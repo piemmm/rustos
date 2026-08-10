@@ -11,7 +11,7 @@ use core::cell::RefCell;
 use tairix_abi::driver::display::{DamageRect, Display, DisplayFormat, DisplayMode};
 use tairix_abi::notify_ipc::{NotifyBody, NotifyRequest, NotifySeverity, NotifyTitle};
 use tairix_abi::switchboard_ipc::{
-    CommandSection, SwitchboardCommand, SwitchboardRequest, SEAT_REPORT_OWNERS_MAX,
+    CommandSection, FrameReport, SwitchboardCommand, SwitchboardRequest, SEAT_REPORT_OWNERS_MAX,
 };
 use tairix_abi::sysinfo::CACHE_LABEL_MAX;
 use tairix_abi::{
@@ -46,17 +46,19 @@ use tairix_wm::{
     WindowId,
 };
 
+use crate::shell::SettleWork;
 use crate::{
     build_pin_views, deliver_pending_open, desktop_info, load_icon_set, load_library,
-    maybe_send_seat_report, open_tray, resolve_library_icons, resolve_window_identities,
-    serve_switchboard_request, ArtworkFileReader, ArtworkSandbox, DesktopSession, DesktopShell,
-    DragOrigin, IconRasteriser, InputSource, LaunchTable, LockOutcome, LockedDrain, OwnerWindow,
-    PinBridge, PinEditError, PinIconSource, PinService, ResolvedPin, ScreenFade, ScreenLock,
-    SessionFileReader, SessionFileWriter, SessionInputResponse, SessionInputRouter, SessionPins,
-    SessionWindows, ShellOutcome, ShellWindowHost, SwitchboardMailbox, SwitchboardOutcome,
-    SwitchboardRefusal, SwitchboardServe, TaskBridge, TaskbarPresenter, BUNDLE_RUN_SUFFIX,
-    DESKTOP_REVEALED, DESKTOP_REVEALED_MESSAGE, DESKTOP_SESSION_RANGE_END,
-    DESKTOP_SESSION_RANGE_START, NO_DEADLINE_NS, SWITCHBOARD_RUN_PATH,
+    maybe_send_frame_report, maybe_send_seat_report, open_tray, resolve_library_icons,
+    resolve_window_identities, serve_switchboard_request, ArtworkFileReader, ArtworkSandbox,
+    DesktopSession, DesktopShell, DragOrigin, FrameContent, IconRasteriser, InputSource,
+    LaunchTable, LockOutcome, LockedDrain, OwnerWindow, PinBridge, PinEditError, PinIconSource,
+    PinService, PresentedOwners, ResolvedPin, ScreenFade, ScreenLock, SessionFileReader,
+    SessionFileWriter, SessionInputResponse, SessionInputRouter, SessionPins, SessionWindows,
+    ShellOutcome, ShellWindowHost, SwitchboardMailbox, SwitchboardOutcome, SwitchboardRefusal,
+    SwitchboardServe, TaskBridge, TaskbarPresenter, BUNDLE_RUN_SUFFIX, DESKTOP_REVEALED,
+    DESKTOP_REVEALED_MESSAGE, DESKTOP_SESSION_RANGE_END, DESKTOP_SESSION_RANGE_START,
+    NO_DEADLINE_NS, SWITCHBOARD_RUN_PATH,
 };
 use tairix_window::PinDecision;
 
@@ -1505,6 +1507,242 @@ fn pump_coalesces_adjacent_pointer_motions_over_one_window() {
     );
     // Observable: pointer position reflects the last sample.
     assert_eq!(shell.router().pointer(), Point::new(253, 253));
+}
+
+/// The desktop state a drain leaves, as one value two drains can be
+/// compared on: where the pointer is, what holds focus, which surfaces are
+/// placed, and the whole taskbar model behind them (hover, highlight, open
+/// popup, drained repaint latch).
+fn desktop_state(
+    shell: &DesktopShell,
+    comp: &Compositor,
+) -> (Point, Option<WindowId>, TaskbarPresenter, usize, String) {
+    (
+        shell.router().pointer(),
+        shell.router().focused(),
+        *shell.presenter(),
+        comp.window_count(),
+        format!("{:?}", shell.session().taskbar()),
+    )
+}
+
+/// The per-frame work a drain cost: presents, active-frame syncs, cursor
+/// refreshes.
+fn work_since(shell: &DesktopShell, before: SettleWork) -> (u32, u32, u32) {
+    let now = shell.settle_work();
+    (
+        now.presents - before.presents,
+        now.active_frame_syncs - before.active_frame_syncs,
+        now.cursor_refreshes - before.cursor_refreshes,
+    )
+}
+
+/// The regression: the shell settled the frame per *sample*, so a burst of
+/// N motion samples cost N taskbar presents, N active-frame syncs and N
+/// cursor refreshes to publish the one frame the run loop then presented.
+#[test]
+fn pump_settles_one_frame_for_a_whole_motion_batch() {
+    let mut shell = shell();
+    let mut comp = compositor();
+    let _window = opaque_window(&mut comp, Point::new(200, 200), 300, 300);
+    shell.handle(moved(250, 250), &mut comp, 0);
+    shell.handle(PRIMARY_PRESS, &mut comp, 0);
+    shell.handle(PRIMARY_RELEASE, &mut comp, 0);
+
+    let path: Vec<InputEvent> = (0..16).map(|step| moved(251 + step, 251 + step)).collect();
+    let before = shell.settle_work();
+    let outcomes = shell
+        .pump(&mut MemoryInput::new(&path), &mut comp, 0)
+        .expect("source does not fault");
+
+    assert_eq!(outcomes.len(), 1, "the motion run folds app-ward too");
+    assert_eq!(
+        work_since(&shell, before),
+        (1, 1, 1),
+        "sixteen samples settle the one frame they produced"
+    );
+    assert_eq!(shell.router().pointer(), Point::new(266, 266));
+}
+
+/// Folding the shell's own per-frame work may not change the desktop it
+/// leaves: a scripted path drained as one batch must land exactly where the
+/// same path lands when every sample settles its own frame.
+#[test]
+fn pump_leaves_the_same_desktop_as_one_handle_per_sample() {
+    // Over the window, off it, along the bar, back over the window: the
+    // path crosses every surface a hover repaints.
+    let path = &[
+        moved(251, 251),
+        moved(260, 260),
+        moved(700, 700),
+        moved(24, 1060),
+        moved(120, 1060),
+        moved(400, 1075),
+        moved(255, 255),
+        moved(250, 250),
+    ];
+
+    let mut batched = shell();
+    let mut batched_comp = compositor();
+    let mut sampled = shell();
+    let mut sampled_comp = compositor();
+    for (shell, comp) in [
+        (&mut batched, &mut batched_comp),
+        (&mut sampled, &mut sampled_comp),
+    ] {
+        let _window = opaque_window(comp, Point::new(200, 200), 300, 300);
+        shell.handle(moved(250, 250), comp, 0);
+        shell.handle(PRIMARY_PRESS, comp, 0);
+        shell.handle(PRIMARY_RELEASE, comp, 0);
+    }
+
+    let batched_before = batched.settle_work();
+    let batched_outcomes = batched
+        .pump(&mut MemoryInput::new(path), &mut batched_comp, 0)
+        .expect("source does not fault");
+    let sampled_before = sampled.settle_work();
+    let sampled_outcomes: Vec<ShellOutcome> = path
+        .iter()
+        .map(|event| sampled.handle(*event, &mut sampled_comp, 0))
+        .collect();
+
+    assert_eq!(
+        desktop_state(&batched, &batched_comp),
+        desktop_state(&sampled, &sampled_comp),
+        "one batch leaves the desktop the per-sample path leaves"
+    );
+    assert_eq!(
+        work_since(&batched, batched_before),
+        (1, 1, 1),
+        "the batch settles once"
+    );
+    assert_eq!(
+        work_since(&sampled, sampled_before),
+        (
+            u32::try_from(path.len()).expect("the path is short"),
+            u32::try_from(path.len()).expect("the path is short"),
+            u32::try_from(path.len()).expect("the path is short")
+        ),
+        "the per-sample path settles once per sample — the work the batch drops"
+    );
+    assert!(
+        batched_outcomes.len() < sampled_outcomes.len(),
+        "the app-ward outcomes still fold"
+    );
+}
+
+/// Only latest-wins motion folds. A press, a release, and a key each act on
+/// the state the samples around them left, so a mixed batch must still apply
+/// in order and report every event.
+#[test]
+fn pump_applies_an_order_sensitive_batch_in_order() {
+    let script = &[
+        moved(251, 251),
+        PRIMARY_PRESS,
+        moved(260, 260),
+        InputEvent::KeyPressed {
+            key: Key::Named(NamedKey::Down),
+            modifiers: tairix_wm::Modifiers::default(),
+        },
+    ];
+
+    let mut batched = shell();
+    let mut batched_comp = compositor();
+    let mut sampled = shell();
+    let mut sampled_comp = compositor();
+    let mut windows = Vec::new();
+    for (shell, comp) in [
+        (&mut batched, &mut batched_comp),
+        (&mut sampled, &mut sampled_comp),
+    ] {
+        windows.push(opaque_window(comp, Point::new(200, 200), 300, 300));
+        shell.handle(moved(250, 250), comp, 0);
+        shell.handle(PRIMARY_PRESS, comp, 0);
+        shell.handle(PRIMARY_RELEASE, comp, 0);
+    }
+    let window = windows[0];
+
+    let batched_before = batched.settle_work();
+    let batched_outcomes = batched
+        .pump(&mut MemoryInput::new(script), &mut batched_comp, 0)
+        .expect("source does not fault");
+    let sampled_outcomes: Vec<ShellOutcome> = script
+        .iter()
+        .map(|event| sampled.handle(*event, &mut sampled_comp, 0))
+        .collect();
+
+    assert_eq!(
+        batched_outcomes, sampled_outcomes,
+        "an order-sensitive batch reports every event, in order"
+    );
+    assert!(
+        matches!(
+            batched_outcomes.as_slice(),
+            [
+                ShellOutcome::WindowManager(InputResponse::ClientPointerMoved { .. }),
+                ShellOutcome::WindowManager(InputResponse::Activated { .. }),
+                ShellOutcome::WindowManager(InputResponse::ClientPointerMoved { .. }),
+                ShellOutcome::WindowManager(InputResponse::Key { .. }),
+            ]
+        ),
+        "the press between the two motions keeps them apart: {batched_outcomes:?}"
+    );
+    assert_eq!(
+        desktop_state(&batched, &batched_comp),
+        desktop_state(&sampled, &sampled_comp),
+        "the batch leaves the desktop the per-sample path leaves"
+    );
+    assert_eq!(
+        work_since(&batched, batched_before),
+        (1, 1, 1),
+        "four ordered events still settle one frame"
+    );
+    assert_eq!(
+        batched.router().focused(),
+        Some(window),
+        "the press in the middle of the batch still moved focus"
+    );
+}
+
+/// An idle wake costs nothing: a drain that found no event has no frame to
+/// settle.
+#[test]
+fn pump_settles_nothing_when_the_source_is_empty() {
+    let mut shell = shell();
+    let mut comp = compositor();
+    shell.present(&mut comp);
+
+    let before = shell.settle_work();
+    let outcomes = shell
+        .pump(&mut MemoryInput::new(&[]), &mut comp, 0)
+        .expect("source does not fault");
+
+    assert!(outcomes.is_empty());
+    assert_eq!(work_since(&shell, before), (0, 0, 0));
+}
+
+/// A faulting source still leaves the screen showing the state the events it
+/// did deliver put the model in.
+#[test]
+fn pump_settles_the_events_applied_before_a_fault() {
+    let mut shell = shell();
+    let mut comp = compositor();
+    shell.present(&mut comp);
+
+    let before = shell.settle_work();
+    let result = shell.pump(
+        &mut MemoryInput::faulting(&[moved(24, 1060), PRIMARY_PRESS], Errno::NotFound),
+        &mut comp,
+        0,
+    );
+
+    assert_eq!(result, Err(Errno::NotFound));
+    assert!(shell.session().taskbar().library().is_open());
+    assert_eq!(
+        work_since(&shell, before),
+        (1, 1, 1),
+        "the opened popup is presented despite the fault"
+    );
 }
 
 #[test]
@@ -4769,6 +5007,127 @@ fn the_seat_report_is_sent_only_on_change_and_tells_the_whole_truth() {
     assert_eq!(mailbox.sent.len(), 1);
 }
 
+/// The frame report the mailbox received, or `None` when it received
+/// something else.
+fn frame_of(command: SwitchboardCommand) -> Option<FrameReport> {
+    match command {
+        SwitchboardCommand::FrameReport { report } => Some(report),
+        _ => None,
+    }
+}
+
+/// The frame report is sent only to a live instance and only when the
+/// counts moved: a desktop redrawing the same rectangles sends nothing.
+#[test]
+fn the_frame_report_is_sent_only_on_change_and_only_to_a_live_instance() {
+    let mut shell = shell();
+    let mut comp = compositor();
+    let _ = open_app(&mut shell, &mut comp, Point::new(300, 200), "Editor");
+    comp.composite();
+    let mut mailbox = RecordingMailbox::default();
+    let mut last = None;
+
+    maybe_send_frame_report(&mut last, &comp, None, FrameContent::Foreign, &mut mailbox);
+    assert!(
+        mailbox.sent.is_empty() && last.is_none(),
+        "nothing is sent with no instance live"
+    );
+
+    maybe_send_frame_report(
+        &mut last,
+        &comp,
+        Some(MONITOR_PID),
+        FrameContent::Foreign,
+        &mut mailbox,
+    );
+    let (pid, command) = mailbox.sent.first().copied().expect("one report");
+    assert_eq!(pid, MONITOR_PID);
+    let report = frame_of(command).expect("a frame report");
+    let mode = comp.mode();
+    assert_eq!(
+        report.screen_px,
+        u64::from(mode.width_px) * u64::from(mode.height_px)
+    );
+    assert_eq!(report.damaged_px, comp.frame_stats().damaged_px);
+    assert!(report.damaged_px > 0, "the composed frame changed pixels");
+    assert_eq!(
+        last,
+        Some(report),
+        "an accepted report is what is remembered"
+    );
+
+    maybe_send_frame_report(
+        &mut last,
+        &comp,
+        Some(MONITOR_PID),
+        FrameContent::Foreign,
+        &mut mailbox,
+    );
+    assert_eq!(
+        mailbox.sent.len(),
+        1,
+        "the same frame twice over is one report"
+    );
+}
+
+/// Whatever the compositor really produces, the receiver's own validation
+/// accepts it: a rule that refused a legitimate frame would blank the page
+/// as surely as a missing check would trust a hostile one.
+#[test]
+fn every_reported_frame_survives_the_receivers_validation() {
+    let mut shell = shell();
+    let mut comp = compositor();
+    let window = open_app(&mut shell, &mut comp, Point::new(300, 200), "Editor");
+    let mut mailbox = RecordingMailbox::default();
+    let mut last = None;
+
+    // A busy frame with a window and its furniture, an idle one that
+    // recomposed nothing, and one over bare desktop with the window gone —
+    // the frame that blends nothing at all.
+    comp.composite();
+    maybe_send_frame_report(
+        &mut last,
+        &comp,
+        Some(MONITOR_PID),
+        FrameContent::Foreign,
+        &mut mailbox,
+    );
+    comp.composite();
+    maybe_send_frame_report(
+        &mut last,
+        &comp,
+        Some(MONITOR_PID),
+        FrameContent::None,
+        &mut mailbox,
+    );
+    shell.close_window(&mut comp, window);
+    comp.composite();
+    maybe_send_frame_report(
+        &mut last,
+        &comp,
+        Some(MONITOR_PID),
+        FrameContent::None,
+        &mut mailbox,
+    );
+
+    assert!(mailbox.sent.len() >= 2, "the frames above differ");
+    for (_, command) in &mailbox.sent {
+        assert_eq!(
+            SwitchboardCommand::from_bytes(&command.to_le_bytes()),
+            Ok(*command),
+            "the receiver must accept a frame the compositor really composed"
+        );
+    }
+    assert!(
+        mailbox
+            .sent
+            .iter()
+            .filter_map(|(_, command)| frame_of(*command))
+            .any(|report| report.is_idle()),
+        "a desktop that recomposed nothing reports an idle frame"
+    );
+}
+
 /// A mailbox whose every send is refused — the instance is gone, or is
 /// still starting and has not bound one — counting the attempts the
 /// session made.
@@ -4803,6 +5162,119 @@ fn a_refused_mailbox_send_is_attempted_once_rather_than_retried() {
 
     maybe_send_seat_report(true, Some(MONITOR_PID), 1, &[11], &mut mailbox);
     assert_eq!(mailbox.attempts, 2, "one change is one attempt");
+
+    // A refused frame report is dropped, and not remembered as sent: the
+    // panel never saw it, so the next frame must offer it again.
+    let mut shell = shell();
+    let mut comp = compositor();
+    let _ = open_app(&mut shell, &mut comp, Point::new(300, 200), "Editor");
+    comp.composite();
+    let mut last = None;
+    maybe_send_frame_report(
+        &mut last,
+        &comp,
+        Some(MONITOR_PID),
+        FrameContent::Foreign,
+        &mut mailbox,
+    );
+    assert_eq!(mailbox.attempts, 3, "one frame is one attempt");
+    assert!(
+        last.is_none(),
+        "a refused report is not what the panel holds"
+    );
+}
+
+/// A frame whose only served content is the Switchboard's own paint must
+/// not be reported: that is the monitor measuring itself, and reporting it
+/// re-excites another paint forever.
+#[test]
+fn a_switchboard_only_frame_is_not_reported() {
+    let mut shell = shell();
+    let mut comp = compositor();
+    let _ = open_app(&mut shell, &mut comp, Point::new(300, 200), "Editor");
+    comp.composite();
+    let mut mailbox = RecordingMailbox::default();
+    let mut last = None;
+
+    // A real desktop frame still reports.
+    maybe_send_frame_report(
+        &mut last,
+        &comp,
+        Some(MONITOR_PID),
+        FrameContent::Foreign,
+        &mut mailbox,
+    );
+    assert_eq!(mailbox.sent.len(), 1, "real work is reported");
+    let first = last.expect("accepted");
+
+    // The Switchboard rebuilds from that report and presents only itself.
+    // Counters differ (its paint is real work for the compositor) but the
+    // content gate must drop the report so the loop cannot restart.
+    let _ = open_app(&mut shell, &mut comp, Point::new(100, 100), "Switchboard");
+    comp.composite();
+    maybe_send_frame_report(
+        &mut last,
+        &comp,
+        Some(MONITOR_PID),
+        FrameContent::SwitchboardOnly,
+        &mut mailbox,
+    );
+    assert_eq!(
+        mailbox.sent.len(),
+        1,
+        "the monitor's own paint must not re-excite a report"
+    );
+    assert_eq!(last, Some(first), "a suppressed report is not remembered");
+
+    // Chrome-only or idle work with no served present still reports when
+    // the counters move — the gate is content, not a blanket silence.
+    shell.close_window(&mut comp, shell.router().focused().expect("live"));
+    // Close the editor too so the settle is not another app present.
+    if let Some(other) = shell.router().focused() {
+        shell.close_window(&mut comp, other);
+    }
+    comp.composite();
+    maybe_send_frame_report(
+        &mut last,
+        &comp,
+        Some(MONITOR_PID),
+        FrameContent::None,
+        &mut mailbox,
+    );
+    assert!(
+        mailbox.sent.len() >= 2,
+        "a non-Switchboard frame whose counts moved still reports"
+    );
+}
+
+/// Owner classification: only a present whose owner is exactly the live
+/// Switchboard is Switchboard-only; anything else is foreign work.
+#[test]
+fn presented_owners_classify_switchboard_only_versus_foreign() {
+    let mut owners = PresentedOwners::default();
+    assert_eq!(owners.content(), FrameContent::None);
+
+    owners.note(Some(MONITOR_PID), Some(MONITOR_PID));
+    assert_eq!(owners.content(), FrameContent::SwitchboardOnly);
+
+    owners.note(Some(MONITOR_PID + 1), Some(MONITOR_PID));
+    assert_eq!(owners.content(), FrameContent::Foreign);
+
+    let mut only_unknown = PresentedOwners::default();
+    only_unknown.note(None, Some(MONITOR_PID));
+    assert_eq!(
+        only_unknown.content(),
+        FrameContent::Foreign,
+        "an unresolved owner is not assumed to be the Switchboard"
+    );
+
+    let mut no_live = PresentedOwners::default();
+    no_live.note(Some(MONITOR_PID), None);
+    assert_eq!(
+        no_live.content(),
+        FrameContent::Foreign,
+        "without a live Switchboard every present is foreign work"
+    );
 }
 
 /// A press that lands while the monitor is still starting is held, not

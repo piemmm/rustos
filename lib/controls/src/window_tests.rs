@@ -17,6 +17,7 @@ use tairix_input::{InputEvent, Key, NamedKey, PointerButton};
 use tairix_raster::{Color, Pixel, Surface};
 use tairix_theme::{Rgba, TextRole, Theme};
 
+use crate::damage::sink;
 use crate::state::{
     AuthorityState, ControlState, PointerState, SizeAction, WindowActivationState,
     WindowControlKind, WindowFurnitureState, WindowSizeState,
@@ -39,6 +40,11 @@ fn has_pixel(surface: &Surface, want: Pixel) -> bool {
 fn opaque_count(surface: &Surface) -> usize {
     surface.pixels().iter().filter(|p| p.a > 0).count()
 }
+
+/// The bar or grabber region a keyboard report covers. Focus and cancel report
+/// the whole surface they were given, so the exact rectangle only has to be
+/// plausible.
+const TITLE_BOUNDS: Rect = Rect::new(0, 0, 320, 28);
 
 fn moved(x: i32, y: i32) -> InputEvent {
     InputEvent::PointerMoved {
@@ -208,10 +214,13 @@ fn accessible_names_identify_commands() {
 fn pointer_press_release_invokes() {
     let mut control = WindowControl::new(WindowControlKind::Close);
     let bounds = Rect::new(0, 0, 40, 40);
-    assert_eq!(control.on_pointer(&moved(10, 10), bounds), None);
-    assert_eq!(control.on_pointer(&PRESS, bounds), None);
     assert_eq!(
-        control.on_pointer(&RELEASE, bounds),
+        control.on_pointer(&moved(10, 10), bounds, &mut sink()),
+        None
+    );
+    assert_eq!(control.on_pointer(&PRESS, bounds, &mut sink()), None);
+    assert_eq!(
+        control.on_pointer(&RELEASE, bounds, &mut sink()),
         Some(WindowControlAction::Invoked(WindowControlKind::Close))
     );
 }
@@ -221,10 +230,10 @@ fn a_secondary_press_reports_the_alternate_gesture_and_leaves_the_control_untouc
     let theme = Theme::dark();
     let mut control = WindowControl::new(WindowControlKind::Close);
     let bounds = Rect::new(0, 0, 40, 40);
-    let _ = control.on_pointer(&moved(10, 10), bounds);
+    let _ = control.on_pointer(&moved(10, 10), bounds, &mut sink());
     let before = render_control(&control, &theme, 40).pixels().to_vec();
     assert_eq!(
-        control.on_pointer(&SECONDARY_PRESS, bounds),
+        control.on_pointer(&SECONDARY_PRESS, bounds, &mut sink()),
         Some(WindowControlAction::AlternateInvoked(
             WindowControlKind::Close
         ))
@@ -233,11 +242,17 @@ fn a_secondary_press_reports_the_alternate_gesture_and_leaves_the_control_untouc
     assert_eq!(control.state().pointer, PointerState::Hover);
     assert_eq!(render_control(&control, &theme, 40).pixels(), &before[..]);
     // Neither release fires the command, so one gesture cannot do both.
-    assert_eq!(control.on_pointer(&SECONDARY_RELEASE, bounds), None);
-    assert_eq!(control.on_pointer(&RELEASE, bounds), None);
+    assert_eq!(
+        control.on_pointer(&SECONDARY_RELEASE, bounds, &mut sink()),
+        None
+    );
+    assert_eq!(control.on_pointer(&RELEASE, bounds, &mut sink()), None);
     // Off the control, a secondary press resolves nothing.
-    let _ = control.on_pointer(&moved(100, 100), bounds);
-    assert_eq!(control.on_pointer(&SECONDARY_PRESS, bounds), None);
+    let _ = control.on_pointer(&moved(100, 100), bounds, &mut sink());
+    assert_eq!(
+        control.on_pointer(&SECONDARY_PRESS, bounds, &mut sink()),
+        None
+    );
 }
 
 #[test]
@@ -248,18 +263,21 @@ fn a_secondary_press_on_a_denied_control_resolves_nothing() {
         ..ControlState::default()
     });
     let bounds = Rect::new(0, 0, 40, 40);
-    let _ = control.on_pointer(&moved(10, 10), bounds);
-    assert_eq!(control.on_pointer(&SECONDARY_PRESS, bounds), None);
+    let _ = control.on_pointer(&moved(10, 10), bounds, &mut sink());
+    assert_eq!(
+        control.on_pointer(&SECONDARY_PRESS, bounds, &mut sink()),
+        None
+    );
 }
 
 #[test]
 fn pointer_release_outside_does_not_invoke() {
     let mut control = WindowControl::new(WindowControlKind::Close);
     let bounds = Rect::new(0, 0, 40, 40);
-    let _ = control.on_pointer(&moved(10, 10), bounds);
-    let _ = control.on_pointer(&PRESS, bounds);
-    let _ = control.on_pointer(&moved(100, 100), bounds);
-    assert_eq!(control.on_pointer(&RELEASE, bounds), None);
+    let _ = control.on_pointer(&moved(10, 10), bounds, &mut sink());
+    let _ = control.on_pointer(&PRESS, bounds, &mut sink());
+    let _ = control.on_pointer(&moved(100, 100), bounds, &mut sink());
+    assert_eq!(control.on_pointer(&RELEASE, bounds, &mut sink()), None);
 }
 
 #[test]
@@ -281,11 +299,11 @@ fn pointer_activation_returns_the_control_to_rest() {
     // relocates the control (a size toggle) or takes the frame away.
     let mut control = WindowControl::new(WindowControlKind::SizeToggle);
     let bounds = Rect::new(0, 0, 40, 40);
-    let _ = control.on_pointer(&moved(10, 10), bounds);
-    let _ = control.on_pointer(&PRESS, bounds);
+    let _ = control.on_pointer(&moved(10, 10), bounds, &mut sink());
+    let _ = control.on_pointer(&PRESS, bounds, &mut sink());
     assert_eq!(control.state().pointer, PointerState::Pressed);
     assert_eq!(
-        control.on_pointer(&RELEASE, bounds),
+        control.on_pointer(&RELEASE, bounds, &mut sink()),
         Some(WindowControlAction::Invoked(WindowControlKind::SizeToggle))
     );
     assert_eq!(
@@ -321,9 +339,9 @@ fn disabled_control_ignores_input() {
     let mut control = WindowControl::new(WindowControlKind::Close);
     control.set_state(ControlState::disabled());
     let bounds = Rect::new(0, 0, 40, 40);
-    let _ = control.on_pointer(&moved(10, 10), bounds);
-    let _ = control.on_pointer(&PRESS, bounds);
-    assert_eq!(control.on_pointer(&RELEASE, bounds), None);
+    let _ = control.on_pointer(&moved(10, 10), bounds, &mut sink());
+    let _ = control.on_pointer(&PRESS, bounds, &mut sink());
+    assert_eq!(control.on_pointer(&RELEASE, bounds, &mut sink()), None);
     control.set_focused(true);
     assert_eq!(control.on_key(Key::Named(NamedKey::Enter)), None);
 }
@@ -434,11 +452,11 @@ fn press_on_drag_region_activates() {
     let mut bar = TitleBar::new(furniture());
     let bounds = title_bounds();
     assert_eq!(
-        bar.on_pointer(&moved(50, 10), bounds, Scale::ONE, &theme),
+        bar.on_pointer(&moved(50, 10), bounds, Scale::ONE, &theme, &mut sink()),
         None
     );
     assert_eq!(
-        bar.on_pointer(&PRESS, bounds, Scale::ONE, &theme),
+        bar.on_pointer(&PRESS, bounds, Scale::ONE, &theme, &mut sink()),
         Some(TitleBarEvent::Activate)
     );
 }
@@ -457,31 +475,31 @@ fn a_secondary_press_over_a_control_reports_the_alternate_and_leaves_the_bar_alo
         .1;
     let cx = close_rect.left() + half(close_rect.width);
     let cy = close_rect.top() + half(close_rect.height);
-    let _ = bar.on_pointer(&moved(cx, cy), bounds, Scale::ONE, &theme);
+    let _ = bar.on_pointer(&moved(cx, cy), bounds, Scale::ONE, &theme, &mut sink());
     assert_eq!(
-        bar.on_pointer(&SECONDARY_PRESS, bounds, Scale::ONE, &theme),
+        bar.on_pointer(&SECONDARY_PRESS, bounds, Scale::ONE, &theme, &mut sink()),
         Some(TitleBarEvent::AlternateControl(WindowControlKind::Close))
     );
     // The bar never activates or drags from it, and the release is inert.
     assert_eq!(
-        bar.on_pointer(&SECONDARY_RELEASE, bounds, Scale::ONE, &theme),
+        bar.on_pointer(&SECONDARY_RELEASE, bounds, Scale::ONE, &theme, &mut sink()),
         None
     );
     assert_eq!(
-        bar.on_pointer(&moved(cx + 40, cy), bounds, Scale::ONE, &theme),
+        bar.on_pointer(&moved(cx + 40, cy), bounds, Scale::ONE, &theme, &mut sink()),
         None
     );
     // Over the drag region a secondary press is unchanged: nothing at all.
-    let _ = bar.on_pointer(&moved(50, 10), bounds, Scale::ONE, &theme);
+    let _ = bar.on_pointer(&moved(50, 10), bounds, Scale::ONE, &theme, &mut sink());
     assert_eq!(
-        bar.on_pointer(&SECONDARY_PRESS, bounds, Scale::ONE, &theme),
+        bar.on_pointer(&SECONDARY_PRESS, bounds, Scale::ONE, &theme, &mut sink()),
         None
     );
     // A primary press over the control still means the command.
-    let _ = bar.on_pointer(&moved(cx, cy), bounds, Scale::ONE, &theme);
-    let _ = bar.on_pointer(&PRESS, bounds, Scale::ONE, &theme);
+    let _ = bar.on_pointer(&moved(cx, cy), bounds, Scale::ONE, &theme, &mut sink());
+    let _ = bar.on_pointer(&PRESS, bounds, Scale::ONE, &theme, &mut sink());
     assert_eq!(
-        bar.on_pointer(&RELEASE, bounds, Scale::ONE, &theme),
+        bar.on_pointer(&RELEASE, bounds, Scale::ONE, &theme, &mut sink()),
         Some(TitleBarEvent::Control(WindowControlKind::Close))
     );
 }
@@ -491,20 +509,20 @@ fn drag_begins_moves_and_ends() {
     let theme = Theme::dark();
     let mut bar = TitleBar::new(furniture());
     let bounds = title_bounds();
-    let _ = bar.on_pointer(&moved(50, 10), bounds, Scale::ONE, &theme);
-    let _ = bar.on_pointer(&PRESS, bounds, Scale::ONE, &theme);
+    let _ = bar.on_pointer(&moved(50, 10), bounds, Scale::ONE, &theme, &mut sink());
+    let _ = bar.on_pointer(&PRESS, bounds, Scale::ONE, &theme, &mut sink());
     assert_eq!(
-        bar.on_pointer(&moved(70, 10), bounds, Scale::ONE, &theme),
+        bar.on_pointer(&moved(70, 10), bounds, Scale::ONE, &theme, &mut sink()),
         Some(TitleBarEvent::DragBegin)
     );
     assert_eq!(
-        bar.on_pointer(&moved(90, 10), bounds, Scale::ONE, &theme),
+        bar.on_pointer(&moved(90, 10), bounds, Scale::ONE, &theme, &mut sink()),
         Some(TitleBarEvent::DragMoved {
             to: Point::new(90, 10)
         })
     );
     assert_eq!(
-        bar.on_pointer(&RELEASE, bounds, Scale::ONE, &theme),
+        bar.on_pointer(&RELEASE, bounds, Scale::ONE, &theme, &mut sink()),
         Some(TitleBarEvent::DragEnd)
     );
 }
@@ -524,13 +542,16 @@ fn press_over_control_routes_to_control_not_drag() {
     let cx = close_rect.left() + half(close_rect.width);
     let cy = close_rect.top() + half(close_rect.height);
     assert_eq!(
-        bar.on_pointer(&moved(cx, cy), bounds, Scale::ONE, &theme),
+        bar.on_pointer(&moved(cx, cy), bounds, Scale::ONE, &theme, &mut sink()),
         None
     );
     // A press over the control must not activate/drag the title bar.
-    assert_eq!(bar.on_pointer(&PRESS, bounds, Scale::ONE, &theme), None);
     assert_eq!(
-        bar.on_pointer(&RELEASE, bounds, Scale::ONE, &theme),
+        bar.on_pointer(&PRESS, bounds, Scale::ONE, &theme, &mut sink()),
+        None
+    );
+    assert_eq!(
+        bar.on_pointer(&RELEASE, bounds, Scale::ONE, &theme, &mut sink()),
         Some(TitleBarEvent::Control(WindowControlKind::Close))
     );
 }
@@ -579,9 +600,12 @@ fn size_toggle_disabled_when_not_resizable() {
     let cx = rect.left() + half(rect.width);
     let cy = rect.top() + half(rect.height);
     let bounds = title_bounds();
-    let _ = bar.on_pointer(&moved(cx, cy), bounds, Scale::ONE, &theme);
-    let _ = bar.on_pointer(&PRESS, bounds, Scale::ONE, &theme);
-    assert_eq!(bar.on_pointer(&RELEASE, bounds, Scale::ONE, &theme), None);
+    let _ = bar.on_pointer(&moved(cx, cy), bounds, Scale::ONE, &theme, &mut sink());
+    let _ = bar.on_pointer(&PRESS, bounds, Scale::ONE, &theme, &mut sink());
+    assert_eq!(
+        bar.on_pointer(&RELEASE, bounds, Scale::ONE, &theme, &mut sink()),
+        None
+    );
 }
 
 #[test]
@@ -619,7 +643,10 @@ fn size_toggle_shows_restore_when_maximized() {
 #[test]
 fn keyboard_focus_navigates_and_activates() {
     let mut bar = TitleBar::new(furniture());
-    assert_eq!(bar.on_key(Key::Named(NamedKey::Right)), None);
+    assert_eq!(
+        bar.on_key(Key::Named(NamedKey::Right), TITLE_BOUNDS, &mut sink()),
+        None
+    );
     assert!(
         bar.control(WindowControlKind::PutToBack)
             .state()
@@ -627,7 +654,7 @@ fn keyboard_focus_navigates_and_activates() {
             .focused
     );
     assert_eq!(
-        bar.on_key(Key::Named(NamedKey::Enter)),
+        bar.on_key(Key::Named(NamedKey::Enter), TITLE_BOUNDS, &mut sink()),
         Some(TitleBarEvent::Control(WindowControlKind::PutToBack))
     );
 }
@@ -1140,7 +1167,7 @@ fn grabber_escape_cancels_drag() {
     let _ = grabber.on_pointer(&moved(10, 10), hit);
     let _ = grabber.on_pointer(&PRESS, hit);
     assert_eq!(
-        grabber.on_key(Key::Named(NamedKey::Escape)),
+        grabber.on_key(Key::Named(NamedKey::Escape), TITLE_BOUNDS, &mut sink()),
         Some(ResizeEvent::Cancel)
     );
     assert!(!grabber.is_dragging());
@@ -1246,8 +1273,8 @@ fn hit_test_bookkeeping_is_invisible_to_a_window_control() {
     // Two samples clear of the glyph, so only the recorded coordinate differs.
     let mut a = WindowControl::new(WindowControlKind::Close);
     let mut b = a.clone();
-    let _ = a.on_pointer(&moved(80, 80), bounds);
-    let _ = b.on_pointer(&moved(120, 12), bounds);
+    let _ = a.on_pointer(&moved(80, 80), bounds, &mut sink());
+    let _ = b.on_pointer(&moved(120, 12), bounds, &mut sink());
     assert_eq!(
         a, b,
         "a coordinate clear of the glyph is not a drawn property"
@@ -1260,8 +1287,8 @@ fn hit_test_bookkeeping_is_invisible_to_a_window_control() {
 
     // One holds a real press latch, the other is merely *shown* pressed.
     let mut latched = WindowControl::new(WindowControlKind::Close);
-    let _ = latched.on_pointer(&moved(10, 10), bounds);
-    let _ = latched.on_pointer(&PRESS, bounds);
+    let _ = latched.on_pointer(&moved(10, 10), bounds, &mut sink());
+    let _ = latched.on_pointer(&PRESS, bounds, &mut sink());
     let mut shown = WindowControl::new(WindowControlKind::Close);
     let mut pressed = ControlState::idle();
     pressed.pointer = PointerState::Pressed;
@@ -1273,7 +1300,7 @@ fn hit_test_bookkeeping_is_invisible_to_a_window_control() {
         "…and the two must therefore paint identically"
     );
     assert_eq!(
-        latched.on_pointer(&RELEASE, bounds),
+        latched.on_pointer(&RELEASE, bounds, &mut sink()),
         Some(WindowControlAction::Invoked(WindowControlKind::Close)),
         "the latch still governs activation, it is only invisible"
     );
@@ -1292,8 +1319,8 @@ fn hit_test_bookkeeping_is_invisible_to_a_title_bar() {
     // Two samples clear of the bar, so only the recorded coordinate differs.
     let mut a = TitleBar::new(furniture());
     let mut b = a.clone();
-    let _ = a.on_pointer(&moved(50, 200), bounds, Scale::ONE, &theme);
-    let _ = b.on_pointer(&moved(90, 240), bounds, Scale::ONE, &theme);
+    let _ = a.on_pointer(&moved(50, 200), bounds, Scale::ONE, &theme, &mut sink());
+    let _ = b.on_pointer(&moved(90, 240), bounds, Scale::ONE, &theme, &mut sink());
     assert_eq!(
         a, b,
         "a coordinate clear of the bar is not a drawn property"
@@ -1307,11 +1334,11 @@ fn hit_test_bookkeeping_is_invisible_to_a_title_bar() {
     // Both are pressed in the drag region, at different points: the origin
     // the drag threshold is measured from is bookkeeping, not a picture.
     let mut near = TitleBar::new(furniture());
-    let _ = near.on_pointer(&moved(50, 10), bounds, Scale::ONE, &theme);
-    let _ = near.on_pointer(&PRESS, bounds, Scale::ONE, &theme);
+    let _ = near.on_pointer(&moved(50, 10), bounds, Scale::ONE, &theme, &mut sink());
+    let _ = near.on_pointer(&PRESS, bounds, Scale::ONE, &theme, &mut sink());
     let mut far = TitleBar::new(furniture());
-    let _ = far.on_pointer(&moved(90, 14), bounds, Scale::ONE, &theme);
-    let _ = far.on_pointer(&PRESS, bounds, Scale::ONE, &theme);
+    let _ = far.on_pointer(&moved(90, 14), bounds, Scale::ONE, &theme, &mut sink());
+    let _ = far.on_pointer(&PRESS, bounds, Scale::ONE, &theme, &mut sink());
     assert_eq!(near, far, "the press origin is not a drawn property");
     assert_eq!(
         paint(&near),

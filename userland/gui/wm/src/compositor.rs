@@ -1,7 +1,7 @@
 //! The software compositor.
 //!
 //! A [`Compositor`] owns a stack of [`Window`]s (bottom-to-top
-//! z-order), a screen-sized back buffer, and the [`DamageRegion`] that
+//! z-order), a screen-sized back buffer, and the [`Region`] that
 //! records what changed since the last frame. [`Compositor::composite`]
 //! recomputes only the damaged pixels — blending each covering window
 //! *over* the opaque background through [`Pixel::over`] — and encodes
@@ -35,8 +35,7 @@ use tairix_theme::{CursorKind, Theme};
 use crate::chrome::{ChromeEpoch, WindowChrome};
 use crate::color::{div255, Color, Pixel};
 use crate::corner::Corners;
-use crate::damage::DamageRegion;
-use crate::geometry::{Point, Rect, Scale};
+use crate::geometry::{Point, Rect, Region, Scale};
 use crate::stats::{area_px, FrameCounters, FrameStats};
 use crate::surface::Surface;
 use crate::viewport::{FurnitureHit, RootViewport};
@@ -121,7 +120,7 @@ pub struct Compositor {
     /// grown to the largest frosted rectangle a frame has needed, so a
     /// frosted window costs no allocation once it has been drawn once.
     blur_scratch: BlurScratch,
-    damage: DamageRegion,
+    damage: Region,
     /// What the frame in flight has cost so far, reset by each
     /// [`composite`](Compositor::composite) and read back through
     /// [`frame_stats`](Compositor::frame_stats).
@@ -194,7 +193,7 @@ impl Compositor {
             back,
             frame,
             blur_scratch: BlurScratch::new(),
-            damage: DamageRegion::new(),
+            damage: Region::new(),
             stats: FrameCounters::new(),
             #[cfg(test)]
             opaque_runs: true,
@@ -1203,9 +1202,14 @@ impl Compositor {
     /// The window manager owns this furniture, so the event is never delivered
     /// to the client; only the furniture bands are marked dirty, so a hover or
     /// press repaint never touches the client area.
-    pub fn frame_pointer(&mut self, id: WindowId, event: &InputEvent) -> Option<TitleBarEvent> {
+    pub fn frame_pointer(
+        &mut self,
+        id: WindowId,
+        event: &InputEvent,
+        damage: &mut Region,
+    ) -> Option<TitleBarEvent> {
         let (result, bands) = self.mutate_frame(id, |window, scale, theme| {
-            let result = window.on_frame_pointer(event, scale, theme);
+            let result = window.on_frame_pointer(event, scale, theme, damage);
             (result, window.furniture_bands())
         })?;
         for band in bands {
@@ -1218,9 +1222,14 @@ impl Compositor {
     /// `id` (the title bar's command controls), repainting the title band, and
     /// return the typed [`TitleBarEvent`] it produced. Returns `None` for an
     /// unknown or undecorated window.
-    pub fn frame_key(&mut self, id: WindowId, key: Key) -> Option<TitleBarEvent> {
-        let (result, band) = self.mutate_frame(id, |window, _, _| {
-            let result = window.on_frame_key(key);
+    pub fn frame_key(
+        &mut self,
+        id: WindowId,
+        key: Key,
+        damage: &mut Region,
+    ) -> Option<TitleBarEvent> {
+        let (result, band) = self.mutate_frame(id, |window, scale, theme| {
+            let result = window.on_frame_key(key, scale, theme, damage);
             (result, window.title_band())
         })?;
         self.damage.add(band);
@@ -1355,7 +1364,7 @@ impl Compositor {
     pub fn has_damage(&self) -> bool {
         let screen = self.screen_rect();
         let on_screen = |rect: Rect| !rect.intersection(&screen).is_empty();
-        if self.damage.rects().iter().any(|&rect| on_screen(rect)) {
+        if self.damage.intersects(screen) {
             return true;
         }
         if !self.cursor_needs_recompose() {
@@ -1380,14 +1389,14 @@ impl Compositor {
     /// marks the client area dirty.
     #[cfg(test)]
     pub(crate) fn damage_covers(&self, point: Point) -> bool {
-        self.damage.covers(point)
+        self.damage.contains(point)
     }
 
     /// Recompose every damaged pixel into the back buffer and the
     /// scan-out frame, then clear the damage. Pixels outside the damage
     /// region keep their previous value (the point of damage tracking).
     ///
-    /// Returns the [`DamageRegion`] actually recomposited — the
+    /// Returns the [`Region`] actually recomposited — the
     /// screen-clipped rectangles every mutation marked dirty since the
     /// last composite, plus the cursor's own damage (see below) — empty
     /// when nothing was dirty. Presenting each of its rectangles individually
@@ -1403,7 +1412,7 @@ impl Compositor {
     /// rectangle it left and the one it is now in, so a whole batch of
     /// pointer samples pumped between two composites costs exactly two
     /// rectangles, not one per sample.
-    pub fn composite(&mut self) -> DamageRegion {
+    pub fn composite(&mut self) -> Region {
         self.stats.begin_frame();
         self.recompose_damage()
     }
@@ -1411,7 +1420,7 @@ impl Compositor {
     /// [`composite`](Self::composite) without opening a new frame's counters,
     /// so a present path that already opened one attributes the composite it
     /// drives to that frame rather than starting a second.
-    fn recompose_damage(&mut self) -> DamageRegion {
+    fn recompose_damage(&mut self) -> Region {
         let screen = self.screen_rect();
         let current_cursor = self.cursor_bounds();
         if self.cursor_needs_recompose() {
@@ -1426,8 +1435,12 @@ impl Compositor {
         self.cursor_replaced = false;
 
         let mut damage = core::mem::take(&mut self.damage);
-        self.widen_blurred_damage(&mut damage, screen);
-        let mut composited = DamageRegion::new();
+        // Clipping once here is what lets the walk below trust every
+        // rectangle it is handed: damage marked wholly off screen composites
+        // nothing, which is what `has_damage` promises.
+        damage.clip(screen);
+        let plan = self.compose_plan(&mut damage, screen);
+        let mut composited = Region::new();
         // The root fill is constant for the whole composite; premultiply
         // it once rather than per pixel.
         let base = self.background.premultiply();
@@ -1438,20 +1451,11 @@ impl Compositor {
         // window covered by two damaged rectangles is rendered once, and
         // that its recency records one composite rather than one per
         // rectangle.
-        let fallback = self.ensure_chrome(|window| {
-            damage
-                .rects()
-                .iter()
-                .any(|dirty| covers(window, dirty.intersection(&screen)))
-        });
+        let fallback = self.ensure_chrome(|window| plan.iter().any(|&dirty| covers(window, dirty)));
         // Reused across rectangles so a multi-rectangle composite makes
         // no per-rectangle allocation on this hot path.
         let mut hits: Vec<usize> = Vec::new();
-        for &dirty in damage.rects() {
-            let area = dirty.intersection(&screen);
-            if area.is_empty() {
-                continue;
-            }
+        for &area in &plan {
             composited.add(area);
             self.stats.add_damaged(area_px(area.width, area.height));
             // Only a window whose bounds overlap this rectangle can
@@ -1470,28 +1474,30 @@ impl Compositor {
         composited
     }
 
-    /// Grow every rectangle of `damage` that touches a blurred window's
-    /// on-screen rectangle to cover the whole of it.
+    /// The rectangles this composite will recompose: every blurred window the
+    /// frame touches as one whole rectangle, then whatever damage is left.
     ///
-    /// A blurred window's pixels are a function of the *whole* backdrop
-    /// under its rectangle, not just the part a caller happened to damage:
-    /// recomposing a strip of it would spread a neighbourhood clipped to
-    /// that strip and leave a seam against the pixels around it. Widening
-    /// to the full rectangle makes every repaint of a blurred window
-    /// produce exactly the same pixels, so a change *behind* the window —
-    /// a moving window, a repainted desktop — refrosts all of it.
+    /// A blurred window's pixels are a function of the *whole* backdrop under
+    /// its rectangle, not just the part a caller happened to damage:
+    /// recomposing a strip of it would spread a neighbourhood clipped to that
+    /// strip and leave a seam against the pixels around it. So any damage
+    /// touching such a window promotes the whole of it into a single
+    /// rectangle, and that rectangle is *removed* from `damage` — the two sets
+    /// stay disjoint, so no pixel is composited twice and the damage outside
+    /// the window stays as tight as it was marked. Two blurred windows that
+    /// overlap merge into one rectangle, because each reads what the other
+    /// wrote.
     ///
-    /// Widening one window can bring the damage into contact with a second
-    /// blurred window, so the sweep repeats. Each pass that grows covers at
-    /// least one more window's rectangle for good, so `windows.len()`
-    /// passes are enough to reach the fixed point, and the common case (no
-    /// blurred window is touched) settles in the first.
+    /// Promoting one window can bring the frame into contact with a second, so
+    /// the sweep repeats. Each pass that grows claims at least one more
+    /// window's rectangle for good, so `windows.len()` passes reach the fixed
+    /// point, and the common case (no blurred window is touched) settles in
+    /// the first.
     ///
-    /// The rectangles are matched against `screen`-clipped bounds and only
-    /// such bounds are added, so damage that lies wholly off screen still
-    /// composites nothing — which is what
-    /// [`has_damage`](Self::has_damage) promises.
-    fn widen_blurred_damage(&self, damage: &mut DamageRegion, screen: Rect) {
+    /// `damage` is already screen-clipped and the promoted bounds are clipped
+    /// here, so every rectangle returned lies on screen.
+    fn compose_plan(&self, damage: &mut Region, screen: Rect) -> Vec<Rect> {
+        let mut plan: Vec<Rect> = Vec::new();
         for _ in 0..self.windows.len() {
             let mut grown = false;
             for window in &self.windows {
@@ -1499,22 +1505,29 @@ impl Compositor {
                     continue;
                 }
                 let bounds = window.bounds().intersection(&screen);
-                if bounds.is_empty() || damage.covers_rect(bounds) {
+                if bounds.is_empty()
+                    || plan
+                        .iter()
+                        .any(|claimed| claimed.intersection(&bounds) == bounds)
+                {
                     continue;
                 }
-                if damage
-                    .rects()
-                    .iter()
-                    .any(|dirty| !dirty.intersection(&bounds).is_empty())
-                {
-                    damage.add(bounds);
-                    grown = true;
+                let touched = damage.intersects(bounds)
+                    || plan
+                        .iter()
+                        .any(|claimed| !claimed.intersection(&bounds).is_empty());
+                if !touched {
+                    continue;
                 }
+                damage.subtract(claim(&mut plan, bounds));
+                grown = true;
             }
             if !grown {
                 break;
             }
         }
+        plan.extend_from_slice(damage.rects());
+        plan
     }
 
     /// Make the rendered furniture of every window `wanted` selects
@@ -2256,6 +2269,31 @@ fn desktop_pixel(row: Option<&[Pixel]>, x: i32) -> Option<Pixel> {
 /// unconditionally `None`, so skipping it is exact.
 fn covers(window: &Window, area: Rect) -> bool {
     window.is_visible() && !window.bounds().intersection(&area).is_empty()
+}
+
+/// Claim `rect` in a compose plan, merging it with every rectangle it
+/// overlaps, and return what was claimed.
+///
+/// The plan's rectangles must stay mutually disjoint — a pixel composited by
+/// two of them would be blended twice — and each must stay whole, because a
+/// blurred window is only seamless when its entire rectangle is recomposed at
+/// once. Merging overlaps into their union is the one shape that keeps both.
+fn claim(plan: &mut Vec<Rect>, mut rect: Rect) -> Rect {
+    let mut index = 0;
+    while let Some(claimed) = plan.get(index) {
+        if claimed.intersection(&rect).is_empty() {
+            index += 1;
+            continue;
+        }
+        rect = rect.union(claimed);
+        // Order carries no meaning: each rectangle is composited on its own.
+        // Restart, because the grown rectangle may now reach one that was
+        // already passed over.
+        plan.swap_remove(index);
+        index = 0;
+    }
+    plan.push(rect);
+    rect
 }
 
 /// A cumulative cache counter's growth across one composite pass, as this

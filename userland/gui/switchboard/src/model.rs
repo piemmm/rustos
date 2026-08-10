@@ -1,5 +1,5 @@
 //! Build the live [`SwitchboardModel`] the panel renders from a [`Sample`],
-//! the session's [`SeatReport`], and the service's own [`Activities`]
+//! the session's [`SessionReport`], and the service's own [`Activities`]
 //! grouping state, and map each interactive [`SwitchboardAction`] the
 //! composed control reports back onto the outbound [`Effect`]s it implies.
 //!
@@ -16,7 +16,7 @@ use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use tairix_abi::switchboard_ipc::{CommandSection, SeatReport};
+use tairix_abi::switchboard_ipc::{CommandSection, FrameReport, SeatReport};
 use tairix_abi::sysinfo::{CrashFaultBucket, CrashFaultClass, ProcessState};
 use tairix_abi::{CapabilityId, CapabilityQuery, Duration64, ProcId, SchedPriority, Signal};
 use tairix_controls::{
@@ -442,6 +442,31 @@ impl PressureClock {
     }
 }
 
+/// Everything the desktop session has told this instance about itself: the
+/// seat's unresponsive-owner report and what its last composited frame cost.
+///
+/// Neither can be sampled here — the session is the party whose deliveries
+/// are refused and the only one that owns a compositor — so both arrive as
+/// commands on the instance's mailbox. Held as one value so the panel keeps
+/// a single "latest from the session", and a rebuild triggered by one of
+/// them still renders the other as last reported.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct SessionReport {
+    /// The seat's latest unresponsive-owner report.
+    pub seat: SeatReport,
+    /// What the session's last composited frame cost, or `None` while it has
+    /// reported no frame yet.
+    pub frame: Option<FrameReport>,
+}
+
+impl SessionReport {
+    /// Nothing reported yet: every owner responsive, no frame measured.
+    pub const HEALTHY: Self = Self {
+        seat: SeatReport::HEALTHY,
+        frame: None,
+    };
+}
+
 /// Everything the monitor carries *between* samples — every reading that no
 /// single [`Sample`] can produce on its own.
 ///
@@ -485,10 +510,10 @@ impl RollingMeters {
     /// from this sample rather than the last one. A task the sample does
     /// not name is dropped here, so an exited task leaks neither its
     /// counters nor its history.
-    pub fn record(&mut self, sample: &Sample, hysteresis: Hysteresis, seat_report: &SeatReport) {
+    pub fn record(&mut self, sample: &Sample, hysteresis: Hysteresis, session: &SessionReport) {
         self.system.record(sample, hysteresis);
         self.tasks.record(sample);
-        self.faults.record(sample, seat_report);
+        self.faults.record(sample, &session.seat);
         let now = sample.uptime.map(|uptime| uptime.since_boot);
         self.pressure.record(
             self.system.cpu_pressured(),
@@ -621,8 +646,8 @@ pub fn derive_self_uid(sample: &Sample, self_pid: u64) -> Option<u32> {
 }
 
 /// Build the live [`PanelModel`] from this sample, the monitor's
-/// [`RollingMeters`], the seat's latest unresponsive-owner report, and the
-/// service's own [`Activities`] grouping state.
+/// [`RollingMeters`], what the session has reported ([`SessionReport`]), and
+/// the service's own [`Activities`] grouping state.
 ///
 /// `self_uid` is the service's own uid, derived by the caller from its own
 /// pid's row in `sample` (an unknown uid narrows authority rather than
@@ -636,7 +661,7 @@ pub fn derive_self_uid(sample: &Sample, self_pid: u64) -> Option<u32> {
 pub fn build_model(
     title: &str,
     sample: &Sample,
-    seat_report: &SeatReport,
+    session: &SessionReport,
     meters: &RollingMeters,
     authority: &dyn CapabilityQuery,
     activities: &Activities,
@@ -647,12 +672,12 @@ pub fn build_model(
 
     let (tasks, task_owners, task_idents) = build_tasks(
         &sample.processes,
-        seat_report,
+        &session.seat,
         &meters.tasks,
         activities,
         can_force,
     );
-    let (recovery, recovery_owners) = build_recovery(sample, seat_report, meters, can_force);
+    let (recovery, recovery_owners) = build_recovery(sample, &session.seat, meters, can_force);
     let (pressure, pressure_targets) = build_pressure(sample, meters, self_uid, authority);
     let (activity_summaries, activity_ids, activity_members) =
         build_activities(activities, sample, &meters.tasks, self_uid, authority);
@@ -665,6 +690,7 @@ pub fn build_model(
             cpu: meters.system.cpu_pressured(),
             memory: meters.system.memory_pressured(),
         },
+        session.frame,
         authority,
     );
     model.recovery = recovery;

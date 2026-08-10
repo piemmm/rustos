@@ -9,9 +9,13 @@
 //! Screen coordinates are signed (`i32`): a window may be positioned partly
 //! off the top or left edge. Sizes are unsigned (`u32`). All arithmetic is
 //! overflow-checked through `i64`/`u32` widening so a pathological
-//! coordinate fails closed rather than wrapping. There is
-//! no rendering or compositing arithmetic here — that is the window
-//! manager's job — so nothing is duplicated.
+//! coordinate fails closed rather than wrapping.
+//!
+//! [`Region`] extends the vocabulary from a single rectangle to a *set* of
+//! pixels held as disjoint rectangles: which pixels changed, which a control
+//! owns, which survive a clip. That is geometry, not rendering — the colour
+//! algebra stays in `lib/raster` — so damage tracking and control repaint
+//! reporting share one definition instead of a copy each.
 //!
 //! The crate also owns [`Scale`], the desktop's single DPI / UI scale factor:
 //! desktop lengths are authored in *logical* pixels at a reference density
@@ -23,8 +27,12 @@
 #![forbid(unsafe_op_in_unsafe_fn)]
 #![deny(missing_docs)]
 
+extern crate alloc;
+
+mod region;
 mod scale;
 
+pub use region::Region;
 pub use scale::{Scale, REFERENCE_DPI};
 
 /// A point in screen space.
@@ -179,7 +187,7 @@ fn clamp_axis(origin: i32, extent: u32, low: i32, high: i32) -> i32 {
 }
 
 /// The unsigned distance `high - low`, clamped at zero, as `u32`.
-fn span(low: i32, high: i32) -> u32 {
+pub(crate) fn span(low: i32, high: i32) -> u32 {
     u32::try_from(i64::from(high) - i64::from(low)).unwrap_or(0)
 }
 
@@ -195,5 +203,7 @@ pub fn to_i32(v: u32) -> i32 {
     i32::try_from(v).unwrap_or(i32::MAX)
 }
 
+#[cfg(test)]
+mod region_tests;
 #[cfg(test)]
 mod tests;

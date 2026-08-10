@@ -10,6 +10,7 @@ use tairix_abi::net_ipc::{
     NetInterfaceRatesRecord, NetInterfaceStateRecord, IF_NAME_LEN, NET_IF_MAX_ADDRS,
 };
 use tairix_abi::rlimit::{LimitKind, ResourceLimit, RLIMIT_INFINITY};
+use tairix_abi::switchboard_ipc::FrameReport;
 use tairix_abi::sysinfo::{
     CpuCoreClass, CpuInfoRecord, LoadAverage, MemoryTotal, MountAvailability, MountRecord,
     MountVolumeState, ResourceLimitRecord, SeatRecord, SystemIdentity, Uptime, SEAT_FLAG_OWNED,
@@ -37,9 +38,15 @@ fn permitted() -> Sample {
     }
 }
 
-/// The report for `sample`, with no history and no pressure latched.
+/// The report for `sample`, with no history, no pressure latched and no
+/// frame reported.
 fn report_of(sample: &Sample) -> crate::view::SystemReport {
-    build_system_report(sample, &[], HeadlinePressure::default(), &NONE)
+    build_system_report(sample, &[], HeadlinePressure::default(), None, &NONE)
+}
+
+/// The Desktop block's facts for `frame`, with nothing else measured.
+fn compositor_facts(frame: Option<FrameReport>) -> Vec<crate::view::SystemFact> {
+    build_system_report(&permitted(), &[], HeadlinePressure::default(), frame, &NONE).compositor
 }
 
 /// The reading of the fact named `label` in `facts`.
@@ -536,6 +543,7 @@ fn the_header_carries_the_latches_the_service_reached() {
             cpu: true,
             memory: false,
         },
+        None,
         &NONE,
     );
     assert!(report.headline[0].pressured);
@@ -563,5 +571,74 @@ fn the_memory_detail_states_the_used_and_installed_totals() {
     assert_eq!(
         report.headline[1].detail,
         Reading::measured("8.0 GiB of 16.0 GiB")
+    );
+}
+
+/// A frame that changed 3 200 of a 1920x1080 screen's pixels and blended
+/// 42 000 layer contributions to do it.
+const OVERDRAWN: FrameReport = FrameReport {
+    screen_px: 1920 * 1080,
+    damaged_px: 3_200,
+    blended_px: 42_000,
+    opaque_px: 1_100,
+    dirty_rects: 3,
+    present_calls: 1,
+    chrome_hits: 12,
+    chrome_misses: 1,
+};
+
+#[test]
+fn a_reported_frame_states_the_damage_against_the_screen_and_the_overdraw() {
+    let facts = compositor_facts(Some(OVERDRAWN));
+    assert_eq!(
+        fact(&facts, "Last frame"),
+        &Reading::measured("3.2k px of 2.0M px recomposed")
+    );
+    assert_eq!(
+        fact(&facts, "Blended"),
+        &Reading::measured("42.0k px, 13.1x damaged"),
+        "the blend against the damage is the reading this block exists for"
+    );
+    assert_eq!(fact(&facts, "Opaque copies"), &Reading::measured("1.1k px"));
+    assert_eq!(fact(&facts, "Rectangles"), &Reading::measured("3"));
+    assert_eq!(fact(&facts, "Present calls"), &Reading::measured("1"));
+    assert_eq!(
+        fact(&facts, "Window furniture"),
+        &Reading::measured("12 cached, 1 rendered")
+    );
+}
+
+#[test]
+fn an_idle_frame_reads_idle_rather_than_a_row_of_zeros() {
+    let idle = FrameReport {
+        screen_px: 1920 * 1080,
+        damaged_px: 0,
+        blended_px: 0,
+        opaque_px: 0,
+        dirty_rects: 0,
+        present_calls: 0,
+        chrome_hits: 0,
+        chrome_misses: 0,
+    };
+    let facts = compositor_facts(Some(idle));
+    assert_eq!(
+        facts.len(),
+        1,
+        "a frame that recomposed nothing must not lay out a row of zeros"
+    );
+    assert_eq!(
+        fact(&facts, "Last frame"),
+        &Reading::measured("idle, nothing recomposed")
+    );
+}
+
+#[test]
+fn an_unreported_frame_is_absent_rather_than_nought() {
+    let facts = compositor_facts(None);
+    assert_eq!(facts.len(), 1);
+    assert_eq!(
+        fact(&facts, "Last frame"),
+        &Reading::Absent(Unmeasured::Unavailable),
+        "only the desktop can count this, and it has not reported yet"
     );
 }

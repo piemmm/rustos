@@ -34,15 +34,15 @@ use core::cmp::Ordering;
 
 use tairix_abi::origin::ProcId;
 use tairix_abi::sysinfo::ProcessState;
-use tairix_geometry::{to_i32, Rect, Scale};
+use tairix_geometry::{to_i32, Rect, Region, Scale};
 use tairix_icon::IconKind;
 use tairix_input::{InputEvent, Key, Modifiers, NamedKey, PointerButton};
 use tairix_raster::Surface;
 use tairix_theme::Theme;
 
 use tairix_controls::{
-    ActionRail, ActivityState, Button, ButtonContent, CellAlign, Chart, ComboAction, ComboBox,
-    ControlRole, ControlState, HeaderAction, HeaderColumn, Menu, MenuAction, MenuItem,
+    damage, ActionRail, ActivityState, Button, ButtonContent, CellAlign, Chart, ComboAction,
+    ComboBox, ControlRole, ControlState, HeaderAction, HeaderColumn, Menu, MenuAction, MenuItem,
     MetricLayout, MetricTile, Panel, PressureKind, PressureState, RailAction, RecoveryState,
     RowAction, SearchField, SelectionState, SelectorAction, SortOrder, StatusPill, Tab, TableCell,
     TableHeader, TableRow, Tabs, TabsAction, Toggle,
@@ -979,7 +979,9 @@ impl TasksSection {
         };
         let focus = self.rail.focus();
         self.rail = ActionRail::new(items);
-        self.rail.set_focus(focus);
+        // A model refresh carries no layout, so the rebuilt rail has no
+        // rectangle to report here.
+        self.rail.set_focus(focus, Rect::EMPTY, &mut damage::sink());
     }
 
     /// Which band the content cursor is in, and where within it.
@@ -1781,9 +1783,13 @@ impl SectionView for TasksSection {
         }
         if let Some(slot) = self.focused_rail() {
             // The rail's own item decides whether it may act, so a refused
-            // command consumes the key without dispatching anything.
-            self.rail.set_focus(Some(slot));
-            let RailAction::Activate { index } = self.rail.on_key(key)?;
+            // command consumes the key without dispatching anything. The
+            // keyboard path carries no layout, so the rail has no rectangle
+            // to report here and reports nothing.
+            self.rail
+                .set_focus(Some(slot), Rect::EMPTY, &mut damage::sink());
+            let RailAction::Activate { index } =
+                self.rail.on_key(key, Rect::EMPTY, &mut damage::sink())?;
             return self.invoke_rail(index);
         }
         let row = self.focused_row()?;
@@ -1852,7 +1858,12 @@ impl SectionView for TasksSection {
         }
     }
 
-    fn on_pointer(&mut self, event: &InputEvent, ctx: SectionCtx<'_>) -> Option<SectionOutcome> {
+    fn on_pointer(
+        &mut self,
+        event: &InputEvent,
+        ctx: SectionCtx<'_>,
+        damage: &mut Region,
+    ) -> Option<SectionOutcome> {
         let (tabs, search) = Self::header_rows(&ctx.frame, ctx.scale);
         if let Some(TabsAction::Selected { index }) = self.filters.on_pointer(event, tabs) {
             self.filters.set_selected(index);
@@ -1895,7 +1906,7 @@ impl SectionView for TasksSection {
             }
         }
         if let Some(SelectorAction::Set { on }) =
-            self.auto_refresh.on_pointer(event, footer.refresh)
+            self.auto_refresh.on_pointer(event, footer.refresh, damage)
         {
             self.auto_refresh.set_on(on);
             return None;
@@ -1907,8 +1918,9 @@ impl SectionView for TasksSection {
         if let Some(content) =
             Self::rail_content(&ctx.frame, &self.rail_panel, ctx.scale, ctx.theme)
         {
-            if let Some(RailAction::Activate { index }) =
-                self.rail.on_pointer(event, content, ctx.scale, ctx.theme)
+            if let Some(RailAction::Activate { index }) = self
+                .rail
+                .on_pointer(event, content, ctx.scale, ctx.theme, damage)
             {
                 return self.invoke_rail(index);
             }
@@ -1925,7 +1937,7 @@ impl SectionView for TasksSection {
             let Some(entry) = self.entries.get_mut(row) else {
                 break;
             };
-            if entry.row.on_pointer(event, item) == Some(RowAction::Activated) {
+            if entry.row.on_pointer(event, item, damage) == Some(RowAction::Activated) {
                 pressed = Some(id);
             }
         }
@@ -1964,7 +1976,9 @@ impl SectionView for TasksSection {
         }
 
         let slot = focused.then_some(rail_focus).flatten();
-        self.rail.set_focus(slot);
+        // Focus marking runs off the keyboard path, which has no layout, so
+        // the rail has no rectangle to report here.
+        self.rail.set_focus(slot, Rect::EMPTY, &mut damage::sink());
         for (index, button) in self.rail.items_mut().iter_mut().enumerate() {
             button.set_focused(slot == Some(index));
             button.set_in_focus_field(focused);

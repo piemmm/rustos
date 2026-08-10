@@ -13,12 +13,13 @@
 
 use alloc::vec::Vec;
 
-use tairix_geometry::{Point, Rect, Scale};
+use tairix_geometry::{Point, Rect, Region, Scale};
 use tairix_input::{InputEvent, Key, NamedKey};
 use tairix_raster::{Color, Surface};
 use tairix_theme::Theme;
 
 use crate::button::{IconButton, SplitAction, SplitButton};
+use crate::damage;
 use crate::paint::{grab_after, heavy_contrast, plate_border, route_pointer, surface_rect, to_i32};
 use crate::state::RenderInvariant;
 
@@ -154,9 +155,14 @@ impl Toolbar {
     /// Focus tool `index` (or clear focus with `None`), updating each tool's
     /// own focus flag so its focus ring draws; an out-of-range index clears
     /// focus (fail closed).
-    pub fn set_focus(&mut self, index: Option<usize>) {
+    ///
+    /// A focus move reports the whole bar: the ring leaves one tool and
+    /// arrives at another, and without a scale and theme the bar cannot say
+    /// where either tool sits. Covering the strip over-covers by the tools
+    /// that did not change, which repaints correctly.
+    pub fn set_focus(&mut self, index: Option<usize>, bounds: Rect, damage: &mut Region) {
         let index = index.filter(|&i| i < self.entries.len());
-        self.focus = index;
+        damage::set(&mut self.focus, index, bounds, damage);
         for (i, entry) in self.entries.iter_mut().enumerate() {
             entry.tool.set_focused(Some(i) == index);
         }
@@ -319,6 +325,7 @@ impl Toolbar {
         bounds: Rect,
         scale: Scale,
         theme: &Theme,
+        damage: &mut Region,
     ) -> Option<ToolbarAction> {
         if let InputEvent::PointerMoved { to } = event {
             *self.pointer = *to;
@@ -334,9 +341,11 @@ impl Toolbar {
                 continue;
             };
             let part = match &mut entry.tool {
-                Tool::Icon(b) => b.on_pointer(event, *rect).map(|_| ToolActivation::Primary),
+                Tool::Icon(b) => b
+                    .on_pointer(event, *rect, damage)
+                    .map(|_| ToolActivation::Primary),
                 Tool::Split(b) => b
-                    .on_pointer(event, *rect, scale, theme)
+                    .on_pointer(event, *rect, scale, theme, damage)
                     .map(|part| match part {
                         SplitAction::Primary => ToolActivation::Primary,
                         SplitAction::Disclosure => ToolActivation::Disclosure,
@@ -362,6 +371,7 @@ impl Toolbar {
         bounds: Rect,
         scale: Scale,
         theme: &Theme,
+        damage: &mut Region,
     ) -> Option<ToolbarAction> {
         if let InputEvent::PointerMoved { to } = event {
             *self.pointer = *to;
@@ -370,9 +380,11 @@ impl Toolbar {
         let mut fired = None;
         for (i, (entry, rect)) in self.entries.iter_mut().zip(rects.iter()).enumerate() {
             let part = match &mut entry.tool {
-                Tool::Icon(b) => b.on_pointer(event, *rect).map(|_| ToolActivation::Primary),
+                Tool::Icon(b) => b
+                    .on_pointer(event, *rect, damage)
+                    .map(|_| ToolActivation::Primary),
                 Tool::Split(b) => b
-                    .on_pointer(event, *rect, scale, theme)
+                    .on_pointer(event, *rect, scale, theme, damage)
                     .map(|part| match part {
                         SplitAction::Primary => ToolActivation::Primary,
                         SplitAction::Disclosure => ToolActivation::Disclosure,
@@ -387,7 +399,7 @@ impl Toolbar {
 
     /// Feed a key event: Left/Right move focus between tools (wrapping),
     /// Home/End jump to the ends, and Enter/Space activate the focused tool.
-    pub fn on_key(&mut self, key: Key) -> Option<ToolbarAction> {
+    pub fn on_key(&mut self, key: Key, bounds: Rect, damage: &mut Region) -> Option<ToolbarAction> {
         if self.entries.is_empty() {
             return None;
         }
@@ -398,7 +410,7 @@ impl Toolbar {
                     Some(i) if i < last => i + 1,
                     _ => 0,
                 };
-                self.set_focus(Some(next));
+                self.set_focus(Some(next), bounds, damage);
                 None
             }
             Key::Named(NamedKey::Left) => {
@@ -406,15 +418,15 @@ impl Toolbar {
                     Some(0) | None => last,
                     Some(i) => i - 1,
                 };
-                self.set_focus(Some(prev));
+                self.set_focus(Some(prev), bounds, damage);
                 None
             }
             Key::Named(NamedKey::Home) => {
-                self.set_focus(Some(0));
+                self.set_focus(Some(0), bounds, damage);
                 None
             }
             Key::Named(NamedKey::End) => {
-                self.set_focus(Some(last));
+                self.set_focus(Some(last), bounds, damage);
                 None
             }
             _ => {

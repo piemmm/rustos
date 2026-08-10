@@ -12,7 +12,7 @@ use tairix_controls::{ActivityState, PressureKind, MAX_CHART_SAMPLES};
 
 use super::{
     apply_action, build_model, map_section, signal_pid, Effect, GroupingEdit, RollingMeters,
-    TaskMeters, TASK_HISTORY_LEN,
+    SessionReport, TaskMeters, TASK_HISTORY_LEN,
 };
 use crate::activities::{Activities, Member};
 use crate::derive::{derive_summary, Hysteresis, CPU_PRESSURE_ENTER_PERMILLE};
@@ -38,7 +38,7 @@ fn meters_over(samples: &[Sample]) -> RollingMeters {
     let mut meters = RollingMeters::new();
     for sample in samples {
         let _ = derive_summary(sample, &mut hysteresis);
-        meters.record(sample, hysteresis, &SeatReport::HEALTHY);
+        meters.record(sample, hysteresis, &SessionReport::HEALTHY);
     }
     meters
 }
@@ -51,14 +51,14 @@ fn meters_for(sample: &Sample) -> RollingMeters {
 /// most tests that do not touch pressure or activities need.
 fn model(
     sample: &Sample,
-    seat_report: &SeatReport,
+    session: &SessionReport,
     meters: &RollingMeters,
     authority: &dyn tairix_abi::CapabilityQuery,
 ) -> super::PanelModel {
     build_model(
         "Switchboard",
         sample,
-        seat_report,
+        session,
         meters,
         authority,
         &Activities::new(),
@@ -90,7 +90,12 @@ fn tasks_are_built_in_sampled_order_with_a_switch_action() {
         process(10, ProcessState::Running, b"alpha", Some(500)),
         process(20, ProcessState::Running, b"beta", None),
     ]);
-    let panel = model(&sample, &SeatReport::HEALTHY, &meters_for(&sample), &NONE);
+    let panel = model(
+        &sample,
+        &SessionReport::HEALTHY,
+        &meters_for(&sample),
+        &NONE,
+    );
     assert_eq!(panel.model.tasks.len(), 2);
     assert_eq!(panel.model.tasks[0].name, "alpha");
     assert_eq!(panel.model.tasks[0].cpu_permille, Some(500));
@@ -131,7 +136,7 @@ fn a_task_grouped_into_an_activity_carries_its_index() {
     let panel = build_model(
         "Switchboard",
         &sample,
-        &SeatReport::HEALTHY,
+        &SessionReport::HEALTHY,
         &meters_for(&sample),
         &NONE,
         &activities,
@@ -150,7 +155,12 @@ fn a_live_process_is_working_and_a_finished_or_stopped_one_is_idle() {
         process(4, ProcessState::Zombie, b"zombie", None),
         process(5, ProcessState::Stopped, b"stopped", None),
     ]);
-    let panel = model(&sample, &SeatReport::HEALTHY, &meters_for(&sample), &NONE);
+    let panel = model(
+        &sample,
+        &SessionReport::HEALTHY,
+        &meters_for(&sample),
+        &NONE,
+    );
     let activities: Vec<ActivityState> =
         panel.model.tasks.iter().map(|task| task.activity).collect();
     assert_eq!(
@@ -173,7 +183,12 @@ fn stopped_processes_become_recovery_rows() {
         b"stuck",
         None
     )]);
-    let panel = model(&sample, &SeatReport::HEALTHY, &meters_for(&sample), &NONE);
+    let panel = model(
+        &sample,
+        &SessionReport::HEALTHY,
+        &meters_for(&sample),
+        &NONE,
+    );
     assert_eq!(panel.model.recovery.len(), 1);
     assert_eq!(panel.model.recovery[0].name, "stuck");
     assert!(panel.model.recovery[0].can_restart);
@@ -191,7 +206,7 @@ fn recovery_force_is_allowed_only_with_the_capability() {
     )]);
     let panel = model(
         &sample,
-        &SeatReport::HEALTHY,
+        &SessionReport::HEALTHY,
         &meters_for(&sample),
         &PROC_CONTROL,
     );
@@ -206,7 +221,10 @@ fn seat_report_owners_are_joined_against_sampled_names() {
         b"hungapp",
         None
     )]);
-    let report = SeatReport::new(1, &[42]).expect("valid report");
+    let report = SessionReport {
+        seat: SeatReport::new(1, &[42]).expect("valid report"),
+        frame: None,
+    };
     let panel = model(&sample, &report, &meters_for(&sample), &NONE);
     assert_eq!(panel.model.recovery.len(), 1);
     assert_eq!(panel.model.recovery[0].name, "hungapp");
@@ -222,7 +240,10 @@ fn an_unknown_reported_owner_does_not_fabricate_a_row() {
         None
     )]);
     // Owner 99 was never sampled, so it cannot be named honestly.
-    let report = SeatReport::new(1, &[99]).expect("valid report");
+    let report = SessionReport {
+        seat: SeatReport::new(1, &[99]).expect("valid report"),
+        frame: None,
+    };
     let panel = model(&sample, &report, &meters_for(&sample), &NONE);
     assert!(panel.model.recovery.is_empty());
 }
@@ -235,7 +256,10 @@ fn a_stopped_process_also_named_by_the_seat_report_is_not_duplicated() {
         b"stuck",
         None
     )]);
-    let report = SeatReport::new(1, &[7]).expect("valid report");
+    let report = SessionReport {
+        seat: SeatReport::new(1, &[7]).expect("valid report"),
+        frame: None,
+    };
     let panel = model(&sample, &report, &meters_for(&sample), &NONE);
     assert_eq!(panel.model.recovery.len(), 1);
 }
@@ -243,7 +267,12 @@ fn a_stopped_process_also_named_by_the_seat_report_is_not_duplicated() {
 #[test]
 fn an_unsampled_resource_reads_unknown_and_stays_unmeasured() {
     let sample = Sample::default();
-    let panel = model(&sample, &SeatReport::HEALTHY, &meters_for(&sample), &NONE);
+    let panel = model(
+        &sample,
+        &SessionReport::HEALTHY,
+        &meters_for(&sample),
+        &NONE,
+    );
     let cpu = &panel.model.system.headline[0];
     let memory = &panel.model.system.headline[1];
     assert_eq!(cpu.name, "CPU");
@@ -267,7 +296,12 @@ fn a_sampled_resource_carries_its_measured_reading() {
         }),
         ..Sample::default()
     };
-    let panel = model(&sample, &SeatReport::HEALTHY, &meters_for(&sample), &NONE);
+    let panel = model(
+        &sample,
+        &SessionReport::HEALTHY,
+        &meters_for(&sample),
+        &NONE,
+    );
     let cpu = &panel.model.system.headline[0];
     let memory = &panel.model.system.headline[1];
     assert_eq!(cpu.value, Reading::measured("62%"));
@@ -284,7 +318,7 @@ fn the_cpu_meter_carries_the_pressure_the_derivation_latched() {
     };
     let meters = meters_for(&sample);
     assert!(meters.system.cpu_pressured());
-    let panel = model(&sample, &SeatReport::HEALTHY, &meters, &NONE);
+    let panel = model(&sample, &SessionReport::HEALTHY, &meters, &NONE);
     let cpu = &panel.model.system.headline[0];
     assert_eq!(cpu.value, Reading::measured("90%"));
     assert!(
@@ -309,7 +343,7 @@ fn the_memory_meter_carries_the_band_the_sampler_read() {
     };
     let meters = meters_for(&sample);
     assert!(meters.system.memory_pressured());
-    let panel = model(&sample, &SeatReport::HEALTHY, &meters, &NONE);
+    let panel = model(&sample, &SessionReport::HEALTHY, &meters, &NONE);
     let memory = &panel.model.system.headline[1];
     assert_eq!(memory.value, Reading::measured("95%"));
     assert!(
@@ -367,7 +401,12 @@ fn the_cpu_history_is_bounded_and_drops_the_oldest_reading() {
 #[test]
 fn jobs_services_and_system_actions_stay_honestly_empty() {
     let sample = Sample::default();
-    let panel = model(&sample, &SeatReport::HEALTHY, &meters_for(&sample), &NONE);
+    let panel = model(
+        &sample,
+        &SessionReport::HEALTHY,
+        &meters_for(&sample),
+        &NONE,
+    );
     assert!(panel.model.jobs.is_empty());
     // There is no service registry to enumerate, so the screen states the
     // absence rather than showing an empty list that reads as "none".
@@ -384,7 +423,12 @@ fn jobs_services_and_system_actions_stay_honestly_empty() {
 #[test]
 fn no_pressure_cards_when_neither_latch_is_active() {
     let sample = Sample::default();
-    let panel = model(&sample, &SeatReport::HEALTHY, &meters_for(&sample), &NONE);
+    let panel = model(
+        &sample,
+        &SessionReport::HEALTHY,
+        &meters_for(&sample),
+        &NONE,
+    );
     assert!(panel.model.pressure.is_empty());
 }
 
@@ -405,7 +449,7 @@ fn a_cpu_culprit_card_recommends_lowering_priority_for_its_own_uid() {
     let panel = build_model(
         "Switchboard",
         &s,
-        &SeatReport::HEALTHY,
+        &SessionReport::HEALTHY,
         &meters,
         &NONE,
         &Activities::new(),
@@ -457,7 +501,7 @@ fn a_cpu_culprit_is_denied_without_authority_over_another_uid() {
     let panel = build_model(
         "Switchboard",
         &sample,
-        &SeatReport::HEALTHY,
+        &SessionReport::HEALTHY,
         &meters,
         &NONE,
         &Activities::new(),
@@ -491,7 +535,7 @@ fn a_cpu_culprit_is_ready_across_uids_with_the_capability() {
     let panel = build_model(
         "Switchboard",
         &sample,
-        &SeatReport::HEALTHY,
+        &SessionReport::HEALTHY,
         &meters,
         &PROC_CONTROL,
         &Activities::new(),
@@ -525,7 +569,7 @@ fn a_cpu_culprit_already_low_disables_lower_priority() {
     let panel = build_model(
         "Switchboard",
         &sample,
-        &SeatReport::HEALTHY,
+        &SessionReport::HEALTHY,
         &meters,
         &NONE,
         &Activities::new(),
@@ -559,7 +603,7 @@ fn a_stopped_cpu_culprit_disables_pause() {
     let panel = build_model(
         "Switchboard",
         &sample,
-        &SeatReport::HEALTHY,
+        &SessionReport::HEALTHY,
         &meters,
         &NONE,
         &Activities::new(),
@@ -582,7 +626,7 @@ fn a_culprit_less_cpu_card_names_the_resource_when_no_rate_is_measured() {
         ..Sample::default()
     };
     let meters = meters_for(&sample);
-    let panel = model(&sample, &SeatReport::HEALTHY, &meters, &NONE);
+    let panel = model(&sample, &SessionReport::HEALTHY, &meters, &NONE);
     let cause = &panel.model.pressure[0];
     assert_eq!(cause.culprit, "CPU");
     assert_eq!(
@@ -617,7 +661,7 @@ fn a_memory_culprit_card_names_bytes_and_the_share_of_memory() {
         ..Sample::default()
     };
     let meters = meters_for(&sample);
-    let panel = model(&sample, &SeatReport::HEALTHY, &meters, &NONE);
+    let panel = model(&sample, &SessionReport::HEALTHY, &meters, &NONE);
     assert_eq!(panel.model.pressure.len(), 1);
     let cause = &panel.model.pressure[0];
     assert_eq!(cause.resource, "Memory");
@@ -651,7 +695,7 @@ fn a_memory_culprit_card_omits_the_percent_clause_without_a_total() {
         ..Sample::default()
     };
     let meters = meters_for(&sample);
-    let panel = model(&sample, &SeatReport::HEALTHY, &meters, &NONE);
+    let panel = model(&sample, &SessionReport::HEALTHY, &meters, &NONE);
     let cause = &panel.model.pressure[0];
     assert_eq!(cause.cause, "Using 640.0 KiB of RAM.");
 }
@@ -668,7 +712,7 @@ fn a_culprit_less_memory_card_names_the_resource_when_nothing_measures_it() {
         ..Sample::default()
     };
     let meters = meters_for(&sample);
-    let panel = model(&sample, &SeatReport::HEALTHY, &meters, &NONE);
+    let panel = model(&sample, &SessionReport::HEALTHY, &meters, &NONE);
     let cause = &panel.model.pressure[0];
     assert_eq!(cause.culprit, "Memory");
     assert_eq!(cause.cause, "Memory pressure is high.");
@@ -688,7 +732,7 @@ fn an_activity_summary_reports_its_id_name_and_member_count() {
     let panel = build_model(
         "Switchboard",
         &sample,
-        &SeatReport::HEALTHY,
+        &SessionReport::HEALTHY,
         &meters_for(&sample),
         &NONE,
         &activities,
@@ -720,7 +764,7 @@ fn an_activity_detail_is_plural_for_multiple_members() {
     let panel = build_model(
         "Switchboard",
         &sample,
-        &SeatReport::HEALTHY,
+        &SessionReport::HEALTHY,
         &meters_for(&sample),
         &NONE,
         &activities,
@@ -763,7 +807,7 @@ fn an_activitys_combined_reading_totals_its_joined_members() {
     let panel = build_model(
         "Switchboard",
         &sample,
-        &SeatReport::HEALTHY,
+        &SessionReport::HEALTHY,
         &meters_for(&sample),
         &NONE,
         &activities,
@@ -805,7 +849,7 @@ fn an_activity_total_is_absent_when_a_member_reading_is() {
     let panel = build_model(
         "Switchboard",
         &sample,
-        &SeatReport::HEALTHY,
+        &SessionReport::HEALTHY,
         &meters_for(&sample),
         &NONE,
         &activities,
@@ -839,7 +883,7 @@ fn an_activity_with_no_running_member_has_no_total_at_all() {
     let panel = build_model(
         "Switchboard",
         &sample,
-        &SeatReport::HEALTHY,
+        &SessionReport::HEALTHY,
         &meters_for(&sample),
         &NONE,
         &activities,
@@ -863,7 +907,7 @@ fn an_activity_is_working_when_a_member_is_working_and_not_paused() {
     let panel = build_model(
         "Switchboard",
         &sample,
-        &SeatReport::HEALTHY,
+        &SessionReport::HEALTHY,
         &meters_for(&sample),
         &NONE,
         &activities,
@@ -884,7 +928,7 @@ fn a_paused_activity_is_idle_even_with_a_working_member() {
     let panel = build_model(
         "Switchboard",
         &sample,
-        &SeatReport::HEALTHY,
+        &SessionReport::HEALTHY,
         &meters_for(&sample),
         &NONE,
         &activities,
@@ -913,7 +957,7 @@ fn can_control_is_true_for_a_same_uid_member_without_the_capability() {
     let panel = build_model(
         "Switchboard",
         &sample,
-        &SeatReport::HEALTHY,
+        &SessionReport::HEALTHY,
         &meters_for(&sample),
         &NONE,
         &activities,
@@ -941,7 +985,7 @@ fn can_control_is_false_for_a_foreign_uid_member_without_the_capability() {
     let panel = build_model(
         "Switchboard",
         &sample,
-        &SeatReport::HEALTHY,
+        &SessionReport::HEALTHY,
         &meters_for(&sample),
         &NONE,
         &activities,
@@ -952,7 +996,7 @@ fn can_control_is_false_for_a_foreign_uid_member_without_the_capability() {
     let panel = build_model(
         "Switchboard",
         &sample,
-        &SeatReport::HEALTHY,
+        &SessionReport::HEALTHY,
         &meters_for(&sample),
         &PROC_CONTROL,
         &activities,
@@ -973,7 +1017,7 @@ fn an_unjoined_member_falls_back_to_its_stored_name_and_is_idle() {
     let panel = build_model(
         "Switchboard",
         &sample,
-        &SeatReport::HEALTHY,
+        &SessionReport::HEALTHY,
         &meters_for(&sample),
         &NONE,
         &activities,
@@ -1000,7 +1044,7 @@ fn can_accept_member_reflects_the_member_bound() {
     let panel = build_model(
         "Switchboard",
         &sample,
-        &SeatReport::HEALTHY,
+        &SessionReport::HEALTHY,
         &meters_for(&sample),
         &NONE,
         &activities,
@@ -1012,7 +1056,12 @@ fn can_accept_member_reflects_the_member_bound() {
 #[test]
 fn can_create_activity_reflects_activities_can_create() {
     let sample = Sample::default();
-    let panel = model(&sample, &SeatReport::HEALTHY, &meters_for(&sample), &NONE);
+    let panel = model(
+        &sample,
+        &SessionReport::HEALTHY,
+        &meters_for(&sample),
+        &NONE,
+    );
     assert!(panel.model.can_create_activity);
 }
 
@@ -1026,7 +1075,12 @@ fn switch_and_reveal_both_ask_the_session_for_that_owner() {
         b"alpha",
         None
     )]);
-    let panel = model(&sample, &SeatReport::HEALTHY, &meters_for(&sample), &NONE);
+    let panel = model(
+        &sample,
+        &SessionReport::HEALTHY,
+        &meters_for(&sample),
+        &NONE,
+    );
     for control in [TaskControl::Switch, TaskControl::Reveal] {
         let effect = apply_action(&panel, SwitchboardAction::Task { index: 0, control }, &NONE);
         assert_eq!(
@@ -1047,7 +1101,7 @@ fn each_signalling_command_maps_to_its_own_signal() {
     )]);
     let panel = model(
         &sample,
-        &SeatReport::HEALTHY,
+        &SessionReport::HEALTHY,
         &meters_for(&sample),
         &PROC_CONTROL,
     );
@@ -1090,7 +1144,7 @@ fn resume_only_reaches_a_stopped_task() {
     )]);
     let panel = model(
         &running,
-        &SeatReport::HEALTHY,
+        &SessionReport::HEALTHY,
         &meters_for(&running),
         &PROC_CONTROL,
     );
@@ -1115,7 +1169,7 @@ fn resume_only_reaches_a_stopped_task() {
     )]);
     let panel = model(
         &stopped,
-        &SeatReport::HEALTHY,
+        &SessionReport::HEALTHY,
         &meters_for(&stopped),
         &PROC_CONTROL,
     );
@@ -1145,7 +1199,12 @@ fn a_task_command_the_caller_may_not_use_produces_no_effect() {
     )]);
     // Built *and* dispatched without process control: the verdict the model
     // reached is the server-side check, so the effect never happens.
-    let panel = model(&sample, &SeatReport::HEALTHY, &meters_for(&sample), &NONE);
+    let panel = model(
+        &sample,
+        &SessionReport::HEALTHY,
+        &meters_for(&sample),
+        &NONE,
+    );
     for control in [TaskControl::Pause, TaskControl::ForceQuit] {
         assert!(
             apply_action(&panel, SwitchboardAction::Task { index: 0, control }, &NONE,).is_empty(),
@@ -1164,7 +1223,7 @@ fn open_logs_produces_no_effect_because_no_interface_exists() {
     )]);
     let panel = model(
         &sample,
-        &SeatReport::HEALTHY,
+        &SessionReport::HEALTHY,
         &meters_for(&sample),
         &PROC_CONTROL,
     );
@@ -1182,7 +1241,12 @@ fn open_logs_produces_no_effect_because_no_interface_exists() {
 #[test]
 fn an_out_of_range_task_index_produces_no_effect() {
     let sample = Sample::default();
-    let panel = model(&sample, &SeatReport::HEALTHY, &meters_for(&sample), &NONE);
+    let panel = model(
+        &sample,
+        &SessionReport::HEALTHY,
+        &meters_for(&sample),
+        &NONE,
+    );
     let effect = apply_action(
         &panel,
         SwitchboardAction::Task {
@@ -1202,7 +1266,12 @@ fn a_recovery_restart_action_maps_to_restart_owner() {
         b"stuck",
         None
     )]);
-    let panel = model(&sample, &SeatReport::HEALTHY, &meters_for(&sample), &NONE);
+    let panel = model(
+        &sample,
+        &SessionReport::HEALTHY,
+        &meters_for(&sample),
+        &NONE,
+    );
     let effect = apply_action(
         &panel,
         SwitchboardAction::Recovery {
@@ -1224,7 +1293,7 @@ fn a_recovery_force_action_signals_kill_when_authorised() {
     )]);
     let panel = model(
         &sample,
-        &SeatReport::HEALTHY,
+        &SessionReport::HEALTHY,
         &meters_for(&sample),
         &PROC_CONTROL,
     );
@@ -1253,7 +1322,12 @@ fn a_recovery_force_action_is_never_attempted_without_the_capability() {
         b"stuck",
         None
     )]);
-    let panel = model(&sample, &SeatReport::HEALTHY, &meters_for(&sample), &NONE);
+    let panel = model(
+        &sample,
+        &SessionReport::HEALTHY,
+        &meters_for(&sample),
+        &NONE,
+    );
     let effect = apply_action(
         &panel,
         SwitchboardAction::Recovery {
@@ -1268,7 +1342,12 @@ fn a_recovery_force_action_is_never_attempted_without_the_capability() {
 #[test]
 fn a_scroll_action_has_no_effect() {
     let sample = Sample::default();
-    let panel = model(&sample, &SeatReport::HEALTHY, &meters_for(&sample), &NONE);
+    let panel = model(
+        &sample,
+        &SessionReport::HEALTHY,
+        &meters_for(&sample),
+        &NONE,
+    );
     let effect = apply_action(&panel, SwitchboardAction::Scrolled { offset: 3 }, &NONE);
     assert!(effect.is_empty());
 }
@@ -1312,7 +1391,7 @@ fn cpu_pressure_panel(
     build_model(
         "Switchboard",
         &sample,
-        &SeatReport::HEALTHY,
+        &SessionReport::HEALTHY,
         &meters_for(&sample),
         authority,
         &Activities::new(),
@@ -1424,7 +1503,12 @@ fn apply_action_show_tasks_never_produces_an_effect() {
 #[test]
 fn apply_action_pressure_index_out_of_range_is_empty() {
     let sample = Sample::default();
-    let panel = model(&sample, &SeatReport::HEALTHY, &meters_for(&sample), &NONE);
+    let panel = model(
+        &sample,
+        &SessionReport::HEALTHY,
+        &meters_for(&sample),
+        &NONE,
+    );
     let effect = apply_action(
         &panel,
         SwitchboardAction::Pressure {
@@ -1441,7 +1525,12 @@ fn apply_action_pressure_index_out_of_range_is_empty() {
 #[test]
 fn task_grouped_into_a_new_activity_yields_an_assign_edit() {
     let sample = sample_with(alloc::vec![process(10, ProcessState::Running, b"a", None)]);
-    let panel = model(&sample, &SeatReport::HEALTHY, &meters_for(&sample), &NONE);
+    let panel = model(
+        &sample,
+        &SessionReport::HEALTHY,
+        &meters_for(&sample),
+        &NONE,
+    );
     let effect = apply_action(
         &panel,
         SwitchboardAction::TaskGrouped {
@@ -1462,7 +1551,12 @@ fn task_grouped_into_a_new_activity_yields_an_assign_edit() {
 #[test]
 fn task_grouped_with_an_out_of_range_task_is_empty() {
     let sample = Sample::default();
-    let panel = model(&sample, &SeatReport::HEALTHY, &meters_for(&sample), &NONE);
+    let panel = model(
+        &sample,
+        &SessionReport::HEALTHY,
+        &meters_for(&sample),
+        &NONE,
+    );
     let effect = apply_action(
         &panel,
         SwitchboardAction::TaskGrouped {
@@ -1477,7 +1571,12 @@ fn task_grouped_with_an_out_of_range_task_is_empty() {
 #[test]
 fn task_grouped_with_an_out_of_range_activity_is_empty() {
     let sample = sample_with(alloc::vec![process(10, ProcessState::Running, b"a", None)]);
-    let panel = model(&sample, &SeatReport::HEALTHY, &meters_for(&sample), &NONE);
+    let panel = model(
+        &sample,
+        &SessionReport::HEALTHY,
+        &meters_for(&sample),
+        &NONE,
+    );
     let effect = apply_action(
         &panel,
         SwitchboardAction::TaskGrouped {
@@ -1492,7 +1591,12 @@ fn task_grouped_with_an_out_of_range_activity_is_empty() {
 #[test]
 fn task_ungrouped_yields_an_unassign_edit() {
     let sample = sample_with(alloc::vec![process(10, ProcessState::Running, b"a", None)]);
-    let panel = model(&sample, &SeatReport::HEALTHY, &meters_for(&sample), &NONE);
+    let panel = model(
+        &sample,
+        &SessionReport::HEALTHY,
+        &meters_for(&sample),
+        &NONE,
+    );
     let effect = apply_action(&panel, SwitchboardAction::TaskUngrouped { task: 0 }, &NONE);
     assert_eq!(
         effect,
@@ -1503,7 +1607,12 @@ fn task_ungrouped_yields_an_unassign_edit() {
 #[test]
 fn task_ungrouped_out_of_range_is_empty() {
     let sample = Sample::default();
-    let panel = model(&sample, &SeatReport::HEALTHY, &meters_for(&sample), &NONE);
+    let panel = model(
+        &sample,
+        &SessionReport::HEALTHY,
+        &meters_for(&sample),
+        &NONE,
+    );
     let effect = apply_action(&panel, SwitchboardAction::TaskUngrouped { task: 0 }, &NONE);
     assert!(effect.is_empty());
 }
@@ -1518,7 +1627,7 @@ fn activity_renamed_yields_a_rename_edit() {
     let panel = build_model(
         "Switchboard",
         &sample,
-        &SeatReport::HEALTHY,
+        &SessionReport::HEALTHY,
         &meters_for(&sample),
         &NONE,
         &activities,
@@ -1538,7 +1647,12 @@ fn activity_renamed_yields_a_rename_edit() {
 #[test]
 fn activity_renamed_out_of_range_is_empty() {
     let sample = Sample::default();
-    let panel = model(&sample, &SeatReport::HEALTHY, &meters_for(&sample), &NONE);
+    let panel = model(
+        &sample,
+        &SessionReport::HEALTHY,
+        &meters_for(&sample),
+        &NONE,
+    );
     let effect = apply_action(
         &panel,
         SwitchboardAction::ActivityRenamed { index: 0 },
@@ -1581,7 +1695,7 @@ fn activity_panel(
     let panel = build_model(
         "Switchboard",
         &sample,
-        &SeatReport::HEALTHY,
+        &SessionReport::HEALTHY,
         &meters_for(&sample),
         authority,
         &activities,
@@ -1719,7 +1833,7 @@ fn activity_close_skips_a_member_not_joined_to_the_current_sample() {
     let panel = build_model(
         "Switchboard",
         &sample,
-        &SeatReport::HEALTHY,
+        &SessionReport::HEALTHY,
         &meters_for(&sample),
         &NONE,
         &activities,
@@ -1748,7 +1862,12 @@ fn activity_close_skips_a_member_not_joined_to_the_current_sample() {
 #[test]
 fn activity_index_out_of_range_is_empty() {
     let sample = Sample::default();
-    let panel = model(&sample, &SeatReport::HEALTHY, &meters_for(&sample), &NONE);
+    let panel = model(
+        &sample,
+        &SessionReport::HEALTHY,
+        &meters_for(&sample),
+        &NONE,
+    );
     let effect = apply_action(
         &panel,
         SwitchboardAction::Activity {
@@ -2053,9 +2172,9 @@ fn a_faults_age_is_measured_from_when_it_was_first_seen() {
     let mut meters = RollingMeters::new();
     let hysteresis = Hysteresis::new();
     let first = sample_at(100, alloc::vec![stopped(7)]);
-    meters.record(&first, hysteresis, &SeatReport::HEALTHY);
+    meters.record(&first, hysteresis, &SessionReport::HEALTHY);
     let later = sample_at(160, alloc::vec![stopped(7)]);
-    meters.record(&later, hysteresis, &SeatReport::HEALTHY);
+    meters.record(&later, hysteresis, &SessionReport::HEALTHY);
 
     let proc_id = later.processes[0].proc_id;
     let elapsed = meters
@@ -2069,7 +2188,7 @@ fn a_faults_age_is_measured_from_when_it_was_first_seen() {
 fn a_fault_with_no_uptime_reading_has_no_age_rather_than_a_zero() {
     let mut meters = RollingMeters::new();
     let sample = sample_with(alloc::vec![stopped(7)]);
-    meters.record(&sample, Hysteresis::new(), &SeatReport::HEALTHY);
+    meters.record(&sample, Hysteresis::new(), &SessionReport::HEALTHY);
     assert_eq!(
         meters.faults.elapsed(sample.processes[0].proc_id, None),
         None
@@ -2081,14 +2200,14 @@ fn a_fault_that_clears_is_counted_and_forgotten() {
     let mut meters = RollingMeters::new();
     let hysteresis = Hysteresis::new();
     let faulted = sample_at(10, alloc::vec![stopped(7)]);
-    meters.record(&faulted, hysteresis, &SeatReport::HEALTHY);
+    meters.record(&faulted, hysteresis, &SessionReport::HEALTHY);
     assert_eq!(meters.faults.resolved(), 0);
 
     let healthy = sample_at(
         20,
         alloc::vec![process(7, ProcessState::Running, b"stuck", Some(10))],
     );
-    meters.record(&healthy, hysteresis, &SeatReport::HEALTHY);
+    meters.record(&healthy, hysteresis, &SessionReport::HEALTHY);
     assert_eq!(meters.faults.resolved(), 1);
     assert_eq!(
         meters.faults.elapsed(
@@ -2111,7 +2230,7 @@ fn a_fault_that_recovers_and_faults_again_is_timed_from_the_new_fault() {
         (50, ProcessState::Stopped),
     ] {
         let sample = sample_at(secs, alloc::vec![process(7, state, b"stuck", Some(10))]);
-        meters.record(&sample, hysteresis, &SeatReport::HEALTHY);
+        meters.record(&sample, hysteresis, &SessionReport::HEALTHY);
     }
     let last = sample_at(50, alloc::vec![stopped(7)]);
     let elapsed = meters
@@ -2155,7 +2274,7 @@ fn a_pressure_bands_age_is_measured_from_when_the_band_was_entered() {
     let mut record = |secs: i64, meters: &mut RollingMeters| {
         let sample = banded_sample_at(secs, CPU_PRESSURE_ENTER_PERMILLE);
         let _ = derive_summary(&sample, &mut hysteresis);
-        meters.record(&sample, hysteresis, &SeatReport::HEALTHY);
+        meters.record(&sample, hysteresis, &SessionReport::HEALTHY);
         sample
     };
     record(100, &mut meters);
@@ -2173,7 +2292,7 @@ fn a_pressure_bands_age_is_measured_from_when_the_band_was_entered() {
 
     // The card carries that same measurement rather than deriving a second
     // opinion of its own.
-    let panel = model(&later, &SeatReport::HEALTHY, &meters, &NONE);
+    let panel = model(&later, &SessionReport::HEALTHY, &meters, &NONE);
     let cause = panel
         .model
         .pressure
@@ -2194,10 +2313,10 @@ fn a_pressure_band_with_no_uptime_reading_has_no_age_rather_than_a_zero() {
         ..sample_with(alloc::vec![cpu_hog()])
     };
     let _ = derive_summary(&sample, &mut hysteresis);
-    meters.record(&sample, hysteresis, &SeatReport::HEALTHY);
+    meters.record(&sample, hysteresis, &SessionReport::HEALTHY);
     assert_eq!(meters.pressure.cpu_elapsed(None), None);
 
-    let panel = model(&sample, &SeatReport::HEALTHY, &meters, &NONE);
+    let panel = model(&sample, &SessionReport::HEALTHY, &meters, &NONE);
     let cause = panel
         .model
         .pressure
@@ -2222,7 +2341,7 @@ fn a_band_that_eases_and_returns_is_timed_from_the_new_band() {
     ] {
         let sample = banded_sample_at(secs, busy);
         let _ = derive_summary(&sample, &mut hysteresis);
-        meters.record(&sample, hysteresis, &SeatReport::HEALTHY);
+        meters.record(&sample, hysteresis, &SessionReport::HEALTHY);
     }
     let elapsed = meters
         .pressure
@@ -2238,11 +2357,11 @@ fn the_models_resolved_count_is_the_clocks_count() {
     meters.record(
         &sample_at(10, alloc::vec![stopped(7)]),
         hysteresis,
-        &SeatReport::HEALTHY,
+        &SessionReport::HEALTHY,
     );
     let healthy = sample_at(20, Vec::new());
-    meters.record(&healthy, hysteresis, &SeatReport::HEALTHY);
-    let built = model(&healthy, &SeatReport::HEALTHY, &meters, &NONE);
+    meters.record(&healthy, hysteresis, &SessionReport::HEALTHY);
+    let built = model(&healthy, &SessionReport::HEALTHY, &meters, &NONE);
     assert_eq!(built.model.recovery_resolved, 1);
 }
 
@@ -2281,7 +2400,7 @@ fn a_faults_crash_record_is_matched_by_process_identity() {
         ..Sample::default()
     };
     let meters = meters_for(&sample);
-    let built = model(&sample, &SeatReport::HEALTHY, &meters, &NONE);
+    let built = model(&sample, &SessionReport::HEALTHY, &meters, &NONE);
     let crash = built.model.recovery[0]
         .crash
         .as_ref()
@@ -2304,7 +2423,7 @@ fn a_crash_record_for_another_task_is_never_attributed_to_this_fault() {
         ..Sample::default()
     };
     let meters = meters_for(&sample);
-    let built = model(&sample, &SeatReport::HEALTHY, &meters, &NONE);
+    let built = model(&sample, &SessionReport::HEALTHY, &meters, &NONE);
     assert!(
         built.model.recovery[0].crash.is_none(),
         "matching on the reused pid would attribute a dead task's crash to a live one"
@@ -2315,7 +2434,7 @@ fn a_crash_record_for_another_task_is_never_attributed_to_this_fault() {
 fn a_fault_carries_its_own_resource_cost_with_network_unmeasured() {
     let sample = sample_with(alloc::vec![stopped(7)]);
     let meters = meters_for(&sample);
-    let built = model(&sample, &SeatReport::HEALTHY, &meters, &NONE);
+    let built = model(&sample, &SessionReport::HEALTHY, &meters, &NONE);
     let item = &built.model.recovery[0];
     assert_eq!(item.cpu, Reading::measured("1%"));
     assert_eq!(item.memory, Reading::measured("0 B"));

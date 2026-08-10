@@ -11,7 +11,7 @@ use tairix_theme::{CursorKind, Theme};
 use crate::chrome::WindowChrome;
 use crate::color::{div255, Pixel};
 use crate::corner::Corners;
-use crate::geometry::{Point, Rect, Scale};
+use crate::geometry::{Point, Rect, Region, Scale};
 use crate::surface::{self, Surface};
 use crate::viewport::RootViewport;
 
@@ -706,21 +706,31 @@ impl Window {
         event: &InputEvent,
         scale: Scale,
         theme: &Theme,
+        damage: &mut Region,
     ) -> Option<TitleBarEvent> {
         let bounds = self.bounds();
         let frame = self.frame.as_mut()?;
         let title_rect = frame.layout(bounds, scale, theme).title_bar;
         frame
             .title_bar_mut()
-            .on_pointer(event, title_rect, scale, theme)
+            .on_pointer(event, title_rect, scale, theme, damage)
     }
 
     /// Feed a key `key` to this window's decoration furniture (the title bar's
     /// command controls: Space/Enter activate the focused control, the arrows
     /// move focus between them) and return the typed [`TitleBarEvent`] it
     /// produced. Returns `None` for an undecorated window.
-    pub(crate) fn on_frame_key(&mut self, key: Key) -> Option<TitleBarEvent> {
-        self.frame.as_mut()?.title_bar_mut().on_key(key)
+    pub(crate) fn on_frame_key(
+        &mut self,
+        key: Key,
+        scale: Scale,
+        theme: &Theme,
+        damage: &mut Region,
+    ) -> Option<TitleBarEvent> {
+        let bounds = self.bounds();
+        let frame = self.frame.as_mut()?;
+        let title_rect = frame.layout(bounds, scale, theme).title_bar;
+        frame.title_bar_mut().on_key(key, title_rect, damage)
     }
 
     /// Toggle a decorated, resizable window between restored and maximized,

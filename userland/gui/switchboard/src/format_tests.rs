@@ -1,6 +1,6 @@
 //! Unit tests for the crate's one set of display formatters.
 
-use super::{format_bytes, format_duration, format_rate};
+use super::{format_bytes, format_duration, format_pixels, format_rate};
 use tairix_abi::Duration64;
 
 #[test]
@@ -23,6 +23,29 @@ fn the_largest_unit_is_the_last_one_rather_than_a_wrap() {
     assert_eq!(format_bytes(pib), "1.0 PiB");
     assert!(
         format_bytes(u64::MAX).ends_with(" PiB"),
+        "a count past the last unit stays in it rather than wrapping"
+    );
+}
+
+#[test]
+fn pixels_below_a_thousand_are_whole_pixels() {
+    assert_eq!(format_pixels(0), "0 px");
+    assert_eq!(format_pixels(512), "512 px");
+    assert_eq!(format_pixels(999), "999 px");
+}
+
+#[test]
+fn pixels_scale_by_thousands_with_one_decimal() {
+    assert_eq!(format_pixels(1_000), "1.0k px");
+    assert_eq!(format_pixels(3_200), "3.2k px");
+    assert_eq!(format_pixels(1920 * 1080), "2.0M px");
+}
+
+#[test]
+fn a_pixel_count_past_the_last_unit_stays_in_it() {
+    assert_eq!(format_pixels(4_000_000_000), "4.0G px");
+    assert!(
+        format_pixels(u64::MAX).ends_with("G px"),
         "a count past the last unit stays in it rather than wrapping"
     );
 }

@@ -19,6 +19,7 @@ use tairix_raster::{Color, Pixel, Surface};
 use tairix_theme::{Rgba, Theme};
 
 use crate::button::{Button, ButtonContent};
+use crate::damage::sink;
 use crate::shell::{
     Notification, NotificationAction, TaskVisibility, TaskbarItem, TaskbarItemAction,
     TaskbarPresentation, TrayBadge, TrayBadgeContent, TrayBadgeTone, TraySignal, TraySignalAction,
@@ -165,12 +166,15 @@ fn notification_action_activates_by_pointer() {
     let mut note = Notification::new("Job").with_actions(vec![Button::labelled("Clear")]);
     let bounds = Rect::new(0, 0, NW, NH);
     assert_eq!(
-        note.on_pointer(&moved(110, 112), bounds, Scale::ONE, &theme),
+        note.on_pointer(&moved(110, 112), bounds, Scale::ONE, &theme, &mut sink()),
         None
     );
-    assert_eq!(note.on_pointer(&PRESS, bounds, Scale::ONE, &theme), None);
     assert_eq!(
-        note.on_pointer(&RELEASE, bounds, Scale::ONE, &theme),
+        note.on_pointer(&PRESS, bounds, Scale::ONE, &theme, &mut sink()),
+        None
+    );
+    assert_eq!(
+        note.on_pointer(&RELEASE, bounds, Scale::ONE, &theme, &mut sink()),
         Some(NotificationAction::ActionActivated { index: 0 })
     );
 }
@@ -379,20 +383,20 @@ fn taskbar_item_denied_shows_lock_and_does_not_activate() {
     let s = task_surface(&item, &theme, Scale::ONE);
     assert!(has_pixel(&s, premul(theme.palette().denied)));
     let bounds = Rect::new(0, 0, TW, TH);
-    assert_eq!(item.on_pointer(&moved(80, 16), bounds), None);
-    assert_eq!(item.on_pointer(&PRESS, bounds), None);
+    assert_eq!(item.on_pointer(&moved(80, 16), bounds, &mut sink()), None);
+    assert_eq!(item.on_pointer(&PRESS, bounds, &mut sink()), None);
     // Fail closed: a denied item never activates.
-    assert_eq!(item.on_pointer(&RELEASE, bounds), None);
+    assert_eq!(item.on_pointer(&RELEASE, bounds, &mut sink()), None);
 }
 
 #[test]
 fn taskbar_item_activates_by_pointer_and_keyboard() {
     let mut item = TaskbarItem::new("Editor", IconKind::Generic);
     let bounds = Rect::new(0, 0, TW, TH);
-    assert_eq!(item.on_pointer(&moved(80, 16), bounds), None);
-    assert_eq!(item.on_pointer(&PRESS, bounds), None);
+    assert_eq!(item.on_pointer(&moved(80, 16), bounds, &mut sink()), None);
+    assert_eq!(item.on_pointer(&PRESS, bounds, &mut sink()), None);
     assert_eq!(
-        item.on_pointer(&RELEASE, bounds),
+        item.on_pointer(&RELEASE, bounds, &mut sink()),
         Some(TaskbarItemAction::Activated)
     );
     item.set_focused(true);
@@ -527,9 +531,9 @@ fn taskbar_item_icon_presentation_keeps_status_furniture() {
     let mut d = Surface::new(PS, PS).expect("surface");
     denied.render(&mut d, bounds, Scale::ONE, &theme, None);
     assert!(has_pixel(&d, premul(theme.palette().denied)));
-    assert_eq!(denied.on_pointer(&moved(20, 20), bounds), None);
-    assert_eq!(denied.on_pointer(&PRESS, bounds), None);
-    assert_eq!(denied.on_pointer(&RELEASE, bounds), None);
+    assert_eq!(denied.on_pointer(&moved(20, 20), bounds, &mut sink()), None);
+    assert_eq!(denied.on_pointer(&PRESS, bounds, &mut sink()), None);
+    assert_eq!(denied.on_pointer(&RELEASE, bounds, &mut sink()), None);
 }
 
 // --- TraySignal (spec §11.27) ------------------------------------------
@@ -818,10 +822,24 @@ fn tray_signal_expands_on_hover_and_focus() {
     let capsule = Rect::new(0, 0, SS, SS);
     let readout = Rect::new(0, iv(SS), 120, 60);
     // Hovering the capsule expands the readout.
-    let _ = sig.on_pointer(&moved(10, 10), capsule, readout, Scale::ONE, &theme);
+    let _ = sig.on_pointer(
+        &moved(10, 10),
+        capsule,
+        readout,
+        Scale::ONE,
+        &theme,
+        &mut sink(),
+    );
     assert!(sig.is_expanded());
     // Focus alone also expands.
-    let _ = sig.on_pointer(&moved(500, 500), capsule, readout, Scale::ONE, &theme);
+    let _ = sig.on_pointer(
+        &moved(500, 500),
+        capsule,
+        readout,
+        Scale::ONE,
+        &theme,
+        &mut sink(),
+    );
     assert!(!sig.is_expanded());
     sig.set_focused(true);
     assert!(sig.is_expanded());
@@ -855,15 +873,22 @@ fn tray_signal_readout_action_activates() {
     // Click the vertical centre of the readout's bottom action band.
     let by = SS + rh - m.control_inset - m.control_height / 2;
     assert_eq!(
-        sig.on_pointer(&moved(20, iv(by)), capsule, readout, Scale::ONE, &theme),
+        sig.on_pointer(
+            &moved(20, iv(by)),
+            capsule,
+            readout,
+            Scale::ONE,
+            &theme,
+            &mut sink()
+        ),
         None
     );
     assert_eq!(
-        sig.on_pointer(&PRESS, capsule, readout, Scale::ONE, &theme),
+        sig.on_pointer(&PRESS, capsule, readout, Scale::ONE, &theme, &mut sink()),
         None
     );
     assert_eq!(
-        sig.on_pointer(&RELEASE, capsule, readout, Scale::ONE, &theme),
+        sig.on_pointer(&RELEASE, capsule, readout, Scale::ONE, &theme, &mut sink()),
         Some(TraySignalAction::Activated)
     );
 }
@@ -889,8 +914,8 @@ fn hit_test_bookkeeping_is_invisible_to_a_taskbar_item() {
     // Two samples clear of the item, so only the recorded coordinate differs.
     let mut a = TaskbarItem::new("Editor", IconKind::Generic);
     let mut b = a.clone();
-    a.on_pointer(&moved(iv(TW) + 40, iv(TH) + 40), bounds);
-    b.on_pointer(&moved(iv(TW) + 90, iv(TH) + 12), bounds);
+    a.on_pointer(&moved(iv(TW) + 40, iv(TH) + 40), bounds, &mut sink());
+    b.on_pointer(&moved(iv(TW) + 90, iv(TH) + 12), bounds, &mut sink());
     assert_eq!(
         a, b,
         "a coordinate clear of the item is not a drawn property"
@@ -903,8 +928,8 @@ fn hit_test_bookkeeping_is_invisible_to_a_taskbar_item() {
 
     // One holds a real press latch, the other is merely *shown* pressed.
     let mut latched = TaskbarItem::new("Editor", IconKind::Generic);
-    latched.on_pointer(&moved(iv(TW) / 2, iv(TH) / 2), bounds);
-    latched.on_pointer(&PRESS, bounds);
+    latched.on_pointer(&moved(iv(TW) / 2, iv(TH) / 2), bounds, &mut sink());
+    latched.on_pointer(&PRESS, bounds, &mut sink());
     let mut shown = TaskbarItem::new("Editor", IconKind::Generic);
     let mut pressed = ControlState::idle();
     pressed.pointer = PointerState::Pressed;
@@ -916,7 +941,7 @@ fn hit_test_bookkeeping_is_invisible_to_a_taskbar_item() {
         "…and the two must therefore paint identically"
     );
     assert_eq!(
-        latched.on_pointer(&RELEASE, bounds),
+        latched.on_pointer(&RELEASE, bounds, &mut sink()),
         Some(TaskbarItemAction::Activated),
         "the latch still governs activation, it is only invisible"
     );
@@ -932,8 +957,22 @@ fn pointer_position_alone_never_changes_a_tray_signal_render() {
     // separate, still-compared property.
     let mut a = TraySignal::new(IconKind::Battery, "Battery").with_value("82%");
     let mut b = a.clone();
-    let _ = a.on_pointer(&moved(500, 500), capsule, readout, Scale::ONE, &theme);
-    let _ = b.on_pointer(&moved(640, 480), capsule, readout, Scale::ONE, &theme);
+    let _ = a.on_pointer(
+        &moved(500, 500),
+        capsule,
+        readout,
+        Scale::ONE,
+        &theme,
+        &mut sink(),
+    );
+    let _ = b.on_pointer(
+        &moved(640, 480),
+        capsule,
+        readout,
+        Scale::ONE,
+        &theme,
+        &mut sink(),
+    );
 
     assert_eq!(
         a, b,

@@ -93,8 +93,8 @@ mod program {
         SESSION_MAX_REQUEST, SESSION_VERDICT_LEN, SESSION_WAKE_LEN,
     };
     use tairix_abi::switchboard_ipc::{
-        command_endpoint_for, encode_publish_reply, CommandSection, SwitchboardCommand,
-        SEAT_REPORT_OWNERS_MAX, SWITCHBOARD_ENDPOINT, SWITCHBOARD_MAX_REQUEST,
+        command_endpoint_for, encode_publish_reply, CommandSection, FrameReport,
+        SwitchboardCommand, SEAT_REPORT_OWNERS_MAX, SWITCHBOARD_ENDPOINT, SWITCHBOARD_MAX_REQUEST,
         SWITCHBOARD_PUBLISH_REPLY_LEN,
     };
     use tairix_abi::window_ipc::{PointerAction, WindowEvent, WINDOW_ENDPOINT, WINDOW_MAX_REQUEST};
@@ -110,15 +110,16 @@ mod program {
         SeatPresentation, SessionAuthority, SwitchUser, NO_DEADLINE_NS,
     };
     use tairix_desktop_session::{
-        build_pin_views, deliver_pending_open, desktop_info, load_library, maybe_send_seat_report,
-        open_tray, parse, reap_launched, relay_power, resolve_window_identities,
-        serve_pinboard_apply, serve_switchboard_request, window_control_alternate_event,
-        window_control_event, Answer, ArtworkFileReader, ArtworkSandbox, CliError, Command,
-        ConcludedPick, ConfirmPrompt, Delivery, Desktop, DesktopAction, DesktopActivation,
-        DesktopOutcome, DesktopShell, DeviceInputSource, DragOrigin, HangTracker, HoldBack,
-        IconRasteriser, InputSource, KeyboardInputSource, LaunchTable, LockedDrain, OwnerWindow,
-        PickConclusion, PinBridge, PinService, PinboardMenu, PinboardMenuOutcome, PinboardStore,
-        PinboardStoreError, ResolvedPin, ScreenFade, ScreenLock, SeatEventReader, SeatInputChannel,
+        build_pin_views, deliver_pending_open, desktop_info, load_library, maybe_send_frame_report,
+        maybe_send_seat_report, open_tray, parse, reap_launched, relay_power,
+        resolve_window_identities, serve_pinboard_apply, serve_switchboard_request,
+        window_control_alternate_event, window_control_event, Answer, ArtworkFileReader,
+        ArtworkSandbox, CliError, Command, ConcludedPick, ConfirmPrompt, Delivery, Desktop,
+        DesktopAction, DesktopActivation, DesktopOutcome, DesktopShell, DeviceInputSource,
+        DragOrigin, FrameContent, HangTracker, HoldBack, IconRasteriser, InputSource,
+        KeyboardInputSource, LaunchTable, LockedDrain, OwnerWindow, PickConclusion, PinBridge,
+        PinService, PinboardMenu, PinboardMenuOutcome, PinboardStore, PinboardStoreError,
+        PresentedOwners, ResolvedPin, ScreenFade, ScreenLock, SeatEventReader, SeatInputChannel,
         SessionFileReader, SessionFileWriter, SessionPicker, SessionPins, SessionWindows,
         ShellWindowHost, SwitchboardMailbox, SwitchboardOutcome, SwitchboardServe, FILES_LABEL,
         FILES_RUN_PATH, SWITCHBOARD_LABEL, SWITCHBOARD_RUN_PATH, USAGE, WALLPAPER_LABEL,
@@ -894,6 +895,24 @@ mod program {
         launched.running_from(SWITCHBOARD_RUN_PATH)
     }
 
+    /// Classify the served presents drained since the last report decision:
+    /// Switchboard-only content is what must not re-excite a frame report.
+    fn frame_content(
+        windows: &mut SessionWindows,
+        server: &WindowServer<RtShmMapper>,
+        identity: &RtWindowIdentity,
+        switchboard_pid: Option<u64>,
+    ) -> FrameContent {
+        let mut owners = PresentedOwners::default();
+        for ipc in windows.take_presented() {
+            let pid = server
+                .owner_of(ipc)
+                .and_then(|client| identity.pid_of(client));
+            owners.note(pid, switchboard_pid);
+        }
+        owners.content()
+    }
+
     /// Name up to [`SEAT_REPORT_OWNERS_MAX`] of the currently-unresponsive
     /// window owners into `owners`, answering how many were named.
     ///
@@ -1567,6 +1586,9 @@ mod program {
         // rather than queued, so a user pressing repeatedly opens the
         // section they last asked for and no more.
         let mut pending_open: Option<CommandSection> = None;
+        // What the monitor's Resources page already shows about the last
+        // frame, so a frame whose cost is unchanged sends nothing.
+        let mut last_frame: Option<FrameReport> = None;
         // The trusted file picker (AW5/CU6): the one shared browser engine
         // over the session's own capability-checked listing call. Every
         // pick starts from a fresh listing under the session's authority;
@@ -1657,6 +1679,13 @@ mod program {
                 if let Err(code) = present(&mut shell, &mut compositor, &mut display, &mut fade) {
                     return code;
                 }
+                maybe_send_frame_report(
+                    &mut last_frame,
+                    &compositor,
+                    switchboard_pid,
+                    frame_content(&mut windows, &server, &identity, switchboard_pid),
+                    &mut RtSwitchboardMailbox,
+                );
                 tairix_rt::cachereport::publish_if_due();
                 continue;
             }
@@ -2131,11 +2160,17 @@ mod program {
                         }
                     }
                 }
+                // Every keystroke is applied in order, and the screen is
+                // settled once for the whole batch below: a held key
+                // repeating costs one taskbar present, active-frame sync and
+                // cursor refresh rather than one of each per repeat.
+                let mut typed = false;
                 while !stepped_aside {
                     match keyboard.poll_record() {
                         Ok(None) => break,
                         Ok(Some((event, record))) => {
-                            let outcome = shell.handle(event, &mut compositor, now_ns);
+                            let outcome = shell.apply(event, &mut compositor, now_ns);
+                            typed = true;
                             route_desktop(
                                 &outcome,
                                 &mut pinboard,
@@ -2196,6 +2231,9 @@ mod program {
                     // The screen belongs to somebody else now: nothing this
                     // wake read is applied any further, and nothing is drawn.
                     continue;
+                }
+                if typed {
+                    shell.settle(&mut compositor);
                 }
                 // A window restored from the taskbar (or otherwise shown
                 // again) whose content was released while it was hidden
@@ -2284,6 +2322,17 @@ mod program {
             if let Err(code) = present(&mut shell, &mut compositor, &mut display, &mut fade) {
                 return code;
             }
+            // What that frame cost, for the monitor's Resources page. After
+            // the present, so the counts describe pixels already on screen,
+            // and silent unless they moved — or unless the only content was
+            // the Switchboard painting the number itself.
+            maybe_send_frame_report(
+                &mut last_frame,
+                &compositor,
+                switchboard_pid,
+                frame_content(&mut windows, &server, &identity, switchboard_pid),
+                &mut RtSwitchboardMailbox,
+            );
             // The wake is fully handled and its frame is on screen: report
             // what the desktop's caches hold now, before parking again. A
             // change made this turn would otherwise wait for the next wake,
@@ -2505,6 +2554,10 @@ mod program {
         associations: &mut alloc::vec::Vec<AppAssociation>,
         now_ns: u64,
     ) -> Drained {
+        // The cursor the motion below moves is settled once for the whole
+        // batch, not per sample: only where the pointer ended up is on
+        // screen, so a sweep across the plate costs one refresh.
+        let mut moved = false;
         loop {
             match pointer.poll() {
                 Ok(None) => break,
@@ -2515,7 +2568,8 @@ mod program {
                     // no press ever reaches it, which is what keeps the
                     // windows beneath the plate untouched.
                     if matches!(event, tairix_wm::InputEvent::PointerMoved { .. }) {
-                        let _ = shell.handle(event, compositor, now_ns);
+                        let _ = shell.apply(event, compositor, now_ns);
+                        moved = true;
                     }
                     let acted = if let Some(bounds) =
                         shell.pinboard_menu_bounds(compositor, &pinboard.menu)
@@ -2546,6 +2600,9 @@ mod program {
                 }
                 Err(_) => return Drained::Faulted,
             }
+        }
+        if moved {
+            shell.settle(compositor);
         }
         loop {
             match keyboard.poll_record() {

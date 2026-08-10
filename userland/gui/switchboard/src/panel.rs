@@ -17,10 +17,12 @@
 use alloc::format;
 use alloc::string::String;
 
-use tairix_abi::switchboard_ipc::{CommandSection, SeatReport, SwitchboardRequest};
+use tairix_abi::switchboard_ipc::{CommandSection, FrameReport, SeatReport, SwitchboardRequest};
 use tairix_abi::{CapabilityQuery, Errno, Signal};
 
-use crate::model::{apply_action, map_section, signal_pid, Effect, GroupingEdit, PanelModel};
+use crate::model::{
+    apply_action, map_section, signal_pid, Effect, GroupingEdit, PanelModel, SessionReport,
+};
 use crate::service::{RenderInputs, ServiceHost};
 use crate::view::{Section, Switchboard, SwitchboardAction};
 
@@ -54,12 +56,12 @@ struct Presented {
     inputs: RenderInputs,
 }
 
-/// The overview panel: the live model, the window when one is open, and the
-/// session's latest unresponsive-owner report.
+/// The overview panel: the live model, the window when one is open, and
+/// what the session has last reported about itself.
 #[derive(Debug)]
 pub struct Panel {
     own_pid: u64,
-    seat_report: SeatReport,
+    session: SessionReport,
     model: PanelModel,
     view: Option<Switchboard>,
     presented: Option<Presented>,
@@ -72,7 +74,7 @@ impl Panel {
     pub fn new(own_pid: u64, model: PanelModel) -> Self {
         Self {
             own_pid,
-            seat_report: SeatReport::HEALTHY,
+            session: SessionReport::HEALTHY,
             model,
             view: None,
             presented: None,
@@ -98,11 +100,12 @@ impl Panel {
         self.view.as_ref().map(Switchboard::section)
     }
 
-    /// The session's latest unresponsive-owner report, which the caller
-    /// folds into the next model it builds.
+    /// What the session has last reported — its unresponsive owners and its
+    /// last frame's cost — which the caller folds into the next model it
+    /// builds.
     #[must_use]
-    pub const fn seat_report(&self) -> &SeatReport {
-        &self.seat_report
+    pub const fn session_report(&self) -> &SessionReport {
+        &self.session
     }
 
     /// The open composition, for the caller to route one input event into.
@@ -126,7 +129,14 @@ impl Panel {
     /// caller rebuilds the model from the sample already in hand rather than
     /// leaving the panel stale until the next cycle.
     pub fn set_seat_report(&mut self, report: SeatReport) {
-        self.seat_report = report;
+        self.session.seat = report;
+    }
+
+    /// Adopt what the session's last composited frame cost, on the same
+    /// terms as the seat report: the Resources page reads it, so the caller
+    /// rebuilds from the sample in hand.
+    pub fn set_frame_report(&mut self, report: FrameReport) {
+        self.session.frame = Some(report);
     }
 
     /// Show the panel on `section`: create the window if none is open, or

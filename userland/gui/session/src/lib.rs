@@ -243,9 +243,9 @@ pub use settings::{
 };
 pub use shell::{DesktopShell, InputSource, ShellOutcome};
 pub use switchboard::{
-    deliver_pending_open, maybe_send_seat_report, open_tray, relay_power,
-    serve_switchboard_request, OwnerWindow, SwitchboardMailbox, SwitchboardOutcome,
-    SwitchboardRefusal, SwitchboardServe,
+    deliver_pending_open, maybe_send_frame_report, maybe_send_seat_report, open_tray, relay_power,
+    serve_switchboard_request, FrameContent, OwnerWindow, PresentedOwners, SwitchboardMailbox,
+    SwitchboardOutcome, SwitchboardRefusal, SwitchboardServe,
 };
 pub use switchuser::{
     ResumeFailure, SeatPresentation, SessionAuthority, SwitchRefusal, SwitchUser, WakeRefusal,

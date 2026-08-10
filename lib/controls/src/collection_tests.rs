@@ -34,6 +34,7 @@ use crate::collection::{
     Card, CardAction, CellAlign, HeaderAction, HeaderColumn, IconTile, ListRow, Panel, PanelAction,
     PanelEdge, RowAction, SortOrder, TableCell, TableHeader, TableRow,
 };
+use crate::damage::sink;
 use crate::state::{
     ActivityState, AuthorityState, ControlRole, ControlState, FocusState, PointerState,
     PressureKind, PressureState, ProgressValue, RecoveryState, SelectionState,
@@ -210,9 +211,18 @@ fn list_row_denied_shows_lock_bead_and_never_activates() {
     let surface = row_surface(&row, &theme, Scale::ONE);
     assert!(has_pixel(&surface, premul(theme.palette().denied)));
     // A denied row is not actionable (fail closed).
-    assert_eq!(row.on_pointer(&moved(20, 14), Rect::new(0, 0, W, H)), None);
-    assert_eq!(row.on_pointer(&PRESS, Rect::new(0, 0, W, H)), None);
-    assert_eq!(row.on_pointer(&RELEASE, Rect::new(0, 0, W, H)), None);
+    assert_eq!(
+        row.on_pointer(&moved(20, 14), Rect::new(0, 0, W, H), &mut sink()),
+        None
+    );
+    assert_eq!(
+        row.on_pointer(&PRESS, Rect::new(0, 0, W, H), &mut sink()),
+        None
+    );
+    assert_eq!(
+        row.on_pointer(&RELEASE, Rect::new(0, 0, W, H), &mut sink()),
+        None
+    );
 }
 
 #[test]
@@ -245,9 +255,12 @@ fn list_row_focus_draws_ring() {
 fn list_row_pointer_click_activates() {
     let mut row = ListRow::new("Click");
     let bounds = Rect::new(0, 0, W, H);
-    assert_eq!(row.on_pointer(&moved(20, 14), bounds), None);
-    assert_eq!(row.on_pointer(&PRESS, bounds), None);
-    assert_eq!(row.on_pointer(&RELEASE, bounds), Some(RowAction::Activated));
+    assert_eq!(row.on_pointer(&moved(20, 14), bounds, &mut sink()), None);
+    assert_eq!(row.on_pointer(&PRESS, bounds, &mut sink()), None);
+    assert_eq!(
+        row.on_pointer(&RELEASE, bounds, &mut sink()),
+        Some(RowAction::Activated)
+    );
 }
 
 #[test]
@@ -874,9 +887,12 @@ fn table_row_selection_and_activation() {
         premul(theme.palette().accent)
     ));
     let bounds = Rect::new(0, 0, W, H);
-    assert_eq!(row.on_pointer(&moved(40, 14), bounds), None);
-    assert_eq!(row.on_pointer(&PRESS, bounds), None);
-    assert_eq!(row.on_pointer(&RELEASE, bounds), Some(RowAction::Activated));
+    assert_eq!(row.on_pointer(&moved(40, 14), bounds, &mut sink()), None);
+    assert_eq!(row.on_pointer(&PRESS, bounds, &mut sink()), None);
+    assert_eq!(
+        row.on_pointer(&RELEASE, bounds, &mut sink()),
+        Some(RowAction::Activated)
+    );
 }
 
 // --- TableHeader (spec §11.14) -----------------------------------------
@@ -2567,12 +2583,15 @@ fn card_footer_action_activates_by_pointer() {
     let bounds = Rect::new(0, 0, CW, CH);
     // The single footer button spans the bottom content row; click within it.
     assert_eq!(
-        card.on_pointer(&moved(100, 110), bounds, Scale::ONE, &theme),
+        card.on_pointer(&moved(100, 110), bounds, Scale::ONE, &theme, &mut sink()),
         None
     );
-    assert_eq!(card.on_pointer(&PRESS, bounds, Scale::ONE, &theme), None);
     assert_eq!(
-        card.on_pointer(&RELEASE, bounds, Scale::ONE, &theme),
+        card.on_pointer(&PRESS, bounds, Scale::ONE, &theme, &mut sink()),
+        None
+    );
+    assert_eq!(
+        card.on_pointer(&RELEASE, bounds, Scale::ONE, &theme, &mut sink()),
         Some(CardAction::FooterActivated { index: 0 })
     );
     // The footer buttons keep their own state.
@@ -2616,12 +2635,21 @@ fn card_body_press_reports_pressed() {
     let theme = Theme::dark();
     let (mut card, bounds, body) = card_with_footer(&theme);
     assert_eq!(
-        card.on_pointer(&moved(body.x, body.y), bounds, Scale::ONE, &theme),
+        card.on_pointer(
+            &moved(body.x, body.y),
+            bounds,
+            Scale::ONE,
+            &theme,
+            &mut sink()
+        ),
         None
     );
-    assert_eq!(card.on_pointer(&PRESS, bounds, Scale::ONE, &theme), None);
     assert_eq!(
-        card.on_pointer(&RELEASE, bounds, Scale::ONE, &theme),
+        card.on_pointer(&PRESS, bounds, Scale::ONE, &theme, &mut sink()),
+        None
+    );
+    assert_eq!(
+        card.on_pointer(&RELEASE, bounds, Scale::ONE, &theme, &mut sink()),
         Some(CardAction::Pressed)
     );
 }
@@ -2630,20 +2658,42 @@ fn card_body_press_reports_pressed() {
 fn card_body_press_released_outside_reports_nothing() {
     let theme = Theme::dark();
     let (mut card, bounds, body) = card_with_footer(&theme);
-    let _ = card.on_pointer(&moved(body.x, body.y), bounds, Scale::ONE, &theme);
-    assert_eq!(card.on_pointer(&PRESS, bounds, Scale::ONE, &theme), None);
+    let _ = card.on_pointer(
+        &moved(body.x, body.y),
+        bounds,
+        Scale::ONE,
+        &theme,
+        &mut sink(),
+    );
+    assert_eq!(
+        card.on_pointer(&PRESS, bounds, Scale::ONE, &theme, &mut sink()),
+        None
+    );
     // Leaving the card before releasing cancels the press.
     let _ = card.on_pointer(
         &moved(to_i32(CW) + 20, to_i32(CH) + 20),
         bounds,
         Scale::ONE,
         &theme,
+        &mut sink(),
     );
-    assert_eq!(card.on_pointer(&RELEASE, bounds, Scale::ONE, &theme), None);
+    assert_eq!(
+        card.on_pointer(&RELEASE, bounds, Scale::ONE, &theme, &mut sink()),
+        None
+    );
     // The cancelled latch leaves nothing behind: returning and releasing
     // again without a fresh press reports nothing either.
-    let _ = card.on_pointer(&moved(body.x, body.y), bounds, Scale::ONE, &theme);
-    assert_eq!(card.on_pointer(&RELEASE, bounds, Scale::ONE, &theme), None);
+    let _ = card.on_pointer(
+        &moved(body.x, body.y),
+        bounds,
+        Scale::ONE,
+        &theme,
+        &mut sink(),
+    );
+    assert_eq!(
+        card.on_pointer(&RELEASE, bounds, Scale::ONE, &theme, &mut sink()),
+        None
+    );
 }
 
 #[test]
@@ -2656,16 +2706,34 @@ fn card_footer_click_reports_footer_and_never_pressed() {
         rect.origin.x + to_i32(rect.width / 2),
         rect.origin.y + to_i32(rect.height / 2),
     );
-    let _ = card.on_pointer(&moved(on_button.x, on_button.y), bounds, Scale::ONE, &theme);
-    assert_eq!(card.on_pointer(&PRESS, bounds, Scale::ONE, &theme), None);
+    let _ = card.on_pointer(
+        &moved(on_button.x, on_button.y),
+        bounds,
+        Scale::ONE,
+        &theme,
+        &mut sink(),
+    );
     assert_eq!(
-        card.on_pointer(&RELEASE, bounds, Scale::ONE, &theme),
+        card.on_pointer(&PRESS, bounds, Scale::ONE, &theme, &mut sink()),
+        None
+    );
+    assert_eq!(
+        card.on_pointer(&RELEASE, bounds, Scale::ONE, &theme, &mut sink()),
         Some(CardAction::FooterActivated { index: 0 })
     );
     // The footer press never armed the body latch, so moving onto the body
     // and releasing cannot yield a stale press.
-    let _ = card.on_pointer(&moved(body.x, body.y), bounds, Scale::ONE, &theme);
-    assert_eq!(card.on_pointer(&RELEASE, bounds, Scale::ONE, &theme), None);
+    let _ = card.on_pointer(
+        &moved(body.x, body.y),
+        bounds,
+        Scale::ONE,
+        &theme,
+        &mut sink(),
+    );
+    assert_eq!(
+        card.on_pointer(&RELEASE, bounds, Scale::ONE, &theme, &mut sink()),
+        None
+    );
 }
 
 #[test]
@@ -2677,9 +2745,21 @@ fn card_disabled_or_denied_body_press_reports_nothing() {
     ] {
         let (card, bounds, body) = card_with_footer(&theme);
         let mut card = card.with_state(state);
-        let _ = card.on_pointer(&moved(body.x, body.y), bounds, Scale::ONE, &theme);
-        assert_eq!(card.on_pointer(&PRESS, bounds, Scale::ONE, &theme), None);
-        assert_eq!(card.on_pointer(&RELEASE, bounds, Scale::ONE, &theme), None);
+        let _ = card.on_pointer(
+            &moved(body.x, body.y),
+            bounds,
+            Scale::ONE,
+            &theme,
+            &mut sink(),
+        );
+        assert_eq!(
+            card.on_pointer(&PRESS, bounds, Scale::ONE, &theme, &mut sink()),
+            None
+        );
+        assert_eq!(
+            card.on_pointer(&RELEASE, bounds, Scale::ONE, &theme, &mut sink()),
+            None
+        );
     }
 }
 
@@ -2689,14 +2769,23 @@ fn card_press_leaves_the_card_equal_and_pixel_identical() {
     let (mut card, bounds, body) = card_with_footer(&theme);
     let resting = card.clone();
     let before = card_surface(&card, &theme);
-    let _ = card.on_pointer(&moved(body.x, body.y), bounds, Scale::ONE, &theme);
-    assert_eq!(card.on_pointer(&PRESS, bounds, Scale::ONE, &theme), None);
+    let _ = card.on_pointer(
+        &moved(body.x, body.y),
+        bounds,
+        Scale::ONE,
+        &theme,
+        &mut sink(),
+    );
+    assert_eq!(
+        card.on_pointer(&PRESS, bounds, Scale::ONE, &theme, &mut sink()),
+        None
+    );
     // Mid-press: the body latch and pointer are hit-test state, so the card
     // still compares equal and still draws the same pixels.
     assert_eq!(card, resting);
     assert_eq!(card_surface(&card, &theme).pixels(), before.pixels());
     assert_eq!(
-        card.on_pointer(&RELEASE, bounds, Scale::ONE, &theme),
+        card.on_pointer(&RELEASE, bounds, Scale::ONE, &theme, &mut sink()),
         Some(CardAction::Pressed)
     );
     assert_eq!(card, resting);
@@ -2791,12 +2880,15 @@ fn panel_header_action_activates() {
     let cx = rect.left() + i32::try_from(rect.width).unwrap() / 2;
     let cy = rect.top() + i32::try_from(rect.height).unwrap() / 2;
     assert_eq!(
-        panel.on_pointer(&moved(cx, cy), bounds, Scale::ONE, &theme),
+        panel.on_pointer(&moved(cx, cy), bounds, Scale::ONE, &theme, &mut sink()),
         None
     );
-    assert_eq!(panel.on_pointer(&PRESS, bounds, Scale::ONE, &theme), None);
     assert_eq!(
-        panel.on_pointer(&RELEASE, bounds, Scale::ONE, &theme),
+        panel.on_pointer(&PRESS, bounds, Scale::ONE, &theme, &mut sink()),
+        None
+    );
+    assert_eq!(
+        panel.on_pointer(&RELEASE, bounds, Scale::ONE, &theme, &mut sink()),
         Some(PanelAction::HeaderActivated { index: 0 })
     );
 }
@@ -2847,8 +2939,8 @@ fn hit_test_bookkeeping_is_invisible_to_a_list_row() {
     let theme = Theme::dark();
     let mut a = ListRow::new("Documents");
     let mut b = a.clone();
-    a.on_pointer(&moved(OFF_A.0, OFF_A.1), Rect::new(0, 0, W, H));
-    b.on_pointer(&moved(OFF_B.0, OFF_B.1), Rect::new(0, 0, W, H));
+    a.on_pointer(&moved(OFF_A.0, OFF_A.1), Rect::new(0, 0, W, H), &mut sink());
+    b.on_pointer(&moved(OFF_B.0, OFF_B.1), Rect::new(0, 0, W, H), &mut sink());
     assert_eq!(
         a, b,
         "a coordinate clear of the row is not a drawn property"
@@ -2860,8 +2952,8 @@ fn hit_test_bookkeeping_is_invisible_to_a_list_row() {
     );
 
     let mut latched = ListRow::new("Documents");
-    latched.on_pointer(&moved(20, 14), Rect::new(0, 0, W, H));
-    latched.on_pointer(&PRESS, Rect::new(0, 0, W, H));
+    latched.on_pointer(&moved(20, 14), Rect::new(0, 0, W, H), &mut sink());
+    latched.on_pointer(&PRESS, Rect::new(0, 0, W, H), &mut sink());
     let mut shown = ListRow::new("Documents");
     shown.set_state(shown_pressed());
     assert_eq!(latched, shown, "the press latch is not a drawn property");
@@ -2879,8 +2971,8 @@ fn hit_test_bookkeeping_is_invisible_to_a_table_row() {
 
     let mut a = TableRow::new(cells());
     let mut b = a.clone();
-    a.on_pointer(&moved(OFF_A.0, OFF_A.1), Rect::new(0, 0, W, H));
-    b.on_pointer(&moved(OFF_B.0, OFF_B.1), Rect::new(0, 0, W, H));
+    a.on_pointer(&moved(OFF_A.0, OFF_A.1), Rect::new(0, 0, W, H), &mut sink());
+    b.on_pointer(&moved(OFF_B.0, OFF_B.1), Rect::new(0, 0, W, H), &mut sink());
     assert_eq!(
         a, b,
         "a coordinate clear of the row is not a drawn property"
@@ -2892,8 +2984,8 @@ fn hit_test_bookkeeping_is_invisible_to_a_table_row() {
     );
 
     let mut latched = TableRow::new(cells());
-    latched.on_pointer(&moved(20, 14), Rect::new(0, 0, W, H));
-    latched.on_pointer(&PRESS, Rect::new(0, 0, W, H));
+    latched.on_pointer(&moved(20, 14), Rect::new(0, 0, W, H), &mut sink());
+    latched.on_pointer(&PRESS, Rect::new(0, 0, W, H), &mut sink());
     let mut shown = TableRow::new(cells());
     shown.set_state(shown_pressed());
     assert_eq!(latched, shown, "the press latch is not a drawn property");

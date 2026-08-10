@@ -553,7 +553,8 @@ attempt and answers whether the instance took it, and a refusal is reported
 on `stderr` with the kernel's own reason: `WouldBlock` is back-pressure
 from a mailbox the monitor has not drained, while `NotFound` is an instance
 that has exited or has not bound its mailbox yet, and the two must not be
-confused for one another. Two commands travel it:
+confused for one another. Three commands travel it, beside the `Power` relay
+above:
 
 - **`OpenPanel { section }`** — the capsule gesture. The bar decides the
   section (a quick press its running-task list, a press held past the bar's
@@ -585,6 +586,15 @@ confused for one another. Two commands travel it:
   name: the id list is bounded by `SEAT_REPORT_OWNERS_MAX`, so the monitor
   sees an honest count alongside the ids it can act on rather than a
   silently truncated one.
+- **`FrameReport { report }`** — what the last composited frame cost, read
+  straight from the compositor's own per-frame counters
+  (`Compositor::frame_stats`). The session is the only party that can count
+  it: the monitor samples the kernel, which knows nothing about pixels. It is
+  sent on the same discipline as the report above — only with a live consumer
+  and only when the counts changed — and a refused report is simply dropped
+  rather than owed, because the next frame carries a fresher one. Nothing
+  about it blocks or retries on a frame path. See [the Desktop
+  block](./switchboard.md#the-desktop-block).
 
 ## The app-ward hold-back
 
@@ -928,31 +938,39 @@ action, and bring the on-screen bar back in step. `DesktopShell` runs exactly
 that loop over an injected `InputSource` seam (a real pointer/keyboard channel
 on a running system, an in-memory queue in tests, `AGENTS.md` §7):
 
-- `pump(source, &mut Compositor, now_ns)` drains every pending event, routing
-  each through `handle(event, &mut Compositor, now_ns)` and returning a
-  `ShellOutcome` per event. To avoid flooding an app with a dense gesture, an
-  adjacent run of one gesture over one window is folded in the returned list:
-  pointer motions collapse to the latest position, and wheel ticks in one
-  direction sum into a single delta (a reversal ends the run, because a tick
-  that clamps at a range end is not recovered by the tick back). Every sample
-  still drives the window manager's own hover and drag state, so the folding
-  is safe. Outcomes are `Ignored`, a `WindowManager` action the embedder
-  may observe, or a `Taskbar` response. One drain is one instant: the
-  embedder reads the monotonic clock once when the source wakes it and every
-  event of that batch resolves its tap-versus-hold gesture against the same
-  `now_ns`;
+- `pump(source, &mut Compositor, now_ns)` drains every pending event, applying
+  each in order and returning a `ShellOutcome` per event. To avoid flooding an
+  app with a dense gesture, an adjacent run of one gesture over one window is
+  folded in the returned list: pointer motions collapse to the latest
+  position, and wheel ticks in one direction sum into a single delta (a
+  reversal ends the run, because a tick that clamps at a range end is not
+  recovered by the tick back). Every sample still drives the window manager's
+  own hover and drag state, so the folding is safe. Outcomes are `Ignored`, a
+  `WindowManager` action the embedder may observe, or a `Taskbar` response.
+  One drain is one instant: the embedder reads the monotonic clock once when
+  the source wakes it and every event of that batch resolves its
+  tap-versus-hold gesture against the same `now_ns`;
 - a taskbar response is applied where the shell's own state suffices (a task
   activate/minimise outcome drives the compositor) and the bar is
-  re-presented — **exactly once per event, at one site**, straight from the
-  taskbar's drained per-surface repaint latch. Every model change that
-  alters what a surface draws latches that surface, so an opened/closed
-  popup, a fold, or a changed task highlight reaches the screen without
-  double-painting, while a motion that crosses no control — over the
-  desktop, over a window, or over dead space on the bar — repaints nothing
-  at all;
+  re-presented straight from the taskbar's drained per-surface repaint latch.
+  Every model change that alters what a surface draws latches that surface, so
+  an opened/closed popup, a fold, or a changed task highlight reaches the
+  screen without double-painting, while a motion that crosses no control —
+  over the desktop, over a window, or over dead space on the bar — repaints
+  nothing at all;
+- the frame is settled **once per drained batch, at one site**: one taskbar
+  present, one active-frame sync, one cursor refresh, whether the batch held
+  one event or sixteen. All three read *current* state rather than the event
+  that changed it — the present repaints the union of the surfaces the batch
+  latched, the sync compares the current focus against the shown active
+  frame, and the cursor follows the pointer's latest position — so settling
+  once leaves the desktop N settles would have left, and drops work nothing
+  could observe, because the embedder publishes one frame per drain. A drain
+  that found no event settles nothing, so an idle wake is free. `handle` is
+  the single-event form of the same thing: apply, then settle;
 - a faulting `InputSource` ends the `pump` with its `Errno`; the events drained
-  before the fault stay applied and the embedder replaces or re-polls the
-  source (`AGENTS.md` §2.9 / §19.5).
+  before the fault stay applied and are settled, so the screen never shows a
+  state the model has left, and the embedder replaces or re-polls the source.
 
 The shell holds no framebuffer and grants itself no authority: the `Compositor`
 is the embedder's and is passed in on each call. A loaded notification-icon set

@@ -13,6 +13,7 @@ use tairix_raster::{Color, Pixel, Surface};
 use tairix_theme::{Rgba, Theme};
 
 use crate::button::{ButtonContent, IconButton, SplitButton};
+use crate::damage::sink;
 use crate::state::ControlRole;
 use crate::toolbar::{ToolActivation, Toolbar, ToolbarAction};
 use tairix_icon::IconKind;
@@ -52,6 +53,11 @@ fn render(toolbar: &Toolbar, theme: &Theme) -> Surface {
     let mut surface = Surface::new(W, H).expect("surface");
     toolbar.render(&mut surface, Rect::new(0, 0, W, H), Scale::ONE, theme);
     surface
+}
+
+/// The strip a keyboard test's focus report covers.
+fn bar() -> Rect {
+    Rect::new(0, 0, W, H)
 }
 
 fn moved(x: i32, y: i32) -> InputEvent {
@@ -180,10 +186,10 @@ fn clicking_an_icon_tool_activates_its_primary() {
     let bounds = Rect::new(0, 0, W, H);
     let theme = Theme::dark();
     let x = icon_centre_x(0);
-    toolbar.on_pointer(&moved(x, 14), bounds, Scale::ONE, &theme);
-    toolbar.on_pointer(&PRESS, bounds, Scale::ONE, &theme);
+    toolbar.on_pointer(&moved(x, 14), bounds, Scale::ONE, &theme, &mut sink());
+    toolbar.on_pointer(&PRESS, bounds, Scale::ONE, &theme, &mut sink());
     assert_eq!(
-        toolbar.on_pointer(&RELEASE, bounds, Scale::ONE, &theme),
+        toolbar.on_pointer(&RELEASE, bounds, Scale::ONE, &theme, &mut sink()),
         Some(ToolbarAction {
             index: 0,
             part: ToolActivation::Primary
@@ -199,10 +205,16 @@ fn clicking_a_split_tool_disclosure_reports_disclosure() {
     let theme = Theme::dark();
     // The split tool spans [GAP, GAP + 2*CH); its disclosure is the right half.
     let disclosure_x = xi(GAP + CH + CH / 2);
-    toolbar.on_pointer(&moved(disclosure_x, 14), bounds, Scale::ONE, &theme);
-    toolbar.on_pointer(&PRESS, bounds, Scale::ONE, &theme);
+    toolbar.on_pointer(
+        &moved(disclosure_x, 14),
+        bounds,
+        Scale::ONE,
+        &theme,
+        &mut sink(),
+    );
+    toolbar.on_pointer(&PRESS, bounds, Scale::ONE, &theme, &mut sink());
     assert_eq!(
-        toolbar.on_pointer(&RELEASE, bounds, Scale::ONE, &theme),
+        toolbar.on_pointer(&RELEASE, bounds, Scale::ONE, &theme, &mut sink()),
         Some(ToolbarAction {
             index: 0,
             part: ToolActivation::Disclosure
@@ -215,12 +227,12 @@ fn clicking_a_split_tool_disclosure_reports_disclosure() {
 #[test]
 fn right_moves_focus_and_enter_activates_the_focused_tool() {
     let mut toolbar = grouped_toolbar();
-    toolbar.on_key(Key::Named(NamedKey::Right));
+    toolbar.on_key(Key::Named(NamedKey::Right), bar(), &mut sink());
     assert_eq!(toolbar.focused(), Some(0));
-    toolbar.on_key(Key::Named(NamedKey::Right));
+    toolbar.on_key(Key::Named(NamedKey::Right), bar(), &mut sink());
     assert_eq!(toolbar.focused(), Some(1));
     assert_eq!(
-        toolbar.on_key(Key::Named(NamedKey::Enter)),
+        toolbar.on_key(Key::Named(NamedKey::Enter), bar(), &mut sink()),
         Some(ToolbarAction {
             index: 1,
             part: ToolActivation::Primary
@@ -231,11 +243,11 @@ fn right_moves_focus_and_enter_activates_the_focused_tool() {
 #[test]
 fn left_wraps_and_home_end_jump() {
     let mut toolbar = grouped_toolbar();
-    toolbar.on_key(Key::Named(NamedKey::Left));
+    toolbar.on_key(Key::Named(NamedKey::Left), bar(), &mut sink());
     assert_eq!(toolbar.focused(), Some(2));
-    toolbar.on_key(Key::Named(NamedKey::Home));
+    toolbar.on_key(Key::Named(NamedKey::Home), bar(), &mut sink());
     assert_eq!(toolbar.focused(), Some(0));
-    toolbar.on_key(Key::Named(NamedKey::End));
+    toolbar.on_key(Key::Named(NamedKey::End), bar(), &mut sink());
     assert_eq!(toolbar.focused(), Some(2));
 }
 
@@ -263,7 +275,10 @@ fn renders_at_a_larger_scale_without_panicking() {
 fn empty_toolbar_reports_no_tools() {
     let mut toolbar = Toolbar::new();
     assert!(toolbar.is_empty());
-    assert_eq!(toolbar.on_key(Key::Named(NamedKey::Enter)), None);
+    assert_eq!(
+        toolbar.on_key(Key::Named(NamedKey::Enter), bar(), &mut sink()),
+        None
+    );
 }
 
 // --- Render-equivalence equality (the host's repaint gate) ----------------
@@ -278,8 +293,20 @@ fn pointer_position_alone_never_changes_a_toolbar_render() {
     let mut b = a.clone();
     let x = i32::try_from(W).expect("width");
     let y = i32::try_from(H).expect("height");
-    a.on_pointer(&moved(x + 40, y + 40), bounds, Scale::ONE, &theme);
-    b.on_pointer(&moved(x + 90, y + 12), bounds, Scale::ONE, &theme);
+    a.on_pointer(
+        &moved(x + 40, y + 40),
+        bounds,
+        Scale::ONE,
+        &theme,
+        &mut sink(),
+    );
+    b.on_pointer(
+        &moved(x + 90, y + 12),
+        bounds,
+        Scale::ONE,
+        &theme,
+        &mut sink(),
+    );
 
     assert_eq!(
         a, b,
@@ -324,8 +351,8 @@ fn routing_leaves_the_same_state_as_fanning_to_every_tool() {
     let mut hovered_at_some_point = false;
 
     for event in script() {
-        let a = routed.on_pointer(&event, bounds, Scale::ONE, &theme);
-        let b = fanned.fan_pointer(&event, bounds, Scale::ONE, &theme);
+        let a = routed.on_pointer(&event, bounds, Scale::ONE, &theme, &mut sink());
+        let b = fanned.fan_pointer(&event, bounds, Scale::ONE, &theme, &mut sink());
         assert_eq!(a, b, "activation differs after {event:?}");
         assert_eq!(routed, fanned, "state differs after {event:?}");
         hovered_at_some_point |= routed != resting;
@@ -345,7 +372,7 @@ fn a_press_dragged_off_its_tool_cancels() {
     let bounds = Rect::new(0, 0, W, H);
     let mut toolbar = grouped_toolbar();
     let feed = |toolbar: &mut Toolbar, event: InputEvent| {
-        toolbar.on_pointer(&event, bounds, Scale::ONE, &theme)
+        toolbar.on_pointer(&event, bounds, Scale::ONE, &theme, &mut sink())
     };
 
     feed(&mut toolbar, moved(icon_centre_x(0), xi(H / 2)));
@@ -359,6 +386,7 @@ fn a_press_dragged_off_its_tool_cancels() {
         bounds,
         Scale::ONE,
         &theme,
+        &mut sink(),
     );
     assert_eq!(toolbar, rested, "the cancelled press must leave no mark");
 }

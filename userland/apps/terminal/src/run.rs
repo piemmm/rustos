@@ -57,6 +57,7 @@ mod program {
     use tairix_abi::{
         Errno, Origin, ProcId, WaitSetOp, WaitSourceKind, WaitStatus, ORIGIN_WIRE_LEN,
     };
+    use tairix_controls::damage;
     use tairix_font::BitmapFont;
     use tairix_geometry::{Point, Rect, Scale};
     use tairix_input::InputEvent;
@@ -1357,8 +1358,9 @@ mod program {
                 }
             }
             Content::Sheet(sheet) => {
+                let mut damage = damage::sink();
                 for event in pointer_input_events(action, at) {
-                    match sheet.on_pointer(&event, viewport, scale, theme) {
+                    match sheet.on_pointer(&event, viewport, scale, theme, &mut damage) {
                         SheetOutcome::Ignored => {}
                         SheetOutcome::Changed => routing = OverlayRouting::Redraw,
                         SheetOutcome::Edited => {

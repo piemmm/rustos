@@ -156,6 +156,27 @@ pub struct DesktopShell {
     /// The compositor window the pinboard's open context menu is shown in, if
     /// one is placed.
     pinboard_window: Option<WindowId>,
+    /// The per-frame shell work counted so far, so a test can prove a
+    /// drained batch settles once rather than once per sample. Test-only:
+    /// the product carries no counter.
+    #[cfg(test)]
+    settled: SettleWork,
+}
+
+/// How many times the shell has run each piece of its per-frame work.
+///
+/// A drained batch of pointer samples must cost one taskbar present, one
+/// active-frame sync, and one cursor refresh however many samples it held,
+/// and "how much work" is the only load-independent way to assert that.
+#[cfg(test)]
+#[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
+pub(crate) struct SettleWork {
+    /// Calls into [`DesktopShell::present`].
+    pub(crate) presents: u32,
+    /// Calls into `DesktopShell::sync_active_frame`.
+    pub(crate) active_frame_syncs: u32,
+    /// Calls into [`DesktopShell::refresh_cursor`].
+    pub(crate) cursor_refreshes: u32,
 }
 
 impl core::fmt::Debug for DesktopShell {
@@ -263,7 +284,16 @@ impl DesktopShell {
             active_frame: None,
             wallpaper: None,
             pinboard_window: None,
+            #[cfg(test)]
+            settled: SettleWork::default(),
         }
+    }
+
+    /// The per-frame shell work run so far, which a test diffs across a
+    /// drain to count what one batch cost.
+    #[cfg(test)]
+    pub(crate) const fn settle_work(&self) -> SettleWork {
+        self.settled
     }
 
     /// Install the seams the desktop's shipped and bundle-supplied icon
@@ -381,14 +411,19 @@ impl DesktopShell {
     /// pointer, the move cursor during an interactive grab), re-rasterising at
     /// the output density only when the chosen shape, the active cursor set,
     /// or the [`scale`](Compositor::scale) actually changed, and repositions
-    /// the overlay so its hotspot tracks the pointer. It is called for you as
-    /// each input event is [`handle`](Self::handle)d and on a runtime
+    /// the overlay so its hotspot tracks the pointer. It is called for you
+    /// once per settled frame ([`handle`](Self::handle) / [`pump`](Self::pump))
+    /// and on a runtime
     /// [`set_scale`](Self::set_scale); the embedder calls it once after the
     /// first [`present`](Self::present) to show the pointer at start-up.
     ///
     /// Fails closed: if the chosen shape cannot be rasterised the current
     /// cursor is left untouched rather than blanking the pointer.
     pub fn refresh_cursor(&mut self, compositor: &mut Compositor) {
+        #[cfg(test)]
+        {
+            self.settled.cursor_refreshes += 1;
+        }
         self.cursor.refresh(self.router.wm(), compositor);
         compositor.move_cursor(self.router.pointer());
     }
@@ -551,6 +586,10 @@ impl DesktopShell {
     /// ([`set_active_frame`](Compositor::set_active_frame) returns `false`), so
     /// it costs nothing when no decorated window is involved.
     fn sync_active_frame(&mut self, compositor: &mut Compositor) {
+        #[cfg(test)]
+        {
+            self.settled.active_frame_syncs += 1;
+        }
         let focus = self.router.focused();
         if self.active_frame == focus {
             return;
@@ -711,6 +750,10 @@ impl DesktopShell {
     /// Fails closed: a render whose surface cannot be
     /// allocated leaves the existing on-screen window untouched.
     pub fn present(&mut self, compositor: &mut Compositor) {
+        #[cfg(test)]
+        {
+            self.settled.presents += 1;
+        }
         // An open popup's shown rows get their applications' own icons
         // resolved before the paint, so a row that has just scrolled into
         // view is drawn with its icon in the same frame.
@@ -1060,79 +1103,108 @@ impl DesktopShell {
     /// taskbar gesture against the monotonic `now_ns`, and return what it
     /// did.
     ///
-    /// The event is fanned to the window manager or taskbar by the
-    /// [`SessionInputRouter`]'s policy; a taskbar action is applied where the
-    /// shell's own state suffices (the task activate/minimise outcome drives
-    /// the compositor) and the bar is re-presented so the screen reflects
-    /// the change (an opened/closed popup, a changed task highlight, a
-    /// hover). A window-manager action re-presents only when it moved focus
-    /// (a press), keeping the highlight in step; motion and drags change no
-    /// highlight and stay cheap. Pixel-only taskbar changes (hover, popup
-    /// scroll or edit) latch the taskbar's repaint flag, drained here so
-    /// exactly one present follows each visual change.
-    ///
-    /// Whatever the event did, the pointer cursor is then brought up to date
-    /// ([`refresh_cursor`](Self::refresh_cursor)): its hotspot follows pointer
-    /// motion and its shape follows what is under it (or the move cursor
-    /// during a drag), so the desktop always shows a live pointer.
+    /// The event is applied and the frame it changed is then settled — one
+    /// taskbar present, one active-frame sync, one cursor refresh. This is the
+    /// single-event entry point; a whole batch of queued events goes through
+    /// [`pump`](Self::pump), which applies each and settles the batch once, or
+    /// through [`apply`](Self::apply) plus one [`settle`](Self::settle) where
+    /// the embedder drains a channel itself.
     pub fn handle(
         &mut self,
         event: InputEvent,
         compositor: &mut Compositor,
         now_ns: u64,
     ) -> ShellOutcome {
-        let outcome =
-            match self
-                .router
-                .handle(event, compositor, self.session.taskbar_mut(), now_ns)
-            {
-                SessionInputResponse::Ignored => ShellOutcome::Ignored,
-                SessionInputResponse::WindowManager(response) => {
-                    self.mirror_focus(&response, compositor);
-                    ShellOutcome::WindowManager(response)
-                }
-                SessionInputResponse::Taskbar(response) => {
-                    match response {
-                        TaskbarResponse::TaskActivated { id, outcome } => {
-                            self.tasks
-                                .activate(compositor, &mut self.router, id, outcome);
-                        }
-                        // A user dismiss clears the notification from the model
-                        // the session owns; the repaint latch it sets drives the
-                        // one present below, closing the popover when the last one
-                        // goes.
-                        TaskbarResponse::DismissNotification { producer, key } => {
-                            self.session.taskbar_mut().clear_notification(producer, key);
-                        }
-                        _ => {}
+        let outcome = self.apply(event, compositor, now_ns);
+        self.settle(compositor);
+        outcome
+    }
+
+    /// Apply one input `event` to the desktop's state, without presenting.
+    ///
+    /// The event is fanned to the window manager or taskbar by the
+    /// [`SessionInputRouter`]'s policy, and a taskbar action is applied where
+    /// the shell's own state suffices (the task activate/minimise outcome
+    /// drives the compositor). Everything a surface *draws* is left latched on
+    /// the taskbar model for `settle` to drain, so applying a
+    /// run of samples costs one repaint of each surface that moved rather than
+    /// one per sample.
+    ///
+    /// An embedder that drains its own channel (so it can pair each event
+    /// with the device record the event carries) applies each event here in
+    /// order and calls [`settle`](Self::settle) once for the batch.
+    pub fn apply(
+        &mut self,
+        event: InputEvent,
+        compositor: &mut Compositor,
+        now_ns: u64,
+    ) -> ShellOutcome {
+        match self
+            .router
+            .handle(event, compositor, self.session.taskbar_mut(), now_ns)
+        {
+            SessionInputResponse::Ignored => ShellOutcome::Ignored,
+            SessionInputResponse::WindowManager(response) => {
+                self.mirror_focus(&response);
+                ShellOutcome::WindowManager(response)
+            }
+            SessionInputResponse::Taskbar(response) => {
+                match response {
+                    TaskbarResponse::TaskActivated { id, outcome } => {
+                        self.tasks
+                            .activate(compositor, &mut self.router, id, outcome);
                     }
-                    ShellOutcome::Taskbar(response)
+                    // A user dismiss clears the notification from the model
+                    // the session owns; the repaint latch it sets drives the
+                    // settling present, closing the popover when the last one
+                    // goes.
+                    TaskbarResponse::DismissNotification { producer, key } => {
+                        self.session.taskbar_mut().clear_notification(producer, key);
+                    }
+                    _ => {}
                 }
-            };
-        // One present per event, at one site. Every change to what a
-        // taskbar surface draws — an acted response opening a popup, or a
-        // pixel-only hover that produced no response at all — latches that
-        // surface on the model, so presenting straight from the latch
-        // repaints exactly what moved and nothing when the pointer merely
-        // crossed dead space.
+                ShellOutcome::Taskbar(response)
+            }
+        }
+    }
+
+    /// Bring the screen up to date with everything the applied events left
+    /// changed: one taskbar present, one active-frame sync, one cursor
+    /// refresh.
+    ///
+    /// All three read current state rather than an event, so running them
+    /// once after a run of samples lands the same desktop as running them
+    /// after each: the present repaints the union of surfaces the samples
+    /// latched, the sync compares the *current* focus against the shown
+    /// active frame, and the cursor's shape and hotspot follow the pointer's
+    /// latest position. Skipping the intermediate passes therefore drops work
+    /// nothing could observe — no frame was published between them.
+    pub fn settle(&mut self, compositor: &mut Compositor) {
+        // Every change to what a taskbar surface draws — an acted response
+        // opening a popup, or a pixel-only hover that produced no response at
+        // all — latches that surface on the model, so presenting straight from
+        // the latch repaints exactly what moved and nothing when the pointer
+        // merely crossed dead space.
         self.present(compositor);
-        // Whatever the event did to focus — a click-to-activate, a taskbar
+        // Whatever the events did to focus — a click-to-activate, a taskbar
         // activate/minimise, a desktop press — keep the decorated active frame
         // in step, so exactly the focused window shows its active title bar.
         self.sync_active_frame(compositor);
+        // The hotspot follows pointer motion and the shape follows what is
+        // under it (or the move cursor during a drag), so the desktop always
+        // shows a live pointer.
         self.refresh_cursor(compositor);
-        outcome
     }
 
     /// Keep the bar's highlighted task in step when the window manager moves
     /// focus by a direct click on a window or the desktop.
     ///
     /// A press that focused a window or the desktop relays the new focus into
-    /// the task list and, only when the highlighted task actually moved,
-    /// re-presents the bar; a drag ([`Moved`](InputResponse::Moved) /
-    /// [`MoveEnded`](InputResponse::MoveEnded)), a no-op, or a press on a window
-    /// that owns no task changes no highlight and is left cheap.
-    fn mirror_focus(&mut self, response: &InputResponse, compositor: &mut Compositor) {
+    /// the task list, which latches the bar's repaint only when the
+    /// highlighted task actually moved; a drag ([`Moved`](InputResponse::Moved)
+    /// / [`MoveEnded`](InputResponse::MoveEnded)), a no-op, or a press on a
+    /// window that owns no task changes no highlight and is left cheap.
+    fn mirror_focus(&mut self, response: &InputResponse) {
         let focus = match *response {
             // A furniture press (a scrollbar) activated its window exactly as a
             // client press does, so the highlighted task follows it too; a
@@ -1168,25 +1240,32 @@ impl DesktopShell {
             | InputResponse::ClientPointerReleased { .. }
             | InputResponse::Ignored => return,
         };
-        if self.tasks.sync_focus(self.session.taskbar_mut(), focus) {
-            self.present(compositor);
-        }
+        let _ = self.tasks.sync_focus(self.session.taskbar_mut(), focus);
     }
 
-    /// Drain every pending event from `source`, routing each through
-    /// [`handle`](Self::handle) against the monotonic `now_ns`, and return
-    /// their outcomes in order — folding an adjacent run of one continuing
-    /// gesture over the same window into a single outcome.
+    /// Drain every pending event from `source`, applying each against the
+    /// monotonic `now_ns`, and return their outcomes in order — folding an
+    /// adjacent run of one continuing gesture over the same window into a
+    /// single outcome.
     ///
     /// One drain is one instant: every event of this batch resolves against
     /// the same `now_ns`, which the embedder read when the source woke it.
-    /// Every drained event still runs through [`handle`](Self::handle), so
-    /// the window manager's own hover, drag, and cursor state track the full
-    /// sample stream; only the *returned* outcome list is compressed. That
+    /// Every drained event is still applied in order, so the window
+    /// manager's own hover, drag, and cursor state track the full sample
+    /// stream; only the *returned* outcome list is compressed. That
     /// is what makes the folding safe: it is the app-ward forwarding path
     /// (the embedder turns each outcome into one event to the owning app)
     /// that a dense gesture would otherwise flood with samples the app must
     /// then drain one at a time from a bounded mailbox.
+    ///
+    /// The shell's *own* per-frame work is folded by the same reasoning: the
+    /// batch is settled once at the end rather than
+    /// after each event, so a burst of N motion samples costs one taskbar
+    /// present, one active-frame sync, and one cursor refresh instead of N of
+    /// each. Nothing observes the intermediate passes — the embedder publishes
+    /// one frame per drain — and all three read current state, so the desktop
+    /// this leaves is the one N settles would have left. A drain that found no
+    /// event settles nothing, keeping an idle wake free.
     ///
     /// Two gestures fold, each by the rule its own quantity obeys: pointer
     /// motion carries a position, which is level-triggered, so the newest
@@ -1220,17 +1299,31 @@ impl DesktopShell {
         S: InputSource + ?Sized,
     {
         let mut outcomes: Vec<ShellOutcome> = Vec::new();
-        while let Some(event) = source.poll()? {
-            let outcome = self.handle(event, compositor, now_ns);
-            let unfolded = match outcomes.last_mut() {
-                Some(last) => fold_outcome(last, outcome),
-                None => Some(outcome),
-            };
-            if let Some(outcome) = unfolded {
-                outcomes.push(outcome);
+        let mut applied = false;
+        let drained = loop {
+            match source.poll() {
+                Ok(Some(event)) => {
+                    let outcome = self.apply(event, compositor, now_ns);
+                    applied = true;
+                    let unfolded = match outcomes.last_mut() {
+                        Some(last) => fold_outcome(last, outcome),
+                        None => Some(outcome),
+                    };
+                    if let Some(outcome) = unfolded {
+                        outcomes.push(outcome);
+                    }
+                }
+                Ok(None) => break Ok(outcomes),
+                Err(err) => break Err(err),
             }
+        };
+        // The events applied before a fault are already in the desktop's
+        // state, so the frame is settled either way: a faulting source must
+        // not leave the bar and cursor showing a state the model has left.
+        if applied {
+            self.settle(compositor);
         }
-        Ok(outcomes)
+        drained
     }
 
     /// Arm an interactive move-grab on the focused window, anchored at the

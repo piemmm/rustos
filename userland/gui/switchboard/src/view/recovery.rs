@@ -10,15 +10,16 @@ use alloc::vec::Vec;
 
 use tairix_abi::ProcId;
 use tairix_font::BitmapFont;
-use tairix_geometry::{to_i32, Rect, Scale};
+use tairix_geometry::{to_i32, Rect, Region, Scale};
 use tairix_input::{InputEvent, Key};
 use tairix_raster::{Color, Surface};
 use tairix_theme::{SignalRole, Theme};
 
 use tairix_controls::{
-    ActionRail, AuthorityState, Button, ButtonContent, Card, ControlRole, ControlState, EventMark,
-    Fact, FactList, MetricLayout, MetricTile, Panel, PressureKind, RailAction, RecoveryState,
-    SelectionState, StatusPill, Tab, Tabs, TabsAction, TabsOrientation, Timeline, TimelineEvent,
+    damage, ActionRail, AuthorityState, Button, ButtonContent, Card, ControlRole, ControlState,
+    EventMark, Fact, FactList, MetricLayout, MetricTile, Panel, PressureKind, RailAction,
+    RecoveryState, SelectionState, StatusPill, Tab, Tabs, TabsAction, TabsOrientation, Timeline,
+    TimelineEvent,
 };
 
 use super::frame::{SectionAnatomy, SectionFrame, ACTION_RAIL_WIDTH, DETAIL_PANE_WIDTH};
@@ -910,8 +911,12 @@ impl SectionView for RecoverySection {
             }
             Stop::Rail(slot) => {
                 let index = self.selected_index()?;
-                self.rail.set_focus(Some(slot));
-                let RailAction::Activate { index: fired } = self.rail.on_key(key)?;
+                // The keyboard path carries no layout, so the rail has no
+                // rectangle to report here and reports nothing.
+                self.rail
+                    .set_focus(Some(slot), Rect::EMPTY, &mut damage::sink());
+                let RailAction::Activate { index: fired } =
+                    self.rail.on_key(key, Rect::EMPTY, &mut damage::sink())?;
                 Some(SectionOutcome::Action(SwitchboardAction::Recovery {
                     index,
                     control: rail_control(fired)?,
@@ -940,12 +945,17 @@ impl SectionView for RecoverySection {
     /// A card that reports any interaction — a body press or (once one
     /// carries footer buttons) a footer click — becomes the selected fault,
     /// so pressing a card opens its detail.
-    fn on_pointer(&mut self, event: &InputEvent, ctx: SectionCtx<'_>) -> Option<SectionOutcome> {
+    fn on_pointer(
+        &mut self,
+        event: &InputEvent,
+        ctx: SectionCtx<'_>,
+        damage: &mut Region,
+    ) -> Option<SectionOutcome> {
         let info = self.list_info(&ctx.frame, ctx.scale, ctx.theme);
         let chosen = select_pressed_card(&info, ctx.start, |index, rect| {
             self.cards
                 .get_mut(index)?
-                .on_pointer(event, rect, ctx.scale, ctx.theme)
+                .on_pointer(event, rect, ctx.scale, ctx.theme, damage)
         });
         if let Some((row, _)) = chosen {
             self.focus = row;
@@ -970,8 +980,9 @@ impl SectionView for RecoverySection {
 
         let index = self.selected_index()?;
         let rail = self.rail_content(&ctx.frame, ctx.scale, ctx.theme)?;
-        let RailAction::Activate { index: fired } =
-            self.rail.on_pointer(event, rail, ctx.scale, ctx.theme)?;
+        let RailAction::Activate { index: fired } = self
+            .rail
+            .on_pointer(event, rail, ctx.scale, ctx.theme, damage)?;
         Some(SectionOutcome::Action(SwitchboardAction::Recovery {
             index,
             control: rail_control(fired)?,
@@ -993,7 +1004,9 @@ impl SectionView for RecoverySection {
             Some(Stop::Rail(slot)) => Some(slot),
             _ => None,
         };
-        self.rail.set_focus(slot);
+        // Focus marking runs off the keyboard path, which has no layout, so
+        // the rail has no rectangle to report here.
+        self.rail.set_focus(slot, Rect::EMPTY, &mut damage::sink());
         for (index, button) in self.rail.items_mut().iter_mut().enumerate() {
             button.set_focused(slot == Some(index));
             button.set_in_focus_field(slot.is_some());

@@ -85,6 +85,10 @@ pub struct SessionWindows {
     /// process that opened it, awaiting identification of the application
     /// they belong to.
     opened_owners: Vec<(WindowId, ProcId)>,
+    /// Window-channel ids that successfully presented content since the
+    /// last frame-report decision. Drained with the report so a frame whose
+    /// only content is the Switchboard's own paint is not reported back.
+    presented: Vec<u64>,
 }
 
 impl SessionWindows {
@@ -105,6 +109,12 @@ impl SessionWindows {
     #[must_use]
     pub fn wm_id(&self, ipc: u64) -> Option<WindowId> {
         self.records.get(&ipc).map(|record| record.wm)
+    }
+
+    /// Window-channel ids that successfully presented since the last take,
+    /// clearing the set so the next report decision starts fresh.
+    pub fn take_presented(&mut self) -> Vec<u64> {
+        core::mem::take(&mut self.presented)
     }
 
     /// Every live served window, as `(window-channel id, compositor id)`
@@ -508,7 +518,13 @@ impl tairix_window::WindowHost for ShellWindowHost<'_> {
         ) else {
             return Err(Errno::NotFound);
         };
-        result
+        result?;
+        // A successful present is what the frame-report gate classifies: the
+        // Switchboard measuring itself must not re-excite a report.
+        if !self.windows.presented.contains(&window_id) {
+            self.windows.presented.push(window_id);
+        }
+        Ok(())
     }
 
     fn window_resized(&mut self, window_id: u64, surface: &DisplayMode) -> Result<(), Errno> {

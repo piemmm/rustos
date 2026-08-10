@@ -40,7 +40,7 @@ use tairix_controls::{
     ActivityState, Button, ControlState, FocusState, PointerState, PressureKind, PressureState,
     RecoveryState, TrayBadge, TrayBadgeContent, TrayBadgeTone, TraySignal, TraySignalAction,
 };
-use tairix_geometry::{Point, Rect, Scale};
+use tairix_geometry::{Point, Rect, Region, Scale};
 use tairix_icon::IconKind;
 use tairix_input::InputEvent;
 use tairix_theme::Theme;
@@ -133,11 +133,12 @@ impl SwitchboardTray {
         readout: Rect,
         scale: Scale,
         theme: &Theme,
+        damage: &mut Region,
     ) -> (bool, Option<TraySignalAction>) {
         let before = self.signal.state();
         let action = self
             .signal
-            .on_pointer(event, capsule, readout, scale, theme);
+            .on_pointer(event, capsule, readout, scale, theme, damage);
         (self.signal.state() != before, action)
     }
 
@@ -154,6 +155,7 @@ impl SwitchboardTray {
         readout: Rect,
         scale: Scale,
         theme: &Theme,
+        damage: &mut Region,
     ) -> bool {
         self.on_pointer(
             &InputEvent::PointerMoved { to: point },
@@ -161,6 +163,7 @@ impl SwitchboardTray {
             readout,
             scale,
             theme,
+            damage,
         )
         .0
     }

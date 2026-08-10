@@ -51,6 +51,12 @@ tairix-reclaim = { path = "../reclaim", version = "=0.0.0", optional = true }
 tairix-procinfo = { path = "../procinfo", version = "=0.0.0", optional = true, default-features = false, features = [
     "program",
 ] }
+# The workspace's one non-cryptographic byte checksum, which the measurement
+# memo fingerprints a measured string with so a lookup builds its key without
+# allocating. A second hash written here would be the duplication the charter
+# forbids; a clash is caught by comparing the retained bytes, so the checksum
+# decides only what is *looked up*, never what is answered.
+tairix-crc32c = { path = "../crc32c", version = "=0.0.0", optional = true }
 
 [dev-dependencies]
 # The audit-sink trait a host test's glyph cache is built with. A test has
@@ -69,6 +75,7 @@ render = [
     "dep:tairix-abi",
     "dep:tairix-theme",
     "dep:tairix-geometry",
+    "dep:tairix-crc32c",
     "glyph-cache",
 ]
 # The shared cached-glyph declaration (`glyph_cache`) alone, with none of

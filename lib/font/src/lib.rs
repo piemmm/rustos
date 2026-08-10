@@ -70,6 +70,16 @@
 //! budget both this crate's own client cache and `fontd`'s service-side
 //! cache build their bounded cache from, so a glyph cache is declared once
 //! rather than separately on each side of the font-service boundary.
+//!
+//! # Measurement is memoised, not recomputed per frame
+//!
+//! Measuring a proportional label costs one advance lookup per character, so
+//! the walk is memoised on the same RAM-derived, pressure-governed terms as
+//! the glyph bitmaps: [`BitmapFont::text_width`],
+//! [`BitmapFont::truncate_to_width`], and [`BitmapFont::elide_to_width`] are
+//! all queries over one retained array of cumulative advances, and a repaint
+//! of unchanged text measures nothing. A monospace family multiplies a cell
+//! width instead and never consults the memo.
 
 #![no_std]
 #![forbid(unsafe_code)]
@@ -89,6 +99,8 @@ pub mod font;
 pub mod glyph;
 #[cfg(feature = "glyph-cache")]
 pub mod glyph_cache;
+#[cfg(feature = "render")]
+mod measure;
 
 #[cfg(test)]
 mod tests;

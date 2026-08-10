@@ -10,7 +10,7 @@
 //! silently diverge between two controls.
 
 use tairix_font::BitmapFont;
-use tairix_geometry::{Rect, Scale};
+use tairix_geometry::{Rect, Region, Scale};
 use tairix_icon::{builtin_icon, IconKind};
 use tairix_input::{InputEvent, Key, NamedKey, PointerButton};
 use tairix_raster::{Color, Surface};
@@ -18,6 +18,7 @@ use tairix_theme::{Contrast, Palette, Rgba, SignalRole, TextRole, Theme};
 
 pub(crate) use tairix_geometry::to_i32;
 
+use crate::damage;
 use crate::state::{
     ActivityState, ControlDisposition, ControlRole, ControlState, PlateSeating, PointerState,
     PressureKind, PressureState, RecoveryState, ValidationState,
@@ -383,41 +384,40 @@ pub(crate) fn grab_after(
 /// checkbox, radio). `inside` is whether the pointer is over the control's
 /// bounds (the caller's hit-test). The latch and its fail-closed gate are
 /// [`press_latch`]; this layers the resulting hover/press visual onto `state`.
+///
+/// The pointer look is the only thing written, so the guarded write through
+/// [`damage::set`] is the whole reporting rule for the clickable families:
+/// `bounds` is reported when the look actually changes — a hover enter, a
+/// hover leave, a press, a release — and motion that stays inside one control
+/// reports nothing, because the moved coordinate is hit-testing input and not
+/// a drawn field.
 pub(crate) fn pointer_activation(
     state: &mut ControlState,
     armed: &mut bool,
     event: &InputEvent,
     inside: bool,
+    bounds: Rect,
+    damage: &mut Region,
 ) -> bool {
     let actionable = state.is_actionable();
     let activated = press_latch(armed, event, inside, actionable);
-    match event {
-        InputEvent::PointerMoved { .. } => {
-            if !*armed {
-                state.pointer = if inside {
-                    PointerState::Hover
-                } else {
-                    PointerState::None
-                };
-            }
-        }
+    let hover_or_none = if inside {
+        PointerState::Hover
+    } else {
+        PointerState::None
+    };
+    let next = match event {
+        InputEvent::PointerMoved { .. } if !*armed => Some(hover_or_none),
         InputEvent::PointerPressed {
             button: PointerButton::Primary,
-        } => {
-            if inside && actionable {
-                state.pointer = PointerState::Pressed;
-            }
-        }
+        } if inside && actionable => Some(PointerState::Pressed),
         InputEvent::PointerReleased {
             button: PointerButton::Primary,
-        } => {
-            state.pointer = if inside {
-                PointerState::Hover
-            } else {
-                PointerState::None
-            };
-        }
-        _ => {}
+        } => Some(hover_or_none),
+        _ => None,
+    };
+    if let Some(next) = next {
+        damage::set(&mut state.pointer, next, bounds, damage);
     }
     activated
 }

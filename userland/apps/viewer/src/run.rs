@@ -868,8 +868,18 @@ mod program {
             changed: false,
             open_requested: false,
         };
+        // One sink for the whole round: both synthesised events reach the same
+        // two controls, which report their repainted bounds into it.
+        let mut damage = tairix_controls::damage::sink();
         for input in pointer_input_events(action, point) {
-            let step = viewer.on_pointer(&input, mode.width_px, mode.height_px, theme, scale);
+            let step = viewer.on_pointer(
+                &input,
+                mode.width_px,
+                mode.height_px,
+                theme,
+                scale,
+                &mut damage,
+            );
             outcome.changed |= step.changed;
             outcome.open_requested |= step.open_requested;
         }

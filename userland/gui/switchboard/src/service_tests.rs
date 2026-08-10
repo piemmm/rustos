@@ -4,7 +4,7 @@
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use tairix_abi::switchboard_ipc::{CommandSection, SeatReport, SwitchboardCommand};
+use tairix_abi::switchboard_ipc::{CommandSection, FrameReport, SeatReport, SwitchboardCommand};
 use tairix_abi::sysinfo::{ProcessRecord, ProcessState};
 use tairix_abi::{Errno, PowerAction, ProcId};
 
@@ -17,7 +17,7 @@ use crate::test_host::{
     process_record, DeadTransport, ProcessListTransport, RecordingHost, DEFAULT_UID, NO_AUTHORITY,
     PROC_CONTROL_AUTHORITY, SYSTEM_POWER_AUTHORITY,
 };
-use crate::view::Section;
+use crate::view::{Reading, Section};
 use crate::wait::required_members;
 
 /// This service's own scheduler task id in these tests.
@@ -285,7 +285,38 @@ fn a_seat_report_is_folded_into_the_panel_at_once() {
         &NO_AUTHORITY,
     );
 
-    assert_eq!(service.panel().seat_report().owners(), &[11]);
+    assert_eq!(service.panel().session_report().seat.owners(), &[11]);
+}
+
+#[test]
+fn a_frame_report_reaches_the_resources_page_at_once() {
+    let mut host = RecordingHost::new();
+    let mut service = service();
+    let report = FrameReport {
+        screen_px: 1920 * 1080,
+        damaged_px: 3_200,
+        blended_px: 42_000,
+        opaque_px: 1_100,
+        dirty_rects: 3,
+        present_calls: 1,
+        chrome_hits: 12,
+        chrome_misses: 1,
+    };
+
+    service.command(
+        &mut host,
+        SwitchboardCommand::FrameReport { report },
+        &NO_AUTHORITY,
+    );
+
+    assert_eq!(service.panel().session_report().frame, Some(report));
+    let facts = &service.panel().model().model.system.compositor;
+    assert_eq!(facts[0].label, "Last frame");
+    assert_eq!(
+        facts[0].value,
+        Reading::measured("3.2k px of 2.0M px recomposed"),
+        "the report must be rebuilt into the page, not held until the next sample"
+    );
 }
 
 /// Two sampled rows: the service's own, and a target task grouped into an

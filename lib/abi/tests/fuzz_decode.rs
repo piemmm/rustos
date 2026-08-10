@@ -55,9 +55,9 @@ use tairix_abi::session_ipc::{
     SESSION_MAX_REQUEST, SESSION_VERDICT_LEN,
 };
 use tairix_abi::switchboard_ipc::{
-    decode_publish_reply, CommandSection, SeatReport, SwitchboardCommand, SwitchboardRequest,
-    TrayPermille, TrayPressure, TrayPressureCount, TrayPressureKind, TraySummary, TrayTask,
-    TrayTaskName,
+    decode_publish_reply, CommandSection, FrameReport, SeatReport, SwitchboardCommand,
+    SwitchboardRequest, TrayPermille, TrayPressure, TrayPressureCount, TrayPressureKind,
+    TraySummary, TrayTask, TrayTaskName,
 };
 use tairix_abi::sysinfo::{
     decode_reply, encode_reply_ok, fold_cache_ledgers, CacheLedgerListRequest, CacheLedgerRecord,
@@ -1140,7 +1140,8 @@ fn structured_switchboard_commands_with_corrupted_fields_never_panic() {
     // The session -> monitor direction is decoded from an unreserved
     // mailbox any process can send to, so walk the accepted/rejected
     // boundary of every command: a flipped section, count, total, owner
-    // slot, or power-action discriminant must fail closed, never panic.
+    // slot, frame count, or power-action discriminant must fail closed,
+    // never panic.
     let open = SwitchboardCommand::OpenPanel {
         section: CommandSection::Recovery,
     }
@@ -1149,11 +1150,24 @@ fn structured_switchboard_commands_with_corrupted_fields_never_panic() {
         report: SeatReport::new(5, &[3, 9, 0x0102_0304]).expect("a truthful report"),
     }
     .to_le_bytes();
+    let frame = SwitchboardCommand::FrameReport {
+        report: FrameReport {
+            screen_px: 1920 * 1080,
+            damaged_px: 3_200,
+            blended_px: 6_400,
+            opaque_px: 1_100,
+            dirty_rects: 2,
+            present_calls: 2,
+            chrome_hits: 1,
+            chrome_misses: 0,
+        },
+    }
+    .to_le_bytes();
     let power = SwitchboardCommand::Power {
         action: PowerAction::Restart,
     }
     .to_le_bytes();
-    for mut base in [open, report, power] {
+    for mut base in [open, report, frame, power] {
         for byte in 0..base.len() {
             for bit in 0..8u32 {
                 base[byte] ^= 1 << bit;

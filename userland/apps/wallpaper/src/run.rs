@@ -810,10 +810,13 @@ mod program {
                         i32::try_from(y).unwrap_or(i32::MAX),
                     );
                     let mut asked = ChooserAction::None;
+                    // One sink for the whole round: both synthesised events
+                    // reach the same controls, which report into it.
+                    let mut damage = tairix_controls::damage::sink();
                     for input in pointer_input_events(action, at) {
                         asked = latest(
                             asked,
-                            chooser.on_pointer(&input, style_for(theme, &desktop)),
+                            chooser.on_pointer(&input, style_for(theme, &desktop), &mut damage),
                         );
                     }
                     asked
@@ -821,6 +824,7 @@ mod program {
                 WindowEvent::Scrolled { dx, dy, .. } => chooser.on_pointer(
                     &InputEvent::PointerScrolled { dx, dy },
                     style_for(theme, &desktop),
+                    &mut tairix_controls::damage::sink(),
                 ),
                 // The keyboard is the secondary path, and reaches
                 // everything the pointer does.

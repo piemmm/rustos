@@ -19,15 +19,13 @@
 use alloc::collections::BTreeSet;
 use alloc::string::String;
 
-use tairix_abi::switchboard_ipc::{
-    SeatReport, SwitchboardCommand, SwitchboardRequest, TraySummary,
-};
+use tairix_abi::switchboard_ipc::{SwitchboardCommand, SwitchboardRequest, TraySummary};
 use tairix_abi::{CapabilityId, CapabilityQuery, Errno, PowerAction, Signal};
 use tairix_procinfo::Transport;
 
 use crate::activities::{Activities, Member};
 use crate::derive::{derive_summary, Hysteresis};
-use crate::model::{build_model, derive_self_uid, GroupingEdit, RollingMeters};
+use crate::model::{build_model, derive_self_uid, GroupingEdit, RollingMeters, SessionReport};
 use crate::panel::{Panel, PanelOutcome, PANEL_TITLE};
 use crate::publish::Publisher;
 use crate::sample::{DegradedField, Sample, Sampler, ScopeVerdicts};
@@ -223,7 +221,7 @@ impl Service {
         let model = build_model(
             PANEL_TITLE,
             &last_sample,
-            &SeatReport::HEALTHY,
+            &SessionReport::HEALTHY,
             &meters,
             authority,
             &activities,
@@ -290,7 +288,7 @@ impl Service {
         // Folded in before the rows are built, so each row reads the disk
         // rate and CPU history this sample produced.
         self.meters
-            .record(&sample, self.hysteresis, self.panel.seat_report());
+            .record(&sample, self.hysteresis, self.panel.session_report());
         // A process list that degraded to its honest empty form this cycle
         // is a query failure, not "every process exited" — pruning against
         // it would wipe every activity on a transient `sysinfo` hiccup, so
@@ -356,9 +354,10 @@ impl Service {
 
     /// Apply one authenticated command from the desktop session.
     ///
-    /// A fresh seat report changes which owners are unresponsive, so the
-    /// model is rebuilt from the sample already in hand rather than leaving
-    /// the panel stale until the next cycle.
+    /// A fresh report from the session — which owners are unresponsive, or
+    /// what its last frame cost — is rebuilt into the model from the sample
+    /// already in hand rather than leaving the panel stale until the next
+    /// cycle.
     pub fn command(
         &mut self,
         host: &mut dyn ServiceHost,
@@ -369,6 +368,10 @@ impl Service {
             SwitchboardCommand::OpenPanel { section } => self.panel.open_section(host, section),
             SwitchboardCommand::SeatReport { report } => {
                 self.panel.set_seat_report(report);
+                self.rebuild(authority);
+            }
+            SwitchboardCommand::FrameReport { report } => {
+                self.panel.set_frame_report(report);
                 self.rebuild(authority);
             }
             SwitchboardCommand::Power { action } => Self::power(host, action, authority),
@@ -509,7 +512,7 @@ impl Service {
         let model = build_model(
             PANEL_TITLE,
             &self.last_sample,
-            self.panel.seat_report(),
+            self.panel.session_report(),
             &self.meters,
             authority,
             &self.activities,

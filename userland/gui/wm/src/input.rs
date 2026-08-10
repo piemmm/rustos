@@ -40,11 +40,11 @@
 //! [`DesktopPointerMoved`]: InputResponse::DesktopPointerMoved
 
 use tairix_controls::{
-    FurniturePart, ResizeEdge, ResizeEvent, ResizeGrabber, ScrollOrientation, TitleBarEvent,
-    TrackHit, WindowControlKind,
+    damage, FurniturePart, ResizeEdge, ResizeEvent, ResizeGrabber, ScrollOrientation,
+    TitleBarEvent, TrackHit, WindowControlKind,
 };
 
-use crate::geometry::{Point, Rect};
+use crate::geometry::{Point, Rect, Region};
 use crate::viewport::FurnitureHit;
 use crate::window::{Window, WindowId};
 use crate::Compositor;
@@ -393,6 +393,9 @@ impl InputRouter {
     /// Process one input `event` against `compositor`, returning what
     /// changed.
     pub fn handle(&mut self, event: InputEvent, compositor: &mut Compositor) -> InputResponse {
+        // One sink for the whole round: every furniture control this event
+        // reaches reports its own repainted bounds into the same region.
+        let mut damage = damage::sink();
         match event {
             InputEvent::PointerMoved { to } => {
                 self.pointer = to;
@@ -401,7 +404,7 @@ impl InputRouter {
                 } else if self.resize_grab.is_some() {
                     self.resize_drag_to(to, compositor)
                 } else if self.control_grab.is_some() {
-                    self.control_drag_to(&event, compositor)
+                    self.control_drag_to(&event, compositor, &mut damage)
                 } else if self.grab.is_some() {
                     self.drag_to(to, compositor)
                 } else {
@@ -411,21 +414,21 @@ impl InputRouter {
             InputEvent::PointerScrolled { dx, dy } => self.wheel(dx, dy, compositor),
             InputEvent::PointerPressed {
                 button: PointerButton::Primary,
-            } => self.press_primary(compositor),
+            } => self.press_primary(compositor, &mut damage),
             InputEvent::PointerReleased {
                 button: PointerButton::Primary,
-            } => self.release_primary(compositor),
+            } => self.release_primary(compositor, &mut damage),
             InputEvent::PointerPressed {
                 button: PointerButton::Secondary,
-            } => self.press_secondary(compositor),
+            } => self.press_secondary(compositor, &mut damage),
             InputEvent::PointerPressed { .. } | InputEvent::PointerReleased { .. } => {
                 InputResponse::Ignored
             }
             InputEvent::KeyPressed { key, modifiers } => {
-                self.deliver_key(key, modifiers, true, compositor)
+                self.deliver_key(key, modifiers, true, compositor, &mut damage)
             }
             InputEvent::KeyReleased { key, modifiers } => {
-                self.deliver_key(key, modifiers, false, compositor)
+                self.deliver_key(key, modifiers, false, compositor, &mut damage)
             }
         }
     }
@@ -443,12 +446,14 @@ impl InputRouter {
         modifiers: Modifiers,
         pressed: bool,
         compositor: &mut Compositor,
+        damage: &mut Region,
     ) -> InputResponse {
         // Escape cancels an in-flight resize, restoring the pre-drag geometry
         // exactly — the shared grabber owns that cancel semantics.
         if pressed {
             if let Some(grab) = self.resize_grab.as_mut() {
-                if let Some(ResizeEvent::Cancel) = grab.grabber.on_key(key) {
+                let hit_bounds = grab.start_outer;
+                if let Some(ResizeEvent::Cancel) = grab.grabber.on_key(key, hit_bounds, damage) {
                     let window = grab.window;
                     let start_outer = grab.start_outer;
                     self.resize_grab = None;
@@ -476,7 +481,9 @@ impl InputRouter {
         // the client — the furniture owns those keys.
         if self.furniture_key_focus && compositor.window_frame(window).is_some() {
             if pressed {
-                if let Some(TitleBarEvent::Control(control)) = compositor.frame_key(window, key) {
+                if let Some(TitleBarEvent::Control(control)) =
+                    compositor.frame_key(window, key, damage)
+                {
                     return InputResponse::WindowControl { window, control };
                 }
             }
@@ -520,7 +527,7 @@ impl InputRouter {
     }
 
     /// Handle a primary-button press at the current pointer position.
-    fn press_primary(&mut self, compositor: &mut Compositor) -> InputResponse {
+    fn press_primary(&mut self, compositor: &mut Compositor, damage: &mut Region) -> InputResponse {
         // A fresh press supersedes any prior client grab; it is re-armed below
         // only when this press lands on client content.
         self.client_grab = None;
@@ -543,7 +550,7 @@ impl InputRouter {
                     return InputResponse::FurniturePressed { window };
                 }
                 FurniturePart::WindowControl(_) => {
-                    return self.begin_control_grab(window, compositor);
+                    return self.begin_control_grab(window, compositor, damage);
                 }
                 FurniturePart::ResizeEdge(edge) => {
                     return self.begin_resize_grab(window, edge, compositor);
@@ -634,7 +641,11 @@ impl InputRouter {
     /// [`InputResponse::WindowControlAlternate`] so the embedder can offer
     /// the control's alternate gesture. The control itself neither arms nor
     /// changes appearance, and no window command runs.
-    fn press_secondary(&mut self, compositor: &mut Compositor) -> InputResponse {
+    fn press_secondary(
+        &mut self,
+        compositor: &mut Compositor,
+        damage: &mut Region,
+    ) -> InputResponse {
         let Some(window) = compositor.window_at(self.pointer) else {
             return InputResponse::DesktopSecondaryPressed;
         };
@@ -644,12 +655,12 @@ impl InputRouter {
         // definition of which control lies under a point. A synthetic move
         // first, so the control knows the pointer is over it.
         let moved = InputEvent::PointerMoved { to: self.pointer };
-        compositor.frame_pointer(window, &moved);
+        compositor.frame_pointer(window, &moved, damage);
         let press = InputEvent::PointerPressed {
             button: PointerButton::Secondary,
         };
         if let Some(TitleBarEvent::AlternateControl(control)) =
-            compositor.frame_pointer(window, &press)
+            compositor.frame_pointer(window, &press, damage)
         {
             return InputResponse::WindowControlAlternate { window, control };
         }
@@ -810,17 +821,20 @@ impl InputRouter {
         &mut self,
         window: WindowId,
         compositor: &mut Compositor,
+        damage: &mut Region,
     ) -> InputResponse {
         self.control_grab = Some(window);
         self.furniture_key_focus = true;
         let moved = InputEvent::PointerMoved { to: self.pointer };
-        compositor.frame_pointer(window, &moved);
+        compositor.frame_pointer(window, &moved, damage);
         let press = InputEvent::PointerPressed {
             button: PointerButton::Primary,
         };
         // A control that fired on the press itself (not the usual click, which
         // completes on release) is dispatched immediately and ends the grab.
-        if let Some(TitleBarEvent::Control(control)) = compositor.frame_pointer(window, &press) {
+        if let Some(TitleBarEvent::Control(control)) =
+            compositor.frame_pointer(window, &press, damage)
+        {
             self.control_grab = None;
             return InputResponse::WindowControl { window, control };
         }
@@ -834,6 +848,7 @@ impl InputRouter {
         &mut self,
         event: &InputEvent,
         compositor: &mut Compositor,
+        damage: &mut Region,
     ) -> InputResponse {
         let Some(window) = self.control_grab else {
             return InputResponse::Ignored;
@@ -842,7 +857,7 @@ impl InputRouter {
             self.control_grab = None;
             return InputResponse::Ignored;
         }
-        compositor.frame_pointer(window, event);
+        compositor.frame_pointer(window, event, damage);
         InputResponse::FurniturePressed { window }
     }
 
@@ -919,7 +934,11 @@ impl InputRouter {
     /// thumb or resized window has already committed its geometry, and a
     /// completed control click is dispatched here (the release is what
     /// activates a button).
-    fn release_primary(&mut self, compositor: &mut Compositor) -> InputResponse {
+    fn release_primary(
+        &mut self,
+        compositor: &mut Compositor,
+        damage: &mut Region,
+    ) -> InputResponse {
         if self.scroll_grab.take().is_some() {
             return InputResponse::Ignored;
         }
@@ -938,7 +957,7 @@ impl InputRouter {
                 button: PointerButton::Primary,
             };
             if let Some(TitleBarEvent::Control(control)) =
-                compositor.frame_pointer(window, &released)
+                compositor.frame_pointer(window, &released, damage)
             {
                 return InputResponse::WindowControl { window, control };
             }

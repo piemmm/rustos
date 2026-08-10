@@ -236,6 +236,11 @@
 //! rather than restating plate, press, role, disabled, or Authority Mark
 //! rendering, and owns only the stacking geometry, the hover and focus
 //! bookkeeping, and the typed [`RailAction`] it reports.
+//!
+//! The [`damage`] module is the repaint seam every family reports through. An
+//! input or update call takes a sink, a control pushes its own bounds when a
+//! drawn state field changes, and the host renders and presents only what came
+//! back — so a hover crossing one control no longer costs the whole surface.
 
 #![no_std]
 #![forbid(unsafe_code)]
@@ -247,6 +252,7 @@ pub mod button;
 pub mod chart;
 pub mod collection;
 pub mod combo;
+pub mod damage;
 pub mod decision;
 pub mod menu;
 pub mod metric;
@@ -313,6 +319,8 @@ mod chart_tests;
 mod collection_tests;
 #[cfg(test)]
 mod combo_tests;
+#[cfg(test)]
+mod damage_tests;
 #[cfg(test)]
 mod decision_tests;
 #[cfg(test)]

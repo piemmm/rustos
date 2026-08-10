@@ -18,7 +18,7 @@ use tairix_controls::{
     Radio, ScrollAction, ScrollBar, SearchField, SelectionState, SelectorAction, Slider,
     SliderAction, SplitButton, TableRow, TextField, Toggle, Toolbar, Tooltip, WindowControl,
 };
-use tairix_geometry::{Rect, Scale};
+use tairix_geometry::{Rect, Region, Scale};
 use tairix_input::{InputEvent, Key, Modifiers};
 use tairix_raster::Surface;
 use tairix_theme::Theme;
@@ -105,8 +105,9 @@ impl DemoWidget {
         }
     }
 
-    /// Set (or clear) this widget's keyboard focus where it has one.
-    pub fn set_focused(&mut self, focused: bool) {
+    /// Set (or clear) this widget's keyboard focus where it has one, at the
+    /// `rect` the widget is rendered at.
+    pub fn set_focused(&mut self, focused: bool, rect: Rect, damage: &mut Region) {
         match self {
             DemoWidget::Button(w) => w.set_focused(focused),
             DemoWidget::IconButton(w) => w.set_focused(focused),
@@ -122,7 +123,7 @@ impl DemoWidget {
             DemoWidget::ScrollBar(w) => w.set_focused(focused),
             DemoWidget::WindowControl(w) => w.set_focused(focused),
             DemoWidget::Menu(w) => w.set_current(focused.then_some(0)),
-            DemoWidget::Toolbar(w) => w.set_focus(focused.then_some(0)),
+            DemoWidget::Toolbar(w) => w.set_focus(focused.then_some(0), rect, damage),
             // No focus ring: split button, progress, card, panel, dialog,
             // tooltip, help tip. Focus is a no-op rather than an error.
             DemoWidget::SplitButton(_)
@@ -183,26 +184,27 @@ impl DemoWidget {
         rect: Rect,
         scale: Scale,
         theme: &Theme,
+        damage: &mut Region,
     ) -> bool {
         match self {
-            DemoWidget::Button(w) => w.on_pointer(event, rect).is_some(),
-            DemoWidget::IconButton(w) => w.on_pointer(event, rect).is_some(),
-            DemoWidget::SplitButton(w) => w.on_pointer(event, rect, scale, theme).is_some(),
-            DemoWidget::Toggle(w) => match w.on_pointer(event, rect) {
+            DemoWidget::Button(w) => w.on_pointer(event, rect, damage).is_some(),
+            DemoWidget::IconButton(w) => w.on_pointer(event, rect, damage).is_some(),
+            DemoWidget::SplitButton(w) => w.on_pointer(event, rect, scale, theme, damage).is_some(),
+            DemoWidget::Toggle(w) => match w.on_pointer(event, rect, damage) {
                 Some(SelectorAction::Set { on }) => {
                     w.set_on(on);
                     true
                 }
                 None => false,
             },
-            DemoWidget::Checkbox(w) => match w.on_pointer(event, rect) {
+            DemoWidget::Checkbox(w) => match w.on_pointer(event, rect, damage) {
                 Some(SelectorAction::Set { on }) => {
                     w.set_selection(selection_for(on));
                     true
                 }
                 None => false,
             },
-            DemoWidget::Radio(w) => match w.on_pointer(event, rect) {
+            DemoWidget::Radio(w) => match w.on_pointer(event, rect, damage) {
                 Some(SelectorAction::Set { on }) => {
                     w.set_selected(on);
                     true
@@ -224,25 +226,25 @@ impl DemoWidget {
                 w.on_pointer(event, rect, popup, scale, theme).is_some()
             }
             DemoWidget::Menu(w) => w.on_pointer(event, rect, scale, theme).is_some(),
-            DemoWidget::ListRow(w) => match w.on_pointer(event, rect) {
+            DemoWidget::ListRow(w) => match w.on_pointer(event, rect, damage) {
                 Some(_) => {
                     w.set_selected(!w.is_selected());
                     true
                 }
                 None => false,
             },
-            DemoWidget::TableRow(w) => match w.on_pointer(event, rect) {
+            DemoWidget::TableRow(w) => match w.on_pointer(event, rect, damage) {
                 Some(_) => {
                     w.set_selected(!w.is_selected());
                     true
                 }
                 None => false,
             },
-            DemoWidget::Card(w) => w.on_pointer(event, rect, scale, theme).is_some(),
-            DemoWidget::Panel(w) => w.on_pointer(event, rect, scale, theme).is_some(),
-            DemoWidget::Dialog(w) => w.on_pointer(event, rect, scale, theme).is_some(),
-            DemoWidget::HelpTip(w) => w.on_pointer(event, rect, scale, theme).is_some(),
-            DemoWidget::Toolbar(w) => match w.on_pointer(event, rect, scale, theme) {
+            DemoWidget::Card(w) => w.on_pointer(event, rect, scale, theme, damage).is_some(),
+            DemoWidget::Panel(w) => w.on_pointer(event, rect, scale, theme, damage).is_some(),
+            DemoWidget::Dialog(w) => w.on_pointer(event, rect, scale, theme, damage).is_some(),
+            DemoWidget::HelpTip(w) => w.on_pointer(event, rect, scale, theme, damage).is_some(),
+            DemoWidget::Toolbar(w) => match w.on_pointer(event, rect, scale, theme, damage) {
                 Some(action) => {
                     w.set_active(action.index);
                     true
@@ -256,13 +258,20 @@ impl DemoWidget {
                 }
                 None => false,
             },
-            DemoWidget::WindowControl(w) => w.on_pointer(event, rect).is_some(),
+            DemoWidget::WindowControl(w) => w.on_pointer(event, rect, damage).is_some(),
         }
     }
 
-    /// Route one key press to the focused widget, reflecting any value-changing
-    /// action back into the control. Returns whether the view should repaint.
-    pub fn on_key(&mut self, key: Key, modifiers: Modifiers) -> bool {
+    /// Route one key press to the focused widget at the `rect` it is rendered
+    /// at, reflecting any value-changing action back into the control. Returns
+    /// whether the view should repaint.
+    pub fn on_key(
+        &mut self,
+        key: Key,
+        modifiers: Modifiers,
+        rect: Rect,
+        damage: &mut Region,
+    ) -> bool {
         match self {
             DemoWidget::Button(w) => w.on_key(key).is_some(),
             DemoWidget::IconButton(w) => w.on_key(key).is_some(),
@@ -318,7 +327,7 @@ impl DemoWidget {
             DemoWidget::Panel(w) => w.on_key(key).is_some(),
             DemoWidget::Dialog(w) => w.on_key(key).is_some(),
             DemoWidget::HelpTip(w) => w.on_key(key).is_some(),
-            DemoWidget::Toolbar(w) => match w.on_key(key) {
+            DemoWidget::Toolbar(w) => match w.on_key(key, rect, damage) {
                 Some(action) => {
                     w.set_active(action.index);
                     true

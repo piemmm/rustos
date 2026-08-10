@@ -9,7 +9,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use tairix_font::BitmapFont;
-use tairix_geometry::{to_i32, Rect, Scale};
+use tairix_geometry::{to_i32, Rect, Region, Scale};
 use tairix_input::{InputEvent, Key, Modifiers};
 use tairix_raster::{Color, Surface};
 use tairix_theme::Theme;
@@ -696,7 +696,12 @@ impl SectionView for ActivitiesSection {
     /// four commands — that group becomes the selected one, so the detail pane
     /// always describes the group the reader just acted on rather than one they
     /// left behind.
-    fn on_pointer(&mut self, event: &InputEvent, ctx: SectionCtx<'_>) -> Option<SectionOutcome> {
+    fn on_pointer(
+        &mut self,
+        event: &InputEvent,
+        ctx: SectionCtx<'_>,
+        damage: &mut Region,
+    ) -> Option<SectionOutcome> {
         let info = self.list_info(&ctx.frame, ctx.scale, ctx.theme);
         for slot in 0..info.visible() {
             let Some(row) = self.row_at(ctx.start + slot as usize) else {
@@ -708,7 +713,8 @@ impl SectionView for ActivitiesSection {
                     let (row_rect, buttons) =
                         Switchboard::split_row(item, Self::BUTTONS, ctx.scale, ctx.theme);
                     let on_header = self.entries.get_mut(index).is_some_and(|entry| {
-                        entry.header.on_pointer(event, row_rect) == Some(RowAction::Activated)
+                        entry.header.on_pointer(event, row_rect, damage)
+                            == Some(RowAction::Activated)
                     });
                     if on_header {
                         self.select_activity(index);
@@ -718,7 +724,8 @@ impl SectionView for ActivitiesSection {
                         continue;
                     };
                     if buttons.first().is_some_and(|rect| {
-                        entry.switch.on_pointer(event, *rect) == Some(ButtonAction::Activated)
+                        entry.switch.on_pointer(event, *rect, damage)
+                            == Some(ButtonAction::Activated)
                     }) {
                         self.select_activity(index);
                         return Some(SectionOutcome::Action(SwitchboardAction::Activity {
@@ -727,7 +734,8 @@ impl SectionView for ActivitiesSection {
                         }));
                     }
                     if buttons.get(1).is_some_and(|rect| {
-                        entry.pause_resume.on_pointer(event, *rect) == Some(ButtonAction::Activated)
+                        entry.pause_resume.on_pointer(event, *rect, damage)
+                            == Some(ButtonAction::Activated)
                     }) {
                         let control = if entry.paused {
                             ActivityControl::Resume
@@ -741,14 +749,16 @@ impl SectionView for ActivitiesSection {
                         }));
                     }
                     if buttons.get(2).is_some_and(|rect| {
-                        entry.rename.on_pointer(event, *rect) == Some(ButtonAction::Activated)
+                        entry.rename.on_pointer(event, *rect, damage)
+                            == Some(ButtonAction::Activated)
                     }) {
                         self.select_activity(index);
                         self.begin_rename(index);
                         return None;
                     }
                     if buttons.get(3).is_some_and(|rect| {
-                        entry.close.on_pointer(event, *rect) == Some(ButtonAction::Activated)
+                        entry.close.on_pointer(event, *rect, damage)
+                            == Some(ButtonAction::Activated)
                     }) {
                         self.select_activity(index);
                         return Some(SectionOutcome::Action(SwitchboardAction::Activity {
@@ -766,7 +776,7 @@ impl SectionView for ActivitiesSection {
                     else {
                         continue;
                     };
-                    if member.on_pointer(event, row_rect) == Some(RowAction::Activated) {
+                    if member.on_pointer(event, row_rect, damage) == Some(RowAction::Activated) {
                         if let Some(entry) = self.entries.get_mut(ai) {
                             for (i, row) in entry.members.iter_mut().enumerate() {
                                 row.set_selected(i == mi);

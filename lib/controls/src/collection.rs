@@ -29,7 +29,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use tairix_font::{BitmapFont, ELLIPSIS};
-use tairix_geometry::{Point, Rect, Scale};
+use tairix_geometry::{Point, Rect, Region, Scale};
 use tairix_icon::IconKind;
 use tairix_input::{InputEvent, Key, NamedKey, PointerButton};
 use tairix_raster::{div255, round_rect_coverage, BlurScratch, Color, Surface};
@@ -457,14 +457,27 @@ impl ListRow {
     }
 
     /// Feed a pointer event, given the row's `bounds`; a completed primary
-    /// click over an actionable row reports [`RowAction::Activated`].
-    pub fn on_pointer(&mut self, event: &InputEvent, bounds: Rect) -> Option<RowAction> {
+    /// click over an actionable row reports [`RowAction::Activated`]. The row
+    /// reports `bounds` into `damage` when the event changed how it draws.
+    pub fn on_pointer(
+        &mut self,
+        event: &InputEvent,
+        bounds: Rect,
+        damage: &mut Region,
+    ) -> Option<RowAction> {
         if let InputEvent::PointerMoved { to } = event {
             *self.pointer = *to;
         }
         let inside = bounds.contains(*self.pointer);
-        pointer_activation(&mut self.state, &mut self.armed, event, inside)
-            .then_some(RowAction::Activated)
+        pointer_activation(
+            &mut self.state,
+            &mut self.armed,
+            event,
+            inside,
+            bounds,
+            damage,
+        )
+        .then_some(RowAction::Activated)
     }
 
     /// Feed a key event; Space/Enter activates a focused, actionable row.
@@ -843,14 +856,27 @@ impl TableRow {
     }
 
     /// Feed a pointer event, given the row's `bounds`; a completed primary
-    /// click over an actionable row reports [`RowAction::Activated`].
-    pub fn on_pointer(&mut self, event: &InputEvent, bounds: Rect) -> Option<RowAction> {
+    /// click over an actionable row reports [`RowAction::Activated`]. The row
+    /// reports `bounds` into `damage` when the event changed how it draws.
+    pub fn on_pointer(
+        &mut self,
+        event: &InputEvent,
+        bounds: Rect,
+        damage: &mut Region,
+    ) -> Option<RowAction> {
         if let InputEvent::PointerMoved { to } = event {
             *self.pointer = *to;
         }
         let inside = bounds.contains(*self.pointer);
-        pointer_activation(&mut self.state, &mut self.armed, event, inside)
-            .then_some(RowAction::Activated)
+        pointer_activation(
+            &mut self.state,
+            &mut self.armed,
+            event,
+            inside,
+            bounds,
+            damage,
+        )
+        .then_some(RowAction::Activated)
     }
 
     /// Feed a key event; Space/Enter activates a focused, actionable row.
@@ -1811,6 +1837,7 @@ impl Card {
         bounds: Rect,
         scale: Scale,
         theme: &Theme,
+        damage: &mut Region,
     ) -> Option<CardAction> {
         if let InputEvent::PointerMoved { to } = event {
             *self.pointer = *to;
@@ -1825,7 +1852,8 @@ impl Card {
             let (Some(button), Some(rect)) = (self.footer.get_mut(i), rects.get(i)) else {
                 continue;
             };
-            if button.on_pointer(event, *rect) == Some(ButtonAction::Activated) && action.is_none()
+            if button.on_pointer(event, *rect, damage) == Some(ButtonAction::Activated)
+                && action.is_none()
             {
                 action = Some(CardAction::FooterActivated { index: i });
             }
@@ -2689,6 +2717,7 @@ impl Panel {
         bounds: Rect,
         scale: Scale,
         theme: &Theme,
+        damage: &mut Region,
     ) -> Option<PanelAction> {
         if let InputEvent::PointerMoved { to } = event {
             *self.pointer = *to;
@@ -2703,7 +2732,8 @@ impl Panel {
             let (Some(button), Some(rect)) = (self.actions.get_mut(i), rects.get(i)) else {
                 continue;
             };
-            if button.on_pointer(event, *rect) == Some(ButtonAction::Activated) && action.is_none()
+            if button.on_pointer(event, *rect, damage) == Some(ButtonAction::Activated)
+                && action.is_none()
             {
                 action = Some(PanelAction::HeaderActivated { index: i });
             }

@@ -1352,6 +1352,7 @@ name = "tairix-font"
 version = "0.0.0"
 dependencies = [
  "tairix-abi",
+ "tairix-crc32c",
  "tairix-geometry",
  "tairix-log",
  "tairix-procinfo",

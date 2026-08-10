@@ -50,7 +50,7 @@
 
 use tairix_abi::switchboard_ipc::CommandSection;
 use tairix_abi::PowerAction;
-use tairix_controls::TraySignalAction;
+use tairix_controls::{damage, TraySignalAction};
 use tairix_geometry::{Point, Rect, Scale};
 use tairix_input::{InputEvent, PointerButton};
 use tairix_proglib::EntryId;
@@ -253,9 +253,12 @@ impl TaskbarInput {
         scale: Scale,
         now_ns: u64,
     ) -> TaskbarResponse {
+        // One sink for the whole round: every control this event reaches
+        // reports its own repainted bounds into the same region.
+        let mut damage = damage::sink();
         if let InputEvent::PointerMoved { to } = event {
             self.pointer = to;
-            taskbar.track_hover(to, scale);
+            taskbar.track_hover(to, scale, &mut damage);
             if let Some(response) = self.continue_capsule_press(taskbar, scale, now_ns) {
                 return response;
             }
@@ -295,7 +298,7 @@ impl TaskbarInput {
                 // re-laid out from under is abandoned here rather than left
                 // armed to resolve on some later release.
                 self.capsule_press = None;
-                return match taskbar.tray_pointer(&event, scale) {
+                return match taskbar.tray_pointer(&event, scale, &mut damage) {
                     Some(TraySignalAction::Activated) => TaskbarResponse::OpenSwitchboard {
                         section: CommandSection::Tasks,
                     },

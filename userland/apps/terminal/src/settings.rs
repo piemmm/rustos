@@ -36,7 +36,7 @@ use alloc::string::ToString;
 use alloc::vec::Vec;
 
 use tairix_font::BitmapFont;
-use tairix_geometry::{to_i32, Point, Rect, Scale};
+use tairix_geometry::{to_i32, Point, Rect, Region, Scale};
 use tairix_input::{InputEvent, Key, Modifiers, NamedKey, PointerButton};
 use tairix_raster::{Color, Surface};
 use tairix_theme::{TextRole, Theme};
@@ -287,6 +287,7 @@ impl Settings {
         viewport: Rect,
         scale: Scale,
         theme: &Theme,
+        damage: &mut Region,
     ) -> SheetOutcome {
         let font = BitmapFont::for_role(theme.fonts(), TextRole::Body, scale);
 
@@ -327,7 +328,7 @@ impl Settings {
 
         if let Some(rect) = body_rect {
             if let outcome @ (SheetOutcome::Changed | SheetOutcome::Edited) =
-                self.route_body_pointer(event, rect, scale, theme, font)
+                self.route_body_pointer(event, rect, scale, theme, font, damage)
             {
                 return outcome;
             }
@@ -345,7 +346,7 @@ impl Settings {
         }
 
         if let Some(rect) = footer_rect {
-            if let Some(outcome) = self.route_footer_pointer(event, rect, scale) {
+            if let Some(outcome) = self.route_footer_pointer(event, rect, scale, damage) {
                 return outcome;
             }
         }
@@ -826,10 +827,11 @@ impl Settings {
         scale: Scale,
         theme: &Theme,
         font: BitmapFont,
+        damage: &mut Region,
     ) -> SheetOutcome {
         let offset = self.scroll.model().offset();
         for (row, rect) in self.laid_out_rows(body, offset, scale, theme, font) {
-            let outcome = self.route_row_pointer(event, row, rect, scale, font);
+            let outcome = self.route_row_pointer(event, row, rect, scale, font, damage);
             if outcome != SheetOutcome::Ignored {
                 return outcome;
             }
@@ -845,13 +847,14 @@ impl Settings {
         rect: Rect,
         scale: Scale,
         font: BitmapFont,
+        damage: &mut Region,
     ) -> SheetOutcome {
         match row {
             Focus::Scheme(index) => {
                 let Some(radio) = self.scheme_radios.get_mut(index) else {
                     return SheetOutcome::Ignored;
                 };
-                match radio.on_pointer(event, rect) {
+                match radio.on_pointer(event, rect, damage) {
                     Some(SelectorAction::Set { on: true }) => {
                         self.focus = row;
                         self.set_scheme(index);
@@ -929,17 +932,18 @@ impl Settings {
         event: &InputEvent,
         rect: Rect,
         scale: Scale,
+        damage: &mut Region,
     ) -> Option<SheetOutcome> {
         let (restore, done) = footer_split(rect, scale);
         if let Some(rect) = restore {
-            if let Some(ButtonAction::Activated) = self.restore.on_pointer(event, rect) {
+            if let Some(ButtonAction::Activated) = self.restore.on_pointer(event, rect, damage) {
                 self.focus = Focus::Restore;
                 self.restore_defaults();
                 return Some(SheetOutcome::Edited);
             }
         }
         if let Some(rect) = done {
-            if let Some(ButtonAction::Activated) = self.done.on_pointer(event, rect) {
+            if let Some(ButtonAction::Activated) = self.done.on_pointer(event, rect, damage) {
                 self.focus = Focus::Done;
                 return Some(SheetOutcome::Dismissed);
             }

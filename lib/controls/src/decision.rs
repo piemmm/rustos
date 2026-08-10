@@ -14,7 +14,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use tairix_font::BitmapFont;
-use tairix_geometry::{Point, Rect, Scale};
+use tairix_geometry::{Point, Rect, Region, Scale};
 use tairix_input::{InputEvent, Key};
 use tairix_raster::{Color, Surface};
 use tairix_theme::{TextRole, Theme};
@@ -316,6 +316,7 @@ impl Dialog {
         bounds: Rect,
         scale: Scale,
         theme: &Theme,
+        damage: &mut Region,
     ) -> Option<DialogAction> {
         if let InputEvent::PointerMoved { to } = event {
             *self.pointer = *to;
@@ -330,7 +331,8 @@ impl Dialog {
             let (Some(button), Some(rect)) = (self.actions.get_mut(i), rects.get(i)) else {
                 continue;
             };
-            if button.on_pointer(event, *rect) == Some(ButtonAction::Activated) && action.is_none()
+            if button.on_pointer(event, *rect, damage) == Some(ButtonAction::Activated)
+                && action.is_none()
             {
                 action = Some(DialogAction::ActionActivated { index: i });
             }
@@ -620,11 +622,12 @@ impl HelpTip {
         bounds: Rect,
         scale: Scale,
         theme: &Theme,
+        damage: &mut Region,
     ) -> Option<HelpTipAction> {
         let font = role_font(theme, scale, TextRole::Body);
         let rect = self.step_rect(bounds, scale, theme, font)?;
         let step = self.step.as_mut()?;
-        (step.on_pointer(event, rect) == Some(ButtonAction::Activated))
+        (step.on_pointer(event, rect, damage) == Some(ButtonAction::Activated))
             .then_some(HelpTipAction::NextStep)
     }
 

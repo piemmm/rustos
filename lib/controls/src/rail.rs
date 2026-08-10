@@ -26,12 +26,13 @@
 
 use alloc::vec::Vec;
 
-use tairix_geometry::{Point, Rect, Scale};
+use tairix_geometry::{Point, Rect, Region, Scale};
 use tairix_input::{InputEvent, Key, NamedKey};
 use tairix_raster::Surface;
 use tairix_theme::{TextRole, Theme};
 
 use crate::button::{icon_content_side, Button, ButtonContent, ContentAlign};
+use crate::damage;
 use crate::paint::{
     grab_after, paint_edge_wake, plate_border, role_font, route_pointer, surface_rect,
     text_plate_height, to_i32,
@@ -161,9 +162,14 @@ impl ActionRail {
     /// Focus item `index` (or clear focus with `None`), updating each item's
     /// own focus flag so its focus ring draws; an out-of-range index clears
     /// focus (fail closed).
-    pub fn set_focus(&mut self, index: Option<usize>) {
+    ///
+    /// A focus move reports the whole rail: the ring leaves one item and
+    /// arrives at another, and without a scale and theme the rail cannot say
+    /// where either item sits. Covering the column over-covers by the items
+    /// that did not change, which repaints correctly.
+    pub fn set_focus(&mut self, index: Option<usize>, bounds: Rect, damage: &mut Region) {
         let index = index.filter(|&i| i < self.items.len());
-        self.focus = index;
+        damage::set(&mut self.focus, index, bounds, damage);
         for (i, item) in self.items.iter_mut().enumerate() {
             item.set_focused(Some(i) == index);
         }
@@ -317,6 +323,7 @@ impl ActionRail {
         bounds: Rect,
         scale: Scale,
         theme: &Theme,
+        damage: &mut Region,
     ) -> Option<RailAction> {
         if let InputEvent::PointerMoved { to } = event {
             *self.pointer = *to;
@@ -331,7 +338,7 @@ impl ActionRail {
             let (Some(item), Some(rect)) = (self.items.get_mut(index), rects.get(index)) else {
                 continue;
             };
-            if item.on_pointer(event, *rect).is_some() {
+            if item.on_pointer(event, *rect, damage).is_some() {
                 fired = Some(RailAction::Activate { index });
             }
         }
@@ -345,7 +352,7 @@ impl ActionRail {
     /// which decides for itself whether it may activate — a disabled or
     /// denied focused item consumes the key without acting, so the column's
     /// shape never shifts under the reader.
-    pub fn on_key(&mut self, key: Key) -> Option<RailAction> {
+    pub fn on_key(&mut self, key: Key, bounds: Rect, damage: &mut Region) -> Option<RailAction> {
         if self.items.is_empty() {
             return None;
         }
@@ -356,7 +363,7 @@ impl ActionRail {
                     Some(i) => (i + 1).min(last),
                     None => 0,
                 };
-                self.set_focus(Some(next));
+                self.set_focus(Some(next), bounds, damage);
                 None
             }
             Key::Named(NamedKey::Up) => {
@@ -364,15 +371,15 @@ impl ActionRail {
                     Some(i) => i.saturating_sub(1),
                     None => 0,
                 };
-                self.set_focus(Some(prev));
+                self.set_focus(Some(prev), bounds, damage);
                 None
             }
             Key::Named(NamedKey::Home) => {
-                self.set_focus(Some(0));
+                self.set_focus(Some(0), bounds, damage);
                 None
             }
             Key::Named(NamedKey::End) => {
-                self.set_focus(Some(last));
+                self.set_focus(Some(last), bounds, damage);
                 None
             }
             _ => {

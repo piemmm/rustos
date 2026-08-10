@@ -391,8 +391,9 @@ genuinely goes.
   a track (each is a fraction of a measured whole).
 - **primary** — the selected page: Overview is the machine's `FactList`, the
   Active Services statement and the permissions summary; Resources is the
-  per-core load and the memory/kernel-heap detail; Storage is the mounts with
-  their capacity *and* health; Network is the per-interface facts, link state,
+  per-core load, the memory/kernel-heap detail, and the compositor's
+  last-frame cost as its third block; Storage is the mounts with their
+  capacity *and* health; Network is the per-interface facts, link state,
   addresses and rates; Session is the seats and the logged-in census;
   Permissions is the authority summary with the resource limits and their
   live usage; Services and Power state what has no interface (S6).
@@ -402,6 +403,26 @@ genuinely goes.
 Every page compiles to one ordered `PageLine` vocabulary — heading, fact,
 absence — so the section has a single layout, scroll range and paint loop
 rather than eight of each.
+
+Resources' third block, **Desktop**, is the one reading this service does not
+sample: the session owns the compositor, so it reports what its last frame
+cost (`SwitchboardCommand::FrameReport`) over the command port it already
+sends the seat report on, on that same discipline — only with a live consumer,
+only when the counts changed, never blocking a frame path, a dropped stale
+report being fine because the next frame re-sends a fresher one — **and never
+when the only served content that landed was this service's own window**. A
+monitor must not measure its own act of displaying: reporting a frame whose
+work was only the panel painting the previous report re-excites another paint
+forever. The session classifies presents by attested owner and suppresses a
+Switchboard-only frame; real desktop work and chrome/idle settles still
+report. The receiver validates it and refuses counts no compositor pass could
+have produced, so the panel never renders a sender's arithmetic. The line that
+earns the block is **damaged px against blended px against screen px** — "we
+blended 4.2 M pixels to change 3 200" — with `Opaque copies`, `Rectangles`,
+`Present calls` and `Window furniture` behind it. An idle frame reads *idle*,
+not a row of zeros pretending to be a frame; a frame nobody has reported yet
+reads unavailable. Counts of work only: no wall-clock figure rides this path,
+because a duration is neither reproducible nor assertable.
 
 Every action emits a typed view action the service authorises and applies;
 the view performs no privileged work. A refusal names its own kind: an

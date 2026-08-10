@@ -10,6 +10,7 @@ use alloc::string::String;
 use alloc::vec;
 
 use tairix_controls::collection::IconTile;
+use tairix_controls::damage;
 use tairix_controls::scrollbar::ScrollPart;
 use tairix_geometry::{Point, Rect};
 use tairix_input::{InputEvent, Key, Modifiers, NamedKey, PointerButton};
@@ -90,7 +91,11 @@ fn centre(rect: Rect) -> Point {
 
 /// Move the pointer to `at`.
 fn move_to(chooser: &mut Chooser, at: Point, style: Style<'_>) -> ChooserAction {
-    chooser.on_pointer(&InputEvent::PointerMoved { to: at }, style)
+    chooser.on_pointer(
+        &InputEvent::PointerMoved { to: at },
+        style,
+        &mut damage::sink(),
+    )
 }
 
 /// Press the primary button where the pointer already is.
@@ -100,6 +105,7 @@ fn press(chooser: &mut Chooser, style: Style<'_>) -> ChooserAction {
             button: PointerButton::Primary,
         },
         style,
+        &mut damage::sink(),
     )
 }
 
@@ -110,6 +116,7 @@ fn release(chooser: &mut Chooser, style: Style<'_>) -> ChooserAction {
             button: PointerButton::Primary,
         },
         style,
+        &mut damage::sink(),
     )
 }
 
@@ -467,22 +474,38 @@ fn the_wheel_scrolls_the_gallery_and_stops_at_both_ends() {
     chooser.relayout(MIN_WIN_WIDTH, MIN_WIN_HEIGHT);
     assert_eq!(chooser.scroll_offset(), 0);
 
-    let scrolled = chooser.on_pointer(&InputEvent::PointerScrolled { dx: 0, dy: 3 }, style);
+    let scrolled = chooser.on_pointer(
+        &InputEvent::PointerScrolled { dx: 0, dy: 3 },
+        style,
+        &mut damage::sink(),
+    );
     assert_eq!(scrolled, ChooserAction::Changed);
     assert!(chooser.scroll_offset() > 0);
 
     for _ in 0..64 {
-        let _ = chooser.on_pointer(&InputEvent::PointerScrolled { dx: 0, dy: 8 }, style);
+        let _ = chooser.on_pointer(
+            &InputEvent::PointerScrolled { dx: 0, dy: 8 },
+            style,
+            &mut damage::sink(),
+        );
     }
     let at_end = chooser.scroll_offset();
     assert_eq!(
-        chooser.on_pointer(&InputEvent::PointerScrolled { dx: 0, dy: 8 }, style),
+        chooser.on_pointer(
+            &InputEvent::PointerScrolled { dx: 0, dy: 8 },
+            style,
+            &mut damage::sink()
+        ),
         ChooserAction::None
     );
     assert_eq!(chooser.scroll_offset(), at_end);
 
     for _ in 0..80 {
-        let _ = chooser.on_pointer(&InputEvent::PointerScrolled { dx: 0, dy: -8 }, style);
+        let _ = chooser.on_pointer(
+            &InputEvent::PointerScrolled { dx: 0, dy: -8 },
+            style,
+            &mut damage::sink(),
+        );
     }
     assert_eq!(chooser.scroll_offset(), 0);
 }
@@ -835,7 +858,11 @@ fn a_window_resize_re_flows_the_gallery_and_clamps_the_scroll() {
     chooser.relayout(MIN_WIN_WIDTH, MIN_WIN_HEIGHT);
 
     for _ in 0..64 {
-        let _ = chooser.on_pointer(&InputEvent::PointerScrolled { dx: 0, dy: 8 }, style);
+        let _ = chooser.on_pointer(
+            &InputEvent::PointerScrolled { dx: 0, dy: 8 },
+            style,
+            &mut damage::sink(),
+        );
     }
     let deep = chooser.scroll_offset();
     assert!(deep > 0);
@@ -862,12 +889,14 @@ fn a_secondary_button_click_changes_nothing() {
             button: PointerButton::Secondary,
         },
         style,
+        &mut damage::sink(),
     );
     let action = chooser.on_pointer(
         &InputEvent::PointerReleased {
             button: PointerButton::Secondary,
         },
         style,
+        &mut damage::sink(),
     );
     assert_eq!(action, ChooserAction::None);
     assert_eq!(chooser.selected(), selected);

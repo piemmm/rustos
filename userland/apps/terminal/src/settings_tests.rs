@@ -5,6 +5,7 @@
 //! rather than restating it, so a test can never assert against a rectangle
 //! the sheet does not actually draw or hit-test.
 
+use tairix_controls::damage;
 use tairix_font::BitmapFont;
 use tairix_geometry::{to_i32, Point, Rect, Scale};
 use tairix_input::{InputEvent, Key, Modifiers, NamedKey, PointerButton};
@@ -128,15 +129,15 @@ fn centre(rect: Rect) -> Point {
 /// Move the pointer to `at` and press, reporting the press outcome — the
 /// gesture a slider commits on.
 fn press_at(sheet: &mut Settings, viewport: Rect, at: Point) -> SheetOutcome {
-    sheet.on_pointer(&moved(at), viewport, SCALE, &theme());
-    sheet.on_pointer(&PRESS, viewport, SCALE, &theme())
+    sheet.on_pointer(&moved(at), viewport, SCALE, &theme(), &mut damage::sink());
+    sheet.on_pointer(&PRESS, viewport, SCALE, &theme(), &mut damage::sink())
 }
 
 /// A complete primary click at `at`, reporting the release outcome — the
 /// gesture a radio or button commits on.
 fn click_at(sheet: &mut Settings, viewport: Rect, at: Point) -> SheetOutcome {
     press_at(sheet, viewport, at);
-    sheet.on_pointer(&RELEASE, viewport, SCALE, &theme())
+    sheet.on_pointer(&RELEASE, viewport, SCALE, &theme(), &mut damage::sink())
 }
 
 /// One unmodified key press.
@@ -384,7 +385,7 @@ fn the_opacity_slider_spans_its_own_floor_to_full() {
         "the low end of the travel is the readable floor, not a dead zone"
     );
 
-    sheet.on_pointer(&RELEASE, CLIENT, SCALE, &theme());
+    sheet.on_pointer(&RELEASE, CLIENT, SCALE, &theme(), &mut damage::sink());
     assert_eq!(
         press_at(&mut sheet, CLIENT, slider_point(row, 1000)),
         SheetOutcome::Edited
@@ -411,11 +412,11 @@ fn the_profile_stays_clamped_after_extreme_values() {
     for index in 0..EFFECT_COUNT {
         let row = visible_row(&sheet, CLIENT, Focus::Effect(index));
         press_at(&mut sheet, CLIENT, slider_point(row, 0));
-        sheet.on_pointer(&RELEASE, CLIENT, SCALE, &theme());
+        sheet.on_pointer(&RELEASE, CLIENT, SCALE, &theme(), &mut damage::sink());
         press_at(&mut sheet, CLIENT, slider_point(row, 1000));
-        sheet.on_pointer(&RELEASE, CLIENT, SCALE, &theme());
+        sheet.on_pointer(&RELEASE, CLIENT, SCALE, &theme(), &mut damage::sink());
         press_at(&mut sheet, CLIENT, slider_point(row, 0));
-        sheet.on_pointer(&RELEASE, CLIENT, SCALE, &theme());
+        sheet.on_pointer(&RELEASE, CLIENT, SCALE, &theme(), &mut damage::sink());
     }
     focus_on(&mut sheet, CLIENT, Focus::Tabs);
     key(&mut sheet, CLIENT, Key::Named(NamedKey::Left));

@@ -772,6 +772,82 @@ impl SeatReport {
     }
 }
 
+/// What one composited desktop frame cost, as the session measured it.
+///
+/// The session owns the compositor, so it is the only party that can count
+/// this; the service samples the kernel, which knows nothing about pixels.
+/// Every field is a count of work — never a duration — so the panel shows a
+/// reading a reader can act on and a test can assert.
+///
+/// The headline reading is `damaged_px` against `blended_px` against
+/// `screen_px`: a frame that changes three thousand pixels but blends four
+/// million of them is paying for depth nobody can see, and one that changes
+/// the whole screen to move a cursor is damaging too much.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct FrameReport {
+    /// The whole screen's pixel count — the denominator of the reading.
+    pub screen_px: u64,
+    /// Screen pixels the frame recomposed.
+    pub damaged_px: u64,
+    /// Layer contributions blended to resolve them.
+    pub blended_px: u64,
+    /// Damaged pixels resolved by copying a fully opaque run instead,
+    /// skipping every layer beneath.
+    pub opaque_px: u64,
+    /// Rectangles the frame recomposed.
+    pub dirty_rects: u32,
+    /// Calls into the display driver that published the frame.
+    pub present_calls: u32,
+    /// Window-furniture lookups served from the retained cache.
+    pub chrome_hits: u32,
+    /// Window-furniture lookups that had to be rendered.
+    pub chrome_misses: u32,
+}
+
+impl FrameReport {
+    /// `true` when the frame recomposed nothing, so the panel says the
+    /// desktop is idle rather than showing a row of zeros as if a frame had
+    /// been drawn.
+    #[must_use]
+    pub const fn is_idle(&self) -> bool {
+        self.damaged_px == 0 && self.dirty_rects == 0
+    }
+
+    /// Refuse a set of counts no compositor pass could have produced.
+    ///
+    /// The receiver's fail-closed gate, applied where the untrusted frame is
+    /// decoded, so the panel never renders a sender's arithmetic. Each rule
+    /// holds of every frame the compositor can actually compose:
+    ///
+    /// * `damaged_px` cannot exceed `screen_px` — the recomposed rectangles
+    ///   are clipped to the screen and pairwise disjoint, so their pixels
+    ///   sum to at most the screen.
+    /// * `dirty_rects` is zero exactly when `damaged_px` is — an empty
+    ///   rectangle is never recomposed, so each counted rectangle carries at
+    ///   least one pixel.
+    /// * `opaque_px` cannot exceed `damaged_px` — a copied opaque run
+    ///   resolves damaged pixels, never pixels outside the damage.
+    /// * `present_calls` cannot exceed `dirty_rects + 1` — a frame publishes
+    ///   at most one driver call per rectangle, and the whole-screen,
+    ///   bounding-box, and hardware-layer paths each publish exactly one.
+    ///
+    /// `blended_px` is deliberately unbounded in both directions: it counts
+    /// layer *contributions*, so a stack of windows may blend one damaged
+    /// pixel many times, while damage over bare desktop — no window, no
+    /// desktop layer, no cursor — resolves to the root fill and blends
+    /// nothing at all.
+    const fn validate(&self) -> Result<(), Errno> {
+        if self.damaged_px > self.screen_px
+            || (self.dirty_rects == 0) != (self.damaged_px == 0)
+            || self.opaque_px > self.damaged_px
+            || self.present_calls > self.dirty_rects.saturating_add(1)
+        {
+            return Err(Errno::OutOfRange);
+        }
+        Ok(())
+    }
+}
+
 /// Wire magic of a [`SwitchboardCommand`] frame (`"SWC1"`).
 const SWITCHBOARD_COMMAND_MAGIC: u32 = 0x3143_5753;
 
@@ -781,6 +857,8 @@ const OP_OPEN_PANEL: u16 = 1;
 const OP_SEAT_REPORT: u16 = 2;
 /// Wire operation discriminant of [`SwitchboardCommand::Power`].
 const OP_POWER: u16 = 3;
+/// Wire operation discriminant of [`SwitchboardCommand::FrameReport`].
+const OP_FRAME_REPORT: u16 = 4;
 
 /// Byte offset of an [`SwitchboardCommand::OpenPanel`] section.
 const SECTION_OFFSET: usize = 8;
@@ -795,6 +873,26 @@ const REPORT_OWNERS_OFFSET: usize = 16;
 /// Shares the same base as [`SECTION_OFFSET`]: each operation reads only its
 /// own fields, so the two never observe each other's bytes.
 const POWER_ACTION_OFFSET: usize = 8;
+/// Byte offset of a frame report's screen pixel count. Each offset below is
+/// chained from this one so the counts keep their natural alignment within
+/// the frame and the layout cannot drift as fields move.
+const FRAME_SCREEN_OFFSET: usize = 8;
+/// Byte offset of a frame report's damaged pixel count.
+const FRAME_DAMAGED_OFFSET: usize = FRAME_SCREEN_OFFSET + 8;
+/// Byte offset of a frame report's blended layer-contribution count.
+const FRAME_BLENDED_OFFSET: usize = FRAME_DAMAGED_OFFSET + 8;
+/// Byte offset of a frame report's copied opaque-run pixel count.
+const FRAME_OPAQUE_OFFSET: usize = FRAME_BLENDED_OFFSET + 8;
+/// Byte offset of a frame report's recomposed-rectangle count.
+const FRAME_RECTS_OFFSET: usize = FRAME_OPAQUE_OFFSET + 8;
+/// Byte offset of a frame report's display-driver present count.
+const FRAME_PRESENTS_OFFSET: usize = FRAME_RECTS_OFFSET + 4;
+/// Byte offset of a frame report's furniture-cache hit count.
+const FRAME_CHROME_HITS_OFFSET: usize = FRAME_PRESENTS_OFFSET + 4;
+/// Byte offset of a frame report's furniture-cache miss count.
+const FRAME_CHROME_MISSES_OFFSET: usize = FRAME_CHROME_HITS_OFFSET + 4;
+/// First reserved byte past a frame report's payload.
+const FRAME_END_OFFSET: usize = FRAME_CHROME_MISSES_OFFSET + 4;
 
 /// One command the desktop session sends a Switchboard instance on its
 /// per-instance mailbox ([`command_endpoint_for`]).
@@ -810,6 +908,11 @@ pub enum SwitchboardCommand {
         /// The report.
         report: SeatReport,
     },
+    /// Hand over what the session's last composited frame cost.
+    FrameReport {
+        /// The report.
+        report: FrameReport,
+    },
     /// Perform the machine power transition `action`. Sent only after the
     /// desktop session's own confirmation prompt has been accepted — the
     /// session holds no authority to act itself, so it relays the user's
@@ -823,7 +926,9 @@ pub enum SwitchboardCommand {
 
 impl SwitchboardCommand {
     /// Encoded size on the wire: magic (4), version (2), op (2), and the
-    /// widest operation's fixed payload (the seat report).
+    /// widest operation's fixed payload (the seat report; every other
+    /// operation's payload, the frame report's counts included, fits inside
+    /// it).
     pub const WIRE_LEN: usize = REPORT_OWNERS_OFFSET + 8 * SEAT_REPORT_OWNERS_MAX;
 
     /// Encode `self` little-endian.
@@ -845,6 +950,17 @@ impl SwitchboardCommand {
                     put_u64(&mut out, REPORT_OWNERS_OFFSET + index * 8, owner);
                 }
             }
+            Self::FrameReport { report } => {
+                put_u16(&mut out, 6, OP_FRAME_REPORT);
+                put_u64(&mut out, FRAME_SCREEN_OFFSET, report.screen_px);
+                put_u64(&mut out, FRAME_DAMAGED_OFFSET, report.damaged_px);
+                put_u64(&mut out, FRAME_BLENDED_OFFSET, report.blended_px);
+                put_u64(&mut out, FRAME_OPAQUE_OFFSET, report.opaque_px);
+                put_u32(&mut out, FRAME_RECTS_OFFSET, report.dirty_rects);
+                put_u32(&mut out, FRAME_PRESENTS_OFFSET, report.present_calls);
+                put_u32(&mut out, FRAME_CHROME_HITS_OFFSET, report.chrome_hits);
+                put_u32(&mut out, FRAME_CHROME_MISSES_OFFSET, report.chrome_misses);
+            }
             Self::Power { action } => {
                 put_u16(&mut out, 6, OP_POWER);
                 put_u32(&mut out, POWER_ACTION_OFFSET, action.as_u32());
@@ -864,8 +980,9 @@ impl SwitchboardCommand {
     /// * [`Errno::AbiVersionUnsupported`] — not `switchboard-v1`.
     /// * [`Errno::OutOfRange`] — an unknown operation, a section outside
     ///   the closed set, a total below the named count, the reserved zero
-    ///   task id, a repeated owner, or an unrecognised power-action
-    ///   discriminant.
+    ///   task id, a repeated owner, an unrecognised power-action
+    ///   discriminant, or a set of frame counts that contradict each other
+    ///   (see [`FrameReport`]).
     /// * [`Errno::LengthOutOfRange`] — a named-owner count above
     ///   [`SEAT_REPORT_OWNERS_MAX`].
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, Errno> {
@@ -892,6 +1009,9 @@ impl SwitchboardCommand {
             }
             OP_SEAT_REPORT => Ok(Self::SeatReport {
                 report: decode_seat_report(bytes)?,
+            }),
+            OP_FRAME_REPORT => Ok(Self::FrameReport {
+                report: decode_frame_report(bytes)?,
             }),
             OP_POWER => {
                 if bytes[POWER_ACTION_OFFSET + 4..Self::WIRE_LEN]
@@ -937,6 +1057,29 @@ fn decode_seat_report(bytes: &[u8]) -> Result<SeatReport, Errno> {
         *owner = read_u64(bytes, REPORT_OWNERS_OFFSET + index * 8);
     }
     SeatReport::new(read_u16(bytes, REPORT_TOTAL_OFFSET), &owners[..count])
+}
+
+/// Decode a frame report, refusing a dirty reserved byte and any counts the
+/// compositor could not have produced.
+fn decode_frame_report(bytes: &[u8]) -> Result<FrameReport, Errno> {
+    if bytes[FRAME_END_OFFSET..SwitchboardCommand::WIRE_LEN]
+        .iter()
+        .any(|&byte| byte != 0)
+    {
+        return Err(Errno::BadMagic);
+    }
+    let report = FrameReport {
+        screen_px: read_u64(bytes, FRAME_SCREEN_OFFSET),
+        damaged_px: read_u64(bytes, FRAME_DAMAGED_OFFSET),
+        blended_px: read_u64(bytes, FRAME_BLENDED_OFFSET),
+        opaque_px: read_u64(bytes, FRAME_OPAQUE_OFFSET),
+        dirty_rects: read_u32(bytes, FRAME_RECTS_OFFSET),
+        present_calls: read_u32(bytes, FRAME_PRESENTS_OFFSET),
+        chrome_hits: read_u32(bytes, FRAME_CHROME_HITS_OFFSET),
+        chrome_misses: read_u32(bytes, FRAME_CHROME_MISSES_OFFSET),
+    };
+    report.validate()?;
+    Ok(report)
 }
 
 #[cfg(test)]

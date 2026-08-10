@@ -20,7 +20,7 @@ The compositor turns a stack of windows into one scan-out frame:
 2. `Compositor::composite` walks the damaged screen regions and, for
    every dirty pixel, blends each covering window *over* the opaque
    background, bottom-to-top in z-order, using the Porter–Duff *over*
-   operator (`Pixel::over`). It returns the `DamageRegion` it actually
+   operator (`Pixel::over`). It returns the `Region` it actually
    recomposited (screen-clipped), which is what the present step moves.
 3. Each composited pixel is scaled by the screen reveal (see
    [Screen reveal](#screen-reveal)) and encoded into a byte frame laid out
@@ -252,11 +252,28 @@ compositor (`AGENTS.md` §2.4). The router never panics and fails closed:
 
 ## Damage tracking
 
-`DamageRegion` records the screen rectangles that changed since the last
-frame (a window was added, moved, restyled, hidden, raised, or removed).
-`Compositor::composite` recomputes only those pixels, returns the region
-it recomposited, and clears the damage, so an idle desktop costs nothing
-to recomposite.
+`tairix_geometry::Region` records the screen rectangles that changed since
+the last frame (a window was added, moved, restyled, hidden, raised, or
+removed). `Compositor::composite` recomputes only those pixels, returns the
+region it recomposited, and clears the damage, so an idle desktop costs
+nothing to recomposite.
+
+The region's rectangles are pairwise **disjoint**: the same pixel is never
+listed twice, however many updates marked it, so it is composited once and
+presented once. Two far-apart updates stay two small rectangles rather than
+collapsing into the bounding box between them. The type is shared
+(`lib/geometry`) because controls report their own repaint rectangles with
+it too.
+
+A window with a backdrop blur is the one exception to "recompose exactly
+what changed": its pixels are a function of the *whole* backdrop under its
+rectangle, so a strip-sized repaint would spread a clipped neighbourhood and
+seam against the pixels beside it. Any damage touching such a window
+therefore promotes the whole of it into one rectangle, and that rectangle is
+subtracted from the rest of the damage — so the frosted window is recomposed
+whole while unrelated damage elsewhere stays exactly as tight as it was
+marked. Two frosted windows that overlap merge into a single rectangle,
+because each reads what the other wrote.
 
 **An update that changes nothing marks nothing.** `move_window` to the
 origin a window already has, and `set_corners` / `set_visible` /
@@ -347,6 +364,39 @@ number of bytes:
   the display service whose fixed cost is paid however few pixels it
   carries, while a larger copy costs only more bytes; beyond a handful of
   rectangles the round trips cost more than one call copying their box.
+
+## What one frame cost (`FrameStats`)
+
+"The desktop feels slow" is not a defect report. `Compositor::frame_stats`
+returns the counts the composite pass that just ran actually paid, so the
+complaint becomes a measurement: *we blended 4.2 M pixels to change 3 200.*
+The accumulator is reset at the start of every composite, so a snapshot
+describes that frame and nothing else.
+
+Every field is a **count of work, never a duration**. Counts are exactly
+reproducible for a given scene, so a test may assert them and stay green under
+any machine load, which a wall-clock figure cannot. The compositor is `no_std`
+and holds no clock: an embedder that wants a duration owns the clock and pairs
+its own measurement with these counts. Counters saturate rather than wrap — a
+wrapped one would read as a suspiciously small frame.
+
+| Count | What it says |
+|---|---|
+| `damaged_px` | Screen pixels inside the frame's dirty rectangles, after screen clipping and after a blurred window widened the damage it touched. The size of the job — the denominator for everything else. |
+| `blended_px` | Layer contributions blended through *over*. Contributions, not screen positions: a pixel two windows both draw at is one damaged pixel and two blends, so this may legitimately exceed the damage — and that ratio is what says whether the frame paid for depth nobody can see. |
+| `opaque_px` | Pixels resolved by copying a fully opaque run of the front window's own pixels. Each cost no blend, and everything beneath it was skipped, which is why `blended_px` falls as this rises. |
+| `blur_px` | Pixels rewritten by a backdrop frost. A frame that re-frosts a window whose backdrop did not change is paying twice for one appearance. |
+| `encoded_px` | Composed pixels converted to scan-out bytes. |
+| `dirty_rects` | Dirty rectangles the frame recomposed. |
+| `present_calls` | Calls the frame made into the display driver to publish itself — the round trips of the section above. |
+| `chrome_hits` / `chrome_misses` | Window-furniture lookups served from the retained cache versus rendered again, whether the cache then kept them or refused. |
+
+The reading that matters is **damaged vs blended vs screen pixels**: damage
+far below the screen means the damage tracking is working, and blends far
+above the damage means the frame is compositing depth the user cannot see.
+`FrameStats::is_idle()` distinguishes a frame that recomposed nothing from one
+that recomposed a little, so a wake that did no work reports *idle* rather
+than a row of zeros pretending to be a frame.
 
 ## Server-side window decorations
 

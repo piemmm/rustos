@@ -18,7 +18,7 @@
 use alloc::string::String;
 
 use tairix_font::BitmapFont;
-use tairix_geometry::{Point, Rect, Scale};
+use tairix_geometry::{Point, Rect, Region, Scale};
 use tairix_input::{InputEvent, Key};
 use tairix_raster::{Color, Surface};
 use tairix_theme::{TextRole, Theme};
@@ -292,12 +292,19 @@ impl SelectorCore {
 
     /// Feed a pointer event and report whether a primary click completed over
     /// the control's `bounds`.
-    fn on_pointer(&mut self, event: &InputEvent, bounds: Rect) -> bool {
+    fn on_pointer(&mut self, event: &InputEvent, bounds: Rect, damage: &mut Region) -> bool {
         if let InputEvent::PointerMoved { to } = event {
             *self.pointer = *to;
         }
         let inside = bounds.contains(*self.pointer);
-        pointer_activation(&mut self.state, &mut self.armed, event, inside)
+        pointer_activation(
+            &mut self.state,
+            &mut self.armed,
+            event,
+            inside,
+            bounds,
+            damage,
+        )
     }
 
     /// Report whether a focused, actionable selector is activated by `key`.
@@ -443,9 +450,14 @@ impl Toggle {
 
     /// Feed a pointer event; a completed primary click over an actionable
     /// toggle requests the flipped value.
-    pub fn on_pointer(&mut self, event: &InputEvent, bounds: Rect) -> Option<SelectorAction> {
+    pub fn on_pointer(
+        &mut self,
+        event: &InputEvent,
+        bounds: Rect,
+        damage: &mut Region,
+    ) -> Option<SelectorAction> {
         self.core
-            .on_pointer(event, bounds)
+            .on_pointer(event, bounds, damage)
             .then_some(SelectorAction::Set { on: !self.on })
     }
 
@@ -580,9 +592,14 @@ impl Checkbox {
     }
 
     /// Feed a pointer event; a completed primary click requests the next value.
-    pub fn on_pointer(&mut self, event: &InputEvent, bounds: Rect) -> Option<SelectorAction> {
+    pub fn on_pointer(
+        &mut self,
+        event: &InputEvent,
+        bounds: Rect,
+        damage: &mut Region,
+    ) -> Option<SelectorAction> {
         self.core
-            .on_pointer(event, bounds)
+            .on_pointer(event, bounds, damage)
             .then_some(SelectorAction::Set { on: self.next_on() })
     }
 
@@ -708,9 +725,14 @@ impl Radio {
     }
 
     /// Feed a pointer event; a completed primary click requests selection.
-    pub fn on_pointer(&mut self, event: &InputEvent, bounds: Rect) -> Option<SelectorAction> {
+    pub fn on_pointer(
+        &mut self,
+        event: &InputEvent,
+        bounds: Rect,
+        damage: &mut Region,
+    ) -> Option<SelectorAction> {
         self.core
-            .on_pointer(event, bounds)
+            .on_pointer(event, bounds, damage)
             .then_some(SelectorAction::Set { on: true })
     }
 

@@ -20,7 +20,7 @@
 use tairix_abi::input::{KeyInput, KeyValue, NamedKeyCode};
 use tairix_abi::PowerAction;
 use tairix_controls::{
-    Button, ControlRole, ControlState, Dialog, DialogAction, FocusState, PointerState,
+    damage, Button, ControlRole, ControlState, Dialog, DialogAction, FocusState, PointerState,
 };
 use tairix_geometry::Scale;
 use tairix_wm::{
@@ -183,6 +183,7 @@ impl ConfirmPrompt {
         let h = scale.scale_length(WIN_HEIGHT);
         let bounds = Rect::new(0, 0, w, h);
         let theme = shell.session().active_theme().clone();
+        let mut damage = damage::sink();
         let action = {
             let active = self.active.as_mut()?;
             // A button resolves on the completed click, so the press and the
@@ -192,6 +193,7 @@ impl ConfirmPrompt {
                 bounds,
                 scale,
                 &theme,
+                &mut damage,
             );
             let _ = active.dialog.on_pointer(
                 &InputEvent::PointerPressed {
@@ -200,6 +202,7 @@ impl ConfirmPrompt {
                 bounds,
                 scale,
                 &theme,
+                &mut damage,
             );
             active.dialog.on_pointer(
                 &InputEvent::PointerReleased {
@@ -208,6 +211,7 @@ impl ConfirmPrompt {
                 bounds,
                 scale,
                 &theme,
+                &mut damage,
             )
         };
         self.resolve(action, shell, compositor)

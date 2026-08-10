@@ -18,6 +18,7 @@ use tairix_raster::{Color, Pixel, Surface};
 use tairix_theme::{Rgba, Theme};
 
 use crate::button::{Button, ButtonContent};
+use crate::damage::sink;
 use crate::rail::{ActionRail, RailAction};
 use crate::state::{AuthorityState, ControlRole, ControlState};
 use crate::testkit::high_contrast;
@@ -55,7 +56,7 @@ fn three_item_rail() -> ActionRail {
 
 /// A rail with an initial keyboard focus, mirroring `Menu::with_current`.
 fn with_focus(mut rail: ActionRail, index: usize) -> ActionRail {
-    rail.set_focus(Some(index));
+    rail.set_focus(Some(index), column(), &mut sink());
     rail
 }
 
@@ -63,6 +64,12 @@ fn render(rail: &ActionRail, theme: &Theme, height: u32) -> Surface {
     let mut surface = Surface::new(W, height).expect("surface");
     rail.render(&mut surface, Rect::new(0, 0, W, height), Scale::ONE, theme);
     surface
+}
+
+/// A column tall enough for every item a keyboard test focuses. Focus reports
+/// the rail's own bounds, so the exact height only has to be plausible.
+fn column() -> Rect {
+    Rect::new(0, 0, W, 200)
 }
 
 fn moved(x: i32, y: i32) -> InputEvent {
@@ -116,11 +123,23 @@ fn an_empty_rail_reports_empty_and_answers_none_everywhere() {
     assert_eq!(rail.measured_height(Scale::ONE, &theme), 0);
     assert_eq!(rail.measured_width(Scale::ONE, &theme), 0);
     assert_eq!(
-        rail.on_pointer(&PRESS, Rect::new(0, 0, W, 100), Scale::ONE, &theme),
+        rail.on_pointer(
+            &PRESS,
+            Rect::new(0, 0, W, 100),
+            Scale::ONE,
+            &theme,
+            &mut sink()
+        ),
         None
     );
-    assert_eq!(rail.on_key(Key::Named(NamedKey::Down)), None);
-    assert_eq!(rail.on_key(Key::Named(NamedKey::Enter)), None);
+    assert_eq!(
+        rail.on_key(Key::Named(NamedKey::Down), column(), &mut sink()),
+        None
+    );
+    assert_eq!(
+        rail.on_key(Key::Named(NamedKey::Enter), column(), &mut sink()),
+        None
+    );
 }
 
 #[test]
@@ -224,10 +243,10 @@ fn pressing_and_releasing_over_the_same_item_activates_it() {
     let h = rail.measured_height(Scale::ONE, &theme);
     let bounds = Rect::new(0, 0, W, h);
     let y = item_centre_y(1);
-    rail.on_pointer(&moved(10, y), bounds, Scale::ONE, &theme);
-    rail.on_pointer(&PRESS, bounds, Scale::ONE, &theme);
+    rail.on_pointer(&moved(10, y), bounds, Scale::ONE, &theme, &mut sink());
+    rail.on_pointer(&PRESS, bounds, Scale::ONE, &theme, &mut sink());
     assert_eq!(
-        rail.on_pointer(&RELEASE, bounds, Scale::ONE, &theme),
+        rail.on_pointer(&RELEASE, bounds, Scale::ONE, &theme, &mut sink()),
         Some(RailAction::Activate { index: 1 })
     );
 }
@@ -238,10 +257,25 @@ fn releasing_over_a_different_item_activates_nothing() {
     let mut rail = three_item_rail();
     let h = rail.measured_height(Scale::ONE, &theme);
     let bounds = Rect::new(0, 0, W, h);
-    rail.on_pointer(&moved(10, item_centre_y(0)), bounds, Scale::ONE, &theme);
-    rail.on_pointer(&PRESS, bounds, Scale::ONE, &theme);
-    rail.on_pointer(&moved(10, item_centre_y(2)), bounds, Scale::ONE, &theme);
-    assert_eq!(rail.on_pointer(&RELEASE, bounds, Scale::ONE, &theme), None);
+    rail.on_pointer(
+        &moved(10, item_centre_y(0)),
+        bounds,
+        Scale::ONE,
+        &theme,
+        &mut sink(),
+    );
+    rail.on_pointer(&PRESS, bounds, Scale::ONE, &theme, &mut sink());
+    rail.on_pointer(
+        &moved(10, item_centre_y(2)),
+        bounds,
+        Scale::ONE,
+        &theme,
+        &mut sink(),
+    );
+    assert_eq!(
+        rail.on_pointer(&RELEASE, bounds, Scale::ONE, &theme, &mut sink()),
+        None
+    );
 }
 
 #[test]
@@ -251,7 +285,13 @@ fn hovering_an_item_changes_the_render() {
     let h = rail.measured_height(Scale::ONE, &theme);
     let bounds = Rect::new(0, 0, W, h);
     let resting = render(&rail, &theme, h);
-    rail.on_pointer(&moved(10, item_centre_y(0)), bounds, Scale::ONE, &theme);
+    rail.on_pointer(
+        &moved(10, item_centre_y(0)),
+        bounds,
+        Scale::ONE,
+        &theme,
+        &mut sink(),
+    );
     let hovered = render(&rail, &theme, h);
     assert_ne!(
         resting.pixels(),
@@ -272,9 +312,18 @@ fn a_disabled_item_never_activates() {
     }]);
     let h = rail.measured_height(Scale::ONE, &theme);
     let bounds = Rect::new(0, 0, W, h);
-    rail.on_pointer(&moved(10, item_centre_y(1)), bounds, Scale::ONE, &theme);
-    rail.on_pointer(&PRESS, bounds, Scale::ONE, &theme);
-    assert_eq!(rail.on_pointer(&RELEASE, bounds, Scale::ONE, &theme), None);
+    rail.on_pointer(
+        &moved(10, item_centre_y(1)),
+        bounds,
+        Scale::ONE,
+        &theme,
+        &mut sink(),
+    );
+    rail.on_pointer(&PRESS, bounds, Scale::ONE, &theme, &mut sink());
+    assert_eq!(
+        rail.on_pointer(&RELEASE, bounds, Scale::ONE, &theme, &mut sink()),
+        None
+    );
 }
 
 #[test]
@@ -293,9 +342,18 @@ fn a_denied_item_never_activates_and_shows_the_authority_mark() {
     let h = rail.measured_height(Scale::ONE, &theme);
     let bounds = Rect::new(0, 0, W, h);
 
-    rail.on_pointer(&moved(10, item_centre_y(1)), bounds, Scale::ONE, &theme);
-    rail.on_pointer(&PRESS, bounds, Scale::ONE, &theme);
-    assert_eq!(rail.on_pointer(&RELEASE, bounds, Scale::ONE, &theme), None);
+    rail.on_pointer(
+        &moved(10, item_centre_y(1)),
+        bounds,
+        Scale::ONE,
+        &theme,
+        &mut sink(),
+    );
+    rail.on_pointer(&PRESS, bounds, Scale::ONE, &theme, &mut sink());
+    assert_eq!(
+        rail.on_pointer(&RELEASE, bounds, Scale::ONE, &theme, &mut sink()),
+        None
+    );
 
     assert!(has_pixel(
         &render(&rail, &theme, h),
@@ -312,33 +370,36 @@ fn a_denied_item_never_activates_and_shows_the_authority_mark() {
 #[test]
 fn down_moves_focus_and_clamps_at_the_last_item() {
     let mut rail = three_item_rail();
-    assert_eq!(rail.on_key(Key::Named(NamedKey::Down)), None);
+    assert_eq!(
+        rail.on_key(Key::Named(NamedKey::Down), column(), &mut sink()),
+        None
+    );
     assert_eq!(rail.focus(), Some(0));
-    rail.on_key(Key::Named(NamedKey::Down));
+    rail.on_key(Key::Named(NamedKey::Down), column(), &mut sink());
     assert_eq!(rail.focus(), Some(1));
-    rail.on_key(Key::Named(NamedKey::Down));
+    rail.on_key(Key::Named(NamedKey::Down), column(), &mut sink());
     assert_eq!(rail.focus(), Some(2));
-    rail.on_key(Key::Named(NamedKey::Down));
+    rail.on_key(Key::Named(NamedKey::Down), column(), &mut sink());
     assert_eq!(rail.focus(), Some(2), "down clamps at the last item");
 }
 
 #[test]
 fn up_moves_focus_and_clamps_at_the_first_item() {
     let mut rail = with_focus(three_item_rail(), 2);
-    rail.on_key(Key::Named(NamedKey::Up));
+    rail.on_key(Key::Named(NamedKey::Up), column(), &mut sink());
     assert_eq!(rail.focus(), Some(1));
-    rail.on_key(Key::Named(NamedKey::Up));
+    rail.on_key(Key::Named(NamedKey::Up), column(), &mut sink());
     assert_eq!(rail.focus(), Some(0));
-    rail.on_key(Key::Named(NamedKey::Up));
+    rail.on_key(Key::Named(NamedKey::Up), column(), &mut sink());
     assert_eq!(rail.focus(), Some(0), "up clamps at the first item");
 }
 
 #[test]
 fn home_and_end_jump_to_the_ends() {
     let mut rail = with_focus(three_item_rail(), 1);
-    rail.on_key(Key::Named(NamedKey::Home));
+    rail.on_key(Key::Named(NamedKey::Home), column(), &mut sink());
     assert_eq!(rail.focus(), Some(0));
-    rail.on_key(Key::Named(NamedKey::End));
+    rail.on_key(Key::Named(NamedKey::End), column(), &mut sink());
     assert_eq!(rail.focus(), Some(2));
 }
 
@@ -346,11 +407,11 @@ fn home_and_end_jump_to_the_ends() {
 fn enter_and_space_activate_the_focused_item() {
     let mut rail = with_focus(three_item_rail(), 1);
     assert_eq!(
-        rail.on_key(Key::Named(NamedKey::Enter)),
+        rail.on_key(Key::Named(NamedKey::Enter), column(), &mut sink()),
         Some(RailAction::Activate { index: 1 })
     );
     assert_eq!(
-        rail.on_key(Key::Char(' ')),
+        rail.on_key(Key::Char(' '), column(), &mut sink()),
         Some(RailAction::Activate { index: 1 })
     );
 }
@@ -362,13 +423,16 @@ fn a_focused_disabled_item_consumes_the_key_without_activating() {
         b.set_state(ControlState::disabled());
         b
     }]);
-    rail.on_key(Key::Named(NamedKey::End));
+    rail.on_key(Key::Named(NamedKey::End), column(), &mut sink());
     assert_eq!(
         rail.focus(),
         Some(1),
         "focus still lands on the disabled item"
     );
-    assert_eq!(rail.on_key(Key::Named(NamedKey::Enter)), None);
+    assert_eq!(
+        rail.on_key(Key::Named(NamedKey::Enter), column(), &mut sink()),
+        None
+    );
 }
 
 #[test]
@@ -378,9 +442,12 @@ fn a_focused_denied_item_consumes_the_key_without_activating() {
         b.set_state(ControlState::idle().with_authority(AuthorityState::Denied));
         b
     }]);
-    rail.on_key(Key::Named(NamedKey::End));
+    rail.on_key(Key::Named(NamedKey::End), column(), &mut sink());
     assert_eq!(rail.focus(), Some(1));
-    assert_eq!(rail.on_key(Key::Named(NamedKey::Enter)), None);
+    assert_eq!(
+        rail.on_key(Key::Named(NamedKey::Enter), column(), &mut sink()),
+        None
+    );
 }
 
 // --- Roles ---------------------------------------------------------------

@@ -37,7 +37,7 @@ mod program {
     use tairix_abi::window_ipc::{PointerAction, WindowEvent, WINDOW_ENDPOINT};
     use tairix_abi::{Errno, Origin, ProcId, ORIGIN_WIRE_LEN};
     use tairix_font::BitmapFont;
-    use tairix_geometry::{Point, Rect, Scale};
+    use tairix_geometry::{Point, Rect, Region, Scale};
     use tairix_input::InputEvent;
     use tairix_rt::io::{Stderr, Write};
     use tairix_theme::{TextRole, Theme, ThemeRegistry};
@@ -218,23 +218,39 @@ mod program {
         event: &WindowEvent,
     ) -> (bool, bool) {
         let viewport = Rect::new(0, 0, mode.width_px, mode.height_px);
+        // One sink for the whole round: every control this event reaches
+        // reports its own repainted bounds into the same region.
+        let mut damage = tairix_controls::damage::sink();
         match event {
             WindowEvent::CloseRequested { .. } => (false, true),
             WindowEvent::Key {
                 key: pressed @ KeyInput::Pressed { .. },
                 ..
             } => match key_input_event(*pressed) {
-                InputEvent::KeyPressed { key, modifiers } => {
-                    (gallery.on_key(key, modifiers), false)
-                }
+                InputEvent::KeyPressed { key, modifiers } => (
+                    gallery.on_key(key, modifiers, viewport, scale, theme, &mut damage),
+                    false,
+                ),
                 _ => (false, false),
             },
-            WindowEvent::Pointer { x, y, action, .. } => {
-                (apply_pointer(gallery, *x, *y, *action, mode, theme, scale), false)
-            }
+            WindowEvent::Pointer { x, y, action, .. } => (
+                apply_pointer(
+                    gallery,
+                    client_point(*x, *y),
+                    *action,
+                    viewport,
+                    scale,
+                    theme,
+                    &mut damage,
+                ),
+                false,
+            ),
             WindowEvent::Scrolled { dx, dy, .. } => {
                 let scroll = InputEvent::PointerScrolled { dx: *dx, dy: *dy };
-                (gallery.on_pointer(&scroll, viewport, scale, theme), false)
+                (
+                    gallery.on_pointer(&scroll, viewport, scale, theme, &mut damage),
+                    false,
+                )
             }
             // A redraw request needs nothing here: the client library
             // re-presents the last frame, and the gallery it drew has not
@@ -255,32 +271,30 @@ mod program {
         }
     }
 
-    /// Route one wire pointer event: a move to `(x, y)` to sync the pointer,
-    /// then the press/release the action names. Returns whether the view
-    /// changed.
-    ///
-    /// The viewport is derived from `mode` here (the same derivation
-    /// [`apply_event`] uses for its own dispatch), so the caller passes only
-    /// the values that can actually differ between call sites.
+    /// Route one wire pointer event: a move to `at` to sync the pointer, then
+    /// the press/release the action names. Returns whether the view changed.
     fn apply_pointer(
         gallery: &mut Gallery,
-        x: u32,
-        y: u32,
+        at: Point,
         action: PointerAction,
-        mode: &DisplayMode,
-        theme: &Theme,
+        viewport: Rect,
         scale: Scale,
+        theme: &Theme,
+        damage: &mut Region,
     ) -> bool {
-        let viewport = Rect::new(0, 0, mode.width_px, mode.height_px);
-        let point = Point::new(
-            i32::try_from(x).unwrap_or(i32::MAX),
-            i32::try_from(y).unwrap_or(i32::MAX),
-        );
         let mut acted = false;
-        for input in pointer_input_events(action, point) {
-            acted |= gallery.on_pointer(&input, viewport, scale, theme);
+        for input in pointer_input_events(action, at) {
+            acted |= gallery.on_pointer(&input, viewport, scale, theme, damage);
         }
         acted
+    }
+
+    /// The client-local point a wire pointer position names.
+    fn client_point(x: u32, y: u32) -> Point {
+        Point::new(
+            i32::try_from(x).unwrap_or(i32::MAX),
+            i32::try_from(y).unwrap_or(i32::MAX),
+        )
     }
 
     /// Bind the app's own event mailbox and add it to a fresh wait-set the

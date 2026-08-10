@@ -69,13 +69,13 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use tairix_font::BitmapFont;
-use tairix_geometry::{to_i32, Point, Rect, Scale};
+use tairix_geometry::{to_i32, Point, Rect, Region, Scale};
 use tairix_input::{InputEvent, Key, NamedKey, PointerButton};
 use tairix_raster::{Color, Surface};
 use tairix_theme::Theme;
 
 use tairix_controls::{
-    ActionRail, AuthorityState, Breadcrumb, BreadcrumbAction, ButtonAction, CardAction,
+    damage, ActionRail, AuthorityState, Breadcrumb, BreadcrumbAction, ButtonAction, CardAction,
     ControlRole, ControlState, Crumb, IconButton, Menu, MenuAction, MenuItem, RenderInvariant,
     ScrollAction, ScrollBar, ScrollModel, ScrollOrientation, ScrollRange, SelectionState,
 };
@@ -614,8 +614,14 @@ trait SectionView {
         let _ = (surface, rect, scale, theme);
     }
 
-    /// Route a pointer event to the section's items.
-    fn on_pointer(&mut self, event: &InputEvent, ctx: SectionCtx<'_>) -> Option<SectionOutcome>;
+    /// Route a pointer event to the section's items, reporting every control
+    /// whose drawn state the event changed into `damage`.
+    fn on_pointer(
+        &mut self,
+        event: &InputEvent,
+        ctx: SectionCtx<'_>,
+        damage: &mut Region,
+    ) -> Option<SectionOutcome>;
 
     /// Mark this section's focus rings and Focus Field membership for a
     /// content region that is (or is not) `focused`.
@@ -1331,6 +1337,9 @@ impl Switchboard {
         if let InputEvent::PointerMoved { to } = event {
             *self.pointer = *to;
         }
+        // One sink for the whole round: every control this event reaches
+        // reports into it.
+        let mut damage = damage::sink();
 
         // An open popup is modal over the rest of the composition: every event
         // routes to it first, and a primary press outside its bounds dismisses
@@ -1375,14 +1384,16 @@ impl Switchboard {
             self.open_section_menu();
             return None;
         }
-        if self.section_list.on_pointer(event, command) == Some(ButtonAction::Activated) {
+        if self.section_list.on_pointer(event, command, &mut damage)
+            == Some(ButtonAction::Activated)
+        {
             self.open_section_menu();
             return None;
         }
 
         // The active section's content.
         let ctx = self.section_ctx(&layout, bounds, scale, theme, font);
-        let outcome = self.active_mut().on_pointer(event, ctx);
+        let outcome = self.active_mut().on_pointer(event, ctx, &mut damage);
         outcome.and_then(|outcome| self.resolve_outcome(outcome))
     }
 

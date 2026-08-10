@@ -70,7 +70,7 @@ use tairix_controls::{
     ScrollOrientation, ScrollRange,
 };
 use tairix_font::BitmapFont;
-use tairix_geometry::{Rect, Scale};
+use tairix_geometry::{Rect, Region, Scale};
 use tairix_input::InputEvent;
 use tairix_raster::Surface;
 use tairix_theme::Theme;
@@ -762,11 +762,12 @@ impl Viewer {
         height_px: u32,
         theme: &Theme,
         scale: Scale,
+        damage: &mut Region,
     ) -> ViewerPointerOutcome {
         let layout = ViewerLayout::for_window(width_px, height_px, theme, scale);
 
         let button_state_before = self.open_button.state();
-        let action = self.open_button.on_pointer(event, layout.button);
+        let action = self.open_button.on_pointer(event, layout.button, damage);
         let button_changed = self.open_button.state() != button_state_before;
 
         let bar_before = self.scrollbar;

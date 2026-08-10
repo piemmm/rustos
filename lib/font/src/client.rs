@@ -37,6 +37,12 @@
 //! families, times the three weights), so unlike the glyph cache a byte
 //! budget would be over-engineering — a bounded ring buffer of entries is
 //! cheap, simple, and already generous for that working set.
+//!
+//! A proportional family's *measurements* are memoised the same way as its
+//! glyphs, in the crate's `measure` module: the per-character advance walk a
+//! label costs is done once and answered from thereafter, so a repaint of
+//! unchanged text measures nothing. A monospace family never reaches the memo
+//! — its width is a multiplication.
 
 use alloc::boxed::Box;
 use alloc::vec::Vec;
@@ -52,6 +58,7 @@ use tairix_sync::SpinLock;
 
 use crate::atlas;
 use crate::glyph_cache::CachedGlyph;
+use crate::measure::{self, MeasureCache, MeasureEpoch, MeasuredText};
 
 /// One synchronous font-service call: send one request frame, receive one
 /// reply frame. The `ipc_call` syscall behind a seam, so the render path is
@@ -91,6 +98,10 @@ pub type GlyphCache = ReclaimCache<GlyphKey, CachedGlyph, ()>;
 /// The audit label the client's own cache is named by in reclaim records.
 #[cfg(feature = "rt")]
 const CLIENT_CACHE_LABEL: &str = "font.client.glyphs";
+
+/// The audit label the client's measurement memo is named by.
+#[cfg(feature = "rt")]
+const MEASURE_CACHE_LABEL: &str = "font.client.measure";
 
 /// The owner the client's own cache charges its bytes to.
 ///
@@ -153,9 +164,9 @@ impl MetricsCache {
 }
 
 /// The render path's process-global font client: the installed transport, a
-/// reusable receive buffer, the optional local glyph cache, and the bounded
-/// metrics cache.
-struct GlyphClient {
+/// reusable receive buffer, the optional local glyph cache, the bounded
+/// metrics cache, and the optional measurement memo.
+pub(crate) struct GlyphClient {
     transport: Option<Box<dyn FontTransport>>,
     reply: Vec<u8>,
     /// `None` until a cache is installed, in which case every glyph is
@@ -163,6 +174,12 @@ struct GlyphClient {
     /// per glyph.
     cache: Option<GlyphCache>,
     metrics: MetricsCache,
+    /// `None` until a memo is installed, in which case every measurement is
+    /// walked afresh — correct, merely one advance lookup per character.
+    measure: Option<MeasureCache>,
+    /// The generation retained measurements are keyed to, moved on by
+    /// [`install_transport`](Self::install_transport).
+    advance_source: MeasureEpoch,
 }
 
 impl GlyphClient {
@@ -172,7 +189,20 @@ impl GlyphClient {
             reply: Vec::new(),
             cache: None,
             metrics: MetricsCache::new(),
+            measure: None,
+            advance_source: 0,
         }
+    }
+
+    /// Install `transport` as this client's advance source.
+    ///
+    /// The measurement epoch moves on with it: a replaced source may measure
+    /// a face differently, so nothing measured under the outgoing one is
+    /// served again. The counter wraps rather than trapping; no process
+    /// installs transports 2^64 times.
+    fn install_transport(&mut self, transport: Box<dyn FontTransport>) {
+        self.transport = Some(transport);
+        self.advance_source = self.advance_source.wrapping_add(1);
     }
 
     /// Install this process's default transport and glyph cache on first
@@ -197,7 +227,7 @@ impl GlyphClient {
     ///
     /// `None` — composite nothing, fail closed — when no transport is
     /// installed or the call or its reply could not be read.
-    fn with_glyph<R>(
+    pub(crate) fn with_glyph<R>(
         &mut self,
         scalar: char,
         family: FamilyKey,
@@ -213,8 +243,166 @@ impl GlyphClient {
             cache,
             ..
         } = self;
-        let transport = transport.as_mut()?;
-        let Some(cache) = cache.as_mut() else {
+        GlyphSource {
+            transport,
+            reply,
+            cache,
+        }
+        .glyph(scalar, family, pixel_height, weight, f)
+    }
+
+    /// Serve `text`'s measurement in `(family, pixel_height, weight)` to `f`,
+    /// walking the per-character advances on a miss and retaining the walk
+    /// when a memo is installed and admits it.
+    ///
+    /// Never fails: with no memo installed, a memo that will not admit the
+    /// entry, or a fingerprint clash, the walk is done for this caller alone
+    /// and `f` sees exactly what it would have.
+    ///
+    /// A walk the advance source could not complete is served but not
+    /// retained, so a service that recovers is measured again rather than
+    /// answered forever from a walk of zeros.
+    pub(crate) fn with_measurement<R>(
+        &mut self,
+        text: &str,
+        family: FamilyKey,
+        pixel_height: u32,
+        weight: FontWeight,
+        f: impl FnOnce(&MeasuredText) -> R,
+    ) -> R {
+        #[cfg(any(feature = "rt", feature = "test-util"))]
+        self.ensure_defaults();
+        let Self {
+            transport,
+            reply,
+            cache,
+            measure,
+            advance_source,
+            ..
+        } = self;
+        let mut source = GlyphSource {
+            transport,
+            reply,
+            cache,
+        };
+        if let Some(memo) = measure.as_mut() {
+            let key = measure::measure_key(family, pixel_height, weight, text);
+            let served = memo.get_or_build(advance_source, key, || {
+                let (measured, resolved) = source.measure_text(text, family, pixel_height, weight);
+                resolved.then_some(measured)
+            });
+            if let Some(served) = served {
+                if served.is_of(text) {
+                    return f(&served);
+                }
+            }
+        }
+        f(&source.measure_text(text, family, pixel_height, weight).0)
+    }
+
+    /// `family`'s line metrics at `pixel_height` in `weight`, fetched over
+    /// the transport on a cache miss.
+    ///
+    /// Never fails: no transport installed or a refused request yields the
+    /// console-atlas geometry scaled to `pixel_height` ([`fallback_metrics`])
+    /// rather than leaving a caller with nothing to lay text out with.
+    pub(crate) fn metrics(
+        &mut self,
+        family: FamilyKey,
+        pixel_height: u32,
+        weight: FontWeight,
+    ) -> FontMetrics {
+        #[cfg(any(feature = "rt", feature = "test-util"))]
+        self.ensure_defaults();
+        let key = (family.to_wire(), pixel_height, weight.to_wire());
+        if let Some(metrics) = self.metrics.get(key) {
+            return metrics;
+        }
+        let fetched = self.transport.as_mut().and_then(|transport| {
+            fetch_metrics(
+                transport.as_mut(),
+                &mut self.reply,
+                family,
+                pixel_height,
+                weight,
+            )
+        });
+        let metrics = fetched.unwrap_or_else(|| fallback_metrics(pixel_height));
+        if fetched.is_some() {
+            self.metrics.insert(key, metrics);
+        }
+        metrics
+    }
+
+    /// Shrink both of the client's caches to the band's ceiling, returning
+    /// the bytes released. A cache that is not installed is nothing to
+    /// release, and neither is built to answer.
+    fn trim(&mut self) -> usize {
+        let glyphs = self
+            .cache
+            .as_mut()
+            .map_or(0, ReclaimCache::enforce_pressure);
+        let measurements = self
+            .measure
+            .as_mut()
+            .map_or(0, ReclaimCache::enforce_pressure);
+        glyphs.saturating_add(measurements)
+    }
+
+    /// The installed families, or an empty list when no transport is
+    /// installed or the service refuses the request (fail closed).
+    fn families(&mut self) -> Vec<FamilyEntry> {
+        #[cfg(any(feature = "rt", feature = "test-util"))]
+        self.ensure_defaults();
+        let Some(transport) = self.transport.as_mut() else {
+            return Vec::new();
+        };
+        if self.reply.len() < FONT_MAX_FAMILIES_REPLY {
+            self.reply.resize(FONT_MAX_FAMILIES_REPLY, 0);
+        }
+        let request = FontRequest::Families.to_le_bytes();
+        let Ok(len) = transport.call(&request, &mut self.reply) else {
+            return Vec::new();
+        };
+        let Some(frame) = self.reply.get(..len) else {
+            return Vec::new();
+        };
+        decode_families_reply(frame)
+            .map(|list| list.entries().to_vec())
+            .unwrap_or_default()
+    }
+}
+
+/// The client state serving one glyph reads: the installed transport, the
+/// reusable receive buffer, and the optional glyph cache.
+///
+/// Borrowed as a group so a measurement walk can hold the advance source
+/// while the memo holds the client's other field — disjointness one
+/// `&mut self` method could not express.
+struct GlyphSource<'a> {
+    transport: &'a mut Option<Box<dyn FontTransport>>,
+    reply: &'a mut Vec<u8>,
+    cache: &'a mut Option<GlyphCache>,
+}
+
+impl GlyphSource<'_> {
+    /// Serve `(scalar, family, pixel_height, weight)` to `f`, fetching it over
+    /// the transport on a miss and retaining it when a cache is installed and
+    /// admits it.
+    ///
+    /// `None` — composite nothing, fail closed — when no transport is
+    /// installed or the call or its reply could not be read.
+    fn glyph<R>(
+        &mut self,
+        scalar: char,
+        family: FamilyKey,
+        pixel_height: u32,
+        weight: FontWeight,
+        f: impl FnOnce(&CachedGlyph) -> R,
+    ) -> Option<R> {
+        let transport = self.transport.as_mut()?;
+        let reply = &mut *self.reply;
+        let Some(cache) = self.cache.as_mut() else {
             let glyph = fetch_glyph(
                 transport.as_mut(),
                 reply,
@@ -244,65 +432,18 @@ impl GlyphClient {
         Some(f(&served))
     }
 
-    /// `family`'s line metrics at `pixel_height` in `weight`, fetched over
-    /// the transport on a cache miss.
-    ///
-    /// Never fails: no transport installed or a refused request yields the
-    /// console-atlas geometry scaled to `pixel_height` ([`fallback_metrics`])
-    /// rather than leaving a caller with nothing to lay text out with.
-    fn metrics(&mut self, family: FamilyKey, pixel_height: u32, weight: FontWeight) -> FontMetrics {
-        #[cfg(any(feature = "rt", feature = "test-util"))]
-        self.ensure_defaults();
-        let key = (family.to_wire(), pixel_height, weight.to_wire());
-        if let Some(metrics) = self.metrics.get(key) {
-            return metrics;
-        }
-        let fetched = self.transport.as_mut().and_then(|transport| {
-            fetch_metrics(
-                transport.as_mut(),
-                &mut self.reply,
-                family,
-                pixel_height,
-                weight,
-            )
-        });
-        let metrics = fetched.unwrap_or_else(|| fallback_metrics(pixel_height));
-        if fetched.is_some() {
-            self.metrics.insert(key, metrics);
-        }
-        metrics
-    }
-
-    /// Shrink the glyph cache to the band's ceiling, returning the bytes
-    /// released. No cache installed is nothing to release, and no cache is
-    /// built to answer.
-    fn trim(&mut self) -> usize {
-        self.cache
-            .as_mut()
-            .map_or(0, ReclaimCache::enforce_pressure)
-    }
-
-    /// The installed families, or an empty list when no transport is
-    /// installed or the service refuses the request (fail closed).
-    fn families(&mut self) -> Vec<FamilyEntry> {
-        #[cfg(any(feature = "rt", feature = "test-util"))]
-        self.ensure_defaults();
-        let Some(transport) = self.transport.as_mut() else {
-            return Vec::new();
-        };
-        if self.reply.len() < FONT_MAX_FAMILIES_REPLY {
-            self.reply.resize(FONT_MAX_FAMILIES_REPLY, 0);
-        }
-        let request = FontRequest::Families.to_le_bytes();
-        let Ok(len) = transport.call(&request, &mut self.reply) else {
-            return Vec::new();
-        };
-        let Some(frame) = self.reply.get(..len) else {
-            return Vec::new();
-        };
-        decode_families_reply(frame)
-            .map(|list| list.entries().to_vec())
-            .unwrap_or_default()
+    /// Walk `text`'s per-character advances in `(family, pixel_height,
+    /// weight)`, reporting whether every one of them resolved.
+    fn measure_text(
+        &mut self,
+        text: &str,
+        family: FamilyKey,
+        pixel_height: u32,
+        weight: FontWeight,
+    ) -> (MeasuredText, bool) {
+        measure::measure(text, |scalar| {
+            self.glyph(scalar, family, pixel_height, weight, |glyph| glyph.advance)
+        })
     }
 }
 
@@ -422,15 +563,18 @@ fn install_defaults(client: &mut GlyphClient) {
     #[cfg(feature = "rt")]
     {
         if client.transport.is_none() {
-            client.transport = Some(Box::new(RtTransport));
+            client.install_transport(Box::new(RtTransport));
         }
         if client.cache.is_none() {
             client.cache = Some(default_cache());
         }
+        if client.measure.is_none() {
+            client.measure = Some(default_measure_cache());
+        }
     }
     #[cfg(all(feature = "test-util", not(feature = "rt")))]
     if client.transport.is_none() {
-        client.transport = Some(Box::new(SolidTestTransport));
+        client.install_transport(Box::new(SolidTestTransport));
     }
 }
 
@@ -478,6 +622,34 @@ fn default_cache() -> GlyphCache {
     cache
 }
 
+/// Build the client's measurement memo, on the same RAM-derived ceiling the
+/// glyph cache takes.
+///
+/// One derivation serves both: the ceiling is a fraction of the machine's
+/// total usable RAM, and a measurement is far smaller than the glyph bitmaps
+/// it was walked from, so the memo's real working set sits well inside it. A
+/// RAM read that fails is a zero total, hence a zero budget, hence a memo that
+/// retains nothing and walks every measurement — slower, never wrong.
+#[cfg(feature = "rt")]
+fn default_measure_cache() -> MeasureCache {
+    use tairix_reclaim::ReclaimOwner;
+
+    static LOG_SINK: tairix_rt::LogSink = tairix_rt::LogSink;
+
+    let total = tairix_procinfo::memory_total_bytes(&tairix_procinfo::IpcTransport).unwrap_or(0);
+    let cache = ReclaimCache::new(
+        MEASURE_CACHE_LABEL,
+        measure::measure_cache_candidate(ReclaimOwner::UserlandProcess(CLIENT_CACHE_OWNER)),
+        crate::glyph_cache::glyph_cache_budget(total),
+        tairix_rt::pressure::gauge(),
+        &LOG_SINK,
+    );
+    if let Some(ledger) = cache.ledger() {
+        tairix_rt::cachereport::register(ledger);
+    }
+    cache
+}
+
 /// The one process-global font client.
 static CLIENT: SpinLock<GlyphClient> = SpinLock::new(GlyphClient::new());
 
@@ -486,8 +658,12 @@ static CLIENT: SpinLock<GlyphClient> = SpinLock::new(GlyphClient::new());
 /// Production installs the `ipc_call`-backed transport; a host test installs
 /// a mock. Under the `rt` feature the transport also defaults lazily on first
 /// use, so an `rt` program needs no explicit install.
+///
+/// Retained measurements do not survive the change: the incoming transport is
+/// a new advance source, and a width measured through the outgoing one is not
+/// evidence about this one.
 pub fn set_font_transport(transport: Box<dyn FontTransport>) {
-    CLIENT.lock().transport = Some(transport);
+    CLIENT.lock().install_transport(transport);
 }
 
 /// Install (or replace) the process-global glyph cache fetched coverage is
@@ -506,20 +682,32 @@ pub fn set_glyph_cache(cache: GlyphCache) {
     CLIENT.lock().cache = Some(cache);
 }
 
-/// Shrink the glyph cache to what the band now in force allows, returning the
-/// bytes released.
+/// Shrink the client's caches — glyph coverage and text measurements — to
+/// what the band now in force allows, returning the bytes released.
 ///
 /// The client counterpart of the service's own trim: a program that learns
 /// the band moved gives the memory back at that moment rather than at its
 /// next draw. Without it a program that has stopped drawing — a minimised
 /// window, an idle tray client — would hold its rendered glyphs through a
 /// pressure event it was told about, which is precisely what the shared
-/// reclaim model exists to prevent.
+/// reclaim model exists to prevent. Both caches answer here, so a caller has
+/// one thing to arm on the pressure wake rather than one per cache the client
+/// happens to keep.
 ///
-/// Trims only an already-installed cache: it never builds one, so a program
+/// Trims only already-installed caches: it never builds one, so a program
 /// that has not drawn yet pays no service round trip to report zero.
 pub fn trim_glyph_cache() -> usize {
     CLIENT.lock().trim()
+}
+
+/// Run `f` against the process-global client, holding its lock across the
+/// call.
+///
+/// One acquisition serves a whole measurement — the face's metrics, then
+/// either the memo or a walk of per-character advances — where a lock taken
+/// per advance would pay for the same thing twice for every character.
+pub(crate) fn with_client<R>(f: impl FnOnce(&mut GlyphClient) -> R) -> R {
+    f(&mut CLIENT.lock())
 }
 
 /// Fetch the coverage glyph for `(scalar, family, pixel_height, weight)` and
@@ -754,7 +942,7 @@ mod tests {
 
     use crate::glyph_cache::{glyph_cache_budget, glyph_cache_candidate};
 
-    const INTER: FamilyKey = match FamilyKey::new("inter") {
+    pub(super) const INTER: FamilyKey = match FamilyKey::new("inter") {
         Ok(key) => key,
         Err(_) => FamilyKey::MONO,
     };
@@ -776,7 +964,7 @@ mod tests {
         }
     }
 
-    fn client_with(transport: impl FontTransport + 'static) -> GlyphClient {
+    pub(super) fn client_with(transport: impl FontTransport + 'static) -> GlyphClient {
         let mut client = GlyphClient::new();
         client.transport = Some(Box::new(transport));
         client
@@ -814,7 +1002,7 @@ mod tests {
     /// A cache built exactly as production builds one — the shared
     /// classification, the shared budget derivation — but from a gauge the
     /// test drives and a sink a host test has nowhere to send records to.
-    fn cache_at(
+    pub(super) fn cache_at(
         band: PressureBand,
         budget: CacheBudget,
     ) -> (GlyphCache, &'static ReportedPressure) {
@@ -1158,3 +1346,9 @@ mod tests {
         assert!(families.iter().any(|entry| entry.key == FamilyKey::MONO));
     }
 }
+
+/// The measurement memo's tests, which borrow this module's test clients and
+/// gauges rather than standing up a second set of them.
+#[cfg(test)]
+#[path = "measure_tests.rs"]
+mod measure_tests;

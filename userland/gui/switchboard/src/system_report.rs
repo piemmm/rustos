@@ -16,13 +16,14 @@ use alloc::vec::Vec;
 use tairix_abi::blkio::BlkDeviceClass;
 use tairix_abi::net_ipc::{NetAddrFamily, NetAddrState, NetIfAddr, NetIfKind};
 use tairix_abi::rlimit::{LimitKind, RLIMIT_INFINITY};
+use tairix_abi::switchboard_ipc::FrameReport;
 use tairix_abi::sysinfo::{
     CpuCoreClass, LoadAverage, MountAvailability, MountRecord, VolumeIoHealthRecord,
 };
 use tairix_abi::{CapabilityId, CapabilityQuery};
 use tairix_controls::{ControlRole, PressureKind};
 
-use crate::format::{format_bytes, format_duration, format_rate, percent};
+use crate::format::{format_bytes, format_duration, format_pixels, format_rate, percent};
 use crate::model::display_name;
 use crate::sample::{DegradedField, Sample};
 use crate::view::{
@@ -49,12 +50,15 @@ pub struct HeadlinePressure {
 ///
 /// `cpu_history` is the rolling CPU series the header's trend plots and
 /// `pressure` the latches the service has already reached; the caller owns
-/// both because no single sample carries a history or a latch.
+/// both because no single sample carries a history or a latch. `frame` is
+/// what the desktop session last reported its composited frame cost, which
+/// no kernel query can answer.
 #[must_use]
 pub fn build_system_report(
     sample: &Sample,
     cpu_history: &[u16],
     pressure: HeadlinePressure,
+    frame: Option<FrameReport>,
     authority: &dyn CapabilityQuery,
 ) -> SystemReport {
     SystemReport {
@@ -63,6 +67,7 @@ pub fn build_system_report(
         authority: authority_facts(sample, authority),
         cores: core_facts(sample),
         memory: memory_facts(sample),
+        compositor: compositor_facts(frame),
         volumes: storage_volumes(sample),
         volumes_absent: absent_unless(sample, DegradedField::Mounts, sample.mounts.is_some()),
         interfaces: network_interfaces(sample),
@@ -568,6 +573,83 @@ fn memory_facts(sample: &Sample) -> Vec<SystemFact> {
             }),
         ),
     ]
+}
+
+/// What the desktop's last composited frame cost, as the Resources page
+/// states it.
+///
+/// The first row is the reading that matters: the pixels the frame
+/// recomposed against the whole screen, with what resolving them blended
+/// directly beneath. A frame that changes a few thousand pixels and blends
+/// millions is paying for depth nobody can see, which is what turns "the
+/// desktop feels slow" into a figure.
+///
+/// A session that has reported no frame is honestly absent rather than
+/// zero: only the desktop can count this, and it has not spoken yet. A
+/// frame that recomposed nothing says so in one line instead of laying out
+/// a row of zeros as though a frame had been drawn.
+fn compositor_facts(frame: Option<FrameReport>) -> Vec<SystemFact> {
+    let Some(frame) = frame else {
+        return alloc::vec![SystemFact::new(
+            "Last frame",
+            Reading::Absent(Unmeasured::Unavailable),
+        )];
+    };
+    if frame.is_idle() {
+        return alloc::vec![SystemFact::new(
+            "Last frame",
+            Reading::measured("idle, nothing recomposed"),
+        )];
+    }
+    alloc::vec![
+        SystemFact::new(
+            "Last frame",
+            Reading::measured(format!(
+                "{} of {} recomposed",
+                format_pixels(frame.damaged_px),
+                format_pixels(frame.screen_px)
+            )),
+        ),
+        SystemFact::new("Blended", Reading::measured(blend_text(&frame))),
+        SystemFact::new(
+            "Opaque copies",
+            Reading::measured(format_pixels(frame.opaque_px)),
+        ),
+        SystemFact::new(
+            "Rectangles",
+            Reading::measured(frame.dirty_rects.to_string()),
+        ),
+        SystemFact::new(
+            "Present calls",
+            Reading::measured(frame.present_calls.to_string()),
+        ),
+        SystemFact::new(
+            "Window furniture",
+            Reading::measured(format!(
+                "{} cached, {} rendered",
+                frame.chrome_hits, frame.chrome_misses
+            )),
+        ),
+    ]
+}
+
+/// The blended-contribution row: the count, and how many times over the
+/// damage it is.
+///
+/// The multiplier is the legible form of overdraw — thirteen layer
+/// contributions for every pixel that changed — and it is derived here from
+/// the two counts beside it rather than sent, so the row can never disagree
+/// with them. A frame with no damage to divide by shows the count alone.
+fn blend_text(frame: &FrameReport) -> String {
+    let pixels = format_pixels(frame.blended_px);
+    match frame
+        .blended_px
+        .saturating_mul(10)
+        .checked_div(frame.damaged_px)
+    {
+        Some(tenths) => format!("{pixels}, {}.{}x damaged", tenths / 10, tenths % 10),
+        None => pixels,
+    }
 }
 
 /// One [`StorageVolume`] per mounted volume, each carrying its real

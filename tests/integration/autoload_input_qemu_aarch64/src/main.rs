@@ -352,6 +352,13 @@ mod kernel {
         /// delivery to any *other* port is the terminal gaining focus. A
         /// system-wide total would name no window at all, and the drift that
         /// gave once stalled this run.
+        ///
+        /// Only window-event mailboxes count: their ids carry the
+        /// `0xE117_…` tag (`lib/window`'s `event_endpoint_for`). Other
+        /// `MessageDelivered` ports — notably the Switchboard command
+        /// mailbox the session's frame reports ride — must not steal the
+        /// first-port slot, or the terminal-focus marker fires on the
+        /// files window and the typed command never reaches the shell.
         fn note_window_delivery(&self, event: &Event<'_>) {
             for field in event.fields {
                 if field.key != "port" {
@@ -363,6 +370,12 @@ mod kernel {
                 let Ok(port) = u64::from_str_radix(value, 16) else {
                     continue;
                 };
+                // Window-event mailbox tag — keep in lockstep with
+                // `lib/window`'s `EVENT_ENDPOINT_TAG` / `event_endpoint_for`.
+                const WINDOW_EVENT_TAG: u64 = 0xE117_0000_0000_0000;
+                if port & 0xFFFF_0000_0000_0000 != WINDOW_EVENT_TAG {
+                    continue;
+                }
                 let first = self.first_window_port.load(Ordering::Acquire);
                 if first == 0 {
                     self.first_window_port.store(port, Ordering::Release);

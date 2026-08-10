@@ -3,10 +3,28 @@
 
 use super::*;
 use alloc::vec;
-use tairix_controls::ScrollPart;
+use tairix_controls::{damage, ScrollPart};
 use tairix_geometry::Point;
 use tairix_input::PointerButton;
 use tairix_theme::ThemeRegistry;
+
+/// Feed one pointer `event` at the initial window size, as its own input
+/// round.
+fn feed(
+    viewer: &mut Viewer,
+    event: &InputEvent,
+    theme: &Theme,
+    scale: Scale,
+) -> ViewerPointerOutcome {
+    viewer.on_pointer(
+        event,
+        WIN_WIDTH,
+        WIN_HEIGHT,
+        theme,
+        scale,
+        &mut damage::sink(),
+    )
+}
 
 #[test]
 fn content_lines_split_on_line_feeds_and_bound_rows_and_cols() {
@@ -299,15 +317,15 @@ fn clicking_the_open_button_reports_the_open_action() {
         layout.button.top() + to_i32(layout.button.height / 2),
     );
 
-    let hover = viewer.on_pointer(&moved(centre), WIN_WIDTH, WIN_HEIGHT, theme, scale);
+    let hover = feed(&mut viewer, &moved(centre), theme, scale);
     assert!(hover.changed, "hovering the button changes its drawn state");
     assert!(!hover.open_requested);
 
-    let press = viewer.on_pointer(&PRESS, WIN_WIDTH, WIN_HEIGHT, theme, scale);
+    let press = feed(&mut viewer, &PRESS, theme, scale);
     assert!(press.changed, "pressing the button changes its drawn state");
     assert!(!press.open_requested, "activation happens on release");
 
-    let release = viewer.on_pointer(&RELEASE, WIN_WIDTH, WIN_HEIGHT, theme, scale);
+    let release = feed(&mut viewer, &RELEASE, theme, scale);
     assert!(
         release.open_requested,
         "releasing over the button activates it"
@@ -327,12 +345,12 @@ fn a_press_released_outside_the_button_does_not_activate_it() {
     // Well outside every control: the top-left corner of the text area.
     let outside = Point::new(layout.text.left(), layout.text.top());
 
-    let _ = viewer.on_pointer(&moved(centre), WIN_WIDTH, WIN_HEIGHT, theme, scale);
-    let press = viewer.on_pointer(&PRESS, WIN_WIDTH, WIN_HEIGHT, theme, scale);
+    let _ = feed(&mut viewer, &moved(centre), theme, scale);
+    let press = feed(&mut viewer, &PRESS, theme, scale);
     assert!(press.changed);
 
-    let _ = viewer.on_pointer(&moved(outside), WIN_WIDTH, WIN_HEIGHT, theme, scale);
-    let release = viewer.on_pointer(&RELEASE, WIN_WIDTH, WIN_HEIGHT, theme, scale);
+    let _ = feed(&mut viewer, &moved(outside), theme, scale);
+    let release = feed(&mut viewer, &RELEASE, theme, scale);
     assert!(
         !release.open_requested,
         "a release outside the button cancels the press rather than activating it"
@@ -353,7 +371,7 @@ fn hovering_the_button_changes_the_rendered_surface() {
     let resting = viewer
         .render(theme, scale, WIN_WIDTH, WIN_HEIGHT)
         .expect("renders");
-    let _ = viewer.on_pointer(&moved(centre), WIN_WIDTH, WIN_HEIGHT, theme, scale);
+    let _ = feed(&mut viewer, &moved(centre), theme, scale);
     let hovered = viewer
         .render(theme, scale, WIN_WIDTH, WIN_HEIGHT)
         .expect("renders");
@@ -365,7 +383,7 @@ fn hovering_the_button_changes_the_rendered_surface() {
 
     // Moving away again restores the resting picture.
     let away = Point::new(layout.text.left(), layout.text.top());
-    let _ = viewer.on_pointer(&moved(away), WIN_WIDTH, WIN_HEIGHT, theme, scale);
+    let _ = feed(&mut viewer, &moved(away), theme, scale);
     let unhovered = viewer
         .render(theme, scale, WIN_WIDTH, WIN_HEIGHT)
         .expect("renders");
@@ -397,14 +415,14 @@ fn dragging_the_scrollbar_thumb_scrolls_by_the_expected_offset() {
     // Grab the very first pixel classified as the thumb — the offset is
     // zero, so this is exactly the track origin, giving a zero anchor.
     let press_point = find_part(&bar, layout.scrollbar, scale, theme, ScrollPart::Thumb);
-    let _ = viewer.on_pointer(&moved(press_point), WIN_WIDTH, WIN_HEIGHT, theme, scale);
-    let _ = viewer.on_pointer(&PRESS, WIN_WIDTH, WIN_HEIGHT, theme, scale);
+    let _ = feed(&mut viewer, &moved(press_point), theme, scale);
+    let _ = feed(&mut viewer, &PRESS, theme, scale);
 
     let delta = 40;
     let drag_to = Point::new(press_point.x, press_point.y + delta);
-    let outcome = viewer.on_pointer(&moved(drag_to), WIN_WIDTH, WIN_HEIGHT, theme, scale);
+    let outcome = feed(&mut viewer, &moved(drag_to), theme, scale);
     assert!(outcome.changed, "dragging the thumb must move the view");
-    let _ = viewer.on_pointer(&RELEASE, WIN_WIDTH, WIN_HEIGHT, theme, scale);
+    let _ = feed(&mut viewer, &RELEASE, theme, scale);
 
     // A zero-anchor drag maps a `delta`-pixel move straight onto the shared
     // geometry's own offset math, so the expected offset comes from the same
@@ -431,15 +449,15 @@ fn clicking_the_track_pages_the_view() {
     let page_step = viewer.scroll_view().expect("open file").window_rows() - 1;
 
     let after_thumb = find_part(&bar, layout.scrollbar, scale, theme, ScrollPart::TrackAfter);
-    let outcome = viewer.on_pointer(&moved(after_thumb), WIN_WIDTH, WIN_HEIGHT, theme, scale);
+    let outcome = feed(&mut viewer, &moved(after_thumb), theme, scale);
     assert!(
         outcome.changed,
         "hovering the track changes the drawn state"
     );
 
-    let outcome = viewer.on_pointer(&PRESS, WIN_WIDTH, WIN_HEIGHT, theme, scale);
+    let outcome = feed(&mut viewer, &PRESS, theme, scale);
     assert!(outcome.changed, "a track click must page the view");
-    let _ = viewer.on_pointer(&RELEASE, WIN_WIDTH, WIN_HEIGHT, theme, scale);
+    let _ = feed(&mut viewer, &RELEASE, theme, scale);
 
     assert_eq!(
         viewer.scroll_view().expect("open file").offset(),

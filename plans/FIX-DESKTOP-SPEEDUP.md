@@ -1,14 +1,14 @@
 # FIX-DESKTOP-SPEEDUP — Software-compositor and GUI redraw performance
 
-Status: **A done, B done, C in progress** (C.2 landed; C.0/C.1/C.3/C.4/C.5
-remain). D–E planned. Stages A–E need no hardware acceleration, no kernel
-change, and no new syscall; F needs a `plans/FIX-HARDWARE-FEATURES.md`
-correction; G is gated on a User decision (§15.7) because it is kernel work.
+Status: **A done, B done, C mostly done** (C.0, C.2, C.4b, C.5 landed; C.1
+partly landed; C.3 blocked on the rest of C.1; C.4a remains). D–E planned.
+Stages A–E need no hardware acceleration, no kernel change, and no new
+syscall; F needs a `plans/FIX-HARDWARE-FEATURES.md` correction; G is gated on
+a User decision (§15.7) because it is kernel work.
 
-Still open in A: the QEMU hover vertical (A.4's counter-bounds gate) and
-surfacing the counters on the Switchboard's System → Resources page. The
-counters themselves, their exact-count unit tests, the build-profile fix and
-the bench harness are in.
+Still open in A: the QEMU hover vertical (A.4's counter-bounds gate). The
+counters, their exact-count unit tests, the build-profile fix, the bench
+harness and the Switchboard surfacing are in.
 
 Binding under `AGENTS.md` (§3, §15.18). This plan closes the standing
 performance defect that the desktop repaints **orders of magnitude more
@@ -69,15 +69,27 @@ full-window repaint and a full-window recomposite. Traced end to end:
 | 4 | app | the container fans the motion to **every** child; each does `Rect::contains` + a state write | `lib/controls` `Toolbar::on_pointer`, `Panel::on_pointer`, `paint::pointer_activation` |
 | 5 | app | any hover flip fails the host's `PartialEq` render gate → **the whole window surface is repainted** | `lib/controls/src/state.rs` (`RenderInvariant` docs) |
 | 6 | app paint | per control: `role_font()` builds a `BitmapFont` **on every paint**, text is re-truncated and re-measured, 1–4 `fill_round_rect`s, a temp `Surface` per signal bead | `lib/controls/src/paint.rs` |
-| 7 | app present | `client.present(id, 0, DamageRect::full(mode))` — **whole window, always** | `files`, `terminal`, `viewer`, `wallpaper`, `widgets`, `switchboard` `run.rs` |
-| 8 | compositor | full-client damage, widened by any blurred window to that window's **entire** bounds | `wm::compositor::widen_blurred_damage` |
+| 7 | app present | `client.present(id, 0, DamageRect::full(mode))` — **whole window, always**, after an unpremultiply-and-copy of every pixel into the shared frame | `files`, `terminal`, `viewer`, `wallpaper`, `widgets`, `switchboard` `run.rs` |
+| 8 | session | converts and **diffs every declared pixel** against the window's surface — a whole-window pass per sample | `session::windows::convert_damage` |
 | 9 | compositor | the frost is recomputed over the whole window every time, 2 box-blur passes, **4 integer divides per pixel per pass**, **never cached** | `wm::compositor::blur_backdrop`, `lib/raster/src/blur.rs` `blur_line`/`mean` |
 | 10 | compositor | every damaged pixel: `WindowRow::sample` → `scale_alpha` → `Pixel::over` (4 × `div255`). **No opaque fast path, no occlusion culling** | `wm::compositor::compose_pixel`, `wm::window::WindowRow::sample` |
 | 11 | present | up to `MAX_PRESENT_REGIONS` (8) separate `present_region` round trips, each rotating the 2-frame ring and copying a growing **bounding-box union** of stale damage | `lib/display/src/client.rs` `RemoteDisplay::push`/`copy_region` |
 
-Rows 5, 7, 8 and 10 are the "plummets when the pointer crosses a
-control-rich window" symptom. Rows 8+9 are the "slow when blur or
-transparency is in use" symptom. Row 11 multiplies both.
+Rows 5–10 are the "plummets when the pointer crosses a control-rich window"
+symptom. Rows 9+10 are the "slow when blur or transparency is in use"
+symptom. Row 11 multiplies both.
+
+**Where that cost actually falls, measured rather than assumed.** The
+compositor is *not* the bottleneck for an app hover: `convert_damage`
+(row 8) compares each presented pixel with the one already in the window's
+surface and returns only the sub-rectangle that genuinely changed, so a
+full-window `DamageRect` already reaches the compositor as the few rows a
+highlight moved. What a single pointer sample really costs is **three
+whole-window passes above it** — the app's re-render (row 5–6), the app's
+unpremultiply-and-copy into the shared frame (row 7), and the session's
+convert-and-diff (row 8) — none of which knows what changed. That is what
+Stages C.1 and C.3 remove, and it is why C.3's win is in the app and the
+session rather than in the composite.
 
 Two build-level facts make any measurement taken today meaningless:
 
@@ -183,6 +195,13 @@ Reset per frame, snapshot-readable.
 - The single most useful number is **damaged px vs blended px vs screen
   px**: it turns "the desktop feels slow" into "we blended 4.2 M pixels
   to change 3 200".
+- **A monitor must not measure its own act of displaying.** The session
+  suppresses a `FrameReport` when the only served content since the last
+  decision came from the live Switchboard's own window(s). Without that
+  gate, the panel rebuild from a report is itself a frame whose counters
+  differ, which sends another report, forever — a self-exciting push loop.
+  Rate-limiting or quantising the counters is not a fix; the content gate
+  is. Real desktop work and chrome/idle settles still report live.
 
 ### A.4 Tests + docs
 - Unit: counters are exact for a scripted scene (a known rect count and
@@ -271,38 +290,88 @@ occlusion and opaque scenarios.
 
 ---
 
-## Stage C — Repaint the control that changed, not the window  **[C.2 done; C.0, C.1, C.3, C.4, C.5 remain]**
+## Stage C — Repaint the control that changed, not the window  **[C.0, C.2, C.4b, C.5 done; C.1 partly; C.3 blocked; C.4a remains]**
 
 The largest single win, and pure userland. Depends on A.
 
-### C.0 One region type, in one place (§2.2, §27)
-`userland/gui/wm/src/damage.rs` holds a WM-private `DamageRegion` over
-`tairix_geometry::Rect`; `lib/controls` needs the same concept, and Stage
-E needs a better one. Hoist it into **`lib/geometry`** as `Region` (the
-crate already owns `Rect`/`Point`/`Scale`; update its module rustdoc,
-which currently says it holds no compositing arithmetic — a dirty-rect
-set is geometry, not rendering). Delete the WM copy (§2.14).
+### C.0 One region type, in one place (§2.2, §27)  **[done]**
+`tairix_geometry::Region` (`lib/geometry/src/region.rs`) is the one region
+type; the WM-private `DamageRegion` is deleted. It holds a set of pixels as
+pairwise-**disjoint**, band-ordered rectangles in a canonical form, so equal
+sets compare equal, no pixel is ever composited or presented twice, and two
+far-apart updates stay two small rectangles instead of collapsing into the
+box between them.
 
-Complete from the start (§27): `add`, `clear`, `bounds`, `is_empty`,
-`iter` (disjoint), `contains`, `intersect`/`clip`, `translate`,
-`subtract`, and a **bounded** coalescing policy (a rect budget above
-which the region degrades to its bounding box — a growable capacity
-policy, not a hand-picked ceiling that a busy frame silently falls off,
-§24.1). Row-banded internally so `add` is not an O(n²) rescan.
+Surface: `new`, `with_budget`, `budget`, `is_empty`, `rects` (the disjoint
+iteration), `bounds`, `clear`, `add`, `subtract`, `clip`,
+`translate`, `contains`, `intersects`, `From<Rect>`. `add`/`subtract`/`clip`
+are one linear band-stripe merge walk over a shared `combine`, not an O(n²)
+rescan, and the walk's two buffers are reused so a frame's edits allocate
+once. `translate` collapses to the clamped bounding box rather than wrap or
+drop a rectangle when a coordinate would leave the `i32` range — over-cover
+is safe, silent loss is not. `with_budget` degrades to the bounding box past
+its rectangle count; `new` stays exact and grows. A `contains_rect` and a
+by-value `clipped` are deliberately **absent**: no consumer needs either, and
+a region method without a caller is the speculative surface invariant 9
+forbids.
 
-### C.1 A damage sink in `lib/controls`
-Controls today are host-composed with no tree and no dirty concept; the
-host's only signal is a `PartialEq` render gate that fails whole-surface.
-Add the missing seam: an input/update call takes a damage sink into which
-a control pushes **its own bounds** when a render-relevant state field
-changes (hover enter/leave, press, focus, selection, validation,
-authority, activity, value, content). `RenderInvariant` fields keep
-reporting nothing, exactly as they keep failing to trip the render gate.
+The compositor consumes it through a **compose plan** rather than the old
+damage-widening: any damage touching a backdrop-blurred window promotes that
+window's whole screen-clipped rectangle into one plan rectangle (overlapping
+blurred windows merge, because each reads what the other wrote) and
+*subtracts* it from the disjoint residual. The frost still sees a whole
+rectangle, so it cannot seam, while damage elsewhere stays exactly as tight
+as it was marked — strictly better than widening it to a union box.
 
-Complete (§27): every control family in the crate reports, containers
-propagate their children's rects, and a control that changes nothing
-reports nothing. The host renders only the reported rects and presents
-their union.
+Proof: a differential sweep applies random `add`/`subtract`/`clip` to the
+region and to a plain pixel grid, comparing the covered set and the
+canonical-form invariants after every step.
+
+### C.1 A damage sink in `lib/controls`  **[pointer path in; keyboard/value families remain]**
+Controls had no dirty concept; the host's only signal was a `PartialEq`
+render gate that fails whole-surface. `lib/controls/src/damage.rs` is the
+seam: `sink()` hands out a `Region::with_budget(8)` and the one guarded
+write `damage::set(field, value, bounds, damage)` decides when a change is
+worth reporting, so no family invents its own rule. `RenderInvariant` fields
+report nothing, exactly as they fail to trip the render gate.
+
+The budget is 8 because a host pays twice per reported rectangle — once to
+re-render clipped to it, once to present it — and the compositor already
+refuses more than eight present round trips per frame; a ninth rectangle
+could never buy a separate present. One routed pointer event produces at
+most four (the child left, the child entered, a child holding a press, the
+container's chrome), so an interactive frame stays exact while a
+whole-model refresh degrades to the one box it may as well have been.
+
+`paint::pointer_activation` is where most of the defect lived: it writes
+only `state.pointer`, so it computes the next pointer state once and reports
+through `damage::set` — which gives correct hover-enter/leave and press
+damage to every clickable family at once, and reports *nothing* for motion
+inside one control. Containers pass each child its own rect, so a container's
+report is exactly the union of what its children reported. The two container
+`set_focus`/`on_key` paths report the container's bounds, having no layout at
+that point: over-covering is the safe direction.
+
+**Remaining, and the reason C.3 is blocked.** These mutate drawn state and do
+not yet report: `TableHeader::set_focus`/`on_key`, `Menu` (which has a public
+`row_rect`, so it should report the two exact rows rather than the popup),
+`Tabs::on_key`, `Breadcrumb::on_key`, `ComboBox::on_key` (field *and* popup
+rects), both text fields' `on_key`, `WindowControl::on_key` (its `rest()`
+clears the highlight and focus ring), `ScrollBar`, `Slider`, and
+`ResizeGrabber::on_pointer`. Also unwritten: the `last: RenderInvariant<Rect>`
+per control that a size/position change needs, so it can report **old ∪ new**
+— a control handed only its new bounds cannot name the old one.
+
+One host-side gap belongs with them. The Switchboard's keyboard path
+(`Switchboard::on_key` → `SectionView::activate_focused` /
+`apply_focus_marks`, and `rebuild_rail` on a model refresh) has **no layout**:
+it takes no bounds, scale or theme, and the panel retains no last frame, so
+its six `ActionRail::set_focus`/`on_key` sites pass `Rect::EMPTY` and report
+nothing. That is honest rather than a fabricated rectangle — an empty rect is
+a documented no-op on the region — but it is a gap, and closing it means
+threading layout through the public `Switchboard::on_key` and its focus
+callers. That is a design change for whoever finishes C.1, not something to
+smuggle into a call-site migration.
 
 ### C.2 Enter/leave hover routing in containers  **[done]**
 `Toolbar`, `Panel`, `Rail`, `Decision` and the collection families now track
@@ -315,34 +384,89 @@ press; over-grabbing only routes further events to a child that ignores them,
 which is what fan-to-all already did. A `#[cfg(test)] fan_pointer` oracle
 keeps the old delivery as the differential reference.
 
-### C.3 Apps present the rect they changed
-Every app presents `DamageRect::full(mode)` today — `files`, `terminal`,
-`viewer`, `wallpaper`, `widgets`, `switchboard`. The window ABI already
-carries a per-present `DamageRect` (`lib/window` `WindowClient::present`),
-so **no ABI change is required**: each app unions its control damage and
-presents that rect. Where an app's frame genuinely changed everywhere
-(resize, theme change, first paint) it still presents full.
+### C.3 Apps present the rect they changed  **[blocked on C.1 completing]**
 
-Receiver side: the session/WM already maps client-local damage to screen;
-confirm and, if missing, add explicit validation — a rect outside the
-client's own surface is clipped or refused, never trusted (§5.4).
+**Do not land this until every model change reports damage.** These hosts
+re-render their whole surface, so a frame may legitimately change pixels no
+reported rectangle covers — a clock tick, an animation, a value update from
+one of the families C.1 has not reached yet. Presenting only the reported
+rects today would silently stop those pixels updating: a correctness
+regression, not an optimisation. The seam is in place (each host builds one
+`damage::sink()` per input round and threads it through), and the sink's
+rects are deliberately not consumed yet.
 
-### C.4 Hoist the font, memoise the measurement
-`role_font()` constructs a `BitmapFont` on every control paint. Resolve
-the role→face **once per render pass** in the host and thread it down.
-Text measurement (`truncate_to_width`, `elide_to_width`, advance widths)
-is recomputed for the same string every paint: add the memo to
-**`lib/font`**, beside the glyph-bitmap `ReclaimCache` it already owns
-(one home for text caching, §2.2; `plans/FONT-SERVICE.md`), keyed by
-(string, face, scale) and reclaim-budgeted (invariant 5).
+When C.1 is complete: every app presents `DamageRect::full(mode)` today —
+`files`, `terminal`, `viewer`, `wallpaper`, `widgets`, `switchboard`. The
+window ABI already carries a per-present `DamageRect` (`lib/window`
+`WindowClient::present`), so **no ABI change is required**: each app unions
+its control damage and presents that rect. Where an app's frame genuinely
+changed everywhere (resize, theme change, first paint) it still presents
+full. The win is in the app and the session — the app's whole-surface
+unpremultiply-and-copy and the session's whole-surface convert-and-diff —
+not in the composite, which `convert_damage` already keeps tight.
 
-### C.5 One shell present per drained batch
-`DesktopShell::handle` runs `present()` + `sync_active_frame` +
-`refresh_cursor` for **every** queued motion sample; `pump` already folds
-app-ward outcomes latest-wins. Apply the same discipline to the shell's
-own work: `handle` updates state per sample, and `pump` does the
-present/active-frame/cursor refresh **once** per drained batch, before
-the single `present()` the run loop already performs.
+Receiver side is already fail-closed and needs no change: the session's
+`window_presented` refuses a `DamageRect` outside the client's surface, or a
+frame shorter than the damage needs, with `Errno::OutOfRange`, and the
+compositor's `present_window_content` intersects the translated rectangle
+with the window's own client rectangle, so an over-large or negative one is
+clipped and can never reach a neighbouring window.
+
+### C.4 Hoist the font, memoise the measurement  **[C.4b done; C.4a remains]**
+
+**C.4a — remains.** `role_font()` constructs a `BitmapFont` on every control
+paint. Resolve the role→face **once per render pass** and thread it down.
+The shape a first attempt settled on: a `Faces` table over `TextRole::ALL`
+(the public order — `TextRole::index()` is private in `lib/theme`, and
+hand-writing the slot mapping would duplicate it), built by
+`Faces::resolve(&Theme, Scale)`, `role_font` deleted, `faces` immediately
+after `theme` in every signature. That attempt failed on scale: it touches
+every `render` signature and so every in-crate test call site at once, and it
+must be landed **alone**, never mixed with another change. It also exposes
+dead parameters to remove in the same pass — `TitleBar::icon_side` and
+`split_identity` need only `faces`, `decision::action_row_rects`/`step_rect`
+no longer need `font`, and `WindowFrame::layout`/`ActionRail::gap`/
+`Panel::action_rects` need no `faces` at all.
+
+**C.4b — done.** Text measurement is memoised in **`lib/font`**, beside the
+glyph-bitmap `ReclaimCache` it already owns, so text caching has one home.
+The memo is the string's per-character **cumulative advance array**, the
+single representation all three queries read: `text_width` is its last entry,
+and `truncate_to_width`/`elide_to_width` are a `partition_point` over it
+(sound because saturating sums are non-decreasing). Key: the face identity
+`GlyphKey` already uses (family, pixel height, weight) plus the text's length
+and CRC-32C; the text itself lives in the *value* and is compared on every
+hit, because the cache takes its key by value (an owned-string key would
+allocate per lookup) and wipes values but merely drops keys (a `Box<str>` key
+would leave titles and filenames in reused heap). A fingerprint clash costs a
+re-walk, never a wrong width. Epoch: the advance-source generation, bumped
+when the font transport is installed — face and scale are in the *key*, not
+the epoch, because an epoch change empties the whole cache and one frame
+measures several roles at several sizes. Budget: the glyph cache's own
+RAM-derived policy, reused verbatim. The monospace path is untouched and pays
+**no** memo lookup, because its advance is arithmetic with nothing to save.
+
+### C.5 One shell present per drained batch  **[done]**
+`DesktopShell::handle` split into `apply` (route the event, mutate state) and
+`settle` (taskbar `present()`, then `sync_active_frame`, then
+`refresh_cursor`). `handle` is still both, so a single event is unchanged;
+`pump` runs `apply` per drained event **in order** and `settle` **once**, and
+not at all when nothing was drained. Every order-sensitive effect still
+applies in sequence — only the screen-settling pass is folded.
+
+Each folded item is level-triggered, which is why folding is exact rather
+than merely cheaper: the taskbar `present()` drains a per-surface repaint
+latch (set-like and idempotent, so N samples leave the same latch as one);
+`sync_active_frame` reconciles the *current* focus and early-returns when it
+already matches; `refresh_cursor` re-runs the shape policy against the
+current pointer. Intermediate values were never observable because no frame
+was published between samples. `mirror_focus`'s conditional second present
+was **deleted**, not moved — it repainted a surface the single settle already
+drains. A source that faults mid-drain still settles what it delivered, so
+the screen can never lag the model.
+
+The same shape appeared twice more and both are folded: the keyboard drain
+and the pinboard backdrop menu each called `handle` per event.
 
 ### C.6 Tests + docs
 - Damage sink: hover enter/leave reports exactly two rects; motion within
@@ -373,8 +497,9 @@ still passes unchanged.
 Depends on A and B (the segmentation and cull interact with frosting).
 
 ### D.1 Split backdrop damage from content damage
-`widen_blurred_damage` widens *any* damage touching a blurred window to
-that window's whole bounds, because the frost must be recomputed. But the
+The compositor's `compose_plan` promotes *any* damage touching a blurred
+window to that window's whole bounds, because the frost must be recomputed.
+But the
 dominant case — the pointer moving **inside** a translucent window —
 changes only the window's own content; the backdrop underneath is
 unchanged. Track the two separately: only damage *below* a blurred window
@@ -434,12 +559,12 @@ Depends on B and D. Touches the display wire protocol, so it must be one
 evolution with `plans/FIX-DISPLAY-ACCELERATION.md` Stage B, not a second
 shape (§2.2, §2.13).
 
-### E.1 Keep the damage region disjoint
-`DamageRegion::add` coalesces overlapping rects to their **union**, and
-more than `MAX_PRESENT_REGIONS` rects collapse to one bounding box — two
-small rects at opposite corners become the whole screen. Use the Stage
-C.0 disjoint `Region` (subtract-and-split, row-banded) with its bounded
-budget, so a scattered frame stays scattered.
+### E.1 Keep the damage region disjoint  **[done in C.0]**
+The damage region is `tairix_geometry::Region`, whose rectangles are
+disjoint and band-canonical, so a scattered frame stays scattered rather
+than coalescing to unions. What remains for E is the *present* side:
+`Compositor::present` still collapses to the bounding box past
+`MAX_PRESENT_REGIONS`, which E.2 replaces with a rect list.
 
 ### E.2 One present per frame, carrying a list of rects
 `RemoteDisplay::push` rotates the 2-frame ring **per `present_region`

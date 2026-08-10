@@ -14,7 +14,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use tairix_font::BitmapFont;
-use tairix_geometry::{Point, Rect, Scale};
+use tairix_geometry::{Point, Rect, Region, Scale};
 use tairix_icon::IconKind;
 use tairix_input::{InputEvent, Key};
 use tairix_raster::{Color, Surface};
@@ -22,6 +22,7 @@ use tairix_theme::{TextRole, Theme};
 
 use crate::button::{icon_content_side, Button, ButtonAction};
 use crate::collection::{Card, CardAction};
+use crate::damage;
 use crate::paint::{
     foreground, inset, key_activation, paint_bead, paint_count_badge, paint_icon_slot, paint_plate,
     plate_border, pointer_activation, rail_thickness, resolve_bead, resolve_frame, resolve_rail,
@@ -200,10 +201,14 @@ impl Notification {
         bounds: Rect,
         scale: Scale,
         theme: &Theme,
+        damage: &mut Region,
     ) -> Option<NotificationAction> {
         let font = role_font(theme, scale, TextRole::Body);
         let card_bounds = self.card_bounds(bounds, scale, theme, font);
-        match self.card.on_pointer(event, card_bounds, scale, theme)? {
+        match self
+            .card
+            .on_pointer(event, card_bounds, scale, theme, damage)?
+        {
             CardAction::FooterActivated { index } => {
                 Some(NotificationAction::ActionActivated { index })
             }
@@ -672,13 +677,25 @@ impl TaskbarItem {
 
     /// Feed a pointer event; a completed primary click reports
     /// [`TaskbarItemAction::Activated`].
-    pub fn on_pointer(&mut self, event: &InputEvent, bounds: Rect) -> Option<TaskbarItemAction> {
+    pub fn on_pointer(
+        &mut self,
+        event: &InputEvent,
+        bounds: Rect,
+        damage: &mut Region,
+    ) -> Option<TaskbarItemAction> {
         if let InputEvent::PointerMoved { to } = event {
             *self.pointer = *to;
         }
         let inside = bounds.contains(*self.pointer);
-        pointer_activation(&mut self.state, &mut self.armed, event, inside)
-            .then_some(TaskbarItemAction::Activated)
+        pointer_activation(
+            &mut self.state,
+            &mut self.armed,
+            event,
+            inside,
+            bounds,
+            damage,
+        )
+        .then_some(TaskbarItemAction::Activated)
     }
 
     /// Feed a key event; Space/Enter while focused reports
@@ -1209,6 +1226,10 @@ impl TraySignal {
     /// readout is expanded, `readout_bounds` is the popup rectangle. Hovering
     /// either keeps the readout open, and the readout's action reports
     /// [`TraySignalAction::Activated`].
+    ///
+    /// A hover change reports the capsule, and the readout as well whenever it
+    /// has just opened or closed — a popup that vanished must be repainted or
+    /// its pixels would stay on screen.
     pub fn on_pointer(
         &mut self,
         event: &InputEvent,
@@ -1216,6 +1237,7 @@ impl TraySignal {
         readout_bounds: Rect,
         scale: Scale,
         theme: &Theme,
+        damage: &mut Region,
     ) -> Option<TraySignalAction> {
         if let InputEvent::PointerMoved { to } = event {
             *self.pointer = *to;
@@ -1223,15 +1245,19 @@ impl TraySignal {
         let expanded_before = self.is_expanded();
         let over_capsule = capsule_bounds.contains(*self.pointer);
         let over_readout = expanded_before && readout_bounds.contains(*self.pointer);
-        self.state.pointer = if over_capsule || over_readout {
+        let hover = if over_capsule || over_readout {
             PointerState::Hover
         } else {
             PointerState::None
         };
+        damage::set(&mut self.state.pointer, hover, capsule_bounds, damage);
+        if self.is_expanded() != expanded_before {
+            damage.add(readout_bounds);
+        }
         if self.is_expanded() {
             if let Some(rect) = self.action_rect(readout_bounds, scale, theme) {
                 if let Some(button) = self.action.as_mut() {
-                    if button.on_pointer(event, rect) == Some(ButtonAction::Activated) {
+                    if button.on_pointer(event, rect, damage) == Some(ButtonAction::Activated) {
                         return Some(TraySignalAction::Activated);
                     }
                 }

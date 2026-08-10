@@ -2,7 +2,7 @@
 //! render-without-panic on every tab, keyboard tab switching, a selector
 //! reaction, and radio-group single selection.
 
-use tairix_controls::SelectionState;
+use tairix_controls::{damage, SelectionState};
 use tairix_font::BitmapFont;
 use tairix_geometry::{Point, Rect, Scale};
 use tairix_input::{InputEvent, Key, Modifiers, NamedKey, PointerButton};
@@ -15,6 +15,12 @@ use crate::widget::DemoWidget;
 /// A 14px font, as the `Run` binary resolves at the theme's UI size.
 fn font() -> BitmapFont {
     BitmapFont::monospace(14)
+}
+
+/// The gallery window the `Run` binary creates, as the viewport every layout
+/// derives from.
+fn window() -> Rect {
+    Rect::new(0, 0, 820, 620)
 }
 
 /// A press-then-release click sequence at `point`, each preceded by the move
@@ -30,8 +36,9 @@ fn click(gallery: &mut Gallery, point: Point, viewport: Rect, themes: &ThemeRegi
             button: PointerButton::Primary,
         },
     ];
+    let mut damage = damage::sink();
     for event in &seq {
-        gallery.on_pointer(event, viewport, Scale::ONE, theme);
+        gallery.on_pointer(event, viewport, Scale::ONE, theme, &mut damage);
     }
 }
 
@@ -42,12 +49,26 @@ fn click(gallery: &mut Gallery, point: Point, viewport: Rect, themes: &ThemeRegi
 /// no matter the gallery's prior state (the tab strip holds keyboard focus
 /// after any selection).
 fn select_tab(mut gallery: Gallery, target: GalleryTab) -> Gallery {
-    gallery.on_key(Key::Named(NamedKey::Home), Modifiers::default());
+    let themes = ThemeRegistry::with_builtins();
+    press(&mut gallery, Key::Named(NamedKey::Home), &themes);
     for _ in 0..target.index() {
-        gallery.on_key(Key::Named(NamedKey::Right), Modifiers::default());
+        press(&mut gallery, Key::Named(NamedKey::Right), &themes);
     }
-    gallery.on_key(Key::Named(NamedKey::Enter), Modifiers::default());
+    press(&mut gallery, Key::Named(NamedKey::Enter), &themes);
     gallery
+}
+
+/// One unmodified key press, laid out at the gallery's window geometry,
+/// reporting whether the view changed.
+fn press(gallery: &mut Gallery, key: Key, themes: &ThemeRegistry) -> bool {
+    gallery.on_key(
+        key,
+        Modifiers::default(),
+        window(),
+        Scale::ONE,
+        themes.active(),
+        &mut damage::sink(),
+    )
 }
 
 #[test]
@@ -77,7 +98,7 @@ fn every_panel_is_populated() {
 fn renders_every_tab_without_panic() {
     let themes = ThemeRegistry::with_builtins();
     let theme = themes.active();
-    let viewport = Rect::new(0, 0, 820, 620);
+    let viewport = window();
     let mut gallery = Gallery::new();
     for tab in GalleryTab::ALL {
         gallery = select_tab(gallery, tab);
@@ -101,8 +122,9 @@ fn focused_toggle_flips_on_space() {
     assert!(toggle_on(&gallery, 0));
 
     // Tab once to focus that first item, then Space actuates it.
-    gallery.on_key(Key::Named(NamedKey::Tab), Modifiers::default());
-    let changed = gallery.on_key(Key::Char(' '), Modifiers::default());
+    let themes = ThemeRegistry::with_builtins();
+    press(&mut gallery, Key::Named(NamedKey::Tab), &themes);
+    let changed = press(&mut gallery, Key::Char(' '), &themes);
 
     assert!(changed);
     assert!(
@@ -120,10 +142,11 @@ fn radio_group_keeps_single_selection() {
     assert!(radio_selected(&gallery, 6));
 
     // Focus the first radio (item 5): Tab moves Tabs -> item0 .. -> item5.
+    let themes = ThemeRegistry::with_builtins();
     for _ in 0..6 {
-        gallery.on_key(Key::Named(NamedKey::Tab), Modifiers::default());
+        press(&mut gallery, Key::Named(NamedKey::Tab), &themes);
     }
-    let changed = gallery.on_key(Key::Char(' '), Modifiers::default());
+    let changed = press(&mut gallery, Key::Char(' '), &themes);
 
     assert!(changed);
     assert!(
@@ -139,7 +162,7 @@ fn radio_group_keeps_single_selection() {
 #[test]
 fn pointer_click_selects_a_checkbox() {
     let themes = ThemeRegistry::with_builtins();
-    let viewport = Rect::new(0, 0, 820, 620);
+    let viewport = window();
     let mut gallery = select_tab(Gallery::new(), GalleryTab::Selectors);
 
     // The fourth Selectors item is the "Accept terms" checkbox (checked).

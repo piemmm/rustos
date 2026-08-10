@@ -1,10 +1,11 @@
 //! Unit tests for the Switchboard tray-summary IPC protocol.
 
 use super::{
-    command_endpoint_for, decode_publish_reply, encode_publish_reply, CommandSection, SeatReport,
-    SwitchboardCommand, SwitchboardRequest, TrayPermille, TrayPressure, TrayPressureCount,
-    TrayPressureKind, TraySummary, TrayTask, TrayTaskName, SEAT_REPORT_OWNERS_MAX,
-    SWITCHBOARD_PUBLISH_REPLY_LEN, TRAY_PRESSURE_KIND_COUNT, TRAY_TASK_NAME_MAX,
+    command_endpoint_for, decode_publish_reply, encode_publish_reply, CommandSection, FrameReport,
+    SeatReport, SwitchboardCommand, SwitchboardRequest, TrayPermille, TrayPressure,
+    TrayPressureCount, TrayPressureKind, TraySummary, TrayTask, TrayTaskName,
+    SEAT_REPORT_OWNERS_MAX, SWITCHBOARD_PUBLISH_REPLY_LEN, TRAY_PRESSURE_KIND_COUNT,
+    TRAY_TASK_NAME_MAX,
 };
 use crate::power::PowerAction;
 use crate::{Errno, ProcId};
@@ -697,4 +698,149 @@ fn command_rejects_dirty_reserved_fields_and_an_over_long_owner_count() {
         SwitchboardCommand::from_bytes(&repeated),
         Err(Errno::OutOfRange)
     );
+}
+
+/// A frame the compositor could plausibly have produced: a cursor-sized
+/// patch of a 1080p screen, blended twice over where the pointer crosses a
+/// window, with one furniture strip served from the cache.
+fn sound_frame() -> FrameReport {
+    FrameReport {
+        screen_px: 1920 * 1080,
+        damaged_px: 3_200,
+        blended_px: 6_400,
+        opaque_px: 1_100,
+        dirty_rects: 2,
+        present_calls: 2,
+        chrome_hits: 1,
+        chrome_misses: 0,
+    }
+}
+
+#[test]
+fn round_trips_frame_reports_at_the_bounds() {
+    let idle = FrameReport {
+        screen_px: 1920 * 1080,
+        damaged_px: 0,
+        blended_px: 0,
+        opaque_px: 0,
+        dirty_rects: 0,
+        present_calls: 0,
+        chrome_hits: 0,
+        chrome_misses: 0,
+    };
+    assert!(idle.is_idle());
+    assert!(!sound_frame().is_idle());
+
+    // The whole screen recomposed in one rectangle, published once: the
+    // widest frame there is.
+    let whole_screen = FrameReport {
+        screen_px: u64::MAX,
+        damaged_px: u64::MAX,
+        blended_px: u64::MAX,
+        opaque_px: u64::MAX,
+        dirty_rects: 1,
+        present_calls: 1,
+        chrome_hits: u32::MAX,
+        chrome_misses: u32::MAX,
+    };
+    for report in [idle, sound_frame(), whole_screen] {
+        let command = SwitchboardCommand::FrameReport { report };
+        assert_eq!(
+            SwitchboardCommand::from_bytes(&command.to_le_bytes()),
+            Ok(command)
+        );
+    }
+}
+
+#[test]
+fn frame_report_admits_every_frame_the_compositor_can_compose() {
+    // Damage over bare desktop resolves to the root fill: nothing is
+    // blended and nothing is copied, and that is not a contradiction.
+    let bare = FrameReport {
+        blended_px: 0,
+        opaque_px: 0,
+        ..sound_frame()
+    };
+    // A stack of windows blends one damaged pixel many times over.
+    let deep = FrameReport {
+        blended_px: 4_200_000,
+        ..sound_frame()
+    };
+    // Every damaged pixel resolved by an opaque copy, blending nothing.
+    let flat = FrameReport {
+        blended_px: 0,
+        opaque_px: 3_200,
+        ..sound_frame()
+    };
+    // Many rectangles published as one bounding-box present.
+    let boxed = FrameReport {
+        dirty_rects: 9,
+        present_calls: 1,
+        ..sound_frame()
+    };
+    // A hardware-layer present publishes one call having composed nothing.
+    let accelerated = FrameReport {
+        damaged_px: 0,
+        blended_px: 0,
+        opaque_px: 0,
+        dirty_rects: 0,
+        present_calls: 1,
+        ..sound_frame()
+    };
+    for report in [bare, deep, flat, boxed, accelerated] {
+        let command = SwitchboardCommand::FrameReport { report };
+        assert_eq!(
+            SwitchboardCommand::from_bytes(&command.to_le_bytes()),
+            Ok(command)
+        );
+    }
+}
+
+#[test]
+fn frame_command_rejects_a_dirty_tail_and_contradictory_counts() {
+    let mut frame = SwitchboardCommand::FrameReport {
+        report: sound_frame(),
+    }
+    .to_le_bytes();
+    frame[super::FRAME_END_OFFSET] = 1;
+    assert_eq!(SwitchboardCommand::from_bytes(&frame), Err(Errno::BadMagic));
+
+    // Each contradiction is refused on decode, so the panel renders no
+    // sender's arithmetic.
+    for report in [
+        // More damage than the screen holds.
+        FrameReport {
+            damaged_px: 1920 * 1080 + 1,
+            ..sound_frame()
+        },
+        // Rectangles that changed no pixel.
+        FrameReport {
+            damaged_px: 0,
+            opaque_px: 0,
+            ..sound_frame()
+        },
+        // Damage recomposed by no rectangle.
+        FrameReport {
+            dirty_rects: 0,
+            present_calls: 1,
+            ..sound_frame()
+        },
+        // More pixels copied than were damaged.
+        FrameReport {
+            opaque_px: 3_201,
+            ..sound_frame()
+        },
+        // More driver calls than rectangles plus the whole-screen case.
+        FrameReport {
+            present_calls: 4,
+            ..sound_frame()
+        },
+    ] {
+        assert_eq!(
+            SwitchboardCommand::from_bytes(
+                &SwitchboardCommand::FrameReport { report }.to_le_bytes()
+            ),
+            Err(Errno::OutOfRange)
+        );
+    }
 }

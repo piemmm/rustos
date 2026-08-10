@@ -12,7 +12,7 @@
 use alloc::string::String;
 
 use tairix_font::BitmapFont;
-use tairix_geometry::{Point, Rect, Scale};
+use tairix_geometry::{Point, Rect, Region, Scale};
 use tairix_icon::{builtin_icon, IconKind};
 use tairix_input::{InputEvent, Key};
 use tairix_raster::{Color, Surface};
@@ -469,13 +469,26 @@ impl Button {
 
     /// Feed a pointer event, given the button's current `bounds`, updating its
     /// pointer state and returning [`ButtonAction::Activated`] on a completed
-    /// primary click.
-    pub fn on_pointer(&mut self, event: &InputEvent, bounds: Rect) -> Option<ButtonAction> {
+    /// primary click. The button reports `bounds` into `damage` when the event
+    /// changed how it draws.
+    pub fn on_pointer(
+        &mut self,
+        event: &InputEvent,
+        bounds: Rect,
+        damage: &mut Region,
+    ) -> Option<ButtonAction> {
         if let InputEvent::PointerMoved { to } = event {
             *self.pointer = *to;
         }
         let inside = bounds.contains(*self.pointer);
-        if pointer_activation(&mut self.state, &mut self.armed, event, inside) {
+        if pointer_activation(
+            &mut self.state,
+            &mut self.armed,
+            event,
+            inside,
+            bounds,
+            damage,
+        ) {
             Some(ButtonAction::Activated)
         } else {
             None
@@ -617,13 +630,25 @@ impl IconButton {
     }
 
     /// Feed a pointer event; see [`Button::on_pointer`].
-    pub fn on_pointer(&mut self, event: &InputEvent, bounds: Rect) -> Option<ButtonAction> {
+    pub fn on_pointer(
+        &mut self,
+        event: &InputEvent,
+        bounds: Rect,
+        damage: &mut Region,
+    ) -> Option<ButtonAction> {
         if let InputEvent::PointerMoved { to } = event {
             *self.pointer = *to;
         }
         let inside = bounds.contains(*self.pointer);
-        pointer_activation(&mut self.state, &mut self.armed, event, inside)
-            .then_some(ButtonAction::Activated)
+        pointer_activation(
+            &mut self.state,
+            &mut self.armed,
+            event,
+            inside,
+            bounds,
+            damage,
+        )
+        .then_some(ButtonAction::Activated)
     }
 
     /// Feed a key event; see [`Button::on_key`].
@@ -781,12 +806,17 @@ impl SplitButton {
 
     /// Feed a pointer event, given the button's current `bounds`, returning the
     /// [`SplitAction`] of whichever region completed a primary click.
+    ///
+    /// Either region reports the whole `bounds`: the two share one plate whose
+    /// frame resolves from both region states, so a change in one repaints the
+    /// pair.
     pub fn on_pointer(
         &mut self,
         event: &InputEvent,
         bounds: Rect,
         scale: Scale,
         theme: &Theme,
+        damage: &mut Region,
     ) -> Option<SplitAction> {
         if let InputEvent::PointerMoved { to } = event {
             *self.pointer = *to;
@@ -799,12 +829,16 @@ impl SplitButton {
             &mut self.primary_armed,
             event,
             in_primary,
+            bounds,
+            damage,
         );
         let disclosure_fired = pointer_activation(
             &mut self.disclosure,
             &mut self.disclosure_armed,
             event,
             in_disclosure,
+            bounds,
+            damage,
         );
         if primary_fired {
             Some(SplitAction::Primary)

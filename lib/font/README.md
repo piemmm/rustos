@@ -108,6 +108,9 @@ the payload exceeds the pre-Korean size ceiling.
   classification, and the RAM-derived byte budget. `fontd` builds its own
   service-side cache from this same declaration, so the two sides of
   `FONT_ENDPOINT` cannot drift apart (`AGENTS.md` §2.2).
+- `measure` — the text-measurement memo behind `render`: one string's
+  cumulative per-`char` advances, retained beside the glyphs they were walked
+  from. See *Measuring proportional text once* below.
 
 ## Rendering at a chosen size
 
@@ -153,6 +156,27 @@ merely one call per glyph. A RAM reading the System Information service cannot
 supply is zero, which yields a zero budget and exactly that uncached
 behaviour, never a guessed ceiling. The client and its cache ride the `render`
 feature; the allocator-free `atlas`/`glyph` view never touches them.
+
+### Measuring proportional text once
+
+A proportional family has no cell width to multiply by, so measuring a label
+costs one advance lookup per character — work every repaint of unchanged text
+redid. The string is walked once into its cumulative per-`char` advances, and
+`text_width`, `truncate_to_width`, and `elide_to_width` are then all queries
+over that one array: the width is its last entry, and the longest prefix that
+fits a box is a binary search within it. An entry is keyed by the face —
+family, pixel height, weight — plus a fingerprint of the text (its length and
+CRC-32C), with the measured bytes kept in the value, so a lookup allocates
+nothing, a released value is overwritten where a dropped key would leave a
+user's own filenames and window titles readable, and a fingerprint clash is
+re-walked rather than served the wrong width. A different scale or face is
+therefore a different entry; the cache's epoch carries the one event that
+changes what an already-measured face measures — installing or replacing the
+transport. The budget is the glyph cache's, derived from the same RAM figure,
+so a zero reading retains nothing and walks every measurement, and
+`trim_glyph_cache` hands both caches back. **A monospace family never consults
+the memo**: its width is a multiplication, and a lookup would cost more than
+the arithmetic it replaced.
 
 The cell model is **one scalar per grid entry** — the deliberate simplification
 `lib/vt` and `lib/curses` document. A zero-advance combining mark renders in

@@ -15,6 +15,7 @@ use tairix_raster::{Color, Pixel, Surface};
 use tairix_theme::{Rgba, Theme};
 
 use crate::button::{Button, ButtonContent};
+use crate::damage::sink;
 use crate::decision::{Dialog, DialogAction, HelpTip, HelpTipAction, Tooltip};
 use crate::state::{AuthorityState, ControlRole, ControlState};
 use crate::testkit::high_contrast;
@@ -120,12 +121,21 @@ fn dialog_denied_action_shows_lock_and_does_not_activate() {
     // Fail closed: clicking a denied action never activates it.
     let bounds = Rect::new(0, 0, DW, DH);
     assert_eq!(
-        dialog.on_pointer(&moved(iv(DW) - 15, iv(DH) - 15), bounds, Scale::ONE, &theme),
+        dialog.on_pointer(
+            &moved(iv(DW) - 15, iv(DH) - 15),
+            bounds,
+            Scale::ONE,
+            &theme,
+            &mut sink()
+        ),
         None
     );
-    assert_eq!(dialog.on_pointer(&PRESS, bounds, Scale::ONE, &theme), None);
     assert_eq!(
-        dialog.on_pointer(&RELEASE, bounds, Scale::ONE, &theme),
+        dialog.on_pointer(&PRESS, bounds, Scale::ONE, &theme, &mut sink()),
+        None
+    );
+    assert_eq!(
+        dialog.on_pointer(&RELEASE, bounds, Scale::ONE, &theme, &mut sink()),
         None
     );
 }
@@ -147,12 +157,15 @@ fn dialog_action_activates_by_pointer() {
     let bounds = Rect::new(0, 0, DW, DH);
     let (cx, cy) = (iv(DW) - 15, iv(DH) - 15);
     assert_eq!(
-        dialog.on_pointer(&moved(cx, cy), bounds, Scale::ONE, &theme),
+        dialog.on_pointer(&moved(cx, cy), bounds, Scale::ONE, &theme, &mut sink()),
         None
     );
-    assert_eq!(dialog.on_pointer(&PRESS, bounds, Scale::ONE, &theme), None);
     assert_eq!(
-        dialog.on_pointer(&RELEASE, bounds, Scale::ONE, &theme),
+        dialog.on_pointer(&PRESS, bounds, Scale::ONE, &theme, &mut sink()),
+        None
+    );
+    assert_eq!(
+        dialog.on_pointer(&RELEASE, bounds, Scale::ONE, &theme, &mut sink()),
         Some(DialogAction::ActionActivated { index: 0 })
     );
 }
@@ -184,12 +197,15 @@ fn dialog_action_rects_match_the_pointer_hit_geometry() {
     let cx = target.origin.x + iv(target.width) / 2;
     let cy = target.origin.y + iv(target.height) / 2;
     assert_eq!(
-        dialog.on_pointer(&moved(cx, cy), bounds, Scale::ONE, &theme),
+        dialog.on_pointer(&moved(cx, cy), bounds, Scale::ONE, &theme, &mut sink()),
         None
     );
-    assert_eq!(dialog.on_pointer(&PRESS, bounds, Scale::ONE, &theme), None);
     assert_eq!(
-        dialog.on_pointer(&RELEASE, bounds, Scale::ONE, &theme),
+        dialog.on_pointer(&PRESS, bounds, Scale::ONE, &theme, &mut sink()),
+        None
+    );
+    assert_eq!(
+        dialog.on_pointer(&RELEASE, bounds, Scale::ONE, &theme, &mut sink()),
         Some(DialogAction::ActionActivated { index: 1 })
     );
 }
@@ -303,12 +319,15 @@ fn helptip_step_activates_by_pointer() {
     let bounds = Rect::new(0, 0, HW, HH);
     let (cx, cy) = (30, iv(HH) - 15);
     assert_eq!(
-        tip.on_pointer(&moved(cx, cy), bounds, Scale::ONE, &theme),
+        tip.on_pointer(&moved(cx, cy), bounds, Scale::ONE, &theme, &mut sink()),
         None
     );
-    assert_eq!(tip.on_pointer(&PRESS, bounds, Scale::ONE, &theme), None);
     assert_eq!(
-        tip.on_pointer(&RELEASE, bounds, Scale::ONE, &theme),
+        tip.on_pointer(&PRESS, bounds, Scale::ONE, &theme, &mut sink()),
+        None
+    );
+    assert_eq!(
+        tip.on_pointer(&RELEASE, bounds, Scale::ONE, &theme, &mut sink()),
         Some(HelpTipAction::NextStep)
     );
 }

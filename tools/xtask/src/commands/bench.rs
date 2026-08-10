@@ -35,7 +35,7 @@ use tairix_display::ChannelOrder;
 use tairix_log::DiscardSink;
 use tairix_raster::{box_blur, BlurScratch, Color, Pixel, Rgba8Image, Surface};
 use tairix_reclaim::{PressureBand, ReportedPressure};
-use tairix_wm::{chrome_cache, Compositor, DamageRegion, Point, Rect, WindowId};
+use tairix_wm::{chrome_cache, Compositor, Point, Rect, Region, WindowId};
 
 /// The default timed calls per round and rounds per case.
 ///
@@ -673,7 +673,7 @@ fn composite(harness: &BenchHarness<'_>) -> Result<Vec<Measurement>, String> {
     Ok(rows)
 }
 
-fn region_pixels(region: &DamageRegion) -> u64 {
+fn region_pixels(region: &Region) -> u64 {
     region
         .rects()
         .iter()

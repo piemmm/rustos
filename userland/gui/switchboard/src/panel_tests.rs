@@ -12,7 +12,7 @@ use tairix_theme::Theme;
 use super::{refusal_notice, Panel, PANEL_TITLE};
 use crate::activities::{Activities, Member};
 use crate::derive::{derive_summary, Hysteresis, CPU_PRESSURE_ENTER_PERMILLE};
-use crate::model::{build_model, PanelModel, RollingMeters};
+use crate::model::{build_model, PanelModel, RollingMeters, SessionReport};
 use crate::sample::Sample;
 use crate::test_host::{
     process_summary, process_summary_with, sample_with, RecordingHost, DEFAULT_UID, NO_AUTHORITY,
@@ -42,7 +42,7 @@ fn stopped_model(pid: u64, can_force: bool) -> PanelModel {
     build_model(
         PANEL_TITLE,
         &sample,
-        &SeatReport::HEALTHY,
+        &SessionReport::HEALTHY,
         &RollingMeters::new(),
         authority,
         &Activities::new(),
@@ -61,7 +61,7 @@ fn task_model(pid: u64) -> PanelModel {
     build_model(
         PANEL_TITLE,
         &sample,
-        &SeatReport::HEALTHY,
+        &SessionReport::HEALTHY,
         &RollingMeters::new(),
         &NO_AUTHORITY,
         &Activities::new(),
@@ -79,7 +79,7 @@ fn busy_model(first_pid: u64) -> PanelModel {
     build_model(
         PANEL_TITLE,
         &sample_with(processes),
-        &SeatReport::HEALTHY,
+        &SessionReport::HEALTHY,
         &RollingMeters::new(),
         &NO_AUTHORITY,
         &Activities::new(),
@@ -92,7 +92,7 @@ fn empty_model() -> PanelModel {
     build_model(
         PANEL_TITLE,
         &Sample::default(),
-        &SeatReport::HEALTHY,
+        &SessionReport::HEALTHY,
         &RollingMeters::new(),
         &NO_AUTHORITY,
         &Activities::new(),
@@ -119,11 +119,11 @@ fn pressured_model(pid: u64) -> PanelModel {
     let mut hysteresis = Hysteresis::new();
     let _ = derive_summary(&sample, &mut hysteresis);
     let mut meters = RollingMeters::new();
-    meters.record(&sample, hysteresis, &SeatReport::HEALTHY);
+    meters.record(&sample, hysteresis, &SessionReport::HEALTHY);
     build_model(
         PANEL_TITLE,
         &sample,
-        &SeatReport::HEALTHY,
+        &SessionReport::HEALTHY,
         &meters,
         &NO_AUTHORITY,
         &Activities::new(),
@@ -174,7 +174,7 @@ fn activity_model(first_pid: u64, second_pid: u64) -> PanelModel {
     build_model(
         PANEL_TITLE,
         &sample,
-        &SeatReport::HEALTHY,
+        &SessionReport::HEALTHY,
         &RollingMeters::new(),
         &NO_AUTHORITY,
         &activities,
@@ -224,7 +224,7 @@ fn a_fresh_panel_is_closed_and_shows_nothing() {
     let panel = Panel::new(OWN_PID, empty_model());
     assert!(!panel.is_open());
     assert_eq!(panel.section(), None);
-    assert_eq!(panel.seat_report(), &SeatReport::HEALTHY);
+    assert_eq!(panel.session_report(), &SessionReport::HEALTHY);
 }
 
 #[test]
@@ -342,8 +342,8 @@ fn a_seat_report_is_stored_for_the_callers_next_rebuild() {
 
     panel.set_seat_report(report);
 
-    assert_eq!(panel.seat_report().owners(), &[11, 12]);
-    assert_eq!(panel.seat_report().total(), 3);
+    assert_eq!(panel.session_report().seat.owners(), &[11, 12]);
+    assert_eq!(panel.session_report().seat.total(), 3);
     assert!(!panel.is_open());
     assert_eq!(host.opened, 0, "a seat report opens no window");
 }

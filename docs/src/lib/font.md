@@ -163,6 +163,32 @@ reading is unavailable (a zero total yields a zero budget), every glyph is
 fetched and served without being retained: correct, merely one call per
 glyph.
 
+### Measuring proportional text once
+
+A proportional family has no cell width to multiply by, so measuring a label
+costs one advance lookup per character — work every repaint of unchanged text
+redid. The crate walks the string once into its cumulative
+per-`char` advances, and `text_width`, `truncate_to_width`, and
+`elide_to_width` are then all queries over that one array: the width is its
+last entry, and the longest prefix that fits a box is a binary search within
+it. **A monospace family never consults the memo** — its width is a
+multiplication, and a lookup would cost more than the arithmetic it replaced.
+
+An entry is keyed by the face (family, pixel height, weight) plus a fingerprint
+of the text — its byte length and CRC-32C — with the measured bytes kept in the
+*value*: a lookup then builds its key without allocating, a released value is
+overwritten where a dropped key would leave a user's own filenames and window
+titles readable in reused heap, and a fingerprint clash is caught by comparing
+the retained bytes, so a colliding string is re-walked rather than served the
+wrong width. Face, height, and weight being part of the key is what makes a
+scale or face change a separate entry instead of a stale answer; the cache's
+epoch carries the one event that changes what an *already-measured* face
+measures — installing or replacing the font transport. The memo takes the same
+RAM-derived budget as the glyph cache, so an unavailable RAM reading retains
+nothing and walks every measurement, a refusing pressure band retains nothing
+and is still correct, and a walk the service could not complete is answered but
+not remembered. `trim_glyph_cache` hands **both** caches back.
+
 ### A drawing program must keep its pressure band current
 
 The cache is governed by the process-wide gauge in `tairix_rt::pressure`, and

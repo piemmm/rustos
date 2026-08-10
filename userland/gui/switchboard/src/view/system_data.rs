@@ -365,6 +365,9 @@ pub struct SystemReport {
     pub cores: Vec<SystemFact>,
     /// The memory and kernel-heap detail, shown on the Resources page.
     pub memory: Vec<SystemFact>,
+    /// What the desktop's last composited frame cost, shown on the
+    /// Resources page.
+    pub compositor: Vec<SystemFact>,
     /// The mounted volumes.
     pub volumes: Vec<StorageVolume>,
     /// Why the mount table is absent, when it is.

@@ -14,13 +14,13 @@
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use tairix_geometry::{to_i32, Rect, Scale};
+use tairix_geometry::{to_i32, Rect, Region, Scale};
 use tairix_input::{InputEvent, Key, NamedKey};
 use tairix_raster::{Color, Surface};
 use tairix_theme::{SignalRole, Theme};
 
 use tairix_controls::{
-    ActionRail, Button, ButtonContent, Chart, Fact, FactList, MeterValue, MetricInstrument,
+    damage, ActionRail, Button, ButtonContent, Chart, Fact, FactList, MeterValue, MetricInstrument,
     MetricLayout, MetricTile, Panel, PressureKind, PressureState, ProgressValue, RailAction, Tab,
     Tabs, TabsAction, TabsOrientation,
 };
@@ -294,13 +294,15 @@ fn overview_page(report: &SystemReport) -> Vec<PageLine> {
     lines
 }
 
-/// The Resources page: per-core load, then the memory and kernel-heap
-/// detail.
+/// The Resources page: per-core load, the memory and kernel-heap detail,
+/// then what the desktop's last frame cost.
 fn resources_page(report: &SystemReport) -> Vec<PageLine> {
     let mut lines = alloc::vec![PageLine::Heading(String::from("Processors"))];
     lines.extend(report.cores.iter().map(fact_of));
     lines.push(PageLine::Heading(String::from("Memory")));
     lines.extend(report.memory.iter().map(fact_of));
+    lines.push(PageLine::Heading(String::from("Desktop")));
+    lines.extend(report.compositor.iter().map(fact_of));
     lines
 }
 
@@ -552,10 +554,15 @@ impl SectionView for SystemSection {
         if index >= self.rail_len() {
             return None;
         }
-        self.rail.set_focus(Some(index));
-        self.rail.on_key(key).map(|RailAction::Activate { index }| {
-            SectionOutcome::Action(SwitchboardAction::System { index })
-        })
+        // The keyboard path carries no layout, so the rail has no rectangle
+        // to report here and reports nothing.
+        self.rail
+            .set_focus(Some(index), Rect::EMPTY, &mut damage::sink());
+        self.rail.on_key(key, Rect::EMPTY, &mut damage::sink()).map(
+            |RailAction::Activate { index }| {
+                SectionOutcome::Action(SwitchboardAction::System { index })
+            },
+        )
     }
 
     fn render(&self, surface: &mut Surface, ctx: SectionCtx<'_>) {
@@ -567,7 +574,12 @@ impl SectionView for SystemSection {
         self.render_rail(surface, ctx);
     }
 
-    fn on_pointer(&mut self, event: &InputEvent, ctx: SectionCtx<'_>) -> Option<SectionOutcome> {
+    fn on_pointer(
+        &mut self,
+        event: &InputEvent,
+        ctx: SectionCtx<'_>,
+        damage: &mut Region,
+    ) -> Option<SectionOutcome> {
         if let Some(sidebar) = ctx.frame.sidebar {
             if let Some(TabsAction::Selected { index }) = self.sidebar.on_pointer(event, sidebar) {
                 if let Some(page) = SystemPage::from_index(index) {
@@ -578,11 +590,11 @@ impl SectionView for SystemSection {
             }
         }
         let rail = self.rail_content(&ctx.frame, ctx.scale, ctx.theme)?;
-        self.rail.on_pointer(event, rail, ctx.scale, ctx.theme).map(
-            |RailAction::Activate { index }| {
+        self.rail
+            .on_pointer(event, rail, ctx.scale, ctx.theme, damage)
+            .map(|RailAction::Activate { index }| {
                 SectionOutcome::Action(SwitchboardAction::System { index })
-            },
-        )
+            })
     }
 
     fn apply_focus_marks(&mut self, focused: bool) {
@@ -594,7 +606,10 @@ impl SectionView for SystemSection {
             .then(|| self.focus.checked_sub(SystemPage::ALL.len()))
             .flatten()
             .filter(|index| *index < self.rail_len());
-        self.rail.set_focus(action);
+        // Focus marking runs off the keyboard path, which has no layout, so
+        // the rail has no rectangle to report here.
+        self.rail
+            .set_focus(action, Rect::EMPTY, &mut damage::sink());
         for (index, button) in self.rail.items_mut().iter_mut().enumerate() {
             button.set_focused(action == Some(index));
         }

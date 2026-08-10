@@ -46,6 +46,34 @@ pub fn format_rate(bytes_per_sec: u64) -> String {
     format!("{}/s", format_bytes(bytes_per_sec))
 }
 
+/// The decimal units a pixel count is scaled through, smallest first.
+const PIXEL_UNITS: [&str; 4] = ["", "k", "M", "G"];
+
+/// A pixel count in the largest decimal unit that keeps it under four
+/// digits, with one decimal place above a thousand (`"2.0M px"`) and whole
+/// pixels below it (`"512 px"`).
+///
+/// Decimal rather than binary: a pixel count is a screen area, so a reader
+/// compares it against a resolution they know in millions, not mebibytes.
+/// A count beyond the last unit saturates in that unit rather than wrapping
+/// to a smaller, misleading number.
+#[must_use]
+pub fn format_pixels(pixels: u64) -> String {
+    let mut scale = 1u64;
+    let mut unit = 0usize;
+    while pixels / scale >= 1000 && unit + 1 < PIXEL_UNITS.len() {
+        scale = scale.saturating_mul(1000);
+        unit = unit.saturating_add(1);
+    }
+    let name = PIXEL_UNITS.get(unit).copied().unwrap_or("");
+    if unit == 0 {
+        return format!("{pixels} px");
+    }
+    let whole = pixels / scale;
+    let tenths = (pixels % scale).saturating_mul(10) / scale;
+    format!("{whole}.{tenths}{name} px")
+}
+
 /// A permille fraction as whole-percent display text (`"92%"`).
 ///
 /// Whole percent is the precision a share sampled over one interval earns:

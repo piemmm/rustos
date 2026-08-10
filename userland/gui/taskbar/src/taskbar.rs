@@ -23,7 +23,7 @@ use tairix_controls::{
     ControlRole, IconButton, PlateSeating, PointerState, TaskbarItem, TaskbarPresentation,
     TraySignalAction,
 };
-use tairix_geometry::{Point, Rect, Scale};
+use tairix_geometry::{Point, Rect, Region, Scale};
 use tairix_icon::IconKind;
 use tairix_input::InputEvent;
 use tairix_proglib::EntryId;
@@ -479,14 +479,15 @@ impl Taskbar {
         &mut self,
         event: &InputEvent,
         scale: Scale,
+        damage: &mut Region,
     ) -> Option<TraySignalAction> {
         let capsule = self.layout(scale).switchboard;
         let readout = self
             .tray_readout_layout(scale)
             .map_or(Rect::EMPTY, |readout| readout.panel);
-        let (changed, action) = self
-            .tray
-            .on_pointer(event, capsule, readout, scale, &self.theme);
+        let (changed, action) =
+            self.tray
+                .on_pointer(event, capsule, readout, scale, &self.theme, damage);
         if changed {
             self.repaint |= TaskbarRepaint::BAR | TaskbarRepaint::READOUT;
         }
@@ -749,7 +750,7 @@ impl Taskbar {
     /// target tracked here paints on the bar itself, so a change latches
     /// only [`bar`](TaskbarRepaint::bar) — except the Switchboard capsule,
     /// whose hover can also expand or collapse its readout.
-    pub(crate) fn track_hover(&mut self, point: Point, scale: Scale) {
+    pub(crate) fn track_hover(&mut self, point: Point, scale: Scale, damage: &mut Region) {
         let layout = self.layout(scale);
         let library_pointer = if self.library.is_open() {
             PointerState::Pressed
@@ -780,9 +781,14 @@ impl Taskbar {
         let readout = self
             .tray_readout_layout(scale)
             .map_or(Rect::EMPTY, |readout| readout.panel);
-        let tray_changed = self
-            .tray
-            .track(point, layout.switchboard, readout, scale, &self.theme);
+        let tray_changed = self.tray.track(
+            point,
+            layout.switchboard,
+            readout,
+            scale,
+            &self.theme,
+            damage,
+        );
         if tray_changed {
             self.repaint |= TaskbarRepaint::BAR;
             if was_expanded || self.tray.is_expanded() {

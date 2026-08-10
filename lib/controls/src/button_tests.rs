@@ -15,6 +15,7 @@ use tairix_theme::{Rgba, Theme};
 use crate::button::{
     Button, ButtonAction, ButtonContent, ContentAlign, IconButton, SplitAction, SplitButton,
 };
+use crate::damage::sink;
 use crate::state::{
     ActivityState, AuthorityState, ControlRole, ControlState, PressureKind, PressureState,
     ProgressValue, RecoveryState,
@@ -245,10 +246,10 @@ fn indeterminate_activity_paints_a_full_width_seam() {
 fn press_then_release_inside_activates() {
     let mut button = Button::labelled("OK");
     let bounds = Rect::new(0, 0, W, H);
-    assert_eq!(button.on_pointer(&moved(10, 10), bounds), None);
-    assert_eq!(button.on_pointer(&PRESS, bounds), None);
+    assert_eq!(button.on_pointer(&moved(10, 10), bounds, &mut sink()), None);
+    assert_eq!(button.on_pointer(&PRESS, bounds, &mut sink()), None);
     assert_eq!(
-        button.on_pointer(&RELEASE, bounds),
+        button.on_pointer(&RELEASE, bounds, &mut sink()),
         Some(ButtonAction::Activated)
     );
 }
@@ -257,11 +258,14 @@ fn press_then_release_inside_activates() {
 fn release_outside_cancels() {
     let mut button = Button::labelled("OK");
     let bounds = Rect::new(0, 0, W, H);
-    assert_eq!(button.on_pointer(&moved(10, 10), bounds), None);
-    assert_eq!(button.on_pointer(&PRESS, bounds), None);
+    assert_eq!(button.on_pointer(&moved(10, 10), bounds, &mut sink()), None);
+    assert_eq!(button.on_pointer(&PRESS, bounds, &mut sink()), None);
     // Pointer leaves the button before release.
-    assert_eq!(button.on_pointer(&moved(1000, 1000), bounds), None);
-    assert_eq!(button.on_pointer(&RELEASE, bounds), None);
+    assert_eq!(
+        button.on_pointer(&moved(1000, 1000), bounds, &mut sink()),
+        None
+    );
+    assert_eq!(button.on_pointer(&RELEASE, bounds, &mut sink()), None);
 }
 
 #[test]
@@ -269,14 +273,14 @@ fn disabled_button_never_activates() {
     let mut button = Button::labelled("OK");
     button.set_state(ControlState::disabled());
     let bounds = Rect::new(0, 0, W, H);
-    button.on_pointer(&moved(10, 10), bounds);
-    button.on_pointer(&PRESS, bounds);
-    assert_eq!(button.on_pointer(&RELEASE, bounds), None);
+    button.on_pointer(&moved(10, 10), bounds, &mut sink());
+    button.on_pointer(&PRESS, bounds, &mut sink());
+    assert_eq!(button.on_pointer(&RELEASE, bounds, &mut sink()), None);
     // A denied button likewise never activates.
     button.set_state(ControlState::idle().with_authority(AuthorityState::Denied));
-    button.on_pointer(&moved(10, 10), bounds);
-    button.on_pointer(&PRESS, bounds);
-    assert_eq!(button.on_pointer(&RELEASE, bounds), None);
+    button.on_pointer(&moved(10, 10), bounds, &mut sink());
+    button.on_pointer(&PRESS, bounds, &mut sink());
+    assert_eq!(button.on_pointer(&RELEASE, bounds, &mut sink()), None);
 }
 
 // --- Keyboard interaction ----------------------------------------------
@@ -326,10 +330,10 @@ fn icon_button_paints_and_activates() {
 
     let mut button = button;
     let bounds = Rect::new(0, 0, H, H);
-    button.on_pointer(&moved(5, 5), bounds);
-    button.on_pointer(&PRESS, bounds);
+    button.on_pointer(&moved(5, 5), bounds, &mut sink());
+    button.on_pointer(&PRESS, bounds, &mut sink());
     assert_eq!(
-        button.on_pointer(&RELEASE, bounds),
+        button.on_pointer(&RELEASE, bounds, &mut sink()),
         Some(ButtonAction::Activated)
     );
 }
@@ -429,18 +433,30 @@ fn split_button_reports_the_activated_region() {
     let mut split = SplitButton::new(ButtonContent::Label("Run".into()), ControlRole::Primary);
     let bounds = Rect::new(0, 0, W, H);
     // A click on the far left lands in the primary region.
-    split.on_pointer(&moved(5, iv(H) / 2), bounds, Scale::ONE, &theme);
-    split.on_pointer(&PRESS, bounds, Scale::ONE, &theme);
+    split.on_pointer(
+        &moved(5, iv(H) / 2),
+        bounds,
+        Scale::ONE,
+        &theme,
+        &mut sink(),
+    );
+    split.on_pointer(&PRESS, bounds, Scale::ONE, &theme, &mut sink());
     assert_eq!(
-        split.on_pointer(&RELEASE, bounds, Scale::ONE, &theme),
+        split.on_pointer(&RELEASE, bounds, Scale::ONE, &theme, &mut sink()),
         Some(SplitAction::Primary)
     );
 
     // A click on the far right lands in the disclosure region.
-    split.on_pointer(&moved(iv(W) - 5, iv(H) / 2), bounds, Scale::ONE, &theme);
-    split.on_pointer(&PRESS, bounds, Scale::ONE, &theme);
+    split.on_pointer(
+        &moved(iv(W) - 5, iv(H) / 2),
+        bounds,
+        Scale::ONE,
+        &theme,
+        &mut sink(),
+    );
+    split.on_pointer(&PRESS, bounds, Scale::ONE, &theme, &mut sink());
     assert_eq!(
-        split.on_pointer(&RELEASE, bounds, Scale::ONE, &theme),
+        split.on_pointer(&RELEASE, bounds, Scale::ONE, &theme, &mut sink()),
         Some(SplitAction::Disclosure)
     );
 }
@@ -574,8 +590,8 @@ fn pressing_darkens_the_plate() {
     let theme = Theme::dark();
     let mut button = Button::labelled("OK");
     let bounds = Rect::new(0, 0, W, H);
-    button.on_pointer(&moved(iv(W) / 2, iv(H) / 2), bounds);
-    button.on_pointer(&PRESS, bounds);
+    button.on_pointer(&moved(iv(W) / 2, iv(H) / 2), bounds, &mut sink());
+    button.on_pointer(&PRESS, bounds, &mut sink());
     let surface = render(&button, &theme);
     assert!(interior_has(
         &surface,
@@ -611,8 +627,8 @@ fn pointer_position_alone_never_changes_a_button_family_render() {
 
     let mut a = Button::labelled("OK");
     let mut b = a.clone();
-    a.on_pointer(&outside, plate());
-    b.on_pointer(&farther, plate());
+    a.on_pointer(&outside, plate(), &mut sink());
+    b.on_pointer(&farther, plate(), &mut sink());
     assert_eq!(a, b, "a coordinate off the plate is not a drawn property");
     assert_eq!(
         pixels_of(|s| a.render(s, plate(), Scale::ONE, &theme)),
@@ -622,8 +638,8 @@ fn pointer_position_alone_never_changes_a_button_family_render() {
 
     let mut a = IconButton::new(IconKind::Bell, ControlRole::Neutral);
     let mut b = a.clone();
-    a.on_pointer(&outside, plate());
-    b.on_pointer(&farther, plate());
+    a.on_pointer(&outside, plate(), &mut sink());
+    b.on_pointer(&farther, plate(), &mut sink());
     assert_eq!(a, b);
     assert_eq!(
         pixels_of(|s| a.render(s, plate(), Scale::ONE, &theme, None)),
@@ -635,8 +651,8 @@ fn pointer_position_alone_never_changes_a_button_family_render() {
         ControlRole::Primary,
     );
     let mut b = a.clone();
-    a.on_pointer(&outside, plate(), Scale::ONE, &theme);
-    b.on_pointer(&farther, plate(), Scale::ONE, &theme);
+    a.on_pointer(&outside, plate(), Scale::ONE, &theme, &mut sink());
+    b.on_pointer(&farther, plate(), Scale::ONE, &theme, &mut sink());
     assert_eq!(a, b);
     assert_eq!(
         pixels_of(|s| a.render(s, plate(), Scale::ONE, &theme)),
@@ -650,7 +666,7 @@ fn press_latch_alone_never_changes_a_button_render() {
     // One button holds a real press latch; the other is merely *shown*
     // pressed. Only the latch differs, and a latch is not drawn.
     let mut latched = Button::labelled("OK");
-    latched.on_pointer(&PRESS, plate());
+    latched.on_pointer(&PRESS, plate(), &mut sink());
 
     let mut shown = Button::labelled("OK");
     let mut pressed = ControlState::idle();
@@ -664,7 +680,7 @@ fn press_latch_alone_never_changes_a_button_render() {
         "…and the two must therefore paint identically"
     );
     assert_eq!(
-        latched.on_pointer(&RELEASE, plate()),
+        latched.on_pointer(&RELEASE, plate(), &mut sink()),
         Some(ButtonAction::Activated),
         "the latch still governs activation, it is only invisible"
     );
@@ -675,11 +691,11 @@ fn hover_press_and_focus_each_change_a_button_render() {
     let resting = Button::labelled("OK");
 
     let mut hovered = resting.clone();
-    hovered.on_pointer(&moved(iv(W) / 2, iv(H) / 2), plate());
+    hovered.on_pointer(&moved(iv(W) / 2, iv(H) / 2), plate(), &mut sink());
     assert_ne!(resting, hovered, "a hover highlight is visible");
 
     let mut held = hovered.clone();
-    held.on_pointer(&PRESS, plate());
+    held.on_pointer(&PRESS, plate(), &mut sink());
     assert_ne!(hovered, held, "a press is visible");
 
     let mut focused = resting.clone();

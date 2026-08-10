@@ -7468,7 +7468,7 @@ load-relative. Docs: `docs/src/architecture/fault-diagnostics.md`.
 
 ---
 
-## FIX-DESKTOP-SPEEDUP — desktop redraw speed without hardware acceleration (`plans/FIX-DESKTOP-SPEEDUP.md`)  **[A DONE, B DONE, C IN PROGRESS]**
+## FIX-DESKTOP-SPEEDUP — desktop redraw speed without hardware acceleration (`plans/FIX-DESKTOP-SPEEDUP.md`)  **[A DONE, B DONE, C MOSTLY DONE]**
 
 **Dependencies:** Stage 7 (compositor, taskbar, controls). Independent of
 `plans/FIX-DISPLAY-ACCELERATION.md` — that is the hardware half; this is
@@ -7476,19 +7476,21 @@ the software path, which stays the mandatory fallback on every target
 (§17.3) and is what a backdrop-blur frame always takes.
 
 **The defect that remains.** A pointer-motion sample over a control-rich
-window still costs a full-window repaint: `lib/controls` has no dirty-rect
-concept, so a hover flip fails the host's `PartialEq` render gate and every
-app presents `DamageRect::full(mode)` (`files`, `terminal`, `viewer`,
-`wallpaper`, `widgets`, `switchboard`). A blurred window's whole backdrop is
-re-frosted with **no cache**, and a frame presents up to eight separate
-region round trips each copying a growing bounding box. What the compositor
-is then asked to do it now does efficiently (B) and measurably (A); the
-waste is upstream of it.
+window still costs three whole-window passes above the compositor: the app
+re-renders its whole surface, unpremultiplies and copies every pixel into the
+shared frame, and the session converts and diffs every one of them. The
+compositor itself is *not* the bottleneck here — `convert_damage` already
+compares each presented pixel with what is there and reports only the
+sub-rectangle that genuinely changed — so the waste is entirely upstream, and
+closing it needs every control model change to report damage (C.1), not just
+the pointer path that now does. A blurred window's whole backdrop is still
+re-frosted with **no cache** (D), and a frame still presents up to eight
+separate region round trips each copying a growing bounding box (E).
 
 **Staged (detail in the plan; do not duplicate it here, §13):**
 
-- **A — measure, and measure the right binary. [done, less the Switchboard
-  surfacing and the QEMU vertical]** `tairix-wm`/`-controls`/`-font`/
+- **A — measure, and measure the right binary. [done, less the QEMU
+  vertical]** `tairix-wm`/`-controls`/`-font`/
   `-window`/`-display` now build at `opt-level = 3` in the dev profile too
   (the debug/QEMU images build userland `Run` binaries there, so a
   measurement taken before this described the profile, not the code);
@@ -7497,8 +7499,11 @@ waste is upstream of it.
   `Compositor::frame_stats` reports exact per-frame work counts (damaged,
   blended, copied, frosted, encoded px, dirty rects, present calls,
   furniture-cache hits/misses taken as the delta of the cache's own
-  accounting). Still open: the counters on the Switchboard's System →
-  Resources page, and the QEMU hover vertical that gates on counter bounds.
+  accounting), surfaced as the Desktop block on the Switchboard's System →
+  Resources page over the port that already carries the seat report — no new
+  syscall, sysinfo query or capability, and a receiver that validates every
+  count and fails closed. Still open: the QEMU hover vertical that gates on
+  counter bounds.
 - **B — stop blending the invisible. [done]** `WindowRow::opaque_run` +
   `compose_row` copy runs of genuinely opaque source pixels and skip every
   layer below them, so occlusion culling *is* the opaque-run path rather
@@ -7508,19 +7513,29 @@ waste is upstream of it.
   cannot name a pixel type without closing the cycle `abi → raster →
   theme/reclaim → abi`). Bit-identity is proven by composing each scene
   twice, with the copy path on and off, and comparing bytes.
-- **C — repaint the control, not the window. [C.2 done]** Containers hit-test
-  once and deliver to at most the child left, the child entered, and any
-  child holding a press, through one shared `route_pointer`/`grab_after`
-  policy, with the old fan-to-all kept as a `#[cfg(test)]` differential
-  oracle. Remaining: hoist one `Region` into `lib/geometry`, add the damage
-  sink to `lib/controls`, apps present real rects (the window ABI already
-  carries one), font/text-measure hoist into `lib/font`, one shell present
-  per drained input batch.
+- **C — repaint the control, not the window. [C.0, C.2, C.4b, C.5 done; C.1
+  partly; C.3 blocked; C.4a remains]** `tairix_geometry::Region` is the one
+  region type (pairwise-disjoint band-canonical rectangles, a linear merge
+  walk, an optional rectangle budget), and the WM's private copy is deleted;
+  the compositor consumes it through a compose plan that promotes a
+  backdrop-blurred window to one whole rectangle and *subtracts* it from the
+  residual, so the frost cannot seam while unrelated damage stays tight.
+  Containers route one hit test to at most the child left, the child entered
+  and any child holding a press. `lib/controls/src/damage.rs` is the damage
+  seam — one guarded write and a budgeted region — and the pointer path
+  reports through it. Text measurement is memoised in `lib/font` beside the
+  glyph cache, keyed by face and text and sharing the glyph cache's
+  RAM-derived budget, with the monospace path paying no lookup. The shell
+  settles once per drained input batch instead of once per sample (as do the
+  keyboard and pinboard drains). Remaining: the keyboard/value control
+  families and the old-bounds memory (C.1), the font hoist (C.4a), and
+  — blocked until C.1 is complete — apps presenting real rects (C.3), which
+  today would silently drop changes no reported rectangle covers.
 - **D — blur costs what it changes.** Split backdrop damage from content
   damage, cache the frosted backdrop as a `lib/reclaim` client, and make
   the box-blur mean a bit-identical reciprocal multiply.
-- **E — one present per frame.** Disjoint damage region, a bounded rect
-  *list* in one `Present` (same evolution as
+- **E — one present per frame.** The disjoint damage region landed with C.0;
+  what remains is a bounded rect *list* in one `Present` (same evolution as
   `plans/FIX-DISPLAY-ACCELERATION.md` Stage B), and one-shot tickless
   frame pacing (§17.1, never a periodic tick).
 - **F — CPU-dispatched raster kernels.** `lib/cpuops` `ByPriority`

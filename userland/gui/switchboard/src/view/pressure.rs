@@ -9,7 +9,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use tairix_font::BitmapFont;
-use tairix_geometry::{to_i32, Rect, Scale};
+use tairix_geometry::{to_i32, Rect, Region, Scale};
 use tairix_input::{InputEvent, Key};
 use tairix_raster::{Color, Surface};
 use tairix_theme::Theme;
@@ -486,13 +486,18 @@ impl SectionView for PressureSection {
     /// A card that reports any interaction becomes the selected cause, so
     /// pressing a card opens its detail; a footer activation additionally
     /// resolves to that footer's outcome.
-    fn on_pointer(&mut self, event: &InputEvent, ctx: SectionCtx<'_>) -> Option<SectionOutcome> {
+    fn on_pointer(
+        &mut self,
+        event: &InputEvent,
+        ctx: SectionCtx<'_>,
+        damage: &mut Region,
+    ) -> Option<SectionOutcome> {
         let info = self.list_info(&ctx.frame, ctx.scale, ctx.theme);
         let chosen = select_pressed_card(&info, ctx.start, |cause, item| {
             self.entries
                 .get_mut(cause)?
                 .card
-                .on_pointer(event, item, ctx.scale, ctx.theme)
+                .on_pointer(event, item, ctx.scale, ctx.theme, damage)
         });
         let (cause, action) = chosen?;
         self.focus = cause;

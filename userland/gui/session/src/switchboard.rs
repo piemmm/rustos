@@ -3,8 +3,9 @@
 //! monitor's panel raises over other processes' windows
 //! ([`SwitchboardRequest::ActivateOwner`] /
 //! [`SwitchboardRequest::RestartOwner`]), and the reverse direction — the
-//! tray-icon press that opens the panel and the seat's unresponsive-owner
-//! report — that the session sends on the service's own command mailbox.
+//! tray-icon press that opens the panel, the seat's unresponsive-owner
+//! report, and what the last composited frame cost — that the session sends
+//! on the service's own command mailbox.
 //!
 //! Every side effect (raising a window, relaunching a bundle, sending on
 //! the mailbox) is an injected seam ([`OwnerWindow`], the `relaunch`
@@ -13,7 +14,8 @@
 //! is worth sending — are pure and host-tested without a running kernel.
 
 use tairix_abi::switchboard_ipc::{
-    CommandSection, SeatReport, SwitchboardCommand, SwitchboardRequest, SEAT_REPORT_OWNERS_MAX,
+    CommandSection, FrameReport, SeatReport, SwitchboardCommand, SwitchboardRequest,
+    SEAT_REPORT_OWNERS_MAX,
 };
 use tairix_abi::{Errno, ProcId};
 use tairix_wm::{Compositor, WindowId};
@@ -325,5 +327,111 @@ pub fn maybe_send_seat_report(
     let bounded = &owners[..owners.len().min(SEAT_REPORT_OWNERS_MAX)];
     if let Ok(report) = SeatReport::new(total, bounded) {
         let _ = mailbox.send(pid, SwitchboardCommand::SeatReport { report });
+    }
+}
+
+/// What served-window content landed since the last frame-report decision.
+///
+/// A monitor must not measure its own act of displaying: when the only
+/// content that arrived is the Switchboard's, the frame is the cost of
+/// drawing the number, not the desktop's work, and must not be reported.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum FrameContent {
+    /// No served window presented — chrome, animation, or an idle settle.
+    None,
+    /// At least one non-Switchboard window presented.
+    Foreign,
+    /// Only the live Switchboard's own window(s) presented.
+    SwitchboardOnly,
+}
+
+/// Owners of windows that presented content since the last report decision.
+///
+/// Fold each successful present in, then read [`PresentedOwners::content`]
+/// once at the frame-report site so the gate stays a pure function of the
+/// owners that actually arrived.
+#[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
+pub struct PresentedOwners {
+    any: bool,
+    foreign: bool,
+}
+
+impl PresentedOwners {
+    /// Record one successful present by its kernel-attested owner pid.
+    ///
+    /// An owner that cannot be resolved, or that is not the live Switchboard,
+    /// counts as foreign: suppressing a real desktop frame is worse than
+    /// reporting one extra Switchboard paint.
+    pub fn note(&mut self, owner_pid: Option<u64>, switchboard_pid: Option<u64>) {
+        self.any = true;
+        let switchboard_only = matches!(
+            (owner_pid, switchboard_pid),
+            (Some(owner), Some(switchboard)) if owner == switchboard
+        );
+        if !switchboard_only {
+            self.foreign = true;
+        }
+    }
+
+    /// Classify the accumulated presents for the frame-report gate.
+    #[must_use]
+    pub const fn content(self) -> FrameContent {
+        if !self.any {
+            FrameContent::None
+        } else if self.foreign {
+            FrameContent::Foreign
+        } else {
+            FrameContent::SwitchboardOnly
+        }
+    }
+}
+
+/// Report what the frame `compositor` has just published cost, when a
+/// Switchboard instance is live, the counts differ from the one `last`
+/// records, and the frame's served content was not only the Switchboard's
+/// own paint.
+///
+/// `last` is what makes this a change report rather than a per-frame send: a
+/// desktop redrawing the same rectangles sends nothing, and one that has
+/// gone quiet sends its idle frame once. `content` is what stops the monitor
+/// measuring itself: a frame whose only served present came from the live
+/// Switchboard is dropped even when the counters moved, so the panel's
+/// rebuild cannot re-excite another report. Nothing here waits on the panel,
+/// so a frame path pays one comparison and at most one non-blocking send.
+///
+/// A refused send is dropped, exactly as a refused seat report is: the count
+/// it carried describes a frame already on screen, and the next frame that
+/// differs from the panel's view re-sends a fresher one. `last` therefore
+/// records what was *accepted*, never what was merely attempted.
+pub fn maybe_send_frame_report(
+    last: &mut Option<FrameReport>,
+    compositor: &Compositor,
+    live: Option<u64>,
+    content: FrameContent,
+    mailbox: &mut dyn SwitchboardMailbox,
+) {
+    if matches!(content, FrameContent::SwitchboardOnly) {
+        return;
+    }
+    let Some(pid) = live else {
+        return;
+    };
+    let mode = compositor.mode();
+    let stats = compositor.frame_stats();
+    let report = FrameReport {
+        screen_px: u64::from(mode.width_px).saturating_mul(u64::from(mode.height_px)),
+        damaged_px: stats.damaged_px,
+        blended_px: stats.blended_px,
+        opaque_px: stats.opaque_px,
+        dirty_rects: stats.dirty_rects,
+        present_calls: stats.present_calls,
+        chrome_hits: stats.chrome_hits,
+        chrome_misses: stats.chrome_misses,
+    };
+    if *last == Some(report) {
+        return;
+    }
+    if mailbox.send(pid, SwitchboardCommand::FrameReport { report }) {
+        *last = Some(report);
     }
 }

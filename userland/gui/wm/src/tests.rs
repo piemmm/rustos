@@ -10,8 +10,7 @@ use tairix_abi::DriverError;
 use crate::color::{div255, Color, Pixel};
 use crate::compositor::MAX_PRESENT_REGIONS;
 use crate::corner::Corners;
-use crate::damage::DamageRegion;
-use crate::geometry::{Point, Rect};
+use crate::geometry::{Point, Rect, Region};
 use crate::surface::Surface;
 use crate::{Compositor, WindowId};
 
@@ -182,74 +181,9 @@ fn radius_is_clamped_to_half_side() {
 }
 
 // ---- damage ----------------------------------------------------------
-
-#[test]
-fn damage_ignores_empty_rects() {
-    let mut d = DamageRegion::new();
-    d.add(Rect::EMPTY);
-    assert!(d.is_empty());
-}
-
-#[test]
-fn damage_tracks_bounds_and_membership() {
-    let mut d = DamageRegion::new();
-    d.add(Rect::new(0, 0, 2, 2));
-    d.add(Rect::new(4, 4, 2, 2));
-    assert_eq!(d.bounds(), Rect::new(0, 0, 6, 6));
-    assert!(d.covers(Point::new(1, 1)));
-    assert!(!d.covers(Point::new(3, 3)));
-    assert_eq!(d.rects().len(), 2);
-}
-
-#[test]
-fn damage_clear_empties() {
-    let mut d = DamageRegion::new();
-    d.add(Rect::new(0, 0, 1, 1));
-    d.clear();
-    assert!(d.is_empty());
-    assert_eq!(d.bounds(), Rect::EMPTY);
-}
-
-#[test]
-fn damage_coalesces_repeated_rectangles() {
-    // The window-open path marks the same window rectangle dirty several
-    // times (open, focus, surface update) and the taskbar its bar
-    // rectangle several times per present. Recomposition is per
-    // rectangle, so without coalescing that region would be composited
-    // once per duplicate — the defect this guards. The same rectangle
-    // added many times must collapse to exactly one.
-    let mut d = DamageRegion::new();
-    let window = Rect::new(80, 80, 900, 620);
-    for _ in 0..6 {
-        d.add(window);
-    }
-    assert_eq!(d.rects(), &[window]);
-    assert_eq!(d.bounds(), window);
-}
-
-#[test]
-fn damage_coalesces_overlapping_into_their_union() {
-    // Two overlapping updates (a window's old and new position after a
-    // move) merge into one rectangle so the overlap is not composited
-    // twice.
-    let mut d = DamageRegion::new();
-    d.add(Rect::new(0, 0, 4, 4));
-    d.add(Rect::new(2, 2, 4, 4));
-    assert_eq!(d.rects(), &[Rect::new(0, 0, 6, 6)]);
-}
-
-#[test]
-fn damage_bridging_rectangle_merges_a_disjoint_pair() {
-    // A later rectangle overlapping two previously-disjoint rectangles
-    // draws all three into a single union, never leaving a stale
-    // duplicate behind.
-    let mut d = DamageRegion::new();
-    d.add(Rect::new(0, 0, 2, 2));
-    d.add(Rect::new(6, 0, 2, 2));
-    assert_eq!(d.rects().len(), 2);
-    d.add(Rect::new(0, 0, 8, 2));
-    assert_eq!(d.rects(), &[Rect::new(0, 0, 8, 2)]);
-}
+//
+// The region type itself is `tairix_geometry::Region` and is tested there;
+// what belongs here is how the compositor uses it.
 
 #[test]
 fn duplicate_damage_composites_a_window_once_and_correctly() {
@@ -503,7 +437,7 @@ fn back_buffer_holds_premultiplied_pixels() {
 /// A caller skips a frame entirely when `has_damage` is `false`, so a
 /// disagreement either drops a repaint the user is waiting for or burns a
 /// wake compositing nothing.
-fn composite_checked(c: &mut Compositor) -> DamageRegion {
+fn composite_checked(c: &mut Compositor) -> Region {
     let claimed = c.has_damage();
     let region = c.composite();
     assert_eq!(
@@ -2037,7 +1971,7 @@ fn a_frosted_window_repaints_whole_however_little_is_damaged() {
     let repainted = composite_checked(&mut c);
     for y in 0..8 {
         assert!(
-            repainted.covers(Point::new(4, y)) && repainted.covers(Point::new(11, y)),
+            repainted.contains(Point::new(4, y)) && repainted.contains(Point::new(11, y)),
             "row {y} of the frosted window was recomposited end to end"
         );
     }
@@ -2048,6 +1982,54 @@ fn a_frosted_window_repaints_whole_however_little_is_damaged() {
         fresh.frame(),
         "one damaged pixel refrosts the window exactly as a full composite"
     );
+}
+
+#[test]
+fn damage_beside_a_frosted_window_is_not_swallowed_by_it() {
+    let (mut c, block) = frosted_block(6, false);
+    // The block sits under the frosted window, so its repaint promotes the
+    // window whole; the taskbar-like strip in the far corner is unrelated.
+    let strip = c.add_window(Point::new(14, 6), opaque(2, 2, GREEN));
+    assert!(!composite_checked(&mut c).is_empty());
+    assert_eq!(present_content(&mut c, block, paint_dot), Some(true));
+    assert!(c.move_window(strip, Point::new(14, 4)));
+
+    let repainted = composite_checked(&mut c);
+    for y in 0..8 {
+        assert!(
+            repainted.contains(Point::new(4, y)) && repainted.contains(Point::new(11, y)),
+            "row {y} of the frosted window was recomposited end to end"
+        );
+    }
+    // Growing the strip's damage to reach the frosted window would have
+    // recomposited the columns between them too.
+    let touched: u32 = repainted
+        .rects()
+        .iter()
+        .map(|r| r.width * r.height)
+        .sum::<u32>();
+    assert_eq!(
+        touched,
+        8 * 8 + 2 * 2 + 2 * 2,
+        "only the window and the strip's two positions were recomposed"
+    );
+}
+
+#[test]
+fn two_overlapping_frosted_windows_recompose_as_one_rectangle() {
+    let mut c = new_compositor(mode(20, 10), BLUE).expect("compositor");
+    let block = c.add_window(Point::ORIGIN, opaque(3, 10, RED));
+    let left = c.add_window(Point::ORIGIN, clear(8, 10));
+    let right = c.add_window(Point::new(6, 0), clear(8, 10));
+    assert!(c.set_backdrop_blur(left, 2));
+    assert!(c.set_backdrop_blur(right, 2));
+    c.composite();
+
+    // Each frosted window reads what the other wrote, so damage touching
+    // either must recompose both at once or the overlap seams.
+    assert_eq!(present_content(&mut c, block, paint_dot), Some(true));
+    let repainted = composite_checked(&mut c);
+    assert_eq!(repainted.rects(), &[Rect::new(0, 0, 14, 10)]);
 }
 
 #[test]

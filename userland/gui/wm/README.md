@@ -38,14 +38,20 @@ router**:
   the largest frosted rectangle the session has needed and reused, so a
   frosted window allocates nothing after its first frame; a mode change
   releases it rather than carrying the old screen's pixels. Because those
-  pixels are a function of the whole backdrop beneath them, every damage
-  rectangle touching a visible frosted window grows to its full bounds,
-  iterated until nothing grows; and `present_accelerated` takes the software
+  pixels are a function of the whole backdrop beneath them, damage touching a
+  visible frosted window promotes that window's full bounds into one
+  recompose rectangle, iterated until nothing grows; and
+  `present_accelerated` takes the software
   fallback outright while any visible window is frosted, because a
   hardware layer is composed from its own pixels and cannot sample what is
   already behind it.
-- Damage tracking (`damage`): only changed pixels are recomposited.
-  `Compositor::composite` returns the `DamageRegion` it actually
+- Damage tracking (`tairix_geometry::Region`): only changed pixels are
+  recomposited, and the region's rectangles are pairwise disjoint, so no
+  pixel is composited or presented twice and two far-apart updates stay two
+  small rectangles. A backdrop-blurred window is promoted to its whole
+  rectangle (and subtracted from the rest of the damage) because its pixels
+  read the whole backdrop beneath it.
+  `Compositor::composite` returns the `Region` it actually
   recomposited (screen-clipped), and `has_damage` answers exactly what
   that next composite would produce, so a wake loop can skip a frame
   outright. An update that changes nothing marks nothing: a `move_window`

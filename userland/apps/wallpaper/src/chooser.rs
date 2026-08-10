@@ -23,7 +23,7 @@ use tairix_controls::combo::{ComboAction, ComboBox};
 use tairix_controls::scroll::{ScrollModel, ScrollOrientation, ScrollRange};
 use tairix_controls::scrollbar::{ScrollAction, ScrollBar};
 use tairix_controls::state::ControlRole;
-use tairix_geometry::{Point, Rect};
+use tairix_geometry::{Point, Rect, Region};
 use tairix_input::{InputEvent, Key, Modifiers, NamedKey, PointerButton};
 use tairix_raster::Surface;
 use tairix_wallpaper::{
@@ -408,7 +408,12 @@ impl Chooser {
     /// the gallery itself. Each control decides for itself whether the
     /// pointer is inside it, so a press that lands on one control and a
     /// release that lands on another activate nothing at all.
-    pub fn on_pointer(&mut self, event: &InputEvent, style: Style<'_>) -> ChooserAction {
+    pub fn on_pointer(
+        &mut self,
+        event: &InputEvent,
+        style: Style<'_>,
+        damage: &mut Region,
+    ) -> ChooserAction {
         let layout = self.sync(style);
         if let InputEvent::PointerMoved { to } = event {
             self.pointer = *to;
@@ -429,12 +434,14 @@ impl Chooser {
             return ChooserAction::Changed;
         }
 
-        let (apply_changed, applied) = button_pointer(&mut self.apply, event, layout.apply());
+        let (apply_changed, applied) =
+            button_pointer(&mut self.apply, event, layout.apply(), damage);
         if applied {
             self.focus = Focus::Apply;
             return ChooserAction::Apply;
         }
-        let (close_changed, closed) = button_pointer(&mut self.close, event, layout.close());
+        let (close_changed, closed) =
+            button_pointer(&mut self.close, event, layout.close(), damage);
         if closed {
             return ChooserAction::Close;
         }
@@ -794,10 +801,15 @@ fn field_from(options: &[BackdropOption], selected: usize) -> ComboBox {
 /// The button reports only its activation, but a hover or a press changes
 /// what it draws, so the state either side of the event is compared: a
 /// repaint happens exactly when the user would see a difference.
-fn button_pointer(button: &mut Button, event: &InputEvent, bounds: Rect) -> (bool, bool) {
+fn button_pointer(
+    button: &mut Button,
+    event: &InputEvent,
+    bounds: Rect,
+    damage: &mut Region,
+) -> (bool, bool) {
     let before = button.state();
     let fired = matches!(
-        button.on_pointer(event, bounds),
+        button.on_pointer(event, bounds, damage),
         Some(ButtonAction::Activated)
     );
     (button.state() != before, fired)

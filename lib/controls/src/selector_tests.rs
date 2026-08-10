@@ -12,6 +12,7 @@ use tairix_input::{InputEvent, Key, NamedKey, PointerButton};
 use tairix_raster::{Color, Pixel, Surface};
 use tairix_theme::{Rgba, Theme};
 
+use crate::damage::sink;
 use crate::selector::{
     selector_mark_rect, toggle_track_rect, Checkbox, Radio, SelectorAction, Toggle,
 };
@@ -283,10 +284,10 @@ fn high_contrast_thickens_the_signal_rim() {
 fn toggle_press_then_release_requests_the_flipped_value() {
     let mut toggle = Toggle::new("X", false);
     let bounds = Rect::new(0, 0, W, H);
-    assert_eq!(toggle.on_pointer(&moved(5, 14), bounds), None);
-    assert_eq!(toggle.on_pointer(&PRESS, bounds), None);
+    assert_eq!(toggle.on_pointer(&moved(5, 14), bounds, &mut sink()), None);
+    assert_eq!(toggle.on_pointer(&PRESS, bounds, &mut sink()), None);
     assert_eq!(
-        toggle.on_pointer(&RELEASE, bounds),
+        toggle.on_pointer(&RELEASE, bounds, &mut sink()),
         Some(SelectorAction::Set { on: true })
     );
 }
@@ -295,10 +296,10 @@ fn toggle_press_then_release_requests_the_flipped_value() {
 fn release_outside_cancels() {
     let mut toggle = Toggle::new("X", false);
     let bounds = Rect::new(0, 0, W, H);
-    toggle.on_pointer(&moved(5, 14), bounds);
-    toggle.on_pointer(&PRESS, bounds);
-    toggle.on_pointer(&moved(1000, 1000), bounds);
-    assert_eq!(toggle.on_pointer(&RELEASE, bounds), None);
+    toggle.on_pointer(&moved(5, 14), bounds, &mut sink());
+    toggle.on_pointer(&PRESS, bounds, &mut sink());
+    toggle.on_pointer(&moved(1000, 1000), bounds, &mut sink());
+    assert_eq!(toggle.on_pointer(&RELEASE, bounds, &mut sink()), None);
 }
 
 #[test]
@@ -306,15 +307,15 @@ fn disabled_or_denied_selector_never_activates() {
     let bounds = Rect::new(0, 0, W, H);
     let mut disabled = Toggle::new("X", false);
     disabled.set_state(ControlState::disabled());
-    disabled.on_pointer(&moved(5, 14), bounds);
-    disabled.on_pointer(&PRESS, bounds);
-    assert_eq!(disabled.on_pointer(&RELEASE, bounds), None);
+    disabled.on_pointer(&moved(5, 14), bounds, &mut sink());
+    disabled.on_pointer(&PRESS, bounds, &mut sink());
+    assert_eq!(disabled.on_pointer(&RELEASE, bounds, &mut sink()), None);
 
     let mut denied = Toggle::new("X", false);
     denied.set_state(ControlState::idle().with_authority(AuthorityState::Denied));
-    denied.on_pointer(&moved(5, 14), bounds);
-    denied.on_pointer(&PRESS, bounds);
-    assert_eq!(denied.on_pointer(&RELEASE, bounds), None);
+    denied.on_pointer(&moved(5, 14), bounds, &mut sink());
+    denied.on_pointer(&PRESS, bounds, &mut sink());
+    assert_eq!(denied.on_pointer(&RELEASE, bounds, &mut sink()), None);
     // A denied toggle keeps its value: it never emits an action.
     assert!(!denied.is_on());
 }
@@ -348,9 +349,9 @@ fn unfocused_selector_ignores_keys() {
 fn checkbox_activation_computes_the_next_value() {
     let bounds = Rect::new(0, 0, W, H);
     let click = |mut c: Checkbox| -> Option<SelectorAction> {
-        c.on_pointer(&moved(5, 14), bounds);
-        c.on_pointer(&PRESS, bounds);
-        c.on_pointer(&RELEASE, bounds)
+        c.on_pointer(&moved(5, 14), bounds, &mut sink());
+        c.on_pointer(&PRESS, bounds, &mut sink());
+        c.on_pointer(&RELEASE, bounds, &mut sink())
     };
     assert_eq!(
         click(Checkbox::new("A", SelectionState::Unselected)),
@@ -371,9 +372,9 @@ fn checkbox_activation_computes_the_next_value() {
 fn radio_activation_always_requests_selection() {
     let bounds = Rect::new(0, 0, W, H);
     let click = |mut r: Radio| -> Option<SelectorAction> {
-        r.on_pointer(&moved(5, 14), bounds);
-        r.on_pointer(&PRESS, bounds);
-        r.on_pointer(&RELEASE, bounds)
+        r.on_pointer(&moved(5, 14), bounds, &mut sink());
+        r.on_pointer(&PRESS, bounds, &mut sink());
+        r.on_pointer(&RELEASE, bounds, &mut sink())
     };
     assert_eq!(
         click(Radio::new("One", false)),
@@ -422,8 +423,8 @@ fn pointer_position_alone_never_changes_a_selector_render() {
 
     let mut a = Toggle::new("Wi-Fi", false);
     let mut b = a.clone();
-    a.on_pointer(&outside, plate());
-    b.on_pointer(&farther, plate());
+    a.on_pointer(&outside, plate(), &mut sink());
+    b.on_pointer(&farther, plate(), &mut sink());
     assert_eq!(a, b, "a coordinate off the plate is not a drawn property");
     assert_eq!(
         pixels_of(|s| a.render(s, plate(), Scale::ONE, &theme)),
@@ -433,8 +434,8 @@ fn pointer_position_alone_never_changes_a_selector_render() {
 
     let mut a = Checkbox::new("Include hidden", SelectionState::Unselected);
     let mut b = a.clone();
-    a.on_pointer(&outside, plate());
-    b.on_pointer(&farther, plate());
+    a.on_pointer(&outside, plate(), &mut sink());
+    b.on_pointer(&farther, plate(), &mut sink());
     assert_eq!(a, b);
     assert_eq!(
         pixels_of(|s| a.render(s, plate(), Scale::ONE, &theme)),
@@ -443,8 +444,8 @@ fn pointer_position_alone_never_changes_a_selector_render() {
 
     let mut a = Radio::new("Daily", false);
     let mut b = a.clone();
-    a.on_pointer(&outside, plate());
-    b.on_pointer(&farther, plate());
+    a.on_pointer(&outside, plate(), &mut sink());
+    b.on_pointer(&farther, plate(), &mut sink());
     assert_eq!(a, b);
     assert_eq!(
         pixels_of(|s| a.render(s, plate(), Scale::ONE, &theme)),
@@ -458,7 +459,7 @@ fn press_latch_alone_never_changes_a_selector_render() {
     // One toggle holds a real press latch; the other is merely *shown*
     // pressed. Only the latch differs, and a latch is not drawn.
     let mut latched = Toggle::new("Wi-Fi", false);
-    latched.on_pointer(&PRESS, plate());
+    latched.on_pointer(&PRESS, plate(), &mut sink());
 
     let mut shown = Toggle::new("Wi-Fi", false);
     let mut pressed = ControlState::idle();
@@ -472,7 +473,7 @@ fn press_latch_alone_never_changes_a_selector_render() {
         "…and the two must therefore paint identically"
     );
     assert_eq!(
-        latched.on_pointer(&RELEASE, plate()),
+        latched.on_pointer(&RELEASE, plate(), &mut sink()),
         Some(SelectorAction::Set { on: true }),
         "the latch still governs activation, it is only invisible"
     );
@@ -483,7 +484,7 @@ fn hover_and_value_each_change_a_selector_render() {
     let resting = Toggle::new("Wi-Fi", false);
 
     let mut hovered = resting.clone();
-    hovered.on_pointer(&moved(4, 4), plate());
+    hovered.on_pointer(&moved(4, 4), plate(), &mut sink());
     assert_ne!(resting, hovered, "a hover highlight is visible");
 
     let switched = Toggle::new("Wi-Fi", true);

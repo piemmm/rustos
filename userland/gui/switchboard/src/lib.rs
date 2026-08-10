@@ -139,7 +139,7 @@ pub use command::{authenticate_command, is_from_session};
 pub use derive::{derive_summary, memory_pressured, Hysteresis};
 pub use model::{
     apply_action, build_model, derive_self_uid, map_section, signal_pid, Effect, GroupingEdit,
-    LiveMeters, PanelModel,
+    LiveMeters, PanelModel, SessionReport,
 };
 pub use panel::{
     refusal_notice, Panel, PanelOutcome, MIN_WIN_HEIGHT, MIN_WIN_WIDTH, PANEL_TITLE, WIN_HEIGHT,

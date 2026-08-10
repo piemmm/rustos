@@ -38,9 +38,11 @@ commands from.
 Commands travel the other way, over the per-instance mailbox
 `command_endpoint_for(<own pid>)` that this service binds: `OpenPanel` (show
 the overview on a named section), `SeatReport` (which window owners the
-session's liveness vigil finds unresponsive), and `Power` (the machine
+session's liveness vigil finds unresponsive), `Power` (the machine
 transition the user confirmed in the taskbar's quick-actions menu — see
-[Power transitions](#power-transitions)). Every command is authenticated
+[Power transitions](#power-transitions)), and `FrameReport` (what the
+session's last composited frame cost — see
+[The Desktop block](#the-desktop-block)). Every command is authenticated
 against the kernel-attested sender of that very message, never a claim on
 the wire; a command from anyone but the attested session, a command that
 arrives before any session has been attested, and a frame that does not
@@ -226,7 +228,7 @@ Each **page** states what it can measure:
 | Page | What it reads |
 |---|---|
 | Overview | hostname, OS version, machine id, uptime, boot time, CPU model and core count, load average and installed RAM; then the Active Services statement and the authority summary |
-| Resources | the per-core load, and the memory and kernel-heap detail |
+| Resources | the per-core load, the memory and kernel-heap detail, and what the desktop's last composited frame cost |
 | Storage | every mount — source, mount point, filesystem, medium, availability, used-of-total from the volume's own block counts, and its measured health |
 | Network | per interface — its facts, its link state and addresses, and its rx/tx rates |
 | Session | the seats and the logged-in census the load reading carries |
@@ -259,6 +261,37 @@ The content cursor's stops are the eight pages and then the rail's buttons, so
 Up/Down walks the sidebar exactly as a reader expects of a vertical list and
 Enter or Space commits. The `Tabs` control's own vertical navigation is
 deliberately not given the same keys, which would give them two meanings.
+
+#### The Desktop block
+
+The Resources page's third block is the one reading this service does not
+sample. The session owns the compositor, so it sends what its last frame cost
+over the command channel above — only when the counts changed, and never when
+the only served content was this service's own paint (a monitor must not
+measure itself) — and this service validates and renders it:
+
+| Row | What it reads |
+|---|---|
+| Last frame | the pixels the frame recomposed, of the whole screen |
+| Blended | the layer contributions blended to resolve them, and how many times over the damage that is |
+| Opaque copies | damaged pixels resolved by copying an opaque run instead |
+| Rectangles | how many rectangles the frame recomposed |
+| Present calls | how many calls into the display driver published it |
+| Window furniture | furniture lookups served from the retained cache, and how many had to be rendered |
+
+Each counter's own meaning is in [what one frame
+cost](./wm.md#what-one-frame-cost-framestats). *Blended* exceeding *Last
+frame* many times over is not an error — it is the reading: a frame that
+blends four million pixels to change three thousand is paying for depth
+nobody can see, and one that recomposes the whole screen to move a cursor is
+damaging too much.
+
+A report whose counts no compositor pass could have produced is refused where
+it is decoded, so the block never renders a sender's arithmetic. An idle frame
+reads *idle, nothing recomposed* rather than a row of zeros pretending a frame
+was drawn, and a frame nobody has reported yet reads unavailable. Every figure
+is a count of work; no duration rides this path, because a duration is neither
+reproducible nor assertable.
 
 ### The Recovery screen
 

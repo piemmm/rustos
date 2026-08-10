@@ -47,7 +47,8 @@ use tairix_theme::{Fonts, TextRole};
 use tairix_vt::char_width;
 
 use crate::atlas;
-use crate::client;
+use crate::client::{self, GlyphClient};
+use crate::measure::MeasuredText;
 
 /// The mark that ends a line the text outgrew: HORIZONTAL ELLIPSIS.
 ///
@@ -228,8 +229,7 @@ impl BitmapFont {
     /// family is proportional.
     #[must_use]
     pub fn monospace_advance(self) -> Option<u32> {
-        let advance = self.metrics().monospace_advance;
-        (advance != 0).then_some(advance)
+        client::with_client(|client| self.monospace_advance_on(client))
     }
 
     /// The column width a grid-drawing caller should use: the family's
@@ -270,15 +270,14 @@ impl BitmapFont {
     /// [`u32::MAX`] rather than wrapping. A monospace family takes the O(1)
     /// fast path of multiplying by the shared cell width instead of fetching
     /// each character's advance individually.
+    ///
+    /// A proportional family's per-character walk is memoised, so repainting
+    /// text that has not changed measures nothing; a monospace family
+    /// multiplies and never consults the memo, because there is no
+    /// per-character lookup there to save.
     #[must_use]
     pub fn text_width(self, text: &str) -> u32 {
-        if let Some(cell) = self.monospace_advance() {
-            return text.chars().fold(0, |width, ch| {
-                width.saturating_add(cell.saturating_mul(u32::from(char_width(ch))))
-            });
-        }
-        text.chars()
-            .fold(0, |width, ch| width.saturating_add(self.advance(ch)))
+        client::with_client(|client| self.width_on(client, text))
     }
 
     /// The longest prefix of `text` whose rendered width fits within `width`
@@ -294,19 +293,7 @@ impl BitmapFont {
     /// truncation respects each glyph's own width.
     #[must_use]
     pub fn truncate_to_width(self, text: &str, width: u32) -> &str {
-        if let Some(cell) = self.monospace_advance() {
-            return tairix_vt::truncate_to_width(text, (width / cell.max(1)) as usize);
-        }
-        let mut used = 0u32;
-        let mut end = 0usize;
-        for ch in text.chars() {
-            let next = used.saturating_add(self.advance(ch));
-            if next > width {
-                break;
-            }
-            used = next;
-            end += ch.len_utf8();
-        }
+        let end = client::with_client(|client| self.fitting_bytes_on(client, text, width));
         &text[..end]
     }
 
@@ -331,13 +318,78 @@ impl BitmapFont {
     /// [`wrap_to_width`](Self::wrap_to_width) does.
     #[must_use]
     pub fn elide_to_width(self, text: &str, width: u32) -> (&str, bool) {
-        if self.truncate_to_width(text, width).len() == text.len() {
-            return (text, false);
+        let (end, elided) = client::with_client(|client| self.elision_on(client, text, width));
+        (&text[..end], elided)
+    }
+
+    /// [`monospace_advance`](Self::monospace_advance) against a client the
+    /// caller already holds.
+    pub(crate) fn monospace_advance_on(self, client: &mut GlyphClient) -> Option<u32> {
+        let advance = client
+            .metrics(self.family, self.pixel_height, self.weight)
+            .monospace_advance;
+        (advance != 0).then_some(advance)
+    }
+
+    /// [`text_width`](Self::text_width) against a client the caller already
+    /// holds.
+    pub(crate) fn width_on(self, client: &mut GlyphClient, text: &str) -> u32 {
+        if let Some(cell) = self.monospace_advance_on(client) {
+            return text.chars().fold(0, |width, ch| {
+                width.saturating_add(cell.saturating_mul(u32::from(char_width(ch))))
+            });
         }
-        let Some(room) = width.checked_sub(self.text_width(ELLIPSIS)) else {
-            return ("", false);
+        client.with_measurement(
+            text,
+            self.family,
+            self.pixel_height,
+            self.weight,
+            MeasuredText::width,
+        )
+    }
+
+    /// The byte length of [`truncate_to_width`](Self::truncate_to_width)'s
+    /// answer, against a client the caller already holds.
+    ///
+    /// Both branches cut on a `char` boundary: the monospace one through the
+    /// shared column truncation, the proportional one at the boundary after
+    /// the last character the memo says fits.
+    pub(crate) fn fitting_bytes_on(
+        self,
+        client: &mut GlyphClient,
+        text: &str,
+        width: u32,
+    ) -> usize {
+        if let Some(cell) = self.monospace_advance_on(client) {
+            return tairix_vt::truncate_to_width(text, (width / cell.max(1)) as usize).len();
+        }
+        let fitting = client.with_measurement(
+            text,
+            self.family,
+            self.pixel_height,
+            self.weight,
+            |measured| measured.chars_within(width),
+        );
+        text.char_indices()
+            .nth(fitting)
+            .map_or(text.len(), |(offset, _)| offset)
+    }
+
+    /// [`elide_to_width`](Self::elide_to_width) against a client the caller
+    /// already holds, as a byte length and the flag.
+    pub(crate) fn elision_on(
+        self,
+        client: &mut GlyphClient,
+        text: &str,
+        width: u32,
+    ) -> (usize, bool) {
+        if self.fitting_bytes_on(client, text, width) == text.len() {
+            return (text.len(), false);
+        }
+        let Some(room) = width.checked_sub(self.width_on(client, ELLIPSIS)) else {
+            return (0, false);
         };
-        (self.truncate_to_width(text, room), true)
+        (self.fitting_bytes_on(client, text, room), true)
     }
 
     /// Lay `text` out over at most `max_lines` lines of `width` pixels,

@@ -9,8 +9,8 @@ use tairix_abi::switchboard_ipc::{
     TrayTask, TrayTaskName,
 };
 use tairix_controls::{
-    ActivityState, ControlState, PressureKind, PressureState, RecoveryState, TaskVisibility,
-    TrayBadgeContent, TrayBadgeTone,
+    damage, ActivityState, ControlState, PressureKind, PressureState, RecoveryState,
+    TaskVisibility, TrayBadgeContent, TrayBadgeTone,
 };
 use tairix_geometry::{Point, Rect, Scale};
 use tairix_icon::{IconArtwork, IconKind, IconRequest, IconSet, NoArtwork};
@@ -877,7 +877,7 @@ fn set_pins_clamps_a_stale_hover() {
     ]);
     let layout = bar.layout(Scale::ONE);
     let pin1 = centre_of(layout.pins[1]);
-    bar.track_hover(pin1, Scale::ONE);
+    bar.track_hover(pin1, Scale::ONE, &mut damage::sink());
     assert_eq!(bar.pins().hover(), Some(1));
 
     // Replace with one pin: hover is clamped to None.
@@ -2410,7 +2410,7 @@ fn hovering_a_launcher_washes_only_that_slot_and_draws_no_edge() {
     let theme = Theme::dark();
     let palette = theme.palette();
     let layout = bar.layout(Scale::ONE);
-    bar.track_hover(centre_of(layout.library), Scale::ONE);
+    bar.track_hover(centre_of(layout.library), Scale::ONE, &mut damage::sink());
     let surface = TaskbarRenderer::new(test_icon_cache())
         .render(&bar, Scale::ONE, &mut NoArtwork)
         .expect("bar renders");
@@ -2718,7 +2718,7 @@ fn pin_and_menu_actions_latch_repaints() {
     // Motion over a pin changes the bar's own hover feedback: bar only.
     let layout = bar.layout(Scale::ONE);
     let pin_centre = centre_of(layout.pins[0]);
-    bar.track_hover(pin_centre, Scale::ONE);
+    bar.track_hover(pin_centre, Scale::ONE, &mut damage::sink());
     assert_eq!(bar.take_repaint(), TaskbarRepaint::BAR);
 
     // Closing the menu: menu only.

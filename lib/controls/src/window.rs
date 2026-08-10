@@ -26,12 +26,13 @@
 use alloc::string::String;
 
 use tairix_font::ELLIPSIS;
-use tairix_geometry::{Point, Rect, Scale};
+use tairix_geometry::{Point, Rect, Region, Scale};
 use tairix_icon::IconKind;
 use tairix_input::{InputEvent, Key, NamedKey, PointerButton};
 use tairix_raster::{Color, Surface, SUBPIXEL};
 use tairix_theme::{TextRole, Theme};
 
+use crate::damage;
 use crate::paint::{
     draw_outline, heavy_contrast, icon_slot_side, inset, key_activation, paint_bead,
     paint_icon_slot, paint_plate, plate_border, pointer_activation, resolve_bead, resolve_frame,
@@ -456,7 +457,12 @@ impl WindowControl {
     /// next pointer move if the pointer still lies over the control, so this
     /// only drops the *stale* highlight left when activation relocates the
     /// control (a size toggle) or takes the frame away (close/minimise/back).
-    pub fn on_pointer(&mut self, event: &InputEvent, bounds: Rect) -> Option<WindowControlAction> {
+    pub fn on_pointer(
+        &mut self,
+        event: &InputEvent,
+        bounds: Rect,
+        damage: &mut Region,
+    ) -> Option<WindowControlAction> {
         if let InputEvent::PointerMoved { to } = event {
             *self.pointer = *to;
         }
@@ -468,8 +474,16 @@ impl WindowControl {
             return (inside && self.state.is_actionable())
                 .then_some(WindowControlAction::AlternateInvoked(self.kind));
         }
-        if pointer_activation(&mut self.state, &mut self.armed, event, inside) {
+        if pointer_activation(
+            &mut self.state,
+            &mut self.armed,
+            event,
+            inside,
+            bounds,
+            damage,
+        ) {
             self.rest();
+            damage.add(bounds);
             Some(WindowControlAction::Invoked(self.kind))
         } else {
             None
@@ -994,6 +1008,7 @@ impl TitleBar {
         bounds: Rect,
         scale: Scale,
         theme: &Theme,
+        damage: &mut Region,
     ) -> Option<TitleBarEvent> {
         if let InputEvent::PointerMoved { to } = event {
             *self.pointer = *to;
@@ -1004,7 +1019,7 @@ impl TitleBar {
         // keeps its latch even as the pointer moves off it.
         let mut fired = None;
         for (kind, rect) in layout.controls {
-            if let Some(action) = self.control_mut(kind).on_pointer(event, rect) {
+            if let Some(action) = self.control_mut(kind).on_pointer(event, rect, damage) {
                 fired = Some(action);
             }
         }
@@ -1067,7 +1082,12 @@ impl TitleBar {
     /// left/right arrows move focus between the enabled controls so the group
     /// is fully keyboard-navigable without a pointer (spec §11.18 furniture
     /// keyboard focus).
-    pub fn on_key(&mut self, key: Key) -> Option<TitleBarEvent> {
+    ///
+    /// A focus move reports the whole bar: the ring leaves one control and
+    /// arrives at another, and the bar has no layout without a scale and
+    /// theme, so covering the strip over-covers by the controls that did not
+    /// change.
+    pub fn on_key(&mut self, key: Key, bounds: Rect, damage: &mut Region) -> Option<TitleBarEvent> {
         for control in &mut self.controls {
             if let Some(WindowControlAction::Invoked(kind)) = control.on_key(key) {
                 return Some(TitleBarEvent::Control(kind));
@@ -1075,11 +1095,11 @@ impl TitleBar {
         }
         match key {
             Key::Named(NamedKey::Right) => {
-                self.move_focus(true);
+                self.move_focus(true, bounds, damage);
                 None
             }
             Key::Named(NamedKey::Left) => {
-                self.move_focus(false);
+                self.move_focus(false, bounds, damage);
                 None
             }
             _ => None,
@@ -1089,7 +1109,7 @@ impl TitleBar {
     /// Move keyboard focus among the controls one slot `forward` (or backward),
     /// skipping disabled controls and wrapping. If no control is focused, the
     /// first step lands on the first (forward) or last (backward) control.
-    fn move_focus(&mut self, forward: bool) {
+    fn move_focus(&mut self, forward: bool, bounds: Rect, damage: &mut Region) {
         let count = self.controls.len();
         let current = self.controls.iter().position(|c| c.state().focus.focused);
         for control in &mut self.controls {
@@ -1100,6 +1120,7 @@ impl TitleBar {
             None if forward => count - 1,
             None => 0,
         };
+        let mut landed = None;
         for _ in 0..count {
             idx = if forward {
                 (idx + 1) % count
@@ -1108,8 +1129,12 @@ impl TitleBar {
             };
             if self.controls[idx].state().is_actionable() {
                 self.controls[idx].set_focused(true);
-                return;
+                landed = Some(idx);
+                break;
             }
+        }
+        if landed != current {
+            damage.add(bounds);
         }
     }
 }
@@ -1694,10 +1719,20 @@ impl ResizeGrabber {
     /// Feed a key event: Escape cancels an in-flight resize (restoring the
     /// pre-drag geometry), so a keyboard escape works exactly like a pointer
     /// cancel.
-    pub fn on_key(&mut self, key: Key) -> Option<ResizeEvent> {
+    pub fn on_key(
+        &mut self,
+        key: Key,
+        hit_bounds: Rect,
+        damage: &mut Region,
+    ) -> Option<ResizeEvent> {
         if self.dragging && key == Key::Named(NamedKey::Escape) {
             self.dragging = false;
-            self.state.pointer = PointerState::None;
+            damage::set(
+                &mut self.state.pointer,
+                PointerState::None,
+                hit_bounds,
+                damage,
+            );
             Some(ResizeEvent::Cancel)
         } else {
             None

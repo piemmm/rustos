@@ -374,36 +374,7 @@ pub(super) fn focus_task_row(sb: &mut Switchboard, row: usize) {
 /// refused actions.
 pub(super) fn system_report() -> SystemReport {
     SystemReport {
-        headline: alloc::vec![
-            tile(
-                "CPU",
-                Reading::measured("62%"),
-                Reading::measured("4 x Test Core"),
-                PressureKind::Cpu,
-                TileInstrument::Trend(alloc::vec![100, 300, 500, 620]),
-            ),
-            tile(
-                "Memory",
-                Reading::measured("54%"),
-                Reading::measured("8.6 GiB of 16.0 GiB"),
-                PressureKind::Memory,
-                TileInstrument::Track(Some(538)),
-            ),
-            tile(
-                "Disk",
-                Reading::measured("72%"),
-                Reading::measured("140.0 GiB free"),
-                PressureKind::Disk,
-                TileInstrument::Track(Some(720)),
-            ),
-            tile(
-                "Network",
-                Reading::Absent(Unmeasured::NotPermitted),
-                Reading::Absent(Unmeasured::NotPermitted),
-                PressureKind::Network,
-                TileInstrument::Trend(alloc::vec![]),
-            ),
-        ],
+        headline: headline_tiles(),
         machine: alloc::vec![
             SystemFact::new("Hostname", Reading::measured("tairix")),
             SystemFact::new("OS version", Reading::measured("TAIRiX 0.1.0")),
@@ -421,6 +392,13 @@ pub(super) fn system_report() -> SystemReport {
         memory: alloc::vec![
             SystemFact::new("Installed", Reading::measured("16.0 GiB")),
             SystemFact::new("Kernel heap", Reading::Absent(Unmeasured::NotPermitted)),
+        ],
+        compositor: alloc::vec![
+            SystemFact::new(
+                "Last frame",
+                Reading::measured("3.2k px of 2.0M px recomposed")
+            ),
+            SystemFact::new("Blended", Reading::measured("42.0k px, 13.1x damaged")),
         ],
         volumes: alloc::vec![
             volume(
@@ -472,6 +450,41 @@ pub(super) fn system_report() -> SystemReport {
             },
         ],
     }
+}
+
+/// The fixture's four header readings: three measured, one refused, across
+/// both instrument shapes.
+fn headline_tiles() -> alloc::vec::Vec<HeadlineTile> {
+    alloc::vec![
+        tile(
+            "CPU",
+            Reading::measured("62%"),
+            Reading::measured("4 x Test Core"),
+            PressureKind::Cpu,
+            TileInstrument::Trend(alloc::vec![100, 300, 500, 620]),
+        ),
+        tile(
+            "Memory",
+            Reading::measured("54%"),
+            Reading::measured("8.6 GiB of 16.0 GiB"),
+            PressureKind::Memory,
+            TileInstrument::Track(Some(538)),
+        ),
+        tile(
+            "Disk",
+            Reading::measured("72%"),
+            Reading::measured("140.0 GiB free"),
+            PressureKind::Disk,
+            TileInstrument::Track(Some(720)),
+        ),
+        tile(
+            "Network",
+            Reading::Absent(Unmeasured::NotPermitted),
+            Reading::Absent(Unmeasured::NotPermitted),
+            PressureKind::Network,
+            TileInstrument::Trend(alloc::vec![]),
+        ),
+    ]
 }
 
 /// One header reading for the fixture.

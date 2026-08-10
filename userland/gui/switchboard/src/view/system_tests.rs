@@ -244,6 +244,21 @@ fn the_resources_page_states_each_core_and_the_memory_detail() {
 }
 
 #[test]
+fn the_resources_page_states_what_the_desktops_last_frame_cost() {
+    let mut sb = shown();
+    show(&mut sb, SystemPage::Resources);
+    assert!(says(&sb.system, "Desktop"));
+    assert!(says(
+        &sb.system,
+        "Last frame: 3.2k px of 2.0M px recomposed"
+    ));
+    assert!(
+        says(&sb.system, "Blended: 42.0k px, 13.1x damaged"),
+        "the blend against the damage is why a reader opens this page"
+    );
+}
+
+#[test]
 fn the_storage_page_states_each_volume_with_its_capacity_and_health() {
     let mut sb = shown();
     show(&mut sb, SystemPage::Storage);
