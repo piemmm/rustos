@@ -1069,7 +1069,7 @@ impl<'a> DecorationSpan<'a> {
 /// weights a window's frosted backdrop by it — so the style and the extent
 /// can never be paired wrongly and the corner arithmetic is not re-derived
 /// per pixel.
-#[derive(Copy, Clone)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub(crate) struct WindowShape {
     corners: Corners,
     width: u32,

@@ -823,6 +823,7 @@ mod tests {
             mode(640, 480, DisplayFormat::Rgba8888),
             Color::rgb(0, 0, 0),
             crate::tests::test_chrome_cache(),
+            crate::tests::test_frost_cache(),
             crate::tests::test_pressure(),
         )
         .expect("compositor builds");

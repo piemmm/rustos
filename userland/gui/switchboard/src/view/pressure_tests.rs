@@ -7,8 +7,8 @@ use tairix_raster::Surface;
 use tairix_theme::Theme;
 
 use tairix_controls::{
-    ActivityState, AuthorityState, ControlDisposition, ControlRole, ControlState, PressureKind,
-    PressureState, RecoveryState,
+    ActivityState, AuthorityState, ControlDisposition, ControlRole, ControlState, PointerState,
+    PressureKind, PressureState, RecoveryState,
 };
 
 use tairix_controls::testkit::high_contrast;
@@ -659,5 +659,64 @@ fn set_model_cannot_complete_a_press_begun_on_a_replaced_pressure_card() {
             control: PressureControl::Pause
         }),
         "a fresh gesture on the new card must still work"
+    );
+}
+
+/// The pointer state the relief action `action` of the card in slot `index` is
+/// wearing. A card draws no highlight of its own, so its footer is where the
+/// pointer shows.
+fn action_pointer(sb: &Switchboard, index: usize, action: usize) -> Option<PointerState> {
+    sb.pressure.entries[index]
+        .card
+        .footer()
+        .get(action)
+        .map(|item| item.state().pointer)
+}
+
+/// Open the Pressure section with the pointer resting on the first relief
+/// action of the card in slot `index`.
+fn hover_relief_action(sb: &mut Switchboard, b: Rect, theme: &Theme, index: usize) {
+    sb.select_section(Section::Pressure);
+    let mut surface = Surface::new(b.width, b.height).expect("surface");
+    sb.render(&mut surface, b, Scale::ONE, theme, font());
+    let (x, y) = pressure_footer_centre(sb, b, theme, index, 0);
+    assert_eq!(
+        sb.on_pointer(&moved(x, y), b, Scale::ONE, theme, font()),
+        None
+    );
+    assert_eq!(action_pointer(sb, index, 0), Some(PointerState::Hover));
+}
+
+#[test]
+fn a_refresh_keeps_the_hover_on_the_relief_action_under_the_pointer() {
+    let theme = Theme::dark();
+    let b = bounds();
+    let mut sb = Switchboard::new(&model());
+    hover_relief_action(&mut sb, b, &theme, 0);
+
+    sb.set_model(&model());
+
+    assert_eq!(
+        action_pointer(&sb, 0, 0),
+        Some(PointerState::Hover),
+        "the card the sample did not change is kept, so its footer keeps the highlight"
+    );
+}
+
+#[test]
+fn a_refresh_that_changes_a_card_rests_its_relief_actions() {
+    let theme = Theme::dark();
+    let b = bounds();
+    let mut sb = Switchboard::new(&model());
+    hover_relief_action(&mut sb, b, &theme, 0);
+
+    let mut changed = model();
+    changed.pressure[0].culprit = alloc::string::String::from("another culprit");
+    sb.set_model(&changed);
+
+    assert_eq!(
+        action_pointer(&sb, 0, 0),
+        Some(PointerState::None),
+        "a fresh card's own hover record cannot be restated, so its footer rests"
     );
 }

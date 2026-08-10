@@ -126,7 +126,7 @@ theme identity:
   is painted once and re-used until that window itself changes. It is the
   one consumer whose ceiling is a whole screenful rather than the small
   fraction a cursor or a glyph is allowed
-  (`tairix_reclaim::desktop::window_chrome_cache`), because no more
+  (`tairix_reclaim::desktop::screenful_ui_cache`), because no more
   furniture than fills the screen can be visible at once and everything
   above that belongs to a minimised or stacked-under window.
 

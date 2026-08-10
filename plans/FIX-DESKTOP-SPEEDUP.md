@@ -1,7 +1,9 @@
 # FIX-DESKTOP-SPEEDUP — Software-compositor and GUI redraw performance
 
-Status: **A done, B done, C mostly done** (C.0, C.2, C.4b, C.5 landed; C.1
-partly landed; C.3 blocked on the rest of C.1; C.4a remains). D–E planned.
+Status: **A done, B done, C mostly done, D done** (C.0, C.2, C.4b, C.5 landed;
+C.1 partly landed; C.3 blocked on the rest of C.1; C.4a remains; D.1–D.4
+landed, D.5 is a User decision, D.6 is a follow-up the measurement exposed).
+E planned.
 Stages A–E need no hardware acceleration, no kernel change, and no new
 syscall; F needs a `plans/FIX-HARDWARE-FEATURES.md` correction; G is gated on
 a User decision (§15.7) because it is kernel work.
@@ -492,64 +494,167 @@ still passes unchanged.
 
 ---
 
-## Stage D — Make blur cost what it changes
+## Stage D — Make blur cost what it changes  **[D.1–D.4 done; D.5 is a User decision]**
 
-Depends on A and B (the segmentation and cull interact with frosting).
+### D.1 Damage below a frost invalidates it; the window's own content does not  **[done]**
+Every `damage.add` in the compositor is gone, replaced by three funnels that
+say *what kind* of change is being marked, because that is exactly what decides
+which retained frosts survive:
 
-### D.1 Split backdrop damage from content damage
-The compositor's `compose_plan` promotes *any* damage touching a blurred
-window to that window's whole bounds, because the frost must be recomputed.
-But the
-dominant case — the pointer moving **inside** a translucent window —
-changes only the window's own content; the backdrop underneath is
-unchanged. Track the two separately: only damage *below* a blurred window
-(or a move/resize of it) invalidates its frost; damage to its own content
-composites over the retained frost.
+- `mark(rect)` — the conservative one, for a change that is not confined to a
+  single layer: the root fill, the desktop layer, the density or theme every
+  window is drawn with, and restacking, which changes *which* layers a frost
+  sees rather than what one of them holds. Drops the frost of every window
+  whose bounds it reaches. `raise` and `remove` narrow even this to the index
+  the restack actually disturbed, since the windows already below it see the
+  same stack as before.
+- `mark_layer(id, rect)` — a change confined to one window's own layer: its
+  content, position, size, shape or furniture. Drops the frosts of windows
+  stacked *above* that one, and of neither its own nor any below. A frosted
+  window is blended over a blur of the layers **below** it, so nothing at or
+  above its own layer is part of its frost. This covers both dominant
+  interactions — the pointer moving inside a frosted terminal, and a window
+  dragged across one — and neither now costs a re-blur.
+- `mark_overlay(rect)` — a change no frost can read: the cursor, composed after
+  every window, and the screen reveal, applied only as a pixel is encoded for
+  scan-out. Drops nothing, so a pointer sample and a fade step keep every frost.
 
-### D.2 Cache the frosted backdrop
-Keep a per-blurred-window frosted `Surface` in a `lib/reclaim`
-`ReclaimCache`, keyed by window id with an epoch of (bounds, radius,
-scale, backdrop generation) — the same shape as the existing `chrome`
-cache in the same file, which is the in-tree precedent. A cache miss or a
-pressure refusal recomputes exactly as today (fail-soft, never a panic,
-§2.9). Budget derived from discovered memory, shrinking under pressure
-(§26.3) — a 1 GiB machine must not retain a screenful of frost per
-window.
+Losing a frost costs a re-blur and never a wrong pixel, so marking too widely
+is the safe direction — but *needlessly* widely is the defect that left a drag
+over a frosted window re-blurring it every sample, so a mutation uses the
+narrowest funnel whose reasoning is exact.
 
-### D.3 Cheaper, bit-identical blur arithmetic
-`blur_line` does a `.get()`-checked read per sample and **four integer
-divides per output pixel per pass** in `mean`. Two changes, both
-output-preserving:
+`compose_plan` no longer promotes a blurred window whose frost is *reusable*:
+there is no neighbourhood to spread, so the damage stays the rectangle it was
+marked as. It still promotes one that must be recomputed, and recomputing one
+frost drops any overlapping frost above it — a blur spreads the change far past
+the rectangle that caused it, so the window above reads different bytes even
+where the damage never reached.
 
-- resolve the source row/column slice once per line (edge replicate
-  handled at the ends), removing the per-sample bounds check;
-- replace the divide-by-`count` with a precomputed fixed-point reciprocal
-  multiply — the window size is constant for the whole pass. The magic
-  must reproduce the current round-half-up mean **exactly** for every
-  reachable (sum, count); prove it by exhaustive test over the count
-  range and property test over sums.
+### D.2 The frosted backdrop is retained  **[done]**
+`userland/gui/wm/src/frost.rs`: `FrostedBackdrop` (the rectangle's frosted
+pixels plus the rectangle, physical radius and window shape they are a function
+of) in a `ReclaimCache` keyed by `WindowId`, built by `frost_cache` from
+`lib/reclaim`'s shared desktop policy — which was generalised from
+`window_chrome_cache` to `screenful_ui_cache`, since "no more of this can be
+visible at once than fills the screen" is the furniture argument word for word
+and a second near-identical factory would be duplication.
 
-### D.4 Tests + docs
-- Existing `blur_tests.rs` must pass **unchanged** (that is the
-  bit-identity proof for D.3).
-- Frost cache: a content-only repaint of a frosted window recomputes no
-  frost; a change behind it recomputes exactly once; a move, resize,
-  radius, scale, or theme change invalidates; a pressure eviction still
-  produces the identical frame.
-- Counters: blur px per frame for the hover-inside-a-frosted-window
-  scenario goes to zero after the first frame.
-- Docs: `lib/raster/src/blur.rs` rustdoc (the reciprocal and why it is
-  exact), the compositor rustdoc (the two damage kinds), `plans/SMARTRAM.md`
-  gains the frost cache as a reclaim client.
+The rectangle recorded is the window's **whole** one, not the on-screen part of
+it: a window pushed off an edge is frosted from the row and column the screen
+begins at while its shape is read from its own top-left, so two positions that
+clip alike are still two different frosts.
 
-**Acceptance:** identical frames, blur recomputation only on genuine
-backdrop change, blur ns/px measurably lower on the Stage A harness.
+The epoch is `(scale, screen extent)`, deliberately **not** the theme: a palette
+change repaints the layers below and marks them damaged, which drops the frosts
+that read them. Both epoch components are already caught per entry (the scale
+through the radius, the screen through the rectangle), so the epoch is not what
+keeps a stale frost off the screen — it is what stops a superseded one staying
+*charged* until it is next looked up. A window that stops frosting is never
+looked up again, so `set_backdrop_blur(_, 0)` releases its entry outright.
+
+**One counted lookup per frosted window per frame.** The plan and the composite
+that follows it both need to know whether a frost may be reused, so the answer
+is taken once (`frost_reusable`) and remembered for the frame: two lookups
+could disagree, which would leave a window the plan did not widen for being
+blurred over a rectangle whose lower layers the frame never composed. The
+lookup goes through `get_or_build`, so a reuse is recorded as a **hit** and
+refreshes the entry's recency — the frost every frame serves must not be the
+first one a squeezed cache gives back — and an entry whose geometry no longer
+matches is released before the lookup so the miss is counted once and the stale
+pixels stop being charged at once.
+
+That accounting is not decoration: the session registers this cache's ledger
+with the process cache report, so its hit ratio is what `sysmon`'s reclaim page
+renders. Admitting a frost through `get_or_build(|| Some(v))` recorded a miss
+and could never record a hit, so that column read 0% however well the cache was
+working — the reading was arithmetically incapable of being right. `FrameStats`
+deliberately gains **no** frost hit/miss pair beside `chrome_hits`/
+`chrome_misses`: `blur_px == 0` already *is* the per-frame statement that a
+frost was reused, and a second tally of it would be duplication. Furniture has
+no equivalent pixel signal, which is why it has counters.
+
+The cache is **read-only for the whole of a composite pass** and written at the
+end of it (`retain_pending_frost`, through `ReclaimCache::retain`, which counts
+no lookup because the frame already counted the one that found nothing):
+admitting one mid-pass could evict an entry the pass had already decided to
+reuse, and that reuse would then blur a rectangle whose lower layers the frame
+only composed where the damage fell.
+
+### D.3 Cheaper, bit-identical blur arithmetic  **[done]**
+The divisor is constant for a whole pass (replicated edges keep it at
+`2·radius + 1`), so it is resolved once into a fixed-point reciprocal instead
+of four integer divides per pixel per pass. It is *exactly* the divide, not an
+approximation: `Reciprocal`'s rustdoc carries the proof, and the cutoff
+(`count <= 65536`) is where the proof stops holding rather than a comfortable
+guess — above it the divide stays.
+
+The output slot and the two samples the sliding window trades are each monotone
+along the line, so all three are walked as strided iterators and the furthest
+offset any can reach is bounds-checked **once per line** instead of per sample.
+No indexing, no `unwrap`, no panic path.
+
+### D.4 Tests + docs  **[done]**
+- Every existing `blur_tests.rs` assertion passes unchanged, and
+  `tairix-controls`, `tairix-greeter` and `tairix-wm` — which render through
+  this blur — pass unchanged, which is the bit-identity witness.
+- The blur is asserted byte-identical to a **naive `O(area·radius)` reference**
+  written in the test file (no running sum, no reciprocal, no iterator
+  arithmetic) over a spread of shapes and radii, including 1×N, N×1, radius 0
+  and radius wider than the region.
+- The reciprocal's exactness condition is checked for **every** count in range
+  plus that a count above the cutoff genuinely breaks it, and its answer is
+  compared against a written-out divide oracle for **every reachable sum** at
+  the radii a desktop frosts at, plus boundaries and a seeded spread at the
+  large counts. Writing these caught a real overflow for a numerator outside a
+  legitimate window (the product now saturates, so the answer is total).
+- The frost cache: one scene composed twice — reusing frosts and blurring
+  afresh — is byte-identical in the scan-out frame *and* the back buffer after
+  ~30 mutations (content above/below/inside, cursor motion, a fade, restacking,
+  geometry, resize, corners, radius, scale, theme, mode, overlapping frosts, a
+  frost clipped by the screen edge, removal). Plus: a content repaint inside a
+  frost blurs 0 px and keeps its damage at the marked rectangle; a change below
+  re-frosts the whole window exactly once; a present above keeps it; recomputing
+  one drops the overlapping frost above it; removal and un-blurring release the
+  entry; the ceiling and mild-pressure trim hold and the frame is unchanged
+  after a trim; teardown releases everything.
+- Docs: `lib/raster/README.md`, the `Reciprocal` and `blur_line` rustdoc,
+  `userland/gui/wm/README.md`, `frost.rs`'s module docs,
+  `docs/src/desktop/wm.md` (a *Retained frosted backdrops* section), and
+  `plans/SMARTRAM.md` (the frost cache as a reclaim client).
+
+**Measured** (release, `cargo xtask bench`, the same scenes as the Stage A
+baseline, both figures taken here):
+
+- A `64×24` repaint inside a backdrop-blurred window: **17.43 ms → 27.2 µs**,
+  a factor of **640** (D.1/D.2). The pixels the frame touched fell from
+  **564 000 to 1 536** — the exact rectangle marked — because the frost no
+  longer widens damage it does not have to recompute.
+- A full-screen re-frost, which is all D.3 can help: **17.98 → 16.52 ns/px**
+  (18.41 → 16.91 ms/frame). The blur family itself is 7.55 ns/px at radius 4
+  and 7.71 at radius 24 — still flat in the radius, as a running-sum blur must
+  be.
+- The opaque cases are unchanged (2.020 → 2.043 and 0.593 → 0.705 ns/px on a
+  1 536-pixel case, within run-to-run noise at that size), so nothing was
+  traded for it.
 
 ### D.5 Decision (not silently taken)
 Blurring at half resolution and upsampling is ~4× less area but
 **changes the output**. It is therefore a rendering decision for the
 User, with a visual comparison, not an optimisation to slip in. Left out
 of D unless approved.
+
+### D.6 Follow-up — the vertical pass may be streaming cache, unquantified
+The vertical pass walks columns with `stride = width`, so for a wide region
+every sample sits on its own cache line and the whole buffer is re-streamed
+once per column; a cache-blocked column pass (several columns' running sums
+carried at once) would fix it. An exploratory run during this work suggested a
+~1.5× penalty for a wide region against a narrow one of equal area, but that
+experiment is not in the committed harness and was not reproduced here, so the
+figure is **not** evidence. Stage F must add the equal-area wide/narrow case to
+`cargo xtask bench` and measure it before acting — the framework there is the
+right home for a blocked variant anyway, and blocking must reproduce the
+identical bytes like every other candidate.
 
 ---
 

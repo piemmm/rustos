@@ -41,9 +41,9 @@ use tairix_theme::{
     Appearance, CursorKind, Metrics, MotionInteraction, Theme, ThemeError, ThemeId, Timeline,
 };
 use tairix_wm::{
-    chrome_cache, cursor_cache, ChromeEpoch, Color, Compositor, Corners, InputEvent, InputResponse,
-    Key, NamedKey, Point, PointerButton, Rect, Scale, Surface, WindowActivationState, WindowChrome,
-    WindowId,
+    chrome_cache, cursor_cache, frost_cache, ChromeEpoch, Color, Compositor, Corners, FrostEpoch,
+    FrostedBackdrop, InputEvent, InputResponse, Key, NamedKey, Point, PointerButton, Rect, Scale,
+    Surface, WindowActivationState, WindowChrome, WindowId,
 };
 
 use crate::shell::SettleWork;
@@ -176,6 +176,13 @@ pub(crate) fn test_chrome_cache() -> ReclaimCache<WindowId, WindowChrome, Chrome
     chrome_cache(TEST_SEAT, TEST_FRAME_BYTES, &NORMAL_PRESSURE, &TEST_SINK)
 }
 
+/// The frosted-backdrop cache every compositor under test is built with, on
+/// the same terms as its furniture cache.
+pub(crate) fn test_frost_cache() -> ReclaimCache<WindowId, FrostedBackdrop, FrostEpoch> {
+    NORMAL_PRESSURE.report(PressureBand::Normal);
+    frost_cache(TEST_SEAT, TEST_FRAME_BYTES, &NORMAL_PRESSURE, &TEST_SINK)
+}
+
 /// The pressure gauge every compositor under test is built over — the same
 /// one its caches read, so the desktop under test has a single notion of
 /// how tight memory is, exactly as the shipping session does.
@@ -215,6 +222,7 @@ pub(crate) fn desktop_over(
         display,
         Color::rgb(0, 0, 0),
         chrome_cache(TEST_SEAT, TEST_FRAME_BYTES, pressure, &TEST_SINK),
+        frost_cache(TEST_SEAT, TEST_FRAME_BYTES, pressure, &TEST_SINK),
         pressure,
     )
     .expect("the compositor allocates");
@@ -222,9 +230,9 @@ pub(crate) fn desktop_over(
 }
 
 /// The desktop's caches, built exactly as the session composes them: its own
-/// artwork, the taskbar's icon glyphs, the window manager's cursors, and the
-/// decorated windows' furniture. All four live in the session process, so all
-/// four are its rows to report.
+/// artwork, the taskbar's icon glyphs, the window manager's cursors, the
+/// decorated windows' furniture, and the frosted windows' backdrops. All five
+/// live in the session process, so all five are its rows to report.
 fn desktop_caches() -> Vec<Option<CacheLedger>> {
     NORMAL_PRESSURE.report(PressureBand::Normal);
     vec![
@@ -239,6 +247,7 @@ fn desktop_caches() -> Vec<Option<CacheLedger>> {
         test_icon_cache().ledger(),
         cursor_cache(TEST_SEAT, TEST_FRAME_BYTES, &NORMAL_PRESSURE, &TEST_SINK).ledger(),
         test_chrome_cache().ledger(),
+        test_frost_cache().ledger(),
     ]
 }
 
@@ -458,6 +467,7 @@ fn compositor() -> Compositor {
             a: 255,
         },
         test_chrome_cache(),
+        test_frost_cache(),
         test_pressure(),
     )
     .expect("the compositor allocates")
@@ -1446,6 +1456,7 @@ fn sync_background_relays_a_programmatic_theme_switch() {
         mode,
         shell.session().active_theme().palette().desktop.into(),
         test_chrome_cache(),
+        test_frost_cache(),
         test_pressure(),
     )
     .expect("the compositor allocates");
@@ -2579,6 +2590,7 @@ fn aw3_click_through_produces_the_staged_outcomes() {
         mode,
         Color::rgb(0, 0, 0),
         test_chrome_cache(),
+        test_frost_cache(),
         test_pressure(),
     )
     .expect("compositor");
@@ -2763,6 +2775,7 @@ fn headless_desktop() -> (DesktopShell, Compositor) {
         mode,
         Color::rgb(0, 0, 0),
         test_chrome_cache(),
+        test_frost_cache(),
         test_pressure(),
     )
     .expect("compositor builds");
@@ -4070,6 +4083,7 @@ fn notifications_relay_raise_dismiss_and_isolate_producers() {
         mode,
         Color::rgb(0, 0, 0),
         test_chrome_cache(),
+        test_frost_cache(),
         test_pressure(),
     )
     .expect("compositor");

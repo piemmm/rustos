@@ -26,6 +26,7 @@ use tairix_controls::{
 };
 
 use super::frame::{SectionAnatomy, SectionFrame, ACTION_RAIL_WIDTH};
+use super::refresh::restate_rail;
 use super::system_data::{
     absence_statement, reading_text, HeadlineTile, HealthSeverity, LimitRow, NetworkInterface,
     Reading, SessionSeat, StorageVolume, SystemAction, SystemFact, SystemPage, SystemReport,
@@ -151,8 +152,8 @@ impl SystemSection {
     fn compile(&mut self) {
         self.tiles = self.report.headline.iter().map(build_tile).collect();
         self.lines = compile_page(self.page, &self.report);
-        self.rail = ActionRail::new(self.report.actions.iter().map(build_action).collect());
-        self.rail_panel = Panel::new(RAIL_TITLE);
+        let commands = self.report.actions.iter().map(build_action).collect();
+        restate_rail(&mut self.rail, commands);
     }
 
     /// The rectangle the page body's lines are laid down.

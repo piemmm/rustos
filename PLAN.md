@@ -6516,7 +6516,8 @@ evidence (`plans/SMARTRAM.md` SMART10; `docs/src/architecture/memory.md`
   discovered framebuffer byte size, so a 4K output is allowed
   proportionately more than a small panel and no ceiling is guessed. The
   first three take a fraction of that output (`disposable_ui_cache`);
-  furniture takes a whole screenful (`window_chrome_cache`), because no
+  furniture takes a whole screenful (`screenful_ui_cache`, which the
+  compositor's frosted backdrops now share), because no
   more chrome than fills the screen can be visible at once and the
   surplus is exactly what reclaim should take first. The session parks on
   the band member, trims all four on a change, and tears them down on
@@ -7468,7 +7469,7 @@ load-relative. Docs: `docs/src/architecture/fault-diagnostics.md`.
 
 ---
 
-## FIX-DESKTOP-SPEEDUP — desktop redraw speed without hardware acceleration (`plans/FIX-DESKTOP-SPEEDUP.md`)  **[A DONE, B DONE, C MOSTLY DONE]**
+## FIX-DESKTOP-SPEEDUP — desktop redraw speed without hardware acceleration (`plans/FIX-DESKTOP-SPEEDUP.md`)  **[A DONE, B DONE, C MOSTLY DONE, D DONE]**
 
 **Dependencies:** Stage 7 (compositor, taskbar, controls). Independent of
 `plans/FIX-DISPLAY-ACCELERATION.md` — that is the hardware half; this is
@@ -7483,8 +7484,7 @@ compositor itself is *not* the bottleneck here — `convert_damage` already
 compares each presented pixel with what is there and reports only the
 sub-rectangle that genuinely changed — so the waste is entirely upstream, and
 closing it needs every control model change to report damage (C.1), not just
-the pointer path that now does. A blurred window's whole backdrop is still
-re-frosted with **no cache** (D), and a frame still presents up to eight
+the pointer path that now does. A frame still presents up to eight
 separate region round trips each copying a growing bounding box (E).
 
 **Staged (detail in the plan; do not duplicate it here, §13):**
@@ -7531,9 +7531,43 @@ separate region round trips each copying a growing bounding box (E).
   families and the old-bounds memory (C.1), the font hoist (C.4a), and
   — blocked until C.1 is complete — apps presenting real rects (C.3), which
   today would silently drop changes no reported rectangle covers.
-- **D — blur costs what it changes.** Split backdrop damage from content
-  damage, cache the frosted backdrop as a `lib/reclaim` client, and make
-  the box-blur mean a bit-identical reciprocal multiply.
+- **D — blur costs what it changes. [D.1–D.4 done; D.5 is decision 2 below;
+  D.6 is an unmeasured follow-up]** A frosted window's backdrop is retained
+  (`userland/gui/wm/src/frost.rs`, `frost_cache`) because that blur is a
+  function of the layers *beneath* the window and of nothing the window
+  draws. Every `damage.add` in the compositor became one of three funnels —
+  `mark` (a change not confined to one layer: the root fill, the desktop
+  layer, the density or theme, a restack), `mark_layer` (a change confined to
+  one window's own layer — its content, position, size, shape or furniture:
+  drops only the frosts above *that* window) and `mark_overlay` (the cursor
+  and the screen reveal: drops none) — because which frosts survive is exactly
+  what the kind of change decides. That is what makes the two dominant
+  interactions free: the pointer moving inside a frosted terminal, and a
+  window dragged across one. A frost whose entry is still valid is no longer
+  promoted to its whole rectangle, so a repaint inside one keeps the damage it
+  marked; a recomputed one still is, and drops any overlapping frost above it.
+  A retained entry records the window's **whole** rectangle, not the on-screen
+  part of it, because a window pushed off an edge is frosted from where the
+  screen begins while its shape is read from its own top-left. Whether a frost
+  may be reused is asked **once per frame** and remembered, through the
+  counted lookup, so a reuse reads as a cache hit and refreshes the entry's
+  recency and the plan and the composite cannot read different answers. The
+  cache is read-only for a whole composite pass and written at the end
+  (`ReclaimCache::retain`, a new out-of-band admission that counts no second
+  lookup and replaces what a key held), so admitting one cannot evict one the
+  pass had decided to reuse. `lib/reclaim`'s `window_chrome_cache` was
+  generalised to `screenful_ui_cache`, since its "no more of this can be
+  visible at once than fills the screen" argument is the same for both. The
+  box-blur mean is now a fixed-point reciprocal resolved once per pass instead
+  of four divides per pixel per pass, *exactly* equal to the divide (the
+  condition is checked for every window size in range, and that the cutoff is
+  where it stops holding), and the sliding window's three strided walks are
+  bounds-checked once per line. **Measured:** a `64×24` repaint inside a
+  backdrop-blurred window **17.43 ms → 27.2 µs** (×640, with the pixels it
+  touched falling from 564 000 to the 1 536 it marked), a full-screen re-frost
+  **17.98 → 16.52 ns/px**, opaque cases unchanged. Bit-identity is proven by
+  composing one scene twice — reusing frosts and blurring afresh — and by a
+  naive `O(area·radius)` blur oracle.
 - **E — one present per frame.** The disjoint damage region landed with C.0;
   what remains is a bounded rect *list* in one `Present` (same evolution as
   `plans/FIX-DISPLAY-ACCELERATION.md` Stage B), and one-shot tickless
@@ -7553,8 +7587,8 @@ separate region round trips each copying a growing bounding box (E).
    decision, exactly as P3a corrected page-zero. `lib/rt` already delivers
    the folded `CpuFeatureSet` to userland, so no kernel mechanism is
    needed. Blocks F.
-2. Half-resolution blur changes output; approve or refuse explicitly.
-   Blocks nothing.
+2. Half-resolution blur changes output; approve or refuse explicitly (D.5).
+   Blocks nothing, and D landed without it.
 3. Whether/when to do the x86_64 user-space FPU/SSE kernel work (G).
 4. **`plans/OPEN-DEFECTS.md` D37 — riscv64 appears to save no
    floating-point state** (no `fsd`/`fld` in `trap.s`/`context.s`, no

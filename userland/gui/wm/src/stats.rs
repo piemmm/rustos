@@ -30,8 +30,9 @@
 #[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
 pub struct FrameStats {
     /// Screen pixels inside the frame's dirty rectangles, after clipping to
-    /// the screen and after a blurred window widened the damage it touched.
-    /// This is the size of the frame's job.
+    /// the screen and after any blurred window whose frost had to be
+    /// recomputed widened the damage it touched. This is the size of the
+    /// frame's job.
     pub damaged_px: u64,
     /// Layer contributions blended through the *over* operator. The
     /// per-pixel cost the desktop actually pays.
@@ -41,8 +42,9 @@ pub struct FrameStats {
     /// it — the windows below, the desktop layer, the root fill — was skipped,
     /// which is why `blended_px` falls as this rises.
     pub opaque_px: u64,
-    /// Pixels rewritten by a backdrop frost. A frame that re-frosts a window
-    /// whose backdrop did not change is paying twice for one appearance.
+    /// Pixels rewritten by a *recomputed* backdrop frost. A frost served from
+    /// the retained one is copied rather than blurred and counts nothing here,
+    /// so this is exactly the blur work the frame could not avoid.
     pub blur_px: u64,
     /// Composed pixels converted to scan-out bytes.
     pub encoded_px: u64,

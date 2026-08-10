@@ -7,6 +7,7 @@
 
 use alloc::string::String;
 use alloc::vec::Vec;
+use core::mem;
 
 use tairix_font::BitmapFont;
 use tairix_geometry::{to_i32, Rect, Region, Scale};
@@ -20,6 +21,7 @@ use tairix_controls::{
 };
 
 use super::frame::{SectionAnatomy, SectionFrame, DETAIL_PANE_WIDTH};
+use super::refresh::{carry_hover, carry_hover_one};
 use super::system_data::{reading_text, selection_prompt, Reading, Unmeasured};
 use super::{
     resolve_selection, ActionVerdict, ListInfo, SectionCtx, SectionOutcome, SectionView,
@@ -537,7 +539,19 @@ impl SectionView for ActivitiesSection {
     /// the selection.
     fn adopt(&mut self, model: &SwitchboardModel) {
         self.items.clone_from(&model.activities);
+        let retired = mem::take(&mut self.entries);
         self.entries = model.activities.iter().map(Self::build).collect();
+        // Every row and button is re-derived per slot rather than matched by
+        // identity, so a slot carries the hover the pointer is still over and
+        // never a press begun on whichever group held it.
+        for (was, now) in retired.iter().zip(self.entries.iter_mut()) {
+            carry_hover_one(&was.header, &mut now.header);
+            carry_hover_one(&was.switch, &mut now.switch);
+            carry_hover_one(&was.pause_resume, &mut now.pause_resume);
+            carry_hover_one(&was.rename, &mut now.rename);
+            carry_hover_one(&was.close, &mut now.close);
+            carry_hover(&was.members, &mut now.members);
+        }
         self.selected = resolve_selection(self.selected, self.items.iter().map(|item| item.id));
         self.mark_selection();
         // An in-flight rename survives a refresh only as long as its activity

@@ -37,7 +37,7 @@
 
 use tairix_controls::WindowFrame;
 use tairix_log::Sink;
-use tairix_reclaim::{window_chrome_cache, CachedBytes, PressureGauge, ReclaimCache};
+use tairix_reclaim::{screenful_ui_cache, CachedBytes, PressureGauge, ReclaimCache};
 use tairix_theme::Theme;
 
 use crate::color::Pixel;
@@ -67,7 +67,7 @@ pub type ChromeEpoch = (u32, u64);
 
 /// Build the one [`ReclaimCache`] a [`Compositor`](crate::Compositor)
 /// retains rendered window furniture in, classified through the shared
-/// desktop cache policy (`tairix_reclaim::window_chrome_cache`).
+/// desktop cache policy (`tairix_reclaim::screenful_ui_cache`).
 ///
 /// `seat` is the seat the output belongs to and `fb_bytes` is the real
 /// output's backing byte size, which is also this cache's ceiling: no more
@@ -84,7 +84,7 @@ pub fn chrome_cache(
     pressure: &'static (dyn PressureGauge + 'static),
     sink: &'static (dyn Sink + Sync),
 ) -> ReclaimCache<WindowId, WindowChrome, ChromeEpoch> {
-    window_chrome_cache(
+    screenful_ui_cache(
         "wm.chrome",
         seat,
         fb_bytes,

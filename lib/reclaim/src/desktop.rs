@@ -103,23 +103,22 @@ where
     )
 }
 
-/// Build the desktop-session cache that retains rendered window
-/// furniture, ceilinged at one screenful of pixels (`fb_bytes`) instead
-/// of the small fraction [`disposable_ui_cache`] allows a cursor or a
-/// notification glyph.
+/// Build a desktop-session cache of *screen-sized* rendered pixels,
+/// ceilinged at one screenful (`fb_bytes`) instead of the small fraction
+/// [`disposable_ui_cache`] allows a cursor or a notification glyph.
 ///
-/// Chrome is the same *kind* of memory as those — it declares the
-/// identical [`disposable_ui_candidate`] classification — but it is
-/// bulkier, and it is bounded by a different fact about the machine:
-/// what can be seen. No more furniture than fills the screen can be
-/// visible at once, so a screenful is the honest ceiling, and anything
-/// above it is chrome for a minimised, off-screen, or stacked-under
-/// window — exactly the entries the least-recently-composited eviction
-/// order should take first. Sizing chrome by the cursor cache's
-/// fraction instead would refuse a single ordinary window's furniture
-/// and rebuild it every frame.
+/// A window's rendered furniture strips and a window's frosted backdrop
+/// are the same *kind* of memory as those — both declare the identical
+/// [`disposable_ui_candidate`] classification — but they are bulkier, and
+/// they are bounded by a different fact about the machine: what can be
+/// seen. No more of either than fills the screen can be visible at once,
+/// so a screenful is the honest ceiling, and anything above it belongs to
+/// a minimised, off-screen, or stacked-under window — exactly the entries
+/// the least-recently-composited eviction order should take first. Sizing
+/// them by the cursor cache's fraction instead would refuse a single
+/// ordinary window and rebuild it every frame.
 #[must_use]
-pub fn window_chrome_cache<K, V, E>(
+pub fn screenful_ui_cache<K, V, E>(
     label: &'static str,
     seat: u64,
     fb_bytes: usize,
@@ -207,7 +206,7 @@ mod tests {
         };
 
         let mut chrome: ReclaimCache<u32, Glyph, u64> =
-            window_chrome_cache("test.chrome", 1, fb_bytes, 32, gauge, sink);
+            screenful_ui_cache("test.chrome", 1, fb_bytes, 32, gauge, sink);
         let mut glyphs: ReclaimCache<u32, Glyph, u64> =
             disposable_ui_cache("test.glyphs", 1, fb_bytes, 32, gauge, sink);
         for key in 0..8u32 {

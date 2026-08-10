@@ -362,6 +362,7 @@ impl DesktopShell {
             .saturating_add(self.renderer.trim())
             .saturating_add(self.artwork.trim())
             .saturating_add(compositor.trim_chrome())
+            .saturating_add(compositor.trim_frost())
             .saturating_add(compositor.release_content_under_pressure(focused))
     }
 
@@ -1350,6 +1351,7 @@ impl DesktopShell {
         self.renderer.teardown();
         self.artwork.teardown();
         compositor.teardown_chrome();
+        compositor.teardown_frost();
         compositor.teardown_content();
     }
 }

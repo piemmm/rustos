@@ -24,7 +24,8 @@
 //!   effect is `lib/raster`'s shared
 //!   [`frost_region`](tairix_raster::Surface::frost_region), driven through
 //!   one [`BlurScratch`](tairix_raster::BlurScratch) the compositor owns and
-//!   reuses.
+//!   reuses, and the result is retained between frames ([`frost`]) so a
+//!   window's own repaint costs no re-blur at all.
 //! - **Damage tracking** ([`Region`]): only changed pixels are
 //!   recomposited, and [`stats`] counts what each frame actually cost so a
 //!   redraw that repaints far more than it changed is measurable rather than
@@ -63,6 +64,7 @@ pub mod chrome;
 pub mod color;
 pub mod compositor;
 pub mod corner;
+pub mod frost;
 pub mod geometry;
 pub mod input;
 pub mod select;
@@ -80,6 +82,7 @@ pub use chrome::{chrome_cache, ChromeEpoch, WindowChrome};
 pub use color::{Color, Pixel};
 pub use compositor::Compositor;
 pub use corner::Corners;
+pub use frost::{frost_cache, FrostEpoch, FrostedBackdrop};
 pub use geometry::{Point, Rect, Region, Scale};
 pub use input::{InputEvent, InputResponse, InputRouter, Key, Modifiers, NamedKey, PointerButton};
 pub use select::{cursor_cache, desired_cursor, CursorController, CursorEpoch};

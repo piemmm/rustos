@@ -120,6 +120,21 @@ This crate owns:
   window manager's alone until the graphical login screen needed it behind a
   selected account tile, and neither the login screen nor any other `lib/*`
   consumer may depend on the window manager.
+
+  Each pass costs a load, a running-sum update, a multiply and a store per
+  sample. The window is the same size for every output — replicated edges keep
+  the divisor at `2·radius + 1` — so the divisor is resolved **once per pass**
+  into a fixed-point reciprocal instead of dividing four times per pixel per
+  pass, which was the dominant cost of a frosted window. The reciprocal is
+  *exactly* the divide, not an approximation: the `Reciprocal` rustdoc carries
+  the proof and `blur_tests` checks its condition for every window size the
+  blur uses, plus that a size above the cutoff genuinely breaks it. The output slot
+  and the two samples the sliding window trades are each monotone along the
+  line, so all three are walked as strided iterators and the furthest offset
+  any can reach is bounds-checked once per line rather than per sample. Blurred
+  output is byte-identical to a naive `O(area·radius)` average, which
+  `blur_tests` asserts over a spread of shapes and radii including the
+  single-row, single-column and radius-wider-than-the-region cases.
 - `Surface::blit` — composite one surface over another through the `over`
   path, clipping a negative origin or an over-large source, so a
   transparent-background sprite (a rasterised cursor or icon) lays onto the

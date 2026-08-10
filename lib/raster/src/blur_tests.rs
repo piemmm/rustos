@@ -17,7 +17,9 @@ use core::cell::RefCell;
 use alloc::vec;
 use alloc::vec::Vec;
 
-use super::{box_blur, BlurScratch};
+use tairix_rng::RandU64;
+
+use super::{box_blur, BlurScratch, Reciprocal, RECIPROCAL_MAX_COUNT, RECIPROCAL_SHIFT};
 use crate::color::{div255, Pixel};
 use crate::round::round_rect_coverage;
 use crate::surface::Surface;
@@ -60,6 +62,220 @@ fn patterned(width: u32, height: u32) -> Surface {
         }
     }
     surface
+}
+
+/// A box blur written the obvious way: two separable passes, each averaging
+/// the window around every sample by clamping the sample index to the line and
+/// dividing.
+///
+/// The oracle the sliding-window implementation is proved against. It shares
+/// nothing with it — no running sum, no reciprocal, no iterator arithmetic —
+/// so an error in either shows up as a differing pixel. It is `O(area·radius)`
+/// and only ever run over the small regions these tests use.
+fn naive_box_blur(region: &[Pixel], width: usize, height: usize, radius: usize) -> Vec<Pixel> {
+    let reach = isize::try_from(radius).expect("a test radius fits");
+    let count = u32::try_from(radius * 2 + 1).expect("a test radius fits");
+    let mean = |sum: u32| -> u8 {
+        u8::try_from(((sum + count / 2) / count).min(255)).expect("clamped to the channel range")
+    };
+    let average = |field: &[Pixel], x: usize, y: usize, horizontal: bool| -> Pixel {
+        let (along, limit) = if horizontal {
+            (isize::try_from(x).expect("in range"), width - 1)
+        } else {
+            (isize::try_from(y).expect("in range"), height - 1)
+        };
+        let (mut r, mut g, mut b, mut a) = (0u32, 0u32, 0u32, 0u32);
+        for step in -reach..=reach {
+            let at = usize::try_from(along + step).unwrap_or(0).min(limit);
+            let pixel = if horizontal {
+                field[y * width + at]
+            } else {
+                field[at * width + x]
+            };
+            r += u32::from(pixel.r);
+            g += u32::from(pixel.g);
+            b += u32::from(pixel.b);
+            a += u32::from(pixel.a);
+        }
+        Pixel {
+            r: mean(r),
+            g: mean(g),
+            b: mean(b),
+            a: mean(a),
+        }
+    };
+
+    if radius == 0 || width == 0 || height == 0 {
+        return region.to_vec();
+    }
+    let mut mid = region.to_vec();
+    for y in 0..height {
+        for x in 0..width {
+            mid[y * width + x] = average(region, x, y, true);
+        }
+    }
+    let mut out = mid.clone();
+    for y in 0..height {
+        for x in 0..width {
+            out[y * width + x] = average(&mid, x, y, false);
+        }
+    }
+    out
+}
+
+#[test]
+fn the_blur_is_the_naive_average_for_every_shape_and_radius() {
+    // The one identity the sliding window, the hoisted bounds checks, and the
+    // reciprocal multiply must all preserve: the same bytes the obvious
+    // implementation produces. Includes the shapes that exercise the clamped
+    // ends — a single row, a single column, and a radius wider than the region,
+    // where every sample of some window is a replicated edge.
+    let mut rng = TestRng::new(0x51ED_0B10_0BED_51ED);
+    for (width, height) in [
+        (1usize, 1usize),
+        (1, 9),
+        (9, 1),
+        (2, 2),
+        (5, 3),
+        (7, 7),
+        (16, 9),
+        (13, 11),
+    ] {
+        let field: Vec<Pixel> = (0..width * height).map(|_| rng.pixel()).collect();
+        for radius in [0usize, 1, 2, 3, 4, 8, 17] {
+            assert_eq!(
+                blurred(&field, width, height, radius),
+                naive_box_blur(&field, width, height, radius),
+                "a {width}x{height} region at radius {radius}"
+            );
+        }
+    }
+}
+
+#[test]
+fn the_reciprocal_is_exact_for_every_window_the_blur_uses() {
+    // The proof, checked rather than argued: for every window size the blur
+    // resolves a reciprocal for, the excess `e = m*d - 2^S` is small enough
+    // that `floor(n*m / 2^S)` and `floor(n/d)` cannot differ for any numerator
+    // a window can produce, and the product cannot overflow the `u64` it is
+    // formed in.
+    let scale = 1u64 << RECIPROCAL_SHIFT;
+    for d in 1..=u64::from(RECIPROCAL_MAX_COUNT) {
+        let m = scale.div_ceil(d);
+        let excess = m * d - scale;
+        assert!(excess < d, "d={d}: the excess must stay below the divisor");
+        // A window holds `d` samples of at most 255, plus the rounding half.
+        let n_max = 256 * d - 1;
+        assert!(
+            n_max * excess < scale,
+            "d={d}: n_max*e = {} reaches 2^{RECIPROCAL_SHIFT}",
+            n_max * excess
+        );
+        assert!(
+            n_max
+                .checked_mul(m)
+                .is_some_and(|product| product < 1 << 49),
+            "d={d}: the reciprocal product must stay well inside a u64"
+        );
+    }
+
+    // And the cutoff is where the proof stops holding, not a comfortable guess:
+    // above it there are counts whose excess is too large, which is why the
+    // divide has to stay.
+    let beyond = u64::from(RECIPROCAL_MAX_COUNT) + 1;
+    let breaks = (beyond..=beyond * 2).any(|d| {
+        let excess = scale.div_ceil(d) * d - scale;
+        (256 * d - 1) * excess >= scale
+    });
+    assert!(breaks, "the cutoff could be raised, so it is arbitrary");
+}
+
+#[test]
+fn the_reciprocal_answers_exactly_what_the_divide_would() {
+    // The reference is written out here rather than called, so this is an
+    // oracle and not a restatement of the code under test.
+    let reference = |sum: u32, count: u32| -> u8 {
+        let divisor = u64::from(count.max(1));
+        let rounded = (u64::from(sum) + divisor / 2) / divisor;
+        u8::try_from(rounded.min(255)).expect("clamped to the channel range")
+    };
+    let checked = |count: u32, sum: u32| {
+        let recip = Reciprocal::new(usize::try_from(count).expect("a test count fits"));
+        assert_eq!(
+            recip.apply(sum),
+            reference(sum, count),
+            "count {count}, sum {sum}"
+        );
+    };
+
+    // Every reachable sum, exhaustively, for the radii a desktop actually
+    // frosts at (1 to 4) plus the degenerate single-sample window.
+    for radius in 0..=4u32 {
+        let count = radius * 2 + 1;
+        for sum in 0..=255 * count {
+            checked(count, sum);
+        }
+    }
+
+    // Boundaries and a spread for the large counts, including the first one
+    // past the reciprocal's range and one whose numerator saturates.
+    let mut rng = TestRng::new(0xD15C_0FFE_ED15_C0DE);
+    for count in [
+        255u32,
+        257,
+        4095,
+        RECIPROCAL_MAX_COUNT - 1,
+        RECIPROCAL_MAX_COUNT,
+        RECIPROCAL_MAX_COUNT + 1,
+        u32::MAX,
+    ] {
+        let full = 255u32.saturating_mul(count);
+        for sum in [
+            0,
+            1,
+            count / 2 - 1,
+            count / 2,
+            count / 2 + 1,
+            count,
+            full / 255 * 254,
+            full,
+            u32::MAX,
+        ] {
+            checked(count, sum);
+        }
+        for _ in 0..64 {
+            checked(count, rng.next_u32() % full.saturating_add(1));
+        }
+    }
+}
+
+/// A deterministic generator for the differential sweeps, so a failure is
+/// reproducible from the seed alone.
+///
+/// It is `lib/rng`'s own non-cryptographic generator rather than a private one
+/// written here, so the workspace keeps a single fast generator.
+struct TestRng(tairix_rng::FastRng);
+
+impl TestRng {
+    fn new(seed: u64) -> Self {
+        Self(tairix_rng::FastRng::seed_from_u64(seed))
+    }
+
+    fn next_u32(&mut self) -> u32 {
+        u32::try_from(self.0.next_u64() >> 32).unwrap_or(u32::MAX)
+    }
+
+    /// A pixel with independent channels, alpha included, so a blur that
+    /// crosses channels is caught.
+    fn pixel(&mut self) -> Pixel {
+        let bytes = self.0.next_u64().to_le_bytes();
+        Pixel {
+            r: bytes[0],
+            g: bytes[1],
+            b: bytes[2],
+            a: bytes[3],
+        }
+    }
 }
 
 #[test]

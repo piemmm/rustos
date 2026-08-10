@@ -144,7 +144,7 @@ guarantees:
   area. A zero-extent edge holds no surface at all.
 - **The chrome is not stored in the window.** The `Compositor` owns one
   `ReclaimCache<WindowId, WindowChrome, ChromeEpoch>` (`chrome_cache`, built on
-  `tairix_reclaim::window_chrome_cache`, ceilinged at one screenful), so the
+  `tairix_reclaim::screenful_ui_cache`, ceilinged at one screenful), so the
   desktop's total furniture is bounded, charged to the seat, wiped on release
   (it carries window titles) and given back the moment the kernel reports
   memory pressure. The epoch is `(scale percent, theme generation)` — a

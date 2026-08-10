@@ -411,6 +411,7 @@ Desktop cache stores UI data that is expensive to reconstruct but safe to drop:
 - icon and cursor rasters;
 - rendered theme primitives;
 - rendered window furniture (title band, bottom band, side borders);
+- frosted backdrops behind backdrop-blurred windows;
 - taskbar and compositor asset caches.
 
 A window's **content** pixels are governed by this section's budgets, gauge,
@@ -951,8 +952,9 @@ weaker policy:
   watermarks, transition history) is unchanged.
 - **The desktop caches.** Every rasterised desktop asset is a
   `ReclaimCache`: the window manager's cursor rasters, the taskbar's
-  notification glyphs, the session's pinned-application artwork, and the
-  window manager's rendered window furniture. The first three are built
+  notification glyphs, the session's pinned-application artwork, the
+  window manager's rendered window furniture, and its frosted backdrops.
+  The first three are built
   from the one `tairix_reclaim::desktop::disposable_ui_cache`
   policy —
   `DisposableUi`, owned by `ReclaimOwner::DesktopSession { seat }`,
@@ -966,15 +968,29 @@ weaker policy:
   built without a live gauge would retain nothing while looking like it
   worked.
 
-  The furniture cache differs only in its ceiling
-  (`tairix_reclaim::desktop::window_chrome_cache`): a whole screenful of
+  The furniture and frost caches differ only in their ceiling
+  (`tairix_reclaim::desktop::screenful_ui_cache`): a whole screenful of
   pixels rather than the small fraction a cursor or a glyph is allowed,
-  because no more furniture than fills the screen can be visible at once
+  because no more of either than fills the screen can be visible at once
   and everything above that belongs to a minimised, off-screen, or
-  stacked-under window — exactly what eviction should take first. It is
-  owned by the `Compositor` and keyed by `WindowId` within a
+  stacked-under window — exactly what eviction should take first. Both are
+  owned by the `Compositor` and keyed by `WindowId`; furniture within a
   `(scale, theme-generation)` epoch, so one window's change releases one
   entry while a DPI or theme change drops them all.
+
+  The **frost** cache holds the blurred backdrop a backdrop-blurred window's
+  own pixels are blended over. It exists because that blur is a function of
+  the layers *beneath* the window and not of anything the window draws, so
+  the dominant interaction — a pointer moving inside a frosted terminal — was
+  re-blurring a whole window per sample: 17.4 ms for a `64×24` repaint,
+  against 26 µs once the frost is copied instead. Its epoch is
+  `(scale, screen extent)` and carries no theme: a palette change repaints
+  the layers below and marks them damaged, which drops the frosts that read
+  them. The rectangle, physical radius and window shape are recorded per
+  entry and compared on every lookup, so geometry, radius, scale and corner
+  changes fail closed to a recompute; damage marked *below* a window is what
+  drops it, which is why a cursor sample, a fade step and the window's own
+  content all keep it.
 - **The font service's glyph rasters, on both sides.** The service's own
   rasterised coverage and the client-side memoisation of what it fetched
   are `ReclaimCache`es too, built from the single
@@ -1041,6 +1057,12 @@ Tests:
   or theme change drops them all; and the composited frame is
   byte-identical with the cache warm, emptied, and unable to retain
   anything, so caching is never required for correctness.
+- Retained frosts stay under the same ceiling however many frosted windows
+  are open, and are given back at mild pressure and wiped on teardown. One
+  scene composed twice — reusing frosts and blurring afresh — is
+  byte-identical in both the scan-out frame and the back buffer through every
+  change that can invalidate a frost, so the cache is an accelerator and never
+  a correctness requirement.
 - The content ladder at every band, including the focused window never
   released and a session-painted window never released; the pixel bytes
   actually overwritten before the buffer is dropped; a released window

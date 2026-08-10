@@ -31,6 +31,7 @@ use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 use core::cmp::Ordering;
+use core::mem;
 
 use tairix_abi::origin::ProcId;
 use tairix_abi::sysinfo::ProcessState;
@@ -49,6 +50,7 @@ use tairix_controls::{
 };
 
 use super::frame::{BandSummary, SectionAnatomy, SectionFrame, ACTION_RAIL_WIDTH};
+use super::refresh::{carry_hover, restate_rail};
 use super::{
     resolve_selection, ActionVerdict, ListInfo, SectionCtx, SectionOutcome, SectionView,
     Switchboard, SwitchboardAction, SwitchboardModel, UNMEASURED_READING,
@@ -918,12 +920,20 @@ impl TasksSection {
                 .map(|task| task.proc_id),
         );
         let selected = self.selected;
+        let retired = mem::take(&mut self.entries);
         self.entries = self
             .order
             .iter()
             .filter_map(|index| self.tasks.get(*index))
             .map(|task| Self::build(task, selected == Some(task.proc_id)))
             .collect();
+        // The rows are re-derived per slot rather than matched by identity, so
+        // the slot carries the hover the pointer is still over and never a
+        // press begun on whichever task held it.
+        carry_hover(
+            retired.iter().map(|entry| &entry.row),
+            self.entries.iter_mut().map(|entry| &mut entry.row),
+        );
         self.count = StatusPill::new(count_line(self.entries.len(), self.tasks.len()));
         self.rebuild_rail();
         self.restore_band(band);
@@ -977,11 +987,7 @@ impl TasksSection {
             }
             None => Vec::new(),
         };
-        let focus = self.rail.focus();
-        self.rail = ActionRail::new(items);
-        // A model refresh carries no layout, so the rebuilt rail has no
-        // rectangle to report here.
-        self.rail.set_focus(focus, Rect::EMPTY, &mut damage::sink());
+        restate_rail(&mut self.rail, items);
     }
 
     /// Which band the content cursor is in, and where within it.

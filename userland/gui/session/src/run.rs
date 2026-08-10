@@ -138,7 +138,7 @@ mod program {
     use tairix_window::{
         event_endpoint_for, CallerIdentity, EventSink, PinDecision, WindowServer, WINDOW_REPLY_MAX,
     };
-    use tairix_wm::{chrome_cache, Compositor, InputResponse, Rect, Surface};
+    use tairix_wm::{chrome_cache, frost_cache, Compositor, InputResponse, Rect, Surface};
 
     extern crate alloc;
 
@@ -1255,29 +1255,37 @@ mod program {
         // fail-loud exit — has to take them back out of the monitor's
         // registry; a dropped guard does that once, unconditionally.
         let _cache_report = CacheReportGuard;
-        // The decorated windows' furniture is the output's own cache, so it
-        // is built here from the same seat, output size, gauge, and sink and
-        // handed to the compositor that draws from it. The compositor takes
-        // the gauge itself as well: a window's *content* is not a keyed
-        // cache but a release policy over the same band, so it reads the
-        // pressure directly rather than through the furniture cache.
+        // The decorated windows' furniture and the backdrop-blurred windows'
+        // frosted backdrops are the output's own caches, so they are built
+        // here from the same seat, output size, gauge, and sink and handed to
+        // the compositor that draws from them. The compositor takes the gauge
+        // itself as well: a window's *content* is not a keyed cache but a
+        // release policy over the same band, so it reads the pressure directly
+        // rather than through a cache.
         //
-        // It is this process's memory like the shell's three caches, so it
-        // joins them in the report before the compositor takes it: a ledger
-        // is a shared handle to the figures, not the cache itself.
+        // They are this process's memory like the shell's three caches, so
+        // they join them in the report before the compositor takes them: a
+        // ledger is a shared handle to the figures, not the cache itself.
         let chrome = chrome_cache(
             SEAT_PRIMARY,
             frame_len,
             tairix_rt::pressure::gauge(),
             &LOG_SINK,
         );
-        if let Some(ledger) = chrome.ledger() {
+        let frost = frost_cache(
+            SEAT_PRIMARY,
+            frame_len,
+            tairix_rt::pressure::gauge(),
+            &LOG_SINK,
+        );
+        for ledger in [chrome.ledger(), frost.ledger()].into_iter().flatten() {
             tairix_rt::cachereport::register(ledger);
         }
         let Some(mut compositor) = Compositor::new(
             mode,
             shell.desktop_background(),
             chrome,
+            frost,
             tairix_rt::pressure::gauge(),
         ) else {
             return fail(EXIT_BAD_MODE, "compositor rejected the queried mode");

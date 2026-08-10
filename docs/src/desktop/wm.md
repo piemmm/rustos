@@ -268,12 +268,18 @@ it too.
 A window with a backdrop blur is the one exception to "recompose exactly
 what changed": its pixels are a function of the *whole* backdrop under its
 rectangle, so a strip-sized repaint would spread a clipped neighbourhood and
-seam against the pixels beside it. Any damage touching such a window
-therefore promotes the whole of it into one rectangle, and that rectangle is
+seam against the pixels beside it. Damage touching such a window — when its
+frost has to be recomputed — therefore promotes the whole of it into one
+rectangle, and that rectangle is
 subtracted from the rest of the damage — so the frosted window is recomposed
 whole while unrelated damage elsewhere stays exactly as tight as it was
 marked. Two frosted windows that overlap merge into a single rectangle,
 because each reads what the other wrote.
+
+When the frost does **not** have to be recomputed there is no neighbourhood to
+spread and no promotion at all: the retained frost is copied back and the
+damage stays the rectangle it was marked as. See [Retained frosted
+backdrops](#retained-frosted-backdrops).
 
 **An update that changes nothing marks nothing.** `move_window` to the
 origin a window already has, and `set_corners` / `set_visible` /
@@ -365,6 +371,79 @@ number of bytes:
   carries, while a larger copy costs only more bytes; beyond a handful of
   rectangles the round trips cost more than one call copying their box.
 
+## Retained frosted backdrops
+
+A frost is a function of exactly four things: the pixels the layers beneath it
+composed, the window's own rectangle, its physical blur radius, and the window
+shape the blurred copy is mixed back through. It is **not** a function of
+anything at or above its own layer — the blur happens before the window's own
+translucent pixels are blended over it, and everything stacked above is blended
+afterwards. The pointer moving inside a frosted terminal and a window dragged
+across one, the two dominant interactions on the desktop, therefore change
+nothing the frost reads, yet either used to re-blur the whole window per sample:
+two separable passes over every pixel of it, measured at 17.4 ms for a 64×24
+repaint against 0.9 µs for the same repaint over an opaque stack.
+
+The compositor keeps each frosted window's backdrop instead, in a bounded,
+pressure-governed cache on the same terms as the window furniture above:
+ceilinged at one screenful of pixels (no more of it can be visible at once),
+released when the memory-pressure band tightens, and **wiped** on release,
+because a frost is a blurred image of whatever the user had on screen. The same
+repaint now costs 26 µs.
+
+How a retained frost is known to be still right:
+
+- **The rectangle, the radius, and the shape are recorded in the entry** and
+  compared on every lookup. A moved, resized, re-rounded, re-radiused, or
+  rescaled window fails that comparison and is blurred again, so the check
+  holds even if the compositor forgot to say anything had changed. The
+  rectangle recorded is the window's whole one, not the part of it on screen: a
+  window pushed off an edge is frosted from the row and column the screen
+  begins at while its shape is still read from its own top-left, so two
+  positions that clip to the same on-screen rectangle are two different frosts.
+- **The pixels beneath it cannot be self-checked** without reading the ones the
+  copy was meant to save, so the entry is dropped when the compositor marks
+  damage that could have changed them. Marking distinguishes three cases: a
+  change confined to *one window's own layer* — its content, position, size,
+  shape or furniture — drops only the frosts of windows stacked above that one,
+  which is why a window dragged across a frosted one costs it nothing; a change
+  that is not confined to a layer (the root fill, the desktop layer, the
+  density or theme, or a restacking, which changes *which* layers a frost sees)
+  drops every frost it reaches; and a change no frost can read at all — the
+  cursor overlay, composed after every window, and the screen reveal, applied
+  only as a pixel is encoded for scan-out — drops none.
+- **Whether a frost may be reused is asked once per frame and remembered.** The
+  recompose plan and the composite that follows it both need the answer, and
+  two lookups could disagree — which would leave a window the plan did not
+  widen for being blurred over a rectangle whose lower layers the frame never
+  composed. That one lookup is also what the cache counts, so a reuse reads as
+  a hit and refreshes the entry's recency: the frost every frame serves must
+  not be the first one a pressured cache gives back.
+- **Recomputing one frost drops any frost above it that overlaps**, because a
+  blur spreads the change far past the rectangle that caused it, so the window
+  above reads different bytes even where the damage never reached.
+- **A density or mode change empties the cache** through its epoch. Both are
+  already caught per entry, so this is not what keeps a stale frost off the
+  screen — it is what stops a superseded one *staying charged* against the
+  budget until it is next looked up. A window that stops frosting altogether is
+  never looked up again, so setting its blur radius to zero releases its entry
+  outright rather than leaving a screenful of dead pixels charged.
+
+The cache is read-only for the whole of a composite pass and written at the end
+of it: admitting a frost mid-pass could evict one the same pass had already
+decided to reuse, and that reuse would then blur a rectangle whose lower layers
+the frame only composed where the damage happened to fall.
+
+Losing a frost costs blur work and never a wrong pixel, which is what makes the
+cache an accelerator rather than a correctness requirement. That is asserted,
+not asserted-about: the compositor's tests compose one scene twice — once
+reusing retained frosts, once blurring afresh every frame — through some thirty
+mutations (content presents above, below and inside the frost, cursor motion, a
+fade, restacking, geometry, radius, corner, scale, theme and mode changes,
+overlapping frosts, a frost clipped by the screen edge, and window removal) and
+require the scan-out frame *and* the back buffer to be byte-identical after
+every one.
+
 ## What one frame cost (`FrameStats`)
 
 "The desktop feels slow" is not a defect report. `Compositor::frame_stats`
@@ -382,10 +461,10 @@ wrapped one would read as a suspiciously small frame.
 
 | Count | What it says |
 |---|---|
-| `damaged_px` | Screen pixels inside the frame's dirty rectangles, after screen clipping and after a blurred window widened the damage it touched. The size of the job — the denominator for everything else. |
+| `damaged_px` | Screen pixels inside the frame's dirty rectangles, after screen clipping and after any blurred window whose frost had to be recomputed widened the damage it touched. The size of the job — the denominator for everything else. |
 | `blended_px` | Layer contributions blended through *over*. Contributions, not screen positions: a pixel two windows both draw at is one damaged pixel and two blends, so this may legitimately exceed the damage — and that ratio is what says whether the frame paid for depth nobody can see. |
 | `opaque_px` | Pixels resolved by copying a fully opaque run of the front window's own pixels. Each cost no blend, and everything beneath it was skipped, which is why `blended_px` falls as this rises. |
-| `blur_px` | Pixels rewritten by a backdrop frost. A frame that re-frosts a window whose backdrop did not change is paying twice for one appearance. |
+| `blur_px` | Pixels rewritten by a *recomputed* backdrop frost. A frost served from the retained one is copied rather than blurred and counts nothing here, so this is exactly the blur work the frame could not avoid — and zero is what a repaint inside a frosted window should read. |
 | `encoded_px` | Composed pixels converted to scan-out bytes. |
 | `dirty_rects` | Dirty rectangles the frame recomposed. |
 | `present_calls` | Calls the frame made into the display driver to publish itself — the round trips of the section above. |

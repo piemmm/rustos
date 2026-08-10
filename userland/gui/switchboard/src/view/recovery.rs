@@ -7,6 +7,7 @@
 
 use alloc::string::String;
 use alloc::vec::Vec;
+use core::mem;
 
 use tairix_abi::ProcId;
 use tairix_font::BitmapFont;
@@ -23,6 +24,7 @@ use tairix_controls::{
 };
 
 use super::frame::{SectionAnatomy, SectionFrame, ACTION_RAIL_WIDTH, DETAIL_PANE_WIDTH};
+use super::refresh::{resettle_cards, restate_rail};
 use super::system_data::{absence_statement, reading_text, selection_prompt, Reading, Unmeasured};
 use super::{
     action_state, resolve_selection, select_pressed_card, ListInfo, SectionCtx, SectionOutcome,
@@ -384,10 +386,11 @@ impl RecoverySection {
         for (card, item) in self.cards.iter_mut().zip(self.items.iter()) {
             card.set_state(card_state(item, selected == Some(item.proc_id)));
         }
-        self.rail = ActionRail::new(match self.selected_item() {
+        let commands = match self.selected_item() {
             Some(item) => alloc::vec![restart_button(item), force_button(item)],
             None => Vec::new(),
-        });
+        };
+        restate_rail(&mut self.rail, commands);
     }
 
     /// Where the detail pane's parts sit inside `content`, or [`None`]
@@ -803,12 +806,17 @@ impl SectionView for RecoverySection {
         self.resolved = model.recovery_resolved;
         self.items.clone_from(&model.recovery);
         self.selected = resolve_selection(previous, self.items.iter().map(|item| item.proc_id));
+        let retired = mem::take(&mut self.cards);
         self.cards = self
             .items
             .iter()
             .map(|item| build_card(item, self.selected == Some(item.proc_id)))
             .collect();
         self.rebuild_selection();
+        // A card holds its own record of which footer action the pointer is on
+        // and which one a press began on, neither of which can be restated
+        // from outside, so a card the sample did not change is kept.
+        resettle_cards(retired, &mut self.cards);
 
         self.focus = match stop {
             Some(Stop::Card(_)) | None => self.selected_index().unwrap_or(0),

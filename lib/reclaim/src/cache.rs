@@ -406,15 +406,7 @@ where
             return build().map(Served::Uncached);
         }
 
-        if self.generation.as_ref() != Some(generation) {
-            let dropped = !self.entries.is_empty();
-            self.invalidate_all();
-            self.generation = Some(generation.clone());
-            if dropped {
-                self.accounting.record_invalidation();
-            }
-        }
-
+        self.enter_generation(generation);
         self.enforce_pressure();
 
         let Some(policy) = self.policy else {
@@ -433,6 +425,48 @@ where
         self.accounting.record_miss(policy.class());
         let value = build()?;
         Some(self.admit(policy, key, value))
+    }
+
+    /// Retain `value` under `key` at `generation`, replacing whatever was
+    /// held for it, and record no hit or miss because no lookup happened.
+    ///
+    /// For a value the cache cannot build on demand because it exists only
+    /// as the by-product of an operation the cache cannot drive: a
+    /// compositor's frosted backdrop is the blur its own composite pass has
+    /// just written into the frame buffer, reproducible only by composing
+    /// that frame again. Such a consumer asks with
+    /// [`get_or_build`](Self::get_or_build) — which counts the lookup — and
+    /// offers the finished value here afterwards, so one lookup is counted
+    /// once however the consumer had to satisfy it.
+    ///
+    /// Admission is otherwise identical to a built value's: a generation
+    /// change empties the cache first, the pressure band is enforced, and a
+    /// budget or growth refusal simply drops the value, leaving the consumer
+    /// to produce it again next time.
+    pub fn retain(&mut self, generation: &E, key: K, value: V) {
+        if self.poisoned {
+            return;
+        }
+        self.enter_generation(generation);
+        self.enforce_pressure();
+        let Some(policy) = self.policy else {
+            return;
+        };
+        let _ = self.admit(policy, key, value);
+    }
+
+    /// Drop everything retained at a different generation and adopt this
+    /// one, so no lookup or admission can mix two generations' values.
+    fn enter_generation(&mut self, generation: &E) {
+        if self.generation.as_ref() == Some(generation) {
+            return;
+        }
+        let dropped = !self.entries.is_empty();
+        self.invalidate_all();
+        self.generation = Some(generation.clone());
+        if dropped {
+            self.accounting.record_invalidation();
+        }
     }
 
     /// Release the entry for `key` if it is retained, wiping it where
@@ -492,7 +526,14 @@ where
 
     /// Admit `value` under `key`, or hand it back unretained when the
     /// live policy refuses it.
+    ///
+    /// A value already held for `key` is released first, so the newest one
+    /// is what is retained and the old one's bytes are discharged rather
+    /// than left charged against an entry nothing can reach.
     fn admit(&mut self, policy: CachePolicy, key: K, value: V) -> Served<'_, V> {
+        if self.entries.contains_key(&key) {
+            let _ = self.release(&key);
+        }
         let payload = value.payload_bytes();
         let cost = payload.saturating_add(self.entry_metadata_bytes);
 
@@ -799,6 +840,84 @@ mod tests {
             "peeking must not refresh recency, so the first build is still the first out"
         );
         assert!(cache.peek(&1, &3).is_some());
+    }
+
+    #[test]
+    fn a_hit_refreshes_recency_so_eviction_takes_what_nothing_asked_for() {
+        let (mut cache, _, _) = cache(PressureBand::Normal, Sensitivity::UserData);
+        for key in 0..3u32 {
+            let _ = cache.get_or_build(&1, key, || Some(Block::of(1024, 0xFF)));
+        }
+        assert_eq!(cache.len(), 3);
+        let _ = cache.get_or_build(&1, 0, || panic!("must not rebuild a cached entry"));
+        let _ = cache.get_or_build(&1, 3, || Some(Block::of(1024, 0xFF)));
+        assert!(
+            cache.peek(&1, &0).is_some(),
+            "the entry a lookup served is not the first one out"
+        );
+        assert_eq!(
+            cache.peek(&1, &1),
+            None,
+            "the one nothing has asked for since is"
+        );
+    }
+
+    #[test]
+    fn retain_admits_a_value_the_caller_built_and_counts_no_lookup() {
+        let (mut cache, _, _) = cache(PressureBand::Normal, Sensitivity::UserData);
+        cache.retain(&1, 7, Block::of(64, 0xAA));
+        assert_eq!(cache.peek(&1, &7), Some(&Block::of(64, 0xAA)));
+        assert_eq!(cache.accounting().hits(), 0);
+        assert_eq!(cache.accounting().misses(), 0);
+        assert_eq!(cache.charged_bytes(), 64 + METADATA);
+    }
+
+    #[test]
+    fn retain_replaces_what_a_key_held_and_discharges_it() {
+        let (mut cache, _, _) = cache(PressureBand::Normal, Sensitivity::UserData);
+        cache.retain(&1, 7, Block::of(100, 1));
+        cache.retain(&1, 7, Block::of(200, 2));
+        assert_eq!(cache.len(), 1);
+        assert_eq!(cache.peek(&1, &7), Some(&Block::of(200, 2)));
+        assert_eq!(cache.charged_bytes(), 200 + METADATA);
+    }
+
+    #[test]
+    fn a_retained_value_is_served_and_counted_by_the_next_lookup() {
+        let (mut cache, _, _) = cache(PressureBand::Normal, Sensitivity::UserData);
+        cache.retain(&1, 7, Block::of(64, 0xAA));
+        let served = cache.get_or_build(&1, 7, || None).expect("retained");
+        assert!(served.is_cached());
+        assert_eq!(cache.accounting().hits(), 1);
+        assert_eq!(cache.accounting().misses(), 0);
+    }
+
+    #[test]
+    fn a_lookup_that_cannot_build_counts_the_miss_and_retains_nothing() {
+        let (mut cache, _, _) = cache(PressureBand::Normal, Sensitivity::UserData);
+        assert!(cache.get_or_build(&1, 7, || None).is_none());
+        assert_eq!(cache.accounting().misses(), 1);
+        assert_eq!(cache.len(), 0);
+    }
+
+    #[test]
+    fn retain_drops_a_value_larger_than_the_whole_budget() {
+        let (mut cache, _, _) = cache(PressureBand::Normal, Sensitivity::UserData);
+        cache.retain(&1, 7, Block::of(1 << 20, 9));
+        assert_eq!(cache.len(), 0);
+        assert_eq!(cache.accounting().refusals(), 1);
+        assert_eq!(cache.accounting().hits(), 0);
+        assert_eq!(cache.accounting().misses(), 0);
+    }
+
+    #[test]
+    fn retain_at_another_generation_drops_the_entries_built_at_the_old_one() {
+        let (mut cache, _, _) = cache(PressureBand::Normal, Sensitivity::UserData);
+        cache.retain(&1, 7, Block::of(64, 1));
+        cache.retain(&2, 8, Block::of(64, 2));
+        assert_eq!(cache.len(), 1);
+        assert_eq!(cache.peek(&2, &8), Some(&Block::of(64, 2)));
+        assert_eq!(cache.accounting().invalidations(), 1);
     }
 
     #[test]

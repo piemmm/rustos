@@ -2135,6 +2135,7 @@ name = "tairix-raster"
 version = "0.0.0"
 dependencies = [
  "tairix-reclaim",
+ "tairix-rng",
  "tairix-theme",
  "tairix-util",
 ]

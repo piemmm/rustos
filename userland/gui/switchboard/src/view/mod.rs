@@ -62,8 +62,9 @@
 //! model; the selected section, every section's scroll offset, and the
 //! keyboard focus are the user's and survive, so a scrolled or
 //! keyboard-navigated list is never snatched back to the top by the next
-//! sample. Row selection, hover, and a half-finished press name a row that may
-//! now be a different object, so they are dropped rather than re-asserted.
+//! sample. The pointer's own highlight survives too, because a refresh moves
+//! neither the pointer nor the slots it is over; a half-finished press does
+//! not, because it names an object the slot may no longer hold.
 
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -86,6 +87,7 @@ pub mod background;
 pub mod frame;
 pub mod pressure;
 pub mod recovery;
+mod refresh;
 pub mod system;
 pub mod system_data;
 pub mod tasks;
@@ -698,20 +700,30 @@ trait SectionView {
 /// theme, and font, so a host may use `==` as its repaint gate: a composition
 /// that compares equal to the one already on screen needs neither a render nor
 /// a present. Everything the picture depends on takes part in that comparison
-/// — the model-derived rows, cards, and meters, the section, the scroll
-/// offsets, hover and press highlights, the focus rings, the open Group popup,
-/// and the in-flight rename. The last pointer coordinate does not: it is pure
-/// hit-testing input that no render path reads, and a sample that crosses no
-/// control would otherwise force a full repaint of an unchanged surface.
+/// — the shared chrome, the section on show and its own rows, cards and
+/// meters, the scroll offsets, hover and press highlights, the focus rings,
+/// the open Group popup, and the in-flight rename.
 ///
-/// The relation is deliberately conservative in the safe direction only.
-/// Unequal compositions *may* still draw identically (a focus index that moves
-/// while focus rests elsewhere), which costs one needless repaint; equal ones
-/// never differ on screen. The exclusion lives in the type of the excluded
-/// field — a crate-internal wrapper that always compares equal — rather than
-/// in a hand-written `PartialEq`, so a field added later counts towards
-/// equality by default.
-#[derive(Clone, Debug, Eq, PartialEq)]
+/// Two things deliberately do not. The last pointer coordinate is pure
+/// hit-testing input that no render path reads, so a sample that crosses no
+/// control does not force a repaint of an unchanged surface; the exclusion
+/// lives in the field's type — a crate-internal wrapper that always compares
+/// equal. And the *five* sections that are not on show draw nothing, so their
+/// contents cannot change the picture: only the section [`section`] names
+/// takes part, and which section that is is compared first, so a section
+/// switch still compares unequal and still repaints. Comparing all six would
+/// repaint the whole window every time any hidden section's readings moved —
+/// which, with a per-frame compositor reading among them, is every frame.
+///
+/// The relation is still conservative in the safe direction only. Unequal
+/// compositions *may* draw identically (a focus index that moves while focus
+/// rests elsewhere), which costs one needless repaint; equal ones never differ
+/// on screen. `PartialEq` is written out rather than derived, so it
+/// destructures `Self` exhaustively: a field added later fails to compile
+/// until it is either compared or deliberately excluded here.
+///
+/// [`section`]: Switchboard::section
+#[derive(Clone, Debug, Eq)]
 pub struct Switchboard {
     /// The location trail: the screen's name, then the section on show.
     trail: Breadcrumb,
@@ -738,6 +750,43 @@ pub struct Switchboard {
     /// coordinate the pointer actually reached — hit-testing input, never a
     /// drawn property.
     pointer: RenderInvariant<Point>,
+}
+
+impl PartialEq for Switchboard {
+    fn eq(&self, other: &Self) -> bool {
+        let Self {
+            trail,
+            section_list,
+            section_menu,
+            scroll,
+            tasks,
+            jobs,
+            pressure,
+            activities,
+            recovery,
+            system,
+            section,
+            offsets,
+            focus,
+            pointer,
+        } = self;
+        *section == other.section
+            && *trail == other.trail
+            && *section_list == other.section_list
+            && *section_menu == other.section_menu
+            && *scroll == other.scroll
+            && *offsets == other.offsets
+            && *focus == other.focus
+            && *pointer == other.pointer
+            && match section {
+                Section::Tasks => *tasks == other.tasks,
+                Section::Jobs => *jobs == other.jobs,
+                Section::Pressure => *pressure == other.pressure,
+                Section::Activities => *activities == other.activities,
+                Section::Recovery => *recovery == other.recovery,
+                Section::System => *system == other.system,
+            }
+    }
 }
 
 impl Switchboard {
@@ -825,13 +874,19 @@ impl Switchboard {
     /// focus region and its position in the list, the last pointer position,
     /// an open section list, and any scroll-thumb drag in flight.
     ///
+    /// **Kept, because the pointer has not moved:** the hover highlight. A row's
+    /// rectangle belongs to its slot and a refresh does not move the slots, so
+    /// the pointer really is still over the control at the same slot; leaving
+    /// the re-derived controls resting would publish the opposite and would
+    /// publish it afresh every sample. Every section carries it over the one
+    /// shared way: a control the refresh derived unchanged is kept whole, and
+    /// one it changed takes the hover alone.
+    ///
     /// **Dropped, because it names a row that may now be a different object:**
-    /// row selection, pointer hover, and any half-finished press. A row index
-    /// survives a refresh only as a *position* in the list, never as an
-    /// identity: the rows are rebuilt from `model`, so a press begun on one
-    /// task can never complete against whatever task now occupies that slot,
-    /// and a highlight is never re-asserted onto a row the pointer is not
-    /// really over. Hover returns with the next pointer movement.
+    /// row selection and any half-finished press. A row index survives a
+    /// refresh only as a *position* in the list, never as an identity, so a
+    /// press begun on one task can never complete against whatever task now
+    /// occupies that slot.
     ///
     /// The list position the keyboard focus names is clamped into the new
     /// content, and the active section's scroll offset is re-ranged through

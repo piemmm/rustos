@@ -35,7 +35,7 @@ use tairix_display::ChannelOrder;
 use tairix_log::DiscardSink;
 use tairix_raster::{box_blur, BlurScratch, Color, Pixel, Rgba8Image, Surface};
 use tairix_reclaim::{PressureBand, ReportedPressure};
-use tairix_wm::{chrome_cache, Compositor, Point, Rect, Region, WindowId};
+use tairix_wm::{chrome_cache, frost_cache, Compositor, Point, Rect, Region, WindowId};
 
 /// The default timed calls per round and rounds per case.
 ///
@@ -692,7 +692,8 @@ fn scene(stack: Stack) -> Result<CompositeWarm, String> {
     };
     let frame_bytes = count_of(mode.stride_bytes).saturating_mul(count_of(mode.height_px));
     let chrome = chrome_cache(SEAT_PRIMARY, frame_bytes, &PRESSURE, &SINK);
-    let mut compositor = Compositor::new(mode, Color::rgb(18, 20, 26), chrome, &PRESSURE)
+    let frost = frost_cache(SEAT_PRIMARY, frame_bytes, &PRESSURE, &SINK);
+    let mut compositor = Compositor::new(mode, Color::rgb(18, 20, 26), chrome, frost, &PRESSURE)
         .ok_or_else(|| format!("bench: no compositor for {SCREEN_W}x{SCREEN_H}"))?;
 
     let layout = [

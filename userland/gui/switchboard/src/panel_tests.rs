@@ -1,7 +1,7 @@
 //! Unit tests for the overview panel's window lifecycle and effect
 //! application, driven entirely through the recording host.
 
-use tairix_abi::switchboard_ipc::{CommandSection, SeatReport, SwitchboardRequest};
+use tairix_abi::switchboard_ipc::{CommandSection, FrameReport, SeatReport, SwitchboardRequest};
 use tairix_abi::sysinfo::ProcessState;
 use tairix_abi::{Errno, SchedPriority, Signal};
 use tairix_font::BitmapFont;
@@ -80,6 +80,34 @@ fn busy_model(first_pid: u64) -> PanelModel {
         PANEL_TITLE,
         &sample_with(processes),
         &SessionReport::HEALTHY,
+        &RollingMeters::new(),
+        &NO_AUTHORITY,
+        &Activities::new(),
+        None,
+    )
+}
+
+/// A model whose only reading is what the session's last frame cost, so a
+/// refresh from one to another changes the System section's compositor
+/// figures and nothing else any section draws.
+fn frame_model(damaged_px: u64) -> PanelModel {
+    let session = SessionReport {
+        seat: SeatReport::HEALTHY,
+        frame: Some(FrameReport {
+            screen_px: 1920 * 1080,
+            damaged_px,
+            blended_px: 42_000,
+            opaque_px: 1_100,
+            dirty_rects: 3,
+            present_calls: 1,
+            chrome_hits: 12,
+            chrome_misses: 1,
+        }),
+    };
+    build_model(
+        PANEL_TITLE,
+        &Sample::default(),
+        &session,
         &RollingMeters::new(),
         &NO_AUTHORITY,
         &Activities::new(),
@@ -367,11 +395,75 @@ fn refreshing_with_a_changed_model_redraws_and_keeps_the_section() {
     open(&mut panel, &mut host, CommandSection::Recovery);
     let presents = host.presents;
 
-    panel.refresh(task_model(10));
+    panel.refresh(stopped_model(7, false));
     panel.flush(&mut host);
 
     assert_eq!(host.presents, presents + 1);
     assert_eq!(panel.section(), Some(Section::Recovery));
+}
+
+#[test]
+fn refreshing_a_section_that_is_not_on_show_draws_nothing() {
+    let mut host = RecordingHost::new();
+    let mut panel = Panel::new(OWN_PID, empty_model());
+    open(&mut panel, &mut host, CommandSection::Recovery);
+    let presents = host.presents;
+
+    // A task appears, which only the Tasks section draws.
+    panel.refresh(task_model(10));
+    panel.flush(&mut host);
+
+    assert_eq!(
+        host.presents, presents,
+        "a reading no shown section draws must not repaint the window"
+    );
+    assert_eq!(panel.section(), Some(Section::Recovery));
+}
+
+#[test]
+fn a_fresh_frame_reading_draws_nothing_while_tasks_is_on_show() {
+    let mut host = RecordingHost::new();
+    let mut panel = Panel::new(OWN_PID, frame_model(3_200));
+    open(&mut panel, &mut host, CommandSection::Tasks);
+    let presents = host.presents;
+
+    panel.refresh(frame_model(6_400));
+    panel.flush(&mut host);
+
+    assert_eq!(
+        host.presents, presents,
+        "the session reports a frame per compositor frame, and only the \
+         System section draws it"
+    );
+}
+
+#[test]
+fn a_fresh_frame_reading_redraws_while_the_system_section_is_on_show() {
+    let mut host = RecordingHost::new();
+    let mut panel = Panel::new(OWN_PID, frame_model(3_200));
+    open(&mut panel, &mut host, CommandSection::System);
+    let presents = host.presents;
+
+    panel.refresh(frame_model(6_400));
+    panel.flush(&mut host);
+
+    assert_eq!(host.presents, presents + 1);
+}
+
+#[test]
+fn switching_the_section_on_show_redraws() {
+    let mut host = RecordingHost::new();
+    let mut panel = Panel::new(OWN_PID, frame_model(3_200));
+    open(&mut panel, &mut host, CommandSection::Tasks);
+    let presents = host.presents;
+
+    panel
+        .view_mut()
+        .expect("the panel is open")
+        .select_section(Section::System);
+    panel.flush(&mut host);
+
+    assert_eq!(host.presents, presents + 1);
 }
 
 #[test]

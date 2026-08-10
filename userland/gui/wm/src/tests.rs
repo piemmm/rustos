@@ -20,6 +20,7 @@ use tairix_reclaim::{CachedBytes, PressureBand, ReclaimCache, ReportedPressure};
 use tairix_theme::{Contrast, Theme, ThemeId, ThemeRegistry};
 
 use crate::chrome::{chrome_cache, ChromeEpoch, WindowChrome};
+use crate::frost::{frost_cache, FrostEpoch, FrostedBackdrop};
 use crate::select::{cursor_cache, CursorEpoch};
 
 use crate::{IconKind, WindowActivationState, WindowFrame, WindowFurnitureState, WindowSizeState};
@@ -37,13 +38,20 @@ pub(crate) fn opaque(w: u32, h: u32, color: Color) -> Surface {
     Surface::filled(w, h, color.premultiply()).expect("surface allocates")
 }
 
-/// A compositor for `mode` over `background`, holding a window-furniture
-/// cache at normal pressure sized from a 1080p output — the one place these
-/// tests assemble the cache the embedder would otherwise inject, so a test
-/// that cares about the budget or the band builds its own instead.
+/// A compositor for `mode` over `background`, holding a window-furniture and a
+/// frosted-backdrop cache at normal pressure sized from a 1080p output — the
+/// one place these tests assemble the caches the embedder would otherwise
+/// inject, so a test that cares about a budget or the band builds its own
+/// instead.
 pub(crate) fn new_compositor(mode: DisplayMode, background: Color) -> Option<Compositor> {
     NORMAL_PRESSURE.report(PressureBand::Normal);
-    Compositor::new(mode, background, test_chrome_cache(), &NORMAL_PRESSURE)
+    Compositor::new(
+        mode,
+        background,
+        test_chrome_cache(),
+        test_frost_cache(),
+        &NORMAL_PRESSURE,
+    )
 }
 
 /// Convert a client present at the window's *current* client size, as the
@@ -3450,6 +3458,13 @@ fn test_chrome_cache() -> ReclaimCache<WindowId, WindowChrome, ChromeEpoch> {
     chrome_cache(TEST_SEAT, TEST_FB_BYTES, &NORMAL_PRESSURE, &TEST_SINK)
 }
 
+/// The frosted-backdrop cache the shipping desktop policy builds, at normal
+/// pressure and sized from a 1080p output.
+fn test_frost_cache() -> ReclaimCache<WindowId, FrostedBackdrop, FrostEpoch> {
+    NORMAL_PRESSURE.report(PressureBand::Normal);
+    frost_cache(TEST_SEAT, TEST_FB_BYTES, &NORMAL_PRESSURE, &TEST_SINK)
+}
+
 #[test]
 fn a_re_shown_cursor_kind_is_rasterised_once_per_epoch() {
     let mut c = new_compositor(mode(80, 80), BLUE).expect("compositor");
@@ -3619,6 +3634,7 @@ fn retained_furniture_never_exceeds_the_one_screenful_ceiling() {
         mode(320, 240),
         BLUE,
         chrome_cache(TEST_SEAT, ceiling, &NORMAL_PRESSURE, &TEST_SINK),
+        test_frost_cache(),
         &NORMAL_PRESSURE,
     )
     .expect("compositor");
@@ -3766,6 +3782,7 @@ fn mild_pressure_drops_the_chrome_cache_and_refuses_growth() {
         mode(320, 240),
         BLUE,
         chrome_cache(TEST_SEAT, TEST_FB_BYTES, &PRESSURE, &TEST_SINK),
+        frost_cache(TEST_SEAT, TEST_FB_BYTES, &PRESSURE, &TEST_SINK),
         &PRESSURE,
     )
     .expect("compositor");
@@ -3833,6 +3850,7 @@ fn the_composited_frame_is_identical_warm_empty_and_uncacheable() {
         mode(320, 240),
         BLUE,
         chrome_cache(TEST_SEAT, 0, &NORMAL_PRESSURE, &TEST_SINK),
+        test_frost_cache(),
         &NORMAL_PRESSURE,
     )
     .expect("compositor");
@@ -3907,6 +3925,7 @@ fn a_hidden_window_s_furniture_is_evicted_before_a_visible_one_s() {
         mode(320, 240),
         BLUE,
         chrome_cache(TEST_SEAT, ceiling, &NORMAL_PRESSURE, &TEST_SINK),
+        test_frost_cache(),
         &NORMAL_PRESSURE,
     )
     .expect("compositor");
@@ -3940,6 +3959,461 @@ fn a_hidden_window_s_furniture_is_evicted_before_a_visible_one_s() {
     assert!(c.chrome_resident(newcomer));
 }
 
+// ---- retained frosted backdrops --------------------------------------
+
+/// One scene composed twice: once reusing retained frosts, once blurring
+/// afresh every frame.
+///
+/// Every operation is applied to both compositors and every frame is compared
+/// byte for byte, so a frost the reuse path kept when something beneath it
+/// changed shows up as a differing pixel rather than as a plausible-looking
+/// screenshot. The back buffer is compared as well as the scan-out frame,
+/// because a frost reads the back buffer: a difference there would go
+/// unnoticed for a frame and surface later.
+struct BothWays {
+    reusing: Compositor,
+    blurring: Compositor,
+}
+
+impl BothWays {
+    fn new(mode: DisplayMode) -> Self {
+        let reusing = new_compositor(mode, BLUE).expect("compositor");
+        let mut blurring = new_compositor(mode, BLUE).expect("compositor");
+        blurring.set_frost_reuse(false);
+        Self { reusing, blurring }
+    }
+
+    /// Apply `act` to both compositors, asserting they agree on what it
+    /// returned — window ids are handed out in order, so the two stacks stay
+    /// identical — and hand that back.
+    fn both<T>(&mut self, act: impl Fn(&mut Compositor) -> T) -> T
+    where
+        T: core::fmt::Debug + PartialEq,
+    {
+        let reusing = act(&mut self.reusing);
+        let blurring = act(&mut self.blurring);
+        assert_eq!(
+            reusing, blurring,
+            "the two compositors took different paths"
+        );
+        reusing
+    }
+
+    /// Composite both and require the results to be identical.
+    fn settle(&mut self, step: &str) {
+        let reused = self.reusing.composite();
+        let blurred = self.blurring.composite();
+        assert_eq!(
+            self.reusing.frame(),
+            self.blurring.frame(),
+            "scan-out differs after {step} (reused {reused:?}, blurred {blurred:?})"
+        );
+        assert_eq!(
+            self.reusing.back_buffer().pixels(),
+            self.blurring.back_buffer().pixels(),
+            "back buffer differs after {step}"
+        );
+    }
+}
+
+#[test]
+fn every_change_around_a_frosted_window_composes_the_frame_a_fresh_blur_would() {
+    let mut both = BothWays::new(mode(40, 24));
+    let under = both.both(|c| c.add_window(Point::ORIGIN, opaque(40, 24, GREEN)));
+    let glass = both.both(|c| c.add_window(Point::new(6, 4), clear(20, 14)));
+    let over = both.both(|c| c.add_window(Point::new(30, 2), opaque(8, 8, RED)));
+    both.both(|c| c.set_backdrop_blur(glass, 3));
+    both.settle("the first frost");
+
+    // The window's own content: the case the whole cache exists for.
+    both.both(|c| present_content(c, glass, paint_dot));
+    both.settle("the frosted window's own content");
+
+    // The cursor, above every window.
+    both.both(|c| {
+        c.set_cursor(solid_cursor(4, RED), Point::new(12, 9));
+        true
+    });
+    both.settle("a cursor over the frost");
+    both.both(|c| c.move_cursor(Point::new(14, 10)));
+    both.settle("a cursor moved over the frost");
+
+    // The screen reveal, applied only as a pixel is encoded.
+    both.both(|c| c.set_reveal(128));
+    both.settle("a partial reveal");
+    both.both(|c| c.set_reveal(u8::MAX));
+    both.settle("a full reveal");
+
+    // A window above it: nothing the frost reads, including while it is
+    // dragged right across the frosted rectangle. It is left overlapping, so
+    // every step below runs with a window above the frost.
+    both.both(|c| c.move_window(over, Point::new(31, 2)));
+    both.settle("the window above moved");
+    both.both(|c| c.move_window(over, Point::new(20, 6)));
+    both.settle("the window above dragged onto the frost");
+    both.both(|c| c.move_window(over, Point::new(14, 8)));
+    both.settle("the window above dragged across the frost");
+
+    // Everything below it, which the frost does read.
+    both.both(|c| present_content(c, under, paint_dot));
+    both.settle("the window below presented");
+    both.both(|c| c.move_window(under, Point::new(1, 0)));
+    both.settle("the window below moved");
+    both.both(|c| c.set_opacity(under, 128));
+    both.settle("the window below faded");
+    both.both(|c| c.set_visible(under, false));
+    both.settle("the window below hidden");
+    both.both(|c| c.set_visible(under, true));
+    both.settle("the window below shown");
+    both.both(|c| c.set_background(RED));
+    both.settle("the root fill recoloured");
+    both.both(|c| c.repaint_desktop(|surface| surface.fill(GREEN)));
+    both.settle("the desktop layer repainted");
+
+    // The frosted window's own geometry, shape, radius, and density.
+    both.both(|c| c.move_window(glass, Point::new(7, 5)));
+    both.settle("the frost moved");
+    both.both(|c| c.resize_window_client(glass, 22, 12));
+    both.settle("the frost resized");
+    both.both(|c| c.set_corners(glass, Corners::Rounded { radius: 5 }));
+    both.settle("the frost rounded");
+    both.both(|c| c.set_backdrop_blur(glass, 2));
+    both.settle("the radius changed");
+    both.both(|c| c.set_scale(Scale::from_percent(200).expect("valid scale")));
+    both.settle("the density changed");
+    both.both(|c| c.set_scale(Scale::ONE));
+    both.settle("the density restored");
+
+    // Restacking, which changes what is beneath the frost and what the frost
+    // is beneath.
+    both.both(|c| c.raise(glass));
+    both.settle("the frost raised");
+    both.both(|c| c.lower(glass));
+    both.settle("the frost lowered");
+    both.both(|c| c.raise(over));
+    both.settle("the window above raised");
+
+    // A second frost overlapping the first, so each reads what the other wrote.
+    let second = both.both(|c| c.add_window(Point::new(18, 8), clear(16, 12)));
+    both.both(|c| c.set_backdrop_blur(second, 4));
+    both.settle("a second overlapping frost");
+    both.both(|c| present_content(c, second, paint_dot));
+    both.settle("the second frost's own content");
+    both.both(|c| present_content(c, under, paint_dot));
+    both.settle("under both frosts");
+    both.both(|c| c.move_window(second, Point::new(20, 9)));
+    both.settle("the second frost moved");
+
+    // A frost hanging off the screen edge, so its rectangle is clipped.
+    both.both(|c| c.move_window(glass, Point::new(-6, -4)));
+    both.settle("the frost partly off screen");
+    both.both(|c| present_content(c, glass, paint_dot));
+    both.settle("the clipped frost's own content");
+
+    // The theme, the mode, and finally taking the windows away.
+    both.both(|c| c.set_theme(Theme::light()));
+    both.settle("a theme switch");
+    both.both(|c| c.set_mode(mode(32, 20)));
+    both.settle("a mode change");
+    both.both(|c| c.remove(second));
+    both.settle("the second frost removed");
+    both.both(|c| c.remove(glass));
+    both.settle("the last frost removed");
+}
+
+#[test]
+fn a_frost_pushed_further_off_screen_is_not_the_one_it_clipped_to_before() {
+    // A window wider than the screen clips to the same on-screen rectangle at
+    // both of these positions, but its rounded shape is read from its own
+    // top-left, so the two frosts weight those pixels differently.
+    let mut both = BothWays::new(mode(20, 16));
+    both.both(|c| c.add_window(Point::ORIGIN, opaque(20, 16, GREEN)));
+    // An edge under the corner: a blur of a flat colour is that colour, so
+    // only a textured backdrop can tell two frostings apart at all.
+    both.both(|c| c.add_window(Point::ORIGIN, opaque(9, 9, RED)));
+    let glass = both.both(|c| c.add_window(Point::ORIGIN, clear(30, 12)));
+    both.both(|c| c.set_corners(glass, Corners::Rounded { radius: 6 }));
+    both.both(|c| c.set_backdrop_blur(glass, 3));
+    both.settle("a frost wider than the screen");
+    both.both(|c| c.move_window(glass, Point::new(-8, 0)));
+    both.settle("the same clipped rectangle, a different part of the shape");
+}
+
+#[test]
+fn a_window_dragged_across_a_frosted_one_never_costs_a_re_blur() {
+    let mut c = new_compositor(mode(40, 24), BLUE).expect("compositor");
+    c.add_window(Point::ORIGIN, opaque(40, 24, GREEN));
+    let glass = c.add_window(Point::new(6, 4), clear(20, 14));
+    let over = c.add_window(Point::new(28, 2), opaque(8, 8, RED));
+    assert!(c.set_backdrop_blur(glass, 3));
+    composite_checked(&mut c);
+    assert!(c.frost_resident(glass));
+    let served = c.frost_cache_stats().hits();
+
+    for x in [24, 20, 16, 12, 8] {
+        assert!(c.move_window(over, Point::new(x, 6)));
+        assert!(
+            c.frost_resident(glass),
+            "a window above cannot change what the frost below reads"
+        );
+        composite_checked(&mut c);
+        assert_eq!(
+            c.frame_stats().blur_px,
+            0,
+            "no step of the drag re-frosts the window it crosses"
+        );
+    }
+    assert_eq!(
+        c.frost_cache_stats().hits(),
+        served + 5,
+        "every frame of the drag served the retained frost"
+    );
+}
+
+#[test]
+fn each_frame_asks_about_a_frost_once_and_records_what_it_got() {
+    let mut c = new_compositor(mode(40, 24), BLUE).expect("compositor");
+    let under = c.add_window(Point::ORIGIN, opaque(40, 24, GREEN));
+    let glass = c.add_window(Point::ORIGIN, clear(20, 14));
+    let away = c.add_window(Point::new(30, 18), opaque(8, 5, RED));
+    assert!(c.set_backdrop_blur(glass, 3));
+    composite_checked(&mut c);
+    let counts = |c: &Compositor| (c.frost_cache_stats().hits(), c.frost_cache_stats().misses());
+    assert_eq!(
+        counts(&c),
+        (0, 1),
+        "the first frame found nothing retained, and retaining is not a lookup"
+    );
+
+    assert_eq!(present_content(&mut c, glass, paint_dot), Some(true));
+    composite_checked(&mut c);
+    assert_eq!(counts(&c), (1, 1), "the frost was copied, not blurred");
+
+    assert_eq!(present_content(&mut c, under, paint_dot), Some(true));
+    composite_checked(&mut c);
+    assert_eq!(
+        counts(&c),
+        (1, 2),
+        "a recompute is one miss, not one for the plan and one for retaining it"
+    );
+
+    assert_eq!(present_content(&mut c, away, paint_dot), Some(true));
+    composite_checked(&mut c);
+    assert_eq!(
+        counts(&c),
+        (1, 2),
+        "a frame that never reaches the frost asks nothing about it"
+    );
+}
+
+#[test]
+fn a_frosted_window_s_own_repaint_costs_no_blur_and_no_widening() {
+    let mut c = new_compositor(mode(40, 24), BLUE).expect("compositor");
+    c.add_window(Point::ORIGIN, opaque(40, 24, GREEN));
+    let glass = c.add_window(Point::new(6, 4), clear(20, 14));
+    assert!(c.set_backdrop_blur(glass, 3));
+    composite_checked(&mut c);
+    assert!(c.frame_stats().blur_px > 0, "the first frame must frost");
+    assert!(c.frost_resident(glass));
+
+    // A one-pixel content present inside the frost: no blur at all, and the
+    // damage stays the pixel rather than growing to the window.
+    assert_eq!(present_content(&mut c, glass, paint_dot), Some(true));
+    let repainted = composite_checked(&mut c);
+    let stats = c.frame_stats();
+    assert_eq!(stats.blur_px, 0, "a retained frost is copied, not blurred");
+    assert_eq!(repainted.rects(), &[Rect::new(7, 8, 1, 1)]);
+    assert_eq!(stats.damaged_px, 1);
+}
+
+#[test]
+fn a_change_beneath_a_frosted_window_re_frosts_the_whole_of_it() {
+    let mut c = new_compositor(mode(40, 24), BLUE).expect("compositor");
+    let under = c.add_window(Point::ORIGIN, opaque(40, 24, GREEN));
+    // The frost covers the pixel `paint_dot` changes, so the change really is
+    // one its blur reads: a frost samples only inside its own rectangle.
+    let glass = c.add_window(Point::ORIGIN, clear(20, 14));
+    assert!(c.set_backdrop_blur(glass, 3));
+    composite_checked(&mut c);
+    assert!(c.frost_resident(glass));
+
+    assert_eq!(present_content(&mut c, under, paint_dot), Some(true));
+    assert!(
+        !c.frost_resident(glass),
+        "a present below the frost must drop it"
+    );
+    composite_checked(&mut c);
+    assert_eq!(
+        c.frame_stats().blur_px,
+        20 * 14,
+        "the whole window is frosted again, not the presented pixel"
+    );
+    assert!(c.frost_resident(glass), "and retained for the next frame");
+}
+
+#[test]
+fn a_present_above_a_frosted_window_leaves_its_frost_alone() {
+    let mut c = new_compositor(mode(40, 24), BLUE).expect("compositor");
+    c.add_window(Point::ORIGIN, opaque(40, 24, GREEN));
+    let glass = c.add_window(Point::new(6, 4), clear(20, 14));
+    let over = c.add_window(Point::new(10, 6), opaque(8, 8, RED));
+    assert!(c.set_backdrop_blur(glass, 3));
+    composite_checked(&mut c);
+    assert!(c.frost_resident(glass));
+
+    assert_eq!(present_content(&mut c, over, paint_dot), Some(true));
+    assert!(
+        c.frost_resident(glass),
+        "a window stacked above contributes nothing to the frost beneath it"
+    );
+    composite_checked(&mut c);
+    assert_eq!(c.frame_stats().blur_px, 0);
+}
+
+#[test]
+fn re_frosting_one_window_drops_the_frost_stacked_above_it() {
+    // The lower frost's *visible* pixels change across the whole of it when it
+    // is recomputed, because a blur spreads the change far past the rectangle
+    // that caused it — so the frost above reads different bytes even where the
+    // damage never reached it.
+    let mut c = new_compositor(mode(40, 24), BLUE).expect("compositor");
+    let under = c.add_window(Point::ORIGIN, opaque(40, 24, GREEN));
+    let lower = c.add_window(Point::new(0, 2), clear(24, 20));
+    let upper = c.add_window(Point::new(20, 2), clear(18, 20));
+    assert!(c.set_backdrop_blur(lower, 3));
+    assert!(c.set_backdrop_blur(upper, 3));
+    composite_checked(&mut c);
+    assert!(c.frost_resident(lower) && c.frost_resident(upper));
+
+    // A pixel inside the lower frost's rectangle and well clear of the upper
+    // one's, so only the spreading blur can reach the window above.
+    assert_eq!(present_content(&mut c, under, paint_dot), Some(true));
+    assert!(!c.frost_resident(lower));
+    let repainted = composite_checked(&mut c);
+    assert_eq!(
+        repainted.rects(),
+        &[Rect::new(0, 2, 38, 20)],
+        "both frosts recompose as one rectangle"
+    );
+    assert!(c.frost_resident(lower) && c.frost_resident(upper));
+}
+
+#[test]
+fn a_removed_window_takes_its_frost_with_it() {
+    let mut c = new_compositor(mode(40, 24), BLUE).expect("compositor");
+    c.add_window(Point::ORIGIN, opaque(40, 24, GREEN));
+    let glass = c.add_window(Point::new(6, 4), clear(20, 14));
+    assert!(c.set_backdrop_blur(glass, 3));
+    composite_checked(&mut c);
+    assert_eq!(c.frost_cache_len(), 1);
+    assert!(c.frost_cache_bytes() > 0);
+
+    assert!(c.remove(glass));
+    assert_eq!(c.frost_cache_len(), 0);
+    assert_eq!(c.frost_cache_bytes(), 0);
+}
+
+#[test]
+fn a_window_that_stops_frosting_retains_nothing() {
+    let mut c = new_compositor(mode(40, 24), BLUE).expect("compositor");
+    c.add_window(Point::ORIGIN, opaque(40, 24, GREEN));
+    let glass = c.add_window(Point::new(6, 4), clear(20, 14));
+    assert!(c.set_backdrop_blur(glass, 3));
+    composite_checked(&mut c);
+    assert_eq!(c.frost_cache_len(), 1);
+
+    assert!(c.set_backdrop_blur(glass, 0));
+    assert!(!c.frost_resident(glass));
+    composite_checked(&mut c);
+    assert_eq!(
+        c.frost_cache_len(),
+        0,
+        "an unfrosted window has no backdrop to retain"
+    );
+    assert_eq!(c.frame_stats().blur_px, 0);
+}
+
+#[test]
+fn retained_frosts_never_exceed_the_one_screenful_ceiling() {
+    // Far more frosted windows than a screenful of frost can hold: the cache
+    // admits what fits and evicts the rest, so a machine's retained frost is
+    // bounded by its output rather than by how many frosted windows are open.
+    let ceiling = 64 * 64 * 4;
+    let mut c = Compositor::new(
+        mode(64, 64),
+        BLUE,
+        test_chrome_cache(),
+        frost_cache(TEST_SEAT, ceiling, &NORMAL_PRESSURE, &TEST_SINK),
+        &NORMAL_PRESSURE,
+    )
+    .expect("compositor");
+    NORMAL_PRESSURE.report(PressureBand::Normal);
+    c.add_window(Point::ORIGIN, opaque(64, 64, GREEN));
+    for index in 0..12 {
+        let offset = (index % 4) * 4;
+        let glass = c.add_window(Point::new(offset, offset), clear(40, 40));
+        assert!(c.set_backdrop_blur(glass, 2));
+    }
+
+    composite_checked(&mut c);
+    assert!(
+        c.frost_cache_bytes() <= ceiling,
+        "retained frost {} passed the one-screenful ceiling {ceiling}",
+        c.frost_cache_bytes()
+    );
+    assert!(
+        c.frost_cache_len() < 12,
+        "a bounded cache cannot have retained every window's frost"
+    );
+    assert!(c.frost_cache_stats().evictions() > 0);
+}
+
+#[test]
+fn pressure_gives_the_frost_back_and_the_frame_is_unchanged() {
+    // A gauge private to this test: it moves the band, and the shared one must
+    // stay at normal for the tests running beside it.
+    static PRESSURE: ReportedPressure = ReportedPressure::unknown();
+    PRESSURE.report(PressureBand::Normal);
+
+    let mut c = Compositor::new(
+        mode(40, 24),
+        BLUE,
+        chrome_cache(TEST_SEAT, TEST_FB_BYTES, &PRESSURE, &TEST_SINK),
+        frost_cache(TEST_SEAT, TEST_FB_BYTES, &PRESSURE, &TEST_SINK),
+        &PRESSURE,
+    )
+    .expect("compositor");
+    c.add_window(Point::ORIGIN, opaque(40, 24, GREEN));
+    let glass = c.add_window(Point::new(6, 4), clear(20, 14));
+    assert!(c.set_backdrop_blur(glass, 3));
+    composite_checked(&mut c);
+    let warm = c.frame().to_vec();
+    assert!(c.frost_cache_bytes() > 0);
+
+    PRESSURE.report(PressureBand::Mild);
+    assert!(c.trim_frost() > 0, "mild pressure must release bytes");
+    assert_eq!(c.frost_cache_bytes(), 0);
+
+    // Nothing was lost: the same scene composes the same frame, blurred again.
+    repaint_everything(&mut c);
+    assert_eq!(c.frame(), warm.as_slice());
+    assert!(c.frame_stats().blur_px > 0);
+}
+
+#[test]
+fn tearing_the_seat_down_releases_every_frost() {
+    let mut c = new_compositor(mode(40, 24), BLUE).expect("compositor");
+    c.add_window(Point::ORIGIN, opaque(40, 24, GREEN));
+    let glass = c.add_window(Point::new(6, 4), clear(20, 14));
+    assert!(c.set_backdrop_blur(glass, 3));
+    composite_checked(&mut c);
+    assert_eq!(c.frost_cache_len(), 1);
+
+    c.teardown_frost();
+    assert_eq!(c.frost_cache_len(), 0);
+    assert_eq!(c.frost_cache_bytes(), 0);
+}
+
 // ---- releasable window content (Stage F) -----------------------------
 
 /// A gauge private to the content-release ladder tests: they move the band,
@@ -3952,7 +4426,14 @@ static CONTENT_PRESSURE: ReportedPressure = ReportedPressure::unknown();
 fn releasable_compositor(mode: DisplayMode, background: Color) -> Compositor {
     CONTENT_PRESSURE.report(PressureBand::Normal);
     NORMAL_PRESSURE.report(PressureBand::Normal);
-    Compositor::new(mode, background, test_chrome_cache(), &CONTENT_PRESSURE).expect("compositor")
+    Compositor::new(
+        mode,
+        background,
+        test_chrome_cache(),
+        frost_cache(TEST_SEAT, TEST_FB_BYTES, &CONTENT_PRESSURE, &TEST_SINK),
+        &CONTENT_PRESSURE,
+    )
+    .expect("compositor")
 }
 
 /// A decorated window whose pixels an app presents — the only kind the

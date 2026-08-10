@@ -39,16 +39,40 @@ router**:
   frosted window allocates nothing after its first frame; a mode change
   releases it rather than carrying the old screen's pixels. Because those
   pixels are a function of the whole backdrop beneath them, damage touching a
-  visible frosted window promotes that window's full bounds into one
-  recompose rectangle, iterated until nothing grows; and
-  `present_accelerated` takes the software
+  visible frosted window whose frost must be **recomputed** promotes that
+  window's full bounds into one recompose rectangle, iterated until nothing
+  grows; and `present_accelerated` takes the software
   fallback outright while any visible window is frosted, because a
   hardware layer is composed from its own pixels and cannot sample what is
   already behind it.
+- Retained frosted backdrops (`frost`): a frost is a function of the layers
+  beneath it, the window's whole rectangle, its physical radius and the
+  window's shape — and of *nothing at or above its own layer*. So it is kept in
+  a `ReclaimCache` (`frost_cache`, one screenful, `lib/reclaim`'s shared
+  desktop policy) and a window's own repaint copies it back instead of blurring
+  again: a `64×24` repaint inside a frosted terminal cost **17.4 ms** and now
+  costs **26 µs**, and its damage stays the rectangle it marked rather than
+  growing to the window. The last three inputs are recorded in the entry and
+  compared on every lookup, so a geometry, radius, scale or corner change fails
+  closed to a recompute; the rectangle recorded is the whole window's, because
+  one pushed off a screen edge is frosted from the row and column the screen
+  begins at while its shape is read from its own top-left. The layers beneath
+  are answered by dropping the entry whenever damage is marked *below* the
+  window — which is what `mark`, `mark_layer` and `mark_overlay` distinguish,
+  and why a cursor sample, a fade step, the window's own content, and a window
+  dragged across it from above all keep it. Whether a frost may be reused is
+  asked of the cache **once per frame** and remembered, so a reuse is recorded
+  as a hit and refreshes the entry's recency, and the plan and the composite
+  can never read different answers. The cache is read-only for the whole of a
+  composite pass and written at the end of it (`ReclaimCache::retain`, which
+  counts no second lookup), so admitting one frost cannot evict another the
+  same pass had already decided to reuse. A frost is a blurred image of the
+  user's desktop, so a released entry is wiped, not merely dropped.
 - Damage tracking (`tairix_geometry::Region`): only changed pixels are
   recomposited, and the region's rectangles are pairwise disjoint, so no
   pixel is composited or presented twice and two far-apart updates stay two
-  small rectangles. A backdrop-blurred window is promoted to its whole
+  small rectangles. A backdrop-blurred window whose frost must be recomputed
+  is promoted to its whole
   rectangle (and subtracted from the rest of the damage) because its pixels
   read the whole backdrop beneath it.
   `Compositor::composite` returns the `Region` it actually

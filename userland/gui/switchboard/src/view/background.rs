@@ -14,6 +14,7 @@
 
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
+use core::mem;
 
 use tairix_font::BitmapFont;
 use tairix_geometry::{to_i32, Rect, Region, Scale};
@@ -27,6 +28,7 @@ use tairix_controls::{
 };
 
 use super::frame::{SectionAnatomy, SectionFrame, ACTION_RAIL_WIDTH, DETAIL_PANE_WIDTH};
+use super::refresh::{resettle_cards, restate_rail};
 use super::system_data::absence_statement;
 use super::{
     action_state, resolve_selection, select_pressed_card, ActionRail, ActionVerdict, ListInfo,
@@ -205,10 +207,11 @@ impl JobsSection {
         for (card, item) in self.cards.iter_mut().zip(self.items.iter()) {
             card.set_state(card_state(item, selected.as_deref() == Some(&item.name)));
         }
-        self.rail = ActionRail::new(match self.selected_item() {
+        let commands = match self.selected_item() {
             Some(item) => alloc::vec![pause_button(item), cancel_button(item)],
             None => Vec::new(),
-        });
+        };
+        restate_rail(&mut self.rail, commands);
     }
 
     /// The rail's own content rectangle inside its plate, or [`None`] when
@@ -478,6 +481,7 @@ impl SectionView for JobsSection {
             self.items.iter().map(|item| item.name.as_str()),
         )
         .map(String::from);
+        let retired = mem::take(&mut self.cards);
         self.cards = self
             .items
             .iter()
@@ -487,6 +491,10 @@ impl SectionView for JobsSection {
             })
             .collect();
         self.rebuild_selection();
+        // A card holds its own record of which footer action the pointer is on
+        // and which one a press began on, neither of which can be restated
+        // from outside, so a card the sample did not change is kept.
+        resettle_cards(retired, &mut self.cards);
 
         self.focus = match stop {
             Some(Stop::Rail(slot)) => self

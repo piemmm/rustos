@@ -29,6 +29,11 @@ that enforces all of it.
   is O(log n); a forced shrink visits only the entries it releases; a
   cache that cannot admit a value still hands the caller a usable one
   (`Served::Uncached`), so caching is never required for correctness.
+  A consumer whose value cannot be built on demand — a compositor's
+  frosted backdrop exists only as the by-product of a composite pass —
+  asks with `get_or_build`, which counts the lookup, and offers the
+  finished value afterwards with `retain`, which counts none, so one
+  lookup is recorded once however it was satisfied.
 - `ledger` — `CacheLedger`: one cache described for a diagnostics
   registry (its label, owner, and class plus a shared handle to the
   counters above) and the one conversion of that description into the

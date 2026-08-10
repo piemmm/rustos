@@ -2083,11 +2083,11 @@ reclaim policy anyway (`plans/SMARTRAM.md` SMART5, section 6.4).
   ceiling exists. The policy lives in `lib/reclaim` because the window
   manager and the taskbar may not depend on each other or on the
   session, and that is the only crate all three already share. The window
-  manager's rendered window furniture is a fourth cache of the same class
-  and owner, differing only in its ceiling
-  (`tairix_reclaim::desktop::window_chrome_cache`): one screenful of
+  manager's rendered window furniture and its frosted backdrops are two
+  further caches of the same class and owner, differing only in their
+  ceiling (`tairix_reclaim::desktop::screenful_ui_cache`): one screenful of
   pixels rather than the small fraction a cursor or a glyph is allowed,
-  because no more furniture than fills the screen can be visible at once.
+  because no more of either than fills the screen can be visible at once.
 
   There is exactly one constructor and it demands the real backing size,
   the real gauge, and the real audit sink; each consumer takes its cache

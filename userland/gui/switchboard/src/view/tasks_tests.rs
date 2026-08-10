@@ -10,7 +10,8 @@ use tairix_theme::Theme;
 
 use tairix_controls::{
     ActivityState, ButtonContent, CellAlign, ControlDisposition, ControlRole, ControlState,
-    MetricLayout, MetricTile, PressureKind, RecoveryState, StatusPill, Tab, TableCell,
+    MetricLayout, MetricTile, PointerState, PressureKind, RecoveryState, StatusPill, Tab,
+    TableCell,
 };
 
 use super::{
@@ -23,7 +24,8 @@ use crate::panel::{WIN_HEIGHT, WIN_WIDTH};
 use crate::view::frame::resolve_section_frame;
 use crate::view::tasks::TasksSection;
 use crate::view::test_support::{
-    centre, click, focus_task_row, font, has_ink, model, select_task_row, task_id, task_rail_rects,
+    centre, click, focus_task_row, font, has_ink, model, moved, select_task_row, task_id,
+    task_rail_rects, task_row_point, PRESS, RELEASE,
 };
 use crate::view::{
     ActionVerdict, Section, SectionView, Switchboard, SwitchboardAction, SwitchboardModel,
@@ -1155,6 +1157,124 @@ fn each_header_and_footer_control_takes_the_focus_ring_in_turn() {
     assert_ne!(
         sb.tasks.auto_refresh, resting.tasks.auto_refresh,
         "and the auto-refresh toggle is reachable in its turn"
+    );
+}
+
+/// The pointer state the row in shown slot `row` is wearing.
+fn row_pointer(sb: &Switchboard, row: usize) -> PointerState {
+    sb.tasks.entries[row].row.state().pointer
+}
+
+/// Move the pointer onto shown row `row`, the way the compositor delivers it.
+fn hover_row(sb: &mut Switchboard, b: Rect, theme: &Theme, row: usize) {
+    let (x, y) = task_row_point(sb, b, Scale::ONE, theme, row);
+    assert_eq!(
+        sb.on_pointer(&moved(x, y), b, Scale::ONE, theme, font()),
+        None,
+        "moving onto a row asks for nothing"
+    );
+}
+
+#[test]
+fn a_refresh_keeps_the_hover_on_the_row_under_the_pointer() {
+    let m = model();
+    let mut sb = Switchboard::new(&m);
+    let (b, theme) = (bounds(), Theme::dark());
+    hover_row(&mut sb, b, &theme, 2);
+    assert_eq!(row_pointer(&sb, 2), PointerState::Hover);
+
+    sb.set_model(&m);
+
+    assert_eq!(
+        row_pointer(&sb, 2),
+        PointerState::Hover,
+        "a refresh moves neither the pointer nor the slot it is over"
+    );
+}
+
+#[test]
+fn a_refresh_drops_a_press_begun_on_a_row() {
+    let m = model();
+    let mut sb = Switchboard::new(&m);
+    let (b, theme) = (bounds(), Theme::dark());
+    hover_row(&mut sb, b, &theme, 2);
+    assert_eq!(sb.on_pointer(&PRESS, b, Scale::ONE, &theme, font()), None);
+    assert_eq!(row_pointer(&sb, 2), PointerState::Pressed);
+
+    sb.set_model(&m);
+
+    assert_eq!(
+        row_pointer(&sb, 2),
+        PointerState::None,
+        "the slot may now hold another task, so the press must not survive"
+    );
+
+    // A press latch holds wherever the pointer went, so it says nothing about
+    // where the pointer is; the next motion states that.
+    hover_row(&mut sb, b, &theme, 2);
+    assert_eq!(row_pointer(&sb, 2), PointerState::Hover);
+}
+
+#[test]
+fn a_refresh_that_drops_the_slot_carries_no_hover() {
+    let m = model();
+    let mut sb = Switchboard::new(&m);
+    let (b, theme) = (bounds(), Theme::dark());
+    hover_row(&mut sb, b, &theme, 2);
+
+    let mut shorter = m.clone();
+    shorter.tasks.truncate(1);
+    sb.set_model(&shorter);
+
+    assert_eq!(sb.tasks.entries.len(), 1);
+    assert_eq!(
+        row_pointer(&sb, 0),
+        PointerState::None,
+        "the pointer is over no row once the slot it was over has gone"
+    );
+}
+
+/// Press rail command `index`, publishing `refresh` before the release when
+/// one is given, and report what the release produced.
+fn press_rail_command(
+    sb: &mut Switchboard,
+    b: Rect,
+    theme: &Theme,
+    index: usize,
+    refresh: Option<&SwitchboardModel>,
+) -> Option<SwitchboardAction> {
+    let (x, y) = centre(task_rail_rects(sb, b, Scale::ONE, theme)[index]);
+    assert_eq!(
+        sb.on_pointer(&moved(x, y), b, Scale::ONE, theme, font()),
+        None
+    );
+    assert_eq!(sb.on_pointer(&PRESS, b, Scale::ONE, theme, font()), None);
+    if let Some(model) = refresh {
+        sb.set_model(model);
+    }
+    sb.on_pointer(&RELEASE, b, Scale::ONE, theme, font())
+}
+
+#[test]
+fn a_refresh_does_not_swallow_a_press_begun_on_a_rail_command() {
+    let m = model();
+    let (b, theme) = (bounds(), Theme::dark());
+
+    let mut undisturbed = Switchboard::new(&m);
+    select_task_row(&mut undisturbed, b, Scale::ONE, &theme, 0);
+    let expected = press_rail_command(&mut undisturbed, b, &theme, 0, None);
+    assert!(
+        expected.is_some(),
+        "a press and release on a rail command commands the selected task"
+    );
+
+    let mut refreshed = Switchboard::new(&m);
+    select_task_row(&mut refreshed, b, Scale::ONE, &theme, 0);
+    let across = press_rail_command(&mut refreshed, b, &theme, 0, Some(&m));
+
+    assert_eq!(
+        across, expected,
+        "the refresh derived the same commands, so the press completes on the one it began on"
     );
 }
 

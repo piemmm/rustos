@@ -49,17 +49,20 @@ pub fn box_blur(
     if radius == 0 || count == 0 || region.len() < count || aux.len() < count {
         return;
     }
+    // The window is the same size for every output of both passes, so its
+    // divisor is resolved here rather than per pixel.
+    let recip = Reciprocal::new(radius.saturating_mul(2).saturating_add(1));
     for y in 0..height {
         let Some((src, dst)) = row_pair(region, aux, y, width) else {
             return;
         };
-        blur_line(src, dst, 1, width, radius);
+        blur_line(src, dst, 1, width, radius, recip);
     }
     for x in 0..width {
         let Some((src, dst)) = column_pair(aux, region, x, count) else {
             return;
         };
-        blur_line(src, dst, width, height, radius);
+        blur_line(src, dst, width, height, radius, recip);
     }
 }
 
@@ -263,47 +266,67 @@ fn column_pair<'a>(
 /// The window slides by adding the sample entering it and subtracting the
 /// one leaving, so each output costs a constant amount of work whatever the
 /// radius. Samples outside `0..len` replicate the nearest edge, which keeps
-/// the divisor at `2 * radius + 1` for every output.
-fn blur_line(src: &[Pixel], dst: &mut [Pixel], stride: usize, len: usize, radius: usize) {
+/// the divisor at `2 * radius + 1` for every output — constant for the whole
+/// pass, which is why `recip` is resolved once by the caller.
+///
+/// The output slot and the two samples the window trades are each monotone
+/// along the line, so all three are walked as strided iterators and the
+/// furthest offset any of them can reach is bounds-checked once here instead
+/// of per sample. An iterator that runs out is exactly a clamped end, so the
+/// replicated edge pixel stands in for it.
+fn blur_line(
+    src: &[Pixel],
+    dst: &mut [Pixel],
+    stride: usize,
+    len: usize,
+    radius: usize,
+    recip: Reciprocal,
+) {
     let Some(last) = len.checked_sub(1) else {
         return;
     };
-    let span = radius.min(last);
-    let mut sum = Sum::default();
+    let Some(last_offset) = last.checked_mul(stride) else {
+        return;
+    };
+    let (Some(&first), Some(&edge)) = (src.first(), src.get(last_offset)) else {
+        return;
+    };
+    if dst.len() <= last_offset {
+        return;
+    }
+
     // Prime the window over `-radius..=radius`. The replicated ends are
     // counted arithmetically rather than sample by sample, so priming costs
     // the line's length at most however wide the radius is.
-    sum.add(at(src, stride, 0), radius.saturating_add(1));
-    for i in 1..=span {
-        sum.add(at(src, stride, i), 1);
+    let span = radius.min(last);
+    let mut sum = Sum::default();
+    sum.add_many(first, radius.saturating_add(1));
+    for &pixel in src.iter().step_by(stride).skip(1).take(span) {
+        sum.add(pixel);
     }
-    sum.add(at(src, stride, last), radius - span);
-    let count = radius.saturating_mul(2).saturating_add(1);
-    for i in 0..len {
-        if let Some(slot) = index(stride, i).and_then(|offset| dst.get_mut(offset)) {
-            *slot = sum.mean(count);
-        }
-        let entering = i.saturating_add(radius).saturating_add(1).min(last);
-        let leaving = i.saturating_sub(radius);
-        sum.add(at(src, stride, entering), 1);
-        sum.sub(at(src, stride, leaving));
+    sum.add_many(edge, radius.saturating_sub(span));
+
+    let mut entering = src
+        .get(radius.saturating_add(1).min(last).saturating_mul(stride)..)
+        .unwrap_or_default()
+        .iter()
+        .step_by(stride);
+    let mut leaving = src.iter().step_by(stride).skip(1);
+    let mut out = dst.iter_mut().step_by(stride);
+
+    // Until the window's trailing edge clears the start of the line, the
+    // sample leaving it is the replicated first pixel. Splitting the walk
+    // there costs the second sample's clamp nothing at all.
+    for slot in out.by_ref().take(span.saturating_add(1)) {
+        *slot = sum.mean(recip);
+        sum.add(*entering.next().unwrap_or(&edge));
+        sum.sub(first);
     }
-}
-
-/// Sample `i` of a strided line, or a transparent pixel if the index falls
-/// outside the buffer — which the caller's clamping already prevents, and
-/// which must not fabricate an out-of-bounds read if it ever did not.
-fn at(src: &[Pixel], stride: usize, i: usize) -> Pixel {
-    index(stride, i)
-        .and_then(|offset| src.get(offset))
-        .copied()
-        .unwrap_or(Pixel::TRANSPARENT)
-}
-
-/// Buffer offset of sample `i` of a line with `stride` pixels between
-/// samples.
-fn index(stride: usize, i: usize) -> Option<usize> {
-    i.checked_mul(stride)
+    for slot in out {
+        *slot = sum.mean(recip);
+        sum.add(*entering.next().unwrap_or(&edge));
+        sum.sub(*leaving.next().unwrap_or(&first));
+    }
 }
 
 /// The running channel sums of the samples currently inside the sliding
@@ -325,13 +348,21 @@ struct Sum {
 
 impl Sum {
     /// Add `times` copies of `pixel` to the window.
-    fn add(&mut self, pixel: Pixel, times: usize) {
+    fn add_many(&mut self, pixel: Pixel, times: usize) {
         let times = u32::try_from(times).unwrap_or(u32::MAX);
         let weighted = |channel: u8| u32::from(channel).saturating_mul(times);
         self.r = self.r.saturating_add(weighted(pixel.r));
         self.g = self.g.saturating_add(weighted(pixel.g));
         self.b = self.b.saturating_add(weighted(pixel.b));
         self.a = self.a.saturating_add(weighted(pixel.a));
+    }
+
+    /// Add one copy of `pixel` to the window.
+    fn add(&mut self, pixel: Pixel) {
+        self.r = self.r.saturating_add(u32::from(pixel.r));
+        self.g = self.g.saturating_add(u32::from(pixel.g));
+        self.b = self.b.saturating_add(u32::from(pixel.b));
+        self.a = self.a.saturating_add(u32::from(pixel.a));
     }
 
     /// Remove one copy of `pixel` from the window.
@@ -342,26 +373,81 @@ impl Sum {
         self.a = self.a.saturating_sub(u32::from(pixel.a));
     }
 
-    /// The window's mean over `count` samples, rounded to nearest.
-    ///
-    /// Every channel divides by the same `count` and rounds the same way, and
-    /// the sums are monotonic in the channel, so a channel can never round
-    /// above the alpha it is premultiplied by.
-    fn mean(self, count: usize) -> Pixel {
-        let count = u32::try_from(count).unwrap_or(u32::MAX).max(1);
+    /// The window's mean over `recip`'s divisor, rounded to nearest.
+    fn mean(self, recip: Reciprocal) -> Pixel {
         Pixel {
-            r: mean(self.r, count),
-            g: mean(self.g, count),
-            b: mean(self.b, count),
-            a: mean(self.a, count),
+            r: recip.apply(self.r),
+            g: recip.apply(self.g),
+            b: recip.apply(self.b),
+            a: recip.apply(self.a),
         }
     }
 }
 
-/// One channel's rounded mean, clamped into a byte.
-fn mean(sum: u32, count: u32) -> u8 {
-    let rounded = sum.saturating_add(count / 2) / count;
-    u8::try_from(rounded.min(255)).unwrap_or(u8::MAX)
+/// The fractional bits the reciprocal multiply is computed with.
+const RECIPROCAL_SHIFT: u32 = 40;
+
+/// The largest window the reciprocal multiply is exactly equal to the divide
+/// for, and therefore the largest it is used at.
+const RECIPROCAL_MAX_COUNT: u32 = 65_536;
+
+/// How one window's mean is divided by its sample count.
+///
+/// The count is `2 * radius + 1` for every output of a pass, so it is resolved
+/// once for the pass instead of dividing four times per pixel per pass — which
+/// was the dominant cost of a frosted window.
+#[derive(Copy, Clone)]
+enum Reciprocal {
+    /// Multiply by a fixed-point reciprocal, which for every window the blur
+    /// is used at gives *exactly* the same answer as the divide.
+    ///
+    /// The target is `floor((n + d/2) / d)`, so with `n` the rounded numerator
+    /// and `m = ceil(2^S / d)` the claim is `floor(n*m / 2^S) == floor(n/d)`.
+    /// Write `n = k*d + s` with `s <= d-1`, and `e = m*d - 2^S` (so `e <= d-1`
+    /// by construction). Then `n*m/2^S = n/d + n*e/(d*2^S)`, and the two floors
+    /// agree exactly while `s*2^S + n*e < d*2^S`; since `s <= d-1` it suffices
+    /// that `n*e < 2^S`.
+    ///
+    /// A window holds exactly `d` samples of at most 255 each, so `n < 256*d`,
+    /// and `(256*d - 1) * (d - 1) < 2^40` holds for every `d` up to 65536 —
+    /// which is why that is the cutoff, and why the product stays under `2^48`.
+    /// `blur_tests` checks the condition for every count in range, and that a
+    /// count above it genuinely breaks the proof, rather than leaving either
+    /// argued.
+    ///
+    /// The product saturates so the answer stays a total function of its
+    /// argument: a numerator from outside a window of `d` samples — which no
+    /// blur produces — reads as fully bright rather than overflowing.
+    Multiply { m: u64, half: u32 },
+    /// Divide, for a count past the range the multiply is exact over. No
+    /// surface is drawn at such a radius; correctness does not depend on that.
+    Divide { d: u32 },
+}
+
+impl Reciprocal {
+    /// The divisor for a window of `count` samples. A count of zero would make
+    /// no window, so it reads as one.
+    fn new(count: usize) -> Self {
+        let d = u32::try_from(count).unwrap_or(u32::MAX).max(1);
+        if d <= RECIPROCAL_MAX_COUNT {
+            let m = (1u64 << RECIPROCAL_SHIFT).div_ceil(u64::from(d));
+            Self::Multiply { m, half: d / 2 }
+        } else {
+            Self::Divide { d }
+        }
+    }
+
+    /// One channel's rounded mean, clamped to the channel range.
+    #[inline]
+    fn apply(self, sum: u32) -> u8 {
+        let rounded = match self {
+            Self::Multiply { m, half } => {
+                u64::from(sum.saturating_add(half)).saturating_mul(m) >> RECIPROCAL_SHIFT
+            }
+            Self::Divide { d } => u64::from(sum.saturating_add(d / 2)) / u64::from(d),
+        };
+        u8::try_from(rounded.min(255)).unwrap_or(u8::MAX)
+    }
 }
 
 #[cfg(test)]

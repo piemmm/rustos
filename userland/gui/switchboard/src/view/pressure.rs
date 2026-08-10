@@ -7,6 +7,7 @@
 
 use alloc::string::String;
 use alloc::vec::Vec;
+use core::mem;
 
 use tairix_font::BitmapFont;
 use tairix_geometry::{to_i32, Rect, Region, Scale};
@@ -20,6 +21,7 @@ use tairix_controls::{
 };
 
 use super::frame::{SectionAnatomy, SectionFrame, DETAIL_PANE_WIDTH};
+use super::refresh::resettle_card;
 use super::system_data::{reading_text, selection_prompt, Reading};
 use super::{
     resolve_selection, select_pressed_card, ActionVerdict, ListInfo, SectionCtx, SectionOutcome,
@@ -405,11 +407,18 @@ impl SectionView for PressureSection {
         let previous = self.selected;
         self.items.clone_from(&model.pressure);
         self.selected = resolve_selection(previous, self.items.iter().map(|item| item.kind));
+        let retired = mem::take(&mut self.entries);
         self.entries = self
             .items
             .iter()
             .map(|item| Self::build(item, self.selected == Some(item.kind)))
             .collect();
+        // A card holds its own record of which footer action the pointer is on
+        // and which one a press began on, neither of which can be restated
+        // from outside, so a card the sample did not change is kept.
+        for (live, fresh) in retired.into_iter().zip(self.entries.iter_mut()) {
+            resettle_card(live.card, &mut fresh.card);
+        }
         self.focus = self
             .selected_index()
             .unwrap_or(0)
