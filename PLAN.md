@@ -7465,3 +7465,70 @@ Leak policy held throughout: the audit log and the breadcrumb carry only
 non-leaking cause classes/offsets; absolute register values live only in
 the `CAP_SYSINFO_KERNEL`-gated crash record, and even there `pc`/frames are
 load-relative. Docs: `docs/src/architecture/fault-diagnostics.md`.
+
+---
+
+## FIX-DESKTOP-SPEEDUP — desktop redraw speed without hardware acceleration (`plans/FIX-DESKTOP-SPEEDUP.md`)  **[PLANNED]**
+
+**Dependencies:** Stage 7 (compositor, taskbar, controls). Independent of
+`plans/FIX-DISPLAY-ACCELERATION.md` — that is the hardware half; this is
+the software path, which stays the mandatory fallback on every target
+(§17.3) and is what a backdrop-blur frame always takes.
+
+**The defect.** A pointer-motion sample over a control-rich window costs a
+full-window repaint and a full-window recomposite: `lib/controls` fans the
+motion to every child and has no dirty-rect concept, so a hover flip fails
+the host's `PartialEq` render gate and every app presents
+`DamageRect::full(mode)` (`files`, `terminal`, `viewer`, `wallpaper`,
+`widgets`, `switchboard`); the compositor then blends every damaged pixel
+through `Pixel::over` with **no opaque fast path and no occlusion
+culling**, re-frosts a blurred window's whole backdrop with **no cache**,
+and presents up to eight separate region round trips each copying a
+growing bounding box. Nothing is instrumented and the debug/QEMU images
+build `tairix-wm`/`tairix-controls`/`tairix-font` at `opt-level = 1`, so
+no measurement taken today means anything.
+
+**Staged (detail in the plan; do not duplicate it here, §13):**
+
+- **A — measure, and measure the right binary.** Dev-profile override for
+  the per-pixel crates, a host bench harness reusing `lib/cpuops`'s
+  `BenchHarness`, and per-frame work counters (damaged/blended/blurred
+  px, present calls, cache hits) surfaced on the existing Switchboard
+  feed — no new syscall, no new capability.
+- **B — stop blending the invisible.** Opaque-run composite, front-to-back
+  occlusion culling, run-at-a-time encode. One blend definition (§2.2).
+- **C — repaint the control, not the window.** Hoist one `Region` into
+  `lib/geometry`, add a damage sink to `lib/controls`, enter/leave hover
+  routing, apps present real rects (the window ABI already carries one),
+  font/text-measure hoist into `lib/font`, one shell present per drained
+  input batch.
+- **D — blur costs what it changes.** Split backdrop damage from content
+  damage, cache the frosted backdrop as a `lib/reclaim` client, and make
+  the box-blur mean a bit-identical reciprocal multiply.
+- **E — one present per frame.** Disjoint damage region, a bounded rect
+  *list* in one `Present` (same evolution as
+  `plans/FIX-DISPLAY-ACCELERATION.md` Stage B), and one-shot tickless
+  frame pacing (§17.1, never a periodic tick).
+- **F — CPU-dispatched raster kernels.** `lib/cpuops` `ByPriority`
+  candidates on the `lib/pagezero` template, aarch64 NEON first. Gated on
+  the P3b axis correction below; may not land before B–C.
+- **G — user-space FP/SSE enablement (kernel work).** Gated on a User
+  decision; carries defect D37 below.
+
+**Escalated for decision (§15.7):**
+
+1. Amend `plans/FIX-HARDWARE-FEATURES.md` P3b to move the `lib/raster`
+   families from the blocked `ByBenchmark` axis to the unblocked
+   `ByPriority` capability axis — a packed-SIMD premultiplied `over` is
+   unconditionally better and bit-identical, so it is a capability
+   decision, exactly as P3a corrected page-zero. `lib/rt` already delivers
+   the folded `CpuFeatureSet` to userland, so no kernel mechanism is
+   needed. Blocks F.
+2. Half-resolution blur changes output; approve or refuse explicitly.
+   Blocks nothing.
+3. Whether/when to do the x86_64 user-space FPU/SSE kernel work (G).
+4. **`plans/OPEN-DEFECTS.md` D37 — riscv64 appears to save no
+   floating-point state** (no `fsd`/`fld` in `trap.s`/`context.s`, no
+   `mstatus.FS` handling, on a hard-float target whose userland uses
+   `f64`). Noticed by reading (§2.18), unconfirmed; confirm and fix
+   independently of any GUI work.

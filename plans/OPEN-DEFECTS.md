@@ -428,6 +428,14 @@ The open items, in priority order:
   a regression test asserts the per-thread independence directly (it fails
   against a shared counter). Not a load artifact and not retried away: six
   consecutive whole-crate runs are green.
+- **D37 — riscv64 appears to save no floating-point state (OPEN,
+  unconfirmed).** Noticed by reading the port while scoping
+  `plans/FIX-DESKTOP-SPEEDUP.md`: `riscv64gc-unknown-none-elf` is a
+  hard-float ABI and `lib/raster`'s gradient path uses `f64`, yet neither
+  `trap.s` nor `context.s` carries an `fsd`/`fld` and no `mstatus.FS`
+  handling was found. Either FP faults or two tasks corrupt each other's
+  float registers. Confirm first, then fix behind the Arch HAL
+  context-switch slice — the same slice x86_64 needs for user-space SSE.
 
 These are **distinct in kind**: D1 finishes an interrupt-model fix, D2
 and D4 are §27 foundational-completeness defects, D3 is an Arch-HAL
@@ -445,9 +453,11 @@ watchdog's own non-maskable sample exposed (fixed), D24 was a missing
 in-kernel preemption boundary — a fairness defect, not a wedge — that let a
 burst of never-waiting device operations withhold a core (fixed), D25 was a
 process-wide test clock that made a host suite's exact-instant assertions
-order-dependent (fixed), and D36 is a panic-path self-deadlock in the console
-write path (open, needs a lock-abandon primitive). Do not collapse the open
-items into one change; land each on its own whole-project-green gate (§7).
+order-dependent (fixed), D36 is a panic-path self-deadlock in the console
+write path (open, needs a lock-abandon primitive), and D37 is a suspected
+per-port context-switch gap found by reading, not by a failure (open, confirm
+before fixing). Do not collapse the open items into one change; land each
+on its own whole-project-green gate (§7).
 
 ## Coupling to be aware of
 
@@ -2190,6 +2200,44 @@ to break — a lone runnable task that never returns to the dispatch loop —
 and it confirms that a userland spin is reachable in practice. It is not
 D32 itself: the desktop and the other cores stayed live here, because a
 user-mode spinner is preemptible and only the wedged process is lost.
+
+## D37 — riscv64 appears to save no floating-point state (OPEN, unconfirmed)
+
+**Symptom.** None observed yet. This is a defect noticed by reading the
+code (§2.18), recorded rather than left silent; it is not a field report.
+
+**Suspected cause.** `riscv64gc-unknown-none-elf` mandates the `D`
+extension and is a hard-float ABI, so both kernel and user code may emit
+`f`/`d` instructions — and `lib/raster`'s gradient sampling (`paint.rs`)
+uses `f64`, so a graphical riscv64 task does. But neither
+`kernel/arch/riscv64/src/trap.s` nor `kernel/arch/riscv64/src/context.s`
+contains a single `fsd`/`fld`, and no `mstatus.FS` handling was found
+anywhere in the port. Exactly one of two things must therefore be true,
+and both are defects:
+
+- `mstatus.FS` is `Off`, so the first FP instruction faults with an
+  illegal instruction — a user task drawing a gradient is killed; or
+- `mstatus.FS` is on, and two tasks silently corrupt each other's
+  `f0`–`f31`/`fcsr` across every context switch (§4 isolation).
+
+**Confirmation procedure (do this first; do not guess).** Read the
+riscv64 boot path for any `mstatus.FS` write; then a QEMU vertical that
+(a) executes an `f64` computation in one user task and asserts the result
+rather than a fault, and (b) runs two user tasks whose interleaved `f64`
+state must not mix. The outcome names which of the two branches above is
+real.
+
+**Fix (once confirmed).** Per-port FP/vector context save/restore behind
+the Arch HAL context-switch slice (§17.2), with `mstatus.FS` dirty
+tracking so a task that never touches FP pays nothing, and an Arch HAL
+conformance case proving two tasks cannot observe each other's FP state.
+The same slice is what x86_64 needs before user space can have SSE
+(`plans/FIX-DESKTOP-SPEEDUP.md` Stage G); do it once for both ports
+rather than twice (§2.21).
+
+**Regression cover (lands with the fix, §7).** The two QEMU cases above
+plus the Arch HAL conformance case, on every port that reports FP
+support — never closed on inspection alone.
 
 ## Non-goals / do not do
 
