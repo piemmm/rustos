@@ -7468,40 +7468,54 @@ load-relative. Docs: `docs/src/architecture/fault-diagnostics.md`.
 
 ---
 
-## FIX-DESKTOP-SPEEDUP — desktop redraw speed without hardware acceleration (`plans/FIX-DESKTOP-SPEEDUP.md`)  **[PLANNED]**
+## FIX-DESKTOP-SPEEDUP — desktop redraw speed without hardware acceleration (`plans/FIX-DESKTOP-SPEEDUP.md`)  **[A DONE, B DONE, C IN PROGRESS]**
 
 **Dependencies:** Stage 7 (compositor, taskbar, controls). Independent of
 `plans/FIX-DISPLAY-ACCELERATION.md` — that is the hardware half; this is
 the software path, which stays the mandatory fallback on every target
 (§17.3) and is what a backdrop-blur frame always takes.
 
-**The defect.** A pointer-motion sample over a control-rich window costs a
-full-window repaint and a full-window recomposite: `lib/controls` fans the
-motion to every child and has no dirty-rect concept, so a hover flip fails
-the host's `PartialEq` render gate and every app presents
-`DamageRect::full(mode)` (`files`, `terminal`, `viewer`, `wallpaper`,
-`widgets`, `switchboard`); the compositor then blends every damaged pixel
-through `Pixel::over` with **no opaque fast path and no occlusion
-culling**, re-frosts a blurred window's whole backdrop with **no cache**,
-and presents up to eight separate region round trips each copying a
-growing bounding box. Nothing is instrumented and the debug/QEMU images
-build `tairix-wm`/`tairix-controls`/`tairix-font` at `opt-level = 1`, so
-no measurement taken today means anything.
+**The defect that remains.** A pointer-motion sample over a control-rich
+window still costs a full-window repaint: `lib/controls` has no dirty-rect
+concept, so a hover flip fails the host's `PartialEq` render gate and every
+app presents `DamageRect::full(mode)` (`files`, `terminal`, `viewer`,
+`wallpaper`, `widgets`, `switchboard`). A blurred window's whole backdrop is
+re-frosted with **no cache**, and a frame presents up to eight separate
+region round trips each copying a growing bounding box. What the compositor
+is then asked to do it now does efficiently (B) and measurably (A); the
+waste is upstream of it.
 
 **Staged (detail in the plan; do not duplicate it here, §13):**
 
-- **A — measure, and measure the right binary.** Dev-profile override for
-  the per-pixel crates, a host bench harness reusing `lib/cpuops`'s
-  `BenchHarness`, and per-frame work counters (damaged/blended/blurred
-  px, present calls, cache hits) surfaced on the existing Switchboard
-  feed — no new syscall, no new capability.
-- **B — stop blending the invisible.** Opaque-run composite, front-to-back
-  occlusion culling, run-at-a-time encode. One blend definition (§2.2).
-- **C — repaint the control, not the window.** Hoist one `Region` into
-  `lib/geometry`, add a damage sink to `lib/controls`, enter/leave hover
-  routing, apps present real rects (the window ABI already carries one),
-  font/text-measure hoist into `lib/font`, one shell present per drained
-  input batch.
+- **A — measure, and measure the right binary. [done, less the Switchboard
+  surfacing and the QEMU vertical]** `tairix-wm`/`-controls`/`-font`/
+  `-window`/`-display` now build at `opt-level = 3` in the dev profile too
+  (the debug/QEMU images build userland `Run` binaries there, so a
+  measurement taken before this described the profile, not the code);
+  `cargo xtask bench` drives the raster and whole-frame composite families
+  through `lib/cpuops`'s `BenchHarness` over a host nanosecond counter; and
+  `Compositor::frame_stats` reports exact per-frame work counts (damaged,
+  blended, copied, frosted, encoded px, dirty rects, present calls,
+  furniture-cache hits/misses taken as the delta of the cache's own
+  accounting). Still open: the counters on the Switchboard's System →
+  Resources page, and the QEMU hover vertical that gates on counter bounds.
+- **B — stop blending the invisible. [done]** `WindowRow::opaque_run` +
+  `compose_row` copy runs of genuinely opaque source pixels and skip every
+  layer below them, so occlusion culling *is* the opaque-run path rather
+  than a second per-window pass — finer, and sound without trusting a
+  client's claim about its own content. `ChannelOrder::encode_run` in
+  `lib/display` encodes a run in one call; it is not ABI surface (`lib/abi`
+  cannot name a pixel type without closing the cycle `abi → raster →
+  theme/reclaim → abi`). Bit-identity is proven by composing each scene
+  twice, with the copy path on and off, and comparing bytes.
+- **C — repaint the control, not the window. [C.2 done]** Containers hit-test
+  once and deliver to at most the child left, the child entered, and any
+  child holding a press, through one shared `route_pointer`/`grab_after`
+  policy, with the old fan-to-all kept as a `#[cfg(test)]` differential
+  oracle. Remaining: hoist one `Region` into `lib/geometry`, add the damage
+  sink to `lib/controls`, apps present real rects (the window ABI already
+  carries one), font/text-measure hoist into `lib/font`, one shell present
+  per drained input batch.
 - **D — blur costs what it changes.** Split backdrop damage from content
   damage, cache the frosted backdrop as a `lib/reclaim` client, and make
   the box-blur mean a bit-identical reciprocal multiply.

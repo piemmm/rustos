@@ -33,8 +33,10 @@ use tairix_theme::{TextRole, Theme};
 
 use crate::button::{icon_content_side, Button, ButtonContent, ContentAlign};
 use crate::paint::{
-    paint_edge_wake, plate_border, role_font, surface_rect, text_plate_height, to_i32,
+    grab_after, paint_edge_wake, plate_border, role_font, route_pointer, surface_rect,
+    text_plate_height, to_i32,
 };
+use crate::state::RenderInvariant;
 
 /// The outcome of feeding input to an [`ActionRail`].
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -76,6 +78,16 @@ pub struct ActionRail {
     /// Whether the rail's own leading-edge Edge Wake is lit (see
     /// [`with_edge_wake`](Self::with_edge_wake)).
     edge_wake: bool,
+    /// The last pointer position, resolved against the item rects —
+    /// hit-testing input, never drawn.
+    pointer: RenderInvariant<Point>,
+    /// The item the pointer was last over, so a motion sample reaches the
+    /// item it left and the one it entered rather than the whole column. It
+    /// mirrors the hover the items themselves carry.
+    hovered: RenderInvariant<Option<usize>>,
+    /// The item holding a press, which keeps receiving the stream wherever
+    /// the pointer goes.
+    armed: RenderInvariant<Option<usize>>,
 }
 
 impl ActionRail {
@@ -91,6 +103,9 @@ impl ActionRail {
                 .map(|item| item.aligned(ContentAlign::Leading))
                 .collect(),
             focus: None,
+            pointer: RenderInvariant::new(Point::ORIGIN),
+            hovered: RenderInvariant::new(None),
+            armed: RenderInvariant::new(None),
             edge_wake: false,
         }
     }
@@ -291,9 +306,11 @@ impl ActionRail {
         }
     }
 
-    /// Feed a pointer event to every drawn item (so hover state stays
-    /// current) and report the activation, if any, with the item it came
-    /// from.
+    /// Route a pointer event to the items it concerns and report the
+    /// activation, if any, with the item it came from.
+    ///
+    /// One hit test decides where the pointer is; the event then reaches only
+    /// the item it left, the item it entered, and any item holding a press.
     pub fn on_pointer(
         &mut self,
         event: &InputEvent,
@@ -301,9 +318,19 @@ impl ActionRail {
         scale: Scale,
         theme: &Theme,
     ) -> Option<RailAction> {
+        if let InputEvent::PointerMoved { to } = event {
+            *self.pointer = *to;
+        }
         let rects = self.layout(bounds, scale, theme);
+        let over = rects.iter().position(|r| r.contains(*self.pointer));
+        let route = route_pointer(&mut self.hovered, *self.armed, over);
+        *self.armed = grab_after(*self.armed, event, over);
+
         let mut fired = None;
-        for (index, (item, rect)) in self.items.iter_mut().zip(rects.iter()).enumerate() {
+        for index in route.into_iter().flatten() {
+            let (Some(item), Some(rect)) = (self.items.get_mut(index), rects.get(index)) else {
+                continue;
+            };
             if item.on_pointer(event, *rect).is_some() {
                 fired = Some(RailAction::Activate { index });
             }

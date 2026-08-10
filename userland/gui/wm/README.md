@@ -226,6 +226,42 @@ router**:
 GPU acceleration and the default apps build on this core in later
 Stage 7 increments.
 
+## What a frame costs, and what it skips
+
+`Compositor::frame_stats` reports the work the last frame actually did, in
+exact counts rather than durations: pixels damaged, layer contributions
+blended, pixels copied from an opaque run, pixels frosted, pixels encoded,
+dirty rectangles recomposed, driver calls made, and the furniture cache's
+hits and misses (taken as the delta of the cache's own accounting, so there
+is no second tally). Counts are a function of the scene, so a test asserts
+them exactly and stays green under any load; the embedder owns the clock and
+pairs its own timings with them.
+
+The number to read first is **damaged versus blended versus screen**: it
+turns "the desktop feels slow" into "4.2 M pixels blended to change 3 200".
+
+A row is served by copying rather than blending only when the segment's
+front-most window offers an **opaque run** at that column. These are the
+only conditions, and widening them is a correctness change, not a tuning
+knob:
+
+- the source pixel's own alpha is 255 (read from the pixels, never from a
+  client's claim, so a translucent terminal can never hide what shows
+  through it),
+- the window's opacity is 255,
+- the row carries no rounded-corner coverage,
+- the pixel is a client pixel inside the drawable extent (furniture is
+  always blended),
+- no screen reveal is in flight on an encoding segment, and the cursor
+  draws nothing on this row.
+
+Because the decision is per run inside the row loop, it *is* the
+compositor's occlusion culling: the windows below, the desktop layer and the
+root fill are all skipped for exactly those columns. A window that covers
+only part of a dirty rectangle, or is opaque only in places, still saves
+what it can. Runs are sought only within a blur segment, so a frosted
+window remains a barrier and nothing a frost reads is ever skipped.
+
 ## Properties
 
 - `no_std` (+ `alloc`); depends only on the shared `lib/*` crates

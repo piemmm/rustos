@@ -51,3 +51,22 @@ It requires a running graphical session; without one the window channel is
 unreachable and the app reports the refusal on the standard error stream and
 exits. It needs only `CAP_CONSOLE_WRITE` (fail-loud diagnostics) and `CAP_SHM`
 (the window frame region).
+
+## Container pointer routing
+
+A container (`Toolbar`, `ActionRail`, `Panel`, `Dialog`, and a `Card`'s
+footer) hit-tests one pointer sample **once** and delivers it to at most
+three children: the one the pointer left, the one it entered, and any child
+holding a press. Every other child is already at rest and would only be
+written back the state it has, so a motion sample over a crowded strip costs
+one rect test rather than one per child.
+
+The pressed child stays in the stream wherever the pointer travels — the
+pointer grab. Its own latch resolves against the position it last saw, so
+dropping it would leave that position stale and a press dragged off the child
+would fire on release instead of cancelling.
+
+Routing is an optimisation, not a behaviour change: the state a scripted
+pointer path leaves behind is identical to feeding every child every event,
+and `lib/controls` pins that with a differential test against the fan-to-all
+delivery it replaced.

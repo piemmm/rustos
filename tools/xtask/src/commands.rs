@@ -13,6 +13,7 @@ use tairix_itest_harness::pie::PieArch;
 use crate::{Context, LONG_BUILD_COMMAND_TIMEOUT};
 
 mod abi_check;
+mod bench;
 mod c_header;
 mod cfg_check;
 mod ci_long;
@@ -65,6 +66,7 @@ pub enum Command {
     FsSoak,
     ModelCheck,
     SpecReview,
+    Bench,
     Ci,
     CiLong,
     Image,
@@ -96,6 +98,7 @@ impl Command {
         Command::FsSoak,
         Command::ModelCheck,
         Command::SpecReview,
+        Command::Bench,
         Command::Ci,
         Command::CiLong,
         Command::Image,
@@ -126,6 +129,7 @@ impl Command {
             "fssoak" => Command::FsSoak,
             "model-check" => Command::ModelCheck,
             "spec-review" => Command::SpecReview,
+            "bench" => Command::Bench,
             "ci" => Command::Ci,
             "ci-long" => Command::CiLong,
             "image" => Command::Image,
@@ -158,6 +162,7 @@ impl Command {
             Command::FsSoak => "fssoak",
             Command::ModelCheck => "model-check",
             Command::SpecReview => "spec-review",
+            Command::Bench => "bench",
             Command::Ci => "ci",
             Command::CiLong => "ci-long",
             Command::Image => "image",
@@ -210,6 +215,9 @@ impl Command {
                 "Exhaustively model-check the §19.7 Silver capability + IPC state machine."
             }
             Command::SpecReview => "Reject unreviewed AI draft markers in source (§19.7).",
+            Command::Bench => {
+                "Time the raster and compositor families in ns/px and ns/frame (evidence, not a gate)."
+            }
             Command::Ci => "Run the full pipeline a pull request must pass.",
             Command::CiLong => {
                 "Run the `ci` checks, repeating every test 20x sequentially then 20x concurrently."
@@ -245,6 +253,7 @@ impl Command {
             Command::FsSoak => run_fssoak(ctx, args),
             Command::ModelCheck => run_model_check(args),
             Command::SpecReview => run_spec_review(ctx),
+            Command::Bench => run_bench(args),
             Command::Ci => run_ci(ctx),
             Command::CiLong => run_ci_long(ctx, args),
             Command::Image => run_image(ctx, args),
@@ -965,6 +974,16 @@ fn run_model_check(args: &[OsString]) -> Result<(), String> {
     let opts = model_check::parse(args)?;
     eprintln!("xtask: [model-check] exhaustive capability + IPC state machine");
     model_check::run(&opts)
+}
+
+fn run_bench(args: &[OsString]) -> Result<(), String> {
+    // Host microbenchmarks for the per-pixel desktop paths, measured through
+    // `lib/cpuops`'s existing harness. Timings are load-dependent, so this is
+    // evidence for a completion report and deliberately not a `ci` gate; the
+    // families and the budget live in `commands/bench.rs`.
+    let opts = bench::parse(args)?;
+    eprintln!("xtask: [bench] raster and compositor families");
+    bench::run(&opts)
 }
 
 fn run_spec_review(ctx: &Context) -> Result<(), String> {

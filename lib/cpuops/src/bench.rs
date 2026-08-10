@@ -22,8 +22,8 @@
 /// This is the generic seam the harness consumes; the architecture-specific
 /// counter (x86_64 `RDTSC`, aarch64 `CNTVCT_EL0`, riscv64 `time`) lives behind
 /// the Arch HAL `CpuCycles` slice, and `kernel/core` adapts it to this trait.
-/// Keeping the seam here means the framework never names an architecture
-/// (§2.20) and is fully host-testable with a fake counter.
+/// Keeping the seam here means the framework never names an architecture and
+/// is fully host-testable with a fake counter.
 pub trait CycleCounter {
     /// The current value of the core's cycle counter.
     ///
@@ -128,7 +128,19 @@ impl<'c> BenchHarness<'c> {
     }
 
     /// The median timed-round cycle cost of one implementation over `warm`.
-    fn median_cycles<T, In, Out>(&self, impl_: T, run: fn(T, &In) -> Out, warm: &In) -> u64
+    ///
+    /// This is the single measurement [`fastest`](Self::fastest) ranks
+    /// candidates by, exposed so a caller can *report* a cost rather than only
+    /// learn which candidate won — the host benchmark harness behind
+    /// `cargo xtask bench` prints these numbers. The value is the whole
+    /// round's cost for `iters` calls, not a per-call cost: divide by
+    /// [`iters`](Self::iters) for that.
+    ///
+    /// The unit is whatever the injected [`CycleCounter`] counts. The harness
+    /// only ever subtracts and medians its readings, so a counter of
+    /// nanoseconds ranks and reports exactly as validly as one of cycles.
+    #[must_use]
+    pub fn median_cycles<T, In, Out>(&self, impl_: T, run: fn(T, &In) -> Out, warm: &In) -> u64
     where
         T: Copy,
     {
@@ -229,6 +241,18 @@ mod tests {
         let impls = [10u64, 3u64];
         let warm = Warm(&ctr);
         assert_eq!(h.fastest(&impls, run_cost, &warm), 1);
+    }
+
+    #[test]
+    fn median_cycles_reports_the_cost_fastest_ranks_by() {
+        let ctr = ScriptedCounter::new();
+        let h = BenchHarness::with_budget(&ctr, 4, 5);
+        let warm = Warm(&ctr);
+        // The scripted counter charges `cost` per call, so a round of `iters`
+        // calls costs exactly `iters * cost` — the same figure the ranking in
+        // `picks_the_cheaper_candidate` compares.
+        assert_eq!(h.median_cycles(10u64, run_cost, &warm), 40);
+        assert_eq!(h.median_cycles(3u64, run_cost, &warm), 12);
     }
 
     #[test]

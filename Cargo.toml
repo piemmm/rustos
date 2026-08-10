@@ -471,6 +471,15 @@ panic = "abort"
 # speed in every profile while the rest of the workspace stays quick to
 # rebuild and pleasant to debug. Overflow checks and debug assertions are
 # untouched, so the fail-closed bounds these decoders enforce still hold.
+#
+# The same reasoning covers the desktop's per-pixel *compositing* chain below.
+# Its cost is not one decode at startup but every frame: closure chains over
+# row slices whose whole efficiency is inlining, so at `opt-level = 1` a
+# pointer sample repaints visibly slowly and any measurement taken from a
+# debug image describes the profile rather than the code. These are userland
+# crates, and the debug/QEMU images build their `Run` binaries in the dev
+# profile (`tools/xtask` `pie_build`), which is exactly why a userland
+# override matters here.
 [profile.dev.package.tairix-image]
 opt-level = 3
 
@@ -481,6 +490,21 @@ opt-level = 3
 opt-level = 3
 
 [profile.dev.package.tairix-fontface]
+opt-level = 3
+
+[profile.dev.package.tairix-wm]
+opt-level = 3
+
+[profile.dev.package.tairix-controls]
+opt-level = 3
+
+[profile.dev.package.tairix-font]
+opt-level = 3
+
+[profile.dev.package.tairix-window]
+opt-level = 3
+
+[profile.dev.package.tairix-display]
 opt-level = 3
 
 # `panic = "abort"` collides with the test harness on host targets. Cargo

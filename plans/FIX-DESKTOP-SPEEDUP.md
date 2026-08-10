@@ -1,8 +1,14 @@
 # FIX-DESKTOP-SPEEDUP — Software-compositor and GUI redraw performance
 
-Status: **planned**. Stages A–E need no hardware acceleration, no kernel
+Status: **A done, B done, C in progress** (C.2 landed; C.0/C.1/C.3/C.4/C.5
+remain). D–E planned. Stages A–E need no hardware acceleration, no kernel
 change, and no new syscall; F needs a `plans/FIX-HARDWARE-FEATURES.md`
 correction; G is gated on a User decision (§15.7) because it is kernel work.
+
+Still open in A: the QEMU hover vertical (A.4's counter-bounds gate) and
+surfacing the counters on the Switchboard's System → Resources page. The
+counters themselves, their exact-count unit tests, the build-profile fix and
+the bench harness are in.
 
 Binding under `AGENTS.md` (§3, §15.18). This plan closes the standing
 performance defect that the desktop repaints **orders of magnitude more
@@ -135,7 +141,7 @@ Two build-level facts make any measurement taken today meaningless:
 
 ---
 
-## Stage A — Measure, and measure the right binary
+## Stage A — Measure, and measure the right binary  **[done, less A.3's Switchboard surfacing and A.4's QEMU vertical]**
 
 Nothing else in this plan may be reported as an improvement until this
 stage exists: §2.16 requires evidence, and §7 requires the numbers in the
@@ -194,46 +200,60 @@ and the counter assertions green.
 
 ---
 
-## Stage B — Stop blending pixels nothing can see
+## Stage B — Stop blending pixels nothing can see  **[done]**
 
 Compositor-local, no ABI change, no app change. Depends on A for
 evidence.
 
 ### B.1 Opaque-run composite
-`Window::row` already resolves the row-constant factors into a
-`WindowRow`. Extend it to yield **runs** over a row rather than a
-per-column `Option<Pixel>`: a run is either opaque (a contiguous
-`&[Pixel]` at full alpha, no rounding coverage, no per-window opacity) or
-blended. `recompose_rect`/`compose_span` then:
+`WindowRow::opaque_run` yields the longest run of source pixels from a
+column that each replace what is beneath them exactly; `compose_row` (the
+row loop, lifted out of `compose_span`) copies such a run into the back
+buffer with `copy_from_slice`, encodes it with one `encode_run`, and takes
+every other column through the unchanged `compose_pixel` → `Pixel::over`.
 
-- copy an opaque run with `copy_from_slice` into the back buffer and
-  encode it in one pass;
-- send only genuinely translucent runs through the existing
-  `compose_pixel` → `Pixel::over`.
+A loop specialisation, not a second blend: the blended branch calls the
+same `Pixel::over`, and *over* with a fully opaque source **is** the
+source, which is why the copy is exact.
 
-This is a loop specialisation, not a second blend (§2.2): the blended
-branch calls the same `Pixel::over`.
+### B.2 Occlusion culling — the *same* mechanism as B.1, not a second one
+Culling is decided **per run, inside the row loop**, not per window before
+it. `compose_row` asks the segment's front-most window for its opaque runs
+first; a run that copies has skipped every layer below it — the windows
+beneath, the desktop layer and the root fill — for exactly those columns.
 
-### B.2 Occlusion culling
-`composite` currently collects `hits` by bounds overlap and paints
-back-to-front. Walk the z-order **front to back** per dirty rect and stop
-at the first window that (a) fully covers the rect, (b) is fully opaque,
-(c) has no rounded-corner coverage over the rect, and (d) has no backdrop
-blur. Everything below it — windows, the desktop layer, and the root fill
-— is dropped for that rect. O(windows) comparisons remove O(pixels ×
-windows) of blending.
+This is strictly better than a per-rect window walk and is why there is no
+separate cull pass:
+
+- **Sound without trusting a client.** "Fully opaque" is read from the
+  source pixels themselves (alpha 255, full window opacity, no rounding
+  coverage on the row), so a window whose *content* is translucent — a
+  frosted terminal — can never cull what shows through it. A window-level
+  `opacity == 255` test would have been wrong, and tracking a per-window
+  "content is opaque" fact would have cost a scan on every present.
+- **Finer.** A window covering part of a dirty rect, or opaque only in
+  places, still saves exactly the blending it can.
+- **One condition set, stated once** in `compose_row`'s rustdoc and
+  `WindowRow::opaque_run`.
 
 The blur segmentation in `recompose_rect` (compose-below → frost →
-resume) must be preserved exactly: a blurred window is a cull barrier.
+resume) is untouched, and a blurred window remains a cull barrier: runs are
+sought only within a segment, so nothing a frost reads is ever skipped.
+A fade in flight (`set_reveal`) and the rows the cursor draws on take the
+general path, because both change the bytes a copy would have written.
 
 ### B.3 Run-at-a-time encode
-`PixelOrder::encode` runs per pixel inside the composite loop. Add
-`encode_run(&[Pixel], &mut [u8])` in `lib/abi/src/driver/display.rs`,
-defined once over `encode` for the general case and degenerating to
-`copy_from_slice` when the scan-out byte order already matches `Pixel`'s
-layout. Replace the per-pixel call site (do not keep both, §2.14).
-Regenerate the C header (`cargo xtask c-header --write`) and keep
-`cargo xtask abi-check` green.
+The per-pixel scan-out encode is `ChannelOrder::encode` in
+`lib/display/src/scanout.rs` — **not** `lib/abi`, which cannot name a pixel
+type without closing the cycle `abi → raster → theme/reclaim → abi`. Add
+`encode_run(self, &[Pixel], &mut [u8]) -> usize` beside it, defined once
+over `encode` and returning the whole pixels written, so a short `out`
+truncates instead of panicking and a partial trailing group is never
+written. There is **no** bulk-`memcpy` case: `Pixel` carries no layout
+guarantee to copy through, and a matching byte order is already a four-byte
+move per pixel. `encode` stays — it is the definition, and the general
+column path encodes one pixel at a time as it computes it. No C header and
+no `abi-check` involvement: this is not ABI surface.
 
 ### B.4 Tests + docs
 - **Golden-frame equality**: a scene with opaque, rounded, translucent,
@@ -247,11 +267,11 @@ Regenerate the C header (`cargo xtask c-header --write`) and keep
   cull conditions and that they are the *only* conditions.
 
 **Acceptance:** identical frames, blended-pixel counter down on the
-occlusion and opaque scenarios, `cargo xtask abi-check` green.
+occlusion and opaque scenarios.
 
 ---
 
-## Stage C — Repaint the control that changed, not the window
+## Stage C — Repaint the control that changed, not the window  **[C.2 done; C.0, C.1, C.3, C.4, C.5 remain]**
 
 The largest single win, and pure userland. Depends on A.
 
@@ -284,14 +304,16 @@ propagate their children's rects, and a control that changes nothing
 reports nothing. The host renders only the reported rects and presents
 their union.
 
-### C.2 Enter/leave hover routing in containers
-`Toolbar`, `Panel`, `Menu`, and the collection families fan every motion
-sample to every child. Track the hovered index in the container: on
-motion, hit-test once and deliver leave/enter to at most two children.
-An armed (dragging/pressed) child keeps receiving the stream regardless
-of position — that is the pointer-grab semantic and must not regress.
-This is the §27 point-2 pattern: an O(n) linear scan on a load-bearing
-path in a foundational primitive.
+### C.2 Enter/leave hover routing in containers  **[done]**
+`Toolbar`, `Panel`, `Rail`, `Decision` and the collection families now track
+the hovered and armed child and route through the shared `route_pointer` /
+`grab_after` policy in `lib/controls/src/paint.rs` — one hit test per event,
+then delivery to at most the child left, the child entered, and any child
+holding a press. The grab is deliberately *wider* than the child's own latch,
+because a container cannot see whether a disabled or denied child caught the
+press; over-grabbing only routes further events to a child that ignores them,
+which is what fan-to-all already did. A `#[cfg(test)] fan_pointer` oracle
+keeps the old delivery as the differential reference.
 
 ### C.3 Apps present the rect they changed
 Every app presents `DamageRect::full(mode)` today — `files`, `terminal`,
@@ -594,7 +616,7 @@ Stated so a later change cannot quietly take a shortcut:
 | Stage | Content | Depends on | Touches ABI? | Touches kernel? |
 |---|---|---|---|---|
 | A | build profile, bench harness, frame counters | — | no | no |
-| B | opaque runs, occlusion cull, `encode_run` | A | `PixelOrder::encode_run` only | no |
+| B | opaque runs (occlusion is the same mechanism), `encode_run` | A | no | no |
 | C | region hoist, control damage, hover routing, font hoist, batch shell work | A | no | no |
 | D | frost cache, backdrop/content damage split, blur reciprocal | A, B | no | no |
 | E | disjoint region, one present per frame, one-shot pacing | B, C, D | `Present` rect list (with FIX-DISPLAY-ACCELERATION Stage B) | no |

@@ -19,7 +19,7 @@ use tairix_raster::{Color, Surface};
 use tairix_theme::Theme;
 
 use crate::button::{IconButton, SplitAction, SplitButton};
-use crate::paint::{heavy_contrast, plate_border, surface_rect, to_i32};
+use crate::paint::{grab_after, heavy_contrast, plate_border, route_pointer, surface_rect, to_i32};
 use crate::state::RenderInvariant;
 
 /// Which region of a tool an activation came from.
@@ -80,6 +80,14 @@ pub struct Toolbar {
     /// The last pointer position, forwarded to the tool it falls on —
     /// hit-testing input, never drawn.
     pointer: RenderInvariant<Point>,
+    /// The tool the pointer was last over, so a motion sample reaches the
+    /// tool it left and the one it entered rather than the whole strip. It
+    /// mirrors the hover the tools themselves carry, so nothing is drawn from
+    /// it.
+    hovered: RenderInvariant<Option<usize>>,
+    /// The tool holding a press, which keeps receiving the stream wherever
+    /// the pointer goes — bookkeeping, never drawn.
+    armed: RenderInvariant<Option<usize>>,
 }
 
 impl Toolbar {
@@ -298,9 +306,57 @@ impl Toolbar {
         );
     }
 
-    /// Feed a pointer event to every tool (so hover state stays current) and
-    /// report the activation, if any, with the tool it came from.
+    /// Route a pointer event to the tools it concerns and report the
+    /// activation, if any, with the tool it came from.
+    ///
+    /// One hit test decides where the pointer is; the event then reaches only
+    /// the tool it left, the tool it entered, and any tool holding a press.
+    /// Every other tool is already at rest and would be written back the
+    /// state it has.
     pub fn on_pointer(
+        &mut self,
+        event: &InputEvent,
+        bounds: Rect,
+        scale: Scale,
+        theme: &Theme,
+    ) -> Option<ToolbarAction> {
+        if let InputEvent::PointerMoved { to } = event {
+            *self.pointer = *to;
+        }
+        let (rects, _) = self.layout(bounds, scale, theme);
+        let over = rects.iter().position(|r| r.contains(*self.pointer));
+        let route = route_pointer(&mut self.hovered, *self.armed, over);
+        *self.armed = grab_after(*self.armed, event, over);
+
+        let mut fired = None;
+        for i in route.into_iter().flatten() {
+            let (Some(entry), Some(rect)) = (self.entries.get_mut(i), rects.get(i)) else {
+                continue;
+            };
+            let part = match &mut entry.tool {
+                Tool::Icon(b) => b.on_pointer(event, *rect).map(|_| ToolActivation::Primary),
+                Tool::Split(b) => b
+                    .on_pointer(event, *rect, scale, theme)
+                    .map(|part| match part {
+                        SplitAction::Primary => ToolActivation::Primary,
+                        SplitAction::Disclosure => ToolActivation::Disclosure,
+                    }),
+            };
+            if let Some(part) = part {
+                fired = Some(ToolbarAction { index: i, part });
+            }
+        }
+        fired
+    }
+
+    /// The fan-to-all delivery [`on_pointer`](Self::on_pointer) replaced: every
+    /// tool receives every event and hit-tests it itself.
+    ///
+    /// Kept as the oracle the routed path is measured against — a scripted
+    /// pointer path must leave the two indistinguishable, which is what makes
+    /// routing an optimisation rather than a behaviour change.
+    #[cfg(test)]
+    pub(crate) fn fan_pointer(
         &mut self,
         event: &InputEvent,
         bounds: Rect,
@@ -313,26 +369,17 @@ impl Toolbar {
         let (rects, _) = self.layout(bounds, scale, theme);
         let mut fired = None;
         for (i, (entry, rect)) in self.entries.iter_mut().zip(rects.iter()).enumerate() {
-            match &mut entry.tool {
-                Tool::Icon(b) => {
-                    if b.on_pointer(event, *rect).is_some() {
-                        fired = Some(ToolbarAction {
-                            index: i,
-                            part: ToolActivation::Primary,
-                        });
-                    }
-                }
-                Tool::Split(b) => {
-                    if let Some(part) = b.on_pointer(event, *rect, scale, theme) {
-                        fired = Some(ToolbarAction {
-                            index: i,
-                            part: match part {
-                                SplitAction::Primary => ToolActivation::Primary,
-                                SplitAction::Disclosure => ToolActivation::Disclosure,
-                            },
-                        });
-                    }
-                }
+            let part = match &mut entry.tool {
+                Tool::Icon(b) => b.on_pointer(event, *rect).map(|_| ToolActivation::Primary),
+                Tool::Split(b) => b
+                    .on_pointer(event, *rect, scale, theme)
+                    .map(|part| match part {
+                        SplitAction::Primary => ToolActivation::Primary,
+                        SplitAction::Disclosure => ToolActivation::Disclosure,
+                    }),
+            };
+            if let Some(part) = part {
+                fired = Some(ToolbarAction { index: i, part });
             }
         }
         fired

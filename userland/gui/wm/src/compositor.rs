@@ -37,6 +37,7 @@ use crate::color::{div255, Color, Pixel};
 use crate::corner::Corners;
 use crate::damage::DamageRegion;
 use crate::geometry::{Point, Rect, Scale};
+use crate::stats::{area_px, FrameCounters, FrameStats};
 use crate::surface::Surface;
 use crate::viewport::{FurnitureHit, RootViewport};
 use crate::window::{Window, WindowId, WindowRow};
@@ -121,6 +122,15 @@ pub struct Compositor {
     /// frosted window costs no allocation once it has been drawn once.
     blur_scratch: BlurScratch,
     damage: DamageRegion,
+    /// What the frame in flight has cost so far, reset by each
+    /// [`composite`](Compositor::composite) and read back through
+    /// [`frame_stats`](Compositor::frame_stats).
+    stats: FrameCounters,
+    /// Whether the opaque-run copy path may serve a row. Only a test turns it
+    /// off, to compose a scene the general way and prove the two agree byte
+    /// for byte; production has no reason to and no way to.
+    #[cfg(test)]
+    opaque_runs: bool,
     next_id: u64,
 }
 
@@ -185,6 +195,9 @@ impl Compositor {
             frame,
             blur_scratch: BlurScratch::new(),
             damage: DamageRegion::new(),
+            stats: FrameCounters::new(),
+            #[cfg(test)]
+            opaque_runs: true,
             next_id: 1,
         };
         compositor.damage.add(compositor.screen_rect());
@@ -1391,6 +1404,14 @@ impl Compositor {
     /// pointer samples pumped between two composites costs exactly two
     /// rectangles, not one per sample.
     pub fn composite(&mut self) -> DamageRegion {
+        self.stats.begin_frame();
+        self.recompose_damage()
+    }
+
+    /// [`composite`](Self::composite) without opening a new frame's counters,
+    /// so a present path that already opened one attributes the composite it
+    /// drives to that frame rather than starting a second.
+    fn recompose_damage(&mut self) -> DamageRegion {
         let screen = self.screen_rect();
         let current_cursor = self.cursor_bounds();
         if self.cursor_needs_recompose() {
@@ -1432,6 +1453,7 @@ impl Compositor {
                 continue;
             }
             composited.add(area);
+            self.stats.add_damaged(area_px(area.width, area.height));
             // Only a window whose bounds overlap this rectangle can
             // contribute a pixel inside it; every other window's sample
             // is unconditionally `None` here, so skipping it is exact
@@ -1519,8 +1541,13 @@ impl Compositor {
             theme,
             windows,
             chrome,
+            stats,
             ..
         } = self;
+        // The cache already counts its own hits and misses, so the frame's
+        // share of them is the difference across this pass rather than a
+        // second tally kept here.
+        let before = (chrome.accounting().hits(), chrome.accounting().misses());
         let mut fallback = ChromeFallback::new();
         for window in windows.iter().filter(|w| w.is_decorated() && wanted(w)) {
             let id = window.id();
@@ -1539,7 +1566,34 @@ impl Compositor {
                 fallback.push((id, built));
             }
         }
+        let after = (chrome.accounting().hits(), chrome.accounting().misses());
+        stats.add_chrome(
+            frame_share(before.0, after.0),
+            frame_share(before.1, after.1),
+        );
         fallback
+    }
+
+    /// What the most recent frame cost: pixels damaged, blended, copied,
+    /// frosted and encoded, the rectangles it recomposed, the driver calls
+    /// that published it, and the furniture cache's hits and misses.
+    ///
+    /// The counts are reset by each [`composite`](Self::composite) and a
+    /// present adds to the frame that composite produced, so a caller that
+    /// snapshots after [`present`](Self::present) reads one whole frame. A
+    /// wake that composited nothing leaves every count at zero
+    /// ([`FrameStats::is_idle`]).
+    #[must_use]
+    pub const fn frame_stats(&self) -> FrameStats {
+        self.stats.snapshot()
+    }
+
+    /// Allow or forbid the opaque-run copy path, so a test can compose one
+    /// scene both ways and compare the results.
+    #[cfg(test)]
+    pub(crate) fn set_opaque_runs(&mut self, allowed: bool) {
+        self.opaque_runs = allowed;
+        self.damage.add(self.screen_rect());
     }
 
     /// The current scan-out frame, laid out for [`Compositor::mode`].
@@ -1576,18 +1630,22 @@ impl Compositor {
     /// Propagates any [`DriverError`] the display driver returns from
     /// [`Display::present`] / [`Display::present_region`].
     pub fn present(&mut self, display: &mut dyn Display) -> Result<(), DriverError> {
-        let region = self.composite();
+        self.stats.begin_frame();
+        let region = self.recompose_damage();
         if region.is_empty() {
             return Ok(());
         }
         let Some(bounding_damage) = sub_screen_damage(&region.bounds(), &self.mode) else {
+            self.stats.bump_present();
             return display.present(&self.frame);
         };
         let rects = region.rects();
         if rects.len() > MAX_PRESENT_REGIONS {
+            self.stats.bump_present();
             return display.present_region(&self.frame, bounding_damage);
         }
         for &rect in rects {
+            self.stats.bump_present();
             match sub_screen_damage(&rect, &self.mode) {
                 Some(damage) => display.present_region(&self.frame, damage)?,
                 None => display.present(&self.frame)?,
@@ -1621,6 +1679,7 @@ impl Compositor {
         display: &mut dyn AcceleratedDisplay,
     ) -> Result<(), DriverError> {
         let caps = display.accel_caps()?;
+        self.stats.begin_frame();
         // A hardware layer is composed from its own pixels alone and cannot
         // sample what is already behind it, so a backdrop blur has no layer
         // encoding at all and the whole frame goes through software.
@@ -1635,9 +1694,11 @@ impl Compositor {
         };
         if let Some(buffers) = layers {
             let layers: Vec<AccelLayer<'_>> = buffers.iter().map(LayerBuf::as_layer).collect();
+            self.stats.bump_present();
             display.present_layers(&layers)
         } else {
-            self.composite();
+            self.recompose_damage();
+            self.stats.bump_present();
             display.present(&self.frame)
         }
     }
@@ -1828,6 +1889,19 @@ impl Compositor {
     /// not exist, which composes no window at all. The cursor is drawn only
     /// by the encoding segment, so it always lands on top.
     ///
+    /// The front-most window of the segment is asked for its **opaque runs**
+    /// first ([`WindowRow::opaque_run`]): a run of fully opaque client pixels
+    /// replaces whatever is beneath it exactly, so it is copied into the back
+    /// buffer and encoded in one pass and every layer below it — the windows
+    /// under it, the desktop layer, and the root fill — is skipped for those
+    /// columns. That is the whole of the compositor's occlusion handling: it
+    /// culls per *run* rather than per window, so a window that covers only
+    /// part of a dirty rectangle, or whose own pixels are opaque only in
+    /// places, still saves exactly the blending it can. Columns no run covers
+    /// take the same [`compose_pixel`] path they always did, over the same
+    /// [`Pixel::over`], so this is a loop specialisation and never a second
+    /// blend.
+    ///
     /// Everything that is constant across a row is resolved before the
     /// column loop: each covering layer's source row ([`Window::row`]),
     /// the destination row of the back buffer, and the destination row of
@@ -1847,6 +1921,10 @@ impl Compositor {
         encode: bool,
     ) {
         let epoch = self.chrome_epoch();
+        #[cfg(test)]
+        let opaque_runs = self.opaque_runs;
+        #[cfg(not(test))]
+        let opaque_runs = true;
         let Self {
             mode,
             order,
@@ -1857,6 +1935,7 @@ impl Compositor {
             reveal,
             back,
             frame,
+            stats,
             ..
         } = self;
         let stride = mode.stride_bytes as usize;
@@ -1917,23 +1996,29 @@ impl Compositor {
             else {
                 continue;
             };
+            // The screen reveal is applied as a pixel is encoded, so a fade
+            // in flight has no run a plain copy could serve; the cursor is
+            // resolved per row, so only the few rows it draws on lose the
+            // fast path.
+            let layers = RowLayers {
+                under,
+                desktop: desktop_row,
+                windows: &rows,
+                cursor: cursor_row,
+                front: rows.last().filter(|_| {
+                    opaque_runs && cursor_row.is_none() && (!encode || reveal == u8::MAX)
+                }),
+            };
+            let targets = RowTargets {
+                back: back_row,
+                frame: encode.then_some(frame_row),
+            };
+            let work = compose_row(&layers, targets, area.left(), order, reveal);
             if encode {
-                let (frame_pixels, _) = frame_row.as_chunks_mut::<4>();
-                for ((dst, bytes), x) in back_row
-                    .iter_mut()
-                    .zip(frame_pixels)
-                    .zip(area.left()..area.right())
-                {
-                    let acc =
-                        compose_pixel(under.unwrap_or(*dst), x, desktop_row, &rows, cursor_row);
-                    *dst = acc;
-                    *bytes = order.encode(revealed(acc, reveal));
-                }
-            } else {
-                for (dst, x) in back_row.iter_mut().zip(area.left()..area.right()) {
-                    *dst = compose_pixel(under.unwrap_or(*dst), x, desktop_row, &rows, cursor_row);
-                }
+                stats.add_encoded(u64::from(area.width));
             }
+            stats.add_blended(work.blended);
+            stats.add_opaque(work.copied);
         }
     }
 
@@ -1960,6 +2045,7 @@ impl Compositor {
             windows,
             back,
             blur_scratch,
+            stats,
             ..
         } = self;
         let Some(window) = windows.get(index) else {
@@ -1979,6 +2065,7 @@ impl Compositor {
         let shape_x = u32::try_from(region.left().saturating_sub(bounds.left())).unwrap_or(0);
         let shape_y = u32::try_from(region.top().saturating_sub(bounds.top())).unwrap_or(0);
         let shape = window.shape();
+        stats.add_blur(area_px(region.width, region.height));
         back.frost_region(
             left,
             top,
@@ -1995,9 +2082,115 @@ impl Compositor {
     }
 }
 
+/// One screen row's resolved layers, bottom to top.
+struct RowLayers<'a> {
+    /// What the layers compose over: the root fill, or `None` to continue
+    /// from whatever the back buffer already holds.
+    under: Option<Pixel>,
+    desktop: Option<&'a [Pixel]>,
+    windows: &'a [WindowRow<'a>],
+    cursor: Option<(&'a PlacedCursor, u32)>,
+    /// The front-most window whose opaque runs may be copied, or `None` where
+    /// no run can be: a fade is encoding, or the cursor draws on this row.
+    front: Option<&'a WindowRow<'a>>,
+}
+
+/// Where a composed row is written: the back buffer's span for these columns
+/// and, when this segment finishes the rectangle, the scan-out bytes for the
+/// same ones.
+struct RowTargets<'a> {
+    back: &'a mut [Pixel],
+    frame: Option<&'a mut [u8]>,
+}
+
+/// What composing one row cost.
+struct RowWork {
+    /// Layer contributions blended.
+    blended: u64,
+    /// Pixels resolved by copying an opaque run.
+    copied: u64,
+}
+
+/// Compose one screen row, writing the back buffer and — when `targets`
+/// carries frame bytes — the scan-out frame, from screen column `first_col`.
+///
+/// Opaque runs of the front-most window are copied whole and everything below
+/// them is skipped; every other column takes [`compose_pixel`]. A run whose
+/// destination slice cannot be resolved encodes nothing and falls through to
+/// the general path, so the frame can never be left holding stale bytes.
+fn compose_row(
+    layers: &RowLayers<'_>,
+    targets: RowTargets<'_>,
+    first_col: i32,
+    order: ChannelOrder,
+    reveal: u8,
+) -> RowWork {
+    let RowTargets { back, mut frame } = targets;
+    let cols = back.len();
+    let limit = first_col.saturating_add_unsigned(u32::try_from(cols).unwrap_or(u32::MAX));
+    let mut work = RowWork {
+        blended: 0,
+        copied: 0,
+    };
+    let mut col = 0usize;
+    let mut x = first_col;
+    while col < cols {
+        if let Some(run) = layers
+            .front
+            .and_then(|row| row.opaque_run(x, limit))
+            .and_then(|run| run.get(..run.len().min(cols - col)))
+        {
+            // The frame slice is exactly four bytes per pixel of the run, so
+            // the encoder takes all of it; reading its count back rather than
+            // assuming it keeps the copy and the encode describing the same
+            // pixels.
+            let len = match frame.as_deref_mut() {
+                Some(bytes) => bytes
+                    .get_mut(col * 4..(col + run.len()) * 4)
+                    .map_or(0, |bytes| order.encode_run(run, bytes)),
+                None => run.len(),
+            };
+            if let (Some(dst), Some(src)) = (back.get_mut(col..col + len), run.get(..len)) {
+                dst.copy_from_slice(src);
+            }
+            if len > 0 {
+                work.copied = work
+                    .copied
+                    .saturating_add(u64::try_from(len).unwrap_or(u64::MAX));
+                col += len;
+                x = x.saturating_add_unsigned(u32::try_from(len).unwrap_or(u32::MAX));
+                continue;
+            }
+        }
+        let Some(dst) = back.get_mut(col) else {
+            break;
+        };
+        let (acc, blends) = compose_pixel(
+            layers.under.unwrap_or(*dst),
+            x,
+            layers.desktop,
+            layers.windows,
+            layers.cursor,
+        );
+        work.blended = work.blended.saturating_add(u64::from(blends));
+        *dst = acc;
+        if let Some(bytes) = frame
+            .as_deref_mut()
+            .and_then(|bytes| bytes.get_mut(col * 4..col * 4 + 4))
+        {
+            bytes.copy_from_slice(&order.encode(revealed(acc, reveal)));
+        }
+        col += 1;
+        x = x.saturating_add(1);
+    }
+    work
+}
+
 /// The composited pixel at screen column `x` of an already-resolved
 /// scanline: the desktop layer, then each window row back-to-front, then
-/// the cursor, each blended *over* `under`.
+/// the cursor, each blended *over* `under`. Returns that pixel and how many
+/// layers were blended to reach it, which is the per-pixel cost the frame
+/// counters report.
 ///
 /// `cursor` carries the overlay and the image-local row this scanline is,
 /// already resolved by the caller, or `None` where the cursor draws nothing
@@ -2008,22 +2201,26 @@ fn compose_pixel(
     desktop_row: Option<&[Pixel]>,
     rows: &[WindowRow<'_>],
     cursor: Option<(&PlacedCursor, u32)>,
-) -> Pixel {
+) -> (Pixel, u32) {
     let mut acc = under;
+    let mut blends = 0;
     if let Some(src) = desktop_pixel(desktop_row, x) {
         acc = src.over(acc);
+        blends += 1;
     }
     for row in rows {
         if let Some(src) = row.sample(x) {
             acc = src.over(acc);
+            blends += 1;
         }
     }
     if let Some((cursor, ly)) = cursor {
         if let Some(src) = cursor.sample_row(x, ly) {
             acc = src.over(acc);
+            blends += 1;
         }
     }
-    acc
+    (acc, blends)
 }
 
 /// `pixel` as the screen reveal presents it: scaled towards black by
@@ -2059,6 +2256,13 @@ fn desktop_pixel(row: Option<&[Pixel]>, x: i32) -> Option<Pixel> {
 /// unconditionally `None`, so skipping it is exact.
 fn covers(window: &Window, area: Rect) -> bool {
     window.is_visible() && !window.bounds().intersection(&area).is_empty()
+}
+
+/// A cumulative cache counter's growth across one composite pass, as this
+/// frame's own share. A count wider than `u32` saturates rather than wrapping,
+/// so a diagnostic never reads as a suspiciously small frame.
+fn frame_share(before: u64, after: u64) -> u32 {
+    u32::try_from(after.saturating_sub(before)).unwrap_or(u32::MAX)
 }
 
 /// The furniture to draw window `id` from: the retained entry, or the one

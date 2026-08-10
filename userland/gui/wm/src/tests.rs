@@ -25,7 +25,7 @@ use crate::select::{cursor_cache, CursorEpoch};
 
 use crate::{IconKind, WindowActivationState, WindowFrame, WindowFurnitureState, WindowSizeState};
 
-fn mode(w: u32, h: u32) -> DisplayMode {
+pub(crate) fn mode(w: u32, h: u32) -> DisplayMode {
     DisplayMode {
         width_px: w,
         height_px: h,
@@ -34,7 +34,7 @@ fn mode(w: u32, h: u32) -> DisplayMode {
     }
 }
 
-fn opaque(w: u32, h: u32, color: Color) -> Surface {
+pub(crate) fn opaque(w: u32, h: u32, color: Color) -> Surface {
     Surface::filled(w, h, color.premultiply()).expect("surface allocates")
 }
 
@@ -42,7 +42,7 @@ fn opaque(w: u32, h: u32, color: Color) -> Surface {
 /// cache at normal pressure sized from a 1080p output — the one place these
 /// tests assemble the cache the embedder would otherwise inject, so a test
 /// that cares about the budget or the band builds its own instead.
-fn new_compositor(mode: DisplayMode, background: Color) -> Option<Compositor> {
+pub(crate) fn new_compositor(mode: DisplayMode, background: Color) -> Option<Compositor> {
     NORMAL_PRESSURE.report(PressureBand::Normal);
     Compositor::new(mode, background, test_chrome_cache(), &NORMAL_PRESSURE)
 }
@@ -1333,7 +1333,7 @@ fn pointer_position_tracks_motion() {
 
 /// A solid opaque `size`×`size` cursor image in `color`, hotspot at the
 /// top-left, built through the shared cursor library.
-fn solid_cursor(size: u32, color: Color) -> tairix_cursor::CursorImage {
+pub(crate) fn solid_cursor(size: u32, color: Color) -> tairix_cursor::CursorImage {
     use tairix_cursor::{Shape, VectorCursor, Vertex};
     let s = i32::try_from(size).expect("small");
     let shape = Shape::new(

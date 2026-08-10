@@ -288,6 +288,36 @@ The clip also *saves* work rather than costing it: the admitted rows and columns
 are resolved once per call, outside the row loop, so a sprite or fill mostly
 outside a narrow window costs only the sliver that survives it.
 
+## Measuring it: `cargo xtask bench`
+
+These primitives are per-pixel loops, so their cost is measured, never
+guessed (`plans/FIX-DESKTOP-SPEEDUP.md` A.2):
+
+```
+cargo xtask bench                       # every family, the default budget
+cargo xtask bench --filter blur         # one family
+cargo xtask bench --iters 64 --rounds 9 # a longer, steadier budget
+```
+
+It reports **ns per pixel** and **ns per frame** for `Surface::blit` (opaque
+and translucent sources), `fill_round_rect`, `box_blur` and `frost_region`
+over several radii, `resample`, the scan-out channel encode, and the window
+manager's whole-frame composite. The per-pixel figure divides by the pixels
+the case genuinely touches — for `resample`, the *destination* pixels; for a
+composited frame, the damage actually recomposited, which is why a 64×24
+change behind a blurred window reports the several hundred thousand pixels
+that change really costs.
+
+The measurement is `lib/cpuops`'s existing bounded, median-of-rounds
+`BenchHarness` with a host nanosecond clock injected through its
+`CycleCounter` seam — there is no second timing loop. Quote numbers from a
+`--release` build; a dev-profile figure is not evidence.
+
+Wall-clock timings are load-dependent, so this is **not** a pass/fail gate and
+no test asserts an elapsed time. CI may run it only as a smoke check that
+every family still produces a number. The regression gates are the
+deterministic work counters instead.
+
 ## Why it lives in `lib/`
 
 Sibling userland GUI crates may not depend on one another (`AGENTS.md` §17.4),

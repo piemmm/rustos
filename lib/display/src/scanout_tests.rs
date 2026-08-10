@@ -1,10 +1,21 @@
 //! Tests for the shared scan-out encode: the byte order per format, the
-//! frame sizing, and the damage conversion.
+//! per-pixel and run encoders agreeing byte for byte, the frame sizing,
+//! and the damage conversion.
 
 use super::{scanout_len, sub_screen_damage, ChannelOrder};
 use tairix_abi::driver::display::{DisplayFormat, DisplayMode};
 use tairix_geometry::Rect;
 use tairix_raster::Pixel;
+
+/// Every order the encoder knows; each run test proves all of them.
+const ORDERS: [ChannelOrder; 2] = [ChannelOrder::Rgba, ChannelOrder::Bgra];
+
+/// The longest run the tests encode: odd, and well past any unrolling or
+/// vector width a compiler might choose, so a mishandled tail shows up.
+const MAX_RUN: usize = 1021;
+
+/// A byte no encode produces here, so an untouched slot is recognisable.
+const UNTOUCHED: u8 = 0x5A;
 
 /// A 4-bytes-per-pixel mode with a tight stride.
 fn mode(width_px: u32, height_px: u32, format: DisplayFormat) -> DisplayMode {
@@ -38,6 +49,116 @@ fn a_pixel_encodes_into_the_order_its_format_wants() {
     };
     assert_eq!(ChannelOrder::Rgba.encode(pixel), [0x10, 0x20, 0x30, 0xFF]);
     assert_eq!(ChannelOrder::Bgra.encode(pixel), [0x30, 0x20, 0x10, 0xFF]);
+}
+
+/// One step of the run's channel sequence.
+fn step(seed: &mut u8) -> u8 {
+    *seed = seed.wrapping_mul(37).wrapping_add(11);
+    *seed
+}
+
+/// A run whose colour channels differ pixel by pixel, so a swapped
+/// channel cannot pass by coincidence. Opaque, as a composited screen
+/// pixel is.
+fn sample_run() -> [Pixel; MAX_RUN] {
+    let mut run = [Pixel {
+        r: 0,
+        g: 0,
+        b: 0,
+        a: 0xFF,
+    }; MAX_RUN];
+    let mut seed = 1u8;
+    for pixel in &mut run {
+        pixel.r = step(&mut seed);
+        pixel.g = step(&mut seed);
+        pixel.b = step(&mut seed);
+    }
+    run
+}
+
+/// The per-pixel reference the run encoder must match byte for byte.
+fn encode_one_by_one(order: ChannelOrder, pixels: &[Pixel], out: &mut [u8]) -> usize {
+    let mut written = 0;
+    for pixel in pixels {
+        let Some(slot) = out.get_mut(written * 4..written * 4 + 4) else {
+            break;
+        };
+        slot.copy_from_slice(&order.encode(*pixel));
+        written += 1;
+    }
+    written
+}
+
+#[test]
+fn a_run_encodes_byte_for_byte_like_the_per_pixel_loop() {
+    let run = sample_run();
+    for order in ORDERS {
+        for len in [0, 1, 2, 3, 4, 5, 16, 17, MAX_RUN] {
+            let pixels = &run[..len];
+            let bytes = len * 4;
+            let mut bulk = [UNTOUCHED; MAX_RUN * 4];
+            let mut one_by_one = [UNTOUCHED; MAX_RUN * 4];
+            assert_eq!(order.encode_run(pixels, &mut bulk[..bytes]), len);
+            assert_eq!(
+                encode_one_by_one(order, pixels, &mut one_by_one[..bytes]),
+                len
+            );
+            assert_eq!(bulk, one_by_one);
+        }
+    }
+}
+
+#[test]
+fn a_short_out_truncates_and_never_half_writes_a_pixel() {
+    let run = sample_run();
+    for order in ORDERS {
+        // Not even one whole pixel fits.
+        let mut stub = [UNTOUCHED; 3];
+        assert_eq!(order.encode_run(&run[..4], &mut stub), 0);
+        assert_eq!(stub, [UNTOUCHED; 3]);
+
+        // Room for two whole pixels and three spare bytes: the two are
+        // encoded and the partial group is left as it was.
+        let mut out = [UNTOUCHED; 11];
+        assert_eq!(order.encode_run(&run[..5], &mut out), 2);
+        let mut expected = [UNTOUCHED; 11];
+        assert_eq!(encode_one_by_one(order, &run[..2], &mut expected), 2);
+        assert_eq!(out, expected);
+    }
+}
+
+#[test]
+fn an_over_long_out_keeps_its_tail_untouched() {
+    let run = sample_run();
+    for order in ORDERS {
+        let pixels = &run[..3];
+        let mut out = [UNTOUCHED; 3 * 4 + 9];
+        assert_eq!(order.encode_run(pixels, &mut out), pixels.len());
+        let mut expected = [UNTOUCHED; 3 * 4 + 9];
+        assert_eq!(
+            encode_one_by_one(order, pixels, &mut expected),
+            pixels.len()
+        );
+        assert_eq!(out, expected);
+        assert!(out[12..].iter().all(|&byte| byte == UNTOUCHED));
+    }
+}
+
+#[test]
+fn a_uniform_run_encodes_uniformly_in_every_order() {
+    for order in ORDERS {
+        for fill in [0x00, 0xFF] {
+            let pixels = [Pixel {
+                r: fill,
+                g: fill,
+                b: fill,
+                a: fill,
+            }; 7];
+            let mut out = [UNTOUCHED; 7 * 4];
+            assert_eq!(order.encode_run(&pixels, &mut out), pixels.len());
+            assert!(out.iter().all(|&byte| byte == fill));
+        }
+    }
 }
 
 #[test]

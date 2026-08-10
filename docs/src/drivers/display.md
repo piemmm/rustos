@@ -160,6 +160,19 @@ itself: a compositor blending many windows through a back buffer and a
 login screen blitting one surface are different loops, and both encode
 their result through the one `ChannelOrder::encode`.
 
+A composite loop encodes a whole row span at once through
+`ChannelOrder::encode_run` — that same per-pixel encoder walked four
+output bytes at a time, not a second spelling of the channel order. It
+writes `min(pixels.len(), out.len() / 4)` pixels and returns that count,
+so a short frame slice truncates rather than panicking or overrunning, a
+longer one keeps its tail, and a trailing group of fewer than four bytes
+is never half-written; the window manager passes one row span of its
+back buffer with the frame bytes for that same span and checks the count
+against the pixels it offered. There is no bulk-copy shortcut for the
+order that already matches the pixel in memory: `tairix_raster::Pixel`
+carries no layout guarantee to copy through, and a matching order is
+already a four-byte move per pixel with no shuffle left to remove.
+
 #### QEMU integration vertical
 
 `tests/integration/framebuffer_display_qemu_riscv64`

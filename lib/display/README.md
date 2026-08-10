@@ -29,6 +29,18 @@ and the client can never drift apart.
   fail-closed, maps exactly `stride_bytes * height_px` bytes through
   the capability-gated `MmioMapper`, and blits full frames or damage
   spans with every write bounds-checked by the window.
+- **Scan-out encode** (`scanout`): the pixel-exact decisions both
+  presenting programs — the compositing window manager and the graphical
+  login screen — have to get right, so neither carries its own copy: how
+  many bytes a frame is for a mode (`scanout_len`), which byte order the
+  mode's format wants (`ChannelOrder::for_format`), the channel encode
+  itself (`ChannelOrder::encode`, and `encode_run` for a whole row span
+  at a time — the bulk form of that same encoder, not a second one), and
+  whether a damage rectangle is a sub-region or the whole frame
+  (`sub_screen_damage`). Each refuses rather than guesses: an
+  unencodable mode or format is `None`, and a run writes whole pixels
+  only, stopping at whichever of its two slices ends first and reporting
+  the count the caller checks.
 - **Client** (`DisplayClient` / `RemoteDisplay`): the session-side half
   over the injected `DisplayTransport` seam. `RemoteDisplay` implements
   the existing `tairix_abi` `Display` trait over the client's own

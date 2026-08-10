@@ -283,6 +283,19 @@ tairix-util = { path = "../../lib/util", version = "=0.0.0" }
 # SMART5).
 tairix-reclaim = { path = "../../lib/reclaim", version = "=0.0.0" }
 tairix-log = { path = "../../lib/log", version = "=0.0.0" }
+# The compositing window manager: `bench` times `Compositor::composite` over a
+# real window stack — the very code the desktop runs each frame — so the
+# whole-frame figure describes production compositing rather than a
+# re-implementation of it (plans/FIX-DESKTOP-SPEEDUP.md A.2). The same gauge
+# and sink the AW3 script wires above build its furniture cache.
+tairix-wm = { path = "../../userland/gui/wm", version = "=0.0.0" }
+# The bounded, median-of-rounds microbenchmark the boot-time CPU-candidate
+# selection already measures over. `bench` injects a host nanosecond clock
+# into its counter seam instead of growing a second timing loop.
+tairix-cpuops = { path = "../../lib/cpuops", version = "=0.0.0" }
+# The scan-out channel order: the encode family times the one definition every
+# composited pixel is written to the frame through.
+tairix-display = { path = "../../lib/display", version = "=0.0.0" }
 
 [target.'cfg(unix)'.dependencies]
 # The pipeline's step timeout must be able to kill a hung step's whole

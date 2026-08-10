@@ -322,6 +322,58 @@ pub(crate) fn press_latch(
     }
 }
 
+/// The children of a container one pointer event must reach: the child the
+/// pointer is now `over`, the child it just left, and any child holding a
+/// press. Entries are distinct, and `None` where there is no such child.
+///
+/// `hovered` is the container's record of which child the pointer was over,
+/// advanced to `over` here so the container hit-tests once per event instead
+/// of asking every child whether the pointer is inside it.
+///
+/// The pressed child stays in the stream wherever the pointer goes — the
+/// pointer grab. Its own latch resolves `inside` against the position it last
+/// saw, so dropping it from the stream would leave that position stale and a
+/// press dragged off the child would fire on release instead of cancelling.
+#[must_use]
+pub(crate) fn route_pointer(
+    hovered: &mut Option<usize>,
+    armed: Option<usize>,
+    over: Option<usize>,
+) -> [Option<usize>; 3] {
+    let left = if *hovered == over { None } else { *hovered };
+    *hovered = over;
+    let armed = if armed == over || armed == left {
+        None
+    } else {
+        armed
+    };
+    [armed, left, over]
+}
+
+/// The child a container grabs after `event`: the one under the pointer on a
+/// primary press, none on its release, and the current grab otherwise.
+///
+/// A container cannot see whether a child's own latch actually caught the
+/// press — a disabled or denied child refuses it — so the grab is the wider
+/// answer. Over-grabbing only routes further events to a child that ignores
+/// them, which is what feeding every child did.
+#[must_use]
+pub(crate) fn grab_after(
+    armed: Option<usize>,
+    event: &InputEvent,
+    over: Option<usize>,
+) -> Option<usize> {
+    match event {
+        InputEvent::PointerPressed {
+            button: PointerButton::Primary,
+        } => over,
+        InputEvent::PointerReleased {
+            button: PointerButton::Primary,
+        } => None,
+        _ => armed,
+    }
+}
+
 /// Update `state`/`armed` from one pointer event and return whether the
 /// control was activated (a primary press-and-release over it).
 ///

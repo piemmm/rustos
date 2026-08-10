@@ -5,6 +5,8 @@
 //! of an icon tool and a split tool's disclosure, keyboard focus movement and
 //! activation, the active-tool flag, theme switching, and scale.
 
+use alloc::vec::Vec;
+
 use tairix_geometry::{Point, Rect, Scale};
 use tairix_input::{InputEvent, Key, NamedKey, PointerButton};
 use tairix_raster::{Color, Pixel, Surface};
@@ -288,4 +290,75 @@ fn pointer_position_alone_never_changes_a_toolbar_render() {
         render(&b, &theme).pixels(),
         "…and the two must therefore paint identically"
     );
+}
+
+// --- Pointer routing ---------------------------------------------------
+
+/// A pointer path that crosses every boundary and drags a press off its tool.
+fn script() -> Vec<InputEvent> {
+    alloc::vec![
+        moved(icon_centre_x(0), xi(H / 2)),
+        moved(icon_centre_x(0) + 1, xi(H / 2)),
+        moved(icon_centre_x(1), xi(H / 2)),
+        PRESS,
+        moved(icon_centre_x(2), xi(H / 2)),
+        RELEASE,
+        moved(icon_centre_x(2), xi(H / 2)),
+        PRESS,
+        RELEASE,
+        moved(xi(W) - 1, xi(H / 2)),
+        moved(icon_centre_x(0), xi(H / 2)),
+    ]
+}
+
+/// Routing is an optimisation, not a behaviour change: the routed strip must
+/// end every step of a scripted path in the state fanning to all tools would
+/// have left it in, and report the same activations.
+#[test]
+fn routing_leaves_the_same_state_as_fanning_to_every_tool() {
+    let theme = Theme::dark();
+    let bounds = Rect::new(0, 0, W, H);
+    let mut routed = grouped_toolbar();
+    let mut fanned = grouped_toolbar();
+    let resting = grouped_toolbar();
+    let mut hovered_at_some_point = false;
+
+    for event in script() {
+        let a = routed.on_pointer(&event, bounds, Scale::ONE, &theme);
+        let b = fanned.fan_pointer(&event, bounds, Scale::ONE, &theme);
+        assert_eq!(a, b, "activation differs after {event:?}");
+        assert_eq!(routed, fanned, "state differs after {event:?}");
+        hovered_at_some_point |= routed != resting;
+    }
+    assert!(
+        hovered_at_some_point,
+        "the script must actually move the strip off its resting state"
+    );
+}
+
+/// A press dragged off its tool keeps reaching that tool, so its latch
+/// resolves against where the pointer really is and the release cancels
+/// instead of activating a tool the pointer left.
+#[test]
+fn a_press_dragged_off_its_tool_cancels() {
+    let theme = Theme::dark();
+    let bounds = Rect::new(0, 0, W, H);
+    let mut toolbar = grouped_toolbar();
+    let feed = |toolbar: &mut Toolbar, event: InputEvent| {
+        toolbar.on_pointer(&event, bounds, Scale::ONE, &theme)
+    };
+
+    feed(&mut toolbar, moved(icon_centre_x(0), xi(H / 2)));
+    feed(&mut toolbar, PRESS);
+    feed(&mut toolbar, moved(icon_centre_x(2), xi(H / 2)));
+    assert_eq!(feed(&mut toolbar, RELEASE), None);
+
+    let mut rested = grouped_toolbar();
+    rested.on_pointer(
+        &moved(icon_centre_x(2), xi(H / 2)),
+        bounds,
+        Scale::ONE,
+        &theme,
+    );
+    assert_eq!(toolbar, rested, "the cancelled press must leave no mark");
 }

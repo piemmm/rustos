@@ -4992,10 +4992,12 @@ dependencies = [
  "tairix-browse",
  "tairix-cc",
  "tairix-controls",
+ "tairix-cpuops",
  "tairix-crypto",
  "tairix-desktop-session",
  "tairix-devids",
  "tairix-devmatch",
+ "tairix-display",
  "tairix-drv-bus-pcie-brcm",
  "tairix-drv-bus-usb",
  "tairix-drv-bus-usb-vl805",
@@ -5050,6 +5052,7 @@ dependencies = [
  "tairix-vcmailbox",
  "tairix-virtio-input",
  "tairix-wallpaper",
+ "tairix-wm",
 ]
 
 [[package]]

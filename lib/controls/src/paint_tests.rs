@@ -6,11 +6,19 @@
 //! rim of the same colour, a role states itself on the edge and the label
 //! before it states itself on the plate, and a press colours a control rather
 //! than merely darkening it.
+//!
+//! The container pointer-routing rule every collection shares is pinned here
+//! for the same reason: which children one sample reaches is one decision,
+//! not one per family.
 
+use alloc::vec::Vec;
+
+use tairix_geometry::Point;
+use tairix_input::{InputEvent, PointerButton};
 use tairix_raster::Color;
 use tairix_theme::{Rgba, Theme};
 
-use crate::paint::{resolve_frame, FrameColors};
+use crate::paint::{grab_after, resolve_frame, route_pointer, FrameColors};
 use crate::state::{
     AuthorityState, ControlRole, ControlState, FocusState, PlateSeating, PointerState,
     ValidationState,
@@ -618,4 +626,77 @@ fn light_theme_keeps_the_same_invariants() {
     assert_eq!(outlined.plate, rgb(palette.surface_raised));
     assert_eq!(outlined.rim, rgb(palette.danger));
     assert_eq!(outlined.label, rgb(palette.danger));
+}
+
+// --- Container pointer routing -----------------------------------------
+
+/// The children `route_pointer` names, in order, ignoring the empty slots.
+fn targets(hovered: &mut Option<usize>, armed: Option<usize>, over: Option<usize>) -> Vec<usize> {
+    route_pointer(hovered, armed, over)
+        .into_iter()
+        .flatten()
+        .collect()
+}
+
+#[test]
+fn crossing_a_boundary_reaches_the_child_left_and_the_child_entered() {
+    let mut hovered = Some(0);
+    assert_eq!(targets(&mut hovered, None, Some(1)), alloc::vec![0, 1]);
+    assert_eq!(hovered, Some(1));
+}
+
+#[test]
+fn motion_within_one_child_reaches_only_that_child() {
+    let mut hovered = Some(1);
+    assert_eq!(targets(&mut hovered, None, Some(1)), alloc::vec![1]);
+}
+
+#[test]
+fn leaving_the_container_reaches_only_the_child_left() {
+    let mut hovered = Some(2);
+    assert_eq!(targets(&mut hovered, None, None), alloc::vec![2]);
+    assert_eq!(hovered, None);
+}
+
+#[test]
+fn an_unarmed_motion_never_reaches_more_than_two_children() {
+    for from in 0..8 {
+        for to in 0..8 {
+            let mut hovered = Some(from);
+            assert!(targets(&mut hovered, None, Some(to)).len() <= 2);
+        }
+    }
+}
+
+#[test]
+fn a_pressed_child_stays_in_the_stream_wherever_the_pointer_goes() {
+    let mut hovered = Some(1);
+    let reached = targets(&mut hovered, Some(0), Some(2));
+    assert!(
+        reached.contains(&0),
+        "the pressed child must keep receiving"
+    );
+    assert_eq!(reached, alloc::vec![0, 1, 2]);
+}
+
+#[test]
+fn the_pressed_child_is_never_named_twice() {
+    let mut hovered = Some(0);
+    assert_eq!(targets(&mut hovered, Some(0), Some(0)), alloc::vec![0]);
+}
+
+#[test]
+fn a_press_grabs_the_child_under_the_pointer_and_its_release_lets_go() {
+    let press = InputEvent::PointerPressed {
+        button: PointerButton::Primary,
+    };
+    let release = InputEvent::PointerReleased {
+        button: PointerButton::Primary,
+    };
+    let moved = InputEvent::PointerMoved {
+        to: Point::new(0, 0),
+    };
+    assert_eq!(grab_after(None, &press, Some(3)), Some(3));
+    assert_eq!(grab_after(Some(3), &moved, Some(1)), Some(3));
+    assert_eq!(grab_after(Some(3), &release, Some(1)), None);
 }

@@ -26,7 +26,9 @@
 //!   one [`BlurScratch`](tairix_raster::BlurScratch) the compositor owns and
 //!   reuses.
 //! - **Damage tracking** ([`damage`]): only changed pixels are
-//!   recomposited.
+//!   recomposited, and [`stats`] counts what each frame actually cost so a
+//!   redraw that repaints far more than it changed is measurable rather than
+//!   merely felt.
 //! - **The [`Compositor`]**: a z-ordered [`Window`] stack composited
 //!   over an opaque background into a [`DisplayMode`]-shaped byte frame.
 //! - **Input routing** ([`input`]): the [`InputRouter`] tracks the
@@ -65,10 +67,13 @@ pub mod damage;
 pub mod geometry;
 pub mod input;
 pub mod select;
+pub mod stats;
 pub mod surface;
 pub mod viewport;
 pub mod window;
 
+#[cfg(test)]
+mod stats_tests;
 #[cfg(test)]
 mod tests;
 
@@ -80,6 +85,7 @@ pub use damage::DamageRegion;
 pub use geometry::{Point, Rect, Scale};
 pub use input::{InputEvent, InputResponse, InputRouter, Key, Modifiers, NamedKey, PointerButton};
 pub use select::{cursor_cache, desired_cursor, CursorController, CursorEpoch};
+pub use stats::FrameStats;
 pub use surface::Surface;
 pub use viewport::{FurnitureHit, FurnitureLayout, RootViewport, ScrollPolicy};
 pub use window::{Window, WindowId};

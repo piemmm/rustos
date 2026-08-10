@@ -14,17 +14,17 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use tairix_font::BitmapFont;
-use tairix_geometry::{Rect, Scale};
+use tairix_geometry::{Point, Rect, Scale};
 use tairix_input::{InputEvent, Key};
 use tairix_raster::{Color, Surface};
 use tairix_theme::{TextRole, Theme};
 
 use crate::button::{Button, ButtonAction, ButtonContent};
 use crate::paint::{
-    foreground, inset, paint_plate, plate_border, role_font, surface_rect, text_plate_height,
-    to_i32, PlateStyle,
+    foreground, grab_after, inset, paint_plate, plate_border, role_font, route_pointer,
+    surface_rect, text_plate_height, to_i32, PlateStyle,
 };
-use crate::state::ControlRole;
+use crate::state::{ControlRole, RenderInvariant};
 
 /// The natural width one action button needs: a labelled button fits its text
 /// plus horizontal padding; a glyph button is a square of the control height.
@@ -121,6 +121,15 @@ pub struct Dialog {
     message: Option<String>,
     reason: Option<String>,
     actions: Vec<Button>,
+    /// The last pointer position, resolved against the action rects —
+    /// hit-testing input, never drawn.
+    pointer: RenderInvariant<Point>,
+    /// The action the pointer was last over, so a motion sample reaches the
+    /// action it left and the one it entered rather than the whole row.
+    hovered: RenderInvariant<Option<usize>>,
+    /// The action holding a press, which keeps receiving the stream wherever
+    /// the pointer goes.
+    armed: RenderInvariant<Option<usize>>,
 }
 
 impl Dialog {
@@ -132,6 +141,9 @@ impl Dialog {
             message: None,
             reason: None,
             actions: Vec::new(),
+            pointer: RenderInvariant::new(Point::ORIGIN),
+            hovered: RenderInvariant::new(None),
+            armed: RenderInvariant::new(None),
         }
     }
 
@@ -292,8 +304,12 @@ impl Dialog {
         }
     }
 
-    /// Feed a pointer event; an action that completes a click reports
-    /// [`DialogAction::ActionActivated`].
+    /// Route a pointer event to the actions it concerns; one that completes a
+    /// click reports [`DialogAction::ActionActivated`].
+    ///
+    /// One hit test decides where the pointer is; the event then reaches only
+    /// the action it left, the action it entered, and any action holding a
+    /// press.
     pub fn on_pointer(
         &mut self,
         event: &InputEvent,
@@ -301,15 +317,22 @@ impl Dialog {
         scale: Scale,
         theme: &Theme,
     ) -> Option<DialogAction> {
+        if let InputEvent::PointerMoved { to } = event {
+            *self.pointer = *to;
+        }
         let rects = self.action_rects(bounds, scale, theme);
+        let over = rects.iter().position(|r| r.contains(*self.pointer));
+        let route = route_pointer(&mut self.hovered, *self.armed, over);
+        *self.armed = grab_after(*self.armed, event, over);
+
         let mut action = None;
-        for (i, button) in self.actions.iter_mut().enumerate() {
-            if let Some(rect) = rects.get(i) {
-                if button.on_pointer(event, *rect) == Some(ButtonAction::Activated)
-                    && action.is_none()
-                {
-                    action = Some(DialogAction::ActionActivated { index: i });
-                }
+        for i in route.into_iter().flatten() {
+            let (Some(button), Some(rect)) = (self.actions.get_mut(i), rects.get(i)) else {
+                continue;
+            };
+            if button.on_pointer(event, *rect) == Some(ButtonAction::Activated) && action.is_none()
+            {
+                action = Some(DialogAction::ActionActivated { index: i });
             }
         }
         action

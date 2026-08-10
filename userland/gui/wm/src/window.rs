@@ -994,6 +994,36 @@ impl WindowRow<'_> {
         }
         Some(self.decoration[1].sample(x)?.scale_alpha(self.opacity))
     }
+
+    /// The longest run of source pixels this row contributes from screen
+    /// column `x` towards `limit` that each replace whatever is beneath them
+    /// exactly, or `None` when the pixel at `x` is not one.
+    ///
+    /// A caller may copy such a run and skip every layer below it without
+    /// changing one byte of the result, because *over* with a fully opaque
+    /// source is the source. Three things must hold, and they are the only
+    /// three: full window opacity and no rounded-corner coverage on the row
+    /// (either would scale the pixel), and a source alpha of 255. Only the
+    /// client's own pixels qualify — furniture is left to the general blend,
+    /// which keeps this a loop specialisation rather than a second blend.
+    #[must_use]
+    pub(crate) fn opaque_run(&self, x: i32, limit: i32) -> Option<&[Pixel]> {
+        if self.opacity != u8::MAX || self.rounding.is_some() {
+            return None;
+        }
+        let start = usize::try_from(x.checked_sub(self.client_x)?).ok()?;
+        // A client column past the drawable extent contributes nothing at
+        // all, so the run stops where the gutter or a short buffer does.
+        let drawable = usize::try_from(self.client_cols)
+            .unwrap_or(usize::MAX)
+            .min(self.content.len());
+        let end = usize::try_from(limit.checked_sub(self.client_x)?)
+            .ok()?
+            .min(drawable);
+        let span = self.content.get(start..end)?;
+        let len = span.iter().take_while(|p| p.a == u8::MAX).count();
+        span.get(..len).filter(|run| !run.is_empty())
+    }
 }
 
 /// One furniture strip's contribution to a screen row: its pixels, the

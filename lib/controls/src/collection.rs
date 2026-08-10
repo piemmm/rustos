@@ -37,10 +37,10 @@ use tairix_theme::{Rgba, TextRole, Theme};
 
 use crate::button::{Button, ButtonAction};
 use crate::paint::{
-    dominant_color, draw_outline, foreground, heavy_contrast, icon_slot_side, inset,
+    dominant_color, draw_outline, foreground, grab_after, heavy_contrast, icon_slot_side, inset,
     key_activation, paint_bead, paint_chevron, paint_count_badge, paint_icon_slot, plate_border,
     pointer_activation, press_latch, rail_thickness, resolve_bead, resolve_rail, role_font,
-    seam_thickness, seam_width, surface_rect, to_i32, ChevronDir,
+    route_pointer, seam_thickness, seam_width, surface_rect, to_i32, ChevronDir,
 };
 use crate::state::{
     ControlDisposition, ControlRole, ControlState, FocusState, PointerState, RenderInvariant,
@@ -1477,6 +1477,13 @@ pub struct Card {
     /// The body press latch; a completed press over the body is reported as
     /// [`CardAction::Pressed`] and never grows a visual of its own.
     armed: RenderInvariant<bool>,
+    /// The footer button the pointer was last over, so a motion sample
+    /// reaches the button it left and the one it entered rather than the
+    /// whole footer. It mirrors the hover the buttons themselves carry.
+    footer_hovered: RenderInvariant<Option<usize>>,
+    /// The footer button holding a press, which keeps receiving the stream
+    /// wherever the pointer goes.
+    footer_armed: RenderInvariant<Option<usize>>,
 }
 
 impl Card {
@@ -1492,6 +1499,8 @@ impl Card {
             footer: Vec::new(),
             pointer: RenderInvariant::new(Point::ORIGIN),
             armed: RenderInvariant::new(false),
+            footer_hovered: RenderInvariant::new(None),
+            footer_armed: RenderInvariant::new(None),
         }
     }
 
@@ -1791,11 +1800,11 @@ impl Card {
     /// and otherwise a completed primary click landing inside the card's own
     /// bounds — outside every footer button — reports [`CardAction::Pressed`].
     ///
-    /// Every footer button always receives the event first, exactly as
-    /// before, so their own hover/press latches stay correct regardless of
-    /// which one (if any) the pointer is over; the body press is considered
-    /// only once none of them claimed it, and only over the area the footer
-    /// buttons do not occupy, so a click cannot report both.
+    /// The footer is routed first, from one hit test: the event reaches only
+    /// the button the pointer left, the one it entered, and any button
+    /// holding a press. The body press is considered once none of them
+    /// claimed it, and only over the area the footer buttons do not occupy,
+    /// so a click cannot report both.
     pub fn on_pointer(
         &mut self,
         event: &InputEvent,
@@ -1803,25 +1812,29 @@ impl Card {
         scale: Scale,
         theme: &Theme,
     ) -> Option<CardAction> {
+        if let InputEvent::PointerMoved { to } = event {
+            *self.pointer = *to;
+        }
         let rects = self.footer_rects(bounds, scale, theme);
+        let over = rects.iter().position(|rect| rect.contains(*self.pointer));
+        let route = route_pointer(&mut self.footer_hovered, *self.footer_armed, over);
+        *self.footer_armed = grab_after(*self.footer_armed, event, over);
+
         let mut action = None;
-        for (i, button) in self.footer.iter_mut().enumerate() {
-            if let Some(rect) = rects.get(i) {
-                if button.on_pointer(event, *rect) == Some(ButtonAction::Activated)
-                    && action.is_none()
-                {
-                    action = Some(CardAction::FooterActivated { index: i });
-                }
+        for i in route.into_iter().flatten() {
+            let (Some(button), Some(rect)) = (self.footer.get_mut(i), rects.get(i)) else {
+                continue;
+            };
+            if button.on_pointer(event, *rect) == Some(ButtonAction::Activated) && action.is_none()
+            {
+                action = Some(CardAction::FooterActivated { index: i });
             }
         }
         if action.is_some() {
             return action;
         }
 
-        if let InputEvent::PointerMoved { to } = event {
-            *self.pointer = *to;
-        }
-        let over_footer = rects.iter().any(|rect| rect.contains(*self.pointer));
+        let over_footer = over.is_some();
         let inside = bounds.contains(*self.pointer) && !over_footer;
         let actionable = self.state.is_actionable();
         press_latch(&mut self.armed, event, inside, actionable).then_some(CardAction::Pressed)
@@ -2376,6 +2389,16 @@ pub struct Panel {
     header_state: ControlState,
     actions: Vec<Button>,
     anchor: Option<Point>,
+    /// The last pointer position, resolved against the header-action rects —
+    /// hit-testing input, never drawn.
+    pointer: RenderInvariant<Point>,
+    /// The header action the pointer was last over, so a motion sample
+    /// reaches the action it left and the one it entered rather than the
+    /// whole header.
+    hovered: RenderInvariant<Option<usize>>,
+    /// The header action holding a press, which keeps receiving the stream
+    /// wherever the pointer goes.
+    armed: RenderInvariant<Option<usize>>,
 }
 
 impl Panel {
@@ -2388,6 +2411,9 @@ impl Panel {
             header_state: ControlState::idle(),
             actions: Vec::new(),
             anchor: None,
+            pointer: RenderInvariant::new(Point::ORIGIN),
+            hovered: RenderInvariant::new(None),
+            armed: RenderInvariant::new(None),
         }
     }
 
@@ -2651,8 +2677,12 @@ impl Panel {
         surface.blit(to_i32(nx), to_i32(ny), &glyph);
     }
 
-    /// Feed a pointer event to the header actions; the first that completes a
-    /// click reports [`PanelAction::HeaderActivated`].
+    /// Route a pointer event to the header actions it concerns; one that
+    /// completes a click reports [`PanelAction::HeaderActivated`].
+    ///
+    /// One hit test decides where the pointer is; the event then reaches only
+    /// the action it left, the action it entered, and any action holding a
+    /// press.
     pub fn on_pointer(
         &mut self,
         event: &InputEvent,
@@ -2660,15 +2690,22 @@ impl Panel {
         scale: Scale,
         theme: &Theme,
     ) -> Option<PanelAction> {
+        if let InputEvent::PointerMoved { to } = event {
+            *self.pointer = *to;
+        }
         let rects = self.action_rects(bounds, scale, theme);
+        let over = rects.iter().position(|rect| rect.contains(*self.pointer));
+        let route = route_pointer(&mut self.hovered, *self.armed, over);
+        *self.armed = grab_after(*self.armed, event, over);
+
         let mut action = None;
-        for (i, button) in self.actions.iter_mut().enumerate() {
-            if let Some(rect) = rects.get(i) {
-                if button.on_pointer(event, *rect) == Some(ButtonAction::Activated)
-                    && action.is_none()
-                {
-                    action = Some(PanelAction::HeaderActivated { index: i });
-                }
+        for i in route.into_iter().flatten() {
+            let (Some(button), Some(rect)) = (self.actions.get_mut(i), rects.get(i)) else {
+                continue;
+            };
+            if button.on_pointer(event, *rect) == Some(ButtonAction::Activated) && action.is_none()
+            {
+                action = Some(PanelAction::HeaderActivated { index: i });
             }
         }
         action

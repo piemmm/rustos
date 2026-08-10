@@ -70,6 +70,15 @@
 //! - `model-check` — exhaustively model-check the Silver capability +
 //!   IPC state machine (an in-tree explicit-state checker; the TLA+
 //!   equivalent), failing closed on any invariant counterexample
+//! - `bench`        — host microbenchmarks for the per-pixel desktop paths:
+//!   `Surface::blit`, rounded-rect fill, `box_blur`/`frost_region`,
+//!   `resample`, the scan-out channel encode, and the window manager's
+//!   whole-frame composite over a representative window stack. Reports ns/px
+//!   and ns/frame for a `--iters N` / `--rounds N` budget, one family at a
+//!   time with `--filter <substring>`. Wall-clock timings are load-dependent,
+//!   so this is evidence for a completion report and is deliberately **not**
+//!   a `ci` gate; CI may run it only as a smoke check that every family still
+//!   produces a number
 //! - `ci`           — the full pipeline a PR must pass, ordered cheapest-first
 //!   so a failing PR fails fast: `fmt --check`, then the concurrent
 //!   static-gate group (`deps-check`, `cfg-check`, `help-lint`,

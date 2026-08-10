@@ -12,7 +12,9 @@
 //! What is *not* here is the composition itself. A compositor blending many
 //! windows through a back buffer and a program blitting one surface are
 //! genuinely different loops; both encode their result through
-//! [`ChannelOrder::encode`], and neither pretends to be the other.
+//! [`ChannelOrder::encode`] — a whole run of it through
+//! [`ChannelOrder::encode_run`], which is that same encoder in bulk — and
+//! neither pretends to be the other.
 
 use tairix_abi::driver::display::{DamageRect, DisplayFormat, DisplayMode};
 use tairix_geometry::Rect;
@@ -57,6 +59,37 @@ impl ChannelOrder {
             Self::Rgba => [pixel.r, pixel.g, pixel.b, pixel.a],
             Self::Bgra => [pixel.b, pixel.g, pixel.r, pixel.a],
         }
+    }
+
+    /// Encode a run of premultiplied pixels into `out`, returning the number
+    /// of whole pixels written.
+    ///
+    /// The bulk form of [`encode`](Self::encode) — `out` is walked in whole
+    /// four-byte groups and each is handed to that one encoder, so a run and
+    /// a single pixel can never disagree about a channel. There is no
+    /// bulk-copy special case for the order that already matches the pixel in
+    /// memory: [`Pixel`] carries no layout guarantee to copy through, and it
+    /// would buy nothing if it did, since a matching order is already a
+    /// four-byte move per pixel with no shuffle left for the optimiser to
+    /// remove.
+    ///
+    /// Writes `min(pixels.len(), out.len() / 4)` pixels and reports that
+    /// count. A short `out` truncates rather than refusing or overrunning, a
+    /// trailing group of fewer than four bytes is left alone rather than
+    /// half-written, and a longer `out` keeps its tail untouched. The caller
+    /// — the window manager, passing one row-span slice of its back buffer
+    /// and the frame bytes for that same span — compares the count against
+    /// `pixels.len()` to see whether the span it asked for is the span that
+    /// reached the frame.
+    #[must_use]
+    pub fn encode_run(self, pixels: &[Pixel], out: &mut [u8]) -> usize {
+        let (groups, _trailing) = out.as_chunks_mut::<4>();
+        let mut written = 0;
+        for (slot, pixel) in groups.iter_mut().zip(pixels) {
+            *slot = self.encode(*pixel);
+            written += 1;
+        }
+        written
     }
 }
 
