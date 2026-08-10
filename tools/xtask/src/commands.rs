@@ -955,7 +955,7 @@ fn run_proptest(ctx: &Context, args: &[OsString]) -> Result<(), String> {
 }
 
 fn run_fssoak(ctx: &Context, args: &[OsString]) -> Result<(), String> {
-    // `.junie/filesystems.md`: drive the in-RAM filesystem soak for a
+    // `docs/src/filesystem/soak.md`: drive the in-RAM filesystem soak for a
     // wall-clock budget. `--quick` runs each filesystem ≥ 5 s; `--soak`
     // runs each ≥ 24 h for the nightly job. The target set and the budget
     // live in `commands/fssoak.rs`; the parallel per-filesystem fan-out is

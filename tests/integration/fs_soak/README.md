@@ -3,7 +3,7 @@
 A host-side test crate that soak-tests the three first-party
 filesystems (`arxfs`, `ext4`, `fat32`) entirely in RAM, with no real
 disk and no `mkfs` shell-out (`AGENTS.md` §12 / §2.12,
-`.junie/filesystems.md`).
+`docs/src/filesystem/soak.md`).
 
 ## What it does
 
@@ -61,6 +61,11 @@ The fixed-sequence exerciser is deterministic: a per-iteration seed
 drives the content and a SplitMix64-style advance, so any failure
 reproduces from its seed (printed in the error).
 
+One pass formats and fills a whole volume, so the budgeted loop starts
+another only while a pass of the same length still fits: a soak that ran
+past its budget by a whole pass would be ended by the orchestrator's
+hung-child deadline instead of stopping cleanly.
+
 ## Running it
 
 A plain `cargo test -p tairix-test-fs-soak` runs **one** smoke
@@ -69,12 +74,13 @@ floor; ext4 gets two block groups), which takes a couple of seconds.
 
 The nightly soak runs it under a wall-clock budget on a full-size
 volume via the orchestrator, which sets two env seams the integration
-tests read:
+tests read (named once in `tairix-fuzzseed`, so both sides cannot drift
+apart on a spelling):
 
 - `TAIRIX_FSSOAK_BUDGET_SECS` — loop each target until the budget
   elapses (unset / `0` runs a single iteration);
-- `TAIRIX_FSSOAK_BYTES` — device size in bytes (≥ 1 GiB for the soak;
-  `MIN_DEVICE_BYTES`).
+- `TAIRIX_FSSOAK_BYTES` — device size in bytes; the orchestrator's own
+  1 GiB soak minimum.
 
 ```
 cargo xtask fssoak --quick            # per-PR gate, ≥ 5 s per filesystem
@@ -82,8 +88,8 @@ cargo xtask fssoak --soak             # nightly, ≥ 24 h per filesystem
 cargo xtask fssoak --target ext4 --secs 30
 ```
 
-The three filesystems run **in parallel** under `tools/ci/soak.sh`
-(one job and one log each), sharing the soak's wall-clock budget.
+Every registered target runs **in parallel** under `tools/ci/soak.sh`
+(one job and one log each), each with the soak's full wall-clock budget.
 
 ## Stability tier
 

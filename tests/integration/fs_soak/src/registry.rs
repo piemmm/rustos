@@ -7,6 +7,7 @@ use tairix_abi::DriverError;
 use tairix_drv_fs_arxfs::{EntropySource, VolumeKey, ARXFS, VOLUME_KEY_LEN};
 use tairix_drv_fs_ext4::Ext4;
 use tairix_drv_fs_fat32::Fat32;
+use tairix_fuzzseed::FSSOAK_SEED_ENV;
 
 use crate::{exercise, random_exercise, RamBlock};
 
@@ -111,20 +112,24 @@ impl SoakFs for Fat32<RamBlock> {
     }
 }
 
-/// Run the named filesystem's soak for `budget_secs` wall-clock seconds
-/// on a `device_bytes` RAM volume. A budget of zero runs exactly one
-/// iteration (the smoke pass); otherwise iterations repeat with fresh
-/// seeds until the budget elapses.
+/// Run the named filesystem's soak on a `device_bytes` RAM volume until
+/// `deadline` passes. `None` — a plain `cargo test` — runs exactly one pass
+/// (the smoke iteration); otherwise passes repeat with fresh seeds.
 ///
 /// # Errors
 /// Returns a descriptive error (including the failing seed) when the
 /// filesystem is unknown or the exerciser finds an inconsistency.
-pub fn run_target(name: &str, device_bytes: u64, budget_secs: u64) -> Result<(), String> {
+pub fn run_target(name: &str, device_bytes: u64, deadline: Option<Instant>) -> Result<(), String> {
     match name {
-        "arxfs" => run::<ARXFS<RamBlock>>(name, device_bytes, budget_secs),
-        "ext4" => run::<Ext4<RamBlock>>(name, device_bytes, budget_secs),
-        "fat32" => run::<Fat32<RamBlock>>(name, device_bytes, budget_secs),
-        "arxfs-random" => run_random::<ARXFS<RamBlock>>(name, device_bytes, budget_secs),
+        "arxfs" => soak(name, device_bytes, deadline, exercise::<ARXFS<RamBlock>>),
+        "ext4" => soak(name, device_bytes, deadline, exercise::<Ext4<RamBlock>>),
+        "fat32" => soak(name, device_bytes, deadline, exercise::<Fat32<RamBlock>>),
+        "arxfs-random" => soak(
+            name,
+            device_bytes,
+            deadline,
+            random_exercise::<ARXFS<RamBlock>>,
+        ),
         other => Err(format!(
             "fssoak: unknown filesystem `{other}`; known: {}",
             TARGETS.join(", ")
@@ -132,54 +137,85 @@ pub fn run_target(name: &str, device_bytes: u64, budget_secs: u64) -> Result<(),
     }
 }
 
-/// Environment variable that pins the soak start seed for replay; unset
-/// draws a fresh seed each launch (`tairix_fuzzseed`).
-const FSSOAK_SEED_ENV: &str = "TAIRIX_FSSOAK_SEED";
-
-/// Resolve and log this launch's *start* seed for `target`.
+/// Drive one `pass` — a whole [`exercise()`] or [`random_exercise`] round over
+/// a freshly formatted volume — repeatedly until the budget runs out, from a
+/// fresh, logged start seed.
 ///
-/// Fresh from host entropy by default — so the run takes a different path on
-/// every launch (the issue's core requirement) — or pinned by
-/// `TAIRIX_FSSOAK_SEED` to replay a failure exactly. Logged at the start so a
-/// fresh-seed failure is still reproducible.
-fn start_seed(target: &str) -> u64 {
-    let seed = tairix_fuzzseed::resolve_seed(FSSOAK_SEED_ENV);
-    println!(
-        "fssoak {target}: start seed {seed} ({seed:#018x}); \
-         replay with {FSSOAK_SEED_ENV}={seed}"
-    );
-    seed
-}
-
-/// Drive [`random_exercise`] for one filesystem until the budget elapses,
-/// from a fresh, logged start seed.
-fn run_random<F: SoakFs>(target: &str, device_bytes: u64, budget_secs: u64) -> Result<(), String> {
-    let deadline = Instant::now() + Duration::from_secs(budget_secs);
-    let mut seed = start_seed(target);
+/// The start seed is fresh from host entropy by default, so the run takes a
+/// different path on every launch, and each pass advances it, so a long soak
+/// never replays one stream. Pinning [`FSSOAK_SEED_ENV`] replays a logged
+/// failure exactly.
+///
+/// The exerciser is a function pointer rather than a second copy of this loop
+/// per target: the budget arithmetic is the easy thing to get subtly different
+/// in two places.
+fn soak(
+    target: &str,
+    device_bytes: u64,
+    deadline: Option<Instant>,
+    pass: fn(u64, u64) -> Result<(), String>,
+) -> Result<(), String> {
+    let mut seed = tairix_fuzzseed::start(target, FSSOAK_SEED_ENV);
     loop {
-        random_exercise::<F>(device_bytes, seed)?;
+        let began = Instant::now();
+        pass(device_bytes, seed)?;
         // SplitMix64-style advance: deterministic, full-period.
         seed = seed.wrapping_add(0x9E37_79B9_7F4A_7C15);
-        if budget_secs == 0 || Instant::now() >= deadline {
-            break;
+        if !room_for_another_pass(deadline, began.elapsed()) {
+            return Ok(());
         }
     }
-    Ok(())
 }
 
-/// Drive [`exercise()`] for one filesystem until the budget elapses, from a
-/// fresh, logged start seed (only the content bytes vary by seed, so each
-/// launch exercises the fixed op sequence over different data).
-fn run<F: SoakFs>(target: &str, device_bytes: u64, budget_secs: u64) -> Result<(), String> {
-    let deadline = Instant::now() + Duration::from_secs(budget_secs);
-    let mut seed = start_seed(target);
-    loop {
-        exercise::<F>(device_bytes, seed)?;
-        // SplitMix64-style seed advance: deterministic, full-period.
-        seed = seed.wrapping_add(0x9E37_79B9_7F4A_7C15);
-        if budget_secs == 0 || Instant::now() >= deadline {
-            break;
+/// Whether `deadline` still leaves room for another pass expected to take
+/// about `pass`; always `false` without a deadline, so a plain `cargo test`
+/// runs a single pass.
+///
+/// A pass formats and fills a whole volume, so it is far too coarse to start
+/// one that cannot finish in time: checking only that the deadline has not yet
+/// passed overruns the budget by a full pass every run, and it is then the
+/// orchestrator's hung-child deadline — sized for building and starting the
+/// binary, not for another pass — that ends the soak.
+fn room_for_another_pass(deadline: Option<Instant>, pass: Duration) -> bool {
+    matches!(deadline, Some(end) if end.saturating_duration_since(Instant::now()) > pass)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{room_for_another_pass, run_target, TARGETS};
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn no_deadline_runs_a_single_pass() {
+        assert!(!room_for_another_pass(None, Duration::ZERO));
+    }
+
+    #[test]
+    fn a_pass_that_would_not_finish_in_time_is_not_started() {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        assert!(
+            !room_for_another_pass(Some(deadline), Duration::from_secs(30)),
+            "a 30 s pass must not start with 10 s of budget left"
+        );
+        assert!(room_for_another_pass(
+            Some(deadline),
+            Duration::from_secs(1)
+        ));
+    }
+
+    #[test]
+    fn an_elapsed_deadline_stops_the_soak() {
+        let past = Instant::now()
+            .checked_sub(Duration::from_secs(1))
+            .expect("an instant one second in the past exists");
+        assert!(!room_for_another_pass(Some(past), Duration::ZERO));
+    }
+
+    #[test]
+    fn an_unknown_filesystem_fails_closed() {
+        let err = run_target("zfs", 1024, None).expect_err("unknown target must not run");
+        for known in TARGETS {
+            assert!(err.contains(known), "the error should list {known}: {err}");
         }
     }
-    Ok(())
 }

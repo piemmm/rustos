@@ -43,7 +43,10 @@
 //!   timer resets the heartbeat forever, and one such guest would otherwise
 //!   stall the whole matrix behind it indefinitely. Exceeding it is
 //!   `Outcome::RuntimeCeilingExceeded`, reported apart from `Timeout` because
-//!   the two describe different faults.
+//!   the two describe different faults. A run whose *success* requires long
+//!   continuous work — a whole-RAM memtest sweep — declares its own ceiling
+//!   ([`Spec::with_runtime_ceiling`]) rather than inheriting the multiple of a
+//!   silence budget that describes no part of its work.
 //! * Kills (`SIGKILL`) the QEMU child if either deadline is hit so a wedged VM
 //!   cannot block subsequent tests.
 //! * Inherits QEMU's stdout/stderr through capture so the failure report can
@@ -540,16 +543,22 @@ impl Arch {
     }
 }
 
-/// Multiple of the inactivity budget that bounds a run's total wall clock.
+/// Multiple of the inactivity budget that bounds a run's total wall clock
+/// when the run does not declare a ceiling of its own.
 ///
 /// The inactivity budget is already sized as the longest a *healthy* guest
 /// may legitimately fall silent, which is an upper bound on any single phase
-/// of its run; a healthy guest completes well inside one such budget. Two
+/// of its run; such a guest completes well inside one such budget. Two
 /// whole budgets of wall clock therefore leave ample margin for host
 /// co-scheduling — the matrix admits guests only up to a third of the host's
 /// logical CPUs, so contention stretches a run by far less than this — while
-/// still bounding a guest that has genuinely wedged. See
-/// [`Spec::runtime_ceiling`].
+/// still bounding a guest that has genuinely wedged.
+///
+/// The derivation holds only while total runtime really is a small multiple of
+/// one phase. A guest whose success *is* one long continuous sweep breaks that
+/// premise — its runtime scales with the work and with host load, not with how
+/// long it may go quiet — so it declares an explicit ceiling instead
+/// ([`Spec::with_runtime_ceiling`]). See [`Spec::runtime_ceiling`].
 const RUNTIME_CEILING_BUDGETS: u32 = 2;
 
 /// Architecture-neutral configuration for a single QEMU test invocation.
@@ -580,6 +589,12 @@ pub struct Spec {
     /// total wall clock, because a guest that keeps printing while never
     /// completing resets this heartbeat forever.
     pub timeout: Duration,
+    /// Absolute wall-clock ceiling this run declared for itself, for a guest
+    /// whose success requires long continuous work. `None` derives one from
+    /// [`Spec::timeout`]; set it through [`Spec::with_runtime_ceiling`] and
+    /// read it through [`Spec::runtime_ceiling`], which is the only bound the
+    /// runner enforces.
+    declared_runtime_ceiling: Option<Duration>,
     /// Backing block devices attached as `virtio-blk-pci` functions, in
     /// declaration order. Empty for tests that need no storage.
     pub block_devices: Vec<BlockDevice>,
@@ -702,6 +717,7 @@ impl Spec {
             kernel: kernel.into(),
             cpus: 1,
             timeout: Duration::from_secs(60),
+            declared_runtime_ceiling: None,
             block_devices: Vec::new(),
             net_devices: Vec::new(),
             display_ramfb: false,
@@ -743,11 +759,35 @@ impl Spec {
     /// without this ceiling its run never ends and the whole matrix stalls
     /// behind it. Exceeding it is [`Outcome::RuntimeCeilingExceeded`].
     ///
-    /// Derived from the inactivity budget rather than declared separately, so
-    /// each test carries one budget and the two bounds cannot drift apart.
+    /// Derived from the inactivity budget unless the run declared a ceiling of
+    /// its own ([`Spec::with_runtime_ceiling`]), so an ordinary test carries
+    /// one number and its two bounds cannot drift apart.
+    ///
+    /// A declared ceiling below the inactivity budget would fire before a
+    /// silent guest could ever be declared hung, so the budget is the floor.
     #[must_use]
     pub fn runtime_ceiling(&self) -> Duration {
-        self.timeout * RUNTIME_CEILING_BUDGETS
+        self.declared_runtime_ceiling
+            .unwrap_or(self.timeout * RUNTIME_CEILING_BUDGETS)
+            .max(self.timeout)
+    }
+
+    /// Declare this run's absolute wall-clock ceiling explicitly, for a guest
+    /// whose success genuinely requires long continuous work.
+    ///
+    /// The derived default (twice the inactivity budget) assumes total runtime
+    /// is a small multiple of one phase of a run. That is false for a guest
+    /// whose whole job is one long sweep — the pre-boot Supervisor's
+    /// whole-RAM memtest takeover, which must complete a full pass over guest
+    /// RAM before the harness resets it: its runtime scales with the RAM it
+    /// sweeps and with host contention, so a multiple of "how long it may go
+    /// quiet" bounds nothing about it and kills it mid-sweep under load.
+    /// Declaring the ceiling keeps the silence budget sharp for what it does
+    /// measure while bounding total runtime by the work actually asked for.
+    #[must_use]
+    pub fn with_runtime_ceiling(mut self, ceiling: Duration) -> Self {
+        self.declared_runtime_ceiling = Some(ceiling);
+        self
     }
 
     /// Accept a guest-initiated machine **reset** (QEMU exit status `0` under
@@ -786,6 +826,7 @@ impl Spec {
             kernel: kernel.into(),
             cpus: 1,
             timeout: Duration::from_secs(60),
+            declared_runtime_ceiling: None,
             block_devices: Vec::new(),
             net_devices: Vec::new(),
             display_ramfb: false,
@@ -813,6 +854,7 @@ impl Spec {
             kernel: kernel.into(),
             cpus: 1,
             timeout: Duration::from_secs(60),
+            declared_runtime_ceiling: None,
             block_devices: Vec::new(),
             net_devices: Vec::new(),
             display_ramfb: false,
@@ -2689,6 +2731,29 @@ mod tests {
     }
 
     #[test]
+    fn a_declared_runtime_ceiling_replaces_the_derived_one_and_keeps_the_budget_sharp() {
+        // A guest whose success is one long sweep needs a ceiling sized to that
+        // work, not to a multiple of how long it may go quiet — while the
+        // silence budget stays exactly as tight as it was.
+        let spec = Spec::for_aarch64_kernel("/tmp/k")
+            .with_timeout(Duration::from_secs(60))
+            .with_runtime_ceiling(Duration::from_mins(15));
+        assert_eq!(spec.runtime_ceiling(), Duration::from_mins(15));
+        assert_eq!(spec.timeout, Duration::from_secs(60));
+    }
+
+    #[test]
+    fn a_declared_ceiling_below_the_inactivity_budget_is_floored_at_it() {
+        // A ceiling inside the silence budget would end every run before a
+        // silent guest could ever be diagnosed as hung, collapsing the two
+        // distinct faults into one; the budget is therefore the floor.
+        let spec = Spec::for_x86_64_kernel("/tmp/k")
+            .with_timeout(Duration::from_secs(60))
+            .with_runtime_ceiling(Duration::from_secs(5));
+        assert_eq!(spec.runtime_ceiling(), Duration::from_secs(60));
+    }
+
+    #[test]
     fn spec_for_x86_64_defaults_are_architecture_neutral() {
         // The generic Spec carries only architecture-neutral fields; the
         // x86_64-specific defaults (RAM size, OVMF flags) are owned by
@@ -3233,6 +3298,7 @@ mod tests {
             kernel,
             cpus: 1,
             timeout: Duration::from_secs(60),
+            declared_runtime_ceiling: None,
             block_devices: vec![BlockDevice {
                 image: PathBuf::from("/definitely/not/a/real/disk.img"),
             }],

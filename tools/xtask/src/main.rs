@@ -389,6 +389,19 @@ pub(crate) const DEFAULT_COMMAND_TIMEOUT: Duration = Duration::from_mins(45);
 /// build, never by default.
 pub(crate) const LONG_BUILD_COMMAND_TIMEOUT: Duration = Duration::from_hours(2);
 
+/// Wall-clock deadline for a child that is *meant* to run for `budget`: a
+/// soaking fuzz harness, property model, or filesystem soak.
+///
+/// Such a child is doing exactly what it was asked while its budget runs, so
+/// its deadline is that budget plus an ordinary step's allowance — far more
+/// than compiling and starting one test binary needs, and thus reached only by
+/// a child that has genuinely stopped making progress. Handing one
+/// [`DEFAULT_COMMAND_TIMEOUT`] instead kills every soak whose budget outlasts
+/// it, so the one definition lives here and every soak orchestrator uses it.
+pub(crate) fn soak_deadline(budget: Duration) -> Duration {
+    budget.saturating_add(DEFAULT_COMMAND_TIMEOUT)
+}
+
 /// Environment variable that raises every [`Context::run`] /
 /// [`Context::run_with_timeout`] budget for a slower machine, without
 /// editing either constant above. Unset by default; see
@@ -708,6 +721,30 @@ mod tests {
             "grandchild pid {grandchild_pid} should have been killed along with the rest \
              of the process group, not left running"
         );
+    }
+
+    #[test]
+    fn soak_deadline_outlasts_the_budget_it_covers() {
+        // A soak child still running near the end of its budget is doing the
+        // work it was asked to; a deadline at or below the budget kills it.
+        for budget in [
+            Duration::from_secs(5),
+            Duration::from_hours(7),
+            Duration::from_hours(24),
+        ] {
+            let deadline = soak_deadline(budget);
+            assert!(
+                deadline > budget,
+                "deadline {deadline:?} must outlast the budget {budget:?}"
+            );
+            assert_eq!(deadline, budget + DEFAULT_COMMAND_TIMEOUT);
+        }
+    }
+
+    #[test]
+    fn soak_deadline_saturates_instead_of_overflowing() {
+        // An operator-supplied budget must never turn a deadline into a panic.
+        assert_eq!(soak_deadline(Duration::MAX), Duration::MAX);
     }
 
     #[test]

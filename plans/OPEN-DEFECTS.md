@@ -437,6 +437,16 @@ The open items, in priority order:
   float registers. Confirm first, then fix behind the Arch HAL
   context-switch slice — the same slice x86_64 needs for user-space SSE.
 
+- **D38 — the nightly soak killed every filesystem soak, and a memtest
+  sweep mid-progress — DONE.** Three wall-clock defects in the soak
+  tooling: an `fssoak` child given an ordinary step's 45-minute deadline
+  while being told to run for seven hours (so any budget above 45 minutes
+  was unreachable by construction), a soak loop that always started one
+  pass more than fitted its budget, and a memtest-takeover guest killed
+  by a ceiling derived from a silence budget that describes no part of a
+  whole-RAM sweep. All fixed structurally, none by a retry. Does **not**
+  close D14, whose 120 s is an inactivity budget, not a ceiling.
+
 These are **distinct in kind**: D1 finishes an interrupt-model fix, D2
 and D4 are §27 foundational-completeness defects, D3 is an Arch-HAL
 parity gap, D5 was a test-harness idle-loop lost-wakeup (fixed), D6
@@ -2238,6 +2248,78 @@ rather than twice (§2.21).
 **Regression cover (lands with the fix, §7).** The two QEMU cases above
 plus the Arch HAL conformance case, on every port that reports FP
 support — never closed on inspection alone.
+
+## D38 — the nightly soak killed every filesystem soak, and a memtest sweep mid-progress — DONE
+
+Two independent wall-clock defects in the soak tooling, both found in the
+same seven-hour nightly run (`soak.yml`, run 31344475389); both fixed.
+
+**1. A soak child was given an ordinary step's deadline.** All four
+`fssoak` jobs died at 46 minutes with
+`fssoak <fs> (25200 s) exceeded its 2700s timeout and was killed`, having
+written a full `test result: ok` line seconds earlier — the soak was
+*working*, and the orchestrator killed it for taking the time it was told
+to take. `fssoak::run` handed each `cargo test` child `Context::run`,
+whose budget is the 45-minute ordinary-step allowance, while exporting a
+seven-hour budget to that same child: any budget above 45 minutes was
+therefore unreachable by construction, so the nightly could never have
+passed. The fuzz and proptest orchestrators already had the right rule in
+`parallel::Job::with_soak_budget`, which is why only `fssoak` failed.
+Fixed by lifting that rule into one shared `soak_deadline(budget)`
+(`tools/xtask/src/main.rs`) — the budget plus an ordinary step's
+allowance, saturating — and routing both `with_soak_budget` and
+`fssoak::run` through it, so a fourth orchestrator cannot reintroduce the
+divergence. The budget/device-size environment names now come from
+`tairix-fuzzseed` too, where the fuzz/proptest names already live, so the
+side that exports and the side that reads cannot drift.
+
+**2. A soak loop overran its budget by a whole pass.** The harness
+checked the deadline only *after* an iteration, so it always started one
+more pass than fitted — on a 1 GiB volume that is 28 s (arxfs) of
+overrun, and it is the orchestrator's kill deadline, not the budget, that
+ends such a run. The loop now starts another pass only while a pass of
+the last one's length still fits, and the two near-identical per-target
+loops (`run`/`run_random`) collapsed into one that takes the exerciser as
+a function pointer, since the budget arithmetic is what must not diverge.
+
+**3. A progressing memtest sweep was killed by a ceiling that described
+no part of it.** `supervisor-memtest-takeover-qemu-{aarch64,riscv64}`
+both failed at 120.03 s while their guests were sweeping normally (49% of
+RAM, zero errors), which failed the whole `test` soak job. `Spec`'s
+absolute ceiling is derived as twice the inactivity budget (D31), a
+derivation that assumes total runtime is a small multiple of one phase.
+These verticals break that premise: their success *is* one full sweep of
+guest RAM, so their runtime scales with the work and with host
+contention. Measured: 40 s for boot, sweep, and reset on an idle host;
+~4 minutes for the same sweep under the nightly's ~95 concurrent jobs —
+so the 120 s ceiling was load-dependent by construction, exactly the
+§7 flaky timeout, and would have kept failing every night. A run may now
+declare its own ceiling (`Spec::with_runtime_ceiling`, floored at the
+silence budget so the two faults stay distinguishable) and the three
+takeover verticals declare 15 minutes, over three times the loaded
+measurement. The derived default is unchanged for every other vertical,
+and the silence budget stays 60 s, so a genuinely hung guest is still
+caught as fast as before.
+
+**Not a fix for D14.** The open `sysmon-qemu-aarch64` load-dependent
+timeout is the same *class* but a different bound: that vertical's own
+120 s is its **inactivity** budget, so it is a work-heavy guest starved
+into real silence, not a progressing guest cut off by a ceiling. It still
+needs its own root-cause (bounded QEMU concurrency, or a budget sized to
+its work); nothing here closes it.
+
+**Regression cover.** `soak_deadline` outlasts every budget it is given
+and saturates instead of overflowing; every `fssoak` mode's deadline
+outlasts its budget, with the ordinary-step budget asserted too short to
+stand in for it; the pass-boundary predicate refuses a pass that would
+not finish, admits one that would, and runs exactly one pass without a
+deadline; a declared ceiling replaces the derived one while leaving the
+silence budget untouched, and is floored at that budget; every takeover
+vertical's declared ceiling outlasts its derived one. End-to-end:
+`cargo xtask fssoak --target fat32 --secs 25` now runs its child under a
+2725 s deadline (was 2700 s) and stops at 20.11 s, inside its budget; the
+three takeover verticals pass in 34.4 s (aarch64), 37.2 s (riscv64), and
+19.0 s (x86_64) against their 15-minute ceiling.
 
 ## Non-goals / do not do
 

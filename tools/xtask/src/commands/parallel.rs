@@ -59,7 +59,9 @@ use std::sync::{Condvar, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use crate::{await_within, effective_timeout, spawn_in_own_group, DEFAULT_COMMAND_TIMEOUT};
+use crate::{
+    await_within, effective_timeout, soak_deadline, spawn_in_own_group, DEFAULT_COMMAND_TIMEOUT,
+};
 
 /// What a [`Job`] actually does when run.
 enum Work {
@@ -114,20 +116,18 @@ impl Job {
         self
     }
 
-    /// Budget this job to outlast an inner soak of `harness`.
+    /// Budget this job to outlast an inner soak of `harness`, through the
+    /// shared [`soak_deadline`] policy every soak orchestrator uses.
     ///
     /// A soaking fuzz harness or property model is *supposed* to run for its
     /// whole budget, so the job must outlast it or the runner would kill work
     /// doing exactly what it was asked to — a nightly 24-hour soak most of
-    /// all. The allowance added on top is an ordinary step's entire budget,
-    /// far more than compiling and starting one test binary needs, so only a
-    /// harness that has genuinely stopped making progress is ever cut short.
-    /// `None` — a single smoke iteration rather than a soak — simply keeps
-    /// the ordinary budget.
+    /// all. `None` — a single smoke iteration rather than a soak — simply
+    /// keeps the ordinary budget.
     #[must_use]
     pub fn with_soak_budget(self, harness: Option<Duration>) -> Self {
         match harness {
-            Some(soak) => self.with_budget(soak.saturating_add(DEFAULT_COMMAND_TIMEOUT)),
+            Some(soak) => self.with_budget(soak_deadline(soak)),
             None => self,
         }
     }

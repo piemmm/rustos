@@ -265,6 +265,7 @@ mod tests {
             kernel: PathBuf::from("/tmp/k.elf"),
             cpus,
             timeout: Duration::from_secs(60),
+            declared_runtime_ceiling: None,
             block_devices: Vec::new(),
             net_devices: Vec::new(),
             display_ramfb: false,

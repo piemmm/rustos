@@ -48,7 +48,7 @@
 #   (no kind)      same as `both`: the §19.6 fuzz and §19.7 proptest soaks
 #   fuzz           run only the §19.6 fuzz harnesses
 #   proptest       run only the §19.7 proptest models
-#   fssoak         run only the filesystems.md filesystem soak
+#   fssoak         run only the docs/src/filesystem/soak.md filesystem soak
 #   test           run only the §7 repeated-test soak
 #   both           run the fuzz and proptest soaks
 #   all            run fuzz, proptest, the filesystem soak, and the test soak
@@ -169,8 +169,8 @@ if [ "$kind" = "both" ] || [ "$kind" = "all" ] || [ "$kind" = "proptest" ]; then
         [ -n "$m" ] && launch "proptest-$m" proptest "$m"
     done < <(enumerate proptest)
 fi
-# The filesystems.md filesystem soak: one job per registered target
-# (arxfs, ext4, fat32, and the randomized arxfs-random), each
+# The docs/src/filesystem/soak.md filesystem soak: one job per registered
+# target (arxfs, ext4, fat32, and the randomized arxfs-random), each
 # formatting a ≥1 GiB RAM volume and exercising it for the per-job
 # budget. The registry (`cargo xtask fssoak --list`) is the single
 # source of truth, so this never hard-codes the filesystem list.

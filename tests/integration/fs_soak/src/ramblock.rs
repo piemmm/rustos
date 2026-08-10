@@ -8,7 +8,7 @@ use crate::SECTOR_BYTES;
 /// A zero-initialised, RAM-backed [`Block`] device addressing
 /// [`SECTOR_BYTES`]-byte logical blocks. The whole image lives in a
 /// `Vec`, so there is no real disk and no `mkfs` shell-out
-/// (`.junie/filesystems.md`).
+/// (`docs/src/filesystem/soak.md`).
 pub struct RamBlock {
     store: Vec<u8>,
 }

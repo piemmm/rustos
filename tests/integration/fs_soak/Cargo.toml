@@ -1,6 +1,6 @@
 [package]
 name = "tairix-test-fs-soak"
-description = "In-RAM filesystem soak harness (filesystems.md). Formats a RAM-backed Block device with each first-party formatter (arxfs/ext4/fat32) and drives one generic, FS-agnostic exerciser over the frozen FilesystemRead/Write ABI: create/write/read-back/truncate/remove round-trips across nested directories with remount re-verification, and the fail-closed extremes (NoSpace on a full data region, Busy on duplicate create / non-empty rmdir, LengthOutOfRange on bad names). A fourth target, arxfs-random, additionally drives arxfs through a randomized, model-checked op mix (create/move/delete/extend/truncate in a different order each run) validated byte-for-byte against an oracle model with periodic remount re-verification. The nightly soak runs every target in parallel under a wall-clock budget; no mkfs shell-out and no parallel re-implementation of any FS semantics (AGENTS.md §2.2)."
+description = "In-RAM filesystem soak harness (docs/src/filesystem/soak.md). Formats a RAM-backed Block device with each first-party formatter (arxfs/ext4/fat32) and drives one generic, FS-agnostic exerciser over the frozen FilesystemRead/Write ABI: create/write/read-back/truncate/remove round-trips across nested directories with remount re-verification, and the fail-closed extremes (NoSpace on a full data region, Busy on duplicate create / non-empty rmdir, LengthOutOfRange on bad names). A fourth target, arxfs-random, additionally drives arxfs through a randomized, model-checked op mix (create/move/delete/extend/truncate in a different order each run) validated byte-for-byte against an oracle model with periodic remount re-verification. The nightly soak runs every target in parallel under a wall-clock budget; no mkfs shell-out and no parallel re-implementation of any FS semantics (AGENTS.md §2.2)."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -19,9 +19,11 @@ path = "src/lib.rs"
 # semantics (AGENTS.md §2.2).
 [dependencies]
 tairix-abi = { path = "../../../lib/abi", version = "=0.0.0" }
-# Shared per-run start-seed selection + start-of-test seed logging, so the
-# soak picks (and replays) its seed through the one seam every fuzz/proptest
-# harness uses (`AGENTS.md` §2.2). Test scaffolding only.
+# Shared per-run start-seed selection, start-of-test seed logging, budget
+# deadline, and the names of the environment variables the orchestrator
+# exports, so the soak reads exactly what `cargo xtask fssoak` writes through
+# the one seam every fuzz/proptest harness uses (`AGENTS.md` §2.2). Test
+# scaffolding only.
 tairix-fuzzseed = { path = "../../fuzzseed", version = "=0.0.0" }
 tairix-drv-fs-arxfs = { path = "../../../drivers/filesystem/arxfs", version = "=0.0.0" }
 tairix-drv-fs-ext4 = { path = "../../../drivers/filesystem/ext4", version = "=0.0.0" }

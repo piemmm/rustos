@@ -8562,6 +8562,20 @@ const MEMTEST_TAKEOVER_BINARIES: [&str; 3] = [
 /// (`tairix_qemu::Spec::reset_success_marker`).
 const MEMTEST_TAKEOVER_LOOP_MARKER: &str = "memtest: completed test loop";
 
+/// Absolute wall-clock ceiling for a `memtest` takeover run
+/// (`tairix_qemu::Spec::with_runtime_ceiling`).
+///
+/// These verticals are the one shape the derived ceiling (twice the silence
+/// budget) describes wrongly: success *is* a full sweep of guest RAM, so the
+/// run's length is set by the work and by host contention, not by how long the
+/// guest may go quiet. Measured: 40 s for boot, one 256 MiB sweep, and the
+/// reset on an idle host; ~4 minutes for the same sweep in the nightly soak,
+/// where ~95 concurrent jobs share the runner. Fifteen minutes is over three
+/// times that loaded measurement, so a progressing guest is never cut off,
+/// while a guest that wedges mid-sweep yet keeps printing is still bounded
+/// rather than stalling the matrix forever.
+const MEMTEST_TAKEOVER_RUNTIME_CEILING: Duration = Duration::from_mins(15);
+
 /// Attach `t`'s virtio-net interface(s) to `spec` and start the harness-side
 /// `netpeer` link peer, returning the updated spec, the running peer (if any),
 /// and the wire's reserved socket paths. Every frame is captured to a
@@ -8677,6 +8691,29 @@ fn attach_net_peer(
     Ok((spec, peer, socks))
 }
 
+/// Apply the `memtest` takeover verticals' run gates to `spec`, or return it
+/// untouched for any other `binary`.
+///
+/// Those verticals test all of RAM *continuously* and never stop on their own
+/// (`plans/NEW-SUPERVISOR.md` §9 Stage E): the machine only leaves the test by
+/// a reset. Once the guest completes a full test loop — printing
+/// [`MEMTEST_TAKEOVER_LOOP_MARKER`] — a QEMU-monitor `system_reset` ends the
+/// endless test deterministically. Under `-no-reboot` that reset exits QEMU
+/// with status 0; it is accepted as a pass only when the marker was printed
+/// first, so a crash that reset before a completed loop still fails loud. The
+/// declared runtime ceiling replaces the derived one, which describes no part
+/// of a whole-RAM sweep. The gates are identical on all three bare-metal
+/// targets, and being a pure function of the binary name they are assertable
+/// without spawning a guest.
+fn memtest_takeover_gates(spec: Spec, binary: &str) -> Spec {
+    if !MEMTEST_TAKEOVER_BINARIES.contains(&binary) {
+        return spec;
+    }
+    spec.with_reset_success_marker(MEMTEST_TAKEOVER_LOOP_MARKER)
+        .with_monitor_command(MEMTEST_TAKEOVER_LOOP_MARKER, 1, "system_reset")
+        .with_runtime_ceiling(MEMTEST_TAKEOVER_RUNTIME_CEILING)
+}
+
 /// Attach `t`'s remaining devices (network capture, display, input, the
 /// scripted serial dialogue) to `spec` and drive the guest to its outcome.
 /// `kernel` is the enrolment's binary path, which names the sibling capture
@@ -8686,19 +8723,7 @@ fn finish_run(t: &QemuTest, kernel: &Path, spec: Spec) -> Result<(), String> {
     // removes its file, which would pull the wire out from under the guest.
     let (mut spec, peer, _wire_socks) = attach_net_peer(t, kernel, spec)?;
 
-    // The `memtest` takeover verticals test all of RAM *continuously* and
-    // never stop on their own (`plans/NEW-SUPERVISOR.md` §9 Stage E): the
-    // machine only leaves the test by a reset. Once the guest completes a full
-    // test loop — printing MEMTEST_TAKEOVER_LOOP_MARKER — issue a QEMU-monitor
-    // `system_reset` to end the endless test deterministically. Under
-    // `-no-reboot` that reset exits QEMU with status 0; accept it as a pass
-    // only when the marker was printed first, so a crash that reset before a
-    // completed loop still fails loud. The gate is identical on all three
-    // bare-metal targets.
-    if MEMTEST_TAKEOVER_BINARIES.contains(&t.binary) {
-        spec = spec.with_reset_success_marker(MEMTEST_TAKEOVER_LOOP_MARKER);
-        spec = spec.with_monitor_command(MEMTEST_TAKEOVER_LOOP_MARKER, 1, "system_reset");
-    }
+    spec = memtest_takeover_gates(spec, t.binary);
 
     // Attach a QEMU `ramfb` display device for the framebuffer vertical.
     if t.ramfb {
@@ -8993,6 +9018,61 @@ mod tests {
             );
         }
         assert_eq!(MEMTEST_TAKEOVER_LOOP_MARKER, "memtest: completed test loop");
+    }
+
+    /// A takeover run must be bounded by a ceiling sized to its sweep, not by
+    /// the default multiple of its silence budget: one full sweep takes ~35 s
+    /// on an idle host and ~4 minutes in the nightly soak, so the derived
+    /// 2x-of-60 s ceiling killed a healthy, progressing guest mid-sweep.
+    #[test]
+    fn a_memtest_takeover_run_is_bounded_by_its_sweep_not_by_its_silence_budget() {
+        use super::{
+            memtest_takeover_gates, MEMTEST_TAKEOVER_BINARIES, MEMTEST_TAKEOVER_RUNTIME_CEILING,
+        };
+        use tairix_qemu::Spec;
+
+        for binary in MEMTEST_TAKEOVER_BINARIES {
+            let t = TESTS
+                .iter()
+                .find(|t| t.binary == binary)
+                .expect("every takeover binary is enrolled");
+            let plain = Spec::for_aarch64_kernel("/tmp/k").with_timeout(t.timeout);
+            let derived = plain.runtime_ceiling();
+            let gated = memtest_takeover_gates(plain, binary);
+            assert_eq!(
+                gated.runtime_ceiling(),
+                MEMTEST_TAKEOVER_RUNTIME_CEILING,
+                "{binary}: the takeover gates must declare the sweep-sized ceiling",
+            );
+            assert!(
+                gated.runtime_ceiling() > derived,
+                "{binary}: the declared ceiling must outlast the derived {derived:?}, \
+                 which cut a progressing sweep short",
+            );
+            // The measured loaded sweep, with headroom for a worse night.
+            assert!(MEMTEST_TAKEOVER_RUNTIME_CEILING >= Duration::from_mins(12));
+            // The silence budget stays exactly as tight as it was.
+            assert_eq!(gated.timeout, t.timeout);
+        }
+    }
+
+    /// Only the takeover verticals get those gates: every other enrolment
+    /// keeps the derived ceiling, so the carve-out cannot silently widen.
+    #[test]
+    fn a_non_takeover_run_keeps_the_derived_ceiling() {
+        use super::{memtest_takeover_gates, MEMTEST_TAKEOVER_BINARIES};
+        use tairix_qemu::Spec;
+
+        let other = TESTS
+            .iter()
+            .find(|t| !MEMTEST_TAKEOVER_BINARIES.contains(&t.binary))
+            .expect("the matrix enrols more than the takeover verticals");
+        let plain = Spec::for_aarch64_kernel("/tmp/k").with_timeout(other.timeout);
+        let derived = plain.runtime_ceiling();
+        assert_eq!(
+            memtest_takeover_gates(plain, other.binary).runtime_ceiling(),
+            derived,
+        );
     }
 
     /// The memory-stability vertical's serial-script marker is the leading

@@ -85,16 +85,36 @@ cargo xtask fssoak --target ext4 --secs 30
 `cargo xtask fssoak` exports two env seams the integration tests read:
 `TAIRIX_FSSOAK_BUDGET_SECS` (loop each filesystem until the budget
 elapses) and `TAIRIX_FSSOAK_BYTES` (the device size, ≥ 1 GiB for the
-soak). A plain `cargo test -p tairix-test-fs-soak` leaves both unset and
-runs a single smoke iteration on a 320 MiB device (above FAT32's
-~256 MiB floor; ext4 still gets two block groups).
+soak). Both names are defined once, in `tairix-fuzzseed`, and used by the
+orchestrator that writes them and the harness that reads them, so the two
+sides cannot drift apart. A plain `cargo test -p tairix-test-fs-soak`
+leaves both unset and runs a single smoke iteration on a 320 MiB device
+(above FAT32's ~256 MiB floor; ext4 still gets two block groups).
+
+## Budget and deadline
+
+Two clocks bound a soak, and they are deliberately different:
+
+- **The budget** is what a target is *asked* to run for. The loop starts
+  another pass only while a pass of the same length as the last still
+  fits, so a soak stops just inside its budget instead of overrunning it
+  by a whole pass — a pass formats and fills a whole volume, so it is far
+  too coarse to start one that cannot finish in time.
+- **The deadline** is when the orchestrator gives up on a child and kills
+  its process group. It is that child's own budget plus an ordinary
+  step's allowance (the shared `soak_deadline` every soak orchestrator
+  uses), which covers building and starting the test binary with room to
+  spare. A deadline shorter than the budget would kill every soak longer
+  than it — work doing exactly what it was told to — and report it as a
+  hang.
 
 ## Parallelism
 
 The nightly soak runs every target **in parallel**, one job and one log
 each, through `tools/ci/soak.sh`'s `fssoak` kind (also part of `all`),
-sharing the soak's wall-clock budget alongside the fuzz, proptest, and
-repeated-test jobs. The registry is the single source of truth —
+alongside the fuzz, proptest, and repeated-test jobs. Every job gets the
+whole wall-clock budget and they overlap, so the window is the budget,
+not the sum of the jobs. The registry is the single source of truth —
 `soak.sh` enumerates `cargo xtask fssoak --list` and never hard-codes
 the filesystem list, so `arxfs-random` runs concurrently with the
 fixed-sequence `arxfs`/`ext4`/`fat32` jobs. Each ≥ 1 GiB volume in

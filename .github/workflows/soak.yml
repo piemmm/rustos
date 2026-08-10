@@ -1,13 +1,13 @@
 name: soak
 
 # Nightly soak window (AGENTS.md §19.6 fuzz, §19.7 proptest, the §7
-# repeated-test soak, and the filesystems.md filesystem soak). The default
-# `all` runs every fuzz harness, every proptest model, every filesystem soak
-# (arxfs/ext4/fat32, each on a ≥1 GiB RAM volume — budget ≥ 3 GiB of runner
-# RAM for the three in parallel), and the whole test matrix in parallel. This
-# is enough exposure to surface a flake too rare to catch in the per-PR
-# single-pass test run (where `ci` runs each test once) without holding the
-# soak runner all day.
+# repeated-test soak, and the docs/src/filesystem/soak.md filesystem soak).
+# The default `all` runs every fuzz harness, every proptest model, every
+# registered filesystem soak (each target on its own ≥1 GiB RAM volume, so
+# budget ≥1 GiB of runner RAM per target running in parallel), and the whole
+# test matrix in parallel. This is enough exposure to surface a flake too rare
+# to catch in the per-PR single-pass test run (where `ci` runs each test once)
+# without holding the soak runner all day.
 #
 # The run starts at 00:00 UTC every day and is budgeted to run for seven
 # hours, a fixed overnight window. GitHub's cron is UTC-only, so the schedule

@@ -25,10 +25,14 @@
 //!    environment variable and the harness loops its continuing stream until
 //!    [`within_budget`] says the time is up.
 //!
+//! It also owns the *names* of those environment variables, so the
+//! orchestrator that exports one and the harness that reads it cannot drift
+//! apart on a spelling.
+//!
 //! This crate is **test scaffolding only**. It lives under `tests/` (not
 //! `lib/`, which is reserved for code that ships inside TAIRiX) and is pulled
-//! in solely as a `[dev-dependencies]` entry of the harness crates, so it is
-//! never part of any TAIRiX build graph.
+//! in only by the host harness crates and the `tools/xtask` orchestrator, so
+//! it is never part of any TAIRiX build graph.
 //!
 //! It deliberately depends on nothing: the seed is a *test-input* seed, not a
 //! security seed, so it must not route through `lib/crypto` / `lib/rng`
@@ -52,6 +56,19 @@ pub const PROPTEST_SEED_ENV: &str = "TAIRIX_PROPTEST_SEED";
 /// Wall-clock budget (seconds) the `cargo xtask proptest` orchestrator exports
 /// for a soak; unset or zero selects the single smoke iteration.
 pub const PROPTEST_BUDGET_ENV: &str = "TAIRIX_PROPTEST_BUDGET_SECS";
+
+/// Seed environment variable the filesystem soak reads. The orchestrator
+/// leaves it unset so each run takes a new path; a developer pins it to replay
+/// a logged failure.
+pub const FSSOAK_SEED_ENV: &str = "TAIRIX_FSSOAK_SEED";
+
+/// Wall-clock budget (seconds) the `cargo xtask fssoak` orchestrator exports
+/// for a soak; unset or zero selects the single smoke iteration.
+pub const FSSOAK_BUDGET_ENV: &str = "TAIRIX_FSSOAK_BUDGET_SECS";
+
+/// RAM device size (bytes) the `cargo xtask fssoak` orchestrator exports for a
+/// soak; unset selects the harness's own smaller smoke device.
+pub const FSSOAK_BYTES_ENV: &str = "TAIRIX_FSSOAK_BYTES";
 
 /// `SplitMix64` finaliser: spreads the bits of `x` so even sequential inputs
 /// (a counter, a job index) map to well-separated outputs.

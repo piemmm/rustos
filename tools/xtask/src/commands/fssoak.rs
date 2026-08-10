@@ -1,7 +1,7 @@
 //! `cargo xtask fssoak` — drive the in-RAM filesystem soak.
 //!
-//! `.junie/filesystems.md` requires a filesystem soak that formats a
-//! ≥ 1 GiB RAM volume with each first-party formatter and exercises it
+//! `docs/src/filesystem/soak.md` specifies a filesystem soak that formats
+//! a ≥ 1 GiB RAM volume with each first-party formatter and exercises it
 //! for integrity and the fail-closed extremes, for `arxfs`, `ext4`, and
 //! `fat32` **in parallel**. This orchestrator is the single place that
 //! runs each filesystem's soak for a wall-clock budget, mirroring the
@@ -11,12 +11,18 @@
 //!
 //! Each [`Target`] names a `#[test]` entry point in the
 //! `tairix-test-fs-soak` integration binary (`tests/fs_soak.rs`). The
-//! orchestrator exports `TAIRIX_FSSOAK_BUDGET_SECS` (loop until it
-//! elapses) and `TAIRIX_FSSOAK_BYTES` (the ≥ 1 GiB device size); a plain
-//! `cargo test` leaves both unset and runs a single smoke iteration on a
-//! smaller device instead. A target that finds an inconsistency, hangs,
-//! or otherwise fails its invariant fails the command — the soak fails
+//! orchestrator exports the budget and device-size seams the harness
+//! reads ([`FSSOAK_BUDGET_ENV`] and [`FSSOAK_BYTES_ENV`], named once in
+//! `tairix-fuzzseed` so both sides cannot drift); a plain `cargo test`
+//! leaves both unset and runs a single smoke iteration on a smaller
+//! device instead. A target that finds an inconsistency, hangs, or
+//! otherwise fails its invariant fails the command — the soak fails
 //! closed.
+//!
+//! A soaking target is meant to occupy its whole budget, so each child
+//! gets the shared [`soak_deadline`](crate::soak_deadline) rather than an
+//! ordinary step's, which expires mid-soak and reports work that was
+//! doing exactly what it was asked as a hang.
 //!
 //! The per-target fan-out into parallel jobs is `tools/ci/soak.sh`'s job
 //! (like fuzz/proptest); this command runs one target at a time.
@@ -26,6 +32,8 @@
 
 use std::ffi::OsString;
 use std::time::Duration;
+
+use tairix_fuzzseed::{FSSOAK_BUDGET_ENV, FSSOAK_BYTES_ENV};
 
 use crate::Context;
 
@@ -47,9 +55,9 @@ const PACKAGE: &str = "tairix-test-fs-soak";
 const TEST_BIN: &str = "fs_soak";
 
 /// Device size, in bytes, the soak formats: the 1 GiB minimum from
-/// `.junie/filesystems.md`. `--quick` keeps the full size and simply
-/// runs fewer iterations (budget-bounded) rather than shrinking below
-/// the spec'd minimum.
+/// `docs/src/filesystem/soak.md`. `--quick` keeps the full size and
+/// simply runs fewer iterations (budget-bounded) rather than shrinking
+/// below the spec'd minimum.
 const SOAK_DEVICE_BYTES: u64 = 1024 * 1024 * 1024;
 
 /// The closed set of soak filesystems, in run order. Mirrors the
@@ -235,10 +243,10 @@ pub fn run(ctx: &Context, opts: &Options) -> Result<(), String> {
             t.test_fn,
             "--nocapture",
         ]);
-        cmd.env("TAIRIX_FSSOAK_BUDGET_SECS", budget.as_secs().to_string());
-        cmd.env("TAIRIX_FSSOAK_BYTES", SOAK_DEVICE_BYTES.to_string());
+        cmd.env(FSSOAK_BUDGET_ENV, budget.as_secs().to_string());
+        cmd.env(FSSOAK_BYTES_ENV, SOAK_DEVICE_BYTES.to_string());
         let label = format!("fssoak {} ({} s)", t.name, budget.as_secs());
-        ctx.run(&label, cmd)?;
+        ctx.run_with_timeout(&label, cmd, crate::soak_deadline(budget))?;
     }
     Ok(())
 }
@@ -247,6 +255,7 @@ pub fn run(ctx: &Context, opts: &Options) -> Result<(), String> {
 mod tests {
     use super::{parse, selected, Mode, TARGETS};
     use std::ffi::OsString;
+    use std::time::Duration;
 
     fn argv(args: &[&str]) -> Vec<OsString> {
         args.iter().map(OsString::from).collect()
@@ -275,6 +284,30 @@ mod tests {
     fn soak_flag_selects_the_soak_budget() {
         let opts = parse(&argv(&["--soak"])).expect("soak parses");
         assert_eq!(opts.mode, Mode::Soak);
+    }
+
+    #[test]
+    fn every_budget_a_target_can_be_given_outlives_an_ordinary_step() {
+        // A target told to run for `budget` is working, not hung, right up to
+        // the end of it, so its child must be allowed to outlast it. An
+        // ordinary step's budget is shorter than the nightly window, so
+        // handing a target that one kills it mid-soak every time.
+        for budget in [
+            Mode::Quick.budget(),
+            Mode::Soak.budget(),
+            // The seven-hour window `.github/workflows/soak.yml` runs.
+            Duration::from_hours(7),
+        ] {
+            let deadline = crate::soak_deadline(budget);
+            assert!(
+                deadline > budget,
+                "deadline {deadline:?} must outlast the budget {budget:?} it covers"
+            );
+        }
+        assert!(
+            crate::DEFAULT_COMMAND_TIMEOUT < Mode::Soak.budget(),
+            "an ordinary step's budget cannot stand in for a soak deadline"
+        );
     }
 
     #[test]

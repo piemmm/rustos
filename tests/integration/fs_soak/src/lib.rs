@@ -1,4 +1,4 @@
-//! In-RAM filesystem soak harness (`.junie/filesystems.md`).
+//! In-RAM filesystem soak harness (`docs/src/filesystem/soak.md`).
 //!
 //! Formats a RAM-backed [`RamBlock`] device with each first-party
 //! formatter (`arxfs`/`ext4`/`fat32`) and drives one generic,
@@ -14,9 +14,10 @@
 //! asserts the OS reports the extremes cleanly.
 //!
 //! The exerciser drives a small LCG from a per-launch start seed (fresh from
-//! host entropy by default, or pinned by `TAIRIX_FSSOAK_SEED`). The start seed
-//! is logged at the start of each run, so every launch exercises different
-//! content yet any failure reproduces from its logged seed.
+//! host entropy by default, or pinned by `tairix_fuzzseed::FSSOAK_SEED_ENV`).
+//! The start seed is logged at the start of each run, so every launch
+//! exercises different content yet any failure reproduces from its logged
+//! seed.
 //!
 //! Alongside that fixed-sequence body, [`random_exercise`] drives a
 //! genuinely *randomized*, model-checked op mix (create/move/delete/
@@ -36,9 +37,6 @@ pub use exercise::exercise;
 pub use ramblock::RamBlock;
 pub use random::random_exercise;
 pub use registry::{run_target, SoakFs, TARGETS};
-
-/// Minimum soak device size, in bytes: 1 GiB (`.junie/filesystems.md`).
-pub const MIN_DEVICE_BYTES: u64 = 1024 * 1024 * 1024;
 
 /// Logical-block (sector) size of the RAM device, in bytes. 4096 keeps
 /// the three filesystems on their large-block paths, so a 1 GiB fill is
