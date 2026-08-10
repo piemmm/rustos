@@ -15,6 +15,12 @@ publish.workspace = true
 # `lib/raster`'s single supersampled polygon path.
 tairix-raster = { path = "../raster", version = "=0.0.0" }
 
+# The shared C-locale number scanner (`cnum`) SVG's own number grammar is
+# spelled on, and the bounded `no_std` float maths (`mathf`) curve flattening,
+# elliptical arcs, rotation, and stroking need. Neither is re-implemented
+# here, and no external libm enters the trusted computing base.
+tairix-util = { path = "../util", version = "=0.0.0" }
+
 [lints]
 workspace = true
 

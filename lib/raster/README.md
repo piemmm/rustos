@@ -24,6 +24,19 @@ This crate owns:
 - `Surface::with_clip` — the scoped clip window every write is confined to, so a
   view bounds what it paints to the area it owns even when it hands the surface
   to code that does not know it is clipped (see below).
+- `Surface::fill_contours` — the anti-aliased fill for real vector artwork:
+  any number of implicitly-closed contours, resolved under a `FillRule`
+  (`NonZero`, SVG's initial value, or `EvenOdd`) and painted with a `Paint` —
+  a flat colour or a gradient. Nesting is what makes a hole, so a glyph or an
+  SVG path fills in one call rather than as a stack of layers, and a gradient
+  is sampled once per pixel at that pixel's centre mapped back into the
+  contours' own coordinates. Each pixel row is resolved by *scanning*: for each
+  of its sample rows every edge's crossing is computed once, the crossings are
+  sorted, and walking them under the rule yields the inside spans, which then
+  become per-pixel sample counts. A fill therefore costs the edges plus the
+  pixels rather than the edges *times* the sub-samples — the difference between
+  0.3 ms and 409 ms for a 4096-edge contour over a 128×128 surface, which is
+  what makes a flattened curve drawable at all.
 - `Surface::fill_polygon` — the single supersampled, anti-aliased
   filled-polygon scan converter. Vector artwork (pointer cursors in
   `lib/cursor`, status icons in `lib/icon`) is authored on a design grid and
@@ -31,6 +44,9 @@ This crate owns:
   rasteriser rather than a copy per asset kind (`AGENTS.md` §2.2 / §10). Only
   the polygon's bounding box, clipped to the surface, is scanned, so a small
   shape on a large canvas costs its own area rather than the whole surface.
+  It is `fill_contours` with one ring, the even-odd rule and a flat colour:
+  both — and `fill_polygon_subpixel` below — are the one converter in `scan`,
+  never a second copy.
 - `Surface::fill_polygon_subpixel` — that same scan converter over vertices
   already in *device* sub-pixel units (`SUBPIXEL` per pixel) instead of a
   design grid stretched across the surface. This is how chrome that must stay
@@ -39,6 +55,26 @@ This crate owns:
   producing no anti-aliased fringe at all, while a diagonal keeps sub-pixel
   placement and stays smooth. The shape is *placed*, not stretched, so a glyph
   needs no square scratch surface and blit to position it.
+- `FillRule` / `Paint` — what a contour fill resolves and paints with. A
+  `Paint` is a flat `Color` or a `Gradient`: linear or radial (with a focal
+  point), a stop list, a `SpreadMethod` (`Pad`/`Reflect`/`Repeat`), and the
+  `Affine` mapping a shape's coordinates into *canonical* gradient space,
+  where a linear ramp runs along x from 0 to 1 and a radial one is the unit
+  circle at the origin. Every ellipse, rotation and units convention a document
+  can express is then one matrix rather than a case in the sampler. Sampling is
+  total: no stops paints nothing, one stop paints it everywhere, a focal point
+  outside the circle is pulled just inside it as SVG requires, and an extreme
+  or degenerate transform resolves to an end colour rather than a `NaN`.
+- `Affine` — SVG's `matrix(a b c d e f)`, the transform vector artwork is
+  placed by and a gradient carries: `translate`, `scale`, `rotate_degrees`
+  (and about a centre), `skew_x_degrees`/`skew_y_degrees`, `then` composition
+  (the receiver applies first), `apply`, an `invert` that answers `None` for a
+  transform that collapses area or would invert to infinities, and `max_scale`
+  — the exact larger singular value, which is what a curve flattener divides
+  its tolerance by and what decides whether a stroke stays uniform. Its
+  trigonometry comes from `tairix_util::mathf`, so no external libm enters the
+  trusted computing base and this crate rotates identically to the glyph
+  rasteriser and the SVG decoder.
 - `Surface::stroke_polyline` — the one stroked-line path the desktop shares: a
   window-furniture diagonal and a history graph's trace are the same primitive
   at different scales. Each segment is offset along *its own* perpendicular, so
@@ -246,9 +282,11 @@ outside a narrow window costs only the sliver that survives it.
 
 Sibling userland GUI crates may not depend on one another (`AGENTS.md` §17.4),
 so the rasteriser they both use belongs in `lib/*`. It depends only on
-`lib/theme` (for the `From<Rgba>` edge) and `lib/reclaim` (for the
-`CachedBytes` trait `Surface` implements) and is depended on by the GUI
-crates, never the reverse — `Layer::Lib` in the §17.4 layering.
+`lib/theme` (for the `From<Rgba>` edge), `lib/reclaim` (for the `CachedBytes`
+trait `Surface` implements) and `lib/util` (for the bounded `no_std`
+trigonometry and square root `Affine` and a radial gradient need), and is
+depended on by the GUI crates, never the reverse — `Layer::Lib` in the §17.4
+layering.
 
 ## Stability tier
 

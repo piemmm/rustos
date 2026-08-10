@@ -3,12 +3,26 @@
 
 use alloc::vec;
 
-use tairix_raster::Color;
+use tairix_raster::{Color, Paint};
 use tairix_theme::CursorKind;
 
 use crate::registry::{CursorRegistry, CursorRegistryError, CursorSetId};
 use crate::theme::CursorTheme;
 use crate::vector::{Shape, VectorCursor, Vertex};
+
+/// The colour a shape paints with. Every built-in cursor and every test
+/// asset here is a flat fill, so anything else is a broken expectation.
+#[track_caller]
+fn solid(shape: &Shape) -> Color {
+    match shape.paint {
+        Paint::Solid(color) => color,
+        Paint::Gradient(_) => panic!("expected a flat fill"),
+    }
+}
+
+/// Where the test asset's `(1, 2)` hotspot lands once its twenty-four-unit
+/// drawing is scaled onto the decoder's shared design grid.
+const HOTSPOT: (i32, i32) = (85, 171);
 
 /// An opaque square cursor filling its whole `size`×`size` design grid.
 fn solid_square(size: u32, fill: Color) -> VectorCursor {
@@ -280,11 +294,13 @@ fn decodes_an_svg_cursor_with_its_hotspot() {
         <polygon points="2,3 2,14 5,11 8,17 9,16 6,10 11,10" fill="#fff"/>
     </svg>"##;
     let cursor = crate::decode_svg(svg).expect("valid svg cursor");
-    assert_eq!(cursor.design_size(), 24);
-    assert_eq!(cursor.hotspot_x(), 1);
-    assert_eq!(cursor.hotspot_y(), 2);
+    // The hotspot is scaled onto the decoder's shared design grid along with
+    // the artwork, so it still points at the same place in the drawing.
+    assert_eq!(cursor.design_size(), tairix_svg::DESIGN_GRID);
+    assert_eq!(cursor.hotspot_x(), HOTSPOT.0);
+    assert_eq!(cursor.hotspot_y(), HOTSPOT.1);
     assert_eq!(cursor.shapes().len(), 2);
-    assert_eq!(cursor.shapes()[1].fill, Color::rgb(255, 255, 255));
+    assert_eq!(solid(&cursor.shapes()[1]), Color::rgb(255, 255, 255));
 }
 
 #[test]
@@ -339,7 +355,9 @@ impl crate::CursorAssetSource for TestSource {
 }
 
 fn is_loaded(cursor: &VectorCursor) -> bool {
-    cursor.design_size() == 24 && cursor.hotspot_x() == 1 && cursor.hotspot_y() == 2
+    cursor.design_size() == tairix_svg::DESIGN_GRID
+        && cursor.hotspot_x() == HOTSPOT.0
+        && cursor.hotspot_y() == HOTSPOT.1
 }
 
 #[test]

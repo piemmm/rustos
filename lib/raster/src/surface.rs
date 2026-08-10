@@ -17,6 +17,7 @@
 use core::mem::size_of;
 use core::num::NonZeroU64;
 use core::ops::Range;
+use core::slice;
 
 use alloc::vec;
 use alloc::vec::Vec;
@@ -24,7 +25,9 @@ use alloc::vec::Vec;
 use tairix_reclaim::CachedBytes;
 
 use crate::color::{Color, Pixel};
+use crate::paint::Paint;
 use crate::round::round_rect_coverage;
+use crate::scan::{coverage_alpha, FillRule, SampleSpace, ScanFill};
 
 /// The half-open pixel window a paint is confined to: `[x0, x1) × [y0, y1)`.
 ///
@@ -414,7 +417,7 @@ impl Surface {
     /// rasterise through here rather than each carrying its own scan
     /// converter.
     ///
-    /// Each output pixel is probed on a fixed [`SUPERSAMPLE`]×[`SUPERSAMPLE`]
+    /// Each output pixel is resolved on a fixed [`SUPERSAMPLE`]×[`SUPERSAMPLE`]
     /// sub-pixel grid and the fraction of samples inside the polygon becomes
     /// its coverage, applied to `color` before compositing. The single ring
     /// is filled with the even-odd rule. A polygon with fewer than three
@@ -427,26 +430,46 @@ impl Surface {
     /// shape on a large surface (a cursor or an icon glyph) costs its own
     /// area rather than the whole canvas.
     ///
+    /// This is [`fill_contours`](Self::fill_contours) with one ring, the
+    /// even-odd rule, and a flat colour — the same scan converter, not a
+    /// second one.
+    ///
     /// [`Pixel::over`]: crate::color::Pixel::over
     pub fn fill_polygon(&mut self, polygon: &[(i32, i32)], design: u32, color: Color) {
-        if polygon.len() < 3 {
-            return;
-        }
-        let (Some(denom_x), Some(denom_y)) = (sample_span(self.width), sample_span(self.height))
-        else {
-            return;
-        };
-        let design = i64::from(design.max(1));
-        let scaled: Vec<(i64, i64)> = polygon
-            .iter()
-            .map(|&(x, y)| {
-                (
-                    i64::from(x) * denom_x / design,
-                    i64::from(y) * denom_y / design,
-                )
-            })
-            .collect();
-        self.fill_sampled(&scaled, color);
+        let space = SampleSpace::design(design, self.width, self.height);
+        self.fill_scan(
+            slice::from_ref(&polygon),
+            space,
+            FillRule::EvenOdd,
+            &Paint::Solid(color),
+        );
+    }
+
+    /// Fill anti-aliased vector artwork: any number of closed contours, under
+    /// a [`FillRule`], painted with a flat colour or a gradient
+    /// ([`Paint`]).
+    ///
+    /// This is the full shape [`fill_polygon`](Self::fill_polygon) is the
+    /// simple case of, and what real vector artwork needs: a glyph or an icon
+    /// path is several contours whose nesting decides where the holes are, and
+    /// an SVG gradient is a paint rather than a colour. The contours are
+    /// authored on the same square `design`×`design` grid, stretched across
+    /// the whole surface.
+    ///
+    /// Each contour is implicitly closed and one with fewer than three points
+    /// contributes nothing; an empty list draws nothing, and a `design` of
+    /// zero is read as `1`. A gradient is sampled once per pixel, at that
+    /// pixel's centre mapped back into the contours' own coordinates, so the
+    /// paint costs a sample per pixel rather than one per sub-sample.
+    pub fn fill_contours(
+        &mut self,
+        contours: &[Vec<(i32, i32)>],
+        design: u32,
+        rule: FillRule,
+        paint: &Paint,
+    ) {
+        let space = SampleSpace::design(design, self.width, self.height);
+        self.fill_scan(contours, space, rule, paint);
     }
 
     /// Fill an anti-aliased polygon whose vertices are already in *device*
@@ -467,14 +490,12 @@ impl Surface {
     /// stretched: it is drawn where its coordinates say, so a glyph needs no
     /// square scratch surface and blit to be positioned.
     pub fn fill_polygon_subpixel(&mut self, polygon: &[(i32, i32)], color: Color) {
-        if polygon.len() < 3 {
-            return;
-        }
-        let scaled: Vec<(i64, i64)> = polygon
-            .iter()
-            .map(|&(x, y)| (i64::from(x), i64::from(y)))
-            .collect();
-        self.fill_sampled(&scaled, color);
+        self.fill_scan(
+            slice::from_ref(&polygon),
+            SampleSpace::device(),
+            FillRule::EvenOdd,
+            &Paint::Solid(color),
+        );
     }
 
     /// Stroke the open polyline through `points` — vertices in device
@@ -529,34 +550,75 @@ impl Surface {
         }
     }
 
-    /// Scan-convert `polygon`, whose vertices are in sample sub-units, and
-    /// composite `color` scaled by each pixel's coverage.
+    /// Scan-convert `contours`, whose vertices reach sample sub-units through
+    /// `space`, and composite `paint` scaled by each pixel's coverage.
     ///
-    /// The one scan converter both polygon entry points share: design-grid
-    /// artwork and grid-fitted device-space chrome differ only in how their
-    /// vertices reach these units.
-    fn fill_sampled(&mut self, scaled: &[(i64, i64)], color: Color) {
-        let Some((x_start, x_end, y_start, y_end)) =
-            polygon_pixel_bounds(scaled, self.width, self.height)
-        else {
+    /// The one entry every fill on this surface goes through: a design-grid
+    /// ring, grid-fitted device-space chrome, and multi-contour artwork differ
+    /// only in how their vertices reach those units and in the rule that
+    /// decides which enclosed region is inside.
+    fn fill_scan<C: AsRef<[(i32, i32)]>>(
+        &mut self,
+        contours: &[C],
+        space: SampleSpace,
+        rule: FillRule,
+        paint: &Paint,
+    ) {
+        if let Some(fill) = ScanFill::new(contours, space, rule) {
+            self.fill_coverage(fill, paint);
+        }
+    }
+
+    /// Composite `paint` over every pixel `fill` covers, scaled by that
+    /// pixel's own coverage.
+    ///
+    /// Kept separate from [`fill_scan`](Self::fill_scan) so this loop — the
+    /// whole of the compositing work — exists once however many contour
+    /// container types the entry points offer.
+    fn fill_coverage(&mut self, mut fill: ScanFill, paint: &Paint) {
+        let Some((x_start, x_end, y_start, y_end)) = fill.bounds(self.width, self.height) else {
             return;
         };
-
-        let source = color.premultiply();
-        let samples = SUPERSAMPLE * SUPERSAMPLE;
         let span_w = x_end - x_start;
+        let Ok(pixels) = usize::try_from(span_w) else {
+            return;
+        };
+        // A flat colour is the same premultiplied pixel everywhere, so it is
+        // converted once rather than per pixel; a gradient is sampled per
+        // pixel below.
+        let solid = match paint {
+            Paint::Solid(color) => Some(color.premultiply()),
+            Paint::Gradient(_) => None,
+        };
+        let mut counts = vec![0_u16; pixels];
         for py in self.clip.rows(y_start, y_end - y_start) {
             let Some((first, row)) = self.row_span_mut(py, x_start, span_w) else {
                 continue;
             };
-            for (px, dst) in (first..).zip(row.iter_mut()) {
-                let coverage = coverage_at(scaled, px, py);
-                if coverage == 0 {
+            counts.fill(0);
+            fill.coverage_row(py, x_start, &mut counts);
+            // The clip window may have cut the row's leading columns, so the
+            // counts are advanced to the column the span actually starts at.
+            let Ok(lead) = usize::try_from(first - x_start) else {
+                continue;
+            };
+            let Some(covered) = counts.get(lead..) else {
+                continue;
+            };
+            for ((px, count), dst) in (first..).zip(covered.iter().copied()).zip(row.iter_mut()) {
+                if count == 0 {
                     continue;
                 }
-                let factor = coverage_to_alpha(coverage, samples);
-                let src = source.scale_alpha(factor);
-                *dst = src.over(*dst);
+                let source = match solid {
+                    Some(pixel) => pixel,
+                    None => paint.sample(fill.pixel_centre(px, py)).premultiply(),
+                };
+                // A premultiplied pixel of zero alpha leaves the destination
+                // exactly as it found it.
+                if source.a == 0 {
+                    continue;
+                }
+                *dst = source.scale_alpha(coverage_alpha(count)).over(*dst);
             }
         }
     }
@@ -874,124 +936,4 @@ fn composite_coverage_span(
         }
         *dst = source.scale_alpha(coverage).over(*dst);
     }
-}
-
-/// The number of sample sub-units spanned by `pixels` pixels: one pixel is
-/// `2 * SUPERSAMPLE` sub-units wide, so sample centres land on odd offsets
-/// and never on an exact polygon edge. `None` if the span overflows.
-fn sample_span(pixels: u32) -> Option<i64> {
-    let span = u64::from(pixels)
-        .checked_mul(2)?
-        .checked_mul(u64::from(SUPERSAMPLE))?;
-    i64::try_from(span).ok()
-}
-
-/// The pixel-space bounding box `[x_start, x_end) × [y_start, y_end)` that
-/// could contain any sample of `polygon` — already in the scaled sample
-/// units [`coverage_at`] consumes — intersected with a `width`×`height`
-/// canvas. `None` when the polygon's extent misses the canvas entirely.
-///
-/// A sample outside a vertex's extreme coordinate can never be inside the
-/// polygon, so no pixel outside this box can have non-zero coverage; a
-/// small shape (a cursor or an icon glyph) therefore costs its own bounding
-/// box, not the whole canvas, with the output identical to scanning every
-/// pixel and discarding the zero-coverage ones.
-fn polygon_pixel_bounds(
-    polygon: &[(i64, i64)],
-    width: u32,
-    height: u32,
-) -> Option<(u32, u32, u32, u32)> {
-    let mut min_x = i64::MAX;
-    let mut max_x = i64::MIN;
-    let mut min_y = i64::MAX;
-    let mut max_y = i64::MIN;
-    for &(px, py) in polygon {
-        min_x = min_x.min(px);
-        max_x = max_x.max(px);
-        min_y = min_y.min(py);
-        max_y = max_y.max(py);
-    }
-
-    // Each pixel `p` spans sample units `[p * scale, (p + 1) * scale)`, so
-    // `div_euclid` (the mathematical floor, correct for a negative vertex
-    // too) gives the pixel that owns each extreme coordinate.
-    let scale = i64::from(2 * SUPERSAMPLE);
-    let x_start = min_x.div_euclid(scale).max(0);
-    let x_end = (max_x.div_euclid(scale) + 1).min(i64::from(width));
-    let y_start = min_y.div_euclid(scale).max(0);
-    let y_end = (max_y.div_euclid(scale) + 1).min(i64::from(height));
-    if x_start >= x_end || y_start >= y_end {
-        return None;
-    }
-    // Each bound above is clamped into `0..=width` or `0..=height`, so the
-    // conversion is always exact; the fallback only guards against a future
-    // change to the clamps above changing that invariant.
-    Some((
-        u32::try_from(x_start).unwrap_or(0),
-        u32::try_from(x_end).unwrap_or(width),
-        u32::try_from(y_start).unwrap_or(0),
-        u32::try_from(y_end).unwrap_or(height),
-    ))
-}
-
-/// The fixed-point coordinate of sub-sample `sub` within output pixel
-/// `pixel`, in the same sample sub-units as a scaled polygon. The pixel
-/// spans `[pixel*2*SS, (pixel+1)*2*SS)`; the `sub`-th sample centre sits at
-/// `pixel*2*SS + 2*sub + 1`.
-fn sample_coordinate(pixel: u32, sub: u32) -> i64 {
-    let base = i64::from(pixel) * 2 * i64::from(SUPERSAMPLE);
-    base + 2 * i64::from(sub) + 1
-}
-
-/// The number of sub-samples of pixel `(px, py)` that fall inside `polygon`.
-fn coverage_at(polygon: &[(i64, i64)], px: u32, py: u32) -> u32 {
-    let mut hits = 0;
-    for sy in 0..SUPERSAMPLE {
-        let sample_y = sample_coordinate(py, sy);
-        for sx in 0..SUPERSAMPLE {
-            let sample_x = sample_coordinate(px, sx);
-            if point_in_polygon(polygon, sample_x, sample_y) {
-                hits += 1;
-            }
-        }
-    }
-    hits
-}
-
-/// Even-odd point-in-polygon test in integer sample space.
-///
-/// A horizontal ray is cast in `+x`; each edge that straddles `py` flips the
-/// inside flag when its crossing lies to the right of `px`. The comparison
-/// is cross-multiplied (with the edge's vertical direction accounted for) so
-/// no division is needed and the result stays exact.
-fn point_in_polygon(polygon: &[(i64, i64)], px: i64, py: i64) -> bool {
-    let mut inside = false;
-    let n = polygon.len();
-    let mut j = n - 1;
-    for i in 0..n {
-        let (xi, yi) = polygon[i];
-        let (xj, yj) = polygon[j];
-        if (yi > py) != (yj > py) {
-            let lhs = (px - xi) * (yj - yi);
-            let rhs = (xj - xi) * (py - yi);
-            if yj - yi > 0 {
-                if lhs < rhs {
-                    inside = !inside;
-                }
-            } else if lhs > rhs {
-                inside = !inside;
-            }
-        }
-        j = i;
-    }
-    inside
-}
-
-/// Map a sample hit count to an alpha factor in `0..=255`.
-fn coverage_to_alpha(hits: u32, samples: u32) -> u8 {
-    if samples == 0 {
-        return 0;
-    }
-    let scaled = u32::from(u8::MAX) * hits / samples;
-    u8::try_from(scaled.min(u32::from(u8::MAX))).unwrap_or(u8::MAX)
 }

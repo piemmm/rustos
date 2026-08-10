@@ -16,7 +16,7 @@
 
 use alloc::vec::Vec;
 
-use tairix_raster::Color;
+use tairix_raster::{Color, FillRule, Paint};
 
 /// A vertex in a cursor's design grid.
 ///
@@ -39,26 +39,34 @@ impl Vertex {
     }
 }
 
-/// One filled, colourful layer of a cursor: a simple polygon plus its fill.
+/// One filled, colourful layer of a cursor: what it is painted with, which
+/// points it encloses, and the contours that bound them.
 ///
-/// The polygon is a single ring filled with the even-odd rule, so a ring
-/// that crosses itself behaves as a designer would expect. Richer artwork is
-/// built by stacking layers (the bottom shape first), not by multi-contour
-/// rings. Fewer than three vertices covers no area and is skipped rather
-/// than rejected.
-#[derive(Clone, Debug, PartialEq, Eq)]
+/// A layer is several contours under one fill rule rather than a single ring,
+/// because artwork decoded from SVG needs shapes with holes and stroke
+/// outlines, both of which are many rings filled as one. A built-in cursor
+/// still writes one ring and gets the even-odd rule, so a ring that crosses
+/// itself behaves as its designer drew it. Fewer than three vertices covers
+/// no area and is skipped rather than rejected.
+#[derive(Clone, Debug, PartialEq)]
 pub struct Shape {
-    /// The straight-alpha fill colour of this layer.
-    pub fill: Color,
-    /// The polygon outline, in design-grid [`Vertex`] order.
-    pub polygon: Vec<Vertex>,
+    /// What this layer is painted with.
+    pub paint: Paint,
+    /// Which points the contours enclose.
+    pub rule: FillRule,
+    /// The contours, each a ring in design-grid [`Vertex`] order.
+    pub contours: Vec<Vec<Vertex>>,
 }
 
 impl Shape {
-    /// Construct a filled shape from a fill colour and a polygon.
+    /// Construct a filled shape from a fill colour and a single polygon.
     #[must_use]
     pub fn new(fill: Color, polygon: Vec<Vertex>) -> Self {
-        Self { fill, polygon }
+        Self {
+            paint: Paint::Solid(fill),
+            rule: FillRule::EvenOdd,
+            contours: alloc::vec![polygon],
+        }
     }
 
     /// Build a shape from a fill colour and a static slice of `(x, y)`
@@ -66,8 +74,21 @@ impl Shape {
     /// geometry reads as self-documenting coordinate tables.
     #[must_use]
     pub fn from_points(fill: Color, points: &[(i32, i32)]) -> Self {
-        let polygon = points.iter().map(|&(x, y)| Vertex::new(x, y)).collect();
-        Self { fill, polygon }
+        Self::new(
+            fill,
+            points.iter().map(|&(x, y)| Vertex::new(x, y)).collect(),
+        )
+    }
+
+    /// Build a shape from artwork that is several contours, a fill rule, and
+    /// a paint of its own.
+    #[must_use]
+    pub fn filled(paint: Paint, rule: FillRule, contours: Vec<Vec<Vertex>>) -> Self {
+        Self {
+            paint,
+            rule,
+            contours,
+        }
     }
 }
 
@@ -80,7 +101,7 @@ impl Shape {
 /// shapes is legal (it rasterises to a fully transparent image); a
 /// degenerate `design_size` of zero is not renderable and the rasteriser
 /// reports that by returning `None` rather than panicking.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct VectorCursor {
     design_size: u32,
     hotspot_x: i32,

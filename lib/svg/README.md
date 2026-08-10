@@ -16,46 +16,72 @@ trusted computing base does not grow for an asset format.
 `decode(bytes) -> Result<SvgImage, SvgError>` turns an SVG byte string into an
 `SvgImage`:
 
-- a **square design grid** (`design()`), and
-- an ordered stack of filled polygon **layers** (`layers()`, bottom layer
-  first), each an `SvgLayer { fill, polygon }`, plus
-- an optional pointer **hotspot** (`hotspot()`) for cursor assets.
+- a **square design grid** (`design()`, always `DESIGN_GRID` units a side —
+  every asset is fitted to it, honouring `preserveAspectRatio`, so a consumer
+  never rescales between assets),
+- an ordered stack of filled **layers** (`layers()`, bottom layer first), each
+  an `SvgLayer { paint, rule, contours }`, plus
+- an optional pointer **hotspot** (`hotspot()`) for cursor assets, and the
+  authored design box (`source_extent()`) for a caller that has something to
+  say about the *shape* an asset was drawn in.
 
-That is exactly the vector form `lib/cursor`'s `VectorCursor` and `lib/icon`'s
-`VectorIcon` already rasterise through `lib/raster`'s single supersampled
-polygon path, so the pipeline converts an asset **once** into this fast-draw
-form and never re-parses SVG on the hot compositing path (`AGENTS.md` §10,
-§2.2). `tairix_cursor::decode_svg` and `tairix_icon::decode_svg` wrap this
-decoder for their respective vector forms.
+A layer is several contours under one fill rule rather than a single ring,
+because a path with a hole and any stroke outline at all are both many rings
+filled as one. That is exactly the vector form `lib/cursor`'s `VectorCursor`
+and `lib/icon`'s `VectorIcon` rasterise through `lib/raster`'s single scan
+converter, so the pipeline converts an asset **once** into this fast-draw form
+and never re-parses SVG on the hot compositing path (`AGENTS.md` §10, §2.2).
+`tairix_cursor::decode_svg` and `tairix_icon::decode_svg` wrap this decoder
+for their respective vector forms.
 
 ## Untrusted input
 
 On-disk assets under `/System/Graphics` are untrusted (`AGENTS.md` §19.5).
 `decode` is **total**: it never panics for any byte string, returns a precise
-`SvgError` for anything outside the supported subset, and a caller fails
+`SvgError` for anything it cannot draw, and a caller fails
 closed to its built-in fallback artwork rather than crashing the compositor
 (`AGENTS.md` §2.9). The decoder has a `cargo xtask fuzz` harness
 (`tests/fuzz_svg.rs`, §19.6).
 
-## Supported subset
+## What it understands
 
-A flat `<svg>` document with a square `viewBox="0 0 D D"` (or equal
-`width`/`height`), whose shapes are `<polygon>`, `<polyline>`, `<rect>`, or
-`<path>` restricted to the straight-line commands `M`/`L`/`H`/`V`/`Z`
-(absolute and relative). Fills are hex (`#rgb`/`#rrggbb` and their alpha
-forms), a small set of named colours, or `none`, optionally scaled by
-`fill-opacity`. Coordinates and the design grid are **integers**. Curves,
-arcs, gradients, transforms, and a second sub-path are out of subset and fail
-closed — richer artwork is built by stacking filled layers, never a second
-rasterisation path (`AGENTS.md` §2.2).
+The drawable part of SVG 1.1, in full:
+
+- the document tree — `<g>`, `<defs>`, `<symbol>`, `<use>`, `<switch>`, and
+  nested `<svg>` viewports;
+- every basic shape — `<path>`, `<rect>` (with rounded corners), `<circle>`,
+  `<ellipse>`, `<line>`, `<polyline>`, `<polygon>`;
+- the whole path grammar, including cubic and quadratic curves and elliptical
+  arcs, flattened to a bounded error rather than a fixed segment count;
+- the whole `transform` grammar, and `viewBox` with `preserveAspectRatio`;
+- strokes — width, caps, joins, miter limit, and dashes;
+- the presentation-property cascade, including the `style` attribute and
+  inheritance;
+- CSS colour syntax — every hex form, `rgb()`/`rgba()`/`hsl()`/`hsla()` in
+  both spellings, the named-colour table, and `currentColor`;
+- linear and radial gradients, with units, spread, and `href` inheritance.
+
+It is a renderer for artwork, not a browser. Text, embedded images, filters,
+masks, clipping paths, patterns, animation, and CSS stylesheets are **not
+drawn**; an element it cannot draw is skipped rather than refusing the
+document, so one unsupported decoration does not lose a whole asset. The
+staged design and the open question about that choice are in `plans/SVG.md`.
 
 ## Layout
 
-- `document` — `SvgImage`, `SvgLayer`, and the top-level `decode` entry point
-  (with decode resource limits, `AGENTS.md` §2.9).
-- `xml` — the fail-closed start-tag scanner.
-- `path` — `points` / `rect` / `path d` geometry → a single polygon ring.
-- `color` — the `fill` / `fill-opacity` colour subset → a `lib/raster` `Color`.
+- `document` — `SvgImage`, `SvgLayer`, the tree walk, and the top-level
+  `decode` entry point (with the decode resource limits, `AGENTS.md` §2.9).
+- `xml` — the element tree: nesting, entities, namespaces, depth bounds.
+- `number` — SVG's number, length, and coordinate-list grammar.
+- `geom` — `SubPath`, `StrokeStyle`, and the object bounding box: the one
+  geometry every stage hands on.
+- `pathdata` — the `d` grammar and curve/arc flattening.
+- `shape` — the basic shapes.
+- `stroke` — stroke outline: segment quads, joins, caps, dashes.
+- `transform` — the `transform` grammar and viewport fitting.
+- `style` — the presentation-property cascade.
+- `paint` — gradients and paint-server resolution.
+- `color` — CSS colour syntax → a `lib/raster` `Color`.
 - `error` — the closed `SvgError` rejection set.
 
 ## Where it sits
@@ -63,8 +89,11 @@ rasterisation path (`AGENTS.md` §2.2).
 Like `lib/geometry`, `lib/theme`, `lib/raster`, `lib/font`, `lib/cursor`, and
 `lib/icon`, this crate lives in `lib/*` so the cursor and icon libraries
 consume it without depending on the window manager (`AGENTS.md` §17.4). It is
-`no_std`, `#![forbid(unsafe_code)]`, depends only on `lib/raster` for the
-`Color` type, and owns no colour arithmetic or rasterisation of its own.
+`no_std`, `#![forbid(unsafe_code)]`, and owns no colour arithmetic,
+rasterisation, or float maths of its own: `Color`, `Affine`, `FillRule`, and
+`Paint` come from `lib/raster`, and the bounded `no_std` maths from
+`lib/util`'s `mathf` (shared with the glyph rasteriser, so no external libm
+enters the trusted computing base).
 
 ## Stability
 

@@ -1394,6 +1394,7 @@ You are not exempt from any rule above. In addition:
     | Display, seats, input routing, graphical session | `plans/DISPLAY.md`; `plans/GUI-CONTROLS-DESIGN.md` (GUI controls) |
     | Reaching a logged-in state: the boot-time text-vs-graphical decision (`continue text\|gui`), the graphical login screen (greeter), the login service's session broker, and macOS-style fast user switching between concurrent desktop sessions | `plans/NEW-DESKTOP-LOGIN.md` |
     | Icon artwork: the raster/vector/glyph asset tiers, the icon vocabulary, the content-type registry that picks an icon, build-time asset discovery, and the sandboxed decode cache every surface draws through | `plans/ICONS.md` |
+    | Vector assets: the SVG decoder (`lib/svg`) — the path/shape grammar, curve flattening, strokes, transforms, the style cascade, gradients, its fixed input bounds, and its deliberate non-goals | `plans/SVG.md` |
     | Compositor window decorations: server-side window furniture (title bar, frame, controls, resize grabber) | `plans/COMPOSITOR-WORK.md` |
     | Display / GPU acceleration: hardware layer compositing, the `AcceleratedDisplay`/`AccelLayer` ABI, virtio-gpu, HVS, zero-copy layers, damage, vsync flips | `plans/FIX-DISPLAY-ACCELERATION.md` |
     | Storage namespace: drives, volumes, aliases, paths, resource references | `docs/src/filesystem/drives.md` (binding spec); `plans/ALIAS.md`; `plans/DRIVES.md` |

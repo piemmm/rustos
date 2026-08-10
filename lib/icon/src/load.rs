@@ -92,7 +92,7 @@ pub trait IconAssetSource {
 /// Stored as one slot per kind, indexed by [`IconKind::index`], so every kind
 /// always resolves and [`icon`](Self::icon) is total — and adding a kind is a
 /// new [`ICON_KINDS`] entry, never a new field here.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct IconSet {
     icons: [Option<VectorIcon>; ICON_KINDS.len()],
 }

@@ -26,25 +26,32 @@
 //! caller fails closed to its built-in fallback artwork rather than crashing
 //! the compositor.
 //!
-//! # Supported subset
+//! # What it understands
 //!
-//! A flat `<svg>` document with a square `viewBox="0 0 D D"` (or equal
-//! `width`/`height`), whose shapes are `<polygon>`, `<polyline>`, `<rect>`, or
-//! `<path>` restricted to the straight-line commands `M`/`L`/`H`/`V`/`Z`.
-//! Fills are hex (`#rgb`/`#rrggbb` and their alpha forms), a small set of
-//! named colours, or `none`, optionally scaled by `fill-opacity`. Coordinates
-//! and the design grid are integers. Curves, arcs, gradients, transforms, and
-//! a second sub-path are out of subset and fail closed — richer artwork is
-//! built by stacking filled layers, never a second rasterisation path.
+//! The drawable part of SVG 1.1, in full: the document tree (`<g>`, `<defs>`,
+//! `<symbol>`, `<use>`, `<switch>`, nested `<svg>` viewports), every basic
+//! shape (`<path>`, `<rect>` with rounded corners, `<circle>`, `<ellipse>`,
+//! `<line>`, `<polyline>`, `<polygon>`), the whole path grammar including
+//! cubic and quadratic curves and elliptical arcs, the whole `transform`
+//! grammar, `viewBox` with `preserveAspectRatio`, strokes (width, caps,
+//! joins, miter limit, dashes), the presentation-property cascade with the
+//! `style` attribute and inheritance, CSS colour syntax with named colours,
+//! and linear and radial gradients.
+//!
+//! It is a *renderer* for artwork, not a browser: text, embedded images,
+//! filters, masks, clipping paths, patterns, animation, and scripting are not
+//! drawn. An element it cannot draw is skipped rather than refused, so one
+//! unsupported decoration does not lose the whole asset; the open question of
+//! whether such an element should instead fail the document closed is
+//! recorded in `plans/ICONS.md`.
 //!
 //! ```
 //! let svg = br##"<svg viewBox="0 0 10 10">
-//!   <polygon points="0,0 10,0 10,10 0,10" fill="#3070f0"/>
+//!   <circle cx="5" cy="5" r="4" fill="#3070f0" stroke="black" stroke-width="1"/>
 //! </svg>"##;
-//! let image = tairix_svg::decode(svg).expect("a square filled polygon");
-//! assert_eq!(image.design(), 10);
-//! assert_eq!(image.layers().len(), 1);
-//! assert_eq!(image.layers()[0].fill.b, 0xf0);
+//! let image = tairix_svg::decode(svg).expect("a stroked circle");
+//! // The fill, then the stroke over it: SVG's painting order.
+//! assert_eq!(image.layers().len(), 2);
 //! ```
 
 #![no_std]
@@ -56,11 +63,15 @@ extern crate alloc;
 pub mod color;
 pub mod document;
 pub mod error;
-pub mod path;
+pub mod geom;
+pub mod number;
+pub mod paint;
+pub mod pathdata;
+pub mod shape;
+pub mod stroke;
+pub mod style;
+pub mod transform;
 pub mod xml;
 
-#[cfg(test)]
-mod tests;
-
-pub use document::{decode, SvgImage, SvgLayer};
+pub use document::{decode, SvgImage, SvgLayer, DESIGN_GRID};
 pub use error::SvgError;

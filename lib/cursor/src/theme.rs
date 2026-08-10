@@ -38,7 +38,7 @@ const BUSY_SECONDARY: Color = Color::rgb(250, 198, 64);
 ///
 /// Stored as fixed fields rather than a map so every kind is always defined
 /// and [`cursor`](Self::cursor) is total.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct CursorTheme {
     arrow: VectorCursor,
     text: VectorCursor,

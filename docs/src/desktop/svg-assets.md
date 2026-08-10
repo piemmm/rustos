@@ -24,14 +24,24 @@ and that form is cached and re-rendered only on a scale or theme change:
 ```
 
 `tairix_svg::decode(bytes)` returns an `SvgImage`: a square design grid
-(`design()`), an ordered stack of filled polygon layers (`layers()`, bottom
-layer first — each an `SvgLayer { fill, polygon }`), and an optional pointer
-hotspot (`hotspot()`). That is exactly the shape `lib/cursor`'s `VectorCursor`
-and `lib/icon`'s `VectorIcon` already hold, so the conversion is a direct
-field map and the asset still rasterises through `lib/raster`'s single
-supersampled polygon path — there is no second rasterisation path (`AGENTS.md`
-§2.2). The cursor and icon libraries expose the wrappers
+(`design()`), an ordered stack of filled layers (`layers()`, bottom layer
+first — each an `SvgLayer { paint, rule, contours }`), and an optional pointer
+hotspot (`hotspot()`). A layer is several contours under one fill rule rather
+than a single ring, because a path with a hole and any stroke outline at all
+are both many rings filled as one. That is exactly the shape `lib/cursor`'s
+`VectorCursor` and `lib/icon`'s `VectorIcon` hold, so the conversion is a
+direct field map and the asset still rasterises through `lib/raster`'s single
+scan converter — there is no second rasterisation path (`AGENTS.md` §2.2).
+The cursor and icon libraries expose the wrappers
 `tairix_cursor::decode_svg` and `tairix_icon::decode_svg`.
+
+Every asset is fitted to the **same** square design grid whatever its own
+`viewBox` says, honouring `preserveAspectRatio`, so a drawing that is not
+square is letter-boxed into the square slot rather than stretched, and a
+consumer never rescales between assets. An app-bundle icon master is still
+required to be authored square (`SvgImage::source_extent()` is what the image
+build checks): letter-boxing is right for artwork in general, but an icon
+with bars down two sides is not an icon.
 
 ## Loading a whole asset set
 
@@ -51,7 +61,7 @@ opening any path of their own (`AGENTS.md` §17.4 / §19.5):
   authored colours) or, for any kind it lacks, the tinted `builtin_icon` glyph.
 
 Both loaders are **total and fail-closed per kind** (`AGENTS.md` §2.9): a kind
-whose asset is missing, malformed, or out of subset keeps its built-in artwork
+whose asset is missing, malformed, or undecodable keeps its built-in artwork
 rather than leaving the set without a glyph for that kind. An empty source
 therefore yields the built-in set, and a partly-broken set mixes loaded assets
 with built-in fallbacks — a corrupt `/System/Graphics` can never blank the
@@ -145,29 +155,44 @@ content](./wm.md#releasable-window-content).
 
 On-disk assets are untrusted (`AGENTS.md` §19.5), so the decoder runs inside a
 minimum-capability parser sandbox and is **total**: `decode` never panics for
-any byte string, returns a precise `SvgError` for anything outside the
-supported subset, and the caller fails closed to its built-in fallback artwork
+any byte string, returns a precise `SvgError` for anything it cannot draw,
+and the caller fails closed to its built-in fallback artwork
 (a built-in cursor or `builtin_icon` glyph) rather than crashing the
 compositor (`AGENTS.md` §2.9). The decode path has a `cargo xtask fuzz`
 harness (§19.6).
 
-## Supported subset
+## What an author may draw
 
-The decoder handles the flat, straight-line subset that maps cleanly onto
-stacked filled polygons:
+The drawable part of SVG 1.1, in full — a designer's own file is shipped as
+authored rather than traced into a simpler form:
 
-- **Document**: one `<svg>` root with a square `viewBox="0 0 D D"` (or equal
-  `width`/`height`). A non-square or non-zero-origin box is rejected.
-- **Shapes**: `<polygon>`, `<polyline>`, `<rect>`, and `<path>` whose `d` uses
-  only the straight-line commands `M`/`L`/`H`/`V`/`Z` (absolute and relative).
-- **Fills**: hex (`#rgb`, `#rrggbb`, and their `#rgba`/`#rrggbbaa` alpha
-  forms), a small named-colour set, or `none`, optionally scaled by
-  `fill-opacity`.
+- **Document**: one `<svg>` root with a `viewBox` (or a `width`/`height`
+  pair), and inside it `<g>`, `<defs>`, `<symbol>`, `<use>`, `<switch>`, and
+  nested `<svg>` viewports.
+- **Shapes**: `<path>`, `<rect>` (with `rx`/`ry` rounded corners),
+  `<circle>`, `<ellipse>`, `<line>`, `<polyline>`, `<polygon>`.
+- **Paths**: the whole `d` grammar, including cubic and quadratic curves and
+  elliptical arcs. Curves are flattened to a bounded error, so a large arc is
+  subdivided more finely than a small one.
+- **Transforms**: the whole `transform` grammar, and `viewBox` with
+  `preserveAspectRatio`.
+- **Strokes**: `stroke`, `stroke-width`, caps, joins, miter limit, and
+  dashes. A stroke becomes its own filled layer, painted over the fill in
+  SVG's own order.
+- **Style**: presentation attributes, the `style` attribute, and inheritance
+  down the tree, including `currentColor`.
+- **Colour**: every hex form, `rgb()`/`rgba()`/`hsl()`/`hsla()` in both
+  spellings, and the CSS named colours.
+- **Gradients**: linear and radial, with units, spread, `gradientTransform`,
+  and `href` inheritance between definitions.
 - **Hotspot**: `data-hotspot-x` / `data-hotspot-y` on the `<svg>` element for
   cursor assets.
-- **Coordinates** and the design grid are integers.
 
-Curves, arcs, gradients, transforms, and a second sub-path are out of subset
-and fail closed: richer artwork is built by **stacking filled layers**, never
-a second rasterisation path (`AGENTS.md` §2.2). Pre-rasterised bitmap assets
-may exist as a cache or fallback but are never the only path.
+What it does **not** draw, because an artwork decoder is not a browser: text,
+embedded images, filters, masks, clipping paths, patterns, animation, and CSS
+stylesheets. An element it cannot draw is skipped rather than refusing the
+document, so one unsupported decoration does not lose a whole asset; the open
+question about that choice is recorded in `plans/ICONS.md`. There is still
+exactly one rasterisation path (`AGENTS.md` §2.2), and pre-rasterised bitmap
+assets may exist as a cache or fallback but are never the only path. The
+staged design is `plans/SVG.md`.

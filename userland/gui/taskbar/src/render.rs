@@ -232,11 +232,12 @@ impl TaskbarRenderer {
 
     /// Paint `taskbar` into a [`Surface`] using its own theme's palette.
     ///
-    /// `artwork` is the desktop's shipped raster-icon lookup: the two leading
+    /// `artwork` is the desktop's shipped icon lookup: the two leading
     /// launchers draw the [`Library`](IconKind::Library) and
-    /// [`Folder`](IconKind::Folder) artwork, and a pinned shortcut or running
-    /// task draws its application's own artwork when it has one, its kind's
-    /// shipped artwork otherwise. Every one of those falls back to its
+    /// [`Folder`](IconKind::Folder) artwork, the trailing Switchboard capsule
+    /// draws its own kind's, and a pinned shortcut or running task draws its
+    /// application's own artwork when it has one, its kind's shipped artwork
+    /// otherwise. Every one of those falls back to its
     /// built-in glyph when the lookup returns `None` — the shared icon slot
     /// does that itself — so a system with no `/System/Graphics` is fully
     /// usable ([`NoArtwork`](tairix_icon::NoArtwork) resolves entirely to
@@ -342,12 +343,11 @@ impl TaskbarRenderer {
         );
 
         if !layout.switchboard.is_empty() {
-            taskbar.tray().signal().render(
-                &mut surface,
-                local_rect(layout.switchboard, origin),
-                scale,
-                theme,
-            );
+            let signal = taskbar.tray().signal();
+            let bounds = local_rect(layout.switchboard, origin);
+            let side = signal.icon_side(bounds, scale, theme);
+            let art = artwork.artwork(IconRequest::kind(signal.icon()), side);
+            signal.render(&mut surface, bounds, scale, theme, art);
         }
         Some(surface)
     }

@@ -32,13 +32,13 @@ so the same definition is
   with fail-closed `register` / `set_active` (`AGENTS.md` §5.4 / §2.9).
 - `svg` — `VectorCursor::from_svg` and `decode_svg(bytes)`: build a cursor
   (hotspot included) from a decoded `lib/svg` `SvgImage` (the SVG-first asset
-  rule, `AGENTS.md` §10). A malformed or out-of-subset asset fails closed, so
+  rule, `AGENTS.md` §10). A malformed or undecodable asset fails closed, so
   the caller keeps the built-in cursor rather than crashing (`AGENTS.md` §2.9).
 - `load` — `CursorAssetSource` and `CursorTheme::from_assets(source)`: build a
   whole cursor *set* from on-disk SVG assets (one per `CursorKind`, served
   through the injected seam so the `/System/Graphics` read and its capability
   stay in userland, `AGENTS.md` §17.4 / §19.5). Total and fail-closed per
-  kind: a kind whose asset is missing, malformed, or out of subset keeps its
+  kind: a kind whose asset is missing, malformed, or undecodable keeps its
   built-in cursor, so an empty source yields the built-in set and a partial
   set mixes loaded cursors with built-in fallbacks (`AGENTS.md` §2.9). The
   result is a `CursorTheme` registered through `CursorRegistry`, so the

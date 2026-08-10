@@ -816,20 +816,30 @@ fn verify_raster_master(label: &str, bytes: &[u8]) -> Result<(), String> {
 /// subset ([`tairix_icon::decode_svg`]) and actually draw something.
 ///
 /// A vector master carries no pixel geometry to check: it is resolution
-/// independent, so the raster rules above do not apply to it, and the decoder
-/// already refuses a design box that is not square (the desktop's vector forms
-/// are authored on a square grid). What is left to prove is that the document
-/// is inside the supported subset and paints visible area — an empty or wholly
-/// transparent document decodes happily and would ship as an invisible icon.
+/// independent, so the raster rules above do not apply to it. What is left to
+/// prove is that the document decodes, that it was authored on a square
+/// design box, and that it paints visible area. The decoder letter-boxes a
+/// rectangular drawing into the square slot rather than squashing it, which
+/// is right for artwork in general but wrong for an icon master: it would
+/// ship a picture with bars down two sides. An empty or wholly transparent
+/// document likewise decodes happily and would ship as an invisible icon.
 ///
 /// # Errors
 ///
 /// Returns an actionable build-error message naming `label` and why the bytes
 /// are not artwork the desktop can draw.
 fn verify_vector_master(label: &str, bytes: &[u8]) -> Result<(), String> {
-    let icon = tairix_icon::decode_svg(bytes).map_err(|e| {
+    let image = tairix_svg::decode(bytes).map_err(|e| {
         format!("image: {label} is neither a PNG nor an SVG the desktop can decode: {e:?}")
     })?;
+    let (width, height) = image.source_extent();
+    if (width - height).abs() > 1e-9 {
+        return Err(format!(
+            "image: {label} is authored on a {width}x{height} design box; an icon \
+             master must be square"
+        ));
+    }
+    let icon = tairix_icon::VectorIcon::from_svg(&image);
     let side = tairix_icon::MIN_ARTWORK_SIDE;
     let surface = icon.rasterise(side).ok_or_else(|| {
         format!("image: {label} decodes but cannot be rasterised at {side} pixels")
@@ -957,16 +967,16 @@ mod tests {
         assert!(verify_library_icon("files.app", Some("files.svg"), resources).is_ok());
     }
 
-    /// A vector master whose design box is not square is refused: the
-    /// desktop's vector forms are authored on a square grid, so a rectangular
-    /// one would be squashed into every square slot.
+    /// A vector master whose design box is not square is refused: the decoder
+    /// would letter-box it into every square slot, shipping a picture with
+    /// bars down two sides rather than an icon.
     #[test]
     fn a_non_square_vector_master_is_refused() {
         let master: &[u8] =
             br##"<svg viewBox="0 0 32 16"><polygon points="0,0 32,0 32,16 0,16" fill="#3070f0"/></svg>"##;
         let err = verify_icon_master("x.app icon", master)
             .expect_err("a rectangular vector master must be refused");
-        assert!(err.contains("NonSquareViewBox"), "{err}");
+        assert!(err.contains("must be square"), "{err}");
     }
 
     /// A vector master that decodes but paints nothing is refused: it would

@@ -538,7 +538,18 @@ const SS: u32 = 32;
 
 fn tray_surface(sig: &TraySignal, theme: &Theme) -> Surface {
     let mut s = Surface::new(SS, SS).expect("surface");
-    sig.render(&mut s, Rect::new(0, 0, SS, SS), Scale::ONE, theme);
+    sig.render(&mut s, Rect::new(0, 0, SS, SS), Scale::ONE, theme, None);
+    s
+}
+
+/// The capsule painted with a flat-coloured square standing in for the
+/// shipped artwork, rasterised at exactly the side the capsule reports.
+fn tray_surface_with_artwork(sig: &TraySignal, theme: &Theme, colour: Color) -> Surface {
+    let bounds = Rect::new(0, 0, SS, SS);
+    let side = sig.icon_side(bounds, Scale::ONE, theme);
+    let art = Surface::filled(side, side, colour.premultiply()).expect("artwork");
+    let mut s = Surface::new(SS, SS).expect("surface");
+    sig.render(&mut s, bounds, Scale::ONE, theme, Some(&art));
     s
 }
 
@@ -561,6 +572,50 @@ fn tray_signal_rests_bare_on_the_bar_in_both_themes() {
             theme.name()
         );
     }
+}
+
+/// The capsule is the desktop's rightmost icon and resolves through the same
+/// tiers as every other one: the shipped artwork when the system has it, the
+/// built-in glyph otherwise. Rasterising the glyph unconditionally left the
+/// capsule unable to ever show a shipped icon.
+#[test]
+fn tray_signal_draws_shipped_artwork_in_place_of_its_glyph() {
+    let theme = Theme::dark();
+    let sig = TraySignal::new(IconKind::Switchboard, "Switchboard");
+    let art = Color::rgb(255, 0, 255);
+    let s = tray_surface_with_artwork(&sig, &theme, art);
+
+    assert!(has_pixel(&s, art.premultiply()), "the artwork is drawn");
+    assert!(
+        !has_pixel(&s, premul(theme.palette().on_surface)),
+        "and the built-in glyph is not drawn as well"
+    );
+}
+
+/// An owner rasterises the artwork itself, so the side the capsule reports
+/// must be the side it draws: an exactly-sized square lands whole, centred,
+/// and inside the plate border.
+#[test]
+fn tray_signal_draws_artwork_at_exactly_the_side_it_reports() {
+    let theme = Theme::dark();
+    let sig = TraySignal::new(IconKind::Switchboard, "Switchboard");
+    let side = sig.icon_side(Rect::new(0, 0, SS, SS), Scale::ONE, &theme);
+    assert!(
+        side > 0 && side < SS,
+        "the icon is inset within the capsule"
+    );
+
+    let art = Color::rgb(255, 0, 255).premultiply();
+    let s = tray_surface_with_artwork(&sig, &theme, Color::rgb(255, 0, 255));
+    let drawn = s.pixels().iter().filter(|&&p| p == art).count();
+    assert_eq!(
+        drawn,
+        usize::try_from(side * side).expect("fits in usize"),
+        "the whole square is placed, neither clipped nor scaled"
+    );
+
+    let offset = (SS - side) / 2;
+    assert_eq!(s.get(offset, offset), Some(art), "placed centred");
 }
 
 #[test]
@@ -719,7 +774,7 @@ fn tray_signal_badge_coexists_with_bead_stack() {
                 .with_validation(ValidationState::Warning),
         );
     let mut s = Surface::new(W, SS).expect("surface");
-    sig.render(&mut s, Rect::new(0, 0, W, SS), Scale::ONE, &theme);
+    sig.render(&mut s, Rect::new(0, 0, W, SS), Scale::ONE, &theme, None);
     // The badge and both severity beads are all visible; none hides another.
     assert!(has_pixel(&s, premul(theme.palette().accent)));
     assert!(has_pixel(&s, premul(theme.palette().denied)));
@@ -752,7 +807,7 @@ fn tray_signal_badge_on_degenerate_bounds_does_not_panic() {
     ));
     let mut s = Surface::new(1, 1).expect("surface");
     // A capsule too small to hold anything simply draws nothing, never panics.
-    sig.render(&mut s, Rect::new(0, 0, 1, 1), Scale::ONE, &theme);
+    sig.render(&mut s, Rect::new(0, 0, 1, 1), Scale::ONE, &theme, None);
 }
 
 #[test]

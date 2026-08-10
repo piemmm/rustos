@@ -19,6 +19,11 @@
 //!   floats, `inf`/`nan`, longest-prefix `endptr` semantics), consumed by
 //!   the `seq` and `printf` command apps, so C's number grammar and its
 //!   exact one-step rounding exist in exactly one place.
+//! * [`mathf`] — bounded `f64` maths (`floor`/`round`, `sqrt`, `sin`/`cos`,
+//!   `atan2`) for `no_std` geometry, consumed by the glyph rasteriser
+//!   (`lib/fontface`) and the SVG decoder (`lib/svg`), so an external libm
+//!   stays out of the trusted computing base and both round and rotate
+//!   identically.
 //! * [`fmt`] — no-allocation numeric formatters for audit-log fields.
 //!   Promoted from `kernel/sec` in Stage 2.5 (`kernel/ipc`) once a second
 //!   caller materialised; consumed by `kernel/sec` and `kernel/ipc`.
@@ -58,6 +63,7 @@ pub mod cnum;
 pub mod conf;
 pub mod count;
 pub mod fmt;
+pub mod mathf;
 pub mod secret;
 pub mod size;
 pub mod tailwindow;

@@ -240,6 +240,13 @@ tairix-image = { path = "../../lib/image", version = "=0.0.0" }
 # have a single definition instead of a captured baseline that would drift
 # the moment the artwork or the fit changed.
 tairix-raster = { path = "../../lib/raster", version = "=0.0.0" }
+# The desktop's own SVG decoder. A shipped vector master is validated through
+# exactly the decoder the desktop will draw it with, and the icon gate reads
+# the authored design box from it: the decoder letter-boxes a rectangular
+# drawing into a square slot, which is right for artwork in general but ships
+# an icon with bars down two sides, so the build refuses it where the author
+# can see it.
+tairix-svg = { path = "../../lib/svg", version = "=0.0.0" }
 # The desktop pinboard's own definitions: the shipped default master's name,
 # the byte bound every shipped master must fit within, the pinboard defaults
 # (which picture and which fit the desktop comes up with), and the placement

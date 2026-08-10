@@ -56,7 +56,7 @@ pub enum CursorRegistryError {
 }
 
 /// One registered cursor set: its id and its cursors.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 struct Entry {
     id: CursorSetId,
     theme: CursorTheme,
@@ -67,7 +67,7 @@ struct Entry {
 /// The built-in set is held in its own field (not the [`Vec`]) so the
 /// registry is provably never empty: [`active`](Self::active) always returns
 /// a set without an `unwrap` or an out-of-bounds index.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct CursorRegistry {
     builtin: CursorTheme,
     custom: Vec<Entry>,

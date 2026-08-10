@@ -2,19 +2,22 @@
 //!
 //! Cursors are authored as SVG (the SVG-first asset rule). A
 //! decoded [`SvgImage`] is a square design grid plus an ordered stack of
-//! filled polygon layers — exactly a cursor's [`Shape`] stack — and it carries
+//! filled layers — exactly a cursor's [`Shape`] stack — and it carries
 //! the optional pointer hotspot (`data-hotspot-x`/`data-hotspot-y`). The
 //! conversion is a direct field map, so the cursor still rasterises through
-//! `lib/raster`'s single polygon path. An asset without a
+//! `lib/raster`'s single scan converter. An asset without a
 //! declared hotspot pins it to the design-grid origin.
+
+use alloc::vec::Vec;
 
 use tairix_svg::{SvgError, SvgImage};
 
-use crate::vector::{Shape, VectorCursor};
+use crate::vector::{Shape, VectorCursor, Vertex};
 
 impl VectorCursor {
     /// Build a cursor from a decoded [`SvgImage`], preserving its design grid,
-    /// per-layer fills, bottom-first layer order, and pointer hotspot.
+    /// per-layer paints and fill rules, bottom-first layer order, and pointer
+    /// hotspot.
     ///
     /// An asset that declares no hotspot pins it to the design-grid origin
     /// `(0, 0)`.
@@ -23,7 +26,14 @@ impl VectorCursor {
         let shapes = image
             .layers()
             .iter()
-            .map(|layer| Shape::from_points(layer.fill, &layer.polygon))
+            .map(|layer| {
+                let contours: Vec<Vec<Vertex>> = layer
+                    .contours
+                    .iter()
+                    .map(|contour| contour.iter().map(|&(x, y)| Vertex::new(x, y)).collect())
+                    .collect();
+                Shape::filled(layer.paint.clone(), layer.rule, contours)
+            })
             .collect();
         let (hotspot_x, hotspot_y) = image.hotspot().unwrap_or((0, 0));
         Self::new(image.design(), hotspot_x, hotspot_y, shapes)

@@ -2135,6 +2135,7 @@ version = "0.0.0"
 dependencies = [
  "tairix-reclaim",
  "tairix-theme",
+ "tairix-util",
 ]
 
 [[package]]
@@ -2309,6 +2310,7 @@ version = "0.0.0"
 dependencies = [
  "tairix-fuzzseed",
  "tairix-raster",
+ "tairix-util",
 ]
 
 [[package]]
@@ -5027,6 +5029,7 @@ dependencies = [
  "tairix-qemu",
  "tairix-raster",
  "tairix-reclaim",
+ "tairix-svg",
  "tairix-switchboard",
  "tairix-sysconfig",
  "tairix-syshelp",

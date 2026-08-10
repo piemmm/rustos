@@ -15,7 +15,7 @@ use alloc::vec::Vec;
 
 use tairix_font::BitmapFont;
 use tairix_geometry::{Point, Rect, Scale};
-use tairix_icon::{builtin_icon, IconKind};
+use tairix_icon::IconKind;
 use tairix_input::{InputEvent, Key};
 use tairix_raster::{Color, Surface};
 use tairix_theme::{TextRole, Theme};
@@ -785,7 +785,7 @@ impl TrayBadge {
 
 /// A compact live status capsule in the notification area (spec §11.27).
 ///
-/// A tray signal is a small glyph capsule seated in the bar
+/// A tray signal is a small icon capsule seated in the bar
 /// ([`PlateSeating::Bar`]): it wears no perimeter of its own and rests with no
 /// plate at all, so the always-rightmost system control point reads as part of
 /// the bar and states itself entirely through its own marks. Background work
@@ -856,6 +856,15 @@ impl TraySignal {
     pub fn with_action(mut self, action: Button) -> Self {
         self.action = Some(action);
         self
+    }
+
+    /// The signal's icon.
+    ///
+    /// Exposed so an owner resolves the shipped artwork for the kind the
+    /// capsule actually draws, rather than naming that kind a second time.
+    #[must_use]
+    pub fn icon(&self) -> IconKind {
+        self.icon
     }
 
     /// The signal's state-name label.
@@ -959,8 +968,39 @@ impl TraySignal {
         Some((badge.tone.fill(theme), text, w, h))
     }
 
+    /// The pixel side the capsule's icon paints at inside `bounds`.
+    ///
+    /// This is the render geometry itself, exposed so an owner rasterising the
+    /// shipped artwork produces it at exactly the size [`Self::render`] will
+    /// place — the two can never disagree. `0` when the bounds are off-surface
+    /// or leave no room inside the plate border.
+    #[must_use]
+    pub fn icon_side(&self, bounds: Rect, scale: Scale, theme: &Theme) -> u32 {
+        let Some((_, _, w, h)) = surface_rect(bounds) else {
+            return 0;
+        };
+        let border = plate_border(theme, scale);
+        role_font(theme, scale, TextRole::Body)
+            .glyph_height()
+            .min(w.saturating_sub(border.saturating_mul(2)))
+            .min(h.saturating_sub(border.saturating_mul(2)))
+    }
+
     /// Paint the compact capsule into `surface` at `bounds`.
-    pub fn render(&self, surface: &mut Surface, bounds: Rect, scale: Scale, theme: &Theme) {
+    ///
+    /// `artwork` is the shipped icon for [`Self::icon`], pre-rasterised by the
+    /// owner at [`Self::icon_side`] (through its cache); `None` falls back to
+    /// the built-in class glyph. The artwork is decoded and rasterised long
+    /// before it reaches this call — a control never parses image bytes. Both
+    /// go through the one shared icon slot every other bar control draws with.
+    pub fn render(
+        &self,
+        surface: &mut Surface,
+        bounds: Rect,
+        scale: Scale,
+        theme: &Theme,
+        artwork: Option<&Surface>,
+    ) {
         let font = role_font(theme, scale, TextRole::Body);
         let Some((x, y, w, h)) = surface_rect(bounds) else {
             return;
@@ -1002,14 +1042,12 @@ impl TraySignal {
             surface.fill_rect(inner_x, inner_y, rail_w, inner_h, color);
         }
 
-        // The calm glyph, centred.
-        let side = font.glyph_height().min(inner_w).min(inner_h);
+        // The calm icon, centred.
+        let side = self.icon_side(bounds, scale, theme);
         if side > 0 {
-            if let Some(image) = builtin_icon(self.icon, frame.label).rasterise(side) {
-                let ix = inner_x + (inner_w.saturating_sub(side)) / 2;
-                let iy = inner_y + (inner_h.saturating_sub(side)) / 2;
-                surface.blit(to_i32(ix), to_i32(iy), &image);
-            }
+            let ix = inner_x + (inner_w.saturating_sub(side)) / 2;
+            let iy = inner_y + (inner_h.saturating_sub(side)) / 2;
+            paint_icon_slot(surface, ix, iy, side, self.icon, frame.label, artwork);
         }
 
         // Lower Heat Seam for background work.

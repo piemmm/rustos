@@ -12,6 +12,12 @@
 //! lives in `lib/*`, exactly as `lib/geometry` owns the shared
 //! coordinate types and `lib/theme` owns the shared design tokens.
 //!
+//! Vector artwork fills through one scan converter ([`scan`]): any number of
+//! closed contours resolved under a [`FillRule`] and painted with a flat
+//! colour or a gradient ([`paint`]), reached as [`Surface::fill_contours`].
+//! [`Affine`] is the transform that places such artwork, and the one a
+//! gradient carries.
+//!
 //! There is exactly one definition of the colour algebra here, so it is
 //! never duplicated into a sibling crate. A theme [`Rgba`] token
 //! meets that algebra at a single edge — [`From<Rgba>`](Color) — which
@@ -26,17 +32,23 @@
 
 extern crate alloc;
 
+pub mod affine;
 pub mod blur;
 pub mod color;
+pub mod paint;
 pub mod resample;
 pub mod round;
+pub mod scan;
 pub mod surface;
 
 #[cfg(test)]
 mod tests;
 
+pub use affine::Affine;
 pub use blur::{box_blur, BlurScratch};
 pub use color::{div255, Color, Pixel};
+pub use paint::{Gradient, GradientKind, GradientStop, Paint, SpreadMethod};
 pub use resample::{resample, resample_rows, Region, ResampleError, Rgba8Image};
 pub use round::round_rect_coverage;
+pub use scan::FillRule;
 pub use surface::{Surface, SUBPIXEL};

@@ -2946,6 +2946,32 @@ fn the_launcher_buttons_draw_their_shipped_artwork() {
     ));
 }
 
+/// The trailing capsule is an icon on the bar like any other, so it resolves
+/// its kind's shipped artwork rather than always drawing the built-in glyph.
+#[test]
+fn the_switchboard_capsule_draws_its_shipped_artwork() {
+    let bar = bottom_bar();
+    let capsule_colour = Color::rgb(255, 0, 255);
+    let mut artwork = FakeArtwork::new(&[(IconKind::Switchboard, capsule_colour)]);
+
+    let layout = bar.layout(Scale::ONE);
+    assert!(!layout.switchboard.is_empty(), "the capsule is on the bar");
+    let surface = TaskbarRenderer::new(test_icon_cache())
+        .render(&bar, Scale::ONE, &mut artwork)
+        .expect("bar renders");
+
+    assert!(
+        artwork.asked_for(IconKind::Switchboard),
+        "the capsule resolves the switchboard artwork"
+    );
+    assert!(region_has_pixel(
+        &surface,
+        layout.bar,
+        layout.switchboard,
+        capsule_colour.premultiply()
+    ));
+}
+
 #[test]
 fn an_application_slot_falls_back_to_its_kinds_artwork_before_the_glyph() {
     let mut bar = bottom_bar();

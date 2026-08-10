@@ -10,9 +10,9 @@ depending on one another (`AGENTS.md` §17.4). The crate is `no_std`,
 ## The vector representation
 
 A cursor is a `VectorCursor`: an ordered stack of filled `Shape`s over a
-square design grid, plus a hotspot. Each `Shape` is a single polygon ring (a
-list of `Vertex`es) and a straight-alpha fill colour. Because the artwork is
-geometry rather than a fixed bitmap:
+square design grid, plus a hotspot. A shape is what it is painted with, which
+points it encloses (its fill rule), and the contours that bound them — lists
+of `Vertex`es. Because the artwork is geometry rather than a fixed bitmap:
 
 - **Scaling** is exact: `VectorCursor::rasterise(scale_percent)` renders one
   pixel per design unit at `100`, doubles at `200`, halves at `50`. The
@@ -58,7 +58,7 @@ in a §19.5 parser sandbox — into the in-memory `VectorCursor`/`CursorTheme`
 form shown here. `tairix_cursor::decode_svg(bytes)` (built on
 `tairix_svg::decode` and `VectorCursor::from_svg`) performs that conversion,
 preserving the asset's `data-hotspot-x`/`data-hotspot-y` hotspot; a malformed
-or out-of-subset asset fails closed, so the caller keeps the built-in cursor
+or undecodable asset fails closed, so the caller keeps the built-in cursor
 rather than crashing (`AGENTS.md` §2.9). See
 [SVG asset decoding](./svg-assets.md). The built-in set remains the
 always-present fallback.

@@ -89,7 +89,7 @@ impl VectorCursor {
     /// Returns `None` for a degenerate cursor or scale, or if the resulting
     /// pixel buffer cannot be allocated — the caller falls back to a smaller
     /// scale or a different cursor rather than crashing.
-    /// Each shape is filled through the shared [`Surface::fill_polygon`] path
+    /// Each shape is filled through the shared [`Surface::fill_contours`] path
     /// in stack order, so a dark outline beneath a light body stays legible.
     ///
     /// [`footprint`]: Self::footprint
@@ -100,8 +100,12 @@ impl VectorCursor {
         let design = self.design_size();
 
         for shape in self.shapes() {
-            let polygon: Vec<(i32, i32)> = shape.polygon.iter().map(|v| (v.x, v.y)).collect();
-            surface.fill_polygon(&polygon, design, shape.fill);
+            let contours: Vec<Vec<(i32, i32)>> = shape
+                .contours
+                .iter()
+                .map(|contour| contour.iter().map(|vertex| (vertex.x, vertex.y)).collect())
+                .collect();
+            surface.fill_contours(&contours, design, shape.rule, &shape.paint);
         }
 
         let hotspot = self.scaled_hotspot(scale_percent, side);

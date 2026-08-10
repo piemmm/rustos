@@ -3,10 +3,20 @@
 use alloc::vec;
 
 use tairix_abi::blkio::BlkDeviceClass;
-use tairix_raster::Color;
+use tairix_raster::{Color, Paint};
 
 use crate::glyph::{builtin_icon, disk_icon, IconKind};
 use crate::vector::{IconLayer, VectorIcon};
+
+/// The colour a layer paints with. Every built-in glyph and every test asset
+/// here is a flat fill, so anything else is a broken expectation.
+#[track_caller]
+fn solid(layer: &IconLayer) -> Color {
+    match layer.paint {
+        Paint::Solid(color) => color,
+        Paint::Gradient(_) => panic!("expected a flat fill"),
+    }
+}
 
 const FG: Color = Color::rgb(230, 230, 235);
 
@@ -241,15 +251,20 @@ fn degenerate_layer_is_skipped() {
 
 #[test]
 fn decodes_an_svg_icon_to_its_layers() {
-    let svg = br##"<svg viewBox="0 0 24 24">
-        <rect width="24" height="24" fill="#102030"/>
-        <polygon points="4,4 20,4 12,20" fill="#ffaa00"/>
+    let svg = br##"<svg viewBox="0 0 16 16">
+        <rect width="16" height="16" fill="#102030"/>
+        <polygon points="2,2 14,2 8,14" fill="#ffaa00"/>
     </svg>"##;
     let icon = crate::decode_svg(svg).expect("valid svg icon");
-    assert_eq!(icon.design(), 24);
+    // Every decoded asset lands on the decoder's shared design grid, so a
+    // sixteen-unit drawing is scaled by 128 on the way in.
+    assert_eq!(icon.design(), tairix_svg::DESIGN_GRID);
     assert_eq!(icon.layers().len(), 2);
-    assert_eq!(icon.layers()[0].fill, Color::rgb(0x10, 0x20, 0x30));
-    assert_eq!(icon.layers()[1].polygon, vec![(4, 4), (20, 4), (12, 20)]);
+    assert_eq!(solid(&icon.layers()[0]), Color::rgb(0x10, 0x20, 0x30));
+    assert_eq!(
+        icon.layers()[1].contours[0],
+        vec![(256, 256), (1792, 256), (1024, 1792)]
+    );
 }
 
 #[test]
@@ -305,7 +320,7 @@ fn icon_set_loads_every_kind_when_all_present() {
     for kind in ALL_KINDS {
         assert!(set.is_loaded(kind), "{kind:?} should be loaded");
         assert_eq!(
-            set.icon(kind, FG).layers()[0].fill,
+            solid(&set.icon(kind, FG).layers()[0]),
             LOADED_FILL,
             "{kind:?} kept its colours"
         );
@@ -325,7 +340,10 @@ fn icon_set_empty_source_falls_back_to_tinted_builtins() {
 fn icon_set_mixes_loaded_assets_and_builtin_fallbacks() {
     let set = crate::IconSet::from_assets(&TestSource::for_kinds(&[IconKind::Bell]));
     assert!(set.is_loaded(IconKind::Bell));
-    assert_eq!(set.icon(IconKind::Bell, FG).layers()[0].fill, LOADED_FILL);
+    assert_eq!(
+        solid(&set.icon(IconKind::Bell, FG).layers()[0]),
+        LOADED_FILL
+    );
     assert!(!set.is_loaded(IconKind::Network));
     assert_eq!(
         set.icon(IconKind::Network, FG),
@@ -354,7 +372,7 @@ fn icon_set_ignores_tint_for_loaded_asset() {
     let red = Color::rgb(255, 0, 0);
     // The authored asset keeps its own colours regardless of the tint.
     assert_eq!(
-        set.icon(IconKind::Volume, red).layers()[0].fill,
+        solid(&set.icon(IconKind::Volume, red).layers()[0]),
         LOADED_FILL
     );
 }

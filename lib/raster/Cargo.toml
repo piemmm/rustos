@@ -19,6 +19,12 @@ tairix-theme = { path = "../theme", version = "=0.0.0" }
 # 6.4); its `CachedBytes` impl belongs here, not duplicated into both GUI
 # crates (§2.2).
 tairix-reclaim = { path = "../reclaim", version = "=0.0.0" }
+# `mathf`: the workspace's bounded `no_std` float maths, for the sine, cosine,
+# tangent and square root the affine transform and a gradient's focal ray need.
+# Taking them from here keeps an external libm out of the trusted computing base
+# and means this crate rotates and scales identically to the glyph rasteriser
+# and the SVG decoder.
+tairix-util = { path = "../util", version = "=0.0.0" }
 
 [lints]
 workspace = true

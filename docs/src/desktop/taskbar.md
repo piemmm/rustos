@@ -228,7 +228,8 @@ colour role from the `Palette`. Its last argument is the caller's
 - each notification icon slot draws a **scalable vector glyph** (see
   *Notification icons* below), tinted in the **muted** foreground colour;
 - the **Switchboard capsule** is the shared `tairix-controls` `TraySignal`
-  drawn in its slot — the mixer glyph with its live badge, seam, rail, and
+  drawn in its slot — its shipped `switchboard` artwork (the built-in mixer
+  glyph where the system ships none) with its live badge, seam, rail, and
   beads, bar-seated like every other icon on the strip, so it carries no
   outline of its own — and `TaskbarRenderer::render_tray_readout` paints the
   expanded instrument readout as its own popover surface, rounded by the window

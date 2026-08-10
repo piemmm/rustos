@@ -159,9 +159,10 @@ must actually draw something.
 
 ## 5. I4 — the taskbar and the program library — **done**
 
-The bar's two permanent launchers draw their shipped artwork; a pin and a
-running-task item use the application's own icon, then its kind's artwork,
-then the glyph — one rule, expressed once. The program-library popup shows
+The bar's two permanent launchers and its trailing Switchboard capsule draw
+their shipped artwork; a pin and a running-task item use the application's own
+icon, then its kind's artwork, then the glyph — one rule, expressed once.
+The program-library popup shows
 each application's own icon, resolved only for the rows actually on screen
 and re-resolved on scroll. The session owns the one `ArtworkCache` and its
 seams; the taskbar renders and never reads a file.
@@ -239,7 +240,24 @@ the right shape for the always-resident chrome glyphs, the bounded cache for
 artwork drawn at a slot's pixel side. Deciding which owns what is a design
 question this plan has not settled.
 
-## 10. What this plan deliberately does not cover
+## 10. Open — an undrawable element is skipped, not refused
+
+`lib/svg` now decodes the drawable part of SVG 1.1 in full (`plans/SVG.md`),
+so an authored master ships as its designer drew it. What it still cannot
+draw — text, embedded images, filters, masks, clipping paths, patterns — it
+**skips**, rendering the rest of the document rather than refusing it.
+
+That is deliberate: one unsupported decoration should not lose a whole asset,
+and it is the behaviour every surface has today. But it cuts against failing
+closed, because a master carrying a clipping path renders *unclipped* — a
+wrong picture — instead of falling back to the tier below. The alternative is
+to refuse the document when it carries a drawable element the decoder cannot
+honour, so a wrong picture becomes a clean fallback. Which of the two the
+desktop wants is a decision this plan has not taken; the build gate already
+refuses a master that draws nothing, so only the *partially* drawable case is
+at stake.
+
+## 11. What this plan deliberately does not cover
 
 - **Cursors and window chrome stay vector.** They are tintable silhouettes
   resolved from the theme; a raster master would be the wrong source format

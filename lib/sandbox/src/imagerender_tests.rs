@@ -313,11 +313,15 @@ fn a_wide_source_is_letterboxed_and_centred_with_transparent_padding() {
 #[test]
 fn a_malformed_svg_document_is_a_typed_refusal() {
     let mut sandbox = sandbox();
-    // A non-square `viewBox`: a well-formed `<svg>` root that violates the
-    // supported subset (design grids must be square), so it is a decode
-    // failure rather than "this is not SVG at all".
+    // A well-formed `<svg>` root whose contents the decoder refuses — here a
+    // colour outside the accepted syntax — so it is a decode failure rather
+    // than "this is not SVG at all".
     assert_eq!(
-        rasterise_icon(&mut sandbox, 4, b"<svg viewBox=\"0 0 10 20\"></svg>"),
+        rasterise_icon(
+            &mut sandbox,
+            4,
+            b"<svg viewBox=\"0 0 10 10\"><rect width=\"10\" height=\"10\" fill=\"chartreuseish\"/></svg>"
+        ),
         Err(IconRasterFailure::Refused(IconRefusal::MalformedImage))
     );
 }

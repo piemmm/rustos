@@ -11,10 +11,13 @@ arithmetic of its own — exactly like `lib/cursor`.
 ## The vector representation
 
 An icon is a `VectorIcon`: an ordered stack of filled `IconLayer`s over a
-square design grid. Each layer is a single polygon ring (a list of `(x, y)`
-design-grid coordinates) and a straight-alpha fill colour. A multi-part glyph
-— a battery body plus its terminal, a bell plus its clapper — is built by
-stacking layers, not by a second multi-contour scan converter.
+square design grid. A layer is what it is painted with, which points it
+encloses (its fill rule), and the contours that bound them — lists of
+`(x, y)` design-grid coordinates. A multi-part glyph — a battery body plus
+its terminal, a bell plus its clapper — is built by stacking layers; a single
+layer holds several contours because a shape with a hole, and any stroke
+outline, are both many rings filled as one through the shared scan
+converter.
 
 - **Scaling** is exact: `VectorIcon::rasterise(side)` renders the design grid
   across a fresh `side`×`side` `Surface`, transparent everywhere the glyph
@@ -59,7 +62,7 @@ On-disk icon sets follow the desktop's **SVG-first** asset rule (`AGENTS.md`
 and decoded — through the curated §16.4 image-decoding library (`lib/svg`) in
 a §19.5 parser sandbox — into the in-memory `VectorIcon` form shown here.
 `tairix_icon::decode_svg(bytes)` (built on `tairix_svg::decode` and
-`VectorIcon::from_svg`) performs that conversion; a malformed or out-of-subset
+`VectorIcon::from_svg`) performs that conversion; a malformed or undecodable
 asset fails closed, so the caller substitutes a `builtin_icon` glyph rather
 than crashing (`AGENTS.md` §2.9). See [SVG asset decoding](./svg-assets.md).
 The built-in glyphs remain the always-present fallback.

@@ -30,6 +30,40 @@ const TEMPLATES: &[&[u8]] = &[
     br##"<svg viewBox="0 0 20 20"><rect x="3" y="4" width="10" height="6" fill="#112233"/></svg>"##,
     br##"<svg width="32px" height="32px" data-hotspot-x="1" data-hotspot-y="2"><polygon points="0,0 32,0 32,32" fill="#fff" fill-opacity="0.5"/></svg>"##,
     br#"<?xml version="1.0"?><!-- c --><svg viewBox="0 0 8 8"><polygon points="0,0 8,0 8,8" fill="none"/></svg>"#,
+    br##"<svg viewBox="0 0 24 24"><path d="M2 12 C2 2 22 2 22 12 S12 26 2 12 Z" fill="#345"/></svg>"##,
+    br#"<svg viewBox="0 0 24 24"><path d="M4 12 A8 8 0 1 1 20 12 a4 4 0 1 0 -8 0 Q12 4 20 4 T4 12 z"/></svg>"#,
+    br#"<svg viewBox="0 0 24 24"><rect x="2" y="2" width="20" height="20" rx="5" ry="3"
+            fill="none" stroke="hsl(210 50% 40%)" stroke-width="2"
+            stroke-linejoin="round" stroke-linecap="square"
+            stroke-dasharray="4 2 1" stroke-dashoffset="-3"/></svg>"#,
+    br#"<svg viewBox="0 0 24 24"><g transform="translate(2 3) rotate(30 12 12) scale(1.5)"
+            style="fill:rgb(10% 20% 30% / 0.5);stroke:currentColor" color="rebeccapurple">
+            <circle cx="8" cy="8" r="5"/><ellipse cx="4" cy="4" rx="3" ry="auto"/>
+            <line x1="0" y1="0" x2="9" y2="9"/></g></svg>"#,
+    br##"<svg viewBox="0 0 24 24"><defs>
+            <linearGradient id="a" x1="0" y1="0" x2="1" y2="1" spreadMethod="reflect">
+              <stop offset="0" stop-color="#f00"/><stop offset="60%" stop-color="#0f0" stop-opacity="0.25"/>
+            </linearGradient>
+            <radialGradient id="b" href="#a" cx="0.3" cy="0.7" r="0.6" fx="0.1" fy="0.9"
+              gradientUnits="objectBoundingBox" gradientTransform="skewX(20)"/>
+            <symbol id="s"><rect width="4" height="4" fill="url(#b) #123"/></symbol>
+          </defs>
+          <use href="#s" x="3" y="4"/><use xlink:href="#s"/>
+          <rect width="24" height="24" fill="url(#a)" opacity="0.75"/></svg>"##,
+    br#"<svg viewBox="0 0 40 10" preserveAspectRatio="xMinYMax slice">
+            <switch><g requiredExtensions="urn:x"><rect width="9" height="9"/></g>
+            <svg x="1" y="1" width="8" height="8" viewBox="0 0 4 4"><rect width="4" height="4"/></svg>
+            </switch></svg>"#,
+];
+
+/// Path-data command letters, so a generated `d` reaches every arm of the
+/// grammar rather than only the ones a byte flip happens to spell.
+const COMMANDS: &[u8] = b"MmLlHhVvCcSsQqTtAaZz";
+
+/// Number spellings a real document uses, including the awkward ones the
+/// separator rules turn on.
+const NUMBERS: &[&str] = &[
+    "0", "1", "-1", ".5", "-.5", "7.", "1e2", "-3E-2", "1.5", "1000000", "-0", "0.0001",
 ];
 
 /// Low byte of `x`, without a narrowing `as` cast.
@@ -43,9 +77,23 @@ fn bounded(x: u64, max: usize) -> usize {
     usize::try_from(x % span).unwrap_or(0)
 }
 
-/// Decode arbitrary bytes: must never panic, whatever it returns.
+/// Decode arbitrary bytes: must never panic, and anything it accepts must be
+/// artwork a consumer can draw — no layer without contours, and no more
+/// vertices than the decoder's own bound admits.
 fn decode_never_panics(bytes: &[u8]) {
-    let _ = decode(bytes);
+    if let Ok(image) = decode(bytes) {
+        let mut vertices = 0usize;
+        for layer in image.layers() {
+            assert!(!layer.contours.is_empty(), "a layer with nothing to fill");
+            vertices += layer.contours.iter().map(Vec::len).sum::<usize>();
+        }
+        assert!(vertices <= 65_536, "{vertices} vertices past the bound");
+    }
+}
+
+/// One generated body inside a fixed, well-formed frame.
+fn alloc_document(body: &str) -> String {
+    format!(r#"<svg viewBox="0 0 24 24">{body}</svg>"#)
 }
 
 #[test]
@@ -90,7 +138,30 @@ fn decode_never_panics_for_any_input() {
         spliced.extend_from_slice(br#"<polygon points="0,0 16,0 16,16"/></svg>"#);
         decode_never_panics(&spliced);
 
-        // 3. Pure noise straight into the decoder.
+        // 3. A generated path: the grammar's own alphabet, so the parser's
+        //    curve, arc, and reflection arms are reached deliberately rather
+        //    than by a lucky byte flip.
+        let mut data = String::from("M0 0");
+        let steps = bounded(next(), 12);
+        for _ in 0..steps {
+            let command = COMMANDS[bounded(next(), COMMANDS.len() - 1)];
+            data.push(char::from(command));
+            let arity = bounded(next(), 7);
+            for _ in 0..arity {
+                data.push_str(NUMBERS[bounded(next(), NUMBERS.len() - 1)]);
+                match bounded(next(), 3) {
+                    0 => data.push(' '),
+                    1 => data.push(','),
+                    _ => {}
+                }
+            }
+        }
+        let generated = alloc_document(&format!(
+            r##"<path d="{data}" fill="#345" stroke="#987" stroke-width="0.4"/>"##
+        ));
+        decode_never_panics(generated.as_bytes());
+
+        // 4. Pure noise straight into the decoder.
         let nlen = bounded(next(), MAX_NOISE);
         let noise: Vec<u8> = (0..nlen).map(|_| low_byte(next() >> 29)).collect();
         decode_never_panics(&noise);
