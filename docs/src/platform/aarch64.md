@@ -91,6 +91,7 @@ a-time regardless.
 | `kernel` | `kernel8.img` | the image the firmware loads at `0x8_0000` |
 | `enable_uart` | `1` | hold the core clock so the PL011/mini-UART baud is stable; route the debug UART |
 | `dtoverlay` | `disable-bt` | detach Bluetooth from the PL011 so `UART0` is the primary UART on the GPIO 14/15 header |
+| `disable_overscan` | `1` | zero the firmware's default per-edge overscan margins (48 px on an HDMI CEA mode); they shrink the display size the firmware reports *and* the surface it allocates, framing the boot console and the HVS-composited desktop in a black border |
 | `init_uart_clock` | `48000000` | pin the PL011 reference clock to the 48 MHz the kernel's baud-divisor arithmetic assumes (`uart_init::UART_CLOCK_HZ`) |
 | `init_uart_baud` | `115200` | the image builder imports `uart_init::CONSOLE_BAUD`, so firmware output and the kernel-programmed 8N1 line share one definition for every image profile; logging is best-effort and never blocks on the UART |
 | `armstub` | `armstub8.bin` | optional PSCI-providing secondary-core stub (enables the `smc`-conduit PSCI `CPU_ON` path of P5) |

@@ -1967,7 +1967,9 @@ console".
   `fdt::scan_translated` walk; `bring_up` (over the `lib/vcmailbox`
   `MailboxTransport` seam) queries the display's EDID-derived native
   size (`0×0` = no display → UART keeps the console) and allocates a
-  32-bit surface at exactly that size. `TextConsole` is a full
+  32-bit surface at exactly that size — the whole panel, since the
+  generated `config.txt` disables the firmware's overscan margins (P9).
+  `TextConsole` is a full
   `xterm-256color` terminal: shell output is fed through the one shared
   streaming parser (`tairix_vt::Parser`, §2.2 — no second escape parser,
   depended `default-features = false` so only its allocation-free parser
@@ -2102,7 +2104,7 @@ SDHCI-5.1 block driver implementing `tairix_abi::driver::block::Block`:
   (§0.4); the emulation artefact is the host state-machine test.
 
 **Metal acceptance — PIO accepted, DMA pending.** A real Pi 4 boots the P9
-image, reads the FAT boot partition and mounts the ARXFS root from the SD
+image, reads the FAT boot partition and ibents the ARXFS root from the SD
 card; the operator's UART log is the recorded acceptance artefact. That
 acceptance predates the DMA fast path and exercised the PIO path. The
 ADMA2 DMA fast path — now the default the aarch64 root-unlock bring-up
@@ -2134,7 +2136,9 @@ user mode (operator metal acceptance).
 - Boot partition: the verified firmware blobs (the `disable-bt` overlay
   planted at its firmware-fixed `overlays/` path), a generated
   `config.txt` (`arm_64bit=1`, `kernel=kernel8.img`, `enable_uart=1`,
-  `dtoverlay=disable-bt`, `init_uart_baud=115200` from the architecture
+  `dtoverlay=disable-bt`, `disable_overscan=1` so the firmware's default
+  per-edge overscan margins do not inset the scan-out surface every display
+  surface sizes itself from, `init_uart_baud=115200` from the architecture
   port's shared console-rate constant;
   `armstub=armstub8.bin` only when the optional stub is staged), and
   `kernel8.img` — the P1 release ELF flattened by `mkimage`'s fail-closed
@@ -2601,6 +2605,7 @@ keyboard service kthread**:
   Rather than guess again (§15.7), `open_controller` now reads each
   programmed register *back* (one-shot `EventId(4110)`, after BAR assign +
   command enable, before `Xhci::open`): bridge `0x18`/`0x20`/`0x04` and VL805
+  `0x04`/`0x10`/nable, before `Xhci::open`): bridge `0x18`/`0x20`/`0x04` and VL805
   `0x04`/`0x10`/`0x14`. Served by a new read-only `PciBus::read_config(bdf,
   offset)` (lib/abi, implemented on `Pci<C>`, reaches both the bus-0 bridge
   and the VL805 via `mech_brcm`); fail-closed (a faulting read renders the
@@ -2715,7 +2720,7 @@ keyboard service kthread**:
     raspberrypi.stackexchange.com #133040 answer). The classic bug — telling
     VideoCore a `0`-byte value buffer so it cannot reply — does not occur:
     `push_tag` sizes every tag's value-buffer length word to
-    `max(request, response)` words (`ALLOCATE`=8 B, `GET_PITCH` /
+    `max(request, response)` wo`=s (`ALLOCATE`=8 B, `GET_PITCH` /
     `GET_FIRMWARE_REVISION` / `NOTIFY_XHCI_RESET`=4 B), and `find_tag` reads
     the per-tag response data bounded by that buffer. Because we never
     under-provision, the protocol's "response length may exceed buffer length,
@@ -2828,7 +2833,7 @@ keyboard service kthread**:
     `bring_up_powers_every_root_port` and
     `bring_up_connects_a_port_only_after_power`.
   - **Enumeration fault localisation (`EnumStage` / `4126`): done, the
-    localiser that pinned the next root cause.** With a device on port 1 the
+    localiser tha*ipinned the next root cause.** With a device on port 1 the
     `device_fault` was *inside* the root attach; the single coarse
     `DriverError::DeviceFault` could not say where. The driver records a
     breadcrumb — `enum_stage()` (an `EnumStage` discriminant set as each step
@@ -2941,7 +2946,7 @@ keyboard service kthread**:
     The metal capture read `4101 reading the hub descriptor failed
     err=device_fault`: the class `GET_DESCRIPTOR(hub)` faulted though the
     device/config-descriptor reads on the same EP0 had succeeded. Root cause:
-    the enumeration issued the HID `SET_PROTOCOL(boot)` to *every* device,
+    the enumeration issued the HID `SET_PRO iCOL(boot)` to *every* device,
     including the hub; a hub is not a HID device so it STALLs that request, and
     an xHCI STALL **halts** the control endpoint (xHCI §4.10.2.4) until reset.
     `control_optional` tolerated the STALL on the (now-broken) assumption that
@@ -3395,7 +3400,7 @@ table, so a new board is match **data**, not new code. Sub-increments
     `MmioMap` (the in-kernel driver-host register-window mapper consumed by
     `KernelMmioMapper`) is now a thin wrapper delegating to `MmioWindowMap`,
     so the guarded logic has one definition (§2.2) with no consumer churn.
-    Host-tested (8 borrowed-space tests + the 15 existing `MmioMap` tests
+  reHost-tested (8 borrowed-space tests + the 15 existing `MmioMap` tests
     still green); no `lib/abi`/C-header change. **5d-0-ii (b′)-1 — the
     arch-neutral live-address-space retention mechanism + production
     producers — LANDED (host-proven).** A task's *live, mutable*
@@ -3508,8 +3513,7 @@ table, so a new board is match **data**, not new code. Sub-increments
     `dma_alloc` buffer and round-trips a sentinel through it). New
     `tairix_rt::dma_alloc` + `tairix_sys_dma_alloc`; C header regenerated.
   - **5d** the continuous keyboard *service* in **user space**, autoloaded
-    by `devmgr` over the 5d-0 surface, feeding the input-focus arbiter.
-    - **5d-1 — the rt-backed `DriverHost` (`lib/drvrt`) — DONE
+    by `devmgbacked `DriverHost` (`lib/drvrt`) — DONE
       (host-proven).** The user-space analogue of the in-kernel keyboard
       service's `IdentityMmioMapper` + frame-allocator DMA host: a driver
       process can no longer reach the kernel frame allocator / identity map,
@@ -3951,6 +3955,7 @@ table, so a new board is match **data**, not new code. Sub-increments
           `tairix_itest_harness::USER_IMAGE_BIAS`, and signs it via the shared
           `tairix_itest_harness::driver_image` composer with
           `build_support::KERNEL_DRIVER_SIGNING_SEED` over the driver's own
+          `BIND_KEYS` + cupport::KERNEL_DRIVER_SIGNING_SEED` over the driver's own
           `BIND_KEYS` + caps (`CAP_MMIO_MAP`/`CAP_MEM_DMA`/`CAP_INPUT_INJECT`).
           The autoload caller presents the delegatable
           `unlock_service::autoload_caps` superset (`service_caps` +
@@ -4069,7 +4074,7 @@ keyboard never regresses (§2.17), until the final flip:
   (keyboard-up-before-unlock). The encrypted-root post-mount hook is gone —
   `unlock_root_and_load_users`/`mount_root_disk_and_load_users`/
   `unlock_root_disk_interactively` no longer take a hook and `NoMountedRootHook`
-  is deleted (§2.14). The driver store is addressed **relative to the scanned
+  is deleted (§2.14). The driver store is addressed **relative _i the scanned
   volume's root**: `enumerate_driver_store`/`DriverImageReader::read_image` take
   an explicit `store_root`, and the `/System` volume (whose own root *is*
   `/System`) is scanned at the volume-relative `tairix_kernel_core::
@@ -4184,7 +4189,7 @@ keyboard never regresses (§2.17), until the final flip:
     **Non-Cacheable** (coherent) but the user-space driver issued **no memory
     barriers**, so on the non-I/O-coherent BCM2711 PCIe the controller could
     observe the doorbell before the published TRBs and the driver could read a
-    fresh event cycle bit with a stale TRB pointer (a torn read). The gap was
+    fresh event cycle bit t th a stale TRB pointer (a torn read). The gap was
     latent until the faster boot outran the controller's write-back window.
     Fix: new `lib/dma-barrier` crate (`dma_wmb`/`dma_rmb`, the user-space §1
     asm carve-out analogous to `lib/abi-trap`; aarch64 `dmb oshst`/`dmb oshld`,
@@ -4308,7 +4313,7 @@ two users — or the same user twice — can be logged in concurrently.
   authenticate). The Pi's metal root mount (P8/P9) and the
   volume-key hand-off to the loader on metal ride the P8/P9 metal
   items.
-- **The login `Run` binary + the `users_db_read` delivery seam**
+- **The login `Run` binary + the `users_db_read` des/very seam**
   (former increment 1): the login service ships at
   `/System/Services/login.app/Run` (`userland/session/login/src/run.rs`, a
   `tairix-rt` program) and PID 1 `init`'s `session` directive points at
@@ -4435,7 +4440,7 @@ two users — or the same user twice — can be logged in concurrently.
     single-UART list.
 - **Stream-layer echo + echo control — LANDED.** Terminal local echo is
   the kernel's read line-discipline behaviour, not a per-program job
-  (§2.2): `ConsoleDevice` carries a per-console `echo` flag (default
+  (§2.2): `ConsoleDheice` carries a per-console `echo` flag (default
   on), and `stream_read` writes the bytes it consumes back to the same
   console's write half, rendering a bare CR/LF as CR-LF, so a typed
   username is visible. The **discipline-control contract** is the
@@ -4794,7 +4799,7 @@ two users — or the same user twice — can be logged in concurrently.
      - **Chunk B-2 `&'static LateUsersDb` dispatch-hook wiring — LANDED
        (whole gate green).** The shared set-once cell
        `tairix_kernel::root_mount::LATE_USERS_DB` is the one definition the
-       dispatch hook reads and the unlock kthread installs into; the aarch64
+       dthpatch hook reads and the unlock kthread installs into; the aarch64
        boot path hands it to the hook via `BootInfo::with_users_db`, so
        `users_db_read` reads that cell on every call. Until an install it
        fails every read closed, identical to the previous `NULL_USERS_DB`
@@ -4908,7 +4913,7 @@ two users — or the same user twice — can be logged in concurrently.
        - **virtio-MMIO device-interrupt ACK (load-bearing).** `tairix_virtio::
          Transport` gained a default-no-op `ack_interrupt`; `MmioTransport`
          overrides it to read `InterruptStatus` and write `InterruptACK`
-         (virtio 1.1 §4.2.2), and `virtio_blk::run_request` calls it after
+         (virtio 1.1 §4.2.2), and `virtio_itk::run_request` calls it after
          `poll_used`. Without it the device holds its line asserted after a
          completion, so the next re-arm re-delivers a stale edge and the
          driver mis-pairs back-to-back reads — the read corruption that blocked

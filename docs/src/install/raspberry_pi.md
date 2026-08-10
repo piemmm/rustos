@@ -60,7 +60,10 @@ of record in [aarch64](../platform/aarch64.md). The generated
 `config.txt` sets `arm_64bit=1`, `kernel=kernel8.img`, `enable_uart=1`,
 `dtoverlay=disable-bt` (the PL011 `UART0` on the GPIO 14/15 header — the
 overlay itself is a pinned firmware input staged on the partition at
-`overlays/disable-bt.dtbo`), `init_uart_clock=48000000` (the PL011
+`overlays/disable-bt.dtbo`), `disable_overscan=1` (the firmware's default
+per-edge overscan margins shrink both the display size it reports and the
+surface it allocates, so leaving them on frames the console and the desktop
+in a black border), `init_uart_clock=48000000` (the PL011
 reference clock the kernel's baud divisors assume), and
 `init_uart_baud=115200`. The image builder imports
 `tairix_arch_aarch64::uart_init::CONSOLE_BAUD` when it writes that firmware

@@ -51,6 +51,12 @@ pub use tairix_drv_fs_arxfs::ROOT_UNLOCK_NAME;
 /// kernel's reprogrammed line share one definition.
 /// `armstub=armstub8.bin` is emitted only when the (optional) stub is
 /// among the build inputs.
+///
+/// `disable_overscan=1` zeroes the firmware's default per-edge overscan
+/// margins (48 px on an HDMI CEA mode). They inset the surface the firmware
+/// reports and allocates, and every TAIRiX display surface sizes itself from
+/// that one answer, so leaving them on frames the console *and* the desktop
+/// in an unusable black border.
 #[must_use]
 pub fn config_txt(with_armstub: bool, console_baud: u32) -> String {
     let mut text = format!(
@@ -60,6 +66,7 @@ pub fn config_txt(with_armstub: bool, console_baud: u32) -> String {
          kernel=kernel8.img\n\
          enable_uart=1\n\
          dtoverlay=disable-bt\n\
+         disable_overscan=1\n\
          init_uart_clock=48000000\n\
          init_uart_baud={console_baud}\n",
     );
@@ -212,7 +219,16 @@ mod tests {
         // The caller-supplied baud is written verbatim (here the debug rate).
         assert!(config.contains("init_uart_baud=57600"));
         assert!(config.contains("dtoverlay=disable-bt"));
+        assert!(config.contains("disable_overscan=1"));
         assert!(!config.contains("armstub="));
+    }
+
+    /// The firmware's default per-edge overscan margins inset the surface it
+    /// reports and allocates, framing every TAIRiX display surface — console
+    /// and desktop alike — in a black border.
+    #[test]
+    fn disables_the_firmware_overscan_border() {
+        assert!(config_txt(false, crate::CONSOLE_BAUD).contains("disable_overscan=1\n"));
     }
 
     #[test]
