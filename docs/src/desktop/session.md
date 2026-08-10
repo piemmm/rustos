@@ -480,10 +480,18 @@ independent, honest feeds (`plans/NEW-TASKBAR.md` T9/T10):
   service (`/System/Services/switchboard.app`, `SWITCHBOARD_RUN_PATH`) at
   bring-up as the logged-in user and binds the seat-scoped
   `SWITCHBOARD_ENDPOINT` beside the window and notification rendezvous. Each
-  publish is attested: the caller's kernel-provided `call_peer_origin` pid
-  must match the launch table's live entry for the service's bundle path — a
-  foreign process, an orphan of an earlier session, or a hand-launched copy
-  is a typed refusal stated on `stderr`, never rendered (`AGENTS.md` §5.4).
+  publish is attested against the caller's **own** launch record: the
+  kernel-provided `call_peer_origin` pid must have an entry in the launch
+  table, and that entry must name the service's bundle path — a foreign
+  process, an orphan of an earlier session, or a hand-launched copy has no
+  record of its own and is a typed refusal, stated on `stderr` and recorded
+  in the system log, never rendered (`AGENTS.md` §5.4). The caller's *own*
+  record is the authority, never the table's first entry for that bundle
+  path: a session can hold more than one at once — an instance that exited
+  but has not been reaped, or a replacement started over it — and a live
+  instance must not be locked out by one of them. One monitor per session is
+  instead enforced where it belongs, at the spawn: bring-up answers with the
+  instance already recorded rather than starting a second.
   The decoded `TraySummary` reaches the capsule through
   `DesktopShell::set_tray_summary`; when the service exits, the reap path
   clears the feed (`set_tray_summary(None)`) so the capsule falls back to
@@ -529,8 +537,8 @@ session it failed to reach.
 Beyond publishing, the monitor's panel acts on *other* processes' windows,
 and the session is the only component that may. Both requests are attested
 exactly like a publish (the kernel-attested `call_peer_origin` pid against
-the launch table's live entry) and then validated against what this session
-can actually see (`AGENTS.md` §5.4):
+that caller's own launch record) and then validated against what this
+session can actually see (`AGENTS.md` §5.4):
 
 | Request | Authorised against | Effect |
 |---|---|---|

@@ -222,7 +222,7 @@ pub use fade::{
 pub use holdback::{Delivery, Flushed, HoldBack, HOLD_BACK_CAPACITY};
 pub use input::{SessionInputResponse, SessionInputRouter};
 pub use keyboard::{KeyInputChannel, KeyboardInputSource};
-pub use launch::{launch_failure_report, reap_launched, LaunchTable, LaunchedApp};
+pub use launch::{admitted_pid, launch_failure_report, reap_launched, LaunchTable, LaunchedApp};
 pub use library::{load_library, LoadedLibrary};
 pub use lock::{LockOutcome, LockedDrain, ScreenLock};
 pub use picker::{
@@ -243,9 +243,10 @@ pub use settings::{
 };
 pub use shell::{DesktopShell, InputSource, ShellOutcome};
 pub use switchboard::{
-    deliver_pending_open, maybe_send_frame_report, maybe_send_seat_report, open_tray, relay_power,
-    serve_switchboard_request, FrameContent, OwnerWindow, PresentedOwners, SwitchboardMailbox,
-    SwitchboardOutcome, SwitchboardRefusal, SwitchboardServe,
+    deliver_pending_open, drop_is_noteworthy, ensure_switchboard, maybe_send_frame_report,
+    maybe_send_seat_report, open_tray, relay_power, serve_switchboard_request, FrameContent,
+    OwnerWindow, PresentedOwners, SwitchboardMailbox, SwitchboardOutcome, SwitchboardRefusal,
+    SwitchboardServe, SWITCHBOARD_CALL_REFUSED,
 };
 pub use switchuser::{
     ResumeFailure, SeatPresentation, SessionAuthority, SwitchRefusal, SwitchUser, WakeRefusal,

@@ -630,30 +630,21 @@ impl Window {
     /// Set the decorated window's activation, so the frame rim, title, and
     /// controls redraw under the new state. Returns `false` for an
     /// undecorated window (nothing to activate).
-    ///
-    /// Attention requests are a separate client-driven state, so an active
-    /// window becomes [`WindowActivationState::Active`] and an inactive one
-    /// [`WindowActivationState::Inactive`]; a window that has raised an
-    /// attention request keeps it while inactive rather than being forced
-    /// quiet.
     pub(crate) fn set_frame_active(&mut self, active: bool) -> bool {
         let Some(frame) = self.frame.as_mut() else {
             return false;
         };
         let mut furniture = frame.furniture();
-        let next = if active {
-            WindowActivationState::Active
-        } else if furniture.activation == WindowActivationState::AttentionRequested {
-            WindowActivationState::AttentionRequested
-        } else {
-            WindowActivationState::Inactive
-        };
-        if furniture.activation == next {
-            return true;
-        }
-        furniture.activation = next;
+        furniture.activation = activation_for(furniture.activation, active);
         frame.set_furniture(furniture);
         true
+    }
+
+    /// Whether marking this window's frame `active` would change what it
+    /// draws, or `None` for an undecorated window (nothing to activate).
+    pub(crate) fn frame_activation_changes(&self, active: bool) -> Option<bool> {
+        let current = self.frame.as_ref()?.furniture().activation;
+        Some(activation_for(current, active) != current)
     }
 
     /// Set the decorated window's title. Returns `false` for an undecorated
@@ -947,6 +938,21 @@ impl Window {
             }
             None => Rect::EMPTY,
         }
+    }
+}
+
+/// The activation a frame currently in `current` takes when the window
+/// manager marks it `active`.
+///
+/// Attention requests are a separate client-driven state, so a window that has
+/// raised one keeps it while inactive rather than being forced quiet.
+fn activation_for(current: WindowActivationState, active: bool) -> WindowActivationState {
+    if active {
+        WindowActivationState::Active
+    } else if current == WindowActivationState::AttentionRequested {
+        current
+    } else {
+        WindowActivationState::Inactive
     }
 }
 

@@ -494,7 +494,7 @@ still passes unchanged.
 
 ---
 
-## Stage D — Make blur cost what it changes  **[D.1–D.4 done; D.5 is a User decision]**
+## Stage D — Make blur cost what it changes  **[D.1–D.4, D.7 done; D.5 is a User decision]**
 
 ### D.1 Damage below a frost invalidates it; the window's own content does not  **[done]**
 Every `damage.add` in the compositor is gone, replaced by three funnels that
@@ -655,6 +655,44 @@ figure is **not** evidence. Stage F must add the equal-area wide/narrow case to
 `cargo xtask bench` and measure it before acting — the framework there is the
 right home for a blocked variant anyway, and blocking must reproduce the
 identical bytes like every other candidate.
+
+### D.7 A mutation that changes nothing marks nothing  **[done]**
+The frost is only as good as the damage that spares it, and three compositor
+mutators marked damage — and so dropped a retained frost — for a call that
+changed nothing:
+
+- `raise` on the window already at the front restacked a `Vec` tail back into
+  its own slot, then marked the whole window and invalidated every frost from
+  that index up. `SessionWindows::keep_popups_stacked` runs immediately before
+  every composite while any popup is open and raises the parent and the popup
+  each time, so **opening a menu re-blurred the parent's whole window on every
+  wake**; `InputRouter::press_primary`/`press_secondary` raise unconditionally
+  too, so every click into an already-focused frosted window re-blurred it.
+  Measured on a 20×14 frosted window: `damaged_px`/`blur_px` `280`/`280` per
+  redundant raise, now `0`/`0`.
+- `set_active_frame` re-asserting the activation a frame already shows, and
+  `set_window_title` re-setting the label the bar already reads, each re-marked
+  their furniture bands *and* dropped that window's chrome-cache entry.
+  `decorate_window` builds the frame active and then immediately activates it,
+  so the first was on every window open.
+
+Each is one guard where it belongs, mirroring `lower`'s existing early-out; the
+activation rule now has a single definition (`window::activation_for`) shared by
+the setter and the new `frame_activation_changes` query, so the guard and the
+mutation cannot drift.
+
+**Two of the same class remain, deliberately not guarded here:**
+- `mutate_frame` invalidates the chrome entry unconditionally, so a *refused*
+  `toggle_window_size` (undecorated, non-resizable, or a failed reallocation)
+  still costs a furniture re-render. A rare failure-path cache miss, not a
+  damage mark; fixing it means restructuring the helper across its nine call
+  sites.
+- `frame_pointer`/`frame_key` re-mark every furniture band per pointer sample
+  even when no hover or press moved. The compositor cannot tell today: a
+  title-bar hover flip changes pixels without returning a `TitleBarEvent`, and
+  the caller-owned `damage` region accumulates across calls, so an empty region
+  is not a per-call signal. This needs per-control damage reporting out of
+  `lib/controls` — C.1's remaining half.
 
 ---
 

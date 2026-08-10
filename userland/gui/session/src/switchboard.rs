@@ -18,6 +18,7 @@ use tairix_abi::switchboard_ipc::{
     SEAT_REPORT_OWNERS_MAX,
 };
 use tairix_abi::{Errno, ProcId};
+use tairix_log::EventId;
 use tairix_wm::{Compositor, WindowId};
 
 use crate::config::SWITCHBOARD_RUN_PATH;
@@ -26,16 +27,26 @@ use crate::launch::LaunchTable;
 use crate::shell::DesktopShell;
 
 /// What a successfully served request answers with, beyond the shared
-/// status word: nothing (every operation but a publish), or the serving
-/// session's own kernel-attested identity a successful publish must carry
-/// so the publisher can authenticate the commands this session later sends
-/// on its mailbox.
+/// status word: nothing (every operation but a publish), or — for a
+/// publish — the two identities the session and the publisher then hold
+/// of each other.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum SwitchboardOutcome {
     /// The plain status frame suffices.
     Plain,
-    /// A successful publish additionally carries this identity.
-    Published(ProcId),
+    /// A successful publish.
+    Published {
+        /// This session's own kernel-attested identity, answered so the
+        /// publisher can authenticate the commands the session later
+        /// sends it.
+        session: ProcId,
+        /// The attested caller that made the publish, which is by
+        /// definition the instance the session can talk to: it is
+        /// running, it holds the session's endpoint, and it just proved
+        /// both. The session tracks it from here rather than deriving a
+        /// live instance from the launch table.
+        publisher: u64,
+    },
 }
 
 /// A served request refused, and why — carrying both the wire [`Errno`]
@@ -44,8 +55,8 @@ pub enum SwitchboardOutcome {
 /// pure serving path performing any I/O itself.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum SwitchboardRefusal {
-    /// The caller is not the live Switchboard instance this session
-    /// launched.
+    /// The caller holds no launch record of this session's own for the
+    /// Switchboard bundle.
     Unattested,
     /// The request frame itself failed to decode.
     Malformed(Errno),
@@ -55,6 +66,12 @@ pub enum SwitchboardRefusal {
     /// owner with no recorded launch.
     UnknownOwner,
 }
+
+/// A Switchboard request was refused. An access decision on the session's
+/// own command channel, so it is stated on the audit trail as well as on
+/// `stderr`: a desktop-launched service has no terminal a user reads, and
+/// a refusal no one can see is how a vanishing panel stayed a mystery.
+pub const SWITCHBOARD_CALL_REFUSED: EventId = EventId(20_002);
 
 impl SwitchboardRefusal {
     /// The wire [`Errno`] the caller receives.
@@ -120,13 +137,16 @@ pub struct SwitchboardServe<'a> {
     pub self_proc_id: ProcId,
 }
 
-/// Attest the caller against the live Switchboard launch-table entry,
-/// decode the request fail-closed, and serve it.
+/// Attest the caller against its own Switchboard launch record, decode
+/// the request fail-closed, and serve it.
 ///
-/// Only the Switchboard child this session spawned (`caller_pid`, the
+/// Only a Switchboard child this session spawned (`caller_pid`, the
 /// kernel-attested `call_peer_origin` pid, never a wire claim) may call:
 /// anything else is [`SwitchboardRefusal::Unattested`] and never mutates
-/// the model. `PublishSummary` relays the summary to the taskbar capsule;
+/// the model. The caller is attested by *its own* launch record naming
+/// the Switchboard bundle, so no sibling, leftover, or not-yet-reaped
+/// entry can answer for a live instance or lock it out. `PublishSummary`
+/// relays the summary to the taskbar capsule;
 /// `ActivateOwner` raises `owner`'s front window, resolved through the
 /// live window ownership; `RestartOwner` resolves `owner` to the bundle
 /// the launch table recorded it as and re-launches it through the
@@ -151,14 +171,17 @@ pub fn serve_switchboard_request(
         relaunch,
         self_proc_id,
     } = serve;
-    if launched.running_from(SWITCHBOARD_RUN_PATH) != Some(caller_pid) {
+    if !attested_switchboard(launched, caller_pid) {
         return Err(SwitchboardRefusal::Unattested);
     }
     let request = SwitchboardRequest::from_bytes(request).map_err(SwitchboardRefusal::Malformed)?;
     match request {
         SwitchboardRequest::PublishSummary { summary } => {
             shell.set_tray_summary(compositor, Some(summary));
-            Ok(SwitchboardOutcome::Published(self_proc_id))
+            Ok(SwitchboardOutcome::Published {
+                session: self_proc_id,
+                publisher: caller_pid,
+            })
         }
         SwitchboardRequest::ActivateOwner { owner } => {
             let window = owner_windows
@@ -180,12 +203,63 @@ pub fn serve_switchboard_request(
     }
 }
 
+/// Whether `pid` is a Switchboard instance this session itself launched:
+/// it has a launch record of its own, and that record names the
+/// Switchboard bundle.
+///
+/// The caller's own record is the authority, never the table's first
+/// entry for the bundle path: a session may hold more than one record for
+/// it at once — an instance that exited but has not yet been reaped, a
+/// replacement started over it — and a live instance must not be locked
+/// out by one of them.
+fn attested_switchboard(launched: &LaunchTable, pid: u64) -> bool {
+    launched
+        .get(pid)
+        .is_some_and(|app| app.run_path == SWITCHBOARD_RUN_PATH)
+}
+
+/// The session's one Switchboard instance: the one already recorded, or
+/// the one `spawn` starts and records now.
+///
+/// One monitor per session is enforced here, at the spawn, so a second is
+/// never started rather than started and then refused. `spawn` answers
+/// with the pid it recorded, or `None` when the launch was refused — in
+/// which case the desktop simply runs without its monitor.
+pub fn ensure_switchboard(
+    launched: &mut LaunchTable,
+    spawn: impl FnOnce(&mut LaunchTable) -> Option<u64>,
+) -> Option<u64> {
+    match launched.running_from(SWITCHBOARD_RUN_PATH) {
+        Some(live) => Some(live),
+        None => spawn(launched),
+    }
+}
+
+/// Whether a refused send of `command` is worth a `stderr` line.
+///
+/// A dropped frame reading is not news. The readings are best-effort
+/// telemetry the monitor may ignore entirely, they are re-sent on the very
+/// next frame that differs, and the mailbox fills precisely when the
+/// desktop is busy — the condition the reading describes. Stating each one
+/// would put a synchronous console write on every frame of exactly the
+/// load being measured, which on a serial console costs far more than the
+/// reading is worth and slows the desktop it is reporting on.
+///
+/// Every other command has a consequence a user can see — a panel that
+/// does not open, a seat warning that does not arrive, a confirmed
+/// shutdown that goes nowhere — so a drop is stated.
+#[must_use]
+pub fn drop_is_noteworthy(command: SwitchboardCommand) -> bool {
+    !matches!(command, SwitchboardCommand::FrameReport { .. })
+}
+
 /// One non-blocking send of a command to a live Switchboard instance's own
 /// mailbox: `ipc_send` in production, a recording fake under test. The
 /// desktop never spins or blocks waiting for the panel to catch up, so a
 /// refused send (a full mailbox, or an instance that has started but not
 /// yet bound one) is the implementation's own `stderr` diagnosis to make,
-/// never a reason for the caller to retry in a loop.
+/// never a reason for the caller to retry in a loop — and only for the
+/// commands [`drop_is_noteworthy`] admits.
 pub trait SwitchboardMailbox {
     /// Send `command` to the instance named by `pid`, answering whether
     /// the instance's mailbox took it.

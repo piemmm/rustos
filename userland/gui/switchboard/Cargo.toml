@@ -51,6 +51,9 @@ tairix-controls = { path = "../../../lib/controls", version = "=0.0.0" }
 # The closed built-in glyph vocabulary: the location band's section-list
 # command names its glyph from that one set rather than carrying artwork.
 tairix-icon = { path = "../../../lib/icon", version = "=0.0.0" }
+# The structured system log. A service the desktop launches has no `stderr`
+# a user ever reads, so the reason it stopped has to reach the log instead.
+tairix-log = { path = "../../../lib/log", version = "=0.0.0" }
 # The screen lives in the library target, so the crates it draws through are
 # ordinary dependencies rather than program-only ones: logical geometry and
 # the one logical-to-physical scale, the design tokens every visible property

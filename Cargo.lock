@@ -2325,6 +2325,7 @@ dependencies = [
  "tairix-geometry",
  "tairix-icon",
  "tairix-input",
+ "tairix-log",
  "tairix-procinfo",
  "tairix-raster",
  "tairix-rt",

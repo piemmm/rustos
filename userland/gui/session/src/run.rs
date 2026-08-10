@@ -110,24 +110,27 @@ mod program {
         SeatPresentation, SessionAuthority, SwitchUser, NO_DEADLINE_NS,
     };
     use tairix_desktop_session::{
-        build_pin_views, deliver_pending_open, desktop_info, load_library, maybe_send_frame_report,
-        maybe_send_seat_report, open_tray, parse, reap_launched, relay_power,
-        resolve_window_identities, serve_pinboard_apply, serve_switchboard_request,
-        window_control_alternate_event, window_control_event, Answer, ArtworkFileReader,
-        ArtworkSandbox, CliError, Command, ConcludedPick, ConfirmPrompt, Delivery, Desktop,
-        DesktopAction, DesktopActivation, DesktopOutcome, DesktopShell, DeviceInputSource,
-        DragOrigin, FrameContent, HangTracker, HoldBack, IconRasteriser, InputSource,
-        KeyboardInputSource, LaunchTable, LockedDrain, OwnerWindow, PickConclusion, PinBridge,
-        PinService, PinboardMenu, PinboardMenuOutcome, PinboardStore, PinboardStoreError,
-        PresentedOwners, ResolvedPin, ScreenFade, ScreenLock, SeatEventReader, SeatInputChannel,
-        SessionFileReader, SessionFileWriter, SessionPicker, SessionPins, SessionWindows,
-        ShellWindowHost, SwitchboardMailbox, SwitchboardOutcome, SwitchboardServe, FILES_LABEL,
-        FILES_RUN_PATH, SWITCHBOARD_LABEL, SWITCHBOARD_RUN_PATH, USAGE, WALLPAPER_LABEL,
-        WALLPAPER_RUN_PATH,
+        admitted_pid, build_pin_views, deliver_pending_open, desktop_info, drop_is_noteworthy,
+        ensure_switchboard, load_library, maybe_send_frame_report, maybe_send_seat_report,
+        open_tray, parse, reap_launched, relay_power, resolve_window_identities,
+        serve_pinboard_apply, serve_switchboard_request, window_control_alternate_event,
+        window_control_event, Answer, ArtworkFileReader, ArtworkSandbox, CliError, Command,
+        ConcludedPick, ConfirmPrompt, Delivery, Desktop, DesktopAction, DesktopActivation,
+        DesktopOutcome, DesktopShell, DeviceInputSource, DragOrigin, FrameContent, HangTracker,
+        HoldBack, IconRasteriser, InputSource, KeyboardInputSource, LaunchTable, LockedDrain,
+        OwnerWindow, PickConclusion, PinBridge, PinService, PinboardMenu, PinboardMenuOutcome,
+        PinboardStore, PinboardStoreError, PresentedOwners, ResolvedPin, ScreenFade, ScreenLock,
+        SeatEventReader, SeatInputChannel, SessionFileReader, SessionFileWriter, SessionPicker,
+        SessionPins, SessionWindows, ShellWindowHost, SwitchboardMailbox, SwitchboardOutcome,
+        SwitchboardServe, FILES_LABEL, FILES_RUN_PATH, SWITCHBOARD_CALL_REFUSED, SWITCHBOARD_LABEL,
+        SWITCHBOARD_RUN_PATH, USAGE, WALLPAPER_LABEL, WALLPAPER_RUN_PATH,
     };
     use tairix_display::{DisplayClient, DisplayTransport, RemoteDisplay, RtShmMapper};
     use tairix_greeter::{Verdict, Verifier};
     use tairix_help::{own_short_help, BundleHelp};
+    use tairix_log::{
+        log, Event as LogEvent, Field as LogField, FieldValue as LogFieldValue, Level as LogLevel,
+    };
     use tairix_rt::io::{self, Stderr, Write};
     use tairix_sandbox::imagerender::{rasterise_icon, render_wallpaper, ImageRenderService};
     use tairix_sandbox::rt::{serve_stdio, worker_role, RtLauncher};
@@ -808,14 +811,14 @@ mod program {
     /// serve it through the shared, host-tested policy, returning what the
     /// caller is answered with.
     ///
-    /// Only the Switchboard child this session spawned may call: the
-    /// caller's kernel-attested `call_peer_origin` pid must match the
-    /// launch table's live entry for the service's bundle path. Anything
-    /// else — a foreign process, an orphan of an earlier session, a copy
-    /// launched by hand — is a typed refusal, stated on `stderr`, and
-    /// never mutates the model (fail closed). A malformed frame, and an
-    /// owner-directed operation naming an owner this session cannot act
-    /// on, refuse the same way.
+    /// Only a Switchboard child this session spawned may call: the
+    /// caller's kernel-attested `call_peer_origin` pid must hold a launch
+    /// record of this session's own naming the service's bundle path.
+    /// Anything else — a foreign process, an orphan of an earlier session,
+    /// a copy launched by hand — is a typed refusal, stated on `stderr`
+    /// and on the audit trail, and never mutates the model (fail closed).
+    /// A malformed frame, and an owner-directed operation naming an owner
+    /// this session cannot act on, refuse the same way.
     fn serve_switchboard(
         serve: SwitchboardServe<'_>,
         ticket: u64,
@@ -828,6 +831,18 @@ mod program {
         serve_switchboard_request(serve, origin.pid(), request).map_err(|refusal| {
             let msg = refusal.reason();
             let _ = writeln!(Stderr, "desktop: {msg}");
+            log(
+                &LOG_SINK,
+                &LogEvent {
+                    level: LogLevel::Warn,
+                    id: SWITCHBOARD_CALL_REFUSED,
+                    message: msg,
+                    fields: &[LogField {
+                        key: "caller",
+                        value: LogFieldValue::UnsignedInt(origin.pid()),
+                    }],
+                },
+            );
             refusal.errno()
         })
     }
@@ -855,11 +870,12 @@ mod program {
     /// the caller to decide whether the command is worth holding for the
     /// monitor's next publish.
     ///
-    /// A refusal is stated on `stderr` with the kernel's own reason rather
-    /// than a guess — `WouldBlock` is back-pressure from a mailbox the
-    /// monitor has not drained, while `NotFound` is an instance that has
-    /// exited or has not bound its mailbox yet, and calling the second one
-    /// "full" would send a reader looking for a problem that is not there.
+    /// A refusal worth stating is stated on `stderr` with the kernel's own
+    /// reason rather than a guess — `WouldBlock` is back-pressure from a
+    /// mailbox the monitor has not drained, while `NotFound` is an instance
+    /// that has exited or has not bound its mailbox yet, and calling the
+    /// second one "full" would send a reader looking for a problem that is
+    /// not there.
     struct RtSwitchboardMailbox;
 
     impl SwitchboardMailbox for RtSwitchboardMailbox {
@@ -868,11 +884,13 @@ mod program {
             if ret == 0 {
                 return true;
             }
-            let _ = writeln!(
-                Stderr,
-                "desktop: switchboard command dropped: {}",
-                Errno::from_syscall(ret)
-            );
+            if drop_is_noteworthy(command) {
+                let _ = writeln!(
+                    Stderr,
+                    "desktop: switchboard command dropped: {}",
+                    Errno::from_syscall(ret)
+                );
+            }
             false
         }
     }
@@ -881,18 +899,21 @@ mod program {
     /// record it in the launch table like any other desktop child,
     /// answering with the pid of the instance now live.
     ///
-    /// The kernel intersects the monitor's manifest with the user's
-    /// ceiling, so its view follows the seat user's authority. A refused
-    /// spawn answers `None` and leaves the capsule calm: the desktop runs
-    /// without its monitor rather than failing over it.
+    /// An instance already recorded is that instance: one monitor per
+    /// session, so a second is never started. The kernel intersects the
+    /// monitor's manifest with the user's ceiling, so its view follows the
+    /// seat user's authority. A refused spawn answers `None` and leaves
+    /// the capsule calm: the desktop runs without its monitor rather than
+    /// failing over it.
     fn spawn_switchboard(launched: &mut LaunchTable) -> Option<u64> {
-        record_launch(
-            launched,
-            spawn_app(SWITCHBOARD_RUN_PATH.as_bytes(), &[]),
-            SWITCHBOARD_LABEL,
-            SWITCHBOARD_RUN_PATH,
-        );
-        launched.running_from(SWITCHBOARD_RUN_PATH)
+        ensure_switchboard(launched, |launched| {
+            record_launch(
+                launched,
+                spawn_app(SWITCHBOARD_RUN_PATH.as_bytes(), &[]),
+                SWITCHBOARD_LABEL,
+                SWITCHBOARD_RUN_PATH,
+            )
+        })
     }
 
     /// Classify the served presents drained since the last report decision:
@@ -1786,7 +1807,7 @@ mod program {
                             },
                             relaunch:
                                 &mut |launched: &mut LaunchTable, run_path: &str, label: &str| {
-                                    record_launch(
+                                    let _ = record_launch(
                                         launched,
                                         spawn_app(run_path.as_bytes(), &[]),
                                         label,
@@ -1799,13 +1820,18 @@ mod program {
                         &request[..len],
                     );
                     // A publish is the proof an instance is up and
-                    // draining: a press that arrived before it was has an
-                    // instance to open on now.
-                    if matches!(result, Ok(SwitchboardOutcome::Published(_))) {
-                        switchboard_pid = launched.running_from(SWITCHBOARD_RUN_PATH);
-                        if let Some(pid) = switchboard_pid {
-                            deliver_pending_open(&mut pending_open, pid, &mut RtSwitchboardMailbox);
-                        }
+                    // draining, and names which one: the session tracks
+                    // the attested publisher from here, so a press that
+                    // arrived before it was up has an instance to open on
+                    // now and every later command goes to the instance
+                    // that answered rather than to a guess.
+                    if let Ok(SwitchboardOutcome::Published { publisher, .. }) = result {
+                        switchboard_pid = Some(publisher);
+                        deliver_pending_open(
+                            &mut pending_open,
+                            publisher,
+                            &mut RtSwitchboardMailbox,
+                        );
                     }
                     // A successful publish answers with this session's own
                     // kernel-attested identity, so the monitor can
@@ -1813,7 +1839,7 @@ mod program {
                     // it; every other outcome, refusals included, answers
                     // with the shared status frame.
                     let mut reply = [0u8; SWITCHBOARD_PUBLISH_REPLY_LEN];
-                    let len = if let Ok(SwitchboardOutcome::Published(session)) = result {
+                    let len = if let Ok(SwitchboardOutcome::Published { session, .. }) = result {
                         let frame = encode_publish_reply(session);
                         reply[..frame.len()].copy_from_slice(&frame);
                         frame.len()
@@ -3635,7 +3661,7 @@ mod program {
     ) -> bool {
         match action {
             Some(DesktopAction::Activate(DesktopActivation::OpenFolder { path })) => {
-                record_launch(
+                let _ = record_launch(
                     launched,
                     spawn_app(FILES_RUN_PATH.as_bytes(), &[path.as_bytes()]),
                     FILES_LABEL,
@@ -3652,7 +3678,7 @@ mod program {
                     .iter()
                     .map(alloc::string::String::as_bytes)
                     .collect();
-                record_launch(
+                let _ = record_launch(
                     launched,
                     spawn_app(run_path.as_bytes(), &args),
                     &label,
@@ -3673,7 +3699,7 @@ mod program {
                     .is_ok()
             }
             Some(DesktopAction::ChangeBackground) => {
-                record_launch(
+                let _ = record_launch(
                     launched,
                     spawn_app(WALLPAPER_RUN_PATH.as_bytes(), &[]),
                     WALLPAPER_LABEL,
@@ -3794,7 +3820,7 @@ mod program {
             }
             return;
         }
-        record_launch(
+        let _ = record_launch(
             launched,
             spawn_app(run_path.as_bytes(), &[]),
             label,
@@ -3838,7 +3864,7 @@ mod program {
         };
         let run_path = alloc::format!("{}/Run", chosen.bundle().as_str());
         let label = chosen.name().as_str();
-        record_launch(
+        let _ = record_launch(
             launched,
             spawn_app(run_path.as_bytes(), &[]),
             label,
@@ -3965,22 +3991,32 @@ mod program {
         tairix_rt::spawn_with(path, CONSOLE_INHERIT, SPAWN_UID_INHERIT, args, &env)
     }
 
-    /// Record a just-issued launch. Asynchronous launch admits the child and
-    /// returns its PID (`ret > 0`) before the image is loaded, so a
-    /// successful admit only *starts* the launch: remember the PID under its
-    /// display label (so the `CHILD_TOKEN` reap can name the app if its load
-    /// is later refused via the child's reserved-`LOAD_*` exit status) and
-    /// its spawn path (its attested bundle identity). A synchronous refusal
-    /// (`ret < 0` — a stripped spawn capability or a malformed path, decided
-    /// before any child exists) is reported fail-loud at once. Either way a
+    /// Record a just-issued launch, answering with the pid recorded.
+    ///
+    /// Asynchronous launch admits the child and returns its PID before the
+    /// image is loaded, so a successful admit only *starts* the launch:
+    /// remember the PID under its display label (so the `CHILD_TOKEN` reap
+    /// can name the app if its load is later refused via the child's
+    /// reserved-`LOAD_*` exit status) and its spawn path (its attested
+    /// bundle identity). Answering with that pid is what lets a caller act
+    /// on the child it just started instead of searching the table for it.
+    ///
+    /// A result that is not a task id — a stripped spawn capability, a
+    /// malformed path, any refusal decided before a child exists — records
+    /// nothing, is reported fail-loud at once, and answers `None`. A
     /// denied optional launch never ends the session.
-    fn record_launch(launched: &mut LaunchTable, ret: i64, label: &str, run_path: &str) {
-        if ret < 0 {
+    fn record_launch(
+        launched: &mut LaunchTable,
+        ret: i64,
+        label: &str,
+        run_path: &str,
+    ) -> Option<u64> {
+        let Some(pid) = admitted_pid(ret) else {
             let _ = writeln!(Stderr, "desktop: {label} launch refused");
-        } else {
-            #[allow(clippy::cast_sign_loss)] // `ret >= 0` in this branch; it is a PID.
-            launched.record(ret as u64, label, run_path);
-        }
+            return None;
+        };
+        launched.record(pid, label, run_path);
+        Some(pid)
     }
 
     /// Conclude a pick: delegate the chosen file one-shot to the

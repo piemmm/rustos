@@ -129,6 +129,17 @@ pub fn launch_failure_report(label: &str, status: WaitStatus) -> Option<String> 
     ))
 }
 
+/// The kernel task id a spawn returned, or `None` when the result is not
+/// one.
+///
+/// Task ids start at 1, so a non-positive result is the kernel's refusal
+/// rather than a child: recording `0` as a pid would leave the launch
+/// table holding an entry no process can ever answer for or reap.
+#[must_use]
+pub fn admitted_pid(ret: i64) -> Option<u64> {
+    u64::try_from(ret).ok().filter(|pid| *pid != 0)
+}
+
 /// Drain every currently-exited child, reporting each load refusal and
 /// handing every reaped PID back to the caller for its own teardown.
 ///
@@ -149,9 +160,13 @@ pub fn launch_failure_report(label: &str, status: WaitStatus) -> Option<String> 
 ///   windows down. It runs for *every* reaped child, load-failure or not — a
 ///   child that launched successfully and later exited is torn down here too.
 ///
+/// Only an exit reaps. A `Stopped` child is still alive and still holds
+/// its windows, so dropping its record or tearing its windows down would
+/// destroy a running program's screen and orphan it from the table.
+///
 /// Reaping drains fully: a non-blocking reap that returns `None` ends the
 /// drain, so a burst of exits is handled in one wake and nothing is left for
-/// a later poll (`AGENTS.md` §2.23 — no busy-wait, one drain per wake).
+/// a later poll — never a busy-wait.
 pub fn reap_launched<R, P, T>(
     launched: &mut LaunchTable,
     mut reap: R,
@@ -163,6 +178,9 @@ pub fn reap_launched<R, P, T>(
     T: FnMut(u64),
 {
     while let Some((pid, status)) = reap() {
+        let WaitStatus::Exited(_) = status else {
+            continue;
+        };
         let label = launched.remove(pid);
         let label = label
             .as_ref()
@@ -176,7 +194,7 @@ pub fn reap_launched<R, P, T>(
 
 #[cfg(test)]
 mod tests {
-    use super::{launch_failure_report, reap_launched, LaunchTable, UNKNOWN_LABEL};
+    use super::{admitted_pid, launch_failure_report, reap_launched, LaunchTable, UNKNOWN_LABEL};
     use alloc::string::String;
     use alloc::vec::Vec;
     use tairix_abi::{
@@ -324,6 +342,83 @@ mod tests {
         assert_eq!(torn_down, alloc::vec![7]);
         assert_eq!(reported.len(), 1);
         assert!(reported[0].contains(UNKNOWN_LABEL));
+    }
+
+    /// A stopped child is alive and unreaped: its launch record and its
+    /// windows both survive, and the drain moves on.
+    #[test]
+    fn a_stopped_child_keeps_its_record_and_its_windows() {
+        let mut launched = LaunchTable::new();
+        launched.record(10, "Viewer", "/Apps/viewer.app/Run");
+
+        let mut script = alloc::vec![(10u64, WaitStatus::Stopped(Signal::Stop))].into_iter();
+        let mut reported: Vec<String> = Vec::new();
+        let mut torn_down: Vec<u64> = Vec::new();
+
+        reap_launched(
+            &mut launched,
+            || script.next(),
+            |line| reported.push(String::from(line)),
+            |pid| torn_down.push(pid),
+        );
+
+        assert_eq!(launched.len(), 1, "a stopped child is still launched");
+        assert!(
+            torn_down.is_empty(),
+            "a stopped child keeps the windows it is still holding"
+        );
+        assert!(reported.is_empty());
+    }
+
+    /// A stop does not stall the drain: the child that exited behind it is
+    /// still reaped and torn down.
+    #[test]
+    fn a_stop_does_not_stop_the_drain() {
+        let mut launched = LaunchTable::new();
+        launched.record(10, "Viewer", "/Apps/viewer.app/Run");
+        launched.record(11, "Terminal", "/System/Applications/terminal.app/Run");
+
+        let mut script = alloc::vec![
+            (10u64, WaitStatus::Stopped(Signal::Stop)),
+            (11u64, WaitStatus::Exited(0)),
+        ]
+        .into_iter();
+        let mut torn_down: Vec<u64> = Vec::new();
+
+        reap_launched(
+            &mut launched,
+            || script.next(),
+            |_| {},
+            |pid| {
+                torn_down.push(pid);
+            },
+        );
+
+        assert_eq!(
+            torn_down,
+            alloc::vec![11],
+            "only the exited child is torn down"
+        );
+        assert_eq!(launched.len(), 1);
+        assert!(
+            launched.get(10).is_some(),
+            "the stopped child is still recorded"
+        );
+    }
+
+    /// A kernel task id starts at 1, so only a positive spawn result names
+    /// a child; `0` and every refusal answer `None`.
+    #[test]
+    fn only_a_positive_spawn_result_is_a_pid() {
+        assert_eq!(admitted_pid(1), Some(1));
+        assert_eq!(admitted_pid(4096), Some(4096));
+        assert_eq!(
+            admitted_pid(i64::MAX),
+            Some(u64::try_from(i64::MAX).unwrap())
+        );
+        assert_eq!(admitted_pid(0), None, "0 is not a task id");
+        assert_eq!(admitted_pid(-1), None);
+        assert_eq!(admitted_pid(i64::MIN), None);
     }
 
     /// No exited child: nothing is reaped, reported, or torn down.

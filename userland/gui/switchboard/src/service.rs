@@ -21,6 +21,7 @@ use alloc::string::String;
 
 use tairix_abi::switchboard_ipc::{SwitchboardCommand, SwitchboardRequest, TraySummary};
 use tairix_abi::{CapabilityId, CapabilityQuery, Errno, PowerAction, Signal};
+use tairix_log::EventId;
 use tairix_procinfo::Transport;
 
 use crate::activities::{Activities, Member};
@@ -185,14 +186,27 @@ pub enum CycleOutcome {
     /// Stop cleanly: nothing is bound to the session's Switchboard
     /// endpoint, so there is no session to report to.
     SessionUnbound,
-    /// Stop cleanly: the session refused this instance's identity, so it is
-    /// orphaned (a session restart left it behind).
+    /// Stop abnormally: the session is there and refused this instance's
+    /// identity, so it is orphaned (a session restart left it behind).
+    ///
+    /// Unlike [`Self::SessionUnbound`] this is not a service running out of
+    /// purpose — it has been told it is an impostor, which it cannot be if
+    /// the session launched it. Ending quietly would hide a fault behind a
+    /// window that simply disappears, so the loop states the reason and
+    /// exits non-zero.
     SessionRefused,
     /// Stop: [`MAX_CONSECUTIVE_PUBLISH_FAILURES`] publish attempts in a row
     /// failed for a reason that is neither of the clean ones above nor mere
     /// back-pressure.
     PublishFailed,
 }
+
+/// Log event for [`CycleOutcome::SessionRefused`], from this service's own
+/// reserved `21000..22000` range.
+///
+/// A desktop-launched service writes `stderr` to nowhere a user will look,
+/// so the one place the reason for stopping can still be found is the log.
+pub const SESSION_REFUSED: EventId = EventId(21_000);
 
 /// The Switchboard service: the sampler, the derived tray summary's
 /// hysteresis, the publish gate, the rolling meter readings, the

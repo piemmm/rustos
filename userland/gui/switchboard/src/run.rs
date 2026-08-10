@@ -78,13 +78,17 @@ mod program {
     use tairix_font::BitmapFont;
     use tairix_geometry::{Point, Rect, Scale};
     use tairix_input::{InputEvent, Key, NamedKey, PointerButton};
+    use tairix_log::{
+        log, Event as LogEvent, Field as LogField, FieldValue as LogFieldValue, Level as LogLevel,
+    };
     use tairix_procinfo::IpcTransport;
     use tairix_raster::Surface;
     use tairix_rt::io::{self, Stderr, Write};
     use tairix_switchboard::{
         authenticate_command, probe_scopes, refusal_notice, CycleOutcome, DegradedField,
         RenderInputs, Service, ServiceHost, Switchboard, SwitchboardAction, WaitToken,
-        MIN_WIN_HEIGHT, MIN_WIN_WIDTH, PANEL_TITLE, WIN_HEIGHT, WIN_RESIZABLE, WIN_WIDTH,
+        MIN_WIN_HEIGHT, MIN_WIN_WIDTH, PANEL_TITLE, SESSION_REFUSED, WIN_HEIGHT, WIN_RESIZABLE,
+        WIN_WIDTH,
     };
     use tairix_theme::{TextRole, Theme, ThemeRegistry};
     use tairix_window::{Desktop, WindowClient, WindowTransport};
@@ -117,6 +121,20 @@ mod program {
     /// deaf monitor is worse than one that says why it stopped.
     const EXIT_NO_COMMANDS: i32 = 4;
 
+    /// Exit code when the desktop session refuses this instance's identity.
+    ///
+    /// A monitor the session itself launched cannot legitimately be an
+    /// impostor, so a refusal is a fault in the pair rather than a reason
+    /// to stop quietly: exiting `0` here would leave the panel vanishing
+    /// mid-use with nothing anywhere to say why.
+    const EXIT_SESSION_REFUSED: i32 = 5;
+
+    /// The system log this service records its own abnormal end through.
+    ///
+    /// The desktop launches it with no terminal behind `stderr`, so the log
+    /// is the only channel a user can still read the reason on.
+    static LOG_SINK: tairix_rt::LogSink = tairix_rt::LogSink;
+
     /// State the abnormal-exit reason on `stderr` (fail loud: an exit code
     /// alone is not a diagnosis) and hand back `code` for `main`.
     fn fail(code: i32, reason: &str) -> i32 {
@@ -130,6 +148,45 @@ mod program {
     fn clean_exit(reason: &str) -> i32 {
         let _ = writeln!(Stderr, "switchboard: {reason}");
         0
+    }
+
+    /// The code one cycle outcome ends the service with, or `None` to keep
+    /// running.
+    ///
+    /// A session that is not there at all leaves the monitor with nothing to
+    /// report to, which is a reason to stop rather than a fault. Being
+    /// refused by a session that *is* there is a fault: the desktop launched
+    /// this instance, so it cannot be the impostor it has been called, and
+    /// ending quietly would leave the panel disappearing mid-use with
+    /// nothing anywhere to say why. The log carries that one because a
+    /// desktop-launched service has no terminal behind `stderr`.
+    fn stop_code(outcome: CycleOutcome, pid: u64) -> Option<i32> {
+        match outcome {
+            CycleOutcome::Continue => None,
+            CycleOutcome::SessionUnbound => Some(clean_exit(
+                "the desktop session's Switchboard endpoint is not bound; exiting",
+            )),
+            CycleOutcome::SessionRefused => {
+                let reason = "the desktop session refused this instance's identity; exiting";
+                log(
+                    &LOG_SINK,
+                    &LogEvent {
+                        level: LogLevel::Error,
+                        id: SESSION_REFUSED,
+                        message: reason,
+                        fields: &[LogField {
+                            key: "instance",
+                            value: LogFieldValue::UnsignedInt(pid),
+                        }],
+                    },
+                );
+                Some(fail(EXIT_SESSION_REFUSED, reason))
+            }
+            CycleOutcome::PublishFailed => Some(fail(
+                EXIT_PUBLISH_FAILURES,
+                "too many consecutive publish failures",
+            )),
+        }
     }
 
     /// A display mode for a client area of `width_px` × `height_px`.
@@ -988,22 +1045,9 @@ mod program {
         let mut service = Service::new(pid, probe_scopes(&transport), &authority);
 
         loop {
-            match service.cycle(&mut host, &transport, tairix_rt::clock_get(), &authority) {
-                CycleOutcome::Continue => {}
-                CycleOutcome::SessionUnbound => {
-                    return clean_exit(
-                        "the desktop session's Switchboard endpoint is not bound; exiting",
-                    );
-                }
-                CycleOutcome::SessionRefused => {
-                    return clean_exit("the desktop session refused this instance; exiting");
-                }
-                CycleOutcome::PublishFailed => {
-                    return fail(
-                        EXIT_PUBLISH_FAILURES,
-                        "too many consecutive publish failures",
-                    );
-                }
+            let cycled = service.cycle(&mut host, &transport, tairix_rt::clock_get(), &authority);
+            if let Some(code) = stop_code(cycled, pid) {
+                return code;
             }
 
             // One present per wake, immediately before parking: whatever the

@@ -336,6 +336,37 @@ fn raise_changes_z_order() {
 }
 
 #[test]
+fn raising_the_topmost_window_repaints_nothing() {
+    // The session re-asserts a popup's stacking before every composite, so a
+    // raise of a window already at the front is the common case, not a rare
+    // one: it must cost nothing at all.
+    let mut c = new_compositor(mode(8, 8), BLUE).expect("compositor");
+    let under = c.add_window(Point::ORIGIN, opaque(8, 8, RED));
+    let top = c.add_window(Point::ORIGIN, opaque(4, 4, GREEN));
+    composite_checked(&mut c);
+
+    assert!(c.raise(top), "a topmost window is raised");
+    assert!(!c.has_damage());
+    assert!(composite_checked(&mut c).is_empty());
+    assert!(c.frame_stats().is_idle());
+    // The stack is exactly as it was: a raise from the front passes nobody.
+    assert_eq!(c.window_at(Point::ORIGIN), Some(top));
+    assert_eq!(c.window_at(Point::new(6, 6)), Some(under));
+}
+
+#[test]
+fn raising_a_covered_window_still_restacks_and_repaints_it() {
+    let mut c = new_compositor(mode(8, 8), BLUE).expect("compositor");
+    let under = c.add_window(Point::ORIGIN, opaque(6, 6, RED));
+    c.add_window(Point::ORIGIN, opaque(4, 4, GREEN));
+    composite_checked(&mut c);
+
+    assert!(c.raise(under));
+    assert_eq!(c.window_at(Point::ORIGIN), Some(under));
+    assert_eq!(composite_checked(&mut c).rects(), &[Rect::new(0, 0, 6, 6)]);
+}
+
+#[test]
 fn semi_transparent_window_blends_with_background() {
     let mut c = new_compositor(mode(1, 1), BLUE).expect("compositor");
     let surface =
@@ -3737,6 +3768,24 @@ fn a_title_change_invalidates_only_that_window_s_furniture() {
 }
 
 #[test]
+fn re_setting_the_title_a_window_already_wears_repaints_nothing() {
+    let mut c = new_compositor(mode(320, 240), BLUE).expect("compositor");
+    let id = titled_window(&mut c, 10, 10, 40, "Documents");
+    composite_checked(&mut c);
+    assert!(c.chrome_resident(id));
+
+    assert!(
+        c.set_window_title(id, "Documents"),
+        "the window is decorated"
+    );
+    assert!(!c.has_damage(), "the title bar already reads that");
+    assert!(
+        c.chrome_resident(id),
+        "and the furniture rendered from it still stands"
+    );
+}
+
+#[test]
 fn a_focus_change_invalidates_only_that_window_s_furniture() {
     let mut c = new_compositor(mode(320, 240), BLUE).expect("compositor");
     let first = titled_window(&mut c, 10, 10, 40, "first");
@@ -3747,6 +3796,50 @@ fn a_focus_change_invalidates_only_that_window_s_furniture() {
     assert!(c.set_active_frame(first, false));
     assert!(!c.chrome_resident(first));
     assert!(c.chrome_resident(second));
+}
+
+#[test]
+fn re_asserting_the_activation_a_frame_already_shows_repaints_nothing() {
+    let mut c = new_compositor(mode(320, 240), BLUE).expect("compositor");
+    let id = titled_window(&mut c, 10, 10, 40, "active");
+    composite_checked(&mut c);
+    assert!(c.chrome_resident(id));
+
+    assert!(c.set_active_frame(id, true), "the window is decorated");
+    assert!(!c.has_damage(), "it already wears the active frame");
+    assert!(c.chrome_resident(id));
+
+    assert!(c.set_active_frame(id, false));
+    composite_checked(&mut c);
+    assert!(c.set_active_frame(id, false), "the window is decorated");
+    assert!(!c.has_damage(), "it already wears the inactive frame");
+    assert!(c.chrome_resident(id));
+}
+
+#[test]
+fn an_attention_request_survives_being_told_it_is_inactive_again() {
+    // Deactivating an attention-requesting frame leaves it requesting, so the
+    // second call really is a no-op — and the first must not quiet it either.
+    let mut c = new_compositor(mode(320, 240), BLUE).expect("compositor");
+    let id = titled_window(&mut c, 10, 10, 40, "attention");
+    let attention = WindowFurnitureState {
+        activation: WindowActivationState::AttentionRequested,
+        ..decorated()
+    };
+    assert!(c.set_window_frame(id, WindowFrame::new(attention)));
+    assert!(c.set_window_title(id, "attention"));
+    composite_checked(&mut c);
+
+    assert!(c.set_active_frame(id, false), "the window is decorated");
+    assert_eq!(
+        c.window_frame(id).map(|f| f.furniture().activation),
+        Some(WindowActivationState::AttentionRequested)
+    );
+    assert!(
+        !c.has_damage(),
+        "an attention request is already not active"
+    );
+    assert!(c.chrome_resident(id));
 }
 
 #[test]
@@ -4268,6 +4361,49 @@ fn a_present_above_a_frosted_window_leaves_its_frost_alone() {
     );
     composite_checked(&mut c);
     assert_eq!(c.frame_stats().blur_px, 0);
+}
+
+#[test]
+fn raising_the_topmost_frosted_window_keeps_its_backdrop() {
+    // An open menu has its parent and itself re-raised before every composite.
+    // Both are already where they belong, so a terminal behind its own menu
+    // must not pay a whole-window re-blur per wake.
+    let mut c = new_compositor(mode(40, 24), BLUE).expect("compositor");
+    c.add_window(Point::ORIGIN, opaque(40, 24, GREEN));
+    let glass = c.add_window(Point::new(6, 4), clear(20, 14));
+    assert!(c.set_backdrop_blur(glass, 3));
+    composite_checked(&mut c);
+    assert!(c.frost_resident(glass));
+
+    assert!(c.raise(glass));
+    assert!(
+        c.frost_resident(glass),
+        "a raise that restacks nothing cannot have changed what the frost sees"
+    );
+    assert!(!c.has_damage());
+    composite_checked(&mut c);
+    let stats = c.frame_stats();
+    // Unguarded this frame cost (280, 280): every pixel of the window
+    // recomposited and its whole backdrop blurred again.
+    assert_eq!((stats.damaged_px, stats.blur_px), (0, 0));
+}
+
+#[test]
+fn raising_a_covered_frosted_window_re_frosts_it() {
+    let mut c = new_compositor(mode(40, 24), BLUE).expect("compositor");
+    c.add_window(Point::ORIGIN, opaque(40, 24, GREEN));
+    let glass = c.add_window(Point::new(6, 4), clear(20, 14));
+    c.add_window(Point::new(10, 6), opaque(8, 8, RED));
+    assert!(c.set_backdrop_blur(glass, 3));
+    composite_checked(&mut c);
+    assert!(c.frost_resident(glass));
+
+    // Raising it puts a window that was above it below: the backdrop it
+    // blurred is a different one now.
+    assert!(c.raise(glass));
+    assert!(!c.frost_resident(glass));
+    composite_checked(&mut c);
+    assert_eq!(c.frame_stats().blur_px, 20 * 14);
 }
 
 #[test]

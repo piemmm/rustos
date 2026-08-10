@@ -141,8 +141,10 @@ fn an_unbound_endpoint_stops_the_service_cleanly() {
     );
 }
 
+/// A refusal is told apart from a session that simply is not there, because
+/// the run loop ends quietly on the second and fails loudly on the first.
 #[test]
-fn a_session_that_refuses_this_instance_stops_the_service_cleanly() {
+fn a_session_that_refuses_this_instance_stops_the_service_abnormally() {
     let mut host = RecordingHost::new();
     host.publish_refusal = Some(Errno::PermissionDenied);
     let mut service = service();

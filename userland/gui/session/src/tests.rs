@@ -11,7 +11,8 @@ use core::cell::RefCell;
 use tairix_abi::driver::display::{DamageRect, Display, DisplayFormat, DisplayMode};
 use tairix_abi::notify_ipc::{NotifyBody, NotifyRequest, NotifySeverity, NotifyTitle};
 use tairix_abi::switchboard_ipc::{
-    CommandSection, FrameReport, SwitchboardCommand, SwitchboardRequest, SEAT_REPORT_OWNERS_MAX,
+    CommandSection, FrameReport, SeatReport, SwitchboardCommand, SwitchboardRequest,
+    SEAT_REPORT_OWNERS_MAX,
 };
 use tairix_abi::sysinfo::CACHE_LABEL_MAX;
 use tairix_abi::{
@@ -48,17 +49,17 @@ use tairix_wm::{
 
 use crate::shell::SettleWork;
 use crate::{
-    build_pin_views, deliver_pending_open, desktop_info, load_icon_set, load_library,
-    maybe_send_frame_report, maybe_send_seat_report, open_tray, resolve_library_icons,
-    resolve_window_identities, serve_switchboard_request, ArtworkFileReader, ArtworkSandbox,
-    DesktopSession, DesktopShell, DragOrigin, FrameContent, IconRasteriser, InputSource,
-    LaunchTable, LockOutcome, LockedDrain, OwnerWindow, PinBridge, PinEditError, PinIconSource,
-    PinService, PresentedOwners, ResolvedPin, ScreenFade, ScreenLock, SessionFileReader,
-    SessionFileWriter, SessionInputResponse, SessionInputRouter, SessionPins, SessionWindows,
-    ShellOutcome, ShellWindowHost, SwitchboardMailbox, SwitchboardOutcome, SwitchboardRefusal,
-    SwitchboardServe, TaskBridge, TaskbarPresenter, BUNDLE_RUN_SUFFIX, DESKTOP_REVEALED,
-    DESKTOP_REVEALED_MESSAGE, DESKTOP_SESSION_RANGE_END, DESKTOP_SESSION_RANGE_START,
-    NO_DEADLINE_NS, SWITCHBOARD_RUN_PATH,
+    build_pin_views, deliver_pending_open, desktop_info, drop_is_noteworthy, ensure_switchboard,
+    load_icon_set, load_library, maybe_send_frame_report, maybe_send_seat_report, open_tray,
+    resolve_library_icons, resolve_window_identities, serve_switchboard_request, ArtworkFileReader,
+    ArtworkSandbox, DesktopSession, DesktopShell, DragOrigin, FrameContent, IconRasteriser,
+    InputSource, LaunchTable, LockOutcome, LockedDrain, OwnerWindow, PinBridge, PinEditError,
+    PinIconSource, PinService, PresentedOwners, ResolvedPin, ScreenFade, ScreenLock,
+    SessionFileReader, SessionFileWriter, SessionInputResponse, SessionInputRouter, SessionPins,
+    SessionWindows, ShellOutcome, ShellWindowHost, SwitchboardMailbox, SwitchboardOutcome,
+    SwitchboardRefusal, SwitchboardServe, TaskBridge, TaskbarPresenter, BUNDLE_RUN_SUFFIX,
+    DESKTOP_REVEALED, DESKTOP_REVEALED_MESSAGE, DESKTOP_SESSION_RANGE_END,
+    DESKTOP_SESSION_RANGE_START, NO_DEADLINE_NS, SWITCHBOARD_RUN_PATH,
 };
 use tairix_window::PinDecision;
 
@@ -4598,6 +4599,169 @@ fn monitor_launched() -> LaunchTable {
     launched
 }
 
+/// A live monitor is attested by *its own* launch record, so an earlier
+/// instance still sitting in the table — one that has exited but not yet
+/// been reaped — cannot answer for it.
+///
+/// The reported defect: the gate used to compare the caller against the
+/// lowest-numbered entry for the monitor's bundle path, so a leftover
+/// entry below the live instance turned every one of its calls into a
+/// permission denial. The instance then read the denial as the session
+/// disowning it and vanished, intermittently and silently.
+#[test]
+fn a_live_monitor_is_attested_beneath_an_older_entry_for_the_same_bundle() {
+    let mut shell = shell();
+    let mut comp = compositor();
+    let mut launched = LaunchTable::new();
+    launched.record(MONITOR_PID - 1, "Switchboard", SWITCHBOARD_RUN_PATH);
+    launched.record(MONITOR_PID, "Switchboard", SWITCHBOARD_RUN_PATH);
+    let mut relaunches = Relaunches::default();
+
+    let outcome = serve_as_monitor(
+        &mut shell,
+        &mut comp,
+        &mut launched,
+        &FakeOwnerWindows::none(),
+        &mut relaunches,
+        &SwitchboardRequest::PublishSummary {
+            summary: tray_summary(2),
+        },
+    );
+
+    assert_eq!(
+        outcome,
+        Ok(SwitchboardOutcome::Published {
+            session: session_proc_id(),
+            publisher: MONITOR_PID,
+        }),
+        "the caller's own launch record attests it, whatever else the table holds"
+    );
+    assert_eq!(
+        shell.session().taskbar().tray().signal().state().activity,
+        tairix_controls::ActivityState::Working,
+        "the published summary drove the capsule"
+    );
+}
+
+/// An accepted publish names the instance that made it, so the session
+/// talks back to the one it just attested rather than to whichever entry
+/// the table lists first. Self-healing: publishing is the proof of life.
+#[test]
+fn an_accepted_publish_names_the_publishing_instance_not_the_lowest_entry() {
+    let mut shell = shell();
+    let mut comp = compositor();
+    let mut launched = LaunchTable::new();
+    launched.record(MONITOR_PID - 1, "Switchboard", SWITCHBOARD_RUN_PATH);
+    launched.record(MONITOR_PID, "Switchboard", SWITCHBOARD_RUN_PATH);
+    let mut relaunches = Relaunches::default();
+
+    let outcome = serve_as_monitor(
+        &mut shell,
+        &mut comp,
+        &mut launched,
+        &FakeOwnerWindows::none(),
+        &mut relaunches,
+        &SwitchboardRequest::PublishSummary {
+            summary: tray_summary(2),
+        },
+    );
+
+    let Ok(SwitchboardOutcome::Published { publisher, .. }) = outcome else {
+        panic!("the attested monitor's publish is accepted");
+    };
+    assert_eq!(publisher, MONITOR_PID);
+    assert_ne!(
+        Some(publisher),
+        launched.running_from(SWITCHBOARD_RUN_PATH),
+        "the lowest entry is deliberately not the answer"
+    );
+}
+
+/// A caller with a launch record for some *other* bundle is refused: a
+/// recorded launch is not authority in itself, only a recorded launch of
+/// the monitor's own bundle is.
+#[test]
+fn a_caller_launched_from_another_bundle_is_refused() {
+    let mut shell = shell();
+    let mut comp = compositor();
+    let mut launched = monitor_launched();
+    launched.record(41, "Editor", "/Apps/Editor.app/Run");
+    let mut relaunches = Relaunches::default();
+
+    let refusal = serve_switchboard_request(
+        SwitchboardServe {
+            shell: &mut shell,
+            compositor: &mut comp,
+            launched: &mut launched,
+            owner_windows: &FakeOwnerWindows::none(),
+            relaunch: &mut |_: &mut LaunchTable, run_path: &str, label: &str| {
+                relaunches
+                    .launched
+                    .push((String::from(run_path), String::from(label)));
+            },
+            self_proc_id: session_proc_id(),
+        },
+        41,
+        &SwitchboardRequest::PublishSummary {
+            summary: tray_summary(2),
+        }
+        .to_le_bytes(),
+    );
+
+    assert_eq!(refusal, Err(SwitchboardRefusal::Unattested));
+    assert_eq!(
+        shell.session().taskbar().tray().signal().state().activity,
+        tairix_controls::ActivityState::Idle,
+        "a refused call publishes nothing"
+    );
+}
+
+/// The press finds the recorded instance and starts nothing: one monitor
+/// per session is enforced at the spawn, not by refusing a running
+/// instance's calls.
+#[test]
+fn ensuring_the_monitor_reuses_the_recorded_instance() {
+    let mut launched = monitor_launched();
+    let mut spawns = 0;
+
+    let live = ensure_switchboard(&mut launched, |_| {
+        spawns += 1;
+        Some(MONITOR_PID + 5)
+    });
+
+    assert_eq!(
+        live,
+        Some(MONITOR_PID),
+        "the recorded instance is the live one"
+    );
+    assert_eq!(spawns, 0, "a recorded instance is never respawned");
+    assert_eq!(launched.len(), 1);
+}
+
+/// With no instance recorded, the answer is the pid the spawn just
+/// recorded — never some other entry the table happens to hold.
+#[test]
+fn ensuring_the_monitor_answers_with_the_instance_it_started() {
+    let mut launched = LaunchTable::new();
+    launched.record(3, "Files", "/System/Applications/files.app/Run");
+
+    let live = ensure_switchboard(&mut launched, |launched| {
+        launched.record(90, "Switchboard", SWITCHBOARD_RUN_PATH);
+        Some(90)
+    });
+
+    assert_eq!(live, Some(90), "the instance just started is the live one");
+}
+
+/// A refused spawn answers with nothing: the desktop runs without its
+/// monitor rather than naming an instance that does not exist.
+#[test]
+fn ensuring_the_monitor_answers_nothing_when_the_spawn_is_refused() {
+    let mut launched = LaunchTable::new();
+    assert_eq!(ensure_switchboard(&mut launched, |_| None), None);
+    assert!(launched.is_empty());
+}
+
 /// A fixed owner→window map standing in for the session's live window
 /// registry: an owner not in it currently owns no window on this seat.
 struct FakeOwnerWindows {
@@ -4700,7 +4864,10 @@ fn a_publish_relays_the_summary_and_answers_with_the_session_identity() {
 
     assert_eq!(
         outcome,
-        Ok(SwitchboardOutcome::Published(session_proc_id()))
+        Ok(SwitchboardOutcome::Published {
+            session: session_proc_id(),
+            publisher: MONITOR_PID,
+        })
     );
     assert_eq!(
         shell.session().taskbar().tray().signal().state().activity,
@@ -4747,8 +4914,8 @@ fn an_unattested_caller_is_refused_for_every_operation() {
                 },
                 self_proc_id: session_proc_id(),
             },
-            // Not the launch table's live monitor: an orphan, a foreign
-            // process, or a copy launched by hand.
+            // No launch record of its own: an orphan, a foreign process,
+            // or a copy launched by hand.
             MONITOR_PID + 1,
             &request.to_le_bytes(),
         );
@@ -5259,6 +5426,49 @@ fn a_switchboard_only_frame_is_not_reported() {
         mailbox.sent.len() >= 2,
         "a non-Switchboard frame whose counts moved still reports"
     );
+}
+
+/// A dropped frame reading says nothing on the console; every command with
+/// a consequence a user can see still does.
+///
+/// The readings are offered again on the very next frame that differs, so
+/// a full mailbox produces one refusal per frame — and it fills precisely
+/// when the desktop is busy, which is the load the reading describes.
+/// Narrating each would put a synchronous console write on every frame of
+/// exactly that load.
+#[test]
+fn a_dropped_frame_reading_is_not_worth_stating() {
+    let report = FrameReport {
+        screen_px: 1,
+        damaged_px: 1,
+        blended_px: 0,
+        opaque_px: 1,
+        dirty_rects: 1,
+        present_calls: 1,
+        chrome_hits: 0,
+        chrome_misses: 0,
+    };
+    assert!(
+        !drop_is_noteworthy(SwitchboardCommand::FrameReport { report }),
+        "a reading the monitor may ignore is not news"
+    );
+
+    for command in [
+        SwitchboardCommand::OpenPanel {
+            section: CommandSection::Tasks,
+        },
+        SwitchboardCommand::Power {
+            action: PowerAction::PowerOff,
+        },
+        SwitchboardCommand::SeatReport {
+            report: SeatReport::HEALTHY,
+        },
+    ] {
+        assert!(
+            drop_is_noteworthy(command),
+            "a command with a visible consequence is stated when it is dropped: {command:?}"
+        );
+    }
 }
 
 /// Owner classification: only a present whose owner is exactly the live

@@ -1160,11 +1160,16 @@ impl Compositor {
     }
 
     /// Raise a window to the top of the z-order; its bounds are marked
-    /// dirty.
+    /// dirty. Raising the window already at the front marks no damage and
+    /// still returns `true` (only an unknown `id` returns `false`).
     pub fn raise(&mut self, id: WindowId) -> bool {
         let Some(index) = self.index_of(id) else {
             return false;
         };
+        if index.saturating_add(1) == self.windows.len() {
+            // Already at the front: nothing to restack, nothing to repaint.
+            return true;
+        }
         let window = self.windows.remove(index);
         let bounds = window.bounds();
         self.windows.push(window);
@@ -1355,8 +1360,19 @@ impl Compositor {
     /// The window manager keeps this in step with the focused window the
     /// [`InputRouter`](crate::InputRouter) tracks. Only the furniture bands are
     /// marked dirty — the client area does not change on a focus flip — so a
-    /// focus change never triggers a full-window recomposite.
+    /// focus change never triggers a full-window recomposite. Re-asserting the
+    /// activation a frame already shows marks no damage and keeps its rendered
+    /// furniture.
     pub fn set_active_frame(&mut self, id: WindowId, active: bool) -> bool {
+        let Some(changes) = self
+            .window(id)
+            .and_then(|window| window.frame_activation_changes(active))
+        else {
+            return false;
+        };
+        if !changes {
+            return true;
+        }
         let bands = self.mutate_frame(id, |window, _, _| {
             window
                 .set_frame_active(active)
@@ -1377,8 +1393,17 @@ impl Compositor {
     /// The title is the untrusted string the window channel already carries
     /// (`WindowTitle`); the title bar sanitises and truncates it. Only the top
     /// (title) furniture band is marked dirty — a title edit never touches the
-    /// client or the other frame edges.
+    /// client or the other frame edges. Setting the label the bar already
+    /// reads marks no damage and keeps that window's rendered furniture.
     pub fn set_window_title(&mut self, id: WindowId, title: &str) -> bool {
+        let Some(frame) = self.window(id).and_then(Window::frame) else {
+            return false;
+        };
+        if frame.title_bar().title() == title {
+            // Sanitising is idempotent, so a title equal to the stored one
+            // sanitises to it: there is nothing to relabel or re-render.
+            return true;
+        }
         let band = self.mutate_frame(id, |window, _, _| {
             window.set_frame_title(title).then(|| window.title_band())
         });
