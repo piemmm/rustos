@@ -2,7 +2,7 @@
 //! the group popup that files a task into an activity.
 
 use tairix_abi::ProcessState;
-use tairix_geometry::{Point, Rect, Scale};
+use tairix_geometry::{to_i32, Point, Rect, Scale};
 use tairix_icon::IconKind;
 use tairix_input::{Key, NamedKey};
 use tairix_raster::Surface;
@@ -1231,6 +1231,70 @@ fn a_refresh_that_drops_the_slot_carries_no_hover() {
         row_pointer(&sb, 0),
         PointerState::None,
         "the pointer is over no row once the slot it was over has gone"
+    );
+}
+
+/// The window point that hits filter tab `tab`.
+///
+/// Aimed through the strip's own hit-test, so a layout change cannot leave a
+/// test quietly pointing at a different tab than it names.
+fn filter_tab_point(sb: &Switchboard, b: Rect, theme: &Theme, tab: usize) -> (i32, i32) {
+    let layout = sb.compute_layout(b, Scale::ONE, theme);
+    let frame = resolve_section_frame(layout.content, sb.tasks.anatomy(), Scale::ONE, theme);
+    let (strip, _) = TasksSection::header_rows(&frame, Scale::ONE);
+    let each = strip.width / u32::try_from(sb.tasks.filters.len()).unwrap_or(1).max(1);
+    let x = strip.left() + to_i32(each * u32::try_from(tab).unwrap_or(0) + each / 2);
+    let y = strip.top() + to_i32(strip.height / 2);
+    assert_eq!(
+        sb.tasks.filters.tab_at(strip, Point::new(x, y)),
+        Some(tab),
+        "the point aims at the tab the strip drew there"
+    );
+    (x, y)
+}
+
+#[test]
+fn a_refresh_keeps_the_filter_tab_under_the_pointer_lit() {
+    let m = model();
+    let mut sb = Switchboard::new(&m);
+    let (b, theme) = (bounds(), Theme::dark());
+    let untouched = sb.tasks.filters.clone();
+    let (x, y) = filter_tab_point(&sb, b, &theme, 1);
+    assert_eq!(
+        sb.on_pointer(&moved(x, y), b, Scale::ONE, &theme, font()),
+        None,
+        "moving onto a filter tab asks for nothing"
+    );
+    let lit = sb.tasks.filters.clone();
+    assert_ne!(lit, untouched, "the pointer resting on a tab lifts it");
+
+    sb.set_model(&m);
+
+    assert_eq!(
+        sb.tasks.filters, lit,
+        "a refresh moves neither the pointer nor the tab it rests on"
+    );
+}
+
+#[test]
+fn a_refresh_does_not_swallow_a_click_begun_on_a_filter_tab() {
+    let m = model();
+    let mut sb = Switchboard::new(&m);
+    let (b, theme) = (bounds(), Theme::dark());
+    let (x, y) = filter_tab_point(&sb, b, &theme, 1);
+    assert_eq!(
+        sb.on_pointer(&moved(x, y), b, Scale::ONE, &theme, font()),
+        None
+    );
+    assert_eq!(sb.on_pointer(&PRESS, b, Scale::ONE, &theme, font()), None);
+
+    sb.set_model(&m);
+
+    assert_eq!(sb.on_pointer(&RELEASE, b, Scale::ONE, &theme, font()), None);
+    assert_eq!(
+        sb.tasks.filters.selected(),
+        Some(1),
+        "the click completes on the tab it began on"
     );
 }
 

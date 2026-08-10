@@ -730,6 +730,13 @@ Tabs use a lower seam for selected state.
 - Modified tab: small Signal Bead.
 - Loading tab: Heat Seam on lower edge.
 - Error tab: warning or recovery bead with accessible label.
+- The hovered tab and the keyboard-cursor tab are separate records: both lift
+  their plate, only the cursor's is ringed, and each may rest on a different
+  tab. A host may therefore re-state where its keyboard is as often as its
+  model refreshes without disturbing where the pointer is.
+- A strip whose labels carry a live reading is re-labelled in place, never
+  rebuilt: a fresh strip knows neither record, nor which tab a press is
+  waiting on.
 
 ### 11.13 ListRow and TableRow
 

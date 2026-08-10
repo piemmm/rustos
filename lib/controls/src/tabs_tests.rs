@@ -226,12 +226,22 @@ fn home_and_end_jump_to_the_ends() {
 // --- Pointer ------------------------------------------------------------
 
 #[test]
-fn hover_focuses_a_tab_and_click_selects_it() {
+fn hover_lifts_a_tab_and_click_selects_it() {
+    let theme = Theme::dark();
     let mut tabs = three_tabs();
     let bounds = Rect::new(0, 0, W, H);
     let x = xi(EACH + EACH / 2);
     assert_eq!(tabs.on_pointer(&moved(x, 14), bounds), None);
-    assert_eq!(tabs.current(), Some(1));
+    assert_eq!(
+        render(&tabs, &theme).get(EACH + 2, 2),
+        Some(premul(theme.palette().surface_raised)),
+        "the tab under the pointer lifts"
+    );
+    assert_eq!(
+        tabs.current(),
+        None,
+        "and the keyboard cursor stays where the keyboard left it"
+    );
     assert_eq!(tabs.on_pointer(&PRESS, bounds), None);
     assert_eq!(
         tabs.on_pointer(&RELEASE, bounds),
@@ -247,6 +257,90 @@ fn release_outside_the_pressed_tab_does_not_select() {
     tabs.on_pointer(&PRESS, bounds);
     tabs.on_pointer(&moved(xi(2 * EACH + EACH / 2), 14), bounds);
     assert_eq!(tabs.on_pointer(&RELEASE, bounds), None);
+}
+
+#[test]
+fn re_stating_the_keyboard_cursor_leaves_the_hover_where_it_is() {
+    let theme = Theme::dark();
+    let mut tabs = three_tabs();
+    let bounds = Rect::new(0, 0, W, H);
+    tabs.on_pointer(&moved(xi(EACH + EACH / 2), 14), bounds);
+    let hovered = render(&tabs, &theme);
+    assert_eq!(
+        hovered.get(EACH + 2, 2),
+        Some(premul(theme.palette().surface_raised))
+    );
+
+    // What a host does on every model refresh, however often that is.
+    tabs.set_current(None);
+
+    assert_eq!(
+        render(&tabs, &theme).pixels(),
+        hovered.pixels(),
+        "stating where the keyboard is says nothing about where the pointer is"
+    );
+}
+
+#[test]
+fn only_the_keyboard_cursor_wears_the_focus_ring() {
+    let theme = Theme::dark();
+    let ring = premul(theme.palette().rim_active);
+    let mut tabs = three_tabs();
+    let bounds = Rect::new(0, 0, W, H);
+    tabs.on_pointer(&moved(xi(EACH + EACH / 2), 14), bounds);
+    assert!(
+        !has_pixel(&render(&tabs, &theme), ring),
+        "a hover lifts a tab without claiming the keyboard"
+    );
+
+    tabs.set_current(Some(1));
+
+    assert!(has_pixel(&render(&tabs, &theme), ring));
+}
+
+#[test]
+fn the_pointer_and_the_keyboard_cursor_light_their_own_tabs() {
+    let theme = Theme::dark();
+    let mut tabs = three_tabs();
+    let bounds = Rect::new(0, 0, W, H);
+    tabs.set_current(Some(0));
+    tabs.on_pointer(&moved(xi(2 * EACH + EACH / 2), 14), bounds);
+
+    let surface = render(&tabs, &theme);
+    let raised = premul(theme.palette().surface_raised);
+    assert_eq!(surface.get(2, 2), Some(raised), "the keyboard's tab lifts");
+    assert_eq!(
+        surface.get(2 * EACH + 2, 2),
+        Some(raised),
+        "so does the pointer's"
+    );
+    assert_eq!(
+        surface.get(EACH + 2, 2),
+        Some(premul(theme.palette().surface_pressed)),
+        "and the tab neither is on stays quiet"
+    );
+    assert_eq!(tabs.current(), Some(0));
+}
+
+#[test]
+fn re_labelling_keeps_the_selection_and_a_click_in_flight() {
+    let mut tabs = three_tabs();
+    let bounds = Rect::new(0, 0, W, H);
+    tabs.set_selected(2);
+    tabs.on_pointer(&moved(xi(EACH + EACH / 2), 14), bounds);
+    assert_eq!(tabs.on_pointer(&PRESS, bounds), None);
+
+    for (tab, label) in tabs.tabs_mut().iter_mut().zip(["One 4", "Two 9", "Tri 0"]) {
+        tab.set_label(label);
+    }
+
+    assert_eq!(
+        tabs.on_pointer(&RELEASE, bounds),
+        Some(TabsAction::Selected { index: 1 }),
+        "a live reading changing mid-click cannot swallow it"
+    );
+    assert_eq!(tabs.selected(), Some(2), "nor commit the selection early");
+    assert_eq!(tabs.tabs()[1].label(), "Two 9");
 }
 
 #[test]
@@ -322,9 +416,8 @@ fn hit_test_bookkeeping_is_invisible_to_a_tab_strip() {
         "…and the two must therefore paint identically"
     );
 
-    // Both hover the already-selected tab, so the selection and the hover
-    // match; only one holds the press, and which tab a release would choose
-    // is not drawn.
+    // Both rest the pointer on the same tab, so only the press latch differs,
+    // and which tab a release would choose is not drawn.
     let over_selected = moved(xi(EACH) / 2, xi(H) / 2);
     let mut latched = three_tabs();
     latched.on_pointer(&over_selected, bounds);
@@ -572,7 +665,11 @@ fn a_vertical_press_selects_the_tab_that_was_drawn() {
     let bounds = Rect::new(0, 0, VW, VH);
     let over_band_one = moved(xi(VW / 2), xi(VEACH + VEACH / 2));
     assert_eq!(tabs.on_pointer(&over_band_one, bounds), None);
-    assert_eq!(tabs.current(), Some(1));
+    assert_eq!(
+        render_in(&tabs, &theme, Scale::ONE, VW, VH).get(VW - 2, VEACH + 4),
+        Some(premul(theme.palette().surface_raised)),
+        "the band under the pointer lifts"
+    );
     assert_eq!(tabs.on_pointer(&PRESS, bounds), None);
     assert_eq!(
         tabs.on_pointer(&RELEASE, bounds),

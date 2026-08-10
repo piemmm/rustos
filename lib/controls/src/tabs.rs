@@ -102,6 +102,15 @@ impl Tab {
         &self.label
     }
 
+    /// Replace the tab's label, leaving the rest of the tab alone.
+    ///
+    /// For a strip whose labels carry a live reading — a count beside the
+    /// name — so the owner can re-label in place and keep the strip that
+    /// holds where the pointer and the keyboard cursor are.
+    pub fn set_label(&mut self, label: impl Into<String>) {
+        self.label = label.into();
+    }
+
     /// The tab's composed state.
     #[must_use]
     pub fn state(&self) -> ControlState {
@@ -186,28 +195,35 @@ fn seam_rect(
 /// A row (or, laid out [`TabsOrientation::Vertical`], a column) of
 /// equal-extent items selecting one of several views (spec §11.12).
 ///
-/// The strip tracks a *current* tab for keyboard focus (distinct from the
-/// *selected* tab, which is the one whose view is shown). Selection commits
-/// through the owner via [`TabsAction::Selected`]; the owner then updates the
-/// items' [`SelectionState`] (helper [`Tabs::set_selected`]).
+/// The strip keeps where the pointer rests (the *hovered* tab) apart from
+/// where the keyboard cursor is (the *current* tab): both lift their plate,
+/// only the current tab is ringed. One record for both would blink a resting
+/// pointer's highlight off every time a host re-stated its keyboard focus,
+/// which hosts do whenever their model refreshes. Neither is the *selected*
+/// tab, whose view is the one on show: selection commits through the owner via
+/// [`TabsAction::Selected`], which then updates the items' [`SelectionState`]
+/// (helper [`Tabs::set_selected`]).
 ///
 /// Equal strips draw the same pixels, so a host may use `==` as its repaint
-/// gate: the items, the orientation, the current tab, and whether that focus
-/// came from the keyboard all compare. The pointer coordinate and the
-/// pressed-tab latch do not — no render path reads either, and the *visible*
-/// consequence of a press is the `current` tab the same event sets.
+/// gate: the items, the orientation, and both records of attention compare.
+/// The pointer coordinate and the pressed-tab latch do not — no render path
+/// reads either, and a press's visible consequence is the lift the pointer's
+/// own motion already stated.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Tabs {
     items: Vec<Tab>,
     orientation: TabsOrientation,
+    /// The tab the pointer rests on, or the one holding a press while the
+    /// pointer slides off it.
+    hovered: Option<usize>,
+    /// The tab the keyboard cursor is on.
     current: Option<usize>,
-    keyboard_focus: bool,
     /// The last pointer position, mapped to a tab on the next press or
     /// release — hit-testing input, never drawn.
     pointer: RenderInvariant<Point>,
     /// The tab a primary press landed on, held until release so a click that
-    /// slides onto another tab does not select it; the pressed tab's *look* is
-    /// `current`.
+    /// slides onto another tab does not select it; the pressed tab keeps its
+    /// lift meanwhile.
     armed: RenderInvariant<Option<usize>>,
 }
 
@@ -218,8 +234,8 @@ impl Tabs {
         Self {
             items: tabs,
             orientation: TabsOrientation::Horizontal,
+            hovered: None,
             current: None,
-            keyboard_focus: false,
             pointer: RenderInvariant::new(Point::ORIGIN),
             armed: RenderInvariant::new(None),
         }
@@ -306,17 +322,19 @@ impl Tabs {
         }
     }
 
-    /// The currently focused tab, if any.
+    /// The tab the keyboard cursor is on, if any.
     #[must_use]
     pub fn current(&self) -> Option<usize> {
         self.current
     }
 
-    /// Focus `index` from the keyboard (or clear focus with `None`); an
-    /// out-of-range index clears focus (fail closed).
+    /// Put the keyboard cursor on `index`, or take it off the strip with
+    /// `None`; an out-of-range index takes it off (fail closed).
+    ///
+    /// Where the pointer rests is untouched, so a host may re-state its
+    /// keyboard focus as often as its model refreshes.
     pub fn set_current(&mut self, index: Option<usize>) {
         self.current = index.filter(|&i| i < self.items.len());
-        self.keyboard_focus = self.current.is_some();
     }
 
     /// The surface rectangle of tab `index` within `bounds`, or `None` if it
@@ -385,13 +403,15 @@ impl Tabs {
         }
         let palette = theme.palette();
         let current = self.current == Some(index);
+        let lifted = current || self.hovered == Some(index);
 
         // Tab plate: the selected tab reads as a quiet selected plate on the
         // content surface in either orientation; an unselected tab is
-        // quieter; a hovered tab lifts. Disabled stays muted.
+        // quieter; a tab either the pointer or the keyboard cursor is on
+        // lifts. Disabled stays muted.
         let plate = if tab.is_selected() {
             palette.surface
-        } else if current {
+        } else if lifted {
             palette.surface_raised
         } else {
             palette.surface_pressed
@@ -401,7 +421,7 @@ impl Tabs {
         Self::paint_seam(surface, self.orientation, rect, scale, theme, tab);
 
         // The keyboard focus ring, distinct from a hover lift.
-        if current && self.keyboard_focus {
+        if current {
             draw_outline(
                 surface,
                 x,
@@ -542,8 +562,11 @@ impl Tabs {
             .then_some(TabsAction::Selected { index })
     }
 
-    /// Feed a pointer event; hover focuses a tab and a completed primary click
-    /// selects it.
+    /// Feed a pointer event; the tab under the pointer lifts and a completed
+    /// primary click selects it.
+    ///
+    /// A press moves no pointer, so it states nothing new about where the
+    /// pointer is; it only arms the tab it landed on.
     pub fn on_pointer(&mut self, event: &InputEvent, bounds: Rect) -> Option<TabsAction> {
         if let InputEvent::PointerMoved { to } = event {
             *self.pointer = *to;
@@ -552,8 +575,7 @@ impl Tabs {
         match event {
             InputEvent::PointerMoved { .. } => {
                 if self.armed.is_none() {
-                    self.current = over;
-                    self.keyboard_focus = false;
+                    self.hovered = over;
                 }
                 None
             }
@@ -561,10 +583,6 @@ impl Tabs {
                 button: PointerButton::Primary,
             } => {
                 *self.armed = over;
-                if let Some(i) = over {
-                    self.current = Some(i);
-                    self.keyboard_focus = false;
-                }
                 None
             }
             InputEvent::PointerReleased {
@@ -603,7 +621,6 @@ impl Tabs {
                     _ => 0,
                 };
                 self.current = Some(next);
-                self.keyboard_focus = true;
                 None
             }
             Key::Named(named) if named == backward => {
@@ -612,17 +629,14 @@ impl Tabs {
                     Some(i) => i - 1,
                 };
                 self.current = Some(prev);
-                self.keyboard_focus = true;
                 None
             }
             Key::Named(NamedKey::Home) => {
                 self.current = Some(0);
-                self.keyboard_focus = true;
                 None
             }
             Key::Named(NamedKey::End) => {
                 self.current = Some(last);
-                self.keyboard_focus = true;
                 None
             }
             Key::Named(NamedKey::Enter) | Key::Char(' ') => self.choose(self.current?),

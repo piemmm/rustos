@@ -111,7 +111,10 @@ The **command surfaces** are the menu, toolbar, tab strip, and combo box:
   `ToolbarAction`.
 - `tabs` — `Tab`/`Tabs`, an equal-width strip whose selected tab carries a
   strong lower seam, loading a Heat Seam, and modified/error a shape-coded bead;
-  it emits a typed `TabsAction`.
+  it emits a typed `TabsAction`. Where the pointer rests and where the keyboard
+  cursor is are two separate records — both lift a tab, only the keyboard's is
+  ringed — so a host re-stating its keyboard focus, which a monitoring host does
+  on every refresh, cannot erase a resting pointer's highlight.
 - `combo` — `ComboBox` composes the text-field focus model and the `Menu` model
   (its popup *is* a `Menu`), opening/selecting/closing by pointer and keyboard
   and emitting a typed `ComboAction`.

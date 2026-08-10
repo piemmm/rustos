@@ -150,6 +150,13 @@ predicate the filter itself applies, so a tile, its tab and the rows it shows
 can never state different numbers. Filtering, searching, grouping and sorting
 are arrangements of the rows already sampled; none of them issues a new query.
 
+A sample changing a count re-labels those tabs **in place**. The strip is built
+once and holds one tab per filter for the life of the section, because it — not
+the section — is what remembers which tab the pointer rests on, which one the
+keyboard cursor is on, and which one a press is waiting to complete on. A
+fresh strip each sample would know none of the three, so a count moving under a
+resting pointer would blink the highlight off and swallow a click in flight.
+
 The **rows** are a sortable `TableHeader` over nine columns: Task (its icon and
 name), Type, State, Activity, CPU, Memory, Disk, Network, Last active. Every
 column is a *reading* about the task. The sort is the header's own, applied

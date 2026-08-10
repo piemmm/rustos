@@ -128,6 +128,14 @@ it, or frame the content that does:
   text, and it never moves a column boundary.
 - `TabsOrientation` gives the existing strip a vertical orientation, so a
   sidebar of pages is the one selection control rather than a second one.
+- `Tabs` keeps where the *pointer* rests and where the *keyboard cursor* is as
+  two separate records: both lift their tab's plate, and only the keyboard's is
+  ringed. A monitoring host re-states where its keyboard is every time its
+  model refreshes — many times a second — so one record for both would erase a
+  resting pointer's highlight on each refresh and blink it as the pointer
+  moved. A strip whose labels carry a live reading is therefore re-labelled in
+  place (`Tab::set_label`) rather than rebuilt: a fresh strip knows neither
+  record, nor which tab is holding a press.
 
 ## Plate seating: a panel or a bar
 

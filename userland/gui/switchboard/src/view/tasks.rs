@@ -802,12 +802,7 @@ impl TasksSection {
             selected: None,
             rail: ActionRail::new(Vec::new()),
             rail_panel: Panel::new(RAIL_TITLE),
-            filters: Tabs::new(
-                TaskFilter::ALL
-                    .iter()
-                    .map(|filter| Tab::new(tab_label(*filter, 0)))
-                    .collect(),
-            ),
+            filters: filter_tabs(),
             search: SearchField::new().with_placeholder("Search tasks"),
             count: StatusPill::new(count_line(0, 0)),
             header: TableHeader::new(
@@ -1143,21 +1138,28 @@ impl TasksSection {
         self.tasks.iter().filter(|task| filter.admits(task)).count()
     }
 
-    /// Re-label every filter tab with its own live count.
+    /// Re-label every filter tab with its own live count, in place.
+    ///
+    /// The strip holds one tab per filter for the life of the section, so a
+    /// refresh has only labels to say. Building a fresh strip instead would
+    /// drop what the *screen* holds — which tab the pointer rests on, which
+    /// one the keyboard cursor is on, and any press waiting for its release
+    /// — so a count moving under a resting pointer would blink the highlight
+    /// off and swallow a click in flight.
     fn relabel_filters(&mut self) {
         let counts: Vec<usize> = TaskFilter::ALL
             .iter()
             .map(|filter| self.count_of(*filter))
             .collect();
-        let selected = self.filters.selected().unwrap_or(0);
-        self.filters = Tabs::new(
-            TaskFilter::ALL
-                .iter()
-                .zip(counts)
-                .map(|(filter, count)| Tab::new(tab_label(*filter, count)))
-                .collect(),
-        );
-        self.filters.set_selected(selected);
+        for ((tab, filter), count) in self
+            .filters
+            .tabs_mut()
+            .iter_mut()
+            .zip(TaskFilter::ALL.iter())
+            .zip(counts)
+        {
+            tab.set_label(tab_label(*filter, count));
+        }
     }
 
     /// The content-cursor stop that focuses shown row `row`, for a caller
@@ -1577,6 +1579,28 @@ impl TaskEntry {
 /// A filter tab's label: its name and its own live count.
 fn tab_label(filter: TaskFilter, count: usize) -> String {
     format!("{} {count}", filter.label())
+}
+
+/// The filter strip a fresh section opens with: one tab per filter, showing
+/// the filter the section starts on and a zero count until the first sample
+/// lands.
+///
+/// This is the only strip a section ever holds; a refresh re-labels these tabs
+/// rather than replacing them.
+fn filter_tabs() -> Tabs {
+    let mut tabs = Tabs::new(
+        TaskFilter::ALL
+            .iter()
+            .map(|filter| Tab::new(tab_label(*filter, 0)))
+            .collect(),
+    );
+    tabs.set_selected(
+        TaskFilter::ALL
+            .iter()
+            .position(|filter| *filter == TaskFilter::default())
+            .unwrap_or(0),
+    );
+    tabs
 }
 
 /// The footer's shown/total readout.
