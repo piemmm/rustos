@@ -520,10 +520,9 @@ the `fw_cfg`/`ramfb` fallback on the QEMU `virt` board. On the Pi:
   (`SU`/`SD`), the alternate screen, and the saved cursor. Glyphs are
   the shared Inconsolata EX + M PLUS 1 Code + D2Coding + Noto Sans Hebrew
   coverage atlas (`tairix_font::atlas` — one font definition), including all
-  precomposed Hangul syllables, at the largest integer scale (1…4) that
-  still leaves a conventional 80×25 screen, so the 8×16 cell is
-  unmagnified at 1024×768 (a 128×48 grid) and doubled at 1080p
-  (120×33), packed
+  precomposed Hangul syllables, drawn at the authored 8×16 cell one atlas
+  pixel per screen pixel, so the grid is `width / 8` × `height / 16` —
+  128×48 at 1024×768, 240×67 at 1080p — packed
   `0xFF00_0000 | (r<<16) | (g<<8) | b` — correct on both the mailbox
   (`Bgra8888`) and ramfb (`XRGB8888`) surfaces, whose bytes coincide.
   The engine keeps a **retained character-cell grid** (`tairix_vt::Cell`

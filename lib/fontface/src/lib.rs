@@ -80,8 +80,8 @@ pub use variations::{Axis, AxisSetting};
 /// land on an 8×16 cell (ascent 13, descent 3) — the character cell PC text
 /// consoles have used since VGA, and the one that makes the text console's
 /// grid the conventional `width / 8` × `height / 16`: 80×30 on a 640×480
-/// panel, 128×48 on 1024×768. `lib/fbcon` magnifies this cell by a whole
-/// factor on a denser display rather than authoring a second atlas.
+/// panel, 128×48 on 1024×768. `lib/fbcon` draws it one atlas pixel per screen
+/// pixel, so a denser panel holds more cells rather than magnified ones.
 pub const ATLAS_EM_PX: u32 = 14;
 
 /// A parse or rasterisation failure.

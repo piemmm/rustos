@@ -5043,11 +5043,11 @@ escape-sequence definition end to end (§2.2).
   cell (`tairix_fontface::ATLAS_EM_PX = 14`), the character cell PC text
   consoles have used since VGA, so a text screen is the expected `width / 8`
   × `height / 16`: 80×30 at 640×480, 128×48 at 1024×768, 160×64 at
-  1280×1024. `Geometry::for_display` magnifies that cell by the largest whole
-  factor (≤ 4) that still leaves a conventional 80×25 screen, so a dense
-  panel gets legible text rather than 240 columns (1080p → ×2, 120×33; 4K →
-  ×4). 80×25 is defined once as `tairix_vt::CONVENTIONAL_COLUMNS` /
-  `CONVENTIONAL_ROWS`, shared with `terminal.app`'s opening grid (§2.2).
+  1280×1024, 240×67 at 1080p. `Geometry::for_display` draws that cell one
+  atlas pixel per screen pixel, so a denser panel holds more cells rather
+  than magnified ones: replicating each pixel into a square block throws
+  away the grid fitting and anti-aliased edges below, which is exactly the
+  blocky type a magnified console shows.
   Glyphs are grid-fitted before they are filled. The committed face carries
   no TrueType hinting bytecode, so at an 8-pixel cell its stems land between
   pixels and antialias into two grey columns: unfitted, under a tenth of the

@@ -74,9 +74,7 @@ still comes from the face. A light rule is one pixel at the conventional cell
 and thickens in proportion; a double rule is derived as the outline of the
 region its arms sweep, so every corner, tee and cross agrees without
 case-splitting the twenty-nine junctions; and a shade is a uniform partial
-coverage rather than a stipple, which tiles exactly at any cell size. Because
-the console magnifies by whole factors, the result stays crisp at every glyph
-scale.
+coverage rather than a stipple, which tiles exactly at any cell size.
 
 The geometry lives in the engine (`tairix_fontface::lineart`), not in the
 generator, because both sources of a character grid's glyphs draw from it: the

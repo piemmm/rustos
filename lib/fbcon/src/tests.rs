@@ -13,64 +13,67 @@ use super::*;
 #[test]
 fn the_standard_display_modes_get_their_conventional_text_grids() {
     // The grids a PC text console has always presented at these modes: the
-    // cell is `width / 8` × `height / 16` until the panel is dense enough to
-    // magnify it.
-    for (width, height, scale, cols, rows) in [
-        (640, 480, 1, 80, 30),
-        (800, 600, 1, 100, 37),
-        (1024, 768, 1, 128, 48),
-        (1280, 720, 1, 160, 45),
-        (1280, 1024, 2, 80, 32),
-        (1920, 1080, 2, 120, 33),
-        (1920, 1200, 3, 80, 25),
-        (2560, 1440, 3, 106, 30),
-        (3840, 2160, 4, 120, 33),
-        (7680, 4320, 4, 240, 67),
+    // cell is drawn at the size it was rasterised at, so the grid is
+    // `width / 8` × `height / 16` however dense the panel is.
+    for (width, height, cols, rows) in [
+        (640, 480, 80, 30),
+        (800, 600, 100, 37),
+        (1024, 768, 128, 48),
+        (1280, 720, 160, 45),
+        (1280, 1024, 160, 64),
+        (1920, 1080, 240, 67),
+        (2560, 1440, 320, 90),
+        (3840, 2160, 480, 135),
     ] {
         let geometry = Geometry::for_display(width, height, width * 4).expect("geometry");
         assert_eq!(
-            (geometry.scale, geometry.columns(), geometry.rows()),
-            (scale, cols, rows),
+            (geometry.columns(), geometry.rows()),
+            (cols, rows),
             "{width}×{height}"
         );
     }
 }
 
 #[test]
-fn the_glyph_scale_is_the_largest_that_still_holds_a_conventional_screen() {
+fn a_dense_panel_holds_more_cells_rather_than_magnifying_them() {
     // The property the table above is instances of, swept over every mode a
-    // panel could report: never below the conventional screen while one more
-    // magnification would still fit, and never so magnified that the screen
-    // shrinks under it.
+    // panel could report: one atlas pixel is one screen pixel at every
+    // density, so a bigger panel divides into more cells of the same size.
     for width in [320, 640, 641, 800, 1024, 1280, 1920, 2560, 3840, 5120] {
         for height in [200, 400, 480, 600, 768, 800, 1080, 1200, 1440, 2160] {
             let geometry = Geometry::for_display(width, height, width * 4).expect("geometry");
-            let (scale, cols, rows) = (geometry.scale, geometry.columns(), geometry.rows());
-            let holds = |scale: u32| {
-                width / (CELL_WIDTH * scale) >= u32::from(CONVENTIONAL_COLUMNS)
-                    && height / (CELL_HEIGHT * scale) >= u32::from(CONVENTIONAL_ROWS)
-            };
-            assert!((1..=MAX_SCALE).contains(&scale), "{width}×{height}");
-            if holds(1) {
-                assert!(
-                    holds(scale),
-                    "{width}×{height} lost the conventional screen"
-                );
-                assert!(
-                    scale == MAX_SCALE || !holds(scale + 1),
-                    "{width}×{height} could have magnified further"
-                );
-            } else {
-                // Too small for the conventional screen at any magnification:
-                // it shows what it can rather than refusing a console.
-                assert_eq!(scale, 1, "{width}×{height}");
-            }
             assert_eq!(
-                (cols, rows),
-                (width / (CELL_WIDTH * scale), height / (CELL_HEIGHT * scale))
+                (geometry.columns(), geometry.rows()),
+                (width / CELL_WIDTH, height / CELL_HEIGHT),
+                "{width}×{height}"
             );
         }
     }
+}
+
+#[test]
+fn a_dense_panel_draws_a_glyph_at_its_authored_size() {
+    // The regression: 1920×1080 magnified the cell ×2, blitting every atlas
+    // pixel as a 2×2 block — legible but visibly blocky, because the grid
+    // fitting and anti-aliased edges are authored for the 8×16 cell and
+    // survive no resampling.
+    let geometry = Geometry::for_display(1920, 1080, 1920 * 4).expect("geometry");
+    assert_eq!((geometry.columns(), geometry.rows()), (240, 67));
+    let mut pixels = vec![0u32; geometry.pixel_count()];
+    let main: &'static mut [Cell] = vec![Cell::BLANK; geometry.cell_count()].leak();
+    let alt: &'static mut [Cell] = vec![Cell::BLANK; geometry.cell_count()].leak();
+    let mut console = TextConsole::new(geometry, main, alt);
+    console.clear(&mut pixels);
+    console.write_bytes(&mut pixels, b"\x1b[?25lW");
+    assert_cell_is_glyph(
+        &pixels,
+        &geometry,
+        0,
+        0,
+        'W',
+        DEFAULT_FOREGROUND,
+        DEFAULT_BACKGROUND,
+    );
 }
 
 #[test]
@@ -88,7 +91,7 @@ fn geometry_rejects_unusable_surfaces() {
 
 // --- Renderer / terminal ---------------------------------------------------
 
-/// A scale-1 test surface `cols`×`rows` cells with the cursor left visible
+/// A test surface `cols`×`rows` cells with the cursor left visible
 /// (the console's default), stride two pixels wider than the visible width so
 /// tests exercise `stride != width`.
 ///
@@ -102,7 +105,6 @@ fn cursor_console_of(cols: u32, rows: u32) -> (TextConsole<'static>, Vec<u32>) {
         width_px,
         height_px,
         stride_px: width_px + 2,
-        scale: 1,
     };
     assert_eq!((geometry.columns(), geometry.rows()), (cols, rows));
     let mut pixels = vec![0u32; geometry.pixel_count()];
@@ -122,7 +124,7 @@ fn console_of(cols: u32, rows: u32) -> (TextConsole<'static>, Vec<u32>) {
     (console, pixels)
 }
 
-/// A 2-column × 2-row scale-1 test surface.
+/// A 2-column × 2-row test surface.
 fn small_console() -> (TextConsole<'static>, Vec<u32>) {
     console_of(2, 2)
 }
@@ -135,7 +137,6 @@ fn console_with_margin(cols: u32, rows: u32) -> (TextConsole<'static>, Vec<u32>,
         width_px: cols * CELL_WIDTH,
         height_px: rows * CELL_HEIGHT + 1,
         stride_px: cols * CELL_WIDTH + 3,
-        scale: 1,
     };
     let mut pixels = vec![0u32; geometry.pixel_count()];
     let main: &'static mut [Cell] = vec![Cell::BLANK; geometry.cell_count()].leak();
@@ -148,11 +149,10 @@ fn console_with_margin(cols: u32, rows: u32) -> (TextConsole<'static>, Vec<u32>,
 /// The pixels of one glyph cell, row-major.
 fn cell(pixels: &[u32], geometry: &Geometry, column: u32, row: u32) -> Vec<u32> {
     let mut out = Vec::new();
-    for y in 0..CELL_HEIGHT * geometry.scale {
-        for x in 0..CELL_WIDTH * geometry.scale {
-            let index = (row * CELL_HEIGHT * geometry.scale + y) as usize
-                * geometry.stride_px as usize
-                + (column * CELL_WIDTH * geometry.scale + x) as usize;
+    for y in 0..CELL_HEIGHT {
+        for x in 0..CELL_WIDTH {
+            let index = (row * CELL_HEIGHT + y) as usize * geometry.stride_px as usize
+                + (column * CELL_WIDTH + x) as usize;
             out.push(pixels[index]);
         }
     }

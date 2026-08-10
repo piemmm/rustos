@@ -908,10 +908,9 @@ mod tests {
         assert_eq!((geometry.width_px, geometry.height_px), (1920, 1080));
         assert_eq!(geometry.stride_px, 1920);
         assert_eq!(
-            (geometry.scale, geometry.columns(), geometry.rows()),
-            (2, 120, 33),
-            "1080p doubles the cell, the largest magnification still holding a \
-             conventional screen"
+            (geometry.columns(), geometry.rows()),
+            (240, 67),
+            "1080p holds more cells of the authored 8×16 size, never magnified ones"
         );
     }
 
@@ -939,9 +938,9 @@ mod tests {
         assert_eq!(geometry.height_px, RAMFB_HEIGHT_PX);
         assert_eq!(geometry.stride_px, RAMFB_WIDTH_PX, "tightly packed");
         assert_eq!(
-            (geometry.scale, geometry.columns(), geometry.rows()),
-            (1, 128, 48),
-            "1024×768 is the conventional 128×48 text grid at the unmagnified cell"
+            (geometry.columns(), geometry.rows()),
+            (128, 48),
+            "1024×768 is the conventional 128×48 text grid"
         );
     }
 }

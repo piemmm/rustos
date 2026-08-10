@@ -79,9 +79,9 @@ from an outline at all. They exist to tile — a border has to join its
 neighbours into one unbroken rule and a filled block has to abut the next with
 no seam — which a rasterised hairline manages only where it happens to land on
 pixel boundaries. `lineart::coverage` draws them as whole pixels computed from
-the cell instead, so they stay crisp at any cell size and at any whole
-magnification. A double rule is derived as the outline of the region its arms
-sweep, so all twenty-nine junctions agree without a per-glyph table.
+the cell instead, so they stay crisp at any cell size. A double rule is derived
+as the outline of the region its arms sweep, so all twenty-nine junctions agree
+without a per-glyph table.
 
 ## Monospace and proportional
 

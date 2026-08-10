@@ -58,19 +58,16 @@
 
 use tairix_font::atlas;
 use tairix_font::glyph::lookup_or_fallback;
-use tairix_vt::{
-    char_width, Attributes, Color, EraseMode, Op, Parser, CONTINUATION, CONVENTIONAL_COLUMNS,
-    CONVENTIONAL_ROWS,
-};
+use tairix_vt::{char_width, Attributes, Color, EraseMode, Op, Parser, CONTINUATION};
 
 pub use tairix_vt::Cell;
 
-/// Glyph cell width in pixels at scale 1. The face's uniform advance already
-/// carries the inter-character spacing, so the cell is the atlas cell.
+/// Glyph cell width in pixels. The face's uniform advance already carries the
+/// inter-character spacing, so the cell is the atlas cell.
 const CELL_WIDTH: u32 = atlas::CELL_WIDTH;
 
-/// Glyph cell height in pixels at scale 1. The face's ascent + descent
-/// already carry the line box, so the cell is the atlas cell.
+/// Glyph cell height in pixels. The face's ascent + descent already carry the
+/// line box, so the cell is the atlas cell.
 const CELL_HEIGHT: u32 = atlas::CELL_HEIGHT;
 
 /// What [`Color::Default`] resolves to for text: light grey, opaque.
@@ -83,21 +80,8 @@ const DEFAULT_FOREGROUND: u32 = 0xFFD8_D8D8;
 /// What [`Color::Default`] resolves to for the background: opaque black.
 const DEFAULT_BACKGROUND: u32 = 0xFF00_0000;
 
-/// Largest glyph scale the policy selects.
-///
-/// Beyond 4× the atlas looks blocky without gaining legibility, so the
-/// policy caps there however dense the panel is.
-const MAX_SCALE: u32 = 4;
-
-/// The smallest surface, in pixels, that holds the conventional screen at
-/// scale 1 — the unit the glyph scale divides into a panel.
-const CONVENTIONAL_WIDTH_PX: u32 = CELL_WIDTH * CONVENTIONAL_COLUMNS as u32;
-
-/// The vertical companion of [`CONVENTIONAL_WIDTH_PX`].
-const CONVENTIONAL_HEIGHT_PX: u32 = CELL_HEIGHT * CONVENTIONAL_ROWS as u32;
-
-/// Validated framebuffer text geometry: the scan-out extents plus the glyph
-/// scale the policy chose for them.
+/// Validated framebuffer text geometry: the scan-out extents the grid is cut
+/// from.
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub struct Geometry {
     /// Visible width in pixels.
@@ -106,23 +90,18 @@ pub struct Geometry {
     pub height_px: u32,
     /// Pixels (not bytes) between consecutive scanlines.
     pub stride_px: u32,
-    /// Integer glyph scale (`1..=MAX_SCALE`).
-    pub scale: u32,
 }
 
 impl Geometry {
     /// Derive the text geometry for a firmware-confirmed surface.
     ///
-    /// The cell is magnified by the largest whole factor that still leaves a
-    /// conventional [`CONVENTIONAL_COLUMNS`]×[`CONVENTIONAL_ROWS`] screen, so
-    /// the grid follows the panel the machine actually has instead of a
-    /// hand-picked pixel threshold. A 640×480 mode and a 1024×768 one take the
-    /// cell unmagnified — the 80×30 and 128×48 grids PC text consoles have
-    /// always presented — 1920×1080 doubles it to 120×33, and a denser panel
-    /// keeps magnifying, to a cap of four, rather than shrinking text to an
-    /// unreadable 240 columns. A surface too small for even one
-    /// conventional screen holds what it can at scale 1: a small panel is not
-    /// a reason to refuse a console.
+    /// The atlas cell is drawn at the size it was rasterised at, one atlas
+    /// pixel per screen pixel, so the grid is the conventional `width / 8` ×
+    /// `height / 16`: 80×30 on 640×480, 128×48 on 1024×768, 240×67 on
+    /// 1920×1080. A denser panel therefore holds more text, never larger
+    /// text: magnifying the cell by a whole factor replicates each pixel into
+    /// a square block, which throws away the grid fitting and anti-aliased
+    /// edges the glyph was authored with and shows as visibly blocky type.
     ///
     /// Returns `None` when the surface cannot host even one glyph cell, the
     /// pitch is not whole pixels, or the pitch is narrower than a scanline —
@@ -137,14 +116,10 @@ impl Geometry {
         if width_px == 0 || height_px == 0 || stride_px < width_px {
             return None;
         }
-        let scale = (width_px / CONVENTIONAL_WIDTH_PX)
-            .min(height_px / CONVENTIONAL_HEIGHT_PX)
-            .clamp(1, MAX_SCALE);
         let geometry = Self {
             width_px,
             height_px,
             stride_px,
-            scale,
         };
         (geometry.columns() != 0 && geometry.rows() != 0).then_some(geometry)
     }
@@ -152,23 +127,13 @@ impl Geometry {
     /// Text columns the surface holds.
     #[must_use]
     pub const fn columns(&self) -> u32 {
-        self.width_px / (CELL_WIDTH * self.scale)
+        self.width_px / CELL_WIDTH
     }
 
     /// Text rows the surface holds.
     #[must_use]
     pub const fn rows(&self) -> u32 {
-        self.height_px / (CELL_HEIGHT * self.scale)
-    }
-
-    /// Pixel rows one text row occupies.
-    const fn cell_height_px(&self) -> u32 {
-        CELL_HEIGHT * self.scale
-    }
-
-    /// Pixel columns one text column occupies.
-    const fn cell_width_px(&self) -> u32 {
-        CELL_WIDTH * self.scale
+        self.height_px / CELL_HEIGHT
     }
 
     /// Pixel count of the rendered band (`stride × height`), the slice length
@@ -1048,23 +1013,20 @@ impl<'a> Screen<'a> {
                 }
             }
         }
-        let cell_h = self.geometry.cell_height_px();
-        (row0 * cell_h, row1 * cell_h)
+        (row0 * CELL_HEIGHT, row1 * CELL_HEIGHT)
     }
 
     /// Fill the cell columns `[from_col, to_col)` of text `row` with `color`.
     fn fill_cells(&self, pixels: &mut [u32], from_col: u32, to_col: u32, row: u32, color: u32) {
-        let cell_w = self.geometry.cell_width_px();
-        let cell_h = self.geometry.cell_height_px();
         let stride = self.geometry.stride_px as usize;
         let to_col = to_col.min(self.cols());
         if from_col >= to_col {
             return;
         }
-        let x0 = (from_col * cell_w) as usize;
-        let w = ((to_col - from_col) * cell_w) as usize;
-        let y0 = row * cell_h;
-        for y in y0..y0 + cell_h {
+        let x0 = (from_col * CELL_WIDTH) as usize;
+        let w = ((to_col - from_col) * CELL_WIDTH) as usize;
+        let y0 = row * CELL_HEIGHT;
+        for y in y0..y0 + CELL_HEIGHT {
             let start = y as usize * stride + x0;
             if let Some(span) = pixels.get_mut(start..start + w) {
                 span.fill(color);
@@ -1090,24 +1052,22 @@ impl<'a> Screen<'a> {
         let ramp = coverage_ramp(fg, bg);
         let shown = if ch == CONTINUATION { ' ' } else { ch };
         let glyph = lookup_or_fallback(shown);
-        let glyph_width = CELL_WIDTH.saturating_mul(u32::from(char_width(shown)));
-        let geometry = &self.geometry;
-        let x0 = col * geometry.cell_width_px();
-        let y0 = row * geometry.cell_height_px();
+        let glyph_width = CELL_WIDTH
+            .saturating_mul(u32::from(char_width(shown)))
+            .min(atlas::GLYPH_WIDTH) as usize;
+        let stride = self.geometry.stride_px as usize;
+        let x0 = (col * CELL_WIDTH) as usize;
+        let y0 = row * CELL_HEIGHT;
         for cell_y in 0..CELL_HEIGHT {
-            for cell_x in 0..glyph_width.min(atlas::GLYPH_WIDTH) {
-                let colour = ramp[usize::from(glyph.coverage(cell_x, cell_y))];
-                for sub_y in 0..geometry.scale {
-                    let y = (y0 + cell_y * geometry.scale + sub_y) as usize;
-                    let x = (x0 + cell_x * geometry.scale) as usize;
-                    let start = y * geometry.stride_px as usize + x;
-                    if let Some(span) = pixels.get_mut(start..start + geometry.scale as usize) {
-                        span.fill(colour);
-                    }
-                }
+            let start = (y0 + cell_y) as usize * stride + x0;
+            let Some(span) = pixels.get_mut(start..start + glyph_width) else {
+                continue;
+            };
+            for (cell_x, pixel) in (0..).zip(span.iter_mut()) {
+                *pixel = ramp[usize::from(glyph.coverage(cell_x, cell_y))];
             }
         }
-        (y0, y0 + geometry.cell_height_px())
+        (y0, y0 + CELL_HEIGHT)
     }
 }
 

@@ -43,21 +43,17 @@ produces), and the one glyph is drawn across both. It is a full terminal:
 
 The cell is 8×16 pixels — what PC text consoles have used since VGA — so the
 grid is the conventional `width / 8` × `height / 16`: 80×30 on a 640×480 mode,
-128×48 on 1024×768, 160×64 on 1280×1024.
+128×48 on 1024×768, 160×64 on 1280×1024, 240×67 at 1080p.
 
-A denser panel does not simply hold more, smaller characters. `for_display`
-magnifies the cell by the largest whole factor that still leaves a
-conventional `tairix_vt::CONVENTIONAL_COLUMNS` × `CONVENTIONAL_ROWS` (80×25)
-screen, so text stays legible as pixels get smaller: 1920×1080 doubles the
-cell to a 120×33 grid, and a 4K panel takes the ×4 cap rather than shrinking
-to an unreadable 240 columns. The grid is therefore derived from the display
-the machine actually reports, never from a hand-picked pixel threshold. A
-surface too small for even one conventional screen holds what it can at ×1: a
-small panel is not a reason to refuse a console.
-
-80×25 has one definition, in `lib/vt`, shared with the graphical terminal's
-opening size, so the console and the terminal emulator cannot disagree about
-what a normal screen is.
+A denser panel therefore holds more characters, never larger ones.
+`for_display` blits the cell at the size the atlas was rasterised at, one atlas
+pixel per screen pixel: magnifying it by a whole factor would replicate every
+pixel into a square block, discarding the grid fitting and anti-aliased edges
+the glyph was authored with, and the same text would read as visibly blocky
+type. Nothing resamples the atlas. The grid is therefore derived from the
+display the machine actually reports, never from a hand-picked pixel threshold,
+and a surface too small for a conventional screen holds what it can rather than
+refusing a console.
 
 ## Design
 
@@ -107,8 +103,8 @@ what a normal screen is.
 
 ## API
 
-- `Geometry` — validated scan-out extents plus the glyph scale the policy
-  chose; `for_display(width, height, pitch_bytes)` fails closed on an unusable
+- `Geometry` — the validated scan-out extents the grid is cut from;
+  `for_display(width, height, pitch_bytes)` fails closed on an unusable
   surface.
 - `TextConsole::new(geometry, main, alt)` — owns the parser and the screen,
   borrowing the two `&mut [Cell]` grids (each at least `geometry.cell_count()`

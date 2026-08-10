@@ -27,9 +27,9 @@ use crate::profile::MIN_FONT_SIZE_PX;
 
 /// Columns of the terminal's screen grid when it opens.
 ///
-/// The shared definition of the conventional text screen, so a terminal
-/// window and the framebuffer text console (which keeps the same shape as its
-/// floor) present one idea of a normal screen rather than two that can drift.
+/// The shared definition of the conventional text screen, so the window a
+/// terminal opens at is the shape every command-line program lays itself out
+/// for rather than a second idea of a normal screen.
 pub const COLS: u16 = tairix_vt::CONVENTIONAL_COLUMNS;
 
 /// Rows of the terminal's screen grid when it opens, from the same shared

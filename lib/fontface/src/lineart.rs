@@ -9,8 +9,7 @@
 //!
 //! Terminals therefore draw these characters geometrically rather than from
 //! the face, and so does this module. Every glyph here is whole covered
-//! pixels computed from the cell, which keeps it crisp at any cell size and —
-//! because the console magnifies by whole factors — at every glyph scale too.
+//! pixels computed from the cell, which keeps it crisp at any cell size.
 //! Only characters whose whole purpose is to tile are synthesised; the face
 //! still supplies every other scalar, including the geometric shapes either
 //! side of these ranges.
@@ -479,8 +478,7 @@ fn draw_block(code: u32, width: u32, height: u32) -> Vec<u8> {
         }
         0x2590 => pen.fill(mid_x..width, 0..height),
         // A shade is a uniform partial coverage, not a stipple: it is the same
-        // tone, and unlike a dither pattern it tiles exactly at any cell size
-        // and under any magnification.
+        // tone, and unlike a dither pattern it tiles exactly at any cell size.
         0x2591 => pen.shade(0..width, 0..height, FULL / 4),
         0x2592 => pen.shade(0..width, 0..height, FULL / 2),
         0x2593 => pen.shade(0..width, 0..height, FULL * 3 / 4),
