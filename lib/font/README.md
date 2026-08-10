@@ -114,16 +114,18 @@ the payload exceeds the pre-Korean size ceiling.
 
 ## Rendering at a chosen size
 
-A `BitmapFont` renders at a chosen **cell height in physical pixels**.
-`BitmapFont::inconsolata()` keeps the atlas's native height and is what the
-text console (`lib/fbcon`) draws at — its glyphs come straight from the atlas
-with no resampling, so console rendering is byte-for-byte unchanged.
-`BitmapFont::with_pixel_height(px)` asks for any other cell: the desktop
-resolves a comfortable physical size from the theme's logical font size and
-the DPI scale (`tairix_geometry::Scale`), so window titles, the taskbar, the
-program-library popup, and the file browser render at that size. Every derived metric
-(advance, cell width, baseline, line height) scales with the cell height,
-keeping the font monospaced and its aspect ratio fixed.
+A `BitmapFont` renders at a chosen **line-box height in physical pixels**.
+`BitmapFont::console()` keeps the atlas's native height and is what the text
+console (`lib/fbcon`) draws at — its glyphs come straight from the atlas with
+no resampling, so console rendering is byte-for-byte unchanged.
+`BitmapFont::new(family, px)` asks for any family at any other size, and
+`BitmapFont::for_role(fonts, role, scale)` resolves one from a theme role: the
+desktop derives a comfortable physical size from the theme's logical font size
+and the DPI scale (`tairix_geometry::Scale`), so window titles, the taskbar,
+the program-library popup, and the file browser render at that size. A
+`BitmapFont` is three fields — family, pixel height, weight — and building one
+reads the theme and does arithmetic: no lock, no client call, nothing cached,
+so resolving a role per control paint costs nothing worth hoisting.
 
 A non-native cell is rasterised **directly from the TrueType outline** at that
 exact size — but by `fontd`, not here: this crate parses no TrueType and holds
@@ -157,6 +159,23 @@ supply is zero, which yields a zero budget and exactly that uncached
 behaviour, never a guessed ceiling. The client and its cache ride the `render`
 feature; the allocator-free `atlas`/`glyph` view never touches them.
 
+### One glyph lookup per character
+
+A glyph's coverage reply carries that glyph's own advance, so `draw_text` reads
+the pen step from the very bitmap it is about to composite rather than asking
+the cache for the same glyph a second time to ask how far to move: a
+proportional run of *n* characters pays *n* lookups, not 2*n*. Whether the face
+is fixed-pitch is a property of the face, not of a character, so it too is
+resolved once for the whole run rather than re-read per character. Both facts
+are asserted as counts rather than timings, against a test-only reference walk
+that draws the run the old way and must produce the identical pixels and the
+identical final pen position.
+
+The fixed-pitch and proportional runs are two written-out loops on purpose: a
+fixed-pitch run must not pay for an advance it discards, and sharing one
+glyph-blitting call between them gives both a closure that returns one, which
+measures worse on both.
+
 ### Measuring proportional text once
 
 A proportional family has no cell width to multiply by, so measuring a label
@@ -189,12 +208,6 @@ its own blitter (`lib/fbcon`, which blends coverage into device-coherent
 memory itself) depends with `default-features = false`; the
 `lib/raster`-backed blitter rides the default-on `render` cargo feature — one
 font definition either way (§2.2).
-
-There is no installed-font machinery yet: a `tairix-theme` font role selects a
-font by family name under `/System/Fonts`, but no faces are installed, so
-everything draws with the built-in `BitmapFont::inconsolata` face. When
-installed faces arrive they extend this crate; consumers keep calling
-`draw_text`.
 
 ## Why it lives in `lib/`
 

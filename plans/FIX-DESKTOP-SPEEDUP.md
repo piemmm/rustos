@@ -1,8 +1,9 @@
 # FIX-DESKTOP-SPEEDUP — Software-compositor and GUI redraw performance
 
-Status: **A done, B done, C mostly done, D done** (C.0, C.2, C.4b, C.5 landed;
-C.1 partly landed; C.3 blocked on the rest of C.1; C.4a remains; D.1–D.4
-landed, D.5 is a User decision, D.6 is a follow-up the measurement exposed).
+Status: **A done, B done, C mostly done, D done** (C.0, C.2, C.4b, C.4c, C.5
+landed; C.1 partly landed; C.3 blocked on the rest of C.1; C.4a withdrawn as a
+performance item after measurement; D.1–D.4 landed, D.5 is a User decision,
+D.6 is a follow-up the measurement exposed).
 E planned.
 Stages A–E need no hardware acceleration, no kernel change, and no new
 syscall; F needs a `plans/FIX-HARDWARE-FEATURES.md` correction; G is gated on
@@ -70,7 +71,7 @@ full-window repaint and a full-window recomposite. Traced end to end:
 | 3 | fold | app-ward outcomes coalesce latest-wins (correct) — but not the work in (2) | `shell.rs` `fold_outcome` |
 | 4 | app | the container fans the motion to **every** child; each does `Rect::contains` + a state write | `lib/controls` `Toolbar::on_pointer`, `Panel::on_pointer`, `paint::pointer_activation` |
 | 5 | app | any hover flip fails the host's `PartialEq` render gate → **the whole window surface is repainted** | `lib/controls/src/state.rs` (`RenderInvariant` docs) |
-| 6 | app paint | per control: `role_font()` builds a `BitmapFont` **on every paint**, text is re-truncated and re-measured, 1–4 `fill_round_rect`s, a temp `Surface` per signal bead | `lib/controls/src/paint.rs` |
+| 6 | app paint | per control: text is re-truncated and re-measured, 1–4 `fill_round_rect`s, a temp `Surface` per signal bead. (`role_font()` building a `BitmapFont` per paint was listed here and is **not** a cost — see C.4a) | `lib/controls/src/paint.rs` |
 | 7 | app present | `client.present(id, 0, DamageRect::full(mode))` — **whole window, always**, after an unpremultiply-and-copy of every pixel into the shared frame | `files`, `terminal`, `viewer`, `wallpaper`, `widgets`, `switchboard` `run.rs` |
 | 8 | session | converts and **diffs every declared pixel** against the window's surface — a whole-window pass per sample | `session::windows::convert_damage` |
 | 9 | compositor | the frost is recomputed over the whole window every time, 2 box-blur passes, **4 integer divides per pixel per pass**, **never cached** | `wm::compositor::blur_backdrop`, `lib/raster/src/blur.rs` `blur_line`/`mean` |
@@ -180,10 +181,13 @@ No new external dependency (§2.12): reuse `lib/cpuops`'s existing
 `BenchHarness` with a host time source injected through its
 `CycleCounter` seam. Add `cargo xtask bench` running, over representative
 sizes and alphas: `composite_span`, `Surface::blit`, `fill_round_rect`,
-`box_blur`/`frost_region`, `resample`, `PixelOrder` encode, and the WM's
-per-row composite. It prints ns/px and ns/frame; it is **not** a CI
-pass/fail gate (invariant 3), but it is runnable in CI as a smoke check
-that the harness itself works.
+`BitmapFont::draw_text`/`text_width` over a label and a row,
+`box_blur`/`frost_region`, `resample`, `ChannelOrder` encode, and the WM's
+per-row composite. The text family draws through the production entry point
+with a glyph cache installed and warm — a figure taken without one would
+describe the mock service's reply encoding instead. It prints ns/px and
+ns/frame; it is **not** a CI pass/fail gate (invariant 3), but it is runnable
+in CI as a smoke check that the harness itself works.
 
 ### A.3 Frame work counters in the compositor
 `Compositor` accumulates a per-frame `FrameStats`: damaged px, blended
@@ -414,21 +418,23 @@ compositor's `present_window_content` intersects the translated rectangle
 with the window's own client rectangle, so an over-large or negative one is
 clipped and can never reach a neighbouring window.
 
-### C.4 Hoist the font, memoise the measurement  **[C.4b done; C.4a remains]**
+### C.4 Draw and measure text once  **[C.4b, C.4c done; C.4a withdrawn as a performance item]**
 
-**C.4a — remains.** `role_font()` constructs a `BitmapFont` on every control
-paint. Resolve the role→face **once per render pass** and thread it down.
-The shape a first attempt settled on: a `Faces` table over `TextRole::ALL`
-(the public order — `TextRole::index()` is private in `lib/theme`, and
-hand-writing the slot mapping would duplicate it), built by
-`Faces::resolve(&Theme, Scale)`, `role_font` deleted, `faces` immediately
-after `theme` in every signature. That attempt failed on scale: it touches
-every `render` signature and so every in-crate test call site at once, and it
-must be landed **alone**, never mixed with another change. It also exposes
-dead parameters to remove in the same pass — `TitleBar::icon_side` and
-`split_identity` need only `faces`, `decision::action_row_rects`/`step_rect`
-no longer need `font`, and `WindowFrame::layout`/`ActionRail::gap`/
-`Panel::action_rects` need no `faces` at all.
+**C.4a — withdrawn as a performance item; a §2.3 tidy at most.** The premise
+above (row 6) was wrong, and measuring it is what showed that:
+`BitmapFont::for_role` reads the theme's spec for the role, scales its size,
+and fills in three fields — **no lock, no client call, no cache lookup, no
+allocation** — so `role_font()` per control paint is arithmetic, and hoisting
+it into a `Faces` table cannot buy measurable time. It would also *add*
+surface (a table beside the one resolver every caller already shares) and
+change every `render` signature and in-crate call site at once, which is why a
+first attempt at it sank.
+
+What is genuinely left is unrelated to speed and much smaller: the dead
+parameters that attempt exposed — `TitleBar::icon_side` and `split_identity`
+take a `font` they do not use, as do `decision::action_row_rects`/`step_rect`,
+and `WindowFrame::layout`/`ActionRail::gap`/`Panel::action_rects` need none.
+Removing those is a bloat fix, not a Stage C item, and needs no `Faces` table.
 
 **C.4b — done.** Text measurement is memoised in **`lib/font`**, beside the
 glyph-bitmap `ReclaimCache` it already owns, so text caching has one home.
@@ -447,6 +453,36 @@ the epoch, because an epoch change empties the whole cache and one frame
 measures several roles at several sizes. Budget: the glyph cache's own
 RAM-derived policy, reused verbatim. The monospace path is untouched and pays
 **no** memo lookup, because its advance is arithmetic with nothing to save.
+
+**C.4c — done.** A drawn run pays **one glyph lookup per character**, not two.
+A glyph's coverage reply already carries that glyph's own advance, so
+`draw_text` reads the pen step from the very bitmap it is about to composite
+instead of asking the cache for the same glyph again to learn how far to move;
+and whether a face is fixed-pitch is a property of the *face*, so it is
+resolved once for the whole run rather than per character. `draw_text` is now
+one `with_client` borrow over a `draw_on` seam (the shape `width_on`/
+`elision_on` already use), which is also what lets a test count lookups on its
+own client rather than the process-global one.
+
+Correctness is proven by counts, not timings: an *n*-character run costs *n*
+lookups, checked against a test-only reference walk that draws the old way and
+must produce identical pixels and an identical final pen position, over both
+faces, five strings, and origins on, straddling, and past the surface.
+
+**The fixed-pitch and proportional runs are deliberately written out as two
+loops**, not one loop sharing a glyph-blitting call. A fixed-pitch run must not
+pay for an advance it discards, and sharing the call gives both runs a closure
+that returns one — which measured ~7% worse on *both* faces, `#[inline]` or
+not. The first attempt (one loop, a per-character branch on the shared cell)
+was worse still: it *regressed* the fixed-pitch path ~4% against the code it
+replaced, which is the terminal's own path. Written out, both faces improve.
+
+**Measuring this exposed a trap worth recording.** The harness's default
+budget (16 iterations × 5 rounds) leaves ±15% run-to-run spread on a 10 k-pixel
+case — the same order as the effect — so a single default-budget pair is *not*
+evidence and must not be quoted. At `--iters 400 --rounds 25` the spread falls
+to ~1% and the pair is decisive. A small case needs a large budget; the
+megapixel composite cases do not, which is why the defaults stay low.
 
 ### C.5 One shell present per drained batch  **[done]**
 `DesktopShell::handle` split into `apply` (route the event, mutate state) and

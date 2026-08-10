@@ -238,10 +238,10 @@ impl BitmapFont {
     /// column width even though the family is not truly fixed-pitch).
     #[must_use]
     pub fn cell_width(self) -> u32 {
-        match self.monospace_advance() {
+        client::with_client(|client| match self.monospace_advance_on(client) {
             Some(advance) => advance,
-            None => self.advance('0'),
-        }
+            None => self.glyph_advance_on(client, '0'),
+        })
     }
 
     /// The pen advance for one character, in pixels.
@@ -254,13 +254,7 @@ impl BitmapFont {
     /// zero rather than composing a guessed width.
     #[must_use]
     pub fn advance(self, ch: char) -> u32 {
-        if let Some(cell) = self.monospace_advance() {
-            return cell.saturating_mul(u32::from(char_width(ch)));
-        }
-        client::with_glyph(ch, self.family, self.pixel_height, self.weight, |glyph| {
-            glyph.advance
-        })
-        .unwrap_or(0)
+        client::with_client(|client| self.advance_on(client, ch))
     }
 
     /// The pixel width of `text` rendered on one line: the sum of each
@@ -322,6 +316,30 @@ impl BitmapFont {
         (&text[..end], elided)
     }
 
+    /// The pen advance a fixed-pitch face gives `ch`: its shared `cell` once
+    /// per terminal column the scalar reserves.
+    fn cell_step(cell: u32, ch: char) -> u32 {
+        cell.saturating_mul(u32::from(char_width(ch)))
+    }
+
+    /// [`advance`](Self::advance) against a client the caller already holds.
+    pub(crate) fn advance_on(self, client: &mut GlyphClient, ch: char) -> u32 {
+        match self.monospace_advance_on(client) {
+            Some(cell) => Self::cell_step(cell, ch),
+            None => self.glyph_advance_on(client, ch),
+        }
+    }
+
+    /// The advance the face's own glyph for `ch` reports, or zero when the
+    /// service cannot supply it (fail closed, never a guessed width).
+    fn glyph_advance_on(self, client: &mut GlyphClient, ch: char) -> u32 {
+        client
+            .with_glyph(ch, self.family, self.pixel_height, self.weight, |glyph| {
+                glyph.advance
+            })
+            .unwrap_or(0)
+    }
+
     /// [`monospace_advance`](Self::monospace_advance) against a client the
     /// caller already holds.
     pub(crate) fn monospace_advance_on(self, client: &mut GlyphClient) -> Option<u32> {
@@ -336,7 +354,7 @@ impl BitmapFont {
     pub(crate) fn width_on(self, client: &mut GlyphClient, text: &str) -> u32 {
         if let Some(cell) = self.monospace_advance_on(client) {
             return text.chars().fold(0, |width, ch| {
-                width.saturating_add(cell.saturating_mul(u32::from(char_width(ch))))
+                width.saturating_add(Self::cell_step(cell, ch))
             });
         }
         client.with_measurement(
@@ -444,16 +462,56 @@ impl BitmapFont {
     /// replacement glyph (the service's fallback) rather than being silently
     /// dropped; if the service is unreachable the glyph composites nothing
     /// (fail closed) rather than reaching for any local font data.
+    ///
+    /// A run costs one glyph lookup per character. Whether the face is
+    /// fixed-pitch is a property of the face, so it is resolved once for the
+    /// whole run, and a proportional glyph's advance is read from the very
+    /// coverage the blit is about to composite rather than fetched a second
+    /// time for it.
+    ///
+    /// The two runs are written out rather than sharing one glyph-blitting
+    /// call: a fixed-pitch run must not pay for an advance it discards, and
+    /// sharing the call gives both a closure that returns one. Measured over
+    /// a 74-character row, sharing it costs either face around 7%.
     pub fn draw_text(self, surface: &mut Surface, x: i32, y: i32, text: &str, color: Color) -> i32 {
+        client::with_client(|client| self.draw_on(client, surface, x, y, text, color))
+    }
+
+    /// [`draw_text`](Self::draw_text) against a client the caller already
+    /// holds.
+    pub(crate) fn draw_on(
+        self,
+        client: &mut GlyphClient,
+        surface: &mut Surface,
+        x: i32,
+        y: i32,
+        text: &str,
+        color: Color,
+    ) -> i32 {
         let sources = coverage_sources(color);
         let mut pen = x;
-        for ch in text.chars() {
-            let advance = self.advance(ch);
-            client::with_glyph(ch, self.family, self.pixel_height, self.weight, |glyph| {
-                let origin_x = pen.saturating_add(glyph.left);
-                draw_coverage_glyph(surface, origin_x, y, glyph, glyph.width, &sources);
-            });
-            pen = pen.saturating_add(advance_step(advance));
+        match self.monospace_advance_on(client) {
+            Some(cell) => {
+                for ch in text.chars() {
+                    client.with_glyph(ch, self.family, self.pixel_height, self.weight, |glyph| {
+                        let origin_x = pen.saturating_add(glyph.left);
+                        draw_coverage_glyph(surface, origin_x, y, glyph, glyph.width, &sources);
+                    });
+                    pen = pen.saturating_add(advance_step(Self::cell_step(cell, ch)));
+                }
+            }
+            None => {
+                for ch in text.chars() {
+                    let advance = client
+                        .with_glyph(ch, self.family, self.pixel_height, self.weight, |glyph| {
+                            let origin_x = pen.saturating_add(glyph.left);
+                            draw_coverage_glyph(surface, origin_x, y, glyph, glyph.width, &sources);
+                            glyph.advance
+                        })
+                        .unwrap_or(0);
+                    pen = pen.saturating_add(advance_step(advance));
+                }
+            }
         }
         pen
     }
@@ -696,9 +754,11 @@ mod blit_tests {
     use alloc::vec::Vec;
 
     use tairix_raster::{Color, Pixel, Surface};
+    use tairix_reclaim::PressureBand;
 
-    use super::{coverage_sources, draw_coverage_glyph};
-    use crate::glyph_cache::CachedGlyph;
+    use super::{advance_step, coverage_sources, draw_coverage_glyph, BitmapFont, GlyphClient};
+    use crate::client::tests::{caching_client, glyph_lookups, INTER};
+    use crate::glyph_cache::{glyph_cache_budget, CachedGlyph};
 
     /// The straightforward blit: walk every glyph pixel, clip it, and
     /// composite it through the surface's per-pixel accessors.
@@ -803,6 +863,100 @@ mod blit_tests {
                         want.get(x, y),
                         "pixel ({x}, {y}) with clip ({cx}, {cy}, {cw}, {ch})"
                     );
+                }
+            }
+        }
+    }
+
+    /// The colour a label is drawn in.
+    fn ink() -> Color {
+        Color::rgba(230, 232, 238, 255)
+    }
+
+    /// The drawing loop as it stood before a glyph's own coverage carried its
+    /// advance: one lookup to ask how far the pen moves, a second to blit it.
+    /// The yardstick that proves the surviving single lookup draws the very
+    /// same pixels and leaves the pen in the very same place; it lives only
+    /// here, so production keeps one definition of the run.
+    fn reference_draw(
+        client: &mut GlyphClient,
+        font: BitmapFont,
+        surface: &mut Surface,
+        x: i32,
+        y: i32,
+        text: &str,
+    ) -> i32 {
+        let sources = coverage_sources(ink());
+        let mut pen = x;
+        for ch in text.chars() {
+            let advance = font.advance_on(client, ch);
+            client.with_glyph(ch, font.family, font.pixel_height, font.weight, |glyph| {
+                let origin_x = pen.saturating_add(glyph.left);
+                draw_coverage_glyph(surface, origin_x, y, glyph, glyph.width, &sources);
+            });
+            pen = pen.saturating_add(advance_step(advance));
+        }
+        pen
+    }
+
+    /// A client whose glyph cache is installed and already holds `text`, so a
+    /// lookup count is what the *run* costs rather than its first fetches.
+    fn warm_client(font: BitmapFont, text: &str) -> GlyphClient {
+        let (mut client, _gauge) =
+            caching_client(PressureBand::Normal, glyph_cache_budget(1 << 30));
+        let mut scratch = Surface::new(4, 4).expect("allocates");
+        font.draw_on(&mut client, &mut scratch, 0, 0, text, ink());
+        client
+    }
+
+    /// The faces a desktop draws with: one proportional, one fixed-pitch.
+    fn faces() -> [BitmapFont; 2] {
+        [BitmapFont::new(INTER, 20), BitmapFont::monospace(20)]
+    }
+
+    /// A drawn run pays exactly one glyph lookup per character: the advance
+    /// the pen needs is carried by the coverage the blit is already holding,
+    /// so asking the cache for it again is pure waste.
+    #[test]
+    fn a_drawn_run_pays_one_glyph_lookup_per_character() {
+        let text = "Documents";
+        let chars = u64::try_from(text.chars().count()).expect("a test string");
+        for font in faces() {
+            let mut client = warm_client(font, text);
+            let before = glyph_lookups(&client);
+            let mut surface = patterned_surface(240, 32);
+            font.draw_on(&mut client, &mut surface, 4, 6, text, ink());
+            assert_eq!(
+                glyph_lookups(&client) - before,
+                chars,
+                "a {chars}-character run cost more than one lookup each"
+            );
+        }
+    }
+
+    /// Reading the advance off the blitted coverage draws the same frame, to
+    /// the pixel, and leaves the pen where fetching it separately did.
+    #[test]
+    fn a_drawn_run_matches_the_two_lookup_reference() {
+        for font in faces() {
+            // The last reserves two cells per scalar on a fixed-pitch face.
+            for text in [
+                "",
+                "A",
+                "Documents",
+                "Attaché — Übung",
+                "  spaced  ",
+                "日本語",
+            ] {
+                // On the surface, straddling its left edge, and past its right.
+                for &(x, y) in &[(4i32, 6i32), (-7, 3), (230, 6)] {
+                    let mut client = warm_client(font, text);
+                    let mut actual = patterned_surface(240, 32);
+                    let mut expected = actual.clone();
+                    let pen = font.draw_on(&mut client, &mut actual, x, y, text, ink());
+                    let want = reference_draw(&mut client, font, &mut expected, x, y, text);
+                    assert_eq!(pen, want, "the pen ended elsewhere: {text:?} at ({x},{y})");
+                    assert_eq!(actual.pixels(), expected.pixels(), "{text:?} at ({x},{y})");
                 }
             }
         }

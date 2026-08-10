@@ -7494,8 +7494,10 @@ separate region round trips each copying a growing bounding box (E).
   `-window`/`-display` now build at `opt-level = 3` in the dev profile too
   (the debug/QEMU images build userland `Run` binaries there, so a
   measurement taken before this described the profile, not the code);
-  `cargo xtask bench` drives the raster and whole-frame composite families
-  through `lib/cpuops`'s `BenchHarness` over a host nanosecond counter; and
+  `cargo xtask bench` drives the raster, text and whole-frame composite
+  families through `lib/cpuops`'s `BenchHarness` over a host nanosecond
+  counter (text through the production `draw_text` with a warm glyph cache,
+  so the figure is drawing rather than the host font's reply encoding); and
   `Compositor::frame_stats` reports exact per-frame work counts (damaged,
   blended, copied, frosted, encoded px, dirty rects, present calls,
   furniture-cache hits/misses taken as the delta of the cache's own
@@ -7513,8 +7515,8 @@ separate region round trips each copying a growing bounding box (E).
   cannot name a pixel type without closing the cycle `abi → raster →
   theme/reclaim → abi`). Bit-identity is proven by composing each scene
   twice, with the copy path on and off, and comparing bytes.
-- **C — repaint the control, not the window. [C.0, C.2, C.4b, C.5 done; C.1
-  partly; C.3 blocked; C.4a remains]** `tairix_geometry::Region` is the one
+- **C — repaint the control, not the window. [C.0, C.2, C.4b, C.4c, C.5 done;
+  C.1 partly; C.3 blocked; C.4a withdrawn]** `tairix_geometry::Region` is the one
   region type (pairwise-disjoint band-canonical rectangles, a linear merge
   walk, an optional rectangle budget), and the WM's private copy is deleted;
   the compositor consumes it through a compose plan that promotes a
@@ -7525,10 +7527,26 @@ separate region round trips each copying a growing bounding box (E).
   seam — one guarded write and a budgeted region — and the pointer path
   reports through it. Text measurement is memoised in `lib/font` beside the
   glyph cache, keyed by face and text and sharing the glyph cache's
-  RAM-derived budget, with the monospace path paying no lookup. The shell
-  settles once per drained input batch instead of once per sample (as do the
-  keyboard and pinboard drains). Remaining: the keyboard/value control
-  families and the old-bounds memory (C.1), the font hoist (C.4a), and
+  RAM-derived budget, with the monospace path paying no lookup. **Drawing** a
+  run now costs one glyph lookup per character instead of two: a glyph's
+  coverage reply carries its own advance, so the pen step is read from the
+  bitmap being composited rather than fetched again for it, and whether the
+  face is fixed-pitch is resolved once per run — as **two written-out loops**,
+  because sharing one glyph-blitting call makes a fixed-pitch run pay for an
+  advance it discards (~7% worse on both faces), and a single loop with a
+  per-character branch *regressed* the terminal's fixed-pitch path ~4%.
+  **Measured** (release, `--iters 400 --rounds 25`, three runs, ~1% spread; the
+  untouched measurement case moved +3% between sessions, which bounds the
+  drift): a 74-character proportional row **17.3 → 14.2 µs (−18%)** and a
+  monospace row **16.0 → 15.2 µs (−6%)**. At the harness's default budget the
+  spread is ±15% on a case this small, so a default-budget pair is not
+  evidence — recorded in the plan. The shell settles once per drained input
+  batch instead of once per sample (as do the keyboard and pinboard drains),
+  and C.4a is **withdrawn**:
+  building a `BitmapFont` is a theme read and arithmetic — no lock, client
+  call or cache lookup — so hoisting it cannot buy measurable time, and only
+  the dead parameters it exposed are worth removing. Remaining: the
+  keyboard/value control families and the old-bounds memory (C.1), and
   — blocked until C.1 is complete — apps presenting real rects (C.3), which
   today would silently drop changes no reported rectangle covers.
 - **D — blur costs what it changes. [D.1–D.4 done; D.5 is decision 2 below;

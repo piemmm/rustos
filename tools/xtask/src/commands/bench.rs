@@ -32,16 +32,22 @@ use tairix_abi::driver::display::{DisplayFormat, DisplayMode};
 use tairix_abi::seat::SEAT_PRIMARY;
 use tairix_cpuops::{BenchHarness, CycleCounter};
 use tairix_display::ChannelOrder;
+use tairix_font::{glyph_cache_budget, glyph_cache_candidate, set_glyph_cache, BitmapFont};
+use tairix_geometry::Scale;
 use tairix_log::DiscardSink;
 use tairix_raster::{box_blur, BlurScratch, Color, Pixel, Rgba8Image, Surface};
-use tairix_reclaim::{PressureBand, ReportedPressure};
+use tairix_reclaim::{PressureBand, ReclaimCache, ReclaimOwner, ReportedPressure};
+use tairix_theme::{TextRole, Theme};
 use tairix_wm::{chrome_cache, frost_cache, Compositor, Point, Rect, Region, WindowId};
 
 /// The default timed calls per round and rounds per case.
 ///
-/// Deliberately far below the harness's own boot-time defaults: a case here
-/// touches up to a megapixel, so a large budget buys resolution nobody needs
-/// and costs a developer minutes. `--iters` / `--rounds` raise it.
+/// Deliberately far below the harness's own boot-time defaults: a megapixel
+/// case resolves at this budget, and a large one would cost a developer
+/// minutes for nothing. A *small* case does not: on a ten-thousand-pixel one
+/// the run-to-run spread here is around ±15%, so comparing two builds of
+/// something that cheap needs `--iters 400 --rounds 25` (≈1%) before a
+/// difference of a few per cent means anything.
 const DEFAULT_ITERS: u32 = 16;
 const DEFAULT_ROUNDS: u32 = 5;
 
@@ -273,6 +279,11 @@ static FAMILIES: &[Family] = &[
         measure: round_rect,
     },
     Family {
+        name: "text",
+        what: "BitmapFont::draw_text and text_width over a label and a row",
+        measure: text,
+    },
+    Family {
         name: "blur",
         what: "box_blur and Surface::frost_region over several radii",
         measure: blur,
@@ -401,6 +412,97 @@ fn round_rect(harness: &BenchHarness<'_>) -> Result<Vec<Measurement>, String> {
             )
         })
         .collect())
+}
+
+/// The label a control draws: a file name, a button caption, a row title.
+const LABEL: &str = "Documents";
+
+/// A list row's or terminal line's worth of text.
+const ROW: &str = "The compositor copies an opaque run and blends only what shows through it.";
+
+/// The colour text is drawn in: the dark theme's body ink.
+const INK: Color = Color::rgb(230, 232, 238);
+
+/// Text drawing and measurement, through the production entry points.
+///
+/// Text is the desktop's other per-pixel family: a control-rich window draws
+/// hundreds of glyphs a frame, and each one costs a pen advance, a glyph-cache
+/// lookup, and a coverage composite. The pixel figure is the run's own
+/// measured extent, so it is comparable with the blit and blend families.
+///
+/// The proportional cases are the ones a desktop pays — a monospace family
+/// shares one advance and takes an arithmetic path with nothing to look up.
+fn text(harness: &BenchHarness<'_>) -> Result<Vec<Measurement>, String> {
+    struct Warm {
+        dst: RefCell<Surface>,
+        font: BitmapFont,
+        text: &'static str,
+    }
+
+    fn draw(_: (), warm: &Warm) -> i32 {
+        let mut dst = warm.dst.borrow_mut();
+        warm.font.draw_text(&mut dst, 0, 0, warm.text, INK)
+    }
+
+    fn measure(_: (), warm: &Warm) -> u32 {
+        warm.font.text_width(warm.text)
+    }
+
+    warm_font_client();
+    let theme = Theme::dark();
+    let proportional = BitmapFont::for_role(theme.fonts(), TextRole::Body, Scale::ONE);
+    let monospace = BitmapFont::monospace(proportional.glyph_height());
+
+    let mut rows = Vec::new();
+    for (label, font, body) in [
+        ("proportional label", proportional, LABEL),
+        ("proportional row", proportional, ROW),
+        ("monospace row", monospace, ROW),
+    ] {
+        let warm = Warm {
+            dst: RefCell::new(surface(SCREEN_W, 64, Color::rgb(18, 20, 26))?),
+            font,
+            text: body,
+        };
+        // The first draw fetches this run's glyphs; every timed one then
+        // measures the steady state a repainting desktop is in.
+        draw((), &warm);
+        let pixels = text_pixels(font, body);
+        rows.push(Measurement::new(
+            format!("draw {label}, {} chars", body.chars().count()),
+            pixels,
+            harness.median_cycles((), draw, &warm),
+        ));
+        if label == "proportional row" {
+            rows.push(Measurement::new(
+                format!("width {label}, {} chars", body.chars().count()),
+                pixels,
+                harness.median_cycles((), measure, &warm),
+            ));
+        }
+    }
+    Ok(rows)
+}
+
+/// The pixels a run of `text` covers at `font`: its measured extent.
+fn text_pixels(font: BitmapFont, text: &str) -> u64 {
+    u64::from(font.text_width(text)) * u64::from(font.glyph_height())
+}
+
+/// Install the glyph cache the text cases draw through.
+///
+/// A desktop draws with a cache installed, so a figure taken without one
+/// would describe the host font's reply encoding rather than the drawing path.
+/// The transport itself defaults in on first draw.
+fn warm_font_client() {
+    PRESSURE.report(PressureBand::Normal);
+    set_glyph_cache(ReclaimCache::new(
+        "bench.font.glyphs",
+        glyph_cache_candidate(ReclaimOwner::UserlandProcess("xtask.bench")),
+        glyph_cache_budget(1 << 30),
+        &PRESSURE,
+        &SINK,
+    ));
 }
 
 fn blur(harness: &BenchHarness<'_>) -> Result<Vec<Measurement>, String> {

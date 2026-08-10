@@ -703,29 +703,12 @@ pub fn trim_glyph_cache() -> usize {
 /// Run `f` against the process-global client, holding its lock across the
 /// call.
 ///
-/// One acquisition serves a whole measurement — the face's metrics, then
-/// either the memo or a walk of per-character advances — where a lock taken
-/// per advance would pay for the same thing twice for every character.
+/// One acquisition serves a whole measurement or a whole drawn run — the
+/// face's metrics, then either the memo or a walk of per-character glyphs —
+/// where a lock taken per glyph would pay for the same thing again for every
+/// character.
 pub(crate) fn with_client<R>(f: impl FnOnce(&mut GlyphClient) -> R) -> R {
     f(&mut CLIENT.lock())
-}
-
-/// Fetch the coverage glyph for `(scalar, family, pixel_height, weight)` and
-/// hand it to `f`, or return `None` (compositing nothing) when the service is
-/// unreachable.
-///
-/// The global lock is held across `f` so glyph fetch and blit see a
-/// consistent cache; `f` does only the bounded per-glyph blit.
-pub(crate) fn with_glyph<R>(
-    scalar: char,
-    family: FamilyKey,
-    pixel_height: u32,
-    weight: FontWeight,
-    f: impl FnOnce(&CachedGlyph) -> R,
-) -> Option<R> {
-    CLIENT
-        .lock()
-        .with_glyph(scalar, family, pixel_height, weight, f)
 }
 
 /// `family`'s line metrics at `pixel_height` in `weight`.
@@ -931,7 +914,7 @@ pub fn install_test_transport() {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     use alloc::sync::Arc;
@@ -942,10 +925,24 @@ mod tests {
 
     use crate::glyph_cache::{glyph_cache_budget, glyph_cache_candidate};
 
-    pub(super) const INTER: FamilyKey = match FamilyKey::new("inter") {
+    pub(crate) const INTER: FamilyKey = match FamilyKey::new("inter") {
         Ok(key) => key,
         Err(_) => FamilyKey::MONO,
     };
+
+    /// Glyph lookups this client has paid.
+    ///
+    /// The glyph cache records exactly one hit or miss per glyph asked of it,
+    /// so its event counters *are* the work counter for a measurement or for a
+    /// drawn run — whether the coverage came from the service or the cache.
+    pub(crate) fn glyph_lookups(client: &GlyphClient) -> u64 {
+        let accounting = client
+            .cache
+            .as_ref()
+            .expect("a cache is installed")
+            .accounting();
+        accounting.hits() + accounting.misses()
+    }
 
     /// A transport that always refuses, to exercise the fail-closed path.
     struct Refusing;
@@ -997,6 +994,18 @@ mod tests {
     fn counting_client() -> (GlyphClient, CallTally) {
         let tally = CallTally::default();
         (client_with(CountingTransport(tally.clone())), tally)
+    }
+
+    /// A client over the deterministic test transport with its glyph cache
+    /// installed, as any drawing or measuring program runs.
+    pub(crate) fn caching_client(
+        band: PressureBand,
+        budget: CacheBudget,
+    ) -> (GlyphClient, &'static ReportedPressure) {
+        let (cache, gauge) = cache_at(band, budget);
+        let mut client = client_with(SolidTestTransport);
+        client.cache = Some(cache);
+        (client, gauge)
     }
 
     /// A cache built exactly as production builds one — the shared

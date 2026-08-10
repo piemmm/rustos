@@ -161,6 +161,24 @@ reading is unavailable (a zero total yields a zero budget), every glyph is
 fetched and served without being retained: correct, merely one call per
 glyph.
 
+### One glyph lookup per character
+
+A glyph's coverage reply carries that glyph's own advance, so `draw_text` reads
+the pen step from the very bitmap it is about to composite rather than asking
+the cache for the same glyph again to learn how far to move: a *proportional*
+run of *n* characters pays *n* lookups, not 2*n*. Whether a face is fixed-pitch
+is a property of the face rather than of a character, so it too is resolved once
+for the whole run instead of being re-read per character. Both are asserted as
+counts, never timings, against a test-only reference that draws the run the old
+way and must produce the identical pixels and the identical final pen position.
+
+The two faces take two written-out loops on purpose: a fixed-pitch run must not
+pay for an advance it discards, and sharing one glyph-blitting call between them
+gives both a closure that returns one, which measures worse on both. Building a
+`BitmapFont` is by contrast free of any of this — it reads the theme and does
+arithmetic, with no lock, client call, or cache lookup — so resolving a themed
+role per control paint is not a cost worth hoisting.
+
 ### Measuring proportional text once
 
 A proportional family has no cell width to multiply by, so measuring a label

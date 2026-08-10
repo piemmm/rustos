@@ -10,7 +10,7 @@ use alloc::string::String;
 use tairix_log::DiscardSink;
 use tairix_reclaim::{CacheBudget, CachedBytes, PressureBand, ReclaimOwner, ReportedPressure};
 
-use super::tests::{cache_at, client_with, INTER};
+use super::tests::{cache_at, caching_client, client_with, glyph_lookups, INTER};
 use super::*;
 
 use crate::font::{BitmapFont, ELLIPSIS};
@@ -33,9 +33,7 @@ fn measuring_client(
 ) -> (GlyphClient, &'static ReportedPressure) {
     static SINK: DiscardSink = DiscardSink;
 
-    let (glyphs, gauge) = cache_at(band, glyph_cache_budget(1 << 30));
-    let mut client = client_with(SolidTestTransport);
-    client.cache = Some(glyphs);
+    let (mut client, gauge) = caching_client(band, glyph_cache_budget(1 << 30));
     client.measure = Some(ReclaimCache::new(
         "test.font.measure",
         measure_cache_candidate(ReclaimOwner::UserlandProcess("test.font")),
@@ -49,20 +47,6 @@ fn measuring_client(
 /// A comfortable machine: room for both caches, band reported normal.
 fn roomy_client() -> (GlyphClient, &'static ReportedPressure) {
     measuring_client(PressureBand::Normal, glyph_cache_budget(1 << 30))
-}
-
-/// Per-glyph advance lookups this client has paid.
-///
-/// The glyph cache records exactly one hit or miss per advance a measurement
-/// asks for, so its event counters *are* the work counter — whether the
-/// advance came from the service or from the cache.
-fn advance_lookups(client: &GlyphClient) -> u64 {
-    let accounting = client
-        .cache
-        .as_ref()
-        .expect("a cache is installed")
-        .accounting();
-    accounting.hits() + accounting.misses()
 }
 
 /// Lookups the memo itself has answered or missed.
@@ -160,12 +144,12 @@ fn measuring_the_same_string_twice_looks_up_its_advances_once() {
     let text = "Switchboard";
 
     let first = font.width_on(&mut client, text);
-    assert_eq!(advance_lookups(&client), char_count(text));
+    assert_eq!(glyph_lookups(&client), char_count(text));
 
     let second = font.width_on(&mut client, text);
     assert_eq!(second, first);
     assert_eq!(
-        advance_lookups(&client),
+        glyph_lookups(&client),
         char_count(text),
         "the second measurement walked the string again"
     );
@@ -179,17 +163,17 @@ fn truncation_and_elision_read_the_same_one_measurement() {
     let text = "Switchboard";
 
     let width = font.width_on(&mut client, text);
-    let walked = advance_lookups(&client);
+    let walked = glyph_lookups(&client);
     assert_eq!(walked, char_count(text));
 
     font.fitting_bytes_on(&mut client, text, width / 2);
-    assert_eq!(advance_lookups(&client), walked, "truncation re-walked");
+    assert_eq!(glyph_lookups(&client), walked, "truncation re-walked");
 
     // Elision measures the mark as well, hence exactly one further entry and
     // one further character walked.
     font.elision_on(&mut client, text, width / 2);
     assert_eq!(
-        advance_lookups(&client),
+        glyph_lookups(&client),
         walked + char_count(ELLIPSIS),
         "elision re-walked the label"
     );
@@ -213,7 +197,7 @@ fn a_monospace_family_pays_no_advance_lookup_and_no_memo_lookup() {
     font.elision_on(&mut client, text, 3 * cell);
 
     assert_eq!(
-        advance_lookups(&client),
+        glyph_lookups(&client),
         0,
         "the monospace path asked for a glyph advance"
     );
@@ -267,19 +251,19 @@ fn a_scale_or_face_change_is_a_separate_measurement() {
     let other_face = BitmapFont::new(INTER, 16);
 
     let at_small = small.width_on(&mut client, text);
-    assert_eq!(advance_lookups(&client), walked);
+    assert_eq!(glyph_lookups(&client), walked);
 
     let at_large = large.width_on(&mut client, text);
     assert_ne!(at_small, at_large, "a scale change measured the same");
     assert_eq!(
-        advance_lookups(&client),
+        glyph_lookups(&client),
         2 * walked,
         "the larger scale was served the smaller one's measurement"
     );
 
     let at_other_face = other_face.width_on(&mut client, text);
     assert_eq!(
-        advance_lookups(&client),
+        glyph_lookups(&client),
         3 * walked,
         "the second face was served the first face's measurement"
     );
@@ -314,7 +298,7 @@ fn a_new_advance_source_invalidates_every_retained_measurement() {
         1
     );
     assert_eq!(
-        advance_lookups(&client),
+        glyph_lookups(&client),
         2 * char_count(text),
         "the measurement was served from the old source's entry"
     );
