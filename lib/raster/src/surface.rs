@@ -728,6 +728,33 @@ impl Surface {
     ///
     /// [`Pixel::over`]: crate::color::Pixel::over
     pub fn blit(&mut self, x: i32, y: i32, src: &Surface) {
+        self.blit_mapped(x, y, src, |pixel| pixel);
+    }
+
+    /// [`blit`](Self::blit), with every source pixel pulled toward its own
+    /// luminance as it lands — `saturation` exactly as
+    /// [`Pixel::desaturate`](crate::color::Pixel::desaturate) reads it, so
+    /// `255` is a plain blit and `0` lays the sprite down greyscale.
+    ///
+    /// Desaturating on the way in leaves the source untouched, so one cached
+    /// full-colour sprite serves every state a caller draws it in without a
+    /// second copy of it in memory.
+    pub fn blit_desaturated(&mut self, x: i32, y: i32, src: &Surface, saturation: u8) {
+        // Full saturation is the plain blit, taken here rather than per pixel
+        // so the common caller pays nothing for the option.
+        if saturation == 255 {
+            self.blit(x, y, src);
+            return;
+        }
+        self.blit_mapped(x, y, src, |pixel| pixel.desaturate(saturation));
+    }
+
+    /// The one blit walk, with `map` applied to each source pixel on its way
+    /// into the destination.
+    ///
+    /// A transparent source pixel is skipped before `map` runs, so a map may
+    /// not turn one opaque; both maps here leave alpha alone.
+    fn blit_mapped(&mut self, x: i32, y: i32, src: &Surface, map: impl Fn(Pixel) -> Pixel) {
         // Which of the source's columns and rows land somewhere this blit is
         // allowed to write. Resolving both once, rather than per pixel, is what
         // turns the inner loop below into a plain paired-slice walk.
@@ -771,7 +798,7 @@ impl Surface {
             };
             for (pixel, dst) in source.iter().zip(destination.iter_mut()) {
                 if pixel.a != 0 {
-                    *dst = pixel.over(*dst);
+                    *dst = map(*pixel).over(*dst);
                 }
             }
         }

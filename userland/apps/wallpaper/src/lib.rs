@@ -92,12 +92,13 @@ pub const WIN_WIDTH: u32 = 880;
 /// [`WIN_WIDTH`]).
 pub const WIN_HEIGHT: u32 = 640;
 
-/// The smallest client width the chooser draws into, in pixels — a floor so
-/// a resize-to-nothing still shows a usable (if cramped) window rather than
-/// a zero-sized surface.
+/// The smallest client width the chooser lays out into, in pixels — below
+/// this the gallery and its options stop being usable. It is declared to
+/// the window manager when the window opens, which is what holds a resize
+/// to it; the app itself adopts whatever size it is given.
 pub const MIN_WIN_WIDTH: u32 = 420;
 
-/// The smallest client height the chooser draws into, in pixels (see
+/// The smallest client height the chooser declares (see
 /// [`MIN_WIN_WIDTH`]).
 pub const MIN_WIN_HEIGHT: u32 = 360;
 

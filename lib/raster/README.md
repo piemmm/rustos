@@ -139,6 +139,11 @@ This crate owns:
   path, clipping a negative origin or an over-large source, so a
   transparent-background sprite (a rasterised cursor or icon) lays onto the
   destination without a rectangular halo.
+- `Surface::blit_desaturated` — the same walk with each source pixel pulled
+  toward its own luminance first (`Pixel::desaturate`: BT.601 luma, `255`
+  identity, `0` pure grey). One definition of saturation reduction, applied on
+  the way in, so a caller that draws the same sprite hot and greyed — a window
+  title bar's identity icon, focused and not — keeps one cached copy of it.
 - `Surface::fill_vertical_gradient` — a top-to-bottom colour ramp, one span
   fill per row. Interpolation is in *straight* alpha and premultiplied per
   row, so a ramp that fades out keeps its hue instead of being dragged toward

@@ -1499,10 +1499,14 @@ per-size layout code. The re-map is fail-closed (`AGENTS.md` §5.4): a fresh
 region is allocated and granted and adopted only once the session accepts
 `WindowClient::resize`; the old region is released only after adoption, and a
 refused or unallocatable resize leaves the current window intact rather than
-blanking or crashing. A drag toward nothing is clamped to `MIN_WIN_WIDTH` ×
-`MIN_WIN_HEIGHT` so the surface is never zero-area. The default window is sized
-so the editable Properties popup (metadata plus the permissions grid) fits
-without resizing.
+blanking or crashing. `MIN_WIN_WIDTH` × `MIN_WIN_HEIGHT` is *declared* on the
+window create (`WindowSizing`) and enforced by the window manager, so a drag
+simply stops there. The app must not clamp a granted size itself: resizing its
+own window back up while a drag keeps shrinking makes the two fight once per
+pointer sample, which is what made the listing visibly bounce as the window
+approached its minimum. An app never answers a resize with a larger size of
+its own. The default window is sized so the editable Properties popup
+(metadata plus the permissions grid) fits without resizing.
 
 Icon-only buttons size their glyph from the plate itself — the smaller plate
 dimension inside its frame, less a small margin proportional to the plate

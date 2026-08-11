@@ -7,9 +7,9 @@ model, and rendering**: the geometry of every region, pointer hit-testing for
 input routing, the program-library popup / pin-strip / task-list /
 notification-area / Switchboard-tray state machines, the bar's right-click
 **context menu**,
-and painting those regions — including the clock label and task-title
-**text** — into a themed pixel surface, plus **routing** pointer, scroll,
-and key events into taskbar actions and drawing **notification-icon
+and painting those regions — including the clock label's **text** — into a
+themed pixel surface, plus **routing** pointer, scroll, and key events into
+taskbar actions and drawing **notification-icon
 artwork** (scalable, themeable vector glyphs) and the desktop's **icon
 artwork** (the shipped class masters and each application's own bundle
 icon, read and decoded by the session and blitted here).
@@ -50,6 +50,8 @@ From the leading end to the trailing end:
 
 - **Library button** — the first of the two permanent leading launchers: the
   nine-tile-glyph invoker that opens the program-library popup.
+- **Separator** — a one-pixel rule immediately after the Library button,
+  grouping everything that follows it (see *The separator rule*).
 - **Files button** — the second permanent launcher: a folder-glyph button that
   opens the file manager. The two leading buttons are fixed — never reordered,
   never removable (`plans/NEW-TASKBAR.md` T4) — and they are quiet peers: on an
@@ -96,6 +98,40 @@ maps a pointer to the `Hit` element under it (the Library button, the Files
 button, a pin index, a task index, a notification index, the clock, or the
 Switchboard capsule), which
 is what input routing dispatches (see *Input routing*).
+
+## The separator rule
+
+The program library is the bar's one *system* launcher; the file manager,
+like a pin, is an application. `BarLayout::separator` states that grouping
+with a single rule immediately after the Library button, so the leading end
+of a horizontal bar reads
+
+```text
+[ library ] | [ files ][ pin ][ pin ] ...
+```
+
+and a vertical bar reads the same way top-to-bottom, the rule crossing the
+bar instead of standing along it. It is one region among the others, laid out
+once and read by both the painter and the tests:
+
+- **Thickness** — one `border_thickness` along the main axis, scaled like
+  every other length and floored at one physical pixel, so the rule is still
+  drawn at a sub-unity scale.
+- **Length** — the bar's thickness less one `control_inset` at each end, so
+  the rule stops short of both long edges and never runs into the rounded
+  corners the compositor applies.
+- **Gutter** — the rule plus one `control_gap` on each side. Files, the pins,
+  the task list, and every trailing region begin one whole gutter past the
+  Library button; the trailing clip floor moves with them, so a degenerate
+  screen still collapses the clock and icons before the launchers.
+- **Colour** — the theme palette's `border`, the same role every other
+  separator on the desktop uses.
+
+The rule is decoration, not a control: `hit_test` has no case for it, so a
+press on the rule or in the gutter around it reaches the bare bar and is
+`Ignored`. A bar too short to reach the rule, or too thin to inset it, lays
+out `Rect::EMPTY` and simply draws nothing — the launchers keep their places
+either way.
 
 ## Rounded edges
 
@@ -209,11 +245,17 @@ colour role from the `Palette`. Its last argument is the caller's
   pointer;
 - the **Files button** is the same quiet (`Neutral`) `IconButton` carrying the
   shipped `Folder` artwork over its folder glyph;
+- the **separator** between them is filled in the palette's `border` colour,
+  through the same `Surface` fill as the background — the renderer draws the
+  laid-out `BarLayout::separator` rectangle and knows nothing of the gutter
+  arithmetic behind it (`AGENTS.md` §2.2);
 - each **pin slot** and each **task slot** is one shared `tairix-controls`
   `TaskbarItem` — the bar's application buttons have exactly one visual
-  recipe (`AGENTS.md` §2.2). A pin uses the icon-only presentation (a
-  centred icon sized off the plate); a task shows its icon beside the
-  truncated window title. The item's `TaskVisibility` paints the state through
+  recipe (`AGENTS.md` §2.2), and that recipe is icon-only: a centred icon
+  sized off the plate, no label, in a slot the same extent as a pin's, so a
+  run of pins and running tasks reads as one strip of equal icons. A window's
+  title is model data (`TaskEntry::title`) the context menu reads, never ink
+  on the bar. The item's `TaskVisibility` paints the state through
   the **presence mark** on the lower edge: the **active** window's item takes
   the full-width accent seam, a merely **running** one a short centred muted
   mark (so presence and activation differ in length as well as in hue), a
@@ -238,10 +280,10 @@ colour role from the `Palette`. Its last argument is the caller's
 
 On top of those plates, the renderer draws **text** with the shared `tairix-font`
 `BitmapFont` (the built-in Inconsolata EX + M PLUS 1 Code + D2Coding + Noto Sans
-Hebrew family): the clock label is centred in the clock region, and each task
-item truncates its title to the characters that fit, so text never spills
-into a neighbouring slot (`AGENTS.md` §2.9). Glyphs are composited through
-`tairix-raster`'s one premultiplied-alpha `over` path — no blitter or colour
+Hebrew family): the clock label, centred in the clock region, is the only text
+on the bar — an application slot draws its icon alone, so nothing can spill into
+a neighbouring slot. Glyphs are composited through `tairix-raster`'s one
+premultiplied-alpha `over` path — no blitter or colour
 algebra is duplicated here (`AGENTS.md` §2.2).
 
 The surface is rectangular: the taskbar paints no corners. The window manager
@@ -252,9 +294,9 @@ local surface space, the translation saturates, and `fill_rect` clips, so a
 degenerate layout paints nothing rather than panicking (`AGENTS.md` §2.9).
 Switching themes simply re-renders with the new palette.
 
-`TaskbarRenderer` is a small stateful object — the region fills, clock, and
-task titles are cheap to repaint every frame, but the vector notification
-glyphs are not, so it holds a `tairix_reclaim::ReclaimCache` of rasterised
+`TaskbarRenderer` is a small stateful object — the region fills and the clock
+are cheap to repaint every frame, but the vector notification glyphs are not,
+so it holds a `tairix_reclaim::ReclaimCache` of rasterised
 glyphs across frames, built by `icon_cache` from the shared
 `tairix_reclaim::desktop::disposable_ui_cache` policy: owned by the seat,
 bounded by a budget derived from the real framebuffer byte size, dropped
@@ -679,8 +721,10 @@ no rim, and no reactive edge); the hover wash appearing under the pointer
 in that slot alone and never as an edge; the Library button compressed while
 its popup is open; focused / unfocused / minimised task fills; notification
 glyphs (including the unknown-asset fallback and cache retint on theme
-switch); clock and truncated task-title text; and the popup's panel, rows,
-hover/selection states, placeholder ink, scrollbar, and dark / light /
+switch); the clock's text; a running task's centred icon with no title ink
+anywhere beside it, and its slot matching a pin's at more than one scale; and
+the popup's panel, rows, hover/selection states, placeholder ink, scrollbar,
+and dark / light /
 high-contrast rendering.
 The icon-artwork tests drive `render` with a recording lookup: the two
 launcher buttons ask for the `Library` and `Folder` kinds at their drawn side

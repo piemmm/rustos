@@ -41,7 +41,7 @@ use crate::paint::{
     dominant_color, draw_outline, foreground, grab_after, heavy_contrast, icon_slot_side, inset,
     key_activation, paint_bead, paint_chevron, paint_count_badge, paint_icon_slot, plate_border,
     pointer_activation, press_latch, rail_thickness, resolve_bead, resolve_rail, role_font,
-    route_pointer, seam_thickness, seam_width, surface_rect, to_i32, ChevronDir,
+    route_pointer, seam_thickness, seam_width, surface_rect, to_i32, ChevronDir, FULL_COLOUR,
 };
 use crate::state::{
     ControlDisposition, ControlRole, ControlState, FocusState, PointerState, RenderInvariant,
@@ -428,7 +428,14 @@ impl ListRow {
         if let Some(kind) = self.icon {
             if icon_slot > 0 {
                 let iy = cy + (ch.saturating_sub(icon_slot)) / 2;
-                paint_icon_slot(surface, left, iy, icon_slot, kind, fg, artwork);
+                paint_icon_slot(
+                    surface,
+                    (left, iy, icon_slot),
+                    kind,
+                    fg,
+                    artwork,
+                    FULL_COLOUR,
+                );
             }
             left = left.saturating_add(icon_slot).saturating_add(pad);
         }
@@ -648,7 +655,7 @@ impl TableCell {
             let side = Self::icon_side(font, h);
             if side > 0 && right > left.saturating_add(side).saturating_add(pad) {
                 let iy = y + (h.saturating_sub(side)) / 2;
-                paint_icon_slot(surface, left, iy, side, kind, fg, None);
+                paint_icon_slot(surface, (left, iy, side), kind, fg, None, FULL_COLOUR);
                 left = left.saturating_add(side).saturating_add(pad);
             }
         }
@@ -2121,7 +2128,14 @@ impl IconTile {
         let ink = self.label_color(theme);
         self.paint_backdrop(surface, (x, y, w, h), scale, theme);
         if let Some((ix, iy, side)) = Self::icon_slot(bounds, scale, theme) {
-            paint_icon_slot(surface, ix, iy, side, self.icon, ink, artwork);
+            paint_icon_slot(
+                surface,
+                (ix, iy, side),
+                self.icon,
+                ink,
+                artwork,
+                FULL_COLOUR,
+            );
         }
         self.paint_label(surface, bounds, scale, theme, font, ink);
         self.paint_bead(surface, (x, y, w, h), scale, theme);

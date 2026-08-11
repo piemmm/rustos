@@ -158,8 +158,34 @@ fn snapping_is_idempotent_so_a_remap_cannot_oscillate() {
 fn snapping_never_yields_an_empty_client() {
     let font = default_font();
     let (w, h) = snap_to_cells(0, 0, font);
-    assert_eq!((w, h), grid_size(1, 1, font));
     assert!(w > 0 && h > 0);
+}
+
+#[test]
+fn snapping_never_asks_for_more_than_it_was_granted() {
+    // The terminal must never answer a resize with a larger size of its own:
+    // the window manager would re-apply the drag on the next pointer sample
+    // and the two would fight, once per sample. A client under one cell keeps
+    // what it was given and draws that cell clipped.
+    let font = default_font();
+    let (advance, line_height) = (font.cell_width().max(1), font.line_height().max(1));
+    for (w, h) in [
+        (1, 1),
+        (advance - 1, line_height - 1),
+        (advance, line_height - 1),
+        (advance * 3 + 2, line_height * 2 + 5),
+    ] {
+        let (snapped_w, snapped_h) = snap_to_cells(w, h, font);
+        assert!(
+            snapped_w <= w && snapped_h <= h,
+            "{w}x{h} snapped up to {snapped_w}x{snapped_h}"
+        );
+        assert_eq!(
+            snap_to_cells(snapped_w, snapped_h, font),
+            (snapped_w, snapped_h),
+            "and settles in one step"
+        );
+    }
 }
 
 // --- chrome_extent -------------------------------------------------------------

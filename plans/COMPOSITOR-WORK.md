@@ -87,7 +87,7 @@ to the outer frame.
 
 ## 2. Stages
 
-**Status:** Stages A–F are **done**. Server-side window decorations are live:
+**Status:** Stages A–H are **done**. Server-side window decorations are live:
 every served application window is decorated by the window manager, client-driven
 resizability is live (the file viewer opens resizable and re-lays-out on
 `Resized`), and the whole-project validation gate is green.
@@ -173,14 +173,21 @@ guarantees:
   title bar via `Compositor::set_window_title`, not merely used as the taskbar
   label. It elides with the shared `ELLIPSIS` mark (`BitmapFont::elide_to_width`)
   rather than being cut, because a title may be a path.
+- A window command wears no perimeter of its own in any state and no plate at
+  all while it rests: it is bar-seated (`FrameColors::face`), so hover and
+  press are the shared plate wash and an accent edge never reads as a line
+  drawn round the window's corner.
 - The four commands sit in two corner clusters — put-to-back then close at the
   leading edge, minimize then size-toggle at the trailing one — and the
   **owning application's identity icon** leads the title text in one group
-  centred in the span between them; a window with no identity reserves no slot
-  and its title is centred alone. The slot is `crate::paint::icon_slot_side`
-  and the artwork is drawn by the shared `paint_icon_slot`, so there is no
-  second icon path. The icon is inert — part of the draggable region, never a
-  control.
+  left-justified in the span between them, one gap past the leading cluster; a
+  window with no identity reserves no slot and its title takes that leading
+  edge alone. The slot is `crate::paint::icon_slot_side` and the artwork is
+  drawn by the shared `paint_icon_slot`, so there is no second icon path. The
+  artwork is desaturated by activation as it lands — nearly all its colour on
+  the active frame, none on an inactive one — through the one saturation
+  definition in `lib/raster`, so one cached full-colour icon serves both. The
+  icon is inert — part of the draggable region, never a control.
   `Compositor::window_title_icon_side` reports the side to rasterise at and
   `Compositor::set_window_identity` takes the identity plus that artwork,
   dirtying only the title band and dropping only that window's chrome entry.
@@ -437,6 +444,45 @@ Two gaps that made resizable windows only nominally resizable are closed:
   too, so in-content controls track the pointer. The file manager's own
   scrollbar is now interactive (`tairix_browse::scroll_pointer`: arrow/track
   step, thumb drag, hover), driven through the shared `ScrollBar`.
+
+### Stage H — Bounded resize, bounded move, and decorations that answer the pointer — DONE
+
+Three ways a decorated window could be left unusable are closed, all in the
+window manager and the shared furniture:
+
+- **A window cannot be dragged smaller than its own furniture.**
+  `TitleBar::min_band_width` is the narrowest band that seats both corner
+  clusters with one control extent of drag surface between them, and
+  `WindowFrame::min_outer_size` turns it into the smallest outer rectangle
+  (that band plus the rim; the bands plus one standard control of client in
+  height). The two hard-coded constants the resize-grab used instead
+  (`MIN_CLIENT_W`/`MIN_CLIENT_H`) are gone: they had no relation to the
+  furniture they were meant to protect, and at 96 px the commands overlapped
+  the title long before the clamp bit.
+- **An application declares the smallest client it can lay out at**, on the
+  existing create request, and the window manager honours the greater of that
+  and the furniture's floor (`Compositor::set_window_min_client_size`,
+  `window_min_outer_size`). Without it an app that clamps its own layout
+  resizes its window back up while the drag keeps shrinking, and the two fight
+  once per pointer sample — the visible "the folder bounces as the window
+  approaches its minimum" defect. The floor bounds a *user* resize only: an
+  application sizing its own window is choosing that size.
+- **A dragged window keeps a grabbable patch of its title bar on screen.**
+  `TitleBarLayout::drag` publishes the span between the clusters — the move
+  surface the bar already laid out — and the move-grab captures it and clamps
+  the origin against `screen_rect`: the whole band vertically, and sideways a
+  patch as wide as the band is tall. Partly off an edge stays normal; wholly
+  unreachable does not. The screen is the whole framebuffer, so a big-desktop
+  multi-monitor layout is one region and a window may straddle two monitors.
+- **Pointer motion over a decoration reaches it.** The router delivered motion
+  to a frame only during a press or grab, so a command button never lit under
+  the pointer — the furniture's hover state existed and was unreachable.
+  `client_pointer_moved` now hands a furniture-bound sample to that window's
+  frame and tells the frame the pointer *left*, so the highlight goes out
+  behind it. The plate it draws is the shared `surface_hover` every widget
+  button uses (lighter on dark, darker on light), so there is one hover
+  definition, not a furniture-specific one. The frame reports its own damage,
+  so a sample crossing the drag region still costs nothing.
 
 ## 3. Definition of done
 

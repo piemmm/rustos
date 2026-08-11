@@ -55,6 +55,7 @@ use crate::chart::Chart;
 use crate::paint::{
     heavy_contrast, inset, paint_icon_slot, paint_measured_track, paint_plate, paint_text_line,
     plate_border, progress_thickness, role_font, signal_color, surface_rect, to_i32, PlateStyle,
+    FULL_COLOUR,
 };
 use crate::state::{MeterValue, PressureKind, PressureState};
 
@@ -326,7 +327,7 @@ impl MetricTile {
             let side = Self::icon_side(primary_h, ch);
             if side > 0 {
                 let tint = signal_color(theme, self.kind);
-                paint_icon_slot(surface, cx, cy, side, kind, tint, None);
+                paint_icon_slot(surface, (cx, cy, side), kind, tint, None, FULL_COLOUR);
                 let gutter = side.saturating_add(gap);
                 primary_x = cx.saturating_add(gutter);
                 primary_w = cw.saturating_sub(gutter);

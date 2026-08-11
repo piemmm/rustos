@@ -74,7 +74,7 @@ mod program {
     };
     use tairix_window::{
         key_input_event, pointer_input_events, Desktop, EventSource, WindowClient, WindowEvents,
-        WindowTransport,
+        WindowSizing, WindowTransport,
     };
 
     /// Exit code when the shared frame region could not be created or
@@ -713,9 +713,15 @@ mod program {
         };
 
         // --- Open the window (resizable: the grid re-lays out to each new
-        // client size) and paint the first frame.
+        // client size, down to the floor the window manager is told to hold)
+        // and paint the first frame.
+        let sizing = WindowSizing {
+            resizable: true,
+            min_width_px: MIN_WIN_WIDTH,
+            min_height_px: MIN_WIN_HEIGHT,
+        };
         let Ok((window, server)) =
-            client.create(grant, event_endpoint, FRAME_COUNT, &mode, TITLE, true)
+            client.create(grant, event_endpoint, FRAME_COUNT, &mode, TITLE, sizing)
         else {
             return fail(EXIT_NO_WINDOW, "desktop session refused the window");
         };
@@ -841,13 +847,17 @@ mod program {
                 // window: re-map the frame region at the new client size
                 // and re-lay everything out. The repaint is the shared one
                 // below, exactly as for any other change.
+                //
+                // The reported size is adopted exactly: the declared minimum
+                // is the window manager's to hold, and an app that pushed
+                // back here would fight the drag frame by frame.
                 WindowEvent::Resized {
                     width_px,
                     height_px,
                     ..
                 } => {
                     resize_window(
-                        mode_for(width_px.max(MIN_WIN_WIDTH), height_px.max(MIN_WIN_HEIGHT)),
+                        mode_for(width_px, height_px),
                         &mut chooser,
                         &mut client,
                         window,

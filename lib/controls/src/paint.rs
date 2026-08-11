@@ -254,7 +254,12 @@ pub(crate) fn icon_slot_side(font: BitmapFont, content_height: u32) -> u32 {
     font.glyph_height().min(content_height)
 }
 
-/// Paint a content icon at `(x, y)` into a `side`-pixel square slot: the
+/// The `saturation` at which [`paint_icon_slot`] draws artwork exactly as its
+/// owner cached it — the identity value of
+/// [`Pixel::desaturate`](tairix_raster::Pixel::desaturate).
+pub(crate) const FULL_COLOUR: u8 = 255;
+
+/// Paint a content icon into the `(x, y, side)` square `slot`: the
 /// owner-supplied `artwork` when present, else the built-in class glyph for
 /// `kind` tinted `tint`.
 ///
@@ -266,19 +271,26 @@ pub(crate) fn icon_slot_side(font: BitmapFont, content_height: u32) -> u32 {
 /// than overflowing the slot from its corner. The built-in glyph rasterises to
 /// fill the slot exactly. Artwork is decoded and rasterised by the owner long
 /// before it reaches here — a control never parses image bytes.
+///
+/// `saturation` reduces the *artwork's* colour on its way in
+/// ([`Pixel::desaturate`](tairix_raster::Pixel::desaturate): [`FULL_COLOUR`]
+/// draws it as cached, `0` draws it grey), which is how a control states that
+/// what the artwork identifies is not the thing in hand — an unfocused
+/// window's title bar. It does not touch the built-in glyph: that is already a
+/// theme tint, with no application colour in it to reduce.
 pub(crate) fn paint_icon_slot(
     surface: &mut Surface,
-    x: u32,
-    y: u32,
-    side: u32,
+    slot: (u32, u32, u32),
     kind: IconKind,
     tint: Color,
     artwork: Option<&Surface>,
+    saturation: u8,
 ) {
+    let (x, y, side) = slot;
     if let Some(art) = artwork {
         let ax = to_i32(x) + (to_i32(side) - to_i32(art.width())) / 2;
         let ay = to_i32(y) + (to_i32(side) - to_i32(art.height())) / 2;
-        surface.blit(ax, ay, art);
+        surface.blit_desaturated(ax, ay, art, saturation);
     } else if let Some(image) = builtin_icon(kind, tint).rasterise(side) {
         surface.blit(to_i32(x), to_i32(y), &image);
     }

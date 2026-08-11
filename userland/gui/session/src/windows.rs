@@ -25,7 +25,7 @@ use tairix_abi::driver::display::{DamageRect, DisplayFormat, DisplayMode};
 use tairix_abi::window_ipc::WindowEvent;
 use tairix_abi::{Errno, ProcId};
 use tairix_icon::{IconKind, IconRequest};
-use tairix_window::PinDecision;
+use tairix_window::{PinDecision, WindowSizing};
 use tairix_wm::{Color, Compositor, Point, Rect, Surface, WindowControlKind, WindowId};
 
 use crate::launch::LaunchTable;
@@ -422,7 +422,7 @@ impl tairix_window::WindowHost for ShellWindowHost<'_> {
         window_id: u64,
         surface: &DisplayMode,
         title: &str,
-        resizable: bool,
+        sizing: WindowSizing,
     ) -> Result<(), Errno> {
         // The engine validated the geometry (non-zero, stride covers a
         // row); a surface too large to allocate is refused, never a
@@ -450,7 +450,13 @@ impl tairix_window::WindowHost for ShellWindowHost<'_> {
         // invisible resize edges — which overlap the client's outer pixels
         // rather than reserving a visible band — are offered.
         self.shell
-            .decorate_window(self.compositor, wm, title, resizable);
+            .decorate_window(self.compositor, wm, title, sizing.resizable);
+        // The smallest client the app said it can lay out at bounds what a
+        // *user* may drag the window down to, so a drag never squeezes the app
+        // past the point where it resizes itself back and the two fight. The
+        // window manager still enforces its own furniture floor over the top.
+        self.compositor
+            .set_window_min_client_size(wm, sizing.min_width_px, sizing.min_height_px);
         // A served window's pixels come from the app, which the session can
         // ask to present them again, so the compositor may give them back
         // under memory pressure. Windows the session paints itself (the
@@ -835,6 +841,14 @@ mod tests {
 
     use crate::tests::window_owner;
 
+    /// A resizable window declaring no minimum client extent of its own, so
+    /// only the window manager's furniture floor bounds a drag.
+    const RESIZABLE: WindowSizing = WindowSizing {
+        resizable: true,
+        min_width_px: 0,
+        min_height_px: 0,
+    };
+
     fn mode(width: u32, height: u32, format: DisplayFormat) -> DisplayMode {
         DisplayMode {
             width_px: width,
@@ -923,7 +937,7 @@ mod tests {
                 7,
                 &mode(64, 48, DisplayFormat::Rgba8888),
                 "files",
-                false,
+                WindowSizing::default(),
             )
             .expect("opens");
             host.window_opened(
@@ -931,7 +945,7 @@ mod tests {
                 9,
                 &mode(64, 48, DisplayFormat::Rgba8888),
                 "terminal",
-                false,
+                WindowSizing::default(),
             )
             .expect("opens");
         }
@@ -973,7 +987,7 @@ mod tests {
                     picker: &mut picker,
                     pins: &mut RefusingPins,
                 };
-                host.window_opened(window_owner(1), 1, &m, "w", false)
+                host.window_opened(window_owner(1), 1, &m, "w", WindowSizing::default())
                     .expect("opens");
                 // One frame with the probe pixel at (2, 1).
                 let mut frame = [0u8; 4 * 4 * 4];
@@ -1022,7 +1036,7 @@ mod tests {
             pins: &mut RefusingPins,
         };
         let m = mode(4, 4, DisplayFormat::Rgba8888);
-        host.window_opened(window_owner(1), 1, &m, "w", false)
+        host.window_opened(window_owner(1), 1, &m, "w", WindowSizing::default())
             .expect("opens");
         let frame = [0u8; 4 * 4 * 4];
         let full = DamageRect {
@@ -1089,7 +1103,7 @@ mod tests {
                 picker: &mut picker,
                 pins: &mut RefusingPins,
             };
-            host.window_opened(window_owner(1), 1, &m, "w", true)
+            host.window_opened(window_owner(1), 1, &m, "w", RESIZABLE)
                 .expect("opens");
             host.window_presented(1, &m, &frame, full)
                 .expect("the first present lands");
@@ -1164,7 +1178,7 @@ mod tests {
                 picker: &mut picker,
                 pins: &mut RefusingPins,
             };
-            host.window_opened(window_owner(1), 1, &m, "w", false)
+            host.window_opened(window_owner(1), 1, &m, "w", WindowSizing::default())
                 .expect("opens");
             host.window_presented(1, &m, &frame, full)
                 .expect("first present lands");
@@ -1213,7 +1227,7 @@ mod tests {
                 picker: &mut picker,
                 pins: &mut RefusingPins,
             };
-            host.window_opened(window_owner(1), 1, &m, "w", false)
+            host.window_opened(window_owner(1), 1, &m, "w", WindowSizing::default())
                 .expect("opens");
             host.window_presented(1, &m, &frame, full)
                 .expect("first present lands");
@@ -1261,7 +1275,7 @@ mod tests {
                 picker: &mut picker,
                 pins: &mut RefusingPins,
             };
-            host.window_opened(window_owner(1), 1, &m, "w", false)
+            host.window_opened(window_owner(1), 1, &m, "w", WindowSizing::default())
                 .expect("opens");
             assert_eq!(
                 host.window_presented(
@@ -1306,7 +1320,7 @@ mod tests {
             pins: &mut RefusingPins,
         };
         let m = mode(8, 8, DisplayFormat::Rgba8888);
-        host.window_opened(window_owner(1), 1, &m, "w", false)
+        host.window_opened(window_owner(1), 1, &m, "w", WindowSizing::default())
             .expect("opens");
         let wm = host.windows.records.get(&1).expect("live").wm;
         host.window_closed(1);
@@ -1335,7 +1349,7 @@ mod tests {
                 3,
                 &mode(120, 80, DisplayFormat::Rgba8888),
                 "Files",
-                false,
+                WindowSizing::default(),
             )
             .expect("opens");
             host.windows.records.get(&3).expect("live").wm
@@ -1372,7 +1386,7 @@ mod tests {
                 picker: &mut picker,
                 pins: &mut RefusingPins,
             };
-            open_one_sized(&mut host, 3, true)
+            open_one_sized(&mut host, 3, RESIZABLE)
         };
         // The app asked to be resizable, so the window manager decorates it
         // with a resizable frame — its invisible resize edges and a live size
@@ -1427,7 +1441,7 @@ mod tests {
                 7,
                 &mode(480, 320, DisplayFormat::Rgba8888),
                 "Files",
-                false,
+                WindowSizing::default(),
             )
             .expect("opens");
             host.windows.records.get(&7).expect("live").wm
@@ -1590,20 +1604,68 @@ mod tests {
 
     /// Open one served window and return its window-channel id → compositor id.
     fn open_one(host: &mut ShellWindowHost<'_>, window_id: u64) -> WindowId {
-        open_one_sized(host, window_id, false)
+        open_one_sized(host, window_id, WindowSizing::default())
     }
 
-    /// Open one served window with an explicit `resizable` request.
-    fn open_one_sized(host: &mut ShellWindowHost<'_>, window_id: u64, resizable: bool) -> WindowId {
+    /// Open one served window with an explicit sizing contract.
+    fn open_one_sized(
+        host: &mut ShellWindowHost<'_>,
+        window_id: u64,
+        sizing: WindowSizing,
+    ) -> WindowId {
         host.window_opened(
             window_owner(1),
             window_id,
             &mode(120, 80, DisplayFormat::Rgba8888),
             "app",
-            resizable,
+            sizing,
         )
         .expect("opens");
         host.windows.records.get(&window_id).expect("live").wm
+    }
+
+    #[test]
+    fn window_opened_gives_the_window_manager_the_declared_minimum() {
+        // What the app said it needs, honoured by whoever drags the window —
+        // never by the app clamping a size it was granted and resizing back,
+        // which fights the drag once per pointer sample.
+        let (mut shell, mut compositor) = desktop();
+        let mut windows = SessionWindows::new();
+        let mut picker = RecordingSlot::default();
+        let (declared, bare) = {
+            let mut host = ShellWindowHost {
+                shell: &mut shell,
+                compositor: &mut compositor,
+                windows: &mut windows,
+                picker: &mut picker,
+                pins: &mut RefusingPins,
+            };
+            (
+                open_one_sized(
+                    &mut host,
+                    3,
+                    WindowSizing {
+                        resizable: true,
+                        min_width_px: 900,
+                        min_height_px: 700,
+                    },
+                ),
+                open_one_sized(&mut host, 4, RESIZABLE),
+            )
+        };
+        let floor = compositor
+            .window_min_outer_size(declared)
+            .expect("decorated");
+        assert!(
+            floor.0 > 900 && floor.1 > 700,
+            "the floor holds the declared client and the furniture around it, not {floor:?}"
+        );
+        assert!(
+            compositor
+                .window_min_outer_size(bare)
+                .is_some_and(|bare| bare.0 < floor.0 && bare.1 < floor.1),
+            "a window declaring no minimum of its own is bounded by the furniture alone"
+        );
     }
 
     /// A resizable, active decoration furniture for a maximizable test window.
@@ -1980,7 +2042,7 @@ mod tests {
             pins: &mut RefusingPins,
         };
         let m = mode(8, 8, DisplayFormat::Rgba8888);
-        host.window_opened(window_owner(1), 1, &m, "w", false)
+        host.window_opened(window_owner(1), 1, &m, "w", WindowSizing::default())
             .expect("opens");
         host.pick_requested(1).expect("slot accepts");
         host.window_closed(1);
@@ -2016,9 +2078,9 @@ mod tests {
                 pins: &mut RefusingPins,
             };
             (
-                open_one_sized(&mut host, 1, false),
-                open_one_sized(&mut host, 2, false),
-                open_one_sized(&mut host, 3, false),
+                open_one_sized(&mut host, 1, WindowSizing::default()),
+                open_one_sized(&mut host, 2, WindowSizing::default()),
+                open_one_sized(&mut host, 3, WindowSizing::default()),
             )
         };
         assert!(compositor.set_visible(hidden, false));

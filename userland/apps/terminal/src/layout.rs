@@ -125,13 +125,18 @@ pub fn fit_font_size(preferred: u16, screen: (u32, u32), theme: &Theme, scale: S
 /// window manager sizes the frame from the client it is given, so a client
 /// that is an exact multiple of the cell leaves nothing over.
 ///
-/// Snapping is idempotent — an already-snapped size is returned unchanged —
-/// and never returns zero, so re-mapping cannot oscillate and a window dragged
-/// smaller than one cell still holds one.
+/// Snapping only ever takes pixels *away*, and is idempotent, so re-mapping
+/// cannot oscillate. Never asking for more than it was granted is what keeps
+/// the terminal from fighting a resize drag: a client too small for a whole
+/// cell keeps the size it was given and draws its one cell clipped, rather
+/// than resizing the window back up under the pointer — which matters after
+/// the profile's text size grows, when the cell can outgrow a window the user
+/// already had. Never returns zero, so the frame it re-maps is allocatable.
 #[must_use]
 pub fn snap_to_cells(width_px: u32, height_px: u32, font: BitmapFont) -> (u32, u32) {
     let (cols, rows) = grid_dims(width_px, height_px, font);
-    grid_size(cols, rows, font)
+    let (whole_w, whole_h) = grid_size(cols, rows, font);
+    (whole_w.min(width_px).max(1), whole_h.min(height_px).max(1))
 }
 
 /// The client size, in physical pixels, a terminal drawn in `font` opens at

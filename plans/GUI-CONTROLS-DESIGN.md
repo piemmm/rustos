@@ -360,7 +360,7 @@ pub struct Theme {
 | Density | Compact, normal, comfortable. |
 | Contrast | Normal, high contrast, monochrome-safe signal shape fallback. |
 
-Window-command placement and order are **not** themeable: the two corner clusters and the centred identity group of §11.18 are the one arrangement, so a window read on one machine is read the same way on the next. The visible glyph, tooltip, accessibility name, and keyboard command for each control identify `Close`, `Minimize`, `PutToBack`, or the next `SizeToggle` action unambiguously.
+Window-command placement and order are **not** themeable: the two corner clusters and the left-justified identity group of §11.18 are the one arrangement, so a window read on one machine is read the same way on the next. The visible glyph, tooltip, accessibility name, and keyboard command for each control identify `Close`, `Minimize`, `PutToBack`, or the next `SizeToggle` action unambiguously.
 
 ### Theme variants
 
@@ -436,7 +436,7 @@ A top-level window uses a second fixed composition order owned by `userland/gui/
 1. Paint the window shadow or occlusion region.
 2. Paint the frame plate and Frame Rim.
 3. Blit the application surface into the client clip only.
-4. Paint the title bar, and the centred application identity glyph and title text.
+4. Paint the title bar, and the left-justified application identity glyph and title text.
 5. Paint the two corner clusters of window-control buttons and their independent hover, press, focus, and disabled states.
 6. Paint vertical and horizontal scrollbars when the root viewport exposes them.
 7. Paint the scroll corner or ResizeGrabber above the scrollbar junction.
@@ -565,12 +565,13 @@ role; the shape-coded beads, presence marks, and the focus ring are unchanged
 because none of them relies on an edge in the first place.
 
 The icon strip — launchers, pinned shortcuts, running-task buttons, and the
-status capsule — is bar-seated. A toolbar inside a window is not: it sits on a
-panel and keeps its plates.
+status capsule — is bar-seated, and so are the window commands in a title bar
+(§11.18). A toolbar inside a window is not: it sits on a panel and keeps its
+plates.
 
 ### Window furniture anatomy
 
-The title bar's arrangement is fixed, not a theme value (§6, §11.18): a command cluster in each corner, the identity group centred between them.
+The title bar's arrangement is fixed, not a theme value (§6, §11.18): a command cluster in each corner, the identity group left-justified in the span between them.
 
 ```text
 WindowFrame
@@ -579,7 +580,7 @@ WindowFrame
     LeadingCluster
       PutToBack
       Close
-    IdentityGroup (centred; the band drags from it like any non-control pixel)
+    IdentityGroup (left-justified; the band drags from it like any non-control pixel)
       ApplicationGlyph (optional)
       TitleText
     TrailingCluster
@@ -839,8 +840,9 @@ A `WindowFrame` is the window-manager-owned boundary around one client viewport.
 The title bar combines application identity, title text, a stable drag region, and the window commands.
 
 - The four commands sit in **two corner clusters**, not one group: `PutToBack` then `Close` inset into the leading corner, `Minimize` then `SizeToggle` inset into the trailing one. That left-to-right order is also the keyboard traversal order, so an arrow key moves the focus ring the way the eye reads. Placement and order are fixed, never a theme value (§6).
-- The identity icon and title text are one group, **centred in the span the clusters leave between them**. Both clusters seat the same number of equally sized controls, so that span is itself centred in the band and the group reads centred in the window.
-- The title text uses a single line. A group too wide for the span stops being centred and pins to the span's leading edge, keeping the icon and the start of the title in place while the tail truncates with an ellipsis on the right; it never overlaps a control.
+- The identity icon and title text are one group, **left-justified in the span the clusters leave between them**: the icon one gap past the leading cluster, the text after it. The group therefore starts in the same place whatever the title says and however wide the window is, so the eye finds it without hunting.
+- The title text uses a single line. A group too wide for the span keeps its leading edge and truncates the tail with an ellipsis on the right; it never overlaps a control.
+- The identity icon is drawn **desaturated by activation**: it keeps nearly all its colour on the active frame and none of it on an inactive one, so an unfocused window's icon reads as quiet as its muted title. One shared saturation reduction does it as the artwork lands, so the owner still caches one full-colour icon per (bundle, pixel side).
 - Everything in the band that is not a control drags the window — the identity slot and the title text included — so the drag region does not have to be reserved against the text.
 - Pressing an inactive title bar activates the window. Movement beyond the theme drag threshold begins a move and captures the pointer until release or cancel.
 - A title-bar drag follows the pointer without easing. Snap previews may appear as container-owned overlays without moving the pointer target.
@@ -853,11 +855,13 @@ The title bar combines application identity, title text, a stable drag region, a
 
 The close, minimize, put-to-back, and size-toggle controls are compact `WindowControl` instances built from the shared `IconButton` behavior.
 
+A window command is **bar-seated** (§6): no perimeter of its own in any state, and no plate at all while it rests. An edge on a command would read as a line drawn round the window's corner rather than as feedback on a button.
+
 | State | Rendering and behavior |
 |---|---|
-| Idle, active frame | Quiet plate, readable glyph, and frame-consistent rim. |
+| Idle, active frame | No plate: the readable glyph alone on the bar's own surface. |
 | Idle, inactive frame | Lower contrast than the active frame while remaining legible. |
-| Hover | Glyph and local rim brighten without changing title-bar geometry. |
+| Hover | The plate lifts to the shared hover wash — lighter on a dark theme, darker on a light one, by the amount every other control moves — without changing title-bar geometry. |
 | Pressed | Firm compression and captured press state until release or cancel. |
 | Keyboard focus | Visible focus ring distinct from hover and window activation. |
 | Disabled | Muted plate and glyph, no command dispatch, and an inspectable reason. |
@@ -939,21 +943,18 @@ Notifications use cards with semantic beads. They should remain compact and acti
 
 ### 11.26 TaskbarItem
 
-Taskbar items combine application identity (icon and label), activity,
-attention, and window-visibility state on one Alloy Plate. They are **bar
-seated** (§10): an item wears no Signal Rim, and rests with no plate at all, so
-a strip of pins and tasks reads as one bar and every state is stated inside the
-slot.
+Taskbar items combine application identity (the icon), activity, attention, and
+window-visibility state on one Alloy Plate. They are **bar seated** (§10): an
+item wears no Signal Rim, and rests with no plate at all, so a strip of pins and
+tasks reads as one bar and every state is stated inside the slot.
 
 #### Presentation
 
-A taskbar item supports two presentations ([`TaskbarPresentation`]):
-
-- **IconAndLabel** — leading icon beside a truncated label. Used for wide
-  running-task buttons.
-- **Icon** — a centred icon filling the plate. Used for compact pinned-shortcut
-  slots. The label stays part of the model for context surfaces (tooltips,
-  menus) to read.
+Every item draws one centred icon filling the plate (`icon_content_side`), so a
+running task and a pinned shortcut are the same square slot and the bar reads as
+one strip of equal icons rather than a row of captions. The item carries no text
+at all: a window's title lives in the bar's own model (`TaskEntry::title`), which
+is what a context surface — a menu, a tooltip — reads.
 
 #### Visibility states
 
@@ -1391,8 +1392,8 @@ Labels, shortcuts, values, and icons keep their position while rims, rails, bead
 
 - Title-bar height, frame inset, control extent, scrollbar breadth, corner cell, and resize hit slop are logical theme metrics.
 - Active, inactive, hover, attention, and maximized states do not change the client origin or frame extents.
-- The work-area clamp always leaves a usable title-bar region reachable after display, scale, or taskbar changes.
-- When space is constrained, title text truncates first; every window-command hit target stays usable, and the band still drags wherever it is not a control.
+- The work-area clamp always leaves a usable title-bar region reachable after display, scale, or taskbar changes. A move-grab enforces it against the screen: the span between the two command clusters (`TitleBarLayout::drag`, the move surface) keeps its whole height on screen and at least a patch as wide as the band is tall, so a window may hang off any edge but never past having something to drag it back by. On a single big desktop spanning several monitors the screen is one region, so a window may straddle two of them.
+- When space is constrained, title text truncates first; every window-command hit target stays usable, and the band still drags wherever it is not a control. The floor that guarantees it is `TitleBar::min_band_width` — both corner clusters, their insets, and one control extent of drag surface between them — which `WindowFrame::min_outer_size` turns into the smallest outer rectangle a window may be dragged to (that band plus the rim, and the furniture bands plus one standard control of client in height). A window's own application may declare a larger minimum client extent; the window manager honours whichever is greater, so a resize can never take a window below what either the furniture or the application needs.
 - Overlay scrollbar hit regions must not cover title-bar controls, the resize grabber, or unrelated client actions. Reserved-gutter scrollbars must not resize the client in response to hover alone.
 
 ---
@@ -1522,12 +1523,12 @@ lower heat seam + recovery bead
 ### Active window furniture
 
 ```text
-+--[back][close]---- Switchboard ----[min][restore]--+
++--[back][close] Switchboard --------[min][restore]--+
 | client viewport                                  |^|
 |                                                  |#|
 |<----------- horizontal thumb ----------->| grip |v|
 +---------------------------------------------------+
-active Frame Rim + centred title + separate hit targets
+active Frame Rim + left-justified title + separate hit targets
 ```
 
 ### Inactive window furniture

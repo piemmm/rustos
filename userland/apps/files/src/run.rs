@@ -125,7 +125,8 @@ mod program {
     use tairix_sandbox::{ParserSandbox, ServeEnd};
     use tairix_theme::{Theme, ThemeRegistry};
     use tairix_window::{
-        pointer_input_events, Desktop, EventSource, WindowClient, WindowEvents, WindowTransport,
+        pointer_input_events, Desktop, EventSource, WindowClient, WindowEvents, WindowSizing,
+        WindowTransport,
     };
 
     use crate::command::{self, unlistable_reason, Command, UsageError, USAGE};
@@ -191,21 +192,20 @@ mod program {
     /// reserved "unchanged" sentinel).
     const OWNER_ID_HINT: &str = "Enter a valid numeric id.";
 
-    /// The smallest client size the window is allowed to shrink to, in pixels.
-    /// The window manager offers a resize grabber and a maximize/restore
-    /// toggle; a hostile or fat-fingered drag to nothing is clamped to a size
-    /// that still shows the chrome rather than a zero-area surface that could
-    /// never be allocated (fail closed, §5.4). The content clips gracefully
-    /// below its natural size; it is never a panic.
+    /// The smallest client width, in pixels, this window declares at create:
+    /// the floor the window manager holds an interactive resize to, so a
+    /// drag toward nothing stops at a window that still shows its chrome.
+    /// The app never re-imposes it — it lays out at whatever size it is
+    /// given, and the content clips gracefully below its natural size.
     const MIN_WIN_WIDTH: u32 = 240;
 
-    /// The smallest client height the window is allowed to shrink to (see
+    /// The smallest client height the window declares (see
     /// [`MIN_WIN_WIDTH`]).
     const MIN_WIN_HEIGHT: u32 = 160;
 
     /// The RGBA8888 window surface `width_px` × `height_px`, its stride the
     /// tightly-packed four-bytes-per-pixel row. One definition so the initial
-    /// window and every resize build the surface identically (§2.2).
+    /// window and every resize build the surface identically.
     fn mode_for(width_px: u32, height_px: u32) -> DisplayMode {
         DisplayMode {
             width_px,
@@ -4048,7 +4048,11 @@ mod program {
             FRAME_COUNT,
             &mode,
             &title,
-            WIN_RESIZABLE,
+            WindowSizing {
+                resizable: WIN_RESIZABLE,
+                min_width_px: MIN_WIN_WIDTH,
+                min_height_px: MIN_WIN_HEIGHT,
+            },
         ) else {
             return fail(EXIT_NO_WINDOW, "desktop session refused the window");
         };
@@ -4274,13 +4278,17 @@ mod program {
             // listing fills the new window; the browser lays out to the new
             // viewport automatically. A refused or unallocatable resize keeps
             // the current window rather than failing the app (fail closed).
+            //
+            // The reported size is adopted exactly: the declared minimum is
+            // the window manager's to hold, and an app that pushed back here
+            // would fight the drag frame by frame.
             if let WindowEvent::Resized {
                 width_px,
                 height_px,
                 ..
             } = event
             {
-                let new_mode = mode_for(width_px.max(MIN_WIN_WIDTH), height_px.max(MIN_WIN_HEIGHT));
+                let new_mode = mode_for(width_px, height_px);
                 if let Some((new_base, new_len)) =
                     resize_frames(&mut client, window, region_base, region_len, &new_mode)
                 {

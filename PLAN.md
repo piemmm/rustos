@@ -3960,13 +3960,15 @@ per-app recipes (§2.2).
   `TaskbarItem` and `TraySignal` live only on the taskbar and are **bar-seated**
   (`PlateSeating::Bar`, the one shared seating rule in `paint::FrameColors`):
   they wear no rim in any state and no plate at all while resting, so the icon
-  strip reads as one bar; `IconButton` carries the choice (`seated`) because it
-  is the only family that appears on both a panel and the bar.
+  strip reads as one bar; the title bar's `WindowControl` commands take the same
+  seating, so an accent edge never reads as a line round the window's corner;
+  `IconButton` carries the choice (`seated`) because it is the only family that
+  appears on both a panel and the bar.
   `Notification` composes a `Card` plus a source attribution: informational
   (quiet rim), background job (Heat Seam), warning (warning rail via the shared
   `dominant_color`), recovery (bead), and denied (Authority Mark beside the
   source) all read from its composed state; its actions are footer `Button`s
-  (typed `NotificationAction`). `TaskbarItem` combines an icon+label identity
+  (typed `NotificationAction`). `TaskbarItem` combines an icon-only identity
   with a `TaskVisibility` (Closed/Running/Active/Minimized) window state, stated
   by the lower **presence mark** — full-width accent seam for the active window,
   a short muted mark for one merely running, nothing for a closed pin; minimized

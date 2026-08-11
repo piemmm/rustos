@@ -26,7 +26,7 @@ use crate::client::{
 };
 use crate::desktop::Desktop;
 use crate::server::{
-    CallerIdentity, EventSink, PinDecision, PopupSpec, WindowHost, WindowServer,
+    CallerIdentity, EventSink, PinDecision, PopupSpec, WindowHost, WindowServer, WindowSizing,
     WINDOWS_PER_CLIENT_MAX, WINDOW_REPLY_MAX,
 };
 
@@ -122,7 +122,7 @@ impl CallerIdentity for MockIdentity {
 /// A host recording every bridge call, optionally refusing opens, picker
 /// requests, pins, and drag offers.
 struct RecordingHost {
-    opened: Vec<(ProcId, u64, DisplayMode, String, bool)>,
+    opened: Vec<(ProcId, u64, DisplayMode, String, WindowSizing)>,
     popups: Vec<(u64, u64, i32, i32, DisplayMode)>,
     presented: Vec<(u64, Vec<u8>, DamageRect)>,
     resized: Vec<(u64, DisplayMode)>,
@@ -189,13 +189,13 @@ impl WindowHost for RecordingHost {
         window_id: u64,
         surface: &DisplayMode,
         title: &str,
-        resizable: bool,
+        sizing: WindowSizing,
     ) -> Result<(), Errno> {
         if self.refuse_open {
             return Err(Errno::WouldBlock);
         }
         self.opened
-            .push((owner, window_id, *surface, String::from(title), resizable));
+            .push((owner, window_id, *surface, String::from(title), sizing));
         Ok(())
     }
 
@@ -288,7 +288,7 @@ impl WindowHost for MinimalHost {
         _window_id: u64,
         _surface: &DisplayMode,
         _title: &str,
-        _resizable: bool,
+        _sizing: WindowSizing,
     ) -> Result<(), Errno> {
         Ok(())
     }
@@ -414,7 +414,14 @@ fn create_id(
     title: &str,
 ) -> Result<u64, Errno> {
     client
-        .create(shm, events, frames, &SURFACE, title, false)
+        .create(
+            shm,
+            events,
+            frames,
+            &SURFACE,
+            title,
+            WindowSizing::default(),
+        )
         .map(|(id, _)| id)
 }
 
@@ -564,7 +571,7 @@ fn create_present_close_round_trips_through_the_loopback() {
     let mut client = WindowClient::new(Rc::clone(&loopback));
 
     let (window, server) = client
-        .create(7, EVENTS_A, 2, &SURFACE, "Files", false)
+        .create(7, EVENTS_A, 2, &SURFACE, "Files", WindowSizing::default())
         .expect("a valid create succeeds");
     assert_eq!(window, 1);
     assert_eq!(
@@ -576,7 +583,13 @@ fn create_present_close_round_trips_through_the_loopback() {
         assert_eq!(inner.server.window_count(), 1);
         assert_eq!(
             inner.host.opened,
-            alloc::vec![(proc_id(0xA1), 1, SURFACE, String::from("Files"), false)],
+            alloc::vec![(
+                proc_id(0xA1),
+                1,
+                SURFACE,
+                String::from("Files"),
+                WindowSizing::default()
+            )],
             "the host is told the kernel-attested owner, not anything the client said"
         );
     }
@@ -611,25 +624,68 @@ fn create_present_close_round_trips_through_the_loopback() {
 }
 
 #[test]
-fn create_forwards_the_resizable_flag_to_the_host() {
+fn create_forwards_the_sizing_contract_to_the_host() {
     let loopback = Loopback::with_regions(&[(7, FRAME_LEN), (8, FRAME_LEN)]);
     let mut client = WindowClient::new(Rc::clone(&loopback));
+    let floor = WindowSizing {
+        resizable: true,
+        min_width_px: 240,
+        min_height_px: 160,
+    };
 
     client
-        .create(7, EVENTS_A, 1, &SURFACE, "fixed", false)
+        .create(7, EVENTS_A, 1, &SURFACE, "fixed", WindowSizing::default())
         .expect("fixed window");
     client
-        .create(8, EVENTS_A, 1, &SURFACE, "resizable", true)
+        .create(8, EVENTS_A, 1, &SURFACE, "resizable", floor)
         .expect("resizable window");
 
     let inner = loopback.borrow();
-    let flags: Vec<bool> = inner
+    let sizings: Vec<WindowSizing> = inner
         .host
         .opened
         .iter()
-        .map(|(_, _, _, _, resizable)| *resizable)
+        .map(|(_, _, _, _, sizing)| *sizing)
         .collect();
-    assert_eq!(flags, alloc::vec![false, true]);
+    // The host is the enforcer, so it receives the app's floor verbatim:
+    // nothing between the two rounds, clamps, or drops it.
+    assert_eq!(sizings, alloc::vec![WindowSizing::default(), floor]);
+}
+
+#[test]
+fn a_below_minimum_resize_is_not_answered_with_a_resize_of_the_client_s_own() {
+    // The size is negotiated once, at create: the app declares its floor
+    // and the window manager enforces it. A reported size below that floor
+    // therefore leaves the wire silent — an app that answered it by
+    // resizing itself back up would fight the drag, frame by frame, which
+    // is the flicker this negotiation removes.
+    let loopback = Loopback::with_regions(&[(7, FRAME_LEN)]);
+    let mut client = WindowClient::new(Rc::clone(&loopback));
+    let floor = WindowSizing {
+        resizable: true,
+        min_width_px: 240,
+        min_height_px: 160,
+    };
+    let (window, _) = client
+        .create(7, EVENTS_A, 1, &SURFACE, "Files", floor)
+        .expect("create");
+
+    let under = WindowEvent::Resized {
+        window_id: window,
+        width_px: 1,
+        height_px: 1,
+    };
+    let mut queue = VecDeque::new();
+    queue.push_back(under.to_le_bytes());
+    let mut waiter = WindowEvents::new(QueueSource { queue });
+    assert_eq!(waiter.wait(&mut client), Ok(under));
+
+    let inner = loopback.borrow();
+    assert!(
+        inner.host.resized.is_empty(),
+        "the reported size is laid out at, never bounced back as a resize"
+    );
+    assert_eq!(inner.server.window_count(), 1);
 }
 
 #[test]
@@ -805,13 +861,13 @@ fn create_is_refused_fail_closed() {
     // A kernel-domain caller is not a window client.
     loopback.borrow_mut().ticket = TICKET_KERNEL;
     assert_eq!(
-        client.create(7, EVENTS_A, 1, &SURFACE, "x", false),
+        client.create(7, EVENTS_A, 1, &SURFACE, "x", WindowSizing::default()),
         Err(Errno::PermissionDenied)
     );
     // A caller the kernel cannot attest.
     loopback.borrow_mut().ticket = TICKET_UNATTESTED;
     assert_eq!(
-        client.create(7, EVENTS_A, 1, &SURFACE, "x", false),
+        client.create(7, EVENTS_A, 1, &SURFACE, "x", WindowSizing::default()),
         Err(Errno::NotFound)
     );
     // Nothing leaked out of any refusal.
@@ -844,7 +900,7 @@ fn a_refused_host_open_commits_nothing() {
     let mut client = WindowClient::new(Rc::clone(&loopback));
 
     assert_eq!(
-        client.create(7, EVENTS_A, 1, &SURFACE, "x", false),
+        client.create(7, EVENTS_A, 1, &SURFACE, "x", WindowSizing::default()),
         Err(Errno::WouldBlock)
     );
     loopback.borrow_mut().host.refuse_open = false;
@@ -924,7 +980,13 @@ fn create_popup_round_trips_and_present_and_close_act_on_its_own_id() {
         );
         assert_eq!(
             inner.host.opened,
-            alloc::vec![(proc_id(0xA1), parent, SURFACE, String::from("Files"), false)]
+            alloc::vec![(
+                proc_id(0xA1),
+                parent,
+                SURFACE,
+                String::from("Files"),
+                WindowSizing::default()
+            )]
         );
     }
 
@@ -1528,6 +1590,8 @@ fn pin_and_drag_default_to_fail_closed_refusal() {
         format: SURFACE.format,
         title: tairix_abi::window_ipc::WindowTitle::new("a").expect("valid title"),
         resizable: false,
+        min_width_px: 0,
+        min_height_px: 0,
     }
     .to_le_bytes();
     let len = server.serve(&mut host, &mut identity, TICKET_A, &create, &mut reply);

@@ -91,7 +91,7 @@ mod program {
         WIN_WIDTH,
     };
     use tairix_theme::{TextRole, Theme, ThemeRegistry};
-    use tairix_window::{Desktop, WindowClient, WindowTransport};
+    use tairix_window::{Desktop, WindowClient, WindowSizing, WindowTransport};
 
     /// Frames in the shared region. The window protocol serialises a
     /// present (the app is parked in the call while the session reads), so
@@ -364,7 +364,7 @@ mod program {
             let Some(window) = self.window.as_mut() else {
                 return;
             };
-            let mode = mode_for(width_px.max(MIN_WIN_WIDTH), height_px.max(MIN_WIN_HEIGHT));
+            let mode = mode_for(width_px, height_px);
             if mode.width_px == window.mode.width_px && mode.height_px == window.mode.height_px {
                 return;
             }
@@ -406,7 +406,11 @@ mod program {
                 FRAME_COUNT,
                 &mode,
                 PANEL_TITLE,
-                WIN_RESIZABLE,
+                WindowSizing {
+                    resizable: WIN_RESIZABLE,
+                    min_width_px: MIN_WIN_WIDTH,
+                    min_height_px: MIN_WIN_HEIGHT,
+                },
             );
             let (id, server) = match created {
                 Ok(pair) => pair,

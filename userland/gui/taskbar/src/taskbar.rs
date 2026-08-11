@@ -20,8 +20,7 @@ use alloc::vec::Vec;
 
 use tairix_abi::switchboard_ipc::TraySummary;
 use tairix_controls::{
-    ControlRole, IconButton, PlateSeating, PointerState, TaskbarItem, TaskbarPresentation,
-    TraySignalAction,
+    ControlRole, IconButton, PlateSeating, PointerState, TaskbarItem, TraySignalAction,
 };
 use tairix_geometry::{Point, Rect, Region, Scale};
 use tairix_icon::IconKind;
@@ -66,7 +65,9 @@ pub struct TaskbarConfig {
     pub launcher_extent: u32,
     /// Main-axis length of each pinned-shortcut slot.
     pub pin_extent: u32,
-    /// Main-axis length of each task slot.
+    /// Main-axis length of each task slot. An icon-only slot takes a pin's
+    /// extent, so running applications and pinned shortcuts read as one strip
+    /// of equal icons rather than a row of captions.
     pub task_extent: u32,
     /// Main-axis length of each notification icon.
     pub icon_extent: u32,
@@ -111,7 +112,7 @@ impl TaskbarConfig {
             thickness: 40,
             launcher_extent: 48,
             pin_extent: 48,
-            task_extent: 160,
+            task_extent: 48,
             icon_extent: 24,
             clock_extent: 80,
             switch_extent: 44,
@@ -552,7 +553,7 @@ impl Taskbar {
     pub fn layout(&self, scale: Scale) -> BarLayout {
         BarLayout::compute(
             &self.config,
-            self.theme.metrics().taskbar_corner_radius,
+            &self.theme,
             scale,
             self.pins.len(),
             self.tasks.len(),
@@ -650,28 +651,37 @@ impl Taskbar {
         )
     }
 
+    /// The pixel side an application slot's icon paints at in a slot of
+    /// `logical_extent`, asked of the control that will paint it so the
+    /// answer can never drift from the drawn geometry.
+    #[must_use]
+    fn slot_icon_side(&self, logical_extent: u32, scale: Scale) -> u32 {
+        let scaled = self.config.scaled(scale);
+        let bounds = Rect::new(
+            0,
+            0,
+            scale.scale_length(logical_extent).max(1),
+            scaled.thickness.max(1),
+        );
+        TaskbarItem::new(IconKind::AppBundle).icon_side(bounds, scale, &self.theme)
+    }
+
     /// The pixel side a pinned shortcut's icon paints at, at the desktop
     /// `scale` — the session rasterises per-application artwork at exactly
     /// this size, through the same control geometry the renderer paints
     /// with, so the artwork and the slot can never disagree.
     #[must_use]
     pub fn pin_icon_side(&self, scale: Scale) -> u32 {
-        let scaled = self.config.scaled(scale);
-        let bounds = Rect::new(0, 0, scaled.pin_extent.max(1), scaled.thickness.max(1));
-        TaskbarItem::new("", IconKind::AppBundle)
-            .with_presentation(TaskbarPresentation::Icon)
-            .icon_side(bounds, scale, &self.theme)
+        self.slot_icon_side(self.config.pin_extent, scale)
     }
 
     /// The pixel side a running task's icon paints at, at the desktop
     /// `scale` — the counterpart of [`pin_icon_side`](Self::pin_icon_side)
-    /// for the task list, and a different size because a task slot shows its
-    /// icon beside a label rather than filling the plate with it.
+    /// for the task list. Both slots are icon-only, so the two agree wherever
+    /// the configured extents do.
     #[must_use]
     pub fn task_icon_side(&self, scale: Scale) -> u32 {
-        let scaled = self.config.scaled(scale);
-        let bounds = Rect::new(0, 0, scaled.task_extent.max(1), scaled.thickness.max(1));
-        TaskbarItem::new("", IconKind::AppBundle).icon_side(bounds, scale, &self.theme)
+        self.slot_icon_side(self.config.task_extent, scale)
     }
 
     /// Open the context menu for the pin at `index`, anchored at its slot.

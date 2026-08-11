@@ -39,8 +39,8 @@ use crate::paint::{
     role_font, surface_rect, to_i32, PlateStyle,
 };
 use crate::state::{
-    ControlDisposition, ControlRole, ControlState, PointerState, RenderInvariant, SizeAction,
-    WindowActivationState, WindowControlKind, WindowFurnitureState,
+    ControlDisposition, ControlRole, ControlState, PlateSeating, PointerState, RenderInvariant,
+    SizeAction, WindowActivationState, WindowControlKind, WindowFurnitureState,
 };
 
 // --- command glyphs -------------------------------------------------------
@@ -384,21 +384,21 @@ impl WindowControl {
         let awake = hovered || pressed || focused;
         let frame = resolve_frame(theme, ControlRole::Neutral, self.state);
 
-        // The plate is drawn only when the control is awake (hover/focus/press)
-        // or non-interactive (disabled/denied/failed/pending); an idle control
-        // on the title bar shows just its glyph on the bar's own surface.
-        let show_plate = !interactive || awake;
         let radius = scale.scale_length(theme.metrics().control_corner_radius);
         let border = plate_border(theme, scale);
-        if show_plate {
+        // A command is seated in the title bar, so it states hover, press, and
+        // focus on its plate alone and wears nothing at all while it rests: an
+        // edge of its own would read as a line drawn round the window's corner
+        // rather than as feedback on a button.
+        if let Some((plate, rim)) = frame.face(PlateSeating::Bar) {
             paint_plate(
                 surface,
                 (x, y, w, h),
                 &PlateStyle {
                     radius,
                     border,
-                    plate: frame.plate,
-                    rim: frame.rim,
+                    plate,
+                    rim,
                     focused,
                     ring: Color::from(palette.rim_active),
                 },
@@ -545,10 +545,41 @@ const CONTROL_ORDER: [WindowControlKind; 4] = [
 
 /// How many of [`CONTROL_ORDER`] each corner cluster seats.
 ///
-/// Both clusters hold this many equally sized controls, so the span they
-/// leave between them is itself centred in the band — which is why centring
-/// the identity group in that span reads as centred in the window.
+/// Both clusters hold this many equally sized controls, so the span they leave
+/// between them is the same whichever end of the bar it is measured from.
 const CLUSTER_COUNT: u32 = 2;
+
+/// The scaled lengths a title bar's command clusters are built from, so
+/// laying a bar out and asking for the narrowest band it fits in read the
+/// same arithmetic.
+struct ClusterMetrics {
+    /// One control's square extent.
+    extent: u32,
+    /// The gap between adjacent controls, and between a cluster and the
+    /// identity span beside it.
+    gap: u32,
+    /// The inset from the band edge to the outermost control.
+    inset: u32,
+    /// One cluster's total width: [`CLUSTER_COUNT`] controls and the gaps
+    /// between them.
+    cluster_w: u32,
+}
+
+impl ClusterMetrics {
+    fn of(scale: Scale, theme: &Theme) -> Self {
+        let metrics = theme.metrics();
+        let extent = scale.scale_length(metrics.window_control_extent).max(1);
+        let gap = scale.scale_length(metrics.control_gap);
+        Self {
+            extent,
+            gap,
+            inset: scale.scale_length(metrics.control_inset),
+            cluster_w: extent
+                .saturating_mul(CLUSTER_COUNT)
+                .saturating_add(gap.saturating_mul(CLUSTER_COUNT.saturating_sub(1))),
+        }
+    }
+}
 
 /// The canonical index of a command in [`CONTROL_ORDER`].
 fn control_index(kind: WindowControlKind) -> usize {
@@ -596,6 +627,16 @@ pub enum TitleHit {
     Drag,
 }
 
+/// How much of the identity artwork's colour a title bar keeps while its
+/// window is active: nearly all of it, so the icon still reads as itself while
+/// sitting in the chrome rather than shouting out of it.
+pub(crate) const IDENTITY_SATURATION_ACTIVE: u8 = 230;
+
+/// And while it is not: none. An unfocused window's icon goes grey along with
+/// its muted title, so a glance across the desktop finds the window in hand by
+/// looking for the one coloured icon.
+pub(crate) const IDENTITY_SATURATION_INACTIVE: u8 = 0;
+
 /// The laid-out rectangles of a title bar's parts, for painting and hit
 /// testing over one shared geometry (so they cannot diverge).
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -603,7 +644,7 @@ pub struct TitleBarLayout {
     /// The control rects in the canonical command order, each paired with its
     /// command: the leading cluster first, then the trailing one.
     pub controls: [(WindowControlKind, Rect); 4],
-    /// The identity icon's square slot, leading the centred identity group.
+    /// The identity icon's square slot, leading the identity group.
     /// [`Rect::EMPTY`] when the bar carries no identity, or when the span
     /// between the clusters leaves no room for the slot.
     pub icon: Rect,
@@ -615,6 +656,15 @@ pub struct TitleBarLayout {
     /// that is not a control drags the window — the identity slot and the
     /// text included — so a bar drags from anywhere but its commands.
     pub title: Rect,
+    /// The span between the two command clusters, which the identity group
+    /// starts at: the contiguous stretch of band a press can always move the
+    /// window by.
+    ///
+    /// Narrower than everything that in fact drags (the insets outboard of
+    /// the clusters do too), and deliberately so — a window manager keeping a
+    /// grabbable patch of the bar on screen wants the part it can be sure of.
+    /// Empty when the band is too narrow to leave a span at all.
+    pub drag: Rect,
 }
 
 /// Bound an untrusted window title/identity string: cap its length and replace
@@ -640,15 +690,16 @@ fn sanitize_label(text: &str) -> String {
 /// It owns the four [`WindowControl`]s and seats them in two corner clusters —
 /// put-to-back and close at the leading edge, minimize and size-toggle at the
 /// trailing one — leaving the span between them for the identity group, which
-/// is centred in it. Pressing anywhere but a control activates the window and,
-/// past the drag threshold, begins a cooperative move; a press over a control
-/// routes to that control instead and never starts a drag. The title text is
-/// untrusted application data, so it is length-bounded, control characters are
-/// replaced, and it elides on the right once the span cannot show it whole.
+/// is left-justified in it, hard against the leading commands. Pressing
+/// anywhere but a control activates the window and, past the drag threshold,
+/// begins a cooperative move; a press over a control routes to that control
+/// instead and never starts a drag. The title text is untrusted application
+/// data, so it is length-bounded, control characters are replaced, and it
+/// elides on the right once the span cannot show it whole.
 ///
-/// The owning application's identity icon leads that centred group, before the
-/// text. It is inert: it drags the window like the rest of the band and is
-/// never a control.
+/// The owning application's identity icon leads that group, before the text. It
+/// is inert: it drags the window like the rest of the band and is never a
+/// control.
 ///
 /// Equal title bars draw the same pixels, so a host may use `==` as its
 /// repaint gate: the furniture state, the four commands with their own visible
@@ -793,6 +844,26 @@ impl TitleBar {
         &self.app_name
     }
 
+    /// The narrowest band that seats both command clusters and still leaves a
+    /// drag surface between them, in physical pixels.
+    ///
+    /// Below it [`layout`](Self::layout) abuts the clusters and the window
+    /// has nothing left to be dragged by, so a window manager sizes a
+    /// decorated window against this rather than a constant of its own. The
+    /// span it reserves between the clusters is one control extent wide:
+    /// that is the theme's own statement of a comfortable furniture target,
+    /// and a drag surface thinner than the buttons beside it would be one
+    /// the pointer keeps missing.
+    #[must_use]
+    pub fn min_band_width(scale: Scale, theme: &Theme) -> u32 {
+        let m = ClusterMetrics::of(scale, theme);
+        m.inset
+            .saturating_mul(2)
+            .saturating_add(m.cluster_w.saturating_mul(2))
+            .saturating_add(m.gap.saturating_mul(2))
+            .saturating_add(m.extent)
+    }
+
     /// A shared reference to the control for `kind`.
     #[must_use]
     pub fn control(&self, kind: WindowControlKind) -> &WindowControl {
@@ -806,17 +877,16 @@ impl TitleBar {
     }
 
     /// Lay the title bar out within `bounds` for the active theme: a command
-    /// cluster inset into each corner, and the identity group centred in the
-    /// span they leave between them.
+    /// cluster inset into each corner, and the identity group at the leading
+    /// edge of the span they leave between them.
     #[must_use]
     pub fn layout(&self, bounds: Rect, scale: Scale, theme: &Theme) -> TitleBarLayout {
-        let metrics = theme.metrics();
-        let e = scale.scale_length(metrics.window_control_extent).max(1);
-        let g = scale.scale_length(metrics.control_gap);
-        let ins = scale.scale_length(metrics.control_inset);
-        let cluster_w = e
-            .saturating_mul(CLUSTER_COUNT)
-            .saturating_add(g.saturating_mul(CLUSTER_COUNT.saturating_sub(1)));
+        let ClusterMetrics {
+            extent: e,
+            gap: g,
+            inset: ins,
+            cluster_w,
+        } = ClusterMetrics::of(scale, theme);
         let cy = bounds.top() + (to_i32(bounds.height) - to_i32(e)).max(0) / 2;
 
         let leading_left = bounds.left() + to_i32(ins);
@@ -850,30 +920,32 @@ impl TitleBar {
             to_u32(trailing_left - to_i32(g) - span_left),
             bounds.height,
         );
-        let (icon, title) = self.centre_identity(span, scale, theme, ins);
+        let (icon, title) = self.seat_identity(span, scale, theme, ins);
 
         TitleBarLayout {
             controls,
             icon,
             title,
+            drag: span,
         }
     }
 
-    /// Seat the identity slot and the title text as one group centred in
-    /// `span`, the two separated by `gap` pixels.
+    /// Seat the identity slot and the title text as one group at the leading
+    /// edge of `span`, the two separated by `gap` pixels.
     ///
-    /// The group is centred while it fits and pinned to the span's leading
-    /// edge once it does not, so a squeezed bar keeps its icon and the title
-    /// elides on the right rather than sliding out from under the reader. A
-    /// bar with no identity, or a span too narrow to seat the slot, reserves
-    /// nothing — a window without an identifiable owner reads exactly as it
-    /// did before one existed.
+    /// Left-justified, so the title starts in the same place whatever it says
+    /// and however wide the window is: the eye finds it without hunting, and a
+    /// squeezed bar elides the tail on the right rather than sliding the whole
+    /// line out from under the reader. A bar with no identity, or a span too
+    /// narrow to seat the slot, reserves nothing — a window without an
+    /// identifiable owner reads exactly as it did before one existed.
     ///
-    /// Centring has to know the text's width, and it measures the very line
-    /// that is drawn: the font layer memoises a measurement by whole string,
-    /// so laying out and then painting the same title measure it once between
-    /// them, and no piecewise total can disagree with what appears.
-    fn centre_identity(&self, span: Rect, scale: Scale, theme: &Theme, gap: u32) -> (Rect, Rect) {
+    /// The text box is exactly as wide as the line drawn in it, so it measures
+    /// the very line that is drawn: the font layer memoises a measurement by
+    /// whole string, so laying out and then painting the same title measure it
+    /// once between them, and no piecewise total can disagree with what
+    /// appears.
+    fn seat_identity(&self, span: Rect, scale: Scale, theme: &Theme, gap: u32) -> (Rect, Rect) {
         let font = role_font(theme, scale, TextRole::WindowTitle);
         let side = icon_slot_side(font, span.height);
         let show_icon = self.identity.is_some() && side > 0 && span.width >= side;
@@ -885,8 +957,7 @@ impl TitleBar {
         let text = font
             .text_width(&self.display_text())
             .min(span.width.saturating_sub(reserved));
-        let left =
-            span.left() + to_i32(span.width.saturating_sub(reserved.saturating_add(text))) / 2;
+        let left = span.left();
         let icon = if show_icon {
             let iy = span.top() + (to_i32(span.height) - to_i32(side)).max(0) / 2;
             Rect::new(left, iy, side, side)
@@ -934,9 +1005,21 @@ impl TitleBar {
         } else {
             Color::from(palette.on_surface_muted)
         };
+        let saturation = if active {
+            IDENTITY_SATURATION_ACTIVE
+        } else {
+            IDENTITY_SATURATION_INACTIVE
+        };
         if let Some(kind) = self.identity {
             if let Some((ix, iy, side, _)) = surface_rect(layout.icon) {
-                paint_icon_slot(surface, ix, iy, side, kind, text_color, artwork);
+                paint_icon_slot(
+                    surface,
+                    (ix, iy, side),
+                    kind,
+                    text_color,
+                    artwork,
+                    saturation,
+                );
             }
         }
 
@@ -961,7 +1044,7 @@ impl TitleBar {
         }
     }
 
-    /// The identity+title string drawn in the centred group.
+    /// The identity+title string drawn in the identity group.
     fn display_text(&self) -> String {
         if self.app_name.is_empty() {
             self.title.clone()
@@ -1347,6 +1430,35 @@ impl WindowFrame {
             right: band,
             bottom: band,
         }
+    }
+
+    /// The smallest outer rectangle this frame may be given, in physical
+    /// pixels: `(width, height)`.
+    ///
+    /// The width is what the title bar needs to seat its commands and keep a
+    /// drag surface between them ([`TitleBar::min_band_width`]) plus the rim
+    /// either side of the band; the height is the furniture bands plus one
+    /// standard control of client, the theme's own minimum interactive
+    /// target. Both axes leave at least that much client, so a window at the
+    /// floor is still a window rather than a strip of chrome.
+    ///
+    /// This is the frame's own floor. It bounds a *user* resize; an
+    /// application's declared minimum is separate and larger, and a window
+    /// manager honours whichever is greater.
+    #[must_use]
+    pub fn min_outer_size(&self, scale: Scale, theme: &Theme) -> (u32, u32) {
+        let (border, _, _) = Self::edges(scale, theme);
+        let insets = self.insets(scale, theme);
+        let client = scale.scale_length(theme.metrics().control_height).max(1);
+        let sides = insets.left.saturating_add(insets.right);
+        let band = TitleBar::min_band_width(scale, theme).saturating_add(border.saturating_mul(2));
+        (
+            band.max(sides.saturating_add(client)),
+            insets
+                .top
+                .saturating_add(insets.bottom)
+                .saturating_add(client),
+        )
     }
 
     /// The outer window rectangle whose client viewport is exactly `client`:

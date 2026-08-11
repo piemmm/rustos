@@ -150,15 +150,28 @@ the remaining pieces together and fills the gaps.
 
 ```
 ┌──────────────────────────────────────────────────────────────────────────┐
-│ [Library] [Files] │ [pin] [pin] … │  running tasks …  │ [tray…] │ [Switch]│
+│ [Library] │ [Files] [pin] [pin] … │  running tasks …  │ [tray…] │ [Switch]│
 └──────────────────────────────────────────────────────────────────────────┘
-  permanent leading    user pins       task list           notif.    always
-  (fixed order)        (reorderable)    (existing)          area      right-most
+  library      the applications:       task list           notif.    always
+  launcher     Files (fixed) then      (existing)          area      right-most
+  (fixed)      user pins (reorderable)
 ```
 
 - **Leading, fixed order, not reorderable:** `Library` (Program Library
   launcher) then `Files` (file manager). These two are permanent and cannot be
   unpinned or moved.
+- **Separator rule:** the rule after `Library` is the only one the bar
+  actually paints — the other `│` above are group boundaries in this sketch.
+  It is one `border_thickness` along the main axis (floored at one physical
+  pixel), inset one `control_inset` from both long edges so it clears the
+  bar's rounded ends, in the palette's `border` colour, with one `control_gap`
+  either side. `Files`, the pins, and every trailing region begin one whole
+  gutter past `Library`, which puts the file manager on the applications' side
+  of the rule rather than the library's. It is decoration:
+  `BarLayout::hit_test` has no case for it, so a press on the rule reaches the
+  bare bar. Laid out once as `BarLayout::separator` and drawn from that rect,
+  never re-derived by the painter (§2.2); `Rect::EMPTY` — and so unpainted —
+  when the bar is too short to reach it or too thin to inset it.
 - **Pinned shortcuts:** a user-ordered, reorderable strip after the permanent
   icons. Empty by default; populated by pin gestures (T7).
 - **Running-task list:** the existing `TaskList` region (one `TaskbarItem` per
@@ -614,10 +627,13 @@ What now stands, and the invariants a future change must keep:
   `TaskVisibility` from the `TaskList` at paint time (Active/Minimized/
   Running; `Closed` for no or stale window — fail closed), so window state
   has exactly one home. Every pin and every task slot paints as the shared
-  `lib/controls` `TaskbarItem` — one visual recipe — with two as-built
-  control extensions recorded in `plans/GUI-CONTROLS-DESIGN.md` §11.26: an
-  icon-only `TaskbarPresentation` for compact slots and the
-  `TaskVisibility::Closed` quiet-at-rest state, plus owner-supplied
+  `lib/controls` `TaskbarItem` — one visual recipe, icon-only: a centred
+  plate-sized icon and its status marks, never a label, in slots of one
+  extent, so pins and running tasks read as one strip of equal icons and a
+  window's title stays model data (`TaskEntry::title`) the context menu
+  reads. The as-built control extensions recorded in
+  `plans/GUI-CONTROLS-DESIGN.md` §11.26 are the
+  `TaskVisibility::Closed` quiet-at-rest state and owner-supplied
   pre-rasterised artwork (the control never parses image bytes;
   `TaskbarItem::icon_side` / `Taskbar::pin_icon_side` /
   `Taskbar::task_icon_side` expose the exact drawn geometry). A running
@@ -674,7 +690,8 @@ reflow/clipping on all four edges, drop-index mapping, visibility
 derivation, pin activation split, menu rows/modality/keyboard/click-away,
 artwork and glyph pixel probes, each running task drawing its own
 application's artwork and only its own), the controls suite
-(presentations, Closed state, artwork, icon-side probe), the session suite
+(Closed state, artwork, icon-side probe, an icon drawn with no ink beside
+it), the session suite
 (store load matrix, edit persistence + refusing writer, resolution matrix,
 service decisions, drag/drop policy, secondary-press menu routing), and
 the sandbox suite (the icon service's happy paths, refusals, hostile

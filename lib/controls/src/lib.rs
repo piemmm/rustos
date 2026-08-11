@@ -179,9 +179,9 @@
 //!
 //! The [`shell`] module is the shell-surface family — [`Notification`],
 //! [`TaskbarItem`], and [`TraySignal`]. A notification is a [`Card`] carrying
-//! semantic beads plus a source attribution; a taskbar item combines
-//! application identity with a [`TaskVisibility`] window state, activity,
-//! attention, and recovery/authority beads; and a tray signal is a compact
+//! semantic beads plus a source attribution; a taskbar item is an icon-only
+//! slot combining application identity with a [`TaskVisibility`] window state,
+//! activity, attention, and recovery/authority beads; a tray signal is a compact
 //! status capsule that shows an optional [`TrayBadge`] (a count or alert
 //! encoding the dominant live state) on its top-trailing corner, stacks
 //! severity-ordered beads starting after it, and expands to an instrument
@@ -292,8 +292,8 @@ pub use scroll::{
 pub use scrollbar::{ScrollAction, ScrollBar, ScrollPart};
 pub use selector::{Checkbox, Radio, SelectorAction, Toggle};
 pub use shell::{
-    Notification, NotificationAction, TaskVisibility, TaskbarItem, TaskbarItemAction,
-    TaskbarPresentation, TrayBadge, TrayBadgeContent, TrayBadgeTone, TraySignal, TraySignalAction,
+    Notification, NotificationAction, TaskVisibility, TaskbarItem, TaskbarItemAction, TrayBadge,
+    TrayBadgeContent, TrayBadgeTone, TraySignal, TraySignalAction,
 };
 pub use state::{
     ActivityState, AuthorityState, ControlDisposition, ControlKind, ControlRole, ControlState,

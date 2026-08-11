@@ -141,6 +141,37 @@ impl Pixel {
         }
     }
 
+    /// Pull every colour channel toward this pixel's own luminance, keeping
+    /// `saturation/255` of the colour it had.
+    ///
+    /// `255` returns the pixel untouched and `0` returns pure grey; alpha is
+    /// coverage, not colour, so it is never touched. The grey is the BT.601
+    /// luma the eye weights the primaries by (0.299 R, 0.587 G, 0.114 B),
+    /// whose 8-bit weights sum to exactly 256, so a pixel that is already
+    /// grey comes back unchanged.
+    ///
+    /// A premultiplied pixel may be desaturated in place: luma is linear in
+    /// the channels and alpha scales all three alike, so the luma of a
+    /// premultiplied pixel is the premultiplied luma, and a weighted average
+    /// of two values that are each `<= a` stays `<= a`.
+    #[must_use]
+    pub fn desaturate(self, saturation: u8) -> Self {
+        if saturation == 255 {
+            return self;
+        }
+        let luma =
+            (77 * u32::from(self.r) + 150 * u32::from(self.g) + 29 * u32::from(self.b) + 128) >> 8;
+        let keep = u32::from(saturation);
+        let grey = 255 - keep;
+        let toward = |c: u8| div255(luma * grey + u32::from(c) * keep);
+        Self {
+            r: toward(self.r),
+            g: toward(self.g),
+            b: toward(self.b),
+            a: self.a,
+        }
+    }
+
     /// Composite `self` (source) *over* `dst` (destination).
     ///
     /// Both operands are premultiplied; the result is

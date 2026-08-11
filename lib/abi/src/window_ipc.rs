@@ -29,8 +29,9 @@
 //! ([`crate::reply::encode_status_reply`] /
 //! [`crate::reply::decode_status_reply`]). Every decode fails closed: an
 //! unknown magic, version, operation, format, an out-of-bounds frame
-//! count, an empty damage rectangle, a malformed title, or a dirty
-//! reserved field refuses rather than guessing.
+//! count, an empty damage rectangle, a malformed title, a minimum client
+//! size declared by a window that cannot be resized, or a dirty reserved
+//! field refuses rather than guessing.
 
 use crate::desktop::DesktopInfo;
 use crate::driver::display::{DamageRect, DisplayFormat};
@@ -275,6 +276,21 @@ pub enum WindowRequest {
         /// window manager offers neither affordance and never sends it a
         /// size change.
         resizable: bool,
+        /// Smallest client width, in physical pixels, this window may be
+        /// resized to; `0` declares no minimum of the app's own, leaving
+        /// the frame furniture's floor to stand alone.
+        ///
+        /// The window manager is the enforcer: an interactive resize stops
+        /// at the larger of this and its own furniture floor, so the app
+        /// lays out at exactly the size it is told and never resizes itself
+        /// back up — two floors fighting over one drag is the defect this
+        /// field exists to remove. A fixed-size window is never resized, so
+        /// a minimum declared without `resizable` is refused rather than
+        /// silently ignored.
+        min_width_px: u32,
+        /// Smallest client height, in physical pixels, on the same terms as
+        /// [`min_width_px`](Self::Create::min_width_px).
+        min_height_px: u32,
     },
     /// Open an **undecorated, app-positioned popup surface** stacked
     /// directly above the caller's own window `parent_window_id`: a
@@ -503,6 +519,22 @@ const POPUP_OFFSET_Y: usize = POPUP_OFFSET_X + 4;
 /// First reserved byte after a [`WindowRequest::CreatePopup`] operand block.
 const POPUP_RESERVED_FROM: usize = POPUP_OFFSET_Y + 4;
 
+/// Byte offset, within the fixed frame, of a [`WindowRequest::Create`]
+/// title length, immediately after the shared frame-layout block. The
+/// create tail runs on from here: the title text, the resizable flag, and
+/// the declared minimum client size.
+const CREATE_TITLE_LEN_OFFSET: usize = 41;
+/// Byte offset of a [`WindowRequest::Create`] title's text.
+const CREATE_TITLE_TEXT_OFFSET: usize = CREATE_TITLE_LEN_OFFSET + 1;
+/// Byte offset of [`WindowRequest::Create::resizable`].
+const CREATE_RESIZABLE_OFFSET: usize = CREATE_TITLE_TEXT_OFFSET + WINDOW_TITLE_MAX;
+/// Byte offset of [`WindowRequest::Create::min_width_px`].
+const CREATE_MIN_WIDTH_OFFSET: usize = CREATE_RESIZABLE_OFFSET + 1;
+/// Byte offset of [`WindowRequest::Create::min_height_px`].
+const CREATE_MIN_HEIGHT_OFFSET: usize = CREATE_MIN_WIDTH_OFFSET + 4;
+/// First reserved byte after a [`WindowRequest::Create`] operand block.
+const CREATE_RESERVED_FROM: usize = CREATE_MIN_HEIGHT_OFFSET + 4;
+
 /// Byte offset, within the fixed frame, of a bundle-path payload's
 /// length-prefixed text — shared by [`WindowRequest::PinBundle`] and
 /// [`WindowRequest::DragOffer`], which carry an identical window id +
@@ -558,30 +590,7 @@ impl WindowRequest {
     /// leaving the reserved tail zero.
     fn write_operands(&self, out: &mut [u8; Self::WIRE_LEN]) {
         match *self {
-            Self::Create {
-                shm_handle,
-                event_endpoint,
-                frame_count,
-                width_px,
-                height_px,
-                stride_bytes,
-                format,
-                title,
-                resizable,
-            } => {
-                put_u64(out, 8, shm_handle);
-                put_u64(out, 16, event_endpoint);
-                FrameLayout {
-                    frame_count,
-                    width_px,
-                    height_px,
-                    stride_bytes,
-                    format,
-                }
-                .write_to(out);
-                encode_title(out, 41, &title);
-                out[42 + WINDOW_TITLE_MAX] = u8::from(resizable);
-            }
+            Self::Create { .. } => self.write_create_operands(out),
             Self::CreatePopup {
                 parent_window_id,
                 shm_handle,
@@ -659,6 +668,42 @@ impl WindowRequest {
         }
     }
 
+    /// Write a [`Create`](Self::Create)'s operand block: the shared frame
+    /// layout, then the title and the sizing contract that follow it.
+    /// A no-op for any other request.
+    fn write_create_operands(&self, out: &mut [u8; Self::WIRE_LEN]) {
+        let Self::Create {
+            shm_handle,
+            event_endpoint,
+            frame_count,
+            width_px,
+            height_px,
+            stride_bytes,
+            format,
+            title,
+            resizable,
+            min_width_px,
+            min_height_px,
+        } = *self
+        else {
+            return;
+        };
+        put_u64(out, 8, shm_handle);
+        put_u64(out, 16, event_endpoint);
+        FrameLayout {
+            frame_count,
+            width_px,
+            height_px,
+            stride_bytes,
+            format,
+        }
+        .write_to(out);
+        encode_title(out, CREATE_TITLE_LEN_OFFSET, &title);
+        out[CREATE_RESIZABLE_OFFSET] = u8::from(resizable);
+        put_u32(out, CREATE_MIN_WIDTH_OFFSET, min_width_px);
+        put_u32(out, CREATE_MIN_HEIGHT_OFFSET, min_height_px);
+    }
+
     /// Decode from `bytes`, failing closed on any malformed input.
     ///
     /// Semantic bounds a decoder can already see are enforced here — the
@@ -682,7 +727,8 @@ impl WindowRequest {
     ///   character or `#`.
     /// * [`Errno::LengthOutOfRange`] — a frame count outside
     ///   `1..=WINDOW_MAX_FRAMES`, a zero-extent geometry, a stride too
-    ///   small for one scanline, an over-long title length, an empty
+    ///   small for one scanline, an over-long title length, a minimum
+    ///   client size declared by a window that is not resizable, an empty
     ///   damage rectangle, a bundle-path length outside
     ///   `1..=WINDOW_BUNDLE_PATH_MAX`, or a backdrop-blur radius above
     ///   [`WINDOW_BACKDROP_BLUR_MAX_PX`].
@@ -837,13 +883,19 @@ fn read_bundle_path(bytes: &[u8]) -> Result<(u64, BundleRef), Errno> {
 }
 
 /// Decode the operands of a [`WindowRequest::Create`]: the granted region
-/// and event route, the frame layout, the title, and the resizability the
-/// app asks the window manager for.
+/// and event route, the frame layout, the title, and the resizability and
+/// minimum client size the app asks the window manager for.
 ///
 /// The widest operand block the protocol carries, so it reads as its own
 /// step rather than crowding out every other operation in the decoder.
+///
+/// The minimum is untrusted, so it is taken only where it can mean
+/// something: any size is a legitimate floor for a resizable window (the
+/// window manager enforces it against its own furniture floor and the
+/// screen), while a fixed-size window that declares one is contradicting
+/// itself and is refused.
 fn read_create(bytes: &[u8]) -> Result<WindowRequest, Errno> {
-    reserved_zero(bytes, 42 + WINDOW_TITLE_MAX + 1)?;
+    reserved_zero(bytes, CREATE_RESERVED_FROM)?;
     let shm_handle = read_u64(bytes, 8);
     let event_endpoint = read_u64(bytes, 16);
     if crate::ipc::is_reserved_endpoint(event_endpoint) {
@@ -851,13 +903,20 @@ fn read_create(bytes: &[u8]) -> Result<WindowRequest, Errno> {
     }
     let layout = read_frame_layout(bytes)?;
     let mut title_bytes = [0u8; WINDOW_TITLE_MAX];
-    title_bytes.copy_from_slice(&bytes[42..42 + WINDOW_TITLE_MAX]);
-    let title = WindowTitle::from_wire(bytes[41], &title_bytes)?;
-    let resizable = match bytes[42 + WINDOW_TITLE_MAX] {
+    title_bytes.copy_from_slice(
+        &bytes[CREATE_TITLE_TEXT_OFFSET..CREATE_TITLE_TEXT_OFFSET + WINDOW_TITLE_MAX],
+    );
+    let title = WindowTitle::from_wire(bytes[CREATE_TITLE_LEN_OFFSET], &title_bytes)?;
+    let resizable = match bytes[CREATE_RESIZABLE_OFFSET] {
         0 => false,
         1 => true,
         _ => return Err(Errno::OutOfRange),
     };
+    let min_width_px = read_u32(bytes, CREATE_MIN_WIDTH_OFFSET);
+    let min_height_px = read_u32(bytes, CREATE_MIN_HEIGHT_OFFSET);
+    if !resizable && (min_width_px != 0 || min_height_px != 0) {
+        return Err(Errno::LengthOutOfRange);
+    }
     Ok(WindowRequest::Create {
         shm_handle,
         event_endpoint,
@@ -868,6 +927,8 @@ fn read_create(bytes: &[u8]) -> Result<WindowRequest, Errno> {
         format: layout.format,
         title,
         resizable,
+        min_width_px,
+        min_height_px,
     })
 }
 
@@ -1509,10 +1570,12 @@ fn event_reserved_zero(bytes: &[u8], from: usize) -> Result<(), Errno> {
 mod tests {
     use super::{
         decode_create_reply, decode_desktop_reply, encode_create_reply, encode_desktop_reply,
-        BundleRef, PointerAction, WindowEvent, WindowRequest, WindowTitle, SET_TITLE_LEN_OFFSET,
-        SET_TITLE_RESERVED_FROM, SET_TITLE_TEXT_OFFSET, WINDOW_BACKDROP_BLUR_MAX_PX,
-        WINDOW_BUNDLE_PATH_MAX, WINDOW_CREATE_REPLY_LEN, WINDOW_DESKTOP_REPLY_LEN, WINDOW_ENDPOINT,
-        WINDOW_EVENT_MAGIC, WINDOW_MAX_FRAMES, WINDOW_REQUEST_MAGIC, WINDOW_TITLE_MAX,
+        BundleRef, PointerAction, WindowEvent, WindowRequest, WindowTitle,
+        CREATE_MIN_HEIGHT_OFFSET, CREATE_MIN_WIDTH_OFFSET, CREATE_RESERVED_FROM,
+        CREATE_RESIZABLE_OFFSET, SET_TITLE_LEN_OFFSET, SET_TITLE_RESERVED_FROM,
+        SET_TITLE_TEXT_OFFSET, WINDOW_BACKDROP_BLUR_MAX_PX, WINDOW_BUNDLE_PATH_MAX,
+        WINDOW_CREATE_REPLY_LEN, WINDOW_DESKTOP_REPLY_LEN, WINDOW_ENDPOINT, WINDOW_EVENT_MAGIC,
+        WINDOW_MAX_FRAMES, WINDOW_REQUEST_MAGIC, WINDOW_TITLE_MAX,
     };
     use crate::desktop::{Appearance, DesktopInfo};
     use crate::driver::display::{DamageRect, DisplayFormat};
@@ -1532,7 +1595,27 @@ mod tests {
             format: DisplayFormat::Bgra8888,
             title: WindowTitle::new("Files").expect("a valid title"),
             resizable: false,
+            min_width_px: 0,
+            min_height_px: 0,
         }
+    }
+
+    /// The same window opened **resizable**, declaring the smallest client
+    /// size the window manager may resize it to.
+    fn sample_create_min(min_width_px: u32, min_height_px: u32) -> WindowRequest {
+        let mut request = sample_create();
+        if let WindowRequest::Create {
+            resizable: ref mut flag,
+            min_width_px: ref mut min_w,
+            min_height_px: ref mut min_h,
+            ..
+        } = request
+        {
+            *flag = true;
+            *min_w = min_width_px;
+            *min_h = min_height_px;
+        }
+        request
     }
 
     fn sample_present() -> WindowRequest {
@@ -1961,23 +2044,78 @@ mod tests {
     #[test]
     fn create_carries_the_resizable_flag_and_rejects_a_dirty_flag_byte() {
         // The flag round-trips both ways.
-        let mut resizable = sample_create();
-        if let WindowRequest::Create {
-            resizable: ref mut flag,
-            ..
-        } = resizable
-        {
-            *flag = true;
-        }
+        let resizable = sample_create_min(0, 0);
         let bytes = resizable.to_le_bytes();
         assert_eq!(WindowRequest::from_bytes(&bytes), Ok(resizable));
         // The flag lives at the byte just past the title.
-        assert_eq!(bytes[42 + WINDOW_TITLE_MAX], 1);
-        assert_eq!(sample_create().to_le_bytes()[42 + WINDOW_TITLE_MAX], 0);
+        assert_eq!(bytes[CREATE_RESIZABLE_OFFSET], 1);
+        assert_eq!(sample_create().to_le_bytes()[CREATE_RESIZABLE_OFFSET], 0);
         // A flag byte outside {0, 1} is refused, never coerced.
         let mut bad = sample_create().to_le_bytes();
-        bad[42 + WINDOW_TITLE_MAX] = 2;
+        bad[CREATE_RESIZABLE_OFFSET] = 2;
         assert_eq!(WindowRequest::from_bytes(&bad), Err(Errno::OutOfRange));
+    }
+
+    #[test]
+    fn create_carries_the_declared_minimum_client_size() {
+        let request = sample_create_min(240, 160);
+        let bytes = request.to_le_bytes();
+        assert_eq!(WindowRequest::from_bytes(&bytes), Ok(request));
+        // The pair follows the resizable flag, in that order.
+        assert_eq!(
+            bytes[CREATE_MIN_WIDTH_OFFSET..CREATE_MIN_WIDTH_OFFSET + 4],
+            240u32.to_le_bytes()
+        );
+        assert_eq!(
+            bytes[CREATE_MIN_HEIGHT_OFFSET..CREATE_MIN_HEIGHT_OFFSET + 4],
+            160u32.to_le_bytes()
+        );
+        // Zero declares no minimum of the app's own, per axis, and the
+        // widest floor an app can state survives the round trip intact.
+        for (min_w, min_h) in [(0, 0), (240, 0), (0, 160), (u32::MAX, u32::MAX)] {
+            let request = sample_create_min(min_w, min_h);
+            assert_eq!(
+                WindowRequest::from_bytes(&request.to_le_bytes()),
+                Ok(request)
+            );
+        }
+    }
+
+    #[test]
+    fn create_refuses_a_minimum_on_a_fixed_size_window() {
+        // A window the window manager never resizes has nothing to measure
+        // a floor against, so the contradiction is refused, not ignored.
+        for (min_w, min_h) in [(240u32, 160u32), (240, 0), (0, 160)] {
+            let mut bytes = sample_create().to_le_bytes();
+            bytes[CREATE_MIN_WIDTH_OFFSET..CREATE_MIN_WIDTH_OFFSET + 4]
+                .copy_from_slice(&min_w.to_le_bytes());
+            bytes[CREATE_MIN_HEIGHT_OFFSET..CREATE_MIN_HEIGHT_OFFSET + 4]
+                .copy_from_slice(&min_h.to_le_bytes());
+            assert_eq!(
+                WindowRequest::from_bytes(&bytes),
+                Err(Errno::LengthOutOfRange)
+            );
+        }
+        // The fixed-size window that declares nothing still opens.
+        assert!(WindowRequest::from_bytes(&sample_create().to_le_bytes()).is_ok());
+    }
+
+    #[test]
+    fn create_refuses_a_truncated_or_dirty_minimum() {
+        let bytes = sample_create_min(240, 160).to_le_bytes();
+        // A frame cut short is refused whole, never decoded from the part
+        // that arrived — including one cut inside the minimum itself.
+        for short in [WindowRequest::WIRE_LEN - 1, CREATE_MIN_WIDTH_OFFSET + 2] {
+            assert_eq!(
+                WindowRequest::from_bytes(&bytes[..short]),
+                Err(Errno::BufferTooSmall)
+            );
+        }
+        // The reserved tail now begins past the minimum; a byte smuggled
+        // into it is still refused.
+        let mut dirty = bytes;
+        dirty[CREATE_RESERVED_FROM] = 1;
+        assert_eq!(WindowRequest::from_bytes(&dirty), Err(Errno::BadMagic));
     }
 
     #[test]

@@ -87,14 +87,13 @@ pub const WIN_WIDTH: u32 = 480;
 /// [`WIN_WIDTH`]).
 pub const WIN_HEIGHT: u32 = 320;
 
-/// The smallest client width the viewer draws into, in pixels: a floor so
-/// a resize-to-nothing still shows at least a sliver of a line rather than
-/// a zero-sized surface. The window manager clamps its own resize to a
-/// minimum client too; this is the app's independent guard (fail closed,
-/// never a zero-extent surface).
+/// The smallest client width the viewer draws into, in pixels: enough for
+/// a sliver of a padded line. It is declared to the window manager when
+/// the window opens, which is what holds a drag toward nothing to it; the
+/// app itself lays out at whatever size it is given.
 pub const MIN_WIN_WIDTH: u32 = 2 * TEXT_PADDING + 1;
 
-/// The smallest client height the viewer draws into, in pixels (see
+/// The smallest client height the viewer declares (see
 /// [`MIN_WIN_WIDTH`]).
 pub const MIN_WIN_HEIGHT: u32 = 1;
 

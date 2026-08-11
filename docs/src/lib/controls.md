@@ -178,16 +178,20 @@ Nothing about the control's feedback is discarded, only moved off the edge:
 
 `IconButton` is the only family that carries the choice (`IconButton::seated`),
 because it is the only one that appears on both kinds of surface — a window
-toolbar and the desktop's icon strip. `shell::TaskbarItem` and
-`shell::TraySignal` exist only on the bar and are bar-seated by construction;
-everything else is panel-seated.
+toolbar and the desktop's icon strip. `shell::TaskbarItem`, `shell::TraySignal`
+and `window::WindowControl` exist only on a bar — the desktop's icon strip and a
+window's title band — and are bar-seated by construction; everything else is
+panel-seated. That is why a window command shows a hover as a plate wash and
+never as an edge: an edge on a command would read as a line drawn round the
+window's corner.
 
 ## Owner-supplied icon artwork
 
-Four controls draw an icon whose artwork their owner may already hold
-rasterised: a `shell::TaskbarItem`, a `collection::IconTile`, a
-`collection::ListRow`, and a `button::IconButton`. Each offers the same pair —
-one query and one parameter:
+Six controls draw an icon whose artwork their owner may already hold
+rasterised: a `shell::TaskbarItem`, a `shell::TraySignal`, a
+`collection::IconTile`, a `collection::ListRow`, a `button::IconButton`, and a
+`window::TitleBar` (its owning application's identity icon). Each offers the
+same pair — one query and one parameter:
 
 - `icon_side(bounds, scale, theme, …) -> u32` reports the exact pixel side
   the control's icon slot will be drawn into, and `0` when the geometry leaves
@@ -199,7 +203,7 @@ one query and one parameter:
   to a meaningful icon instead of a blank slot (`AGENTS.md` §10).
 
 The rule lives once, in the crate's shared paint recipe
-(`paint::paint_icon_slot`), so the four controls cannot drift apart
+(`paint::paint_icon_slot`), so the six controls cannot drift apart
 (`AGENTS.md` §2.2). Artwork whose surface does not match the slot is centred
 on it rather than pinned to a corner, so a size mismatch reads as an even
 margin instead of a lopsided drawing; a control that reserves no icon slot
@@ -207,6 +211,17 @@ ignores the parameter entirely. A control never decodes an image — artwork
 reaches it already decoded and rasterised through the desktop's sandboxed
 asset path (`AGENTS.md` §19.5), so a malformed file can only fail to produce
 artwork, never reach a drawing path.
+
+The recipe also takes a **saturation** factor, which pulls each artwork pixel
+toward its own luminance as it lands (`Surface::blit_desaturated`, the one
+saturation definition in `lib/raster`). It is how a control states that what its
+artwork identifies is not the thing in hand: a `window::TitleBar` keeps nearly
+all of the colour while its window is active and none of it while it is not, so
+an unfocused window's icon goes grey with its muted title. Every other control
+asks for full colour. The built-in glyph is never touched — it is a theme tint,
+with no application colour in it to reduce — and because the reduction happens
+on the way in, an owner still caches one full-colour copy per (asset, pixel
+side) rather than one per state.
 
 ## The icon-view tile
 

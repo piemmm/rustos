@@ -65,7 +65,9 @@ mod program {
     use tairix_raster::Surface;
     use tairix_rt::io::{Stderr, Write};
     use tairix_terminal::effects::{Afterglow, Phase};
-    use tairix_terminal::layout::{fit_font_size, grid_dims, snap_to_cells, window_size};
+    use tairix_terminal::layout::{
+        fit_font_size, grid_dims, grid_size, snap_to_cells, window_size,
+    };
     use tairix_terminal::menu::{Command, ContextMenu, MenuOutcome};
     use tairix_terminal::profile::{
         parse as parse_profile, render as render_profile, user_profile_path, Profile,
@@ -82,7 +84,7 @@ mod program {
     use tairix_users::DEFAULT_SHELL;
     use tairix_window::{
         event_endpoint_for, key_input_event, pointer_input_events, Desktop, PopupSpec,
-        WindowClient, WindowTransport, EVENT_MAILBOX_CAPACITY,
+        WindowClient, WindowSizing, WindowTransport, EVENT_MAILBOX_CAPACITY,
     };
 
     /// Exit code when the shell could not be hosted (the pty or the spawn
@@ -889,6 +891,10 @@ mod program {
             return fail(EXIT_NO_EVENTS, "memory-pressure wake refused");
         }
 
+        // A character grid can show nothing at all below one whole cell, and
+        // that is where the terminal's own snap to whole cells bottoms out,
+        // so one cell of the face it opens in is its declared floor.
+        let (min_width_px, min_height_px) = grid_size(1, 1, look.font);
         #[allow(clippy::cast_sign_loss)] // `grant >= 1` checked above; it is a kernel handle.
         let Ok((window, server)) = client.create(
             grant as u64,
@@ -896,7 +902,11 @@ mod program {
             FRAME_COUNT,
             &mode,
             "Terminal",
-            WIN_RESIZABLE,
+            WindowSizing {
+                resizable: WIN_RESIZABLE,
+                min_width_px,
+                min_height_px,
+            },
         ) else {
             return fail(EXIT_NO_WINDOW, "desktop session refused the window");
         };

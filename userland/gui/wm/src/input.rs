@@ -249,6 +249,11 @@ pub enum InputResponse {
 struct MoveGrab {
     window: WindowId,
     offset: Point,
+    /// The title bar's drag surface in window-local coordinates, captured at
+    /// grab start so a motion sample never re-lays the furniture out.
+    /// [`Rect::EMPTY`] for an undecorated window, which is not clamped at all
+    /// — it has no move surface of its own to keep reachable.
+    drag: Rect,
 }
 
 /// An in-flight scrollbar thumb drag: the window, which bar is being
@@ -260,16 +265,6 @@ struct ScrollGrab {
     orientation: ScrollOrientation,
     anchor: i32,
 }
-
-/// The smallest client (application content) width a resize-grab will shrink a
-/// window to, in physical pixels. A floor, not a capacity: it keeps a window
-/// from collapsing to an unusable sliver (and its title bar and controls from
-/// overlapping), never a ceiling on how large a window may grow.
-const MIN_CLIENT_W: u32 = 96;
-
-/// The smallest client height a resize-grab will shrink a window to, in
-/// physical pixels (companion to [`MIN_CLIENT_W`]).
-const MIN_CLIENT_H: u32 = 64;
 
 /// An in-flight interactive resize: the decorated window, which frame edge is
 /// being dragged, the shared [`ResizeGrabber`] driving the gesture lifecycle,
@@ -283,10 +278,10 @@ struct ResizeGrab {
     grabber: ResizeGrabber,
     start_outer: Rect,
     start_pointer: Point,
-    /// The frame band thickness `(left, right, top, bottom)` in physical
-    /// pixels, captured at grab start so the outer→client conversion and the
-    /// minimum-outer clamp never re-derive the frame metrics mid-drag.
-    insets: (u32, u32, u32, u32),
+    /// The smallest outer size this window may be dragged down to, in
+    /// physical pixels, captured at grab start so the clamp never re-derives
+    /// the frame metrics mid-drag.
+    min_outer: (u32, u32),
 }
 
 impl ResizeGrab {
@@ -337,6 +332,11 @@ pub struct InputRouter {
     /// on the release, and on any press that starts a furniture, move, or
     /// desktop interaction instead.
     client_grab: Option<WindowId>,
+    /// The decorated window whose furniture last received a hover sample, so
+    /// the pointer leaving it can be told to drop the highlight. Only the
+    /// window manager sees a pointer over its own decorations, so nothing
+    /// else can clear one.
+    frame_hover: Option<WindowId>,
 }
 
 impl InputRouter {
@@ -525,6 +525,16 @@ impl InputRouter {
         let Some(origin) = compositor.window(window).map(Window::origin) else {
             return false;
         };
+        let drag = compositor
+            .window_drag_surface(window)
+            .map_or(Rect::EMPTY, |rect| {
+                Rect::new(
+                    rect.left().saturating_sub(origin.x),
+                    rect.top().saturating_sub(origin.y),
+                    rect.width,
+                    rect.height,
+                )
+            });
         // Starting a move supersedes the implicit client pointer grab: this
         // press moves the window, so its motion and release drive the move,
         // never leak to the client as an in-content drag.
@@ -535,6 +545,7 @@ impl InputRouter {
                 self.pointer.x.saturating_sub(origin.x),
                 self.pointer.y.saturating_sub(origin.y),
             ),
+            drag,
         });
         true
     }
@@ -609,8 +620,10 @@ impl InputRouter {
     /// (even once the pointer leaves it, `local` clamped into the client);
     /// otherwise it is a hover over the client content under the pointer. A
     /// motion over the desktop, over window furniture, or over a window that
-    /// has vanished is [`InputResponse::Ignored`] (no client owns it).
-    fn client_pointer_moved(&mut self, to: Point, compositor: &Compositor) -> InputResponse {
+    /// has vanished is [`InputResponse::Ignored`] (no client owns it) — but a
+    /// motion over furniture still reaches that furniture, so a decoration
+    /// highlights under the pointer like any other control.
+    fn client_pointer_moved(&mut self, to: Point, compositor: &mut Compositor) -> InputResponse {
         if let Some(window) = self.client_grab {
             let Some(client) = compositor.window_client_rect(window) else {
                 self.client_grab = None;
@@ -621,10 +634,13 @@ impl InputRouter {
                 local: client_local(to, client),
             };
         }
-        let Some(window) = compositor.window_at(to) else {
+        let over = compositor.window_at(to);
+        let on_client = over.is_some_and(|window| over_client(window, to, compositor));
+        self.hover_furniture(over.filter(|_| !on_client), compositor);
+        let Some(window) = over else {
             return InputResponse::DesktopPointerMoved;
         };
-        if !over_client(window, to, compositor) {
+        if !on_client {
             return InputResponse::Ignored;
         }
         let Some(client) = compositor.window_client_rect(window) else {
@@ -633,6 +649,33 @@ impl InputRouter {
         InputResponse::ClientPointerMoved {
             window,
             local: client_local(to, client),
+        }
+    }
+
+    /// Hand the current pointer position to the furniture of `over` — the
+    /// window whose decorations lie under it, `None` for none — and to the
+    /// window the pointer has just left, so its highlight is dropped.
+    ///
+    /// A frame is never told the pointer is on it while the pointer is on a
+    /// client, and never left believing the pointer is still on it once it is
+    /// not: a decoration lights up under the pointer and goes out behind it,
+    /// exactly as a control in a window does. Nothing is delivered while a
+    /// grab is in flight, because the grab already owns the motion.
+    ///
+    /// The frame repaints only what it reports changing, so a sample that
+    /// stays within one control, or merely crosses the drag region, costs a
+    /// hit test and nothing else.
+    fn hover_furniture(&mut self, over: Option<WindowId>, compositor: &mut Compositor) {
+        if self.frame_hover.is_none() && over.is_none() {
+            return;
+        }
+        let moved = InputEvent::PointerMoved { to: self.pointer };
+        if let Some(left) = self.frame_hover.filter(|&id| Some(id) != over) {
+            compositor.frame_pointer(left, &moved);
+        }
+        self.frame_hover = over.filter(|&id| compositor.window_frame(id).is_some());
+        if let Some(id) = self.frame_hover {
+            compositor.frame_pointer(id, &moved);
         }
     }
 
@@ -876,25 +919,19 @@ impl InputRouter {
         edge: ResizeEdge,
         compositor: &Compositor,
     ) -> InputResponse {
-        let (Some(start_outer), Some(client)) = (
+        let (Some(start_outer), Some(min_outer)) = (
             compositor.window(window).map(Window::bounds),
-            compositor.window_client_rect(window),
+            compositor.window_min_outer_size(window),
         ) else {
             return InputResponse::FurniturePressed { window };
         };
-        let insets = (
-            u32::try_from(client.left() - start_outer.left()).unwrap_or(0),
-            u32::try_from(start_outer.right() - client.right()).unwrap_or(0),
-            u32::try_from(client.top() - start_outer.top()).unwrap_or(0),
-            u32::try_from(start_outer.bottom() - client.bottom()).unwrap_or(0),
-        );
         let mut grab = ResizeGrab {
             window,
             edge,
             grabber: ResizeGrabber::new(),
             start_outer,
             start_pointer: self.pointer,
-            insets,
+            min_outer,
         };
         // Prime the grabber's pointer, then begin its gesture over the whole
         // outer rectangle (the pointer is inside it): the shared control owns
@@ -975,14 +1012,19 @@ impl InputRouter {
         }
     }
 
-    /// Apply pointer motion to an active move-grab, if any.
+    /// Apply pointer motion to an active move-grab, if any, keeping a
+    /// grabbable patch of the window's move surface on screen.
     fn drag_to(&mut self, to: Point, compositor: &mut Compositor) -> InputResponse {
         let Some(grab) = self.grab else {
             return InputResponse::Ignored;
         };
-        let origin = Point::new(
-            to.x.saturating_sub(grab.offset.x),
-            to.y.saturating_sub(grab.offset.y),
+        let origin = clamp_move_origin(
+            Point::new(
+                to.x.saturating_sub(grab.offset.x),
+                to.y.saturating_sub(grab.offset.y),
+            ),
+            grab.drag,
+            compositor.screen_rect(),
         );
         if compositor.move_window(grab.window, origin) {
             InputResponse::Moved {
@@ -1000,9 +1042,11 @@ impl InputRouter {
 
 /// The new outer rectangle a resize-grab produces when the pointer is at `to`:
 /// the grabbed edge(s) of the captured `start_outer` move by the pointer
-/// delta, the un-grabbed edges stay put, and the result is clamped so the
-/// client never shrinks below [`MIN_CLIENT_W`] × [`MIN_CLIENT_H`]. The top
-/// edge is never a resize edge (the title bar lives there), so it is fixed.
+/// delta, the un-grabbed edges stay put, and the result is clamped to the
+/// window's captured minimum outer size — the greater of what its title bar
+/// needs to seat its commands with a drag surface between them and what its
+/// application declared it can lay out at. The top edge is never a resize
+/// edge (the title bar lives there), so it is fixed.
 fn compute_resized_outer(grab: &ResizeGrab, to: Point) -> Rect {
     let start = grab.start_outer;
     let dx = to.x - grab.start_pointer.x;
@@ -1014,21 +1058,8 @@ fn compute_resized_outer(grab: &ResizeGrab, to: Point) -> Rect {
         ResizeEdge::BottomLeft => (true, false, true),
         ResizeEdge::BottomRight => (false, true, true),
     };
-    // Minimum outer extent = the fixed frame band plus the minimum client.
-    let min_w = i32::try_from(
-        grab.insets
-            .0
-            .saturating_add(grab.insets.1)
-            .saturating_add(MIN_CLIENT_W),
-    )
-    .unwrap_or(i32::MAX);
-    let min_h = i32::try_from(
-        grab.insets
-            .2
-            .saturating_add(grab.insets.3)
-            .saturating_add(MIN_CLIENT_H),
-    )
-    .unwrap_or(i32::MAX);
+    let min_w = i32::try_from(grab.min_outer.0).unwrap_or(i32::MAX);
+    let min_h = i32::try_from(grab.min_outer.1).unwrap_or(i32::MAX);
 
     let top = start.top();
     let mut left = start.left();
@@ -1055,6 +1086,43 @@ fn compute_resized_outer(grab: &ResizeGrab, to: Point) -> Rect {
     let width = u32::try_from(right - left).unwrap_or(0);
     let height = u32::try_from(bottom - top).unwrap_or(0);
     Rect::new(left, top, width, height)
+}
+
+/// `origin` clamped so `drag` — the title bar's move surface in window-local
+/// coordinates — keeps a grabbable patch inside `screen`.
+///
+/// A window may hang off any edge, which is what a desktop expects, but never
+/// so far that nothing is left to drag it back by. The whole band stays on
+/// screen vertically, because a title bar half above the top edge is one the
+/// pointer cannot reach along its length; sideways a square of the band's own
+/// height is enough, which is the smallest patch that is still a comfortable
+/// pointer target. `screen` is the whole framebuffer, so a single big desktop
+/// spanning several monitors is one region and a window may straddle two of
+/// them.
+///
+/// An empty `drag` — an undecorated window, or a band with no span between its
+/// clusters — leaves `origin` alone: there is nothing to keep reachable, and
+/// clamping against a rectangle with no area would pin the window to an edge
+/// for no gain.
+fn clamp_move_origin(origin: Point, drag: Rect, screen: Rect) -> Point {
+    if drag.width == 0 || drag.height == 0 || screen.width == 0 || screen.height == 0 {
+        return origin;
+    }
+    let reach = i32::try_from(drag.width.min(drag.height)).unwrap_or(i32::MAX);
+    let min_x = screen
+        .left()
+        .saturating_add(reach)
+        .saturating_sub(drag.right());
+    let max_x = screen
+        .right()
+        .saturating_sub(reach)
+        .saturating_sub(drag.left());
+    let min_y = screen.top().saturating_sub(drag.top());
+    let max_y = screen.bottom().saturating_sub(drag.bottom());
+    Point::new(
+        origin.x.clamp(min_x, max_x.max(min_x)),
+        origin.y.clamp(min_y, max_y.max(min_y)),
+    )
 }
 
 /// Whether `point` over `window` falls on the client content rather than

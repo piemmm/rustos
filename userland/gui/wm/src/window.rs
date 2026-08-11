@@ -90,6 +90,15 @@ pub struct Window {
     /// to present them again. Off until the embedder says otherwise, so a
     /// window nobody can repaint is never released.
     app_presented: bool,
+    /// The smallest client extent the owning application declared it can lay
+    /// out at, in physical pixels; `(0, 0)` for an application that declared
+    /// none and is content at any size.
+    ///
+    /// It bounds a resize, never the size the window was created at: an
+    /// application asking for a small window is choosing that size, while a
+    /// *user* dragging an edge is one the application cannot refuse without
+    /// fighting the drag.
+    min_client: (u32, u32),
 }
 
 impl Window {
@@ -118,6 +127,7 @@ impl Window {
             size_state: WindowSizeState::Restored,
             restore_outer: None,
             app_presented: false,
+            min_client: (0, 0),
         }
     }
 
@@ -172,6 +182,48 @@ impl Window {
     #[must_use]
     pub const fn size_state(&self) -> WindowSizeState {
         self.size_state
+    }
+
+    /// Adopt the owning application's declared minimum client extent.
+    pub(crate) fn set_min_client_size(&mut self, min_w: u32, min_h: u32) {
+        self.min_client = (min_w, min_h);
+    }
+
+    /// The screen rectangle of this window's move surface: the span of title
+    /// band between its two command clusters. `None` for an undecorated
+    /// window, which has no title bar to be dragged by.
+    pub(crate) fn drag_surface(&self, scale: Scale, theme: &Theme) -> Option<Rect> {
+        let frame = self.frame.as_ref()?;
+        let band = frame.layout(self.bounds(), scale, theme).title_bar;
+        Some(frame.title_bar().layout(band, scale, theme).drag)
+    }
+
+    /// The smallest outer rectangle this window may be resized to, in
+    /// physical pixels: the greater of its own furniture's floor and the
+    /// owning application's declared minimum client extent grown by the
+    /// furniture band.
+    ///
+    /// Both floors are real. The furniture's is what keeps the title bar's
+    /// commands seated with a drag surface between them, so it holds even
+    /// for an application that declared nothing; the application's is what
+    /// keeps its content laying out, so it holds even where the furniture
+    /// would fit in less. Never zero on either axis.
+    pub(crate) fn min_outer_size(&self, scale: Scale, theme: &Theme) -> (u32, u32) {
+        let (band_w, band_h) = match self.band {
+            Some(insets) => (
+                insets.left.saturating_add(insets.right),
+                insets.top.saturating_add(insets.bottom),
+            ),
+            None => (0, 0),
+        };
+        let (floor_w, floor_h) = self
+            .frame
+            .as_ref()
+            .map_or((1, 1), |frame| frame.min_outer_size(scale, theme));
+        (
+            floor_w.max(self.min_client.0.saturating_add(band_w)).max(1),
+            floor_h.max(self.min_client.1.saturating_add(band_h)).max(1),
+        )
     }
 
     /// This window's window-manager-owned root-viewport scrollbars, if any.

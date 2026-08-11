@@ -148,6 +148,68 @@ fn unpremultiply_partial_alpha_still_recovers_the_colour() {
 }
 
 #[test]
+fn desaturate_full_saturation_is_identity() {
+    let p = Color::rgba(200, 40, 10, 255).premultiply();
+    assert_eq!(p.desaturate(255), p);
+}
+
+#[test]
+fn desaturate_none_greys_every_channel_and_keeps_alpha() {
+    let grey = RED.premultiply().desaturate(0);
+    // BT.601 luma of pure red: (77 * 255 + 128) >> 8.
+    assert_eq!(grey.r, 77);
+    assert_eq!(grey.r, grey.g);
+    assert_eq!(grey.g, grey.b);
+    assert_eq!(grey.a, 255);
+}
+
+#[test]
+fn desaturate_leaves_a_grey_pixel_alone() {
+    // The weights sum to exactly 256, so a grey is its own luma at every
+    // saturation.
+    let grey = Color::rgb(90, 90, 90).premultiply();
+    for saturation in [0, 1, 128, 254, 255] {
+        assert_eq!(grey.desaturate(saturation), grey, "saturation {saturation}");
+    }
+}
+
+#[test]
+fn desaturate_keeps_the_premultiplied_invariant() {
+    // Every channel of a premultiplied pixel is <= a, and desaturating may
+    // not break that: a translucent icon pixel would otherwise composite
+    // brighter than it covers.
+    for alpha in [0, 1, 17, 128, 254, 255] {
+        for (r, g, b) in [
+            (255, 0, 0),
+            (0, 255, 0),
+            (0, 0, 255),
+            (255, 255, 0),
+            (13, 200, 90),
+        ] {
+            let p = Color::rgba(r, g, b, alpha).premultiply();
+            for saturation in [0, 90, 200, 255] {
+                let out = p.desaturate(saturation);
+                assert_eq!(out.a, p.a);
+                assert!(
+                    out.r <= out.a && out.g <= out.a && out.b <= out.a,
+                    "{out:?} exceeds its own alpha (from {p:?} at {saturation})"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn desaturate_partway_lands_between_the_colour_and_its_grey() {
+    let p = RED.premultiply();
+    let part = p.desaturate(128);
+    let grey = p.desaturate(0);
+    assert!(part.r < p.r && part.r > grey.r);
+    // The channels the colour did not use rise off zero toward the grey.
+    assert!(part.g > 0 && part.g < grey.g);
+}
+
+#[test]
 fn theme_rgba_converts_to_color_by_field_move() {
     let rgba = tairix_theme::Rgba::new(10, 20, 30, 40);
     assert_eq!(
@@ -587,6 +649,41 @@ fn blit_composites_only_opaque_source_pixels() {
     assert_eq!(dst.get(2, 2), Some(BLUE.premultiply()));
     // Outside the blit footprint is also untouched.
     assert_eq!(dst.get(0, 0), Some(BLUE.premultiply()));
+}
+
+#[test]
+fn blit_desaturated_greys_the_source_without_touching_it() {
+    let mut dst = Surface::new(2, 2).expect("allocates");
+    let mut src = Surface::new(2, 2).expect("allocates");
+    src.fill(RED);
+    dst.blit_desaturated(0, 0, &src, 0);
+    assert_eq!(dst.get(0, 0), Some(RED.premultiply().desaturate(0)));
+    // The sprite itself is unchanged, so one cached copy serves every state.
+    assert_eq!(src.get(0, 0), Some(RED.premultiply()));
+}
+
+#[test]
+fn a_fully_saturated_blit_is_the_plain_blit() {
+    let mut src = Surface::new(3, 3).expect("allocates");
+    src.fill(RED);
+    src.set(1, 1, Color::rgba(0, 200, 40, 128).premultiply());
+    let mut plain = Surface::new(3, 3).expect("allocates");
+    plain.fill(BLUE);
+    let mut mapped = Surface::new(3, 3).expect("allocates");
+    mapped.fill(BLUE);
+    plain.blit(0, 0, &src);
+    mapped.blit_desaturated(0, 0, &src, 255);
+    assert_eq!(plain.pixels(), mapped.pixels());
+}
+
+#[test]
+fn a_desaturated_blit_clips_exactly_as_a_plain_one_does() {
+    let mut src = Surface::new(4, 4).expect("allocates");
+    src.fill(RED);
+    let mut dst = Surface::new(2, 2).expect("allocates");
+    dst.blit_desaturated(-1, -1, &src, 0);
+    let grey = RED.premultiply().desaturate(0);
+    assert!(dst.pixels().iter().all(|p| *p == grey));
 }
 
 #[test]

@@ -26,7 +26,8 @@ pub struct TaskId(pub u64);
 pub struct TaskEntry {
     /// The task's window id.
     pub id: TaskId,
-    /// The window title shown on the entry.
+    /// The window title. Model data, not ink: the slot draws the icon alone,
+    /// and this is what a context surface — the task menu — reads.
     pub title: String,
     /// `true` when the window is minimised (hidden but still running).
     pub minimised: bool,

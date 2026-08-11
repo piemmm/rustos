@@ -34,8 +34,14 @@ server and every app's client can never drift apart.
 - **Client** (`WindowClient` / `WindowEvents`): the app-side half over
   the injected `WindowTransport` seam (the `ipc_call` syscall in
   production). `create` validates and sends the window geometry, grant
-  handle, event endpoint, and title, returning the session-minted window
-  id; `present` sends a frame index plus damage, never pixels;
+  handle, event endpoint, title, and the app's `WindowSizing` — whether it
+  is resizable and the smallest client extent it can lay out at, `0`
+  declaring none — returning the session-minted window id. The minimum is
+  a *declaration*: the window manager enforces it (alongside its own
+  furniture floor) so a drag stops there, and an app never clamps a
+  granted size by resizing its own window back up, which would fight the
+  drag once per pointer sample. `present` sends a frame index plus
+  damage, never pixels;
   `set_backdrop_blur` asks for the content behind the window to be
   frosted, a radius in logical pixels with `0` off and anything above
   `WINDOW_BACKDROP_BLUR_MAX_PX` refused at decode; `close` tears the

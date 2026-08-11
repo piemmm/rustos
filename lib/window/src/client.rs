@@ -29,7 +29,7 @@ use tairix_abi::{Errno, ProcId};
 use tairix_geometry::{Point, Rect, Region};
 use tairix_input::{InputEvent, Key, Modifiers, NamedKey, PointerButton};
 
-use crate::server::PopupSpec;
+use crate::server::{PopupSpec, WindowSizing};
 
 /// High tag of an app's event-mailbox endpoint id (see
 /// [`event_endpoint_for`]).
@@ -300,12 +300,19 @@ impl<T: WindowTransport> WindowClient<T> {
     /// `title`, with this window's events delivered to the app's own
     /// `event_endpoint`.
     ///
-    /// `resizable` asks the window manager to present the window with a
+    /// `sizing` asks the window manager to present the window with a
     /// resize grabber and a live maximize/restore size toggle; a
-    /// fixed-size app passes `false` and is offered neither affordance
-    /// (and never receives a [`WindowEvent::Resized`]). A resizable app
-    /// re-lays-out to each reported size and re-maps its region with
-    /// [`Self::resize`].
+    /// fixed-size app passes [`WindowSizing::default()`] and is offered
+    /// neither affordance (and never receives a
+    /// [`WindowEvent::Resized`]). A resizable app re-lays-out to each
+    /// reported size and re-maps its region with [`Self::resize`].
+    ///
+    /// A resizable app declares its smallest workable client here, once
+    /// ([`WindowSizing::min_width_px`]/[`WindowSizing::min_height_px`],
+    /// `0` for no minimum of its own). The **window manager** enforces
+    /// it and will not resize below it, so the app lays out at exactly
+    /// the size it is told; an app that resized itself back up instead
+    /// would fight the drag, frame by frame.
     ///
     /// The size is the app's own choice; [`Self::desktop`] is how it
     /// learns the screen it must fit on before making that choice.
@@ -332,7 +339,7 @@ impl<T: WindowTransport> WindowClient<T> {
         frame_count: u32,
         surface: &DisplayMode,
         title: &str,
-        resizable: bool,
+        sizing: WindowSizing,
     ) -> Result<(u64, ProcId), Errno> {
         let title = WindowTitle::new(title)?;
         let request = WindowRequest::Create {
@@ -344,7 +351,9 @@ impl<T: WindowTransport> WindowClient<T> {
             stride_bytes: surface.stride_bytes,
             format: surface.format,
             title,
-            resizable,
+            resizable: sizing.resizable,
+            min_width_px: sizing.min_width_px,
+            min_height_px: sizing.min_height_px,
         }
         .to_le_bytes();
         let mut reply = [0u8; WINDOW_CREATE_REPLY_LEN];

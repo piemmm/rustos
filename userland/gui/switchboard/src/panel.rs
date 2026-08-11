@@ -406,8 +406,12 @@ pub const WIN_HEIGHT: u32 = 560;
 /// (see [`WIN_WIDTH`]).
 pub const WIN_RESIZABLE: bool = true;
 
-/// The narrowest client width the panel is laid out for; a resize below it
-/// is clamped up rather than drawn into a box the sections cannot fit.
+/// The narrowest client width the panel is laid out for, declared to the
+/// window manager when the window opens so a drag simply stops here rather
+/// than squeezing the sections into a box they cannot fit.
+///
+/// Declared, never self-imposed: an app that answered a resize by resizing
+/// its own window back up would fight the drag once per pointer sample.
 ///
 /// The floor is what every section's primary column must still seat — the
 /// widest unshrinkable row-command strip any section declares. The optional

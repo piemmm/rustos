@@ -2908,6 +2908,137 @@ fn a_title_bar_drag_moves_the_window() {
 }
 
 #[test]
+fn a_title_bar_drag_keeps_a_grabbable_patch_of_the_bar_on_screen() {
+    // A window may hang off any edge — that is normal on a desktop — but never
+    // so far that nothing is left to drag it back by.
+    let (mut c, id) = decorated_compositor();
+    let screen = c.screen_rect();
+    let mut router = InputRouter::new();
+    let drag = scan_title(&c, id, |p| matches!(p, FurniturePart::TitleBar)).expect("drag region");
+    router.handle(moved(drag.x, drag.y), &mut c);
+    router.handle(press_primary(), &mut c);
+
+    // The last pair is a pointer sample at the far end of the coordinate
+    // space: the clamp must saturate rather than overflow into a window
+    // parked somewhere impossible.
+    for (dx, dy) in [
+        (-4000, 0),
+        (4000, 0),
+        (0, -4000),
+        (0, 4000),
+        (i32::MIN / 2, i32::MAX / 2),
+    ] {
+        router.handle(moved(drag.x + dx, drag.y + dy), &mut c);
+        let surface = c.window_drag_surface(id).expect("decorated");
+        assert!(
+            surface.top() >= screen.top() && surface.bottom() <= screen.bottom(),
+            "the whole band stays on screen along its height ({dx},{dy})"
+        );
+        let visible = Rect::new(
+            surface.left().max(screen.left()),
+            surface.top(),
+            u32::try_from(surface.right().min(screen.right()) - surface.left().max(screen.left()))
+                .unwrap_or(0),
+            surface.height,
+        );
+        assert!(
+            visible.width >= surface.height.min(surface.width),
+            "a patch at least as wide as the band is tall is still reachable ({dx},{dy})"
+        );
+        let probe = Point::new(
+            i32::midpoint(visible.left(), visible.right()),
+            i32::midpoint(visible.top(), visible.bottom()),
+        );
+        assert_eq!(
+            c.frame_hit(id, probe),
+            Some(FurniturePart::TitleBar),
+            "and a press there would move the window ({dx},{dy})"
+        );
+    }
+}
+
+#[test]
+fn a_title_bar_drag_still_hangs_the_window_off_an_edge() {
+    // The clamp bounds the extreme, it does not glue windows to the screen:
+    // dragging a window part-way off an edge must still work.
+    let (mut c, id) = decorated_compositor();
+    let mut router = InputRouter::new();
+    let drag = scan_title(&c, id, |p| matches!(p, FurniturePart::TitleBar)).expect("drag region");
+    router.handle(moved(drag.x, drag.y), &mut c);
+    router.handle(press_primary(), &mut c);
+    router.handle(moved(drag.x - 60, drag.y), &mut c);
+
+    let bounds = c.window(id).expect("window").bounds();
+    assert!(
+        bounds.left() < c.screen_rect().left(),
+        "the window hangs off the leading edge"
+    );
+    assert_eq!(bounds.left(), 20 - 60, "by exactly the pointer delta");
+}
+
+#[test]
+fn hovering_a_window_command_lights_it_and_leaving_puts_it_out() {
+    // Pointer motion over a decoration is the window manager's own: nothing
+    // else can see it, so if the router does not hand it to the frame the
+    // buttons never respond to the pointer at all.
+    let mut c = new_compositor(mode(320, 240), BLUE).expect("compositor");
+    let id = titled_window(&mut c, 10, 10, 180, "Documents");
+    composite_checked(&mut c);
+    let mut router = InputRouter::new();
+
+    let close = command_rect(&c, id, WindowControlKind::Close);
+    let over = inside(close);
+    assert_eq!(
+        router.handle(moved(over.x, over.y), &mut c),
+        InputResponse::Ignored,
+        "a hover over furniture is no client's"
+    );
+    assert_eq!(
+        composite_checked(&mut c).rects(),
+        [close],
+        "exactly the command under the pointer lit up"
+    );
+
+    // Moving along the bar puts it out again, and costs only that control.
+    let drag = title_layout(&c, id).drag;
+    let away = Point::new(drag.left() + 1, i32::midpoint(drag.top(), drag.bottom()));
+    router.handle(moved(away.x, away.y), &mut c);
+    assert_eq!(
+        composite_checked(&mut c).rects(),
+        [close],
+        "the command the pointer left, and nothing else"
+    );
+
+    // And a sample that stays on the drag region costs nothing at all.
+    router.handle(moved(away.x + 1, away.y), &mut c);
+    assert!(!c.has_damage());
+    assert!(c.chrome_resident(id));
+}
+
+#[test]
+fn a_hover_leaving_a_window_for_another_puts_the_first_one_out() {
+    let mut c = new_compositor(mode(320, 240), BLUE).expect("compositor");
+    let first = titled_window(&mut c, 10, 10, 140, "first");
+    let second = titled_window(&mut c, 170, 10, 140, "second");
+    composite_checked(&mut c);
+    let mut router = InputRouter::new();
+
+    let lit = command_rect(&c, first, WindowControlKind::Close);
+    let over = inside(lit);
+    router.handle(moved(over.x, over.y), &mut c);
+    composite_checked(&mut c);
+
+    let next = command_rect(&c, second, WindowControlKind::Close);
+    let onto = inside(next);
+    router.handle(moved(onto.x, onto.y), &mut c);
+    let region = composite_checked(&mut c);
+    assert!(
+        region.rects().contains(&lit) && region.rects().contains(&next),
+        "the command left goes out as the one arrived at lights up"
+    );
+}
+
+#[test]
 fn a_resize_grab_resizes_the_window_from_the_corner() {
     let (mut c, id) = decorated_compositor();
     let mut router = InputRouter::new();
@@ -2936,23 +3067,36 @@ fn a_resize_grab_resizes_the_window_from_the_corner() {
 }
 
 #[test]
-fn a_resize_grab_clamps_to_a_minimum_and_escape_restores() {
+fn a_resize_grab_clamps_where_the_title_bar_still_works_and_escape_restores() {
     let (mut c, id) = decorated_compositor();
     let mut router = InputRouter::new();
     let before = c.window(id).unwrap().bounds();
+    let floor = c.window_min_outer_size(id).expect("decorated");
     let corner = Point::new(before.right() - 1, before.bottom() - 1);
 
     router.handle(moved(corner.x, corner.y), &mut c);
     router.handle(press_primary(), &mut c);
 
-    // Dragging far past the top-left cannot shrink the client below the floor.
+    // Dragging far past the top-left cannot shrink the window below the floor.
     router.handle(moved(before.left(), before.top()), &mut c);
     let shrunk = c.window(id).unwrap().bounds();
     assert!(shrunk.width < before.width && shrunk.height < before.height);
-    let client = c.window_client_rect(id).unwrap();
+    assert_eq!((shrunk.width, shrunk.height), floor);
+
+    // What the floor is *for*: at it the band still seats all four commands
+    // side by side, inside the window, with a drag surface left between them.
+    let layout = title_layout(&c, id);
+    let mut previous = shrunk.left();
+    for (kind, rect) in layout.controls {
+        assert!(
+            rect.width > 0 && rect.left() >= previous && rect.right() <= shrunk.right(),
+            "{kind:?} is seated inside the window and clear of the command before it"
+        );
+        previous = rect.right();
+    }
     assert!(
-        client.width >= 96 && client.height >= 64,
-        "the client is clamped to its minimum size"
+        layout.drag.width > 0 && layout.drag.height > 0,
+        "and the window can still be dragged by its title bar"
     );
 
     // Escape cancels the gesture and restores the exact pre-drag geometry.
@@ -2962,6 +3106,53 @@ fn a_resize_grab_clamps_to_a_minimum_and_escape_restores() {
     );
     assert_eq!(c.window(id).unwrap().bounds(), before);
     assert!(!router.is_resizing());
+}
+
+#[test]
+fn an_application_s_declared_minimum_raises_the_resize_floor() {
+    // The application states the smallest client it can lay out at; below it
+    // the app would either be squeezed into nonsense or fight the drag by
+    // resizing itself back, which is the bounce this closes.
+    let (mut c, id) = decorated_compositor();
+    let furniture = c.window_min_outer_size(id).expect("decorated");
+    let declared = (furniture.0 + 60, furniture.1 + 40);
+    assert!(c.set_window_min_client_size(id, declared.0, declared.1));
+    let raised = c.window_min_outer_size(id).expect("decorated");
+    assert!(
+        raised.0 > furniture.0 && raised.1 > furniture.1,
+        "a minimum larger than the furniture's own raises the floor"
+    );
+
+    let mut router = InputRouter::new();
+    let before = c.window(id).unwrap().bounds();
+    let corner = Point::new(before.right() - 1, before.bottom() - 1);
+    router.handle(moved(corner.x, corner.y), &mut c);
+    router.handle(press_primary(), &mut c);
+    router.handle(moved(before.left(), before.top()), &mut c);
+
+    let shrunk = c.window(id).unwrap().bounds();
+    assert_eq!((shrunk.width, shrunk.height), raised);
+    let client = c.window_client_rect(id).expect("decorated");
+    assert!(
+        client.width >= declared.0 && client.height >= declared.1,
+        "the client never shrinks below what its application declared"
+    );
+}
+
+#[test]
+fn a_declared_minimum_under_the_furniture_s_own_floor_cannot_lower_it() {
+    // Both floors are real, and the furniture's holds even for an application
+    // that asks for less: the title bar's commands must stay usable whatever
+    // the application would settle for.
+    let (mut c, id) = decorated_compositor();
+    let furniture = c.window_min_outer_size(id).expect("decorated");
+    assert!(c.set_window_min_client_size(id, 1, 1));
+    assert_eq!(c.window_min_outer_size(id), Some(furniture));
+
+    assert!(
+        !c.set_window_min_client_size(WindowId(9999), 200, 200),
+        "a minimum for a window the compositor does not know changes nothing"
+    );
 }
 
 #[test]
@@ -3794,17 +3985,21 @@ fn inside(rect: Rect) -> Point {
     Point::new(rect.left() + 1, rect.top() + 1)
 }
 
-/// The screen rect of one window-command control of a decorated window,
-/// resolved through the same layout the frame paints and hit-tests with.
-fn command_rect(c: &Compositor, id: WindowId, kind: WindowControlKind) -> Rect {
+/// The laid-out title bar of a decorated window in screen coordinates: the
+/// same geometry the frame paints and hit-tests with.
+fn title_layout(c: &Compositor, id: WindowId) -> tairix_controls::TitleBarLayout {
     let window = c.window(id).expect("window");
     let frame = c.window_frame(id).expect("decorated");
     let band = frame
         .layout(window.bounds(), c.scale(), c.theme())
         .title_bar;
-    frame
-        .title_bar()
-        .layout(band, c.scale(), c.theme())
+    frame.title_bar().layout(band, c.scale(), c.theme())
+}
+
+/// The screen rect of one window-command control of a decorated window,
+/// resolved through the same layout the frame paints and hit-tests with.
+fn command_rect(c: &Compositor, id: WindowId, kind: WindowControlKind) -> Rect {
+    title_layout(c, id)
         .controls
         .iter()
         .find(|(k, _)| *k == kind)
@@ -3826,20 +4021,11 @@ fn a_pointer_sample_crossing_the_drag_region_repaints_nothing() {
 
     // Just past the leading cluster, at mid-height: the band's corners are
     // commands, and a sample on one of those is a hover, not idle motion.
-    let frame = c.window_frame(id).expect("decorated");
-    let band = frame
-        .layout(c.window(id).expect("window").bounds(), c.scale(), c.theme())
-        .title_bar;
-    let controls = frame
-        .title_bar()
-        .layout(band, c.scale(), c.theme())
-        .controls;
-    let origin = Point::new(
-        controls[1].1.right() + 1,
-        i32::midpoint(band.top(), band.bottom()),
-    );
+    let layout = title_layout(&c, id);
+    let drag = layout.drag;
+    let origin = Point::new(drag.left(), i32::midpoint(drag.top(), drag.bottom()));
     assert!(
-        origin.x + 8 < controls[2].1.left(),
+        origin.x + 8 < drag.right(),
         "the samples must stay inside the drag span"
     );
     for step in 0..8 {

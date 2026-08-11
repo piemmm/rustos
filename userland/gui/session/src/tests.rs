@@ -61,7 +61,7 @@ use crate::{
     DESKTOP_REVEALED, DESKTOP_REVEALED_MESSAGE, DESKTOP_SESSION_RANGE_END,
     DESKTOP_SESSION_RANGE_START, NO_DEADLINE_NS, SWITCHBOARD_RUN_PATH,
 };
-use tairix_window::PinDecision;
+use tairix_window::{PinDecision, WindowSizing};
 
 /// A valid SVG asset (a single filled triangle on a square grid) that decodes
 /// to a non-empty vector form, so loading it is observably different from the
@@ -7373,6 +7373,16 @@ fn desktop_info_reports_compositor_state() {
 
 // --- App-owned popup surfaces ---------------------------------------------
 
+/// A resizable window declaring no minimum client extent of its own, so a
+/// drag is bounded by the window manager's furniture floor alone.
+fn resizable_sizing() -> WindowSizing {
+    WindowSizing {
+        resizable: true,
+        min_width_px: 0,
+        min_height_px: 0,
+    }
+}
+
 /// A frame geometry of `width`×`height` in the compositor's own format —
 /// what the window engine hands the host for a create or a popup.
 fn served_mode(width: u32, height: u32) -> DisplayMode {
@@ -7420,7 +7430,13 @@ fn open_parent_and_popup(
 ) -> (WindowId, WindowId) {
     with_window_host(shell, comp, windows, |host| {
         assert_eq!(
-            host.window_opened(window_owner(1), 1, &served_mode(320, 240), "Terminal", true),
+            host.window_opened(
+                window_owner(1),
+                1,
+                &served_mode(320, 240),
+                "Terminal",
+                resizable_sizing(),
+            ),
             Ok(())
         );
         assert_eq!(
@@ -7580,7 +7596,13 @@ fn keep_popups_stacked_is_idle_with_no_popup_open() {
     let mut windows = SessionWindows::new();
     with_window_host(&mut shell, &mut comp, &mut windows, |host| {
         assert_eq!(
-            host.window_opened(window_owner(1), 1, &served_mode(320, 240), "Terminal", true),
+            host.window_opened(
+                window_owner(1),
+                1,
+                &served_mode(320, 240),
+                "Terminal",
+                resizable_sizing(),
+            ),
             Ok(())
         );
     });
@@ -8225,8 +8247,14 @@ fn open_owned_window(
     window_id: u64,
 ) {
     with_window_host(shell, comp, windows, |host| {
-        host.window_opened(owner, window_id, &served_mode(320, 240), "App", true)
-            .expect("the window opens");
+        host.window_opened(
+            owner,
+            window_id,
+            &served_mode(320, 240),
+            "App",
+            resizable_sizing(),
+        )
+        .expect("the window opens");
     });
 }
 

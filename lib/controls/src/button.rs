@@ -21,7 +21,7 @@ use tairix_theme::{TextRole, Theme};
 use crate::paint::{
     key_activation, paint_bead, paint_chevron, paint_icon_slot, paint_plate, plate_border,
     pointer_activation, resolve_bead, resolve_frame, resolve_rail, role_font, surface_rect, to_i32,
-    BeadShape, ChevronDir, PlateStyle,
+    BeadShape, ChevronDir, PlateStyle, FULL_COLOUR,
 };
 use crate::state::{
     ActivityState, ControlDisposition, ControlRole, ControlState, PlateSeating, PointerState,
@@ -624,7 +624,14 @@ impl IconButton {
             if side > 0 {
                 let ix = x + (w.saturating_sub(side)) / 2;
                 let iy = y + (h.saturating_sub(side)) / 2;
-                paint_icon_slot(surface, ix, iy, side, self.icon, res.label, artwork);
+                paint_icon_slot(
+                    surface,
+                    (ix, iy, side),
+                    self.icon,
+                    res.label,
+                    artwork,
+                    FULL_COLOUR,
+                );
             }
         }
     }

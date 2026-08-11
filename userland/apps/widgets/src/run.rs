@@ -45,7 +45,7 @@ mod program {
     use tairix_widgets::Gallery;
     use tairix_window::{
         key_input_event, pointer_input_events, present_damage, Desktop, EventSource, Repaint,
-        WindowClient, WindowEvents, WindowTransport,
+        WindowClient, WindowEvents, WindowSizing, WindowTransport,
     };
 
     /// The gallery window's logical width in physical pixels.
@@ -434,9 +434,15 @@ mod program {
         scale: Scale,
         frames: &mut [u8],
     ) -> Result<(GalleryWindow, ProcId, Gallery), i32> {
-        let Ok((window, server)) =
-            client.create(grant, event_endpoint, FRAME_COUNT, mode, "widgets", false)
-        else {
+        // Fixed size: the gallery is never resized, so it declares no floor.
+        let Ok((window, server)) = client.create(
+            grant,
+            event_endpoint,
+            FRAME_COUNT,
+            mode,
+            "widgets",
+            WindowSizing::default(),
+        ) else {
             return Err(fail(EXIT_NO_WINDOW, "desktop session refused the window"));
         };
         let Some(pixels) = Surface::new(mode.width_px, mode.height_px) else {

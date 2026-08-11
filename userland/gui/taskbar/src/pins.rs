@@ -15,9 +15,7 @@
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use tairix_controls::{
-    ControlState, PointerState, TaskVisibility, TaskbarItem, TaskbarPresentation,
-};
+use tairix_controls::{ControlState, PointerState, TaskVisibility, TaskbarItem};
 use tairix_icon::IconKind;
 use tairix_proglib::EntryId;
 use tairix_raster::Surface;
@@ -209,8 +207,7 @@ impl PinStrip {
             PointerState::None
         };
         Some(
-            TaskbarItem::new(pin.label.clone(), pin.icon)
-                .with_presentation(TaskbarPresentation::Icon)
+            TaskbarItem::new(pin.icon)
                 .with_visibility(self.visibility(index, tasks))
                 .with_state(ControlState::idle().with_pointer(pointer)),
         )

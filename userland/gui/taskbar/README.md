@@ -10,11 +10,20 @@ owns:
 - **Layout** — `TaskbarConfig` (edge, thickness, per-region extents) and
   `BarLayout::compute`, which lays the bar out along its main axis: the two
   permanent leading launcher buttons (**Library**, then **Files** — fixed
-  order, never removable), the **pin strip** between the launchers and tasks,
-  the running-task list in the middle, the notification-icon area packed
-  before the clock, and the clock anchored to the trailing end. All
-  arithmetic saturates, so a degenerate screen size fails closed inside the
-  bar (`AGENTS.md` §2.9).
+  order, never removable) divided by the **separator** rule, the **pin strip**
+  between the launchers and tasks, the running-task list in the middle, the
+  notification-icon area packed before the clock, and the clock anchored to
+  the trailing end. All arithmetic saturates, so a degenerate screen size
+  fails closed inside the bar (`AGENTS.md` §2.9).
+- **The separator** — `BarLayout::separator`, a rule one `border_thickness`
+  along the bar's main axis (floored at one physical pixel so it survives a
+  small scale), spanning the cross axis inset by one `control_inset` from
+  both long edges, filled in the theme's `border` colour. It sits a
+  `control_gap` past the Library button and pushes Files, the pins, and every
+  trailing region along by the whole gutter, so the file manager reads as a
+  peer of the pins rather than of the library. It is decoration: `hit_test`
+  never reports it, and a bar too short to reach it or too thin to inset it
+  simply lays out `Rect::EMPTY` and draws nothing.
 - **Variable DPI** — the bar's extents, thickness, and corner radius are
   *logical* pixels (the screen dimensions are physical). `BarLayout::compute`
   takes a `tairix-geometry` `Scale` and converts the logical lengths to
@@ -57,7 +66,9 @@ owns:
 - **Hit-testing** — `BarLayout::hit_test` maps a pointer to the `Hit` element
   under it (the Library button, the Files button, a pin, a task, a
   notification icon, the clock, or the Switchboard capsule) for input
-  routing. A region slot that does not fit is `Rect::EMPTY` and is never hit.
+  routing. A region slot that does not fit is `Rect::EMPTY` and is never hit,
+  and the separator is not a region at all: a press on the rule lands on the
+  bare bar.
 - **Input routing** — `TaskbarInput` consumes the shared `tairix-input`
   `InputEvent` stream (the same one the window manager routes) and turns a
   primary press into a typed `TaskbarResponse`: `OpenLibrary` (the Library
@@ -148,19 +159,22 @@ owns:
   `tairix-raster` `Surface` using the taskbar's own theme, taking the caller's
   `tairix_icon::IconArtwork` lookup as its last argument: the two leading
   `IconButton`s draw with their live hover state over the shipped `Library`
-  and `Folder` artwork, then each **pin** and **task slot** is drawn as a
-  shared `TaskbarItem` (pins use the `Icon` presentation; tasks
-  `IconAndLabel`). Every icon on the bar is **bar-seated**
-  (`tairix_controls::PlateSeating::Bar`): it wears no perimeter in any state and
-  no plate at all while it has nothing of its own to state, so the strip reads
-  as one bar rather than a row of boxed buttons, and a hover shows as the shared
-  pointer wash under that one slot. The rule itself lives in `lib/controls`; the
-  bar only chooses the seating (`AGENTS.md` §2.2). Each remaining region is
-  filled with its theme role, then
-  the notification icons, clock, and titles are drawn on top. `pin_icon_side`
-  and `task_icon_side` expose the exact pixel geometry of each kind of slot,
-  so owners rasterise at the drawn size. The surface is rectangular — the
-  window manager rounds it — and the colour/blit algebra is reused from
+  and `Folder` artwork, then each **pin** and **task slot** is drawn as the
+  same icon-only `TaskbarItem`: one centred, plate-sized icon and its status
+  marks, never a label, so pins and running tasks read as one strip of equal
+  icons. A window's title stays model data the context menu reads
+  (`TaskEntry::title`), never ink on the bar. Every icon on the bar is
+  **bar-seated** (`tairix_controls::PlateSeating::Bar`): it wears no perimeter
+  in any state and no plate at all while it has nothing of its own to state, so
+  the strip reads as one bar rather than a row of boxed buttons, and a hover
+  shows as the shared pointer wash under that one slot. The rule itself lives
+  in `lib/controls`; the bar only chooses the seating (`AGENTS.md` §2.2). Each
+  remaining region is filled with its theme role, then the notification icons
+  and the clock are drawn on top. `pin_icon_side` and `task_icon_side` expose
+  the exact pixel geometry of each kind of slot, so owners rasterise at the
+  drawn size; both slots are icon-only, so the two agree wherever the
+  configured extents do — and by default they do. The surface is rectangular —
+  the window manager rounds it — and the colour/blit algebra is reused from
   `lib/*` (`AGENTS.md` §2.2).
   The renderer holds a `tairix-reclaim` `ReclaimCache` of the rasterised
   notification glyphs across frames, built by `icon_cache` from the shared

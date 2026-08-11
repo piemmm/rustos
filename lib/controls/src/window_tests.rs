@@ -4,8 +4,8 @@
 //! These cover the command glyphs (distinct per command, and the size toggle
 //! reflecting its *next* action), the shared window-control state model
 //! (pointer/keyboard activation, disabled/denied), the title bar (the two
-//! corner command clusters and the identity group centred between them, title
-//! sanitisation, activate/drag/control routing,
+//! corner command clusters and the identity group left-justified in the span
+//! between them, title sanitisation, activate/drag/control routing,
 //! keyboard focus), the window frame's furniture hit map (the client interior
 //! against furniture, the resize edges that overlap the client's outermost
 //! pixels, activation not changing geometry), the resize grabber (drag capture
@@ -19,15 +19,19 @@ use tairix_input::{InputEvent, Key, NamedKey, PointerButton};
 use tairix_raster::{Color, Pixel, Surface};
 use tairix_theme::{Rgba, TextRole, Theme};
 
+use alloc::string::String;
+
+use crate::button::{Button, ButtonContent};
 use crate::damage::sink;
 use crate::state::{
-    AuthorityState, ControlState, PointerState, SizeAction, WindowActivationState,
+    AuthorityState, ControlRole, ControlState, PointerState, SizeAction, WindowActivationState,
     WindowControlKind, WindowFurnitureState, WindowSizeState,
 };
 use crate::testkit::high_contrast;
 use crate::window::{
     FrameInsets, FurniturePart, ResizeEdge, ResizeEvent, ResizeGrabber, ScrollCorner, TitleBar,
     TitleBarEvent, TitleHit, WindowControl, WindowControlAction, WindowFrame,
+    IDENTITY_SATURATION_ACTIVE, IDENTITY_SATURATION_INACTIVE,
 };
 
 fn premul(rgba: Rgba) -> Pixel {
@@ -498,23 +502,38 @@ fn the_commands_seat_two_in_each_corner_in_reading_order() {
 }
 
 #[test]
-fn the_identity_group_is_centred_between_the_clusters() {
+fn the_identity_group_is_left_justified_against_the_leading_commands() {
     let theme = Theme::dark();
     let bounds = title_bounds();
+    let gap = metric(theme.metrics().control_gap);
+    let identity_gap = metric(theme.metrics().control_inset);
     let mut bar = TitleBar::new(furniture());
     bar.set_identity(Some(IconKind::AppBundle));
     bar.set_title("Report");
     let layout = bar.layout(bounds, Scale::ONE, &theme);
 
-    // Both clusters are the same width, so the span between them is centred
-    // in the band and a group centred in the span is centred in the window.
-    // Integer halving can leave the odd pixel on the trailing side.
-    let before = layout.icon.left() - bounds.left();
-    let after = bounds.right() - layout.title.right();
-    assert!(
-        (before - after).abs() <= 1,
-        "icon+title should sit centred, not {before} in and {after} out"
+    assert_eq!(
+        layout.icon.left(),
+        layout.controls[1].1.right() + gap,
+        "the icon starts one gap past the last leading command"
     );
+    assert_eq!(
+        layout.title.left(),
+        layout.icon.right() + identity_gap,
+        "and the text follows the slot by the identity gap"
+    );
+    assert!(
+        layout.title.right() < layout.controls[2].1.left(),
+        "a title this short leaves the rest of the span empty"
+    );
+
+    // The point of justifying left: the group starts in the same place
+    // whatever the title says, so the eye finds it without hunting.
+    bar.set_title("A considerably longer window title");
+    let longer = bar.layout(bounds, Scale::ONE, &theme);
+    assert_eq!(longer.icon, layout.icon);
+    assert_eq!(longer.title.left(), layout.title.left());
+    assert!(longer.title.width > layout.title.width);
 }
 
 #[test]
@@ -546,7 +565,7 @@ fn a_title_wider_than_the_span_fills_it_and_elides_on_the_right() {
     assert_eq!(
         layout.icon.left(),
         layout.controls[1].1.right() + gap,
-        "a squeezed group pins to the span's leading edge"
+        "the group still starts at the span's leading edge"
     );
     assert_eq!(
         layout.title.right(),
@@ -608,6 +627,174 @@ fn a_band_too_narrow_for_both_clusters_abuts_them_rather_than_stacking_them() {
     }
     assert_eq!(layout.icon, Rect::EMPTY, "no span is left for an identity");
     assert_eq!(layout.title.width, 0, "nor for a title");
+}
+
+#[test]
+fn the_minimum_band_is_the_narrowest_that_still_leaves_a_drag_surface() {
+    // The floor a window manager sizes against: at it the commands are seated
+    // and a comfortable target is left to drag by; under it that target is
+    // already too thin to keep hitting.
+    let bar = TitleBar::new(furniture());
+    let half_scale = Scale::from_percent(50).expect("scale");
+    let double = Scale::from_percent(200).expect("scale");
+    for theme in [Theme::dark(), Theme::light(), high_contrast()] {
+        for scale in [Scale::ONE, half_scale, double] {
+            let extent = scale
+                .scale_length(theme.metrics().window_control_extent)
+                .max(1);
+            let min = TitleBar::min_band_width(scale, &theme);
+            let at = bar.layout(Rect::new(0, 0, min, 28), scale, &theme);
+            assert_eq!(
+                at.drag.width, extent,
+                "the floor reserves exactly one command's worth of drag surface"
+            );
+            for (i, (kind, rect)) in at.controls.iter().enumerate() {
+                assert!(rect.width > 0, "{kind:?} is seated");
+                for (other_kind, other) in &at.controls[i + 1..] {
+                    assert!(
+                        rect.intersection(other).is_empty(),
+                        "{kind:?} is drawn over {other_kind:?}"
+                    );
+                }
+            }
+            let under = bar.layout(Rect::new(0, 0, min.saturating_sub(1), 28), scale, &theme);
+            assert!(
+                under.drag.width < extent,
+                "and one pixel under it the drag surface is under that target"
+            );
+        }
+    }
+}
+
+#[test]
+fn the_drag_span_is_the_band_between_the_clusters_and_touches_no_command() {
+    let theme = Theme::dark();
+    let mut bar = TitleBar::new(furniture());
+    bar.set_identity(Some(IconKind::AppBundle));
+    bar.set_title("Documents");
+    let gap = metric(theme.metrics().control_gap);
+    for width in [60, 152, 200, 300, 1920] {
+        let layout = bar.layout(Rect::new(0, 0, width, 28), Scale::ONE, &theme);
+        for (kind, rect) in layout.controls {
+            assert!(
+                layout.drag.intersection(&rect).is_empty(),
+                "the drag span reaches {kind:?} at {width}px"
+            );
+        }
+        if layout.drag.width > 0 {
+            assert_eq!(layout.drag.left(), layout.controls[1].1.right() + gap);
+            assert_eq!(layout.drag.right(), layout.controls[2].1.left() - gap);
+            assert!(
+                layout.drag.intersection(&layout.title) == layout.title || layout.title.width == 0,
+                "the title is drawn inside the span at {width}px"
+            );
+        }
+    }
+}
+
+#[test]
+fn the_minimum_outer_size_leaves_a_usable_band_and_a_real_client() {
+    let frame = WindowFrame::new(furniture());
+    let double = Scale::from_percent(200).expect("scale");
+    for theme in [Theme::dark(), Theme::light()] {
+        for scale in [Scale::ONE, double] {
+            let (w, h) = frame.min_outer_size(scale, &theme);
+            let layout = frame.layout(Rect::new(0, 0, w, h), scale, &theme);
+            assert!(
+                layout.title_bar.width >= TitleBar::min_band_width(scale, &theme),
+                "the band the title bar is given is at least the band it needs"
+            );
+            assert!(
+                layout.client.width > 0 && layout.client.height > 0,
+                "and a window at the floor is still a window, not a strip of chrome"
+            );
+            let insets = frame.insets(scale, &theme);
+            assert_eq!(
+                frame.outer_for_client(layout.client, scale, &theme),
+                Rect::new(0, 0, w, h),
+                "the floor round-trips through the band {insets:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn a_hovered_command_wears_the_same_plate_an_ordinary_button_does() {
+    // Lighter under the pointer on a dark theme, darker on a light one, by
+    // the amount every other control moves: one shared plate definition, so a
+    // decoration can never drift into a hover of its own.
+    for theme in [Theme::dark(), Theme::light()] {
+        let palette = theme.palette();
+        let bounds = Rect::new(0, 0, 24, 24);
+        let mut control = WindowControl::new(WindowControlKind::Close);
+
+        let mut resting = Surface::new(24, 24).expect("surface");
+        control.render(&mut resting, bounds, Scale::ONE, &theme);
+        assert!(
+            !has_pixel(&resting, premul(palette.surface_hover)),
+            "a resting command shows only its glyph on the bar's own surface"
+        );
+
+        control.on_pointer(&moved(12, 12), bounds, &mut sink());
+        let mut hovered = Surface::new(24, 24).expect("surface");
+        control.render(&mut hovered, bounds, Scale::ONE, &theme);
+        assert!(
+            has_pixel(&hovered, premul(palette.surface_hover)),
+            "the pointer lifts the plate to the shared hover wash"
+        );
+        let plate = Rect::new(0, 0, 60, 24);
+        let mut button = Button::new(
+            ButtonContent::Label(String::from("Open")),
+            ControlRole::Neutral,
+        );
+        button.on_pointer(&moved(30, 12), plate, &mut sink());
+        let mut widget = Surface::new(60, 24).expect("surface");
+        button.render(&mut widget, plate, Scale::ONE, &theme);
+        assert!(
+            has_pixel(&widget, premul(palette.surface_hover)),
+            "which is the very wash an ordinary button hovers to"
+        );
+    }
+}
+
+#[test]
+fn a_command_states_itself_on_its_plate_and_never_on_an_edge() {
+    // The bar's own surface runs right up to a command, so an edge of its own
+    // would read as a line drawn round the window's corner rather than as
+    // feedback on a button. Only the keyboard ring may carry the accent, and
+    // it sits inside the plate.
+    for theme in [Theme::dark(), Theme::light(), high_contrast()] {
+        let palette = theme.palette();
+        let bounds = Rect::new(0, 0, 24, 24);
+        let edges = |control: &WindowControl, state: &str| {
+            let mut surface = Surface::new(24, 24).expect("surface");
+            control.render(&mut surface, bounds, Scale::ONE, &theme);
+            assert!(
+                !has_pixel(&surface, premul(palette.rim_active)),
+                "a {state} command draws the reactive rim"
+            );
+            assert!(
+                !has_pixel(&surface, premul(palette.rim)),
+                "a {state} command draws the quiet rim"
+            );
+        };
+
+        let mut control = WindowControl::new(WindowControlKind::Close);
+        edges(&control, "resting");
+        control.on_pointer(&moved(12, 12), bounds, &mut sink());
+        edges(&control, "hovered");
+        control.on_pointer(&PRESS, bounds, &mut sink());
+        edges(&control, "pressed");
+
+        let mut focused = WindowControl::new(WindowControlKind::Close);
+        focused.set_focused(true);
+        let mut surface = Surface::new(24, 24).expect("surface");
+        focused.render(&mut surface, bounds, Scale::ONE, &theme);
+        assert!(
+            has_pixel(&surface, premul(palette.rim_active)),
+            "the keyboard ring is the one accent mark a command wears"
+        );
+    }
 }
 
 #[test]
@@ -1016,30 +1203,30 @@ fn inactive_title_bar_reads_quieter() {
     assert_ne!(a.pixels(), b.pixels());
 }
 
-/// A bar with no identity reserves nothing: its title is the whole centred
-/// group, and it draws exactly what it drew before identities existed.
+/// A bar with no identity reserves nothing: its title is the whole group, and
+/// it draws exactly what it drew before identities existed.
 #[test]
-fn a_bar_without_an_identity_centres_its_title_alone() {
+fn a_bar_without_an_identity_leads_with_its_title_alone() {
     let theme = Theme::dark();
     let bounds = title_bounds();
+    let gap = metric(theme.metrics().control_gap);
     let mut bar = TitleBar::new(furniture());
     bar.set_title("Report");
     let layout = bar.layout(bounds, Scale::ONE, &theme);
     assert_eq!(bar.identity(), None);
     assert_eq!(layout.icon, Rect::EMPTY);
     assert_eq!(layout.title.height, bounds.height);
-    let before = layout.title.left() - bounds.left();
-    let after = bounds.right() - layout.title.right();
-    assert!(
-        (before - after).abs() <= 1,
-        "the text alone is the centred group, not {before} in and {after} out"
+    assert_eq!(
+        layout.title.left(),
+        layout.controls[1].1.right() + gap,
+        "the text takes the leading edge the slot would have had"
     );
 }
 
-/// An identity leads the centred group with a square slot and the title text
-/// follows it; the slot is the side the owner is told to rasterise at.
+/// An identity leads the group with a square slot and the title text follows
+/// it; the slot is the side the owner is told to rasterise at.
 #[test]
-fn an_identity_leads_the_centred_group_and_the_title_follows_it() {
+fn an_identity_leads_the_group_and_the_title_follows_it() {
     let theme = Theme::dark();
     let bounds = title_bounds();
     let mut plain = TitleBar::new(furniture());
@@ -1063,9 +1250,14 @@ fn an_identity_leads_the_centred_group_and_the_title_follows_it() {
         with.title.width, bare.title.width,
         "the same title draws at the same width either way"
     );
+    assert_eq!(
+        with.icon.left(),
+        bare.title.left(),
+        "the slot takes the leading edge the bare title had"
+    );
     assert!(
-        with.icon.left() < bare.title.left() && with.title.left() > bare.title.left(),
-        "the slot widens the group, so the whole of it re-centres"
+        with.title.left() > bare.title.left(),
+        "and pushes the text along by the slot and its gap"
     );
     // The slot never reaches a control.
     for (_, rect) in with.controls {
@@ -1111,11 +1303,69 @@ fn an_identity_draws_its_artwork_and_falls_back_to_the_glyph() {
         drawn.pixels(),
         "the owner's artwork replaces the glyph"
     );
-    assert!(has_pixel(&drawn, premul(theme.palette().accent)));
+    // The artwork is desaturated by activation, so its ink is the accent
+    // pulled toward its own luminance rather than the accent itself.
+    assert!(has_pixel(
+        &drawn,
+        premul(theme.palette().accent).desaturate(IDENTITY_SATURATION_ACTIVE)
+    ));
 
     // Artwork offered to a bar with no identity is ignored.
     bar.set_identity(None);
     assert_eq!(paint(&bar, Some(&art)).pixels(), bare.pixels());
+}
+
+/// Colour on the identity icon says "this is the window in hand": an active
+/// window's artwork is drawn a shade off full colour and an inactive one's
+/// fully grey, so a glance finds the focused window by its one coloured icon.
+#[test]
+fn the_identity_artwork_desaturates_with_the_frame() {
+    let theme = Theme::dark();
+    let bounds = title_bounds();
+    let ink = Rgba::new(0xd0, 0x20, 0x20, 0xff);
+    let mut bar = TitleBar::new(furniture());
+    bar.set_identity(Some(IconKind::AppBundle));
+    bar.set_title("Report");
+    let side = bar.icon_side(bounds, Scale::ONE, &theme);
+    assert!(side > 0, "the band is tall enough for a slot");
+    let mut art = Surface::new(side, side).expect("artwork");
+    art.fill_rect(0, 0, side, side, Color::from(ink));
+
+    let paint = |activation: WindowActivationState| {
+        let mut state = furniture();
+        state.activation = activation;
+        let mut bar = TitleBar::new(state);
+        bar.set_identity(Some(IconKind::AppBundle));
+        bar.set_title("Report");
+        let mut surface = Surface::new(bounds.width, bounds.height).expect("surface");
+        bar.render(&mut surface, bounds, Scale::ONE, &theme, Some(&art));
+        surface
+    };
+
+    let active = paint(WindowActivationState::Active);
+    assert!(
+        !has_pixel(&active, premul(ink)),
+        "an active window's icon is still a shade off full colour"
+    );
+    assert!(
+        has_pixel(&active, premul(ink).desaturate(IDENTITY_SATURATION_ACTIVE)),
+        "…but keeps nearly all of it"
+    );
+
+    let inactive = paint(WindowActivationState::Inactive);
+    let grey = premul(ink).desaturate(IDENTITY_SATURATION_INACTIVE);
+    assert!(grey.r == grey.g && grey.g == grey.b, "{grey:?} is not grey");
+    let slot = bar.layout(bounds, Scale::ONE, &theme).icon;
+    for y in slot.top()..slot.bottom() {
+        for x in slot.left()..slot.right() {
+            let at = |v: i32| u32::try_from(v).expect("an on-surface coordinate");
+            assert_eq!(
+                inactive.get(at(x), at(y)),
+                Some(grey),
+                "colour survives at ({x}, {y}) on an unfocused window"
+            );
+        }
+    }
 }
 
 /// A title too wide for its region ends in the shared elision mark rather

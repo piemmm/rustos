@@ -103,11 +103,18 @@ pub trait CallerIdentity {
 /// re-derives protocol policy.
 pub trait WindowHost {
     /// A validated `Create` opened `window_id` with `surface` geometry,
-    /// titled `title`, for the attested `owner`. `resizable` is the app's
-    /// request that the window manager present the window with a resize
-    /// grabber and a live maximize/restore size toggle (a fixed-size app
-    /// passes `false`). An error refuses the create: the engine unmaps the
-    /// region and replies the refusal, keeping engine and host in lockstep.
+    /// titled `title`, for the attested `owner`. `sizing` is what the app
+    /// asks of the window manager's sizing: whether to present the window
+    /// with a resize grabber and a live maximize/restore size toggle, and
+    /// the smallest client size it may then be resized to. An error refuses
+    /// the create: the engine unmaps the region and replies the refusal,
+    /// keeping engine and host in lockstep.
+    ///
+    /// The host is the **enforcer** of
+    /// [`WindowSizing::min_width_px`]/[`WindowSizing::min_height_px`]: it
+    /// resizes no smaller than the larger of that and its own frame
+    /// furniture's floor. The app states its minimum here once and lays out
+    /// at whatever size it is given, so nothing resizes itself back.
     ///
     /// `owner` is the kernel-attested caller, not anything the client
     /// said — it is the only trustworthy answer to "which application is
@@ -124,7 +131,7 @@ pub trait WindowHost {
         window_id: u64,
         surface: &DisplayMode,
         title: &str,
-        resizable: bool,
+        sizing: WindowSizing,
     ) -> Result<(), Errno>;
 
     /// A validated `CreatePopup` opened undecorated popup `window_id` of
@@ -311,6 +318,40 @@ const fn surface_of(
     }
 }
 
+/// What an app asks of the window manager's sizing of one window: whether
+/// it may be resized at all, and the smallest client it may be resized to.
+///
+/// The pair travels as one value because the minimum only means something
+/// for a resizable window — a minimum declared without `resizable` is
+/// refused at decode, since a window that is never resized can never be
+/// measured against a floor.
+///
+/// One definition serves both halves: the app fills it in for
+/// [`WindowClient::create`] and the engine hands the host the same value,
+/// so the two cannot drift.
+///
+/// [`WindowClient::create`]: crate::client::WindowClient::create
+#[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
+pub struct WindowSizing {
+    /// Whether the window manager presents the window with a resize
+    /// grabber and a live maximize/restore size toggle. A fixed-size app
+    /// leaves this `false` and is offered neither affordance (and never
+    /// receives a `WindowEvent::Resized`).
+    pub resizable: bool,
+    /// Smallest client width, in physical pixels, the window manager may
+    /// resize the window to; `0` declares no minimum of the app's own,
+    /// leaving the frame furniture's floor to stand alone.
+    ///
+    /// The window manager enforces it, never the app: an app states the
+    /// floor here once and then lays out at exactly the size it is told.
+    /// An app that resized itself back up instead would fight the drag,
+    /// frame by frame.
+    pub min_width_px: u32,
+    /// Smallest client height, in physical pixels, on the same terms as
+    /// [`min_width_px`](Self::min_width_px).
+    pub min_height_px: u32,
+}
+
 /// Everything one validated `Create` asks for, in one place, so the
 /// engine's create path takes the request as a unit.
 #[derive(Copy, Clone)]
@@ -320,7 +361,7 @@ struct CreateSpec {
     frame_count: u32,
     surface: DisplayMode,
     title: WindowTitle,
-    resizable: bool,
+    sizing: WindowSizing,
 }
 
 /// Everything one validated `Resize` asks for, in one place, so the
@@ -478,6 +519,8 @@ impl<M: ShmMapper> WindowServer<M> {
                 format,
                 title,
                 resizable,
+                min_width_px,
+                min_height_px,
             } => {
                 let spec = CreateSpec {
                     shm_handle,
@@ -485,7 +528,11 @@ impl<M: ShmMapper> WindowServer<M> {
                     frame_count,
                     surface: surface_of(width_px, height_px, stride_bytes, format),
                     title,
-                    resizable,
+                    sizing: WindowSizing {
+                        resizable,
+                        min_width_px,
+                        min_height_px,
+                    },
                 };
                 create_reply(reply, self.create(host, caller, spec), self.server)
             }
@@ -512,6 +559,21 @@ impl<M: ShmMapper> WindowServer<M> {
                 };
                 create_reply(reply, self.create_popup(host, caller, spec), self.server)
             }
+            ref other => self.dispatch_status_op(host, caller, other, reply),
+        }
+    }
+
+    /// Act on one decoded request that answers with a plain status frame —
+    /// everything but the two create requests, which mint a window id and so
+    /// answer with the create-reply frame instead.
+    fn dispatch_status_op(
+        &mut self,
+        host: &mut dyn WindowHost,
+        caller: ProcId,
+        decoded: &WindowRequest,
+        reply: &mut [u8; WINDOW_REPLY_MAX],
+    ) -> usize {
+        match *decoded {
             WindowRequest::Present {
                 window_id,
                 frame_index,
@@ -567,6 +629,13 @@ impl<M: ShmMapper> WindowServer<M> {
             // seat, holding nothing another principal owns and granting
             // no authority, so every client on the desktop may ask.
             WindowRequest::QueryDesktop => desktop_reply(reply, host.desktop()),
+            // A create mints a window id and is answered by the caller with
+            // the create-reply frame; refusing it here keeps this total
+            // without a second copy of that path, and refuses rather than
+            // opening a window down a route that never validated one.
+            WindowRequest::Create { .. } | WindowRequest::CreatePopup { .. } => {
+                create_reply(reply, Err(Errno::NotSupported), self.server)
+            }
         }
     }
 
@@ -621,7 +690,7 @@ impl<M: ShmMapper> WindowServer<M> {
             window_id,
             &spec.surface,
             spec.title.as_str(),
-            spec.resizable,
+            spec.sizing,
         )?;
         self.next_id = next;
         self.windows.insert(

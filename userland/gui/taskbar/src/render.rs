@@ -5,12 +5,15 @@
 //! two permanent leading launchers are the shared `lib/controls`
 //! [`IconButton`](tairix_controls::IconButton)s the model owns, painted with
 //! their live hover/pressed state; every pinned shortcut and running task is
-//! one shared [`TaskbarItem`] — an icon-only slot for a pin, an icon+title
-//! plate for a task — so the bar's application buttons have exactly one
-//! visual recipe. Per-application artwork (rasterised by the session) is
+//! one shared icon-only [`TaskbarItem`] slot, so the bar's application
+//! buttons have exactly one visual recipe and read as one strip of equal
+//! icons. Per-application artwork (rasterised by the session) is
 //! blitted through the control: a pin's from the bundle it points at, a
 //! task's from the bundle that opened its window, so a running application
-//! is recognised whether or not it is pinned.
+//! is recognised whether or not it is pinned. The one mark the bar draws for
+//! itself is the [`BarLayout::separator`] rule dividing the Library launcher
+//! from everything after it, filled in [`Palette::border`] through the same
+//! [`Surface`] fill as the bar's own background.
 //! The surface is the window manager's to place and round:
 //! the taskbar paints a *rectangular* buffer and the compositor applies
 //! [`BarLayout::corner_radius`] through its single anti-aliased
@@ -282,6 +285,14 @@ impl TaskbarRenderer {
             button.render(&mut surface, bounds, scale, theme, art);
         }
 
+        surface.fill_rect(
+            local(layout.separator.left(), origin.x),
+            local(layout.separator.top(), origin.y),
+            layout.separator.width,
+            layout.separator.height,
+            theme.palette().border.into(),
+        );
+
         let strip = taskbar.pins();
         for (index, slot) in layout.pins.iter().enumerate() {
             if slot.is_empty() {
@@ -323,7 +334,7 @@ impl TaskbarRenderer {
             // session from the bundle the kernel attested opened it, so an
             // application is recognised on the bar whether or not it is
             // pinned.
-            let item = TaskbarItem::new(entry.title.clone(), IconKind::AppBundle)
+            let item = TaskbarItem::new(IconKind::AppBundle)
                 .with_visibility(visibility)
                 .with_state(ControlState::idle().with_pointer(pointer));
             let bounds = local_rect(*slot, origin);

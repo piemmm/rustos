@@ -3,9 +3,10 @@
 //! [`BarLayout::compute`] turns a [`TaskbarConfig`] plus the current pin,
 //! task, and icon counts into the screen [`Rect`] of every region: the bar
 //! itself, the two permanent leading launcher buttons (Library, then Files —
-//! never reordered, never removed), the pin strip (and a slot per pinned
-//! shortcut), the task list (and a slot per task), the notification area
-//! (and a slot per icon), the clock, and the Switchboard tray capsule
+//! never reordered, never removed), the separator rule that divides the
+//! Library launcher from everything after it, the pin strip (and a slot per
+//! pinned shortcut), the task list (and a slot per task), the notification
+//! area (and a slot per icon), the clock, and the Switchboard tray capsule
 //! anchored at the very trailing end. All arithmetic saturates, so a
 //! pathological screen size or extent fails closed inside the bar rather
 //! than wrapping: a leading button that does not fit is [`Rect::EMPTY`] and
@@ -56,7 +57,15 @@ pub struct BarLayout {
     /// The Library launcher button, at the leading end. [`Rect::EMPTY`] when
     /// the bar is too short to hold it.
     pub library: Rect,
-    /// The Files launcher button, immediately after the Library button.
+    /// The rule dividing the Library launcher from everything after it: one
+    /// border thickness along the bar's main axis, spanning the cross axis
+    /// inset from both long edges. Decoration only — [`hit_test`](Self::hit_test)
+    /// never reports it, so a press here lands on the bare bar. [`Rect::EMPTY`]
+    /// when the bar is too short to reach it or too thin to inset it.
+    pub separator: Rect,
+    /// The Files launcher button, after the Library button and the separator
+    /// — the first of everything the rule groups together, so the file
+    /// manager reads as a peer of the pins rather than of the library.
     /// [`Rect::EMPTY`] when the bar is too short to hold it.
     pub files: Rect,
     /// The pin strip, between the leading launchers and the task list.
@@ -86,17 +95,18 @@ pub struct BarLayout {
 impl BarLayout {
     /// Compute the layout for `config` with `pin_count` pinned shortcuts,
     /// `task_count` running tasks, and `icon_count` notification icons,
-    /// applying `corner_radius` at the desktop `scale`.
+    /// taking the bar's corner radius, separator rule, and the rule's
+    /// spacing from `theme` at the desktop `scale`.
     ///
     /// The screen dimensions in `config` are *physical* pixels (the real
-    /// framebuffer), while the bar's extents, thickness, and the
-    /// `corner_radius` are *logical* pixels authored at the reference
-    /// density; `scale` converts those logical lengths into physical pixels
-    /// so the bar stays a comfortable physical size across panel densities.
+    /// framebuffer), while the bar's extents and thickness and the theme's
+    /// metrics are *logical* pixels authored at the reference density;
+    /// `scale` converts those logical lengths into physical pixels so the bar
+    /// stays a comfortable physical size across panel densities.
     #[must_use]
     pub fn compute(
         config: &TaskbarConfig,
-        corner_radius: u32,
+        theme: &Theme,
         scale: Scale,
         pin_count: usize,
         task_count: usize,
@@ -104,7 +114,8 @@ impl BarLayout {
     ) -> Self {
         let scaled = config.scaled(scale);
         let config = &scaled;
-        let corner_radius = scale.scale_length(corner_radius);
+        let metrics = theme.metrics();
+        let corner_radius = scale.scale_length(metrics.taskbar_corner_radius);
         let orientation = config.edge.orientation();
         let (main_total, cross_size) = match orientation {
             Orientation::Horizontal => (config.screen_width, config.screen_height),
@@ -124,10 +135,25 @@ impl BarLayout {
 
         let bar = placer.place(0, main_total);
 
-        let launchers = slots(&placer, 0, config.launcher_extent, 2, 0, main_total);
-        let library = launchers[0];
-        let files = launchers[1];
-        let leading_len = config.launcher_extent.saturating_mul(2).min(main_total);
+        // The rule divides two adjacent controls of one strip: the theme's
+        // control gap spaces it, and the padding a control keeps from its
+        // plate edge insets it so the bar's rounded ends stay clear. Flooring
+        // at one physical pixel keeps it from vanishing at a small scale.
+        let rule = scale.scale_length(metrics.border_thickness).max(1);
+        let margin = scale.scale_length(metrics.control_gap);
+        let inset = scale.scale_length(metrics.control_inset);
+        let gutter = rule.saturating_add(margin.saturating_mul(2));
+
+        let library = slot(&placer, 0, config.launcher_extent, 0, main_total);
+        let rule_start = config.launcher_extent.saturating_add(margin);
+        let separator = clip(rule_start, rule, 0, main_total).map_or(Rect::EMPTY, |(off, len)| {
+            placer.place_inset(off, len, inset)
+        });
+        let files_start = config.launcher_extent.saturating_add(gutter);
+        let files = slot(&placer, files_start, config.launcher_extent, 0, main_total);
+        let leading_len = files_start
+            .saturating_add(config.launcher_extent)
+            .min(main_total);
 
         // The trailing regions clip against the permanent leading launchers
         // (never the reverse), so a degenerate screen shrinks the clock and
@@ -185,6 +211,7 @@ impl BarLayout {
             bar,
             corner_radius,
             library,
+            separator,
             files,
             pin_strip,
             pins,
@@ -199,6 +226,10 @@ impl BarLayout {
 
     /// The taskbar element under `point`, or `None` for a point outside the
     /// bar or on a gap between regions.
+    ///
+    /// The [`separator`](Self::separator) is not a region: it is painted
+    /// decoration, so a point on the rule (or in the gutter around it) reports
+    /// no element and the press reaches the bare bar.
     #[must_use]
     pub fn hit_test(&self, point: Point) -> Option<Hit> {
         if !self.bar.contains(point) {
@@ -523,23 +554,45 @@ impl Placer {
             Orientation::Vertical => Rect::new(self.cross_origin, off, self.thickness, main_len),
         }
     }
+
+    /// [`place`](Self::place), pulled in by `cross_inset` at both ends of the
+    /// cross axis. A bar too thin to hold the inset yields [`Rect::EMPTY`]
+    /// rather than a rule running edge to edge.
+    fn place_inset(&self, main_off: u32, main_len: u32, cross_inset: u32) -> Rect {
+        let breadth = self.thickness.saturating_sub(cross_inset.saturating_mul(2));
+        if main_len == 0 || breadth == 0 {
+            return Rect::EMPTY;
+        }
+        let off = to_i32(main_off);
+        let cross = self.cross_origin.saturating_add(to_i32(cross_inset));
+        match self.orientation {
+            Orientation::Horizontal => Rect::new(off, cross, main_len, breadth),
+            Orientation::Vertical => Rect::new(cross, off, breadth, main_len),
+        }
+    }
+}
+
+/// The main-axis interval `[start, start + extent)` clipped to `[lo, hi)` as
+/// an `(offset, length)` pair, or `None` when nothing of it survives.
+fn clip(start: u32, extent: u32, lo: u32, hi: u32) -> Option<(u32, u32)> {
+    let end = start.saturating_add(extent).min(hi);
+    let start = start.max(lo);
+    (end > start).then(|| (start, end - start))
+}
+
+/// One `extent`-long slot at `start`, clipped to `[lo, hi)`; a slot with
+/// nothing left after clipping is [`Rect::EMPTY`].
+fn slot(placer: &Placer, start: u32, extent: u32, lo: u32, hi: u32) -> Rect {
+    clip(start, extent, lo, hi).map_or(Rect::EMPTY, |(off, len)| placer.place(off, len))
 }
 
 /// Lay `count` fixed-width slots out from `base`, each `extent` long, every
-/// slot clipped to `[lo, hi)`; a slot that does not fit is [`Rect::EMPTY`].
+/// slot clipped to `[lo, hi)`.
 fn slots(placer: &Placer, base: u32, extent: u32, count: usize, lo: u32, hi: u32) -> Vec<Rect> {
     let mut out = Vec::with_capacity(count);
     for index in 0..count {
         let start = base.saturating_add(extent.saturating_mul(to_u32(index)));
-        let end = start.saturating_add(extent);
-        let clipped_start = start.max(lo);
-        let clipped_end = end.min(hi);
-        let rect = if clipped_end <= clipped_start {
-            Rect::EMPTY
-        } else {
-            placer.place(clipped_start, clipped_end - clipped_start)
-        };
-        out.push(rect);
+        out.push(slot(placer, start, extent, lo, hi));
     }
     out
 }

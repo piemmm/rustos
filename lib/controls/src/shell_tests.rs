@@ -21,8 +21,8 @@ use tairix_theme::{Rgba, Theme};
 use crate::button::{Button, ButtonContent};
 use crate::damage::sink;
 use crate::shell::{
-    Notification, NotificationAction, TaskVisibility, TaskbarItem, TaskbarItemAction,
-    TaskbarPresentation, TrayBadge, TrayBadgeContent, TrayBadgeTone, TraySignal, TraySignalAction,
+    Notification, NotificationAction, TaskVisibility, TaskbarItem, TaskbarItemAction, TrayBadge,
+    TrayBadgeContent, TrayBadgeTone, TraySignal, TraySignalAction,
 };
 use crate::state::{
     ActivityState, AuthorityState, ControlRole, ControlState, PointerState, PressureKind,
@@ -229,7 +229,7 @@ fn task_surface(item: &TaskbarItem, theme: &Theme, scale: Scale) -> Surface {
 #[test]
 fn taskbar_item_rests_bare_on_the_bar_and_marks_its_presence() {
     for theme in [Theme::dark(), Theme::light()] {
-        let item = TaskbarItem::new("Editor", IconKind::Generic);
+        let item = TaskbarItem::new(IconKind::Generic);
         let s = task_surface(&item, &theme, Scale::ONE);
         // Its identity is drawn...
         assert!(has_pixel(&s, premul(theme.palette().on_surface)));
@@ -271,7 +271,7 @@ fn taskbar_item_presence_mark_tells_running_from_closed_and_active() {
 
     // A closed pin marks nothing at all: no window, no presence.
     let closed = task_surface(
-        &TaskbarItem::new("Editor", IconKind::Generic).with_visibility(TaskVisibility::Closed),
+        &TaskbarItem::new(IconKind::Generic).with_visibility(TaskVisibility::Closed),
         &theme,
         Scale::ONE,
     );
@@ -286,7 +286,7 @@ fn taskbar_item_presence_mark_tells_running_from_closed_and_active() {
     // A running window's mark is short and centred, so the leading end of the
     // lower edge stays clear — the active window's full-width seam does not.
     let running = task_surface(
-        &TaskbarItem::new("Editor", IconKind::Generic).with_visibility(TaskVisibility::Running),
+        &TaskbarItem::new(IconKind::Generic).with_visibility(TaskVisibility::Running),
         &theme,
         Scale::ONE,
     );
@@ -297,7 +297,7 @@ fn taskbar_item_presence_mark_tells_running_from_closed_and_active() {
         premul(palette.on_surface_muted)
     ));
     let active = task_surface(
-        &TaskbarItem::new("Editor", IconKind::Generic).with_visibility(TaskVisibility::Active),
+        &TaskbarItem::new(IconKind::Generic).with_visibility(TaskVisibility::Active),
         &theme,
         Scale::ONE,
     );
@@ -309,7 +309,7 @@ fn taskbar_item_washes_its_plate_under_the_pointer_without_an_edge() {
     for theme in [Theme::dark(), Theme::light()] {
         let palette = theme.palette();
         let hovered = task_surface(
-            &TaskbarItem::new("Editor", IconKind::Generic)
+            &TaskbarItem::new(IconKind::Generic)
                 .with_state(ControlState::idle().with_pointer(PointerState::Hover)),
             &theme,
             Scale::ONE,
@@ -330,8 +330,7 @@ fn taskbar_item_washes_its_plate_under_the_pointer_without_an_edge() {
 #[test]
 fn taskbar_item_active_shows_lower_accent_seam() {
     let theme = Theme::dark();
-    let item =
-        TaskbarItem::new("Editor", IconKind::Generic).with_visibility(TaskVisibility::Active);
+    let item = TaskbarItem::new(IconKind::Generic).with_visibility(TaskVisibility::Active);
     let s = task_surface(&item, &theme, Scale::ONE);
     assert!(region_has(
         &s,
@@ -344,8 +343,7 @@ fn taskbar_item_active_shows_lower_accent_seam() {
 #[test]
 fn taskbar_item_minimized_recesses_and_marks() {
     let theme = Theme::dark();
-    let item =
-        TaskbarItem::new("Editor", IconKind::Generic).with_visibility(TaskVisibility::Minimized);
+    let item = TaskbarItem::new(IconKind::Generic).with_visibility(TaskVisibility::Minimized);
     let s = task_surface(&item, &theme, Scale::ONE);
     // Recessed plate (flat surface, not raised) and a leading non-colour tick.
     assert!(has_pixel(&s, premul(theme.palette().surface)));
@@ -355,7 +353,7 @@ fn taskbar_item_minimized_recesses_and_marks() {
 #[test]
 fn taskbar_item_attention_shows_bead() {
     let theme = Theme::dark();
-    let item = TaskbarItem::new("Chat", IconKind::Bell).with_attention(true);
+    let item = TaskbarItem::new(IconKind::Bell).with_attention(true);
     let s = task_surface(&item, &theme, Scale::ONE);
     assert!(region_has(
         &s,
@@ -368,7 +366,7 @@ fn taskbar_item_attention_shows_bead() {
 #[test]
 fn taskbar_item_recovery_bead_takes_priority_over_attention() {
     let theme = Theme::dark();
-    let item = TaskbarItem::new("Hung", IconKind::Generic)
+    let item = TaskbarItem::new(IconKind::Generic)
         .with_attention(true)
         .with_state(ControlState::idle().with_recovery(RecoveryState::Hung));
     let s = task_surface(&item, &theme, Scale::ONE);
@@ -378,7 +376,7 @@ fn taskbar_item_recovery_bead_takes_priority_over_attention() {
 #[test]
 fn taskbar_item_denied_shows_lock_and_does_not_activate() {
     let theme = Theme::dark();
-    let mut item = TaskbarItem::new("Locked", IconKind::Generic)
+    let mut item = TaskbarItem::new(IconKind::Generic)
         .with_state(ControlState::idle().with_authority(AuthorityState::Denied));
     let s = task_surface(&item, &theme, Scale::ONE);
     assert!(has_pixel(&s, premul(theme.palette().denied)));
@@ -391,7 +389,7 @@ fn taskbar_item_denied_shows_lock_and_does_not_activate() {
 
 #[test]
 fn taskbar_item_activates_by_pointer_and_keyboard() {
-    let mut item = TaskbarItem::new("Editor", IconKind::Generic);
+    let mut item = TaskbarItem::new(IconKind::Generic);
     let bounds = Rect::new(0, 0, TW, TH);
     assert_eq!(item.on_pointer(&moved(80, 16), bounds, &mut sink()), None);
     assert_eq!(item.on_pointer(&PRESS, bounds, &mut sink()), None);
@@ -409,38 +407,25 @@ fn taskbar_item_activates_by_pointer_and_keyboard() {
 #[test]
 fn taskbar_item_high_contrast_and_scale_render() {
     let hc = high_contrast();
-    let item =
-        TaskbarItem::new("Editor", IconKind::Generic).with_visibility(TaskVisibility::Active);
+    let item = TaskbarItem::new(IconKind::Generic).with_visibility(TaskVisibility::Active);
     let s = task_surface(&item, &hc, scale2());
     assert!(has_pixel(&s, premul(hc.palette().on_surface)));
 }
 
-/// A square pinned-shortcut slot.
+/// A square application slot — the shape every slot on the bar wears.
 const PS: u32 = 40;
 
-fn pin_item() -> TaskbarItem {
-    TaskbarItem::new("Editor", IconKind::AppBundle).with_presentation(TaskbarPresentation::Icon)
-}
-
 #[test]
-fn taskbar_item_icon_presentation_centres_a_plate_sized_glyph() {
+fn taskbar_item_centres_a_plate_sized_glyph() {
     let theme = Theme::dark();
     let bounds = Rect::new(0, 0, PS, PS);
     let wide = Rect::new(0, 0, PS * 2, PS * 2);
-    let labelled = TaskbarItem::new("Editor", IconKind::AppBundle);
-    let icon_only = pin_item();
-    // The compact look sizes the glyph off the plate (it grows with the
-    // slot); the labelled look stays bound to the text line regardless.
-    assert!(
-        icon_only.icon_side(wide, Scale::ONE, &theme)
-            > icon_only.icon_side(bounds, Scale::ONE, &theme)
-    );
-    assert_eq!(
-        labelled.icon_side(wide, Scale::ONE, &theme),
-        labelled.icon_side(bounds, Scale::ONE, &theme)
-    );
+    let item = TaskbarItem::new(IconKind::AppBundle);
+    // The glyph is sized off the plate, so it grows with the slot rather than
+    // staying bound to a text line.
+    assert!(item.icon_side(wide, Scale::ONE, &theme) > item.icon_side(bounds, Scale::ONE, &theme));
     let mut s = Surface::new(PS, PS).expect("surface");
-    icon_only.render(&mut s, bounds, Scale::ONE, &theme, None);
+    item.render(&mut s, bounds, Scale::ONE, &theme, None);
     // Glyph ink sits in the centre of the plate.
     assert!(region_has(
         &s,
@@ -451,30 +436,64 @@ fn taskbar_item_icon_presentation_centres_a_plate_sized_glyph() {
 }
 
 #[test]
+fn taskbar_item_draws_its_icon_and_nothing_beside_it() {
+    let theme = Theme::dark();
+    // A slot far wider than its icon: the identity is the icon alone, so the
+    // space beside it carries no ink at all — a title drawn there would read
+    // as a second, unequal kind of button on a strip of equal icons.
+    let bounds = Rect::new(0, 0, TW, TH);
+    let item = TaskbarItem::new(IconKind::AppBundle).with_visibility(TaskVisibility::Running);
+    let side = item.icon_side(bounds, Scale::ONE, &theme);
+    assert!(side > 0);
+    let mut s = Surface::new(TW, TH).expect("surface");
+    item.render(&mut s, bounds, Scale::ONE, &theme, None);
+
+    let icon_end = u32::midpoint(TW, side);
+    assert!(
+        region_has(
+            &s,
+            ((TW - side) / 2, icon_end),
+            (0, TH),
+            premul(theme.palette().on_surface)
+        ),
+        "the icon is drawn"
+    );
+    assert!(
+        !region_has(
+            &s,
+            (icon_end + 1, TW),
+            (0, TH),
+            premul(theme.palette().on_surface)
+        ),
+        "and nothing is drawn beside it"
+    );
+}
+
+#[test]
 fn taskbar_item_icon_side_is_zero_for_degenerate_bounds() {
     let theme = Theme::dark();
     assert_eq!(
-        pin_item().icon_side(Rect::new(-4, -4, 0, 0), Scale::ONE, &theme),
+        TaskbarItem::new(IconKind::AppBundle).icon_side(
+            Rect::new(-4, -4, 0, 0),
+            Scale::ONE,
+            &theme
+        ),
         0
     );
 }
 
 #[test]
-fn taskbar_item_artwork_replaces_the_builtin_glyph_in_both_presentations() {
+fn taskbar_item_artwork_replaces_the_builtin_glyph_at_any_slot_shape() {
     let theme = Theme::dark();
     let magenta = Color::rgb(255, 0, 255).premultiply();
-    // A compact square pin slot and a wide labelled task slot both paint the
-    // owner-supplied artwork in place of the built-in class glyph.
+    // A square slot and a wider one both paint the owner-supplied artwork in
+    // place of the built-in class glyph.
     let cases = [
-        (pin_item(), Rect::new(0, 0, PS, PS), PS, PS),
-        (
-            TaskbarItem::new("Editor", IconKind::AppBundle),
-            Rect::new(0, 0, TW, TH),
-            TW,
-            TH,
-        ),
+        (Rect::new(0, 0, PS, PS), PS, PS),
+        (Rect::new(0, 0, TW, TH), TW, TH),
     ];
-    for (item, bounds, w, h) in cases {
+    for (bounds, w, h) in cases {
+        let item = TaskbarItem::new(IconKind::AppBundle);
         let side = item.icon_side(bounds, Scale::ONE, &theme);
         assert!(side > 0);
         let art = Surface::filled(side, side, magenta).expect("artwork");
@@ -488,7 +507,7 @@ fn taskbar_item_artwork_replaces_the_builtin_glyph_in_both_presentations() {
 fn taskbar_item_closed_rests_quiet_and_plates_on_hover() {
     let theme = Theme::dark();
     let bounds = Rect::new(0, 0, PS, PS);
-    let closed = pin_item().with_visibility(TaskVisibility::Closed);
+    let closed = TaskbarItem::new(IconKind::AppBundle).with_visibility(TaskVisibility::Closed);
     let mut rest = Surface::new(PS, PS).expect("surface");
     closed.render(&mut rest, bounds, Scale::ONE, &theme, None);
     // At rest a closed pin shows no plate or rim — only the glyph sits on
@@ -503,7 +522,7 @@ fn taskbar_item_closed_rests_quiet_and_plates_on_hover() {
     assert_ne!(rest.pixels(), hover.pixels());
     // A denied closed pin still shows its plate and lock bead (a marked
     // state is never hidden by the quiet resting look).
-    let denied = pin_item()
+    let denied = TaskbarItem::new(IconKind::AppBundle)
         .with_visibility(TaskVisibility::Closed)
         .with_state(ControlState::idle().with_authority(AuthorityState::Denied));
     let mut d = Surface::new(PS, PS).expect("surface");
@@ -512,11 +531,11 @@ fn taskbar_item_closed_rests_quiet_and_plates_on_hover() {
 }
 
 #[test]
-fn taskbar_item_icon_presentation_keeps_status_furniture() {
+fn taskbar_item_keeps_status_furniture_in_a_square_slot() {
     let theme = Theme::dark();
     let bounds = Rect::new(0, 0, PS, PS);
     // The active seam still paints along the bottom edge of a compact slot.
-    let active = pin_item().with_visibility(TaskVisibility::Active);
+    let active = TaskbarItem::new(IconKind::AppBundle).with_visibility(TaskVisibility::Active);
     let mut s = Surface::new(PS, PS).expect("surface");
     active.render(&mut s, bounds, Scale::ONE, &theme, None);
     assert!(region_has(
@@ -526,8 +545,8 @@ fn taskbar_item_icon_presentation_keeps_status_furniture() {
         premul(theme.palette().accent)
     ));
     // A denied compact slot still shows the lock bead and refuses to act.
-    let mut denied =
-        pin_item().with_state(ControlState::idle().with_authority(AuthorityState::Denied));
+    let mut denied = TaskbarItem::new(IconKind::AppBundle)
+        .with_state(ControlState::idle().with_authority(AuthorityState::Denied));
     let mut d = Surface::new(PS, PS).expect("surface");
     denied.render(&mut d, bounds, Scale::ONE, &theme, None);
     assert!(has_pixel(&d, premul(theme.palette().denied)));
@@ -912,7 +931,7 @@ fn hit_test_bookkeeping_is_invisible_to_a_taskbar_item() {
     let bounds = Rect::new(0, 0, TW, TH);
 
     // Two samples clear of the item, so only the recorded coordinate differs.
-    let mut a = TaskbarItem::new("Editor", IconKind::Generic);
+    let mut a = TaskbarItem::new(IconKind::Generic);
     let mut b = a.clone();
     a.on_pointer(&moved(iv(TW) + 40, iv(TH) + 40), bounds, &mut sink());
     b.on_pointer(&moved(iv(TW) + 90, iv(TH) + 12), bounds, &mut sink());
@@ -927,10 +946,10 @@ fn hit_test_bookkeeping_is_invisible_to_a_taskbar_item() {
     );
 
     // One holds a real press latch, the other is merely *shown* pressed.
-    let mut latched = TaskbarItem::new("Editor", IconKind::Generic);
+    let mut latched = TaskbarItem::new(IconKind::Generic);
     latched.on_pointer(&moved(iv(TW) / 2, iv(TH) / 2), bounds, &mut sink());
     latched.on_pointer(&PRESS, bounds, &mut sink());
-    let mut shown = TaskbarItem::new("Editor", IconKind::Generic);
+    let mut shown = TaskbarItem::new(IconKind::Generic);
     let mut pressed = ControlState::idle();
     pressed.pointer = PointerState::Pressed;
     shown.set_state(pressed);

@@ -243,6 +243,24 @@ actions, reporting each through `InputResponse`:
   window vanishing mid-drag, ends it (`MoveEnded`). Separating content
   clicks from window dragging avoids a "drag anywhere" hack
   (`AGENTS.md` §2.1).
+- **A dragged window keeps a grabbable patch of its title bar on screen.**
+  The grab captures the bar's move surface — `TitleBarLayout::drag`, the
+  span between the two command clusters — in window-local coordinates, and
+  `clamp_move_origin` keeps that span inside `screen_rect`: the whole band
+  vertically, and sideways at least a patch as wide as the band is tall. A
+  window may still hang off any edge, which is normal on a desktop; it
+  cannot be pushed somewhere with nothing left to drag it back by. The
+  region is the whole framebuffer, so a single big desktop spanning several
+  monitors is one region and a window may straddle two of them. An
+  undecorated window has no move surface and is not clamped.
+- **Furniture hover** — pointer motion that lands on a window's decorations
+  is handed to that window's frame (and the frame the pointer just left is
+  told too, so its highlight goes out). Only the window manager ever sees a
+  pointer over its own decorations, so without this a command button could
+  never light up under the pointer. The response is still `Ignored` — no
+  client owns the motion — and the frame reports its own repainted
+  rectangles, so a sample crossing the drag region costs nothing and one
+  entering a command repaints that command alone.
 
 The router models *which* window owns the keyboard (`focused`); the key
 encoding itself is a separate ABI concern and is not invented in the
@@ -314,6 +332,25 @@ rectangle rather than the caller declaring one up front because only the
 conversion — having compared each pixel it wrote against the one already
 there — knows what truly changed; a conservative rectangle handed down
 beforehand would repaint pixels that never moved.
+
+**A window cannot be dragged smaller than its own furniture, or than its
+application declared.** `Compositor::window_min_outer_size` is the greater
+of two real floors, and an interactive resize captures it at grab start:
+
+- the *furniture's* floor, `WindowFrame::min_outer_size` — a band wide
+  enough to seat all four commands with one command's worth of drag surface
+  left between them (`TitleBar::min_band_width`), and the bands plus one
+  standard control of client in height. It holds for every decorated
+  window, including one whose application declared nothing.
+- the *application's* declared minimum client extent, adopted through
+  `Compositor::set_window_min_client_size` from what the app stated when it
+  created its window. Without it an app that cannot lay out below some size
+  resizes itself back up while the drag keeps shrinking, and the two fight
+  once per pointer sample — the window and its content visibly bouncing.
+
+The floor bounds a *user* resize. An application sizing its own window is
+choosing that size, so `resize_window_client` is not clamped and a window
+already smaller than the minimum is never grown under its owner.
 
 **The frame is the window manager's; the pixels are the client's.** A
 window's content buffer is sized by the frame the *client* presents, never
@@ -481,15 +518,18 @@ than a row of zeros pretending to be a frame.
 
 Window decorations — a title bar carrying the four command controls in two
 corner clusters (put-to-back and close at the leading edge, minimize and
-size-toggle at the trailing one) with the identity and title centred between
-them, and the frame rim — are drawn by the **window manager**, never by an app
-(`AGENTS.md` §10, `plans/GUI-CONTROLS-DESIGN.md` §1, §11.17–§11.23;
-`plans/COMPOSITOR-WORK.md`). An app supplies only its content surface and
-typed window metadata; it can neither paint over nor receive input from
-the chrome. The furniture family itself lives once in
+size-toggle at the trailing one) with the identity and title left-justified in
+the span between them, and the frame rim — are drawn by the **window manager**,
+never by an app (`AGENTS.md` §10, `plans/GUI-CONTROLS-DESIGN.md` §1,
+§11.17–§11.23; `plans/COMPOSITOR-WORK.md`). An app supplies only its content
+surface and typed window metadata; it can neither paint over nor receive input
+from the chrome. The furniture family itself lives once in
 `lib/controls::window` (`WindowFrame`, `TitleBar`, `WindowControl`,
 `ResizeGrabber`) and is composed here, so there is no second visual recipe
-(`AGENTS.md` §2.2).
+(`AGENTS.md` §2.2). A command is *bar-seated*: it wears no perimeter of its own
+in any state and no plate at all while it rests, so it states hover and press by
+the same plate wash every other control uses and the row reads as part of the
+bar (`plans/GUI-CONTROLS-DESIGN.md` §6).
 
 - **Reserved band (geometry).** `Compositor::set_window_frame` attaches a
   `WindowFrame` and reserves a furniture band *around* the client from the
@@ -691,10 +731,10 @@ then calls `DesktopShell::decorate_window`, which attaches a `WindowFrame`
 `WindowTitle`.
 
 The title bar also carries the **owning application's identity icon**, leading
-the group that is centred in the span the two command clusters leave between
-them, with the title text after it. The icon is inert: it drags the window like
-the rest of the band and is never a control. A window with no identity reserves
-no slot and its title is centred on its own.
+the group that is left-justified in the span the two command clusters leave
+between them, with the title text after it. The icon is inert: it drags the
+window like the rest of the band and is never a control. A window with no
+identity reserves no slot and its title takes that leading edge on its own.
 
 - **Attested, never claimed.** `WindowServer` hands
   `WindowHost::window_opened` the caller's kernel-attested `ProcId`, which
@@ -729,11 +769,18 @@ no slot and its title is centred on its own.
   bar's own slot side the same way. A second window of the same application
   costs a cache lookup for each: the shared `ArtworkCache` serves both without
   re-reading or re-decoding the asset.
+- **Greyed while the window is not focused.** The icon is drawn desaturated by
+  activation — nearly all of its colour on the active frame, none of it on an
+  inactive one — so an unfocused window's icon reads as quiet as its muted
+  title. The reduction happens as the artwork lands
+  (`Surface::blit_desaturated`, the one saturation definition in `lib/raster`),
+  so the session still caches one full-colour icon per (bundle, pixel side) and
+  an activation change re-draws it rather than re-rasterising it.
 
 The title text elides with the shared `ELLIPSIS` mark rather than being cut,
-because a title may be a path. A group wider than the span stops being centred
-and pins to the span's leading edge, so the icon and the start of the title
-stay put as the window narrows and only the tail is marked.
+because a title may be a path. The group keeps that leading edge at every
+width, so the icon and the start of the title stay put as the window narrows
+and only the tail is marked.
 
 An app retitles its own window over the channel with
 `WindowRequest::SetTitle`, which the server admits only from the window's
@@ -745,8 +792,9 @@ this way with **no per-app decoration code** — the one place a served window i
 dressed is the window manager.
 
 Whether the frame is **resizable** is the opening app's own choice, carried on
-its window `Create` (`WindowRequest::Create { resizable, .. }` → `WindowClient::create`'s
-`resizable` argument → `WindowHost::window_opened`). A resizable window gets a
+its window `Create` (`WindowRequest::Create { resizable, .. }` →
+`WindowClient::create`'s `sizing` argument, `WindowSizing { resizable, .. }` →
+`WindowHost::window_opened`). A resizable window gets a
 live maximize/restore size toggle and the invisible resize edges above; the app
 re-lays-out to each new client size the window manager reports
 (`WindowEvent::Resized`), re-mapping its frame region with `WindowRequest::Resize`
