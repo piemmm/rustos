@@ -24,7 +24,7 @@ use crate::panel::{WIN_HEIGHT, WIN_WIDTH};
 use crate::view::frame::resolve_section_frame;
 use crate::view::tasks::TasksSection;
 use crate::view::test_support::{
-    centre, click, focus_task_row, font, has_ink, model, moved, select_task_row, task_id,
+    centre, click, focus_task_row, font, has_ink, key, model, moved, select_task_row, task_id,
     task_rail_rects, task_row_point, PRESS, RELEASE,
 };
 use crate::view::{
@@ -435,7 +435,7 @@ fn group_popup_escape_dismisses_without_emitting() {
     let b = bounds();
     let mut sb = Switchboard::new(&model());
     open_group_popup_on_first_task(&mut sb, b, &theme);
-    assert_eq!(sb.on_key(Key::Named(NamedKey::Escape)), None);
+    assert_eq!(key(&mut sb, Key::Named(NamedKey::Escape)), None);
     assert!(sb.tasks.popup.is_none());
 }
 
@@ -491,7 +491,7 @@ fn group_popup_drops_on_refresh_and_section_change() {
 fn walk_to_rail_slot(sb: &mut Switchboard, slot: usize) {
     let target = sb.tasks.rail_focus_index(slot);
     while sb.active().content_focus() < target {
-        assert_eq!(sb.on_key(Key::Named(NamedKey::Down)), None);
+        assert_eq!(key(sb, Key::Named(NamedKey::Down)), None);
     }
     assert_eq!(sb.active().content_focus(), target);
 }
@@ -501,7 +501,7 @@ fn the_keyboard_selects_a_row_then_reaches_its_commands() {
     let mut sb = Switchboard::new(&model());
     focus_task_row(&mut sb, 0);
     assert_eq!(
-        sb.on_key(Key::Named(NamedKey::Enter)),
+        key(&mut sb, Key::Named(NamedKey::Enter)),
         None,
         "choosing a row reports nothing of its own"
     );
@@ -509,7 +509,7 @@ fn the_keyboard_selects_a_row_then_reaches_its_commands() {
 
     walk_to_rail_slot(&mut sb, 0);
     assert_eq!(
-        sb.on_key(Key::Named(NamedKey::Enter)),
+        key(&mut sb, Key::Named(NamedKey::Enter)),
         Some(SwitchboardAction::Task {
             index: 0,
             control: TaskControl::Switch
@@ -521,17 +521,17 @@ fn the_keyboard_selects_a_row_then_reaches_its_commands() {
 fn keyboard_group_flow_reaches_the_popup_and_activates() {
     let mut sb = Switchboard::new(&model());
     focus_task_row(&mut sb, 0);
-    assert_eq!(sb.on_key(Key::Named(NamedKey::Enter)), None);
+    assert_eq!(key(&mut sb, Key::Named(NamedKey::Enter)), None);
     walk_to_rail_slot(&mut sb, TasksSection::group_slot());
     assert_eq!(
-        sb.on_key(Key::Named(NamedKey::Enter)),
+        key(&mut sb, Key::Named(NamedKey::Enter)),
         None,
         "opening the popup emits nothing"
     );
     assert_eq!(sb.tasks.popup.as_ref().map(|p| p.task), Some(0));
-    assert_eq!(sb.on_key(Key::Named(NamedKey::Down)), None);
+    assert_eq!(key(&mut sb, Key::Named(NamedKey::Down)), None);
     assert_eq!(
-        sb.on_key(Key::Named(NamedKey::Enter)),
+        key(&mut sb, Key::Named(NamedKey::Enter)),
         Some(SwitchboardAction::TaskGrouped {
             task: 0,
             activity: Some(0)
@@ -544,7 +544,7 @@ fn keyboard_group_flow_reaches_the_popup_and_activates() {
 fn a_rail_command_takes_the_focus_ring_from_the_rows() {
     let mut sb = Switchboard::new(&model());
     focus_task_row(&mut sb, 0);
-    assert_eq!(sb.on_key(Key::Named(NamedKey::Enter)), None);
+    assert_eq!(key(&mut sb, Key::Named(NamedKey::Enter)), None);
     walk_to_rail_slot(&mut sb, 2);
     assert!(
         sb.tasks.rail.items()[2].state().focus.focused,
@@ -663,7 +663,7 @@ fn shown(sb: &Switchboard) -> alloc::vec::Vec<alloc::string::String> {
 /// Put the content cursor on one of the section's header stops.
 fn focus_header_stop(sb: &mut Switchboard, stop: usize) {
     for _ in 0..stop {
-        assert_eq!(sb.on_key(Key::Named(NamedKey::Down)), None);
+        assert_eq!(key(sb, Key::Named(NamedKey::Down)), None);
     }
     assert_eq!(sb.active().content_focus(), stop);
 }
@@ -675,7 +675,7 @@ fn focus_header_stop(sb: &mut Switchboard, stop: usize) {
 fn focus_footer_stop(sb: &mut Switchboard, stop: usize) {
     let target = sb.tasks.rail_focus_index(usize::MAX) + 1 + stop;
     for _ in 0..target {
-        assert_eq!(sb.on_key(Key::Named(NamedKey::Down)), None);
+        assert_eq!(key(sb, Key::Named(NamedKey::Down)), None);
     }
     assert_eq!(sb.active().content_focus(), target);
 }
@@ -683,7 +683,7 @@ fn focus_footer_stop(sb: &mut Switchboard, stop: usize) {
 /// Walk the action cursor to `index` within the focused stop.
 fn walk_action_to(sb: &mut Switchboard, index: usize) {
     for _ in 0..index {
-        assert_eq!(sb.on_key(Key::Named(NamedKey::Right)), None);
+        assert_eq!(key(sb, Key::Named(NamedKey::Right)), None);
     }
     assert_eq!(sb.active().row_action(), index);
 }
@@ -764,7 +764,7 @@ fn choosing_a_filter_shows_exactly_the_rows_it_counted() {
         let mut sb = Switchboard::new(&mixed_model());
         focus_header_stop(&mut sb, 0);
         walk_action_to(&mut sb, stop);
-        assert_eq!(sb.on_key(Key::Named(NamedKey::Enter)), None);
+        assert_eq!(key(&mut sb, Key::Named(NamedKey::Enter)), None);
         assert_eq!(shown(&sb), expected, "filter {stop} shows what it counted");
         assert_eq!(
             sb.tasks.entries.len(),
@@ -785,7 +785,7 @@ fn a_filter_that_admits_nothing_shows_no_rows_and_strands_no_cursor() {
     )]));
     focus_header_stop(&mut sb, 0);
     walk_action_to(&mut sb, 2);
-    assert_eq!(sb.on_key(Key::Named(NamedKey::Enter)), None);
+    assert_eq!(key(&mut sb, Key::Named(NamedKey::Enter)), None);
     assert!(sb.tasks.entries.is_empty(), "no job rows to show");
     assert!(
         sb.active().content_focus() < 3,
@@ -798,7 +798,7 @@ fn search_matches_on_the_task_name_ignoring_case() {
     let mut sb = Switchboard::new(&mixed_model());
     focus_header_stop(&mut sb, 1);
     for ch in "BET".chars() {
-        assert_eq!(sb.on_key(Key::Char(ch)), None);
+        assert_eq!(key(&mut sb, Key::Char(ch)), None);
     }
     assert_eq!(shown(&sb), alloc::vec!["Beta"], "case is folded both ways");
     assert_eq!(sb.tasks.entries.len(), 1);
@@ -809,7 +809,7 @@ fn search_matching_nothing_shows_nothing_rather_than_everything() {
     let mut sb = Switchboard::new(&mixed_model());
     focus_header_stop(&mut sb, 1);
     for ch in "zzz".chars() {
-        assert_eq!(sb.on_key(Key::Char(ch)), None);
+        assert_eq!(key(&mut sb, Key::Char(ch)), None);
     }
     assert!(
         sb.tasks.entries.is_empty(),
@@ -822,11 +822,11 @@ fn clearing_the_search_restores_every_row() {
     let mut sb = Switchboard::new(&mixed_model());
     focus_header_stop(&mut sb, 1);
     for ch in "bet".chars() {
-        assert_eq!(sb.on_key(Key::Char(ch)), None);
+        assert_eq!(key(&mut sb, Key::Char(ch)), None);
     }
     assert_eq!(sb.tasks.entries.len(), 1);
     for _ in 0..3 {
-        assert_eq!(sb.on_key(Key::Named(NamedKey::Backspace)), None);
+        assert_eq!(key(&mut sb, Key::Named(NamedKey::Backspace)), None);
     }
     assert!(sb.tasks.search.text().is_empty());
     assert_eq!(sb.tasks.entries.len(), 5, "clearing restores every row");
@@ -837,7 +837,7 @@ fn sorted_by(model: &SwitchboardModel, column: usize) -> alloc::vec::Vec<alloc::
     let mut sb = Switchboard::new(model);
     focus_header_stop(&mut sb, 2);
     walk_action_to(&mut sb, column);
-    assert_eq!(sb.on_key(Key::Named(NamedKey::Enter)), None);
+    assert_eq!(key(&mut sb, Key::Named(NamedKey::Enter)), None);
     shown(&sb)
 }
 
@@ -894,9 +894,9 @@ fn a_second_press_reverses_the_sort_and_the_unmeasured_rows_stay_last() {
     let mut sb = Switchboard::new(&mixed_model());
     focus_header_stop(&mut sb, 2);
     walk_action_to(&mut sb, 4);
-    assert_eq!(sb.on_key(Key::Named(NamedKey::Enter)), None);
+    assert_eq!(key(&mut sb, Key::Named(NamedKey::Enter)), None);
     let ascending = shown(&sb);
-    assert_eq!(sb.on_key(Key::Named(NamedKey::Enter)), None);
+    assert_eq!(key(&mut sb, Key::Named(NamedKey::Enter)), None);
     let descending = shown(&sb);
     assert_ne!(ascending, descending, "a second press reverses the order");
     assert_eq!(
@@ -1048,7 +1048,7 @@ fn the_footer_counts_the_shown_rows_against_the_total() {
     assert_eq!(sb.tasks.count, StatusPill::new("5 of 5 shown"));
     focus_header_stop(&mut sb, 0);
     walk_action_to(&mut sb, 1);
-    assert_eq!(sb.on_key(Key::Named(NamedKey::Enter)), None);
+    assert_eq!(key(&mut sb, Key::Named(NamedKey::Enter)), None);
     assert_eq!(
         sb.tasks.count,
         StatusPill::new("3 of 5 shown"),
@@ -1060,10 +1060,10 @@ fn the_footer_counts_the_shown_rows_against_the_total() {
 fn the_grouping_control_arranges_the_same_rows() {
     let mut sb = Switchboard::new(&mixed_model());
     focus_footer_stop(&mut sb, 0);
-    assert_eq!(sb.on_key(Key::Named(NamedKey::Enter)), None);
+    assert_eq!(key(&mut sb, Key::Named(NamedKey::Enter)), None);
     assert!(sb.tasks.grouping.is_expanded(), "the choices open");
-    assert_eq!(sb.on_key(Key::Named(NamedKey::Down)), None);
-    assert_eq!(sb.on_key(Key::Named(NamedKey::Enter)), None);
+    assert_eq!(key(&mut sb, Key::Named(NamedKey::Down)), None);
+    assert_eq!(key(&mut sb, Key::Named(NamedKey::Enter)), None);
     assert_eq!(sb.tasks.grouping.selected_text(), Some("By type"));
     assert_eq!(
         shown(&sb),
@@ -1092,7 +1092,7 @@ fn auto_refresh_off_holds_the_rows_the_reader_was_reading() {
     let mut sb = Switchboard::new(&mixed_model());
     focus_footer_stop(&mut sb, 1);
     assert!(sb.tasks.auto_refresh.is_on(), "refreshing by default");
-    assert_eq!(sb.on_key(Key::Named(NamedKey::Enter)), None);
+    assert_eq!(key(&mut sb, Key::Named(NamedKey::Enter)), None);
     assert!(!sb.tasks.auto_refresh.is_on(), "the toggle turns it off");
 
     let mut later = mixed_model();
@@ -1100,7 +1100,7 @@ fn auto_refresh_off_holds_the_rows_the_reader_was_reading() {
     sb.tasks.adopt(&later);
     assert_eq!(sb.tasks.entries.len(), 5, "a paused table holds its rows");
 
-    assert_eq!(sb.on_key(Key::Named(NamedKey::Enter)), None);
+    assert_eq!(key(&mut sb, Key::Named(NamedKey::Enter)), None);
     assert!(sb.tasks.auto_refresh.is_on());
     sb.tasks.adopt(&later);
     assert_eq!(sb.tasks.entries.len(), 1, "resuming takes the new sample");
@@ -1119,7 +1119,7 @@ fn the_cursor_reaches_every_header_rail_and_footer_control() {
     let mut rows = alloc::vec::Vec::new();
     for stop in 0..span {
         if stop > 0 {
-            assert_eq!(sb.on_key(Key::Named(NamedKey::Down)), None);
+            assert_eq!(key(&mut sb, Key::Named(NamedKey::Down)), None);
         }
         assert_eq!(sb.active().content_focus(), stop);
         rows.push(sb.active().focus_row(stop));
@@ -1142,7 +1142,7 @@ fn each_header_and_footer_control_takes_the_focus_ring_in_turn() {
         sb.tasks.search, resting.tasks.search,
         "the search field takes the ring"
     );
-    assert_eq!(sb.on_key(Key::Named(NamedKey::Down)), None);
+    assert_eq!(key(&mut sb, Key::Named(NamedKey::Down)), None);
     assert_eq!(
         sb.tasks.search, resting.tasks.search,
         "and gives it up again"

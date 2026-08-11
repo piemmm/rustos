@@ -20,7 +20,7 @@
 
 use alloc::vec::Vec;
 
-use tairix_controls::{ActivityState, ControlState, Menu, MenuAction, MenuItem};
+use tairix_controls::{damage, ActivityState, ControlState, Menu, MenuAction, MenuItem};
 use tairix_geometry::{Point, Rect, Scale};
 use tairix_raster::Surface;
 use tairix_theme::Theme;
@@ -225,19 +225,29 @@ impl PinboardMenu {
             return PinboardMenuOutcome::Dismissed;
         }
         let before = self.menu.current();
-        let acted = self.menu.on_pointer(event, bounds, scale, theme);
+        let acted = self
+            .menu
+            .on_pointer(event, bounds, scale, theme, &mut damage::sink());
         self.resolve(acted, before)
     }
 
-    /// Route one `key` into the open menu: the arrows and Home/End move the
-    /// highlighted row, Enter chooses it, and Escape dismisses. A closed menu
-    /// claims nothing.
-    pub fn on_key(&mut self, key: Key) -> PinboardMenuOutcome {
+    /// Route one `key` into the open menu drawn at `bounds`: the arrows and
+    /// Home/End move the highlighted row, Enter chooses it, and Escape
+    /// dismisses. A closed menu claims nothing.
+    pub fn on_key(
+        &mut self,
+        key: Key,
+        bounds: Rect,
+        scale: Scale,
+        theme: &Theme,
+    ) -> PinboardMenuOutcome {
         if !self.is_open() {
             return PinboardMenuOutcome::Ignored;
         }
         let before = self.menu.current();
-        let acted = self.menu.on_key(key);
+        let acted = self
+            .menu
+            .on_key(key, bounds, scale, theme, &mut damage::sink());
         self.resolve(acted, before)
     }
 

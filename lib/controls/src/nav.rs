@@ -30,11 +30,12 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 use tairix_font::BitmapFont;
-use tairix_geometry::{Point, Rect, Scale};
+use tairix_geometry::{Point, Rect, Region, Scale};
 use tairix_input::{InputEvent, Key, NamedKey, PointerButton};
 use tairix_raster::{Color, Surface};
 use tairix_theme::{TextRole, Theme};
 
+use crate::damage;
 use crate::paint::{
     draw_outline, heavy_contrast, key_activation, paint_bead, paint_chevron, plate_border,
     resolve_bead, role_font, surface_rect, to_i32, ChevronDir,
@@ -217,8 +218,45 @@ impl Breadcrumb {
     /// out-of-range index, or the trailing (current, non-activatable) crumb,
     /// clears focus instead (fail closed — focus never lands on the current
     /// location).
-    pub fn set_focus(&mut self, index: Option<usize>) {
-        self.focus = index.filter(|&i| Some(i) <= self.last_activatable());
+    ///
+    /// The trail reports the cell the ring leaves and the cell it arrives on
+    /// into `damage`. It takes the layout to do so because only the trail knows
+    /// which cell shows a given crumb: an elided ancestor is shown on the
+    /// ellipsis, not on a cell of its own.
+    pub fn set_focus(
+        &mut self,
+        index: Option<usize>,
+        bounds: Rect,
+        scale: Scale,
+        theme: &Theme,
+        damage: &mut Region,
+    ) {
+        let next = self.focusable(index);
+        if damage::move_mark(
+            self.focus,
+            next,
+            |crumb| self.cell_area(crumb, bounds, scale, theme),
+            damage,
+        ) {
+            self.focus = next;
+        }
+    }
+
+    /// Adopt `index` as the focused crumb without reporting, for a caller that
+    /// is composing or rebuilding this trail and presents it whole.
+    ///
+    /// [`set_focus`](Self::set_focus) is the interactive move and reports the
+    /// two cells the ring moves between. A rebuild has no layout to resolve a
+    /// cell against and nothing to report against either, so it says so here
+    /// rather than passing a rectangle and theme it does not have.
+    pub fn adopt_focus(&mut self, index: Option<usize>) {
+        self.focus = self.focusable(index);
+    }
+
+    /// `index` if focus may land on it, else `None` — the one admission rule
+    /// both focus entry points apply.
+    fn focusable(&self, index: Option<usize>) -> Option<usize> {
+        index.filter(|&i| Some(i) <= self.last_activatable())
     }
 
     /// Whether the crumb at `index` is the trailing (current, non-activatable)
@@ -291,18 +329,22 @@ impl Breadcrumb {
         self.hover == Some(Self::cell_index(cell))
     }
 
+    /// Whether `cell` is where crumb `index` is shown: its own cell, or the
+    /// ellipsis when `index` is one of the ancestors that ellipsis hides.
+    fn cell_shows(cell: Cell, index: usize) -> bool {
+        match cell {
+            Cell::Crumb(i) => i == index,
+            Cell::Ellipsis { newest_hidden } => index <= newest_hidden,
+        }
+    }
+
     /// Whether `cell` should show the keyboard focus ring: an ordinary crumb
     /// matches focus exactly, and the ellipsis also lights up when the
     /// keyboard focus sits on one of the ancestors it currently hides, so a
     /// focused crumb elided out of individual view never loses its visible
     /// indicator.
     fn cell_shows_focus(&self, cell: Cell) -> bool {
-        match cell {
-            Cell::Crumb(i) => self.focus == Some(i),
-            Cell::Ellipsis { newest_hidden } => {
-                matches!(self.focus, Some(f) if f <= newest_hidden)
-            }
-        }
+        matches!(self.focus, Some(f) if Self::cell_shows(cell, f))
     }
 
     /// The candidate cell list for showing crumbs `start..=last` plainly,
@@ -436,6 +478,24 @@ impl Breadcrumb {
             Cell::Crumb(i) => i,
             Cell::Ellipsis { newest_hidden } => newest_hidden,
         }
+    }
+
+    /// The rectangle of the cell that stands for crumb `index` at `bounds`, or
+    /// `None` when the layout shows it nowhere.
+    ///
+    /// The reverse of [`crumb_at`](Self::crumb_at) over the same plan, so a
+    /// moved mark reports the cell a reader sees it on — the ellipsis for an
+    /// ancestor elided out of individual view, which is precisely where that
+    /// ancestor's focus ring is drawn.
+    fn cell_area(&self, index: usize, bounds: Rect, scale: Scale, theme: &Theme) -> Option<Rect> {
+        let font = role_font(theme, scale, TextRole::Body);
+        self.plan(bounds, scale, theme, font)
+            .into_iter()
+            .find(|p| Self::cell_shows(p.cell, index))
+            .map(|p| {
+                let (x, y, w, h) = p.rect;
+                Rect::new(to_i32(x), to_i32(y), w, h)
+            })
     }
 
     /// The crumb index at `point` for the given bounds, resolved through the
@@ -591,12 +651,16 @@ impl Breadcrumb {
     /// Feed a pointer event, given the trail's current `bounds`; hover
     /// emphasises an ancestor crumb and a completed primary click over an
     /// actionable, non-current one activates it.
+    ///
+    /// A moved hover reports the cell it left and the cell it arrives on; a
+    /// sample that stays on one crumb reports nothing.
     pub fn on_pointer(
         &mut self,
         event: &InputEvent,
         bounds: Rect,
         scale: Scale,
         theme: &Theme,
+        damage: &mut Region,
     ) -> Option<BreadcrumbAction> {
         if let InputEvent::PointerMoved { to } = event {
             *self.pointer = *to;
@@ -606,7 +670,14 @@ impl Breadcrumb {
             .filter(|&i| !self.is_current(i));
         match event {
             InputEvent::PointerMoved { .. } => {
-                if self.armed.is_none() {
+                if self.armed.is_none()
+                    && damage::move_mark(
+                        self.hover,
+                        over,
+                        |crumb| self.cell_area(crumb, bounds, scale, theme),
+                        damage,
+                    )
+                {
                     self.hover = over;
                 }
                 None
@@ -647,29 +718,41 @@ impl Breadcrumb {
     /// ancestors (wrapping), Home/End jump to the first/last one, and
     /// Enter/Space activate the focused crumb. Focus never lands on the
     /// current (trailing) crumb.
-    pub fn on_key(&mut self, key: Key) -> Option<BreadcrumbAction> {
+    ///
+    /// A moved ring reports the two cells it moved between; activating reports
+    /// nothing, because the trail itself draws nothing differently for it.
+    pub fn on_key(
+        &mut self,
+        key: Key,
+        bounds: Rect,
+        scale: Scale,
+        theme: &Theme,
+        damage: &mut Region,
+    ) -> Option<BreadcrumbAction> {
         let last = self.last_activatable()?;
         match key {
             Key::Named(NamedKey::Right) => {
-                self.focus = Some(match self.focus {
+                let next = match self.focus {
                     Some(i) if i < last => i + 1,
                     _ => 0,
-                });
+                };
+                self.set_focus(Some(next), bounds, scale, theme, damage);
                 None
             }
             Key::Named(NamedKey::Left) => {
-                self.focus = Some(match self.focus {
+                let prev = match self.focus {
                     Some(0) | None => last,
                     Some(i) => i - 1,
-                });
+                };
+                self.set_focus(Some(prev), bounds, scale, theme, damage);
                 None
             }
             Key::Named(NamedKey::Home) => {
-                self.focus = Some(0);
+                self.set_focus(Some(0), bounds, scale, theme, damage);
                 None
             }
             Key::Named(NamedKey::End) => {
-                self.focus = Some(last);
+                self.set_focus(Some(last), bounds, scale, theme, damage);
                 None
             }
             _ => {

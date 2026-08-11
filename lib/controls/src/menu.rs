@@ -15,12 +15,13 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use tairix_font::BitmapFont;
-use tairix_geometry::{Point, Rect, Scale};
+use tairix_geometry::{Point, Rect, Region, Scale};
 use tairix_icon::{builtin_icon, IconKind};
 use tairix_input::{InputEvent, Key, NamedKey, PointerButton};
 use tairix_raster::{Color, Surface};
 use tairix_theme::{TextRole, Theme};
 
+use crate::damage;
 use crate::paint::{
     draw_outline, heavy_contrast, inset, paint_bead, paint_chevron, plate_border, resolve_bead,
     role_font, surface_rect, text_plate_height, to_i32, ChevronDir,
@@ -751,14 +752,45 @@ impl Menu {
         }
     }
 
+    /// Move the highlight to `next`, `keyboard` when the keyboard put it there,
+    /// reporting the row it left, the row it arrives on, and — when only the
+    /// ring changed — that one row.
+    fn highlight(
+        &mut self,
+        next: Option<usize>,
+        keyboard: bool,
+        bounds: Rect,
+        scale: Scale,
+        theme: &Theme,
+        damage: &mut Region,
+    ) {
+        if damage::move_mark(
+            self.current,
+            next,
+            |index| self.row_rect(index, bounds, scale, theme),
+            damage,
+        ) {
+            self.current = next;
+        }
+        let ring = self
+            .current
+            .and_then(|index| self.row_rect(index, bounds, scale, theme))
+            .unwrap_or(Rect::EMPTY);
+        damage::set(&mut self.keyboard_focus, keyboard, ring, damage);
+    }
+
     /// Feed a pointer event; hover sets the current row and a completed primary
     /// click over an actionable row activates it (opening a submenu parent).
+    ///
+    /// A moved highlight reports the two rows it moved between, never the whole
+    /// popup, and a sample that stays on one row reports nothing.
     pub fn on_pointer(
         &mut self,
         event: &InputEvent,
         bounds: Rect,
         scale: Scale,
         theme: &Theme,
+        damage: &mut Region,
     ) -> Option<MenuAction> {
         if let InputEvent::PointerMoved { to } = event {
             *self.pointer = *to;
@@ -767,8 +799,7 @@ impl Menu {
         match event {
             InputEvent::PointerMoved { .. } => {
                 if self.armed.is_none() {
-                    self.current = over;
-                    self.keyboard_focus = false;
+                    self.highlight(over, false, bounds, scale, theme, damage);
                 }
                 None
             }
@@ -776,9 +807,8 @@ impl Menu {
                 button: PointerButton::Primary,
             } => {
                 *self.armed = over;
-                if let Some(i) = over {
-                    self.current = Some(i);
-                    self.keyboard_focus = false;
+                if over.is_some() {
+                    self.highlight(over, false, bounds, scale, theme, damage);
                 }
                 None
             }
@@ -798,7 +828,18 @@ impl Menu {
     /// Feed a key event: Up/Down move the current row (wrapping), Home/End jump
     /// to the ends, Right/Enter/Space activate (opening a submenu parent), and
     /// Escape dismisses.
-    pub fn on_key(&mut self, key: Key) -> Option<MenuAction> {
+    ///
+    /// A moved highlight reports the two rows it moved between; the keys that
+    /// only activate or dismiss report nothing, because the menu itself draws
+    /// nothing differently for them.
+    pub fn on_key(
+        &mut self,
+        key: Key,
+        bounds: Rect,
+        scale: Scale,
+        theme: &Theme,
+        damage: &mut Region,
+    ) -> Option<MenuAction> {
         if self.items.is_empty() {
             return match key {
                 Key::Named(NamedKey::Escape) => Some(MenuAction::Dismissed),
@@ -812,8 +853,7 @@ impl Menu {
                     Some(i) if i < last => i + 1,
                     _ => 0,
                 };
-                self.current = Some(next);
-                self.keyboard_focus = true;
+                self.highlight(Some(next), true, bounds, scale, theme, damage);
                 None
             }
             Key::Named(NamedKey::Up) => {
@@ -821,18 +861,15 @@ impl Menu {
                     Some(0) | None => last,
                     Some(i) => i - 1,
                 };
-                self.current = Some(prev);
-                self.keyboard_focus = true;
+                self.highlight(Some(prev), true, bounds, scale, theme, damage);
                 None
             }
             Key::Named(NamedKey::Home) => {
-                self.current = Some(0);
-                self.keyboard_focus = true;
+                self.highlight(Some(0), true, bounds, scale, theme, damage);
                 None
             }
             Key::Named(NamedKey::End) => {
-                self.current = Some(last);
-                self.keyboard_focus = true;
+                self.highlight(Some(last), true, bounds, scale, theme, damage);
                 None
             }
             Key::Named(NamedKey::Right) => {

@@ -771,9 +771,9 @@ impl Viewer {
         let button_changed = self.open_button.state() != button_state_before;
 
         let bar_before = self.scrollbar;
-        let scroll_action = self
-            .scrollbar
-            .on_pointer(event, layout.scrollbar, scale, theme);
+        let scroll_action =
+            self.scrollbar
+                .on_pointer(event, layout.scrollbar, scale, theme, damage);
         let bar_changed = self.scrollbar != bar_before;
 
         let mut changed = button_changed || bar_changed;

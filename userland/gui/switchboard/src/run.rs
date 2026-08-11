@@ -707,6 +707,17 @@ mod program {
         acted.or(moved)
     }
 
+    /// Feed one key to the composition, laid out exactly as a present would
+    /// lay it out, so every control the key reaches reports the rectangle it
+    /// is drawn in.
+    fn route_key(service: &mut Service, host: &RtHost, key: Key) -> Option<SwitchboardAction> {
+        let bounds = host.bounds()?;
+        let theme = host.themes.active();
+        let font = panel_font(theme, host.desktop.scale());
+        let view = service.panel_mut().view_mut()?;
+        view.on_key(key, bounds, host.desktop.scale(), theme, font)
+    }
+
     /// Feed one wheel gesture to the composition.
     fn route_scroll(
         service: &mut Service,
@@ -762,10 +773,7 @@ mod program {
                     KeyValue::Char(ch) => Key::Char(ch),
                     KeyValue::Named(named) => Key::Named(to_named_key(named)),
                 };
-                service
-                    .panel_mut()
-                    .view_mut()
-                    .and_then(|view| view.on_key(key))
+                route_key(service, host, key)
             }
             WindowEvent::Pointer { x, y, action, .. } => route_pointer(service, host, x, y, action),
             WindowEvent::Scrolled { dx, dy, .. } => route_scroll(service, host, dx, dy),

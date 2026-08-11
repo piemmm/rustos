@@ -12,10 +12,7 @@
 use alloc::vec::Vec;
 use core::mem;
 
-use tairix_controls::{
-    damage, ActionRail, Button, Card, ControlState, ListRow, PointerState, TableRow,
-};
-use tairix_geometry::Rect;
+use tairix_controls::{ActionRail, Button, Card, ControlState, ListRow, PointerState, TableRow};
 
 /// A control carrying a pointer highlight a refresh can restate.
 pub(super) trait Pointed {
@@ -165,9 +162,7 @@ pub(super) fn restate_rail(rail: &mut ActionRail, fresh: Vec<Button>) {
     } else {
         *rail = ActionRail::new(fresh);
     }
-    // A refresh carries no layout, so there is no rectangle to report the
-    // focus move into.
-    rail.set_focus(focus, Rect::EMPTY, &mut damage::sink());
+    rail.adopt_focus(focus);
 }
 
 /// Whether two runs name the same commands in the same order — the identity

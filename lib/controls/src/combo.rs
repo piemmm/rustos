@@ -13,11 +13,12 @@
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use tairix_geometry::{Point, Rect, Scale};
+use tairix_geometry::{Point, Rect, Region, Scale};
 use tairix_input::{InputEvent, Key, NamedKey, PointerButton};
 use tairix_raster::{Color, Surface};
 use tairix_theme::{TextRole, Theme};
 
+use crate::damage;
 use crate::menu::{Menu, MenuAction, MenuItem};
 use crate::paint::{
     paint_bead, paint_chevron, paint_plate, plate_border, resolve_bead, resolve_frame, role_font,
@@ -163,9 +164,14 @@ impl ComboBox {
 
     /// Record a selection and mirror it into the menu (highlight + selection
     /// state), so the popup opens on the current choice.
-    fn select_internal(&mut self, index: usize) {
-        if index >= self.choices.len() {
-            return;
+    ///
+    /// Answers whether the selection moved, which is what decides whether the
+    /// label the field shows — and so the field — changed. Re-selecting the
+    /// current choice moves nothing: the menu's mirror is a function of this
+    /// selection and is already in that state.
+    fn select_internal(&mut self, index: usize) -> bool {
+        if index >= self.choices.len() || self.selected == Some(index) {
+            return false;
         }
         self.selected = Some(index);
         for (i, item) in self.menu.items_mut().iter_mut().enumerate() {
@@ -178,26 +184,49 @@ impl ComboBox {
             item.set_state(s);
         }
         self.menu.set_current(Some(index));
+        true
     }
 
-    /// Expand the list, highlighting the selected (or first) choice.
-    fn open(&mut self) -> Option<ComboAction> {
+    /// Expand the list, highlighting the selected (or first) choice, reporting
+    /// the `popup` rectangle that appears.
+    fn open(&mut self, popup: Rect, damage: &mut Region) -> Option<ComboAction> {
         if self.expanded || self.choices.is_empty() {
             return None;
         }
-        self.expanded = true;
+        damage::set(&mut self.expanded, true, popup, damage);
         self.menu.set_current(Some(self.selected.unwrap_or(0)));
         Some(ComboAction::Opened)
     }
 
-    /// Collapse the list.
-    fn close(&mut self) -> Option<ComboAction> {
+    /// Collapse the list, reporting the `popup` rectangle it vacates — what the
+    /// popup covered is drawn again by whatever lies beneath it.
+    fn close(&mut self, popup: Rect, damage: &mut Region) -> Option<ComboAction> {
         if !self.expanded {
             return None;
         }
-        self.expanded = false;
+        damage::set(&mut self.expanded, false, popup, damage);
         *self.armed = false;
         Some(ComboAction::Closed)
+    }
+
+    /// Take the choice at `index` and collapse, reporting the `field` whose
+    /// label it changes and the `popup` it vacates.
+    ///
+    /// The collapse is [`close`](Self::close)'s, so there is one definition of
+    /// what collapsing does; the action it would have reported is superseded by
+    /// the selection.
+    fn take_choice(
+        &mut self,
+        index: usize,
+        field: Rect,
+        popup: Rect,
+        damage: &mut Region,
+    ) -> ComboAction {
+        if self.select_internal(index) {
+            damage.add(field);
+        }
+        self.close(popup, damage);
+        ComboAction::Selected { index }
     }
 
     /// The popup surface size for the active theme: as wide as the widest
@@ -305,6 +334,11 @@ impl ComboBox {
     /// toggles the list open. When expanded, the event is routed to the popup
     /// menu at `popup_bounds`: choosing a row selects it and collapses, and a
     /// primary press outside both the field and the popup collapses the list.
+    ///
+    /// The two rectangles are reported separately, because they change for
+    /// different reasons: the popup when it appears or vacates (and the rows
+    /// within it as the highlight moves), the field only when the label it
+    /// shows changes.
     pub fn on_pointer(
         &mut self,
         event: &InputEvent,
@@ -312,19 +346,20 @@ impl ComboBox {
         popup_bounds: Rect,
         scale: Scale,
         theme: &Theme,
+        damage: &mut Region,
     ) -> Option<ComboAction> {
         if let InputEvent::PointerMoved { to } = event {
             *self.pointer = *to;
         }
         if self.expanded {
-            match self.menu.on_pointer(event, popup_bounds, scale, theme) {
+            match self
+                .menu
+                .on_pointer(event, popup_bounds, scale, theme, damage)
+            {
                 Some(MenuAction::Activated { index } | MenuAction::OpenSubmenu { index }) => {
-                    self.select_internal(index);
-                    self.expanded = false;
-                    *self.armed = false;
-                    return Some(ComboAction::Selected { index });
+                    return Some(self.take_choice(index, field_bounds, popup_bounds, damage));
                 }
-                Some(MenuAction::Dismissed) => return self.close(),
+                Some(MenuAction::Dismissed) => return self.close(popup_bounds, damage),
                 None => {}
             }
             if matches!(
@@ -335,7 +370,7 @@ impl ComboBox {
             ) && !popup_bounds.contains(*self.pointer)
                 && !field_bounds.contains(*self.pointer)
             {
-                return self.close();
+                return self.close(popup_bounds, damage);
             }
             return None;
         }
@@ -354,7 +389,7 @@ impl ComboBox {
                 let fire = *self.armed && inside && self.state.is_actionable();
                 *self.armed = false;
                 if fire {
-                    self.open()
+                    self.open(popup_bounds, damage)
                 } else {
                     None
                 }
@@ -366,15 +401,21 @@ impl ComboBox {
     /// Feed a key event. When expanded, keys drive the popup menu (Up/Down move,
     /// Enter/Space choose, Escape closes). When collapsed and focused, Down /
     /// Up / Enter / Space open the list on the current choice.
-    pub fn on_key(&mut self, key: Key) -> Option<ComboAction> {
+    pub fn on_key(
+        &mut self,
+        key: Key,
+        field_bounds: Rect,
+        popup_bounds: Rect,
+        scale: Scale,
+        theme: &Theme,
+        damage: &mut Region,
+    ) -> Option<ComboAction> {
         if self.expanded {
-            return match self.menu.on_key(key) {
+            return match self.menu.on_key(key, popup_bounds, scale, theme, damage) {
                 Some(MenuAction::Activated { index } | MenuAction::OpenSubmenu { index }) => {
-                    self.select_internal(index);
-                    self.expanded = false;
-                    Some(ComboAction::Selected { index })
+                    Some(self.take_choice(index, field_bounds, popup_bounds, damage))
                 }
-                Some(MenuAction::Dismissed) => self.close(),
+                Some(MenuAction::Dismissed) => self.close(popup_bounds, damage),
                 None => None,
             };
         }
@@ -383,7 +424,7 @@ impl ComboBox {
         }
         match key {
             Key::Named(NamedKey::Down | NamedKey::Up | NamedKey::Enter) | Key::Char(' ') => {
-                self.open()
+                self.open(popup_bounds, damage)
             }
             _ => None,
         }

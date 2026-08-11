@@ -27,12 +27,13 @@ use core::mem;
 use core::ops::Range;
 
 use tairix_font::BitmapFont;
-use tairix_geometry::{Point, Rect, Scale};
+use tairix_geometry::{Point, Rect, Region, Scale};
 use tairix_input::{InputEvent, Key, Modifiers, NamedKey, PointerButton};
 use tairix_raster::{Color, Surface};
 use tairix_theme::{TextRole, Theme};
 use tairix_util::secret::wipe;
 
+use crate::damage;
 use crate::paint::{
     paint_bead, paint_filled_circle, paint_plate, plate_border, resolve_bead, resolve_frame,
     role_font, surface_rect, to_i32, PlateStyle,
@@ -936,6 +937,28 @@ impl FieldCore {
         font.draw_text(surface, to_i32(mx), to_i32(my), fitted, color);
     }
 
+    /// Apply `edit` to the editor, reporting `bounds` when it changed anything
+    /// the field draws, and pass on the edit's own answer.
+    ///
+    /// An edit changes the drawn field in two ways: the buffer, which the edit
+    /// itself answers for, and the caret or selection, which the caret/anchor
+    /// pair answers for. The buffer's bytes are deliberately **not** compared:
+    /// a secret field's characters must not be copied anywhere, even into a
+    /// temporary a comparison would drop.
+    fn edit(
+        &mut self,
+        bounds: Rect,
+        damage: &mut Region,
+        edit: impl FnOnce(&mut TextEditor) -> bool,
+    ) -> bool {
+        let before = (self.editor.caret, self.editor.anchor);
+        let changed = edit(&mut self.editor);
+        if changed || (self.editor.caret, self.editor.anchor) != before {
+            damage.add(bounds);
+        }
+        changed
+    }
+
     /// Feed a pointer event; a press places the caret (and starts a selection
     /// drag), motion while dragging extends the selection, release ends it.
     /// A denied/disabled/pending field ignores pointer editing (fail closed).
@@ -945,36 +968,51 @@ impl FieldCore {
         bounds: Rect,
         scale: Scale,
         theme: &Theme,
-        font: BitmapFont,
         leading: u32,
+        damage: &mut Region,
     ) -> Option<TextAction> {
         if let InputEvent::PointerMoved { to } = event {
             *self.pointer = *to;
         }
+        // The face is a function of the theme and the scale, so the input path
+        // asks for it rather than taking a derived value as an argument.
+        let font = role_font(theme, scale, TextRole::Body);
         let geom = field_geom(bounds, scale, theme, font, leading)?;
         let inside = bounds.contains(*self.pointer);
+        let hover_or_none = if inside {
+            PointerState::Hover
+        } else {
+            PointerState::None
+        };
         match event {
             InputEvent::PointerPressed {
                 button: PointerButton::Primary,
             } => {
                 if inside && self.actionable() {
                     *self.selecting = true;
-                    self.state.pointer = PointerState::Pressed;
+                    damage::set(
+                        &mut self.state.pointer,
+                        PointerState::Pressed,
+                        bounds,
+                        damage,
+                    );
                     let byte = self.byte_at(&geom, scale, theme, font);
-                    self.editor.place_caret(byte, false);
+                    self.edit(bounds, damage, |editor| {
+                        editor.place_caret(byte, false);
+                        false
+                    });
                 }
                 None
             }
             InputEvent::PointerMoved { .. } => {
                 if *self.selecting {
                     let byte = self.byte_at(&geom, scale, theme, font);
-                    self.editor.place_caret(byte, true);
+                    self.edit(bounds, damage, |editor| {
+                        editor.place_caret(byte, true);
+                        false
+                    });
                 } else {
-                    self.state.pointer = if inside {
-                        PointerState::Hover
-                    } else {
-                        PointerState::None
-                    };
+                    damage::set(&mut self.state.pointer, hover_or_none, bounds, damage);
                 }
                 None
             }
@@ -982,11 +1020,7 @@ impl FieldCore {
                 button: PointerButton::Primary,
             } => {
                 *self.selecting = false;
-                self.state.pointer = if inside {
-                    PointerState::Hover
-                } else {
-                    PointerState::None
-                };
+                damage::set(&mut self.state.pointer, hover_or_none, bounds, damage);
                 None
             }
             _ => None,
@@ -1020,46 +1054,69 @@ impl FieldCore {
     /// Feed a key event. Editing keys require an editable field; navigation and
     /// selection require an actionable one; Enter/Escape report submit/cancel.
     /// `clear_on_escape` clears a non-empty buffer first (a search field).
-    fn on_key(&mut self, key: Key, mods: Modifiers, clear_on_escape: bool) -> Option<TextAction> {
+    fn on_key(
+        &mut self,
+        key: Key,
+        mods: Modifiers,
+        clear_on_escape: bool,
+        bounds: Rect,
+        damage: &mut Region,
+    ) -> Option<TextAction> {
         if !self.state.focus.focused || !self.actionable() {
             return None;
         }
         match key {
             Key::Char('a' | 'A') if mods.ctrl => {
-                self.editor.select_all();
+                self.edit(bounds, damage, |editor| {
+                    editor.select_all();
+                    false
+                });
                 None
             }
             Key::Char(ch) if self.editable() && !mods.ctrl && !mods.alt && !mods.meta => {
                 if ch.is_control() {
                     return None;
                 }
-                self.editor.insert_char(ch).then_some(TextAction::Edited)
+                self.edit(bounds, damage, |editor| editor.insert_char(ch))
+                    .then_some(TextAction::Edited)
             }
-            Key::Named(NamedKey::Backspace) if self.editable() => {
-                self.editor.backspace().then_some(TextAction::Edited)
-            }
-            Key::Named(NamedKey::Delete) if self.editable() => {
-                self.editor.delete_forward().then_some(TextAction::Edited)
-            }
+            Key::Named(NamedKey::Backspace) if self.editable() => self
+                .edit(bounds, damage, TextEditor::backspace)
+                .then_some(TextAction::Edited),
+            Key::Named(NamedKey::Delete) if self.editable() => self
+                .edit(bounds, damage, TextEditor::delete_forward)
+                .then_some(TextAction::Edited),
             Key::Named(NamedKey::Left) => {
-                self.editor.move_left(mods.shift);
+                self.edit(bounds, damage, |editor| {
+                    editor.move_left(mods.shift);
+                    false
+                });
                 None
             }
             Key::Named(NamedKey::Right) => {
-                self.editor.move_right(mods.shift);
+                self.edit(bounds, damage, |editor| {
+                    editor.move_right(mods.shift);
+                    false
+                });
                 None
             }
             Key::Named(NamedKey::Home) => {
-                self.editor.home(mods.shift);
+                self.edit(bounds, damage, |editor| {
+                    editor.home(mods.shift);
+                    false
+                });
                 None
             }
             Key::Named(NamedKey::End) => {
-                self.editor.end(mods.shift);
+                self.edit(bounds, damage, |editor| {
+                    editor.end(mods.shift);
+                    false
+                });
                 None
             }
             Key::Named(NamedKey::Enter) => Some(TextAction::Submitted),
             Key::Named(NamedKey::Escape) => {
-                if clear_on_escape && self.editor.clear() {
+                if clear_on_escape && self.edit(bounds, damage, TextEditor::clear) {
                     Some(TextAction::Edited)
                 } else {
                     Some(TextAction::Cancelled)
@@ -1224,23 +1281,37 @@ impl TextField {
     /// pointer and starts a selection, motion while pressed extends it, and
     /// release ends it. A denied/disabled/pending field ignores it (fail
     /// closed).
+    ///
+    /// The field reports `bounds` into `damage` when the event changed what it
+    /// draws — the text, the caret, the selection, or its pointer look. A
+    /// sample that stays inside a field it is already hovering reports nothing.
     pub fn on_pointer(
         &mut self,
         event: &InputEvent,
         bounds: Rect,
         scale: Scale,
         theme: &Theme,
+        damage: &mut Region,
     ) -> Option<TextAction> {
-        let font = role_font(theme, scale, TextRole::Body);
-        self.core.on_pointer(event, bounds, scale, theme, font, 0)
+        self.core.on_pointer(event, bounds, scale, theme, 0, damage)
     }
 
     /// Feed a key event: printable keys insert (replacing any selection),
     /// Backspace/Delete remove, arrows/Home/End move the caret (Shift extends
     /// the selection), Ctrl+A selects all, Enter submits, and Escape cancels.
     /// Editing keys require an editable (not read-only, not denied) field.
-    pub fn on_key(&mut self, key: Key, modifiers: Modifiers) -> Option<TextAction> {
-        self.core.on_key(key, modifiers, false)
+    ///
+    /// A key that edits the buffer or moves the caret reports `bounds`; one
+    /// that only submits or cancels, or moves a caret already at the end it
+    /// moves toward, reports nothing.
+    pub fn on_key(
+        &mut self,
+        key: Key,
+        modifiers: Modifiers,
+        bounds: Rect,
+        damage: &mut Region,
+    ) -> Option<TextAction> {
+        self.core.on_key(key, modifiers, false, bounds, damage)
     }
 }
 
@@ -1454,15 +1525,24 @@ impl SearchField {
         bounds: Rect,
         scale: Scale,
         theme: &Theme,
+        damage: &mut Region,
     ) -> Option<TextAction> {
         let font = role_font(theme, scale, TextRole::Body);
         let leading = Self::leading(bounds, scale, theme, font);
         self.core
-            .on_pointer(event, bounds, scale, theme, font, leading)
+            .on_pointer(event, bounds, scale, theme, leading, damage)
     }
 
     /// Feed a key event; Escape clears a non-empty query before dismissing.
-    pub fn on_key(&mut self, key: Key, modifiers: Modifiers) -> Option<TextAction> {
-        self.core.on_key(key, modifiers, true)
+    /// Reports like [`TextField::on_key`], and a cleared query reports too —
+    /// the magnifier goes quiet with it.
+    pub fn on_key(
+        &mut self,
+        key: Key,
+        modifiers: Modifiers,
+        bounds: Rect,
+        damage: &mut Region,
+    ) -> Option<TextAction> {
+        self.core.on_key(key, modifiers, true, bounds, damage)
     }
 }

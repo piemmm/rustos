@@ -142,7 +142,14 @@ fn click_at(sheet: &mut Settings, viewport: Rect, at: Point) -> SheetOutcome {
 
 /// One unmodified key press.
 fn key(sheet: &mut Settings, viewport: Rect, key: Key) -> SheetOutcome {
-    sheet.on_key(key, Modifiers::default(), viewport, SCALE, &theme())
+    sheet.on_key(
+        key,
+        Modifiers::default(),
+        viewport,
+        SCALE,
+        &theme(),
+        &mut damage::sink(),
+    )
 }
 
 /// One Shift-modified key press.
@@ -151,7 +158,14 @@ fn shift_key(sheet: &mut Settings, viewport: Rect, key: Key) -> SheetOutcome {
         shift: true,
         ..Modifiers::default()
     };
-    sheet.on_key(key, modifiers, viewport, SCALE, &theme())
+    sheet.on_key(
+        key,
+        modifiers,
+        viewport,
+        SCALE,
+        &theme(),
+        &mut damage::sink(),
+    )
 }
 
 /// Tab forward until `target` holds focus.

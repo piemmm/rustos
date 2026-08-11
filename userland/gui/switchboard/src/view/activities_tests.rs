@@ -13,7 +13,7 @@ use super::{ActivityControl, ActivityRow};
 use crate::view::frame::DETAIL_PANE_WIDTH;
 use crate::view::system_data::{reading_text, Reading, Unmeasured};
 use crate::view::test_support::{
-    bounds, centre, click, font, has_ink, model, moved, PRESS, RELEASE,
+    bounds, centre, click, font, has_ink, key, model, moved, PRESS, RELEASE,
 };
 use crate::view::{Section, Switchboard, SwitchboardAction, SwitchboardModel};
 
@@ -393,32 +393,32 @@ fn keyboard_reaches_every_activity_header_button() {
     let mut sb = Switchboard::new(&model());
     sb.select_section(Section::Activities);
     assert_eq!(
-        sb.on_key(Key::Named(NamedKey::Enter)),
+        key(&mut sb, Key::Named(NamedKey::Enter)),
         Some(SwitchboardAction::Activity {
             index: 0,
             control: ActivityControl::Switch
         })
     );
-    assert_eq!(sb.on_key(Key::Named(NamedKey::Right)), None);
+    assert_eq!(key(&mut sb, Key::Named(NamedKey::Right)), None);
     assert_eq!(
-        sb.on_key(Key::Named(NamedKey::Enter)),
+        key(&mut sb, Key::Named(NamedKey::Enter)),
         Some(SwitchboardAction::Activity {
             index: 0,
             control: ActivityControl::Pause
         })
     );
-    assert_eq!(sb.on_key(Key::Named(NamedKey::Right)), None);
+    assert_eq!(key(&mut sb, Key::Named(NamedKey::Right)), None);
     assert_eq!(
-        sb.on_key(Key::Named(NamedKey::Enter)),
+        key(&mut sb, Key::Named(NamedKey::Enter)),
         None,
         "Rename begins an edit instead of emitting"
     );
     assert!(sb.activities.rename.is_some());
-    assert_eq!(sb.on_key(Key::Named(NamedKey::Escape)), None);
+    assert_eq!(key(&mut sb, Key::Named(NamedKey::Escape)), None);
     assert!(sb.activities.rename.is_none());
-    assert_eq!(sb.on_key(Key::Named(NamedKey::Right)), None);
+    assert_eq!(key(&mut sb, Key::Named(NamedKey::Right)), None);
     assert_eq!(
-        sb.on_key(Key::Named(NamedKey::Enter)),
+        key(&mut sb, Key::Named(NamedKey::Enter)),
         Some(SwitchboardAction::Activity {
             index: 0,
             control: ActivityControl::Close
@@ -426,8 +426,8 @@ fn keyboard_reaches_every_activity_header_button() {
     );
 
     // A member row (flattened row 1) has no buttons to focus or activate.
-    assert_eq!(sb.on_key(Key::Named(NamedKey::Down)), None);
-    assert_eq!(sb.on_key(Key::Named(NamedKey::Enter)), None);
+    assert_eq!(key(&mut sb, Key::Named(NamedKey::Down)), None);
+    assert_eq!(key(&mut sb, Key::Named(NamedKey::Enter)), None);
 }
 
 /// Begin an inline rename of the first activity's header by pointer.
@@ -452,9 +452,9 @@ fn rename_commits_by_enter_and_reports_the_name() {
         Some("activity 0"),
         "the field pre-fills with the current name"
     );
-    assert_eq!(sb.on_key(Key::Char('!')), None);
+    assert_eq!(key(&mut sb, Key::Char('!')), None);
     assert_eq!(
-        sb.on_key(Key::Named(NamedKey::Enter)),
+        key(&mut sb, Key::Named(NamedKey::Enter)),
         Some(SwitchboardAction::ActivityRenamed { index: 0 })
     );
     assert_eq!(sb.submitted_activity_name(), Some("activity 0!"));
@@ -468,8 +468,8 @@ fn rename_escape_cancels_without_emitting() {
     let b = bounds();
     let mut sb = Switchboard::new(&model());
     begin_first_rename(&mut sb, b, &theme);
-    assert_eq!(sb.on_key(Key::Char('!')), None);
-    assert_eq!(sb.on_key(Key::Named(NamedKey::Escape)), None);
+    assert_eq!(key(&mut sb, Key::Char('!')), None);
+    assert_eq!(key(&mut sb, Key::Named(NamedKey::Escape)), None);
     assert!(sb.activities.rename.is_none());
     assert_eq!(sb.submitted_activity_name(), None);
     assert_eq!(
@@ -484,7 +484,7 @@ fn rename_survives_a_refresh_that_moves_its_activity() {
     let b = bounds();
     let mut sb = Switchboard::new(&model());
     begin_first_rename(&mut sb, b, &theme);
-    assert_eq!(sb.on_key(Key::Char('!')), None);
+    assert_eq!(key(&mut sb, Key::Char('!')), None);
 
     // The refresh reorders the list: id 100 moves from index 0 to index 5.
     let mut m = model();
@@ -499,7 +499,7 @@ fn rename_survives_a_refresh_that_moves_its_activity() {
     assert_eq!(edit.index, 5, "the edit re-locates its activity by id");
     assert_eq!(edit.field.text(), "activity 0!", "the typed text survives");
     assert_eq!(
-        sb.on_key(Key::Named(NamedKey::Enter)),
+        key(&mut sb, Key::Named(NamedKey::Enter)),
         Some(SwitchboardAction::ActivityRenamed { index: 5 })
     );
     assert_eq!(sb.submitted_activity_name(), Some("activity 0!"));
@@ -531,7 +531,7 @@ fn submitted_name_clears_on_the_next_refresh() {
     let mut sb = Switchboard::new(&model());
     begin_first_rename(&mut sb, b, &theme);
     assert_eq!(
-        sb.on_key(Key::Named(NamedKey::Enter)),
+        key(&mut sb, Key::Named(NamedKey::Enter)),
         Some(SwitchboardAction::ActivityRenamed { index: 0 })
     );
     assert!(sb.submitted_activity_name().is_some());

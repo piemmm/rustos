@@ -23,6 +23,7 @@ use tairix_input::{InputEvent, Key, Modifiers, NamedKey, PointerButton};
 use tairix_raster::{Color, Pixel, Surface};
 use tairix_theme::{Rgba, Theme};
 
+use crate::damage::sink;
 use crate::state::{AuthorityState, ControlState, ValidationState};
 use crate::testkit::{control_font, high_contrast};
 use crate::text::{
@@ -96,7 +97,7 @@ fn has_pixel(surface: &Surface, want: Pixel) -> bool {
 /// Type a string into a focused, editable field a character at a time.
 fn type_str(field: &mut TextField, text: &str) {
     for ch in text.chars() {
-        field.on_key(Key::Char(ch), NONE_MODS);
+        field.on_key(Key::Char(ch), NONE_MODS, bounds(), &mut sink());
     }
 }
 
@@ -107,7 +108,7 @@ fn typing_inserts_and_reports_edits() {
     let mut field = TextField::new();
     field.set_focused(true);
     assert_eq!(
-        field.on_key(Key::Char('h'), NONE_MODS),
+        field.on_key(Key::Char('h'), NONE_MODS, bounds(), &mut sink()),
         Some(TextAction::Edited)
     );
     type_str(&mut field, "i!");
@@ -120,14 +121,24 @@ fn backspace_and_delete_remove_characters() {
     field.set_focused(true);
     // Caret is at the end after with_text; backspace removes 'o'.
     assert_eq!(
-        field.on_key(Key::Named(NamedKey::Backspace), NONE_MODS),
+        field.on_key(
+            Key::Named(NamedKey::Backspace),
+            NONE_MODS,
+            bounds(),
+            &mut sink()
+        ),
         Some(TextAction::Edited)
     );
     assert_eq!(field.text(), "hell");
     // Home then forward-delete removes 'h'.
-    field.on_key(Key::Named(NamedKey::Home), NONE_MODS);
+    field.on_key(Key::Named(NamedKey::Home), NONE_MODS, bounds(), &mut sink());
     assert_eq!(
-        field.on_key(Key::Named(NamedKey::Delete), NONE_MODS),
+        field.on_key(
+            Key::Named(NamedKey::Delete),
+            NONE_MODS,
+            bounds(),
+            &mut sink()
+        ),
         Some(TextAction::Edited)
     );
     assert_eq!(field.text(), "ell");
@@ -137,13 +148,26 @@ fn backspace_and_delete_remove_characters() {
 fn backspace_at_start_and_delete_at_end_do_nothing() {
     let mut field = TextField::new().with_text("x");
     field.set_focused(true);
-    field.on_key(Key::Named(NamedKey::Home), NONE_MODS);
+    field.on_key(Key::Named(NamedKey::Home), NONE_MODS, bounds(), &mut sink());
     assert_eq!(
-        field.on_key(Key::Named(NamedKey::Backspace), NONE_MODS),
+        field.on_key(
+            Key::Named(NamedKey::Backspace),
+            NONE_MODS,
+            bounds(),
+            &mut sink()
+        ),
         None
     );
-    field.on_key(Key::Named(NamedKey::End), NONE_MODS);
-    assert_eq!(field.on_key(Key::Named(NamedKey::Delete), NONE_MODS), None);
+    field.on_key(Key::Named(NamedKey::End), NONE_MODS, bounds(), &mut sink());
+    assert_eq!(
+        field.on_key(
+            Key::Named(NamedKey::Delete),
+            NONE_MODS,
+            bounds(),
+            &mut sink()
+        ),
+        None
+    );
     assert_eq!(field.text(), "x");
 }
 
@@ -151,7 +175,7 @@ fn backspace_at_start_and_delete_at_end_do_nothing() {
 fn caret_moves_and_inserts_in_the_middle() {
     let mut field = TextField::new().with_text("ac");
     field.set_focused(true);
-    field.on_key(Key::Named(NamedKey::Left), NONE_MODS);
+    field.on_key(Key::Named(NamedKey::Left), NONE_MODS, bounds(), &mut sink());
     type_str(&mut field, "b");
     assert_eq!(field.text(), "abc");
 }
@@ -161,7 +185,10 @@ fn selection_then_typing_replaces() {
     let mut field = TextField::new().with_text("abc");
     field.set_focused(true);
     // Select the whole buffer, then type replaces it.
-    assert_eq!(field.on_key(Key::Char('a'), CTRL), None);
+    assert_eq!(
+        field.on_key(Key::Char('a'), CTRL, bounds(), &mut sink()),
+        None
+    );
     type_str(&mut field, "Z");
     assert_eq!(field.text(), "Z");
 }
@@ -171,10 +198,15 @@ fn shift_arrow_selects_and_backspace_deletes_selection() {
     let mut field = TextField::new().with_text("abcd");
     field.set_focused(true);
     // Select the last two characters with Shift+Left twice.
-    field.on_key(Key::Named(NamedKey::Left), SHIFT);
-    field.on_key(Key::Named(NamedKey::Left), SHIFT);
+    field.on_key(Key::Named(NamedKey::Left), SHIFT, bounds(), &mut sink());
+    field.on_key(Key::Named(NamedKey::Left), SHIFT, bounds(), &mut sink());
     assert_eq!(
-        field.on_key(Key::Named(NamedKey::Backspace), NONE_MODS),
+        field.on_key(
+            Key::Named(NamedKey::Backspace),
+            NONE_MODS,
+            bounds(),
+            &mut sink()
+        ),
         Some(TextAction::Edited)
     );
     assert_eq!(field.text(), "ab");
@@ -200,7 +232,12 @@ fn multibyte_editing_stays_on_boundaries() {
     field.set_focused(true);
     // Backspace removes the 'é' (a two-byte scalar) cleanly.
     assert_eq!(
-        field.on_key(Key::Named(NamedKey::Backspace), NONE_MODS),
+        field.on_key(
+            Key::Named(NamedKey::Backspace),
+            NONE_MODS,
+            bounds(),
+            &mut sink()
+        ),
         Some(TextAction::Edited)
     );
     assert_eq!(field.text(), "caf");
@@ -211,11 +248,21 @@ fn enter_submits_and_escape_cancels() {
     let mut field = TextField::new().with_text("hi");
     field.set_focused(true);
     assert_eq!(
-        field.on_key(Key::Named(NamedKey::Enter), NONE_MODS),
+        field.on_key(
+            Key::Named(NamedKey::Enter),
+            NONE_MODS,
+            bounds(),
+            &mut sink()
+        ),
         Some(TextAction::Submitted)
     );
     assert_eq!(
-        field.on_key(Key::Named(NamedKey::Escape), NONE_MODS),
+        field.on_key(
+            Key::Named(NamedKey::Escape),
+            NONE_MODS,
+            bounds(),
+            &mut sink()
+        ),
         Some(TextAction::Cancelled)
     );
     // A plain text field's Escape does not clear its text.
@@ -229,7 +276,10 @@ fn disabled_field_ignores_input() {
     let mut field = TextField::new();
     field.set_state(ControlState::disabled());
     field.set_focused(true);
-    assert_eq!(field.on_key(Key::Char('x'), NONE_MODS), None);
+    assert_eq!(
+        field.on_key(Key::Char('x'), NONE_MODS, bounds(), &mut sink()),
+        None
+    );
     assert_eq!(field.text(), "");
 }
 
@@ -238,9 +288,17 @@ fn denied_field_keeps_value_and_ignores_edits() {
     let mut field = TextField::new().with_text("secret");
     field.set_state(ControlState::idle().with_authority(AuthorityState::Denied));
     field.set_focused(true);
-    assert_eq!(field.on_key(Key::Char('x'), NONE_MODS), None);
     assert_eq!(
-        field.on_key(Key::Named(NamedKey::Backspace), NONE_MODS),
+        field.on_key(Key::Char('x'), NONE_MODS, bounds(), &mut sink()),
+        None
+    );
+    assert_eq!(
+        field.on_key(
+            Key::Named(NamedKey::Backspace),
+            NONE_MODS,
+            bounds(),
+            &mut sink()
+        ),
         None
     );
     assert_eq!(field.text(), "secret");
@@ -250,13 +308,24 @@ fn denied_field_keeps_value_and_ignores_edits() {
 fn read_only_field_navigates_but_refuses_edits() {
     let mut field = TextField::new().with_text("value").read_only(true);
     field.set_focused(true);
-    assert_eq!(field.on_key(Key::Char('x'), NONE_MODS), None);
     assert_eq!(
-        field.on_key(Key::Named(NamedKey::Backspace), NONE_MODS),
+        field.on_key(Key::Char('x'), NONE_MODS, bounds(), &mut sink()),
+        None
+    );
+    assert_eq!(
+        field.on_key(
+            Key::Named(NamedKey::Backspace),
+            NONE_MODS,
+            bounds(),
+            &mut sink()
+        ),
         None
     );
     // Navigation still works (no action, but no panic and no change).
-    assert_eq!(field.on_key(Key::Named(NamedKey::Home), NONE_MODS), None);
+    assert_eq!(
+        field.on_key(Key::Named(NamedKey::Home), NONE_MODS, bounds(), &mut sink()),
+        None
+    );
     assert_eq!(field.text(), "value");
     assert!(field.is_read_only());
 }
@@ -346,9 +415,9 @@ fn click_focuses_caret_and_typing_inserts_there() {
     let mut field = TextField::new().with_text("aaaa");
     field.set_focused(true);
     // Click near the far left to place the caret at the start.
-    field.on_pointer(&moved(1, 14), bounds(), Scale::ONE, &theme);
-    field.on_pointer(&PRESS, bounds(), Scale::ONE, &theme);
-    field.on_pointer(&RELEASE, bounds(), Scale::ONE, &theme);
+    field.on_pointer(&moved(1, 14), bounds(), Scale::ONE, &theme, &mut sink());
+    field.on_pointer(&PRESS, bounds(), Scale::ONE, &theme, &mut sink());
+    field.on_pointer(&RELEASE, bounds(), Scale::ONE, &theme, &mut sink());
     type_str(&mut field, "Z");
     assert!(
         field.text().starts_with('Z'),
@@ -364,11 +433,11 @@ fn drag_selects_a_range_then_typing_replaces_it() {
     field.set_focused(true);
     let advance = font().cell_width();
     // Press at the start, drag several cells right, release: selects a run.
-    field.on_pointer(&moved(1, 14), bounds(), Scale::ONE, &theme);
-    field.on_pointer(&PRESS, bounds(), Scale::ONE, &theme);
+    field.on_pointer(&moved(1, 14), bounds(), Scale::ONE, &theme, &mut sink());
+    field.on_pointer(&PRESS, bounds(), Scale::ONE, &theme, &mut sink());
     let far = 3 * i32::try_from(advance).unwrap() + 2;
-    field.on_pointer(&moved(far, 14), bounds(), Scale::ONE, &theme);
-    field.on_pointer(&RELEASE, bounds(), Scale::ONE, &theme);
+    field.on_pointer(&moved(far, 14), bounds(), Scale::ONE, &theme, &mut sink());
+    field.on_pointer(&RELEASE, bounds(), Scale::ONE, &theme, &mut sink());
     type_str(&mut field, "Z");
     assert!(
         field.text().starts_with('Z') && field.text().ends_with("def"),
@@ -453,14 +522,24 @@ fn search_escape_clears_query_then_cancels() {
     search.set_focused(true);
     // First Escape clears the non-empty query and reports an edit.
     assert_eq!(
-        search.on_key(Key::Named(NamedKey::Escape), NONE_MODS),
+        search.on_key(
+            Key::Named(NamedKey::Escape),
+            NONE_MODS,
+            bounds(),
+            &mut sink()
+        ),
         Some(TextAction::Edited)
     );
     assert_eq!(search.text(), "");
     assert!(!search.has_query());
     // A second Escape (now empty) cancels.
     assert_eq!(
-        search.on_key(Key::Named(NamedKey::Escape), NONE_MODS),
+        search.on_key(
+            Key::Named(NamedKey::Escape),
+            NONE_MODS,
+            bounds(),
+            &mut sink()
+        ),
         Some(TextAction::Cancelled)
     );
 }
@@ -470,7 +549,7 @@ fn search_typing_builds_a_query() {
     let mut search = SearchField::new();
     search.set_focused(true);
     for ch in "abc".chars() {
-        search.on_key(Key::Char(ch), NONE_MODS);
+        search.on_key(Key::Char(ch), NONE_MODS, bounds(), &mut sink());
     }
     assert_eq!(search.text(), "abc");
     assert!(search.has_query());
@@ -502,11 +581,11 @@ fn search_click_places_caret_after_the_magnifier() {
     let mut search = SearchField::new().with_text("aaaa");
     search.set_focused(true);
     // A click well to the right lands somewhere in the text without panic.
-    search.on_pointer(&moved(80, 14), bounds(), Scale::ONE, &theme);
-    search.on_pointer(&PRESS, bounds(), Scale::ONE, &theme);
-    search.on_pointer(&RELEASE, bounds(), Scale::ONE, &theme);
+    search.on_pointer(&moved(80, 14), bounds(), Scale::ONE, &theme, &mut sink());
+    search.on_pointer(&PRESS, bounds(), Scale::ONE, &theme, &mut sink());
+    search.on_pointer(&RELEASE, bounds(), Scale::ONE, &theme, &mut sink());
     // Typing at that caret keeps the buffer well-formed.
-    search.on_key(Key::Char('Z'), NONE_MODS);
+    search.on_key(Key::Char('Z'), NONE_MODS, bounds(), &mut sink());
     assert!(search.text().contains('Z'));
 }
 
@@ -599,7 +678,7 @@ fn filling_a_secret_field_to_its_limit_never_reallocates() {
     // worst case its reservation was sized for. A growth here would leave a
     // copy of everything typed so far in the block it moved out of.
     for _ in 0..LIMIT {
-        field.on_key(Key::Char('😀'), NONE_MODS);
+        field.on_key(Key::Char('😀'), NONE_MODS, bounds(), &mut sink());
     }
     assert_eq!(field.text().chars().count(), LIMIT);
     let (after_ptr, after_cap) = debug_buffer_identity(&field);
@@ -743,13 +822,13 @@ fn a_secret_fields_caret_stands_between_bead_cells() {
         Some(caret),
         "typing three characters leaves the caret in the fourth cell"
     );
-    field.on_key(Key::Named(NamedKey::Home), NONE_MODS);
+    field.on_key(Key::Named(NamedKey::Home), NONE_MODS, bounds(), &mut sink());
     assert_eq!(
         field_surface(&field, &theme).get(text_x0, 0),
         Some(caret),
         "Home returns it to the first cell"
     );
-    field.on_key(Key::Named(NamedKey::End), NONE_MODS);
+    field.on_key(Key::Named(NamedKey::End), NONE_MODS, bounds(), &mut sink());
     assert_eq!(
         field_surface(&field, &theme).get(text_x0 + 3 * advance, 0),
         Some(caret),
@@ -764,8 +843,8 @@ fn a_secret_fields_selection_covers_whole_bead_cells() {
     let accent = premul(theme.palette().accent);
     let mut field = TextField::new().secret(8).with_text("abcd");
     field.set_focused(true);
-    field.on_key(Key::Named(NamedKey::Left), SHIFT);
-    field.on_key(Key::Named(NamedKey::Left), SHIFT);
+    field.on_key(Key::Named(NamedKey::Left), SHIFT, bounds(), &mut sink());
+    field.on_key(Key::Named(NamedKey::Left), SHIFT, bounds(), &mut sink());
     let surface = field_surface(&field, &theme);
     let first = (0..W).find(|&x| surface.get(x, 0) == Some(accent));
     let width = (0..W)
@@ -790,9 +869,9 @@ fn clicking_a_secret_field_places_the_caret_on_a_cell_boundary() {
     let mut field = TextField::new().secret(8).with_text("abcde");
     field.set_focused(true);
     let x = i32::try_from(text_x0 + 2 * advance).expect("cell x");
-    field.on_pointer(&moved(x, 14), bounds(), Scale::ONE, &theme);
-    field.on_pointer(&PRESS, bounds(), Scale::ONE, &theme);
-    field.on_pointer(&RELEASE, bounds(), Scale::ONE, &theme);
+    field.on_pointer(&moved(x, 14), bounds(), Scale::ONE, &theme, &mut sink());
+    field.on_pointer(&PRESS, bounds(), Scale::ONE, &theme, &mut sink());
+    field.on_pointer(&RELEASE, bounds(), Scale::ONE, &theme, &mut sink());
     type_str(&mut field, "Z");
     assert_eq!(
         field.text(),
@@ -809,10 +888,10 @@ fn dragging_a_secret_field_selects_whole_cells_and_typing_replaces_them() {
     field.set_focused(true);
     let start = i32::try_from(text_x0).expect("cell x");
     let end = i32::try_from(text_x0 + 3 * advance).expect("cell x");
-    field.on_pointer(&moved(start, 14), bounds(), Scale::ONE, &theme);
-    field.on_pointer(&PRESS, bounds(), Scale::ONE, &theme);
-    field.on_pointer(&moved(end, 14), bounds(), Scale::ONE, &theme);
-    field.on_pointer(&RELEASE, bounds(), Scale::ONE, &theme);
+    field.on_pointer(&moved(start, 14), bounds(), Scale::ONE, &theme, &mut sink());
+    field.on_pointer(&PRESS, bounds(), Scale::ONE, &theme, &mut sink());
+    field.on_pointer(&moved(end, 14), bounds(), Scale::ONE, &theme, &mut sink());
+    field.on_pointer(&RELEASE, bounds(), Scale::ONE, &theme, &mut sink());
     type_str(&mut field, "Z");
     assert_eq!(
         field.text(),
@@ -848,8 +927,8 @@ fn a_secret_field_edits_exactly_like_a_plain_one() {
     ];
     for (key, mods) in script {
         assert_eq!(
-            secret.on_key(key, mods),
-            plain.on_key(key, mods),
+            secret.on_key(key, mods, bounds(), &mut sink()),
+            plain.on_key(key, mods, bounds(), &mut sink()),
             "the same key reports the same action in either mode"
         );
         assert_eq!(
@@ -901,8 +980,20 @@ fn pointer_position_alone_never_changes_a_text_field_render() {
     let theme = Theme::dark();
     let mut a = TextField::new().with_text("hello");
     let mut b = a.clone();
-    a.on_pointer(&moved(OFF_A.0, OFF_A.1), bounds(), Scale::ONE, &theme);
-    b.on_pointer(&moved(OFF_B.0, OFF_B.1), bounds(), Scale::ONE, &theme);
+    a.on_pointer(
+        &moved(OFF_A.0, OFF_A.1),
+        bounds(),
+        Scale::ONE,
+        &theme,
+        &mut sink(),
+    );
+    b.on_pointer(
+        &moved(OFF_B.0, OFF_B.1),
+        bounds(),
+        Scale::ONE,
+        &theme,
+        &mut sink(),
+    );
 
     assert_eq!(
         a, b,
@@ -924,11 +1015,11 @@ fn selection_drag_latch_alone_never_changes_a_text_field_render() {
     // An empty field maps every press to byte zero, so the press moves no
     // caret and creates no selection: the drag latch is the only difference.
     let mut dragging = TextField::new();
-    dragging.on_pointer(&moved(4, 14), bounds(), Scale::ONE, &theme);
-    dragging.on_pointer(&PRESS, bounds(), Scale::ONE, &theme);
+    dragging.on_pointer(&moved(4, 14), bounds(), Scale::ONE, &theme, &mut sink());
+    dragging.on_pointer(&PRESS, bounds(), Scale::ONE, &theme, &mut sink());
 
     let mut shown = TextField::new();
-    shown.on_pointer(&moved(4, 14), bounds(), Scale::ONE, &theme);
+    shown.on_pointer(&moved(4, 14), bounds(), Scale::ONE, &theme, &mut sink());
     let mut pressed = ControlState::idle();
     pressed.pointer = crate::state::PointerState::Pressed;
     shown.set_state(pressed);
@@ -951,8 +1042,20 @@ fn pointer_position_alone_never_changes_a_search_field_render() {
     let theme = Theme::dark();
     let mut a = SearchField::new();
     let mut b = a.clone();
-    a.on_pointer(&moved(OFF_A.0, OFF_A.1), bounds(), Scale::ONE, &theme);
-    b.on_pointer(&moved(OFF_B.0, OFF_B.1), bounds(), Scale::ONE, &theme);
+    a.on_pointer(
+        &moved(OFF_A.0, OFF_A.1),
+        bounds(),
+        Scale::ONE,
+        &theme,
+        &mut sink(),
+    );
+    b.on_pointer(
+        &moved(OFF_B.0, OFF_B.1),
+        bounds(),
+        Scale::ONE,
+        &theme,
+        &mut sink(),
+    );
 
     assert_eq!(a, b);
     let sa = search_surface(&a, &theme);
@@ -966,9 +1069,56 @@ fn hover_and_typing_each_change_a_text_field_render() {
     let resting = TextField::new();
 
     let mut hovered = resting.clone();
-    hovered.on_pointer(&moved(4, 14), bounds(), Scale::ONE, &theme);
+    hovered.on_pointer(&moved(4, 14), bounds(), Scale::ONE, &theme, &mut sink());
     assert_ne!(resting, hovered, "a hover highlight is visible");
 
     let typed = TextField::new().with_text("a");
     assert_ne!(resting, typed, "the text is visible");
+}
+
+/// A caret move repaints the field; a submit draws nothing of its own.
+#[test]
+fn a_caret_move_reports_and_a_submit_does_not() {
+    let mut field = TextField::new().with_text("ab");
+    field.set_focused(true);
+    let mut moved_caret = sink();
+    field.on_key(
+        Key::Named(NamedKey::Left),
+        NONE_MODS,
+        bounds(),
+        &mut moved_caret,
+    );
+    assert_eq!(moved_caret.bounds(), bounds(), "the caret is drawn");
+
+    let mut submitted = sink();
+    field.on_key(
+        Key::Named(NamedKey::Enter),
+        NONE_MODS,
+        bounds(),
+        &mut submitted,
+    );
+    assert!(submitted.is_empty(), "submitting changes no pixel here");
+
+    let mut at_start = sink();
+    field.on_key(
+        Key::Named(NamedKey::Home),
+        NONE_MODS,
+        bounds(),
+        &mut at_start,
+    );
+    let mut again = sink();
+    field.on_key(Key::Named(NamedKey::Home), NONE_MODS, bounds(), &mut again);
+    assert!(!at_start.is_empty(), "the first Home moved the caret");
+    assert!(again.is_empty(), "the second had nowhere to move it");
+}
+
+/// A masked field reports its edits like any other, without its buffer ever
+/// being compared: the edit answers for the text and the caret for the rest.
+#[test]
+fn a_secret_field_reports_its_edits() {
+    let mut field = TextField::new().secret(16);
+    field.set_focused(true);
+    let mut damage = sink();
+    field.on_key(Key::Char('p'), NONE_MODS, bounds(), &mut damage);
+    assert_eq!(damage.bounds(), bounds(), "a bead was added");
 }

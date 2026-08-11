@@ -15,7 +15,7 @@ use tairix_theme::Theme;
 
 use super::{PageLine, SystemSection};
 use crate::view::system_data::{Reading, SystemPage, TileInstrument, Unmeasured};
-use crate::view::test_support::{bounds, font, has_ink, model, system_report};
+use crate::view::test_support::{activate, bounds, font, has_ink, model, system_report};
 use crate::view::{
     ActionVerdict, Section, SectionOutcome, SectionView, Switchboard, SwitchboardAction,
     SwitchboardModel, SystemAction,
@@ -433,10 +433,7 @@ fn the_cursor_reaches_every_page_and_then_every_rail_action() {
 fn enter_on_a_sidebar_stop_shows_that_page() {
     let mut sb = shown();
     sb.system.set_content_focus(SystemPage::Storage.index());
-    assert!(sb
-        .system
-        .activate_focused(Key::Named(NamedKey::Enter))
-        .is_none());
+    assert!(activate(&mut sb, Key::Named(NamedKey::Enter)).is_none());
     assert_eq!(sb.system.page, SystemPage::Storage);
 }
 
@@ -444,7 +441,7 @@ fn enter_on_a_sidebar_stop_shows_that_page() {
 fn enter_on_a_rail_stop_reports_the_action_for_the_service_to_authorise() {
     let mut sb = shown();
     sb.system.set_content_focus(SystemPage::ALL.len());
-    let outcome = sb.system.activate_focused(Key::Named(NamedKey::Enter));
+    let outcome = activate(&mut sb, Key::Named(NamedKey::Enter));
     assert!(
         matches!(
             outcome,
@@ -477,13 +474,11 @@ fn enter_on_a_refused_rail_stop_dispatches_nothing() {
 
         sb.system.set_content_focus(SystemPage::ALL.len() + 1);
         assert!(
-            sb.system
-                .activate_focused(Key::Named(NamedKey::Enter))
-                .is_none(),
+            activate(&mut sb, Key::Named(NamedKey::Enter)).is_none(),
             "a refused command must not fire from the keyboard ({refusal:?})"
         );
         assert!(
-            sb.system.activate_focused(Key::Char(' ')).is_none(),
+            activate(&mut sb, Key::Char(' ')).is_none(),
             "neither commit key may bypass the refusal ({refusal:?})"
         );
     }
@@ -493,7 +488,7 @@ fn enter_on_a_refused_rail_stop_dispatches_nothing() {
 fn a_key_that_is_not_a_commit_does_nothing() {
     let mut sb = shown();
     sb.system.set_content_focus(SystemPage::Storage.index());
-    assert!(sb.system.activate_focused(Key::Char('x')).is_none());
+    assert!(activate(&mut sb, Key::Char('x')).is_none());
     assert_eq!(
         sb.system.page,
         SystemPage::Overview,
@@ -534,7 +529,7 @@ fn every_page_paints() {
 /// reader would.
 fn show(sb: &mut Switchboard, page: SystemPage) {
     sb.system.set_content_focus(page.index());
-    sb.system.activate_focused(Key::Named(NamedKey::Enter));
+    activate(sb, Key::Named(NamedKey::Enter));
     assert_eq!(sb.system.page, page, "the page must have been committed");
 }
 

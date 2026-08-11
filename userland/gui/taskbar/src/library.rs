@@ -64,7 +64,7 @@ use tairix_controls::{
     ScrollOrientation, ScrollRange, SearchField, TextAction,
 };
 use tairix_font::BitmapFont;
-use tairix_geometry::{Point, Rect, Scale};
+use tairix_geometry::{Point, Rect, Region, Scale};
 use tairix_input::{InputEvent, Key, Modifiers, NamedKey, PointerButton};
 use tairix_proglib::{Catalog, EntryId, LibraryCategory};
 use tairix_raster::Surface;
@@ -598,15 +598,17 @@ impl LibraryPopup {
         layout: &LibraryLayout,
         theme: &Theme,
         scale: Scale,
+        damage: &mut Region,
     ) -> PopupOutcome {
         self.sync_scroll(layout);
         // The search field and scrollbar track the pointer themselves; feed
         // them every event so a caret drag or thumb drag follows motion.
         let mut changed = self
             .search
-            .on_pointer(event, layout.search, scale, theme)
+            .on_pointer(event, layout.search, scale, theme, damage)
             .is_some();
-        if let Some(action) = pointer_scroll(&mut self.scroll, event, layout, scale, theme) {
+        if let Some(action) = pointer_scroll(&mut self.scroll, event, layout, scale, theme, damage)
+        {
             self.scroll_to(action);
             changed = true;
         }
@@ -687,7 +689,13 @@ impl LibraryPopup {
             }
             InputEvent::PointerReleased { .. } => changed_outcome(changed),
             InputEvent::PointerScrolled { dx, dy } => {
-                if let Some(offset) = self.scroll.wheel(dx, dy).map(scroll_offset) {
+                // A popup whose rows fit lays out no bar and cannot scroll,
+                // so there is nothing to feed the wheel to.
+                if let Some(offset) = layout
+                    .scrollbar
+                    .and_then(|bounds| self.scroll.wheel(dx, dy, bounds, damage))
+                    .map(scroll_offset)
+                {
                     self.scroll_to(offset);
                     return PopupOutcome::Changed;
                 }
@@ -705,6 +713,7 @@ impl LibraryPopup {
         key: Key,
         modifiers: Modifiers,
         layout: &LibraryLayout,
+        damage: &mut Region,
     ) -> PopupOutcome {
         self.sync_scroll(layout);
         // Escape abandons an offered drag before it means anything else, so
@@ -717,8 +726,8 @@ impl LibraryPopup {
             return self.toggle_focus(layout.visible_rows);
         }
         match self.focus {
-            LibraryFocus::Search => self.key_in_search(key, modifiers, layout.visible_rows),
-            LibraryFocus::Rows => self.key_in_rows(key, modifiers, layout.visible_rows),
+            LibraryFocus::Search => self.key_in_search(key, modifiers, layout, damage),
+            LibraryFocus::Rows => self.key_in_rows(key, modifiers, layout, damage),
         }
     }
 
@@ -727,19 +736,20 @@ impl LibraryPopup {
         &mut self,
         key: Key,
         modifiers: Modifiers,
-        visible_rows: usize,
+        layout: &LibraryLayout,
+        damage: &mut Region,
     ) -> PopupOutcome {
         match key {
             Key::Named(NamedKey::Down) => {
-                self.focus_rows(visible_rows);
+                self.focus_rows(layout.visible_rows);
                 PopupOutcome::Changed
             }
-            Key::Named(NamedKey::Enter) => self.launch_first_entry(visible_rows),
+            Key::Named(NamedKey::Enter) => self.launch_first_entry(layout.visible_rows),
             Key::Named(NamedKey::Escape) if !self.search.has_query() => {
                 self.close();
                 PopupOutcome::Dismiss
             }
-            _ => match self.search.on_key(key, modifiers) {
+            _ => match self.search.on_key(key, modifiers, layout.search, damage) {
                 Some(TextAction::Edited) => {
                     self.rebuild();
                     self.current = None;
@@ -756,7 +766,14 @@ impl LibraryPopup {
     }
 
     /// Apply one key press while the row list owns the keyboard.
-    fn key_in_rows(&mut self, key: Key, modifiers: Modifiers, visible_rows: usize) -> PopupOutcome {
+    fn key_in_rows(
+        &mut self,
+        key: Key,
+        modifiers: Modifiers,
+        layout: &LibraryLayout,
+        damage: &mut Region,
+    ) -> PopupOutcome {
+        let visible_rows = layout.visible_rows;
         match key {
             Key::Named(NamedKey::Escape) => {
                 self.close();
@@ -794,7 +811,7 @@ impl LibraryPopup {
             // happened.
             Key::Char(_) | Key::Named(NamedKey::Backspace) => {
                 self.focus_search();
-                self.key_in_search(key, modifiers, visible_rows)
+                self.key_in_search(key, modifiers, layout, damage)
             }
             Key::Named(_) => PopupOutcome::Ignored,
         }
@@ -1086,10 +1103,11 @@ fn pointer_scroll(
     layout: &LibraryLayout,
     scale: Scale,
     theme: &Theme,
+    damage: &mut Region,
 ) -> Option<u64> {
     let bounds = layout.scrollbar?;
     scroll
-        .on_pointer(event, bounds, scale, theme)
+        .on_pointer(event, bounds, scale, theme, damage)
         .map(scroll_offset)
 }
 

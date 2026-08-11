@@ -1154,9 +1154,29 @@ fn a_fixed_disabled_or_denied_column_refuses_to_sort() {
             header.on_pointer(&RELEASE, bounds, Scale::ONE, &theme, &COLUMNS),
             None
         );
-        header.set_focus(Some(1));
-        assert_eq!(header.on_key(Key::Named(NamedKey::Enter)), None);
-        assert_eq!(header.on_key(Key::Char(' ')), None);
+        header.set_focus(Some(1), bounds, Scale::ONE, &theme, &COLUMNS, &mut sink());
+        assert_eq!(
+            header.on_key(
+                Key::Named(NamedKey::Enter),
+                bounds,
+                Scale::ONE,
+                &theme,
+                &COLUMNS,
+                &mut sink()
+            ),
+            None
+        );
+        assert_eq!(
+            header.on_key(
+                Key::Char(' '),
+                bounds,
+                Scale::ONE,
+                &theme,
+                &COLUMNS,
+                &mut sink()
+            ),
+            None
+        );
         assert_eq!(header.sort(), None);
     }
 }
@@ -1343,26 +1363,30 @@ fn a_sort_caret_shortens_its_title_rather_than_overlapping_it() {
 #[test]
 fn the_keyboard_moves_focus_across_columns_and_sorts_the_focused_one() {
     let theme = Theme::dark();
+    let bounds = Rect::new(0, 0, W, H);
     let mut header = three_columns();
-    header.on_key(Key::Named(NamedKey::Right));
+    let key = |header: &mut TableHeader, key: Key| {
+        header.on_key(key, bounds, Scale::ONE, &theme, &COLUMNS, &mut sink())
+    };
+    key(&mut header, Key::Named(NamedKey::Right));
     assert_eq!(header.focus(), Some(0));
-    header.on_key(Key::Named(NamedKey::Right));
+    key(&mut header, Key::Named(NamedKey::Right));
     assert_eq!(header.focus(), Some(1));
-    header.on_key(Key::Named(NamedKey::End));
+    key(&mut header, Key::Named(NamedKey::End));
     assert_eq!(header.focus(), Some(2));
-    header.on_key(Key::Named(NamedKey::Right));
+    key(&mut header, Key::Named(NamedKey::Right));
     assert_eq!(header.focus(), Some(0), "…and wraps at the ends");
-    header.on_key(Key::Named(NamedKey::Left));
+    key(&mut header, Key::Named(NamedKey::Left));
     assert_eq!(header.focus(), Some(2));
-    header.on_key(Key::Named(NamedKey::Home));
+    key(&mut header, Key::Named(NamedKey::Home));
     assert_eq!(header.focus(), Some(0));
 
     let ascending = Some(HeaderAction::Sort {
         column: 0,
         order: SortOrder::Ascending,
     });
-    assert_eq!(header.on_key(Key::Char(' ')), ascending);
-    assert_eq!(header.on_key(Key::Named(NamedKey::Enter)), ascending);
+    assert_eq!(key(&mut header, Key::Char(' ')), ascending);
+    assert_eq!(key(&mut header, Key::Named(NamedKey::Enter)), ascending);
     assert!(
         has_pixel(
             &header_surface(&header, &theme, Scale::ONE, &COLUMNS),
@@ -1371,15 +1395,15 @@ fn the_keyboard_moves_focus_across_columns_and_sorts_the_focused_one() {
         "the focused column wears the shared focus ring"
     );
 
-    header.set_focus(Some(9));
+    header.set_focus(Some(9), bounds, Scale::ONE, &theme, &COLUMNS, &mut sink());
     assert_eq!(header.focus(), None, "an out-of-range focus fails closed");
     assert_eq!(
-        header.on_key(Key::Named(NamedKey::Enter)),
+        key(&mut header, Key::Named(NamedKey::Enter)),
         None,
         "with no focused column there is nothing to sort"
     );
     assert_eq!(
-        TableHeader::new(vec![]).on_key(Key::Named(NamedKey::Right)),
+        key(&mut TableHeader::new(vec![]), Key::Named(NamedKey::Right)),
         None
     );
 }
@@ -1428,7 +1452,14 @@ fn a_header_reads_in_both_themes_and_under_heavy_contrast() {
     for theme in [Theme::dark(), Theme::light(), high_contrast()] {
         let mut header = three_columns();
         header.set_sort(Some((2, SortOrder::Descending)));
-        header.set_focus(Some(0));
+        header.set_focus(
+            Some(0),
+            Rect::new(0, 0, W, H),
+            Scale::ONE,
+            &theme,
+            &COLUMNS,
+            &mut sink(),
+        );
         let surface = header_surface(&header, &theme, Scale::ONE, &COLUMNS);
         assert!(
             has_pixel(&surface, premul(theme.palette().on_surface_muted)),
@@ -3037,5 +3068,29 @@ fn both_row_kinds_can_join_a_focus_field() {
         list.state().focus,
         table.state().focus,
         "one row family, one focus contract: a section may use either kind"
+    );
+}
+
+/// A keyboard focus move repaints the column the ring leaves and the column it
+/// arrives on, not the header strip.
+#[test]
+fn a_header_focus_move_reports_the_two_columns() {
+    let theme = Theme::dark();
+    let bounds = Rect::new(0, 0, W, H);
+    let mut header = three_columns();
+    let right = Key::Named(NamedKey::Right);
+    header.on_key(right, bounds, Scale::ONE, &theme, &COLUMNS, &mut sink());
+
+    let mut damage = sink();
+    header.on_key(right, bounds, Scale::ONE, &theme, &COLUMNS, &mut damage);
+    assert_eq!(header.focus(), Some(1));
+    assert!(
+        damage.bounds().width < W,
+        "two columns, not the strip: {:?}",
+        damage.bounds()
+    );
+    assert!(
+        !damage.is_empty() && damage.bounds().height <= H,
+        "and only within the header's own band"
     );
 }

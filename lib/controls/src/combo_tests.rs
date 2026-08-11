@@ -15,6 +15,7 @@ use tairix_raster::{Color, Pixel, Surface};
 use tairix_theme::{Rgba, Theme};
 
 use crate::combo::{ComboAction, ComboBox};
+use crate::damage::sink;
 use crate::state::{AuthorityState, ControlState};
 
 const W: u32 = 160;
@@ -60,6 +61,12 @@ const RELEASE: InputEvent = InputEvent::PointerReleased {
     button: PointerButton::Primary,
 };
 
+/// The popup bounds directly below the field, sized as the combo asks.
+fn popup_bounds(combo: &ComboBox, theme: &Theme) -> Rect {
+    let (pw, ph) = combo.popup_size(W, Scale::ONE, theme);
+    Rect::new(0, xi(H), pw, ph)
+}
+
 /// Open the combo (by a field click) and return its popup bounds directly
 /// below the field.
 fn open_and_popup(combo: &mut ComboBox, theme: &Theme) -> Rect {
@@ -72,11 +79,25 @@ fn open_and_popup(combo: &mut ComboBox, theme: &Theme) -> Rect {
         Rect::new(0, 0, 0, 0),
         Scale::ONE,
         theme,
+        &mut sink(),
     );
-    combo.on_pointer(&PRESS, field, Rect::new(0, 0, 0, 0), Scale::ONE, theme);
-    combo.on_pointer(&RELEASE, field, Rect::new(0, 0, 0, 0), Scale::ONE, theme);
-    let (pw, ph) = combo.popup_size(W, Scale::ONE, theme);
-    Rect::new(0, xi(H), pw, ph)
+    combo.on_pointer(
+        &PRESS,
+        field,
+        Rect::new(0, 0, 0, 0),
+        Scale::ONE,
+        theme,
+        &mut sink(),
+    );
+    combo.on_pointer(
+        &RELEASE,
+        field,
+        Rect::new(0, 0, 0, 0),
+        Scale::ONE,
+        theme,
+        &mut sink(),
+    );
+    popup_bounds(combo, theme)
 }
 
 // --- Collapsed field ----------------------------------------------------
@@ -116,10 +137,10 @@ fn clicking_the_field_opens_the_list() {
     combo.set_focused(true);
     let field = field_bounds();
     let none = Rect::new(0, 0, 0, 0);
-    combo.on_pointer(&moved(10, 14), field, none, Scale::ONE, &theme);
-    combo.on_pointer(&PRESS, field, none, Scale::ONE, &theme);
+    combo.on_pointer(&moved(10, 14), field, none, Scale::ONE, &theme, &mut sink());
+    combo.on_pointer(&PRESS, field, none, Scale::ONE, &theme, &mut sink());
     assert_eq!(
-        combo.on_pointer(&RELEASE, field, none, Scale::ONE, &theme),
+        combo.on_pointer(&RELEASE, field, none, Scale::ONE, &theme, &mut sink()),
         Some(ComboAction::Opened)
     );
     assert!(combo.is_expanded());
@@ -133,10 +154,10 @@ fn clicking_a_popup_row_selects_and_closes() {
     let field = field_bounds();
     // Row 1 centre in popup coordinates.
     let y = xi(H) + xi(BORDER + ROW_H + ROW_H / 2);
-    combo.on_pointer(&moved(40, y), field, popup, Scale::ONE, &theme);
-    combo.on_pointer(&PRESS, field, popup, Scale::ONE, &theme);
+    combo.on_pointer(&moved(40, y), field, popup, Scale::ONE, &theme, &mut sink());
+    combo.on_pointer(&PRESS, field, popup, Scale::ONE, &theme, &mut sink());
     assert_eq!(
-        combo.on_pointer(&RELEASE, field, popup, Scale::ONE, &theme),
+        combo.on_pointer(&RELEASE, field, popup, Scale::ONE, &theme, &mut sink()),
         Some(ComboAction::Selected { index: 1 })
     );
     assert!(!combo.is_expanded());
@@ -149,9 +170,16 @@ fn pressing_outside_closes_the_list() {
     let mut combo = combo();
     let popup = open_and_popup(&mut combo, &theme);
     let field = field_bounds();
-    combo.on_pointer(&moved(500, 500), field, popup, Scale::ONE, &theme);
+    combo.on_pointer(
+        &moved(500, 500),
+        field,
+        popup,
+        Scale::ONE,
+        &theme,
+        &mut sink(),
+    );
     assert_eq!(
-        combo.on_pointer(&PRESS, field, popup, Scale::ONE, &theme),
+        combo.on_pointer(&PRESS, field, popup, Scale::ONE, &theme, &mut sink()),
         Some(ComboAction::Closed)
     );
     assert!(!combo.is_expanded());
@@ -161,17 +189,44 @@ fn pressing_outside_closes_the_list() {
 
 #[test]
 fn focused_field_opens_on_down_and_navigates_then_selects() {
+    let theme = Theme::dark();
     let mut combo = combo();
+    let field = field_bounds();
+    let popup = popup_bounds(&combo, &theme);
     combo.set_focused(true);
     assert_eq!(
-        combo.on_key(Key::Named(NamedKey::Down)),
+        combo.on_key(
+            Key::Named(NamedKey::Down),
+            field,
+            popup,
+            Scale::ONE,
+            &theme,
+            &mut sink()
+        ),
         Some(ComboAction::Opened)
     );
     assert!(combo.is_expanded());
     // Now expanded: Down moves the menu current (starts at 0), Enter chooses.
-    assert_eq!(combo.on_key(Key::Named(NamedKey::Down)), None);
     assert_eq!(
-        combo.on_key(Key::Named(NamedKey::Enter)),
+        combo.on_key(
+            Key::Named(NamedKey::Down),
+            field,
+            popup,
+            Scale::ONE,
+            &theme,
+            &mut sink()
+        ),
+        None
+    );
+    assert_eq!(
+        combo.on_key(
+            Key::Named(NamedKey::Enter),
+            field,
+            popup,
+            Scale::ONE,
+            &theme,
+            &mut sink()
+        ),
         Some(ComboAction::Selected { index: 1 })
     );
     assert!(!combo.is_expanded());
@@ -179,11 +234,28 @@ fn focused_field_opens_on_down_and_navigates_then_selects() {
 
 #[test]
 fn escape_closes_an_open_list() {
+    let theme = Theme::dark();
     let mut combo = combo();
+    let field = field_bounds();
+    let popup = popup_bounds(&combo, &theme);
     combo.set_focused(true);
-    combo.on_key(Key::Named(NamedKey::Down));
+    combo.on_key(
+        Key::Named(NamedKey::Down),
+        field,
+        popup,
+        Scale::ONE,
+        &theme,
+        &mut sink(),
+    );
     assert_eq!(
-        combo.on_key(Key::Named(NamedKey::Escape)),
+        combo.on_key(
+            Key::Named(NamedKey::Escape),
+            field,
+            popup,
+            Scale::ONE,
+            &theme,
+            &mut sink()
+        ),
         Some(ComboAction::Closed)
     );
     assert!(!combo.is_expanded());
@@ -191,8 +263,21 @@ fn escape_closes_an_open_list() {
 
 #[test]
 fn unfocused_field_ignores_keys() {
+    let theme = Theme::dark();
     let mut combo = combo();
-    assert_eq!(combo.on_key(Key::Named(NamedKey::Down)), None);
+    let field = field_bounds();
+    let popup = popup_bounds(&combo, &theme);
+    assert_eq!(
+        combo.on_key(
+            Key::Named(NamedKey::Down),
+            field,
+            popup,
+            Scale::ONE,
+            &theme,
+            &mut sink()
+        ),
+        None
+    );
     assert!(!combo.is_expanded());
 }
 
@@ -206,10 +291,10 @@ fn denied_field_never_opens() {
     combo.set_focused(true);
     let field = field_bounds();
     let none = Rect::new(0, 0, 0, 0);
-    combo.on_pointer(&moved(10, 14), field, none, Scale::ONE, &theme);
-    combo.on_pointer(&PRESS, field, none, Scale::ONE, &theme);
+    combo.on_pointer(&moved(10, 14), field, none, Scale::ONE, &theme, &mut sink());
+    combo.on_pointer(&PRESS, field, none, Scale::ONE, &theme, &mut sink());
     assert_eq!(
-        combo.on_pointer(&RELEASE, field, none, Scale::ONE, &theme),
+        combo.on_pointer(&RELEASE, field, none, Scale::ONE, &theme, &mut sink()),
         None
     );
     assert!(!combo.is_expanded());
@@ -265,8 +350,22 @@ fn hit_test_bookkeeping_is_invisible_to_a_combo_box() {
     let none = Rect::new(0, 0, 0, 0);
     let mut a = combo();
     let mut b = a.clone();
-    a.on_pointer(&moved(400, 60), field_bounds(), none, Scale::ONE, &theme);
-    b.on_pointer(&moved(460, 70), field_bounds(), none, Scale::ONE, &theme);
+    a.on_pointer(
+        &moved(400, 60),
+        field_bounds(),
+        none,
+        Scale::ONE,
+        &theme,
+        &mut sink(),
+    );
+    b.on_pointer(
+        &moved(460, 70),
+        field_bounds(),
+        none,
+        Scale::ONE,
+        &theme,
+        &mut sink(),
+    );
     assert_eq!(
         a, b,
         "a coordinate clear of the field is not a drawn property"
@@ -280,8 +379,22 @@ fn hit_test_bookkeeping_is_invisible_to_a_combo_box() {
     // A press on the field only latches; the disposition a press *shows* is
     // the owner-set `ControlState`, which is still compared.
     let mut latched = combo();
-    latched.on_pointer(&moved(8, 14), field_bounds(), none, Scale::ONE, &theme);
-    latched.on_pointer(&PRESS, field_bounds(), none, Scale::ONE, &theme);
+    latched.on_pointer(
+        &moved(8, 14),
+        field_bounds(),
+        none,
+        Scale::ONE,
+        &theme,
+        &mut sink(),
+    );
+    latched.on_pointer(
+        &PRESS,
+        field_bounds(),
+        none,
+        Scale::ONE,
+        &theme,
+        &mut sink(),
+    );
     let resting = combo();
     assert_eq!(latched, resting, "the press latch is not a drawn property");
     assert_eq!(
@@ -295,4 +408,63 @@ fn hit_test_bookkeeping_is_invisible_to_a_combo_box() {
     state.pointer = crate::state::PointerState::Pressed;
     pressed.set_state(state);
     assert_ne!(resting, pressed, "the shown pressed disposition is visible");
+}
+
+/// Opening reports the popup that appears; the field's own plate is unchanged,
+/// so it is not reported with it.
+#[test]
+fn opening_reports_the_popup_not_the_field() {
+    let theme = Theme::dark();
+    let mut combo = combo();
+    let popup = popup_bounds(&combo, &theme);
+    combo.set_focused(true);
+
+    let mut damage = sink();
+    combo.on_key(
+        Key::Named(NamedKey::Down),
+        field_bounds(),
+        popup,
+        Scale::ONE,
+        &theme,
+        &mut damage,
+    );
+    assert!(combo.is_expanded());
+    assert_eq!(damage.bounds(), popup, "the list appeared");
+    assert!(
+        !damage.intersects(Rect::new(0, 0, W, 1)),
+        "the field's own top edge is untouched"
+    );
+}
+
+/// Choosing a row reports both the popup it vacates and the field whose label
+/// the choice changes.
+#[test]
+fn choosing_reports_the_popup_and_the_field() {
+    let theme = Theme::dark();
+    let mut combo = combo();
+    let popup = open_and_popup(&mut combo, &theme);
+
+    let mut damage = sink();
+    combo.on_key(
+        Key::Named(NamedKey::Down),
+        field_bounds(),
+        popup,
+        Scale::ONE,
+        &theme,
+        &mut sink(),
+    );
+    combo.on_key(
+        Key::Named(NamedKey::Enter),
+        field_bounds(),
+        popup,
+        Scale::ONE,
+        &theme,
+        &mut damage,
+    );
+    assert!(!combo.is_expanded(), "choosing collapses the list");
+    assert!(
+        damage.intersects(field_bounds()) && damage.intersects(popup),
+        "the label changed and the popup vacated: {:?}",
+        damage.bounds()
+    );
 }

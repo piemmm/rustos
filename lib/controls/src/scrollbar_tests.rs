@@ -12,6 +12,7 @@ use tairix_input::{InputEvent, Key, NamedKey, PointerButton};
 use tairix_raster::{Color, Pixel, Surface};
 use tairix_theme::Theme;
 
+use crate::damage::sink;
 use crate::scroll::{ScrollModel, ScrollOrientation, ScrollRange};
 use crate::scrollbar::{ScrollAction, ScrollBar, ScrollPart};
 use crate::state::{AuthorityState, ControlState};
@@ -34,6 +35,11 @@ fn hbar() -> ScrollBar {
 
 fn vbounds() -> Rect {
     Rect::new(0, 0, VW, VH)
+}
+
+/// The same bar laid along the other axis: the vertical extents transposed.
+fn hbounds() -> Rect {
+    Rect::new(0, 0, VH, VW)
 }
 
 fn theme() -> Theme {
@@ -78,48 +84,78 @@ fn both_orientations_are_one_behaviour() {
     // either axis — the bars are one component parameterised by orientation.
     let mut v = vbar();
     let mut h = hbar();
-    assert_eq!(off(v.wheel(0, 3)), Some(30));
-    assert_eq!(off(h.wheel(3, 0)), Some(30));
+    assert_eq!(off(v.wheel(0, 3, vbounds(), &mut sink())), Some(30));
+    assert_eq!(off(h.wheel(3, 0, hbounds(), &mut sink())), Some(30));
     assert_eq!(v.model().offset(), h.model().offset());
 }
 
 #[test]
 fn wheel_moves_one_line_per_tick_and_clamps() {
     let mut bar = vbar();
-    assert_eq!(off(bar.wheel(0, 3)), Some(30));
+    assert_eq!(off(bar.wheel(0, 3, vbounds(), &mut sink())), Some(30));
     // A cross-axis tick does nothing to a vertical bar.
-    assert_eq!(bar.wheel(5, 0), None);
+    assert_eq!(bar.wheel(5, 0, vbounds(), &mut sink()), None);
     // Scrolling back past the start clamps at zero, then stops changing.
-    assert_eq!(off(bar.wheel(0, -100)), Some(0));
-    assert_eq!(bar.wheel(0, -1), None);
+    assert_eq!(off(bar.wheel(0, -100, vbounds(), &mut sink())), Some(0));
+    assert_eq!(bar.wheel(0, -1, vbounds(), &mut sink()), None);
 }
 
 #[test]
 fn keys_step_line_page_and_bounds_when_focused() {
     let mut bar = vbar();
     bar.set_focused(true);
-    assert_eq!(off(bar.on_key(Key::Named(NamedKey::Down))), Some(10));
-    assert_eq!(off(bar.on_key(Key::Named(NamedKey::PageDown))), Some(110));
-    assert_eq!(off(bar.on_key(Key::Named(NamedKey::End))), Some(700));
-    assert_eq!(off(bar.on_key(Key::Named(NamedKey::PageUp))), Some(600));
-    assert_eq!(off(bar.on_key(Key::Named(NamedKey::Home))), Some(0));
+    assert_eq!(
+        off(bar.on_key(Key::Named(NamedKey::Down), vbounds(), &mut sink())),
+        Some(10)
+    );
+    assert_eq!(
+        off(bar.on_key(Key::Named(NamedKey::PageDown), vbounds(), &mut sink())),
+        Some(110)
+    );
+    assert_eq!(
+        off(bar.on_key(Key::Named(NamedKey::End), vbounds(), &mut sink())),
+        Some(700)
+    );
+    assert_eq!(
+        off(bar.on_key(Key::Named(NamedKey::PageUp), vbounds(), &mut sink())),
+        Some(600)
+    );
+    assert_eq!(
+        off(bar.on_key(Key::Named(NamedKey::Home), vbounds(), &mut sink())),
+        Some(0)
+    );
     // At the start, another line back does nothing (fail-closed bounds).
-    assert_eq!(bar.on_key(Key::Named(NamedKey::Up)), None);
+    assert_eq!(
+        bar.on_key(Key::Named(NamedKey::Up), vbounds(), &mut sink()),
+        None
+    );
 }
 
 #[test]
 fn horizontal_bar_uses_left_right_not_up_down() {
     let mut bar = hbar();
     bar.set_focused(true);
-    assert_eq!(bar.on_key(Key::Named(NamedKey::Down)), None);
-    assert_eq!(off(bar.on_key(Key::Named(NamedKey::Right))), Some(10));
-    assert_eq!(off(bar.on_key(Key::Named(NamedKey::Left))), Some(0));
+    assert_eq!(
+        bar.on_key(Key::Named(NamedKey::Down), hbounds(), &mut sink()),
+        None
+    );
+    assert_eq!(
+        off(bar.on_key(Key::Named(NamedKey::Right), hbounds(), &mut sink())),
+        Some(10)
+    );
+    assert_eq!(
+        off(bar.on_key(Key::Named(NamedKey::Left), hbounds(), &mut sink())),
+        Some(0)
+    );
 }
 
 #[test]
 fn unfocused_bar_ignores_keys() {
     let mut bar = vbar();
-    assert_eq!(bar.on_key(Key::Named(NamedKey::Down)), None);
+    assert_eq!(
+        bar.on_key(Key::Named(NamedKey::Down), vbounds(), &mut sink()),
+        None
+    );
     assert_eq!(bar.model().offset(), 0);
 }
 
@@ -130,14 +166,14 @@ fn end_button_press_steps_one_line() {
     bar.set_model(bar.model().scroll_to(500));
     // Decrement button at the top.
     assert_eq!(
-        off(bar.on_pointer(&PRESS, vbounds(), Scale::ONE, &theme)),
+        off(bar.on_pointer(&PRESS, vbounds(), Scale::ONE, &theme, &mut sink())),
         Some(490)
     );
-    bar.on_pointer(&RELEASE, vbounds(), Scale::ONE, &theme);
+    bar.on_pointer(&RELEASE, vbounds(), Scale::ONE, &theme, &mut sink());
     // Increment button at the bottom.
-    bar.on_pointer(&moved(2, 290), vbounds(), Scale::ONE, &theme);
+    bar.on_pointer(&moved(2, 290), vbounds(), Scale::ONE, &theme, &mut sink());
     assert_eq!(
-        off(bar.on_pointer(&PRESS, vbounds(), Scale::ONE, &theme)),
+        off(bar.on_pointer(&PRESS, vbounds(), Scale::ONE, &theme, &mut sink())),
         Some(500)
     );
 }
@@ -148,9 +184,9 @@ fn track_press_pages_toward_the_pointer() {
     let mut bar = vbar();
     // At offset 0 the thumb sits at the track start; a press well below it in
     // the after-thumb region pages forward.
-    bar.on_pointer(&moved(2, 200), vbounds(), Scale::ONE, &theme);
+    bar.on_pointer(&moved(2, 200), vbounds(), Scale::ONE, &theme, &mut sink());
     assert_eq!(
-        off(bar.on_pointer(&PRESS, vbounds(), Scale::ONE, &theme)),
+        off(bar.on_pointer(&PRESS, vbounds(), Scale::ONE, &theme, &mut sink())),
         Some(100)
     );
 }
@@ -160,25 +196,28 @@ fn thumb_drag_preserves_anchor_and_does_not_jump_on_grab() {
     let theme = theme();
     let mut bar = vbar();
     // Press on the thumb (near the track start at offset 0): no jump.
-    bar.on_pointer(&moved(2, 20), vbounds(), Scale::ONE, &theme);
-    assert_eq!(bar.on_pointer(&PRESS, vbounds(), Scale::ONE, &theme), None);
+    bar.on_pointer(&moved(2, 20), vbounds(), Scale::ONE, &theme, &mut sink());
+    assert_eq!(
+        bar.on_pointer(&PRESS, vbounds(), Scale::ONE, &theme, &mut sink()),
+        None
+    );
     assert_eq!(bar.model().offset(), 0);
     // Dragging down moves the offset forward, clamped within the range.
-    let a = off(bar.on_pointer(&moved(2, 150), vbounds(), Scale::ONE, &theme));
+    let a = off(bar.on_pointer(&moved(2, 150), vbounds(), Scale::ONE, &theme, &mut sink()));
     let moved_to = a.expect("drag moved");
     assert!(moved_to > 0 && moved_to <= 700);
-    bar.on_pointer(&RELEASE, vbounds(), Scale::ONE, &theme);
+    bar.on_pointer(&RELEASE, vbounds(), Scale::ONE, &theme, &mut sink());
 }
 
 #[test]
 fn mid_drag_range_shrink_stays_valid() {
     let theme = theme();
     let mut bar = vbar();
-    bar.on_pointer(&moved(2, 20), vbounds(), Scale::ONE, &theme);
-    bar.on_pointer(&PRESS, vbounds(), Scale::ONE, &theme);
+    bar.on_pointer(&moved(2, 20), vbounds(), Scale::ONE, &theme, &mut sink());
+    bar.on_pointer(&PRESS, vbounds(), Scale::ONE, &theme, &mut sink());
     // The content shrinks mid-drag; the bar recomputes from the new range.
     bar.set_model(ScrollModel::new(ScrollRange::new(400, 300, 0), 10, 100));
-    let dragged = off(bar.on_pointer(&moved(2, 290), vbounds(), Scale::ONE, &theme));
+    let dragged = off(bar.on_pointer(&moved(2, 290), vbounds(), Scale::ONE, &theme, &mut sink()));
     let value = dragged.unwrap_or_else(|| bar.model().offset());
     assert!(
         value <= 100,
@@ -193,9 +232,15 @@ fn denied_bar_keeps_position_and_ignores_input() {
     bar.set_model(bar.model().scroll_to(200));
     bar.set_focused(true);
     bar.set_state(ControlState::idle().with_authority(AuthorityState::Denied));
-    assert_eq!(bar.on_pointer(&PRESS, vbounds(), Scale::ONE, &theme), None);
-    assert_eq!(bar.on_key(Key::Named(NamedKey::Down)), None);
-    assert_eq!(bar.wheel(0, 3), None);
+    assert_eq!(
+        bar.on_pointer(&PRESS, vbounds(), Scale::ONE, &theme, &mut sink()),
+        None
+    );
+    assert_eq!(
+        bar.on_key(Key::Named(NamedKey::Down), vbounds(), &mut sink()),
+        None
+    );
+    assert_eq!(bar.wheel(0, 3, vbounds(), &mut sink()), None);
     assert_eq!(bar.model().offset(), 200);
     // It renders the denied colour, distinct from a disabled look.
     let surface = render(&bar, vbounds(), &theme);
@@ -208,9 +253,15 @@ fn disabled_bar_ignores_input() {
     let mut bar = vbar();
     bar.set_focused(true);
     bar.set_state(ControlState::disabled());
-    assert_eq!(bar.on_pointer(&PRESS, vbounds(), Scale::ONE, &theme), None);
-    assert_eq!(bar.on_key(Key::Named(NamedKey::Down)), None);
-    assert_eq!(bar.wheel(0, 3), None);
+    assert_eq!(
+        bar.on_pointer(&PRESS, vbounds(), Scale::ONE, &theme, &mut sink()),
+        None
+    );
+    assert_eq!(
+        bar.on_key(Key::Named(NamedKey::Down), vbounds(), &mut sink()),
+        None
+    );
+    assert_eq!(bar.wheel(0, 3, vbounds(), &mut sink()), None);
 }
 
 #[test]
@@ -252,17 +303,17 @@ fn press_hold_repeat_steps_the_held_part_and_stops_at_a_bound() {
     let theme = theme();
     let mut bar = vbar();
     bar.set_model(bar.model().scroll_to(25));
-    bar.on_pointer(&PRESS, vbounds(), Scale::ONE, &theme); // decrement, held
+    bar.on_pointer(&PRESS, vbounds(), Scale::ONE, &theme, &mut sink()); // decrement, held
     assert_eq!(bar.held(), Some(ScrollPart::Decrement));
     assert_eq!(bar.model().offset(), 15);
-    assert_eq!(off(bar.repeat()), Some(5));
+    assert_eq!(off(bar.repeat(vbounds(), &mut sink())), Some(5));
     // The next repeat reaches the start; a further one contributes nothing.
-    assert_eq!(off(bar.repeat()), Some(0));
-    assert_eq!(bar.repeat(), None);
+    assert_eq!(off(bar.repeat(vbounds(), &mut sink())), Some(0));
+    assert_eq!(bar.repeat(vbounds(), &mut sink()), None);
     // Releasing clears the held part.
-    bar.on_pointer(&RELEASE, vbounds(), Scale::ONE, &theme);
+    bar.on_pointer(&RELEASE, vbounds(), Scale::ONE, &theme, &mut sink());
     assert_eq!(bar.held(), None);
-    assert_eq!(bar.repeat(), None);
+    assert_eq!(bar.repeat(vbounds(), &mut sink()), None);
 }
 
 #[test]
@@ -279,7 +330,7 @@ fn an_awake_bar_brightens_the_thumb() {
     let theme = theme();
     let mut bar = vbar();
     // Hovering the bar makes it awake; the thumb takes the reactive rim.
-    bar.on_pointer(&moved(2, 200), vbounds(), Scale::ONE, &theme);
+    bar.on_pointer(&moved(2, 200), vbounds(), Scale::ONE, &theme, &mut sink());
     let surface = render(&bar, vbounds(), &theme);
     assert!(has_pixel(&surface, premul(theme.palette().rim_active)));
 }
@@ -329,7 +380,10 @@ fn degenerate_bounds_never_panic_and_never_move() {
     // Rendering a zero surface is a no-op; input yields nothing.
     let mut surface = Surface::new(1, 1).expect("surface");
     bar.render(&mut surface, zero, Scale::ONE, &theme);
-    assert_eq!(bar.on_pointer(&PRESS, zero, Scale::ONE, &theme), None);
+    assert_eq!(
+        bar.on_pointer(&PRESS, zero, Scale::ONE, &theme, &mut sink()),
+        None
+    );
     assert_eq!(
         bar.part_at(zero, Point::ORIGIN, Scale::ONE, &theme),
         ScrollPart::Outside
@@ -349,9 +403,12 @@ fn a_non_scrollable_bar_has_a_non_draggable_full_thumb() {
         .expect("geometry");
     assert!(!geometry.draggable());
     // A press on the "thumb" starts no drag and the wheel cannot move it.
-    bar.on_pointer(&moved(2, 100), vbounds(), Scale::ONE, &theme);
-    assert_eq!(bar.on_pointer(&PRESS, vbounds(), Scale::ONE, &theme), None);
-    assert_eq!(bar.wheel(0, 3), None);
+    bar.on_pointer(&moved(2, 100), vbounds(), Scale::ONE, &theme, &mut sink());
+    assert_eq!(
+        bar.on_pointer(&PRESS, vbounds(), Scale::ONE, &theme, &mut sink()),
+        None
+    );
+    assert_eq!(bar.wheel(0, 3, vbounds(), &mut sink()), None);
     assert_eq!(bar.model().offset(), 0);
 }
 
@@ -393,10 +450,10 @@ fn the_drag_anchor_alone_never_changes_a_scrollbar_render() {
     // while a drag is in flight.
     let grab = |y: i32| {
         let mut bar = vbar();
-        bar.on_pointer(&moved(2, y), vbounds(), Scale::ONE, &theme);
-        bar.on_pointer(&PRESS, vbounds(), Scale::ONE, &theme);
-        bar.on_pointer(&RELEASE, vbounds(), Scale::ONE, &theme);
-        bar.on_pointer(&moved(2, 40), vbounds(), Scale::ONE, &theme);
+        bar.on_pointer(&moved(2, y), vbounds(), Scale::ONE, &theme, &mut sink());
+        bar.on_pointer(&PRESS, vbounds(), Scale::ONE, &theme, &mut sink());
+        bar.on_pointer(&RELEASE, vbounds(), Scale::ONE, &theme, &mut sink());
+        bar.on_pointer(&moved(2, 40), vbounds(), Scale::ONE, &theme, &mut sink());
         bar
     };
     let near = grab(20);
@@ -411,9 +468,9 @@ fn the_drag_anchor_alone_never_changes_a_scrollbar_render() {
     // live the anchor decides where the same pointer lands.
     let drag_from = |y: i32| {
         let mut bar = vbar();
-        bar.on_pointer(&moved(2, y), vbounds(), Scale::ONE, &theme);
-        bar.on_pointer(&PRESS, vbounds(), Scale::ONE, &theme);
-        off(bar.on_pointer(&moved(2, 150), vbounds(), Scale::ONE, &theme))
+        bar.on_pointer(&moved(2, y), vbounds(), Scale::ONE, &theme, &mut sink());
+        bar.on_pointer(&PRESS, vbounds(), Scale::ONE, &theme, &mut sink());
+        off(bar.on_pointer(&moved(2, 150), vbounds(), Scale::ONE, &theme, &mut sink()))
     };
     assert_ne!(
         drag_from(20),
@@ -438,7 +495,7 @@ fn a_move_within_one_part_leaves_a_scrollbar_equal() {
     // surface on every mouse move.
     let settle = |x: i32, y: i32| {
         let mut bar = vbar();
-        bar.on_pointer(&moved(x, y), vbounds(), Scale::ONE, &theme);
+        bar.on_pointer(&moved(x, y), vbounds(), Scale::ONE, &theme, &mut sink());
         bar
     };
     for (from, to, region) in [
@@ -467,9 +524,9 @@ fn the_part_under_the_pointer_is_a_drawn_property() {
     // pointer sits over does compare — excluding it would let the gate pass a
     // bar that paints a lit chevron off as one that does not.
     let mut on_end = vbar();
-    on_end.on_pointer(&moved(2, 2), vbounds(), Scale::ONE, &theme);
+    on_end.on_pointer(&moved(2, 2), vbounds(), Scale::ONE, &theme, &mut sink());
     let mut on_track = vbar();
-    on_track.on_pointer(&moved(2, 150), vbounds(), Scale::ONE, &theme);
+    on_track.on_pointer(&moved(2, 150), vbounds(), Scale::ONE, &theme, &mut sink());
 
     assert_ne!(
         on_end, on_track,
@@ -480,4 +537,37 @@ fn the_part_under_the_pointer_is_a_drawn_property() {
         render(&on_track, vbounds(), &theme).pixels(),
         "…and the two must therefore paint differently"
     );
+}
+
+/// A release clears the drag latch and the pressed look the bar draws, so it
+/// repaints even though the pointer has not moved.
+#[test]
+fn a_release_reports_the_bar_it_wakes_from() {
+    let theme = theme();
+    let mut bar = vbar();
+    let thumb = moved(8, 20);
+    bar.on_pointer(&thumb, vbounds(), Scale::ONE, &theme, &mut sink());
+    bar.on_pointer(&PRESS, vbounds(), Scale::ONE, &theme, &mut sink());
+    assert!(bar.is_pressing(), "the thumb press captured the drag");
+
+    let mut damage = sink();
+    bar.on_pointer(&RELEASE, vbounds(), Scale::ONE, &theme, &mut damage);
+    assert_eq!(
+        damage.bounds(),
+        vbounds(),
+        "the whole bar: its awake look is not confined to one part"
+    );
+}
+
+/// A wheel tick that cannot move the offset reports nothing.
+#[test]
+fn a_wheel_at_the_end_reports_nothing() {
+    let mut bar = vbar();
+    // Park the offset at the end through the owner's setter, the way a viewport
+    // that has scrolled to its bottom refreshes the bar.
+    bar.set_model(bar.model().to_end());
+
+    let mut damage = sink();
+    assert_eq!(off(bar.wheel(0, 1, vbounds(), &mut damage)), None);
+    assert!(damage.is_empty(), "the thumb is already at the end");
 }

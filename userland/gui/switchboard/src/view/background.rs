@@ -23,16 +23,17 @@ use tairix_raster::{Color, Surface};
 use tairix_theme::Theme;
 
 use tairix_controls::{
-    damage, ActivityState, Button, ButtonContent, Card, Chart, ControlRole, ControlState, Fact,
-    FactList, Panel, PressureKind, RailAction, SelectionState, Timeline, TimelineEvent, Toggle,
+    ActivityState, Button, ButtonContent, Card, Chart, ControlRole, ControlState, Fact, FactList,
+    Panel, PressureKind, RailAction, SelectionState, Timeline, TimelineEvent, Toggle,
 };
 
 use super::frame::{SectionAnatomy, SectionFrame, ACTION_RAIL_WIDTH, DETAIL_PANE_WIDTH};
 use super::refresh::{resettle_cards, restate_rail};
 use super::system_data::absence_statement;
 use super::{
-    action_state, resolve_selection, select_pressed_card, ActionRail, ActionVerdict, ListInfo,
-    SectionCtx, SectionOutcome, SectionView, SwitchboardAction, SwitchboardModel, Unmeasured,
+    action_state, resolve_selection, select_pressed_card, ActionRail, ActionVerdict, FocusSweep,
+    ListInfo, SectionCtx, SectionOutcome, SectionView, SwitchboardAction, SwitchboardModel,
+    Unmeasured,
 };
 
 /// One background job with known or working progress
@@ -559,7 +560,7 @@ impl SectionView for JobsSection {
         self.action
     }
 
-    fn set_row_action(&mut self, index: usize) {
+    fn set_row_action(&mut self, index: usize, _sweep: &mut FocusSweep<'_, '_>) {
         self.action = index;
     }
 
@@ -569,7 +570,12 @@ impl SectionView for JobsSection {
     /// focused button so the button decides for itself whether it may fire:
     /// a command this caller may not take refuses the keyboard exactly as it
     /// refuses the pointer.
-    fn activate_focused(&mut self, key: Key) -> Option<SectionOutcome> {
+    fn activate_focused(
+        &mut self,
+        key: Key,
+        ctx: SectionCtx<'_>,
+        damage: &mut Region,
+    ) -> Option<SectionOutcome> {
         match self.stop_at(self.focus)? {
             Stop::Card(row) => {
                 self.select_row(row);
@@ -577,12 +583,11 @@ impl SectionView for JobsSection {
             }
             Stop::Rail(slot) => {
                 let index = self.selected_index()?;
-                // The keyboard path carries no layout, so the rail has no
-                // rectangle to report here and reports nothing.
-                self.rail
-                    .set_focus(Some(slot), Rect::EMPTY, &mut damage::sink());
-                let RailAction::Activate { index: fired } =
-                    self.rail.on_key(key, Rect::EMPTY, &mut damage::sink())?;
+                let rail = self
+                    .rail_content(&ctx.frame, ctx.scale, ctx.theme)
+                    .unwrap_or(Rect::EMPTY);
+                self.rail.set_focus(Some(slot), rail, damage);
+                let RailAction::Activate { index: fired } = self.rail.on_key(key, rail, damage)?;
                 Some(SectionOutcome::Action(SwitchboardAction::Job {
                     index,
                     control: job_control(fired)?,
@@ -635,7 +640,7 @@ impl SectionView for JobsSection {
         }))
     }
 
-    fn apply_focus_marks(&mut self, focused: bool) {
+    fn apply_focus_marks(&mut self, focused: bool, sweep: &mut FocusSweep<'_, '_>) {
         let stop = focused.then(|| self.stop_at(self.focus)).flatten();
         for (i, card) in self.cards.iter_mut().enumerate() {
             card.set_in_focus_field(stop == Some(Stop::Card(i)));
@@ -644,9 +649,10 @@ impl SectionView for JobsSection {
             Some(Stop::Rail(slot)) => Some(slot),
             _ => None,
         };
-        // Focus marking runs off the keyboard path, which has no layout, so
-        // the rail has no rectangle to report here.
-        self.rail.set_focus(slot, Rect::EMPTY, &mut damage::sink());
+        let rail = sweep
+            .ctx
+            .and_then(|ctx| self.rail_content(&ctx.frame, ctx.scale, ctx.theme));
+        sweep.rail(&mut self.rail, slot, rail);
         for (index, button) in self.rail.items_mut().iter_mut().enumerate() {
             button.set_focused(slot == Some(index));
             button.set_in_focus_field(slot.is_some());

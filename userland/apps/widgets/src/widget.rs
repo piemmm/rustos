@@ -211,7 +211,7 @@ impl DemoWidget {
                 }
                 None => false,
             },
-            DemoWidget::Slider(w) => match w.on_pointer(event, rect) {
+            DemoWidget::Slider(w) => match w.on_pointer(event, rect, damage) {
                 Some(SliderAction::SetValue { permille }) => {
                     w.set_value(permille);
                     true
@@ -219,13 +219,14 @@ impl DemoWidget {
                 None => false,
             },
             DemoWidget::Progress(_) | DemoWidget::Tooltip(_) => false,
-            DemoWidget::TextField(w) => w.on_pointer(event, rect, scale, theme).is_some(),
-            DemoWidget::SearchField(w) => w.on_pointer(event, rect, scale, theme).is_some(),
+            DemoWidget::TextField(w) => w.on_pointer(event, rect, scale, theme, damage).is_some(),
+            DemoWidget::SearchField(w) => w.on_pointer(event, rect, scale, theme, damage).is_some(),
             DemoWidget::ComboBox(w) => {
                 let popup = combo_popup_rect(w, rect, scale, theme);
-                w.on_pointer(event, rect, popup, scale, theme).is_some()
+                w.on_pointer(event, rect, popup, scale, theme, damage)
+                    .is_some()
             }
-            DemoWidget::Menu(w) => w.on_pointer(event, rect, scale, theme).is_some(),
+            DemoWidget::Menu(w) => w.on_pointer(event, rect, scale, theme, damage).is_some(),
             DemoWidget::ListRow(w) => match w.on_pointer(event, rect, damage) {
                 Some(_) => {
                     w.set_selected(!w.is_selected());
@@ -251,7 +252,7 @@ impl DemoWidget {
                 }
                 None => false,
             },
-            DemoWidget::ScrollBar(w) => match w.on_pointer(event, rect, scale, theme) {
+            DemoWidget::ScrollBar(w) => match w.on_pointer(event, rect, scale, theme, damage) {
                 Some(ScrollAction::ScrollTo { offset }) => {
                     w.set_model(w.model().scroll_to(offset));
                     true
@@ -270,6 +271,8 @@ impl DemoWidget {
         key: Key,
         modifiers: Modifiers,
         rect: Rect,
+        scale: Scale,
+        theme: &Theme,
         damage: &mut Region,
     ) -> bool {
         match self {
@@ -297,7 +300,7 @@ impl DemoWidget {
                 }
                 None => false,
             },
-            DemoWidget::Slider(w) => match w.on_key(key) {
+            DemoWidget::Slider(w) => match w.on_key(key, rect, damage) {
                 Some(SliderAction::SetValue { permille }) => {
                     w.set_value(permille);
                     true
@@ -305,10 +308,13 @@ impl DemoWidget {
                 None => false,
             },
             DemoWidget::Progress(_) | DemoWidget::Tooltip(_) => false,
-            DemoWidget::TextField(w) => w.on_key(key, modifiers).is_some(),
-            DemoWidget::SearchField(w) => w.on_key(key, modifiers).is_some(),
-            DemoWidget::ComboBox(w) => w.on_key(key).is_some(),
-            DemoWidget::Menu(w) => w.on_key(key).is_some(),
+            DemoWidget::TextField(w) => w.on_key(key, modifiers, rect, damage).is_some(),
+            DemoWidget::SearchField(w) => w.on_key(key, modifiers, rect, damage).is_some(),
+            DemoWidget::ComboBox(w) => {
+                let popup = combo_popup_rect(w, rect, scale, theme);
+                w.on_key(key, rect, popup, scale, theme, damage).is_some()
+            }
+            DemoWidget::Menu(w) => w.on_key(key, rect, scale, theme, damage).is_some(),
             DemoWidget::ListRow(w) => match w.on_key(key) {
                 Some(_) => {
                     w.set_selected(!w.is_selected());
@@ -334,7 +340,7 @@ impl DemoWidget {
                 }
                 None => false,
             },
-            DemoWidget::ScrollBar(w) => match w.on_key(key) {
+            DemoWidget::ScrollBar(w) => match w.on_key(key, rect, damage) {
                 Some(ScrollAction::ScrollTo { offset }) => {
                     w.set_model(w.model().scroll_to(offset));
                     true

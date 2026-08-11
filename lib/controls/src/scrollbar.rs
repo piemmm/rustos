@@ -19,11 +19,12 @@
 //! applies. Every result is clamped and every division guarded, so an empty,
 //! non-scrollable, or degenerate bar simply does not move (fail closed).
 
-use tairix_geometry::{Point, Rect, Scale};
+use tairix_geometry::{Point, Rect, Region, Scale};
 use tairix_input::{InputEvent, Key, NamedKey, PointerButton};
 use tairix_raster::{Color, Surface};
 use tairix_theme::Theme;
 
+use crate::damage;
 use crate::paint::{draw_outline, heavy_contrast, paint_chevron, surface_rect, to_i32, ChevronDir};
 use crate::scroll::{ScrollGeometry, ScrollModel, ScrollOrientation, ThumbSpan, TrackHit};
 use crate::state::{ControlDisposition, ControlState, PointerState, RenderInvariant};
@@ -64,6 +65,21 @@ pub enum ScrollPart {
     TrackAfter,
     /// Not over the bar at all.
     Outside,
+}
+
+/// The model step a pressed `part` performs, or `None` for a part that presses
+/// into no step (the thumb, which drags instead, and off the bar).
+///
+/// One mapping for the initial press and for every auto-repeat of it, so a held
+/// button cannot repeat a different step from the one it started with.
+fn step_for(part: ScrollPart) -> Option<fn(ScrollModel) -> ScrollModel> {
+    match part {
+        ScrollPart::Decrement => Some(ScrollModel::line_backward),
+        ScrollPart::Increment => Some(ScrollModel::line_forward),
+        ScrollPart::TrackBefore => Some(ScrollModel::page_backward),
+        ScrollPart::TrackAfter => Some(ScrollModel::page_forward),
+        ScrollPart::Thumb | ScrollPart::Outside => None,
+    }
 }
 
 /// The resolved on-screen anatomy of one scrollbar: the two end buttons, the
@@ -270,12 +286,19 @@ impl ScrollBar {
     }
 
     /// Apply `change` to the held model, returning the requested offset when it
-    /// actually moved (fail closed: no movement means no action).
-    fn apply(&mut self, change: impl FnOnce(ScrollModel) -> ScrollModel) -> Option<ScrollAction> {
-        let before = self.model.offset();
-        self.model = change(self.model);
-        let after = self.model.offset();
-        (after != before).then_some(ScrollAction::ScrollTo { offset: after })
+    /// actually moved (fail closed: no movement means no action) and reporting
+    /// `bounds` — a moved offset is a moved thumb.
+    fn apply(
+        &mut self,
+        change: impl FnOnce(ScrollModel) -> ScrollModel,
+        bounds: Rect,
+        damage: &mut Region,
+    ) -> Option<ScrollAction> {
+        let next = change(self.model);
+        let offset = next.offset();
+        let moved = offset != self.model.offset();
+        damage::set(&mut self.model, next, bounds, damage);
+        moved.then_some(ScrollAction::ScrollTo { offset })
     }
 
     /// Feed a pointer event for the bar drawn at `bounds`.
@@ -285,31 +308,39 @@ impl ScrollBar {
     /// the content does not jump; a subsequent move re-maps and re-clamps the
     /// offset (so a mid-drag range change stays valid). A denied, disabled,
     /// pending, or failed-closed bar ignores presses (fail closed).
+    /// The bar reports `bounds` into `damage` when the event changed how it
+    /// draws — a moved thumb, a part hovered or released, the awake look
+    /// arriving or leaving. It is the whole bar because that look is the whole
+    /// bar: brightening for a hover is not confined to the part under the
+    /// pointer.
     pub fn on_pointer(
         &mut self,
         event: &InputEvent,
         bounds: Rect,
         scale: Scale,
         theme: &Theme,
+        damage: &mut Region,
     ) -> Option<ScrollAction> {
         if let InputEvent::PointerMoved { to } = event {
             *self.pointer = *to;
         }
         let layout = self.layout(bounds, scale, theme)?;
+        let over_bar = if layout.bar.contains(*self.pointer) {
+            PointerState::Hover
+        } else {
+            PointerState::None
+        };
         match event {
             InputEvent::PointerMoved { .. } => {
-                self.hover = layout.part_at(*self.pointer);
+                let part = layout.part_at(*self.pointer);
+                damage::set(&mut self.hover, part, bounds, damage);
                 if self.dragging {
                     let offset = layout
                         .geometry
                         .offset_for_drag(layout.along(*self.pointer), *self.anchor);
-                    self.apply(|m| m.scroll_to(offset))
+                    self.apply(|m| m.scroll_to(offset), bounds, damage)
                 } else {
-                    self.state.pointer = if layout.bar.contains(*self.pointer) {
-                        PointerState::Hover
-                    } else {
-                        PointerState::None
-                    };
+                    damage::set(&mut self.state.pointer, over_bar, bounds, damage);
                     None
                 }
             }
@@ -319,49 +350,36 @@ impl ScrollBar {
                 if !self.state.is_actionable() {
                     return None;
                 }
-                match layout.part_at(*self.pointer) {
-                    ScrollPart::Decrement => {
-                        self.held = Some(ScrollPart::Decrement);
-                        self.state.pointer = PointerState::Pressed;
-                        self.apply(ScrollModel::line_backward)
-                    }
-                    ScrollPart::Increment => {
-                        self.held = Some(ScrollPart::Increment);
-                        self.state.pointer = PointerState::Pressed;
-                        self.apply(ScrollModel::line_forward)
-                    }
-                    ScrollPart::TrackBefore => {
-                        self.held = Some(ScrollPart::TrackBefore);
-                        self.state.pointer = PointerState::Pressed;
-                        self.apply(ScrollModel::page_backward)
-                    }
-                    ScrollPart::TrackAfter => {
-                        self.held = Some(ScrollPart::TrackAfter);
-                        self.state.pointer = PointerState::Pressed;
-                        self.apply(ScrollModel::page_forward)
-                    }
-                    ScrollPart::Thumb => {
-                        if layout.geometry.draggable() {
-                            self.dragging = true;
-                            let thumb_start = to_i32(layout.geometry.thumb().start);
-                            *self.anchor = layout.along(*self.pointer) - thumb_start;
-                            self.state.pointer = PointerState::Pressed;
-                        }
-                        None
-                    }
-                    ScrollPart::Outside => None,
+                let part = layout.part_at(*self.pointer);
+                if let Some(step) = step_for(part) {
+                    damage::set(&mut self.held, Some(part), bounds, damage);
+                    damage::set(
+                        &mut self.state.pointer,
+                        PointerState::Pressed,
+                        bounds,
+                        damage,
+                    );
+                    return self.apply(step, bounds, damage);
                 }
+                if part == ScrollPart::Thumb && layout.geometry.draggable() {
+                    let thumb_start = to_i32(layout.geometry.thumb().start);
+                    *self.anchor = layout.along(*self.pointer) - thumb_start;
+                    damage::set(&mut self.dragging, true, bounds, damage);
+                    damage::set(
+                        &mut self.state.pointer,
+                        PointerState::Pressed,
+                        bounds,
+                        damage,
+                    );
+                }
+                None
             }
             InputEvent::PointerReleased {
                 button: PointerButton::Primary,
             } => {
-                self.dragging = false;
-                self.held = None;
-                self.state.pointer = if layout.bar.contains(*self.pointer) {
-                    PointerState::Hover
-                } else {
-                    PointerState::None
-                };
+                damage::set(&mut self.dragging, false, bounds, damage);
+                damage::set(&mut self.held, None, bounds, damage);
+                damage::set(&mut self.state.pointer, over_bar, bounds, damage);
                 None
             }
             _ => None,
@@ -375,44 +393,46 @@ impl ScrollBar {
     /// a timer on the press and calls this on each wake while the button is
     /// held. It stops contributing when the offset reaches a bound (fail
     /// closed) or the press is released.
-    pub fn repeat(&mut self) -> Option<ScrollAction> {
+    pub fn repeat(&mut self, bounds: Rect, damage: &mut Region) -> Option<ScrollAction> {
         if !self.state.is_actionable() {
             return None;
         }
-        match self.held {
-            Some(ScrollPart::Decrement) => self.apply(ScrollModel::line_backward),
-            Some(ScrollPart::Increment) => self.apply(ScrollModel::line_forward),
-            Some(ScrollPart::TrackBefore) => self.apply(ScrollModel::page_backward),
-            Some(ScrollPart::TrackAfter) => self.apply(ScrollModel::page_forward),
-            _ => None,
-        }
+        let step = step_for(self.held?)?;
+        self.apply(step, bounds, damage)
     }
 
     /// Feed a key event to a focused, actionable bar: the orientation's arrow
     /// keys step one line, Page Up/Down step one page, and Home/End jump to the
     /// range bounds (spec §11.28).
-    pub fn on_key(&mut self, key: Key) -> Option<ScrollAction> {
+    pub fn on_key(&mut self, key: Key, bounds: Rect, damage: &mut Region) -> Option<ScrollAction> {
         if !self.state.focus.focused || !self.state.is_actionable() {
             return None;
         }
         let vertical = self.orientation == ScrollOrientation::Vertical;
-        match key {
-            Key::Named(NamedKey::PageUp) => self.apply(ScrollModel::page_backward),
-            Key::Named(NamedKey::PageDown) => self.apply(ScrollModel::page_forward),
-            Key::Named(NamedKey::Home) => self.apply(ScrollModel::to_start),
-            Key::Named(NamedKey::End) => self.apply(ScrollModel::to_end),
-            Key::Named(NamedKey::Up) if vertical => self.apply(ScrollModel::line_backward),
-            Key::Named(NamedKey::Down) if vertical => self.apply(ScrollModel::line_forward),
-            Key::Named(NamedKey::Left) if !vertical => self.apply(ScrollModel::line_backward),
-            Key::Named(NamedKey::Right) if !vertical => self.apply(ScrollModel::line_forward),
-            _ => None,
-        }
+        let step: fn(ScrollModel) -> ScrollModel = match key {
+            Key::Named(NamedKey::PageUp) => ScrollModel::page_backward,
+            Key::Named(NamedKey::PageDown) => ScrollModel::page_forward,
+            Key::Named(NamedKey::Home) => ScrollModel::to_start,
+            Key::Named(NamedKey::End) => ScrollModel::to_end,
+            Key::Named(NamedKey::Up) if vertical => ScrollModel::line_backward,
+            Key::Named(NamedKey::Down) if vertical => ScrollModel::line_forward,
+            Key::Named(NamedKey::Left) if !vertical => ScrollModel::line_backward,
+            Key::Named(NamedKey::Right) if !vertical => ScrollModel::line_forward,
+            _ => return None,
+        };
+        self.apply(step, bounds, damage)
     }
 
     /// Apply wheel `dx`/`dy` ticks to the bar (one line step per tick along its
     /// own axis), returning the requested offset when it moved. A denied or
     /// disabled bar ignores the wheel (fail closed).
-    pub fn wheel(&mut self, dx: i32, dy: i32) -> Option<ScrollAction> {
+    pub fn wheel(
+        &mut self,
+        dx: i32,
+        dy: i32,
+        bounds: Rect,
+        damage: &mut Region,
+    ) -> Option<ScrollAction> {
         let ticks = match self.orientation {
             ScrollOrientation::Vertical => dy,
             ScrollOrientation::Horizontal => dx,
@@ -420,10 +440,14 @@ impl ScrollBar {
         if ticks == 0 || !self.state.is_actionable() {
             return None;
         }
-        self.apply(|m| {
-            let step = i64::try_from(m.line_step()).unwrap_or(i64::MAX);
-            m.scroll_by(i64::from(ticks).saturating_mul(step))
-        })
+        self.apply(
+            |m| {
+                let step = i64::try_from(m.line_step()).unwrap_or(i64::MAX);
+                m.scroll_by(i64::from(ticks).saturating_mul(step))
+            },
+            bounds,
+            damage,
+        )
     }
 
     /// Resolve the bar's on-screen anatomy for `bounds`, or `None` when it

@@ -18,6 +18,7 @@ use tairix_input::{InputEvent, Key, NamedKey, PointerButton};
 use tairix_raster::{Color, Pixel, Surface};
 use tairix_theme::{Rgba, Theme};
 
+use crate::damage::sink;
 use crate::nav::{Breadcrumb, BreadcrumbAction, Crumb};
 use crate::state::{AuthorityState, ControlState};
 use crate::testkit::high_contrast;
@@ -44,14 +45,22 @@ fn render(bc: &Breadcrumb, theme: &Theme, w: u32, h: u32) -> Surface {
     surface
 }
 
+/// The tight-fit bounds at which [`Breadcrumb::layout`] admits every crumb
+/// unelided (the elision check is `<=`).
+fn full_bounds(bc: &Breadcrumb, theme: &Theme) -> Rect {
+    bounds(
+        bc.measured_width(Scale::ONE, theme),
+        Breadcrumb::measured_height(Scale::ONE, theme),
+    )
+}
+
 /// A surface exactly `bc.measured_width()` wide, the tight-fit width at
 /// which [`Breadcrumb::layout`] admits every crumb unelided (the elision
 /// check is `<=`), so a test using this can reason about pointer positions
 /// without needing elision itself.
 fn render_full(bc: &Breadcrumb, theme: &Theme) -> Surface {
-    let w = bc.measured_width(Scale::ONE, theme);
-    let h = Breadcrumb::measured_height(Scale::ONE, theme);
-    render(bc, theme, w, h)
+    let b = full_bounds(bc, theme);
+    render(bc, theme, b.width, b.height)
 }
 
 fn moved(x: i32, y: i32) -> InputEvent {
@@ -142,10 +151,13 @@ fn current_crumb_never_activates_by_pointer() {
         Some(2),
         "the point must land on the current crumb's own cell"
     );
-    bc.on_pointer(&moved(point.x, point.y), b, Scale::ONE, &theme);
-    assert_eq!(bc.on_pointer(&PRESS, b, Scale::ONE, &theme), None);
+    bc.on_pointer(&moved(point.x, point.y), b, Scale::ONE, &theme, &mut sink());
     assert_eq!(
-        bc.on_pointer(&RELEASE, b, Scale::ONE, &theme),
+        bc.on_pointer(&PRESS, b, Scale::ONE, &theme, &mut sink()),
+        None
+    );
+    assert_eq!(
+        bc.on_pointer(&RELEASE, b, Scale::ONE, &theme, &mut sink()),
         None,
         "pressing the current location is a no-op"
     );
@@ -153,10 +165,18 @@ fn current_crumb_never_activates_by_pointer() {
 
 #[test]
 fn current_crumb_never_receives_keyboard_focus() {
+    let theme = Theme::dark();
     let mut bc = trail(&["Root", "Docs", "file.txt"]);
-    bc.set_focus(Some(2));
+    let b = full_bounds(&bc, &theme);
+    bc.set_focus(Some(2), b, Scale::ONE, &theme, &mut sink());
     assert_eq!(bc.focus(), None, "focus on the current crumb is refused");
-    bc.on_key(Key::Named(NamedKey::End));
+    bc.on_key(
+        Key::Named(NamedKey::End),
+        b,
+        Scale::ONE,
+        &theme,
+        &mut sink(),
+    );
     assert_eq!(
         bc.focus(),
         Some(1),
@@ -166,17 +186,29 @@ fn current_crumb_never_receives_keyboard_focus() {
 
 #[test]
 fn single_crumb_trail_has_no_activatable_ancestor() {
-    let mut bc = trail(&["file.txt"]);
-    assert_eq!(bc.on_key(Key::Named(NamedKey::Right)), None);
-    assert_eq!(bc.focus(), None);
     let theme = Theme::dark();
+    let mut bc = trail(&["file.txt"]);
     let w = bc.measured_width(Scale::ONE, &theme);
     let h = Breadcrumb::measured_height(Scale::ONE, &theme);
     let b = bounds(w, h);
+    assert_eq!(
+        bc.on_key(
+            Key::Named(NamedKey::Right),
+            b,
+            Scale::ONE,
+            &theme,
+            &mut sink()
+        ),
+        None
+    );
+    assert_eq!(bc.focus(), None);
     let point = Point::new(1, xi(h) / 2);
-    bc.on_pointer(&moved(point.x, point.y), b, Scale::ONE, &theme);
-    bc.on_pointer(&PRESS, b, Scale::ONE, &theme);
-    assert_eq!(bc.on_pointer(&RELEASE, b, Scale::ONE, &theme), None);
+    bc.on_pointer(&moved(point.x, point.y), b, Scale::ONE, &theme, &mut sink());
+    bc.on_pointer(&PRESS, b, Scale::ONE, &theme, &mut sink());
+    assert_eq!(
+        bc.on_pointer(&RELEASE, b, Scale::ONE, &theme, &mut sink()),
+        None
+    );
 }
 
 // --- Hover and focus rendering differ from rest --------------------------
@@ -194,7 +226,7 @@ fn hover_changes_the_rendered_ancestor() {
         bc.crumb_at(b, Scale::ONE, &theme, Point::new(1, xi(h) / 2)),
         Some(0)
     );
-    bc.on_pointer(&moved(1, xi(h) / 2), b, Scale::ONE, &theme);
+    bc.on_pointer(&moved(1, xi(h) / 2), b, Scale::ONE, &theme, &mut sink());
     let hovered = render(&bc, &theme, w, h);
     assert_ne!(
         rest.pixels(),
@@ -211,7 +243,13 @@ fn hovering_the_current_crumb_changes_nothing() {
     let h = Breadcrumb::measured_height(Scale::ONE, &theme);
     let b = bounds(w, h);
     let rest = render(&bc, &theme, w, h);
-    bc.on_pointer(&moved(xi(w) - 1, xi(h) / 2), b, Scale::ONE, &theme);
+    bc.on_pointer(
+        &moved(xi(w) - 1, xi(h) / 2),
+        b,
+        Scale::ONE,
+        &theme,
+        &mut sink(),
+    );
     let after = render(&bc, &theme, w, h);
     assert_eq!(
         rest.pixels(),
@@ -229,10 +267,16 @@ fn keyboard_focus_draws_a_ring_distinct_from_rest_and_from_hover() {
     let rest = render(&bc, &theme, w, h);
 
     let mut hovered_only = bc.clone();
-    hovered_only.on_pointer(&moved(1, xi(h) / 2), bounds(w, h), Scale::ONE, &theme);
+    hovered_only.on_pointer(
+        &moved(1, xi(h) / 2),
+        bounds(w, h),
+        Scale::ONE,
+        &theme,
+        &mut sink(),
+    );
     let hovered = render(&hovered_only, &theme, w, h);
 
-    bc.set_focus(Some(0));
+    bc.set_focus(Some(0), bounds(w, h), Scale::ONE, &theme, &mut sink());
     let focused = render(&bc, &theme, w, h);
 
     assert_ne!(rest.pixels(), focused.pixels());
@@ -247,13 +291,27 @@ fn keyboard_focus_draws_a_ring_distinct_from_rest_and_from_hover() {
 
 #[test]
 fn disabled_ancestor_refuses_activation() {
+    let theme = Theme::dark();
     let mut bc = Breadcrumb::new(vec![
         Crumb::new("Root").with_state(ControlState::disabled()),
         Crumb::new("file.txt"),
     ]);
-    bc.set_focus(Some(0));
-    assert_eq!(bc.on_key(Key::Named(NamedKey::Enter)), None);
-    assert_eq!(bc.on_key(Key::Char(' ')), None);
+    let b = full_bounds(&bc, &theme);
+    bc.set_focus(Some(0), b, Scale::ONE, &theme, &mut sink());
+    assert_eq!(
+        bc.on_key(
+            Key::Named(NamedKey::Enter),
+            b,
+            Scale::ONE,
+            &theme,
+            &mut sink()
+        ),
+        None
+    );
+    assert_eq!(
+        bc.on_key(Key::Char(' '), b, Scale::ONE, &theme, &mut sink()),
+        None
+    );
 }
 
 #[test]
@@ -266,9 +324,12 @@ fn disabled_ancestor_refuses_activation_by_pointer() {
     let surface = render_full(&bc, &theme);
     let (w, h) = (surface.width(), surface.height());
     let b = bounds(w, h);
-    bc.on_pointer(&moved(1, xi(h) / 2), b, Scale::ONE, &theme);
-    bc.on_pointer(&PRESS, b, Scale::ONE, &theme);
-    assert_eq!(bc.on_pointer(&RELEASE, b, Scale::ONE, &theme), None);
+    bc.on_pointer(&moved(1, xi(h) / 2), b, Scale::ONE, &theme, &mut sink());
+    bc.on_pointer(&PRESS, b, Scale::ONE, &theme, &mut sink());
+    assert_eq!(
+        bc.on_pointer(&RELEASE, b, Scale::ONE, &theme, &mut sink()),
+        None
+    );
 }
 
 #[test]
@@ -278,8 +339,18 @@ fn denied_ancestor_refuses_activation_and_shows_authority_mark() {
         Crumb::new("Root").with_state(ControlState::idle().with_authority(AuthorityState::Denied)),
         Crumb::new("file.txt"),
     ]);
-    bc.set_focus(Some(0));
-    assert_eq!(bc.on_key(Key::Named(NamedKey::Enter)), None);
+    let b = full_bounds(&bc, &theme);
+    bc.set_focus(Some(0), b, Scale::ONE, &theme, &mut sink());
+    assert_eq!(
+        bc.on_key(
+            Key::Named(NamedKey::Enter),
+            b,
+            Scale::ONE,
+            &theme,
+            &mut sink()
+        ),
+        None
+    );
     let surface = render_full(&bc, &theme);
     assert!(
         has_pixel(&surface, premul(theme.palette().denied)),
@@ -291,38 +362,86 @@ fn denied_ancestor_refuses_activation_and_shows_authority_mark() {
 
 #[test]
 fn left_and_right_move_focus_among_ancestors_and_wrap() {
+    let theme = Theme::dark();
     let mut bc = trail(&["Root", "Docs", "Projects", "file.txt"]);
-    bc.on_key(Key::Named(NamedKey::Right));
+    let b = full_bounds(&bc, &theme);
+    bc.on_key(
+        Key::Named(NamedKey::Right),
+        b,
+        Scale::ONE,
+        &theme,
+        &mut sink(),
+    );
     assert_eq!(bc.focus(), Some(0));
-    bc.on_key(Key::Named(NamedKey::Right));
-    bc.on_key(Key::Named(NamedKey::Right));
+    bc.on_key(
+        Key::Named(NamedKey::Right),
+        b,
+        Scale::ONE,
+        &theme,
+        &mut sink(),
+    );
+    bc.on_key(
+        Key::Named(NamedKey::Right),
+        b,
+        Scale::ONE,
+        &theme,
+        &mut sink(),
+    );
     assert_eq!(bc.focus(), Some(2));
-    bc.on_key(Key::Named(NamedKey::Right));
+    bc.on_key(
+        Key::Named(NamedKey::Right),
+        b,
+        Scale::ONE,
+        &theme,
+        &mut sink(),
+    );
     assert_eq!(bc.focus(), Some(0), "wraps past the last ancestor");
-    bc.on_key(Key::Named(NamedKey::Left));
+    bc.on_key(
+        Key::Named(NamedKey::Left),
+        b,
+        Scale::ONE,
+        &theme,
+        &mut sink(),
+    );
     assert_eq!(bc.focus(), Some(2), "wraps back past the first ancestor");
 }
 
 #[test]
 fn home_and_end_jump_to_first_and_last_ancestor() {
+    let theme = Theme::dark();
     let mut bc = trail(&["Root", "Docs", "Projects", "file.txt"]);
-    bc.set_focus(Some(1));
-    bc.on_key(Key::Named(NamedKey::Home));
+    let b = full_bounds(&bc, &theme);
+    bc.set_focus(Some(1), b, Scale::ONE, &theme, &mut sink());
+    bc.on_key(
+        Key::Named(NamedKey::Home),
+        b,
+        Scale::ONE,
+        &theme,
+        &mut sink(),
+    );
     assert_eq!(bc.focus(), Some(0));
-    bc.on_key(Key::Named(NamedKey::End));
+    bc.on_key(
+        Key::Named(NamedKey::End),
+        b,
+        Scale::ONE,
+        &theme,
+        &mut sink(),
+    );
     assert_eq!(bc.focus(), Some(2));
 }
 
 #[test]
 fn set_focus_clamps_the_current_crumb_and_out_of_range_indices() {
+    let theme = Theme::dark();
     let mut bc = trail(&["Root", "file.txt"]);
-    bc.set_focus(Some(1));
+    let b = full_bounds(&bc, &theme);
+    bc.set_focus(Some(1), b, Scale::ONE, &theme, &mut sink());
     assert_eq!(bc.focus(), None, "the current crumb never holds focus");
-    bc.set_focus(Some(99));
+    bc.set_focus(Some(99), b, Scale::ONE, &theme, &mut sink());
     assert_eq!(bc.focus(), None, "an out-of-range index clears focus");
-    bc.set_focus(Some(0));
+    bc.set_focus(Some(0), b, Scale::ONE, &theme, &mut sink());
     assert_eq!(bc.focus(), Some(0));
-    bc.set_focus(None);
+    bc.set_focus(None, b, Scale::ONE, &theme, &mut sink());
     assert_eq!(bc.focus(), None);
 }
 
@@ -330,27 +449,49 @@ fn set_focus_clamps_the_current_crumb_and_out_of_range_indices() {
 fn a_disabled_or_denied_ancestor_keeps_its_slot_in_focus_order() {
     // Left/Right must not skip an ancestor whose state refuses activation —
     // it still holds its place in the trail, exactly as a Menu row does.
+    let theme = Theme::dark();
     let mut bc = Breadcrumb::new(vec![
         Crumb::new("Root").with_state(ControlState::disabled()),
         Crumb::new("Docs").with_state(ControlState::idle().with_authority(AuthorityState::Denied)),
         Crumb::new("file.txt"),
     ]);
-    bc.on_key(Key::Named(NamedKey::Right));
+    let b = full_bounds(&bc, &theme);
+    bc.on_key(
+        Key::Named(NamedKey::Right),
+        b,
+        Scale::ONE,
+        &theme,
+        &mut sink(),
+    );
     assert_eq!(bc.focus(), Some(0));
-    bc.on_key(Key::Named(NamedKey::Right));
+    bc.on_key(
+        Key::Named(NamedKey::Right),
+        b,
+        Scale::ONE,
+        &theme,
+        &mut sink(),
+    );
     assert_eq!(bc.focus(), Some(1));
 }
 
 #[test]
 fn enter_and_space_activate_the_focused_ancestor() {
+    let theme = Theme::dark();
     let mut bc = trail(&["Root", "Docs", "file.txt"]);
-    bc.set_focus(Some(1));
+    let b = full_bounds(&bc, &theme);
+    bc.set_focus(Some(1), b, Scale::ONE, &theme, &mut sink());
     assert_eq!(
-        bc.on_key(Key::Named(NamedKey::Enter)),
+        bc.on_key(
+            Key::Named(NamedKey::Enter),
+            b,
+            Scale::ONE,
+            &theme,
+            &mut sink()
+        ),
         Some(BreadcrumbAction::Activate { index: 1 })
     );
     assert_eq!(
-        bc.on_key(Key::Char(' ')),
+        bc.on_key(Key::Char(' '), b, Scale::ONE, &theme, &mut sink()),
         Some(BreadcrumbAction::Activate { index: 1 })
     );
 }
@@ -366,12 +507,15 @@ fn hover_then_click_activates_an_ancestor() {
     let b = bounds(w, h);
     let point = Point::new(1, xi(h) / 2);
     assert_eq!(
-        bc.on_pointer(&moved(point.x, point.y), b, Scale::ONE, &theme),
+        bc.on_pointer(&moved(point.x, point.y), b, Scale::ONE, &theme, &mut sink()),
         None
     );
-    assert_eq!(bc.on_pointer(&PRESS, b, Scale::ONE, &theme), None);
     assert_eq!(
-        bc.on_pointer(&RELEASE, b, Scale::ONE, &theme),
+        bc.on_pointer(&PRESS, b, Scale::ONE, &theme, &mut sink()),
+        None
+    );
+    assert_eq!(
+        bc.on_pointer(&RELEASE, b, Scale::ONE, &theme, &mut sink()),
         Some(BreadcrumbAction::Activate { index: 0 })
     );
 }
@@ -383,11 +527,20 @@ fn release_outside_the_pressed_crumb_does_not_activate() {
     let w = bc.measured_width(Scale::ONE, &theme);
     let h = Breadcrumb::measured_height(Scale::ONE, &theme);
     let b = bounds(w, h);
-    bc.on_pointer(&moved(1, xi(h) / 2), b, Scale::ONE, &theme);
-    bc.on_pointer(&PRESS, b, Scale::ONE, &theme);
+    bc.on_pointer(&moved(1, xi(h) / 2), b, Scale::ONE, &theme, &mut sink());
+    bc.on_pointer(&PRESS, b, Scale::ONE, &theme, &mut sink());
     // Slide onto the current (trailing) crumb before releasing.
-    bc.on_pointer(&moved(xi(w) - 1, xi(h) / 2), b, Scale::ONE, &theme);
-    assert_eq!(bc.on_pointer(&RELEASE, b, Scale::ONE, &theme), None);
+    bc.on_pointer(
+        &moved(xi(w) - 1, xi(h) / 2),
+        b,
+        Scale::ONE,
+        &theme,
+        &mut sink(),
+    );
+    assert_eq!(
+        bc.on_pointer(&RELEASE, b, Scale::ONE, &theme, &mut sink()),
+        None
+    );
 }
 
 // --- Elision --------------------------------------------------------------
@@ -464,10 +617,10 @@ fn elision_keeps_the_current_crumb_and_activates_the_newest_hidden_ancestor() {
 
     // Activating the leading (ellipsis) cell reaches the newest ancestor it
     // hides.
-    bc.on_pointer(&moved(1, xi(h) / 2), b, Scale::ONE, &theme);
-    bc.on_pointer(&PRESS, b, Scale::ONE, &theme);
+    bc.on_pointer(&moved(1, xi(h) / 2), b, Scale::ONE, &theme, &mut sink());
+    bc.on_pointer(&PRESS, b, Scale::ONE, &theme, &mut sink());
     assert_eq!(
-        bc.on_pointer(&RELEASE, b, Scale::ONE, &theme),
+        bc.on_pointer(&RELEASE, b, Scale::ONE, &theme, &mut sink()),
         Some(BreadcrumbAction::Activate {
             index: newest_hidden
         })
@@ -557,9 +710,24 @@ fn empty_trail_renders_nothing_and_answers_none_everywhere() {
     assert_eq!(bc.current(), None);
     assert_eq!(bc.focus(), None);
     let mut bc = bc;
-    assert_eq!(bc.on_key(Key::Named(NamedKey::Right)), None);
     assert_eq!(
-        bc.on_pointer(&moved(5, 5), bounds(80, 40), Scale::ONE, &theme),
+        bc.on_key(
+            Key::Named(NamedKey::Right),
+            bounds(80, 40),
+            Scale::ONE,
+            &theme,
+            &mut sink()
+        ),
+        None
+    );
+    assert_eq!(
+        bc.on_pointer(
+            &moved(5, 5),
+            bounds(80, 40),
+            Scale::ONE,
+            &theme,
+            &mut sink()
+        ),
         None
     );
 }
@@ -612,11 +780,66 @@ fn hit_test_bookkeeping_is_invisible_to_the_trail() {
     // differs — that is not a drawn property.
     let mut a = bc.clone();
     let mut b_copy = bc.clone();
-    a.on_pointer(&moved(xi(w) + 40, xi(h) + 40), b, Scale::ONE, &theme);
-    b_copy.on_pointer(&moved(xi(w) + 90, xi(h) + 12), b, Scale::ONE, &theme);
+    a.on_pointer(
+        &moved(xi(w) + 40, xi(h) + 40),
+        b,
+        Scale::ONE,
+        &theme,
+        &mut sink(),
+    );
+    b_copy.on_pointer(
+        &moved(xi(w) + 90, xi(h) + 12),
+        b,
+        Scale::ONE,
+        &theme,
+        &mut sink(),
+    );
     assert_eq!(a, b_copy);
     assert_eq!(
         render(&a, &theme, w, h).pixels(),
         render(&b_copy, &theme, w, h).pixels()
     );
+}
+
+/// Focus on an ancestor the layout elided is drawn on the ellipsis, so that is
+/// the cell the trail reports — the case a per-crumb rectangle would have got
+/// wrong.
+#[test]
+fn focus_on_an_elided_ancestor_reports_the_ellipsis_cell() {
+    let theme = Theme::dark();
+    let mut bc = trail(&["Root", "Users", "ada", "Documents", "Work", "Now"]);
+    // Narrow enough that the leading ancestors collapse into one ellipsis.
+    let narrow = bounds(
+        bc.measured_width(Scale::ONE, &theme) / 2,
+        Breadcrumb::measured_height(Scale::ONE, &theme),
+    );
+    let elided = bc
+        .crumb_at(narrow, Scale::ONE, &theme, Point::new(2, 4))
+        .expect("the leading cell is the ellipsis");
+    assert!(elided > 0, "the ellipsis stands for hidden ancestors");
+
+    let mut damage = sink();
+    bc.set_focus(Some(0), narrow, Scale::ONE, &theme, &mut damage);
+    assert!(
+        damage.contains(Point::new(2, 4)),
+        "the ring lights on the ellipsis, so the ellipsis is what repaints"
+    );
+    assert!(
+        damage.bounds().width < narrow.width,
+        "one cell, not the trail: {:?}",
+        damage.bounds()
+    );
+}
+
+/// Re-stating the focus the trail already holds draws nothing new.
+#[test]
+fn re_stating_the_focused_crumb_reports_nothing() {
+    let theme = Theme::dark();
+    let mut bc = trail(&["Root", "Users", "ada"]);
+    let full = full_bounds(&bc, &theme);
+    bc.set_focus(Some(1), full, Scale::ONE, &theme, &mut sink());
+
+    let mut damage = sink();
+    bc.set_focus(Some(1), full, Scale::ONE, &theme, &mut damage);
+    assert!(damage.is_empty(), "the ring has not moved");
 }

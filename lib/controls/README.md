@@ -305,6 +305,47 @@ exclusion carries a drift guard in the tests: two values differing *only* in
 that field are rendered and their pixels compared byte for byte, so the
 exclusion is proved rather than asserted.
 
+## Reporting what changed
+
+Equality answers *whether* a surface changed; it cannot say *where*. Every
+input call therefore takes a damage sink (`&mut tairix_geometry::Region`, from
+`damage::sink()`) and pushes the rectangles it repainted into it, so a host
+renders and presents those instead of the window. A pointer crossing a
+control-rich window costs the control left and the control entered, not the
+surface.
+
+Two guarded writes are the whole rule, so no family invents a third:
+`damage::set` writes one drawn field and reports the control's own bounds when
+the value actually changed, and `damage::move_mark` reports the two children an
+index-valued mark moves between — the menu row a highlight leaves and the one it
+arrives on, the hovered tab, the focused crumb, the focused header column —
+never the strip or popup around them. A `RenderInvariant` field reports nothing,
+exactly as it compares equal, which is why a motion sample inside one control is
+free.
+
+A control reports every drawn change it makes itself. A change a *host* makes
+through a setter is the host's to report, since the host knows where it put the
+control — except a mark a container draws on one of its own children, whose two
+rectangles only the container can name: `Breadcrumb::set_focus` and
+`TableHeader::set_focus` take the layout and report.
+
+A host that is *composing or rebuilding* a control has no layout to resolve a
+child against and nothing to report against either, because it presents that
+surface whole. It says so: `Breadcrumb::adopt_focus` / `TableHeader::adopt_focus`
+adopt the mark without reporting, sharing the one admission rule with their
+reporting sibling so a rebuild cannot admit a focus the interactive path would
+refuse. Passing a fabricated rectangle, scale, or theme to the reporting form is
+the alternative, and it is forbidden — a made-up theme is one read away from
+being silently wrong. The remaining container-mark setters
+(`Tabs::set_current`/`set_selected`, `Menu::set_current`, `TableHeader::set_sort`)
+report nothing at all yet, and their hosts still present in full; closing that is
+staged in `plans/FIX-DESKTOP-SPEEDUP.md`.
+
+Over-covering is safe, under-covering is not: a rectangle reported that did not
+change costs one redundant repaint, while a change left unreported leaves a
+stale pixel on screen. Where the two pull against each other — a disabled
+control tracking a hover it does not draw — the report stands.
+
 ## Where it sits
 
 `#![no_std]`. The `scroll` and `state` modules are pure logic with no

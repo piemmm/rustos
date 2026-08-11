@@ -310,6 +310,19 @@ State composition is preferred over one enormous enum. A disabled destructive re
 
 A `SizeToggle` renders the action that will occur next: `Maximize` while restored and `Restore` while maximized. A `ScrollRange` is normalized before painting or hit testing: when the viewport covers the content, the offset is zero; otherwise the offset cannot exceed `content_extent - viewport_extent`. Content extent, viewport extent, offset, line step, and page step use the same logical scroll unit declared by the owning viewport; they are not mixed implicitly between pixels, rows, or application records. Invalid, overflowing, or stale range data fails closed to a non-draggable, zero-offset scrollbar rather than producing out-of-bounds geometry.
 
+### Reporting what changed
+
+Equality (above) answers *whether* a control's surface changed; it cannot say *where*, so a host that only holds it repaints whole windows for a hover. Every input entry point therefore takes a damage sink — `&mut tairix_geometry::Region`, from `damage::sink()` — and pushes the rectangles it repainted into it, and the host renders and presents only those.
+
+Exactly two guarded writes carry the rule, so no family invents a third: `damage::set` writes one drawn field and reports the control's own bounds when the value actually changed, and `damage::move_mark` reports the two children an index-valued mark moves between — the menu row a highlight leaves and the one it arrives on, the hovered tab, the focused crumb, the focused header column — never the strip or popup around them. A `RenderInvariant` field reports nothing, exactly as it compares equal.
+
+A control reports every drawn change it makes itself. A change a *host* makes through a setter is the host's to report, because the host is what knows where it put the control — with one exception: a mark a container draws on one of its own children, whose two rectangles only the container can name. Those setters take the layout and report (`Breadcrumb::set_focus`, `TableHeader::set_focus`).
+
+A host that is *composing or rebuilding* a control is the case that proves the rule: it has no layout to resolve a child against, and nothing to report against either, because it presents that surface whole. It must say so rather than fabricate the inputs — `adopt_focus` adopts the mark without reporting, sharing the one admission rule with its reporting sibling so a rebuild cannot admit a focus the interactive path would refuse. Passing a made-up rectangle, scale, or theme to the reporting form is forbidden: it compiles, reports nothing today, and is one read away from being silently wrong.
+
+Over-covering is safe and under-covering is not: a reported rectangle that did not change costs one redundant repaint, while an unreported change leaves a stale pixel on screen. Where the two are in tension — a disabled control that tracks hover it does not draw — the report stands.
+
+
 ---
 
 ## 6. Theme Model

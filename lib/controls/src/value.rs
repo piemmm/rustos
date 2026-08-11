@@ -21,11 +21,12 @@ use alloc::format;
 use alloc::string::String;
 
 use tairix_font::BitmapFont;
-use tairix_geometry::{Point, Rect, Scale};
+use tairix_geometry::{Point, Rect, Region, Scale};
 use tairix_input::{InputEvent, Key, NamedKey, PointerButton};
 use tairix_raster::{Color, Surface};
 use tairix_theme::{TextRole, Theme};
 
+use crate::damage;
 use crate::paint::{
     clamp_permille, inset, measured_thickness, paint_bead, paint_plate, plate_border,
     progress_thickness, resolve_bead, resolve_frame, resolve_mark, resolve_rail, role_font,
@@ -242,14 +243,12 @@ impl Slider {
     }
 
     /// Request a new value, clamped to `0..=ceiling`; returns the action if the
-    /// value actually changed, updating the displayed value immediately.
-    fn request(&mut self, value: u16) -> Option<SliderAction> {
+    /// value actually changed, updating the displayed value immediately and
+    /// reporting `bounds` — the thumb and the filled track both move with it.
+    fn request(&mut self, value: u16, bounds: Rect, damage: &mut Region) -> Option<SliderAction> {
         let next = self.ceiling().min(clamp_permille(value));
-        if next == self.value {
-            return None;
-        }
-        self.value = next;
-        Some(SliderAction::SetValue { permille: next })
+        damage::set(&mut self.value, next, bounds, damage)
+            .then_some(SliderAction::SetValue { permille: next })
     }
 
     /// Paint the slider into `surface` at `bounds` for the active theme.
@@ -329,33 +328,46 @@ impl Slider {
 
     /// Feed a pointer event; a press/drag over an actionable slider updates the
     /// value and reports the requested change. A denied, disabled, pending, or
-    /// failed-closed slider ignores pointer input (fail closed).
-    pub fn on_pointer(&mut self, event: &InputEvent, bounds: Rect) -> Option<SliderAction> {
+    /// failed-closed slider ignores pointer input (fail closed). The slider
+    /// reports `bounds` into `damage` when the event moved the thumb or changed
+    /// the pointer look; a sample that stays inside it reports nothing.
+    pub fn on_pointer(
+        &mut self,
+        event: &InputEvent,
+        bounds: Rect,
+        damage: &mut Region,
+    ) -> Option<SliderAction> {
         if let InputEvent::PointerMoved { to } = event {
             *self.pointer = *to;
         }
         let layout = slider_layout(bounds)?;
         let inside = bounds.contains(*self.pointer);
+        let hover_or_none = if inside {
+            PointerState::Hover
+        } else {
+            PointerState::None
+        };
         match event {
             InputEvent::PointerPressed {
                 button: PointerButton::Primary,
             } => {
                 if inside && self.state.is_actionable() {
                     *self.dragging = true;
-                    self.state.pointer = PointerState::Pressed;
-                    return self.request(layout.value_for(self.pointer.x));
+                    damage::set(
+                        &mut self.state.pointer,
+                        PointerState::Pressed,
+                        bounds,
+                        damage,
+                    );
+                    return self.request(layout.value_for(self.pointer.x), bounds, damage);
                 }
                 None
             }
             InputEvent::PointerMoved { .. } => {
                 if *self.dragging {
-                    self.request(layout.value_for(self.pointer.x))
+                    self.request(layout.value_for(self.pointer.x), bounds, damage)
                 } else {
-                    self.state.pointer = if inside {
-                        PointerState::Hover
-                    } else {
-                        PointerState::None
-                    };
+                    damage::set(&mut self.state.pointer, hover_or_none, bounds, damage);
                     None
                 }
             }
@@ -363,11 +375,7 @@ impl Slider {
                 button: PointerButton::Primary,
             } => {
                 *self.dragging = false;
-                self.state.pointer = if inside {
-                    PointerState::Hover
-                } else {
-                    PointerState::None
-                };
+                damage::set(&mut self.state.pointer, hover_or_none, bounds, damage);
                 None
             }
             _ => None,
@@ -376,25 +384,24 @@ impl Slider {
 
     /// Feed a key event; arrows step by the line step, PageUp/PageDown by the
     /// page step, Home/End jump to the ends, on a focused, actionable slider.
-    pub fn on_key(&mut self, key: Key) -> Option<SliderAction> {
+    /// A step that moves the value reports `bounds` into `damage`; one already
+    /// at the end it steps toward reports nothing.
+    pub fn on_key(&mut self, key: Key, bounds: Rect, damage: &mut Region) -> Option<SliderAction> {
         if !self.state.focus.focused || !self.state.is_actionable() {
             return None;
         }
-        match key {
-            Key::Named(NamedKey::Right | NamedKey::Up) => {
-                self.request(self.value.saturating_add(self.line_step))
-            }
+        let target = match key {
+            Key::Named(NamedKey::Right | NamedKey::Up) => self.value.saturating_add(self.line_step),
             Key::Named(NamedKey::Left | NamedKey::Down) => {
-                self.request(self.value.saturating_sub(self.line_step))
+                self.value.saturating_sub(self.line_step)
             }
-            Key::Named(NamedKey::PageUp) => self.request(self.value.saturating_add(self.page_step)),
-            Key::Named(NamedKey::PageDown) => {
-                self.request(self.value.saturating_sub(self.page_step))
-            }
-            Key::Named(NamedKey::Home) => self.request(0),
-            Key::Named(NamedKey::End) => self.request(FULL),
-            _ => None,
-        }
+            Key::Named(NamedKey::PageUp) => self.value.saturating_add(self.page_step),
+            Key::Named(NamedKey::PageDown) => self.value.saturating_sub(self.page_step),
+            Key::Named(NamedKey::Home) => 0,
+            Key::Named(NamedKey::End) => FULL,
+            _ => return None,
+        };
+        self.request(target, bounds, damage)
     }
 }
 

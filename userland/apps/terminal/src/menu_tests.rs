@@ -3,7 +3,7 @@
 use alloc::vec::Vec;
 
 use tairix_controls::testkit::text_ladder;
-use tairix_controls::{Menu, MenuItem};
+use tairix_controls::{damage, Menu, MenuItem};
 use tairix_geometry::{to_i32, Point, Rect, Scale};
 use tairix_input::{InputEvent, Key, Modifiers, NamedKey, PointerButton};
 use tairix_theme::{Fonts, Theme};
@@ -183,13 +183,26 @@ fn accelerator_returns_none_for_an_unrelated_ctrl_combination() {
 /// below, since [`ContextMenu`] exposes no public row accessor of its own.
 #[test]
 fn activating_a_row_by_keyboard_yields_the_matching_command() {
+    let theme = Theme::dark();
     for (index, command) in Command::ALL.into_iter().enumerate() {
         let mut menu = ContextMenu::open(Point::new(10, 10));
         for _ in 0..=index {
-            let outcome = menu.on_key(Key::Named(NamedKey::Down));
+            let outcome = menu.on_key(
+                Key::Named(NamedKey::Down),
+                viewport(),
+                Scale::ONE,
+                &theme,
+                &mut damage::sink(),
+            );
             assert_eq!(outcome, MenuOutcome::Changed);
         }
-        let outcome = menu.on_key(Key::Named(NamedKey::Enter));
+        let outcome = menu.on_key(
+            Key::Named(NamedKey::Enter),
+            viewport(),
+            Scale::ONE,
+            &theme,
+            &mut damage::sink(),
+        );
         assert_eq!(outcome, MenuOutcome::Chose(command), "row {index}");
     }
 }
@@ -198,9 +211,16 @@ fn activating_a_row_by_keyboard_yields_the_matching_command() {
 
 #[test]
 fn escape_dismisses() {
+    let theme = Theme::dark();
     let mut menu = ContextMenu::open(Point::new(10, 10));
     assert_eq!(
-        menu.on_key(Key::Named(NamedKey::Escape)),
+        menu.on_key(
+            Key::Named(NamedKey::Escape),
+            viewport(),
+            Scale::ONE,
+            &theme,
+            &mut damage::sink()
+        ),
         MenuOutcome::Dismissed
     );
 }
@@ -218,14 +238,20 @@ fn a_primary_press_outside_the_plate_dismisses_without_choosing() {
 
     let moved = InputEvent::PointerMoved { to: outside };
     assert_eq!(
-        menu.on_pointer(&moved, viewport(), Scale::ONE, &theme),
+        menu.on_pointer(&moved, viewport(), Scale::ONE, &theme, &mut damage::sink()),
         MenuOutcome::Changed
     );
     let pressed = InputEvent::PointerPressed {
         button: PointerButton::Primary,
     };
     assert_eq!(
-        menu.on_pointer(&pressed, viewport(), Scale::ONE, &theme),
+        menu.on_pointer(
+            &pressed,
+            viewport(),
+            Scale::ONE,
+            &theme,
+            &mut damage::sink()
+        ),
         MenuOutcome::Dismissed
     );
 }
@@ -240,21 +266,33 @@ fn a_press_inside_on_a_row_chooses_it() {
     let mut menu = ContextMenu::open(anchor);
     let moved = InputEvent::PointerMoved { to: point };
     assert_eq!(
-        menu.on_pointer(&moved, viewport(), Scale::ONE, &theme),
+        menu.on_pointer(&moved, viewport(), Scale::ONE, &theme, &mut damage::sink()),
         MenuOutcome::Changed
     );
     let pressed = InputEvent::PointerPressed {
         button: PointerButton::Primary,
     };
     assert_eq!(
-        menu.on_pointer(&pressed, viewport(), Scale::ONE, &theme),
+        menu.on_pointer(
+            &pressed,
+            viewport(),
+            Scale::ONE,
+            &theme,
+            &mut damage::sink()
+        ),
         MenuOutcome::Changed
     );
     let released = InputEvent::PointerReleased {
         button: PointerButton::Primary,
     };
     assert_eq!(
-        menu.on_pointer(&released, viewport(), Scale::ONE, &theme),
+        menu.on_pointer(
+            &released,
+            viewport(),
+            Scale::ONE,
+            &theme,
+            &mut damage::sink()
+        ),
         MenuOutcome::Chose(Command::ALL[target_row])
     );
 }

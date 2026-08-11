@@ -51,7 +51,7 @@
 use tairix_abi::switchboard_ipc::CommandSection;
 use tairix_abi::PowerAction;
 use tairix_controls::{damage, TraySignalAction};
-use tairix_geometry::{Point, Rect, Scale};
+use tairix_geometry::{Point, Rect, Region, Scale};
 use tairix_input::{InputEvent, PointerButton};
 use tairix_proglib::EntryId;
 use tairix_theme::Appearance;
@@ -264,10 +264,10 @@ impl TaskbarInput {
             }
         }
         if taskbar.menu().is_open() {
-            return self.route_to_menu(event, taskbar, scale);
+            return self.route_to_menu(event, taskbar, scale, &mut damage);
         }
         if taskbar.library().is_open() {
-            return self.route_to_popup(event, taskbar, scale);
+            return self.route_to_popup(event, taskbar, scale, &mut damage);
         }
         // The notification popover and the Switchboard readout are
         // non-modal: unlike the menu and library popup they do not swallow
@@ -596,6 +596,7 @@ impl TaskbarInput {
         event: InputEvent,
         taskbar: &mut Taskbar,
         scale: Scale,
+        damage: &mut Region,
     ) -> TaskbarResponse {
         let Some(layout) = taskbar.menu_layout(scale) else {
             // An open menu always lays out; a missing layout means the menu
@@ -605,7 +606,9 @@ impl TaskbarInput {
         };
         let theme = taskbar.theme().clone();
         let outcome = match event {
-            InputEvent::KeyPressed { key, .. } => taskbar.menu_routing_mut().route_key(key),
+            InputEvent::KeyPressed { key, .. } => taskbar
+                .menu_routing_mut()
+                .route_key(key, &layout, scale, &theme, damage),
             InputEvent::KeyReleased { .. } => MenuOutcome::Ignored,
             ref pointer_event => taskbar.menu_routing_mut().route_pointer(
                 pointer_event,
@@ -613,6 +616,7 @@ impl TaskbarInput {
                 &layout,
                 scale,
                 &theme,
+                damage,
             ),
         };
         match outcome {
@@ -706,6 +710,7 @@ impl TaskbarInput {
         event: InputEvent,
         taskbar: &mut Taskbar,
         scale: Scale,
+        damage: &mut Region,
     ) -> TaskbarResponse {
         if matches!(
             event,
@@ -734,7 +739,7 @@ impl TaskbarInput {
         let outcome = match event {
             InputEvent::KeyPressed { key, modifiers } => taskbar
                 .library_routing_mut()
-                .route_key(key, modifiers, &layout),
+                .route_key(key, modifiers, &layout, damage),
             InputEvent::KeyReleased { .. } => PopupOutcome::Ignored,
             ref pointer_event => taskbar.library_routing_mut().route_pointer(
                 pointer_event,
@@ -742,6 +747,7 @@ impl TaskbarInput {
                 &layout,
                 &theme,
                 scale,
+                damage,
             ),
         };
         match outcome {

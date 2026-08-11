@@ -24,8 +24,8 @@ use super::frame::{SectionAnatomy, SectionFrame, DETAIL_PANE_WIDTH};
 use super::refresh::resettle_card;
 use super::system_data::{reading_text, selection_prompt, Reading};
 use super::{
-    resolve_selection, select_pressed_card, ActionVerdict, ListInfo, SectionCtx, SectionOutcome,
-    SectionView, SwitchboardAction, SwitchboardModel,
+    resolve_selection, select_pressed_card, ActionVerdict, FocusSweep, ListInfo, SectionCtx,
+    SectionOutcome, SectionView, SwitchboardAction, SwitchboardModel,
 };
 
 /// A relief action a Switchboard pressure card can recommend or offer
@@ -459,11 +459,16 @@ impl SectionView for PressureSection {
         self.action
     }
 
-    fn set_row_action(&mut self, index: usize) {
+    fn set_row_action(&mut self, index: usize, _sweep: &mut FocusSweep<'_, '_>) {
         self.action = index;
     }
 
-    fn activate_focused(&mut self, key: Key) -> Option<SectionOutcome> {
+    fn activate_focused(
+        &mut self,
+        key: Key,
+        _ctx: SectionCtx<'_>,
+        _damage: &mut Region,
+    ) -> Option<SectionOutcome> {
         let cause = self.focus;
         match self.entries.get_mut(cause)?.card.on_key(key)? {
             CardAction::FooterActivated { index } => self.resolve_footer(cause, index),
@@ -517,7 +522,7 @@ impl SectionView for PressureSection {
         }
     }
 
-    fn apply_focus_marks(&mut self, focused: bool) {
+    fn apply_focus_marks(&mut self, focused: bool, _sweep: &mut FocusSweep<'_, '_>) {
         let (index, action) = (self.focus, self.action);
         for (i, entry) in self.entries.iter_mut().enumerate() {
             let here = focused && i == index;

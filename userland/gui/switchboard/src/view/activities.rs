@@ -24,8 +24,8 @@ use super::frame::{SectionAnatomy, SectionFrame, DETAIL_PANE_WIDTH};
 use super::refresh::{carry_hover, carry_hover_one};
 use super::system_data::{reading_text, selection_prompt, Reading, Unmeasured};
 use super::{
-    resolve_selection, ActionVerdict, ListInfo, SectionCtx, SectionOutcome, SectionView,
-    Switchboard, SwitchboardAction, SwitchboardModel,
+    resolve_selection, ActionVerdict, FocusSweep, ListInfo, SectionCtx, SectionOutcome,
+    SectionView, Switchboard, SwitchboardAction, SwitchboardModel,
 };
 
 /// An action a Switchboard activity header row can request (spec T12).
@@ -339,6 +339,22 @@ impl ActivitiesSection {
         None
     }
 
+    /// Where the in-flight rename field is drawn, or [`None`] when there is
+    /// no rename or the header row it stands in has scrolled out of view.
+    fn rename_rect(&self, ctx: SectionCtx<'_>) -> Option<Rect> {
+        let index = self.rename.as_ref()?.index;
+        let info = self.list_info(&ctx.frame, ctx.scale, ctx.theme);
+        let slot = (0..info.visible()).find(|slot| {
+            matches!(
+                self.row_at(ctx.start + *slot as usize),
+                Some(ActivityRow::Header(row)) if row == index
+            )
+        })?;
+        let (row, _) =
+            Switchboard::split_row(info.item_rect(slot), Self::BUTTONS, ctx.scale, ctx.theme);
+        Some(row)
+    }
+
     /// A member row's rectangle: indented under its header by one control
     /// height, so the grouping reads as a hierarchy.
     fn member_rect(item: Rect, scale: Scale, theme: &Theme) -> Rect {
@@ -613,14 +629,19 @@ impl SectionView for ActivitiesSection {
         self.action
     }
 
-    fn set_row_action(&mut self, index: usize) {
+    fn set_row_action(&mut self, index: usize, _sweep: &mut FocusSweep<'_, '_>) {
         self.action = index;
     }
 
     /// Activate the focused header's action-focused button (Switch,
     /// Pause-or-Resume, Rename, Close, in action-focus order). Member rows are
     /// display-only, so they activate nothing.
-    fn activate_focused(&mut self, key: Key) -> Option<SectionOutcome> {
+    fn activate_focused(
+        &mut self,
+        key: Key,
+        _ctx: SectionCtx<'_>,
+        _damage: &mut Region,
+    ) -> Option<SectionOutcome> {
         let Some(ActivityRow::Header(index)) = self.row_at(self.focus) else {
             return None;
         };
@@ -806,7 +827,7 @@ impl SectionView for ActivitiesSection {
 
     /// The flattened cursor marks a button only when it names a header row; a
     /// member row is a Focus Field of one.
-    fn apply_focus_marks(&mut self, focused: bool) {
+    fn apply_focus_marks(&mut self, focused: bool, _sweep: &mut FocusSweep<'_, '_>) {
         let action = self.action;
         let row = focused.then(|| self.row_at(self.focus)).flatten();
         let header = row.and_then(|row| match row {
@@ -843,12 +864,20 @@ impl SectionView for ActivitiesSection {
     /// Route a key to the in-flight rename field: Enter commits (rebuilding
     /// the header row and reporting the rename), Escape cancels without
     /// emitting, and everything else edits the field.
-    fn overlay_on_key(&mut self, key: Key) -> Option<SectionOutcome> {
+    fn overlay_on_key(
+        &mut self,
+        key: Key,
+        ctx: SectionCtx<'_>,
+        damage: &mut Region,
+    ) -> Option<SectionOutcome> {
+        // A rename whose row has scrolled out of the window draws nowhere, so
+        // there is no rectangle to report against.
+        let rect = self.rename_rect(ctx).unwrap_or(Rect::EMPTY);
         let action = self
             .rename
             .as_mut()?
             .field
-            .on_key(key, Modifiers::default());
+            .on_key(key, Modifiers::default(), rect, damage);
         match action {
             Some(TextAction::Submitted) => {
                 let edit = self.rename.take()?;

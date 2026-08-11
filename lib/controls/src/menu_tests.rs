@@ -14,6 +14,7 @@ use tairix_input::{InputEvent, Key, NamedKey, PointerButton};
 use tairix_raster::{Color, Pixel, Surface};
 use tairix_theme::{Rgba, Theme};
 
+use crate::damage::sink;
 use crate::menu::{Menu, MenuAction, MenuItem};
 use crate::state::{AuthorityState, ControlRole, ControlState};
 use crate::testkit::{control_font, high_contrast, text_ladder};
@@ -185,71 +186,167 @@ fn destructive_row_paints_a_leading_danger_rail() {
 
 #[test]
 fn down_and_up_move_the_current_row_and_wrap() {
+    let theme = Theme::dark();
     let mut menu = three_item_menu();
-    assert_eq!(menu.on_key(Key::Named(NamedKey::Down)), None);
+    let bounds = Rect::new(0, 0, W, menu.preferred_height(Scale::ONE, &theme));
+    assert_eq!(
+        menu.on_key(
+            Key::Named(NamedKey::Down),
+            bounds,
+            Scale::ONE,
+            &theme,
+            &mut sink()
+        ),
+        None
+    );
     assert_eq!(menu.current(), Some(0));
-    menu.on_key(Key::Named(NamedKey::Down));
-    menu.on_key(Key::Named(NamedKey::Down));
+    menu.on_key(
+        Key::Named(NamedKey::Down),
+        bounds,
+        Scale::ONE,
+        &theme,
+        &mut sink(),
+    );
+    menu.on_key(
+        Key::Named(NamedKey::Down),
+        bounds,
+        Scale::ONE,
+        &theme,
+        &mut sink(),
+    );
     assert_eq!(menu.current(), Some(2));
-    menu.on_key(Key::Named(NamedKey::Down));
+    menu.on_key(
+        Key::Named(NamedKey::Down),
+        bounds,
+        Scale::ONE,
+        &theme,
+        &mut sink(),
+    );
     assert_eq!(menu.current(), Some(0), "down wraps to the top");
-    menu.on_key(Key::Named(NamedKey::Up));
+    menu.on_key(
+        Key::Named(NamedKey::Up),
+        bounds,
+        Scale::ONE,
+        &theme,
+        &mut sink(),
+    );
     assert_eq!(menu.current(), Some(2), "up wraps to the bottom");
 }
 
 #[test]
 fn home_and_end_jump_to_the_ends() {
+    let theme = Theme::dark();
     let mut menu = three_item_menu().with_current(1);
-    menu.on_key(Key::Named(NamedKey::Home));
+    let bounds = Rect::new(0, 0, W, menu.preferred_height(Scale::ONE, &theme));
+    menu.on_key(
+        Key::Named(NamedKey::Home),
+        bounds,
+        Scale::ONE,
+        &theme,
+        &mut sink(),
+    );
     assert_eq!(menu.current(), Some(0));
-    menu.on_key(Key::Named(NamedKey::End));
+    menu.on_key(
+        Key::Named(NamedKey::End),
+        bounds,
+        Scale::ONE,
+        &theme,
+        &mut sink(),
+    );
     assert_eq!(menu.current(), Some(2));
 }
 
 #[test]
 fn enter_and_space_activate_the_current_row() {
+    let theme = Theme::dark();
     let mut menu = three_item_menu().with_current(1);
+    let bounds = Rect::new(0, 0, W, menu.preferred_height(Scale::ONE, &theme));
     assert_eq!(
-        menu.on_key(Key::Named(NamedKey::Enter)),
+        menu.on_key(
+            Key::Named(NamedKey::Enter),
+            bounds,
+            Scale::ONE,
+            &theme,
+            &mut sink()
+        ),
         Some(MenuAction::Activated { index: 1 })
     );
     assert_eq!(
-        menu.on_key(Key::Char(' ')),
+        menu.on_key(Key::Char(' '), bounds, Scale::ONE, &theme, &mut sink()),
         Some(MenuAction::Activated { index: 1 })
     );
 }
 
 #[test]
 fn escape_dismisses() {
+    let theme = Theme::dark();
     let mut menu = three_item_menu().with_current(0);
+    let bounds = Rect::new(0, 0, W, menu.preferred_height(Scale::ONE, &theme));
     assert_eq!(
-        menu.on_key(Key::Named(NamedKey::Escape)),
+        menu.on_key(
+            Key::Named(NamedKey::Escape),
+            bounds,
+            Scale::ONE,
+            &theme,
+            &mut sink()
+        ),
         Some(MenuAction::Dismissed)
     );
 }
 
 #[test]
 fn submenu_parent_opens_on_right_and_enter() {
+    let theme = Theme::dark();
     let mut menu = Menu::new(vec![MenuItem::new("More").with_submenu(true)]).with_current(0);
+    let bounds = Rect::new(0, 0, W, menu.preferred_height(Scale::ONE, &theme));
     assert_eq!(
-        menu.on_key(Key::Named(NamedKey::Right)),
+        menu.on_key(
+            Key::Named(NamedKey::Right),
+            bounds,
+            Scale::ONE,
+            &theme,
+            &mut sink()
+        ),
         Some(MenuAction::OpenSubmenu { index: 0 })
     );
     assert_eq!(
-        menu.on_key(Key::Named(NamedKey::Enter)),
+        menu.on_key(
+            Key::Named(NamedKey::Enter),
+            bounds,
+            Scale::ONE,
+            &theme,
+            &mut sink()
+        ),
         Some(MenuAction::OpenSubmenu { index: 0 })
     );
 }
 
 #[test]
 fn disabled_current_row_never_activates() {
+    let theme = Theme::dark();
     let mut menu = Menu::new(vec![
         MenuItem::new("Ok"),
         MenuItem::new("Nope").with_state(ControlState::disabled()),
     ]);
-    menu.on_key(Key::Named(NamedKey::End));
+    let bounds = Rect::new(0, 0, W, menu.preferred_height(Scale::ONE, &theme));
+    menu.on_key(
+        Key::Named(NamedKey::End),
+        bounds,
+        Scale::ONE,
+        &theme,
+        &mut sink(),
+    );
     assert_eq!(menu.current(), Some(1));
-    assert_eq!(menu.on_key(Key::Named(NamedKey::Enter)), None);
+    assert_eq!(
+        menu.on_key(
+            Key::Named(NamedKey::Enter),
+            bounds,
+            Scale::ONE,
+            &theme,
+            &mut sink()
+        ),
+        None
+    );
 }
 
 // --- Pointer ------------------------------------------------------------
@@ -262,13 +359,22 @@ fn hover_sets_the_current_row_and_click_activates_it() {
     let bounds = Rect::new(0, 0, W, h);
     let y = row_centre_y(1);
     assert_eq!(
-        menu.on_pointer(&moved(xi(W) / 2, y), bounds, Scale::ONE, &theme),
+        menu.on_pointer(
+            &moved(xi(W) / 2, y),
+            bounds,
+            Scale::ONE,
+            &theme,
+            &mut sink()
+        ),
         None
     );
     assert_eq!(menu.current(), Some(1));
-    assert_eq!(menu.on_pointer(&PRESS, bounds, Scale::ONE, &theme), None);
     assert_eq!(
-        menu.on_pointer(&RELEASE, bounds, Scale::ONE, &theme),
+        menu.on_pointer(&PRESS, bounds, Scale::ONE, &theme, &mut sink()),
+        None
+    );
+    assert_eq!(
+        menu.on_pointer(&RELEASE, bounds, Scale::ONE, &theme, &mut sink()),
         Some(MenuAction::Activated { index: 1 })
     );
 }
@@ -284,15 +390,20 @@ fn release_outside_the_pressed_row_does_not_activate() {
         bounds,
         Scale::ONE,
         &theme,
+        &mut sink(),
     );
-    menu.on_pointer(&PRESS, bounds, Scale::ONE, &theme);
+    menu.on_pointer(&PRESS, bounds, Scale::ONE, &theme, &mut sink());
     menu.on_pointer(
         &moved(xi(W) / 2, row_centre_y(2)),
         bounds,
         Scale::ONE,
         &theme,
+        &mut sink(),
     );
-    assert_eq!(menu.on_pointer(&RELEASE, bounds, Scale::ONE, &theme), None);
+    assert_eq!(
+        menu.on_pointer(&RELEASE, bounds, Scale::ONE, &theme, &mut sink()),
+        None
+    );
 }
 
 #[test]
@@ -384,8 +495,14 @@ fn hit_test_bookkeeping_is_invisible_to_a_menu() {
     // Two samples clear of the menu, so only the recorded coordinate differs.
     let mut a = three_item_menu();
     let mut b = a.clone();
-    a.on_pointer(&away, bounds, Scale::ONE, &theme);
-    b.on_pointer(&moved(xi(W) + 90, xi(h) + 12), bounds, Scale::ONE, &theme);
+    a.on_pointer(&away, bounds, Scale::ONE, &theme, &mut sink());
+    b.on_pointer(
+        &moved(xi(W) + 90, xi(h) + 12),
+        bounds,
+        Scale::ONE,
+        &theme,
+        &mut sink(),
+    );
     assert_eq!(
         a, b,
         "a coordinate clear of the menu is not a drawn property"
@@ -400,10 +517,10 @@ fn hit_test_bookkeeping_is_invisible_to_a_menu() {
     // press, and which row a release would activate is not drawn.
     let over_row = moved(xi(W) / 2, row_centre_y(1));
     let mut latched = three_item_menu();
-    latched.on_pointer(&over_row, bounds, Scale::ONE, &theme);
-    latched.on_pointer(&PRESS, bounds, Scale::ONE, &theme);
+    latched.on_pointer(&over_row, bounds, Scale::ONE, &theme, &mut sink());
+    latched.on_pointer(&PRESS, bounds, Scale::ONE, &theme, &mut sink());
     let mut hovered = three_item_menu();
-    hovered.on_pointer(&over_row, bounds, Scale::ONE, &theme);
+    hovered.on_pointer(&over_row, bounds, Scale::ONE, &theme, &mut sink());
     assert_eq!(latched, hovered, "the armed row is not a drawn property");
     assert_eq!(
         render(&latched, &theme, h).pixels(),
@@ -516,27 +633,62 @@ fn a_click_landing_in_the_divider_band_activates_nothing() {
     let above = menu.row_rect(0, bounds, Scale::ONE, &theme).expect("row 0");
     let y = above.top() + xi(above.height);
     let at = moved(xi(W) / 2, y);
-    assert_eq!(menu.on_pointer(&at, bounds, Scale::ONE, &theme), None);
+    assert_eq!(
+        menu.on_pointer(&at, bounds, Scale::ONE, &theme, &mut sink()),
+        None
+    );
     assert_eq!(menu.current(), None, "no row highlights from the gap");
-    assert_eq!(menu.on_pointer(&PRESS, bounds, Scale::ONE, &theme), None);
-    assert_eq!(menu.on_pointer(&RELEASE, bounds, Scale::ONE, &theme), None);
+    assert_eq!(
+        menu.on_pointer(&PRESS, bounds, Scale::ONE, &theme, &mut sink()),
+        None
+    );
+    assert_eq!(
+        menu.on_pointer(&RELEASE, bounds, Scale::ONE, &theme, &mut sink()),
+        None
+    );
 }
 
 #[test]
 fn keyboard_navigation_is_unaffected_by_a_group_break() {
     // The divider is a property of the row that opens the group, not a row of
     // its own, so there is no separator slot for Down/Up to skip over.
+    let theme = Theme::dark();
     let mut menu = grouped_menu();
+    let bounds = Rect::new(0, 0, W, menu.preferred_height(Scale::ONE, &theme));
     for expected in [0, 1, 2, 0] {
-        menu.on_key(Key::Named(NamedKey::Down));
+        menu.on_key(
+            Key::Named(NamedKey::Down),
+            bounds,
+            Scale::ONE,
+            &theme,
+            &mut sink(),
+        );
         assert_eq!(menu.current(), Some(expected));
     }
-    menu.on_key(Key::Named(NamedKey::End));
+    menu.on_key(
+        Key::Named(NamedKey::End),
+        bounds,
+        Scale::ONE,
+        &theme,
+        &mut sink(),
+    );
     assert_eq!(menu.current(), Some(2), "End reaches the last command");
-    menu.on_key(Key::Named(NamedKey::Home));
+    menu.on_key(
+        Key::Named(NamedKey::Home),
+        bounds,
+        Scale::ONE,
+        &theme,
+        &mut sink(),
+    );
     assert_eq!(menu.current(), Some(0), "Home reaches the first command");
     assert_eq!(
-        menu.on_key(Key::Named(NamedKey::Enter)),
+        menu.on_key(
+            Key::Named(NamedKey::Enter),
+            bounds,
+            Scale::ONE,
+            &theme,
+            &mut sink()
+        ),
         Some(MenuAction::Activated { index: 0 }),
         "reported indices stay indices into the caller's command list"
     );
@@ -735,4 +887,47 @@ fn a_row_grows_to_hold_text_taller_than_the_standard_control_height() {
         BORDER * 2 + 3 * line,
         "a row must hold the line it draws"
     );
+}
+
+/// A keyboard move repaints the row the highlight leaves and the row it
+/// arrives on, and nothing else in the popup.
+#[test]
+fn a_keyboard_move_reports_the_two_rows_it_moves_between() {
+    let theme = Theme::dark();
+    let mut menu = three_item_menu();
+    let h = menu.preferred_height(Scale::ONE, &theme);
+    let bounds = Rect::new(0, 0, W, h);
+    let down = Key::Named(NamedKey::Down);
+    // The first Down lands the highlight on row 0, the second moves it.
+    menu.on_key(down, bounds, Scale::ONE, &theme, &mut sink());
+    let mut damage = sink();
+    menu.on_key(down, bounds, Scale::ONE, &theme, &mut damage);
+
+    let row = |i| menu.row_rect(i, bounds, Scale::ONE, &theme).expect("row");
+    assert_eq!(
+        damage.bounds(),
+        row(0).union(&row(1)),
+        "the report covers the row left and the row entered"
+    );
+    assert!(
+        !damage.intersects(row(2)),
+        "and no row the highlight never touched"
+    );
+}
+
+/// Pointer motion inside one row changes no pixel, so it reports nothing —
+/// this is the sample rate a host would otherwise repaint the popup at.
+#[test]
+fn motion_within_one_row_reports_nothing() {
+    let theme = Theme::dark();
+    let mut menu = three_item_menu();
+    let h = menu.preferred_height(Scale::ONE, &theme);
+    let bounds = Rect::new(0, 0, W, h);
+    let first = menu.row_rect(0, bounds, Scale::ONE, &theme).expect("row 0");
+    let inside = |dx| moved(first.left() + dx, first.top() + 1);
+    menu.on_pointer(&inside(4), bounds, Scale::ONE, &theme, &mut sink());
+
+    let mut damage = sink();
+    menu.on_pointer(&inside(9), bounds, Scale::ONE, &theme, &mut damage);
+    assert!(damage.is_empty(), "the same row stays the same row");
 }

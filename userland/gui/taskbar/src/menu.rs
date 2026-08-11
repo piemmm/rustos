@@ -15,7 +15,7 @@
 //! [`TaskbarResponse`]: crate::input::TaskbarResponse
 
 use tairix_controls::{Menu, MenuAction, MenuItem};
-use tairix_geometry::{Point, Rect, Scale};
+use tairix_geometry::{Point, Rect, Region, Scale};
 use tairix_input::{InputEvent, Key, PointerButton};
 use tairix_proglib::EntryId;
 use tairix_theme::Theme;
@@ -219,11 +219,14 @@ impl BarMenu {
         layout: &MenuLayout,
         scale: Scale,
         theme: &Theme,
+        damage: &mut Region,
     ) -> MenuOutcome {
         match event {
             InputEvent::PointerMoved { .. } => {
                 let before = self.menu.current();
-                let _ = self.menu.on_pointer(event, layout.panel, scale, theme);
+                let _ = self
+                    .menu
+                    .on_pointer(event, layout.panel, scale, theme, damage);
                 if self.menu.current() == before {
                     MenuOutcome::Ignored
                 } else {
@@ -239,7 +242,10 @@ impl BarMenu {
             }
             | InputEvent::PointerReleased {
                 button: PointerButton::Primary,
-            } => match self.menu.on_pointer(event, layout.panel, scale, theme) {
+            } => match self
+                .menu
+                .on_pointer(event, layout.panel, scale, theme, damage)
+            {
                 Some(MenuAction::Activated { index }) => self.choose(index),
                 Some(MenuAction::Dismissed) => {
                     self.close();
@@ -257,8 +263,15 @@ impl BarMenu {
 
     /// Route a key into the open menu: arrows move the highlight,
     /// Enter/Space choose, Escape dismisses.
-    pub(crate) fn route_key(&mut self, key: Key) -> MenuOutcome {
-        match self.menu.on_key(key) {
+    pub(crate) fn route_key(
+        &mut self,
+        key: Key,
+        layout: &MenuLayout,
+        scale: Scale,
+        theme: &Theme,
+        damage: &mut Region,
+    ) -> MenuOutcome {
+        match self.menu.on_key(key, layout.panel, scale, theme, damage) {
             Some(MenuAction::Activated { index }) => self.choose(index),
             Some(MenuAction::Dismissed) => {
                 self.close();

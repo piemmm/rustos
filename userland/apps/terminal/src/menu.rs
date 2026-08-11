@@ -15,7 +15,7 @@
 use alloc::vec::Vec;
 
 use tairix_controls::{Menu, MenuAction, MenuItem};
-use tairix_geometry::{Point, Rect, Scale};
+use tairix_geometry::{Point, Rect, Region, Scale};
 use tairix_input::{InputEvent, Key, Modifiers, NamedKey};
 use tairix_raster::Surface;
 use tairix_theme::Theme;
@@ -192,6 +192,7 @@ impl ContextMenu {
         viewport: Rect,
         scale: Scale,
         theme: &Theme,
+        damage: &mut Region,
     ) -> MenuOutcome {
         if let InputEvent::PointerMoved { to } = event {
             self.pointer = *to;
@@ -200,7 +201,7 @@ impl ContextMenu {
         if matches!(event, InputEvent::PointerPressed { .. }) && !bounds.contains(self.pointer) {
             return MenuOutcome::Dismissed;
         }
-        match self.menu.on_pointer(event, bounds, scale, theme) {
+        match self.menu.on_pointer(event, bounds, scale, theme, damage) {
             Some(MenuAction::Activated { index }) => Command::ALL
                 .get(index)
                 .copied()
@@ -217,11 +218,19 @@ impl ContextMenu {
     /// A row-highlight move (Up/Down/Home/End) reports [`MenuOutcome::Changed`]
     /// just as a pointer hover does in [`Self::on_pointer`], so the caller
     /// repaints and the moved highlight is actually shown.
-    pub fn on_key(&mut self, key: Key) -> MenuOutcome {
+    pub fn on_key(
+        &mut self,
+        key: Key,
+        viewport: Rect,
+        scale: Scale,
+        theme: &Theme,
+        damage: &mut Region,
+    ) -> MenuOutcome {
         if key == Key::Named(NamedKey::Escape) {
             return MenuOutcome::Dismissed;
         }
-        match self.menu.on_key(key) {
+        let bounds = self.bounds(viewport, scale, theme);
+        match self.menu.on_key(key, bounds, scale, theme, damage) {
             Some(MenuAction::Activated { index }) => Command::ALL
                 .get(index)
                 .copied()

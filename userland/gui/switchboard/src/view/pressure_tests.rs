@@ -17,7 +17,8 @@ use super::{PressureAction, PressureCause, PressureControl};
 use crate::view::frame::DETAIL_PANE_WIDTH;
 use crate::view::system_data::{Reading, Unmeasured};
 use crate::view::test_support::{
-    bounds, card_body_centre, card_slot, centre, click, font, has_ink, model, moved, PRESS, RELEASE,
+    bounds, card_body_centre, card_slot, centre, click, font, has_ink, key, model, moved, PRESS,
+    RELEASE,
 };
 use crate::view::{
     ActionVerdict, Section, Switchboard, SwitchboardAction, SwitchboardModel, TaskSummary,
@@ -254,7 +255,7 @@ fn the_pressure_selection_survives_a_refresh_and_drops_when_the_cause_eases() {
     // Move the cursor onto the Memory cause: the card the reader is on is the
     // cause the detail describes.
     sb.render(&mut surface, b, Scale::ONE, &theme, font());
-    sb.on_key(Key::Named(NamedKey::Down));
+    key(&mut sb, Key::Named(NamedKey::Down));
     assert_eq!(sb.pressure.selected, Some(PressureKind::Memory));
 
     // A refresh that reorders the causes keeps the reader on Memory, wherever
@@ -300,7 +301,7 @@ fn the_keyboard_refuses_a_disabled_or_denied_relief_command() {
         )]));
         sb.select_section(Section::Pressure);
         assert_eq!(
-            sb.on_key(Key::Named(NamedKey::Enter)),
+            key(&mut sb, Key::Named(NamedKey::Enter)),
             None,
             "{verdict:?} must refuse the keyboard exactly as it refuses the pointer"
         );
@@ -594,7 +595,7 @@ fn empty_pressure_section_has_nothing_to_activate() {
     sb.select_section(Section::Pressure);
     let mut surface = Surface::new(b.width, b.height).expect("surface");
     sb.render(&mut surface, b, Scale::ONE, &theme, font());
-    assert_eq!(sb.on_key(Key::Named(NamedKey::Enter)), None);
+    assert_eq!(key(&mut sb, Key::Named(NamedKey::Enter)), None);
 }
 
 #[test]
@@ -602,23 +603,23 @@ fn keyboard_reaches_every_pressure_footer() {
     let mut sb = Switchboard::new(&model());
     sb.select_section(Section::Pressure);
     assert_eq!(
-        sb.on_key(Key::Named(NamedKey::Enter)),
+        key(&mut sb, Key::Named(NamedKey::Enter)),
         Some(SwitchboardAction::Pressure {
             index: 0,
             control: PressureControl::Pause
         })
     );
-    assert_eq!(sb.on_key(Key::Named(NamedKey::Right)), None);
+    assert_eq!(key(&mut sb, Key::Named(NamedKey::Right)), None);
     assert_eq!(
-        sb.on_key(Key::Named(NamedKey::Enter)),
+        key(&mut sb, Key::Named(NamedKey::Enter)),
         Some(SwitchboardAction::Pressure {
             index: 0,
             control: PressureControl::LowerPriority
         })
     );
-    assert_eq!(sb.on_key(Key::Named(NamedKey::Right)), None);
+    assert_eq!(key(&mut sb, Key::Named(NamedKey::Right)), None);
     assert_eq!(
-        sb.on_key(Key::Named(NamedKey::Enter)),
+        key(&mut sb, Key::Named(NamedKey::Enter)),
         Some(SwitchboardAction::SectionChanged {
             section: Section::Tasks
         })

@@ -44,7 +44,7 @@ use tairix_controls::{
     ScrollPart, TableCell, TableRow, Toolbar,
 };
 use tairix_font::BitmapFont;
-use tairix_geometry::{Point, Rect, Scale};
+use tairix_geometry::{Point, Rect, Region, Scale};
 use tairix_icon::{IconArtwork, IconKind, IconRequest};
 use tairix_input::{InputEvent, PointerButton};
 use tairix_raster::Surface;
@@ -568,6 +568,7 @@ pub fn scroll_pointer<S: DirectorySource>(
     viewport: Rect,
     point: Point,
     event: &InputEvent,
+    damage: &mut Region,
 ) -> Option<bool> {
     let bounds = scrollbar_bounds(scale, theme, viewport)?;
     let model = scroll_model(browser, scale, theme, viewport);
@@ -581,16 +582,20 @@ pub fn scroll_pointer<S: DirectorySource>(
         bounds,
         scale,
         theme,
+        damage,
     );
     let pressing_before = bar.is_pressing();
     let on_bar = bar.part_at(bounds, point, scale, theme) != ScrollPart::Outside;
     let (consumed, action) = match event {
         InputEvent::PointerPressed {
             button: PointerButton::Primary,
-        } => (on_bar, bar.on_pointer(event, bounds, scale, theme)),
+        } => (on_bar, bar.on_pointer(event, bounds, scale, theme, damage)),
         InputEvent::PointerReleased {
             button: PointerButton::Primary,
-        } => (pressing_before, bar.on_pointer(event, bounds, scale, theme)),
+        } => (
+            pressing_before,
+            bar.on_pointer(event, bounds, scale, theme, damage),
+        ),
         InputEvent::PointerMoved { .. } => (pressing_before || on_bar, synth),
         _ => (false, None),
     };
@@ -1683,6 +1688,44 @@ fn owner_editor_width(font: BitmapFont) -> u32 {
     font.text_width("0000000000").max(1)
 }
 
+/// The rectangle the inline editor occupies over `field`'s value: the value's
+/// own origin, widened to the readable editor width but never past the window,
+/// and as tall as the row pitch.
+fn owner_editor_geom(
+    geom: &OwnerRowGeom,
+    field: OwnerField,
+    viewport: Rect,
+    font: BitmapFont,
+) -> Rect {
+    let cell = match field {
+        OwnerField::Uid => geom.cells[0],
+        OwnerField::Gid => geom.cells[1],
+    };
+    let left = u32::try_from(cell.left()).unwrap_or(0);
+    let avail = viewport.width.saturating_sub(left).max(1);
+    let width = owner_editor_width(font).min(avail);
+    Rect::new(cell.left(), cell.top(), width, geom.line)
+}
+
+/// Where the editable Properties overlay draws the active owner editor for
+/// `field`, or `None` when the owner row does not fit the panel.
+///
+/// The one placement [`draw_owner_control`] draws it at, published so the host
+/// feeding that editor keys can report the rectangle it repaints instead of
+/// re-deriving this layout.
+#[must_use]
+pub fn owner_editor_rect(
+    props: &Properties,
+    viewport: Rect,
+    scale: Scale,
+    theme: &Theme,
+    field: OwnerField,
+) -> Option<Rect> {
+    let font = BitmapFont::for_role(theme.fonts(), TextRole::Body, scale);
+    let geom = owner_row_geom(props, viewport, scale, theme, font)?;
+    Some(owner_editor_geom(&geom, field, viewport, font))
+}
+
 /// Draw the inline ownership control over the Properties overlay's owner row:
 /// an accent underline beneath the uid and gid values marking each as
 /// clickable to edit, and — when `editor` names a field being edited — the
@@ -1717,10 +1760,7 @@ pub fn draw_owner_control(
     for (rect, field) in geom.cells.iter().zip(fields) {
         if let Some((editing, text_field)) = editor {
             if editing == field {
-                let left = u32::try_from(rect.left()).unwrap_or(0);
-                let avail = viewport.width.saturating_sub(left).max(1);
-                let width = owner_editor_width(font).min(avail);
-                let bounds = Rect::new(rect.left(), rect.top(), width, geom.line);
+                let bounds = owner_editor_geom(&geom, field, viewport, font);
                 text_field.render(surface, bounds, scale, theme);
                 continue;
             }

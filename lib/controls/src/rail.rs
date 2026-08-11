@@ -168,8 +168,32 @@ impl ActionRail {
     /// where either item sits. Covering the column over-covers by the items
     /// that did not change, which repaints correctly.
     pub fn set_focus(&mut self, index: Option<usize>, bounds: Rect, damage: &mut Region) {
-        let index = index.filter(|&i| i < self.items.len());
+        let index = self.focusable(index);
         damage::set(&mut self.focus, index, bounds, damage);
+        self.mark_items(index);
+    }
+
+    /// Adopt `index` as the focused item without reporting, for a caller that
+    /// is composing or rebuilding this rail and presents it whole.
+    ///
+    /// [`set_focus`](Self::set_focus) is the interactive move and reports the
+    /// column the ring moved within. A rebuild has no column to report against,
+    /// so it says so here rather than passing a rectangle it does not have.
+    pub fn adopt_focus(&mut self, index: Option<usize>) {
+        let index = self.focusable(index);
+        self.focus = index;
+        self.mark_items(index);
+    }
+
+    /// `index` if it names an item, else `None` — the one admission rule both
+    /// focus entry points apply.
+    fn focusable(&self, index: Option<usize>) -> Option<usize> {
+        index.filter(|&i| i < self.items.len())
+    }
+
+    /// Give each item its own focus flag, so exactly the focused one draws a
+    /// ring.
+    fn mark_items(&mut self, index: Option<usize>) {
         for (i, item) in self.items.iter_mut().enumerate() {
             item.set_focused(Some(i) == index);
         }

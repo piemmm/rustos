@@ -1346,10 +1346,11 @@ mod program {
     ) -> OverlayRouting {
         let viewport = overlay.viewport();
         let mut routing = OverlayRouting::Nothing;
+        let mut damage = damage::sink();
         match &mut overlay.content {
             Content::Menu(menu) => {
                 for event in pointer_input_events(action, at) {
-                    match menu.on_pointer(&event, viewport, scale, theme) {
+                    match menu.on_pointer(&event, viewport, scale, theme, &mut damage) {
                         MenuOutcome::Ignored => {}
                         MenuOutcome::Changed => routing = OverlayRouting::Redraw,
                         MenuOutcome::Dismissed => return OverlayRouting::Dismissed,
@@ -1358,7 +1359,6 @@ mod program {
                 }
             }
             Content::Sheet(sheet) => {
-                let mut damage = damage::sink();
                 for event in pointer_input_events(action, at) {
                     match sheet.on_pointer(&event, viewport, scale, theme, &mut damage) {
                         SheetOutcome::Ignored => {}
@@ -1389,12 +1389,13 @@ mod program {
     ) -> OverlayRouting {
         let input = key_input_event(key);
         let viewport = overlay.viewport();
+        let mut damage = damage::sink();
         match &mut overlay.content {
             Content::Menu(menu) => {
                 let InputEvent::KeyPressed { key, .. } = input else {
                     return OverlayRouting::Nothing;
                 };
-                match menu.on_key(key) {
+                match menu.on_key(key, viewport, scale, theme, &mut damage) {
                     MenuOutcome::Ignored => OverlayRouting::Nothing,
                     MenuOutcome::Changed => OverlayRouting::Redraw,
                     MenuOutcome::Dismissed => OverlayRouting::Dismissed,
@@ -1405,7 +1406,7 @@ mod program {
                 let InputEvent::KeyPressed { key, modifiers } = input else {
                     return OverlayRouting::Nothing;
                 };
-                let outcome = sheet.on_key(key, modifiers, viewport, scale, theme);
+                let outcome = sheet.on_key(key, modifiers, viewport, scale, theme, &mut damage);
                 if matches!(outcome, SheetOutcome::Edited | SheetOutcome::Dismissed) {
                     *profile = *sheet.profile();
                 }

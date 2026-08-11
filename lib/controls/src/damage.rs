@@ -37,15 +37,53 @@ pub fn sink() -> Region {
     Region::with_budget(BUDGET)
 }
 
-/// Write `value` into `field`, reporting `bounds` when that changed it.
+/// Write `value` into `field`, reporting `bounds` when that changed it, and
+/// return whether it did.
 ///
 /// The comparison is the whole rule: a write that lands the value already
 /// there changes no pixel and must report nothing, or a host would repaint on
-/// every idle motion sample.
-pub(crate) fn set<T: PartialEq>(field: &mut T, value: T, bounds: Rect, damage: &mut Region) {
+/// every idle motion sample. The answer is returned because a family whose
+/// action is "the value moved" — a slider step, a scroll request — must not
+/// compare a second time to learn what this write already decided.
+pub(crate) fn set<T: PartialEq>(
+    field: &mut T,
+    value: T,
+    bounds: Rect,
+    damage: &mut Region,
+) -> bool {
     if *field == value {
-        return;
+        return false;
     }
     *field = value;
     damage.add(bounds);
+    true
+}
+
+/// Report the two children an index-valued mark moves between — the highlighted
+/// menu row, the hovered tab, the focused crumb — and answer whether it moved.
+///
+/// A container draws such a mark on one child at a time, so the two rectangles
+/// that change are the child it leaves and the child it arrives on, never the
+/// strip or popup they sit in. `rect_of` names a child's rectangle in the
+/// container's current layout; a child that lays out nowhere reports nothing.
+///
+/// The caller performs the write itself, because `rect_of` resolves the
+/// rectangles from the container while the mark is a field of that same
+/// container: taking the field by mutable reference here would conflict with the
+/// layout the rectangles come from.
+pub(crate) fn move_mark(
+    mark: Option<usize>,
+    next: Option<usize>,
+    rect_of: impl Fn(usize) -> Option<Rect>,
+    damage: &mut Region,
+) -> bool {
+    if mark == next {
+        return false;
+    }
+    for index in [mark, next].into_iter().flatten() {
+        if let Some(rect) = rect_of(index) {
+            damage.add(rect);
+        }
+    }
+    true
 }

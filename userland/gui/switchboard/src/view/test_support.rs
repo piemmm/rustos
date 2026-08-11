@@ -7,20 +7,20 @@
 use tairix_abi::{ProcId, PROC_ID_LEN};
 use tairix_font::BitmapFont;
 use tairix_geometry::{Point, Rect, Scale};
-use tairix_input::{InputEvent, NamedKey, PointerButton};
+use tairix_input::{InputEvent, Key, NamedKey, PointerButton};
 use tairix_raster::Surface;
 use tairix_theme::Theme;
 
 use tairix_controls::{
-    ActivityState, ControlRole, PressureKind, PressureState, ProgressValue, RecoveryState,
+    damage, ActivityState, ControlRole, PressureKind, PressureState, ProgressValue, RecoveryState,
 };
 
 use super::{
     ActionVerdict, ActivityMember, ActivitySummary, CrashSnapshot, FaultImpact, FaultMark,
     HeadlineTile, HealthSeverity, JobSummary, LimitRow, NetworkInterface, PressureAction,
-    PressureCause, PressureControl, Reading, RecoveryItem, SessionSeat, StorageVolume, Switchboard,
-    SwitchboardAction, SwitchboardModel, SystemAction, SystemFact, SystemReport, TaskAuthority,
-    TaskSummary, TileInstrument, Unmeasured,
+    PressureCause, PressureControl, Reading, RecoveryItem, SectionOutcome, SessionSeat,
+    StorageVolume, Switchboard, SwitchboardAction, SwitchboardModel, SystemAction, SystemFact,
+    SystemReport, TaskAuthority, TaskSummary, TileInstrument, Unmeasured,
 };
 
 pub(super) fn font() -> BitmapFont {
@@ -310,6 +310,27 @@ pub(super) fn click(
     out
 }
 
+/// Feed one key to the screen laid out in the fixture window for the dark
+/// theme — the same screen [`bounds`] and [`click`] use, which is what gives
+/// every control the key reaches the rectangle it is drawn in.
+pub(super) fn key(sb: &mut Switchboard, key: Key) -> Option<SwitchboardAction> {
+    sb.on_key(key, bounds(), Scale::ONE, &Theme::dark(), font())
+}
+
+/// Commit `key` on the section the screen is showing, laid out in the
+/// fixture window for the dark theme.
+///
+/// The section's own activation path, reached without the screen's Tab cycle
+/// in the way, so a test can put the cursor on one stop and press it.
+pub(super) fn activate(sb: &mut Switchboard, key: Key) -> Option<SectionOutcome> {
+    let theme = Theme::dark();
+    let b = bounds();
+    let layout = sb.compute_layout(b, Scale::ONE, &theme);
+    let ctx = sb.section_ctx(&layout, b, Scale::ONE, &theme, font());
+    sb.active_mut()
+        .activate_focused(key, ctx, &mut damage::sink())
+}
+
 /// The Tasks section's command-rail item rectangles, in rail order.
 ///
 /// Read from the rail's own layout — the very rectangles the render path
@@ -363,7 +384,7 @@ pub(super) fn select_task_row(
 pub(super) fn focus_task_row(sb: &mut Switchboard, row: usize) {
     let target = sb.tasks.focus_index_for_row(row);
     for _ in 0..target {
-        assert_eq!(sb.on_key(tairix_input::Key::Named(NamedKey::Down)), None);
+        assert_eq!(key(sb, Key::Named(NamedKey::Down)), None);
     }
     assert_eq!(sb.active().content_focus(), target);
 }

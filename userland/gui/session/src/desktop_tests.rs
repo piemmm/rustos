@@ -1053,9 +1053,13 @@ fn a_click_on_a_row_chooses_its_command_and_the_keyboard_reaches_it_too() {
     assert!(!menu.is_open(), "choosing closes the menu");
 
     menu.open(Point::new(100, 100), true, &PinboardSettings::default());
-    assert_eq!(menu.on_key(down()), PinboardMenuOutcome::Changed);
+    let plate = plate_of(&menu, &theme);
     assert_eq!(
-        menu.on_key(enter()),
+        menu.on_key(down(), plate, Scale::ONE, &theme),
+        PinboardMenuOutcome::Changed
+    );
+    assert_eq!(
+        menu.on_key(enter(), plate, Scale::ONE, &theme),
         PinboardMenuOutcome::Chose(PinboardCommand::Open)
     );
 }
@@ -1065,10 +1069,14 @@ fn escape_dismisses_the_menu_and_so_does_a_press_away_from_it() {
     let theme = theme();
     let mut menu = PinboardMenu::new();
     menu.open(Point::new(100, 100), false, &PinboardSettings::default());
-    assert_eq!(menu.on_key(escape()), PinboardMenuOutcome::Dismissed);
+    let plate = plate_of(&menu, &theme);
+    assert_eq!(
+        menu.on_key(escape(), plate, Scale::ONE, &theme),
+        PinboardMenuOutcome::Dismissed
+    );
     assert!(!menu.is_open());
     assert_eq!(
-        menu.on_key(escape()),
+        menu.on_key(escape(), plate, Scale::ONE, &theme),
         PinboardMenuOutcome::Ignored,
         "a closed menu claims nothing"
     );

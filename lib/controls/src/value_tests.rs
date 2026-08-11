@@ -13,6 +13,7 @@ use tairix_input::{InputEvent, Key, NamedKey, PointerButton};
 use tairix_raster::{Color, Pixel, Surface};
 use tairix_theme::{Rgba, Theme};
 
+use crate::damage::sink;
 use crate::paint::progress_thickness;
 use crate::state::{
     ActivityState, AuthorityState, ControlState, PressureKind, PressureState, ProgressValue,
@@ -153,12 +154,12 @@ fn slider_arrows_step_by_the_line_step() {
     let mut slider = Slider::new(500);
     slider.set_focused(true);
     assert_eq!(
-        slider.on_key(Key::Named(NamedKey::Right)),
+        slider.on_key(Key::Named(NamedKey::Right), bounds(), &mut sink()),
         Some(SliderAction::SetValue { permille: 510 })
     );
     assert_eq!(slider.value(), 510);
     assert_eq!(
-        slider.on_key(Key::Named(NamedKey::Left)),
+        slider.on_key(Key::Named(NamedKey::Left), bounds(), &mut sink()),
         Some(SliderAction::SetValue { permille: 500 })
     );
 }
@@ -168,15 +169,15 @@ fn slider_page_and_home_end_keys() {
     let mut slider = Slider::new(500);
     slider.set_focused(true);
     assert_eq!(
-        slider.on_key(Key::Named(NamedKey::PageUp)),
+        slider.on_key(Key::Named(NamedKey::PageUp), bounds(), &mut sink()),
         Some(SliderAction::SetValue { permille: 600 })
     );
     assert_eq!(
-        slider.on_key(Key::Named(NamedKey::Home)),
+        slider.on_key(Key::Named(NamedKey::Home), bounds(), &mut sink()),
         Some(SliderAction::SetValue { permille: 0 })
     );
     assert_eq!(
-        slider.on_key(Key::Named(NamedKey::End)),
+        slider.on_key(Key::Named(NamedKey::End), bounds(), &mut sink()),
         Some(SliderAction::SetValue { permille: 1000 })
     );
 }
@@ -185,25 +186,40 @@ fn slider_page_and_home_end_keys() {
 fn slider_bounds_are_fail_closed() {
     let mut top = Slider::new(1000);
     top.set_focused(true);
-    assert_eq!(top.on_key(Key::Named(NamedKey::Right)), None);
+    assert_eq!(
+        top.on_key(Key::Named(NamedKey::Right), bounds(), &mut sink()),
+        None
+    );
     let mut bottom = Slider::new(0);
     bottom.set_focused(true);
-    assert_eq!(bottom.on_key(Key::Named(NamedKey::Left)), None);
+    assert_eq!(
+        bottom.on_key(Key::Named(NamedKey::Left), bounds(), &mut sink()),
+        None
+    );
 }
 
 #[test]
 fn slider_zero_step_moves_nothing() {
     let mut slider = Slider::new(500).with_steps(0, 0);
     slider.set_focused(true);
-    assert_eq!(slider.on_key(Key::Named(NamedKey::Right)), None);
-    assert_eq!(slider.on_key(Key::Named(NamedKey::PageUp)), None);
+    assert_eq!(
+        slider.on_key(Key::Named(NamedKey::Right), bounds(), &mut sink()),
+        None
+    );
+    assert_eq!(
+        slider.on_key(Key::Named(NamedKey::PageUp), bounds(), &mut sink()),
+        None
+    );
     assert_eq!(slider.value(), 500);
 }
 
 #[test]
 fn slider_unfocused_ignores_keys() {
     let mut slider = Slider::new(500);
-    assert_eq!(slider.on_key(Key::Named(NamedKey::Right)), None);
+    assert_eq!(
+        slider.on_key(Key::Named(NamedKey::Right), bounds(), &mut sink()),
+        None
+    );
 }
 
 #[test]
@@ -220,23 +236,26 @@ fn slider_clamps_construction_and_set_value() {
 fn slider_drag_updates_and_commits() {
     let mut slider = Slider::new(0);
     let b = bounds();
-    assert_eq!(slider.on_pointer(&moved(100, 14), b), None);
+    assert_eq!(slider.on_pointer(&moved(100, 14), b, &mut sink()), None);
     assert_eq!(
-        slider.on_pointer(&PRESS, b),
+        slider.on_pointer(&PRESS, b, &mut sink()),
         Some(SliderAction::SetValue { permille: 500 })
     );
-    let dragged = slider.on_pointer(&moved(151, 14), b);
+    let dragged = slider.on_pointer(&moved(151, 14), b, &mut sink());
     assert!(matches!(
         dragged,
         Some(SliderAction::SetValue { permille }) if permille > 700
     ));
-    assert_eq!(slider.on_pointer(&RELEASE, b), None);
+    assert_eq!(slider.on_pointer(&RELEASE, b, &mut sink()), None);
 }
 
 #[test]
 fn slider_move_without_press_does_not_commit() {
     let mut slider = Slider::new(500);
-    assert_eq!(slider.on_pointer(&moved(150, 14), bounds()), None);
+    assert_eq!(
+        slider.on_pointer(&moved(150, 14), bounds(), &mut sink()),
+        None
+    );
     assert_eq!(slider.value(), 500);
 }
 
@@ -258,12 +277,15 @@ fn slider_cannot_step_past_its_cap() {
     slider.set_focused(true);
     // End requests the maximum, which the cap holds at 600 rather than full.
     assert_eq!(
-        slider.on_key(Key::Named(NamedKey::End)),
+        slider.on_key(Key::Named(NamedKey::End), bounds(), &mut sink()),
         Some(SliderAction::SetValue { permille: 600 })
     );
     assert_eq!(slider.value(), 600);
     // At the cap, a further step reports no change (fail closed).
-    assert_eq!(slider.on_key(Key::Named(NamedKey::Right)), None);
+    assert_eq!(
+        slider.on_key(Key::Named(NamedKey::Right), bounds(), &mut sink()),
+        None
+    );
 }
 
 #[test]
@@ -271,9 +293,9 @@ fn slider_drag_clamps_to_its_cap() {
     let mut slider = Slider::new(300).with_cap(600);
     let b = bounds();
     // A drag to the far right resolves past the cap but commits only the cap.
-    let _ = slider.on_pointer(&moved(195, 14), b);
+    let _ = slider.on_pointer(&moved(195, 14), b, &mut sink());
     assert_eq!(
-        slider.on_pointer(&PRESS, b),
+        slider.on_pointer(&PRESS, b, &mut sink()),
         Some(SliderAction::SetValue { permille: 600 })
     );
     assert_eq!(slider.value(), 600);
@@ -295,8 +317,11 @@ fn denied_slider_keeps_value_and_shows_a_lock_bead() {
     ));
     // A denied slider ignores input and keeps its value (fail closed).
     slider.set_focused(true);
-    assert_eq!(slider.on_key(Key::Named(NamedKey::Right)), None);
-    assert_eq!(slider.on_pointer(&PRESS, bounds()), None);
+    assert_eq!(
+        slider.on_key(Key::Named(NamedKey::Right), bounds(), &mut sink()),
+        None
+    );
+    assert_eq!(slider.on_pointer(&PRESS, bounds(), &mut sink()), None);
     assert_eq!(slider.value(), 400);
 }
 
@@ -313,7 +338,10 @@ fn disabled_slider_is_not_actionable_and_differs_from_denied() {
     assert!(has_pixel(&n, denied_px));
     assert!(!has_pixel(&d, denied_px));
     disabled.set_focused(true);
-    assert_eq!(disabled.on_key(Key::Named(NamedKey::Right)), None);
+    assert_eq!(
+        disabled.on_key(Key::Named(NamedKey::Right), bounds(), &mut sink()),
+        None
+    );
 }
 
 // --- Slider resource rail, contrast, and scale -------------------------
@@ -498,8 +526,8 @@ fn hit_test_bookkeeping_is_invisible_to_a_slider() {
     // Two samples clear of the track, so only the recorded coordinate differs.
     let mut a = Slider::new(500);
     let mut c = a.clone();
-    assert_eq!(a.on_pointer(&moved(400, 90), b), None);
-    assert_eq!(c.on_pointer(&moved(460, 70), b), None);
+    assert_eq!(a.on_pointer(&moved(400, 90), b, &mut sink()), None);
+    assert_eq!(c.on_pointer(&moved(460, 70), b, &mut sink()), None);
     assert_eq!(
         a, c,
         "a coordinate clear of the track is not a drawn property"
@@ -513,8 +541,8 @@ fn hit_test_bookkeeping_is_invisible_to_a_slider() {
     // One holds a live drag, the other is merely *shown* pressed. A press
     // only requests a value, so the two also carry the same reading.
     let mut dragging = Slider::new(500);
-    dragging.on_pointer(&moved(100, 14), b);
-    dragging.on_pointer(&PRESS, b);
+    dragging.on_pointer(&moved(100, 14), b, &mut sink());
+    dragging.on_pointer(&PRESS, b, &mut sink());
     let mut shown = Slider::new(500);
     let mut pressed = ControlState::idle();
     pressed.pointer = crate::state::PointerState::Pressed;
@@ -527,7 +555,45 @@ fn hit_test_bookkeeping_is_invisible_to_a_slider() {
         "…and the two must therefore paint identically"
     );
     assert!(
-        dragging.on_pointer(&moved(151, 14), b).is_some(),
+        dragging
+            .on_pointer(&moved(151, 14), b, &mut sink())
+            .is_some(),
         "the latch still governs the drag, it is only invisible"
     );
+}
+
+/// A drag sample that lands on the value the slider already shows moves no
+/// thumb, so it reports nothing — the sample rate a window would otherwise
+/// repaint at.
+#[test]
+fn a_drag_sample_on_the_same_value_reports_nothing() {
+    let mut slider = Slider::new(0);
+    slider.on_pointer(&moved(0, 14), bounds(), &mut sink());
+    slider.on_pointer(&PRESS, bounds(), &mut sink());
+    let at_left = slider.value();
+
+    let mut damage = sink();
+    slider.on_pointer(&moved(1, 14), bounds(), &mut damage);
+    assert_eq!(
+        slider.value(),
+        at_left,
+        "the pixel maps to the same permille"
+    );
+    assert!(damage.is_empty(), "so nothing is repainted");
+}
+
+/// A step that moves the value reports the slider; one already at the end it
+/// steps toward reports nothing.
+#[test]
+fn only_a_step_that_moves_reports() {
+    let mut slider = Slider::new(1000);
+    slider.set_focused(true);
+    let end = Key::Named(NamedKey::End);
+    let mut none = sink();
+    slider.on_key(end, bounds(), &mut none);
+    assert!(none.is_empty(), "already at the top of the range");
+
+    let mut some = sink();
+    slider.on_key(Key::Named(NamedKey::Home), bounds(), &mut some);
+    assert_eq!(some.bounds(), bounds(), "the thumb and the fill both move");
 }

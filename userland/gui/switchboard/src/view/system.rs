@@ -20,7 +20,7 @@ use tairix_raster::{Color, Surface};
 use tairix_theme::{SignalRole, Theme};
 
 use tairix_controls::{
-    damage, ActionRail, Button, ButtonContent, Chart, Fact, FactList, MeterValue, MetricInstrument,
+    ActionRail, Button, ButtonContent, Chart, Fact, FactList, MeterValue, MetricInstrument,
     MetricLayout, MetricTile, Panel, PressureKind, PressureState, ProgressValue, RailAction, Tab,
     Tabs, TabsAction, TabsOrientation,
 };
@@ -33,8 +33,8 @@ use super::system_data::{
     TileInstrument, Unmeasured,
 };
 use super::{
-    ActionVerdict, ListInfo, SectionCtx, SectionOutcome, SectionView, SwitchboardAction,
-    SwitchboardModel,
+    ActionVerdict, FocusSweep, ListInfo, SectionCtx, SectionOutcome, SectionView,
+    SwitchboardAction, SwitchboardModel,
 };
 
 /// The rail's title. The rail control carries no caption of its own, so the
@@ -532,7 +532,7 @@ impl SectionView for SystemSection {
         0
     }
 
-    fn set_row_action(&mut self, _index: usize) {}
+    fn set_row_action(&mut self, _index: usize, _sweep: &mut FocusSweep<'_, '_>) {}
 
     /// Commit the focused stop: a sidebar stop shows its page, a rail stop
     /// reports its action for the service to authorise.
@@ -543,7 +543,12 @@ impl SectionView for SystemSection {
     /// therefore refuses the keyboard exactly as it refuses the pointer;
     /// committing on the cursor's position alone would let the keyboard
     /// dispatch a command the screen is showing as refused.
-    fn activate_focused(&mut self, key: Key) -> Option<SectionOutcome> {
+    fn activate_focused(
+        &mut self,
+        key: Key,
+        ctx: SectionCtx<'_>,
+        damage: &mut Region,
+    ) -> Option<SectionOutcome> {
         if !matches!(key, Key::Named(NamedKey::Enter) | Key::Char(' ')) {
             return None;
         }
@@ -555,15 +560,15 @@ impl SectionView for SystemSection {
         if index >= self.rail_len() {
             return None;
         }
-        // The keyboard path carries no layout, so the rail has no rectangle
-        // to report here and reports nothing.
+        let rail = self
+            .rail_content(&ctx.frame, ctx.scale, ctx.theme)
+            .unwrap_or(Rect::EMPTY);
+        self.rail.set_focus(Some(index), rail, damage);
         self.rail
-            .set_focus(Some(index), Rect::EMPTY, &mut damage::sink());
-        self.rail.on_key(key, Rect::EMPTY, &mut damage::sink()).map(
-            |RailAction::Activate { index }| {
+            .on_key(key, rail, damage)
+            .map(|RailAction::Activate { index }| {
                 SectionOutcome::Action(SwitchboardAction::System { index })
-            },
-        )
+            })
     }
 
     fn render(&self, surface: &mut Surface, ctx: SectionCtx<'_>) {
@@ -582,7 +587,9 @@ impl SectionView for SystemSection {
         damage: &mut Region,
     ) -> Option<SectionOutcome> {
         if let Some(sidebar) = ctx.frame.sidebar {
-            if let Some(TabsAction::Selected { index }) = self.sidebar.on_pointer(event, sidebar) {
+            if let Some(TabsAction::Selected { index }) =
+                self.sidebar.on_pointer(event, sidebar, damage)
+            {
                 if let Some(page) = SystemPage::from_index(index) {
                     self.select_page(page);
                     self.focus = index;
@@ -598,7 +605,7 @@ impl SectionView for SystemSection {
             })
     }
 
-    fn apply_focus_marks(&mut self, focused: bool) {
+    fn apply_focus_marks(&mut self, focused: bool, sweep: &mut FocusSweep<'_, '_>) {
         let page = focused
             .then_some(self.focus)
             .filter(|f| *f < SystemPage::ALL.len());
@@ -607,10 +614,10 @@ impl SectionView for SystemSection {
             .then(|| self.focus.checked_sub(SystemPage::ALL.len()))
             .flatten()
             .filter(|index| *index < self.rail_len());
-        // Focus marking runs off the keyboard path, which has no layout, so
-        // the rail has no rectangle to report here.
-        self.rail
-            .set_focus(action, Rect::EMPTY, &mut damage::sink());
+        let rail = sweep
+            .ctx
+            .and_then(|ctx| self.rail_content(&ctx.frame, ctx.scale, ctx.theme));
+        sweep.rail(&mut self.rail, action, rail);
         for (index, button) in self.rail.items_mut().iter_mut().enumerate() {
             button.set_focused(action == Some(index));
         }

@@ -20,6 +20,7 @@ use alloc::vec::Vec;
 use tairix_controls::button::{Button, ButtonAction, ButtonContent};
 use tairix_controls::collection::IconTile;
 use tairix_controls::combo::{ComboAction, ComboBox};
+use tairix_controls::damage;
 use tairix_controls::scroll::{ScrollModel, ScrollOrientation, ScrollRange};
 use tairix_controls::scrollbar::{ScrollAction, ScrollBar};
 use tairix_controls::state::ControlRole;
@@ -420,13 +421,13 @@ impl Chooser {
         }
 
         if let Some(group) = self.expanded() {
-            let changed = self.field_pointer(group, event, &layout, style);
+            let changed = self.field_pointer(group, event, &layout, style, damage);
             return ChooserAction::changed(changed);
         }
 
         let mut changed = false;
         for group in OptionGroup::ALL {
-            changed |= self.field_pointer(group, event, &layout, style);
+            changed |= self.field_pointer(group, event, &layout, style, damage);
         }
         if self.expanded().is_some() {
             // A field just opened: the click is spent, and nothing beneath
@@ -447,7 +448,7 @@ impl Chooser {
         }
         changed |= apply_changed | close_changed;
 
-        changed |= self.scroll_pointer(event, &layout, style);
+        changed |= self.scroll_pointer(event, &layout, style, damage);
         changed |= self.gallery_pointer(event, &layout);
         ChooserAction::changed(changed)
     }
@@ -459,9 +460,10 @@ impl Chooser {
     /// owns the keyboard exactly as it owns the pointer.
     pub fn on_key(&mut self, key: Key, modifiers: Modifiers, style: Style<'_>) -> ChooserAction {
         let layout = self.sync(style);
+        let mut damage = damage::sink();
 
         if let Some(group) = self.expanded() {
-            let action = self.fields[group.index()].on_key(key);
+            let action = self.field_key(group, key, &layout, style, &mut damage);
             return ChooserAction::changed(action.is_some());
         }
 
@@ -477,9 +479,10 @@ impl Chooser {
             Key::Named(NamedKey::Escape) => ChooserAction::Close,
             _ => match self.focus {
                 Focus::Gallery => self.gallery_key(key, &layout),
-                Focus::Setting(group) => {
-                    ChooserAction::changed(self.fields[group.index()].on_key(key).is_some())
-                }
+                Focus::Setting(group) => ChooserAction::changed(
+                    self.field_key(group, key, &layout, style, &mut damage)
+                        .is_some(),
+                ),
                 Focus::Apply => match self.apply.on_key(key) {
                     Some(ButtonAction::Activated) => ChooserAction::Apply,
                     None => ChooserAction::None,
@@ -640,24 +643,46 @@ impl Chooser {
         event: &InputEvent,
         layout: &Layout,
         style: Style<'_>,
+        damage: &mut Region,
     ) -> bool {
         let field = layout.option_field(group);
-        // A collapsed field never reads its popup rectangle, and measuring
-        // one costs a pass over every choice's text, so it is resolved only
-        // for the field that is actually showing a list.
-        let popup = if self.fields[group.index()].is_expanded() {
-            self.popup_rect(group, layout, style)
-        } else {
-            Rect::new(0, 0, 0, 0)
-        };
+        let popup = self.field_popup(group, layout, style);
         let combo = &mut self.fields[group.index()];
         let before = (combo.state(), combo.is_expanded(), combo.selected());
-        let action = combo.on_pointer(event, field, popup, style.scale(), style.theme());
+        let action = combo.on_pointer(event, field, popup, style.scale(), style.theme(), damage);
         let after = (combo.state(), combo.is_expanded(), combo.selected());
         if matches!(action, Some(ComboAction::Opened)) {
             self.focus = Focus::Setting(group);
         }
         before != after
+    }
+
+    /// Route a key press to one settings drop-down, at the same two
+    /// rectangles the pointer path resolves.
+    fn field_key(
+        &mut self,
+        group: OptionGroup,
+        key: Key,
+        layout: &Layout,
+        style: Style<'_>,
+        damage: &mut Region,
+    ) -> Option<ComboAction> {
+        let field = layout.option_field(group);
+        let popup = self.field_popup(group, layout, style);
+        self.fields[group.index()].on_key(key, field, popup, style.scale(), style.theme(), damage)
+    }
+
+    /// The popup rectangle of `group`'s drop-down.
+    ///
+    /// A collapsed field never reads one, and measuring it costs a pass over
+    /// every choice's text, so it is resolved only for the field that is
+    /// actually showing a list.
+    fn field_popup(&self, group: OptionGroup, layout: &Layout, style: Style<'_>) -> Rect {
+        if self.fields[group.index()].is_expanded() {
+            self.popup_rect(group, layout, style)
+        } else {
+            Rect::new(0, 0, 0, 0)
+        }
     }
 
     /// Route a pointer event to the gallery's scrollbar and to the wheel,
@@ -670,17 +695,29 @@ impl Chooser {
     /// bar's own hover, press and held part) were *before* the event, never
     /// by comparing the request against a model that has already followed
     /// it.
-    fn scroll_pointer(&mut self, event: &InputEvent, layout: &Layout, style: Style<'_>) -> bool {
+    fn scroll_pointer(
+        &mut self,
+        event: &InputEvent,
+        layout: &Layout,
+        style: Style<'_>,
+        damage: &mut Region,
+    ) -> bool {
         let before = (
             self.scroll.model().offset(),
             self.scroll.state(),
             self.scroll.held(),
         );
         let action = match event {
-            InputEvent::PointerScrolled { dx, dy } => self.scroll.wheel(*dx, *dy),
-            _ => self
-                .scroll
-                .on_pointer(event, layout.scrollbar(), style.scale(), style.theme()),
+            InputEvent::PointerScrolled { dx, dy } => {
+                self.scroll.wheel(*dx, *dy, layout.scrollbar(), damage)
+            }
+            _ => self.scroll.on_pointer(
+                event,
+                layout.scrollbar(),
+                style.scale(),
+                style.theme(),
+                damage,
+            ),
         };
         if let Some(ScrollAction::ScrollTo { offset }) = action {
             self.scroll_to(offset);

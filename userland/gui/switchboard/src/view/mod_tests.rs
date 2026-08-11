@@ -26,8 +26,8 @@ use tairix_controls::{
 use crate::panel::{MIN_WIN_HEIGHT, MIN_WIN_WIDTH};
 
 use super::test_support::{
-    bounds, centre, click, focus_task_row, font, has_ink, model, moved, select_task_row, task_id,
-    task_rail_rects, task_row_point, PRESS, RELEASE,
+    bounds, centre, click, focus_task_row, font, has_ink, key, model, moved, select_task_row,
+    task_id, task_rail_rects, task_row_point, PRESS, RELEASE,
 };
 use super::{
     resolve_section_frame, ActionVerdict, Reading, RecoveryControl, Section, Switchboard,
@@ -299,8 +299,8 @@ fn keyboard_scrolls_the_focused_scrollbar() {
     // Render once so the scroll model matches the layout.
     sb.render(&mut surface, bounds(), Scale::ONE, &theme, font());
     // Cycle focus Content -> Scrollbar (one Tab).
-    assert_eq!(sb.on_key(Key::Named(NamedKey::Tab)), None);
-    let action = sb.on_key(Key::Named(NamedKey::Down));
+    assert_eq!(key(&mut sb, Key::Named(NamedKey::Tab)), None);
+    let action = key(&mut sb, Key::Named(NamedKey::Down));
     match action {
         Some(SwitchboardAction::Scrolled { offset }) => assert!(offset >= 1),
         other => panic!("expected a keyboard scroll, got {other:?}"),
@@ -312,14 +312,14 @@ fn keyboard_cycles_focus_and_selects_a_section() {
     let mut sb = Switchboard::new(&model());
     // Content -> Scrollbar -> Location.
     for _ in 0..2 {
-        assert_eq!(sb.on_key(Key::Named(NamedKey::Tab)), None);
+        assert_eq!(key(&mut sb, Key::Named(NamedKey::Tab)), None);
     }
     // The band's leading crumb opens the section list, which then walks to
     // Jobs and shows it.
-    assert_eq!(sb.on_key(Key::Named(NamedKey::Enter)), None);
+    assert_eq!(key(&mut sb, Key::Named(NamedKey::Enter)), None);
     assert!(sb.section_menu.is_some(), "the list is open");
-    assert_eq!(sb.on_key(Key::Named(NamedKey::Down)), None);
-    let action = sb.on_key(Key::Named(NamedKey::Enter));
+    assert_eq!(key(&mut sb, Key::Named(NamedKey::Down)), None);
+    let action = key(&mut sb, Key::Named(NamedKey::Enter));
     assert_eq!(
         action,
         Some(SwitchboardAction::SectionChanged {
@@ -333,11 +333,11 @@ fn keyboard_cycles_focus_and_selects_a_section() {
 fn escape_closes_the_section_list_and_leaves_the_section_alone() {
     let mut sb = Switchboard::new(&model());
     for _ in 0..2 {
-        assert_eq!(sb.on_key(Key::Named(NamedKey::Tab)), None);
+        assert_eq!(key(&mut sb, Key::Named(NamedKey::Tab)), None);
     }
-    assert_eq!(sb.on_key(Key::Named(NamedKey::Enter)), None);
-    assert_eq!(sb.on_key(Key::Named(NamedKey::Down)), None);
-    assert_eq!(sb.on_key(Key::Named(NamedKey::Escape)), None);
+    assert_eq!(key(&mut sb, Key::Named(NamedKey::Enter)), None);
+    assert_eq!(key(&mut sb, Key::Named(NamedKey::Down)), None);
+    assert_eq!(key(&mut sb, Key::Named(NamedKey::Escape)), None);
     assert!(sb.section_menu.is_none());
     assert_eq!(sb.section(), Section::Tasks);
 }
@@ -645,7 +645,7 @@ fn selecting_the_shown_section_changes_nothing() {
         font(),
     );
     // Move the keyboard off the first item too, so a stray reset would show.
-    assert_eq!(sb.on_key(Key::Named(NamedKey::Down)), None);
+    assert_eq!(key(&mut sb, Key::Named(NamedKey::Down)), None);
     let before = sb.clone();
     let offset = sb.scroll_offset();
 
@@ -699,15 +699,15 @@ fn direct_selection_and_the_keyboard_path_agree() {
     // Put both on the location band (Content -> Scrollbar -> Location) so the
     // only difference is how the section is chosen.
     for _ in 0..2 {
-        assert_eq!(by_key.on_key(Key::Named(NamedKey::Tab)), None);
-        assert_eq!(direct.on_key(Key::Named(NamedKey::Tab)), None);
+        assert_eq!(key(&mut by_key, Key::Named(NamedKey::Tab)), None);
+        assert_eq!(key(&mut direct, Key::Named(NamedKey::Tab)), None);
     }
     // One opens the section list, walks it to Recovery and commits it...
-    assert_eq!(by_key.on_key(Key::Named(NamedKey::Enter)), None);
+    assert_eq!(key(&mut by_key, Key::Named(NamedKey::Enter)), None);
     for _ in 0..Section::Recovery.index() {
-        assert_eq!(by_key.on_key(Key::Named(NamedKey::Down)), None);
+        assert_eq!(key(&mut by_key, Key::Named(NamedKey::Down)), None);
     }
-    let by_key_action = by_key.on_key(Key::Named(NamedKey::Enter));
+    let by_key_action = key(&mut by_key, Key::Named(NamedKey::Enter));
     // ...the other asks for it directly.
     let direct_action = direct.select_section(Section::Recovery);
 
@@ -776,7 +776,7 @@ fn set_model_keeps_the_section_the_offset_and_the_focus() {
     // Walk the keyboard down the job list, scroll it away from the top, then
     // step the focus region on, so all three are off their defaults.
     for _ in 0..3 {
-        assert_eq!(sb.on_key(Key::Named(NamedKey::Down)), None);
+        assert_eq!(key(&mut sb, Key::Named(NamedKey::Down)), None);
     }
     sb.on_pointer(
         &InputEvent::PointerScrolled { dx: 0, dy: 3 },
@@ -787,7 +787,7 @@ fn set_model_keeps_the_section_the_offset_and_the_focus() {
     );
     let offset = sb.scroll_offset();
     assert!(offset > 0, "the job list must actually scroll");
-    assert_eq!(sb.on_key(Key::Named(NamedKey::Tab)), None);
+    assert_eq!(key(&mut sb, Key::Named(NamedKey::Tab)), None);
     let focus = sb.focus;
     let content_focus = sb.active().content_focus();
 
@@ -852,7 +852,7 @@ fn set_model_to_an_empty_model_stays_valid_and_renderable() {
     let mut surface = Surface::new(b.width, b.height).expect("surface");
     sb.render(&mut surface, b, Scale::ONE, &theme, font());
     for _ in 0..4 {
-        assert_eq!(sb.on_key(Key::Named(NamedKey::Down)), None);
+        assert_eq!(key(&mut sb, Key::Named(NamedKey::Down)), None);
     }
     sb.on_pointer(
         &InputEvent::PointerScrolled { dx: 0, dy: 20 },
@@ -868,7 +868,7 @@ fn set_model_to_an_empty_model_stays_valid_and_renderable() {
     assert_eq!(sb.scroll_offset(), 0, "an empty list has nowhere to scroll");
     assert_eq!(sb.active().content_focus(), 0);
     assert_eq!(
-        sb.on_key(Key::Named(NamedKey::Enter)),
+        key(&mut sb, Key::Named(NamedKey::Enter)),
         None,
         "an emptied section has nothing to activate"
     );
@@ -974,9 +974,9 @@ fn a_section_change_drops_an_in_flight_inline_edit() {
     let _ = painted(&mut sb, &theme);
     // Rename is the third action on the focused header row.
     for _ in 0..2 {
-        sb.on_key(Key::Named(NamedKey::Right));
+        key(&mut sb, Key::Named(NamedKey::Right));
     }
-    sb.on_key(Key::Named(NamedKey::Enter));
+    key(&mut sb, Key::Named(NamedKey::Enter));
     assert!(
         sb.activities.rename.is_some(),
         "the edit must genuinely be open, or this proves nothing"
@@ -990,7 +990,7 @@ fn a_section_change_drops_an_in_flight_inline_edit() {
          outlive the section that opened it"
     );
     assert_eq!(
-        sb.on_key(Key::Named(NamedKey::Down)),
+        key(&mut sb, Key::Named(NamedKey::Down)),
         None,
         "and the keyboard must reach the new section rather than the edit"
     );
@@ -1082,8 +1082,8 @@ fn action_focus_clamps_and_resets_with_the_row_focus() {
     // cursor has nowhere to go within a row; the filter strip, whose tabs it
     // does traverse, is where the clamp is worth proving.
     focus_task_row(&mut sb, 0);
-    for key in [NamedKey::Left, NamedKey::Right] {
-        assert_eq!(sb.on_key(Key::Named(key)), None);
+    for sideways in [NamedKey::Left, NamedKey::Right] {
+        assert_eq!(key(&mut sb, Key::Named(sideways)), None);
         assert_eq!(
             sb.active().row_action(),
             0,
@@ -1095,21 +1095,21 @@ fn action_focus_clamps_and_resets_with_the_row_focus() {
     // cursor does traverse.
     let mut sb = Switchboard::new(&model());
     let stops = sb.tasks.filters.len();
-    assert_eq!(sb.on_key(Key::Named(NamedKey::Left)), None);
+    assert_eq!(key(&mut sb, Key::Named(NamedKey::Left)), None);
     assert_eq!(
         sb.active().row_action(),
         0,
         "Left at the first tab stays put"
     );
     for _ in 0..stops + 2 {
-        assert_eq!(sb.on_key(Key::Named(NamedKey::Right)), None);
+        assert_eq!(key(&mut sb, Key::Named(NamedKey::Right)), None);
     }
     assert_eq!(
         sb.active().row_action(),
         stops - 1,
         "Right clamps at the last tab"
     );
-    assert_eq!(sb.on_key(Key::Named(NamedKey::Down)), None);
+    assert_eq!(key(&mut sb, Key::Named(NamedKey::Down)), None);
     assert_eq!(
         sb.active().row_action(),
         0,
@@ -1355,7 +1355,7 @@ fn focus_change_changes_the_composition() {
     let mut sb = settled(&theme);
     let before = sb.clone();
 
-    sb.on_key(Key::Named(NamedKey::Tab));
+    key(&mut sb, Key::Named(NamedKey::Tab));
 
     assert_ne!(sb, before, "the focus ring moves to another region");
 }
@@ -1398,7 +1398,7 @@ fn leaving_the_content_region_clears_the_focus_field() {
     );
 
     // Content -> Scrollbar: the content list no longer holds the keyboard.
-    sb.on_key(Key::Named(NamedKey::Tab));
+    key(&mut sb, Key::Named(NamedKey::Tab));
 
     assert!(
         sb.tasks
@@ -1536,10 +1536,10 @@ fn the_edge_wake_lands_on_the_action_columns_leading_edge() {
 fn the_focus_field_is_visible_in_the_pixels() {
     let theme = Theme::dark();
     let mut in_field = settled(&theme);
-    in_field.on_key(Key::Named(NamedKey::Down));
+    key(&mut in_field, Key::Named(NamedKey::Down));
     let mut elsewhere = in_field.clone();
     // Move focus off the list entirely, leaving the same rows on screen.
-    elsewhere.on_key(Key::Named(NamedKey::Tab));
+    key(&mut elsewhere, Key::Named(NamedKey::Tab));
 
     let a = painted(&mut in_field, &theme);
     let b = painted(&mut elsewhere, &theme);

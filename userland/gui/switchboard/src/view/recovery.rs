@@ -17,18 +17,17 @@ use tairix_raster::{Color, Surface};
 use tairix_theme::{SignalRole, Theme};
 
 use tairix_controls::{
-    damage, ActionRail, AuthorityState, Button, ButtonContent, Card, ControlRole, ControlState,
-    EventMark, Fact, FactList, MetricLayout, MetricTile, Panel, PressureKind, RailAction,
-    RecoveryState, SelectionState, StatusPill, Tab, Tabs, TabsAction, TabsOrientation, Timeline,
-    TimelineEvent,
+    ActionRail, AuthorityState, Button, ButtonContent, Card, ControlRole, ControlState, EventMark,
+    Fact, FactList, MetricLayout, MetricTile, Panel, PressureKind, RailAction, RecoveryState,
+    SelectionState, StatusPill, Tab, Tabs, TabsAction, TabsOrientation, Timeline, TimelineEvent,
 };
 
 use super::frame::{SectionAnatomy, SectionFrame, ACTION_RAIL_WIDTH, DETAIL_PANE_WIDTH};
 use super::refresh::{resettle_cards, restate_rail};
 use super::system_data::{absence_statement, reading_text, selection_prompt, Reading, Unmeasured};
 use super::{
-    action_state, resolve_selection, select_pressed_card, ListInfo, SectionCtx, SectionOutcome,
-    SectionView, SwitchboardAction, SwitchboardModel, UNMEASURED_READING,
+    action_state, resolve_selection, select_pressed_card, FocusSweep, ListInfo, SectionCtx,
+    SectionOutcome, SectionView, SwitchboardAction, SwitchboardModel, UNMEASURED_READING,
 };
 
 /// One hung or recoverable object (`plans/NEW-SWITCHBOARD.md`).
@@ -434,6 +433,14 @@ impl RecoverySection {
             pages,
             body,
         })
+    }
+
+    /// Where the detail pane seats its page strip, or [`None`] when the pane
+    /// is too small to seat it.
+    fn pages_rect(&self, ctx: SectionCtx<'_>) -> Option<Rect> {
+        let content = self.detail_content(&ctx.frame, ctx.scale, ctx.theme)?;
+        let layout = Self::detail_layout(content, &self.pages, ctx.scale, ctx.theme, ctx.font)?;
+        Some(layout.pages)
     }
 
     /// The plate the detail pane draws in: its caption is the selected
@@ -889,7 +896,7 @@ impl SectionView for RecoverySection {
     /// Move the within-stop cursor. On the page strip that *is* the page
     /// selection, so Left/Right walk the pages the way they walk any other
     /// row's actions.
-    fn set_row_action(&mut self, index: usize) {
+    fn set_row_action(&mut self, index: usize, _sweep: &mut FocusSweep<'_, '_>) {
         self.action = index;
         if matches!(self.stop_at(self.focus), Some(Stop::Pages)) {
             if let Some(page) = FaultPage::from_index(index) {
@@ -904,14 +911,22 @@ impl SectionView for RecoverySection {
     /// focused button so the button decides for itself whether it may fire:
     /// a disabled command, or one whose Authority Mark denies the caller,
     /// refuses the keyboard exactly as it refuses the pointer.
-    fn activate_focused(&mut self, key: Key) -> Option<SectionOutcome> {
+    fn activate_focused(
+        &mut self,
+        key: Key,
+        ctx: SectionCtx<'_>,
+        damage: &mut Region,
+    ) -> Option<SectionOutcome> {
         match self.stop_at(self.focus)? {
             Stop::Card(row) => {
                 self.select_row(row);
                 None
             }
             Stop::Pages => {
-                let TabsAction::Selected { index } = self.pages.on_key(key)?;
+                // A pane too small to seat the strip draws it nowhere, so
+                // there is no rectangle to report against.
+                let pages = self.pages_rect(ctx).unwrap_or(Rect::EMPTY);
+                let TabsAction::Selected { index } = self.pages.on_key(key, pages, damage)?;
                 let page = FaultPage::from_index(index)?;
                 self.select_page(page);
                 self.action = index;
@@ -919,12 +934,11 @@ impl SectionView for RecoverySection {
             }
             Stop::Rail(slot) => {
                 let index = self.selected_index()?;
-                // The keyboard path carries no layout, so the rail has no
-                // rectangle to report here and reports nothing.
-                self.rail
-                    .set_focus(Some(slot), Rect::EMPTY, &mut damage::sink());
-                let RailAction::Activate { index: fired } =
-                    self.rail.on_key(key, Rect::EMPTY, &mut damage::sink())?;
+                let rail = self
+                    .rail_content(&ctx.frame, ctx.scale, ctx.theme)
+                    .unwrap_or(Rect::EMPTY);
+                self.rail.set_focus(Some(slot), rail, damage);
+                let RailAction::Activate { index: fired } = self.rail.on_key(key, rail, damage)?;
                 Some(SectionOutcome::Action(SwitchboardAction::Recovery {
                     index,
                     control: rail_control(fired)?,
@@ -971,18 +985,14 @@ impl SectionView for RecoverySection {
             return None;
         }
 
-        if let Some(content) = self.detail_content(&ctx.frame, ctx.scale, ctx.theme) {
-            if let Some(layout) =
-                Self::detail_layout(content, &self.pages, ctx.scale, ctx.theme, ctx.font)
+        if let Some(pages) = self.pages_rect(ctx) {
+            if let Some(TabsAction::Selected { index }) =
+                self.pages.on_pointer(event, pages, damage)
             {
-                if let Some(TabsAction::Selected { index }) =
-                    self.pages.on_pointer(event, layout.pages)
-                {
-                    if let Some(page) = FaultPage::from_index(index) {
-                        self.select_page(page);
-                    }
-                    return None;
+                if let Some(page) = FaultPage::from_index(index) {
+                    self.select_page(page);
                 }
+                return None;
             }
         }
 
@@ -997,7 +1007,7 @@ impl SectionView for RecoverySection {
         }))
     }
 
-    fn apply_focus_marks(&mut self, focused: bool) {
+    fn apply_focus_marks(&mut self, focused: bool, sweep: &mut FocusSweep<'_, '_>) {
         let stop = focused.then(|| self.stop_at(self.focus)).flatten();
         for (i, card) in self.cards.iter_mut().enumerate() {
             card.set_in_focus_field(stop == Some(Stop::Card(i)));
@@ -1012,9 +1022,10 @@ impl SectionView for RecoverySection {
             Some(Stop::Rail(slot)) => Some(slot),
             _ => None,
         };
-        // Focus marking runs off the keyboard path, which has no layout, so
-        // the rail has no rectangle to report here.
-        self.rail.set_focus(slot, Rect::EMPTY, &mut damage::sink());
+        let rail = sweep
+            .ctx
+            .and_then(|ctx| self.rail_content(&ctx.frame, ctx.scale, ctx.theme));
+        sweep.rail(&mut self.rail, slot, rail);
         for (index, button) in self.rail.items_mut().iter_mut().enumerate() {
             button.set_focused(slot == Some(index));
             button.set_in_focus_field(slot.is_some());

@@ -2646,7 +2646,18 @@ mod program {
                 // has no meaning for is dropped rather than reaching a
                 // window behind it.
                 Ok(Some((tairix_wm::InputEvent::KeyPressed { key, .. }, _))) => {
-                    let acted = pinboard.menu.on_key(key);
+                    // The shell can only fail to place a plate for a menu that
+                    // is already closed, and a closed menu claims no key, so
+                    // the empty stand-in is never read.
+                    let bounds = shell
+                        .pinboard_menu_bounds(compositor, &pinboard.menu)
+                        .unwrap_or(Rect::EMPTY);
+                    let acted = pinboard.menu.on_key(
+                        key,
+                        bounds,
+                        compositor.scale(),
+                        shell.session().active_theme(),
+                    );
                     settle_pinboard_menu(
                         acted,
                         pinboard,

@@ -13,7 +13,7 @@ use tairix_theme::Theme;
 
 use super::{JobControl, JobSummary};
 use crate::view::test_support::{
-    bounds, card_body_centre, card_slot, centre, click, font, has_ink, model,
+    bounds, card_body_centre, card_slot, centre, click, font, has_ink, key, model,
 };
 use crate::view::{
     resolve_section_frame, Section, SectionView, Switchboard, SwitchboardAction, SwitchboardModel,
@@ -57,9 +57,9 @@ fn keyboard_activates_a_job_footer() {
     let mut sb = shown(&["copy"]);
     // The commands moved from the card's own footer into the anchored rail,
     // so the cursor now walks the cards first and the commands after them.
-    assert_eq!(sb.on_key(Key::Named(NamedKey::Enter)), None);
-    assert_eq!(sb.on_key(Key::Named(NamedKey::Down)), None);
-    let action = sb.on_key(Key::Named(NamedKey::Enter));
+    assert_eq!(key(&mut sb, Key::Named(NamedKey::Enter)), None);
+    assert_eq!(key(&mut sb, Key::Named(NamedKey::Down)), None);
+    let action = key(&mut sb, Key::Named(NamedKey::Enter));
     assert_eq!(
         action,
         Some(SwitchboardAction::Job {
@@ -74,10 +74,10 @@ fn keyboard_reaches_the_job_cancel_footer() {
     let mut sb = shown(&["copy"]);
     // Cancel is the rail's second command, so it is one stop below Pause
     // rather than one action to its right.
-    assert_eq!(sb.on_key(Key::Named(NamedKey::Down)), None);
-    assert_eq!(sb.on_key(Key::Named(NamedKey::Down)), None);
+    assert_eq!(key(&mut sb, Key::Named(NamedKey::Down)), None);
+    assert_eq!(key(&mut sb, Key::Named(NamedKey::Down)), None);
     assert_eq!(
-        sb.on_key(Key::Named(NamedKey::Enter)),
+        key(&mut sb, Key::Named(NamedKey::Enter)),
         Some(SwitchboardAction::Job {
             index: 0,
             control: JobControl::Cancel

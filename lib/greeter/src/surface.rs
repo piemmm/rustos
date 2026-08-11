@@ -8,7 +8,7 @@ use alloc::vec::Vec;
 use core::cell::Cell;
 
 use tairix_abi::Duration64;
-use tairix_controls::{PointerState, TextAction, TextField, ValidationState};
+use tairix_controls::{damage, TextAction, TextField, ValidationState};
 use tairix_font::BitmapFont;
 use tairix_geometry::{Rect, Scale};
 use tairix_icon::{builtin_icon, IconKind};
@@ -801,15 +801,16 @@ impl AuthSurface {
         let Mode::Name(name) = &mut self.mode else {
             return Outcome::quiet();
         };
-        let (action, redraw) = if let InputEvent::KeyPressed { key, modifiers } = event {
-            (name.on_key(*key, *modifiers), true)
+        let mut reported = damage::sink();
+        let action = if let InputEvent::KeyPressed { key, modifiers } = event {
+            name.on_key(*key, *modifiers, bounds, &mut reported)
         } else {
-            let was = name.state();
-            let action = name.on_pointer(event, bounds, scale, theme);
-            let now = name.state();
-            let dragging = now.pointer == PointerState::Pressed;
-            (action, action.is_some() || now != was || dragging)
+            name.on_pointer(event, bounds, scale, theme, &mut reported)
         };
+        // The field reports what it repainted, so its own answer decides the
+        // frame: a motion sample that changed no glyph, caret, or plate — or a
+        // key that only submitted — draws nothing.
+        let redraw = action.is_some() || !reported.is_empty();
         let typed = (action == Some(TextAction::Submitted)).then(|| name.text().trim().to_string());
         match typed {
             // A name is what the next question is asked about, so an empty
@@ -840,25 +841,27 @@ impl AuthSurface {
             if !self.is_cooling() {
                 self.show(HINT.to_string(), ValidationState::Valid);
             }
-            let action = self.field.on_key(*key, *modifiers);
-            // A key can move the caret without reporting an edit, and arrives
-            // at human typing rate either way, so every one is worth a frame.
+            let bounds = self.field_rect(ctx.screen, ctx.scale, ctx.theme);
+            let action = self
+                .field
+                .on_key(*key, *modifiers, bounds, &mut damage::sink());
+            // The notice line above the field was just re-asked, so a key draws
+            // a frame whether or not the field itself changed.
             (matches!(action, Some(TextAction::Submitted)), true)
         } else {
             let bounds = self.field_rect(ctx.screen, ctx.scale, ctx.theme);
-            let was = self.field.state();
-            let action = self.field.on_pointer(event, bounds, ctx.scale, ctx.theme);
-            let now = self.field.state();
+            let mut reported = damage::sink();
+            let action = self
+                .field
+                .on_pointer(event, bounds, ctx.scale, ctx.theme, &mut reported);
             // Pointer motion is the one event that streams. Repainting the
             // whole screen for each one would rebuild a screen-sized surface
             // per sample for no visible difference, so a frame is drawn only
-            // when the field's rendering can actually have changed: it
-            // edited, its state moved (a hover arriving or leaving), or a
-            // button is down and the motion is extending a selection.
-            let dragging = now.pointer == PointerState::Pressed;
+            // when the field says it repainted: an edit, a caret or selection
+            // move, or a hover arriving or leaving.
             (
                 matches!(action, Some(TextAction::Submitted)),
-                action.is_some() || now != was || dragging,
+                action.is_some() || !reported.is_empty(),
             )
         };
         let rejected_ms = ctx

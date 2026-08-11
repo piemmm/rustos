@@ -42,8 +42,8 @@ use tairix_raster::Surface;
 use tairix_theme::Theme;
 
 use tairix_controls::{
-    damage, ActionRail, ActivityState, Button, ButtonContent, CellAlign, Chart, ComboAction,
-    ComboBox, ControlRole, ControlState, HeaderAction, HeaderColumn, Menu, MenuAction, MenuItem,
+    ActionRail, ActivityState, Button, ButtonContent, CellAlign, Chart, ComboAction, ComboBox,
+    ControlRole, ControlState, HeaderAction, HeaderColumn, Menu, MenuAction, MenuItem,
     MetricLayout, MetricTile, Panel, PressureKind, PressureState, RailAction, RecoveryState,
     RowAction, SearchField, SelectionState, SelectorAction, SortOrder, StatusPill, Tab, TableCell,
     TableHeader, TableRow, Tabs, TabsAction, Toggle,
@@ -52,8 +52,8 @@ use tairix_controls::{
 use super::frame::{BandSummary, SectionAnatomy, SectionFrame, ACTION_RAIL_WIDTH};
 use super::refresh::{carry_hover, restate_rail};
 use super::{
-    resolve_selection, ActionVerdict, ListInfo, SectionCtx, SectionOutcome, SectionView,
-    Switchboard, SwitchboardAction, SwitchboardModel, UNMEASURED_READING,
+    resolve_selection, ActionVerdict, FocusSweep, ListInfo, SectionCtx, SectionOutcome,
+    SectionView, Switchboard, SwitchboardAction, SwitchboardModel, UNMEASURED_READING,
 };
 use crate::format::{format_bytes, format_rate, percent};
 
@@ -1310,15 +1310,34 @@ impl TasksSection {
         )
     }
 
-    /// The expanded grouping popup's rectangle, clamped inside the window.
+    /// Mark the column headings' focused heading, against the pinned heading
+    /// rectangle the paint and the hit test share.
+    fn mark_header(&mut self, index: Option<usize>, sweep: &mut FocusSweep<'_, '_>) {
+        match sweep.ctx {
+            Some(ctx) => self.header.set_focus(
+                index,
+                Self::header_rect(&ctx.frame, ctx.scale, ctx.theme),
+                ctx.scale,
+                ctx.theme,
+                &COLUMN_WEIGHTS,
+                sweep.damage,
+            ),
+            None => self.header.adopt_focus(index),
+        }
+    }
+
+    /// The grouping control's own field rectangle.
     ///
-    /// A frame too narrow to seat the rail has no footer slot for the
-    /// grouping control either, so the popup falls back to the footer itself
-    /// — somewhere inside the window rather than off its edge.
+    /// A frame too narrow to seat the rail has no footer slot for it, so it
+    /// falls back to the footer itself — somewhere inside the window rather
+    /// than off its edge.
+    fn grouping_field(frame: &SectionFrame) -> Rect {
+        Self::footer_split(frame).grouping.unwrap_or(frame.footer)
+    }
+
+    /// The expanded grouping popup's rectangle, clamped inside the window.
     fn grouping_popup_rect(&self, ctx: SectionCtx<'_>) -> Rect {
-        let field = Self::footer_split(&ctx.frame)
-            .grouping
-            .unwrap_or(ctx.frame.footer);
+        let field = Self::grouping_field(&ctx.frame);
         let (w, h) = self.grouping.popup_size(field.width, ctx.scale, ctx.theme);
         // A footer sits at the bottom of the content, so the list opens
         // upward from the field rather than off the bottom of the window.
@@ -1484,23 +1503,42 @@ impl TasksSection {
     }
 
     /// Feed a key to whichever header control the cursor is on.
-    fn header_on_key(&mut self, key: Key) -> Option<SectionOutcome> {
+    fn header_on_key(
+        &mut self,
+        key: Key,
+        ctx: SectionCtx<'_>,
+        damage: &mut Region,
+    ) -> Option<SectionOutcome> {
+        let (filters, search) = Self::header_rows(&ctx.frame, ctx.scale);
         match self.focus {
             STOP_FILTERS => {
-                if let Some(TabsAction::Selected { index }) = self.filters.on_key(key) {
+                if let Some(TabsAction::Selected { index }) =
+                    self.filters.on_key(key, filters, damage)
+                {
                     self.filters.set_selected(index);
                     self.arrange();
                 }
                 None
             }
             STOP_SEARCH => {
-                if self.search.on_key(key, Modifiers::default()).is_some() {
+                if self
+                    .search
+                    .on_key(key, Modifiers::default(), search, damage)
+                    .is_some()
+                {
                     self.arrange();
                 }
                 None
             }
             STOP_SORT => {
-                if let Some(HeaderAction::Sort { column, order }) = self.header.on_key(key) {
+                if let Some(HeaderAction::Sort { column, order }) = self.header.on_key(
+                    key,
+                    Self::header_rect(&ctx.frame, ctx.scale, ctx.theme),
+                    ctx.scale,
+                    ctx.theme,
+                    &COLUMN_WEIGHTS,
+                    damage,
+                ) {
                     self.apply_sort(column, order);
                 }
                 None
@@ -1521,10 +1559,23 @@ impl TasksSection {
     }
 
     /// Feed a key to whichever footer control the cursor is on.
-    fn footer_on_key(&mut self, stop: usize, key: Key) -> Option<SectionOutcome> {
+    fn footer_on_key(
+        &mut self,
+        stop: usize,
+        key: Key,
+        ctx: SectionCtx<'_>,
+        damage: &mut Region,
+    ) -> Option<SectionOutcome> {
         match stop {
             STOP_GROUPING => {
-                if let Some(ComboAction::Selected { index }) = self.grouping.on_key(key) {
+                if let Some(ComboAction::Selected { index }) = self.grouping.on_key(
+                    key,
+                    Self::grouping_field(&ctx.frame),
+                    self.grouping_popup_rect(ctx),
+                    ctx.scale,
+                    ctx.theme,
+                    damage,
+                ) {
                     self.grouping.set_selected(index);
                     self.arrange();
                 }
@@ -1792,34 +1843,37 @@ impl SectionView for TasksSection {
         self.action
     }
 
-    fn set_row_action(&mut self, index: usize) {
+    fn set_row_action(&mut self, index: usize, sweep: &mut FocusSweep<'_, '_>) {
         self.action = index;
         // The filter strip and the column headings hold their own internal
         // cursor, so the shared action cursor is mirrored onto them rather
         // than kept as a second, separately-moving idea of the same thing.
         match self.focus {
             STOP_FILTERS => self.filters.set_current(Some(index)),
-            STOP_SORT => self.header.set_focus(Some(index)),
+            STOP_SORT => self.mark_header(Some(index), sweep),
             _ => {}
         }
     }
 
-    fn activate_focused(&mut self, key: Key) -> Option<SectionOutcome> {
+    fn activate_focused(
+        &mut self,
+        key: Key,
+        ctx: SectionCtx<'_>,
+        damage: &mut Region,
+    ) -> Option<SectionOutcome> {
         if self.focus < HEADER_STOPS {
-            return self.header_on_key(key);
+            return self.header_on_key(key, ctx, damage);
         }
         if let Some(stop) = self.focused_footer() {
-            return self.footer_on_key(stop, key);
+            return self.footer_on_key(stop, key, ctx, damage);
         }
         if let Some(slot) = self.focused_rail() {
             // The rail's own item decides whether it may act, so a refused
-            // command consumes the key without dispatching anything. The
-            // keyboard path carries no layout, so the rail has no rectangle
-            // to report here and reports nothing.
-            self.rail
-                .set_focus(Some(slot), Rect::EMPTY, &mut damage::sink());
-            let RailAction::Activate { index } =
-                self.rail.on_key(key, Rect::EMPTY, &mut damage::sink())?;
+            // command consumes the key without dispatching anything.
+            let rail = Self::rail_content(&ctx.frame, &self.rail_panel, ctx.scale, ctx.theme)
+                .unwrap_or(Rect::EMPTY);
+            self.rail.set_focus(Some(slot), rail, damage);
+            let RailAction::Activate { index } = self.rail.on_key(key, rail, damage)?;
             return self.invoke_rail(index);
         }
         let row = self.focused_row()?;
@@ -1895,14 +1949,14 @@ impl SectionView for TasksSection {
         damage: &mut Region,
     ) -> Option<SectionOutcome> {
         let (tabs, search) = Self::header_rows(&ctx.frame, ctx.scale);
-        if let Some(TabsAction::Selected { index }) = self.filters.on_pointer(event, tabs) {
+        if let Some(TabsAction::Selected { index }) = self.filters.on_pointer(event, tabs, damage) {
             self.filters.set_selected(index);
             self.arrange();
             return None;
         }
         if self
             .search
-            .on_pointer(event, search, ctx.scale, ctx.theme)
+            .on_pointer(event, search, ctx.scale, ctx.theme, damage)
             .is_some()
         {
             self.arrange();
@@ -1924,7 +1978,7 @@ impl SectionView for TasksSection {
             let popup = self.grouping_popup_rect(ctx);
             match self
                 .grouping
-                .on_pointer(event, grouping, popup, ctx.scale, ctx.theme)
+                .on_pointer(event, grouping, popup, ctx.scale, ctx.theme, damage)
             {
                 Some(ComboAction::Selected { index }) => {
                     self.grouping.set_selected(index);
@@ -1981,7 +2035,7 @@ impl SectionView for TasksSection {
         None
     }
 
-    fn apply_focus_marks(&mut self, focused: bool) {
+    fn apply_focus_marks(&mut self, focused: bool, sweep: &mut FocusSweep<'_, '_>) {
         let (stop, action) = (self.focus, self.action);
         let row_focus = self.focused_row();
         let rail_focus = self.focused_rail();
@@ -1990,8 +2044,7 @@ impl SectionView for TasksSection {
         self.filters
             .set_current((focused && stop == STOP_FILTERS).then_some(action));
         self.search.set_focused(focused && stop == STOP_SEARCH);
-        self.header
-            .set_focus((focused && stop == STOP_SORT).then_some(action));
+        self.mark_header((focused && stop == STOP_SORT).then_some(action), sweep);
         self.grouping
             .set_focused(focused && footer_focus == Some(STOP_GROUPING));
         self.auto_refresh
@@ -2006,9 +2059,10 @@ impl SectionView for TasksSection {
         }
 
         let slot = focused.then_some(rail_focus).flatten();
-        // Focus marking runs off the keyboard path, which has no layout, so
-        // the rail has no rectangle to report here.
-        self.rail.set_focus(slot, Rect::EMPTY, &mut damage::sink());
+        let rail = sweep
+            .ctx
+            .and_then(|ctx| Self::rail_content(&ctx.frame, &self.rail_panel, ctx.scale, ctx.theme));
+        sweep.rail(&mut self.rail, slot, rail);
         for (index, button) in self.rail.items_mut().iter_mut().enumerate() {
             button.set_focused(slot == Some(index));
             button.set_in_focus_field(focused);
@@ -2046,15 +2100,14 @@ impl SectionView for TasksSection {
         &mut self,
         event: &InputEvent,
         ctx: SectionCtx<'_>,
+        damage: &mut Region,
     ) -> Option<SectionOutcome> {
         if self.grouping.is_expanded() {
-            let field = Self::footer_split(&ctx.frame)
-                .grouping
-                .unwrap_or(ctx.frame.footer);
+            let field = Self::grouping_field(&ctx.frame);
             let popup = self.grouping_popup_rect(ctx);
             if let Some(ComboAction::Selected { index }) = self
                 .grouping
-                .on_pointer(event, field, popup, ctx.scale, ctx.theme)
+                .on_pointer(event, field, popup, ctx.scale, ctx.theme, damage)
             {
                 self.grouping.set_selected(index);
                 self.arrange();
@@ -2083,7 +2136,7 @@ impl SectionView for TasksSection {
         let popup = self.popup.as_mut()?;
         match popup
             .menu
-            .on_pointer(event, popup_rect, ctx.scale, ctx.theme)
+            .on_pointer(event, popup_rect, ctx.scale, ctx.theme, damage)
         {
             Some(MenuAction::Activated { index }) => self.resolve_activation(index),
             Some(MenuAction::Dismissed) => {
@@ -2096,15 +2149,30 @@ impl SectionView for TasksSection {
 
     /// Arrows move the popup's focus, Enter or Space activates the focused
     /// row, and Escape dismisses without emitting.
-    fn overlay_on_key(&mut self, key: Key) -> Option<SectionOutcome> {
+    fn overlay_on_key(
+        &mut self,
+        key: Key,
+        ctx: SectionCtx<'_>,
+        damage: &mut Region,
+    ) -> Option<SectionOutcome> {
         if self.grouping.is_expanded() {
-            if let Some(ComboAction::Selected { index }) = self.grouping.on_key(key) {
+            if let Some(ComboAction::Selected { index }) = self.grouping.on_key(
+                key,
+                Self::grouping_field(&ctx.frame),
+                self.grouping_popup_rect(ctx),
+                ctx.scale,
+                ctx.theme,
+                damage,
+            ) {
                 self.grouping.set_selected(index);
                 self.arrange();
             }
             return None;
         }
-        let action = self.popup.as_mut()?.menu.on_key(key);
+        let anchor = self.anchor_rect(ctx);
+        let popup = self.popup.as_mut()?;
+        let rect = Switchboard::popup_rect(&popup.menu, anchor, ctx.bounds, ctx.scale, ctx.theme);
+        let action = popup.menu.on_key(key, rect, ctx.scale, ctx.theme, damage);
         match action {
             Some(MenuAction::Activated { index }) => self.resolve_activation(index),
             Some(MenuAction::Dismissed) => {

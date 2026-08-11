@@ -596,12 +596,18 @@ trait SectionView {
 
     /// Move the within-row action cursor. The caller has already clamped it
     /// against [`focused_action_count`](Self::focused_action_count).
-    fn set_row_action(&mut self, index: usize);
+    fn set_row_action(&mut self, index: usize, sweep: &mut FocusSweep<'_, '_>);
 
-    /// Feed an activation key to the focused item's action-focused control. A
-    /// disabled or denied control refuses the key itself, so a refused
-    /// activation produces nothing.
-    fn activate_focused(&mut self, key: Key) -> Option<SectionOutcome>;
+    /// Feed an activation key to the focused item's action-focused control,
+    /// reporting every control whose drawn state the key changed into
+    /// `damage`. A disabled or denied control refuses the key itself, so a
+    /// refused activation produces nothing.
+    fn activate_focused(
+        &mut self,
+        key: Key,
+        ctx: SectionCtx<'_>,
+        damage: &mut Region,
+    ) -> Option<SectionOutcome>;
 
     /// Paint the section into its own regions.
     fn render(&self, surface: &mut Surface, ctx: SectionCtx<'_>);
@@ -631,7 +637,7 @@ trait SectionView {
     /// Every section is told, not just the one on show, so the rings of a
     /// section the reader has navigated away from are cleared rather than
     /// left lit under content nobody is looking at.
-    fn apply_focus_marks(&mut self, focused: bool);
+    fn apply_focus_marks(&mut self, focused: bool, sweep: &mut FocusSweep<'_, '_>);
 
     /// Whether this section holds the keyboard: an open popup or an in-flight
     /// inline edit of its own takes every key before the Tab-cycled regions
@@ -654,18 +660,26 @@ trait SectionView {
     fn render_overlay(&self, _surface: &mut Surface, _ctx: SectionCtx<'_>) {}
 
     /// Route a pointer event to this section's overlay while it
-    /// [`holds_pointer`](Self::holds_pointer).
+    /// [`holds_pointer`](Self::holds_pointer), reporting every control whose
+    /// drawn state the event changed into `damage`.
     fn overlay_on_pointer(
         &mut self,
         _event: &InputEvent,
         _ctx: SectionCtx<'_>,
+        _damage: &mut Region,
     ) -> Option<SectionOutcome> {
         None
     }
 
     /// Route a key to this section's overlay while it
-    /// [`holds_keyboard`](Self::holds_keyboard).
-    fn overlay_on_key(&mut self, _key: Key) -> Option<SectionOutcome> {
+    /// [`holds_keyboard`](Self::holds_keyboard), reporting every control whose
+    /// drawn state the key changed into `damage`.
+    fn overlay_on_key(
+        &mut self,
+        _key: Key,
+        _ctx: SectionCtx<'_>,
+        _damage: &mut Region,
+    ) -> Option<SectionOutcome> {
         None
     }
 
@@ -676,6 +690,51 @@ trait SectionView {
     /// overlay left standing would keep taking keys for content that is not
     /// on screen.
     fn dismiss_overlay(&mut self) {}
+}
+
+/// What a focus change marks its controls against.
+///
+/// An interactive path — a key, a pointer outcome — holds the frame it just
+/// laid out, so every mark reports the rectangle it repaints into that
+/// round's sink. A caller that is composing or rebuilding the composition —
+/// [`Switchboard::new`], a fresh sample, a section the host chose — has no
+/// frame and presents the whole surface, so it sweeps with no `ctx`: each
+/// mark is adopted and nothing is reported.
+struct FocusSweep<'a, 'b> {
+    ctx: Option<SectionCtx<'a>>,
+    damage: &'b mut Region,
+}
+
+impl<'a, 'b> FocusSweep<'a, 'b> {
+    /// A sweep from a path that holds the frame it laid out.
+    fn reporting(ctx: SectionCtx<'a>, damage: &'b mut Region) -> Self {
+        Self {
+            ctx: Some(ctx),
+            damage,
+        }
+    }
+
+    /// A sweep from a caller that presents the composition whole.
+    fn adopting(sink: &'b mut Region) -> Self {
+        Self {
+            ctx: None,
+            damage: sink,
+        }
+    }
+
+    /// Mark an action rail's focused command.
+    ///
+    /// `rect` is the rail's own content rectangle, resolved from this sweep's
+    /// frame by the section that seats it, or [`None`] when the frame is too
+    /// narrow to seat the rail at all — it is then drawn nowhere and the
+    /// empty rectangle reports nothing. A sweep with no frame is a rebuild
+    /// that presents the composition whole, so it adopts the mark instead.
+    fn rail(&mut self, rail: &mut ActionRail, index: Option<usize>, rect: Option<Rect>) {
+        match self.ctx {
+            Some(_) => rail.set_focus(index, rect.unwrap_or(Rect::EMPTY), self.damage),
+            None => rail.adopt_focus(index),
+        }
+    }
 }
 
 /// This application's Switchboard screen (`plans/NEW-SWITCHBOARD.md`).
@@ -922,7 +981,7 @@ impl Switchboard {
         for section in Section::ALL {
             self.section_mut(section).adopt(model);
         }
-        self.apply_focus_marks();
+        self.apply_focus_marks(&mut FocusSweep::adopting(&mut damage::sink()));
     }
 
     /// The currently selected section.
@@ -980,7 +1039,10 @@ impl Switchboard {
     ///
     /// [`scroll_offset`]: Switchboard::scroll_offset
     pub fn select_section(&mut self, section: Section) -> Option<SwitchboardAction> {
-        self.select_section_index(section.index())
+        self.select_section_index(
+            section.index(),
+            &mut FocusSweep::adopting(&mut damage::sink()),
+        )
     }
 
     /// The physical height of one list-row item (a control plus a gap).
@@ -1402,11 +1464,13 @@ impl Switchboard {
         if self.active().holds_pointer() {
             let layout = self.compute_layout(bounds, scale, theme);
             let ctx = self.section_ctx(&layout, bounds, scale, theme, font);
-            let outcome = self.active_mut().overlay_on_pointer(event, ctx);
-            return outcome.and_then(|outcome| self.resolve_outcome(outcome));
+            let outcome = self
+                .active_mut()
+                .overlay_on_pointer(event, ctx, &mut damage);
+            return outcome.and_then(|outcome| self.resolve_outcome(outcome, ctx, &mut damage));
         }
         if self.section_menu.is_some() {
-            return self.section_menu_on_pointer(event, bounds, scale, theme);
+            return self.section_menu_on_pointer(event, bounds, scale, theme, font, &mut damage);
         }
 
         self.sync_scroll(bounds, scale, theme);
@@ -1414,7 +1478,9 @@ impl Switchboard {
 
         // The mouse wheel scrolls the active section (spec §17 / no deferral).
         if let InputEvent::PointerScrolled { dx, dy } = event {
-            if let Some(ScrollAction::ScrollTo { offset }) = self.scroll.wheel(*dx, *dy) {
+            if let Some(ScrollAction::ScrollTo { offset }) =
+                self.scroll.wheel(*dx, *dy, layout.scroll, &mut damage)
+            {
                 self.offsets[self.section.index()] = offset;
                 return Some(SwitchboardAction::Scrolled { offset });
             }
@@ -1423,7 +1489,8 @@ impl Switchboard {
 
         // The scrollbar.
         if let Some(ScrollAction::ScrollTo { offset }) =
-            self.scroll.on_pointer(event, layout.scroll, scale, theme)
+            self.scroll
+                .on_pointer(event, layout.scroll, scale, theme, &mut damage)
         {
             self.offsets[self.section.index()] = offset;
             return Some(SwitchboardAction::Scrolled { offset });
@@ -1434,7 +1501,8 @@ impl Switchboard {
         let band = self.band(layout.location, theme, scale);
         let (trail, command) = (band.trail, band.command);
         if let Some(BreadcrumbAction::Activate { .. }) =
-            self.trail.on_pointer(event, trail, scale, theme)
+            self.trail
+                .on_pointer(event, trail, scale, theme, &mut damage)
         {
             self.open_section_menu();
             return None;
@@ -1449,16 +1517,21 @@ impl Switchboard {
         // The active section's content.
         let ctx = self.section_ctx(&layout, bounds, scale, theme, font);
         let outcome = self.active_mut().on_pointer(event, ctx, &mut damage);
-        outcome.and_then(|outcome| self.resolve_outcome(outcome))
+        outcome.and_then(|outcome| self.resolve_outcome(outcome, ctx, &mut damage))
     }
 
     /// Turn what a section reported into the action a host sees, running the
     /// composition-wide transitions a section may ask for but never perform
     /// itself.
-    fn resolve_outcome(&mut self, outcome: SectionOutcome) -> Option<SwitchboardAction> {
+    fn resolve_outcome(
+        &mut self,
+        outcome: SectionOutcome,
+        ctx: SectionCtx<'_>,
+        damage: &mut Region,
+    ) -> Option<SwitchboardAction> {
         match outcome {
             SectionOutcome::Action(action) => Some(action),
-            SectionOutcome::ShowTask { task } => self.show_task(task),
+            SectionOutcome::ShowTask { task } => self.show_task(task, ctx, damage),
         }
     }
 
@@ -1468,15 +1541,21 @@ impl Switchboard {
     /// This runs the one section transition and the one focus arithmetic every
     /// other route runs, so the Pressure section's "Show tasks" relief cannot
     /// leave the trail, the content and the offsets disagreeing.
-    fn show_task(&mut self, task: Option<usize>) -> Option<SwitchboardAction> {
-        let action = self.select_section_index(Section::Tasks.index());
+    fn show_task(
+        &mut self,
+        task: Option<usize>,
+        ctx: SectionCtx<'_>,
+        damage: &mut Region,
+    ) -> Option<SwitchboardAction> {
+        let mut sweep = FocusSweep::reporting(ctx, damage);
+        let action = self.select_section_index(Section::Tasks.index(), &mut sweep);
         let last = self.tasks.item_count().saturating_sub(1);
         let row = task.unwrap_or(0).min(last);
         let focus = self.tasks.focus_index_for_row(row);
         self.tasks.set_content_focus(focus);
-        self.tasks.set_row_action(0);
+        self.tasks.set_row_action(0, &mut sweep);
         self.ensure_focus_visible();
-        self.apply_focus_marks();
+        self.apply_focus_marks(&mut sweep);
         action
     }
 
@@ -1496,6 +1575,8 @@ impl Switchboard {
         bounds: Rect,
         scale: Scale,
         theme: &Theme,
+        font: BitmapFont,
+        damage: &mut Region,
     ) -> Option<SwitchboardAction> {
         let layout = self.compute_layout(bounds, scale, theme);
         let menu = self.section_menu.as_ref()?;
@@ -1512,8 +1593,11 @@ impl Switchboard {
         }
 
         let menu = self.section_menu.as_mut()?;
-        match menu.on_pointer(event, rect, scale, theme) {
-            Some(MenuAction::Activated { index }) => self.choose_section_row(index),
+        match menu.on_pointer(event, rect, scale, theme, damage) {
+            Some(MenuAction::Activated { index }) => {
+                let ctx = self.section_ctx(&layout, bounds, scale, theme, font);
+                self.choose_section_row(index, ctx, damage)
+            }
             Some(MenuAction::Dismissed) => {
                 self.section_menu = None;
                 None
@@ -1523,11 +1607,20 @@ impl Switchboard {
     }
 
     /// Route a key to the open section list, closing it on a choice or a
-    /// dismissal.
-    fn section_menu_on_key(&mut self, key: Key) -> Option<SwitchboardAction> {
-        let action = self.section_menu.as_mut()?.on_key(key);
+    /// dismissal. The one anchor is the location band both routes opened it
+    /// from, so the list reports the same rectangle it is drawn in.
+    fn section_menu_on_key(
+        &mut self,
+        key: Key,
+        ctx: SectionCtx<'_>,
+        damage: &mut Region,
+    ) -> Option<SwitchboardAction> {
+        let layout = self.compute_layout(ctx.bounds, ctx.scale, ctx.theme);
+        let menu = self.section_menu.as_mut()?;
+        let rect = Self::popup_rect(menu, layout.location, ctx.bounds, ctx.scale, ctx.theme);
+        let action = menu.on_key(key, rect, ctx.scale, ctx.theme, damage);
         match action {
-            Some(MenuAction::Activated { index }) => self.choose_section_row(index),
+            Some(MenuAction::Activated { index }) => self.choose_section_row(index, ctx, damage),
             Some(MenuAction::Dismissed) => {
                 self.section_menu = None;
                 None
@@ -1538,9 +1631,14 @@ impl Switchboard {
 
     /// Apply a choice from the section list: the list closes either way, and an
     /// out-of-range row changes nothing (fail closed).
-    fn choose_section_row(&mut self, index: usize) -> Option<SwitchboardAction> {
+    fn choose_section_row(
+        &mut self,
+        index: usize,
+        ctx: SectionCtx<'_>,
+        damage: &mut Region,
+    ) -> Option<SwitchboardAction> {
         self.section_menu = None;
-        self.select_section_index(index)
+        self.select_section_index(index, &mut FocusSweep::reporting(ctx, damage))
     }
 
     /// Feed one key event, returning the typed action it produced (if any).
@@ -1556,17 +1654,30 @@ impl Switchboard {
     /// band, Space or Enter opens the section list, Up/Down walk it, and Enter
     /// shows the section under the cursor — the [`Menu`]'s own keys, with
     /// Escape closing it and leaving the section as it was.
-    pub fn on_key(&mut self, key: Key) -> Option<SwitchboardAction> {
+    pub fn on_key(
+        &mut self,
+        key: Key,
+        bounds: Rect,
+        scale: Scale,
+        theme: &Theme,
+        font: BitmapFont,
+    ) -> Option<SwitchboardAction> {
+        // One sink for the whole round: every control this key reaches
+        // reports into it.
+        let mut damage = damage::sink();
+        let layout = self.compute_layout(bounds, scale, theme);
+        let ctx = self.section_ctx(&layout, bounds, scale, theme, font);
+
         if self.active().holds_keyboard() {
-            let outcome = self.active_mut().overlay_on_key(key);
-            return outcome.and_then(|outcome| self.resolve_outcome(outcome));
+            let outcome = self.active_mut().overlay_on_key(key, ctx, &mut damage);
+            return outcome.and_then(|outcome| self.resolve_outcome(outcome, ctx, &mut damage));
         }
         if self.section_menu.is_some() {
-            return self.section_menu_on_key(key);
+            return self.section_menu_on_key(key, ctx, &mut damage);
         }
         if key == Key::Named(NamedKey::Tab) {
             self.focus = self.focus.next();
-            self.apply_focus_marks();
+            self.apply_focus_marks(&mut FocusSweep::reporting(ctx, &mut damage));
             return None;
         }
         match self.focus {
@@ -1575,19 +1686,22 @@ impl Switchboard {
             // trailing command is the same command for the pointer, so giving
             // it its own stop would be a second stop for one action.
             FocusRegion::Location => {
-                if let Some(BreadcrumbAction::Activate { .. }) = self.trail.on_key(key) {
+                let trail = self.band(layout.location, theme, scale).trail;
+                if let Some(BreadcrumbAction::Activate { .. }) =
+                    self.trail.on_key(key, trail, scale, theme, &mut damage)
+                {
                     self.open_section_menu();
                 }
                 None
             }
-            FocusRegion::Scrollbar => match self.scroll.on_key(key) {
+            FocusRegion::Scrollbar => match self.scroll.on_key(key, layout.scroll, &mut damage) {
                 Some(ScrollAction::ScrollTo { offset }) => {
                     self.offsets[self.section.index()] = offset;
                     Some(SwitchboardAction::Scrolled { offset })
                 }
                 None => None,
             },
-            FocusRegion::Content => self.content_on_key(key),
+            FocusRegion::Content => self.content_on_key(key, ctx, &mut damage),
         }
     }
 
@@ -1595,7 +1709,12 @@ impl Switchboard {
     /// (resetting the action focus to the row's first button), Left/Right
     /// move the action focus along the row's buttons, and Enter/Space
     /// activate the action-focused button.
-    fn content_on_key(&mut self, key: Key) -> Option<SwitchboardAction> {
+    fn content_on_key(
+        &mut self,
+        key: Key,
+        ctx: SectionCtx<'_>,
+        damage: &mut Region,
+    ) -> Option<SwitchboardAction> {
         let count = self.active().focus_span();
         if count == 0 {
             return None;
@@ -1603,32 +1722,38 @@ impl Switchboard {
         match key {
             Key::Named(NamedKey::Down) => {
                 let next = (self.active().content_focus() + 1).min(count - 1);
-                self.move_content_focus(next);
+                self.move_content_focus(next, ctx, damage);
                 None
             }
             Key::Named(NamedKey::Up) => {
                 let next = self.active().content_focus().saturating_sub(1);
-                self.move_content_focus(next);
+                self.move_content_focus(next, ctx, damage);
                 None
             }
             Key::Named(NamedKey::Right) => {
                 let last = self.active().focused_action_count().saturating_sub(1);
                 let next = (self.active().row_action() + 1).min(last);
-                self.active_mut().set_row_action(next);
-                self.apply_focus_marks();
+                self.move_row_action(next, ctx, damage);
                 None
             }
             Key::Named(NamedKey::Left) => {
                 let next = self.active().row_action().saturating_sub(1);
-                self.active_mut().set_row_action(next);
-                self.apply_focus_marks();
+                self.move_row_action(next, ctx, damage);
                 None
             }
             _ => {
-                let outcome = self.active_mut().activate_focused(key)?;
-                self.resolve_outcome(outcome)
+                let outcome = self.active_mut().activate_focused(key, ctx, damage)?;
+                self.resolve_outcome(outcome, ctx, damage)
             }
         }
+    }
+
+    /// Put the within-row action cursor on `index` of the active section and
+    /// re-apply the focus marks.
+    fn move_row_action(&mut self, index: usize, ctx: SectionCtx<'_>, damage: &mut Region) {
+        let mut sweep = FocusSweep::reporting(ctx, damage);
+        self.active_mut().set_row_action(index, &mut sweep);
+        self.apply_focus_marks(&mut sweep);
     }
 
     /// Put the content cursor on `index` of the active section: the action
@@ -1638,11 +1763,12 @@ impl Switchboard {
     /// Both arrow keys move the cursor through here, so "keep the focused item
     /// visible" is one definition rather than one per direction or per
     /// section.
-    fn move_content_focus(&mut self, index: usize) {
+    fn move_content_focus(&mut self, index: usize, ctx: SectionCtx<'_>, damage: &mut Region) {
+        let mut sweep = FocusSweep::reporting(ctx, damage);
         self.active_mut().set_content_focus(index);
-        self.active_mut().set_row_action(0);
+        self.active_mut().set_row_action(0, &mut sweep);
         self.ensure_focus_visible();
-        self.apply_focus_marks();
+        self.apply_focus_marks(&mut sweep);
     }
 
     /// The one section transition: every path that changes the shown section —
@@ -1656,7 +1782,11 @@ impl Switchboard {
     /// against the new content by the next scroll sync. Re-selecting the shown
     /// section is a no-op, and an out-of-range index changes nothing (fail
     /// closed); both report no change.
-    fn select_section_index(&mut self, index: usize) -> Option<SwitchboardAction> {
+    fn select_section_index(
+        &mut self,
+        index: usize,
+        sweep: &mut FocusSweep<'_, '_>,
+    ) -> Option<SwitchboardAction> {
         let section = Section::from_index(index)?;
         if section == self.section {
             return None;
@@ -1671,8 +1801,8 @@ impl Switchboard {
         self.section = section;
         self.trail = Self::build_trail(section);
         self.active_mut().set_content_focus(0);
-        self.active_mut().set_row_action(0);
-        self.apply_focus_marks();
+        self.active_mut().set_row_action(0, sweep);
+        self.apply_focus_marks(sweep);
         Some(SwitchboardAction::SectionChanged { section })
     }
 
@@ -1709,22 +1839,35 @@ impl Switchboard {
     /// what makes a row read as a related set rather than as one lit button
     /// beside some unrelated neighbours, and it is why membership is set from
     /// the same `focus_here` fact the ring is — the two can never disagree.
-    fn apply_focus_marks(&mut self) {
+    fn apply_focus_marks(&mut self, sweep: &mut FocusSweep<'_, '_>) {
         // The trail's leading crumb is the band's one keyboard stop; the
         // trailing crumb is the current location a breadcrumb never focuses.
-        self.trail
-            .set_focus((self.focus == FocusRegion::Location).then_some(0));
+        let crumb = (self.focus == FocusRegion::Location).then_some(0);
+        match sweep.ctx {
+            Some(ctx) => {
+                let layout = self.compute_layout(ctx.bounds, ctx.scale, ctx.theme);
+                let trail = self.band(layout.location, ctx.theme, ctx.scale).trail;
+                self.trail
+                    .set_focus(crumb, trail, ctx.scale, ctx.theme, sweep.damage);
+            }
+            None => self.trail.adopt_focus(crumb),
+        }
         self.scroll
             .set_focused(self.focus == FocusRegion::Scrollbar);
 
         // Every section is told, so the one on show lights its focused item
         // and the five behind it are cleared rather than left glowing under
-        // content nobody is looking at.
+        // content nobody is looking at. Only the one on show is drawn, so only
+        // its marks have a rectangle to report.
         let content = self.focus == FocusRegion::Content;
         let active = self.section;
         for section in Section::ALL {
-            self.section_mut(section)
-                .apply_focus_marks(content && section == active);
+            if section == active {
+                self.section_mut(section).apply_focus_marks(content, sweep);
+            } else {
+                self.section_mut(section)
+                    .apply_focus_marks(false, &mut FocusSweep::adopting(&mut damage::sink()));
+            }
         }
     }
 }

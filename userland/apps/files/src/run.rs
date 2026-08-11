@@ -93,7 +93,7 @@ mod program {
         build_context_menu, build_delete_dialog, build_open_with_menu, context_menu_command_at,
         delete_dialog_action_at, draw_context_menu, draw_delete_dialog, draw_owner_control,
         draw_progress_dialog, draw_properties_editable, manager_tool_at, open_with_index_at,
-        owner_field_at, permission_cell_at, render, scroll_pointer, OwnerField,
+        owner_editor_rect, owner_field_at, permission_cell_at, render, scroll_pointer, OwnerField,
         DELETE_CANCEL_INDEX, DELETE_CONFIRM_INDEX,
     };
     use tairix_browse::{
@@ -107,6 +107,7 @@ mod program {
         RenameError, ToolbarCommand, TrashStrategy, VfsDirectorySource, ViewMode, Volume, VolumeId,
         MANAGER_TOOLS, WIN_HEIGHT, WIN_RESIZABLE, WIN_WIDTH,
     };
+    use tairix_controls::damage;
     use tairix_controls::decision::Dialog;
     use tairix_controls::text::{TextAction, TextField};
     use tairix_controls::Menu;
@@ -1477,8 +1478,11 @@ mod program {
             i32::try_from(*y).unwrap_or(i32::MAX),
         );
         let mut scrolled = None;
+        let mut damage = damage::sink();
         for input in pointer_input_events(*action, point) {
-            if let Some(repaint) = scroll_pointer(browser, scale, theme, viewport, point, &input) {
+            if let Some(repaint) =
+                scroll_pointer(browser, scale, theme, viewport, point, &input, &mut damage)
+            {
                 scrolled = Some(scrolled.unwrap_or(false) || repaint);
             }
         }
@@ -1529,11 +1533,7 @@ mod program {
                     key: KeyInput::Pressed { key, modifiers },
                     ..
                 } => apply_owner_edit_key(
-                    browser,
-                    &mut overlays.properties,
-                    &mut overlays.owner,
-                    *key,
-                    *modifiers,
+                    browser, overlays, *key, *modifiers, scale, theme, viewport,
                 ),
                 _ => (false, false),
             });
@@ -3529,27 +3529,38 @@ mod program {
     /// id so a non-numeric or out-of-range value is flagged as the user types.
     fn apply_owner_edit_key<S: DirectorySource>(
         browser: &mut Browser<S>,
-        properties: &mut Option<Properties>,
-        owner: &mut Option<OwnerEditor>,
+        overlays: &mut Overlays,
         key: KeyValue,
         modifiers: AbiModifiers,
+        scale: Scale,
+        theme: &Theme,
+        viewport: Rect,
     ) -> (bool, bool) {
         let (editor_key, mods) = to_editor_key(key, modifiers);
-        let action = match owner.as_mut() {
-            Some(ed) => ed.editor.on_key(editor_key, mods),
-            None => return (false, false),
+        let Some(ed) = overlays.owner.as_mut() else {
+            return (false, false);
         };
+        // The rectangle the shared owner control draws this editor at; a row
+        // that does not fit is drawn nowhere and so reports nothing.
+        let bounds = overlays
+            .properties
+            .as_ref()
+            .and_then(|props| owner_editor_rect(props, viewport, scale, theme, ed.field))
+            .unwrap_or(Rect::EMPTY);
+        let action = ed
+            .editor
+            .on_key(editor_key, mods, bounds, &mut damage::sink());
         match action {
-            Some(TextAction::Submitted) => commit_owner_edit(browser, properties, owner),
+            Some(TextAction::Submitted) => {
+                commit_owner_edit(browser, &mut overlays.properties, &mut overlays.owner)
+            }
             Some(TextAction::Cancelled) => {
-                *owner = None;
+                overlays.owner = None;
                 (true, false)
             }
             Some(TextAction::Edited) => {
-                if let Some(ed) = owner.as_mut() {
-                    let text = ed.editor.text().to_string();
-                    ed.editor.set_message(owner_id_message(&text));
-                }
+                let text = ed.editor.text().to_string();
+                ed.editor.set_message(owner_id_message(&text));
                 (true, false)
             }
             None => (false, false),
@@ -3633,8 +3644,10 @@ mod program {
         modifiers: AbiModifiers,
     ) -> (bool, bool) {
         let (editor_key, mods) = to_editor_key(key, modifiers);
+        let bounds = tairix_browse::render::selection_rect(browser, scale, theme, viewport)
+            .unwrap_or(Rect::EMPTY);
         let action = match rename.as_mut() {
-            Some(field) => field.on_key(editor_key, mods),
+            Some(field) => field.on_key(editor_key, mods, bounds, &mut damage::sink()),
             None => return (false, false),
         };
         match action {

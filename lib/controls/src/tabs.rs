@@ -19,11 +19,12 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use tairix_font::BitmapFont;
-use tairix_geometry::{Point, Rect, Scale};
+use tairix_geometry::{Point, Rect, Region, Scale};
 use tairix_input::{InputEvent, Key, NamedKey, PointerButton};
 use tairix_raster::{Color, Surface};
 use tairix_theme::{TextRole, Theme};
 
+use crate::damage;
 use crate::paint::{
     draw_outline, heavy_contrast, paint_bead, plate_border, role_font, seam_thickness, seam_width,
     surface_rect, to_i32, BeadShape,
@@ -359,6 +360,14 @@ impl Tabs {
         }
     }
 
+    /// Tab `index`'s area within `bounds`, or `None` if it collapses — the
+    /// rectangle a moved mark reports, in the coordinates the host laid the
+    /// strip out in.
+    fn tab_area(&self, index: usize, bounds: Rect) -> Option<Rect> {
+        let (x, y, w, h) = self.tab_rect(index, bounds)?;
+        Some(Rect::new(to_i32(x), to_i32(y), w, h))
+    }
+
     /// The tab index under `point`, if any, for the given bounds.
     #[must_use]
     pub fn tab_at(&self, bounds: Rect, point: Point) -> Option<usize> {
@@ -562,19 +571,48 @@ impl Tabs {
             .then_some(TabsAction::Selected { index })
     }
 
+    /// Put the keyboard cursor on `next`, reporting the tab it left and the tab
+    /// it arrives on rather than the whole strip.
+    fn move_current(&mut self, next: usize, bounds: Rect, damage: &mut Region) {
+        let next = Some(next);
+        if damage::move_mark(
+            self.current,
+            next,
+            |index| self.tab_area(index, bounds),
+            damage,
+        ) {
+            self.current = next;
+        }
+    }
+
     /// Feed a pointer event; the tab under the pointer lifts and a completed
     /// primary click selects it.
     ///
     /// A press moves no pointer, so it states nothing new about where the
     /// pointer is; it only arms the tab it landed on.
-    pub fn on_pointer(&mut self, event: &InputEvent, bounds: Rect) -> Option<TabsAction> {
+    ///
+    /// A lift that moves reports the two tabs it moved between; a sample that
+    /// stays on one tab reports nothing.
+    pub fn on_pointer(
+        &mut self,
+        event: &InputEvent,
+        bounds: Rect,
+        damage: &mut Region,
+    ) -> Option<TabsAction> {
         if let InputEvent::PointerMoved { to } = event {
             *self.pointer = *to;
         }
         let over = self.tab_at(bounds, *self.pointer);
         match event {
             InputEvent::PointerMoved { .. } => {
-                if self.armed.is_none() {
+                if self.armed.is_none()
+                    && damage::move_mark(
+                        self.hovered,
+                        over,
+                        |index| self.tab_area(index, bounds),
+                        damage,
+                    )
+                {
                     self.hovered = over;
                 }
                 None
@@ -600,12 +638,14 @@ impl Tabs {
 
     /// Feed a key event: Left/Right move the current tab (wrapping) in a
     /// horizontal strip, Up/Down do the same in a vertical one, Home/End jump
-    /// to the ends in either, and Enter/Space select the current tab.
+    /// to the ends in either, and Enter/Space select the current tab. A moved
+    /// cursor reports the two tabs it moved between; selecting reports nothing,
+    /// because the strip draws the selection its owner sets.
     ///
     /// The two arrow pairs are deliberately exclusive to their own axis: a
     /// vertical strip ignores Left/Right and a horizontal one ignores Up/Down,
     /// so a reader is never misled into thinking the wrong arrows move it.
-    pub fn on_key(&mut self, key: Key) -> Option<TabsAction> {
+    pub fn on_key(&mut self, key: Key, bounds: Rect, damage: &mut Region) -> Option<TabsAction> {
         if self.items.is_empty() {
             return None;
         }
@@ -620,7 +660,7 @@ impl Tabs {
                     Some(i) if i < last => i + 1,
                     _ => 0,
                 };
-                self.current = Some(next);
+                self.move_current(next, bounds, damage);
                 None
             }
             Key::Named(named) if named == backward => {
@@ -628,15 +668,15 @@ impl Tabs {
                     Some(0) | None => last,
                     Some(i) => i - 1,
                 };
-                self.current = Some(prev);
+                self.move_current(prev, bounds, damage);
                 None
             }
             Key::Named(NamedKey::Home) => {
-                self.current = Some(0);
+                self.move_current(0, bounds, damage);
                 None
             }
             Key::Named(NamedKey::End) => {
-                self.current = Some(last);
+                self.move_current(last, bounds, damage);
                 None
             }
             Key::Named(NamedKey::Enter) | Key::Char(' ') => self.choose(self.current?),

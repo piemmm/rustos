@@ -1727,6 +1727,7 @@ fn scrollbar_bounds_matches_the_reserved_gutter() {
 #[test]
 fn scrollbar_click_on_the_increment_button_scrolls_down() {
     use crate::render::{row_height, scroll_pointer, scrollbar_bounds};
+    use tairix_controls::damage::sink;
     use tairix_geometry::Point;
     use tairix_input::{InputEvent, PointerButton};
 
@@ -1749,7 +1750,15 @@ fn scrollbar_click_on_the_increment_button_scrolls_down() {
         button: PointerButton::Primary,
     };
     assert_eq!(
-        scroll_pointer(&mut browser, Scale::ONE, &theme, vp, down, &press),
+        scroll_pointer(
+            &mut browser,
+            Scale::ONE,
+            &theme,
+            vp,
+            down,
+            &press,
+            &mut sink()
+        ),
         Some(true)
     );
     assert_eq!(browser.scroll_offset(), 1);
@@ -1758,7 +1767,15 @@ fn scrollbar_click_on_the_increment_button_scrolls_down() {
     // the content (the helper reports it did not consume it).
     let off = Point::new(10, bounds.top() + 4);
     assert_eq!(
-        scroll_pointer(&mut browser, Scale::ONE, &theme, vp, off, &press),
+        scroll_pointer(
+            &mut browser,
+            Scale::ONE,
+            &theme,
+            vp,
+            off,
+            &press,
+            &mut sink()
+        ),
         None
     );
 }
@@ -1766,6 +1783,7 @@ fn scrollbar_click_on_the_increment_button_scrolls_down() {
 #[test]
 fn scrollbar_thumb_drag_scrolls_and_release_ends_the_capture() {
     use crate::render::{row_height, scroll_model, scroll_pointer, scrollbar_bounds};
+    use tairix_controls::damage::sink;
     use tairix_controls::{ScrollBar, ScrollOrientation, ScrollPart};
     use tairix_geometry::Point;
     use tairix_input::{InputEvent, PointerButton};
@@ -1804,7 +1822,8 @@ fn scrollbar_thumb_drag_scrolls_and_release_ends_the_capture() {
             &theme,
             vp,
             Point::new(cx, thumb_y),
-            &press
+            &press,
+            &mut sink()
         ),
         Some(true)
     );
@@ -1814,7 +1833,15 @@ fn scrollbar_thumb_drag_scrolls_and_release_ends_the_capture() {
     let to = Point::new(cx, bounds.bottom() - 2);
     let moved = InputEvent::PointerMoved { to };
     assert_eq!(
-        scroll_pointer(&mut browser, Scale::ONE, &theme, vp, to, &moved),
+        scroll_pointer(
+            &mut browser,
+            Scale::ONE,
+            &theme,
+            vp,
+            to,
+            &moved,
+            &mut sink()
+        ),
         Some(true)
     );
     assert!(browser.scroll_offset() > 0);
@@ -1825,7 +1852,15 @@ fn scrollbar_thumb_drag_scrolls_and_release_ends_the_capture() {
         button: PointerButton::Primary,
     };
     assert_eq!(
-        scroll_pointer(&mut browser, Scale::ONE, &theme, vp, to, &release),
+        scroll_pointer(
+            &mut browser,
+            Scale::ONE,
+            &theme,
+            vp,
+            to,
+            &release,
+            &mut sink()
+        ),
         Some(true)
     );
     let off = InputEvent::PointerMoved {
@@ -1838,7 +1873,8 @@ fn scrollbar_thumb_drag_scrolls_and_release_ends_the_capture() {
             &theme,
             vp,
             Point::new(10, bounds.top() + 3),
-            &off
+            &off,
+            &mut sink()
         ),
         None
     );

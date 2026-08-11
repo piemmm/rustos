@@ -197,11 +197,7 @@ fn different_commands_replace_the_rail() {
 #[test]
 fn restating_keeps_the_rails_focus() {
     let mut rail = ActionRail::new(alloc::vec![command("Pause"), command("Cancel")]);
-    rail.set_focus(
-        Some(1),
-        tairix_geometry::Rect::EMPTY,
-        &mut tairix_controls::damage::sink(),
-    );
+    rail.adopt_focus(Some(1));
     restate_rail(&mut rail, alloc::vec![command("Pause"), command("Cancel")]);
     assert_eq!(rail.focus(), Some(1));
 }

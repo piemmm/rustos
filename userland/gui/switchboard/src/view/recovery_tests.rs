@@ -16,8 +16,8 @@ use tairix_controls::{
 
 use super::{FaultImpact, FaultPage, RecoveryControl};
 use crate::view::test_support::{
-    bounds, card_body_centre, card_slot, centre, click, fault_crash, fault_id, font, has_ink,
-    model, recovery_item,
+    activate, bounds, card_body_centre, card_slot, centre, click, fault_crash, fault_id, font,
+    has_ink, key, model, recovery_item,
 };
 use crate::view::{
     resolve_section_frame, Reading, Section, SectionFrame, SectionView, Switchboard,
@@ -187,19 +187,19 @@ fn keyboard_reaches_the_recovery_force_action() {
     sb.select_section(Section::Recovery);
     // The cursor now walks every fault card, then the detail pane's page
     // strip, then the rail, so Enter on a card only selects that fault.
-    assert_eq!(sb.on_key(Key::Named(NamedKey::Enter)), None);
-    assert_eq!(sb.on_key(Key::Named(NamedKey::Down)), None);
-    assert_eq!(sb.on_key(Key::Named(NamedKey::Down)), None);
+    assert_eq!(key(&mut sb, Key::Named(NamedKey::Enter)), None);
+    assert_eq!(key(&mut sb, Key::Named(NamedKey::Down)), None);
+    assert_eq!(key(&mut sb, Key::Named(NamedKey::Down)), None);
     assert_eq!(
-        sb.on_key(Key::Named(NamedKey::Enter)),
+        key(&mut sb, Key::Named(NamedKey::Enter)),
         Some(SwitchboardAction::Recovery {
             index: 0,
             control: RecoveryControl::Restart
         })
     );
-    assert_eq!(sb.on_key(Key::Named(NamedKey::Down)), None);
+    assert_eq!(key(&mut sb, Key::Named(NamedKey::Down)), None);
     assert_eq!(
-        sb.on_key(Key::Named(NamedKey::Enter)),
+        key(&mut sb, Key::Named(NamedKey::Enter)),
         Some(SwitchboardAction::Recovery {
             index: 0,
             control: RecoveryControl::Force
@@ -428,7 +428,7 @@ fn enter_on_a_refused_rail_stop_dispatches_nothing() {
             sb.select_section(Section::Recovery);
             sb.recovery.set_content_focus(2 + slot);
             assert!(
-                sb.recovery.activate_focused(commit).is_none(),
+                activate(&mut sb, commit).is_none(),
                 "a refused command must refuse the keyboard exactly as it refuses \
                  the pointer (slot {slot})"
             );
@@ -468,12 +468,12 @@ fn the_cursor_reaches_every_fault_then_the_pages_then_every_command() {
 fn the_cursor_walks_the_page_strip_sideways() {
     let mut sb = one_fault();
     sb.select_section(Section::Recovery);
-    assert_eq!(sb.on_key(Key::Named(NamedKey::Down)), None);
-    assert_eq!(sb.on_key(Key::Named(NamedKey::Right)), None);
+    assert_eq!(key(&mut sb, Key::Named(NamedKey::Down)), None);
+    assert_eq!(key(&mut sb, Key::Named(NamedKey::Right)), None);
     assert_eq!(sb.recovery.page, FaultPage::CrashSnapshot);
-    assert_eq!(sb.on_key(Key::Named(NamedKey::Right)), None);
+    assert_eq!(key(&mut sb, Key::Named(NamedKey::Right)), None);
     assert_eq!(sb.recovery.page, FaultPage::Logs);
-    assert_eq!(sb.on_key(Key::Named(NamedKey::Left)), None);
+    assert_eq!(key(&mut sb, Key::Named(NamedKey::Left)), None);
     assert_eq!(sb.recovery.page, FaultPage::CrashSnapshot);
 }
 

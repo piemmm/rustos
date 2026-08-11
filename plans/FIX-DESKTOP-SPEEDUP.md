@@ -1,8 +1,9 @@
 # FIX-DESKTOP-SPEEDUP — Software-compositor and GUI redraw performance
 
-Status: **A done, B done, C mostly done, D done** (C.0, C.2, C.4b, C.4c, C.5
-landed; C.1 partly landed — the pointer path and the window furniture are in,
-the keyboard/value families remain; C.3 blocked on the rest of C.1; C.4a
+Status: **A done, B done, C mostly done, D done** (C.0, C.1, C.2, C.4b, C.4c,
+C.5 landed — every control family now reports what it repaints, from both the
+pointer and the keyboard path; C.3 is unblocked but needs the three
+non-reporting container-mark setters closed first (see C.1 and C.3); C.4a
 withdrawn as a performance item after measurement; D.1–D.4 and D.7 landed, D.5
 is a User decision, D.6 is a follow-up the measurement exposed).
 E planned.
@@ -334,13 +335,15 @@ Proof: a differential sweep applies random `add`/`subtract`/`clip` to the
 region and to a plain pixel grid, comparing the covered set and the
 canonical-form invariants after every step.
 
-### C.1 A damage sink in `lib/controls`  **[pointer path and window furniture in; keyboard/value families remain]**
+### C.1 A damage sink in `lib/controls`  **[done]**
 Controls had no dirty concept; the host's only signal was a `PartialEq`
 render gate that fails whole-surface. `lib/controls/src/damage.rs` is the
-seam: `sink()` hands out a `Region::with_budget(8)` and the one guarded
-write `damage::set(field, value, bounds, damage)` decides when a change is
-worth reporting, so no family invents its own rule. `RenderInvariant` fields
-report nothing, exactly as they fail to trip the render gate.
+seam: `sink()` hands out a `Region::with_budget(8)` and two guarded writes
+decide when a change is worth reporting, so no family invents its own rule —
+`damage::set(field, value, bounds, damage)` for one drawn field, and
+`damage::move_mark` for an index-valued mark a container draws on one child at
+a time. `RenderInvariant` fields report nothing, exactly as they fail to trip
+the render gate.
 
 The budget is 8 because a host pays twice per reported rectangle — once to
 re-render clipped to it, once to present it — and the compositor already
@@ -379,22 +382,70 @@ rectangles — it reports them (C.3: a resize, theme change, or first paint stil
 presents full). A `last` field per control would be a second, staler copy of
 the host's layout with no render path reading it (§2.3).
 
-**Remaining, and the reason C.3 is blocked.** These mutate drawn state and do
-not yet report: `TableHeader::set_focus`/`on_key`, `Menu` (which has a public
-`row_rect`, so it should report the two exact rows rather than the popup),
-`Tabs::on_key`, `Breadcrumb::on_key`, `ComboBox::on_key` (field *and* popup
-rects), both text fields' `on_key`, `ScrollBar`, and `Slider`.
+**The keyboard and value families are in.** `Slider`, `ScrollBar`, `Tabs`,
+`Menu`, `ComboBox`, `Breadcrumb`, `TableHeader` and both text fields now report
+from every input path, so a keystroke or a value drag costs what it changed:
 
-One host-side gap belongs with them. The Switchboard's keyboard path
-(`Switchboard::on_key` → `SectionView::activate_focused` /
-`apply_focus_marks`, and `rebuild_rail` on a model refresh) has **no layout**:
-it takes no bounds, scale or theme, and the panel retains no last frame, so
-its six `ActionRail::set_focus`/`on_key` sites pass `Rect::EMPTY` and report
-nothing. That is honest rather than a fabricated rectangle — an empty rect is
-a documented no-op on the region — but it is a gap, and closing it means
-threading layout through the public `Switchboard::on_key` and its focus
-callers. That is a design change for whoever finishes C.1, not something to
-smuggle into a call-site migration.
+- A second guarded write, `damage::move_mark`, is what keeps the five
+  index-marked families from each inventing a rule. A container draws such a
+  mark on one child at a time, so the two rectangles that change are the child
+  it leaves and the child it arrives on — the menu row, the tab, the crumb's
+  *cell*, the header column — never the strip or popup around them. It hands the
+  write back to its caller because the child rectangles are resolved from the
+  very container the mark is a field of.
+- The breadcrumb is the case that proves the rule needs the container: an
+  ancestor elided out of individual view is drawn on the *ellipsis*, so its ring
+  is reported there. `cell_shows` is now the one definition of "which cell shows
+  crumb *i*", read by both the render path and the report.
+- `ScrollBar` reports its whole bar, deliberately: its awake look (`dragging`,
+  `held`, hover, focus) is the whole bar, not the part under the pointer. Its
+  press and auto-repeat now share one `step_for` mapping, so a held button
+  cannot repeat a step other than the one it started with.
+- The text fields never compare their buffer to decide: the edit answers for
+  the text and the caret/anchor pair answers for the rest, so a secret field's
+  characters are not copied even into a temporary a comparison would drop.
+- A `ComboBox` reports its field and its popup separately, because they change
+  for different reasons — the popup on appearing or vacating, the field only
+  when the label it shows changes.
+
+**Where a report is still the host's.** A control reports every drawn change it
+makes itself; a change a *host* makes through a setter is the host's to report,
+since the host knows where it put the control. The exception is a mark a
+container draws on its own children, which only the container can name:
+`Breadcrumb::set_focus` and `TableHeader::set_focus` therefore take the layout
+and report. The remaining container-mark setters — `Tabs::set_current` /
+`set_selected`, `Menu::set_current`, `TableHeader::set_sort` — do not yet, and
+that is what C.3 must close before an app may present less than its surface: a
+host that applies a selection through one of them changes two children's plates
+with nothing reported.
+
+The Switchboard gap is closed rather than papered over, and closing it settled a
+question the plan had left open. Its keyboard path now threads the same layout
+its pointer path uses, so `Switchboard::on_key` and its focus callers — including
+the `ActionRail` sites that passed `Rect::EMPTY` — report real rectangles.
+
+Two dead ends are worth recording, because both look reasonable from a call site:
+
+- **A fabricated layout.** A first attempt handed the layout-less sites an inert
+  `(Rect::EMPTY, Scale::ONE, Theme::dark())`. It compiled and reported nothing
+  (each family resolves a child rectangle from the bounds, so the theme beside it
+  could not matter *today*) — and is exactly one read away from being silently
+  wrong. Rejected.
+- **Plumbing a live theme to the panel.** `apply_focus_marks` is also reached
+  from `Switchboard::new` and from a model refresh, where no window layout
+  exists: the panel's `RenderInputs` seam deliberately carries a `theme_id`, not
+  a `&Theme`, because it is a comparable snapshot. Threading a live theme through
+  that seam would have touched the service contract and ~150 call sites to report
+  rectangles **nothing consumes** — a construction or a rebuild presents the
+  panel whole by design.
+
+The answer is that a rebuild has nothing to report and should *say so*:
+`Breadcrumb::adopt_focus` / `TableHeader::adopt_focus` adopt the mark without a
+layout and without reporting, sharing the one admission rule with their reporting
+sibling so a rebuild cannot admit a focus the interactive path would refuse.
+`Switchboard::new` therefore keeps its signature and the initial ring still
+appears exactly when it did, so composition equality — and the repaint decision
+resting on it — is untouched.
 
 ### C.2 Enter/leave hover routing in containers  **[done]**
 `Toolbar`, `Panel`, `Rail`, `Decision` and the collection families now track
@@ -407,18 +458,23 @@ press; over-grabbing only routes further events to a child that ignores them,
 which is what fan-to-all already did. A `#[cfg(test)] fan_pointer` oracle
 keeps the old delivery as the differential reference.
 
-### C.3 Apps present the rect they changed  **[blocked on C.1 completing]**
+### C.3 Apps present the rect they changed  **[C.1 done; three setters left to close first]**
 
 **Do not land this until every model change reports damage.** These hosts
 re-render their whole surface, so a frame may legitimately change pixels no
-reported rectangle covers — a clock tick, an animation, a value update from
-one of the families C.1 has not reached yet. Presenting only the reported
-rects today would silently stop those pixels updating: a correctness
-regression, not an optimisation. The seam is in place (each host builds one
-`damage::sink()` per input round and threads it through), and the sink's
-rects are deliberately not consumed yet.
+reported rectangle covers — a clock tick, an animation, or a selection a host
+applies through one of the three container-mark setters that still report
+nothing (`Tabs::set_current`/`set_selected`, `Menu::set_current`,
+`TableHeader::set_sort`; see C.1). Presenting only the reported rects today
+would silently stop those pixels updating: a correctness regression, not an
+optimisation. The seam is in place (each host builds one `damage::sink()` per
+input round and threads it through), and the sink's rects are deliberately not
+consumed yet.
 
-When C.1 is complete: every app presents `DamageRect::full(mode)` today —
+Close those three the way the focus marks were closed — the setter takes the
+layout and reports, with an `adopt_focus`-style non-reporting form for a host
+that is rebuilding and presents whole — and then: every app presents
+`DamageRect::full(mode)` today —
 `files`, `terminal`, `viewer`, `wallpaper`, `widgets`, `switchboard`. The
 window ABI already carries a per-present `DamageRect` (`lib/window`
 `WindowClient::present`), so **no ABI change is required**: each app unions

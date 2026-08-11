@@ -36,6 +36,7 @@ use tairix_raster::{div255, round_rect_coverage, BlurScratch, Color, Surface};
 use tairix_theme::{Rgba, TextRole, Theme};
 
 use crate::button::{Button, ButtonAction};
+use crate::damage;
 use crate::paint::{
     dominant_color, draw_outline, foreground, grab_after, heavy_contrast, icon_slot_side, inset,
     key_activation, paint_bead, paint_chevron, paint_count_badge, paint_icon_slot, plate_border,
@@ -1137,8 +1138,69 @@ impl TableHeader {
 
     /// Focus `index` (or clear focus with `None`); an out-of-range index
     /// clears focus (fail closed).
-    pub fn set_focus(&mut self, index: Option<usize>) {
-        self.focus = index.filter(|&i| i < self.columns.len());
+    ///
+    /// The header reports the column the ring leaves and the column it arrives
+    /// on into `damage`. It takes the same layout inputs [`Self::render`] does,
+    /// because a column's rectangle is a function of the declared `columns`
+    /// widths and the shared leading/trailing reservation — something only the
+    /// header resolves.
+    pub fn set_focus(
+        &mut self,
+        index: Option<usize>,
+        bounds: Rect,
+        scale: Scale,
+        theme: &Theme,
+        columns: &[u32],
+        damage: &mut Region,
+    ) {
+        let next = self.focusable(index);
+        if damage::move_mark(
+            self.focus,
+            next,
+            |column| self.column_area(column, bounds, scale, theme, columns),
+            damage,
+        ) {
+            self.focus = next;
+        }
+    }
+
+    /// Adopt `index` as the focused column without reporting, for a caller that
+    /// is composing or rebuilding this header and presents it whole.
+    ///
+    /// [`set_focus`](Self::set_focus) is the interactive move and reports the
+    /// two columns the ring moves between. A rebuild has no layout to resolve a
+    /// column against and nothing to report against either, so it says so here
+    /// rather than passing widths and a theme it does not have.
+    pub fn adopt_focus(&mut self, index: Option<usize>) {
+        self.focus = self.focusable(index);
+    }
+
+    /// `index` if it names a declared column, else `None` — the one admission
+    /// rule both focus entry points apply.
+    fn focusable(&self, index: Option<usize>) -> Option<usize> {
+        index.filter(|&i| i < self.columns.len())
+    }
+
+    /// The rectangle column `index` occupies at `bounds`, or `None` when the
+    /// header lays it out nowhere — the forward mirror of
+    /// [`column_at`](Self::column_at) over the same spans, so a moved mark
+    /// reports exactly the column a reader sees it on.
+    fn column_area(
+        &self,
+        index: usize,
+        bounds: Rect,
+        scale: Scale,
+        theme: &Theme,
+        columns: &[u32],
+    ) -> Option<Rect> {
+        let (x, y, w, h) = surface_rect(bounds)?;
+        if w == 0 || h == 0 {
+            return None;
+        }
+        let (content_x, content_w) = row_content_span(scale, theme, x, w, h)?;
+        let &(cx, cw) =
+            column_spans(content_x, content_w, columns, self.columns.len()).get(index)?;
+        Some(Rect::new(to_i32(cx), to_i32(y), cw, h))
     }
 
     /// The scaled height the header needs, from the font's line height and
@@ -1411,32 +1473,46 @@ impl TableHeader {
 
     /// Feed a key event: Left/Right move the focused column (wrapping),
     /// Home/End jump to the ends, and Space/Enter sort the focused column.
-    pub fn on_key(&mut self, key: Key) -> Option<HeaderAction> {
+    ///
+    /// A moved ring reports the two columns it moved between; sorting reports
+    /// nothing, because the header draws the sort its owner commits
+    /// ([`set_sort`](Self::set_sort)), not the request.
+    pub fn on_key(
+        &mut self,
+        key: Key,
+        bounds: Rect,
+        scale: Scale,
+        theme: &Theme,
+        columns: &[u32],
+        damage: &mut Region,
+    ) -> Option<HeaderAction> {
         if self.columns.is_empty() {
             return None;
         }
         let last = self.columns.len() - 1;
         match key {
             Key::Named(NamedKey::Right) => {
-                self.focus = Some(match self.focus {
+                let next = match self.focus {
                     Some(i) if i < last => i + 1,
                     _ => 0,
-                });
+                };
+                self.set_focus(Some(next), bounds, scale, theme, columns, damage);
                 None
             }
             Key::Named(NamedKey::Left) => {
-                self.focus = Some(match self.focus {
+                let prev = match self.focus {
                     Some(0) | None => last,
                     Some(i) => i - 1,
-                });
+                };
+                self.set_focus(Some(prev), bounds, scale, theme, columns, damage);
                 None
             }
             Key::Named(NamedKey::Home) => {
-                self.focus = Some(0);
+                self.set_focus(Some(0), bounds, scale, theme, columns, damage);
                 None
             }
             Key::Named(NamedKey::End) => {
-                self.focus = Some(last);
+                self.set_focus(Some(last), bounds, scale, theme, columns, damage);
                 None
             }
             _ => {

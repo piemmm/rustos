@@ -20,6 +20,7 @@ use tairix_input::{InputEvent, Key, NamedKey, PointerButton};
 use tairix_raster::{Color, Pixel, Surface};
 use tairix_theme::{Rgba, Theme};
 
+use crate::damage::sink;
 use crate::state::{ActivityState, ControlState, SelectionState, ValidationState};
 use crate::tabs::{Tab, Tabs, TabsAction, TabsOrientation};
 use crate::testkit::high_contrast;
@@ -188,27 +189,29 @@ fn error_tab_shows_a_recovery_or_warning_bead() {
 #[test]
 fn left_and_right_move_the_current_tab_and_wrap() {
     let mut tabs = three_tabs();
-    tabs.on_key(Key::Named(NamedKey::Right));
+    let bounds = Rect::new(0, 0, W, H);
+    tabs.on_key(Key::Named(NamedKey::Right), bounds, &mut sink());
     assert_eq!(tabs.current(), Some(0));
-    tabs.on_key(Key::Named(NamedKey::Right));
-    tabs.on_key(Key::Named(NamedKey::Right));
+    tabs.on_key(Key::Named(NamedKey::Right), bounds, &mut sink());
+    tabs.on_key(Key::Named(NamedKey::Right), bounds, &mut sink());
     assert_eq!(tabs.current(), Some(2));
-    tabs.on_key(Key::Named(NamedKey::Right));
+    tabs.on_key(Key::Named(NamedKey::Right), bounds, &mut sink());
     assert_eq!(tabs.current(), Some(0));
-    tabs.on_key(Key::Named(NamedKey::Left));
+    tabs.on_key(Key::Named(NamedKey::Left), bounds, &mut sink());
     assert_eq!(tabs.current(), Some(2));
 }
 
 #[test]
 fn enter_selects_the_current_tab() {
     let mut tabs = three_tabs();
+    let bounds = Rect::new(0, 0, W, H);
     tabs.set_current(Some(2));
     assert_eq!(
-        tabs.on_key(Key::Named(NamedKey::Enter)),
+        tabs.on_key(Key::Named(NamedKey::Enter), bounds, &mut sink()),
         Some(TabsAction::Selected { index: 2 })
     );
     assert_eq!(
-        tabs.on_key(Key::Char(' ')),
+        tabs.on_key(Key::Char(' '), bounds, &mut sink()),
         Some(TabsAction::Selected { index: 2 })
     );
 }
@@ -216,10 +219,11 @@ fn enter_selects_the_current_tab() {
 #[test]
 fn home_and_end_jump_to_the_ends() {
     let mut tabs = three_tabs();
+    let bounds = Rect::new(0, 0, W, H);
     tabs.set_current(Some(1));
-    tabs.on_key(Key::Named(NamedKey::Home));
+    tabs.on_key(Key::Named(NamedKey::Home), bounds, &mut sink());
     assert_eq!(tabs.current(), Some(0));
-    tabs.on_key(Key::Named(NamedKey::End));
+    tabs.on_key(Key::Named(NamedKey::End), bounds, &mut sink());
     assert_eq!(tabs.current(), Some(2));
 }
 
@@ -231,7 +235,7 @@ fn hover_lifts_a_tab_and_click_selects_it() {
     let mut tabs = three_tabs();
     let bounds = Rect::new(0, 0, W, H);
     let x = xi(EACH + EACH / 2);
-    assert_eq!(tabs.on_pointer(&moved(x, 14), bounds), None);
+    assert_eq!(tabs.on_pointer(&moved(x, 14), bounds, &mut sink()), None);
     assert_eq!(
         render(&tabs, &theme).get(EACH + 2, 2),
         Some(premul(theme.palette().surface_raised)),
@@ -242,9 +246,9 @@ fn hover_lifts_a_tab_and_click_selects_it() {
         None,
         "and the keyboard cursor stays where the keyboard left it"
     );
-    assert_eq!(tabs.on_pointer(&PRESS, bounds), None);
+    assert_eq!(tabs.on_pointer(&PRESS, bounds, &mut sink()), None);
     assert_eq!(
-        tabs.on_pointer(&RELEASE, bounds),
+        tabs.on_pointer(&RELEASE, bounds, &mut sink()),
         Some(TabsAction::Selected { index: 1 })
     );
 }
@@ -253,10 +257,10 @@ fn hover_lifts_a_tab_and_click_selects_it() {
 fn release_outside_the_pressed_tab_does_not_select() {
     let mut tabs = three_tabs();
     let bounds = Rect::new(0, 0, W, H);
-    tabs.on_pointer(&moved(xi(EACH / 2), 14), bounds);
-    tabs.on_pointer(&PRESS, bounds);
-    tabs.on_pointer(&moved(xi(2 * EACH + EACH / 2), 14), bounds);
-    assert_eq!(tabs.on_pointer(&RELEASE, bounds), None);
+    tabs.on_pointer(&moved(xi(EACH / 2), 14), bounds, &mut sink());
+    tabs.on_pointer(&PRESS, bounds, &mut sink());
+    tabs.on_pointer(&moved(xi(2 * EACH + EACH / 2), 14), bounds, &mut sink());
+    assert_eq!(tabs.on_pointer(&RELEASE, bounds, &mut sink()), None);
 }
 
 #[test]
@@ -264,7 +268,7 @@ fn re_stating_the_keyboard_cursor_leaves_the_hover_where_it_is() {
     let theme = Theme::dark();
     let mut tabs = three_tabs();
     let bounds = Rect::new(0, 0, W, H);
-    tabs.on_pointer(&moved(xi(EACH + EACH / 2), 14), bounds);
+    tabs.on_pointer(&moved(xi(EACH + EACH / 2), 14), bounds, &mut sink());
     let hovered = render(&tabs, &theme);
     assert_eq!(
         hovered.get(EACH + 2, 2),
@@ -287,7 +291,7 @@ fn only_the_keyboard_cursor_wears_the_focus_ring() {
     let ring = premul(theme.palette().rim_active);
     let mut tabs = three_tabs();
     let bounds = Rect::new(0, 0, W, H);
-    tabs.on_pointer(&moved(xi(EACH + EACH / 2), 14), bounds);
+    tabs.on_pointer(&moved(xi(EACH + EACH / 2), 14), bounds, &mut sink());
     assert!(
         !has_pixel(&render(&tabs, &theme), ring),
         "a hover lifts a tab without claiming the keyboard"
@@ -304,7 +308,7 @@ fn the_pointer_and_the_keyboard_cursor_light_their_own_tabs() {
     let mut tabs = three_tabs();
     let bounds = Rect::new(0, 0, W, H);
     tabs.set_current(Some(0));
-    tabs.on_pointer(&moved(xi(2 * EACH + EACH / 2), 14), bounds);
+    tabs.on_pointer(&moved(xi(2 * EACH + EACH / 2), 14), bounds, &mut sink());
 
     let surface = render(&tabs, &theme);
     let raised = premul(theme.palette().surface_raised);
@@ -327,15 +331,15 @@ fn re_labelling_keeps_the_selection_and_a_click_in_flight() {
     let mut tabs = three_tabs();
     let bounds = Rect::new(0, 0, W, H);
     tabs.set_selected(2);
-    tabs.on_pointer(&moved(xi(EACH + EACH / 2), 14), bounds);
-    assert_eq!(tabs.on_pointer(&PRESS, bounds), None);
+    tabs.on_pointer(&moved(xi(EACH + EACH / 2), 14), bounds, &mut sink());
+    assert_eq!(tabs.on_pointer(&PRESS, bounds, &mut sink()), None);
 
     for (tab, label) in tabs.tabs_mut().iter_mut().zip(["One 4", "Two 9", "Tri 0"]) {
         tab.set_label(label);
     }
 
     assert_eq!(
-        tabs.on_pointer(&RELEASE, bounds),
+        tabs.on_pointer(&RELEASE, bounds, &mut sink()),
         Some(TabsAction::Selected { index: 1 }),
         "a live reading changing mid-click cannot swallow it"
     );
@@ -350,7 +354,14 @@ fn disabled_tab_never_selects() {
         Tab::new("No").with_state(ControlState::disabled()),
     ]);
     tabs.set_current(Some(1));
-    assert_eq!(tabs.on_key(Key::Named(NamedKey::Enter)), None);
+    assert_eq!(
+        tabs.on_key(
+            Key::Named(NamedKey::Enter),
+            Rect::new(0, 0, W, H),
+            &mut sink()
+        ),
+        None
+    );
 }
 
 #[test]
@@ -404,8 +415,8 @@ fn hit_test_bookkeeping_is_invisible_to_a_tab_strip() {
     // Two samples clear of the strip, so only the recorded coordinate differs.
     let mut a = three_tabs();
     let mut b = a.clone();
-    a.on_pointer(&moved(xi(W) + 40, xi(H) + 40), bounds);
-    b.on_pointer(&moved(xi(W) + 90, xi(H) + 12), bounds);
+    a.on_pointer(&moved(xi(W) + 40, xi(H) + 40), bounds, &mut sink());
+    b.on_pointer(&moved(xi(W) + 90, xi(H) + 12), bounds, &mut sink());
     assert_eq!(
         a, b,
         "a coordinate clear of the strip is not a drawn property"
@@ -420,10 +431,10 @@ fn hit_test_bookkeeping_is_invisible_to_a_tab_strip() {
     // and which tab a release would choose is not drawn.
     let over_selected = moved(xi(EACH) / 2, xi(H) / 2);
     let mut latched = three_tabs();
-    latched.on_pointer(&over_selected, bounds);
-    latched.on_pointer(&PRESS, bounds);
+    latched.on_pointer(&over_selected, bounds, &mut sink());
+    latched.on_pointer(&PRESS, bounds, &mut sink());
     let mut hovered = three_tabs();
-    hovered.on_pointer(&over_selected, bounds);
+    hovered.on_pointer(&over_selected, bounds, &mut sink());
     assert_eq!(latched, hovered, "the armed tab is not a drawn property");
     assert_eq!(
         render(&latched, &theme).pixels(),
@@ -613,47 +624,62 @@ fn a_tab_too_narrow_for_its_bead_omits_it_rather_than_reaching_past_its_edge() {
 
 #[test]
 fn only_the_strip_own_axis_arrows_move_the_current_tab() {
+    let across = Rect::new(0, 0, W, H);
+    let down = Rect::new(0, 0, VW, VH);
     let mut horizontal = three_tabs();
     horizontal.set_current(Some(1));
-    assert_eq!(horizontal.on_key(Key::Named(NamedKey::Down)), None);
+    assert_eq!(
+        horizontal.on_key(Key::Named(NamedKey::Down), across, &mut sink()),
+        None
+    );
     assert_eq!(
         horizontal.current(),
         Some(1),
         "a row must not answer to a column's arrows"
     );
-    assert_eq!(horizontal.on_key(Key::Named(NamedKey::Up)), None);
+    assert_eq!(
+        horizontal.on_key(Key::Named(NamedKey::Up), across, &mut sink()),
+        None
+    );
     assert_eq!(horizontal.current(), Some(1));
-    horizontal.on_key(Key::Named(NamedKey::Right));
+    horizontal.on_key(Key::Named(NamedKey::Right), across, &mut sink());
     assert_eq!(horizontal.current(), Some(2));
 
     let mut vertical = vertical_three();
     vertical.set_current(Some(1));
-    assert_eq!(vertical.on_key(Key::Named(NamedKey::Left)), None);
+    assert_eq!(
+        vertical.on_key(Key::Named(NamedKey::Left), down, &mut sink()),
+        None
+    );
     assert_eq!(
         vertical.current(),
         Some(1),
         "a column must not answer to a row's arrows"
     );
-    assert_eq!(vertical.on_key(Key::Named(NamedKey::Right)), None);
+    assert_eq!(
+        vertical.on_key(Key::Named(NamedKey::Right), down, &mut sink()),
+        None
+    );
     assert_eq!(vertical.current(), Some(1));
-    vertical.on_key(Key::Named(NamedKey::Down));
+    vertical.on_key(Key::Named(NamedKey::Down), down, &mut sink());
     assert_eq!(vertical.current(), Some(2));
-    vertical.on_key(Key::Named(NamedKey::Down));
+    vertical.on_key(Key::Named(NamedKey::Down), down, &mut sink());
     assert_eq!(vertical.current(), Some(0), "…and wraps along its own axis");
-    vertical.on_key(Key::Named(NamedKey::Up));
+    vertical.on_key(Key::Named(NamedKey::Up), down, &mut sink());
     assert_eq!(vertical.current(), Some(2));
 }
 
 #[test]
 fn home_and_end_jump_to_the_ends_of_a_vertical_strip_too() {
     let mut tabs = vertical_three();
+    let bounds = Rect::new(0, 0, VW, VH);
     tabs.set_current(Some(1));
-    tabs.on_key(Key::Named(NamedKey::End));
+    tabs.on_key(Key::Named(NamedKey::End), bounds, &mut sink());
     assert_eq!(tabs.current(), Some(2));
-    tabs.on_key(Key::Named(NamedKey::Home));
+    tabs.on_key(Key::Named(NamedKey::Home), bounds, &mut sink());
     assert_eq!(tabs.current(), Some(0));
     assert_eq!(
-        tabs.on_key(Key::Named(NamedKey::Enter)),
+        tabs.on_key(Key::Named(NamedKey::Enter), bounds, &mut sink()),
         Some(TabsAction::Selected { index: 0 })
     );
 }
@@ -664,15 +690,15 @@ fn a_vertical_press_selects_the_tab_that_was_drawn() {
     let mut tabs = vertical_three();
     let bounds = Rect::new(0, 0, VW, VH);
     let over_band_one = moved(xi(VW / 2), xi(VEACH + VEACH / 2));
-    assert_eq!(tabs.on_pointer(&over_band_one, bounds), None);
+    assert_eq!(tabs.on_pointer(&over_band_one, bounds, &mut sink()), None);
     assert_eq!(
         render_in(&tabs, &theme, Scale::ONE, VW, VH).get(VW - 2, VEACH + 4),
         Some(premul(theme.palette().surface_raised)),
         "the band under the pointer lifts"
     );
-    assert_eq!(tabs.on_pointer(&PRESS, bounds), None);
+    assert_eq!(tabs.on_pointer(&PRESS, bounds, &mut sink()), None);
     assert_eq!(
-        tabs.on_pointer(&RELEASE, bounds),
+        tabs.on_pointer(&RELEASE, bounds, &mut sink()),
         Some(TabsAction::Selected { index: 1 })
     );
     // The owner commits the selection, and the band the press chose is the one
@@ -693,10 +719,14 @@ fn a_vertical_press_selects_the_tab_that_was_drawn() {
 fn a_release_off_the_pressed_band_does_not_select_it() {
     let mut tabs = vertical_three();
     let bounds = Rect::new(0, 0, VW, VH);
-    tabs.on_pointer(&moved(xi(VW / 2), xi(VEACH / 2)), bounds);
-    tabs.on_pointer(&PRESS, bounds);
-    tabs.on_pointer(&moved(xi(VW / 2), xi(2 * VEACH + VEACH / 2)), bounds);
-    assert_eq!(tabs.on_pointer(&RELEASE, bounds), None);
+    tabs.on_pointer(&moved(xi(VW / 2), xi(VEACH / 2)), bounds, &mut sink());
+    tabs.on_pointer(&PRESS, bounds, &mut sink());
+    tabs.on_pointer(
+        &moved(xi(VW / 2), xi(2 * VEACH + VEACH / 2)),
+        bounds,
+        &mut sink(),
+    );
+    assert_eq!(tabs.on_pointer(&RELEASE, bounds, &mut sink()), None);
 }
 
 #[test]
@@ -809,4 +839,46 @@ fn a_vertical_strip_reads_in_both_themes_and_under_heavy_contrast() {
             .count()
     };
     assert!(seam_run(&high_contrast()) > seam_run(&Theme::dark()));
+}
+
+/// A hover crossing from one tab to the next repaints those two tabs, not the
+/// strip they sit in.
+#[test]
+fn a_hover_crossing_tabs_reports_the_two_tabs() {
+    let mut tabs = three_tabs();
+    let bounds = Rect::new(0, 0, W, H);
+    let centre = |i: u32| moved(i32::try_from(i * EACH + EACH / 2).expect("fits"), 4);
+    tabs.on_pointer(&centre(0), bounds, &mut sink());
+
+    let mut damage = sink();
+    tabs.on_pointer(&centre(1), bounds, &mut damage);
+    assert!(
+        damage.bounds().width < W,
+        "two tabs, not the whole strip: {:?}",
+        damage.bounds()
+    );
+    assert!(
+        damage.contains(Point::new(i32::try_from(EACH / 2).expect("fits"), 4))
+            && damage.contains(Point::new(i32::try_from(EACH + EACH / 2).expect("fits"), 4)),
+        "both the tab left and the tab entered"
+    );
+    assert!(
+        !damage.contains(Point::new(
+            i32::try_from(2 * EACH + EACH / 2).expect("fits"),
+            4
+        )),
+        "and never a tab the pointer did not visit"
+    );
+}
+
+/// Motion inside one tab reports nothing: the lift it draws has not moved.
+#[test]
+fn motion_within_one_tab_reports_nothing() {
+    let mut tabs = three_tabs();
+    let bounds = Rect::new(0, 0, W, H);
+    tabs.on_pointer(&moved(4, 4), bounds, &mut sink());
+
+    let mut damage = sink();
+    tabs.on_pointer(&moved(9, 6), bounds, &mut damage);
+    assert!(damage.is_empty(), "the same tab stays lifted");
 }

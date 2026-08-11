@@ -309,7 +309,9 @@ impl Gallery {
         let (tabs_rect, content) = Self::layout(viewport, scale, theme);
 
         if tabs_rect.contains(self.pointer) {
-            if let Some(TabsAction::Selected { index }) = self.tabs.on_pointer(event, tabs_rect) {
+            if let Some(TabsAction::Selected { index }) =
+                self.tabs.on_pointer(event, tabs_rect, damage)
+            {
                 let rects = self.item_rects(content, scale, theme);
                 return self.select_index(index, &rects, damage);
             }
@@ -363,7 +365,7 @@ impl Gallery {
     ) -> bool {
         // The focused widget's own rectangle comes from the same layout the
         // render and pointer paths use, so a key reports the pixels it changed.
-        let (_, content) = Self::layout(viewport, scale, theme);
+        let (tabs_rect, content) = Self::layout(viewport, scale, theme);
         let rects = self.item_rects(content, scale, theme);
         if key == Key::Named(tairix_input::NamedKey::Tab) {
             self.focus_step(!modifiers.shift, &rects, damage);
@@ -371,7 +373,9 @@ impl Gallery {
         }
         match self.focus {
             Focus::Tabs => {
-                if let Some(TabsAction::Selected { index }) = self.tabs.on_key(key) {
+                if let Some(TabsAction::Selected { index }) =
+                    self.tabs.on_key(key, tabs_rect, damage)
+                {
                     return self.select_index(index, &rects, damage);
                 }
                 false
@@ -379,7 +383,9 @@ impl Gallery {
             Focus::Item(idx) => {
                 let rect = rects.get(idx).copied().unwrap_or(Rect::EMPTY);
                 if let Some(item) = self.panels[self.current.index()].get_mut(idx) {
-                    let changed = item.widget.on_key(key, modifiers, rect, damage);
+                    let changed = item
+                        .widget
+                        .on_key(key, modifiers, rect, scale, theme, damage);
                     if changed {
                         self.enforce_radio_group(idx);
                     }

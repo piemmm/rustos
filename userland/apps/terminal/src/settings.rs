@@ -318,7 +318,8 @@ impl Settings {
             .set_model(self.scrolled_model(body_rect, scale, theme, font));
 
         if let Some(rect) = tabs_rect {
-            if let Some(TabsAction::Selected { index }) = self.tabs.on_pointer(event, rect) {
+            if let Some(TabsAction::Selected { index }) = self.tabs.on_pointer(event, rect, damage)
+            {
                 self.tabs.set_selected(index);
                 self.focus = Focus::Tabs;
                 self.sync_focus();
@@ -338,7 +339,11 @@ impl Settings {
             // The bar applies the offset to the model it holds, and that model
             // is the sheet's only scroll position, so there is nothing further
             // to write back.
-            if self.scroll.on_pointer(event, rect, scale, theme).is_some() {
+            if self
+                .scroll
+                .on_pointer(event, rect, scale, theme, damage)
+                .is_some()
+            {
                 self.focus = Focus::Scroll;
                 self.sync_focus();
                 return SheetOutcome::Changed;
@@ -369,6 +374,7 @@ impl Settings {
         viewport: Rect,
         scale: Scale,
         theme: &Theme,
+        damage: &mut Region,
     ) -> SheetOutcome {
         let font = BitmapFont::for_role(theme.fonts(), TextRole::Body, scale);
 
@@ -377,10 +383,12 @@ impl Settings {
         // Only scrolling needs the geometry, and an unsizeable body simply
         // leaves the bar with nothing to move.
         let bounds = panel_bounds(viewport, scale);
-        let body_rect = self
+        let (tabs_rect, body_rect, scrollbar_rect, _) = self
             .panel
             .content_rect(bounds, scale, theme)
-            .and_then(|content| self.bands(content, scale, theme).1);
+            .map_or((None, None, None, None), |content| {
+                self.bands(content, scale, theme)
+            });
         self.scroll
             .set_model(self.scrolled_model(body_rect, scale, theme, font));
         if key == Key::Named(NamedKey::Escape) {
@@ -391,7 +399,14 @@ impl Settings {
             self.sync_focus();
             return SheetOutcome::Changed;
         }
-        self.dispatch_key(key)
+        let slider_rect = self.focused_slider_rect(body_rect, scale, theme, font);
+        self.dispatch_key(
+            key,
+            tabs_rect.unwrap_or(Rect::EMPTY),
+            slider_rect.unwrap_or(Rect::EMPTY),
+            scrollbar_rect.unwrap_or(Rect::EMPTY),
+            damage,
+        )
     }
 }
 
@@ -865,7 +880,7 @@ impl Settings {
             }
             Focus::TextSize => {
                 let (_, control) = split_row(rect, scale);
-                match self.text_size.on_pointer(event, control) {
+                match self.text_size.on_pointer(event, control, damage) {
                     Some(SliderAction::SetValue { permille }) => {
                         self.focus = row;
                         self.set_font_size_permille(permille);
@@ -880,7 +895,7 @@ impl Settings {
                 let Some(slider) = self.channel_sliders.get_mut(index) else {
                     return SheetOutcome::Ignored;
                 };
-                match slider.on_pointer(event, control) {
+                match slider.on_pointer(event, control, damage) {
                     Some(SliderAction::SetValue { permille }) => {
                         self.focus = row;
                         self.set_channel_permille(index, permille);
@@ -894,7 +909,7 @@ impl Settings {
                 let Some(slider) = self.effect_sliders.get_mut(index) else {
                     return SheetOutcome::Ignored;
                 };
-                match slider.on_pointer(event, control) {
+                match slider.on_pointer(event, control, damage) {
                     Some(SliderAction::SetValue { permille }) => {
                         self.focus = row;
                         self.set_effect_permille(index, permille);
@@ -951,11 +966,40 @@ impl Settings {
         None
     }
 
+    /// The control rectangle of the focused slider row, as the body last laid
+    /// it out — the very rectangle the pointer path hit-tests and the renderer
+    /// draws into. `None` where the body is unsizeable or the focus is not a
+    /// slider row.
+    fn focused_slider_rect(
+        &self,
+        body: Option<Rect>,
+        scale: Scale,
+        theme: &Theme,
+        font: BitmapFont,
+    ) -> Option<Rect> {
+        let offset = self.scroll.model().offset();
+        self.laid_out_rows(body?, offset, scale, theme, font)
+            .into_iter()
+            .find(|(row, _)| *row == self.focus)
+            .map(|(_, rect)| split_row(rect, scale).1)
+    }
+
     /// Dispatch one key press to whichever element currently holds focus.
-    fn dispatch_key(&mut self, key: Key) -> SheetOutcome {
+    ///
+    /// The rectangles are the tab strip, the focused slider, and the scrollbar
+    /// as the sheet last laid them out, and are empty where a window too small
+    /// to draw that element leaves it no pixels to report.
+    fn dispatch_key(
+        &mut self,
+        key: Key,
+        tabs: Rect,
+        slider: Rect,
+        scrollbar: Rect,
+        damage: &mut Region,
+    ) -> SheetOutcome {
         match self.focus {
             Focus::Tabs => {
-                if let Some(TabsAction::Selected { index }) = self.tabs.on_key(key) {
+                if let Some(TabsAction::Selected { index }) = self.tabs.on_key(key, tabs, damage) {
                     self.tabs.set_selected(index);
                 }
                 SheetOutcome::Changed
@@ -971,7 +1015,7 @@ impl Settings {
                 }
                 _ => SheetOutcome::Changed,
             },
-            Focus::TextSize => match self.text_size.on_key(key) {
+            Focus::TextSize => match self.text_size.on_key(key, slider, damage) {
                 Some(SliderAction::SetValue { permille }) => {
                     self.set_font_size_permille(permille);
                     SheetOutcome::Edited
@@ -988,7 +1032,7 @@ impl Settings {
             Focus::Channel(index) => match self
                 .channel_sliders
                 .get_mut(index)
-                .and_then(|s| s.on_key(key))
+                .and_then(|s| s.on_key(key, slider, damage))
             {
                 Some(SliderAction::SetValue { permille }) => {
                     self.set_channel_permille(index, permille);
@@ -999,7 +1043,7 @@ impl Settings {
             Focus::Effect(index) => match self
                 .effect_sliders
                 .get_mut(index)
-                .and_then(|s| s.on_key(key))
+                .and_then(|s| s.on_key(key, slider, damage))
             {
                 Some(SliderAction::SetValue { permille }) => {
                     self.set_effect_permille(index, permille);
@@ -1010,7 +1054,7 @@ impl Settings {
             // The bar holds the sheet's only scroll position and has already
             // moved it, so the action needs no write-back.
             Focus::Scroll => {
-                let _ = self.scroll.on_key(key);
+                let _ = self.scroll.on_key(key, scrollbar, damage);
                 SheetOutcome::Changed
             }
             Focus::Restore => match self.restore.on_key(key) {
