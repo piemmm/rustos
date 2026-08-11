@@ -482,23 +482,28 @@ impl WindowControl {
             bounds,
             damage,
         ) {
-            self.rest();
-            damage.add(bounds);
+            self.rest(bounds, damage);
             Some(WindowControlAction::Invoked(self.kind))
         } else {
             None
         }
     }
 
-    /// Feed a key event, returning [`WindowControlAction::Invoked`] when a
-    /// focused, actionable control is activated with Space or Enter.
+    /// Feed a key event, given the control's current `bounds`, returning
+    /// [`WindowControlAction::Invoked`] when a focused, actionable control is
+    /// activated with Space or Enter.
     ///
     /// Activation clears the control's focus ring, so the border shows only
     /// while the group is being navigated with the keyboard, not after the
     /// command has fired.
-    pub fn on_key(&mut self, key: Key) -> Option<WindowControlAction> {
+    pub fn on_key(
+        &mut self,
+        key: Key,
+        bounds: Rect,
+        damage: &mut Region,
+    ) -> Option<WindowControlAction> {
         if key_activation(self.state, key) {
-            self.rest();
+            self.rest(bounds, damage);
             Some(WindowControlAction::Invoked(self.kind))
         } else {
             None
@@ -508,9 +513,13 @@ impl WindowControl {
     /// Return the control to rest after its command fires: drop the pointer
     /// hover/press highlight and the keyboard focus ring so no border lingers
     /// once activation completes.
-    fn rest(&mut self) {
-        self.state.pointer = PointerState::None;
-        self.state.focus.focused = false;
+    ///
+    /// Both cleared fields are drawn, so each goes through the guarded write:
+    /// a control activated by the keyboard reports the ring it just dropped,
+    /// and one activated by a press that was already resting reports nothing.
+    fn rest(&mut self, bounds: Rect, damage: &mut Region) {
+        damage::set(&mut self.state.pointer, PointerState::None, bounds, damage);
+        damage::set(&mut self.state.focus.focused, false, bounds, damage);
         *self.armed = false;
     }
 
@@ -1078,28 +1087,38 @@ impl TitleBar {
         }
     }
 
-    /// Feed a key event. A focused control is activated with Space/Enter; the
-    /// left/right arrows move focus between the enabled controls so the group
-    /// is fully keyboard-navigable without a pointer (spec §11.18 furniture
-    /// keyboard focus).
+    /// Feed a key event within the title bar `bounds`. A focused control is
+    /// activated with Space/Enter; the left/right arrows move focus between the
+    /// enabled controls so the group is fully keyboard-navigable without a
+    /// pointer (spec §11.18 furniture keyboard focus).
     ///
-    /// A focus move reports the whole bar: the ring leaves one control and
-    /// arrives at another, and the bar has no layout without a scale and
-    /// theme, so covering the strip over-covers by the controls that did not
-    /// change.
-    pub fn on_key(&mut self, key: Key, bounds: Rect, damage: &mut Region) -> Option<TitleBarEvent> {
-        for control in &mut self.controls {
-            if let Some(WindowControlAction::Invoked(kind)) = control.on_key(key) {
-                return Some(TitleBarEvent::Control(kind));
+    /// The bar lays itself out here for the same reason
+    /// [`on_pointer`](Self::on_pointer) does: a control's own rect is what it
+    /// reports repainting, so an activation or a focus move costs the two
+    /// controls that changed and never the whole strip.
+    pub fn on_key(
+        &mut self,
+        key: Key,
+        bounds: Rect,
+        scale: Scale,
+        theme: &Theme,
+        damage: &mut Region,
+    ) -> Option<TitleBarEvent> {
+        let layout = self.layout(bounds, scale, theme);
+        for (kind, rect) in layout.controls {
+            if let Some(WindowControlAction::Invoked(invoked)) =
+                self.control_mut(kind).on_key(key, rect, damage)
+            {
+                return Some(TitleBarEvent::Control(invoked));
             }
         }
         match key {
             Key::Named(NamedKey::Right) => {
-                self.move_focus(true, bounds, damage);
+                self.move_focus(true, &layout, damage);
                 None
             }
             Key::Named(NamedKey::Left) => {
-                self.move_focus(false, bounds, damage);
+                self.move_focus(false, &layout, damage);
                 None
             }
             _ => None,
@@ -1109,12 +1128,16 @@ impl TitleBar {
     /// Move keyboard focus among the controls one slot `forward` (or backward),
     /// skipping disabled controls and wrapping. If no control is focused, the
     /// first step lands on the first (forward) or last (backward) control.
-    fn move_focus(&mut self, forward: bool, bounds: Rect, damage: &mut Region) {
+    ///
+    /// The ring is then written to every control through the guarded write, so
+    /// exactly the controls whose ring changed are reported — the one it left
+    /// and the one it reached, never the strip between them, and nothing at all
+    /// when it stays put. Writing all four rather than the two this bar's own
+    /// invariant predicts costs a comparison each and cannot under-report if a
+    /// caller had lit two of them.
+    fn move_focus(&mut self, forward: bool, layout: &TitleBarLayout, damage: &mut Region) {
         let count = self.controls.len();
         let current = self.controls.iter().position(|c| c.state().focus.focused);
-        for control in &mut self.controls {
-            control.set_focused(false);
-        }
         let mut idx = match current {
             Some(i) => i,
             None if forward => count - 1,
@@ -1128,14 +1151,30 @@ impl TitleBar {
                 (idx + count - 1) % count
             };
             if self.controls[idx].state().is_actionable() {
-                self.controls[idx].set_focused(true);
                 landed = Some(idx);
                 break;
             }
         }
-        if landed != current {
-            damage.add(bounds);
+        for slot in 0..count {
+            let rect = Self::control_rect(layout, slot);
+            damage::set(
+                &mut self.controls[slot].state.focus.focused,
+                landed == Some(slot),
+                rect,
+                damage,
+            );
         }
+    }
+
+    /// The laid-out rect of the control stored at `slot`, or [`Rect::EMPTY`]
+    /// when the layout has no entry for it (fail closed: an empty rectangle
+    /// covers nothing).
+    fn control_rect(layout: &TitleBarLayout, slot: usize) -> Rect {
+        layout
+            .controls
+            .iter()
+            .find(|(kind, _)| control_index(*kind) == slot)
+            .map_or(Rect::EMPTY, |(_, rect)| *rect)
     }
 }
 
@@ -1671,21 +1710,31 @@ impl ResizeGrabber {
     /// `hit_bounds`, returning the resize gesture it produced. A press begins
     /// and captures the drag; motion continues it; release ends it. A disabled
     /// or denied grabber ignores input (fail closed).
-    pub fn on_pointer(&mut self, event: &InputEvent, hit_bounds: Rect) -> Option<ResizeEvent> {
+    ///
+    /// Both the pointer look and the `dragging` flag are drawn in the teeth, so
+    /// each is a guarded write against `hit_bounds`: motion that only carries a
+    /// drag forward paints the same teeth and reports nothing.
+    pub fn on_pointer(
+        &mut self,
+        event: &InputEvent,
+        hit_bounds: Rect,
+        damage: &mut Region,
+    ) -> Option<ResizeEvent> {
         if let InputEvent::PointerMoved { to } = event {
             *self.pointer = *to;
         }
         let inside = hit_bounds.contains(*self.pointer);
+        let hover_or_none = if inside {
+            PointerState::Hover
+        } else {
+            PointerState::None
+        };
         match event {
             InputEvent::PointerMoved { to } => {
                 if self.dragging {
                     Some(ResizeEvent::Moved { to: *to })
                 } else {
-                    self.state.pointer = if inside {
-                        PointerState::Hover
-                    } else {
-                        PointerState::None
-                    };
+                    damage::set(&mut self.state.pointer, hover_or_none, hit_bounds, damage);
                     None
                 }
             }
@@ -1693,8 +1742,13 @@ impl ResizeGrabber {
                 button: PointerButton::Primary,
             } => {
                 if inside && self.state.is_actionable() {
-                    self.dragging = true;
-                    self.state.pointer = PointerState::Pressed;
+                    damage::set(&mut self.dragging, true, hit_bounds, damage);
+                    damage::set(
+                        &mut self.state.pointer,
+                        PointerState::Pressed,
+                        hit_bounds,
+                        damage,
+                    );
                     Some(ResizeEvent::Begin)
                 } else {
                     None
@@ -1704,12 +1758,8 @@ impl ResizeGrabber {
                 button: PointerButton::Primary,
             } => {
                 let was = self.dragging;
-                self.dragging = false;
-                self.state.pointer = if inside {
-                    PointerState::Hover
-                } else {
-                    PointerState::None
-                };
+                damage::set(&mut self.dragging, false, hit_bounds, damage);
+                damage::set(&mut self.state.pointer, hover_or_none, hit_bounds, damage);
                 was.then_some(ResizeEvent::End)
             }
             _ => None,
@@ -1719,6 +1769,11 @@ impl ResizeGrabber {
     /// Feed a key event: Escape cancels an in-flight resize (restoring the
     /// pre-drag geometry), so a keyboard escape works exactly like a pointer
     /// cancel.
+    ///
+    /// The cancel drops the drag *and* the pressed look, and the drag is drawn
+    /// in the teeth in its own right — so it is guarded too. Cancelling with
+    /// the pointer already away from the corner changes only the drag, and that
+    /// still has to be reported.
     pub fn on_key(
         &mut self,
         key: Key,
@@ -1726,7 +1781,7 @@ impl ResizeGrabber {
         damage: &mut Region,
     ) -> Option<ResizeEvent> {
         if self.dragging && key == Key::Named(NamedKey::Escape) {
-            self.dragging = false;
+            damage::set(&mut self.dragging, false, hit_bounds, damage);
             damage::set(
                 &mut self.state.pointer,
                 PointerState::None,

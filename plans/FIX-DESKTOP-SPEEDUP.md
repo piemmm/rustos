@@ -1,9 +1,10 @@
 # FIX-DESKTOP-SPEEDUP — Software-compositor and GUI redraw performance
 
 Status: **A done, B done, C mostly done, D done** (C.0, C.2, C.4b, C.4c, C.5
-landed; C.1 partly landed; C.3 blocked on the rest of C.1; C.4a withdrawn as a
-performance item after measurement; D.1–D.4 landed, D.5 is a User decision,
-D.6 is a follow-up the measurement exposed).
+landed; C.1 partly landed — the pointer path and the window furniture are in,
+the keyboard/value families remain; C.3 blocked on the rest of C.1; C.4a
+withdrawn as a performance item after measurement; D.1–D.4 and D.7 landed, D.5
+is a User decision, D.6 is a follow-up the measurement exposed).
 E planned.
 Stages A–E need no hardware acceleration, no kernel change, and no new
 syscall; F needs a `plans/FIX-HARDWARE-FEATURES.md` correction; G is gated on
@@ -333,7 +334,7 @@ Proof: a differential sweep applies random `add`/`subtract`/`clip` to the
 region and to a plain pixel grid, comparing the covered set and the
 canonical-form invariants after every step.
 
-### C.1 A damage sink in `lib/controls`  **[pointer path in; keyboard/value families remain]**
+### C.1 A damage sink in `lib/controls`  **[pointer path and window furniture in; keyboard/value families remain]**
 Controls had no dirty concept; the host's only signal was a `PartialEq`
 render gate that fails whole-surface. `lib/controls/src/damage.rs` is the
 seam: `sink()` hands out a `Region::with_budget(8)` and the one guarded
@@ -354,19 +355,35 @@ only `state.pointer`, so it computes the next pointer state once and reports
 through `damage::set` — which gives correct hover-enter/leave and press
 damage to every clickable family at once, and reports *nothing* for motion
 inside one control. Containers pass each child its own rect, so a container's
-report is exactly the union of what its children reported. The two container
-`set_focus`/`on_key` paths report the container's bounds, having no layout at
-that point: over-covering is the safe direction.
+report is exactly the union of what its children reported.
+
+The window furniture is complete, and it is the worked example for the rest:
+`WindowControl::rest` guards both fields it clears (the highlight *and* the
+focus ring), `ResizeGrabber` guards its pointer look *and* its `dragging`
+flag — which is drawn in the teeth, so an Escape-cancel away from the corner
+reports even though the pointer look was already at rest — and
+`TitleBar::on_key` takes the `Scale`/`Theme` its caller already holds so it
+can lay its controls out and hand each its own rect, exactly as
+`TitleBar::on_pointer` does.
+
+**The `old ∪ new` question is answered: no per-control `last` rect.**
+`TitleBar::move_focus` is precisely that case — the ring leaves one control and
+arrives at another — and it names both rectangles by laying its children out,
+not by remembering one. That generalises: a container owns its children's
+geometry, so given a scale and theme it can always name both, and the fix for a
+container that reports its own bounds today (`Rail::set_focus`,
+`Toolbar::set_focus`, and the Switchboard gap below) is to thread the layout in,
+not to add a remembered rectangle. A control's *own* bounds moving is a host
+layout decision, and the host that moved it is the only party that knows both
+rectangles — it reports them (C.3: a resize, theme change, or first paint still
+presents full). A `last` field per control would be a second, staler copy of
+the host's layout with no render path reading it (§2.3).
 
 **Remaining, and the reason C.3 is blocked.** These mutate drawn state and do
 not yet report: `TableHeader::set_focus`/`on_key`, `Menu` (which has a public
 `row_rect`, so it should report the two exact rows rather than the popup),
 `Tabs::on_key`, `Breadcrumb::on_key`, `ComboBox::on_key` (field *and* popup
-rects), both text fields' `on_key`, `WindowControl::on_key` (its `rest()`
-clears the highlight and focus ring), `ScrollBar`, `Slider`, and
-`ResizeGrabber::on_pointer`. Also unwritten: the `last: RenderInvariant<Rect>`
-per control that a size/position change needs, so it can report **old ∪ new**
-— a control handed only its new bounds cannot name the old one.
+rects), both text fields' `on_key`, `ScrollBar`, and `Slider`.
 
 One host-side gap belongs with them. The Switchboard's keyboard path
 (`Switchboard::on_key` → `SectionView::activate_focused` /
@@ -717,18 +734,25 @@ activation rule now has a single definition (`window::activation_for`) shared by
 the setter and the new `frame_activation_changes` query, so the guard and the
 mutation cannot drift.
 
-**Two of the same class remain, deliberately not guarded here:**
-- `mutate_frame` invalidates the chrome entry unconditionally, so a *refused*
-  `toggle_window_size` (undecorated, non-resizable, or a failed reallocation)
-  still costs a furniture re-render. A rare failure-path cache miss, not a
-  damage mark; fixing it means restructuring the helper across its nine call
-  sites.
-- `frame_pointer`/`frame_key` re-mark every furniture band per pointer sample
-  even when no hover or press moved. The compositor cannot tell today: a
-  title-bar hover flip changes pixels without returning a `TitleBarEvent`, and
-  the caller-owned `damage` region accumulates across calls, so an empty region
-  is not a per-call signal. This needs per-control damage reporting out of
-  `lib/controls` — C.1's remaining half.
+**The general rule now lives in one funnel.** `mutate_frame` — which all nine
+frame mutations run through — hands the mutation a `damage::sink()`, marks
+exactly the rectangles it reported over that window's layer, and releases the
+window's retained chrome *only when something was reported*. A mutation that
+changed no drawn pixel therefore marks nothing and keeps its furniture, so the
+two remaining cases of this class are closed with it and no caller computes a
+band or invalidates a cache entry of its own:
+
+- A refused mutation (an undecorated or non-resizable `toggle_window_size`, a
+  failed reallocation, a retitle to the label already there) reports nothing,
+  so it no longer costs a furniture re-render.
+- `frame_pointer`/`frame_key` mark what the furniture reported instead of all
+  four bands. A pointer sample crossing the drag region costs `0`/`0` and keeps
+  the chrome; a hover entering one command control recomposites that control's
+  rectangle alone, and a keyboard focus move the two controls the ring moved
+  between. The `InputRouter` consequently carries no damage region at all —
+  repainting is the compositor's, at the point the frame is mutated — and the
+  resize grabber it drives as a gesture engine (the WM's chrome draws no
+  grabber) reports into a sink behind `ResizeGrab::gesture`.
 
 ---
 

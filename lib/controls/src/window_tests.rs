@@ -11,7 +11,7 @@
 //! and Escape-cancel, non-overlap with scrollbars), and the neutral scroll
 //! corner, across dark/light/high-contrast and scale.
 
-use tairix_geometry::{Point, Rect, Scale};
+use tairix_geometry::{Point, Rect, Region, Scale};
 use tairix_icon::IconKind;
 use tairix_input::{InputEvent, Key, NamedKey, PointerButton};
 use tairix_raster::{Color, Pixel, Surface};
@@ -41,9 +41,9 @@ fn opaque_count(surface: &Surface) -> usize {
     surface.pixels().iter().filter(|p| p.a > 0).count()
 }
 
-/// The bar or grabber region a keyboard report covers. Focus and cancel report
-/// the whole surface they were given, so the exact rectangle only has to be
-/// plausible.
+/// The bar or grabber region a keyboard event is given. The bar lays its
+/// controls out inside it and the grabber's cancel covers all of it, so the
+/// exact rectangle only has to be plausible.
 const TITLE_BOUNDS: Rect = Rect::new(0, 0, 320, 28);
 
 fn moved(x: i32, y: i32) -> InputEvent {
@@ -283,10 +283,14 @@ fn pointer_release_outside_does_not_invoke() {
 #[test]
 fn keyboard_activates_focused_control() {
     let mut control = WindowControl::new(WindowControlKind::Minimize);
-    assert_eq!(control.on_key(Key::Named(NamedKey::Enter)), None);
+    let bounds = Rect::new(0, 0, 40, 40);
+    assert_eq!(
+        control.on_key(Key::Named(NamedKey::Enter), bounds, &mut sink()),
+        None
+    );
     control.set_focused(true);
     assert_eq!(
-        control.on_key(Key::Char(' ')),
+        control.on_key(Key::Char(' '), bounds, &mut sink()),
         Some(WindowControlAction::Invoked(WindowControlKind::Minimize))
     );
 }
@@ -324,14 +328,29 @@ fn keyboard_activation_clears_the_focus_ring() {
     // the command has fired.
     let mut control = WindowControl::new(WindowControlKind::Minimize);
     control.set_focused(true);
+    let bounds = Rect::new(0, 0, 40, 40);
+    let mut damage = sink();
     assert_eq!(
-        control.on_key(Key::Named(NamedKey::Enter)),
+        control.on_key(Key::Named(NamedKey::Enter), bounds, &mut damage),
         Some(WindowControlAction::Invoked(WindowControlKind::Minimize))
     );
     assert!(
         !control.state().focus.focused,
         "activation clears the keyboard focus ring"
     );
+    // The dropped ring is drawn, so the control has to say it repainted.
+    assert_eq!(damage.rects(), [bounds]);
+}
+
+#[test]
+fn a_key_that_activates_nothing_reports_nothing() {
+    // An unfocused control ignores the key, and a control that is already at
+    // rest has no ring or highlight to drop: neither may cost a repaint.
+    let mut control = WindowControl::new(WindowControlKind::Close);
+    let bounds = Rect::new(0, 0, 40, 40);
+    let mut damage = sink();
+    assert_eq!(control.on_key(Key::Char(' '), bounds, &mut damage), None);
+    assert!(damage.is_empty());
 }
 
 #[test]
@@ -343,7 +362,10 @@ fn disabled_control_ignores_input() {
     let _ = control.on_pointer(&PRESS, bounds, &mut sink());
     assert_eq!(control.on_pointer(&RELEASE, bounds, &mut sink()), None);
     control.set_focused(true);
-    assert_eq!(control.on_key(Key::Named(NamedKey::Enter)), None);
+    assert_eq!(
+        control.on_key(Key::Named(NamedKey::Enter), bounds, &mut sink()),
+        None
+    );
 }
 
 #[test]
@@ -642,9 +664,16 @@ fn size_toggle_shows_restore_when_maximized() {
 
 #[test]
 fn keyboard_focus_navigates_and_activates() {
+    let theme = Theme::dark();
     let mut bar = TitleBar::new(furniture());
     assert_eq!(
-        bar.on_key(Key::Named(NamedKey::Right), TITLE_BOUNDS, &mut sink()),
+        bar.on_key(
+            Key::Named(NamedKey::Right),
+            TITLE_BOUNDS,
+            Scale::ONE,
+            &theme,
+            &mut sink()
+        ),
         None
     );
     assert!(
@@ -654,9 +683,139 @@ fn keyboard_focus_navigates_and_activates() {
             .focused
     );
     assert_eq!(
-        bar.on_key(Key::Named(NamedKey::Enter), TITLE_BOUNDS, &mut sink()),
+        bar.on_key(
+            Key::Named(NamedKey::Enter),
+            TITLE_BOUNDS,
+            Scale::ONE,
+            &theme,
+            &mut sink()
+        ),
         Some(TitleBarEvent::Control(WindowControlKind::PutToBack))
     );
+}
+
+#[test]
+fn a_focus_move_reports_the_two_controls_it_touches() {
+    // The ring leaves one control and lands on another. Repainting the strip
+    // between them would drop every frost above the title band for nothing, so
+    // the bar reports exactly the two rects and never its own bounds.
+    let theme = Theme::dark();
+    let mut bar = TitleBar::new(furniture());
+    let layout = bar.layout(TITLE_BOUNDS, Scale::ONE, &theme);
+    let rect_of = |kind: WindowControlKind| {
+        layout
+            .controls
+            .iter()
+            .find(|(k, _)| *k == kind)
+            .map(|(_, r)| *r)
+            .expect("every command is laid out")
+    };
+
+    let arrive = |bar: &mut TitleBar, damage: &mut Region| {
+        bar.on_key(
+            Key::Named(NamedKey::Right),
+            TITLE_BOUNDS,
+            Scale::ONE,
+            &theme,
+            damage,
+        )
+    };
+
+    let mut damage = sink();
+    assert_eq!(arrive(&mut bar, &mut damage), None);
+    assert_eq!(
+        damage.rects(),
+        [rect_of(WindowControlKind::PutToBack)],
+        "the first step only lights the control it lands on"
+    );
+
+    let mut damage = sink();
+    assert_eq!(arrive(&mut bar, &mut damage), None);
+    for rect in [
+        rect_of(WindowControlKind::PutToBack),
+        rect_of(WindowControlKind::Minimize),
+    ] {
+        assert!(
+            damage
+                .rects()
+                .iter()
+                .any(|reported| reported.contains(rect.origin)),
+            "the control at {rect:?} the ring moved between must be repainted"
+        );
+    }
+    assert!(
+        damage.bounds().width < TITLE_BOUNDS.width,
+        "a focus move must not report the whole bar"
+    );
+}
+
+#[test]
+fn a_focus_move_reports_every_ring_it_clears() {
+    // The bar's own invariant is one focused control, but a caller reaches the
+    // controls directly. A move must report each ring it actually clears, not
+    // the two the invariant predicts.
+    let theme = Theme::dark();
+    let mut bar = TitleBar::new(furniture());
+    for kind in [WindowControlKind::Minimize, WindowControlKind::Close] {
+        bar.control_mut(kind).set_focused(true);
+    }
+    let layout = bar.layout(TITLE_BOUNDS, Scale::ONE, &theme);
+    let rect_of = |kind: WindowControlKind| {
+        layout
+            .controls
+            .iter()
+            .find(|(k, _)| *k == kind)
+            .map(|(_, r)| *r)
+            .expect("every command is laid out")
+    };
+
+    let mut damage = sink();
+    assert_eq!(
+        bar.on_key(
+            Key::Named(NamedKey::Right),
+            TITLE_BOUNDS,
+            Scale::ONE,
+            &theme,
+            &mut damage
+        ),
+        None
+    );
+    let covers = |kind: WindowControlKind| {
+        damage
+            .rects()
+            .iter()
+            .any(|reported| reported.contains(rect_of(kind).origin))
+    };
+    // The ring left both lit controls and arrived at the one past the first.
+    for kind in [
+        WindowControlKind::Minimize,
+        WindowControlKind::SizeToggle,
+        WindowControlKind::Close,
+    ] {
+        assert!(covers(kind), "the ring changed on {kind:?} and must report");
+    }
+    assert!(
+        !covers(WindowControlKind::PutToBack),
+        "a control whose ring did not change costs nothing"
+    );
+}
+
+#[test]
+fn a_key_the_bar_ignores_reports_nothing() {
+    let theme = Theme::dark();
+    let mut bar = TitleBar::new(furniture());
+    let mut damage = sink();
+    assert_eq!(
+        bar.on_key(
+            Key::Char('x'),
+            TITLE_BOUNDS,
+            Scale::ONE,
+            &theme,
+            &mut damage
+        ),
+        None
+    );
+    assert!(damage.is_empty());
 }
 
 #[test]
@@ -1147,16 +1306,25 @@ fn grabber_draws_teeth() {
 fn grabber_captures_drag() {
     let mut grabber = ResizeGrabber::new();
     let hit = Rect::new(0, 0, 20, 20);
-    let _ = grabber.on_pointer(&moved(10, 10), hit);
-    assert_eq!(grabber.on_pointer(&PRESS, hit), Some(ResizeEvent::Begin));
-    assert!(grabber.is_dragging());
+    let _ = grabber.on_pointer(&moved(10, 10), hit, &mut sink());
     assert_eq!(
-        grabber.on_pointer(&moved(15, 15), hit),
+        grabber.on_pointer(&PRESS, hit, &mut sink()),
+        Some(ResizeEvent::Begin)
+    );
+    assert!(grabber.is_dragging());
+    // A sample that only carries the drag forward paints the same teeth.
+    let mut damage = sink();
+    assert_eq!(
+        grabber.on_pointer(&moved(15, 15), hit, &mut damage),
         Some(ResizeEvent::Moved {
             to: Point::new(15, 15)
         })
     );
-    assert_eq!(grabber.on_pointer(&RELEASE, hit), Some(ResizeEvent::End));
+    assert!(damage.is_empty(), "a drag sample repaints nothing");
+    assert_eq!(
+        grabber.on_pointer(&RELEASE, hit, &mut sink()),
+        Some(ResizeEvent::End)
+    );
     assert!(!grabber.is_dragging());
 }
 
@@ -1164,8 +1332,8 @@ fn grabber_captures_drag() {
 fn grabber_escape_cancels_drag() {
     let mut grabber = ResizeGrabber::new();
     let hit = Rect::new(0, 0, 20, 20);
-    let _ = grabber.on_pointer(&moved(10, 10), hit);
-    let _ = grabber.on_pointer(&PRESS, hit);
+    let _ = grabber.on_pointer(&moved(10, 10), hit, &mut sink());
+    let _ = grabber.on_pointer(&PRESS, hit, &mut sink());
     assert_eq!(
         grabber.on_key(Key::Named(NamedKey::Escape), TITLE_BOUNDS, &mut sink()),
         Some(ResizeEvent::Cancel)
@@ -1174,13 +1342,37 @@ fn grabber_escape_cancels_drag() {
 }
 
 #[test]
+fn a_cancel_away_from_the_corner_still_reports_the_teeth() {
+    // The drag itself is drawn in the pressed treatment, so dropping it
+    // repaints even when the pointer has long left the hit region and the
+    // pointer look is already at rest.
+    let mut grabber = ResizeGrabber::new();
+    let hit = Rect::new(0, 0, 20, 20);
+    let _ = grabber.on_pointer(&moved(10, 10), hit, &mut sink());
+    let _ = grabber.on_pointer(&PRESS, hit, &mut sink());
+    let _ = grabber.on_pointer(&moved(400, 400), hit, &mut sink());
+
+    let mut damage = sink();
+    assert_eq!(
+        grabber.on_key(Key::Named(NamedKey::Escape), hit, &mut damage),
+        Some(ResizeEvent::Cancel)
+    );
+    assert_eq!(damage.rects(), [hit]);
+}
+
+#[test]
 fn disabled_grabber_ignores_input() {
     let mut grabber = ResizeGrabber::new();
     grabber.set_enabled(false);
     let hit = Rect::new(0, 0, 20, 20);
-    let _ = grabber.on_pointer(&moved(10, 10), hit);
-    assert_eq!(grabber.on_pointer(&PRESS, hit), None);
+    let mut damage = sink();
+    let _ = grabber.on_pointer(&moved(10, 10), hit, &mut sink());
+    assert_eq!(grabber.on_pointer(&PRESS, hit, &mut damage), None);
     assert!(!grabber.is_dragging());
+    assert!(
+        damage.is_empty(),
+        "a refused press captures nothing and repaints nothing"
+    );
 }
 
 #[test]
@@ -1361,8 +1553,8 @@ fn pointer_position_alone_never_changes_a_grabber_render() {
     // differs; a drag in progress is visible and stays compared.
     let mut a = ResizeGrabber::new();
     let mut b = a.clone();
-    let _ = a.on_pointer(&moved(60, 60), bounds);
-    let _ = b.on_pointer(&moved(90, 40), bounds);
+    let _ = a.on_pointer(&moved(60, 60), bounds, &mut sink());
+    let _ = b.on_pointer(&moved(90, 40), bounds, &mut sink());
 
     assert_eq!(
         a, b,

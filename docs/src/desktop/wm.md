@@ -544,6 +544,16 @@ the chrome. The furniture family itself lives once in
   forbids growth — is rendered for that frame alone, and the composited
   output is byte-identical whether the cache is warm, has just been emptied,
   or can retain nothing at all.
+- **One funnel decides the repaint and the retention.** Every mutation that
+  can change how a frame is drawn runs through one internal helper that hands
+  the mutation a damage sink, marks exactly the rectangles it reported over
+  that window's layer, and releases the window's retained furniture *only when
+  something was reported*. So a mutation that changes no drawn pixel — a title
+  set to the label already there, an activation re-asserted, a pointer sample
+  crossing the drag region — marks nothing and keeps its rendered strips, and
+  a hover that reaches one command control costs that control's rectangle
+  rather than the band it sits in. Neither the marking nor the invalidation is
+  a caller's to remember.
 - **Activation and title.** `Compositor::set_active_frame` repaints a
   window's title and controls for the focused/unfocused state the
   `InputRouter` tracks. The *rim* is not part of that: every window wears the
@@ -555,8 +565,9 @@ the chrome. The furniture family itself lives once in
   heavy contrast by a doubled inner rim line so the distinction is a
   difference in shape too. `Compositor::set_window_title` repaints the title
   bar with the (untrusted, sanitised) `WindowTitle` the channel already
-  carries. Both confine their damage to the furniture bands — a focus flip
-  or title edit never recomposites the client (`AGENTS.md` §2.16).
+  carries. An activation change repaints the four furniture bands (the rim
+  contrast is a band-wide change under heavy contrast); a title edit repaints
+  the title band alone. Neither recomposites the client.
 
 - **Furniture hit map.** `Compositor::frame_hit` classifies a screen point
   against a decorated window's `WindowFrame::hit`, returning a typed
@@ -586,7 +597,12 @@ the chrome. The furniture family itself lives once in
   shared `ResizeGrabber`. When the frame furniture holds the keyboard, arrows
   move focus between the controls and Space/Enter activate one
   (`Compositor::frame_key` → `TitleBar::on_key`); a client press returns the
-  keyboard to the app.
+  keyboard to the app. The furniture controls report their own repainted
+  rectangles into the sink the compositor hands them, so a hover, a press, and
+  a keyboard focus move each cost only the control that changed — a focus move
+  reports the control the ring left and the one it reached, never the strip
+  between them. The router itself carries no damage: repainting belongs to the
+  compositor, which owns the sink at the point the frame is mutated.
 - **Typed lifecycle (no new syscall).** Each command control maps to a window
   lifecycle action in one shared place
   (`tairix_desktop_session::window_control_event`), so the live serve loop and

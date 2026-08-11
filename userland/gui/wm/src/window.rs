@@ -721,7 +721,9 @@ impl Window {
         let bounds = self.bounds();
         let frame = self.frame.as_mut()?;
         let title_rect = frame.layout(bounds, scale, theme).title_bar;
-        frame.title_bar_mut().on_key(key, title_rect, damage)
+        frame
+            .title_bar_mut()
+            .on_key(key, title_rect, scale, theme, damage)
     }
 
     /// Toggle a decorated, resizable window between restored and maximized,

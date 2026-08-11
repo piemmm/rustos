@@ -23,7 +23,10 @@ use crate::chrome::{chrome_cache, ChromeEpoch, WindowChrome};
 use crate::frost::{frost_cache, FrostEpoch, FrostedBackdrop};
 use crate::select::{cursor_cache, CursorEpoch};
 
-use crate::{IconKind, WindowActivationState, WindowFrame, WindowFurnitureState, WindowSizeState};
+use crate::{
+    IconKind, WindowActivationState, WindowControlKind, WindowFrame, WindowFurnitureState,
+    WindowSizeState,
+};
 
 pub(crate) fn mode(w: u32, h: u32) -> DisplayMode {
     DisplayMode {
@@ -3783,6 +3786,85 @@ fn re_setting_the_title_a_window_already_wears_repaints_nothing() {
         c.chrome_resident(id),
         "and the furniture rendered from it still stands"
     );
+}
+
+/// A point inside `rect`, one pixel in from its top-left corner — enough to
+/// land a pointer sample on the thing without depending on its extent.
+fn inside(rect: Rect) -> Point {
+    Point::new(rect.left() + 1, rect.top() + 1)
+}
+
+/// The screen rect of one window-command control of a decorated window,
+/// resolved through the same layout the frame paints and hit-tests with.
+fn command_rect(c: &Compositor, id: WindowId, kind: WindowControlKind) -> Rect {
+    let window = c.window(id).expect("window");
+    let frame = c.window_frame(id).expect("decorated");
+    let band = frame
+        .layout(window.bounds(), c.scale(), c.theme())
+        .title_bar;
+    frame
+        .title_bar()
+        .layout(band, c.scale(), c.theme())
+        .controls
+        .iter()
+        .find(|(k, _)| *k == kind)
+        .map(|(_, rect)| *rect)
+        .expect("every command is laid out")
+}
+
+#[test]
+fn a_pointer_sample_crossing_the_drag_region_repaints_nothing() {
+    // Moving the pointer across a title bar changes no furniture pixel: the
+    // drag region has no hover look. It must therefore neither mark damage nor
+    // cost the window its rendered furniture — the alternative is a full chrome
+    // re-render and a four-band recomposite per input sample.
+    let mut c = new_compositor(mode(320, 240), BLUE).expect("compositor");
+    let id = titled_window(&mut c, 10, 10, 120, "Documents");
+    composite_checked(&mut c);
+    assert!(c.chrome_resident(id));
+
+    let band = c
+        .window_frame(id)
+        .expect("decorated")
+        .layout(c.window(id).expect("window").bounds(), c.scale(), c.theme())
+        .title_bar;
+    let origin = inside(band);
+    for step in 0..8 {
+        assert_eq!(
+            c.frame_pointer(id, &moved(origin.x + step, origin.y)),
+            None,
+            "a drag-region sample produces no furniture event"
+        );
+        assert!(!c.has_damage(), "…and no repaint");
+        assert!(c.chrome_resident(id), "…and keeps its rendered furniture");
+    }
+}
+
+#[test]
+fn entering_a_command_control_repaints_that_control_alone() {
+    // A hover that reaches a command button is a real pixel change, so it does
+    // cost a repaint — of that button, not of the band it sits in and never of
+    // the client area.
+    let mut c = new_compositor(mode(320, 240), BLUE).expect("compositor");
+    let id = titled_window(&mut c, 10, 10, 120, "Documents");
+    composite_checked(&mut c);
+
+    let close = command_rect(&c, id, WindowControlKind::Close);
+    let over = inside(close);
+    assert_eq!(c.frame_pointer(id, &moved(over.x, over.y)), None);
+    assert!(
+        !c.chrome_resident(id),
+        "the furniture the hover invalidated must be dropped, not served stale"
+    );
+
+    let region = composite_checked(&mut c);
+    assert_eq!(region.rects(), [close], "exactly the control that lit up");
+    assert!(c.chrome_resident(id), "and re-rendered for the next frame");
+
+    // The same sample again is idle motion: the look is already hover.
+    assert_eq!(c.frame_pointer(id, &moved(over.x, over.y)), None);
+    assert!(!c.has_damage(), "a repeated sample changes nothing");
+    assert!(c.chrome_resident(id));
 }
 
 #[test]

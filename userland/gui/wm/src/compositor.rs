@@ -24,7 +24,7 @@ use tairix_abi::driver::display::{
 use tairix_abi::DriverError;
 use tairix_display::{scanout_len, sub_screen_damage, ChannelOrder};
 
-use tairix_controls::{FurniturePart, TitleBarEvent, WindowFrame};
+use tairix_controls::{damage, FurniturePart, TitleBarEvent, WindowFrame};
 use tairix_cursor::{CursorImage, PlacedCursor};
 use tairix_icon::IconKind;
 use tairix_input::{InputEvent, Key};
@@ -781,29 +781,39 @@ impl Compositor {
     }
 
     /// Apply `change` to the window named by `id` under the active scale
-    /// and theme, releasing that window's retained furniture, and return
-    /// what `change` produced (`None` for an unknown id).
+    /// and theme, marking exactly the rectangles it reported repainting, and
+    /// return what `change` produced (`None` for an unknown id).
     ///
-    /// Every mutation that can alter how a frame is drawn runs through
-    /// here, so releasing the entry is part of the mutation rather than
-    /// something each caller must remember. It is one key, never the whole
-    /// cache: a title edit or a focus flip leaves every *other* window's
-    /// furniture perfectly valid.
+    /// Every mutation that can alter how a frame is drawn runs through here,
+    /// so what it reported decides both halves of the repaint rather than each
+    /// caller remembering them: the reported rectangles are marked over this
+    /// window's layer, and the retained furniture is released only when
+    /// something was reported at all. A mutation that changed no drawn pixel —
+    /// a title set to the label already there, a pointer sample crossing a
+    /// title bar without entering a control — keeps that window's rendered
+    /// furniture and marks nothing.
+    ///
+    /// The release is one key, never the whole cache: a title edit or a focus
+    /// flip leaves every *other* window's furniture perfectly valid.
     fn mutate_frame<R>(
         &mut self,
         id: WindowId,
-        change: impl FnOnce(&mut Window, Scale, &Theme) -> R,
+        change: impl FnOnce(&mut Window, Scale, &Theme, &mut Region) -> R,
     ) -> Option<R> {
         let scale = self.scale;
-        let Self {
-            theme,
-            windows,
-            chrome,
-            ..
-        } = self;
-        let window = windows.iter_mut().find(|w| w.id() == id)?;
-        let out = change(window, scale, theme);
-        chrome.invalidate(&id);
+        let mut damage = damage::sink();
+        let out = {
+            let Self { theme, windows, .. } = self;
+            let window = windows.iter_mut().find(|w| w.id() == id)?;
+            change(window, scale, theme, &mut damage)
+        };
+        if damage.is_empty() {
+            return Some(out);
+        }
+        self.chrome.invalidate(&id);
+        for rect in damage.rects() {
+            self.mark_layer(id, *rect);
+        }
         Some(out)
     }
 
@@ -1212,16 +1222,16 @@ impl Compositor {
         id: WindowId,
         work_area: Rect,
     ) -> Option<(tairix_controls::WindowSizeState, Rect)> {
-        let (result, before, after) = self.mutate_frame(id, |window, scale, theme| {
+        self.mutate_frame(id, |window, scale, theme, damage| {
             let before = window.bounds();
             let result = window.toggle_size(work_area, scale, theme);
-            (result, before, window.bounds())
-        })?;
-        if result.is_some() {
-            self.mark_layer(id, before);
-            self.mark_layer(id, after);
-        }
-        result
+            if result.is_some() {
+                damage.add(before);
+                damage.add(window.bounds());
+            }
+            result
+        })
+        .flatten()
     }
 
     /// Remove a window; its last bounds are marked dirty.
@@ -1309,16 +1319,12 @@ impl Compositor {
     /// [`client_rect`](Window::client_rect); the client never overlaps the
     /// furniture. The union of the old and new outer bounds is marked dirty.
     pub fn set_window_frame(&mut self, id: WindowId, frame: WindowFrame) -> bool {
-        let Some((before, after)) = self.mutate_frame(id, |window, scale, theme| {
-            let before = window.bounds();
+        self.mutate_frame(id, |window, scale, theme, damage| {
+            damage.add(window.bounds());
             window.set_frame(Some(frame), scale, theme);
-            (before, window.bounds())
-        }) else {
-            return false;
-        };
-        self.mark_layer(id, before);
-        self.mark_layer(id, after);
-        true
+            damage.add(window.bounds());
+        })
+        .is_some()
     }
 
     /// Remove the decoration frame from the window named by `id`, so the window
@@ -1326,16 +1332,12 @@ impl Compositor {
     /// bounds collapse back to the bare content surface. Returns `false` for an
     /// unknown id. The union of the old and new bounds is marked dirty.
     pub fn clear_window_frame(&mut self, id: WindowId) -> bool {
-        let Some((before, after)) = self.mutate_frame(id, |window, scale, theme| {
-            let before = window.bounds();
+        self.mutate_frame(id, |window, scale, theme, damage| {
+            damage.add(window.bounds());
             window.set_frame(None, scale, theme);
-            (before, window.bounds())
-        }) else {
-            return false;
-        };
-        self.mark_layer(id, before);
-        self.mark_layer(id, after);
-        true
+            damage.add(window.bounds());
+        })
+        .is_some()
     }
 
     /// The decoration frame of the window named by `id`, or `None` when the id
@@ -1373,18 +1375,16 @@ impl Compositor {
         if !changes {
             return true;
         }
-        let bands = self.mutate_frame(id, |window, _, _| {
-            window
-                .set_frame_active(active)
-                .then(|| window.furniture_bands())
-        });
-        let Some(Some(bands)) = bands else {
-            return false;
-        };
-        for band in bands {
-            self.mark_layer(id, band);
-        }
-        true
+        self.mutate_frame(id, |window, _, _, damage| {
+            if !window.set_frame_active(active) {
+                return false;
+            }
+            for band in window.furniture_bands() {
+                damage.add(band);
+            }
+            true
+        })
+        .unwrap_or(false)
     }
 
     /// Set the decorated window named by `id`'s title, repainting the title
@@ -1404,14 +1404,14 @@ impl Compositor {
             // sanitises to it: there is nothing to relabel or re-render.
             return true;
         }
-        let band = self.mutate_frame(id, |window, _, _| {
-            window.set_frame_title(title).then(|| window.title_band())
-        });
-        let Some(Some(band)) = band else {
-            return false;
-        };
-        self.mark_layer(id, band);
-        true
+        self.mutate_frame(id, |window, _, _, damage| {
+            if !window.set_frame_title(title) {
+                return false;
+            }
+            damage.add(window.title_band());
+            true
+        })
+        .unwrap_or(false)
     }
 
     /// Give the decorated window named by `id` the owning application's
@@ -1436,16 +1436,14 @@ impl Compositor {
         identity: IconKind,
         artwork: Option<Surface>,
     ) -> bool {
-        let band = self.mutate_frame(id, |window, _, _| {
-            window
-                .set_frame_identity(identity, artwork)
-                .then(|| window.title_band())
-        });
-        let Some(Some(band)) = band else {
-            return false;
-        };
-        self.mark_layer(id, band);
-        true
+        self.mutate_frame(id, |window, _, _, damage| {
+            if !window.set_frame_identity(identity, artwork) {
+                return false;
+            }
+            damage.add(window.title_band());
+            true
+        })
+        .unwrap_or(false)
     }
 
     /// The pixel side the identity icon of the decorated window named by `id`
@@ -1491,46 +1489,33 @@ impl Compositor {
     }
 
     /// Feed a pointer `event` to the decoration furniture of the window named
-    /// by `id`, repainting only its furniture bands, and return the typed
-    /// [`TitleBarEvent`] it produced (a completed command-control click, or a
-    /// title-bar activation/drag gesture). Returns `None` for an unknown or
-    /// undecorated window.
+    /// by `id`, repainting only what the furniture reported changing, and
+    /// return the typed [`TitleBarEvent`] it produced (a completed
+    /// command-control click, or a title-bar activation/drag gesture). Returns
+    /// `None` for an unknown or undecorated window.
     ///
     /// The window manager owns this furniture, so the event is never delivered
-    /// to the client; only the furniture bands are marked dirty, so a hover or
-    /// press repaint never touches the client area.
-    pub fn frame_pointer(
-        &mut self,
-        id: WindowId,
-        event: &InputEvent,
-        damage: &mut Region,
-    ) -> Option<TitleBarEvent> {
-        let (result, bands) = self.mutate_frame(id, |window, scale, theme| {
-            let result = window.on_frame_pointer(event, scale, theme, damage);
-            (result, window.furniture_bands())
-        })?;
-        for band in bands {
-            self.mark_layer(id, band);
-        }
-        result
+    /// to the client. The furniture reports its own repainted rectangles, so a
+    /// hover that enters one command control costs that control — not the band
+    /// it sits in, and never the client area — and a sample that merely crosses
+    /// the drag region costs nothing at all and keeps the window's rendered
+    /// chrome.
+    pub fn frame_pointer(&mut self, id: WindowId, event: &InputEvent) -> Option<TitleBarEvent> {
+        self.mutate_frame(id, |window, scale, theme, damage| {
+            window.on_frame_pointer(event, scale, theme, damage)
+        })
+        .flatten()
     }
 
     /// Feed a key `key` to the decoration furniture of the window named by
-    /// `id` (the title bar's command controls), repainting the title band, and
-    /// return the typed [`TitleBarEvent`] it produced. Returns `None` for an
-    /// unknown or undecorated window.
-    pub fn frame_key(
-        &mut self,
-        id: WindowId,
-        key: Key,
-        damage: &mut Region,
-    ) -> Option<TitleBarEvent> {
-        let (result, band) = self.mutate_frame(id, |window, scale, theme| {
-            let result = window.on_frame_key(key, scale, theme, damage);
-            (result, window.title_band())
-        })?;
-        self.mark_layer(id, band);
-        result
+    /// `id` (the title bar's command controls), repainting only what the
+    /// furniture reported changing, and return the typed [`TitleBarEvent`] it
+    /// produced. Returns `None` for an unknown or undecorated window.
+    pub fn frame_key(&mut self, id: WindowId, key: Key) -> Option<TitleBarEvent> {
+        self.mutate_frame(id, |window, scale, theme, damage| {
+            window.on_frame_key(key, scale, theme, damage)
+        })
+        .flatten()
     }
 
     /// Resize the window named by `id` so its outer rectangle becomes
@@ -1539,18 +1524,16 @@ impl Compositor {
     /// Returns `false` for an unknown window or when the implied client size
     /// is empty. The union of the old and new outer bounds is marked dirty.
     pub fn resize_window(&mut self, id: WindowId, new_outer: Rect) -> bool {
-        let Some((changed, before, after)) = self.mutate_frame(id, |window, scale, theme| {
+        self.mutate_frame(id, |window, scale, theme, damage| {
             let before = window.bounds();
             let changed = window.resize_to_outer(new_outer, scale, theme);
-            (changed, before, window.bounds())
-        }) else {
-            return false;
-        };
-        if changed {
-            self.mark_layer(id, before);
-            self.mark_layer(id, after);
-        }
-        changed
+            if changed {
+                damage.add(before);
+                damage.add(window.bounds());
+            }
+            changed
+        })
+        .unwrap_or(false)
     }
 
     /// Reallocate the content surface of the window named by `id` to the new
@@ -1565,18 +1548,16 @@ impl Compositor {
     /// (unlike [`resize_window`](Self::resize_window), which sizes from an
     /// outer rectangle and moves the origin for an interactive edge drag).
     pub fn resize_window_client(&mut self, id: WindowId, client_w: u32, client_h: u32) -> bool {
-        let Some((changed, before, after)) = self.mutate_frame(id, |window, scale, theme| {
+        self.mutate_frame(id, |window, scale, theme, damage| {
             let before = window.bounds();
             let changed = window.resize_client(client_w, client_h, scale, theme);
-            (changed, before, window.bounds())
-        }) else {
-            return false;
-        };
-        if changed {
-            self.mark_layer(id, before);
-            self.mark_layer(id, after);
-        }
-        changed
+            if changed {
+                damage.add(before);
+                damage.add(window.bounds());
+            }
+            changed
+        })
+        .unwrap_or(false)
     }
 
     /// Mutate the root viewport of the window named by `id` through `change`,

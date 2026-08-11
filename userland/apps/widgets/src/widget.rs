@@ -341,7 +341,7 @@ impl DemoWidget {
                 }
                 None => false,
             },
-            DemoWidget::WindowControl(w) => w.on_key(key).is_some(),
+            DemoWidget::WindowControl(w) => w.on_key(key, rect, damage).is_some(),
         }
     }
 }
