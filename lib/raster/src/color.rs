@@ -198,6 +198,32 @@ impl Pixel {
     }
 }
 
+/// `weight`/255 of the way from `from` to `to`, per premultiplied channel.
+///
+/// The crate's one mixer: the blur mixes a frosted copy back over what it
+/// covers with it, and a laid rounded rectangle mixes its arc pixels toward
+/// their new colour with it. Every channel is weighted identically, so a
+/// colour channel can never come out above the alpha it is premultiplied by,
+/// and the two extremes return their end exactly.
+#[must_use]
+pub(crate) fn mix(from: Pixel, to: Pixel, weight: u8) -> Pixel {
+    if weight == 255 {
+        return to;
+    }
+    if weight == 0 {
+        return from;
+    }
+    let keep = u32::from(255 - weight);
+    let take = u32::from(weight);
+    let channel = |from: u8, to: u8| div255(u32::from(from) * keep + u32::from(to) * take);
+    Pixel {
+        r: channel(from.r, to.r),
+        g: channel(from.g, to.g),
+        b: channel(from.b, to.b),
+        a: channel(from.a, to.a),
+    }
+}
+
 impl From<tairix_theme::Rgba> for Color {
     /// Adopt a theme colour token as a straight-alpha rasteriser colour.
     ///

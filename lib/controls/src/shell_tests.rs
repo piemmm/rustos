@@ -878,6 +878,60 @@ fn tray_signal_readout_renders_name_value_and_action() {
     assert!(has_pixel(&s, premul(theme.palette().surface_raised)));
 }
 
+/// The capsule's readout is one of the desktop's floating surfaces, and the
+/// trap is the same one the menu's test names: its rim is drawn across the
+/// whole plate first, so a ground merely *composited* over it comes back
+/// opaque and the popup frosts nothing on screen.
+#[test]
+fn a_floating_readout_lays_a_see_through_ground_over_its_rim() {
+    for theme in [Theme::dark(), Theme::light()] {
+        let sig = TraySignal::new(IconKind::Battery, "Battery").with_value("82%");
+        let chrome_theme = theme.clone().floating();
+        let (w, h) = sig.readout_size(Scale::ONE, &theme);
+        let mut floating = Surface::new(w, h).expect("surface");
+        sig.render_readout(
+            &mut floating,
+            Rect::new(0, 0, w, h),
+            Scale::ONE,
+            &chrome_theme,
+        );
+        // The padding row just inside the top border: the readout's own
+        // ground, clear of the name and value lines that fill its middle.
+        let interior = floating.get(w / 2, 1).expect("in bounds");
+        assert_eq!(
+            interior,
+            premul(
+                theme
+                    .palette()
+                    .surface_raised
+                    .with_alpha(theme.palette().chrome_alpha)
+            ),
+            "{}: opaque ground",
+            theme.name()
+        );
+        assert!(interior.a < 255, "{}: the chrome covers", theme.name());
+        // The rim survives as the readout's edge, at the surface's own weight:
+        // part of the glass, not a hard line drawn on it.
+        let rim = premul(theme.palette().rim.with_alpha(theme.palette().chrome_alpha));
+        assert_eq!(
+            floating.get(0, h / 2),
+            Some(rim),
+            "{}: the laid ground ate the rim",
+            theme.name()
+        );
+        assert_ne!(rim, interior, "{}: the edge must read", theme.name());
+
+        let mut opaque = Surface::new(w, h).expect("surface");
+        sig.render_readout(&mut opaque, Rect::new(0, 0, w, h), Scale::ONE, &theme);
+        assert_eq!(
+            opaque.get(w / 2, 1),
+            Some(premul(theme.palette().surface_raised)),
+            "{}: an ordinary readout changed",
+            theme.name()
+        );
+    }
+}
+
 #[test]
 fn tray_signal_readout_action_activates() {
     let theme = Theme::dark();

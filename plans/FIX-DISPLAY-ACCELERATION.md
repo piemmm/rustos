@@ -63,6 +63,25 @@ where reachable, **does not actually save work**:
    signalled via `irq_bind`/`irq_wait` (never a busy-poll, §2.23), which
    also feeds `plans/FIX-DESKTOP.md` responsiveness.
 
+6. **One backdrop-blurred window disables acceleration for the whole
+   frame**, and the desktop now always has one. `Compositor::encode_layers`
+   refuses the layer path outright when any visible window asks for a
+   backdrop blur, because a hardware plane cannot read what is beneath it;
+   the frame falls back to the software composite. The taskbar and every
+   popup it opens are floating chrome over a blurred backdrop
+   (`plans/GUI-CONTROLS-DESIGN.md`, "Surface ground"), so on a desktop
+   session that refusal is permanent, not occasional: the accelerated path
+   as it stands can only serve a headless or bar-less configuration. This
+   is a real cost of the desktop's look, not a bug in either half — the
+   software path is the mandatory always-available fallback (§17.3) and
+   `plans/FIX-DESKTOP-SPEEDUP.md` is what keeps it fast. Closing it means
+   compositing *only* the frosted surfaces in software and handing the
+   hardware the rest: the blurred region is bounded (the bar and one popup),
+   its backdrop is what the layers below already contain, and a baked layer
+   is exactly the shape Stage A gives such a surface. Until that lands, the
+   accelerated path's win is measured on scenes without chrome, and a
+   measurement quoted from one must say so.
+
 ---
 
 ## Goal / invariants (bind every stage)

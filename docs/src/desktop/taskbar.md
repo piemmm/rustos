@@ -1,8 +1,10 @@
 # Traditional desktop taskbar
 
 The taskbar (`userland/gui/taskbar`, crate `tairix-taskbar`) is the
-GNOME/Windows-style bar pinned to a configured screen edge (`AGENTS.md` §10,
-`PLAN.md` Stage 7, `plans/NEW-TASKBAR.md`). This page describes the **layout,
+GNOME/Windows-style bar at a configured screen edge (`AGENTS.md` §10,
+`PLAN.md` Stage 7, `plans/NEW-TASKBAR.md`). It floats clear of the three
+screen-facing sides by the theme's `Metrics::taskbar_margin` and keeps its
+normal thickness on the work-area side. This page describes the **layout,
 model, and rendering**: the geometry of every region, pointer hit-testing for
 input routing, the program-library popup / pin-strip / task-list /
 notification-area / Switchboard-tray state machines, the bar's right-click
@@ -45,6 +47,21 @@ per-region extents. The edge fixes the bar's `Orientation`: a top/bottom bar
 runs horizontally (its long *main axis* is `x`), a left/right bar runs
 vertically (main axis `y`). Regions are laid out along the main axis and the
 code is otherwise orientation-agnostic.
+
+`BarLayout::compute` insets the bar by the theme's `taskbar_margin` on the
+three sides facing a screen edge: left, right, and bottom for a bottom bar;
+top, bottom, and left for a left bar; and the corresponding sides for the
+other edges. The margin is `5` logical pixels in both built-in themes and is
+scaled through `Scale::scale_length`. The fourth side faces the work area, so
+the bar keeps its thickness there. If the screen is too small for the margin,
+the layout clamps it and still produces a bar.
+
+The bar's own rim is spent before anything is placed on it: `compute` lays out
+the bar's rectangle, then places every region through a placer pulled in by one
+`plate_border` on both axes, so a hovered or pressed slot's plate cannot wash
+over the surface's edge. `BarLayout::bar` stays the whole rectangle, rim
+included, and hit-testing reads it — a press on the rim reaches the bare bar.
+A bar too thin to spare two rims keeps its content rather than the inset.
 
 From the leading end to the trailing end:
 
@@ -135,11 +152,14 @@ either way.
 
 ## Rounded edges
 
-The taskbar supports rounded corners, but it does **not** draw them itself.
 `BarLayout::corner_radius` carries the radius taken from the active theme's
-`taskbar_corner_radius` metric; the window manager applies that radius through
-its single anti-aliased rounded-corner path, exactly as it rounds windows.
-There is no second rounded-corner implementation (`AGENTS.md` §2.2).
+`taskbar_corner_radius` metric. The window manager cuts the bar window to it
+through its single anti-aliased rounded-corner path, exactly as it rounds
+windows, and the bar's own background plate is laid down at that same radius so
+its rim follows the silhouette the cut leaves. Because the bar floats clear of
+the screen edges it faces, all four corners round against the wallpaper. Both
+round through `lib/raster`'s one coverage path; there is no second
+rounded-corner implementation (`AGENTS.md` §2.2).
 
 ## The owned theme
 
@@ -147,6 +167,11 @@ The bar owns a copy of the active `Theme` (`Taskbar::theme`), adopted at
 construction and swapped by `Taskbar::apply_theme`. Layout, hit-testing, and
 painting all read that one copy, so the radius a hit-test assumes and the
 radius the painter draws can never come from two different themes.
+
+Both take `Theme::floating`, so the ground for floating chrome is adopted once
+and every surface the bar paints — and every control on them — is translucent by
+construction, with no control told separately and none left an opaque patch (see
+*Floating chrome*).
 
 ## The per-surface repaint latch
 
@@ -230,7 +255,12 @@ colour role from the `Palette`. Its last argument is the caller's
 `tairix_icon::IconArtwork` lookup — the session's decoded artwork, or
 `NoArtwork` on a system that has none (see *Icon artwork*, below):
 
-- the bar background is the **raised surface** colour;
+- the bar background is the shared floating-surface plate
+  (`tairix_controls::paint_surface_plate`), the recipe every popup it opens
+  already wears: a rim one `plate_border` thick in the palette's `rim`, then the
+  `surface_raised` ground inside it. Both are laid down through `ground_fill` at
+  the palette's `chrome_alpha`, so the blurred backdrop reads through the edge
+  as well as the middle, and both are rounded by `BarLayout::corner_radius`;
 - every icon on the bar is **bar-seated** (`PlateSeating::Bar`): it wears no
   perimeter in any state, and no plate at all while it has nothing of its own to
   state, so the strip reads as one bar rather than a row of boxed buttons. A
@@ -246,8 +276,8 @@ colour role from the `Palette`. Its last argument is the caller's
 - the **Files button** is the same quiet (`Neutral`) `IconButton` carrying the
   shipped `Folder` artwork over its folder glyph;
 - the **separator** between them is filled in the palette's `border` colour,
-  through the same `Surface` fill as the background — the renderer draws the
-  laid-out `BarLayout::separator` rectangle and knows nothing of the gutter
+  through a plain `Surface` fill — the renderer draws the laid-out
+  `BarLayout::separator` rectangle and knows nothing of the gutter
   arithmetic behind it (`AGENTS.md` §2.2);
 - each **pin slot** and each **task slot** is one shared `tairix-controls`
   `TaskbarItem` — the bar's application buttons have exactly one visual
@@ -286,10 +316,12 @@ a neighbouring slot. Glyphs are composited through `tairix-raster`'s one
 premultiplied-alpha `over` path — no blitter or colour
 algebra is duplicated here (`AGENTS.md` §2.2).
 
-The surface is rectangular: the taskbar paints no corners. The window manager
-presents it and applies `BarLayout::corner_radius` through its single
-anti-aliased rounded-corner path, exactly as it rounds windows (`AGENTS.md`
-§2.2). Region rectangles are screen-space; each is translated into the bar's
+The window manager presents the surface and cuts it to
+`BarLayout::corner_radius` through its single anti-aliased rounded-corner path,
+exactly as it rounds windows; the bar's own background plate is laid down at
+that same radius, so its rim curves with the cut instead of squaring off across
+it (`AGENTS.md` §2.2). Region rectangles are screen-space; each is translated
+into the bar's
 local surface space, the translation saturates, and `fill_rect` clips, so a
 degenerate layout paints nothing rather than panicking (`AGENTS.md` §2.9).
 Switching themes simply re-renders with the new palette.
@@ -303,6 +335,29 @@ bounded by a budget derived from the real framebuffer byte size, dropped
 under memory pressure, and wiped on release. The renderer is the right home
 for that state: the `Taskbar` model stays pure data. `render_library` (the
 popup painter) needs no cache of its own, so it stays a `&self` method.
+
+## Floating chrome
+
+The bar and every popup it opens — the program-library panel, context menu,
+notification popover, and Switchboard readout — are drawn with the floating
+theme the bar adopted, and the session asks the compositor for the theme's
+`chrome_backdrop_blur` — `7` logical pixels in both built-in themes — behind
+each surface. Along-bar popup placement is clamped to the bar's own span, so
+no popup enters the wallpaper gap.
+
+Every *background* on those surfaces therefore lets the backdrop through: the
+hover and press wash under a bar icon, the library's rows and its search field,
+the readout's *Open Switchboard* button, a notification card, and the scrollbar
+channel. Each keeps the colour role it wears when solid — the bar, its context
+menu and the readout ground in `surface_raised`, a `Panel` in `surface` — so a
+resting row still matches its panel and a hover wash still steps away from it.
+What a surface is there to *show* stays solid: icons, labels, a control's rim,
+focus rings, role fills, a menu's highlighted command, and the pressure rails
+and beads, because each has to read against whatever wallpaper is behind it. A
+*surface's* own rim is not one of those marks but its edge, so it takes the
+ground's weight — a step lighter than the ground on the dark theme, a step
+darker on the light one. Each surface draws one translucent layer, so a floating
+panel has no separate header band.
 
 ## Icon artwork
 
@@ -384,8 +439,9 @@ the same catalog always presents the same way.
 `Taskbar::library_layout` computes the popup's geometry (`LibraryLayout`):
 the panel opens *outward* from the bar — above a bottom bar, below a top bar,
 to the inner side of a left/right bar — aligned to the Library button and
-clamped to the screen. Its height is sized to the rows it has, capped by the
-space between the bar and the opposite screen edge; overflowing rows scroll.
+clamped along the bar's own span, so it cannot enter the wallpaper gap. Its
+height is sized to the rows it has, capped by the space between the bar and
+the opposite screen edge; overflowing rows scroll.
 The panel chrome overhead is *measured* by probing the shared `Panel`
 geometry rather than re-deriving its arithmetic, so a metrics change can
 never drift the layout from what the panel draws (`AGENTS.md` §2.2). Widths,
@@ -418,9 +474,9 @@ entry count; an entry row is indented beneath its folder and draws **the
 application's own icon** (below) over the app-bundle glyph; the hovered row
 raises its fill, and the keyboard cursor row shows the shared selection rail
 and focus ring — the calm placeholder when nothing is listed, and the
-scrollbar when the rows overflow. Like the bar it is a rectangular surface
-the window manager places and rounds with `LibraryLayout::corner_radius`, and
-it returns `None` while the popup is closed (`AGENTS.md` §2.9).
+scrollbar when the rows overflow. Like the bar, the window manager places it
+and rounds it with `LibraryLayout::corner_radius`, and it returns `None` while
+the popup is closed (`AGENTS.md` §2.9).
 
 ### Each application's own icon
 
@@ -527,7 +583,7 @@ otherwise); a secondary press on a program-library **entry row** in the
 open popup opens it over that entry (*Open* / *Pin to taskbar*, or *Unpin
 from taskbar* when the entry is already pinned). The menu opens outward
 from the bar edge, anchored at the slot or row it is about, clamped to the
-screen (`Taskbar::menu_layout`), and is presented by the session as its own
+bar's own span (`Taskbar::menu_layout`), and is presented by the session as its own
 small rounded window above the bar. Choosing a row reports a typed response
 (`ActivatePin` / `Unpin { index }` / `PinEntry { entry }` /
 `LibraryLaunch`); the menu itself performs nothing — the session edits the
@@ -715,10 +771,16 @@ a drop that launches neither the pressed row nor the row it ended over and
 leaves the popup open, `Escape` withdraws and keeps the popup open (the
 release that follows drops nothing and a second `Escape` dismisses as ever),
 and a folder header arms nothing.
-The rendering tests probe painted pixels for the bar regions; both launchers
+The rendering tests probe painted pixels for the bar regions; the bar's own rim
+(the theme's rim tone at the chrome weight on both built-in themes, the ground
+one `plate_border` further in, lighter than that ground on the dark theme and
+darker on the light one, still see-through, one scaled border thick at 100% and
+200%, and cut away at the rounded corner); both launchers
 resting bare on the bar (glyph ink on the bar's own fill, with no role fill,
-no rim, and no reactive edge); the hover wash appearing under the pointer
-in that slot alone and never as an edge; the Library button compressed while
+no rim of their own, and no reactive edge); a hovered or pressed slot inking
+inside itself and never over the bar's rim, on both themes; the hover wash
+appearing under the pointer in that slot alone and never as an edge; the
+Library button compressed while
 its popup is open; focused / unfocused / minimised task fills; notification
 glyphs (including the unknown-asset fallback and cache retint on theme
 switch); the clock's text; a running task's centred icon with no title ink

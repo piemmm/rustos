@@ -34,7 +34,7 @@ use tairix_proglib::{
 };
 use tairix_reclaim::{CacheLedger, PressureBand, ReclaimCache, ReportedPressure};
 use tairix_taskbar::{
-    icon_cache, ActivateOutcome, IconEpoch, LibraryRow, PinView, TaskId, TaskbarConfig,
+    icon_cache, ActivateOutcome, Edge, IconEpoch, LibraryRow, PinView, TaskId, TaskbarConfig,
     TaskbarRenderer, TaskbarRepaint, TaskbarResponse,
 };
 use tairix_taskpins::PinTarget;
@@ -2033,18 +2033,25 @@ fn motion_is_ignored_and_repaints_only_when_the_hover_changes() {
         "a motion that crosses no control repaints no part of the bar"
     );
 
-    // Motion onto the library button. The bar is itself a compositor
-    // window, so the window manager reports the motion over it; nothing is
-    // forwarded, because no application owns the bar.
+    // Motion onto the library button, asked of the layout rather than
+    // spelled out: the bar floats clear of the screen edge, so its buttons
+    // are nowhere a screen coordinate can name. The bar is itself a
+    // compositor window, so the window manager reports the motion over it;
+    // nothing is forwarded, because no application owns the bar.
+    let onto = centre(shell.session().taskbar().layout(Scale::ONE).library);
     let outcomes = shell
-        .pump(&mut MemoryInput::new(&[moved(24, 1060)]), &mut comp, 0)
+        .pump(
+            &mut MemoryInput::new(&[moved(onto.x, onto.y)]),
+            &mut comp,
+            0,
+        )
         .expect("source does not fault");
     assert_eq!(
         outcomes,
         [ShellOutcome::WindowManager(
             InputResponse::ClientPointerMoved {
                 window: bar,
-                local: Point::new(24, 20),
+                local: Point::new(onto.x - bar_rect.left(), onto.y - bar_rect.top()),
             }
         )]
     );
@@ -7239,6 +7246,189 @@ fn the_pinboard_menu_is_shown_as_its_own_window_and_taken_down_when_it_closes() 
         "closing the menu takes its window down"
     );
     assert_eq!(comp.window_count(), before);
+}
+
+/// The backdrop blur `window` asks the compositor for.
+fn blur_of(comp: &Compositor, window: Option<WindowId>, what: &str) -> u16 {
+    let id = window.unwrap_or_else(|| panic!("{what} is on screen"));
+    comp.window(id)
+        .expect("a placed window is live")
+        .blur_radius()
+}
+
+/// The blur the active theme asks for behind its floating chrome.
+fn chrome_blur(shell: &DesktopShell) -> u16 {
+    let radius = shell
+        .session()
+        .active_theme()
+        .metrics()
+        .chrome_backdrop_blur;
+    let blur = u16::try_from(radius).expect("a desktop length fits");
+    assert!(blur > 0, "the theme asks for no frosting at all");
+    blur
+}
+
+/// Every surface the taskbar puts on screen is floating chrome: it is drawn
+/// on the theme's translucent fill, which reads as frosted glass only if the
+/// compositor blurs what is behind it, so each asks for that as it is placed.
+#[test]
+fn the_bar_and_its_library_popup_frost_what_is_behind_them() {
+    let mut shell = shell();
+    let mut comp = compositor();
+    shell.present(&mut comp);
+    let blur = chrome_blur(&shell);
+    assert_eq!(
+        blur_of(&comp, shell.presenter().bar_window(), "the bar"),
+        blur
+    );
+
+    shell
+        .session_mut()
+        .taskbar_mut()
+        .library_mut()
+        .set_catalog(office_and_games());
+    let library = centre(shell.session().taskbar().layout(Scale::ONE).library);
+    shell.handle(moved(library.x, library.y), &mut comp, 0);
+    shell.handle(PRIMARY_PRESS, &mut comp, 0);
+    assert_eq!(
+        blur_of(&comp, shell.presenter().popup_window(), "the library popup"),
+        blur
+    );
+}
+
+/// The bar's other three surfaces are the same chrome. Each is opened the
+/// way the desktop opens it, on its own shell: the ones that are modal would
+/// otherwise swallow the input that raises the next.
+#[test]
+fn the_bars_menu_popover_and_readout_frost_what_is_behind_them() {
+    let mut menued = shell();
+    let mut comp = compositor();
+    let blur = chrome_blur(&menued);
+    menued.set_pins(&mut comp, vec![PinView::new("Files", IconKind::AppBundle)]);
+    let pin = pin_slot_point(&menued, 0);
+    menued.handle(moved(pin.x, pin.y), &mut comp, 0);
+    menued.handle(SECONDARY_PRESS, &mut comp, 0);
+    assert_eq!(
+        blur_of(&comp, menued.presenter().menu_window(), "the context menu"),
+        blur
+    );
+
+    let mut hovered = shell();
+    let mut comp = compositor();
+    hovered.present(&mut comp);
+    let capsule = capsule_point(&hovered);
+    hovered.handle(moved(capsule.x, capsule.y), &mut comp, 0);
+    assert_eq!(
+        blur_of(&comp, hovered.presenter().readout_window(), "the readout"),
+        blur
+    );
+
+    let mut notified = shell();
+    let mut comp = compositor();
+    notified.apply_notify(
+        &mut comp,
+        42,
+        NotifyRequest::Raise {
+            key: 1,
+            severity: NotifySeverity::Warning,
+            title: NotifyTitle::new("Battery low").expect("title"),
+            body: NotifyBody::new("12% remaining").expect("body"),
+        },
+    );
+    assert_eq!(
+        blur_of(
+            &comp,
+            notified.presenter().notifications_window(),
+            "the notification popover"
+        ),
+        blur
+    );
+}
+
+/// The desktop's own backdrop menu is not the bar's chrome: it covers what it
+/// opens over, so nothing behind it is blurred for it.
+#[test]
+fn the_backdrops_own_menu_frosts_nothing() {
+    let (mut shell, mut comp) = headless_desktop();
+    let mut menu = PinboardMenu::new();
+    menu.open(Point::new(100, 100), true, &PinboardSettings::default());
+    shell.present_pinboard_menu(&mut comp, &menu);
+    let id = shell.pinboard_window().expect("an open menu is placed");
+    assert_eq!(
+        comp.window(id).expect("live").blur_radius(),
+        0,
+        "an opaque menu paid for a blur nothing shows through"
+    );
+}
+
+/// The bar stands clear of the screen edges it faces, and the band it
+/// reserves runs from its own edge to its inner side. A maximized window
+/// therefore never covers the bar, and never claims the wallpaper gap behind
+/// it either — that gap can only be reached through the bar.
+#[test]
+fn a_floating_bar_reserves_the_whole_band_from_its_screen_edge() {
+    for edge in [Edge::Top, Edge::Bottom, Edge::Left, Edge::Right] {
+        let shell = shell_for(TaskbarConfig {
+            edge,
+            ..TaskbarConfig::bottom_bar(1920, 1080)
+        });
+        let comp = compositor();
+        let screen = comp.screen_rect();
+        let bar = shell.session().taskbar().layout(comp.scale()).bar;
+        let area = shell.work_area(&comp);
+
+        let gap = match edge {
+            Edge::Top => bar.top() - screen.top(),
+            Edge::Bottom => screen.bottom() - bar.bottom(),
+            Edge::Left => bar.left() - screen.left(),
+            Edge::Right => screen.right() - bar.right(),
+        };
+        assert!(
+            gap > 0,
+            "{edge:?}: the bar hugs its screen edge, so nothing below tests a gap"
+        );
+
+        // Toward the screen edge from the bar is the wallpaper gap; away from
+        // it is the first row or column a window may have.
+        let (in_gap, in_bar, past_bar) = match edge {
+            Edge::Top => (
+                Point::new(bar.left(), screen.top()),
+                Point::new(bar.left(), bar.top()),
+                Point::new(bar.left(), bar.bottom()),
+            ),
+            Edge::Bottom => (
+                Point::new(bar.left(), screen.bottom() - 1),
+                Point::new(bar.left(), bar.bottom() - 1),
+                Point::new(bar.left(), bar.top() - 1),
+            ),
+            Edge::Left => (
+                Point::new(screen.left(), bar.top()),
+                Point::new(bar.left(), bar.top()),
+                Point::new(bar.right(), bar.top()),
+            ),
+            Edge::Right => (
+                Point::new(screen.right() - 1, bar.top()),
+                Point::new(bar.right() - 1, bar.top()),
+                Point::new(bar.left() - 1, bar.top()),
+            ),
+        };
+        assert!(
+            !area.contains(in_gap),
+            "{edge:?}: the wallpaper gap {in_gap:?} was handed to a window ({area:?})"
+        );
+        assert!(
+            !area.contains(in_bar),
+            "{edge:?}: a maximized window would cover the bar ({area:?} over {bar:?})"
+        );
+        assert!(
+            area.contains(past_bar),
+            "{edge:?}: the row past the bar {past_bar:?} is usable ({area:?})"
+        );
+        assert!(
+            area.width <= screen.width && area.height <= screen.height,
+            "{edge:?}: the work area left the screen"
+        );
+    }
 }
 
 /// Every session-owned surface reads the compositor's density rather than

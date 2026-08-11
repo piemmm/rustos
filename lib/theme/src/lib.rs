@@ -65,5 +65,5 @@ pub use metrics::Metrics;
 pub use motion::{Contrast, Density, Fade, MotionInteraction, MotionTheme, Timeline};
 pub use palette::{Palette, SignalRole};
 pub use registry::{ThemeError, ThemeRegistry};
-pub use theme::{Appearance, Theme, ThemeId};
+pub use theme::{Appearance, SurfaceGround, Theme, ThemeId};
 pub use typography::{FamilyKey, FontSpec, FontWeight, Fonts, TextRole};

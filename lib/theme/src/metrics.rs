@@ -22,6 +22,23 @@ pub struct Metrics {
     /// Corner radius applied to the taskbar, rounded through the same
     /// compositor path as windows.
     pub taskbar_corner_radius: u32,
+    /// How far the taskbar stands off the screen edges it faces, in logical
+    /// pixels. `0` hugs them.
+    ///
+    /// The bar floats: the margin applies to the three sides that face a
+    /// screen edge (for a bottom bar, the left, right, and bottom), so the
+    /// wallpaper is unbroken around it and its rounded corners all read. The
+    /// fourth side faces the work area, which the margin never widens.
+    pub taskbar_margin: u32,
+    /// How far the backdrop behind a floating desktop-chrome surface — the
+    /// taskbar and its popups — is blurred, in logical pixels. `0` leaves
+    /// what is behind them sharp.
+    ///
+    /// Wide enough that the wallpaper reading through
+    /// [`chrome_alpha`](crate::Palette::chrome_alpha) is a wash of its colours
+    /// rather than detail competing with the icons on top, and narrow enough
+    /// that the larger shapes behind the bar still place it on the desktop.
+    pub chrome_backdrop_blur: u32,
     /// Corner radius applied to transient surfaces (menus, popups,
     /// tooltips).
     pub popup_corner_radius: u32,

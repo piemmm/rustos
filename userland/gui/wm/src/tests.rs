@@ -163,6 +163,22 @@ fn rounded_corner_pixel_is_clipped() {
 }
 
 #[test]
+fn only_the_corner_bands_clip_a_row() {
+    // What a per-row decision may skip: a row no arc reaches is fully covered
+    // at every column, so the compositor pays for coverage at the corners only.
+    let rounded = Corners::Rounded { radius: 8 };
+    assert!(rounded.clips_row(0, 20, 20));
+    assert!(rounded.clips_row(7, 20, 20));
+    assert!(!rounded.clips_row(8, 20, 20));
+    assert!(!rounded.clips_row(11, 20, 20));
+    assert!(rounded.clips_row(12, 20, 20));
+    assert!(rounded.clips_row(19, 20, 20));
+    // A square window, and a radius clamped away by a short side, clip nothing.
+    assert!(!Corners::Square.clips_row(0, 20, 20));
+    assert!(!Corners::Rounded { radius: 8 }.clips_row(0, 20, 1));
+}
+
+#[test]
 fn rounded_centre_is_opaque() {
     assert_eq!(Corners::Rounded { radius: 8 }.coverage(10, 10, 20, 20), 255);
 }
@@ -2603,11 +2619,114 @@ fn a_focus_flip_repaints_only_the_furniture() {
     // The title rim, by contrast, is dirty.
     assert!(c.damage_covers(Point::new(centre(bounds).x, bounds.top())));
 
-    // The furniture bands never overlap the client (the separate furniture
-    // paint/hit map the design language requires).
+    // The furniture bands reach into the client only where the rim's own curve
+    // does: a corner arc is drawn as frame, and everything further in than the
+    // radius belongs to the client alone (the separate furniture paint/hit map
+    // the design language requires).
+    let radius = c
+        .scale()
+        .scale_length(c.theme().metrics().window_corner_radius);
+    let interior = Rect::new(
+        client.left().saturating_add_unsigned(radius),
+        client.top().saturating_add_unsigned(radius),
+        client.width.saturating_sub(radius.saturating_mul(2)),
+        client.height.saturating_sub(radius.saturating_mul(2)),
+    );
+    assert!(
+        !interior.is_empty(),
+        "the test window must have an interior"
+    );
     for band in c.window(id).unwrap().furniture_bands() {
-        assert!(band.intersection(&client).is_empty());
+        assert!(band.intersection(&interior).is_empty());
     }
+}
+
+#[test]
+fn a_decorated_windows_content_cannot_square_off_its_rounded_corner() {
+    // What the window composites to is exactly the shape its rim traces: a
+    // pixel the shape does not reach shows the desktop, and every pixel it does
+    // reach is drawn. The application's own rows are square, so without the
+    // clip they reached the bottom corners and covered the curve.
+    let (mut c, id) = decorated_compositor();
+    c.composite();
+    let bounds = c.window(id).expect("window").bounds();
+    let shape = c
+        .window(id)
+        .expect("window")
+        .shape()
+        .expect("a decorated window is rounded");
+    let desktop = [BLUE.r, BLUE.g, BLUE.b, 255];
+    for ly in 0..bounds.height {
+        for lx in 0..bounds.width {
+            let px = frame_pixel(
+                &c,
+                bounds.left().cast_unsigned() + lx,
+                bounds.top().cast_unsigned() + ly,
+            );
+            assert_eq!(
+                px != desktop,
+                shape.coverage(lx, ly) > 0,
+                "({lx}, {ly}) is not the shape the rim traces"
+            );
+        }
+    }
+}
+
+#[test]
+fn clipping_the_client_to_the_curve_costs_it_nothing_else() {
+    // The clip takes the corner arcs and nothing more: every client pixel
+    // further in than the radius is still the application's own, whatever the
+    // theme's band and radius are.
+    for theme in [Theme::dark(), Theme::light()] {
+        let (mut c, id) = decorated_compositor();
+        c.set_theme(theme.clone());
+        assert_eq!(c.theme().id(), theme.id(), "the theme is in effect");
+        c.composite();
+        let client = c.window_client_rect(id).expect("client rect");
+        for y in client.top()..client.bottom() {
+            for x in client.left()..client.right() {
+                if in_a_client_corner(&c, client, Point::new(x, y)) {
+                    continue;
+                }
+                assert_eq!(
+                    frame_pixel(&c, x.cast_unsigned(), y.cast_unsigned()),
+                    [RED.r, RED.g, RED.b, 255],
+                    "the client's own pixel at ({x}, {y}) must survive the clip"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn a_decorated_frosted_window_leaves_the_corner_outside_its_rim_alone() {
+    // The frost is confined to the shape the rim traces, not to the window's
+    // rectangle, so a corner the window does not cover keeps the desktop it
+    // had. The backdrop changes colour under the corner, so a blur that
+    // reached it could not go unnoticed.
+    let scene = |blur: u16| {
+        let mut c = new_compositor(mode(64, 64), BLUE).expect("compositor");
+        c.add_window(Point::ORIGIN, opaque(30, 64, RED));
+        let glass = c.add_window(Point::new(28, 0), clear(30, 40));
+        assert!(c.set_window_frame(glass, WindowFrame::new(decorated())));
+        if blur > 0 {
+            assert!(c.set_backdrop_blur(glass, blur));
+        }
+        c.composite();
+        c
+    };
+    let plain = scene(0);
+    let frosted = scene(3);
+    assert_eq!(
+        frame_pixel(&frosted, 28, 0),
+        frame_pixel(&plain, 28, 0),
+        "the corner the rim curves away from keeps its unfrosted pixel"
+    );
+    assert_ne!(
+        frame_pixel(&frosted, 30, 30),
+        frame_pixel(&plain, 30, 30),
+        "the covered client is frosted"
+    );
 }
 
 #[test]
@@ -3837,6 +3956,24 @@ fn titled_window(c: &mut Compositor, x: i32, y: i32, client: u32, title: &str) -
     id
 }
 
+/// Whether client-space `point` lies where a decorated window's own rim curves
+/// through its client area: within the theme's window corner radius of both a
+/// vertical and a horizontal client edge, at this compositor's scale.
+///
+/// The frame owns those pixels — the client is clipped out of them so the curve
+/// the rim traces is what shows there — so a test asking what the *client*
+/// draws asks outside them. An arc reaches no further than its radius from a
+/// corner, so content bleeding anywhere else cannot hide behind this.
+fn in_a_client_corner(c: &Compositor, client: Rect, point: Point) -> bool {
+    let radius = c
+        .scale()
+        .scale_length(c.theme().metrics().window_corner_radius)
+        .cast_signed();
+    let dx = (point.x - client.left()).min(client.right() - 1 - point.x);
+    let dy = (point.y - client.top()).min(client.bottom() - 1 - point.y);
+    dx < radius && dy < radius
+}
+
 /// The bytes one such window's furniture costs the cache, measured rather
 /// than assumed, so a budget expressed in whole entries stays correct when
 /// the theme's band metrics change.
@@ -4940,17 +5077,27 @@ fn a_released_window_composites_as_transparent_and_leaves_the_desktop_identical(
     c.composite();
     CONTENT_PRESSURE.report(PressureBand::Normal);
 
-    // The released window's client area is now the desktop background.
+    // The released window's client area is now the desktop background — except
+    // at the corners its own rim curves through, which are frame, not client.
+    let desktop = [BLUE.r, BLUE.g, BLUE.b, 255];
+    let mut corner_drawn = false;
     for y in client.top()..client.bottom() {
         for x in client.left()..client.right() {
             let px = frame_pixel(&c, x.cast_unsigned(), y.cast_unsigned());
+            if in_a_client_corner(&c, client, Point::new(x, y)) {
+                corner_drawn |= px != desktop;
+                continue;
+            }
             assert_eq!(
-                px,
-                [BLUE.r, BLUE.g, BLUE.b, 255],
+                px, desktop,
                 "the released client area must show the desktop at ({x}, {y})"
             );
         }
     }
+    assert!(
+        corner_drawn,
+        "a released window still draws the curve its rim traces"
+    );
     // Everything outside it is byte-for-byte what it was.
     let after = c.frame().to_vec();
     let stride = c.mode().stride_bytes;
@@ -5132,6 +5279,9 @@ fn an_app_that_ignores_the_redraw_request_leaves_its_window_blank_and_the_deskto
     let silent_client = c.window_client_rect(silent).expect("client rect");
     for y in silent_client.top()..silent_client.bottom() {
         for x in silent_client.left()..silent_client.right() {
+            if in_a_client_corner(&c, silent_client, Point::new(x, y)) {
+                continue;
+            }
             assert_eq!(
                 frame_pixel(&c, x.cast_unsigned(), y.cast_unsigned()),
                 [BLUE.r, BLUE.g, BLUE.b, 255],

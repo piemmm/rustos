@@ -147,8 +147,40 @@ is the opt-out. Coverage in `0..=255` is computed by deterministic
 supersampling on a fixed grid (no `sqrt`, which `core` lacks), so a pixel
 on a corner arc receives anti-aliased partial coverage and the
 anti-aliasing is exactly reproducible in tests. The radius is clamped to
-half the shorter side. The taskbar's rounded edges reuse this same path
-rather than a second implementation (`AGENTS.md` §2.2).
+half the shorter side (`round_rect_radius`, the same clamp the coverage
+applies). The taskbar's rounded edges reuse this same path rather than a
+second implementation (`AGENTS.md` §2.2) — and because the bar floats clear
+of the screen edges it faces (`Metrics::taskbar_margin`), all four of its
+corners now round against wallpaper rather than two of them against the
+screen edge.
+
+`Window::shape` is the one silhouette a window is cut to, whichever kind it
+is: a **decorated** window takes its frame's rim radius (`WindowFrame::rim`)
+and a plain one its own corner style, and either way the extent is the outer
+rectangle. Both the window's own pixels and the frosted backdrop confined to
+its rectangle weight themselves by it.
+
+A rounded silhouette leaves a curve where a rectangle would have a corner, and
+an application's rows are square, so the window manager keeps content out of
+that curve two ways:
+
+- **The client is clipped to the frame's plate.** A decorated window's client
+  pixels are cut to the rounded plate the frame fills inside its rim
+  (`FrameRim::plate` — the concentric inset and radius the frame itself draws
+  from). A pixel the plate does not fully cover belongs to the frame, whose own
+  arc — the rim and the plate behind it — is what the curve is made of, so
+  content can neither draw over the rim nor square off the corner. A plain
+  window has no rim and no furniture to give way to, so its coverage
+  anti-aliases its own edge exactly as before.
+- **A corner row is furniture over its whole width.** The top and bottom
+  furniture strips reach at least the rim's radius even where the reserved band
+  is thinner than that, and the side strips take only the rows between them, so
+  the frame's own render supplies every pixel of a corner row. A window whose
+  content has been released still draws its curve.
+
+The title bar draws no ground of its own: the frame has already laid its plate
+under the whole window, rounded, so filling the band again would square off the
+very corners the rim curves around — in the colour that is already there.
 
 ## Backdrop blur
 
@@ -161,6 +193,20 @@ window's radius over the window channel
 (`WindowClient::set_backdrop_blur`, below), which the protocol bounds at
 `WINDOW_BACKDROP_BLUR_MAX_PX` — a validation limit on the compositor's
 per-frame work, not a capacity that grows.
+
+The desktop's own chrome is the standing consumer: the session places the
+taskbar and every popup it opens — the program-library launcher, the bar's
+context menu, the notification popover, the Switchboard capsule's readout —
+with the theme's `chrome_backdrop_blur`, because each is drawn on a
+translucent ground that only reads as frosted glass over a blurred backdrop
+(`plans/GUI-CONTROLS-DESIGN.md`, "Surface ground"). It is asked for as the
+surface is placed, so a chrome window is never shown for a frame wearing the
+frosting of whatever was placed before it. The pinboard's own backdrop menu
+asks for none: it covers what it opens over. A desktop session therefore
+always has at least one frosted window, which is why the accelerated layer
+path — a hardware plane cannot read what is beneath it — currently falls back
+to this software composite for the whole frame
+(`plans/FIX-DISPLAY-ACCELERATION.md`).
 
 The radius is a desktop length, so it is authored once and converted to
 physical pixels through the output's own `Scale::scale_length`, exactly as
@@ -535,8 +581,8 @@ bar (`plans/GUI-CONTROLS-DESIGN.md` §6).
   `WindowFrame` and reserves a furniture band *around* the client from the
   frame's `FrameInsets` at the active `Scale` and `Theme`: the window's
   outer `bounds` grow to hold the decoration and the content surface is
-  presented inset at `window_client_rect`, so the client never overlaps the
-  furniture. That band is the border plus the title bar above and the **thin
+  presented inset at `window_client_rect`, so the client never receives frame
+  input. That band is the border plus the title bar above and the **thin
   frame rim** on the other three edges — the same for a resizable window as
   for a fixed one, because a band wide enough to grab would show as dead
   space around every app's content. A resizable window's extra grab room
@@ -560,10 +606,14 @@ bar (`plans/GUI-CONTROLS-DESIGN.md` §6).
   them (`Window::row` /
   `Window::sample_local`), for both the software and the
   hardware-accelerated present paths; a screen row needs at most two of
-  them, since a row is either in the title/bottom band or crosses the client
-  between the two side borders. The furniture is animation-free, so it is
-  reduced-motion correct by construction, and high contrast thickens the
-  command-glyph strokes.
+  them, since a row is either in the top/bottom strip or crosses the client
+  between the two side borders. Those two strips are as deep as the rim's
+  corner radius wherever the reserved band is thinner (above), so on a corner
+  row the frame draws the curve and the client is clipped out of it — which is
+  the only way furniture and client share a row, and it reaches no further in
+  than the radius. The furniture is animation-free, so it is reduced-motion
+  correct by construction, and high contrast thickens the command-glyph
+  strokes.
 - **Retention (bounded and reclaimable).** The strips are *derived* pixels,
   so the compositor holds them in one shared, pressure-governed
   `ReclaimCache` keyed by `WindowId` rather than each window pinning its own
@@ -657,7 +707,9 @@ bar (`plans/GUI-CONTROLS-DESIGN.md` §6).
   the window, marks its taskbar entry minimised, drops focus, and returns
   `WindowEvent::Minimized`; **PutToBack** restacks to the bottom of the
   z-order with no app-ward event; **SizeToggle** maximizes to the session work
-  area (screen minus the taskbar) or restores, returning `WindowEvent::Resized`
+  area (the screen minus the band the taskbar holds, which runs from that
+  screen edge to the bar's inner side and so includes the wallpaper margin the
+  bar floats above) or restores, returning `WindowEvent::Resized`
   with the new client size (nothing for a non-resizable window). These ride the
   existing window path, owner-validated by the engine; there is no ambient
   authority and no privileged force-quit button (`AGENTS.md` §4, §5.4).

@@ -49,6 +49,6 @@ pub use blur::{box_blur, BlurScratch};
 pub use color::{div255, Color, Pixel};
 pub use paint::{Gradient, GradientKind, GradientStop, Paint, SpreadMethod};
 pub use resample::{resample, resample_rows, Region, ResampleError, Rgba8Image};
-pub use round::round_rect_coverage;
+pub use round::{round_rect_coverage, round_rect_radius};
 pub use scan::FillRule;
 pub use surface::{Surface, SUBPIXEL};

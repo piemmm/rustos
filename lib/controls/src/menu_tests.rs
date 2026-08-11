@@ -53,6 +53,50 @@ fn render(menu: &Menu, theme: &Theme, height: u32) -> Surface {
     surface
 }
 
+/// A floating surface must come out **actually** see-through. The trap is
+/// that the plate's rim is drawn across the whole shape first: compositing a
+/// half-opaque ground over it returns an opaque pixel, and the popup then
+/// frosts nothing at all on screen while every colour still looks plausible.
+#[test]
+fn a_floating_menu_lays_a_see_through_ground_over_its_rim() {
+    for theme in [Theme::dark(), Theme::light()] {
+        let chrome = premul(
+            theme
+                .palette()
+                .surface_raised
+                .with_alpha(theme.palette().chrome_alpha),
+        );
+        let height = BORDER * 2 + ROW_H * 3;
+        let floating = render(&three_item_menu(), &theme.clone().floating(), height);
+        let interior = floating.get(W / 2, height / 2).expect("in bounds");
+        assert_eq!(interior, chrome, "{}: opaque ground", theme.name());
+        assert!(
+            interior.a < 255,
+            "{}: the theme's own chrome covers",
+            theme.name()
+        );
+
+        // The rim survives as the popup's edge, at the surface's own weight —
+        // part of the glass, not a hard line on it — and the ordinary menu is
+        // untouched by the option existing.
+        let rim = premul(theme.palette().rim.with_alpha(theme.palette().chrome_alpha));
+        assert_eq!(
+            floating.get(0, height / 2),
+            Some(rim),
+            "{}: the laid ground ate the rim",
+            theme.name()
+        );
+        assert_ne!(rim, interior, "{}: the edge must read", theme.name());
+        let opaque = render(&three_item_menu(), &theme, height);
+        assert_eq!(
+            opaque.get(W / 2, height / 2),
+            Some(premul(theme.palette().surface_raised)),
+            "{}: an ordinary menu changed",
+            theme.name()
+        );
+    }
+}
+
 fn three_item_menu() -> Menu {
     Menu::new(vec![
         MenuItem::new("Open"),

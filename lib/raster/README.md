@@ -162,6 +162,10 @@ This crate owns:
   `Surface::fill_round_rect`'s Reactive Alloy control plates, and the mask
   above all round through this one function, so they never drift apart
   (`AGENTS.md` §2.2).
+- `round_rect_radius` — the radius that coverage actually rounds by: the
+  requested one clamped to half the shorter side. A caller reasoning about
+  *where* a shape's corners are — which rows carry an arc at all, as the
+  compositor asks per window row — reads the clamp rather than restating it.
 - `resample` / `resample_rows` — the single image resampler the whole desktop
   scales through: the icon pipeline fitting a bundle's artwork into a slot and
   the wallpaper pipeline placing a photograph onto a screen are the same

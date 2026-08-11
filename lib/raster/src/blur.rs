@@ -19,7 +19,7 @@
 
 use alloc::vec::Vec;
 
-use crate::color::{div255, Pixel};
+use crate::color::{mix, Pixel};
 use crate::surface::Surface;
 
 /// Blur `region` in place: a dense, row-major, premultiplied
@@ -209,29 +209,6 @@ impl Surface {
                 *dst = mix(*dst, *src, coverage(lx, ly));
             }
         }
-    }
-}
-
-/// `weight`/255 of the way from `from` to `to`, per premultiplied channel.
-///
-/// Every channel is weighted identically, so a colour channel can never
-/// come out above the alpha it is premultiplied by, and the two extremes
-/// return their end exactly.
-fn mix(from: Pixel, to: Pixel, weight: u8) -> Pixel {
-    if weight == 255 {
-        return to;
-    }
-    if weight == 0 {
-        return from;
-    }
-    let keep = u32::from(255 - weight);
-    let take = u32::from(weight);
-    let channel = |from: u8, to: u8| div255(u32::from(from) * keep + u32::from(to) * take);
-    Pixel {
-        r: channel(from.r, to.r),
-        g: channel(from.g, to.g),
-        b: channel(from.b, to.b),
-        a: channel(from.a, to.a),
     }
 }
 

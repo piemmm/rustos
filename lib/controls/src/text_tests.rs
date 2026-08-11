@@ -590,6 +590,38 @@ fn search_click_places_caret_after_the_magnifier() {
 }
 
 #[test]
+fn a_focused_search_field_shows_one_accent_line_not_two() {
+    for theme in [Theme::dark(), Theme::light()] {
+        let accent = premul(theme.palette().rim_active);
+        let mut search = SearchField::new();
+        search.set_focused(true);
+        let focused = search_surface(&search, &theme);
+        // Down the middle of the row, so the count is the vertical runs of
+        // the field's edge and not a corner's coverage blend: one ring per
+        // side, never a ring with a lifted rim outside it.
+        let lines = (0..W)
+            .filter(|x| focused.get(*x, H / 2) == Some(accent))
+            .count();
+        assert_eq!(lines, 2, "{}: doubled focus border", theme.name());
+
+        // The pointer resting on the focused field states itself in the
+        // plate, so it cannot restore the second line either.
+        let mid = moved(i32::try_from(W / 2).expect("in range"), 1);
+        search.on_pointer(&mid, bounds(), Scale::ONE, &theme, &mut sink());
+        let hovered = search_surface(&search, &theme);
+        let lines = (0..W)
+            .filter(|x| hovered.get(*x, H / 2) == Some(accent))
+            .count();
+        assert_eq!(lines, 2, "{}: hover doubled the focus border", theme.name());
+        assert!(
+            has_pixel(&hovered, premul(theme.palette().surface_hover)),
+            "{}: and then the pointer is stated nowhere",
+            theme.name()
+        );
+    }
+}
+
+#[test]
 fn search_renders_in_light_without_panic() {
     let theme = Theme::light();
     let search = SearchField::new().with_text("find");

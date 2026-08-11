@@ -24,10 +24,19 @@ use alloc::vec::Vec;
 
 use tairix_reclaim::CachedBytes;
 
-use crate::color::{Color, Pixel};
+use crate::color::{mix, Color, Pixel};
 use crate::paint::Paint;
 use crate::round::round_rect_coverage;
 use crate::scan::{FillRule, SampleSpace, ScanFill};
+
+/// What a rounded-rectangle paint does with the pixels it covers.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+enum PaintMode {
+    /// Composite the source over them.
+    Over,
+    /// Replace them with the source, mixing toward it by coverage on an arc.
+    Replace,
+}
 
 /// The half-open pixel window a paint is confined to: `[x0, x1) × [y0, y1)`.
 ///
@@ -340,6 +349,37 @@ impl Surface {
     /// rectangle the surface bounds or the clip window cut short keeps the
     /// corner arcs of the whole shape rather than re-rounding what survives.
     pub fn fill_round_rect(&mut self, x: u32, y: u32, w: u32, h: u32, radius: u32, color: Color) {
+        self.round_rect((x, y, w, h), radius, color, PaintMode::Over);
+    }
+
+    /// Lay `color` down over the rounded rectangle `[x, x+w) × [y, y+h)`,
+    /// **replacing** what it covers instead of compositing over it: a pixel
+    /// the shape fully covers becomes exactly `color`, one on a corner arc is
+    /// mixed toward it by that pixel's coverage, and one outside the shape is
+    /// untouched.
+    ///
+    /// This is how a *translucent* fill is laid down. Compositing one
+    /// ([`fill_round_rect`](Self::fill_round_rect)) inherits whatever it was
+    /// drawn over — a half-opaque fill over an opaque plate comes back fully
+    /// opaque — so a surface that must actually be see-through states its
+    /// ground here. An opaque `color` covers what is beneath it either way.
+    ///
+    /// The same walk, the same [`round_rect_coverage`], and the same mix the
+    /// rest of the crate uses, so a laid shape and a filled one round
+    /// identically.
+    pub fn set_round_rect(&mut self, x: u32, y: u32, w: u32, h: u32, radius: u32, color: Color) {
+        self.round_rect((x, y, w, h), radius, color, PaintMode::Replace);
+    }
+
+    /// The one rounded-rectangle walk, painting each span in `mode`.
+    fn round_rect(
+        &mut self,
+        area: (u32, u32, u32, u32),
+        radius: u32,
+        color: Color,
+        mode: PaintMode,
+    ) {
+        let (x, y, w, h) = area;
         if w == 0 || h == 0 {
             return;
         }
@@ -356,7 +396,7 @@ impl Surface {
                 continue;
             };
             if !in_corner_band(local_y, h, radius) {
-                composite_span(span, source);
+                paint_span(span, source, mode);
                 continue;
             }
             // The drawn columns as the rectangle sees them: `lead` is the
@@ -370,16 +410,16 @@ impl Surface {
             let right_start = right_band.saturating_sub(lead).min(drawn).max(left_end);
             let (left, rest) = span.split_at_mut(left_end as usize);
             let (middle, right) = rest.split_at_mut((right_start - left_end) as usize);
-            composite_coverage_span(left, lead..lead + left_end, local_y, w, h, radius, source);
-            composite_span(middle, source);
-            composite_coverage_span(
+            let shape = (w, h, radius);
+            paint_coverage_span(left, lead..lead + left_end, local_y, shape, source, mode);
+            paint_span(middle, source, mode);
+            paint_coverage_span(
                 right,
                 lead + right_start..lead + drawn,
                 local_y,
-                w,
-                h,
-                radius,
+                shape,
                 source,
+                mode,
             );
         }
     }
@@ -421,7 +461,7 @@ impl Surface {
                 continue;
             }
             if let Some((_, span)) = self.row_span_mut(row, x, w) {
-                composite_span(span, source);
+                paint_span(span, source, PaintMode::Over);
             }
         }
     }
@@ -995,12 +1035,13 @@ fn in_corner_band(local: u32, size: u32, radius: u32) -> bool {
     local < radius || local >= size - radius
 }
 
-/// Composite `source` at full coverage over every pixel of `span`.
+/// Paint `source` at full coverage onto every pixel of `span`.
 ///
-/// Compositing a fully opaque source yields that source unchanged, so an
-/// opaque span is one slice fill rather than a per-pixel blend.
-fn composite_span(span: &mut [Pixel], source: Pixel) {
-    if source.a == 255 {
+/// Replacing is a slice fill, and so is compositing a fully opaque source —
+/// which yields that source unchanged — so only a translucent composite is a
+/// per-pixel blend.
+fn paint_span(span: &mut [Pixel], source: Pixel, mode: PaintMode) {
+    if mode == PaintMode::Replace || source.a == 255 {
         span.fill(source);
         return;
     }
@@ -1050,25 +1091,28 @@ fn mask_coverage_span(
     }
 }
 
-/// Composite `source` over one corner span of a `w`×`h` rounded rectangle of
-/// corner `radius`, scaling it by each pixel's anti-aliased coverage.
+/// Paint `source` onto one corner span of a `shape` — a `w`×`h` rounded
+/// rectangle of corner `radius` — weighted by each pixel's anti-aliased
+/// coverage: compositing it over what is there, or mixing what is there
+/// toward it.
 ///
 /// `columns` are the span pixels' x coordinates local to the rectangle,
 /// paired one for one with `span`, and `local_y` is its row.
-fn composite_coverage_span(
+fn paint_coverage_span(
     span: &mut [Pixel],
     columns: Range<u32>,
     local_y: u32,
-    w: u32,
-    h: u32,
-    radius: u32,
+    shape: (u32, u32, u32),
     source: Pixel,
+    mode: PaintMode,
 ) {
+    let (w, h, radius) = shape;
     for (local_x, dst) in columns.zip(span.iter_mut()) {
         let coverage = round_rect_coverage(local_x, local_y, w, h, radius);
-        if coverage == 0 {
-            continue;
-        }
-        *dst = source.scale_alpha(coverage).over(*dst);
+        *dst = match mode {
+            PaintMode::Over if coverage == 0 => continue,
+            PaintMode::Over => source.scale_alpha(coverage).over(*dst),
+            PaintMode::Replace => mix(*dst, source, coverage),
+        };
     }
 }

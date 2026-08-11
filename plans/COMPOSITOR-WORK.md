@@ -142,6 +142,18 @@ guarantees:
   the drawing primitives refuse a negative-origin destination; only the strips
   are kept, so retained bytes scale with the band and never with the window
   area. A zero-extent edge holds no surface at all.
+- **The window's silhouette is the frame's rim, and the client is clipped to
+  it.** `Window::shape` reports one shape for either kind of window — a
+  decorated window's `WindowFrame::rim` radius over its outer rectangle, a plain
+  window's own corner style — and both its pixels and its frosted backdrop are
+  weighted by it. The client, whose rows are square, is cut to the plate the
+  frame fills inside that rim (`FrameRim::plate`); a pixel the plate does not
+  fully cover is the frame's, so content can neither cover the rim nor square
+  off the corner. The top and bottom strips are therefore as deep as the radius
+  wherever the reserved inset is thinner, and the side strips take only the rows
+  between them: a corner row is furniture over its whole width, so a window with
+  no content still draws its curve. `TitleBar::render` lays no ground of its own
+  — the frame's plate is already under it, rounded.
 - **The chrome is not stored in the window.** The `Compositor` owns one
   `ReclaimCache<WindowId, WindowChrome, ChromeEpoch>` (`chrome_cache`, built on
   `tairix_reclaim::screenful_ui_cache`, ceilinged at one screenful), so the

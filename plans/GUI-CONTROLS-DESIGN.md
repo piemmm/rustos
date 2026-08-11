@@ -351,9 +351,9 @@ pub struct Theme {
 
 | Theme value | Examples |
 |---|---|
-| Palette roles | `surface`, `surface_elevated`, `surface_hover`, `surface_pressed`, `text`, `text_muted`, `rim`, `rim_active`, `accent`, `danger`, the window-frame role, scroll track, and scroll thumb. |
+| Palette roles | `surface`, `surface_elevated`, `surface_hover`, `surface_pressed`, `text`, `text_muted`, `rim`, `rim_active`, `accent`, `danger`, the window-frame role, scroll track, and scroll thumb, plus the two opacities floating chrome is drawn at (`chrome_alpha`, `chrome_plate_alpha`). |
 | Semantic signal roles | `cpu_pressure`, `memory_pressure`, `disk_pressure`, `network_activity`, `recovery`, `success`, `warning`, `denied`. |
-| Metrics | Control height, inset, gap, corner radius, border width, seam thickness, rail thickness, bead size, title-bar height, frame inset, window-control extent, resize-grabber extent, scrollbar breadth, minimum thumb length, and invisible hit slop. |
+| Metrics | Control height, inset, gap, corner radius, border width, seam thickness, rail thickness, bead size, title-bar height, frame inset, window-control extent, resize-grabber extent, scrollbar breadth, minimum thumb length, invisible hit slop, the taskbar's margin off the screen edges it faces, and the blur behind floating chrome. |
 | Typography | Font family token, label size, caption size, numeric size, weight roles, active title weight, and inactive title weight. |
 | Motion | Open duration, hover duration, press duration, progress tick cadence, window activation, minimize and size-toggle transitions, scrollbar wake timing, and reduced-motion policy. |
 | Window furniture | Active/inactive treatment, frame profile, scrollbar placement, and grip geometry. |
@@ -519,6 +519,14 @@ ControlBounds
   Elsewhere a persistent bead reserves its own space and a transient one
   overlays inside the existing trailing inset.
 - Focus rings are visible in every theme and do not rely on color alone.
+- **A focused control shows exactly one accent line, and it is the ring.** The
+  ring is drawn a border *inside* the plate; the perimeter keeps the quiet
+  resting rim, including under the pointer, where a hover would otherwise lift
+  it. Two accent lines with a plate-coloured gap between them read as a
+  doubled border rather than as one mark, and the position of the single line
+  is what tells focus from hover — not its colour. A rim carrying a *role* or a
+  *disposition* (a destructive edge, a pending check) is that control's own
+  statement and is never demoted for the ring.
 - Destructive controls remain readable before and during confirmation.
 
 ### Plate seating: panel or bar
@@ -568,6 +576,63 @@ The icon strip — launchers, pinned shortcuts, running-task buttons, and the
 status capsule — is bar-seated, and so are the window commands in a title bar
 (§11.18). A toolbar inside a window is not: it sits on a panel and keeps its
 plates.
+
+### Surface ground: opaque or floating chrome
+
+Seating says what a control sitting *on* a surface wears. Its counterpart,
+`SurfaceGround`, says what lies **under** the surface being drawn, and so
+whether its backgrounds cover that or let it through. It rides on the theme a
+surface is drawn with (`Theme::floating`), never on each control: everything
+drawn on one surface then agrees without any of them being told separately, and
+none can be forgotten and left an opaque patch.
+
+| Ground | Backgrounds |
+|---|---|
+| Opaque | The palette's own colours, covering what is behind them. The default for every surface. |
+| Floating | The same colours at the palette's chrome alphas (§6), over a backdrop the compositor blurs by `chrome_backdrop_blur`. The wallpaper and the windows behind read through as a wash of their colours. |
+
+A floating surface keeps whichever colour role it wears solid and takes only
+the alpha, so every relationship the theme authored survives: the taskbar, the
+bar's context menu and the tray readout ground in `surface_raised`, a panel in
+`surface`, and a resting row — `surface` too — is therefore exactly its panel
+rather than a patch on it. There are two alphas, one step apart:
+
+| Layer | Alpha | What takes it |
+|---|---|---|
+| `ChromeLayer::Ground` | `chrome_alpha` | The surface itself and anything that reads as part of it: a list row, a menu row, a scroll channel. |
+| `ChromeLayer::Plate` | `chrome_plate_alpha` | A plate raised on it: a button, a text field, a notification card — furniture standing on the glass rather than a hole cut in it. |
+
+The choice belongs to whoever puts the surface on screen — the only party that
+knows what is behind it. The desktop's floating chrome is the taskbar and
+**every** popup the bar opens: the program-library launcher, the bar's context
+menu, the notification popover, and the Switchboard capsule's readout. A
+window's own menus and the pinboard's backdrop menu are not: they cover what
+they open over.
+
+Three rules keep the look honest:
+
+- **A background is laid down, never composited.** A translucent fill
+  composited over the pass beneath it comes back more opaque than the theme
+  authored, and the surface frosts nothing. An opaque colour covers either way,
+  so this is the ordinary path too rather than a second one for chrome: the
+  same byte wherever the shape fully covers a pixel, and one rounding rather
+  than two on an arc pixel.
+- **Exactly one translucent fill per surface.** A second layer over the first —
+  a header band over the plate it already covers — would compound into an
+  opacity no theme authored, so a floating panel draws no header band and
+  states its header with the rail and title it already has.
+- **A mark is not a background.** Only backgrounds take a chrome alpha. A role
+  fill, a highlighted command, a pressure rail, a bead, a control's own rim, and
+  a focus ring stay solid, because they have to read against whatever wallpaper
+  happens to be behind them — and every icon and label is drawn exactly as on an
+  opaque surface. Legibility comes from the blurred backdrop, not from dimming
+  what the surface is there to show.
+- **A surface's own rim is part of that surface.** The edge of a floating
+  surface takes the surface's alpha, not a mark's solidity: it reads as the same
+  glass one step lighter (one step darker on a light theme), which is the 1 px
+  border the taskbar wears, rather than a hard line the wallpaper cannot reach
+  through. `paint_surface_plate` is the one recipe that draws it, so the bar and
+  every popup it opens state their edges alike.
 
 ### Window furniture anatomy
 
@@ -828,6 +893,8 @@ A `WindowFrame` is the window-manager-owned boundary around one client viewport.
 - The inactive frame is structurally identical and equally legible; only its title contrast is quieter.
 - An attention request adds a bounded Signal Bead or rim segment. It does not steal focus and does not pulse indefinitely.
 - Client pixels are clipped to the client viewport and never paint into the title bar, borders, root scrollbars, or resize grabber.
+- **Client pixels are clipped to the frame's rounded plate, so content can never square off the window's corner.** A client's rows are square and the frame's silhouette is a curve, so the compositor cuts the client to the plate the frame fills inside its rim: a pixel the plate does not fully cover is the frame's, whose rim and plate *are* the curve there. The top and bottom furniture strips reach at least the rim's radius so a corner row is drawn as furniture over its whole width — the one place furniture and client share a row, and never further in than the radius.
+- **The title bar draws no ground of its own.** The frame has already laid its plate, rounded, under the whole window; a band fill would square off the very corners the rim curves around, in the colour that is already there.
 - Frame activation, theme change, and hover do not change the client origin or outer dimensions.
 - Maximized geometry uses the session work area and therefore respects taskbars, reserved screen edges, and the current logical scale.
 - The furniture band on the left, right, and bottom edges is the thin frame rim, whether or not the window is resizable. A band wide enough to grab is not reserved: it would show as dead space around the content on every resizable window.

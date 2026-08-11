@@ -19,8 +19,10 @@ same reasoning that puts the System Information client helpers in
 The crate owns no rendering arithmetic; it is a table of values. A `Theme`
 bundles, under a stable `ThemeId`:
 
-- `Palette` — semantic `Rgba` colour roles: the surface/foreground base
-  (`desktop`, `surface`, `surface_raised`, `on_surface`, `on_surface_muted`,
+- `Palette` — semantic `Rgba` colour roles plus the two floating-chrome
+  opacities: the surface/foreground base
+  (`desktop`, `surface`, `surface_raised`, `on_surface`,
+  `on_surface_muted`,
   `accent`, `on_accent`, `selection_fill`, `border`), the Reactive Alloy
   control roles
   (`surface_hover`, `surface_pressed`, `rim`, `rim_active`, `danger`), the
@@ -52,6 +54,27 @@ bundles, under a stable `ThemeId`:
     the selection instead of being replaced by a block of accent. It is
     authored per theme rather than derived from `accent` at the draw site, so
     a theme can tune the fill's weight against its own surfaces.
+  - `chrome_alpha` (`179`) and `chrome_plate_alpha` (`217`) are opacities, not
+    colours, and they are what a *floating* desktop-chrome surface is drawn at:
+    the taskbar and every popup it opens — the program-library launcher, the
+    bar's context menu, the notification popover, the Switchboard capsule's
+    readout. Such a surface keeps whichever colour role it wears when solid and
+    takes `chrome_alpha`, so a frosted bar is recognisably the same grey a solid
+    one was, what is behind it — the wallpaper, an open window — reads through
+    instead of being replaced by a band across the screen, and every
+    relationship the theme authored survives. Anything that reads as *part* of
+    the surface — a list row, a menu row, a scrollbar channel, and the surface's
+    own `rim`, which is its edge rather than a mark on it — takes the same
+    alpha, which is what keeps a resting row exactly its ground rather than a
+    patch on it; a control *plate* raised on it — a button, a text field, a
+    notification card — takes `chrome_plate_alpha`, a step more solid, so it
+    reads as furniture standing on the glass rather than a hole cut in it. `255`
+    draws chrome solid. Like `selection_fill` neither works alone: the backdrop
+    is blurred by `chrome_backdrop_blur` first, which is what lets opaque icons
+    and text sit legibly on a translucent ground. Exactly one such fill is laid
+    down per surface — a second translucent layer over the first would compound
+    into an opacity no theme authored, so a floating panel drops its header band
+    and states the header with its rail and title instead.
   - `frame` is a single *neutral* tone — a step lighter than `surface` on dark,
     a step deeper on light — and it is deliberately **not** a focus signal.
     Every window wears the same quiet rim at every activation, because the rim
@@ -69,10 +92,26 @@ bundles, under a stable `ThemeId`:
   `control_inset`, `control_gap`, `control_corner_radius`,
   `selection_backdrop_blur`, `seam_thickness`,
   `rail_thickness`, `bead_size`, `measured_thickness`, `progress_thickness`,
-  `chart_height`, `selector_extent`, `toggle_track_length`); and the window
+  `chart_height`, `selector_extent`, `toggle_track_length`); the desktop's
+  floating chrome (`taskbar_margin`, `chrome_backdrop_blur`); and the window
   furniture
   (`title_bar_height`, `frame_inset`, `window_control_extent`,
   `resize_grabber_extent`, `hit_slop`).
+  - `taskbar_margin` is how far the taskbar stands off the screen edges it
+    faces, `5` logical pixels in both themes. The bar floats: the margin
+    applies to the three sides facing a screen edge — for a bottom bar the
+    left, right, and bottom — so the wallpaper is unbroken around it and its
+    rounded corners all read. The fourth side faces the work area, which the
+    margin never widens: the band a maximized window is kept out of runs from
+    the screen edge to the bar's inner side, so the gap behind the bar is not
+    handed to a window either.
+  - `chrome_backdrop_blur` is how far the backdrop behind a floating chrome
+    surface is blurred, `7` logical pixels in both themes — wide enough that
+    the wallpaper reading through the chrome is a wash of its colours rather
+    than detail competing with the icons on top, narrow enough that the
+    larger shapes behind the bar still place it on the desktop. It is the
+    same compositor filter `selection_backdrop_blur` uses, asked for by the
+    session as each chrome surface is placed.
   - `selection_backdrop_blur` is how far the *backdrop* behind a selected item
     is blurred, `6` logical pixels in both themes. The `selection_fill` laid
     over it keeps a crisp, rounded edge; it is the pixels the item covers — a
@@ -160,6 +199,15 @@ bundles, under a stable `ThemeId`:
     the state still changes visibly, through contrast and shape, and no
     control carries a second branch for it. A zero duration also means no
     animation frame is ever asked for, so an idle surface arms no timer.
+
+A theme also carries the **ground** its surfaces are drawn on. `SurfaceGround`
+is `Opaque` by default and `Floating` on the copy `Theme::floating` returns —
+the theme the taskbar draws its bar and its popups with — and `Theme::ground`
+reports it. The ground rides on the theme rather than on each control, so
+everything drawn with one theme agrees and no control can be forgotten and left
+an opaque patch; `lib/controls` is where a background becomes the chrome alpha
+for its layer. See
+[the control library](../lib/controls.md#surface-ground-opaque-or-floating-chrome).
 
 `Theme::dark` is the default; `Theme::light` is its light counterpart. Both are
 the Reactive Alloy design boards (`plans/desktop1.png`, `plans/desktop2a.png`,
@@ -304,10 +352,13 @@ means answering that question first, not adding a call.
 appearance-dependent role differs between dark and light, `on_accent` is shared
 and stays legible on the accent fill, body and muted text clear their own
 minimum contrast, the hover and pressed plates each separate from the bar fill
-in their appearance's direction, surfaces are opaque and distinct), the type
-ladder (every role's size and weight, the descending order, the base-size clamp
-at both ends, and the monospace role being the only one on the fixed-width
-family), the shared metrics/fonts/cursors, cursor lookup for every kind, and
+in their appearance's direction, surfaces are opaque and distinct, the chrome
+plate alpha standing a step more solid than the ground alpha with both short of
+solid over a blurred backdrop, and a theme drawing opaque until `floating` is
+asked for), the type ladder (every role's size and weight, the descending order,
+the base-size clamp at both ends, and the monospace role being the only one on
+the fixed-width family), the shared metrics/fonts/cursors, cursor lookup for
+every kind, and
 the registry: the dark default, runtime dark↔light switching, custom-theme
 registration and activation, and the fail-closed `UnknownTheme`/`DuplicateId`
 paths. The

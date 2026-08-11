@@ -687,6 +687,111 @@ fn a_desaturated_blit_clips_exactly_as_a_plain_one_does() {
 }
 
 #[test]
+fn set_round_rect_lays_a_translucent_ground_a_fill_could_not() {
+    // The point of the primitive: a half-opaque colour composited over an
+    // opaque plate comes back opaque, so a surface that must be see-through
+    // has to *replace* what it covers.
+    let ground = Color::rgba(20, 26, 30, 128);
+    let mut laid = Surface::new(8, 8).expect("allocates");
+    laid.fill(BLUE);
+    laid.set_round_rect(0, 0, 8, 8, 0, ground);
+    assert_eq!(laid.get(4, 4), Some(ground.premultiply()));
+
+    let mut filled = Surface::new(8, 8).expect("allocates");
+    filled.fill(BLUE);
+    filled.fill_round_rect(0, 0, 8, 8, 0, ground);
+    assert_eq!(filled.get(4, 4).map(|p| p.a), Some(255));
+}
+
+/// Every control background is *laid down* rather than composited, so that a
+/// translucent one keeps the alpha its theme authored. This is what makes
+/// that safe for the opaque ones: an opaque colour covers what is under it
+/// either way. Wherever the shape fully covers a pixel the two are the same
+/// byte; on an arc pixel both compute the same blend, laying it down with a
+/// single rounding where compositing rounds the source and the destination
+/// separately, so it can land one level nearer the exact value and never
+/// further.
+#[test]
+fn laying_an_opaque_colour_down_matches_compositing_it_to_within_a_rounding() {
+    let under = Color::rgba(254, 3, 200, 255);
+    let over = Color::rgba(1, 251, 40, 255);
+    for radius in [0, 1, 5, 8] {
+        let mut laid = Surface::new(16, 16).expect("allocates");
+        laid.fill(under);
+        laid.set_round_rect(0, 0, 16, 16, radius, over);
+
+        let mut composited = Surface::new(16, 16).expect("allocates");
+        composited.fill(under);
+        composited.fill_round_rect(0, 0, 16, 16, radius, over);
+
+        let exact = |x: u32, y: u32| {
+            let inset = radius.saturating_add(1);
+            (inset..16 - inset).contains(&x) || (inset..16 - inset).contains(&y)
+        };
+        for y in 0..16 {
+            for x in 0..16 {
+                let (a, b) = (
+                    laid.get(x, y).expect("in bounds"),
+                    composited.get(x, y).expect("in bounds"),
+                );
+                let apart = [(a.r, b.r), (a.g, b.g), (a.b, b.b), (a.a, b.a)]
+                    .into_iter()
+                    .map(|(l, r)| u32::from(l.abs_diff(r)))
+                    .max()
+                    .unwrap_or(0);
+                if exact(x, y) {
+                    assert_eq!(a, b, "r{radius} ({x},{y}) is fully covered");
+                } else {
+                    assert!(apart <= 1, "r{radius} ({x},{y}): {a:?} vs {b:?}");
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn set_round_rect_leaves_everything_outside_its_shape_alone() {
+    let mut surface = Surface::new(8, 8).expect("allocates");
+    surface.fill(RED);
+    let red = RED.premultiply();
+    surface.set_round_rect(2, 2, 4, 4, 0, Color::rgba(0, 0, 0, 0));
+    assert_eq!(surface.get(1, 4), Some(red), "the column beside it");
+    assert_eq!(surface.get(4, 1), Some(red), "the row above it");
+    assert_eq!(
+        surface.get(3, 3),
+        Some(Pixel::TRANSPARENT),
+        "and inside it is exactly what was laid"
+    );
+}
+
+#[test]
+fn set_round_rect_mixes_an_arc_pixel_toward_the_ground() {
+    // A pixel the arc partly covers keeps that fraction of what was under
+    // it, so the rim a floating plate is laid over still shows through its
+    // own arc instead of being punched out to a translucent notch.
+    let mut surface = Surface::new(16, 16).expect("allocates");
+    surface.fill(RED);
+    let red = RED.premultiply();
+    let ground = Color::rgba(0, 0, 40, 128);
+    let laid = ground.premultiply();
+    surface.set_round_rect(0, 0, 16, 16, 6, ground);
+
+    let partial = (0..6u32)
+        .flat_map(|x| (0..6u32).map(move |y| (x, y)))
+        .filter_map(|(x, y)| surface.get(x, y))
+        .find(|p| p.a > laid.a && p.a < red.a);
+    assert!(
+        partial.is_some(),
+        "no pixel on the arc kept part of what was under it"
+    );
+    assert_eq!(
+        surface.get(0, 0),
+        Some(red),
+        "and the corner the arc misses entirely is untouched"
+    );
+}
+
+#[test]
 fn blit_clips_negative_origin_and_overflow() {
     let mut dst = Surface::new(2, 2).expect("allocates");
     let mut src = Surface::new(4, 4).expect("allocates");

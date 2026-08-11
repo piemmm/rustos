@@ -42,6 +42,28 @@ impl ThemeId {
 /// must be the same value a theme carries.
 pub use tairix_abi::desktop::Appearance;
 
+/// What lies under the surfaces drawn with a theme, and so whether their
+/// backgrounds cover it or let it through.
+///
+/// This is a property of *where a surface is put on screen*, not of what it
+/// is: one menu is an opaque plate in a window and frosted glass when the
+/// taskbar opens it over the wallpaper. It rides on the theme a surface is
+/// drawn with ([`Theme::floating`]) rather than on each control, so everything
+/// drawn on one surface agrees without any of them being told twice — and
+/// nothing can be forgotten and left as an opaque patch.
+#[derive(Copy, Clone, Debug, Default, Eq, PartialEq, Hash)]
+pub enum SurfaceGround {
+    /// An ordinary surface — a window, a dialog: backgrounds are the palette's
+    /// own colours and cover what is behind them.
+    #[default]
+    Opaque,
+    /// Floating desktop chrome — the taskbar and the popups it opens — over a
+    /// backdrop the compositor blurs first: backgrounds keep their colour and
+    /// take the palette's chrome alphas, so the wallpaper and windows behind
+    /// read through as a wash of their colours.
+    Floating,
+}
+
 /// A complete, named theme: colours, metrics, fonts, and cursors.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Theme {
@@ -55,6 +77,7 @@ pub struct Theme {
     motion: MotionTheme,
     density: Density,
     contrast: Contrast,
+    ground: SurfaceGround,
 }
 
 impl Theme {
@@ -84,7 +107,29 @@ impl Theme {
             motion,
             density,
             contrast,
+            ground: SurfaceGround::Opaque,
         }
+    }
+
+    /// The same theme, for drawing *floating desktop chrome*: the taskbar and
+    /// the popups it opens, over a backdrop the compositor blurs.
+    ///
+    /// Whoever puts a surface on screen is the only party that knows what is
+    /// behind it, so it renders with this rather than each control being told
+    /// separately — which is also what makes it impossible to leave one
+    /// control on the surface opaque.
+    #[must_use]
+    pub fn floating(self) -> Self {
+        Self {
+            ground: SurfaceGround::Floating,
+            ..self
+        }
+    }
+
+    /// What lies under the surfaces drawn with this theme.
+    #[must_use]
+    pub fn ground(&self) -> SurfaceGround {
+        self.ground
     }
 
     /// The theme's stable identifier.
@@ -167,6 +212,8 @@ impl Theme {
                 desktop: Rgba::rgb(0x0b, 0x0e, 0x10),
                 surface: Rgba::rgb(0x0f, 0x13, 0x16),
                 surface_raised: Rgba::rgb(0x15, 0x1b, 0x1f),
+                chrome_alpha: CHROME_ALPHA,
+                chrome_plate_alpha: CHROME_PLATE_ALPHA,
                 on_surface: Rgba::rgb(0xe8, 0xeb, 0xed),
                 on_surface_muted: Rgba::rgb(0x8e, 0x97, 0x9c),
                 accent,
@@ -219,6 +266,8 @@ impl Theme {
                 desktop: Rgba::rgb(0xe8, 0xe3, 0xdd),
                 surface: Rgba::rgb(0xfd, 0xfc, 0xfa),
                 surface_raised: Rgba::rgb(0xf4, 0xf0, 0xec),
+                chrome_alpha: CHROME_ALPHA,
+                chrome_plate_alpha: CHROME_PLATE_ALPHA,
                 on_surface: Rgba::rgb(0x1b, 0x1d, 0x20),
                 on_surface_muted: Rgba::rgb(0x6a, 0x6f, 0x75),
                 accent,
@@ -273,6 +322,25 @@ const ON_ACCENT: Rgba = Rgba::rgb(0xff, 0xf5, 0xee);
 /// this.
 pub(crate) const SELECTION_ALPHA: u8 = 77;
 
+/// The opacity both built-in themes give their floating chrome: seven tenths.
+///
+/// The bar and its popups sit over the wallpaper and over whatever windows
+/// are open, and the desktop reads better when they are part of that picture
+/// rather than a solid band across it. Three tenths through is as far as it
+/// goes: the icons and text on top need a settled ground to read against, and
+/// the backdrop they are laid over is blurred first, which is what carries
+/// the separation the missing opacity would otherwise have to.
+pub(crate) const CHROME_ALPHA: u8 = 179;
+
+/// The opacity both built-in themes give a plate raised on floating chrome:
+/// a further fifteen hundredths of the way to solid.
+///
+/// A button or a text field is furniture standing on the glass, so it reads
+/// as a distinct object rather than a hole cut in the surface — while still
+/// letting the blurred backdrop through, which is what keeps a popup one
+/// piece of glass instead of a frosted sheet with solid patches on it.
+pub(crate) const CHROME_PLATE_ALPHA: u8 = 217;
+
 /// The metrics shared by both built-in themes. Corner radii and border
 /// thickness are an appearance-independent house style, so the dark and
 /// light themes share them rather than restate identical numbers.
@@ -280,6 +348,8 @@ fn common_metrics() -> Metrics {
     Metrics {
         window_corner_radius: 8,
         taskbar_corner_radius: 12,
+        taskbar_margin: 5,
+        chrome_backdrop_blur: 7,
         popup_corner_radius: 6,
         border_thickness: 1,
         scrollbar_breadth: 14,

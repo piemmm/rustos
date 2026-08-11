@@ -972,10 +972,13 @@ impl TitleBar {
 
     /// Paint the title bar into `surface` at `bounds` for the active theme.
     ///
-    /// `bounds` is the title band, not the whole window. The bar background is
-    /// the window surface; the identity icon is painted in its laid-out slot,
-    /// the identity/title text is elided to the box laid out for it, and the
-    /// controls are painted in their laid-out slots.
+    /// `bounds` is the title band, not the whole window. The band's ground is
+    /// the frame's own plate, which the frame has already laid down *rounded*
+    /// ([`WindowFrame::render`]) — painting it again here would square off the
+    /// very corners the rim curves around, in the colour that is already there.
+    /// So this draws the bar's own marks alone: the identity icon in its
+    /// laid-out slot, the identity/title text elided to the box laid out for
+    /// it, and the controls in their laid-out slots.
     ///
     /// `artwork` is the owning application's identity icon, pre-rasterised by
     /// the owner at [`icon_side`](Self::icon_side); `None` falls back to the
@@ -994,9 +997,6 @@ impl TitleBar {
         // Window furniture is titling text, not interface body text.
         let font = role_font(theme, scale, TextRole::WindowTitle);
         let palette = theme.palette();
-        if let Some((x, y, w, h)) = surface_rect(bounds) {
-            surface.fill_rect(x, y, w, h, Color::from(palette.surface));
-        }
         let layout = self.layout(bounds, scale, theme);
 
         let active = self.furniture.activation != WindowActivationState::Inactive;
@@ -1319,6 +1319,31 @@ pub struct FrameInsets {
     pub bottom: u32,
 }
 
+/// The line a window frame draws its shape with, in physical pixels at a given
+/// scale and theme: how far the corners round and how thick the rim is.
+///
+/// A window's *silhouette* is this radius, and a rectangular client cannot be
+/// drawn over the arc it curves around, so a window manager reads it to cut the
+/// client to the [`plate`](Self::plate) the frame fills inside the rim — the
+/// only region client pixels belong in.
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
+pub struct FrameRim {
+    /// The outer corner radius; `0` for square corners.
+    pub radius: u32,
+    /// The rim line's thickness, never less than one pixel.
+    pub thickness: u32,
+}
+
+impl FrameRim {
+    /// The plate the frame fills inside the rim, as `(inset, radius)`: inset
+    /// from the window's outer rectangle by the rim's thickness, with a
+    /// concentric radius, so the rim keeps its weight around the whole arc.
+    #[must_use]
+    pub const fn plate(self) -> (u32, u32) {
+        (self.thickness, self.radius.saturating_sub(self.thickness))
+    }
+}
+
 /// The window-manager-owned boundary around one client viewport (spec §11.17).
 ///
 /// It draws the Frame Rim — one quiet neutral at every activation, with a
@@ -1409,6 +1434,20 @@ impl WindowFrame {
     /// border.
     fn grab_overlap(scale: Scale, theme: &Theme) -> u32 {
         scale.scale_length(theme.metrics().hit_slop)
+    }
+
+    /// The rim this frame draws its shape with, at the active scale and theme.
+    ///
+    /// [`Self::render`] draws from it, and a window manager reads it to cut the
+    /// application's rectangular client to the plate inside the rim, so the
+    /// content can never square off the corners the rim curves around.
+    #[must_use]
+    pub fn rim(&self, scale: Scale, theme: &Theme) -> FrameRim {
+        let (thickness, _, _) = Self::edges(scale, theme);
+        FrameRim {
+            radius: scale.scale_length(theme.metrics().window_corner_radius),
+            thickness,
+        }
     }
 
     /// The per-edge furniture-band thickness around the client, at the active
@@ -1602,8 +1641,8 @@ impl WindowFrame {
         }
         let palette = theme.palette();
         let metrics = theme.metrics();
-        let border = scale.scale_length(metrics.border_thickness).max(1);
-        let radius = scale.scale_length(metrics.window_corner_radius);
+        let rim = self.rim(scale, theme);
+        let border = rim.thickness;
         let active = self.furniture.activation != WindowActivationState::Inactive;
 
         // Frame Rim: one quiet neutral, whatever the activation. The rim is
@@ -1611,18 +1650,14 @@ impl WindowFrame {
         // focus made the boundary the loudest mark on the desktop and left
         // every other window looking switched off. Focus is the title bar's
         // to carry.
-        surface.fill_round_rect(x, y, w, h, radius, Color::from(palette.frame));
+        surface.fill_round_rect(x, y, w, h, rim.radius, Color::from(palette.frame));
 
-        // Window body behind the title bar and client viewport.
-        if let Some((ix, iy, iw, ih)) = inset(x, y, w, h, border) {
-            surface.fill_round_rect(
-                ix,
-                iy,
-                iw,
-                ih,
-                radius.saturating_sub(border),
-                Color::from(palette.surface),
-            );
+        // Window body behind the title bar and client viewport. It is the plate
+        // the window manager cuts the client to, so both read one definition of
+        // where the arc leaves room for content.
+        let (plate_inset, plate_radius) = rim.plate();
+        if let Some((ix, iy, iw, ih)) = inset(x, y, w, h, plate_inset) {
+            surface.fill_round_rect(ix, iy, iw, ih, plate_radius, Color::from(palette.surface));
             // In high contrast the active frame adds a doubled inner rim line
             // in the muted foreground, so focus reads as a difference in shape
             // and not only as the title tone; it never changes frame

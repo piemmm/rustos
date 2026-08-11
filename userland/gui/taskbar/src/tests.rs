@@ -9,15 +9,15 @@ use tairix_abi::switchboard_ipc::{
     TrayTask, TrayTaskName,
 };
 use tairix_controls::{
-    damage, ActivityState, ControlState, PressureKind, PressureState, RecoveryState,
-    TaskVisibility, TrayBadgeContent, TrayBadgeTone,
+    damage, ground_fill, plate_border, ActivityState, ChromeLayer, ControlState, PressureKind,
+    PressureState, RecoveryState, TaskVisibility, TrayBadgeContent, TrayBadgeTone,
 };
 use tairix_geometry::{Point, Rect, Scale};
 use tairix_icon::{IconArtwork, IconKind, IconRequest, IconSet, NoArtwork};
 use tairix_input::{InputEvent, Key, Modifiers, NamedKey, PointerButton};
 use tairix_proglib::{BundlePath, Catalog, DisplayName, EntryId, LibraryCategory, LibraryEntry};
 use tairix_raster::{Color, Pixel, Surface};
-use tairix_theme::{Appearance, Contrast, SignalRole, Theme, ThemeId};
+use tairix_theme::{Appearance, Contrast, Rgba, SignalRole, Theme, ThemeId};
 
 use tairix_log::{Event, Sink};
 use tairix_reclaim::{CacheBudget, PressureBand, ReclaimCache, ReportedPressure};
@@ -462,17 +462,21 @@ fn clear_producer_drops_only_that_producers_notifications() {
 fn leading_launchers_partition_the_leading_end() {
     let bar = bottom_bar();
     let layout = bar.layout(Scale::ONE);
-    assert_eq!(layout.library, Rect::new(0, 760, 48, 40));
+    // The bar stands off the screen by the 5 px taskbar margin it floats in
+    // (x 5..995, top 800 − 5 − 40); every region then sits inside the bar's
+    // 1 px rim, so the content strip runs x 6..994 and is 38 px thick.
+    assert_eq!(layout.bar, Rect::new(5, 755, 990, 40));
+    assert_eq!(layout.library, Rect::new(6, 756, 48, 38));
     // The rule sits a control gap (8) past the Library button, one border
-    // thick, inset a control padding (10) from both long edges of the 40 px
-    // bar; Files follows the whole 17 px gutter.
-    assert_eq!(layout.separator, Rect::new(56, 770, 1, 20));
-    assert_eq!(layout.files, Rect::new(65, 760, 48, 40));
-    assert_eq!(layout.task_list.left(), 113);
-    // The Switchboard capsule owns the very trailing end; the clock ends
-    // where it starts.
-    assert_eq!(layout.switchboard, Rect::new(956, 760, 44, 40));
-    assert_eq!(layout.clock.right(), 956);
+    // thick, inset a control padding (10) from both long edges of the 38 px
+    // content strip; Files follows the whole 17 px gutter.
+    assert_eq!(layout.separator, Rect::new(62, 766, 1, 18));
+    assert_eq!(layout.files, Rect::new(71, 756, 48, 38));
+    assert_eq!(layout.task_list.left(), 119);
+    // The Switchboard capsule owns the trailing end of that strip; the clock
+    // ends where it starts.
+    assert_eq!(layout.switchboard, Rect::new(950, 756, 44, 38));
+    assert_eq!(layout.clock.right(), 950);
 }
 
 #[test]
@@ -490,7 +494,7 @@ fn hit_testing_resolves_every_region() {
         Some(Hit::Library)
     );
     assert_eq!(
-        bar.hit_test(Point::new(70, 780), Scale::ONE),
+        bar.hit_test(Point::new(71, 780), Scale::ONE),
         Some(Hit::Files)
     );
     assert_eq!(
@@ -549,9 +553,12 @@ fn vertical_bar_stacks_launchers_downward() {
     };
     let bar = Taskbar::new(config, &Theme::dark());
     let layout = bar.layout(Scale::ONE);
-    assert_eq!(layout.bar, Rect::new(0, 0, 40, 800));
-    assert_eq!(layout.library, Rect::new(0, 0, 40, 48));
-    assert_eq!(layout.files, Rect::new(0, 65, 40, 48));
+    // A left bar floats off the top, bottom, and left screen edges by the
+    // 5 px margin; its 40 px thickness is untouched. The launchers stack
+    // inside its 1 px rim, so they start at 6 and are 38 px broad.
+    assert_eq!(layout.bar, Rect::new(5, 5, 40, 790));
+    assert_eq!(layout.library, Rect::new(6, 6, 38, 48));
+    assert_eq!(layout.files, Rect::new(6, 71, 38, 48));
 }
 
 /// `rect`'s `(main start, main end, cross start, cross end)` on a bar
@@ -609,13 +616,18 @@ fn the_separator_gutter_shifts_the_files_launcher_and_everything_after_it() {
     let layout = bar.layout(Scale::ONE);
     let launcher = i32::try_from(layout.library.width).expect("a modest launcher");
 
+    let margin = i32::try_from(metrics.taskbar_margin).expect("a modest margin");
+    // The leading end of the *content*: the margin the bar floats in, then
+    // the bar's own rim the regions sit inside.
+    let leading =
+        margin + i32::try_from(plate_border(&theme, Scale::ONE)).expect("a modest border");
     assert_eq!(
         layout.library.left(),
-        0,
+        leading,
         "the library keeps the leading end"
     );
-    assert_eq!(layout.files.left(), launcher + gutter);
-    assert_eq!(layout.pins[0].left(), launcher * 2 + gutter);
+    assert_eq!(layout.files.left(), leading + launcher + gutter);
+    assert_eq!(layout.pins[0].left(), leading + launcher * 2 + gutter);
     assert_eq!(layout.pin_strip.left(), layout.files.right());
     assert_eq!(layout.tasks[0].left(), layout.pins[0].right());
 }
@@ -679,10 +691,10 @@ fn a_bar_too_thin_to_inset_the_rule_drops_it_and_keeps_the_flow() {
     assert!(layout.separator.is_empty());
     assert_eq!(
         layout.files.left(),
-        65,
+        71,
         "the launchers keep their places whether or not the rule is drawn"
     );
-    assert_eq!(layout.hit_test(Point::new(56, 790)), None);
+    assert_eq!(layout.hit_test(Point::new(61, 790)), None);
     assert!(
         TaskbarRenderer::new(test_icon_cache())
             .render(&bar, Scale::ONE, &mut NoArtwork)
@@ -693,19 +705,20 @@ fn a_bar_too_thin_to_inset_the_rule_drops_it_and_keeps_the_flow() {
 
 #[test]
 fn launchers_clip_fail_closed_on_a_tiny_screen() {
-    // Room for the Library button, the 17 px separator gutter, and only part
-    // of Files.
-    let bar = Taskbar::new(TaskbarConfig::bottom_bar(77, 50), &Theme::dark());
+    // 79 px, less the two 5 px margins and the bar's two 1 px rims, leaves a
+    // 67 px content strip: room for the Library button, the 17 px separator
+    // gutter, and only part of Files.
+    let bar = Taskbar::new(TaskbarConfig::bottom_bar(79, 50), &Theme::dark());
     let layout = bar.layout(Scale::ONE);
     assert_eq!(layout.library.width, 48);
-    assert_eq!(layout.separator, Rect::new(56, 20, 1, 20));
-    assert_eq!(layout.files.width, 12, "Files clips to what fits");
+    assert_eq!(layout.separator, Rect::new(62, 16, 1, 18));
+    assert_eq!(layout.files.width, 2, "Files clips to what fits");
 
     // No room for the rule or Files at all: both are empty and neither can
     // ever be hit.
     let bar = Taskbar::new(TaskbarConfig::bottom_bar(30, 50), &Theme::dark());
     let layout = bar.layout(Scale::ONE);
-    assert_eq!(layout.library.width, 30);
+    assert_eq!(layout.library.width, 18);
     assert!(layout.separator.is_empty());
     assert!(layout.files.is_empty());
     assert_eq!(layout.hit_test(Point::new(20, 30)), Some(Hit::Library));
@@ -717,6 +730,68 @@ fn launchers_clip_fail_closed_on_a_tiny_screen() {
     assert!(layout.separator.is_empty());
     assert!(layout.files.is_empty());
     assert_eq!(layout.hit_test(Point::new(0, 0)), None);
+}
+
+#[test]
+fn a_bar_too_small_for_its_rim_keeps_its_content_inside_itself() {
+    // The rim the regions sit inside is spent from the bar's own extent, so
+    // a bar with barely any extent keeps its content rather than the rim.
+    // Whatever survives, nothing may fall outside the bar and nothing may
+    // panic — at any scale, on any edge.
+    let theme = Theme::dark();
+    for percent in [50, 100, 200, 400] {
+        let scale = Scale::from_percent(percent).expect("a valid scale");
+        for (screen_w, screen_h) in [(0, 0), (1, 1), (8, 8), (30, 50)] {
+            for edge in [Edge::Top, Edge::Bottom, Edge::Left, Edge::Right] {
+                let config = TaskbarConfig {
+                    edge,
+                    ..TaskbarConfig::bottom_bar(screen_w, screen_h)
+                };
+                let mut bar = Taskbar::new(config, &theme);
+                bar.set_pins(alloc::vec![PinView::new("Pin", IconKind::AppBundle)]);
+                bar.tasks_mut().add(TaskId(1), "Editor");
+                let layout = bar.layout(scale);
+                let frame = layout.bar;
+                let at = alloc::format!("{percent}% {screen_w}x{screen_h} {edge:?}");
+
+                assert_eq!(
+                    frame.intersection(&Rect::new(0, 0, screen_w, screen_h)),
+                    frame,
+                    "{at}: the bar stays on the screen"
+                );
+                for (label, region) in [
+                    ("library", layout.library),
+                    ("separator", layout.separator),
+                    ("files", layout.files),
+                    ("pin strip", layout.pin_strip),
+                    ("pin", layout.pins[0]),
+                    ("task list", layout.task_list),
+                    ("task", layout.tasks[0]),
+                    ("notification area", layout.notification_area),
+                    ("clock", layout.clock),
+                    ("switchboard", layout.switchboard),
+                ] {
+                    if region.is_empty() {
+                        continue;
+                    }
+                    assert_eq!(
+                        region.intersection(&frame),
+                        region,
+                        "{at}: the {label} stays inside the bar"
+                    );
+                }
+                // Painting a bar this small must not panic, and one that has
+                // pixels at all still produces them.
+                let painted = TaskbarRenderer::new(test_icon_cache())
+                    .render(&bar, scale, &mut NoArtwork)
+                    .is_some();
+                assert!(
+                    frame.is_empty() || painted,
+                    "{at}: a bar with pixels still paints"
+                );
+            }
+        }
+    }
 }
 
 #[test]
@@ -796,13 +871,14 @@ fn adding_pins_reflows_the_task_region() {
 fn pin_slots_clip_fail_closed_on_a_tiny_screen() {
     let mut bar = Taskbar::new(TaskbarConfig::bottom_bar(261, 40), &Theme::dark());
     // Launchers (48+48) plus the separator gutter (17) take 113. Switchboard
-    // (44) plus clock (80) take 124. Screen 261. Remaining for pins/tasks:
-    // 261 - 237 = 24.
+    // (44) plus clock (80) take 124. Screen 261, less the two 5 px margins
+    // the bar floats in and the two 1 px rims its content sits inside, leaves
+    // 249. Remaining for pins/tasks: 249 - 237 = 12.
     bar.set_pins(alloc::vec![PinView::new("Pin", IconKind::AppBundle)]);
     let layout = bar.layout(Scale::ONE);
     assert_eq!(layout.library.width, 48);
     assert_eq!(layout.files.width, 48);
-    assert_eq!(layout.pins[0].width, 24, "pin clips to fit");
+    assert_eq!(layout.pins[0].width, 12, "pin clips to fit");
     assert!(layout.task_list.is_empty(), "no room for tasks");
 
     // Even smaller: pin is empty.
@@ -814,23 +890,27 @@ fn pin_slots_clip_fail_closed_on_a_tiny_screen() {
 
 #[test]
 fn pin_strip_positions_on_all_four_edges() {
+    let theme = Theme::dark();
+    // Across the bar the strip spans the thickness less the two rims it sits
+    // inside; along the bar it is one pin extent.
+    let border = plate_border(&theme, Scale::ONE);
     for edge in [Edge::Top, Edge::Bottom, Edge::Left, Edge::Right] {
         let config = TaskbarConfig {
             edge,
             ..TaskbarConfig::bottom_bar(1000, 800)
         };
-        let mut bar = Taskbar::new(config, &Theme::dark());
+        let mut bar = Taskbar::new(config, &theme);
         bar.set_pins(alloc::vec![PinView::new("Pin", IconKind::AppBundle)]);
         let layout = bar.layout(Scale::ONE);
         assert!(!layout.pin_strip.is_empty(), "{edge:?}");
         assert_eq!(layout.pins.len(), 1, "{edge:?}");
         match edge.orientation() {
             Orientation::Horizontal => {
-                assert_eq!(layout.pin_strip.height, 40);
+                assert_eq!(layout.pin_strip.height, layout.bar.height - border * 2);
                 assert_eq!(layout.pin_strip.width, 48);
             }
             Orientation::Vertical => {
-                assert_eq!(layout.pin_strip.width, 40);
+                assert_eq!(layout.pin_strip.width, layout.bar.width - border * 2);
                 assert_eq!(layout.pin_strip.height, 48);
             }
         }
@@ -839,11 +919,14 @@ fn pin_strip_positions_on_all_four_edges() {
 
 #[test]
 fn bar_pins_to_all_four_edges() {
+    // Each bar stands off the three screen edges it faces by the 5 px
+    // taskbar margin; only the side facing the work area keeps its place,
+    // and the 40 px thickness is unchanged.
     for (edge, expect) in [
-        (Edge::Top, Rect::new(0, 0, 1000, 40)),
-        (Edge::Bottom, Rect::new(0, 760, 1000, 40)),
-        (Edge::Left, Rect::new(0, 0, 40, 800)),
-        (Edge::Right, Rect::new(960, 0, 40, 800)),
+        (Edge::Top, Rect::new(5, 5, 990, 40)),
+        (Edge::Bottom, Rect::new(5, 755, 990, 40)),
+        (Edge::Left, Rect::new(5, 5, 40, 790)),
+        (Edge::Right, Rect::new(955, 5, 40, 790)),
     ] {
         let config = TaskbarConfig {
             edge,
@@ -851,6 +934,167 @@ fn bar_pins_to_all_four_edges() {
         };
         let bar = Taskbar::new(config, &Theme::dark());
         assert_eq!(bar.layout(Scale::ONE).bar, expect, "{edge:?}");
+    }
+}
+
+// ---- the wallpaper margin -------------------------------------------
+
+/// Saturating `u32` → `i32` for coordinate arithmetic in the assertions.
+fn coord(value: u32) -> i32 {
+    i32::try_from(value).expect("a test screen fits in an i32")
+}
+
+#[test]
+fn the_bar_stands_off_the_screen_edges_it_faces_at_every_scale() {
+    let theme = Theme::dark();
+    let (screen_w, screen_h) = (1000, 800);
+    for percent in [50, 100, 200, 400] {
+        let scale = Scale::from_percent(percent).expect("a valid scale");
+        let gap = coord(scale.scale_length(theme.metrics().taskbar_margin));
+        for edge in [Edge::Top, Edge::Bottom, Edge::Left, Edge::Right] {
+            let config = TaskbarConfig {
+                edge,
+                ..TaskbarConfig::bottom_bar(screen_w, screen_h)
+            };
+            let thickness = scale.scale_length(config.thickness);
+            let bar = Taskbar::new(config, &theme).layout(scale).bar;
+            let at = |side: i32, want: i32, which: &str| {
+                assert_eq!(side, want, "{edge:?} at {percent}%: the {which} side");
+            };
+            match edge {
+                Edge::Top | Edge::Bottom => {
+                    at(bar.left(), gap, "leading");
+                    at(bar.right(), coord(screen_w) - gap, "trailing");
+                    if edge == Edge::Top {
+                        at(bar.top(), gap, "faced");
+                    } else {
+                        at(bar.bottom(), coord(screen_h) - gap, "faced");
+                    }
+                    assert_eq!(
+                        bar.height, thickness,
+                        "{edge:?} at {percent}%: the work-area side keeps its thickness"
+                    );
+                }
+                Edge::Left | Edge::Right => {
+                    at(bar.top(), gap, "leading");
+                    at(bar.bottom(), coord(screen_h) - gap, "trailing");
+                    if edge == Edge::Left {
+                        at(bar.left(), gap, "faced");
+                    } else {
+                        at(bar.right(), coord(screen_w) - gap, "faced");
+                    }
+                    assert_eq!(
+                        bar.width, thickness,
+                        "{edge:?} at {percent}%: the work-area side keeps its thickness"
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn the_wallpaper_gap_belongs_to_no_control() {
+    let mut bar = bottom_bar();
+    let (screen_w, screen_h) = (bar.config().screen_width, bar.config().screen_height);
+    let layout = bar.layout(Scale::ONE);
+    let mid_y = layout.bar.top() + coord(layout.bar.height / 2);
+    // One pixel outside each of the three sides the bar stands off.
+    for (which, point) in [
+        ("below", Point::new(500, layout.bar.bottom())),
+        ("left of", Point::new(layout.bar.left() - 1, mid_y)),
+        ("right of", Point::new(layout.bar.right(), mid_y)),
+    ] {
+        assert!(
+            point.x >= 0 && point.x < coord(screen_w) && point.y >= 0 && point.y < coord(screen_h),
+            "{which} the bar: the probe is on screen, in the gap the margin leaves"
+        );
+        assert!(!layout.bar.contains(point), "{which} the bar");
+        assert_eq!(layout.hit_test(point), None, "{which} the bar");
+        assert_eq!(
+            bar.hit_test(point, Scale::ONE),
+            None,
+            "{which} the bar, through the taskbar"
+        );
+        let mut input = TaskbarInput::new();
+        assert_eq!(
+            press_at(&mut input, &mut bar, point.x, point.y),
+            TaskbarResponse::Ignored,
+            "a press {which} the bar reaches the wallpaper"
+        );
+    }
+}
+
+#[test]
+fn a_popup_opens_against_the_bar_and_clears_the_gap() {
+    let mut bar = bottom_bar();
+    let mut input = TaskbarInput::new();
+    open_library(&mut input, &mut bar);
+    let frame = bar.layout(Scale::ONE).bar;
+    let panel = bar.library_layout(Scale::ONE).panel;
+    assert!(
+        panel.bottom() <= frame.top(),
+        "the popup opens above the bar, not over it"
+    );
+    assert!(panel.left() >= frame.left(), "clear of the leading gap");
+    assert!(panel.right() <= frame.right(), "clear of the trailing gap");
+}
+
+#[test]
+fn a_side_bar_readout_stays_within_the_bars_span() {
+    // The Switchboard sits at the trailing end of a side bar, so its readout
+    // is the popover most likely to be pushed past the bar — into the gap the
+    // bar leaves at the bottom of the screen.
+    for edge in [Edge::Left, Edge::Right] {
+        let config = TaskbarConfig {
+            edge,
+            ..TaskbarConfig::bottom_bar(1000, 800)
+        };
+        let mut bar = Taskbar::new(config, &Theme::dark());
+        let mut summary = tray_summary(0, 0, 300);
+        summary.top_task = Some(tray_task("editor", 250));
+        bar.set_tray_summary(Some(summary));
+        let mut input = TaskbarInput::new();
+        hover_switchboard(&mut input, &mut bar);
+
+        let frame = bar.layout(Scale::ONE).bar;
+        let panel = bar
+            .tray_readout_layout(Scale::ONE)
+            .expect("hover expands")
+            .panel;
+        assert!(panel.top() >= frame.top(), "{edge:?}: clear of the top gap");
+        assert!(
+            panel.bottom() <= frame.bottom(),
+            "{edge:?}: clear of the bottom gap"
+        );
+    }
+}
+
+#[test]
+fn a_screen_too_small_for_the_margin_keeps_the_bar_rather_than_the_gap() {
+    for percent in [100, 400] {
+        let scale = Scale::from_percent(percent).expect("a valid scale");
+        for (w, h) in [(0, 0), (1, 1), (8, 8), (30, 50), (77, 50)] {
+            let bar = Taskbar::new(TaskbarConfig::bottom_bar(w, h), &Theme::dark());
+            let layout = bar.layout(scale);
+            let rect = layout.bar;
+            let at = alloc::format!("{w}x{h} at {percent}%");
+            assert!(
+                rect.left() >= 0 && rect.top() >= 0,
+                "{at}: no negative origin"
+            );
+            assert!(rect.right() <= coord(w), "{at}: never past the right edge");
+            assert!(
+                rect.bottom() <= coord(h),
+                "{at}: never past the bottom edge"
+            );
+            assert_eq!(
+                rect.is_empty(),
+                w == 0 || h == 0,
+                "{at}: a screen with room keeps a bar, the margin never takes its last pixel"
+            );
+            assert_eq!(layout.hit_test(Point::new(-1, -1)), None, "{at}");
+        }
     }
 }
 
@@ -865,19 +1109,24 @@ fn doubling_the_scale_doubles_logical_lengths() {
     assert_eq!(two.files.width, one.files.width * 2);
     assert_eq!(two.bar.height, one.bar.height * 2);
     assert_eq!(two.corner_radius, one.corner_radius * 2);
-    // The physical screen is unchanged, so the doubled bar still spans it.
-    assert_eq!(two.bar.width, 1000);
+    // The physical screen is unchanged, so the doubled bar still spans it —
+    // less the margin it floats in, which doubles with everything else (5
+    // logical pixels at each end becomes 10 physical).
+    assert_eq!(two.bar.width, 980);
+    assert_eq!(two.bar.left(), 10);
 }
 
 #[test]
 fn hit_testing_follows_the_scale() {
     let bar = bottom_bar();
     let scale = Scale::from_percent(200).expect("a valid scale");
-    // At 2x the Library button spans 96 physical pixels and the separator
-    // gutter 34, so Files starts at 130 and the gutter between them is bare.
+    // At 2x the bar starts 10 physical pixels in (the doubled margin) and its
+    // content 2 further (the doubled rim), the Library button spans 96
+    // physical pixels and the separator gutter 34, so Files starts at 142 and
+    // the gutter between them is bare.
     assert_eq!(bar.hit_test(Point::new(90, 780), scale), Some(Hit::Library));
-    assert_eq!(bar.hit_test(Point::new(100, 780), scale), None);
-    assert_eq!(bar.hit_test(Point::new(140, 780), scale), Some(Hit::Files));
+    assert_eq!(bar.hit_test(Point::new(120, 780), scale), None);
+    assert_eq!(bar.hit_test(Point::new(142, 780), scale), Some(Hit::Files));
 }
 
 #[test]
@@ -1103,7 +1352,7 @@ fn files_press_reports_open_files() {
     let mut bar = bottom_bar();
     let mut input = TaskbarInput::new();
     assert_eq!(
-        press_at(&mut input, &mut bar, 70, 780),
+        press_at(&mut input, &mut bar, 71, 780),
         TaskbarResponse::OpenFiles
     );
 }
@@ -2439,6 +2688,33 @@ fn role(color: tairix_theme::Rgba) -> Pixel {
     Color::from(color).premultiply()
 }
 
+/// The ground a floating surface lays down for the palette role it wears
+/// solid — the fill the compositor's backdrop blur reads through.
+///
+/// Taken through the rule the bar paints with rather than restated, so a test
+/// cannot drift from the theme's authored weight. Pass `surface_raised` for
+/// the bar and the surfaces raised like it (the context menu, the tray
+/// readout), `surface` for a `Panel` (the library popup, the notification
+/// popover), and `rim` for the edge any of them wears, exactly as each
+/// control does.
+fn floating_ground(theme: &Theme, fill: Rgba) -> Pixel {
+    role(ground_fill(
+        &theme.clone().floating(),
+        fill,
+        ChromeLayer::Ground,
+    ))
+}
+
+/// The plate a control raised on floating chrome lays down — a search field,
+/// a button: a step more solid than the ground under it.
+fn floating_plate(theme: &Theme, fill: Rgba) -> Pixel {
+    role(ground_fill(
+        &theme.clone().floating(),
+        fill,
+        ChromeLayer::Plate,
+    ))
+}
+
 /// A dark theme with reduced motion, for the reduced-motion render check.
 fn dark_reduced_motion() -> Theme {
     let base = Theme::dark();
@@ -2527,15 +2803,306 @@ fn rendered_surface_matches_bar_dimensions() {
 }
 
 #[test]
-fn background_is_the_raised_surface_colour() {
+fn background_is_the_floating_chrome_fill() {
+    let theme = Theme::dark();
+    let palette = theme.palette();
     let bar = bottom_bar();
     let surface = TaskbarRenderer::new(test_icon_cache())
         .render(&bar, Scale::ONE, &mut NoArtwork)
         .expect("bar renders");
-    assert_eq!(
-        pixel_at(&surface, bar.layout(Scale::ONE).bar, 500, 780),
-        role(Theme::dark().palette().surface_raised)
+    let frame = bar.layout(Scale::ONE).bar;
+
+    // The bar is see-through: its ground is the raised surface let through at
+    // the theme's chrome alpha, so the desktop behind it reads through the
+    // backdrop the compositor blurs.
+    let ground = floating_ground(&theme, palette.surface_raised);
+    assert_eq!(pixel_at(&surface, frame, 500, 780), ground);
+    assert!(
+        ground.a < 255,
+        "a covering ground is what makes the bar not see-through"
     );
+
+    // A bare stretch of bar, well clear of every control: nowhere on it is
+    // the opaque plate colour the bar used to be filled with.
+    let bare = Rect::new(400, frame.top(), 200, frame.height);
+    assert!(
+        !region_has_pixel(&surface, frame, bare, role(palette.surface_raised)),
+        "the bar is never filled opaque"
+    );
+    assert!(
+        region_has_pixel(&surface, frame, bare, ground),
+        "the bare bar shows its chrome ground"
+    );
+}
+
+#[test]
+fn the_bar_edge_is_the_rim_and_its_interior_the_ground() {
+    for theme in [Theme::dark(), Theme::light()] {
+        let mut bar = bottom_bar();
+        bar.apply_theme(&theme);
+        let surface = TaskbarRenderer::new(test_icon_cache())
+            .render(&bar, Scale::ONE, &mut NoArtwork)
+            .expect("bar renders");
+        let frame = bar.layout(Scale::ONE).bar;
+        let border = coord(plate_border(&theme, Scale::ONE));
+        let rim = floating_ground(&theme, theme.palette().rim);
+        let ground = floating_ground(&theme, theme.palette().surface_raised);
+        let mid_x = frame.left() + coord(frame.width / 2);
+        let mid_y = frame.top() + coord(frame.height / 2);
+        let name = theme.name();
+
+        for (edge_label, (ex, ey), (ix, iy)) in [
+            ("top", (mid_x, frame.top()), (mid_x, frame.top() + border)),
+            (
+                "bottom",
+                (mid_x, frame.bottom() - 1),
+                (mid_x, frame.bottom() - 1 - border),
+            ),
+            (
+                "leading",
+                (frame.left(), mid_y),
+                (frame.left() + border, mid_y),
+            ),
+            (
+                "trailing",
+                (frame.right() - 1, mid_y),
+                (frame.right() - 1 - border, mid_y),
+            ),
+        ] {
+            assert_eq!(
+                pixel_at(&surface, frame, ex, ey),
+                rim,
+                "{name}: the {edge_label} edge is the theme's rim"
+            );
+            assert_eq!(
+                pixel_at(&surface, frame, ix, iy),
+                ground,
+                "{name}: one border past the {edge_label} edge is the bar's ground"
+            );
+        }
+    }
+}
+
+#[test]
+fn the_bar_rim_lightens_a_dark_theme_and_darkens_a_light_one() {
+    // The claim is made on the painted pixels rather than the palette: the
+    // edge steps up from the ground on a dark theme and down on a light one,
+    // which is the one "lightened" edge read correctly either way.
+    for (theme, lighter) in [(Theme::dark(), true), (Theme::light(), false)] {
+        let mut bar = bottom_bar();
+        bar.apply_theme(&theme);
+        let surface = TaskbarRenderer::new(test_icon_cache())
+            .render(&bar, Scale::ONE, &mut NoArtwork)
+            .expect("bar renders");
+        let frame = bar.layout(Scale::ONE).bar;
+        let border = coord(plate_border(&theme, Scale::ONE));
+        let mid_x = frame.left() + coord(frame.width / 2);
+        let edge = pixel_at(&surface, frame, mid_x, frame.top());
+        let inside = pixel_at(&surface, frame, mid_x, frame.top() + border);
+        let name = theme.name();
+
+        assert_eq!(
+            edge.r > inside.r && edge.g > inside.g && edge.b > inside.b,
+            lighter,
+            "{name}: the rim is lighter than the ground exactly on a dark theme"
+        );
+        assert_eq!(
+            edge.r < inside.r && edge.g < inside.g && edge.b < inside.b,
+            !lighter,
+            "{name}: the rim is darker than the ground exactly on a light theme"
+        );
+        assert_eq!(
+            edge.a, inside.a,
+            "{name}: the rim is the surface's own edge, so it takes the ground's weight"
+        );
+    }
+}
+
+#[test]
+fn the_bar_rim_stays_see_through() {
+    for theme in [Theme::dark(), Theme::light()] {
+        let mut bar = bottom_bar();
+        bar.apply_theme(&theme);
+        let surface = TaskbarRenderer::new(test_icon_cache())
+            .render(&bar, Scale::ONE, &mut NoArtwork)
+            .expect("bar renders");
+        let frame = bar.layout(Scale::ONE).bar;
+        let mid_x = frame.left() + coord(frame.width / 2);
+        let edge = pixel_at(&surface, frame, mid_x, frame.top());
+        let name = theme.name();
+
+        assert!(
+            edge.a < 255,
+            "{name}: a solid rim is a hard line the wallpaper cannot reach through"
+        );
+        assert_eq!(
+            edge.a,
+            theme.palette().chrome_alpha,
+            "{name}: the rim is let through at the theme's chrome weight"
+        );
+        assert_ne!(
+            edge,
+            role(theme.palette().rim),
+            "{name}: the rim is laid down at that weight, never solid"
+        );
+    }
+}
+
+#[test]
+fn the_bar_rim_is_one_border_thick_and_scales() {
+    let theme = Theme::dark();
+    let bar = bottom_bar();
+    let rim = floating_ground(&theme, theme.palette().rim);
+    let ground = floating_ground(&theme, theme.palette().surface_raised);
+    let mut thicknesses = Vec::new();
+
+    for percent in [100, 200] {
+        let scale = Scale::from_percent(percent).expect("a valid scale");
+        let border = plate_border(&theme, scale);
+        thicknesses.push(border);
+        let surface = TaskbarRenderer::new(test_icon_cache())
+            .render(&bar, scale, &mut NoArtwork)
+            .expect("bar renders");
+        let frame = bar.layout(scale).bar;
+        let mid_x = frame.left() + coord(frame.width / 2);
+
+        for step in 0..border {
+            assert_eq!(
+                pixel_at(&surface, frame, mid_x, frame.top() + coord(step)),
+                rim,
+                "{percent}%: row {step} of the rim"
+            );
+        }
+        assert_eq!(
+            pixel_at(&surface, frame, mid_x, frame.top() + coord(border)),
+            ground,
+            "{percent}%: the rim stops after one border thickness"
+        );
+    }
+
+    assert!(
+        thicknesses[1] > thicknesses[0],
+        "the rim is a scaled length, not a fixed pixel count"
+    );
+}
+
+#[test]
+fn the_bar_rim_follows_the_rounded_corner_rather_than_squaring_off() {
+    let theme = Theme::dark();
+    let bar = bottom_bar();
+    let layout = bar.layout(Scale::ONE);
+    let frame = layout.bar;
+    let radius = coord(layout.corner_radius);
+    assert!(radius > 0, "a square bar would prove nothing about the rim");
+    let surface = TaskbarRenderer::new(test_icon_cache())
+        .render(&bar, Scale::ONE, &mut NoArtwork)
+        .expect("bar renders");
+    let rim = floating_ground(&theme, theme.palette().rim);
+
+    for (label, x, y) in [
+        ("leading top", frame.left(), frame.top()),
+        ("trailing top", frame.right() - 1, frame.top()),
+        ("leading bottom", frame.left(), frame.bottom() - 1),
+        ("trailing bottom", frame.right() - 1, frame.bottom() - 1),
+    ] {
+        assert_eq!(
+            pixel_at(&surface, frame, x, y),
+            Pixel::TRANSPARENT,
+            "{label}: the corner is cut away, so the rim curves with it"
+        );
+    }
+    assert_eq!(
+        pixel_at(&surface, frame, frame.left() + radius, frame.top()),
+        rim,
+        "past the corner arc the rim resumes along the edge"
+    );
+}
+
+#[test]
+fn a_hovered_or_pressed_slot_never_washes_over_the_bar_rim() {
+    // A slot's wash is content, and content is laid out inside the bar's rim,
+    // so the pointer can never rub the bar's edge off. Every pixel of both
+    // long edges across the slot's span is swept rather than one sample; the
+    // rounded ends are left out because the cut is what the rim does there,
+    // and its own test owns that.
+    for theme in [Theme::dark(), Theme::light()] {
+        let palette = theme.palette();
+        let rim = floating_ground(&theme, palette.rim);
+        let name = theme.name();
+        // A pin wears the pointer's wash and nothing else — the strip has no
+        // held state of its own — so a press on one still reads as a hover.
+        for (slot_label, pinned, held) in [
+            ("library", false, palette.surface_pressed),
+            ("pin", true, palette.surface_hover),
+        ] {
+            for (state, wash) in [
+                ("hovered", floating_plate(&theme, palette.surface_hover)),
+                ("pressed", floating_plate(&theme, held)),
+            ] {
+                let mut bar = bottom_bar();
+                bar.apply_theme(&theme);
+                bar.set_pins(alloc::vec![PinView::new("Pin", IconKind::AppBundle)]);
+                let layout = bar.layout(Scale::ONE);
+                let frame = layout.bar;
+                let slot = if pinned {
+                    layout.pins[0]
+                } else {
+                    layout.library
+                };
+                let centre = centre_of(slot);
+                if state == "pressed" {
+                    let _ = press_at(&mut TaskbarInput::new(), &mut bar, centre.x, centre.y);
+                } else {
+                    bar.track_hover(centre, Scale::ONE, &mut damage::sink());
+                }
+                let surface = TaskbarRenderer::new(test_icon_cache())
+                    .render(&bar, Scale::ONE, &mut NoArtwork)
+                    .expect("bar renders");
+
+                assert!(
+                    region_has_pixel(&surface, frame, slot, wash),
+                    "{name}: the {state} {slot_label} inks its wash inside its slot"
+                );
+
+                let radius = coord(layout.corner_radius);
+                let (x_lo, x_hi) = (
+                    slot.left().max(frame.left() + radius),
+                    slot.right().min(frame.right() - radius),
+                );
+                let (y_lo, y_hi) = (
+                    slot.top().max(frame.top() + radius),
+                    slot.bottom().min(frame.bottom() - radius),
+                );
+                assert!(
+                    x_lo < x_hi && y_lo < y_hi,
+                    "{name}: the {slot_label} slot clears the rounded ends"
+                );
+                let along = u32::try_from(x_hi - x_lo).expect("a positive span");
+                let across = u32::try_from(y_hi - y_lo).expect("a positive span");
+
+                let mut strips = alloc::vec![
+                    ("top", Rect::new(x_lo, frame.top(), along, 1)),
+                    ("bottom", Rect::new(x_lo, frame.bottom() - 1, along, 1)),
+                ];
+                if slot.left() == frame.left() + coord(plate_border(&theme, Scale::ONE)) {
+                    strips.push(("leading", Rect::new(frame.left(), y_lo, 1, across)));
+                }
+
+                for (edge_label, strip) in strips {
+                    for y in strip.top()..strip.bottom() {
+                        for x in strip.left()..strip.right() {
+                            assert_eq!(
+                                pixel_at(&surface, frame, x, y),
+                                rim,
+                                "{name}: the {state} {slot_label} covers the bar's \
+                                 {edge_label} rim at ({x}, {y})"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
 }
 
 #[test]
@@ -2560,7 +3127,7 @@ fn both_leading_launchers_rest_bare_on_the_bar() {
                 frame,
                 slot,
                 palette.on_surface,
-                role(palette.surface_raised),
+                floating_ground(&theme, palette.surface_raised),
             ),
             "the {label} glyph inks the ordinary foreground on the bar"
         );
@@ -2630,12 +3197,16 @@ fn hovering_a_launcher_washes_only_that_slot_and_draws_no_edge() {
         .expect("bar renders");
 
     // The pointer's only mark is a lighter grey wash under the icon it is on.
-    assert!(region_has_pixel(
-        &surface,
-        layout.bar,
-        layout.library,
-        role(palette.surface_hover)
-    ));
+    // It is a plate raised on the bar, so it reads through to the blurred
+    // desktop like the bar does rather than punching a solid block in it.
+    let wash = floating_plate(&theme, palette.surface_hover);
+    assert!(region_has_pixel(&surface, layout.bar, layout.library, wash));
+    assert!(wash.a < 255, "a solid wash is a hole in the glass");
+    assert_ne!(
+        wash,
+        floating_ground(&theme, palette.surface_raised),
+        "a wash the bar's own weight and colour states nothing"
+    );
     assert!(
         !region_has_pixel(
             &surface,
@@ -2646,12 +3217,7 @@ fn hovering_a_launcher_washes_only_that_slot_and_draws_no_edge() {
         "a hovered bar icon never grows an edge"
     );
     // Its neighbour is untouched: the wash belongs to one slot, not the strip.
-    assert!(!region_has_pixel(
-        &surface,
-        layout.bar,
-        layout.files,
-        role(palette.surface_hover)
-    ));
+    assert!(!region_has_pixel(&surface, layout.bar, layout.files, wash));
 }
 
 #[test]
@@ -2667,18 +3233,9 @@ fn the_library_button_reads_as_held_down_while_its_popup_is_open() {
 
     // Held open compresses the plate rather than outlining it, so the state is
     // legible on a bar where nothing wears an edge.
-    assert!(region_has_pixel(
-        &surface,
-        layout.bar,
-        layout.library,
-        role(palette.surface_pressed)
-    ));
-    assert!(!region_has_pixel(
-        &surface,
-        layout.bar,
-        layout.files,
-        role(palette.surface_pressed)
-    ));
+    let held = floating_plate(&theme, palette.surface_pressed);
+    assert!(region_has_pixel(&surface, layout.bar, layout.library, held));
+    assert!(!region_has_pixel(&surface, layout.bar, layout.files, held));
 }
 
 #[test]
@@ -2761,7 +3318,7 @@ fn status_signal_glyph_draws_in_the_muted_role() {
         layout.bar,
         layout.notifications[0],
         theme.palette().on_surface_muted,
-        role(theme.palette().surface_raised),
+        floating_ground(&theme, theme.palette().surface_raised),
     ));
 }
 
@@ -2954,7 +3511,7 @@ fn clock_label_paints_and_an_empty_clock_paints_nothing() {
             layout.bar,
             layout.clock,
             theme.palette().on_surface,
-            role(theme.palette().surface_raised),
+            floating_ground(&theme, theme.palette().surface_raised),
         ),
         "an unset clock draws nothing"
     );
@@ -2968,7 +3525,7 @@ fn clock_label_paints_and_an_empty_clock_paints_nothing() {
         layout.bar,
         layout.clock,
         theme.palette().on_surface,
-        role(theme.palette().surface_raised),
+        floating_ground(&theme, theme.palette().surface_raised),
     ));
 }
 
@@ -2989,7 +3546,7 @@ fn a_running_task_draws_its_icon_and_no_title_beside_it() {
     let side = bar.task_icon_side(Scale::ONE);
     let inset = i32::try_from(slot.width.saturating_sub(side) / 2).expect("a slot-sized inset");
     let band = Rect::new(slot.left() + inset - 1, slot.top(), side + 2, slot.height);
-    let bar_fill = role(theme.palette().surface_raised);
+    let bar_fill = floating_ground(&theme, theme.palette().surface_raised);
     assert!(
         region_has_role_ink(
             &surface,
@@ -3063,7 +3620,7 @@ fn pins_render_artwork_or_fallback_glyph() {
         layout.bar,
         layout.pins[1],
         theme.palette().on_surface,
-        role(theme.palette().surface_raised),
+        floating_ground(&theme, theme.palette().surface_raised),
     ));
 }
 
@@ -3150,7 +3707,7 @@ fn a_task_with_no_resolved_artwork_keeps_the_shared_application_glyph() {
         layout.bar,
         layout.tasks[0],
         theme.palette().on_surface,
-        role(theme.palette().surface),
+        floating_ground(&theme, theme.palette().surface_raised),
     ));
 }
 
@@ -3343,13 +3900,13 @@ fn a_bar_with_no_artwork_at_all_still_draws_every_element() {
                 layout.bar,
                 rect,
                 theme.palette().on_surface,
-                role(theme.palette().surface_raised),
+                floating_ground(&theme, theme.palette().surface_raised),
             ) || region_has_role_ink(
                 &surface,
                 layout.bar,
                 rect,
                 theme.palette().on_surface_muted,
-                role(theme.palette().surface_raised),
+                floating_ground(&theme, theme.palette().surface_raised),
             ),
             "the {label} slot must never be blank without artwork"
         );
@@ -3380,7 +3937,8 @@ fn render_menu_paints_the_modal_plate_and_follows_theme() {
     assert_eq!(dark.width(), layout.panel.width);
     assert_eq!(dark.height(), layout.panel.height);
 
-    // Plate is raised surface.
+    // The plate is floating chrome, not the opaque raised fill a menu wears
+    // inside a window.
     assert!(region_has_pixel(
         &dark,
         layout.panel,
@@ -3390,7 +3948,7 @@ fn render_menu_paints_the_modal_plate_and_follows_theme() {
             layout.panel.width,
             layout.panel.height
         ),
-        role(Theme::dark().palette().surface_raised)
+        floating_ground(&Theme::dark(), Theme::dark().palette().surface_raised)
     ));
     // Contains on_surface ink for labels.
     assert!(region_has_role_ink(
@@ -3403,7 +3961,7 @@ fn render_menu_paints_the_modal_plate_and_follows_theme() {
             layout.panel.height
         ),
         Theme::dark().palette().on_surface,
-        role(Theme::dark().palette().surface_raised),
+        floating_ground(&Theme::dark(), Theme::dark().palette().surface_raised),
     ));
 
     // Theme switch changes pixels.
@@ -3442,27 +4000,36 @@ fn open_popup_renders_panel_rows_and_search() {
     assert_eq!(surface.width(), layout.panel.width);
     assert_eq!(surface.height(), layout.panel.height);
 
-    // The panel's content region is the plain surface colour…
+    // The panel's content region is the floating chrome ground…
     let viewport_gap = Point::new(layout.viewport.left(), layout.viewport.bottom() - 1);
+    let ground = floating_ground(&theme, theme.palette().surface);
     assert_eq!(
         pixel_at(&surface, layout.panel, viewport_gap.x, viewport_gap.y),
-        role(theme.palette().surface)
+        ground
     );
-    // …the first folder row inks its label…
+    // …the first folder row inks its label over that same ground, because a
+    // resting row is the surface it sits in rather than a plate on it…
     assert!(region_has_role_ink(
         &surface,
         layout.panel,
         layout.rows[0].1,
         theme.palette().on_surface,
-        role(theme.palette().surface),
+        ground,
     ));
-    // …and the search row paints its field plate distinct from the panel.
+    // …and the search row is a plate raised on it: a step more solid, so it
+    // reads as a field rather than dissolving into the panel, while the
+    // backdrop still shows through.
+    let field = floating_plate(&theme, theme.palette().surface_raised);
     assert!(region_has_pixel(
         &surface,
         layout.panel,
         layout.search,
-        role(theme.palette().surface_raised)
+        field
     ));
+    assert!(
+        field.a > ground.a && field.a < 255,
+        "the field is a step more solid than its panel, not opaque"
+    );
 }
 
 #[test]
@@ -3494,13 +4061,16 @@ fn hovered_and_current_rows_show_their_states() {
 
     // The hovered row takes the pointer wash — the shared hover fill, not the
     // raised fill a *selected* row lifts to, so the pointer never imitates
-    // selection.
+    // selection. A row is part of the panel rather than a plate on it, so the
+    // wash carries the panel's own weight and the desktop still reads through.
+    let wash = floating_ground(&theme, theme.palette().surface_hover);
     assert!(region_has_pixel(
         &surface,
         layout.panel,
         layout.rows[1].1,
-        role(theme.palette().surface_hover)
+        wash
     ));
+    assert!(wash.a < 255, "a solid highlight is a hole in the glass");
     // The current (selected) row draws the accent selection rail in its
     // leading gutter.
     assert!(region_has_pixel(
@@ -3528,7 +4098,7 @@ fn empty_library_renders_the_placeholder_ink() {
         layout.panel,
         layout.viewport,
         theme.palette().on_surface_muted,
-        role(theme.palette().surface),
+        floating_ground(&theme, theme.palette().surface),
     ));
 }
 
@@ -3554,12 +4124,20 @@ fn overflowing_popup_paints_its_scrollbar() {
     let surface = TaskbarRenderer::new(test_icon_cache())
         .render_library(&bar, Scale::ONE)
         .expect("popup renders");
-    assert!(region_has_pixel(
-        &surface,
-        layout.panel,
-        scrollbar,
-        role(theme.palette().scroll_track)
-    ));
+    // The channel is recessed into the popup rather than raised on it, so it
+    // carries the panel's own weight: an overflowing library shows a bar, not
+    // an opaque strip down its frosted edge.
+    let channel = floating_ground(&theme, theme.palette().scroll_track);
+    assert!(region_has_pixel(&surface, layout.panel, scrollbar, channel));
+    assert!(
+        !region_has_pixel(
+            &surface,
+            layout.panel,
+            scrollbar,
+            role(theme.palette().scroll_track)
+        ),
+        "the channel covers the desktop behind the popup"
+    );
 }
 
 #[test]
@@ -3585,7 +4163,7 @@ fn popup_renders_under_both_themes_and_high_contrast() {
                 layout.panel,
                 layout.rows[0].1,
                 theme.palette().on_surface,
-                role(theme.palette().surface),
+                floating_ground(&theme, theme.palette().surface),
             ),
             "{} paints its rows",
             theme.name()
@@ -3784,7 +4362,7 @@ fn a_popup_row_draws_its_artwork_and_a_row_without_it_draws_the_glyph() {
                 layout.panel,
                 other,
                 theme.palette().on_surface,
-                role(theme.palette().surface),
+                floating_ground(&theme, theme.palette().surface),
             ),
             "row {index} must draw without artwork"
         );
@@ -4087,28 +4665,37 @@ fn readout_action_centre(taskbar: &Taskbar) -> Point {
 
 #[test]
 fn switchboard_is_trailing_most_on_every_edge() {
+    let theme = Theme::dark();
+    let border = i32::try_from(plate_border(&theme, Scale::ONE)).expect("a modest border");
     for edge in [Edge::Top, Edge::Bottom, Edge::Left, Edge::Right] {
         let config = TaskbarConfig {
             edge,
             ..TaskbarConfig::bottom_bar(1000, 800)
         };
-        let bar = Taskbar::new(config, &Theme::dark());
+        let bar = Taskbar::new(config, &theme);
         let layout = bar.layout(Scale::ONE);
+        // Trailing-most on the *bar*, which stands off the screen by the
+        // margin it floats in and seats its regions inside its own rim —
+        // both read from the bar rather than restated here.
         let (slot_start, slot_end, clock_end, main_end) = match edge.orientation() {
             Orientation::Horizontal => (
                 layout.switchboard.left(),
                 layout.switchboard.right(),
                 layout.clock.right(),
-                1000,
+                layout.bar.right(),
             ),
             Orientation::Vertical => (
                 layout.switchboard.top(),
                 layout.switchboard.bottom(),
                 layout.clock.bottom(),
-                800,
+                layout.bar.bottom(),
             ),
         };
-        assert_eq!(slot_end, main_end, "{edge:?}: the capsule is trailing-most");
+        assert_eq!(
+            slot_end,
+            main_end - border,
+            "{edge:?}: the capsule is trailing-most, up against the rim"
+        );
         assert_eq!(
             clock_end, slot_start,
             "{edge:?}: the clock ends at the capsule"
@@ -4123,16 +4710,19 @@ fn switchboard_is_trailing_most_on_every_edge() {
 
 #[test]
 fn narrow_screen_collapses_clock_and_icons_before_the_switchboard() {
-    // 157 px holds exactly the leading end (96 of launchers plus the 17 px
-    // separator gutter) plus the 44 px capsule: the clock and the
-    // notification area collapse to nothing first.
+    // 157 px, less the two 5 px margins the bar floats in and the two 1 px
+    // rims its content sits inside, leaves 145: the leading end (96 of
+    // launchers plus the 17 px separator gutter) and what remains of the
+    // capsule. The clock and the notification area collapse to nothing
+    // first, and the capsule clips into the leftover 32 px rather than
+    // overlaying a launcher.
     let mut bar = Taskbar::new(TaskbarConfig::bottom_bar(157, 800), &Theme::dark());
     bar.set_status_signals(alloc::vec![StatusSignal::new(
         IconId(1),
         StatusKind::Network
     )]);
     let layout = bar.layout(Scale::ONE);
-    assert_eq!(layout.switchboard, Rect::new(113, 760, 44, 40));
+    assert_eq!(layout.switchboard, Rect::new(119, 756, 32, 38));
     assert!(layout.clock.is_empty());
     assert!(layout.notification_area.is_empty());
     assert!(layout.notifications[0].is_empty());
@@ -4151,7 +4741,7 @@ fn tiny_screen_clips_the_switchboard_against_the_launchers() {
     let layout = bar.layout(Scale::ONE);
     assert!(layout.switchboard.is_empty());
     assert!(layout.clock.is_empty());
-    assert_eq!(layout.hit_test(Point::new(70, 780)), Some(Hit::Files));
+    assert_eq!(layout.hit_test(Point::new(71, 780)), Some(Hit::Files));
 
     // An absurd sliver clips into the launchers themselves; nothing panics
     // and neither the empty capsule slot nor the empty rule can be hit.
@@ -4907,14 +5497,135 @@ fn readout_renders_the_state_and_value_lines() {
         .expect("readout renders");
     assert_eq!(surface.width(), layout.panel.width);
     assert_eq!(surface.height(), layout.panel.height);
-    // The plate carries the state-name ink over the raised surface.
+    // The plate carries the state-name ink over the floating chrome ground.
     assert!(region_has_role_ink(
         &surface,
         layout.panel,
         layout.panel,
         theme.palette().on_surface,
-        role(theme.palette().surface_raised),
+        floating_ground(&theme, theme.palette().surface_raised),
     ));
+}
+
+/// The readout's *Open Switchboard* button is furniture standing on the
+/// glass, not part of it: a step more solid than the ground it sits on, so it
+/// reads as pressable, while the blurred desktop still shows through it.
+#[test]
+fn the_readout_action_is_a_plate_raised_on_the_floating_ground() {
+    let theme = Theme::dark();
+    let mut bar = bottom_bar();
+    bar.set_tray_summary(Some(tray_summary(0, 0, 300)));
+    let mut input = TaskbarInput::new();
+    hover_switchboard(&mut input, &mut bar);
+
+    let layout = bar.tray_readout_layout(Scale::ONE).expect("expanded");
+    let surface = TaskbarRenderer::new(test_icon_cache())
+        .render_tray_readout(&bar, Scale::ONE)
+        .expect("readout renders");
+
+    let ground = floating_ground(&theme, theme.palette().surface_raised);
+    let plate = floating_plate(&theme, theme.palette().surface_raised);
+    assert!(
+        plate.a > ground.a && plate.a < 255,
+        "a raised plate is a step more solid than its ground, never opaque"
+    );
+    assert!(
+        region_has_pixel(&surface, layout.panel, layout.panel, plate),
+        "the action button wears no plate of its own"
+    );
+    assert!(
+        !region_has_pixel(
+            &surface,
+            layout.panel,
+            layout.panel,
+            role(theme.palette().surface_raised)
+        ),
+        "nothing on the readout is filled opaque"
+    );
+}
+
+// ---- floating chrome --------------------------------------------------
+
+#[test]
+fn every_popup_the_bar_opens_grounds_itself_in_the_floating_chrome() {
+    let theme = Theme::dark();
+    let renderer = TaskbarRenderer::new(test_icon_cache());
+    // Each popup grounds in the colour role it wears solid: a `Panel` its own
+    // surface, a menu and the readout the raised one. What is under test is
+    // that all four let the backdrop through at the theme's one weight.
+    let grounded = |label: &str, surface: &Surface, frame: Rect, region: Rect, fill| {
+        let ground = floating_ground(&theme, fill);
+        assert!(ground.a < 255, "the {label} ground covers");
+        assert!(
+            region_has_pixel(surface, frame, region, ground),
+            "the {label} popup grounds itself in the translucent chrome the \
+             compositor's backdrop blur reads through"
+        );
+    };
+
+    let mut bar = bottom_bar();
+    let mut input = TaskbarInput::new();
+    open_library(&mut input, &mut bar);
+    let library = bar.library_layout(Scale::ONE);
+    grounded(
+        "library",
+        &renderer.render_library(&bar, Scale::ONE).expect("renders"),
+        library.panel,
+        library.viewport,
+        theme.palette().surface,
+    );
+
+    let mut bar = bottom_bar();
+    bar.set_pins(alloc::vec![PinView::new("Pin", IconKind::AppBundle)]);
+    bar.menu_routing_mut().open(
+        MenuSubject::Pin {
+            index: 0,
+            running: false,
+        },
+        Rect::new(100, 760, 48, 40),
+    );
+    let menu = bar.menu_layout(Scale::ONE).expect("menu layout");
+    grounded(
+        "context menu",
+        &renderer.render_menu(&bar, Scale::ONE).expect("renders"),
+        menu.panel,
+        menu.panel,
+        theme.palette().surface_raised,
+    );
+
+    let mut bar = bottom_bar();
+    let _ = bar.raise_notification(TransientNotification::new(
+        2,
+        5,
+        NotifySeverity::Info,
+        "Ready",
+        "All done",
+    ));
+    let notifications = bar.notifications_layout(Scale::ONE).expect("popover");
+    grounded(
+        "notification",
+        &renderer
+            .render_notifications(&bar, Scale::ONE)
+            .expect("renders"),
+        notifications.panel,
+        notifications.panel,
+        theme.palette().surface,
+    );
+
+    let mut bar = bottom_bar();
+    bar.set_tray_summary(Some(tray_summary(0, 0, 300)));
+    let mut input = TaskbarInput::new();
+    hover_switchboard(&mut input, &mut bar);
+    let readout = bar.tray_readout_layout(Scale::ONE).expect("expanded");
+    grounded(
+        "Switchboard readout",
+        &renderer
+            .render_tray_readout(&bar, Scale::ONE)
+            .expect("renders"),
+        readout.panel,
+        readout.panel,
+        theme.palette().surface_raised,
+    );
 }
 
 // ---- TaskbarRepaint ---------------------------------------------------

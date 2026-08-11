@@ -2857,6 +2857,70 @@ fn panel_surface(panel: &Panel, theme: &Theme) -> Surface {
     s
 }
 
+/// The library popup is a floating `Panel`, and it has two ways to come out
+/// wrong: a ground merely composited over the rim it is drawn on top of
+/// returns opaque, and a header band laid over the ground would deepen it to
+/// an opacity no theme authored. Both leave every colour looking plausible.
+#[test]
+fn a_floating_panel_lays_one_see_through_ground_and_no_second_layer() {
+    for theme in [Theme::dark(), Theme::light()] {
+        // A panel's ground is its own surface role, let through at the
+        // theme's chrome alpha — which is what keeps a resting row, drawn in
+        // that same role, exactly its ground rather than a patch on it.
+        let chrome = premul(
+            theme
+                .palette()
+                .surface
+                .with_alpha(theme.palette().chrome_alpha),
+        );
+        let bounds = Rect::new(0, 0, PW, PH);
+        let panel = Panel::new("Programs");
+        let chrome_theme = theme.clone().floating();
+        let floating = panel_surface(&panel, &chrome_theme);
+        let header = panel
+            .header_rect(bounds, Scale::ONE, &theme)
+            .expect("header");
+
+        let content = floating.get(PW / 2, PH - 2).expect("in bounds");
+        assert_eq!(content, chrome, "{}: opaque ground", theme.name());
+        assert!(content.a < 255, "{}: the chrome covers", theme.name());
+
+        // The header reads as one layer with the content, not two stacked.
+        let band_y = u32::try_from(header.top()).expect("on surface") + header.height / 2;
+        assert_eq!(
+            floating.get(PW - 2, band_y),
+            Some(chrome),
+            "{}: the header band deepened the ground",
+            theme.name()
+        );
+        // The rim survives as the surface's edge, at the surface's own weight:
+        // it is part of the glass, not a hard line drawn on it.
+        let rim = premul(theme.palette().rim.with_alpha(theme.palette().chrome_alpha));
+        assert_eq!(
+            floating.get(0, PH / 2),
+            Some(rim),
+            "{}: the laid ground ate the rim",
+            theme.name()
+        );
+        assert_ne!(rim, chrome, "{}: the edge must read", theme.name());
+
+        // An ordinary panel keeps its opaque content and its raised header.
+        let opaque = panel_surface(&Panel::new("Programs"), &theme);
+        assert_eq!(
+            opaque.get(PW / 2, PH - 2),
+            Some(premul(theme.palette().surface)),
+            "{}: an ordinary panel changed",
+            theme.name()
+        );
+        assert_eq!(
+            opaque.get(PW - 2, band_y),
+            Some(premul(theme.palette().surface_raised)),
+            "{}: an ordinary panel lost its header band",
+            theme.name()
+        );
+    }
+}
+
 #[test]
 fn panel_layout_splits_header_and_content() {
     let theme = Theme::dark();

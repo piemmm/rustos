@@ -24,11 +24,12 @@ router**:
   the window, blurs the back buffer inside that window's rectangle only,
   and resumes composing from the window itself. The effect is
   `lib/raster`'s shared `Surface::frost_region` — the one frosted glass the
-  desktop has, so the login screen frosting a selected account tile draws
-  through the same code. It copies the rectangle, blurs the copy with a
-  separable box blur carrying running sums (cost proportional to the
-  rectangle's area whatever the radius, over premultiplied channels
-  including alpha, with samples past an edge replicating it, so the effect
+  desktop has, so the taskbar and every popup it opens, and the login screen
+  frosting a selected account tile, all draw through the same code. It copies
+  the rectangle, blurs the copy with a separable box blur carrying running
+  sums (cost proportional to the rectangle's area whatever the radius, over
+  premultiplied channels including alpha, with samples past an edge
+  replicating it, so the effect
   can neither pull a neighbour's pixels in nor write outside the rectangle
   and a uniform backdrop comes out unchanged), and mixes the blurred copy
   back weighted by the window's own rounded-corner coverage, so a rounded
