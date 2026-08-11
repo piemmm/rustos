@@ -41,7 +41,15 @@ server and every app's client can never drift apart.
   `WINDOW_BACKDROP_BLUR_MAX_PX` refused at decode; `close` tears the
   window down. `WindowEvents` wraps the injected `EventSource`
   seam — a **parked** wait on the app's own event endpoint, never a
-  poll — and decodes each delivered `WindowEvent` fail-closed. The
+  poll — and decodes each delivered `WindowEvent` fail-closed.
+  `present_damage` decides *what* a round presents from the three cases
+  every such app faces (`Repaint::Nothing` / `Reported` / `Whole`), and
+  `damage_in` clips a reported client-space rectangle onto the window —
+  the app's own fail-closed step, since the session refuses a rectangle
+  outside the surface. A round that changed the view but reported no
+  rectangle presents the whole window: over-covering costs pixels, while
+  under-covering would leave a stale frame on screen, because the session
+  copies only what a present declares. The
   endpoint's *name* (`event_endpoint_for`) and its *depth*
   (`EVENT_MAILBOX_CAPACITY`) are both defined here, once, because both
   ends depend on them agreeing: the session reads a refused delivery as

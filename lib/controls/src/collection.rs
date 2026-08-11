@@ -1113,21 +1113,63 @@ impl TableHeader {
         self.sort
     }
 
-    /// Adopt the owner's committed sort.
+    /// Adopt the owner's committed sort, reporting the column the caret leaves
+    /// and the column it arrives on.
     ///
     /// The header never applies a sort itself; this is how the owner tells it
     /// which sort it actually committed, so the header draws the caret
     /// against the real outcome rather than assuming its own report was
     /// honoured. Ignored (fail closed) for an out-of-range or unsortable
     /// column, rather than clamping the request onto a different column.
-    pub fn set_sort(&mut self, sort: Option<(usize, SortOrder)>) {
-        self.sort = match sort {
-            None => None,
-            Some((index, order)) => match self.columns.get(index) {
-                Some(column) if column.is_sortable() => Some((index, order)),
-                _ => return,
-            },
-        };
+    ///
+    /// Re-sorting the column already sorted reports that one column, because the
+    /// caret it draws there turns over.
+    pub fn set_sort(
+        &mut self,
+        sort: Option<(usize, SortOrder)>,
+        bounds: Rect,
+        scale: Scale,
+        theme: &Theme,
+        columns: &[u32],
+        damage: &mut Region,
+    ) {
+        if !self.accepts_sort(sort) {
+            return;
+        }
+        if damage::move_mark(
+            self.sort,
+            sort,
+            |(column, _)| self.column_area(column, bounds, scale, theme, columns),
+            damage,
+        ) {
+            self.sort = sort;
+        }
+    }
+
+    /// Adopt the owner's committed sort without reporting, for a caller that is
+    /// composing or rebuilding this header and presents it whole.
+    ///
+    /// [`set_sort`](Self::set_sort) is the interactive commit and reports the
+    /// columns whose carets change. A rebuild has no layout to resolve a column
+    /// against and nothing to report against either, so it says so here rather
+    /// than passing widths and a theme it does not have.
+    pub fn adopt_sort(&mut self, sort: Option<(usize, SortOrder)>) {
+        if self.accepts_sort(sort) {
+            self.sort = sort;
+        }
+    }
+
+    /// Whether this header will draw `sort`: sorting by nothing always, sorting
+    /// by a column only when that column is declared and sortable — the one
+    /// admission rule every sort entry point applies.
+    fn accepts_sort(&self, sort: Option<(usize, SortOrder)>) -> bool {
+        match sort {
+            None => true,
+            Some((index, _)) => self
+                .columns
+                .get(index)
+                .is_some_and(HeaderColumn::is_sortable),
+        }
     }
 
     /// The keyboard-focused column, if any.

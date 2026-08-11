@@ -1068,7 +1068,7 @@ fn a_first_press_sorts_ascending_and_the_next_flips_the_committed_order() {
         "the header reports the request; only the owner commits it"
     );
 
-    header.set_sort(Some((1, SortOrder::Ascending)));
+    header.adopt_sort(Some((1, SortOrder::Ascending)));
     header.on_pointer(&PRESS, bounds, Scale::ONE, &theme, &COLUMNS);
     assert_eq!(
         header.on_pointer(&RELEASE, bounds, Scale::ONE, &theme, &COLUMNS),
@@ -1198,21 +1198,38 @@ fn a_denied_column_draws_its_authority_mark() {
 
 #[test]
 fn set_sort_refuses_an_out_of_range_or_unsortable_column() {
+    let bounds = Rect::new(0, 0, W, H);
+    let theme = Theme::dark();
     let mut header = TableHeader::new(vec![HeaderColumn::new("Name"), HeaderColumn::fixed("Act")]);
-    header.set_sort(Some((5, SortOrder::Ascending)));
+
+    // Both entry points apply the one admission rule, and a refusal reports
+    // nothing because it changes nothing.
+    let mut damage = sink();
+    header.set_sort(
+        Some((5, SortOrder::Ascending)),
+        bounds,
+        Scale::ONE,
+        &theme,
+        &COLUMNS,
+        &mut damage,
+    );
+    assert_eq!(header.sort(), None);
+    assert!(damage.is_empty(), "a refused sort reports nothing");
+
+    header.adopt_sort(Some((5, SortOrder::Ascending)));
     assert_eq!(header.sort(), None, "an out-of-range column is refused");
-    header.set_sort(Some((1, SortOrder::Ascending)));
+    header.adopt_sort(Some((1, SortOrder::Ascending)));
     assert_eq!(header.sort(), None, "an unsortable column is refused");
 
-    header.set_sort(Some((0, SortOrder::Descending)));
+    header.adopt_sort(Some((0, SortOrder::Descending)));
     assert_eq!(header.sort(), Some((0, SortOrder::Descending)));
-    header.set_sort(Some((5, SortOrder::Ascending)));
+    header.adopt_sort(Some((5, SortOrder::Ascending)));
     assert_eq!(
         header.sort(),
         Some((0, SortOrder::Descending)),
         "a refused request must not clamp onto another column, nor clear the real one"
     );
-    header.set_sort(None);
+    header.adopt_sort(None);
     assert_eq!(header.sort(), None);
 }
 
@@ -1226,7 +1243,7 @@ fn the_sorted_column_alone_takes_the_emphasised_foreground() {
     assert!(!has_pixel(&plain, emphasised));
 
     let mut sorted = three_columns();
-    sorted.set_sort(Some((1, SortOrder::Ascending)));
+    sorted.adopt_sort(Some((1, SortOrder::Ascending)));
     let surface = header_surface(&sorted, &theme, Scale::ONE, &COLUMNS);
     assert!(has_pixel(&surface, emphasised));
     assert!(
@@ -1241,7 +1258,7 @@ fn a_sort_caret_reads_as_a_caret_at_the_unscaled_desktop() {
     let emphasised = premul(theme.palette().on_surface);
     // An empty title leaves the caret as the only emphasised mark.
     let mut header = TableHeader::new(vec![HeaderColumn::new("")]);
-    header.set_sort(Some((0, SortOrder::Ascending)));
+    header.adopt_sort(Some((0, SortOrder::Ascending)));
     let surface = header_surface(&header, &theme, Scale::ONE, &[W]);
     let (x0, y0, x1, y1) = bbox(&surface, emphasised)
         .expect("a caret drawn only in coverage fringe is a grey smudge, not a mark");
@@ -1274,7 +1291,7 @@ fn a_sort_caret_points_up_for_ascending_and_down_for_descending() {
     let tall = TableHeader::measured_height(scale, &theme);
     let caret = |order| {
         let mut header = TableHeader::new(vec![HeaderColumn::new("")]);
-        header.set_sort(Some((0, order)));
+        header.adopt_sort(Some((0, order)));
         let mut surface = Surface::new(wide, tall).expect("surface");
         header.render(
             &mut surface,
@@ -1308,7 +1325,7 @@ fn a_sort_caret_sits_on_the_side_the_alignment_implies() {
     ] {
         // An empty title leaves the caret as the only emphasised mark.
         let mut header = TableHeader::new(vec![HeaderColumn::new("").with_align(align)]);
-        header.set_sort(Some((0, SortOrder::Ascending)));
+        header.adopt_sort(Some((0, SortOrder::Ascending)));
         let surface = header_surface(&header, &theme, Scale::ONE, &[W]);
         let (x0, _, x1, _) = bbox(&surface, emphasised).expect("caret drawn");
         let (start, end) = column_x_range(&header, &theme, &[W], 0).expect("column laid out");
@@ -1340,7 +1357,7 @@ fn a_sort_caret_shortens_its_title_rather_than_overlapping_it() {
     };
     let sorted = |title: &str| {
         let mut header = TableHeader::new(vec![HeaderColumn::new(title)]);
-        header.set_sort(Some((0, SortOrder::Ascending)));
+        header.adopt_sort(Some((0, SortOrder::Ascending)));
         header
     };
     let emphasised = premul(theme.palette().on_surface);
@@ -1451,7 +1468,7 @@ fn measured_height_never_reads_shorter_than_a_control() {
 fn a_header_reads_in_both_themes_and_under_heavy_contrast() {
     for theme in [Theme::dark(), Theme::light(), high_contrast()] {
         let mut header = three_columns();
-        header.set_sort(Some((2, SortOrder::Descending)));
+        header.adopt_sort(Some((2, SortOrder::Descending)));
         header.set_focus(
             Some(0),
             Rect::new(0, 0, W, H),
@@ -3093,4 +3110,98 @@ fn a_header_focus_move_reports_the_two_columns() {
         !damage.is_empty() && damage.bounds().height <= H,
         "and only within the header's own band"
     );
+}
+
+#[test]
+fn committing_a_sort_reports_the_columns_whose_caret_changes() {
+    let bounds = Rect::new(0, 0, W, H);
+    let theme = Theme::dark();
+    let mut header = three_columns();
+    header.adopt_sort(Some((0, SortOrder::Ascending)));
+
+    let mut damage = sink();
+    header.set_sort(
+        Some((2, SortOrder::Descending)),
+        bounds,
+        Scale::ONE,
+        &theme,
+        &COLUMNS,
+        &mut damage,
+    );
+
+    assert_eq!(header.sort(), Some((2, SortOrder::Descending)));
+    for column in [0, 2] {
+        let (start, end) =
+            column_x_range(&header, &theme, &COLUMNS, column).expect("column laid out");
+        assert!(
+            damage.contains(Point::new(xi(start + (end - start) / 2), xi(H / 2))),
+            "column {column} carries a caret change: {:?}",
+            damage.rects()
+        );
+    }
+    let (start, end) = column_x_range(&header, &theme, &COLUMNS, 1).expect("column 1 laid out");
+    assert!(
+        !damage.contains(Point::new(xi(start + (end - start) / 2), xi(H / 2))),
+        "the column between them is untouched"
+    );
+}
+
+#[test]
+fn turning_the_same_column_over_reports_that_column() {
+    let bounds = Rect::new(0, 0, W, H);
+    let theme = Theme::dark();
+    let mut header = three_columns();
+    header.adopt_sort(Some((1, SortOrder::Ascending)));
+
+    let mut damage = sink();
+    header.set_sort(
+        Some((1, SortOrder::Descending)),
+        bounds,
+        Scale::ONE,
+        &theme,
+        &COLUMNS,
+        &mut damage,
+    );
+
+    assert_eq!(header.sort(), Some((1, SortOrder::Descending)));
+    let (start, end) = column_x_range(&header, &theme, &COLUMNS, 1).expect("column 1 laid out");
+    assert!(
+        damage.contains(Point::new(xi(start + (end - start) / 2), xi(H / 2))),
+        "the caret it draws there turns over, so the column is repainted"
+    );
+
+    // Re-committing the very same sort draws the same caret and reports nothing.
+    let mut again = sink();
+    header.set_sort(
+        Some((1, SortOrder::Descending)),
+        bounds,
+        Scale::ONE,
+        &theme,
+        &COLUMNS,
+        &mut again,
+    );
+    assert!(again.is_empty());
+}
+
+#[test]
+fn adopting_a_sort_reports_nothing_and_admits_what_setting_admits() {
+    let bounds = Rect::new(0, 0, W, H);
+    let theme = Theme::dark();
+    let mut adopted = three_columns();
+    let mut reported = three_columns();
+    let mut damage = sink();
+
+    for sort in [
+        Some((1, SortOrder::Ascending)),
+        Some((9, SortOrder::Ascending)),
+        None,
+    ] {
+        adopted.adopt_sort(sort);
+        reported.set_sort(sort, bounds, Scale::ONE, &theme, &COLUMNS, &mut damage);
+        assert_eq!(
+            adopted.sort(),
+            reported.sort(),
+            "a rebuild must not admit a sort the interactive path refuses"
+        );
+    }
 }

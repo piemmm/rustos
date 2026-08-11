@@ -13,7 +13,7 @@
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use tairix_controls::{Tab, Tabs, TabsAction};
+use tairix_controls::{damage, Tab, Tabs, TabsAction};
 use tairix_font::BitmapFont;
 use tairix_geometry::{Point, Rect, Region, Scale};
 use tairix_input::{InputEvent, Key, Modifiers, PointerButton};
@@ -174,7 +174,7 @@ impl Gallery {
                 .map(|t| Tab::new(t.title()))
                 .collect::<Vec<_>>(),
         );
-        tabs.set_selected(0);
+        tabs.adopt_selected(0);
         let panels = GalleryTab::ALL.iter().map(|t| panels::build(*t)).collect();
         Self {
             tabs,
@@ -312,8 +312,7 @@ impl Gallery {
             if let Some(TabsAction::Selected { index }) =
                 self.tabs.on_pointer(event, tabs_rect, damage)
             {
-                let rects = self.item_rects(content, scale, theme);
-                return self.select_index(index, &rects, damage);
+                return self.select_index(index, tabs_rect, content, scale, theme, damage);
             }
             return false;
         }
@@ -325,7 +324,7 @@ impl Gallery {
         } = event
         {
             if let Some(idx) = hovered {
-                self.set_focus(Focus::Item(idx), &rects, damage);
+                self.set_focus(Focus::Item(idx), tabs_rect, &rects, damage);
             }
         }
         // The focused widget captures every event once a press has focused it
@@ -343,7 +342,7 @@ impl Gallery {
             ) {
                 let changed = item.widget.on_pointer(event, *rect, scale, theme, damage);
                 if changed {
-                    self.enforce_radio_group(idx);
+                    self.enforce_radio_group(idx, &rects, damage);
                 }
                 return changed;
             }
@@ -368,7 +367,7 @@ impl Gallery {
         let (tabs_rect, content) = Self::layout(viewport, scale, theme);
         let rects = self.item_rects(content, scale, theme);
         if key == Key::Named(tairix_input::NamedKey::Tab) {
-            self.focus_step(!modifiers.shift, &rects, damage);
+            self.focus_step(!modifiers.shift, tabs_rect, &rects, damage);
             return true;
         }
         match self.focus {
@@ -376,7 +375,7 @@ impl Gallery {
                 if let Some(TabsAction::Selected { index }) =
                     self.tabs.on_key(key, tabs_rect, damage)
                 {
-                    return self.select_index(index, &rects, damage);
+                    return self.select_index(index, tabs_rect, content, scale, theme, damage);
                 }
                 false
             }
@@ -387,7 +386,7 @@ impl Gallery {
                         .widget
                         .on_key(key, modifiers, rect, scale, theme, damage);
                     if changed {
-                        self.enforce_radio_group(idx);
+                        self.enforce_radio_group(idx, &rects, damage);
                     }
                     return changed;
                 }
@@ -396,9 +395,21 @@ impl Gallery {
         }
     }
 
-    /// Select the tab at `index`, returning whether it changed. `rects` are
-    /// the current panel's widget rectangles (see [`item_rects`](Self::item_rects)).
-    fn select_index(&mut self, index: usize, rects: &[Rect], damage: &mut Region) -> bool {
+    /// Select the tab at `index`, returning whether it changed.
+    ///
+    /// A different panel is drawn, so the whole content band is reported; the
+    /// strip reports the two tab plates itself. The focus marks are then set
+    /// against the *new* panel's rectangles, which is why they are resolved here
+    /// rather than taken from the caller.
+    fn select_index(
+        &mut self,
+        index: usize,
+        tabs: Rect,
+        content: Rect,
+        scale: Scale,
+        theme: &Theme,
+        damage: &mut Region,
+    ) -> bool {
         let Some(tab) = GalleryTab::from_index(index) else {
             return false;
         };
@@ -406,23 +417,37 @@ impl Gallery {
             return false;
         }
         self.current = tab;
-        self.tabs.set_selected(index);
-        self.set_focus(Focus::Tabs, rects, damage);
+        self.tabs.set_selected(index, tabs, damage);
+        damage.add(content);
+        let rects = self.item_rects(content, scale, theme);
+        self.set_focus(Focus::Tabs, tabs, &rects, damage);
         true
     }
 
     /// Move focus to `focus`, updating the widgets' and tab strip's focus
     /// marks so exactly one region reads as focused. `rects` are the current
     /// panel's widget rectangles (see [`item_rects`](Self::item_rects)).
-    fn set_focus(&mut self, focus: Focus, rects: &[Rect], damage: &mut Region) {
+    ///
+    /// Every widget's mark is a function of [`Self::focus`], so the ring can only
+    /// move between the item it left and the item it arrives on: those are what
+    /// the ring costs, and the strip reports its own cell when focus lands there.
+    fn set_focus(&mut self, focus: Focus, tabs: Rect, rects: &[Rect], damage: &mut Region) {
+        damage::move_mark(
+            Self::focused_item(self.focus),
+            Self::focused_item(focus),
+            |idx| rects.get(idx).copied(),
+            damage,
+        );
         for (idx, item) in self.panels[self.current.index()].iter_mut().enumerate() {
             let rect = rects.get(idx).copied().unwrap_or(Rect::EMPTY);
             item.widget.set_focused(false, rect, damage);
         }
-        self.tabs.set_current(None);
+        self.tabs.set_current(None, tabs, damage);
         self.focus = focus;
         match focus {
-            Focus::Tabs => self.tabs.set_current(Some(self.current.index())),
+            Focus::Tabs => self
+                .tabs
+                .set_current(Some(self.current.index()), tabs, damage),
             Focus::Item(idx) => {
                 let rect = rects.get(idx).copied().unwrap_or(Rect::EMPTY);
                 if let Some(item) = self.panels[self.current.index()].get_mut(idx) {
@@ -432,9 +457,17 @@ impl Gallery {
         }
     }
 
+    /// The panel item `focus` sits on, or `None` when it sits on the tab strip.
+    fn focused_item(focus: Focus) -> Option<usize> {
+        match focus {
+            Focus::Tabs => None,
+            Focus::Item(idx) => Some(idx),
+        }
+    }
+
     /// Advance keyboard focus forward (`true`) or backward (`false`) through
     /// the tab strip and the panel's interactive widgets, wrapping around.
-    fn focus_step(&mut self, forward: bool, rects: &[Rect], damage: &mut Region) {
+    fn focus_step(&mut self, forward: bool, tabs: Rect, rects: &[Rect], damage: &mut Region) {
         let interactive: Vec<usize> = self.panels[self.current.index()]
             .iter()
             .enumerate()
@@ -460,7 +493,7 @@ impl Gallery {
         } else {
             Focus::Item(interactive[next_pos - 1])
         };
-        self.set_focus(next, rects, damage);
+        self.set_focus(next, tabs, rects, damage);
     }
 
     /// The on-screen widget rectangle of demo item `index` in the current
@@ -479,15 +512,18 @@ impl Gallery {
 
     /// Keep a radio group single-selection: if the item just actuated is a now
     /// selected radio, clear every other radio in the panel.
-    fn enforce_radio_group(&mut self, idx: usize) {
+    ///
+    /// A cleared radio's plate changes, and only this owner knows where it drew
+    /// it, so each one it actually clears is reported.
+    fn enforce_radio_group(&mut self, idx: usize, rects: &[Rect], damage: &mut Region) {
         let panel = &mut self.panels[self.current.index()];
         if panel
             .get(idx)
             .is_some_and(|it| it.widget.is_selected_radio())
         {
             for (i, item) in panel.iter_mut().enumerate() {
-                if i != idx {
-                    item.widget.clear_radio();
+                if i != idx && item.widget.clear_radio() {
+                    damage.add(rects.get(i).copied().unwrap_or(Rect::EMPTY));
                 }
             }
         }

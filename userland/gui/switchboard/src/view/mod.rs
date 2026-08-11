@@ -916,7 +916,7 @@ impl Switchboard {
                 })
                 .collect::<Vec<_>>(),
         );
-        menu.set_current(Some(section.index()));
+        menu.adopt_current(Some(section.index()));
         menu
     }
 

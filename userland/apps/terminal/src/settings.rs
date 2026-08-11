@@ -42,7 +42,7 @@ use tairix_raster::{Color, Surface};
 use tairix_theme::{TextRole, Theme};
 
 use tairix_controls::{
-    Button, ButtonAction, ButtonContent, ControlRole, Panel, Radio, ScrollBar, ScrollModel,
+    damage, Button, ButtonAction, ButtonContent, ControlRole, Panel, Radio, ScrollBar, ScrollModel,
     ScrollOrientation, ScrollRange, SelectorAction, Slider, SliderAction, Tab, Tabs, TabsAction,
 };
 
@@ -174,7 +174,7 @@ impl Settings {
         profile.clamp();
 
         let mut tabs = Tabs::new(Vec::from([Tab::new("Appearance"), Tab::new("Effects")]));
-        tabs.set_selected(APPEARANCE_TAB);
+        tabs.adopt_selected(APPEARANCE_TAB);
 
         let scheme_radios = Scheme::ALL
             .iter()
@@ -231,7 +231,7 @@ impl Settings {
             last_pointer: Point::ORIGIN,
         };
         sheet.sync_channel_sliders();
-        sheet.sync_focus();
+        sheet.sync_focus(Rect::EMPTY, &mut damage::sink());
         sheet
     }
 
@@ -320,9 +320,9 @@ impl Settings {
         if let Some(rect) = tabs_rect {
             if let Some(TabsAction::Selected { index }) = self.tabs.on_pointer(event, rect, damage)
             {
-                self.tabs.set_selected(index);
+                self.tabs.set_selected(index, rect, damage);
                 self.focus = Focus::Tabs;
-                self.sync_focus();
+                self.sync_focus(rect, damage);
                 return SheetOutcome::Changed;
             }
         }
@@ -345,7 +345,7 @@ impl Settings {
                 .is_some()
             {
                 self.focus = Focus::Scroll;
-                self.sync_focus();
+                self.sync_focus(tabs_rect.unwrap_or(Rect::EMPTY), damage);
                 return SheetOutcome::Changed;
             }
         }
@@ -396,7 +396,7 @@ impl Settings {
         }
         if key == Key::Named(NamedKey::Tab) {
             self.move_focus(!modifiers.shift);
-            self.sync_focus();
+            self.sync_focus(tabs_rect.unwrap_or(Rect::EMPTY), damage);
             return SheetOutcome::Changed;
         }
         let slider_rect = self.focused_slider_rect(body_rect, scale, theme, font);
@@ -537,7 +537,11 @@ impl Settings {
     /// Set exactly the focused control's own focus flag, clearing every
     /// other one — the one place that maps [`Focus`] onto every control's
     /// composed keyboard-focus state.
-    fn sync_focus(&mut self) {
+    ///
+    /// `tabs` is the strip's own rectangle as the sheet last laid it out, empty
+    /// where the strip is drawn nowhere to report against: a window too small to
+    /// seat it, or a sheet still being composed and presented whole.
+    fn sync_focus(&mut self, tabs: Rect, damage: &mut Region) {
         for (index, radio) in self.scheme_radios.iter_mut().enumerate() {
             radio.set_focused(self.focus == Focus::Scheme(index));
         }
@@ -553,9 +557,9 @@ impl Settings {
         self.done.set_focused(self.focus == Focus::Done);
         if self.focus == Focus::Tabs {
             let index = self.tabs.current().or(self.tabs.selected()).unwrap_or(0);
-            self.tabs.set_current(Some(index));
+            self.tabs.set_current(Some(index), tabs, damage);
         } else {
-            self.tabs.set_current(None);
+            self.tabs.set_current(None, tabs, damage);
         }
     }
 
@@ -1000,7 +1004,7 @@ impl Settings {
         match self.focus {
             Focus::Tabs => {
                 if let Some(TabsAction::Selected { index }) = self.tabs.on_key(key, tabs, damage) {
-                    self.tabs.set_selected(index);
+                    self.tabs.set_selected(index, tabs, damage);
                 }
                 SheetOutcome::Changed
             }

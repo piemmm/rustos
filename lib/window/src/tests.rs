@@ -19,9 +19,11 @@ use tairix_abi::reply::decode_status_reply;
 use tairix_abi::window_ipc::{PointerAction, WindowEvent, WindowRequest, WINDOW_TITLE_MAX};
 use tairix_abi::Errno;
 use tairix_display::{FrameRegion, ShmMapper};
-use tairix_geometry::{Rect, Scale};
+use tairix_geometry::{Rect, Region, Scale};
 
-use crate::client::{EventSource, WindowClient, WindowEvents, WindowTransport};
+use crate::client::{
+    damage_in, present_damage, EventSource, Repaint, WindowClient, WindowEvents, WindowTransport,
+};
 use crate::desktop::Desktop;
 use crate::server::{
     CallerIdentity, EventSink, PinDecision, PopupSpec, WindowHost, WindowServer,
@@ -1668,4 +1670,77 @@ fn event_endpoint_ids_are_distinct_per_task_and_never_reserved() {
             pid
         )));
     }
+}
+
+#[test]
+fn a_reported_rect_becomes_the_damage_it_covers() {
+    let rect = Rect::new(1, 1, 2, 2);
+    let damage = damage_in(&SURFACE, rect).expect("inside the surface");
+    assert_eq!(
+        (damage.x, damage.y, damage.width_px, damage.height_px),
+        (1, 1, 2, 2)
+    );
+}
+
+#[test]
+fn a_reported_rect_is_clipped_to_the_window() {
+    // A control drawn partly off the window — a popup at the edge — must not
+    // present pixels the session would refuse.
+    let damage = damage_in(&SURFACE, Rect::new(-4, 2, 100, 100)).expect("the part inside");
+    assert_eq!(
+        (damage.x, damage.y, damage.width_px, damage.height_px),
+        (0, 2, 4, 1)
+    );
+}
+
+#[test]
+fn a_rect_wholly_outside_the_window_presents_nothing() {
+    assert_eq!(damage_in(&SURFACE, Rect::new(9, 9, 4, 4)), None);
+    assert_eq!(damage_in(&SURFACE, Rect::EMPTY), None);
+}
+
+#[test]
+fn a_round_that_changed_nothing_presents_nothing() {
+    let damage = Region::new();
+    assert_eq!(present_damage(&SURFACE, Repaint::Nothing, &damage), None);
+}
+
+#[test]
+fn a_round_presents_what_it_reported() {
+    let mut damage = Region::new();
+    damage.add(Rect::new(1, 0, 1, 1));
+    damage.add(Rect::new(3, 2, 1, 1));
+    let presented = present_damage(&SURFACE, Repaint::Reported, &damage).expect("a rectangle");
+    // One present per frame carries one rectangle, so two reports present the
+    // box around them — still far short of the window where they are close.
+    assert_eq!(
+        (
+            presented.x,
+            presented.y,
+            presented.width_px,
+            presented.height_px
+        ),
+        (1, 0, 3, 3)
+    );
+}
+
+#[test]
+fn a_round_that_changed_the_view_but_reported_nothing_presents_the_window() {
+    // Under-covering would leave a stale frame on screen, so the fallback is
+    // the whole window rather than nothing.
+    let damage = Region::new();
+    assert_eq!(
+        present_damage(&SURFACE, Repaint::Reported, &damage),
+        Some(DamageRect::full(&SURFACE))
+    );
+}
+
+#[test]
+fn a_whole_round_presents_the_window_whatever_was_reported() {
+    let mut damage = Region::new();
+    damage.add(Rect::new(1, 1, 1, 1));
+    assert_eq!(
+        present_damage(&SURFACE, Repaint::Whole, &damage),
+        Some(DamageRect::full(&SURFACE))
+    );
 }

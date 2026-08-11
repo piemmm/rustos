@@ -98,10 +98,18 @@ impl DemoWidget {
     }
 
     /// Clear this widget's selection if it is a radio button (used to enforce
-    /// single-selection across a radio group).
-    pub fn clear_radio(&mut self) {
-        if let DemoWidget::Radio(r) = self {
-            r.set_selected(false);
+    /// single-selection across a radio group), answering whether that cleared a
+    /// selection the radio was drawing.
+    ///
+    /// The owner clearing it holds the rectangle it is drawn at, so the answer
+    /// is what tells the owner which radios to report.
+    pub fn clear_radio(&mut self) -> bool {
+        match self {
+            DemoWidget::Radio(r) if r.is_selected() => {
+                r.set_selected(false);
+                true
+            }
+            _ => false,
         }
     }
 
@@ -122,7 +130,9 @@ impl DemoWidget {
             DemoWidget::TableRow(w) => w.set_focused(focused),
             DemoWidget::ScrollBar(w) => w.set_focused(focused),
             DemoWidget::WindowControl(w) => w.set_focused(focused),
-            DemoWidget::Menu(w) => w.set_current(focused.then_some(0)),
+            // The gallery reports this item's whole rectangle when the ring
+            // moves, and the highlighted row is drawn inside it.
+            DemoWidget::Menu(w) => w.adopt_current(focused.then_some(0)),
             DemoWidget::Toolbar(w) => w.set_focus(focused.then_some(0), rect, damage),
             // No focus ring: split button, progress, card, panel, dialog,
             // tooltip, help tip. Focus is a no-op rather than an error.
@@ -193,28 +203,28 @@ impl DemoWidget {
             DemoWidget::Toggle(w) => match w.on_pointer(event, rect, damage) {
                 Some(SelectorAction::Set { on }) => {
                     w.set_on(on);
-                    true
+                    committed(rect, damage)
                 }
                 None => false,
             },
             DemoWidget::Checkbox(w) => match w.on_pointer(event, rect, damage) {
                 Some(SelectorAction::Set { on }) => {
                     w.set_selection(selection_for(on));
-                    true
+                    committed(rect, damage)
                 }
                 None => false,
             },
             DemoWidget::Radio(w) => match w.on_pointer(event, rect, damage) {
                 Some(SelectorAction::Set { on }) => {
                     w.set_selected(on);
-                    true
+                    committed(rect, damage)
                 }
                 None => false,
             },
             DemoWidget::Slider(w) => match w.on_pointer(event, rect, damage) {
                 Some(SliderAction::SetValue { permille }) => {
                     w.set_value(permille);
-                    true
+                    committed(rect, damage)
                 }
                 None => false,
             },
@@ -230,14 +240,14 @@ impl DemoWidget {
             DemoWidget::ListRow(w) => match w.on_pointer(event, rect, damage) {
                 Some(_) => {
                     w.set_selected(!w.is_selected());
-                    true
+                    committed(rect, damage)
                 }
                 None => false,
             },
             DemoWidget::TableRow(w) => match w.on_pointer(event, rect, damage) {
                 Some(_) => {
                     w.set_selected(!w.is_selected());
-                    true
+                    committed(rect, damage)
                 }
                 None => false,
             },
@@ -248,14 +258,14 @@ impl DemoWidget {
             DemoWidget::Toolbar(w) => match w.on_pointer(event, rect, scale, theme, damage) {
                 Some(action) => {
                     w.set_active(action.index);
-                    true
+                    committed(rect, damage)
                 }
                 None => false,
             },
             DemoWidget::ScrollBar(w) => match w.on_pointer(event, rect, scale, theme, damage) {
                 Some(ScrollAction::ScrollTo { offset }) => {
                     w.set_model(w.model().scroll_to(offset));
-                    true
+                    committed(rect, damage)
                 }
                 None => false,
             },
@@ -282,28 +292,28 @@ impl DemoWidget {
             DemoWidget::Toggle(w) => match w.on_key(key) {
                 Some(SelectorAction::Set { on }) => {
                     w.set_on(on);
-                    true
+                    committed(rect, damage)
                 }
                 None => false,
             },
             DemoWidget::Checkbox(w) => match w.on_key(key) {
                 Some(SelectorAction::Set { on }) => {
                     w.set_selection(selection_for(on));
-                    true
+                    committed(rect, damage)
                 }
                 None => false,
             },
             DemoWidget::Radio(w) => match w.on_key(key) {
                 Some(SelectorAction::Set { on }) => {
                     w.set_selected(on);
-                    true
+                    committed(rect, damage)
                 }
                 None => false,
             },
             DemoWidget::Slider(w) => match w.on_key(key, rect, damage) {
                 Some(SliderAction::SetValue { permille }) => {
                     w.set_value(permille);
-                    true
+                    committed(rect, damage)
                 }
                 None => false,
             },
@@ -318,14 +328,14 @@ impl DemoWidget {
             DemoWidget::ListRow(w) => match w.on_key(key) {
                 Some(_) => {
                     w.set_selected(!w.is_selected());
-                    true
+                    committed(rect, damage)
                 }
                 None => false,
             },
             DemoWidget::TableRow(w) => match w.on_key(key) {
                 Some(_) => {
                     w.set_selected(!w.is_selected());
-                    true
+                    committed(rect, damage)
                 }
                 None => false,
             },
@@ -336,20 +346,31 @@ impl DemoWidget {
             DemoWidget::Toolbar(w) => match w.on_key(key, rect, damage) {
                 Some(action) => {
                     w.set_active(action.index);
-                    true
+                    committed(rect, damage)
                 }
                 None => false,
             },
             DemoWidget::ScrollBar(w) => match w.on_key(key, rect, damage) {
                 Some(ScrollAction::ScrollTo { offset }) => {
                     w.set_model(w.model().scroll_to(offset));
-                    true
+                    committed(rect, damage)
                 }
                 None => false,
             },
             DemoWidget::WindowControl(w) => w.on_key(key, rect, damage).is_some(),
         }
     }
+}
+
+/// Report the control drawn at `rect` after the owner has committed a value into
+/// it, and answer the `true` the caller returns.
+///
+/// A control reports the pixels it changes itself, but the value it holds is its
+/// owner's to commit, and the owner is the only party that knows where it drew
+/// the control. The committed value is drawn inside that rectangle.
+fn committed(rect: Rect, damage: &mut Region) -> bool {
+    damage.add(rect);
+    true
 }
 
 /// The [`SelectionState`] a checkbox takes for a boolean set request.

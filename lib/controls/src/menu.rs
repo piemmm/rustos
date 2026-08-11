@@ -472,9 +472,38 @@ impl Menu {
 
     /// Highlight `index` from the keyboard (or clear the highlight with
     /// `None`); an out-of-range index clears it (fail closed).
-    pub fn set_current(&mut self, index: Option<usize>) {
-        self.current = index.filter(|&i| i < self.items.len());
+    ///
+    /// Reports the row the highlight leaves and the row it arrives on into
+    /// `damage`, taking the same layout inputs [`Self::render`] does because a
+    /// row's rectangle is a function of the popup's own scaled geometry.
+    pub fn set_current(
+        &mut self,
+        index: Option<usize>,
+        bounds: Rect,
+        scale: Scale,
+        theme: &Theme,
+        damage: &mut Region,
+    ) {
+        let next = self.on_menu(index);
+        self.highlight(next, next.is_some(), bounds, scale, theme, damage);
+    }
+
+    /// Adopt `index` as the highlighted row without reporting, for a caller that
+    /// is composing or rebuilding this menu and presents it whole.
+    ///
+    /// [`set_current`](Self::set_current) is the interactive move and reports the
+    /// two rows the highlight moves between. A rebuild has no layout to resolve a
+    /// row against and nothing to report against either, so it says so here
+    /// rather than passing a scale and theme it does not have.
+    pub fn adopt_current(&mut self, index: Option<usize>) {
+        self.current = self.on_menu(index);
         self.keyboard_focus = self.current.is_some();
+    }
+
+    /// `index` if it names a row of this menu, else `None` — the one admission
+    /// rule every highlight entry point applies.
+    fn on_menu(&self, index: Option<usize>) -> Option<usize> {
+        index.filter(|&i| i < self.items.len())
     }
 
     /// The scaled height of one menu row.

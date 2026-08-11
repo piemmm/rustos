@@ -26,7 +26,7 @@ use tairix_abi::window_ipc::{
     WindowRequest, WindowTitle, WINDOW_CREATE_REPLY_LEN, WINDOW_DESKTOP_REPLY_LEN,
 };
 use tairix_abi::{Errno, ProcId};
-use tairix_geometry::Point;
+use tairix_geometry::{Point, Rect, Region};
 use tairix_input::{InputEvent, Key, Modifiers, NamedKey, PointerButton};
 
 use crate::server::PopupSpec;
@@ -34,6 +34,67 @@ use crate::server::PopupSpec;
 /// High tag of an app's event-mailbox endpoint id (see
 /// [`event_endpoint_for`]).
 const EVENT_ENDPOINT_TAG: u64 = 0xE117_0000_0000_0000;
+
+/// Why a round of input repaints, which is what decides the rectangle it
+/// presents (see [`present_damage`]).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Repaint {
+    /// Nothing changed, so nothing is presented.
+    Nothing,
+    /// Controls and their host reported what they changed.
+    Reported,
+    /// Every pixel may have changed — a first frame, an adopted desktop change,
+    /// a resize — so no report could describe it.
+    Whole,
+}
+
+/// The rectangle a round presents, or `None` when it presents nothing.
+///
+/// A [`Repaint::Reported`] round presents what its controls and host reported,
+/// clipped to the window — the whole point of reporting. A round that reported
+/// *nothing* presents the whole window instead of nothing at all: over-covering
+/// costs pixels, while under-covering would leave a stale frame on screen,
+/// because the session copies only what a present declares.
+///
+/// One definition, because every app that presents what it changed faces the
+/// same three cases.
+///
+/// Presenting less than the whole window is sound only where the frame being
+/// presented already holds the rest of the window's current pixels: a
+/// single-frame region the app writes each rectangle into as it goes, never an
+/// alternate buffer whose other pixels are a frame behind.
+#[must_use]
+pub fn present_damage(mode: &DisplayMode, repaint: Repaint, damage: &Region) -> Option<DamageRect> {
+    match repaint {
+        Repaint::Nothing => None,
+        Repaint::Whole => Some(DamageRect::full(mode)),
+        Repaint::Reported => {
+            Some(damage_in(mode, damage.bounds()).unwrap_or_else(|| DamageRect::full(mode)))
+        }
+    }
+}
+
+/// The damage rectangle a client-space `rect` names, clipped to `mode`'s
+/// surface, or `None` when nothing of it survives the clip.
+///
+/// An app that presents what it repainted holds that as a [`Rect`] in its own
+/// coordinates — the very rectangles its controls reported — while the protocol
+/// carries a [`DamageRect`] the session refuses outside the surface. Clipping is
+/// therefore the app's own fail-closed step, with one definition here rather
+/// than a copy per app, and `None` says there is nothing to present at all.
+#[must_use]
+pub fn damage_in(mode: &DisplayMode, rect: Rect) -> Option<DamageRect> {
+    let clipped = rect.intersection(&Rect::new(0, 0, mode.width_px, mode.height_px));
+    if clipped.is_empty() {
+        return None;
+    }
+    Some(DamageRect {
+        x: u32::try_from(clipped.left()).ok()?,
+        y: u32::try_from(clipped.top()).ok()?,
+        width_px: clipped.width,
+        height_px: clipped.height,
+    })
+}
 
 /// The shared input events one delivered [`PointerAction`] at window-local
 /// `point` means, in the order a control must receive them.

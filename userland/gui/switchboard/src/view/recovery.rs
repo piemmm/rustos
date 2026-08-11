@@ -371,11 +371,22 @@ impl RecoverySection {
         }
     }
 
-    /// Show `page` and mark it on the strip.
-    fn select_page(&mut self, page: FaultPage) {
+    /// Show `page` and mark it on the strip, against the strip rectangle the
+    /// paint and the hit test share.
+    ///
+    /// A pane too small to seat the strip draws it nowhere, so there is no
+    /// rectangle to report against.
+    fn select_page(&mut self, page: FaultPage, sweep: &mut FocusSweep<'_, '_>) {
         self.page = page;
-        self.pages.set_selected(page.index());
-        self.pages.set_current(Some(page.index()));
+        if let Some(ctx) = sweep.ctx {
+            let pages = self.pages_rect(ctx).unwrap_or(Rect::EMPTY);
+            self.pages.set_selected(page.index(), pages, sweep.damage);
+            self.pages
+                .set_current(Some(page.index()), pages, sweep.damage);
+        } else {
+            self.pages.adopt_selected(page.index());
+            self.pages.adopt_current(Some(page.index()));
+        }
     }
 
     /// Rebuild everything that depends on *which* fault is selected: the
@@ -636,8 +647,8 @@ fn page_tabs(selected: FaultPage) -> Tabs {
             .collect(),
     )
     .with_orientation(TabsOrientation::Horizontal);
-    tabs.set_selected(selected.index());
-    tabs.set_current(Some(selected.index()));
+    tabs.adopt_selected(selected.index());
+    tabs.adopt_current(Some(selected.index()));
     tabs
 }
 
@@ -896,11 +907,11 @@ impl SectionView for RecoverySection {
     /// Move the within-stop cursor. On the page strip that *is* the page
     /// selection, so Left/Right walk the pages the way they walk any other
     /// row's actions.
-    fn set_row_action(&mut self, index: usize, _sweep: &mut FocusSweep<'_, '_>) {
+    fn set_row_action(&mut self, index: usize, sweep: &mut FocusSweep<'_, '_>) {
         self.action = index;
         if matches!(self.stop_at(self.focus), Some(Stop::Pages)) {
             if let Some(page) = FaultPage::from_index(index) {
-                self.select_page(page);
+                self.select_page(page, sweep);
             }
         }
     }
@@ -928,7 +939,7 @@ impl SectionView for RecoverySection {
                 let pages = self.pages_rect(ctx).unwrap_or(Rect::EMPTY);
                 let TabsAction::Selected { index } = self.pages.on_key(key, pages, damage)?;
                 let page = FaultPage::from_index(index)?;
-                self.select_page(page);
+                self.select_page(page, &mut FocusSweep::reporting(ctx, damage));
                 self.action = index;
                 None
             }
@@ -990,7 +1001,7 @@ impl SectionView for RecoverySection {
                 self.pages.on_pointer(event, pages, damage)
             {
                 if let Some(page) = FaultPage::from_index(index) {
-                    self.select_page(page);
+                    self.select_page(page, &mut FocusSweep::reporting(ctx, damage));
                 }
                 return None;
             }
@@ -1012,12 +1023,18 @@ impl SectionView for RecoverySection {
         for (i, card) in self.cards.iter_mut().enumerate() {
             card.set_in_focus_field(stop == Some(Stop::Card(i)));
         }
-        self.pages
-            .set_current(Some(if matches!(stop, Some(Stop::Pages)) {
-                self.action.min(FaultPage::ALL.len().saturating_sub(1))
-            } else {
-                self.page.index()
-            }));
+        let current = Some(if matches!(stop, Some(Stop::Pages)) {
+            self.action.min(FaultPage::ALL.len().saturating_sub(1))
+        } else {
+            self.page.index()
+        });
+        match sweep.ctx {
+            Some(ctx) => {
+                let pages = self.pages_rect(ctx).unwrap_or(Rect::EMPTY);
+                self.pages.set_current(current, pages, sweep.damage);
+            }
+            None => self.pages.adopt_current(current),
+        }
         let slot = match stop {
             Some(Stop::Rail(slot)) => Some(slot),
             _ => None,

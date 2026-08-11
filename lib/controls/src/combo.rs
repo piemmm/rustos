@@ -169,6 +169,10 @@ impl ComboBox {
     /// label the field shows — and so the field — changed. Re-selecting the
     /// current choice moves nothing: the menu's mirror is a function of this
     /// selection and is already in that state.
+    ///
+    /// The mirror is adopted rather than reported: every path that moves it
+    /// while the popup is on screen reports that whole popup — appearing or
+    /// vacating — and a host committing a choice has no popup laid out at all.
     fn select_internal(&mut self, index: usize) -> bool {
         if index >= self.choices.len() || self.selected == Some(index) {
             return false;
@@ -183,7 +187,7 @@ impl ComboBox {
             };
             item.set_state(s);
         }
-        self.menu.set_current(Some(index));
+        self.menu.adopt_current(Some(index));
         true
     }
 
@@ -194,7 +198,7 @@ impl ComboBox {
             return None;
         }
         damage::set(&mut self.expanded, true, popup, damage);
-        self.menu.set_current(Some(self.selected.unwrap_or(0)));
+        self.menu.adopt_current(Some(self.selected.unwrap_or(0)));
         Some(ComboAction::Opened)
     }
 

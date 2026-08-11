@@ -1326,6 +1326,18 @@ impl TasksSection {
         }
     }
 
+    /// Mark the filter strip's keyboard cursor, against the strip rectangle
+    /// the paint and the hit test share.
+    fn mark_filters(&mut self, index: Option<usize>, sweep: &mut FocusSweep<'_, '_>) {
+        match sweep.ctx {
+            Some(ctx) => {
+                let (filters, _) = Self::header_rows(&ctx.frame, ctx.scale);
+                self.filters.set_current(index, filters, sweep.damage);
+            }
+            None => self.filters.adopt_current(index),
+        }
+    }
+
     /// The grouping control's own field rectangle.
     ///
     /// A frame too narrow to seat the rail has no footer slot for it, so it
@@ -1492,13 +1504,27 @@ impl TasksSection {
         }
     }
 
-    /// Apply a sort request from the column headings and re-arrange.
+    /// Apply a sort request from the column headings and re-arrange,
+    /// reporting the headings whose caret changed.
     ///
     /// The header only *reports* the request; committing it here and
     /// re-reading it in [`Self::arrange`] keeps what is drawn and what is
     /// ordered the same one fact.
-    fn apply_sort(&mut self, column: usize, order: SortOrder) {
-        self.header.set_sort(Some((column, order)));
+    fn apply_sort(
+        &mut self,
+        column: usize,
+        order: SortOrder,
+        ctx: SectionCtx<'_>,
+        damage: &mut Region,
+    ) {
+        self.header.set_sort(
+            Some((column, order)),
+            Self::header_rect(&ctx.frame, ctx.scale, ctx.theme),
+            ctx.scale,
+            ctx.theme,
+            &COLUMN_WEIGHTS,
+            damage,
+        );
         self.arrange();
     }
 
@@ -1515,7 +1541,7 @@ impl TasksSection {
                 if let Some(TabsAction::Selected { index }) =
                     self.filters.on_key(key, filters, damage)
                 {
-                    self.filters.set_selected(index);
+                    self.filters.set_selected(index, filters, damage);
                     self.arrange();
                 }
                 None
@@ -1539,7 +1565,7 @@ impl TasksSection {
                     &COLUMN_WEIGHTS,
                     damage,
                 ) {
-                    self.apply_sort(column, order);
+                    self.apply_sort(column, order, ctx, damage);
                 }
                 None
             }
@@ -1645,7 +1671,7 @@ fn filter_tabs() -> Tabs {
             .map(|filter| Tab::new(tab_label(*filter, 0)))
             .collect(),
     );
-    tabs.set_selected(
+    tabs.adopt_selected(
         TaskFilter::ALL
             .iter()
             .position(|filter| *filter == TaskFilter::default())
@@ -1849,7 +1875,7 @@ impl SectionView for TasksSection {
         // cursor, so the shared action cursor is mirrored onto them rather
         // than kept as a second, separately-moving idea of the same thing.
         match self.focus {
-            STOP_FILTERS => self.filters.set_current(Some(index)),
+            STOP_FILTERS => self.mark_filters(Some(index), sweep),
             STOP_SORT => self.mark_header(Some(index), sweep),
             _ => {}
         }
@@ -1950,7 +1976,7 @@ impl SectionView for TasksSection {
     ) -> Option<SectionOutcome> {
         let (tabs, search) = Self::header_rows(&ctx.frame, ctx.scale);
         if let Some(TabsAction::Selected { index }) = self.filters.on_pointer(event, tabs, damage) {
-            self.filters.set_selected(index);
+            self.filters.set_selected(index, tabs, damage);
             self.arrange();
             return None;
         }
@@ -1969,7 +1995,7 @@ impl SectionView for TasksSection {
             ctx.theme,
             &COLUMN_WEIGHTS,
         ) {
-            self.apply_sort(column, order);
+            self.apply_sort(column, order, ctx, damage);
             return None;
         }
 
@@ -2041,8 +2067,7 @@ impl SectionView for TasksSection {
         let rail_focus = self.focused_rail();
         let footer_focus = self.focused_footer();
 
-        self.filters
-            .set_current((focused && stop == STOP_FILTERS).then_some(action));
+        self.mark_filters((focused && stop == STOP_FILTERS).then_some(action), sweep);
         self.search.set_focused(focused && stop == STOP_SEARCH);
         self.mark_header((focused && stop == STOP_SORT).then_some(action), sweep);
         self.grouping

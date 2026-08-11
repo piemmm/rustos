@@ -139,11 +139,17 @@ impl SystemSection {
         self.report.actions.len()
     }
 
-    /// Show `page` and recompile the body behind it.
-    fn select_page(&mut self, page: SystemPage) {
+    /// Show `page` and recompile the body behind it, reporting the sidebar
+    /// tabs whose marks moved.
+    ///
+    /// `sidebar` is where the frame seats the strip, or the empty rectangle
+    /// when a frame too narrow for it seats none: drawn nowhere reports
+    /// nothing.
+    fn select_page(&mut self, page: SystemPage, sidebar: Rect, damage: &mut Region) {
         self.page = page;
-        self.sidebar.set_selected(page.index());
-        self.sidebar.set_current(Some(page.index()));
+        self.sidebar.set_selected(page.index(), sidebar, damage);
+        self.sidebar
+            .set_current(Some(page.index()), sidebar, damage);
         self.compile();
     }
 
@@ -208,7 +214,7 @@ fn page_tabs(page: SystemPage) -> Tabs {
             .collect(),
     )
     .with_orientation(TabsOrientation::Vertical);
-    tabs.set_selected(page.index());
+    tabs.adopt_selected(page.index());
     tabs
 }
 
@@ -553,7 +559,8 @@ impl SectionView for SystemSection {
             return None;
         }
         if let Some(page) = SystemPage::from_index(self.focus) {
-            self.select_page(page);
+            let sidebar = ctx.frame.sidebar.unwrap_or(Rect::EMPTY);
+            self.select_page(page, sidebar, damage);
             return None;
         }
         let index = self.focus.checked_sub(SystemPage::ALL.len())?;
@@ -591,7 +598,7 @@ impl SectionView for SystemSection {
                 self.sidebar.on_pointer(event, sidebar, damage)
             {
                 if let Some(page) = SystemPage::from_index(index) {
-                    self.select_page(page);
+                    self.select_page(page, sidebar, damage);
                     self.focus = index;
                 }
                 return None;
@@ -609,7 +616,14 @@ impl SectionView for SystemSection {
         let page = focused
             .then_some(self.focus)
             .filter(|f| *f < SystemPage::ALL.len());
-        self.sidebar.set_current(page.or(Some(self.page.index())));
+        let current = page.or(Some(self.page.index()));
+        match sweep.ctx {
+            Some(ctx) => {
+                let sidebar = ctx.frame.sidebar.unwrap_or(Rect::EMPTY);
+                self.sidebar.set_current(current, sidebar, sweep.damage);
+            }
+            None => self.sidebar.adopt_current(current),
+        }
         let action = focused
             .then(|| self.focus.checked_sub(SystemPage::ALL.len()))
             .flatten()

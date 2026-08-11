@@ -313,14 +313,35 @@ impl Tabs {
 
     /// Mark `index` as the selected tab and clear the selection from the
     /// others; an out-of-range index selects nothing (fail closed).
-    pub fn set_selected(&mut self, index: usize) {
-        for (i, tab) in self.items.iter_mut().enumerate() {
-            tab.state.selection = if i == index {
+    ///
+    /// Every tab whose selection actually changes reports its own rectangle, so
+    /// moving the selection costs the tab it left and the tab it arrives on. The
+    /// sweep is over all of them rather than those two, because the owner sets
+    /// each tab's initial selection and nothing here may assume only one was
+    /// ever lit.
+    pub fn set_selected(&mut self, index: usize, bounds: Rect, damage: &mut Region) {
+        for i in 0..self.items.len() {
+            let rect = self.tab_area(i, bounds).unwrap_or(Rect::EMPTY);
+            let selection = if i == index {
                 SelectionState::Selected
             } else {
                 SelectionState::Unselected
             };
+            if let Some(tab) = self.items.get_mut(i) {
+                damage::set(&mut tab.state.selection, selection, rect, damage);
+            }
         }
+    }
+
+    /// Adopt `index` as the selected tab without reporting, for a caller that is
+    /// composing or rebuilding this strip and presents it whole.
+    ///
+    /// [`set_selected`](Self::set_selected) is the interactive move and reports
+    /// the tabs whose plates change. A rebuild has no layout to resolve a tab
+    /// against and nothing to report against either, so it says so here rather
+    /// than passing a rectangle it does not have.
+    pub fn adopt_selected(&mut self, index: usize) {
+        self.set_selected(index, Rect::EMPTY, &mut damage::sink());
     }
 
     /// The tab the keyboard cursor is on, if any.
@@ -333,9 +354,27 @@ impl Tabs {
     /// `None`; an out-of-range index takes it off (fail closed).
     ///
     /// Where the pointer rests is untouched, so a host may re-state its
-    /// keyboard focus as often as its model refreshes.
-    pub fn set_current(&mut self, index: Option<usize>) {
-        self.current = index.filter(|&i| i < self.items.len());
+    /// keyboard focus as often as its model refreshes; a re-state that lands the
+    /// cursor where it already was reports nothing.
+    pub fn set_current(&mut self, index: Option<usize>, bounds: Rect, damage: &mut Region) {
+        self.move_current(self.on_strip(index), bounds, damage);
+    }
+
+    /// Adopt `index` as the keyboard cursor without reporting, for a caller that
+    /// is composing or rebuilding this strip and presents it whole.
+    ///
+    /// [`set_current`](Self::set_current) is the interactive move and reports the
+    /// two tabs the cursor moves between. A rebuild has no layout to resolve a
+    /// tab against and nothing to report against either, so it says so here
+    /// rather than passing a rectangle it does not have.
+    pub fn adopt_current(&mut self, index: Option<usize>) {
+        self.current = self.on_strip(index);
+    }
+
+    /// `index` if it names a tab of this strip, else `None` — the one admission
+    /// rule every cursor entry point applies.
+    fn on_strip(&self, index: Option<usize>) -> Option<usize> {
+        index.filter(|&i| i < self.items.len())
     }
 
     /// The surface rectangle of tab `index` within `bounds`, or `None` if it
@@ -571,10 +610,10 @@ impl Tabs {
             .then_some(TabsAction::Selected { index })
     }
 
-    /// Put the keyboard cursor on `next`, reporting the tab it left and the tab
-    /// it arrives on rather than the whole strip.
-    fn move_current(&mut self, next: usize, bounds: Rect, damage: &mut Region) {
-        let next = Some(next);
+    /// Put the keyboard cursor on `next`, or take it off the strip with `None`,
+    /// reporting the tab it left and the tab it arrives on rather than the whole
+    /// strip.
+    fn move_current(&mut self, next: Option<usize>, bounds: Rect, damage: &mut Region) {
         if damage::move_mark(
             self.current,
             next,
@@ -660,7 +699,7 @@ impl Tabs {
                     Some(i) if i < last => i + 1,
                     _ => 0,
                 };
-                self.move_current(next, bounds, damage);
+                self.move_current(Some(next), bounds, damage);
                 None
             }
             Key::Named(named) if named == backward => {
@@ -668,15 +707,15 @@ impl Tabs {
                     Some(0) | None => last,
                     Some(i) => i - 1,
                 };
-                self.move_current(prev, bounds, damage);
+                self.move_current(Some(prev), bounds, damage);
                 None
             }
             Key::Named(NamedKey::Home) => {
-                self.move_current(0, bounds, damage);
+                self.move_current(Some(0), bounds, damage);
                 None
             }
             Key::Named(NamedKey::End) => {
-                self.move_current(last, bounds, damage);
+                self.move_current(Some(last), bounds, damage);
                 None
             }
             Key::Named(NamedKey::Enter) | Key::Char(' ') => self.choose(self.current?),

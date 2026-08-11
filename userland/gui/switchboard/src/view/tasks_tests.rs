@@ -229,11 +229,11 @@ fn the_selection_follows_the_task_when_a_re_sort_moves_it() {
     // Reverse the name order; the chosen task is now somewhere else.
     sb.tasks
         .header
-        .set_sort(Some((0, super::SortOrder::Ascending)));
+        .adopt_sort(Some((0, super::SortOrder::Ascending)));
     sb.tasks.arrange();
     sb.tasks
         .header
-        .set_sort(Some((0, super::SortOrder::Descending)));
+        .adopt_sort(Some((0, super::SortOrder::Descending)));
     sb.tasks.arrange();
 
     assert_eq!(

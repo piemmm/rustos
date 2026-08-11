@@ -10,8 +10,8 @@ use tairix_theme::Theme;
 
 use tairix_controls::testkit::high_contrast;
 use tairix_controls::{
-    AuthorityState, ControlDisposition, ControlRole, ControlState, EventMark, Fact, MetricLayout,
-    RecoveryState, Tab,
+    damage, AuthorityState, ControlDisposition, ControlRole, ControlState, EventMark, Fact,
+    MetricLayout, RecoveryState, Tab,
 };
 
 use super::{FaultImpact, FaultPage, RecoveryControl};
@@ -20,7 +20,7 @@ use crate::view::test_support::{
     has_ink, key, model, recovery_item,
 };
 use crate::view::{
-    resolve_section_frame, Reading, Section, SectionFrame, SectionView, Switchboard,
+    resolve_section_frame, FocusSweep, Reading, Section, SectionFrame, SectionView, Switchboard,
     SwitchboardAction, SwitchboardModel, Unmeasured, UNMEASURED_READING,
 };
 
@@ -512,7 +512,8 @@ fn every_detail_page_paints() {
         }
         let mut sb = Switchboard::new(&m);
         sb.select_section(Section::Recovery);
-        sb.recovery.select_page(page);
+        sb.recovery
+            .select_page(page, &mut FocusSweep::adopting(&mut damage::sink()));
         let b = bounds();
         let mut surface = Surface::new(b.width, b.height).expect("surface");
         sb.render(&mut surface, b, Scale::ONE, &theme, font());

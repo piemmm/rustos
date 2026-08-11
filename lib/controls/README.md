@@ -314,32 +314,48 @@ renders and presents those instead of the window. A pointer crossing a
 control-rich window costs the control left and the control entered, not the
 surface.
 
-Two guarded writes are the whole rule, so no family invents a third:
-`damage::set` writes one drawn field and reports the control's own bounds when
-the value actually changed, and `damage::move_mark` reports the two children an
-index-valued mark moves between — the menu row a highlight leaves and the one it
-arrives on, the hovered tab, the focused crumb, the focused header column —
-never the strip or popup around them. A `RenderInvariant` field reports nothing,
+Two guarded writes are the whole rule, so nothing invents a third — and they are
+public, because a host reports its own drawn changes through the same two:
+`damage::set` writes one drawn field and reports the bounds it is drawn in when
+the value actually changed, and `damage::move_mark` reports the two children a
+mark moves between — the menu row a highlight leaves and the one it arrives on,
+the hovered tab, the focused crumb, the focused header column, the sorted column,
+a host's own keyboard focus — never the strip, popup, or window around them. The
+mark is compared whole, so the same child marked differently (a sort caret
+turning over) is still a changed child. A `RenderInvariant` field reports nothing,
 exactly as it compares equal, which is why a motion sample inside one control is
 free.
 
-A control reports every drawn change it makes itself. A change a *host* makes
-through a setter is the host's to report, since the host knows where it put the
-control — except a mark a container draws on one of its own children, whose two
-rectangles only the container can name: `Breadcrumb::set_focus` and
-`TableHeader::set_focus` take the layout and report.
+A control reports every drawn change it makes itself. Two kinds of change are
+the *host's* to report, because only the host knows where it put the controls:
+
+- **A value it commits back into a control.** A control never mutates its own
+  committed value: it reports an action and the owner writes the value in
+  (`Toggle::set_on`, `Slider::set_value`, `Radio::set_selected`, …). The owner
+  holds that control's rectangle at exactly that moment, so it reports it. The
+  value is drawn inside it, so nothing narrower is available and nothing wider
+  is needed.
+- **A mark of its own that moves between two controls.** Keyboard focus is the
+  one every host has: each control's ring is a function of the host's own focus
+  field, so `damage::move_mark` over that field reports the control the ring
+  left and the control it arrives on. A focus that lands on the host's own
+  chrome maps to `None`, and the chrome reports its own pixels.
+
+The exception is a mark a *container* draws on one of its own children, whose
+two rectangles only that container can name: `Breadcrumb::set_focus`,
+`TableHeader::set_focus`, `TableHeader::set_sort`, `Tabs::set_current`,
+`Tabs::set_selected` and `Menu::set_current` therefore take the layout the host
+already renders and hit-tests with, and report.
 
 A host that is *composing or rebuilding* a control has no layout to resolve a
 child against and nothing to report against either, because it presents that
-surface whole. It says so: `Breadcrumb::adopt_focus` / `TableHeader::adopt_focus`
-adopt the mark without reporting, sharing the one admission rule with their
-reporting sibling so a rebuild cannot admit a focus the interactive path would
-refuse. Passing a fabricated rectangle, scale, or theme to the reporting form is
-the alternative, and it is forbidden — a made-up theme is one read away from
-being silently wrong. The remaining container-mark setters
-(`Tabs::set_current`/`set_selected`, `Menu::set_current`, `TableHeader::set_sort`)
-report nothing at all yet, and their hosts still present in full; closing that is
-staged in `plans/FIX-DESKTOP-SPEEDUP.md`.
+surface whole. It says so, rather than passing a rectangle it does not have:
+`adopt_focus`, `adopt_sort`, `adopt_current` and `adopt_selected` adopt the mark
+without reporting, and each shares the one admission rule with its reporting
+sibling so a rebuild cannot admit a mark the interactive path would refuse.
+Passing a fabricated rectangle, scale, or theme to the reporting form is the
+alternative, and it is forbidden — a made-up theme is one read away from being
+silently wrong.
 
 Over-covering is safe, under-covering is not: a rectangle reported that did not
 change costs one redundant repaint, while a change left unreported leaves a

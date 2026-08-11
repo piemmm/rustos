@@ -931,3 +931,66 @@ fn motion_within_one_row_reports_nothing() {
     menu.on_pointer(&inside(9), bounds, Scale::ONE, &theme, &mut damage);
     assert!(damage.is_empty(), "the same row stays the same row");
 }
+
+// --- What a host setter reports -----------------------------------------
+
+#[test]
+fn moving_the_highlight_reports_the_two_rows_it_moves_between() {
+    let theme = Theme::dark();
+    let mut menu = three_item_menu();
+    let bounds = Rect::new(0, 0, W, menu.preferred_height(Scale::ONE, &theme));
+    menu.adopt_current(Some(0));
+
+    let mut damage = sink();
+    menu.set_current(Some(2), bounds, Scale::ONE, &theme, &mut damage);
+
+    assert_eq!(menu.current(), Some(2));
+    let first = menu
+        .row_rect(0, bounds, Scale::ONE, &theme)
+        .expect("row 0 laid out");
+    let last = menu
+        .row_rect(2, bounds, Scale::ONE, &theme)
+        .expect("row 2 laid out");
+    assert!(damage.contains(Point::new(first.left(), first.top())));
+    assert!(damage.contains(Point::new(last.left(), last.top())));
+
+    let middle = menu
+        .row_rect(1, bounds, Scale::ONE, &theme)
+        .expect("row 1 laid out");
+    assert!(
+        !damage.contains(Point::new(middle.left(), middle.top())),
+        "the row the highlight passed over is not redrawn: {:?}",
+        damage.rects()
+    );
+}
+
+#[test]
+fn re_stating_the_highlight_reports_nothing() {
+    let theme = Theme::dark();
+    let mut menu = three_item_menu();
+    let bounds = Rect::new(0, 0, W, menu.preferred_height(Scale::ONE, &theme));
+    menu.adopt_current(Some(1));
+
+    let mut damage = sink();
+    menu.set_current(Some(1), bounds, Scale::ONE, &theme, &mut damage);
+    assert!(damage.is_empty());
+}
+
+#[test]
+fn adopting_a_highlight_reports_nothing_and_admits_what_setting_admits() {
+    let theme = Theme::dark();
+    let mut adopted = three_item_menu();
+    let mut reported = three_item_menu();
+    let bounds = Rect::new(0, 0, W, adopted.preferred_height(Scale::ONE, &theme));
+    let mut damage = sink();
+
+    for index in [Some(1), Some(9), None] {
+        adopted.adopt_current(index);
+        reported.set_current(index, bounds, Scale::ONE, &theme, &mut damage);
+        assert_eq!(
+            adopted.current(),
+            reported.current(),
+            "a rebuild must not admit a highlight the interactive path refuses"
+        );
+    }
+}

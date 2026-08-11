@@ -36,8 +36,8 @@ pub mod desktop;
 pub mod server;
 
 pub use client::{
-    event_endpoint_for, key_input_event, pointer_input_events, EventSource, WindowClient,
-    WindowEvents, WindowTransport, EVENT_MAILBOX_CAPACITY,
+    damage_in, event_endpoint_for, key_input_event, pointer_input_events, present_damage,
+    EventSource, Repaint, WindowClient, WindowEvents, WindowTransport, EVENT_MAILBOX_CAPACITY,
 };
 pub use desktop::Desktop;
 pub use server::{

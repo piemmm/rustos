@@ -39,12 +39,13 @@ mod program {
     use tairix_font::BitmapFont;
     use tairix_geometry::{Point, Rect, Region, Scale};
     use tairix_input::InputEvent;
+    use tairix_raster::Surface;
     use tairix_rt::io::{Stderr, Write};
     use tairix_theme::{TextRole, Theme, ThemeRegistry};
     use tairix_widgets::Gallery;
     use tairix_window::{
-        key_input_event, pointer_input_events, Desktop, EventSource, WindowClient, WindowEvents,
-        WindowTransport,
+        key_input_event, pointer_input_events, present_damage, Desktop, EventSource, Repaint,
+        WindowClient, WindowEvents, WindowTransport,
     };
 
     /// The gallery window's logical width in physical pixels.
@@ -142,52 +143,73 @@ mod program {
         }
     }
 
-    /// Render the gallery into `frame` (the shared window surface) and present
-    /// the whole window.
-    fn present_frame<T: WindowTransport>(
-        gallery: &Gallery,
-        theme: &Theme,
-        scale: Scale,
-        client: &mut WindowClient<T>,
-        window: u64,
+    /// Convert `damage`'s pixels out of `surface` into the shared `frame`.
+    ///
+    /// Only that rectangle is converted, because it is also the only one the
+    /// present declares: the session copies exactly it and leaves the rest of
+    /// the window as it already was.
+    fn convert_damage(
+        surface: &Surface,
         frame: &mut [u8],
         mode: &DisplayMode,
+        damage: DamageRect,
     ) -> Result<(), Errno> {
-        let viewport = Rect::new(0, 0, mode.width_px, mode.height_px);
-        let mut surface = tairix_raster::Surface::new(mode.width_px, mode.height_px)
-            .ok_or(Errno::LengthOutOfRange)?;
-        gallery.render(
-            &mut surface,
-            viewport,
-            scale,
-            theme,
-            BitmapFont::for_role(theme.fonts(), TextRole::Body, scale),
-        );
-        for (i, pixel) in surface.pixels().iter().enumerate() {
-            let color = pixel.unpremultiply();
-            let at = i * 4;
-            let Some(slot) = frame.get_mut(at..at + 4) else {
-                return Err(Errno::LengthOutOfRange);
+        let stride = mode.stride_bytes as usize;
+        let columns = surface.width() as usize;
+        let x = damage.x as usize;
+        let span = damage.width_px as usize;
+        let short = || Errno::LengthOutOfRange;
+        let bytes = span.checked_mul(4).ok_or_else(short)?;
+        for y in damage.y..damage.y.saturating_add(damage.height_px) {
+            let from = (y as usize)
+                .checked_mul(columns)
+                .and_then(|row| row.checked_add(x))
+                .and_then(|lo| lo.checked_add(span).map(|hi| lo..hi))
+                .ok_or_else(short)?;
+            let at = (y as usize)
+                .checked_mul(stride)
+                .and_then(|row| row.checked_add(x * 4))
+                .and_then(|lo| lo.checked_add(bytes).map(|hi| lo..hi))
+                .ok_or_else(short)?;
+            let (Some(row), Some(slot)) = (surface.pixels().get(from), frame.get_mut(at)) else {
+                return Err(short());
             };
-            slot.copy_from_slice(&[color.r, color.g, color.b, color.a]);
+            // The slot is exactly `span` whole pixels by construction, so the
+            // ragged tail this splits off is always empty.
+            let (out, _tail) = slot.as_chunks_mut::<4>();
+            for (pixel, target) in row.iter().zip(out) {
+                let color = pixel.unpremultiply();
+                *target = [color.r, color.g, color.b, color.a];
+            }
         }
-        client.present(window, 0, DamageRect::full(mode))
+        Ok(())
     }
 
     /// The live window channel this app owns: the transport to the desktop
-    /// session and its session-assigned window id. Grouped so the event
-    /// loop and the first present take one receiver instead of scattering
-    /// the same two parameters through every call.
+    /// session, its session-assigned window id, and the surface it draws into.
+    /// Grouped so the event loop and the first present take one receiver
+    /// instead of scattering the same parameters through every call.
+    ///
+    /// The surface is held rather than built per frame: a window-sized buffer
+    /// allocated and zeroed on every pointer sample is a whole-window pass of
+    /// its own, and holding it is what makes a clipped repaint sound — every
+    /// pixel outside the clip is the one already on screen.
     struct GalleryWindow {
         /// The synchronous channel to the desktop session.
         client: WindowClient<RtWindowTransport>,
         /// This app's window id, assigned by the session at create.
         window: u64,
+        /// The window-sized surface every frame is drawn into.
+        surface: Surface,
     }
 
     impl GalleryWindow {
-        /// Draw the gallery into `frames` (the shared window surface,
-        /// shaped as `mode`) and present the whole window.
+        /// Draw the gallery, convert `damage` into `frames` (the shared window
+        /// surface, shaped as `mode`) and present that rectangle.
+        ///
+        /// The draw is clipped to `damage` too: everything outside it is already
+        /// in the surface from the last frame, and neither the conversion nor
+        /// the present would carry it.
         fn present(
             &mut self,
             gallery: &Gallery,
@@ -195,32 +217,37 @@ mod program {
             scale: Scale,
             frames: &mut [u8],
             mode: &DisplayMode,
+            damage: DamageRect,
         ) -> Result<(), Errno> {
-            present_frame(
-                gallery,
-                theme,
-                scale,
-                &mut self.client,
-                self.window,
-                frames,
-                mode,
-            )
+            let viewport = Rect::new(0, 0, mode.width_px, mode.height_px);
+            let font = BitmapFont::for_role(theme.fonts(), TextRole::Body, scale);
+            self.surface.with_clip(
+                damage.x,
+                damage.y,
+                damage.width_px,
+                damage.height_px,
+                |surface| gallery.render(surface, viewport, scale, theme, font),
+            );
+            convert_damage(&self.surface, frames, mode, damage)?;
+            self.client.present(self.window, 0, damage)
         }
     }
 
     /// Apply one delivered event to the gallery, reporting whether the view
     /// changed (and must re-present) and whether the app should end.
+    ///
+    /// Every control the event reaches, and the gallery for what it changes
+    /// itself, reports its own repainted bounds into `damage` — the round's one
+    /// sink, which is what the present is then clipped to.
     fn apply_event(
         gallery: &mut Gallery,
         theme: &Theme,
         scale: Scale,
         mode: &DisplayMode,
         event: &WindowEvent,
+        damage: &mut Region,
     ) -> (bool, bool) {
         let viewport = Rect::new(0, 0, mode.width_px, mode.height_px);
-        // One sink for the whole round: every control this event reaches
-        // reports its own repainted bounds into the same region.
-        let mut damage = tairix_controls::damage::sink();
         match event {
             WindowEvent::CloseRequested { .. } => (false, true),
             WindowEvent::Key {
@@ -228,7 +255,7 @@ mod program {
                 ..
             } => match key_input_event(*pressed) {
                 InputEvent::KeyPressed { key, modifiers } => (
-                    gallery.on_key(key, modifiers, viewport, scale, theme, &mut damage),
+                    gallery.on_key(key, modifiers, viewport, scale, theme, damage),
                     false,
                 ),
                 _ => (false, false),
@@ -241,14 +268,14 @@ mod program {
                     viewport,
                     scale,
                     theme,
-                    &mut damage,
+                    damage,
                 ),
                 false,
             ),
             WindowEvent::Scrolled { dx, dy, .. } => {
                 let scroll = InputEvent::PointerScrolled { dx: *dx, dy: *dy };
                 (
-                    gallery.on_pointer(&scroll, viewport, scale, theme, &mut damage),
+                    gallery.on_pointer(&scroll, viewport, scale, theme, damage),
                     false,
                 )
             }
@@ -412,10 +439,17 @@ mod program {
         else {
             return Err(fail(EXIT_NO_WINDOW, "desktop session refused the window"));
         };
+        let Some(pixels) = Surface::new(mode.width_px, mode.height_px) else {
+            return Err(fail(EXIT_NO_WINDOW, "no memory for the window surface"));
+        };
         let gallery = Gallery::new();
-        let mut surface = GalleryWindow { client, window };
+        let mut surface = GalleryWindow {
+            client,
+            window,
+            surface: pixels,
+        };
         if surface
-            .present(&gallery, theme, scale, frames, mode)
+            .present(&gallery, theme, scale, frames, mode, DamageRect::full(mode))
             .is_err()
         {
             return Err(fail(EXIT_CHANNEL_LOST, "first present refused"));
@@ -446,7 +480,7 @@ mod program {
             // current. Only a real change costs a re-theme and a repaint; a
             // refused one states its reason and stands on the last good
             // desktop.
-            let mut redraw = match desktop.apply(&event) {
+            let redraw = match desktop.apply(&event) {
                 Ok(true) => {
                     themes.set_appearance(desktop.appearance());
                     true
@@ -458,17 +492,41 @@ mod program {
                 }
             };
 
-            let (changed, close) =
-                apply_event(gallery, themes.active(), desktop.scale(), mode, &event);
+            // One sink per round: every control the event reaches, and the
+            // gallery for what it changes itself, reports into this one.
+            let mut damage = tairix_controls::damage::sink();
+            let (changed, close) = apply_event(
+                gallery,
+                themes.active(),
+                desktop.scale(),
+                mode,
+                &event,
+                &mut damage,
+            );
             if close {
                 let _ = surface.client.close(surface.window);
                 return 0;
             }
-            redraw |= changed;
-            if redraw
-                && surface
-                    .present(gallery, themes.active(), desktop.scale(), frames, mode)
-                    .is_err()
+            // An adopted desktop change re-themes and re-densifies every pixel,
+            // so no report could describe it.
+            let repaint = match (redraw, changed) {
+                (true, _) => Repaint::Whole,
+                (false, true) => Repaint::Reported,
+                (false, false) => Repaint::Nothing,
+            };
+            let Some(damage) = present_damage(mode, repaint, &damage) else {
+                continue;
+            };
+            if surface
+                .present(
+                    gallery,
+                    themes.active(),
+                    desktop.scale(),
+                    frames,
+                    mode,
+                    damage,
+                )
+                .is_err()
             {
                 return fail(EXIT_CHANNEL_LOST, "present refused");
             }

@@ -1,11 +1,12 @@
 # FIX-DESKTOP-SPEEDUP — Software-compositor and GUI redraw performance
 
 Status: **A done, B done, C mostly done, D done** (C.0, C.1, C.2, C.4b, C.4c,
-C.5 landed — every control family now reports what it repaints, from both the
-pointer and the keyboard path; C.3 is unblocked but needs the three
-non-reporting container-mark setters closed first (see C.1 and C.3); C.4a
-withdrawn as a performance item after measurement; D.1–D.4 and D.7 landed, D.5
-is a User decision, D.6 is a follow-up the measurement exposed).
+C.5 landed — every control family reports what it repaints from both input
+paths, and a host now reports its own two kinds of change through the same two
+guarded writes; C.3 has landed for `userland/apps/widgets` with its differential
+proof and five apps remain; C.4a withdrawn as a performance item after
+measurement; D.1–D.4 and D.7 landed, D.5 is a User decision, D.6 is a follow-up
+the measurement exposed).
 E planned.
 Stages A–E need no hardware acceleration, no kernel change, and no new
 syscall; F needs a `plans/FIX-HARDWARE-FEATURES.md` correction; G is gated on
@@ -298,7 +299,7 @@ occlusion and opaque scenarios.
 
 ---
 
-## Stage C — Repaint the control that changed, not the window  **[C.0, C.2, C.4b, C.5 done; C.1 partly; C.3 blocked; C.4a remains]**
+## Stage C — Repaint the control that changed, not the window  **[C.0, C.1, C.2, C.4b, C.4c, C.5 done; C.3 landed for `widgets`, five apps remain; C.4a withdrawn]**
 
 The largest single win, and pure userland. Depends on A.
 
@@ -408,16 +409,48 @@ from every input path, so a keystroke or a value drag costs what it changed:
   for different reasons — the popup on appearing or vacating, the field only
   when the label it shows changes.
 
-**Where a report is still the host's.** A control reports every drawn change it
-makes itself; a change a *host* makes through a setter is the host's to report,
-since the host knows where it put the control. The exception is a mark a
-container draws on its own children, which only the container can name:
-`Breadcrumb::set_focus` and `TableHeader::set_focus` therefore take the layout
-and report. The remaining container-mark setters — `Tabs::set_current` /
-`set_selected`, `Menu::set_current`, `TableHeader::set_sort` — do not yet, and
-that is what C.3 must close before an app may present less than its surface: a
-host that applies a selection through one of them changes two children's plates
-with nothing reported.
+**Where a report is the host's, and how a host makes one.** A control reports
+every drawn change it makes itself; two kinds of change are the *host's*, because
+only the host knows where it put the controls. Both go through the very same two
+guarded writes, which are therefore **public**: a host guards its own field with
+`damage::set` / `damage::move_mark` rather than hand-rolling a comparison beside
+every setter (the defect the greeter had).
+
+- **A value the host commits back into a control.** The Reactive Alloy rule is
+  that a control never mutates its own committed value: it reports an action and
+  the owner writes it in (`Toggle::set_on`, `Slider::set_value`,
+  `Radio::set_selected`, …). That write is an unreported drawn change at ~40
+  sites across the tree, and it — not the three container setters — was the real
+  blocker. The owner holds that control's rectangle at exactly that moment and
+  the value is drawn inside it, so the owner reports it; nothing narrower is
+  available and nothing wider is needed. Growing `(bounds, damage)` onto every
+  value setter instead would have changed ~38 signatures and needed ~23
+  non-reporting siblings, for no more precision.
+- **A mark of the host's own that moves between two controls.** Keyboard focus is
+  the one every host has, and `set_focused` on 15 families with 63 call sites
+  reports nothing. It does not need to: each control's ring is a function of the
+  host's own focus field, so `damage::move_mark` over that field names the control
+  the ring left and the control it arrives on, and the flags are then written
+  unconditionally — if the field did not move, no ring moved either. A focus that
+  lands on the host's own chrome maps to `None` and the chrome reports itself.
+
+The container-mark setters are **closed**: `Tabs::set_current` / `set_selected`,
+`Menu::set_current` and `TableHeader::set_sort` take the layout the host already
+renders and hit-tests with, and report the children whose plates change — with
+`Tabs::adopt_current` / `adopt_selected`, `Menu::adopt_current` and
+`TableHeader::adopt_sort` for a rebuild, each sharing its sibling's admission
+rule. Two shapes fell out of doing them:
+
+- `set_selected` sweeps *every* tab and reports each whose selection actually
+  changed, rather than the two it assumes moved: the owner sets each tab's
+  initial selection, so nothing here may assume only one was ever lit.
+- `move_mark` is generic over the mark, because a sort carries its direction:
+  re-sorting the column already sorted turns its caret over, and comparing
+  column indices alone would have reported nothing.
+
+`ComboBox` adopts internally instead of reporting: every path that moves its
+menu's highlight while the popup is on screen already reports that whole popup
+appearing or vacating, and a host committing a choice has no popup laid out.
 
 The Switchboard gap is closed rather than papered over, and closing it settled a
 question the plan had left open. Its keyboard path now threads the same layout
@@ -458,31 +491,58 @@ press; over-grabbing only routes further events to a child that ignores them,
 which is what fan-to-all already did. A `#[cfg(test)] fan_pointer` oracle
 keeps the old delivery as the differential reference.
 
-### C.3 Apps present the rect they changed  **[C.1 done; three setters left to close first]**
+### C.3 Apps present the rect they changed  **[`widgets` landed; five apps remain]**
 
-**Do not land this until every model change reports damage.** These hosts
-re-render their whole surface, so a frame may legitimately change pixels no
-reported rectangle covers — a clock tick, an animation, or a selection a host
-applies through one of the three container-mark setters that still report
-nothing (`Tabs::set_current`/`set_selected`, `Menu::set_current`,
-`TableHeader::set_sort`; see C.1). Presenting only the reported rects today
-would silently stop those pixels updating: a correctness regression, not an
-optimisation. The seam is in place (each host builds one `damage::sink()` per
-input round and threads it through), and the sink's rects are deliberately not
-consumed yet.
+No ABI change is required: the window ABI already carries a per-present
+`DamageRect` (`lib/window` `WindowClient::present`). The decision an app makes
+with it is shared, not per-app — `tairix_window::present_damage` over
+`Repaint::{Nothing, Reported, Whole}`, with `damage_in` clipping a reported
+client-space rectangle onto the window (the app's own fail-closed step, since the
+session refuses one outside the surface).
 
-Close those three the way the focus marks were closed — the setter takes the
-layout and reports, with an `adopt_focus`-style non-reporting form for a host
-that is rebuilding and presents whole — and then: every app presents
-`DamageRect::full(mode)` today —
-`files`, `terminal`, `viewer`, `wallpaper`, `widgets`, `switchboard`. The
-window ABI already carries a per-present `DamageRect` (`lib/window`
-`WindowClient::present`), so **no ABI change is required**: each app unions
-its control damage and presents that rect. Where an app's frame genuinely
-changed everywhere (resize, theme change, first paint) it still presents
-full. The win is in the app and the session — the app's whole-surface
-unpremultiply-and-copy and the session's whole-surface convert-and-diff —
-not in the composite, which `convert_damage` already keeps tight.
+**`userland/apps/widgets` is done and is the recipe.** Three whole-window passes
+per pointer sample became one control-sized one:
+
+1. **Retain the surface.** `present_frame` allocated *and zeroed* a
+   window-sized `Surface` every present — a whole-window pass in its own right,
+   ~2 MB for the gallery's window — and then drew into all of it. The surface now
+   lives for the life of the window. Every app in the list below does the same
+   thing per frame and needs the same fix.
+2. **Clip the draw to the damage**, which is sound *because* the surface is
+   retained: every pixel outside the clip is the one already on screen.
+   `Surface::with_clip` confines writes centrally (every primitive reaches pixels
+   through `row_span_mut`), so no control needs changing.
+3. **Convert and present only that rectangle**, which is where the app's
+   unpremultiply-and-copy and the session's convert-and-diff both stop being
+   whole-window.
+
+A round that changed the view but reported nothing presents the **whole window**
+— not nothing. Over-covering costs pixels; under-covering leaves a stale frame,
+because the session copies only what a present declares. That is the safety net,
+and it is reachable: a focus step that finds nowhere to move reports nothing yet
+answers "changed".
+
+**The proof, and what every remaining app must land with it.** The safety net is
+not a licence to under-report, so the invariant is *tested*, not audited: a host
+test renders the app before and after every event of a scripted walk (all nine
+panels; hover, press and release on every widget; the whole focus ring actuated
+from the keyboard) and asserts every pixel that changed lies inside what that
+round reported. Two further tests hold the *tight* direction, or the whole thing
+would pass by presenting everything: a hover reports exactly the widget entered,
+a second sample inside it reports nothing, and a tab switch reports the content
+band it redraws. Fixing three real defects in the gallery was part of getting
+there — a tab switch redrew a different panel while reporting nothing, a radio
+group's cleared siblings reported nothing, and after switching tabs the focus
+marks were resolved against the *previous* panel's rectangles.
+
+Still to do, in this order per app: `viewer`, `wallpaper`, `terminal`, `files`,
+`switchboard`. Each needs its host-owned reports (a committed value, a focus mark
+— see C.1), its surface retained, and its own differential test; a model refresh
+that is not a control round (a clock tick, an animation, new service data, a
+resize) keeps presenting whole, which is correct and needs no report. The
+terminal's settings sheet is the one part already threaded (its strip reports on
+both paths); its radios, sliders and buttons still need the `move_mark` focus
+report.
 
 Receiver side is already fail-closed and needs no change: the session's
 `window_presented` refuses a `DamageRect` outside the client's surface, or a
@@ -587,8 +647,12 @@ and the pinboard backdrop menu each called `handle` per event.
   child still receives every sample; the resulting `ControlState` is
   identical to the fan-to-all behaviour (a differential test over a
   scripted pointer path).
-- App: a hover flip presents a rect of the control's size, not the
-  window's; a resize still presents full.
+- App (per app, and the gate on C.3 landing for it): the differential
+  proof — render before and after every event of a scripted walk over the
+  app's own controls, and assert every changed pixel lies inside what that
+  round reported — plus the tight direction (a hover flip presents a rect
+  of the control's size, not the window's) and a whole present for a
+  resize, a theme change, or a round that reported nothing.
 - Shell: a batch of N motion samples produces one taskbar present and one
   cursor refresh, with the same final state as N individual handles.
 - Region: disjointness, subtract/split, budget degradation, translate,

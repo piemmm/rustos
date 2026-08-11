@@ -82,7 +82,7 @@ const RELEASE: InputEvent = InputEvent::PointerReleased {
 #[test]
 fn set_selected_marks_one_tab_and_clears_the_rest() {
     let mut tabs = three_tabs();
-    tabs.set_selected(1);
+    tabs.adopt_selected(1);
     assert_eq!(tabs.selected(), Some(1));
     assert!(tabs.tabs()[1].is_selected());
     assert!(!tabs.tabs()[0].is_selected());
@@ -92,7 +92,7 @@ fn set_selected_marks_one_tab_and_clears_the_rest() {
 fn selected_tab_draws_a_strong_lower_accent_seam() {
     let theme = Theme::dark();
     let mut tabs = three_tabs();
-    tabs.set_selected(1);
+    tabs.adopt_selected(1);
     let surface = render(&tabs, &theme);
     // The seam runs along the bottom edge of tab 1 only.
     assert!(region_has(
@@ -114,7 +114,7 @@ fn selected_tab_draws_a_strong_lower_accent_seam() {
 fn selected_and_unselected_plates_differ() {
     let theme = Theme::dark();
     let mut tabs = three_tabs();
-    tabs.set_selected(1);
+    tabs.adopt_selected(1);
     let surface = render(&tabs, &theme);
     // Empty (label-free) area of each tab, mid-height.
     assert_eq!(
@@ -205,7 +205,7 @@ fn left_and_right_move_the_current_tab_and_wrap() {
 fn enter_selects_the_current_tab() {
     let mut tabs = three_tabs();
     let bounds = Rect::new(0, 0, W, H);
-    tabs.set_current(Some(2));
+    tabs.adopt_current(Some(2));
     assert_eq!(
         tabs.on_key(Key::Named(NamedKey::Enter), bounds, &mut sink()),
         Some(TabsAction::Selected { index: 2 })
@@ -220,7 +220,7 @@ fn enter_selects_the_current_tab() {
 fn home_and_end_jump_to_the_ends() {
     let mut tabs = three_tabs();
     let bounds = Rect::new(0, 0, W, H);
-    tabs.set_current(Some(1));
+    tabs.adopt_current(Some(1));
     tabs.on_key(Key::Named(NamedKey::Home), bounds, &mut sink());
     assert_eq!(tabs.current(), Some(0));
     tabs.on_key(Key::Named(NamedKey::End), bounds, &mut sink());
@@ -276,7 +276,7 @@ fn re_stating_the_keyboard_cursor_leaves_the_hover_where_it_is() {
     );
 
     // What a host does on every model refresh, however often that is.
-    tabs.set_current(None);
+    tabs.adopt_current(None);
 
     assert_eq!(
         render(&tabs, &theme).pixels(),
@@ -297,7 +297,7 @@ fn only_the_keyboard_cursor_wears_the_focus_ring() {
         "a hover lifts a tab without claiming the keyboard"
     );
 
-    tabs.set_current(Some(1));
+    tabs.adopt_current(Some(1));
 
     assert!(has_pixel(&render(&tabs, &theme), ring));
 }
@@ -307,7 +307,7 @@ fn the_pointer_and_the_keyboard_cursor_light_their_own_tabs() {
     let theme = Theme::dark();
     let mut tabs = three_tabs();
     let bounds = Rect::new(0, 0, W, H);
-    tabs.set_current(Some(0));
+    tabs.adopt_current(Some(0));
     tabs.on_pointer(&moved(xi(2 * EACH + EACH / 2), 14), bounds, &mut sink());
 
     let surface = render(&tabs, &theme);
@@ -330,7 +330,7 @@ fn the_pointer_and_the_keyboard_cursor_light_their_own_tabs() {
 fn re_labelling_keeps_the_selection_and_a_click_in_flight() {
     let mut tabs = three_tabs();
     let bounds = Rect::new(0, 0, W, H);
-    tabs.set_selected(2);
+    tabs.adopt_selected(2);
     tabs.on_pointer(&moved(xi(EACH + EACH / 2), 14), bounds, &mut sink());
     assert_eq!(tabs.on_pointer(&PRESS, bounds, &mut sink()), None);
 
@@ -353,7 +353,7 @@ fn disabled_tab_never_selects() {
         Tab::new("Ok"),
         Tab::new("No").with_state(ControlState::disabled()),
     ]);
-    tabs.set_current(Some(1));
+    tabs.adopt_current(Some(1));
     assert_eq!(
         tabs.on_key(
             Key::Named(NamedKey::Enter),
@@ -381,7 +381,7 @@ fn tab_at_maps_points_to_tabs() {
 #[test]
 fn theme_switch_changes_the_plate() {
     let mut tabs = three_tabs();
-    tabs.set_selected(0);
+    tabs.adopt_selected(0);
     let dark = render(&tabs, &Theme::dark());
     let light = render(&tabs, &Theme::light());
     assert_ne!(dark.get(5, H / 2), light.get(5, H / 2));
@@ -392,7 +392,7 @@ fn renders_at_a_larger_scale_without_panicking() {
     let theme = Theme::dark();
     let scale = Scale::from_percent(200).expect("valid scale");
     let mut tabs = three_tabs();
-    tabs.set_selected(0);
+    tabs.adopt_selected(0);
     let mut surface = Surface::new(W, H * 2).expect("surface");
     tabs.render(&mut surface, Rect::new(0, 0, W, H * 2), scale, &theme);
     assert!(has_pixel(&surface, premul(theme.palette().accent)));
@@ -529,7 +529,7 @@ fn vertical_selection_seam_runs_down_the_leading_edge() {
     let theme = Theme::dark();
     let accent = premul(theme.palette().accent);
     let mut tabs = vertical_three();
-    tabs.set_selected(1);
+    tabs.adopt_selected(1);
     let surface = render_in(&tabs, &theme, Scale::ONE, VW, VH);
     // The seam hugs the leading edge of tab 1, running along its own height.
     assert!(region_has(
@@ -627,7 +627,7 @@ fn only_the_strip_own_axis_arrows_move_the_current_tab() {
     let across = Rect::new(0, 0, W, H);
     let down = Rect::new(0, 0, VW, VH);
     let mut horizontal = three_tabs();
-    horizontal.set_current(Some(1));
+    horizontal.adopt_current(Some(1));
     assert_eq!(
         horizontal.on_key(Key::Named(NamedKey::Down), across, &mut sink()),
         None
@@ -646,7 +646,7 @@ fn only_the_strip_own_axis_arrows_move_the_current_tab() {
     assert_eq!(horizontal.current(), Some(2));
 
     let mut vertical = vertical_three();
-    vertical.set_current(Some(1));
+    vertical.adopt_current(Some(1));
     assert_eq!(
         vertical.on_key(Key::Named(NamedKey::Left), down, &mut sink()),
         None
@@ -673,7 +673,7 @@ fn only_the_strip_own_axis_arrows_move_the_current_tab() {
 fn home_and_end_jump_to_the_ends_of_a_vertical_strip_too() {
     let mut tabs = vertical_three();
     let bounds = Rect::new(0, 0, VW, VH);
-    tabs.set_current(Some(1));
+    tabs.adopt_current(Some(1));
     tabs.on_key(Key::Named(NamedKey::End), bounds, &mut sink());
     assert_eq!(tabs.current(), Some(2));
     tabs.on_key(Key::Named(NamedKey::Home), bounds, &mut sink());
@@ -703,7 +703,7 @@ fn a_vertical_press_selects_the_tab_that_was_drawn() {
     );
     // The owner commits the selection, and the band the press chose is the one
     // that draws as selected.
-    tabs.set_selected(1);
+    tabs.adopt_selected(1);
     let surface = render_in(&tabs, &theme, Scale::ONE, VW, VH);
     assert_eq!(
         surface.get(VW - 2, VEACH + 4),
@@ -810,7 +810,7 @@ fn a_vertical_strip_reads_in_both_themes_and_under_heavy_contrast() {
     let accent = premul(Theme::dark().palette().accent);
     for theme in [Theme::dark(), Theme::light(), high_contrast()] {
         let mut tabs = vertical_three();
-        tabs.set_selected(1);
+        tabs.adopt_selected(1);
         let surface = render_in(&tabs, &theme, Scale::ONE, VW, VH);
         assert!(
             region_has(
@@ -832,7 +832,7 @@ fn a_vertical_strip_reads_in_both_themes_and_under_heavy_contrast() {
     // can differ.
     let seam_run = |theme: &Theme| {
         let mut tabs = vertical_three();
-        tabs.set_selected(1);
+        tabs.adopt_selected(1);
         let surface = render_in(&tabs, theme, Scale::ONE, VW, VH);
         (0..VW)
             .take_while(|&x| surface.get(x, VEACH + 4) == Some(accent))
@@ -881,4 +881,105 @@ fn motion_within_one_tab_reports_nothing() {
     let mut damage = sink();
     tabs.on_pointer(&moved(9, 6), bounds, &mut damage);
     assert!(damage.is_empty(), "the same tab stays lifted");
+}
+
+// --- What a host setter reports -----------------------------------------
+
+#[test]
+fn moving_the_selection_reports_the_two_plates_that_change() {
+    let bounds = Rect::new(0, 0, W, H);
+    let mut tabs = three_tabs();
+    tabs.adopt_selected(0);
+
+    let mut damage = sink();
+    tabs.set_selected(1, bounds, &mut damage);
+
+    assert_eq!(tabs.selected(), Some(1));
+    // The two plates are adjacent, so the canonical region holds them as one
+    // rectangle covering exactly those two cells — never the whole strip.
+    assert_eq!(damage.rects(), &[Rect::new(0, 0, EACH * 2, H)]);
+    assert!(
+        !damage.contains(Point::new(xi(EACH * 2 + EACH / 2), xi(H / 2))),
+        "the untouched third tab is not reported"
+    );
+}
+
+#[test]
+fn re_stating_the_selection_reports_nothing() {
+    let bounds = Rect::new(0, 0, W, H);
+    let mut tabs = three_tabs();
+    tabs.adopt_selected(1);
+
+    let mut damage = sink();
+    tabs.set_selected(1, bounds, &mut damage);
+
+    assert!(
+        damage.is_empty(),
+        "a host may re-state its selection as often as its model refreshes"
+    );
+}
+
+#[test]
+fn moving_the_keyboard_cursor_reports_the_two_tabs_it_moves_between() {
+    let bounds = Rect::new(0, 0, W, H);
+    let mut tabs = three_tabs();
+    tabs.adopt_current(Some(0));
+
+    let mut damage = sink();
+    tabs.set_current(Some(2), bounds, &mut damage);
+
+    assert_eq!(tabs.current(), Some(2));
+    assert_eq!(
+        damage.rects(),
+        &[
+            Rect::new(0, 0, EACH, H),
+            Rect::new(xi(EACH * 2), 0, EACH, H)
+        ]
+    );
+
+    // Taking the cursor off the strip costs only the tab it was on.
+    let mut off = sink();
+    tabs.set_current(None, bounds, &mut off);
+    assert_eq!(tabs.current(), None);
+    assert_eq!(off.rects(), &[Rect::new(xi(EACH * 2), 0, EACH, H)]);
+}
+
+#[test]
+fn an_out_of_range_cursor_reports_only_the_tab_it_clears() {
+    let bounds = Rect::new(0, 0, W, H);
+    let mut tabs = three_tabs();
+    tabs.adopt_current(Some(1));
+
+    let mut damage = sink();
+    tabs.set_current(Some(9), bounds, &mut damage);
+
+    assert_eq!(tabs.current(), None, "an out-of-range index takes it off");
+    assert_eq!(damage.rects(), &[Rect::new(xi(EACH), 0, EACH, H)]);
+}
+
+#[test]
+fn adopting_reports_nothing_and_admits_what_setting_admits() {
+    let bounds = Rect::new(0, 0, W, H);
+    let mut adopted = three_tabs();
+    let mut reported = three_tabs();
+    let mut damage = sink();
+
+    for index in [Some(1), Some(9), None] {
+        adopted.adopt_current(index);
+        reported.set_current(index, bounds, &mut damage);
+        assert_eq!(
+            adopted.current(),
+            reported.current(),
+            "a rebuild must not admit a cursor the interactive path refuses"
+        );
+    }
+
+    let mut selection = sink();
+    adopted.adopt_selected(2);
+    assert!(selection.is_empty());
+    assert_eq!(adopted.selected(), Some(2));
+    // The reporting sibling agrees on the state, differing only in the report.
+    reported.set_selected(2, bounds, &mut selection);
+    assert_eq!(reported.selected(), Some(2));
+    assert!(!selection.is_empty());
 }

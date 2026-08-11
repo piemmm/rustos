@@ -37,6 +37,32 @@ widgets. Each control emits its typed action, which the gallery — the control'
 owner — reflects straight back into the control; nothing here performs
 privileged work.
 
+## Presenting what changed
+
+The gallery is the worked example of an app that presents the rectangle it
+repainted instead of its window. Three whole-window passes used to run on every
+pointer sample: a window-sized surface allocated and zeroed, the gallery drawn
+into all of it, and every pixel unpremultiplied into the shared frame under a
+full-window damage rectangle — after which the session diffed the whole window
+again.
+
+Now the `Run` binary holds one surface for the life of the window, and each
+round of input carries a damage region (`tairix_controls::damage::sink()`) that
+the controls and the gallery report into. `tairix_window::present_damage` turns
+that into the rectangle to present: what was reported, clipped to the window;
+the whole window for a first frame or an adopted desktop change, which re-themes
+and re-densifies every pixel; and nothing at all when nothing changed. The draw
+is clipped to that same rectangle, which is sound precisely because the surface
+is retained — every pixel outside it is the one already on screen.
+
+A round that changed the view but reported nothing presents the whole window.
+Over-covering costs pixels; under-covering would leave a stale frame, since the
+session copies only what a present declares. That safety net is not a substitute
+for reporting: a host test renders the gallery before and after every event of a
+scripted walk over all nine panels — hovering, pressing and releasing every
+widget, then actuating the whole focus ring from the keyboard — and asserts that
+every pixel which changed lies inside what that round reported.
+
 ## Structure
 
 The app is `userland/apps/widgets`. Everything with behaviour worth testing
