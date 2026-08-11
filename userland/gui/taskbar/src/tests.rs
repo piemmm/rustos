@@ -896,7 +896,7 @@ fn pin_accessors_resolve_correctly() {
 
     assert_eq!(bar.pins().len(), 1);
     assert_eq!(bar.pins().position_of_entry(&entry_id), Some(0));
-    assert!(bar.pins().view_for_window(task_id).is_some());
+    assert_eq!(bar.pins().get(0).unwrap().window(), Some(task_id));
     assert_eq!(bar.pins().get(0).unwrap().label(), "Editor");
 }
 
@@ -2844,27 +2844,77 @@ fn active_pin_shows_the_accent_seam() {
 }
 
 #[test]
-fn task_borrows_artwork_from_pin() {
+fn each_running_task_draws_its_own_application_artwork() {
     let mut bar = bottom_bar();
-    let task_id = TaskId(1);
     let magenta = Color::rgb(255, 0, 255).premultiply();
-    bar.set_pins(alloc::vec![PinView::new("App", IconKind::AppBundle)
-        .with_window(task_id)
-        .with_artwork(Surface::filled(16, 16, magenta).unwrap()),]);
-    bar.tasks_mut().add(task_id, "App");
+    let cyan = Color::rgb(0, 255, 255).premultiply();
+    // Neither window is pinned: a window wears the icon of the application
+    // that opened it, whether or not the user pinned that application.
+    bar.tasks_mut().add(TaskId(1), "Magenta");
+    bar.tasks_mut().add(TaskId(2), "Cyan");
+    assert!(bar
+        .tasks_mut()
+        .set_artwork(TaskId(1), Some(Surface::filled(16, 16, magenta).unwrap())));
+    assert!(bar
+        .tasks_mut()
+        .set_artwork(TaskId(2), Some(Surface::filled(16, 16, cyan).unwrap())));
 
     let layout = bar.layout(Scale::ONE);
     let surface = TaskbarRenderer::new(test_icon_cache())
         .render(&bar, Scale::ONE, &mut NoArtwork)
         .expect("bar renders");
 
-    // The task slot shows the borrowed magenta artwork.
-    assert!(region_has_pixel(
+    // Each slot shows its own window's picture and only its own: one
+    // application's icon on every slot would be the defect this closes.
+    for (slot, own, other) in [(0, magenta, cyan), (1, cyan, magenta)] {
+        assert!(region_has_pixel(
+            &surface,
+            layout.bar,
+            layout.tasks[slot],
+            own
+        ));
+        assert!(!region_has_pixel(
+            &surface,
+            layout.bar,
+            layout.tasks[slot],
+            other
+        ));
+    }
+}
+
+#[test]
+fn a_task_with_no_resolved_artwork_keeps_the_shared_application_glyph() {
+    let theme = Theme::dark();
+    let mut bar = bottom_bar();
+    // A window this desktop cannot attribute to a bundle: the session
+    // resolves no picture for it, and the slot must still read as an
+    // application rather than as a blank plate.
+    bar.tasks_mut().add(TaskId(1), "Unattributed");
+
+    let layout = bar.layout(Scale::ONE);
+    let surface = TaskbarRenderer::new(test_icon_cache())
+        .render(&bar, Scale::ONE, &mut NoArtwork)
+        .expect("bar renders");
+
+    assert!(region_has_role_ink(
         &surface,
         layout.bar,
         layout.tasks[0],
-        magenta
+        theme.palette().on_surface,
+        role(theme.palette().surface),
     ));
+}
+
+#[test]
+fn artwork_for_a_window_the_bar_does_not_list_changes_nothing() {
+    let mut bar = bottom_bar();
+    bar.tasks_mut().add(TaskId(1), "App");
+    let magenta = Color::rgb(255, 0, 255).premultiply();
+
+    assert!(!bar
+        .tasks_mut()
+        .set_artwork(TaskId(9), Some(Surface::filled(16, 16, magenta).unwrap())));
+    assert!(bar.tasks().entries()[0].artwork.is_none());
 }
 
 /// A stand-in for the shipped `/System/Graphics` icon set: it answers the

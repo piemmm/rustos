@@ -92,8 +92,12 @@ owns:
 - **Task list and pin strip** — `TaskList` tracks one entry per top-level
   window; `PinStrip` holds the resolved views of the user's pinned shortcuts.
   Both use the familiar click-to-activate / minimise-restore rule. Both pins
-  and tasks are rendered as `TaskbarItem` controls. `PinView` matched running
-  windows and per-application artwork are handed in by the session.
+  and tasks are rendered as `TaskbarItem` controls, and both carry
+  per-application artwork the session hands in: a pin's from the bundle it
+  points at (on its `PinView`, along with its matched running window), a
+  task's from the bundle the kernel attested opened its window
+  (`TaskList::set_artwork`), so an open window shows its own application's
+  icon whether or not that application is pinned.
   `set_focused` mirrors focus into the highlight. A slot's `TaskVisibility`
   states itself with the presence mark on its lower edge: the full-width accent
   seam for the active window, a short muted mark for one merely running, and
@@ -154,9 +158,10 @@ owns:
   bar only chooses the seating (`AGENTS.md` §2.2). Each remaining region is
   filled with its theme role, then
   the notification icons, clock, and titles are drawn on top. `pin_icon_side`
-  exposes the exact pixel geometry so owners rasterise at the drawn size. The
-  surface is rectangular — the window manager rounds it
-  — and the colour/blit algebra is reused from `lib/*` (`AGENTS.md` §2.2).
+  and `task_icon_side` expose the exact pixel geometry of each kind of slot,
+  so owners rasterise at the drawn size. The surface is rectangular — the
+  window manager rounds it — and the colour/blit algebra is reused from
+  `lib/*` (`AGENTS.md` §2.2).
   The renderer holds a `tairix-reclaim` `ReclaimCache` of the rasterised
   notification glyphs across frames, built by `icon_cache` from the shared
   desktop cache policy (`tairix_reclaim::desktop::disposable_ui_cache`,
@@ -170,10 +175,11 @@ owns:
   supplied it, else the artwork the lookup holds for the slot's `IconKind`,
   else the control's built-in vector glyph. The bar never reads or decodes a
   file; it asks the lookup the session owns, at exactly the pixel side the
-  slot will be drawn at (`pin_icon_side`, the controls' `icon_side`). A
-  lookup that answers nothing — `tairix_icon::NoArtwork`, a machine with no
-  `/System/Graphics`, a store under memory pressure — therefore renders every
-  element from glyphs rather than leaving a blank slot.
+  slot will be drawn at (`pin_icon_side`, `task_icon_side`, the controls'
+  `icon_side`). A lookup that answers nothing — `tairix_icon::NoArtwork`, a
+  machine with no `/System/Graphics`, a store under memory pressure —
+  therefore renders every element from glyphs rather than leaving a blank
+  slot.
 - **The popup's per-row artwork** — `LibraryPopup::visible_icon_requests`
   reports the rows the viewport actually shows, each with its entry id and
   pixel side, so the session decodes only icons a user can see;

@@ -220,11 +220,12 @@ colour role from the `Palette`. Its last argument is the caller's
   **minimised** one that same mark plus a recessed plate and the muted leading
   tick, and a **closed** pin (its application not running) no mark and no plate
   at all — only the icon sits on the bar — until hovered;
-- a pin's per-application **artwork** (its bundle icon, read and rasterised by
-  the session through the sandboxed icon pipeline — see
-  [the session](session.md)) is blitted through the control in place of the
-  built-in glyph, and a running task whose window matches a pin **borrows**
-  that same artwork, so one application shows one icon everywhere;
+- a pin's and a running task's per-application **artwork** (the owning
+  bundle's icon, read and rasterised by the session through the sandboxed
+  icon pipeline — see [the session](session.md)) is blitted through the
+  control in place of the built-in glyph. A task's comes from the bundle the
+  kernel attested opened its window, so an open window is recognised by its
+  own application whether or not that application is pinned;
 - each notification icon slot draws a **scalable vector glyph** (see
   *Notification icons* below), tinted in the **muted** foreground colour;
 - the **Switchboard capsule** is the shared `tairix-controls` `TraySignal`
@@ -267,15 +268,17 @@ Every application icon the bar draws resolves through **one** rule, written
 once in `render` rather than restated per slot (`AGENTS.md` §2.2):
 
 1. the artwork its owner already supplied for that specific application (a
-   `PinView`'s bundle icon, a library row's own icon), else
+   `PinView`'s bundle icon, a running task's own bundle icon, a library row's
+   own icon), else
 2. the artwork the `IconArtwork` lookup holds for the slot's `IconKind` — the
    shipped class master under `/System/Graphics/Icons`, else
 3. the control's built-in vector glyph.
 
 The bar reads no file and decodes no image: it *asks* the lookup the session
 owns, at exactly the pixel side the slot will be drawn at (`pin_icon_side`,
-and the controls' own `icon_side`), so nothing is ever rescaled at draw time.
-Because the third rung always exists, resolution is **total**: a lookup that
+`task_icon_side`, and the controls' own `icon_side`), so nothing is ever
+rescaled at draw time. Because the third rung always exists, resolution is
+**total**: a lookup that
 answers nothing — `tairix_icon::NoArtwork`, a machine with no
 `/System/Graphics`, or a cache that is giving memory back under pressure —
 still renders every element, so a headless-graphics or freshly-installed
@@ -654,8 +657,7 @@ derivation (running / active / minimised / closed / stale match), pin
 activation (launch vs the task click rule), the context menu's rows,
 modality, keyboard path, click-away, entry pin/unpin verb switch, menu
 geometry on every edge, and the rendered pin slots — artwork override,
-built-in glyph fallback, a focused pin's full-width accent seam, and a task
-borrowing its pin's artwork.
+built-in glyph fallback, and a focused pin's full-width accent seam.
 The popup model tests cover taxonomy-ordered folders with name-sorted
 entries, hidden empty folders, folder labels, the calm empty and no-match
 placeholders, the deterministic reopen state, case-insensitive filtering with
@@ -683,7 +685,10 @@ high-contrast rendering.
 The icon-artwork tests drive `render` with a recording lookup: the two
 launcher buttons ask for the `Library` and `Folder` kinds at their drawn side
 and blit what comes back, an application slot with no artwork of its own
-falls back to its kind's artwork before the glyph, the popup asks only for
+falls back to its kind's artwork before the glyph, two unpinned running tasks
+each draw their own application's picture and only their own (a task the
+session could not attribute keeping the shared glyph, and artwork offered for
+a window the bar does not list changing nothing), the popup asks only for
 the entry rows the viewport shows (and, after a scroll, only for the rows
 that just appeared), a rebuild drops stale row artwork, and a bar rendered
 through `NoArtwork` still draws every element from its built-in glyphs — the

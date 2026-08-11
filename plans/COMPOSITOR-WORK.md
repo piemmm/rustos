@@ -190,10 +190,14 @@ guarantees:
   immediately after the serve pass (the attested-caller table and the launch
   records are both borrowed while a request is served), mapping pid →
   `LaunchTable` bundle → that bundle's own `AppInfo` icon through the one
-  `ArtworkCache` a taskbar pin uses. No app-supplied string can choose it, an
+  `ArtworkCache` a taskbar pin uses. That same resolution also gives the
+  window's taskbar entry its icon (`Taskbar::task_icon_side` →
+  `TaskList::set_artwork`), from one manifest read, so the bar shows the
+  application that owns the window whether or not it is pinned and the two
+  surfaces cannot disagree. No app-supplied string can choose it, an
   unidentified caller gets no icon, an unresolvable one gets the built-in
   `IconKind::AppBundle` glyph — a window always opens — and a second window of
-  the same application is a cache hit, not a second read and decode.
+  the same application is a cache hit per slot, not a second read and decode.
 - Activation follows the focused window through
   `Compositor::set_active_frame`, which repaints the title and controls;
   attention requests are preserved rather than clobbered by a focus change.

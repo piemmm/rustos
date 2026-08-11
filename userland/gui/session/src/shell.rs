@@ -50,7 +50,7 @@ use tairix_log::Sink;
 use tairix_proglib::Catalog;
 use tairix_reclaim::PressureGauge;
 use tairix_taskbar::{
-    icon_cache, ActivateOutcome, PinView, TaskbarConfig, TaskbarRenderer, TaskbarResponse,
+    icon_cache, ActivateOutcome, PinView, TaskId, TaskbarConfig, TaskbarRenderer, TaskbarResponse,
     TransientNotification,
 };
 use tairix_wallpaper::Backdrop;
@@ -948,6 +948,32 @@ impl DesktopShell {
     pub fn set_pins(&mut self, compositor: &mut Compositor, pins: Vec<PinView>) {
         self.session.taskbar_mut().set_pins(pins);
         self.present(compositor);
+    }
+
+    /// Give the running task `task` the icon of the application that opened
+    /// its window and re-present, so the bar shows that application's own
+    /// icon rather than the shared one — the task counterpart of
+    /// [`set_pins`](Self::set_pins).
+    ///
+    /// The picture is the session's, resolved from the bundle the kernel
+    /// attested owns the window and rasterised at the bar's own slot side
+    /// ([`Taskbar::task_icon_side`](tairix_taskbar::Taskbar::task_icon_side));
+    /// `None` leaves the entry on the shared application icon. A task the bar
+    /// does not know changes nothing.
+    pub fn set_task_artwork(
+        &mut self,
+        compositor: &mut Compositor,
+        task: TaskId,
+        artwork: Option<Surface>,
+    ) {
+        if self
+            .session
+            .taskbar_mut()
+            .tasks_mut()
+            .set_artwork(task, artwork)
+        {
+            self.present(compositor);
+        }
     }
 
     /// Relay a decoded notification request from an attested `producer` to the

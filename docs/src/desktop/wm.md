@@ -708,6 +708,13 @@ no slot and its title is centred on its own.
   → the session's single `ArtworkCache` and sandboxed rasteriser). No string
   an app supplies can choose the icon, and one app's pid cannot yield another
   app's artwork.
+- **The same identity dresses both surfaces.** That one resolution gives the
+  window its title-bar icon *and* its taskbar entry its icon
+  (`TaskList::set_artwork` through `DesktopShell::set_task_artwork`), so a
+  running application is recognised on the bar by its own icon — pinned or
+  not — and the two surfaces can never name different applications. The
+  bundle's manifest is read once and rasterised per slot, because the slots
+  differ only in pixel side.
 - **Total resolution, and a window always opens.** An unidentified caller (a
   shell-spawned app, a child process) gets no icon at all rather than a
   fabricated badge. An identified bundle whose artwork is missing, refused,
@@ -718,9 +725,10 @@ no slot and its title is centred on its own.
   reports the slot side for that window's laid-out title band at the active
   scale, and `Compositor::set_window_identity` takes the identity plus the
   artwork already rasterised at it, dirtying only the title band and dropping
-  only that window's chrome-cache entry. A second window of the same
-  application costs a cache lookup: the shared `ArtworkCache` serves it
-  without re-reading or re-decoding the asset.
+  only that window's chrome-cache entry; `Taskbar::task_icon_side` reports the
+  bar's own slot side the same way. A second window of the same application
+  costs a cache lookup for each: the shared `ArtworkCache` serves both without
+  re-reading or re-decoding the asset.
 
 The title text elides with the shared `ELLIPSIS` mark rather than being cut,
 because a title may be a path. A group wider than the span stops being centred

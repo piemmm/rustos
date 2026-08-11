@@ -17,6 +17,7 @@
 //! its frame disagree.
 
 use alloc::collections::BTreeMap;
+use alloc::string::String;
 use alloc::vec::Vec;
 
 use tairix_abi::desktop::DesktopInfo;
@@ -296,7 +297,9 @@ pub fn window_control_alternate_event(
 }
 
 /// Give every window opened since the last pass the icon of the
-/// application that opened it.
+/// application that opened it — on its own title bar *and* on its taskbar
+/// entry, both from this one resolution, so the two can never show
+/// different applications.
 ///
 /// `windows` supplies each freshly opened compositor window paired with the
 /// kernel-attested process that opened it, `task_of` resolves that process
@@ -306,15 +309,18 @@ pub fn window_control_alternate_event(
 ///
 /// A window whose owner this desktop did not launch — a shell-spawned
 /// program, a child process — is left with no identity, so its title keeps
-/// the whole band rather than a badge for an application that cannot be
+/// the whole band and its taskbar entry keeps the shared application icon,
+/// rather than either wearing a badge for an application that cannot be
 /// named. An identified bundle whose declared artwork is absent, refused,
-/// or undecodable keeps the identity and loses only the picture: the title
-/// bar draws the shared application-bundle glyph. Resolution never fails a
-/// window; it is already open.
+/// or undecodable keeps the identity and loses only the picture: both
+/// surfaces fall back to the shared application-bundle artwork and then to
+/// their built-in glyph. Resolution never fails a window; it is already
+/// open.
 ///
-/// Each icon is resolved through the session's one artwork cache at the
-/// pixel side that window's own title band draws it at, so a second window
-/// of the same application costs a lookup rather than a read and a decode.
+/// Each icon is resolved through the session's one artwork cache, at the
+/// pixel side of the slot that draws it — the window's own title band, and
+/// the bar's own task slot — so a second window of the same application
+/// costs a lookup rather than a read and a decode.
 pub fn resolve_window_identities<F>(
     shell: &mut DesktopShell,
     compositor: &mut Compositor,
@@ -331,35 +337,56 @@ pub fn resolve_window_identities<F>(
         else {
             continue;
         };
-        let Some(side) = compositor.window_title_icon_side(wm) else {
-            continue;
-        };
-        let artwork = bundle_artwork(shell, bundle, side);
-        compositor.set_window_identity(wm, IconKind::AppBundle, artwork);
+        // Read the bundle's manifest once and rasterise from it per slot:
+        // the two slots differ only in pixel side, and the declared source
+        // is the same answer for both.
+        let declared = bundle_icon_asset(shell, bundle);
+        // An undecorated window draws no identity slot and reports no side;
+        // it still has a taskbar entry to identify.
+        if let Some(side) = compositor.window_title_icon_side(wm) {
+            let artwork = bundle_artwork(shell, declared.as_deref(), side);
+            compositor.set_window_identity(wm, IconKind::AppBundle, artwork);
+        }
+        if let Some(task) = shell.tasks().task_for(wm) {
+            let side = shell.session().taskbar().task_icon_side(compositor.scale());
+            let artwork = bundle_artwork(shell, declared.as_deref(), side);
+            shell.set_task_artwork(compositor, task, artwork);
+        }
     }
 }
 
-/// The picture for `bundle`'s own icon at `side` pixels, resolved through
-/// the session's one artwork cache and its sandboxed decode seam.
+/// The asset path `bundle`'s own manifest declares its icon at, if it
+/// declares one that reads and decodes.
 ///
-/// `bundle` is the bundle *directory* of the application the kernel
-/// attested owns the window, never a path an application sent; `side` is
-/// the pixel side that window's title bar draws its identity slot at, so
-/// the artwork is rasterised at exactly the size drawn. The bundle's own
-/// manifest is consulted for a declared icon and the shipped
-/// application-bundle artwork stands in when it declares none — the same
-/// order a pinned application resolves through. `None` when neither reads
-/// or decodes, leaving the title bar on its built-in glyph.
-fn bundle_artwork(shell: &mut DesktopShell, bundle: &str, side: u32) -> Option<Surface> {
+/// `bundle` is the bundle *directory* of the application the kernel attested
+/// owns the window, never a path an application sent. `None` — no manifest,
+/// a manifest that will not decode, or one declaring no icon — resolves the
+/// shipped application-bundle artwork instead, exactly as a pinned
+/// application does.
+fn bundle_icon_asset(shell: &mut DesktopShell, bundle: &str) -> Option<String> {
     let manifest_path = bundle_manifest_path(bundle);
-    let (cache, reader, rasteriser) = shell.artwork_parts();
-    let declared = reader
+    let (_, reader, _) = shell.artwork_parts();
+    reader
         .read(&manifest_path)
         .as_deref()
         .and_then(decode_bundle_manifest)
         .and_then(|header| bundle_icon_source(&header, bundle))
-        .map(|source| source.path());
-    let request = declared.as_deref().map_or_else(
+        .map(|source| source.path())
+}
+
+/// The picture at `side` pixels for an application whose manifest declares
+/// its icon at `declared`, resolved through the session's one artwork cache
+/// and its sandboxed decode seam.
+///
+/// `side` is the pixel side of the slot that draws it — the window's title
+/// band or the bar's task slot — so the artwork is rasterised at exactly the
+/// size drawn, and a slot that has already asked for that size is served
+/// from the cache. The shipped application-bundle artwork stands in for an
+/// application declaring no icon of its own; `None` when neither reads or
+/// decodes, leaving the slot on its built-in glyph.
+fn bundle_artwork(shell: &mut DesktopShell, declared: Option<&str>, side: u32) -> Option<Surface> {
+    let (cache, reader, rasteriser) = shell.artwork_parts();
+    let request = declared.map_or_else(
         || IconRequest::kind(IconKind::AppBundle),
         |path| IconRequest::asset(IconKind::AppBundle, path),
     );

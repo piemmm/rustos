@@ -8240,6 +8240,18 @@ fn launched_bundles(records: &[(u64, &str)]) -> LaunchTable {
     launched
 }
 
+/// The opaque tint and pixel side of the artwork the taskbar draws for the
+/// task presenting window `wm`. `None` when the entry keeps the shared
+/// application icon, so a test can tell "its own picture" from "the generic
+/// one".
+fn task_artwork(shell: &DesktopShell, wm: WindowId) -> Option<(u8, u32)> {
+    let task = shell.tasks().task_for(wm)?;
+    let bar = shell.session().taskbar();
+    let entry = bar.tasks().entries().iter().find(|e| e.id == task)?;
+    let artwork = entry.artwork.as_ref()?;
+    Some((artwork.pixels().first()?.r, artwork.width()))
+}
+
 /// The identity the decorated window `wm` wears, and the opaque tint of the
 /// artwork drawn in its slot when it has any.
 fn window_identity(comp: &Compositor, wm: WindowId) -> (Option<IconKind>, Option<u8>) {
@@ -8293,6 +8305,14 @@ fn a_windows_identity_comes_from_the_bundle_the_desktop_launched() {
         side,
         "rasterised at exactly the slot the title bar draws"
     );
+    assert_eq!(
+        task_artwork(&shell, wm),
+        Some((
+            EDITOR_TINT,
+            shell.session().taskbar().task_icon_side(comp.scale())
+        )),
+        "and the window's taskbar entry wears the same bundle's icon, at its own slot's size"
+    );
 }
 
 #[test]
@@ -8321,6 +8341,11 @@ fn a_window_whose_owner_the_desktop_did_not_launch_gets_no_identity() {
         window_identity(&comp, wm),
         (None, None),
         "an application that cannot be named wears no badge"
+    );
+    assert_eq!(
+        task_artwork(&shell, wm),
+        None,
+        "and its taskbar entry keeps the shared application icon"
     );
 }
 
@@ -8362,6 +8387,14 @@ fn one_owners_pid_cannot_yield_another_bundles_icon() {
         Some(CHESS_TINT),
         "each window wears the icon of the bundle its own attested owner runs"
     );
+    assert_eq!(
+        (
+            task_artwork(&shell, editor).map(|(tint, _)| tint),
+            task_artwork(&shell, chess).map(|(tint, _)| tint)
+        ),
+        (Some(EDITOR_TINT), Some(CHESS_TINT)),
+        "and so does each window's own taskbar entry: two running applications, two icons"
+    );
 }
 
 #[test]
@@ -8392,6 +8425,11 @@ fn a_window_opens_and_keeps_its_identity_when_the_icon_cannot_be_resolved() {
         (Some(IconKind::AppBundle), None),
         "a refused picture leaves the identity on its built-in glyph"
     );
+    assert_eq!(
+        task_artwork(&shell, wm),
+        None,
+        "and leaves the taskbar entry on the shared application icon"
+    );
 }
 
 #[test]
@@ -8407,7 +8445,7 @@ fn a_second_window_of_the_same_application_reuses_the_resolved_icon() {
 
     let mut costs = Vec::new();
     for window_id in 1..=2 {
-        let before = reader.borrow().reads;
+        let before = (reader.borrow().reads, rasteriser.borrow().calls);
         open_owned_window(
             &mut shell,
             &mut comp,
@@ -8418,21 +8456,27 @@ fn a_second_window_of_the_same_application_reuses_the_resolved_icon() {
         resolve_window_identities(&mut shell, &mut comp, &mut windows, &launched, |_| {
             Some(EDITOR_PID)
         });
-        costs.push(reader.borrow().reads - before);
+        costs.push((
+            reader.borrow().reads - before.0,
+            rasteriser.borrow().calls - before.1,
+        ));
     }
 
+    let second = windows.wm_id(2).expect("live");
     assert_eq!(
-        window_identity(&comp, windows.wm_id(2).expect("live")).1,
+        window_identity(&comp, second).1,
         Some(EDITOR_TINT),
         "the second window wears the same icon"
     );
     assert_eq!(
-        rasteriser.borrow().calls,
-        1,
-        "which the one shared cache served without decoding again"
+        task_artwork(&shell, second).map(|(tint, _)| tint),
+        Some(EDITOR_TINT),
+        "on its title bar and on its taskbar entry alike"
     );
     assert_eq!(
-        costs[1], 1,
-        "and cost only the bundle's own manifest read, not a second artwork fetch"
+        costs[1],
+        (1, 0),
+        "which the one shared cache served for both slots without a second \
+         artwork fetch or decode: only the bundle's own manifest is re-read"
     );
 }

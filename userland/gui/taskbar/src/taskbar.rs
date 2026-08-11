@@ -663,6 +663,17 @@ impl Taskbar {
             .icon_side(bounds, scale, &self.theme)
     }
 
+    /// The pixel side a running task's icon paints at, at the desktop
+    /// `scale` — the counterpart of [`pin_icon_side`](Self::pin_icon_side)
+    /// for the task list, and a different size because a task slot shows its
+    /// icon beside a label rather than filling the plate with it.
+    #[must_use]
+    pub fn task_icon_side(&self, scale: Scale) -> u32 {
+        let scaled = self.config.scaled(scale);
+        let bounds = Rect::new(0, 0, scaled.task_extent.max(1), scaled.thickness.max(1));
+        TaskbarItem::new("", IconKind::AppBundle).icon_side(bounds, scale, &self.theme)
+    }
+
     /// Open the context menu for the pin at `index`, anchored at its slot.
     /// The menu is its own overlay surface, so this latches only
     /// [`menu`](TaskbarRepaint::menu).

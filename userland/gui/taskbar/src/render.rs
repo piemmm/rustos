@@ -7,10 +7,11 @@
 //! their live hover/pressed state; every pinned shortcut and running task is
 //! one shared [`TaskbarItem`] — an icon-only slot for a pin, an icon+title
 //! plate for a task — so the bar's application buttons have exactly one
-//! visual recipe. A pin's per-application artwork (rasterised by the
-//! session) is blitted through the control; a running task whose window
-//! matches a pin borrows that same artwork, so one application shows one
-//! icon everywhere. The surface is the window manager's to place and round:
+//! visual recipe. Per-application artwork (rasterised by the session) is
+//! blitted through the control: a pin's from the bundle it points at, a
+//! task's from the bundle that opened its window, so a running application
+//! is recognised whether or not it is pinned.
+//! The surface is the window manager's to place and round:
 //! the taskbar paints a *rectangular* buffer and the compositor applies
 //! [`BarLayout::corner_radius`] through its single anti-aliased
 //! rounded-corner path, exactly as it rounds windows. There is no rounding —
@@ -318,17 +319,16 @@ impl TaskbarRenderer {
             } else {
                 PointerState::None
             };
-            // A running window that matches a pin borrows the pin's identity
-            // — its class glyph and per-application artwork — so one
-            // application shows one icon on the bar.
-            let pin = strip.view_for_window(entry.id);
-            let icon = pin.map_or(IconKind::AppBundle, PinView::icon);
-            let item = TaskbarItem::new(entry.title.clone(), icon)
+            // The window wears its own application's icon, resolved by the
+            // session from the bundle the kernel attested opened it, so an
+            // application is recognised on the bar whether or not it is
+            // pinned.
+            let item = TaskbarItem::new(entry.title.clone(), IconKind::AppBundle)
                 .with_visibility(visibility)
                 .with_state(ControlState::idle().with_pointer(pointer));
             let bounds = local_rect(*slot, origin);
             let side = item.icon_side(bounds, scale, theme);
-            let art = slot_artwork(pin.and_then(PinView::artwork), icon, side, artwork);
+            let art = slot_artwork(entry.artwork.as_ref(), IconKind::AppBundle, side, artwork);
             item.render(&mut surface, bounds, scale, theme, art);
         }
 

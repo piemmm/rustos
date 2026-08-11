@@ -164,13 +164,6 @@ impl PinStrip {
             .position(|pin| pin.entry.as_ref() == Some(entry))
     }
 
-    /// The pin whose matched running window is `window`, if any — how a
-    /// task button borrows its pinned application's icon identity.
-    #[must_use]
-    pub fn view_for_window(&self, window: TaskId) -> Option<&PinView> {
-        self.pins.iter().find(|pin| pin.window == Some(window))
-    }
-
     /// Track the hovered pin, reporting whether the visual state changed.
     pub(crate) fn set_hover(&mut self, hover: Option<usize>) -> bool {
         let hover = hover.filter(|&index| index < self.pins.len());

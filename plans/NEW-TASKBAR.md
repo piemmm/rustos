@@ -619,9 +619,14 @@ What now stands, and the invariants a future change must keep:
   icon-only `TaskbarPresentation` for compact slots and the
   `TaskVisibility::Closed` quiet-at-rest state, plus owner-supplied
   pre-rasterised artwork (the control never parses image bytes;
-  `TaskbarItem::icon_side` / `Taskbar::pin_icon_side` expose the exact
-  drawn geometry). A running task whose window matches a pin borrows the
-  pin's icon identity, so one application shows one icon everywhere.
+  `TaskbarItem::icon_side` / `Taskbar::pin_icon_side` /
+  `Taskbar::task_icon_side` expose the exact drawn geometry). A running
+  task carries its **own** application's icon (`TaskEntry::artwork`, set
+  through `TaskList::set_artwork`), resolved by the session from the
+  bundle the kernel attested opened the window — so an open window is
+  recognised by its application whether or not that application is
+  pinned, and no pin match can lend an identity to a window whose owner
+  is not attested.
 - **Deliberate deviation, recorded**: the staged `PinContext(index)`
   response is not how the context surface landed. The bar owns its one
   right-click menu (`BarMenu`, composed from the shared `Menu` control,
@@ -650,9 +655,10 @@ What now stands, and the invariants a future change must keep:
   `TaskList::retitle`), so the two can never name different subjects; a
   session-owned undecorated window relabels on the bar alone.
 - **Per-application icons land here too** (beyond the staged text — task
-  direction): a pin's bundle icon (the manifest's `library_icon` asset, SVG
-  or PNG) is untrusted third-party input, so the session never decodes it
-  in-process. New `lib/image` (complete fail-closed PNG decoder) +
+  direction): a bundle icon (the manifest's `library_icon` asset, SVG or
+  PNG), a pin's and a running window's alike, is untrusted third-party
+  input, so the session never decodes it in-process. New `lib/image`
+  (complete fail-closed PNG decoder) +
   `lib/compress` `inflate`/`zlib` (RFC 1951/1950 decode) + the
   `lib/sandbox` **image-rendering service** (`imagerender`: SVG via
   `lib/svg`/`lib/icon`, PNG via `lib/image` with alpha-weighted box-filter
@@ -666,7 +672,8 @@ Tested in the taskpins suite (grammar round-trip, refusal matrix with
 exact lines, operation semantics, fuzz), the taskbar suite (strip layout/
 reflow/clipping on all four edges, drop-index mapping, visibility
 derivation, pin activation split, menu rows/modality/keyboard/click-away,
-artwork and glyph pixel probes, borrowed task artwork), the controls suite
+artwork and glyph pixel probes, each running task drawing its own
+application's artwork and only its own), the controls suite
 (presentations, Closed state, artwork, icon-side probe), the session suite
 (store load matrix, edit persistence + refusing writer, resolution matrix,
 service decisions, drag/drop policy, secondary-press menu routing), and

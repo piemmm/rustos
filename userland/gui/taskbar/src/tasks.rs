@@ -13,12 +13,15 @@
 use alloc::string::String;
 use alloc::vec::Vec;
 
+use tairix_raster::Surface;
+
 /// A stable identifier for a task, matching the window manager's top-level
 /// window id.
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Hash, Ord, PartialOrd)]
 pub struct TaskId(pub u64);
 
-/// One running task: the window id, its title, and whether it is minimised.
+/// One running task: the window id, its title, the owning application's own
+/// icon, and whether it is minimised.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TaskEntry {
     /// The task's window id.
@@ -27,6 +30,14 @@ pub struct TaskEntry {
     pub title: String,
     /// `true` when the window is minimised (hidden but still running).
     pub minimised: bool,
+    /// The owning application's own rasterised icon, as the session resolved
+    /// it from the bundle the kernel attested opened the window
+    /// ([`set_artwork`](TaskList::set_artwork)).
+    ///
+    /// `None` — no attested bundle, or a bundle whose artwork would not read
+    /// or decode — leaves the entry on the shared application-bundle icon, so
+    /// a slot is never blank.
+    pub artwork: Option<Surface>,
 }
 
 /// What [`TaskList::activate`] did, so the caller can drive the window
@@ -141,7 +152,25 @@ impl TaskList {
             id,
             title: title.into(),
             minimised: false,
+            artwork: None,
         });
+        true
+    }
+
+    /// Give the task with `id` the icon of the application that opened its
+    /// window, so a running window is recognised by its own application
+    /// rather than by the shared application-bundle icon.
+    ///
+    /// The session resolves the picture from the bundle the kernel attested
+    /// owns the window — never anything the application sent — and rasterises
+    /// it at the slot's own pixel side; `None` clears it back to the shared
+    /// icon. Returns `false`, changing nothing, for an unknown id (fail
+    /// closed).
+    pub fn set_artwork(&mut self, id: TaskId, artwork: Option<Surface>) -> bool {
+        let Some(index) = self.position(id) else {
+            return false;
+        };
+        self.entries[index].artwork = artwork;
         true
     }
 
