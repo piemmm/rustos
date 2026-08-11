@@ -3819,16 +3819,29 @@ fn a_pointer_sample_crossing_the_drag_region_repaints_nothing() {
     // cost the window its rendered furniture — the alternative is a full chrome
     // re-render and a four-band recomposite per input sample.
     let mut c = new_compositor(mode(320, 240), BLUE).expect("compositor");
-    let id = titled_window(&mut c, 10, 10, 120, "Documents");
+    // Wide enough to leave a real drag span between the two command clusters.
+    let id = titled_window(&mut c, 10, 10, 180, "Documents");
     composite_checked(&mut c);
     assert!(c.chrome_resident(id));
 
-    let band = c
-        .window_frame(id)
-        .expect("decorated")
+    // Just past the leading cluster, at mid-height: the band's corners are
+    // commands, and a sample on one of those is a hover, not idle motion.
+    let frame = c.window_frame(id).expect("decorated");
+    let band = frame
         .layout(c.window(id).expect("window").bounds(), c.scale(), c.theme())
         .title_bar;
-    let origin = inside(band);
+    let controls = frame
+        .title_bar()
+        .layout(band, c.scale(), c.theme())
+        .controls;
+    let origin = Point::new(
+        controls[1].1.right() + 1,
+        i32::midpoint(band.top(), band.bottom()),
+    );
+    assert!(
+        origin.x + 8 < controls[2].1.left(),
+        "the samples must stay inside the drag span"
+    );
     for step in 0..8 {
         assert_eq!(
             c.frame_pointer(id, &moved(origin.x + step, origin.y)),

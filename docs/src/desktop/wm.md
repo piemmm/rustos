@@ -479,10 +479,11 @@ than a row of zeros pretending to be a frame.
 
 ## Server-side window decorations
 
-Window decorations — a title bar with the four command controls (close,
-minimize, put-to-back, size-toggle) and the frame rim — are drawn by the
-**window manager**, never by an app (`AGENTS.md` §10,
-`plans/GUI-CONTROLS-DESIGN.md` §1, §11.17–§11.23;
+Window decorations — a title bar carrying the four command controls in two
+corner clusters (put-to-back and close at the leading edge, minimize and
+size-toggle at the trailing one) with the identity and title centred between
+them, and the frame rim — are drawn by the **window manager**, never by an app
+(`AGENTS.md` §10, `plans/GUI-CONTROLS-DESIGN.md` §1, §11.17–§11.23;
 `plans/COMPOSITOR-WORK.md`). An app supplies only its content surface and
 typed window metadata; it can neither paint over nor receive input from
 the chrome. The furniture family itself lives once in
@@ -689,11 +690,11 @@ then calls `DesktopShell::decorate_window`, which attaches a `WindowFrame`
 (always movable by its title bar) and labels its title bar with the channel's
 `WindowTitle`.
 
-The title bar also carries the **owning application's identity icon**, drawn
-in a square slot at the leading edge of the drag region with the title text
-starting after it. The icon is inert: it drags the window like the rest of
-the region and is never a control. A window with no identity reserves no slot
-and its title takes the whole band.
+The title bar also carries the **owning application's identity icon**, leading
+the group that is centred in the span the two command clusters leave between
+them, with the title text after it. The icon is inert: it drags the window like
+the rest of the band and is never a control. A window with no identity reserves
+no slot and its title is centred on its own.
 
 - **Attested, never claimed.** `WindowServer` hands
   `WindowHost::window_opened` the caller's kernel-attested `ProcId`, which
@@ -722,7 +723,9 @@ and its title takes the whole band.
   without re-reading or re-decoding the asset.
 
 The title text elides with the shared `ELLIPSIS` mark rather than being cut,
-because a title may be a path.
+because a title may be a path. A group wider than the span stops being centred
+and pins to the span's leading edge, so the icon and the start of the title
+stay put as the window narrows and only the tail is marked.
 
 An app retitles its own window over the channel with
 `WindowRequest::SetTitle`, which the server admits only from the window's

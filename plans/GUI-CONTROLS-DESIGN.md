@@ -356,11 +356,11 @@ pub struct Theme {
 | Metrics | Control height, inset, gap, corner radius, border width, seam thickness, rail thickness, bead size, title-bar height, frame inset, window-control extent, resize-grabber extent, scrollbar breadth, minimum thumb length, and invisible hit slop. |
 | Typography | Font family token, label size, caption size, numeric size, weight roles, active title weight, and inactive title weight. |
 | Motion | Open duration, hover duration, press duration, progress tick cadence, window activation, minimize and size-toggle transitions, scrollbar wake timing, and reduced-motion policy. |
-| Window furniture | Leading or trailing control placement, control order, title alignment, active/inactive treatment, frame profile, scrollbar placement, and grip geometry. |
+| Window furniture | Active/inactive treatment, frame profile, scrollbar placement, and grip geometry. |
 | Density | Compact, normal, comfortable. |
 | Contrast | Normal, high contrast, monochrome-safe signal shape fallback. |
 
-A theme may place the window-control group on the leading or trailing side and may change its visual order, but it cannot change command meaning. The visible glyph, tooltip, accessibility name, and keyboard command for each control must continue to identify `Close`, `Minimize`, `PutToBack`, or the next `SizeToggle` action unambiguously.
+Window-command placement and order are **not** themeable: the two corner clusters and the centred identity group of §11.18 are the one arrangement, so a window read on one machine is read the same way on the next. The visible glyph, tooltip, accessibility name, and keyboard command for each control identify `Close`, `Minimize`, `PutToBack`, or the next `SizeToggle` action unambiguously.
 
 ### Theme variants
 
@@ -436,8 +436,8 @@ A top-level window uses a second fixed composition order owned by `userland/gui/
 1. Paint the window shadow or occlusion region.
 2. Paint the frame plate and Frame Rim.
 3. Blit the application surface into the client clip only.
-4. Paint the title bar, title text, and application identity glyph.
-5. Paint window-control buttons and their independent hover, press, focus, and disabled states.
+4. Paint the title bar, and the centred application identity glyph and title text.
+5. Paint the two corner clusters of window-control buttons and their independent hover, press, focus, and disabled states.
 6. Paint vertical and horizontal scrollbars when the root viewport exposes them.
 7. Paint the scroll corner or ResizeGrabber above the scrollbar junction.
 8. Paint the active-window focus treatment and transient attention signals.
@@ -570,20 +570,21 @@ panel and keeps its plates.
 
 ### Window furniture anatomy
 
-The order below is illustrative. A theme may place or reorder the command group while preserving command identity.
+The title bar's arrangement is fixed, not a theme value (§6, §11.18): a command cluster in each corner, the identity group centred between them.
 
 ```text
 WindowFrame
   FrameRim
   TitleBar
-    ApplicationGlyph (optional)
-    TitleText
-    DragRegion
-    WindowControls
+    LeadingCluster
       PutToBack
+      Close
+    IdentityGroup (centred; the band drags from it like any non-control pixel)
+      ApplicationGlyph (optional)
+      TitleText
+    TrailingCluster
       Minimize
       SizeToggle
-      Close
   ClientViewport
     ClientSurface
     VerticalScrollBar
@@ -593,7 +594,7 @@ WindowFrame
 
 ### Required window-anatomy rules
 
-- The title text truncates before it displaces a window control or removes the minimum drag region.
+- The title text truncates before it would reach a window control.
 - Visible glyph size and pointer hit-target size are separate theme metrics; compact glyphs still receive a usable target.
 - Hover, active, inactive, maximized, and attention states do not change the client origin or measured frame extents.
 - A drawn ResizeGrabber's affordance never overlaps a scrollbar thumb. At a two-scrollbar junction, the corner cell belongs to the grabber or a neutral ScrollCorner. The window frame's resize *hit* zone is a separate thing and deliberately overlaps the client's outermost pixels (§11.17).
@@ -835,9 +836,12 @@ A `WindowFrame` is the window-manager-owned boundary around one client viewport.
 
 ### 11.18 TitleBar
 
-The title bar combines application identity, title text, a stable drag region, and the window-control group.
+The title bar combines application identity, title text, a stable drag region, and the window commands.
 
-- The title text uses a single line and truncates with an ellipsis before it overlaps controls or removes the minimum drag region.
+- The four commands sit in **two corner clusters**, not one group: `PutToBack` then `Close` inset into the leading corner, `Minimize` then `SizeToggle` inset into the trailing one. That left-to-right order is also the keyboard traversal order, so an arrow key moves the focus ring the way the eye reads. Placement and order are fixed, never a theme value (§6).
+- The identity icon and title text are one group, **centred in the span the clusters leave between them**. Both clusters seat the same number of equally sized controls, so that span is itself centred in the band and the group reads centred in the window.
+- The title text uses a single line. A group too wide for the span stops being centred and pins to the span's leading edge, keeping the icon and the start of the title in place while the tail truncates with an ellipsis on the right; it never overlaps a control.
+- Everything in the band that is not a control drags the window — the identity slot and the title text included — so the drag region does not have to be reserved against the text.
 - Pressing an inactive title bar activates the window. Movement beyond the theme drag threshold begins a move and captures the pointer until release or cancel.
 - A title-bar drag follows the pointer without easing. Snap previews may appear as container-owned overlays without moving the pointer target.
 - A double-click or equivalent gesture may invoke `SizeToggle` only when session policy enables it. The explicit size-toggle button remains required.
@@ -1388,7 +1392,7 @@ Labels, shortcuts, values, and icons keep their position while rims, rails, bead
 - Title-bar height, frame inset, control extent, scrollbar breadth, corner cell, and resize hit slop are logical theme metrics.
 - Active, inactive, hover, attention, and maximized states do not change the client origin or frame extents.
 - The work-area clamp always leaves a usable title-bar region reachable after display, scale, or taskbar changes.
-- When space is constrained, title text truncates first. Window-command hit targets and the minimum drag region remain usable.
+- When space is constrained, title text truncates first; every window-command hit target stays usable, and the band still drags wherever it is not a control.
 - Overlay scrollbar hit regions must not cover title-bar controls, the resize grabber, or unrelated client actions. Reserved-gutter scrollbars must not resize the client in response to hover alone.
 
 ---
@@ -1517,15 +1521,13 @@ lower heat seam + recovery bead
 
 ### Active window furniture
 
-The order is illustrative; theme data may place the command group elsewhere.
-
 ```text
-+--[back]--[min]-- Switchboard --[restore]--[close]--+
++--[back][close]---- Switchboard ----[min][restore]--+
 | client viewport                                  |^|
 |                                                  |#|
 |<----------- horizontal thumb ----------->| grip |v|
 +---------------------------------------------------+
-active Frame Rim + stable title + separate hit targets
+active Frame Rim + centred title + separate hit targets
 ```
 
 ### Inactive window furniture

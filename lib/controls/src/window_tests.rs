@@ -3,14 +3,16 @@
 //!
 //! These cover the command glyphs (distinct per command, and the size toggle
 //! reflecting its *next* action), the shared window-control state model
-//! (pointer/keyboard activation, disabled/denied), the title bar (control
-//! layout on either edge, title sanitisation, activate/drag/control routing,
+//! (pointer/keyboard activation, disabled/denied), the title bar (the two
+//! corner command clusters and the identity group centred between them, title
+//! sanitisation, activate/drag/control routing,
 //! keyboard focus), the window frame's furniture hit map (the client interior
 //! against furniture, the resize edges that overlap the client's outermost
 //! pixels, activation not changing geometry), the resize grabber (drag capture
 //! and Escape-cancel, non-overlap with scrollbars), and the neutral scroll
 //! corner, across dark/light/high-contrast and scale.
 
+use tairix_font::BitmapFont;
 use tairix_geometry::{Point, Rect, Region, Scale};
 use tairix_icon::IconKind;
 use tairix_input::{InputEvent, Key, NamedKey, PointerButton};
@@ -24,9 +26,8 @@ use crate::state::{
 };
 use crate::testkit::high_contrast;
 use crate::window::{
-    ControlPlacement, FrameInsets, FurniturePart, ResizeEdge, ResizeEvent, ResizeGrabber,
-    ScrollCorner, TitleBar, TitleBarEvent, TitleHit, WindowControl, WindowControlAction,
-    WindowFrame,
+    FrameInsets, FurniturePart, ResizeEdge, ResizeEvent, ResizeGrabber, ScrollCorner, TitleBar,
+    TitleBarEvent, TitleHit, WindowControl, WindowControlAction, WindowFrame,
 };
 
 fn premul(rgba: Rgba) -> Pixel {
@@ -427,38 +428,186 @@ fn title_bounds() -> Rect {
     Rect::new(0, 0, 300, 28)
 }
 
+/// A scaled theme metric as an `i32`, for comparing against laid-out edges.
+fn metric(value: u32) -> i32 {
+    i32::try_from(Scale::ONE.scale_length(value)).expect("a small metric")
+}
+
+fn title_font(theme: &Theme) -> BitmapFont {
+    BitmapFont::for_role(theme.fonts(), TextRole::WindowTitle, Scale::ONE)
+}
+
+/// A point on `bar`'s drag region within [`title_bounds`]: the middle of the
+/// span the two command clusters leave between them.
+fn drag_point(bar: &TitleBar, theme: &Theme) -> Point {
+    let bounds = title_bounds();
+    let layout = bar.layout(bounds, Scale::ONE, theme);
+    Point::new(
+        i32::midpoint(layout.controls[1].1.right(), layout.controls[2].1.left()),
+        i32::midpoint(bounds.top(), bounds.bottom()),
+    )
+}
+
 #[test]
-fn trailing_layout_places_close_outermost() {
+fn the_commands_seat_two_in_each_corner_in_reading_order() {
     let theme = Theme::dark();
+    let bounds = title_bounds();
     let bar = TitleBar::new(furniture());
-    let layout = bar.layout(title_bounds(), Scale::ONE, &theme);
-    assert_eq!(layout.controls[3].0, WindowControlKind::Close);
-    let close_x = layout.controls[3].1.left();
+    let layout = bar.layout(bounds, Scale::ONE, &theme);
+    let ins = metric(theme.metrics().control_inset);
+    let gap = metric(theme.metrics().control_gap);
+
+    assert_eq!(
+        layout.controls.map(|(kind, _)| kind),
+        [
+            WindowControlKind::PutToBack,
+            WindowControlKind::Close,
+            WindowControlKind::Minimize,
+            WindowControlKind::SizeToggle,
+        ],
+        "put-to-back and close lead, minimize and size-toggle trail"
+    );
+    for pair in layout.controls.windows(2) {
+        assert!(
+            pair[0].1.right() <= pair[1].1.left(),
+            "the commands are laid out in that same reading order"
+        );
+    }
+    assert_eq!(
+        layout.controls[0].1.left(),
+        bounds.left() + ins,
+        "the leading cluster is inset into the left corner"
+    );
+    assert_eq!(
+        layout.controls[3].1.right(),
+        bounds.right() - ins,
+        "and the trailing cluster into the right"
+    );
+    assert_eq!(
+        layout.controls[1].1.left(),
+        layout.controls[0].1.right() + gap
+    );
+    assert_eq!(
+        layout.controls[3].1.left(),
+        layout.controls[2].1.right() + gap
+    );
     assert!(
-        layout.controls.iter().all(|(_, r)| r.left() <= close_x),
-        "close should be the rightmost (outermost trailing) control"
+        layout.controls[2].1.left() > layout.controls[1].1.right() + gap,
+        "the identity span lies between the two clusters"
     );
 }
 
 #[test]
-fn leading_layout_mirrors_close_outermost() {
+fn the_identity_group_is_centred_between_the_clusters() {
+    let theme = Theme::dark();
+    let bounds = title_bounds();
+    let mut bar = TitleBar::new(furniture());
+    bar.set_identity(Some(IconKind::AppBundle));
+    bar.set_title("Report");
+    let layout = bar.layout(bounds, Scale::ONE, &theme);
+
+    // Both clusters are the same width, so the span between them is centred
+    // in the band and a group centred in the span is centred in the window.
+    // Integer halving can leave the odd pixel on the trailing side.
+    let before = layout.icon.left() - bounds.left();
+    let after = bounds.right() - layout.title.right();
+    assert!(
+        (before - after).abs() <= 1,
+        "icon+title should sit centred, not {before} in and {after} out"
+    );
+}
+
+#[test]
+fn the_title_box_is_exactly_as_wide_as_the_text_it_draws() {
     let theme = Theme::dark();
     let mut bar = TitleBar::new(furniture());
-    bar.set_placement(ControlPlacement::Leading);
+    bar.set_app_name("Files");
+    bar.set_title("Documents");
     let layout = bar.layout(title_bounds(), Scale::ONE, &theme);
-    let close_rect = layout
-        .controls
-        .iter()
-        .find(|(k, _)| *k == WindowControlKind::Close)
-        .expect("close")
-        .1;
-    assert!(
-        layout
-            .controls
-            .iter()
-            .all(|(_, r)| r.left() >= close_rect.left()),
-        "close should be the leftmost (outermost leading) control"
+    // The box bounds the drawn line, not the room left over: a caller can take
+    // it as where the title is, and the render path elides into exactly it.
+    assert_eq!(
+        layout.title.width,
+        title_font(&theme).text_width("Files \u{2014} Documents")
     );
+}
+
+#[test]
+fn a_title_wider_than_the_span_fills_it_and_elides_on_the_right() {
+    let theme = Theme::dark();
+    let bounds = title_bounds();
+    let mut bar = TitleBar::new(furniture());
+    bar.set_identity(Some(IconKind::AppBundle));
+    let long = "a window title far too long for this band";
+    bar.set_title(long);
+    let layout = bar.layout(bounds, Scale::ONE, &theme);
+    let gap = metric(theme.metrics().control_gap);
+
+    assert_eq!(
+        layout.icon.left(),
+        layout.controls[1].1.right() + gap,
+        "a squeezed group pins to the span's leading edge"
+    );
+    assert_eq!(
+        layout.title.right(),
+        layout.controls[2].1.left() - gap,
+        "and runs to its trailing one"
+    );
+    assert!(
+        title_font(&theme)
+            .elide_to_width(long, layout.title.width)
+            .1,
+        "the hidden tail is marked, not silently cut"
+    );
+}
+
+#[test]
+fn the_identity_group_never_reaches_a_command() {
+    let theme = Theme::dark();
+    let mut bar = TitleBar::new(furniture());
+    bar.set_identity(Some(IconKind::AppBundle));
+    bar.set_app_name("Files");
+    bar.set_title("a window title far too long for a narrow band");
+    for width in [40, 80, 120, 200, 300, 640, 1920] {
+        let bounds = Rect::new(0, 0, width, 28);
+        let layout = bar.layout(bounds, Scale::ONE, &theme);
+        for (kind, rect) in layout.controls {
+            assert!(
+                layout.icon.intersection(&rect).is_empty(),
+                "the icon reaches {kind:?} at {width}px"
+            );
+            assert!(
+                layout.title.intersection(&rect).is_empty(),
+                "the title reaches {kind:?} at {width}px"
+            );
+        }
+    }
+}
+
+#[test]
+fn a_band_too_narrow_for_both_clusters_abuts_them_rather_than_stacking_them() {
+    // A control drawn under another cannot be hit where it is seen, so the
+    // clusters meet instead of overlapping and the leading pair — which
+    // carries close — keeps its place.
+    let theme = Theme::dark();
+    let bar = TitleBar::new(furniture());
+    let bounds = Rect::new(0, 0, 60, 28);
+    let layout = bar.layout(bounds, Scale::ONE, &theme);
+
+    assert_eq!(
+        layout.controls[0].1.left(),
+        bounds.left() + metric(theme.metrics().control_inset)
+    );
+    for (i, (kind, rect)) in layout.controls.iter().enumerate() {
+        for (other_kind, other) in &layout.controls[i + 1..] {
+            assert!(
+                rect.intersection(other).is_empty(),
+                "{kind:?} is drawn over {other_kind:?}"
+            );
+        }
+    }
+    assert_eq!(layout.icon, Rect::EMPTY, "no span is left for an identity");
+    assert_eq!(layout.title.width, 0, "nor for a title");
 }
 
 #[test]
@@ -473,8 +622,15 @@ fn press_on_drag_region_activates() {
     let theme = Theme::dark();
     let mut bar = TitleBar::new(furniture());
     let bounds = title_bounds();
+    let drag = drag_point(&bar, &theme);
     assert_eq!(
-        bar.on_pointer(&moved(50, 10), bounds, Scale::ONE, &theme, &mut sink()),
+        bar.on_pointer(
+            &moved(drag.x, drag.y),
+            bounds,
+            Scale::ONE,
+            &theme,
+            &mut sink()
+        ),
         None
     );
     assert_eq!(
@@ -512,7 +668,14 @@ fn a_secondary_press_over_a_control_reports_the_alternate_and_leaves_the_bar_alo
         None
     );
     // Over the drag region a secondary press is unchanged: nothing at all.
-    let _ = bar.on_pointer(&moved(50, 10), bounds, Scale::ONE, &theme, &mut sink());
+    let drag = drag_point(&bar, &theme);
+    let _ = bar.on_pointer(
+        &moved(drag.x, drag.y),
+        bounds,
+        Scale::ONE,
+        &theme,
+        &mut sink(),
+    );
     assert_eq!(
         bar.on_pointer(&SECONDARY_PRESS, bounds, Scale::ONE, &theme, &mut sink()),
         None
@@ -531,16 +694,35 @@ fn drag_begins_moves_and_ends() {
     let theme = Theme::dark();
     let mut bar = TitleBar::new(furniture());
     let bounds = title_bounds();
-    let _ = bar.on_pointer(&moved(50, 10), bounds, Scale::ONE, &theme, &mut sink());
+    let drag = drag_point(&bar, &theme);
+    let _ = bar.on_pointer(
+        &moved(drag.x, drag.y),
+        bounds,
+        Scale::ONE,
+        &theme,
+        &mut sink(),
+    );
     let _ = bar.on_pointer(&PRESS, bounds, Scale::ONE, &theme, &mut sink());
     assert_eq!(
-        bar.on_pointer(&moved(70, 10), bounds, Scale::ONE, &theme, &mut sink()),
+        bar.on_pointer(
+            &moved(drag.x + 20, drag.y),
+            bounds,
+            Scale::ONE,
+            &theme,
+            &mut sink()
+        ),
         Some(TitleBarEvent::DragBegin)
     );
     assert_eq!(
-        bar.on_pointer(&moved(90, 10), bounds, Scale::ONE, &theme, &mut sink()),
+        bar.on_pointer(
+            &moved(drag.x + 40, drag.y),
+            bounds,
+            Scale::ONE,
+            &theme,
+            &mut sink()
+        ),
         Some(TitleBarEvent::DragMoved {
-            to: Point::new(90, 10)
+            to: Point::new(drag.x + 40, drag.y)
         })
     );
     assert_eq!(
@@ -597,7 +779,7 @@ fn hit_distinguishes_control_from_drag() {
         TitleHit::Control(WindowControlKind::Close)
     );
     assert_eq!(
-        bar.hit(bounds, Scale::ONE, &theme, Point::new(50, 10)),
+        bar.hit(bounds, Scale::ONE, &theme, drag_point(&bar, &theme)),
         TitleHit::Drag
     );
 }
@@ -733,7 +915,7 @@ fn a_focus_move_reports_the_two_controls_it_touches() {
     assert_eq!(arrive(&mut bar, &mut damage), None);
     for rect in [
         rect_of(WindowControlKind::PutToBack),
-        rect_of(WindowControlKind::Minimize),
+        rect_of(WindowControlKind::Close),
     ] {
         assert!(
             damage
@@ -756,7 +938,7 @@ fn a_focus_move_reports_every_ring_it_clears() {
     // the two the invariant predicts.
     let theme = Theme::dark();
     let mut bar = TitleBar::new(furniture());
-    for kind in [WindowControlKind::Minimize, WindowControlKind::Close] {
+    for kind in [WindowControlKind::Close, WindowControlKind::SizeToggle] {
         bar.control_mut(kind).set_focused(true);
     }
     let layout = bar.layout(TITLE_BOUNDS, Scale::ONE, &theme);
@@ -788,9 +970,9 @@ fn a_focus_move_reports_every_ring_it_clears() {
     };
     // The ring left both lit controls and arrived at the one past the first.
     for kind in [
-        WindowControlKind::Minimize,
-        WindowControlKind::SizeToggle,
         WindowControlKind::Close,
+        WindowControlKind::SizeToggle,
+        WindowControlKind::Minimize,
     ] {
         assert!(covers(kind), "the ring changed on {kind:?} and must report");
     }
@@ -834,47 +1016,57 @@ fn inactive_title_bar_reads_quieter() {
     assert_ne!(a.pixels(), b.pixels());
 }
 
-/// A bar with no identity reserves nothing: its text region is the whole
-/// draggable region, and it draws exactly what it drew before identities
-/// existed.
+/// A bar with no identity reserves nothing: its title is the whole centred
+/// group, and it draws exactly what it drew before identities existed.
 #[test]
-fn a_bar_without_an_identity_gives_the_whole_band_to_its_title() {
-    let theme = Theme::dark();
-    let bar = TitleBar::new(furniture());
-    let layout = bar.layout(title_bounds(), Scale::ONE, &theme);
-    assert_eq!(bar.identity(), None);
-    assert_eq!(layout.icon, Rect::EMPTY);
-    // The text starts at the band's inset, exactly where the drag region does.
-    let inset = i32::try_from(Scale::ONE.scale_length(theme.metrics().control_inset))
-        .expect("a small inset");
-    assert_eq!(layout.title.left(), title_bounds().left() + inset);
-    assert_eq!(layout.title.height, title_bounds().height);
-}
-
-/// An identity reserves a square slot at the leading edge of the drag region
-/// and the title text starts after it; the slot is the side the owner is told
-/// to rasterise at.
-#[test]
-fn an_identity_reserves_the_leading_slot_and_the_title_starts_after_it() {
+fn a_bar_without_an_identity_centres_its_title_alone() {
     let theme = Theme::dark();
     let bounds = title_bounds();
-    let plain = TitleBar::new(furniture());
+    let mut bar = TitleBar::new(furniture());
+    bar.set_title("Report");
+    let layout = bar.layout(bounds, Scale::ONE, &theme);
+    assert_eq!(bar.identity(), None);
+    assert_eq!(layout.icon, Rect::EMPTY);
+    assert_eq!(layout.title.height, bounds.height);
+    let before = layout.title.left() - bounds.left();
+    let after = bounds.right() - layout.title.right();
+    assert!(
+        (before - after).abs() <= 1,
+        "the text alone is the centred group, not {before} in and {after} out"
+    );
+}
+
+/// An identity leads the centred group with a square slot and the title text
+/// follows it; the slot is the side the owner is told to rasterise at.
+#[test]
+fn an_identity_leads_the_centred_group_and_the_title_follows_it() {
+    let theme = Theme::dark();
+    let bounds = title_bounds();
+    let mut plain = TitleBar::new(furniture());
+    plain.set_title("Report");
     let mut identified = TitleBar::new(furniture());
+    identified.set_title("Report");
     identified.set_identity(Some(IconKind::AppBundle));
     assert_eq!(identified.identity(), Some(IconKind::AppBundle));
 
     let bare = plain.layout(bounds, Scale::ONE, &theme);
     let with = identified.layout(bounds, Scale::ONE, &theme);
-    let side = identified.icon_side(bare.title, Scale::ONE, &theme);
+    let side = identified.icon_side(bounds, Scale::ONE, &theme);
     assert!(side > 0, "the band is tall enough for a slot");
     assert_eq!(with.icon.width, side);
     assert_eq!(with.icon.height, side);
-    assert_eq!(with.icon.left(), bare.title.left());
     assert!(
         with.title.left() > with.icon.right(),
         "the text starts past the slot"
     );
-    assert!(with.title.width < bare.title.width);
+    assert_eq!(
+        with.title.width, bare.title.width,
+        "the same title draws at the same width either way"
+    );
+    assert!(
+        with.icon.left() < bare.title.left() && with.title.left() > bare.title.left(),
+        "the slot widens the group, so the whole of it re-centres"
+    );
     // The slot never reaches a control.
     for (_, rect) in with.controls {
         assert!(with.icon.intersection(&rect).is_empty());
@@ -983,8 +1175,13 @@ fn hit_map_separates_the_client_interior_from_furniture() {
         frame.hit(bounds, Scale::ONE, &theme, inside),
         FurniturePart::Client
     );
+    let band = frame.layout(bounds, Scale::ONE, &theme).title_bar;
+    let on_band = Point::new(
+        i32::midpoint(band.left(), band.right()),
+        i32::midpoint(band.top(), band.bottom()),
+    );
     assert_eq!(
-        frame.hit(bounds, Scale::ONE, &theme, Point::new(50, 10)),
+        frame.hit(bounds, Scale::ONE, &theme, on_band),
         FurniturePart::TitleBar
     );
     assert_eq!(
@@ -1526,10 +1723,23 @@ fn hit_test_bookkeeping_is_invisible_to_a_title_bar() {
     // Both are pressed in the drag region, at different points: the origin
     // the drag threshold is measured from is bookkeeping, not a picture.
     let mut near = TitleBar::new(furniture());
-    let _ = near.on_pointer(&moved(50, 10), bounds, Scale::ONE, &theme, &mut sink());
+    let drag = drag_point(&near, &theme);
+    let _ = near.on_pointer(
+        &moved(drag.x - 40, drag.y),
+        bounds,
+        Scale::ONE,
+        &theme,
+        &mut sink(),
+    );
     let _ = near.on_pointer(&PRESS, bounds, Scale::ONE, &theme, &mut sink());
     let mut far = TitleBar::new(furniture());
-    let _ = far.on_pointer(&moved(90, 14), bounds, Scale::ONE, &theme, &mut sink());
+    let _ = far.on_pointer(
+        &moved(drag.x + 40, drag.y),
+        bounds,
+        Scale::ONE,
+        &theme,
+        &mut sink(),
+    );
     let _ = far.on_pointer(&PRESS, bounds, Scale::ONE, &theme, &mut sink());
     assert_eq!(near, far, "the press origin is not a drawn property");
     assert_eq!(

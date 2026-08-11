@@ -173,12 +173,14 @@ guarantees:
   title bar via `Compositor::set_window_title`, not merely used as the taskbar
   label. It elides with the shared `ELLIPSIS` mark (`BitmapFont::elide_to_width`)
   rather than being cut, because a title may be a path.
-- The title bar carries the **owning application's identity icon** in a square
-  slot at the leading edge of the drag region, with the text starting after
-  it; a window with no identity reserves no slot and its title takes the whole
-  band. The slot is `crate::paint::icon_slot_side` and the artwork is drawn by
-  the shared `paint_icon_slot`, so there is no second icon path. The icon is
-  inert — part of the draggable region, never a control.
+- The four commands sit in two corner clusters — put-to-back then close at the
+  leading edge, minimize then size-toggle at the trailing one — and the
+  **owning application's identity icon** leads the title text in one group
+  centred in the span between them; a window with no identity reserves no slot
+  and its title is centred alone. The slot is `crate::paint::icon_slot_side`
+  and the artwork is drawn by the shared `paint_icon_slot`, so there is no
+  second icon path. The icon is inert — part of the draggable region, never a
+  control.
   `Compositor::window_title_icon_side` reports the side to rasterise at and
   `Compositor::set_window_identity` takes the identity plus that artwork,
   dirtying only the title band and dropping only that window's chrome entry.

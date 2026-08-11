@@ -1,10 +1,10 @@
 //! The window-manager furniture family (spec §11.17–§11.23, §11.31).
 //!
 //! These are the window-manager-owned controls around one client viewport:
-//! the [`WindowFrame`] boundary, the [`TitleBar`] with its window-command
-//! group, the compact [`WindowControl`] buttons (close, minimize,
-//! put-to-back, size-toggle), the [`ResizeGrabber`], and the neutral
-//! [`ScrollCorner`] at a two-scrollbar junction.
+//! the [`WindowFrame`] boundary, the [`TitleBar`] with its window commands,
+//! the compact [`WindowControl`] buttons (close, minimize, put-to-back,
+//! size-toggle), the [`ResizeGrabber`], and the neutral [`ScrollCorner`] at a
+//! two-scrollbar junction.
 //!
 //! The window manager owns frame rendering, hit testing, pointer capture,
 //! move and resize, stacking, minimization, and size-state transitions;
@@ -532,42 +532,32 @@ impl WindowControl {
 
 // --- TitleBar -------------------------------------------------------------
 
-/// The canonical window-command order, independent of which edge the group
-/// sits on. A theme may place the group leading or trailing and mirror its
-/// visual order, but never change command meaning (spec §10).
+/// The window commands in the fixed left-to-right order they are seated in:
+/// the leading cluster in the bar's left corner, then the trailing cluster in
+/// its right. It is also the keyboard traversal order, so an arrow key moves
+/// the focus ring the way the eye reads.
 const CONTROL_ORDER: [WindowControlKind; 4] = [
     WindowControlKind::PutToBack,
+    WindowControlKind::Close,
     WindowControlKind::Minimize,
     WindowControlKind::SizeToggle,
-    WindowControlKind::Close,
 ];
 
-/// The number of window-command controls (the length of [`CONTROL_ORDER`]).
-const CONTROL_COUNT: u32 = 4;
+/// How many of [`CONTROL_ORDER`] each corner cluster seats.
+///
+/// Both clusters hold this many equally sized controls, so the span they
+/// leave between them is itself centred in the band — which is why centring
+/// the identity group in that span reads as centred in the window.
+const CLUSTER_COUNT: u32 = 2;
 
 /// The canonical index of a command in [`CONTROL_ORDER`].
 fn control_index(kind: WindowControlKind) -> usize {
     match kind {
         WindowControlKind::PutToBack => 0,
-        WindowControlKind::Minimize => 1,
-        WindowControlKind::SizeToggle => 2,
-        WindowControlKind::Close => 3,
+        WindowControlKind::Close => 1,
+        WindowControlKind::Minimize => 2,
+        WindowControlKind::SizeToggle => 3,
     }
-}
-
-/// Which edge of the title bar the window-command group sits on.
-///
-/// A session/theme policy chooses this; it changes placement and visual order
-/// only, never command meaning (spec §10, §11.18).
-#[derive(Copy, Clone, Debug, Eq, PartialEq, Default)]
-pub enum ControlPlacement {
-    /// The command group sits on the logical trailing (right) edge — the
-    /// default — with the close control outermost.
-    #[default]
-    Trailing,
-    /// The command group sits on the logical leading (left) edge, mirrored so
-    /// the close control stays outermost.
-    Leading,
 }
 
 /// The outcome of interacting with a [`TitleBar`].
@@ -611,20 +601,19 @@ pub enum TitleHit {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TitleBarLayout {
     /// The control rects in the canonical command order, each paired with its
-    /// command.
+    /// command: the leading cluster first, then the trailing one.
     pub controls: [(WindowControlKind, Rect); 4],
-    /// The bounding rect of the whole command group.
-    pub group: Rect,
-    /// The identity icon's square slot, at the leading edge of the draggable
-    /// region. [`Rect::EMPTY`] when the bar carries no identity, or when the
-    /// band leaves no room for the slot.
+    /// The identity icon's square slot, leading the centred identity group.
+    /// [`Rect::EMPTY`] when the bar carries no identity, or when the span
+    /// between the clusters leaves no room for the slot.
     pub icon: Rect,
-    /// Where the title text is drawn: the draggable region past the identity
-    /// slot, never overlapping a control.
+    /// The box the title text occupies, following the identity slot: exactly
+    /// as wide as the text draws, or as wide as the span leaves once the text
+    /// has to elide.
     ///
-    /// This is the *text* region, not the drag region. Everything in the band
-    /// that is not a control drags the window — the identity slot included —
-    /// so a bar with an identity still drags from its icon.
+    /// This is the *text* box, not the drag region. Everything in the band
+    /// that is not a control drags the window — the identity slot and the
+    /// text included — so a bar drags from anywhere but its commands.
     pub title: Rect,
 }
 
@@ -646,32 +635,32 @@ fn sanitize_label(text: &str) -> String {
 }
 
 /// The window-manager-owned title bar: application identity, a title, a stable
-/// drag region, and the window-command group (spec §11.18).
+/// drag region, and the window commands (spec §11.18).
 ///
-/// It owns the four [`WindowControl`]s and lays them out on the configured
-/// edge; the remaining area is the drag/identity region. Pressing it activates
-/// the window and, past the drag threshold, begins a cooperative move; a press
-/// over a control routes to that control instead and never starts a drag. The
-/// title text is untrusted application data, so it is length-bounded, control
-/// characters are replaced, and it truncates with an ellipsis before it would
-/// overlap the controls.
+/// It owns the four [`WindowControl`]s and seats them in two corner clusters —
+/// put-to-back and close at the leading edge, minimize and size-toggle at the
+/// trailing one — leaving the span between them for the identity group, which
+/// is centred in it. Pressing anywhere but a control activates the window and,
+/// past the drag threshold, begins a cooperative move; a press over a control
+/// routes to that control instead and never starts a drag. The title text is
+/// untrusted application data, so it is length-bounded, control characters are
+/// replaced, and it elides on the right once the span cannot show it whole.
 ///
-/// The owning application's identity icon sits at the leading edge of the
-/// drag region, before the text. It is inert: it drags the window like the
-/// rest of the region and is never a control.
+/// The owning application's identity icon leads that centred group, before the
+/// text. It is inert: it drags the window like the rest of the band and is
+/// never a control.
 ///
 /// Equal title bars draw the same pixels, so a host may use `==` as its
-/// repaint gate: the furniture state, control placement, the four commands
-/// with their own visible states, the identity class, and both texts all
-/// compare. The whole drag gesture behind them does not — the pointer
-/// coordinate, the pending-press and dragging latches, and the press origin
-/// the threshold is measured from are hit-testing bookkeeping no render path
-/// reads. What a drag *shows* is the window moving, which is the owner's
-/// geometry rather than this bar's pixels.
+/// repaint gate: the furniture state, the four commands with their own visible
+/// states, the identity class, and both texts all compare. The whole drag
+/// gesture behind them does not — the pointer coordinate, the pending-press
+/// and dragging latches, and the press origin the threshold is measured from
+/// are hit-testing bookkeeping no render path reads. What a drag *shows* is
+/// the window moving, which is the owner's geometry rather than this bar's
+/// pixels.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TitleBar {
     furniture: WindowFurnitureState,
-    placement: ControlPlacement,
     controls: [WindowControl; 4],
     identity: Option<IconKind>,
     app_name: String,
@@ -688,8 +677,8 @@ pub struct TitleBar {
 }
 
 impl TitleBar {
-    /// A title bar for a window in the given furniture state, with the four
-    /// commands on the trailing edge.
+    /// A title bar for a window in the given furniture state, with its four
+    /// commands seated in the two corner clusters.
     #[must_use]
     pub fn new(furniture: WindowFurnitureState) -> Self {
         let controls = [
@@ -700,7 +689,6 @@ impl TitleBar {
         ];
         let mut bar = Self {
             furniture,
-            placement: ControlPlacement::Trailing,
             controls,
             identity: None,
             app_name: String::new(),
@@ -743,17 +731,6 @@ impl TitleBar {
     pub fn set_furniture(&mut self, furniture: WindowFurnitureState) {
         self.furniture = furniture;
         self.apply_furniture();
-    }
-
-    /// The command-group placement edge.
-    #[must_use]
-    pub fn placement(&self) -> ControlPlacement {
-        self.placement
-    }
-
-    /// Set the command-group placement edge.
-    pub fn set_placement(&mut self, placement: ControlPlacement) {
-        self.placement = placement;
     }
 
     /// Set the application-identity name (untrusted; sanitised).
@@ -828,22 +805,26 @@ impl TitleBar {
         &mut self.controls[control_index(kind)]
     }
 
-    /// Lay the title bar out within `bounds` for the active theme.
+    /// Lay the title bar out within `bounds` for the active theme: a command
+    /// cluster inset into each corner, and the identity group centred in the
+    /// span they leave between them.
     #[must_use]
     pub fn layout(&self, bounds: Rect, scale: Scale, theme: &Theme) -> TitleBarLayout {
         let metrics = theme.metrics();
         let e = scale.scale_length(metrics.window_control_extent).max(1);
         let g = scale.scale_length(metrics.control_gap);
         let ins = scale.scale_length(metrics.control_inset);
-        let group_w = e
-            .saturating_mul(CONTROL_COUNT)
-            .saturating_add(g.saturating_mul(CONTROL_COUNT.saturating_sub(1)));
+        let cluster_w = e
+            .saturating_mul(CLUSTER_COUNT)
+            .saturating_add(g.saturating_mul(CLUSTER_COUNT.saturating_sub(1)));
         let cy = bounds.top() + (to_i32(bounds.height) - to_i32(e)).max(0) / 2;
 
-        let group_left = match self.placement {
-            ControlPlacement::Trailing => bounds.right() - to_i32(ins) - to_i32(group_w),
-            ControlPlacement::Leading => bounds.left() + to_i32(ins),
-        };
+        let leading_left = bounds.left() + to_i32(ins);
+        // A band too narrow for both clusters abuts them instead of stacking
+        // one over the other: a control drawn under another cannot be hit
+        // where it is seen.
+        let trailing_left = (bounds.right() - to_i32(ins) - to_i32(cluster_w))
+            .max(leading_left + to_i32(cluster_w));
 
         let mut controls = [
             (CONTROL_ORDER[0], Rect::new(0, 0, e, e)),
@@ -853,66 +834,68 @@ impl TitleBar {
         ];
         for (i, slot) in controls.iter_mut().enumerate() {
             let i = u32::try_from(i).unwrap_or(0);
-            // Leading mirrors the visual order so the close control stays
-            // outermost; trailing keeps the canonical left-to-right order.
-            let pos = match self.placement {
-                ControlPlacement::Trailing => i,
-                ControlPlacement::Leading => (CONTROL_COUNT - 1) - i,
+            let (cluster_left, within) = if i < CLUSTER_COUNT {
+                (leading_left, i)
+            } else {
+                (trailing_left, i - CLUSTER_COUNT)
             };
-            let x = group_left + to_i32(pos.saturating_mul(e.saturating_add(g)));
+            let x = cluster_left + to_i32(within.saturating_mul(e.saturating_add(g)));
             slot.1 = Rect::new(x, cy, e, e);
         }
 
-        let group = Rect::new(group_left.max(bounds.left()), cy, group_w, e);
-        let drag = match self.placement {
-            ControlPlacement::Trailing => Rect::new(
-                bounds.left() + to_i32(ins),
-                bounds.top(),
-                u32::try_from((group_left - to_i32(g) - (bounds.left() + to_i32(ins))).max(0))
-                    .unwrap_or(0),
-                bounds.height,
-            ),
-            ControlPlacement::Leading => {
-                let start = group_left + to_i32(group_w) + to_i32(g);
-                Rect::new(
-                    start,
-                    bounds.top(),
-                    u32::try_from((bounds.right() - to_i32(ins) - start).max(0)).unwrap_or(0),
-                    bounds.height,
-                )
-            }
-        };
-        let (icon, title) = self.split_identity(drag, scale, theme, ins);
+        let span_left = leading_left + to_i32(cluster_w) + to_i32(g);
+        let span = Rect::new(
+            span_left,
+            bounds.top(),
+            to_u32(trailing_left - to_i32(g) - span_left),
+            bounds.height,
+        );
+        let (icon, title) = self.centre_identity(span, scale, theme, ins);
 
         TitleBarLayout {
             controls,
-            group,
             icon,
             title,
         }
     }
 
-    /// Divide the draggable region `drag` into the identity slot and the text
-    /// region that follows it, separated by `gap` pixels.
+    /// Seat the identity slot and the title text as one group centred in
+    /// `span`, the two separated by `gap` pixels.
     ///
-    /// A bar with no identity, or a band too narrow to seat the slot, keeps
-    /// the whole region for its text and reserves nothing — a window without
-    /// an identifiable owner reads exactly as it did before one existed.
-    fn split_identity(&self, drag: Rect, scale: Scale, theme: &Theme, gap: u32) -> (Rect, Rect) {
-        let side = self.icon_side(drag, scale, theme);
-        if self.identity.is_none() || side == 0 || drag.width < side {
-            return (Rect::EMPTY, drag);
-        }
-        let iy = drag.top() + (to_i32(drag.height) - to_i32(side)).max(0) / 2;
-        let taken = side.saturating_add(gap);
+    /// The group is centred while it fits and pinned to the span's leading
+    /// edge once it does not, so a squeezed bar keeps its icon and the title
+    /// elides on the right rather than sliding out from under the reader. A
+    /// bar with no identity, or a span too narrow to seat the slot, reserves
+    /// nothing — a window without an identifiable owner reads exactly as it
+    /// did before one existed.
+    ///
+    /// Centring has to know the text's width, and it measures the very line
+    /// that is drawn: the font layer memoises a measurement by whole string,
+    /// so laying out and then painting the same title measure it once between
+    /// them, and no piecewise total can disagree with what appears.
+    fn centre_identity(&self, span: Rect, scale: Scale, theme: &Theme, gap: u32) -> (Rect, Rect) {
+        let font = role_font(theme, scale, TextRole::WindowTitle);
+        let side = icon_slot_side(font, span.height);
+        let show_icon = self.identity.is_some() && side > 0 && span.width >= side;
+        let reserved = if show_icon {
+            side.saturating_add(gap)
+        } else {
+            0
+        };
+        let text = font
+            .text_width(&self.display_text())
+            .min(span.width.saturating_sub(reserved));
+        let left =
+            span.left() + to_i32(span.width.saturating_sub(reserved.saturating_add(text))) / 2;
+        let icon = if show_icon {
+            let iy = span.top() + (to_i32(span.height) - to_i32(side)).max(0) / 2;
+            Rect::new(left, iy, side, side)
+        } else {
+            Rect::EMPTY
+        };
         (
-            Rect::new(drag.left(), iy, side, side),
-            Rect::new(
-                drag.left() + to_i32(taken),
-                drag.top(),
-                drag.width.saturating_sub(taken),
-                drag.height,
-            ),
+            icon,
+            Rect::new(left + to_i32(reserved), span.top(), text, span.height),
         )
     }
 
@@ -920,8 +903,8 @@ impl TitleBar {
     ///
     /// `bounds` is the title band, not the whole window. The bar background is
     /// the window surface; the identity icon is painted in its laid-out slot,
-    /// the identity/title text is elided to what is left of the drag region,
-    /// and the controls are painted in their laid-out slots.
+    /// the identity/title text is elided to the box laid out for it, and the
+    /// controls are painted in their laid-out slots.
     ///
     /// `artwork` is the owning application's identity icon, pre-rasterised by
     /// the owner at [`icon_side`](Self::icon_side); `None` falls back to the
@@ -978,7 +961,7 @@ impl TitleBar {
         }
     }
 
-    /// The identity+title string drawn in the drag region.
+    /// The identity+title string drawn in the centred group.
     fn display_text(&self) -> String {
         if self.app_name.is_empty() {
             self.title.clone()
