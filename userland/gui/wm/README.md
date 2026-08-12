@@ -54,17 +54,27 @@ router**:
   again: a `64×24` repaint inside a frosted terminal cost **17.4 ms** and now
   costs **26 µs**, and its damage stays the rectangle it marked rather than
   growing to the window. The last three inputs are recorded in the entry and
-  compared on every lookup, so a geometry, radius, scale or corner change fails
-  closed to a recompute; the rectangle recorded is the whole window's, because
-  one pushed off a screen edge is frosted from the row and column the screen
-  begins at while its shape is read from its own top-left. The layers beneath
+  consulted on every lookup, so a change fails closed to whatever it cannot
+  have left intact: a different radius keeps nothing, while a window that has
+  **moved, resized or changed shape keeps its core** — in screen coordinates
+  the retained pixels are still exactly right wherever neither the blur's
+  replication nor the shape's corners reach, so only the border is blurred
+  again (`Surface::frost_region_around`) and dragging a frosted, translucent
+  terminal costs **3.03 ms** a sample where it cost **7.05 ms**. The rectangle
+  recorded is the whole window's, because one pushed off a screen edge is
+  frosted from the row and column the screen begins at while its shape is read
+  from its own top-left. The layers beneath
   are answered by dropping the entry whenever damage is marked *below* the
   window — which is what `mark`, `mark_layer` and `mark_overlay` distinguish,
   and why a cursor sample, a fade step, the window's own content, and a window
-  dragged across it from above all keep it. Whether a frost may be reused is
+  dragged across it from above all keep it. How much of a frost may be reused is
   asked of the cache **once per frame** and remembered, so a reuse is recorded
   as a hit and refreshes the entry's recency, and the plan and the composite
-  can never read different answers. The cache is read-only for the whole of a
+  can never read different answers. The layers a frost writes over are not
+  composed at all — composing them first is work the copy throws away — so a
+  frame composes below a frost only outside what it will write: nothing under
+  one reused whole, and only the ring the border blur reads under one reused in
+  part. The cache is read-only for the whole of a
   composite pass and written at the end of it (`ReclaimCache::retain`, which
   counts no second lookup), so admitting one frost cannot evict another the
   same pass had already decided to reuse. A frost is a blurred image of the

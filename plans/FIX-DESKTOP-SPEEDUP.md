@@ -6,8 +6,10 @@ C.5 landed — every control family reports what it repaints from both input
 paths, and a host now reports its own two kinds of change through the same two
 guarded writes; C.3 has landed for `userland/apps/widgets` with its differential
 proof and five apps remain; C.4a withdrawn as a performance item after
-measurement; D.1–D.4 and D.7 landed, D.5 is a User decision, D.6 is a follow-up
-the measurement exposed).
+measurement; D.1–D.4, D.7 and D.8 landed — a frosted window that moves now keeps
+the frost the move cannot reach and the layers a frost covers are no longer
+composed — D.5 is a User decision, and D.6 and D.9 are follow-ups the
+measurements exposed).
 E planned.
 Stages A–E need no hardware acceleration, no kernel change, and no new
 syscall; F needs a `plans/FIX-HARDWARE-FEATURES.md` correction; G is gated on
@@ -704,7 +706,7 @@ still passes unchanged.
 
 ---
 
-## Stage D — Make blur cost what it changes  **[D.1–D.4, D.7 done; D.5 is a User decision]**
+## Stage D — Make blur cost what it changes  **[D.1–D.4, D.7, D.8 done; D.5 is a User decision]**
 
 ### D.1 Damage below a frost invalidates it; the window's own content does not  **[done]**
 Every `damage.add` in the compositor is gone, replaced by three funnels that
@@ -722,9 +724,12 @@ which retained frosts survive:
   content, position, size, shape or furniture. Drops the frosts of windows
   stacked *above* that one, and of neither its own nor any below. A frosted
   window is blended over a blur of the layers **below** it, so nothing at or
-  above its own layer is part of its frost. This covers both dominant
-  interactions — the pointer moving inside a frosted terminal, and a window
-  dragged across one — and neither now costs a re-blur.
+  above its own layer is part of its frost. This covers two of the three
+  dominant interactions — the pointer moving inside a frosted terminal, and a
+  window dragged across one — and neither costs a re-blur. The third, the
+  frosted window's *own* drag, is D.8: `mark_layer` spares its frost too, but
+  its rectangle has moved, so what survives is decided per pixel rather than
+  wholesale.
 - `mark_overlay(rect)` — a change no frost can read: the cursor, composed after
   every window, and the screen reveal, applied only as a pixel is encoded for
   scan-out. Drops nothing, so a pointer sample and a fade step keep every frost.
@@ -911,6 +916,101 @@ band or invalidates a cache entry of its own:
   resize grabber it drives as a gesture engine (the WM's chrome draws no
   grabber) reports into a sink behind `ResizeGrab::gesture`.
 
+### D.8 A frosted window that moves keeps the frost the move cannot reach  **[done]**
+The third dominant interaction, and the one the cache was worst at: dragging
+the frosted window itself. Its backdrop does not move, so the retained frost is
+still exactly right — in *screen* coordinates — wherever neither difference
+between the two positions applies. Only two differences exist, and both are
+confined to a border:
+
+- the blur **replicates** at its rectangle's edges, so a pixel less than
+  `radius_px` inside either position's on-screen rectangle averaged a different
+  set of samples;
+- the shape **weights** the mix at a window-local coordinate, so a pixel within
+  a corner's reach of either position's own rectangle was mixed at a different
+  coverage.
+
+So `FrostedBackdrop::reuse` answers `FrostPlan::{Whole, Core(rect), Blur}`,
+where the core is the shared rectangle taken in by the larger of the two
+reaches. A differing blur radius keeps nothing (every pixel is a different
+average); a resize and a corner change are **not** special cases, because the
+coverage argument holds for them word for word — which is why `reuse` compares
+no shapes for equality. `matches` is gone: an entry is released only when
+nothing can be kept from it.
+
+`Surface::frost_region_around` is the raster half: frost a rectangle *except* a
+kept inner block, writing exactly what the whole-rectangle frost would write
+around it. `blur_line` generalised into `blur_span` (the outputs of a line, not
+all of them), so `box_blur` and the partial path share one sliding window;
+`frost_region` and `frost_region_around` share one private `frost`, so a border
+and a whole cannot round, replicate, weight, or dither differently. Two things
+that had to be got right, both found by the tests rather than argued:
+
+- **All four border bands are blurred before any is mixed back.** A band's
+  neighbourhood reaches into the bands beside it, and what it must read there is
+  the backdrop, not the frost of it. Blurring and mixing band by band seams.
+- **`blur_span` confines its source to the line before walking it.** The walk
+  reads a clamped edge by letting a strided iterator run out, which held while
+  the scratch ended with the line and broke the moment several bands shared one
+  max-sized scratch — a band then read a neighbour's pixels as its replicated
+  edge.
+
+The frost also no longer copies the rectangle out before blurring it: nothing is
+written until both passes are done, so the horizontal pass reads the surface's
+own rows. That removes a whole pass over the area from every frost, and it is
+the *small* part of this work — 0.7% of a full-screen re-frost, which the two
+blur passes and the plane composite dominate.
+
+**The layers a frost covers are no longer composed** (`compose_plane`,
+`frost_spared`). A frost is copied over whatever is beneath it, so composing
+that stack first is work the copy throws away — and for a dragged frosted
+window it was a whole window's worth of blending per pointer sample. A frame
+composes below a frost only outside what the frost will write: nothing at all
+under one reused whole, and only the ring the border blur *reads* (the core
+taken in by the radius) under one reused in part. The remainder is composed as
+the disjoint rectangles `Region::subtract` gives, never as the box around them.
+The pair cannot disagree about a vanished entry: `frost_spared` and
+`frost_segment` both consult the cache with only a composite in between, so a
+missing frost composes the plane and blurs in full.
+
+A frost the frame recomputed any part of is captured whole, so the next frame
+compares against where the window is *now*; otherwise the core would erode a
+sample at a time until nothing was left of it.
+
+**Measured** (`cargo xtask bench --filter composite`, 1280×800, a 560×360
+backdrop-blurred translucent window over two overlapping windows, moved 6 px a
+frame). Both figures are taken from the *same* binary, with only this
+behaviour disabled for the baseline, so the pair differs in nothing else:
+
+- Drag, backdrop blur: **7.05 ms → 3.03 ms** a sample (34.06 → 14.64 ns/px),
+  a factor of **2.3**.
+- A `64×24` repaint inside a frosted window: **40.6 → 15.0 µs** (26.44 → 9.79
+  ns/px), from the spared plane alone — the frost was already reused whole here,
+  so this is the layers beneath it no longer being composed.
+- Drag, opaque stack unchanged (0.484 → 0.471 ns/px) and the full-screen cases
+  unchanged (opaque 2.91 → 2.87, translucent 9.57 → 9.55), so nothing was
+  traded for it.
+
+The remaining 3.03 ms is bounded from above by a *measurement*, not an estimate:
+the same drag with the blur turned off costs **3.92 ms** (D.9), and that is the
+window's own blend plus the whole plane with no frost involved — so the frost now
+more than pays for the blur it performs. Reducing what is left means the
+per-pixel blend itself (Stage F) or retaining the plane (D.9), not more caching
+of the blur. The counters carry the claim in CI: a three-pixel move blurs under a
+fifth of the window, and a reused frost resolves *no* pixel of the layer beneath
+it.
+
+### D.9 Follow-up — a translucent window with no blur has no plane to keep
+The same bench now measures the **non**-blurred translucent drag at **3.92 ms**
+a sample against the blurred one's 3.03 ms: it is the slower case, because a
+frost is a cache of the composed plane and a window with no blur has none, so
+every sample re-blends the whole stack beneath it. Closing it means retaining
+the *unblurred* plane on the same terms (a second `lib/reclaim` client, its own
+epoch, the same invalidation funnels) — which is a new cache and a second
+screenful of retained pixels, so it is a design decision and not something to
+fold into a blur change (§2.3, §26.3). Not started, and not needed for the
+blurred window this stage fixed.
+
 ---
 
 ## Stage E — One present per frame, and a frame deadline
@@ -931,7 +1031,10 @@ than coalescing to unions. What remains for E is the *present* side:
 call** and refreshes `union(stale, damage)` as a **bounding rect**: with
 8 rects that is 8 IPC round trips, each copying a growing box — in the
 worst case ~8 near-full-screen copies for a frame that changed a few
-thousand pixels. Change the `Present` request in place to carry a
+thousand pixels. A window drag needs no pathological scene to hit it: the
+frame presents the rectangle vacated and the one arrived at, and each of
+those two calls copies the *union* box, so a window moved a few pixels is
+copied to the screen twice per sample. Change the `Present` request in place to carry a
 bounded **list** of rects (count bounded by a discovered/negotiated
 limit, not a magic const, §24.1); the ring rotates once per frame and the
 per-frame stale set is tracked per rect rather than as one box. Align the

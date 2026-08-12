@@ -105,21 +105,37 @@ This crate owns:
   the `colour <= alpha` invariant survives and no halo appears at a
   translucent edge; samples past an edge replicate it, which keeps the
   divisor constant and leaves a uniform field exactly unchanged.
-  `frost_region` is the effect itself: it copies one rectangle of a surface,
-  blurs the copy, and mixes it back weighted by a caller-supplied per-pixel
-  coverage, so a rounded shape fades from frosted to untouched across its own
-  arc rather than showing a square edge. Coverage is asked at coordinates
-  relative to the rectangle's *own* top-left, so a rectangle the surface edge
-  or the active clip window cuts short still reads its whole shape while the
-  frost touches only what the bounds and the clip admit. A zero radius, an
-  empty or wholly off-surface rectangle, and a scratch that cannot be grown
-  each leave the surface exactly as it was. `BlurScratch` holds the copy and
-  the blur's intermediate across calls — grown on demand, reused, and handed
-  back by `release` — so the per-frame caller (the compositor frosting a
-  window's backdrop) allocates nothing once it is warm. The effect was the
-  window manager's alone until the graphical login screen needed it behind a
-  selected account tile, and neither the login screen nor any other `lib/*`
-  consumer may depend on the window manager.
+  `frost_region` is the effect itself: it blurs one rectangle of a surface and
+  mixes the result back weighted by a caller-supplied per-pixel coverage, so a
+  rounded shape fades from frosted to untouched across its own arc rather than
+  showing a square edge. Coverage is asked at coordinates relative to the
+  rectangle's *own* top-left, so a rectangle the surface edge or the active clip
+  window cuts short still reads its whole shape while the frost touches only
+  what the bounds and the clip admit. A zero radius, an empty or wholly
+  off-surface rectangle, and a scratch that cannot be grown each leave the
+  surface exactly as it was. Nothing is written until both passes are done,
+  which is what lets the horizontal one read the surface's own rows rather than
+  a copy of them. `BlurScratch` holds the blurred pixels and the pass-to-pass
+  intermediate across calls — grown on demand, reused, and handed back by
+  `release` — so the per-frame caller (the compositor frosting a window's
+  backdrop) allocates nothing once it is warm. The effect was the window
+  manager's alone until the graphical login screen needed it behind a selected
+  account tile, and neither the login screen nor any other `lib/*` consumer may
+  depend on the window manager.
+
+  `frost_region_around` frosts the same rectangle **except** a kept inner
+  block, and writes exactly the pixels the whole-rectangle frost would write
+  around it — proved by a differential sweep over random blocks, radii and
+  coverages. The rectangle still decides the answer: samples replicate at *its*
+  edges and coverage is read at its own coordinates, so a border is never a
+  smaller frost of a smaller rectangle, which would spread a clipped
+  neighbourhood and seam against the pixels it was kept beside. The border's
+  four bands are all blurred before any is mixed back, because a band's
+  neighbourhood reaches into the bands next to it and what it must read there
+  is the *unfrosted* surface. Its caller is the compositor: a frosted window
+  that has moved keeps every retained pixel neither the blur's replication nor
+  its own corners can reach, and pays for the border alone instead of a whole
+  blur per pointer sample.
 
   Each pass costs a load, a running-sum update, a multiply and a store per
   sample. The window is the same size for every output — replicated edges keep

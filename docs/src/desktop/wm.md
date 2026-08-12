@@ -265,18 +265,32 @@ segment it further.
 
 The effect itself is `lib/raster`'s shared `Surface::frost_region` — the
 one frosted glass the desktop has, which the login screen frosting a
-selected account tile draws through too. It copies the rectangle out of the
-back buffer, blurs the copy, and mixes the blurred pixels back over the
-originals at a per-pixel weight the caller supplies.
+selected account tile draws through too. It reads the rectangle out of the
+back buffer a row at a time, blurs it, and mixes the blurred pixels back over
+the originals at a per-pixel weight the caller supplies.
 
 The blur is a **separable box blur**: a horizontal pass then a vertical
 one, each carrying a running sum so the window slides by one add and one
 subtract per output. The cost is proportional to the rectangle's *area*
-whatever the radius, never to area × radius. The copy and the pass-to-pass
+whatever the radius, never to area × radius. Nothing is written until both
+passes are done, which is what lets the horizontal one read the surface
+directly instead of a copy of it. The blurred pixels and the pass-to-pass
 intermediate live in one `tairix_raster::BlurScratch` the compositor owns,
 grown to the largest frosted rectangle the session has needed and reused,
 so a frosted window allocates nothing after its first frame; a mode change
 releases it rather than pinning the old screen's worth of pixels.
+
+`Surface::frost_region_around` frosts the same rectangle *except* a kept
+inner block, writing exactly the pixels the whole-rectangle frost would write
+around it. The rectangle still decides the answer — samples replicate at its
+edges and coverage is read at its own coordinates — so a border is never a
+smaller frost of a smaller rectangle, which would spread a clipped
+neighbourhood and seam against the pixels it was kept beside. The border's
+bands are all blurred before any is mixed back, because a band's own
+neighbourhood reaches into the bands next to it and what it must read there is
+the backdrop, not the frost of it. This is what a dragged frosted window costs
+instead of a whole blur (see [Retained frosted
+backdrops](#retained-frosted-backdrops)).
 
 Every channel is averaged, alpha included: on premultiplied data that is
 the same convex combination of the contributing colours that compositing
@@ -381,9 +395,11 @@ whole while unrelated damage elsewhere stays exactly as tight as it was
 marked. Two frosted windows that overlap merge into a single rectangle,
 because each reads what the other wrote.
 
-When the frost does **not** have to be recomputed there is no neighbourhood to
-spread and no promotion at all: the retained frost is copied back and the
-damage stays the rectangle it was marked as. See [Retained frosted
+When the frost does **not** have to be recomputed at all there is no
+neighbourhood to spread and no promotion either: the retained frost is copied
+back and the damage stays the rectangle it was marked as. A frost that survives
+only in part is promoted like one that must be blurred outright, because its
+border is blurred. See [Retained frosted
 backdrops](#retained-frosted-backdrops).
 
 **An update that changes nothing marks nothing.** `move_window` to the
@@ -506,7 +522,9 @@ afterwards. The pointer moving inside a frosted terminal and a window dragged
 across one, the two dominant interactions on the desktop, therefore change
 nothing the frost reads, yet either used to re-blur the whole window per sample:
 two separable passes over every pixel of it, measured at 17.4 ms for a 64×24
-repaint against 0.9 µs for the same repaint over an opaque stack.
+repaint against 0.9 µs for the same repaint over an opaque stack. Dragging the
+frosted window *itself* changes nothing beneath it either, and that is the third
+case the cache answers.
 
 The compositor keeps each frosted window's backdrop instead, in a bounded,
 pressure-governed cache on the same terms as the window furniture above:
@@ -518,13 +536,29 @@ repaint now costs 26 µs.
 How a retained frost is known to be still right:
 
 - **The rectangle, the radius, and the shape are recorded in the entry** and
-  compared on every lookup. A moved, resized, re-rounded, re-radiused, or
-  rescaled window fails that comparison and is blurred again, so the check
-  holds even if the compositor forgot to say anything had changed. The
-  rectangle recorded is the window's whole one, not the part of it on screen: a
-  window pushed off an edge is frosted from the row and column the screen
-  begins at while its shape is still read from its own top-left, so two
-  positions that clip to the same on-screen rectangle are two different frosts.
+  consulted on every lookup, so the check holds even if the compositor forgot
+  to say anything had changed. A radius that differs keeps nothing: every pixel
+  is a different average. Geometry is the interesting case, and it is answered
+  by *how much* survives rather than yes or no (below). The rectangle recorded
+  is the window's whole one, not the part of it on screen: a window pushed off
+  an edge is frosted from the row and column the screen begins at while its
+  shape is still read from its own top-left, so two positions that clip to the
+  same on-screen rectangle weight the same pixels differently.
+- **A window that has moved, resized, or changed shape keeps everything the
+  change cannot reach.** Its backdrop did not move, so in *screen* coordinates
+  the retained pixels are still exactly what a fresh blur would write wherever
+  neither difference between the two positions applies: the blur replicates at
+  its rectangle's edges, so a pixel less than the radius inside either
+  position's on-screen rectangle averaged a different set of samples, and the
+  shape weights the mix at a window-local coordinate, so a pixel within a
+  corner's reach of either position's own rectangle was mixed at a different
+  coverage. Both are confined to a border, so the shared rectangle taken in by
+  the larger of the two reaches is copied and only that border is blurred
+  again. Dragging a frosted terminal was the interaction this cache was worst
+  at — every sample re-blurred the whole window *and* re-composed the entire
+  stack beneath it — and a three-pixel sample now blurs under a fifth of it. A
+  jump that leaves no shared core keeps nothing and blurs the whole rectangle,
+  so the fallback is the old cost and never a seam.
 - **The pixels beneath it cannot be self-checked** without reading the ones the
   copy was meant to save, so the entry is dropped when the compositor marks
   damage that could have changed them. Marking distinguishes three cases: a
@@ -536,13 +570,26 @@ How a retained frost is known to be still right:
   drops every frost it reaches; and a change no frost can read at all — the
   cursor overlay, composed after every window, and the screen reveal, applied
   only as a pixel is encoded for scan-out — drops none.
-- **Whether a frost may be reused is asked once per frame and remembered.** The
-  recompose plan and the composite that follows it both need the answer, and
+- **How much of a frost may be reused is asked once per frame and remembered.**
+  The recompose plan and the composite that follows it both need the answer, and
   two lookups could disagree — which would leave a window the plan did not
   widen for being blurred over a rectangle whose lower layers the frame never
   composed. That one lookup is also what the cache counts, so a reuse reads as
   a hit and refreshes the entry's recency: the frost every frame serves must
-  not be the first one a pressured cache gives back.
+  not be the first one a pressured cache gives back. A frost that survives only
+  in part is promoted like one that must be blurred outright, because its
+  border is blurred and a border blurred over a strip of damage would spread a
+  neighbourhood clipped to that strip.
+- **The layers a frost covers are not composed at all.** A frost is copied on
+  top of whatever is beneath it, so composing that stack first is work the copy
+  throws away — a whole window's worth of blending per pointer sample for a
+  dragged terminal. The frame composes the layers below only outside what the
+  frost will write over: nothing at all under a frost reused whole, and only the
+  ring the border blur reads under one reused in part. What is left is composed
+  as the disjoint rectangles it is, never as the box around them.
+- **A frost the frame recomputed any part of is captured whole**, so the next
+  frame compares against where the window is now rather than eroding the same
+  core until nothing is left of it.
 - **Recomputing one frost drops any frost above it that overlaps**, because a
   blur spreads the change far past the rectangle that caused it, so the window
   above reads different bytes even where the damage never reached.
@@ -566,7 +613,10 @@ mutations (content presents above, below and inside the frost, cursor motion, a
 fade, restacking, geometry, radius, corner, scale, theme and mode changes,
 overlapping frosts, a frost clipped by the screen edge, and window removal) and
 require the scan-out frame *and* the back buffer to be byte-identical after
-every one.
+every one. The partial reuse a moved window takes is held to the same bar from
+both ends: that sweep covers it, and `lib/raster` proves separately that
+frosting a border around a kept block is bit-for-bit the whole frost, over
+random blocks, radii and coverages.
 
 ## What one frame cost (`FrameStats`)
 

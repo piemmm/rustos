@@ -13,6 +13,7 @@
 //! [`frost_region`]: Surface::frost_region
 
 use core::cell::RefCell;
+use core::ops::Range;
 
 use alloc::vec;
 use alloc::vec::Vec;
@@ -604,6 +605,136 @@ fn a_clip_confines_the_frost_and_the_shape_still_reads_from_the_rectangle() {
         "what the clip admits is frosted"
     );
     outside_is_untouched(&after, &before, (3, 4, 4, 3));
+}
+
+/// `surface` with `[x, x+w) × [y, y+h)` frosted around the kept `cols` × `rows`
+/// block, at a constant coverage.
+fn frosted_around(
+    mut surface: Surface,
+    (x, y, w, h): (u32, u32, u32, u32),
+    (cols, rows): (Range<u32>, Range<u32>),
+    radius: u32,
+    weight: u8,
+) -> Surface {
+    surface.frost_region_around(
+        x,
+        y,
+        w,
+        h,
+        cols,
+        rows,
+        radius,
+        &mut BlurScratch::new(),
+        |_, _| weight,
+    );
+    surface
+}
+
+/// Frosting the border around a kept block, then putting back what the block
+/// held before, is bit-for-bit the whole frost.
+///
+/// This is the compositor's drag path: the retained backdrop of a window that
+/// has moved is still exact in the middle, so only the border is recomputed and
+/// the middle is copied from the frost of the previous frame. If the border
+/// disagreed with the whole frost by one level anywhere — a neighbourhood
+/// clipped to the border, a replication edge read from the band instead of the
+/// rectangle, a dither read from the band's own corner, or one band reading
+/// another band's already-frosted pixels — the join would show as an edge that
+/// travels with the window.
+#[test]
+fn a_frosted_border_around_a_kept_block_is_exactly_the_whole_frost() {
+    let mut rng = TestRng::new(0x9A11_0F20_57D1_7E20);
+    let rect = (2u32, 1, 13, 11);
+    for radius in [1u32, 2, 3, 7] {
+        // Full coverage, a rounded weight, and none at all: the mix and its
+        // dither are part of what must agree, not just the blur.
+        for weight in [255u8, 176, 0] {
+            let before = patterned(17, 14);
+            let whole = frosted(before.clone(), rect, radius, weight);
+            for _ in 0..24 {
+                let keep = (span_within(&mut rng, rect.2), span_within(&mut rng, rect.3));
+                let mut border = frosted_around(before.clone(), rect, keep.clone(), radius, weight);
+                let kept = (
+                    rect.0 + keep.0.start,
+                    rect.1 + keep.1.start,
+                    keep.0.end - keep.0.start,
+                    keep.1.end - keep.1.start,
+                );
+                // What the block held is the caller's own business: it kept the
+                // earlier frost of those very pixels.
+                assert_eq!(
+                    block(&border, kept.0, kept.1, kept.2, kept.3),
+                    block(&before, kept.0, kept.1, kept.2, kept.3),
+                    "the kept block is left alone"
+                );
+                for row in kept.1..kept.1 + kept.3 {
+                    for column in kept.0..kept.0 + kept.2 {
+                        border.set(column, row, whole.get(column, row).expect("in the surface"));
+                    }
+                }
+                assert_eq!(
+                    border, whole,
+                    "a radius-{radius} frost at coverage {weight} around the kept \
+                     columns {:?} rows {:?}",
+                    keep.0, keep.1
+                );
+            }
+        }
+    }
+}
+
+/// A non-empty sub-range of `0..extent`.
+fn span_within(rng: &mut TestRng, extent: u32) -> Range<u32> {
+    let start = rng.next_u32() % extent;
+    let len = 1 + rng.next_u32() % (extent - start);
+    start..start + len
+}
+
+/// A kept block touching an edge leaves fewer than four border bands, and a
+/// block covering the whole rectangle leaves none — neither is a special case
+/// the caller has to know about.
+#[test]
+fn a_kept_block_against_an_edge_still_frosts_exactly_the_rest() {
+    let rect = (1u32, 2, 10, 8);
+    let before = patterned(13, 12);
+    let whole = frosted(before.clone(), rect, 2, 255);
+    for keep in [
+        (0..4, 0..8),  // the whole left side: no top, bottom, or left band
+        (0..10, 0..3), // the whole top: only a bottom band
+        (6..10, 5..8), // a corner: no bottom or right band
+        (0..10, 0..8), // everything: nothing to frost at all
+    ] {
+        let mut border = frosted_around(before.clone(), rect, keep.clone(), 2, 255);
+        for row in keep.1.clone() {
+            for column in keep.0.clone() {
+                let (x, y) = (rect.0 + column, rect.1 + row);
+                border.set(x, y, whole.get(x, y).expect("in the surface"));
+            }
+        }
+        assert_eq!(
+            border, whole,
+            "keeping columns {:?} rows {:?}",
+            keep.0, keep.1
+        );
+    }
+}
+
+/// Keeping nothing is the whole frost, so a caller with an empty core need not
+/// choose between two calls.
+#[test]
+fn keeping_nothing_frosts_the_whole_rectangle() {
+    let rect = (2u32, 2, 9, 7);
+    let before = patterned(13, 11);
+    let whole = frosted(before.clone(), rect, 3, 255);
+    for keep in [(0..0, 0..0), (4..4, 0..7), (0..9, 3..3), (99..120, 0..7)] {
+        assert_eq!(
+            frosted_around(before.clone(), rect, keep.clone(), 3, 255),
+            whole,
+            "keeping columns {:?} rows {:?} covers no pixels",
+            keep.0,
+            keep.1
+        );
+    }
 }
 
 #[test]

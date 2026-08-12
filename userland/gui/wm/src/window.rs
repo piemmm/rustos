@@ -1266,6 +1266,14 @@ impl WindowShape {
         self.corners.coverage(lx, ly, self.width, self.height)
     }
 
+    /// How far in from its own edges this shape can weight a pixel by less than
+    /// full coverage: the radius it actually rounds by, clamped as the shared
+    /// rounded-rectangle definition clamps it. A pixel at least this far inside
+    /// every edge is fully covered, whatever the corner style.
+    pub(crate) fn corner_reach(self) -> u32 {
+        self.corners.radius(self.width, self.height)
+    }
+
     /// Whether row `ly` carries an arc at all: `false` where the shape covers
     /// every column of it.
     fn clips_row(self, ly: u32) -> bool {

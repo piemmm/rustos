@@ -2086,6 +2086,16 @@ fn the_blur_is_confined_to_the_window_rectangle() {
     assert!(r > 0 && b > 0, "inside the window the edge is spread");
 }
 
+/// Fill a window's whole content with `color` and report all of it as changed:
+/// the largest damage an application can present.
+fn repaint_all(color: Color) -> impl FnOnce(&mut Surface) -> (bool, Rect) {
+    move |content| {
+        content.fill(color);
+        let damage = Rect::new(0, 0, content.width(), content.height());
+        (true, damage)
+    }
+}
+
 /// Paint one green pixel into a window's content and report exactly that
 /// pixel as changed: the smallest damage an application can present.
 fn paint_dot(content: &mut Surface) -> (bool, Rect) {
@@ -4789,6 +4799,98 @@ fn a_window_dragged_across_a_frosted_one_never_costs_a_re_blur() {
         c.frost_cache_stats().hits(),
         served + 5,
         "every frame of the drag served the retained frost"
+    );
+}
+
+#[test]
+fn dragging_a_frosted_window_blurs_only_the_border_the_move_uncovers() {
+    // The interaction this cache was least good at: the frosted window itself
+    // being dragged. Its rectangle moves, so the frost taken for the old one no
+    // longer describes it — but the layers *beneath* it did not move, so every
+    // pixel far enough inside both rectangles that neither the blur's
+    // replication nor the shape's corners can reach it is still exactly right.
+    // Only the border is blurred again.
+    const SIDE: (u32, u32) = (200, 140);
+    const RADIUS: u16 = 4;
+    let mut c = new_compositor(mode(320, 240), BLUE).expect("compositor");
+    c.add_window(Point::ORIGIN, opaque(320, 240, GREEN));
+    let glass = c.add_window(Point::new(40, 40), clear(SIDE.0, SIDE.1));
+    assert!(c.set_backdrop_blur(glass, RADIUS));
+    composite_checked(&mut c);
+    let whole = u64::from(SIDE.0 * SIDE.1);
+    assert_eq!(
+        c.frame_stats().blur_px,
+        whole,
+        "the first frame has nothing to keep"
+    );
+
+    // A pointer sample's worth of movement, several times over, so the steady
+    // state of a drag is what is measured and not just its first step.
+    for step in 1..=5 {
+        assert!(c.move_window(glass, Point::new(40 + step * 3, 40 + step * 3)));
+        assert!(
+            c.frost_resident(glass),
+            "moving a window changes nothing beneath it, so its frost survives"
+        );
+        composite_checked(&mut c);
+        let blurred = c.frame_stats().blur_px;
+        assert!(blurred > 0, "the border it uncovered must be blurred");
+        assert!(
+            blurred * 5 < whole,
+            "step {step} blurred {blurred} of {whole} pixels; the border of a \
+             three-pixel move is a small fraction of the window"
+        );
+    }
+
+    // A jump far enough to leave no shared core at all falls back to blurring
+    // the whole rectangle rather than producing a seam.
+    assert!(c.move_window(glass, Point::new(300, 220)));
+    composite_checked(&mut c);
+    assert_eq!(
+        c.frame_stats().blur_px,
+        20 * 20,
+        "a window jumped clear of itself keeps nothing, and only its \
+         on-screen part is frosted"
+    );
+}
+
+#[test]
+fn a_reused_frost_spares_composing_the_layers_it_covers() {
+    // A frost is copied over whatever is beneath it, so composing that stack
+    // first is work the copy throws away. The window's own pixels still blend
+    // over the frost — one contribution per pixel — and nothing else does.
+    let mut c = new_compositor(mode(40, 24), BLUE).expect("compositor");
+    let under = c.add_window(Point::ORIGIN, opaque(40, 24, GREEN));
+    let glass = c.add_window(Point::new(6, 4), clear(20, 14));
+    assert!(c.set_backdrop_blur(glass, 3));
+    // Translucent as well as frosted, which is the window this is about: an
+    // opaque one would have its pixels copied rather than blended.
+    assert!(c.set_opacity(glass, 200));
+    composite_checked(&mut c);
+    assert!(c.frost_resident(glass));
+
+    // The frosted window repaints all of itself: the frost is reused whole.
+    assert_eq!(present_content(&mut c, glass, repaint_all(RED)), Some(true));
+    composite_checked(&mut c);
+    let stats = c.frame_stats();
+    assert_eq!(stats.blur_px, 0, "a retained frost is copied, not blurred");
+    assert_eq!(
+        (stats.damaged_px, stats.blended_px, stats.opaque_px),
+        (20 * 14, 20 * 14, 0),
+        "one blend per pixel — the window over its frost — and the window \
+         beneath it, which the frost hides, neither blended nor copied"
+    );
+
+    // The same damage with nothing retained pays for that stack: the blur has
+    // to read it.
+    assert_eq!(
+        present_content(&mut c, under, repaint_all(GREEN)),
+        Some(true)
+    );
+    composite_checked(&mut c);
+    assert!(
+        c.frame_stats().opaque_px >= 20 * 14,
+        "a recomputed frost must resolve the layers it blurs"
     );
 }
 
