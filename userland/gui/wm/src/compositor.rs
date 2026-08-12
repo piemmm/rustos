@@ -33,7 +33,7 @@ use tairix_reclaim::{CacheAccounting, PressureBand, PressureGauge, ReclaimCache,
 use tairix_theme::{CursorKind, Theme};
 
 use crate::chrome::{ChromeEpoch, WindowChrome};
-use crate::color::{div255, Color, Pixel};
+use crate::color::{div255, Color, DitherRow, Pixel};
 use crate::corner::Corners;
 use crate::frost::{FrostEpoch, FrostedBackdrop};
 use crate::geometry::{Point, Rect, Region, Scale};
@@ -2084,7 +2084,7 @@ impl Compositor {
         // A hardware layer is composed from its own pixels alone and cannot
         // sample what is already behind it, so a backdrop blur has no layer
         // encoding at all and the whole frame goes through software.
-        let layers = if self.has_backdrop_blur() {
+        let layers = if self.has_backdrop_blur() || self.has_translucent_window() {
             None
         } else {
             // Every visible window becomes its own layer here, so every one
@@ -2102,6 +2102,23 @@ impl Compositor {
             self.stats.bump_present();
             display.present(&self.frame)
         }
+    }
+
+    /// Whether any visible window is translucent as a whole.
+    ///
+    /// Such a window is a large field the *engine* would have to blend over
+    /// what is beneath it, and an engine blends in the scan-out's own 8 bits
+    /// with a fixed rounding: the wallpaper under it would arrive in the
+    /// `256 - opacity` levels that leaves and step into bands. The composite
+    /// this crate performs spends that missing resolution across the area
+    /// instead ([`DitherRow`]), which no layer stack can express, so the
+    /// frame goes through software exactly as a backdrop blur does. A
+    /// window's own antialiased corner is not this case — its partial
+    /// coverage is an edge a few pixels wide, with no gradient to band.
+    fn has_translucent_window(&self) -> bool {
+        self.windows
+            .iter()
+            .any(|window| window.is_visible() && window.opacity() != u8::MAX)
     }
 
     /// Encode the current scene as hardware layers, or `None` if the
@@ -2420,6 +2437,7 @@ impl Compositor {
                     .iter()
                     .filter_map(|(window, chrome)| window.row(y, *chrome)),
             );
+            let dither = DitherRow::at(py);
             let cursor_row = cursor.and_then(|c| c.local_row(y).map(|ly| (c, ly)));
             let desktop_row = desktop.map(|layer| crate::surface::row(layer, py));
             let Some((_, back_row)) = back.row_span_mut(py, left, area.width) else {
@@ -2452,7 +2470,13 @@ impl Compositor {
                 back: back_row,
                 frame: encode.then_some(frame_row),
             };
-            let work = compose_row(&layers, targets, area.left(), order, reveal);
+            let work = compose_row(
+                &layers,
+                targets,
+                area.left(),
+                order,
+                RowRound { reveal, dither },
+            );
             if encode {
                 stats.add_encoded(u64::from(area.width));
             }
@@ -2544,6 +2568,15 @@ struct RowTargets<'a> {
     frame: Option<&'a mut [u8]>,
 }
 
+/// How a composed row rounds into its 8-bit targets: the screen reveal the
+/// scan-out byte is dimmed by, and the ordered dither every blend on the row
+/// varies its rounding with.
+#[derive(Copy, Clone)]
+struct RowRound {
+    reveal: u8,
+    dither: DitherRow,
+}
+
 /// What composing one row cost.
 struct RowWork {
     /// Layer contributions blended.
@@ -2564,9 +2597,10 @@ fn compose_row(
     targets: RowTargets<'_>,
     first_col: i32,
     order: ChannelOrder,
-    reveal: u8,
+    round: RowRound,
 ) -> RowWork {
     let RowTargets { back, mut frame } = targets;
+    let RowRound { reveal, dither } = round;
     let cols = back.len();
     let limit = first_col.saturating_add_unsigned(u32::try_from(cols).unwrap_or(u32::MAX));
     let mut work = RowWork {
@@ -2606,12 +2640,15 @@ fn compose_row(
         let Some(dst) = back.get_mut(col) else {
             break;
         };
+        // A composed column is always a screen column, so the pattern is read
+        // at the position the whole-screen pass would have read it at.
         let (acc, blends) = compose_pixel(
             layers.under.unwrap_or(*dst),
             x,
             layers.desktop,
             layers.windows,
             layers.cursor,
+            dither.bias(x.cast_unsigned()),
         );
         work.blended = work.blended.saturating_add(u64::from(blends));
         *dst = acc;
@@ -2635,29 +2672,32 @@ fn compose_row(
 ///
 /// `cursor` carries the overlay and the image-local row this scanline is,
 /// already resolved by the caller, or `None` where the cursor draws nothing
-/// on this row.
+/// on this row. `bias` is this column's share of the row's ordered dither,
+/// which every blend here — and the opacity and coverage scaling inside
+/// [`WindowRow::sample`] — rounds at.
 fn compose_pixel(
     under: Pixel,
     x: i32,
     desktop_row: Option<&[Pixel]>,
     rows: &[WindowRow<'_>],
     cursor: Option<(&PlacedCursor, u32)>,
+    bias: u32,
 ) -> (Pixel, u32) {
     let mut acc = under;
     let mut blends = 0;
     if let Some(src) = desktop_pixel(desktop_row, x) {
-        acc = src.over(acc);
+        acc = src.over_biased(acc, bias);
         blends += 1;
     }
     for row in rows {
-        if let Some(src) = row.sample(x) {
-            acc = src.over(acc);
+        if let Some(src) = row.sample(x, bias) {
+            acc = src.over_biased(acc, bias);
             blends += 1;
         }
     }
     if let Some((cursor, ly)) = cursor {
         if let Some(src) = cursor.sample_row(x, ly) {
-            acc = src.over(acc);
+            acc = src.over_biased(acc, bias);
             blends += 1;
         }
     }

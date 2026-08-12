@@ -127,6 +127,82 @@ fn an_empty_picture_answers_the_minimum() {
     assert_eq!(scrim_alpha(&empty, panel(), &theme()), MIN_SCRIM);
 }
 
+/// A screen-sized picture that ramps smoothly from black at the top to white
+/// at the bottom — the tonal shape a photographic sky has, and the one a
+/// darkening wash can flatten into bands.
+fn vertical_ramp() -> Surface {
+    let mut image = Surface::new(SCREEN.width, SCREEN.height).expect("a 1000x600 picture");
+    for y in 0..SCREEN.height {
+        let level = u8::try_from(y * 255 / (SCREEN.height - 1)).unwrap_or(u8::MAX);
+        image.fill_rect(0, y, SCREEN.width, 1, Color::rgb(level, level, level));
+    }
+    image
+}
+
+/// The longest run of consecutive rows of `frame` that carry the same tone in
+/// the strip `[0, STRIP)` — a band — and how many distinct tones those rows
+/// hold, measured over `rows`.
+///
+/// A row's tone is the sum of its green channels across the strip, so it
+/// resolves the row to a fraction of a level rather than to the one level a
+/// single pixel can hold. The strip is at the left edge, clear of the centred
+/// column and below the chrome band, so it is backdrop and nothing else.
+fn backdrop_bands(frame: &Surface, rows: core::ops::Range<u32>) -> (u32, u32) {
+    const STRIP: u32 = 64;
+    let tone = |y: u32| -> u32 {
+        (0..STRIP)
+            .filter_map(|x| frame.get(x, y))
+            .map(|pixel| u32::from(pixel.g))
+            .sum()
+    };
+    let mut previous = tone(rows.start);
+    let (mut longest, mut run, mut tones) = (1, 1, 1);
+    for y in rows.skip(1) {
+        let here = tone(y);
+        if here == previous {
+            run += 1;
+            longest = longest.max(run);
+        } else {
+            run = 1;
+            tones += 1;
+            previous = here;
+        }
+    }
+    (longest, tones)
+}
+
+/// Darkening the wallpaper must not band it. This is the whole point of the
+/// scrim being a wash rather than a curtain: the picture stays a picture.
+///
+/// Measured over the middle third, where the scrim is the only thing laid
+/// over the picture, at the heaviest scrim the surface will ever ask for. The
+/// ramp there crosses about 85 levels in 200 rows, and an undithered scrim of
+/// 224 answered them with twelve tones and plateaus 22 rows deep — bands wide
+/// enough to read across a room, which is exactly what a 1080-row screen
+/// showed.
+#[test]
+fn the_heaviest_scrim_does_not_band_the_wallpaper_it_darkens() {
+    let surface = AuthSurface::new("ann");
+    let image = vertical_ramp();
+
+    let frame = surface
+        .render(
+            SCREEN,
+            Scale::ONE,
+            &theme(),
+            Backdrop::Wallpaper {
+                image: &image,
+                scrim: MAX_SCRIM,
+            },
+        )
+        .expect("a wallpapered frame");
+
+    let middle = SCREEN.height / 3..SCREEN.height - SCREEN.height / 3;
+    let (band, tones) = backdrop_bands(&frame, middle);
+    assert!(band <= 8, "the scrim flattened {band} rows into one tone");
+    assert!(tones >= 32, "the scrim left only {tones} tones of the ramp");
+}
+
 /// The wallpaper reaches the frame, and the scrim over it is what decides
 /// how much of it shows.
 #[test]

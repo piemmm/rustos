@@ -111,6 +111,29 @@ router**:
   Recomposition resolves each covering layer's source row, the back-buffer
   row, and the frame row once per row (`Window::row`), leaving a column a
   slice index and a blend.
+- **Dithered blending.** A blend into the 8-bit back buffer holds only
+  `256 - a` of the levels the picture beneath it had, so rounding every
+  pixel alike steps a smooth wallpaper into visible horizontal bands under
+  a translucent window or a frosted panel. Every blended pixel therefore
+  rounds at its own share of `tairix_raster::DitherRow`, resolved once per
+  row from the **screen** row and read at the screen column, and
+  `WindowRow::sample` scales opacity and corner coverage at the same bias.
+  The pattern is a pure function of the screen position, so a recomposited
+  rectangle matches the frame it replaces exactly and two damage rectangles
+  that meet cannot seam; its mean is plain nearest rounding, so nothing
+  lightens or darkens and no pixel moves by more than one level. Opaque
+  runs are copied, not blended, so the fast path pays nothing for it.
+- **Translucency stays in software.** A hardware layer is blended by the
+  engine in the scan-out's own 8 bits with a fixed rounding, which is
+  exactly what bands a picture under a translucent field, and no layer
+  stack can express a per-pixel dither. `present_accelerated` therefore
+  takes its software fallback when any visible window is translucent as a
+  whole, alongside the backdrop-blur and reveal cases below. A window's own
+  anti-aliased corner is not this case: partial coverage on a few edge
+  pixels has no gradient to band. Where the compositor *bakes* a window into
+  a layer (`Window::sample_local`), it reads the dither at the pixel's
+  screen position, so a baked layer holds exactly what the software
+  composite would have written there.
 - Screen reveal (`set_reveal`/`reveal`): the whole screen scaled toward
   black, `u8::MAX` normal and `0` black, which is what the desktop session
   fades in over on start-up. It is applied at the one step in

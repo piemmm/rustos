@@ -272,6 +272,18 @@ where the chrome and the prompt sit. Because the wash *is* the desktop colour,
 it composites to exactly what is already there over the flat backdrop, and only
 a picture ever sees it.
 
+The scrim and that wash are laid as **one** pass per pixel, not a scrim with
+washes over it: two composites of the same colour are one composite of the
+alpha they compose to, so the ends simply carry the composed alpha. That is a
+rendering guarantee, not a saving. A picture darkened by a heavy scrim has far
+fewer output levels than it had input levels, so rounding it into the surface
+*twice* — and rounding every pixel the same way — flattens a smooth sky into
+wide horizontal plateaus with a hard step between them. One pass through the
+shared dithered wash (`lib/raster`'s `fill_vertical_gradient`) spends the
+missing resolution across the area instead, and the picture stays a picture.
+The entry and exit veil is the same shape — a flat field over a picture — and
+goes through the same wash for the same reason.
+
 `scrim_alpha(image, panel, theme)` derives how much scrim that wallpaper needs
 for the block's text to stay legible. It sizes for the *brightest* patch under
 the block rather than the average, because text sits over the worst pixel and

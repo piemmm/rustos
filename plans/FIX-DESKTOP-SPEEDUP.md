@@ -1,6 +1,7 @@
 # FIX-DESKTOP-SPEEDUP — Software-compositor and GUI redraw performance
 
-Status: **A done, B done, C mostly done, D done** (C.0, C.1, C.2, C.4b, C.4c,
+Status: **A done, B done, C mostly done, D done** (B.5 dithers every blended
+pixel; C.0, C.1, C.2, C.4b, C.4c,
 C.5 landed — every control family reports what it repaints from both input
 paths, and a host now reports its own two kinds of change through the same two
 guarded writes; C.3 has landed for `userland/apps/widgets` with its differential
@@ -123,7 +124,10 @@ Two build-level facts make any measurement taken today meaningless:
    scene both ways and asserts equality. A change that alters output
    (half-resolution blur, a different rounding) is a *deliberate,
    documented rendering decision with a visual test*, never a silent
-   tweak — and is called out as a decision below.
+   tweak — and is called out as a decision below. Exactly one such change
+   has been made: B.5's per-pixel dither on a *blended* pixel, whose bound
+   (mean unchanged, never more than one level) is stated there; a copied
+   or opaque pixel is still byte-identical.
 3. **Tests assert work, not wall-clock (§7, no flaky tests).** CI gates
    on deterministic counters — pixels blended, rects presented, controls
    repainted, IPC round trips, cache hits — which are load-independent. A
@@ -296,6 +300,39 @@ no `abi-check` involvement: this is not ABI surface.
 
 **Acceptance:** identical frames, blended-pixel counter down on the
 occlusion and opaque scenarios.
+
+### B.5 Blended pixels are dithered  **[done]**
+
+A blend into the 8-bit back buffer admits only `256 - a` of the 256 levels the
+picture beneath it held, so one fixed rounding stepped a smooth wallpaper into
+plateaus under a translucent window or a frosted panel — invisible on a small
+QEMU screen, unmistakable on a 1080-row Pi display. Every blended pixel now
+rounds at its own bias from `tairix_raster::DitherRow`, resolved once per
+screen row in `compose_span` and indexed by the screen column;
+`WindowRow::sample` scales opacity and corner coverage at the same bias, and
+`Surface::frost_region`'s mix-back does the same.
+
+This is a **deliberate rendering change** under invariant 2, and the bound it
+keeps is stated rather than assumed: the dither's tile mean is exactly
+`ROUND_NEAREST`, so nothing lightens or darkens, and no pixel moves more than
+one level from the undithered answer. It is not a second blend (invariant 1):
+`div255` *is* `(value + 127) / 255`, so the biased divide is the same
+arithmetic with its rounding point named, and every unbiased operator
+delegates to it — which is why all 251 pre-existing WM frame tests stayed
+byte-identical.
+
+Cost is confined to pixels that were already blending: one mask and one load.
+The B.1 opaque run is untouched — it copies — so the fast path pays nothing,
+and the counters are unchanged.
+
+The hardware path keeps the same guarantee by *not* taking work it cannot do:
+an engine blends a layer in the scan-out's own 8 bits with a fixed rounding
+and no layer stack can express a per-pixel dither, so
+`Compositor::has_translucent_window` sends a window-wide translucency through
+software exactly as a backdrop blur does, and a baked layer
+(`Window::sample_local`) reads the dither at the pixel's *screen* position so
+it holds what the software composite would have written
+(`plans/FIX-DISPLAY-ACCELERATION.md` A.3).
 
 ---
 

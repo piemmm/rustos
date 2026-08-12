@@ -25,9 +25,20 @@ use alloc::vec::Vec;
 use tairix_reclaim::CachedBytes;
 
 use crate::color::{mix, Color, Pixel};
+use crate::dither::DitherRow;
 use crate::paint::Paint;
 use crate::round::round_rect_coverage;
 use crate::scan::{FillRule, SampleSpace, ScanFill};
+
+/// Where one span of a rounded-rectangle paint lands and what it does there:
+/// the span's own position on the surface — which is where its ordered dither
+/// is read — and the mode every span of that paint shares.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+struct SpanPaint {
+    first: u32,
+    row: u32,
+    mode: PaintMode,
+}
 
 /// What a rounded-rectangle paint does with the pixels it covers.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -396,7 +407,7 @@ impl Surface {
                 continue;
             };
             if !in_corner_band(local_y, h, radius) {
-                paint_span(span, source, mode);
+                paint_span(span, SpanPaint { first, row, mode }, source);
                 continue;
             }
             // The drawn columns as the rectangle sees them: `lead` is the
@@ -411,15 +422,27 @@ impl Surface {
             let (left, rest) = span.split_at_mut(left_end as usize);
             let (middle, right) = rest.split_at_mut((right_start - left_end) as usize);
             let shape = (w, h, radius);
-            paint_coverage_span(left, lead..lead + left_end, local_y, shape, source, mode);
-            paint_span(middle, source, mode);
+            let at = |column| SpanPaint {
+                first: column,
+                row,
+                mode,
+            };
+            paint_coverage_span(
+                left,
+                lead..lead + left_end,
+                local_y,
+                shape,
+                source,
+                at(first),
+            );
+            paint_span(middle, at(first + left_end), source);
             paint_coverage_span(
                 right,
                 lead + right_start..lead + drawn,
                 local_y,
                 shape,
                 source,
-                mode,
+                at(first + right_start),
             );
         }
     }
@@ -431,9 +454,19 @@ impl Surface {
     /// This is the shared gradient wash: the legibility gradient a
     /// full-screen surface lays over a wallpaper so its text survives a
     /// bright picture, and the soft shading a large plate carries. Both the
-    /// colour and the alpha are interpolated in straight-alpha form and
-    /// premultiplied per row, so a ramp that fades out keeps its hue all the
-    /// way down instead of darkening as it goes.
+    /// colour and the alpha are interpolated in straight-alpha form, so a ramp
+    /// that fades out keeps its hue all the way down instead of darkening as
+    /// it goes.
+    ///
+    /// A wash over a smoothly varying picture has fewer output levels than
+    /// the picture has input levels, so — like every translucent composite
+    /// here — it rounds at each pixel's own ordered-dither bias rather than a
+    /// fixed one, and unlike the others it rounds into the surface *once*
+    /// rather than premultiplying the source and then blending. What lands is
+    /// mean-accurate to a fraction of a level instead of resolving into flat
+    /// plateaus with a step between them. A wash of the colour already
+    /// underneath it still comes back exactly unchanged, so a flat backdrop
+    /// gains no noise from a wash it cannot see.
     ///
     /// The ramp is evaluated in the rectangle's own coordinates, so a
     /// rectangle the surface bounds or the clip window cut short shows the
@@ -454,14 +487,14 @@ impl Surface {
         }
         let last = h - 1;
         for row in self.clip.rows(y, h) {
-            let source = lerp_color(top, bottom, row - y, last).premultiply();
-            // A premultiplied pixel of zero alpha is all zeroes, so `over`
-            // would leave every destination pixel exactly as it found it.
+            let source = lerp_color(top, bottom, row - y, last);
+            // A transparent source contributes nothing at any bias, so the row
+            // is left exactly as it was found.
             if source.a == 0 {
                 continue;
             }
-            if let Some((_, span)) = self.row_span_mut(row, x, w) {
-                paint_span(span, source, PaintMode::Over);
+            if let Some((first, span)) = self.row_span_mut(row, x, w) {
+                wash_span(span, first, row, source);
             }
         }
     }
@@ -1035,18 +1068,45 @@ fn in_corner_band(local: u32, size: u32, radius: u32) -> bool {
     local < radius || local >= size - radius
 }
 
-/// Paint `source` at full coverage onto every pixel of `span`.
+/// Paint `source` at full coverage onto every pixel of `span`, which starts
+/// at surface column `first` of surface row `row`.
 ///
 /// Replacing is a slice fill, and so is compositing a fully opaque source —
 /// which yields that source unchanged — so only a translucent composite is a
-/// per-pixel blend.
-fn paint_span(span: &mut [Pixel], source: Pixel, mode: PaintMode) {
+/// per-pixel blend. That blend rounds through the surface's ordered dither
+/// for the reason every translucent composite here does: a plate laid over a
+/// picture — a control's ground over a frosted backdrop, a panel over a
+/// wallpaper — admits only `256 - a` of the levels beneath it, and rounding
+/// them all alike is what steps a gradient into bands.
+fn paint_span(span: &mut [Pixel], paint: SpanPaint, source: Pixel) {
+    let SpanPaint { first, row, mode } = paint;
     if mode == PaintMode::Replace || source.a == 255 {
         span.fill(source);
         return;
     }
-    for dst in span.iter_mut() {
-        *dst = source.over(*dst);
+    let dither = DitherRow::at(row);
+    for (column, dst) in (first..).zip(span.iter_mut()) {
+        *dst = source.over_biased(*dst, dither.bias(column));
+    }
+}
+
+/// Composite `source` over every pixel of `span`, spreading the rounding
+/// error across them so a smooth field cannot contour.
+///
+/// `first` is the span's leftmost column and `row` its row, both in the
+/// surface's own coordinates, so the dither pattern tiles the surface and two
+/// spans that meet cannot show a seam. An opaque source keeps none of the
+/// destination and rounds to itself at every bias, so it stays a slice fill.
+fn wash_span(span: &mut [Pixel], first: u32, row: u32, source: Color) {
+    if source.a == 255 {
+        span.fill(source.premultiply());
+        return;
+    }
+    let dither = DitherRow::at(row);
+    // A span never reaches past the surface width, so the column can neither
+    // overflow nor leave the surface.
+    for (column, dst) in (first..).zip(span.iter_mut()) {
+        *dst = source.over_biased(*dst, dither.bias(column));
     }
 }
 
@@ -1097,22 +1157,30 @@ fn mask_coverage_span(
 /// toward it.
 ///
 /// `columns` are the span pixels' x coordinates local to the rectangle,
-/// paired one for one with `span`, and `local_y` is its row.
+/// paired one for one with `span`, and `local_y` is its row; `first` and
+/// `row` are the same span's position on the *surface*, which is where the
+/// ordered dither is read so an arc pixel rounds exactly as the interior
+/// beside it does.
 fn paint_coverage_span(
     span: &mut [Pixel],
     columns: Range<u32>,
     local_y: u32,
     shape: (u32, u32, u32),
     source: Pixel,
-    mode: PaintMode,
+    paint: SpanPaint,
 ) {
     let (w, h, radius) = shape;
-    for (local_x, dst) in columns.zip(span.iter_mut()) {
+    let SpanPaint { first, row, mode } = paint;
+    let dither = DitherRow::at(row);
+    for ((local_x, dst), column) in columns.zip(span.iter_mut()).zip(first..) {
         let coverage = round_rect_coverage(local_x, local_y, w, h, radius);
+        let bias = dither.bias(column);
         *dst = match mode {
             PaintMode::Over if coverage == 0 => continue,
-            PaintMode::Over => source.scale_alpha(coverage).over(*dst),
-            PaintMode::Replace => mix(*dst, source, coverage),
+            PaintMode::Over => source
+                .scale_alpha_biased(coverage, bias)
+                .over_biased(*dst, bias),
+            PaintMode::Replace => mix(*dst, source, coverage, bias),
         };
     }
 }

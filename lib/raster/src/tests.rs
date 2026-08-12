@@ -3,6 +3,7 @@
 use tairix_reclaim::CachedBytes;
 
 use crate::color::{Color, Pixel};
+use crate::dither::DitherRow;
 use crate::paint::Paint;
 use crate::round::round_rect_coverage;
 use crate::scan::FillRule;
@@ -321,7 +322,16 @@ fn reference_round_rect(
             let Some(dst) = surface.get(col, row) else {
                 continue;
             };
-            surface.set(col, row, source.scale_alpha(coverage).over(dst));
+            // A translucent composite rounds at the pixel's own share of the
+            // surface's ordered dither, arc and interior alike.
+            let bias = DitherRow::at(row).bias(col);
+            surface.set(
+                col,
+                row,
+                source
+                    .scale_alpha_biased(coverage, bias)
+                    .over_biased(dst, bias),
+            );
         }
     }
 }
@@ -1038,6 +1048,139 @@ fn a_clipped_gradient_keeps_the_ramp_the_whole_rectangle_would_have_had() {
     }
     assert_eq!(clipped.get(0, 1), Some(Pixel::TRANSPARENT));
     assert_eq!(clipped.get(0, 4), Some(Pixel::TRANSPARENT));
+}
+
+/// A picture for a wash to be laid over: an opaque vertical ramp, one grey
+/// level per row.
+fn grey_ramp(width: u32, height: u32) -> Surface {
+    let mut picture = Surface::new(width, height).expect("allocates");
+    for y in 0..height {
+        let level = u8::try_from(y).unwrap_or(u8::MAX);
+        picture.fill_rect(0, y, width, 1, Color::rgb(level, level, level));
+    }
+    picture
+}
+
+/// One row's *area* tone: the sum of its green channels, which resolves the
+/// row to a fraction of a level rather than to the one level a single pixel
+/// can hold.
+fn row_tone(surface: &Surface, y: u32) -> u32 {
+    (0..surface.width())
+        .filter_map(|x| surface.get(x, y))
+        .map(|pixel| u32::from(pixel.g))
+        .sum()
+}
+
+/// The longest run of consecutive rows of `surface` carrying the same area
+/// tone — a flat plateau, which is what a band is — and how many distinct
+/// tones the rows hold between them.
+///
+/// The scenes below ramp in one direction and a wash is monotone in what it
+/// covers, so a tone that changes is a tone not seen before and counting the
+/// changes counts the distinct tones.
+fn tone_plateaus(surface: &Surface) -> (u32, u32) {
+    let mut previous = row_tone(surface, 0);
+    let (mut longest, mut run, mut tones) = (1, 1, 1);
+    for y in 1..surface.height() {
+        let tone = row_tone(surface, y);
+        if tone == previous {
+            run += 1;
+            longest = longest.max(run);
+        } else {
+            run = 1;
+            tones += 1;
+            previous = tone;
+        }
+    }
+    (longest, tones)
+}
+
+#[test]
+fn a_heavy_wash_over_a_ramp_keeps_the_ramp_distinguishable() {
+    // A wash of alpha `a` has only `256 - a` levels to say what the picture
+    // under it said in 256, so rounding every pixel the same way flattens a
+    // slow ramp into wide plateaus with a step between them — the banding a
+    // darkened wallpaper showed. Spreading that rounding across the area
+    // keeps neighbouring rows apart: at alpha 224 the plateaus were nine rows
+    // deep and only nine of 64 rows were distinguishable at all.
+    for alpha in [176, 200, 224] {
+        let mut washed = grey_ramp(64, 64);
+        let wash = Color::rgba(11, 14, 16, alpha);
+        washed.fill_vertical_gradient(0, 0, 64, 64, wash, wash);
+
+        let (plateau, tones) = tone_plateaus(&washed);
+        assert!(plateau <= 3, "alpha {alpha} flattened {plateau} rows");
+        assert!(tones >= 24, "alpha {alpha} left only {tones} of 64 tones");
+    }
+}
+
+#[test]
+fn a_wash_spreads_its_rounding_error_over_the_area() {
+    // A flat wash over a flat picture whose exact result falls between two
+    // levels: one tile's pixels must average to that result rather than all
+    // taking the nearer level, which is the tonal resolution the ramp above
+    // survives on. Exactly `100 * 127 / 255 = 49.8` per pixel here, so the
+    // tile of 64 owes 3187.45 and a fixed rounding pays 3200.
+    let half_black = Color::rgba(0, 0, 0, 128);
+    let mut washed = Surface::new(8, 8).expect("allocates");
+    washed.fill(Color::rgb(100, 100, 100));
+    washed.fill_vertical_gradient(0, 0, 8, 8, half_black, half_black);
+
+    let tile: u32 = (0..8).map(|y| row_tone(&washed, y)).sum();
+    let owed = 100 * 127 * 64 / 255;
+    assert!(
+        tile.abs_diff(owed) <= 1,
+        "the tile paid {tile} against {owed} owed"
+    );
+}
+
+#[test]
+fn a_wash_of_the_colour_underneath_it_leaves_the_surface_exactly_as_it_was() {
+    // The flat desktop backdrop behind the login column is washed in its own
+    // colour, so the wash must be an identity there whatever its alpha:
+    // dithering only the picture's share of the blend would sprinkle a
+    // half-level of noise over a surface that has nothing to smooth.
+    let desktop = Color::rgb(11, 14, 16);
+    for alpha in [1, 64, 128, 140, 224, 254] {
+        let mut surface = Surface::new(8, 8).expect("allocates");
+        surface.fill(desktop);
+        let wash = Color::rgba(desktop.r, desktop.g, desktop.b, alpha);
+        surface.fill_vertical_gradient(0, 0, 8, 8, wash, wash);
+
+        for y in 0..8 {
+            for x in 0..8 {
+                assert_eq!(
+                    surface.get(x, y),
+                    Some(desktop.premultiply()),
+                    "alpha {alpha} at ({x}, {y})"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn a_wash_leaves_every_pixel_premultiplied() {
+    // Every channel takes the same rounding bias, so a colour channel can
+    // never round above the alpha it is premultiplied by — including over a
+    // destination that is itself translucent.
+    let mut surface = Surface::new(8, 8).expect("allocates");
+    for y in 0..8 {
+        let ground = Color::rgba(255, 200, 100, u8::try_from(y * 36).unwrap_or(u8::MAX));
+        surface.fill_rect(0, y, 8, 1, ground);
+    }
+    let wash = Color::rgba(200, 150, 90, 96);
+    surface.fill_vertical_gradient(0, 0, 8, 8, wash, Color::rgba(30, 40, 50, 200));
+
+    for y in 0..8 {
+        for x in 0..8 {
+            let pixel = surface.get(x, y).expect("in bounds");
+            assert!(
+                pixel.r <= pixel.a && pixel.g <= pixel.a && pixel.b <= pixel.a,
+                "({x}, {y}) came out unpremultiplied: {pixel:?}"
+            );
+        }
+    }
 }
 
 // ---- rounded-rect mask ----------------------------------------------

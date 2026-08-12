@@ -20,7 +20,8 @@ use alloc::vec::Vec;
 use tairix_rng::RandU64;
 
 use super::{box_blur, BlurScratch, Reciprocal, RECIPROCAL_MAX_COUNT, RECIPROCAL_SHIFT};
-use crate::color::{div255, Pixel};
+use crate::color::{div255_biased, Pixel, ROUND_NEAREST};
+use crate::dither::DitherRow;
 use crate::round::round_rect_coverage;
 use crate::surface::Surface;
 
@@ -463,30 +464,58 @@ fn zero_coverage_leaves_the_whole_surface_untouched() {
     assert_eq!(after, before, "a coverage of nothing frosts nothing");
 }
 
+/// A partial coverage is a translucent field over a picture, so the mix takes
+/// the surface's ordered dither: the expectation is the same weighted average
+/// rounded at each pixel's own bias, read at its **surface** position (the
+/// rectangle starts at `(1, 1)`), not at a fixed rounding.
 #[test]
-fn partial_coverage_is_the_weighted_mix_of_the_original_and_the_blur() {
+fn partial_coverage_is_the_dithered_weighted_mix_of_the_original_and_the_blur() {
     const WEIGHT: u8 = 64;
+    const RECT: (u32, u32, u32, u32) = (1, 1, 5, 4);
     let before = patterned(8, 6);
-    let original = block(&before, 1, 1, 5, 4);
+    let original = block(&before, RECT.0, RECT.1, RECT.2, RECT.3);
     let blur = blurred(&original, 5, 4, 2);
     let keep = u32::from(255 - WEIGHT);
     let take = u32::from(WEIGHT);
-    let channel = |from: u8, to: u8| div255(u32::from(from) * keep + u32::from(to) * take);
-    let expected: Vec<Pixel> = original
-        .iter()
-        .zip(&blur)
-        .map(|(from, to)| Pixel {
+    let mixed = |from: Pixel, to: Pixel, bias: u32| {
+        let channel =
+            |from: u8, to: u8| div255_biased(u32::from(from) * keep + u32::from(to) * take, bias);
+        Pixel {
             r: channel(from.r, to.r),
             g: channel(from.g, to.g),
             b: channel(from.b, to.b),
             a: channel(from.a, to.a),
+        }
+    };
+    let expected: Vec<Pixel> = original
+        .iter()
+        .zip(&blur)
+        .enumerate()
+        .map(|(index, (from, to))| {
+            let column = RECT.0 + u32::try_from(index).unwrap_or(0) % RECT.2;
+            let row = RECT.1 + u32::try_from(index).unwrap_or(0) / RECT.2;
+            mixed(*from, *to, DitherRow::at(row).bias(column))
         })
         .collect();
     assert_ne!(expected, original, "a partial mix is not the original");
     assert_ne!(expected, blur, "a partial mix is not the blur");
 
-    let after = frosted(before, (1, 1, 5, 4), 2, WEIGHT);
-    assert_eq!(block(&after, 1, 1, 5, 4), expected);
+    let after = frosted(before, RECT, 2, WEIGHT);
+    assert_eq!(block(&after, RECT.0, RECT.1, RECT.2, RECT.3), expected);
+
+    // The dither only ever chooses between the two levels the exact mix falls
+    // between, so no pixel is more than a level from the undithered answer.
+    for ((from, to), got) in original.iter().zip(&blur).zip(&expected) {
+        let nearest = mixed(*from, *to, ROUND_NEAREST);
+        for (a, b) in [
+            (got.r, nearest.r),
+            (got.g, nearest.g),
+            (got.b, nearest.b),
+            (got.a, nearest.a),
+        ] {
+            assert!(a.abs_diff(b) <= 1, "{a} is more than a level from {b}");
+        }
+    }
 }
 
 #[test]

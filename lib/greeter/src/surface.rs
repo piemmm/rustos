@@ -13,7 +13,7 @@ use tairix_font::BitmapFont;
 use tairix_geometry::{Rect, Scale};
 use tairix_icon::{builtin_icon, IconKind};
 use tairix_input::{InputEvent, Key, NamedKey};
-use tairix_raster::{Color, Surface};
+use tairix_raster::{div255, Color, Surface};
 use tairix_theme::{Contrast, MotionInteraction, TextRole, Theme};
 
 use crate::chooser::{monogram_disc, monogram_of, AccountTile, Chooser, Step, OTHER_MONOGRAM};
@@ -520,15 +520,11 @@ impl AuthSurface {
             None => self.paint_settled(&mut surface, screen, scale, theme, offset),
         }
         if let Some(veil) = self.veil {
+            // Through the wash, not a rectangle fill: this is a flat field over
+            // a picture, the shape that bands when every pixel rounds alike.
             let (w, h) = (surface.width(), surface.height());
-            surface.fill_round_rect(
-                0,
-                0,
-                w,
-                h,
-                0,
-                Color::from(at_strength(VEIL, veil.strength())),
-            );
+            let black = Color::from(at_strength(VEIL, veil.strength()));
+            surface.fill_vertical_gradient(0, 0, w, h, black, black);
         }
         self.place(screen, scale, theme);
         Some(surface)
@@ -1414,34 +1410,45 @@ fn cooldown_notice(remaining: Duration64) -> String {
 }
 
 /// Fill `surface` with what lies behind the column.
+///
+/// The picture is darkened by one wash whose strength varies down the screen:
+/// the scrim the panel's legibility asks for everywhere, deepened at the ends
+/// by [`WASH_ALPHA`]. No blur is reachable from here — that lives in the
+/// compositor — so the ends carry more of the desktop colour instead, where
+/// the chrome and the prompt sit. The wash *is* the desktop colour, so over
+/// the flat backdrop it composites to exactly what is already there and only
+/// a picture ever sees it.
+///
+/// Laid as one pass per pixel rather than a scrim with washes over it: two
+/// composites of the same colour are one composite of the alpha they compose
+/// to, and a picture that reaches the surface's 8 bits once instead of twice
+/// keeps tonal steps a second rounding would flatten into bands.
 fn paint_backdrop(surface: &mut Surface, theme: &Theme, backdrop: Backdrop<'_>) {
     let desktop = Color::from(theme.palette().desktop);
     surface.fill(desktop);
     let (w, h) = (surface.width(), surface.height());
-    if let Backdrop::Wallpaper { image, scrim } = backdrop {
-        surface.blit(0, 0, image);
-        // Through the compositing rounded fill at zero radius, because a plain
-        // rectangle fill overwrites rather than blends and would hide the
-        // picture outright.
-        surface.fill_round_rect(
-            0,
-            0,
-            w,
-            h,
-            0,
-            Color::rgba(desktop.r, desktop.g, desktop.b, scrim),
-        );
-    }
-    // No blur is reachable from here — that lives in the compositor — so the
-    // ends of the screen carry more of the desktop colour instead, where the
-    // chrome and the prompt sit. It is the desktop colour itself, so over the
-    // flat backdrop the wash composites to exactly what is already there and
-    // only a picture ever sees it.
+    let scrim = match backdrop {
+        Backdrop::Wallpaper { image, scrim } => {
+            surface.blit(0, 0, image);
+            scrim
+        }
+        Backdrop::Desktop => 0,
+    };
     let band = (h / WASH_BANDS).max(1);
-    let wash = Color::rgba(desktop.r, desktop.g, desktop.b, WASH_ALPHA);
-    let clear = Color::rgba(desktop.r, desktop.g, desktop.b, 0);
-    surface.fill_vertical_gradient(0, 0, w, band, wash, clear);
-    surface.fill_vertical_gradient(0, h.saturating_sub(band), w, band, clear, wash);
+    let wash = |alpha| Color::rgba(desktop.r, desktop.g, desktop.b, alpha);
+    let ends = wash(washes_composed(WASH_ALPHA, scrim));
+    let middle = wash(scrim);
+    surface.fill_vertical_gradient(0, 0, w, band, ends, middle);
+    surface.fill_vertical_gradient(0, band, w, h.saturating_sub(2 * band), middle, middle);
+    surface.fill_vertical_gradient(0, h.saturating_sub(band), w, band, middle, ends);
+}
+
+/// The single alpha two washes of the *same* colour compose to.
+///
+/// Each keeps `1 - a` of what it covers, so what survives both is the product
+/// of what each leaves.
+fn washes_composed(first: u8, second: u8) -> u8 {
+    255 - div255(u32::from(255 - first) * u32::from(255 - second))
 }
 
 /// Paint one field as the prompt's pill.

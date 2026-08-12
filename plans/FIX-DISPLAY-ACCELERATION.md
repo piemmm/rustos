@@ -99,6 +99,21 @@ where reachable, **does not actually save work**:
   `lib/raster`; no second blend is forked. The WM composites in software
   *only* the layers hardware cannot source directly; those baked results
   become their own layer.
+- **The engine is never handed a blend that would band**
+  (`plans/FIX-DESKTOP-SPEEDUP.md` B.5). A hardware layer is blended in the
+  scan-out's own 8 bits with one fixed rounding, so a *translucent field*
+  over a picture arrives in the `256 - a` levels that leaves and steps a
+  smooth wallpaper into plateaus; the software composite spends that
+  missing resolution across the area with a per-pixel ordered dither, which
+  no layer stack can express. `Compositor::has_translucent_window`
+  therefore refuses the layer path for a window-wide translucency exactly
+  as a backdrop blur does. A layer's own antialiased *edge* is not this
+  case — a few pixels of partial coverage have no gradient to band — so
+  ordinary rounded windows keep the hardware path. A stage that wants the
+  hardware to blend translucency must first give the engine an honest,
+  *proven* way to say it blends without banding (a high-precision or
+  dithered blend); until such a capability has a live producer and
+  consumer it is not added (§2.4), and translucency is baked or refused.
 - **Roll our own** (§2.12): the virtio-gpu protocol is implemented in-
   tree on `lib/virtio`, not an external crate.
 - **Fail closed, seat-gated, no ambient authority** (§5.4): every
@@ -176,6 +191,12 @@ Stage A adds no speculative caps; `max_layers`, `max_width_px`,
   window shm frame (no `LayerBuf`, no `sample_local`); only layers the
   hardware cannot source (rounded corners, per-region alpha, translucency
   beyond `per_layer_opacity`) are baked in software into their own layer.
+  A baked layer keeps the software path's own rounding: `sample_local`
+  reads the ordered dither at the pixel's **screen** position, so the baked
+  pixels are the ones the software composite would have written there. A
+  translucency the *engine* would blend is refused outright, per the
+  no-banding invariant above — baking cannot help there, because the
+  banding would happen in the engine's blend, not in the bake.
 - `lib/abi` C header (`cargo xtask c-header --write`) regenerated;
   `cargo xtask abi-check` green.
 

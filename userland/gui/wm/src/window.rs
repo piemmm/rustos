@@ -9,7 +9,7 @@ use tairix_reclaim::CachedBytes;
 use tairix_theme::{CursorKind, Theme};
 
 use crate::chrome::WindowChrome;
-use crate::color::{div255, Pixel};
+use crate::color::{div255, DitherRow, Pixel};
 use crate::corner::Corners;
 use crate::geometry::{Point, Rect, Region, Scale};
 use crate::surface::{self, Surface};
@@ -636,6 +636,10 @@ impl Window {
     /// (`Compositor::present_accelerated`) uses to bake a window into a
     /// premultiplied layer. `chrome` is this window's rendered furniture,
     /// resolved by the caller exactly as for [`Self::row`].
+    ///
+    /// The ordered dither is read at the pixel's **screen** position, not the
+    /// layer's, so a window baked into a layer holds exactly the pixels the
+    /// software composite would have written at the same place.
     pub(crate) fn sample_local(
         &self,
         lx: u32,
@@ -644,7 +648,8 @@ impl Window {
     ) -> Option<Pixel> {
         let x = self.origin.x.checked_add(i32::try_from(lx).ok()?)?;
         let y = self.origin.y.checked_add(i32::try_from(ly).ok()?)?;
-        self.row(y, chrome)?.sample(x)
+        self.row(y, chrome)?
+            .sample(x, DitherRow::at(y.cast_unsigned()).bias(x.cast_unsigned()))
     }
 
     /// Move the window to `origin`, returning whether it actually changed
@@ -1143,8 +1148,13 @@ impl WindowRow<'_> {
     /// there is no decoration to give way to does the coverage anti-alias the
     /// client's own edge, which is how a plain rounded window (a popup, the
     /// taskbar) presents its corners.
+    ///
+    /// `bias` is this pixel's share of the composite's ordered dither, taken
+    /// here as well as in the blend because scaling by an opacity is the same
+    /// loss of tonal resolution: a translucent window's own gradients would
+    /// otherwise step before they ever reached the backdrop.
     #[must_use]
-    pub(crate) fn sample(&self, x: i32) -> Option<Pixel> {
+    pub(crate) fn sample(&self, x: i32, bias: u32) -> Option<Pixel> {
         if let Some(lx) = x
             .checked_sub(self.client_x)
             .and_then(|d| u32::try_from(d).ok())
@@ -1152,16 +1162,23 @@ impl WindowRow<'_> {
             if lx < self.client_cols {
                 let coverage = self.cut.map_or(u8::MAX, |cut| cut.coverage(lx));
                 if coverage == u8::MAX {
-                    return Some(self.content.get(lx as usize)?.scale_alpha(self.opacity));
+                    return Some(
+                        self.content
+                            .get(lx as usize)?
+                            .scale_alpha_biased(self.opacity, bias),
+                    );
                 }
                 if let Some(pixel) = self.decoration_sample(x) {
-                    return Some(pixel.scale_alpha(self.opacity));
+                    return Some(pixel.scale_alpha_biased(self.opacity, bias));
                 }
                 let pixel = *self.content.get(lx as usize)?;
-                return Some(pixel.scale_alpha(combine(self.opacity, coverage)));
+                return Some(pixel.scale_alpha_biased(combine(self.opacity, coverage), bias));
             }
         }
-        Some(self.decoration_sample(x)?.scale_alpha(self.opacity))
+        Some(
+            self.decoration_sample(x)?
+                .scale_alpha_biased(self.opacity, bias),
+        )
     }
 
     /// The decoration pixel at screen column `x`, from whichever of the row's

@@ -20,6 +20,7 @@
 use alloc::vec::Vec;
 
 use crate::color::{mix, Pixel};
+use crate::dither::DitherRow;
 use crate::surface::Surface;
 
 /// Blur `region` in place: a dense, row-major, premultiplied
@@ -138,6 +139,12 @@ impl Surface {
     /// edge or the clip window cuts short still reads the whole shape rather
     /// than re-fitting it to what survives.
     ///
+    /// A partial coverage is a translucent field over a picture, so the mix
+    /// rounds through the surface's own ordered dither: a frosted bar over a
+    /// smooth wallpaper keeps the wallpaper's gradient instead of stepping it
+    /// into plateaus. Full coverage takes the blurred pixel exactly and no
+    /// coverage leaves the destination exactly, at every bias.
+    ///
     /// The frost is confined to what the surface bounds and the active clip
     /// window admit and reads only the pixels it may write: samples past
     /// that edge replicate it, so the effect can neither pull a neighbour's
@@ -201,12 +208,15 @@ impl Surface {
         );
         let lead = columns.start - x;
         for (row, blurred) in rows.zip(region.chunks_exact(width)) {
-            let Some((_, target)) = self.row_span_mut(row, columns.start, cols) else {
+            let Some((first, target)) = self.row_span_mut(row, columns.start, cols) else {
                 continue;
             };
             let ly = row - y;
-            for ((dst, src), lx) in target.iter_mut().zip(blurred).zip(lead..) {
-                *dst = mix(*dst, *src, coverage(lx, ly));
+            let dither = DitherRow::at(row);
+            for (((dst, src), lx), column) in
+                target.iter_mut().zip(blurred).zip(lead..).zip(first..)
+            {
+                *dst = mix(*dst, *src, coverage(lx, ly), dither.bias(column));
             }
         }
     }

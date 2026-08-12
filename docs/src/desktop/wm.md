@@ -22,6 +22,9 @@ The compositor turns a stack of windows into one scan-out frame:
    background, bottom-to-top in z-order, using the Porter–Duff *over*
    operator (`Pixel::over`). It returns the `Region` it actually
    recomposited (screen-clipped), which is what the present step moves.
+   Each blend rounds at that pixel's own share of the shared ordered
+   dither (see [Dithered blending](#dithered-blending)); an opaque run is
+   copied rather than blended and pays nothing for it.
 3. Each composited pixel is scaled by the screen reveal (see
    [Screen reveal](#screen-reveal)) and encoded into a byte frame laid out
    for the active `DisplayMode` (`Rgba8888` or `Bgra8888`).
@@ -46,6 +49,37 @@ dirty so the next composite repaints every pixel over it — windows and the
 cursor re-blend on top unchanged — and returns `false` without damaging
 anything when the colour is already in effect, so a caller can skip a
 redundant present.
+
+## Dithered blending
+
+A blend into the 8-bit back buffer cannot hold what it was given: a source
+of alpha `a` admits only `256 - a` of the 256 levels the picture beneath it
+held. Round every pixel the same way and a smoothly shaded wallpaper under a
+translucent window — or under a frosted panel — collapses into wide flat
+stripes with a hard step between them. It is invisible on a small test
+display and unmistakable on a 1080-row screen.
+
+Every blended pixel therefore rounds at its own bias from
+`tairix_raster::DitherRow`: values between two levels land on the lower one
+in some pixels and the higher one in others, and the area mean carries the
+fraction. The row is resolved once per **screen** row and indexed by the
+screen column, and `WindowRow::sample` scales window opacity and
+rounded-corner coverage at the same bias, so a translucent window's own
+gradients survive too. This is one shared definition with the rest of the
+rasteriser — the login screen's scrim, a translucent plate, and
+`frost_region`'s mix-back all round the same way — not a compositor-local
+trick.
+
+Three properties make it safe on the frame path:
+
+- The bias is a pure function of the screen position, so a recomposited
+  rectangle matches the frame it replaces exactly, two damage rectangles
+  that meet cannot seam, and a still frame never shimmers.
+- The tile's mean bias is plain nearest rounding, so nothing lightens or
+  darkens and no pixel is ever more than one level from the undithered
+  answer.
+- Opaque runs are copied whole, so the cost falls only where a blend was
+  already being paid: one mask and one load per blended pixel.
 
 ## Screen reveal
 
@@ -112,7 +146,14 @@ unconditionally (`Compositor::has_backdrop_blur`): a hardware layer is
 composed from its own pixels alone and cannot sample what is already
 behind it, so a scene with any visible frosted window has no layer
 encoding at all and goes through software rather than presenting a frame
-the frosting is missing from. An **in-flight screen reveal** takes it too:
+the frosting is missing from. A **translucent window** takes it as well
+(`Compositor::has_translucent_window`): the engine would blend that layer
+over what is beneath it in the scan-out's own 8 bits with a fixed rounding,
+which is exactly what bands a picture under a translucent field, and no
+layer stack can express a per-pixel dither. A window's own anti-aliased
+corner is not this case — partial coverage a few pixels wide has no gradient
+to band — so ordinary rounded windows still take the hardware path. An
+**in-flight screen reveal** takes it too:
 the engine scans a layer out as the driver was handed it, so nothing it
 composes passes through the dimming and the screen would show at full
 strength while the fade ran. `encode_layers` therefore declines while

@@ -335,6 +335,91 @@ fn opaque_window_overwrites_background() {
     assert_eq!(frame_pixel(&c, 3, 3), [0, 0, 255, 255]); // background again
 }
 
+/// A picture that ramps *slowly* down the screen — one level per row, the
+/// tonal shape of a wallpaper's sky and the one a translucent field over it
+/// can flatten into bands. A steep ramp cannot band: it outruns the levels
+/// the blend takes away.
+fn ramp_surface(side: u32) -> Surface {
+    let mut surface = Surface::new(side, side).expect("surface allocates");
+    for y in 0..side {
+        let level = u8::try_from(y).unwrap_or(u8::MAX);
+        surface.fill_rect(0, y, side, 1, Color::rgb(level, level, level));
+    }
+    surface
+}
+
+/// The longest run of consecutive frame rows carrying the same tone across
+/// `columns`, and how many distinct tones those rows hold.
+///
+/// A row's tone is the sum of its green scan-out bytes, so it resolves the row
+/// to a fraction of a level rather than to the one level a single pixel can
+/// hold. The scene below ramps in one direction and a blend is monotone in
+/// what it covers, so a tone that changes is a tone not seen before.
+fn frame_bands(comp: &Compositor, rows: core::ops::Range<u32>, columns: u32) -> (u32, u32) {
+    let tone = |y: u32| -> u32 {
+        (0..columns)
+            .map(|x| u32::from(frame_pixel(comp, x, y)[1]))
+            .sum()
+    };
+    let mut previous = tone(rows.start);
+    let (mut longest, mut run, mut tones) = (1, 1, 1);
+    for y in rows.skip(1) {
+        let here = tone(y);
+        if here == previous {
+            run += 1;
+            longest = longest.max(run);
+        } else {
+            run = 1;
+            tones += 1;
+            previous = here;
+        }
+    }
+    (longest, tones)
+}
+
+/// A translucent window over a smoothly shaded desktop must not band it.
+///
+/// The blend has only `256 - alpha` output levels for the 256 the picture
+/// beneath it held, so rounding every pixel alike answers a whole ramp with a
+/// handful of tones: at alpha 224 this scene came out as eight plateaus eight
+/// rows deep. The composite spreads that rounding over the area instead, and
+/// the ramp survives.
+#[test]
+fn a_translucent_window_does_not_band_the_desktop_beneath_it() {
+    const SIDE: u32 = 64;
+    let mut c = new_compositor(mode(SIDE, SIDE), BLUE).expect("compositor");
+    c.set_desktop(ramp_surface(SIDE));
+    let veil = Surface::filled(SIDE, SIDE, Color::rgba(11, 14, 16, 224).premultiply())
+        .expect("surface allocates");
+    c.add_window(Point::ORIGIN, veil);
+
+    c.composite();
+
+    let (band, tones) = frame_bands(&c, 0..SIDE, SIDE);
+    assert!(band <= 3, "the window flattened {band} rows into one tone");
+    assert!(
+        tones >= 32,
+        "only {tones} of {SIDE} tones survived the window"
+    );
+}
+
+/// The same guarantee for the desktop layer's own blend: a translucent
+/// wallpaper over the root fill is the same shape of composite.
+#[test]
+fn a_translucent_desktop_layer_does_not_band_over_the_background() {
+    const SIDE: u32 = 64;
+    let mut c = new_compositor(mode(SIDE, SIDE), BLUE).expect("compositor");
+    let mut ramp = ramp_surface(SIDE);
+    ramp.fill_round_rect(0, 0, SIDE, SIDE, 0, Color::rgba(11, 14, 16, 224));
+    c.set_desktop(ramp);
+
+    c.composite();
+
+    let (band, tones) = frame_bands(&c, 0..SIDE, SIDE);
+    assert!(band <= 3, "the desktop layer flattened {band} rows");
+    assert!(tones >= 32, "only {tones} of {SIDE} tones survived");
+}
+
 #[test]
 fn top_window_wins_z_order() {
     let mut c = new_compositor(mode(2, 2), BLUE).expect("compositor");
@@ -1836,6 +1921,32 @@ fn hidden_window_is_omitted_from_the_layer_stack() {
 
     c.present_accelerated(&mut display).expect("present");
     assert_eq!(display.layers.len(), 1, "only the background remains");
+}
+
+/// An engine blends a layer over what is beneath it in the scan-out's own 8
+/// bits with a fixed rounding, which is exactly what bands a picture under a
+/// translucent field. The compositor keeps such a scene for itself, where the
+/// blend can spread its rounding across the area, as it already does for a
+/// backdrop blur.
+#[test]
+fn a_translucent_window_takes_the_software_path_the_engine_cannot_dither() {
+    let mut c = new_compositor(mode(8, 8), BLUE).expect("compositor");
+    let win = c.add_window(Point::new(1, 1), opaque(2, 2, RED));
+    assert!(c.set_opacity(win, 200));
+    let mut display = MockAccel::new(mode(8, 8), generous_caps());
+
+    c.present_accelerated(&mut display).expect("present");
+
+    assert!(display.layers.is_empty(), "no layer stack was handed over");
+    assert!(
+        !display.software_frame.is_empty(),
+        "the frame went through the software composite"
+    );
+
+    // Opaque again, and the engine serves the scene as before.
+    assert!(c.set_opacity(win, 255));
+    c.present_accelerated(&mut display).expect("present");
+    assert_eq!(display.layers.len(), 2, "background + window");
 }
 
 #[test]

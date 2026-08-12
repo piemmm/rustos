@@ -145,11 +145,12 @@ This crate owns:
   the way in, so a caller that draws the same sprite hot and greyed — a window
   title bar's identity icon, focused and not — keeps one cached copy of it.
 - `Surface::fill_vertical_gradient` — a top-to-bottom colour ramp, one span
-  fill per row. Interpolation is in *straight* alpha and premultiplied per
-  row, so a ramp that fades out keeps its hue instead of being dragged toward
-  black. The ramp is evaluated in the rectangle's own coordinates, so a
-  clipped gradient shows the band the whole rectangle would have had rather
-  than a re-scaled one.
+  fill per row. Interpolation is in *straight* alpha, so a ramp that fades out
+  keeps its hue instead of being dragged toward black. The ramp is evaluated in
+  the rectangle's own coordinates, so a clipped gradient shows the band the
+  whole rectangle would have had rather than a re-scaled one. This is the
+  crate's one *wash*, and washes round differently from every other paint — see
+  below.
 - `Surface::mask_to_round_rect` — confine content already painted on a surface
   to a rounded shape: everything outside is cleared and corner pixels are
   scaled by the shared coverage. This is what a *fill* cannot do — a rounded
@@ -217,6 +218,47 @@ a coverage bitmap through it — so such a consumer also pays one bounds check
 and one index computation per row instead of per pixel. It returns the column
 the span really starts at, so a caller pairing it with its own mask advances
 that mask by whatever leading columns the clip withheld.
+
+## Rounding, and why a translucent paint dithers
+
+Every operator here rounds at a caller-chosen point: `div255_biased(value,
+bias)` is the one divide, and `ROUND_NEAREST` (127) *is* nearest rounding,
+because a quotient's fractional part is a multiple of 1/255 and can never fall
+exactly half way. `div255`, `Pixel::over`, `Pixel::scale_alpha` and the mixer
+are that same arithmetic at that same bias, so naming the rounding point added
+no second definition and moved no existing pixel.
+
+It matters because compositing into 8 bits *loses* levels: a source of alpha
+`a` admits only `256 - a` of the 256 the destination held. Round every pixel
+of a large translucent field the same way and a smoothly varying picture under
+it resolves into flat plateaus with a hard step between them — banding. No
+extra arithmetic precision fixes it; the levels to say it with are gone.
+
+So a **translucent composite into a surface** rounds at a per-pixel bias from
+the ordered (Bayer 8×8) `DitherRow`: a value between two levels lands on the
+lower one in some pixels and the higher one in others, and the area mean
+carries the fraction. A heavy wash over a 64-row ramp keeps 37 of its 64 tones
+apart where a fixed rounding kept nine. That covers the gradient wash, a
+translucent `fill_rect`/`fill_round_rect` plate and its anti-aliased arc, and
+`frost_region`'s mix-back — one rule, no exceptions to remember. The
+compositor (`userland/gui/wm`) reads the same `DitherRow` at each pixel's
+screen position, so a window blended over the wallpaper rounds exactly as a
+wash over it would.
+
+Three properties make it safe to apply everywhere:
+
+- The bias is a pure function of the pixel's **surface** coordinates, so frames
+  are reproducible, two spans that meet cannot seam, and a rectangle
+  recomposited on its own lands where the whole-surface pass would have put it.
+- The tile's mean bias is exactly `ROUND_NEAREST`, so a dithered paint neither
+  lightens nor darkens what it covers, and no pixel is ever more than one level
+  from the undithered answer.
+- A wash of the colour already underneath it is exactly the identity at every
+  bias, so a flat backdrop gains no noise from a paint it cannot see.
+
+An *opaque* source keeps none of the destination, so it stays a slice fill with
+no dither work at all — which is also why the compositor's opaque-run copy path
+is untouched.
 
 ## The resampler
 
