@@ -14,7 +14,9 @@ User decision and D.6 a follow-up the measurements exposed).
 E.1 and E.2 done — a frame is presented **once**, naming every disjoint
 rectangle it changed, so the present path no longer rotates the frame ring
 per rectangle nor copies a bounding box spanning them; E.3/E.4 (frame
-pacing) planned.
+pacing) planned. H done — the kernel no longer re-freezes a task's whole
+address-space snapshot when a syscall or fault maps or releases a region it
+can name, which is what made a popup-window menu cost ~300 ms on a Pi 4B.
 Stages A–E need no hardware acceleration, no kernel change, and no new
 syscall; F needs a `plans/FIX-HARDWARE-FEATURES.md` correction; G is gated on
 a User decision (§15.7) because it is kernel work.
@@ -1451,8 +1453,67 @@ Stated so a later change cannot quietly take a shortcut:
 | E | disjoint region, one present per frame, one-shot pacing | B, C, D | `Present` rect list (with FIX-DISPLAY-ACCELERATION Stage B) | no |
 | F | `lib/cpuops` `ByPriority` raster candidates (aarch64 first) | B, C, (D, E), F.0 decision | no | no |
 | G | user-space FP/SSE enablement | User decision | target floor | yes |
+| H | publish a region's own pages instead of re-freezing the space | — | no | yes |
 
 A–E are expected to dominate F entirely.
+
+---
+
+## Stage H — the kernel cost of a popup window  **[done]**
+
+Not a compositor stage, and recorded here because this is where a reader
+chasing "opening a menu is slow" arrives. The cost was **below** every
+stage above it, and it is why a menu drawn inside a window was instant
+while the same menu in its own window was not.
+
+### H.1 What it was
+`terminal.app` is the only app whose menus are separate **popup windows**
+(`files.app`, the pinboard and the switchboard draw theirs into their own
+surface). A popup window therefore costs, per open: `shm_create` +
+`shm_grant` in the app and `shm_map` in the session; per close, an unmap on
+each side. **Every one of those syscalls re-froze the caller's entire
+address-space snapshot** — `AddressSpace::freeze` walks the page table and
+allocates a fresh node per resident page, and the kernel heap places a node
+by scanning its free list (`plans/FIX-KHEAP.md`). The session is the largest
+address space on the machine (wallpaper, back buffer, every window's
+pixels), so four of those per menu, inside non-preemptible syscalls, is the
+stall — and it is invisible at QEMU screen sizes because the session's
+resident set is a fraction of a 1080p one.
+
+### H.2 The fix
+Every path that knows *which* pages it changed publishes exactly those,
+through one pair in `kernel/core/src/syscalls.rs`:
+`publish_region_mapping` (reads each page's resolved mapping from the live
+space) and `publish_region_teardown` (removes them, unconditionally — a
+re-freeze is a no-op on a CPU with no published live space, which would
+leave freed pages translating). Both fall back to the wholesale re-freeze
+only when a snapshot cannot absorb a delta, so the delta is a cost
+reduction and never a correctness dependency. `sharedreg::unmap`,
+`DmaPool::free_at`, `LiveUserSpace::free_dma` and `DmaAllocFacility::free`
+now report the byte extent they released, because those were the only two
+releases whose caller did not already hold it.
+
+Two further instances of the same defect were found by reading and fixed in
+the same change: the **file-backed fault** path re-froze the whole snapshot
+per faulted page (making an N-page mapping O(N²) to read — the very hazard
+the single-page delta was introduced for on the anonymous path), and the
+stack-growth walk re-froze after committing a page range it had just
+computed. Only two callers re-freeze now, both compressed-tier batches that
+move several pages at once and report no list: the ramzip warm/cluster
+restore and the direct-reclaim compress-out sweep.
+
+### H.3 The gate
+`shm_map_and_unmap_publish_only_the_regions_own_pages`: a task with 64
+resident pages maps and unmaps a one-page shared region and must end with a
+snapshot of exactly three pages and **zero** whole-space freezes. Proved to
+fail before the fix — the snapshot held 67 pages, the whole resident set the
+rebuild imported. A work count, not a timing (invariant 3).
+
+### H.4 What this does *not* close
+The remaining desktop cost of an app-owned popup window is the app's own
+whole-surface repaint (C.3) and the session's convert-and-diff of it. Moving
+menus out of apps altogether is `plans/NEW-MENUS.md`, an architectural
+change rather than a performance one now that this is fixed.
 
 ---
 

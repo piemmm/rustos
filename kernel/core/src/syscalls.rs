@@ -1524,18 +1524,19 @@ where
     /// caller is switched in on, so the caller's live space is the one
     /// published for [`SchedulerArch::current_cpu`]; re-freeze it and publish
     /// the fresh snapshot so the very next copy reflects the current
-    /// mappings. A caller with no published live space (a
-    /// kernel task, or a task spawned without a retained space) or no
-    /// registered snapshot is a no-op — there is nothing to refresh and the
-    /// mutation could not have touched a live space either.
-    fn refreeze_caller_aspace(&self, caller: &CallerContext<'_>) {
-        self.refreeze_task_aspace(caller.task_id);
-    }
-
-    /// Re-freeze the current CPU's live address space into the registry
-    /// under `task` — the [`Self::refreeze_caller_aspace`] mechanism, keyed
-    /// by a bare task id so the user-fault resolver (which has no
-    /// [`CallerContext`]) shares the one definition.
+    /// mappings. A task with no published live space (a kernel task, or a
+    /// task spawned without a retained space) or no registered snapshot is a
+    /// no-op — there is nothing to refresh and the mutation could not have
+    /// touched a live space either.
+    ///
+    /// This rebuilds the *whole* snapshot, so it costs a page-table walk and
+    /// a fresh heap node per resident page of the task. A syscall or fault
+    /// that knows which pages it changed publishes those instead
+    /// ([`Self::publish_region_mapping`] / [`Self::publish_region_teardown`])
+    /// and reaches this only as their fallback. The two unconditional users
+    /// are the compressed-tier batches — the warm/cluster restore and the
+    /// direct-reclaim compress-out — which move several pages at once and
+    /// report no list, so no smaller delta exists to name.
     fn refreeze_task_aspace(&self, task: SecTaskId) {
         let cpu = SchedulerArch::current_cpu(self.arch);
         if let Some(frozen) = crate::kthread::with_current_live_space(cpu, |live| live.freeze()) {
@@ -1546,8 +1547,7 @@ where
     }
 
     /// Publish the teardown of the `page_count`-page region based at `base`
-    /// into `task`'s registry snapshot as one in-place delta per page, and
-    /// report whether the snapshot absorbed every one.
+    /// into `task`'s registry snapshot as one in-place delta per page.
     ///
     /// Every page of a released region is unmapped by construction, so each
     /// delta is a removal and none needs a translation. The cost is the
@@ -1566,21 +1566,65 @@ where
     /// published on this CPU, which would leave freed pages translating in
     /// the snapshot the copy path walks — reachable memory the task no
     /// longer owns. Removing by delta cannot silently skip that.
+    fn publish_region_teardown(&self, task: SecTaskId, base: u64, page_count: u64) {
+        let absorbed = {
+            let mut aspaces = self.aspaces.write();
+            fold_region_pages(base, page_count, |page| {
+                aspaces.note_faulted_page(task, page, None)
+            })
+        };
+        if !absorbed {
+            self.refreeze_task_aspace(task);
+        }
+    }
+
+    /// Publish the mapping of the `page_count`-page region based at `base`
+    /// into `task`'s registry snapshot as one in-place delta per page,
+    /// reading each page's resolved `(frame, flags)` from the live space the
+    /// mapping was installed in.
     ///
-    /// A snapshot that cannot absorb an in-place delta (the host double)
-    /// answers `false` for that page, and the caller falls back to the
-    /// wholesale re-freeze — so this is a cost reduction, never a
-    /// correctness dependency.
-    fn publish_region_teardown(&self, task: SecTaskId, base: u64, page_count: u64) -> bool {
-        let mut aspaces = self.aspaces.write();
-        (0..page_count).fold(true, |absorbed, index| {
-            let page = index
-                .checked_mul(PAGE_SIZE as u64)
-                .and_then(|offset| base.checked_add(offset))
-                .and_then(|va| Page::from_addr(VirtAddr::new(va)).ok());
-            let applied = page.is_some_and(|page| aspaces.note_faulted_page(task, page, None));
-            applied && absorbed
-        })
+    /// The teardown's counterpart, and the same bargain: an eager mapping
+    /// syscall knows exactly which pages it changed, so it pays one
+    /// translation per page of *its own* region instead of the wholesale
+    /// [`Self::refreeze_task_aspace`] over the caller's entire resident set.
+    /// That is what a desktop session — the largest address space on the
+    /// machine, holding the wallpaper, the back buffer and every window's
+    /// pixels — used to pay every time an app handed it a shared frame
+    /// region, inside one non-preemptible syscall, which froze the pointer.
+    ///
+    /// A page the mapping left unmapped resolves to `None` and is removed,
+    /// so a sparse or partially-installed region cannot leave a stale
+    /// translation behind (fail closed, never expose memory the task does
+    /// not own).
+    ///
+    /// A snapshot that cannot absorb an in-place delta (the host double), or
+    /// a CPU with no live space published, falls back to the wholesale
+    /// re-freeze — so the delta is a cost reduction, never a correctness
+    /// dependency.
+    fn publish_region_mapping(&self, task: SecTaskId, base: u64, page_count: u64) {
+        let cpu = SchedulerArch::current_cpu(self.arch);
+        let absorbed = crate::kthread::with_current_live_space(cpu, |live| {
+            let mut aspaces = self.aspaces.write();
+            fold_region_pages(base, page_count, |page| {
+                let mapping = live.translate_page(page);
+                aspaces.note_faulted_page(task, page, mapping)
+            })
+        });
+        if absorbed != Some(true) {
+            self.refreeze_task_aspace(task);
+        }
+    }
+
+    /// Release `task`'s shared mapping based at `base` and drop its pages
+    /// from the registry snapshot — the shared unwind both `shm_create` and
+    /// `shm_map` take when the copy-out after their map faults.
+    ///
+    /// A mapping that could not be found is already gone, so nothing is
+    /// published: there are no pages to drop.
+    fn release_shared_mapping(&self, task: SecTaskId, base: u64) {
+        if let Ok(len) = crate::sharedreg::unmap(self.shared_mem_facility, task, base) {
+            self.publish_region_teardown(task, base, pages_spanning(len as u64));
+        }
     }
 
     /// Record a fault-kill of `task` and reclaim its kernel resources —
@@ -1906,9 +1950,12 @@ where
             Ok(0) | Err(_) => false,
             Ok(n) => match self.file_map.map_page(page_va, &page[..n]) {
                 Ok(()) => {
-                    // The fault grew the live space; re-freeze the registry
-                    // snapshot so the copy path can see the new page.
-                    self.refreeze_task_aspace(task);
+                    // The fault backed exactly this page; publish that one
+                    // page so the copy path can see it. Re-freezing the whole
+                    // snapshot here would make reading an N-page mapping
+                    // O(N²) — each fault rebuilding every page faulted before
+                    // it — which is the whole reason the delta exists.
+                    self.publish_region_mapping(task, page_va, 1);
                     true
                 }
                 // Already resident: another resolution won the race; the
@@ -1958,29 +2005,13 @@ where
             // won the race — either way the page is there.
             Ok(_) | Err(Errno::BadAddress) => {
                 // The fault grew the live space; publish the new page to the
-                // registry snapshot so the copy path can see it. Applying just
-                // this one page as an in-place delta keeps per-fault work
-                // O(log n): demand-faulting a large mapping backs one page per
-                // fault, and a full re-freeze per fault would make touching it
-                // O(N²) (tens of seconds for a multi-megabyte buffer under
-                // emulation). If the snapshot cannot absorb an in-place delta
-                // (the host double), fall back to a full re-freeze — the delta
-                // is an optimisation, never a correctness dependency.
-                let cpu = SchedulerArch::current_cpu(self.arch);
-                let applied = Page::from_addr(VirtAddr::new(page_va))
-                    .ok()
-                    .and_then(|page| {
-                        crate::kthread::with_current_live_space(cpu, |live| {
-                            live.translate_page(page)
-                        })
-                        .map(|mapping| (page, mapping))
-                    })
-                    .is_some_and(|(page, mapping)| {
-                        self.aspaces.write().note_faulted_page(task, page, mapping)
-                    });
-                if !applied {
-                    self.refreeze_task_aspace(task);
-                }
+                // registry snapshot so the copy path can see it. Publishing
+                // just this one page keeps per-fault work O(log n):
+                // demand-faulting a large mapping backs one page per fault,
+                // and a full re-freeze per fault would make touching it O(N²)
+                // (tens of seconds for a multi-megabyte buffer under
+                // emulation).
+                self.publish_region_mapping(task, page_va, 1);
                 true
             }
             // Frame exhaustion or an uninstalled producer: fatal to the task
@@ -2027,23 +2058,7 @@ where
         });
         match outcome {
             Some(RamzipFaultOutcome::Handled) => {
-                // The restore remapped one page with a fresh frame; publish
-                // it to the registry snapshot so the copy path never reads
-                // the stale (freed) frame the page held before compression.
-                // A single-page delta keeps this O(log n); a snapshot that
-                // cannot absorb the delta falls back to a full re-freeze.
                 let page_va = fault_va & !(PAGE_SIZE as u64 - 1);
-                let applied = Page::from_addr(VirtAddr::new(page_va))
-                    .ok()
-                    .and_then(|page| {
-                        crate::kthread::with_current_live_space(cpu, |live| {
-                            live.translate_page(page)
-                        })
-                        .map(|mapping| (page, mapping))
-                    })
-                    .is_some_and(|(page, mapping)| {
-                        self.aspaces.write().note_faulted_page(task, page, mapping)
-                    });
                 // Opportunistic warm restores while memory is comfortable:
                 // fault clustering brings back the faulted page's near,
                 // contemporaneous neighbours, and one bounded warm step
@@ -2065,13 +2080,15 @@ where
                     .unwrap_or(0),
                     None => 0,
                 };
-                // Republish the restored pages to the registry snapshot: a
-                // warm restore remapped several pages at once, so re-freeze
-                // the whole snapshot once; otherwise the faulted page's
-                // single-page delta already covered it (fall back to a full
-                // re-freeze only if that delta could not be applied).
-                if warmed > 0 || !applied {
+                // Republish the restored pages so the copy path never reads
+                // the stale (freed) frame a restored page held before
+                // compression. A warm restore remapped several pages at once
+                // and does not report which, so that case re-freezes the
+                // whole snapshot; the plain restore publishes its one page.
+                if warmed > 0 {
                     self.refreeze_task_aspace(task);
+                } else {
+                    self.publish_region_mapping(task, page_va, 1);
                 }
                 RamzipFaultOutcome::Handled
             }
@@ -2304,9 +2321,9 @@ where
             }
             next -= PAGE_SIZE as u64;
         }
-        // The fault grew the live space; re-freeze the registry snapshot
-        // once for the whole walk so the copy path can see the new pages.
-        self.refreeze_task_aspace(task);
+        // The walk backed exactly the pages it reserved room for, so publish
+        // that range rather than the caller's whole resident set.
+        self.publish_region_mapping(task, page_va, growth_pages);
         true
     }
 
@@ -3858,6 +3875,30 @@ fn records_that_fit(out_cap: usize, record_len: usize) -> Result<usize, Errno> {
         return Err(Errno::BufferTooSmall);
     }
     Ok(out_cap / record_len)
+}
+
+/// The number of whole pages a `bytes`-byte region spans.
+fn pages_spanning(bytes: u64) -> u64 {
+    bytes.div_ceil(PAGE_SIZE as u64)
+}
+
+/// Apply `publish` to every page of the `page_count`-page region based at
+/// `base`, reporting whether all of them were published.
+///
+/// The one walk both region deltas share, so a mapping and its teardown can
+/// never disagree about which pages a region holds. Every page is attempted
+/// — the result is folded, not short-circuited — because a snapshot that
+/// refuses one delta must still receive the rest before the caller falls
+/// back. A page whose address overflows is one the region cannot contain,
+/// and reports unpublished rather than wrapping.
+fn fold_region_pages(base: u64, page_count: u64, mut publish: impl FnMut(Page) -> bool) -> bool {
+    (0..page_count).fold(true, |published, index| {
+        let page = index
+            .checked_mul(PAGE_SIZE as u64)
+            .and_then(|offset| base.checked_add(offset))
+            .and_then(|va| Page::from_addr(VirtAddr::new(va)).ok());
+        page.is_some_and(&mut publish) && published
+    })
 }
 
 /// Wake the `ipc_call` caller a just-completed `CallEndpoint::reply`
@@ -5755,10 +5796,11 @@ where
         // never pretending a window was mapped; frame exhaustion surfaces as
         // `OutOfMemory` (deterministic OOM).
         let result = self.mmio_map_facility.map_window(phys_base, len, kind);
-        // The window grew the caller's live space; re-freeze the registry
-        // snapshot so a later copy through the driver's space sees it. Only on success.
-        if result.is_ok() {
-            self.refreeze_caller_aspace(caller);
+        // The window grew the caller's live space; publish the window's own
+        // pages into the registry snapshot so a later copy through the
+        // driver's space sees it. Only on success.
+        if let Ok(base) = result {
+            self.publish_region_mapping(caller.task_id, base, pages_spanning(len as u64));
         }
         result
     }
@@ -5808,10 +5850,10 @@ where
         // carve already lies below `addr_limit`, so this only re-bases it; a
         // base outside the viewport's CPU window fails closed.
         let device_addr = translate_device_addr(&constraint, carve.device_addr)?;
-        // The carve grew the caller's live space; re-freeze the registry
-        // snapshot before the copy below so the new DMA window is visible to
-        // the copy path.
-        self.refreeze_caller_aspace(caller);
+        // The carve grew the caller's live space; publish the buffer's own
+        // pages into the registry snapshot before the copy below, so the new
+        // DMA window is visible to the copy path.
+        self.publish_region_mapping(caller.task_id, carve.cpu_va, pages_spanning(len as u64));
         // Hand the device-visible base back through the `device_out` user
         // pointer via the validated `copy_to_user` boundary, exactly as `wait` writes the reaped status — a faulting
         // `device_out` collapses onto the same fail-closed `BadAddress` an
@@ -5850,12 +5892,14 @@ where
         // (covering a stale, double, or cross-task free) without releasing
         // anything. The default `NULL_DMA_ALLOC_FACILITY` fails closed with
         // `NotImplemented`.
-        self.dma_alloc_facility.free(cpu_va)?;
-        // The free shrank the caller's live space; re-freeze the registry
-        // snapshot so the copy path no longer sees the released DMA window
-        // (leaving it in the stale snapshot would let a copy read or write
-        // memory the task no longer owns — fail closed). Only on success.
-        self.refreeze_caller_aspace(caller);
+        let released = self.dma_alloc_facility.free(cpu_va)?;
+        // The free shrank the caller's live space; drop the buffer's own
+        // pages from the registry snapshot so the copy path no longer sees
+        // the released DMA window (leaving it in the stale snapshot would
+        // let a copy read or write memory the task no longer owns — fail
+        // closed). Only on success, and only over the extent the allocator
+        // reports it released.
+        self.publish_region_teardown(caller.task_id, cpu_va, pages_spanning(released as u64));
         Ok(0)
     }
 
@@ -5980,9 +6024,7 @@ where
             aspaces.remove_anon_region(caller.task_id, base);
             aspaces.credit_aspace_bytes(caller.task_id, credited);
             drop(aspaces);
-            if !self.publish_region_teardown(caller.task_id, base, page_count) {
-                self.refreeze_caller_aspace(caller);
-            }
+            self.publish_region_teardown(caller.task_id, base, page_count);
         }
         result
     }
@@ -6147,18 +6189,17 @@ where
         // costs nothing. Success reports `Ok(0)` — the `Errno`-return ABI
         // shape.
         let result = self.file_map.release(base, len).map(|_resident| 0);
-        // Only on success: drop the record, credit the accounting, and
-        // re-freeze the registry snapshot so the freed pages are dropped
-        // from it too — leaving them in the stale snapshot would let the
-        // copy path read memory the task no longer owns (fail closed, never
-        // expose freed memory).
+        // Only on success: drop the record, credit the accounting, and drop
+        // the region's own pages from the registry snapshot too — leaving
+        // them in the stale snapshot would let the copy path read memory the
+        // task no longer owns (fail closed, never expose freed memory).
         if result.is_ok() {
             {
                 let mut aspaces = self.aspaces.write();
                 aspaces.remove_file_region(caller.task_id, base);
                 aspaces.credit_aspace_bytes(caller.task_id, charged);
             }
-            self.refreeze_caller_aspace(caller);
+            self.publish_region_teardown(caller.task_id, base, pages_spanning(charged));
         }
         result
     }
@@ -7947,10 +7988,10 @@ where
         // returned to the allocator, so a failed create leaks nothing.
         let (base_va, id) =
             crate::sharedreg::create(self.shared_mem_facility, caller.task_id, pages)?;
-        // The map grew the caller's live space; re-freeze the registry
-        // snapshot so the `id_out` copy (and any later copy) sees current
-        // memory, exactly as `mem_map` / `mmio_map` do.
-        self.refreeze_caller_aspace(caller);
+        // The map grew the caller's live space; publish the region's own
+        // pages so the `id_out` copy (and any later copy) sees current
+        // memory, exactly as `mmio_map` does.
+        self.publish_region_mapping(caller.task_id, base_va, pages);
         // Write the kernel-minted region id out through the validated
         // `copy_to_user` boundary. A faulting `id_out` releases the region we
         // just created (dropping its only reference, which frees and scrubs
@@ -7962,13 +8003,11 @@ where
         }) {
             Some(Ok(())) => {}
             Some(Err(err)) => {
-                let _ = crate::sharedreg::unmap(self.shared_mem_facility, caller.task_id, base_va);
-                self.refreeze_caller_aspace(caller);
+                self.release_shared_mapping(caller.task_id, base_va);
                 return Err(copy_fault_errno(err));
             }
             None => {
-                let _ = crate::sharedreg::unmap(self.shared_mem_facility, caller.task_id, base_va);
-                self.refreeze_caller_aspace(caller);
+                self.release_shared_mapping(caller.task_id, base_va);
                 return Err(Errno::BadAddress);
             }
         }
@@ -8006,9 +8045,12 @@ where
         // grant and map fails closed `NotFound`.
         let (base_va, len) =
             crate::sharedreg::map(self.shared_mem_facility, caller.task_id, resource.base())?;
-        // The map grew the caller's live space; re-freeze its snapshot so
-        // the `len_out` copy sees current memory, exactly as `shm_create`.
-        self.refreeze_caller_aspace(caller);
+        // The map grew the caller's live space; publish the region's own
+        // pages so the `len_out` copy sees current memory, exactly as
+        // `shm_create`. A desktop session takes this path for every frame
+        // region an app hands it, so it must cost the region's pages and
+        // never the session's whole resident set.
+        self.publish_region_mapping(caller.task_id, base_va, pages_spanning(len as u64));
         // Report the region's byte length — the registry's own record, so a
         // server sizes its view from the kernel's answer, never the granting
         // client's claim — through the validated `copy_to_user` boundary. A
@@ -8021,13 +8063,11 @@ where
         }) {
             Some(Ok(())) => {}
             Some(Err(err)) => {
-                let _ = crate::sharedreg::unmap(self.shared_mem_facility, caller.task_id, base_va);
-                self.refreeze_caller_aspace(caller);
+                self.release_shared_mapping(caller.task_id, base_va);
                 return Err(copy_fault_errno(err));
             }
             None => {
-                let _ = crate::sharedreg::unmap(self.shared_mem_facility, caller.task_id, base_va);
-                self.refreeze_caller_aspace(caller);
+                self.release_shared_mapping(caller.task_id, base_va);
                 return Err(Errno::BadAddress);
             }
         }
@@ -8120,9 +8160,10 @@ where
         // entries, and drop the caller's reference; the region's frames are
         // zeroed and freed at its last reference. A `base` that does not name
         // a live shared mapping of the caller fails closed `NotFound`.
-        crate::sharedreg::unmap(self.shared_mem_facility, caller.task_id, base)?;
-        // The unmap shrank the caller's live space; re-freeze its snapshot.
-        self.refreeze_caller_aspace(caller);
+        let len = crate::sharedreg::unmap(self.shared_mem_facility, caller.task_id, base)?;
+        // The unmap shrank the caller's live space; drop the region's own
+        // pages from its snapshot.
+        self.publish_region_teardown(caller.task_id, base, pages_spanning(len as u64));
         Ok(0)
     }
 
@@ -22178,11 +22219,30 @@ mod tests {
 
     /// A minimal published live space whose [`LiveUserSpace::freeze`] returns
     /// a snapshot of an inner [`AddressSpace`] — standing in for the live
-    /// space a real `mem_map` would have grown. Only `freeze` is exercised;
-    /// the mutating methods are unreachable in this test (the producer is the
-    /// fake `RecordingMemMap`), so they fail closed.
+    /// space a real `mem_map` would have grown. Only `freeze` and
+    /// `translate_page` are exercised; the mutating methods are unreachable
+    /// in these tests (the producer is the fake `RecordingMemMap` or a
+    /// recording facility), so they fail closed.
+    ///
+    /// `freezes` counts the whole-space rebuilds, whose cost is proportional
+    /// to the space's resident set — the number a test asserts on to show a
+    /// syscall published its own region's pages instead.
     struct PublishedLive {
         space: AddressSpace<HostPageTable>,
+        freezes: core::sync::atomic::AtomicUsize,
+    }
+
+    impl PublishedLive {
+        fn new(space: AddressSpace<HostPageTable>) -> Self {
+            Self {
+                space,
+                freezes: core::sync::atomic::AtomicUsize::new(0),
+            }
+        }
+
+        fn freezes(&self) -> usize {
+            self.freezes.load(core::sync::atomic::Ordering::Relaxed)
+        }
     }
 
     impl LiveUserSpace for PublishedLive {
@@ -22239,7 +22299,7 @@ mod tests {
         fn alloc_dma(&mut self, _len: usize, _limit: u64) -> Result<DmaMapping, LiveSpaceError> {
             Err(LiveSpaceError::Anon(AnonError::OutOfMemory))
         }
-        fn free_dma(&mut self, _cpu_va: u64) -> Result<(), LiveSpaceError> {
+        fn free_dma(&mut self, _cpu_va: u64) -> Result<usize, LiveSpaceError> {
             Err(LiveSpaceError::Dma(DmaError::UnknownBuffer))
         }
         fn map_shared(&mut self, _phys: u64, _len: usize) -> Result<u64, LiveSpaceError> {
@@ -22252,6 +22312,8 @@ mod tests {
             Err(LiveSpaceError::Anon(AnonError::NotMapped))
         }
         fn freeze(&self) -> FrozenAddressSpace {
+            self.freezes
+                .fetch_add(1, core::sync::atomic::Ordering::Relaxed);
             self.space.freeze()
         }
         fn ramzip_fault_in(
@@ -22359,8 +22421,7 @@ mod tests {
         live_space
             .map(heap, Frame(9), MapFlags::READ | MapFlags::USER)
             .expect("map heap page");
-        let live: &'static mut PublishedLive =
-            Box::leak(Box::new(PublishedLive { space: live_space }));
+        let live: &'static mut PublishedLive = Box::leak(Box::new(PublishedLive::new(live_space)));
         let _guard = crate::kthread::publish_live_space_for_test(0, live);
 
         let producer: &'static RecordingMemMap = Box::leak(Box::new(RecordingMemMap::new()));
@@ -22888,9 +22949,9 @@ mod tests {
             *self.last.lock() = Some((len, addr_limit));
             self.ret
         }
-        fn free(&self, cpu_va: u64) -> Result<(), Errno> {
+        fn free(&self, cpu_va: u64) -> Result<usize, Errno> {
             *self.freed.lock() = Some(cpu_va);
-            Ok(())
+            Ok(PAGE_SIZE)
         }
     }
 
@@ -27777,6 +27838,26 @@ mod tests {
         Box<dyn UserAddressSpace + Send + Sync>,
         Box<dyn PhysMap + Send + Sync>,
     ) {
+        let (space, sim) = call_window(request);
+        (Box::new(space), Box::new(sim))
+    }
+
+    /// [`call_aspace`]'s window registered as a **frozen snapshot** — what a
+    /// task really holds, and the only form that can absorb the in-place
+    /// page delta a mapping syscall publishes (a live `AddressSpace` refuses
+    /// one, forcing the whole-space re-freeze the delta exists to avoid).
+    fn frozen_call_aspace(
+        request: &[u8],
+    ) -> (
+        Box<dyn UserAddressSpace + Send + Sync>,
+        Box<dyn PhysMap + Send + Sync>,
+    ) {
+        let (space, sim) = call_window(request);
+        (Box::new(space.freeze()), Box::new(sim))
+    }
+
+    /// The two-page caller window both forms above are built from.
+    fn call_window(request: &[u8]) -> (AddressSpace<HostPageTable>, SimPhysMap) {
         let base = PhysAddr::new(CALL_FRAME as u64 * PAGE_SIZE as u64);
         let sim = SimPhysMap::new(base, PAGE_SIZE * 2);
         if !request.is_empty() {
@@ -27802,7 +27883,26 @@ mod tests {
                 MapFlags::READ | MapFlags::WRITE | MapFlags::USER,
             )
             .expect("map reply page");
-        (Box::new(space), Box::new(sim))
+        (space, sim)
+    }
+
+    /// A live space the size a real one reaches: the [`call_window`] copy
+    /// pages, `resident` further pages from `base`, and `region`.
+    ///
+    /// Stands in for the desktop session, whose resident set is what makes
+    /// re-freezing its whole snapshot expensive.
+    fn big_live_space(base: u64, resident: usize, region: Page) -> AddressSpace<HostPageTable> {
+        let rw = MapFlags::READ | MapFlags::WRITE | MapFlags::USER;
+        let mut space = AddressSpace::new(HostPageTable::new());
+        for (index, at) in [page(1), page(2), region].into_iter().enumerate() {
+            space.map(at, Frame(CALL_FRAME + index), rw).expect("map");
+        }
+        for index in 0..resident {
+            let at = VirtAddr::new(base + (index * PAGE_SIZE) as u64);
+            let at = Page::from_addr(at).expect("aligned");
+            space.map(at, Frame(200 + index), rw).expect("map resident");
+        }
+        space
     }
 
     /// Read `len` bytes the handler copied out to page 2 (`0x2000`).
@@ -28830,6 +28930,117 @@ mod tests {
             .grant_covers(SecTaskId(7), &tairix_abi::HwResource::shared(id + 1)));
         // Cleanup so the global region registry does not leak across tests.
         let _ = crate::sharedreg::unmap(facility, SecTaskId(7), va);
+    }
+
+    /// A mapping syscall publishes **its own region's** pages; it never
+    /// re-walks the caller's whole address space.
+    ///
+    /// This is the desktop session's cost. It maps a frame region for every
+    /// window an app opens — a context menu's few pages into the largest
+    /// address space on the machine, holding the wallpaper, the back buffer
+    /// and every window's pixels — and rebuilding that snapshot allocates a
+    /// node per resident page inside one non-preemptible syscall, which
+    /// stalled the pointer for hundreds of milliseconds per menu.
+    ///
+    /// The gate is what a rebuild would leave behind: it re-imports the live
+    /// space wholesale, so the caller's snapshot would gain every one of
+    /// `RESIDENT_PAGES`. A published delta gains one page, and the freeze
+    /// count — the only work proportional to the resident set — stays zero.
+    #[test]
+    fn shm_map_and_unmap_publish_only_the_regions_own_pages() {
+        /// A CPU no other test publishes a live space on: the slot is global
+        /// and the suite runs in parallel.
+        const CPU: u32 = 20;
+        /// Stands in for the session's resident set: a rebuild walks all of
+        /// them, the region below is one page.
+        const RESIDENT_PAGES: usize = 64;
+        const RESIDENT_BASE: u64 = 0x9000_0000;
+        const REGION_VA: u64 = 0x2_0000_1000;
+
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(CPU + 1));
+        arch.set_current_cpu(CPU);
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let caps = make_caps_record(21, &[CapabilityId::SHM], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(21),
+            caps: &caps,
+        };
+
+        // The mapper's registered snapshot: the two-page copy window
+        // (`len_out` is page 2), frozen so it can absorb a page delta.
+        let (space, physmap) = frozen_call_aspace(b"");
+        aspaces
+            .write()
+            .register(SecTaskId(21), space, physmap)
+            .expect("registration succeeds");
+
+        // Its live space: the same window, a large resident set, and the
+        // page the facility reports the region mapped at.
+        let region_page = Page::from_addr(VirtAddr::new(REGION_VA)).expect("aligned");
+        let live_space = big_live_space(RESIDENT_BASE, RESIDENT_PAGES, region_page);
+        let live: &'static mut PublishedLive = Box::leak(Box::new(PublishedLive::new(live_space)));
+        // The handler's `&mut` borrow of the published space has ended by the
+        // time the counter is read below (single-threaded, guard still held).
+        let observer: *const PublishedLive = live;
+        let _guard = crate::kthread::publish_live_space_for_test(CPU, live);
+
+        // A region owned by another task, granted to the mapper — the app
+        // hands the session its frame region.
+        let facility: &'static RecordingSharedFacility =
+            Box::leak(Box::new(RecordingSharedFacility { va: REGION_VA }));
+        let (owner_va, id) =
+            crate::sharedreg::create(facility, SecTaskId(22), 1).expect("region created");
+        let handle = aspaces
+            .write()
+            .mint_grant(SecTaskId(21), tairix_abi::HwResource::shared(id));
+
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        )
+        .with_shared_mem_facility(facility);
+
+        assert_eq!(
+            h.shm_map(&ctx, handle, 0x2000),
+            Ok(REGION_VA),
+            "the region maps at the facility's base"
+        );
+        let snapshot = || {
+            let held = aspaces.read();
+            let (space, _) = held.resolve(SecTaskId(21)).expect("registered");
+            (space.translate(region_page).is_some(), space.mapped_pages())
+        };
+        assert_eq!(
+            snapshot(),
+            (true, 3),
+            "the region's page reached the snapshot, joining the window's two \
+             — a whole-space rebuild would have imported the resident set too"
+        );
+
+        assert_eq!(h.shm_unmap(&ctx, REGION_VA, 0), Ok(0));
+        assert_eq!(
+            snapshot(),
+            (false, 2),
+            "the released page left the snapshot, so no copy can still reach it"
+        );
+
+        // SAFETY: see `observer` above — the published space is not borrowed
+        // here and this test is single-threaded.
+        assert_eq!(
+            unsafe { (*observer).freezes() },
+            0,
+            "neither the map nor the unmap walked the caller's whole space"
+        );
+
+        // Cleanup so the global region registry does not leak across tests.
+        let _ = crate::sharedreg::unmap(facility, SecTaskId(22), owner_va);
     }
 
     /// `shm_map` fails closed for a forged handle (`NotFound`) and for a grant

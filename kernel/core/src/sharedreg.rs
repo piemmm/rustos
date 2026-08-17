@@ -159,11 +159,15 @@ pub fn map(facility: &dyn SharedMemFacility, task: TaskId, id: u64) -> Result<(u
 /// page-table entries and dropping its reference to the region; the region's
 /// frames are zeroed and freed when its last reference is released.
 ///
+/// Reports the byte length released — the registry's own record of the
+/// region, which the teardown already reads — so the caller can drop exactly
+/// those pages from the task's address-space snapshot.
+///
 /// # Errors
 ///
 /// [`Errno::NotFound`] if `base` does not name a live shared mapping of
 /// `task`.
-pub fn unmap(facility: &dyn SharedMemFacility, task: TaskId, base: u64) -> Result<(), Errno> {
+pub fn unmap(facility: &dyn SharedMemFacility, task: TaskId, base: u64) -> Result<usize, Errno> {
     // Find and remove the mapping record and recover its region's length
     // under the lock; the reference itself is dropped through the shared
     // release step below, outside it.
@@ -186,7 +190,7 @@ pub fn unmap(facility: &dyn SharedMemFacility, task: TaskId, base: u64) -> Resul
     // was the last one.
     let unmap = facility.unmap_region(base, len);
     release_ref(facility, id);
-    unmap
+    unmap.map(|()| len)
 }
 
 /// Drop one reference to region `id`, freeing its frames if this was the

@@ -350,6 +350,10 @@ impl DmaWindowMap {
     /// so a `virt` that is not the base of a live carve fails closed with
     /// [`DmaError::UnknownBuffer`] (covering a forged, stale, or double free).
     ///
+    /// Reports the byte length released, so the caller can name exactly the
+    /// pages that left its address space without re-deriving an extent only
+    /// this record knows.
+    ///
     /// # Errors
     ///
     /// As [`DmaPool::free`].
@@ -359,7 +363,7 @@ impl DmaWindowMap {
         frames: &FrameAllocator,
         phys: &dyn PhysMap,
         virt: VirtAddr,
-    ) -> Result<(), DmaError> {
+    ) -> Result<usize, DmaError> {
         let record = self
             .allocations
             .get(&virt.as_u64())
@@ -369,7 +373,8 @@ impl DmaWindowMap {
             phys: record.start_frame.start(),
             len: record.data_pages * PAGE_SIZE,
         };
-        self.free_inner(space, frames, phys, buf)
+        let len = buf.len;
+        self.free_inner(space, frames, phys, buf).map(|()| len)
     }
 
     /// Look up `buf`'s live record and return its `(physical base, byte

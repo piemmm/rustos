@@ -169,13 +169,17 @@ pub trait DmaAllocFacility: Sync {
     /// allocator's authoritative record, so a `cpu_va` that is not the base of
     /// a live carve fails closed without releasing anything.
     ///
+    /// Reports the byte length released, so the handler can drop exactly the
+    /// buffer's pages from the caller's address-space snapshot rather than
+    /// rebuilding the whole snapshot.
+    ///
     /// # Errors
     ///
     /// Returns a stable [`Errno`] — [`Errno::OutOfRange`] when `cpu_va` is not
     /// the base of a live DMA carve of the caller's space (covering a forged,
     /// stale, or double free). The default producer
     /// ([`NullDmaAllocFacility`]) returns [`Errno::NotImplemented`].
-    fn free(&self, cpu_va: u64) -> Result<(), Errno>;
+    fn free(&self, cpu_va: u64) -> Result<usize, Errno>;
 }
 
 /// The DMA-alloc facility installed before any real one exists.
@@ -190,7 +194,7 @@ impl DmaAllocFacility for NullDmaAllocFacility {
         Err(Errno::NotImplemented)
     }
 
-    fn free(&self, _cpu_va: u64) -> Result<(), Errno> {
+    fn free(&self, _cpu_va: u64) -> Result<usize, Errno> {
         Err(Errno::NotImplemented)
     }
 }

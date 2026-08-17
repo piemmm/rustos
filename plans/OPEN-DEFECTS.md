@@ -456,6 +456,17 @@ The open items, in priority order:
   closes nothing. Suspected an unbounded wait or a stranded deferred wake on
   the riscv64 driver-spawn/bind path; reproduce at gate concurrency with the
   guest's watchdog records in view before fixing.
+- **D40 — a mutating memory syscall re-froze the whole address space —
+  DONE.** Every syscall or fault that changed a task's mappings rebuilt the
+  registry's whole snapshot: a page-table walk plus a heap node per resident
+  page, inside one non-preemptible call. The release half was fixed earlier
+  (`mem_unmap`); the mapping half was staged and underrated, because the
+  desktop session maps a frame region for **every window an app opens** — a
+  `terminal.app` context menu paid four of them against the largest address
+  space on the machine, the ~300 ms per menu reported on a Pi 4B. Each path
+  now publishes only its own region's pages. Reading the same class found two
+  more: a file-backed fault re-froze per page (O(N²) to read an N-page
+  mapping) and stack growth re-froze a range it had just computed.
 
 These are **distinct in kind**: D1 finishes an interrupt-model fix, D2
 and D4 are §27 foundational-completeness defects, D3 is an Arch-HAL
@@ -1438,7 +1449,7 @@ and `the_callers_budget_reaches_the_park` (`kernel/virtio`),
 
 ---
 
-## D5 — root-unlock login vertical failed once under a loaded gate
+## D41 — root-unlock login vertical failed once under a loaded gate
 
 Status: **open, unreproduced, not diagnosed**. Observed once during a
 `cargo xtask ci` run whose QEMU verticals overlapped the pipeline's own image
@@ -1551,10 +1562,11 @@ QEMU vertical.
 
 ---
 
-## D24 — a mutating memory syscall re-froze the whole address space
+## D40 — a mutating memory syscall re-froze the whole address space
 
-**State:** the two hot paths (`mem_map`, `mem_unmap`) are fixed; the sibling
-mapping syscalls listed under *Remaining* still pay the wholesale cost.
+**State:** closed. Every syscall and fault path that knows which pages it
+changed now publishes those, and only the two batch paths that genuinely
+cannot name them re-freeze.
 
 **Mechanism.** The registry holds a frozen `Send + Sync` snapshot of a task's
 mappings for the user-copy path. `AddressSpace::freeze` rebuilds it by walking
@@ -1575,13 +1587,29 @@ tick — the core was still taking maskable interrupts while making no dispatch
 progress, which is a long in-kernel computation, not a lock or a wedge.
 
 **Fix.** Every path that knows *which* pages changed publishes them as
-in-place deltas (`AddressSpaceRegistry::note_faulted_page`) instead:
-`mem_unmap` drops exactly the region it released (cost proportional to that
-region, which it already walked), and `mem_map` publishes nothing, because
-`MemMap::reserve` commits no frame and writes no page-table entry, so the
-snapshot is unchanged by construction. A snapshot that cannot absorb a delta
-falls back to the wholesale re-freeze, so the delta is never a correctness
-dependency.
+in-place deltas (`AddressSpaceRegistry::note_faulted_page`) instead, through
+one pair in `kernel/core/src/syscalls.rs`: `publish_region_mapping` (resolves
+each page's `(frame, flags)` from the live space) and
+`publish_region_teardown` (removes them). A snapshot that cannot absorb a
+delta falls back to the wholesale re-freeze, so the delta is never a
+correctness dependency.
+
+Who publishes what: `mem_unmap`, `file_unmap`, `shm_unmap` and `dma_free`
+drop the region they released; `shm_create`, `shm_map`, `mmio_map` and
+`dma_alloc` publish the region they mapped; the anonymous, file-backed and
+compressed-page faults publish the one page they backed, and stack growth the
+range it committed. `mem_map` and `file_map` publish **nothing** — a
+reservation commits no frame and writes no page-table entry, so the snapshot
+is unchanged by construction — and `shm_grant` / `call_grant` publish nothing
+because they mint a grant and map no page (the earlier *Remaining* list named
+these three in error). `sharedreg::unmap`, `DmaPool::free_at`,
+`LiveUserSpace::free_dma` and `DmaAllocFacility::free` gained a released-length
+return, because those were the only two releases whose caller did not already
+hold the extent.
+
+Only the two genuinely unnameable batches still re-freeze: the ramzip
+warm/cluster restore and the direct-reclaim sweep, each of which moves several
+pages at once and reports no list.
 
 Removing by delta also closes a **fail-open** hole: the wholesale re-freeze is
 a documented no-op when no live space is published on the current CPU, so a
@@ -1592,14 +1620,25 @@ is free to hand to another task. The regression test
 case and fails on the pre-fix source with "a released page must not stay
 reachable through the snapshot".
 
-**Remaining.** `mmio_map`, `dma_alloc`, `file_map`, `file_unmap`, `shm_map`,
-`shm_grant` and `call_grant` still call the wholesale re-freeze. Each maps or
-releases a known region, so each can publish deltas the same way — an eager
-mapping needs the resolved `(frame, flags)` per page, i.e. one `translate` per
-page of *its own* region rather than of the whole address space. They are
-one-shot window setups rather than per-allocation paths, which is why they are
-staged here and not folded into the same change; the stall class is identical
-and they are not to be left indefinitely.
+**What the mapping half cost, and where it showed.** These were staged as
+"one-shot window setups", which underrated them: the desktop session maps a
+frame region for **every window an app opens**, so a `terminal.app` context
+menu — a popup window — paid four of these (the app's `shm_create` and
+`shm_grant`, the session's `shm_map`, then both unmaps) against the largest
+address space on the machine. That is the ~300 ms per menu open and close
+reported on a Pi 4B, and it is invisible under QEMU because the session's
+resident set there is a fraction of a 1080p one. Reading the same class found
+two more instances: `resolve_file_fault` re-froze per faulted page, making an
+N-page file mapping O(N²) to read (the very hazard the anonymous path's delta
+existed to avoid), and stack growth re-froze after committing a range it had
+just computed.
+
+**Regression cover (mapping half).**
+`shm_map_and_unmap_publish_only_the_regions_own_pages`: a task with 64
+resident pages maps and unmaps a one-page shared region and must end with a
+snapshot of exactly three pages and **zero** whole-space freezes. Fails on the
+pre-fix source with `(true, 67)` — the whole resident set the rebuild
+imported.
 
 Also unfixed, and **separate**: the same report's `id=4082 cpu hard lockup
 detected cpu=0 observer=1 … sampled=pre_silence stuck_irq=77` is a
@@ -1639,7 +1678,7 @@ is *not* diagnostic: that is `task.body.lock()`, legitimately held for the whole
 off-CPU lifetime of any parked task. The accompanying `stuck_irq=77
 stuck_state=pending` (the virtio mouse, mmio slot 29) is a consequence: every
 device SPI is routed to cpu 0 alone (`CPU0_TARGET`), so a wedged cpu 0 leaves
-its lines asserted and untaken. As under D24, the hard-lockup label and its
+its lines asserted and untaken. As under D40, the hard-lockup label and its
 live-GIC `stuck_irq` story are the misclassification described there, not the
 mechanism.
 
