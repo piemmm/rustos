@@ -193,11 +193,10 @@ impl FrostedBackdrop {
     /// rectangle and the pixels it names are derived together and cannot
     /// disagree.
     ///
-    /// [`Surface::blit`] composites through the premultiplied *over* operator,
-    /// and a fresh [`Surface::new`] starts fully transparent, so compositing
-    /// the back buffer over it reproduces those pixels exactly. That is the
-    /// copy path the furniture strips already take, rather than a second
-    /// hand-written row loop.
+    /// The copy is [`Surface::overwrite`], the shared blit walk laying rows
+    /// down whole rather than compositing them: a snapshot replaces what it
+    /// lands on by definition, and at a screenful a frame that is the
+    /// difference between a row copy and reading and blending every pixel.
     pub(crate) fn capture(
         back: &Surface,
         bounds: Rect,
@@ -210,7 +209,7 @@ impl FrostedBackdrop {
             return None;
         }
         let mut pixels = Surface::new(rect.width, rect.height)?;
-        pixels.blit(-rect.left(), -rect.top(), back);
+        pixels.overwrite(-rect.left(), -rect.top(), back);
         Some(Self {
             bounds,
             rect,

@@ -39,7 +39,7 @@ use crate::corner::Corners;
 use crate::frost::{inset, FrostEpoch, FrostPlan, FrostedBackdrop};
 use crate::geometry::{Point, Rect, Region, Scale};
 use crate::stats::{area_px, FrameCounters, FrameStats};
-use crate::surface::Surface;
+use crate::surface::{blend_run, Surface};
 use crate::viewport::{FurnitureHit, RootViewport};
 use crate::window::{Window, WindowId, WindowRow};
 
@@ -1884,7 +1884,7 @@ impl Compositor {
                 let Some(window) = self.windows.get(index) else {
                     continue;
                 };
-                if !window.is_visible() || window.blur_radius() == 0 {
+                if !window.is_visible() || !window.reads_backdrop() {
                     continue;
                 }
                 let bounds = window.bounds().intersection(&screen);
@@ -2301,7 +2301,7 @@ impl Compositor {
             let Some(index) = hits.get(split).copied() else {
                 continue;
             };
-            if self.windows.get(index).is_none_or(|w| w.blur_radius() == 0) {
+            if self.windows.get(index).is_none_or(|w| !w.reads_backdrop()) {
                 continue;
             }
             let plan = self.frost_plan(index);
@@ -2479,7 +2479,7 @@ impl Compositor {
     /// culls per *run* rather than per window, so a window that covers only
     /// part of a dirty rectangle, or whose own pixels are opaque only in
     /// places, still saves exactly the blending it can. Columns no run covers
-    /// take the same [`compose_pixel`] path they always did, over the same
+    /// take the same [`compose_segment`] path they always did, over the same
     /// [`Pixel::over`], so this is a loop specialisation and never a second
     /// blend.
     ///
@@ -2668,9 +2668,17 @@ impl Compositor {
             local_span(kept.left(), kept.right(), region.left()),
             local_span(kept.top(), kept.bottom(), region.top()),
         );
-        stats.add_blur(
-            area_px(region.width, region.height).saturating_sub(area_px(kept.width, kept.height)),
-        );
+        // Only a real blur is charged. A window that retains its backdrop
+        // without one — translucent but unblurred — comes through here with
+        // radius zero, and the shared frost leaves the composed layers exactly
+        // as it found them, so counting those pixels would report blur work
+        // that never happened.
+        if radius > 0 {
+            stats.add_blur(
+                area_px(region.width, region.height)
+                    .saturating_sub(area_px(kept.width, kept.height)),
+            );
+        }
         back.frost_region_around(
             left,
             top,
@@ -2739,9 +2747,11 @@ struct RowWork {
 /// carries frame bytes — the scan-out frame, from screen column `first_col`.
 ///
 /// Opaque runs of the front-most window are copied whole and everything below
-/// them is skipped; every other column takes [`compose_pixel`]. A run whose
-/// destination slice cannot be resolved encodes nothing and falls through to
-/// the general path, so the frame can never be left holding stale bytes.
+/// them is skipped; the columns between two such runs are composed as one
+/// **segment** ([`compose_segment`]), and a row with no copyable run at all is
+/// one segment from end to end. A run whose destination slice cannot be
+/// resolved encodes nothing and falls through to the general path, so the
+/// frame can never be left holding stale bytes.
 fn compose_row(
     layers: &RowLayers<'_>,
     targets: RowTargets<'_>,
@@ -2787,71 +2797,91 @@ fn compose_row(
                 continue;
             }
         }
-        let Some(dst) = back.get_mut(col) else {
+        // As far as the front-most window's next copyable run, so the columns
+        // between two runs are composed in one pass rather than one at a time.
+        let segment = layers
+            .front
+            .map_or(cols - col, |row| row.blend_len(x, limit))
+            .clamp(1, cols - col);
+        let Some(dst) = back.get_mut(col..col + segment) else {
             break;
         };
-        // A composed column is always a screen column, so the pattern is read
-        // at the position the whole-screen pass would have read it at.
-        let (acc, blends) = compose_pixel(
-            layers.under.unwrap_or(*dst),
-            x,
-            layers.desktop,
-            layers.windows,
-            layers.cursor,
-            dither.bias(x.cast_unsigned()),
-        );
-        work.blended = work.blended.saturating_add(u64::from(blends));
-        *dst = acc;
+        work.blended = work
+            .blended
+            .saturating_add(compose_segment(dst, layers, x, dither));
         if let Some(bytes) = frame
             .as_deref_mut()
-            .and_then(|bytes| bytes.get_mut(col * 4..col * 4 + 4))
+            .and_then(|bytes| bytes.get_mut(col * 4..(col + segment) * 4))
         {
-            bytes.copy_from_slice(&order.encode(revealed(acc, reveal)));
+            encode_segment(bytes, dst, order, reveal);
         }
-        col += 1;
-        x = x.saturating_add(1);
+        col += segment;
+        x = x.saturating_add_unsigned(u32::try_from(segment).unwrap_or(u32::MAX));
     }
     work
 }
 
-/// The composited pixel at screen column `x` of an already-resolved
-/// scanline: the desktop layer, then each window row back-to-front, then
-/// the cursor, each blended *over* `under`. Returns that pixel and how many
-/// layers were blended to reach it, which is the per-pixel cost the frame
+/// Compose the columns of one screen row that `dst` covers, from screen column
+/// `first_x`: the root fill or whatever the back buffer already held, then the
+/// desktop layer, then each window row back to front, then the cursor. Returns
+/// how many layer contributions were blended, which is the cost the frame
 /// counters report.
 ///
-/// `cursor` carries the overlay and the image-local row this scanline is,
-/// already resolved by the caller, or `None` where the cursor draws nothing
-/// on this row. `bias` is this column's share of the row's ordered dither,
-/// which every blend here — and the opacity and coverage scaling inside
-/// [`WindowRow::sample`] — rounds at.
-fn compose_pixel(
-    under: Pixel,
-    x: i32,
-    desktop_row: Option<&[Pixel]>,
-    rows: &[WindowRow<'_>],
-    cursor: Option<(&PlacedCursor, u32)>,
-    bias: u32,
-) -> (Pixel, u32) {
-    let mut acc = under;
-    let mut blends = 0;
-    if let Some(src) = desktop_pixel(desktop_row, x) {
-        acc = src.over_biased(acc, bias);
-        blends += 1;
+/// The layers are laid **one at a time over the whole segment**, not one column
+/// at a time through the whole stack. Each is a straight run of source pixels
+/// at a screen column and a constant opacity ([`blend_run`]), so the arithmetic
+/// per pixel is the same *over* at the same rounding while the layer decision,
+/// the coordinate conversion, and the bounds checks around it are paid once per
+/// run instead of once per pixel — which measurement showed was where a
+/// translucent composite's time actually went. A pixel still sees the layers in
+/// exactly the order it saw them column by column, so the result is unchanged.
+///
+/// A window row the shape cuts, and the cursor, keep the column-by-column walk
+/// inside their own contribution ([`WindowRow::blend_into`]); they are a few
+/// rows of a frame, and their coverage genuinely varies per column.
+fn compose_segment(
+    dst: &mut [Pixel],
+    layers: &RowLayers<'_>,
+    first_x: i32,
+    dither: DitherRow,
+) -> u64 {
+    if let Some(base) = layers.under {
+        dst.fill(base);
     }
-    for row in rows {
-        if let Some(src) = row.sample(x, bias) {
-            acc = src.over_biased(acc, bias);
-            blends += 1;
+    // The desktop layer is a whole screen row, so its first pixel is screen
+    // column zero.
+    let mut blended = layers.desktop.map_or(0, |desktop| {
+        blend_run(dst, first_x, desktop, 0, u8::MAX, dither)
+    });
+    for row in layers.windows {
+        blended = blended.saturating_add(row.blend_into(dst, first_x, dither));
+    }
+    if let Some((cursor, ly)) = layers.cursor {
+        for (dst, x) in dst.iter_mut().zip(first_x..) {
+            let bias = dither.bias(x.cast_unsigned());
+            if let Some(src) = cursor.sample_row(x, ly) {
+                *dst = src.over_biased(*dst, bias);
+                blended = blended.saturating_add(1);
+            }
         }
     }
-    if let Some((cursor, ly)) = cursor {
-        if let Some(src) = cursor.sample_row(x, ly) {
-            acc = src.over_biased(acc, bias);
-            blends += 1;
-        }
+    blended
+}
+
+/// Encode `pixels` into `bytes` as scan-out, dimmed by the screen reveal.
+///
+/// A fully-revealed screen — every frame but the few of a fade — is the shared
+/// run encoder over the whole segment.
+fn encode_segment(bytes: &mut [u8], pixels: &[Pixel], order: ChannelOrder, reveal: u8) {
+    if reveal == u8::MAX {
+        // Four bytes per pixel of the segment by construction, so the shared
+        // encoder takes all of them.
+        let _encoded = order.encode_run(pixels, bytes);
+        return;
     }
-    (acc, blends)
+    for (slot, pixel) in bytes.as_chunks_mut::<4>().0.iter_mut().zip(pixels) {
+        *slot = order.encode(revealed(*pixel, reveal));
+    }
 }
 
 /// `pixel` as the screen reveal presents it: scaled towards black by
@@ -2871,15 +2901,6 @@ fn revealed(pixel: Pixel, strength: u8) -> Pixel {
         b: div255(u32::from(pixel.b) * s),
         a: pixel.a,
     }
-}
-
-/// The desktop layer's pixel at screen column `x` on an already-resolved
-/// scanline, or `None` where the layer does not reach (no layer at all, a row
-/// past its height, or a column past its width) — there the root fill shows
-/// through, exactly as it did before a layer was installed.
-fn desktop_pixel(row: Option<&[Pixel]>, x: i32) -> Option<Pixel> {
-    let column = usize::try_from(x).ok()?;
-    row?.get(column).copied()
 }
 
 /// Whether `window` can contribute a pixel inside `area`: it is visible

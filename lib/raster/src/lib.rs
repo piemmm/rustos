@@ -52,7 +52,7 @@ mod tests;
 
 pub use affine::Affine;
 pub use blur::{box_blur, BlurScratch};
-pub use color::{div255, div255_biased, Color, Pixel, ROUND_NEAREST};
+pub use color::{blend_span, div255, div255_biased, Color, Pixel, ROUND_NEAREST};
 pub use dither::DitherRow;
 pub use paint::{Gradient, GradientKind, GradientStop, Paint, SpreadMethod};
 pub use resample::{resample, resample_rows, Region, ResampleError, Rgba8Image};

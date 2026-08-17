@@ -12,7 +12,7 @@ use crate::chrome::WindowChrome;
 use crate::color::{div255, DitherRow, Pixel};
 use crate::corner::Corners;
 use crate::geometry::{Point, Rect, Region, Scale};
-use crate::surface::{self, Surface};
+use crate::surface::{self, blend_run, Surface};
 use crate::viewport::RootViewport;
 
 /// An opaque, compositor-minted window identifier.
@@ -152,6 +152,26 @@ impl Window {
     #[must_use]
     pub const fn opacity(&self) -> u8 {
         self.opacity
+    }
+
+    /// Whether this window's own pixels leave what is composed beneath its
+    /// rectangle showing through it as a *field*, so the compositor is worth
+    /// retaining that backdrop for.
+    ///
+    /// Two things do it: a backdrop blur, which reads the backdrop to blur it,
+    /// and a whole-window opacity below full, which admits it everywhere. Both
+    /// make every frame that touches the window recompose the entire stack
+    /// beneath it, which is what retaining pays for.
+    ///
+    /// Deliberately *not* here: an antialiased corner, whose backdrop is a few
+    /// pixels of arc, and a client that paints alpha into its own content,
+    /// which cannot be known without reading every pixel of it. Both still
+    /// composite correctly — they simply blend the layers below rather than
+    /// copying a retained picture of them, which is what a window that reads
+    /// only a sliver of its backdrop should do.
+    #[must_use]
+    pub const fn reads_backdrop(&self) -> bool {
+        self.blur_radius > 0 || self.opacity < u8::MAX
     }
 
     /// Backdrop-blur radius in *logical* pixels (`0` for no blur): how far
@@ -1187,6 +1207,108 @@ impl WindowRow<'_> {
         self.decoration[0]
             .sample(x)
             .or_else(|| self.decoration[1].sample(x))
+    }
+
+    /// Blend this row's contribution over `dst`, whose first pixel is screen
+    /// column `first_x`, and report how many columns it contributed to — the
+    /// blend count the frame counters read, which counts a contribution
+    /// whatever its alpha, exactly as sampling column by column did.
+    ///
+    /// Outside its rounded corners a window's contribution to a row is three
+    /// straight runs — the two furniture strips and the client's own drawable
+    /// pixels — laid at a single opacity, so the row is composited a *run* at
+    /// a time through the shared span blend rather than a column at a time
+    /// through [`sample`](Self::sample). The arithmetic is the same operator
+    /// at the same rounding; what goes is the per-column layer decision, which
+    /// is what the composite was actually spending its time on.
+    ///
+    /// Two rows keep the column-by-column path, because on them the three runs
+    /// are not the whole truth: a row the shape cuts, where coverage varies
+    /// across the arc and the frame's own rim takes precedence over the client
+    /// beneath it, and the row of a window whose furniture somehow reaches
+    /// into its client columns, where that same precedence decides. The second
+    /// cannot arise from the furniture bands this window manager lays out — a
+    /// strip that overlaps the client is a corner row, and those are cut — so
+    /// it is a guard against a layout that has changed rather than a case in
+    /// use, and it fails onto the slower path rather than into the wrong
+    /// pixels.
+    pub(crate) fn blend_into(&self, dst: &mut [Pixel], first_x: i32, dither: DitherRow) -> u64 {
+        if self.cut.is_some() || self.decoration.iter().any(|s| self.overlaps_client(s)) {
+            let mut blended = 0;
+            for (dst, x) in dst.iter_mut().zip(first_x..) {
+                let bias = dither.bias(x.cast_unsigned());
+                if let Some(src) = self.sample(x, bias) {
+                    *dst = src.over_biased(*dst, bias);
+                    blended += 1;
+                }
+            }
+            return blended;
+        }
+        let mut blended = blend_run(
+            dst,
+            first_x,
+            self.drawable(),
+            self.client_x,
+            self.opacity,
+            dither,
+        );
+        for span in &self.decoration {
+            blended += blend_run(dst, first_x, span.pixels, span.x, self.opacity, dither);
+        }
+        blended
+    }
+
+    /// The client pixels this row actually draws: the content row, never
+    /// longer than the columns the client owns, so a gutter-clipped tail draws
+    /// nothing rather than spilling past the gutter.
+    fn drawable(&self) -> &[Pixel] {
+        let cols = usize::try_from(self.client_cols).unwrap_or(usize::MAX);
+        self.content
+            .get(..cols.min(self.content.len()))
+            .unwrap_or(&[])
+    }
+
+    /// Whether `span` reaches any column the client owns, where
+    /// [`sample`](Self::sample) decides between the two by coverage rather
+    /// than by position.
+    fn overlaps_client(&self, span: &DecorationSpan<'_>) -> bool {
+        let Ok(len) = i64::try_from(span.pixels.len()) else {
+            return true;
+        };
+        if len == 0 || self.client_cols == 0 {
+            return false;
+        }
+        let client = i64::from(self.client_x);
+        i64::from(span.x) < client + i64::from(self.client_cols) && i64::from(span.x) + len > client
+    }
+
+    /// How many columns from screen column `x` towards `limit` cannot begin an
+    /// [`opaque_run`](Self::opaque_run), so a caller that has just been
+    /// refused one knows how far to compose before asking again.
+    ///
+    /// Always at least one column, so a caller stepping by it makes progress
+    /// whatever it was refused for.
+    #[must_use]
+    pub(crate) fn blend_len(&self, x: i32, limit: i32) -> usize {
+        let all = usize::try_from(i64::from(limit) - i64::from(x)).unwrap_or(0);
+        if self.opacity != u8::MAX || self.cut.is_some() {
+            return all;
+        }
+        let Ok(lx) = usize::try_from(i64::from(x) - i64::from(self.client_x)) else {
+            // Before the client's own pixels, where no run can start.
+            return usize::try_from(i64::from(self.client_x) - i64::from(x))
+                .unwrap_or(all)
+                .clamp(1, all.max(1));
+        };
+        // Past the client's own pixels — the furniture beyond the gutter, or a
+        // short content buffer — nothing further along the row can begin one.
+        let Some(span) = self.drawable().get(lx..).filter(|s| !s.is_empty()) else {
+            return all;
+        };
+        span.iter()
+            .take_while(|pixel| pixel.a != u8::MAX)
+            .count()
+            .clamp(1, all.max(1))
     }
 
     /// The longest run of source pixels this row contributes from screen

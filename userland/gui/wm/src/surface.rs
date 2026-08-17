@@ -7,9 +7,53 @@
 //! type without duplication. This module re-exports it so the
 //! rest of the compositor keeps referring to `crate::surface::Surface`.
 
+use tairix_raster::{blend_span, DitherRow};
+
 use crate::color::Pixel;
 
 pub use tairix_raster::surface::Surface;
+
+/// Blend `src`, whose first pixel is screen column `src_x`, over the part of
+/// `dst` it reaches, `dst` beginning at screen column `dst_x`; report how many
+/// columns overlapped.
+///
+/// This is the one place a composited layer meets the shared span blend: the
+/// desktop layer, a window's client run, and each furniture strip are all a
+/// slice at a screen column, and clipping one to the segment being composed is
+/// the only thing that differs between them. The count is the overlap, not the
+/// pixels the blend chose to touch, because a transparent source still *is* a
+/// contribution the frame composed.
+pub(crate) fn blend_run(
+    dst: &mut [Pixel],
+    dst_x: i32,
+    src: &[Pixel],
+    src_x: i32,
+    factor: u8,
+    dither: DitherRow,
+) -> u64 {
+    let (Ok(dst_len), Ok(src_len)) = (i64::try_from(dst.len()), i64::try_from(src.len())) else {
+        return 0;
+    };
+    let (dst_x, src_x) = (i64::from(dst_x), i64::from(src_x));
+    let from = dst_x.max(src_x);
+    let until = (dst_x + dst_len).min(src_x + src_len);
+    let (Ok(len), Ok(into), Ok(taken), Ok(column)) = (
+        usize::try_from(until - from),
+        usize::try_from(from - dst_x),
+        usize::try_from(from - src_x),
+        u32::try_from(from),
+    ) else {
+        return 0;
+    };
+    let (Some(dst), Some(src)) = (
+        dst.get_mut(into..into.saturating_add(len)),
+        src.get(taken..taken.saturating_add(len)),
+    ) else {
+        return 0;
+    };
+    blend_span(dst, src, factor, dither, column);
+    u64::try_from(len).unwrap_or(u64::MAX)
+}
 
 /// Row `y` of `surface` left to right, or an empty slice when the row is out
 /// of bounds — a row that does not exist simply draws nothing.

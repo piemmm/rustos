@@ -1,10 +1,15 @@
 //! Colours and premultiplied-alpha compositing arithmetic.
 //!
+//! [`blend_span`] is where a whole run of pixels is composited; the operators
+//! below are the same arithmetic for one.
+//!
 //! The desktop rasteriser works exclusively in **premultiplied alpha**:
 //! each colour channel of a [`Pixel`] is already scaled by its own alpha.
 //! Premultiplication is what makes the Porter–Duff *over* operator a
 //! single multiply-add per channel and keeps filtering and per-region
 //! opacity correct.
+
+use crate::dither::DitherRow;
 
 /// The bias at which [`div255_biased`] rounds to nearest.
 ///
@@ -23,7 +28,7 @@ pub const ROUND_NEAREST: u32 = 127;
 /// defensive clamp that lets the conversion stay total without an `unwrap`.
 ///
 /// At [`ROUND_NEAREST`] this is exactly the nearest integer. A bias that
-/// varies per pixel ([`DitherRow`](crate::DitherRow)) is how a paint whose
+/// varies per pixel ([`DitherRow`]) is how a paint whose
 /// output holds fewer levels than its input spends the missing resolution
 /// across the area instead of contouring; the two are the same divide, and
 /// nothing else about the arithmetic changes.
@@ -282,6 +287,55 @@ impl Pixel {
     }
 }
 
+/// Composite `src` over `dst` pixel for pixel, each source scaled by
+/// `factor`/255 on its way in, rounding both at the surface row's ordered
+/// dither.
+///
+/// This is the crate's one span composite, and the reason a caller reaches
+/// for it rather than looping over [`Pixel::over_biased`] itself is speed, not
+/// convenience: the operands are two slices walked in step, so the destination
+/// is read and written straight through with no per-pixel bounds check,
+/// coordinate conversion, or layer decision around it. A compositor laying a
+/// translucent window over the picture beneath it, and [`Surface::blit`]
+/// laying a sprite, are the same walk and must stay so — one blended pixel is
+/// the same arithmetic wherever it comes from.
+///
+/// The two slices are paired by position: `dst[i]` takes `src[i]`, and the
+/// shorter one ends the walk. `first_x` is the surface column `dst[0]` sits
+/// at, so the dither is read at each pixel's own place on the surface and two
+/// spans that meet cannot disagree about the phase between them.
+///
+/// A fully transparent source leaves its destination exactly as it found it,
+/// so it is skipped before the arithmetic rather than composited to no effect.
+///
+/// [`Surface::blit`]: crate::Surface::blit
+pub fn blend_span(dst: &mut [Pixel], src: &[Pixel], factor: u8, dither: DitherRow, first_x: u32) {
+    blend_span_mapped(dst, src, factor, dither, first_x, |pixel| pixel);
+}
+
+/// [`blend_span`], with `map` applied to each source pixel on its way in.
+///
+/// `map` may not turn a transparent source opaque: the skip above happens
+/// first, which is what keeps the mapped walk the same walk.
+pub(crate) fn blend_span_mapped(
+    dst: &mut [Pixel],
+    src: &[Pixel],
+    factor: u8,
+    dither: DitherRow,
+    first_x: u32,
+    map: impl Fn(Pixel) -> Pixel,
+) {
+    for ((dst, src), x) in dst.iter_mut().zip(src).zip(first_x..) {
+        if src.a == 0 {
+            continue;
+        }
+        let bias = dither.bias(x);
+        *dst = map(*src)
+            .scale_alpha_biased(factor, bias)
+            .over_biased(*dst, bias);
+    }
+}
+
 /// `weight`/255 of the way from `from` to `to`, per premultiplied channel.
 ///
 /// The crate's one mixer: the blur mixes a frosted copy back over what it
@@ -331,3 +385,7 @@ impl From<tairix_theme::Rgba> for Color {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "color_tests.rs"]
+mod tests;

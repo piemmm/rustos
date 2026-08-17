@@ -1,15 +1,16 @@
 # FIX-DESKTOP-SPEEDUP — Software-compositor and GUI redraw performance
 
 Status: **A done, B done, C mostly done, D done** (B.5 dithers every blended
-pixel; C.0, C.1, C.2, C.4b, C.4c,
+pixel and B.6 composes a segment a layer at a time; C.0, C.1, C.2, C.4b, C.4c,
 C.5 landed — every control family reports what it repaints from both input
 paths, and a host now reports its own two kinds of change through the same two
 guarded writes; C.3 has landed for `userland/apps/widgets` with its differential
 proof and five apps remain; C.4a withdrawn as a performance item after
-measurement; D.1–D.4, D.7 and D.8 landed — a frosted window that moves now keeps
-the frost the move cannot reach and the layers a frost covers are no longer
-composed — D.5 is a User decision, and D.6 and D.9 are follow-ups the
-measurements exposed).
+measurement; D.1–D.4 and D.7–D.9 landed — a frosted window that moves now keeps
+the frost the move cannot reach, the layers a frost covers are no longer
+composed, and *any* window that reads its backdrop retains one, so a translucent
+drag went from the desktop's slowest to cheaper than a blurred one — D.5 is a
+User decision and D.6 a follow-up the measurements exposed).
 E planned.
 Stages A–E need no hardware acceleration, no kernel change, and no new
 syscall; F needs a `plans/FIX-HARDWARE-FEATURES.md` correction; G is gated on
@@ -81,7 +82,7 @@ full-window repaint and a full-window recomposite. Traced end to end:
 | 7 | app present | `client.present(id, 0, DamageRect::full(mode))` — **whole window, always**, after an unpremultiply-and-copy of every pixel into the shared frame | `files`, `terminal`, `viewer`, `wallpaper`, `widgets`, `switchboard` `run.rs` |
 | 8 | session | converts and **diffs every declared pixel** against the window's surface — a whole-window pass per sample | `session::windows::convert_damage` |
 | 9 | compositor | the frost is recomputed over the whole window every time, 2 box-blur passes, **4 integer divides per pixel per pass**, **never cached** | `wm::compositor::blur_backdrop`, `lib/raster/src/blur.rs` `blur_line`/`mean` |
-| 10 | compositor | every damaged pixel: `WindowRow::sample` → `scale_alpha` → `Pixel::over` (4 × `div255`). **No opaque fast path, no occlusion culling** | `wm::compositor::compose_pixel`, `wm::window::WindowRow::sample` |
+| 10 | compositor | every damaged pixel: `WindowRow::sample` → `scale_alpha` → `Pixel::over` (4 × `div255`). **No opaque fast path, no occlusion culling** | the per-column walk since replaced by `wm::compositor::compose_segment` |
 | 11 | present | up to `MAX_PRESENT_REGIONS` (8) separate `present_region` round trips, each rotating the 2-frame ring and copying a growing **bounding-box union** of stale damage | `lib/display/src/client.rs` `RemoteDisplay::push`/`copy_region` |
 
 Rows 5–10 are the "plummets when the pointer crosses a control-rich window"
@@ -244,7 +245,7 @@ evidence.
 column that each replace what is beneath them exactly; `compose_row` (the
 row loop, lifted out of `compose_span`) copies such a run into the back
 buffer with `copy_from_slice`, encodes it with one `encode_run`, and takes
-every other column through the unchanged `compose_pixel` → `Pixel::over`.
+every other column through the unchanged blend path (now `compose_segment`).
 
 A loop specialisation, not a second blend: the blended branch calls the
 same `Pixel::over`, and *over* with a fully opaque source **is** the
@@ -335,6 +336,37 @@ software exactly as a backdrop blur does, and a baked layer
 (`Window::sample_local`) reads the dither at the pixel's *screen* position so
 it holds what the software composite would have written
 (`plans/FIX-DISPLAY-ACCELERATION.md` A.3).
+
+### B.6 A segment is composed a layer at a time, not a pixel at a time  **[done]**
+B.1's opaque runs are copied; everything else went through a per-*column* walk
+that, for each pixel, asked the desktop layer, then every window row, then the
+cursor, what it contributed. Decomposition on the bench (each stage disabled in
+turn, same binary) put **1.7 ns/px** in the row loop, write and encode, and
+**18.2 ns/px** inside that walk at ~2.4 layer contributions a pixel — so the
+colour arithmetic was under half of a blended pixel and the dispatch around it
+the rest. (Cross-crate call overhead was tested and ruled out: marking every
+`lib/raster` colour primitive `#[inline]` moved the drag by under 1%.)
+
+The columns between two copyable runs are now one **segment**, composed a layer
+at a time across its whole width: the base fill, the desktop row, each window
+row back to front, then the cursor. Each is a straight run of source pixels at a
+screen column and a constant opacity, laid through `lib/raster`'s one span
+composite, `blend_span` — which `Surface::blit` also takes, so a blended pixel
+is the same arithmetic wherever it comes from and there is no second blend loop
+(§2.2). `compose_pixel` is deleted, not left beside it (§2.14).
+
+What keeps it exact: a window row is three straight runs (two furniture strips
+and the client's drawable pixels) *except* where the shape cuts it, and there
+`WindowRow::blend_into` keeps the column-by-column walk, as does the cursor. The
+dither is read at each pixel's own surface column, so a run split anywhere
+writes what the whole run wrote and a segment boundary that moves with a window
+cannot seam.
+
+Measured: full-screen opaque **2.98 → 0.61 ns/px**, 64×24 opaque **2.54 → 0.96**,
+drag opaque **1.24 → 0.47**, full-screen translucent **10.04 → 5.99**, 64×24
+blur **9.74 → 6.30**. All 256 existing compositor frame tests stayed
+byte-identical, which is the correctness argument; `color_tests` adds the
+run-versus-per-pixel differential and the split-at-every-boundary equality.
 
 ---
 
@@ -835,7 +867,7 @@ No indexing, no `unwrap`, no panic path.
   after a trim; teardown releases everything.
 - Docs: `lib/raster/README.md`, the `Reciprocal` and `blur_line` rustdoc,
   `userland/gui/wm/README.md`, `frost.rs`'s module docs,
-  `docs/src/desktop/wm.md` (a *Retained frosted backdrops* section), and
+  `docs/src/desktop/wm.md` (a *Retained backdrops* section), and
   `plans/SMARTRAM.md` (the frost cache as a reclaim client).
 
 **Measured** (release, `cargo xtask bench`, the same scenes as the Stage A
@@ -991,25 +1023,53 @@ behaviour disabled for the baseline, so the pair differs in nothing else:
   unchanged (opaque 2.91 → 2.87, translucent 9.57 → 9.55), so nothing was
   traded for it.
 
-The remaining 3.03 ms is bounded from above by a *measurement*, not an estimate:
-the same drag with the blur turned off costs **3.92 ms** (D.9), and that is the
-window's own blend plus the whole plane with no frost involved — so the frost now
-more than pays for the blur it performs. Reducing what is left means the
-per-pixel blend itself (Stage F) or retaining the plane (D.9), not more caching
-of the blur. The counters carry the claim in CI: a three-pixel move blurs under a
+The counters carry the claim in CI: a three-pixel move blurs under a
 fifth of the window, and a reused frost resolves *no* pixel of the layer beneath
-it.
+it. B.6 and D.9 took the blurred drag further still, to **9.30 ns/px**.
 
-### D.9 Follow-up — a translucent window with no blur has no plane to keep
-The same bench now measures the **non**-blurred translucent drag at **3.92 ms**
-a sample against the blurred one's 3.03 ms: it is the slower case, because a
-frost is a cache of the composed plane and a window with no blur has none, so
-every sample re-blends the whole stack beneath it. Closing it means retaining
-the *unblurred* plane on the same terms (a second `lib/reclaim` client, its own
-epoch, the same invalidation funnels) — which is a new cache and a second
-screenful of retained pixels, so it is a design decision and not something to
-fold into a blur change (§2.3, §26.3). Not started, and not needed for the
-blurred window this stage fixed.
+### D.9 Any window that reads its backdrop retains one  **[done]**
+A frost is a cache of the composed plane, and a window with no blur had none, so
+every pointer sample of a plainly translucent drag re-blended the whole stack
+beneath it — measured at **19.89 ns/px**, the slowest window on the desktop to
+drag, worse than the blurred one.
+
+The expected shape of the fix was a *second* cache for the unblurred plane. It
+was not needed and would have been the duplication §2.2 forbids: **a blur of
+radius zero leaves the composed layers exactly as it found them**, so the
+retained entry already *is* the composed backdrop and the whole retention path —
+the epoch, the invalidation funnels, the `reuse` core/whole/blur decision, the
+spared-plane composite, the wipe on release — applies unchanged. All that was
+missing was admission. One predicate, `Window::reads_backdrop` (a blur, or a
+whole-window opacity below full), replaced the two `blur_radius() == 0` gates in
+`compose_plan` and `recompose_rect`.
+
+Deliberately excluded, because their backdrop is not a field: an antialiased
+corner (a few pixels of arc) and a client painting alpha into its own content
+(unknowable without reading every pixel). Both still composite correctly through
+the blend path.
+
+Two defects were found and fixed with it:
+
+- `blur_px` counted a radius-zero frost as blurred, reporting blur work that
+  never happened. Gated on `radius > 0`.
+- `FrostedBackdrop::capture` composited the snapshot onto a fresh transparent
+  surface through `blit`, reading and blending every pixel of a screenful. A
+  snapshot is a copy: `Surface::overwrite` is the same shared blit walk laying
+  rows down whole.
+
+Measured (`cargo xtask bench --filter composite`, 1280×800, a 560×360 window
+moved 6 px a frame over two more translucent windows):
+
+- Drag, translucent stack: **19.89 → 6.95 ns/px** (4.12 → 1.44 ms), a factor of
+  **2.9**. It is now cheaper than the blurred drag rather than dearer.
+- Drag, backdrop blur: **15.30 → 9.30 ns/px**, from B.6 and the cheaper capture.
+
+Gated by two tests: a change-by-change sweep composing one scene twice — every
+backdrop retained against every backdrop recomposed — asserting the scan-out and
+the back buffer are byte-identical at each of ~30 steps; and a drag measured on
+two compositors driven identically, asserting the retaining one resolves under
+half the layer contributions and under the damaged area of the other while
+producing the same screen. The second fails without the admission change.
 
 ---
 

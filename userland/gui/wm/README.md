@@ -46,12 +46,18 @@ router**:
   fallback outright while any visible window is frosted, because a
   hardware layer is composed from its own pixels and cannot sample what is
   already behind it.
-- Retained frosted backdrops (`frost`): a frost is a function of the layers
+- Retained backdrops (`frost`): a **translucent or backdrop-blurred** window
+  is composed over the picture beneath its rectangle, so every frame that
+  touches it otherwise recomposes that whole stack. That backdrop is a
+  function of the layers
   beneath it, the window's whole rectangle, its physical radius and the
   window's shape — and of *nothing at or above its own layer*. So it is kept in
   a `ReclaimCache` (`frost_cache`, one screenful, `lib/reclaim`'s shared
-  desktop policy) and a window's own repaint copies it back instead of blurring
-  again: a `64×24` repaint inside a frosted terminal cost **17.4 ms** and now
+  desktop policy) and a window's own repaint copies it back instead of
+  composing that stack again. A blur of radius zero leaves the composed layers
+  exactly as it found them, so an unblurred translucent window retains its
+  backdrop through the very same path (`Window::reads_backdrop`) rather than a
+  second cache: a `64×24` repaint inside a frosted terminal cost **17.4 ms** and now
   costs **26 µs**, and its damage stays the rectangle it marked rather than
   growing to the window. The last three inputs are recorded in the entry and
   consulted on every lookup, so a change fails closed to whatever it cannot
@@ -59,8 +65,12 @@ router**:
   **moved, resized or changed shape keeps its core** — in screen coordinates
   the retained pixels are still exactly right wherever neither the blur's
   replication nor the shape's corners reach, so only the border is blurred
-  again (`Surface::frost_region_around`) and dragging a frosted, translucent
-  terminal costs **3.03 ms** a sample where it cost **7.05 ms**. The rectangle
+  again (`Surface::frost_region_around`). Dragging a frosted, translucent
+  terminal costs **9.30 ns/px** a sample where it cost **15.30**, and dragging
+  a translucent unblurred one **6.95** where it cost **19.89** — it was the
+  slowest window on the desktop to drag and is now cheaper than a frosted one.
+  A backdrop is snapshotted with `Surface::overwrite`, a row copy rather than a
+  composite onto a blank surface. The rectangle
   recorded is the whole window's, because one pushed off a screen edge is
   frosted from the row and column the screen begins at while its shape is read
   from its own top-left. The layers beneath
@@ -325,6 +335,22 @@ root fill are all skipped for exactly those columns. A window that covers
 only part of a dirty rectangle, or is opaque only in places, still saves
 what it can. Runs are sought only within a blur segment, so a frosted
 window remains a barrier and nothing a frost reads is ever skipped.
+
+The columns between two copyable runs are one **segment**, and a segment is
+composed a *layer* at a time over its whole width — the base fill, the
+desktop row, each window row back to front, then the cursor — rather than a
+column at a time through the whole stack. Each layer is a straight run of
+source pixels at a screen column and a constant opacity, laid through
+`lib/raster`'s one span composite (`blend_span`), so the arithmetic per pixel
+is the same *over* at the same rounding while the layer decision, the
+coordinate conversion and the bounds checks around it are paid once per run.
+A pixel still sees its layers in the order it always did and the frames are
+byte-identical; what changed is that measurement showed the dispatch, not the
+blending, was the larger half of a translucent composite. Full-screen opaque
+composition fell from **2.98 ns/px to 0.61**, and the translucent case from
+**10.04 to 5.99**. The rows where coverage genuinely varies per column — a
+rounded corner's arc, and the cursor — keep the column-by-column walk inside
+their own contribution.
 
 ## Properties
 

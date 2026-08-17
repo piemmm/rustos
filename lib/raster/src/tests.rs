@@ -662,6 +662,72 @@ fn blit_composites_only_opaque_source_pixels() {
 }
 
 #[test]
+fn overwrite_replaces_what_it_lands_on_where_a_blit_would_composite() {
+    // A snapshot is a copy, not a composite: the compositor retains the
+    // backdrop beneath a translucent or blurred window with this, and a
+    // transparent source pixel must arrive as transparent rather than leave
+    // the old contents showing.
+    let mut copied = Surface::new(4, 4).expect("allocates");
+    copied.fill(BLUE);
+    let mut composited = Surface::new(4, 4).expect("allocates");
+    composited.fill(BLUE);
+    let mut src = Surface::new(2, 2).expect("allocates");
+    src.set(0, 0, RED.premultiply());
+    src.set(1, 0, Color::rgba(0, 200, 40, 128).premultiply());
+
+    copied.overwrite(1, 1, &src);
+    composited.blit(1, 1, &src);
+    assert_eq!(copied.get(1, 1), Some(RED.premultiply()));
+    assert_eq!(
+        copied.get(2, 2),
+        Some(Pixel::TRANSPARENT),
+        "a transparent source pixel replaces, it does not skip"
+    );
+    assert_ne!(
+        copied.pixels(),
+        composited.pixels(),
+        "the two differ exactly where the source was not opaque"
+    );
+    // Outside the footprint neither touched anything.
+    assert_eq!(copied.get(0, 0), Some(BLUE.premultiply()));
+}
+
+#[test]
+fn overwriting_a_whole_surface_reproduces_it_exactly() {
+    // The property the retained backdrop rests on: what comes back is what
+    // was there, byte for byte, translucent pixels included.
+    let mut source = Surface::new(5, 3).expect("allocates");
+    source.fill(BLUE);
+    source.set(2, 1, Color::rgba(10, 20, 30, 90).premultiply());
+    source.set(4, 2, Pixel::TRANSPARENT);
+    let mut taken = Surface::new(5, 3).expect("allocates");
+    taken.fill(RED);
+    taken.overwrite(0, 0, &source);
+    assert_eq!(taken.pixels(), source.pixels());
+}
+
+#[test]
+fn an_overwrite_clips_exactly_as_a_plain_blit_does() {
+    // The two share one geometry walk, so a source hanging off an edge must
+    // land on precisely the same pixels either way.
+    let mut src = Surface::new(3, 3).expect("allocates");
+    src.fill(RED);
+    for at in [(-2i32, -1i32), (3, 2), (-4, -4), (2, 0)] {
+        let mut copied = Surface::new(4, 4).expect("allocates");
+        copied.fill(BLUE);
+        let mut blitted = Surface::new(4, 4).expect("allocates");
+        blitted.fill(BLUE);
+        copied.overwrite(at.0, at.1, &src);
+        blitted.blit(at.0, at.1, &src);
+        assert_eq!(
+            copied.pixels(),
+            blitted.pixels(),
+            "an opaque source at {at:?} copies and composites alike"
+        );
+    }
+}
+
+#[test]
 fn blit_desaturated_greys_the_source_without_touching_it() {
     let mut dst = Surface::new(2, 2).expect("allocates");
     let mut src = Surface::new(2, 2).expect("allocates");

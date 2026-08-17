@@ -151,10 +151,26 @@ This crate owns:
   output is byte-identical to a naive `O(area·radius)` average, which
   `blur_tests` asserts over a spread of shapes and radii including the
   single-row, single-column and radius-wider-than-the-region cases.
-- `Surface::blit` — composite one surface over another through the `over`
-  path, clipping a negative origin or an over-large source, so a
+- `blend_span` — composite a run of source pixels over a run of destination
+  pixels, each source scaled by a factor on its way in and both roundings
+  taken at the row's ordered dither. This is the crate's **one span
+  composite**, and every blended run in the desktop goes through it: a blit,
+  and the window manager laying a translucent window's row over the picture
+  beneath it, are the same walk, so a blended pixel is the same arithmetic
+  wherever it comes from. The two slices are paired by position and the
+  shorter ends the walk; the dither is read at each pixel's own *surface*
+  column, so a run split anywhere writes exactly what the whole run wrote and
+  a moving segment boundary can never leave a seam (`color_tests`).
+- `Surface::blit` — composite one surface over another through `blend_span`,
+  clipping a negative origin or an over-large source, so a
   transparent-background sprite (a rasterised cursor or icon) lays onto the
   destination without a rectangular halo.
+- `Surface::overwrite` — the same walk, but each source pixel **replaces**
+  the pixel it lands on. A snapshot is a copy, not a composite: the window
+  manager retains the backdrop beneath a translucent or blurred window with
+  this, and at a screenful a frame the difference between a row copy and
+  reading and blending every pixel is worth having. Sharing one geometry walk
+  with `blit` is what keeps the two clipping identically.
 - `Surface::blit_desaturated` — the same walk with each source pixel pulled
   toward its own luminance first (`Pixel::desaturate`: BT.601 luma, `255`
   identity, `0` pure grey). One definition of saturation reduction, applied on
@@ -226,7 +242,11 @@ panel is — rather than a coverage evaluation per pixel.
 A fully opaque source keeps none of the destination, so `Pixel::over` returns
 it unchanged and a full-coverage opaque span is a single slice fill rather
 than a per-pixel blend. A translucent source still takes the general
-Porter–Duff path.
+Porter–Duff path — as a *run* through `blend_span`, so the layer decision,
+the coordinate conversion, and the bounds checks around the arithmetic are
+paid once per run rather than once per pixel. Measurement is what settled
+that shape: in the window manager's composite the arithmetic itself was
+under half the cost of a blended pixel, and the dispatch around it the rest.
 
 `row_span_mut` is the row-at-a-time write seam for a consumer that composites
 through a mask of its own — `lib/font`'s glyph blitter scales a text colour by

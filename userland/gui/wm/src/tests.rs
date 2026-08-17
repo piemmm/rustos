@@ -4591,7 +4591,7 @@ fn a_hidden_window_s_furniture_is_evicted_before_a_visible_one_s() {
     assert!(c.chrome_resident(newcomer));
 }
 
-// ---- retained frosted backdrops --------------------------------------
+// ---- retained backdrops ----------------------------------------------
 
 /// One scene composed twice: once reusing retained frosts, once blurring
 /// afresh every frame.
@@ -4852,6 +4852,190 @@ fn dragging_a_frosted_window_blurs_only_the_border_the_move_uncovers() {
         "a window jumped clear of itself keeps nothing, and only its \
          on-screen part is frosted"
     );
+}
+
+#[test]
+fn every_change_around_a_translucent_window_composes_the_frame_a_fresh_one_would() {
+    // The same sweep as the frosted one above, over a window that is merely
+    // translucent. It retains its backdrop through the same cache — a blur of
+    // radius zero leaves the composed layers exactly as they were — so every
+    // way the picture beneath it can change has to drop it, and a frame that
+    // kept one it should not have differs from a frame that composed the stack
+    // afresh.
+    let mut both = BothWays::new(mode(40, 24));
+    let under = both.both(|c| c.add_window(Point::ORIGIN, opaque(40, 24, GREEN)));
+    let glass = both.both(|c| c.add_window(Point::new(6, 4), opaque(20, 14, RED)));
+    let over = both.both(|c| c.add_window(Point::new(30, 2), opaque(8, 8, BLUE)));
+    both.both(|c| c.set_opacity(glass, 160));
+    both.settle("the first translucent backdrop");
+
+    both.both(|c| present_content(c, glass, paint_dot));
+    both.settle("the translucent window's own content");
+    both.both(|c| {
+        c.set_cursor(solid_cursor(4, RED), Point::new(12, 9));
+        true
+    });
+    both.settle("a cursor over it");
+    both.both(|c| c.move_cursor(Point::new(14, 10)));
+    both.settle("a cursor moved over it");
+    both.both(|c| c.set_reveal(128));
+    both.settle("a partial reveal");
+    both.both(|c| c.set_reveal(u8::MAX));
+    both.settle("a full reveal");
+
+    // Above it: nothing its backdrop reads.
+    both.both(|c| c.move_window(over, Point::new(20, 6)));
+    both.settle("the window above dragged onto it");
+    both.both(|c| c.move_window(over, Point::new(14, 8)));
+    both.settle("the window above dragged across it");
+
+    // Beneath it: everything its backdrop reads.
+    both.both(|c| present_content(c, under, paint_dot));
+    both.settle("the window below presented");
+    both.both(|c| c.move_window(under, Point::new(1, 0)));
+    both.settle("the window below moved");
+    both.both(|c| c.set_visible(under, false));
+    both.settle("the window below hidden");
+    both.both(|c| c.set_visible(under, true));
+    both.settle("the window below shown");
+    both.both(|c| c.set_background(GREEN));
+    both.settle("the root fill recoloured");
+    both.both(|c| c.repaint_desktop(|surface| surface.fill(RED)));
+    both.settle("the desktop layer repainted");
+
+    // Its own geometry and shape, each of which decides how much survives.
+    both.both(|c| c.move_window(glass, Point::new(7, 5)));
+    both.settle("moved a pointer sample");
+    both.both(|c| c.move_window(glass, Point::new(26, 14)));
+    both.settle("moved clear of where it was");
+    both.both(|c| c.resize_window_client(glass, 22, 12));
+    both.settle("resized");
+    both.both(|c| c.set_corners(glass, Corners::Rounded { radius: 5 }));
+    both.settle("rounded");
+    both.both(|c| c.set_opacity(glass, 90));
+    both.settle("faded further");
+    both.both(|c| c.set_scale(Scale::from_percent(200).expect("valid scale")));
+    both.settle("the density changed");
+    both.both(|c| c.set_scale(Scale::ONE));
+    both.settle("the density restored");
+
+    // Restacking, and a second translucent window overlapping it, so each
+    // reads what the other wrote.
+    both.both(|c| c.raise(glass));
+    both.settle("raised");
+    both.both(|c| c.lower(glass));
+    both.settle("lowered");
+    let second = both.both(|c| c.add_window(Point::new(18, 8), opaque(16, 12, GREEN)));
+    both.both(|c| c.set_opacity(second, 128));
+    both.settle("a second overlapping translucent window");
+    both.both(|c| c.move_window(second, Point::new(20, 9)));
+    both.settle("the second one moved");
+    both.both(|c| present_content(c, under, paint_dot));
+    both.settle("under both of them");
+
+    // Off the screen edge, where the retained rectangle is clipped, then a
+    // blur added on top of the opacity and finally taken away again.
+    both.both(|c| c.move_window(glass, Point::new(-6, -4)));
+    both.settle("partly off screen");
+    both.both(|c| present_content(c, glass, paint_dot));
+    both.settle("the clipped window's own content");
+    both.both(|c| c.set_backdrop_blur(glass, 3));
+    both.settle("blurred as well as translucent");
+    both.both(|c| c.set_backdrop_blur(glass, 0));
+    both.settle("the blur taken away");
+    both.both(|c| c.set_opacity(glass, u8::MAX));
+    both.settle("made opaque, so it retains nothing");
+    both.both(|c| c.remove(second));
+    both.settle("the second one removed");
+    both.both(|c| c.remove(glass));
+    both.settle("the last one removed");
+}
+
+/// Apply `act` to two compositors, requiring both to take it, so the pair
+/// stays in the same state and their frame counters stay comparable.
+fn apply_to_both(a: &mut Compositor, b: &mut Compositor, act: impl Fn(&mut Compositor) -> bool) {
+    assert!(act(a) && act(b), "both stacks take the act");
+}
+
+#[test]
+fn dragging_a_translucent_window_keeps_the_backdrop_it_already_composed() {
+    // The complaint this closes: a translucent window was the *slowest* thing
+    // to drag, because every pointer sample recomposed the whole stack beneath
+    // it. Moving it disturbs nothing below, so all of the backdrop the two
+    // positions share is still exactly right and only the sliver the move
+    // uncovers has to be composed.
+    // Two compositors given identical scenes and identical moves, one keeping
+    // its backdrops and one composing every frame from the root fill up, so
+    // the counters below are the same frame's work measured two ways rather
+    // than two different frames compared.
+    let mut kept = new_compositor(mode(320, 240), BLUE).expect("compositor");
+    let mut fresh = new_compositor(mode(320, 240), BLUE).expect("compositor");
+    fresh.set_frost_reuse(false);
+    let whole = u64::from(200 * 140_u32);
+    apply_to_both(&mut kept, &mut fresh, |c| {
+        c.add_window(Point::ORIGIN, opaque(320, 240, GREEN));
+        // Translucent, so the layer beneath the dragged window has to be
+        // blended rather than copied by the opaque-run path — which is what
+        // makes it something a retained backdrop can spare.
+        let mid = c.add_window(Point::new(20, 20), opaque(260, 190, RED));
+        c.set_opacity(mid, 200)
+    });
+    let glass = kept.add_window(Point::new(40, 40), opaque(200, 140, BLUE));
+    assert_eq!(
+        fresh.add_window(Point::new(40, 40), opaque(200, 140, BLUE)),
+        glass,
+        "ids are handed out in order, so the two stacks stay identical"
+    );
+    apply_to_both(&mut kept, &mut fresh, |c| c.set_opacity(glass, 160));
+    composite_checked(&mut kept);
+    composite_checked(&mut fresh);
+    assert!(kept.frost_resident(glass), "its backdrop is retained");
+
+    for step in 1..=5 {
+        apply_to_both(&mut kept, &mut fresh, |c| {
+            c.move_window(glass, Point::new(40 + step * 3, 40 + step * 3))
+        });
+        composite_checked(&mut kept);
+        composite_checked(&mut fresh);
+        let (with, without) = (kept.frame_stats(), fresh.frame_stats());
+        assert_eq!(
+            (with.blur_px, without.blur_px),
+            (0, 0),
+            "step {step}: nothing in this scene is blurred"
+        );
+        // Keeping the backdrop also keeps the damaged rectangle down to what
+        // the move actually disturbed: a window that must recompose its
+        // backdrop is promoted to its whole bounds first, so the stack beneath
+        // it is resolved over more of the screen as well as more deeply.
+        assert!(
+            with.damaged_px < without.damaged_px,
+            "step {step} damaged {} pixels keeping the backdrop and {} without",
+            with.damaged_px,
+            without.damaged_px
+        );
+        // Its own pixels still blend over the whole rectangle; what the kept
+        // backdrop spares is resolving the layers under it at all — neither
+        // blended nor copied.
+        let resolved = |s: crate::FrameStats| s.blended_px + s.opaque_px;
+        assert!(
+            resolved(with) < whole * 5 / 4,
+            "step {step} resolved {} layer contributions over a {whole}-pixel \
+             window; a kept backdrop leaves the window itself and the sliver \
+             the move uncovered",
+            resolved(with)
+        );
+        assert!(
+            resolved(without) > resolved(with) * 2,
+            "step {step} resolved {} contributions with the backdrop kept \
+             against {} without it; keeping it must spare the stack beneath",
+            resolved(with),
+            resolved(without)
+        );
+    }
+
+    // Both took the same route to the same screen: the saving is work not
+    // done, never a different picture.
+    assert_eq!(kept.frame(), fresh.frame(), "the two screens are identical");
 }
 
 #[test]

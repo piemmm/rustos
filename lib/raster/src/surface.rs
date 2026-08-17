@@ -24,7 +24,7 @@ use alloc::vec::Vec;
 
 use tairix_reclaim::CachedBytes;
 
-use crate::color::{mix, Color, Pixel};
+use crate::color::{blend_span, blend_span_mapped, mix, Color, Pixel};
 use crate::dither::DitherRow;
 use crate::paint::Paint;
 use crate::round::round_rect_coverage;
@@ -801,7 +801,21 @@ impl Surface {
     ///
     /// [`Pixel::over`]: crate::color::Pixel::over
     pub fn blit(&mut self, x: i32, y: i32, src: &Surface) {
-        self.blit_mapped(x, y, src, |pixel| pixel);
+        self.blit_with(x, y, src, |dst, src| {
+            blend_span(dst, src, 255, DitherRow::NEAREST, 0);
+        });
+    }
+
+    /// [`blit`](Self::blit), but each source pixel **replaces** the pixel it
+    /// lands on instead of compositing over it.
+    ///
+    /// This is how a snapshot is taken — the compositor retaining the backdrop
+    /// beneath a translucent or blurred window copies a rectangle of its back
+    /// buffer with it. Compositing onto a fresh transparent surface would
+    /// reproduce the same pixels, but it reads and blends every one of them to
+    /// do it; a snapshot of a screenful is worth the row copy it actually is.
+    pub fn overwrite(&mut self, x: i32, y: i32, src: &Surface) {
+        self.blit_with(x, y, src, <[Pixel]>::copy_from_slice);
     }
 
     /// [`blit`](Self::blit), with every source pixel pulled toward its own
@@ -819,15 +833,22 @@ impl Surface {
             self.blit(x, y, src);
             return;
         }
-        self.blit_mapped(x, y, src, |pixel| pixel.desaturate(saturation));
+        self.blit_with(x, y, src, |dst, source| {
+            blend_span_mapped(dst, source, 255, DitherRow::NEAREST, 0, |pixel| {
+                pixel.desaturate(saturation)
+            });
+        });
     }
 
-    /// The one blit walk, with `map` applied to each source pixel on its way
-    /// into the destination.
+    /// The one blit walk: resolve which rows and columns of `src` land inside
+    /// the clip, then hand each destination row and the source row it covers
+    /// to `lay`.
     ///
-    /// A transparent source pixel is skipped before `map` runs, so a map may
-    /// not turn one opaque; both maps here leave alpha alone.
-    fn blit_mapped(&mut self, x: i32, y: i32, src: &Surface, map: impl Fn(Pixel) -> Pixel) {
+    /// Every caller differs only in what `lay` does with a paired row — blend,
+    /// blend through a map, or copy — so the geometry that pairs them is
+    /// written once here and a caller cannot get the clipping subtly different
+    /// from its siblings.
+    fn blit_with(&mut self, x: i32, y: i32, src: &Surface, lay: impl Fn(&mut [Pixel], &[Pixel])) {
         // Which of the source's columns and rows land somewhere this blit is
         // allowed to write. Resolving both once, rather than per pixel, is what
         // turns the inner loop below into a plain paired-slice walk.
@@ -869,11 +890,7 @@ impl Surface {
             let Some(source) = src.pixels.get(lo..hi) else {
                 continue;
             };
-            for (pixel, dst) in source.iter().zip(destination.iter_mut()) {
-                if pixel.a != 0 {
-                    *dst = map(*pixel).over(*dst);
-                }
-            }
+            lay(destination, source);
         }
     }
 

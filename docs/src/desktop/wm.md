@@ -38,6 +38,21 @@ and a blend rather than a coordinate conversion, a layer decision, and a
 `y * stride + x * 4` offset recomputed per pixel. Only windows whose
 bounds overlap the dirty rectangle are considered at all.
 
+Within a row, the columns between two copied opaque runs are one **segment**,
+and a segment is composed a *layer* at a time across its whole width — the
+base fill, the desktop row, each window row back to front, then the cursor —
+not a column at a time through the whole stack. Each layer is a straight run
+of source pixels at a screen column and a constant opacity, laid through
+`lib/raster`'s one span composite (`blend_span`), which is the same walk
+`Surface::blit` takes: one blended pixel is the same arithmetic wherever it
+comes from. The order a pixel sees its layers in is unchanged and the frames
+are byte-identical; what the segment saves is the per-column dispatch around
+the arithmetic, which measurement showed was the larger half of a translucent
+composite. Full-screen opaque composition fell from 2.98 ns/px to 0.61 and the
+translucent case from 10.04 to 5.99. Rows where coverage genuinely varies per
+column — a rounded corner's arc, and the cursor — keep the column-by-column
+walk inside their own contribution.
+
 Because the root background is forced opaque, the final screen is always
 fully opaque and its premultiplied channels equal their straight-alpha
 form on scan-out.
@@ -289,8 +304,8 @@ neighbourhood and seam against the pixels it was kept beside. The border's
 bands are all blurred before any is mixed back, because a band's own
 neighbourhood reaches into the bands next to it and what it must read there is
 the backdrop, not the frost of it. This is what a dragged frosted window costs
-instead of a whole blur (see [Retained frosted
-backdrops](#retained-frosted-backdrops)).
+instead of a whole blur (see [Retained
+backdrops](#retained-backdrops)).
 
 Every channel is averaged, alpha included: on premultiplied data that is
 the same convex combination of the contributing colours that compositing
@@ -399,8 +414,8 @@ When the frost does **not** have to be recomputed at all there is no
 neighbourhood to spread and no promotion either: the retained frost is copied
 back and the damage stays the rectangle it was marked as. A frost that survives
 only in part is promoted like one that must be blurred outright, because its
-border is blurred. See [Retained frosted
-backdrops](#retained-frosted-backdrops).
+border is blurred. See [Retained
+backdrops](#retained-backdrops).
 
 **An update that changes nothing marks nothing.** `move_window` to the
 origin a window already has, and `set_corners` / `set_visible` /
@@ -511,9 +526,12 @@ number of bytes:
   carries, while a larger copy costs only more bytes; beyond a handful of
   rectangles the round trips cost more than one call copying their box.
 
-## Retained frosted backdrops
+## Retained backdrops
 
-A frost is a function of exactly four things: the pixels the layers beneath it
+A window that is **translucent, backdrop-blurred, or both** is composed over
+the picture beneath its rectangle, so a frame that touches it otherwise
+recomposes that whole stack. That backdrop is a function of exactly four
+things: the pixels the layers beneath it
 composed, the window's own rectangle, its physical blur radius, and the window
 shape the blurred copy is mixed back through. It is **not** a function of
 anything at or above its own layer — the blur happens before the window's own
@@ -530,10 +548,29 @@ The compositor keeps each frosted window's backdrop instead, in a bounded,
 pressure-governed cache on the same terms as the window furniture above:
 ceilinged at one screenful of pixels (no more of it can be visible at once),
 released when the memory-pressure band tightens, and **wiped** on release,
-because a frost is a blurred image of whatever the user had on screen. The same
+because a frost is a blurred image of whatever the user had on screen — and an
+unblurred backdrop is a plain one, so the wipe matters more, not less. The same
 repaint now costs 26 µs.
 
-How a retained frost is known to be still right:
+A plainly translucent window — no blur — is the same problem without the two
+blur passes, and takes the same path: a blur of radius zero leaves the composed
+layers exactly as it found them, so the retained entry *is* the composed
+backdrop and `Window::reads_backdrop` is the one predicate deciding which
+windows are worth keeping one for (a whole-window opacity below full, or a
+blur). There is no second cache and no second copy of the reuse rule. Dragging
+a translucent unblurred terminal fell from **19.89 ns/px** a pointer sample to
+**6.95** — it was the slowest window on the desktop to drag and is now cheaper
+than a frosted one, which itself fell from **15.30** to **9.30**. A backdrop is
+snapshotted with `Surface::overwrite`, a row copy, rather than composited onto
+a blank surface.
+
+An antialiased corner is deliberately *not* enough to retain a backdrop for:
+its backdrop is a few pixels of arc, not a field. Nor is a client that paints
+alpha into its own content, which cannot be known without reading every pixel
+of it. Both still composite correctly — they blend the layers below instead of
+copying a retained picture of them.
+
+How a retained backdrop is known to be still right:
 
 - **The rectangle, the radius, and the shape are recorded in the entry** and
   consulted on every lookup, so the check holds even if the compositor forgot
