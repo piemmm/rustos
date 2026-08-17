@@ -131,7 +131,9 @@ fn report(result: std::io::Result<Outcome>) -> ExitCode {
             ExitCode::from(1)
         }
         Ok(Outcome::Timeout { budget, serial }) => {
-            eprintln!("tairix-qemu-run: TIMEOUT after {budget:?} with no serial output");
+            eprintln!(
+                "tairix-qemu-run: HUNG: the guest fell silent for its whole {budget:?} inactivity budget; the transcript's last line is the stall point"
+            );
             eprint!("{serial}");
             ExitCode::from(2)
         }

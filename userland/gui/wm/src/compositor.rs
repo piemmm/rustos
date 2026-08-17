@@ -54,6 +54,15 @@ use crate::window::{Window, WindowId, WindowRow};
 /// fill it holds only the windows covering the damage.
 type ChromeFallback = Vec<(WindowId, WindowChrome)>;
 
+/// Which end of the z-order a restack moves a window's family to.
+#[derive(Copy, Clone, Eq, PartialEq)]
+enum StackEnd {
+    /// The front, above every other window: a raise.
+    Front,
+    /// The back, below every other window: a put-to-back.
+    Back,
+}
+
 /// A software compositing window manager surface.
 ///
 /// The compositor owns its output's display density as a [`Scale`]: the
@@ -995,6 +1004,53 @@ impl Compositor {
         id
     }
 
+    /// Add `surface` as a window `parent` owns — a *transient*: the menu or
+    /// sheet that window opened — at `origin`, stacked directly above its
+    /// owner and any transient already there. Returns its identifier, or
+    /// `None` for an unknown `parent`.
+    ///
+    /// A transient is not a window in its own right. It is composed above its
+    /// owner and restacked with it ([`raise`](Self::raise),
+    /// [`lower`](Self::lower)), so nothing can be raised between the two and
+    /// no caller has to re-assert the arrangement afterwards. Refusing an
+    /// unknown owner is the fail-closed half of that: a transient whose owner
+    /// does not exist would have no place in the stack to hold.
+    ///
+    /// Only the new window's own bounds are marked dirty when its owner
+    /// already holds the front — which is the ordinary case, a menu opening on
+    /// the focused window — so opening one costs its own rectangle rather than
+    /// its owner's whole frame.
+    pub fn add_transient_window(
+        &mut self,
+        parent: WindowId,
+        origin: Point,
+        surface: Surface,
+    ) -> Option<WindowId> {
+        let above = self.family_top(parent)?;
+        let id = WindowId(self.next_id);
+        self.next_id += 1;
+        let mut window = Window::new(id, origin, surface);
+        window.set_parent(Some(parent));
+        let bounds = window.bounds();
+        self.windows.insert(above, window);
+        self.mark_layer(id, bounds);
+        self.restack_family(parent, StackEnd::Front);
+        Some(id)
+    }
+
+    /// The stack index directly above `parent` and every transient it already
+    /// owns — where the next one belongs — or `None` when `parent` is not a
+    /// window here.
+    fn family_top(&self, parent: WindowId) -> Option<usize> {
+        let mut top = self.index_of(parent)?;
+        for (index, window) in self.windows.iter().enumerate() {
+            if window.parent() == Some(parent) {
+                top = top.max(index);
+            }
+        }
+        Some(top.saturating_add(1))
+    }
+
     /// Borrow a window by id.
     #[must_use]
     pub fn window(&self, id: WindowId) -> Option<&Window> {
@@ -1184,44 +1240,123 @@ impl Compositor {
     }
 
     /// Raise a window to the top of the z-order; its bounds are marked
-    /// dirty. Raising the window already at the front marks no damage and
-    /// still returns `true` (only an unknown `id` returns `false`).
+    /// dirty. Raising a window whose family already holds the front marks no
+    /// damage and still returns `true` (only an unknown `id` returns
+    /// `false`).
+    ///
+    /// A window and its transients ([`add_transient_window`]) rise together
+    /// and keep their order, so raising either the owner or its menu brings
+    /// the pair, and neither can be left stranded under a window that was
+    /// raised between them.
+    ///
+    /// [`add_transient_window`]: Self::add_transient_window
     pub fn raise(&mut self, id: WindowId) -> bool {
-        let Some(index) = self.index_of(id) else {
+        if self.index_of(id).is_none() {
             return false;
-        };
-        if index.saturating_add(1) == self.windows.len() {
-            // Already at the front: nothing to restack, nothing to repaint.
-            return true;
         }
-        let window = self.windows.remove(index);
-        let bounds = window.bounds();
-        self.windows.push(window);
-        // Restacked first: a window's own frosted backdrop is a function of
-        // its place in the stack, and marking is what drops it. Only the
-        // windows the raise passed changed which layers they see, and after
-        // the move they occupy this index upwards; the ones that were already
-        // below it see the same stack as before.
-        self.mark_from(bounds, index);
+        self.restack_family(self.family_root(id), StackEnd::Front);
         true
     }
 
     /// Send a window to the bottom of the z-order (put-to-back), keeping it
     /// visible; its bounds are marked dirty so whatever it was covering
     /// recomposites. Returns `false` for an unknown id.
+    ///
+    /// The family goes as a unit, exactly as [`raise`](Self::raise) brings
+    /// it: a window sent to the back takes the menu it owns with it, rather
+    /// than leaving it floating over windows it does not belong to.
     pub fn lower(&mut self, id: WindowId) -> bool {
-        let Some(index) = self.index_of(id) else {
+        if self.index_of(id).is_none() {
+            return false;
+        }
+        self.restack_family(self.family_root(id), StackEnd::Back);
+        true
+    }
+
+    /// The window every restack moves as one with `id`: the window it is a
+    /// transient of, or `id` itself when it owns its place in the stack.
+    fn family_root(&self, id: WindowId) -> WindowId {
+        self.window(id).and_then(Window::parent).unwrap_or(id)
+    }
+
+    /// How many windows `id` owns as transients.
+    ///
+    /// A transient's own transients are not counted, because none exist: a
+    /// popup is opened by a window, never by another popup, and a chain would
+    /// need a stacking rule of its own rather than this one applied twice.
+    fn transients(&self, id: WindowId) -> usize {
+        self.windows
+            .iter()
+            .filter(|window| window.parent() == Some(id))
+            .count()
+    }
+
+    /// Move `root`'s family to one end of the z-order, owner first, and mark
+    /// what the move changed. Reports whether anything actually moved.
+    ///
+    /// A family already sitting at that end is left completely alone — no
+    /// restack, no damage, no dropped backdrop, and not so much as an
+    /// allocation. That is the common case, not a rare one: an owner and its
+    /// menu spend their whole life at the front, and re-deriving an
+    /// arrangement that already holds must not cost a window's worth of blur
+    /// to be told nothing changed.
+    fn restack_family(&mut self, root: WindowId, end: StackEnd) -> bool {
+        let Some(root_at) = self.index_of(root) else {
             return false;
         };
-        if index == 0 {
-            // Already at the back: nothing to restack, nothing to repaint.
-            return true;
+        let owned = self.transients(root);
+        let first = match end {
+            StackEnd::Front => self.windows.len().saturating_sub(owned.saturating_add(1)),
+            StackEnd::Back => 0,
+        };
+        if root_at == first && self.family_is_placed(root, first, owned) {
+            return false;
         }
-        let window = self.windows.remove(index);
-        let bounds = window.bounds();
-        self.windows.insert(0, window);
-        self.mark(bounds);
+        // The lowest window the move disturbs: everything below it sees the
+        // same stack it always did, so its retained backdrop still holds.
+        let low = root_at.min(first);
+        let mut order = Vec::with_capacity(owned.saturating_add(1));
+        order.push(root);
+        order.extend(
+            self.windows
+                .iter()
+                .filter(|window| window.parent() == Some(root))
+                .map(Window::id),
+        );
+        let mut taken = Vec::with_capacity(order.len());
+        // Top-down, so each removal leaves the indices below it untouched.
+        for id in order.iter().rev() {
+            if let Some(index) = self.index_of(*id) {
+                taken.push(self.windows.remove(index));
+            }
+        }
+        let mut moved = Vec::with_capacity(taken.len());
+        for (offset, window) in taken.into_iter().rev().enumerate() {
+            moved.push(window.bounds());
+            let at = first.saturating_add(offset).min(self.windows.len());
+            self.windows.insert(at, window);
+        }
+        // Restacked first: a window's own frosted backdrop is a function of
+        // its place in the stack, and marking is what drops it.
+        for bounds in moved {
+            self.mark_from(bounds, low);
+        }
         true
+    }
+
+    /// Whether `root`'s family already occupies the stack from `first`
+    /// upwards: the owner there, and each of the `owned` windows above it one
+    /// of its transients.
+    ///
+    /// Their order among themselves is not examined, because it cannot be
+    /// wrong: a restack preserves it, so any arrangement of a family's own
+    /// transients above their owner is the one a restack would produce.
+    fn family_is_placed(&self, root: WindowId, first: usize, owned: usize) -> bool {
+        self.windows.get(first).map(Window::id) == Some(root)
+            && self
+                .windows
+                .get(first.saturating_add(1)..first.saturating_add(1).saturating_add(owned))
+                .is_some_and(|above| above.iter().all(|w| w.parent() == Some(root)))
     }
 
     /// Toggle the decorated, resizable window named by `id` between restored
@@ -1262,6 +1397,14 @@ impl Compositor {
         self.chrome.invalidate(&id);
         self.frost.invalidate(&id);
         self.pending_redraws.retain(|pending| *pending != id);
+        // A transient outliving its owner stands on its own: the window engine
+        // tears a window's popups down with it, and until each arrives the
+        // link must not name a window that has gone.
+        for other in &mut self.windows {
+            if other.parent() == Some(id) {
+                other.set_parent(None);
+            }
+        }
         window.release_content();
         // The windows that were above the removed one start at its index now,
         // and they are the only ones whose backdrop lost anything.

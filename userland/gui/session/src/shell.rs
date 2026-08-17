@@ -486,8 +486,8 @@ impl DesktopShell {
         Some(window)
     }
 
-    /// Open `surface` as an undecorated window at `origin`, raise it above
-    /// everything, and focus it — *without* listing it on the taskbar.
+    /// Open `surface` as an undecorated window at `origin` belonging to
+    /// `parent`, and focus it — *without* listing it on the taskbar.
     ///
     /// This is how an app-owned popup surface (a context menu, a settings
     /// sheet) is placed. A popup belongs to the window that opened it, so it is
@@ -497,19 +497,22 @@ impl DesktopShell {
     /// deactivates the parent's frame exactly as the session's own trusted
     /// modal surfaces do.
     ///
-    /// Returns the new [`WindowId`]. It cannot fail: no task id is minted, so
-    /// there is no id space to exhaust.
+    /// It is opened as its parent's *transient*
+    /// ([`Compositor::add_transient_window`]), so the window manager stacks
+    /// the pair together from here on and nothing has to re-assert the
+    /// arrangement per frame. Returns `None`, opening nothing, for a parent
+    /// the compositor does not know.
     pub fn open_popup_window(
         &mut self,
         compositor: &mut Compositor,
+        parent: WindowId,
         origin: Point,
         surface: Surface,
-    ) -> WindowId {
-        let window = compositor.add_window(origin, surface);
-        compositor.raise(window);
+    ) -> Option<WindowId> {
+        let window = compositor.add_transient_window(parent, origin, surface)?;
         self.router.focus(window, compositor);
         self.sync_active_frame(compositor);
-        window
+        Some(window)
     }
 
     /// Close the popup window `window` opened by

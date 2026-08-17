@@ -738,7 +738,7 @@ still passes unchanged.
 
 ---
 
-## Stage D — Make blur cost what it changes  **[D.1–D.4, D.7, D.8 done; D.5 is a User decision]**
+## Stage D — Make blur cost what it changes  **[D.1–D.4, D.7–D.10 done; D.5 is a User decision]**
 
 ### D.1 Damage below a frost invalidates it; the window's own content does not  **[done]**
 Every `damage.add` in the compositor is gone, replaced by three funnels that
@@ -910,13 +910,12 @@ changed nothing:
 
 - `raise` on the window already at the front restacked a `Vec` tail back into
   its own slot, then marked the whole window and invalidated every frost from
-  that index up. `SessionWindows::keep_popups_stacked` runs immediately before
-  every composite while any popup is open and raises the parent and the popup
-  each time, so **opening a menu re-blurred the parent's whole window on every
-  wake**; `InputRouter::press_primary`/`press_secondary` raise unconditionally
-  too, so every click into an already-focused frosted window re-blurred it.
-  Measured on a 20×14 frosted window: `damaged_px`/`blur_px` `280`/`280` per
-  redundant raise, now `0`/`0`.
+  that index up. `InputRouter::press_primary`/`press_secondary` raise
+  unconditionally, so every click into an already-focused frosted window
+  re-blurred it. Measured on a 20×14 frosted window: `damaged_px`/`blur_px`
+  `280`/`280` per redundant raise, now `0`/`0`. A *pair* of windows defeated
+  this guard — an owner with a popup above it is never itself at the front —
+  which is what D.10 closes structurally.
 - `set_active_frame` re-asserting the activation a frame already shows, and
   `set_window_title` re-setting the label the bar already reads, each re-marked
   their furniture bands *and* dropped that window's chrome-cache entry.
@@ -1070,6 +1069,69 @@ the back buffer are byte-identical at each of ~30 steps; and a drag measured on
 two compositors driven identically, asserting the retaining one resolves under
 half the layer contributions and under the damaged area of the other while
 producing the same screen. The second fails without the admission change.
+
+### D.10 A window and the menu it owns are one thing to restack  **[done]**
+The backdrop is only retained while nothing *marks* the window, and one caller
+marked it on **every wake**: the desktop re-asserted each open popup's stacking
+immediately before compositing, as `raise(parent)` then `raise(popup)`. D.7's
+guard cannot help a pair — with its popup above it the parent is never the front
+window — so the two ping-ponged past each other every frame, and each raise
+dropped the parent's frost and marked its whole rectangle. Hovering a menu over a
+translucent, backdrop-blurred terminal therefore re-blurred, re-captured and
+re-presented the entire window per pointer sample: on a 1080p Pi 4B, most of a
+megapixel tens of times a second for one highlighted row. The observed symptom
+was ~2 frames a second while the pointer moved over an open menu, with the same
+window perfectly fast when the menu was closed.
+
+The fix is to make the coupling the compositor's, where a restack happens, rather
+than a per-frame repair:
+
+- `Window` carries `parent: Option<WindowId>` — the window it is a *transient*
+  of. `Compositor::add_transient_window(parent, origin, surface)` records it and
+  inserts the popup directly above its owner and any transient already there,
+  refusing an unknown owner (fail closed, §5.4).
+- `raise` and `lower` move the **family** — owner immediately below its
+  transients — whichever member is named, through one private `restack_family`.
+  So nothing can be raised between the two, which is the invariant the re-assert
+  existed to protect, now held by construction.
+- A family already at the end it is being moved to is left completely alone: no
+  restack, no damage, no dropped frost, and not one allocation (the settled check
+  is a count and two slice reads).
+- `SessionWindows::keep_popups_stacked` and its `popups` counter are **deleted**;
+  `DesktopShell::open_popup_window` takes the owner and returns `Option`.
+  `Compositor::remove` clears the transient link of anything the removed window
+  owned, so no stale link can outlive a window.
+
+A deliberate behaviour change comes with it, and is an improvement: the old
+two-`raise` idiom forced the owner to the very front of the stack for as long as
+its menu lived, so no other window — nor the taskbar — could be raised over a
+window with a menu open. The family restack keeps the pair glued without pinning
+it topmost.
+
+Measured, and now gated in CI by counters rather than a claim: re-asserting an
+unchanged arrangement over a frosted owner marked `2304`/`2304` `damaged_px`/
+`blur_px` — 100% of a 48×48 window — and now marks `0`/`0` with an empty damage
+region. Opening a menu on the front window damages the menu's own rectangle and
+blurs nothing (it was the owner's whole frame). Four further tests hold the
+semantics: an intruder raised over a pair goes above both and never between, a
+lower takes the family down, a transient of an absent owner is refused, and an
+orphaned transient stands on its own.
+
+**The app half, in the same change.** The terminal republished its whole menu
+plate per pointer sample as well, because `ContextMenu` reported
+`MenuOutcome::Changed` for every routed event: `lib/controls`' `Menu` already
+fills a `damage::sink()` with the rows it redraws and reports *nothing* for a
+sample that leaves the highlight where it was, and that report was collected and
+thrown away. `ContextMenu::outcome` now reads it — `Ignored` when nothing was
+reported — so a sample inside the highlighted row costs no render, no frame copy,
+and no present, while crossing into another row still repaints. `Settings` had
+the same defect on the same seam (its own fall-through called an inert event
+`Changed`), fixed at the one boundary in `Settings::on_pointer`. A round that
+reported *something* still repaints the whole plate, deliberately: a change the
+sheet composes above its controls — a switched tab's body — is wider than the
+rectangle the control that caused it reports. Per-rectangle *presenting* of a
+plate is not attempted here; it needs a retained overlay surface and belongs with
+E.2's rect-list present.
 
 ---
 

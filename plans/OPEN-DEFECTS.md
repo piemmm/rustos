@@ -446,6 +446,16 @@ The open items, in priority order:
   by a ceiling derived from a silence budget that describes no part of a
   whole-RAM sweep. All fixed structurally, none by a retry. Does **not**
   close D14, whose 120 s is an inactivity budget, not a ceiling.
+- **D39 — `netstack-bond-qemu-riscv64` stalled dead after the NIC driver
+  was spawned (OPEN).** One gate run went silent for its whole 240 s
+  *inactivity* budget, the transcript stopping at `id=4030 process spawned`
+  for the first bound NIC — a bond needs two. Measured: passes alone in
+  8.6 s, passes under 3× host oversubscription in 28.0 s still narrating,
+  silent for 240 s at the gate's eight-guest concurrency. That is the D22
+  signature (a fixed-point stall, not starvation), so the green solo run
+  closes nothing. Suspected an unbounded wait or a stranded deferred wake on
+  the riscv64 driver-spawn/bind path; reproduce at gate concurrency with the
+  guest's watchdog records in view before fixing.
 
 These are **distinct in kind**: D1 finishes an interrupt-model fix, D2
 and D4 are §27 foundational-completeness defects, D3 is an Arch-HAL
@@ -2320,6 +2330,65 @@ vertical's declared ceiling outlasts its derived one. End-to-end:
 2725 s deadline (was 2700 s) and stops at 20.11 s, inside its budget; the
 three takeover verticals pass in 34.4 s (aarch64), 37.2 s (riscv64), and
 19.0 s (x86_64) against their 15-minute ceiling.
+
+## D39 — `netstack-bond-qemu-riscv64` stalled dead after the NIC driver was spawned (OPEN)
+
+**Symptom.** One `cargo xtask ci` run failed with the vertical silent for its
+**whole 240 s inactivity budget**. The transcript's last line is the stall
+point, and it is precise:
+
+```
+id=7001  driver loaded path=/Drivers/network/virtio_net/Run handle=1
+id=13001 node bound to driver task=6 node=0000000080030000 handle=0000000000000009
+id=1020  task capabilities derived task=0000000000000009 uid=0 caps=8
+id=4030  process spawned entry=000000100001a5ce
+```
+
+Nothing follows. A bond needs **two** members, so `devmgr` (task 6) had one
+node bound and had just spawned its driver process; the second node's bind, the
+bond's composition, and every other task's output stop together — the whole
+guest went quiet, not just the driver.
+
+**Not load, and not closable by a re-run.** Measured on this 24-thread host:
+
+- alone: **passes in 8.6 s**;
+- under 3× oversubscription (48 spinners beside it): **passes in 28.0 s**,
+  narrating its boot throughout — 3.3× slower, nowhere near a 28× margin;
+- at the gate's eight-guest concurrency: **silent for the full 240 s**.
+
+That is the D22 signature exactly: proportional starvation stretches a guest
+that keeps talking, whereas this guest stopped at a fixed point. The green solo
+run is therefore *not* evidence the defect is gone — it is evidence the window
+is narrow.
+
+**Suspected class (not yet proven).** A wake that is flagged but never
+delivered, or a wait that cannot expire, on the riscv64 driver-spawn /
+device-bind path — the shape D22 fixed for `virtio_blk`'s `notify_wait` and
+D32 described for stranded deferred wakes. `devmgr` stalling *between* two
+binds while holding whatever the rest of the guest needs would explain total
+silence on a single-hart guest. Candidates to separate: `devmgr`'s wait for a
+freshly spawned driver's readiness (is it bounded?), `virtio_net`'s own
+`notify_wait` budget, and whether a deferred wake can strand on riscv64 the way
+D32 found it could on aarch64.
+
+**Next step.** Reproduce deliberately at gate concurrency (run the whole
+`--qemu` set, or eight guests, in a loop) rather than waiting for it to recur,
+with the guest's watchdog records in view: if a stall record names a site the
+diagnosis is immediate, and if none appears then the riscv64 watchdog cadence
+is itself not sampling (which is D3's parity gap and a finding in its own
+right).
+
+**Regression cover (lands with the fix, §7).** A host-side test for whichever
+wait or wake proves unbounded, plus the vertical passing at gate concurrency.
+Never closed on a green re-run.
+
+**Landed with this entry (observability only).** The harness's own report for
+this outcome said "TIMEOUT after 240s **with no serial output**" for a guest
+that had emitted 12.8 KB — the same misdiagnosis D22 corrected for the sibling
+outcome, and it cost time here before the transcript was read. Both emitters
+(`tools/qemu/src/bin/run.rs`, `tools/xtask/src/commands/qemu_tests.rs`) now say
+the guest fell silent for its whole *inactivity* budget and point at the
+transcript's last line as the stall point.
 
 ## Non-goals / do not do
 

@@ -470,6 +470,141 @@ fn raising_a_covered_window_still_restacks_and_repaints_it() {
     assert_eq!(composite_checked(&mut c).rects(), &[Rect::new(0, 0, 6, 6)]);
 }
 
+/// A pointer moving over an open menu is the hover the desktop redraws most
+/// often, and every one of those frames re-derives where the menu sits. A
+/// window whose family is already arranged must therefore restack nothing and
+/// damage nothing — a frosted owner asked to prove its own arrangement pays a
+/// window's worth of blur to be told what it already knew.
+#[test]
+fn re_asserting_a_transients_stacking_over_a_frosted_owner_costs_nothing() {
+    let mut c = new_compositor(mode(64, 64), BLUE).expect("compositor");
+    let owner = c.add_window(Point::ORIGIN, opaque(48, 48, RED));
+    assert!(c.set_opacity(owner, 128));
+    assert!(c.set_backdrop_blur(owner, 4));
+    let menu = c
+        .add_transient_window(owner, Point::new(8, 8), opaque(12, 12, GREEN))
+        .expect("the owner is a window");
+    composite_checked(&mut c);
+
+    assert!(c.raise(owner), "the owner is known");
+    assert!(c.raise(menu), "the menu is known");
+
+    assert!(
+        !c.has_damage(),
+        "re-asserting the arrangement already in force damaged the screen"
+    );
+    assert!(composite_checked(&mut c).is_empty());
+    assert!(c.frame_stats().is_idle(), "{:?}", c.frame_stats());
+}
+
+/// Opening a menu on the window that already holds the front costs the menu's
+/// own rectangle, not its owner's whole frosted frame: the owner has not
+/// moved in the stack, so its retained backdrop is still exactly right.
+#[test]
+fn opening_a_transient_on_the_front_window_repaints_only_the_transient() {
+    let mut c = new_compositor(mode(64, 64), BLUE).expect("compositor");
+    let owner = c.add_window(Point::ORIGIN, opaque(48, 48, RED));
+    assert!(c.set_opacity(owner, 128));
+    assert!(c.set_backdrop_blur(owner, 4));
+    composite_checked(&mut c);
+
+    let menu = c
+        .add_transient_window(owner, Point::new(8, 8), opaque(12, 12, GREEN))
+        .expect("the owner is a window");
+
+    assert_eq!(
+        composite_checked(&mut c).rects(),
+        &[Rect::new(8, 8, 12, 12)]
+    );
+    assert_eq!(c.frame_stats().blur_px, 0, "the owner was re-blurred");
+    assert_eq!(c.window_at(Point::new(10, 10)), Some(menu));
+}
+
+/// The invariant the old per-frame re-assert existed to protect, now held by
+/// the restack itself: whatever else is raised, a menu stays directly above
+/// the window that owns it.
+#[test]
+fn nothing_can_be_raised_between_a_window_and_its_transient() {
+    let mut c = new_compositor(mode(32, 32), BLUE).expect("compositor");
+    let owner = c.add_window(Point::ORIGIN, opaque(32, 32, RED));
+    let intruder = c.add_window(Point::ORIGIN, opaque(32, 32, GREEN));
+    let menu = c
+        .add_transient_window(owner, Point::new(4, 4), opaque(8, 8, BLUE))
+        .expect("the owner is a window");
+    // Opening the menu brought its owner with it, over the intruder.
+    assert_eq!(c.window_at(Point::new(6, 6)), Some(menu));
+    assert_eq!(c.window_at(Point::new(20, 20)), Some(owner));
+
+    // An intruder raised over the pair goes over *both* of them, never
+    // between: it is the front window, and the menu is still on its owner.
+    assert!(c.raise(intruder));
+    assert_eq!(c.window_at(Point::new(6, 6)), Some(intruder));
+    assert!(c.raise(owner), "a click on the owner brings its menu back");
+    assert_eq!(c.window_at(Point::new(6, 6)), Some(menu));
+    assert_eq!(c.window_at(Point::new(20, 20)), Some(owner));
+
+    // And a raise of the menu itself arranges the pair the same way round.
+    assert!(c.raise(intruder));
+    assert!(c.raise(menu));
+    assert_eq!(c.window_at(Point::new(6, 6)), Some(menu));
+    assert_eq!(c.window_at(Point::new(20, 20)), Some(owner));
+}
+
+/// A window sent to the back takes the menu it owns with it: a transient left
+/// behind would float over windows it does not belong to.
+#[test]
+fn lowering_a_window_takes_its_transient_with_it() {
+    let mut c = new_compositor(mode(32, 32), BLUE).expect("compositor");
+    let owner = c.add_window(Point::ORIGIN, opaque(32, 32, RED));
+    let menu = c
+        .add_transient_window(owner, Point::new(4, 4), opaque(8, 8, BLUE))
+        .expect("the owner is a window");
+    let other = c.add_window(Point::ORIGIN, opaque(32, 32, GREEN));
+    assert!(c.lower(owner));
+
+    assert_eq!(c.window_at(Point::new(6, 6)), Some(other));
+    assert!(c.remove(other));
+    // Beneath it the pair kept its order, owner below its menu.
+    assert_eq!(c.window_at(Point::new(6, 6)), Some(menu));
+    assert_eq!(c.window_at(Point::new(20, 20)), Some(owner));
+    // Lowering the menu lowers the family it belongs to, not just itself.
+    assert!(c.lower(menu));
+    assert_eq!(c.window_at(Point::new(6, 6)), Some(menu));
+}
+
+#[test]
+fn a_transient_needs_a_window_to_belong_to() {
+    let mut c = new_compositor(mode(8, 8), BLUE).expect("compositor");
+    let gone = c.add_window(Point::ORIGIN, opaque(8, 8, RED));
+    assert!(c.remove(gone));
+
+    assert!(
+        c.add_transient_window(gone, Point::ORIGIN, opaque(4, 4, GREEN))
+            .is_none(),
+        "a transient of a window that is not there has no place to hold"
+    );
+    assert_eq!(c.window_count(), 0);
+}
+
+/// A menu outliving the window that owned it stands on its own rather than
+/// naming a window that has gone — so a later raise cannot try to bring a
+/// dead owner along.
+#[test]
+fn a_transient_whose_owner_closes_stands_on_its_own() {
+    let mut c = new_compositor(mode(32, 32), BLUE).expect("compositor");
+    let owner = c.add_window(Point::ORIGIN, opaque(32, 32, RED));
+    let menu = c
+        .add_transient_window(owner, Point::new(4, 4), opaque(8, 8, BLUE))
+        .expect("the owner is a window");
+    let other = c.add_window(Point::ORIGIN, opaque(32, 32, GREEN));
+
+    assert!(c.remove(owner));
+    assert_eq!(c.window(menu).and_then(crate::window::Window::parent), None);
+    assert!(c.raise(menu));
+    assert_eq!(c.window_at(Point::new(6, 6)), Some(menu));
+    assert_eq!(c.window_at(Point::new(20, 20)), Some(other));
+}
+
 #[test]
 fn semi_transparent_window_blends_with_background() {
     let mut c = new_compositor(mode(1, 1), BLUE).expect("compositor");

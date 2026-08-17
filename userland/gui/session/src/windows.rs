@@ -61,10 +61,10 @@ struct WindowRecord {
     /// (`Compositor::present_window_content`), so the session keeps no
     /// second copy to convert into and clone from.
     wm: WindowId,
-    /// For a popup surface, the compositor window of the parent it is glued
-    /// above; `None` for a top-level window. Held as the compositor id
-    /// because that is what the stacking coupling needs, and a window's
-    /// compositor id never changes while it lives.
+    /// For a popup surface, the compositor window of the parent that owns
+    /// it; `None` for a top-level window. It is what tells a close which
+    /// teardown the surface takes, and the window manager holds the same
+    /// link itself for stacking, so no re-assertion happens here.
     parent: Option<WindowId>,
 }
 
@@ -78,10 +78,6 @@ pub struct SessionWindows {
     by_wm: BTreeMap<WindowId, u64>,
     /// Monotonic count of opens, driving the cascade placement.
     opened: u64,
-    /// How many live records are popups. Kept beside the map so the
-    /// per-wake stacking pass costs one integer test on the overwhelmingly
-    /// common wake with no popup open, instead of walking every record.
-    popups: usize,
     /// Windows opened since the last drain, each with the kernel-attested
     /// process that opened it, awaiting identification of the application
     /// they belong to.
@@ -155,32 +151,9 @@ impl SessionWindows {
         core::mem::take(&mut self.opened_owners)
     }
 
-    /// Re-assert every live popup's stacking: each popup is restacked
-    /// directly above the parent that owns it.
-    ///
-    /// The embedder calls this immediately before each composite. A popup is
-    /// its parent's transient — a menu, a sheet — so the pair is raised as a
-    /// unit, which is what guarantees nothing raised elsewhere during the
-    /// same wake can land between a parent and its popup. Idle (one integer
-    /// test) while no popup is open.
-    pub fn keep_popups_stacked(&self, compositor: &mut Compositor) {
-        if self.popups == 0 {
-            return;
-        }
-        for record in self.records.values() {
-            if let Some(parent) = record.parent {
-                compositor.raise(parent);
-                compositor.raise(record.wm);
-            }
-        }
-    }
-
     /// Record the freshly opened window `ipc`, shown as `wm` and owned by
     /// `parent` when it is a popup.
     fn insert(&mut self, ipc: u64, wm: WindowId, parent: Option<WindowId>) {
-        if parent.is_some() {
-            self.popups += 1;
-        }
         self.records.insert(ipc, WindowRecord { wm, parent });
         self.by_wm.insert(wm, ipc);
     }
@@ -189,9 +162,6 @@ impl SessionWindows {
     fn take(&mut self, ipc: u64) -> Option<WindowRecord> {
         let record = self.records.remove(&ipc)?;
         self.by_wm.remove(&record.wm);
-        if record.parent.is_some() {
-            self.popups = self.popups.saturating_sub(1);
-        }
         Some(record)
     }
 }
@@ -504,10 +474,14 @@ impl tairix_window::WindowHost for ShellWindowHost<'_> {
         .clamped_onto(self.compositor.screen_rect());
         // Undecorated on purpose: a popup is a transient its parent owns, so
         // it wears no title bar, no controls, and no taskbar entry, and the
-        // app that opened it is what dismisses it.
-        let wm = self
-            .shell
-            .open_popup_window(self.compositor, placed.origin, content);
+        // app that opened it is what dismisses it. The window manager stacks
+        // it on its parent from here on.
+        let Some(wm) =
+            self.shell
+                .open_popup_window(self.compositor, parent, placed.origin, content)
+        else {
+            return Err(Errno::NotFound);
+        };
         self.compositor.set_app_presented(wm, true);
         self.windows.insert(window_id, wm, Some(parent));
         Ok(())

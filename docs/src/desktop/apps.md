@@ -1666,6 +1666,17 @@ open. The popup is the shared `lib/controls` `Menu`, placed by that control's
 own `anchored_rect` rule — the same placement the file manager's context menu
 uses.
 
+Hovering it costs what it changes. The shared control reports the rows it
+redraws into a damage sink, and reports **nothing** for a sample that leaves
+the highlight where it already was, so `ContextMenu` answers `Ignored` for it
+and the program neither re-renders its plate nor republishes the popup's
+window. Sliding the pointer within one row is therefore free; crossing into
+another repaints once. The settings sheet answers the same way on the same
+seam, so resting the pointer on a control is free too — and a round that *did*
+report keeps its whole-plate repaint, because a change the sheet composes above
+its controls (a switched tab's body) is wider than the rectangle the control
+that caused it reports.
+
 *Settings…* opens an in-window modal sheet built from the shared Reactive
 Alloy controls: an **Appearance** tab (the scheme chooser, the text-size
 slider, and the custom scheme's twenty colour wells with red/green/blue

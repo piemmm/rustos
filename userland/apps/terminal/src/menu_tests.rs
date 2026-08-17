@@ -239,7 +239,8 @@ fn a_primary_press_outside_the_plate_dismisses_without_choosing() {
     let moved = InputEvent::PointerMoved { to: outside };
     assert_eq!(
         menu.on_pointer(&moved, viewport(), Scale::ONE, &theme, &mut damage::sink()),
-        MenuOutcome::Changed
+        MenuOutcome::Ignored,
+        "no row was highlighted and none is now, so nothing was redrawn"
     );
     let pressed = InputEvent::PointerPressed {
         button: PointerButton::Primary,
@@ -280,7 +281,8 @@ fn a_press_inside_on_a_row_chooses_it() {
             &theme,
             &mut damage::sink()
         ),
-        MenuOutcome::Changed
+        MenuOutcome::Ignored,
+        "the row was already highlighted, and a press draws nothing further"
     );
     let released = InputEvent::PointerReleased {
         button: PointerButton::Primary,
@@ -294,6 +296,94 @@ fn a_press_inside_on_a_row_chooses_it() {
             &mut damage::sink()
         ),
         MenuOutcome::Chose(Command::ALL[target_row])
+    );
+}
+
+/// Sweeping the pointer across one row is the commonest thing a menu ever
+/// sees, and every sample of it leaves the screen exactly as it was. The
+/// caller repaints on [`MenuOutcome::Changed`], so reporting one here would
+/// re-render and re-publish the whole plate per pointer sample.
+#[test]
+fn moving_within_the_highlighted_row_changes_nothing() {
+    let theme = Theme::dark();
+    let anchor = Point::new(10, 10);
+    let center = row_center(anchor, 1, &theme);
+    let mut menu = ContextMenu::open(anchor);
+
+    let mut arriving = damage::sink();
+    assert_eq!(
+        menu.on_pointer(
+            &InputEvent::PointerMoved { to: center },
+            viewport(),
+            Scale::ONE,
+            &theme,
+            &mut arriving,
+        ),
+        MenuOutcome::Changed,
+        "arriving on the row highlights it"
+    );
+    assert!(!arriving.is_empty(), "the highlighted row was reported");
+
+    // Every further sample inside the same row: the exact same point, and one
+    // a pixel away that is still the same row.
+    for to in [center, Point::new(center.x + 1, center.y)] {
+        let mut damage = damage::sink();
+        assert_eq!(
+            menu.on_pointer(
+                &InputEvent::PointerMoved { to },
+                viewport(),
+                Scale::ONE,
+                &theme,
+                &mut damage,
+            ),
+            MenuOutcome::Ignored,
+            "a sample inside the highlighted row asked for a repaint"
+        );
+        assert!(damage.is_empty(), "nothing was reported for it either");
+    }
+}
+
+/// Crossing into another row genuinely changes two rows, and only those two:
+/// the highlight leaves one and arrives on the other.
+#[test]
+fn crossing_into_another_row_reports_only_the_two_rows() {
+    let theme = Theme::dark();
+    let anchor = Point::new(10, 10);
+    let mut menu = ContextMenu::open(anchor);
+    let plate = menu.bounds(viewport(), Scale::ONE, &theme);
+    let first = row_center(anchor, 0, &theme);
+    let next = row_center(anchor, 1, &theme);
+
+    menu.on_pointer(
+        &InputEvent::PointerMoved { to: first },
+        viewport(),
+        Scale::ONE,
+        &theme,
+        &mut damage::sink(),
+    );
+    let mut damage = damage::sink();
+    assert_eq!(
+        menu.on_pointer(
+            &InputEvent::PointerMoved { to: next },
+            viewport(),
+            Scale::ONE,
+            &theme,
+            &mut damage,
+        ),
+        MenuOutcome::Changed
+    );
+
+    let reported = damage.bounds();
+    assert!(!reported.is_empty(), "the two rows were reported");
+    assert!(
+        reported.height < plate.height,
+        "two rows ({}) reported as tall as the whole plate ({})",
+        reported.height,
+        plate.height
+    );
+    assert!(
+        plate.intersection(&reported) == reported,
+        "the reported rows lie inside the plate"
     );
 }
 

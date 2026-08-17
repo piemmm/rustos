@@ -94,6 +94,14 @@ pub struct Window {
     /// to present them again. Off until the embedder says otherwise, so a
     /// window nobody can repaint is never released.
     app_presented: bool,
+    /// The window this one is a *transient* of — the surface it belongs to
+    /// and is stacked immediately above (a menu's or a sheet's owner) — or
+    /// `None` for a top-level window that stands on its own.
+    ///
+    /// Stacking reads it: a restack moves an owner and its transients
+    /// together, which is what keeps a menu on its own window and stops
+    /// anything landing between the two.
+    parent: Option<WindowId>,
     /// The smallest client extent the owning application declared it can lay
     /// out at, in physical pixels; `(0, 0)` for an application that declared
     /// none and is content at any size.
@@ -132,6 +140,7 @@ impl Window {
             size_state: WindowSizeState::Restored,
             restore_outer: None,
             app_presented: false,
+            parent: None,
             min_client: (0, 0),
         }
     }
@@ -146,6 +155,23 @@ impl Window {
     #[must_use]
     pub const fn origin(&self) -> Point {
         self.origin
+    }
+
+    /// The window this one is a transient of, or `None` when it stands on
+    /// its own.
+    #[must_use]
+    pub const fn parent(&self) -> Option<WindowId> {
+        self.parent
+    }
+
+    /// Make this window a transient of `parent`, or a top-level window again
+    /// when `parent` is `None`.
+    ///
+    /// Only the compositor calls this, and only where it restacks the family
+    /// in the same breath: the link and the stacking it implies are
+    /// established together, so no frame can see one without the other.
+    pub(crate) fn set_parent(&mut self, parent: Option<WindowId>) {
+        self.parent = parent;
     }
 
     /// Per-window opacity (`255` opaque).

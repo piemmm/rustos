@@ -8878,7 +8878,7 @@ fn finish_run(t: &QemuTest, kernel: &Path, spec: Spec) -> Result<(), String> {
         Outcome::Timeout { budget, serial } => {
             persist_failure_serial(t.package, &serial_log, &serial)?;
             Err(format!(
-                "test --qemu ({}) TIMEOUT after {budget:?} with no serial output (no retries per AGENTS.md §7; full serial: {})\n--- serial ---\n{serial}\n--- end ---",
+                "test --qemu ({}) HUNG: the guest fell silent for its whole {budget:?} inactivity budget; the transcript's last line is the stall point (no retries per AGENTS.md §7; full serial: {})\n--- serial ---\n{serial}\n--- end ---",
                 t.package,
                 serial_log.display()
             ))

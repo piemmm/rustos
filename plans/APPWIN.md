@@ -351,15 +351,19 @@ Done. What now holds:
   id consumed, and the mapping dropped. One shared `PopupSpec` describes
   the request on both halves (`WindowClient::create_popup`).
 - **Undecorated by construction**: the session opens it through
-  `DesktopShell::open_popup_window` (compositor `add_window` + `raise` +
+  `DesktopShell::open_popup_window` (compositor `add_transient_window` +
   focus), which never decorates and never opens a taskbar entry — the path
   the trusted picker already used. No protocol "undecorated" bit exists.
-- **Stacking**: the session holds the parent→popup link on its own
-  `WindowRecord` and re-asserts `raise(parent)` then `raise(popup)` once
-  per wake immediately before `present`
-  (`SessionWindows::keep_popups_stacked`, beside `LockOverlay::
-  keep_topmost`), so nothing raised earlier in the frame lands between
-  them. No new compositor primitive.
+- **Stacking is the compositor's, held by the restack itself**: a popup is
+  its parent's *transient* (`Compositor::add_transient_window`), stacked
+  directly above its owner, and `raise`/`lower` move the family as a unit
+  whichever member is named — so nothing can land between them and nothing
+  re-asserts the arrangement per frame. The per-wake re-assert this plan
+  originally specified was a defect: it dropped the parent's retained
+  frosted backdrop every frame, costing a translucent blurred terminal a
+  full-window blur per pointer sample its open menu saw
+  (`plans/FIX-DESKTOP-SPEEDUP.md` D.10). The session still records the link
+  on its `WindowRecord`, but only to choose a close's teardown.
 - **Lifetime**: closing the parent (channel close, frame control, or
   `client_exited`) tears down every popup keyed to it; closing a popup's
   own id tears down only the popup. The session clears the link on both
@@ -375,8 +379,9 @@ Done. What now holds:
   refused host committing nothing, parent-close cascade, dead-client
   teardown), the session suite (undecorated + off-taskbar placement at the
   parent's client origin, screen clamp, unknown parent, popup close
-  leaving the parent's task, re-glued stacking after an intruder raise),
-  and `lib/geometry`'s `clamped_onto` tests.
+  leaving the parent's task, the pair staying glued through an intruder
+  raise, and a popup hover repainting only the popup), the compositor's own
+  transient suite, and `lib/geometry`'s `clamped_onto` tests.
 
 ## 2. Documentation
 

@@ -585,6 +585,62 @@ fn a_keyboard_only_session_reaches_a_row_the_body_cannot_show() {
     );
 }
 
+/// A pointer sample that redraws nothing must not ask the caller for a
+/// repaint: the sheet is one plate in its own window, so a repaint re-renders
+/// and re-publishes every pixel of it, and the pointer samples far faster than
+/// the sheet changes.
+#[test]
+fn a_pointer_sample_that_redraws_nothing_asks_for_nothing() {
+    let mut sheet = sheet();
+    let row = row_rect(&sheet, CLIENT, Focus::Scheme(1)).expect("the first scheme row is shown");
+    let at = Point::new(row.left() + to_i32(row.width / 2), row.top() + 1);
+
+    let mut arriving = damage::sink();
+    let first = sheet.on_pointer(&moved(at), CLIENT, SCALE, &theme(), &mut arriving);
+    assert_eq!(
+        first == SheetOutcome::Changed,
+        !arriving.is_empty(),
+        "a repaint was asked for exactly when something was reported"
+    );
+
+    // The same sample again, and one a pixel away inside the same row: the
+    // sheet looks precisely as it did.
+    for to in [at, Point::new(at.x + 1, at.y)] {
+        let mut damage = damage::sink();
+        assert_eq!(
+            sheet.on_pointer(&moved(to), CLIENT, SCALE, &theme(), &mut damage),
+            SheetOutcome::Ignored,
+            "a sample that changed nothing asked for a repaint"
+        );
+        assert!(damage.is_empty(), "and it reported nothing either");
+    }
+}
+
+/// The other half of the rule: a round that *did* report keeps its whole-plate
+/// repaint, because switching tabs replaces the body while the strip is all
+/// the tabs control reports.
+#[test]
+fn switching_tabs_still_asks_for_a_repaint() {
+    let mut sheet = sheet();
+    let mut damage = damage::sink();
+    let before = sheet.tabs.selected();
+    let (tabs, ..) = bands(&sheet, CLIENT);
+    let strip = tabs.expect("the tab strip is laid out");
+    let at = Point::new(
+        strip.right() - to_i32(strip.width / 4),
+        strip.top() + to_i32(strip.height / 2),
+    );
+
+    sheet.on_pointer(&moved(at), CLIENT, SCALE, &theme(), &mut damage);
+    sheet.on_pointer(&PRESS, CLIENT, SCALE, &theme(), &mut damage);
+    assert_eq!(
+        sheet.on_pointer(&RELEASE, CLIENT, SCALE, &theme(), &mut damage),
+        SheetOutcome::Changed
+    );
+    assert_ne!(sheet.tabs.selected(), before, "the tab really changed");
+    assert!(!damage.is_empty());
+}
+
 // --- Tabs and scrolling ------------------------------------------------------
 
 #[test]

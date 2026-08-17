@@ -171,14 +171,23 @@ router**:
   software fallback while a reveal is in flight, because a hardware layer
   is scanned out as the driver was handed it and would show at full
   strength while the fade ran.
-- Popup surfaces need no compositor primitive of their own. An app-owned
-  popup (`tairix_abi::window_ipc::WindowRequest::CreatePopup`) is an
-  ordinary undecorated window in that same flat z-order, placed by the
-  session at its clamped screen origin; "directly above its parent" is
-  re-asserted with `raise(parent)` then `raise(popup)` once per wake, just
-  before `present`, so nothing raised earlier in the frame can land between
-  them. The compositor gains no popup concept, no second stacking rule, and
-  no parent link.
+- Transients (`add_transient_window`): an app-owned popup
+  (`tairix_abi::window_ipc::WindowRequest::CreatePopup`) is an ordinary
+  undecorated window that *belongs to* the one that opened it. It is
+  inserted directly above its owner and any transient already there, and
+  every restack afterwards moves the **family** — owner immediately below
+  its transients — whichever member is named, so `raise` on a terminal
+  brings its menu and `lower` takes it along. Nothing can be raised between
+  the two, and no caller re-asserts the arrangement per frame: a family
+  already at the end it is being restacked to is left completely alone, with
+  no restack, no damage and not one allocation. That last point is the whole
+  reason the link lives here. Re-deriving the arrangement per frame *drops
+  the owner's retained backdrop*, and the desktop used to do exactly that:
+  hovering an open menu cost a frosted, translucent terminal a full-window
+  blur, capture and present on every pointer sample — the whole window's
+  pixels, tens of times a second, for a menu row's highlight. Raising an
+  unrelated window now places it above *both*, which is what a desktop
+  should do: an open menu no longer pins its owner over its neighbours.
 - Input routing (`input`): the `InputRouter` tracks the pointer and the
   focused window, raises and focuses the window under a primary press
   (click-to-activate), and drives explicit interactive window

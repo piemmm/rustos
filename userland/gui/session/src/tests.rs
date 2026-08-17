@@ -7749,8 +7749,11 @@ fn closing_a_popup_leaves_its_parent_and_its_task_alone() {
     assert!(shell.session().taskbar().tasks().is_empty());
 }
 
+/// A popup is opened as its parent's transient, so the window manager keeps
+/// the pair together by itself. The session re-asserts nothing per frame: it
+/// is the restack that holds the arrangement, wherever the raise comes from.
 #[test]
-fn keep_popups_stacked_reglues_a_popup_onto_its_parent() {
+fn a_popup_is_glued_above_its_parent_by_every_restack() {
     let mut shell = shell();
     let mut comp = compositor();
     let mut windows = SessionWindows::new();
@@ -7758,57 +7761,87 @@ fn keep_popups_stacked_reglues_a_popup_onto_its_parent() {
         open_parent_and_popup(&mut shell, &mut comp, &mut windows, (10, 20), (200, 160));
     let bounds = comp.window(popup).expect("popup is live").bounds();
     let over_popup = Point::new(bounds.left() + 1, bounds.top() + 1);
+    let client = comp.window_client_rect(parent).expect("parent client");
 
-    // A third window opened over the pair covers the popup: the parent is
-    // no longer at the top and the popup is buried with it.
+    // A third window opened over the pair is simply in front of both: the
+    // popup is buried *with* its parent, never separated from it.
     let intruder = shell
         .open_window(&mut comp, bounds.origin, app_surface(), "Intruder")
         .expect("opens");
     assert_eq!(comp.window_at(over_popup), Some(intruder));
 
-    windows.keep_popups_stacked(&mut comp);
-
+    // Raising the parent — a click on the terminal, the taskbar activating
+    // its task — brings its popup back with it, still directly above it.
+    assert!(comp.raise(parent));
     assert_eq!(
         comp.window_at(over_popup),
         Some(popup),
-        "the pair is raised as a unit, popup on top"
+        "the pair rose as a unit, popup on top"
     );
     // Directly above: a point the parent covers but the popup does not is
     // the parent's, so nothing landed between them.
-    let client = comp.window_client_rect(parent).expect("parent client");
+    assert_eq!(comp.window_at(client.origin), Some(parent));
+
+    // And the intruder raised again takes the front from both of them
+    // without ever slipping between them.
+    assert!(comp.raise(intruder));
+    assert_eq!(comp.window_at(over_popup), Some(intruder));
+    assert!(comp.raise(popup), "a raise of the popup arranges the pair");
+    assert_eq!(comp.window_at(over_popup), Some(popup));
     assert_eq!(comp.window_at(client.origin), Some(parent));
 }
 
+/// Hovering an open menu is the frame the desktop draws most often: the app
+/// repaints its popup, and *nothing else about the screen changes*. With a
+/// translucent, backdrop-blurred parent — a terminal set to frosted glass —
+/// that frame must cost the popup's rectangle and no more, or every pointer
+/// sample re-blurs a whole window.
 #[test]
-fn keep_popups_stacked_is_idle_with_no_popup_open() {
+fn hovering_an_open_popup_repaints_only_the_popup() {
     let mut shell = shell();
     let mut comp = compositor();
     let mut windows = SessionWindows::new();
+    let (parent, popup) =
+        open_parent_and_popup(&mut shell, &mut comp, &mut windows, (10, 20), (200, 160));
+    assert!(comp.set_opacity(parent, 128));
+    assert!(comp.set_backdrop_blur(parent, 8));
+    comp.composite();
+    assert!(!comp.has_damage(), "the opening frame has been drained");
+
+    // The app redraws its menu row and presents it; the session serves that
+    // present exactly as the serve loop does.
+    let popup_bounds = comp.window(popup).expect("popup is live").bounds();
+    let content = comp
+        .window_client_rect(popup)
+        .expect("the popup has a client");
     with_window_host(&mut shell, &mut comp, &mut windows, |host| {
         assert_eq!(
-            host.window_opened(
-                window_owner(1),
-                1,
-                &served_mode(320, 240),
-                "Terminal",
-                resizable_sizing(),
+            host.window_presented(
+                2,
+                &served_mode(popup_bounds.width, popup_bounds.height),
+                &vec![0x40; (popup_bounds.width * popup_bounds.height * 4) as usize],
+                DamageRect {
+                    x: 0,
+                    y: 0,
+                    width_px: popup_bounds.width,
+                    height_px: popup_bounds.height,
+                },
             ),
             Ok(())
         );
     });
-    let parent = windows.wm_id(1).expect("live");
-    let intruder = shell
-        .open_window(&mut comp, Point::new(0, 0), app_surface(), "Intruder")
-        .expect("opens");
 
-    windows.keep_popups_stacked(&mut comp);
-
+    let damage = comp.composite();
     assert_eq!(
-        comp.window_at(Point::new(1, 1)),
-        Some(intruder),
-        "with no popup open the stack is left exactly as it was"
+        damage.rects(),
+        &[content],
+        "the hover repainted more than the popup itself"
     );
-    assert!(comp.window(parent).is_some());
+    assert_eq!(
+        comp.frame_stats().blur_px,
+        0,
+        "the parent's frosted backdrop was thrown away and blurred again"
+    );
 }
 
 // ---- the desktop's reveal from black ----

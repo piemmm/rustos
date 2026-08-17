@@ -1031,22 +1031,32 @@ parent, which any app can open for any transient overlay
 - **Undecorated by construction, not by a flag.**
   `ShellWindowHost::popup_opened` opens it through
   `DesktopShell::open_popup_window`, which adds the window to the
-  compositor and raises it but never calls `decorate_window` and never
-  opens a taskbar entry — the same path the session's own trusted file
-  picker already takes. No protocol "undecorated" bit exists to be
+  compositor as its parent's transient but never calls `decorate_window`
+  and never opens a taskbar entry — the same path the session's own trusted
+  file picker already takes. No protocol "undecorated" bit exists to be
   forged.
-- **Stacked directly above its parent.** The compositor's z-order is one
-  flat stack, so the session re-asserts the coupling once per wake,
-  immediately before `present`
-  (`SessionWindows::keep_popups_stacked` → `raise(parent)` then
-  `raise(popup)`), exactly as the lock overlay keeps itself topmost.
-  Nothing raised earlier in that frame can land between a parent and its
-  popup, and the compositor gains no popup concept of its own.
+- **Stacked directly above its parent, by the restack itself.** A popup is
+  its parent's **transient**: `Compositor::add_transient_window` records
+  the link and inserts the popup directly above its owner (and any
+  transient already there), and every restack from then on moves the family
+  as a unit, owner immediately below — `raise` and `lower` alike, whichever
+  member is named. So nothing raised anywhere can land between a parent and
+  its popup, and no caller re-asserts the arrangement per frame. That
+  matters for more than tidiness: a re-assert *drops* the parent's retained
+  frosted backdrop, and re-deriving an arrangement that already held cost a
+  frosted, translucent terminal a full-window blur on every pointer sample
+  its open menu saw. A family already at the end it is being moved to is
+  left completely alone — no restack, no damage, not even an allocation.
+  Raising an unrelated window puts it in front of *both*, as a desktop
+  should: a window with a menu open is not pinned above its neighbours (nor
+  above the taskbar) for as long as the menu lives.
 - **Parent death takes the popup with it.** Closing the parent — over the
   channel, from the frame's close control, or by the owning client dying
   (`client_exited`) — tears down every popup keyed to it; a `Close` naming
   the popup's own id tears down only the popup. The session drops the
-  parent→popup link on either path, so no stale link can outlive a window.
+  parent→popup link on either path, and `Compositor::remove` clears the
+  transient link of anything the removed window owned, so no stale link can
+  outlive a window on either side.
 - **Presenting is unchanged.** `Present`, `SetBackdropBlur`, and `Close`
   act on a popup's id exactly as on a top-level id, and the popup's own
   events (pointer, key) arrive under its own window id with

@@ -186,6 +186,11 @@ impl ContextMenu {
     /// A primary press outside the plate dismisses without acting on what it
     /// landed on, so a click meant for the screen behind never runs a command
     /// by accident.
+    ///
+    /// A sample that leaves the highlight on the row it was already on reports
+    /// [`MenuOutcome::Ignored`]: it changes no pixel, and the caller must not
+    /// re-render and re-publish the plate for it. Sweeping the pointer across
+    /// a row would otherwise cost a frame's work per sample.
     pub fn on_pointer(
         &mut self,
         event: &InputEvent,
@@ -201,23 +206,17 @@ impl ContextMenu {
         if matches!(event, InputEvent::PointerPressed { .. }) && !bounds.contains(self.pointer) {
             return MenuOutcome::Dismissed;
         }
-        match self.menu.on_pointer(event, bounds, scale, theme, damage) {
-            Some(MenuAction::Activated { index }) => Command::ALL
-                .get(index)
-                .copied()
-                .map_or(MenuOutcome::Dismissed, MenuOutcome::Chose),
-            // No row owns a submenu, so a submenu request cannot arise; a
-            // dismissal closes the menu.
-            Some(MenuAction::OpenSubmenu { .. } | MenuAction::Dismissed) => MenuOutcome::Dismissed,
-            None => MenuOutcome::Changed,
-        }
+        let action = self.menu.on_pointer(event, bounds, scale, theme, damage);
+        Self::outcome(action, damage)
     }
 
     /// Route one key press.
     ///
     /// A row-highlight move (Up/Down/Home/End) reports [`MenuOutcome::Changed`]
     /// just as a pointer hover does in [`Self::on_pointer`], so the caller
-    /// repaints and the moved highlight is actually shown.
+    /// repaints and the moved highlight is actually shown. A key that moves it
+    /// nowhere — Down on the last row of a menu that does not wrap, a key the
+    /// menu has no use for — reports [`MenuOutcome::Ignored`].
     pub fn on_key(
         &mut self,
         key: Key,
@@ -230,12 +229,30 @@ impl ContextMenu {
             return MenuOutcome::Dismissed;
         }
         let bounds = self.bounds(viewport, scale, theme);
-        match self.menu.on_key(key, bounds, scale, theme, damage) {
+        let action = self.menu.on_key(key, bounds, scale, theme, damage);
+        Self::outcome(action, damage)
+    }
+
+    /// What the shared control's `action` and the pixels it reported into
+    /// `damage` amount to for the caller.
+    ///
+    /// The shared control reports the rows it redraws, and reports nothing at
+    /// all for an event that leaves every drawn field where it was — that is
+    /// the difference between [`MenuOutcome::Changed`] and
+    /// [`MenuOutcome::Ignored`], so a caller that repaints on `Changed`
+    /// repaints exactly when something moved. The sink covers one round of
+    /// input, so an event that changes nothing after one that did keeps the
+    /// round's answer.
+    fn outcome(action: Option<MenuAction>, damage: &Region) -> MenuOutcome {
+        match action {
             Some(MenuAction::Activated { index }) => Command::ALL
                 .get(index)
                 .copied()
                 .map_or(MenuOutcome::Dismissed, MenuOutcome::Chose),
+            // No row owns a submenu, so a submenu request cannot arise; a
+            // dismissal closes the menu.
             Some(MenuAction::OpenSubmenu { .. } | MenuAction::Dismissed) => MenuOutcome::Dismissed,
+            None if damage.is_empty() => MenuOutcome::Ignored,
             None => MenuOutcome::Changed,
         }
     }
