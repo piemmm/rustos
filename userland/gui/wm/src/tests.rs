@@ -72,6 +72,21 @@ fn present_content<T>(
     comp.present_window_content(id, w, h, convert)
 }
 
+/// Fill `colour` over exactly the rectangles a desktop repaint handed out,
+/// which is the contract every real painter keeps: nothing outside them is
+/// marked, so nothing outside them may be written.
+fn paint_desktop_rects(surface: &mut Surface, rects: &[Rect], colour: Color) {
+    for rect in rects {
+        surface.with_clip(
+            rect.left().unsigned_abs(),
+            rect.top().unsigned_abs(),
+            rect.width,
+            rect.height,
+            |surface| surface.fill(colour),
+        );
+    }
+}
+
 /// Read the RGBA scan-out bytes of frame pixel `(x, y)`.
 fn frame_pixel(comp: &Compositor, x: u32, y: u32) -> [u8; 4] {
     let info = comp.mode();
@@ -4834,8 +4849,21 @@ fn every_change_around_a_frosted_window_composes_the_frame_a_fresh_blur_would() 
     both.settle("the window below shown");
     both.both(|c| c.set_background(RED));
     both.settle("the root fill recoloured");
-    both.both(|c| c.repaint_desktop(|surface| surface.fill(GREEN)));
+    both.both(|c| {
+        let whole = Region::from(c.screen_rect());
+        c.repaint_desktop(&whole, |surface, rects| {
+            paint_desktop_rects(surface, rects, GREEN);
+        })
+    });
     both.settle("the desktop layer repainted");
+    both.both(|c| {
+        let mut area = Region::new();
+        area.add(Rect::new(4, 3, 9, 6));
+        c.repaint_desktop(&area, |surface, rects| {
+            paint_desktop_rects(surface, rects, BLUE);
+        })
+    });
+    both.settle("part of the desktop layer repainted");
 
     // The frosted window's own geometry, shape, radius, and density.
     both.both(|c| c.move_window(glass, Point::new(7, 5)));
@@ -5035,8 +5063,21 @@ fn every_change_around_a_translucent_window_composes_the_frame_a_fresh_one_would
     both.settle("the window below shown");
     both.both(|c| c.set_background(GREEN));
     both.settle("the root fill recoloured");
-    both.both(|c| c.repaint_desktop(|surface| surface.fill(RED)));
+    both.both(|c| {
+        let whole = Region::from(c.screen_rect());
+        c.repaint_desktop(&whole, |surface, rects| {
+            paint_desktop_rects(surface, rects, RED);
+        })
+    });
     both.settle("the desktop layer repainted");
+    both.both(|c| {
+        let mut area = Region::new();
+        area.add(Rect::new(5, 6, 8, 7));
+        c.repaint_desktop(&area, |surface, rects| {
+            paint_desktop_rects(surface, rects, BLUE);
+        })
+    });
+    both.settle("part of the desktop layer repainted");
 
     // Its own geometry and shape, each of which decides how much survives.
     both.both(|c| c.move_window(glass, Point::new(7, 5)));
@@ -5968,7 +6009,11 @@ fn repainting_the_desktop_layer_reuses_its_buffer_and_damages_its_footprint() {
 
     // With no layer installed the first repaint allocates one at exactly the
     // screen's extent, whatever the painter chooses to draw into it.
-    assert!(c.repaint_desktop(|surface| surface.fill(GREEN)));
+    let whole = Region::from(c.screen_rect());
+    assert!(c.repaint_desktop(&whole, |surface, rects| {
+        assert_eq!(rects, [Rect::new(0, 0, 20, 20)], "the whole layer");
+        paint_desktop_rects(surface, rects, GREEN);
+    }));
     assert_eq!(c.desktop_bounds(), Some(Rect::new(0, 0, 20, 20)));
     assert!(c.has_damage());
     c.composite();
@@ -5977,13 +6022,67 @@ fn repainting_the_desktop_layer_reuses_its_buffer_and_damages_its_footprint() {
     // A second repaint paints into that very buffer: the painter sees the
     // pixels the previous one left, which is what lets a wallpapered desktop
     // touch only the tiles that changed.
-    assert!(c.repaint_desktop(|surface| {
+    let mut corner = Region::new();
+    corner.add(Rect::new(0, 0, 4, 4));
+    assert!(c.repaint_desktop(&corner, |surface, rects| {
         assert_eq!(surface.get(10, 10), Some(GREEN.premultiply()));
-        surface.fill_rect(0, 0, 4, 4, RED);
+        paint_desktop_rects(surface, rects, RED);
     }));
     c.composite();
     assert_eq!(frame_pixel(&c, 2, 2), [255, 0, 0, 255]);
     assert_eq!(frame_pixel(&c, 10, 10), [0, 255, 0, 255], "kept its pixels");
+}
+
+/// A repaint of part of the layer is the ordinary case — an icon takes the
+/// hover — and it must cost that part. The layer is the bottom of the stack,
+/// so marking all of it would recomposite every window above it and blur
+/// every frosted backdrop over it again.
+#[test]
+fn repainting_part_of_the_desktop_layer_marks_only_that_part() {
+    let mut c = new_compositor(mode(20, 20), BLUE).expect("compositor");
+    c.set_desktop(opaque(20, 20, GREEN));
+    c.composite();
+    assert!(!c.has_damage());
+
+    let mut area = Region::new();
+    area.add(Rect::new(2, 3, 5, 4));
+    assert!(c.repaint_desktop(&area, |surface, rects| {
+        assert_eq!(rects, [Rect::new(2, 3, 5, 4)], "only what was asked for");
+        paint_desktop_rects(surface, rects, RED);
+    }));
+    let composed = c.composite();
+    assert_eq!(
+        composed.rects(),
+        [Rect::new(2, 3, 5, 4)],
+        "the rectangle, not the screen"
+    );
+    assert_eq!(c.frame_stats().damaged_px, 20);
+    assert_eq!(frame_pixel(&c, 3, 4), [255, 0, 0, 255]);
+    assert_eq!(frame_pixel(&c, 10, 10), [0, 255, 0, 255], "untouched");
+
+    // Two disjoint cells — the icon that lost the hover and the one that took
+    // it — are two rectangles, and the pixels between them are not repainted.
+    let mut cells = Region::new();
+    cells.add(Rect::new(1, 1, 2, 2));
+    cells.add(Rect::new(16, 16, 2, 2));
+    assert!(c.repaint_desktop(&cells, |surface, rects| {
+        assert_eq!(rects.len(), 2, "two cells, two rectangles");
+        paint_desktop_rects(surface, rects, BLUE);
+    }));
+    let composed = c.composite();
+    assert_eq!(composed.rects().len(), 2, "two cells, still two");
+    assert_eq!(
+        c.frame_stats().damaged_px,
+        8,
+        "both cells and nothing between them"
+    );
+
+    // An area the layer does not cover damages nothing at all, rather than
+    // falling back to the whole layer.
+    let mut off = Region::new();
+    off.add(Rect::new(40, 40, 4, 4));
+    assert!(c.repaint_desktop(&off, |_, _| panic!("nothing to paint")));
+    assert!(!c.has_damage(), "no pixel of the layer was asked for");
 }
 
 #[test]
@@ -5993,9 +6092,14 @@ fn repainting_the_desktop_layer_re_allocates_when_the_screen_size_changed() {
     // installed a partial layer) is replaced by a screen-sized one rather
     // than painted into at the wrong size.
     c.set_desktop(opaque(8, 8, GREEN));
-    assert!(c.repaint_desktop(|surface| {
+    // Asking for one small rectangle still paints the whole fresh layer: a
+    // buffer that has just been allocated holds no pixels worth preserving.
+    let mut area = Region::new();
+    area.add(Rect::new(1, 1, 2, 2));
+    assert!(c.repaint_desktop(&area, |surface, rects| {
         assert_eq!((surface.width(), surface.height()), (20, 20));
-        surface.fill(RED);
+        assert_eq!(rects, [Rect::new(0, 0, 20, 20)], "a fresh layer, whole");
+        paint_desktop_rects(surface, rects, RED);
     }));
     assert_eq!(c.desktop_bounds(), Some(Rect::new(0, 0, 20, 20)));
     c.composite();

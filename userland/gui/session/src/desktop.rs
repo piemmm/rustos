@@ -73,7 +73,7 @@ use tairix_browse::{
 };
 use tairix_controls::state::{ControlState, FocusState, PointerState, SelectionState};
 use tairix_controls::IconTile;
-use tairix_geometry::{Point, Rect, Scale};
+use tairix_geometry::{Point, Rect, Region, Scale};
 use tairix_icon::IconArtwork;
 use tairix_raster::Surface;
 use tairix_theme::Theme;
@@ -180,13 +180,17 @@ pub struct PinboardChange {
     pub wallpaper: bool,
 }
 
-/// The outcome of one desktop gesture: whether the desktop's own pixels
-/// changed, whether the gesture re-listed the folder, and what (if anything)
-/// the session must now do.
+/// The outcome of one desktop gesture: whether the gesture re-listed the
+/// folder, and what (if anything) the session must now do.
+///
+/// What the gesture *changed on screen* is not here. Every gesture takes a
+/// [`Region`] sink and adds the icon cells it altered to it, so the embedder
+/// repaints those cells rather than the whole desktop layer: the desktop is
+/// the bottom layer, and marking all of it recomposites every window above it
+/// and throws away every frosted backdrop over it — a screenful of work to
+/// move one highlight.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct DesktopOutcome {
-    /// The desktop layer must be repainted.
-    pub redraw: bool,
     /// The gesture re-listed the folder and its contents had changed.
     ///
     /// The moment the user's own files demonstrably moved under the desktop
@@ -201,31 +205,19 @@ pub struct DesktopOutcome {
 }
 
 impl DesktopOutcome {
-    /// The gesture changed nothing at all.
+    /// The gesture asks for nothing.
     #[must_use]
     pub const fn ignored() -> Self {
         Self {
-            redraw: false,
             relisted: false,
             action: None,
         }
     }
 
-    /// The gesture changed only what is drawn.
-    #[must_use]
-    pub const fn redraw() -> Self {
-        Self {
-            redraw: true,
-            relisted: false,
-            action: None,
-        }
-    }
-
-    /// The gesture changed what is drawn *and* asks for `action`.
+    /// The gesture asks for `action`.
     #[must_use]
     pub const fn acting(action: DesktopAction) -> Self {
         Self {
-            redraw: true,
             relisted: false,
             action: Some(action),
         }
@@ -341,13 +333,32 @@ impl<S: DirectorySource> Desktop<S> {
         self.focused
     }
 
-    /// Tell the desktop whether it holds the keyboard. Returns whether that
-    /// changed, so the caller repaints only when the focus ring appears or
-    /// disappears.
-    pub fn set_focused(&mut self, focused: bool) -> bool {
-        let changed = self.focused != focused;
+    /// Tell the desktop whether it holds the keyboard, adding what that
+    /// changed to `damage`.
+    ///
+    /// Only the selected icon wears the Focus Ring, so gaining or losing the
+    /// keyboard changes that one cell and nothing else — and with nothing
+    /// selected it changes no pixel at all. This is the click that moves
+    /// focus between the desktop and a window, which is exactly when the
+    /// screen must *not* be repainted wholesale.
+    pub fn set_focused(&mut self, focused: bool, layout: &GridView, damage: &mut Region) {
+        if self.focused == focused {
+            return;
+        }
         self.focused = focused;
-        changed
+        Self::mark_cell(layout, self.selected, damage);
+    }
+
+    /// Add the cell the icon at `index` occupies to `damage`.
+    ///
+    /// The one place an icon's footprint is spelled: a tile draws strictly
+    /// inside the cell the shared grid gives it, so repainting that rectangle
+    /// is the whole of repainting the icon. An index the column does not
+    /// currently show has no cell and damages nothing.
+    fn mark_cell(layout: &GridView, index: Option<usize>, damage: &mut Region) {
+        if let Some(rect) = index.and_then(|index| layout.cell_rect(0, index)) {
+            damage.add(rect);
+        }
     }
 
     /// Note that the pointer is somewhere other than the desktop (over a
@@ -355,11 +366,9 @@ impl<S: DirectorySource> Desktop<S> {
     ///
     /// The next arrival on the desktop is then a real *entry*, which is what
     /// the rate-limited re-list keys on.
-    pub fn pointer_left(&mut self) -> DesktopOutcome {
+    pub fn pointer_left(&mut self, layout: &GridView, damage: &mut Region) -> DesktopOutcome {
         self.pointer_over = false;
-        if self.hovered.take().is_some() {
-            return DesktopOutcome::redraw();
-        }
+        Self::mark_cell(layout, self.hovered.take(), damage);
         DesktopOutcome::ignored()
     }
 
@@ -432,18 +441,21 @@ impl<S: DirectorySource> Desktop<S> {
         )
     }
 
-    /// Paint the visible icons into `surface` through the shared icon tile,
-    /// resolving each one's artwork from `artwork` at exactly the slot side
-    /// the tile will draw it in.
+    /// Paint the visible icons that fall inside `area` into `surface` through
+    /// the shared icon tile, resolving each one's artwork from `artwork` at
+    /// exactly the slot side the tile will draw it in.
     ///
     /// Only the icons the column actually shows are painted and only their
     /// artwork is asked for, so a folder with more icons than fit costs
-    /// nothing for the ones off screen. An application bundle on the desktop
-    /// names itself in its request, so it draws the icon it carries in its own
-    /// `Resources/` rather than the generic bundle picture. An icon whose
-    /// artwork the lookup declines falls back to the shared class glyph inside
-    /// the tile, so a system with no `/System/Graphics` still shows a
-    /// meaningful desktop.
+    /// nothing for the ones off screen. `area` narrows that again to the
+    /// rectangle being repainted, so moving a highlight costs the cells that
+    /// changed rather than every icon on screen — a tile draws strictly inside
+    /// its own cell, so a cell `area` misses has nothing in `area` to draw.
+    /// An application bundle on the desktop names itself in its request, so it
+    /// draws the icon it carries in its own `Resources/` rather than the
+    /// generic bundle picture. An icon whose artwork the lookup declines falls
+    /// back to the shared class glyph inside the tile, so a system with no
+    /// `/System/Graphics` still shows a meaningful desktop.
     pub fn render(
         &self,
         surface: &mut Surface,
@@ -451,6 +463,7 @@ impl<S: DirectorySource> Desktop<S> {
         scale: Scale,
         theme: &Theme,
         artwork: &mut dyn IconArtwork,
+        area: Rect,
     ) {
         // Spelled once for the whole pass; a bundle icon appends its own leaf
         // into this one buffer rather than allocating a path per tile.
@@ -463,6 +476,9 @@ impl<S: DirectorySource> Desktop<S> {
             let Some(bounds) = layout.cell_rect(0, index) else {
                 continue;
             };
+            if bounds.intersection(&area).is_empty() {
+                continue;
+            }
             let kind = media_for_entry(entry, &self.folder).icon();
             let tile = grid_tile(entry, self.icon_state(index), kind);
             let side = IconTile::icon_side(bounds, scale, theme);
@@ -494,17 +510,25 @@ impl<S: DirectorySource> Desktop<S> {
     /// Arriving on the desktop from somewhere else re-lists the folder (rate
     /// limited), so a file created while the user was in another window is
     /// there when they look. Motion otherwise only drives the hover highlight.
-    pub fn pointer_moved(&mut self, at: Point, layout: &GridView, now_ns: u64) -> DesktopOutcome {
+    /// A re-list that changed the shown set reports `relisted`, which is the
+    /// caller's signal to repaint the whole column: the icons themselves
+    /// moved, so no cell of the old layout describes the new one.
+    pub fn pointer_moved(
+        &mut self,
+        at: Point,
+        layout: &GridView,
+        now_ns: u64,
+        damage: &mut Region,
+    ) -> DesktopOutcome {
         let arrived = !core::mem::replace(&mut self.pointer_over, true);
         let relisted = arrived && self.relist_on_arrival(now_ns);
-        let mut redraw = relisted;
         let hovered = index_at(layout, at);
         if self.hovered != hovered {
+            Self::mark_cell(layout, self.hovered, damage);
+            Self::mark_cell(layout, hovered, damage);
             self.hovered = hovered;
-            redraw = true;
         }
         DesktopOutcome {
-            redraw,
             relisted,
             action: None,
         }
@@ -521,21 +545,23 @@ impl<S: DirectorySource> Desktop<S> {
         layout: &GridView,
         now_ns: u64,
         apps: &[AppAssociation],
+        damage: &mut Region,
     ) -> DesktopOutcome {
+        // Taking the keyboard puts the ring on whatever is selected, so the
+        // old selection's cell is repainted whether the press moves the
+        // selection or merely claims focus.
         self.focused = true;
+        Self::mark_cell(layout, self.selected, damage);
         let Some(index) = index_at(layout, at) else {
-            let had = self.selected.take().is_some();
-            return if had {
-                DesktopOutcome::redraw()
-            } else {
-                DesktopOutcome::ignored()
-            };
+            self.selected = None;
+            return DesktopOutcome::ignored();
         };
         self.selected = Some(index);
+        Self::mark_cell(layout, self.selected, damage);
         if self.clicks.register(now_ns, index) == ClickKind::Double {
             return self.activate(index, apps);
         }
-        DesktopOutcome::redraw()
+        DesktopOutcome::ignored()
     }
 
     /// A secondary (right) press at screen position `at`: the pinboard's
@@ -547,17 +573,21 @@ impl<S: DirectorySource> Desktop<S> {
     /// The gesture claims no keyboard focus: the window manager does not move
     /// focus for a secondary press on the backdrop, and the desktop does not
     /// pretend otherwise.
-    pub fn context_press(&mut self, at: Point, layout: &GridView) -> DesktopOutcome {
+    pub fn context_press(
+        &mut self,
+        at: Point,
+        layout: &GridView,
+        damage: &mut Region,
+    ) -> DesktopOutcome {
         let on_icon = index_at(layout, at);
-        let redraw = match on_icon {
-            Some(index) if self.selected != Some(index) => {
+        if let Some(index) = on_icon {
+            if self.selected != Some(index) {
+                Self::mark_cell(layout, self.selected, damage);
                 self.selected = Some(index);
-                true
+                Self::mark_cell(layout, self.selected, damage);
             }
-            _ => false,
-        };
+        }
         DesktopOutcome {
-            redraw,
             relisted: false,
             action: Some(DesktopAction::OpenMenu {
                 at,
@@ -595,14 +625,10 @@ impl<S: DirectorySource> Desktop<S> {
                 icons,
                 ..self.settings.clone()
             }),
-            PinboardCommand::Refresh => {
-                let relisted = self.relist(now_ns);
-                DesktopOutcome {
-                    redraw: relisted,
-                    relisted,
-                    action: None,
-                }
-            }
+            PinboardCommand::Refresh => DesktopOutcome {
+                relisted: self.relist(now_ns),
+                action: None,
+            },
             PinboardCommand::OpenDesktopFolder => {
                 DesktopOutcome::acting(DesktopAction::Activate(DesktopActivation::OpenFolder {
                     path: self.folder_path(),
@@ -634,6 +660,7 @@ impl<S: DirectorySource> Desktop<S> {
         pressed: bool,
         layout: &GridView,
         apps: &[AppAssociation],
+        damage: &mut Region,
     ) -> DesktopOutcome {
         if !pressed || !self.focused {
             return DesktopOutcome::ignored();
@@ -641,14 +668,11 @@ impl<S: DirectorySource> Desktop<S> {
         match key {
             Key::Named(NamedKey::Enter) => self.activate_selection(apps),
             Key::Named(NamedKey::Escape) => {
-                if self.selected.take().is_some() {
-                    DesktopOutcome::redraw()
-                } else {
-                    DesktopOutcome::ignored()
-                }
+                Self::mark_cell(layout, self.selected.take(), damage);
+                DesktopOutcome::ignored()
             }
             Key::Named(named) => match Step::for_key(named, self.settings.icons) {
-                Some(step) => self.move_selection(step, layout),
+                Some(step) => self.move_selection(step, layout, damage),
                 None => DesktopOutcome::ignored(),
             },
             Key::Char(_) => DesktopOutcome::ignored(),
@@ -658,7 +682,12 @@ impl<S: DirectorySource> Desktop<S> {
     /// Move the selection one `step` along the listing, clamped to its ends.
     /// With nothing selected the first arrow selects the first icon, so the
     /// keyboard always has somewhere to start.
-    fn move_selection(&mut self, step: Step, layout: &GridView) -> DesktopOutcome {
+    fn move_selection(
+        &mut self,
+        step: Step,
+        layout: &GridView,
+        damage: &mut Region,
+    ) -> DesktopOutcome {
         if self.entries.is_empty() {
             return DesktopOutcome::ignored();
         }
@@ -670,8 +699,10 @@ impl<S: DirectorySource> Desktop<S> {
         if self.selected == Some(next) {
             return DesktopOutcome::ignored();
         }
+        Self::mark_cell(layout, self.selected, damage);
         self.selected = Some(next);
-        DesktopOutcome::redraw()
+        Self::mark_cell(layout, self.selected, damage);
+        DesktopOutcome::ignored()
     }
 
     /// Activate whatever is selected, if anything.

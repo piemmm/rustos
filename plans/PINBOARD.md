@@ -14,7 +14,12 @@ This spec defers to its companions and MUST stay consistent with them:
   user setting (§4) instead of a fixed trailing column.
 - **Compositor** — `plans/COMPOSITOR-WORK.md` and `userland/gui/wm` own the
   desktop layer (`Compositor::set_desktop`). The pinboard paints into that
-  one layer; it never becomes a window and never gains a second layer.
+  one layer; it never becomes a window and never gains a second layer. It is
+  repainted **per changed icon cell** (`repaint_desktop(area, …)`), never
+  wholesale for a hover, a selection, or a focus change: the desktop is the
+  bottom layer, so marking all of it recomposites every window above it and
+  re-blurs every frosted backdrop over it
+  (`plans/FIX-DESKTOP-SPEEDUP.md` D.11).
 - **Icons / artwork** — `plans/ICONS.md` owns the icon asset tiers, the
   sandboxed decode, and the artwork cache. Wallpapers reuse that decode
   posture; they are *not* icons and do not enter the icon vocabulary.
@@ -126,9 +131,12 @@ One document, one engine, one writer.
   one attempt, not one per frame.
 - **Prepared once, per (path, fit, screen).** The sandbox returns the image
   already placed at exactly the screen size; the session holds that one
-  prepared surface and blits it as the desktop layer's base. It is
-  re-prepared only when the wallpaper, the fit, or the screen geometry
-  changes. Nothing decodes, resamples, or parses on a frame path.
+  prepared surface and composites it as the desktop layer's base, over the
+  backdrop colour, which is laid down first — a letterboxed or centred
+  placement leaves its margins transparent on purpose, and that is what the
+  backdrop is for. It is re-prepared only when the wallpaper, the fit, or the
+  screen geometry changes. Nothing decodes, resamples, or parses on a frame
+  path.
 - **Memory.** The prepared surface is held in the shared reclaimable-memory
   model (`lib/reclaim`), so a machine under pressure drops it and re-prepares
   on demand rather than holding a screenful of pixels the user cannot see.

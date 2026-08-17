@@ -43,6 +43,7 @@ use tairix_abi::switchboard_ipc::TraySummary;
 use tairix_abi::Errno;
 use tairix_browse::{DirectorySource, GridView};
 use tairix_cursor::{CursorRegistry, CursorSetId, CursorTheme};
+use tairix_geometry::Region;
 use tairix_icon::{
     artwork_cache, ArtworkCache, ArtworkRasteriser, ArtworkReader, IconArtworkSource, IconSet,
 };
@@ -796,20 +797,21 @@ impl DesktopShell {
         self.wallpaper = wallpaper;
     }
 
-    /// Repaint the desktop layer — the wallpaper (or the backdrop colour the
-    /// settings name) with the icon column over it — beneath every window.
+    /// Repaint the whole desktop layer — the wallpaper (or the backdrop colour
+    /// the settings name) with the icon column over it — beneath every window.
+    ///
+    /// This is for the changes that genuinely alter the whole layer: bring-up,
+    /// a new wallpaper, a theme switch, a re-list that moved the icons. A
+    /// change confined to some icons goes through
+    /// [`present_desktop_area`](Self::present_desktop_area) instead.
     ///
     /// The layer is repainted in place, into the screen-sized buffer the
-    /// compositor already holds, because a hover, a moved selection, or a
-    /// re-list repaints it often and a whole screen of pixels is not something
-    /// to re-allocate per frame. It is opaque and covers the screen: the
-    /// wallpaper is blitted at the origin, and the backdrop colour is laid down
-    /// first wherever the wallpaper does not reach (which, with no wallpaper at
-    /// all, is everywhere). The icons are then drawn over it, laid out in the
-    /// work area — which excludes the taskbar's band — so nothing is ever drawn
-    /// under the bar. Each icon's artwork is resolved through the same
-    /// seat-wide cache and seams the taskbar draws from, at exactly the slot
-    /// side the tile will paint it in, and an icon the store cannot supply
+    /// compositor already holds, so even a whole-layer repaint costs a paint
+    /// rather than a paint plus a multi-megabyte allocation. Icons are laid out
+    /// in the work area — which excludes the taskbar's band — so nothing is
+    /// ever drawn under the bar. Each icon's artwork is resolved through the
+    /// same seat-wide cache and seams the taskbar draws from, at exactly the
+    /// slot side the tile will paint it in, and an icon the store cannot supply
     /// falls back to its built-in glyph.
     ///
     /// Fails closed: a screen-sized layer the heap will not give back leaves
@@ -818,6 +820,33 @@ impl DesktopShell {
         &mut self,
         compositor: &mut Compositor,
         desktop: &Desktop<S>,
+    ) {
+        let whole = Region::from(compositor.screen_rect());
+        self.present_desktop_area(compositor, desktop, &whole);
+    }
+
+    /// Repaint just the parts of the desktop layer covered by `area`.
+    ///
+    /// This is the ordinary path, and [`present_desktop`](Self::present_desktop)
+    /// is the whole-screen case of it: the desktop's own gestures report the
+    /// icon cells they changed, so taking the hover, moving a selection, or
+    /// gaining and losing the keyboard costs those cells. Repainting the layer
+    /// whole for a highlight would recomposite every window above it and blur
+    /// every frosted backdrop over it again, which is why the model reports
+    /// cells rather than a flag.
+    ///
+    /// Every rectangle is painted the same way, so a partial repaint and a
+    /// whole one cannot disagree about a pixel: the backdrop colour goes down
+    /// first, the wallpaper composites over it, and the icons that reach the
+    /// rectangle draw over that. Laying the colour down under the wallpaper is
+    /// what makes a letterboxed or centred picture show the user's chosen
+    /// backdrop in the margins it does not cover, rather than whatever the
+    /// previous frame happened to leave there.
+    pub fn present_desktop_area<S: DirectorySource>(
+        &mut self,
+        compositor: &mut Compositor,
+        desktop: &Desktop<S>,
+        area: &Region,
     ) {
         let screen = compositor.screen_rect();
         let scale = compositor.scale();
@@ -828,18 +857,24 @@ impl DesktopShell {
         let cache = &mut self.artwork;
         let reader = self.artwork_reader.as_mut();
         let rasteriser = self.artwork_rasteriser.as_mut();
-        compositor.repaint_desktop(|surface| {
-            let covered = wallpaper.is_some_and(|paper| {
-                paper.width() >= screen.width && paper.height() >= screen.height
-            });
-            if !covered {
-                surface.fill_rect(0, 0, screen.width, screen.height, backdrop);
-            }
-            if let Some(paper) = wallpaper {
-                surface.blit(0, 0, paper);
-            }
+        compositor.repaint_desktop(area, |surface, rects| {
             let mut artwork = IconArtworkSource::new(cache, reader, rasteriser);
-            desktop.render(surface, &layout, scale, theme, &mut artwork);
+            for rect in rects {
+                // The layer sits at the screen origin and every rectangle is
+                // clipped to it, so its corner is a surface coordinate; a
+                // rectangle that somehow is not addressable is left alone
+                // rather than painted somewhere else.
+                let (Ok(x), Ok(y)) = (u32::try_from(rect.left()), u32::try_from(rect.top())) else {
+                    continue;
+                };
+                surface.with_clip(x, y, rect.width, rect.height, |surface| {
+                    surface.fill_rect(0, 0, screen.width, screen.height, backdrop);
+                    if let Some(paper) = wallpaper {
+                        surface.blit(0, 0, paper);
+                    }
+                    desktop.render(surface, &layout, scale, theme, &mut artwork, *rect);
+                });
+            }
         });
     }
 

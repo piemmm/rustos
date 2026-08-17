@@ -136,6 +136,19 @@ reach, and one larger is clipped — the layer is never a reason to fail a
 frame. Installing, replacing, or clearing it damages exactly its old and
 new footprints, precisely as any other surface replacement does.
 
+`Compositor::repaint_desktop(area, paint)` repaints it in place: the owner
+keeps the screen-sized buffer it already has (a repaint costs a paint, not a
+multi-megabyte allocation) and `paint` receives the surface together with the
+rectangles of `area` clipped to the layer, painting inside them and nowhere
+else. Only those rectangles are marked, and that matters far more than the
+paint itself: the desktop is the **bottom** layer, so marking all of it
+recomposites every window above it and throws away every frosted backdrop over
+it. An icon taking the hover must cost that icon, not a screenful of blur. A
+layer that is absent or sized for a screen this output no longer has is
+allocated fresh and painted whole, since it holds no pixels a partial paint
+could preserve; a heap that will not give one back leaves the desktop exactly
+as it was rather than blanking it.
+
 Pointer and keyboard input that resolves to no window is reported to the
 desktop layer's owner rather than swallowed: see *Input routing*, below.
 

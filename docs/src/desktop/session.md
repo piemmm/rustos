@@ -264,7 +264,7 @@ the settings store stays free of the browser engine's dependency weight.
 
 ### The desktop layer: wallpaper or backdrop, then icons
 
-`DesktopShell::present_desktop` repaints the layer **in place**, through
+`DesktopShell::present_desktop_area` repaints the layer **in place**, through
 `Compositor::repaint_desktop`, into the screen-sized buffer the compositor
 already holds: a hover, a moved selection, or a re-list repaints the desktop
 often, and a whole screen of pixels is not something to re-allocate per frame.
@@ -274,11 +274,43 @@ capability to read the user's chosen image and the sandbox that decodes it, and
 it fits the pixels through the one shared placement in `lib/wallpaper`); the
 shell blits what it is handed and parses nothing. The backdrop colour the
 settings name — the active theme's own desktop colour for `Backdrop::Theme`, the
-chosen flat colour for `Backdrop::Colour` — is laid down wherever the wallpaper
-does not reach, which with no wallpaper at all is everywhere. The icons are then
-drawn over that base exactly as before, in the work area, so nothing is ever
-drawn under the taskbar. A layer the heap will not give back leaves the desktop
-exactly as it was rather than blanking it.
+chosen flat colour for `Backdrop::Colour` — is laid down **first**, under the
+wallpaper, so a letterboxed or centred picture shows the user's own backdrop in
+the margins it does not cover (the sandbox leaves those pixels transparent on
+purpose) rather than whatever the previous frame left there. The icons are then
+drawn over that base, in the work area, so nothing is ever drawn under the
+taskbar. A layer the heap will not give back leaves the desktop exactly as it
+was rather than blanking it.
+
+#### Only what changed is repainted
+
+The desktop is the **bottom** layer, so marking all of it is never just a screen
+repaint: every window above it recomposites, and every frosted backdrop over the
+marked pixels is thrown away and blurred again. Repainting the whole layer to
+move one highlight therefore costs, on a 1080p screen, most of a megapixel of
+blur — felt as the pointer freezing for the best part of a second on a
+Raspberry Pi 4B.
+
+So the desktop's gestures report *where* they changed something instead of a
+"redraw" flag. `Desktop::set_focused`, `pointer_moved`, `pointer_left`, `press`,
+`context_press`, and `key` each take a `tairix_geometry::Region` damage sink and
+add the **cell rectangle** of every icon whose appearance changed — the icon
+that lost the hover and the one that took it, the old selection and the new, the
+selected icon whose Focus Ring appeared or disappeared. An `IconTile` draws
+strictly inside the cell the shared `GridView` gives it, so that rectangle is
+the whole of repainting the icon; a gesture that changed nothing visible (a
+focus flip with nothing selected, motion within one icon) adds nothing and
+composes no frame at all.
+
+`present_desktop_area` paints each of those rectangles under a narrowed surface
+clip and hands the same rectangle to `Desktop::render`, which skips every cell
+it does not reach, and `Compositor::repaint_desktop` marks exactly the
+rectangles it painted. `present_desktop` is the whole-screen case of the same
+call, for the changes that genuinely alter the whole layer: bring-up, a new
+wallpaper, a theme switch, adopted settings, and a re-list that moved the icons
+(which is why a re-list reports `relisted` rather than cells — no rectangle of
+the old layout describes the new column). A freshly allocated layer is likewise
+painted whole, since it holds no pixels a partial paint could preserve.
 
 ### The pinboard's context menu
 

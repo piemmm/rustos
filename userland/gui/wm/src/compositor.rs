@@ -931,26 +931,45 @@ impl Compositor {
         }
     }
 
-    /// Repaint the desktop layer in place through `paint`, keeping the
-    /// screen-sized buffer it is already drawn into, and mark its footprint
-    /// dirty.
+    /// Repaint the parts of the desktop layer covered by `area` through
+    /// `paint`, keeping the screen-sized buffer it is already drawn into, and
+    /// mark exactly those parts dirty.
     ///
     /// The desktop is repainted whenever its owner's model changes — an icon
     /// takes the hover, a selection moves, the folder re-lists — which is
-    /// often, and the layer is a whole screen of pixels. Handing the existing
-    /// buffer back to the painter means those repaints cost a paint, not a
-    /// paint plus a multi-megabyte allocation the heap may refuse. A layer
-    /// that is absent, or sized for a screen this output no longer has, is
-    /// allocated fresh at the current screen size; `paint` then always sees a
-    /// surface of exactly [`screen_rect`](Self::screen_rect)'s extent, and
-    /// receives it exactly as the previous frame left it (it is the painter's
-    /// job to lay down its own background, which is cheaper than a clear this
-    /// method cannot know is redundant).
+    /// often, and the layer is a whole screen of pixels. Two things follow,
+    /// and this method is where both are paid:
+    ///
+    /// * Handing the existing buffer back to the painter means a repaint
+    ///   costs a paint, not a paint plus a multi-megabyte allocation the heap
+    ///   may refuse.
+    /// * Painting and marking only `area` means an icon taking the hover
+    ///   costs that icon. Marking the whole layer would not merely repaint a
+    ///   screen: the desktop is the bottom layer, so every window above it
+    ///   would recomposite and every frosted backdrop over the marked pixels
+    ///   would be thrown away and blurred again — a screenful of work to
+    ///   redraw one label.
+    ///
+    /// `paint` receives the surface and the rectangles to paint, already
+    /// clipped to the layer and disjoint; it must write inside them and
+    /// nowhere else, since nothing outside them is marked. It sees the
+    /// surface exactly as the previous frame left it, so it lays down its own
+    /// background over each rectangle rather than relying on a clear this
+    /// method cannot know is redundant.
+    ///
+    /// A layer that is absent, or sized for a screen this output no longer
+    /// has, is allocated fresh at the current screen size and painted whole
+    /// however little `area` asked for — a buffer with no pixels worth keeping
+    /// has nothing for a partial paint to preserve.
     ///
     /// Returns `false` — having changed and damaged nothing — when no such
     /// surface could be allocated, so a heap that will not give back a screen
     /// of pixels leaves the desktop exactly as it was rather than blanking it.
-    pub fn repaint_desktop(&mut self, paint: impl FnOnce(&mut Surface)) -> bool {
+    pub fn repaint_desktop(
+        &mut self,
+        area: &Region,
+        paint: impl FnOnce(&mut Surface, &[Rect]),
+    ) -> bool {
         let screen = self.screen_rect();
         let fits = self
             .desktop
@@ -962,12 +981,25 @@ impl Compositor {
             };
             self.set_desktop(fresh);
         }
+        let Some(layer) = self.desktop_bounds() else {
+            return false;
+        };
+        let painted = if fits {
+            let mut region = area.clone();
+            region.clip(layer);
+            region
+        } else {
+            Region::from(layer)
+        };
+        if painted.is_empty() {
+            return true;
+        }
         let Some(surface) = self.desktop.as_mut() else {
             return false;
         };
-        paint(surface);
-        if let Some(covered) = self.desktop_bounds() {
-            self.mark(covered);
+        paint(surface, painted.rects());
+        for rect in painted.rects() {
+            self.mark(*rect);
         }
         true
     }

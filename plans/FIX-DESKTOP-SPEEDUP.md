@@ -738,7 +738,7 @@ still passes unchanged.
 
 ---
 
-## Stage D — Make blur cost what it changes  **[D.1–D.4, D.7–D.10 done; D.5 is a User decision]**
+## Stage D — Make blur cost what it changes  **[D.1–D.4, D.7–D.11 done; D.5 is a User decision]**
 
 ### D.1 Damage below a frost invalidates it; the window's own content does not  **[done]**
 Every `damage.add` in the compositor is gone, replaced by three funnels that
@@ -1132,6 +1132,62 @@ sheet composes above its controls — a switched tab's body — is wider than th
 rectangle the control that caused it reports. Per-rectangle *presenting* of a
 plate is not attempted here; it needs a retained overlay surface and belongs with
 E.2's rect-list present.
+
+### D.11 The desktop layer repaints the icons that changed, not the screen  **[done]**
+The same defect as D.10 — a needless whole-window mark — one layer lower, and
+worse, because the desktop layer is the **bottom** of the stack: marking all of
+it recomposites every window above it and drops every frosted backdrop over it.
+`Desktop`'s gestures returned a `redraw: bool`, the session answered it with
+`present_desktop`, and that marked the layer's whole footprint. A click that
+moved focus between a window and the wallpaper therefore re-blurred and
+re-presented the entire screen: on a 1080p Pi 4B the pointer froze for ~800 ms
+per click, in both directions (clicking into the terminal *cleared* the desktop's
+selection, clicking the wallpaper *set* it, and either way the focus ring moved).
+Every hover sample over the icon column paid the same price.
+
+That is what made it ~800 ms rather than ~80: the wake loop drains the whole
+pointer batch and routes **each** outcome, so the click and the motion samples
+queued around it each repainted the entire layer — a 2 M-pixel wallpaper blit
+plus every icon and its label — before the one composite at the end of the
+batch. Coalescing the batch would only have hidden it; the paint itself had to
+stop being screen-sized.
+
+- `DesktopOutcome::redraw` is **deleted**. `set_focused`, `pointer_moved`,
+  `pointer_left`, `press`, `context_press`, and `key` each take a
+  `tairix_geometry::Region` damage sink and add the *cell rectangle* of every
+  icon whose appearance changed — hover left and hover taken, old selection and
+  new, the selected icon whose Focus Ring appeared or disappeared. One private
+  `Desktop::mark_cell` spells that rule once. `IconTile::render` draws strictly
+  inside its cell, so the cell is the whole of repainting the icon.
+- A gesture that changes nothing visible adds nothing: a focus flip with nothing
+  selected, or motion inside the icon already hovered, composes **no frame**.
+- `Compositor::repaint_desktop(area, paint)` hands the painter the rectangles of
+  `area` clipped to the layer and marks exactly those. A freshly allocated layer
+  is still painted whole — it holds no pixels a partial paint could preserve.
+- `DesktopShell::present_desktop_area` paints each rectangle under a narrowed
+  surface clip and passes it to `Desktop::render`, which skips every cell it does
+  not reach. `present_desktop` is now the whole-screen case of the same call,
+  kept for the changes that genuinely alter the whole layer: bring-up, a new
+  wallpaper, a theme switch, adopted settings, and a re-list that moved the icons
+  (which is why a re-list reports `relisted` rather than cells).
+
+Gated by counters, not a claim: over a translucent, backdrop-blurred window a
+focus flip composes exactly the ring's own cell with `blur_px 0`, and with
+nothing selected it composes no frame at all. Correctness is held by a
+differential test — two identical screens driven through six gestures (hover
+arrive, hover move, press, focus lost, focus gained, pointer left), one
+presenting the reported cells and the other the whole layer, asserting
+byte-identical scan-out — so a partial paint that forgot the wallpaper,
+mis-clipped a tile, or left a stale highlight cannot pass as the cheaper path.
+
+**A latent rendering defect fixed in the same change.** The layer's painter
+skipped the backdrop fill whenever the wallpaper surface was screen-sized
+(`covered`), but `lib/sandbox` leaves a letterboxed or centred placement's
+margins *fully transparent* on purpose, "so the desktop's own backdrop shows
+through". Those margins therefore showed the root fill on the first paint and
+whatever the previous frame had drawn there afterwards — stale icons. The
+backdrop colour is now laid down first and the wallpaper composited over it,
+which is also what makes a partial repaint total; `covered` is gone.
 
 ---
 

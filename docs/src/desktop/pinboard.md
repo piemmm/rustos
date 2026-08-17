@@ -8,9 +8,20 @@ how it is put together and where each decision lives.
 
 The pinboard is a *layer*, not a window. The compositor
 (`AGENTS.md` §10, [the window manager](./wm.md)) keeps one desktop layer
-beneath every window, and the session paints the whole pinboard into it.
-That is why a wallpapered desktop costs the compositor nothing extra: it
-composites the same single surface it always did.
+beneath every window, and the session paints the pinboard into it. A
+wallpapered desktop therefore costs the compositor nothing extra to
+*composite*: it blends the same single surface it always did, whatever the
+picture.
+
+What it does cost is *repainting* that layer, and only there. The desktop is
+the bottom of the stack, so marking all of it recomposites every window above
+it and throws away every frosted backdrop over it — on a 1080p screen, most of
+a megapixel of blur to move one highlight. So the model reports the icon cells
+a gesture actually changed and the session repaints only those
+(`DesktopShell::present_desktop_area`); the whole layer is repainted only when
+the whole layer changed — bring-up, a new wallpaper, a theme switch, adopted
+settings, or a re-list that moved the icons. See
+[the session's desktop layer](./session.md#the-desktop-layer-wallpaper-or-backdrop-then-icons).
 
 ## The pieces
 

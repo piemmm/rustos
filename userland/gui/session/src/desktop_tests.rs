@@ -12,7 +12,7 @@ use core::cell::RefCell;
 use tairix_abi::{Errno, Time64};
 use tairix_browse::{AppAssociation, DirectorySource, Entry, EntryKind, GridView};
 use tairix_controls::{ActivityState, MenuItem};
-use tairix_geometry::{Point, Rect, Scale};
+use tairix_geometry::{Point, Rect, Region, Scale};
 use tairix_icon::NoArtwork;
 use tairix_raster::Surface;
 use tairix_theme::Theme;
@@ -127,12 +127,25 @@ fn layout_of(desktop: &Desktop<FakeDir>) -> GridView {
     desktop.layout(work_area(), Scale::ONE, &theme())
 }
 
+/// The cell the icon at `index` occupies: the whole of its repaint.
+fn cell(layout: &GridView, index: usize) -> Rect {
+    layout.cell_rect(0, index).expect("a shown icon")
+}
+
+/// The damage `gesture` reports, over a sink of its own so one step's damage
+/// can never be read as another's.
+fn damage_of(gesture: impl FnOnce(&mut Region)) -> Region {
+    let mut damage = Region::new();
+    gesture(&mut damage);
+    damage
+}
+
 /// The centre of the icon at `index`, in screen coordinates.
 fn centre_of(layout: &GridView, index: usize) -> Point {
-    let cell = layout.cell_rect(0, index).expect("a shown icon");
+    let bounds = cell(layout, index);
     Point::new(
-        cell.left() + i32::try_from(cell.width / 2).unwrap_or(0),
-        cell.top() + i32::try_from(cell.height / 2).unwrap_or(0),
+        bounds.left() + i32::try_from(bounds.width / 2).unwrap_or(0),
+        bounds.top() + i32::try_from(bounds.height / 2).unwrap_or(0),
     )
 }
 
@@ -176,7 +189,7 @@ fn a_relist_keeps_the_selection_on_the_same_named_icon() {
     let folder = holding(vec![file("b.txt"), file("c.txt")]);
     let mut desktop = desktop_over(&folder);
     let layout = layout_of(&desktop);
-    desktop.press(centre_of(&layout, 1), &layout, 0, &[]);
+    desktop.press(centre_of(&layout, 1), &layout, 0, &[], &mut Region::new());
     assert_eq!(desktop.entries()[1].name(), "c.txt");
 
     // A file appears ahead of it: the selection follows the name, not the
@@ -192,7 +205,7 @@ fn a_relist_that_removes_the_selected_icon_selects_nothing() {
     let folder = holding(vec![file("a.txt"), file("b.txt")]);
     let mut desktop = desktop_over(&folder);
     let layout = layout_of(&desktop);
-    desktop.press(centre_of(&layout, 1), &layout, 0, &[]);
+    desktop.press(centre_of(&layout, 1), &layout, 0, &[], &mut Region::new());
     folder.borrow_mut().answer = Some(Ok(vec![file("a.txt")]));
     assert!(desktop.relist(1));
     assert_eq!(desktop.selected(), None);
@@ -209,16 +222,26 @@ fn arriving_on_the_desktop_relists_but_no_more_often_than_the_rate_limit() {
 
     // Sweeping on and off inside the limit costs no further listing at all.
     for step in 0..5 {
-        desktop.pointer_left();
-        desktop.pointer_moved(EMPTY_DESKTOP, &layout, step);
+        desktop.pointer_left(&layout, &mut Region::new());
+        desktop.pointer_moved(EMPTY_DESKTOP, &layout, step, &mut Region::new());
     }
     assert_eq!(listings(&folder), 1, "a sweep is not a re-list");
 
     // Once the limit has passed, the next arrival looks again — exactly once.
-    desktop.pointer_left();
-    desktop.pointer_moved(EMPTY_DESKTOP, &layout, RELIST_MIN_INTERVAL_NS);
+    desktop.pointer_left(&layout, &mut Region::new());
+    desktop.pointer_moved(
+        EMPTY_DESKTOP,
+        &layout,
+        RELIST_MIN_INTERVAL_NS,
+        &mut Region::new(),
+    );
     assert_eq!(listings(&folder), 2);
-    desktop.pointer_moved(centre_of(&layout, 0), &layout, RELIST_MIN_INTERVAL_NS + 1);
+    desktop.pointer_moved(
+        centre_of(&layout, 0),
+        &layout,
+        RELIST_MIN_INTERVAL_NS + 1,
+        &mut Region::new(),
+    );
     assert_eq!(
         listings(&folder),
         2,
@@ -241,19 +264,29 @@ fn a_forced_relist_ignores_the_rate_limit() {
 // --- Hover, selection, focus ---------------------------------------------
 
 #[test]
-fn hover_follows_the_pointer_and_redraws_only_when_it_moves_icon() {
+fn hover_follows_the_pointer_and_damages_only_the_cells_it_moves_between() {
     let mut desktop = desktop_of(vec![file("a.txt"), file("b.txt")]);
     let layout = layout_of(&desktop);
+    let mut damage = Region::new();
 
-    let first = desktop.pointer_moved(centre_of(&layout, 0), &layout, 0);
-    assert!(first.redraw);
+    desktop.pointer_moved(centre_of(&layout, 0), &layout, 0, &mut damage);
+    assert_eq!(damage.rects(), [cell(&layout, 0)]);
     assert_eq!(desktop.hovered(), Some(0));
 
-    let again = desktop.pointer_moved(centre_of(&layout, 0), &layout, 1);
-    assert!(!again.redraw, "the same icon is not a change");
+    damage.clear();
+    desktop.pointer_moved(centre_of(&layout, 0), &layout, 1, &mut damage);
+    assert!(damage.is_empty(), "the same icon is not a change");
 
-    let empty = desktop.pointer_moved(EMPTY_DESKTOP, &layout, 2);
-    assert!(empty.redraw);
+    // Moving between icons costs both cells and nothing between them: the one
+    // that lost the highlight and the one that took it.
+    damage.clear();
+    desktop.pointer_moved(centre_of(&layout, 1), &layout, 2, &mut damage);
+    assert_eq!(damage.rects(), [cell(&layout, 0), cell(&layout, 1)]);
+    assert_eq!(desktop.hovered(), Some(1));
+
+    damage.clear();
+    desktop.pointer_moved(EMPTY_DESKTOP, &layout, 3, &mut damage);
+    assert_eq!(damage.rects(), [cell(&layout, 1)]);
     assert_eq!(desktop.hovered(), None);
 }
 
@@ -261,11 +294,20 @@ fn hover_follows_the_pointer_and_redraws_only_when_it_moves_icon() {
 fn leaving_the_desktop_clears_the_hover() {
     let mut desktop = desktop_of(vec![file("a.txt")]);
     let layout = layout_of(&desktop);
-    desktop.pointer_moved(centre_of(&layout, 0), &layout, 0);
-    assert!(desktop.pointer_left().redraw);
+    desktop.pointer_moved(centre_of(&layout, 0), &layout, 0, &mut Region::new());
+    assert_eq!(
+        damage_of(|damage| {
+            desktop.pointer_left(&layout, damage);
+        })
+        .rects(),
+        [cell(&layout, 0)]
+    );
     assert_eq!(desktop.hovered(), None);
     assert!(
-        !desktop.pointer_left().redraw,
+        damage_of(|damage| {
+            desktop.pointer_left(&layout, damage);
+        })
+        .is_empty(),
         "leaving twice changes nothing"
     );
 }
@@ -274,28 +316,66 @@ fn leaving_the_desktop_clears_the_hover() {
 fn a_press_selects_an_icon_and_a_press_on_empty_desktop_clears_it() {
     let mut desktop = desktop_of(vec![file("a.txt"), file("b.txt")]);
     let layout = layout_of(&desktop);
+    let mut damage = Region::new();
 
-    let picked = desktop.press(centre_of(&layout, 1), &layout, 0, &[]);
-    assert!(picked.redraw);
+    desktop.press(centre_of(&layout, 1), &layout, 0, &[], &mut damage);
+    assert_eq!(damage.rects(), [cell(&layout, 1)]);
     assert_eq!(desktop.selected(), Some(1));
     assert!(desktop.is_focused(), "a press moves focus to the desktop");
 
-    let cleared = desktop.press(EMPTY_DESKTOP, &layout, 0, &[]);
-    assert!(cleared.redraw);
+    // A selection that moves costs the icon it left and the icon it landed on.
+    damage.clear();
+    desktop.press(centre_of(&layout, 0), &layout, 0, &[], &mut damage);
+    assert_eq!(damage.rects(), [cell(&layout, 0), cell(&layout, 1)]);
+    assert_eq!(desktop.selected(), Some(0));
+
+    damage.clear();
+    desktop.press(EMPTY_DESKTOP, &layout, 0, &[], &mut damage);
+    assert_eq!(damage.rects(), [cell(&layout, 0)]);
     assert_eq!(desktop.selected(), None);
+
+    damage.clear();
+    desktop.press(EMPTY_DESKTOP, &layout, 0, &[], &mut damage);
     assert!(
-        !desktop.press(EMPTY_DESKTOP, &layout, 0, &[]).redraw,
+        damage.is_empty(),
         "clearing an empty selection changes nothing"
     );
 }
 
 #[test]
-fn focus_is_the_embedders_to_set_and_reports_whether_it_moved() {
+fn focus_moves_the_ring_onto_the_selection_and_costs_nothing_without_one() {
     let mut desktop = desktop_of(vec![file("a.txt")]);
+    let layout = layout_of(&desktop);
     assert!(!desktop.is_focused());
-    assert!(desktop.set_focused(true));
-    assert!(!desktop.set_focused(true), "unchanged focus is no redraw");
-    assert!(desktop.set_focused(false));
+
+    // Only the selection wears the ring, so with nothing selected the click
+    // that moves focus between the desktop and a window moves no pixel.
+    assert!(
+        damage_of(|damage| desktop.set_focused(true, &layout, damage)).is_empty(),
+        "nothing is selected, so no ring appeared"
+    );
+    assert!(desktop.is_focused());
+    assert!(
+        damage_of(|damage| desktop.set_focused(false, &layout, damage)).is_empty(),
+        "and none disappeared"
+    );
+
+    desktop.press(centre_of(&layout, 0), &layout, 0, &[], &mut Region::new());
+    assert!(desktop.is_focused(), "a press claims the keyboard");
+    assert_eq!(
+        damage_of(|damage| desktop.set_focused(false, &layout, damage)).rects(),
+        [cell(&layout, 0)],
+        "the ring left the selected icon"
+    );
+    assert_eq!(
+        damage_of(|damage| desktop.set_focused(true, &layout, damage)).rects(),
+        [cell(&layout, 0)],
+        "and came back to it"
+    );
+    assert!(
+        damage_of(|damage| desktop.set_focused(true, &layout, damage)).is_empty(),
+        "unchanged focus damages nothing"
+    );
 }
 
 // --- Keyboard -------------------------------------------------------------
@@ -316,21 +396,36 @@ fn the_arrows_move_the_selection_the_way_the_icons_run_under_both_arrangements()
         let layout = layout_of(&desktop);
         let per_column = layout.cells_per_line();
         assert!(per_column >= 2, "the fixture needs a multi-icon column");
-        desktop.set_focused(true);
+        desktop.set_focused(true, &layout, &mut Region::new());
 
         // With nothing selected the first arrow starts at the first icon.
-        assert!(desktop.key(down(), true, &layout, &[]).redraw);
+        assert_eq!(
+            damage_of(|damage| {
+                desktop.key(down(), true, &layout, &[], damage);
+            })
+            .rects(),
+            [cell(&layout, 0)]
+        );
         assert_eq!(desktop.selected(), Some(0));
 
-        desktop.key(down(), true, &layout, &[]);
+        desktop.key(down(), true, &layout, &[], &mut Region::new());
         assert_eq!(desktop.selected(), Some(1));
-        desktop.key(up(), true, &layout, &[]);
+        desktop.key(up(), true, &layout, &[], &mut Region::new());
         assert_eq!(desktop.selected(), Some(0));
 
-        // One whole column further into the listing, and back out again.
-        desktop.key(later, true, &layout, &[]);
+        // One whole column further into the listing, and back out again. The
+        // two cells lie in different columns, so their order in the damage is
+        // the arrangement's, not the listing's.
+        let stepped = damage_of(|damage| {
+            desktop.key(later, true, &layout, &[], damage);
+        });
         assert_eq!(desktop.selected(), Some(per_column), "{icons:?} onward");
-        desktop.key(earlier, true, &layout, &[]);
+        assert!(
+            stepped.intersects(cell(&layout, 0)) && stepped.intersects(cell(&layout, per_column)),
+            "{icons:?} repaints the icon left and the icon reached"
+        );
+        assert_eq!(stepped.rects().len(), 2, "{icons:?} and nothing else");
+        desktop.key(earlier, true, &layout, &[], &mut Region::new());
         assert_eq!(desktop.selected(), Some(0), "{icons:?} back");
     }
 }
@@ -339,14 +434,20 @@ fn the_arrows_move_the_selection_the_way_the_icons_run_under_both_arrangements()
 fn the_selection_clamps_at_both_ends_of_the_listing() {
     let mut desktop = desktop_of(vec![file("a.txt"), file("b.txt")]);
     let layout = layout_of(&desktop);
-    desktop.set_focused(true);
-    desktop.key(down(), true, &layout, &[]);
-    assert!(!desktop.key(up(), true, &layout, &[]).redraw);
+    desktop.set_focused(true, &layout, &mut Region::new());
+    desktop.key(down(), true, &layout, &[], &mut Region::new());
+    assert!(damage_of(|damage| {
+        desktop.key(up(), true, &layout, &[], damage);
+    })
+    .is_empty());
     assert_eq!(desktop.selected(), Some(0));
 
-    desktop.key(down(), true, &layout, &[]);
+    desktop.key(down(), true, &layout, &[], &mut Region::new());
     assert_eq!(desktop.selected(), Some(1));
-    assert!(!desktop.key(down(), true, &layout, &[]).redraw);
+    assert!(damage_of(|damage| {
+        desktop.key(down(), true, &layout, &[], damage);
+    })
+    .is_empty());
     assert_eq!(desktop.selected(), Some(1), "clamped at the last icon");
 }
 
@@ -354,10 +455,12 @@ fn the_selection_clamps_at_both_ends_of_the_listing() {
 fn keys_do_nothing_while_the_desktop_does_not_hold_the_keyboard() {
     let mut desktop = desktop_of(vec![file("a.txt")]);
     let layout = layout_of(&desktop);
+    let mut damage = Region::new();
     assert_eq!(
-        desktop.key(down(), true, &layout, &[]),
+        desktop.key(down(), true, &layout, &[], &mut damage),
         DesktopOutcome::ignored()
     );
+    assert!(damage.is_empty(), "and paints nothing either");
     assert_eq!(desktop.selected(), None);
 }
 
@@ -365,33 +468,44 @@ fn keys_do_nothing_while_the_desktop_does_not_hold_the_keyboard() {
 fn a_key_release_and_an_unknown_key_change_nothing() {
     let mut desktop = desktop_of(vec![file("a.txt")]);
     let layout = layout_of(&desktop);
-    desktop.set_focused(true);
+    // One sink across all three: between them they must add no cell at all.
+    let mut damage = Region::new();
+    desktop.set_focused(true, &layout, &mut damage);
     assert_eq!(
-        desktop.key(down(), false, &layout, &[]),
+        desktop.key(down(), false, &layout, &[], &mut damage),
         DesktopOutcome::ignored()
     );
     assert_eq!(
-        desktop.key(Key::Char('x'), true, &layout, &[]),
+        desktop.key(Key::Char('x'), true, &layout, &[], &mut damage),
         DesktopOutcome::ignored()
     );
     assert_eq!(
-        desktop.key(Key::Named(NamedKey::Tab), true, &layout, &[]),
+        desktop.key(Key::Named(NamedKey::Tab), true, &layout, &[], &mut damage),
         DesktopOutcome::ignored()
     );
+    assert!(damage.is_empty(), "and none of them paints anything");
 }
 
 #[test]
 fn escape_clears_the_selection() {
     let mut desktop = desktop_of(vec![file("a.txt")]);
     let layout = layout_of(&desktop);
-    desktop.press(centre_of(&layout, 0), &layout, 0, &[]);
-    assert!(desktop.key(escape(), true, &layout, &[]).redraw);
-    assert_eq!(desktop.selected(), None);
+    desktop.press(centre_of(&layout, 0), &layout, 0, &[], &mut Region::new());
     assert_eq!(
-        desktop.key(escape(), true, &layout, &[]),
+        damage_of(|damage| {
+            desktop.key(escape(), true, &layout, &[], damage);
+        })
+        .rects(),
+        [cell(&layout, 0)]
+    );
+    assert_eq!(desktop.selected(), None);
+    let mut damage = Region::new();
+    assert_eq!(
+        desktop.key(escape(), true, &layout, &[], &mut damage),
         DesktopOutcome::ignored(),
         "nothing selected and no offer outstanding"
     );
+    assert!(damage.is_empty(), "so there is nothing to repaint");
 }
 
 // --- Activation -----------------------------------------------------------
@@ -401,8 +515,8 @@ fn double_clicking_a_folder_opens_the_file_manager_at_its_path() {
     let mut desktop = desktop_of(vec![folder("Work")]);
     let layout = layout_of(&desktop);
     let at = centre_of(&layout, 0);
-    desktop.press(at, &layout, 0, &[]);
-    let acted = desktop.press(at, &layout, 1, &[]);
+    desktop.press(at, &layout, 0, &[], &mut Region::new());
+    let acted = desktop.press(at, &layout, 1, &[], &mut Region::new());
     assert_eq!(
         acted.action,
         Some(DesktopAction::Activate(DesktopActivation::OpenFolder {
@@ -416,9 +530,11 @@ fn double_clicking_an_application_bundle_launches_its_run_binary() {
     let mut desktop = desktop_of(vec![bundle("Chess.app")]);
     let layout = layout_of(&desktop);
     let at = centre_of(&layout, 0);
-    desktop.press(at, &layout, 0, &[]);
+    desktop.press(at, &layout, 0, &[], &mut Region::new());
     assert_eq!(
-        desktop.press(at, &layout, 1, &[]).action,
+        desktop
+            .press(at, &layout, 1, &[], &mut Region::new())
+            .action,
         Some(DesktopAction::Activate(DesktopActivation::Launch {
             run_path: "/Users/ada/Desktop/Chess.app/Run".to_string(),
             label: "Chess".to_string(),
@@ -432,9 +548,11 @@ fn double_clicking_a_file_launches_its_associated_application_with_the_file() {
     let mut desktop = desktop_of(vec![file("notes.txt")]);
     let layout = layout_of(&desktop);
     let at = centre_of(&layout, 0);
-    desktop.press(at, &layout, 0, &[]);
+    desktop.press(at, &layout, 0, &[], &mut Region::new());
     assert_eq!(
-        desktop.press(at, &layout, 1, &editor()).action,
+        desktop
+            .press(at, &layout, 1, &editor(), &mut Region::new())
+            .action,
         Some(DesktopAction::Activate(DesktopActivation::Launch {
             run_path: "/Apps/Edit.app/Run".to_string(),
             label: "Edit".to_string(),
@@ -448,8 +566,8 @@ fn a_file_no_application_opens_is_refused_with_its_reason_and_does_nothing_else(
     let mut desktop = desktop_of(vec![file("mystery.qqq")]);
     let layout = layout_of(&desktop);
     let at = centre_of(&layout, 0);
-    desktop.press(at, &layout, 0, &[]);
-    let acted = desktop.press(at, &layout, 1, &editor());
+    desktop.press(at, &layout, 0, &[], &mut Region::new());
+    let acted = desktop.press(at, &layout, 1, &editor(), &mut Region::new());
     assert_eq!(
         acted.action,
         Some(DesktopAction::Refuse(
@@ -464,14 +582,21 @@ fn a_file_no_application_opens_is_refused_with_its_reason_and_does_nothing_else(
 fn enter_activates_the_selection_and_does_nothing_with_no_selection() {
     let mut desktop = desktop_of(vec![folder("Work")]);
     let layout = layout_of(&desktop);
-    desktop.set_focused(true);
+    let mut damage = Region::new();
+    desktop.set_focused(true, &layout, &mut damage);
     assert_eq!(
-        desktop.key(enter(), true, &layout, &[]),
+        desktop.key(enter(), true, &layout, &[], &mut damage),
         DesktopOutcome::ignored()
     );
-    desktop.press(centre_of(&layout, 0), &layout, 0, &[]);
+    assert!(
+        damage.is_empty(),
+        "there was nothing to activate or repaint"
+    );
+    desktop.press(centre_of(&layout, 0), &layout, 0, &[], &mut Region::new());
     assert_eq!(
-        desktop.key(enter(), true, &layout, &[]).action,
+        desktop
+            .key(enter(), true, &layout, &[], &mut Region::new())
+            .action,
         Some(DesktopAction::Activate(DesktopActivation::OpenFolder {
             path: "/Users/ada/Desktop/Work".to_string(),
         }))
@@ -483,12 +608,13 @@ fn two_slow_clicks_are_two_clicks_not_an_activation() {
     let mut desktop = desktop_of(vec![folder("Work")]);
     let layout = layout_of(&desktop);
     let at = centre_of(&layout, 0);
-    desktop.press(at, &layout, 0, &[]);
+    desktop.press(at, &layout, 0, &[], &mut Region::new());
     let late = desktop.press(
         at,
         &layout,
         tairix_browse::DOUBLE_CLICK_INTERVAL_NS + 1,
         &[],
+        &mut Region::new(),
     );
     assert_eq!(late.action, None);
 }
@@ -501,17 +627,26 @@ fn every_icon_the_column_shows_is_painted_even_with_no_artwork_at_all() {
     let layout = layout_of(&desktop);
     let theme = theme();
     let mut surface = Surface::new(800, 600).expect("a screen-sized layer");
-    desktop.set_focused(true);
-    desktop.press(centre_of(&layout, 0), &layout, 0, &[]);
-    desktop.pointer_moved(centre_of(&layout, 1), &layout, 1);
+    desktop.set_focused(true, &layout, &mut Region::new());
+    desktop.press(centre_of(&layout, 0), &layout, 0, &[], &mut Region::new());
+    desktop.pointer_moved(centre_of(&layout, 1), &layout, 1, &mut Region::new());
 
-    desktop.render(&mut surface, &layout, Scale::ONE, &theme, &mut NoArtwork);
+    desktop.render(
+        &mut surface,
+        &layout,
+        Scale::ONE,
+        &theme,
+        &mut NoArtwork,
+        work_area(),
+    );
 
     // With no artwork store at all every tile still draws its built-in
     // glyph, so no icon slot can come out blank.
     for index in 0..3 {
-        let cell = layout.cell_rect(0, index).expect("a shown icon");
-        assert!(painted(&surface, cell), "icon {index} drew nothing at all");
+        assert!(
+            painted(&surface, cell(&layout, index)),
+            "icon {index} drew nothing at all"
+        );
     }
 }
 
@@ -521,10 +656,45 @@ fn an_empty_desktop_paints_nothing_and_leaves_the_wallpaper_showing() {
     let layout = layout_of(&desktop);
     let theme = theme();
     let mut surface = Surface::new(800, 600).expect("a screen-sized layer");
-    desktop.render(&mut surface, &layout, Scale::ONE, &theme, &mut NoArtwork);
+    desktop.render(
+        &mut surface,
+        &layout,
+        Scale::ONE,
+        &theme,
+        &mut NoArtwork,
+        work_area(),
+    );
     assert!(
         !painted(&surface, work_area()),
         "an empty folder leaves the layer fully transparent"
+    );
+}
+
+#[test]
+fn a_render_clipped_to_one_cell_leaves_every_other_icon_untouched() {
+    let desktop = desktop_of(vec![file("a.txt"), file("b.txt")]);
+    let layout = layout_of(&desktop);
+    let theme = theme();
+    let mut surface = Surface::new(800, 600).expect("a screen-sized layer");
+
+    desktop.render(
+        &mut surface,
+        &layout,
+        Scale::ONE,
+        &theme,
+        &mut NoArtwork,
+        cell(&layout, 1),
+    );
+
+    // A tile draws strictly inside its own cell, which is what lets a moved
+    // highlight cost one cell instead of the whole layer.
+    assert!(
+        painted(&surface, cell(&layout, 1)),
+        "the cell asked for drew"
+    );
+    assert!(
+        !painted(&surface, cell(&layout, 0)),
+        "a cell outside the repainted area is left exactly as it was"
     );
 }
 
@@ -584,17 +754,17 @@ fn each_arrangement_lays_the_column_out_at_its_own_corner_and_hit_tests_there() 
         let mut desktop =
             desktop_with(vec![file("a.txt")], arranged_by(icons, IconSort::default()));
         let layout = layout_of(&desktop);
-        let cell = layout.cell_rect(0, 0).expect("a shown icon");
+        let bounds = cell(&layout, 0);
         assert_eq!(
-            cell.top(),
+            bounds.top(),
             area.top() + margin,
             "{icons:?} starts at the top"
         );
         // The icon the user can see is the icon a press lands on, whichever
         // corner the column grew from.
-        desktop.press(centre_of(&layout, 0), &layout, 0, &[]);
+        desktop.press(centre_of(&layout, 0), &layout, 0, &[], &mut Region::new());
         assert_eq!(desktop.selected(), Some(0), "{icons:?} hit-test");
-        cells.push(cell);
+        cells.push(bounds);
     }
     let (leading, trailing) = (cells[0], cells[1]);
     assert_eq!(
@@ -616,7 +786,7 @@ fn each_arrangement_lays_the_column_out_at_its_own_corner_and_hit_tests_there() 
 fn changing_the_arrangement_relays_the_icons_out_without_relisting() {
     let folder = holding(vec![file("a.txt")]);
     let mut desktop = desktop_over(&folder);
-    let before = layout_of(&desktop).cell_rect(0, 0).expect("a shown icon");
+    let before = cell(&layout_of(&desktop), 0);
 
     let change = desktop
         .apply_settings(arranged_by(IconFlow::Trailing, IconSort::default()))
@@ -625,7 +795,7 @@ fn changing_the_arrangement_relays_the_icons_out_without_relisting() {
     assert!(!change.relist && !change.wallpaper);
     assert_eq!(listings(&folder), 1, "an arrangement is not a listing");
 
-    let after = layout_of(&desktop).cell_rect(0, 0).expect("a shown icon");
+    let after = cell(&layout_of(&desktop), 0);
     assert_ne!(before.left(), after.left(), "the column moved edge");
 }
 
@@ -708,8 +878,9 @@ fn a_secondary_press_on_an_icon_selects_it_and_asks_for_the_menu() {
     let layout = layout_of(&desktop);
     let at = centre_of(&layout, 1);
 
-    let opened = desktop.context_press(at, &layout);
-    assert!(opened.redraw);
+    let mut damage = Region::new();
+    let opened = desktop.context_press(at, &layout, &mut damage);
+    assert_eq!(damage.rects(), [cell(&layout, 1)]);
     assert_eq!(
         desktop.selected(),
         Some(1),
@@ -720,8 +891,9 @@ fn a_secondary_press_on_an_icon_selects_it_and_asks_for_the_menu() {
         Some(DesktopAction::OpenMenu { at, on_icon: true })
     );
 
-    let again = desktop.context_press(at, &layout);
-    assert!(!again.redraw, "the selection did not move");
+    damage.clear();
+    let again = desktop.context_press(at, &layout, &mut damage);
+    assert!(damage.is_empty(), "the selection did not move");
     assert_eq!(
         again.action,
         Some(DesktopAction::OpenMenu { at, on_icon: true })
@@ -732,10 +904,11 @@ fn a_secondary_press_on_an_icon_selects_it_and_asks_for_the_menu() {
 fn a_secondary_press_on_the_backdrop_leaves_the_selection_untouched() {
     let mut desktop = desktop_of(vec![file("a.txt")]);
     let layout = layout_of(&desktop);
-    desktop.press(centre_of(&layout, 0), &layout, 0, &[]);
+    desktop.press(centre_of(&layout, 0), &layout, 0, &[], &mut Region::new());
 
-    let opened = desktop.context_press(EMPTY_DESKTOP, &layout);
-    assert!(!opened.redraw);
+    let mut damage = Region::new();
+    let opened = desktop.context_press(EMPTY_DESKTOP, &layout, &mut damage);
+    assert!(damage.is_empty(), "the backdrop menu moves no highlight");
     assert_eq!(
         desktop.selected(),
         Some(0),
@@ -755,8 +928,8 @@ fn the_menus_open_command_resolves_exactly_as_a_double_click_does() {
     let mut desktop = desktop_of(vec![folder("Work")]);
     let layout = layout_of(&desktop);
     let at = centre_of(&layout, 0);
-    desktop.press(at, &layout, 0, &[]);
-    let clicked = desktop.press(at, &layout, 1, &[]);
+    desktop.press(at, &layout, 0, &[], &mut Region::new());
+    let clicked = desktop.press(at, &layout, 1, &[], &mut Region::new());
 
     assert_eq!(
         desktop.command(PinboardCommand::Open, &[], 2).action,
@@ -830,8 +1003,15 @@ fn refresh_relists_now_and_the_remaining_rows_name_their_own_action() {
     let mut desktop = desktop_over(&folder);
     folder.borrow_mut().answer = Some(Ok(vec![file("a.txt"), file("b.txt")]));
 
-    let refreshed = desktop.command(PinboardCommand::Refresh, &[], 1);
-    assert!(refreshed.relisted && refreshed.redraw);
+    // A re-list reports no cell: the icons themselves moved, so the caller
+    // repaints the whole layer instead of any cell of the layout it replaced.
+    assert_eq!(
+        desktop.command(PinboardCommand::Refresh, &[], 1),
+        DesktopOutcome {
+            relisted: true,
+            action: None,
+        }
+    );
     assert_eq!(listings(&folder), 2);
     assert_eq!(desktop.entries().len(), 2);
     assert_eq!(

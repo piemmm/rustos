@@ -7072,8 +7072,10 @@ fn a_desktop_with_no_artwork_at_all_still_draws_every_icon_from_its_glyphs() {
 
 use crate::desktop::Desktop;
 use crate::pinboard::PinboardMenu;
+use tairix_browse::GridView;
 use tairix_wallpaper::{Backdrop, PinboardSettings, Rgb};
 use tairix_window::WindowHost;
+use tairix_wm::{Region, Window};
 
 /// The row stride, in bytes, of the [`headless_desktop`] frame.
 const FRAME_STRIDE: usize = 640 * 4;
@@ -7087,6 +7089,23 @@ fn pinboard_desktop() -> Desktop<TreeSource> {
     desktop.relist(0);
     desktop
 }
+
+/// The centre of the icon at `index`, in screen coordinates.
+fn centre_of(layout: &GridView, index: usize) -> Point {
+    let cell = layout.cell_rect(0, index).expect("a shown icon");
+    Point::new(
+        cell.left() + i32::try_from(cell.width / 2).unwrap_or(0),
+        cell.top() + i32::try_from(cell.height / 2).unwrap_or(0),
+    )
+}
+
+/// A point on the backdrop that no icon reaches: inside the margin the icon
+/// column is inset by.
+const EMPTY_BACKDROP: Point = Point::new(2, 2);
+
+/// One desktop gesture, reporting the cells it changed into a damage sink.
+/// The lifetime is spelled because each gesture borrows the layout it acts on.
+type Gesture<'a> = dyn Fn(&mut Desktop<TreeSource>, &mut Region) + 'a;
 
 /// `desktop` with its backdrop set to the flat colour `rgb`.
 fn with_backdrop(desktop: &mut Desktop<TreeSource>, rgb: Rgb) {
@@ -7188,6 +7207,197 @@ fn the_desktop_layer_paints_the_wallpaper_when_one_is_set() {
         without,
         "taking the wallpaper away brings the backdrop colour back"
     );
+}
+
+/// A wallpaper that does not cover the screen — a centred or letterboxed
+/// picture, delivered as a screen-sized surface with transparent margins —
+/// shows the backdrop colour the settings name in the margins it leaves.
+///
+/// The layer is painted into the same buffer every frame, so a margin that
+/// took no paint would keep whatever the previous frame drew there: an icon
+/// that has since moved, or nothing at all.
+#[test]
+fn a_wallpaper_that_does_not_cover_the_screen_shows_the_backdrop_in_its_margins() {
+    let (mut shell, mut comp) = headless_desktop();
+    let mut desktop = pinboard_desktop();
+    with_backdrop(&mut desktop, Rgb::new(10, 20, 30));
+
+    // The sandbox draws an under-sized placement into a screen-sized canvas
+    // and leaves every pixel outside it fully transparent.
+    let mut paper = Surface::new(640, 480).expect("a screen-sized wallpaper");
+    paper.fill_rect(220, 140, 200, 200, Color::rgb(200, 100, 50));
+    shell.set_wallpaper(Some(paper));
+    shell.present_desktop(&mut comp, &desktop);
+    comp.composite();
+
+    let inside = frame_pixel(&comp, 300, 200);
+    assert!(
+        inside.contains(&200) && inside.contains(&100) && inside.contains(&50),
+        "the picture itself is drawn, got {inside:?}"
+    );
+    let (x, y) = CLEAR_OF_EVERYTHING;
+    let margin = frame_pixel(&comp, x, y);
+    assert_eq!(margin[3], 255, "the layer is opaque everywhere");
+    assert!(
+        margin.contains(&10) && margin.contains(&20) && margin.contains(&30),
+        "the margin shows the chosen backdrop, not the root fill, got {margin:?}"
+    );
+}
+
+/// A window over the desktop, translucent and backdrop-blurred: a terminal on
+/// frosted glass, which is what makes a needless desktop repaint expensive.
+fn frosted_window(shell: &mut DesktopShell, comp: &mut Compositor) -> WindowId {
+    let window = shell
+        .open_window(comp, Point::new(200, 60), app_surface(), "Terminal")
+        .expect("opens");
+    assert!(comp.set_opacity(window, 128));
+    assert!(comp.set_backdrop_blur(window, 8));
+    window
+}
+
+/// Clicking between a window and the wallpaper moves the keyboard, which
+/// moves the desktop's Focus Ring — one icon's worth of pixels.
+///
+/// It must cost that. The desktop is the bottom layer, so repainting it whole
+/// marks the whole screen: every window above it recomposites and every
+/// frosted backdrop over it is thrown away and blurred again. On a 1080p
+/// screen that is most of a megapixel of blur per click, which is felt as the
+/// pointer freezing.
+#[test]
+fn moving_focus_between_a_window_and_the_desktop_repaints_one_icon() {
+    let (mut shell, mut comp) = headless_desktop();
+    let mut desktop = pinboard_desktop();
+    with_backdrop(&mut desktop, Rgb::new(10, 20, 30));
+    let window = frosted_window(&mut shell, &mut comp);
+    shell.present_desktop(&mut comp, &desktop);
+    let layout = shell.desktop_layout(&comp, &desktop);
+    let cell = layout.cell_rect(0, 1).expect("a shown icon");
+
+    // An icon is selected and the desktop holds the keyboard, exactly as it
+    // does before the user clicks into the terminal.
+    let mut damage = Region::new();
+    desktop.press(centre_of(&layout, 1), &layout, 0, &[], &mut damage);
+    shell.present_desktop_area(&mut comp, &desktop, &damage);
+    comp.composite();
+    assert!(!comp.has_damage(), "the opening frames have been drained");
+    assert_eq!(desktop.selected(), Some(1));
+
+    // The click into the terminal: the window takes the keyboard, so the ring
+    // leaves the selected icon.
+    damage.clear();
+    desktop.set_focused(false, &layout, &mut damage);
+    assert_eq!(damage.rects(), [cell], "the ring's own cell, nothing more");
+    shell.present_desktop_area(&mut comp, &desktop, &damage);
+    let composed = comp.composite();
+    assert_eq!(composed.rects(), [cell], "the frame recomposed one cell");
+    assert_eq!(
+        comp.frame_stats().blur_px,
+        0,
+        "the window's frosted backdrop was kept, not blurred again"
+    );
+    assert!(
+        comp.frame_stats().damaged_px < 640 * 480 / 10,
+        "a focus click must not cost a screen, got {}",
+        comp.frame_stats().damaged_px
+    );
+
+    // And the click back onto the wallpaper, which brings the ring back.
+    damage.clear();
+    desktop.set_focused(true, &layout, &mut damage);
+    assert_eq!(damage.rects(), [cell]);
+    shell.present_desktop_area(&mut comp, &desktop, &damage);
+    comp.composite();
+    assert_eq!(comp.frame_stats().blur_px, 0, "still no re-blur");
+
+    // With nothing selected there is no ring to move, so the same click
+    // changes no pixel at all and asks for no frame.
+    damage.clear();
+    desktop.press(EMPTY_BACKDROP, &layout, 1, &[], &mut damage);
+    shell.present_desktop_area(&mut comp, &desktop, &damage);
+    comp.composite();
+    assert_eq!(desktop.selected(), None);
+    damage.clear();
+    desktop.set_focused(false, &layout, &mut damage);
+    assert!(damage.is_empty(), "no selection, no ring, no repaint");
+    shell.present_desktop_area(&mut comp, &desktop, &damage);
+    assert!(!comp.has_damage(), "and no frame to compose");
+    assert_eq!(comp.window(window).map(Window::opacity), Some(128));
+}
+
+/// Repainting part of the desktop layer must produce the very pixels a whole
+/// repaint would have: the same backdrop, the same wallpaper over it, and the
+/// same icons over that.
+///
+/// Two identical screens are driven through the same gestures, one presenting
+/// the cells the model reported and the other presenting the whole layer, and
+/// their scan-out is compared byte for byte — so a partial paint that forgot
+/// the wallpaper, mis-clipped a tile, or left a stale highlight behind cannot
+/// pass as the cheaper path.
+#[test]
+fn a_partial_desktop_repaint_draws_what_a_whole_one_would() {
+    let mut cheap = headless_desktop();
+    let mut whole = headless_desktop();
+    // Striped on both axes, at periods no cell origin is a multiple of: the
+    // partial paint draws the wallpaper at its true screen position and
+    // writes only inside the cell, so a picture shifted by even a few pixels
+    // would show here where a flat one could not.
+    let mut paper = Surface::new(640, 480).expect("a screen-sized wallpaper");
+    for row in 0..480 / 8 {
+        let shade = u8::try_from(row * 3 % 200).unwrap_or(0);
+        paper.fill_rect(0, row * 8, 640, 4, Color::rgb(shade, 100, 200 - shade));
+    }
+    for column in 0..640 / 16 {
+        let shade = u8::try_from(column * 5 % 200).unwrap_or(0);
+        paper.fill_rect(column * 16, 0, 8, 480, Color::rgb(40, shade, 120));
+    }
+    for (shell, comp) in [&mut cheap, &mut whole] {
+        shell.set_wallpaper(Some(paper.clone()));
+        frosted_window(shell, comp);
+    }
+    let mut desktops = [pinboard_desktop(), pinboard_desktop()];
+    for desktop in &mut desktops {
+        with_backdrop(desktop, Rgb::new(10, 20, 30));
+    }
+    let layout = cheap.0.desktop_layout(&cheap.1, &desktops[0]);
+
+    // Every gesture the pointer and keyboard produce over the icon column,
+    // each of which reports its own cells.
+    let first = centre_of(&layout, 0);
+    let second = centre_of(&layout, 1);
+    let gestures: [&Gesture<'_>; 6] = [
+        &|d, dmg| {
+            d.pointer_moved(first, &layout, 0, dmg);
+        },
+        &|d, dmg| {
+            d.pointer_moved(second, &layout, 1, dmg);
+        },
+        &|d, dmg| {
+            d.press(second, &layout, 2, &[], dmg);
+        },
+        &|d, dmg| d.set_focused(false, &layout, dmg),
+        &|d, dmg| d.set_focused(true, &layout, dmg),
+        &|d, dmg| {
+            d.pointer_left(&layout, dmg);
+        },
+    ];
+    for (step, gesture) in gestures.iter().enumerate() {
+        let mut damage = Region::new();
+        gesture(&mut desktops[0], &mut damage);
+        cheap
+            .0
+            .present_desktop_area(&mut cheap.1, &desktops[0], &damage);
+        cheap.1.composite();
+
+        gesture(&mut desktops[1], &mut Region::new());
+        whole.0.present_desktop(&mut whole.1, &desktops[1]);
+        whole.1.composite();
+
+        assert_eq!(
+            cheap.1.frame(),
+            whole.1.frame(),
+            "the cheap path drew a different screen at step {step}"
+        );
+    }
 }
 
 #[test]

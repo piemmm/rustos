@@ -296,7 +296,12 @@ router**:
   on top of the background layer and beneath every window's, so the
   accelerated and software paths agree pixel-for-pixel. Installing,
   clearing, or replacing it damages exactly its old and new footprints,
-  precisely as a window's own surface replacement does.
+  precisely as a window's own surface replacement does. `repaint_desktop`
+  repaints it in place, painting and marking only the rectangles of the
+  `Region` its owner asks for: it is the bottom layer, so marking all of it
+  recomposites every window above and re-blurs every frosted backdrop over
+  it — an icon taking the hover must cost that icon. A layer that is absent
+  or sized for another screen is allocated fresh and painted whole.
 - Input that resolves to no window is reported, not swallowed: a primary
   press or a key with focus on the desktop comes back as `DesktopPressed`
   / `DesktopKey { key, modifiers, pressed }`, and pointer motion that
