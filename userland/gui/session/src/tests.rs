@@ -8941,3 +8941,107 @@ fn a_second_window_of_the_same_application_reuses_the_resolved_icon() {
          artwork fetch or decode: only the bundle's own manifest is re-read"
     );
 }
+
+/// The reported stall, through the real window host: right-clicking a frosted,
+/// translucent terminal and dismissing the menu must not re-blur the window.
+///
+/// The hand-built compositor scenes prove the restack rule; this proves the
+/// *session's* own sequence obeys it — a popup opened above a window that sits
+/// under the taskbar, painted, closed, and the owner refocused.
+#[test]
+fn a_popup_over_a_frosted_window_never_reblurs_it() {
+    let mut shell = shell();
+    let mut comp = compositor();
+    let mut windows = SessionWindows::new();
+
+    comp.set_desktop(
+        Surface::filled(1920, 1080, Color::rgb(40, 60, 90).premultiply()).expect("desktop"),
+    );
+    // The bar window exists before any app window, as in a live session.
+    shell.present(&mut comp);
+    with_window_host(&mut shell, &mut comp, &mut windows, |host| {
+        assert_eq!(
+            host.window_opened(
+                window_owner(1),
+                1,
+                &served_mode(1000, 700),
+                "Terminal",
+                resizable_sizing(),
+            ),
+            Ok(())
+        );
+    });
+    let parent = windows.wm_id(1).expect("parent live");
+    assert!(comp.set_opacity(parent, 128));
+    assert!(comp.set_backdrop_blur(parent, 12));
+    // Compose until nothing is dirty, so the backdrop is retained.
+    for _ in 0..4 {
+        comp.composite();
+    }
+    // The bar is frosted too, so the count is the session's, not a constant;
+    // what matters is that none of the gestures below drops one.
+    let retained = comp.frost_cache_len();
+    assert!(retained >= 1, "the window retained no backdrop");
+    let window_px = 1000 * 700;
+
+    // The right-click: the app opens its menu as a popup.
+    with_window_host(&mut shell, &mut comp, &mut windows, |host| {
+        assert_eq!(
+            host.popup_opened(2, 1, 100, 100, &served_mode(220, 180)),
+            Ok(())
+        );
+    });
+    comp.composite();
+    let opened = comp.frame_stats();
+    assert_eq!(opened.blur_px, 0, "opening the menu re-blurred the window");
+    assert!(
+        opened.damaged_px < window_px / 8,
+        "opening the menu repainted most of the window: {opened:?}"
+    );
+    assert_eq!(
+        comp.frost_cache_len(),
+        retained,
+        "a backdrop was thrown away"
+    );
+
+    // The app paints the menu into its popup.
+    let frame = vec![0xffu8; 220 * 180 * 4];
+    with_window_host(&mut shell, &mut comp, &mut windows, |host| {
+        assert_eq!(
+            host.window_presented(
+                2,
+                &served_mode(220, 180),
+                &frame,
+                DamageRect::full(&served_mode(220, 180))
+            ),
+            Ok(())
+        );
+    });
+    comp.composite();
+    let painted = comp.frame_stats();
+    assert_eq!(
+        painted.blur_px, 0,
+        "painting the menu re-blurred the window"
+    );
+    assert_eq!(painted.damaged_px, 220 * 180, "{painted:?}");
+
+    // The dismissing click: the popup goes and the terminal takes focus back.
+    let popup = windows.wm_id(2).expect("popup live");
+    assert!(shell.close_popup_window(&mut comp, popup));
+    assert!(comp.set_active_frame(parent, true));
+    comp.composite();
+    let closed = comp.frame_stats();
+    assert_eq!(
+        closed.blur_px, 0,
+        "dismissing the menu re-blurred the window"
+    );
+    assert!(
+        closed.damaged_px < window_px / 8,
+        "dismissing the menu repainted most of the window: {closed:?}"
+    );
+    assert_eq!(
+        comp.frost_cache_len(),
+        retained,
+        "a backdrop was thrown away"
+    );
+}

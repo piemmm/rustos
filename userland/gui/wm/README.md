@@ -188,6 +188,18 @@ router**:
   pixels, tens of times a second, for a menu row's highlight. Raising an
   unrelated window now places it above *both*, which is what a desktop
   should do: an open menu no longer pins its owner over its neighbours.
+
+  A restack that *does* move something marks only where the family and the
+  windows it **crossed** overlap. Reordering windows that do not overlap
+  changes no pixel — nothing is drawn differently and no frost sees a
+  different backdrop — so it damages nothing, and a family's own footprint is
+  never marked merely for having moved. That is what makes the shipping
+  arrangement cheap rather than only the ideal one: the taskbar is a window
+  above every application window, so an app is essentially never frontmost
+  and the raise that opens a menu always crosses the bar. Marking the whole
+  family instead cost a 1000×700 translucent, blurred terminal a full-window
+  blur (`blur_px 700000`) to open a 220×180 menu on it; it now costs the menu
+  (`damaged_px 39600`, `blur_px 0`).
 - Input routing (`input`): the `InputRouter` tracks the pointer and the
   focused window, raises and focuses the window under a primary press
   (click-to-activate), and drives explicit interactive window

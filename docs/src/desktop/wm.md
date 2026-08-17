@@ -1063,6 +1063,17 @@ parent, which any app can open for any transient overlay
   Raising an unrelated window puts it in front of *both*, as a desktop
   should: a window with a menu open is not pinned above its neighbours (nor
   above the taskbar) for as long as the menu lives.
+- **A restack marks only where the family and the windows it crossed
+  overlap.** Reordering two windows that do not overlap changes no pixel —
+  nothing is drawn differently and no frost sees a different backdrop — so
+  the move damages nothing. This is what makes opening a menu cheap in the
+  arrangement that actually ships: the taskbar is a window above every
+  application window, so an app is essentially never frontmost, and the
+  raise that brings a family up crosses the bar. Marking the family's whole
+  footprint instead threw away the owner's frosted backdrop every time,
+  costing a 1000×700 translucent, blurred terminal a full-window blur
+  (`blur_px 700000`) to open a 220×180 menu on it; it now costs the menu
+  (`damaged_px 39600`, `blur_px 0`).
 - **Parent death takes the popup with it.** Closing the parent — over the
   channel, from the frame's close control, or by the owning client dying
   (`client_exited`) — tears down every popup keyed to it; a `Close` naming

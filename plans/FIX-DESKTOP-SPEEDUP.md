@@ -6,12 +6,15 @@ C.5 landed — every control family reports what it repaints from both input
 paths, and a host now reports its own two kinds of change through the same two
 guarded writes; C.3 has landed for `userland/apps/widgets` with its differential
 proof and five apps remain; C.4a withdrawn as a performance item after
-measurement; D.1–D.4 and D.7–D.9 landed — a frosted window that moves now keeps
+measurement; D.1–D.4 and D.7–D.12 landed — a frosted window that moves now keeps
 the frost the move cannot reach, the layers a frost covers are no longer
 composed, and *any* window that reads its backdrop retains one, so a translucent
 drag went from the desktop's slowest to cheaper than a blurred one — D.5 is a
 User decision and D.6 a follow-up the measurements exposed).
-E planned.
+E planned, and **E.2 is now the largest attributed desktop stall**: the
+present path rotates the frame ring per damage rectangle and copies a
+bounding box each time, which is what a Pi 4B feels as a ~600 ms freeze when
+a menu opens or closes over a focused window.
 Stages A–E need no hardware acceleration, no kernel change, and no new
 syscall; F needs a `plans/FIX-HARDWARE-FEATURES.md` correction; G is gated on
 a User decision (§15.7) because it is kernel work.
@@ -738,7 +741,7 @@ still passes unchanged.
 
 ---
 
-## Stage D — Make blur cost what it changes  **[D.1–D.4, D.7–D.11 done; D.5 is a User decision]**
+## Stage D — Make blur cost what it changes  **[D.1–D.4, D.7–D.12 done; D.5 is a User decision]**
 
 ### D.1 Damage below a frost invalidates it; the window's own content does not  **[done]**
 Every `damage.add` in the compositor is gone, replaced by three funnels that
@@ -1189,6 +1192,55 @@ whatever the previous frame had drawn there afterwards — stale icons. The
 backdrop colour is now laid down first and the wallpaper composited over it,
 which is also what makes a partial repaint total; `covered` is gone.
 
+### D.12 A restack marks where it crossed, not what it moved  **[done]**
+D.10 stopped the desktop from re-asserting an arrangement that already held, and
+that fixed hovering an open menu. It did **not** fix opening or closing one,
+because those *do* move the family, and a move marked every pixel of it. The
+taskbar is a window above every application window, so an app is essentially
+never frontmost: the raise that brings a family forward always crosses the bar,
+and the bar's own `keep_topmost` re-assert crosses back. Each crossing marked a
+1000×700 translucent, backdrop-blurred terminal in full and dropped its retained
+frost. The observed symptom was ~600 ms with the pointer frozen when the menu
+opened and ~600 ms again when a click elsewhere dismissed it — the same stall
+twice, from one cause, which is why it was symmetric.
+
+The fix is the fact the marking was missing: **reordering two windows that do
+not overlap changes no pixel.** Nothing is drawn differently, and no frost sees
+a different backdrop, so there is nothing to mark. `restack_family` now asks
+`crossed_bounds` for the windows the family actually swaps sides with — those
+above it when moving to the front, below it when moving to the back, visible
+only — and marks each moved member's bounds **intersected** with each of them.
+Windows on the far side keep their relative order with the family and so see
+exactly the stack they always did.
+
+Measured on the reported arrangement (1920×1080, a 1000×700 window at 50%
+opacity and radius 12, a 1920×40 bar, a 220×180 menu), the four steps of the
+gesture, before → after:
+
+| Step | `damaged_px` | `blur_px` |
+|---|---|---|
+| Open the menu | 700 000 → **39 600** | 700 000 → **0** |
+| Bar re-asserts topmost | 76 800 → **0** | 0 → 0 |
+| Dismissing click raises the terminal | 700 000 → **39 600**¹ | 700 000 → **0** |
+| Popup removed | 39 600 → 39 600 | 0 → 0 |
+
+¹ zero when the click does not also move the menu; the table's figure is the
+menu's own rectangle, which the popup's removal repaints in either case.
+
+The bar row is a third win and a continuous one: the re-assert marked its own
+76 800 pixels on **every** wake it moved, so every pointer sample composed,
+encoded and presented the whole bar.
+
+Gated by three tests, each proved to fail before the change: the reported
+gesture end to end (open under the bar → bar re-assert → dismissing raise →
+popup removed, asserting the menu's rectangle, `blur_px 0`, and that the frost
+cache still holds the entry it started with); opening a transient on a window
+under the bar; and a raise past windows it does not overlap, which additionally
+asserts the frame is byte-identical afterwards — tighter damage is only correct
+if the pixels are. The existing whole-family invariants (nothing lands between
+an owner and its transient, `lower` takes the family) are unchanged and still
+pass, so the coupling was not loosened to buy the saving.
+
 ---
 
 ## Stage E — One present per frame, and a frame deadline
@@ -1205,18 +1257,50 @@ than coalescing to unions. What remains for E is the *present* side:
 `MAX_PRESENT_REGIONS`, which E.2 replaces with a rect list.
 
 ### E.2 One present per frame, carrying a list of rects
-`RemoteDisplay::push` rotates the 2-frame ring **per `present_region`
-call** and refreshes `union(stale, damage)` as a **bounding rect**: with
-8 rects that is 8 IPC round trips, each copying a growing box — in the
-worst case ~8 near-full-screen copies for a frame that changed a few
+**This is the largest remaining desktop stall, and it is now attributed
+rather than suspected.** `RemoteDisplay::push` rotates the 2-frame ring **per
+`present_region` call** and refreshes `union(stale, damage)` as a **bounding
+rect**: with 8 rects that is 8 IPC round trips, each copying a growing box —
+in the worst case ~8 near-full-screen copies for a frame that changed a few
 thousand pixels. A window drag needs no pathological scene to hit it: the
 frame presents the rectangle vacated and the one arrived at, and each of
 those two calls copies the *union* box, so a window moved a few pixels is
-copied to the screen twice per sample. Change the `Present` request in place to carry a
-bounded **list** of rects (count bounded by a discovered/negotiated
-limit, not a magic const, §24.1); the ring rotates once per frame and the
-per-frame stale set is tracked per rect rather than as one box. Align the
-request shape with `PresentLayers` so the accelerated path reuses it.
+copied to the screen twice per sample.
+
+Two rectangles are enough, and two is what an ordinary gesture produces.
+Opening a context menu on a focused window damages the popup's rectangle
+*and* the owner's title band, because the owner's furniture is repainted
+inactive (`set_active_frame`). Those two are far apart, so on a 1920×1080
+screen each of the two `present_region` calls copies a box spanning them —
+of the order of 1.3 M pixels, ~5 MB — and the ring rotation between them
+means the second call's box has grown by the first. Dismissing the menu
+repaints the same two places and pays it again, which is why the stall is
+**symmetric**: ~600 ms with the pointer frozen when the menu opens and
+~600 ms again when a click elsewhere closes it, on a Raspberry Pi 4B whose
+framebuffer is uncached device memory. A QEMU-scale screen hides it because
+the box is a fraction of the pixels.
+
+That the copies are the cost and not the composite is what the D.12
+measurements show: after D.12 the compositor blends 39 600 pixels and blurs
+none for that gesture, while the present path still copies the box twice.
+
+The fix, in one in-place evolution (§2.13) rather than a second entry point
+beside the first (§2.14):
+
+- Replace `Display::present_region` with a **rect-list** present, count
+  bounded by a discovered/negotiated limit rather than a magic const (§24.1).
+  Every in-tree implementor moves with it in the same change.
+- `RemoteDisplay` rotates the ring **once per frame** and copies each rect
+  plus that frame's own stale region, so a rect's copy is that rect — never a
+  box spanning a rect it has nothing to do with, and never a box grown by a
+  rotation that has not happened yet.
+- Track the per-frame stale set as a `tairix_geometry::Region` (disjoint,
+  budgeted, degrading to its bounding box past the budget) instead of one
+  box, so two far-apart updates stay two small copies across frames as well
+  as within one.
+- Align the request shape with `PresentLayers` so the accelerated path reuses
+  it (`plans/FIX-DISPLAY-ACCELERATION.md` Stage B) — one wire evolution, not
+  two.
 
 ### E.3 One-shot frame pacing in the session
 There is no pacing today: the session composites once per wake, as fast

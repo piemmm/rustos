@@ -1332,6 +1332,14 @@ impl Compositor {
     /// menu spend their whole life at the front, and re-deriving an
     /// arrangement that already holds must not cost a window's worth of blur
     /// to be told nothing changed.
+    ///
+    /// **A move marks where the family and the windows it crossed overlap,
+    /// and nothing else.** Reordering two windows that do not overlap changes
+    /// no pixel: nothing is drawn differently, and no frost sees a different
+    /// backdrop. Marking the whole family instead would drop the owner's own
+    /// retained frost every time — a menu opening on a window with anything at
+    /// all above it would re-blur the entire window, which is the expensive
+    /// case, not the rare one, because the taskbar sits above app windows.
     fn restack_family(&mut self, root: WindowId, end: StackEnd) -> bool {
         let Some(root_at) = self.index_of(root) else {
             return false;
@@ -1355,6 +1363,7 @@ impl Compositor {
                 .filter(|window| window.parent() == Some(root))
                 .map(Window::id),
         );
+        let crossed = self.crossed_bounds(&order, end);
         let mut taken = Vec::with_capacity(order.len());
         // Top-down, so each removal leaves the indices below it untouched.
         for id in order.iter().rev() {
@@ -1371,9 +1380,40 @@ impl Compositor {
         // Restacked first: a window's own frosted backdrop is a function of
         // its place in the stack, and marking is what drops it.
         for bounds in moved {
-            self.mark_from(bounds, low);
+            for over in &crossed {
+                self.mark_from(bounds.intersection(over), low);
+            }
         }
         true
+    }
+
+    /// The bounds of every window `family` swaps places with when it moves to
+    /// `end` — the only windows the move can put on the other side of it.
+    ///
+    /// The family lands contiguously at one end, so moving to the front puts it
+    /// above everything that was above its *lowest* member, and moving to the
+    /// back puts it below everything that was below its *highest*. Windows
+    /// beyond that keep their relative order with the family and so see exactly
+    /// the stack they always did. An invisible window contributes no pixel to
+    /// any composite, so crossing one changes nothing.
+    fn crossed_bounds(&self, family: &[WindowId], end: StackEnd) -> Vec<Rect> {
+        let indices = family.iter().filter_map(|id| self.index_of(*id));
+        let (lowest, highest) = indices.fold((usize::MAX, 0), |(low, high), at| {
+            (low.min(at), high.max(at))
+        });
+        self.windows
+            .iter()
+            .enumerate()
+            .filter(|(at, window)| {
+                window.is_visible()
+                    && !family.contains(&window.id())
+                    && match end {
+                        StackEnd::Front => *at > lowest,
+                        StackEnd::Back => *at < highest,
+                    }
+            })
+            .map(|(_, window)| window.bounds())
+            .collect()
     }
 
     /// Whether `root`'s family already occupies the stack from `first`

@@ -473,8 +473,12 @@ fn raising_the_topmost_window_repaints_nothing() {
     assert_eq!(c.window_at(Point::new(6, 6)), Some(under));
 }
 
+/// Raising a partly covered window repaints exactly the part that was
+/// covered. The rest of it was already the front-most thing at those pixels,
+/// so the move cannot have changed them, and claiming otherwise would drop
+/// every frost over them for nothing.
 #[test]
-fn raising_a_covered_window_still_restacks_and_repaints_it() {
+fn raising_a_covered_window_repaints_only_where_it_was_covered() {
     let mut c = new_compositor(mode(8, 8), BLUE).expect("compositor");
     let under = c.add_window(Point::ORIGIN, opaque(6, 6, RED));
     c.add_window(Point::ORIGIN, opaque(4, 4, GREEN));
@@ -482,7 +486,12 @@ fn raising_a_covered_window_still_restacks_and_repaints_it() {
 
     assert!(c.raise(under));
     assert_eq!(c.window_at(Point::ORIGIN), Some(under));
-    assert_eq!(composite_checked(&mut c).rects(), &[Rect::new(0, 0, 6, 6)]);
+    assert_eq!(composite_checked(&mut c).rects(), &[Rect::new(0, 0, 4, 4)]);
+    // Tighter damage is only right if the frame is: red now shows where green
+    // covered it, and the pixels outside the overlap never moved.
+    assert_eq!(frame_pixel(&c, 0, 0), [255, 0, 0, 255]);
+    assert_eq!(frame_pixel(&c, 5, 5), [255, 0, 0, 255]);
+    assert_eq!(frame_pixel(&c, 7, 7), [0, 0, 255, 255]);
 }
 
 /// A pointer moving over an open menu is the hover the desktop redraws most
@@ -533,6 +542,210 @@ fn opening_a_transient_on_the_front_window_repaints_only_the_transient() {
     );
     assert_eq!(c.frame_stats().blur_px, 0, "the owner was re-blurred");
     assert_eq!(c.window_at(Point::new(10, 10)), Some(menu));
+}
+
+/// Opening a menu on a frosted window that is *not* the front one costs the
+/// menu's rectangle too. This is the production arrangement, not an unusual
+/// one: the taskbar is a window and it sits above every application window, so
+/// an app is essentially never frontmost. The raise that brings the family up
+/// therefore crosses the bar — and crossing a window it does not overlap
+/// changes no pixel, so the owner keeps the frost it already had.
+#[test]
+fn opening_a_transient_on_a_window_under_the_bar_keeps_its_frost() {
+    let mut c = new_compositor(mode(64, 64), BLUE).expect("compositor");
+    let owner = c.add_window(Point::ORIGIN, opaque(48, 48, RED));
+    assert!(c.set_opacity(owner, 128));
+    assert!(c.set_backdrop_blur(owner, 4));
+    // A bar along the bottom edge, above the window and clear of it.
+    let bar = c.add_window(Point::new(0, 56), opaque(64, 8, GREEN));
+    composite_checked(&mut c);
+    assert_eq!(c.frost_cache_len(), 1, "the owner's backdrop was retained");
+
+    let menu = c
+        .add_transient_window(owner, Point::new(8, 8), opaque(12, 12, GREEN))
+        .expect("the owner is a window");
+
+    assert_eq!(
+        composite_checked(&mut c).rects(),
+        &[Rect::new(8, 8, 12, 12)],
+        "opening the menu repainted more than the menu"
+    );
+    let stats = c.frame_stats();
+    assert_eq!(
+        stats.blur_px, 0,
+        "the owner was re-blurred to open a menu on it"
+    );
+    assert_eq!(stats.damaged_px, 12 * 12, "{stats:?}");
+    // The raise really happened, and the bar really was crossed.
+    assert_eq!(c.window_at(Point::new(10, 10)), Some(menu));
+    assert_eq!(c.window_at(Point::new(2, 58)), Some(bar));
+    assert!(c.raise(bar), "the bar is known");
+    assert_eq!(c.window_at(Point::new(2, 58)), Some(bar));
+}
+
+/// The reported defect, end to end: right-click a frosted, translucent
+/// terminal under the taskbar, then click back in the terminal to dismiss the
+/// menu. Both gestures used to re-blur and re-present the whole window,
+/// because the bar re-asserts itself topmost between them and every restack
+/// marked the family's own footprint.
+#[test]
+fn opening_and_dismissing_a_menu_under_the_bar_never_reblurs_the_window() {
+    let mut c = new_compositor(mode(320, 240), BLUE).expect("compositor");
+    let term = c.add_window(Point::new(20, 20), opaque(200, 140, RED));
+    assert!(c.set_opacity(term, 128));
+    assert!(c.set_backdrop_blur(term, 6));
+    let bar = c.add_window(Point::new(0, 232), opaque(320, 8, GREEN));
+    composite_checked(&mut c);
+    assert_eq!(c.frost_cache_len(), 1, "the terminal retained a backdrop");
+
+    // Right-click: the app opens a popup, which brings the family forward
+    // over the bar.
+    let menu = c
+        .add_transient_window(term, Point::new(60, 50), opaque(44, 36, GREEN))
+        .expect("the owner is a window");
+    assert_eq!(
+        composite_checked(&mut c).rects(),
+        &[Rect::new(60, 50, 44, 36)],
+        "opening the menu repainted more than the menu"
+    );
+    assert_eq!(c.frame_stats().blur_px, 0, "the window was re-blurred");
+
+    // The session puts the bar back on top on its next wake.
+    assert!(c.raise(bar));
+    assert!(
+        composite_checked(&mut c).is_empty(),
+        "the bar's move repainted"
+    );
+
+    // The dismissing click lands in the terminal, so click-to-activate raises
+    // it — back over the bar it does not overlap.
+    assert!(c.raise(term));
+    assert!(
+        composite_checked(&mut c).is_empty(),
+        "the dismissing click repainted the window"
+    );
+    assert_eq!(c.frame_stats().blur_px, 0, "the window was re-blurred");
+
+    // …and the popup goes, costing its own rectangle and nothing more.
+    c.remove(menu);
+    assert_eq!(
+        composite_checked(&mut c).rects(),
+        &[Rect::new(60, 50, 44, 36)]
+    );
+    assert_eq!(c.frame_stats().blur_px, 0, "the window was re-blurred");
+    assert_eq!(
+        c.frost_cache_len(),
+        1,
+        "the backdrop was thrown away and blurred again"
+    );
+}
+
+/// Compose `c` from scratch and return the frame, without changing what it
+/// shows: a reveal strength it does not already hold marks the whole screen,
+/// and a full reveal is byte-identical to never having heard of the fade.
+///
+/// This is the oracle for "did the damage a restack marked miss a pixel?" — a
+/// frame composed incrementally must equal the same screen composed whole.
+fn frame_recomposed(c: &mut Compositor) -> alloc::vec::Vec<u8> {
+    assert!(c.set_reveal(200), "the fade is settable");
+    c.composite();
+    assert!(c.set_reveal(u8::MAX), "the fade is settable");
+    c.composite();
+    c.frame().to_vec()
+}
+
+/// Marking only what a restack crossed must lose no pixel. Each arrangement is
+/// composed incrementally across a raise and a lower, and every step is
+/// compared with the same screen composed whole.
+#[test]
+fn a_restacks_tight_damage_composes_what_a_whole_recomposite_would() {
+    // Overlaps of every kind against the window that moves: none, partial,
+    // total, and a shape that surrounds it.
+    let others: &[&[(i32, i32, u32, u32)]] = &[
+        &[(48, 0, 16, 16)],
+        &[(12, 12, 20, 20)],
+        &[(0, 0, 40, 40)],
+        &[(0, 0, 64, 6), (0, 58, 64, 6), (44, 0, 20, 64)],
+        &[(8, 8, 12, 12), (30, 4, 24, 40), (0, 40, 30, 24)],
+    ];
+    for (case, rects) in others.iter().enumerate() {
+        for translucent in [false, true] {
+            for blur in [0, 5] {
+                let mut c = new_compositor(mode(64, 64), BLUE).expect("compositor");
+                let moving = c.add_window(Point::new(4, 4), opaque(36, 36, RED));
+                if translucent {
+                    assert!(c.set_opacity(moving, 144));
+                }
+                if blur > 0 {
+                    assert!(c.set_backdrop_blur(moving, blur));
+                }
+                let menu = c
+                    .add_transient_window(moving, Point::new(10, 10), opaque(10, 8, GREEN))
+                    .expect("the owner is a window");
+                for (i, (x, y, w, h)) in rects.iter().enumerate() {
+                    let colour = if i % 2 == 0 { GREEN } else { RED };
+                    c.add_window(Point::new(*x, *y), opaque(*w, *h, colour));
+                }
+                composite_checked(&mut c);
+                let what = alloc::format!("case {case}, translucent {translucent}, blur {blur}");
+
+                // The family goes down, then comes back up. Either move that
+                // marks too little shows here as a stale pixel.
+                for step in [
+                    StepUnder::Lower,
+                    StepUnder::RaiseOwner,
+                    StepUnder::RaiseMenu,
+                ] {
+                    let moved = match step {
+                        StepUnder::Lower => c.lower(moving),
+                        StepUnder::RaiseOwner => c.raise(moving),
+                        StepUnder::RaiseMenu => c.raise(menu),
+                    };
+                    composite_checked(&mut c);
+                    let incremental = c.frame().to_vec();
+                    let whole = frame_recomposed(&mut c);
+                    assert_eq!(
+                        incremental, whole,
+                        "{what}, {step:?} (moved {moved}) left a stale pixel"
+                    );
+                }
+            }
+        }
+    }
+}
+
+/// The restacks the sweep above drives, named so a failure says which one.
+#[derive(Clone, Copy, Debug)]
+enum StepUnder {
+    Lower,
+    RaiseOwner,
+    RaiseMenu,
+}
+
+/// Reordering windows that do not overlap changes no pixel, so it costs
+/// nothing: the same fact from the other direction, and the one that keeps a
+/// click on a frosted window from re-blurring it just to bring it forward.
+#[test]
+fn raising_a_window_past_windows_it_does_not_overlap_costs_nothing() {
+    let mut c = new_compositor(mode(64, 64), BLUE).expect("compositor");
+    let left = c.add_window(Point::ORIGIN, opaque(20, 20, RED));
+    assert!(c.set_opacity(left, 128));
+    assert!(c.set_backdrop_blur(left, 4));
+    c.add_window(Point::new(40, 0), opaque(20, 20, GREEN));
+    c.add_window(Point::new(40, 40), opaque(20, 20, RED));
+    composite_checked(&mut c);
+    let before = c.frame().to_vec();
+
+    assert!(c.raise(left), "the window moves to the front");
+
+    assert!(
+        !c.has_damage(),
+        "passing windows it never touches damaged the screen"
+    );
+    assert!(composite_checked(&mut c).is_empty());
+    assert_eq!(c.frame_stats().blur_px, 0);
+    // Nothing moved because nothing could: the frame is the one it was.
+    assert_eq!(c.frame(), before.as_slice());
 }
 
 /// The invariant the old per-frame re-assert existed to protect, now held by
@@ -5546,19 +5759,26 @@ fn tearing_the_seat_down_releases_every_frost() {
 /// A gauge private to the content-release ladder tests: they move the band,
 /// and the shared [`NORMAL_PRESSURE`] must stay at normal for the tests
 /// running beside them.
-static CONTENT_PRESSURE: ReportedPressure = ReportedPressure::unknown();
-
-/// A compositor whose content-release ladder is driven by
-/// [`CONTENT_PRESSURE`], started at the normal band.
-fn releasable_compositor(mode: DisplayMode, background: Color) -> Compositor {
-    CONTENT_PRESSURE.report(PressureBand::Normal);
+/// A compositor whose content-release ladder is driven by `pressure`, started
+/// at the normal band.
+///
+/// The gauge belongs to the calling test, never to the crate: these tests
+/// drive it to different bands and the test binary runs them in parallel, so a
+/// gauge shared between them would let one test's band decide another's
+/// assertion.
+fn releasable_compositor(
+    pressure: &'static ReportedPressure,
+    mode: DisplayMode,
+    background: Color,
+) -> Compositor {
+    pressure.report(PressureBand::Normal);
     NORMAL_PRESSURE.report(PressureBand::Normal);
     Compositor::new(
         mode,
         background,
         test_chrome_cache(),
-        frost_cache(TEST_SEAT, TEST_FB_BYTES, &CONTENT_PRESSURE, &TEST_SINK),
-        &CONTENT_PRESSURE,
+        frost_cache(TEST_SEAT, TEST_FB_BYTES, pressure, &TEST_SINK),
+        pressure,
     )
     .expect("compositor")
 }
@@ -5616,26 +5836,27 @@ fn releasing_content_overwrites_the_pixels_before_dropping_them() {
 
 #[test]
 fn releasing_content_drops_the_retained_bytes_to_zero() {
-    let mut c = releasable_compositor(mode(320, 240), BLUE);
+    static PRESSURE: ReportedPressure = ReportedPressure::unknown();
+    let mut c = releasable_compositor(&PRESSURE, mode(320, 240), BLUE);
     let id = app_window(&mut c, 20, 20, 60, "held");
     assert!(c.set_visible(id, false));
     c.composite();
     let held = c.content_bytes();
     assert_eq!(held, 60 * 60 * size_of::<Pixel>());
 
-    CONTENT_PRESSURE.report(PressureBand::Mild);
+    PRESSURE.report(PressureBand::Mild);
     assert_eq!(c.release_content_under_pressure(None), held);
     assert_eq!(c.content_bytes(), 0);
     assert!(!c.window(id).expect("window").has_content());
-    CONTENT_PRESSURE.report(PressureBand::Normal);
 }
 
 #[test]
 fn a_released_window_composites_as_transparent_and_leaves_the_desktop_identical() {
+    static PRESSURE: ReportedPressure = ReportedPressure::unknown();
     // The desktop shows through where the pixels were; every other pixel
     // on screen — background, furniture, the window beside it — is
     // untouched.
-    let mut c = releasable_compositor(mode(200, 160), BLUE);
+    let mut c = releasable_compositor(&PRESSURE, mode(200, 160), BLUE);
     let kept = app_window(&mut c, 10, 10, 40, "kept");
     present_full(&mut c, kept, GREEN);
     let dropped = app_window(&mut c, 120, 10, 40, "dropped");
@@ -5645,10 +5866,10 @@ fn a_released_window_composites_as_transparent_and_leaves_the_desktop_identical(
     let client = c.window_client_rect(dropped).expect("client rect");
     let before = c.frame().to_vec();
 
-    CONTENT_PRESSURE.report(PressureBand::Critical);
+    PRESSURE.report(PressureBand::Critical);
     assert!(c.release_content_under_pressure(Some(kept)) > 0);
     c.composite();
-    CONTENT_PRESSURE.report(PressureBand::Normal);
+    PRESSURE.report(PressureBand::Normal);
 
     // The released window's client area is now the desktop background — except
     // at the corners its own rim curves through, which are frame, not client.
@@ -5691,16 +5912,17 @@ fn a_released_window_composites_as_transparent_and_leaves_the_desktop_identical(
 
 #[test]
 fn a_released_window_still_hit_tests_shows_furniture_focuses_and_resizes() {
-    let mut c = releasable_compositor(mode(240, 200), BLUE);
+    static PRESSURE: ReportedPressure = ReportedPressure::unknown();
+    let mut c = releasable_compositor(&PRESSURE, mode(240, 200), BLUE);
     let id = app_window(&mut c, 20, 20, 60, "live");
     present_full(&mut c, id, RED);
     c.composite();
     let bounds = c.window(id).expect("window").bounds();
     let title_band = c.window(id).expect("window").furniture_bands()[0];
 
-    CONTENT_PRESSURE.report(PressureBand::Critical);
+    PRESSURE.report(PressureBand::Critical);
     assert!(c.release_content_under_pressure(None) > 0);
-    CONTENT_PRESSURE.report(PressureBand::Normal);
+    PRESSURE.report(PressureBand::Normal);
     c.composite();
 
     // Still hit-tests over its whole outer rectangle.
@@ -5731,15 +5953,16 @@ fn a_released_window_still_hit_tests_shows_furniture_focuses_and_resizes() {
 
 #[test]
 fn a_full_window_present_after_release_restores_pixel_identical_content() {
-    let mut c = releasable_compositor(mode(200, 160), BLUE);
+    static PRESSURE: ReportedPressure = ReportedPressure::unknown();
+    let mut c = releasable_compositor(&PRESSURE, mode(200, 160), BLUE);
     let id = app_window(&mut c, 20, 20, 50, "restored");
     present_full(&mut c, id, GREEN);
     c.composite();
     let before = c.frame().to_vec();
 
-    CONTENT_PRESSURE.report(PressureBand::Critical);
+    PRESSURE.report(PressureBand::Critical);
     assert!(c.release_content_under_pressure(None) > 0);
-    CONTENT_PRESSURE.report(PressureBand::Normal);
+    PRESSURE.report(PressureBand::Normal);
     c.composite();
     assert_ne!(before, c.frame(), "the release must be visible");
 
@@ -5755,7 +5978,8 @@ fn a_full_window_present_after_release_restores_pixel_identical_content() {
 
 #[test]
 fn the_release_ladder_follows_the_pressure_band() {
-    let mut c = releasable_compositor(mode(320, 240), BLUE);
+    static PRESSURE: ReportedPressure = ReportedPressure::unknown();
+    let mut c = releasable_compositor(&PRESSURE, mode(320, 240), BLUE);
     let focused = app_window(&mut c, 10, 10, 40, "focused");
     let unfocused = app_window(&mut c, 100, 10, 40, "unfocused");
     let hidden = app_window(&mut c, 200, 10, 40, "hidden");
@@ -5766,12 +5990,12 @@ fn the_release_ladder_follows_the_pressure_band() {
     let content = |c: &Compositor, id: WindowId| c.window(id).expect("window").has_content();
 
     // Normal: memory is plentiful and every release costs a repaint.
-    CONTENT_PRESSURE.report(PressureBand::Normal);
+    PRESSURE.report(PressureBand::Normal);
     assert_eq!(c.release_content_under_pressure(Some(focused)), 0);
     assert!(content(&c, focused) && content(&c, unfocused) && content(&c, hidden));
 
     // Mild: only what nobody is looking at.
-    CONTENT_PRESSURE.report(PressureBand::Mild);
+    PRESSURE.report(PressureBand::Mild);
     assert!(c.release_content_under_pressure(Some(focused)) > 0);
     assert!(content(&c, focused), "the focused window is never released");
     assert!(content(&c, unfocused), "a visible window survives mild");
@@ -5779,7 +6003,7 @@ fn the_release_ladder_follows_the_pressure_band() {
     assert_eq!(c.release_content_under_pressure(Some(focused)), 0);
 
     // Critical: visible but unfocused goes too; the focused one never does.
-    CONTENT_PRESSURE.report(PressureBand::Critical);
+    PRESSURE.report(PressureBand::Critical);
     assert!(c.release_content_under_pressure(Some(focused)) > 0);
     assert!(
         content(&c, focused),
@@ -5791,12 +6015,12 @@ fn the_release_ladder_follows_the_pressure_band() {
     present_full(&mut c, focused, RED);
     assert!(c.release_content_under_pressure(None) > 0);
     assert!(!content(&c, focused));
-    CONTENT_PRESSURE.report(PressureBand::Normal);
 }
 
 #[test]
 fn each_release_queues_exactly_one_redraw_request() {
-    let mut c = releasable_compositor(mode(320, 240), BLUE);
+    static PRESSURE: ReportedPressure = ReportedPressure::unknown();
+    let mut c = releasable_compositor(&PRESSURE, mode(320, 240), BLUE);
     let visible = app_window(&mut c, 10, 10, 40, "visible");
     let hidden = app_window(&mut c, 120, 10, 40, "hidden");
     assert!(c.set_visible(hidden, false));
@@ -5804,7 +6028,7 @@ fn each_release_queues_exactly_one_redraw_request() {
     // Hiding a window that still holds its pixels asks for nothing.
     assert!(c.pending_redraws().is_empty());
 
-    CONTENT_PRESSURE.report(PressureBand::Critical);
+    PRESSURE.report(PressureBand::Critical);
     assert!(c.release_content_under_pressure(None) > 0);
     let mut queued = c.pending_redraws();
     queued.sort_unstable_by_key(|id| id.0);
@@ -5821,15 +6045,15 @@ fn each_release_queues_exactly_one_redraw_request() {
     // Showing a window whose pixels are gone asks again, once.
     assert!(c.set_visible(hidden, true));
     assert_eq!(c.pending_redraws(), alloc::vec![hidden]);
-    CONTENT_PRESSURE.report(PressureBand::Normal);
 }
 
 #[test]
 fn an_app_that_ignores_the_redraw_request_leaves_its_window_blank_and_the_desktop_runs_on() {
+    static PRESSURE: ReportedPressure = ReportedPressure::unknown();
     // The event is advisory: a client that never answers simply shows the
     // desktop through its client area. Nothing panics, nothing spins, and
     // every other window keeps compositing.
-    let mut c = releasable_compositor(mode(240, 200), BLUE);
+    let mut c = releasable_compositor(&PRESSURE, mode(240, 200), BLUE);
     let answering = app_window(&mut c, 10, 10, 40, "answers");
     present_full(&mut c, answering, GREEN);
     let silent = app_window(&mut c, 120, 10, 40, "silent");
@@ -5837,9 +6061,9 @@ fn an_app_that_ignores_the_redraw_request_leaves_its_window_blank_and_the_deskto
     c.composite();
     let _ = c.pending_redraws();
 
-    CONTENT_PRESSURE.report(PressureBand::Critical);
+    PRESSURE.report(PressureBand::Critical);
     assert!(c.release_content_under_pressure(None) > 0);
-    CONTENT_PRESSURE.report(PressureBand::Normal);
+    PRESSURE.report(PressureBand::Normal);
     // Both apps were asked; only one of them answers.
     let mut asked = c.pending_redraws();
     asked.sort_unstable_by_key(|id| id.0);
@@ -5882,9 +6106,10 @@ fn an_app_that_ignores_the_redraw_request_leaves_its_window_blank_and_the_deskto
 
 #[test]
 fn tearing_content_down_wipes_every_window_and_asks_nobody_to_redraw() {
+    static PRESSURE: ReportedPressure = ReportedPressure::unknown();
     // The seat is going away, so there is nobody left to present: the
     // pixels are overwritten and no request is raised.
-    let mut c = releasable_compositor(mode(240, 200), BLUE);
+    let mut c = releasable_compositor(&PRESSURE, mode(240, 200), BLUE);
     let a = app_window(&mut c, 10, 10, 40, "a");
     let b = app_window(&mut c, 120, 10, 40, "b");
     present_full(&mut c, a, RED);
@@ -5892,10 +6117,10 @@ fn tearing_content_down_wipes_every_window_and_asks_nobody_to_redraw() {
     c.composite();
     assert!(c.content_bytes() > 0);
 
-    CONTENT_PRESSURE.report(PressureBand::Critical);
+    PRESSURE.report(PressureBand::Critical);
     assert!(c.release_content_under_pressure(None) > 0);
     c.teardown_content();
-    CONTENT_PRESSURE.report(PressureBand::Normal);
+    PRESSURE.report(PressureBand::Normal);
     assert_eq!(c.content_bytes(), 0);
     assert!(!c.window(a).expect("window").has_content());
     assert!(!c.window(b).expect("window").has_content());
@@ -5907,10 +6132,11 @@ fn tearing_content_down_wipes_every_window_and_asks_nobody_to_redraw() {
 
 #[test]
 fn a_window_the_embedder_paints_itself_is_never_released() {
+    static PRESSURE: ReportedPressure = ReportedPressure::unknown();
     // The taskbar, a session dialog, the lock screen: nobody would answer
     // a redraw request for them, so releasing their pixels would blank
     // them permanently. An un-declared window keeps every pixel.
-    let mut c = releasable_compositor(mode(240, 200), BLUE);
+    let mut c = releasable_compositor(&PRESSURE, mode(240, 200), BLUE);
     let session_painted = titled_window(&mut c, 10, 10, 40, "bar");
     let app = app_window(&mut c, 120, 10, 40, "app");
     assert!(!c
@@ -5919,9 +6145,9 @@ fn a_window_the_embedder_paints_itself_is_never_released() {
         .is_app_presented());
     c.composite();
 
-    CONTENT_PRESSURE.report(PressureBand::Critical);
+    PRESSURE.report(PressureBand::Critical);
     assert!(c.release_content_under_pressure(None) > 0);
-    CONTENT_PRESSURE.report(PressureBand::Normal);
+    PRESSURE.report(PressureBand::Normal);
     assert!(
         c.window(session_painted).expect("window").has_content(),
         "a window nobody can redraw must keep its pixels"
@@ -5932,9 +6158,9 @@ fn a_window_the_embedder_paints_itself_is_never_released() {
     // Hiding it does not change that: even invisible, no client would
     // present it again.
     assert!(c.set_visible(session_painted, false));
-    CONTENT_PRESSURE.report(PressureBand::Mild);
+    PRESSURE.report(PressureBand::Mild);
     assert_eq!(c.release_content_under_pressure(None), 0);
-    CONTENT_PRESSURE.report(PressureBand::Normal);
+    PRESSURE.report(PressureBand::Normal);
     assert!(c.window(session_painted).expect("window").has_content());
     assert!(c.pending_redraws().is_empty());
 }
