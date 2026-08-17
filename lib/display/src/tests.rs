@@ -10,7 +10,7 @@ use alloc::vec;
 use alloc::vec::Vec;
 use core::cell::RefCell;
 
-use tairix_abi::display_ipc::{DisplayRequest, DISPLAY_MAX_FRAMES};
+use tairix_abi::display_ipc::{DamageList, DisplayRequest, DISPLAY_MAX_FRAMES};
 use tairix_abi::driver::display::{DamageRect, Display, DisplayFormat, DisplayMode};
 use tairix_abi::reply::decode_status_reply;
 use tairix_abi::{DriverError, Errno};
@@ -109,7 +109,10 @@ struct RecordingDisplay {
     scanout: Vec<u8>,
     presents: u32,
     region_presents: u32,
-    last_damage: Option<DamageRect>,
+    /// The rectangles the last present named, empty after a whole-frame
+    /// one — so a test can tell one call naming two rectangles from two
+    /// calls naming one each.
+    last_damage: Vec<DamageRect>,
     fail_with: Option<DriverError>,
 }
 
@@ -136,27 +139,29 @@ impl Display for RecordingDisplay {
         }
         self.scanout.copy_from_slice(&frame[..FRAME_LEN]);
         self.presents += 1;
-        self.last_damage = None;
+        self.last_damage.clear();
         Ok(())
     }
 
-    fn present_region(&mut self, frame: &[u8], damage: DamageRect) -> Result<(), DriverError> {
+    fn present_rects(&mut self, frame: &[u8], damage: &[DamageRect]) -> Result<(), DriverError> {
         if let Some(err) = self.fail_with {
             return Err(err);
         }
-        damage.validate_in(&MODE)?;
+        DamageRect::validate_list(damage, &MODE)?;
         if frame.len() < FRAME_LEN {
             return Err(DriverError::BufferTooSmall);
         }
         let stride = MODE.stride_bytes as usize;
-        let x0 = damage.x as usize * 4;
-        let span = damage.width_px as usize * 4;
-        for row in 0..damage.height_px as usize {
-            let line = (damage.y as usize + row) * stride + x0;
-            self.scanout[line..line + span].copy_from_slice(&frame[line..line + span]);
+        for rect in damage {
+            let x0 = rect.x as usize * 4;
+            let span = rect.width_px as usize * 4;
+            for row in 0..rect.height_px as usize {
+                let line = (rect.y as usize + row) * stride + x0;
+                self.scanout[line..line + span].copy_from_slice(&frame[line..line + span]);
+            }
         }
         self.region_presents += 1;
-        self.last_damage = Some(damage);
+        self.last_damage = damage.to_vec();
         Ok(())
     }
 }
@@ -218,11 +223,11 @@ impl Rig {
         })
     }
 
-    fn present(&mut self, frame_index: u32, damage: DamageRect) -> Result<(), Errno> {
+    fn present(&mut self, frame_index: u32, damage: &[DamageRect]) -> Result<(), Errno> {
         self.status(&DisplayRequest::Present {
             seat_id: SEAT,
             frame_index,
-            damage,
+            damage: DamageList::new(damage)?,
         })
     }
 }
@@ -276,7 +281,7 @@ fn configure_maps_once_and_present_blits_the_indexed_frame() {
     assert!(rig.server.is_configured());
     assert_eq!(*rig.maps.borrow(), 1, "the region is mapped exactly once");
 
-    assert_eq!(rig.present(1, full()), Ok(()));
+    assert_eq!(rig.present(1, &[full()]), Ok(()));
     assert_eq!(rig.display.presents, 1, "full damage takes the full blit");
     assert_eq!(rig.display.scanout, vec![0xAB; FRAME_LEN]);
     assert_eq!(*rig.maps.borrow(), 1, "no mapping on the present hot path");
@@ -293,9 +298,9 @@ fn present_with_partial_damage_blits_only_the_region() {
         width_px: 2,
         height_px: 1,
     };
-    assert_eq!(rig.present(0, damage), Ok(()));
+    assert_eq!(rig.present(0, &[damage]), Ok(()));
     assert_eq!(rig.display.region_presents, 1);
-    assert_eq!(rig.display.last_damage, Some(damage));
+    assert_eq!(rig.display.last_damage, vec![damage]);
     // Only the damaged span reached scan-out.
     let mut want = vec![0u8; FRAME_LEN];
     want[16 + 4..16 + 12].fill(0xCD);
@@ -368,10 +373,10 @@ fn configure_refuses_an_unknown_grant_and_a_short_region() {
 fn present_is_refused_without_before_and_out_of_bounds_configuration() {
     let mut rig = Rig::new(2, 1);
     // No configuration yet.
-    assert_eq!(rig.present(0, full()), Err(Errno::NotFound));
+    assert_eq!(rig.present(0, &[full()]), Err(Errno::NotFound));
     assert_eq!(rig.configure(2), Ok(()));
     // Frame index beyond the configured count.
-    assert_eq!(rig.present(2, full()), Err(Errno::OutOfRange));
+    assert_eq!(rig.present(2, &[full()]), Err(Errno::OutOfRange));
     // Damage escaping the mode.
     let escape = DamageRect {
         x: 3,
@@ -379,7 +384,7 @@ fn present_is_refused_without_before_and_out_of_bounds_configuration() {
         width_px: 2,
         height_px: 1,
     };
-    assert_eq!(rig.present(0, escape), Err(Errno::LengthOutOfRange));
+    assert_eq!(rig.present(0, &[escape]), Err(Errno::LengthOutOfRange));
     assert_eq!(rig.display.presents + rig.display.region_presents, 0);
 }
 
@@ -390,10 +395,10 @@ fn a_present_under_a_newer_lease_requires_reconfigure() {
     // The seat was released and re-acquired: same owner task id in the
     // rig, but a newer generation.
     rig.seat = MockSeat::live(2);
-    assert_eq!(rig.present(0, full()), Err(Errno::NotFound));
+    assert_eq!(rig.present(0, &[full()]), Err(Errno::NotFound));
     // Reconfiguring under the live lease restores presentability.
     assert_eq!(rig.configure(2), Ok(()));
-    assert_eq!(rig.present(0, full()), Ok(()));
+    assert_eq!(rig.present(0, &[full()]), Ok(()));
 }
 
 #[test]
@@ -401,7 +406,7 @@ fn losing_the_lease_drops_the_configuration_and_refuses_typed() {
     let mut rig = Rig::new(2, 1);
     assert_eq!(rig.configure(2), Ok(()));
     rig.seat = MockSeat::refusing(Errno::SeatRevoked);
-    assert_eq!(rig.present(0, full()), Err(Errno::SeatRevoked));
+    assert_eq!(rig.present(0, &[full()]), Err(Errno::SeatRevoked));
     assert!(
         !rig.server.is_configured(),
         "a revoked owner's frames are released, never scanned out"
@@ -413,9 +418,9 @@ fn driver_failures_surface_as_typed_errnos() {
     let mut rig = Rig::new(1, 1);
     assert_eq!(rig.configure(1), Ok(()));
     rig.display.fail_with = Some(DriverError::DeviceFault);
-    assert_eq!(rig.present(0, full()), Err(Errno::DeviceFault));
+    assert_eq!(rig.present(0, &[full()]), Err(Errno::DeviceFault));
     rig.display.fail_with = Some(DriverError::Busy);
-    assert_eq!(rig.present(0, full()), Err(Errno::WouldBlock));
+    assert_eq!(rig.present(0, &[full()]), Err(Errno::WouldBlock));
 }
 
 // --- error conversions ----------------------------------------------
@@ -524,14 +529,14 @@ fn remote_display_tracks_stale_regions_across_the_ring() {
         height_px: 1,
     };
     remote
-        .present_region(&frame_b, damage)
+        .present_rects(&frame_b, &[damage])
         .expect("damage present");
 
     // Third present into frame 0 with the same damage: frame 0 missed
     // frame_b's row, so the union refreshes it too.
     let frame_c = frame_b.clone();
     remote
-        .present_region(&frame_c, damage)
+        .present_rects(&frame_c, &[damage])
         .expect("second damage present");
     drop(remote);
 
@@ -543,7 +548,141 @@ fn remote_display_tracks_stale_regions_across_the_ring() {
 
     let rig = rig.borrow();
     assert_eq!(rig.display.region_presents, 2);
-    assert_eq!(rig.display.last_damage, Some(damage));
+    assert_eq!(rig.display.last_damage, vec![damage]);
+}
+
+/// Byte offset of pixel `(x, y)` in one frame.
+fn pixel(x: usize, y: usize) -> usize {
+    y * MODE.stride_bytes as usize + x * 4
+}
+
+/// A byte no primed frame holds, so a byte the copy was never asked for is
+/// recognisable wherever it lands.
+const MARKER: u8 = 0x99;
+
+/// The reported stall's shape, proven at the copy: a frame that changed two
+/// far-apart places is **one** round trip that copies those two places, and
+/// the buffer's own catch-up is just as tight. Their bounding box here is
+/// the whole surface — which is exactly what the ring used to copy, twice
+/// over, because it rotated once per rectangle.
+#[test]
+fn a_scattered_frame_copies_its_rectangles_not_the_box_between_them() {
+    let (rig, client, mode) = client_session(2);
+    let mut view = vec![0u8; FRAME_LEN * 2];
+    let mut remote = RemoteDisplay::new(client, mode, &mut view, 2).expect("valid session");
+
+    // Both buffers start wholly stale, so level them first: what this
+    // measures is the steady state a desktop spends its life in.
+    let base = vec![0x11; FRAME_LEN];
+    remote.present(&base).expect("frame 0");
+    remote.present(&base).expect("frame 1");
+
+    let top_left = DamageRect {
+        x: 0,
+        y: 0,
+        width_px: 1,
+        height_px: 1,
+    };
+    let bottom_right = DamageRect {
+        x: 3,
+        y: 2,
+        width_px: 1,
+        height_px: 1,
+    };
+    // Frame 0 is still catching up on the whole surface, so this present is
+    // the one that leaves frame 1 owing exactly `top_left`.
+    remote
+        .present_rects(&base, &[top_left])
+        .expect("one corner changed");
+
+    // Every byte of this frame differs from the primed one, so any byte the
+    // copy was not asked for shows up as the marker.
+    let mut marked = vec![MARKER; FRAME_LEN];
+    marked[pixel(0, 0)..pixel(0, 0) + 4].fill(0xA1);
+    marked[pixel(3, 2)..pixel(3, 2) + 4].fill(0xB2);
+    remote
+        .present_rects(&marked, &[bottom_right])
+        .expect("the other corner changed");
+    drop(remote);
+
+    {
+        let rig = rig.borrow();
+        assert_eq!(
+            rig.display.region_presents, 2,
+            "one round trip per frame, not one per rectangle"
+        );
+        assert_eq!(
+            rig.display.last_damage,
+            vec![bottom_right],
+            "the driver blits what changed on screen, not the catch-up"
+        );
+    }
+
+    // Frame 1 took the corner it owed (`top_left`, from its stale set) and
+    // the corner this present named — and nothing in between.
+    for (offset, byte) in view[FRAME_LEN..].iter().enumerate() {
+        let expected = if (pixel(0, 0)..pixel(0, 0) + 4).contains(&offset) {
+            0xA1
+        } else if (pixel(3, 2)..pixel(3, 2) + 4).contains(&offset) {
+            0xB2
+        } else {
+            0x11
+        };
+        assert_eq!(*byte, expected, "frame 1, byte {offset}");
+    }
+}
+
+/// A refused present still moved the composed frame on, so the damage it
+/// named is owed to every other buffer. Forgetting it would show as stale
+/// pixels the next time one of them is presented.
+#[test]
+fn damage_from_a_refused_present_is_still_owed_to_the_other_frames() {
+    let (rig, client, mode) = client_session(2);
+    let mut view = vec![0u8; FRAME_LEN * 2];
+    let mut remote = RemoteDisplay::new(client, mode, &mut view, 2).expect("valid session");
+    let base = vec![0x11; FRAME_LEN];
+    remote.present(&base).expect("frame 0");
+    remote.present(&base).expect("frame 1");
+    remote.present(&base).expect("frame 0 catches up");
+
+    let refused = DamageRect {
+        x: 0,
+        y: 0,
+        width_px: 1,
+        height_px: 1,
+    };
+    let served = DamageRect {
+        x: 3,
+        y: 2,
+        width_px: 1,
+        height_px: 1,
+    };
+    let mut changed = base.clone();
+    changed[pixel(0, 0)..pixel(0, 0) + 4].fill(0xA1);
+    changed[pixel(3, 2)..pixel(3, 2) + 4].fill(0xB2);
+
+    // Frame 1 is the back buffer and the service refuses it.
+    rig.borrow_mut().display.fail_with = Some(DriverError::Busy);
+    assert!(remote.present_rects(&changed, &[refused]).is_err());
+    rig.borrow_mut().display.fail_with = None;
+    // The ring did not advance, so this lands in frame 1 as well.
+    remote
+        .present_rects(&changed, &[served])
+        .expect("the retry is served");
+    // …and frame 0's turn comes round: it owes both corners.
+    remote
+        .present_rects(&changed, &[served])
+        .expect("frame 0 catches up");
+    drop(remote);
+
+    for (frame, bytes) in view.as_chunks::<FRAME_LEN>().0.iter().enumerate() {
+        assert_eq!(
+            bytes[pixel(0, 0)],
+            0xA1,
+            "frame {frame} never caught up on the refused present's damage"
+        );
+        assert_eq!(bytes[pixel(3, 2)], 0xB2, "frame {frame}");
+    }
 }
 
 #[test]
@@ -574,7 +713,7 @@ fn remote_display_validates_its_construction_and_inputs() {
         height_px: 1,
     };
     assert_eq!(
-        remote.present_region(&[0u8; FRAME_LEN], escape),
+        remote.present_rects(&[0u8; FRAME_LEN], &[escape]),
         Err(DriverError::LengthOutOfRange)
     );
     assert_eq!(

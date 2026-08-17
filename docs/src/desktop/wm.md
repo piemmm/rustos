@@ -105,7 +105,7 @@ nothing else in the compositor reads it.
 
 It is applied at exactly one point — the step in `compose_span` where a
 composited pixel becomes a scan-out byte — so every present path
-(`composite`, `present`, `present_region`, the accelerated path's software
+(`composite`, `present`, the accelerated path's software
 fallback) dims each pixel exactly once. The back buffer deliberately keeps
 the **true** composed colour: a frosted window samples the backdrop out of
 it, and a blur-split rectangle re-reads it for its second segment, so
@@ -527,17 +527,25 @@ number of bytes:
   all, so a wake that changed nothing costs neither the whole-frame
   shared-memory copy nor the driver blit. The first frame still shows: a
   new compositor marks the whole screen dirty.
-- **Whole-screen damage is one `Display::present`.**
-- **Anything else is one `Display::present_region` per disjoint dirty
-  rectangle**, so the bytes moved are proportional to what changed rather
-  than to the bounding box of scattered damage — a dirty taskbar strip
-  along the bottom edge plus a cursor near the top is two small blits,
-  not a near-full-screen one.
-- **Past `MAX_PRESENT_REGIONS` rectangles, one bounding-box present
-  replaces the batch.** Each region present is a synchronous round trip to
-  the display service whose fixed cost is paid however few pixels it
-  carries, while a larger copy costs only more bytes; beyond a handful of
-  rectangles the round trips cost more than one call copying their box.
+- **A frame is presented once, naming everything it changed.** Damage
+  that covers the screen is one `Display::present`; anything else is one
+  `Display::present_rects` carrying the frame's disjoint dirty
+  rectangles. The bytes moved are proportional to what changed rather
+  than to the box around it — a dirty taskbar strip along the bottom edge
+  plus a cursor near the top is two small blits, not a near-full-screen
+  one — and a scattered frame costs one round trip, not one per
+  rectangle.
+- **Covering the screen and spanning it are different questions.** Two
+  far-apart corners have a bounding box the size of the screen while
+  changing a few dozen pixels, so the whole-frame path is reserved for
+  damage that really is the surface. `tairix_display::damage_list` is the
+  one place that decides, and the client's frame ring honours the same
+  distinction: a buffer catching up copies the rectangles it missed, not
+  the box around them.
+- **Past `MAX_DAMAGE_RECTS` rectangles the list degrades to its bounding
+  box** — over-covering costs pixels, dropping a rectangle would leave
+  stale ones on screen. It is still one present: the bound is what one
+  message carries, not how often a frame may publish.
 
 ## Retained backdrops
 

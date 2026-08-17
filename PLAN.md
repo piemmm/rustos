@@ -3500,11 +3500,12 @@ transfer, landed in increments:
   `DisplayServer` engine — decode → `call_peer_seat` lease gate on every
   request, lease-generation-bound configure state, bounded present — the
   `DisplayClient`/`RemoteDisplay` halves with per-frame stale-damage
-  double-buffer bookkeeping, and the hoisted linear-surface engine
+  double-buffer bookkeeping (a disjoint, budgeted `Region` per frame), and
+  the hoisted linear-surface engine
   `Framebuffer`/`FramebufferConfig` the three framebuffer QEMU verticals
-  drive as non-driver consumers), the in-place `Display::present_region`
-  evolution (full-blit default; the WM compositor threads its damage
-  bounds through it), the
+  drive as non-driver consumers), the in-place `Display::present_rects`
+  evolution (full-blit default; one present per frame naming every
+  disjoint rectangle the compositor touched), the
   distinct `Errno::DeviceFault` (`DriverError::as_errno` maps
   `DeviceFault`/`Busy` to `DeviceFault`/`WouldBlock`), the
   `HwResourceKind::Framebuffer` scan-out resource (geometry-carrying

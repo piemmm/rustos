@@ -542,12 +542,14 @@ Sub-stages, each shipped complete (code + tests + docs, §7 gate green):
   revoked or re-acquired seat must reconfigure before it can present, and
   an observed lease loss drops the stale mapping) and the client
   (`DisplayClient` over a `DisplayTransport` seam; `RemoteDisplay`
-  implements the *existing* `Display` trait over the client's mapping
-  with per-frame stale-damage union bookkeeping, so `Compositor::present`
-  is unchanged and a double-buffered frame is always current). The
-  in-place `Display::present_region` evolution landed with a full-blit
-  default, a real partial blit in the framebuffer driver, and the WM
-  compositor threading its composited damage bounds through it. The
+  implements the *existing* `Display` trait over the client's mapping,
+  keeping each frame's outstanding damage as a disjoint, budgeted
+  `Region`, so `Compositor::present` is unchanged and a double-buffered
+  frame is always current). The in-place `Display::present_rects`
+  evolution landed with a full-blit default, a real partial blit in the
+  framebuffer driver, and the WM compositor naming a whole frame's
+  disjoint damage in one call — the ring advances once per frame and each
+  rectangle is copied at its own size, never as the box spanning them. The
   surface-discovery contract landed as `HwResourceKind::Framebuffer`
   (the FDT `simple-framebuffer` model normalised into the hardware tree,
   §18.1): a geometry-carrying, `CAP_MMIO_MAP`-gated scan-out window with

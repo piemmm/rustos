@@ -16,8 +16,8 @@
 //! [`ChannelOrder::encode_run`], which is that same encoder in bulk — and
 //! neither pretends to be the other.
 
-use tairix_abi::driver::display::{DamageRect, DisplayFormat, DisplayMode};
-use tairix_geometry::Rect;
+use tairix_abi::driver::display::{DamageRect, DisplayFormat, DisplayMode, MAX_DAMAGE_RECTS};
+use tairix_geometry::{Rect, Region};
 use tairix_raster::Pixel;
 
 /// The byte order a display format wants each pixel written in.
@@ -119,19 +119,72 @@ pub fn scanout_len(mode: &DisplayMode) -> Option<usize> {
 /// present rather than presenting a wrong region.
 #[must_use]
 pub fn sub_screen_damage(bounds: &Rect, mode: &DisplayMode) -> Option<DamageRect> {
-    if bounds.is_empty() {
-        return None;
-    }
-    let damage = DamageRect {
-        x: u32::try_from(bounds.left()).ok()?,
-        y: u32::try_from(bounds.top()).ok()?,
-        width_px: bounds.width,
-        height_px: bounds.height,
-    };
+    let damage = as_damage(bounds)?;
     if damage.covers(mode) {
         return None;
     }
     Some(damage)
+}
+
+/// One screen rectangle as the wire's damage rectangle, or `None` when it is
+/// empty or has an edge the wire's unsigned fields cannot express.
+fn as_damage(rect: &Rect) -> Option<DamageRect> {
+    if rect.is_empty() {
+        return None;
+    }
+    Some(DamageRect {
+        x: u32::try_from(rect.left()).ok()?,
+        y: u32::try_from(rect.top()).ok()?,
+        width_px: rect.width,
+        height_px: rect.height,
+    })
+}
+
+/// Fill `out` with the damage list a present carries for `region`, and
+/// return the filled prefix — or `None` to present the whole frame instead.
+///
+/// `region` is the frame's *disjoint* damage, so each rectangle in the list
+/// is blitted once and no pixel twice. There are three answers, and this is
+/// the one place that chooses between them:
+///
+/// * the region's own rectangles, whenever they fit the list — the point of
+///   the exercise, so two far-apart updates stay two small blits;
+/// * its bounding rectangle, when there are more rectangles than the list
+///   holds (or, defensively, one cannot be expressed) — over-covering costs
+///   pixels, dropping a rectangle would leave stale ones on screen;
+/// * `None`, when the damage genuinely covers the surface.
+///
+/// **Covering and spanning are not the same thing.** Two opposite corners of
+/// the screen have a bounding box the size of the screen while changing
+/// eight pixels; naming them is exactly what the list is for, so the
+/// whole-frame answer is reserved for damage that really is the surface.
+///
+/// Call it with a non-empty `region`; an empty one names nothing to present.
+#[must_use]
+pub fn damage_list<'a>(
+    region: &Region,
+    mode: &DisplayMode,
+    out: &'a mut [DamageRect; MAX_DAMAGE_RECTS],
+) -> Option<&'a [DamageRect]> {
+    let mut count = 0;
+    if region.rects().len() <= out.len() {
+        for (slot, rect) in out.iter_mut().zip(region.rects()) {
+            let Some(damage) = as_damage(rect) else {
+                count = 0;
+                break;
+            };
+            *slot = damage;
+            count += 1;
+        }
+    }
+    if count == 1 && out[0].covers(mode) {
+        return None;
+    }
+    if count == 0 {
+        out[0] = sub_screen_damage(&region.bounds(), mode)?;
+        count = 1;
+    }
+    Some(&out[..count])
 }
 
 #[cfg(test)]

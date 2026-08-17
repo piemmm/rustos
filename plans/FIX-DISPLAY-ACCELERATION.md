@@ -28,13 +28,14 @@ where reachable, **does not actually save work**:
 1. **The accelerated path never crosses the process boundary.** The
    runtime path is `userland/gui/session/run.rs` →
    `Compositor::composite()` (software blend into one back buffer) →
-   `RemoteDisplay::present`/`present_region` → `DisplayClient` `ipc_call`
+   `RemoteDisplay::present`/`present_rects` → `DisplayClient` `ipc_call`
    to `DISPLAY_ENDPOINT` → `DisplayServer` in the driver's `Run` binary →
    software `Display::present`. `lib/display` speaks a **software-frame-
    only** wire protocol (`DisplayRequest::{Query,Configure,Present}`,
    `lib/abi/src/display_ipc.rs`): one shm frame region indexed by frame
-   number plus a `DamageRect`. `RemoteDisplay` implements only `Display`,
-   **not** `AcceleratedDisplay`. So `Compositor::present_accelerated`
+   number plus a `DamageList` of up to `MAX_DAMAGE_RECTS` rectangles.
+   `RemoteDisplay` implements only `Display`, **not**
+   `AcceleratedDisplay`. So `Compositor::present_accelerated`
    (which already exists) is exercised only by an in-process mock in
    `userland/gui/wm/src/tests.rs` — it is dead in production.
 
@@ -297,9 +298,10 @@ doorbell and reads of device-written ring entries:
   via `lib/drvrt`/`dma_alloc`), `SET_SCANOUT`.
 - `TRANSFER_TO_HOST_2D` + `RESOURCE_FLUSH`.
 - `Display::present` = transfer whole frame + flush;
-  `Display::present_region` maps a `DamageRect` **straight** onto
-  `TRANSFER_TO_HOST_2D` + `RESOURCE_FLUSH` of the damaged rect (host-side
-  damage — a real win over the whole-frame blit even before layers).
+  `Display::present_rects` maps each `DamageRect` of the list **straight**
+  onto `TRANSFER_TO_HOST_2D` + `RESOURCE_FLUSH` of that rect (host-side
+  damage — a real win over the whole-frame blit even before layers), so a
+  scattered frame is one call's worth of small transfers.
 
 ### C.3 `AcceleratedDisplay` via blob resources / multi-scanout
 - Where the QEMU build supports it, wrap each `AccelLayer` shm region as a

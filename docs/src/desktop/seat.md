@@ -318,11 +318,14 @@ are live (stage D7b):
   owner reconfigures, and a caller observed to have lost its lease has
   its stale frame region dropped — one owner's frames can never scan
   out under another's lease.
-- **Damage travels end to end.** `Display::present_region` (an in-place
-  evolution with a full-blit default) carries the changed rectangle
-  from the compositor — which reports its composited damage bounds —
-  through the protocol to the driver's partial blit, so a small update
-  touches only its own scanlines on the scan-out path.
+- **Damage travels end to end.** `Display::present_rects` (an in-place
+  evolution with a full-blit default) carries the changed rectangles
+  from the compositor — which reports its composited damage as a
+  disjoint set — through the protocol to the driver's partial blit, so a
+  small update touches only its own scanlines on the scan-out path. A
+  frame is presented **once**, naming every rectangle it changed, so
+  scattered damage costs those rectangles rather than one round trip
+  each and a copy of the box between them.
 - **A display's surface is discovered, never assumed.** A display-class
   hardware node can now carry a `Framebuffer` resource — a
   geometry-carrying, `CAP_MMIO_MAP`-gated scan-out window (the FDT

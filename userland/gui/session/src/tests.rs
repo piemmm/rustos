@@ -8130,7 +8130,7 @@ impl Display for RefusingDisplay {
         Err(DriverError::Busy)
     }
 
-    fn present_region(&mut self, _frame: &[u8], _damage: DamageRect) -> Result<(), DriverError> {
+    fn present_rects(&mut self, _frame: &[u8], _damage: &[DamageRect]) -> Result<(), DriverError> {
         self.refusals += 1;
         Err(DriverError::Busy)
     }

@@ -124,10 +124,14 @@ router**:
   background into a `DisplayMode`-shaped byte frame, presented through a
   `Display` seam. `present` composites and then moves only what changed:
   **no damage means no driver call at all** (a wake that changed nothing
-  costs neither a scan-out copy nor a blit), whole-screen damage is one
-  `Display::present`, and anything else is one `Display::present_region`
-  per disjoint dirty rectangle — up to `MAX_PRESENT_REGIONS`, past which a
-  single bounding-box present costs less than the round trips it replaces.
+  costs neither a scan-out copy nor a blit), damage that covers the screen
+  is one `Display::present`, and anything else is **one**
+  `Display::present_rects` naming every disjoint dirty rectangle the frame
+  touched — up to `MAX_DAMAGE_RECTS`, past which the list degrades to its
+  bounding box. A frame publishes itself once however scattered it is, and
+  a bounding box that merely *spans* the screen (two far-apart corners do)
+  is not whole-screen damage: `tairix_display::damage_list` is the one
+  place that tells those apart.
   Recomposition resolves each covering layer's source row, the back-buffer
   row, and the frame row once per row (`Window::row`), leaving a column a
   slice index and a blend.

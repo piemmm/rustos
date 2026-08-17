@@ -15,8 +15,9 @@ and the client can never drift apart.
   endpoint-directed `shm_grant` region **once** at `Configure` through
   the injected `ShmMapper` seam, and scans out on `Present` by frame
   index through the `Display` trait — damage-aware via
-  `Display::present_region`, with no per-present mapping, allocation, or
-  copy of its own. A `Configure` binds the mapped frames to the granting
+  `Display::present_rects`, whose whole rectangle list it validates before
+  blitting any of it, with no per-present mapping, allocation, or copy of
+  its own. A `Configure` binds the mapped frames to the granting
   lease's generation; a `Present` under any other lease (a revoked or
   re-acquired seat) is refused fail-closed until the new owner
   reconfigures, so one owner's frames can never be scanned out under

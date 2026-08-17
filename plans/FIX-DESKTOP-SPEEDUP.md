@@ -11,10 +11,10 @@ the frost the move cannot reach, the layers a frost covers are no longer
 composed, and *any* window that reads its backdrop retains one, so a translucent
 drag went from the desktop's slowest to cheaper than a blurred one — D.5 is a
 User decision and D.6 a follow-up the measurements exposed).
-E planned, and **E.2 is now the largest attributed desktop stall**: the
-present path rotates the frame ring per damage rectangle and copies a
-bounding box each time, which is what a Pi 4B feels as a ~600 ms freeze when
-a menu opens or closes over a focused window.
+E.1 and E.2 done — a frame is presented **once**, naming every disjoint
+rectangle it changed, so the present path no longer rotates the frame ring
+per rectangle nor copies a bounding box spanning them; E.3/E.4 (frame
+pacing) planned.
 Stages A–E need no hardware acceleration, no kernel change, and no new
 syscall; F needs a `plans/FIX-HARDWARE-FEATURES.md` correction; G is gated on
 a User decision (§15.7) because it is kernel work.
@@ -86,7 +86,7 @@ full-window repaint and a full-window recomposite. Traced end to end:
 | 8 | session | converts and **diffs every declared pixel** against the window's surface — a whole-window pass per sample | `session::windows::convert_damage` |
 | 9 | compositor | the frost is recomputed over the whole window every time, 2 box-blur passes, **4 integer divides per pixel per pass**, **never cached** | `wm::compositor::blur_backdrop`, `lib/raster/src/blur.rs` `blur_line`/`mean` |
 | 10 | compositor | every damaged pixel: `WindowRow::sample` → `scale_alpha` → `Pixel::over` (4 × `div255`). **No opaque fast path, no occlusion culling** | the per-column walk since replaced by `wm::compositor::compose_segment` |
-| 11 | present | up to `MAX_PRESENT_REGIONS` (8) separate `present_region` round trips, each rotating the 2-frame ring and copying a growing **bounding-box union** of stale damage | `lib/display/src/client.rs` `RemoteDisplay::push`/`copy_region` |
+| 11 | present | one round trip **per dirty rectangle**, each rotating the 2-frame ring and copying a growing **bounding-box union** of stale damage | the per-rectangle present since replaced by one `Display::present_rects` per frame (E.2) |
 
 Rows 5–10 are the "plummets when the pointer crosses a control-rich window"
 symptom. Rows 9+10 are the "slow when blur or transparency is in use"
@@ -1252,55 +1252,39 @@ shape (§2.2, §2.13).
 ### E.1 Keep the damage region disjoint  **[done in C.0]**
 The damage region is `tairix_geometry::Region`, whose rectangles are
 disjoint and band-canonical, so a scattered frame stays scattered rather
-than coalescing to unions. What remains for E is the *present* side:
-`Compositor::present` still collapses to the bounding box past
-`MAX_PRESENT_REGIONS`, which E.2 replaces with a rect list.
+than coalescing to unions. E.2 carries that all the way to the driver.
 
-### E.2 One present per frame, carrying a list of rects
-**This is the largest remaining desktop stall, and it is now attributed
-rather than suspected.** `RemoteDisplay::push` rotates the 2-frame ring **per
-`present_region` call** and refreshes `union(stale, damage)` as a **bounding
-rect**: with 8 rects that is 8 IPC round trips, each copying a growing box —
-in the worst case ~8 near-full-screen copies for a frame that changed a few
-thousand pixels. A window drag needs no pathological scene to hit it: the
-frame presents the rectangle vacated and the one arrived at, and each of
-those two calls copies the *union* box, so a window moved a few pixels is
-copied to the screen twice per sample.
+### E.2 One present per frame, carrying a list of rects  **[done]**
+A frame is presented **once**, naming every disjoint rectangle it changed.
+`Display::present_rects(&[DamageRect])` is the one damage-aware present —
+there is no per-rectangle entry point beside it — and the
+`DISPLAY_ENDPOINT` `Present` request carries a fixed-width, self-validating
+`DamageList` of up to `MAX_DAMAGE_RECTS` rectangles, the one wire shape
+`plans/FIX-DISPLAY-ACCELERATION.md` Stage B extends rather than a second.
 
-Two rectangles are enough, and two is what an ordinary gesture produces.
-Opening a context menu on a focused window damages the popup's rectangle
-*and* the owner's title band, because the owner's furniture is repainted
-inactive (`set_active_frame`). Those two are far apart, so on a 1920×1080
-screen each of the two `present_region` calls copies a box spanning them —
-of the order of 1.3 M pixels, ~5 MB — and the ring rotation between them
-means the second call's box has grown by the first. Dismissing the menu
-repaints the same two places and pays it again, which is why the stall is
-**symmetric**: ~600 ms with the pointer frozen when the menu opens and
-~600 ms again when a click elsewhere closes it, on a Raspberry Pi 4B whose
-framebuffer is uncached device memory. A QEMU-scale screen hides it because
-the box is a fraction of the pixels.
+The invariants this establishes, which later work must keep:
 
-That the copies are the cost and not the composite is what the D.12
-measurements show: after D.12 the compositor blends 39 600 pixels and blurs
-none for that gesture, while the present path still copies the box twice.
-
-The fix, in one in-place evolution (§2.13) rather than a second entry point
-beside the first (§2.14):
-
-- Replace `Display::present_region` with a **rect-list** present, count
-  bounded by a discovered/negotiated limit rather than a magic const (§24.1).
-  Every in-tree implementor moves with it in the same change.
-- `RemoteDisplay` rotates the ring **once per frame** and copies each rect
-  plus that frame's own stale region, so a rect's copy is that rect — never a
-  box spanning a rect it has nothing to do with, and never a box grown by a
-  rotation that has not happened yet.
-- Track the per-frame stale set as a `tairix_geometry::Region` (disjoint,
-  budgeted, degrading to its bounding box past the budget) instead of one
-  box, so two far-apart updates stay two small copies across frames as well
-  as within one.
-- Align the request shape with `PresentLayers` so the accelerated path reuses
-  it (`plans/FIX-DISPLAY-ACCELERATION.md` Stage B) — one wire evolution, not
-  two.
+- **The ring rotates once per frame.** `RemoteDisplay` holds each frame's
+  outstanding damage as a disjoint `tairix_geometry::Region`, so a buffer
+  catching up copies the rectangles it missed rather than one box spanning
+  them. The region's budget is *derived* — ring depth ×
+  `MAX_DAMAGE_RECTS` — so a double-buffered desktop's scattered catch-up
+  never degrades to that box. A buffer is still wholly current after its
+  present, which is what lets a driver scan it out in full.
+- **Covering the screen and spanning it are different questions.**
+  `tairix_display::damage_list` is the single place that chooses between the
+  rectangle list, its bounding box (past the bound) and the whole-frame
+  present. Two far-apart corners span the screen while changing a few dozen
+  pixels; deciding on the bounding box, as the compositor used to, made them
+  a whole-screen present.
+- **The whole list is validated before any pixel is blitted**
+  (`DamageRect::validate_list`), so a bad rectangle refuses the present
+  rather than leaving the ones before it on screen.
+- **`MAX_DAMAGE_RECTS` is a format bound (§24.4), not a capacity**: it is
+  what one fixed-width request carries, and a producer holding more
+  rectangles presents their bounding box. There is no *per-call* rectangle
+  limit to reintroduce — a frame publishes once, so no cost model trades
+  rectangles against round trips any more.
 
 ### E.3 One-shot frame pacing in the session
 There is no pacing today: the session composites once per wake, as fast
@@ -1312,20 +1296,15 @@ under an input flood and is the seam
 `plans/FIX-DISPLAY-ACCELERATION.md` Stage E hangs real vsync off.
 
 ### E.4 Tests + docs
-- Region: two far-apart small rects present two small rects, never the
-  screen; a pathological scatter degrades to the documented budget, not
-  unbounded round trips.
-- Present: N dirty rects produce **one** transport call and one ring
-  rotation; stale tracking still guarantees no stale pixel is shown (the
-  existing double-buffer tests must pass unchanged).
+The present-side tests and docs landed with E.2 (one transport call per
+frame however scattered; a rectangle-sized catch-up copy; the existing
+double-buffer tests unchanged). What remains is pacing:
+
 - Pacing: a flood of M motion samples inside one deadline produces one
   composite; an idle session arms no timer and consumes no CPU; the
   deadline never busy-waits (assert on the wait call, not on timing).
-- Docs: `docs/src/drivers/display.md` protocol table; `lib/display`
-  rustdoc; `plans/FIX-DISPLAY-ACCELERATION.md` cross-reference (§13).
 
-**Acceptance:** present calls per frame == 1, no stale-pixel regression,
-CPU at idle unchanged from parked.
+**Acceptance:** CPU at idle unchanged from parked.
 
 ---
 

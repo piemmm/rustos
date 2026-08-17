@@ -11,6 +11,12 @@
 //! the kernel's `call_peer_seat` oracle-free check, so only the seat owner
 //! can learn the mode, configure frames, or scan out.
 //!
+//! A `Present` names a whole frame's damage in one call: it carries a
+//! [`DamageList`] of up to [`MAX_DAMAGE_RECTS`] rectangles inline, so a
+//! frame that changed two far-apart places costs one round trip and two
+//! rectangle-sized blits rather than a round trip each and a blit of the
+//! box spanning them.
+//!
 //! Requests are the fixed-width [`DisplayRequest`]. `Configure` and
 //! `Present` answer with the shared status frame
 //! ([`crate::reply::encode_status_reply`] /
@@ -21,7 +27,7 @@
 //! damage rectangle, or a dirty reserved field refuses rather than
 //! guessing.
 
-use crate::driver::display::{DamageRect, DisplayFormat, DisplayMode};
+use crate::driver::display::{DamageRect, DisplayFormat, DisplayMode, MAX_DAMAGE_RECTS};
 use crate::le::{put_u16, put_u32, put_u64, read_u16, read_u32, read_u64};
 use crate::Errno;
 
@@ -94,11 +100,76 @@ pub enum DisplayRequest {
         seat_id: u64,
         /// Index of the frame inside the configured region.
         frame_index: u32,
-        /// The changed rectangle; [`DamageRect::full`] presents the whole
-        /// frame. Never empty.
-        damage: DamageRect,
+        /// The changed rectangles; a single [`DamageRect::full`] presents
+        /// the whole frame. Never empty.
+        damage: DamageList,
     },
 }
+
+/// The damage a [`DisplayRequest::Present`] names: one to
+/// [`MAX_DAMAGE_RECTS`] rectangles, held inline in the fixed-width frame.
+///
+/// Constructing one is the only way to name a present's damage, so the count
+/// bound and the "no empty rectangle" rule hold before a byte is encoded as
+/// well as after one is decoded — a decoded list is exactly as trustworthy as
+/// a locally built one. Rectangles beyond the live count are zero, which is
+/// what makes the frame's reserved tail checkable.
+///
+/// Equality compares the rectangles named, not the dead slots behind them.
+#[derive(Copy, Clone, Debug)]
+pub struct DamageList {
+    rects: [DamageRect; MAX_DAMAGE_RECTS],
+    count: u8,
+}
+
+/// The zero rectangle filling a [`DamageList`]'s unused slots. Not a valid
+/// damage rectangle — it is never inside the live prefix.
+const NO_RECT: DamageRect = DamageRect {
+    x: 0,
+    y: 0,
+    width_px: 0,
+    height_px: 0,
+};
+
+impl DamageList {
+    /// The list naming `rects`.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::LengthOutOfRange`] if `rects` is empty, holds more than
+    /// [`MAX_DAMAGE_RECTS`] entries, or holds an empty rectangle.
+    pub fn new(rects: &[DamageRect]) -> Result<Self, Errno> {
+        let count = u8::try_from(rects.len()).map_err(|_| Errno::LengthOutOfRange)?;
+        if rects.is_empty() || rects.len() > MAX_DAMAGE_RECTS {
+            return Err(Errno::LengthOutOfRange);
+        }
+        let mut slots = [NO_RECT; MAX_DAMAGE_RECTS];
+        for (slot, rect) in slots.iter_mut().zip(rects) {
+            if rect.width_px == 0 || rect.height_px == 0 {
+                return Err(Errno::LengthOutOfRange);
+            }
+            *slot = *rect;
+        }
+        Ok(Self {
+            rects: slots,
+            count,
+        })
+    }
+
+    /// The rectangles the present names.
+    #[must_use]
+    pub fn rects(&self) -> &[DamageRect] {
+        &self.rects[..usize::from(self.count)]
+    }
+}
+
+impl PartialEq for DamageList {
+    fn eq(&self, other: &Self) -> bool {
+        self.rects() == other.rects()
+    }
+}
+
+impl Eq for DamageList {}
 
 /// Wire operation discriminant of [`DisplayRequest::Query`].
 const OP_QUERY: u16 = 1;
@@ -107,10 +178,18 @@ const OP_CONFIGURE: u16 = 2;
 /// Wire operation discriminant of [`DisplayRequest::Present`].
 const OP_PRESENT: u16 = 3;
 
+/// Offset of a `Present`'s first damage rectangle.
+const PRESENT_RECTS_AT: usize = 24;
+
+/// Encoded size of one [`DamageRect`]: x, y, width, height.
+const DAMAGE_RECT_LEN: usize = 16;
+
 impl DisplayRequest {
     /// Encoded size on the wire: magic (4), version (2), op (2), seat id
-    /// (8), and a 32-byte operation block whose unused tail must be zero.
-    pub const WIRE_LEN: usize = 48;
+    /// (8), and an operation block whose unused tail must be zero. The
+    /// widest block is `Present`'s frame index, rectangle count and its
+    /// [`MAX_DAMAGE_RECTS`] inline rectangles.
+    pub const WIRE_LEN: usize = PRESENT_RECTS_AT + MAX_DAMAGE_RECTS * DAMAGE_RECT_LEN;
 
     /// Encode `self` little-endian.
     #[must_use]
@@ -149,10 +228,10 @@ impl DisplayRequest {
                 put_u16(&mut out, 6, OP_PRESENT);
                 put_u64(&mut out, 8, seat_id);
                 put_u32(&mut out, 16, frame_index);
-                put_u32(&mut out, 20, damage.x);
-                put_u32(&mut out, 24, damage.y);
-                put_u32(&mut out, 28, damage.width_px);
-                put_u32(&mut out, 32, damage.height_px);
+                put_u32(&mut out, 20, u32::from(damage.count));
+                for (index, rect) in damage.rects().iter().enumerate() {
+                    put_rect(&mut out, PRESENT_RECTS_AT + index * DAMAGE_RECT_LEN, rect);
+                }
             }
         }
         out
@@ -224,25 +303,46 @@ impl DisplayRequest {
                 })
             }
             OP_PRESENT => {
-                reserved_zero(bytes, 36)?;
                 let frame_index = read_u32(bytes, 16);
-                let damage = DamageRect {
-                    x: read_u32(bytes, 20),
-                    y: read_u32(bytes, 24),
-                    width_px: read_u32(bytes, 28),
-                    height_px: read_u32(bytes, 32),
-                };
-                if damage.width_px == 0 || damage.height_px == 0 {
-                    return Err(Errno::LengthOutOfRange);
+                let count = usize::try_from(read_u32(bytes, 20))
+                    .ok()
+                    .filter(|count| *count <= MAX_DAMAGE_RECTS)
+                    .ok_or(Errno::LengthOutOfRange)?;
+                // The slots past the live count are part of the reserved
+                // tail: a rectangle smuggled behind the count is refused,
+                // never ignored.
+                reserved_zero(bytes, PRESENT_RECTS_AT + count * DAMAGE_RECT_LEN)?;
+                let mut rects = [NO_RECT; MAX_DAMAGE_RECTS];
+                for (index, slot) in rects.iter_mut().take(count).enumerate() {
+                    *slot = read_rect(bytes, PRESENT_RECTS_AT + index * DAMAGE_RECT_LEN);
                 }
                 Ok(Self::Present {
                     seat_id,
                     frame_index,
-                    damage,
+                    damage: DamageList::new(&rects[..count])?,
                 })
             }
             _ => Err(Errno::OutOfRange),
         }
+    }
+}
+
+/// Write one damage rectangle at `at`.
+fn put_rect(out: &mut [u8; DisplayRequest::WIRE_LEN], at: usize, rect: &DamageRect) {
+    put_u32(out, at, rect.x);
+    put_u32(out, at + 4, rect.y);
+    put_u32(out, at + 8, rect.width_px);
+    put_u32(out, at + 12, rect.height_px);
+}
+
+/// Read one damage rectangle from `at`. The result is bounds-checked by
+/// [`DamageList::new`] (non-empty) and by the server (inside the mode).
+fn read_rect(bytes: &[u8], at: usize) -> DamageRect {
+    DamageRect {
+        x: read_u32(bytes, at),
+        y: read_u32(bytes, at + 4),
+        width_px: read_u32(bytes, at + 8),
+        height_px: read_u32(bytes, at + 12),
     }
 }
 
@@ -328,11 +428,43 @@ pub fn decode_mode_reply(bytes: &[u8]) -> Result<DisplayMode, Errno> {
 #[cfg(test)]
 mod tests {
     use super::{
-        decode_mode_reply, encode_mode_reply, DisplayRequest, DISPLAY_MAX_FRAMES,
-        DISPLAY_MODE_REPLY_LEN, DISPLAY_REQUEST_MAGIC,
+        decode_mode_reply, encode_mode_reply, DamageList, DisplayRequest, DAMAGE_RECT_LEN,
+        DISPLAY_MAX_FRAMES, DISPLAY_MODE_REPLY_LEN, DISPLAY_REQUEST_MAGIC, NO_RECT,
+        PRESENT_RECTS_AT,
     };
-    use crate::driver::display::{DamageRect, DisplayFormat, DisplayMode};
+    use crate::driver::display::{DamageRect, DisplayFormat, DisplayMode, MAX_DAMAGE_RECTS};
     use crate::Errno;
+
+    /// The bound as a `u32`, for the tests that count rectangles.
+    fn max_rects() -> u32 {
+        u32::try_from(MAX_DAMAGE_RECTS).expect("the bound fits a u32")
+    }
+
+    /// The rectangle `index` pixels down the surface, so a list's entries
+    /// are distinguishable at a glance.
+    fn rect(index: u32) -> DamageRect {
+        DamageRect {
+            x: 10,
+            y: 20 + index,
+            width_px: 30,
+            height_px: 40,
+        }
+    }
+
+    /// One rectangle more than the bound allows, so a test can slice out any
+    /// length it needs (this crate allocates nowhere, tests included).
+    fn rects() -> [DamageRect; MAX_DAMAGE_RECTS + 1] {
+        let mut all = [NO_RECT; MAX_DAMAGE_RECTS + 1];
+        for (index, slot) in all.iter_mut().enumerate() {
+            *slot = rect(u32::try_from(index).expect("a small index"));
+        }
+        all
+    }
+
+    fn damage(count: u32) -> DamageList {
+        let count = usize::try_from(count).expect("a small count");
+        DamageList::new(&rects()[..count]).expect("a list within the bound")
+    }
 
     fn sample_configure() -> DisplayRequest {
         DisplayRequest::Configure {
@@ -350,12 +482,7 @@ mod tests {
         DisplayRequest::Present {
             seat_id: 0,
             frame_index: 1,
-            damage: DamageRect {
-                x: 10,
-                y: 20,
-                width_px: 30,
-                height_px: 40,
-            },
+            damage: damage(1),
         }
     }
 
@@ -368,6 +495,91 @@ mod tests {
         ] {
             let bytes = request.to_le_bytes();
             assert_eq!(DisplayRequest::from_bytes(&bytes), Ok(request));
+        }
+    }
+
+    /// A whole frame's damage travels in one request: every list length the
+    /// bound allows survives the wire, rectangles and order intact.
+    #[test]
+    fn a_present_carries_a_whole_damage_list() {
+        for count in 1..=max_rects() {
+            let request = DisplayRequest::Present {
+                seat_id: 7,
+                frame_index: 1,
+                damage: damage(count),
+            };
+            let decoded = DisplayRequest::from_bytes(&request.to_le_bytes());
+            assert_eq!(decoded, Ok(request), "{count} rectangles");
+            let Ok(DisplayRequest::Present { damage, .. }) = decoded else {
+                panic!("a present decodes as one");
+            };
+            assert_eq!(u32::try_from(damage.rects().len()), Ok(count));
+            assert_eq!(damage.rects().last(), Some(&rect(count - 1)));
+        }
+    }
+
+    /// The list's bound and its "no empty rectangle" rule hold at
+    /// construction, so a caller cannot build one the wire would refuse.
+    #[test]
+    fn a_damage_list_is_bounded_and_never_empty() {
+        assert_eq!(DamageList::new(&[]).err(), Some(Errno::LengthOutOfRange));
+        assert_eq!(
+            DamageList::new(&rects()).err(),
+            Some(Errno::LengthOutOfRange),
+            "one rectangle past the bound"
+        );
+        let with_empty = [
+            rect(0),
+            DamageRect {
+                x: 0,
+                y: 0,
+                width_px: 0,
+                height_px: 1,
+            },
+        ];
+        assert_eq!(
+            DamageList::new(&with_empty).err(),
+            Some(Errno::LengthOutOfRange)
+        );
+        // Equality is the rectangles named, not the slots behind them.
+        assert_eq!(damage(2), damage(2));
+        assert_ne!(damage(2), damage(3));
+    }
+
+    /// A count past the bound, and a rectangle hidden in a slot the count
+    /// does not reach, are both refused rather than partly honoured.
+    #[test]
+    fn a_present_refuses_a_smuggled_rectangle() {
+        let encoded = DisplayRequest::Present {
+            seat_id: 0,
+            frame_index: 0,
+            damage: damage(2),
+        }
+        .to_le_bytes();
+
+        let mut over = encoded;
+        over[20..24].copy_from_slice(&(max_rects() + 1).to_le_bytes());
+        assert_eq!(
+            DisplayRequest::from_bytes(&over),
+            Err(Errno::LengthOutOfRange)
+        );
+        let mut none = encoded;
+        none[20..24].copy_from_slice(&0u32.to_le_bytes());
+        none[PRESENT_RECTS_AT..].fill(0);
+        assert_eq!(
+            DisplayRequest::from_bytes(&none),
+            Err(Errno::LengthOutOfRange),
+            "a present that names nothing changed"
+        );
+        // A rectangle the count does not reach is a dirty reserved slot,
+        // whether it sits behind a live one or behind a zeroed count.
+        for at in [PRESENT_RECTS_AT + 2 * DAMAGE_RECT_LEN, PRESENT_RECTS_AT] {
+            let mut behind = encoded;
+            if at == PRESENT_RECTS_AT {
+                behind[20..24].copy_from_slice(&0u32.to_le_bytes());
+            }
+            behind[at] = 1;
+            assert_eq!(DisplayRequest::from_bytes(&behind), Err(Errno::BadMagic));
         }
     }
 
@@ -408,9 +620,9 @@ mod tests {
         let mut configure = sample_configure().to_le_bytes();
         configure[47] = 1;
         assert_eq!(DisplayRequest::from_bytes(&configure), Err(Errno::BadMagic));
-        // A present's tail past the damage rectangle must be zero.
+        // A present's tail past its last damage rectangle must be zero.
         let mut present = sample_present().to_le_bytes();
-        present[36] = 1;
+        present[PRESENT_RECTS_AT + DAMAGE_RECT_LEN] = 1;
         assert_eq!(DisplayRequest::from_bytes(&present), Err(Errno::BadMagic));
     }
 
@@ -443,16 +655,33 @@ mod tests {
 
     #[test]
     fn present_refuses_an_empty_damage_rectangle() {
+        // The width and height of the first rectangle, at its own offset.
+        let width_at = PRESENT_RECTS_AT + 8;
+        let height_at = PRESENT_RECTS_AT + 12;
         let mut zero_width = sample_present().to_le_bytes();
-        zero_width[28..32].copy_from_slice(&0u32.to_le_bytes());
+        zero_width[width_at..width_at + 4].copy_from_slice(&0u32.to_le_bytes());
         assert_eq!(
             DisplayRequest::from_bytes(&zero_width),
             Err(Errno::LengthOutOfRange)
         );
         let mut zero_height = sample_present().to_le_bytes();
-        zero_height[32..36].copy_from_slice(&0u32.to_le_bytes());
+        zero_height[height_at..height_at + 4].copy_from_slice(&0u32.to_le_bytes());
         assert_eq!(
             DisplayRequest::from_bytes(&zero_height),
+            Err(Errno::LengthOutOfRange)
+        );
+        // An empty rectangle behind a live one is refused too: the whole
+        // list is checked, never just its first entry.
+        let mut second = DisplayRequest::Present {
+            seat_id: 0,
+            frame_index: 0,
+            damage: damage(2),
+        }
+        .to_le_bytes();
+        let second_width = PRESENT_RECTS_AT + DAMAGE_RECT_LEN + 8;
+        second[second_width..second_width + 4].copy_from_slice(&0u32.to_le_bytes());
+        assert_eq!(
+            DisplayRequest::from_bytes(&second),
             Err(Errno::LengthOutOfRange)
         );
     }

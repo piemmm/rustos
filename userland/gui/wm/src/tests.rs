@@ -4,11 +4,11 @@ extern crate alloc;
 
 use tairix_abi::driver::display::{
     AccelCaps, AccelLayer, AcceleratedDisplay, DamageRect, Display, DisplayFormat, DisplayMode,
+    MAX_DAMAGE_RECTS,
 };
 use tairix_abi::DriverError;
 
 use crate::color::{div255, Color, Pixel};
-use crate::compositor::MAX_PRESENT_REGIONS;
 use crate::corner::Corners;
 use crate::geometry::{Point, Rect, Region};
 use crate::surface::Surface;
@@ -97,14 +97,19 @@ fn frame_pixel(comp: &Compositor, x: u32, y: u32) -> [u8; 4] {
 
 /// A display seam that records the last presented frame and, separately,
 /// how many times each of [`Display::present`] (a whole-frame present) and
-/// [`Display::present_region`] (naming the exact rectangle presented) were
+/// [`Display::present_rects`] (naming the exact rectangles presented) were
 /// called, or always fails when `fail` is set.
 struct MockDisplay {
     mode: DisplayMode,
     last: alloc::vec::Vec<u8>,
     fail: bool,
     full_presents: usize,
+    /// Every rectangle presented, in order.
     regions: alloc::vec::Vec<DamageRect>,
+    /// Calls that named rectangles. A frame publishes itself once however
+    /// scattered it is, so this is what separates one call naming two
+    /// rectangles from a call per rectangle.
+    rect_presents: usize,
 }
 
 impl MockDisplay {
@@ -115,6 +120,7 @@ impl MockDisplay {
             fail: false,
             full_presents: 0,
             regions: alloc::vec::Vec::new(),
+            rect_presents: 0,
         }
     }
 
@@ -141,9 +147,11 @@ impl Display for MockDisplay {
         Ok(())
     }
 
-    fn present_region(&mut self, frame: &[u8], damage: DamageRect) -> Result<(), DriverError> {
+    fn present_rects(&mut self, frame: &[u8], damage: &[DamageRect]) -> Result<(), DriverError> {
+        DamageRect::validate_list(damage, &self.mode)?;
         self.record(frame)?;
-        self.regions.push(damage);
+        self.regions.extend_from_slice(damage);
+        self.rect_presents += 1;
         Ok(())
     }
 }
@@ -1189,13 +1197,19 @@ fn a_present_with_no_damage_never_touches_the_display() {
     assert!(display.last.is_empty(), "the driver was not called at all");
 }
 
+/// The reported stall's shape, at the compositor's own boundary: a frame
+/// that changed two far-apart places — a popup and the title band its owner
+/// repainted — publishes itself in **one** call naming both rectangles.
+/// One call per rectangle was what made the driver copy a box spanning them,
+/// twice.
 #[test]
-fn two_disjoint_dirty_rectangles_present_exactly_those_rectangles() {
+fn two_disjoint_dirty_rectangles_present_exactly_those_rectangles_in_one_call() {
     let m = mode(64, 64);
     let mut c = new_compositor(m, BLUE).expect("compositor");
     let mut display = MockDisplay::new(m);
     assert!(c.present(&mut display).is_ok());
     display.full_presents = 0;
+    display.rect_presents = 0;
 
     // A repaint at the top-left and one at the bottom-right: their bounding
     // box is nearly the whole screen, the changed pixels are two small
@@ -1207,6 +1221,10 @@ fn two_disjoint_dirty_rectangles_present_exactly_those_rectangles() {
     assert_eq!(
         display.full_presents, 0,
         "a partial frame is not a full present"
+    );
+    assert_eq!(
+        display.rect_presents, 1,
+        "a frame publishes itself once, whatever it changed"
     );
     assert_eq!(display.regions.len(), 2);
     assert!(display.regions.contains(&DamageRect {
@@ -1240,23 +1258,27 @@ fn whole_screen_damage_presents_the_frame_once() {
     );
 }
 
+/// Past the list's bound the frame presents its bounding box: over-covering
+/// costs pixels, dropping a rectangle would leave stale ones on screen. It
+/// is still one call — the bound is what the message can carry, not how
+/// often a frame may publish.
 #[test]
-fn more_dirty_rectangles_than_the_limit_collapse_to_one_bounding_present() {
+fn more_dirty_rectangles_than_the_list_holds_collapse_to_one_bounding_present() {
     let m = mode(64, 64);
     let mut c = new_compositor(m, BLUE).expect("compositor");
     let mut display = MockDisplay::new(m);
     assert!(c.present(&mut display).is_ok());
     display.full_presents = 0;
+    display.rect_presents = 0;
 
-    // One more scattered rectangle than the per-rectangle path carries:
-    // their round trips would cost more than one call copying their box.
-    let count = i32::try_from(MAX_PRESENT_REGIONS + 1).expect("a small limit");
+    let count = i32::try_from(MAX_DAMAGE_RECTS + 1).expect("a small limit");
     for step in 0..count {
         c.add_window(Point::new(step * 6, 0), opaque(4, 4, RED));
     }
     assert!(c.present(&mut display).is_ok());
 
     assert_eq!(display.full_presents, 0);
+    assert_eq!(display.rect_presents, 1);
     let width = u32::try_from((count - 1) * 6 + 4).expect("on screen");
     assert_eq!(
         display.regions,
@@ -1267,6 +1289,18 @@ fn more_dirty_rectangles_than_the_limit_collapse_to_one_bounding_present() {
             height_px: 4,
         }]
     );
+
+    // Exactly the bound still names every rectangle: the degradation begins
+    // one past it, not at it.
+    let mut c = new_compositor(m, BLUE).expect("compositor");
+    let mut display = MockDisplay::new(m);
+    assert!(c.present(&mut display).is_ok());
+    display.regions.clear();
+    for step in 0..count - 1 {
+        c.add_window(Point::new(step * 6, 0), opaque(4, 4, RED));
+    }
+    assert!(c.present(&mut display).is_ok());
+    assert_eq!(display.regions.len(), MAX_DAMAGE_RECTS);
 }
 
 // ---- shared theme integration (lib/theme) ---------------------------

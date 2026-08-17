@@ -14,18 +14,27 @@ GPU acceleration live above this trait, not inside it.
 |------------------|------------------------------------------|--------------------------|
 | `mode_info`      | report `DisplayMode { width_px, height_px, stride_bytes, format }` | `DriverHandle` ownership |
 | `present`        | copy a fully-rendered frame to the surface | `DriverHandle` ownership |
-| `present_region` | present a full frame of which only a `DamageRect` changed | `DriverHandle` ownership |
+| `present_rects`  | present a full frame of which only a list of `DamageRect`s changed | `DriverHandle` ownership |
 
 Pixel encodings are `DisplayFormat::Rgba8888` and
 `DisplayFormat::Bgra8888` (4 bytes per pixel). Per `AGENTS.md` §2.9 the
 trait never panics: a frame shorter than `stride_bytes * height_px`
 maps to `DriverError::BufferTooSmall`.
 
-`present_region` is the damage-aware present (`plans/DISPLAY.md` D7b):
+`present_rects` is the damage-aware present (`plans/DISPLAY.md` D7b):
 `frame` still carries the whole surface, and `damage` names the
-rectangle that changed since the previous present, validated against
-the active mode (`DamageRect::validate_in` — non-empty, wholly
-on-surface, overflow-checked) before any pixel access. The trait
+rectangles that changed since the previous present — one to
+`MAX_DAMAGE_RECTS`, kept disjoint by the caller so no pixel is blitted
+twice. The **whole list** is validated against the active mode
+(`DamageRect::validate_list` — non-empty, within the bound, each
+rectangle non-empty and wholly on-surface, overflow-checked) before any
+pixel access, so one bad rectangle refuses the present rather than
+leaving the ones before it on screen.
+
+One call carries a whole frame's damage. A frame that changed two
+far-apart places — a menu and the title band its owner repainted — costs
+one dispatch and two rectangle-sized blits, never a blit of the box
+spanning them and never a dispatch each. The trait
 supplies a full-blit default so every driver stays correct unchanged;
 a driver whose scan-out path is a copy overrides it to blit only the
 touched scanline spans (the framebuffer driver does). The WM
@@ -102,8 +111,9 @@ which enforces `CAP_MMIO_MAP`. The framebuffer is therefore reached
 only through a kernel-installed mapping, never through a pointer the
 service synthesises (`AGENTS.md` §4 — no ambient authority). `present`
 is byte-preserving: it copies the caller's frame verbatim into the
-mapped window, bounds-checked at every write; `present_region` blits
-only the validated damage rectangle.
+mapped window, bounds-checked at every write; `present_rects` blits
+only the validated damage rectangles, and refuses the whole list
+rather than write part of it.
 
 The hardware-tree framebuffer resource also carries its discovered CPU
 memory policy. QEMU `ramfb` scans ordinary coherent guest RAM and therefore

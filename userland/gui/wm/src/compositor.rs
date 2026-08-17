@@ -20,10 +20,10 @@ use alloc::vec::Vec;
 use core::ops::Range;
 
 use tairix_abi::driver::display::{
-    AccelCaps, AccelLayer, AcceleratedDisplay, Display, DisplayMode,
+    AccelCaps, AccelLayer, AcceleratedDisplay, DamageRect, Display, DisplayMode, MAX_DAMAGE_RECTS,
 };
 use tairix_abi::DriverError;
-use tairix_display::{scanout_len, sub_screen_damage, ChannelOrder};
+use tairix_display::{damage_list, scanout_len, ChannelOrder};
 
 use tairix_controls::{damage, FurniturePart, TitleBarEvent, WindowFrame};
 use tairix_cursor::{CursorImage, PlacedCursor};
@@ -1949,8 +1949,8 @@ impl Compositor {
     /// Returns the [`Region`] actually recomposited — the
     /// screen-clipped rectangles every mutation marked dirty since the
     /// last composite, plus the cursor's own damage (see below) — empty
-    /// when nothing was dirty. Presenting each of its rectangles individually
-    /// (via [`Display::present_region`]) moves bytes proportional to what
+    /// when nothing was dirty. Naming each of its rectangles in the present
+    /// (via [`Display::present_rects`]) moves bytes proportional to what
     /// changed rather than their bounding box, which can span far more of
     /// the screen than the union of the pixels that actually moved (a
     /// dirty taskbar strip plus a cursor near the opposite edge, say).
@@ -2247,45 +2247,34 @@ impl Compositor {
     /// No damage means nothing changed since the last present, so this
     /// does nothing at all and does not call `display` — a wake that
     /// changed nothing must not cost a scan-out copy or a driver blit.
-    /// A composited region spanning the whole screen takes the full
-    /// [`Display::present`] path. Otherwise each composited rectangle is
-    /// handed to [`Display::present_region`] individually, so the bytes
-    /// moved are proportional to what actually changed rather than the
-    /// bounding box of a scattered set of dirty rectangles (a taskbar
-    /// strip and a cursor near the opposite edge, say) — unless there are
-    /// more than [`MAX_PRESENT_REGIONS`] of them, in which case a single
-    /// bounding-box present replaces the whole batch (see its docs for
-    /// why). Whatever is finally presented — a single rectangle from the
-    /// per-rectangle path or the fallback bounding box — still takes the
-    /// full-screen path if it turns out to cover the whole screen.
+    ///
+    /// **A frame is presented once, naming everything it changed.** Damage
+    /// that covers the screen takes the full [`Display::present`] path;
+    /// anything else takes [`Display::present_rects`], whose list is the
+    /// frame's disjoint dirty rectangles (`damage_list` chooses between the
+    /// two, and degrades to the bounding box past [`MAX_DAMAGE_RECTS`]). The
+    /// bytes moved are therefore proportional to what actually changed
+    /// rather than to the box around it — a taskbar strip and a cursor near
+    /// the opposite edge cost those two rectangles even though the box
+    /// between them is the screen — and a scattered frame costs one dispatch
+    /// rather than one per rectangle.
     ///
     /// # Errors
     ///
     /// Propagates any [`DriverError`] the display driver returns from
-    /// [`Display::present`] / [`Display::present_region`].
+    /// [`Display::present`] / [`Display::present_rects`].
     pub fn present(&mut self, display: &mut dyn Display) -> Result<(), DriverError> {
         self.stats.begin_frame();
         let region = self.recompose_damage();
         if region.is_empty() {
             return Ok(());
         }
-        let Some(bounding_damage) = sub_screen_damage(&region.bounds(), &self.mode) else {
-            self.stats.bump_present();
-            return display.present(&self.frame);
-        };
-        let rects = region.rects();
-        if rects.len() > MAX_PRESENT_REGIONS {
-            self.stats.bump_present();
-            return display.present_region(&self.frame, bounding_damage);
+        self.stats.bump_present();
+        let mut list = [DamageRect::full(&self.mode); MAX_DAMAGE_RECTS];
+        match damage_list(&region, &self.mode, &mut list) {
+            Some(rects) => display.present_rects(&self.frame, rects),
+            None => display.present(&self.frame),
         }
-        for &rect in rects {
-            self.stats.bump_present();
-            match sub_screen_damage(&rect, &self.mode) {
-                Some(damage) => display.present_region(&self.frame, damage)?,
-                None => display.present(&self.frame)?,
-            }
-        }
-        Ok(())
     }
 
     /// Present via the display's hardware layer engine when it can serve
@@ -3203,24 +3192,3 @@ impl LayerBuf {
         }
     }
 }
-
-/// The most rectangles [`Compositor::present`] will hand to
-/// [`Display::present_region`] individually before falling back to a
-/// single bounding-box present.
-///
-/// Each `present_region` call is a synchronous IPC round trip to the
-/// display service: its fixed dispatch cost (marshalling the message,
-/// the context switch into the driver and back) is paid once per call no
-/// matter how few pixels the rectangle covers, while the *marginal* cost
-/// of a larger copy is just more bytes memcpy'd — the measured whole
-/// 1024×768×4 frame copy this crate optimises away (~108 microseconds
-/// for almost 3.2 MiB) puts that marginal cost at a small fraction of a
-/// microsecond per extra kilobyte. The fixed per-call cost therefore
-/// dominates well before the combined bounding box grows large: past a
-/// handful of rectangles, the sum of their round trips costs more than
-/// one call that copies their (larger) bounding box in a single trip.
-/// Eight keeps the common cases — a moved window plus the cursor, a
-/// couple of repainted widgets — on the cheap per-rectangle path while
-/// capping a pathological scattered-damage frame at one round trip
-/// instead of dozens.
-pub const MAX_PRESENT_REGIONS: usize = 8;
