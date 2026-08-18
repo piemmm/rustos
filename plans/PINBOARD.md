@@ -137,6 +137,12 @@ One document, one engine, one writer.
   decode: a 3840×2160 JPEG decodes in tens of milliseconds, while reading it a
   kilobyte at a time cost one trap per kilobyte and, behind an SD or USB
   volume, seconds. Neither side may keep a chunk size of its own.
+  - A 64 KiB request is also above the kernel file cache's bypass limit, so
+    it reaches the filesystem whole rather than as page-sized pieces, and
+    ARXFS fetches each contiguous run of it in **one** device request
+    (`docs/src/filesystem/arxfs.md`). Both halves are needed: without the
+    coalescing a 64 KiB syscall still cost ~35 device round-trips, which is
+    what made a five-master gallery take seconds behind an SD card.
 - **Prepared once, per (path, fit, screen).** The sandbox returns the image
   already placed at exactly the screen size; the session holds that one
   prepared surface and composites it as the desktop layer's base, over the

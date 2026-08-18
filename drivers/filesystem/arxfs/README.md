@@ -114,6 +114,21 @@ fixed-width **263-byte slots** (an 8-byte header — 4-byte inode number, 4-byte
 name length — plus a maximum-length 255-byte name) reached through the extent
 map; `.`/`..` are stored on disk and hidden from `read_dir`.
 
+## Serving reads: one device request per contiguous run
+
+An extent maps a **contiguous** physical run, so a read spanning one asks the
+device **once for the whole run** instead of once per block, over a 64 KiB run
+window (`read_block_run`, `RunStage`) — the round-trips a reading task parks
+across scale with the runs it spans, not the blocks inside them. Reading a
+1 MiB file costs 35 device requests against 783 block-at-a-time, and the
+extent tree is descended once per run. The checks are unchanged and still
+per block: each staged block passes its own physical checksum, AEAD, and
+content-slot hash keyed by its own address (`verify_data_block`), so a
+misdirected or rotted block *inside* a run fails the read closed. The staging
+is one bounded allocation per read, wiped on drop, and falls back to a single
+block when memory is too tight to reserve it (`AGENTS.md` §4, §26.3). A
+compressed cluster's stored run is fetched in one request too.
+
 ## Names (`arxfs-spec.md` §13)
 
 Directory-entry names match ext4's rules so a name valid on one is valid on the

@@ -216,6 +216,29 @@ a first-party FNV-1a — a checksum is not a cryptographic primitive, so §2.12
 does not bar rolling it, and the block's keyed authenticity still rests on the
 AEAD and the metadata MAC.
 
+## Serving reads: one device request per contiguous run
+
+An extent maps a **contiguous** physical run, so a read spanning one asks the
+device **once for the whole run** rather than once per block
+(`read_block_run`, `RunStage`). The run window is 64 KiB — the transfer a
+storage controller moves on a single DMA descriptor — so a read parks the
+calling task across round-trips proportional to the runs it spans, not to the
+blocks inside them. Reading a 1 MiB file (261 content blocks) costs **35**
+device requests, against **783** when the same bytes are fetched a block at a
+time; a whole-file read also descends the extent tree once per run instead of
+once per block.
+
+The fetch is separate from the checks, never instead of them: every block in a
+staged run still passes its own physical checksum, its own AEAD, and its own
+content-slot hash keyed by its own physical address (`verify_data_block`), so a
+misdirected, stale, or bit-rotted block *inside* a run fails the read closed
+exactly as a single-block read would. The staging is one allocation per read,
+bounded by the window, wiped on drop (it holds decrypted user content), and
+falls back to a single block when memory is too tight to reserve it — a
+machine under pressure reads slower rather than failing (`AGENTS.md` §4,
+§26.3). A compressed cluster's stored blocks are contiguous too, so its frame
+is fetched in one request as well.
+
 ## Compression
 
 Compression is **mandatory and always on** (`arxfs-spec.md` §1, §10) and

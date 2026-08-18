@@ -64,6 +64,7 @@ use tairix_abi::time::Time64;
 use tairix_abi::{CapabilityId, DriverError, DriverHandle, DriverHost};
 use tairix_crypto::{AeadKey, MacKey};
 use tairix_fsmeta::{AttrFlags, AttrKey, AttrSet};
+use zeroize::Zeroize;
 
 mod allocator;
 mod allocmap;
@@ -182,6 +183,83 @@ where
 const MAX_BLOCK_SIZE: usize = 4096;
 /// Smallest block size the format supports.
 const MIN_BLOCK_SIZE: usize = 512;
+
+/// Bytes one coalesced data-run device request covers.
+///
+/// An extent maps a *contiguous* physical run, so a read that spans one asks
+/// the device once for the whole run instead of once per block: a storage
+/// controller moves this much on a single DMA transfer, so a megabyte-scale
+/// read parks the calling task across tens of completion interrupts rather
+/// than hundreds. The window also bounds the staging one read allocates — a
+/// larger read loops — so many volumes on a small machine stay bounded.
+const READ_RUN_BYTES: usize = 64 * 1024;
+
+// A run must cover at least one block of every supported geometry, so a read
+// always makes progress, and a whole number of them, so no request is
+// misaligned. Held at compile time: the run length needs no runtime clamp.
+const _: () =
+    assert!(READ_RUN_BYTES >= MAX_BLOCK_SIZE && READ_RUN_BYTES.is_multiple_of(MAX_BLOCK_SIZE));
+
+/// Staging for the coalesced run reads of one serving read
+/// ([`ARXFS::read_block_run`]).
+///
+/// Holds the [`READ_RUN_BYTES`] window when it can be allocated and a single
+/// on-stack block when it cannot, so a machine short of memory reads slower
+/// rather than failing the read (deterministic OOM, never a panic). The
+/// staged bytes are decrypted user content, so they are wiped when the stage
+/// is dropped, on every path out of the read.
+struct RunStage {
+    /// The run window, empty when its allocation was refused.
+    window: Vec<u8>,
+    /// The fallback single block, used only while `window` is empty.
+    block: [u8; MAX_BLOCK_SIZE],
+    /// Device blocks one request through this stage covers.
+    blocks: usize,
+}
+
+impl RunStage {
+    /// A stage for a read wanting `blocks` device blocks of `block_size`,
+    /// bounded by the run window.
+    fn new(block_size: usize, blocks: usize) -> Self {
+        let want = blocks.clamp(1, READ_RUN_BYTES / block_size);
+        let span = want * block_size;
+        let mut window = Vec::new();
+        // A fallible reservation, then the zeroing the slice needs: `vec![0;
+        // span]` aborts the whole system on allocation failure, where a
+        // filesystem read must fall back to the single block instead.
+        if window.try_reserve_exact(span).is_ok() {
+            window.resize(span, 0);
+        }
+        let blocks = if window.is_empty() { 1 } else { want };
+        Self {
+            window,
+            block: [0u8; MAX_BLOCK_SIZE],
+            blocks,
+        }
+    }
+
+    /// Device blocks one request through this stage covers: never zero, so a
+    /// read always makes progress.
+    fn blocks(&self) -> usize {
+        self.blocks
+    }
+
+    /// The staging bytes: the run window, or the single block it fell back to.
+    fn buf(&mut self) -> &mut [u8] {
+        if self.window.is_empty() {
+            &mut self.block
+        } else {
+            &mut self.window
+        }
+    }
+}
+
+impl Drop for RunStage {
+    fn drop(&mut self) {
+        self.window.zeroize();
+        self.block.zeroize();
+    }
+}
 
 /// Fixed on-disk size of one inode record, in bytes.
 const INODE_SIZE: usize = 256;
@@ -757,8 +835,27 @@ impl<B: Block> ARXFS<B> {
 
     /// Read the raw block at `phys` into the first `block_size` bytes of `buf`.
     fn read_block(&mut self, phys: u64, buf: &mut [u8]) -> Result<(), DriverError> {
-        let bs = self.block_size;
-        self.block.read_blocks(phys, &mut buf[..bs])
+        self.read_block_run(phys, 1, buf)
+    }
+
+    /// Read the contiguous run of `blocks` raw blocks at `phys` into the first
+    /// `blocks * block_size` bytes of `buf`, in **one** device request.
+    ///
+    /// The one device-read primitive: a caller that knows its blocks are
+    /// contiguous (an extent's stored run) pays one round-trip for the run
+    /// instead of one per block. A `buf` too short for the run is refused
+    /// rather than truncated.
+    fn read_block_run(
+        &mut self,
+        phys: u64,
+        blocks: usize,
+        buf: &mut [u8],
+    ) -> Result<(), DriverError> {
+        let span = blocks
+            .checked_mul(self.block_size)
+            .ok_or(DriverError::LengthOutOfRange)?;
+        let run = buf.get_mut(..span).ok_or(DriverError::LengthOutOfRange)?;
+        self.block.read_blocks(phys, run)
     }
 
     /// Write the first `block_size` bytes of `buf` to the block at `phys`.
@@ -2165,10 +2262,10 @@ impl<B: Block> ARXFS<B> {
         self.logical_hash_offset() + LOGICAL_HASH_LEN
     }
 
-    /// Read the data block at `phys`, verify its two-layer integrity field,
-    /// and decrypt its content in place, leaving the decrypted content slot in
-    /// `buf[..data_capacity()]` and returning how the record is stored
-    /// (`docs/src/filesystem/arxfs-spec.md` §6).
+    /// Verify the two-layer integrity field of the data block staged in `buf`
+    /// from address `phys`, and decrypt its content in place, leaving the
+    /// decrypted content slot in `buf[..data_capacity()]` and returning how
+    /// the record is stored (`docs/src/filesystem/arxfs-spec.md` §6).
     ///
     /// The read path is the spec's: verify the fast physical checksum over the
     /// at-rest block first (so media corruption is caught cheaply, before the
@@ -2176,9 +2273,13 @@ impl<B: Block> ARXFS<B> {
     /// decrypted slot against its stored logical hash. Each layer is kept
     /// distinct ([`DataFault`]); the classification drives the Stage 5 tests
     /// and is the seam scrub and health record against.
-    fn open_data_block(&mut self, phys: u64, buf: &mut [u8]) -> Result<StoredForm, DataFault> {
-        self.read_block(phys, buf)
-            .map_err(|_| DataFault::Physical)?;
+    ///
+    /// The checks are separate from the fetch ([`read_block_run`](Self::read_block_run))
+    /// so one device request can serve a whole contiguous run without
+    /// weakening any of them: every block passes its own checksum, AEAD, and
+    /// content-slot hash keyed by its own `phys`, so a misdirected block
+    /// inside a run fails closed exactly as a single-block read would.
+    fn verify_data_block(&self, phys: u64, buf: &mut [u8]) -> Result<StoredForm, DataFault> {
         let cap = as_usize(self.data_capacity());
         let csum_off = self.phys_checksum_offset();
         let mut stored = [0u8; PHYS_CHECKSUM_LEN];
@@ -2222,7 +2323,17 @@ impl<B: Block> ARXFS<B> {
     /// [`read_data_block`](Self::read_data_block) and see only a fail-closed
     /// [`DriverError::DeviceFault`].
     fn read_data_block_classified(&mut self, phys: u64, buf: &mut [u8]) -> Result<(), DataFault> {
-        match self.open_data_block(phys, buf)? {
+        self.read_block(phys, buf)
+            .map_err(|_| DataFault::Physical)?;
+        self.verify_raw_block(phys, buf)
+    }
+
+    /// [`verify_data_block`](Self::verify_data_block) for a block a per-block
+    /// path staged: the record must be a raw single-block one, so a
+    /// compressed-cluster block reached this way is a wrong-shape read and
+    /// classifies as a logical fault.
+    fn verify_raw_block(&self, phys: u64, buf: &mut [u8]) -> Result<(), DataFault> {
+        match self.verify_data_block(phys, buf)? {
             StoredForm::Raw => Ok(()),
             StoredForm::ClusterHead { .. } | StoredForm::ClusterPart { .. } => {
                 Err(DataFault::Logical)
@@ -2509,7 +2620,14 @@ impl<B: Block> ARXFS<B> {
         let end = inode.size.min(offset + out.len() as u64);
         let mut done = 0usize;
         let mut pos = offset;
-        let mut data = [0u8; MAX_BLOCK_SIZE];
+        let block_size = self.block_size;
+        // Blocks this read can cross at most: its content span, plus one for a
+        // read that starts inside a block. Sizing the stage to the request
+        // keeps a small read from staging the whole run window.
+        let span_blocks = as_usize((end - offset).div_ceil(cap)) + 1;
+        // Staged on the first raw extent the read actually crosses, so a file
+        // served wholly from compressed clusters allocates no run window.
+        let mut stage: Option<RunStage> = None;
         while pos < end {
             let bi = pos / cap;
             let within = as_usize(pos % cap);
@@ -2555,11 +2673,28 @@ impl<B: Block> ARXFS<B> {
                     pos += chunk as u64;
                 }
                 Some((start, ext)) => {
-                    let chunk = as_usize((cap - within as u64).min(end - pos));
-                    self.read_data_block(ext.phys + (bi - start), &mut data)?;
-                    out[done..done + chunk].copy_from_slice(&data[within..within + chunk]);
-                    done += chunk;
-                    pos += chunk as u64;
+                    // A raw extent maps a contiguous physical run, so fetch
+                    // every block of it this read still wants in one device
+                    // request, then verify and decrypt each block in place.
+                    // The next iteration resumes past the run, so the extent
+                    // tree is walked once per run rather than once per block.
+                    let stage = stage.get_or_insert_with(|| RunStage::new(block_size, span_blocks));
+                    let first = bi - start;
+                    let run = (as_usize(end - pos) + within)
+                        .div_ceil(as_usize(cap))
+                        .min(as_usize(ext.len - first))
+                        .min(stage.blocks());
+                    self.read_block_run(ext.phys + first, run, stage.buf())?;
+                    for slot in 0..run {
+                        let block = &mut stage.buf()[slot * block_size..(slot + 1) * block_size];
+                        self.verify_raw_block(ext.phys + first + slot as u64, block)
+                            .map_err(|_| DriverError::DeviceFault)?;
+                        let at = if slot == 0 { within } else { 0 };
+                        let chunk = (as_usize(cap) - at).min(as_usize(end - pos));
+                        out[done..done + chunk].copy_from_slice(&block[at..at + chunk]);
+                        done += chunk;
+                        pos += chunk as u64;
+                    }
                 }
                 None => {
                     let chunk = as_usize((cap - within as u64).min(end - pos));

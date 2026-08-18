@@ -5995,6 +5995,174 @@ fn read_dir_resume_cost_is_independent_of_directory_position() {
     );
 }
 
+// ---------------------------------------------------------------------------
+// Serving-read device cost: an extent maps a contiguous physical run, so a
+// read spanning one asks the device once per run rather than once per block.
+// The round-trips a reading task parks across scale with the run window, not
+// with the file size (`docs/src/filesystem/arxfs-spec.md` §6).
+// ---------------------------------------------------------------------------
+
+/// Content length the run-coalescing fixtures store: large enough to span
+/// many runs, so a per-block cost is unmistakable next to a per-run one.
+const RUN_FIXTURE_BYTES: usize = 1024 * 1024;
+
+/// Device blocks one coalesced request covers at the 4096-byte geometry the
+/// run fixtures format.
+const RUN_FIXTURE_BLOCKS: usize = READ_RUN_BYTES / 4096;
+
+/// A volume holding `f`, a [`RUN_FIXTURE_BYTES`] file of incompressible
+/// content (so it is stored as raw 1:1 extents, not compressed clusters),
+/// reopened over a counting device with a cold read counter.
+fn counted_file_fixture() -> (ARXFS<CountingBlock>, NodeId, alloc::vec::Vec<u8>) {
+    let body = incompressible(RUN_FIXTURE_BYTES);
+    let mut fs = fmt(4096, 4096, 64);
+    let root = fs.root();
+    fs.create(root, b"f", NodeKind::RegularFile)
+        .expect("create");
+    assert_eq!(fs.write_at(root, b"f", 0, &body), Ok(body.len()));
+    FilesystemWrite::flush(&mut fs).expect("sync");
+    let mut fs =
+        ARXFS::open(counting(fs.into_block().bytes(), 4096, 4096), &TEST_KEY).expect("reopen");
+    let node = fs.lookup(fs.root(), b"f").expect("lookup");
+    fs.block_mut().reads = 0;
+    (fs, node, body)
+}
+
+#[test]
+fn a_whole_file_read_asks_the_device_once_per_contiguous_run() {
+    let (mut fs, node, body) = counted_file_fixture();
+    let cap = as_usize(fs.data_capacity());
+    let blocks = body.len().div_ceil(cap);
+    let runs = blocks.div_ceil(RUN_FIXTURE_BLOCKS);
+    let mut out = alloc::vec![0u8; body.len()];
+    assert_eq!(fs.read_at(node, 0, &mut out), Ok(body.len()));
+    assert_eq!(out, body, "a coalesced read returns the file exactly");
+    // One data request per run, plus one extent-tree walk per run: the price
+    // of the read tracks the runs it spans, never the blocks inside them.
+    let whole = fs.block_mut().reads;
+    let ceiling = 4 * u64::try_from(runs).unwrap();
+    assert!(
+        whole <= ceiling,
+        "{blocks} blocks in {runs} runs must cost at most {ceiling} device \
+         requests, not one per block: {whole}"
+    );
+
+    // The same bytes fetched a block at a time — the cost a per-block serving
+    // path pays — measures the gap the run window buys.
+    fs.block_mut().reads = 0;
+    for bi in 0..blocks {
+        let at = bi * cap;
+        let want = cap.min(body.len() - at);
+        assert_eq!(
+            fs.read_at(node, u64::try_from(at).unwrap(), &mut out[..want]),
+            Ok(want)
+        );
+    }
+    let per_block = fs.block_mut().reads;
+    assert!(
+        whole * 8 <= per_block,
+        "one call spanning {blocks} blocks must cost an order of magnitude \
+         less than a call per block: {whole} vs {per_block} device requests"
+    );
+}
+
+#[test]
+fn a_coalesced_read_returns_the_same_bytes_from_any_offset() {
+    // A read that starts inside a block, on a run boundary, or either side of
+    // one still returns exactly the stored bytes: the run window changes how
+    // many requests a read makes, never what it answers.
+    let (mut fs, node, body) = counted_file_fixture();
+    let cap = as_usize(fs.data_capacity());
+    let run = RUN_FIXTURE_BLOCKS * cap;
+    for start in [1, cap - 1, cap, cap + 1, run - 1, run, run + 1, 3 * run + 7] {
+        for len in [1, cap + 3, run + 5, 2 * run] {
+            let end = (start + len).min(body.len());
+            let mut out = alloc::vec![0u8; end - start];
+            let want = out.len();
+            assert_eq!(
+                fs.read_at(node, u64::try_from(start).unwrap(), &mut out),
+                Ok(want),
+                "offset {start} length {len} reads whole"
+            );
+            assert_eq!(out, body[start..end], "offset {start} length {len}");
+        }
+    }
+}
+
+#[test]
+fn a_wounded_block_inside_a_coalesced_run_fails_the_read_closed() {
+    // One request now fetches a whole run, but every block in it is still
+    // verified on its own: a block wounded *inside* a run fails the read
+    // rather than being served, and the fault stays contained to its run.
+    let body = incompressible(RUN_FIXTURE_BYTES);
+    let mut fs = fmt(4096, 4096, 64);
+    let root = fs.root();
+    fs.create(root, b"f", NodeKind::RegularFile)
+        .expect("create");
+    assert_eq!(fs.write_at(root, b"f", 0, &body), Ok(body.len()));
+    let interior = 5u64;
+    assert!(
+        interior < u64::try_from(RUN_FIXTURE_BLOCKS).unwrap(),
+        "the wounded block must sit inside the first run, not start it"
+    );
+    let phys = data_block_phys(&mut fs, b"f", interior);
+    let mut bytes = fs.into_block().bytes();
+    bytes[as_usize(phys) * 4096] ^= 0x01;
+
+    let mut fs =
+        ARXFS::open(MemBlock::from_bytes(bytes, 4096, 4096), &TEST_KEY).expect("still mounts");
+    let node = fs.lookup(fs.root(), b"f").expect("lookup");
+    let cap = as_usize(fs.data_capacity());
+    let mut out = alloc::vec![0u8; body.len()];
+    assert!(
+        matches!(fs.read_at(node, 0, &mut out), Err(DriverError::DeviceFault)),
+        "a wounded block inside a coalesced run fails the whole read closed"
+    );
+    let later = RUN_FIXTURE_BLOCKS * cap;
+    let mut out = alloc::vec![0u8; cap];
+    assert_eq!(
+        fs.read_at(node, u64::try_from(later).unwrap(), &mut out),
+        Ok(cap),
+        "a run that does not cover the wound still reads"
+    );
+    assert_eq!(out, body[later..later + cap], "and answers exactly");
+}
+
+#[test]
+fn a_compressed_cluster_read_asks_the_device_once_for_its_stored_run() {
+    // A compressed cluster's stored blocks are contiguous too, so the frame
+    // is fetched in one request instead of one per stored block.
+    let mut fs = fmt(4096, 4096, 64);
+    let root = fs.root();
+    fs.create(root, b"c", NodeKind::RegularFile)
+        .expect("create");
+    // A cluster that compresses, but not to a single block: half noise, half
+    // constant padding, so its stored run genuinely spans several blocks.
+    let logical = as_usize(fs.data_capacity() * COMPRESS_CLUSTER_BLOCKS);
+    let mut payload = incompressible(logical / 2);
+    payload.resize(logical, b'.');
+    assert_eq!(fs.write_at(root, b"c", 0, &payload), Ok(payload.len()));
+    FilesystemWrite::flush(&mut fs).expect("sync");
+    let (_, ext) = extent_of(&mut fs, b"c", 0);
+    assert!(
+        ext.compressed && ext.stored > 1,
+        "the fixture must store a multi-block run: stored {}",
+        ext.stored
+    );
+
+    let mut fs =
+        ARXFS::open(counting(fs.into_block().bytes(), 4096, 4096), &TEST_KEY).expect("reopen");
+    fs.block_mut().reads = 0;
+    let plain = fs.read_data_cluster(&ext).expect("cluster reads");
+    assert_eq!(plain, payload, "the cluster decompresses exactly");
+    assert_eq!(
+        fs.block_mut().reads,
+        1,
+        "one device request fetches the whole stored run ({} blocks)",
+        ext.stored
+    );
+}
+
 /// The durability contract behind `fs_sync`: a filesystem flush forces the
 /// backing device's volatile write cache to stable media exactly once —
 /// the transaction data already reached the device, but only a device

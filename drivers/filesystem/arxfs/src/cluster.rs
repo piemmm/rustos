@@ -32,7 +32,7 @@ use crate::dedupe::{ChunkRecord, REVERSE_REF_CAP};
 use crate::integrity::{logical_hash, DataFault, StoredForm, LOGICAL_HASH_LEN};
 use crate::xform;
 use crate::{
-    as_u32, as_usize, extent_spec, is_all_zero, Block, Extent, Inode, ARXFS,
+    as_u32, as_usize, extent_spec, is_all_zero, Block, Extent, Inode, RunStage, ARXFS,
     COMPRESS_CLUSTER_BLOCKS, MAX_BLOCK_SIZE, METADATA_RESERVE, RING_BLOCKS,
 };
 
@@ -187,22 +187,34 @@ impl<B: Block> ARXFS<B> {
         frame: &mut [u8],
     ) -> Result<usize, DataFault> {
         let stored = as_usize(ext.stored);
+        let block_size = self.block_size;
         let mut frame_len = 0usize;
-        let mut blk = [0u8; MAX_BLOCK_SIZE];
-        for i in 0..stored {
-            let form = self.open_data_block(ext.phys + i as u64, &mut blk)?;
-            match (i, form) {
-                (0, StoredForm::ClusterHead { frame_len: len }) => {
-                    frame_len = as_usize(u64::from(len));
-                    if frame_len.div_ceil(capu) != stored {
-                        return Err(DataFault::Logical);
+        // The cluster's stored blocks are one contiguous run: fetch them in
+        // whole-run device requests, then verify and decrypt each in place.
+        let mut stage = RunStage::new(block_size, stored);
+        let mut done = 0usize;
+        while done < stored {
+            let run = stage.blocks().min(stored - done);
+            self.read_block_run(ext.phys + done as u64, run, stage.buf())
+                .map_err(|_| DataFault::Physical)?;
+            for slot in 0..run {
+                let at = done + slot;
+                let block = &mut stage.buf()[slot * block_size..(slot + 1) * block_size];
+                let form = self.verify_data_block(ext.phys + at as u64, block)?;
+                match (at, form) {
+                    (0, StoredForm::ClusterHead { frame_len: len }) => {
+                        frame_len = as_usize(u64::from(len));
+                        if frame_len.div_ceil(capu) != stored {
+                            return Err(DataFault::Logical);
+                        }
                     }
+                    (at, StoredForm::ClusterPart { index })
+                        if at > 0 && as_usize(u64::from(index)) == at => {}
+                    _ => return Err(DataFault::Logical),
                 }
-                (i, StoredForm::ClusterPart { index })
-                    if i > 0 && as_usize(u64::from(index)) == i => {}
-                _ => return Err(DataFault::Logical),
+                frame[at * capu..(at + 1) * capu].copy_from_slice(&block[..capu]);
             }
-            frame[i * capu..(i + 1) * capu].copy_from_slice(&blk[..capu]);
+            done += run;
         }
         Ok(frame_len)
     }
