@@ -1605,10 +1605,10 @@ staged design is `plans/GUI-TERMINAL.md`.
 
 ### Rendering
 
-`render(terminal, painted, viewport, font)` paints the grid into a
-`tairix-raster` `Surface` sized to the viewport, using the shared
-`tairix-font` monospace family (Inconsolata EX plus the M PLUS 1 Code Japanese,
-D2Coding Korean, and Noto Sans Hebrew companions). Hebrew and Yiddish letters,
+`Screen` owns a `tairix-raster` `Surface` the size of the window's client
+area and **keeps it between frames**, using the shared `tairix-font`
+monospace family (Inconsolata EX plus the M PLUS 1 Code Japanese, D2Coding
+Korean, and Noto Sans Hebrew companions). Hebrew and Yiddish letters,
 final forms, punctuation, and marks occupy individual terminal cells;
 Japanese and precomposed Hangul full-width bitmaps paint their lead and
 continuation cells as one unit, so a continuation-cell background cannot erase
@@ -1625,6 +1625,28 @@ rectangular; the compositor places and rounds it through its single
 anti-aliased rounded-corner path, so there is no rounding in the app. Every
 length saturates so a viewport smaller than the grid paints what fits rather
 than panicking.
+
+#### A repaint costs what changed, not a window
+
+`Screen::paint` holds the cells the surface was last painted from and
+compares the grid against them, so a frame redraws only the block that
+differs and returns it as the rectangle to present. A keystroke costs the
+cell it wrote and the two the cursor moved between — a couple of glyph
+blits, a couple of cells copied into the shared frame, and a two-cell
+damage rectangle for the session to recomposite — rather than re-rendering,
+re-converting, and re-presenting the whole window for one character. A wake
+that changed nothing presents nothing at all. Two equal cells paint
+identically only under the same colours and the same face, so a profile,
+theme, or scale change calls `Screen::invalidate` and the next paint covers
+the window. A resize needs no such call: the present step reconciles the
+picture to the display mode describing the shared frame region, so the two
+can never disagree, and reshaping invalidates implicitly.
+A damaged block is widened to whole glyphs before it is drawn, so
+overwriting the continuation half of a wide glyph repaints its lead cell
+too. The equivalence that makes this safe is a unit test: an incremental
+repaint must land pixels byte-identical to a fresh whole-window paint of the
+same grid, across typing, cursor moves, scrolling, rendition changes,
+erases, and wide-glyph clobbering.
 
 ### Colour schemes, the profile, and screen effects
 
@@ -1656,6 +1678,16 @@ wobble run over the finished frame. An animated effect is a pure function of a
 monotonically increasing `Phase` that the program advances on a one-shot frame
 deadline in its wait-set park — there is no poll loop, and a terminal with the
 effects off never wakes for them at all.
+
+A pass is a *whole-frame* post-process by nature — wobble displaces rows and
+phosphor decays every pixel — so when one is in force the finished screen is
+copied into a reused buffer, the passes run there, and the whole window is
+presented. The retained screen itself stays clean, so the next frame's cell
+diff still describes the text rather than the effect's own churn, and an
+animated terminal re-runs its passes without re-rendering the grid. That
+buffer exists only while an effect is on. Translucency and backdrop blur are
+not passes, so a see-through, frosted terminal still types at cell-diff
+cost.
 
 ### The menu and the settings sheet
 

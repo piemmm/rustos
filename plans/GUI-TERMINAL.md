@@ -128,6 +128,18 @@ one-shot frame deadline (`FRAME_INTERVAL_NS`, 20 fps) only while an animated
 effect is in force; otherwise it parks indefinitely. There is no poll loop and
 no periodic tick.
 
+**A pass runs over a copy, never into the retained screen.** `render::Screen`
+keeps the painted picture between frames so a repaint costs the cells that
+changed (§13); a pass is a whole-frame post-process by nature — wobble
+displaces rows, phosphor decays every pixel — so an active pass copies the
+finished screen into a buffer, runs there, and presents whole. The retained
+screen therefore stays clean and the next frame's cell diff still describes
+the *text* rather than the effect's own churn, so an animated terminal
+re-runs its passes without re-rendering the grid. The buffer is reused
+between frames and exists only while an effect is on. Translucency and
+backdrop blur are not passes, so a see-through, frosted terminal keeps the
+cell-diff repaint cost.
+
 The overlay surfaces (menu, settings sheet) are drawn **after** the effects: a
 settings sheet that wobbled with the screen behind it would be unusable, and
 its controls must read exactly as they do everywhere else on the desktop.
@@ -316,7 +328,54 @@ altering one screen's semantics fails the other's test too. What it guarantees:
 
 ---
 
-## 12. What remains
+## 12. A repaint costs what changed, not a window
+
+**Status: done.**
+
+`render::Screen` owns the window-sized premultiplied surface the grid is
+drawn into and **keeps it, and the cells it was painted from, between
+frames**. `Screen::paint` compares the live `Grid` against that snapshot,
+redraws only the block of cells that differs, and returns it as the surface
+rectangle to present. One `write_frame` — shared with the popup path —
+copies just that rectangle into the shared frame region, and that rectangle
+is the `DamageRect` the window channel carries, so the session converts and
+the compositor recomposites the same few cells.
+
+Before this, every present allocated a window-sized surface, re-drew every
+cell in it, un-premultiplied every pixel into the frame, and declared
+whole-window damage — for one keystroke. On a Pi 4B that is the ~30 ms
+between pressing a key and seeing it, and it grew to ~80 ms with a
+translucent background, because an alpha below 255 takes `unpremultiply`'s
+three-divide path for every pixel and the compositor's blend path for every
+row. The cliff is invisible: an opacity a hair under full looks opaque yet
+costs the same as a fully see-through window, which is why turning
+translucency "off" appeared to leave the terminal permanently slower. Scoping
+the work to the damage removes the cliff rather than hiding it by snapping
+the slider.
+
+**What the diff may assume, and what it may not.** Two equal cells paint
+identically *only* under the same colours and the same face, so a profile,
+theme, or scale change calls `Screen::invalidate`, and so does a session
+redraw request. A resize needs no such call: `present_frame` reconciles the
+picture to the `DisplayMode` describing the frame region, so a surface and a
+region of different shapes cannot arise however a resize half-fails, and
+reshaping invalidates implicitly. The cursor block is tracked beside the
+cells, so a cursor that moves damages the cell it left and the one it
+entered. A damaged block is widened to whole glyphs, so clobbering a wide
+glyph's continuation cell repaints its lead cell.
+
+**Both directions are tested, not audited.** A scripted walk — typing,
+cursor moves, scrolling, rendition changes, erases, cursor hide/show, and
+wide-glyph clobbering — asserts after every step that every pixel the
+repaint changed lies inside the rectangle it reported, *and* that the
+retained surface is byte-identical to a fresh whole-window paint of the same
+grid. The tight direction is pinned separately, or the suite would pass by
+reporting everything: a keystroke reports exactly two cells, a cursor reveal
+exactly one, and an unchanged grid reports nothing and presents nothing.
+
+---
+
+## 13. What remains
 
 Nothing in the sections above. Recognised later work, none of it blocking:
 

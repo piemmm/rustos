@@ -10,7 +10,7 @@ use alloc::vec::Vec;
 
 use tairix_abi::Errno;
 use tairix_font::BitmapFont;
-use tairix_geometry::Rect;
+use tairix_geometry::{Point, Rect};
 use tairix_raster::Color;
 use tairix_theme::Theme;
 
@@ -32,6 +32,7 @@ fn encode_all(ops: &[Op]) -> alloc::vec::Vec<u8> {
 
 use crate::grid::{Grid, MAX_DIMENSION};
 use crate::parser::Parser;
+use crate::render::Screen;
 use crate::shell::ShellSource;
 use crate::terminal::Terminal;
 use crate::Cell;
@@ -509,21 +510,53 @@ fn system_colors(theme: &Theme) -> crate::scheme::Painted {
     )
 }
 
+/// A `width` × `height` screen painted once from `grid` — the whole-window
+/// first paint every renderer test that only cares about pixels wants.
+fn painted_screen(
+    grid: &Grid,
+    painted: &crate::scheme::Painted,
+    width: u32,
+    height: u32,
+) -> Screen {
+    let mut screen = Screen::new(width, height).expect("surface");
+    let _ = screen.paint(grid, painted, test_font());
+    screen
+}
+
+/// The surface rectangle a `cols` × `rows` block of cells at `(col, row)`
+/// occupies in the test face.
+fn cell_rect(col: u32, row: u32, cols: u32, rows: u32) -> Rect {
+    let font = test_font();
+    let (cw, lh) = (font.cell_width(), font.line_height());
+    Rect::new(
+        i32::try_from(cw * col).expect("in range"),
+        i32::try_from(lh * row).expect("in range"),
+        cw * cols,
+        lh * rows,
+    )
+}
+
+/// A `cols` × `rows` terminal and a screen sized exactly to it.
+fn grid_and_screen(cols: u16, rows: u16) -> (Terminal<QueueShell>, Screen) {
+    let font = test_font();
+    let terminal = Terminal::new(cols, rows, QueueShell::default()).expect("valid size");
+    let screen = Screen::new(
+        font.cell_width() * u32::from(cols),
+        font.line_height() * u32::from(rows),
+    )
+    .expect("surface");
+    (terminal, screen)
+}
+
 #[test]
 fn render_produces_a_surface_of_the_viewport_size() {
     let shell = QueueShell::with_output(&[b"hi"]);
     let mut term = Terminal::new(20, 3, shell).expect("valid size");
     term.pump().expect("read succeeds");
     let theme = Theme::dark();
-    let surface = crate::render(
-        &term,
-        &system_colors(&theme),
-        Rect::new(0, 0, 120, 40),
-        test_font(),
-    )
-    .expect("surface");
-    assert_eq!(surface.width(), 120);
-    assert_eq!(surface.height(), 40);
+    let screen = painted_screen(term.grid(), &system_colors(&theme), 120, 40);
+    assert_eq!(screen.surface().width(), 120);
+    assert_eq!(screen.surface().height(), 40);
 }
 
 #[test]
@@ -541,13 +574,8 @@ fn render_keeps_hebrew_ink_inside_each_coloured_cell() {
     let mut term = Terminal::new(4, 1, QueueShell::default()).expect("valid size");
     term.feed("\u{1B}[?25l\u{1B}[48;2;10;20;30mאבם".as_bytes());
     let theme = Theme::dark();
-    let surface = crate::render(
-        &term,
-        &system_colors(&theme),
-        Rect::new(0, 0, 60, 28),
-        test_font(),
-    )
-    .expect("surface");
+    let screen = painted_screen(term.grid(), &system_colors(&theme), 60, 28);
+    let surface = screen.surface();
     let background = Color::rgb(10, 20, 30);
     for column in 0..3 {
         let first_x = column * 15;
@@ -567,13 +595,8 @@ fn render_keeps_wide_japanese_ink_over_a_coloured_background() {
     let mut term = Terminal::new(3, 1, QueueShell::default()).expect("valid size");
     term.feed("\u{1B}[?25l\u{1B}[48;2;10;20;30m日".as_bytes());
     let theme = Theme::dark();
-    let surface = crate::render(
-        &term,
-        &system_colors(&theme),
-        Rect::new(0, 0, 45, 28),
-        test_font(),
-    )
-    .expect("surface");
+    let screen = painted_screen(term.grid(), &system_colors(&theme), 45, 28);
+    let surface = screen.surface();
     let background = Color::rgb(10, 20, 30);
     assert!(
         (15..30).any(|x| {
@@ -590,13 +613,8 @@ fn render_highlights_the_cursor_cell() {
     let mut term = Terminal::new(20, 3, QueueShell::default()).expect("valid size");
     term.feed(b"\x1b[H");
     let theme = Theme::dark();
-    let surface = crate::render(
-        &term,
-        &system_colors(&theme),
-        Rect::new(0, 0, 120, 40),
-        test_font(),
-    )
-    .expect("surface");
+    let screen = painted_screen(term.grid(), &system_colors(&theme), 120, 40);
+    let surface = screen.surface();
     let accent: Color = theme.palette().accent.into();
     let surface_bg: Color = theme.palette().surface.into();
     // The top-left pixel sits under the home cursor, so it carries the accent
@@ -611,15 +629,232 @@ fn render_handles_a_zero_sized_viewport_without_panicking() {
     let term = Terminal::new(20, 3, QueueShell::default()).expect("valid size");
     let theme = Theme::dark();
     // A zero-width viewport is degenerate but allocatable: it paints nothing.
-    let surface = crate::render(
-        &term,
-        &system_colors(&theme),
-        Rect::new(0, 0, 0, 40),
-        test_font(),
-    )
-    .expect("surface");
-    assert_eq!(surface.width(), 0);
-    assert!(surface.pixels().is_empty());
+    let screen = painted_screen(term.grid(), &system_colors(&theme), 0, 40);
+    assert_eq!(screen.surface().width(), 0);
+    assert!(screen.surface().pixels().is_empty());
+}
+
+#[test]
+fn a_first_paint_damages_the_whole_window() {
+    let theme = Theme::dark();
+    let (term, mut screen) = grid_and_screen(20, 3);
+    let damage = screen.paint(term.grid(), &system_colors(&theme), test_font());
+    assert_eq!(damage, cell_rect(0, 0, 20, 3));
+}
+
+/// The reported defect: typing a character must cost the cell it wrote and
+/// the two the cursor moved between — never the whole window.
+#[test]
+fn typing_one_character_damages_only_the_cells_it_touched() {
+    let theme = Theme::dark();
+    let painted = system_colors(&theme);
+    let (mut term, mut screen) = grid_and_screen(80, 24);
+    let _ = screen.paint(term.grid(), &painted, test_font());
+
+    term.feed(b"a");
+
+    // Column 0 gained a glyph and the cursor block moved to column 1.
+    assert_eq!(
+        screen.paint(term.grid(), &painted, test_font()),
+        cell_rect(0, 0, 2, 1)
+    );
+}
+
+#[test]
+fn a_repaint_of_an_unchanged_grid_damages_nothing() {
+    let theme = Theme::dark();
+    let painted = system_colors(&theme);
+    let (mut term, mut screen) = grid_and_screen(20, 3);
+    term.feed(b"steady");
+    let _ = screen.paint(term.grid(), &painted, test_font());
+
+    assert!(screen.paint(term.grid(), &painted, test_font()).is_empty());
+}
+
+#[test]
+fn a_hidden_cursor_reappearing_damages_only_its_own_cell() {
+    let theme = Theme::dark();
+    let painted = system_colors(&theme);
+    let (mut term, mut screen) = grid_and_screen(20, 3);
+    term.feed(b"\x1b[2;3H\x1b[?25l");
+    let _ = screen.paint(term.grid(), &painted, test_font());
+
+    term.feed(b"\x1b[?25h");
+
+    assert_eq!(
+        screen.paint(term.grid(), &painted, test_font()),
+        cell_rect(2, 1, 1, 1)
+    );
+}
+
+/// Overwriting the *continuation* half of a wide glyph must repaint the lead
+/// cell too, or the orphaned left half of the old glyph would survive.
+#[test]
+fn clobbering_a_continuation_cell_damages_its_lead_cell() {
+    let theme = Theme::dark();
+    let painted = system_colors(&theme);
+    let (mut term, mut screen) = grid_and_screen(10, 1);
+    term.feed("\u{1B}[?25l日本".as_bytes());
+    let _ = screen.paint(term.grid(), &painted, test_font());
+
+    // Column 1 is 日's continuation; writing there leaves column 0 stale.
+    term.feed(b"\x1b[1;2Hx");
+
+    let damage = screen.paint(term.grid(), &painted, test_font());
+    assert_eq!(damage.left(), 0, "the lead cell was not repainted");
+}
+
+/// The safety property behind repainting only part of the window: whatever
+/// the change, the retained surface must end up byte-identical to a fresh
+/// whole-window paint of the same grid.
+#[test]
+fn an_incremental_repaint_matches_a_whole_one_pixel_for_pixel() {
+    const CASES: &[(&str, &str)] = &[
+        ("hello", "!"),
+        ("hello", "\u{1B}[1;1Hx"),
+        ("ab", "\u{1B}[?25l"),
+        ("\u{1B}[?25labc", "\u{1B}[?25h"),
+        ("line one\r\nline two", "\r\n\r\n\r\nscrolled"),
+        ("日本", "\u{1B}[1;2Hx"),
+        ("日本", "\u{1B}[1;1H\u{1B}[K"),
+        ("x", "\u{1B}[41mred"),
+        ("\u{1B}[41mred", "\u{1B}[0m plain"),
+        ("filled text here", "\u{1B}[2J"),
+        ("abc", "\u{1B}[1;1H\u{1B}[1;33mA"),
+    ];
+    let theme = Theme::dark();
+    let painted = system_colors(&theme);
+    let font = test_font();
+    for (setup, change) in CASES {
+        let (mut term, mut incremental) = grid_and_screen(12, 4);
+        term.feed(setup.as_bytes());
+        let _ = incremental.paint(term.grid(), &painted, font);
+        term.feed(change.as_bytes());
+        let _ = incremental.paint(term.grid(), &painted, font);
+
+        let whole = painted_screen(
+            term.grid(),
+            &painted,
+            incremental.surface().width(),
+            incremental.surface().height(),
+        );
+        assert_eq!(
+            incremental.surface().pixels(),
+            whole.surface().pixels(),
+            "incremental repaint diverged after {change:?}"
+        );
+    }
+}
+
+/// The other half of the safety argument: every pixel a repaint *changes*
+/// must lie inside the rectangle it reported, or the session would leave a
+/// stale patch on screen. Walked over a script that scrolls, recolours,
+/// erases and clobbers wide glyphs, checking both directions each step.
+#[test]
+fn every_pixel_a_repaint_changes_lies_inside_the_rect_it_reported() {
+    const SCRIPT: &[&str] = &[
+        "hello world",
+        "\r\n",
+        "\u{1B}[41mred on black",
+        "\u{1B}[0m\r\n日本語",
+        "\u{1B}[1;1Hx",
+        "\u{1B}[2;2H\u{1B}[K",
+        "\u{1B}[?25l",
+        "more text\r\n",
+        "\u{1B}[?25h",
+        "\r\n\r\n\r\nscrolled off",
+        "\u{1B}[H\u{1B}[1;33mA",
+        "\u{1B}[2J",
+    ];
+    let theme = Theme::dark();
+    let painted = system_colors(&theme);
+    let font = test_font();
+    let (mut term, mut screen) = grid_and_screen(12, 4);
+    let _ = screen.paint(term.grid(), &painted, font);
+
+    for step in SCRIPT {
+        let before = screen.surface().clone();
+        term.feed(step.as_bytes());
+        let reported = screen.paint(term.grid(), &painted, font);
+
+        for y in 0..screen.surface().height() {
+            for x in 0..screen.surface().width() {
+                if screen.surface().get(x, y) == before.get(x, y) {
+                    continue;
+                }
+                assert!(
+                    reported.contains(Point::new(
+                        i32::try_from(x).expect("in range"),
+                        i32::try_from(y).expect("in range")
+                    )),
+                    "{step:?} changed ({x}, {y}) outside the reported {reported:?}"
+                );
+            }
+        }
+
+        let whole = painted_screen(
+            term.grid(),
+            &painted,
+            screen.surface().width(),
+            screen.surface().height(),
+        );
+        assert_eq!(
+            screen.surface().pixels(),
+            whole.surface().pixels(),
+            "the retained screen diverged after {step:?}"
+        );
+    }
+}
+
+#[test]
+fn invalidating_forces_the_next_paint_to_cover_the_window() {
+    let theme = Theme::dark();
+    let painted = system_colors(&theme);
+    let (mut term, mut screen) = grid_and_screen(20, 3);
+    term.feed(b"text");
+    let _ = screen.paint(term.grid(), &painted, test_font());
+
+    screen.invalidate();
+
+    assert_eq!(
+        screen.paint(term.grid(), &painted, test_font()),
+        cell_rect(0, 0, 20, 3)
+    );
+}
+
+#[test]
+fn a_resize_repaints_the_whole_new_surface() {
+    let theme = Theme::dark();
+    let painted = system_colors(&theme);
+    let font = test_font();
+    let (mut term, mut screen) = grid_and_screen(20, 3);
+    term.feed(b"text");
+    let _ = screen.paint(term.grid(), &painted, font);
+
+    assert!(screen.resize(font.cell_width() * 10, font.line_height() * 2));
+    let _ = term.resize(10, 2);
+
+    assert_eq!(
+        screen.paint(term.grid(), &painted, font),
+        cell_rect(0, 0, 10, 2)
+    );
+}
+
+/// A grid reshaped under a screen of the same pixel size still repaints
+/// whole: the cell snapshot no longer describes the new shape.
+#[test]
+fn a_reshaped_grid_repaints_the_whole_window() {
+    let theme = Theme::dark();
+    let painted = system_colors(&theme);
+    let (mut term, mut screen) = grid_and_screen(20, 3);
+    let _ = screen.paint(term.grid(), &painted, test_font());
+
+    let _ = term.resize(3, 20);
+
+    assert_eq!(
+        screen.paint(term.grid(), &painted, test_font()),
+        cell_rect(0, 0, 20, 3)
+    );
 }
 
 #[test]
@@ -716,13 +951,8 @@ fn hidden_cursor_is_not_painted() {
     let mut term = Terminal::new(20, 3, QueueShell::default()).expect("valid size");
     term.feed(b"\x1b[H\x1b[?25l");
     let theme = Theme::dark();
-    let surface = crate::render(
-        &term,
-        &system_colors(&theme),
-        Rect::new(0, 0, 120, 40),
-        test_font(),
-    )
-    .expect("surface");
+    let screen = painted_screen(term.grid(), &system_colors(&theme), 120, 40);
+    let surface = screen.surface();
     let surface_bg: Color = theme.palette().surface.into();
     // With the cursor hidden the home cell shows the plain surface, not accent.
     let top_left = surface.get(0, 0).map(tairix_raster::Pixel::unpremultiply);

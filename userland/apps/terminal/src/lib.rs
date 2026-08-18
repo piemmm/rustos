@@ -29,11 +29,14 @@
 //!   [`Terminal::send`] forwards keystrokes to the shell. Neither side echoes
 //!   on the terminal's behalf — echo is the pty slave's line discipline, the
 //!   shell's tty, exactly as on the hardware console.
-//! * [`render()`] paints the grid into a `lib/raster`
+//! * [`Screen`] paints the grid into a `lib/raster`
 //!   [`Surface`](tairix_raster::Surface) using the user's own colour
 //!   [`Scheme`] and the shared `lib/font` monospace face — the same surface
-//!   the compositor places and rounds. The screen [`Effects`] pipeline then
-//!   runs over the finished frame.
+//!   the compositor places and rounds. It **keeps** that surface between
+//!   frames and repaints only the cells that changed, returning them as the
+//!   damage rectangle to present, so a keystroke costs two cells rather than
+//!   a window. The screen [`Effects`] pipeline runs over a copy of the
+//!   finished picture, never into the retained one.
 //!
 //! # The user's profile
 //!
@@ -78,7 +81,8 @@
 //! * [`profile`] — the per-user settings document and its store.
 //! * [`layout`] — the screen grid, the text size that fits it, and the window.
 //! * [`effects`] — the ordered screen-effect pipeline a frame passes through.
-//! * [`render`](mod@render) — painting the grid into a `Surface`.
+//! * [`render`](mod@render) — the retained [`Screen`] the grid is painted
+//!   into, and the cell diff that decides what a frame redraws.
 //! * [`menu`] — the right-click context menu and its keyboard shortcuts.
 //! * [`settings`] — the in-window settings sheet.
 //! * [`swatch`] — the colour-well grid the custom scheme is edited with.
@@ -116,7 +120,7 @@ pub use layout::{COLS, ROWS};
 pub use menu::{Command, ContextMenu};
 pub use parser::Parser;
 pub use profile::{user_profile_path, Profile};
-pub use render::render;
+pub use render::Screen;
 pub use scheme::{ColorScheme, Painted, Scheme};
 pub use settings::{Settings, SheetOutcome};
 pub use shell::ShellSource;

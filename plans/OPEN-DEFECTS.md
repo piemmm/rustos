@@ -2370,11 +2370,14 @@ vertical's declared ceiling outlasts its derived one. End-to-end:
 three takeover verticals pass in 34.4 s (aarch64), 37.2 s (riscv64), and
 19.0 s (x86_64) against their 15-minute ceiling.
 
-## D39 — `netstack-bond-qemu-riscv64` stalled dead after the NIC driver was spawned (OPEN)
+## D39 — a riscv64 QEMU guest stalls dead moments after a `spawn`, at gate concurrency (OPEN)
 
-**Symptom.** One `cargo xtask ci` run failed with the vertical silent for its
-**whole 240 s inactivity budget**. The transcript's last line is the stall
-point, and it is precise:
+**Symptom.** A `cargo xtask ci` run fails with the vertical silent for its
+**whole 240 s inactivity budget**. Seen on two verticals so far
+(`netstack-bond-qemu-riscv64`, `netstack-static-qemu-riscv64`); the common
+shape is that the guest goes *entirely* quiet a few log lines after a
+`spawn`, never one task falling behind. The transcript's last line is the
+stall point, and it is precise:
 
 ```
 id=7001  driver loaded path=/Drivers/network/virtio_net/Run handle=1
@@ -2400,22 +2403,43 @@ that keeps talking, whereas this guest stopped at a fixed point. The green solo
 run is therefore *not* evidence the defect is gone — it is evidence the window
 is narrow.
 
+**Second occurrence narrows it, and rules the network path out as a
+precondition.** `netstack-static-qemu-riscv64` stalled the same way (240 s
+silent, at `admitted (8/8 in flight)`), but *earlier* — during `init`'s
+service bring-up, before `devmgr` had bound any NIC node at all. Its last
+lines are the eighth service's capability derivation, its `spawn`, and one
+call-endpoint creation:
+
+```
+id=1020 task capabilities derived task=0000000000000008 uid=13 caps=9
+id=4030 process spawned entry=0000001000027c6c
+id=3040 ipc call endpoint created endpoint=0000000053541001
+```
+
+So neither the bond's two-member composition, nor `virtio_net`'s
+`notify_wait`, nor any NIC bind is *necessary* to reproduce it: what both
+occurrences share is a `spawn` on riscv64 followed by total guest silence.
+That points at the generic spawn/wake path rather than anything
+network-specific, and it is why both verticals carry the same entry.
+
 **Suspected class (not yet proven).** A wake that is flagged but never
-delivered, or a wait that cannot expire, on the riscv64 driver-spawn /
-device-bind path — the shape D22 fixed for `virtio_blk`'s `notify_wait` and
-D32 described for stranded deferred wakes. `devmgr` stalling *between* two
-binds while holding whatever the rest of the guest needs would explain total
-silence on a single-hart guest. Candidates to separate: `devmgr`'s wait for a
-freshly spawned driver's readiness (is it bounded?), `virtio_net`'s own
-`notify_wait` budget, and whether a deferred wake can strand on riscv64 the way
-D32 found it could on aarch64.
+delivered, or a wait that cannot expire, on the riscv64 spawn path — the
+shape D22 fixed for `virtio_blk`'s `notify_wait` and D32 described for
+stranded deferred wakes. A task stalling while holding whatever the rest of
+the guest needs would explain total silence on a single-hart guest.
+Candidates to separate: whether a deferred wake can strand on riscv64 the way
+D32 found it could on aarch64 (now the leading candidate, since the second
+occurrence predates any device work); the parent's wait for a freshly spawned
+child's readiness (is it bounded?); and `devmgr`'s per-driver readiness wait.
 
 **Next step.** Reproduce deliberately at gate concurrency (run the whole
 `--qemu` set, or eight guests, in a loop) rather than waiting for it to recur,
 with the guest's watchdog records in view: if a stall record names a site the
 diagnosis is immediate, and if none appears then the riscv64 watchdog cadence
 is itself not sampling (which is D3's parity gap and a finding in its own
-right).
+right). Because the second occurrence stalls before any device work, the
+cheapest reproducer is now the *spawn* path alone — eight concurrent riscv64
+guests booting `init`'s service set, no NIC required.
 
 **Regression cover (lands with the fix, §7).** A host-side test for whichever
 wait or wake proves unbounded, plus the vertical passing at gate concurrency.

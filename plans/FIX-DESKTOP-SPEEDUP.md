@@ -567,7 +567,7 @@ press; over-grabbing only routes further events to a child that ignores them,
 which is what fan-to-all already did. A `#[cfg(test)] fan_pointer` oracle
 keeps the old delivery as the differential reference.
 
-### C.3 Apps present the rect they changed  **[`widgets` landed; five apps remain]**
+### C.3 Apps present the rect they changed  **[`widgets` and `terminal` landed; four apps remain]**
 
 No ABI change is required: the window ABI already carries a per-present
 `DamageRect` (`lib/window` `WindowClient::present`). The decision an app makes
@@ -611,7 +611,47 @@ there — a tab switch redrew a different panel while reporting nothing, a radio
 group's cleared siblings reported nothing, and after switching tabs the focus
 marks were resolved against the *previous* panel's rectangles.
 
-Still to do, in this order per app: `viewer`, `wallpaper`, `terminal`, `files`,
+**`userland/apps/terminal` is done, and its window reports from a *cell diff*
+rather than from control rounds.** A character grid has no control tree to
+report for it, so `render::Screen` retains the surface *and* the cells it was
+last painted from, and `Screen::paint` returns the block that differs. The
+recipe's three steps land as: retain the surface (it was allocated, zeroed and
+fully re-rendered per present — every one of the window's cells re-drawn for
+one keystroke); draw only the differing cells, which needs no clip because the
+loops are bounded by the block; and convert and present only that rectangle
+through the one `write_frame` the popup path shares. A keystroke went from
+~1900 glyph blits + a whole-window unpremultiply + whole-window damage to two
+glyph blits and a two-cell rectangle, and a wake that changed nothing presents
+nothing.
+
+Two things the diff cannot see for itself, so they are explicit
+`Screen::invalidate` calls: new colours or a new face (a profile, theme or
+scale change), and a session redraw request. A resize needs no call site at
+all — `present_frame` reconciles the picture to the `DisplayMode` that
+describes the frame region, so a surface and a region of different shapes
+cannot arise however a resize half-fails. A damaged block is widened to whole
+glyphs, so clobbering a wide glyph's continuation cell repaints its lead cell.
+Translucency and backdrop blur are *not* passes, so a see-through frosted
+terminal now types at cell-diff cost too — that is what closed the reported
+"blur on then off leaves it slower" case, whose real cause is that an opacity a
+hair below full is invisible on screen yet takes `unpremultiply`'s divide path
+and the compositor's blend path for every pixel of the window. The fix removes
+the cliff instead of snapping the slider to hide it.
+
+A screen effect *is* inherently whole-frame (wobble displaces rows, phosphor
+decays every pixel), so an active pass copies the finished screen into a reused
+buffer, runs there, and presents whole; the retained screen stays clean, so the
+next diff still describes the text and an animated terminal no longer
+re-renders the grid per frame. The buffer exists only while an effect is on.
+
+Both directions are tested, as the recipe demands: every pixel a repaint
+changes lies inside the rectangle it reported, *and* the retained surface stays
+byte-identical to a fresh whole-window paint — walked over a script that
+scrolls, recolours, erases, hides and shows the cursor, and clobbers wide
+glyphs. The tight direction is held by asserting the exact rectangle for a
+keystroke, a cursor reveal, and an unchanged grid (which reports nothing).
+
+Still to do, in this order per app: `viewer`, `wallpaper`, `files`,
 `switchboard`. Each needs its host-owned reports (a committed value, a focus mark
 — see C.1), its surface retained, and its own differential test; a model refresh
 that is not a control round (a clock tick, an animation, new service data, a

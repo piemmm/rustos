@@ -6,7 +6,7 @@
 //!
 //! Everything with behaviour worth testing lives in host-tested crates —
 //! the screen model and its `lib/vt`-consuming parser (`tairix_terminal`),
-//! the themed cell renderer (`tairix_terminal::render`), the user's profile
+//! the retained cell renderer (`tairix_terminal::render`), the user's profile
 //! and its document, the screen-effect pipeline, the right-click menu, the
 //! settings sheet, the spawned shell's pipe wiring, and the window channel's
 //! client half (`tairix_window`). This binary only composes them over the
@@ -64,7 +64,7 @@ mod program {
     use tairix_keymap::{encode_key_input, MAX_KEY_BYTES};
     use tairix_raster::Surface;
     use tairix_rt::io::{Stderr, Write};
-    use tairix_terminal::effects::{Afterglow, Phase};
+    use tairix_terminal::effects::{Afterglow, Effects, Phase};
     use tairix_terminal::layout::{
         fit_font_size, grid_dims, grid_size, snap_to_cells, window_size,
     };
@@ -73,7 +73,7 @@ mod program {
         parse as parse_profile, render as render_profile, user_profile_path, Profile,
         MAX_PROFILE_LEN,
     };
-    use tairix_terminal::render::render;
+    use tairix_terminal::render::Screen;
     use tairix_terminal::scheme::Painted;
     use tairix_terminal::settings::{preferred_extent, Settings, SheetOutcome};
     use tairix_terminal::{
@@ -83,7 +83,7 @@ mod program {
     use tairix_theme::{Theme, ThemeRegistry};
     use tairix_users::DEFAULT_SHELL;
     use tairix_window::{
-        event_endpoint_for, key_input_event, pointer_input_events, Desktop, PopupSpec,
+        damage_in, event_endpoint_for, key_input_event, pointer_input_events, Desktop, PopupSpec,
         WindowClient, WindowSizing, WindowTransport, EVENT_MAILBOX_CAPACITY,
     };
 
@@ -114,6 +114,10 @@ mod program {
     /// present (the app is parked in the call while the session reads),
     /// so a single frame is race-free; the constant names the choice.
     const FRAME_COUNT: u32 = 1;
+
+    /// Bytes per pixel of the [`mode_for`] surface format: the one definition
+    /// the stride and the frame writer both take it from.
+    const BYTES_PER_PIXEL: u32 = 4;
 
     /// The wait-set token of the event-mailbox member.
     const EVENT_TOKEN: u64 = 1;
@@ -147,7 +151,7 @@ mod program {
         DisplayMode {
             width_px,
             height_px,
-            stride_bytes: width_px.saturating_mul(4),
+            stride_bytes: width_px.saturating_mul(BYTES_PER_PIXEL),
             format: DisplayFormat::Rgba8888,
         }
     }
@@ -622,15 +626,57 @@ mod program {
         // present call below while the session reads the same frame.
         let frame =
             unsafe { core::slice::from_raw_parts_mut(overlay.base as *mut u8, overlay.len) };
-        for (i, pixel) in surface.pixels().iter().enumerate() {
-            let color = pixel.unpremultiply();
-            let at = i * 4;
-            let Some(slot) = frame.get_mut(at..at + 4) else {
-                return Err(Errno::LengthOutOfRange);
-            };
-            slot.copy_from_slice(&[color.r, color.g, color.b, color.a]);
-        }
+        write_frame(&surface, frame, &overlay.mode, viewport)?;
         client.present(overlay.window, 0, DamageRect::full(&overlay.mode))
+    }
+
+    /// Copy `area` of `surface` into the shared `frame` shaped as `mode`.
+    ///
+    /// The window channel carries straight-alpha bytes while a
+    /// [`Surface`] holds premultiplied pixels, so this is where the two meet.
+    /// One row address and one bounds check per row, not per pixel: this runs
+    /// over every damaged pixel of every repaint.
+    fn write_frame(
+        surface: &Surface,
+        frame: &mut [u8],
+        mode: &DisplayMode,
+        area: Rect,
+    ) -> Result<(), Errno> {
+        let clipped = area.intersection(&Rect::new(0, 0, surface.width(), surface.height()));
+        if clipped.is_empty() {
+            return Ok(());
+        }
+        let (Ok(x), Ok(y)) = (u32::try_from(clipped.left()), u32::try_from(clipped.top())) else {
+            return Err(Errno::OutOfRange);
+        };
+        let bpp = BYTES_PER_PIXEL as usize;
+        let columns = clipped.width as usize;
+        let width = surface.width() as usize;
+        let stride = mode.stride_bytes as usize;
+        let span = columns.checked_mul(bpp).ok_or(Errno::OutOfRange)?;
+        let start = (x as usize).checked_mul(bpp).ok_or(Errno::OutOfRange)?;
+        let pixels = surface.pixels();
+        for row in y..y.saturating_add(clipped.height) {
+            let source = (row as usize)
+                .checked_mul(width)
+                .and_then(|offset| offset.checked_add(x as usize))
+                .ok_or(Errno::OutOfRange)?;
+            let target = (row as usize)
+                .checked_mul(stride)
+                .and_then(|offset| offset.checked_add(start))
+                .ok_or(Errno::OutOfRange)?;
+            let (Some(read), Some(write)) = (
+                pixels.get(source..source.saturating_add(columns)),
+                frame.get_mut(target..target.saturating_add(span)),
+            ) else {
+                return Err(Errno::OutOfRange);
+            };
+            for (pixel, slot) in read.iter().zip(write.chunks_exact_mut(bpp)) {
+                let color = pixel.unpremultiply();
+                slot.copy_from_slice(&[color.r, color.g, color.b, color.a]);
+            }
+        }
+        Ok(())
     }
 
     /// Everything the program holds about how the screen currently looks.
@@ -643,12 +689,19 @@ mod program {
         font: BitmapFont,
         /// The colours the screen is painted with.
         painted: Painted,
+        /// The effect pipeline in force, held beside the colours it was
+        /// resolved with so a frame cannot be drawn under one profile and
+        /// post-processed under another.
+        effects: Effects,
         /// The desktop scale everything above was sized at.
         scale: Scale,
         /// The animation step the effects are drawn at.
         phase: Phase,
         /// The persistence state the phosphor effect carries between frames.
         afterglow: Afterglow,
+        /// Where the effect pipeline runs, so it never accumulates into the
+        /// retained screen. Held only while an effect is in force.
+        effected: Option<Surface>,
     }
 
     impl Look {
@@ -664,14 +717,18 @@ mod program {
                     theme,
                     profile.effects.background_alpha(),
                 ),
+                effects: profile.effects,
                 scale: desktop.scale(),
                 phase: Phase::default(),
                 afterglow: Afterglow::new(),
+                effected: None,
             }
         }
 
         /// Adopt a changed profile or desktop, forgetting the afterglow so a
-        /// trail of the old screen cannot ghost over the new one.
+        /// trail of the old screen cannot ghost over the new one, and the
+        /// effect buffer so a terminal whose effects were switched off stops
+        /// holding a screen's worth of pixels.
         fn refresh(&mut self, profile: &Profile, theme: &Theme, desktop: &Desktop) {
             let phase = self.phase;
             *self = Self::resolve(profile, theme, desktop);
@@ -679,19 +736,29 @@ mod program {
         }
     }
 
-    /// Render the terminal screen into `frame` and present the whole window.
+    /// Bring the retained screen up to date, copy what changed into `frame`,
+    /// and present that rectangle.
+    ///
+    /// **Only the cells that changed are drawn, copied, and presented.** A
+    /// keystroke costs the cell it wrote and the two the cursor moved
+    /// between; a shell write that scrolls costs the grid. A wake that
+    /// changed nothing presents nothing at all, so it costs the session no
+    /// composite either.
+    ///
+    /// A screen effect is a whole-frame post-process — a wobble displaces
+    /// rows and a phosphor trail decays every pixel — so when one is in force
+    /// the finished screen is copied into [`Look::effected`], the passes run
+    /// there, and the whole window is presented. The retained screen itself
+    /// stays clean, so the next frame's diff still describes the *text*
+    /// rather than the effect's own churn.
     ///
     /// An open overlay is *not* drawn here: it lives in its own popup window
-    /// above this one, so the screen effects below can never wobble a menu or
-    /// a settings control, and shrinking this window cannot clip one.
-    ///
-    /// The full-window damage is deliberate: a shell write can scroll the
-    /// whole grid, and the surface is one window — not a screen — so the
-    /// copy is small.
+    /// above this one, so the screen effects can never wobble a menu or a
+    /// settings control, and shrinking this window cannot clip one.
     fn present_frame<S, T>(
         terminal: &Terminal<S>,
-        profile: &Profile,
         look: &mut Look,
+        screen: &mut Screen,
         client: &mut WindowClient<T>,
         window: u64,
         frame: &mut [u8],
@@ -701,23 +768,65 @@ mod program {
         S: ShellSource,
         T: WindowTransport,
     {
-        let viewport = Rect::new(0, 0, mode.width_px, mode.height_px);
-        let mut surface =
-            render(terminal, &look.painted, viewport, look.font).ok_or(Errno::LengthOutOfRange)?;
-        profile.effects.apply(
-            &mut surface,
+        // `mode` is the one truth about the window's extent, so the picture
+        // is reconciled to it here rather than at each site that changes it:
+        // a surface and a frame region of different shapes cannot arise.
+        let shaped = screen.surface().width() == mode.width_px
+            && screen.surface().height() == mode.height_px;
+        if !shaped && !screen.resize(mode.width_px, mode.height_px) {
+            return Err(Errno::LengthOutOfRange);
+        }
+        let damage = screen.paint(terminal.grid(), &look.painted, look.font);
+        let (_, passes) = look.effects.passes(look.scale.percent());
+        if passes == 0 {
+            if damage.is_empty() {
+                return Ok(());
+            }
+            write_frame(screen.surface(), frame, mode, damage)?;
+            let Some(rect) = damage_in(mode, damage) else {
+                // The damage lies outside the window the session knows about,
+                // so these pixels were never shown: repaint whole next frame
+                // rather than leave the surface silently ahead of the screen.
+                screen.invalidate();
+                return Ok(());
+            };
+            return client.present(window, 0, rect);
+        }
+        // Reused between frames, so an animated terminal allocates once
+        // rather than once a frame; a resize is what makes it stale.
+        let clean = screen.surface();
+        let held = match look.effected.take() {
+            Some(held) if held.width() == clean.width() && held.height() == clean.height() => {
+                Some(held)
+            }
+            _ => Surface::new(clean.width(), clean.height()),
+        };
+        // A refused buffer costs the effect, never the terminal: present the
+        // plain screen rather than exiting over decoration.
+        let Some(mut effected) = held else {
+            write_frame(
+                clean,
+                frame,
+                mode,
+                Rect::new(0, 0, mode.width_px, mode.height_px),
+            )?;
+            return client.present(window, 0, DamageRect::full(mode));
+        };
+        effected.overwrite(0, 0, clean);
+        look.effects.apply(
+            &mut effected,
             &mut look.afterglow,
             look.phase,
             look.scale.percent(),
         );
-        for (i, pixel) in surface.pixels().iter().enumerate() {
-            let color = pixel.unpremultiply();
-            let at = i * 4;
-            let Some(slot) = frame.get_mut(at..at + 4) else {
-                return Err(Errno::LengthOutOfRange);
-            };
-            slot.copy_from_slice(&[color.r, color.g, color.b, color.a]);
-        }
+        let written = write_frame(
+            &effected,
+            frame,
+            mode,
+            Rect::new(0, 0, mode.width_px, mode.height_px),
+        );
+        look.effected = Some(effected);
+        written?;
         client.present(window, 0, DamageRect::full(mode))
     }
 
@@ -767,8 +876,8 @@ mod program {
         themes.set_appearance(desktop.appearance());
         let mut theme = themes.active();
         let mut look = Look::resolve(&profile, theme, &desktop);
-        let screen = (desktop.screen_width_px(), desktop.screen_height_px());
-        let (w, h) = window_size(look.font, screen, theme, desktop.scale());
+        let output = (desktop.screen_width_px(), desktop.screen_height_px());
+        let (w, h) = window_size(look.font, output, theme, desktop.scale());
         let (cols, rows) = grid_dims(w, h, look.font);
 
         // --- The hosted shell: one pseudo-terminal, then the spawn wiring
@@ -814,6 +923,12 @@ mod program {
         );
         let Some(mut terminal) = Terminal::new(cols, rows, source) else {
             return fail(EXIT_NO_SHELL, "screen grid refused");
+        };
+
+        // --- The retained window picture. Kept between frames so a repaint
+        // costs the cells that changed rather than the whole window.
+        let Some(mut screen) = Screen::new(w, h) else {
+            return fail(EXIT_NO_FRAMES, "screen surface refused");
         };
 
         // --- Open the window and paint the first frame.
@@ -914,8 +1029,8 @@ mod program {
         let mut overlay: Option<Overlay> = None;
         if present_frame(
             &terminal,
-            &profile,
             &mut look,
+            &mut screen,
             &mut client,
             window,
             frames,
@@ -948,8 +1063,8 @@ mod program {
                     look.phase = look.phase.advance();
                     if present_frame(
                         &terminal,
-                        &profile,
                         &mut look,
+                        &mut screen,
                         &mut client,
                         window,
                         frames,
@@ -1022,10 +1137,14 @@ mod program {
                             }
                         }
                         EventOutcome::Repaint => {
+                            // The session dropped this window's pixels (a
+                            // redraw request) or the grid was blanked, so the
+                            // retained picture cannot be trusted.
+                            screen.invalidate();
                             if present_frame(
                                 &terminal,
-                                &profile,
                                 &mut look,
+                                &mut screen,
                                 &mut client,
                                 window,
                                 frames,
@@ -1048,10 +1167,13 @@ mod program {
                             let _ = terminal.resize(cols, rows);
                             let _ = tairix_rt::pty_set_size(pty_master, rows, cols);
                             persist_profile(store.as_deref(), &profile);
+                            // New colours or a new face: every retained pixel
+                            // is stale, and the diff cannot see either.
+                            screen.invalidate();
                             if present_frame(
                                 &terminal,
-                                &profile,
                                 &mut look,
+                                &mut screen,
                                 &mut client,
                                 window,
                                 frames,
@@ -1130,8 +1252,8 @@ mod program {
                                 look.afterglow.clear();
                                 if present_frame(
                                     &terminal,
-                                    &profile,
                                     &mut look,
+                                    &mut screen,
                                     &mut client,
                                     window,
                                     frames,
@@ -1155,10 +1277,13 @@ mod program {
                             let (cols, rows) = grid_dims(mode.width_px, mode.height_px, look.font);
                             let _ = terminal.resize(cols, rows);
                             let _ = tairix_rt::pty_set_size(pty_master, rows, cols);
+                            // A new appearance or scale: new colours and a new
+                            // face, so nothing retained still holds.
+                            screen.invalidate();
                             if present_frame(
                                 &terminal,
-                                &profile,
                                 &mut look,
+                                &mut screen,
                                 &mut client,
                                 window,
                                 frames,
@@ -1192,8 +1317,8 @@ mod program {
                     Ok(_) => {
                         if present_frame(
                             &terminal,
-                            &profile,
                             &mut look,
+                            &mut screen,
                             &mut client,
                             window,
                             frames,
@@ -1237,8 +1362,8 @@ mod program {
                     while terminal.pump().is_ok() {}
                     let _ = present_frame(
                         &terminal,
-                        &profile,
                         &mut look,
+                        &mut screen,
                         &mut client,
                         window,
                         frames,
@@ -1273,8 +1398,9 @@ mod program {
     enum EventOutcome {
         /// Every pending event was applied and nothing on screen changed.
         Continue,
-        /// Something on the terminal's own screen changed; repaint and
-        /// present its window.
+        /// The whole window must be repainted: the session dropped this
+        /// window's pixels and asked for them again, or the grid was blanked
+        /// outright. Anything the retained picture still holds is discarded.
         Repaint,
         /// Only the open overlay's own pixels changed; re-present its popup
         /// and leave the terminal's window alone.
