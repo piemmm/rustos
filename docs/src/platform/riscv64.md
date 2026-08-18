@@ -191,9 +191,14 @@ which `arm` the device source, install the trap dispatch, and call
   supervisor external interrupt forwards to the one-shot PLIC dispatch
   callback (claim → `IrqTable::fire` → complete), a supervisor timer
   interrupt drives the scheduler tick, and any other synchronous
-  exception is forwarded to the installed `fault::FaultHandlerFn`
-  (passing `scause`/`stval`/`sepc`) if one is present, otherwise fails
-  closed (parks the hart).
+  exception reaches `trap::fatal_exception`, which charges it to whoever
+  caused it. One taken from U-mode goes to the installed
+  `fault::UserFaultTerminateFn`, which kills that task and leaves the hart
+  running — a wild jump or an illegal instruction costs its process, never
+  the machine. An S-mode one, or a U-mode one that could not be attributed
+  to a running task, is the kernel's own: it is forwarded to the installed
+  `fault::FaultHandlerFn` (passing `scause`/`stval`/`sepc`) if one is
+  present, otherwise fails closed (parks the hart).
 
 ### Per-task kernel stack + frame-resident return state (`trap.s`)
 
@@ -218,8 +223,27 @@ The vector therefore:
   stack. `userentry::enter_user` arms `sscratch` before its first `sret`;
   `init_traps` zeroes it at boot; the vector re-arms it on every
   U-return and forces it to 0 for the duration of every handler.
-- **Saves `sepc`/`sstatus`/`sp` into the per-trap frame** (160 bytes,
-  the GP-register offsets unchanged so the `[u64; …]` syscall view is
+
+  Because that swap is the *only* thing distinguishing a U-mode trap from
+  an S-mode one, S-mode interrupts must be masked wherever `sscratch` is
+  armed. An interrupt taken in S-mode while it is non-zero is misread as a
+  U-mode trap: it builds its frame on the armed stack top, clobbering the
+  caller's own frame, and returns down the S-mode path — which does not
+  re-arm, so `sscratch` is left 0 and the task runs in U-mode with no
+  kernel stack armed, every later trap of it landing on its own *user*
+  stack. Both arming sites hold that line: the vector's U-return epilogue
+  restores the frame's saved `sstatus` (hardware cleared `SIE` on trap
+  entry, so the saved copy always has it clear) before re-arming, and
+  `enter_user` clears `sstatus.SIE` in the same `csrc` that aims the `sret`
+  at U-mode, ahead of the arm. Interrupts are deliberately *enabled* inside
+  the syscall body, so a long `ecall` cannot monopolise the hart; that is
+  safe precisely because `sscratch` is 0 for the whole handler, so a nested
+  S-mode trap is classified correctly. `sret_tests.rs` pins both orderings
+  against their sources, since neither runs on the host and the window is a
+  race no target test can reliably enter.
+- **Saves `sepc`/`sstatus`/`sp` into the per-trap frame** (256 bytes since
+  the callee-saved set joined it, the GP-register offsets unchanged so the
+  `[u64; …]` syscall view is
   intact) and reloads them before `sret`, choosing the U-mode vs S-mode
   return path from the saved `sstatus.SPP`. Each exception's resume is
   thus self-contained across a cooperative context switch. The syscall

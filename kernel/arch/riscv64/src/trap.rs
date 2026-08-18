@@ -358,6 +358,17 @@ pub unsafe fn wait_for_interrupt() {
     }
 }
 
+/// Read `stval` — the faulting address of the trap being handled.
+#[cfg(all(target_arch = "riscv64", target_os = "none"))]
+fn read_stval() -> u64 {
+    let stval: u64;
+    // SAFETY: reading `stval` has no side effects.
+    unsafe {
+        core::arch::asm!("csrr {}, stval", out(reg) stval, options(nomem, nostack));
+    }
+    stval
+}
+
 /// Build the faulting-thread [`tairix_arch_api::backtrace::UserRegisterFrame`]
 /// from the saved [`TrapFrame`].
 ///
@@ -427,9 +438,11 @@ unsafe fn user_register_frame(
 ///   guarded user-copy fault window ([`crate::uaccess`]) is redirected
 ///   to the copy's fix-up (the frame's `sepc` is rewritten), so the copy
 ///   returns an error instead of the hart halting.
-/// * Any other synchronous exception is unexpected in this slice and
-///   fails closed by parking the hart rather than `sret`-looping on the
-///   faulting instruction (never silently reset).
+/// * Any other synchronous exception cannot be resumed — an `sret` would
+///   loop on the faulting instruction — so [`fatal_exception`] charges it to
+///   whoever caused it: one taken from U-mode kills the running task through
+///   [`crate::fault::UserFaultTerminateFn`] and the hart carries on, while
+///   one taken from S-mode parks the hart (never silently reset).
 ///
 /// `frame` is the saved-register frame the asm vector built; the
 /// syscall path reads the user's `a0`–`a7` from it and writes the
@@ -528,13 +541,7 @@ unsafe extern "C" fn tairix_riscv64_trap_handler(frame: *mut TrapFrame) {
             None
         };
         if let Some(kind) = ad_kind {
-            let stval: u64;
-            // SAFETY: reading `stval` (the faulting address) has no side
-            // effects.
-            unsafe {
-                core::arch::asm!("csrr {}, stval", out(reg) stval, options(nomem, nostack));
-            }
-            if crate::paging::set_accessed_flag_in_active(stval, kind) {
+            if crate::paging::set_accessed_flag_in_active(read_stval(), kind) {
                 return;
             }
         }
@@ -553,8 +560,6 @@ unsafe extern "C" fn tairix_riscv64_trap_handler(frame: *mut TrapFrame) {
         // into the scheduler with an exit action); `false` falls through
         // to the fatal path below, exactly as with no resolver installed
         // (fail closed).
-        // SAFETY: `frame` is the live saved-register frame the asm vector
-        // passed; reading its saved `sstatus` is sound.
         let write_fault = crate::fault::is_store_page_fault(scause);
         if crate::fault::is_load_page_fault(scause) || write_fault {
             // SAFETY: `frame` is the live saved-register frame; reading
@@ -562,12 +567,6 @@ unsafe extern "C" fn tairix_riscv64_trap_handler(frame: *mut TrapFrame) {
             let from_user = trap_came_from_user(unsafe { (*frame).sstatus });
             if from_user {
                 if let Some(resolver) = crate::fault::user_fault_resolver() {
-                    let stval: u64;
-                    // SAFETY: reading `stval` (the faulting address) has no
-                    // side effects.
-                    unsafe {
-                        core::arch::asm!("csrr {}, stval", out(reg) stval, options(nomem, nostack));
-                    }
                     // Capture the faulting U-mode register frame from the
                     // saved trap frame so the resolver can record a
                     // post-mortem crash record with a backtrace. It lives on
@@ -576,7 +575,7 @@ unsafe extern "C" fn tairix_riscv64_trap_handler(frame: *mut TrapFrame) {
                     // asm vector passed, which now saves the callee-saved
                     // set (incl. s0=fp) as well as the caller-saved GPRs.
                     let user_frame = unsafe { user_register_frame(frame) };
-                    if resolver(stval, write_fault, &raw const user_frame) {
+                    if resolver(read_stval(), write_fault, &raw const user_frame) {
                         return;
                     }
                 }
@@ -598,25 +597,12 @@ unsafe extern "C" fn tairix_riscv64_trap_handler(frame: *mut TrapFrame) {
             }
         }
 
-        // Any other synchronous exception (a page fault, an access
-        // fault, an illegal instruction) is unrecoverable in this slice:
-        // returning would re-execute the faulting instruction forever.
-        // Forward it to the installed fault handler if one is present
-        // (the memory-isolation vertical installs one to confirm an
-        // attacker faulted on an isolated address); otherwise fail closed
-        // by parking the hart.
-        if let Some(handler) = crate::fault::fault_handler() {
-            let stval: u64;
-            let sepc: u64;
-            // SAFETY: reading `stval` (the faulting address) and `sepc`
-            // (the faulting PC) has no side effects.
-            unsafe {
-                core::arch::asm!("csrr {}, stval", out(reg) stval, options(nomem, nostack));
-                core::arch::asm!("csrr {}, sepc", out(reg) sepc, options(nomem, nostack));
-            }
-            handler(scause, stval, sepc);
-        }
-        crate::kernel_arch::halt_current_hart();
+        // Any other synchronous exception (a page fault, an access fault,
+        // an illegal instruction) cannot be resumed: returning would
+        // re-execute the faulting instruction forever.
+        // SAFETY: `frame` is the live saved-register frame the asm vector
+        // passed, valid for the rest of this trap.
+        unsafe { fatal_exception(scause, frame) }
     }
 
     // Whether the interrupted context was U-mode (the saved `SPP == 0`),
@@ -673,6 +659,54 @@ unsafe extern "C" fn tairix_riscv64_trap_handler(frame: *mut TrapFrame) {
         crate::preempt::on_u_mode_preempt_point(crate::smp::current_hartid());
     }
 }
+
+/// The unrecoverable tail of the synchronous-exception path.
+///
+/// A U-mode exception is the running task's fault, so the installed
+/// [`crate::fault::UserFaultTerminateFn`] kills that task and never returns
+/// — a wild jump or an illegal instruction costs its process, never the
+/// machine. A `false` return means the exception could not be attributed to
+/// a running task; that, and every S-mode exception, is the kernel's own and
+/// genuinely unrecoverable, so the installed [`crate::fault::FaultHandlerFn`]
+/// gets it (the memory-isolation vertical installs one to confirm an attacker
+/// faulted on an isolated address) and otherwise the hart parks — never a
+/// silent reset. With no terminator installed a U-mode fault takes that same
+/// fatal path, so a missing install can only be safe (fail closed).
+///
+/// # Safety
+///
+/// `frame` must point to the live [`TrapFrame`] the asm vector built, valid
+/// for the duration of the call.
+#[cfg(all(target_arch = "riscv64", target_os = "none"))]
+unsafe fn fatal_exception(scause: u64, frame: *const TrapFrame) -> ! {
+    // Read the faulting address before any callback runs: unlike `sepc`,
+    // `stval` is not frame-resident, so a nested S-mode trap taken inside a
+    // callback would leave the handler below reporting that trap's address.
+    let stval = read_stval();
+    // SAFETY: the caller guarantees `frame` addresses the live saved frame.
+    let (sstatus, sepc) = unsafe { ((*frame).sstatus, (*frame).sepc) };
+    if trap_came_from_user(sstatus) {
+        if let Some(terminate) = crate::fault::user_fault_terminator() {
+            // The frame lives on this kernel stack across the call, so the
+            // terminator can record a post-mortem crash record with a
+            // backtrace.
+            // SAFETY: as above.
+            let user_frame = unsafe { user_register_frame(frame) };
+            let _ = terminate(sepc, &raw const user_frame);
+        }
+    }
+    if let Some(handler) = crate::fault::fault_handler() {
+        handler(scause, stval, sepc);
+    }
+    crate::kernel_arch::halt_current_hart();
+}
+
+/// The ordering invariant of this port's two `sret` sequences, pinned
+/// against their sources: the vector's U-return epilogue and the U-mode
+/// entry both mask S-mode interrupts before they arm `sscratch`.
+#[cfg(test)]
+#[path = "sret_tests.rs"]
+mod sret_tests;
 
 #[cfg(test)]
 mod tests {

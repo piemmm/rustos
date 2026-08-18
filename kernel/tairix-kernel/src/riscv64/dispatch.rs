@@ -104,6 +104,43 @@ pub extern "C" fn production_user_fault(
 const _USER_FAULT_SIGNATURE_PINNED: tairix_arch_riscv64::fault::UserFaultResolveFn =
     production_user_fault;
 
+/// Production user-fault **terminator** callback installed beside the
+/// resolver before user space is entered.
+///
+/// The riscv64 trap handler calls this for a U-mode synchronous exception it
+/// can neither treat as a syscall nor resolve as a demand-paged fault — an
+/// instruction page fault from a wild jump, an illegal instruction, a
+/// misaligned access (`tairix_arch_riscv64::fault::UserFaultTerminateFn`).
+/// The arch-neutral terminate sequence lives in
+/// [`crate::dispatch_core::terminate_user_fault_via_slot`]: no resolution is
+/// attempted (retrying the instruction would re-take the exception forever),
+/// so it records the crash exit, reclaims the task, and suspends it with an
+/// exit action — the call never returns for the killed task, so the offending
+/// task dies and the hart stays alive. `false` means the exception could not
+/// be attributed to a running task, sending the trap handler to its fatal
+/// path (fail closed).
+///
+/// `fault_pc` is the interrupted `sepc`; `regs` is the faulting U-mode
+/// register frame the trap handler captured (or null), forwarded for the
+/// post-mortem crash record.
+#[must_use = "the verdict decides whether the trap handler halts or the killed task's suspension carried the hart away"]
+#[allow(clippy::not_unsafe_ptr_arg_deref)]
+pub extern "C" fn production_user_fault_terminate(
+    fault_pc: u64,
+    regs: *const tairix_arch_api::backtrace::UserRegisterFrame,
+) -> bool {
+    // SAFETY: the trap handler builds the frame on its own kernel stack and
+    // holds it live across this call, or passes null; the slot helper
+    // narrows the pointer with `as_ref` and never dereferences null.
+    unsafe { crate::dispatch_core::terminate_user_fault_via_slot(&DISPATCH_SLOT, fault_pc, regs) }
+}
+
+// SAFETY-INVARIANT: [`production_user_fault_terminate`] is a valid
+// [`tairix_arch_riscv64::fault::UserFaultTerminateFn`]. The compile-time
+// coercion fails to type-check if the ABI or signature ever drifts.
+const _USER_FAULT_TERMINATE_SIGNATURE_PINNED: tairix_arch_riscv64::fault::UserFaultTerminateFn =
+    production_user_fault_terminate;
+
 /// Halt the hart forever (the riscv64 fail-closed branch).
 ///
 /// Wrapped behind a non-test indirection so host tests can replace the

@@ -4,10 +4,14 @@
 //! the syscall path and a supervisor timer / external interrupt to their
 //! dispatchers. Every *other* synchronous exception — an instruction,
 //! load, or store/AMO page fault, an access fault, an illegal
-//! instruction — is, by default, unrecoverable in this kernel slice:
-//! resuming the faulting instruction without fix-up logic would re-trap
-//! forever, so the trap path parks the hart (never
-//! silently reset).
+//! instruction — cannot be resumed without fix-up logic, since re-running
+//! the faulting instruction would re-trap forever.
+//!
+//! Who pays for it depends on where it came from. One taken from U-mode is
+//! the running task's fault, so [`UserFaultTerminateFn`] kills that task and
+//! the hart carries on; one taken from S-mode is the kernel's own and is
+//! genuinely unrecoverable, so the trap path parks the hart (never silently
+//! reset).
 //!
 //! A single fault handler may be installed through [`set_fault_handler`]
 //! before any fault can fire; the trap path then invokes it, passing the
@@ -220,6 +224,69 @@ fn clear_user_fault_resolver_for_tests() {
     USER_FAULT_RESOLVER.store(0, Ordering::Release);
 }
 
+/// Signature of the user-fault terminator the trap path calls for a U-mode
+/// synchronous exception it can neither treat as a syscall nor resolve.
+///
+/// No resolution is attempted — retrying the faulting instruction would
+/// re-take the exception forever — so the callback records the crash exit
+/// and suspends the task with an exit action, exactly like a rescheduling
+/// syscall, and never returns for the killed task. A `false` return means
+/// the exception could not be attributed to a running task, which sends the
+/// trap path to its fatal handler (fail closed).
+///
+/// `fault_pc` is the interrupted `sepc` and `regs` the faulting U-mode
+/// register frame the trap path captured (or null), forwarded for the
+/// post-mortem crash record. Like every trap-path callback it is a bare
+/// `extern "C" fn` with no captured environment.
+pub type UserFaultTerminateFn =
+    extern "C" fn(fault_pc: u64, regs: *const UserRegisterFrame) -> bool;
+
+/// Slot holding the installed user-fault terminator as a raw function
+/// pointer (`0` = none installed).
+static USER_FAULT_TERMINATOR: AtomicUsize = AtomicUsize::new(0);
+
+/// Install the user-fault terminator.
+///
+/// Must be called once, on the boot hart, before user space is entered
+/// (beside [`set_user_fault_resolver`]). Without one installed an
+/// unrecoverable U-mode exception takes the fatal path (halt) — fail closed,
+/// exactly as before this path existed, so the omission can never widen
+/// what a faulting task is allowed to survive.
+///
+/// # Errors
+///
+/// [`SetFaultHandlerError::AlreadyInstalled`] on the second publish.
+pub fn set_user_fault_terminator(cb: UserFaultTerminateFn) -> Result<(), SetFaultHandlerError> {
+    let raw = cb as usize;
+    USER_FAULT_TERMINATOR
+        .compare_exchange(0, raw, Ordering::AcqRel, Ordering::Acquire)
+        .map(|_| ())
+        .map_err(|_| SetFaultHandlerError::AlreadyInstalled)
+}
+
+/// Read back the installed user-fault terminator, if any. The trap path
+/// calls this on an unresolved U-mode synchronous exception; it is also a
+/// test/diagnostic observer.
+#[must_use]
+pub fn user_fault_terminator() -> Option<UserFaultTerminateFn> {
+    let raw = USER_FAULT_TERMINATOR.load(Ordering::Acquire);
+    if raw == 0 {
+        None
+    } else {
+        // SAFETY: every value stored into the slot round-trips a valid
+        // `UserFaultTerminateFn` through `set_user_fault_terminator`;
+        // function pointers are `usize`-sized so the transmute is lossless.
+        Some(unsafe { core::mem::transmute::<usize, UserFaultTerminateFn>(raw) })
+    }
+}
+
+#[cfg(test)]
+fn clear_user_fault_terminator_for_tests() {
+    // Test-only: lets back-to-back host tests reinstall a terminator.
+    // Production code never clears the slot.
+    USER_FAULT_TERMINATOR.store(0, Ordering::Release);
+}
+
 #[cfg(test)]
 fn clear_fault_handler_for_tests() {
     // Test-only: lets back-to-back host tests reinstall a handler.
@@ -313,6 +380,32 @@ mod tests {
             Err(SetFaultHandlerError::AlreadyInstalled)
         );
         clear_user_fault_resolver_for_tests();
+    }
+
+    extern "C" fn host_user_fault_terminator(
+        _fault_pc: u64,
+        _regs: *const UserRegisterFrame,
+    ) -> bool {
+        false
+    }
+
+    #[test]
+    fn user_fault_terminator_slot_is_set_once_and_round_trips() {
+        clear_user_fault_terminator_for_tests();
+        assert!(user_fault_terminator().is_none());
+
+        set_user_fault_terminator(host_user_fault_terminator).expect("first install");
+        let got = user_fault_terminator().expect("terminator present");
+        assert_eq!(
+            got as *const () as usize,
+            host_user_fault_terminator as *const () as usize
+        );
+
+        assert_eq!(
+            set_user_fault_terminator(host_user_fault_terminator),
+            Err(SetFaultHandlerError::AlreadyInstalled)
+        );
+        clear_user_fault_terminator_for_tests();
     }
 
     extern "C" fn host_fault_handler(_scause: u64, _stval: u64, _sepc: u64) -> ! {

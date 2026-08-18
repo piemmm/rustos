@@ -44,10 +44,20 @@
 #   2. The frame is 16-byte aligned (256 bytes) per the riscv64 ABI; the
 #      `offset_of!` asserts in `syscall_entry_tests.rs` pin every field
 #      offset against the stores/loads below.
-#   3. Interrupts stay disabled for the whole handler (hardware clears
-#      `sstatus.SIE` on trap entry; `sret` restores the pre-trap value
-#      from `sstatus.SPIE`), so no nested trap occurs while `sscratch`
-#      is transiently 0 mid-handler.
+#   3. Wherever `sscratch` is armed (non-zero), S-mode interrupts are
+#      masked. The entry swap is the only from-U/from-S discriminator, so
+#      an S-mode interrupt taken with `sscratch` armed is misread as a
+#      U-mode trap: it builds its frame on the armed top, clobbering the
+#      interrupted frame, and returns down the S path, which does not
+#      re-arm — leaving the task running in U-mode with no kernel stack
+#      armed. Both arming sites hold the line: the U-return below writes
+#      the frame's saved `sstatus` (hardware cleared `SIE` on entry, so
+#      the saved copy always has it clear) before its `csrw sscratch`, and
+#      `userentry::enter_user` clears `SIE` before its own arm.
+#      A syscall body *does* deliberately enable `SIE` mid-handler so a
+#      long `ecall` cannot monopolise the hart; that is safe only because
+#      `sscratch` is 0 for the whole handler, which is why the
+#      `csrw sscratch, zero` below is not optional.
 
 .equ TRAP_FRAME_SIZE, 256
 .equ OFF_SEPC,    224

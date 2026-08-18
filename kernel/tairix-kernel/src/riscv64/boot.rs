@@ -75,7 +75,9 @@ use tairix_kernel_sched_api::SchedulerConfig;
 use tairix_log::{log, Event, EventId, Field, Level, Sink, TeeSink};
 use tairix_sync::InterruptControl;
 
-use crate::riscv64::dispatch::{production_dispatch, production_user_fault, DISPATCH_SLOT};
+use crate::riscv64::dispatch::{
+    production_dispatch, production_user_fault, production_user_fault_terminate, DISPATCH_SLOT,
+};
 
 /// Logical CPU id of the boot hart for the single-hart slice.
 const BOOT_CPU: CpuId = 0;
@@ -859,6 +861,18 @@ pub fn boot(
     // would be a programmer error, so it parks fail-closed rather than
     // running with an unpredictable fault path.
     if tairix_arch_riscv64::fault::set_user_fault_resolver(production_user_fault).is_err() {
+        halt_current_hart()
+    }
+    // Beside the resolver, install the terminator the trap handler uses for a
+    // U-mode exception it cannot resolve (a wild jump's instruction page
+    // fault, an illegal instruction, a misaligned access): it kills the
+    // offending task and keeps the hart alive, so one task's bad instruction
+    // can never park a core. Installed once, before user space; a second
+    // publish is a programmer error that parks fail-closed rather than
+    // running with an unpredictable fault path.
+    if tairix_arch_riscv64::fault::set_user_fault_terminator(production_user_fault_terminate)
+        .is_err()
+    {
         halt_current_hart()
     }
 

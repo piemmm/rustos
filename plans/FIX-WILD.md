@@ -25,11 +25,10 @@ Stage 2/3 wiring — validated integration map (design, not yet coded):
 - **Per-arch frame availability:** aarch64's EL1 vector (`vectors.s`) already
   saves the whole user frame (x0–x30 incl. x29=fp, ELR=pc, SP_EL0=sp) at the
   base the trap handler holds — no assembly change, fp-backtrace lights up
-  immediately. riscv64's `trap::TrapFrame` saves only caller-saved regs and
-  **omits `s0`/x8** (the fp), so its fp-backtrace needs `trap.s` extended to
-  save the callee-saved set (offset asserts updated); until then riscv64
-  captures pc/sp with `fp_valid=false`. x86_64 needs the same check on its
-  interrupt stub.
+  immediately. riscv64's `trap::TrapFrame` was extended to save the
+  callee-saved set too (`s0`/x8 = fp included, offset asserts updated), so its
+  fp-backtrace is live as well. x86_64 needs the same check on its interrupt
+  stub.
 - **User-stack walk** reuses the shared `tairix_arch_api::backtrace::walk`
   (never a copy) over a `copy_in`-backed fallible `StackReader`; kernel-core
   reaches the faulting task's space+physmap via
@@ -64,13 +63,10 @@ Stage 2 implementation notes — validated against the code (coded next):
   - *aarch64:* `vectors.s` already saves the whole EL0 frame — frame index
     `x29`=fp @ 29, `ELR_EL1`=pc @ 31, `SP_EL0`=sp @ 33 (byte 264, two words
     past `ELR_FRAME_INDEX`). No assembly change; `fp_valid = true`.
-  - *riscv64:* `trap::TrapFrame` (160 B) saves only `ra`/`t*`/`a*` +
-    `sepc`/`sstatus`/`user_sp` and **omits the callee-saved set incl. `s0`
-    (=fp)**. `trap.s` must grow the frame to save `s0`..`s11` (add fields +
-    `offset_of!` asserts). This is a full-GPR save on trap entry, exactly
-    what Linux's `pt_regs` does — a handful of stores, the sanctioned cost;
-    until it lands, riscv64 sets `fp_valid = false` (pc/sp only). `sepc` is
-    the pc, `user_sp` the sp.
+  - *riscv64:* `trap::TrapFrame` saves `ra`/`t*`/`a*` + `s0`..`s11` +
+    `sepc`/`sstatus`/`user_sp` — the full-GPR save on trap entry Linux's
+    `pt_regs` does, pinned by the `offset_of!` asserts against `trap.s`. `s0`
+    is the fp, `sepc` the pc, `user_sp` the sp; `fp_valid = true`.
   - *x86_64:* the `#PF` stub calls `tairix_arch_x86_64_page_fault_dispatch(
     err, cr2, rip, rip_slot)` — it must also pass `*const
     interrupts::SavedRegs` (r8, = `%rsp` before the `subq $8`, giving `rbp`

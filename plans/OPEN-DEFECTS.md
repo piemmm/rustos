@@ -446,16 +446,19 @@ The open items, in priority order:
   by a ceiling derived from a silence budget that describes no part of a
   whole-RAM sweep. All fixed structurally, none by a retry. Does **not**
   close D14, whose 120 s is an inactivity budget, not a ceiling.
-- **D39 — `netstack-bond-qemu-riscv64` stalled dead after the NIC driver
-  was spawned (OPEN).** One gate run went silent for its whole 240 s
-  *inactivity* budget, the transcript stopping at `id=4030 process spawned`
-  for the first bound NIC — a bond needs two. Measured: passes alone in
-  8.6 s, passes under 3× host oversubscription in 28.0 s still narrating,
-  silent for 240 s at the gate's eight-guest concurrency. That is the D22
-  signature (a fixed-point stall, not starvation), so the green solo run
-  closes nothing. Suspected an unbounded wait or a stranded deferred wake on
-  the riscv64 driver-spawn/bind path; reproduce at gate concurrency with the
-  guest's watchdog records in view before fixing.
+- **D39 — a riscv64 guest stalled dead moments after a `spawn` — DONE.**
+  `userentry::enter_user_mode` armed `sscratch` — which the trap vector reads
+  as "this trap came from U-mode" — with `sstatus.SIE` still set, so an
+  interrupt in the two instructions before its `sret` was misclassified,
+  clobbered the caller's frame and returned down the S-mode path, which does
+  not re-arm. The new process then ran with no kernel stack armed and every
+  later trap built its frame on the task's own *user* stack until the program
+  wild-jumped — and a U-mode instruction page fault halted the hart, silencing
+  the guest. `SIE` now joins the mask cleared ahead of the arm, as aarch64
+  has always done. The silence was a second defect: riscv64 offered only
+  load/store U-mode page faults to the resolver and halted on everything
+  else, so any user program's wild jump could park the machine. It now has
+  aarch64's `UserFaultTerminateFn` and kills the task instead.
 - **D40 — a mutating memory syscall re-froze the whole address space —
   DONE.** Every syscall or fault that changed a task's mappings rebuilt the
   registry's whole snapshot: a page-table walk plus a heap node per resident
@@ -467,6 +470,12 @@ The open items, in priority order:
   now publishes only its own region's pages. Reading the same class found two
   more: a file-backed fault re-froze per page (O(N²) to read an N-page
   mapping) and stack growth re-froze a range it had just computed.
+- **D42 — an x86_64 ring-3 wild jump halts the CPU instead of the task
+  (OPEN).** Found by inspection while fixing D39's sibling half. That port
+  has no `user_fault_terminator`, and its `#PF` dispatcher offers a ring-3
+  fault to the resolver only for *data* accesses, so an instruction-fetch
+  fault parks the CPU for one task's mistake. Mirror the aarch64/riscv64
+  slot; also settle which exception vectors that port installs at all.
 
 These are **distinct in kind**: D1 finishes an interrupt-model fix, D2
 and D4 are §27 foundational-completeness defects, D3 is an Arch-HAL
@@ -480,10 +489,11 @@ proved non-reproducing once FONT-SERVICE removed the per-app font payload
 tests), D21 is an ABI-honesty gap — a layer asserting a hardware fact nobody
 reported — D22 is a load-dependent QEMU-harness timeout whose mechanism is
 not yet named, D23 was an observer-perturbs-the-observed defect the debug
-watchdog's own non-maskable sample exposed (fixed), D24 was a missing
-in-kernel preemption boundary — a fairness defect, not a wedge — that let a
-burst of never-waiting device operations withhold a core (fixed), D25 was a
-process-wide test clock that made a host suite's exact-instant assertions
+watchdog's own non-maskable sample exposed (fixed), D42 is the x86_64 half
+of the fatal-user-exception routing D39 closed for riscv64 (open), D24 was a
+missing in-kernel preemption boundary — a fairness defect, not a wedge — that
+let a burst of never-waiting device operations withhold a core (fixed), D25
+was a process-wide test clock that made a host suite's exact-instant assertions
 order-dependent (fixed), D36 is a panic-path self-deadlock in the console
 write path (open, needs a lock-abandon primitive), and D37 is a suspected
 per-port context-switch gap found by reading, not by a failure (open, confirm
@@ -2370,88 +2380,114 @@ vertical's declared ceiling outlasts its derived one. End-to-end:
 three takeover verticals pass in 34.4 s (aarch64), 37.2 s (riscv64), and
 19.0 s (x86_64) against their 15-minute ceiling.
 
-## D39 — a riscv64 QEMU guest stalls dead moments after a `spawn`, at gate concurrency (OPEN)
+## D39 — a riscv64 guest stalled dead moments after a `spawn` — DONE
 
-**Symptom.** A `cargo xtask ci` run fails with the vertical silent for its
-**whole 240 s inactivity budget**. Seen on two verticals so far
-(`netstack-bond-qemu-riscv64`, `netstack-static-qemu-riscv64`); the common
-shape is that the guest goes *entirely* quiet a few log lines after a
-`spawn`, never one task falling behind. The transcript's last line is the
-stall point, and it is precise:
+**Root cause: `userentry::enter_user_mode` armed `sscratch` with S-mode
+interrupts still enabled.** The riscv64 trap vector's *only* discriminator
+between a trap from U-mode and one from S-mode is the entry swap
+`csrrw sp, sscratch, sp`: `sscratch` holds the current task's kernel-stack
+top while U-mode runs and **0** while S-mode runs, and a non-zero swap-in
+result therefore *means* "from U-mode". The entry sequence armed `sscratch`
+two instructions before its `sret` but only cleared `SPP`/`SPIE`, never
+`sstatus.SIE` — and the dispatch loop runs in-kernel bodies with S-mode
+interrupts enabled, so the window was open on **every** `enter_user`.
 
-```
-id=7001  driver loaded path=/Drivers/network/virtio_net/Run handle=1
-id=13001 node bound to driver task=6 node=0000000080030000 handle=0000000000000009
-id=1020  task capabilities derived task=0000000000000009 uid=0 caps=8
-id=4030  process spawned entry=000000100001a5ce
-```
+A supervisor timer or external interrupt landing in that window was
+misclassified as a U-mode trap. It built its frame at the freshly armed
+stack top (above the live `sp`, clobbering the caller's own frame), then
+returned down the *S-mode* epilogue, which does not re-arm — leaving
+`sscratch` **0**. The new process was then `sret`-ed into U-mode with no
+kernel stack armed, so its very next trap took the `bnez` fall-through and
+built the kernel's trap frame **on the task's own user stack**, corrupting
+the running program until it jumped into its data. That final wild jump
+raised a U-mode *instruction* page fault, which the trap path answered with
+`halt_current_hart()` — total guest silence, on a single-hart guest, moments
+after a `spawn`.
 
-Nothing follows. A bond needs **two** members, so `devmgr` (task 6) had one
-node bound and had just spawned its driver process; the second node's bind, the
-bond's composition, and every other task's output stop together — the whole
-guest went quiet, not just the driver.
+That explains every observed property: it only ever appeared just after a
+`spawn` (the only caller of `enter_user`), it was timing-dependent on a
+~2-instruction window (hence rare, and sensitive to host load skewing
+interrupt arrival against the guest instruction stream), and it silenced the
+*whole* guest rather than one task.
 
-**Not load, and not closable by a re-run.** Measured on this 24-thread host:
+**Fix (`kernel/arch/riscv64/src/userentry.rs`).** `SIE` joins `SPP`/`SPIE` in
+the mask the entry `csrc` clears, ahead of the `csrw sscratch`, so no S-mode
+interrupt can be taken while `sscratch` is armed. The mask never reaches the
+task: `sret` restores U-mode's interrupt state from `SPIE`, and U-mode stays
+preemptible because the hart runs below S-mode. This is what the aarch64
+sibling's opening `msr DAIFSet, #0xf` has always done, and what `trap.s`'s
+own stated invariant already assumed. Interrupts remain deliberately enabled
+inside a syscall body (so a long `ecall` cannot monopolise the hart), which
+is safe precisely because `sscratch` is 0 there.
 
-- alone: **passes in 8.6 s**;
-- under 3× oversubscription (48 spinners beside it): **passes in 28.0 s**,
-  narrating its boot throughout — 3.3× slower, nowhere near a 28× margin;
-- at the gate's eight-guest concurrency: **silent for the full 240 s**.
+**Fix (`kernel/arch/riscv64/src/{trap,fault}.rs`, that port's
+`dispatch.rs`/`boot.rs`).** The reason the corruption ended in *silence* was
+a second defect: riscv64 offered only U-mode **load/store** page faults to
+the user-fault resolver and sent everything else — an instruction page fault,
+an illegal instruction, a misaligned access — straight to
+`halt_current_hart()`. Any user program with a wild jump could therefore park
+the machine, an unprivileged denial of service. The port now has the
+`UserFaultTerminateFn` slot aarch64 already had, and `trap::fatal_exception`
+charges an unresumable exception to whoever caused it: from U-mode it kills
+that task through the shared arch-neutral
+`dispatch_core::terminate_user_fault_via_slot` and the hart carries on; from
+S-mode (or when no task can be attributed) it takes the fault handler and
+otherwise parks. With no terminator installed the old fatal path is still
+what happens, so the install can only fail closed.
 
-That is the D22 signature exactly: proportional starvation stretches a guest
-that keeps talking, whereas this guest stopped at a fixed point. The green solo
-run is therefore *not* evidence the defect is gone — it is evidence the window
-is narrow.
+**Regression cover.** Host tests in `userentry.rs` pin the entry masks —
+`SIE` cleared before the arm, `SPP`/`SPIE` cleared, `SUM` set, and the two
+masks disjoint — and fail on the pre-fix constants; two compile-time
+assertions pin the same invariants in every configuration. `fault.rs` pins
+the terminator slot's set-once round-trip. End to end: **822 consecutive
+boots** of `autoload-input-qemu-riscv64` reached the login prompt with no
+stall (342 at six-way host concurrency, then 480 at eight-way), where the
+same loop on the pre-fix binary silenced a guest at boot **117**.
 
-**Second occurrence narrows it, and rules the network path out as a
-precondition.** `netstack-static-qemu-riscv64` stalled the same way (240 s
-silent, at `admitted (8/8 in flight)`), but *earlier* — during `init`'s
-service bring-up, before `devmgr` had bound any NIC node at all. Its last
-lines are the eighth service's capability derivation, its `spawn`, and one
-call-endpoint creation:
+**Reproducer worth keeping.** Booting `autoload-input-qemu-riscv64` to its
+login prompt takes ~2–6 s per guest and drives several `enter_user`
+transitions, so six-to-eight concurrent guests in a loop hit the window
+roughly once per ~120 boots — a far cheaper probe for this class than the
+network verticals the defect was first seen on. Watch for a guest that stops
+emitting rather than one that exits: the stall is total silence, and the
+guest process stays alive.
 
-```
-id=1020 task capabilities derived task=0000000000000008 uid=13 caps=9
-id=4030 process spawned entry=0000001000027c6c
-id=3040 ipc call endpoint created endpoint=0000000053541001
-```
-
-So neither the bond's two-member composition, nor `virtio_net`'s
-`notify_wait`, nor any NIC bind is *necessary* to reproduce it: what both
-occurrences share is a `spawn` on riscv64 followed by total guest silence.
-That points at the generic spawn/wake path rather than anything
-network-specific, and it is why both verticals carry the same entry.
-
-**Suspected class (not yet proven).** A wake that is flagged but never
-delivered, or a wait that cannot expire, on the riscv64 spawn path — the
-shape D22 fixed for `virtio_blk`'s `notify_wait` and D32 described for
-stranded deferred wakes. A task stalling while holding whatever the rest of
-the guest needs would explain total silence on a single-hart guest.
-Candidates to separate: whether a deferred wake can strand on riscv64 the way
-D32 found it could on aarch64 (now the leading candidate, since the second
-occurrence predates any device work); the parent's wait for a freshly spawned
-child's readiness (is it bounded?); and `devmgr`'s per-driver readiness wait.
-
-**Next step.** Reproduce deliberately at gate concurrency (run the whole
-`--qemu` set, or eight guests, in a loop) rather than waiting for it to recur,
-with the guest's watchdog records in view: if a stall record names a site the
-diagnosis is immediate, and if none appears then the riscv64 watchdog cadence
-is itself not sampling (which is D3's parity gap and a finding in its own
-right). Because the second occurrence stalls before any device work, the
-cheapest reproducer is now the *spawn* path alone — eight concurrent riscv64
-guests booting `init`'s service set, no NIC required.
-
-**Regression cover (lands with the fix, §7).** A host-side test for whichever
-wait or wake proves unbounded, plus the vertical passing at gate concurrency.
-Never closed on a green re-run.
-
-**Landed with this entry (observability only).** The harness's own report for
-this outcome said "TIMEOUT after 240s **with no serial output**" for a guest
-that had emitted 12.8 KB — the same misdiagnosis D22 corrected for the sibling
-outcome, and it cost time here before the transcript was read. Both emitters
-(`tools/qemu/src/bin/run.rs`, `tools/xtask/src/commands/qemu_tests.rs`) now say
-the guest fell silent for its whole *inactivity* budget and point at the
+**Landed with the original entry (observability only).** The harness reported
+"TIMEOUT after 240s **with no serial output**" for a guest that had emitted
+12.8 KB — the same misdiagnosis D22 corrected for the sibling outcome, and it
+cost time before the transcript was read. Both emitters
+(`tools/qemu/src/bin/run.rs`, `tools/xtask/src/commands/qemu_tests.rs`) now
+say the guest fell silent for its whole *inactivity* budget and point at the
 transcript's last line as the stall point.
+
+## D42 — an x86_64 ring-3 wild jump halts the CPU instead of the task (OPEN)
+
+**Symptom (found by inspection while fixing D39, not yet observed).** The
+x86_64 port has no `user_fault_terminator` equivalent, and its `#PF`
+dispatcher offers a ring-3 fault to the resolver only when
+`fault::is_user_data_fault(error_code)` holds — which is
+`is_user(error_code) && error_code & PF_ERR_INSTR == 0`, i.e. **data**
+accesses only. A ring-3 *instruction-fetch* page fault (a wild jump, exactly
+the shape that made D39 fatal on riscv64) is therefore never offered to any
+resolver and takes the fatal path, parking the CPU for what is one task's
+fault. Unprivileged, trivially reachable, and the same defect class D39's
+second half closed for riscv64 and aarch64 already closes.
+
+**Fix shape.** Mirror the sibling ports: add the `UserFaultTerminateFn` slot
+to `kernel/arch/x86_64/src/fault.rs`, install
+`production_user_fault_terminate` beside the resolver in that port's boot,
+and route the fatal tail of the `#PF` dispatcher (and of any other ring-3
+exception the port dispatches) through it — reusing the arch-neutral
+`dispatch_core::terminate_user_fault_via_slot`, never a second copy.
+
+**Also to establish.** Which architectural exception vectors that port
+actually installs beyond `#PF`/`#NMI`/`#DF`: a ring-3 `#UD` or `#GP` with no
+IDT entry would be worse than a halt, and this entry should not be closed
+without reading `interrupts.rs`'s base IDT to settle it.
+
+**Regression cover (lands with the fix, §7).** A host test for the slot's
+set-once round-trip, and a QEMU vertical in which a ring-3 task jumps to a
+non-executable page and only that task dies.
 
 ## Non-goals / do not do
 
