@@ -29,6 +29,7 @@
 //! seam only authorises the *act* of spawning under `CAP_PROC_SPAWN`.
 
 use alloc::boxed::Box;
+use alloc::sync::Arc;
 use core::ptr::NonNull;
 
 use tairix_abi::rxe::LoadImage;
@@ -41,11 +42,11 @@ use tairix_arch_api::mmu::AddressSpace as MmuAddressSpace;
 use tairix_arch_api::EnterUser;
 use tairix_kernel_core::{
     refuse_build, spawn_caller_errno, spawn_image, ArchImageBuilder, BoxStack, BuiltImage,
-    ImageBuildCtx, KernelStack, SpawnMode, SpawnRequest,
+    ImageBuildCtx, KernelStack, ProcessSpace, SpawnMode, SpawnRequest,
 };
 use tairix_kernel_mem::{
-    AddressSpace, DirectPhysMap, FrameAllocator, FrameTableSource, LiveSpace, LiveUserSpace,
-    PhysAddr, PhysMap, UserAddressSpace, UserStack, VirtAddr,
+    AddressSpace, DirectPhysMap, FrameAllocator, FrameTableSource, LiveSpace, PhysAddr, PhysMap,
+    UserAddressSpace, UserStack, VirtAddr,
 };
 use tairix_kernel_syscall::SYSCALL_TABLE_HASH;
 use tairix_sync::Once;
@@ -375,16 +376,15 @@ impl ArchImageBuilder for Aarch64ProcessSpawn {
         });
 
         // Freeze the just-built mappings into the registry-storable,
-        // `Send + Sync` snapshot the address-space registry holds, then
-        // retain the live, mutable arch space (the same one frozen above)
-        // behind `LiveUserSpace` so the child's `mem_map` / `mmio_map`
-        // mutate its own space. A build context with no `'static` allocator,
-        // or a window the allocator rejects, retains no live space and those
-        // syscalls fail closed. The live space's `PhysMap` must be
-        // [`ConfiguredIdentityPhysMap`] so the child's `dma_alloc`
-        // post-zero `clean_invalidate` is the real dcache clean+invalidate.
+        // `Send + Sync` snapshot, then hand the child's threads the same arch
+        // space as their process address space, so its `mem_map` / `mmio_map`
+        // mutate exactly the mappings the snapshot describes. No `'static`
+        // allocator, or a window the allocator rejects, retains none and
+        // those syscalls fail closed. The `PhysMap` must be
+        // [`ConfiguredIdentityPhysMap`] so the child's `dma_alloc` post-zero
+        // `clean_invalidate` is the real dcache clean+invalidate.
         let frozen: Box<dyn UserAddressSpace + Send + Sync> = Box::new(space.freeze());
-        let live: Option<Box<dyn LiveUserSpace + Send>> = match ctx.page_table_allocator() {
+        let live: Option<Arc<ProcessSpace>> = match ctx.page_table_allocator() {
             Some(static_frames) => {
                 let windows = crate::user_windows::user_windows(
                     static_frames.total_frames() as u64,
@@ -407,7 +407,7 @@ impl ArchImageBuilder for Aarch64ProcessSpawn {
                     windows.file_pages,
                 )
                 .ok()
-                .map(|live| Box::new(live) as Box<dyn LiveUserSpace + Send>)
+                .map(|live| Arc::new(ProcessSpace::new(Box::new(live))))
             }
             None => None,
         };

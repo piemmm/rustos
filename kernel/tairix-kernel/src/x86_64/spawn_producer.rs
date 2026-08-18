@@ -41,6 +41,7 @@
 //! under `CAP_PROC_SPAWN`.
 
 use alloc::boxed::Box;
+use alloc::sync::Arc;
 
 use tairix_abi::rxe::LoadImage;
 use tairix_abi::Errno;
@@ -53,11 +54,11 @@ use tairix_arch_x86_64::syscall_entry;
 use tairix_arch_x86_64::userentry::UserMode;
 use tairix_kernel_core::{
     refuse_build, spawn_caller_errno, spawn_image, ArchImageBuilder, BoxStack, BuiltImage,
-    ImageBuildCtx, KernelStack, SpawnMode, SpawnRequest,
+    ImageBuildCtx, KernelStack, ProcessSpace, SpawnMode, SpawnRequest,
 };
 use tairix_kernel_mem::{
-    AddressSpace, DirectPhysMap, FrameAllocator, FrameTableSource, LiveSpace, LiveUserSpace,
-    PhysMap, UserAddressSpace, UserStack, VirtAddr,
+    AddressSpace, DirectPhysMap, FrameAllocator, FrameTableSource, LiveSpace, PhysMap,
+    UserAddressSpace, UserStack, VirtAddr,
 };
 use tairix_kernel_syscall::SYSCALL_TABLE_HASH;
 use tairix_sync::Once;
@@ -348,21 +349,14 @@ impl ArchImageBuilder for X86_64ProcessSpawn {
         // mapped page — segments, stack, and the startup-vector block.
         let frozen: Box<dyn UserAddressSpace + Send + Sync> = Box::new(space.freeze());
 
-        // Retain the live, mutable arch space behind the object-safe
-        // `LiveUserSpace` boundary so the child's `mem_map` / `mmio_map` /
-        // `dma_alloc` syscalls mutate *its own* address space (`plans/PI.md`
-        // 5d-0-ii (b′)), the cross-port sibling of the aarch64 producer. The `LiveSpace` composes the audited
-        // anonymous-map mechanism (over the kernel's `'static` frame
-        // allocator) and the guarded device-window allocator (over the
-        // `[WINDOWS.mmio, …)` region); it carries the *same* arch space
-        // the snapshot above was frozen from, and zeroes anonymous frames
-        // through a fresh higher-half [`DirectPhysMap`] identical to the one
-        // the image build used (both the low identity and the higher-half
-        // kernel window are mapped under the child's CR3). A build context
-        // with no `'static` allocator, or a window the allocator rejects,
-        // retains no live space and the child's `mem_map` / `mmio_map` fail
-        // closed.
-        let live: Option<Box<dyn LiveUserSpace + Send>> = match ctx.page_table_allocator() {
+        // The child's process address space (`plans/PI.md` 5d-0-ii (b′)): the
+        // *same* arch space the snapshot above was frozen from, zeroing
+        // anonymous frames through a fresh higher-half [`DirectPhysMap`]
+        // identical to the one the image build used (both the low identity and
+        // the higher-half kernel window are mapped under the child's CR3). No
+        // `'static` allocator, or a window the allocator rejects, retains none
+        // and the child's `mem_map` / `mmio_map` fail closed.
+        let live: Option<Arc<ProcessSpace>> = match ctx.page_table_allocator() {
             Some(static_frames) => {
                 let windows = crate::user_windows::user_windows(
                     static_frames.total_frames() as u64,
@@ -385,7 +379,7 @@ impl ArchImageBuilder for X86_64ProcessSpawn {
                     windows.file_pages,
                 )
                 .ok()
-                .map(|live| Box::new(live) as Box<dyn LiveUserSpace + Send>)
+                .map(|live| Arc::new(ProcessSpace::new(Box::new(live))))
             }
             None => None,
         };

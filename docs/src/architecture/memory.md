@@ -569,9 +569,7 @@ in `kernel/virtio`) turns an `MmioRegion` into an
 [ABI `RegisterWindow`](../drivers/bus.md#register-window-hand-off) for
 the in-kernel driver host, and the `mmio_map` syscall facility (`plans/PI.md`
 P10 chunk 5d-0), which maps a granted device window into the caller's
-*own running* address space (the production wiring of that facility, over
-a retained live address space, is staged with the arch-level live-space
-retention).
+*own running* address space (§7e).
 
 The mapper is **capability-agnostic**; the gate is
 `kernel/sec::mmio`, whose `map_mmio` / `unmap_mmio` verify
@@ -901,7 +899,7 @@ design note, `AGENTS.md` §15.2):
 
 The immutable-`FrozenAddressSpace` snapshot the post-spawn registry stores
 (§3b) is read-only; the production `mem_map` / `mmio_map` producers instead
-mutate a task's **retained live** address space, the single live-space
+mutate the caller's **process address space**, the single live-space
 mutation path (§7e) rather than a second parallel address-space model
 (`AGENTS.md` §2.2).
 
@@ -944,16 +942,16 @@ verifies every value, and exits 0, with the program's allocator-issued
 `mem_map` / `mem_unmap` `svc`s routed through the live `MemMap` producer
 (`plans/PI.md` P6e-3b prerequisite).
 
-## 7e. Retained live address space (`live`) and the production producers
+## 7e. The process address space (`ProcessSpace`) and the production producers
 
 The post-spawn registry holds a read-only `FrozenAddressSpace` snapshot (§3b)
 for the user-memory copy path, but `mem_map` / `mmio_map` must mutate the
 *running* space — grow a process's heap, or map a driver's granted device
 window into its own space. A live arch `AddressSpace<P>` cannot sit behind
 the registry's `Send + Sync` shared lock (the production page-table backend
-is `!Send`/`!Sync`), so the live space is retained **per task and reached
-only by the CPU currently running it**, never a global lock over a live page
-table (`plans/PI.md` 5d-0-ii (b′)).
+is `!Send`/`!Sync`), so the live space is held **per process, behind its own
+spin lock**, and reached only through the CPU currently running one of that
+process's threads (`plans/PI.md` 5d-0-ii (b′); `plans/THREADS.md` decision 4).
 
 - **`kernel/mem::live` — the object-safe boundary.** `LiveUserSpace` is a
   `Send` object-safe trait (`map_anonymous` / `unmap_anonymous` /
@@ -963,24 +961,26 @@ table (`plans/PI.md` 5d-0-ii (b′)).
   mapping path for each (`AGENTS.md` §2.2). Erasing the space behind the
   trait keeps `kernel/core` free of any concrete page-table backend `P`
   (`AGENTS.md` §17.4). `LiveSpaceError` unions the two mechanisms' errors.
-- **Per-task ownership + per-CPU publication.** `kernel/core::kthread` owns
-  the boxed live space in the task's `ThreadControl` (so it — and its
-  page-table frames — is reclaimed when the task exits). A new per-CPU
-  `USER_LIVE_SPACE` table publishes a pointer to it immediately before the
-  task is switched in and clears it the instant the task switches back —
-  the exact lifecycle as the `USER_RESUME` reschedule handle — so the slot
-  is populated only while that CPU runs the (now trapped) task. The
-  `with_current_live_space(cpu, f)` accessor hands a producer an exclusive
-  `&mut dyn LiveUserSpace` that cannot alias: the task is suspended in its
-  own syscall trap for the whole call, and a task runs on at most one CPU
-  (`AGENTS.md` §4 — the access is genuinely exclusive). The
-  `spawn_user_kthread_with_stack_live` admission entry carries the space.
+- **Per-process ownership + per-CPU publication.**
+  `kernel/core::procspace::ProcessSpace` wraps the boxed live space in a
+  `SpinLock`; every thread of the process holds an `Arc` clone in its
+  `ThreadControl`, so the space — and its page-table frames — is reclaimed
+  when the last thread exits. The per-CPU live-space slot publishes a
+  borrowed `*const ProcessSpace` immediately before a thread is switched in
+  and clears it the instant that thread switches back — the same lifecycle
+  as the reschedule handle — so no refcount traffic lands on the
+  context-switch path. `with_current_live_space(cpu, f)` reborrows the
+  pointer (kept alive by the running thread's own clone) and takes the
+  space's lock for the call, so two threads of one process mutating it from
+  two cores are serialised rather than racing (`AGENTS.md` §4). `f` must not
+  park while it holds the lock. The
+  `spawn_user_kthread_with_stack_live` admission entry carries the handle.
 - **The production producers.** `kernel/core::live_producer` provides
   `LiveMemMap<A>` (`MemMap`) and `LiveMmioMap<A>` (`MmioMapFacility`); each
   holds a `&'static A` (mirroring `KernelProcessWait`), reads
   `arch.current_cpu()`, routes through `with_current_live_space`, folds
   `LiveSpaceError` onto a stable `Errno`, and **fails closed**
-  (`NotImplemented`) when the running task has no retained space
+  (`NotImplemented`) when the running task has no published space
   (`AGENTS.md` §2.9 / §5.4 — it never touches another task's memory).
   `mmio_map` is fully served (the guarded `MmioWindowMap` chooses the user
   virtual window); anonymous `mem_map` is fully served for both `FIXED`
@@ -988,12 +988,11 @@ table (`plans/PI.md` 5d-0-ii (b′)).
   (the kernel chooses the base out of the per-task heap window via
   `LiveSpace::map_anonymous_placed`, §7f) — never a guessed base.
 
-The retention is wired into the **aarch64** spawn path (`plans/PI.md`
-5d-0-ii (b′)-2): the live space threads through the `admit_init` /
-`admit_process` seam as `Option<Box<dyn LiveUserSpace + Send>>` (the x86_64 /
-riscv64 ports pass `None` until their turn), the aarch64 `init_spawn` /
-`spawn_producer` freeze a snapshot for the copy path **and** retain a
-`LiveSpace` built from the same arch space, admitting through
+Every bare-metal port wires the retention (`plans/PI.md` 5d-0-ii (b′)-2): the
+handle threads through the `admit_init` / `BuiltImage` seam as
+`Option<Arc<ProcessSpace>>`, each port's `init_spawn` / `spawn_producer`
+freezes a snapshot for the copy path **and** wraps a `LiveSpace` built from
+the same arch space, admitting through
 `spawn_user_kthread_with_stack_live`, and `kernel_main` installs `LiveMemMap` /
 `LiveMmioMap` for every port (a port that retains no live space simply fails
 those syscalls closed). A device window a user-space driver maps through

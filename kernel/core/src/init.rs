@@ -1420,7 +1420,7 @@ impl<A: KernelArch + 'static> InitSpawnCtx for KernelInitSpawner<'_, A> {
         stack_span: crate::aspace::StackSpan,
         stack: Box<dyn crate::kthread::KernelStack + Send>,
         pre_resume: Box<dyn FnMut(u64) + Send>,
-        live: Option<Box<dyn tairix_kernel_mem::LiveUserSpace + Send>>,
+        live: Option<alloc::sync::Arc<crate::procspace::ProcessSpace>>,
         mut enter: Box<dyn FnMut() + Send>,
     ) {
         let cpu: CpuId = SchedulerArch::current_cpu(self.arch);
@@ -2168,7 +2168,7 @@ fn run_phases<A: KernelArch>(
     };
 
     // Build the production `mem_map` / `mmio_map` / `dma_alloc` producers over
-    // the per-task retained live address space (`plans/PI.md` 5d-0-ii (b′)/(c)):
+    // the calling process's live address space (`plans/PI.md` 5d-0-ii (b′)/(c)):
     // each routes a syscall to the calling task's *own* live space via the
     // per-CPU slot, reading the current CPU from the same `'static` arch handle
     // the process-wait producer uses, so a task that retains a live space (the
@@ -2429,7 +2429,7 @@ fn run_phases<A: KernelArch>(
 }
 
 /// Build and `Box::leak` the production `mem_map` / `mmio_map` / `dma_alloc`
-/// / `shm_*` producers over the per-task retained live address space
+/// / `shm_*` producers over the calling process's live address space
 /// (`plans/PI.md` 5d-0-ii (b′)/(c); `plans/USB.md` for shared memory).
 ///
 /// Each is arch-generic (it reads the current CPU from the `'static` `arch`

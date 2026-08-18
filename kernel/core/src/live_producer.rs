@@ -1,26 +1,24 @@
-//! Production `mem_map` / `mmio_map` producers over the per-task retained
+//! Production `mem_map` / `mmio_map` producers over the calling process's
 //! live address space (`plans/PI.md` P10 chunk 5d-0-ii (b′)).
 //!
 //! [`crate::memmap::MemMap`] and [`crate::devres::MmioMapFacility`] are the
 //! object-safe seams the `mem_map` and `mmio_map` syscall handlers reach.
 //! Before this module the only implementations were the fail-closed
-//! `NULL_*` defaults, because no live, mutable address space was retained
-//! per task (the spawn path froze the space into a read-only snapshot and
-//! dropped the live one). With per-task retention now wired through the
-//! kthread runtime ([`crate::kthread::with_current_live_space`]) these two
-//! producers route each call to the **caller's own** live space:
-//!
-//! * a syscall handler runs on the CPU servicing the trap, on which the
-//!   calling task is the one currently switched in, so its live space is
-//!   exactly the per-CPU slot for [`SchedulerArch::current_cpu`]; and
-//! * the access is exclusive — the task is suspended in its own syscall
-//!   trap for the whole call (see [`crate::kthread::with_current_live_space`]).
+//! `NULL_*` defaults, because no live, mutable address space was retained at
+//! all (the spawn path froze the space into a read-only snapshot and dropped
+//! the live one). Every call now routes through the kthread runtime
+//! ([`crate::kthread::with_current_live_space`]) to the **caller's own**
+//! space: a syscall handler runs on the CPU servicing the trap, on which the
+//! calling thread is the one switched in, so its process's space is exactly
+//! the per-CPU slot for [`SchedulerArch::current_cpu`], and
+//! [`crate::ProcessSpace`]'s own lock serialises a sibling thread mutating
+//! it from another core.
 //!
 //! Both producers are generic over the arch (`A: SchedulerArch`) and hold a
 //! `&'static A`, mirroring [`crate::procwait::KernelProcessWait`], so
-//! `kernel/core` reads the current CPU without naming a concrete port. A call on a CPU with no published live space (a
-//! task spawned without a retained space) fails closed with
-//! [`Errno::NotImplemented`] rather than touching another task's memory.
+//! `kernel/core` reads the current CPU without naming a concrete port. A call
+//! on a CPU with no published space (a task spawned without one) fails closed
+//! with [`Errno::NotImplemented`] rather than touching another task's memory.
 
 use alloc::vec::Vec;
 
@@ -507,6 +505,7 @@ mod tests {
     };
 
     use crate::kthread::publish_live_space_for_test;
+    use crate::procspace::ProcessSpace;
     use crate::test_arch::TestArch;
 
     /// A recording [`LiveUserSpace`] double: it logs each call and returns a
@@ -785,19 +784,20 @@ mod tests {
         arch
     }
 
-    /// Leak `fake` to the `'static` lifetime [`publish_live_space_for_test`]
-    /// requires (the production live space is owned for the task's life),
-    /// returning the `&'static mut` to publish and a raw pointer to inspect
-    /// the recording after the producer call (the producer's `&mut` has ended
-    /// by then; single-threaded). A test leak is bounded by the process.
-    fn leak_fake() -> (&'static mut FakeLive, *const FakeLive) {
+    /// Wrap `fake` in a leaked [`ProcessSpace`] — the `'static` shape
+    /// [`publish_live_space_for_test`] requires (the production space is held
+    /// by the process's threads for their whole lives) — returning the handle
+    /// to publish and a raw pointer to inspect the recording after the
+    /// producer call (the space's lock is released by then; single-threaded).
+    /// A test leak is bounded by the process.
+    fn leak_fake() -> (&'static ProcessSpace, *const FakeLive) {
         leak_fake_with(FakeLive::default())
     }
 
-    fn leak_fake_with(fake: FakeLive) -> (&'static mut FakeLive, *const FakeLive) {
-        let leaked: &'static mut FakeLive = Box::leak(Box::new(fake));
-        let ptr: *const FakeLive = leaked;
-        (leaked, ptr)
+    fn leak_fake_with(fake: FakeLive) -> (&'static ProcessSpace, *const FakeLive) {
+        let boxed = Box::new(fake);
+        let ptr: *const FakeLive = &raw const *boxed;
+        (Box::leak(Box::new(ProcessSpace::new(boxed))), ptr)
     }
 
     const PAGE: usize = 4096;

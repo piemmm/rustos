@@ -9,9 +9,10 @@ use core::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
 #[cfg(feature = "watchdog-diagnostics")]
 use core::sync::atomic::{AtomicU32, AtomicUsize};
 
-use tairix_kernel_mem::LiveUserSpace;
 use tairix_kernel_sched_api::TaskAction;
 use tairix_sync::{OnceCell, SpinLock};
+
+use crate::procspace::ProcessSpace;
 
 /// Type-erased continuation handle for the task currently running on a CPU.
 #[derive(Copy, Clone)]
@@ -20,9 +21,15 @@ pub(crate) struct ResumeHandle {
     pub(crate) thunk: unsafe fn(usize, TaskAction),
 }
 
-/// Published live user-space pointer for the task currently running on a CPU.
+/// Published address-space handle for the process whose thread is currently
+/// running on a CPU.
+///
+/// A borrowed raw pointer, not an `Arc` clone, so the context-switch path
+/// pays no refcount traffic: the running thread's control block holds an
+/// `Arc` clone for its whole life, which keeps the pointee alive for exactly
+/// as long as the publication can be observed.
 #[derive(Copy, Clone)]
-pub(crate) struct LiveSpacePtr(pub(crate) *mut (dyn LiveUserSpace + Send));
+pub(crate) struct LiveSpacePtr(pub(crate) *const ProcessSpace);
 
 /// Maximum stack frames the watchdog records per liveness sample.
 ///
@@ -49,9 +56,10 @@ pub(crate) const WD_BT_MAX: usize = 12;
 #[cfg(feature = "watchdog-diagnostics")]
 pub(crate) const LOCK_STACK_MAX: usize = 8;
 
-// SAFETY: the kthread publication protocol makes the pointee exclusive to
-// the CPU whose slot contains it; consumers borrow it only while that task is
-// synchronously trapped and cannot run or migrate.
+// SAFETY: `ProcessSpace` is `Sync` (it locks internally), and the kthread
+// publication protocol keeps the pointee alive for as long as the slot can be
+// observed — the running thread's control block holds an `Arc` clone. The raw
+// pointer is only ever reborrowed as a shared `&ProcessSpace`.
 unsafe impl Send for LiveSpacePtr {}
 
 /// All kernel-core state indexed by a dense discovered CPU id.

@@ -110,6 +110,7 @@ pub mod pipe;
 pub mod preempt;
 pub mod proc_id;
 pub mod procsignal;
+pub mod procspace;
 pub mod procwait;
 pub mod pty;
 pub mod random;
@@ -234,6 +235,7 @@ pub use procsignal::{
     ForegroundSignal, ForegroundSignalAlreadyInstalled, KernelProcessSignal, NullProcessSignal,
     ProcessSignal, NULL_PROCESS_SIGNAL,
 };
+pub use procspace::ProcessSpace;
 pub use procwait::{
     KernelProcessWait, NullProcessWait, ProcessTable, ProcessWait, Reap, WaitedChild,
     NULL_PROCESS_WAIT,

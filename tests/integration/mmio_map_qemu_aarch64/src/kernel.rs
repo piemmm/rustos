@@ -1,6 +1,7 @@
 //! The freestanding aarch64 test kernel: build one isolated EL0 program,
-//! retain its address space live behind the production
-//! [`tairix_kernel_mem::LiveSpace`], admit it through the production
+//! hold its address space live behind the production
+//! [`tairix_kernel_mem::LiveSpace`] + [`tairix_kernel_core::ProcessSpace`],
+//! admit it through the production
 //! [`tairix_kernel_core::spawn_user_kthread_with_stack_live`] path, and route
 //! its `mmio_map` syscall to the granted device window through
 //! [`tairix_kernel_core::with_current_live_space`] +
@@ -28,12 +29,12 @@ use tairix_arch_api::{CpuId, EnterUser};
 use tairix_fdt::Fdt;
 use tairix_kalloc::FreeListAllocator;
 use tairix_kernel_core::{
-    spawn_image, spawn_user_kthread_with_stack_live, with_current_live_space, BoxStack, SpawnMode,
-    SpawnRequest, Yielder,
+    spawn_image, spawn_user_kthread_with_stack_live, with_current_live_space, BoxStack,
+    ProcessSpace, SpawnMode, SpawnRequest, Yielder,
 };
 use tairix_kernel_mem::{
     page_count_for, AddressSpace, BootMemoryMap, DirectPhysMap, Frame, FrameAllocator, LiveSpace,
-    LiveUserSpace, MemoryRegion, PhysAddr, RegionKind, UserStack, VirtAddr,
+    MemoryRegion, PhysAddr, RegionKind, UserStack, VirtAddr,
 };
 use tairix_kernel_sched_eevdf::{Priority, Scheduler, SchedulerConfig};
 use tairix_kernel_syscall::SYSCALL_TABLE_HASH;
@@ -564,7 +565,7 @@ pub extern "C" fn kernel_main(_dtb: u64) -> ! {
     ) else {
         qemu_exit::exit_failure(FAIL_LIVE_BUILD);
     };
-    let live: Box<dyn LiveUserSpace + Send> = Box::new(live);
+    let live = Arc::new(ProcessSpace::new(Box::new(live)));
 
     // Bring up the EL1 vectors + GICv2 and install the dispatch callback so the
     // program's `svc`s are handled. Interrupts stay masked — the cooperative

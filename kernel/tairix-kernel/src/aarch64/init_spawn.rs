@@ -25,6 +25,7 @@
 use core::sync::atomic::{AtomicBool, Ordering};
 
 use alloc::boxed::Box;
+use alloc::sync::Arc;
 
 use tairix_abi::rxe::LoadImage;
 use tairix_arch_aarch64::paging::{
@@ -33,10 +34,8 @@ use tairix_arch_aarch64::paging::{
 };
 use tairix_arch_aarch64::userentry::UserMode;
 use tairix_arch_api::EnterUser;
-use tairix_kernel_core::{spawn_image, InitSpawn, InitSpawnCtx, SpawnMode};
-use tairix_kernel_mem::{
-    AddressSpace, LiveSpace, LiveUserSpace, PhysMap, UserAddressSpace, VirtAddr,
-};
+use tairix_kernel_core::{spawn_image, InitSpawn, InitSpawnCtx, ProcessSpace, SpawnMode};
+use tairix_kernel_mem::{AddressSpace, LiveSpace, PhysMap, UserAddressSpace, VirtAddr};
 use tairix_kernel_syscall::SYSCALL_TABLE_HASH;
 
 use super::spawn_producer::ConfiguredIdentityPhysMap;
@@ -219,25 +218,19 @@ impl InitSpawn for Aarch64InitSpawn {
         // the live arch `space` is still owned below.
         let frozen: Box<dyn UserAddressSpace + Send + Sync> = Box::new(space.freeze());
 
-        // Retain the live, mutable arch space behind the object-safe
-        // `LiveUserSpace` boundary so PID 1's `mem_map` / `mmio_map`
-        // syscalls mutate *its own* address space (`plans/PI.md`
-        // 5d-0-ii (b′)). The `LiveSpace` composes the audited anonymous-map
-        // mechanism (over the kernel's `'static` frame allocator, drawn from
-        // `static_frames`) and the guarded device-window allocator (over the
-        // `[WINDOWS.mmio, …)` region); it carries the *same* arch space
-        // the snapshot above was frozen from. A context with no `'static`
-        // allocator, or a window the allocator rejects, retains no live space
-        // and PID 1's `mem_map` / `mmio_map` fail closed.
+        // PID 1's process address space (`plans/PI.md` 5d-0-ii (b′)): the
+        // *same* arch space the snapshot above was frozen from, so its
+        // `mem_map` / `mmio_map` mutate exactly the mappings the snapshot
+        // describes. No `'static` allocator, or a window the allocator
+        // rejects, retains none and those syscalls fail closed.
         //
-        // The live space's `PhysMap` must be [`ConfiguredIdentityPhysMap`]:
-        // a `dma_alloc` carve is mapped Normal-Non-Cacheable for the caller
-        // while the kernel zeroes it through the cacheable identity alias,
-        // so the post-zero `clean_invalidate` must be the real dcache
-        // clean+invalidate (the runtime spawn producer's rationale applies
-        // identically here — a no-op physmap leaves dirty zero lines that
-        // the cache later writes back over device-visible rings).
-        let live: Option<Box<dyn LiveUserSpace + Send>> = match ctx.static_frames() {
+        // The `PhysMap` must be [`ConfiguredIdentityPhysMap`]: a `dma_alloc`
+        // carve is mapped Normal-Non-Cacheable for the caller while the
+        // kernel zeroes it through the cacheable identity alias, so the
+        // post-zero `clean_invalidate` must be the real dcache
+        // clean+invalidate — a no-op physmap leaves dirty zero lines the
+        // cache later writes back over device-visible rings.
+        let live: Option<Arc<ProcessSpace>> = match ctx.static_frames() {
             Some(static_frames) => {
                 let windows = crate::user_windows::user_windows(
                     static_frames.total_frames() as u64,
@@ -260,7 +253,7 @@ impl InitSpawn for Aarch64InitSpawn {
                     windows.file_pages,
                 )
                 .ok()
-                .map(|live| Box::new(live) as Box<dyn LiveUserSpace + Send>)
+                .map(|live| Arc::new(ProcessSpace::new(Box::new(live))))
             }
             None => None,
         };

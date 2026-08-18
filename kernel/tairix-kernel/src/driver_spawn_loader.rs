@@ -545,7 +545,7 @@ mod tests {
     use tairix_drvhost::Event;
     use tairix_kernel_core::KernelStack;
     use tairix_kernel_mem::{
-        BootMemoryMap, FrameAllocator, LiveUserSpace, MemoryRegion, PhysAddr, PhysMap, RegionKind,
+        BootMemoryMap, FrameAllocator, MemoryRegion, PhysAddr, PhysMap, RegionKind,
         UserAddressSpace, PAGE_SIZE,
     };
 
@@ -616,7 +616,7 @@ mod tests {
             _stack_span: tairix_kernel_core::StackSpan,
             _stack: Box<dyn KernelStack + Send>,
             _pre_resume: Box<dyn FnMut(u64) + Send>,
-            _live: Option<Box<dyn LiveUserSpace + Send>>,
+            _live: Option<alloc::sync::Arc<tairix_kernel_core::ProcessSpace>>,
             _enter: Box<dyn FnMut() + Send>,
         ) {
             unreachable!("the driver-spawn adapter drives spawn_driver_process, not admit_init")

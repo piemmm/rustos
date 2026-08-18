@@ -1,6 +1,6 @@
 # THREADS.md — lightweight threads (multiple threads per process)
 
-Status: **T1 and T2 done; T3 planned.**
+Status: **T1, T2 and T3a done; T3b planned.**
 
 Binding under `AGENTS.md`. Read `plans/SPAWN.md` (the process model this builds
 on), `plans/PI.md` RV1 (the riscv64 trap protocol T1 reworked), and
@@ -15,18 +15,17 @@ process, so a program wanting concurrency must `spawn` a whole separate address
 space and talk over IPC/shm. Every server, compositor, and driver runtime needs
 threads over one heap instead.
 
-T2 has removed the state-model obstacle: process-scoped state is now keyed by
+T2 removed the state-model obstacle: process-scoped state is keyed by
 `ProcessId` and thread-scoped state by `TaskId`, so the kernel can hold several
-threads per process. What remains (T3) is the mechanism:
+threads per process. T3a removed the address-space obstacle: the live space is
+a shared, locked `ProcessSpace` rather than one task's property. What remains
+(T3b) is the mechanism:
 
-- `kernel/mem/src/live.rs` — `LiveUserSpace` is `Send` but deliberately not
-  `Sync`, still *owned* by one kthread's `ThreadControl` and reached through a
-  per-CPU raw pointer whose safety argument is "only one task per space"
-  (`kthread::with_current_live_space`). Decision 4 replaces that with a shared,
-  locked process object.
 - `BuiltImage::pre_resume` is a single-use `Box<dyn FnMut>`, so a second thread
   of a process has no way to obtain its own switch-in hook. Decision 9 makes it
-  a cloneable per-process factory.
+  a cloneable per-process hook and hands `kernel/core` the port's `EnterUser`.
+- No per-thread thread pointer: `UserEntry` has no `tls_base`, so every thread
+  of a process would share one (decision 7).
 - No `thread_create`/`thread_exit`/futex ABI, and no `lib/rt` thread runtime.
 
 ## Binding decisions
@@ -157,32 +156,28 @@ than adjusted: a caller with a different thread id but the *same* capability
 record is now a sibling thread, which shares the grant by design, so the
 "foreign" caller in those tests was given its own record (its own process) and
 a companion test now pins the sibling-sharing half explicitly.
-- `kernel/sec/src/captable.rs` — the thread alias map, `register_thread` /
-  `remove_thread` (fail closed: an alias for an unknown process, or a duplicate
-  alias, is refused), `threads_of` over a second `members` index so a group
-  operation is O(log n + k) rather than a system-wide scan (§27.2), and the
-  `task()` → `process()` rename.
-- `kernel/core/src/aspace.rs` — process-scoped maps keyed by `ProcessId`;
-  per-thread maps (`stack_spans`, the per-thread TLS base) keyed by `TaskId`;
-  `withdraw_thread` vs `withdraw_process`.
-- `kernel/core/src/kthread.rs` + `cpu_state.rs` — `ProcessSpace` (decision 4).
-  `kernel/core/src/live_producer.rs` is the only consumer of
-  `with_current_live_space` (15 call sites, none nested, so no self-deadlock).
-- `kernel/core/src/spawn.rs` + the six producers under
-  `kernel/tairix-kernel/src/{aarch64,riscv64,x86_64}/{init_spawn,spawn_producer}.rs`
-  — the `BuiltImage` change of decision 9.
-- `kernel/syscall/src/table.rs` — `CallerContext::process()`.
-- The compiler-checked sweep of the process-scoped registry call sites
-  (~68 in `kernel/core/src/syscalls.rs`, plus `rlimit.rs`, `devres.rs`,
-  `callreg.rs`, `spawn.rs`, `init.rs`, `spawn_services.rs` and their tests).
-  Note the benign failure mode: a *missed* conversion keys process state under a
-  thread id, which finds nothing and fails closed rather than crossing a
-  process boundary.
-- Tests: alias resolution and its fail-closed refusals; a table-driven test
-  asserting every process-scoped accessor resolves a non-leader thread id;
-  shared-address-space lock exclusion.
 
-### T3 — threads end to end `[ ]`
+### T3a — the process address space `[x]`
+
+**Done** (decision 4), behaviour-preserving: every process still has exactly
+one thread, so nothing user-visible changed.
+
+`kernel/core/src/procspace.rs` holds `ProcessSpace`, a `SpinLock` over the
+boxed `LiveUserSpace`. Each thread's `ThreadControl` holds an `Arc` clone; the
+per-CPU slot publishes a borrowed `*const ProcessSpace` (no refcount traffic on
+the switch path) and `with_current_live_space` reborrows it and takes the lock,
+so the old "only one task per space" `&mut` argument is replaced by real
+exclusion. The lock order is `ProcessSpace` before the address-space registry
+(the snapshot publication reads translations out of the live space under the
+registry write guard); the discipline is never park while holding it, which
+holds because every `LiveUserSpace` method is park-free.
+
+The handle threads through `InitSpawnCtx::admit_init`, `BuiltImage::live`,
+`Yielder::become_user`, and `spawn_user_kthread_with_stack_live` as
+`Option<Arc<ProcessSpace>>`, and each of the six per-arch producers wraps its
+own `LiveSpace` in one.
+
+### T3b — threads end to end `[ ]`
 
 **ABI** (`lib/abi`, `lib/abi-sys`, regenerated `include/`, recomputed
 `SYSCALL_TABLE_HASH`): `SyscallNumber` 109–112 — `THREAD_CREATE`, `THREAD_EXIT`,
@@ -201,6 +196,12 @@ blocking primitive).
 T1); x86_64 `IA32_FS_BASE` set at entry and reloaded from `pre_resume`.
 
 **`kernel/core`**:
+- decision 9 — `BuiltImage::pre_resume` becomes `Arc<dyn Fn(u64 /*kernel stack
+  top*/, u64 /*tls base*/) + Send + Sync>`, `BuiltImage` carries
+  `user_entry: &'static dyn EnterUser` plus the `UserEntry` register state
+  instead of a boxed `enter` thunk, and the six per-arch producers stop
+  building an entry closure — `kernel/core` builds each thread's from the port
+  handle, so a new thread needs no new per-arch producer (§2.21).
 - `threads.rs` — `thread_create`: limit check *before* state, validate entry,
   stack, tls and clear-word all lie in the caller's own space through the
   existing uaccess boundary, reserve the kernel stack, `spawn_parked`, register
@@ -252,9 +253,10 @@ and the thread-group credential model), the per-arch TLS notes in
 - Do NOT add a `v2` of any type or a compatibility shim: `abi-v1` is unfrozen,
   so every change is made in place with all callers updated (§2.13).
 - Do NOT add thread-local *storage* (`PT_TLS` loading, per-arch variant
-  layouts, `__tls_get_addr`) in T3 — decision 8. The kernel's per-thread
-  thread-pointer contract is what T3 owes.
+  layouts, `__tls_get_addr`) in T3b — decision 8. The kernel's per-thread
+  thread-pointer contract is what T3b owes.
 - Do NOT add process-shared (shm-backed) futexes — decision 6.
-- Do NOT collapse T2 into T3: the state-model split must land green on its own,
-  because nothing in it is user-visible and its blast radius is the whole
-  syscall surface.
+- Do NOT collapse the prerequisite stages into T3b: T2 (the state-model split)
+  and T3a (the process address space) each land green on their own, because
+  nothing in them is user-visible and their blast radius is the whole syscall
+  surface.

@@ -15,11 +15,10 @@
 //!
 //! * [`LiveUserSpace`] — the object-safe, mutating operations the producers
 //!   reach (anonymous map/unmap; device-window map). `Send` so the boxed
-//!   space can be **owned by the kernel thread that runs the task**; it is
-//!   deliberately **not** `Sync` and is reached only by the single CPU
-//!   currently running the task, from that task's own synchronous syscall
-//!   path, so the `&mut` its methods take can never alias — the same
-//!   exclusivity the task's kernel stack already relies on (the access is genuinely exclusive).
+//!   space can move into the process's shared, spin-locked `ProcessSpace`
+//!   (`kernel/core`), whose threads may run on any CPU; it is deliberately
+//!   **not** `Sync`, because that lock — not an ambient one-task-per-space
+//!   assumption — is what makes the `&mut` its methods take non-aliasing.
 //! * [`LiveSpace`] — the generic concrete implementation over a port's
 //!   [`PageTable`] backend `P`, the kernel direct map `M`, the kernel
 //!   [`FrameAllocator`] (anonymous frames), and an [`MmioWindowMap`]
@@ -121,13 +120,12 @@ pub struct DmaMapping {
     pub phys_base: u64,
 }
 
-/// The object-safe, mutating view of a task's retained live address space.
+/// The object-safe, mutating view of a process's live address space.
 ///
-/// Held by `kernel/core` as a `Box<dyn LiveUserSpace + Send>` owned by the
-/// task's kernel thread, reached only by the CPU currently running the task
-/// from that task's syscall path (see the module docs for the exclusivity
-/// argument). Every method takes `&mut self`; the producer that calls them
-/// guarantees the access is exclusive.
+/// Held by `kernel/core` as a `Box<dyn LiveUserSpace + Send>` inside the
+/// process's shared, spin-locked `ProcessSpace`, reached from a running
+/// thread's syscall path through the per-CPU publication. Every method takes
+/// `&mut self`; that lock is what makes the access exclusive.
 pub trait LiveUserSpace: Send {
     /// Map `page_count` fresh, zeroed `RW|USER` pages at the page-aligned
     /// `base_va` into this space, returning `base_va` on success.
@@ -2120,10 +2118,8 @@ mod tests {
         (live, simmap)
     }
 
-    /// The retained live space must be `Send` (it is owned by the kernel
-    /// thread that runs the task) but is intentionally **not** stored behind
-    /// a shared lock — its `Send`-ness is what lets it move to its running
-    /// CPU (the module exclusivity argument).
+    /// The live space must be `Send`: `kernel/core` moves it into the
+    /// process's shared `ProcessSpace`, whose threads may run on any CPU.
     #[test]
     fn live_space_is_send() {
         fn assert_send<T: Send>() {}

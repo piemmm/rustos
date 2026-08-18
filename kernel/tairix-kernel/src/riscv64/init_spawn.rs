@@ -33,6 +33,7 @@
 use core::sync::atomic::{AtomicBool, Ordering};
 
 use alloc::boxed::Box;
+use alloc::sync::Arc;
 
 use tairix_abi::rxe::LoadImage;
 use tairix_arch_api::EnterUser;
@@ -40,9 +41,9 @@ use tairix_arch_riscv64::paging::{
     activate_user_root, AddressSpace as ArchAddressSpace, PageTablePool,
 };
 use tairix_arch_riscv64::userentry::UserMode;
-use tairix_kernel_core::{spawn_image, InitSpawn, InitSpawnCtx, SpawnMode};
+use tairix_kernel_core::{spawn_image, InitSpawn, InitSpawnCtx, ProcessSpace, SpawnMode};
 use tairix_kernel_mem::{
-    AddressSpace, DirectPhysMap, LiveSpace, LiveUserSpace, PhysMap, UserAddressSpace, VirtAddr,
+    AddressSpace, DirectPhysMap, LiveSpace, PhysMap, UserAddressSpace, VirtAddr,
 };
 use tairix_kernel_syscall::SYSCALL_TABLE_HASH;
 
@@ -215,19 +216,13 @@ impl InitSpawn for RiscvInitSpawn {
         // segments, stack, and the startup-vector block.
         let frozen: Box<dyn UserAddressSpace + Send + Sync> = Box::new(space.freeze());
 
-        // Retain the live, mutable arch space behind the object-safe
-        // `LiveUserSpace` boundary so PID 1's `mem_map` / `mmio_map` /
-        // `dma_alloc` syscalls mutate *its own* address space (`plans/PI.md`
-        // 5d-0-ii (b′)), the cross-port sibling of the aarch64 seam. The `LiveSpace` composes the audited
-        // anonymous-map mechanism (over the kernel's `'static` frame
-        // allocator, drawn from `static_frames`) and the guarded device-window
-        // allocator (over the `[WINDOWS.mmio, …)` region); it carries the
-        // *same* arch space the snapshot above was frozen from, and zeroes
+        // PID 1's process address space (`plans/PI.md` 5d-0-ii (b′)): the
+        // *same* arch space the snapshot above was frozen from, zeroing
         // anonymous frames through a fresh identity [`DirectPhysMap`] over the
-        // same identity window PID 1 runs under. A context with no `'static`
-        // allocator, or a window the allocator rejects, retains no live space
-        // and PID 1's `mem_map` / `mmio_map` fail closed.
-        let live: Option<Box<dyn LiveUserSpace + Send>> = match ctx.static_frames() {
+        // identity window PID 1 runs under. No `'static` allocator, or a
+        // window the allocator rejects, retains none and PID 1's `mem_map` /
+        // `mmio_map` fail closed.
+        let live: Option<Arc<ProcessSpace>> = match ctx.static_frames() {
             Some(static_frames) => {
                 let windows = crate::user_windows::user_windows(
                     static_frames.total_frames() as u64,
@@ -250,7 +245,7 @@ impl InitSpawn for RiscvInitSpawn {
                     windows.file_pages,
                 )
                 .ok()
-                .map(|live| Box::new(live) as Box<dyn LiveUserSpace + Send>)
+                .map(|live| Arc::new(ProcessSpace::new(Box::new(live))))
             }
             None => None,
         };

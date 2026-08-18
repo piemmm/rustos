@@ -27,6 +27,7 @@
 //! authority.
 
 use alloc::boxed::Box;
+use alloc::sync::Arc;
 
 use tairix_abi::hwtree::HwResource;
 use tairix_abi::rxe::LoadImage;
@@ -34,14 +35,15 @@ use tairix_abi::{CapabilityId, CapabilityQuery, Errno};
 use tairix_arch_api::{EnterUser, UserEntry};
 use tairix_caps::CapabilitySet;
 use tairix_kernel_mem::{
-    build_process_image, AddressSpace, Frame, FrameAllocator, LiveUserSpace, PageTable, PhysMap,
-    SpawnError, UserAddressSpace, UserStack,
+    build_process_image, AddressSpace, Frame, FrameAllocator, PageTable, PhysMap, SpawnError,
+    UserAddressSpace, UserStack,
 };
 use tairix_log::{Event, Field, Level, Sink};
 use tairix_util::fmt::format_hex_u64;
 
 use crate::aspace::StackSpan;
 use crate::audit::AuditEvent;
+use crate::procspace::ProcessSpace;
 
 /// The architecture-specific seam that spawns PID 1 (`init`) into user
 /// mode once the kernel has finished booting.
@@ -151,16 +153,15 @@ pub trait InitSpawnCtx {
     /// runtime stores it in PID 1's control block and frees it when the task
     /// exits.
     ///
-    /// `live` is PID 1's **retained live, mutable** user address space
-    /// (`plans/PI.md` 5d-0-ii (b′)): when [`Some`], the runtime owns it in
-    /// PID 1's control block and publishes it on the per-CPU live-space slot
-    /// while PID 1 is switched in, so PID 1's `mem_map` / `mmio_map`
-    /// syscalls mutate its own address space through
-    /// [`crate::kthread::with_current_live_space`]. The seam builds it from
-    /// the *same* arch [`AddressSpace`] it froze into `space`, so the
-    /// snapshot and the live space describe one set of mappings. A seam that
-    /// retains no live space passes [`None`] and PID 1's `mem_map` /
-    /// `mmio_map` fail closed.
+    /// `live` is PID 1's process address space (`plans/PI.md` 5d-0-ii (b′)):
+    /// when [`Some`], the runtime clones the handle into PID 1's control
+    /// block and publishes it on the per-CPU slot while PID 1 is switched
+    /// in, so PID 1's `mem_map` / `mmio_map` syscalls mutate its own address
+    /// space through [`crate::kthread::with_current_live_space`]. The seam
+    /// builds it from the *same* arch [`AddressSpace`] it froze into `space`,
+    /// so the snapshot and the live space describe one set of mappings. A
+    /// seam that retains no live space passes [`None`] and PID 1's `mem_map`
+    /// / `mmio_map` fail closed.
     ///
     /// # Safety
     ///
@@ -187,7 +188,7 @@ pub trait InitSpawnCtx {
         stack_span: StackSpan,
         stack: Box<dyn crate::kthread::KernelStack + Send>,
         pre_resume: Box<dyn FnMut(u64) + Send>,
-        live: Option<Box<dyn LiveUserSpace + Send>>,
+        live: Option<Arc<ProcessSpace>>,
         enter: Box<dyn FnMut() + Send>,
     );
 
@@ -874,11 +875,11 @@ pub struct BuiltImage {
     /// The user-stack span the seam's layout placed in `frozen`; the fault
     /// path backs growth pages inside it.
     pub stack_span: StackSpan,
-    /// The retained live, mutable address space (`plans/PI.md`
+    /// The child process's live, mutable address space (`plans/PI.md`
     /// 5d-0-ii (b′)) built from the *same* arch space `frozen` was frozen
     /// from, so the child's `mem_map` / `mmio_map` mutate its own space.
     /// [`None`] retains no live space and those syscalls fail closed.
-    pub live: Option<Box<dyn LiveUserSpace + Send>>,
+    pub live: Option<Arc<ProcessSpace>>,
     /// The child's page-table-root reactivation hook, run on the
     /// dispatcher's context before every switch into the child so it enters
     /// user mode under its own isolated root. Handed the task's kernel-stack
@@ -1509,7 +1510,7 @@ mod tests {
             _stack_span: StackSpan,
             _stack: Box<dyn crate::kthread::KernelStack + Send>,
             _pre_resume: Box<dyn FnMut(u64) + Send>,
-            _live: Option<Box<dyn LiveUserSpace + Send>>,
+            _live: Option<Arc<ProcessSpace>>,
             _enter: Box<dyn FnMut() + Send>,
         ) {
             unreachable!("the default spawn_driver_process returns before admitting a process")

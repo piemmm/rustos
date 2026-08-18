@@ -10034,11 +10034,11 @@ impl tairix_appload::Clock for RuntimeClock<'_> {
 
 /// The pieces the loading body needs to upgrade itself into a user task once
 /// its image is built, verified, and registered: the address-space-root
-/// reactivation hook, the retained live space (for a task whose producer
+/// reactivation hook, the process address space (for a task whose producer
 /// wired one), and the user-mode entry thunk.
 struct ReadyToEnter {
     pre_resume: Box<dyn FnMut(u64) + Send>,
-    live: Option<Box<dyn tairix_kernel_mem::LiveUserSpace + Send>>,
+    live: Option<alloc::sync::Arc<crate::procspace::ProcessSpace>>,
     enter: Box<dyn FnMut() + Send>,
 }
 
@@ -22321,11 +22321,23 @@ mod tests {
     }
 
     impl PublishedLive {
-        fn new(space: AddressSpace<HostPageTable>) -> Self {
-            Self {
+        /// Wrap `space` in a leaked [`crate::procspace::ProcessSpace`] — the
+        /// `'static` shape `publish_live_space_for_test` takes — returning
+        /// the handle to publish and a raw pointer for reading the recording
+        /// back once the handler has released the space's lock
+        /// (single-threaded). A test leak is bounded by the process.
+        fn published(
+            space: AddressSpace<HostPageTable>,
+        ) -> (&'static crate::procspace::ProcessSpace, *const Self) {
+            let boxed = Box::new(Self {
                 space,
                 freezes: core::sync::atomic::AtomicUsize::new(0),
-            }
+            });
+            let observer: *const Self = &raw const *boxed;
+            (
+                Box::leak(Box::new(crate::procspace::ProcessSpace::new(boxed))),
+                observer,
+            )
         }
 
         fn freezes(&self) -> usize {
@@ -22509,7 +22521,7 @@ mod tests {
         live_space
             .map(heap, Frame(9), MapFlags::READ | MapFlags::USER)
             .expect("map heap page");
-        let live: &'static mut PublishedLive = Box::leak(Box::new(PublishedLive::new(live_space)));
+        let (live, _observer) = PublishedLive::published(live_space);
         let _guard = crate::kthread::publish_live_space_for_test(0, live);
 
         let producer: &'static RecordingMemMap = Box::leak(Box::new(RecordingMemMap::new()));
@@ -29125,10 +29137,7 @@ mod tests {
         // page the facility reports the region mapped at.
         let region_page = Page::from_addr(VirtAddr::new(REGION_VA)).expect("aligned");
         let live_space = big_live_space(RESIDENT_BASE, RESIDENT_PAGES, region_page);
-        let live: &'static mut PublishedLive = Box::leak(Box::new(PublishedLive::new(live_space)));
-        // The handler's `&mut` borrow of the published space has ended by the
-        // time the counter is read below (single-threaded, guard still held).
-        let observer: *const PublishedLive = live;
+        let (live, observer) = PublishedLive::published(live_space);
         let _guard = crate::kthread::publish_live_space_for_test(CPU, live);
 
         // A region owned by another task, granted to the mapper — the app

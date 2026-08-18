@@ -59,6 +59,7 @@
 //! tests only the host-testable `prepare`.
 
 use alloc::boxed::Box;
+use alloc::sync::Arc;
 use core::ptr::addr_of_mut;
 
 use tairix_arch_api::{ContextSwitch, TaskContext};
@@ -70,6 +71,7 @@ use tairix_sync::once::OnceCell;
 
 use crate::cpu_state::{self, LiveSpacePtr, ResumeHandle as UserResumeHandle};
 use crate::dispatch_slot::RescheduleAction;
+use crate::procspace::ProcessSpace;
 
 /// Default per-kthread kernel-stack size, in bytes — a **release-tuned
 /// policy value**, not a single worst-case constant.
@@ -366,11 +368,7 @@ impl<C: ContextSwitch + Copy> Yielder<C> {
     /// enter user mode. It **yields** (re-enqueue) rather than parking:
     /// nothing external wakes a loading task, so it must stay runnable to
     /// reach the install step.
-    pub fn become_user(
-        &mut self,
-        pre_resume: PreResume,
-        live: Option<Box<dyn LiveUserSpace + Send>>,
-    ) {
+    pub fn become_user(&mut self, pre_resume: PreResume, live: Option<Arc<ProcessSpace>>) {
         // SAFETY: `pending_upgrade` points at the live `pending_upgrade`
         // field of this task's `ThreadControl`, which outlives the running
         // work. The dispatcher side is suspended inside `switch` while the
@@ -648,16 +646,16 @@ struct ThreadControl<C: ContextSwitch + Copy, S: KernelStack> {
     /// dispatcher's context, where the kernel mapping is identical across
     /// every user space, so switching the user root mid-step is sound.
     pre_resume: Option<PreResume>,
-    /// The task's retained live, mutable user address space, or `None` for a
+    /// The owning process's live, mutable user address space, or `None` for a
     /// task that has none (a kernel kthread, or a user task whose producer
     /// is not wired). When `Some`, [`dispatch_step`] publishes a pointer to
     /// it in the discovered per-CPU state for the running CPU so `mem_map` /
     /// `mmio_map` syscall producers can mutate the caller's own space
-    /// (`plans/PI.md` 5d-0-ii (b′)). Owned here for the task's whole life, so
-    /// the published pointer stays valid while the task exists and the space
-    /// (and its page-table frames) are reclaimed when the control block is
-    /// dropped on exit.
-    live: Option<Box<dyn LiveUserSpace + Send>>,
+    /// (`plans/PI.md` 5d-0-ii (b′)). Every thread of the process holds a
+    /// clone of the same handle, so the published pointer stays valid while
+    /// *any* thread exists and the space (and its page-table frames) are
+    /// reclaimed when the last one drops its control block.
+    live: Option<Arc<ProcessSpace>>,
     /// A pending user-space upgrade a **loading** task's own body deposited
     /// through [`Yielder::become_user`], installed dispatcher-side by
     /// [`dispatch_step`] before the next switch-in (`plans/FIX-DESKTOP.md`
@@ -683,14 +681,14 @@ type PreResume = Box<dyn FnMut(u64) + Send + 'static>;
 /// A child spawned through the asynchronous launch path is admitted as a
 /// plain kernel kthread and builds its own user image on its first slice.
 /// When the build completes its body deposits the built page-table-root
-/// reactivation hook and retained live space here through
+/// reactivation hook and process address space here through
 /// [`Yielder::become_user`] and yields; [`dispatch_step`] moves them into
 /// the control block's `pre_resume`/`live` fields — the side that already
 /// owns those fields — before the next switch-in, so the task resumes as a
 /// fully-formed user kthread. `None` for every task not mid-upgrade.
 struct UserUpgrade {
     pre_resume: PreResume,
-    live: Option<Box<dyn LiveUserSpace + Send>>,
+    live: Option<Arc<ProcessSpace>>,
 }
 
 /// The entry point a freshly prepared kthread first runs.
@@ -953,17 +951,19 @@ where
     )
 }
 
-/// Admit a resumable user (EL0) kthread that **retains a live, mutable user
-/// address space** onto `scheduler` over a caller-supplied kernel stack.
+/// Admit a resumable user (EL0) kthread that **shares its process's live,
+/// mutable user address space** onto `scheduler` over a caller-supplied
+/// kernel stack.
 ///
 /// The production form of [`spawn_user_kthread_with_stack`] for a task whose
 /// `mem_map` / `mmio_map` syscalls must mutate its own address space
-/// (`plans/PI.md` 5d-0-ii (b′)): the boxed [`LiveUserSpace`] is owned by the
-/// task's control block for its whole life, and the dispatcher publishes a
-/// pointer to it in the discovered per-CPU state while the task is
+/// (`plans/PI.md` 5d-0-ii (b′)): the [`ProcessSpace`] handle is cloned into
+/// the task's control block for its whole life, and the dispatcher publishes
+/// a pointer to it in the discovered per-CPU state while the task is
 /// switched in, so the syscall producers reach it through
 /// [`with_current_live_space`]. The space (and its page-table frames) is
-/// reclaimed when the task exits and the control block is dropped.
+/// reclaimed when the last thread of the process exits and drops its
+/// control block.
 ///
 /// `parked` admits the task suspended (see
 /// [`SchedulerPolicy::spawn_parked`]); `false` is the ordinary Ready
@@ -980,7 +980,7 @@ pub fn spawn_user_kthread_with_stack_live<C, A, P, S, R, W>(
     home_cpu: CpuId,
     priority: Priority,
     pre_resume: R,
-    live: Box<dyn LiveUserSpace + Send>,
+    live: Arc<ProcessSpace>,
     work: W,
     parked: bool,
 ) -> SchedResult<TaskId>
@@ -1012,7 +1012,7 @@ where
 ///
 /// Each parameter is a distinct piece of the task's construction (the
 /// scheduler, placement, context-switch handle, stack, body, the optional
-/// user pre-resume hook, and the optional retained live space); bundling
+/// user pre-resume hook, and the optional process address space); bundling
 /// them behind a one-use struct purely to satisfy the arg-count lint would
 /// be the wrapper the charter forbids.
 #[allow(clippy::too_many_arguments)]
@@ -1024,7 +1024,7 @@ fn spawn_control<C, A, P, S, W>(
     stack: S,
     work: W,
     pre_resume: Option<PreResume>,
-    live: Option<Box<dyn LiveUserSpace + Send>>,
+    live: Option<Arc<ProcessSpace>>,
     parked: bool,
 ) -> SchedResult<TaskId>
 where
@@ -1327,10 +1327,10 @@ fn clear_resume(cpu: CpuId) {
     }
 }
 
-/// Publish the per-CPU live-address-space pointer for the user kthread
-/// `ctl`, about to be switched in on `cpu`, when it carries a retained live
-/// space ([`ThreadControl::live`]). A task with no live space publishes
-/// nothing, so its `mem_map` / `mmio_map` fall closed at the producer.
+/// Publish the per-CPU address-space handle for the user kthread `ctl`,
+/// about to be switched in on `cpu`, when it carries one
+/// ([`ThreadControl::live`]). A task with no live space publishes nothing,
+/// so its `mem_map` / `mmio_map` fall closed at the producer.
 ///
 /// Out-of-range or unconfigured `cpu` is a silent no-op, exactly as
 /// [`publish_resume`].
@@ -1340,15 +1340,10 @@ where
     S: KernelStack,
 {
     // SAFETY: dispatcher-side exclusive access to `*ctl` (the kthread
-    // raw-pointer protocol; see `dispatch_step`). The `&mut` to the boxed
-    // trait object is taken only to form the raw pointer published below;
-    // it is not retained.
-    let ptr = unsafe {
-        (*ctl)
-            .live
-            .as_deref_mut()
-            .map(core::ptr::from_mut::<dyn LiveUserSpace + Send>)
-    };
+    // raw-pointer protocol; see `dispatch_step`). The shared borrow of the
+    // `Arc` is taken only to form the raw pointer published below; the `Arc`
+    // itself stays in the control block, so the pointee outlives the slot.
+    let ptr = unsafe { (*ctl).live.as_ref().map(Arc::as_ptr) };
     if let Some(ptr) = ptr {
         if let Some(state) = cpu_state::get(cpu) {
             *state.live_space.lock() = Some(LiveSpacePtr(ptr));
@@ -1356,52 +1351,57 @@ where
     }
 }
 
-/// Clear the per-CPU live-address-space pointer for `cpu` once its user
-/// kthread has switched back (the counterpart of [`publish_live_space`]).
+/// Clear the per-CPU address-space handle for `cpu` once its user kthread
+/// has switched back (the counterpart of [`publish_live_space`]).
 fn clear_live_space(cpu: CpuId) {
     if let Some(state) = cpu_state::get(cpu) {
         *state.live_space.lock() = None;
     }
 }
 
-/// Run `f` against the live, mutable user address space of the task
-/// currently switched in on `cpu`, returning `None` (fail closed) when that CPU has no published live space.
+/// Run `f` against the live, mutable user address space of the process whose
+/// thread is currently switched in on `cpu`, returning `None` (fail closed)
+/// when that CPU has no published space.
 ///
 /// This is the seam the `mem_map` / `mmio_map` syscall producers reach to
 /// mutate the **caller's own** address space: the syscall handler runs on
-/// the CPU servicing the trap, on which the calling task is the one
-/// currently switched in, so its live space is exactly the slot for `cpu`.
+/// the CPU servicing the trap, on which the calling thread is the one
+/// currently switched in, so its process's space is exactly the slot for
+/// `cpu`.
+///
+/// The exclusive borrow comes from [`ProcessSpace`]'s own lock, so a sibling
+/// thread of the same process mutating the space on another CPU is
+/// serialised rather than racing. `f` must not park while it holds it (see
+/// the [`crate::procspace`] module docs).
 ///
 /// # Safety of the borrow
 ///
-/// The published pointer is dereferenced into an exclusive `&mut` for the
-/// duration of `f`. That is sound because the slot is `Some` only while the
-/// task runs on `cpu`, the task is suspended in its own syscall trap (not
-/// executing EL0) for the whole call, and a task runs on at most one CPU —
-/// so no other context (this CPU's EL0 task, another CPU, the dispatcher's
-/// switch-back clear) can observe the space concurrently (see the
-/// `LiveSpacePtr` publication discipline).
+/// The published pointer is reborrowed as a shared `&ProcessSpace`. That is
+/// sound because the slot is `Some` only while a thread of that process runs
+/// on `cpu`, and that thread's control block holds an `Arc` clone for its
+/// whole life — so the pointee cannot be freed while the slot names it.
 pub fn with_current_live_space<R>(
     cpu: CpuId,
     f: impl FnOnce(&mut dyn LiveUserSpace) -> R,
 ) -> Option<R> {
     let state = cpu_state::get(cpu)?;
-    // Lift the (Copy) pointer out from under the lock, then release the lock
-    // before the (possibly lengthy, page-table-walking) `f` — the per-CPU
-    // slot is only ever touched by this CPU, so nothing can change it while
-    // the task is trapped here (mirrors `reschedule_current`'s lift-then-act).
+    // Lift the (Copy) pointer out from under the per-CPU slot lock, then
+    // release it before the (possibly lengthy, page-table-walking) `f` — the
+    // slot is only ever written by this CPU's own dispatcher, so nothing can
+    // change it while the task is trapped here (mirrors
+    // `reschedule_current`'s lift-then-act).
     let ptr = {
         let guard = state.live_space.lock();
         *guard
     }?;
-    // SAFETY: see the function's borrow argument — exclusive while the task
-    // is trapped on this CPU.
-    let space: &mut (dyn LiveUserSpace + Send) = unsafe { &mut *ptr.0 };
-    Some(f(space))
+    // SAFETY: see the function's borrow argument — the pointee is kept alive
+    // by the running thread's own `Arc` clone.
+    let space: &ProcessSpace = unsafe { &*ptr.0 };
+    Some(space.with(f))
 }
 
-/// Test-only: publish `space` as the current live space for `cpu`, returning
-/// a guard that clears the slot when dropped.
+/// Test-only: publish `space` as the current process space for `cpu`,
+/// returning a guard that clears the slot when dropped.
 ///
 /// Lets sibling in-crate test modules (notably `live_producer`) exercise the
 /// [`with_current_live_space`] path without driving a full context switch.
@@ -1421,12 +1421,10 @@ impl Drop for LiveSpacePublishGuard {
 #[cfg(test)]
 pub(crate) fn publish_live_space_for_test(
     cpu: CpuId,
-    space: &'static mut (dyn LiveUserSpace + Send),
+    space: &'static ProcessSpace,
 ) -> LiveSpacePublishGuard {
     if let Some(state) = cpu_state::get(cpu) {
-        *state.live_space.lock() = Some(LiveSpacePtr(core::ptr::from_mut::<
-            dyn LiveUserSpace + Send,
-        >(space)));
+        *state.live_space.lock() = Some(LiveSpacePtr(core::ptr::from_ref(space)));
     }
     LiveSpacePublishGuard { cpu }
 }
