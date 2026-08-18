@@ -1,9 +1,9 @@
 //! Host tests for the whole-disk block cache (`plans/SMARTRAM.md`
 //! SMART11): classification, hit/miss accounting, write-through
 //! coherence, discard and failed-write invalidation, sensitive-class
-//! scrubbing, large-read bypass, LRU eviction with hysteresis,
-//! pressure-band enforcement, fail-closed poisoning, and secret
-//! wiping.
+//! scrubbing, budget-bounded admission of a wide read, LRU eviction
+//! with hysteresis, pressure-band enforcement, fail-closed poisoning,
+//! and secret wiping.
 
 use super::*;
 
@@ -390,17 +390,51 @@ fn a_non_sensitive_classified_read_is_cached_like_a_plain_one() {
 }
 
 #[test]
-fn a_large_read_streams_through_uncached() {
+fn a_read_the_budget_could_not_hold_streams_through_uncached() {
+    // The only size rule left: a request wider than the watermark the
+    // cache evicts down to would flush everything else to hold itself,
+    // so it streams through instead. The bound follows the budget.
     let (store, mut cache) = cached();
-    let blocks = usize::try_from(LARGE_READ_BYPASS_BLOCKS + 1).expect("small test span");
+    let blocks = budget().low() / BS as usize + 1;
     let mut bulk = vec![0u8; blocks * BS as usize];
     cache.read_blocks(0, &mut bulk).unwrap();
     assert_eq!(store.borrow().reads, 1);
     assert_eq!(
         cache.accounting().total_bytes(),
         0,
-        "a bulk load must not flush the working set"
+        "a load the budget cannot hold must not flush the working set"
     );
+}
+
+#[test]
+fn a_wide_read_the_budget_holds_is_retained_and_repeats_from_the_cache() {
+    // The regression: a filesystem that coalesces its reads into whole
+    // contiguous runs (`tairix-drv-fs-arxfs`'s 64 KiB run window) is
+    // exactly the caller whose repeat must come from RAM. Request size
+    // decides how a miss is fetched, never whether the bytes are kept.
+    let (store, mut cache) = roomy_cached();
+    let blocks = 64 * 1024 / BS as usize;
+    let mut run = vec![0u8; blocks * BS as usize];
+    cache.read_blocks(0, &mut run).unwrap();
+    assert_eq!(
+        store.borrow().reads,
+        1,
+        "one device request fetched the whole run"
+    );
+    assert_eq!(
+        cache.accounting().total_bytes(),
+        blocks * COST,
+        "every block of the run is retained"
+    );
+
+    let mut again = vec![0u8; blocks * BS as usize];
+    cache.read_blocks(0, &mut again).unwrap();
+    assert_eq!(
+        store.borrow().reads,
+        1,
+        "the repeated run never reached the device"
+    );
+    assert_eq!(again, run, "and answered exactly the same bytes");
 }
 
 #[test]
@@ -760,12 +794,12 @@ fn random_access_never_speculates() {
 fn a_bulk_bypass_breaks_the_sequential_run() {
     // A bulk (bypassed) read must not leave a stale sequential
     // expectation that mis-fires readahead on the next small read.
-    let (store, mut cache) = roomy_cached();
+    let (store, mut cache) = cached();
     let mut b0 = block_of(0);
     cache.read_blocks(0, &mut b0).unwrap();
-    // A large read past the bypass bound streams uncached and resets the
+    // A read the budget cannot hold streams uncached and resets the
     // tracker.
-    let bulk_blocks = usize::try_from(LARGE_READ_BYPASS_BLOCKS + 1).unwrap();
+    let bulk_blocks = budget().low() / BS as usize + 1;
     let mut bulk = vec![0u8; bulk_blocks * BS as usize];
     cache.read_blocks(1, &mut bulk).unwrap();
     let reads_after_bulk = store.borrow().reads;

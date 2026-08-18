@@ -162,15 +162,14 @@ impl PipeEnd {
             return ReadStep::Read(0);
         }
         let n = out.len().min(state.buf.len());
-        for slot in out.iter_mut().take(n) {
-            // The length guard above makes `pop_front` infallible for the
-            // first `n` slots; fail closed (stop short) rather than panic
-            // if the invariant were ever violated.
-            match state.buf.pop_front() {
-                Some(byte) => *slot = byte,
-                None => break,
-            }
-        }
+        // Two bulk copies, one per ring segment: a byte-at-a-time drain
+        // would make every megabyte a million bounds-checked pops on a
+        // path that carries whole documents between processes.
+        let (front, back) = state.buf.as_slices();
+        let head = front.len().min(n);
+        out[..head].copy_from_slice(&front[..head]);
+        out[head..n].copy_from_slice(&back[..n - head]);
+        state.buf.drain(..n);
         ReadStep::Read(n)
     }
 
@@ -213,7 +212,20 @@ impl PipeEnd {
             return WriteStep::Full;
         }
         let n = data.len().min(free);
-        state.buf.extend(data.iter().take(n).copied());
+        // Grow the ring fallibly, then append in bulk. A kernel
+        // allocation failure must never abort, so a refused reservation
+        // accepts only what the ring already has room for and the writer
+        // retries after the reader drains (or after reclaim runs).
+        let spare = state.buf.capacity() - state.buf.len();
+        let n = if n <= spare || state.buf.try_reserve_exact(n - spare).is_ok() {
+            n
+        } else {
+            spare
+        };
+        if n == 0 {
+            return WriteStep::Full;
+        }
+        state.buf.extend(&data[..n]);
         WriteStep::Wrote(n)
     }
 }
@@ -301,6 +313,36 @@ mod tests {
         let mut out = vec![0u8; 100];
         assert_eq!(read.try_read(&mut out), ReadStep::Read(100));
         assert_eq!(write.try_write(&chunk), WriteStep::Wrote(100));
+    }
+
+    #[test]
+    fn a_read_spanning_the_ring_wrap_returns_exactly_the_written_bytes() {
+        // Transfers are bulk copies, one per ring segment, so the seam a
+        // wrapped ring puts in the middle of a read is the case to pin:
+        // the reader must see one unbroken stream across it.
+        let (read, write) = Pipe::create();
+        let filler = vec![0xEEu8; PIPE_CAPACITY];
+        assert_eq!(write.try_write(&filler), WriteStep::Wrote(PIPE_CAPACITY));
+        // Free the head, then refill it: the live bytes now straddle the
+        // ring's end and its start.
+        let mut drained = vec![0u8; PIPE_CAPACITY / 2];
+        assert_eq!(
+            read.try_read(&mut drained),
+            ReadStep::Read(PIPE_CAPACITY / 2)
+        );
+        let tail: alloc::vec::Vec<u8> = (0..PIPE_CAPACITY / 2)
+            .map(|i| u8::try_from(i % 251).expect("bounded by the modulus"))
+            .collect();
+        assert_eq!(write.try_write(&tail), WriteStep::Wrote(tail.len()));
+
+        let mut out = vec![0u8; PIPE_CAPACITY];
+        assert_eq!(read.try_read(&mut out), ReadStep::Read(PIPE_CAPACITY));
+        assert!(
+            out[..PIPE_CAPACITY / 2].iter().all(|&b| b == 0xEE),
+            "the bytes before the seam are unchanged"
+        );
+        assert_eq!(&out[PIPE_CAPACITY / 2..], &tail[..], "and those after it");
+        assert_eq!(read.try_read(&mut out), ReadStep::Empty, "nothing is left");
     }
 
     #[test]

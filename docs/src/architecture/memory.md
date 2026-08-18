@@ -1133,12 +1133,23 @@ properties:
   target purges the whole cache; a detected ledger imbalance poisons
   the cache (purge + admit nothing) while the driver keeps serving.
 - **Bounded and zeroing.** Payload copies are fallibly allocated
-  (`try_reserve`); oversized names are refused; reads above four chunks
-  bypass the cache so bulk streams cannot evict the hot working set;
-  and every cached buffer (file bytes, names) is zeroed on
-  invalidation, eviction, purge, and teardown — the volumes are
-  encrypted at rest, so cached bytes are decrypted user data that must
-  not linger in reusable heap memory.
+  (`try_reserve`); oversized names are refused; and every cached buffer
+  (file bytes, names) is zeroed on invalidation, eviction, purge, and
+  teardown — the volumes are encrypted at rest, so cached bytes are
+  decrypted user data that must not linger in reusable heap memory.
+- **Read size is a cost, never an admission rule.** Every read is
+  cached whatever its length: a read's size decides how its miss is
+  *fetched*, never whether the bytes are retained. A miss issues **one**
+  driver call for the whole run of consecutive chunks the read still
+  needs and the cache does not hold (staged in one fallibly reserved,
+  wiped-on-drop buffer bounded by the request the syscall layer already
+  bounds), so a whole-document read pays one call per absent run instead
+  of one per page, hits and fetches stitch together, and a repeat is
+  served from RAM. Residency is bounded by the budget and its LRU, not
+  by a hand-picked read length: a stream larger than the budget evicts
+  its own head as it goes, and the class drains first under pressure.
+  A refused staging reservation serves that slice straight from the
+  driver, uncached, rather than failing the read.
 
 ## 7h. VM pressure bands and reclaim ordering (`pressure`)
 
@@ -1218,11 +1229,12 @@ with it, once per *cluster*.
   behaves exactly as before, and the integrity passes (scrub, check,
   rescue) never consult it — they exist to verify the on-disk bytes.
 - **Complementary to `CachedFs`, not duplicate.** `CachedFs` (§7g)
-  retains page chunks of *served* plaintext for small reads; the
-  transform cache sits below the driver's read path and covers what
-  `CachedFs` cannot: the large sequential reads (bundle and
-  driver-store loads) that bypass `CachedFs` by design, and `CachedFs`
-  misses — both of which otherwise re-run the whole transform per call.
+  retains page chunks of *served* plaintext, keyed by file and offset;
+  the transform cache sits below the driver's read path, keyed by the
+  cluster's stored physical run, and covers what `CachedFs` cannot: a
+  `CachedFs` miss, a read of a file too large to stay resident, and
+  the same cluster reached through a second path — each of which
+  otherwise re-runs the whole transform per call.
 - **Classified, budgeted, pressure-governed.** The cache declares a
   `CacheCandidate` (class `TransformCache`, owned by the volume's
   stable per-boot mount handle, expensive to rebuild, decrypted user
@@ -1498,9 +1510,15 @@ calling task across a completion interrupt.
   a successful write refreshes the cached copies of the written blocks
   in place (admitting nothing new), a failed write invalidates the
   range (the device state is unknown — fail closed), and a discard
-  invalidates its range. Reads spanning more than
-  `LARGE_READ_BYPASS_BLOCKS` stream through uncached so a bulk bundle
-  or driver-store load cannot flush the hot working set.
+  invalidates its range.
+- **Request size is not an admission rule.** A filesystem that
+  coalesces its reads into whole contiguous runs (`ARXFS`'s 64 KiB run
+  window) is exactly the caller whose repeats must be served from RAM,
+  so a wide read is retained like any other. Only a request the cache
+  could not hold without evicting itself — wider than the low watermark
+  it evicts down to, a single block always fitting — streams through
+  uncached, a bound that scales with the machine rather than a
+  hand-picked length.
 - **Sequential readahead.** The filesystem serves file content one
   block per iteration, so a cold sequential load (a program image, a
   bundle, the users database) would otherwise cost one device
@@ -1510,9 +1528,10 @@ calling task across a completion interrupt.
   window ahead in a single coalesced device request, retaining it so
   the following blocks are hits; the window ramps 8→16→32→64 blocks
   (doubling per sustained sequential miss, capped at
-  `LARGE_READ_BYPASS_BLOCKS`) and is clamped to the device end. It is
-  a pure hint: random access disarms the ramp (scattered reads never
-  over-read), a coalesced read that faults falls back to the exact
+  `READAHEAD_MAX_BLOCKS` — a bound on what the cache *guesses*, not on
+  what it keeps) and is clamped to the device end. It is a pure hint:
+  random access disarms the ramp (scattered reads never over-read), a
+  coalesced read that faults falls back to the exact
   requested span (a speculative over-read never widens a caller's
   fault), and a scratch reservation refused under pressure falls back
   to the exact read. Prefetched blocks still pass the pressure/budget
@@ -1531,8 +1550,10 @@ The host suite (`kernel/tairix-kernel/src/block_cache_tests.rs`)
 proves classification, hit/miss/insertion accounting (a hit is shown
 never to reach the device by corrupting the backing store),
 write-through coherence, failed-write and discard invalidation,
-sensitive-class scrubbing, the large-read bypass, sequential
-readahead (a streaming read collapsing to a handful of device
+sensitive-class scrubbing, the budget-bounded admission of a wide read
+(a 64 KiB run retained and its repeat served without a device request,
+against a request the budget cannot hold streaming through),
+sequential readahead (a streaming read collapsing to a handful of device
 round-trips, byte-correctness, prefetch-served-from-cache,
 no-speculation-on-random-access, bypass-resets-the-run, and
 coalesced-fault fallback), LRU eviction with

@@ -1,7 +1,8 @@
 //! Host tests for the clean, rebuildable filesystem cache
 //! (`plans/SMARTRAM.md` section 6.1): hit/miss behaviour, precise
 //! invalidation on every mutation, budget-bounded eviction with
-//! hysteresis, large-read bypass, authorisation-sensitive reuse, and
+//! hysteresis, whole-document reads (one driver call per absent run,
+//! served from RAM on the repeat), authorisation-sensitive reuse, and
 //! ledger consistency.
 
 use super::*;
@@ -461,18 +462,60 @@ fn security_change_is_seen_by_the_secured_vfs_permission_check() {
 }
 
 #[test]
-fn large_reads_bypass_the_cache() {
+fn a_large_read_is_cached_and_repeats_without_driver_calls() {
+    // Read size decides how a miss is *fetched*, never whether the bytes
+    // are retained: a whole-document read — the shape every image,
+    // bundle, and settings load has — is served from RAM on the repeat,
+    // and its miss costs one driver call rather than one per page.
     let contents = vec![0xA5u8; 64 * 1024];
     let mut cache = fixture(&contents);
     let file = file_of(&mut cache);
 
-    let mut big = vec![0u8; 32 * 1024];
-    let n = cache.read_at(file, 0, &mut big).expect("bulk read");
-    assert_eq!(n, 32 * 1024);
+    let mut big = vec![0u8; contents.len()];
+    let before = calls(&cache);
+    assert_eq!(cache.read_at(file, 0, &mut big), Ok(contents.len()));
+    assert_eq!(big, contents);
     assert_eq!(
-        cache.accounting().class_bytes(ReclaimClass::CleanFileData),
-        0,
-        "a bulk read is not admitted into the cache"
+        calls(&cache) - before,
+        1,
+        "one driver call fetched the whole missing run"
+    );
+    assert!(
+        cache.accounting().class_bytes(ReclaimClass::CleanFileData) >= contents.len(),
+        "every chunk the read covered is retained"
+    );
+
+    let before = calls(&cache);
+    let mut again = vec![0u8; contents.len()];
+    assert_eq!(cache.read_at(file, 0, &mut again), Ok(contents.len()));
+    assert_eq!(again, contents, "the warm read answers exactly");
+    assert_eq!(calls(&cache), before, "the repeat never reached the driver");
+}
+
+#[test]
+fn a_partly_cached_large_read_fetches_only_the_missing_runs() {
+    // Hits and fetches stitch together: a read spanning resident and
+    // absent chunks asks the driver once per *contiguous absent run*,
+    // and the answer is byte-exact across every boundary.
+    let contents: alloc::vec::Vec<u8> = (0..64 * 1024)
+        .map(|i| u8::try_from(i % 251).expect("bounded by the modulus"))
+        .collect();
+    let mut cache = fixture(&contents);
+    let file = file_of(&mut cache);
+
+    // Warm two isolated chunks, leaving a gap between and after them.
+    let mut page = vec![0u8; CHUNK];
+    assert_eq!(cache.read_at(file, 0, &mut page), Ok(CHUNK));
+    assert_eq!(cache.read_at(file, 3 * CHUNK as u64, &mut page), Ok(CHUNK));
+
+    let before = calls(&cache);
+    let mut whole = vec![0u8; contents.len()];
+    assert_eq!(cache.read_at(file, 0, &mut whole), Ok(contents.len()));
+    assert_eq!(whole, contents, "hits and fetches stitch together exactly");
+    assert_eq!(
+        calls(&cache) - before,
+        2,
+        "one call per absent run: the gap, then the tail"
     );
 }
 

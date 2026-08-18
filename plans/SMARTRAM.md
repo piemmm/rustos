@@ -1328,9 +1328,14 @@ ordering as every other class:
   watermark on a full budget (hysteresis).
 - Coherence: a successful write refreshes cached copies in place
   (admitting nothing new), a failed write invalidates its range (the
-  device state is unknown), a discard invalidates its range, and
-  reads wider than the large-read bound stream through uncached so a
-  bulk bundle/driver-store load cannot flush the hot working set.
+  device state is unknown), and a discard invalidates its range.
+- Request size is not an admission rule: a filesystem that coalesces
+  its reads into whole contiguous runs is exactly the caller whose
+  repeats must be served from RAM, so a wide read is retained like any
+  other. Only a request wider than the low watermark the cache evicts
+  down to — one it could not hold without evicting itself, a single
+  block always fitting — streams through uncached. The bound follows
+  the machine's memory, never a hand-picked length.
 - Sequential readahead: the filesystem's per-block content path
   reads a file one `data_capacity()` block per iteration, so a cold
   sequential load (a program image, a bundle, the users database)
@@ -1340,12 +1345,13 @@ ordering as every other class:
   reads a bounded readahead window ahead in a single coalesced device
   request, retaining the window so the following blocks are cache
   hits. The window ramps 8→16→32→64 blocks (doubling per sustained
-  sequential miss, capped at the large-read bound so a prefetch never
-  retains more than one non-bypassed request could) and is clamped to
-  the end of the device. It is a pure hint: a random access disarms
-  the ramp (so scattered reads never over-read), a coalesced read
-  that faults falls back to the exact requested span (a speculative
-  over-read never widens a caller's fault), and a scratch reservation
+  sequential miss, capped at the widest single device transfer worth
+  speculating over — a bound on what the cache *guesses*, not on what
+  it keeps) and is clamped to the end of the device. It is a pure hint:
+  a random access disarms the ramp (so scattered reads never
+  over-read), a coalesced read that faults falls back to the exact
+  requested span (a speculative over-read never widens a caller's
+  fault), and a scratch reservation
   refused under pressure falls back to the exact read. Admission of
   the prefetched blocks still passes the SMART2 pressure/budget gate.
 - Secret hygiene: `BufferClass::Sensitive` reads and writes bypass
@@ -1362,10 +1368,13 @@ owner, hit/miss/insertion accounting with a device-corruption proof
 that a hit never reaches the device, multi-block partial-hit
 behaviour, write-through coherence, failed-write and discard
 invalidation, sensitive-class scrubbing on both directions,
-non-sensitive classified reads cached normally, large-read bypass,
-sequential readahead coalescing a streaming read into a handful of
-device round-trips (byte-correctness, prefetch-served-from-cache,
-no-speculation-on-random-access, bypass-resets-the-run, and
+non-sensitive classified reads cached normally, budget-bounded
+admission of a wide read (a 64 KiB run retained and its repeat served
+without a device request, against a request the budget cannot hold
+streaming through), sequential readahead coalescing a streaming read
+into a handful of device round-trips (byte-correctness,
+prefetch-served-from-cache, no-speculation-on-random-access,
+bypass-resets-the-run, and
 coalesced-fault fallback), unaligned passthrough, LRU eviction with
 hysteresis, per-band
 growth/shrink/drain enforcement with recovery, zero-backing refusal,

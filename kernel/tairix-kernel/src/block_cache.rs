@@ -56,11 +56,15 @@
 //!
 //! # Bypasses
 //!
-//! Reads larger than [`LARGE_READ_BYPASS_BLOCKS`] blocks stream
-//! through uncached in both directions (a bundle or driver-store bulk
-//! load must not flush the hot working set), mirroring `CachedFs`'s
-//! large-read bypass. Unaligned or zero-length requests are the
-//! device's own error surface and are forwarded untouched.
+//! Request *size* is not an admission rule: a filesystem that
+//! coalesces its reads into whole contiguous runs is exactly the
+//! caller whose repeats must be served from RAM, so a wide read is
+//! retained like any other. Only a request the cache could not hold
+//! without evicting itself — one wider than the budget's low watermark
+//! (a single block always fits) — streams through uncached, a bound
+//! that scales with the machine rather than a hand-picked length.
+//! Unaligned or zero-length requests are the device's own error
+//! surface and are forwarded untouched.
 
 use alloc::collections::BTreeMap;
 use alloc::sync::Arc;
@@ -92,11 +96,6 @@ const CACHE_LABEL: &str = "block";
 /// volume identity fits.
 const OWNER_SUBSYSTEM: &str = "boot_block_device";
 
-/// Reads spanning more blocks than this stream through uncached: a
-/// bulk sequential load (bundle read, driver-store scan) must not
-/// flush the hot working set. Mirrors `CachedFs`'s large-read bypass.
-pub const LARGE_READ_BYPASS_BLOCKS: u64 = 64;
-
 /// Readahead only drives off *small* requests: a request already this
 /// many blocks wide amortises its own device round-trip, so speculating
 /// past it wins nothing and only risks pulling in blocks the caller
@@ -112,11 +111,12 @@ const READAHEAD_TRIGGER_BLOCKS: u64 = 8;
 /// a long sequential stream quickly reaches the widest coalesced I/O.
 const READAHEAD_INIT_BLOCKS: u64 = 8;
 
-/// The widest readahead window, in device blocks. Held at
-/// [`LARGE_READ_BYPASS_BLOCKS`] so a coalesced prefetch never retains
-/// more of the working set than a single non-bypassed request could,
-/// and one prefetch is always one device round-trip.
-const READAHEAD_MAX_BLOCKS: u64 = LARGE_READ_BYPASS_BLOCKS;
+/// The widest readahead window, in device blocks: one prefetch is
+/// always a single device round-trip, and speculation past a transfer
+/// this wide buys no further round-trip saving while risking blocks the
+/// caller never asked for. Bounds only what the cache *guesses*; what
+/// it retains is bounded by the budget and its LRU.
+pub const READAHEAD_MAX_BLOCKS: u64 = 64;
 
 /// The widest device block the cache will retain. A device reporting
 /// a larger (or zero) block size is served uncached: per-block entries
@@ -529,18 +529,25 @@ impl<B: Block> BlockCache<B> {
     }
 
     /// Whether a request shaped `(lba, len)` is cacheable: block-
-    /// aligned, non-empty, within the small-read bound, and not
-    /// wrapping the LBA space. Anything else streams through uncached
-    /// and takes the device's own error surface.
+    /// aligned, non-empty, holdable under the budget, and not wrapping
+    /// the LBA space. Anything else streams through uncached and takes
+    /// the device's own error surface.
+    ///
+    /// A request is refused only when the cache could not hold it
+    /// without evicting everything else to make room — wider than the
+    /// low watermark it evicts down to — so the bound follows the
+    /// machine's memory, not the request's length. A single block is
+    /// always cacheable, however small the budget.
     fn cacheable_span(&self, lba: u64, len: usize) -> Option<u64> {
         let bs = self.block_size();
         if self.poisoned || len == 0 || bs == 0 || !len.is_multiple_of(bs) {
             return None;
         }
-        let blocks = (len / bs) as u64;
-        if blocks > LARGE_READ_BYPASS_BLOCKS || lba.checked_add(blocks).is_none() {
+        if len > self.budget.low().max(bs) {
             return None;
         }
+        let blocks = (len / bs) as u64;
+        lba.checked_add(blocks)?;
         Some(blocks)
     }
 

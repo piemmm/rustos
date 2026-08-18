@@ -49,12 +49,24 @@
 //! first evicts least-recently-used entries down to the low watermark
 //! (hysteresis), evicting file data before metadata
 //! ([`ReclaimClass::reclaim_priority`]). Oversized entries (a name over
-//! the component bound, a read larger than the bypass limit) are refused
-//! or bypassed, never admitted unbounded. Every payload buffer the cache
-//! copies is allocated fallibly (`try_reserve`): allocation failure
-//! refuses the entry and the operation is served straight from the
-//! driver. The remaining map-node allocations are small, fixed-size, and
-//! bounded by the budget's entry-overhead charge.
+//! the component bound) are refused, never admitted unbounded. Every
+//! payload buffer the cache copies is allocated fallibly
+//! (`try_reserve`): allocation failure refuses the entry and the
+//! operation is served straight from the driver. The remaining map-node
+//! allocations are small, fixed-size, and bounded by the budget's
+//! entry-overhead charge.
+//!
+//! # Read size is a cost, never an admission rule
+//!
+//! **Every** read is cached, whatever its length: a read's size decides
+//! how the miss is *fetched*, never whether the bytes are retained. A
+//! miss issues **one** driver call for the whole run of consecutive
+//! chunks the read still needs and the cache does not hold
+//! ([`ReadStage`]), so a large sequential read pays one call per run
+//! rather than one per page, and a repeat of it is served from RAM. The
+//! residency bound is the budget and its LRU, not a hand-picked read
+//! length: a bulk read that outgrows the budget evicts its own head as
+//! it streams, and the whole class drains first under pressure.
 //!
 //! # Secret hygiene
 //!
@@ -95,11 +107,6 @@ use crate::cache_control::{CacheClass, CacheControl, CACHE_CONTROL};
 
 /// A cached file-data chunk covers exactly one page-aligned window.
 const CHUNK: usize = PAGE_SIZE;
-
-/// Reads larger than this bypass the cache entirely: a bulk sequential
-/// read (a bundle load) is served in one driver call and must not evict
-/// the hot small-read working set.
-const READ_BYPASS_LIMIT: usize = 4 * CHUNK;
 
 /// Approximate per-entry bookkeeping cost (map nodes, key copies, the
 /// LRU index) charged on top of an entry's payload so the ledger tracks
@@ -752,66 +759,108 @@ impl<F: FilesystemRead> CachedFs<F> {
         self.invalidate_data(node);
     }
 
-    /// Serve one chunk-aligned slice of a file read: copy into `out`
-    /// from the cached chunk at `base`, fetching and admitting the
-    /// chunk on a miss. Returns `(bytes copied, chunk length)`; a chunk
-    /// shorter than [`CHUNK`] marks end-of-file within it.
-    fn chunk_read(
-        &mut self,
-        file: NodeId,
-        base: u64,
-        in_off: usize,
-        out: &mut [u8],
-    ) -> Result<(usize, usize), DriverError> {
-        let raw = file.raw();
-        if let Some(entry) = self.data.get(&(raw, base)) {
-            let len = entry.bytes.len();
-            let n = out.len().min(len.saturating_sub(in_off));
-            if n > 0 {
-                out[..n].copy_from_slice(&entry.bytes[in_off..in_off + n]);
-            }
-            let old_tick = entry.tick;
-            let tick = self.touch(old_tick);
-            if let Some(entry) = self.data.get_mut(&(raw, base)) {
-                entry.tick = tick;
-            }
-            self.accounting.record_hit(ReclaimClass::CleanFileData);
-            return Ok((n, len));
-        }
-        self.accounting.record_miss(ReclaimClass::CleanFileData);
-        let Some(mut chunk) = Self::try_zeroed(CHUNK) else {
-            // No memory for a chunk buffer: serve the caller's slice
-            // straight from the driver without caching. A short read
-            // here means EOF within this window, reported as a short
-            // chunk so the outer loop stops.
-            self.accounting.record_refusal(ReclaimClass::CleanFileData);
-            let n = self.inner.read_at(file, base + in_off as u64, out)?;
-            let len = if n < out.len() { in_off + n } else { CHUNK };
-            return Ok((n, len));
+    /// Copy `in_off` onward out of the resident chunk at `base`,
+    /// refreshing its recency.
+    ///
+    /// `None` when the chunk is not held — the caller then fetches it.
+    /// `Some(bytes copied)` on a hit, short of `out` exactly when the
+    /// chunk ends there (end-of-file, or the chunk's own tail).
+    fn chunk_hit(&mut self, raw: u64, base: u64, in_off: usize, out: &mut [u8]) -> Option<usize> {
+        let (copied, old_tick) = {
+            let entry = self.data.get(&(raw, base))?;
+            // A short chunk (end-of-file inside it) can end before
+            // `in_off`; clamping the start keeps the empty copy in range.
+            let from = in_off.min(entry.bytes.len());
+            let copied = out.len().min(entry.bytes.len() - from);
+            out[..copied].copy_from_slice(&entry.bytes[from..from + copied]);
+            (copied, entry.tick)
         };
-        let read = self.inner.read_at(file, base, chunk.as_mut_slice())?;
-        chunk[read..].zeroize();
-        chunk.truncate(read);
-        let n = out.len().min(read.saturating_sub(in_off));
-        if n > 0 {
-            out[..n].copy_from_slice(&chunk[in_off..in_off + n]);
+        let tick = self.touch(old_tick);
+        if let Some(entry) = self.data.get_mut(&(raw, base)) {
+            entry.tick = tick;
         }
-        match self.admit(KeyRef::Data(raw, base), read, ENTRY_OVERHEAD) {
-            Some(tick) => {
-                self.data
-                    .insert((raw, base), DataEntry { bytes: chunk, tick });
-            }
-            None => chunk.as_mut_slice().zeroize(),
-        }
-        Ok((n, read))
+        self.accounting.record_hit(ReclaimClass::CleanFileData);
+        Some(copied)
     }
 
-    /// A zeroed buffer of `len` bytes, or `None` on allocation failure.
-    fn try_zeroed(len: usize) -> Option<Vec<u8>> {
-        let mut out = Vec::new();
-        out.try_reserve_exact(len).ok()?;
-        out.resize(len, 0);
-        Some(out)
+    /// How many consecutive chunks from `base` this read still needs and
+    /// the cache does not hold.
+    ///
+    /// The span is rounded up to whole chunks, so a chunk the read wants
+    /// only part of is still fetched — and cached — in full.
+    fn missing_run(&self, raw: u64, base: u64, in_off: usize, remaining: usize) -> usize {
+        let wanted = in_off.saturating_add(remaining).div_ceil(CHUNK).max(1);
+        let mut run = 1usize;
+        let mut next = base;
+        while run < wanted {
+            let Some(after) = next.checked_add(CHUNK as u64) else {
+                break;
+            };
+            next = after;
+            if self.data.contains_key(&(raw, next)) {
+                break;
+            }
+            run += 1;
+        }
+        run
+    }
+
+    /// Admit every whole chunk a fetch at `base` filled, from the run's
+    /// `filled` bytes.
+    fn admit_run(&mut self, raw: u64, base: u64, filled: &[u8]) {
+        for (index, bytes) in filled.chunks(CHUNK).enumerate() {
+            let Some(chunk_base) = base.checked_add((index * CHUNK) as u64) else {
+                return;
+            };
+            let Some(mut copy) = Self::try_copy(bytes) else {
+                self.accounting.record_refusal(ReclaimClass::CleanFileData);
+                return;
+            };
+            match self.admit(KeyRef::Data(raw, chunk_base), copy.len(), ENTRY_OVERHEAD) {
+                Some(tick) => {
+                    self.data
+                        .insert((raw, chunk_base), DataEntry { bytes: copy, tick });
+                }
+                None => copy.as_mut_slice().zeroize(),
+            }
+        }
+    }
+}
+
+/// One read's staging for its coalesced chunk fetches.
+///
+/// A miss fetches the whole run of chunks the read needs in **one**
+/// driver call, so the run's bytes need somewhere to land before they
+/// are copied out to the caller and into the cache. Reserved fallibly at
+/// the first miss and grown at most to the widest run that one read
+/// needs — itself bounded by the request the syscall layer already
+/// bounds ([`tairix_abi::FS_IO_MAX`]) — so a read never stages more than
+/// the caller asked for, rounded out to whole chunks. A refused
+/// reservation leaves the stage empty and the read serves uncached
+/// rather than failing. The staged bytes are decrypted file content, so
+/// they are wiped when the stage is dropped, on every path out of the
+/// read.
+#[derive(Default)]
+struct ReadStage {
+    bytes: Vec<u8>,
+}
+
+impl ReadStage {
+    /// A window of exactly `span` bytes, or `None` when the reservation
+    /// was refused.
+    fn window(&mut self, span: usize) -> Option<&mut [u8]> {
+        if self.bytes.len() < span {
+            let more = span - self.bytes.len();
+            self.bytes.try_reserve_exact(more).ok()?;
+            self.bytes.resize(span, 0);
+        }
+        Some(&mut self.bytes[..span])
+    }
+}
+
+impl Drop for ReadStage {
+    fn drop(&mut self) {
+        self.bytes.as_mut_slice().zeroize();
     }
 }
 
@@ -889,10 +938,12 @@ impl<F: FilesystemRead> FilesystemRead for CachedFs<F> {
 
     fn read_at(&mut self, file: NodeId, offset: u64, buf: &mut [u8]) -> Result<usize, DriverError> {
         self.enforce_pressure();
-        if buf.is_empty() || buf.len() > READ_BYPASS_LIMIT || self.poisoned {
+        if buf.is_empty() || self.poisoned {
             return self.inner.read_at(file, offset, buf);
         }
+        let raw = file.raw();
         let chunk_len = CHUNK as u64;
+        let mut stage = ReadStage::default();
         let mut total = 0usize;
         while total < buf.len() {
             let Some(pos) = offset.checked_add(total as u64) else {
@@ -901,10 +952,38 @@ impl<F: FilesystemRead> FilesystemRead for CachedFs<F> {
             let base = pos - (pos % chunk_len);
             let in_off = Self::offset_in_chunk(pos, base);
             let want = (buf.len() - total).min(CHUNK - in_off);
-            let (copied, len) =
-                self.chunk_read(file, base, in_off, &mut buf[total..total + want])?;
+            if let Some(copied) = self.chunk_hit(raw, base, in_off, &mut buf[total..total + want]) {
+                total += copied;
+                if copied < want {
+                    break;
+                }
+                continue;
+            }
+            self.accounting.record_miss(ReclaimClass::CleanFileData);
+            let run = self.missing_run(raw, base, in_off, buf.len() - total);
+            let span = run * CHUNK;
+            let Some(window) = stage.window(span) else {
+                // No staging: serve the caller's own slice straight from
+                // the driver, uncached, rather than failing the read.
+                self.accounting.record_refusal(ReclaimClass::CleanFileData);
+                let served = self
+                    .inner
+                    .read_at(file, pos, &mut buf[total..total + want])?;
+                total += served;
+                if served < want {
+                    break;
+                }
+                continue;
+            };
+            // Clamped to the window: a driver that over-reports must not
+            // widen a slice or let a stale byte reach the caller.
+            let read = self.inner.read_at(file, base, window)?.min(span);
+            let copied = (buf.len() - total).min(read.saturating_sub(in_off));
+            buf[total..total + copied].copy_from_slice(&stage.bytes[in_off..in_off + copied]);
+            self.admit_run(raw, base, &stage.bytes[..read]);
             total += copied;
-            if len < CHUNK || copied < want {
+            // A run the driver could not fill completely is end-of-file.
+            if read < span {
                 break;
             }
         }
