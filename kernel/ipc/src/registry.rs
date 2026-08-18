@@ -367,7 +367,7 @@ mod tests {
     use tairix_abi::ipc::IPC_MESSAGE_MAX_PAYLOAD_LEN;
     use tairix_abi::CapabilityId;
     use tairix_caps::CapabilitySet;
-    use tairix_kernel_sec::captable::{TaskCapabilities, TaskId};
+    use tairix_kernel_sec::captable::{ProcessId, TaskCapabilities};
     use tairix_kernel_sec::identity::UserId;
 
     fn caps_of(items: &[CapabilityId]) -> CapabilitySet {
@@ -381,7 +381,7 @@ mod tests {
     fn task_with(task_id: u64, caps: &[CapabilityId]) -> TaskCapabilities {
         let sink = RecordingSink::new();
         let set = caps_of(caps);
-        TaskCapabilities::derive(TaskId(task_id), UserId(1), set, set, &sink)
+        TaskCapabilities::derive(ProcessId(task_id), UserId(1), set, set, &sink)
     }
 
     fn open_port(id: u64, sink: &RecordingSink) -> Port {

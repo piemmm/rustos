@@ -167,12 +167,12 @@ mod tests {
         bootinfo::{BootMemoryMap, MemoryRegion, RegionKind},
         HostPageTable, PhysAddr, SimPhysMap, PAGE_SIZE,
     };
-    use tairix_kernel_sec::captable::{TaskCapabilities, TaskId};
+    use tairix_kernel_sec::captable::{ProcessId, TaskCapabilities};
     use tairix_kernel_sec::identity::UserId;
     use tairix_log::{Event, Sink};
     use tairix_sync::SpinLock;
 
-    const OWNER: TaskId = TaskId(99);
+    const OWNER: ProcessId = ProcessId(99);
 
     /// Idle waiter: the factory tests never park on `notify_wait`.
     struct IdleWaiter;

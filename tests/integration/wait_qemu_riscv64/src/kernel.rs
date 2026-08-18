@@ -34,7 +34,7 @@ use tairix_kernel_mem::{
     VirtAddr,
 };
 use tairix_kernel_sched_cfq::{Priority, Scheduler, SchedulerConfig};
-use tairix_kernel_sec::TaskId;
+use tairix_kernel_sec::{ProcessId, TaskId};
 use tairix_kernel_syscall::SYSCALL_TABLE_HASH;
 use tairix_log::{log, Event, EventId, Level};
 use tairix_sync::SpinLock;
@@ -247,7 +247,7 @@ extern "C" fn dispatch(number: u64, args_ptr: *const [u64; SYSCALL_MAX_ARGS]) ->
             Ok(flags) => flags,
             Err(err) => return encode(Err(err)),
         };
-        match producer.wait(TaskId(cur), pid, flags) {
+        match producer.wait(ProcessId(cur), pid, flags) {
             Ok(reaped) => {
                 // Copy the typed status record out to the parent's `status`
                 // pointer through the validated boundary, exactly as the
@@ -265,7 +265,7 @@ extern "C" fn dispatch(number: u64, args_ptr: *const [u64; SYSCALL_MAX_ARGS]) ->
     } else if raw == SyscallNumber::EXIT.as_u16() {
         #[allow(clippy::cast_possible_truncation)]
         let code = args[0] as i32;
-        producer.record_exit(TaskId(cur), code);
+        producer.record_exit(ProcessId(cur), code);
         if cur == PARENT_TID.load(Ordering::SeqCst) {
             // The parent verified the reaped code and returned 0 on success.
             if code == 0 && REAP_OK.load(Ordering::SeqCst) {
@@ -473,7 +473,7 @@ pub extern "C" fn kernel_main(hartid: u64, dtb: u64) -> ! {
     let child_tid = admit(sched, child_root, child_entry);
     let parent_tid = admit(sched, parent_root, parent_entry);
     PARENT_TID.store(parent_tid, Ordering::SeqCst);
-    producer.register_child(TaskId(parent_tid), TaskId(child_tid));
+    producer.register_child(ProcessId(parent_tid), ProcessId(child_tid));
     note(
         TEST_SPAWNED,
         "riscv64 RV-X4 wait test: parent + child spawned",

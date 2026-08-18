@@ -1,20 +1,35 @@
-//! Per-task address-space registry (increment **B** of the staged
+//! Per-**process** address-space registry (increment **B** of the staged
 //! user-memory copy path, `PLAN.md` Stage 7).
 //!
 //! The kernel's `copy_from_user` / `copy_to_user` boundary
 //! ([`tairix_kernel_mem::uaccess`] /
-//! `tests/SECURITY.md` §5) walks the *calling task's* address space.
+//! `tests/SECURITY.md` §5) walks the *calling process's* address space.
 //! A syscall handler therefore needs to turn the caller's
-//! [`tairix_kernel_sec::TaskId`] into the pair the copy path consumes:
-//! the task's user [`AddressSpace`](tairix_kernel_mem::AddressSpace)
+//! [`tairix_kernel_sec::ProcessId`] into the pair the copy path consumes:
+//! the process's user [`AddressSpace`](tairix_kernel_mem::AddressSpace)
 //! and the kernel [`PhysMap`] that backs it. This module owns that
 //! mapping.
+//!
+//! # Two scopes, two key types
+//!
+//! Almost everything here is **process**-scoped — the address space itself,
+//! the standard streams, resource limits, device grants, open files, the
+//! working directory, the file and anonymous region records, the pinning mark,
+//! and the mapped-byte accounting. Every thread of a process shares all of it,
+//! so those maps are keyed by [`ProcessId`] and a thread's syscall resolves
+//! its process's entry.
+//!
+//! The exception is the user-stack span: each thread has a stack of its own,
+//! so [`AddressSpaceRegistry::stack_span`] is keyed by [`TaskId`] and the
+//! per-process committed total is maintained alongside it. The two key types
+//! are distinct precisely so a site cannot silently scope one to the other —
+//! keying process state by a thread id does not compile.
 //!
 //! # Why trait objects
 //!
 //! [`tairix_kernel_mem::AddressSpace`] is generic over its
 //! [`PageTable`](tairix_kernel_mem::PageTable) backend, so the
-//! kernel cannot hold a `BTreeMap<TaskId, AddressSpace<P>>` for a
+//! kernel cannot hold a `BTreeMap<ProcessId, AddressSpace<P>>` for a
 //! single `P` — different tasks may run on different architecture page
 //! tables, and the orchestrator that composes this registry into
 //! `KernelState` is architecture-neutral. Each entry is therefore
@@ -53,12 +68,23 @@ use tairix_abi::hwtree::{GrantedResource, HwResource, HwResourceKind};
 use tairix_abi::{DescriptorTable, Errno, LimitKind, OpenFlags, ResourceLimit, STD_STREAM_COUNT};
 use tairix_caps::CapabilitySet;
 use tairix_kernel_mem::{Frame, MapFlags, Page, PhysMap, UserAddressSpace, PAGE_SIZE};
-use tairix_kernel_sec::TaskId;
+use tairix_kernel_sec::{ProcessId, TaskId};
 
 use crate::pipe::PipeEnd;
 use crate::pty::{PtyMasterEnd, PtySlaveEnd};
 use crate::resource::ResourceBacking;
 use crate::rlimit::LimitSet;
+
+/// One thread's reserved user-stack span, with the process that owns it.
+///
+/// The stack is per *thread*; the process is stored beside it so removing a
+/// thread's record can decrement its process's committed total without a
+/// second index from process to threads.
+#[derive(Debug, Clone, Copy)]
+struct ThreadStack {
+    process: ProcessId,
+    span: StackSpan,
+}
 
 /// Why registering a task's address space was refused.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -81,7 +107,7 @@ struct TaskAddressSpace {
     physmap: Box<dyn PhysMap + Send + Sync>,
 }
 
-/// Maps each live task's [`TaskId`] to its user address space and the
+/// Maps each live task's [`ProcessId`] to its user address space and the
 /// kernel [`PhysMap`] backing it.
 ///
 /// Composed into `KernelState` as a `RwLock`-wrapped field (mirroring
@@ -91,23 +117,23 @@ struct TaskAddressSpace {
 /// spawned and disappear as they exit.
 #[derive(Default)]
 pub struct AddressSpaceRegistry {
-    tasks: BTreeMap<TaskId, TaskAddressSpace>,
+    tasks: BTreeMap<ProcessId, TaskAddressSpace>,
     /// Each live task's standard-stream descriptor table. Co-located with the address space because it shares the
     /// exact per-process lifecycle — established at spawn, withdrawn at
-    /// exit — and is keyed by the same [`TaskId`]; a parallel registry +
+    /// exit — and is keyed by the same [`ProcessId`]; a parallel registry +
     /// lock would be near-duplicate plumbing.
     /// A task with no entry resolves to the fail-closed
     /// [`DescriptorTable::closed`] default, so an unestablished process
     /// can reach no stream backing.
-    streams: BTreeMap<TaskId, DescriptorTable>,
+    streams: BTreeMap<ProcessId, DescriptorTable>,
     /// Each live task's effective resource limits. Held
     /// here for the same reason as [`Self::streams`]: it shares the exact
     /// per-process lifecycle (inherited at spawn, withdrawn at exit) and is
-    /// keyed by the same [`TaskId`], so a parallel registry + lock would be
+    /// keyed by the same [`ProcessId`], so a parallel registry + lock would be
     /// near-duplicate plumbing. A task with no
     /// entry resolves to the per-boot [`Self::default_limits`] policy via
     /// [`Self::limits`].
-    limits: BTreeMap<TaskId, LimitSet>,
+    limits: BTreeMap<ProcessId, LimitSet>,
     /// The per-boot default limit policy a task with no established set
     /// resolves to, and the default `LimitSet::inherit` intersects
     /// against. Starts at the compile-time [`LimitSet::DEFAULT`] floor;
@@ -125,20 +151,20 @@ pub struct AddressSpaceRegistry {
     /// eligibility classifier reads this through
     /// [`Self::is_pinned`] when a candidate's owner is judged, so there
     /// is exactly one pin decision.
-    pinned: BTreeSet<TaskId>,
+    pinned: BTreeSet<ProcessId>,
     /// Each live task's device-resource grants (the unforgeable, kernel-issued handles a driver task may map with
     /// `mmio_map`). Co-located with the address space for the same reason
     /// as [`Self::streams`] and [`Self::limits`]: a grant shares the exact
     /// per-process lifecycle — minted when a driver is admitted, reclaimed
-    /// when the task exits — and is keyed by the same [`TaskId`], so a
+    /// when the task exits — and is keyed by the same [`ProcessId`], so a
     /// parallel registry + lock would be near-duplicate plumbing. A task with no entry owns no grants, so
     /// [`Self::grant`] resolves to `None` — fail closed: a task can
     /// map only the windows it was actually granted.
-    grants: BTreeMap<TaskId, TaskGrants>,
+    grants: BTreeMap<ProcessId, TaskGrants>,
     /// The discovered hardware-tree node each autoloaded **driver** task was
     /// loaded for. Recorded when a driver is spawned for
     /// a matched node, beside its grants, and keyed by the same kernel-trusted
-    /// [`TaskId`]; an ordinary `spawn` (no matched node) records nothing.
+    /// [`ProcessId`]; an ordinary `spawn` (no matched node) records nothing.
     ///
     /// This is the security spine of `hw_emit_node`'s tree placement: when a driver publishes a discovered child,
     /// the kernel sets the child's parent to *this* node — the emitter's own —
@@ -148,55 +174,55 @@ pub struct AddressSpaceRegistry {
     /// no matched node) cannot emit a child at all (fail closed).
     /// Dropped at [`withdraw`](Self::withdraw) so a reused id never inherits a
     /// dead driver's node.
-    loaded_nodes: BTreeMap<TaskId, u32>,
+    loaded_nodes: BTreeMap<ProcessId, u32>,
     /// Each live task's open file/directory handles (the descriptors
     /// `fs_open` returns and `fs_close` releases). Co-located with the
     /// address space for the same reason as [`Self::streams`]: a handle
     /// shares the exact per-process lifecycle — allocated on `fs_open`,
     /// released on `fs_close`, and reclaimed when the task exits — and is
-    /// keyed by the same [`TaskId`]. A task with no entry owns no open
+    /// keyed by the same [`ProcessId`]. A task with no entry owns no open
     /// files, so [`Self::open_file`] resolves to `None` (fail closed: a
     /// task can only operate on a descriptor it actually opened). Dropped at
     /// [`withdraw`](Self::withdraw) so a reused id never inherits a dead
     /// task's handles.
-    open_files: BTreeMap<TaskId, OpenFileTable>,
+    open_files: BTreeMap<ProcessId, OpenFileTable>,
     /// Each live task's running total of mapped address space, in bytes
     /// (whole pages): anonymous memory from `mem_map` plus demand-paged
     /// file regions from `file_map`. Co-located with the address space for
     /// the same reason as [`Self::streams`]: it shares the exact
     /// per-process lifecycle — accrued on a map, released on the matching
     /// unmap, and dropped when the task exits — and is keyed by the
-    /// same [`TaskId`]. This is the live usage the kernel checks the
+    /// same [`ProcessId`]. This is the live usage the kernel checks the
     /// `LimitKind::AddressSpaceBytes` ceiling against so the limit is
     /// actually enforced on the allocation path (fail closed) rather than
     /// merely stored. A task with no entry has mapped nothing, so
     /// [`Self::mapped_aspace_bytes`] resolves to `0`. Dropped at
     /// [`withdraw`](Self::withdraw) so a reused id never inherits a dead
     /// task's accounting.
-    mapped_aspace_bytes: BTreeMap<TaskId, u64>,
+    mapped_aspace_bytes: BTreeMap<ProcessId, u64>,
     /// Each live task's current working directory, as a normalised absolute
     /// path (the `/`-view spelling). Co-located with the address space for
     /// the same reason as [`Self::streams`]: it shares the exact per-process
     /// lifecycle — inherited from the spawner at spawn, changed by `fs_chdir`,
-    /// and dropped when the task exits — and is keyed by the same [`TaskId`].
+    /// and dropped when the task exits — and is keyed by the same [`ProcessId`].
     /// A task with no entry resolves to the root `/` via [`Self::cwd`], so a
     /// process whose directory was never established resolves relative paths
     /// against the root rather than failing (a sensible, fail-safe default;
     /// the root is the least-privileged starting point). Dropped at
     /// [`withdraw`](Self::withdraw) so a reused id never inherits a dead
     /// task's directory.
-    cwds: BTreeMap<TaskId, String>,
+    cwds: BTreeMap<ProcessId, String>,
     /// Each live task's demand-paged file mappings (the regions `file_map`
     /// reserves and the fault path backs), keyed by region base. Co-located
     /// with the address space for the same reason as [`Self::open_files`]:
     /// a mapping shares the exact per-process lifecycle — recorded on
     /// `file_map`, removed on `file_unmap`, and dropped when the task exits
-    /// — and is keyed by the same kernel-trusted [`TaskId`]. A task with no
+    /// — and is keyed by the same kernel-trusted [`ProcessId`]. A task with no
     /// entry has mapped no file, so a fault outside every record resolves
     /// to `None` and the task is terminated rather than silently backed
     /// (fail closed). Dropped at [`withdraw`](Self::withdraw) so a reused
     /// id never inherits a dead task's mappings.
-    file_regions: BTreeMap<TaskId, BTreeMap<u64, FileRegion>>,
+    file_regions: BTreeMap<ProcessId, BTreeMap<u64, FileRegion>>,
     /// Each live task's reserved demand-paged **anonymous** mappings (the
     /// regions `mem_map` reserves and the anonymous fault path backs one
     /// zeroed page at a time), keyed by region base and valued by the
@@ -204,7 +230,7 @@ pub struct AddressSpaceRegistry {
     /// for the same reason as [`Self::file_regions`]: a mapping shares the
     /// exact per-process lifecycle — recorded on `mem_map`, removed on
     /// `mem_unmap`, and dropped when the task exits — and is keyed by the
-    /// same kernel-trusted [`TaskId`]. A task with no entry has reserved no
+    /// same kernel-trusted [`ProcessId`]. A task with no entry has reserved no
     /// anonymous region, so a fault outside every record resolves to `None`
     /// and the task is terminated rather than silently backed (fail
     /// closed). The resident frames themselves are owned by the task's live
@@ -212,30 +238,40 @@ pub struct AddressSpaceRegistry {
     /// fault-validation and accounting bookkeeping. Dropped at
     /// [`withdraw`](Self::withdraw) so a reused id never inherits a dead
     /// task's mappings.
-    anon_regions: BTreeMap<TaskId, BTreeMap<u64, u64>>,
+    anon_regions: BTreeMap<ProcessId, BTreeMap<u64, u64>>,
     /// Each live task's reserved user-stack span (the region the spawn
     /// layout placed and the stack-growth fault path backs on demand).
-    /// Co-located with the address space for the same reason as
-    /// [`Self::limits`]: the span shares the exact per-process lifecycle —
-    /// recorded at admission, dropped when the task exits — and is keyed by
-    /// the same kernel-trusted [`TaskId`]. A task with no entry has no
-    /// growable stack, so a fault below its committed stack resolves to
-    /// `None` and stays fatal (fail closed). Dropped at
-    /// [`withdraw`](Self::withdraw) so a reused id never inherits a dead
-    /// task's span.
-    stack_spans: BTreeMap<TaskId, StackSpan>,
+    /// Keyed by **thread**, not by process: every thread of a process has a
+    /// user stack of its own, so the growable span is the one genuinely
+    /// per-thread record this registry holds. Recorded at admission, dropped
+    /// when that thread exits ([`withdraw_thread`](Self::withdraw_thread), or
+    /// [`withdraw`](Self::withdraw) for the leader). A thread with no entry
+    /// has no growable stack, so a fault below its committed stack resolves
+    /// to `None` and stays fatal (fail closed), and a reused id never
+    /// inherits a dead thread's span.
+    stack_spans: BTreeMap<TaskId, ThreadStack>,
+    /// Running total of committed stack bytes per process, maintained by the
+    /// three mutators that can change it (record, commit, withdraw).
+    ///
+    /// Kept incrementally rather than summed on demand: the only consumer is
+    /// the pinned-footprint reading the `mem_pin` gate and the resource-limit
+    /// report take, and summing would have to scan every thread on the
+    /// machine to find one process's. This is what lets the total stay
+    /// correct for a process with any number of threads without the registry
+    /// having to know which threads those are.
+    stack_committed: BTreeMap<ProcessId, u64>,
     /// The one-shot file delegations minted **to** each live task and not
     /// yet redeemed (`fd_grant`/`fd_redeem`, `plans/CAPABILITY_USE.md`
     /// CU6). Co-located with the address space for the same reason as
     /// [`Self::grants`]: a pending delegation shares the exact per-process
     /// lifecycle — minted when a grantor delegates to the task, consumed on
     /// redemption, and dropped when the recipient exits — and is keyed by
-    /// the same kernel-trusted [`TaskId`]. A task with no entry holds no
+    /// the same kernel-trusted [`ProcessId`]. A task with no entry holds no
     /// pending delegation, so [`Self::redeem_fd_delegation`] resolves to
     /// `NotFound` (fail closed: a task can redeem only what was actually
     /// minted to it). Dropped at [`withdraw`](Self::withdraw) so a reused
     /// id never inherits a dead task's pending delegations.
-    fd_delegations: BTreeMap<TaskId, TaskFdDelegations>,
+    fd_delegations: BTreeMap<ProcessId, TaskFdDelegations>,
     /// Each live task's PIE load base — the lowest user virtual address
     /// its relocated program image occupies. Recorded at admission by the
     /// spawn path (the lowest relocated segment vaddr) and used only by the
@@ -246,12 +282,12 @@ pub struct AddressSpaceRegistry {
     /// offline against the unstripped binary. Co-located with the address
     /// space for the same reason as [`Self::stack_spans`]: it shares the
     /// exact per-process lifecycle and is keyed by the same kernel-trusted
-    /// [`TaskId`]. A task with no entry (a kernel task, or one whose image
+    /// [`ProcessId`]. A task with no entry (a kernel task, or one whose image
     /// was loaded at a base the spawn path did not record) has no load base
     /// and its offsets degrade to absolute values only inside the
     /// capability-gated record. Dropped at [`withdraw`](Self::withdraw) so
     /// a reused id never inherits a dead task's base.
-    load_bases: BTreeMap<TaskId, u64>,
+    load_bases: BTreeMap<ProcessId, u64>,
 }
 
 /// One live demand-paged file mapping of a task: the region `file_map`
@@ -650,7 +686,7 @@ impl OpenFile {
 /// opens and closes many files reuses descriptors rather than marching a
 /// monotonic counter toward exhaustion (a grow-not-cap posture, never a
 /// fixed ceiling). The whole record is dropped when the task is
-/// [`withdraw`](AddressSpaceRegistry::withdraw)n, so a reused [`TaskId`]
+/// [`withdraw`](AddressSpaceRegistry::withdraw)n, so a reused [`ProcessId`]
 /// starts from an empty descriptor set.
 #[derive(Default)]
 struct OpenFileTable {
@@ -691,7 +727,7 @@ impl OpenFileTable {
 /// reserved invalid value and is never issued), and are never reused
 /// within a task's lifetime — so a stale handle from a reclaimed grant
 /// can never alias a later one. The whole record is dropped when the task
-/// is [`withdraw`](AddressSpaceRegistry::withdraw)n, so a reused [`TaskId`]
+/// is [`withdraw`](AddressSpaceRegistry::withdraw)n, so a reused [`ProcessId`]
 /// starts from an empty grant set and cannot inherit a dead task's windows
 /// (fail closed).
 #[derive(Default)]
@@ -749,6 +785,7 @@ impl AddressSpaceRegistry {
     pub const fn new() -> Self {
         Self {
             tasks: BTreeMap::new(),
+            stack_committed: BTreeMap::new(),
             streams: BTreeMap::new(),
             limits: BTreeMap::new(),
             grants: BTreeMap::new(),
@@ -775,7 +812,7 @@ impl AddressSpaceRegistry {
     /// registered for `task`; the existing entry is left untouched.
     pub fn register(
         &mut self,
-        task: TaskId,
+        task: ProcessId,
         space: Box<dyn UserAddressSpace + Send + Sync>,
         physmap: Box<dyn PhysMap + Send + Sync>,
     ) -> Result<(), AspaceError> {
@@ -814,7 +851,7 @@ impl AddressSpaceRegistry {
     /// closed).
     pub fn reregister_space(
         &mut self,
-        task: TaskId,
+        task: ProcessId,
         space: Box<dyn UserAddressSpace + Send + Sync>,
     ) -> bool {
         match self.tasks.get_mut(&task) {
@@ -844,7 +881,7 @@ impl AddressSpaceRegistry {
     /// untouched (it is the shared kernel direct map).
     pub fn note_faulted_page(
         &mut self,
-        task: TaskId,
+        task: ProcessId,
         page: Page,
         mapping: Option<(Frame, MapFlags)>,
     ) -> bool {
@@ -861,11 +898,16 @@ impl AddressSpaceRegistry {
     /// no-op that returns `false`. The task's standard-stream descriptor
     /// table is dropped at the same time so a reused id never inherits a
     /// dead task's streams (fail closed).
-    pub fn withdraw(&mut self, task: TaskId) -> bool {
-        // The pin mark is per-process state: a task that exits (or is
+    pub fn withdraw(&mut self, task: ProcessId) -> bool {
+        // The leader thread's own per-thread records go with the process:
+        // every *other* thread withdrew its own on the way out
+        // ([`Self::withdraw_thread`]), and the leader never withdraws
+        // separately.
+        let had_stack_span = self.withdraw_thread(task.leader_task());
+        // The pin mark is per-process state: a process that exits (or is
         // killed) leaves the pinned set, so a reused id never inherits a
-        // dead task's exemption and the system-wide pinned aggregate
-        // drops with the task.
+        // dead process's exemption and the system-wide pinned aggregate
+        // drops with the process.
         let had_pin = self.pinned.remove(&task);
         let had_streams = self.streams.remove(&task).is_some();
         let had_limits = self.limits.remove(&task).is_some();
@@ -876,13 +918,12 @@ impl AddressSpaceRegistry {
         let had_cwd = self.cwds.remove(&task).is_some();
         let had_file_regions = self.file_regions.remove(&task).is_some();
         let had_anon_regions = self.anon_regions.remove(&task).is_some();
-        let had_stack_span = self.stack_spans.remove(&task).is_some();
         let had_load_base = self.load_bases.remove(&task).is_some();
         let had_fd_delegations = self.fd_delegations.remove(&task).is_some();
         let had_task = self.tasks.remove(&task).is_some();
-        // Reclaim post-condition (debug-only tripwire): every per-task map
+        // Reclaim post-condition (debug-only tripwire): every per-process map
         // has just had `task` removed, so no map may still hold it. A
-        // residual entry means either a per-task map was added without a
+        // residual entry means either a per-process map was added without a
         // matching removal above — the precursor to a reused id inheriting
         // a dead task's state — or a `remove` did not take effect, i.e. the
         // map is corrupt. Faulting here names the reclaim site deterministically
@@ -909,7 +950,28 @@ impl AddressSpaceRegistry {
             || had_fd_delegations
     }
 
-    /// The name of the first per-task map that still holds `task`, or `None`
+    /// Drop every **per-thread** record `thread` held: today its user-stack
+    /// span.
+    ///
+    /// Called when one thread of a multi-threaded process exits, and by
+    /// [`withdraw`](Self::withdraw) for the process's leader. Process-scoped
+    /// state (the address space, streams, limits, grants, open files, cwd,
+    /// mappings) deliberately survives: it belongs to the process and its
+    /// remaining threads still need it.
+    ///
+    /// Returns whether anything was recorded for `thread`, so an idempotent
+    /// second teardown is distinguishable from the first.
+    pub fn withdraw_thread(&mut self, thread: TaskId) -> bool {
+        match self.stack_spans.remove(&thread) {
+            Some(held) => {
+                self.release_committed_stack(held.process, held.span.committed_bytes());
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// The name of the first per-process map that still holds `task`, or `None`
     /// when no per-task state references it — the check
     /// [`withdraw`](Self::withdraw) asserts as its reclaim post-condition.
     ///
@@ -918,7 +980,7 @@ impl AddressSpaceRegistry {
     /// to the registry is added to *both*. Pure and host-tested; the caller
     /// asserts on it only in the `debug_assertions` (non-shippable) build.
     #[must_use]
-    pub fn stale_task_entry(&self, task: TaskId) -> Option<&'static str> {
+    pub fn stale_task_entry(&self, task: ProcessId) -> Option<&'static str> {
         if self.tasks.contains_key(&task) {
             return Some("tasks");
         }
@@ -952,8 +1014,11 @@ impl AddressSpaceRegistry {
         if self.anon_regions.contains_key(&task) {
             return Some("anon_regions");
         }
-        if self.stack_spans.contains_key(&task) {
+        if self.stack_spans.contains_key(&task.leader_task()) {
             return Some("stack_spans");
+        }
+        if self.stack_committed.contains_key(&task) {
+            return Some("stack_committed");
         }
         if self.load_bases.contains_key(&task) {
             return Some("load_bases");
@@ -974,7 +1039,7 @@ impl AddressSpaceRegistry {
     /// resolved), never caller-supplied. The ordinary
     /// `spawn` path records nothing, so a non-driver task has no loaded node
     /// and cannot publish a child (fail closed).
-    pub fn set_loaded_node(&mut self, task: TaskId, node_id: u32) {
+    pub fn set_loaded_node(&mut self, task: ProcessId, node_id: u32) {
         self.loaded_nodes.insert(task, node_id);
     }
 
@@ -986,7 +1051,7 @@ impl AddressSpaceRegistry {
     /// nothing (fail closed). The `task` argument is the kernel-trusted
     /// caller id, never caller-supplied.
     #[must_use]
-    pub fn loaded_node(&self, task: TaskId) -> Option<u32> {
+    pub fn loaded_node(&self, task: ProcessId) -> Option<u32> {
         self.loaded_nodes.get(&task).copied()
     }
 
@@ -1009,7 +1074,7 @@ impl AddressSpaceRegistry {
     /// fresh handle (monotonic from `1`, so a handle number never aliases a
     /// reclaimed grant). Authority is a set: repetition must not be able to
     /// grow a recipient's kernel-side table.
-    pub fn mint_grant(&mut self, task: TaskId, resource: HwResource) -> u64 {
+    pub fn mint_grant(&mut self, task: ProcessId, resource: HwResource) -> u64 {
         let entry = self.grants.entry(task).or_default();
         // Authority is a set, not a multiset: a task that already holds
         // exactly this resource is handed the handle it already has rather
@@ -1078,7 +1143,7 @@ impl AddressSpaceRegistry {
     /// the security spine of the `mmio_map` handler (no
     /// trusted-caller shortcut;).
     #[must_use]
-    pub fn grant(&self, task: TaskId, handle: u64) -> Option<HwResource> {
+    pub fn grant(&self, task: ProcessId, handle: u64) -> Option<HwResource> {
         self.grants.get(&task)?.by_handle.get(&handle).copied()
     }
 
@@ -1096,7 +1161,7 @@ impl AddressSpaceRegistry {
     /// handle order makes the delivered sequence deterministic
     /// ([`BTreeMap`] iterates by key).
     #[must_use]
-    pub fn grants_to_le_bytes(&self, task: TaskId) -> Vec<u8> {
+    pub fn grants_to_le_bytes(&self, task: ProcessId) -> Vec<u8> {
         let mut out = Vec::new();
         if let Some(entry) = self.grants.get(&task) {
             out.reserve(entry.by_handle.len() * GrantedResource::WIRE_LEN);
@@ -1117,7 +1182,7 @@ impl AddressSpaceRegistry {
     /// so an ungranted task fails closed. The `task` argument is the
     /// kernel-trusted caller id, never a caller-supplied value.
     #[must_use]
-    pub fn grant_covers(&self, task: TaskId, resource: &HwResource) -> bool {
+    pub fn grant_covers(&self, task: ProcessId, resource: &HwResource) -> bool {
         self.grants
             .get(&task)
             .is_some_and(|entry| entry.by_handle.values().any(|grant| grant.covers(resource)))
@@ -1131,7 +1196,7 @@ impl AddressSpaceRegistry {
     /// task is the spawner's prerogative, and unlike the address space
     /// there is no live mapping to protect. A task whose table is never
     /// set resolves to [`DescriptorTable::closed`] via [`Self::streams`].
-    pub fn set_streams(&mut self, task: TaskId, table: DescriptorTable) {
+    pub fn set_streams(&mut self, task: ProcessId, table: DescriptorTable) {
         self.streams.insert(task, table);
     }
 
@@ -1143,7 +1208,7 @@ impl AddressSpaceRegistry {
     /// caller's `fd` into the direction its backing supports. An unregistered task (a kernel task, or one withdrawn on
     /// `exit`) has every descriptor closed, so it can reach no backing.
     #[must_use]
-    pub fn streams(&self, task: TaskId) -> DescriptorTable {
+    pub fn streams(&self, task: ProcessId) -> DescriptorTable {
         self.streams.get(&task).copied().unwrap_or_default()
     }
 
@@ -1155,7 +1220,7 @@ impl AddressSpaceRegistry {
     /// resolved and authorised. Replacing an existing value is permitted, as
     /// for [`Self::set_streams`]. A task whose directory is never established
     /// resolves to the root `/` via [`Self::cwd`].
-    pub fn set_cwd(&mut self, task: TaskId, cwd: String) {
+    pub fn set_cwd(&mut self, task: ProcessId, cwd: String) {
         self.cwds.insert(task, cwd);
     }
 
@@ -1169,7 +1234,7 @@ impl AddressSpaceRegistry {
     /// since every subsequent resolution is still authorised against the
     /// caller's real credentials.
     #[must_use]
-    pub fn cwd(&self, task: TaskId) -> String {
+    pub fn cwd(&self, task: ProcessId) -> String {
         self.cwds
             .get(&task)
             .cloned()
@@ -1184,7 +1249,7 @@ impl AddressSpaceRegistry {
     /// for [`Self::set_streams`]; a task whose set is never established
     /// resolves to the per-boot [`Self::default_limits`] policy via
     /// [`Self::limits`].
-    pub fn set_limits(&mut self, task: TaskId, limits: LimitSet) {
+    pub fn set_limits(&mut self, task: ProcessId, limits: LimitSet) {
         self.limits.insert(task, limits);
     }
 
@@ -1196,7 +1261,7 @@ impl AddressSpaceRegistry {
     /// set starts from the per-boot [`Self::default_limits`] policy, so
     /// the first imposed bound on any kind leaves every other kind at
     /// the default policy.
-    pub fn set_limit(&mut self, task: TaskId, kind: LimitKind, limit: ResourceLimit) {
+    pub fn set_limit(&mut self, task: ProcessId, kind: LimitKind, limit: ResourceLimit) {
         let mut set = self
             .limits
             .get(&task)
@@ -1215,7 +1280,7 @@ impl AddressSpaceRegistry {
     /// task (a kernel task, or one withdrawn on `exit`) reads the default
     /// policy — reading one's own limit grants no authority.
     #[must_use]
-    pub fn limits(&self, task: TaskId) -> LimitSet {
+    pub fn limits(&self, task: ProcessId) -> LimitSet {
         self.limits
             .get(&task)
             .copied()
@@ -1248,13 +1313,13 @@ impl AddressSpaceRegistry {
     /// The handler has already enforced the caller's
     /// `PinnedMemoryBytes` bound; this is the unconditional store. The
     /// `task` argument is the kernel-trusted caller id.
-    pub fn set_pinned(&mut self, task: TaskId) {
+    pub fn set_pinned(&mut self, task: ProcessId) {
         self.pinned.insert(task);
     }
 
     /// Clear `task`'s pin mark (`mem_unpin`). Idempotent: unpinning an
     /// unpinned task is a no-op.
-    pub fn clear_pinned(&mut self, task: TaskId) {
+    pub fn clear_pinned(&mut self, task: ProcessId) {
         self.pinned.remove(&task);
     }
 
@@ -1265,7 +1330,7 @@ impl AddressSpaceRegistry {
     /// `pinned` attribute), the `mem_map`/stack-growth bounds while
     /// pinned, and the observability export.
     #[must_use]
-    pub fn is_pinned(&self, task: TaskId) -> bool {
+    pub fn is_pinned(&self, task: ProcessId) -> bool {
         self.pinned.contains(&task)
     }
 
@@ -1281,7 +1346,7 @@ impl AddressSpaceRegistry {
     /// mean a second running total to keep honest. Saturating: a
     /// miscount can overstate, never understate, usage.
     #[must_use]
-    pub fn pinned_footprint_bytes(&self, task: TaskId) -> u64 {
+    pub fn pinned_footprint_bytes(&self, task: ProcessId) -> u64 {
         self.mapped_aspace_bytes(task)
             .saturating_add(self.stack_committed_bytes(task))
     }
@@ -1308,7 +1373,7 @@ impl AddressSpaceRegistry {
     /// against the `LimitKind::AddressSpaceBytes` ceiling before mapping.
     /// The `task` argument is the kernel-trusted caller id.
     #[must_use]
-    pub fn mapped_aspace_bytes(&self, task: TaskId) -> u64 {
+    pub fn mapped_aspace_bytes(&self, task: ProcessId) -> u64 {
         self.mapped_aspace_bytes.get(&task).copied().unwrap_or(0)
     }
 
@@ -1321,7 +1386,7 @@ impl AddressSpaceRegistry {
     /// so a future miscount can never silently understate usage (fail
     /// closed, never a panic). The `task` argument is the kernel-trusted
     /// caller id.
-    pub fn charge_aspace_bytes(&mut self, task: TaskId, bytes: u64) {
+    pub fn charge_aspace_bytes(&mut self, task: ProcessId, bytes: u64) {
         let entry = self.mapped_aspace_bytes.entry(task).or_insert(0);
         *entry = entry.saturating_add(bytes);
     }
@@ -1335,7 +1400,7 @@ impl AddressSpaceRegistry {
     /// entry once it reaches zero so a task that frees everything holds no
     /// residual accounting. The `task` argument is the kernel-trusted
     /// caller id.
-    pub fn credit_aspace_bytes(&mut self, task: TaskId, bytes: u64) {
+    pub fn credit_aspace_bytes(&mut self, task: ProcessId, bytes: u64) {
         if let Some(entry) = self.mapped_aspace_bytes.get_mut(&task) {
             *entry = entry.saturating_sub(bytes);
             if *entry == 0 {
@@ -1353,8 +1418,26 @@ impl AddressSpaceRegistry {
     /// growable stack and every fault below its committed stack stays
     /// fatal (fail closed). The `task` argument is the kernel-trusted id
     /// the admission path minted, never a caller-supplied value.
-    pub fn set_stack_span(&mut self, task: TaskId, span: StackSpan) {
-        self.stack_spans.insert(task, span);
+    pub fn set_stack_span(&mut self, process: ProcessId, thread: TaskId, span: StackSpan) {
+        let committed = span.committed_bytes();
+        if let Some(previous) = self
+            .stack_spans
+            .insert(thread, ThreadStack { process, span })
+        {
+            self.release_committed_stack(previous.process, previous.span.committed_bytes());
+        }
+        *self.stack_committed.entry(process).or_default() += committed;
+    }
+
+    /// Subtract `bytes` from `process`'s committed-stack total, dropping the
+    /// entry when it reaches zero so a dead process leaves nothing behind.
+    fn release_committed_stack(&mut self, process: ProcessId, bytes: u64) {
+        if let Some(total) = self.stack_committed.get_mut(&process) {
+            *total = total.saturating_sub(bytes);
+            if *total == 0 {
+                self.stack_committed.remove(&process);
+            }
+        }
     }
 
     /// Resolve `task`'s recorded stack span, or `None` when none was
@@ -1364,8 +1447,8 @@ impl AddressSpaceRegistry {
     /// growth room. The `task` argument is the kernel-trusted id of the
     /// faulting CPU's current task.
     #[must_use]
-    pub fn stack_span(&self, task: TaskId) -> Option<StackSpan> {
-        self.stack_spans.get(&task).copied()
+    pub fn stack_span(&self, thread: TaskId) -> Option<StackSpan> {
+        self.stack_spans.get(&thread).map(|held| held.span)
     }
 
     /// Lower `task`'s committed stack base to `page_va` after the growth
@@ -1377,12 +1460,17 @@ impl AddressSpaceRegistry {
     /// or a hole above the low-water mark) leaves the record unchanged, and
     /// one below the reserve base is refused — the record can never claim
     /// pages outside the span (fail closed).
-    pub fn commit_stack_page(&mut self, task: TaskId, page_va: u64) {
-        if let Some(span) = self.stack_spans.get_mut(&task) {
-            if page_va >= span.reserve_base && page_va < span.committed_base {
-                span.committed_base = page_va;
-            }
+    pub fn commit_stack_page(&mut self, thread: TaskId, page_va: u64) {
+        let Some(held) = self.stack_spans.get_mut(&thread) else {
+            return;
+        };
+        if page_va < held.span.reserve_base || page_va >= held.span.committed_base {
+            return;
         }
+        let grown = held.span.committed_base - page_va;
+        let process = held.process;
+        held.span.committed_base = page_va;
+        *self.stack_committed.entry(process).or_default() += grown;
     }
 
     /// Bytes of `task`'s stack currently committed, or `0` when no span is
@@ -1391,10 +1479,8 @@ impl AddressSpaceRegistry {
     /// The live usage the `LimitKind::StackBytes` report surfaces beside
     /// the effective bound, mirroring [`Self::mapped_aspace_bytes`].
     #[must_use]
-    pub fn stack_committed_bytes(&self, task: TaskId) -> u64 {
-        self.stack_spans
-            .get(&task)
-            .map_or(0, StackSpan::committed_bytes)
+    pub fn stack_committed_bytes(&self, process: ProcessId) -> u64 {
+        self.stack_committed.get(&process).copied().unwrap_or(0)
     }
 
     /// Record `task`'s PIE load base — the lowest user virtual address its
@@ -1408,7 +1494,7 @@ impl AddressSpaceRegistry {
     /// never recorded simply has crash offsets expressed absolute rather
     /// than load-relative (a diagnostics-quality degradation only, never a
     /// correctness or security one — an absent base leaks nothing).
-    pub fn set_load_base(&mut self, task: TaskId, load_base: u64) {
+    pub fn set_load_base(&mut self, task: ProcessId, load_base: u64) {
         self.load_bases.insert(task, load_base);
     }
 
@@ -1420,7 +1506,7 @@ impl AddressSpaceRegistry {
     /// argument is the kernel-trusted id of the faulting CPU's current
     /// task.
     #[must_use]
-    pub fn load_base(&self, task: TaskId) -> Option<u64> {
+    pub fn load_base(&self, task: ProcessId) -> Option<u64> {
         self.load_bases.get(&task).copied()
     }
 
@@ -1433,7 +1519,7 @@ impl AddressSpaceRegistry {
     /// capability snapshot) the fault path pages under — the same authority
     /// model as an open descriptor, resolved once at map time. The `task`
     /// argument is the kernel-trusted caller id.
-    pub fn record_file_region(&mut self, task: TaskId, region: FileRegion) {
+    pub fn record_file_region(&mut self, task: ProcessId, region: FileRegion) {
         self.file_regions
             .entry(task)
             .or_default()
@@ -1447,7 +1533,7 @@ impl AddressSpaceRegistry {
     /// this before any teardown, so a mismatched or unknown pair fails
     /// closed touching nothing.
     #[must_use]
-    pub fn file_region_exact(&self, task: TaskId, base: u64, len: u64) -> Option<FileRegion> {
+    pub fn file_region_exact(&self, task: ProcessId, base: u64, len: u64) -> Option<FileRegion> {
         let region = self.file_regions.get(&task)?.get(&base)?;
         (region.len == len).then(|| region.clone())
     }
@@ -1456,7 +1542,7 @@ impl AddressSpaceRegistry {
     ///
     /// Called by the `file_unmap` handler *after* the producer released the
     /// region, so record and reservation leave together.
-    pub fn remove_file_region(&mut self, task: TaskId, base: u64) -> Option<FileRegion> {
+    pub fn remove_file_region(&mut self, task: ProcessId, base: u64) -> Option<FileRegion> {
         let regions = self.file_regions.get_mut(&task)?;
         let removed = regions.remove(&base);
         if regions.is_empty() {
@@ -1473,7 +1559,7 @@ impl AddressSpaceRegistry {
     /// genuine wild access (terminate, fail closed). Returns a clone so no
     /// registry lock is held across the filesystem read that follows.
     #[must_use]
-    pub fn file_region_covering(&self, task: TaskId, va: u64) -> Option<FileRegion> {
+    pub fn file_region_covering(&self, task: ProcessId, va: u64) -> Option<FileRegion> {
         let regions = self.file_regions.get(&task)?;
         let (_, region) = regions.range(..=va).next_back()?;
         (va < region.base + region.len).then(|| region.clone())
@@ -1488,7 +1574,7 @@ impl AddressSpaceRegistry {
     /// a legitimate first-touch of reserved memory apart from a wild access
     /// (fail closed on a miss). The `task` argument is the kernel-trusted
     /// caller id.
-    pub fn record_anon_region(&mut self, task: TaskId, base: u64, page_count: u64) {
+    pub fn record_anon_region(&mut self, task: ProcessId, base: u64, page_count: u64) {
         self.anon_regions
             .entry(task)
             .or_default()
@@ -1502,7 +1588,7 @@ impl AddressSpaceRegistry {
     /// before any teardown, so a mismatched or unknown pair fails closed
     /// touching nothing.
     #[must_use]
-    pub fn anon_region_exact(&self, task: TaskId, base: u64, page_count: u64) -> bool {
+    pub fn anon_region_exact(&self, task: ProcessId, base: u64, page_count: u64) -> bool {
         self.anon_regions
             .get(&task)
             .and_then(|regions| regions.get(&base))
@@ -1514,7 +1600,7 @@ impl AddressSpaceRegistry {
     ///
     /// Called by the `mem_unmap` handler *after* the producer released the
     /// region, so record and reservation leave together.
-    pub fn remove_anon_region(&mut self, task: TaskId, base: u64) -> Option<u64> {
+    pub fn remove_anon_region(&mut self, task: ProcessId, base: u64) -> Option<u64> {
         let regions = self.anon_regions.get_mut(&task)?;
         let removed = regions.remove(&base);
         if regions.is_empty() {
@@ -1530,7 +1616,7 @@ impl AddressSpaceRegistry {
     /// faulting address is demand-paged anonymous backing (back one zeroed
     /// page and resume) or a genuine wild access (terminate, fail closed).
     #[must_use]
-    pub fn anon_region_covering(&self, task: TaskId, va: u64) -> bool {
+    pub fn anon_region_covering(&self, task: ProcessId, va: u64) -> bool {
         let Some(regions) = self.anon_regions.get(&task) else {
             return false;
         };
@@ -1556,7 +1642,12 @@ impl AddressSpaceRegistry {
     /// genuinely wild access. Runs on the dying-task fault path (never a
     /// hot path) and allocates nothing.
     #[must_use]
-    pub fn classify_fault_locality(&self, task: TaskId, va: u64) -> FaultLocality {
+    pub fn classify_fault_locality(
+        &self,
+        task: ProcessId,
+        thread: TaskId,
+        va: u64,
+    ) -> FaultLocality {
         // A dereference through (or near) a null pointer: the offset from
         // virtual address 0 reveals nothing about layout.
         if va < PAGE_SIZE as u64 {
@@ -1565,7 +1656,7 @@ impl AddressSpaceRegistry {
         // Just below the reserved stack span's guard page: a stack
         // overflow that ran past the guard. The distance below the reserve
         // base is a relative measure, not the base itself.
-        if let Some(span) = self.stack_spans.get(&task) {
+        if let Some(span) = self.stack_span(thread) {
             let reserve_base = span.reserve_base();
             if va < reserve_base {
                 let distance = reserve_base - va;
@@ -1576,7 +1667,7 @@ impl AddressSpaceRegistry {
         }
         // A small bounded distance past the end of a mapping the task
         // owns; the region it is relative to is never identified.
-        if let Some(end) = self.nearest_region_end_at_or_below(task, va) {
+        if let Some(end) = self.nearest_region_end_at_or_below(task, thread, va) {
             let offset = va - end;
             if offset <= NEAR_REGION_WINDOW {
                 return FaultLocality::PastRegion { offset };
@@ -1588,8 +1679,7 @@ impl AddressSpaceRegistry {
         // demand-paged page that could not be backed), not a wild pointer:
         // report the honest "in a region you own" locality, never "wild".
         let in_stack_span = self
-            .stack_spans
-            .get(&task)
+            .stack_span(thread)
             .is_some_and(|span| va >= span.reserve_base() && va < span.top());
         if in_stack_span
             || self.anon_region_covering(task, va)
@@ -1610,7 +1700,12 @@ impl AddressSpaceRegistry {
     /// region that *covers* `va` (its end is strictly above `va`) is
     /// excluded — that is a miss inside a live mapping, described by the
     /// `fault_class`, not a run past a region end.
-    fn nearest_region_end_at_or_below(&self, task: TaskId, va: u64) -> Option<u64> {
+    fn nearest_region_end_at_or_below(
+        &self,
+        task: ProcessId,
+        thread: TaskId,
+        va: u64,
+    ) -> Option<u64> {
         let mut best: Option<u64> = None;
         let mut consider = |end: u64| {
             if end <= va {
@@ -1627,7 +1722,7 @@ impl AddressSpaceRegistry {
                 consider(base.saturating_add(pages.saturating_mul(PAGE_SIZE as u64)));
             }
         }
-        if let Some(span) = self.stack_spans.get(&task) {
+        if let Some(span) = self.stack_span(thread) {
             consider(span.top());
         }
         best
@@ -1651,7 +1746,7 @@ impl AddressSpaceRegistry {
     /// number up to [`u32::MAX`] (genuine exhaustion, fail closed).
     pub fn open_file(
         &mut self,
-        task: TaskId,
+        task: ProcessId,
         path: String,
         flags: OpenFlags,
     ) -> Result<u32, Errno> {
@@ -1675,7 +1770,7 @@ impl AddressSpaceRegistry {
     /// number up to [`u32::MAX`] (genuine exhaustion, fail closed).
     pub fn open_resource(
         &mut self,
-        task: TaskId,
+        task: ProcessId,
         backing: ResourceBacking,
         flags: OpenFlags,
     ) -> Result<u32, Errno> {
@@ -1690,7 +1785,7 @@ impl AddressSpaceRegistry {
     /// comes from one allocator and one number space (: one definition).
     fn open_backed(
         &mut self,
-        task: TaskId,
+        task: ProcessId,
         backing: OpenBacking,
         flags: OpenFlags,
     ) -> Result<u32, Errno> {
@@ -1716,7 +1811,7 @@ impl AddressSpaceRegistry {
     /// resolves to nothing).
     pub fn mint_fd_delegation(
         &mut self,
-        recipient: TaskId,
+        recipient: ProcessId,
         file: DelegatedFile,
         flags: OpenFlags,
     ) -> u64 {
@@ -1760,7 +1855,7 @@ impl AddressSpaceRegistry {
     ///   exactly like absence, so the handle space leaks nothing).
     /// * [`Errno::OutOfRange`] — descriptor-space exhaustion; the grant
     ///   stays pending.
-    pub fn redeem_fd_delegation(&mut self, task: TaskId, handle: u64) -> Result<u32, Errno> {
+    pub fn redeem_fd_delegation(&mut self, task: ProcessId, handle: u64) -> Result<u32, Errno> {
         let (file, flags) = self
             .fd_delegations
             .get(&task)
@@ -1792,7 +1887,7 @@ impl AddressSpaceRegistry {
     ///
     /// [`Errno::OutOfRange`] only on genuine descriptor-space exhaustion
     /// (fail closed).
-    pub fn open_pipe(&mut self, task: TaskId) -> Result<(u32, u32), Errno> {
+    pub fn open_pipe(&mut self, task: ProcessId) -> Result<(u32, u32), Errno> {
         let (read_end, write_end) = crate::pipe::Pipe::create();
         let read_fd = self.open_backed(task, OpenBacking::Pipe(read_end), OpenFlags::READ)?;
         match self.open_backed(task, OpenBacking::Pipe(write_end), OpenFlags::WRITE) {
@@ -1825,7 +1920,7 @@ impl AddressSpaceRegistry {
     /// (fail closed).
     pub fn open_pty(
         &mut self,
-        task: TaskId,
+        task: ProcessId,
         size: tairix_abi::TerminalSize,
     ) -> Result<(u32, u32), Errno> {
         let (master, slave) = crate::pty::Pty::create(size);
@@ -1856,7 +1951,7 @@ impl AddressSpaceRegistry {
     /// [`Errno::OutOfRange`] for an `fd` at or above [`STD_STREAM_COUNT`].
     pub fn install_std_entry(
         &mut self,
-        task: TaskId,
+        task: ProcessId,
         fd: u32,
         file: OpenFile,
     ) -> Result<(), Errno> {
@@ -1884,7 +1979,7 @@ impl AddressSpaceRegistry {
     /// the `task` argument is the kernel-trusted caller id, so one process
     /// cannot reach another's open file by guessing a number.
     #[must_use]
-    pub fn open_file_entry(&self, task: TaskId, fd: u32) -> Option<OpenFile> {
+    pub fn open_file_entry(&self, task: ProcessId, fd: u32) -> Option<OpenFile> {
         self.open_files.get(&task)?.by_fd.get(&fd).cloned()
     }
 
@@ -1899,7 +1994,7 @@ impl AddressSpaceRegistry {
     /// place — never a clone, so the peek can never touch a stream's
     /// live-end counts.
     #[must_use]
-    pub fn stream_read_member(&self, task: TaskId, fd: u32) -> bool {
+    pub fn stream_read_member(&self, task: ProcessId, fd: u32) -> bool {
         self.borrow_read_stream_end(task, fd).is_some()
     }
 
@@ -1912,7 +2007,7 @@ impl AddressSpaceRegistry {
     /// place, so the per-scan peek never clones a stream end (a clone/drop
     /// pair would spuriously wake every stream waiter).
     #[must_use]
-    pub fn stream_readable(&self, task: TaskId, fd: u32) -> bool {
+    pub fn stream_readable(&self, task: ProcessId, fd: u32) -> bool {
         match self.borrow_read_stream_end(task, fd) {
             Some(ReadStreamEnd::Pipe(end)) => end.readable(),
             Some(ReadStreamEnd::PtyMaster(end)) => end.readable(),
@@ -1925,7 +2020,7 @@ impl AddressSpaceRegistry {
     /// place**, only when the entry is opened for reading and backed by a
     /// pipe read end, a pty master, or a pty slave — the one resolution
     /// [`Self::stream_read_member`] and [`Self::stream_readable`] share.
-    fn borrow_read_stream_end(&self, task: TaskId, fd: u32) -> Option<ReadStreamEnd<'_>> {
+    fn borrow_read_stream_end(&self, task: ProcessId, fd: u32) -> Option<ReadStreamEnd<'_>> {
         let entry = self.open_files.get(&task)?.by_fd.get(&fd)?;
         if !entry.flags.contains(OpenFlags::READ) {
             return None;
@@ -1954,7 +2049,7 @@ impl AddressSpaceRegistry {
     ///
     /// [`Pty`]: crate::pty::Pty
     #[must_use]
-    pub fn pty_slave(&self, task: TaskId, fd: u32) -> Option<&crate::pty::Pty> {
+    pub fn pty_slave(&self, task: ProcessId, fd: u32) -> Option<&crate::pty::Pty> {
         let entry = self.open_files.get(&task)?.by_fd.get(&fd)?;
         entry.pty_slave().map(PtySlaveEnd::pty)
     }
@@ -1972,7 +2067,7 @@ impl AddressSpaceRegistry {
     ///
     /// [`Pty`]: crate::pty::Pty
     #[must_use]
-    pub fn pty_master(&self, task: TaskId, fd: u32) -> Option<&crate::pty::Pty> {
+    pub fn pty_master(&self, task: ProcessId, fd: u32) -> Option<&crate::pty::Pty> {
         let entry = self.open_files.get(&task)?.by_fd.get(&fd)?;
         entry.pty_master().map(PtyMasterEnd::pty)
     }
@@ -1984,7 +2079,7 @@ impl AddressSpaceRegistry {
     /// (an unopened number, a standard stream, or another task's descriptor)
     /// is a no-op returning `false`, never an error or a panic. The `task`
     /// argument is the kernel-trusted caller id.
-    pub fn close_file(&mut self, task: TaskId, fd: u32) -> bool {
+    pub fn close_file(&mut self, task: ProcessId, fd: u32) -> bool {
         self.open_files
             .get_mut(&task)
             .is_some_and(|table| table.by_fd.remove(&fd).is_some())
@@ -1994,7 +2089,7 @@ impl AddressSpaceRegistry {
     /// [`tairix_kernel_mem::uaccess`] copy path consumes, or `None` if
     /// no entry is registered.
     #[must_use]
-    pub fn resolve(&self, task: TaskId) -> Option<(&dyn UserAddressSpace, &dyn PhysMap)> {
+    pub fn resolve(&self, task: ProcessId) -> Option<(&dyn UserAddressSpace, &dyn PhysMap)> {
         self.tasks.get(&task).map(|entry| {
             // Drop the `Send + Sync` auto-trait bounds the stored boxes
             // carry: the copy path only needs the bare read-only views,
@@ -2007,7 +2102,7 @@ impl AddressSpaceRegistry {
 
     /// Whether an address space is registered for `task`.
     #[must_use]
-    pub fn contains(&self, task: TaskId) -> bool {
+    pub fn contains(&self, task: ProcessId) -> bool {
         self.tasks.contains_key(&task)
     }
 
@@ -2067,19 +2162,19 @@ mod tests {
         let reg = AddressSpaceRegistry::new();
         assert!(reg.is_empty());
         assert_eq!(reg.len(), 0);
-        assert!(!reg.contains(TaskId(1)));
-        assert!(reg.resolve(TaskId(1)).is_none());
+        assert!(!reg.contains(ProcessId(1)));
+        assert!(reg.resolve(ProcessId(1)).is_none());
     }
 
     #[test]
     fn register_then_resolve_returns_the_pair() {
         let mut reg = AddressSpaceRegistry::new();
-        reg.register(TaskId(7), user_space(1, 9), sim())
+        reg.register(ProcessId(7), user_space(1, 9), sim())
             .expect("first registration succeeds");
-        assert!(reg.contains(TaskId(7)));
+        assert!(reg.contains(ProcessId(7)));
         assert_eq!(reg.len(), 1);
 
-        let (space, _physmap) = reg.resolve(TaskId(7)).expect("registered task resolves");
+        let (space, _physmap) = reg.resolve(ProcessId(7)).expect("registered task resolves");
         // The boxed trait object forwards `translate` to the underlying
         // `AddressSpace<HostPageTable>`.
         let (frame, flags) = space.translate(page(1)).expect("page resolves");
@@ -2090,15 +2185,15 @@ mod tests {
     #[test]
     fn duplicate_registration_is_rejected_and_keeps_first_entry() {
         let mut reg = AddressSpaceRegistry::new();
-        reg.register(TaskId(3), user_space(1, 100), sim())
+        reg.register(ProcessId(3), user_space(1, 100), sim())
             .expect("first registration succeeds");
         let err = reg
-            .register(TaskId(3), user_space(2, 200), sim())
+            .register(ProcessId(3), user_space(2, 200), sim())
             .expect_err("second registration for same task is refused");
         assert_eq!(err, AspaceError::AlreadyPresent);
         // The original entry survives untouched: page 1 → frame 100 is
         // still mapped, page 2 (from the rejected entry) is not.
-        let (space, _) = reg.resolve(TaskId(3)).expect("first entry intact");
+        let (space, _) = reg.resolve(ProcessId(3)).expect("first entry intact");
         assert_eq!(space.translate(page(1)).expect("page 1").0, Frame(100));
         assert!(space.translate(page(2)).is_none());
     }
@@ -2107,20 +2202,20 @@ mod tests {
     fn reregister_space_swaps_the_snapshot_and_keeps_the_physmap() {
         let mut reg = AddressSpaceRegistry::new();
         // Register a snapshot that maps only page 1 (the "spawn-time" view).
-        reg.register(TaskId(5), user_space(1, 100), sim())
+        reg.register(ProcessId(5), user_space(1, 100), sim())
             .expect("first registration succeeds");
 
         // The freeze-time snapshot cannot see page 2 yet — exactly the stale
         // state a `login` hit when its heap was mapped after spawn.
-        let (space, _) = reg.resolve(TaskId(5)).expect("registered");
+        let (space, _) = reg.resolve(ProcessId(5)).expect("registered");
         assert!(space.translate(page(2)).is_none());
 
         // Re-freeze: a fresh snapshot that now also maps page 2 (the grown
         // heap). `reregister_space` reports the task was present.
-        assert!(reg.reregister_space(TaskId(5), user_space(2, 200)));
+        assert!(reg.reregister_space(ProcessId(5), user_space(2, 200)));
 
         // The copy path now sees the newly-mapped page through the same task.
-        let (space, physmap) = reg.resolve(TaskId(5)).expect("still registered");
+        let (space, physmap) = reg.resolve(ProcessId(5)).expect("still registered");
         let (frame, flags) = space.translate(page(2)).expect("page 2 now resolves");
         assert_eq!(frame, Frame(200));
         assert!(flags.contains(MapFlags::USER));
@@ -2132,10 +2227,10 @@ mod tests {
     fn note_faulted_page_updates_a_frozen_snapshot_in_place() {
         let mut reg = AddressSpaceRegistry::new();
         // The stored snapshot sees only page 1 (the spawn-time view).
-        reg.register(TaskId(6), frozen_space(1, 100), sim())
+        reg.register(ProcessId(6), frozen_space(1, 100), sim())
             .expect("registration succeeds");
         assert!(reg
-            .resolve(TaskId(6))
+            .resolve(ProcessId(6))
             .expect("registered")
             .0
             .translate(page(2))
@@ -2143,9 +2238,9 @@ mod tests {
 
         // A demand fault backs page 2; the resolver applies just that page as
         // a delta (no whole-space re-freeze) and the snapshot absorbs it.
-        assert!(reg.note_faulted_page(TaskId(6), page(2), Some((Frame(200), MapFlags::USER))));
+        assert!(reg.note_faulted_page(ProcessId(6), page(2), Some((Frame(200), MapFlags::USER))));
 
-        let (space, _) = reg.resolve(TaskId(6)).expect("still registered");
+        let (space, _) = reg.resolve(ProcessId(6)).expect("still registered");
         let (frame, flags) = space.translate(page(2)).expect("delta page resolves");
         assert_eq!(frame, Frame(200));
         assert!(flags.contains(MapFlags::USER));
@@ -2158,13 +2253,13 @@ mod tests {
         let mut reg = AddressSpaceRegistry::new();
         // A live `AddressSpace` entry keeps the default no-op delta, so the
         // registry reports `false` and the caller full-re-freezes instead.
-        reg.register(TaskId(7), user_space(1, 1), sim())
+        reg.register(ProcessId(7), user_space(1, 1), sim())
             .expect("registration succeeds");
-        assert!(!reg.note_faulted_page(TaskId(7), page(2), Some((Frame(2), MapFlags::USER))));
+        assert!(!reg.note_faulted_page(ProcessId(7), page(2), Some((Frame(2), MapFlags::USER))));
         // A task with no entry also reports `false` (fail closed), never a
         // silently-created entry.
-        assert!(!reg.note_faulted_page(TaskId(99), page(0), None));
-        assert!(!reg.contains(TaskId(99)));
+        assert!(!reg.note_faulted_page(ProcessId(99), page(0), None));
+        assert!(!reg.contains(ProcessId(99)));
     }
 
     #[test]
@@ -2172,44 +2267,45 @@ mod tests {
         let mut reg = AddressSpaceRegistry::new();
         // A task with no entry is never created by a re-freeze (a kernel task
         // reaches no user copy path); the call fails closed.
-        assert!(!reg.reregister_space(TaskId(9), user_space(1, 1)));
-        assert!(!reg.contains(TaskId(9)));
-        assert!(reg.resolve(TaskId(9)).is_none());
+        assert!(!reg.reregister_space(ProcessId(9), user_space(1, 1)));
+        assert!(!reg.contains(ProcessId(9)));
+        assert!(reg.resolve(ProcessId(9)).is_none());
     }
 
     #[test]
     fn withdraw_removes_only_the_named_task() {
         let mut reg = AddressSpaceRegistry::new();
-        reg.register(TaskId(1), user_space(1, 1), sim()).unwrap();
-        reg.register(TaskId(2), user_space(1, 2), sim()).unwrap();
+        reg.register(ProcessId(1), user_space(1, 1), sim()).unwrap();
+        reg.register(ProcessId(2), user_space(1, 2), sim()).unwrap();
 
-        assert!(reg.withdraw(TaskId(1)));
-        assert!(!reg.contains(TaskId(1)));
-        assert!(reg.resolve(TaskId(1)).is_none());
-        assert!(reg.contains(TaskId(2)));
+        assert!(reg.withdraw(ProcessId(1)));
+        assert!(!reg.contains(ProcessId(1)));
+        assert!(reg.resolve(ProcessId(1)).is_none());
+        assert!(reg.contains(ProcessId(2)));
         assert_eq!(reg.len(), 1);
     }
 
     #[test]
     fn withdrawing_unknown_task_is_a_noop() {
         let mut reg = AddressSpaceRegistry::new();
-        assert!(!reg.withdraw(TaskId(42)));
-        reg.register(TaskId(1), user_space(1, 1), sim()).unwrap();
+        assert!(!reg.withdraw(ProcessId(42)));
+        reg.register(ProcessId(1), user_space(1, 1), sim()).unwrap();
         // Double withdraw: the second call finds nothing.
-        assert!(reg.withdraw(TaskId(1)));
-        assert!(!reg.withdraw(TaskId(1)));
+        assert!(reg.withdraw(ProcessId(1)));
+        assert!(!reg.withdraw(ProcessId(1)));
     }
 
     #[test]
     fn re_register_after_withdraw_succeeds() {
         let mut reg = AddressSpaceRegistry::new();
-        reg.register(TaskId(5), user_space(1, 10), sim()).unwrap();
-        assert!(reg.withdraw(TaskId(5)));
+        reg.register(ProcessId(5), user_space(1, 10), sim())
+            .unwrap();
+        assert!(reg.withdraw(ProcessId(5)));
         // A new task reusing the same id (after the old one exited) can
         // register again — withdrawal fully clears the slot.
-        reg.register(TaskId(5), user_space(3, 30), sim())
+        reg.register(ProcessId(5), user_space(3, 30), sim())
             .expect("re-registration after withdraw succeeds");
-        let (space, _) = reg.resolve(TaskId(5)).expect("re-registered");
+        let (space, _) = reg.resolve(ProcessId(5)).expect("re-registered");
         assert_eq!(space.translate(page(3)).expect("page 3").0, Frame(30));
     }
 
@@ -2217,130 +2313,130 @@ mod tests {
     fn unset_streams_resolve_to_the_closed_default() {
         let reg = AddressSpaceRegistry::new();
         // A task with no established table can reach no backing.
-        assert_eq!(reg.streams(TaskId(9)), DescriptorTable::closed());
+        assert_eq!(reg.streams(ProcessId(9)), DescriptorTable::closed());
     }
 
     #[test]
     fn set_streams_then_resolve_returns_the_table() {
         let mut reg = AddressSpaceRegistry::new();
-        reg.set_streams(TaskId(2), DescriptorTable::standard());
-        assert_eq!(reg.streams(TaskId(2)), DescriptorTable::standard());
+        reg.set_streams(ProcessId(2), DescriptorTable::standard());
+        assert_eq!(reg.streams(ProcessId(2)), DescriptorTable::standard());
         // A different task is unaffected and stays fail-closed.
-        assert_eq!(reg.streams(TaskId(3)), DescriptorTable::closed());
+        assert_eq!(reg.streams(ProcessId(3)), DescriptorTable::closed());
     }
 
     #[test]
     fn withdraw_clears_the_stream_table() {
         let mut reg = AddressSpaceRegistry::new();
-        reg.set_streams(TaskId(4), DescriptorTable::standard());
+        reg.set_streams(ProcessId(4), DescriptorTable::standard());
         // Withdrawing a task with streams but no address space still
         // reports the slot was present and clears the table.
-        assert!(reg.withdraw(TaskId(4)));
-        assert_eq!(reg.streams(TaskId(4)), DescriptorTable::closed());
+        assert!(reg.withdraw(ProcessId(4)));
+        assert_eq!(reg.streams(ProcessId(4)), DescriptorTable::closed());
     }
 
     #[test]
     fn stale_task_entry_is_none_for_a_fresh_id() {
         let reg = AddressSpaceRegistry::new();
-        assert_eq!(reg.stale_task_entry(TaskId(1)), None);
+        assert_eq!(reg.stale_task_entry(ProcessId(1)), None);
     }
 
     #[test]
     fn stale_task_entry_names_a_populated_map_then_withdraw_clears_it() {
         let mut reg = AddressSpaceRegistry::new();
-        reg.set_streams(TaskId(8), DescriptorTable::standard());
-        assert_eq!(reg.stale_task_entry(TaskId(8)), Some("streams"));
+        reg.set_streams(ProcessId(8), DescriptorTable::standard());
+        assert_eq!(reg.stale_task_entry(ProcessId(8)), Some("streams"));
         // Reclaim must leave nothing behind: this is exactly the
         // post-condition `withdraw` asserts, exercised explicitly.
-        assert!(reg.withdraw(TaskId(8)));
-        assert_eq!(reg.stale_task_entry(TaskId(8)), None);
+        assert!(reg.withdraw(ProcessId(8)));
+        assert_eq!(reg.stale_task_entry(ProcessId(8)), None);
     }
 
     #[test]
     fn stale_task_entry_reports_a_registered_address_space() {
         let mut reg = AddressSpaceRegistry::new();
-        reg.register(TaskId(3), user_space(1, 1), sim()).unwrap();
-        assert_eq!(reg.stale_task_entry(TaskId(3)), Some("tasks"));
-        assert!(reg.withdraw(TaskId(3)));
-        assert_eq!(reg.stale_task_entry(TaskId(3)), None);
+        reg.register(ProcessId(3), user_space(1, 1), sim()).unwrap();
+        assert_eq!(reg.stale_task_entry(ProcessId(3)), Some("tasks"));
+        assert!(reg.withdraw(ProcessId(3)));
+        assert_eq!(reg.stale_task_entry(ProcessId(3)), None);
     }
 
     #[test]
     fn stream_read_member_admits_only_the_owners_pipe_read_end() {
         let mut reg = AddressSpaceRegistry::new();
-        let (read_fd, write_fd) = reg.open_pipe(TaskId(2)).expect("pipe minted");
+        let (read_fd, write_fd) = reg.open_pipe(ProcessId(2)).expect("pipe minted");
         let file_fd = reg
-            .open_file(TaskId(2), String::from("/Storage/x"), OpenFlags::READ)
+            .open_file(ProcessId(2), String::from("/Storage/x"), OpenFlags::READ)
             .expect("file opened");
         // Only the caller's own pipe read end qualifies.
-        assert!(reg.stream_read_member(TaskId(2), read_fd));
+        assert!(reg.stream_read_member(ProcessId(2), read_fd));
         // A write end, a path-backed descriptor, an unopened number, and
         // another task's descriptor all refuse identically.
-        assert!(!reg.stream_read_member(TaskId(2), write_fd));
-        assert!(!reg.stream_read_member(TaskId(2), file_fd));
-        assert!(!reg.stream_read_member(TaskId(2), 999));
-        assert!(!reg.stream_read_member(TaskId(3), read_fd));
+        assert!(!reg.stream_read_member(ProcessId(2), write_fd));
+        assert!(!reg.stream_read_member(ProcessId(2), file_fd));
+        assert!(!reg.stream_read_member(ProcessId(2), 999));
+        assert!(!reg.stream_read_member(ProcessId(3), read_fd));
         // A closed descriptor stops qualifying.
-        assert!(reg.close_file(TaskId(2), read_fd));
-        assert!(!reg.stream_read_member(TaskId(2), read_fd));
+        assert!(reg.close_file(ProcessId(2), read_fd));
+        assert!(!reg.stream_read_member(ProcessId(2), read_fd));
     }
 
     #[test]
     fn stream_readable_peeks_bytes_and_eof_without_consuming() {
         let mut reg = AddressSpaceRegistry::new();
-        let (read_fd, write_fd) = reg.open_pipe(TaskId(2)).expect("pipe minted");
+        let (read_fd, write_fd) = reg.open_pipe(ProcessId(2)).expect("pipe minted");
         // Empty with a live writer: a read would park, so not ready.
-        assert!(!reg.stream_readable(TaskId(2), read_fd));
+        assert!(!reg.stream_readable(ProcessId(2), read_fd));
         // Buffered bytes: ready, and the peek consumes nothing.
         let end = reg
-            .open_file_entry(TaskId(2), write_fd)
+            .open_file_entry(ProcessId(2), write_fd)
             .and_then(|entry| entry.pipe().cloned())
             .expect("write end resolves");
         assert_eq!(end.try_write(b"go"), crate::pipe::WriteStep::Wrote(2));
-        assert!(reg.stream_readable(TaskId(2), read_fd));
-        assert!(reg.stream_readable(TaskId(2), read_fd));
+        assert!(reg.stream_readable(ProcessId(2), read_fd));
+        assert!(reg.stream_readable(ProcessId(2), read_fd));
         // The write end itself is never stream-readable; nor is a foreign
         // task's descriptor.
-        assert!(!reg.stream_readable(TaskId(2), write_fd));
-        assert!(!reg.stream_readable(TaskId(3), read_fd));
+        assert!(!reg.stream_readable(ProcessId(2), write_fd));
+        assert!(!reg.stream_readable(ProcessId(3), read_fd));
         // Closing every write end leaves the member ready for its EOF
         // read (drop the local clone too — each holds a live end).
         drop(end);
-        assert!(reg.close_file(TaskId(2), write_fd));
-        assert!(reg.stream_readable(TaskId(2), read_fd));
+        assert!(reg.close_file(ProcessId(2), write_fd));
+        assert!(reg.stream_readable(ProcessId(2), read_fd));
     }
 
     #[test]
     fn stream_readable_peeks_a_pty_master_against_its_slaves_output() {
         let mut reg = AddressSpaceRegistry::new();
         let size = tairix_abi::TerminalSize::new(24, 80).expect("valid grid");
-        let (master_fd, slave_fd) = reg.open_pty(TaskId(2), size).expect("pty minted");
+        let (master_fd, slave_fd) = reg.open_pty(ProcessId(2), size).expect("pty minted");
         // Both ends are wait-set stream members (each is opened readable);
         // a foreign task's number and an unopened one are not.
-        assert!(reg.stream_read_member(TaskId(2), master_fd));
-        assert!(reg.stream_read_member(TaskId(2), slave_fd));
-        assert!(!reg.stream_read_member(TaskId(3), master_fd));
-        assert!(!reg.stream_read_member(TaskId(2), 999));
+        assert!(reg.stream_read_member(ProcessId(2), master_fd));
+        assert!(reg.stream_read_member(ProcessId(2), slave_fd));
+        assert!(!reg.stream_read_member(ProcessId(3), master_fd));
+        assert!(!reg.stream_read_member(ProcessId(2), 999));
         // Nothing written yet: a master read would park, so the terminal's
         // `Stream` member is not ready.
-        assert!(!reg.stream_readable(TaskId(2), master_fd));
+        assert!(!reg.stream_readable(ProcessId(2), master_fd));
         // The slave's program output makes the master ready, and the peek
         // consumes nothing.
         let slave = reg
-            .open_file_entry(TaskId(2), slave_fd)
+            .open_file_entry(ProcessId(2), slave_fd)
             .and_then(|entry| entry.pty_slave().cloned())
             .expect("slave end resolves");
         assert_eq!(slave.write(b"out"), crate::pty::PtyWriteStep::Wrote(3));
-        assert!(reg.stream_readable(TaskId(2), master_fd));
-        assert!(reg.stream_readable(TaskId(2), master_fd));
+        assert!(reg.stream_readable(ProcessId(2), master_fd));
+        assert!(reg.stream_readable(ProcessId(2), master_fd));
         // The slave side stays unready: cooked output is the master's to
         // read, never its own.
-        assert!(!reg.stream_readable(TaskId(2), slave_fd));
+        assert!(!reg.stream_readable(ProcessId(2), slave_fd));
         // Every slave end closed leaves the master ready for its EOF read
         // (drop the local clone too — each holds a live end).
         drop(slave);
-        assert!(reg.close_file(TaskId(2), slave_fd));
-        assert!(reg.stream_readable(TaskId(2), master_fd));
+        assert!(reg.close_file(ProcessId(2), slave_fd));
+        assert!(reg.stream_readable(ProcessId(2), master_fd));
     }
 
     #[test]
@@ -2348,46 +2444,46 @@ mod tests {
         let reg = AddressSpaceRegistry::new();
         // A task whose working directory was never established resolves to
         // the root, the safe least-privileged default.
-        assert_eq!(reg.cwd(TaskId(9)), "/");
+        assert_eq!(reg.cwd(ProcessId(9)), "/");
     }
 
     #[test]
     fn set_cwd_then_resolve_returns_the_directory() {
         let mut reg = AddressSpaceRegistry::new();
-        reg.set_cwd(TaskId(2), String::from("/Users/bob"));
-        assert_eq!(reg.cwd(TaskId(2)), "/Users/bob");
+        reg.set_cwd(ProcessId(2), String::from("/Users/bob"));
+        assert_eq!(reg.cwd(ProcessId(2)), "/Users/bob");
         // A different task is unaffected and stays at the root default.
-        assert_eq!(reg.cwd(TaskId(3)), "/");
+        assert_eq!(reg.cwd(ProcessId(3)), "/");
     }
 
     #[test]
     fn withdraw_clears_the_working_directory() {
         let mut reg = AddressSpaceRegistry::new();
-        reg.set_cwd(TaskId(4), String::from("/Storage/data"));
+        reg.set_cwd(ProcessId(4), String::from("/Storage/data"));
         // Withdrawing a task with a cwd but no address space still reports
         // the slot was present and resets it to the root.
-        assert!(reg.withdraw(TaskId(4)));
-        assert_eq!(reg.cwd(TaskId(4)), "/");
+        assert!(reg.withdraw(ProcessId(4)));
+        assert_eq!(reg.cwd(ProcessId(4)), "/");
     }
 
     #[test]
     fn unset_limits_resolve_to_the_default_policy() {
         let reg = AddressSpaceRegistry::new();
         // A task with no established set runs under the default policy.
-        assert_eq!(reg.limits(TaskId(9)), LimitSet::DEFAULT);
+        assert_eq!(reg.limits(ProcessId(9)), LimitSet::DEFAULT);
     }
 
     #[test]
     fn set_limit_updates_one_kind_and_leaves_the_rest_at_default() {
         let mut reg = AddressSpaceRegistry::new();
         let lo = ResourceLimit::new(4, 8).expect("well-formed");
-        reg.set_limit(TaskId(2), LimitKind::Processes, lo);
-        let set = reg.limits(TaskId(2));
+        reg.set_limit(ProcessId(2), LimitKind::Processes, lo);
+        let set = reg.limits(ProcessId(2));
         assert_eq!(set.get(LimitKind::Processes), lo);
         // Every other kind stays at the default policy.
         assert_eq!(set.get(LimitKind::OpenStreams), ResourceLimit::UNLIMITED);
         // A different task is unaffected and stays at the default policy.
-        assert_eq!(reg.limits(TaskId(3)), LimitSet::DEFAULT);
+        assert_eq!(reg.limits(ProcessId(3)), LimitSet::DEFAULT);
     }
 
     #[test]
@@ -2398,8 +2494,8 @@ mod tests {
             LimitKind::StackBytes,
             ResourceLimit::new(1024, 4096).expect("well-formed"),
         );
-        reg.set_limits(TaskId(7), wanted);
-        assert_eq!(reg.limits(TaskId(7)), wanted);
+        reg.set_limits(ProcessId(7), wanted);
+        assert_eq!(reg.limits(ProcessId(7)), wanted);
     }
 
     #[test]
@@ -2408,16 +2504,16 @@ mod tests {
         let boot_default = LimitSet::with_pinned_default(128 << 20);
         reg.set_default_limits(boot_default);
         // An unestablished task resolves to the per-boot default …
-        assert_eq!(reg.limits(TaskId(9)), boot_default);
+        assert_eq!(reg.limits(ProcessId(9)), boot_default);
         assert_eq!(reg.default_limits(), boot_default);
         // … and a first single-kind bound starts from it, keeping the
         // derived pinned bound rather than silently reverting to the
         // compile-time floor.
         let cap = ResourceLimit::new(4, 8).expect("well-formed");
-        reg.set_limit(TaskId(9), LimitKind::Processes, cap);
-        assert_eq!(reg.limits(TaskId(9)).get(LimitKind::Processes), cap);
+        reg.set_limit(ProcessId(9), LimitKind::Processes, cap);
+        assert_eq!(reg.limits(ProcessId(9)).get(LimitKind::Processes), cap);
         assert_eq!(
-            reg.limits(TaskId(9)).get(LimitKind::PinnedMemoryBytes),
+            reg.limits(ProcessId(9)).get(LimitKind::PinnedMemoryBytes),
             boot_default.get(LimitKind::PinnedMemoryBytes)
         );
     }
@@ -2426,28 +2522,28 @@ mod tests {
     fn pin_state_is_per_task_idempotent_and_cleared_on_withdraw() {
         let mut reg = AddressSpaceRegistry::new();
         // Fresh tasks are unpinned — pinning is never inherited.
-        assert!(!reg.is_pinned(TaskId(1)));
-        reg.set_pinned(TaskId(1));
-        assert!(reg.is_pinned(TaskId(1)));
-        assert!(!reg.is_pinned(TaskId(2)), "pin is per-task state");
+        assert!(!reg.is_pinned(ProcessId(1)));
+        reg.set_pinned(ProcessId(1));
+        assert!(reg.is_pinned(ProcessId(1)));
+        assert!(!reg.is_pinned(ProcessId(2)), "pin is per-task state");
         // Idempotent both ways.
-        reg.set_pinned(TaskId(1));
-        assert!(reg.is_pinned(TaskId(1)));
-        reg.clear_pinned(TaskId(1));
-        assert!(!reg.is_pinned(TaskId(1)));
-        reg.clear_pinned(TaskId(1));
-        assert!(!reg.is_pinned(TaskId(1)));
+        reg.set_pinned(ProcessId(1));
+        assert!(reg.is_pinned(ProcessId(1)));
+        reg.clear_pinned(ProcessId(1));
+        assert!(!reg.is_pinned(ProcessId(1)));
+        reg.clear_pinned(ProcessId(1));
+        assert!(!reg.is_pinned(ProcessId(1)));
         // Withdraw clears the mark, so a reused id starts unpinned and
         // the withdraw reports state was dropped.
-        reg.set_pinned(TaskId(3));
-        assert!(reg.withdraw(TaskId(3)));
-        assert!(!reg.is_pinned(TaskId(3)));
+        reg.set_pinned(ProcessId(3));
+        assert!(reg.withdraw(ProcessId(3)));
+        assert!(!reg.is_pinned(ProcessId(3)));
     }
 
     #[test]
     fn pinned_footprint_sums_mapped_bytes_and_committed_stack() {
         let mut reg = AddressSpaceRegistry::new();
-        let task = TaskId(4);
+        let task = ProcessId(4);
         assert_eq!(reg.pinned_footprint_bytes(task), 0);
         reg.charge_aspace_bytes(task, 3 * PAGE_SIZE as u64);
         assert_eq!(reg.pinned_footprint_bytes(task), 3 * PAGE_SIZE as u64);
@@ -2456,7 +2552,7 @@ mod tests {
         let top = 0x8000_0000u64;
         let span = StackSpan::new(top - 16 * PAGE_SIZE as u64, top - PAGE_SIZE as u64, top)
             .expect("well-formed span");
-        reg.set_stack_span(task, span);
+        reg.set_stack_span(task, task.leader_task(), span);
         assert_eq!(
             reg.pinned_footprint_bytes(task),
             3 * PAGE_SIZE as u64 + PAGE_SIZE as u64
@@ -2466,17 +2562,17 @@ mod tests {
     #[test]
     fn pinned_total_aggregates_only_pinned_tasks() {
         let mut reg = AddressSpaceRegistry::new();
-        reg.charge_aspace_bytes(TaskId(1), 2 * PAGE_SIZE as u64);
-        reg.charge_aspace_bytes(TaskId(2), 5 * PAGE_SIZE as u64);
+        reg.charge_aspace_bytes(ProcessId(1), 2 * PAGE_SIZE as u64);
+        reg.charge_aspace_bytes(ProcessId(2), 5 * PAGE_SIZE as u64);
         assert_eq!(reg.pinned_total_bytes(), 0, "nothing pinned yet");
-        reg.set_pinned(TaskId(1));
+        reg.set_pinned(ProcessId(1));
         assert_eq!(reg.pinned_total_bytes(), 2 * PAGE_SIZE as u64);
-        reg.set_pinned(TaskId(2));
+        reg.set_pinned(ProcessId(2));
         assert_eq!(reg.pinned_total_bytes(), 7 * PAGE_SIZE as u64);
         // Unpin and exit both drop out of the aggregate.
-        reg.clear_pinned(TaskId(2));
+        reg.clear_pinned(ProcessId(2));
         assert_eq!(reg.pinned_total_bytes(), 2 * PAGE_SIZE as u64);
-        reg.withdraw(TaskId(1));
+        reg.withdraw(ProcessId(1));
         assert_eq!(reg.pinned_total_bytes(), 0);
     }
 
@@ -2484,14 +2580,14 @@ mod tests {
     fn withdraw_clears_the_limit_set() {
         let mut reg = AddressSpaceRegistry::new();
         reg.set_limit(
-            TaskId(4),
+            ProcessId(4),
             LimitKind::Processes,
             ResourceLimit::new(1, 2).expect("well-formed"),
         );
         // Withdrawing a task with limits but no address space still reports
         // the slot was present and resets it to the default policy.
-        assert!(reg.withdraw(TaskId(4)));
-        assert_eq!(reg.limits(TaskId(4)), LimitSet::DEFAULT);
+        assert!(reg.withdraw(ProcessId(4)));
+        assert_eq!(reg.limits(ProcessId(4)), LimitSet::DEFAULT);
     }
 
     // --- device-resource grants ----------------
@@ -2506,19 +2602,19 @@ mod tests {
         let reg = AddressSpaceRegistry::new();
         // A task with no grants can map nothing, and handle 0 (the reserved
         // invalid value) is never a live grant.
-        assert_eq!(reg.grant(TaskId(9), 1), None);
-        assert_eq!(reg.grant(TaskId(9), 0), None);
+        assert_eq!(reg.grant(ProcessId(9), 1), None);
+        assert_eq!(reg.grant(ProcessId(9), 0), None);
     }
 
     #[test]
     fn mint_then_grant_returns_the_resource_for_its_owner() {
         let mut reg = AddressSpaceRegistry::new();
-        let handle = reg.mint_grant(TaskId(2), window());
+        let handle = reg.mint_grant(ProcessId(2), window());
         // The first minted handle is 1 (handle 0 stays reserved-invalid).
         assert_eq!(handle, 1);
-        assert_eq!(reg.grant(TaskId(2), handle), Some(window()));
+        assert_eq!(reg.grant(ProcessId(2), handle), Some(window()));
         // The reserved handle still resolves to nothing for the owner.
-        assert_eq!(reg.grant(TaskId(2), 0), None);
+        assert_eq!(reg.grant(ProcessId(2), 0), None);
     }
 
     #[test]
@@ -2526,36 +2622,36 @@ mod tests {
         let mut reg = AddressSpaceRegistry::new();
         let a = HwResource::mmio(0xFE98_0000, 0x4000);
         let b = HwResource::bus_window(0x6000_0000, 0x40_0000, 0xF800_0000);
-        let h_a = reg.mint_grant(TaskId(2), a);
-        let h_b = reg.mint_grant(TaskId(2), b);
+        let h_a = reg.mint_grant(ProcessId(2), a);
+        let h_b = reg.mint_grant(ProcessId(2), b);
         assert_ne!(h_a, h_b, "each grant gets its own handle");
-        assert_eq!(reg.grant(TaskId(2), h_a), Some(a));
-        assert_eq!(reg.grant(TaskId(2), h_b), Some(b));
+        assert_eq!(reg.grant(ProcessId(2), h_a), Some(a));
+        assert_eq!(reg.grant(ProcessId(2), h_b), Some(b));
     }
 
     #[test]
     fn grant_is_owner_bound_against_handle_forgery() {
         let mut reg = AddressSpaceRegistry::new();
-        let handle = reg.mint_grant(TaskId(2), window());
+        let handle = reg.mint_grant(ProcessId(2), window());
         // The owner resolves its grant; an unknown handle value does not.
-        assert_eq!(reg.grant(TaskId(2), handle), Some(window()));
-        assert_eq!(reg.grant(TaskId(2), handle + 1), None);
+        assert_eq!(reg.grant(ProcessId(2), handle), Some(window()));
+        assert_eq!(reg.grant(ProcessId(2), handle + 1), None);
         // A *different* task passing the same numeric handle reaches
         // nothing — a driver cannot map another driver's window by reusing
         // its handle value.
-        assert_eq!(reg.grant(TaskId(3), handle), None);
+        assert_eq!(reg.grant(ProcessId(3), handle), None);
     }
 
     #[test]
     fn withdraw_reclaims_every_grant() {
         let mut reg = AddressSpaceRegistry::new();
-        let handle = reg.mint_grant(TaskId(4), window());
-        assert_eq!(reg.grant(TaskId(4), handle), Some(window()));
+        let handle = reg.mint_grant(ProcessId(4), window());
+        assert_eq!(reg.grant(ProcessId(4), handle), Some(window()));
         // Withdrawing a task with grants but no address space still reports
         // the slot was present and clears the grants (reclaimed on
         // exit).
-        assert!(reg.withdraw(TaskId(4)));
-        assert_eq!(reg.grant(TaskId(4), handle), None);
+        assert!(reg.withdraw(ProcessId(4)));
+        assert_eq!(reg.grant(ProcessId(4), handle), None);
     }
 
     /// Regression: delegation is idempotent, so repeating it cannot grow a
@@ -2569,22 +2665,22 @@ mod tests {
     #[test]
     fn granting_a_held_resource_again_returns_the_same_handle() {
         let mut reg = AddressSpaceRegistry::new();
-        let first = reg.mint_grant(TaskId(2), window());
+        let first = reg.mint_grant(ProcessId(2), window());
         for _ in 0..1_000 {
             assert_eq!(
-                reg.mint_grant(TaskId(2), window()),
+                reg.mint_grant(ProcessId(2), window()),
                 first,
                 "repetition must not append a second entry naming the same resource"
             );
         }
         assert_eq!(
-            reg.grants_to_le_bytes(TaskId(2)).len(),
+            reg.grants_to_le_bytes(ProcessId(2)).len(),
             GrantedResource::WIRE_LEN
         );
         // A *different* resource is still new authority and mints its own
         // handle: suppression is exact, never a collapse of distinct grants.
         let other = HwResource::mmio(0x3F20_0000, 0x1000);
-        assert_ne!(reg.mint_grant(TaskId(2), other), first);
+        assert_ne!(reg.mint_grant(ProcessId(2), other), first);
     }
 
     /// A grant naming a *narrower* resource than one already held is still
@@ -2600,10 +2696,10 @@ mod tests {
         let wide = HwResource::mmio(0xFE98_0000, 0x4000);
         let narrow = HwResource::mmio(0xFE98_0000, 0x1000);
         assert!(wide.covers(&narrow), "the wider window covers the narrower");
-        let wide_handle = reg.mint_grant(TaskId(2), wide);
-        let narrow_handle = reg.mint_grant(TaskId(2), narrow);
+        let wide_handle = reg.mint_grant(ProcessId(2), wide);
+        let narrow_handle = reg.mint_grant(ProcessId(2), narrow);
         assert_ne!(wide_handle, narrow_handle);
-        assert_eq!(reg.grant(TaskId(2), narrow_handle), Some(narrow));
+        assert_eq!(reg.grant(ProcessId(2), narrow_handle), Some(narrow));
     }
 
     /// Regression: a per-endpoint grant must not outlive the endpoint
@@ -2618,29 +2714,29 @@ mod tests {
         let mut reg = AddressSpaceRegistry::new();
         let doomed = HwResource::endpoint(0xCA11_0001);
         let survivor = HwResource::endpoint(0xCA11_0002);
-        let holder_a = reg.mint_grant(TaskId(2), doomed);
-        let holder_b = reg.mint_grant(TaskId(3), doomed);
-        let unrelated_endpoint = reg.mint_grant(TaskId(3), survivor);
+        let holder_a = reg.mint_grant(ProcessId(2), doomed);
+        let holder_b = reg.mint_grant(ProcessId(3), doomed);
+        let unrelated_endpoint = reg.mint_grant(ProcessId(3), survivor);
         // A same-numbered resource of a *different kind* must survive: the
         // revocation is scoped to endpoints, not to the number.
-        let same_number_region = reg.mint_grant(TaskId(3), HwResource::shared(0xCA11_0001));
-        let mmio = reg.mint_grant(TaskId(4), window());
+        let same_number_region = reg.mint_grant(ProcessId(3), HwResource::shared(0xCA11_0001));
+        let mmio = reg.mint_grant(ProcessId(4), window());
 
         let mut destroyed = BTreeSet::new();
         destroyed.insert(0xCA11_0001_u64);
         assert_eq!(reg.revoke_endpoint_grants(&destroyed), 2);
 
         // Every holder of the destroyed endpoint lost it, whichever task.
-        assert_eq!(reg.grant(TaskId(2), holder_a), None);
-        assert_eq!(reg.grant(TaskId(3), holder_b), None);
-        assert!(!reg.grant_covers(TaskId(2), &doomed));
+        assert_eq!(reg.grant(ProcessId(2), holder_a), None);
+        assert_eq!(reg.grant(ProcessId(3), holder_b), None);
+        assert!(!reg.grant_covers(ProcessId(2), &doomed));
         // Nothing else was touched.
-        assert_eq!(reg.grant(TaskId(3), unrelated_endpoint), Some(survivor));
+        assert_eq!(reg.grant(ProcessId(3), unrelated_endpoint), Some(survivor));
         assert_eq!(
-            reg.grant(TaskId(3), same_number_region),
+            reg.grant(ProcessId(3), same_number_region),
             Some(HwResource::shared(0xCA11_0001))
         );
-        assert_eq!(reg.grant(TaskId(4), mmio), Some(window()));
+        assert_eq!(reg.grant(ProcessId(4), mmio), Some(window()));
         // Idempotent, and an empty set is a no-op.
         assert_eq!(reg.revoke_endpoint_grants(&destroyed), 0);
         assert_eq!(reg.revoke_endpoint_grants(&BTreeSet::new()), 0);
@@ -2652,13 +2748,13 @@ mod tests {
     #[test]
     fn a_revoked_handle_number_is_not_reissued() {
         let mut reg = AddressSpaceRegistry::new();
-        let revoked = reg.mint_grant(TaskId(2), HwResource::endpoint(0xCA11_0003));
+        let revoked = reg.mint_grant(ProcessId(2), HwResource::endpoint(0xCA11_0003));
         let mut destroyed = BTreeSet::new();
         destroyed.insert(0xCA11_0003_u64);
         assert_eq!(reg.revoke_endpoint_grants(&destroyed), 1);
-        let fresh = reg.mint_grant(TaskId(2), window());
+        let fresh = reg.mint_grant(ProcessId(2), window());
         assert_ne!(fresh, revoked);
-        assert_eq!(reg.grant(TaskId(2), revoked), None);
+        assert_eq!(reg.grant(ProcessId(2), revoked), None);
     }
 
     /// Regression: re-granting a file delegation that is still pending
@@ -2678,10 +2774,10 @@ mod tests {
             uid: 1000,
             caps: CapabilitySet::empty(),
         };
-        let first = reg.mint_fd_delegation(TaskId(2), file.clone(), OpenFlags::READ);
+        let first = reg.mint_fd_delegation(ProcessId(2), file.clone(), OpenFlags::READ);
         for _ in 0..1_000 {
             assert_eq!(
-                reg.mint_fd_delegation(TaskId(2), file.clone(), OpenFlags::READ),
+                reg.mint_fd_delegation(ProcessId(2), file.clone(), OpenFlags::READ),
                 first,
                 "repetition must not append a second pending delegation"
             );
@@ -2693,34 +2789,34 @@ mod tests {
             caps: CapabilitySet::empty(),
         };
         assert_ne!(
-            reg.mint_fd_delegation(TaskId(2), other, OpenFlags::READ),
+            reg.mint_fd_delegation(ProcessId(2), other, OpenFlags::READ),
             first
         );
         // One redemption consumes the one pending right; the duplicate
         // suppression never turned two grants into one *redeemable*
         // descriptor that outlives its consumption.
-        assert!(reg.redeem_fd_delegation(TaskId(2), first).is_ok());
+        assert!(reg.redeem_fd_delegation(ProcessId(2), first).is_ok());
         assert_eq!(
-            reg.redeem_fd_delegation(TaskId(2), first),
+            reg.redeem_fd_delegation(ProcessId(2), first),
             Err(Errno::NotFound)
         );
         // With nothing pending, granting the same file again mints anew.
-        let renewed = reg.mint_fd_delegation(TaskId(2), file, OpenFlags::READ);
+        let renewed = reg.mint_fd_delegation(ProcessId(2), file, OpenFlags::READ);
         assert_ne!(renewed, first);
     }
 
     #[test]
     fn reused_task_id_starts_from_an_empty_grant_set() {
         let mut reg = AddressSpaceRegistry::new();
-        let old = reg.mint_grant(TaskId(5), window());
-        assert!(reg.withdraw(TaskId(5)));
+        let old = reg.mint_grant(ProcessId(5), window());
+        assert!(reg.withdraw(ProcessId(5)));
         // A new task reusing the id mints from handle 1 again and never
         // inherits the dead task's grant.
-        let fresh = reg.mint_grant(TaskId(5), HwResource::mmio(0x3F20_0000, 0x1000));
+        let fresh = reg.mint_grant(ProcessId(5), HwResource::mmio(0x3F20_0000, 0x1000));
         assert_eq!(fresh, 1);
         assert_eq!(old, 1);
         assert_eq!(
-            reg.grant(TaskId(5), fresh),
+            reg.grant(ProcessId(5), fresh),
             Some(HwResource::mmio(0x3F20_0000, 0x1000))
         );
     }
@@ -2731,12 +2827,16 @@ mod tests {
     fn first_opened_descriptor_is_the_first_number_after_the_standard_streams() {
         let mut reg = AddressSpaceRegistry::new();
         let fd = reg
-            .open_file(TaskId(2), String::from("/System/Logs/a"), OpenFlags::READ)
+            .open_file(
+                ProcessId(2),
+                String::from("/System/Logs/a"),
+                OpenFlags::READ,
+            )
             .expect("descriptor space is not exhausted");
         // fd 0..3 are the reserved standard streams; the first file handle is 4.
         assert_eq!(fd, u32::try_from(STD_STREAM_COUNT).unwrap());
         assert_eq!(
-            reg.open_file_entry(TaskId(2), fd),
+            reg.open_file_entry(ProcessId(2), fd),
             Some(OpenFile::new(
                 OpenBacking::Path(String::from("/System/Logs/a")),
                 OpenFlags::READ,
@@ -2749,26 +2849,26 @@ mod tests {
         let mut reg = AddressSpaceRegistry::new();
         // A file takes the first descriptor after the standard streams.
         let file = reg
-            .open_file(TaskId(2), String::from("/Storage/x"), OpenFlags::READ)
+            .open_file(ProcessId(2), String::from("/Storage/x"), OpenFlags::READ)
             .expect("fits");
         // A resource open draws the *next* number from the same allocator, so
         // a resource fd can never collide with a file fd.
         let res = reg
-            .open_resource(TaskId(2), ResourceBacking::Random, OpenFlags::READ)
+            .open_resource(ProcessId(2), ResourceBacking::Random, OpenFlags::READ)
             .expect("fits");
         assert_eq!((file, res), (4, 5));
         assert_eq!(
-            reg.open_file_entry(TaskId(2), res).map(|f| f.backing),
+            reg.open_file_entry(ProcessId(2), res).map(|f| f.backing),
             Some(OpenBacking::Resource(ResourceBacking::Random))
         );
         // The resource handle exposes its resource, not a path.
         assert_eq!(
-            reg.open_file_entry(TaskId(2), res)
+            reg.open_file_entry(ProcessId(2), res)
                 .and_then(|f| f.resource()),
             Some(ResourceBacking::Random)
         );
         assert_eq!(
-            reg.open_file_entry(TaskId(2), res)
+            reg.open_file_entry(ProcessId(2), res)
                 .and_then(|f| f.path().map(String::from)),
             None
         );
@@ -2777,22 +2877,22 @@ mod tests {
     #[test]
     fn an_unopened_descriptor_resolves_to_none() {
         let reg = AddressSpaceRegistry::new();
-        assert_eq!(reg.open_file_entry(TaskId(9), 4), None);
+        assert_eq!(reg.open_file_entry(ProcessId(9), 4), None);
         // A standard-stream number is never recorded in the open-file table.
-        assert_eq!(reg.open_file_entry(TaskId(9), 0), None);
+        assert_eq!(reg.open_file_entry(ProcessId(9), 0), None);
     }
 
     #[test]
     fn open_descriptor_is_owner_bound_against_forgery() {
         let mut reg = AddressSpaceRegistry::new();
         let fd = reg
-            .open_file(TaskId(2), String::from("/Storage/x"), OpenFlags::READ)
+            .open_file(ProcessId(2), String::from("/Storage/x"), OpenFlags::READ)
             .expect("fits");
         // A *different* task passing the same number reaches nothing — one
         // process cannot read another's open file by guessing the descriptor.
-        assert_eq!(reg.open_file_entry(TaskId(3), fd), None);
+        assert_eq!(reg.open_file_entry(ProcessId(3), fd), None);
         assert_eq!(
-            reg.open_file_entry(TaskId(2), fd)
+            reg.open_file_entry(ProcessId(2), fd)
                 .and_then(|f| f.path().map(String::from)),
             Some(String::from("/Storage/x"))
         );
@@ -2802,34 +2902,34 @@ mod tests {
     fn closing_a_descriptor_frees_it_and_close_is_idempotent() {
         let mut reg = AddressSpaceRegistry::new();
         let fd = reg
-            .open_file(TaskId(2), String::from("/Storage/x"), OpenFlags::READ)
+            .open_file(ProcessId(2), String::from("/Storage/x"), OpenFlags::READ)
             .expect("fits");
-        assert!(reg.close_file(TaskId(2), fd));
-        assert_eq!(reg.open_file_entry(TaskId(2), fd), None);
+        assert!(reg.close_file(ProcessId(2), fd));
+        assert_eq!(reg.open_file_entry(ProcessId(2), fd), None);
         // Closing again, or closing an unopened number, is a fail-closed no-op.
-        assert!(!reg.close_file(TaskId(2), fd));
-        assert!(!reg.close_file(TaskId(2), 999));
+        assert!(!reg.close_file(ProcessId(2), fd));
+        assert!(!reg.close_file(ProcessId(2), 999));
         // Closing another task's descriptor number is refused.
-        assert!(!reg.close_file(TaskId(3), fd));
+        assert!(!reg.close_file(ProcessId(3), fd));
     }
 
     #[test]
     fn the_lowest_free_descriptor_is_reused_after_a_close() {
         let mut reg = AddressSpaceRegistry::new();
         let a = reg
-            .open_file(TaskId(2), String::from("/a"), OpenFlags::READ)
+            .open_file(ProcessId(2), String::from("/a"), OpenFlags::READ)
             .expect("fits");
         let b = reg
-            .open_file(TaskId(2), String::from("/b"), OpenFlags::READ)
+            .open_file(ProcessId(2), String::from("/b"), OpenFlags::READ)
             .expect("fits");
         let c = reg
-            .open_file(TaskId(2), String::from("/c"), OpenFlags::READ)
+            .open_file(ProcessId(2), String::from("/c"), OpenFlags::READ)
             .expect("fits");
         assert_eq!((a, b, c), (4, 5, 6));
         // Free the middle one; the next open reuses the lowest free number.
-        assert!(reg.close_file(TaskId(2), b));
+        assert!(reg.close_file(ProcessId(2), b));
         let reused = reg
-            .open_file(TaskId(2), String::from("/d"), OpenFlags::READ)
+            .open_file(ProcessId(2), String::from("/d"), OpenFlags::READ)
             .expect("fits");
         assert_eq!(reused, 5);
     }
@@ -2838,13 +2938,13 @@ mod tests {
     fn withdraw_reclaims_every_open_descriptor() {
         let mut reg = AddressSpaceRegistry::new();
         let fd = reg
-            .open_file(TaskId(4), String::from("/Storage/x"), OpenFlags::READ)
+            .open_file(ProcessId(4), String::from("/Storage/x"), OpenFlags::READ)
             .expect("fits");
-        assert!(reg.withdraw(TaskId(4)));
-        assert_eq!(reg.open_file_entry(TaskId(4), fd), None);
+        assert!(reg.withdraw(ProcessId(4)));
+        assert_eq!(reg.open_file_entry(ProcessId(4), fd), None);
         // A reused id starts from an empty descriptor set, back at 4.
         let fresh = reg
-            .open_file(TaskId(4), String::from("/Storage/y"), OpenFlags::READ)
+            .open_file(ProcessId(4), String::from("/Storage/y"), OpenFlags::READ)
             .expect("fits");
         assert_eq!(fresh, u32::try_from(STD_STREAM_COUNT).unwrap());
     }
@@ -2854,19 +2954,23 @@ mod tests {
     #[test]
     fn open_pipe_mints_a_read_write_pair_in_the_one_number_space() {
         let mut reg = AddressSpaceRegistry::new();
-        let (read_fd, write_fd) = reg.open_pipe(TaskId(2)).expect("pair fits");
+        let (read_fd, write_fd) = reg.open_pipe(ProcessId(2)).expect("pair fits");
         assert_eq!((read_fd, write_fd), (4, 5));
-        let read = reg.open_file_entry(TaskId(2), read_fd).expect("read end");
-        let write = reg.open_file_entry(TaskId(2), write_fd).expect("write end");
+        let read = reg
+            .open_file_entry(ProcessId(2), read_fd)
+            .expect("read end");
+        let write = reg
+            .open_file_entry(ProcessId(2), write_fd)
+            .expect("write end");
         assert!(read.flags.is_read() && !read.flags.is_write());
         assert!(write.flags.is_write() && !write.flags.is_read());
         let (read_end, write_end) = (read.pipe().expect("pipe"), write.pipe().expect("pipe"));
         assert!(read_end.same_pipe(write_end));
         // The pair is owner-bound like every descriptor.
-        assert_eq!(reg.open_file_entry(TaskId(3), read_fd), None);
+        assert_eq!(reg.open_file_entry(ProcessId(3), read_fd), None);
         // A later open draws the next number from the same allocator.
         let next = reg
-            .open_file(TaskId(2), String::from("/x"), OpenFlags::READ)
+            .open_file(ProcessId(2), String::from("/x"), OpenFlags::READ)
             .expect("fits");
         assert_eq!(next, 6);
     }
@@ -2875,12 +2979,14 @@ mod tests {
     fn closing_a_pipe_entry_releases_its_end() {
         use crate::pipe::WriteStep;
         let mut reg = AddressSpaceRegistry::new();
-        let (read_fd, write_fd) = reg.open_pipe(TaskId(2)).expect("pair fits");
-        let write = reg.open_file_entry(TaskId(2), write_fd).expect("write end");
+        let (read_fd, write_fd) = reg.open_pipe(ProcessId(2)).expect("pair fits");
+        let write = reg
+            .open_file_entry(ProcessId(2), write_fd)
+            .expect("write end");
         let write_end = write.pipe().expect("pipe").clone();
         // Dropping the read entry (close) leaves no reader: the writer
         // observes broken-pipe through the shared object.
-        assert!(reg.close_file(TaskId(2), read_fd));
+        assert!(reg.close_file(ProcessId(2), read_fd));
         assert_eq!(write_end.try_write(b"x"), WriteStep::Broken);
     }
 
@@ -2888,14 +2994,16 @@ mod tests {
     fn withdraw_releases_pipe_ends_through_the_table_drop() {
         use crate::pipe::ReadStep;
         let mut reg = AddressSpaceRegistry::new();
-        let (read_fd, _write_fd) = reg.open_pipe(TaskId(2)).expect("pair fits");
-        let read = reg.open_file_entry(TaskId(2), read_fd).expect("read end");
+        let (read_fd, _write_fd) = reg.open_pipe(ProcessId(2)).expect("pair fits");
+        let read = reg
+            .open_file_entry(ProcessId(2), read_fd)
+            .expect("read end");
         let read_end = read.pipe().expect("pipe").clone();
         // Task exit: the whole table drops, closing the write end, so the
         // surviving reader observes end-of-stream (nothing leaks).
-        reg.register(TaskId(2), user_space(1, 7), sim())
+        reg.register(ProcessId(2), user_space(1, 7), sim())
             .expect("register");
-        assert!(reg.withdraw(TaskId(2)));
+        assert!(reg.withdraw(ProcessId(2)));
         assert_eq!(read_end.try_read(&mut [0u8; 4]), ReadStep::Eof);
     }
 
@@ -2903,11 +3011,14 @@ mod tests {
     fn install_std_entry_accepts_only_standard_slots() {
         let mut reg = AddressSpaceRegistry::new();
         let entry = OpenFile::new(OpenBacking::Path(String::from("/log")), OpenFlags::WRITE);
-        assert_eq!(reg.install_std_entry(TaskId(2), 1, entry.clone()), Ok(()));
-        assert_eq!(reg.open_file_entry(TaskId(2), 1), Some(entry.clone()));
+        assert_eq!(
+            reg.install_std_entry(ProcessId(2), 1, entry.clone()),
+            Ok(())
+        );
+        assert_eq!(reg.open_file_entry(ProcessId(2), 1), Some(entry.clone()));
         // The reserved standard range is the only installable space.
         assert_eq!(
-            reg.install_std_entry(TaskId(2), 4, entry),
+            reg.install_std_entry(ProcessId(2), 4, entry),
             Err(Errno::OutOfRange)
         );
     }
@@ -2933,42 +3044,42 @@ mod tests {
     #[test]
     fn a_task_with_no_mapping_has_zero_mapped_anon_bytes() {
         let reg = AddressSpaceRegistry::new();
-        assert_eq!(reg.mapped_aspace_bytes(TaskId(2)), 0);
+        assert_eq!(reg.mapped_aspace_bytes(ProcessId(2)), 0);
     }
 
     #[test]
     fn charge_then_credit_tracks_the_running_total() {
         let mut reg = AddressSpaceRegistry::new();
-        reg.charge_aspace_bytes(TaskId(2), 0x4000);
-        assert_eq!(reg.mapped_aspace_bytes(TaskId(2)), 0x4000);
+        reg.charge_aspace_bytes(ProcessId(2), 0x4000);
+        assert_eq!(reg.mapped_aspace_bytes(ProcessId(2)), 0x4000);
         // A second map accrues onto the existing total.
-        reg.charge_aspace_bytes(TaskId(2), 0x1000);
-        assert_eq!(reg.mapped_aspace_bytes(TaskId(2)), 0x5000);
+        reg.charge_aspace_bytes(ProcessId(2), 0x1000);
+        assert_eq!(reg.mapped_aspace_bytes(ProcessId(2)), 0x5000);
         // Freeing one region credits it back.
-        reg.credit_aspace_bytes(TaskId(2), 0x1000);
-        assert_eq!(reg.mapped_aspace_bytes(TaskId(2)), 0x4000);
+        reg.credit_aspace_bytes(ProcessId(2), 0x1000);
+        assert_eq!(reg.mapped_aspace_bytes(ProcessId(2)), 0x4000);
     }
 
     #[test]
     fn credit_saturates_at_zero_and_drops_the_entry() {
         let mut reg = AddressSpaceRegistry::new();
-        reg.charge_aspace_bytes(TaskId(2), 0x2000);
+        reg.charge_aspace_bytes(ProcessId(2), 0x2000);
         // Crediting more than is charged can never underflow into a bogus
         // huge total that would wrongly deny later maps.
-        reg.credit_aspace_bytes(TaskId(2), 0x9000);
-        assert_eq!(reg.mapped_aspace_bytes(TaskId(2)), 0);
+        reg.credit_aspace_bytes(ProcessId(2), 0x9000);
+        assert_eq!(reg.mapped_aspace_bytes(ProcessId(2)), 0);
         // Crediting a task that holds nothing is a no-op.
-        reg.credit_aspace_bytes(TaskId(3), 0x1000);
-        assert_eq!(reg.mapped_aspace_bytes(TaskId(3)), 0);
+        reg.credit_aspace_bytes(ProcessId(3), 0x1000);
+        assert_eq!(reg.mapped_aspace_bytes(ProcessId(3)), 0);
     }
 
     #[test]
     fn withdraw_drops_anon_accounting_so_a_reused_id_starts_clean() {
         let mut reg = AddressSpaceRegistry::new();
-        reg.charge_aspace_bytes(TaskId(4), 0x8000);
-        assert!(reg.withdraw(TaskId(4)));
+        reg.charge_aspace_bytes(ProcessId(4), 0x8000);
+        assert!(reg.withdraw(ProcessId(4)));
         // A reused id never inherits the dead task's mapped-memory total.
-        assert_eq!(reg.mapped_aspace_bytes(TaskId(4)), 0);
+        assert_eq!(reg.mapped_aspace_bytes(ProcessId(4)), 0);
     }
 
     // --- demand-paged file-mapping regions (file_map / file_unmap) --------
@@ -2987,41 +3098,41 @@ mod tests {
     #[test]
     fn file_region_exact_matches_only_the_recorded_pair_of_the_owner() {
         let mut reg = AddressSpaceRegistry::new();
-        reg.record_file_region(TaskId(2), file_region(0x10_0000, 0x4000));
+        reg.record_file_region(ProcessId(2), file_region(0x10_0000, 0x4000));
         // The exact `(base, len)` of the recording task resolves; a wrong
         // base, a wrong length, and another task's lookup all fail closed.
         assert!(reg
-            .file_region_exact(TaskId(2), 0x10_0000, 0x4000)
+            .file_region_exact(ProcessId(2), 0x10_0000, 0x4000)
             .is_some());
         assert!(reg
-            .file_region_exact(TaskId(2), 0x10_1000, 0x4000)
+            .file_region_exact(ProcessId(2), 0x10_1000, 0x4000)
             .is_none());
         assert!(reg
-            .file_region_exact(TaskId(2), 0x10_0000, 0x3000)
+            .file_region_exact(ProcessId(2), 0x10_0000, 0x3000)
             .is_none());
         assert!(reg
-            .file_region_exact(TaskId(3), 0x10_0000, 0x4000)
+            .file_region_exact(ProcessId(3), 0x10_0000, 0x4000)
             .is_none());
     }
 
     #[test]
     fn file_region_covering_resolves_only_addresses_inside_a_live_region() {
         let mut reg = AddressSpaceRegistry::new();
-        reg.record_file_region(TaskId(2), file_region(0x10_0000, 0x4000));
-        reg.record_file_region(TaskId(2), file_region(0x20_0000, 0x1000));
+        reg.record_file_region(ProcessId(2), file_region(0x10_0000, 0x4000));
+        reg.record_file_region(ProcessId(2), file_region(0x20_0000, 0x1000));
         // Base, an interior byte, and the last byte are covered.
-        assert!(reg.file_region_covering(TaskId(2), 0x10_0000).is_some());
-        assert!(reg.file_region_covering(TaskId(2), 0x10_2fff).is_some());
-        assert!(reg.file_region_covering(TaskId(2), 0x10_3fff).is_some());
+        assert!(reg.file_region_covering(ProcessId(2), 0x10_0000).is_some());
+        assert!(reg.file_region_covering(ProcessId(2), 0x10_2fff).is_some());
+        assert!(reg.file_region_covering(ProcessId(2), 0x10_3fff).is_some());
         // The exclusive top, the gap between regions, an address below every
         // region, and another task's address space are not.
-        assert!(reg.file_region_covering(TaskId(2), 0x10_4000).is_none());
-        assert!(reg.file_region_covering(TaskId(2), 0x18_0000).is_none());
-        assert!(reg.file_region_covering(TaskId(2), 0x0f_ffff).is_none());
-        assert!(reg.file_region_covering(TaskId(3), 0x10_0000).is_none());
+        assert!(reg.file_region_covering(ProcessId(2), 0x10_4000).is_none());
+        assert!(reg.file_region_covering(ProcessId(2), 0x18_0000).is_none());
+        assert!(reg.file_region_covering(ProcessId(2), 0x0f_ffff).is_none());
+        assert!(reg.file_region_covering(ProcessId(3), 0x10_0000).is_none());
         // The second region resolves independently and carries its record.
         let hit = reg
-            .file_region_covering(TaskId(2), 0x20_0abc)
+            .file_region_covering(ProcessId(2), 0x20_0abc)
             .expect("inside the second region");
         assert_eq!(hit.base, 0x20_0000);
         assert_eq!(hit.path, "/big");
@@ -3030,26 +3141,26 @@ mod tests {
     #[test]
     fn remove_file_region_returns_the_record_and_only_once() {
         let mut reg = AddressSpaceRegistry::new();
-        reg.record_file_region(TaskId(2), file_region(0x10_0000, 0x4000));
+        reg.record_file_region(ProcessId(2), file_region(0x10_0000, 0x4000));
         let removed = reg
-            .remove_file_region(TaskId(2), 0x10_0000)
+            .remove_file_region(ProcessId(2), 0x10_0000)
             .expect("recorded");
         assert_eq!(removed.len, 0x4000);
         // Gone: neither an exact lookup, a covering lookup, nor a second
         // removal can see it.
         assert!(reg
-            .file_region_exact(TaskId(2), 0x10_0000, 0x4000)
+            .file_region_exact(ProcessId(2), 0x10_0000, 0x4000)
             .is_none());
-        assert!(reg.file_region_covering(TaskId(2), 0x10_0001).is_none());
-        assert!(reg.remove_file_region(TaskId(2), 0x10_0000).is_none());
+        assert!(reg.file_region_covering(ProcessId(2), 0x10_0001).is_none());
+        assert!(reg.remove_file_region(ProcessId(2), 0x10_0000).is_none());
     }
 
     #[test]
     fn withdraw_drops_file_regions_so_a_reused_id_starts_clean() {
         let mut reg = AddressSpaceRegistry::new();
-        reg.record_file_region(TaskId(5), file_region(0x10_0000, 0x4000));
-        assert!(reg.withdraw(TaskId(5)));
-        assert!(reg.file_region_covering(TaskId(5), 0x10_0000).is_none());
+        reg.record_file_region(ProcessId(5), file_region(0x10_0000, 0x4000));
+        assert!(reg.withdraw(ProcessId(5)));
+        assert!(reg.file_region_covering(ProcessId(5), 0x10_0000).is_none());
     }
 
     // --- reserved demand-paged anonymous regions (mem_map) ----------------
@@ -3058,46 +3169,46 @@ mod tests {
     fn anon_region_covering_resolves_only_addresses_inside_a_live_region() {
         let mut reg = AddressSpaceRegistry::new();
         // A four-page region based at 0x20_0000.
-        reg.record_anon_region(TaskId(2), 0x20_0000, 4);
+        reg.record_anon_region(ProcessId(2), 0x20_0000, 4);
         // Inside the region (first byte, last byte of the fourth page).
-        assert!(reg.anon_region_covering(TaskId(2), 0x20_0000));
-        assert!(reg.anon_region_covering(TaskId(2), 0x20_0000 + 4 * 0x1000 - 1));
+        assert!(reg.anon_region_covering(ProcessId(2), 0x20_0000));
+        assert!(reg.anon_region_covering(ProcessId(2), 0x20_0000 + 4 * 0x1000 - 1));
         // One byte past the region is outside.
-        assert!(!reg.anon_region_covering(TaskId(2), 0x20_0000 + 4 * 0x1000));
+        assert!(!reg.anon_region_covering(ProcessId(2), 0x20_0000 + 4 * 0x1000));
         // Below the base and another task both resolve to nothing.
-        assert!(!reg.anon_region_covering(TaskId(2), 0x1F_FFFF));
-        assert!(!reg.anon_region_covering(TaskId(3), 0x20_0000));
+        assert!(!reg.anon_region_covering(ProcessId(2), 0x1F_FFFF));
+        assert!(!reg.anon_region_covering(ProcessId(3), 0x20_0000));
     }
 
     #[test]
     fn anon_region_exact_matches_only_the_recorded_pair_of_the_owner() {
         let mut reg = AddressSpaceRegistry::new();
-        reg.record_anon_region(TaskId(2), 0x20_0000, 4);
-        assert!(reg.anon_region_exact(TaskId(2), 0x20_0000, 4));
+        reg.record_anon_region(ProcessId(2), 0x20_0000, 4);
+        assert!(reg.anon_region_exact(ProcessId(2), 0x20_0000, 4));
         // A wrong page count, a wrong base, or another task all fail closed.
-        assert!(!reg.anon_region_exact(TaskId(2), 0x20_0000, 3));
-        assert!(!reg.anon_region_exact(TaskId(2), 0x21_0000, 4));
-        assert!(!reg.anon_region_exact(TaskId(3), 0x20_0000, 4));
+        assert!(!reg.anon_region_exact(ProcessId(2), 0x20_0000, 3));
+        assert!(!reg.anon_region_exact(ProcessId(2), 0x21_0000, 4));
+        assert!(!reg.anon_region_exact(ProcessId(3), 0x20_0000, 4));
     }
 
     #[test]
     fn remove_anon_region_returns_the_page_count_and_only_once() {
         let mut reg = AddressSpaceRegistry::new();
-        reg.record_anon_region(TaskId(2), 0x20_0000, 4);
-        assert_eq!(reg.remove_anon_region(TaskId(2), 0x20_0000), Some(4));
+        reg.record_anon_region(ProcessId(2), 0x20_0000, 4);
+        assert_eq!(reg.remove_anon_region(ProcessId(2), 0x20_0000), Some(4));
         // Gone: neither a covering lookup, an exact lookup, nor a second
         // removal can see it.
-        assert!(!reg.anon_region_covering(TaskId(2), 0x20_0000));
-        assert!(!reg.anon_region_exact(TaskId(2), 0x20_0000, 4));
-        assert_eq!(reg.remove_anon_region(TaskId(2), 0x20_0000), None);
+        assert!(!reg.anon_region_covering(ProcessId(2), 0x20_0000));
+        assert!(!reg.anon_region_exact(ProcessId(2), 0x20_0000, 4));
+        assert_eq!(reg.remove_anon_region(ProcessId(2), 0x20_0000), None);
     }
 
     #[test]
     fn withdraw_drops_anon_regions_so_a_reused_id_starts_clean() {
         let mut reg = AddressSpaceRegistry::new();
-        reg.record_anon_region(TaskId(5), 0x20_0000, 4);
-        assert!(reg.withdraw(TaskId(5)));
-        assert!(!reg.anon_region_covering(TaskId(5), 0x20_0000));
+        reg.record_anon_region(ProcessId(5), 0x20_0000, 4);
+        assert!(reg.withdraw(ProcessId(5)));
+        assert!(!reg.anon_region_covering(ProcessId(5), 0x20_0000));
     }
 
     // --- reserved user-stack spans (demand-grown stack) -------------------
@@ -3136,23 +3247,23 @@ mod tests {
     fn unrecorded_stack_span_resolves_to_none() {
         let reg = AddressSpaceRegistry::new();
         assert!(reg.stack_span(TaskId(2)).is_none());
-        assert_eq!(reg.stack_committed_bytes(TaskId(2)), 0);
+        assert_eq!(reg.stack_committed_bytes(ProcessId(2)), 0);
     }
 
     #[test]
     fn set_stack_span_then_resolve_returns_the_owners_record() {
         let mut reg = AddressSpaceRegistry::new();
-        reg.set_stack_span(TaskId(2), stack_span());
+        reg.set_stack_span(ProcessId(2), TaskId(2), stack_span());
         assert_eq!(reg.stack_span(TaskId(2)), Some(stack_span()));
         // Another task's lookup resolves nothing (fail closed).
         assert!(reg.stack_span(TaskId(3)).is_none());
-        assert_eq!(reg.stack_committed_bytes(TaskId(2)), 0x2000);
+        assert_eq!(reg.stack_committed_bytes(ProcessId(2)), 0x2000);
     }
 
     #[test]
     fn commit_stack_page_lowers_the_base_monotonically_within_the_span() {
         let mut reg = AddressSpaceRegistry::new();
-        reg.set_stack_span(TaskId(2), stack_span());
+        reg.set_stack_span(ProcessId(2), TaskId(2), stack_span());
         // A growth page lowers the committed base and grows the usage.
         reg.commit_stack_page(TaskId(2), 0x6000);
         assert_eq!(
@@ -3161,7 +3272,7 @@ mod tests {
                 .committed_base(),
             0x6000
         );
-        assert_eq!(reg.stack_committed_bytes(TaskId(2)), 0x4000);
+        assert_eq!(reg.stack_committed_bytes(ProcessId(2)), 0x4000);
         // A page at/above the base (the resident race) never raises it.
         reg.commit_stack_page(TaskId(2), 0x7000);
         reg.commit_stack_page(TaskId(2), 0x9000);
@@ -3188,36 +3299,133 @@ mod tests {
     #[test]
     fn withdraw_drops_the_stack_span_so_a_reused_id_starts_clean() {
         let mut reg = AddressSpaceRegistry::new();
-        reg.set_stack_span(TaskId(6), stack_span());
-        assert!(reg.withdraw(TaskId(6)));
+        reg.set_stack_span(ProcessId(6), TaskId(6), stack_span());
+        assert!(reg.withdraw(ProcessId(6)));
         assert!(reg.stack_span(TaskId(6)).is_none());
-        assert_eq!(reg.stack_committed_bytes(TaskId(6)), 0);
+        assert_eq!(reg.stack_committed_bytes(ProcessId(6)), 0);
+    }
+
+    /// Each thread of a process owns its own stack, and the process's
+    /// committed total is their sum — so a multi-threaded process reports its
+    /// whole stack footprint, not just its leader's.
+    #[test]
+    fn every_thread_has_its_own_stack_and_the_process_totals_them() {
+        let mut reg = AddressSpaceRegistry::new();
+        let process = ProcessId(6);
+        reg.set_stack_span(process, TaskId(6), stack_span());
+        let one_thread = reg.stack_committed_bytes(process);
+        assert!(one_thread > 0);
+
+        reg.set_stack_span(process, TaskId(70), stack_span());
+        assert_eq!(
+            reg.stack_committed_bytes(process),
+            one_thread * 2,
+            "the process total sums its threads' committed stacks",
+        );
+        // The spans themselves stay separate per thread.
+        assert!(reg.stack_span(TaskId(6)).is_some());
+        assert!(reg.stack_span(TaskId(70)).is_some());
+        assert!(reg.stack_span(TaskId(71)).is_none());
+    }
+
+    /// One thread exiting takes only its own stack record — and its share of
+    /// the total — leaving its siblings' intact.
+    #[test]
+    fn withdrawing_one_thread_leaves_its_siblings_stacks() {
+        let mut reg = AddressSpaceRegistry::new();
+        let process = ProcessId(6);
+        reg.set_stack_span(process, TaskId(6), stack_span());
+        reg.set_stack_span(process, TaskId(70), stack_span());
+        let both = reg.stack_committed_bytes(process);
+
+        assert!(reg.withdraw_thread(TaskId(70)));
+        assert!(reg.stack_span(TaskId(70)).is_none());
+        assert!(reg.stack_span(TaskId(6)).is_some());
+        assert_eq!(reg.stack_committed_bytes(process), both / 2);
+        // Idempotent: a thread torn down twice reports nothing the second time.
+        assert!(!reg.withdraw_thread(TaskId(70)));
+        assert_eq!(reg.stack_committed_bytes(process), both / 2);
+    }
+
+    /// Growing one thread's stack raises the process total by exactly the
+    /// pages committed, so the `PinnedMemoryBytes` and `StackBytes` readings
+    /// stay honest for a multi-threaded process.
+    #[test]
+    fn committing_a_page_raises_the_processes_total_by_that_page() {
+        let mut reg = AddressSpaceRegistry::new();
+        let process = ProcessId(6);
+        let span = stack_span();
+        reg.set_stack_span(process, TaskId(6), span);
+        let before = reg.stack_committed_bytes(process);
+
+        let grown_to = span.committed_base() - PAGE_SIZE as u64;
+        reg.commit_stack_page(TaskId(6), grown_to);
+        assert_eq!(
+            reg.stack_committed_bytes(process),
+            before + PAGE_SIZE as u64,
+        );
+        // A page at or above the committed base changes neither record.
+        reg.commit_stack_page(TaskId(6), span.top());
+        assert_eq!(
+            reg.stack_committed_bytes(process),
+            before + PAGE_SIZE as u64,
+        );
+    }
+
+    /// The two teardown scopes are distinct: withdrawing a thread releases
+    /// only that thread's records, while the process's own state — the
+    /// address space its siblings are still running in — survives until the
+    /// process itself is withdrawn.
+    #[test]
+    fn thread_teardown_and_process_teardown_release_different_state() {
+        let mut reg = AddressSpaceRegistry::new();
+        let process = ProcessId(6);
+        reg.register(process, user_space(1, 6), sim()).unwrap();
+        reg.set_load_base(process, 0x20_0000);
+        reg.set_stack_span(process, TaskId(6), stack_span());
+        reg.set_stack_span(process, TaskId(70), stack_span());
+
+        // A thread exits: its stack goes, the process's address space stays —
+        // its sibling is still executing in it.
+        assert!(reg.withdraw_thread(TaskId(70)));
+        assert!(reg.stack_span(TaskId(70)).is_none());
+        assert!(reg.resolve(process).is_some());
+        assert_eq!(reg.load_base(process), Some(0x20_0000));
+        assert!(reg.contains(process));
+
+        // The process exits: everything goes, including the leader's own
+        // per-thread records, so a reused id inherits nothing.
+        assert!(reg.withdraw(process));
+        assert!(reg.stack_span(TaskId(6)).is_none());
+        assert!(reg.resolve(process).is_none());
+        assert!(reg.load_base(process).is_none());
+        assert_eq!(reg.stale_task_entry(process), None);
     }
 
     #[test]
     fn unrecorded_load_base_resolves_to_none() {
         let reg = AddressSpaceRegistry::new();
-        assert!(reg.load_base(TaskId(2)).is_none());
+        assert!(reg.load_base(ProcessId(2)).is_none());
     }
 
     #[test]
     fn set_load_base_then_resolve_returns_the_owners_base() {
         let mut reg = AddressSpaceRegistry::new();
-        reg.set_load_base(TaskId(2), 0x20_0000);
-        assert_eq!(reg.load_base(TaskId(2)), Some(0x20_0000));
+        reg.set_load_base(ProcessId(2), 0x20_0000);
+        assert_eq!(reg.load_base(ProcessId(2)), Some(0x20_0000));
         // Keyed by the owning task; a different id has no base.
-        assert!(reg.load_base(TaskId(3)).is_none());
+        assert!(reg.load_base(ProcessId(3)).is_none());
         // Replacing is permitted (a reused id re-admitted at a new base).
-        reg.set_load_base(TaskId(2), 0x40_0000);
-        assert_eq!(reg.load_base(TaskId(2)), Some(0x40_0000));
+        reg.set_load_base(ProcessId(2), 0x40_0000);
+        assert_eq!(reg.load_base(ProcessId(2)), Some(0x40_0000));
     }
 
     #[test]
     fn withdraw_drops_the_load_base_so_a_reused_id_starts_clean() {
         let mut reg = AddressSpaceRegistry::new();
-        reg.set_load_base(TaskId(6), 0x20_0000);
-        assert!(reg.withdraw(TaskId(6)));
-        assert!(reg.load_base(TaskId(6)).is_none());
+        reg.set_load_base(ProcessId(6), 0x20_0000);
+        assert!(reg.withdraw(ProcessId(6)));
+        assert!(reg.load_base(ProcessId(6)).is_none());
     }
 
     #[test]
@@ -3252,16 +3460,16 @@ mod tests {
         let reg = AddressSpaceRegistry::new();
         // Anywhere in the first page, offset measured from VA 0.
         assert_eq!(
-            reg.classify_fault_locality(TaskId(2), 0),
+            reg.classify_fault_locality(ProcessId(2), TaskId(2), 0),
             FaultLocality::NullPage { offset: 0 }
         );
         assert_eq!(
-            reg.classify_fault_locality(TaskId(2), 0x18),
+            reg.classify_fault_locality(ProcessId(2), TaskId(2), 0x18),
             FaultLocality::NullPage { offset: 0x18 }
         );
         // The very first byte of the second page is no longer the null page.
         assert_ne!(
-            reg.classify_fault_locality(TaskId(2), PAGE_SIZE as u64)
+            reg.classify_fault_locality(ProcessId(2), TaskId(2), PAGE_SIZE as u64)
                 .bucket(),
             "null_page"
         );
@@ -3275,17 +3483,18 @@ mod tests {
         let reserve_base = 0x20_0000u64;
         let span = StackSpan::new(reserve_base, reserve_base + 0x4000, reserve_base + 0x8000)
             .expect("well-formed");
-        reg.set_stack_span(TaskId(2), span);
+        reg.set_stack_span(ProcessId(2), TaskId(2), span);
         // A fault a little below the reserve base is an overflow that ran
         // past the guard page.
         assert_eq!(
-            reg.classify_fault_locality(TaskId(2), reserve_base - 0x40),
+            reg.classify_fault_locality(ProcessId(2), TaskId(2), reserve_base - 0x40),
             FaultLocality::BelowStackGuard { distance: 0x40 }
         );
         // Far below the reserve base (past the window) is genuinely wild,
         // not attributed to the stack.
         assert_eq!(
             reg.classify_fault_locality(
+                ProcessId(2),
                 TaskId(2),
                 reserve_base - (NEAR_REGION_WINDOW + PAGE_SIZE as u64)
             ),
@@ -3298,19 +3507,23 @@ mod tests {
         let mut reg = AddressSpaceRegistry::new();
         // A file region [0x10_0000, 0x10_4000): a small run past its end
         // is reported as a region-relative offset, the region unnamed.
-        reg.record_file_region(TaskId(2), file_region(0x10_0000, 0x4000));
+        reg.record_file_region(ProcessId(2), file_region(0x10_0000, 0x4000));
         assert_eq!(
-            reg.classify_fault_locality(TaskId(2), 0x10_4000 + 0x40),
+            reg.classify_fault_locality(ProcessId(2), TaskId(2), 0x10_4000 + 0x40),
             FaultLocality::PastRegion { offset: 0x40 }
         );
         // One byte past the end is offset 0.
         assert_eq!(
-            reg.classify_fault_locality(TaskId(2), 0x10_4000),
+            reg.classify_fault_locality(ProcessId(2), TaskId(2), 0x10_4000),
             FaultLocality::PastRegion { offset: 0 }
         );
         // Far past the region (beyond the window) is wild.
         assert_eq!(
-            reg.classify_fault_locality(TaskId(2), 0x10_4000 + NEAR_REGION_WINDOW + 1),
+            reg.classify_fault_locality(
+                ProcessId(2),
+                TaskId(2),
+                0x10_4000 + NEAR_REGION_WINDOW + 1
+            ),
             FaultLocality::Wild
         );
         // A fault inside the live region is not a run *past* it — it is a
@@ -3318,7 +3531,7 @@ mod tests {
         // the locality is the honest `InRegion`, never the scaremongering
         // `wild` (which is reserved for addresses outside every mapping).
         assert_eq!(
-            reg.classify_fault_locality(TaskId(2), 0x10_2000),
+            reg.classify_fault_locality(ProcessId(2), TaskId(2), 0x10_2000),
             FaultLocality::InRegion
         );
     }
@@ -3330,8 +3543,8 @@ mod tests {
         // it that the resolver could not back (frame exhaustion) is a
         // deterministic OOM, reported as `in_region` with no leaked offset —
         // not `wild`, which would falsely read as a stray pointer.
-        reg.record_anon_region(TaskId(2), 0x20_0000, 4);
-        let locality = reg.classify_fault_locality(TaskId(2), 0x20_2000);
+        reg.record_anon_region(ProcessId(2), 0x20_0000, 4);
+        let locality = reg.classify_fault_locality(ProcessId(2), TaskId(2), 0x20_2000);
         assert_eq!(locality, FaultLocality::InRegion);
         assert_eq!(locality.bucket(), "in_region");
         assert_eq!(locality.offset(), None, "in-region OOM leaks no offset");
@@ -3343,10 +3556,10 @@ mod tests {
         // Two regions and an anonymous mapping; the nearest end at or below
         // the fault wins, so the reported offset is the smallest true
         // distance.
-        reg.record_file_region(TaskId(2), file_region(0x10_0000, 0x4000)); // end 0x104000
-        reg.record_anon_region(TaskId(2), 0x20_0000, 4); // end 0x204000
+        reg.record_file_region(ProcessId(2), file_region(0x10_0000, 0x4000)); // end 0x104000
+        reg.record_anon_region(ProcessId(2), 0x20_0000, 4); // end 0x204000
         assert_eq!(
-            reg.classify_fault_locality(TaskId(2), 0x20_4000 + 0x10),
+            reg.classify_fault_locality(ProcessId(2), TaskId(2), 0x20_4000 + 0x10),
             FaultLocality::PastRegion { offset: 0x10 }
         );
     }
@@ -3355,7 +3568,7 @@ mod tests {
     fn classify_fault_locality_is_wild_with_no_regions() {
         let reg = AddressSpaceRegistry::new();
         assert_eq!(
-            reg.classify_fault_locality(TaskId(2), 0x9999_0000),
+            reg.classify_fault_locality(ProcessId(2), TaskId(2), 0x9999_0000),
             FaultLocality::Wild
         );
     }

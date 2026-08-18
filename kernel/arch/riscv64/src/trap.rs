@@ -44,9 +44,10 @@ use core::sync::atomic::{AtomicUsize, Ordering};
 /// `tairix_riscv64_trap_vector` before it calls the Rust handler, laid
 /// out to match the store/load offsets in `trap.s` exactly.
 ///
-/// The asm reserves a 160-byte frame and stores `ra`, `t0`–`t6`,
-/// `a0`–`a7`, then `sepc`, `sstatus`, and the interrupted `sp` at the
-/// byte offsets the field order below reproduces. The Rust handler
+/// The asm reserves a [`TRAP_FRAME_BYTES`]-byte frame and stores `ra`,
+/// `t0`–`t6`, `a0`–`a7`, the callee-saved set, then `sepc`, `sstatus`, the
+/// interrupted `sp`, and the interrupted `tp` at the byte offsets the field
+/// order below reproduces. The Rust handler
 /// receives a `*mut TrapFrame` (the saved-frame `sp`) so it can read the
 /// user's `ecall` arguments from `a0`–`a7`, write the return value back
 /// into `a0`, and advance the saved [`TrapFrame::sepc`] past the `ecall`
@@ -126,7 +127,59 @@ pub struct TrapFrame {
     /// U-mode (restored before `sret`), or the kernel `sp` for a nested
     /// S-mode trap (unused on the S-return path).
     pub user_sp: u64,
+    /// Saved interrupted thread pointer (`tp`, x4): the *user's* own value
+    /// for a trap from U-mode, or this hart's kernel `tp` for a nested
+    /// S-mode trap.
+    ///
+    /// `tp` is both the RISC-V psABI thread pointer U-mode code may write
+    /// freely and this port's per-hart kernel anchor
+    /// ([`crate::smp::current_hartid`]), so the vector spills the
+    /// interrupted value here and reloads the kernel's from the task's trap
+    /// anchor before the handler runs. Making it frame-resident is what lets
+    /// U-mode keep a thread pointer of its own across every trap and every
+    /// context switch: the frame lives on the trapping task's *own* kernel
+    /// stack, so the value is per-task by construction.
+    pub user_tp: u64,
 }
+
+/// Byte size of the per-trap frame `trap.s` reserves — the value of its
+/// `TRAP_FRAME_SIZE` `.equ`.
+///
+/// Equal to [`size_of::<TrapFrame>()`](core::mem::size_of) and a multiple of
+/// the riscv64 ABI's 16-byte stack alignment. `trap_layout_tests.rs` parses
+/// the `.equ` out of `trap.s` and compares it here, so the asm and the Rust
+/// view cannot drift.
+pub const TRAP_FRAME_BYTES: u64 = 256;
+
+/// Byte width of the per-task **trap anchor** `sscratch` points at while a
+/// task runs in U-mode — the value of `trap.s`'s `TRAP_ANCHOR_BYTES` `.equ`.
+///
+/// The anchor is a kernel-only region at the top of a task's kernel-stack
+/// window whose first word ([`TRAP_ANCHOR_KTP_OFFSET`]) holds the kernel `tp`
+/// of the hart the task is running on; the trap frame is built immediately
+/// below it, so the width is the ABI's 16-byte stack alignment rather than
+/// the single word it stores.
+///
+/// Both arming sites — [`crate::userentry`]'s entry sequence and the
+/// vector's U-return path — publish the running hart's kernel `tp` into the
+/// anchor before arming `sscratch`, which is what stops a U-mode-written `tp`
+/// from ever reaching the kernel's per-CPU resolution.
+pub const TRAP_ANCHOR_BYTES: u64 = 16;
+
+/// Offset within the trap anchor of the hart's kernel `tp` — the value of
+/// `trap.s`'s `OFF_ANCHOR_KTP` `.equ`.
+pub const TRAP_ANCHOR_KTP_OFFSET: u64 = 0;
+
+/// The riscv64 ABI stack alignment every frame and anchor bound respects.
+const STACK_ALIGN: u64 = 16;
+
+// The frame is built immediately below the anchor, so an anchor width that is
+// not a multiple of the ABI alignment would misalign every trap frame, and a
+// kernel `tp` word that did not fit inside the anchor would be written into the
+// frame the vector is about to build.
+const _: () = assert!(TRAP_FRAME_BYTES.is_multiple_of(STACK_ALIGN));
+const _: () = assert!(TRAP_ANCHOR_BYTES.is_multiple_of(STACK_ALIGN));
+const _: () = assert!(TRAP_ANCHOR_KTP_OFFSET + 8 <= TRAP_ANCHOR_BYTES);
 
 /// `scause` bit set when the trap is an interrupt (cleared for a
 /// synchronous exception). The remaining bits hold the cause code.
@@ -707,6 +760,13 @@ unsafe fn fatal_exception(scause: u64, frame: *const TrapFrame) -> ! {
 #[cfg(test)]
 #[path = "sret_tests.rs"]
 mod sret_tests;
+
+/// The trap-frame / trap-anchor layout and the `tp` discipline, pinned
+/// against `trap.s` itself so the assembly and this module's view of it
+/// cannot drift.
+#[cfg(test)]
+#[path = "trap_layout_tests.rs"]
+mod trap_layout_tests;
 
 #[cfg(test)]
 mod tests {

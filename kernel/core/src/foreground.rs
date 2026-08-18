@@ -34,7 +34,7 @@
 use core::sync::atomic::{AtomicU64, Ordering};
 
 use tairix_abi::Errno;
-use tairix_kernel_sec::TaskId;
+use tairix_kernel_sec::ProcessId;
 use tairix_sync::SpinLock;
 
 /// The [`ForegroundOwnership`] sentinel for "no foreground owner".
@@ -93,7 +93,7 @@ impl ForegroundOwnership {
     ///
     /// [`Errno::NotForeground`] when another task's ownership is in place and
     /// `caller` is neither its granter nor the owner.
-    pub fn grant(&self, caller: TaskId, owner: TaskId) -> Result<(), Errno> {
+    pub fn grant(&self, caller: ProcessId, owner: ProcessId) -> Result<(), Errno> {
         let _guard = self.lock.lock();
         let current = self.owner.load(Ordering::Acquire);
         let permitted = current == FOREGROUND_NONE
@@ -121,7 +121,7 @@ impl ForegroundOwnership {
     ///
     /// [`Errno::NotForeground`] when another task's ownership is in place and
     /// `caller` is neither its granter nor the owner.
-    pub fn release(&self, caller: TaskId) -> Result<(), Errno> {
+    pub fn release(&self, caller: ProcessId) -> Result<(), Errno> {
         let _guard = self.lock.lock();
         let current = self.owner.load(Ordering::Acquire);
         if current == FOREGROUND_NONE {
@@ -142,7 +142,7 @@ impl ForegroundOwnership {
     /// never wedged behind a task that can no longer read it. Task ids are never
     /// reused, so clearing on a proven-dead owner can never displace a live one.
     /// A slot naming any other task is left untouched (idempotent).
-    pub fn clear_dead(&self, dead: TaskId) {
+    pub fn clear_dead(&self, dead: ProcessId) {
         let _guard = self.lock.lock();
         if self.owner.load(Ordering::Acquire) == dead.0 {
             self.owner.store(FOREGROUND_NONE, Ordering::Release);
@@ -154,10 +154,10 @@ impl ForegroundOwnership {
     ///
     /// A single lock-free atomic load, safe to call from an interrupt handler.
     #[must_use]
-    pub fn current(&self) -> Option<TaskId> {
+    pub fn current(&self) -> Option<ProcessId> {
         match self.owner.load(Ordering::Acquire) {
             FOREGROUND_NONE => None,
-            raw => Some(TaskId(raw)),
+            raw => Some(ProcessId(raw)),
         }
     }
 }
@@ -166,8 +166,8 @@ impl ForegroundOwnership {
 mod tests {
     use super::*;
 
-    fn tid(n: u64) -> TaskId {
-        TaskId(n)
+    fn pid(n: u64) -> ProcessId {
+        ProcessId(n)
     }
 
     #[test]
@@ -179,75 +179,75 @@ mod tests {
     #[test]
     fn granting_an_unowned_terminal_records_owner_and_granter() {
         let fg = ForegroundOwnership::new();
-        assert_eq!(fg.grant(tid(1), tid(2)), Ok(()));
-        assert_eq!(fg.current(), Some(tid(2)));
+        assert_eq!(fg.grant(pid(1), pid(2)), Ok(()));
+        assert_eq!(fg.current(), Some(pid(2)));
     }
 
     #[test]
     fn the_granter_can_retarget_between_its_children() {
         let fg = ForegroundOwnership::new();
-        assert_eq!(fg.grant(tid(1), tid(2)), Ok(()));
+        assert_eq!(fg.grant(pid(1), pid(2)), Ok(()));
         // The same granter re-targets to another child.
-        assert_eq!(fg.grant(tid(1), tid(3)), Ok(()));
-        assert_eq!(fg.current(), Some(tid(3)));
+        assert_eq!(fg.grant(pid(1), pid(3)), Ok(()));
+        assert_eq!(fg.current(), Some(pid(3)));
     }
 
     #[test]
     fn the_owner_can_delegate_onward() {
         let fg = ForegroundOwnership::new();
-        assert_eq!(fg.grant(tid(1), tid(2)), Ok(()));
+        assert_eq!(fg.grant(pid(1), pid(2)), Ok(()));
         // The owner (2) delegates to its own child (4); 2 becomes the granter.
-        assert_eq!(fg.grant(tid(2), tid(4)), Ok(()));
-        assert_eq!(fg.current(), Some(tid(4)));
+        assert_eq!(fg.grant(pid(2), pid(4)), Ok(()));
+        assert_eq!(fg.current(), Some(pid(4)));
         // …and can re-target as the granter now.
-        assert_eq!(fg.grant(tid(2), tid(5)), Ok(()));
-        assert_eq!(fg.current(), Some(tid(5)));
+        assert_eq!(fg.grant(pid(2), pid(5)), Ok(()));
+        assert_eq!(fg.current(), Some(pid(5)));
     }
 
     #[test]
     fn a_bystander_cannot_take_or_retarget_the_ownership() {
         let fg = ForegroundOwnership::new();
-        assert_eq!(fg.grant(tid(1), tid(2)), Ok(()));
-        assert_eq!(fg.grant(tid(9), tid(9)), Err(Errno::NotForeground));
-        assert_eq!(fg.current(), Some(tid(2)));
+        assert_eq!(fg.grant(pid(1), pid(2)), Ok(()));
+        assert_eq!(fg.grant(pid(9), pid(9)), Err(Errno::NotForeground));
+        assert_eq!(fg.current(), Some(pid(2)));
     }
 
     #[test]
     fn a_bystander_cannot_release_the_ownership() {
         let fg = ForegroundOwnership::new();
-        assert_eq!(fg.grant(tid(1), tid(2)), Ok(()));
-        assert_eq!(fg.release(tid(9)), Err(Errno::NotForeground));
-        assert_eq!(fg.current(), Some(tid(2)));
+        assert_eq!(fg.grant(pid(1), pid(2)), Ok(()));
+        assert_eq!(fg.release(pid(9)), Err(Errno::NotForeground));
+        assert_eq!(fg.current(), Some(pid(2)));
     }
 
     #[test]
     fn the_owner_and_the_granter_can_each_release() {
         let fg = ForegroundOwnership::new();
-        assert_eq!(fg.grant(tid(1), tid(2)), Ok(()));
-        assert_eq!(fg.release(tid(2)), Ok(()));
+        assert_eq!(fg.grant(pid(1), pid(2)), Ok(()));
+        assert_eq!(fg.release(pid(2)), Ok(()));
         assert_eq!(fg.current(), None);
 
-        assert_eq!(fg.grant(tid(1), tid(2)), Ok(()));
-        assert_eq!(fg.release(tid(1)), Ok(()));
+        assert_eq!(fg.grant(pid(1), pid(2)), Ok(()));
+        assert_eq!(fg.release(pid(1)), Ok(()));
         assert_eq!(fg.current(), None);
     }
 
     #[test]
     fn releasing_an_unowned_terminal_is_an_idempotent_success() {
         let fg = ForegroundOwnership::new();
-        assert_eq!(fg.release(tid(9)), Ok(()));
+        assert_eq!(fg.release(pid(9)), Ok(()));
         assert_eq!(fg.current(), None);
     }
 
     #[test]
     fn clear_dead_clears_only_the_matching_owner() {
         let fg = ForegroundOwnership::new();
-        assert_eq!(fg.grant(tid(1), tid(7)), Ok(()));
+        assert_eq!(fg.grant(pid(1), pid(7)), Ok(()));
         // A different task ending leaves the slot untouched.
-        fg.clear_dead(tid(9));
-        assert_eq!(fg.current(), Some(tid(7)));
+        fg.clear_dead(pid(9));
+        assert_eq!(fg.current(), Some(pid(7)));
         // The owner ending clears it.
-        fg.clear_dead(tid(7));
+        fg.clear_dead(pid(7));
         assert_eq!(fg.current(), None);
     }
 }

@@ -111,7 +111,7 @@ mod kernel {
     use tairix_kernel_ipc::PortRegistry;
     use tairix_kernel_irq::{IrqTable, UnsupportedController};
     use tairix_kernel_sched_cfq::{Priority, Scheduler, SchedulerConfig, TaskAction};
-    use tairix_kernel_sec::{CapTable, TaskCapabilities, TaskId as SecTaskId, UserId};
+    use tairix_kernel_sec::{CapTable, ProcessId, TaskCapabilities, TaskId as SecTaskId, UserId};
     use tairix_kernel_syscall::{CallerContext, Dispatcher, RawArgs};
     use tairix_log::{Event, EventId, Sink};
     use tairix_sync::RwLock;
@@ -303,13 +303,13 @@ mod kernel {
         let mut grant = CapabilitySet::empty();
         grant.insert(CapabilityId::TIME_SET);
         let task_caps =
-            TaskCapabilities::derive(SecTaskId(task_id), UserId(1000), grant, grant, &INNER_SINK);
+            TaskCapabilities::derive(ProcessId(task_id), UserId(1000), grant, grant, &INNER_SINK);
         let cap_table = RwLock::new(CapTable::new());
         // Insert a record using the same grant so `KernelSyscallHandlers::exit`
         // — which calls `CapTable::remove(task_id)` before
         // `Scheduler::exit` — sees a real entry to evict.
         let table_record =
-            TaskCapabilities::derive(SecTaskId(task_id), UserId(1000), grant, grant, &INNER_SINK);
+            TaskCapabilities::derive(ProcessId(task_id), UserId(1000), grant, grant, &INNER_SINK);
         let _ = cap_table.write().insert(table_record);
 
         // 5. Synthesised handlers + dispatcher. The dispatcher and the

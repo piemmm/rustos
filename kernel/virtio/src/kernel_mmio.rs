@@ -127,7 +127,7 @@ mod tests {
     use tairix_abi::CapabilityId;
     use tairix_caps::CapabilitySet;
     use tairix_kernel_mem::{AddressSpace, HostPageTable, PhysAddr, SimPhysMap, VirtAddr};
-    use tairix_kernel_sec::captable::{TaskCapabilities, TaskId};
+    use tairix_kernel_sec::captable::{ProcessId, TaskCapabilities};
     use tairix_kernel_sec::identity::UserId;
     use tairix_log::{Event, Sink};
 
@@ -174,7 +174,7 @@ mod tests {
         for c in caps {
             set.insert(*c);
         }
-        TaskCapabilities::derive(TaskId(7), UserId(1000), set, set, sink)
+        TaskCapabilities::derive(ProcessId(7), UserId(1000), set, set, sink)
     }
 
     #[test]

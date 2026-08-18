@@ -10,7 +10,7 @@ extern crate alloc;
 
 use super::*;
 use crate::audit::RecordingSink;
-use crate::captable::{TaskCapabilities, TaskId};
+use crate::captable::{ProcessId, TaskCapabilities};
 use crate::identity::UserId;
 use tairix_abi::CapabilityId;
 use tairix_caps::CapabilitySet;
@@ -31,7 +31,13 @@ fn caps_of(items: &[CapabilityId]) -> CapabilitySet {
 fn task_with(caps: &[CapabilityId], sink: &RecordingSink) -> TaskCapabilities {
     let user_grant = caps_of(caps);
     let manifest_request = user_grant;
-    TaskCapabilities::derive(TaskId(42), UserId(1000), user_grant, manifest_request, sink)
+    TaskCapabilities::derive(
+        ProcessId(42),
+        UserId(1000),
+        user_grant,
+        manifest_request,
+        sink,
+    )
 }
 
 fn small_map(usable_pages: usize) -> BootMemoryMap {

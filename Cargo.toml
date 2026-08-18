@@ -290,6 +290,8 @@ members = [
     "tests/integration/spawn_program_qemu_riscv64",
     "tests/integration/spawn_program_qemu_aarch64",
     "tests/integration/spawn_program_qemu_x86_64",
+    "tests/integration/tp_probe_program",
+    "tests/integration/tp_isolation_qemu_riscv64",
     "tests/integration/spawn_init_qemu_aarch64",
     "tests/integration/spawn_init_qemu_riscv64",
     "tests/integration/spawn_session_qemu_aarch64",

@@ -7472,6 +7472,27 @@ load-relative. Docs: `docs/src/architecture/fault-diagnostics.md`.
 
 ---
 
+## THREADS — lightweight threads within a process (`plans/THREADS.md`)  **[T1+T2 DONE; T3 PLANNED]**
+
+**Dependencies:** `plans/SPAWN.md` SP1–SP5 (the process model, all landed).
+
+**The gap it closes.** There is no way to run two threads over one heap: a
+program that wants concurrency must `spawn` a whole separate address space and
+talk over IPC. THREADS adds the thread-group model (done), then a futex,
+per-thread thread pointers, and the `lib/rt` thread runtime.
+
+**Staged (detail in the plan; do not duplicate it here, §13):** T1 the riscv64
+`tp`/`sscratch` trap-protocol fix (**done**, `plans/OPEN-DEFECTS.md` D43), T2
+the process/thread-group split in the kernel state model (**done**,
+behaviour-preserving: `ProcessId` in `kernel/sec` distinguishes the thread group
+from the thread throughout the kernel's state, so the compiler rejects a site
+that scopes one to the other), T3 threads end to end — syscalls 109–112 (`thread_create`, `thread_exit`,
+`futex_wait`, `futex_wake`), `LimitKind::Threads`, the per-arch TLS-register
+slices, `kernel/core`'s `threads.rs` + `futex.rs`, the `lib/rt` runtime
+(spawn/join/detach, futex `Mutex`/`Condvar`), and per-arch QEMU verticals.
+
+---
+
 ## NEW-MENUS — menus owned by the desktop, not by the app (`plans/NEW-MENUS.md`)  **[PLANNED, NOT STARTED]**
 
 **Dependencies:** Stage 7 (compositor, session, controls). Independent of

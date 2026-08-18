@@ -56,7 +56,7 @@ use tairix_kernel_mem::{
 };
 use tairix_kernel_sched_api::SchedulerArch;
 use tairix_kernel_sched_cfq::{Scheduler, SchedulerConfig};
-use tairix_kernel_sec::{CapTable, TaskId as SecTaskId};
+use tairix_kernel_sec::{CapTable, ProcessId, TaskId as SecTaskId};
 use tairix_log::{log, Event, EventId, Level};
 use tairix_sync::RwLock;
 
@@ -531,7 +531,7 @@ pub extern "C" fn kernel_main(_dtb: u64) -> ! {
         tairix_kernel_core::timed_wake_sweep();
         let _ = tairix_kernel_core::waitq::drain_pending_wakes();
 
-        match wait_producer.poll(SecTaskId(0), fixture_pid, WaitFlags::empty()) {
+        match wait_producer.poll(ProcessId(0), fixture_pid, WaitFlags::empty()) {
             Ok(reaped) => match reaped.status {
                 WaitStatus::Exited(0) => {
                     note(

@@ -30,9 +30,12 @@ fn pack_raw_args_orders_a0_through_a5() {
     assert_eq!(a.len(), SYSCALL_MAX_ARGS);
 }
 
+/// The GPR slots the vector's `SAVE_GPRS`/`RESTORE_GPRS` macros address by
+/// literal offset. The CSR and `tp` slots are instead pinned against the
+/// `OFF_*` `.equ`s in `trap.s` itself (`trap_layout_tests.rs`), so those have
+/// one definition rather than a hand-copied second one here.
 #[test]
-fn trap_frame_layout_matches_trap_s_offsets() {
-    // The asm in `trap.s` stores these registers at these byte offsets.
+fn trap_frame_gpr_layout_matches_trap_s_offsets() {
     assert_eq!(offset_of!(TrapFrame, ra), 0);
     assert_eq!(offset_of!(TrapFrame, t0), 8);
     assert_eq!(offset_of!(TrapFrame, t6), 56);
@@ -43,16 +46,6 @@ fn trap_frame_layout_matches_trap_s_offsets() {
     // user-fault crash backtrace, appended after the caller-saved GPRs.
     assert_eq!(offset_of!(TrapFrame, s0), 128);
     assert_eq!(offset_of!(TrapFrame, s11), 216);
-    // The return-state CSRs the redesigned vector saves, appended after
-    // the GP registers (their offsets are pinned by the `OFF_*` `.equ`s
-    // in `trap.s`).
-    assert_eq!(offset_of!(TrapFrame, sepc), 224);
-    assert_eq!(offset_of!(TrapFrame, sstatus), 232);
-    assert_eq!(offset_of!(TrapFrame, user_sp), 240);
-    // The struct packs 31 u64 fields (248 bytes, offset 240 + 8); the asm
-    // reserves TRAP_FRAME_SIZE = 256 so the kernel stack stays 16-byte
-    // aligned, the top 8 bytes being alignment padding.
-    assert_eq!(core::mem::size_of::<TrapFrame>(), 248);
 }
 
 /// Records the (number, args) it was handed and returns a fixed value.

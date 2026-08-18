@@ -23,7 +23,7 @@ use tairix_drvhost::{
 };
 use tairix_fdt::Fdt;
 use tairix_kernel_mem::{AddressSpace, DirectPhysMap, HostPageTable, MmioMap, VirtAddr};
-use tairix_kernel_sec::captable::{TaskCapabilities, TaskId};
+use tairix_kernel_sec::captable::{ProcessId, TaskCapabilities};
 use tairix_kernel_sec::identity::UserId;
 use tairix_kernel_virtio::KernelMmioMapper;
 use tairix_log::{Event, EventId, Level, Sink};
@@ -61,8 +61,8 @@ const MMIO_CAP_PAGES: usize = 32;
 /// board's RAM and the framebuffer surface both sit well inside it.
 const IDENTITY_LIMIT: u64 = 0x1_0000_0000;
 
-/// Synthetic owner task id for the driver context.
-const TASK: TaskId = TaskId(0xFB0);
+/// Synthetic owner process id for the driver context.
+const TASK: ProcessId = ProcessId(0xFB0);
 
 /// Milestone breadcrumb event id.
 const MILESTONE_ID: EventId = EventId(9200);

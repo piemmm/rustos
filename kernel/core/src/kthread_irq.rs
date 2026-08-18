@@ -184,7 +184,7 @@ mod tests {
 
     use tairix_abi::IrqHandle;
     use tairix_kernel_irq::{block_until_ready, IrqController, IrqTable, MaskError, WaitOutcome};
-    use tairix_kernel_sec::TaskId;
+    use tairix_kernel_sec::ProcessId;
 
     /// Permissive controller so [`IrqTable::fire`] can set the ready flag
     /// without a real architecture port.
@@ -227,7 +227,7 @@ mod tests {
     #[test]
     fn ready_when_the_line_is_already_fired_consumes_no_yield() {
         let table = IrqTable::new(31);
-        let out = table.bind(7, TaskId(1)).unwrap();
+        let out = table.bind(7, ProcessId(1)).unwrap();
         table.fire(7, &OkController).unwrap();
 
         let yields = Cell::new(0);
@@ -240,7 +240,7 @@ mod tests {
         let waiter = KthreadIrqWaiter::new(&coop, || 0);
 
         assert_eq!(
-            block_until_ready(&table, out.handle, TaskId(1), u64::MAX, &waiter),
+            block_until_ready(&table, out.handle, ProcessId(1), u64::MAX, &waiter),
             WaitOutcome::Ready
         );
         // A pre-fired binding is consumed on the first poll, before any
@@ -251,7 +251,7 @@ mod tests {
     #[test]
     fn ready_when_the_device_fires_during_a_cooperative_yield() {
         let table = IrqTable::new(31);
-        let out = table.bind(7, TaskId(1)).unwrap();
+        let out = table.bind(7, ProcessId(1)).unwrap();
 
         let yields = Cell::new(0);
         let fire = || {
@@ -269,7 +269,7 @@ mod tests {
         let waiter = KthreadIrqWaiter::new(&coop, || 0);
 
         assert_eq!(
-            block_until_ready(&table, out.handle, TaskId(1), u64::MAX, &waiter),
+            block_until_ready(&table, out.handle, ProcessId(1), u64::MAX, &waiter),
             WaitOutcome::Ready
         );
         assert_eq!(yields.get(), 3);
@@ -278,7 +278,7 @@ mod tests {
     #[test]
     fn timed_out_when_the_deadline_elapses_without_a_fire() {
         let table = IrqTable::new(31);
-        let out = table.bind(7, TaskId(1)).unwrap();
+        let out = table.bind(7, ProcessId(1)).unwrap();
 
         // A clock that advances 100 ns per reading expires a 250 ns budget
         // after a few polls; the waiter never injects a fire.
@@ -298,7 +298,7 @@ mod tests {
         let waiter = KthreadIrqWaiter::new(&coop, clock);
 
         assert_eq!(
-            block_until_ready(&table, out.handle, TaskId(1), 250, &waiter),
+            block_until_ready(&table, out.handle, ProcessId(1), 250, &waiter),
             WaitOutcome::TimedOut
         );
     }
@@ -319,7 +319,7 @@ mod tests {
             block_until_ready(
                 &table,
                 IrqHandle::from_raw(0xDEAD_BEEF),
-                TaskId(1),
+                ProcessId(1),
                 u64::MAX,
                 &waiter
             ),

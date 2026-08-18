@@ -71,7 +71,7 @@ mod kernel {
         boot, handle_panic_via_kernel_core, FreeListAllocator, SerialSink, SERIAL_SINK,
     };
     use tairix_kernel_irq::WaitStep;
-    use tairix_kernel_sec::TaskId as SecTaskId;
+    use tairix_kernel_sec::ProcessId;
     use tairix_log::{Event, EventId, Sink};
 
     use crate::fixture::{PS2_IMAGE, SYSCALL_TABLE_HASH, TRUSTED_SIGNER_PUBKEY};
@@ -143,7 +143,7 @@ mod kernel {
     const KEYBOARD_GSI: u32 = 1;
     /// Synthesised owner for the keyboard IRQ binding. No real task runs
     /// in this test; the bind only needs an opaque owner identity.
-    const IRQ_OWNER: SecTaskId = SecTaskId(0);
+    const IRQ_OWNER: ProcessId = ProcessId(0);
     /// Polling deadline for the [`WaitStep`] loop, in nanoseconds against
     /// the synthetic 1 GHz [`rdtsc_ns`] clock. One second is three orders
     /// of magnitude longer than the sub-millisecond IRQ latency, so a
@@ -351,7 +351,7 @@ mod kernel {
         published_typed()?;
         arch_irq::global_routing().vector_for_gsi(KEYBOARD_GSI)?;
 
-        let outcome = table.bind(KEYBOARD_GSI, IRQ_OWNER).ok()?;
+        let outcome = table.bind(KEYBOARD_GSI, ProcessId(IRQ_OWNER.0)).ok()?;
 
         let io = x86_port_io8();
         mask_legacy_pic(io);
@@ -393,7 +393,7 @@ mod kernel {
         unsafe { sti() };
         let deadline_ns = rdtsc_ns().saturating_add(WAIT_DEADLINE_NS);
         let ready = loop {
-            match table.try_wait_step(handle, IRQ_OWNER, rdtsc_ns(), deadline_ns) {
+            match table.try_wait_step(handle, ProcessId(IRQ_OWNER.0), rdtsc_ns(), deadline_ns) {
                 WaitStep::Ready => break true,
                 // SAFETY: see `hlt`.
                 WaitStep::Continue => unsafe { hlt() },

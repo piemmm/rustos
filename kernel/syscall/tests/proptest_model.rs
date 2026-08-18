@@ -37,7 +37,7 @@ use tairix_abi::{
     SyscallSpec, UnlinkFlags, SYSCALLS, SYSCALL_MAX_ARGS,
 };
 use tairix_caps::CapabilitySet;
-use tairix_kernel_sec::{TaskCapabilities, TaskId, UserId};
+use tairix_kernel_sec::{ProcessId, TaskCapabilities, TaskId, UserId};
 use tairix_kernel_syscall::{CallerContext, Dispatcher, RawArgs, SyscallHandlers, SyscallResult};
 use tairix_log::{set_max_level, Event, Level, Sink};
 
@@ -903,7 +903,8 @@ fn dispatch_capability_gate_tracks_oracle() {
                         cap_set.insert(*cap);
                     }
                 }
-                let caps = TaskCapabilities::derive(TaskId(7), UserId(1), cap_set, cap_set, &sink);
+                let caps =
+                    TaskCapabilities::derive(ProcessId(7), UserId(1), cap_set, cap_set, &sink);
                 let ctx = CallerContext {
                     task_id: TaskId(7),
                     caps: &caps,

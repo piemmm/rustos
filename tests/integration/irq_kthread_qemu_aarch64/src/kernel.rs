@@ -21,7 +21,7 @@ use tairix_fdt::Fdt;
 use tairix_kernel_core::{spawn_kthread, CooperativeYield, KthreadIrqWaiter, YielderHandle};
 use tairix_kernel_irq::{block_until_ready, IrqController, IrqTable, MaskError, WaitOutcome};
 use tairix_kernel_sched_eevdf::{Priority, Scheduler, SchedulerConfig};
-use tairix_kernel_sec::TaskId;
+use tairix_kernel_sec::{ProcessId, TaskId};
 use tairix_log::{log, Event, EventId, Level};
 
 // The canonical QEMU `virt` device tree, dumped and embedded at build time.
@@ -267,7 +267,7 @@ pub extern "C" fn kernel_main(_dtb: u64) -> ! {
     //    bind it, leak it `'static`, and publish its pointer for the
     //    interrupt-context dispatcher.
     let table: &'static IrqTable = Box::leak(Box::new(IrqTable::new(rtc_intid)));
-    let Ok(bind) = table.bind(rtc_intid, OWNER) else {
+    let Ok(bind) = table.bind(rtc_intid, ProcessId(OWNER.0)) else {
         qemu_exit::exit_failure(FAIL_BIND);
     };
     let handle: IrqHandle = bind.handle;
@@ -312,7 +312,7 @@ pub extern "C" fn kernel_main(_dtb: u64) -> ! {
             let mut handle_obj = YielderHandle::new(yielder);
             let coop = CooperativeYield::new(&mut handle_obj);
             let waiter = KthreadIrqWaiter::new(&coop, || clock_arch.monotonic_ns());
-            match block_until_ready(table, handle, OWNER, u64::MAX, &waiter) {
+            match block_until_ready(table, handle, ProcessId(OWNER.0), u64::MAX, &waiter) {
                 WaitOutcome::Ready => {
                     WOKEN.store(true, Ordering::SeqCst);
                 }

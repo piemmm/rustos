@@ -35,7 +35,9 @@ use tairix_kernel_ipc::PortRegistry;
 use tairix_kernel_irq::{IrqController, IrqTable, MonotonicClock};
 use tairix_kernel_mem::{AllocError, FrameAllocator, PhysMap, UserAddressSpace};
 use tairix_kernel_sched_api::{ExitDisposition, Priority, StepOutcome};
-use tairix_kernel_sec::{CapTable, ProcName, TaskCapabilities, TaskId as SecTaskId, UserId};
+use tairix_kernel_sec::{
+    CapTable, ProcName, ProcessId as SecProcessId, TaskCapabilities, TaskId as SecTaskId, UserId,
+};
 use tairix_log::{set_max_level, Field, Level, Sink};
 use tairix_sync::RwLock;
 use tairix_util::fmt::format_hex_u64;
@@ -1487,7 +1489,7 @@ impl<A: KernelArch + 'static> InitSpawnCtx for KernelInitSpawner<'_, A> {
         // derive bounds (`plans/CAPABILITY_USE.md` §4.1, the one legitimate
         // manifest-as-ceiling shape; a user session's ceiling is its
         // account grant, threaded through `SpawnCredential`).
-        let sec_id = SecTaskId(task_id);
+        let sec_id = SecProcessId::leader(SecTaskId(task_id));
         // Attach PID 1's process-instance identity (a kernel-trusted bootstrap
         // principal minted from the shared per-boot counter), so its syscalls
         // are attributed to this instance distinctly from any task that later
@@ -1537,7 +1539,7 @@ impl<A: KernelArch + 'static> InitSpawnCtx for KernelInitSpawner<'_, A> {
             // back pages inside it on demand — bounded by its `StackBytes`
             // limit. The span is seam-derived from the validated spawn
             // layout, never a caller-supplied value.
-            aspaces.set_stack_span(sec_id, stack_span);
+            aspaces.set_stack_span(sec_id, SecTaskId(task_id), stack_span);
         }
 
         // Drive PID 1 (and anything it spawns) to completion: each `step`
@@ -1648,7 +1650,9 @@ impl<A: KernelArch + 'static> InitSpawnCtx for KernelInitSpawner<'_, A> {
             self.caps,
             self.aspaces,
             self.arch,
-            SecTaskId(0),
+            // A driver spawn has no user-space parent process: the kernel
+            // itself is the spawner, which the sentinel names.
+            SecProcessId(0),
             self.process_wait,
             DescriptorTable::closed(),
             // A driver spawn wires no standard-stream open entries: its
@@ -1703,14 +1707,14 @@ impl<A: KernelArch + 'static> InitSpawnCtx for KernelInitSpawner<'_, A> {
         // (`admit_process` builds `SecTaskId(task_id)`). Reclaim every
         // kernel-held piece of the driver under that one id.
         let sched_id = handle;
-        let sec_id = SecTaskId(handle);
+        let sec_id = SecProcessId(handle);
 
         // Presence is keyed on the address-space registry entry every spawned
         // driver registers: if neither it nor a capability record exists, no
         // live driver bears this handle, so the unload is a benign idempotent
         // miss (the device manager may diff the same vanished node twice).
-        let known =
-            self.aspaces.read().contains(sec_id) || self.caps.read().caps_for(sec_id).is_some();
+        let known = self.aspaces.read().contains(sec_id)
+            || self.caps.read().caps_of_process(sec_id).is_some();
         if !known {
             return Err(Errno::NotFound);
         }
@@ -1731,7 +1735,7 @@ impl<A: KernelArch + 'static> InitSpawnCtx for KernelInitSpawner<'_, A> {
         // unload is committed — audit it now — and the deferred reclaim runs
         // the same shared task teardown this path performs inline.
         if let Ok(ExitDisposition::Deferred) = self.scheduler.exit(sched_id) {
-            crate::procsignal::defer_plain_reclaim(sched_id);
+            crate::procsignal::defer_plain_reclaim(sched_id, sec_id);
             let mut handle_buf = [0u8; 16];
             emit(
                 self.audit,
@@ -1758,7 +1762,7 @@ impl<A: KernelArch + 'static> InitSpawnCtx for KernelInitSpawner<'_, A> {
         // though this teardown runs in the driver-store service's context, not
         // the driver's own (a driver may be the region owner whose last
         // grantee already vanished).
-        crate::sharedreg::reclaim_task(self.shared_mem_facility, sec_id);
+        crate::sharedreg::reclaim_process(self.shared_mem_facility, sec_id);
 
         // Destroy every synchronous call endpoint the driver served before
         // dropping its capability record, mirroring the `exit` syscall: a
@@ -2985,18 +2989,18 @@ mod tests {
         // Make a handle "known" exactly as `admit_process` does for a spawned
         // driver: a capability record minted under its `SecTaskId`.
         let handle = 0x4242u64;
-        let sec = SecTaskId(handle);
+        let sec = SecProcessId(handle);
         let mut caps = CapabilitySet::empty();
         caps.insert(tairix_abi::CapabilityId::DRV_LOAD);
         let record = TaskCapabilities::derive(sec, UserId(0), caps, caps, audit_sink);
         state.caps.write().insert(record);
-        assert!(state.caps.read().caps_for(sec).is_some());
+        assert!(state.caps.read().caps_of_process(sec).is_some());
 
         audit_sink.clear();
         // Teardown reclaims the capability record and audits the unload.
         assert_eq!(ctx.terminate_driver_process(handle), Ok(()));
         assert!(
-            state.caps.read().caps_for(sec).is_none(),
+            state.caps.read().caps_of_process(sec).is_none(),
             "the driver's capability record is reclaimed"
         );
         assert!(

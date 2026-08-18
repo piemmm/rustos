@@ -33,7 +33,7 @@ use tairix_abi::{
     FS_ATTR_VALUE_MAX, FS_MODE_MASK, SYSCALLS, SYSCALL_MAX_ARGS,
 };
 use tairix_caps::CapabilitySet;
-use tairix_kernel_sec::{TaskCapabilities, TaskId, UserId};
+use tairix_kernel_sec::{ProcessId, TaskCapabilities, TaskId, UserId};
 use tairix_kernel_syscall::{CallerContext, Dispatcher, RawArgs, SyscallHandlers, SyscallResult};
 use tairix_log::{set_max_level, Event, Level, Sink};
 
@@ -1066,7 +1066,7 @@ fn fuzz_dispatcher_matches_mirror() {
             caps_set.insert(c);
         }
     }
-    let caps = TaskCapabilities::derive(TaskId(0xF), UserId(42), caps_set, caps_set, &sink);
+    let caps = TaskCapabilities::derive(ProcessId(0xF), UserId(42), caps_set, caps_set, &sink);
     let ctx = CallerContext {
         task_id: TaskId(0xF),
         caps: &caps,
@@ -1204,7 +1204,7 @@ fn pointer_shaped_user_ptr_inputs_are_handled_deterministically() {
             caps_set.insert(c);
         }
     }
-    let caps = TaskCapabilities::derive(TaskId(0x7), UserId(7), caps_set, caps_set, &sink);
+    let caps = TaskCapabilities::derive(ProcessId(0x7), UserId(7), caps_set, caps_set, &sink);
     let ctx = CallerContext {
         task_id: TaskId(0x7),
         caps: &caps,

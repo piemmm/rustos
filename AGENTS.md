@@ -1377,6 +1377,7 @@ You are not exempt from any rule above. In addition:
     | Capabilities: grants, manifests, ceilings, admin, elevation, the capability lifecycle | `plans/CAPABILITY_USE.md` |
     | User accounts: default system/service identities, id ranges, the users/groups databases | `plans/USERS.md` |
     | Process spawn, userland multitasking | `plans/SPAWN.md` |
+    | Lightweight threads: threads within a process, the thread-group model, the futex, per-thread thread pointers | `plans/THREADS.md` |
     | App bundles, command apps, help, command resolution | `plans/APPS.md`; `plans/UNIVERSAL.md` (multi-arch/Wasm distribution) |
     | Default desktop apps going live: app windows, live app data channels, the file picker | `plans/APPWIN.md` |
     | The graphical file manager (`files.app`): clickable icons, open/launch, rename, move/copy/delete, properties | `plans/NEW-FILEMANAGER.md` |

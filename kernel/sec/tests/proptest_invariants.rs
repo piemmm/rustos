@@ -20,7 +20,7 @@
 use proptest::prelude::*;
 use tairix_abi::{CapabilityId, Errno};
 use tairix_caps::CapabilitySet;
-use tairix_kernel_sec::{TaskCapabilities, TaskId, UserId};
+use tairix_kernel_sec::{ProcessId, TaskCapabilities, UserId};
 use tairix_log::{Event, Sink};
 
 /// Sink that throws away every event it receives. The property test is
@@ -67,7 +67,7 @@ proptest! {
         manifest_request in caps_strategy(),
     ) {
         let t = TaskCapabilities::derive(
-            TaskId(0),
+            ProcessId(0),
             UserId(1),
             user_grant,
             manifest_request,
@@ -86,7 +86,7 @@ proptest! {
         requested in caps_strategy(),
     ) {
         let mut t = TaskCapabilities::derive(
-            TaskId(0),
+            ProcessId(0),
             UserId(1),
             user_grant,
             manifest_request,

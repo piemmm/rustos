@@ -44,7 +44,7 @@ use tairix_kernel_mem::{
     VirtAddr,
 };
 use tairix_kernel_sched_cfq::{Priority, Scheduler, SchedulerConfig};
-use tairix_kernel_sec::TaskId;
+use tairix_kernel_sec::{ProcessId, TaskId};
 use tairix_kernel_syscall::SYSCALL_TABLE_HASH;
 use tairix_log::{log, Event, EventId, Level};
 use tairix_sync::SpinLock;
@@ -289,7 +289,7 @@ extern "C" fn dispatch(number: u64, args_ptr: *const [u64; SYSCALL_MAX_ARGS]) ->
         };
         encode(
             signaller
-                .resolve_child(TaskId(cur), pid)
+                .resolve_child(ProcessId(cur), pid)
                 .and_then(|target| signaller.signal_task(target, signal))
                 .map(|()| 0),
         )
@@ -307,7 +307,7 @@ extern "C" fn dispatch(number: u64, args_ptr: *const [u64; SYSCALL_MAX_ARGS]) ->
             Ok(flags) => flags,
             Err(err) => return encode(Err(err)),
         };
-        match producer.wait(TaskId(cur), pid, flags) {
+        match producer.wait(ProcessId(cur), pid, flags) {
             Ok(reported) => {
                 // Copy the typed status record out to the parent's `status`
                 // pointer through the validated boundary, exactly as the
@@ -562,7 +562,7 @@ fn drive_intake_saga(wait_producer: &KernelProcessWait<Aarch64Arch>) {
             let Ok(pid) = i32::try_from(intake_tid) else {
                 qemu_exit::exit_failure(FAIL_INTAKE_BAD_REAP);
             };
-            match wait_producer.poll(TaskId(SUPERVISOR), pid, WaitFlags::NONBLOCK) {
+            match wait_producer.poll(ProcessId(SUPERVISOR), pid, WaitFlags::NONBLOCK) {
                 Ok(reported) => {
                     if reported.status
                         == WaitStatus::Exited(match Signal::Interrupt.termination_status() {
@@ -656,7 +656,7 @@ pub extern "C" fn kernel_main(_dtb: u64) -> ! {
         build_el0_space(&PAGE_TABLES_PARENT, PARENT_RXE, &[b"signal", pid_arg]);
     let parent_tid = admit(sched, parent_root, parent_entry);
     PARENT_TID.store(parent_tid, Ordering::SeqCst);
-    wait_producer.register_child(TaskId(parent_tid), TaskId(child_tid));
+    wait_producer.register_child(ProcessId(parent_tid), ProcessId(child_tid));
 
     // The ST3 intake role: admitted like the others, registered under the
     // synthetic supervisor so its escalated termination is reapable, and
@@ -666,14 +666,14 @@ pub extern "C" fn kernel_main(_dtb: u64) -> ! {
         build_el0_space(&PAGE_TABLES_INTAKE, INTAKE_RXE, &[b"signal"]);
     let intake_tid = admit(sched, intake_root, intake_entry);
     INTAKE_TID.store(intake_tid, Ordering::SeqCst);
-    wait_producer.register_child(TaskId(SUPERVISOR), TaskId(intake_tid));
+    wait_producer.register_child(ProcessId(SUPERVISOR), ProcessId(intake_tid));
     // The foreground delivery hook: the same producer the `signal` syscall
     // uses, installed exactly as the production boot path installs it.
     if install_foreground_signal(signal_producer).is_err() {
         qemu_exit::exit_failure(FAIL_FOREGROUND);
     }
     if CONSOLE
-        .grant_foreground(TaskId(SUPERVISOR), TaskId(intake_tid))
+        .grant_foreground(ProcessId(SUPERVISOR), ProcessId(intake_tid))
         .is_err()
     {
         qemu_exit::exit_failure(FAIL_FOREGROUND);

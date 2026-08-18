@@ -61,7 +61,7 @@ use tairix_kernel_mem::{
     BootMemoryMap, FrameAllocator, MemoryRegion, PhysAddr, RegionKind, PAGE_SIZE,
 };
 use tairix_kernel_sched_cfq::{Scheduler, SchedulerConfig};
-use tairix_kernel_sec::{CapTable, TaskId as SecTaskId};
+use tairix_kernel_sec::{CapTable, ProcessId, TaskId as SecTaskId};
 use tairix_log::{log, Event, EventId, Level};
 use tairix_sync::RwLock;
 
@@ -421,7 +421,7 @@ pub extern "C" fn kernel_main(_dtb: u64) -> ! {
     // the same (`plans/FIX-DESKTOP.md` DESK-1).
     if sys.sched.live_task_count() != 1
         || sys.caps.read().caps_for(sec).is_none()
-        || sys.aspaces.read().contains(sec)
+        || sys.aspaces.read().contains(ProcessId(sec.0))
     {
         qemu_exit::exit_failure(FAIL_NOT_LIVE);
     }
@@ -446,7 +446,7 @@ pub extern "C" fn kernel_main(_dtb: u64) -> ! {
     if sys.caps.read().caps_for(sec).is_some() {
         qemu_exit::exit_failure(FAIL_CAPS_LEFT);
     }
-    if sys.aspaces.read().contains(sec) {
+    if sys.aspaces.read().contains(ProcessId(sec.0)) {
         qemu_exit::exit_failure(FAIL_ASPACE_LEFT);
     }
 

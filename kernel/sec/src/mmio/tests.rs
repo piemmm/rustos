@@ -10,7 +10,7 @@ extern crate alloc;
 
 use super::*;
 use crate::audit::RecordingSink;
-use crate::captable::{TaskCapabilities, TaskId};
+use crate::captable::{ProcessId, TaskCapabilities};
 use crate::identity::UserId;
 use tairix_abi::CapabilityId;
 use tairix_caps::CapabilitySet;
@@ -26,7 +26,7 @@ fn caps_of(items: &[CapabilityId]) -> CapabilitySet {
 
 fn task_with(caps: &[CapabilityId], sink: &RecordingSink) -> TaskCapabilities {
     let grant = caps_of(caps);
-    TaskCapabilities::derive(TaskId(42), UserId(1000), grant, grant, sink)
+    TaskCapabilities::derive(ProcessId(42), UserId(1000), grant, grant, sink)
 }
 
 /// Simulated register block covering the BAR addresses the tests map.

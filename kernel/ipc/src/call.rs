@@ -104,7 +104,9 @@ pub enum RecvCall {
 pub struct ReceivedCall {
     /// The ticket the server must [`reply`](CallEndpoint::reply) with.
     pub ticket: CallTicket,
-    /// Task identifier of the caller that posted the request.
+    /// **Process** identifier of the caller that posted the request. The
+    /// scheduler id of the posting *thread* is carried separately, by
+    /// `poster_sched`, because only that names the entity to wake.
     pub sender: u64,
     /// The request payload (kernel-owned copy).
     pub request: Vec<u8>,
@@ -216,9 +218,10 @@ pub struct CallEndpoint {
     max_request: u32,
     max_reply: u32,
     capacity: usize,
-    /// Task that created and serves this endpoint. The kernel tears the
-    /// endpoint down when this task exits so in-flight callers are released
-    /// fail-closed rather than blocked forever.
+    /// **Process** that created and serves this endpoint. The kernel tears
+    /// the endpoint down when that process exits so in-flight callers are
+    /// released fail-closed rather than blocked forever; a single thread of a
+    /// multi-threaded server exiting does not take the endpoint with it.
     owner: u64,
     /// The serving task's *scheduler* id, recorded the first time the server
     /// receives on this endpoint (`0` until then). The post path wakes
@@ -392,7 +395,7 @@ impl CallEndpoint {
             max_request,
             max_reply,
             capacity,
-            owner: creator.task().0,
+            owner: creator.process().0,
             server_task: AtomicU64::new(0),
             state: AtomicU32::new(state::OPEN),
             inner: tairix_sync::SpinLock::new(Inner {
@@ -633,7 +636,7 @@ impl CallEndpoint {
         };
         let sender_field = Field {
             key: "sender",
-            value: tairix_log::FieldValue::Str(format_hex_u64(caller.task().0, &mut sender_buf)),
+            value: tairix_log::FieldValue::Str(format_hex_u64(caller.process().0, &mut sender_buf)),
         };
         let len_field = Field {
             key: "len",
@@ -691,7 +694,7 @@ impl CallEndpoint {
         }
         let ticket = g.next_ticket;
         g.next_ticket += 1;
-        let sender = caller.task().0;
+        let sender = caller.process().0;
         let origin = caller.attest_origin();
         g.pending.push_back(PendingCall {
             ticket,
@@ -986,7 +989,7 @@ mod tests {
     use super::*;
     use crate::audit::RecordingSink;
     use tairix_abi::CapabilityId;
-    use tairix_kernel_sec::captable::TaskId;
+    use tairix_kernel_sec::captable::ProcessId;
     use tairix_kernel_sec::identity::UserId;
 
     /// The scheduler id the tests post under — arbitrary but non-zero, so
@@ -1004,7 +1007,7 @@ mod tests {
     fn task_with(task_id: u64, caps: &[CapabilityId]) -> TaskCapabilities {
         let sink = RecordingSink::new();
         let set = caps_of(caps);
-        TaskCapabilities::derive(TaskId(task_id), UserId(1), set, set, &sink)
+        TaskCapabilities::derive(ProcessId(task_id), UserId(1), set, set, &sink)
     }
 
     /// An unrestricted endpoint any task may call, with generous bounds.

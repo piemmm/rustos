@@ -1,0 +1,47 @@
+[package]
+name = "tairix-test-tp-isolation-qemu-riscv64"
+description = "riscv64 QEMU integration test: prove a U-mode program cannot steer the kernel's per-hart identity through the psABI thread pointer, and that its own tp survives every trap. The build script compiles the adversarial fixture (tests/integration/tp_probe_program) PIE and converts it to an rxe blob; the kernel enters it through the production spawn caller and the dispatch callback asserts the kernel still reads its own hart id while the program is shouting a hostile one."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+# The regression witness for the riscv64 trap-entry `tp` discipline
+# (`kernel/arch/riscv64/src/trap.s`). `tp` is both the RISC-V thread pointer
+# U-mode writes freely and this port's per-hart identity anchor, so a vector
+# that let the U-mode value survive into the handler would let a task name a
+# different hart and steer the kernel onto that core's per-CPU state. The
+# fixture writes a hostile `tp` before every `ecall`; the dispatch callback
+# reads `smp::current_hartid()` and fails the run if it is not the true boot
+# hart, and the fixture's own exit code fails the run if its value did not come
+# back. Two CPUs are emulated so the hostile low-bit `1` names a real sibling
+# rather than an unmapped id that would fall back safely.
+#
+# The `test-hooks` feature is on by default. Release builds that enable it are
+# rejected by the `compile_error!` guard in `src/main.rs` (AGENTS.md §1 — no
+# hacks; §5.4.5 — fail closed), mirroring the sibling riscv64 verticals.
+[features]
+default = ["test-hooks"]
+test-hooks = []
+
+[[bin]]
+name = "tairix-test-tp-isolation-qemu-riscv64"
+path = "src/main.rs"
+
+[target.'cfg(all(target_arch = "riscv64", target_os = "none"))'.dependencies]
+tairix-abi = { path = "../../../lib/abi", version = "=0.0.0" }
+tairix-kalloc = { path = "../../../lib/kalloc", version = "=0.0.0" }
+tairix-arch-riscv64 = { path = "../../../kernel/arch/riscv64", version = "=0.0.0" }
+tairix-kernel-core = { path = "../../../kernel/core", version = "=0.0.0" }
+tairix-kernel-mem = { path = "../../../kernel/mem", version = "=0.0.0" }
+tairix-kernel-syscall = { path = "../../../kernel/syscall", version = "=0.0.0" }
+tairix-log = { path = "../../../lib/log", version = "=0.0.0" }
+
+[build-dependencies]
+tairix-itest-harness = { path = "../harness", version = "=0.0.0" }
+tairix-kernel-syscall = { path = "../../../kernel/syscall", version = "=0.0.0" }

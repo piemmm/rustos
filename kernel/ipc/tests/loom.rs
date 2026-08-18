@@ -38,7 +38,7 @@ use loom::thread;
 use tairix_abi::{CapabilityId, Errno};
 use tairix_caps::CapabilitySet;
 use tairix_kernel_ipc::port::{EndpointId, Port};
-use tairix_kernel_sec::captable::{TaskCapabilities, TaskId};
+use tairix_kernel_sec::captable::{ProcessId, TaskCapabilities};
 use tairix_kernel_sec::identity::UserId;
 use tairix_log::{Event, Sink};
 

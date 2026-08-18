@@ -30,7 +30,7 @@ use core::ptr::NonNull;
 
 use tairix_abi::Errno;
 use tairix_kernel_mem::PAGE_SIZE;
-use tairix_kernel_sec::TaskId;
+use tairix_kernel_sec::ProcessId;
 use tairix_sync::SpinLock;
 
 use crate::devres::{SharedChunk, SharedMemFacility};
@@ -91,7 +91,7 @@ fn region_len_bytes(pages: u64) -> usize {
 /// failed create leaks nothing.
 pub fn create(
     facility: &dyn SharedMemFacility,
-    owner: TaskId,
+    owner: ProcessId,
     pages: u64,
 ) -> Result<(u64, u64), Errno> {
     let chunks = facility.alloc_region(pages)?;
@@ -121,7 +121,7 @@ pub fn create(
     Ok((base_va, id))
 }
 
-/// Map an existing region `id` into `task`'s own live address space,
+/// Map an existing region `id` into `process`'s own live address space,
 /// returning its base user virtual address and the region's byte length
 /// (the registry's own record — the size the caller may trust without
 /// consulting the granting task).
@@ -129,7 +129,11 @@ pub fn create(
 /// # Errors
 ///
 /// [`Errno::NotFound`] if the region was torn down, or the facility error.
-pub fn map(facility: &dyn SharedMemFacility, task: TaskId, id: u64) -> Result<(u64, usize), Errno> {
+pub fn map(
+    facility: &dyn SharedMemFacility,
+    process: ProcessId,
+    id: u64,
+) -> Result<(u64, usize), Errno> {
     // Snapshot the backing under the lock; map outside it.
     let (chunks, pages) = {
         let state = REGIONS.lock();
@@ -139,7 +143,7 @@ pub fn map(facility: &dyn SharedMemFacility, task: TaskId, id: u64) -> Result<(u
     let base_va = facility.map_region(&chunks)?;
     let mut state = REGIONS.lock();
     // The region could have been torn down between the two locks only if its
-    // last reference dropped; but `task` holds the grant and no mapping was
+    // last reference dropped; but `process` holds the grant and no mapping was
     // dropped here, so re-checking keeps the accounting honest fail-closed.
     let Some(region) = state.regions.get_mut(&id) else {
         drop(state);
@@ -149,38 +153,42 @@ pub fn map(facility: &dyn SharedMemFacility, task: TaskId, id: u64) -> Result<(u
     region.refs += 1;
     state
         .mappings
-        .entry(task.0)
+        .entry(process.0)
         .or_default()
         .push((base_va, id));
     Ok((base_va, region_len_bytes(pages)))
 }
 
-/// Release `task`'s shared mapping based at `base`, tearing down its
+/// Release `process`'s shared mapping based at `base`, tearing down its
 /// page-table entries and dropping its reference to the region; the region's
 /// frames are zeroed and freed when its last reference is released.
 ///
 /// Reports the byte length released — the registry's own record of the
 /// region, which the teardown already reads — so the caller can drop exactly
-/// those pages from the task's address-space snapshot.
+/// those pages from the process's address-space snapshot.
 ///
 /// # Errors
 ///
 /// [`Errno::NotFound`] if `base` does not name a live shared mapping of
-/// `task`.
-pub fn unmap(facility: &dyn SharedMemFacility, task: TaskId, base: u64) -> Result<usize, Errno> {
+/// `process`.
+pub fn unmap(
+    facility: &dyn SharedMemFacility,
+    process: ProcessId,
+    base: u64,
+) -> Result<usize, Errno> {
     // Find and remove the mapping record and recover its region's length
     // under the lock; the reference itself is dropped through the shared
     // release step below, outside it.
     let (id, len) = {
         let mut state = REGIONS.lock();
-        let list = state.mappings.get_mut(&task.0).ok_or(Errno::NotFound)?;
+        let list = state.mappings.get_mut(&process.0).ok_or(Errno::NotFound)?;
         let pos = list
             .iter()
             .position(|&(b, _)| b == base)
             .ok_or(Errno::NotFound)?;
         let (_, id) = list.remove(pos);
         if list.is_empty() {
-            state.mappings.remove(&task.0);
+            state.mappings.remove(&process.0);
         }
         let region = state.regions.get(&id).ok_or(Errno::NotFound)?;
         (id, region_len_bytes(region.pages))
@@ -194,7 +202,7 @@ pub fn unmap(facility: &dyn SharedMemFacility, task: TaskId, base: u64) -> Resul
 }
 
 /// Drop one reference to region `id`, freeing its frames if this was the
-/// last one. The shared release step behind [`unmap`], [`reclaim_task`],
+/// last one. The shared release step behind [`unmap`], [`reclaim_process`],
 /// and a [`KernelHold`] drop.
 fn release_ref(facility: &dyn SharedMemFacility, id: u64) {
     let free = {
@@ -319,14 +327,14 @@ pub fn kernel_hold(facility: &'static dyn SharedMemFacility, id: u64) -> Result<
     }
 }
 
-/// Reclaim every shared mapping `task` held when it exits or is torn down,
+/// Reclaim every shared mapping `process` held when it exits or is torn down,
 /// dropping each reference and freeing any region whose last reference this
 /// releases. Does **not** tear down page-table entries (the task's address
 /// space is being destroyed). Idempotent.
-pub fn reclaim_task(facility: &dyn SharedMemFacility, task: TaskId) {
+pub fn reclaim_process(facility: &dyn SharedMemFacility, process: ProcessId) {
     let ids: Vec<u64> = {
         let mut state = REGIONS.lock();
-        let Some(list) = state.mappings.remove(&task.0) else {
+        let Some(list) = state.mappings.remove(&process.0) else {
             return;
         };
         list.into_iter().map(|(_, id)| id).collect()
@@ -417,7 +425,7 @@ mod tests {
     #[test]
     fn create_maps_and_grants_an_owner_reference() {
         let fac = FakeFacility::new();
-        let owner = TaskId(0x5_0001);
+        let owner = ProcessId(0x5_0001);
         let (va, id) = create(&fac, owner, 2).expect("create");
         // The owner's mapping was created and the VA flows back from the
         // facility.
@@ -434,8 +442,8 @@ mod tests {
     #[test]
     fn region_frees_only_when_the_last_reference_is_released() {
         let fac = FakeFacility::new();
-        let owner = TaskId(0x5_0002);
-        let grantee = TaskId(0x5_0003);
+        let owner = ProcessId(0x5_0002);
+        let grantee = ProcessId(0x5_0003);
         let (owner_va, id) = create(&fac, owner, 1).expect("create");
         // A grantee maps the same region: refs = 2. The reported length is
         // the registry's own record of the one-page region, never a claim.
@@ -462,23 +470,23 @@ mod tests {
     }
 
     #[test]
-    fn reclaim_task_drops_references_and_frees_at_zero() {
+    fn reclaim_process_drops_references_and_frees_at_zero() {
         let fac = FakeFacility::new();
-        let owner = TaskId(0x5_0004);
-        let grantee = TaskId(0x5_0005);
+        let owner = ProcessId(0x5_0004);
+        let grantee = ProcessId(0x5_0005);
         let (_owner_va, id) = create(&fac, owner, 1).expect("create");
         let (_grantee_va, _) = map(&fac, grantee, id).expect("grantee maps");
 
         // Reclaiming the grantee (e.g. a class driver unloaded on hot-removal)
         // drops its reference but does not free the region — the owner still
         // holds it.
-        reclaim_task(&fac, grantee);
+        reclaim_process(&fac, grantee);
         assert!(fac.frees.lock().unwrap().is_empty());
         // Reclaiming the owner drops the last reference: the region is freed.
-        reclaim_task(&fac, owner);
+        reclaim_process(&fac, owner);
         assert_eq!(fac.frees.lock().unwrap().len(), 1, "freed at last ref");
         // Reclaiming a task with no mappings is a benign no-op (idempotent).
-        reclaim_task(&fac, owner);
+        reclaim_process(&fac, owner);
         assert_eq!(fac.frees.lock().unwrap().len(), 1);
     }
 
@@ -533,7 +541,7 @@ mod tests {
             inner: FakeFacility::new(),
             window: Mutex::new(Vec::new()),
         }));
-        let owner = TaskId(0x5_0007);
+        let owner = ProcessId(0x5_0007);
         let (_va, id) = create(fac, owner, 1).expect("create");
         let hold = kernel_hold(fac, id).expect("kernel hold");
         assert_eq!(hold.len(), PAGE_SIZE);
@@ -542,7 +550,7 @@ mod tests {
 
         // The owner exits: its mapping is reclaimed, but the kernel's hold
         // keeps the frames alive.
-        reclaim_task(fac, owner);
+        reclaim_process(fac, owner);
         assert!(fac.inner.frees.lock().unwrap().is_empty());
         // Dropping the hold releases the last reference and frees exactly
         // once.
@@ -558,7 +566,7 @@ mod tests {
             inner: FakeFacility::new(),
             window: Mutex::new(Vec::new()),
         }));
-        let owner = TaskId(0x5_0009);
+        let owner = ProcessId(0x5_0009);
         // A two-page region is two single-page chunks: not physically
         // contiguous, so no single kernel window can span it and the hold
         // fails closed rather than fabricating a contiguous view.
@@ -578,7 +586,7 @@ mod tests {
     fn kernel_hold_fails_closed_when_the_kernel_cannot_reach_the_frames() {
         // `FakeFacility` inherits the fail-closed default `kernel_window`.
         let fac: &'static FakeFacility = Box::leak(Box::new(FakeFacility::new()));
-        let owner = TaskId(0x5_0008);
+        let owner = ProcessId(0x5_0008);
         let (va, id) = create(fac, owner, 1).expect("create");
         assert_eq!(kernel_hold(fac, id).err(), Some(Errno::NotImplemented));
         // The failed hold released its reference: the owner's unmap still
@@ -590,11 +598,11 @@ mod tests {
     #[test]
     fn map_and_unmap_fail_closed_for_unknown_ids() {
         let fac = FakeFacility::new();
-        let task = TaskId(0x5_0006);
+        let process = ProcessId(0x5_0006);
         // A region id that was never created.
-        assert_eq!(map(&fac, task, 0xDEAD_BEEF), Err(Errno::NotFound));
-        // A base VA the task never mapped.
-        assert_eq!(unmap(&fac, task, 0x1234), Err(Errno::NotFound));
+        assert_eq!(map(&fac, process, 0xDEAD_BEEF), Err(Errno::NotFound));
+        // A base VA the process never mapped.
+        assert_eq!(unmap(&fac, process, 0x1234), Err(Errno::NotFound));
         // Neither touched the facility's free path.
         assert!(fac.frees.lock().unwrap().is_empty());
     }

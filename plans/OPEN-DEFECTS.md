@@ -476,6 +476,23 @@ The open items, in priority order:
   fault to the resolver only for *data* accesses, so an instruction-fetch
   fault parks the CPU for one task's mistake. Mirror the aarch64/riscv64
   slot; also settle which exception vectors that port installs at all.
+- **D43 — a riscv64 U-mode task could steer the kernel onto another hart's
+  per-CPU state — DONE.** Found by inspection while designing per-thread
+  thread-local storage. `tp` (x4) is both the psABI thread pointer U-mode
+  writes freely and this port's per-hart kernel identity anchor
+  (`SchedulerArch::current_cpu` → `smp::current_hartid` reads it), and the
+  trap vector never touched it — so `li tp, <other hart>; ecall` had the
+  kernel resolve *that* core's resume handle, dispatch slot, and live address
+  space. `sscratch` now points at a per-task 16-byte **trap anchor** carrying
+  the running hart's kernel `tp`; the from-U prologue spills the user's `tp`
+  into the frame and reloads the kernel's before any other register is
+  touched, and the U-return path publishes the current hart's value (so a
+  migrated task re-enters U-mode under the right identity) and restores the
+  user's. The frame slot lives on the task's own kernel stack, so the thread
+  pointer is now genuinely per-task — the platform contract TLS rests on.
+  Witness: `tests/integration/tp_isolation_qemu_riscv64` (a hostile-`tp`
+  U-mode fixture on a two-CPU guest), plus the `trap_layout_tests.rs`
+  ordering/layout pinning against `trap.s`.
 
 These are **distinct in kind**: D1 finishes an interrupt-model fix, D2
 and D4 are §27 foundational-completeness defects, D3 is an Arch-HAL
@@ -495,9 +512,11 @@ missing in-kernel preemption boundary — a fairness defect, not a wedge — tha
 let a burst of never-waiting device operations withhold a core (fixed), D25
 was a process-wide test clock that made a host suite's exact-instant assertions
 order-dependent (fixed), D36 is a panic-path self-deadlock in the console
-write path (open, needs a lock-abandon primitive), and D37 is a suspected
+write path (open, needs a lock-abandon primitive), D37 is a suspected
 per-port context-switch gap found by reading, not by a failure (open, confirm
-before fixing). Do not collapse the open items into one change; land each
+before fixing), and D43 was a privilege-boundary defect of the same
+found-by-reading kind as D42 — a user-writable register the kernel trusted for
+its own per-CPU identity (fixed). Do not collapse the open items into one change; land each
 on its own whole-project-green gate (§7).
 
 ## Coupling to be aware of
@@ -2385,8 +2404,8 @@ three takeover verticals pass in 34.4 s (aarch64), 37.2 s (riscv64), and
 **Root cause: `userentry::enter_user_mode` armed `sscratch` with S-mode
 interrupts still enabled.** The riscv64 trap vector's *only* discriminator
 between a trap from U-mode and one from S-mode is the entry swap
-`csrrw sp, sscratch, sp`: `sscratch` holds the current task's kernel-stack
-top while U-mode runs and **0** while S-mode runs, and a non-zero swap-in
+`csrrw sp, sscratch, sp`: `sscratch` holds the running task's trap anchor
+while U-mode runs and **0** while S-mode runs, and a non-zero swap-in
 result therefore *means* "from U-mode". The entry sequence armed `sscratch`
 two instructions before its `sret` but only cleared `SPP`/`SPIE`, never
 `sstatus.SIE` — and the dispatch loop runs in-kernel bodies with S-mode
@@ -2488,6 +2507,63 @@ without reading `interrupts.rs`'s base IDT to settle it.
 **Regression cover (lands with the fix, §7).** A host test for the slot's
 set-once round-trip, and a QEMU vertical in which a ring-3 task jumps to a
 non-executable page and only that task dies.
+
+## D43 — a riscv64 U-mode task could steer the kernel onto another hart's per-CPU state — DONE
+
+**Root cause: the trap vector never re-established the kernel's `tp`.** On
+riscv64 `tp` (x4) is an ordinary *unprivileged* register — the RISC-V psABI
+thread pointer, which U-mode code may write with a single `mv` — and it is
+also this port's per-hart kernel anchor: `SchedulerArch::current_cpu`
+resolves the running CPU through `smp::current_hartid`, which reads `tp`, and
+the Arch-HAL per-CPU slice reads and writes the same register. The vector
+saved and restored the caller-saved and callee-saved GPR sets and the
+return-state CSRs, but not `tp`, so every `ecall` handed the kernel whatever
+value the trapping task had left there.
+
+`li tp, <another hart id>; ecall` therefore made the kernel believe it was
+running on that hart: `cpu_for_hartid` maps a *valid* sibling id, so the
+dispatcher read and wrote another core's `CpuState` — its resume handle, its
+dispatch slot, its published live address space. Driving
+`reschedule_current` against a foreign core's saved dispatcher context
+context-switches through another task's state; that is kernel memory
+corruption reachable from any unprivileged program, not merely a wrong
+reading. It was latent only because nothing in the tree used `tp` yet.
+
+**Fix.** `sscratch`'s U-mode meaning is now a per-task **trap anchor**
+instead of a bare kernel-stack top: a `TRAP_ANCHOR_BYTES` (16-byte)
+kernel-only region at the top of the task's kernel-stack window whose first
+word carries the kernel `tp` of the hart the task is running on, with the
+trap frame built immediately below it. The from-U prologue spills the user's
+`tp` straight into the frame's new `user_tp` slot and reloads the kernel's
+from the anchor *before any other register is touched*; the U-return path
+publishes the **current** hart's `tp` into the anchor (so a task resumed on a
+different hart re-enters U-mode under that hart's true identity) and then
+restores the user's value. `enter_user` carves and publishes the anchor
+before it arms `sscratch`, and hands a freshly entered task a **zeroed** `tp`
+rather than leaking the kernel's hart id into U-mode.
+
+Because the frame lives on the trapping task's own kernel stack, the same
+change makes the thread pointer genuinely **per task**: U-mode keeps a value
+of its own across every trap and every context switch, which is the platform
+contract thread-local storage rests on. No ABI or C-header impact
+(`TrapFrame` is internal to the arch crate); `PerCpu`/`current_hartid` keep
+their existing "`tp` holds the hart id" semantics, so no other port or
+arch-neutral crate changed.
+
+**Regression cover.** `tests/integration/tp_isolation_qemu_riscv64` is the
+adversarial witness: its U-mode fixture
+(`tests/integration/tp_probe_program`) writes a hostile sentinel into `tp`
+before every `ecall` on a **two-CPU** guest (so the sentinel's low-bit `1`
+names a real sibling rather than an unmapped id that would fall back safely),
+and the dispatch callback fails the run unless `current_hartid()` is still
+the true boot hart; the fixture's own exit code fails the run unless its
+value came back intact. Confirmed to fail without the fix. Host-side,
+`trap_layout_tests.rs` parses every `.equ` out of `trap.s` and pins it
+against the `TrapFrame` field or Rust constant it addresses — removing the
+hand-copied offsets that used to sit in `syscall_entry_tests.rs` — and pins
+the entry ordering (nothing between the swap and the reload may read `tp`)
+and the U-return publish-before-restore ordering. `sret_tests.rs` gained the
+matching `enter_user` anchor/`tp`-clearing ordering test.
 
 ## Non-goals / do not do
 

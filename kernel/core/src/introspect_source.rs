@@ -32,7 +32,7 @@ use tairix_abi::sysinfo::{
 use tairix_abi::{Duration64, Errno, LimitKind, ProcId, Time64};
 use tairix_kernel_mem::PAGE_SIZE;
 use tairix_kernel_sched_api::{Priority, SchedulerPolicy, TaskId, TaskState};
-use tairix_kernel_sec::TaskId as SecTaskId;
+use tairix_kernel_sec::ProcessId;
 use tairix_reclaim::PressureBand;
 
 use crate::bootinfo::KernelArch;
@@ -204,7 +204,7 @@ impl<A: KernelArch + 'static> IntrospectSource for KernelIntrospectSource<A> {
         // survives PID reuse.
         let mut pid_by_proc: Vec<(ProcId, u64)> = Vec::new();
         for record in caps.iter() {
-            pid_by_proc.push((record.proc_id(), record.task().0));
+            pid_by_proc.push((record.proc_id(), record.process().0));
         }
         let resolve_parent = |parent: ProcId| -> u64 {
             pid_by_proc
@@ -223,7 +223,7 @@ impl<A: KernelArch + 'static> IntrospectSource for KernelIntrospectSource<A> {
             .skip(usize::try_from(offset).unwrap_or(usize::MAX))
             .take(max_records)
         {
-            let task_id = record.task().0;
+            let task_id = record.process().0;
             let state = Self::process_state(self.state.scheduler.state_of(task_id));
             let cpu = match SchedulerPolicy::running_cpu(&self.state.scheduler, task_id) {
                 Some(cpu) => u8::try_from(cpu).unwrap_or(PROCESS_CPU_NONE),
@@ -242,7 +242,7 @@ impl<A: KernelArch + 'static> IntrospectSource for KernelIntrospectSource<A> {
             // is re-frozen on every mutating map syscall). A task with no
             // registered space (a pure kernel task) truthfully reports zero.
             let mem_bytes = aspaces
-                .resolve(SecTaskId(task_id))
+                .resolve(ProcessId(task_id))
                 .map_or(0, |(space, _)| space.mapped_pages() as u64)
                 .saturating_mul(PAGE_SIZE as u64);
             // The task's service level from the scheduler's own record. A
@@ -370,12 +370,12 @@ impl<A: KernelArch + 'static> IntrospectSource for KernelIntrospectSource<A> {
         {
             let caps = self.state.caps.read();
             for record in caps.iter() {
-                let state = self.state.scheduler.state_of(record.task().0);
+                let state = self.state.scheduler.state_of(record.process().0);
                 if state == TaskState::Exited {
                     continue;
                 }
                 total = total.saturating_add(1);
-                if counts_toward_load(state, record.task().0, observer) {
+                if counts_toward_load(state, record.process().0, observer) {
                     runnable = runnable.saturating_add(1);
                 }
                 let uid = record.owner().0;
@@ -597,7 +597,7 @@ impl<A: KernelArch + 'static> IntrospectSource for KernelIntrospectSource<A> {
             let id = caps
                 .iter()
                 .find(|record| record.proc_id() == proc_id)
-                .map(tairix_kernel_sec::TaskCapabilities::task);
+                .map(tairix_kernel_sec::TaskCapabilities::process);
             id
         };
         let task_id = found.ok_or(Errno::NotFound)?;
@@ -610,19 +610,19 @@ impl<A: KernelArch + 'static> IntrospectSource for KernelIntrospectSource<A> {
         // positional, never omitting a kind).
         let (limits, aspace_usage, stack_usage, pinned_usage) = {
             let aspaces = self.state.aspaces.read();
-            let task = SecTaskId(task_id.0);
-            // Pinned usage is the whole footprint while the task is
+            let process = ProcessId(task_id.0);
+            // Pinned usage is the whole footprint while the process is
             // pinned and zero otherwise — the budget is only consumed by
-            // a live pin, so an unpinned task honestly reports none.
-            let pinned_usage = if aspaces.is_pinned(task) {
-                aspaces.pinned_footprint_bytes(task)
+            // a live pin, so an unpinned process honestly reports none.
+            let pinned_usage = if aspaces.is_pinned(process) {
+                aspaces.pinned_footprint_bytes(process)
             } else {
                 0
             };
             (
-                aspaces.limits(task),
-                aspaces.mapped_aspace_bytes(task),
-                aspaces.stack_committed_bytes(task),
+                aspaces.limits(process),
+                aspaces.mapped_aspace_bytes(process),
+                aspaces.stack_committed_bytes(process),
                 pinned_usage,
             )
         };

@@ -57,7 +57,7 @@ use alloc::sync::Arc;
 use alloc::vec::Vec;
 
 use tairix_abi::{InputMode, Signal, TerminalSize};
-use tairix_kernel_sec::TaskId;
+use tairix_kernel_sec::ProcessId;
 use tairix_sync::SpinLock;
 
 use crate::foreground::ForegroundOwnership;
@@ -147,7 +147,7 @@ pub enum MasterWriteStep {
         /// Number of input bytes consumed (buffered, or turned into a signal).
         consumed: usize,
         /// `(foreground task, signal)` pairs the caller must deliver.
-        signals: Vec<(TaskId, Signal)>,
+        signals: Vec<(ProcessId, Signal)>,
     },
     /// Every slave end is closed: the bytes can never be read.
     Broken,
@@ -309,7 +309,7 @@ impl PtyMasterEnd {
             None
         };
         let mut consumed = 0usize;
-        let mut signals: Vec<(TaskId, Signal)> = Vec::new();
+        let mut signals: Vec<(ProcessId, Signal)> = Vec::new();
         for &byte in data {
             if let Some(owner) = target {
                 if let Some(signal) = tairix_tty::job_control_signal(byte) {
@@ -563,7 +563,7 @@ mod tests {
         Pty::create(TerminalSize::new(24, 80).unwrap())
     }
 
-    fn wrote(step: MasterWriteStep) -> (usize, Vec<(TaskId, Signal)>) {
+    fn wrote(step: MasterWriteStep) -> (usize, Vec<(ProcessId, Signal)>) {
         match step {
             MasterWriteStep::Wrote { consumed, signals } => (consumed, signals),
             other => panic!("expected Wrote, got {other:?}"),
@@ -731,10 +731,13 @@ mod tests {
     #[test]
     fn cooked_ctrl_c_with_a_foreground_job_is_a_signal_not_input() {
         let (m, s) = pty();
-        m.pty().foreground().grant(TaskId(1), TaskId(2)).unwrap();
+        m.pty()
+            .foreground()
+            .grant(ProcessId(1), ProcessId(2))
+            .unwrap();
         let (consumed, signals) = wrote(m.write(&[0x03], true));
         assert_eq!(consumed, 1);
-        assert_eq!(signals, vec![(TaskId(2), Signal::Interrupt)]);
+        assert_eq!(signals, vec![(ProcessId(2), Signal::Interrupt)]);
         // The byte was consumed as a signal, not buffered.
         let mut out = [0u8; 4];
         assert_eq!(s.read(&mut out), PtyReadStep::Empty);
@@ -743,9 +746,12 @@ mod tests {
     #[test]
     fn cooked_ctrl_z_with_a_foreground_job_maps_to_stop() {
         let (m, _s) = pty();
-        m.pty().foreground().grant(TaskId(1), TaskId(2)).unwrap();
+        m.pty()
+            .foreground()
+            .grant(ProcessId(1), ProcessId(2))
+            .unwrap();
         let (_c, signals) = wrote(m.write(&[0x1A], true));
-        assert_eq!(signals, vec![(TaskId(2), Signal::Stop)]);
+        assert_eq!(signals, vec![(ProcessId(2), Signal::Stop)]);
     }
 
     #[test]
@@ -762,7 +768,10 @@ mod tests {
     #[test]
     fn intercept_false_buffers_the_control_byte_even_with_a_foreground_job() {
         let (m, s) = pty();
-        m.pty().foreground().grant(TaskId(1), TaskId(2)).unwrap();
+        m.pty()
+            .foreground()
+            .grant(ProcessId(1), ProcessId(2))
+            .unwrap();
         let (consumed, signals) = wrote(m.write(&[0x03], false));
         assert_eq!(consumed, 1);
         assert!(signals.is_empty());
@@ -774,7 +783,10 @@ mod tests {
     #[test]
     fn raw_mode_passes_control_bytes_through_even_with_a_foreground_job() {
         let (m, s) = pty();
-        m.pty().foreground().grant(TaskId(1), TaskId(2)).unwrap();
+        m.pty()
+            .foreground()
+            .grant(ProcessId(1), ProcessId(2))
+            .unwrap();
         m.pty().set_input_mode(InputMode::Raw);
         let (consumed, signals) = wrote(m.write(&[0x03], true));
         assert_eq!(consumed, 1);

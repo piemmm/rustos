@@ -16,7 +16,7 @@ use std::vec::Vec;
 
 use tairix_arch_riscv64::plic::{regs, s_mode_context, Plic, PlicController, PlicMmio};
 use tairix_kernel_irq::{FireOutcome, IrqController, IrqTable};
-use tairix_kernel_sec::captable::TaskId;
+use tairix_kernel_sec::captable::ProcessId;
 
 /// In-memory PLIC register file. Serves the last value written to a register
 /// on a subsequent read and records every write in order through a shared log
@@ -60,7 +60,7 @@ fn mask_before_wake_through_irq_table() {
     assert_eq!(controller.source_priority(8), 1);
 
     let table = IrqTable::new(31);
-    let _bind = table.bind(8, TaskId(1)).expect("bind");
+    let _bind = table.bind(8, ProcessId(1)).expect("bind");
     let outcome = table
         .fire(8, &controller as &dyn IrqController)
         .expect("fire");

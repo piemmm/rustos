@@ -26,7 +26,7 @@ use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
 use tairix_abi::{Errno, Signal};
 use tairix_kernel_sched_api::{ExitDisposition, SchedError, SchedulerArch, SchedulerPolicy};
-use tairix_kernel_sec::TaskId;
+use tairix_kernel_sec::{ProcessId, TaskId};
 use tairix_sync::once::OnceCell;
 use tairix_sync::SpinLock;
 
@@ -182,7 +182,7 @@ static KILL_GATE: SpinLock<KillGate> = SpinLock::new(KillGate {
 pub fn syscall_enter(task: u64) {
     let migrated = take_running_kill(task);
     match migrated {
-        Some(DeferredTeardown::Signalled(signal)) => {
+        Some(DeferredTeardown::Signalled { signal, .. }) => {
             let mut gate = KILL_GATE.lock();
             gate.in_syscall.insert(task);
             gate.pending.entry(task).or_insert(signal);
@@ -191,8 +191,8 @@ pub fn syscall_enter(task: u64) {
         // gate; leave it deferred for the dispatch loop, which reclaims once
         // the driver's dispatch retires it (honouring any `Park` in between
         // so handler state is never reclaimed under).
-        Some(DeferredTeardown::Plain) => {
-            insert_deferred(task, DeferredTeardown::Plain);
+        Some(plain @ DeferredTeardown::Plain { .. }) => {
+            insert_deferred(task, plain);
             KILL_GATE.lock().in_syscall.insert(task);
         }
         None => {
@@ -258,31 +258,48 @@ static RUNNING_KILLS: SpinLock<BTreeMap<u64, DeferredTeardown>> = SpinLock::new(
 static PENDING_RUNNING_KILLS: AtomicUsize = AtomicUsize::new(0);
 
 /// What teardown a still-executing task owes once its owning dispatch
-/// retires it. Both kinds reclaim the task's kernel resources; they differ
-/// only in whether a parent's `wait` is also given a signalled-exit status.
+/// retires it. Both kinds reclaim the doomed **process's** kernel resources;
+/// they differ only in whether a parent's `wait` is also given a
+/// signalled-exit status.
+///
+/// The deferral is keyed by the *thread* that is still executing — that is
+/// what the dispatch loop can recognise when it retires a dispatch — but the
+/// teardown it owes names the **process**, because reclaiming an address
+/// space, capability record, endpoints, and open files is a process
+/// operation. Carrying the process here is what keeps the two scopes
+/// straight without the dispatch loop needing to resolve one from the other.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum DeferredTeardown {
     /// A terminating signal was delivered: record `128 + n` for the
     /// parent's `wait` **and** reclaim (the signal-terminate path).
-    Signalled(Signal),
+    Signalled {
+        /// The process to reap and reclaim.
+        process: ProcessId,
+        /// The signal whose status the parent's `wait` reports.
+        signal: Signal,
+    },
     /// A non-signal teardown (an unloaded driver whose process was still
     /// executing): reclaim its kernel resources only, no `wait` reap.
-    Plain,
+    Plain {
+        /// The process to reclaim.
+        process: ProcessId,
+    },
 }
 
-/// Record a termination deferred against `task` while it was executing in
-/// user mode. First request wins: a later signal against an already-doomed
-/// task changes nothing (it is already dying at the same rendezvous),
-/// matching the immediate and in-syscall paths.
-pub fn defer_running_kill(task: u64, signal: Signal) {
-    insert_deferred(task, DeferredTeardown::Signalled(signal));
+/// Record a termination of `process` deferred against its still-executing
+/// thread `task`. First request wins: a later signal against an
+/// already-doomed task changes nothing (it is already dying at the same
+/// rendezvous), matching the immediate and in-syscall paths.
+pub fn defer_running_kill(task: u64, process: ProcessId, signal: Signal) {
+    insert_deferred(task, DeferredTeardown::Signalled { process, signal });
 }
 
-/// Record a non-signal teardown deferred against `task` (an unloaded driver
-/// still executing on another CPU): the dispatch loop reclaims its kernel
-/// resources once the owning dispatch retires it, without a `wait` reap.
-pub fn defer_plain_reclaim(task: u64) {
-    insert_deferred(task, DeferredTeardown::Plain);
+/// Record a non-signal teardown of `process` deferred against its
+/// still-executing thread `task` (an unloaded driver still executing on
+/// another CPU): the dispatch loop reclaims its kernel resources once the
+/// owning dispatch retires it, without a `wait` reap.
+pub fn defer_plain_reclaim(task: u64, process: ProcessId) {
+    insert_deferred(task, DeferredTeardown::Plain { process });
 }
 
 /// Insert a deferred teardown, first-request-wins, keeping the pending
@@ -431,7 +448,7 @@ pub trait ForegroundSignal: Sync {
     ///
     /// [`Errno::NotFound`] when the target no longer exists;
     /// [`Errno::OutOfRange`] for a signal the line discipline never maps.
-    fn deliver(&self, target: TaskId, signal: Signal) -> Result<(), Errno>;
+    fn deliver(&self, target: ProcessId, signal: Signal) -> Result<(), Errno>;
 }
 
 /// The boot-installed [`ForegroundSignal`] hook (set-once per boot).
@@ -469,7 +486,7 @@ pub fn foreground_signal_installed() -> bool {
 /// Reclaims every kernel-held resource of a task that terminated without
 /// running its own `exit` syscall — the seam through which the
 /// signal-terminate path drives the same
-/// `KernelSyscallHandlers::reclaim_task_resources` the `exit` handler
+/// `KernelSyscallHandlers::reclaim_process_resources` the `exit` handler
 /// runs (IRQ bindings, served call endpoints, shared memory, wait-sets,
 /// console foreground ownership, the capability record, and the
 /// address-space registry entry whose open pipe ends wake their parked
@@ -507,7 +524,7 @@ static PENDING_FOREGROUND: AtomicU64 = AtomicU64::new(0);
 /// runs in interrupt context where taking scheduler locks could deadlock
 /// against the interrupted task. A target id that does not fit the packed
 /// slot is refused (fail closed) — scheduler ids stay well below that.
-pub fn queue_foreground_signal(target: TaskId, signal: Signal) {
+pub fn queue_foreground_signal(target: ProcessId, signal: Signal) {
     let Ok(narrow) = u32::try_from(target.0) else {
         return;
     };
@@ -545,7 +562,7 @@ pub fn drain_pending_foreground() -> bool {
         // retried into a later boot phase.
         return false;
     };
-    let target = TaskId(packed >> 32);
+    let target = ProcessId(packed >> 32);
     // The packed low word was a defined discriminant when stored; decode
     // fail-closed anyway rather than trusting the round-trip.
     #[allow(clippy::cast_possible_truncation)] // Low 32 bits by construction.
@@ -583,7 +600,7 @@ pub trait ProcessSignal: Sync {
     /// `sender` — the answer that sends the handler on to its
     /// cross-principal rule. The default producer ([`NullProcessSignal`])
     /// returns [`Errno::NotImplemented`] to mark an inert interface.
-    fn resolve_child(&self, sender: TaskId, pid: i32) -> Result<TaskId, Errno>;
+    fn resolve_child(&self, sender: ProcessId, pid: i32) -> Result<ProcessId, Errno>;
 
     /// Deliver `signal` to an **already-authorised** `target`.
     ///
@@ -597,7 +614,7 @@ pub trait ProcessSignal: Sync {
     /// exited between authorisation and delivery). The default producer
     /// ([`NullProcessSignal`]) returns [`Errno::NotImplemented`] to mark an
     /// inert interface.
-    fn signal_task(&self, target: TaskId, signal: Signal) -> Result<(), Errno>;
+    fn signal_task(&self, target: ProcessId, signal: Signal) -> Result<(), Errno>;
 }
 
 /// The process-signal producer installed before any real one exists.
@@ -610,11 +627,11 @@ pub trait ProcessSignal: Sync {
 pub struct NullProcessSignal;
 
 impl ProcessSignal for NullProcessSignal {
-    fn resolve_child(&self, _sender: TaskId, _pid: i32) -> Result<TaskId, Errno> {
+    fn resolve_child(&self, _sender: ProcessId, _pid: i32) -> Result<ProcessId, Errno> {
         Err(Errno::NotImplemented)
     }
 
-    fn signal_task(&self, _target: TaskId, _signal: Signal) -> Result<(), Errno> {
+    fn signal_task(&self, _target: ProcessId, _signal: Signal) -> Result<(), Errno> {
         Err(Errno::NotImplemented)
     }
 }
@@ -714,7 +731,7 @@ where
     /// [`SchedError::InvalidState`] from `unpark` is folded to `Ok`. A child
     /// the scheduler no longer knows (it exited between authorisation and
     /// delivery) fails closed with [`Errno::NotFound`].
-    fn resume(&self, child: TaskId) -> Result<(), Errno> {
+    fn resume(&self, child: ProcessId) -> Result<(), Errno> {
         // Lift the stop overlay *before* the unpark, so the dispatch that
         // the unpark makes possible finds the task runnable rather than
         // re-parking it.
@@ -736,7 +753,7 @@ where
     /// stop for a `WaitFlags::STOPPED` wait. A child the scheduler no
     /// longer knows fails closed with [`Errno::NotFound`] and leaves no
     /// overlay entry behind.
-    fn stop(&self, child: TaskId) -> Result<(), Errno> {
+    fn stop(&self, child: ProcessId) -> Result<(), Errno> {
         STOPPED_TASKS.lock().insert(child.0);
         if self.scheduler.park(child.0).is_ok() {
             self.wait.record_stop(child, Signal::Stop);
@@ -775,7 +792,7 @@ where
     /// the child is doomed and the parent's `wait` reaps it when the exit is
     /// recorded. Only a child that is neither in a syscall nor executing
     /// ([`ExitDisposition::Quiesced`]) is reaped and reclaimed inline here.
-    fn terminate(&self, child: TaskId, signal: Signal) -> Result<(), Errno> {
+    fn terminate(&self, child: ProcessId, signal: Signal) -> Result<(), Errno> {
         {
             let mut gate = KILL_GATE.lock();
             if gate.in_syscall.contains(&child.0) {
@@ -815,7 +832,7 @@ where
                 // delivery is still complete from the caller's view — the
                 // child is doomed and its `wait` reap follows.
                 STOPPED_TASKS.lock().remove(&child.0);
-                defer_running_kill(child.0, signal);
+                defer_running_kill(child.0, child, signal);
                 Ok(())
             }
             Ok(ExitDisposition::AlreadyExited) => {
@@ -834,7 +851,7 @@ where
     /// definition shared by the immediate ([`ExitDisposition::Quiesced`])
     /// terminate arm and the deferred dispatch-loop landing
     /// ([`DeferredKillLander`]), so both death timings tear down identically.
-    fn land_termination(&self, child: TaskId, signal: Signal) {
+    fn land_termination(&self, child: ProcessId, signal: Signal) {
         // `termination_status` is `Some` for every terminating signal
         // (Terminate/Kill/Interrupt); this is never reached for
         // Continue or Stop.
@@ -859,7 +876,7 @@ where
     /// parent's `Terminate` take exactly the same path and can never
     /// diverge. Authority is decided by each caller before it arrives:
     /// nothing here consults the parent/child table or a capability.
-    fn deliver_signal(&self, target: TaskId, signal: Signal) -> Result<(), Errno> {
+    fn deliver_signal(&self, target: ProcessId, signal: Signal) -> Result<(), Errno> {
         match signal {
             Signal::Continue => self.resume(target),
             // A termination *request* is observable: an opted-in target with
@@ -887,19 +904,22 @@ where
     A: SchedulerArch + Send + Sync + 'static,
     P: SchedulerPolicy<A> + Send + Sync + 'static,
 {
-    fn land_deferred_teardown(&self, task: TaskId, teardown: DeferredTeardown) {
-        // The task has returned to the dispatch loop and executes nowhere,
-        // so the teardown deferred at request time is now safe.
+    fn land_deferred_teardown(&self, _thread: TaskId, teardown: DeferredTeardown) {
+        // The thread has returned to the dispatch loop and executes nowhere,
+        // so the teardown deferred at request time is now safe. The process
+        // it owes is carried by the deferral itself.
         match teardown {
             // A signalled kill: the very reap+reclaim the immediate
             // terminate path runs, one definition.
-            DeferredTeardown::Signalled(signal) => self.land_termination(task, signal),
+            DeferredTeardown::Signalled { process, signal } => {
+                self.land_termination(process, signal);
+            }
             // A driver unload whose process was still executing: reclaim its
             // kernel resources only, with no `wait` reap (a driver is not a
             // waited-for child).
-            DeferredTeardown::Plain => {
+            DeferredTeardown::Plain { process } => {
                 if let Ok(Some(hook)) = self.reclaim.get() {
-                    hook.reclaim(task.0);
+                    hook.reclaim(process.0);
                 }
             }
         }
@@ -911,14 +931,14 @@ where
     A: SchedulerArch + Send + Sync + 'static,
     P: SchedulerPolicy<A> + Send + Sync + 'static,
 {
-    fn resolve_child(&self, sender: TaskId, pid: i32) -> Result<TaskId, Errno> {
+    fn resolve_child(&self, sender: ProcessId, pid: i32) -> Result<ProcessId, Errno> {
         // The `wait` producer already owns the parent/child bookkeeping, so
         // who-parents-whom is answered in one place for both syscalls. A
         // live child of `sender` resolves; anything else is `NotFound`.
         self.wait.authorise_child(sender, pid)
     }
 
-    fn signal_task(&self, target: TaskId, signal: Signal) -> Result<(), Errno> {
+    fn signal_task(&self, target: ProcessId, signal: Signal) -> Result<(), Errno> {
         self.deliver_signal(target, signal)
     }
 }
@@ -928,7 +948,7 @@ where
     A: SchedulerArch + Send + Sync + 'static,
     P: SchedulerPolicy<A> + Send + Sync + 'static,
 {
-    fn deliver(&self, target: TaskId, signal: Signal) -> Result<(), Errno> {
+    fn deliver(&self, target: ProcessId, signal: Signal) -> Result<(), Errno> {
         // No parent/child authorisation here: the authority was checked when
         // the parent marked the target foreground on its own console, and
         // the console line discipline is the kernel acting on the terminal
@@ -989,7 +1009,7 @@ pub(crate) fn running_kill_test_lock() -> std::sync::MutexGuard<'static, ()> {
 /// line-discipline tests can assert what the filter queued without invoking
 /// whichever process-global hook another test may have installed.
 #[cfg(test)]
-pub(crate) fn take_pending_foreground_for_test() -> Option<(TaskId, Signal)> {
+pub(crate) fn take_pending_foreground_for_test() -> Option<(ProcessId, Signal)> {
     let packed = PENDING_FOREGROUND.swap(0, Ordering::Acquire);
     if packed == 0 {
         return None;
@@ -997,7 +1017,7 @@ pub(crate) fn take_pending_foreground_for_test() -> Option<(TaskId, Signal)> {
     #[allow(clippy::cast_possible_truncation)] // Low 32 bits by construction.
     Signal::from_u32(packed as u32)
         .ok()
-        .map(|signal| (TaskId(packed >> 32), signal))
+        .map(|signal| (ProcessId(packed >> 32), signal))
 }
 
 /// Test-only: whether some [`ForegroundSignal`] hook is installed, and if
@@ -1007,7 +1027,7 @@ pub(crate) fn take_pending_foreground_for_test() -> Option<(TaskId, Signal)> {
 pub(crate) fn ensure_foreground_hook_for_test() {
     struct InertHook;
     impl ForegroundSignal for InertHook {
-        fn deliver(&self, _target: TaskId, _signal: Signal) -> Result<(), Errno> {
+        fn deliver(&self, _target: ProcessId, _signal: Signal) -> Result<(), Errno> {
             Ok(())
         }
     }
@@ -1064,7 +1084,7 @@ mod tests {
     /// path and the delivery mechanics.
     fn signal_child(
         signaller: &KernelProcessSignal<TestArch, Scheduler<TestArch>>,
-        sender: TaskId,
+        sender: ProcessId,
         pid: i32,
         signal: Signal,
     ) -> Result<(), Errno> {
@@ -1077,7 +1097,7 @@ mod tests {
         // Neither half of the inert default answers: it resolves no target
         // and delivers to none, rather than pretending either succeeded.
         assert_eq!(
-            NULL_PROCESS_SIGNAL.resolve_child(TaskId(1), 2),
+            NULL_PROCESS_SIGNAL.resolve_child(ProcessId(1), 2),
             Err(Errno::NotImplemented)
         );
         // Every variant of the closed signal set fails closed on delivery.
@@ -1089,7 +1109,7 @@ mod tests {
             Signal::Stop,
         ] {
             assert_eq!(
-                NULL_PROCESS_SIGNAL.signal_task(TaskId(2), signal),
+                NULL_PROCESS_SIGNAL.signal_task(ProcessId(2), signal),
                 Err(Errno::NotImplemented)
             );
         }
@@ -1101,15 +1121,15 @@ mod tests {
         let signaller = KernelProcessSignal::new(wait, scheduler);
         // A caller with no children resolves nothing to signal.
         assert_eq!(
-            signal_child(&signaller, TaskId(1), 2, Signal::Terminate),
+            signal_child(&signaller, ProcessId(1), 2, Signal::Terminate),
             Err(Errno::NotFound)
         );
         // A live task that is not *this* caller's child is off-limits: task 9
         // may not reach task 7's child through the child rule.
         let (child, child_pid) = spawn_child(scheduler);
-        wait.register_child(TaskId(7), TaskId(child));
+        wait.register_child(ProcessId(7), ProcessId(child));
         assert_eq!(
-            signal_child(&signaller, TaskId(9), child_pid, Signal::Kill),
+            signal_child(&signaller, ProcessId(9), child_pid, Signal::Kill),
             Err(Errno::NotFound)
         );
         // The child was untouched by the unresolved signal.
@@ -1121,11 +1141,11 @@ mod tests {
         let _overlay = stopped_overlay_test_lock();
         let (wait, scheduler) = scaffold();
         let (child, child_pid) = spawn_child(scheduler);
-        wait.register_child(TaskId(7), TaskId(child));
+        wait.register_child(ProcessId(7), ProcessId(child));
         let signaller = KernelProcessSignal::new(wait, scheduler);
 
         assert_eq!(
-            signal_child(&signaller, TaskId(7), child_pid, Signal::Terminate),
+            signal_child(&signaller, ProcessId(7), child_pid, Signal::Terminate),
             Ok(())
         );
         // The child was terminated on the scheduler.
@@ -1134,7 +1154,7 @@ mod tests {
         // as if it had exited with that code itself.
         let pid = u32::try_from(child).expect("host task id fits u32");
         assert_eq!(
-            wait.wait(TaskId(7), tairix_abi::WAIT_PID_ANY, WaitFlags::empty()),
+            wait.wait(ProcessId(7), tairix_abi::WAIT_PID_ANY, WaitFlags::empty()),
             Ok(WaitedChild {
                 pid,
                 status: WaitStatus::Exited(143)
@@ -1159,7 +1179,7 @@ mod tests {
         let _overlay = stopped_overlay_test_lock();
         let (wait, scheduler) = scaffold();
         let (child, child_pid) = spawn_child(scheduler);
-        wait.register_child(TaskId(7), TaskId(child));
+        wait.register_child(ProcessId(7), ProcessId(child));
         let signaller = KernelProcessSignal::new(wait, scheduler);
 
         // The child is mid-syscall: its handler may hold kernel state only
@@ -1169,7 +1189,7 @@ mod tests {
         // lock held forever, deadlocking every later filesystem call.
         syscall_enter(child);
         assert_eq!(
-            signal_child(&signaller, TaskId(7), child_pid, Signal::Kill),
+            signal_child(&signaller, ProcessId(7), child_pid, Signal::Kill),
             Ok(())
         );
         // The child was not destroyed mid-handler: it is still live on the
@@ -1178,7 +1198,7 @@ mod tests {
         assert_eq!(scheduler.live_task_count(), 1);
         assert!(kill_pending(child));
         assert_eq!(
-            wait.poll(TaskId(7), tairix_abi::WAIT_PID_ANY, WaitFlags::empty()),
+            wait.poll(ProcessId(7), tairix_abi::WAIT_PID_ANY, WaitFlags::empty()),
             Err(Errno::WouldBlock)
         );
         // The syscall boundary takes the deferred kill exactly once.
@@ -1191,12 +1211,12 @@ mod tests {
         let _overlay = stopped_overlay_test_lock();
         let (wait, scheduler) = scaffold();
         let (child, child_pid) = spawn_child(scheduler);
-        wait.register_child(TaskId(7), TaskId(child));
+        wait.register_child(ProcessId(7), ProcessId(child));
         let signaller = KernelProcessSignal::new(wait, scheduler);
 
         syscall_enter(child);
         assert_eq!(
-            signal_child(&signaller, TaskId(7), child_pid, Signal::Terminate),
+            signal_child(&signaller, ProcessId(7), child_pid, Signal::Terminate),
             Ok(())
         );
         // A follow-up `Kill` against the already-doomed child changes
@@ -1204,7 +1224,7 @@ mod tests {
         // status — matching the immediate path, where a second signal finds
         // the child already gone.
         assert_eq!(
-            signal_child(&signaller, TaskId(7), child_pid, Signal::Kill),
+            signal_child(&signaller, ProcessId(7), child_pid, Signal::Kill),
             Ok(())
         );
         assert_eq!(syscall_exit_take_kill(child), Some(Signal::Terminate));
@@ -1235,14 +1255,14 @@ mod tests {
         let _overlay = stopped_overlay_test_lock();
         let (wait, scheduler) = scaffold();
         let (child, child_pid) = spawn_child(scheduler);
-        wait.register_child(TaskId(7), TaskId(child));
+        wait.register_child(ProcessId(7), ProcessId(child));
         let signaller = KernelProcessSignal::new(wait, scheduler);
         signaller
             .install_task_reclaim(&RecordingReclaim)
             .expect("first install on this producer");
 
         assert_eq!(
-            signal_child(&signaller, TaskId(7), child_pid, Signal::Kill),
+            signal_child(&signaller, ProcessId(7), child_pid, Signal::Kill),
             Ok(())
         );
         assert!(RECLAIMED.lock().contains(&child));
@@ -1260,9 +1280,9 @@ mod tests {
         let _ = take_running_kill(b);
         let before = PENDING_RUNNING_KILLS.load(Ordering::Relaxed);
 
-        defer_running_kill(a, Signal::Kill);
+        defer_running_kill(a, ProcessId(a), Signal::Kill);
         // First request wins: a later signal against the same task is ignored.
-        defer_running_kill(a, Signal::Terminate);
+        defer_running_kill(a, ProcessId(a), Signal::Terminate);
         assert_eq!(
             PENDING_RUNNING_KILLS.load(Ordering::Relaxed),
             before + 1,
@@ -1270,7 +1290,10 @@ mod tests {
         );
         assert_eq!(
             take_running_kill(a),
-            Some(DeferredTeardown::Signalled(Signal::Kill)),
+            Some(DeferredTeardown::Signalled {
+                process: ProcessId(a),
+                signal: Signal::Kill
+            }),
             "the first-recorded signal is taken"
         );
         assert_eq!(take_running_kill(a), None, "taken exactly once");
@@ -1279,7 +1302,7 @@ mod tests {
         // `clear_running_kill` drops an entry without landing it (the
         // self-exit/fault teardown path, so the dispatch loop never lands a
         // kill for an already-reclaimed task).
-        defer_running_kill(b, Signal::Kill);
+        defer_running_kill(b, ProcessId(b), Signal::Kill);
         clear_running_kill(b);
         assert_eq!(take_running_kill(b), None);
         assert_eq!(PENDING_RUNNING_KILLS.load(Ordering::Relaxed), before);
@@ -1297,7 +1320,7 @@ mod tests {
         let _ = take_running_kill(plain_id);
 
         // A signalled kill migrates into the gate and out of RUNNING_KILLS.
-        defer_running_kill(sig_id, Signal::Terminate);
+        defer_running_kill(sig_id, ProcessId(sig_id), Signal::Terminate);
         syscall_enter(sig_id);
         assert_eq!(
             take_running_kill(sig_id),
@@ -1309,12 +1332,14 @@ mod tests {
 
         // A plain reclaim carries no signal for the gate; it stays deferred
         // for the dispatch loop.
-        defer_plain_reclaim(plain_id);
+        defer_plain_reclaim(plain_id, ProcessId(plain_id));
         syscall_enter(plain_id);
         assert!(!kill_pending(plain_id), "no signal handed to the gate");
         assert_eq!(
             take_running_kill(plain_id),
-            Some(DeferredTeardown::Plain),
+            Some(DeferredTeardown::Plain {
+                process: ProcessId(plain_id)
+            }),
             "still deferred for the dispatch loop"
         );
         clear_kill_gate(plain_id);
@@ -1337,13 +1362,13 @@ mod tests {
     impl DeferredKillLander for TestLander {
         fn land_deferred_teardown(&self, task: TaskId, teardown: DeferredTeardown) {
             match teardown {
-                DeferredTeardown::Signalled(signal) => {
+                DeferredTeardown::Signalled { signal, .. } => {
                     if let Some(status) = signal.termination_status() {
                         LAND_REAPED.lock().insert(task.0, status);
                     }
                     LAND_RECLAIMED.lock().insert(task.0);
                 }
-                DeferredTeardown::Plain => {
+                DeferredTeardown::Plain { .. } => {
                     LAND_RECLAIMED.lock().insert(task.0);
                 }
             }
@@ -1384,7 +1409,7 @@ mod tests {
 
         // The scheduler reported the victim still-executing, so terminate
         // deferred rather than landing: the entry is pending and untouched.
-        defer_running_kill(child, Signal::Kill);
+        defer_running_kill(child, ProcessId(child), Signal::Kill);
         assert!(!LAND_RECLAIMED.lock().contains(&child));
 
         // The dispatch loop lands it once the task has retired (executes
@@ -1416,7 +1441,7 @@ mod tests {
         let _ = take_running_kill(child);
         LAND_RECLAIMED.lock().remove(&child);
 
-        defer_running_kill(child, Signal::Kill);
+        defer_running_kill(child, ProcessId(child), Signal::Kill);
         clear_running_kill(child);
         land_running_kill(child);
         assert_eq!(take_running_kill(child), None, "nothing left to land");
@@ -1439,7 +1464,7 @@ mod tests {
         LAND_RECLAIMED.lock().remove(&driver);
         LAND_REAPED.lock().remove(&driver);
 
-        defer_plain_reclaim(driver);
+        defer_plain_reclaim(driver, ProcessId(driver));
         land_running_kill(driver);
         assert_eq!(take_running_kill(driver), None, "the deferral was consumed");
         if ours {
@@ -1462,18 +1487,24 @@ mod tests {
         let _overlay = stopped_overlay_test_lock();
         let (wait, scheduler) = scaffold();
         let (child, _pid) = spawn_child(scheduler);
-        wait.register_child(TaskId(7), TaskId(child));
+        wait.register_child(ProcessId(7), ProcessId(child));
         let signaller = KernelProcessSignal::new(wait, scheduler);
         signaller
             .install_task_reclaim(&RecordingReclaim)
             .expect("first install on this producer");
 
         // Signalled: reclaim the resources and record the kill's 137 status.
-        signaller.land_deferred_teardown(TaskId(child), DeferredTeardown::Signalled(Signal::Kill));
+        signaller.land_deferred_teardown(
+            TaskId(child),
+            DeferredTeardown::Signalled {
+                process: ProcessId(child),
+                signal: Signal::Kill,
+            },
+        );
         assert!(RECLAIMED.lock().contains(&child));
         let pid = u32::try_from(child).expect("host task id fits u32");
         assert_eq!(
-            wait.wait(TaskId(7), tairix_abi::WAIT_PID_ANY, WaitFlags::empty()),
+            wait.wait(ProcessId(7), tairix_abi::WAIT_PID_ANY, WaitFlags::empty()),
             Ok(WaitedChild {
                 pid,
                 status: WaitStatus::Exited(137)
@@ -1484,10 +1515,15 @@ mod tests {
         let driver = scheduler
             .spawn(0, Priority::Normal, |_| TaskAction::Exit)
             .expect("driver task");
-        signaller.land_deferred_teardown(TaskId(driver), DeferredTeardown::Plain);
+        signaller.land_deferred_teardown(
+            TaskId(driver),
+            DeferredTeardown::Plain {
+                process: ProcessId(driver),
+            },
+        );
         assert!(RECLAIMED.lock().contains(&driver));
         assert_eq!(
-            wait.poll(TaskId(7), tairix_abi::WAIT_PID_ANY, WaitFlags::empty()),
+            wait.poll(ProcessId(7), tairix_abi::WAIT_PID_ANY, WaitFlags::empty()),
             Err(Errno::NotFound),
             "a plain reclaim records no reap"
         );
@@ -1498,17 +1534,17 @@ mod tests {
         let _overlay = stopped_overlay_test_lock();
         let (wait, scheduler) = scaffold();
         let (child, child_pid) = spawn_child(scheduler);
-        wait.register_child(TaskId(7), TaskId(child));
+        wait.register_child(ProcessId(7), ProcessId(child));
         let signaller = KernelProcessSignal::new(wait, scheduler);
 
         assert_eq!(
-            signal_child(&signaller, TaskId(7), child_pid, Signal::Kill),
+            signal_child(&signaller, ProcessId(7), child_pid, Signal::Kill),
             Ok(())
         );
         let pid = u32::try_from(child).expect("host task id fits u32");
         // Kill surfaces as SIGKILL's familiar 137, distinct from Terminate.
         assert_eq!(
-            wait.wait(TaskId(7), tairix_abi::WAIT_PID_ANY, WaitFlags::empty()),
+            wait.wait(ProcessId(7), tairix_abi::WAIT_PID_ANY, WaitFlags::empty()),
             Ok(WaitedChild {
                 pid,
                 status: WaitStatus::Exited(137)
@@ -1521,18 +1557,18 @@ mod tests {
         let _overlay = stopped_overlay_test_lock();
         let (wait, scheduler) = scaffold();
         let (child, child_pid) = spawn_child(scheduler);
-        wait.register_child(TaskId(7), TaskId(child));
+        wait.register_child(ProcessId(7), ProcessId(child));
         let signaller = KernelProcessSignal::new(wait, scheduler);
 
         assert_eq!(
-            signal_child(&signaller, TaskId(7), child_pid, Signal::Interrupt),
+            signal_child(&signaller, ProcessId(7), child_pid, Signal::Interrupt),
             Ok(())
         );
         assert_eq!(scheduler.live_task_count(), 0);
         let pid = u32::try_from(child).expect("host task id fits u32");
         // Interrupt surfaces as the `^C` 130 every POSIX shell reports.
         assert_eq!(
-            wait.wait(TaskId(7), tairix_abi::WAIT_PID_ANY, WaitFlags::empty()),
+            wait.wait(ProcessId(7), tairix_abi::WAIT_PID_ANY, WaitFlags::empty()),
             Ok(WaitedChild {
                 pid,
                 status: WaitStatus::Exited(130)
@@ -1545,11 +1581,11 @@ mod tests {
         let _overlay = stopped_overlay_test_lock();
         let (wait, scheduler) = scaffold();
         let (child, child_pid) = spawn_child(scheduler);
-        wait.register_child(TaskId(7), TaskId(child));
+        wait.register_child(ProcessId(7), ProcessId(child));
         let signaller = KernelProcessSignal::new(wait, scheduler);
 
         assert_eq!(
-            signal_child(&signaller, TaskId(7), child_pid, Signal::Stop),
+            signal_child(&signaller, ProcessId(7), child_pid, Signal::Stop),
             Ok(())
         );
         // The stop overlay holds the child, so no broadcast wake can run it.
@@ -1559,7 +1595,7 @@ mod tests {
         // … and a STOPPED wait observes the stop without reaping.
         assert_eq!(
             wait.poll(
-                TaskId(7),
+                ProcessId(7),
                 tairix_abi::WAIT_PID_ANY,
                 WaitFlags::from_bits(WaitFlags::NONBLOCK.bits() | WaitFlags::STOPPED.bits())
                     .expect("defined bits")
@@ -1571,7 +1607,7 @@ mod tests {
         );
         // Continue lifts the overlay and resumes the child.
         assert_eq!(
-            signal_child(&signaller, TaskId(7), child_pid, Signal::Continue),
+            signal_child(&signaller, ProcessId(7), child_pid, Signal::Continue),
             Ok(())
         );
         assert!(!task_is_stopped(child));
@@ -1583,21 +1619,21 @@ mod tests {
         let _overlay = stopped_overlay_test_lock();
         let (wait, scheduler) = scaffold();
         let (child, child_pid) = spawn_child(scheduler);
-        wait.register_child(TaskId(7), TaskId(child));
+        wait.register_child(ProcessId(7), ProcessId(child));
         let signaller = KernelProcessSignal::new(wait, scheduler);
 
         assert_eq!(
-            signal_child(&signaller, TaskId(7), child_pid, Signal::Stop),
+            signal_child(&signaller, ProcessId(7), child_pid, Signal::Stop),
             Ok(())
         );
         assert_eq!(
-            signal_child(&signaller, TaskId(7), child_pid, Signal::Continue),
+            signal_child(&signaller, ProcessId(7), child_pid, Signal::Continue),
             Ok(())
         );
         // The unobserved stop was cleared by the resume: nothing to report.
         assert_eq!(
             wait.poll(
-                TaskId(7),
+                ProcessId(7),
                 tairix_abi::WAIT_PID_ANY,
                 WaitFlags::from_bits(WaitFlags::NONBLOCK.bits() | WaitFlags::STOPPED.bits())
                     .expect("defined bits")
@@ -1611,23 +1647,23 @@ mod tests {
         let _overlay = stopped_overlay_test_lock();
         let (wait, scheduler) = scaffold();
         let (child, child_pid) = spawn_child(scheduler);
-        wait.register_child(TaskId(7), TaskId(child));
+        wait.register_child(ProcessId(7), ProcessId(child));
         let signaller = KernelProcessSignal::new(wait, scheduler);
 
         assert_eq!(
-            signal_child(&signaller, TaskId(7), child_pid, Signal::Stop),
+            signal_child(&signaller, ProcessId(7), child_pid, Signal::Stop),
             Ok(())
         );
         assert!(task_is_stopped(child));
         assert_eq!(
-            signal_child(&signaller, TaskId(7), child_pid, Signal::Kill),
+            signal_child(&signaller, ProcessId(7), child_pid, Signal::Kill),
             Ok(())
         );
         // The dead child leaves no stale overlay entry behind.
         assert!(!task_is_stopped(child));
         // The terminal exit superseded the unobserved stop.
         assert_eq!(
-            wait.wait(TaskId(7), tairix_abi::WAIT_PID_ANY, WaitFlags::STOPPED),
+            wait.wait(ProcessId(7), tairix_abi::WAIT_PID_ANY, WaitFlags::STOPPED),
             Ok(WaitedChild {
                 pid: u32::try_from(child).expect("host task id fits u32"),
                 status: WaitStatus::Exited(137)
@@ -1640,25 +1676,28 @@ mod tests {
         let _overlay = stopped_overlay_test_lock();
         let (wait, scheduler) = scaffold();
         let (child, _child_pid) = spawn_child(scheduler);
-        wait.register_child(TaskId(7), TaskId(child));
+        wait.register_child(ProcessId(7), ProcessId(child));
         let signaller = KernelProcessSignal::new(wait, scheduler);
 
         // The console path never delivers Continue/Terminate/Kill.
         for signal in [Signal::Continue, Signal::Terminate, Signal::Kill] {
             assert_eq!(
-                signaller.deliver(TaskId(child), signal),
+                signaller.deliver(ProcessId(child), signal),
                 Err(Errno::OutOfRange)
             );
         }
         // `^Z` stops the foreground task …
-        assert_eq!(signaller.deliver(TaskId(child), Signal::Stop), Ok(()));
+        assert_eq!(signaller.deliver(ProcessId(child), Signal::Stop), Ok(()));
         assert!(task_is_stopped(child));
         assert_eq!(scheduler.live_task_count(), 1);
         // … and `^C` terminates it with the 130 status.
-        assert_eq!(signaller.deliver(TaskId(child), Signal::Interrupt), Ok(()));
+        assert_eq!(
+            signaller.deliver(ProcessId(child), Signal::Interrupt),
+            Ok(())
+        );
         assert_eq!(scheduler.live_task_count(), 0);
         assert_eq!(
-            wait.wait(TaskId(7), tairix_abi::WAIT_PID_ANY, WaitFlags::empty()),
+            wait.wait(ProcessId(7), tairix_abi::WAIT_PID_ANY, WaitFlags::empty()),
             Ok(WaitedChild {
                 pid: u32::try_from(child).expect("host task id fits u32"),
                 status: WaitStatus::Exited(130)
@@ -1672,11 +1711,11 @@ mod tests {
         let signaller = KernelProcessSignal::new(wait, scheduler);
         // Task 9999 was never admitted: the delivery reaches no one.
         assert_eq!(
-            signaller.deliver(TaskId(9999), Signal::Interrupt),
+            signaller.deliver(ProcessId(9999), Signal::Interrupt),
             Err(Errno::NotFound)
         );
         assert_eq!(
-            signaller.deliver(TaskId(9999), Signal::Stop),
+            signaller.deliver(ProcessId(9999), Signal::Stop),
             Err(Errno::NotFound)
         );
         // A refused stop leaves no overlay entry behind.
@@ -1688,7 +1727,7 @@ mod tests {
         // The pending slot is process-global, so serialise against the
         // console line-discipline tests that share it.
         let _guard = foreground_test_lock();
-        queue_foreground_signal(TaskId(77), Signal::Interrupt);
+        queue_foreground_signal(ProcessId(77), Signal::Interrupt);
         // The drain consumes the slot (delivering only if a boot-style hook
         // was installed by another test; either way the slot empties).
         drain_pending_foreground();
@@ -1701,20 +1740,20 @@ mod tests {
         let _overlay = stopped_overlay_test_lock();
         let (wait, scheduler) = scaffold();
         let (child, child_pid) = spawn_child(scheduler);
-        wait.register_child(TaskId(7), TaskId(child));
+        wait.register_child(ProcessId(7), ProcessId(child));
         let signaller = KernelProcessSignal::new(wait, scheduler);
 
         // The child is runnable, not stopped, so Continue succeeds as a no-op
         // (it neither terminates the child nor records an exit).
         assert_eq!(
-            signal_child(&signaller, TaskId(7), child_pid, Signal::Continue),
+            signal_child(&signaller, ProcessId(7), child_pid, Signal::Continue),
             Ok(())
         );
         assert_eq!(scheduler.live_task_count(), 1);
         // The child is still a live, signallable child (no status recorded).
         assert_eq!(
-            wait.authorise_child(TaskId(7), child_pid),
-            Ok(TaskId(child))
+            wait.authorise_child(ProcessId(7), child_pid),
+            Ok(ProcessId(child))
         );
     }
 
@@ -1795,31 +1834,31 @@ mod tests {
         let (wait, scheduler) = scaffold();
         let (child, child_pid) = spawn_child(scheduler);
         clear_intake(child);
-        wait.register_child(TaskId(7), TaskId(child));
+        wait.register_child(ProcessId(7), ProcessId(child));
         let signaller = KernelProcessSignal::new(wait, scheduler);
 
         intake_enable(child);
         // The interrupt is recorded, not delivered as a termination: the
         // child stays live and nothing becomes reapable.
         assert_eq!(
-            signal_child(&signaller, TaskId(7), child_pid, Signal::Interrupt),
+            signal_child(&signaller, ProcessId(7), child_pid, Signal::Interrupt),
             Ok(())
         );
         assert_eq!(scheduler.live_task_count(), 1);
         assert_eq!(
-            wait.poll(TaskId(7), tairix_abi::WAIT_PID_ANY, WaitFlags::NONBLOCK),
+            wait.poll(ProcessId(7), tairix_abi::WAIT_PID_ANY, WaitFlags::NONBLOCK),
             Err(Errno::WouldBlock)
         );
         assert_eq!(intake_take(child), Ok(Signal::Interrupt));
         // `Kill` is unconditionally fatal regardless of the opt-in and
         // reaps with SIGKILL's familiar 137.
         assert_eq!(
-            signal_child(&signaller, TaskId(7), child_pid, Signal::Kill),
+            signal_child(&signaller, ProcessId(7), child_pid, Signal::Kill),
             Ok(())
         );
         assert_eq!(scheduler.live_task_count(), 0);
         assert_eq!(
-            wait.wait(TaskId(7), tairix_abi::WAIT_PID_ANY, WaitFlags::empty()),
+            wait.wait(ProcessId(7), tairix_abi::WAIT_PID_ANY, WaitFlags::empty()),
             Ok(WaitedChild {
                 pid: u32::try_from(child).expect("host task id fits u32"),
                 status: WaitStatus::Exited(137)
@@ -1835,12 +1874,12 @@ mod tests {
         let (wait, scheduler) = scaffold();
         let (child, child_pid) = spawn_child(scheduler);
         clear_intake(child);
-        wait.register_child(TaskId(7), TaskId(child));
+        wait.register_child(ProcessId(7), ProcessId(child));
         let signaller = KernelProcessSignal::new(wait, scheduler);
 
         intake_enable(child);
         assert_eq!(
-            signal_child(&signaller, TaskId(7), child_pid, Signal::Interrupt),
+            signal_child(&signaller, ProcessId(7), child_pid, Signal::Interrupt),
             Ok(())
         );
         assert_eq!(scheduler.live_task_count(), 1);
@@ -1848,12 +1887,12 @@ mod tests {
         // child with the `^C` 130 — an unresponsive opted-in program stays
         // killable with plain `^C ^C`.
         assert_eq!(
-            signal_child(&signaller, TaskId(7), child_pid, Signal::Interrupt),
+            signal_child(&signaller, ProcessId(7), child_pid, Signal::Interrupt),
             Ok(())
         );
         assert_eq!(scheduler.live_task_count(), 0);
         assert_eq!(
-            wait.wait(TaskId(7), tairix_abi::WAIT_PID_ANY, WaitFlags::empty()),
+            wait.wait(ProcessId(7), tairix_abi::WAIT_PID_ANY, WaitFlags::empty()),
             Ok(WaitedChild {
                 pid: u32::try_from(child).expect("host task id fits u32"),
                 status: WaitStatus::Exited(130)
@@ -1869,20 +1908,26 @@ mod tests {
         let (wait, scheduler) = scaffold();
         let (child, _child_pid) = spawn_child(scheduler);
         clear_intake(child);
-        wait.register_child(TaskId(7), TaskId(child));
+        wait.register_child(ProcessId(7), ProcessId(child));
         let signaller = KernelProcessSignal::new(wait, scheduler);
 
         intake_enable(child);
         // The console `^C` is observed, not fatal …
-        assert_eq!(signaller.deliver(TaskId(child), Signal::Interrupt), Ok(()));
+        assert_eq!(
+            signaller.deliver(ProcessId(child), Signal::Interrupt),
+            Ok(())
+        );
         assert_eq!(scheduler.live_task_count(), 1);
         assert_eq!(intake_take(child), Ok(Signal::Interrupt));
         // … and `^Z` still stops the opted-in target (only termination
         // requests are observable; `Stop` stays scheduler-side).
-        assert_eq!(signaller.deliver(TaskId(child), Signal::Stop), Ok(()));
+        assert_eq!(signaller.deliver(ProcessId(child), Signal::Stop), Ok(()));
         assert!(task_is_stopped(child));
         // Lift the overlay so the shared set holds no stale entry.
-        assert_eq!(signaller.deliver(TaskId(child), Signal::Interrupt), Ok(()));
+        assert_eq!(
+            signaller.deliver(ProcessId(child), Signal::Interrupt),
+            Ok(())
+        );
         assert_eq!(intake_take(child), Ok(Signal::Interrupt));
         STOPPED_TASKS.lock().remove(&child);
         clear_intake(child);
@@ -1893,17 +1938,17 @@ mod tests {
         let _overlay = stopped_overlay_test_lock();
         let (wait, scheduler) = scaffold();
         let (child, child_pid) = spawn_child(scheduler);
-        wait.register_child(TaskId(7), TaskId(child));
+        wait.register_child(ProcessId(7), ProcessId(child));
         let signaller = KernelProcessSignal::new(wait, scheduler);
 
         assert_eq!(
-            signal_child(&signaller, TaskId(7), child_pid, Signal::Terminate),
+            signal_child(&signaller, ProcessId(7), child_pid, Signal::Terminate),
             Ok(())
         );
         // Once terminated the child is a zombie awaiting reap, not a live
         // process: a second signal fails closed rather than re-terminating it.
         assert_eq!(
-            signal_child(&signaller, TaskId(7), child_pid, Signal::Kill),
+            signal_child(&signaller, ProcessId(7), child_pid, Signal::Kill),
             Err(Errno::NotFound)
         );
     }

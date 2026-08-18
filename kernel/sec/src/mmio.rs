@@ -98,7 +98,7 @@ pub fn map_mmio<P: PageTable, S: Sink + ?Sized>(
         let mut uid_buf = [0u8; 12];
         let mut phys_buf = [0u8; 16];
         let mut len_buf = [0u8; 12];
-        let task_str = format_hex_u64(caller.task().0, &mut task_buf);
+        let task_str = format_hex_u64(caller.process().0, &mut task_buf);
         let uid_str = format_usize(caller.owner().0 as usize, &mut uid_buf);
         let phys_str = format_hex_u64(phys_base, &mut phys_buf);
         let len_str = format_usize(len, &mut len_buf);
@@ -107,7 +107,7 @@ pub fn map_mmio<P: PageTable, S: Sink + ?Sized>(
             AuditEvent::MmioMapDenied,
             &[
                 Field {
-                    key: "task",
+                    key: "proc",
                     value: tairix_log::FieldValue::Str(task_str),
                 },
                 Field {
@@ -130,7 +130,7 @@ pub fn map_mmio<P: PageTable, S: Sink + ?Sized>(
     let mut task_buf = [0u8; 16];
     let mut phys_buf = [0u8; 16];
     let mut len_buf = [0u8; 12];
-    let task_str = format_hex_u64(caller.task().0, &mut task_buf);
+    let task_str = format_hex_u64(caller.process().0, &mut task_buf);
     let phys_str = format_hex_u64(region.phys(), &mut phys_buf);
     let len_str = format_usize(region.len(), &mut len_buf);
     record(
@@ -138,7 +138,7 @@ pub fn map_mmio<P: PageTable, S: Sink + ?Sized>(
         AuditEvent::MmioMapped,
         &[
             Field {
-                key: "task",
+                key: "proc",
                 value: tairix_log::FieldValue::Str(task_str),
             },
             Field {
@@ -173,12 +173,12 @@ pub fn unmap_mmio<P: PageTable, S: Sink + ?Sized>(
 ) -> Result<(), MmioGateError> {
     if !caller.has(CapabilityId::MMIO_MAP) {
         let mut task_buf = [0u8; 16];
-        let task_str = format_hex_u64(caller.task().0, &mut task_buf);
+        let task_str = format_hex_u64(caller.process().0, &mut task_buf);
         record(
             audit,
             AuditEvent::MmioMapDenied,
             &[Field {
-                key: "task",
+                key: "proc",
                 value: tairix_log::FieldValue::Str(task_str),
             }],
         );

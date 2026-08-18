@@ -142,9 +142,11 @@ impl<'a, P: PageTable, S: Sink + Sync + ?Sized> KernelVirtioHost<'a, P, S> {
     /// `irq_handle` is the handle the bus driver minted for that
     /// line, and `waiter` is the clock + yield seam
     /// [`Self::notify_wait`] drives. The handle is waited on against
-    /// the owning task (`caller.task()`), so a host can only wake on
-    /// a line its own task bound — the forgery defence lives in
-    /// [`IrqTable::try_wait_step`].
+    /// the owning **process** (`caller.process()`), so a host can only wake on
+    /// a line its own process bound — the forgery defence lives in
+    /// [`IrqTable::try_wait_step`]. Process-scoped deliberately: an interrupt
+    /// binding is a process resource, so any thread of a multi-threaded driver
+    /// may drive the completion wait, while another process still cannot.
     #[must_use]
     pub fn new(
         pool: DmaPool<'a, P>,
@@ -318,7 +320,7 @@ impl<P: PageTable, S: Sink + Sync + ?Sized> VirtioHost for KernelVirtioHost<'_, 
         match block_until_ready(
             self.irq,
             self.irq_handle,
-            self.caller.task(),
+            self.caller.process(),
             timeout_ns,
             self.waiter,
         ) {
@@ -369,14 +371,14 @@ mod tests {
         bootinfo::{BootMemoryMap, MemoryRegion, RegionKind},
         AddressSpace, FrameAllocator, HostPageTable, PhysAddr, SimPhysMap, VirtAddr, PAGE_SIZE,
     };
-    use tairix_kernel_sec::captable::{TaskCapabilities, TaskId};
+    use tairix_kernel_sec::captable::{ProcessId, TaskCapabilities};
     use tairix_kernel_sec::identity::UserId;
     use tairix_log::{Event, Sink};
 
-    /// Owner task id every fixture binds the device line against. The
-    /// host waits on `self.caller.task()`, and [`task_with`] derives
+    /// Owner process id every fixture binds the device line against. The
+    /// host waits on `self.caller.process()`, and [`task_with`] derives
     /// the caller with this id.
-    const OWNER: TaskId = TaskId(99);
+    const OWNER: ProcessId = ProcessId(99);
 
     /// Permissive controller so [`IrqTable::fire`] can mask and set
     /// the ready flag without an architecture port.
@@ -530,7 +532,7 @@ mod tests {
         for c in caps {
             set.insert(*c);
         }
-        TaskCapabilities::derive(TaskId(99), UserId(1000), set, set, sink)
+        TaskCapabilities::derive(ProcessId(99), UserId(1000), set, set, sink)
     }
 
     /// Event ID emitted by `kernel/sec::dma::alloc_dma` on a

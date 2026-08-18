@@ -1,9 +1,31 @@
 # Kernel security subsystem
 
 `kernel/sec` is the in-kernel home of every datum a privileged operation
-must consult: the user/group identity tables, the per-task capability
-tables, the manifest verifier that gates binary loading, and the audit
+must consult: the user/group identity tables, the per-process capability
+table, the manifest verifier that gates binary loading, and the audit
 log writer that records every security-relevant decision.
+
+## Processes, threads, and the unit of authority
+
+A **process** is a thread group, named by its leader thread's `TaskId` — that
+value is the PID, and the type `ProcessId` makes it distinct from a thread's
+own `TaskId` so the compiler rejects a site that confuses the two.
+
+`CapTable` holds exactly **one** `TaskCapabilities` record per process, plus
+the mapping from every live thread to its process. A syscall from any thread
+resolves that one record, so credentials, the attested process identity and
+name, the I/O counters, and — critically — `cap_delegate` and `cap_revoke` are
+process-wide. A per-thread copy of the record would make revocation partial: a
+sibling thread could keep exercising an authority the process had already given
+up. That is why the record is the process's, not the thread's.
+
+The same split runs through the rest of the kernel's state. Process-scoped:
+the address space, standard streams, resource limits, device-resource grants
+(`mmio_map`/`dma_alloc`), IRQ bindings, IPC port and call-endpoint ownership,
+shared-memory mappings, wait-sets, console foreground ownership, the working
+directory, and signal targets. Thread-scoped: the schedulable identity itself
+(park, unpark, wake), the user-stack span, and the in-kernel kill gate that
+lands a deferred termination when a *thread* leaves its syscall.
 
 It depends only on `lib/sync`, `kernel/mem`, and the shared
 `lib/abi`, `lib/caps`, `lib/crypto`, and `lib/log` crates (Stage 2.4

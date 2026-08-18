@@ -1143,10 +1143,11 @@ const MSI_PROBE_MMIO_VBASE: u64 = 0x6800_0000;
 /// function maps its MSI-X table BAR through it).
 const MSI_PROBE_MMIO_PAGES: usize = 64;
 
-/// Kernel-trusted task id the boot MSI-routing capability context is derived
-/// against (it programs the device MSI-X table under `CAP_MMIO_MAP`). Distinct
-/// from the unlock task's id so the two audit streams never conflate.
-const MSI_PROBE_TASK: tairix_kernel_sec::TaskId = tairix_kernel_sec::TaskId(0x5b5);
+/// Kernel-trusted process id the boot MSI-routing capability context is
+/// derived against (it programs the device MSI-X table under `CAP_MMIO_MAP`).
+/// Distinct from the unlock service's id so the two audit streams never
+/// conflate.
+const MSI_PROBE_TASK: tairix_kernel_sec::ProcessId = tairix_kernel_sec::ProcessId(0x5b5);
 
 /// Page-table frame pool the throwaway MSI-X-routing bookkeeping space draws
 /// its PML4 + intermediate tables from. Private to the probe so it never

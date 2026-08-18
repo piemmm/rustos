@@ -207,14 +207,14 @@ mod tests {
         AddressSpace, FrameAllocator, HostPageTable, MmioMap, PhysAddr, SimPhysMap, VirtAddr,
         PAGE_SIZE,
     };
-    use tairix_kernel_sec::captable::{TaskCapabilities, TaskId};
+    use tairix_kernel_sec::captable::{ProcessId, TaskCapabilities};
     use tairix_kernel_sec::identity::UserId;
     use tairix_log::{Event, Sink};
 
     const VIRTIO_BLK_DEVICE_ID: u16 = 0x1042;
     const TARGET_BDF: u64 = 0x0000_0800;
     const NOTIFY_MULTIPLIER: u32 = 4;
-    const OWNER: TaskId = TaskId(77);
+    const OWNER: ProcessId = ProcessId(77);
 
     /// MSI-X table entry + message the arch layer hands the boot wiring
     /// to route the device's interrupt. The address/data encoding is

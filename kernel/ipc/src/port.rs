@@ -67,8 +67,10 @@ mod state {
 /// cannot mutate the buffer after the send has been accepted.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Message {
-    /// Sender task identifier, taken from the kernel-trusted capability
-    /// record at enqueue time — never a caller-supplied value.
+    /// Sending **process** identifier, taken from the kernel-trusted
+    /// capability record at enqueue time — never a caller-supplied value.
+    /// Process-scoped because the principal a receiver authorises is the
+    /// process, not whichever of its threads happened to call `send`.
     pub sender: u64,
     /// The sender's kernel-attested [`Origin`], snapshotted from its own
     /// task state when the send was accepted, so a receiver can
@@ -86,11 +88,11 @@ pub struct Message {
 /// described in the module docs; receives use [`Port::recv`].
 pub struct Port {
     id: EndpointId,
-    /// Task that bound this port. Only this task may receive from it (or
-    /// observe it through a wait-set), and the exit path reclaims every
-    /// port by this owner so a dead task's mailbox never lingers. Never
-    /// caller-supplied: recorded from the kernel-trusted capability
-    /// record at create time.
+    /// **Process** that bound this port. Only that process may receive from
+    /// it (any of its threads may) or observe it through a wait-set, and the
+    /// exit path reclaims every port by this owner so a dead process's
+    /// mailbox never lingers. Never caller-supplied: recorded from the
+    /// kernel-trusted capability record at create time.
     owner: u64,
     required_send_caps: CapabilitySet,
     required_recv_caps: CapabilitySet,
@@ -180,7 +182,7 @@ impl Port {
 
         Ok(Self {
             id,
-            owner: creator.task().0,
+            owner: creator.process().0,
             required_send_caps,
             required_recv_caps,
             max_payload,
@@ -360,7 +362,7 @@ impl Port {
         };
         let sender_field = Field {
             key: "sender",
-            value: tairix_log::FieldValue::Str(format_hex_u64(sender.task().0, &mut sender_buf)),
+            value: tairix_log::FieldValue::Str(format_hex_u64(sender.process().0, &mut sender_buf)),
         };
         let len_field = Field {
             key: "len",
@@ -427,7 +429,7 @@ impl Port {
             return Err(Errno::WouldBlock);
         }
         q.push_back(Message {
-            sender: sender.task().0,
+            sender: sender.process().0,
             origin: sender.attest_origin(),
             payload: payload.to_vec(),
         });
@@ -502,7 +504,7 @@ mod tests {
     use super::*;
     use crate::audit::RecordingSink;
     use tairix_abi::CapabilityId;
-    use tairix_kernel_sec::captable::TaskId;
+    use tairix_kernel_sec::captable::ProcessId;
     use tairix_kernel_sec::identity::UserId;
 
     fn caps_of(items: &[CapabilityId]) -> CapabilitySet {
@@ -516,7 +518,7 @@ mod tests {
     fn task_with(task_id: u64, caps: &[CapabilityId]) -> TaskCapabilities {
         let sink = RecordingSink::new();
         let set = caps_of(caps);
-        TaskCapabilities::derive(TaskId(task_id), UserId(1), set, set, &sink)
+        TaskCapabilities::derive(ProcessId(task_id), UserId(1), set, set, &sink)
     }
 
     #[test]

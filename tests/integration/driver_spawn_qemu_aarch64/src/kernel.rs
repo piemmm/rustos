@@ -44,7 +44,7 @@ use tairix_kernel_mem::{
     BootMemoryMap, FrameAllocator, MemoryRegion, PhysAddr, RegionKind, PAGE_SIZE,
 };
 use tairix_kernel_sched_cfq::{Scheduler, SchedulerConfig};
-use tairix_kernel_sec::{CapTable, TaskCapabilities, TaskId as SecTaskId, UserId};
+use tairix_kernel_sec::{CapTable, ProcessId, TaskCapabilities, TaskId as SecTaskId, UserId};
 use tairix_log::{log, Event, EventId, Level};
 use tairix_sync::RwLock;
 
@@ -396,7 +396,7 @@ fn bind_reply_port(ipc: &RwLock<PortRegistry>) {
     let mut host_grant = CapabilitySet::empty();
     host_grant.insert(CapabilityId::IPC_BIND_PRIVILEGED);
     let host_caps = TaskCapabilities::derive(
-        SecTaskId(0),
+        ProcessId(0),
         UserId(0),
         host_grant,
         host_grant,

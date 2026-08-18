@@ -21,7 +21,7 @@ use tairix_kernel_irq::{IrqWaitAbort, IrqWaiter};
 use tairix_kernel_mem::{
     AddressSpace, DirectPhysMap, DmaPool, FrameAllocator, HostPageTable, MmioMap, VirtAddr,
 };
-use tairix_kernel_sec::captable::{TaskCapabilities, TaskId};
+use tairix_kernel_sec::captable::{ProcessId, TaskCapabilities};
 use tairix_kernel_sec::identity::UserId;
 use tairix_kernel_virtio::{KernelMmioMapper, KernelVirtioHost};
 use tairix_log::{Event, EventId, Level, Sink};
@@ -86,8 +86,8 @@ const DEVICE_GSI: u32 = 16;
 /// `IrqHandle` covers a multi-queue device (e.g. virtio-net rx + tx).
 const MSIX_ENTRY: u16 = 0;
 
-/// Synthetic owner task id for the bus-driver context.
-const TASK: TaskId = TaskId(0x5b1);
+/// Synthetic owner process id for the bus-driver context.
+const TASK: ProcessId = ProcessId(0x5b1);
 
 /// Capacity, in pages, of each per-device DMA window.
 const POOL_PAGES: usize = 64;

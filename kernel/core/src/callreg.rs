@@ -249,7 +249,7 @@ mod tests {
     use super::*;
     use tairix_caps::CapabilitySet;
     use tairix_kernel_ipc::CallEndpointLimits;
-    use tairix_kernel_sec::captable::{TaskCapabilities, TaskId};
+    use tairix_kernel_sec::captable::{ProcessId, TaskCapabilities};
     use tairix_kernel_sec::identity::UserId;
     use tairix_log::Sink;
 
@@ -281,7 +281,7 @@ mod tests {
     fn endpoint(id: u64) -> Arc<CallEndpoint> {
         let sink = NullSink;
         let creator = TaskCapabilities::derive(
-            TaskId(1),
+            ProcessId(1),
             UserId(1),
             CapabilitySet::empty(),
             CapabilitySet::empty(),
@@ -348,7 +348,7 @@ mod tests {
         // already made unique for the same reason.
         let poster = 0x0004_1234;
         let caller = TaskCapabilities::derive(
-            TaskId(poster),
+            ProcessId(poster),
             UserId(1),
             CapabilitySet::empty(),
             CapabilitySet::empty(),

@@ -88,7 +88,7 @@ mod kernel {
         boot, handle_panic_via_kernel_core, FreeListAllocator, SerialSink, SERIAL_SINK,
     };
     use tairix_kernel_irq::WaitStep;
-    use tairix_kernel_sec::TaskId as SecTaskId;
+    use tairix_kernel_sec::ProcessId;
     use tairix_log::{Event, EventId, Sink};
 
     // --- Bump-allocator-backed `#[global_allocator]` ---------------
@@ -296,8 +296,8 @@ mod kernel {
         // 3. Bind GSI 2 in the IrqTable. `TaskId(0)` is the
         //    synthesised caller — no real task runs in this test;
         //    the bind only needs an opaque owner.
-        let owner = SecTaskId(0);
-        let Ok(bind_outcome) = table.bind(PIT_GSI, owner) else {
+        let owner = ProcessId(0);
+        let Ok(bind_outcome) = table.bind(PIT_GSI, ProcessId(owner.0)) else {
             qemu_exit::exit_failure();
         };
         let handle: IrqHandle = bind_outcome.handle;
@@ -336,7 +336,7 @@ mod kernel {
         let deadline_ns = start_ns.saturating_add(WAIT_DEADLINE_NS);
         loop {
             let now_ns = rdtsc_ns();
-            match table.try_wait_step(handle, owner, now_ns, deadline_ns) {
+            match table.try_wait_step(handle, ProcessId(owner.0), now_ns, deadline_ns) {
                 WaitStep::Ready => break,
                 WaitStep::Continue => {
                     // Park until the IRQ fires. Each `hlt` returns

@@ -1161,7 +1161,7 @@ mod tests {
     fn serve_system_store_without_bind_authority_fails_closed_and_registers_nothing() {
         use tairix_caps::CapabilitySet;
         use tairix_kernel_core::CooperativeYield;
-        use tairix_kernel_sec::captable::{TaskCapabilities, TaskId};
+        use tairix_kernel_sec::captable::{ProcessId, TaskCapabilities};
         use tairix_kernel_sec::identity::UserId;
 
         // Guard against a leaked binding from an earlier aborted run so the
@@ -1172,7 +1172,7 @@ mod tests {
         // A binder holding no capabilities — in particular not
         // `IPC_BIND_PRIVILEGED` — may not bind a restricted-sender endpoint.
         let binder = TaskCapabilities::derive(
-            TaskId(0x5b4),
+            ProcessId(0x5b4),
             UserId(0),
             CapabilitySet::empty(),
             CapabilitySet::empty(),

@@ -49,7 +49,7 @@ use tairix_abi::IrqHandle;
 use tairix_kernel_irq::{
     block_until_ready, IrqController, IrqTable, IrqWaitAbort, IrqWaiter, WaitOutcome,
 };
-use tairix_kernel_sec::TaskId;
+use tairix_kernel_sec::ProcessId;
 
 use crate::dispatch_slot::RescheduleAction;
 use crate::kthread::reschedule_current;
@@ -128,7 +128,7 @@ impl IrqParkWaiter {
     /// the request's completion is the only other thing that could end the
     /// wait.
     #[must_use]
-    pub fn park_wait(&self, owner: TaskId, timeout_ns: u64) -> WaitOutcome {
+    pub fn park_wait(&self, owner: ProcessId, timeout_ns: u64) -> WaitOutcome {
         block_until_ready(self.table, self.handle, owner, timeout_ns, self)
     }
 }
@@ -265,7 +265,7 @@ mod tests {
     }
 
     const LINE: u32 = 9;
-    const OWNER: TaskId = TaskId(31);
+    const OWNER: ProcessId = ProcessId(31);
 
     fn bound_waiter() -> (&'static IrqTable, IrqHandle, IrqParkWaiter) {
         let table: &'static IrqTable =

@@ -214,9 +214,12 @@ user-mode bring-up (`plans/PI.md` §X) requires.
 The vector therefore:
 
 - **Swaps `sp` with `sscratch` on entry.** The port-wide invariant is
-  that `sscratch` holds this hart's current user task's **kernel-stack
-  top** while running U-mode code, and **0** while running S-mode code.
-  A trap from U-mode lands a non-zero kernel top in `sp`; a nested trap
+  that `sscratch` holds the running user task's **trap anchor** while
+  running U-mode code, and **0** while running S-mode code. The anchor is
+  a `TRAP_ANCHOR_BYTES`-wide kernel-only region at the top of that task's
+  kernel-stack window whose first word carries the kernel `tp` of the hart
+  the task is running on; the trap frame is built immediately below it.
+  A trap from U-mode lands a non-zero anchor address in `sp`; a nested trap
   from S-mode (a timer/IPI taken while running kernel code) lands 0 and
   is recovered onto the interrupted kernel `sp`, so the handler never
   runs on the user stack and a nested kernel trap stays on the kernel
@@ -241,6 +244,32 @@ The vector therefore:
   S-mode trap is classified correctly. `sret_tests.rs` pins both orderings
   against their sources, since neither runs on the host and the window is a
   race no target test can reliably enter.
+- **Restores the kernel `tp` from the anchor before anything reads it.**
+  `tp` (x4) is simultaneously the RISC-V psABI thread pointer U-mode code
+  writes freely and this port's per-hart kernel identity anchor —
+  `smp::current_hartid` and the Arch-HAL per-CPU slice read the running
+  hart's identity out of it. A vector that left `tp` alone would therefore
+  hand the kernel a caller-chosen CPU identity on every `ecall`, letting a
+  task name a *different* hart and steer the kernel onto that core's
+  per-CPU state (its resume handle, dispatch slot, live address space) —
+  kernel memory corruption, not merely a wrong reading. The from-U prologue
+  spills the user's `tp` straight into the frame's `user_tp` slot and
+  reloads the kernel's from the anchor before any other register is
+  touched; the U-return epilogue publishes the *current* hart's `tp` into
+  the anchor (so a task resumed on a different hart re-enters U-mode under
+  that hart's true identity) and then restores the user's value.
+
+  Because the frame lives on the trapping task's own kernel stack, that
+  makes the thread pointer genuinely **per task**: U-mode keeps a value of
+  its own across every trap and every context switch, which is the
+  platform contract thread-local storage rests on. `enter_user` hands a
+  freshly entered task a zeroed `tp` rather than leaking the kernel's hart
+  id into U-mode. `trap_layout_tests.rs` pins the ordering and every
+  frame/anchor offset against `trap.s` itself, and
+  `tests/integration/tp_isolation_qemu_riscv64` is the adversarial
+  witness: a U-mode fixture writes a hostile `tp` before every `ecall` on
+  a two-CPU guest, and the run fails unless the kernel still reads its own
+  hart id and the fixture gets its own value back.
 - **Saves `sepc`/`sstatus`/`sp` into the per-trap frame** (256 bytes since
   the callee-saved set joined it, the GP-register offsets unchanged so the
   `[u64; …]` syscall view is
@@ -312,11 +341,11 @@ kernel stack that the dispatcher must repoint per task with
 `set_kernel_rsp0` — riscv64 needs **no** dispatcher-side stack
 repointing, so RV-X2 added only the vertical, no new structural code (as
 aarch64 SP2c added nothing over SP2b). `sscratch` is per-task hardware
-state: `userentry::enter_user` arms it with a task's own kernel-stack top
-on first entry, and the trap vector's U-return path re-arms it from that
+state: `userentry::enter_user` arms it with a task's own trap anchor on
+first entry, and the trap vector's U-return path re-arms it from that
 task's own kernel-stack frame on every return to U-mode (`trap.s`:
 `sscratch = sp + TRAP_FRAME_SIZE`, where `sp` is the resuming task's
-kernel stack). A trap from whichever task resumes therefore always lands
+frame base). A trap from whichever task resumes therefore always lands
 on *its* kernel stack, so each `pre_resume` hook only reactivates its
 `satp` root and ignores the kernel-stack-top argument.
 

@@ -3239,6 +3239,38 @@ static TESTS: &[QemuTest] = &[
         pointer_script: None,
         serial: &[],
     },
+    // The riscv64 trap-entry thread-pointer discipline
+    // (`kernel/arch/riscv64/src/trap.s`). `tp` is both the RISC-V psABI thread
+    // pointer U-mode writes freely and this port's per-hart kernel identity
+    // anchor, so a vector that let the U-mode value survive into the handler
+    // would let a task name a *different* hart and steer the kernel onto that
+    // core's per-CPU state (resume handle, dispatch slot, live address space).
+    // The adversarial fixture (`tests/integration/tp_probe_program`) writes a
+    // hostile sentinel into `tp` before every `ecall` and checks its own value
+    // came back; the dispatch callback reads `smp::current_hartid()` on every
+    // `ecall` and fails the run if it is not the true boot hart. PASS needs all
+    // three: the true hart id every time, a zero exit (both round trips
+    // intact), and both rounds actually run — each shortfall has its own
+    // finisher, and a guest that never exits trips the harness timeout.
+    // **Two CPUs** so the sentinel's low-bit `1` names a real sibling CPU: with
+    // one hart a hostile id would fail to map and fall back to the boot CPU,
+    // masking the very defect this test witnesses.
+    QemuTest {
+        package: "tairix-test-tp-isolation-qemu-riscv64",
+        binary: "tairix-test-tp-isolation-qemu-riscv64",
+        target: "riscv64gc-unknown-none-elf",
+        cpus: 2,
+        timeout: Duration::from_secs(60),
+        disk_sectors: None,
+        netstack_peer: NetPeerMode::None,
+        ramfb: false,
+        fs_disk: FsDisk::None,
+        keyboard: None,
+        typed_keys: &[],
+        screendumps: &[],
+        pointer_script: None,
+        serial: &[],
+    },
     // PI Stage RV-X1 (`plans/PI.md` §X tail): the riscv64 single-resumable-
     // user-kthread vertical — the first proof that a U-mode task is admitted as
     // a *resumable* user kthread on riscv64 and cooperatively parks/resumes

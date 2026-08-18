@@ -34,7 +34,7 @@ use proptest::prelude::*;
 use proptest::test_runner::TestCaseError;
 use tairix_abi::CapabilityId;
 use tairix_caps::CapabilitySet;
-use tairix_kernel_sec::{CapTable, TaskCapabilities, TaskId, UserId};
+use tairix_kernel_sec::{CapTable, ProcessId, TaskCapabilities, TaskId, UserId};
 use tairix_log::{Event, Sink};
 
 /// Sequences run by a plain `cargo test` (no budget set).
@@ -150,7 +150,7 @@ fn check_captable(cmds: &[Cmd]) -> Result<(), TestCaseError> {
             } => {
                 let ug = build(user_grant);
                 let mf = build(manifest);
-                let caps = TaskCapabilities::derive(TaskId(*task), UserId(1), ug, mf, &sink);
+                let caps = TaskCapabilities::derive(ProcessId(*task), UserId(1), ug, mf, &sink);
                 // Derive must intersect: effective ⊆ both inputs.
                 prop_assert!(caps.effective().is_subset_of(&ug));
                 prop_assert!(caps.effective().is_subset_of(&mf));
@@ -210,7 +210,7 @@ fn check_captable(cmds: &[Cmd]) -> Result<(), TestCaseError> {
                 }
             }
             Cmd::Remove { task } => {
-                let live = table.remove(TaskId(*task)).is_some();
+                let live = table.remove(ProcessId(*task)).is_some();
                 let modelled = model.remove(task).is_some();
                 prop_assert_eq!(live, modelled);
             }

@@ -1,0 +1,23 @@
+[package]
+name = "tairix-test-tp-probe"
+description = "Adversarial riscv64 fixture: a separately-linked pure-Rust U-mode program that writes a hostile value into the psABI thread pointer (tp) before every ecall and checks its own value survives each trap, so the tp_isolation vertical can prove a user-written tp can neither steer the kernel's per-hart resolution nor be lost across a trap. Built PIE for the freestanding riscv64 target and converted to an rxe blob by the consuming test's build script."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "tairix-test-tp-probe"
+path = "src/main.rs"
+
+# The program is a pure-Rust TAIRiX program, so it links the pure-Rust userland
+# runtime `tairix-rt` — never the C ABI (`crt0` + `abi-sys`), which exists
+# solely for non-Rust programs. Only on a bare-metal target; on the host it is
+# an inert stub so `cargo build --workspace` / clippy still cover the crate.
+[target.'cfg(target_os = "none")'.dependencies]
+tairix-rt = { path = "../../../lib/rt", version = "=0.0.0" }

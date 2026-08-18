@@ -20,7 +20,7 @@
 
 extern crate alloc;
 
-use alloc::collections::BTreeMap;
+use alloc::collections::{BTreeMap, BTreeSet};
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
@@ -33,14 +33,57 @@ use tairix_log::{Field, Sink};
 use crate::audit::{record, AuditEvent};
 use crate::identity::{format_hex_u64, format_i32, GroupId, UserId};
 
-/// Numeric task identifier carried by audit records.
+/// Numeric task identifier carried by audit records — one **thread**.
 ///
 /// Distinct from `pid_t`: `TaskId` is the kernel's internal handle for a
 /// schedulable entity. `kernel/sched` produces these; we accept them
-/// verbatim for audit attribution.
+/// verbatim for audit attribution. A process with several threads has one
+/// `TaskId` per thread; the process itself is named by a [`ProcessId`].
 #[repr(transparent)]
 #[derive(Copy, Clone, Debug, Default, Eq, PartialEq, Hash, Ord, PartialOrd)]
 pub struct TaskId(pub u64);
+
+/// Identifier of a **process** — a thread group — which is its leader
+/// thread's [`TaskId`], and therefore the PID.
+///
+/// A distinct type, not an alias, because the two are not interchangeable and
+/// the difference is security-relevant: process-scoped state (credentials, the
+/// address space, descriptors, limits, device grants) must be keyed by the
+/// group, while scheduler operations (park, unpark, wake) must name the
+/// individual thread. Making them different types means the compiler rejects a
+/// site that confuses them instead of it becoming a runtime bug.
+///
+/// The only way to obtain one for a running caller is
+/// [`TaskCapabilities::process`] or [`CapTable::process_of`], both of which
+/// resolve through the kernel-held thread-group table — never from anything a
+/// caller supplied.
+#[repr(transparent)]
+#[derive(Copy, Clone, Debug, Default, Eq, PartialEq, Hash, Ord, PartialOrd)]
+pub struct ProcessId(pub u64);
+
+impl ProcessId {
+    /// The process a single-threaded task constitutes on its own: a task that
+    /// is its own thread-group leader.
+    ///
+    /// Used by every admit path that creates a *process* (as opposed to a
+    /// thread of an existing one), where the new task is by construction its
+    /// group's leader.
+    #[must_use]
+    pub const fn leader(task: TaskId) -> Self {
+        Self(task.0)
+    }
+
+    /// The leader thread's id — the schedulable entity this process's id was
+    /// minted from.
+    ///
+    /// Deliberately explicit rather than a `From` impl: crossing from the
+    /// process scope back to a thread id is exactly the step a reader must be
+    /// able to see, so it is spelled at the call site.
+    #[must_use]
+    pub const fn leader_task(self) -> TaskId {
+        TaskId(self.0)
+    }
+}
 
 /// Maximum length, in bytes, of a kernel-attested process name.
 ///
@@ -174,7 +217,14 @@ impl Default for ProcName {
 /// reads back.
 #[derive(Clone, Debug)]
 pub struct TaskCapabilities {
-    task: TaskId,
+    /// The **process** (thread group) this record authorises.
+    ///
+    /// There is exactly one record per process, shared by every thread in it,
+    /// so a `cap_delegate` or `cap_revoke` issued by any thread binds all of
+    /// them. A per-thread copy would make revocation incomplete — a thread
+    /// could keep using an authority the process had given up — which is a
+    /// security defect, not a behavioural nuance.
+    process: ProcessId,
     owner: UserId,
     /// Primary group of the task's kernel-attested credential.
     ///
@@ -325,7 +375,7 @@ impl TaskCapabilities {
     /// The effective set is the intersection of the two inputs. Emits exactly one
     /// [`AuditEvent::TaskCapabilitiesDerived`].
     pub fn derive<S: Sink + ?Sized>(
-        task: TaskId,
+        process: ProcessId,
         owner: UserId,
         user_grant: CapabilitySet,
         manifest_request: CapabilitySet,
@@ -333,7 +383,7 @@ impl TaskCapabilities {
     ) -> Self {
         let effective = user_grant.intersection(&manifest_request);
         let mut task_buf = [0u8; 16];
-        let task_field = format_hex_u64(task.0, &mut task_buf);
+        let task_field = format_hex_u64(process.0, &mut task_buf);
         let mut uid_buf = [0u8; 12];
         let uid_field = format_i32(i32::try_from(owner.0).unwrap_or(i32::MAX), &mut uid_buf);
         let mut len_buf = [0u8; 12];
@@ -360,7 +410,7 @@ impl TaskCapabilities {
             ],
         );
         Self {
-            task,
+            process,
             owner,
             primary_gid: GroupId::default(),
             supplementary_gids: Vec::new(),
@@ -640,7 +690,7 @@ impl TaskCapabilities {
     /// record can replace a live entry, so the continuity holds for every
     /// install path without any caller having to remember it, and only ever
     /// between records of the *same* task (the registry keys on
-    /// [`Self::task`], which no setter can change after derivation).
+    /// [`Self::process`], which no setter can change after derivation).
     fn adopt_io_counters(&mut self, previous: &Self) {
         self.io_bytes_read = Arc::clone(&previous.io_bytes_read);
         self.io_bytes_written = Arc::clone(&previous.io_bytes_written);
@@ -689,7 +739,7 @@ impl TaskCapabilities {
             trust_domain,
             self.owner.0,
             self.primary_gid.0,
-            self.task.0,
+            self.process.0,
             self.proc_id,
             capabilities,
             self.console,
@@ -739,10 +789,17 @@ impl TaskCapabilities {
         self.owner
     }
 
-    /// Task identifier carried in audit records.
+    /// The process (thread group) this record authorises — the identifier
+    /// carried in audit records, and the PID.
+    ///
+    /// Every thread of the process resolves to this same value, so a consumer
+    /// that keys per-process state on it cannot accidentally scope that state
+    /// to one thread. A consumer that genuinely needs the *calling thread* —
+    /// a scheduler park/unpark/wake target — must take the thread's own
+    /// `TaskId` from the dispatcher instead.
     #[must_use]
-    pub fn task(&self) -> TaskId {
-        self.task
+    pub fn process(&self) -> ProcessId {
+        self.process
     }
 
     /// `true` if the task's effective set holds `cap`.
@@ -784,7 +841,7 @@ impl TaskCapabilities {
                 AuditEvent::TaskCapabilitiesDelegateWiden,
                 &[Field {
                     key: "task",
-                    value: tairix_log::FieldValue::Str(format_hex_u64(self.task.0, &mut buf)),
+                    value: tairix_log::FieldValue::Str(format_hex_u64(self.process.0, &mut buf)),
                 }],
             );
             return Err(Errno::PermissionDenied);
@@ -798,7 +855,10 @@ impl TaskCapabilities {
                     AuditEvent::TaskCapabilitiesDelegated,
                     &[Field {
                         key: "task",
-                        value: tairix_log::FieldValue::Str(format_hex_u64(self.task.0, &mut buf)),
+                        value: tairix_log::FieldValue::Str(format_hex_u64(
+                            self.process.0,
+                            &mut buf,
+                        )),
                     }],
                 );
                 Ok(())
@@ -810,7 +870,10 @@ impl TaskCapabilities {
                     AuditEvent::TaskCapabilitiesDelegateWiden,
                     &[Field {
                         key: "task",
-                        value: tairix_log::FieldValue::Str(format_hex_u64(self.task.0, &mut buf)),
+                        value: tairix_log::FieldValue::Str(format_hex_u64(
+                            self.process.0,
+                            &mut buf,
+                        )),
                     }],
                 );
                 Err(err)
@@ -855,12 +918,12 @@ impl TaskCapabilities {
                 AuditEvent::TaskCapabilitiesDelegateWiden,
                 &[Field {
                     key: "task",
-                    value: tairix_log::FieldValue::Str(format_hex_u64(self.task.0, &mut buf)),
+                    value: tairix_log::FieldValue::Str(format_hex_u64(self.process.0, &mut buf)),
                 }],
             );
             return Err(Errno::PermissionDenied);
         }
-        match token.verify(authority, &self.effective, epoch, self.task.0) {
+        match token.verify(authority, &self.effective, epoch, self.process.0) {
             Ok(()) => {
                 self.effective = token.caps;
                 let mut buf = [0u8; 16];
@@ -869,7 +932,10 @@ impl TaskCapabilities {
                     AuditEvent::TaskCapabilitiesDelegated,
                     &[Field {
                         key: "task",
-                        value: tairix_log::FieldValue::Str(format_hex_u64(self.task.0, &mut buf)),
+                        value: tairix_log::FieldValue::Str(format_hex_u64(
+                            self.process.0,
+                            &mut buf,
+                        )),
                     }],
                 );
                 Ok(())
@@ -881,7 +947,10 @@ impl TaskCapabilities {
                     AuditEvent::TaskCapabilitiesDelegateWiden,
                     &[Field {
                         key: "task",
-                        value: tairix_log::FieldValue::Str(format_hex_u64(self.task.0, &mut buf)),
+                        value: tairix_log::FieldValue::Str(format_hex_u64(
+                            self.process.0,
+                            &mut buf,
+                        )),
                     }],
                 );
                 Err(err)
@@ -904,7 +973,10 @@ impl TaskCapabilities {
             &[
                 Field {
                     key: "task",
-                    value: tairix_log::FieldValue::Str(format_hex_u64(self.task.0, &mut task_buf)),
+                    value: tairix_log::FieldValue::Str(format_hex_u64(
+                        self.process.0,
+                        &mut task_buf,
+                    )),
                 },
                 Field {
                     key: "cap",
@@ -928,17 +1000,28 @@ impl tairix_abi::CapabilityQuery for TaskCapabilities {
     }
 }
 
-/// Per-task capability registry — the `TaskId → TaskCapabilities` lookup
-/// the syscall dispatcher consults to recover a caller's effective
-/// capability set after the per-CPU current-task slot
-/// (`Scheduler::current_task`, Stage 2.7 follow-up (f1)) has named the
-/// caller.
+/// The per-process capability registry **and the thread-group table** — the
+/// `TaskId → TaskCapabilities` lookup the syscall dispatcher consults to
+/// recover a caller's effective capability set after the per-CPU
+/// current-task slot (`Scheduler::current_task`) has named the calling
+/// thread.
 ///
-/// The registry owns the per-task records: callers pass a freshly
-/// derived [`TaskCapabilities`] in via [`Self::insert`] (at task
-/// creation, after `TaskCapabilities::derive` has audited the
-/// intersection) and pull it back out via [`Self::remove`] when the
-/// task exits. Lookups go through [`Self::caps_for`].
+/// The registry owns one record per **process** and the mapping from every
+/// thread to its process. Callers pass a freshly derived
+/// [`TaskCapabilities`] in via [`Self::insert`] (at process creation, after
+/// `TaskCapabilities::derive` has audited the intersection), add each further
+/// thread with [`Self::register_thread`], and tear down with
+/// [`Self::remove_thread`] per thread and [`Self::remove`] when the last one
+/// goes. Lookups go through [`Self::caps_for`], which resolves the calling
+/// thread to its process, so a thread is authorised by exactly its process's
+/// record and revocation is never partial.
+///
+/// # Why the thread↔process relation lives here
+///
+/// It is security state: it decides *which* capability record authorises a
+/// syscall. Keeping it beside the records means the resolution is one lookup
+/// under the lock the dispatcher already takes, with no second structure that
+/// could disagree with this one about who belongs to which process.
 ///
 /// # Synchronisation
 ///
@@ -963,7 +1046,37 @@ impl tairix_abi::CapabilityQuery for TaskCapabilities {
 /// shortcut and no implicit grant on lookup.
 #[derive(Debug, Default)]
 pub struct CapTable {
-    entries: BTreeMap<TaskId, TaskCapabilities>,
+    /// One record per process, keyed by the process (its leader's id).
+    entries: BTreeMap<ProcessId, TaskCapabilities>,
+    /// Every live thread, mapped to the process it belongs to. A process's
+    /// leader maps to its own process, so [`Self::process_of`] is a single
+    /// lookup for leaders and additional threads alike.
+    threads: BTreeMap<TaskId, ProcessId>,
+    /// The reverse index: each process's live threads.
+    ///
+    /// Held alongside [`Self::threads`] so a group-wide operation — the
+    /// thread-group exit, a process-directed signal — costs
+    /// `O(log n + threads)` instead of a scan across every thread on the
+    /// machine, which is what a system under load would actually pay. The two
+    /// indices are only ever updated together, by the four mutators below.
+    members: BTreeMap<ProcessId, BTreeSet<TaskId>>,
+}
+
+/// Why registering a thread against a process was refused.
+///
+/// Both variants fail the registration closed: a thread that is not in the
+/// table resolves to no capability record at all, so it cannot issue a
+/// syscall, rather than being silently attached to the wrong process.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum ThreadRegisterError {
+    /// No capability record exists for the named process, so there is nothing
+    /// for the thread to be authorised by. A thread can only ever join a
+    /// process the kernel has already admitted.
+    UnknownProcess,
+    /// The thread id is already registered. Never silently re-pointed at
+    /// another process: that would move a live thread's authority.
+    AlreadyPresent,
 }
 
 impl CapTable {
@@ -972,12 +1085,15 @@ impl CapTable {
     pub const fn new() -> Self {
         Self {
             entries: BTreeMap::new(),
+            threads: BTreeMap::new(),
+            members: BTreeMap::new(),
         }
     }
 
-    /// Register a task's capabilities. The [`TaskId`] is taken from the
-    /// record (`caps.task()`); callers do not pass it separately so the
-    /// id and the body cannot diverge.
+    /// Register a process's capabilities, and its leader as the process's
+    /// first thread. The [`ProcessId`] is taken from the record
+    /// (`caps.process()`); callers do not pass it separately so the id and
+    /// the body cannot diverge.
     ///
     /// Returns the previously-registered record, if any. A non-`None`
     /// return is an unusual condition — task ids are not recycled
@@ -986,48 +1102,156 @@ impl CapTable {
     /// than silently dropped so callers can audit / refuse it. The one
     /// routine replacement is a spawned child's effective record taking
     /// over from its admit-time placeholder; because the entry is keyed on
-    /// the record's own [`TaskCapabilities::task`], a replacement always
-    /// concerns that same task, so the incoming record continues the
+    /// the record's own [`TaskCapabilities::process`], a replacement always
+    /// concerns that same process, so the incoming record continues the
     /// outgoing one's per-process I/O totals rather than restarting them.
+    /// A replacement leaves the process's thread set untouched: the threads
+    /// belong to the process, not to the record that describes it.
     pub fn insert(&mut self, mut caps: TaskCapabilities) -> Option<TaskCapabilities> {
-        let task = caps.task();
-        if let Some(previous) = self.entries.get(&task) {
+        let process = caps.process();
+        if let Some(previous) = self.entries.get(&process) {
             caps.adopt_io_counters(previous);
         }
-        self.entries.insert(task, caps)
+        let leader = process.leader_task();
+        self.threads.insert(leader, process);
+        self.members.entry(process).or_default().insert(leader);
+        self.entries.insert(process, caps)
     }
 
-    /// Borrow the registry entry for `task` immutably.
+    /// Attach `thread` to the already-registered process `process`, so the
+    /// thread is authorised by that process's record.
+    ///
+    /// # Errors
+    ///
+    /// * [`ThreadRegisterError::UnknownProcess`] when `process` has no
+    ///   record — a thread never joins a process the kernel has not admitted.
+    /// * [`ThreadRegisterError::AlreadyPresent`] when `thread` is already
+    ///   registered anywhere, so a live thread's authority can never be
+    ///   re-pointed.
+    pub fn register_thread(
+        &mut self,
+        thread: TaskId,
+        process: ProcessId,
+    ) -> Result<(), ThreadRegisterError> {
+        if !self.entries.contains_key(&process) {
+            return Err(ThreadRegisterError::UnknownProcess);
+        }
+        if self.threads.contains_key(&thread) {
+            return Err(ThreadRegisterError::AlreadyPresent);
+        }
+        self.threads.insert(thread, process);
+        self.members.entry(process).or_default().insert(thread);
+        Ok(())
+    }
+
+    /// The process `thread` belongs to, or [`None`] for a thread the kernel
+    /// does not know (fail closed: an unknown thread has no authority).
+    #[must_use]
+    pub fn process_of(&self, thread: TaskId) -> Option<ProcessId> {
+        self.threads.get(&thread).copied()
+    }
+
+    /// Every live thread of `process`, in ascending [`TaskId`] order.
+    ///
+    /// The thread-group exit and process-directed signal delivery iterate
+    /// this. Ascending order makes the fan-out deterministic rather than
+    /// dependent on admission order.
+    pub fn threads_of(&self, process: ProcessId) -> impl Iterator<Item = TaskId> + '_ {
+        self.members
+            .get(&process)
+            .into_iter()
+            .flat_map(|set| set.iter().copied())
+    }
+
+    /// How many live threads `process` has. `0` for an unknown process.
+    #[must_use]
+    pub fn thread_count(&self, process: ProcessId) -> usize {
+        self.members.get(&process).map_or(0, BTreeSet::len)
+    }
+
+    /// Borrow the capability record authorising `thread` immutably.
     ///
     /// Used by the syscall dispatcher's `cap_query` / `cap_revoke`
-    /// paths: the caller's effective set is read but not mutated.
+    /// paths: the caller's effective set is read but not mutated. Resolves
+    /// the thread to its process first, so every thread of a process reads
+    /// the one shared record.
     #[must_use]
-    pub fn caps_for(&self, task: TaskId) -> Option<&TaskCapabilities> {
-        self.entries.get(&task)
+    pub fn caps_for(&self, thread: TaskId) -> Option<&TaskCapabilities> {
+        self.entries.get(&self.process_of(thread)?)
     }
 
-    /// Borrow the registry entry for `task` mutably. Used by the
+    /// Borrow the capability record authorising `thread` mutably. Used by the
     /// syscall dispatcher's `cap_delegate` / `cap_revoke` paths,
     /// which call `TaskCapabilities::{delegate,revoke,apply_token}`
-    /// directly on the borrowed record.
-    pub fn caps_for_mut(&mut self, task: TaskId) -> Option<&mut TaskCapabilities> {
-        self.entries.get_mut(&task)
+    /// directly on the borrowed record. Because the record is the process's,
+    /// a mutation by one thread is immediately in force for its siblings.
+    pub fn caps_for_mut(&mut self, thread: TaskId) -> Option<&mut TaskCapabilities> {
+        let process = self.process_of(thread)?;
+        self.entries.get_mut(&process)
     }
 
-    /// Remove the registry entry for `task`, returning it.
+    /// Borrow a process's record directly, without resolving a thread.
+    ///
+    /// For the paths that already hold a [`ProcessId`] — an admit path
+    /// installing state under a freshly minted process, an introspection
+    /// query naming a process.
+    #[must_use]
+    pub fn caps_of_process(&self, process: ProcessId) -> Option<&TaskCapabilities> {
+        self.entries.get(&process)
+    }
+
+    /// Mutably borrow a process's record directly, without resolving a
+    /// thread. The counterpart of [`Self::caps_of_process`].
+    pub fn caps_of_process_mut(&mut self, process: ProcessId) -> Option<&mut TaskCapabilities> {
+        self.entries.get_mut(&process)
+    }
+
+    /// Detach one exiting `thread` from its process, returning the process it
+    /// left and how many of its threads remain.
+    ///
+    /// The record itself survives: the remaining threads are still authorised
+    /// by it, and a thread group outlives its leader exactly as it does on a
+    /// POSIX system (the leader's id keeps naming the process). The caller
+    /// removes the record with [`Self::remove`] once the count reaches zero.
+    /// [`None`] for a thread that was not registered — idempotent teardown.
+    pub fn remove_thread(&mut self, thread: TaskId) -> Option<(ProcessId, usize)> {
+        let process = self.threads.remove(&thread)?;
+        let remaining = match self.members.get_mut(&process) {
+            Some(set) => {
+                set.remove(&thread);
+                let remaining = set.len();
+                if remaining == 0 {
+                    self.members.remove(&process);
+                }
+                remaining
+            }
+            None => 0,
+        };
+        Some((process, remaining))
+    }
+
+    /// Remove a process's capability record and every thread still mapped to
+    /// it, returning the record.
     ///
     /// Called by the syscall dispatcher's `exit` handler after
     /// `Scheduler::exit` has flipped the task's state; the returned
     /// record can be inspected by tests, then dropped. Returning the
     /// record (instead of swallowing it) lets the caller zero out any
     /// capability material in line with the kernel allocator's
-    /// "zero-on-free for credential-holding memory" requirement.
-    pub fn remove(&mut self, task: TaskId) -> Option<TaskCapabilities> {
-        self.entries.remove(&task)
+    /// "zero-on-free for credential-holding memory" requirement. Clearing
+    /// the thread mappings here as well is what stops a dead process's
+    /// thread id from resolving to a record that is about to be dropped.
+    pub fn remove(&mut self, process: ProcessId) -> Option<TaskCapabilities> {
+        if let Some(threads) = self.members.remove(&process) {
+            for thread in threads {
+                self.threads.remove(&thread);
+            }
+        }
+        self.entries.remove(&process)
     }
 
-    /// Iterate every registered task's attested capability record, in
-    /// ascending [`TaskId`] order.
+    /// Iterate every registered **process's** attested capability record, in
+    /// ascending [`ProcessId`] order.
     ///
     /// The order is the `BTreeMap` key order, so it is stable across calls
     /// as long as the registry is unchanged — letting the System Information
@@ -1039,13 +1263,13 @@ impl CapTable {
         self.entries.values()
     }
 
-    /// Number of tasks currently registered. Primarily for tests.
+    /// Number of processes currently registered. Primarily for tests.
     #[must_use]
     pub fn len(&self) -> usize {
         self.entries.len()
     }
 
-    /// `true` if no task is currently registered.
+    /// `true` if no process is currently registered.
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
@@ -1077,8 +1301,13 @@ mod tests {
         ]);
         let manifest_request = caps_of(&[CapabilityId::FS_MOUNT, CapabilityId::DRV_LOAD]);
         let sink = RecordingSink::new();
-        let t =
-            TaskCapabilities::derive(TaskId(1), UserId(1000), user_grant, manifest_request, &sink);
+        let t = TaskCapabilities::derive(
+            ProcessId(1),
+            UserId(1000),
+            user_grant,
+            manifest_request,
+            &sink,
+        );
         // Intersection: only FS_MOUNT is in both.
         assert!(t.has(CapabilityId::FS_MOUNT));
         assert!(!t.has(CapabilityId::NET_RAW));
@@ -1091,7 +1320,7 @@ mod tests {
         use tairix_abi::ProcId;
         let grant = caps_of(&[CapabilityId::FS_MOUNT]);
         let sink = RecordingSink::new();
-        let base = TaskCapabilities::derive(TaskId(7), UserId(1000), grant, grant, &sink);
+        let base = TaskCapabilities::derive(ProcessId(7), UserId(1000), grant, grant, &sink);
         // A freshly-derived record carries the kernel sentinel: it is not a
         // distinct user process instance until a minted id is attached.
         assert_eq!(base.proc_id(), ProcId::KERNEL);
@@ -1110,7 +1339,7 @@ mod tests {
         use tairix_abi::ProcId;
         let grant = caps_of(&[CapabilityId::FS_MOUNT]);
         let sink = RecordingSink::new();
-        let base = TaskCapabilities::derive(TaskId(9), UserId(1000), grant, grant, &sink);
+        let base = TaskCapabilities::derive(ProcessId(9), UserId(1000), grant, grant, &sink);
         // A freshly-derived record is kernel-parented until the admit path
         // attaches the spawning parent's attested identity.
         assert_eq!(base.parent_proc_id(), ProcId::KERNEL);
@@ -1131,7 +1360,7 @@ mod tests {
     fn proc_name_defaults_empty_and_with_name_attaches() {
         let grant = caps_of(&[CapabilityId::FS_MOUNT]);
         let sink = RecordingSink::new();
-        let base = TaskCapabilities::derive(TaskId(11), UserId(1000), grant, grant, &sink);
+        let base = TaskCapabilities::derive(ProcessId(11), UserId(1000), grant, grant, &sink);
         // A freshly-derived record has no attested name.
         assert_eq!(base.name(), "");
 
@@ -1145,7 +1374,7 @@ mod tests {
     fn start_time_defaults_to_boot_sentinel_and_with_start_time_attaches() {
         let grant = caps_of(&[CapabilityId::FS_MOUNT]);
         let sink = RecordingSink::new();
-        let base = TaskCapabilities::derive(TaskId(15), UserId(1000), grant, grant, &sink);
+        let base = TaskCapabilities::derive(ProcessId(15), UserId(1000), grant, grant, &sink);
         // A freshly-derived record carries the `0` boot/kernel-principal
         // sentinel until an admission timestamp is attested.
         assert_eq!(base.start_time(), 0);
@@ -1262,7 +1491,7 @@ mod tests {
     fn credential_defaults_empty_and_with_credential_attaches() {
         let grant = caps_of(&[CapabilityId::FS_MOUNT]);
         let sink = RecordingSink::new();
-        let base = TaskCapabilities::derive(TaskId(13), UserId(1000), grant, grant, &sink);
+        let base = TaskCapabilities::derive(ProcessId(13), UserId(1000), grant, grant, &sink);
         // A freshly-derived record carries the system group and no
         // supplementary groups until a credential is attached.
         assert_eq!(base.primary_gid(), GroupId::default());
@@ -1282,7 +1511,7 @@ mod tests {
         use tairix_abi::ProcId;
         let grant = caps_of(&[CapabilityId::FS_MOUNT]);
         let sink = RecordingSink::new();
-        let proc = TaskCapabilities::derive(TaskId(44), UserId(1000), grant, grant, &sink)
+        let proc = TaskCapabilities::derive(ProcessId(44), UserId(1000), grant, grant, &sink)
             .with_proc_id(ProcId::from_raw([0x5A; 16]))
             .with_credential(GroupId(77), alloc::vec![]);
         assert_eq!(proc.attest_origin().gid(), 77);
@@ -1294,7 +1523,7 @@ mod tests {
         let grant = caps_of(&[CapabilityId::FS_MOUNT, CapabilityId::SYSINFO_GLOBAL]);
         let sink = RecordingSink::new();
         // A kernel-domain record (no minted proc_id) attests as Kernel.
-        let kernel_task = TaskCapabilities::derive(TaskId(3), UserId(0), grant, grant, &sink);
+        let kernel_task = TaskCapabilities::derive(ProcessId(3), UserId(0), grant, grant, &sink);
         let kernel_origin = kernel_task.attest_origin();
         assert_eq!(kernel_origin.trust_domain(), TrustDomain::Kernel);
         assert!(kernel_origin.proc_id().is_kernel());
@@ -1302,7 +1531,7 @@ mod tests {
         // A minted process instance attests as User, carrying its own uid,
         // pid, proc_id, and a capability summary mirroring its effective set.
         let minted = ProcId::from_raw([0x5A; 16]);
-        let proc = TaskCapabilities::derive(TaskId(42), UserId(1000), grant, grant, &sink)
+        let proc = TaskCapabilities::derive(ProcessId(42), UserId(1000), grant, grant, &sink)
             .with_proc_id(minted);
         let origin = proc.attest_origin();
         assert_eq!(origin.trust_domain(), TrustDomain::User);
@@ -1327,7 +1556,7 @@ mod tests {
         let manifest_request = user_grant; // identical → effective == both.
         let sink = RecordingSink::new();
         let mut t =
-            TaskCapabilities::derive(TaskId(2), UserId(1), user_grant, manifest_request, &sink);
+            TaskCapabilities::derive(ProcessId(2), UserId(1), user_grant, manifest_request, &sink);
         let narrower = caps_of(&[CapabilityId::FS_MOUNT]);
         assert_eq!(t.delegate(&narrower, &sink), Ok(()));
         assert!(t.has(CapabilityId::FS_MOUNT));
@@ -1347,7 +1576,7 @@ mod tests {
         let manifest_request = user_grant;
         let sink = RecordingSink::new();
         let mut t =
-            TaskCapabilities::derive(TaskId(3), UserId(1), user_grant, manifest_request, &sink);
+            TaskCapabilities::derive(ProcessId(3), UserId(1), user_grant, manifest_request, &sink);
         let wider = caps_of(&[CapabilityId::FS_MOUNT, CapabilityId::DRV_KERNEL]);
         assert_eq!(t.delegate(&wider, &sink), Err(Errno::DelegationWiden));
         // The effective set is unchanged.
@@ -1366,7 +1595,8 @@ mod tests {
     fn revoke_removes_capability_and_returns_previous_state() {
         let user_grant = caps_of(&[CapabilityId::FS_MOUNT, CapabilityId::NET_RAW]);
         let sink = RecordingSink::new();
-        let mut t = TaskCapabilities::derive(TaskId(4), UserId(1), user_grant, user_grant, &sink);
+        let mut t =
+            TaskCapabilities::derive(ProcessId(4), UserId(1), user_grant, user_grant, &sink);
         assert!(t.revoke(CapabilityId::FS_MOUNT, &sink));
         assert!(!t.has(CapabilityId::FS_MOUNT));
         // Revoking again is idempotent (returns false) but still
@@ -1389,16 +1619,17 @@ mod tests {
 
         let user_grant = caps_of(&[CapabilityId::FS_MOUNT, CapabilityId::AUDIT_READ]);
         let sink = RecordingSink::new();
-        let mut t = TaskCapabilities::derive(TaskId(5), UserId(1), user_grant, user_grant, &sink);
+        let mut t =
+            TaskCapabilities::derive(ProcessId(5), UserId(1), user_grant, user_grant, &sink);
 
         let epoch = RevocationEpoch(3);
         let narrowed = caps_of(&[CapabilityId::FS_MOUNT]);
         let body =
-            CapabilityToken::signing_input(ABI_VERSION_CURRENT, t.task().0, epoch, &narrowed);
+            CapabilityToken::signing_input(ABI_VERSION_CURRENT, t.process().0, epoch, &narrowed);
         let sig = signing.sign(&body);
         let token = CapabilityToken {
             abi_version: ABI_VERSION_CURRENT,
-            subject: t.task().0,
+            subject: t.process().0,
             epoch,
             caps: narrowed,
             signature: Ed25519Signature::from_bytes(sig.to_bytes()),
@@ -1416,8 +1647,8 @@ mod tests {
         // discarded sets.
         let grant = caps_of(&[CapabilityId::FS_MOUNT, CapabilityId::NET_RAW]);
         let sink = RecordingSink::new();
-        let t =
-            TaskCapabilities::derive(TaskId(11), UserId(1000), grant, grant, &sink).as_sandboxed();
+        let t = TaskCapabilities::derive(ProcessId(11), UserId(1000), grant, grant, &sink)
+            .as_sandboxed();
         assert!(t.is_sandboxed());
         assert!(t.effective().is_empty());
         assert!(t.user_grant().is_empty());
@@ -1429,7 +1660,7 @@ mod tests {
     fn delegate_refuses_a_sandboxed_target() {
         let sink = RecordingSink::new();
         let mut t = TaskCapabilities::derive(
-            TaskId(12),
+            ProcessId(12),
             UserId(1000),
             caps_of(&[CapabilityId::FS_MOUNT]),
             caps_of(&[CapabilityId::FS_MOUNT]),
@@ -1465,7 +1696,7 @@ mod tests {
         let authority = Ed25519PublicKey::from_bytes(signing.verifying_key().as_bytes()).unwrap();
         let sink = RecordingSink::new();
         let mut t = TaskCapabilities::derive(
-            TaskId(13),
+            ProcessId(13),
             UserId(1000),
             caps_of(&[CapabilityId::FS_MOUNT]),
             caps_of(&[CapabilityId::FS_MOUNT]),
@@ -1474,11 +1705,12 @@ mod tests {
         .as_sandboxed();
         let epoch = RevocationEpoch(1);
         let payload = CapabilitySet::empty();
-        let body = CapabilityToken::signing_input(ABI_VERSION_CURRENT, t.task().0, epoch, &payload);
+        let body =
+            CapabilityToken::signing_input(ABI_VERSION_CURRENT, t.process().0, epoch, &payload);
         let sig = signing.sign(&body);
         let token = CapabilityToken {
             abi_version: ABI_VERSION_CURRENT,
-            subject: t.task().0,
+            subject: t.process().0,
             epoch,
             caps: payload,
             signature: Ed25519Signature::from_bytes(sig.to_bytes()),
@@ -1500,12 +1732,13 @@ mod tests {
 
         let user_grant = caps_of(&[CapabilityId::FS_MOUNT, CapabilityId::AUDIT_READ]);
         let sink = RecordingSink::new();
-        let mut t = TaskCapabilities::derive(TaskId(9), UserId(1), user_grant, user_grant, &sink);
+        let mut t =
+            TaskCapabilities::derive(ProcessId(9), UserId(1), user_grant, user_grant, &sink);
 
         let epoch = RevocationEpoch(3);
         let narrowed = caps_of(&[CapabilityId::FS_MOUNT]);
         // Sign the token for some other task, not `t`.
-        let other_subject = t.task().0 ^ 0x1;
+        let other_subject = t.process().0 ^ 0x1;
         let body =
             CapabilityToken::signing_input(ABI_VERSION_CURRENT, other_subject, epoch, &narrowed);
         let sig = signing.sign(&body);
@@ -1535,17 +1768,22 @@ mod tests {
 
         let user_grant = caps_of(&[CapabilityId::FS_MOUNT]);
         let sink = RecordingSink::new();
-        let mut t = TaskCapabilities::derive(TaskId(6), UserId(1), user_grant, user_grant, &sink);
+        let mut t =
+            TaskCapabilities::derive(ProcessId(6), UserId(1), user_grant, user_grant, &sink);
 
         // Sign for epoch 1 but verify under epoch 2 — mass revocation.
         let issued_at = RevocationEpoch(1);
         let current = RevocationEpoch(2);
-        let body =
-            CapabilityToken::signing_input(ABI_VERSION_CURRENT, t.task().0, issued_at, &user_grant);
+        let body = CapabilityToken::signing_input(
+            ABI_VERSION_CURRENT,
+            t.process().0,
+            issued_at,
+            &user_grant,
+        );
         let sig = signing.sign(&body);
         let token = CapabilityToken {
             abi_version: ABI_VERSION_CURRENT,
-            subject: t.task().0,
+            subject: t.process().0,
             epoch: issued_at,
             caps: user_grant,
             signature: Ed25519Signature::from_bytes(sig.to_bytes()),
@@ -1572,7 +1810,7 @@ mod tests {
         ]);
         let sink = RecordingSink::new();
         let t = TaskCapabilities::derive(
-            TaskId(7),
+            ProcessId(7),
             UserId(0),
             CapabilitySet::empty(), // ambient powers? no.
             manifest_request,
@@ -1585,7 +1823,7 @@ mod tests {
     fn io_counters_start_at_zero_and_add_the_bytes_moved() {
         let grant = caps_of(&[CapabilityId::FS_MOUNT]);
         let sink = RecordingSink::new();
-        let t = TaskCapabilities::derive(TaskId(60), UserId(1000), grant, grant, &sink);
+        let t = TaskCapabilities::derive(ProcessId(60), UserId(1000), grant, grant, &sink);
         assert_eq!(t.io_bytes_read(), 0);
         assert_eq!(t.io_bytes_written(), 0);
 
@@ -1612,7 +1850,7 @@ mod tests {
     fn io_counters_saturate_rather_than_wrapping() {
         let grant = caps_of(&[CapabilityId::FS_MOUNT]);
         let sink = RecordingSink::new();
-        let t = TaskCapabilities::derive(TaskId(61), UserId(1000), grant, grant, &sink);
+        let t = TaskCapabilities::derive(ProcessId(61), UserId(1000), grant, grant, &sink);
         t.record_bytes_read(u64::MAX - 1);
         t.record_bytes_written(u64::MAX);
 
@@ -1631,8 +1869,8 @@ mod tests {
     fn io_counters_are_independent_between_tasks() {
         let grant = caps_of(&[CapabilityId::FS_MOUNT]);
         let sink = RecordingSink::new();
-        let parent = TaskCapabilities::derive(TaskId(62), UserId(1000), grant, grant, &sink);
-        let child = TaskCapabilities::derive(TaskId(63), UserId(1000), grant, grant, &sink);
+        let parent = TaskCapabilities::derive(ProcessId(62), UserId(1000), grant, grant, &sink);
+        let child = TaskCapabilities::derive(ProcessId(63), UserId(1000), grant, grant, &sink);
         parent.record_bytes_read(4096);
         parent.record_bytes_written(512);
         // Each task's record is derived on its own, so one task's I/O can
@@ -1648,7 +1886,7 @@ mod tests {
     fn cloned_snapshots_of_one_task_share_its_counters() {
         let grant = caps_of(&[CapabilityId::FS_MOUNT]);
         let sink = RecordingSink::new();
-        let live = TaskCapabilities::derive(TaskId(64), UserId(1000), grant, grant, &sink);
+        let live = TaskCapabilities::derive(ProcessId(64), UserId(1000), grant, grant, &sink);
         // The dispatcher answers each syscall off a clone of the live record;
         // an increment made through that snapshot must land on the one total
         // the registry's entry reads back.
@@ -1666,7 +1904,7 @@ mod tests {
     fn narrowing_a_record_leaves_its_io_totals_alone() {
         let grant = caps_of(&[CapabilityId::FS_MOUNT, CapabilityId::NET_RAW]);
         let sink = RecordingSink::new();
-        let mut t = TaskCapabilities::derive(TaskId(65), UserId(1000), grant, grant, &sink);
+        let mut t = TaskCapabilities::derive(ProcessId(65), UserId(1000), grant, grant, &sink);
         t.record_bytes_read(300);
         t.record_bytes_written(30);
         t.delegate(&caps_of(&[CapabilityId::FS_MOUNT]), &sink)
@@ -1685,7 +1923,7 @@ mod tests {
     fn make_caps(task: u64, caps: &[tairix_abi::CapabilityId]) -> TaskCapabilities {
         let grant = caps_of(caps);
         let sink = RecordingSink::new();
-        TaskCapabilities::derive(TaskId(task), UserId(1000), grant, grant, &sink)
+        TaskCapabilities::derive(ProcessId(task), UserId(1000), grant, grant, &sink)
     }
 
     #[test]
@@ -1704,7 +1942,7 @@ mod tests {
         assert_eq!(table.len(), 1);
         let got = table.caps_for(TaskId(7)).expect("registered");
         assert!(got.has(tairix_abi::CapabilityId::FS_MOUNT));
-        assert_eq!(got.task(), TaskId(7));
+        assert_eq!(got.process(), ProcessId(7));
     }
 
     #[test]
@@ -1733,16 +1971,216 @@ mod tests {
     }
 
     #[test]
+    fn a_freshly_inserted_process_has_its_leader_as_its_only_thread() {
+        let mut table = CapTable::new();
+        table.insert(make_caps(5, &[tairix_abi::CapabilityId::FS_MOUNT]));
+        assert_eq!(table.process_of(TaskId(5)), Some(ProcessId(5)));
+        assert_eq!(table.thread_count(ProcessId(5)), 1);
+        assert_eq!(
+            table.threads_of(ProcessId(5)).collect::<Vec<_>>(),
+            alloc::vec![TaskId(5)]
+        );
+    }
+
+    #[test]
+    fn every_thread_of_a_process_resolves_to_the_one_shared_record() {
+        let mut table = CapTable::new();
+        table.insert(make_caps(5, &[tairix_abi::CapabilityId::FS_MOUNT]));
+        table
+            .register_thread(TaskId(11), ProcessId(5))
+            .expect("joins the process");
+        table
+            .register_thread(TaskId(12), ProcessId(5))
+            .expect("joins the process");
+
+        for thread in [TaskId(5), TaskId(11), TaskId(12)] {
+            let record = table.caps_for(thread).expect("authorised");
+            assert_eq!(record.process(), ProcessId(5));
+            assert!(record.has(tairix_abi::CapabilityId::FS_MOUNT));
+        }
+        // One record, three threads: the process is the unit of authority.
+        assert_eq!(table.len(), 1);
+        assert_eq!(table.thread_count(ProcessId(5)), 3);
+        assert_eq!(
+            table.threads_of(ProcessId(5)).collect::<Vec<_>>(),
+            alloc::vec![TaskId(5), TaskId(11), TaskId(12)]
+        );
+    }
+
+    /// The security property the shared record buys: a revoke by any thread is
+    /// immediately in force for its siblings. A per-thread copy would leave a
+    /// sibling holding an authority the process had given up.
+    #[test]
+    fn a_revoke_through_one_thread_binds_its_siblings() {
+        let mut table = CapTable::new();
+        table.insert(make_caps(
+            5,
+            &[
+                tairix_abi::CapabilityId::FS_MOUNT,
+                tairix_abi::CapabilityId::NET_RAW,
+            ],
+        ));
+        table
+            .register_thread(TaskId(11), ProcessId(5))
+            .expect("joins the process");
+
+        let sink = RecordingSink::new();
+        table
+            .caps_for_mut(TaskId(11))
+            .expect("authorised")
+            .revoke(tairix_abi::CapabilityId::NET_RAW, &sink);
+
+        for thread in [TaskId(5), TaskId(11)] {
+            let record = table.caps_for(thread).expect("authorised");
+            assert!(!record.has(tairix_abi::CapabilityId::NET_RAW));
+            assert!(record.has(tairix_abi::CapabilityId::FS_MOUNT));
+        }
+    }
+
+    #[test]
+    fn registering_a_thread_fails_closed_on_an_unknown_process() {
+        let mut table = CapTable::new();
+        assert_eq!(
+            table.register_thread(TaskId(11), ProcessId(5)),
+            Err(ThreadRegisterError::UnknownProcess),
+        );
+        // Nothing was recorded, so the thread has no authority at all.
+        assert!(table.caps_for(TaskId(11)).is_none());
+        assert_eq!(table.thread_count(ProcessId(5)), 0);
+    }
+
+    #[test]
+    fn a_live_threads_authority_can_never_be_re_pointed() {
+        let mut table = CapTable::new();
+        table.insert(make_caps(5, &[tairix_abi::CapabilityId::FS_MOUNT]));
+        table.insert(make_caps(6, &[tairix_abi::CapabilityId::NET_RAW]));
+        table
+            .register_thread(TaskId(11), ProcessId(5))
+            .expect("joins the first process");
+
+        // A second registration — for the same process or another one — is
+        // refused, so a thread cannot be moved to a different authority.
+        assert_eq!(
+            table.register_thread(TaskId(11), ProcessId(6)),
+            Err(ThreadRegisterError::AlreadyPresent),
+        );
+        assert_eq!(
+            table.register_thread(TaskId(11), ProcessId(5)),
+            Err(ThreadRegisterError::AlreadyPresent),
+        );
+        // A leader cannot be stolen either.
+        assert_eq!(
+            table.register_thread(TaskId(5), ProcessId(6)),
+            Err(ThreadRegisterError::AlreadyPresent),
+        );
+        assert_eq!(
+            table.caps_for(TaskId(11)).expect("authorised").process(),
+            ProcessId(5)
+        );
+    }
+
+    #[test]
+    fn removing_a_thread_leaves_its_siblings_authorised() {
+        let mut table = CapTable::new();
+        table.insert(make_caps(5, &[tairix_abi::CapabilityId::FS_MOUNT]));
+        table
+            .register_thread(TaskId(11), ProcessId(5))
+            .expect("joins the process");
+
+        assert_eq!(
+            table.remove_thread(TaskId(11)),
+            Some((ProcessId(5), 1)),
+            "one thread left after the second exits",
+        );
+        assert!(table.caps_for(TaskId(11)).is_none());
+        assert!(table.caps_for(TaskId(5)).is_some());
+        assert_eq!(table.len(), 1);
+        // Idempotent: a thread torn down twice reports nothing the second time.
+        assert!(table.remove_thread(TaskId(11)).is_none());
+    }
+
+    /// A thread group outlives its leader, exactly as on a POSIX system: the
+    /// leader's id keeps naming the process, and the surviving threads stay
+    /// authorised until the last one goes.
+    #[test]
+    fn a_process_outlives_its_leader_thread() {
+        let mut table = CapTable::new();
+        table.insert(make_caps(5, &[tairix_abi::CapabilityId::FS_MOUNT]));
+        table
+            .register_thread(TaskId(11), ProcessId(5))
+            .expect("joins the process");
+
+        assert_eq!(table.remove_thread(TaskId(5)), Some((ProcessId(5), 1)));
+        assert!(table.caps_for(TaskId(5)).is_none());
+        let survivor = table.caps_for(TaskId(11)).expect("still authorised");
+        assert_eq!(survivor.process(), ProcessId(5));
+        assert!(survivor.has(tairix_abi::CapabilityId::FS_MOUNT));
+
+        assert_eq!(table.remove_thread(TaskId(11)), Some((ProcessId(5), 0)));
+        assert!(table.remove(ProcessId(5)).is_some());
+        assert!(table.is_empty());
+    }
+
+    /// Removing the process drops every thread mapping with it, so no thread id
+    /// can resolve to a record that has been torn down.
+    #[test]
+    fn removing_a_process_clears_every_thread_mapping() {
+        let mut table = CapTable::new();
+        table.insert(make_caps(5, &[tairix_abi::CapabilityId::FS_MOUNT]));
+        table
+            .register_thread(TaskId(11), ProcessId(5))
+            .expect("joins the process");
+
+        assert!(table.remove(ProcessId(5)).is_some());
+        for thread in [TaskId(5), TaskId(11)] {
+            assert!(table.caps_for(thread).is_none());
+            assert!(table.process_of(thread).is_none());
+        }
+        assert_eq!(table.thread_count(ProcessId(5)), 0);
+        assert!(table.is_empty());
+    }
+
+    /// A record replacement (a spawned child's effective record taking over
+    /// from its admit-time placeholder) must not disturb the thread set.
+    #[test]
+    fn replacing_a_record_keeps_the_processes_threads() {
+        let mut table = CapTable::new();
+        table.insert(make_caps(5, &[tairix_abi::CapabilityId::FS_MOUNT]));
+        table
+            .register_thread(TaskId(11), ProcessId(5))
+            .expect("joins the process");
+
+        assert!(table
+            .insert(make_caps(5, &[tairix_abi::CapabilityId::NET_RAW]))
+            .is_some());
+        assert_eq!(table.thread_count(ProcessId(5)), 2);
+        let record = table.caps_for(TaskId(11)).expect("still authorised");
+        assert!(record.has(tairix_abi::CapabilityId::NET_RAW));
+    }
+
+    #[test]
+    fn a_process_can_be_read_without_resolving_a_thread() {
+        let mut table = CapTable::new();
+        table.insert(make_caps(5, &[tairix_abi::CapabilityId::FS_MOUNT]));
+        assert!(table
+            .caps_of_process(ProcessId(5))
+            .expect("present")
+            .has(tairix_abi::CapabilityId::FS_MOUNT));
+        assert!(table.caps_of_process(ProcessId(6)).is_none());
+        assert!(table.caps_of_process_mut(ProcessId(5)).is_some());
+    }
+
+    #[test]
     fn captable_remove_returns_and_evicts_record() {
         let mut table = CapTable::new();
         table.insert(make_caps(9, &[tairix_abi::CapabilityId::FS_MOUNT]));
-        let evicted = table.remove(TaskId(9)).expect("present before remove");
+        let evicted = table.remove(ProcessId(9)).expect("present before remove");
         assert!(evicted.has(tairix_abi::CapabilityId::FS_MOUNT));
         assert!(table.is_empty());
         assert!(table.caps_for(TaskId(9)).is_none());
         // Idempotent: a second remove returns None and leaves the
         // registry empty.
-        assert!(table.remove(TaskId(9)).is_none());
+        assert!(table.remove(ProcessId(9)).is_none());
         assert!(table.is_empty());
     }
 
@@ -1788,7 +2226,7 @@ mod tests {
             .expect("3")
             .has(tairix_abi::CapabilityId::DRV_LOAD));
         // Removing one leaves the others intact (no aliasing).
-        table.remove(TaskId(2));
+        table.remove(ProcessId(2));
         assert_eq!(table.len(), 2);
         assert!(table.caps_for(TaskId(2)).is_none());
         assert!(table.caps_for(TaskId(1)).is_some());
@@ -1856,7 +2294,7 @@ mod tests {
         let first = make_caps(41, &[]);
         first.record_bytes_read(9999);
         table.insert(first);
-        table.remove(TaskId(41)).expect("evicted on exit");
+        table.remove(ProcessId(41)).expect("evicted on exit");
         table.insert(make_caps(41, &[]));
         assert_eq!(
             table.caps_for(TaskId(41)).expect("present").io_bytes_read(),

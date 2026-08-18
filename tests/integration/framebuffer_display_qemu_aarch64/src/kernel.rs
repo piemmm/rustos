@@ -45,7 +45,7 @@ use tairix_fwcfg::{FwCfg, MmioDma, RamfbConfig, DRM_FORMAT_XRGB8888};
 use tairix_kernel_core::console::NULL_CONSOLE_INPUT;
 use tairix_kernel_core::SeatRegistry;
 use tairix_kernel_mem::{AddressSpace, DirectPhysMap, HostPageTable, MmioMap, VirtAddr};
-use tairix_kernel_sec::captable::{TaskCapabilities, TaskId};
+use tairix_kernel_sec::captable::{ProcessId, TaskCapabilities};
 use tairix_kernel_sec::identity::UserId;
 use tairix_kernel_virtio::KernelMmioMapper;
 use tairix_seat::SeatOwner;
@@ -86,8 +86,8 @@ const MMIO_CAP_PAGES: usize = 128;
 /// sit well inside it (and inside the 2 GiB the MMU actually maps).
 const IDENTITY_LIMIT: u64 = 0x1_0000_0000;
 
-/// Synthetic owner task id for the driver context.
-const TASK: TaskId = TaskId(0xFB1);
+/// Synthetic owner process id for the driver context.
+const TASK: ProcessId = ProcessId(0xFB1);
 
 // --- Static scan-out surface -----------------------------------------
 

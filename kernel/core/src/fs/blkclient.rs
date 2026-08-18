@@ -32,7 +32,7 @@ use tairix_abi::sysinfo::{BlkHealthTransition, MountAvailability};
 use tairix_abi::{CapabilityId, Errno};
 use tairix_caps::CapabilitySet;
 use tairix_kernel_ipc::{CallEndpoint, EndpointId, ReplyOutcome};
-use tairix_kernel_sec::{TaskCapabilities, TaskId as SecTaskId, UserId};
+use tairix_kernel_sec::{ProcessId as SecProcessId, TaskCapabilities, UserId};
 use tairix_log::{Field, FieldValue, Level, Sink};
 
 use crate::audit::AuditEvent;
@@ -234,7 +234,7 @@ impl BlkClient {
         let mut caps = CapabilitySet::empty();
         caps.insert(CapabilityId::IPC_ENDPOINT);
         let caps = TaskCapabilities::derive(
-            SecTaskId(NEXT_CLIENT_ID.fetch_add(1, Ordering::Relaxed)),
+            SecProcessId(NEXT_CLIENT_ID.fetch_add(1, Ordering::Relaxed)),
             UserId(0),
             caps,
             caps,
@@ -483,7 +483,7 @@ impl BlkClient {
                 hook.set_wakeup(nearest_timed_deadline());
             }
         }
-        let claimant = self.caps.task().0;
+        let claimant = self.caps.process().0;
         let outcome = loop {
             let now = wait_arch().map_or(0, WaitQueueArch::now_ns);
             match self.endpoint.take_reply(claimant, ticket, now) {
@@ -679,7 +679,7 @@ mod tests {
     /// Create, register, and return an unrestricted block-service endpoint.
     fn register_endpoint(id: u64) -> Arc<CallEndpoint> {
         let creator = TaskCapabilities::derive(
-            SecTaskId(0x7E57_0001),
+            SecProcessId(0x7E57_0001),
             UserId(0),
             CapabilitySet::empty(),
             CapabilitySet::empty(),

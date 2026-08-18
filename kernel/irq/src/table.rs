@@ -10,7 +10,7 @@ use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 
 use tairix_abi::sysinfo::{IrqRecord, IRQ_FLAG_QUARANTINED};
 use tairix_abi::IrqHandle;
-use tairix_kernel_sec::TaskId;
+use tairix_kernel_sec::ProcessId;
 use tairix_sync::{OnceCell, RwLock};
 
 use crate::error::{IrqError, MaskError};
@@ -23,8 +23,14 @@ use crate::error::{IrqError, MaskError};
 pub struct IrqEntry {
     /// Handle minted at [`IrqTable::bind`] time.
     pub handle: IrqHandle,
-    /// Security-attribution task id of the bound owner.
-    pub owner: TaskId,
+    /// The **process** that owns this binding.
+    ///
+    /// Process-scoped, not per-thread: a driver's interrupt binding is a
+    /// process resource like an open file, so any thread of the owning
+    /// process may wait on it and the binding outlives the particular thread
+    /// that made it. The forgery check in [`IrqTable::try_wait_step`] compares
+    /// against this, so a *different* process can never wait on the line.
+    pub owner: ProcessId,
     /// Architecture-defined IRQ line. Stable for the lifetime of
     /// the binding.
     pub line: u32,
@@ -470,7 +476,7 @@ impl IrqTable {
     /// * [`IrqError::LineAlreadyBound`] if a binding for `line`
     ///   already exists (regardless of owner). `abi-v1` does not
     ///   support shared lines.
-    pub fn bind(&self, line: u32, owner: TaskId) -> Result<BindOutcome, IrqError> {
+    pub fn bind(&self, line: u32, owner: ProcessId) -> Result<BindOutcome, IrqError> {
         if line > self.max_line {
             return Err(IrqError::LineOutOfRange);
         }
@@ -544,7 +550,7 @@ impl IrqTable {
     pub fn try_wait_step(
         &self,
         handle: IrqHandle,
-        caller: TaskId,
+        caller: ProcessId,
         now_ns: u64,
         deadline_ns: u64,
     ) -> WaitStep {
@@ -600,7 +606,7 @@ impl IrqTable {
     /// path can resolve the line to re-arm without trusting a caller-supplied
     /// value: a forged or foreign handle yields [`None`] and re-arms nothing.
     #[must_use]
-    pub fn line_for(&self, handle: IrqHandle, caller: TaskId) -> Option<u32> {
+    pub fn line_for(&self, handle: IrqHandle, caller: ProcessId) -> Option<u32> {
         let g = self.inner.read();
         let line = *g.by_handle.get(&handle.as_u64())?;
         let entry = g.entries.get(&line)?;
@@ -620,7 +626,7 @@ impl IrqTable {
     /// line, or `unbound` for a spurious/contained line no driver owns. It
     /// grants no authority and mutates nothing.
     #[must_use]
-    pub fn owner_of_line(&self, line: u32) -> Option<TaskId> {
+    pub fn owner_of_line(&self, line: u32) -> Option<ProcessId> {
         self.inner
             .read()
             .entries
@@ -790,24 +796,27 @@ impl IrqTable {
     /// by the wait-set path to fail a quarantined IRQ member closed rather
     /// than re-arm and re-storm it. A pure read, safe from any context.
     #[must_use]
-    pub fn is_quarantined(&self, handle: IrqHandle, caller: TaskId) -> bool {
+    pub fn is_quarantined(&self, handle: IrqHandle, caller: ProcessId) -> bool {
         match self.line_for(handle, caller) {
             Some(line) => self.quarantined[line as usize].load(Ordering::Acquire),
             None => false,
         }
     }
 
-    /// Drop every binding owned by `task`.
+    /// Drop every binding owned by `process`.
     ///
     /// Called from `KernelSyscallHandlers::exit` on the syscall
-    /// path and (in future stages) from the scheduler-driven task
-    /// teardown path. Idempotent: a second call is a no-op.
-    pub fn release_for(&self, task: TaskId) -> ReleaseOutcome {
+    /// path and from the scheduler-driven task teardown path.
+    /// Idempotent: a second call is a no-op. Scoped to the process, not to
+    /// one thread: a binding belongs to the driver process, so it is released
+    /// when the process dies, not when whichever thread happened to bind it
+    /// exits.
+    pub fn release_for(&self, process: ProcessId) -> ReleaseOutcome {
         let mut g = self.inner.write();
         let to_drop: alloc::vec::Vec<u32> = g
             .entries
             .iter()
-            .filter_map(|(line, e)| (e.owner == task).then_some(*line))
+            .filter_map(|(line, e)| (e.owner == process).then_some(*line))
             .collect();
         let released = to_drop.len();
         for line in to_drop {
@@ -934,12 +943,12 @@ mod tests {
     #[test]
     fn bind_mints_handle_and_records_owner() {
         let t = IrqTable::new(31);
-        let out = t.bind(7, TaskId(42)).expect("bind");
+        let out = t.bind(7, ProcessId(42)).expect("bind");
         assert_eq!(out.line, 7);
         assert_ne!(out.handle, IrqHandle::INVALID);
         let entry = t.lookup(out.handle).expect("present");
         assert_eq!(entry.line, 7);
-        assert_eq!(entry.owner, TaskId(42));
+        assert_eq!(entry.owner, ProcessId(42));
         assert!(!t.ready_flag(7));
     }
 
@@ -948,13 +957,13 @@ mod tests {
         let t = IrqTable::new(31);
         // Unbound line: no owner.
         assert_eq!(t.owner_of_line(7), None);
-        let _ = t.bind(7, TaskId(42)).expect("bind");
+        let _ = t.bind(7, ProcessId(42)).expect("bind");
         // Bound line: names the owner, without a caller check (any reader).
-        assert_eq!(t.owner_of_line(7), Some(TaskId(42)));
+        assert_eq!(t.owner_of_line(7), Some(ProcessId(42)));
         // A different, still-unbound line stays None.
         assert_eq!(t.owner_of_line(8), None);
         // Releasing the owner's bindings makes the line unbound again.
-        let _ = t.release_for(TaskId(42));
+        let _ = t.release_for(ProcessId(42));
         assert_eq!(t.owner_of_line(7), None);
     }
 
@@ -962,8 +971,8 @@ mod tests {
     fn records_report_bound_lines_with_counts_owners_and_paging() {
         let t = IrqTable::new(31);
         let ctl = MockController::ok();
-        let _ = t.bind(5, TaskId(7)).expect("bind 5");
-        let _ = t.bind(10, TaskId(9)).expect("bind 10");
+        let _ = t.bind(5, ProcessId(7)).expect("bind 5");
+        let _ = t.bind(10, ProcessId(9)).expect("bind 10");
         // Fire line 5 three times, line 10 once. `fire_total` counts every
         // edge on an addressable line.
         for _ in 0..3 {
@@ -1003,7 +1012,7 @@ mod tests {
         let t = IrqTable::new(31);
         t.set_clock(leak_clock(0)).expect("clock");
         let ctl = MockController::ok();
-        let _ = t.bind(5, TaskId(7)).expect("bind");
+        let _ = t.bind(5, ProcessId(7)).expect("bind");
         // Drive the line past its storm budget within one window so it
         // quarantines; the record must carry the flag.
         for _ in 0..=STORM_FIRE_BUDGET {
@@ -1020,28 +1029,28 @@ mod tests {
     #[test]
     fn bind_refuses_duplicate_line() {
         let t = IrqTable::new(31);
-        let _ = t.bind(7, TaskId(1)).unwrap();
+        let _ = t.bind(7, ProcessId(1)).unwrap();
         // Same task, same line: still refused — `abi-v1` does not
         // share lines.
-        assert_eq!(t.bind(7, TaskId(1)), Err(IrqError::LineAlreadyBound));
+        assert_eq!(t.bind(7, ProcessId(1)), Err(IrqError::LineAlreadyBound));
         // Different task, same line: refused for the same reason.
-        assert_eq!(t.bind(7, TaskId(2)), Err(IrqError::LineAlreadyBound));
+        assert_eq!(t.bind(7, ProcessId(2)), Err(IrqError::LineAlreadyBound));
     }
 
     #[test]
     fn bind_refuses_out_of_range_line() {
         let t = IrqTable::new(15);
-        assert_eq!(t.bind(16, TaskId(1)), Err(IrqError::LineOutOfRange));
+        assert_eq!(t.bind(16, ProcessId(1)), Err(IrqError::LineOutOfRange));
         // Boundary case: max_line itself is accepted.
-        let _ = t.bind(15, TaskId(1)).expect("boundary accepted");
+        let _ = t.bind(15, ProcessId(1)).expect("boundary accepted");
     }
 
     #[test]
     fn try_wait_step_returns_continue_when_no_ready_and_not_expired() {
         let t = IrqTable::new(31);
-        let out = t.bind(7, TaskId(42)).unwrap();
+        let out = t.bind(7, ProcessId(42)).unwrap();
         assert_eq!(
-            t.try_wait_step(out.handle, TaskId(42), 0, 1_000),
+            t.try_wait_step(out.handle, ProcessId(42), 0, 1_000),
             WaitStep::Continue
         );
     }
@@ -1050,16 +1059,16 @@ mod tests {
     fn try_wait_step_returns_ready_after_fire_and_consumes_flag() {
         let t = IrqTable::new(31);
         let ctl = MockController::ok();
-        let out = t.bind(7, TaskId(42)).unwrap();
+        let out = t.bind(7, ProcessId(42)).unwrap();
         assert_eq!(t.fire(7, &ctl), Ok(FireOutcome::Marked));
         // First poll consumes the ready flag.
         assert_eq!(
-            t.try_wait_step(out.handle, TaskId(42), 0, 1_000),
+            t.try_wait_step(out.handle, ProcessId(42), 0, 1_000),
             WaitStep::Ready
         );
         // Second poll without another fire is Continue.
         assert_eq!(
-            t.try_wait_step(out.handle, TaskId(42), 0, 1_000),
+            t.try_wait_step(out.handle, ProcessId(42), 0, 1_000),
             WaitStep::Continue
         );
     }
@@ -1067,9 +1076,9 @@ mod tests {
     #[test]
     fn try_wait_step_returns_timed_out_when_now_meets_deadline() {
         let t = IrqTable::new(31);
-        let out = t.bind(7, TaskId(42)).unwrap();
+        let out = t.bind(7, ProcessId(42)).unwrap();
         assert_eq!(
-            t.try_wait_step(out.handle, TaskId(42), 1_000, 1_000),
+            t.try_wait_step(out.handle, ProcessId(42), 1_000, 1_000),
             WaitStep::TimedOut
         );
     }
@@ -1079,7 +1088,7 @@ mod tests {
         let t = IrqTable::new(31);
         // No bind: any handle is unknown.
         assert_eq!(
-            t.try_wait_step(IrqHandle::from_raw(0xDEAD_BEEF), TaskId(42), 0, 1_000),
+            t.try_wait_step(IrqHandle::from_raw(0xDEAD_BEEF), ProcessId(42), 0, 1_000),
             WaitStep::NotFound
         );
     }
@@ -1087,10 +1096,10 @@ mod tests {
     #[test]
     fn try_wait_step_returns_not_found_on_handle_minted_for_another_task() {
         let t = IrqTable::new(31);
-        let out = t.bind(7, TaskId(42)).unwrap();
+        let out = t.bind(7, ProcessId(42)).unwrap();
         // Same handle, different caller — forgery defence.
         assert_eq!(
-            t.try_wait_step(out.handle, TaskId(99), 0, 1_000),
+            t.try_wait_step(out.handle, ProcessId(99), 0, 1_000),
             WaitStep::NotFound
         );
     }
@@ -1099,12 +1108,12 @@ mod tests {
     fn ready_beats_timeout_in_a_tie() {
         let t = IrqTable::new(31);
         let ctl = MockController::ok();
-        let out = t.bind(7, TaskId(42)).unwrap();
+        let out = t.bind(7, ProcessId(42)).unwrap();
         t.fire(7, &ctl).unwrap();
         // The wake-up happened; even though `now == deadline` we
         // must surface `Ready` rather than `TimedOut`.
         assert_eq!(
-            t.try_wait_step(out.handle, TaskId(42), 1_000, 1_000),
+            t.try_wait_step(out.handle, ProcessId(42), 1_000, 1_000),
             WaitStep::Ready
         );
     }
@@ -1123,7 +1132,7 @@ mod tests {
     fn fire_returns_arch_unsupported_when_controller_unsupported() {
         let t = IrqTable::new(31);
         let ctl = MockController::unsupported();
-        let _ = t.bind(7, TaskId(42)).unwrap();
+        let _ = t.bind(7, ProcessId(42)).unwrap();
         assert_eq!(t.fire(7, &ctl), Err(IrqError::ArchUnsupported));
     }
 
@@ -1160,7 +1169,7 @@ mod tests {
             }
         }
         let t = IrqTable::new(31);
-        let _ = t.bind(7, TaskId(42)).unwrap();
+        let _ = t.bind(7, ProcessId(42)).unwrap();
         let probe = OrderingProbe {
             table: &t,
             line: 7,
@@ -1179,24 +1188,24 @@ mod tests {
     #[test]
     fn release_for_evicts_bindings_and_returns_subsequent_wait_with_not_found() {
         let t = IrqTable::new(31);
-        let a = t.bind(7, TaskId(42)).unwrap();
-        let b = t.bind(9, TaskId(42)).unwrap();
-        let c = t.bind(10, TaskId(99)).unwrap();
-        assert_eq!(t.release_for(TaskId(42)).released, 2);
+        let a = t.bind(7, ProcessId(42)).unwrap();
+        let b = t.bind(9, ProcessId(42)).unwrap();
+        let c = t.bind(10, ProcessId(99)).unwrap();
+        assert_eq!(t.release_for(ProcessId(42)).released, 2);
         // Releases are idempotent.
-        assert_eq!(t.release_for(TaskId(42)).released, 0);
+        assert_eq!(t.release_for(ProcessId(42)).released, 0);
         // 42's handles are now unknown.
         assert_eq!(
-            t.try_wait_step(a.handle, TaskId(42), 0, 1_000),
+            t.try_wait_step(a.handle, ProcessId(42), 0, 1_000),
             WaitStep::NotFound
         );
         assert_eq!(
-            t.try_wait_step(b.handle, TaskId(42), 0, 1_000),
+            t.try_wait_step(b.handle, ProcessId(42), 0, 1_000),
             WaitStep::NotFound
         );
         // 99's binding survives.
         assert_eq!(
-            t.try_wait_step(c.handle, TaskId(99), 0, 1_000),
+            t.try_wait_step(c.handle, ProcessId(99), 0, 1_000),
             WaitStep::Continue
         );
     }
@@ -1211,14 +1220,14 @@ mod tests {
     fn len_and_is_empty_track_bindings() {
         let t = IrqTable::new(31);
         assert!(t.is_empty());
-        let _ = t.bind(7, TaskId(1)).unwrap();
+        let _ = t.bind(7, ProcessId(1)).unwrap();
         assert_eq!(t.len(), 1);
         assert!(!t.is_empty());
-        let _ = t.bind(8, TaskId(2)).unwrap();
+        let _ = t.bind(8, ProcessId(2)).unwrap();
         assert_eq!(t.len(), 2);
-        t.release_for(TaskId(1));
+        t.release_for(ProcessId(1));
         assert_eq!(t.len(), 1);
-        t.release_for(TaskId(2));
+        t.release_for(ProcessId(2));
         assert!(t.is_empty());
     }
 
@@ -1231,9 +1240,9 @@ mod tests {
     #[test]
     fn handles_are_unique_across_rebinds() {
         let t = IrqTable::new(31);
-        let a = t.bind(7, TaskId(1)).unwrap();
-        t.release_for(TaskId(1));
-        let b = t.bind(7, TaskId(1)).unwrap();
+        let a = t.bind(7, ProcessId(1)).unwrap();
+        t.release_for(ProcessId(1));
+        let b = t.bind(7, ProcessId(1)).unwrap();
         assert_ne!(a.handle, b.handle, "fresh bind must mint a fresh handle");
     }
 
@@ -1271,7 +1280,7 @@ mod tests {
         t.set_observer(obs).expect("first install succeeds");
         let ctl = MockController::ok();
         // Bound line: fire notifies the observer.
-        let _ = t.bind(7, TaskId(1)).unwrap();
+        let _ = t.bind(7, ProcessId(1)).unwrap();
         t.fire(7, &ctl).expect("fire bound line");
         assert_eq!(obs.calls.load(Ordering::Relaxed), 1);
         assert_eq!(obs.last_line.load(Ordering::Relaxed), 7);
@@ -1298,7 +1307,7 @@ mod tests {
         // as before (no panic, correct outcome).
         let t = IrqTable::new(31);
         let ctl = MockController::ok();
-        let _ = t.bind(3, TaskId(1)).unwrap();
+        let _ = t.bind(3, ProcessId(1)).unwrap();
         assert_eq!(t.fire(3, &ctl), Ok(FireOutcome::Marked));
     }
 
@@ -1336,15 +1345,15 @@ mod tests {
         // the budget every fire is delivered exactly as before.
         let t = IrqTable::new(31);
         let ctl = MockController::ok();
-        let out = t.bind(7, TaskId(1)).unwrap();
+        let out = t.bind(7, ProcessId(1)).unwrap();
         for _ in 0..(STORM_FIRE_BUDGET + 10) {
             assert_eq!(t.fire(7, &ctl), Ok(FireOutcome::Marked));
         }
         assert_eq!(
-            t.try_wait_step(out.handle, TaskId(1), 0, u64::MAX),
+            t.try_wait_step(out.handle, ProcessId(1), 0, u64::MAX),
             WaitStep::Ready
         );
-        assert!(!t.is_quarantined(out.handle, TaskId(1)));
+        assert!(!t.is_quarantined(out.handle, ProcessId(1)));
     }
 
     #[test]
@@ -1352,7 +1361,7 @@ mod tests {
         let t = IrqTable::new(31);
         t.set_clock(leak_clock(0)).expect("clock installs once");
         let ctl = MockController::ok();
-        let out = t.bind(7, TaskId(1)).unwrap();
+        let out = t.bind(7, ProcessId(1)).unwrap();
         // Every fire lands at the same instant (one window). The budget-th
         // is still delivered; the one past it trips the quarantine.
         for _ in 0..STORM_FIRE_BUDGET {
@@ -1361,9 +1370,9 @@ mod tests {
         assert_eq!(t.fire(7, &ctl), Ok(FireOutcome::Quarantined));
         // The tripping fire delivered no wake, and the waiter observes the
         // terminal, fail-closed quarantine rather than a ready or a spin.
-        assert!(t.is_quarantined(out.handle, TaskId(1)));
+        assert!(t.is_quarantined(out.handle, ProcessId(1)));
         assert_eq!(
-            t.try_wait_step(out.handle, TaskId(1), 0, u64::MAX),
+            t.try_wait_step(out.handle, ProcessId(1), 0, u64::MAX),
             WaitStep::Quarantined
         );
         // A quarantined line keeps reporting quarantined and never re-delivers.
@@ -1378,17 +1387,17 @@ mod tests {
         let clock = leak_clock(0);
         t.set_clock(clock).expect("clock installs once");
         let ctl = MockController::ok();
-        let out = t.bind(7, TaskId(1)).unwrap();
+        let out = t.bind(7, ProcessId(1)).unwrap();
         for window in 0..4u64 {
             clock.set(window * STORM_WINDOW_NS);
             for _ in 0..STORM_FIRE_BUDGET {
                 assert_eq!(t.fire(7, &ctl), Ok(FireOutcome::Marked));
                 // Consume the ready flag each time, mirroring a driver that
                 // services every interrupt (so `fire` re-sets it next round).
-                let _ = t.try_wait_step(out.handle, TaskId(1), 0, u64::MAX);
+                let _ = t.try_wait_step(out.handle, ProcessId(1), 0, u64::MAX);
             }
         }
-        assert!(!t.is_quarantined(out.handle, TaskId(1)));
+        assert!(!t.is_quarantined(out.handle, ProcessId(1)));
     }
 
     #[test]
@@ -1396,18 +1405,18 @@ mod tests {
         let t = IrqTable::new(31);
         t.set_clock(leak_clock(0)).expect("clock installs once");
         let ctl = MockController::ok();
-        let first = t.bind(7, TaskId(1)).unwrap();
+        let first = t.bind(7, ProcessId(1)).unwrap();
         for _ in 0..=STORM_FIRE_BUDGET {
             let _ = t.fire(7, &ctl);
         }
-        assert!(t.is_quarantined(first.handle, TaskId(1)));
+        assert!(t.is_quarantined(first.handle, ProcessId(1)));
         // The driver releases and rebinds the line to recover it.
-        t.release_for(TaskId(1));
-        let second = t.bind(7, TaskId(1)).unwrap();
-        assert!(!t.is_quarantined(second.handle, TaskId(1)));
+        t.release_for(ProcessId(1));
+        let second = t.bind(7, ProcessId(1)).unwrap();
+        assert!(!t.is_quarantined(second.handle, ProcessId(1)));
         assert_eq!(t.fire(7, &ctl), Ok(FireOutcome::Marked));
         assert_eq!(
-            t.try_wait_step(second.handle, TaskId(1), 0, u64::MAX),
+            t.try_wait_step(second.handle, ProcessId(1), 0, u64::MAX),
             WaitStep::Ready
         );
     }
@@ -1417,15 +1426,15 @@ mod tests {
         let t = IrqTable::new(31);
         t.set_clock(leak_clock(0)).expect("clock installs once");
         let ctl = MockController::ok();
-        let out = t.bind(7, TaskId(1)).unwrap();
+        let out = t.bind(7, ProcessId(1)).unwrap();
         for _ in 0..=STORM_FIRE_BUDGET {
             let _ = t.fire(7, &ctl);
         }
         // Owner sees the quarantine; a foreign task and a forged handle do
         // not (identify before acting).
-        assert!(t.is_quarantined(out.handle, TaskId(1)));
-        assert!(!t.is_quarantined(out.handle, TaskId(2)));
-        assert!(!t.is_quarantined(IrqHandle::from_raw(0xDEAD), TaskId(1)));
+        assert!(t.is_quarantined(out.handle, ProcessId(1)));
+        assert!(!t.is_quarantined(out.handle, ProcessId(2)));
+        assert!(!t.is_quarantined(IrqHandle::from_raw(0xDEAD), ProcessId(1)));
     }
 
     #[test]

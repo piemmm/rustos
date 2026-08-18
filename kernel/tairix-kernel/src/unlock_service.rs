@@ -27,7 +27,7 @@
 use tairix_abi::{CapabilityId, Errno, HwNode};
 use tairix_caps::CapabilitySet;
 use tairix_kernel_core::{ConsoleRead, CooperativeYield, SecretFeedback};
-use tairix_kernel_sec::captable::TaskId;
+use tairix_kernel_sec::captable::ProcessId;
 use tairix_log::{log, Event, EventId, Level, Sink};
 use tairix_sync::SpinLock;
 
@@ -218,11 +218,11 @@ impl ConsoleRead for GatedConsoleRead {
 /// per-arch copy.
 pub const UNLOCK_SERVICE: EventId = EventId(4139);
 
-/// Synthetic owner task id for the unlock kthread's capability context and
-/// IRQ binding. Distinct from the keyboard service's so an audit observer
+/// Synthetic owner process id for the unlock kthread's capability context
+/// and IRQ binding. Distinct from the keyboard service's so an audit observer
 /// can tell the two in-kernel services apart. The single definition every
 /// port shares.
-pub const UNLOCK_TASK: TaskId = TaskId(0x5b4);
+pub const UNLOCK_TASK: ProcessId = ProcessId(0x5b4);
 
 /// The capabilities the unlock kthread holds: [`CapabilityId::MMIO_MAP`]
 /// (the virtio register window), [`CapabilityId::MEM_DMA`] (the request
@@ -1066,7 +1066,7 @@ mod tests {
     fn the_unlock_owner_task_id_is_the_fixed_shared_value() {
         // A distinct synthetic owner so an audit observer tells the two
         // in-kernel services apart; fixed and shared by every port.
-        assert_eq!(UNLOCK_TASK, TaskId(0x5b4));
+        assert_eq!(UNLOCK_TASK, ProcessId(0x5b4));
     }
 
     /// A console source that reports `remaining_empty` zero-length reads

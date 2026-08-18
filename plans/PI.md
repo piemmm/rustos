@@ -1728,19 +1728,30 @@ parity with the aarch64 and x86_64 ports.
 
 - **RV1 — `trap.s` per-task kernel stack + frame-resident return state
   `[x]`.** The prerequisite trap-entry redesign. The vector now swaps `sp`
-  with `sscratch` on entry (port invariant: `sscratch` = this hart's current
-  user task's kernel-stack top while in U-mode, 0 while in S-mode; a nested
-  S-mode trap lands `sp == 0` and is recovered onto the interrupted kernel
-  `sp`), so the handler never runs on the interrupted **user** `sp` (which a
+  with `sscratch` on entry (port invariant: `sscratch` = the running user
+  task's **trap anchor** while in U-mode, 0 while in S-mode; a nested S-mode
+  trap lands `sp == 0` and is recovered onto the interrupted kernel `sp`), so
+  the handler never runs on the interrupted **user** `sp` (which a
   cooperative `ContextSwitch::switch` taken mid-handler would wrongly persist).
-  It saves `sepc`/`sstatus`/the interrupted `sp` into an enlarged 160-byte
-  `trap::TrapFrame` (GP-register offsets unchanged, so the `[u64; …]` syscall
-  view is intact) and reloads them before `sret`, picking the U-mode vs S-mode
-  return path from the saved `sstatus.SPP`; the syscall path advances the
+  The anchor is a 16-byte kernel-only region at the top of the task's
+  kernel-stack window carrying the running hart's kernel `tp`, which the
+  from-U prologue reloads — after spilling the user's `tp` into the frame —
+  before anything reads it: `tp` doubles as this port's per-hart identity
+  anchor *and* as the psABI thread pointer U-mode writes freely, so leaving it
+  alone would let a task name another hart and steer the kernel onto that
+  core's per-CPU state. It also makes the thread pointer per-task, the
+  platform contract thread-local storage needs;
+  `tests/integration/tp_isolation_qemu_riscv64` is the adversarial witness.
+  The vector saves `sepc`/`sstatus`/the interrupted `sp`/the interrupted `tp`
+  into a 256-byte `trap::TrapFrame` (GP-register offsets unchanged, so the
+  `[u64; …]` syscall view is intact) and reloads them before `sret`, picking
+  the U-mode vs S-mode return path from the saved `sstatus.SPP`; the syscall
+  path advances the
   **saved** `frame.sepc`. `userentry::enter_user` arms `sscratch` before its
   first `sret`; `init_traps` zeroes it at boot. This is the riscv64 sibling of
   the aarch64 `ELR_EL1`/`SPSR_EL1`/`SP_EL0` return-state errata. Host-proven
-  (the `TrapFrame` `offset_of!` asserts pin the layout against `trap.s`) and
+  (`trap_layout_tests.rs` parses every `.equ` out of `trap.s` and pins it
+  against the `TrapFrame` field or Rust constant it addresses) and
   every line of the redesigned vector is exercised by the existing riscv64
   matrix: U-mode `ecall`s/faults (`mem_map`/`spawn_program`/`abi_sys`/
   `memory_isolation`) drive the from-U swap + U-return path, and S-mode

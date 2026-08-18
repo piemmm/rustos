@@ -40,7 +40,7 @@ use tairix_kernel_mem::{
     AddressSpace, DirectPhysMap, DmaPool, FrameAllocator, HostPageTable, MmioMap, PhysAddr,
     VirtAddr, PAGE_SIZE,
 };
-use tairix_kernel_sec::captable::{TaskCapabilities, TaskId};
+use tairix_kernel_sec::captable::{ProcessId, TaskCapabilities};
 use tairix_kernel_sec::identity::UserId;
 use tairix_kernel_virtio::{
     provision_virtio_mmio, KernelMmioMapper, KernelVirtioFactory, KernelVirtioFactoryConfig,
@@ -121,8 +121,8 @@ fn static_dma_map() -> BootMemoryMap {
 /// Milestone event id namespace for the shared serial breadcrumbs.
 const MILESTONE_ID: EventId = EventId(9110);
 
-/// Synthetic owner task id for the bus-driver context.
-const TASK: TaskId = TaskId(0x5b3);
+/// Synthetic owner process id for the bus-driver context.
+const TASK: ProcessId = ProcessId(0x5b3);
 
 /// Capacity, in pages, of each per-device DMA window.
 const POOL_PAGES: usize = 64;

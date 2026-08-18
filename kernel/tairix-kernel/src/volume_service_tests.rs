@@ -38,7 +38,9 @@ use tairix_kernel_core::fs::FilesystemService;
 use tairix_kernel_core::{sharedreg, Vfs};
 use tairix_kernel_ipc::{CallEndpoint, CallEndpointLimits, EndpointId, RecvCall};
 use tairix_kernel_sec::captable::TaskCapabilities;
-use tairix_kernel_sec::{GroupId, GroupRecord, IdentityTableBuilder, TaskId, UserId, UserRecord};
+use tairix_kernel_sec::{
+    GroupId, GroupRecord, IdentityTableBuilder, ProcessId, UserId, UserRecord,
+};
 use tairix_log::Sink;
 use tairix_reclaim::{FreeMemorySource, MemoryPressure};
 
@@ -311,7 +313,7 @@ fn serve(
 /// endpoint-teardown path matches on unplug).
 fn register_endpoint(id: u64, owner: u64) -> StdArc<CallEndpoint> {
     let creator = TaskCapabilities::derive(
-        TaskId(owner),
+        ProcessId(owner),
         UserId(0),
         CapabilitySet::empty(),
         CapabilitySet::empty(),
@@ -505,7 +507,7 @@ fn attach_read_detach_lifecycle_over_a_served_fat32_volume() {
 
     // The shared region the request names: created through the recorded
     // facility so the kernel hold resolves it.
-    let (_va, region_id) = sharedreg::create(facility, TaskId(0x70_0002), 8).expect("region");
+    let (_va, region_id) = sharedreg::create(facility, ProcessId(0x70_0002), 8).expect("region");
 
     // --- Attach. ---
     let attach = VolumeAttachRequest {
@@ -622,7 +624,7 @@ fn attach_then_yank(
         StdArc::clone(&stop),
     );
     let (_va, region) =
-        sharedreg::create(facility, TaskId(scenario.region_task), 8).expect("region");
+        sharedreg::create(facility, ProcessId(scenario.region_task), 8).expect("region");
     VOLUME_SERVICE
         .attach(&VolumeAttachRequest {
             endpoint: scenario.endpoint_id,
@@ -798,7 +800,7 @@ fn dirty_yank_round(
         StdArc::clone(&stop),
     );
     let (_va, region) =
-        sharedreg::create(facility, TaskId(scenario.region_task), 8).expect("region");
+        sharedreg::create(facility, ProcessId(scenario.region_task), 8).expect("region");
     VOLUME_SERVICE
         .attach(&VolumeAttachRequest {
             endpoint: scenario.endpoint_id,
@@ -857,7 +859,7 @@ fn reinsert(
         StdArc::clone(&device),
         StdArc::clone(&stop),
     );
-    let (_va, region) = sharedreg::create(facility, TaskId(region_task), 8).expect("region");
+    let (_va, region) = sharedreg::create(facility, ProcessId(region_task), 8).expect("region");
     let outcome = VOLUME_SERVICE.attach(&VolumeAttachRequest {
         endpoint: endpoint_id,
         window: region,
@@ -1047,7 +1049,7 @@ fn forced_unmount_of_a_healthy_volume_scenario(
         StdArc::clone(&device),
         StdArc::clone(&stop),
     );
-    let (_va, region) = sharedreg::create(facility, TaskId(0x70_0006), 8).expect("region");
+    let (_va, region) = sharedreg::create(facility, ProcessId(0x70_0006), 8).expect("region");
     VOLUME_SERVICE
         .attach(&VolumeAttachRequest {
             endpoint: endpoint_id,
@@ -1143,7 +1145,7 @@ fn sibling_volumes_share_one_client_scenario(window_ptr: *mut u8, facility: &'st
         StdArc::clone(&device),
         StdArc::clone(&stop),
     );
-    let (_va, region) = sharedreg::create(facility, TaskId(0x70_0008), 8).expect("region");
+    let (_va, region) = sharedreg::create(facility, ProcessId(0x70_0008), 8).expect("region");
 
     let attach_extent = |name: &'static [u8], first_lba: u64| VolumeAttachRequest {
         endpoint: endpoint_id,
@@ -1242,7 +1244,7 @@ fn unrecognised_medium_mounts_as_unknown_scenario(
         StdArc::clone(&device),
         StdArc::clone(&stop),
     );
-    let (_va, region) = sharedreg::create(facility, TaskId(0x70_0009), 8).expect("region");
+    let (_va, region) = sharedreg::create(facility, ProcessId(0x70_0009), 8).expect("region");
 
     VOLUME_SERVICE
         .attach(&VolumeAttachRequest {

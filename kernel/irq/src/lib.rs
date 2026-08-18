@@ -25,7 +25,7 @@
 //!   counter snapshotted on `ready=true`.
 //! * **Forgery defence in the table itself.** Every
 //!   [`IrqTable::try_wait_step`] call re-verifies that the handle
-//!   was minted for the calling `kernel/sec::TaskId` before any
+//!   was minted for the calling `kernel/sec::ProcessId` before any
 //!   state transition. A forged handle returns
 //!   [`WaitStep::NotFound`] which the syscall handler translates to
 //!   `Errno::NotFound`; the dispatcher emits the standard

@@ -6,11 +6,26 @@
 //! the program's `ecall` may touch the U-bit user stack), clear
 //! `sstatus.SPP`/`SPIE` (so `sret` targets U-mode with `sstatus.SIE == 0`
 //! there) and `sstatus.SIE` (so no S-mode interrupt can be taken across the
-//! rest of the sequence — the `sscratch` arm below depends on it), arm
-//! `sscratch` with the kernel-stack top, load `sepc` with the entry point and
-//! `sp`/`a0` with the stack pointer and first argument, then `sret`. This is
-//! the one definition of that sequence; the CC2/CC3 QEMU verticals reach it
-//! through the HAL rather than copying the `asm!` block.
+//! rest of the sequence — the `sscratch` arm below depends on it), lay this
+//! task's **trap anchor** just below the kernel stack pointer and arm
+//! `sscratch` with it, load `sepc` with the entry point and `sp`/`a0` with
+//! the stack pointer and first argument, hand U-mode a zeroed thread
+//! pointer, then `sret`. This is the one definition of that sequence; the
+//! CC2/CC3 QEMU verticals reach it through the HAL rather than copying the
+//! `asm!` block.
+//!
+//! # The trap anchor and `tp`
+//!
+//! `sscratch` points at a [`crate::trap::TRAP_ANCHOR_BYTES`]-wide kernel-only
+//! region whose first word carries the kernel `tp` — this port's per-hart
+//! identity anchor ([`crate::smp::current_hartid`]) — so the trap vector can
+//! restore it the instant a U-mode trap arrives. `tp` is also the RISC-V psABI
+//! thread pointer, which U-mode code writes freely; without the anchor the
+//! kernel would resolve its per-CPU state from whatever value the trapping
+//! task last put there. The entry sequence therefore publishes the running
+//! hart's `tp` into the anchor (it is still live in `tp` at that point) and
+//! then **zeroes** `tp` for U-mode, so the entered task neither inherits nor
+//! can observe the kernel's hart identity.
 //!
 //! # U-mode preemptibility
 //!
@@ -71,7 +86,7 @@ const USER_ENTRY_SSTATUS_SET: u64 = SSTATUS_SUM;
 /// non-zero `sscratch` as "this trap came from U-mode", so an interrupt
 /// taken in S-mode while it is armed is misclassified: it overwrites the
 /// caller's frame and returns through the S-mode path, which leaves
-/// `sscratch` zero, and the task then runs in U-mode with no kernel stack
+/// `sscratch` zero, and the task then runs in U-mode with no trap anchor
 /// armed — every later trap of that task builds its frame on the task's own
 /// *user* stack. The aarch64 sibling masks `DAIF` for the same reason.
 ///
@@ -94,29 +109,42 @@ const _: () = assert!(USER_ENTRY_SSTATUS_SET & USER_ENTRY_SSTATUS_CLEAR == 0);
 /// top, and the trap vector must be installed. Diverges via `sret`.
 #[cfg(all(target_arch = "riscv64", target_os = "none"))]
 unsafe fn enter_user_mode(entry: u64, sp: u64, a0: u64) -> ! {
+    use crate::trap::{TRAP_ANCHOR_BYTES, TRAP_ANCHOR_KTP_OFFSET};
+
     // SAFETY: the-sanctioned assembly carve-out (no Rust spelling for
     // `sret` or the `sstatus` CSR edits). `csrs`/`csrc` set/clear exactly
     // the named bits, and the `csrc` — which masks `SIE` — precedes the
-    // `csrw sscratch` it protects; `csrw sscratch, sp` (with `sp` still the
-    // kernel stack pointer) arms the per-task kernel-stack top the trap
-    // vector swaps to on the next U->S trap (`trap.s`); `csrw sepc` and the
-    // `sp`/`a0` moves load the U-mode entry state; `sret` performs the
-    // documented S→U transition. The caller's safety contract guarantees
-    // the mapped entry/stack. `options(noreturn)` matches the divergence.
+    // `csrw sscratch` it protects. Lowering `sp` by `TRAP_ANCHOR_BYTES`
+    // carves the anchor out of stack this diverging sequence has already
+    // abandoned (nothing returns to the frames above it), so publishing this
+    // hart's `tp` there cannot touch a live frame; the trap vector then swaps
+    // to that address on the next U->S trap and rebuilds its frame beneath it
+    // (`trap.s`). `csrw sepc` and the `sp`/`a0` moves load the U-mode entry
+    // state, `mv tp, zero` keeps the kernel's hart identity out of U-mode,
+    // and `sret` performs the documented S→U transition. The caller's safety
+    // contract guarantees the mapped entry/stack. `options(noreturn)` matches
+    // the divergence, and `sp` is deliberately left as the user stack — no
+    // output operand is possible alongside `noreturn`, so `sp` itself carries
+    // the anchor address across the three instructions that need it.
     unsafe {
         core::arch::asm!(
             "csrs sstatus, {set}",
             "csrc sstatus, {clr}",
+            "addi sp, sp, -{anchor_bytes}",
+            "sd tp, {ktp_off}(sp)",
             "csrw sscratch, sp",
             "csrw sepc, {entry}",
             "mv sp, {sp}",
+            "mv tp, zero",
             "sret",
             set = in(reg) USER_ENTRY_SSTATUS_SET,
             clr = in(reg) USER_ENTRY_SSTATUS_CLEAR,
+            anchor_bytes = const TRAP_ANCHOR_BYTES,
+            ktp_off = const TRAP_ANCHOR_KTP_OFFSET,
             entry = in(reg) entry,
             sp = in(reg) sp,
             in("a0") a0,
-            options(noreturn, nostack),
+            options(noreturn),
         );
     }
 }

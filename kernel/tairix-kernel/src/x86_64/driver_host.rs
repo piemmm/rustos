@@ -185,11 +185,11 @@ mod tests {
         AddressSpace, FrameAllocator, HostPageTable, MmioMap, PhysAddr, SimPhysMap, VirtAddr,
         PAGE_SIZE,
     };
-    use tairix_kernel_sec::captable::{TaskCapabilities, TaskId};
+    use tairix_kernel_sec::captable::{ProcessId, TaskCapabilities};
     use tairix_kernel_sec::identity::UserId;
     use tairix_log::{Event, Sink};
 
-    const OWNER: TaskId = TaskId(88);
+    const OWNER: ProcessId = ProcessId(88);
     const SEED: [u8; 32] = [9u8; 32];
     /// Physical base of the register block the driver maps; the
     /// `SimPhysMap` backing the MMIO map covers `[BASE, BASE + 0x4000)`.

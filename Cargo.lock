@@ -4516,6 +4516,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "tairix-test-tp-isolation-qemu-riscv64"
+version = "0.0.0"
+dependencies = [
+ "tairix-abi",
+ "tairix-arch-riscv64",
+ "tairix-itest-harness",
+ "tairix-kalloc",
+ "tairix-kernel-core",
+ "tairix-kernel-mem",
+ "tairix-kernel-syscall",
+ "tairix-log",
+]
+
+[[package]]
+name = "tairix-test-tp-probe"
+version = "0.0.0"
+dependencies = [
+ "tairix-rt",
+]
+
+[[package]]
 name = "tairix-test-uaccess-fault-qemu-aarch64"
 version = "0.0.0"
 dependencies = [

@@ -35,7 +35,7 @@ use tairix_abi::ipc::IPC_MESSAGE_MAX_PAYLOAD_LEN;
 use tairix_abi::{CapabilityId, Errno};
 use tairix_caps::CapabilitySet;
 use tairix_kernel_ipc::{EndpointId, Port};
-use tairix_kernel_sec::{TaskCapabilities, TaskId, UserId};
+use tairix_kernel_sec::{ProcessId, TaskCapabilities, UserId};
 use tairix_log::{set_max_level, Event, Level, Sink};
 
 /// Sequences run by a plain `cargo test` (no budget set).
@@ -72,7 +72,7 @@ fn caps_of(items: &[CapabilityId]) -> CapabilitySet {
 }
 
 fn task_with(task_id: u64, caps: &CapabilitySet) -> TaskCapabilities {
-    TaskCapabilities::derive(TaskId(task_id), UserId(1), *caps, *caps, &NullSink)
+    TaskCapabilities::derive(ProcessId(task_id), UserId(1), *caps, *caps, &NullSink)
 }
 
 fn authorised_port() -> Port {

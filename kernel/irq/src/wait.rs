@@ -22,7 +22,7 @@
 //! virtio host wraps the kernel-binary's equivalent seam).
 
 use tairix_abi::IrqHandle;
-use tairix_kernel_sec::TaskId;
+use tairix_kernel_sec::ProcessId;
 
 use crate::table::{IrqTable, WaitStep};
 
@@ -141,7 +141,7 @@ pub enum WaitOutcome {
 pub fn block_until_ready(
     table: &IrqTable,
     handle: IrqHandle,
-    caller: TaskId,
+    caller: ProcessId,
     timeout_ns: u64,
     waiter: &dyn IrqWaiter,
 ) -> WaitOutcome {
@@ -259,11 +259,11 @@ mod tests {
     #[test]
     fn returns_ready_when_pre_fired() {
         let table = IrqTable::new(31);
-        let out = table.bind(7, TaskId(1)).unwrap();
+        let out = table.bind(7, ProcessId(1)).unwrap();
         table.fire(7, &OkController).unwrap();
         let waiter = TestWaiter::new(1);
         assert_eq!(
-            block_until_ready(&table, out.handle, TaskId(1), 1_000, &waiter),
+            block_until_ready(&table, out.handle, ProcessId(1), 1_000, &waiter),
             WaitOutcome::Ready
         );
         // A pre-fired binding is consumed on the first poll, before
@@ -274,14 +274,14 @@ mod tests {
     #[test]
     fn returns_ready_when_fire_arrives_during_a_yield() {
         let table = IrqTable::new(31);
-        let out = table.bind(7, TaskId(1)).unwrap();
+        let out = table.bind(7, ProcessId(1)).unwrap();
         let fire = || {
             table.fire(7, &OkController).unwrap();
         };
         // The device raises its line on the third parked yield.
         let waiter = TestWaiter::firing(3, &fire);
         assert_eq!(
-            block_until_ready(&table, out.handle, TaskId(1), u64::MAX, &waiter),
+            block_until_ready(&table, out.handle, ProcessId(1), u64::MAX, &waiter),
             WaitOutcome::Ready
         );
         assert_eq!(waiter.yield_calls.get(), 3);
@@ -290,12 +290,12 @@ mod tests {
     #[test]
     fn returns_timed_out_when_deadline_elapses() {
         let table = IrqTable::new(31);
-        let out = table.bind(7, TaskId(1)).unwrap();
+        let out = table.bind(7, ProcessId(1)).unwrap();
         // Clock advances 100 ns per yield; a 250 ns budget expires
         // after three readings.
         let waiter = TestWaiter::new(100);
         assert_eq!(
-            block_until_ready(&table, out.handle, TaskId(1), 250, &waiter),
+            block_until_ready(&table, out.handle, ProcessId(1), 250, &waiter),
             WaitOutcome::TimedOut
         );
     }
@@ -308,10 +308,10 @@ mod tests {
         // so a lost completion interrupt would strand the task forever while
         // it holds the device's lock.
         let table = IrqTable::new(31);
-        let out = table.bind(7, TaskId(1)).unwrap();
+        let out = table.bind(7, ProcessId(1)).unwrap();
         let waiter = TestWaiter::new(100);
         assert_eq!(
-            block_until_ready(&table, out.handle, TaskId(1), 250, &waiter),
+            block_until_ready(&table, out.handle, ProcessId(1), 250, &waiter),
             WaitOutcome::TimedOut
         );
         assert_eq!(waiter.parked_until.get(), 250);
@@ -323,7 +323,7 @@ mod tests {
         // whole reason a *request* wait must never ask for one).
         let unbounded = TestWaiter::aborting(1, IrqWaitAbort::TaskVanished);
         assert_eq!(
-            block_until_ready(&table, out.handle, TaskId(1), u64::MAX, &unbounded),
+            block_until_ready(&table, out.handle, ProcessId(1), u64::MAX, &unbounded),
             WaitOutcome::Aborted(IrqWaitAbort::TaskVanished)
         );
         assert_eq!(unbounded.parked_until.get(), u64::MAX);
@@ -337,7 +337,7 @@ mod tests {
             block_until_ready(
                 &table,
                 IrqHandle::from_raw(0xDEAD_BEEF),
-                TaskId(1),
+                ProcessId(1),
                 u64::MAX,
                 &waiter
             ),
@@ -348,10 +348,10 @@ mod tests {
     #[test]
     fn propagates_yield_abort() {
         let table = IrqTable::new(31);
-        let out = table.bind(7, TaskId(1)).unwrap();
+        let out = table.bind(7, ProcessId(1)).unwrap();
         let waiter = TestWaiter::aborting(1, IrqWaitAbort::TaskVanished);
         assert_eq!(
-            block_until_ready(&table, out.handle, TaskId(1), u64::MAX, &waiter),
+            block_until_ready(&table, out.handle, ProcessId(1), u64::MAX, &waiter),
             WaitOutcome::Aborted(IrqWaitAbort::TaskVanished)
         );
     }
@@ -375,7 +375,7 @@ mod tests {
                 AtomicU64::new(0),
             ))))
             .expect("clock installs once");
-        let out = table.bind(7, TaskId(1)).unwrap();
+        let out = table.bind(7, ProcessId(1)).unwrap();
         for _ in 0..=crate::table::STORM_FIRE_BUDGET {
             let _ = table.fire(7, &OkController);
         }
@@ -383,7 +383,7 @@ mod tests {
         // yielding: the driver fails closed instead of re-arming into a storm.
         let waiter = TestWaiter::new(1);
         assert_eq!(
-            block_until_ready(&table, out.handle, TaskId(1), u64::MAX, &waiter),
+            block_until_ready(&table, out.handle, ProcessId(1), u64::MAX, &waiter),
             WaitOutcome::Quarantined
         );
         assert_eq!(waiter.yield_calls.get(), 0);
@@ -394,13 +394,13 @@ mod tests {
         // A `u64::MAX` timeout must not wrap to a tiny deadline and
         // spuriously time out on the first poll.
         let table = IrqTable::new(31);
-        let out = table.bind(7, TaskId(1)).unwrap();
+        let out = table.bind(7, ProcessId(1)).unwrap();
         let fire = || {
             table.fire(7, &OkController).unwrap();
         };
         let waiter = TestWaiter::firing(1, &fire);
         assert_eq!(
-            block_until_ready(&table, out.handle, TaskId(1), u64::MAX, &waiter),
+            block_until_ready(&table, out.handle, ProcessId(1), u64::MAX, &waiter),
             WaitOutcome::Ready
         );
     }

@@ -10,7 +10,7 @@ use tairix_arch_aarch64::gic::{self, GicController, Gicv2, VolatileGicMmio, MAX_
 use tairix_arch_aarch64::{exceptions, handle_panic_via_serial, qemu_exit, SERIAL_SINK};
 use tairix_kalloc::FreeListAllocator;
 use tairix_kernel_irq::{IrqController, IrqTable, MaskError, WaitStep};
-use tairix_kernel_sec::TaskId;
+use tairix_kernel_sec::{ProcessId, TaskId};
 use tairix_log::{log, Event, EventId, Level};
 
 /// Bump heap backing the `IrqTable` allocations (one `bind`, two
@@ -209,7 +209,7 @@ pub extern "C" fn kernel_main(_dtb: u64) -> ! {
     // 1. Build the kernel-neutral IRQ table and bind the RTC line, then
     //    publish a pointer to it for the interrupt-context dispatcher.
     let table = IrqTable::new(RTC_INTID);
-    let Ok(bind) = table.bind(RTC_INTID, OWNER) else {
+    let Ok(bind) = table.bind(RTC_INTID, ProcessId(OWNER.0)) else {
         note(TEST_START, "IrqTable::bind rejected the RTC line");
         qemu_exit::exit_failure(FAIL_BIND);
     };
@@ -251,7 +251,7 @@ pub extern "C" fn kernel_main(_dtb: u64) -> ! {
     //    backstop, so a line that never fires times out and is reported
     //    as a failure, never a false pass.
     loop {
-        match table.try_wait_step(handle, OWNER, 0, u64::MAX) {
+        match table.try_wait_step(handle, ProcessId(OWNER.0), 0, u64::MAX) {
             WaitStep::Ready => break,
             WaitStep::Continue => {
                 // SAFETY: `wfi` parks until the next interrupt; the RTC

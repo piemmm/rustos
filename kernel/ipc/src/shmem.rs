@@ -186,7 +186,10 @@ impl SharedMemory {
         };
         let recv_field = Field {
             key: "recipient",
-            value: tairix_log::FieldValue::Str(format_hex_u64(recipient.task().0, &mut recv_buf)),
+            value: tairix_log::FieldValue::Str(format_hex_u64(
+                recipient.process().0,
+                &mut recv_buf,
+            )),
         };
 
         if !self.inner.required_caps.is_subset_of(recipient.effective()) {
@@ -287,7 +290,7 @@ mod tests {
     use super::*;
     use crate::audit::RecordingSink;
     use tairix_abi::CapabilityId;
-    use tairix_kernel_sec::captable::TaskId;
+    use tairix_kernel_sec::captable::ProcessId;
     use tairix_kernel_sec::identity::UserId;
 
     fn caps_of(items: &[CapabilityId]) -> CapabilitySet {
@@ -301,7 +304,7 @@ mod tests {
     fn task_with(task_id: u64, caps: &[CapabilityId]) -> TaskCapabilities {
         let sink = RecordingSink::new();
         let set = caps_of(caps);
-        TaskCapabilities::derive(TaskId(task_id), UserId(1), set, set, &sink)
+        TaskCapabilities::derive(ProcessId(task_id), UserId(1), set, set, &sink)
     }
 
     #[test]

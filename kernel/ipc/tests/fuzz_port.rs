@@ -41,7 +41,7 @@ use tairix_abi::ipc::IPC_MESSAGE_MAX_PAYLOAD_LEN;
 use tairix_abi::{CapabilityId, Errno};
 use tairix_caps::CapabilitySet;
 use tairix_kernel_ipc::{EndpointId, Port};
-use tairix_kernel_sec::{TaskCapabilities, TaskId, UserId};
+use tairix_kernel_sec::{ProcessId, TaskCapabilities, UserId};
 use tairix_log::{set_max_level, Event, Level, Sink};
 
 /// Fixed-iteration sweep run once by a plain `cargo test` (no budget set).
@@ -101,7 +101,7 @@ fn caps_of(items: &[CapabilityId]) -> CapabilitySet {
 /// Build a task whose effective set is exactly `caps` (the derive
 /// intersection of a set with itself is that set).
 fn task_with(task_id: u64, caps: &CapabilitySet, sink: &NullSink) -> TaskCapabilities {
-    TaskCapabilities::derive(TaskId(task_id), UserId(1), *caps, *caps, sink)
+    TaskCapabilities::derive(ProcessId(task_id), UserId(1), *caps, *caps, sink)
 }
 
 /// Create the port under test, owned by an authorised creator.

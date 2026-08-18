@@ -80,7 +80,7 @@ use tairix_kernel_mem::{
 use tairix_kernel_sched_api::StepOutcome;
 use tairix_kernel_sched_api::{Priority, SchedulerArch};
 use tairix_kernel_sched_cfq::{Scheduler, SchedulerConfig};
-use tairix_kernel_sec::{CapTable, TaskCapabilities, TaskId as SecTaskId, UserId};
+use tairix_kernel_sec::{CapTable, ProcessId, TaskCapabilities, TaskId as SecTaskId, UserId};
 use tairix_log::{log, Event, EventId, Level};
 use tairix_sync::RwLock;
 
@@ -533,7 +533,7 @@ fn leak_subsystems(counter_hz: u64) -> Subsystems {
 fn install_echo_server(sys: &Subsystems) {
     let empty = CapabilitySet::empty();
     let creator = TaskCapabilities::derive(
-        SecTaskId(0x4d49_4752),
+        ProcessId(0x4d49_4752),
         UserId(0),
         empty,
         empty,
@@ -603,7 +603,7 @@ fn drive_process(sys: &Subsystems, wait: &KernelProcessWait<Aarch64BinArch>, pid
     for _ in 0..MAX_STEPS {
         let _ = sys.sched.step(BOOT_CPU);
         let _ = tairix_kernel_core::waitq::drain_pending_wakes();
-        match wait.poll(SecTaskId(0), pid, WaitFlags::empty()) {
+        match wait.poll(ProcessId(0), pid, WaitFlags::empty()) {
             Ok(reaped) => match reaped.status {
                 WaitStatus::Exited(code) => return code,
                 WaitStatus::Stopped(_) => qemu_exit::exit_failure(FAIL_PARENT_STOPPED),
@@ -931,7 +931,7 @@ pub extern "C" fn kernel_main(_dtb: u64) -> ! {
                     SchedulerArch::send_ipi(sys.arch, cpu);
                 }
             }
-            match wait_producer.poll(SecTaskId(0), poll_pid, WaitFlags::empty()) {
+            match wait_producer.poll(ProcessId(0), poll_pid, WaitFlags::empty()) {
                 Ok(reaped) => match reaped.status {
                     WaitStatus::Exited(code) => {
                         exit_code = Some(code);

@@ -21,7 +21,7 @@ use tairix_kernel_irq::{IrqTable, IrqWaitAbort, IrqWaiter};
 use tairix_kernel_mem::{
     AddressSpace, DirectPhysMap, DmaPool, FrameAllocator, HostPageTable, MmioMap, VirtAddr,
 };
-use tairix_kernel_sec::captable::{TaskCapabilities, TaskId};
+use tairix_kernel_sec::captable::{ProcessId, TaskCapabilities};
 use tairix_kernel_sec::identity::UserId;
 use tairix_kernel_virtio::{
     provision_virtio_mmio, KernelMmioMapper, KernelVirtioFactory, KernelVirtioFactoryConfig,
@@ -86,8 +86,8 @@ const MILESTONE_ID: EventId = EventId(9100);
 
 // --- Bring-up parameters ---------------------------------------------
 
-/// Synthetic owner task id for the bus-driver context.
-const TASK: TaskId = TaskId(0x5b2);
+/// Synthetic owner process id for the bus-driver context.
+const TASK: ProcessId = ProcessId(0x5b2);
 
 /// Capacity, in pages, of each per-device DMA window.
 const POOL_PAGES: usize = 64;

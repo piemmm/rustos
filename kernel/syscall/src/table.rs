@@ -16,7 +16,7 @@ use tairix_abi::{
     PROC_ID_HEX_LEN, SYSCALL_MAX_ARGS,
 };
 use tairix_crypto::{sha256, Sha256Digest};
-use tairix_kernel_sec::{TaskCapabilities, TaskId};
+use tairix_kernel_sec::{ProcessId, TaskCapabilities, TaskId};
 use tairix_log::{Field, Sink};
 use tairix_util::fmt::{format_hex_u64, format_i32};
 
@@ -98,11 +98,26 @@ impl RawArgs {
 /// the dispatcher uses them for capability checking and audit
 /// attribution only.
 pub struct CallerContext<'a> {
-    /// Identifier carried in audit records.
+    /// The calling **thread**, and the identifier carried in audit records.
+    ///
+    /// This is the schedulable entity, so it is what a park, unpark, or wake
+    /// must name. For per-process state use [`Self::process`] instead.
     pub task_id: TaskId,
     /// Effective capability set, already intersected with the user
     /// grant and manifest request (see `kernel/sec`).
     pub caps: &'a TaskCapabilities,
+}
+
+impl CallerContext<'_> {
+    /// The **process** (thread group) the calling thread belongs to — the key
+    /// every piece of per-process state is held under.
+    ///
+    /// Read straight off the capability snapshot the dispatcher already took,
+    /// so it costs no lookup and no lock: the record *is* the process's.
+    #[must_use]
+    pub fn process(&self) -> ProcessId {
+        self.caps.process()
+    }
 }
 
 /// Whether a **parser sandbox** task (`SPAWN_FLAG_SANDBOX`,
@@ -3618,7 +3633,7 @@ mod tests {
     use core::cell::RefCell;
     use tairix_abi::{CapabilityId, SyscallNumber};
     use tairix_caps::CapabilitySet;
-    use tairix_kernel_sec::{ProcName, TaskCapabilities, TaskId, UserId};
+    use tairix_kernel_sec::{ProcName, ProcessId, TaskCapabilities, TaskId, UserId};
     use tairix_log::{set_max_level, Event, Level};
 
     /// Single-threaded sink that records every event identifier.
@@ -3652,7 +3667,7 @@ mod tests {
 
     fn build_caps(items: &[CapabilityId], sink: &RecordingSink) -> TaskCapabilities {
         let set = caps_of(items);
-        let t = TaskCapabilities::derive(TaskId(0xA), UserId(1000), set, set, sink);
+        let t = TaskCapabilities::derive(ProcessId(0xA), UserId(1000), set, set, sink);
         // Drop the derivation event so tests can assert against dispatcher
         // events alone.
         sink.events.borrow_mut().clear();
@@ -4943,7 +4958,7 @@ mod tests {
         // kernel-side; it is unrelated to the numeric task id.
         let minted = ProcId::from_raw([0xAB; 16]);
         let caps = TaskCapabilities::derive(
-            TaskId(7),
+            ProcessId(7),
             UserId(1000),
             CapabilitySet::empty(),
             CapabilitySet::empty(),
@@ -5008,7 +5023,7 @@ mod tests {
         let own = ProcId::from_raw([0xAB; 16]);
         let parent = ProcId::from_raw([0xC3; 16]);
         let caps = TaskCapabilities::derive(
-            TaskId(7),
+            ProcessId(7),
             UserId(1000),
             CapabilitySet::empty(),
             CapabilitySet::empty(),
@@ -5072,7 +5087,7 @@ mod tests {
         // admission; it is not derived from the numeric task id and cannot be
         // set by the caller.
         let caps = TaskCapabilities::derive(
-            TaskId(7),
+            ProcessId(7),
             UserId(1000),
             CapabilitySet::empty(),
             CapabilitySet::empty(),
@@ -5128,7 +5143,7 @@ mod tests {
         // numeric task id and cannot be set by the caller.
         let start = 0x00A1_B2C3_u64;
         let caps = TaskCapabilities::derive(
-            TaskId(7),
+            ProcessId(7),
             UserId(1000),
             CapabilitySet::empty(),
             CapabilitySet::empty(),

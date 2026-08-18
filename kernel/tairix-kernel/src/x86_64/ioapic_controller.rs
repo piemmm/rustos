@@ -571,7 +571,7 @@ mod tests {
     #[test]
     fn ioapic_controller_mask_before_wake_ordering() {
         use tairix_kernel_irq::{FireOutcome, IrqTable};
-        use tairix_kernel_sec::TaskId;
+        use tairix_kernel_sec::{ProcessId, TaskId};
 
         let (controller, mmio) = fresh_controller(0, 24);
         controller.program_pin(7, 0x30, 0xAB, false).expect("prog");
@@ -584,7 +584,7 @@ mod tests {
         // covers).
         let table = IrqTable::new(23);
         let owner = TaskId(1);
-        let _outcome = table.bind(7, owner).expect("bind");
+        let _outcome = table.bind(7, ProcessId(owner.0)).expect("bind");
         // Snapshot the write count *before* the fire.
         let pre_fire_writes = mmio.snapshot().len();
         let outcome = table

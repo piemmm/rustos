@@ -23,7 +23,7 @@ use tairix_caps::CapabilitySet;
 use tairix_kernel_ipc::audit::AuditEvent;
 use tairix_kernel_ipc::port::{EndpointId, Port};
 use tairix_kernel_ipc::shmem::{SharedMemory, ShmemId};
-use tairix_kernel_sec::captable::{TaskCapabilities, TaskId};
+use tairix_kernel_sec::captable::{ProcessId, TaskCapabilities};
 use tairix_kernel_sec::identity::UserId;
 use tairix_log::{set_max_level, Event, Level, Sink};
 
@@ -63,7 +63,7 @@ fn caps_of(items: &[CapabilityId]) -> CapabilitySet {
 fn task_with(task_id: u64, caps: &[CapabilityId]) -> TaskCapabilities {
     let sink = SyncSink::new();
     let set = caps_of(caps);
-    TaskCapabilities::derive(TaskId(task_id), UserId(1), set, set, &sink)
+    TaskCapabilities::derive(ProcessId(task_id), UserId(1), set, set, &sink)
 }
 
 /// A send racing with `destroy()` must either succeed *or* fail

@@ -137,7 +137,7 @@ impl NotificationChannel {
         };
         let recv_field = Field {
             key: "receiver",
-            value: tairix_log::FieldValue::Str(format_hex_u64(receiver.task().0, &mut recv_buf)),
+            value: tairix_log::FieldValue::Str(format_hex_u64(receiver.process().0, &mut recv_buf)),
         };
         if !self.required_bind_caps.is_subset_of(receiver.effective()) {
             record(
@@ -179,7 +179,7 @@ impl NotificationChannel {
         };
         let sender_field = Field {
             key: "sender",
-            value: tairix_log::FieldValue::Str(format_hex_u64(sender.task().0, &mut sender_buf)),
+            value: tairix_log::FieldValue::Str(format_hex_u64(sender.process().0, &mut sender_buf)),
         };
         if !self.required_send_caps.is_subset_of(sender.effective()) {
             record(
@@ -232,7 +232,7 @@ mod tests {
     use super::*;
     use crate::audit::RecordingSink;
     use tairix_abi::CapabilityId;
-    use tairix_kernel_sec::captable::TaskId;
+    use tairix_kernel_sec::captable::ProcessId;
     use tairix_kernel_sec::identity::UserId;
 
     fn caps_of(items: &[CapabilityId]) -> CapabilitySet {
@@ -246,7 +246,7 @@ mod tests {
     fn task_with(task_id: u64, caps: &[CapabilityId]) -> TaskCapabilities {
         let sink = RecordingSink::new();
         let set = caps_of(caps);
-        TaskCapabilities::derive(TaskId(task_id), UserId(1), set, set, &sink)
+        TaskCapabilities::derive(ProcessId(task_id), UserId(1), set, set, &sink)
     }
 
     #[test]

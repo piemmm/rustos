@@ -110,7 +110,7 @@ use tairix_kernel_mem::{
 };
 use tairix_kernel_sched_api::Priority;
 use tairix_kernel_sec::{
-    CapTable, GroupId, ProcName, TaskCapabilities, TaskId as SecTaskId, UserId,
+    CapTable, GroupId, ProcName, ProcessId, TaskCapabilities, TaskId as SecTaskId, UserId,
 };
 use tairix_kernel_syscall::{CallerContext, Dispatcher, RawArgs, SyscallHandlers, SyscallResult};
 use tairix_log::{Event, EventId, Field, Level, Sink};
@@ -1222,7 +1222,7 @@ where
         f: impl FnOnce(&dyn UserAddressSpace, &dyn PhysMap) -> R,
     ) -> Option<R> {
         let registry = self.aspaces.read();
-        let (space, physmap) = registry.resolve(caller.task_id)?;
+        let (space, physmap) = registry.resolve(caller.process())?;
         Some(f(space, physmap))
     }
 
@@ -1315,9 +1315,9 @@ where
                 Some(Ok(())) => return Ok(()),
                 Some(Err(UaccessError::NotMapped { va })) if budget > 0 => {
                     budget -= 1;
-                    if !self.resolve_file_fault(caller.task_id, va)
-                        && !self.resolve_stack_fault(caller.task_id, va)
-                        && !self.resolve_anon_fault(caller.task_id, va)
+                    if !self.resolve_file_fault(caller.process(), va)
+                        && !self.resolve_stack_fault(caller.process(), caller.task_id, va)
+                        && !self.resolve_anon_fault(caller.process(), va)
                     {
                         return Err(Errno::BadAddress);
                     }
@@ -1441,7 +1441,7 @@ where
     ) -> Result<(DescriptorTable, Vec<(u32, crate::aspace::OpenFile)>), Errno> {
         let inherits_parent = attach.console == CONSOLE_INHERIT;
         let base_streams = if inherits_parent {
-            self.aspaces.read().streams(caller.task_id)
+            self.aspaces.read().streams(caller.process())
         } else {
             let index = match u8::try_from(attach.console) {
                 Ok(index) if usize::from(index) < self.consoles.len() => index,
@@ -1455,7 +1455,7 @@ where
             if !inherits_parent || slot as usize >= tairix_abi::STD_STREAM_COUNT {
                 return None;
             }
-            self.aspaces.read().open_file_entry(caller.task_id, slot)
+            self.aspaces.read().open_file_entry(caller.process(), slot)
         };
         let mut child_streams = base_streams;
         let mut wired: Vec<(u32, crate::aspace::OpenFile)> = Vec::new();
@@ -1488,7 +1488,7 @@ where
                     let entry = self
                         .aspaces
                         .read()
-                        .open_file_entry(caller.task_id, handle)
+                        .open_file_entry(caller.process(), handle)
                         .ok_or(Errno::NotFound)?;
                     let direction_ok = if fd == tairix_abi::STDIN {
                         entry.flags.is_read()
@@ -1537,12 +1537,12 @@ where
     /// are the compressed-tier batches — the warm/cluster restore and the
     /// direct-reclaim compress-out — which move several pages at once and
     /// report no list, so no smaller delta exists to name.
-    fn refreeze_task_aspace(&self, task: SecTaskId) {
+    fn refreeze_task_aspace(&self, process: ProcessId) {
         let cpu = SchedulerArch::current_cpu(self.arch);
         if let Some(frozen) = crate::kthread::with_current_live_space(cpu, |live| live.freeze()) {
             self.aspaces
                 .write()
-                .reregister_space(task, Box::new(frozen));
+                .reregister_space(process, Box::new(frozen));
         }
     }
 
@@ -1566,15 +1566,15 @@ where
     /// published on this CPU, which would leave freed pages translating in
     /// the snapshot the copy path walks — reachable memory the task no
     /// longer owns. Removing by delta cannot silently skip that.
-    fn publish_region_teardown(&self, task: SecTaskId, base: u64, page_count: u64) {
+    fn publish_region_teardown(&self, process: ProcessId, base: u64, page_count: u64) {
         let absorbed = {
             let mut aspaces = self.aspaces.write();
             fold_region_pages(base, page_count, |page| {
-                aspaces.note_faulted_page(task, page, None)
+                aspaces.note_faulted_page(process, page, None)
             })
         };
         if !absorbed {
-            self.refreeze_task_aspace(task);
+            self.refreeze_task_aspace(process);
         }
     }
 
@@ -1601,17 +1601,17 @@ where
     /// a CPU with no live space published, falls back to the wholesale
     /// re-freeze — so the delta is a cost reduction, never a correctness
     /// dependency.
-    fn publish_region_mapping(&self, task: SecTaskId, base: u64, page_count: u64) {
+    fn publish_region_mapping(&self, process: ProcessId, base: u64, page_count: u64) {
         let cpu = SchedulerArch::current_cpu(self.arch);
         let absorbed = crate::kthread::with_current_live_space(cpu, |live| {
             let mut aspaces = self.aspaces.write();
             fold_region_pages(base, page_count, |page| {
                 let mapping = live.translate_page(page);
-                aspaces.note_faulted_page(task, page, mapping)
+                aspaces.note_faulted_page(process, page, mapping)
             })
         });
         if absorbed != Some(true) {
-            self.refreeze_task_aspace(task);
+            self.refreeze_task_aspace(process);
         }
     }
 
@@ -1621,9 +1621,9 @@ where
     ///
     /// A mapping that could not be found is already gone, so nothing is
     /// published: there are no pages to drop.
-    fn release_shared_mapping(&self, task: SecTaskId, base: u64) {
-        if let Ok(len) = crate::sharedreg::unmap(self.shared_mem_facility, task, base) {
-            self.publish_region_teardown(task, base, pages_spanning(len as u64));
+    fn release_shared_mapping(&self, process: ProcessId, base: u64) {
+        if let Ok(len) = crate::sharedreg::unmap(self.shared_mem_facility, process, base) {
+            self.publish_region_teardown(process, base, pages_spanning(len as u64));
         }
     }
 
@@ -1690,7 +1690,8 @@ where
     #[allow(clippy::too_many_lines)]
     pub(crate) fn record_fault_exit(
         &self,
-        task: SecTaskId,
+        process: ProcessId,
+        thread: SecTaskId,
         fault_va: u64,
         write: bool,
         regs: Option<&UserRegisterFrame>,
@@ -1707,19 +1708,19 @@ where
         let (fault_class, locality) = {
             let aspaces = self.aspaces.read();
             let growth_span = aspaces
-                .stack_span(task)
+                .stack_span(thread)
                 .filter(|span| span.in_growth_room(fault_va));
             let fault_class = if let Some(span) = growth_span {
                 let page_va = fault_va & !(PAGE_SIZE as u64 - 1);
-                let soft = aspaces.limits(task).get(LimitKind::StackBytes).soft;
+                let soft = aspaces.limits(process).get(LimitKind::StackBytes).soft;
                 if span.top() - page_va > soft {
                     "stack_limit"
                 } else {
                     "stack"
                 }
-            } else if aspaces.file_region_covering(task, fault_va).is_some() {
+            } else if aspaces.file_region_covering(process, fault_va).is_some() {
                 "file_region"
-            } else if aspaces.anon_region_covering(task, fault_va) {
+            } else if aspaces.anon_region_covering(process, fault_va) {
                 // A miss inside a reserved anonymous region the resolver
                 // could not back (e.g. frame exhaustion) — deterministic OOM
                 // fatal to this task alone, distinct from a wild access.
@@ -1727,14 +1728,14 @@ where
             } else {
                 "wild"
             };
-            let locality = aspaces.classify_fault_locality(task, fault_va);
+            let locality = aspaces.classify_fault_locality(process, thread, fault_va);
 
             // Build the crash-record backtrace from the captured user frame.
             // The PIE load base makes code addresses load-relative; a task
             // whose base was never recorded keeps them absolute (behind the
             // capability gate either way).
             if let Some(regs) = regs {
-                let load_base = aspaces.load_base(task);
+                let load_base = aspaces.load_base(process);
                 load_base_known = load_base.is_some();
                 let rel = |addr: u64| load_base.map_or(addr, |base| addr.saturating_sub(base));
                 pc_relative = rel(regs.snapshot.pc);
@@ -1746,7 +1747,7 @@ where
                 // stack, so a corrupt or unmapped fp ends the walk cleanly.
                 if regs.fp_valid {
                     if let (Some((space, physmap)), Some(span)) =
-                        (aspaces.resolve(task), aspaces.stack_span(task))
+                        (aspaces.resolve(process), aspaces.stack_span(thread))
                     {
                         let reader = crate::crash::UserStackReader::new(space, physmap);
                         let bounds = StackBounds::new(span.committed_base(), span.top());
@@ -1765,7 +1766,7 @@ where
         // read guard only for the duration of the borrow: `name` and
         // `proc_id` are read from the faulting task's own capability record
         // (never caller-supplied), and the guard MUST be released before
-        // `reclaim_task_resources` below, which takes the same table for
+        // `reclaim_process_resources` below, which takes the same table for
         // write to evict the record — holding the read across it would
         // self-deadlock. A task with no record (only reachable in hermetic
         // tests — every spawned process has one) degrades to an empty name
@@ -1773,7 +1774,7 @@ where
         // (fail closed).
         {
             let caps_guard = self.caps.read();
-            let record = caps_guard.caps_for(task);
+            let record = caps_guard.caps_of_process(process);
             let name = record.map_or("", TaskCapabilities::name);
             let mut proc_hex = [0u8; PROC_ID_HEX_LEN];
             let proc_id = record.map_or(ProcId::KERNEL, TaskCapabilities::proc_id);
@@ -1785,7 +1786,7 @@ where
             let mut fields = [
                 Field {
                     key: "task",
-                    value: tairix_log::FieldValue::UnsignedInt(task.0),
+                    value: tairix_log::FieldValue::UnsignedInt(process.0),
                 },
                 Field {
                     key: "name",
@@ -1835,7 +1836,7 @@ where
             let (class, bucket, fault_offset) = crash_cause_codes(fault_class, locality);
             if let Ok(mut crash) = CrashRecord::new(
                 proc_id,
-                task.0,
+                process.0,
                 uid,
                 gid,
                 write,
@@ -1870,8 +1871,8 @@ where
                 self.crashes.record(crash);
             }
         }
-        self.process_wait.record_exit(task, FAULT_EXIT_CODE);
-        self.reclaim_task_resources(task);
+        self.process_wait.record_exit(process, FAULT_EXIT_CODE);
+        self.reclaim_process_resources(process);
     }
 
     /// Land a termination that was deferred while `task` was inside the
@@ -1887,7 +1888,7 @@ where
     /// result never reaches user space.
     pub(crate) fn land_pending_kill(
         &self,
-        task: SecTaskId,
+        process: ProcessId,
         signal: Signal,
         result: SyscallResult,
         cpu: CpuId,
@@ -1896,9 +1897,9 @@ where
         // path defers (Terminate/Interrupt/Kill); mirror the immediate
         // path's shape rather than fabricate a status.
         if let Some(status) = signal.termination_status() {
-            self.process_wait.record_exit(task, status);
+            self.process_wait.record_exit(process, status);
         }
-        self.reclaim_task_resources(task);
+        self.reclaim_process_resources(process);
         DispatchOutcome::Reschedule {
             result,
             action: RescheduleAction::Exit,
@@ -1927,8 +1928,8 @@ where
     /// `task` is the kernel-trusted current task of the faulting CPU,
     /// never a caller-supplied value.
     #[must_use]
-    pub fn resolve_file_fault(&self, task: SecTaskId, fault_va: u64) -> bool {
-        let Some(region) = self.aspaces.read().file_region_covering(task, fault_va) else {
+    pub fn resolve_file_fault(&self, process: ProcessId, fault_va: u64) -> bool {
+        let Some(region) = self.aspaces.read().file_region_covering(process, fault_va) else {
             return false;
         };
         let page_va = fault_va & !(PAGE_SIZE as u64 - 1);
@@ -1955,7 +1956,7 @@ where
                     // snapshot here would make reading an N-page mapping
                     // O(N²) — each fault rebuilding every page faulted before
                     // it — which is the whole reason the delta exists.
-                    self.publish_region_mapping(task, page_va, 1);
+                    self.publish_region_mapping(process, page_va, 1);
                     true
                 }
                 // Already resident: another resolution won the race; the
@@ -1991,8 +1992,8 @@ where
     /// `task` is the kernel-trusted current task of the faulting CPU, never
     /// a caller-supplied value.
     #[must_use]
-    pub fn resolve_anon_fault(&self, task: SecTaskId, fault_va: u64) -> bool {
-        if !self.aspaces.read().anon_region_covering(task, fault_va) {
+    pub fn resolve_anon_fault(&self, process: ProcessId, fault_va: u64) -> bool {
+        if !self.aspaces.read().anon_region_covering(process, fault_va) {
             return false;
         }
         let page_va = fault_va & !(PAGE_SIZE as u64 - 1);
@@ -2011,7 +2012,7 @@ where
                 // and a full re-freeze per fault would make touching it O(N²)
                 // (tens of seconds for a multi-megabyte buffer under
                 // emulation).
-                self.publish_region_mapping(task, page_va, 1);
+                self.publish_region_mapping(process, page_va, 1);
                 true
             }
             // Frame exhaustion or an uninstalled producer: fatal to the task
@@ -2048,7 +2049,7 @@ where
     ///
     /// `task` is the kernel-trusted current task of the faulting CPU.
     #[must_use]
-    pub fn resolve_ramzip_fault(&self, task: SecTaskId, fault_va: u64) -> RamzipFaultOutcome {
+    pub fn resolve_ramzip_fault(&self, process: ProcessId, fault_va: u64) -> RamzipFaultOutcome {
         let Some(tier) = tairix_kernel_mem::ramzip::global() else {
             return RamzipFaultOutcome::NoEntry;
         };
@@ -2086,9 +2087,9 @@ where
                 // and does not report which, so that case re-freezes the
                 // whole snapshot; the plain restore publishes its one page.
                 if warmed > 0 {
-                    self.refreeze_task_aspace(task);
+                    self.refreeze_task_aspace(process);
                 } else {
-                    self.publish_region_mapping(task, page_va, 1);
+                    self.publish_region_mapping(process, page_va, 1);
                 }
                 RamzipFaultOutcome::Handled
             }
@@ -2126,7 +2127,7 @@ where
     /// restored page, batched here.
     ///
     /// `task` is the kernel-trusted current task of the faulting CPU.
-    pub fn ramzip_direct_reclaim(&self, task: SecTaskId) {
+    pub fn ramzip_direct_reclaim(&self, process: ProcessId) {
         // The tier and the shared gauge must both exist; before boot wires
         // them there is nothing to reclaim into and no pressure to read.
         let Some(tier) = tairix_kernel_mem::ramzip::global() else {
@@ -2150,9 +2151,9 @@ where
         // scanner, and the sensitivity of ordinary anonymous heap is
         // covered by the tier's eligibility gate — kernel secrets never
         // live in a task's placed-anonymous window.
-        let pinned = self.aspaces.read().is_pinned(task);
+        let pinned = self.aspaces.read().is_pinned(process);
         let latency_critical =
-            matches!(self.sched.sched_class(task.0), Ok(class) if class.is_realtime());
+            matches!(self.sched.sched_class(process.0), Ok(class) if class.is_realtime());
         let template = PageCandidate {
             pinned,
             latency_critical,
@@ -2166,7 +2167,7 @@ where
         })
         .unwrap_or(0);
         if compressed > 0 {
-            self.refreeze_task_aspace(task);
+            self.refreeze_task_aspace(process);
         }
     }
 
@@ -2186,17 +2187,17 @@ where
     /// limit would otherwise fail open on.
     fn check_map_growth(&self, caller: &CallerContext<'_>, charged: u64) -> Result<(), Errno> {
         let aspaces = self.aspaces.read();
-        let limits = aspaces.limits(caller.task_id);
+        let limits = aspaces.limits(caller.process());
         let projected = aspaces
-            .mapped_aspace_bytes(caller.task_id)
+            .mapped_aspace_bytes(caller.process())
             .checked_add(charged)
             .ok_or(Errno::OutOfRange)?;
         if projected > limits.get(LimitKind::AddressSpaceBytes).soft {
             return Err(Errno::OutOfRange);
         }
-        if aspaces.is_pinned(caller.task_id) {
+        if aspaces.is_pinned(caller.process()) {
             let pinned_projected = aspaces
-                .pinned_footprint_bytes(caller.task_id)
+                .pinned_footprint_bytes(caller.process())
                 .checked_add(charged)
                 .ok_or(Errno::OutOfRange)?;
             if pinned_projected > limits.get(LimitKind::PinnedMemoryBytes).soft {
@@ -2241,26 +2242,31 @@ where
     /// `task` is the kernel-trusted current task of the faulting CPU,
     /// never a caller-supplied value.
     #[must_use]
-    pub fn resolve_stack_fault(&self, task: SecTaskId, fault_va: u64) -> bool {
+    pub fn resolve_stack_fault(
+        &self,
+        process: ProcessId,
+        thread: SecTaskId,
+        fault_va: u64,
+    ) -> bool {
         let (span, soft, pinned_room) = {
             let aspaces = self.aspaces.read();
-            let Some(span) = aspaces.stack_span(task) else {
+            let Some(span) = aspaces.stack_span(thread) else {
                 return false;
             };
-            let limits = aspaces.limits(task);
-            // While the task is pinned, stack growth also consumes the
+            let limits = aspaces.limits(process);
+            // While the process is pinned, stack growth also consumes the
             // pinned-memory budget: every committed stack page joins the
             // exempt footprint, so the budget left over the mapped bytes
             // bounds the committed extent exactly as it bounds `mem_map`
             // growth (fail closed — the guard page below the span stays
             // the terminal defence). Saturating: a footprint already past
             // the budget leaves zero room, refusing any further growth.
-            let pinned_room = if aspaces.is_pinned(task) {
+            let pinned_room = if aspaces.is_pinned(process) {
                 Some(
                     limits
                         .get(LimitKind::PinnedMemoryBytes)
                         .soft
-                        .saturating_sub(aspaces.mapped_aspace_bytes(task)),
+                        .saturating_sub(aspaces.mapped_aspace_bytes(process)),
                 )
             } else {
                 None
@@ -2308,7 +2314,7 @@ where
                 // Freshly backed, or already resident because another
                 // resolution won the race — either way the page is there.
                 Ok(_) | Err(Errno::BadAddress) => {
-                    self.aspaces.write().commit_stack_page(task, next);
+                    self.aspaces.write().commit_stack_page(thread, next);
                 }
                 // Frame exhaustion or an uninstalled producer: fatal to
                 // the task and only the task — deterministic OOM, never a
@@ -2323,7 +2329,7 @@ where
         }
         // The walk backed exactly the pages it reserved room for, so publish
         // that range rather than the caller's whole resident set.
-        self.publish_region_mapping(task, page_va, growth_pages);
+        self.publish_region_mapping(process, page_va, growth_pages);
         true
     }
 
@@ -2350,9 +2356,9 @@ where
     /// or broken-pipe instead of waiting forever on a dead partner
     /// (`plans/SPAWN.md` SP10 — `seq | wc` must end when `seq` exits, and
     /// `yes` must fail `BrokenPipe` when `head` is done).
-    pub(crate) fn reclaim_task_resources(&self, task: SecTaskId) {
-        let _ = self.irq.release_for(task);
-        // Tear down every synchronous call endpoint this task served
+    pub(crate) fn reclaim_process_resources(&self, process: ProcessId) {
+        let _ = self.irq.release_for(process);
+        // Tear down every synchronous call endpoint this process served
         // before dropping its capability record: a user-space service
         // that dies (cleanly, by fault, or killed) must not leave callers
         // blocked in `ipc_call` forever — destroying its endpoints
@@ -2362,43 +2368,43 @@ where
         // disk's dead block service. The same step revokes every
         // per-endpoint grant naming those ids, so a later task binding a
         // recycled endpoint id can never inherit this service's callers.
-        crate::callreg::teardown_owned_by(task.0, self.aspaces, self.audit);
-        // The converse: cancel every call this task *posted* that is still
+        crate::callreg::teardown_owned_by(process.0, self.aspaces, self.audit);
+        // The converse: cancel every call this process *posted* that is still
         // in flight on someone else's endpoint. A dead caller's queued
         // request must never be handed to a server as if live — it would
         // be serviced on a ticket whose reply goes nowhere and, on a
         // single-slot protocol like the USB URB transport, wedge the
         // endpoint against the caller's replacement.
-        crate::callreg::cancel_posted_by(task.0, self.audit);
-        // Tear down every asynchronous message port this task bound, so
-        // a dead task's mailbox is never left for a later task to squat
+        crate::callreg::cancel_posted_by(process.0, self.audit);
+        // Tear down every asynchronous message port this process bound, so
+        // a dead process's mailbox is never left for a later process to squat
         // on or a sender to fill (racing senders observe the closed port
         // and fail typed).
-        self.ipc.write().teardown_owned_by(task.0, self.audit);
+        self.ipc.write().teardown_owned_by(process.0, self.audit);
         // A sender parked for room in one of those mailboxes must learn its
         // destination is gone rather than wait for a drain that can never
         // come. The destroyed port took its own record of who was waiting
         // with it, so this is the one place the broadcast is right.
         crate::waitq::port_room_wake();
-        // Release every shared-memory mapping this task held, dropping
+        // Release every shared-memory mapping this process held, dropping
         // each reference and zeroing + freeing any region whose last
         // reference this releases (zero-on-free). The registry scrubs a
         // freed region's frames through the kernel direct map, so the
-        // reclaim works from the dying task's own `exit` and from a
+        // reclaim works from the dying process's own `exit` and from a
         // killer's context alike.
-        crate::sharedreg::reclaim_task(self.shared_mem_facility, task);
-        // Drop every wait-set this task owned. A wait-set holds no
+        crate::sharedreg::reclaim_process(self.shared_mem_facility, process);
+        // Drop every wait-set this process owned. A wait-set holds no
         // resource of its own (its members only *name* endpoints and IRQ
         // lines, reclaimed around here), so dropping the sets is the
         // whole reclamation.
-        crate::waitset::release_owned_by(task.0);
-        // Release any console foreground ownership the dead task holds,
+        crate::waitset::release_owned_by(process.0);
+        // Release any console foreground ownership the dead process holds,
         // so the console returns to its open state the moment the owner
         // is gone rather than waiting for a reader to prove the owner
         // dead (`plans/DISPLAY.md` D5). Independent of the shared
         // process-bookkeeping teardown below, so it runs first.
         for device in self.consoles {
-            device.clear_dead_foreground(task);
+            device.clear_dead_foreground(process);
         }
         // Reclaim every seat the dead task held (`plans/DISPLAY.md` D8):
         // the display surface returns to the text console, the seat
@@ -2409,14 +2415,14 @@ where
         // back. The keyboard half above and this pixel half are the two
         // sides of one handover, so they sit together.
         self.seat_registry
-            .release_owned_by(SeatOwner(task.0), self.audit);
+            .release_owned_by(SeatOwner(process.0), self.audit);
         // Tear down the process-bookkeeping subset — signal gates,
         // parent/child wait rows, capability record, and address-space
         // registry entry — through the one helper the deferred-launch
         // loading-child teardown also drives, so a fully-admitted task and
         // a child that failed to load release the same bookkeeping through
         // one definition.
-        reclaim_process_bookkeeping(self.caps, self.aspaces, self.process_wait, task);
+        reclaim_process_bookkeeping(self.caps, self.aspaces, self.process_wait, process);
     }
 
     /// Whether one wait-set member is ready, as a **non-consuming peek**
@@ -2451,7 +2457,7 @@ where
             // was added (an unknown id is refused there), so a caller cannot
             // conjure a permanently-ready member out of a bogus id.
             WaitSourceKind::CallReply => match crate::callreg::lookup(EndpointId(m.id)) {
-                Some(ep) => ep.has_ready_reply_for(caller.caps.task().0, now),
+                Some(ep) => ep.has_ready_reply_for(caller.caps.process().0, now),
                 None => true,
             },
             // The IRQ ready flag is *peeked* (`ready_for`), not consumed,
@@ -2459,12 +2465,12 @@ where
             // delivered edge.
             WaitSourceKind::Irq => {
                 let handle = IrqHandle::from_raw(m.id);
-                self.irq.line_for(handle, caller.task_id).is_some() && self.irq.ready_for(handle)
+                self.irq.line_for(handle, caller.process()).is_some() && self.irq.ready_for(handle)
             }
             // The reapable zombie stays in the table for the non-blocking
             // `wait` that follows, so the scan can never steal a reap.
             WaitSourceKind::Child => child_selector(m.id).is_some_and(|selector| {
-                self.process_wait.child_state(caller.task_id, selector) == ChildPeek::Reapable
+                self.process_wait.child_state(caller.process(), selector) == ChildPeek::Reapable
             }),
             // A queued keyboard/pointer record for the live owner, or the
             // loss of the lease itself (revoked, released, seat destroyed)
@@ -2484,7 +2490,7 @@ where
             // re-resolved against the open table so a descriptor closed or
             // replaced mid-wait simply stops reporting.
             WaitSourceKind::Stream => u32::try_from(m.id)
-                .is_ok_and(|fd| self.aspaces.read().stream_readable(caller.task_id, fd)),
+                .is_ok_and(|fd| self.aspaces.read().stream_readable(caller.process(), fd)),
             // An observed termination-request signal pending undrained on
             // the caller's own intake — the woken owner drains through
             // `signal_intake(Take)`, so a still-pending intake re-reports
@@ -2560,7 +2566,7 @@ where
         let Some(owner) = fg.current() else {
             return Ok(());
         };
-        if owner == caller.task_id {
+        if owner == caller.process() {
             return Ok(());
         }
         if self.process_wait.is_live(owner) {
@@ -3239,7 +3245,7 @@ where
             // root. The joined string always begins with `/`, so it parses as
             // a view path; its components are the normalised absolute path.
             tairix_path::Root::Relative => {
-                let cwd = self.aspaces.read().cwd(caller.task_id);
+                let cwd = self.aspaces.read().cwd(caller.process());
                 let mut joined = cwd;
                 if !joined.ends_with('/') {
                     joined.push('/');
@@ -3444,9 +3450,9 @@ where
         caller: &CallerContext<'_>,
         pid: i32,
         signal: Signal,
-    ) -> Result<SecTaskId, Errno> {
+    ) -> Result<ProcessId, Errno> {
         let (target, rule) = self.cross_principal_rule(caller, pid)?;
-        self.audit_cross_principal_signal(caller.task_id, pid, target, signal, rule);
+        self.audit_cross_principal_signal(caller.process(), pid, target, signal, rule);
         if rule.allows() {
             Ok(target)
         } else {
@@ -3473,12 +3479,12 @@ where
         &self,
         caller: &CallerContext<'_>,
         pid: i32,
-    ) -> Result<(SecTaskId, CrossPrincipalRule), Errno> {
+    ) -> Result<(ProcessId, CrossPrincipalRule), Errno> {
         // Both callers name exactly one process — neither has a wildcard
         // selector — so a non-positive `pid` is not a task id and is refused
         // before any table is consulted.
         let target = match u32::try_from(pid) {
-            Ok(raw) if raw != 0 => SecTaskId(u64::from(raw)),
+            Ok(raw) if raw != 0 => ProcessId(u64::from(raw)),
             _ => return Err(Errno::NotFound),
         };
 
@@ -3487,7 +3493,7 @@ where
         // itself runs with the capability table borrowed.
         let owner = {
             let guard = self.caps.read();
-            match guard.caps_for(target) {
+            match guard.caps_of_process(target) {
                 Some(record) => record.owner(),
                 None => return Err(Errno::NotFound),
             }
@@ -3514,9 +3520,9 @@ where
     /// raised service — all program state, never a capability token.
     fn audit_priority_change(
         &self,
-        caller: SecTaskId,
+        caller: ProcessId,
         pid: i32,
-        target: SecTaskId,
+        target: ProcessId,
         priority: SchedPriority,
         decision: PriorityDecision,
     ) {
@@ -3567,9 +3573,9 @@ where
     /// capability token.
     fn audit_cross_principal_signal(
         &self,
-        caller: SecTaskId,
+        caller: ProcessId,
         pid: i32,
-        target: SecTaskId,
+        target: ProcessId,
         signal: Signal,
         rule: CrossPrincipalRule,
     ) {
@@ -4037,7 +4043,7 @@ where
         // interface creep the charter forbids: the one consumer (`wait`)
         // exists. The dispatcher's `SyscallInvoked` audit record (the `EXIT`
         // spec sets `audit = true`) still carries the code for the log.
-        self.process_wait.record_exit(caller.task_id, code);
+        self.process_wait.record_exit(caller.process(), code);
         // A nonzero status is an abnormal termination: record it with a
         // stable event id so a failing service is visible on the system
         // log even when nothing reaps it (fail loud) — the task id and
@@ -4069,10 +4075,10 @@ where
         // re-entrantly from inside the in-flight `step` the exiting
         // kthread runs under. This handler performs only the kernel-state
         // reclamation the reschedule path does not — the shared
-        // [`Self::reclaim_task_resources`] the signal-terminate path also
+        // [`Self::reclaim_process_resources`] the signal-terminate path also
         // drives, so a task that exits and a task that is killed release
         // exactly the same resources.
-        self.reclaim_task_resources(caller.task_id);
+        self.reclaim_process_resources(caller.process());
         Ok(0)
     }
 
@@ -4165,7 +4171,7 @@ where
         if !port
             .required_recv_caps()
             .is_subset_of(caller.caps.effective())
-            || port.owner() != caller.caps.task().0
+            || port.owner() != caller.caps.process().0
         {
             return Err(Errno::PermissionDenied);
         }
@@ -4466,7 +4472,7 @@ where
         let pty_geometry = self
             .aspaces
             .read()
-            .pty_slave(caller.task_id, fd)
+            .pty_slave(caller.process(), fd)
             .map(|pty| pty.geometry().to_le_bytes());
         if let Some(bytes) = pty_geometry {
             return match self.with_caller_aspace(caller, |space, physmap| {
@@ -4482,7 +4488,7 @@ where
         // that is not open (an out-of-range fd, a closed one, or an opened
         // file — which the standard-stream table records as `Closed`) fails
         // closed with `NotFound`, never leaking which case occurred.
-        let streams = self.aspaces.read().streams(caller.task_id);
+        let streams = self.aspaces.read().streams(caller.process());
         if streams.mode(fd) == StreamMode::Closed {
             return Err(Errno::NotFound);
         }
@@ -4521,7 +4527,7 @@ where
         // caller-supplied) so the resulting [`IrqHandle`] is
         // unforgeable in the strong sense: it can only be waited on
         // by the task that bound it.
-        match self.irq.bind(line, caller.task_id) {
+        match self.irq.bind(line, caller.process()) {
             Ok(out) => Ok(out.handle.as_u64()),
             Err(e) => Err(e.to_errno()),
         }
@@ -4559,7 +4565,7 @@ where
             // The line is resolved once, owner-checked: a forged/foreign
             // handle yields `None` and re-arms nothing.
             irq_controller: self.irq_controller,
-            line: self.irq.line_for(handle, caller.task_id),
+            line: self.irq.line_for(handle, caller.process()),
         };
 
         // Register *before* the first poll so a fire arriving in the
@@ -4573,7 +4579,7 @@ where
         // recomputes the identical deadline from its own first reading.
         let deadline_ns = self.arch.monotonic_ns(cpu).saturating_add(timeout_ns);
         crate::waitq::IRQ_WAITQ.register(task, deadline_ns);
-        let outcome = block_until_ready(self.irq, handle, caller.task_id, timeout_ns, &waiter);
+        let outcome = block_until_ready(self.irq, handle, caller.process(), timeout_ns, &waiter);
         // Leave the wait set and re-point the one-shot at the nearest
         // deadline any remaining waiter on *any* timed wait-queue needs (or
         // clear it if none) so a finished wait never leaves a stale arming
@@ -4700,7 +4706,7 @@ where
         // across a blocking pipe write — a writer parked on a full ring
         // holding this lock would wedge every registry writer (`mem_map`,
         // a sibling spawn) on the non-preemptible kernel.
-        let entry = self.aspaces.read().open_file_entry(caller.task_id, fd);
+        let entry = self.aspaces.read().open_file_entry(caller.process(), fd);
         if let Some(entry) = entry {
             return self.descriptor_write(caller, &entry, StreamPos::Cursor, buf, len);
         }
@@ -4713,7 +4719,7 @@ where
         // never leaking whether it was closed, the wrong direction, or
         // out of range. An unregistered caller resolves to the
         // all-`Closed` default and fails here too.
-        let streams = self.aspaces.read().streams(caller.task_id);
+        let streams = self.aspaces.read().streams(caller.process());
         if streams.mode(fd) != StreamMode::Write {
             // `stdinfo` is the one exception to the fail-closed deny: it is
             // advisory by contract — best-effort and non-blocking with no
@@ -4789,7 +4795,7 @@ where
         // an empty ring holding this lock would wedge every registry
         // writer (`mem_map`, a sibling spawn) on the non-preemptible
         // kernel.
-        let entry = self.aspaces.read().open_file_entry(caller.task_id, fd);
+        let entry = self.aspaces.read().open_file_entry(caller.process(), fd);
         if let Some(entry) = entry {
             return self.descriptor_read(caller, &entry, StreamPos::Cursor, buf, len, timeout_ns);
         }
@@ -4799,7 +4805,7 @@ where
         // that is not a readable inherited stream fails closed with
         // `NotFound`, never leaking which case occurred. An unregistered
         // caller resolves to the all-`Closed` default and fails here too.
-        let streams = self.aspaces.read().streams(caller.task_id);
+        let streams = self.aspaces.read().streams(caller.process());
         if streams.mode(fd) != StreamMode::Read {
             return Err(Errno::NotFound);
         }
@@ -5063,7 +5069,7 @@ where
             self.caps,
             self.aspaces,
             self.arch,
-            caller.task_id,
+            caller.process(),
             self.process_wait,
             child_streams,
             // The wired standard-stream entries the attach block resolved
@@ -5156,7 +5162,7 @@ where
         // program's echo/raw mode under it).
         {
             let aspaces = self.aspaces.read();
-            if let Some(pty) = aspaces.pty_slave(caller.task_id, fd) {
+            if let Some(pty) = aspaces.pty_slave(caller.process(), fd) {
                 self.check_terminal_foreground(caller, pty.foreground())?;
                 pty.set_input_mode(mode);
                 return Ok(0);
@@ -5168,7 +5174,7 @@ where
         // closed with `NotFound`, never leaking which case occurred. An
         // unregistered caller resolves to the all-`Closed` default and
         // fails here too.
-        let streams = self.aspaces.read().streams(caller.task_id);
+        let streams = self.aspaces.read().streams(caller.process());
         if streams.mode(fd) != StreamMode::Read {
             return Err(Errno::NotFound);
         }
@@ -5206,7 +5212,7 @@ where
         // emulator screen, which it clears without asking the kernel.
         {
             let aspaces = self.aspaces.read();
-            if let Some(pty) = aspaces.pty_slave(caller.task_id, fd) {
+            if let Some(pty) = aspaces.pty_slave(caller.process(), fd) {
                 self.check_terminal_foreground(caller, pty.foreground())?;
                 pty.purge_session();
                 // The discard frees ring space, so a writer parked on a full
@@ -5220,7 +5226,7 @@ where
         // discipline control names it, so anything else fails closed with
         // `NotFound` — never leaking which case occurred. An unregistered
         // caller resolves to the all-`Closed` default and fails here too.
-        let streams = self.aspaces.read().streams(caller.task_id);
+        let streams = self.aspaces.read().streams(caller.process());
         if streams.mode(fd) != StreamMode::Read {
             return Err(Errno::NotFound);
         }
@@ -5243,7 +5249,7 @@ where
         // Unprivileged by design (`plans/SPAWN.md` SP10): both descriptors
         // land in the caller's own open table and reach nothing else. The
         // dispatcher already checked `out` is non-null (`UserPtr`).
-        let (read_fd, write_fd) = self.aspaces.write().open_pipe(caller.task_id)?;
+        let (read_fd, write_fd) = self.aspaces.write().open_pipe(caller.process())?;
         // Two `u32`s, read end first — native byte order, exactly as the
         // `WaitStatusRecord` out-parameter (the record never leaves the
         // machine; it crosses only the user/kernel boundary).
@@ -5259,8 +5265,8 @@ where
                 // unwind the pair whole (fail closed — the dropped entries
                 // close both ends through their handles).
                 let mut aspaces = self.aspaces.write();
-                aspaces.close_file(caller.task_id, read_fd);
-                aspaces.close_file(caller.task_id, write_fd);
+                aspaces.close_file(caller.process(), read_fd);
+                aspaces.close_file(caller.process(), write_fd);
                 match outcome {
                     Some(Err(err)) => Err(copy_fault_errno(err)),
                     _ => Err(Errno::BadAddress),
@@ -5286,7 +5292,7 @@ where
         // Unprivileged by design, exactly like `pipe_create`: both
         // descriptors land in the caller's own open table and reach nothing
         // else. The dispatcher already checked `out` is non-null (`UserPtr`).
-        let (master_fd, slave_fd) = self.aspaces.write().open_pty(caller.task_id, size)?;
+        let (master_fd, slave_fd) = self.aspaces.write().open_pty(caller.process(), size)?;
         // Two `u32`s, master end first — native byte order, exactly as the
         // `pipe_create` out-parameter (crosses only the user/kernel
         // boundary, never the machine).
@@ -5302,8 +5308,8 @@ where
                 // unwind the pair whole (fail closed — the dropped entries
                 // close both ends through their handles).
                 let mut aspaces = self.aspaces.write();
-                aspaces.close_file(caller.task_id, master_fd);
-                aspaces.close_file(caller.task_id, slave_fd);
+                aspaces.close_file(caller.process(), master_fd);
+                aspaces.close_file(caller.process(), slave_fd);
                 match outcome {
                     Some(Err(err)) => Err(copy_fault_errno(err)),
                     _ => Err(Errno::BadAddress),
@@ -5333,7 +5339,7 @@ where
         // design (the dispatcher required no capability): the geometry is a
         // property of the caller's own terminal.
         let aspaces = self.aspaces.read();
-        let Some(pty) = aspaces.pty_master(caller.task_id, fd) else {
+        let Some(pty) = aspaces.pty_master(caller.process(), fd) else {
             return Err(Errno::NotFound);
         };
         pty.set_size(size);
@@ -5348,12 +5354,12 @@ where
         // slot's home differs.
         {
             let aspaces = self.aspaces.read();
-            if let Some(pty) = aspaces.pty_slave(caller.task_id, fd) {
+            if let Some(pty) = aspaces.pty_slave(caller.process(), fd) {
                 if pid == 0 {
-                    return pty.foreground().release(caller.task_id).map(|()| 0);
+                    return pty.foreground().release(caller.process()).map(|()| 0);
                 }
-                let child = self.process_wait.authorise_child(caller.task_id, pid)?;
-                return pty.foreground().grant(caller.task_id, child).map(|()| 0);
+                let child = self.process_wait.authorise_child(caller.process(), pid)?;
+                return pty.foreground().grant(caller.process(), child).map(|()| 0);
             }
         }
         // Resolve `fd` against the caller's per-process descriptor table
@@ -5361,7 +5367,7 @@ where
         // property of an *input* stream's console, so `fd` must be a
         // readable inherited stream — anything else fails closed with
         // `NotFound`, never leaking which case occurred.
-        let streams = self.aspaces.read().streams(caller.task_id);
+        let streams = self.aspaces.read().streams(caller.process());
         if streams.mode(fd) != StreamMode::Read {
             return Err(Errno::NotFound);
         }
@@ -5374,7 +5380,7 @@ where
         // task cannot open the console by clearing the slot and then
         // draining it (`plans/DISPLAY.md` D5).
         if pid == 0 {
-            return device.release_foreground(caller.task_id).map(|()| 0);
+            return device.release_foreground(caller.process()).map(|()| 0);
         }
         // A non-zero `pid` must be a live child of the caller: the same
         // parent/child authority `wait`/`signal` enforce, decided by the
@@ -5384,8 +5390,8 @@ where
         // the caller is the recorded granter or the current owner), so
         // the drain right only ever moves down the spawn chain and is
         // never taken from a live foreground job by a bystander.
-        let child = self.process_wait.authorise_child(caller.task_id, pid)?;
-        device.grant_foreground(caller.task_id, child).map(|()| 0)
+        let child = self.process_wait.authorise_child(caller.process(), pid)?;
+        device.grant_foreground(caller.process(), child).map(|()| 0)
     }
 
     fn key_inject(
@@ -5733,8 +5739,8 @@ where
         let page_count = charged / PAGE_SIZE as u64;
         {
             let mut aspaces = self.aspaces.write();
-            aspaces.record_anon_region(caller.task_id, base, page_count);
-            aspaces.charge_aspace_bytes(caller.task_id, charged);
+            aspaces.record_anon_region(caller.process(), base, page_count);
+            aspaces.charge_aspace_bytes(caller.process(), charged);
         }
         // The registry snapshot needs no republishing: `MemMap::reserve`
         // commits no frame and makes no page-table entry, so the live
@@ -5767,7 +5773,7 @@ where
         // per-task grant table lives in the address-space registry (minted
         // when a driver is admitted, reclaimed when the task is withdrawn on
         // exit), so the read guard is held only for the lookup.
-        let Some(resource) = self.aspaces.read().grant(caller.task_id, handle) else {
+        let Some(resource) = self.aspaces.read().grant(caller.process(), handle) else {
             return Err(Errno::NotFound);
         };
         // The grant must name a memory window of this driver's, and the
@@ -5800,7 +5806,7 @@ where
         // pages into the registry snapshot so a later copy through the
         // driver's space sees it. Only on success.
         if let Ok(base) = result {
-            self.publish_region_mapping(caller.task_id, base, pages_spanning(len as u64));
+            self.publish_region_mapping(caller.process(), base, pages_spanning(len as u64));
         }
         result
     }
@@ -5819,7 +5825,7 @@ where
         // another driver's handle resolves to nothing and is refused
         // (— a driver reaches only the resources its
         // matched node requested), exactly as `mmio_map`.
-        let Some(resource) = self.aspaces.read().grant(caller.task_id, handle) else {
+        let Some(resource) = self.aspaces.read().grant(caller.process(), handle) else {
             return Err(Errno::NotFound);
         };
         // The grant must name a DMA constraint; reject any other kind before
@@ -5853,7 +5859,7 @@ where
         // The carve grew the caller's live space; publish the buffer's own
         // pages into the registry snapshot before the copy below, so the new
         // DMA window is visible to the copy path.
-        self.publish_region_mapping(caller.task_id, carve.cpu_va, pages_spanning(len as u64));
+        self.publish_region_mapping(caller.process(), carve.cpu_va, pages_spanning(len as u64));
         // Hand the device-visible base back through the `device_out` user
         // pointer via the validated `copy_to_user` boundary, exactly as `wait` writes the reaped status — a faulting
         // `device_out` collapses onto the same fail-closed `BadAddress` an
@@ -5879,7 +5885,7 @@ where
         // or another driver's handle resolves to nothing and is refused, and
         // the grant must name a DMA constraint — exactly as `dma_alloc`. A
         // task may free only against a DMA constraint it still holds.
-        let Some(resource) = self.aspaces.read().grant(caller.task_id, handle) else {
+        let Some(resource) = self.aspaces.read().grant(caller.process(), handle) else {
             return Err(Errno::NotFound);
         };
         let _constraint = dma_constraint(&resource)?;
@@ -5899,7 +5905,7 @@ where
         // let a copy read or write memory the task no longer owns — fail
         // closed). Only on success, and only over the extent the allocator
         // reports it released.
-        self.publish_region_teardown(caller.task_id, cpu_va, pages_spanning(released as u64));
+        self.publish_region_teardown(caller.process(), cpu_va, pages_spanning(released as u64));
         Ok(0)
     }
 
@@ -5914,7 +5920,7 @@ where
         // caller-supplied) from the per-task grant table in the
         // address-space registry; the read guard is held only for the
         // serialisation.
-        let bytes = self.aspaces.read().grants_to_le_bytes(caller.task_id);
+        let bytes = self.aspaces.read().grants_to_le_bytes(caller.process());
         // Never deliver a partial grant list: a buffer that cannot hold the
         // whole set fails closed, so the driver re-sizes
         // and retries rather than binding against a truncated table.
@@ -5953,13 +5959,13 @@ where
         // the earlier pin and every later growth were admitted.
         let mut aspaces = self.aspaces.write();
         let soft = aspaces
-            .limits(caller.task_id)
+            .limits(caller.process())
             .get(LimitKind::PinnedMemoryBytes)
             .soft;
-        if aspaces.pinned_footprint_bytes(caller.task_id) > soft {
+        if aspaces.pinned_footprint_bytes(caller.process()) > soft {
             return Err(Errno::OutOfRange);
         }
-        aspaces.set_pinned(caller.task_id);
+        aspaces.set_pinned(caller.process());
         Ok(0)
     }
 
@@ -5967,7 +5973,7 @@ where
         // Ungated (releasing one's own exemption grants nothing) and
         // audited by the dispatcher. Idempotent: unpinning an unpinned
         // caller is a no-op success — the caller is in the requested state.
-        self.aspaces.write().clear_pinned(caller.task_id);
+        self.aspaces.write().clear_pinned(caller.process());
         Ok(0)
     }
 
@@ -5992,7 +5998,7 @@ where
         if !self
             .aspaces
             .read()
-            .anon_region_exact(caller.task_id, base, page_count)
+            .anon_region_exact(caller.process(), base, page_count)
         {
             return Err(Errno::NotFound);
         }
@@ -6021,10 +6027,10 @@ where
         if result.is_ok() {
             let credited = page_count * PAGE_SIZE as u64;
             let mut aspaces = self.aspaces.write();
-            aspaces.remove_anon_region(caller.task_id, base);
-            aspaces.credit_aspace_bytes(caller.task_id, credited);
+            aspaces.remove_anon_region(caller.process(), base);
+            aspaces.credit_aspace_bytes(caller.process(), credited);
             drop(aspaces);
-            self.publish_region_teardown(caller.task_id, base, page_count);
+            self.publish_region_teardown(caller.process(), base, page_count);
         }
         result
     }
@@ -6060,7 +6066,7 @@ where
         let handle = self
             .aspaces
             .read()
-            .open_file_entry(caller.task_id, fd)
+            .open_file_entry(caller.process(), fd)
             .ok_or(Errno::NotFound)?;
         if !handle.flags.is_read() {
             return Err(Errno::PermissionDenied);
@@ -6094,8 +6100,8 @@ where
         };
         {
             let mut aspaces = self.aspaces.write();
-            aspaces.record_file_region(caller.task_id, region);
-            aspaces.charge_aspace_bytes(caller.task_id, charged);
+            aspaces.record_file_region(caller.process(), region);
+            aspaces.charge_aspace_bytes(caller.process(), charged);
         }
         Ok(base)
     }
@@ -6130,8 +6136,8 @@ where
         // transport (no ambient authority).
         {
             let aspaces = self.aspaces.read();
-            if !aspaces.grant_covers(caller.task_id, &HwResource::endpoint(decoded.endpoint))
-                || !aspaces.grant_covers(caller.task_id, &HwResource::shared(decoded.window))
+            if !aspaces.grant_covers(caller.process(), &HwResource::endpoint(decoded.endpoint))
+                || !aspaces.grant_covers(caller.process(), &HwResource::shared(decoded.window))
             {
                 return Err(Errno::PermissionDenied);
             }
@@ -6179,7 +6185,7 @@ where
         if self
             .aspaces
             .read()
-            .file_region_exact(caller.task_id, base, charged)
+            .file_region_exact(caller.process(), base, charged)
             .is_none()
         {
             return Err(Errno::NotFound);
@@ -6196,10 +6202,10 @@ where
         if result.is_ok() {
             {
                 let mut aspaces = self.aspaces.write();
-                aspaces.remove_file_region(caller.task_id, base);
-                aspaces.credit_aspace_bytes(caller.task_id, charged);
+                aspaces.remove_file_region(caller.process(), base);
+                aspaces.credit_aspace_bytes(caller.process(), charged);
             }
-            self.publish_region_teardown(caller.task_id, base, pages_spanning(charged));
+            self.publish_region_teardown(caller.process(), base, pages_spanning(charged));
         }
         result
     }
@@ -6229,9 +6235,9 @@ where
         // A `WouldBlock` leaves `status` untouched — the `?` returns before
         // the copy-out below — so a poll that finds nothing writes nothing.
         let reported = if flags.is_nonblock() {
-            self.process_wait.poll(caller.task_id, pid, flags)?
+            self.process_wait.poll(caller.process(), pid, flags)?
         } else {
-            self.process_wait.wait(caller.task_id, pid, flags)?
+            self.process_wait.wait(caller.process(), pid, flags)?
         };
 
         // Copy the typed status record out to the caller's `status` pointer
@@ -6267,7 +6273,7 @@ where
         // child reaches the cross-principal rule, whose every outcome is
         // audited. Any other producer error (an inert interface) propagates
         // verbatim rather than being reinterpreted as a target question.
-        let target = match self.process_signal.resolve_child(caller.task_id, pid) {
+        let target = match self.process_signal.resolve_child(caller.process(), pid) {
             Ok(child) => child,
             Err(Errno::NotFound) => self.authorise_cross_principal(caller, pid, signal)?,
             Err(err) => return Err(err),
@@ -6343,14 +6349,14 @@ where
         // principal, then `CAP_PROC_CONTROL`. Any other producer error (an
         // inert interface) propagates verbatim rather than being
         // reinterpreted as a target question.
-        let (target, rule) = match self.process_signal.resolve_child(caller.task_id, pid) {
+        let (target, rule) = match self.process_signal.resolve_child(caller.process(), pid) {
             Ok(child) => (child, CrossPrincipalRule::OwnChild),
             Err(Errno::NotFound) => self.cross_principal_rule(caller, pid)?,
             Err(err) => return Err(err),
         };
         if !rule.allows() {
             self.audit_priority_change(
-                caller.task_id,
+                caller.process(),
                 pid,
                 target,
                 priority,
@@ -6375,7 +6381,7 @@ where
         let raise = priority.outranks(current);
         if raise && !caller.caps.has(CapabilityId::PROC_CONTROL) {
             self.audit_priority_change(
-                caller.task_id,
+                caller.process(),
                 pid,
                 target,
                 priority,
@@ -6394,7 +6400,7 @@ where
         // recorded once.
         if raise || rule != CrossPrincipalRule::OwnChild {
             self.audit_priority_change(
-                caller.task_id,
+                caller.process(),
                 pid,
                 target,
                 priority,
@@ -6454,7 +6460,7 @@ where
         // one is imposed). Reading one's own limit grants no authority and
         // needs no capability; the dispatcher
         // leaves this call ungated and unaudited.
-        let limit = self.aspaces.read().limits(caller.task_id).get(kind);
+        let limit = self.aspaces.read().limits(caller.process()).get(kind);
         let encoded = limit.encode();
 
         // Copy the encoded limit out to the caller's `out` pointer through
@@ -6492,7 +6498,7 @@ where
         // otherwise, fail closed. This call is audited per spec, so
         // the dispatcher logs a rejection automatically — no
         // bespoke audit record is needed here.
-        let current = self.aspaces.read().limits(caller.task_id).get(kind);
+        let current = self.aspaces.read().limits(caller.process()).get(kind);
         let can_raise = caller.caps.has(CapabilityId::RLIMIT_RAISE);
         let stored = authorize_set(current, requested, can_raise)?;
 
@@ -6500,7 +6506,9 @@ where
         // task is identified by the kernel-trusted `caller.task_id`, never a
         // caller-supplied id, so a process can only set its own
         // limits.
-        self.aspaces.write().set_limit(caller.task_id, kind, stored);
+        self.aspaces
+            .write()
+            .set_limit(caller.process(), kind, stored);
         Ok(0)
     }
 
@@ -6921,7 +6929,7 @@ where
             && !self
                 .aspaces
                 .read()
-                .grant_covers(caller.task_id, &HwResource::endpoint(endpoint))
+                .grant_covers(caller.process(), &HwResource::endpoint(endpoint))
         {
             return Err(Errno::PermissionDenied);
         }
@@ -6986,11 +6994,11 @@ where
         // a reply arriving in that window is never lost.
         //
         // `take_reply` is matched by `claimant`, the *security* task id the
-        // request was posted under (`caller.caps.task()`), while the
+        // request was posted under (`caller.caps.process()`), while the
         // wait-queue and the scheduler park/unpark use the *scheduler* task
         // id (`caller.task_id`), exactly as `hw_tree_wait` does.
         let sched_task = caller.task_id.0;
-        let claimant = caller.caps.task().0;
+        let claimant = caller.caps.process().0;
         crate::waitq::CALL_WAITQ.register(sched_task, crate::waitq::NO_DEADLINE);
         let outcome = loop {
             // `now` is dead input here: this call posted with a `u64::MAX`
@@ -7070,7 +7078,7 @@ where
             && !self
                 .aspaces
                 .read()
-                .grant_covers(caller.task_id, &HwResource::endpoint(endpoint))
+                .grant_covers(caller.process(), &HwResource::endpoint(endpoint))
         {
             return Err(Errno::PermissionDenied);
         }
@@ -7117,11 +7125,11 @@ where
         }) {
             Some(Ok(())) => Ok(0),
             Some(Err(err)) => {
-                let _ = ep.cancel_one(caller.caps.task().0, ticket);
+                let _ = ep.cancel_one(caller.caps.process().0, ticket);
                 Err(copy_fault_errno(err))
             }
             None => {
-                let _ = ep.cancel_one(caller.caps.task().0, ticket);
+                let _ = ep.cancel_one(caller.caps.process().0, ticket);
                 Err(Errno::BadAddress)
             }
         }
@@ -7140,7 +7148,7 @@ where
         };
         // The ticket is the unforgeable authority; `take_reply` matches it
         // against the *security* task id the request was posted under.
-        let claimant = caller.caps.task().0;
+        let claimant = caller.caps.process().0;
         let cpu = SchedulerArch::current_cpu(self.arch);
         let now = self.arch.monotonic_ns(cpu);
         match ep.take_reply(claimant, CallTicket(ticket), now) {
@@ -7177,7 +7185,7 @@ where
         // Only the ticket's own poster may withdraw it; a foreign, unknown, or
         // already-completed ticket removes nothing and fails closed with the
         // same `NotFound` (no existence oracle).
-        if ep.cancel_one(caller.caps.task().0, CallTicket(ticket)) {
+        if ep.cancel_one(caller.caps.process().0, CallTicket(ticket)) {
             Ok(0)
         } else {
             Err(Errno::NotFound)
@@ -7315,7 +7323,7 @@ where
             let _ = self
                 .aspaces
                 .write()
-                .mint_grant(caller.task_id, HwResource::endpoint(endpoint_id));
+                .mint_grant(caller.process(), HwResource::endpoint(endpoint_id));
         }
         Ok(0)
     }
@@ -7340,7 +7348,7 @@ where
         if !ep
             .required_recv_caps()
             .is_subset_of(caller.caps.effective())
-            || ep.owner() != caller.caps.task().0
+            || ep.owner() != caller.caps.process().0
         {
             return Err(Errno::PermissionDenied);
         }
@@ -7442,7 +7450,7 @@ where
         if !ep
             .required_recv_caps()
             .is_subset_of(caller.caps.effective())
-            || ep.owner() != caller.caps.task().0
+            || ep.owner() != caller.caps.process().0
         {
             return Err(Errno::PermissionDenied);
         }
@@ -7484,7 +7492,7 @@ where
         if !ep
             .required_recv_caps()
             .is_subset_of(caller.caps.effective())
-            || ep.owner() != caller.caps.task().0
+            || ep.owner() != caller.caps.process().0
         {
             return Err(Errno::PermissionDenied);
         }
@@ -7531,7 +7539,7 @@ where
         if !ep
             .required_recv_caps()
             .is_subset_of(caller.caps.effective())
-            || ep.owner() != caller.caps.task().0
+            || ep.owner() != caller.caps.process().0
         {
             return Err(Errno::PermissionDenied);
         }
@@ -7667,11 +7675,11 @@ where
         //    resource fails the whole publish closed (never partially apply).
         let parent_id = {
             let aspaces = self.aspaces.read();
-            let Some(parent_id) = aspaces.loaded_node(caller.task_id) else {
+            let Some(parent_id) = aspaces.loaded_node(caller.process()) else {
                 return Err(Errno::PermissionDenied);
             };
             for resource in decoded.resources() {
-                if !aspaces.grant_covers(caller.task_id, resource) {
+                if !aspaces.grant_covers(caller.process(), resource) {
                     return Err(Errno::PermissionDenied);
                 }
             }
@@ -7756,7 +7764,7 @@ where
         // driver can never retire a node it did not itself publish.
         let parent_id = {
             let aspaces = self.aspaces.read();
-            let Some(parent_id) = aspaces.loaded_node(caller.task_id) else {
+            let Some(parent_id) = aspaces.loaded_node(caller.process()) else {
                 return Err(Errno::PermissionDenied);
             };
             parent_id
@@ -7893,7 +7901,7 @@ where
         // for.
         let node_id = {
             let aspaces = self.aspaces.read();
-            let Some(node_id) = aspaces.loaded_node(caller.task_id) else {
+            let Some(node_id) = aspaces.loaded_node(caller.process()) else {
                 return Err(Errno::PermissionDenied);
             };
             node_id
@@ -7924,7 +7932,7 @@ where
         // the same answer whether the caller could never have a node or simply
         // does not).
         let aspaces = self.aspaces.read();
-        let Some(node_id) = aspaces.loaded_node(caller.task_id) else {
+        let Some(node_id) = aspaces.loaded_node(caller.process()) else {
             return Err(Errno::NotFound);
         };
         Ok(u64::from(node_id))
@@ -7966,7 +7974,7 @@ where
         // grant path; the handle is unused here — the *line*, not a handle, is
         // what the driver presents to `irq_bind` and forwards.
         let _handle = self.aspaces.write().mint_grant(
-            caller.task_id,
+            caller.process(),
             HwResource::irq(u64::from(allocation.line), 1),
         );
         Ok(tairix_abi::MsiAllocation::WIRE_LEN as u64)
@@ -7987,11 +7995,11 @@ where
         // On any failure no region is recorded and the frames (if any) are
         // returned to the allocator, so a failed create leaks nothing.
         let (base_va, id) =
-            crate::sharedreg::create(self.shared_mem_facility, caller.task_id, pages)?;
+            crate::sharedreg::create(self.shared_mem_facility, caller.process(), pages)?;
         // The map grew the caller's live space; publish the region's own
         // pages so the `id_out` copy (and any later copy) sees current
         // memory, exactly as `mmio_map` does.
-        self.publish_region_mapping(caller.task_id, base_va, pages);
+        self.publish_region_mapping(caller.process(), base_va, pages);
         // Write the kernel-minted region id out through the validated
         // `copy_to_user` boundary. A faulting `id_out` releases the region we
         // just created (dropping its only reference, which frees and scrubs
@@ -8003,11 +8011,11 @@ where
         }) {
             Some(Ok(())) => {}
             Some(Err(err)) => {
-                self.release_shared_mapping(caller.task_id, base_va);
+                self.release_shared_mapping(caller.process(), base_va);
                 return Err(copy_fault_errno(err));
             }
             None => {
-                self.release_shared_mapping(caller.task_id, base_va);
+                self.release_shared_mapping(caller.process(), base_va);
                 return Err(Errno::BadAddress);
             }
         }
@@ -8020,7 +8028,7 @@ where
         let _handle = self
             .aspaces
             .write()
-            .mint_grant(caller.task_id, HwResource::shared(id));
+            .mint_grant(caller.process(), HwResource::shared(id));
         Ok(base_va)
     }
 
@@ -8031,7 +8039,7 @@ where
         // (`caller.task_id` is kernel-trusted), so a forged or another
         // driver's handle resolves to nothing and is refused, exactly as
         // `mmio_map` / `dma_alloc` resolve their grants.
-        let Some(resource) = self.aspaces.read().grant(caller.task_id, handle) else {
+        let Some(resource) = self.aspaces.read().grant(caller.process(), handle) else {
             return Err(Errno::NotFound);
         };
         // The grant must name a shared region; reject any other kind before
@@ -8044,13 +8052,13 @@ where
         // freed while the caller still maps them. A region torn down between
         // grant and map fails closed `NotFound`.
         let (base_va, len) =
-            crate::sharedreg::map(self.shared_mem_facility, caller.task_id, resource.base())?;
+            crate::sharedreg::map(self.shared_mem_facility, caller.process(), resource.base())?;
         // The map grew the caller's live space; publish the region's own
         // pages so the `len_out` copy sees current memory, exactly as
         // `shm_create`. A desktop session takes this path for every frame
         // region an app hands it, so it must cost the region's pages and
         // never the session's whole resident set.
-        self.publish_region_mapping(caller.task_id, base_va, pages_spanning(len as u64));
+        self.publish_region_mapping(caller.process(), base_va, pages_spanning(len as u64));
         // Report the region's byte length — the registry's own record, so a
         // server sizes its view from the kernel's answer, never the granting
         // client's claim — through the validated `copy_to_user` boundary. A
@@ -8063,11 +8071,11 @@ where
         }) {
             Some(Ok(())) => {}
             Some(Err(err)) => {
-                self.release_shared_mapping(caller.task_id, base_va);
+                self.release_shared_mapping(caller.process(), base_va);
                 return Err(copy_fault_errno(err));
             }
             None => {
-                self.release_shared_mapping(caller.task_id, base_va);
+                self.release_shared_mapping(caller.process(), base_va);
                 return Err(Errno::BadAddress);
             }
         }
@@ -8084,7 +8092,7 @@ where
         // are the same `NotFound`, so the error shape confirms nothing about
         // foreign regions.
         let wanted = HwResource::shared(region);
-        if !self.aspaces.read().grant_covers(caller.task_id, &wanted) {
+        if !self.aspaces.read().grant_covers(caller.process(), &wanted) {
             return Err(Errno::NotFound);
         }
         // Resolve the recipient as the live serving task of `endpoint` at
@@ -8101,7 +8109,7 @@ where
         let handle = self
             .aspaces
             .write()
-            .mint_grant(SecTaskId(ep.owner()), wanted);
+            .mint_grant(ProcessId(ep.owner()), wanted);
         Ok(handle)
     }
 
@@ -8130,7 +8138,7 @@ where
         // grant naming its id, so a delegated grant can never outlive the
         // instance it was issued against.
         let wanted = HwResource::endpoint(endpoint);
-        if !self.aspaces.read().grant_covers(caller.task_id, &wanted) {
+        if !self.aspaces.read().grant_covers(caller.process(), &wanted) {
             return Err(Errno::NotFound);
         }
         // Resolve the recipient as the live serving task of `recipient` at
@@ -8149,7 +8157,7 @@ where
         let handle = self
             .aspaces
             .write()
-            .mint_grant(SecTaskId(ep.owner()), wanted);
+            .mint_grant(ProcessId(ep.owner()), wanted);
         Ok(handle)
     }
 
@@ -8160,10 +8168,10 @@ where
         // entries, and drop the caller's reference; the region's frames are
         // zeroed and freed at its last reference. A `base` that does not name
         // a live shared mapping of the caller fails closed `NotFound`.
-        let len = crate::sharedreg::unmap(self.shared_mem_facility, caller.task_id, base)?;
+        let len = crate::sharedreg::unmap(self.shared_mem_facility, caller.process(), base)?;
         // The unmap shrank the caller's live space; drop the region's own
         // pages from its snapshot.
-        self.publish_region_teardown(caller.task_id, base, pages_spanning(len as u64));
+        self.publish_region_teardown(caller.process(), base, pages_spanning(len as u64));
         Ok(0)
     }
 
@@ -8229,7 +8237,7 @@ where
                                 || self
                                     .aspaces
                                     .read()
-                                    .grant_covers(caller.task_id, &HwResource::endpoint(id)))
+                                    .grant_covers(caller.process(), &HwResource::endpoint(id)))
                                 && ep
                                     .required_send_caps()
                                     .is_subset_of(caller.caps.effective())
@@ -8241,7 +8249,7 @@ where
                     WaitSourceKind::Irq => {
                         if self
                             .irq
-                            .line_for(IrqHandle::from_raw(id), caller.task_id)
+                            .line_for(IrqHandle::from_raw(id), caller.process())
                             .is_none()
                         {
                             return Err(Errno::NotFound);
@@ -8258,7 +8266,7 @@ where
                         // confirms a foreign task's existence.
                         let named_child = child_selector(id).is_some_and(|selector| {
                             selector == WAIT_PID_ANY
-                                || self.process_wait.child_state(caller.task_id, selector)
+                                || self.process_wait.child_state(caller.process(), selector)
                                     != ChildPeek::NoChild
                         });
                         if !named_child {
@@ -8323,7 +8331,7 @@ where
                         // all collapse to the same `NotFound` the other
                         // kinds use (no existence oracle).
                         let owned = u32::try_from(id).is_ok_and(|fd| {
-                            self.aspaces.read().stream_read_member(caller.task_id, fd)
+                            self.aspaces.read().stream_read_member(caller.process(), fd)
                         });
                         if !owned {
                             return Err(Errno::NotFound);
@@ -8358,7 +8366,7 @@ where
                         };
                         let path = {
                             let Some(handle) =
-                                self.aspaces.read().open_file_entry(caller.task_id, fd)
+                                self.aspaces.read().open_file_entry(caller.process(), fd)
                             else {
                                 return Err(Errno::NotFound);
                             };
@@ -8544,7 +8552,7 @@ where
             }
         }
         if observes_callreply {
-            let claimant = caller.caps.task().0;
+            let claimant = caller.caps.process().0;
             let mut call_deadline = crate::waitq::NO_DEADLINE;
             for m in &members {
                 if m.kind == WaitSourceKind::CallReply {
@@ -8581,8 +8589,8 @@ where
                     return None;
                 }
                 let handle = IrqHandle::from_raw(m.id);
-                if self.irq.is_quarantined(handle, caller.task_id) {
-                    self.irq.line_for(handle, caller.task_id)
+                if self.irq.is_quarantined(handle, caller.process()) {
+                    self.irq.line_for(handle, caller.process())
                 } else {
                     None
                 }
@@ -8618,7 +8626,9 @@ where
             // still bounds the wait.
             for m in &members {
                 if m.kind == WaitSourceKind::Irq {
-                    if let Some(line) = self.irq.line_for(IrqHandle::from_raw(m.id), caller.task_id)
+                    if let Some(line) = self
+                        .irq
+                        .line_for(IrqHandle::from_raw(m.id), caller.process())
                     {
                         let _ = self.irq_controller.rearm(line);
                     }
@@ -8713,9 +8723,9 @@ where
         // consumes nothing (harmless).
         if kind == WaitSourceKind::Irq {
             let now = self.arch.monotonic_ns(cpu);
-            let _ = self
-                .irq
-                .try_wait_step(IrqHandle::from_raw(id), caller.task_id, now, u64::MAX);
+            let _ =
+                self.irq
+                    .try_wait_step(IrqHandle::from_raw(id), caller.process(), now, u64::MAX);
         }
         // Consume a File winner's edge: advance the member's observed
         // generation to the node's current one, so the next wait blocks until
@@ -8783,7 +8793,7 @@ where
         let fd = self
             .aspaces
             .write()
-            .open_file(caller.task_id, path, flags)?;
+            .open_file(caller.process(), path, flags)?;
         Ok(u64::from(fd))
     }
 
@@ -8808,7 +8818,7 @@ where
         let fd = self
             .aspaces
             .write()
-            .open_resource(caller.task_id, backing, flags)?;
+            .open_resource(caller.process(), backing, flags)?;
         Ok(u64::from(fd))
     }
 
@@ -8816,7 +8826,7 @@ where
         // Release the caller's own descriptor. `fd` is resolved against the
         // kernel-trusted caller id, so one task cannot close another's
         // handle; an unopened descriptor fails closed with `NotFound`.
-        if self.aspaces.write().close_file(caller.task_id, fd) {
+        if self.aspaces.write().close_file(caller.process(), fd) {
             Ok(0)
         } else {
             Err(Errno::NotFound)
@@ -8833,7 +8843,7 @@ where
         let handle = self
             .aspaces
             .read()
-            .open_file_entry(caller.task_id, fd)
+            .open_file_entry(caller.process(), fd)
             .ok_or(Errno::NotFound)?;
         // Only a plain filesystem descriptor is delegatable: a pipe or
         // resource has its own authority model, and a delegated backing
@@ -8870,7 +8880,7 @@ where
         // recycled identity. An unknown recipient is the same `NotFound`
         // as an unopened descriptor, so the reply shape confirms nothing
         // about foreign task ids.
-        let recipient = SecTaskId(pid);
+        let recipient = ProcessId(pid);
         let mut registry = self.aspaces.write();
         if !registry.contains(recipient) {
             return Err(Errno::NotFound);
@@ -8888,7 +8898,7 @@ where
         let fd = self
             .aspaces
             .write()
-            .redeem_fd_delegation(caller.task_id, handle)?;
+            .redeem_fd_delegation(caller.process(), handle)?;
         Ok(u64::from(fd))
     }
 
@@ -8914,7 +8924,7 @@ where
         let handle = self
             .aspaces
             .read()
-            .open_file_entry(caller.task_id, fd)
+            .open_file_entry(caller.process(), fd)
             .ok_or(Errno::NotFound)?;
         // A positional read of a parking backing waits for its producer
         // rather than timing out: the reader asked for bytes, not a poll.
@@ -8935,7 +8945,7 @@ where
         let handle = self
             .aspaces
             .read()
-            .open_file_entry(caller.task_id, fd)
+            .open_file_entry(caller.process(), fd)
             .ok_or(Errno::NotFound)?;
         self.descriptor_write(caller, &handle, StreamPos::At(offset), buf, len)
     }
@@ -8950,7 +8960,7 @@ where
         let handle = self
             .aspaces
             .read()
-            .open_file_entry(caller.task_id, fd)
+            .open_file_entry(caller.process(), fd)
             .ok_or(Errno::NotFound)?;
         // A resource-backed descriptor is not a directory (it has no path to
         // list); fail closed as an invalid operation for its kind.
@@ -9004,7 +9014,7 @@ where
         let handle = self
             .aspaces
             .read()
-            .open_file_entry(caller.task_id, fd)
+            .open_file_entry(caller.process(), fd)
             .ok_or(Errno::NotFound)?;
         // A resource-backed descriptor has no filesystem metadata to report;
         // fail closed as an invalid operation for its kind.
@@ -9030,7 +9040,7 @@ where
         let handle = self
             .aspaces
             .read()
-            .open_file_entry(caller.task_id, fd)
+            .open_file_entry(caller.process(), fd)
             .ok_or(Errno::NotFound)?;
         // Truncation is a write; a handle not opened for writing fails closed
         // before the filesystem is touched (the secured VFS also rejects a
@@ -9065,7 +9075,7 @@ where
         let handle = self
             .aspaces
             .read()
-            .open_file_entry(caller.task_id, fd)
+            .open_file_entry(caller.process(), fd)
             .ok_or(Errno::NotFound)?;
         // Syncing is a filesystem operation; a resource-backed descriptor has
         // nothing to flush and fails closed as an invalid operation for its
@@ -9413,7 +9423,7 @@ where
         let uid = caller.caps.owner().0;
         self.filesystem
             .open(uid, caller.caps.effective(), &abs, OpenFlags::DIRECTORY)?;
-        self.aspaces.write().set_cwd(caller.task_id, abs);
+        self.aspaces.write().set_cwd(caller.process(), abs);
         Ok(0)
     }
 
@@ -9423,7 +9433,7 @@ where
         // (the root `/` when none was established) and copy it out through
         // the validated boundary. The whole path is delivered or none: a
         // buffer too small fails closed rather than truncating the path.
-        let cwd = self.aspaces.read().cwd(caller.task_id);
+        let cwd = self.aspaces.read().cwd(caller.process());
         let bytes = cwd.as_bytes();
         if bytes.len() > buf_cap {
             return Err(Errno::BufferTooSmall);
@@ -9444,13 +9454,13 @@ where
 /// record, and its address-space registry entry (streams, open files,
 /// limits, grants, cwd, and — when registered — the frozen space snapshot).
 ///
-/// Factored out of [`KernelSyscallHandlers::reclaim_task_resources`] so the
+/// Factored out of [`KernelSyscallHandlers::reclaim_process_resources`] so the
 /// full task teardown and the asynchronous-launch loading-child teardown
 /// release the *same* bookkeeping through one definition
 /// (`plans/FIX-DESKTOP.md` §2.6.5, item 2). It covers only the bookkeeping
 /// every principal owns from admission; the resource teardown a
 /// fully-running task also needs (IPC ports, IRQ bindings, shared memory,
-/// wait-sets, console foreground) stays in `reclaim_task_resources`, which a
+/// wait-sets, console foreground) stays in `reclaim_process_resources`, which a
 /// loading child that failed before entering user mode provably never
 /// acquired.
 ///
@@ -9461,31 +9471,42 @@ fn reclaim_process_bookkeeping(
     caps: &RwLock<CapTable>,
     aspaces: &RwLock<AddressSpaceRegistry>,
     process_wait: &(dyn ProcessWait + 'static),
-    task: SecTaskId,
+    process: ProcessId,
 ) {
-    // Drop the task's signal-intake state (its opt-in and any pending
-    // observed signal): a dead task's intake must never linger, and task
-    // ids are never reused, so a leaked entry could never be reclaimed.
-    crate::procsignal::clear_intake(task.0);
-    // Drop the task's kill-gate state for the same reason — and so a task
-    // that exits on its own while a termination was deferred against it
-    // (both raced) leaves no pending kill behind.
-    crate::procsignal::clear_kill_gate(task.0);
-    // Drop any termination deferred against the task while it ran in user
-    // mode: a self-exit or fault teardown running here means the task is
-    // already being reclaimed, so the dispatch loop's later
-    // `land_running_kill` must find nothing and never reclaim twice.
-    crate::procsignal::clear_running_kill(task.0);
-    // Prune the dead task's own child rows from the wait bookkeeping: a
+    // Drop the signal-intake state of every thread of the process (its opt-in
+    // and any pending observed signal): a dead thread's intake must never
+    // linger, and task ids are never reused, so a leaked entry could never be
+    // reclaimed. The gates below are the same story, and all three are keyed
+    // by the individual thread — so the thread set is read once, before the
+    // capability record that holds it is dropped.
+    let threads: Vec<u64> = {
+        let guard = caps.read();
+        guard.threads_of(process).map(|thread| thread.0).collect()
+    };
+    for thread in threads {
+        crate::procsignal::clear_intake(thread);
+        // Drop the kill-gate state for the same reason — and so a thread
+        // that exits on its own while a termination was deferred against it
+        // (both raced) leaves no pending kill behind.
+        crate::procsignal::clear_kill_gate(thread);
+        // Drop any termination deferred against the thread while it ran in
+        // user mode: a self-exit or fault teardown running here means the
+        // process is already being reclaimed, so the dispatch loop's later
+        // `land_running_kill` must find nothing and never reclaim twice.
+        crate::procsignal::clear_running_kill(thread);
+        // Its per-thread registry records (the user-stack span) go with it.
+        aspaces.write().withdraw_thread(SecTaskId(thread));
+    }
+    // Prune the dead process's own child rows from the wait bookkeeping: a
     // dead parent can never reap, so a row it never collected — a running
     // orphan's link or an unreaped zombie — would be stranded forever.
-    process_wait.parent_exited(task);
-    let _ = caps.write().remove(task);
+    process_wait.parent_exited(process);
+    let _ = caps.write().remove(process);
     // Withdraw the address-space registry entry last: streams, open files
     // (pipe ends wake their parked peers as they drop), limits, grants, cwd,
     // and any frozen space snapshot all go together, so no stale entry
-    // outlives the task.
-    aspaces.write().withdraw(task);
+    // outlives the process.
+    aspaces.write().withdraw(process);
 }
 
 /// The kernel-attested identity a freshly spawned child is admitted under:
@@ -9634,7 +9655,7 @@ where
     /// The spawning caller's task id — the parent the freshly admitted
     /// child is recorded against so a later `wait` from this parent can
     /// reap it (`plans/SPAWN.md` SP6). Kernel-trusted, never caller-supplied.
-    parent: SecTaskId,
+    parent: ProcessId,
     /// The scheduler-side process-wait producer the parent/child link is
     /// recorded with at admit. Defaults to the inert `NULL_PROCESS_WAIT`
     /// until the boot path installs the real producer, so the link is a
@@ -9752,7 +9773,7 @@ where
         caps: &'a RwLock<CapTable>,
         aspaces: &'a RwLock<AddressSpaceRegistry>,
         arch: &'a A,
-        parent: SecTaskId,
+        parent: ProcessId,
         process_wait: &'static (dyn ProcessWait + 'static),
         streams: DescriptorTable,
         wired: Vec<(u32, crate::aspace::OpenFile)>,
@@ -9808,7 +9829,7 @@ where
 /// derivations can never diverge (`plans/FIX-DESKTOP.md` §2.6.5, item 2).
 #[allow(clippy::too_many_arguments)]
 fn derive_task_record(
-    sec_id: SecTaskId,
+    sec_id: ProcessId,
     manifest_request: CapabilitySet,
     credential: &SpawnCredential,
     proc_id: ProcId,
@@ -9946,7 +9967,7 @@ impl ChildRecordSeed {
     /// verified manifest's request (the effective record that replaces it).
     fn record(
         &self,
-        sec_id: SecTaskId,
+        sec_id: ProcessId,
         manifest_request: CapabilitySet,
         audit: &dyn Sink,
     ) -> TaskCapabilities {
@@ -10132,7 +10153,7 @@ fn body_load_bundle(
 #[allow(clippy::too_many_arguments)]
 fn build_from_bytes(
     services: &'static crate::spawn_services::SpawnServices,
-    sec_id: SecTaskId,
+    sec_id: ProcessId,
     seed: &ChildRecordSeed,
     guard: Option<u64>,
     rxe: &[u8],
@@ -10161,7 +10182,9 @@ fn build_from_bytes(
         {
             return Err(Errno::AlreadyExists);
         }
-        aspaces.set_stack_span(sec_id, image.stack_span);
+        // A freshly admitted process is its own thread-group leader, so its
+        // leader thread owns the spawn layout's stack span.
+        aspaces.set_stack_span(sec_id, sec_id.leader_task(), image.stack_span);
     }
     Ok(ReadyToEnter {
         pre_resume: image.pre_resume,
@@ -10183,7 +10206,7 @@ fn build_from_bytes(
 #[allow(clippy::too_many_arguments)]
 fn build_child_image(
     services: &'static crate::spawn_services::SpawnServices,
-    sec_id: SecTaskId,
+    sec_id: ProcessId,
     task: u64,
     plan: &LoadPlan,
     seed: &ChildRecordSeed,
@@ -10234,7 +10257,7 @@ fn build_child_image(
 /// refusal is recorded here — beside the child's reserved-status exit — with
 /// the stable errno that classified it, rather than surfacing as a `spawn`
 /// return value (`plans/FIX-DESKTOP.md` §2.3).
-fn emit_load_refusal(audit: &(dyn Sink + Sync), sec_id: SecTaskId, errno: Errno) {
+fn emit_load_refusal(audit: &(dyn Sink + Sync), sec_id: ProcessId, errno: Errno) {
     crate::audit::emit(
         audit,
         Level::Warn,
@@ -10316,7 +10339,7 @@ where
         let parent_proc_id = self
             .caps
             .read()
-            .caps_for(self.parent)
+            .caps_of_process(self.parent)
             .map_or(ProcId::KERNEL, TaskCapabilities::proc_id);
         let start_time = SchedulerArch::ticks_now(self.arch);
         let console = self
@@ -10357,7 +10380,7 @@ where
 
         let work = move |yielder: &mut Yielder<A::Cs>| {
             let task = body_id.load(core::sync::atomic::Ordering::Acquire);
-            let sec_id = SecTaskId(task);
+            let sec_id = ProcessId(task);
             let arg_refs: Vec<&[u8]> = args.iter().map(Vec::as_slice).collect();
             let env_refs: Vec<&[u8]> = env.iter().map(Vec::as_slice).collect();
             match build_child_image(
@@ -10395,7 +10418,7 @@ where
         let task_id =
             spawn_kthread_with_stack_parked(self.sched, cs, stack, cpu, Priority::Normal, work)
                 .map_err(|_| AdmitError::SchedulerFull)?;
-        let sec_id = SecTaskId(task_id);
+        let sec_id = ProcessId::leader(SecTaskId(task_id));
 
         // Publish the id to the still-parked body before installing per-task
         // state and unparking.
@@ -11060,7 +11083,7 @@ where
         // teardown — one definition, reached through the boot-installed
         // seam because the signal producer cannot borrow the handlers
         // directly.
-        self.handlers.reclaim_task_resources(SecTaskId(task));
+        self.handlers.reclaim_process_resources(ProcessId(task));
     }
 }
 
@@ -11119,6 +11142,10 @@ where
             task_id,
             caps: &caps_snapshot,
         };
+        // The calling thread's process, taken from the snapshot rather than a
+        // second table lookup: the kill boundary below tears the *process*
+        // down, not just the thread that was inside the handler.
+        let caller_process = caller.process();
 
         // Open the kill gate's in-syscall window: from here until the
         // boundary check below, a termination aimed at this task is
@@ -11159,9 +11186,12 @@ where
         // then simply superseded by the exit in flight.
         if let Some(signal) = crate::procsignal::syscall_exit_take_kill(sched_task_id) {
             if raw_number != SyscallNumber::EXIT.as_u16() {
-                return self
-                    .handlers
-                    .land_pending_kill(task_id, signal, result, completion_cpu);
+                return self.handlers.land_pending_kill(
+                    caller_process,
+                    signal,
+                    result,
+                    completion_cpu,
+                );
             }
         }
 
@@ -11195,7 +11225,16 @@ where
         let Some(sched_task_id) = self.sched.current_task(cpu) else {
             return UserFaultOutcome::Unhandled;
         };
-        let task = SecTaskId(sched_task_id);
+        let thread = SecTaskId(sched_task_id);
+        // The faulting thread's process owns every mapping the resolvers
+        // consult; the thread itself owns only its stack span. A thread with
+        // no thread-group entry has no process to resolve against, so the
+        // fault is unattributable and the port takes its fatal path (fail
+        // closed — the resolvers never materialise memory for a task the
+        // kernel does not know).
+        let Some(process) = self.caps.read().process_of(thread) else {
+            return UserFaultOutcome::Unhandled;
+        };
         // Kernel-activity breadcrumb: the fault resolver runs in the
         // data-abort exception handler with IRQ masked (only the `svc`
         // syscall path re-enables IRQ), so a CPU that wedges here can be
@@ -11220,7 +11259,7 @@ where
             crate::watchdog::KernelBreadcrumb::FaultReclaim,
             fault_va,
         );
-        self.handlers.ramzip_direct_reclaim(task);
+        self.handlers.ramzip_direct_reclaim(process);
         // Stack growth is offered first, for reads and writes alike (a
         // stack push is a write), so the write-fatal file rule below can
         // never kill a legitimate growth fault. The resolver itself bounds
@@ -11231,7 +11270,7 @@ where
             crate::watchdog::KernelBreadcrumb::FaultStack,
             fault_va,
         );
-        if self.handlers.resolve_stack_fault(task, fault_va) {
+        if self.handlers.resolve_stack_fault(process, thread, fault_va) {
             return UserFaultOutcome::Resolved;
         }
         // A page the compressed-memory tier parked is offered **before**
@@ -11247,10 +11286,11 @@ where
             crate::watchdog::KernelBreadcrumb::FaultRamzip,
             fault_va,
         );
-        match self.handlers.resolve_ramzip_fault(task, fault_va) {
+        match self.handlers.resolve_ramzip_fault(process, fault_va) {
             RamzipFaultOutcome::Handled => return UserFaultOutcome::Resolved,
             RamzipFaultOutcome::Fatal(_) => {
-                self.handlers.record_fault_exit(task, fault_va, write, regs);
+                self.handlers
+                    .record_fault_exit(process, thread, fault_va, write, regs);
                 return UserFaultOutcome::Terminated { cpu };
             }
             // NoEntry (and any future non-restoring outcome): fall through.
@@ -11266,7 +11306,7 @@ where
             crate::watchdog::KernelBreadcrumb::FaultAnon,
             fault_va,
         );
-        if self.handlers.resolve_anon_fault(task, fault_va) {
+        if self.handlers.resolve_anon_fault(process, fault_va) {
             return UserFaultOutcome::Resolved;
         }
         // A write is never resolved as file backing: file mappings are
@@ -11278,7 +11318,7 @@ where
             crate::watchdog::KernelBreadcrumb::FaultFile,
             fault_va,
         );
-        if !write && self.handlers.resolve_file_fault(task, fault_va) {
+        if !write && self.handlers.resolve_file_fault(process, fault_va) {
             return UserFaultOutcome::Resolved;
         }
         // A wild access, a page at/past end-of-file, an unresolvable
@@ -11292,7 +11332,8 @@ where
             crate::watchdog::KernelBreadcrumb::FaultFatal,
             fault_va,
         );
-        self.handlers.record_fault_exit(task, fault_va, write, regs);
+        self.handlers
+            .record_fault_exit(process, thread, fault_va, write, regs);
         UserFaultOutcome::Terminated { cpu }
     }
 
@@ -11309,7 +11350,14 @@ where
         let Some(sched_task_id) = self.sched.current_task(cpu) else {
             return UserFaultOutcome::Unhandled;
         };
-        let task = SecTaskId(sched_task_id);
+        let thread = SecTaskId(sched_task_id);
+        // Its process owns the crash record's identity and every resource the
+        // reclaim releases; an unattributable thread takes the port's fatal
+        // path rather than being recorded against a process it may not belong
+        // to (fail closed).
+        let Some(process) = self.caps.read().process_of(thread) else {
+            return UserFaultOutcome::Unhandled;
+        };
         // No resolution is attempted: the instruction is unrecoverable (an
         // illegal/unallocated encoding, an alignment fault, a store to a
         // non-executable page), so retrying it would re-take the exception
@@ -11324,7 +11372,8 @@ where
             crate::watchdog::KernelBreadcrumb::FaultFatal,
             fault_pc,
         );
-        self.handlers.record_fault_exit(task, fault_pc, false, regs);
+        self.handlers
+            .record_fault_exit(process, thread, fault_pc, false, regs);
         UserFaultOutcome::Terminated { cpu }
     }
 }
@@ -11491,7 +11540,7 @@ mod tests {
         sink: &(dyn Sink + Sync),
     ) -> TaskCapabilities {
         let set = caps_with(items);
-        TaskCapabilities::derive(SecTaskId(task), UserId(uid), set, set, sink)
+        TaskCapabilities::derive(ProcessId(task), UserId(uid), set, set, sink)
     }
 
     fn make_sched(arch: Arc<TestArch>) -> Scheduler<TestArch> {
@@ -11748,11 +11797,11 @@ mod tests {
         // A producer task (7) holds a pipe pair and has fed it two bytes;
         // a peer (9) holds a cloned read end at its stdin, exactly as a
         // pipeline consumer is wired at spawn.
-        let (read_fd, write_fd) = aspaces.write().open_pipe(SecTaskId(7)).expect("pair fits");
+        let (read_fd, write_fd) = aspaces.write().open_pipe(ProcessId(7)).expect("pair fits");
         {
             let reg = aspaces.read();
             let write = reg
-                .open_file_entry(SecTaskId(7), write_fd)
+                .open_file_entry(ProcessId(7), write_fd)
                 .expect("write end");
             let OpenBacking::Pipe(end) = &write.backing else {
                 panic!("a pipe descriptor is pipe-backed");
@@ -11761,11 +11810,11 @@ mod tests {
         }
         let read = aspaces
             .read()
-            .open_file_entry(SecTaskId(7), read_fd)
+            .open_file_entry(ProcessId(7), read_fd)
             .expect("read end");
         aspaces
             .write()
-            .install_std_entry(SecTaskId(9), tairix_abi::STDIN, read)
+            .install_std_entry(ProcessId(9), tairix_abi::STDIN, read)
             .expect("peer wired");
 
         let caps = make_caps_record(7, &[], sink);
@@ -11782,14 +11831,14 @@ mod tests {
         // streams, limits, and cwd with it)…
         assert!(aspaces
             .read()
-            .open_file_entry(SecTaskId(7), write_fd)
+            .open_file_entry(ProcessId(7), write_fd)
             .is_none());
         // …and the peer drains the buffered bytes, then observes
         // end-of-stream: the dead producer's write end was dropped, so the
         // reader is never left waiting on a writer that no longer exists.
         let peer = aspaces
             .read()
-            .open_file_entry(SecTaskId(9), tairix_abi::STDIN)
+            .open_file_entry(ProcessId(9), tairix_abi::STDIN)
             .expect("peer entry");
         let OpenBacking::Pipe(end) = &peer.backing else {
             panic!("the peer's stdin is pipe-backed");
@@ -12079,7 +12128,7 @@ mod tests {
         let rng = unseeded_rng();
         aspaces
             .write()
-            .register(SecTaskId(2), space, physmap)
+            .register(ProcessId(2), space, physmap)
             .expect("registration succeeds");
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
@@ -12135,7 +12184,7 @@ mod tests {
         let rng = unseeded_rng();
         aspaces
             .write()
-            .register(SecTaskId(2), space, physmap)
+            .register(ProcessId(2), space, physmap)
             .expect("registration succeeds");
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
@@ -12219,7 +12268,7 @@ mod tests {
         let rng = unseeded_rng();
         aspaces
             .write()
-            .register(SecTaskId(2), space, physmap)
+            .register(ProcessId(2), space, physmap)
             .expect("registration succeeds");
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
@@ -12256,7 +12305,7 @@ mod tests {
         let rng = unseeded_rng();
         aspaces
             .write()
-            .register(SecTaskId(2), space, physmap)
+            .register(ProcessId(2), space, physmap)
             .expect("registration succeeds");
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
@@ -12397,7 +12446,7 @@ mod tests {
         let rng = unseeded_rng();
         aspaces
             .write()
-            .register(SecTaskId(3), space, physmap)
+            .register(ProcessId(3), space, physmap)
             .expect("registration succeeds");
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
@@ -12462,7 +12511,7 @@ mod tests {
         let rng = unseeded_rng();
         aspaces
             .write()
-            .register(SecTaskId(4), space, physmap)
+            .register(ProcessId(4), space, physmap)
             .expect("registration succeeds");
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
@@ -12543,7 +12592,7 @@ mod tests {
         let rng = unseeded_rng();
         aspaces
             .write()
-            .register(SecTaskId(3), space, physmap)
+            .register(ProcessId(3), space, physmap)
             .expect("registration succeeds");
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
@@ -12580,7 +12629,7 @@ mod tests {
         let rng = unseeded_rng();
         aspaces
             .write()
-            .register(SecTaskId(3), space, physmap)
+            .register(ProcessId(3), space, physmap)
             .expect("registration succeeds");
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
@@ -12621,7 +12670,7 @@ mod tests {
         let rng = unseeded_rng();
         aspaces
             .write()
-            .register(SecTaskId(3), space, physmap)
+            .register(ProcessId(3), space, physmap)
             .expect("registration succeeds");
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
@@ -12698,7 +12747,7 @@ mod tests {
         let rng = unseeded_rng();
         aspaces
             .write()
-            .register(SecTaskId(2), space, physmap)
+            .register(ProcessId(2), space, physmap)
             .expect("registration succeeds");
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
@@ -12739,7 +12788,7 @@ mod tests {
         let rng = unseeded_rng();
         aspaces
             .write()
-            .register(SecTaskId(2), space, physmap)
+            .register(ProcessId(2), space, physmap)
             .expect("registration succeeds");
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
@@ -12776,7 +12825,7 @@ mod tests {
         let rng = unseeded_rng();
         aspaces
             .write()
-            .register(SecTaskId(2), space, physmap)
+            .register(ProcessId(2), space, physmap)
             .expect("registration succeeds");
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
@@ -12845,7 +12894,7 @@ mod tests {
         let rng = unseeded_rng();
         aspaces
             .write()
-            .register(SecTaskId(2), space, physmap)
+            .register(ProcessId(2), space, physmap)
             .expect("registration succeeds");
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
@@ -12901,7 +12950,7 @@ mod tests {
         let (space, physmap) = send_aspace(MapFlags::READ | MapFlags::USER, &set.to_le_bytes());
         aspaces
             .write()
-            .register(SecTaskId(task), space, physmap)
+            .register(ProcessId(task), space, physmap)
             .expect("registration succeeds");
     }
 
@@ -13183,7 +13232,7 @@ mod tests {
             .lookup(IrqHandle::from_raw(raw))
             .expect("binding present");
         assert_eq!(entry.line, 5);
-        assert_eq!(entry.owner, SecTaskId(7));
+        assert_eq!(entry.owner, ProcessId(7));
         // No `SyscallFeatureUnavailable` audit emission — the
         // subsystem is now wired (`docs/src/security/irq.md`
         // failure-mode table: a successful bind is audited by the
@@ -13407,12 +13456,12 @@ mod tests {
         // Storm the line (bounded so the test can never hang) until the
         // safety net quarantines it, independent of the exact budget.
         let mut fired = 0u32;
-        while !irq.is_quarantined(handle, ctx.task_id) && fired < 1_000_000 {
+        while !irq.is_quarantined(handle, ctx.process()) && fired < 1_000_000 {
             let _ = irq.fire(5, &permissive);
             fired += 1;
         }
         assert!(
-            irq.is_quarantined(handle, ctx.task_id),
+            irq.is_quarantined(handle, ctx.process()),
             "a storming line must be quarantined"
         );
 
@@ -13661,7 +13710,7 @@ mod tests {
         let rng = unseeded_rng();
         aspaces
             .write()
-            .register(SecTaskId(12), space, physmap)
+            .register(ProcessId(12), space, physmap)
             .expect("registration succeeds");
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
@@ -13702,7 +13751,7 @@ mod tests {
         let rng = seeded_rng();
         aspaces
             .write()
-            .register(SecTaskId(12), space, physmap)
+            .register(ProcessId(12), space, physmap)
             .expect("registration succeeds");
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
@@ -13778,7 +13827,7 @@ mod tests {
         let rng = seeded_rng();
         aspaces
             .write()
-            .register(SecTaskId(12), space, physmap)
+            .register(ProcessId(12), space, physmap)
             .expect("registration succeeds");
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
@@ -13833,7 +13882,7 @@ mod tests {
         let rng = unseeded_rng();
         aspaces
             .write()
-            .register(SecTaskId(5), user_space(1, 9), sim_map())
+            .register(ProcessId(5), user_space(1, 9), sim_map())
             .expect("registration succeeds");
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
@@ -13903,11 +13952,11 @@ mod tests {
         let rng = unseeded_rng();
         aspaces
             .write()
-            .register(SecTaskId(1), user_space(1, 100), sim_map())
+            .register(ProcessId(1), user_space(1, 100), sim_map())
             .expect("task 1 registers");
         aspaces
             .write()
-            .register(SecTaskId(2), user_space(1, 200), sim_map())
+            .register(ProcessId(2), user_space(1, 200), sim_map())
             .expect("task 2 registers");
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
@@ -14064,7 +14113,7 @@ mod tests {
         let rng = unseeded_rng();
         aspaces
             .write()
-            .register(SecTaskId(2), space, physmap)
+            .register(ProcessId(2), space, physmap)
             .expect("registration succeeds");
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
@@ -14081,7 +14130,7 @@ mod tests {
         .with_consoles(single_write_console(console));
         aspaces
             .write()
-            .set_streams(SecTaskId(2), DescriptorTable::standard());
+            .set_streams(ProcessId(2), DescriptorTable::standard());
 
         assert_eq!(
             h.stream_write(&ctx, STDOUT, 0x1000, banner.len()),
@@ -14108,7 +14157,7 @@ mod tests {
         let rng = unseeded_rng();
         aspaces
             .write()
-            .register(SecTaskId(2), space, physmap)
+            .register(ProcessId(2), space, physmap)
             .expect("registration succeeds");
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
@@ -14123,7 +14172,7 @@ mod tests {
         );
         aspaces
             .write()
-            .set_streams(SecTaskId(2), DescriptorTable::standard());
+            .set_streams(ProcessId(2), DescriptorTable::standard());
         assert_eq!(
             h.stream_write(&ctx, STDOUT, 0x1000, 2),
             Err(Errno::NotImplemented)
@@ -14159,7 +14208,7 @@ mod tests {
         // write is to a valid (writable) stream.
         aspaces
             .write()
-            .set_streams(SecTaskId(2), DescriptorTable::standard());
+            .set_streams(ProcessId(2), DescriptorTable::standard());
         let console: &'static RecordingConsole = Box::leak(Box::new(RecordingConsole::new()));
         let h = KernelSyscallHandlers::new(
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
@@ -14208,7 +14257,7 @@ mod tests {
         .with_consoles(single_write_console(console));
         aspaces
             .write()
-            .set_streams(SecTaskId(2), DescriptorTable::standard());
+            .set_streams(ProcessId(2), DescriptorTable::standard());
         assert_eq!(
             h.stream_write(&ctx, STDOUT, 0x1000, 4),
             Err(Errno::BadAddress)
@@ -14234,7 +14283,7 @@ mod tests {
         let rng = unseeded_rng();
         aspaces
             .write()
-            .register(SecTaskId(2), space, physmap)
+            .register(ProcessId(2), space, physmap)
             .expect("registration succeeds");
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
@@ -14251,7 +14300,7 @@ mod tests {
         .with_consoles(single_write_console(console));
         aspaces
             .write()
-            .set_streams(SecTaskId(2), DescriptorTable::standard());
+            .set_streams(ProcessId(2), DescriptorTable::standard());
         // Ask for more than the cap; the handler writes exactly the cap.
         let r = h.stream_write(&ctx, STDOUT, 0x1000, CONSOLE_WRITE_MAX + 100);
         assert_eq!(r, Ok(CONSOLE_WRITE_MAX as u64));
@@ -14302,7 +14351,7 @@ mod tests {
         let rng = unseeded_rng();
         aspaces
             .write()
-            .register(SecTaskId(2), space, physmap)
+            .register(ProcessId(2), space, physmap)
             .expect("registration succeeds");
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
@@ -14321,7 +14370,7 @@ mod tests {
         .with_consoles(single_read_console(console));
         aspaces
             .write()
-            .set_streams(SecTaskId(2), DescriptorTable::standard());
+            .set_streams(ProcessId(2), DescriptorTable::standard());
 
         assert_eq!(
             h.stream_read(&ctx, STDIN, 0x1000, 64, 0),
@@ -14354,7 +14403,7 @@ mod tests {
         let rng = unseeded_rng();
         aspaces
             .write()
-            .register(SecTaskId(2), space, physmap)
+            .register(ProcessId(2), space, physmap)
             .expect("registration succeeds");
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
@@ -14369,7 +14418,7 @@ mod tests {
         );
         aspaces
             .write()
-            .set_streams(SecTaskId(2), DescriptorTable::standard());
+            .set_streams(ProcessId(2), DescriptorTable::standard());
         assert_eq!(
             h.stream_read(&ctx, STDIN, 0x1000, 8, 0),
             Err(Errno::NotImplemented)
@@ -14404,7 +14453,7 @@ mod tests {
         // the device or copy path.
         aspaces
             .write()
-            .set_streams(SecTaskId(2), DescriptorTable::standard());
+            .set_streams(ProcessId(2), DescriptorTable::standard());
         let console: &'static RecordingConsoleRead =
             Box::leak(Box::new(RecordingConsoleRead::new(b"unseen")));
         let h = KernelSyscallHandlers::new(
@@ -14442,7 +14491,7 @@ mod tests {
         let rng = unseeded_rng();
         aspaces
             .write()
-            .register(SecTaskId(2), space, physmap)
+            .register(ProcessId(2), space, physmap)
             .expect("registration succeeds");
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
@@ -14460,7 +14509,7 @@ mod tests {
         .with_consoles(single_read_console(console));
         aspaces
             .write()
-            .set_streams(SecTaskId(2), DescriptorTable::standard());
+            .set_streams(ProcessId(2), DescriptorTable::standard());
         assert_eq!(h.stream_read(&ctx, STDIN, 0x1000, 8, 0), Ok(0));
     }
 
@@ -14485,7 +14534,7 @@ mod tests {
         let rng = unseeded_rng();
         aspaces
             .write()
-            .register(SecTaskId(2), space, physmap)
+            .register(ProcessId(2), space, physmap)
             .expect("registration succeeds");
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
@@ -14506,7 +14555,7 @@ mod tests {
         .with_consoles(single_read_console(console));
         aspaces
             .write()
-            .set_streams(SecTaskId(2), DescriptorTable::standard());
+            .set_streams(ProcessId(2), DescriptorTable::standard());
         let r = h.stream_read(&ctx, STDIN, 0x1000, CONSOLE_READ_MAX + 100, 0);
         assert_eq!(r, Ok(CONSOLE_READ_MAX as u64));
         // The device was handed exactly the capped buffer, never the
@@ -14543,7 +14592,7 @@ mod tests {
         .with_consoles(single_read_console(console));
         aspaces
             .write()
-            .set_streams(SecTaskId(2), DescriptorTable::standard());
+            .set_streams(ProcessId(2), DescriptorTable::standard());
         assert_eq!(
             h.stream_read(&ctx, STDIN, 0x1000, 4, 0),
             Err(Errno::BadAddress)
@@ -14568,11 +14617,11 @@ mod tests {
         let rng = unseeded_rng();
         aspaces
             .write()
-            .register(SecTaskId(2), space, physmap)
+            .register(ProcessId(2), space, physmap)
             .expect("registration succeeds");
         aspaces
             .write()
-            .set_streams(SecTaskId(2), DescriptorTable::standard());
+            .set_streams(ProcessId(2), DescriptorTable::standard());
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
         let caps = make_caps_record(2, &[], sink);
@@ -14612,12 +14661,12 @@ mod tests {
         let rng = unseeded_rng();
         aspaces
             .write()
-            .register(SecTaskId(2), space, physmap)
+            .register(ProcessId(2), space, physmap)
             .expect("registration succeeds");
         // The standard session table leaves fd 3 unattached (Closed).
         aspaces
             .write()
-            .set_streams(SecTaskId(2), DescriptorTable::standard());
+            .set_streams(ProcessId(2), DescriptorTable::standard());
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
         let caps = make_caps_record(2, &[], sink);
@@ -14656,11 +14705,11 @@ mod tests {
         let rng = unseeded_rng();
         aspaces
             .write()
-            .register(SecTaskId(2), space, physmap)
+            .register(ProcessId(2), space, physmap)
             .expect("registration succeeds");
         aspaces
             .write()
-            .set_streams(SecTaskId(2), DescriptorTable::standard());
+            .set_streams(ProcessId(2), DescriptorTable::standard());
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
         let caps = make_caps_record(2, &[], sink);
@@ -14741,16 +14790,21 @@ mod tests {
         task: SecTaskId,
     ) -> (u32, u32, DescriptorTable) {
         let size = TerminalSize::new(24, 80).expect("valid grid");
-        let (master_fd, slave_fd) = aspaces.write().open_pty(task, size).expect("pty minted");
+        let (master_fd, slave_fd) = aspaces
+            .write()
+            .open_pty(ProcessId(task.0), size)
+            .expect("pty minted");
         let mut streams = DescriptorTable::standard();
         let mut reg = aspaces.write();
-        let slave = reg.open_file_entry(task, slave_fd).expect("slave end");
+        let slave = reg
+            .open_file_entry(ProcessId(task.0), slave_fd)
+            .expect("slave end");
         for fd in [tairix_abi::STDIN, tairix_abi::STDOUT, tairix_abi::STDERR] {
-            reg.install_std_entry(task, fd, slave.clone())
+            reg.install_std_entry(ProcessId(task.0), fd, slave.clone())
                 .expect("parent stream wired");
             streams.close_slot(fd);
         }
-        reg.set_streams(task, streams);
+        reg.set_streams(ProcessId(task.0), streams);
         (master_fd, slave_fd, streams)
     }
 
@@ -15045,7 +15099,7 @@ mod tests {
         let rng = unseeded_rng();
         aspaces
             .write()
-            .register(SecTaskId(2), space, physmap)
+            .register(ProcessId(2), space, physmap)
             .expect("caller registration");
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
@@ -15096,7 +15150,7 @@ mod tests {
         // *independent* placeholder record; it reads/builds its own image on
         // its first slice, so no address space is registered yet.
         assert!(
-            !aspaces.read().contains(SecTaskId(pid)),
+            !aspaces.read().contains(ProcessId(pid)),
             "no address space is registered until the child builds its image"
         );
         // The placeholder record carries the empty capability set until the
@@ -15113,7 +15167,7 @@ mod tests {
         // A user-driven `spawn` grants the child no device resources: the
         // handler passes an empty grant slice, so the child holds no
         // resolvable handle (no ambient authority).
-        assert_eq!(aspaces.read().grant(SecTaskId(pid), 1), None);
+        assert_eq!(aspaces.read().grant(ProcessId(pid), 1), None);
     }
 
     /// Absolute store-bundle entry-point path the disk-spawn tests use.
@@ -15150,7 +15204,7 @@ mod tests {
         let rng = unseeded_rng();
         aspaces
             .write()
-            .register(SecTaskId(2), space, physmap)
+            .register(ProcessId(2), space, physmap)
             .expect("caller registration");
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
@@ -15205,7 +15259,7 @@ mod tests {
         let rng = unseeded_rng();
         aspaces
             .write()
-            .register(SecTaskId(2), space, physmap)
+            .register(ProcessId(2), space, physmap)
             .expect("caller registration");
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
@@ -15262,7 +15316,7 @@ mod tests {
             "the admit-time record is the empty-set placeholder"
         );
         assert!(
-            !aspaces.read().contains(SecTaskId(pid)),
+            !aspaces.read().contains(ProcessId(pid)),
             "no address space is registered until the child loads"
         );
     }
@@ -15286,7 +15340,7 @@ mod tests {
         let rng = unseeded_rng();
         aspaces
             .write()
-            .register(SecTaskId(2), space, physmap)
+            .register(ProcessId(2), space, physmap)
             .expect("caller registration");
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
@@ -15352,7 +15406,7 @@ mod tests {
         let rng = unseeded_rng();
         aspaces
             .write()
-            .register(SecTaskId(2), space, physmap)
+            .register(ProcessId(2), space, physmap)
             .expect("caller registration");
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
@@ -15394,7 +15448,7 @@ mod tests {
             "the child is admitted so the caller's search stops here"
         );
         assert!(
-            !aspaces.read().contains(SecTaskId(pid)),
+            !aspaces.read().contains(ProcessId(pid)),
             "the deferred load, not the handler, will surface the refusal"
         );
     }
@@ -15417,7 +15471,7 @@ mod tests {
         let rng = unseeded_rng();
         aspaces
             .write()
-            .register(SecTaskId(2), space, physmap)
+            .register(ProcessId(2), space, physmap)
             .expect("caller registration");
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
@@ -15457,7 +15511,7 @@ mod tests {
             "the child is admitted and will park on the store latch"
         );
         assert!(
-            !aspaces.read().contains(SecTaskId(pid)),
+            !aspaces.read().contains(ProcessId(pid)),
             "no address space is registered until the store resolves and the child loads"
         );
     }
@@ -15486,7 +15540,7 @@ mod tests {
         let seed = body_seed();
         let err = expect_load_err(build_child_image(
             services,
-            SecTaskId(1),
+            ProcessId(1),
             1,
             &bundle_plan(),
             &seed,
@@ -15500,7 +15554,7 @@ mod tests {
             tairix_abi::LOAD_NOT_FOUND
         );
         assert!(
-            !aspaces.read().contains(SecTaskId(1)),
+            !aspaces.read().contains(ProcessId(1)),
             "a refused load registers no address space"
         );
     }
@@ -15526,7 +15580,7 @@ mod tests {
         let seed = body_seed();
         let err = expect_load_err(build_child_image(
             services,
-            SecTaskId(1),
+            ProcessId(1),
             1,
             &bundle_plan(),
             &seed,
@@ -15568,7 +15622,7 @@ mod tests {
         let args: [&[u8]; 1] = [BUNDLE_COMMAND.as_bytes()];
         build_child_image(
             services,
-            SecTaskId(7),
+            ProcessId(7),
             7,
             &bundle_plan(),
             &seed,
@@ -15599,7 +15653,7 @@ mod tests {
         drop(guard);
         // The child's isolated address space is registered under its id.
         assert!(
-            aspaces.read().contains(SecTaskId(7)),
+            aspaces.read().contains(ProcessId(7)),
             "the built address space is registered before entry"
         );
     }
@@ -15642,7 +15696,7 @@ mod tests {
             };
             let err = expect_load_err(build_child_image(
                 services,
-                SecTaskId(1),
+                ProcessId(1),
                 1,
                 &plan,
                 &seed,
@@ -15658,7 +15712,7 @@ mod tests {
                 "the failing build must be reached"
             );
             assert!(
-                !aspaces.read().contains(SecTaskId(1)),
+                !aspaces.read().contains(ProcessId(1)),
                 "a failed build registers no address space for the caller to enter"
             );
         }
@@ -15674,7 +15728,7 @@ mod tests {
     fn emit_load_refusal_audits_the_failing_child() {
         install_trace_filter();
         let sink = make_sink();
-        emit_load_refusal(sink, SecTaskId(42), Errno::SignatureInvalid);
+        emit_load_refusal(sink, ProcessId(42), Errno::SignatureInvalid);
         let event = sink
             .snapshot()
             .into_iter()
@@ -16006,7 +16060,7 @@ mod tests {
         let seed = body_seed();
         let err = expect_load_err(build_child_image(
             services,
-            SecTaskId(1),
+            ProcessId(1),
             1,
             &bundle_plan(),
             &seed,
@@ -16026,7 +16080,7 @@ mod tests {
             0,
             "no image is built for a refused bundle"
         );
-        assert!(!aspaces.read().contains(SecTaskId(1)));
+        assert!(!aspaces.read().contains(ProcessId(1)));
     }
 
     /// A caller-supplied startup-strings block replaces the program's
@@ -16055,7 +16109,7 @@ mod tests {
         let rng = unseeded_rng();
         aspaces
             .write()
-            .register(SecTaskId(2), space, physmap)
+            .register(ProcessId(2), space, physmap)
             .expect("caller registration");
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
@@ -16119,7 +16173,7 @@ mod tests {
         let rng = unseeded_rng();
         aspaces
             .write()
-            .register(SecTaskId(2), space, physmap)
+            .register(ProcessId(2), space, physmap)
             .expect("caller registration");
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
@@ -16236,7 +16290,7 @@ mod tests {
         let rng = unseeded_rng();
         aspaces
             .write()
-            .register(SecTaskId(2), space, physmap)
+            .register(ProcessId(2), space, physmap)
             .expect("caller registration");
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
@@ -16291,7 +16345,7 @@ mod tests {
         let rng = unseeded_rng();
         aspaces
             .write()
-            .register(SecTaskId(2), space, physmap)
+            .register(ProcessId(2), space, physmap)
             .expect("caller registration");
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
@@ -16371,7 +16425,7 @@ mod tests {
             &table,
             &aspaces,
             arch.as_ref(),
-            SecTaskId(1),
+            ProcessId(1),
             &NULL_PROCESS_WAIT,
             DescriptorTable::standard(),
             Vec::new(),
@@ -16436,23 +16490,23 @@ mod tests {
         // The driver's matched node is recorded against it, so a later
         // `hw_emit_node` parents its published child under exactly this node
         // (the emitter cannot forge its position).
-        assert_eq!(aspaces.read().loaded_node(child), Some(0x55));
+        assert_eq!(aspaces.read().loaded_node(ProcessId(child.0)), Some(0x55));
         // A different task has no loaded node (owner-bound, fail closed).
-        assert_eq!(aspaces.read().loaded_node(SecTaskId(pid + 1)), None);
+        assert_eq!(aspaces.read().loaded_node(ProcessId(pid + 1)), None);
 
         // One handle per requested resource, monotonic from 1, in order.
-        assert_eq!(aspaces.read().grant(child, 1), Some(regs));
-        assert_eq!(aspaces.read().grant(child, 2), Some(dma));
+        assert_eq!(aspaces.read().grant(ProcessId(child.0), 1), Some(regs));
+        assert_eq!(aspaces.read().grant(ProcessId(child.0), 2), Some(dma));
         // No third grant was minted.
-        assert_eq!(aspaces.read().grant(child, 3), None);
+        assert_eq!(aspaces.read().grant(ProcessId(child.0), 3), None);
         // Owner-check: a different task presenting the same handle value
         // resolves nothing — a driver cannot reach another's window by
         // guessing a handle.
-        assert_eq!(aspaces.read().grant(SecTaskId(pid + 1), 1), None);
+        assert_eq!(aspaces.read().grant(ProcessId(pid + 1), 1), None);
 
         // The set serialises for delivery through `resource_grants`: two
         // consecutive `GrantedResource` records in ascending handle order.
-        let wire = aspaces.read().grants_to_le_bytes(child);
+        let wire = aspaces.read().grants_to_le_bytes(ProcessId(child.0));
         assert_eq!(
             wire.len(),
             2 * tairix_abi::hwtree::GrantedResource::WIRE_LEN
@@ -16488,7 +16542,7 @@ mod tests {
         // known attested process-instance identity distinct from its numeric
         // id. This is what the admit path must copy onto the child — never a
         // caller-supplied value.
-        let parent_task = SecTaskId(3);
+        let parent_task = ProcessId(3);
         let parent_proc = tairix_abi::ProcId::from_raw([0x22; 16]);
         table.write().insert(
             TaskCapabilities::derive(
@@ -16510,7 +16564,7 @@ mod tests {
 
         // One ctx builder for both admits below: everything but the parent
         // and the minted child identity is the same live kernel state.
-        let make_ctx = |parent: SecTaskId, proc_id: tairix_abi::ProcId| {
+        let make_ctx = |parent: ProcessId, proc_id: tairix_abi::ProcId| {
             KernelSpawnCtx::new(
                 &frames,
                 None,
@@ -16556,7 +16610,7 @@ mod tests {
 
         // A kernel-parented admit — the parent id names no capability record
         // — records the kernel sentinel, never a fabricated value.
-        let orphan_ctx = make_ctx(SecTaskId(9999), tairix_abi::ProcId::from_raw([0x33; 16]));
+        let orphan_ctx = make_ctx(ProcessId(9999), tairix_abi::ProcId::from_raw([0x33; 16]));
         let orphan_pid =
             admit_prebuilt_child(&orphan_ctx, &program).expect("kernel-parented child admitted");
         assert_eq!(
@@ -16625,7 +16679,7 @@ mod tests {
     fn derive_prebuilt_effective(
         credential: SpawnCredential,
         requested: CapabilitySet,
-    ) -> (&'static RwLock<CapTable>, SecTaskId, &'static TestSink) {
+    ) -> (&'static RwLock<CapTable>, ProcessId, &'static TestSink) {
         let seed = ChildRecordSeed {
             credential,
             ..body_seed()
@@ -16650,7 +16704,7 @@ mod tests {
             caps,
             builder,
         );
-        let sec_id = SecTaskId(1);
+        let sec_id = ProcessId(1);
         build_child_image(services, sec_id, 1, &plan, &seed, None, &[], &[])
             .expect("prebuilt build succeeds");
         (caps, sec_id, audit)
@@ -16689,7 +16743,7 @@ mod tests {
             caps,
             builder,
         );
-        build_child_image(services, SecTaskId(1), 1, &plan, &seed, None, &[], &[])
+        build_child_image(services, ProcessId(1), 1, &plan, &seed, None, &[], &[])
             .expect("prebuilt build succeeds");
         assert!(
             builder
@@ -16719,7 +16773,7 @@ mod tests {
             builder2,
             runtime2,
         )));
-        build_child_image(services2, SecTaskId(1), 1, &plan, &seed, None, &[], &[])
+        build_child_image(services2, ProcessId(1), 1, &plan, &seed, None, &[], &[])
             .expect("prebuilt build succeeds");
         assert!(
             !builder2
@@ -16745,13 +16799,13 @@ mod tests {
         let rng = unseeded_rng();
         aspaces
             .write()
-            .register(SecTaskId(2), space, physmap)
+            .register(ProcessId(2), space, physmap)
             .expect("caller registration");
         // The parent caps its own child-process fan-out below the default.
         let parent_cap = ResourceLimit::new(2, 4).expect("well-formed");
         aspaces
             .write()
-            .set_limit(SecTaskId(2), LimitKind::Processes, parent_cap);
+            .set_limit(ProcessId(2), LimitKind::Processes, parent_cap);
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
         let frames = spawn_test_frames();
@@ -16780,7 +16834,7 @@ mod tests {
             .expect("spawn succeeds");
         // The child carries the parent's tighter Processes ceiling and the
         // default policy for every other kind.
-        let child = aspaces.read().limits(SecTaskId(pid));
+        let child = aspaces.read().limits(ProcessId(pid));
         assert_eq!(child.get(LimitKind::Processes), parent_cap);
         assert_eq!(
             child.get(LimitKind::StackBytes),
@@ -16804,7 +16858,7 @@ mod tests {
         let rng = unseeded_rng();
         aspaces
             .write()
-            .register(SecTaskId(2), space, physmap)
+            .register(ProcessId(2), space, physmap)
             .expect("caller registration");
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
@@ -16887,7 +16941,7 @@ mod tests {
         let rng = unseeded_rng();
         aspaces
             .write()
-            .register(SecTaskId(2), space, physmap)
+            .register(ProcessId(2), space, physmap)
             .expect("caller registration");
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
@@ -17015,7 +17069,7 @@ mod tests {
         let rng = unseeded_rng();
         aspaces
             .write()
-            .register(SecTaskId(2), space, physmap)
+            .register(ProcessId(2), space, physmap)
             .expect("caller registration");
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
@@ -17090,7 +17144,7 @@ mod tests {
         let rng = unseeded_rng();
         aspaces
             .write()
-            .register(SecTaskId(2), space, physmap)
+            .register(ProcessId(2), space, physmap)
             .expect("caller registration");
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
@@ -17189,7 +17243,7 @@ mod tests {
         let rng = unseeded_rng();
         aspaces
             .write()
-            .register(SecTaskId(2), space, physmap)
+            .register(ProcessId(2), space, physmap)
             .expect("caller registration");
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
@@ -17263,7 +17317,7 @@ mod tests {
         let rng = unseeded_rng();
         aspaces
             .write()
-            .register(SecTaskId(2), space, physmap)
+            .register(ProcessId(2), space, physmap)
             .expect("caller registration");
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
@@ -17282,18 +17336,18 @@ mod tests {
         // pipe's read end, stdout = its write end, console table closed.
         {
             let mut reg = aspaces.write();
-            let (read_fd, write_fd) = reg.open_pipe(SecTaskId(2)).expect("pair fits");
+            let (read_fd, write_fd) = reg.open_pipe(ProcessId(2)).expect("pair fits");
             let read = reg
-                .open_file_entry(SecTaskId(2), read_fd)
+                .open_file_entry(ProcessId(2), read_fd)
                 .expect("read end");
             let write = reg
-                .open_file_entry(SecTaskId(2), write_fd)
+                .open_file_entry(ProcessId(2), write_fd)
                 .expect("write end");
-            reg.install_std_entry(SecTaskId(2), tairix_abi::STDIN, read)
+            reg.install_std_entry(ProcessId(2), tairix_abi::STDIN, read)
                 .expect("stdin wired");
-            reg.install_std_entry(SecTaskId(2), tairix_abi::STDOUT, write)
+            reg.install_std_entry(ProcessId(2), tairix_abi::STDOUT, write)
                 .expect("stdout wired");
-            reg.set_streams(SecTaskId(2), DescriptorTable::closed());
+            reg.set_streams(ProcessId(2), DescriptorTable::closed());
         }
 
         // stdout -> pipe -> stdin, no console anywhere.
@@ -17352,16 +17406,16 @@ mod tests {
         let rng = unseeded_rng();
         aspaces
             .write()
-            .register(SecTaskId(2), space, physmap)
+            .register(ProcessId(2), space, physmap)
             .expect("caller registration");
         let (parent_read_fd, parent_write_fd) = aspaces
             .write()
-            .open_pipe(SecTaskId(2))
+            .open_pipe(ProcessId(2))
             .expect("pipe pair fits");
         assert_eq!((parent_read_fd, parent_write_fd), (4, 5));
         aspaces
             .write()
-            .set_streams(SecTaskId(2), DescriptorTable::standard_on(1));
+            .set_streams(ProcessId(2), DescriptorTable::standard_on(1));
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
         let frames = spawn_test_frames();
@@ -17398,11 +17452,11 @@ mod tests {
         // The child's stdout is a counted clone of the parent's write end.
         let child_entry = aspaces
             .read()
-            .open_file_entry(SecTaskId(pid), tairix_abi::STDOUT)
+            .open_file_entry(ProcessId(pid), tairix_abi::STDOUT)
             .expect("wired child entry");
         let parent_entry = aspaces
             .read()
-            .open_file_entry(SecTaskId(2), parent_write_fd)
+            .open_file_entry(ProcessId(2), parent_write_fd)
             .expect("parent entry");
         assert!(child_entry
             .pipe()
@@ -17412,7 +17466,7 @@ mod tests {
         // The wired slot's console entry is closed; the explicit `Closed`
         // wire closed stderr; the untouched slots inherit the parent's
         // console-1 table.
-        let child_streams = aspaces.read().streams(SecTaskId(pid));
+        let child_streams = aspaces.read().streams(ProcessId(pid));
         assert_eq!(child_streams.mode(tairix_abi::STDOUT), StreamMode::Closed);
         assert_eq!(child_streams.mode(tairix_abi::STDERR), StreamMode::Closed);
         assert_eq!(child_streams.mode(tairix_abi::STDIN), StreamMode::Read);
@@ -17460,7 +17514,7 @@ mod tests {
         let rng = unseeded_rng();
         aspaces
             .write()
-            .register(SecTaskId(2), space, physmap)
+            .register(ProcessId(2), space, physmap)
             .expect("caller registration");
         let (master_fd, slave_fd, parent_streams) = host_shell_on_a_pty(&aspaces, SecTaskId(2));
         let irq = IrqTable::new(31);
@@ -17499,15 +17553,15 @@ mod tests {
         // Each inherited standard stream is a counted clone of the parent's
         // slave end, and its console slot stays closed — stdin and stdout
         // through `Inherit`, stderr through the `2>&1` duplication.
-        let child_streams = aspaces.read().streams(SecTaskId(pid));
+        let child_streams = aspaces.read().streams(ProcessId(pid));
         let parent_slave = aspaces
             .read()
-            .open_file_entry(SecTaskId(2), slave_fd)
+            .open_file_entry(ProcessId(2), slave_fd)
             .expect("parent slave entry");
         for fd in [tairix_abi::STDIN, tairix_abi::STDOUT, tairix_abi::STDERR] {
             let child_entry = aspaces
                 .read()
-                .open_file_entry(SecTaskId(pid), fd)
+                .open_file_entry(ProcessId(pid), fd)
                 .expect("inherited child entry");
             assert!(child_entry
                 .pty_slave()
@@ -17519,7 +17573,7 @@ mod tests {
         // console table as before.
         assert!(aspaces
             .read()
-            .open_file_entry(SecTaskId(pid), tairix_abi::STDINFO)
+            .open_file_entry(ProcessId(pid), tairix_abi::STDINFO)
             .is_none());
         assert_eq!(
             child_streams.mode(tairix_abi::STDINFO),
@@ -17529,7 +17583,7 @@ mod tests {
         // terminal reads off the master.
         let child_stdout = aspaces
             .read()
-            .open_file_entry(SecTaskId(pid), tairix_abi::STDOUT)
+            .open_file_entry(ProcessId(pid), tairix_abi::STDOUT)
             .expect("inherited stdout");
         assert_eq!(
             child_stdout.pty_slave().expect("slave end").write(b"out"),
@@ -17537,7 +17591,7 @@ mod tests {
         );
         let master = aspaces
             .read()
-            .open_file_entry(SecTaskId(2), master_fd)
+            .open_file_entry(ProcessId(2), master_fd)
             .expect("master entry");
         let mut seen = [0u8; 8];
         assert_eq!(
@@ -17570,7 +17624,7 @@ mod tests {
         let rng = unseeded_rng();
         aspaces
             .write()
-            .register(SecTaskId(2), space, physmap)
+            .register(ProcessId(2), space, physmap)
             .expect("caller registration");
         let (_master_fd, _slave_fd, _) = host_shell_on_a_pty(&aspaces, SecTaskId(2));
         let irq = IrqTable::new(31);
@@ -17610,9 +17664,9 @@ mod tests {
 
         // The child holds no open entry at all: its standard streams are
         // the selected console's, never the parent's pty.
-        let child_streams = aspaces.read().streams(SecTaskId(pid));
+        let child_streams = aspaces.read().streams(ProcessId(pid));
         for fd in [tairix_abi::STDIN, tairix_abi::STDOUT, tairix_abi::STDERR] {
-            assert!(aspaces.read().open_file_entry(SecTaskId(pid), fd).is_none());
+            assert!(aspaces.read().open_file_entry(ProcessId(pid), fd).is_none());
             assert_eq!(child_streams.console(fd), 0);
         }
         assert_eq!(child_streams, DescriptorTable::standard_on(0));
@@ -17639,7 +17693,7 @@ mod tests {
         let rng = unseeded_rng();
         aspaces
             .write()
-            .register(SecTaskId(2), space, physmap)
+            .register(ProcessId(2), space, physmap)
             .expect("caller registration");
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
@@ -17686,7 +17740,7 @@ mod tests {
         drop(guard);
         // Every standard stream is denied: the explicit `Closed` wires are
         // the whole story, nothing ambient flowed in.
-        let child_streams = aspaces.read().streams(SecTaskId(pid));
+        let child_streams = aspaces.read().streams(ProcessId(pid));
         for fd in [
             tairix_abi::STDIN,
             tairix_abi::STDOUT,
@@ -17715,7 +17769,7 @@ mod tests {
         let rng = unseeded_rng();
         aspaces
             .write()
-            .register(SecTaskId(2), space, physmap)
+            .register(ProcessId(2), space, physmap)
             .expect("caller registration");
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
@@ -17771,7 +17825,7 @@ mod tests {
         let rng = unseeded_rng();
         aspaces
             .write()
-            .register(SecTaskId(2), space, physmap)
+            .register(ProcessId(2), space, physmap)
             .expect("caller registration");
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
@@ -17825,7 +17879,7 @@ mod tests {
         let rng = unseeded_rng();
         aspaces
             .write()
-            .register(SecTaskId(2), space, physmap)
+            .register(ProcessId(2), space, physmap)
             .expect("caller registration");
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
@@ -17889,7 +17943,7 @@ mod tests {
         let rng = unseeded_rng();
         aspaces
             .write()
-            .register(SecTaskId(2), space, physmap)
+            .register(ProcessId(2), space, physmap)
             .expect("caller registration");
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
@@ -17954,7 +18008,7 @@ mod tests {
         let rng = unseeded_rng();
         aspaces
             .write()
-            .register(SecTaskId(2), space, physmap)
+            .register(ProcessId(2), space, physmap)
             .expect("caller registration");
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
@@ -18012,7 +18066,7 @@ mod tests {
         let rng = unseeded_rng();
         aspaces
             .write()
-            .register(SecTaskId(2), space, physmap)
+            .register(ProcessId(2), space, physmap)
             .expect("caller registration");
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
@@ -18089,11 +18143,11 @@ mod tests {
         let rng = unseeded_rng();
         aspaces
             .write()
-            .register(SecTaskId(2), space, physmap)
+            .register(ProcessId(2), space, physmap)
             .expect("caller registration");
         let (_read_fd, write_fd) = aspaces
             .write()
-            .open_pipe(SecTaskId(2))
+            .open_pipe(ProcessId(2))
             .expect("pipe pair fits");
         assert_eq!(write_fd, 5);
         let irq = IrqTable::new(31);
@@ -18159,7 +18213,7 @@ mod tests {
         let rng = unseeded_rng();
         aspaces
             .write()
-            .register(SecTaskId(2), space, physmap)
+            .register(ProcessId(2), space, physmap)
             .expect("caller registration");
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
@@ -18264,7 +18318,7 @@ mod tests {
         let rng = unseeded_rng();
         aspaces
             .write()
-            .register(SecTaskId(2), space, physmap)
+            .register(ProcessId(2), space, physmap)
             .expect("registration succeeds");
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
@@ -18286,7 +18340,7 @@ mod tests {
         .with_consoles(consoles);
         aspaces
             .write()
-            .set_streams(SecTaskId(2), DescriptorTable::standard_on(1));
+            .set_streams(ProcessId(2), DescriptorTable::standard_on(1));
 
         assert_eq!(
             h.stream_write(&ctx, STDOUT, 0x1000, line.len()),
@@ -18299,7 +18353,7 @@ mod tests {
         // it fails closed rather than falling back to another device.
         aspaces
             .write()
-            .set_streams(SecTaskId(2), DescriptorTable::standard_on(7));
+            .set_streams(ProcessId(2), DescriptorTable::standard_on(7));
         assert_eq!(
             h.stream_write(&ctx, STDOUT, 0x1000, line.len()),
             Err(Errno::NotImplemented)
@@ -18323,7 +18377,7 @@ mod tests {
         let rng = unseeded_rng();
         aspaces
             .write()
-            .register(SecTaskId(2), space, physmap)
+            .register(ProcessId(2), space, physmap)
             .expect("registration succeeds");
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
@@ -18347,7 +18401,7 @@ mod tests {
         .with_consoles(consoles);
         aspaces
             .write()
-            .set_streams(SecTaskId(2), DescriptorTable::standard_on(1));
+            .set_streams(ProcessId(2), DescriptorTable::standard_on(1));
 
         assert_eq!(h.stream_read(&ctx, STDIN, 0x1000, 16, 0), Ok(5));
         // The UART console's input was drained; the video console's
@@ -18373,7 +18427,7 @@ mod tests {
         let rng = unseeded_rng();
         aspaces
             .write()
-            .register(SecTaskId(2), space, physmap)
+            .register(ProcessId(2), space, physmap)
             .expect("registration succeeds");
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
@@ -18394,7 +18448,7 @@ mod tests {
         .with_consoles(consoles);
         aspaces
             .write()
-            .set_streams(SecTaskId(2), DescriptorTable::standard());
+            .set_streams(ProcessId(2), DescriptorTable::standard());
 
         assert_eq!(h.stream_read(&ctx, STDIN, 0x1000, 16, 0), Ok(3));
         // The consumed bytes were echoed back, with the CR rendered as
@@ -18418,7 +18472,7 @@ mod tests {
         let rng = unseeded_rng();
         aspaces
             .write()
-            .register(SecTaskId(2), space, physmap)
+            .register(ProcessId(2), space, physmap)
             .expect("registration succeeds");
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
@@ -18439,7 +18493,7 @@ mod tests {
         .with_consoles(consoles);
         aspaces
             .write()
-            .set_streams(SecTaskId(2), DescriptorTable::standard());
+            .set_streams(ProcessId(2), DescriptorTable::standard());
 
         // Select the secret discipline on the input descriptor, then read:
         // nothing is echoed back.
@@ -18490,7 +18544,7 @@ mod tests {
         let rng = unseeded_rng();
         aspaces
             .write()
-            .register(SecTaskId(2), space, physmap)
+            .register(ProcessId(2), space, physmap)
             .expect("registration succeeds");
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
@@ -18507,7 +18561,7 @@ mod tests {
         let wait_arch: &'static TestArch = Box::leak(Box::new(TestArch::with_cpus(1)));
         let wait: &'static crate::procwait::KernelProcessWait<TestArch> =
             Box::leak(Box::new(crate::procwait::KernelProcessWait::new(wait_arch)));
-        wait.register_child(SecTaskId(2), SecTaskId(9));
+        wait.register_child(ProcessId(2), ProcessId(9));
         let h = KernelSyscallHandlers::new(
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
         )
@@ -18515,11 +18569,11 @@ mod tests {
         .with_process_wait(wait);
         aspaces
             .write()
-            .set_streams(SecTaskId(2), DescriptorTable::standard());
+            .set_streams(ProcessId(2), DescriptorTable::standard());
 
         // Marking the caller's live child records it on the console.
         assert_eq!(h.console_foreground(&ctx, STDIN, 9), Ok(0));
-        assert_eq!(consoles[0].foreground(), Some(SecTaskId(9)));
+        assert_eq!(consoles[0].foreground(), Some(ProcessId(9)));
         // `pid == 0` clears the slot (the shell back at its prompt).
         assert_eq!(h.console_foreground(&ctx, STDIN, 0), Ok(0));
         assert_eq!(consoles[0].foreground(), None);
@@ -18531,7 +18585,7 @@ mod tests {
         // A non-readable descriptor names no console to mark on.
         assert_eq!(h.console_foreground(&ctx, STDOUT, 9), Err(Errno::NotFound));
         // A zombie (exited, unreaped) child is not a markable target.
-        wait.record_exit(SecTaskId(9), 0);
+        wait.record_exit(ProcessId(9), 0);
         assert_eq!(h.console_foreground(&ctx, STDIN, 9), Err(Errno::NotFound));
         assert_eq!(consoles[0].foreground(), None);
     }
@@ -18561,13 +18615,13 @@ mod tests {
         let wait_arch: &'static TestArch = Box::leak(Box::new(TestArch::with_cpus(1)));
         let wait: &'static crate::procwait::KernelProcessWait<TestArch> =
             Box::leak(Box::new(crate::procwait::KernelProcessWait::new(wait_arch)));
-        wait.register_child(SecTaskId(2), SecTaskId(9));
+        wait.register_child(ProcessId(2), ProcessId(9));
         let h = KernelSyscallHandlers::new(
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
         )
         .with_process_wait(wait);
 
-        let outcome = h.land_pending_kill(SecTaskId(9), Signal::Terminate, Ok(0), 0);
+        let outcome = h.land_pending_kill(ProcessId(9), Signal::Terminate, Ok(0), 0);
 
         // The task is suspended with an `Exit` action on its own CPU; the
         // completed syscall's result rides along but never reaches user
@@ -18583,7 +18637,7 @@ mod tests {
         // The parent reaps the signalled exit with Terminate's `128 + n`
         // status, exactly as the immediate terminate path records it.
         assert_eq!(
-            wait.poll(SecTaskId(2), tairix_abi::WAIT_PID_ANY, WaitFlags::empty()),
+            wait.poll(ProcessId(2), tairix_abi::WAIT_PID_ANY, WaitFlags::empty()),
             Ok(crate::procwait::WaitedChild {
                 pid: 9,
                 status: tairix_abi::WaitStatus::Exited(143)
@@ -18634,7 +18688,7 @@ mod tests {
                 send_aspace(MapFlags::READ | MapFlags::WRITE | MapFlags::USER, &[]);
             aspaces
                 .write()
-                .register(SecTaskId(task), space, physmap)
+                .register(ProcessId(task), space, physmap)
                 .expect("registration succeeds");
         }
 
@@ -18647,8 +18701,8 @@ mod tests {
         let wait_arch: &'static TestArch = Box::leak(Box::new(TestArch::with_cpus(1)));
         let wait: &'static crate::procwait::KernelProcessWait<TestArch> =
             Box::leak(Box::new(crate::procwait::KernelProcessWait::new(wait_arch)));
-        wait.register_child(SecTaskId(2), SecTaskId(9));
-        wait.register_child(SecTaskId(2), SecTaskId(7));
+        wait.register_child(ProcessId(2), ProcessId(9));
+        wait.register_child(ProcessId(2), ProcessId(7));
         let h = KernelSyscallHandlers::new(
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
         )
@@ -18657,7 +18711,7 @@ mod tests {
         for task in [2u64, 9, 7] {
             aspaces
                 .write()
-                .set_streams(SecTaskId(task), DescriptorTable::standard());
+                .set_streams(ProcessId(task), DescriptorTable::standard());
         }
 
         // The shell hands the console to child 9. From then on only 9
@@ -18682,7 +18736,7 @@ mod tests {
             h.console_foreground(&bg, STDIN, 0),
             Err(Errno::NotForeground)
         );
-        assert_eq!(consoles[0].foreground(), Some(SecTaskId(9)));
+        assert_eq!(consoles[0].foreground(), Some(ProcessId(9)));
 
         // The granter's explicit handoff transfers the drain right: the
         // old owner is now the refused background reader.
@@ -18731,7 +18785,7 @@ mod tests {
                 send_aspace(MapFlags::READ | MapFlags::WRITE | MapFlags::USER, &[]);
             aspaces
                 .write()
-                .register(SecTaskId(task), space, physmap)
+                .register(ProcessId(task), space, physmap)
                 .expect("registration succeeds");
         }
 
@@ -18744,7 +18798,7 @@ mod tests {
         let wait_arch: &'static TestArch = Box::leak(Box::new(TestArch::with_cpus(1)));
         let wait: &'static crate::procwait::KernelProcessWait<TestArch> =
             Box::leak(Box::new(crate::procwait::KernelProcessWait::new(wait_arch)));
-        wait.register_child(SecTaskId(2), SecTaskId(9));
+        wait.register_child(ProcessId(2), ProcessId(9));
         let h = KernelSyscallHandlers::new(
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
         )
@@ -18753,7 +18807,7 @@ mod tests {
         for task in [2u64, 9] {
             aspaces
                 .write()
-                .set_streams(SecTaskId(task), DescriptorTable::standard());
+                .set_streams(ProcessId(task), DescriptorTable::standard());
         }
 
         // The owner's own `exit` releases the ownership on the spot.
@@ -18766,9 +18820,9 @@ mod tests {
         // its death behind the console's back (a kill that never ran the
         // exit handler), and the next refused reader proves it dead and
         // proceeds instead of being wedged.
-        wait.register_child(SecTaskId(2), SecTaskId(12));
+        wait.register_child(ProcessId(2), ProcessId(12));
         assert_eq!(h.console_foreground(&shell, STDIN, 12), Ok(0));
-        wait.record_exit(SecTaskId(12), 0);
+        wait.record_exit(ProcessId(12), 0);
         assert_eq!(h.stream_read(&shell, STDIN, 0x1000, 16, 0), Ok(5));
         assert_eq!(consoles[0].foreground(), None);
     }
@@ -18808,7 +18862,7 @@ mod tests {
         let wait_arch: &'static TestArch = Box::leak(Box::new(TestArch::with_cpus(1)));
         let wait: &'static crate::procwait::KernelProcessWait<TestArch> =
             Box::leak(Box::new(crate::procwait::KernelProcessWait::new(wait_arch)));
-        wait.register_child(SecTaskId(2), SecTaskId(9));
+        wait.register_child(ProcessId(2), ProcessId(9));
         let h = KernelSyscallHandlers::new(
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
         )
@@ -18817,7 +18871,7 @@ mod tests {
         for task in [2u64, 9] {
             aspaces
                 .write()
-                .set_streams(SecTaskId(task), DescriptorTable::standard());
+                .set_streams(ProcessId(task), DescriptorTable::standard());
         }
 
         assert_eq!(h.console_foreground(&shell, STDIN, 9), Ok(0));
@@ -18869,7 +18923,7 @@ mod tests {
         .with_consoles(consoles);
         aspaces
             .write()
-            .set_streams(SecTaskId(2), DescriptorTable::standard());
+            .set_streams(ProcessId(2), DescriptorTable::standard());
 
         // A session leaves the terminal in a full-screen program's raw
         // discipline.
@@ -18912,7 +18966,7 @@ mod tests {
         .with_consoles(consoles);
         aspaces
             .write()
-            .set_streams(SecTaskId(2), DescriptorTable::standard());
+            .set_streams(ProcessId(2), DescriptorTable::standard());
 
         assert_eq!(
             h.terminal_purge(&ctx, STDIN),
@@ -18954,7 +19008,7 @@ mod tests {
         let wait_arch: &'static TestArch = Box::leak(Box::new(TestArch::with_cpus(1)));
         let wait: &'static crate::procwait::KernelProcessWait<TestArch> =
             Box::leak(Box::new(crate::procwait::KernelProcessWait::new(wait_arch)));
-        wait.register_child(SecTaskId(2), SecTaskId(9));
+        wait.register_child(ProcessId(2), ProcessId(9));
         let h = KernelSyscallHandlers::new(
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
         )
@@ -18963,7 +19017,7 @@ mod tests {
         for task in [2u64, 9] {
             aspaces
                 .write()
-                .set_streams(SecTaskId(task), DescriptorTable::standard());
+                .set_streams(ProcessId(task), DescriptorTable::standard());
         }
 
         assert_eq!(h.console_foreground(&shell, STDIN, 9), Ok(0));
@@ -19012,7 +19066,7 @@ mod tests {
         );
         aspaces
             .write()
-            .set_streams(SecTaskId(2), DescriptorTable::standard());
+            .set_streams(ProcessId(2), DescriptorTable::standard());
         assert_eq!(bare.terminal_purge(&ctx, STDIN), Err(Errno::NotImplemented));
 
         let (console, consoles) = single_purge_console();
@@ -19068,7 +19122,7 @@ mod tests {
         );
         aspaces
             .write()
-            .set_streams(SecTaskId(2), DescriptorTable::standard());
+            .set_streams(ProcessId(2), DescriptorTable::standard());
         assert_eq!(
             h.console_foreground(&ctx, STDIN, 9),
             Err(Errno::NotImplemented)
@@ -19103,7 +19157,7 @@ mod tests {
             send_aspace(MapFlags::READ | MapFlags::WRITE | MapFlags::USER, &bytes);
         aspaces
             .write()
-            .register(SecTaskId(2), space, physmap)
+            .register(ProcessId(2), space, physmap)
             .expect("registration succeeds");
     }
 
@@ -19286,7 +19340,7 @@ mod tests {
             send_aspace(MapFlags::READ | MapFlags::WRITE | MapFlags::USER, &bytes);
         aspaces
             .write()
-            .register(SecTaskId(2), space, physmap)
+            .register(ProcessId(2), space, physmap)
             .expect("registration succeeds");
     }
 
@@ -19394,7 +19448,7 @@ mod tests {
         );
         aspaces
             .write()
-            .register(SecTaskId(2), space, physmap)
+            .register(ProcessId(2), space, physmap)
             .expect("registration succeeds");
         let rng = unseeded_rng();
         let irq = IrqTable::new(31);
@@ -19816,7 +19870,7 @@ mod tests {
         let aspaces = RwLock::new(AddressSpaceRegistry::new());
         aspaces
             .write()
-            .register(SecTaskId(2), space, physmap)
+            .register(ProcessId(2), space, physmap)
             .expect("registration succeeds");
         let rng = unseeded_rng();
         let irq = IrqTable::new(31);
@@ -19919,7 +19973,7 @@ mod tests {
         let rng = unseeded_rng();
         aspaces
             .write()
-            .register(SecTaskId(2), space, physmap)
+            .register(ProcessId(2), space, physmap)
             .expect("caller registration");
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
@@ -19964,7 +20018,7 @@ mod tests {
             )
             .expect("spawn succeeds");
         assert_eq!(
-            aspaces.read().streams(SecTaskId(pid)),
+            aspaces.read().streams(ProcessId(pid)),
             DescriptorTable::standard_on(1)
         );
 
@@ -20012,7 +20066,7 @@ mod tests {
         let rng = unseeded_rng();
         aspaces
             .write()
-            .register(SecTaskId(2), space, physmap)
+            .register(ProcessId(2), space, physmap)
             .expect("caller registration");
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
@@ -20047,12 +20101,12 @@ mod tests {
         // verbatim.
         aspaces
             .write()
-            .set_streams(SecTaskId(2), DescriptorTable::standard_on(1));
+            .set_streams(ProcessId(2), DescriptorTable::standard_on(1));
         let pid = h
             .spawn(&ctx, 0x1000, SPAWN_PATH.len(), 0, 0, 0, 0)
             .expect("spawn succeeds");
         assert_eq!(
-            aspaces.read().streams(SecTaskId(pid)),
+            aspaces.read().streams(ProcessId(pid)),
             DescriptorTable::standard_on(1)
         );
     }
@@ -20072,7 +20126,7 @@ mod tests {
         let rng = unseeded_rng();
         aspaces
             .write()
-            .register(SecTaskId(2), space, physmap)
+            .register(ProcessId(2), space, physmap)
             .expect("caller registration");
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
@@ -20127,7 +20181,7 @@ mod tests {
         let rng = unseeded_rng();
         aspaces
             .write()
-            .register(SecTaskId(2), space, physmap)
+            .register(ProcessId(2), space, physmap)
             .expect("caller registration");
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
@@ -20181,7 +20235,7 @@ mod tests {
         let rng = unseeded_rng();
         aspaces
             .write()
-            .register(SecTaskId(2), space, physmap)
+            .register(ProcessId(2), space, physmap)
             .expect("caller registration");
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
@@ -20239,7 +20293,7 @@ mod tests {
         let rng = unseeded_rng();
         aspaces
             .write()
-            .register(SecTaskId(2), space, physmap)
+            .register(ProcessId(2), space, physmap)
             .expect("caller registration");
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
@@ -20322,7 +20376,7 @@ mod tests {
         let rng = unseeded_rng();
         aspaces
             .write()
-            .register(SecTaskId(2), space, physmap)
+            .register(ProcessId(2), space, physmap)
             .expect("caller registration");
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
@@ -20401,7 +20455,9 @@ mod tests {
         ]);
         let (derived_caps, child_id, derive_sink) = derive_prebuilt_effective(credential, manifest);
         let derived = derived_caps.read();
-        let child = derived.caps_for(child_id).expect("effective child record");
+        let child = derived
+            .caps_of_process(child_id)
+            .expect("effective child record");
         // The effective set is the intersection: the console pair passes,
         // the uncovered `FS_ACCESS` request does not.
         assert!(child.has(CapabilityId::CONSOLE_READ));
@@ -20445,7 +20501,7 @@ mod tests {
         let rng = unseeded_rng();
         aspaces
             .write()
-            .register(SecTaskId(2), space, physmap)
+            .register(ProcessId(2), space, physmap)
             .expect("caller registration");
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
@@ -20510,7 +20566,9 @@ mod tests {
         let (derived_caps, child_id, _derive_sink) =
             derive_prebuilt_effective(credential, caps_with(manifest));
         let derived = derived_caps.read();
-        let child = derived.caps_for(child_id).expect("effective child record");
+        let child = derived
+            .caps_of_process(child_id)
+            .expect("effective child record");
         // Every capability the account's own ceiling grants survives.
         for cap in ceiling {
             assert!(
@@ -20590,7 +20648,7 @@ mod tests {
         let rng = unseeded_rng();
         aspaces
             .write()
-            .register(SecTaskId(2), space, physmap)
+            .register(ProcessId(2), space, physmap)
             .expect("caller registration");
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
@@ -20604,7 +20662,7 @@ mod tests {
             CapabilityId::CONSOLE_WRITE,
         ]);
         let manifest = caps_with(&[CapabilityId::PROC_SPAWN]);
-        let caps = TaskCapabilities::derive(SecTaskId(2), UserId(1000), ceiling, manifest, sink);
+        let caps = TaskCapabilities::derive(ProcessId(2), UserId(1000), ceiling, manifest, sink);
         assert!(!caps.has(CapabilityId::FS_ACCESS));
         let ctx = CallerContext {
             task_id: SecTaskId(2),
@@ -20638,7 +20696,9 @@ mod tests {
         let (derived_caps, child_id, _derive_sink) =
             derive_prebuilt_effective(credential, child_manifest);
         let derived = derived_caps.read();
-        let child = derived.caps_for(child_id).expect("effective child record");
+        let child = derived
+            .caps_of_process(child_id)
+            .expect("effective child record");
         // The child's manifest requests are honoured within the *ceiling*,
         // even though the caller's own effective set never held them…
         assert!(child.has(CapabilityId::FS_ACCESS));
@@ -20668,7 +20728,7 @@ mod tests {
         let rng = unseeded_rng();
         aspaces
             .write()
-            .register(SecTaskId(2), space, physmap)
+            .register(ProcessId(2), space, physmap)
             .expect("caller registration");
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
@@ -20676,7 +20736,7 @@ mod tests {
         // The PID-1 shape: a system-principal record whose manifest holds
         // only `PROC_SPAWN` + `CONSOLE_WRITE`.
         let manifest = caps_with(&[CapabilityId::PROC_SPAWN, CapabilityId::CONSOLE_WRITE]);
-        let caps = TaskCapabilities::derive(SecTaskId(2), UserId(0), manifest, manifest, sink)
+        let caps = TaskCapabilities::derive(ProcessId(2), UserId(0), manifest, manifest, sink)
             .as_system_principal();
         let ctx = CallerContext {
             task_id: SecTaskId(2),
@@ -20711,7 +20771,9 @@ mod tests {
         let (derived_caps, child_id, _derive_sink) =
             derive_prebuilt_effective(credential, child_manifest);
         let derived = derived_caps.read();
-        let child = derived.caps_for(child_id).expect("effective child record");
+        let child = derived
+            .caps_of_process(child_id)
+            .expect("effective child record");
         // The child is bounded by its own manifest, not the caller's.
         assert!(child.has(CapabilityId::USERS_READ));
         assert!(child.has(CapabilityId::SPAWN_AS_USER));
@@ -20740,7 +20802,7 @@ mod tests {
         let rng = unseeded_rng();
         aspaces
             .write()
-            .register(SecTaskId(2), space, physmap)
+            .register(ProcessId(2), space, physmap)
             .expect("caller registration");
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
@@ -20805,7 +20867,7 @@ mod tests {
         let rng = unseeded_rng();
         aspaces
             .write()
-            .register(SecTaskId(2), space, physmap)
+            .register(ProcessId(2), space, physmap)
             .expect("caller registration");
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
@@ -21027,7 +21089,7 @@ mod tests {
 
         // Impose a 2-page (0x2000-byte) address-space ceiling on the caller.
         aspaces.write().set_limit(
-            SecTaskId(2),
+            ProcessId(2),
             LimitKind::AddressSpaceBytes,
             ResourceLimit::new(0x2000, u64::MAX).expect("well-formed"),
         );
@@ -21042,7 +21104,7 @@ mod tests {
         let base = h
             .mem_map(&ctx, 0x2000, tairix_abi::MapFlags::empty(), 0)
             .expect("a map at the ceiling succeeds");
-        assert_eq!(aspaces.read().mapped_aspace_bytes(SecTaskId(2)), 0x2000);
+        assert_eq!(aspaces.read().mapped_aspace_bytes(ProcessId(2)), 0x2000);
 
         // A further page would exceed the ceiling: denied, fail closed, and
         // the producer is never reached for the rejected request.
@@ -21053,16 +21115,16 @@ mod tests {
         );
         assert!(producer.mapping.lock().is_none());
         // The denied request changed no accounting.
-        assert_eq!(aspaces.read().mapped_aspace_bytes(SecTaskId(2)), 0x2000);
+        assert_eq!(aspaces.read().mapped_aspace_bytes(ProcessId(2)), 0x2000);
 
         // Freeing the mapped region credits the bytes back, so a fresh map
         // of the same size fits under the ceiling again.
         assert_eq!(h.mem_unmap(&ctx, base, 0x2000), Ok(0));
-        assert_eq!(aspaces.read().mapped_aspace_bytes(SecTaskId(2)), 0);
+        assert_eq!(aspaces.read().mapped_aspace_bytes(ProcessId(2)), 0);
         assert!(h
             .mem_map(&ctx, 0x2000, tairix_abi::MapFlags::empty(), 0)
             .is_ok());
-        assert_eq!(aspaces.read().mapped_aspace_bytes(SecTaskId(2)), 0x2000);
+        assert_eq!(aspaces.read().mapped_aspace_bytes(ProcessId(2)), 0x2000);
     }
 
     /// A page-rounded request: a sub-page `len` is charged as a whole page,
@@ -21088,7 +21150,7 @@ mod tests {
 
         // A one-page ceiling.
         aspaces.write().set_limit(
-            SecTaskId(2),
+            ProcessId(2),
             LimitKind::AddressSpaceBytes,
             ResourceLimit::new(0x1000, u64::MAX).expect("well-formed"),
         );
@@ -21102,7 +21164,7 @@ mod tests {
         // One byte rounds up to a whole page and just fits the one-page
         // ceiling; it is charged as a full page, not a single byte.
         assert!(h.mem_map(&ctx, 1, tairix_abi::MapFlags::empty(), 0).is_ok());
-        assert_eq!(aspaces.read().mapped_aspace_bytes(SecTaskId(2)), 0x1000);
+        assert_eq!(aspaces.read().mapped_aspace_bytes(ProcessId(2)), 0x1000);
         // A second single byte would need a second page: denied.
         assert_eq!(
             h.mem_map(&ctx, 1, tairix_abi::MapFlags::empty(), 0),
@@ -21177,7 +21239,7 @@ mod tests {
         let rng = Box::leak(Box::new(unseeded_rng()));
         aspaces
             .write()
-            .register(SecTaskId(2), space, physmap)
+            .register(ProcessId(2), space, physmap)
             .expect("registration succeeds");
         let irq = Box::leak(Box::new(IrqTable::new(31)));
         let ctl = Box::leak(Box::new(UnsupportedController));
@@ -21229,10 +21291,10 @@ mod tests {
         let base = h.file_map(&ctx, fd, 0x3000, 0x1001).expect("maps");
         assert_eq!(base, FILE_REGION_BASE);
         assert_eq!(*fm.reserves.lock(), std::vec![0x1001]);
-        assert_eq!(aspaces.read().mapped_aspace_bytes(SecTaskId(2)), 0x2000);
+        assert_eq!(aspaces.read().mapped_aspace_bytes(ProcessId(2)), 0x2000);
         let region = aspaces
             .read()
-            .file_region_exact(SecTaskId(2), base, 0x2000)
+            .file_region_exact(ProcessId(2), base, 0x2000)
             .expect("recorded page-rounded");
         assert_eq!(region.path, "/big");
         assert_eq!(region.offset, 0x3000);
@@ -21255,7 +21317,7 @@ mod tests {
         );
         let (pipe_read, _pipe_write) = aspaces
             .write()
-            .open_pipe(SecTaskId(2))
+            .open_pipe(ProcessId(2))
             .expect("pipe pair fits");
         assert_eq!(
             h.file_map(&ctx, pipe_read, 0, 0x1000),
@@ -21270,7 +21332,7 @@ mod tests {
     fn file_map_enforces_the_shared_address_space_limit() {
         let (_fs, fm, aspaces, h, ctx, _sink) = file_map_fixture(Vec::new());
         aspaces.write().set_limit(
-            SecTaskId(2),
+            ProcessId(2),
             LimitKind::AddressSpaceBytes,
             ResourceLimit::new(0x1000, u64::MAX).expect("well-formed"),
         );
@@ -21284,7 +21346,7 @@ mod tests {
         assert!(fm.reserves.lock().is_empty());
         // Exactly at the ceiling: admitted and charged.
         let base = h.file_map(&ctx, fd, 0, 0x1000).expect("fits");
-        assert_eq!(aspaces.read().mapped_aspace_bytes(SecTaskId(2)), 0x1000);
+        assert_eq!(aspaces.read().mapped_aspace_bytes(ProcessId(2)), 0x1000);
         // The budget is shared: an anonymous map now exceeds it too.
         assert_eq!(
             h.mem_map(&ctx, 1, tairix_abi::MapFlags::empty(), 0),
@@ -21292,7 +21354,7 @@ mod tests {
         );
         // Releasing the file region frees the budget again.
         assert_eq!(h.file_unmap(&ctx, base, 0x1000), Ok(0));
-        assert_eq!(aspaces.read().mapped_aspace_bytes(SecTaskId(2)), 0);
+        assert_eq!(aspaces.read().mapped_aspace_bytes(ProcessId(2)), 0);
     }
 
     /// `file_unmap` releases only the exact whole region the caller mapped;
@@ -21320,7 +21382,7 @@ mod tests {
         // credits, and forgets the region.
         assert_eq!(h.file_unmap(&ctx, base, 0x1800), Ok(0));
         assert_eq!(*fm.releases.lock(), std::vec![(base, 0x1800)]);
-        assert_eq!(aspaces.read().mapped_aspace_bytes(SecTaskId(2)), 0);
+        assert_eq!(aspaces.read().mapped_aspace_bytes(ProcessId(2)), 0);
         assert_eq!(h.file_unmap(&ctx, base, 0x1800), Err(Errno::NotFound));
     }
 
@@ -21338,7 +21400,7 @@ mod tests {
         let base = h.file_map(&ctx, fd, 0x3000, 0x2000).expect("maps");
 
         // A fault mid-way into the region's second page.
-        assert!(h.resolve_file_fault(SecTaskId(2), base + 0x1000 + 5));
+        assert!(h.resolve_file_fault(ProcessId(2), base + 0x1000 + 5));
         assert_eq!(*fm.pages.lock(), std::vec![(base + 0x1000, 100)]);
         // The read hit the file at region offset + page offset (0x3000 +
         // 0x1000), for one whole page, under the recorded path.
@@ -21356,7 +21418,7 @@ mod tests {
     fn resolve_file_fault_refuses_everything_outside_live_backing() {
         let (_fs, fm, _aspaces, h, ctx, _sink) = file_map_fixture(Vec::new());
         // No region at all.
-        assert!(!h.resolve_file_fault(SecTaskId(2), 0x9999_0000));
+        assert!(!h.resolve_file_fault(ProcessId(2), 0x9999_0000));
         let fd = u32::try_from(
             h.fs_open(&ctx, 0x1000, "/big".len(), OpenFlags::READ)
                 .expect("open"),
@@ -21365,12 +21427,12 @@ mod tests {
         let base = h.file_map(&ctx, fd, 0, 0x2000).expect("maps");
         // Empty `read_data` means the file reads as zero bytes: the page is
         // wholly past end-of-file and is never backed.
-        assert!(!h.resolve_file_fault(SecTaskId(2), base));
+        assert!(!h.resolve_file_fault(ProcessId(2), base));
         // Another task faulting on this task's region resolves nothing.
-        assert!(!h.resolve_file_fault(SecTaskId(3), base));
+        assert!(!h.resolve_file_fault(ProcessId(3), base));
         // A released region stops resolving.
         assert_eq!(h.file_unmap(&ctx, base, 0x2000), Ok(0));
-        assert!(!h.resolve_file_fault(SecTaskId(2), base));
+        assert!(!h.resolve_file_fault(ProcessId(2), base));
         assert!(fm.pages.lock().is_empty());
     }
 
@@ -21387,9 +21449,9 @@ mod tests {
         .unwrap();
         let base = h.file_map(&ctx, fd, 0, 0x1000).expect("maps");
         *fm.map_page_result.lock() = Err(Errno::BadAddress);
-        assert!(h.resolve_file_fault(SecTaskId(2), base));
+        assert!(h.resolve_file_fault(ProcessId(2), base));
         *fm.map_page_result.lock() = Err(Errno::OutOfMemory);
-        assert!(!h.resolve_file_fault(SecTaskId(2), base));
+        assert!(!h.resolve_file_fault(ProcessId(2), base));
     }
 
     /// A `copy_in_user` miss inside a live file region is offered to the
@@ -21460,7 +21522,7 @@ mod tests {
 
         // A four-page anonymous region the task "reserved" via `mem_map`.
         let base = 0x30_0000;
-        aspaces.write().record_anon_region(SecTaskId(2), base, 4);
+        aspaces.write().record_anon_region(ProcessId(2), base, 4);
 
         let producer: &'static RecordingMemMap = Box::leak(Box::new(RecordingMemMap::new()));
         let h = KernelSyscallHandlers::new(
@@ -21471,14 +21533,14 @@ mod tests {
         // Outside every reserved region: refused, and the producer is never
         // reached (no memory materialised for an address the task did not
         // map).
-        assert!(!h.resolve_anon_fault(SecTaskId(2), base + 4 * PAGE_SIZE as u64));
+        assert!(!h.resolve_anon_fault(ProcessId(2), base + 4 * PAGE_SIZE as u64));
         assert!(producer.mapping.lock().is_none());
 
         // Inside the region: the covering page is backed — one page, FIXED,
         // at the page-aligned base of the faulting address.
         let fault = base + PAGE_SIZE as u64 + 5;
         let page_va = base + PAGE_SIZE as u64;
-        assert!(h.resolve_anon_fault(SecTaskId(2), fault));
+        assert!(h.resolve_anon_fault(ProcessId(2), fault));
         assert_eq!(
             *producer.mapping.lock(),
             Some((PAGE_SIZE, tairix_abi::MapFlags::FIXED.bits(), page_va))
@@ -21503,8 +21565,8 @@ mod tests {
         // A refused read miss inside the live region (the empty file reads
         // as zero bytes, so the page is past end-of-file), then a wild
         // write.
-        h.record_fault_exit(SecTaskId(2), base, false, None);
-        h.record_fault_exit(SecTaskId(2), 0x9999_0000, true, None);
+        h.record_fault_exit(ProcessId(2), SecTaskId(2), base, false, None);
+        h.record_fault_exit(ProcessId(2), SecTaskId(2), 0x9999_0000, true, None);
         let kills: Vec<_> = sink
             .snapshot()
             .into_iter()
@@ -21601,7 +21663,7 @@ mod tests {
         // run past its end is a `region` locality with a bounded offset.
         let region_base = 0x0F00_0000u64;
         aspaces.write().record_file_region(
-            SecTaskId(3),
+            ProcessId(3),
             crate::aspace::FileRegion {
                 base: region_base,
                 len: PAGE_SIZE as u64,
@@ -21619,8 +21681,8 @@ mod tests {
         // Task 2: a null-pointer write. Task 3: a bounded read run 0x40
         // past its region's end.
         let region_end = region_base + PAGE_SIZE as u64;
-        h.record_fault_exit(SecTaskId(2), 0x18, true, None);
-        h.record_fault_exit(SecTaskId(3), region_end + 0x40, false, None);
+        h.record_fault_exit(ProcessId(2), SecTaskId(2), 0x18, true, None);
+        h.record_fault_exit(ProcessId(3), SecTaskId(3), region_end + 0x40, false, None);
 
         let kills: Vec<_> = sink
             .snapshot()
@@ -21714,7 +21776,7 @@ mod tests {
             .with_proc_id(ProcId::from_raw([0xCD; PROC_ID_LEN]));
         table.write().insert(record);
         // A known PIE load base so the faulting pc resolves load-relative.
-        aspaces.write().set_load_base(SecTaskId(2), 0x1000);
+        aspaces.write().set_load_base(ProcessId(2), 0x1000);
 
         let store: &'static crate::crash::CrashStore =
             Box::leak(Box::new(crate::crash::CrashStore::new()));
@@ -21732,7 +21794,7 @@ mod tests {
             .with("x1", 0xBB);
         let frame = UserRegisterFrame::new(snapshot, layout, false);
         // A null-pointer write with the captured (fp-less) register frame.
-        h.record_fault_exit(SecTaskId(2), 0x18, true, Some(&frame));
+        h.record_fault_exit(ProcessId(2), SecTaskId(2), 0x18, true, Some(&frame));
 
         let crash = store.latest().expect("a crash record was stored");
         assert_eq!(crash.pid, 2);
@@ -21799,7 +21861,7 @@ mod tests {
         .with_crashes(store2);
         let snapshot2 = RegisterSnapshot::new(0x1040, 0, 0);
         let frame2 = UserRegisterFrame::new(snapshot2, layout, false);
-        h2.record_fault_exit(SecTaskId(4), 0x18, false, Some(&frame2));
+        h2.record_fault_exit(ProcessId(4), SecTaskId(4), 0x18, false, Some(&frame2));
         let crash2 = store2.latest().expect("stored");
         assert!(!crash2.load_base_known());
         assert_eq!(crash2.pc, 0x1040);
@@ -21896,7 +21958,9 @@ mod tests {
         let span =
             crate::aspace::StackSpan::new(STACK_RESERVE_BASE, STACK_COMMITTED_BASE, STACK_TOP)
                 .expect("the fixture span is page-aligned and well-formed");
-        aspaces.write().set_stack_span(SecTaskId(2), span);
+        aspaces
+            .write()
+            .set_stack_span(ProcessId(2), SecTaskId(2), span);
         let producer: &'static StackGrowMemMap = Box::leak(Box::new(StackGrowMemMap::new()));
         let h = KernelSyscallHandlers::new(sched, table, arch, sink, irq, ctl, ipc, aspaces, rng)
             .with_mem_map(producer);
@@ -21912,7 +21976,7 @@ mod tests {
         let (producer, aspaces, h, _sink) = stack_fault_fixture();
         let fault = STACK_COMMITTED_BASE - 5;
         let page_va = STACK_COMMITTED_BASE - PAGE_SIZE as u64;
-        assert!(h.resolve_stack_fault(SecTaskId(2), fault));
+        assert!(h.resolve_stack_fault(ProcessId(2), SecTaskId(2), fault));
         assert_eq!(
             *producer.maps.lock(),
             std::vec![(PAGE_SIZE, tairix_abi::MapFlags::FIXED.bits(), page_va)]
@@ -21920,13 +21984,13 @@ mod tests {
         let span = aspaces.read().stack_span(SecTaskId(2)).expect("recorded");
         assert_eq!(span.committed_base(), page_va);
         assert_eq!(
-            aspaces.read().stack_committed_bytes(SecTaskId(2)),
+            aspaces.read().stack_committed_bytes(ProcessId(2)),
             STACK_TOP - page_va
         );
         // A deeper fault keeps growing; a shallower re-fault (the resident
         // race through the registry) never raises the base back up.
         let deep = STACK_RESERVE_BASE + PAGE_SIZE as u64;
-        assert!(h.resolve_stack_fault(SecTaskId(2), deep));
+        assert!(h.resolve_stack_fault(ProcessId(2), SecTaskId(2), deep));
         assert_eq!(
             aspaces
                 .read()
@@ -21951,11 +22015,15 @@ mod tests {
         let bound = ResourceLimit::new(committed + page, committed + page).expect("well-formed");
         aspaces
             .write()
-            .set_limit(SecTaskId(2), LimitKind::PinnedMemoryBytes, bound);
-        aspaces.write().set_pinned(SecTaskId(2));
+            .set_limit(ProcessId(2), LimitKind::PinnedMemoryBytes, bound);
+        aspaces.write().set_pinned(ProcessId(2));
         // Two growth pages would cross the budget: refused closed, no
         // page mapped, committed base unchanged.
-        assert!(!h.resolve_stack_fault(SecTaskId(2), STACK_COMMITTED_BASE - page - 1));
+        assert!(!h.resolve_stack_fault(
+            ProcessId(2),
+            SecTaskId(2),
+            STACK_COMMITTED_BASE - page - 1
+        ));
         assert_eq!(
             aspaces
                 .read()
@@ -21965,7 +22033,7 @@ mod tests {
             STACK_COMMITTED_BASE
         );
         // One growth page fits the budget exactly.
-        assert!(h.resolve_stack_fault(SecTaskId(2), STACK_COMMITTED_BASE - 1));
+        assert!(h.resolve_stack_fault(ProcessId(2), SecTaskId(2), STACK_COMMITTED_BASE - 1));
         assert_eq!(
             aspaces
                 .read()
@@ -21976,12 +22044,16 @@ mod tests {
         );
         // Mapped bytes consume the same budget: with one further page
         // charged, even the next single-page growth is refused …
-        aspaces.write().charge_aspace_bytes(SecTaskId(2), 2 * page);
-        assert!(!h.resolve_stack_fault(SecTaskId(2), STACK_COMMITTED_BASE - page - 1));
+        aspaces.write().charge_aspace_bytes(ProcessId(2), 2 * page);
+        assert!(!h.resolve_stack_fault(
+            ProcessId(2),
+            SecTaskId(2),
+            STACK_COMMITTED_BASE - page - 1
+        ));
         // … and unpinning restores the ordinary rule (the fixture span is
         // far inside the default `StackBytes` bound).
-        aspaces.write().clear_pinned(SecTaskId(2));
-        assert!(h.resolve_stack_fault(SecTaskId(2), STACK_COMMITTED_BASE - page - 1));
+        aspaces.write().clear_pinned(ProcessId(2));
+        assert!(h.resolve_stack_fault(ProcessId(2), SecTaskId(2), STACK_COMMITTED_BASE - page - 1));
     }
 
     /// A fault that jumps several pages below the committed base (a large
@@ -21998,7 +22070,7 @@ mod tests {
         let page = PAGE_SIZE as u64;
         // Three pages below the committed base in one jump.
         let fault_page = STACK_COMMITTED_BASE - 3 * page;
-        assert!(h.resolve_stack_fault(SecTaskId(2), fault_page + 7));
+        assert!(h.resolve_stack_fault(ProcessId(2), SecTaskId(2), fault_page + 7));
         // The walk backed the two skipped pages and the faulting page,
         // top-down, so the mark stayed truthful at every step.
         assert_eq!(
@@ -22044,12 +22116,12 @@ mod tests {
     fn resolve_stack_fault_refuses_everything_outside_the_growth_room() {
         let (producer, _aspaces, h, _sink) = stack_fault_fixture();
         // The unmapped guard page immediately below the reserved span.
-        assert!(!h.resolve_stack_fault(SecTaskId(2), STACK_RESERVE_BASE - 1));
+        assert!(!h.resolve_stack_fault(ProcessId(2), SecTaskId(2), STACK_RESERVE_BASE - 1));
         // At and above the committed base (already-mapped territory).
-        assert!(!h.resolve_stack_fault(SecTaskId(2), STACK_COMMITTED_BASE));
-        assert!(!h.resolve_stack_fault(SecTaskId(2), STACK_TOP - 1));
+        assert!(!h.resolve_stack_fault(ProcessId(2), SecTaskId(2), STACK_COMMITTED_BASE));
+        assert!(!h.resolve_stack_fault(ProcessId(2), SecTaskId(2), STACK_TOP - 1));
         // A task with no recorded span has no growable stack.
-        assert!(!h.resolve_stack_fault(SecTaskId(3), STACK_COMMITTED_BASE - 5));
+        assert!(!h.resolve_stack_fault(ProcessId(3), SecTaskId(3), STACK_COMMITTED_BASE - 5));
         assert!(producer.maps.lock().is_empty());
     }
 
@@ -22064,19 +22136,19 @@ mod tests {
         // Allow exactly one page of growth below the committed region.
         let soft = STACK_TOP - STACK_COMMITTED_BASE + PAGE_SIZE as u64;
         aspaces.write().set_limit(
-            SecTaskId(2),
+            ProcessId(2),
             LimitKind::StackBytes,
             ResourceLimit::new(soft, u64::MAX).expect("well-formed"),
         );
         // Two pages below the committed base: past the bound, refused.
         let too_deep = STACK_COMMITTED_BASE - 2 * PAGE_SIZE as u64;
-        assert!(!h.resolve_stack_fault(SecTaskId(2), too_deep));
+        assert!(!h.resolve_stack_fault(ProcessId(2), SecTaskId(2), too_deep));
         assert!(producer.maps.lock().is_empty());
         // One page below: exactly at the bound, admitted.
         let allowed = STACK_COMMITTED_BASE - PAGE_SIZE as u64;
-        assert!(h.resolve_stack_fault(SecTaskId(2), allowed));
+        assert!(h.resolve_stack_fault(ProcessId(2), SecTaskId(2), allowed));
         assert_eq!(producer.maps.lock().len(), 1);
-        assert_eq!(aspaces.read().stack_committed_bytes(SecTaskId(2)), soft);
+        assert_eq!(aspaces.read().stack_committed_bytes(ProcessId(2)), soft);
     }
 
     /// A page that became resident since the fault (a concurrent
@@ -22090,7 +22162,7 @@ mod tests {
         let (producer, aspaces, h, _sink) = stack_fault_fixture();
         let fault = STACK_COMMITTED_BASE - PAGE_SIZE as u64;
         *producer.map_result.lock() = Err(Errno::BadAddress);
-        assert!(h.resolve_stack_fault(SecTaskId(2), fault));
+        assert!(h.resolve_stack_fault(ProcessId(2), SecTaskId(2), fault));
         assert_eq!(
             aspaces
                 .read()
@@ -22101,7 +22173,11 @@ mod tests {
             "a resident race page is committed — it is backed, whoever won"
         );
         *producer.map_result.lock() = Err(Errno::OutOfMemory);
-        assert!(!h.resolve_stack_fault(SecTaskId(2), STACK_COMMITTED_BASE - 2 * PAGE_SIZE as u64));
+        assert!(!h.resolve_stack_fault(
+            ProcessId(2),
+            SecTaskId(2),
+            STACK_COMMITTED_BASE - 2 * PAGE_SIZE as u64
+        ));
     }
 
     /// Frame exhaustion part-way through a multi-page walk fails the fault
@@ -22116,7 +22192,7 @@ mod tests {
         // it exhausts.
         *producer.fail_from.lock() = Some(1);
         let fault_page = STACK_COMMITTED_BASE - 3 * page;
-        assert!(!h.resolve_stack_fault(SecTaskId(2), fault_page));
+        assert!(!h.resolve_stack_fault(ProcessId(2), SecTaskId(2), fault_page));
         // Exactly one page was backed (the one just below the old base);
         // the mark lowered to it and no further.
         assert_eq!(producer.maps.lock().len(), 2, "one success, one refusal");
@@ -22143,17 +22219,22 @@ mod tests {
         let span =
             crate::aspace::StackSpan::new(STACK_RESERVE_BASE, STACK_COMMITTED_BASE, STACK_TOP)
                 .expect("well-formed");
-        aspaces.write().set_stack_span(SecTaskId(3), span);
+        aspaces
+            .write()
+            .set_stack_span(ProcessId(3), SecTaskId(3), span);
         aspaces.write().set_limit(
-            SecTaskId(3),
+            ProcessId(3),
             LimitKind::StackBytes,
             ResourceLimit::new(STACK_TOP - STACK_COMMITTED_BASE, u64::MAX).expect("well-formed"),
         );
-        aspaces.write().set_stack_span(SecTaskId(4), span);
+        aspaces
+            .write()
+            .set_stack_span(ProcessId(4), SecTaskId(4), span);
         sink.clear();
         // Unlimited bound (task 2): an in-span kill is an unresolvable
         // growth fault.
         h.record_fault_exit(
+            ProcessId(2),
             SecTaskId(2),
             STACK_COMMITTED_BASE - PAGE_SIZE as u64,
             true,
@@ -22161,13 +22242,20 @@ mod tests {
         );
         // Tightened bound (task 3): the same depth is past the limit.
         h.record_fault_exit(
+            ProcessId(3),
             SecTaskId(3),
             STACK_COMMITTED_BASE - PAGE_SIZE as u64,
             true,
             None,
         );
         // The guard page below the span is outside every mapping (task 4).
-        h.record_fault_exit(SecTaskId(4), STACK_RESERVE_BASE - 1, true, None);
+        h.record_fault_exit(
+            ProcessId(4),
+            SecTaskId(4),
+            STACK_RESERVE_BASE - 1,
+            true,
+            None,
+        );
         let kills: Vec<_> = sink
             .snapshot()
             .into_iter()
@@ -22400,7 +22488,7 @@ mod tests {
             aspaces
                 .write()
                 .register(
-                    SecTaskId(2),
+                    ProcessId(2),
                     Box::new(spawn_time.freeze()),
                     Box::new(physmap),
                 )
@@ -22409,7 +22497,7 @@ mod tests {
         // The stale snapshot cannot see the heap page — the faulting state.
         assert!(aspaces
             .read()
-            .resolve(SecTaskId(2))
+            .resolve(ProcessId(2))
             .expect("registered")
             .0
             .translate(heap)
@@ -22442,7 +22530,7 @@ mod tests {
         // set rather than to this call.
         assert!(aspaces
             .read()
-            .resolve(SecTaskId(2))
+            .resolve(ProcessId(2))
             .expect("registered")
             .0
             .translate(heap)
@@ -22450,12 +22538,12 @@ mod tests {
 
         // First touch of the reserved region: the fault path backs the page
         // and publishes it.
-        assert!(h.resolve_anon_fault(SecTaskId(2), 0x5000_4000 + 0x40));
+        assert!(h.resolve_anon_fault(ProcessId(2), 0x5000_4000 + 0x40));
 
         // The page now resolves through the registry, so a subsequent
         // `copy_in` (e.g. `spawn`'s path argument) reaches it.
         let reg = aspaces.read();
-        let (space, _) = reg.resolve(SecTaskId(2)).expect("still registered");
+        let (space, _) = reg.resolve(ProcessId(2)).expect("still registered");
         let (frame, flags) = space.translate(heap).expect("heap page now visible");
         assert_eq!(frame, Frame(9));
         assert!(flags.contains(MapFlags::USER));
@@ -22511,11 +22599,11 @@ mod tests {
             let physmap = SimPhysMap::new(PhysAddr::new(0), PAGE_SIZE);
             aspaces
                 .write()
-                .register(SecTaskId(2), Box::new(resident.freeze()), Box::new(physmap))
+                .register(ProcessId(2), Box::new(resident.freeze()), Box::new(physmap))
                 .expect("register snapshot");
             aspaces
                 .write()
-                .record_anon_region(SecTaskId(2), 0x10_0000, 2);
+                .record_anon_region(ProcessId(2), 0x10_0000, 2);
         }
 
         // No live space is published for this CPU — the case the wholesale
@@ -22529,7 +22617,7 @@ mod tests {
         assert_eq!(h.mem_unmap(&ctx, 0x10_0000, 0x2000), Ok(0));
 
         let reg = aspaces.read();
-        let (space, _) = reg.resolve(SecTaskId(2)).expect("still registered");
+        let (space, _) = reg.resolve(ProcessId(2)).expect("still registered");
         assert!(
             space.translate(first).is_none(),
             "a released page must not stay reachable through the snapshot"
@@ -22572,7 +22660,7 @@ mod tests {
         // have recorded).
         aspaces
             .write()
-            .record_anon_region(SecTaskId(2), 0x10_0000, 1);
+            .record_anon_region(ProcessId(2), 0x10_0000, 1);
 
         // Region present but no producer → the validated range reaches the
         // (NULL) producer, which fails closed with NotImplemented.
@@ -22676,10 +22764,16 @@ mod tests {
         assert_eq!(h.mmio_map(&ctx, 7, 0, 0x10), Err(Errno::NotFound));
     }
 
-    /// The grant is owner-bound: a handle minted for another task, or an
-    /// unknown handle value, resolves to nothing and is refused
+    /// The grant is owner-bound: a handle minted for another **process**, or
+    /// an unknown handle value, resolves to nothing and is refused
     /// (no trusted-caller shortcut; handle forgery is
     /// rejected exactly as `irq_wait` re-checks its binding).
+    ///
+    /// The foreign caller carries its *own* capability record, because that is
+    /// what makes it a different process. A caller with a different thread id
+    /// but the same record is a sibling thread of the owner, which shares the
+    /// grant by design — [`mmio_map_grant_is_shared_by_a_sibling_thread`]
+    /// covers that half.
     #[test]
     fn mmio_map_forged_or_foreign_handle_is_not_found() {
         let sink = make_sink();
@@ -22690,7 +22784,7 @@ mod tests {
 
         // Mint one grant for task 2, capturing its kernel-issued handle.
         let handle = aspaces.write().mint_grant(
-            SecTaskId(2),
+            ProcessId(2),
             tairix_abi::hwtree::HwResource::mmio(0xFE98_0000, 0x4000),
         );
         let facility: &'static RecordingMmioFacility = Box::leak(Box::new(RecordingMmioFacility {
@@ -22713,16 +22807,56 @@ mod tests {
             Err(Errno::NotFound)
         );
 
-        // Right handle value, wrong (foreign) task → NotFound: a driver
-        // cannot reach another driver's window by reusing its handle.
+        // Right handle value, foreign *process* → NotFound: a driver cannot
+        // reach another driver's window by reusing its handle. The foreign
+        // caller has its own capability record, which is what makes it a
+        // different process rather than a sibling thread.
+        let foreign_caps = make_caps_record(3, &[], sink);
         let foreign = CallerContext {
             task_id: SecTaskId(3),
-            caps: &caps,
+            caps: &foreign_caps,
         };
         assert_eq!(h.mmio_map(&foreign, handle, 0, 0x10), Err(Errno::NotFound));
 
         // Neither refusal touched the mapping mechanism.
         assert!(facility.last.lock().is_none());
+    }
+
+    /// The other half of the ownership rule: a **sibling thread** of the
+    /// granted process reaches the same window through the same handle.
+    ///
+    /// A device grant is a process resource, so every thread of the driver
+    /// may map it; scoping it to the one thread that happened to be admitted
+    /// would make a multi-threaded driver unable to use its own hardware.
+    #[test]
+    fn mmio_map_grant_is_shared_by_a_sibling_thread() {
+        let sink = make_sink();
+        let (arch, table, ipc, aspaces, rng, irq) = mmio_scaffold();
+        let sched = make_sched(arch.clone());
+        let ctl = UnsupportedController;
+        let caps = make_caps_record(2, &[], sink);
+        let handle = aspaces.write().mint_grant(
+            ProcessId(2),
+            tairix_abi::hwtree::HwResource::mmio(0xFE98_0000, 0x4000),
+        );
+        let facility: &'static RecordingMmioFacility = Box::leak(Box::new(RecordingMmioFacility {
+            last: tairix_sync::SpinLock::new(None),
+            last_kind: tairix_sync::SpinLock::new(None),
+            ret: Ok(0x9000_0000),
+        }));
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        )
+        .with_mmio_map_facility(facility);
+
+        // Thread 42 of process 2: a different scheduler task, the same
+        // capability record — so the same process, and the same grant.
+        let sibling = CallerContext {
+            task_id: SecTaskId(42),
+            caps: &caps,
+        };
+        assert!(h.mmio_map(&sibling, handle, 0, 0x10).is_ok());
+        assert!(facility.last.lock().is_some());
     }
 
     /// The success path: the owner's handle resolves to its granted MMIO
@@ -22742,7 +22876,7 @@ mod tests {
         };
 
         let handle = aspaces.write().mint_grant(
-            SecTaskId(2),
+            ProcessId(2),
             tairix_abi::hwtree::HwResource::mmio(0xFE98_0000, 0x4000),
         );
         let facility: &'static RecordingMmioFacility = Box::leak(Box::new(RecordingMmioFacility {
@@ -22785,12 +22919,12 @@ mod tests {
             format: DisplayFormat::Bgra8888,
         };
         let write_back = aspaces.write().mint_grant(
-            SecTaskId(2),
+            ProcessId(2),
             HwResource::framebuffer(0x8000_0000, &mode, FramebufferMemory::WriteBack)
                 .expect("valid WB framebuffer"),
         );
         let write_combine = aspaces.write().mint_grant(
-            SecTaskId(2),
+            ProcessId(2),
             HwResource::framebuffer(0x9000_0000, &mode, FramebufferMemory::WriteCombine)
                 .expect("valid WC framebuffer"),
         );
@@ -22832,7 +22966,7 @@ mod tests {
         };
 
         let handle = aspaces.write().mint_grant(
-            SecTaskId(2),
+            ProcessId(2),
             tairix_abi::hwtree::HwResource::mmio(0xFE98_0000, 0x4000),
         );
         let h = KernelSyscallHandlers::new(
@@ -22862,7 +22996,7 @@ mod tests {
         };
 
         let handle = aspaces.write().mint_grant(
-            SecTaskId(2),
+            ProcessId(2),
             tairix_abi::hwtree::HwResource::dma(0x4000_0000, 0),
         );
         let facility: &'static RecordingMmioFacility = Box::leak(Box::new(RecordingMmioFacility {
@@ -22904,7 +23038,7 @@ mod tests {
         // A 1 GiB outbound bus window (the BCM2711 PCIe geometry): CPU base
         // 0x6_0000_0000, PCIe-space base 0xC000_0000.
         let handle = aspaces.write().mint_grant(
-            SecTaskId(2),
+            ProcessId(2),
             tairix_abi::hwtree::HwResource::bus_window(0x6_0000_0000, 0x4000_0000, 0xC000_0000),
         );
         let facility: &'static RecordingMmioFacility = Box::leak(Box::new(RecordingMmioFacility {
@@ -22987,7 +23121,7 @@ mod tests {
         let caps = make_caps_record(2, &[], sink);
 
         let handle = aspaces.write().mint_grant(
-            SecTaskId(2),
+            ProcessId(2),
             tairix_abi::hwtree::HwResource::dma(0x4000_0000, 0x1_0000),
         );
         let facility: &'static RecordingDmaFacility = Box::leak(Box::new(RecordingDmaFacility {
@@ -23012,10 +23146,13 @@ mod tests {
             h.dma_alloc(&owner, handle + 1, 0x1000, 0x1234),
             Err(Errno::NotFound)
         );
-        // Right handle value, wrong (foreign) task → NotFound.
+        // Right handle value, foreign *process* → NotFound. The foreign
+        // caller carries its own capability record, which is what makes it a
+        // different process rather than a sibling thread sharing the grant.
+        let foreign_caps = make_caps_record(3, &[], sink);
         let foreign = CallerContext {
             task_id: SecTaskId(3),
-            caps: &caps,
+            caps: &foreign_caps,
         };
         assert_eq!(
             h.dma_alloc(&foreign, handle, 0x1000, 0x1234),
@@ -23041,7 +23178,7 @@ mod tests {
         };
 
         let handle = aspaces.write().mint_grant(
-            SecTaskId(2),
+            ProcessId(2),
             tairix_abi::hwtree::HwResource::mmio(0xFE98_0000, 0x4000),
         );
         let facility: &'static RecordingDmaFacility = Box::leak(Box::new(RecordingDmaFacility {
@@ -23086,7 +23223,7 @@ mod tests {
         };
 
         let handle = aspaces.write().mint_grant(
-            SecTaskId(2),
+            ProcessId(2),
             tairix_abi::hwtree::HwResource::dma_translated(
                 0x2_0000_0000,
                 0x2_0000_0000,
@@ -23135,7 +23272,7 @@ mod tests {
 
         // The grant declares a 0x1_0000-byte maximum extent.
         let handle = aspaces.write().mint_grant(
-            SecTaskId(2),
+            ProcessId(2),
             tairix_abi::hwtree::HwResource::dma(0x4000_0000, 0x1_0000),
         );
         let facility: &'static RecordingDmaFacility = Box::leak(Box::new(RecordingDmaFacility {
@@ -23178,7 +23315,7 @@ mod tests {
         };
 
         let handle = aspaces.write().mint_grant(
-            SecTaskId(2),
+            ProcessId(2),
             tairix_abi::hwtree::HwResource::dma(0x4000_0000, 0x1_0000),
         );
         let h = KernelSyscallHandlers::new(
@@ -23210,7 +23347,7 @@ mod tests {
         };
 
         let handle = aspaces.write().mint_grant(
-            SecTaskId(2),
+            ProcessId(2),
             tairix_abi::hwtree::HwResource::dma(0x4000_0000, 0x1_0000),
         );
         let facility: &'static RecordingDmaFacility = Box::leak(Box::new(RecordingDmaFacility {
@@ -23266,7 +23403,7 @@ mod tests {
             caps: &caps,
         };
         let handle = aspaces.write().mint_grant(
-            SecTaskId(2),
+            ProcessId(2),
             tairix_abi::hwtree::HwResource::dma(0x4000_0000, 0x1_0000),
         );
         let facility = recording_dma_facility();
@@ -23314,7 +23451,7 @@ mod tests {
         let ctl = UnsupportedController;
         let caps = make_caps_record(2, &[], sink);
         let handle = aspaces.write().mint_grant(
-            SecTaskId(2),
+            ProcessId(2),
             tairix_abi::hwtree::HwResource::dma(0x4000_0000, 0x1_0000),
         );
         let facility = recording_dma_facility();
@@ -23332,10 +23469,12 @@ mod tests {
             h.dma_free(&owner, handle + 1, 0xD000_0000),
             Err(Errno::NotFound)
         );
-        // Right handle value, wrong (foreign) task → NotFound.
+        // Right handle value, foreign *process* → NotFound. Its own record is
+        // what makes it a different process, not a sibling thread.
+        let foreign_caps = make_caps_record(3, &[], sink);
         let foreign = CallerContext {
             task_id: SecTaskId(3),
-            caps: &caps,
+            caps: &foreign_caps,
         };
         assert_eq!(
             h.dma_free(&foreign, handle, 0xD000_0000),
@@ -23359,7 +23498,7 @@ mod tests {
             caps: &caps,
         };
         let handle = aspaces.write().mint_grant(
-            SecTaskId(2),
+            ProcessId(2),
             tairix_abi::hwtree::HwResource::mmio(0xFE98_0000, 0x4000),
         );
         let facility = recording_dma_facility();
@@ -23390,7 +23529,7 @@ mod tests {
             caps: &caps,
         };
         let handle = aspaces.write().mint_grant(
-            SecTaskId(2),
+            ProcessId(2),
             tairix_abi::hwtree::HwResource::dma(0x4000_0000, 0x1_0000),
         );
         let h = KernelSyscallHandlers::new(
@@ -23424,7 +23563,7 @@ mod tests {
         let aspaces = RwLock::new(AddressSpaceRegistry::new());
         aspaces
             .write()
-            .register(SecTaskId(2), space, physmap)
+            .register(ProcessId(2), space, physmap)
             .expect("registration succeeds");
         (arch, table, ipc, aspaces, unseeded_rng(), IrqTable::new(31))
     }
@@ -23466,11 +23605,11 @@ mod tests {
             caps: &caps,
         };
         aspaces.write().mint_grant(
-            SecTaskId(2),
+            ProcessId(2),
             tairix_abi::hwtree::HwResource::mmio(0xFE98_0000, 0x4000),
         );
         aspaces.write().mint_grant(
-            SecTaskId(2),
+            ProcessId(2),
             tairix_abi::hwtree::HwResource::dma(0x4000_0000, 0x1_0000),
         );
         let h = KernelSyscallHandlers::new(
@@ -23495,7 +23634,7 @@ mod tests {
             caps: &caps,
         };
         aspaces.write().mint_grant(
-            SecTaskId(2),
+            ProcessId(2),
             tairix_abi::hwtree::HwResource::mmio(0xFE98_0000, 0x4000),
         );
         let h = KernelSyscallHandlers::new(
@@ -23529,7 +23668,7 @@ mod tests {
             caps: &caps,
         };
         aspaces.write().mint_grant(
-            SecTaskId(2),
+            ProcessId(2),
             tairix_abi::hwtree::HwResource::mmio(0xFE98_0000, 0x4000),
         );
         let h = KernelSyscallHandlers::new(
@@ -23556,7 +23695,7 @@ mod tests {
         let aspaces = RwLock::new(AddressSpaceRegistry::new());
         aspaces
             .write()
-            .register(SecTaskId(3), space, physmap)
+            .register(ProcessId(3), space, physmap)
             .expect("registration succeeds");
         let rng = unseeded_rng();
         let irq = IrqTable::new(31);
@@ -23568,7 +23707,7 @@ mod tests {
         };
         // The grant belongs to task 2, not the calling task 3.
         aspaces.write().mint_grant(
-            SecTaskId(2),
+            ProcessId(2),
             tairix_abi::hwtree::HwResource::mmio(0xFE98_0000, 0x4000),
         );
         let h = KernelSyscallHandlers::new(
@@ -23604,7 +23743,7 @@ mod tests {
     impl crate::procwait::ProcessWait for RecordingProcessWait {
         fn wait(
             &self,
-            parent: SecTaskId,
+            parent: ProcessId,
             pid: i32,
             flags: WaitFlags,
         ) -> Result<crate::procwait::WaitedChild, Errno> {
@@ -23614,7 +23753,7 @@ mod tests {
         }
         fn poll(
             &self,
-            parent: SecTaskId,
+            parent: ProcessId,
             pid: i32,
             flags: WaitFlags,
         ) -> Result<crate::procwait::WaitedChild, Errno> {
@@ -23625,10 +23764,10 @@ mod tests {
             *self.last_flags.lock() = Some(flags);
             self.result
         }
-        fn record_exit(&self, task: SecTaskId, code: i32) {
+        fn record_exit(&self, task: ProcessId, code: i32) {
             *self.last_exit.lock() = Some((task.0, code));
         }
-        fn register_child(&self, parent: SecTaskId, child: SecTaskId) {
+        fn register_child(&self, parent: ProcessId, child: ProcessId) {
             *self.last_register.lock() = Some((parent.0, child.0));
         }
     }
@@ -23652,7 +23791,7 @@ mod tests {
         let rng = unseeded_rng();
         aspaces
             .write()
-            .register(SecTaskId(2), space, physmap)
+            .register(ProcessId(2), space, physmap)
             .expect("registration succeeds");
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
@@ -23697,7 +23836,7 @@ mod tests {
         let rng = unseeded_rng();
         aspaces
             .write()
-            .register(SecTaskId(2), space, physmap)
+            .register(ProcessId(2), space, physmap)
             .expect("registration succeeds");
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
@@ -23743,7 +23882,7 @@ mod tests {
         let rng = unseeded_rng();
         aspaces
             .write()
-            .register(SecTaskId(2), space, physmap)
+            .register(ProcessId(2), space, physmap)
             .expect("registration succeeds");
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
@@ -23782,7 +23921,7 @@ mod tests {
         let rng = unseeded_rng();
         aspaces
             .write()
-            .register(SecTaskId(2), space, physmap)
+            .register(ProcessId(2), space, physmap)
             .expect("registration succeeds");
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
@@ -23832,16 +23971,16 @@ mod tests {
         }
     }
     impl crate::procsignal::ProcessSignal for RecordingProcessSignal {
-        fn resolve_child(&self, sender: SecTaskId, pid: i32) -> Result<SecTaskId, Errno> {
+        fn resolve_child(&self, sender: ProcessId, pid: i32) -> Result<ProcessId, Errno> {
             match self.child {
                 Some((s, p)) if s == sender.0 && p == pid => {
-                    Ok(SecTaskId(u64::try_from(pid).unwrap_or_default()))
+                    Ok(ProcessId(u64::try_from(pid).unwrap_or_default()))
                 }
                 _ => Err(Errno::NotFound),
             }
         }
 
-        fn signal_task(&self, target: SecTaskId, signal: Signal) -> Result<(), Errno> {
+        fn signal_task(&self, target: ProcessId, signal: Signal) -> Result<(), Errno> {
             *self.last.lock() = Some((target.0, signal));
             self.result
         }
@@ -24715,7 +24854,7 @@ mod tests {
         let rng = unseeded_rng();
         aspaces
             .write()
-            .register(SecTaskId(2), space, physmap)
+            .register(ProcessId(2), space, physmap)
             .expect("registration succeeds");
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
@@ -24882,7 +25021,7 @@ mod tests {
         let rng = unseeded_rng();
         aspaces
             .write()
-            .register(SecTaskId(2), space, physmap)
+            .register(ProcessId(2), space, physmap)
             .expect("registration succeeds");
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
@@ -24926,7 +25065,7 @@ mod tests {
         let rng = unseeded_rng();
         aspaces
             .write()
-            .register(SecTaskId(2), space, physmap)
+            .register(ProcessId(2), space, physmap)
             .expect("registration succeeds");
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
@@ -24992,7 +25131,7 @@ mod tests {
         let rng = unseeded_rng();
         aspaces
             .write()
-            .register(SecTaskId(2), space, physmap)
+            .register(ProcessId(2), space, physmap)
             .expect("registration succeeds");
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
@@ -25013,7 +25152,7 @@ mod tests {
         assert_eq!(
             aspaces
                 .read()
-                .limits(SecTaskId(2))
+                .limits(ProcessId(2))
                 .get(LimitKind::Processes),
             lower
         );
@@ -25053,7 +25192,7 @@ mod tests {
         let rng = unseeded_rng();
         aspaces
             .write()
-            .register(SecTaskId(2), space, physmap)
+            .register(ProcessId(2), space, physmap)
             .expect("registration succeeds");
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
@@ -25082,7 +25221,7 @@ mod tests {
         assert_eq!(
             aspaces
                 .read()
-                .limits(SecTaskId(2))
+                .limits(ProcessId(2))
                 .get(LimitKind::Processes),
             lower
         );
@@ -25107,7 +25246,7 @@ mod tests {
         let rng = unseeded_rng();
         aspaces
             .write()
-            .register(SecTaskId(2), space, physmap)
+            .register(ProcessId(2), space, physmap)
             .expect("registration succeeds");
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
@@ -25133,7 +25272,7 @@ mod tests {
         assert_eq!(
             aspaces
                 .read()
-                .limits(SecTaskId(2))
+                .limits(ProcessId(2))
                 .get(LimitKind::Processes),
             higher
         );
@@ -25159,7 +25298,7 @@ mod tests {
         let rng = unseeded_rng();
         aspaces
             .write()
-            .register(SecTaskId(2), space, physmap)
+            .register(ProcessId(2), space, physmap)
             .expect("registration succeeds");
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
@@ -25177,7 +25316,7 @@ mod tests {
             Err(Errno::OutOfRange)
         );
         // Nothing was stored: the caller still runs under the default.
-        assert_eq!(aspaces.read().limits(SecTaskId(2)), LimitSet::DEFAULT);
+        assert_eq!(aspaces.read().limits(ProcessId(2)), LimitSet::DEFAULT);
     }
 
     /// Build the minimal handler fixture the pin tests share: no producer
@@ -25216,12 +25355,12 @@ mod tests {
         let (aspaces, h) = pin_fixture();
         aspaces
             .write()
-            .charge_aspace_bytes(SecTaskId(5), 3 * PAGE_SIZE as u64);
-        let before = aspaces.read().mapped_aspace_bytes(SecTaskId(5));
+            .charge_aspace_bytes(ProcessId(5), 3 * PAGE_SIZE as u64);
+        let before = aspaces.read().mapped_aspace_bytes(ProcessId(5));
         // No global tier installed: a no-op that changes nothing.
-        h.ramzip_direct_reclaim(SecTaskId(5));
-        assert_eq!(aspaces.read().mapped_aspace_bytes(SecTaskId(5)), before);
-        assert!(!aspaces.read().is_pinned(SecTaskId(5)));
+        h.ramzip_direct_reclaim(ProcessId(5));
+        assert_eq!(aspaces.read().mapped_aspace_bytes(ProcessId(5)), before);
+        assert!(!aspaces.read().is_pinned(ProcessId(5)));
     }
 
     /// `mem_pin` marks the kernel-trusted caller, is idempotent, and
@@ -25236,16 +25375,16 @@ mod tests {
             task_id: SecTaskId(2),
             caps: &caps,
         };
-        assert!(!aspaces.read().is_pinned(SecTaskId(2)));
+        assert!(!aspaces.read().is_pinned(ProcessId(2)));
         assert_eq!(h.mem_pin(&ctx), Ok(0));
-        assert!(aspaces.read().is_pinned(SecTaskId(2)));
+        assert!(aspaces.read().is_pinned(ProcessId(2)));
         // Re-pinning an already pinned caller is success, not an error.
         assert_eq!(h.mem_pin(&ctx), Ok(0));
-        assert!(aspaces.read().is_pinned(SecTaskId(2)));
+        assert!(aspaces.read().is_pinned(ProcessId(2)));
         assert_eq!(h.mem_unpin(&ctx), Ok(0));
-        assert!(!aspaces.read().is_pinned(SecTaskId(2)));
+        assert!(!aspaces.read().is_pinned(ProcessId(2)));
         assert_eq!(h.mem_unpin(&ctx), Ok(0));
-        assert!(!aspaces.read().is_pinned(SecTaskId(2)));
+        assert!(!aspaces.read().is_pinned(ProcessId(2)));
     }
 
     /// `sched_set_realtime` flips the kernel-trusted caller's own
@@ -25303,14 +25442,14 @@ mod tests {
         let bound = ResourceLimit::new(2 * page, 2 * page).expect("well-formed");
         aspaces
             .write()
-            .set_limit(SecTaskId(2), LimitKind::PinnedMemoryBytes, bound);
-        aspaces.write().charge_aspace_bytes(SecTaskId(2), 3 * page);
+            .set_limit(ProcessId(2), LimitKind::PinnedMemoryBytes, bound);
+        aspaces.write().charge_aspace_bytes(ProcessId(2), 3 * page);
         assert_eq!(h.mem_pin(&ctx), Err(Errno::OutOfRange));
-        assert!(!aspaces.read().is_pinned(SecTaskId(2)));
+        assert!(!aspaces.read().is_pinned(ProcessId(2)));
         // Shrinking under the bound makes the same pin admissible.
-        aspaces.write().credit_aspace_bytes(SecTaskId(2), 2 * page);
+        aspaces.write().credit_aspace_bytes(ProcessId(2), 2 * page);
         assert_eq!(h.mem_pin(&ctx), Ok(0));
-        assert!(aspaces.read().is_pinned(SecTaskId(2)));
+        assert!(aspaces.read().is_pinned(ProcessId(2)));
     }
 
     /// While pinned, `mem_map` growth is bounded by the pinned budget
@@ -25331,8 +25470,8 @@ mod tests {
         let bound = ResourceLimit::new(2 * page, 2 * page).expect("well-formed");
         aspaces
             .write()
-            .set_limit(SecTaskId(2), LimitKind::PinnedMemoryBytes, bound);
-        aspaces.write().charge_aspace_bytes(SecTaskId(2), page);
+            .set_limit(ProcessId(2), LimitKind::PinnedMemoryBytes, bound);
+        aspaces.write().charge_aspace_bytes(ProcessId(2), page);
         assert_eq!(h.mem_pin(&ctx), Ok(0));
         // One more page fits the budget: the bound admits it and the
         // request reaches the (inert) producer.
@@ -25442,7 +25581,7 @@ mod tests {
         let rng = unseeded_rng();
         aspaces
             .write()
-            .register(SecTaskId(2), space, physmap)
+            .register(ProcessId(2), space, physmap)
             .expect("registration succeeds");
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
@@ -25515,7 +25654,7 @@ mod tests {
         let rng = unseeded_rng();
         aspaces
             .write()
-            .register(SecTaskId(2), space, physmap)
+            .register(ProcessId(2), space, physmap)
             .expect("registration succeeds");
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
@@ -25564,7 +25703,7 @@ mod tests {
         let rng = unseeded_rng();
         aspaces
             .write()
-            .register(SecTaskId(2), space, physmap)
+            .register(ProcessId(2), space, physmap)
             .expect("registration succeeds");
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
@@ -25881,7 +26020,7 @@ mod tests {
         let rng = unseeded_rng();
         aspaces
             .write()
-            .register(SecTaskId(2), space, physmap)
+            .register(ProcessId(2), space, physmap)
             .expect("registration succeeds");
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
@@ -26176,7 +26315,7 @@ mod tests {
         let rng = unseeded_rng();
         aspaces
             .write()
-            .register(SecTaskId(2), space, physmap)
+            .register(ProcessId(2), space, physmap)
             .expect("registration succeeds");
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
@@ -26294,7 +26433,7 @@ mod tests {
         let rng = unseeded_rng();
         aspaces
             .write()
-            .register(SecTaskId(2), space, physmap)
+            .register(ProcessId(2), space, physmap)
             .expect("registration succeeds");
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
@@ -26478,7 +26617,7 @@ mod tests {
         let rng = unseeded_rng();
         aspaces
             .write()
-            .register(SecTaskId(2), space, physmap)
+            .register(ProcessId(2), space, physmap)
             .expect("registration succeeds");
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
@@ -26533,7 +26672,7 @@ mod tests {
         let rng = unseeded_rng();
         aspaces
             .write()
-            .register(SecTaskId(2), space, physmap)
+            .register(ProcessId(2), space, physmap)
             .expect("registration succeeds");
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
@@ -26615,7 +26754,7 @@ mod tests {
         let rng = unseeded_rng();
         aspaces
             .write()
-            .register(SecTaskId(2), space, physmap)
+            .register(ProcessId(2), space, physmap)
             .expect("registration succeeds");
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
@@ -26801,7 +26940,7 @@ mod tests {
         let rng = unseeded_rng();
         aspaces
             .write()
-            .register(SecTaskId(2), space, physmap)
+            .register(ProcessId(2), space, physmap)
             .expect("registration succeeds");
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
@@ -26842,17 +26981,17 @@ mod tests {
         let rng = unseeded_rng();
         aspaces
             .write()
-            .register(SecTaskId(2), space, physmap)
+            .register(ProcessId(2), space, physmap)
             .expect("registration succeeds");
         // The driver holds a grant for a *different* window, so the emitted
         // node's resource is not covered.
         aspaces.write().mint_grant(
-            SecTaskId(2),
+            ProcessId(2),
             tairix_abi::HwResource::mmio(0x3F20_0000, 0x1000),
         );
         // The caller is a driver loaded for a node, so it passes the
         // loaded-node gate and the test exercises the *coverage* refusal.
-        aspaces.write().set_loaded_node(SecTaskId(2), 1);
+        aspaces.write().set_loaded_node(ProcessId(2), 1);
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
         let caps = make_caps_record(2, &[CapabilityId::HW_EMIT], sink);
@@ -26897,12 +27036,12 @@ mod tests {
         let rng = unseeded_rng();
         aspaces
             .write()
-            .register(SecTaskId(2), space, physmap)
+            .register(ProcessId(2), space, physmap)
             .expect("registration succeeds");
         // A grant that *would* cover the resource — but no loaded node is
         // recorded, so the emitter still cannot publish.
         aspaces.write().mint_grant(
-            SecTaskId(2),
+            ProcessId(2),
             tairix_abi::HwResource::mmio(0xFE98_0000, 0x1_0000),
         );
         let irq = IrqTable::new(31);
@@ -26946,16 +27085,16 @@ mod tests {
         let rng = unseeded_rng();
         aspaces
             .write()
-            .register(SecTaskId(2), space, physmap)
+            .register(ProcessId(2), space, physmap)
             .expect("registration succeeds");
         // A grant whose window contains the emitted resource fully covers it.
         aspaces.write().mint_grant(
-            SecTaskId(2),
+            ProcessId(2),
             tairix_abi::HwResource::mmio(0xFE98_0000, 0x1_0000),
         );
         // The emitter is a driver loaded for node 9; its published child is
         // parented under exactly that node.
-        aspaces.write().set_loaded_node(SecTaskId(2), 9);
+        aspaces.write().set_loaded_node(ProcessId(2), 9);
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
         let caps = make_caps_record(2, &[CapabilityId::HW_EMIT], sink);
@@ -27005,11 +27144,11 @@ mod tests {
         let rng = unseeded_rng();
         aspaces
             .write()
-            .register(SecTaskId(2), space, physmap)
+            .register(ProcessId(2), space, physmap)
             .expect("registration succeeds");
         // The caller is a driver loaded for node 9; it can only ever set
         // node 9's health.
-        aspaces.write().set_loaded_node(SecTaskId(2), 9);
+        aspaces.write().set_loaded_node(ProcessId(2), 9);
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
         let caps = make_caps_record(2, &[CapabilityId::HW_EMIT], sink);
@@ -27055,7 +27194,7 @@ mod tests {
         let (space3, physmap3) = send_aspace(MapFlags::READ | MapFlags::USER, &[0u8]);
         aspaces
             .write()
-            .register(SecTaskId(3), space3, physmap3)
+            .register(ProcessId(3), space3, physmap3)
             .expect("registration succeeds");
         assert_eq!(h.hw_node_health(&other, 1), Err(Errno::PermissionDenied));
         assert_eq!(
@@ -27082,10 +27221,10 @@ mod tests {
         let rng = unseeded_rng();
         aspaces
             .write()
-            .register(SecTaskId(2), space, physmap)
+            .register(ProcessId(2), space, physmap)
             .expect("registration succeeds");
         // The caller is a driver autoloaded for node 9.
-        aspaces.write().set_loaded_node(SecTaskId(2), 9);
+        aspaces.write().set_loaded_node(ProcessId(2), 9);
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
         // No capability granted: learning one's own node id is unprivileged.
@@ -27111,7 +27250,7 @@ mod tests {
         let (space3, physmap3) = send_aspace(MapFlags::READ | MapFlags::USER, &[0u8]);
         aspaces
             .write()
-            .register(SecTaskId(3), space3, physmap3)
+            .register(ProcessId(3), space3, physmap3)
             .expect("registration succeeds");
         assert_eq!(h.hw_self_node(&other), Err(Errno::NotFound));
     }
@@ -27141,13 +27280,13 @@ mod tests {
         let rng = unseeded_rng();
         aspaces
             .write()
-            .register(SecTaskId(2), space, physmap)
+            .register(ProcessId(2), space, physmap)
             .expect("registration succeeds");
         aspaces.write().mint_grant(
-            SecTaskId(2),
+            ProcessId(2),
             tairix_abi::HwResource::mmio(0xFE98_0000, 0x1_0000),
         );
-        aspaces.write().set_loaded_node(SecTaskId(2), 9);
+        aspaces.write().set_loaded_node(ProcessId(2), 9);
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
         let caps = make_caps_record(2, &[CapabilityId::HW_EMIT], sink);
@@ -27238,17 +27377,17 @@ mod tests {
         let rng = unseeded_rng();
         aspaces
             .write()
-            .register(SecTaskId(2), space, physmap)
+            .register(ProcessId(2), space, physmap)
             .expect("registration succeeds");
         // The bridge's outbound window — CPU side [0xFE00_0000, 0xFF00_0000) —
         // contains the child's BAR, so the bridge legitimately grants it.
         aspaces.write().mint_grant(
-            SecTaskId(2),
+            ProcessId(2),
             tairix_abi::HwResource::bus_window(0xFE00_0000, 0x100_0000, 0x6_0000_0000),
         );
         // The bridge driver is loaded for its own node; the child is parented
         // under it.
-        aspaces.write().set_loaded_node(SecTaskId(2), 1);
+        aspaces.write().set_loaded_node(ProcessId(2), 1);
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
         let caps = make_caps_record(2, &[CapabilityId::HW_EMIT], sink);
@@ -27293,12 +27432,12 @@ mod tests {
         let rng = unseeded_rng();
         aspaces
             .write()
-            .register(SecTaskId(2), space, physmap)
+            .register(ProcessId(2), space, physmap)
             .expect("registration succeeds");
         // A driver loaded for a node, so the publish reaches the store (which
         // here is the inert `NULL_HW_TREE`) rather than failing the
         // loaded-node gate first.
-        aspaces.write().set_loaded_node(SecTaskId(2), 2);
+        aspaces.write().set_loaded_node(ProcessId(2), 2);
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
         let caps = make_caps_record(2, &[CapabilityId::HW_EMIT], sink);
@@ -27332,11 +27471,11 @@ mod tests {
         let rng = unseeded_rng();
         aspaces
             .write()
-            .register(SecTaskId(2), space, physmap)
+            .register(ProcessId(2), space, physmap)
             .expect("registration succeeds");
         // The caller is the bus driver loaded for node 9; it owns the
         // children parented under 9 and may retire them.
-        aspaces.write().set_loaded_node(SecTaskId(2), 9);
+        aspaces.write().set_loaded_node(ProcessId(2), 9);
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
         let caps = make_caps_record(2, &[CapabilityId::HW_EMIT], sink);
@@ -27380,7 +27519,7 @@ mod tests {
         let rng = unseeded_rng();
         aspaces
             .write()
-            .register(SecTaskId(2), space, physmap)
+            .register(ProcessId(2), space, physmap)
             .expect("registration succeeds");
         // Deliberately no `set_loaded_node`: the caller owns nothing.
         let irq = IrqTable::new(31);
@@ -27419,9 +27558,9 @@ mod tests {
         let rng = unseeded_rng();
         aspaces
             .write()
-            .register(SecTaskId(2), space, physmap)
+            .register(ProcessId(2), space, physmap)
             .expect("registration succeeds");
-        aspaces.write().set_loaded_node(SecTaskId(2), 9);
+        aspaces.write().set_loaded_node(ProcessId(2), 9);
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
         let caps = make_caps_record(2, &[CapabilityId::HW_EMIT], sink);
@@ -27459,9 +27598,9 @@ mod tests {
         let rng = unseeded_rng();
         aspaces
             .write()
-            .register(SecTaskId(2), space, physmap)
+            .register(ProcessId(2), space, physmap)
             .expect("registration succeeds");
-        aspaces.write().set_loaded_node(SecTaskId(2), 9);
+        aspaces.write().set_loaded_node(ProcessId(2), 9);
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
         let caps = make_caps_record(2, &[CapabilityId::HW_EMIT], sink);
@@ -27497,9 +27636,9 @@ mod tests {
         let rng = unseeded_rng();
         aspaces
             .write()
-            .register(SecTaskId(2), space, physmap)
+            .register(ProcessId(2), space, physmap)
             .expect("registration succeeds");
-        aspaces.write().set_loaded_node(SecTaskId(2), 2);
+        aspaces.write().set_loaded_node(ProcessId(2), 2);
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
         let caps = make_caps_record(2, &[CapabilityId::HW_EMIT], sink);
@@ -27535,9 +27674,9 @@ mod tests {
         let rng = unseeded_rng();
         aspaces
             .write()
-            .register(SecTaskId(2), space, physmap)
+            .register(ProcessId(2), space, physmap)
             .expect("registration succeeds");
-        aspaces.write().set_loaded_node(SecTaskId(2), 9);
+        aspaces.write().set_loaded_node(ProcessId(2), 9);
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
         let caps = make_caps_record(2, &[CapabilityId::HW_EMIT], sink);
@@ -27592,9 +27731,9 @@ mod tests {
         let rng = unseeded_rng();
         aspaces
             .write()
-            .register(SecTaskId(2), space, physmap)
+            .register(ProcessId(2), space, physmap)
             .expect("registration succeeds");
-        aspaces.write().set_loaded_node(SecTaskId(2), 9);
+        aspaces.write().set_loaded_node(ProcessId(2), 9);
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
         let caps = make_caps_record(2, &[CapabilityId::HW_EMIT], sink);
@@ -27648,9 +27787,9 @@ mod tests {
         let rng = unseeded_rng();
         aspaces
             .write()
-            .register(SecTaskId(2), space, physmap)
+            .register(ProcessId(2), space, physmap)
             .expect("registration succeeds");
-        aspaces.write().set_loaded_node(SecTaskId(2), 9);
+        aspaces.write().set_loaded_node(ProcessId(2), 9);
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
         let caps = make_caps_record(2, &[CapabilityId::HW_EMIT], sink);
@@ -27696,9 +27835,9 @@ mod tests {
         let rng = unseeded_rng();
         aspaces
             .write()
-            .register(SecTaskId(2), space, physmap)
+            .register(ProcessId(2), space, physmap)
             .expect("registration succeeds");
-        aspaces.write().set_loaded_node(SecTaskId(2), 9);
+        aspaces.write().set_loaded_node(ProcessId(2), 9);
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
         let caps = make_caps_record(2, &[CapabilityId::HW_EMIT], sink);
@@ -27746,9 +27885,9 @@ mod tests {
         let rng = unseeded_rng();
         aspaces
             .write()
-            .register(SecTaskId(2), space, physmap)
+            .register(ProcessId(2), space, physmap)
             .expect("registration succeeds");
-        aspaces.write().set_loaded_node(SecTaskId(2), 9);
+        aspaces.write().set_loaded_node(ProcessId(2), 9);
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
         let caps = make_caps_record(2, &[CapabilityId::HW_EMIT], sink);
@@ -27786,9 +27925,9 @@ mod tests {
         let rng = unseeded_rng();
         aspaces
             .write()
-            .register(SecTaskId(2), space, physmap)
+            .register(ProcessId(2), space, physmap)
             .expect("registration succeeds");
-        aspaces.write().set_loaded_node(SecTaskId(2), 9);
+        aspaces.write().set_loaded_node(ProcessId(2), 9);
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
         let caps = make_caps_record(2, &[CapabilityId::HW_EMIT], sink);
@@ -28050,7 +28189,7 @@ mod tests {
         let rng = unseeded_rng();
         aspaces
             .write()
-            .register(SecTaskId(2), space, physmap)
+            .register(ProcessId(2), space, physmap)
             .expect("registration succeeds");
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
@@ -28118,7 +28257,7 @@ mod tests {
         let rng = unseeded_rng();
         aspaces
             .write()
-            .register(SecTaskId(tid), space, physmap)
+            .register(ProcessId(tid), space, physmap)
             .expect("registration succeeds");
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
@@ -28155,7 +28294,7 @@ mod tests {
 
         // The reply landed in the caller's page-2 buffer.
         let guard = aspaces.read();
-        let (_space, physmap) = guard.resolve(SecTaskId(tid)).expect("aspace present");
+        let (_space, physmap) = guard.resolve(ProcessId(tid)).expect("aspace present");
         assert_eq!(read_reply_page(physmap, 4), b"pong");
         crate::callreg::unregister(EndpointId(id));
     }
@@ -28178,7 +28317,7 @@ mod tests {
         let rng = unseeded_rng();
         aspaces
             .write()
-            .register(SecTaskId(tid), space, physmap)
+            .register(ProcessId(tid), space, physmap)
             .expect("registration succeeds");
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
@@ -28235,7 +28374,7 @@ mod tests {
         let rng = unseeded_rng();
         aspaces
             .write()
-            .register(SecTaskId(2), space, physmap)
+            .register(ProcessId(2), space, physmap)
             .expect("registration succeeds");
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
@@ -28254,7 +28393,7 @@ mod tests {
         assert_eq!(h.call_post(&ctx, id, 0x1000, 4, 0x2000, u64::MAX), Ok(0));
         let ticket = {
             let guard = aspaces.read();
-            let (_s, physmap) = guard.resolve(SecTaskId(2)).expect("aspace present");
+            let (_s, physmap) = guard.resolve(ProcessId(2)).expect("aspace present");
             read_ticket(physmap)
         };
 
@@ -28276,7 +28415,7 @@ mod tests {
         // The reap now copies the reply out and reports its length.
         assert_eq!(h.call_reap(&ctx, id, ticket, 0x2000, 64), Ok(4));
         let guard = aspaces.read();
-        let (_s, physmap) = guard.resolve(SecTaskId(2)).expect("aspace present");
+        let (_s, physmap) = guard.resolve(ProcessId(2)).expect("aspace present");
         assert_eq!(read_reply_page(physmap, 4), b"pong");
         drop(guard);
         crate::callreg::unregister(EndpointId(id));
@@ -28300,7 +28439,7 @@ mod tests {
         let rng = unseeded_rng();
         aspaces
             .write()
-            .register(SecTaskId(2), space, physmap)
+            .register(ProcessId(2), space, physmap)
             .expect("registration succeeds");
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
@@ -28319,7 +28458,7 @@ mod tests {
         assert_eq!(h.call_post(&ctx, id, 0x1000, 4, 0x2000, 100), Ok(0));
         let ticket = {
             let guard = aspaces.read();
-            let (_s, physmap) = guard.resolve(SecTaskId(2)).expect("aspace present");
+            let (_s, physmap) = guard.resolve(ProcessId(2)).expect("aspace present");
             read_ticket(physmap)
         };
 
@@ -28359,7 +28498,7 @@ mod tests {
         let rng = unseeded_rng();
         aspaces
             .write()
-            .register(SecTaskId(2), space, physmap)
+            .register(ProcessId(2), space, physmap)
             .expect("registration succeeds");
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
@@ -28377,7 +28516,7 @@ mod tests {
         assert_eq!(h.call_post(&ctx, id, 0x1000, 4, 0x2000, u64::MAX), Ok(0));
         let ticket = {
             let guard = aspaces.read();
-            let (_s, physmap) = guard.resolve(SecTaskId(2)).expect("aspace present");
+            let (_s, physmap) = guard.resolve(ProcessId(2)).expect("aspace present");
             read_ticket(physmap)
         };
         // A ticket the caller never posted cancels nothing (fail closed).
@@ -28465,7 +28604,7 @@ mod tests {
         let rng = unseeded_rng();
         aspaces
             .write()
-            .register(SecTaskId(5), space, physmap)
+            .register(ProcessId(5), space, physmap)
             .expect("registration succeeds");
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
@@ -28523,7 +28662,7 @@ mod tests {
         let rng = unseeded_rng();
         aspaces
             .write()
-            .register(SecTaskId(0x5709), space, physmap)
+            .register(ProcessId(0x5709), space, physmap)
             .expect("registration succeeds");
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
@@ -28608,7 +28747,7 @@ mod tests {
         let rng = unseeded_rng();
         aspaces
             .write()
-            .register(SecTaskId(5), space, physmap)
+            .register(ProcessId(5), space, physmap)
             .expect("registration succeeds");
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
@@ -28626,16 +28765,16 @@ mod tests {
         // No grant for the endpoint before creation.
         assert!(!aspaces
             .read()
-            .grant_covers(SecTaskId(5), &tairix_abi::HwResource::endpoint(id)));
+            .grant_covers(ProcessId(5), &tairix_abi::HwResource::endpoint(id)));
         assert_eq!(h.call_create(&ctx, id, 0x1000, 0x2000, 64, 64, 4), Ok(0));
         // The creator now holds the per-endpoint grant for exactly this id.
         assert!(aspaces
             .read()
-            .grant_covers(SecTaskId(5), &tairix_abi::HwResource::endpoint(id)));
+            .grant_covers(ProcessId(5), &tairix_abi::HwResource::endpoint(id)));
         // …and not for a neighbouring id (the grant is scoped to one endpoint).
         assert!(!aspaces
             .read()
-            .grant_covers(SecTaskId(5), &tairix_abi::HwResource::endpoint(id + 1)));
+            .grant_covers(ProcessId(5), &tairix_abi::HwResource::endpoint(id + 1)));
         crate::callreg::unregister(EndpointId(id));
     }
 
@@ -28732,14 +28871,14 @@ mod tests {
         let rng = unseeded_rng();
         aspaces
             .write()
-            .register(SecTaskId(tid), space, physmap)
+            .register(ProcessId(tid), space, physmap)
             .expect("registration succeeds");
         let id = 0xCA11_4003;
         // The caller was granted exactly this endpoint (as an autoloaded class
         // driver would inherit it from its matched node).
         aspaces
             .write()
-            .mint_grant(SecTaskId(tid), tairix_abi::HwResource::endpoint(id));
+            .mint_grant(ProcessId(tid), tairix_abi::HwResource::endpoint(id));
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
         let caps = make_caps_record(tid, &[CapabilityId::IPC_ENDPOINT], sink);
@@ -28798,7 +28937,7 @@ mod tests {
         let holder = 0x9E11_0003;
         aspaces
             .write()
-            .register(SecTaskId(holder), space, physmap)
+            .register(ProcessId(holder), space, physmap)
             .expect("registration succeeds");
         // An endpoint id no other test binds: the call-endpoint registry is
         // process-global and these tests run in parallel, so a shared id
@@ -28807,10 +28946,10 @@ mod tests {
         let endpoint = tairix_abi::HwResource::endpoint(id);
         // The holder is granted exactly this endpoint, as an autoloaded class
         // driver inherits it from its matched node.
-        aspaces.write().mint_grant(SecTaskId(holder), endpoint);
+        aspaces.write().mint_grant(ProcessId(holder), endpoint);
         let _serving = register_grant_restricted_endpoint_owned_by(first_owner, id, sink);
         assert!(
-            aspaces.read().grant_covers(SecTaskId(holder), &endpoint),
+            aspaces.read().grant_covers(ProcessId(holder), &endpoint),
             "the holder starts out able to reach the endpoint it was granted"
         );
 
@@ -28818,7 +28957,7 @@ mod tests {
         // naming its id goes with it.
         crate::callreg::teardown_owned_by(first_owner, &aspaces, sink);
         assert!(
-            !aspaces.read().grant_covers(SecTaskId(holder), &endpoint),
+            !aspaces.read().grant_covers(ProcessId(holder), &endpoint),
             "a destroyed endpoint's grants are revoked, so its id is safe to reuse"
         );
 
@@ -28890,7 +29029,7 @@ mod tests {
         let rng = unseeded_rng();
         aspaces
             .write()
-            .register(SecTaskId(7), space, physmap)
+            .register(ProcessId(7), space, physmap)
             .expect("registration succeeds");
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
@@ -28915,7 +29054,7 @@ mod tests {
         );
         // The kernel-minted region id was written to `id_out` (page 2).
         let id_bytes = read_reply_page(
-            aspaces.read().resolve(SecTaskId(7)).expect("registered").1,
+            aspaces.read().resolve(ProcessId(7)).expect("registered").1,
             8,
         );
         let id = u64::from_le_bytes(id_bytes.try_into().expect("8 bytes"));
@@ -28924,12 +29063,12 @@ mod tests {
         // not covered (the grant is scoped to one region).
         assert!(aspaces
             .read()
-            .grant_covers(SecTaskId(7), &tairix_abi::HwResource::shared(id)));
+            .grant_covers(ProcessId(7), &tairix_abi::HwResource::shared(id)));
         assert!(!aspaces
             .read()
-            .grant_covers(SecTaskId(7), &tairix_abi::HwResource::shared(id + 1)));
+            .grant_covers(ProcessId(7), &tairix_abi::HwResource::shared(id + 1)));
         // Cleanup so the global region registry does not leak across tests.
-        let _ = crate::sharedreg::unmap(facility, SecTaskId(7), va);
+        let _ = crate::sharedreg::unmap(facility, ProcessId(7), va);
     }
 
     /// A mapping syscall publishes **its own region's** pages; it never
@@ -28979,7 +29118,7 @@ mod tests {
         let (space, physmap) = frozen_call_aspace(b"");
         aspaces
             .write()
-            .register(SecTaskId(21), space, physmap)
+            .register(ProcessId(21), space, physmap)
             .expect("registration succeeds");
 
         // Its live space: the same window, a large resident set, and the
@@ -28997,10 +29136,10 @@ mod tests {
         let facility: &'static RecordingSharedFacility =
             Box::leak(Box::new(RecordingSharedFacility { va: REGION_VA }));
         let (owner_va, id) =
-            crate::sharedreg::create(facility, SecTaskId(22), 1).expect("region created");
+            crate::sharedreg::create(facility, ProcessId(22), 1).expect("region created");
         let handle = aspaces
             .write()
-            .mint_grant(SecTaskId(21), tairix_abi::HwResource::shared(id));
+            .mint_grant(ProcessId(21), tairix_abi::HwResource::shared(id));
 
         let h = KernelSyscallHandlers::new(
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
@@ -29014,7 +29153,7 @@ mod tests {
         );
         let snapshot = || {
             let held = aspaces.read();
-            let (space, _) = held.resolve(SecTaskId(21)).expect("registered");
+            let (space, _) = held.resolve(ProcessId(21)).expect("registered");
             (space.translate(region_page).is_some(), space.mapped_pages())
         };
         assert_eq!(
@@ -29040,7 +29179,7 @@ mod tests {
         );
 
         // Cleanup so the global region registry does not leak across tests.
-        let _ = crate::sharedreg::unmap(facility, SecTaskId(22), owner_va);
+        let _ = crate::sharedreg::unmap(facility, ProcessId(22), owner_va);
     }
 
     /// `shm_map` fails closed for a forged handle (`NotFound`) and for a grant
@@ -29078,7 +29217,7 @@ mod tests {
         // A grant of the wrong kind (an IRQ line) is refused before mapping.
         let handle = aspaces
             .write()
-            .mint_grant(SecTaskId(8), tairix_abi::HwResource::irq(33, 1));
+            .mint_grant(ProcessId(8), tairix_abi::HwResource::irq(33, 1));
         assert_eq!(h.shm_map(&ctx, handle, 0x2000), Err(Errno::OutOfRange));
     }
 
@@ -29100,7 +29239,7 @@ mod tests {
         let rng = unseeded_rng();
         aspaces
             .write()
-            .register(SecTaskId(9), space, physmap)
+            .register(ProcessId(9), space, physmap)
             .expect("registration succeeds");
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
@@ -29118,24 +29257,24 @@ mod tests {
 
         // A two-page region another task created; the caller was granted it.
         let (owner_va, id) =
-            crate::sharedreg::create(facility, SecTaskId(10), 2).expect("region created");
+            crate::sharedreg::create(facility, ProcessId(10), 2).expect("region created");
         let handle = aspaces
             .write()
-            .mint_grant(SecTaskId(9), tairix_abi::HwResource::shared(id));
+            .mint_grant(ProcessId(9), tairix_abi::HwResource::shared(id));
 
         let va = h.shm_map(&ctx, handle, 0x2000).expect("shm_map succeeds");
         assert_eq!(va, 0x2_0000_3000, "the mapped base flows back");
         // The region's byte length — two whole pages, the registry's own
         // record — was written to `len_out` (page 2).
         let len_bytes = read_reply_page(
-            aspaces.read().resolve(SecTaskId(9)).expect("registered").1,
+            aspaces.read().resolve(ProcessId(9)).expect("registered").1,
             8,
         );
         let len = u64::from_le_bytes(len_bytes.try_into().expect("8 bytes"));
         assert_eq!(len, 2 * PAGE_SIZE as u64);
         // Cleanup so the global region registry does not leak across tests.
-        let _ = crate::sharedreg::unmap(facility, SecTaskId(9), va);
-        let _ = crate::sharedreg::unmap(facility, SecTaskId(10), owner_va);
+        let _ = crate::sharedreg::unmap(facility, ProcessId(9), va);
+        let _ = crate::sharedreg::unmap(facility, ProcessId(10), owner_va);
     }
 
     /// `shm_grant` delegates a mapping right only for a region the caller
@@ -29172,7 +29311,7 @@ mod tests {
         // unknown: still refused, nothing minted.
         let _own = aspaces
             .write()
-            .mint_grant(SecTaskId(7), tairix_abi::HwResource::shared(42));
+            .mint_grant(ProcessId(7), tairix_abi::HwResource::shared(42));
         assert_eq!(h.shm_grant(&ctx, 42, 0xD15_2001), Err(Errno::NotFound));
 
         // A live endpoint owned by the service task: the grant lands on the
@@ -29198,12 +29337,12 @@ mod tests {
         let handle = h.shm_grant(&ctx, 42, id).expect("grant mints a handle");
         // The recipient resolves it to exactly the shared region…
         assert_eq!(
-            aspaces.read().grant(SecTaskId(0x5707), handle),
+            aspaces.read().grant(ProcessId(0x5707), handle),
             Some(tairix_abi::HwResource::shared(42))
         );
         // …and the handle is meaningless when presented by anyone else
         // (owner-checked at `shm_map`; the number is useless to a bystander).
-        assert_eq!(aspaces.read().grant(SecTaskId(9), handle), None);
+        assert_eq!(aspaces.read().grant(ProcessId(9), handle), None);
         crate::callreg::unregister(EndpointId(id));
     }
 
@@ -29244,7 +29383,7 @@ mod tests {
         // recipient endpoint is unknown: still refused, nothing minted.
         let _own = aspaces
             .write()
-            .mint_grant(donor, tairix_abi::HwResource::endpoint(member));
+            .mint_grant(ProcessId(donor.0), tairix_abi::HwResource::endpoint(member));
         assert_eq!(h.call_grant(&ctx, member, registry), Err(Errno::NotFound));
 
         // A live recipient endpoint owned by the composing service: the
@@ -29273,20 +29412,20 @@ mod tests {
             .expect("grant mints a handle");
         // The recipient resolves it to exactly the delegated endpoint…
         assert_eq!(
-            aspaces.read().grant(SecTaskId(composer), handle),
+            aspaces.read().grant(ProcessId(composer), handle),
             Some(tairix_abi::HwResource::endpoint(member))
         );
         // …and to nothing else: delegation conveys one endpoint, not the
         // caller's whole authority.
         assert!(!aspaces.read().grant_covers(
-            SecTaskId(composer),
+            ProcessId(composer),
             &tairix_abi::HwResource::endpoint(member + 1)
         ));
         // The handle is meaningless when presented by anyone else, so the
         // number the donor forwards in-band is useless to a bystander.
         // (Handles are per-task, so the donor's *own* grant table has its own
         // numbering; the bystander here holds nothing at all.)
-        assert_eq!(aspaces.read().grant(SecTaskId(0x6A11_B75A), handle), None);
+        assert_eq!(aspaces.read().grant(ProcessId(0x6A11_B75A), handle), None);
         // Delegating again returns the same handle rather than growing the
         // recipient's grant table — authority is a set.
         assert_eq!(
@@ -29313,7 +29452,7 @@ mod tests {
         let rng = unseeded_rng();
         aspaces
             .write()
-            .register(SecTaskId(2), space, physmap)
+            .register(ProcessId(2), space, physmap)
             .expect("registration succeeds");
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
@@ -29352,7 +29491,7 @@ mod tests {
         assert_eq!(h.fd_grant(&ctx, dir, 3), Err(Errno::OutOfRange));
         let (pipe_read, _pipe_write) = aspaces
             .write()
-            .open_pipe(SecTaskId(2))
+            .open_pipe(ProcessId(2))
             .expect("pipe allocates");
         assert_eq!(h.fd_grant(&ctx, pipe_read, 3), Err(Errno::OutOfRange));
 
@@ -29368,7 +29507,7 @@ mod tests {
         let (rspace, rphysmap) = send_aspace(MapFlags::READ | MapFlags::USER, b"");
         aspaces
             .write()
-            .register(SecTaskId(3), rspace, rphysmap)
+            .register(ProcessId(3), rspace, rphysmap)
             .expect("recipient registers");
         let handle = h.fd_grant(&ctx, fd, 3).expect("grant mints a handle");
         assert!(handle >= 1, "handle 0 is the reserved invalid value");
@@ -29389,12 +29528,12 @@ mod tests {
         let rng = unseeded_rng();
         aspaces
             .write()
-            .register(SecTaskId(2), space, physmap)
+            .register(ProcessId(2), space, physmap)
             .expect("registration succeeds");
         let (rspace, rphysmap) = send_aspace(MapFlags::READ | MapFlags::USER, b"");
         aspaces
             .write()
-            .register(SecTaskId(3), rspace, rphysmap)
+            .register(ProcessId(3), rspace, rphysmap)
             .expect("recipient registers");
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
@@ -29424,7 +29563,7 @@ mod tests {
         // The recipient redeems once: the installed descriptor is a
         // read-only delegated backing carrying the grantor's identity.
         let recipient_caps = TaskCapabilities::derive(
-            SecTaskId(3),
+            ProcessId(3),
             UserId(2000),
             caps_with(&[]),
             caps_with(&[]),
@@ -29437,7 +29576,7 @@ mod tests {
         let rfd = u32::try_from(h.fd_redeem(&rctx, handle).expect("redeem installs")).unwrap();
         let entry = aspaces
             .read()
-            .open_file_entry(SecTaskId(3), rfd)
+            .open_file_entry(ProcessId(3), rfd)
             .expect("descriptor recorded");
         assert_eq!(entry.flags, OpenFlags::READ);
         match &entry.backing {
@@ -29468,7 +29607,7 @@ mod tests {
         let rng = unseeded_rng();
         aspaces
             .write()
-            .register(SecTaskId(2), space, physmap)
+            .register(ProcessId(2), space, physmap)
             .expect("registration succeeds");
         // The recipient's own memory must be writable for the read's
         // copy-out; its page also holds a path for the contrast open below.
@@ -29476,7 +29615,7 @@ mod tests {
             send_aspace(MapFlags::READ | MapFlags::WRITE | MapFlags::USER, b"/f");
         aspaces
             .write()
-            .register(SecTaskId(3), rspace, rphysmap)
+            .register(ProcessId(3), rspace, rphysmap)
             .expect("recipient registers");
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
@@ -29488,7 +29627,7 @@ mod tests {
         // The recipient runs as a different user and holds **no**
         // capability at all.
         let recipient_caps = TaskCapabilities::derive(
-            SecTaskId(3),
+            ProcessId(3),
             UserId(2000),
             caps_with(&[]),
             caps_with(&[]),
@@ -29549,9 +29688,9 @@ mod tests {
         // rest of its records: a second grant minted to the recipient dies
         // with it and can never be redeemed by a later task.
         let second = h.fd_grant(&gctx, fd, 3).expect("second grant mints");
-        aspaces.write().withdraw(SecTaskId(3));
+        aspaces.write().withdraw(ProcessId(3));
         assert_eq!(
-            aspaces.write().redeem_fd_delegation(SecTaskId(3), second),
+            aspaces.write().redeem_fd_delegation(ProcessId(3), second),
             Err(Errno::NotFound),
             "withdraw reclaimed the pending delegation"
         );
@@ -29798,7 +29937,7 @@ mod tests {
         let rng = unseeded_rng();
         aspaces
             .write()
-            .register(SecTaskId(0x570C), space, physmap)
+            .register(ProcessId(0x570C), space, physmap)
             .expect("registration succeeds");
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
@@ -29831,7 +29970,7 @@ mod tests {
         let token_bytes = read_reply_page(
             aspaces
                 .read()
-                .resolve(SecTaskId(0x570C))
+                .resolve(ProcessId(0x570C))
                 .expect("registered")
                 .1,
             8,
@@ -29913,7 +30052,7 @@ mod tests {
     impl ProcessWait for TableWait {
         fn wait(
             &self,
-            _parent: SecTaskId,
+            _parent: ProcessId,
             _pid: i32,
             _flags: WaitFlags,
         ) -> Result<crate::procwait::WaitedChild, Errno> {
@@ -29922,7 +30061,7 @@ mod tests {
 
         fn poll(
             &self,
-            parent: SecTaskId,
+            parent: ProcessId,
             pid: i32,
             flags: WaitFlags,
         ) -> Result<crate::procwait::WaitedChild, Errno> {
@@ -29933,15 +30072,15 @@ mod tests {
             }
         }
 
-        fn register_child(&self, parent: SecTaskId, child: SecTaskId) {
+        fn register_child(&self, parent: ProcessId, child: ProcessId) {
             self.0.lock().register(parent, child);
         }
 
-        fn record_exit(&self, task: SecTaskId, code: i32) {
+        fn record_exit(&self, task: ProcessId, code: i32) {
             self.0.lock().record_exit(task, code);
         }
 
-        fn child_state(&self, parent: SecTaskId, pid: i32) -> ChildPeek {
+        fn child_state(&self, parent: ProcessId, pid: i32) -> ChildPeek {
             self.0.lock().peek(parent, pid)
         }
     }
@@ -30073,7 +30212,7 @@ mod tests {
         let rng = unseeded_rng();
         aspaces
             .write()
-            .register(SecTaskId(7), space, physmap)
+            .register(ProcessId(7), space, physmap)
             .expect("registration succeeds");
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
@@ -30097,7 +30236,7 @@ mod tests {
         assert_eq!(h.waitset_wait(&ctx, set, 0, 0x2000), Ok(0));
         // The ready member's token was written to `token_out` (page 2).
         let token_bytes = read_reply_page(
-            aspaces.read().resolve(SecTaskId(7)).expect("registered").1,
+            aspaces.read().resolve(ProcessId(7)).expect("registered").1,
             8,
         );
         assert_eq!(
@@ -30172,7 +30311,7 @@ mod tests {
         let rng = unseeded_rng();
         aspaces
             .write()
-            .register(SecTaskId(0x5902), space, physmap)
+            .register(ProcessId(0x5902), space, physmap)
             .expect("registration succeeds");
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
@@ -30209,7 +30348,7 @@ mod tests {
         let token_bytes = read_reply_page(
             aspaces
                 .read()
-                .resolve(SecTaskId(0x5902))
+                .resolve(ProcessId(0x5902))
                 .expect("registered")
                 .1,
             8,
@@ -30249,7 +30388,7 @@ mod tests {
         let rng = unseeded_rng();
         aspaces
             .write()
-            .register(SecTaskId(0x5702), space, physmap)
+            .register(ProcessId(0x5702), space, physmap)
             .expect("registration succeeds");
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
@@ -30296,7 +30435,7 @@ mod tests {
         let token_bytes = read_reply_page(
             aspaces
                 .read()
-                .resolve(SecTaskId(0x5702))
+                .resolve(ProcessId(0x5702))
                 .expect("registered")
                 .1,
             8,
@@ -30337,7 +30476,7 @@ mod tests {
         let rng = unseeded_rng();
         aspaces
             .write()
-            .register(SecTaskId(0x5F03), space, physmap)
+            .register(ProcessId(0x5F03), space, physmap)
             .expect("registration succeeds");
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
@@ -30388,7 +30527,7 @@ mod tests {
             let bytes = read_reply_page(
                 aspaces
                     .read()
-                    .resolve(SecTaskId(0x5F03))
+                    .resolve(ProcessId(0x5F03))
                     .expect("registered")
                     .1,
                 8,
@@ -30426,7 +30565,7 @@ mod tests {
         let rng = unseeded_rng();
         aspaces
             .write()
-            .register(SecTaskId(0x5B09), space, physmap)
+            .register(ProcessId(0x5B09), space, physmap)
             .expect("registration succeeds");
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
@@ -30448,7 +30587,7 @@ mod tests {
         assert_eq!(h.call_post(&ctx, id, 0x1000, 4, 0x2000, u64::MAX), Ok(0));
         let ticket = {
             let guard = aspaces.read();
-            let (_s, physmap) = guard.resolve(SecTaskId(0x5B09)).expect("aspace present");
+            let (_s, physmap) = guard.resolve(ProcessId(0x5B09)).expect("aspace present");
             read_ticket(physmap)
         };
         let set = h.waitset_create(&ctx).expect("create");
@@ -30472,7 +30611,7 @@ mod tests {
         let token_bytes = read_reply_page(
             aspaces
                 .read()
-                .resolve(SecTaskId(0x5B09))
+                .resolve(ProcessId(0x5B09))
                 .expect("registered")
                 .1,
             8,
@@ -30507,7 +30646,7 @@ mod tests {
         let rng = unseeded_rng();
         aspaces
             .write()
-            .register(SecTaskId(0x5B0A), space, physmap)
+            .register(ProcessId(0x5B0A), space, physmap)
             .expect("registration succeeds");
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
@@ -30526,7 +30665,7 @@ mod tests {
         assert_eq!(h.call_post(&ctx, id, 0x1000, 4, 0x2000, 100), Ok(0));
         let ticket = {
             let guard = aspaces.read();
-            let (_s, physmap) = guard.resolve(SecTaskId(0x5B0A)).expect("aspace present");
+            let (_s, physmap) = guard.resolve(ProcessId(0x5B0A)).expect("aspace present");
             read_ticket(physmap)
         };
         let set = h.waitset_create(&ctx).expect("create");
@@ -30576,7 +30715,7 @@ mod tests {
         let rng = unseeded_rng();
         aspaces
             .write()
-            .register(SecTaskId(0x5B0B), space, physmap)
+            .register(ProcessId(0x5B0B), space, physmap)
             .expect("registration succeeds");
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
@@ -30596,7 +30735,7 @@ mod tests {
         assert_eq!(h.call_post(&ctx, id, 0x1000, 4, 0x2000, u64::MAX), Ok(0));
         let ticket = {
             let guard = aspaces.read();
-            let (_s, physmap) = guard.resolve(SecTaskId(0x5B0B)).expect("aspace present");
+            let (_s, physmap) = guard.resolve(ProcessId(0x5B0B)).expect("aspace present");
             read_ticket(physmap)
         };
         let set = h.waitset_create(&ctx).expect("create");
@@ -30621,7 +30760,7 @@ mod tests {
         let token_bytes = read_reply_page(
             aspaces
                 .read()
-                .resolve(SecTaskId(0x5B0B))
+                .resolve(ProcessId(0x5B0B))
                 .expect("registered")
                 .1,
             8,
@@ -30754,7 +30893,7 @@ mod tests {
         let rng = unseeded_rng();
         aspaces
             .write()
-            .register(SecTaskId(0x5707), space, physmap)
+            .register(ProcessId(0x5707), space, physmap)
             .expect("registration succeeds");
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
@@ -30795,7 +30934,7 @@ mod tests {
         let token_bytes = read_reply_page(
             aspaces
                 .read()
-                .resolve(SecTaskId(0x5707))
+                .resolve(ProcessId(0x5707))
                 .expect("registered")
                 .1,
             8,
@@ -30832,7 +30971,7 @@ mod tests {
         let rng = unseeded_rng();
         aspaces
             .write()
-            .register(SecTaskId(0x5710), space, physmap)
+            .register(ProcessId(0x5710), space, physmap)
             .expect("registration succeeds");
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
@@ -30881,7 +31020,7 @@ mod tests {
         let token_bytes = read_reply_page(
             aspaces
                 .read()
-                .resolve(SecTaskId(0x5710))
+                .resolve(ProcessId(0x5710))
                 .expect("registered")
                 .1,
             8,
@@ -30919,7 +31058,7 @@ mod tests {
         let rng = unseeded_rng();
         aspaces
             .write()
-            .register(SecTaskId(0x5712), space, physmap)
+            .register(ProcessId(0x5712), space, physmap)
             .expect("registration succeeds");
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
@@ -31037,12 +31176,12 @@ mod tests {
         // another task's resource, only mis-name one of the caller's own.
         let (foreign_read_fd, _foreign_write_fd) = aspaces
             .write()
-            .open_pipe(SecTaskId(0x570C))
+            .open_pipe(ProcessId(0x570C))
             .expect("foreign pipe minted");
         let file_fd = aspaces
             .write()
             .open_file(
-                SecTaskId(0x570E),
+                ProcessId(0x570E),
                 alloc::string::String::from("/Storage/x"),
                 OpenFlags::READ,
             )
@@ -31053,7 +31192,7 @@ mod tests {
         );
         let (read_fd, write_fd) = aspaces
             .write()
-            .open_pipe(SecTaskId(0x570E))
+            .open_pipe(ProcessId(0x570E))
             .expect("pipe minted");
 
         let set = h.waitset_create(&ctx).expect("create");
@@ -31084,7 +31223,7 @@ mod tests {
 
         // Cleanup: this test's own sets and tables only.
         assert_eq!(crate::waitset::release_owned_by(0x570E), 1);
-        assert!(aspaces.write().withdraw(SecTaskId(0x570C)));
+        assert!(aspaces.write().withdraw(ProcessId(0x570C)));
     }
 
     /// A `Stream` member reports readiness as a non-consuming peek when
@@ -31104,7 +31243,7 @@ mod tests {
         let rng = unseeded_rng();
         aspaces
             .write()
-            .register(SecTaskId(0x570D), space, physmap)
+            .register(ProcessId(0x570D), space, physmap)
             .expect("registration succeeds");
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
@@ -31119,7 +31258,7 @@ mod tests {
 
         let (read_fd, write_fd) = aspaces
             .write()
-            .open_pipe(SecTaskId(0x570D))
+            .open_pipe(ProcessId(0x570D))
             .expect("pipe minted");
         let set = h.waitset_create(&ctx).expect("create");
         h.waitset_ctl(
@@ -31140,7 +31279,7 @@ mod tests {
         // drains it.
         let write_end = aspaces
             .read()
-            .open_file_entry(SecTaskId(0x570D), write_fd)
+            .open_file_entry(ProcessId(0x570D), write_fd)
             .and_then(|entry| entry.pipe().cloned())
             .expect("write end resolves");
         assert_eq!(
@@ -31151,7 +31290,7 @@ mod tests {
         let token_bytes = read_reply_page(
             aspaces
                 .read()
-                .resolve(SecTaskId(0x570D))
+                .resolve(ProcessId(0x570D))
                 .expect("registered")
                 .1,
             8,
@@ -31165,7 +31304,7 @@ mod tests {
         // The owner's read drains the bytes; the member goes quiet again.
         let read_end = aspaces
             .read()
-            .open_file_entry(SecTaskId(0x570D), read_fd)
+            .open_file_entry(ProcessId(0x570D), read_fd)
             .and_then(|entry| entry.pipe().cloned())
             .expect("read end resolves");
         let mut out = [0u8; 8];
@@ -31175,13 +31314,13 @@ mod tests {
         // Closing every write end leaves the member ready for its EOF
         // read (the shell-exited wake), never parked forever.
         drop(write_end);
-        assert!(aspaces.write().close_file(SecTaskId(0x570D), write_fd));
+        assert!(aspaces.write().close_file(ProcessId(0x570D), write_fd));
         assert_eq!(h.waitset_wait(&ctx, set, 0, 0x2000), Ok(0));
         assert_eq!(read_end.try_read(&mut out), crate::pipe::ReadStep::Eof);
 
         // Cleanup: this test's own sets and tables only.
         assert_eq!(crate::waitset::release_owned_by(0x570D), 1);
-        assert!(aspaces.write().withdraw(SecTaskId(0x570D)));
+        assert!(aspaces.write().withdraw(ProcessId(0x570D)));
     }
 
     /// Task-exit reclamation tears down every port the dead task bound:
@@ -31189,7 +31328,7 @@ mod tests {
     /// squat on a dead task's mailbox) and a racing sender observes the
     /// typed `NotFound`.
     #[test]
-    fn reclaim_task_resources_tears_down_owned_ports() {
+    fn reclaim_process_resources_tears_down_owned_ports() {
         install_trace_filter();
         let sink = make_sink();
         let arch = Arc::new(TestArch::with_cpus(1));
@@ -31214,7 +31353,7 @@ mod tests {
         // Another task's port survives the reclaim untouched.
         register_port_for(&ipc, 0x5EAD_0022, 0xF0F1, sink);
 
-        h.reclaim_task_resources(SecTaskId(0x5708));
+        h.reclaim_process_resources(ProcessId(0x5708));
         assert!(ipc.read().lookup(EndpointId(id)).is_none());
         assert!(ipc.read().lookup(EndpointId(0x5EAD_0022)).is_some());
 
@@ -31260,8 +31399,8 @@ mod tests {
 
         // With the producer installed and child 21 registered to the caller.
         let pw = TableWait::leaked();
-        pw.register_child(SecTaskId(0x5703), SecTaskId(21));
-        pw.register_child(SecTaskId(0x9999), SecTaskId(22));
+        pw.register_child(ProcessId(0x5703), ProcessId(21));
+        pw.register_child(ProcessId(0x9999), ProcessId(22));
         let h = KernelSyscallHandlers::new(
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
         )
@@ -31315,7 +31454,7 @@ mod tests {
         let rng = unseeded_rng();
         aspaces
             .write()
-            .register(SecTaskId(0x5704), space, physmap)
+            .register(ProcessId(0x5704), space, physmap)
             .expect("registration succeeds");
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
@@ -31325,7 +31464,7 @@ mod tests {
             caps: &caps,
         };
         let pw = TableWait::leaked();
-        pw.register_child(SecTaskId(0x5704), SecTaskId(21));
+        pw.register_child(ProcessId(0x5704), ProcessId(21));
         let h = KernelSyscallHandlers::new(
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
         )
@@ -31345,12 +31484,12 @@ mod tests {
         assert_eq!(h.waitset_wait(&ctx, set, 0, 0x2000), Err(Errno::TimedOut));
 
         // The child exits: the member is ready and its token is written.
-        pw.record_exit(SecTaskId(21), 3);
+        pw.record_exit(ProcessId(21), 3);
         assert_eq!(h.waitset_wait(&ctx, set, 0, 0x2000), Ok(0));
         let token_bytes = read_reply_page(
             aspaces
                 .read()
-                .resolve(SecTaskId(0x5704))
+                .resolve(ProcessId(0x5704))
                 .expect("registered")
                 .1,
             8,
@@ -31365,7 +31504,7 @@ mod tests {
         // the `wait` syscall's NONBLOCK form performs after the wake.
         assert_eq!(
             pw.poll(
-                SecTaskId(0x5704),
+                ProcessId(0x5704),
                 tairix_abi::WAIT_PID_ANY,
                 WaitFlags::NONBLOCK
             ),
@@ -31491,7 +31630,7 @@ mod tests {
         // running in parallel would tear this endpoint down mid-receive.
         aspaces
             .write()
-            .register(SecTaskId(0x5705), space, physmap)
+            .register(ProcessId(0x5705), space, physmap)
             .expect("registration succeeds");
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
@@ -31536,7 +31675,7 @@ mod tests {
             .expect("received");
         assert_eq!(got, 4);
         let guard = aspaces.read();
-        let (_space, physmap) = guard.resolve(SecTaskId(0x5705)).expect("aspace present");
+        let (_space, physmap) = guard.resolve(ProcessId(0x5705)).expect("aspace present");
         assert_eq!(read_server_page(physmap, 1, 4), b"ping");
         let ticket_bytes = read_server_page(physmap, 2, 8);
         let recv_ticket = u64::from_le_bytes(ticket_bytes.try_into().expect("8 bytes"));
@@ -31570,7 +31709,7 @@ mod tests {
         // Unique server task + endpoint id (the registry is process-global).
         aspaces
             .write()
-            .register(SecTaskId(0x5707), space, physmap)
+            .register(ProcessId(0x5707), space, physmap)
             .expect("registration succeeds");
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
@@ -31642,7 +31781,7 @@ mod tests {
         // registry `crate::callreg` is process-global, so both must be
         // unique across the whole test binary — see the client-id note
         // below). The owner id in particular must not collide with any id a
-        // sibling test reclaims: `reclaim_task_resources` scrubs the global
+        // sibling test reclaims: `reclaim_process_resources` scrubs the global
         // registry by owner (`callreg::teardown_owned_by`), so a sibling
         // reclaiming a shared owner id (e.g. the widely-reused `0x5708`)
         // would destroy this test's endpoint between the post and the
@@ -31668,7 +31807,7 @@ mod tests {
 
         // A client posts and is then killed before the server receives.
         // The poster task id must be unique to this test, not a small
-        // shared constant: `reclaim_task_resources` scrubs the poster's
+        // shared constant: `reclaim_process_resources` scrubs the poster's
         // calls across the *process-global* endpoint registry, so a
         // sibling test reusing the same id and reclaiming it in parallel
         // would cancel this call between the post and the assert. The
@@ -31683,7 +31822,7 @@ mod tests {
         let h = KernelSyscallHandlers::new(
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
         );
-        h.reclaim_task_resources(SecTaskId(client));
+        h.reclaim_process_resources(ProcessId(client));
 
         // The dead poster's call is gone before any server sees it.
         assert!(!ep.has_pending());
@@ -31712,7 +31851,7 @@ mod tests {
         // endpoint down mid-receive.
         aspaces
             .write()
-            .register(SecTaskId(0x5706), space, physmap)
+            .register(ProcessId(0x5706), space, physmap)
             .expect("registration succeeds");
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
@@ -31799,7 +31938,7 @@ mod tests {
         assert_eq!(wrote, ORIGIN_WIRE_LEN as u64);
 
         let guard = aspaces.read();
-        let (_space, physmap) = guard.resolve(SecTaskId(0x5706)).expect("aspace present");
+        let (_space, physmap) = guard.resolve(ProcessId(0x5706)).expect("aspace present");
         let bytes = read_server_page(physmap, 1, ORIGIN_WIRE_LEN);
         let decoded = Origin::from_bytes(&bytes).expect("valid origin");
         drop(guard);
@@ -31835,7 +31974,7 @@ mod tests {
         let rng = unseeded_rng();
         aspaces
             .write()
-            .register(SecTaskId(9), space, physmap)
+            .register(ProcessId(9), space, physmap)
             .expect("registration succeeds");
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
@@ -31866,7 +32005,7 @@ mod tests {
         assert_eq!(wrote, ORIGIN_WIRE_LEN as u64);
 
         let guard = aspaces.read();
-        let (_space, physmap) = guard.resolve(SecTaskId(9)).expect("aspace present");
+        let (_space, physmap) = guard.resolve(ProcessId(9)).expect("aspace present");
         let bytes = read_server_page(physmap, 1, ORIGIN_WIRE_LEN);
         let decoded = Origin::from_bytes(&bytes).expect("valid origin");
         drop(guard);
@@ -31904,7 +32043,7 @@ mod tests {
         let rng = unseeded_rng();
         aspaces
             .write()
-            .register(SecTaskId(9), space, physmap)
+            .register(ProcessId(9), space, physmap)
             .expect("registration succeeds");
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
@@ -31933,7 +32072,7 @@ mod tests {
         assert_eq!(wrote, WallClockReading::WIRE_LEN as u64);
         {
             let guard = aspaces.read();
-            let (_s, pm) = guard.resolve(SecTaskId(9)).expect("aspace present");
+            let (_s, pm) = guard.resolve(ProcessId(9)).expect("aspace present");
             let bytes = read_server_page(pm, 1, WallClockReading::WIRE_LEN);
             let r = WallClockReading::from_bytes(&bytes).expect("valid reading");
             assert_eq!(r.state(), WallTimeState::Unset);
@@ -31982,7 +32121,7 @@ mod tests {
         let wrote = h.wall_time_get(&ctx, 0x1000, 64).expect("reading written");
         assert_eq!(wrote, WallClockReading::WIRE_LEN as u64);
         let guard = aspaces.read();
-        let (_s, pm) = guard.resolve(SecTaskId(9)).expect("aspace present");
+        let (_s, pm) = guard.resolve(ProcessId(9)).expect("aspace present");
         let bytes = read_server_page(pm, 1, WallClockReading::WIRE_LEN);
         let r = WallClockReading::from_bytes(&bytes).expect("valid reading");
         assert_eq!(r.state(), WallTimeState::Trusted);
@@ -32010,7 +32149,7 @@ mod tests {
         let rng = unseeded_rng();
         aspaces
             .write()
-            .register(SecTaskId(2), space, physmap)
+            .register(ProcessId(2), space, physmap)
             .expect("registration succeeds");
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
@@ -32071,7 +32210,7 @@ mod tests {
         let rng = unseeded_rng();
         aspaces
             .write()
-            .register(SecTaskId(2), space, physmap)
+            .register(ProcessId(2), space, physmap)
             .expect("registration succeeds");
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
@@ -32117,7 +32256,7 @@ mod tests {
             Ok(BootFacts::WIRE_LEN as u64)
         );
         let guard = aspaces.read();
-        let (_s, pm) = guard.resolve(SecTaskId(2)).expect("aspace present");
+        let (_s, pm) = guard.resolve(ProcessId(2)).expect("aspace present");
         let bytes = read_server_page(pm, 1, BootFacts::WIRE_LEN);
         assert_eq!(BootFacts::from_bytes(&bytes), Ok(facts));
     }
@@ -32140,7 +32279,7 @@ mod tests {
         let rng = unseeded_rng();
         aspaces
             .write()
-            .register(SecTaskId(2), space, physmap)
+            .register(ProcessId(2), space, physmap)
             .expect("registration succeeds");
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
@@ -32168,14 +32307,14 @@ mod tests {
         // Attached to console 0 (the display): the known grid is copied out.
         aspaces
             .write()
-            .set_streams(SecTaskId(2), DescriptorTable::standard_on(0));
+            .set_streams(ProcessId(2), DescriptorTable::standard_on(0));
         assert_eq!(
             h.terminal_size(&ctx, STDOUT, 0x1000, TERMINAL_SIZE_WIRE_LEN),
             Ok(TERMINAL_SIZE_WIRE_LEN as u64)
         );
         {
             let guard = aspaces.read();
-            let (_s, pm) = guard.resolve(SecTaskId(2)).expect("aspace present");
+            let (_s, pm) = guard.resolve(ProcessId(2)).expect("aspace present");
             let bytes = read_server_page(pm, 1, TERMINAL_SIZE_WIRE_LEN);
             assert_eq!(tairix_abi::TerminalSize::from_bytes(&bytes), Ok(grid));
         }
@@ -32190,7 +32329,7 @@ mod tests {
         // so it fails closed rather than fabricating one.
         aspaces
             .write()
-            .set_streams(SecTaskId(2), DescriptorTable::standard_on(1));
+            .set_streams(ProcessId(2), DescriptorTable::standard_on(1));
         assert_eq!(
             h.terminal_size(&ctx, STDOUT, 0x1000, TERMINAL_SIZE_WIRE_LEN),
             Err(Errno::NotImplemented)
@@ -32200,7 +32339,7 @@ mod tests {
         // set) fails closed `NotFound`.
         aspaces
             .write()
-            .set_streams(SecTaskId(2), DescriptorTable::standard_on(0));
+            .set_streams(ProcessId(2), DescriptorTable::standard_on(0));
         assert_eq!(
             h.terminal_size(&ctx, 9, 0x1000, TERMINAL_SIZE_WIRE_LEN),
             Err(Errno::NotFound)
@@ -32540,7 +32679,7 @@ mod tests {
         let rng = unseeded_rng();
         aspaces
             .write()
-            .register(SecTaskId(2), space, physmap)
+            .register(ProcessId(2), space, physmap)
             .expect("registration succeeds");
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
@@ -32583,7 +32722,7 @@ mod tests {
         let rng = unseeded_rng();
         aspaces
             .write()
-            .register(SecTaskId(2), space, physmap)
+            .register(ProcessId(2), space, physmap)
             .expect("registration succeeds");
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
@@ -32600,7 +32739,7 @@ mod tests {
             Err(Errno::NotImplemented)
         );
         // No descriptor was recorded for the caller.
-        assert_eq!(aspaces.read().open_file_entry(SecTaskId(2), 4), None);
+        assert_eq!(aspaces.read().open_file_entry(ProcessId(2), 4), None);
     }
 
     /// A refused open (e.g. exclusive-create clash) yields no descriptor.
@@ -32617,7 +32756,7 @@ mod tests {
         let rng = unseeded_rng();
         aspaces
             .write()
-            .register(SecTaskId(2), space, physmap)
+            .register(ProcessId(2), space, physmap)
             .expect("registration succeeds");
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
@@ -32637,7 +32776,7 @@ mod tests {
             h.fs_open(&ctx, 0x1000, "/Storage/x".len(), OpenFlags::READ),
             Err(Errno::AlreadyExists)
         );
-        assert_eq!(aspaces.read().open_file_entry(SecTaskId(2), 4), None);
+        assert_eq!(aspaces.read().open_file_entry(ProcessId(2), 4), None);
     }
 
     /// `fs_read` re-authorises through the service and copies the read bytes
@@ -32656,7 +32795,7 @@ mod tests {
         let rng = unseeded_rng();
         aspaces
             .write()
-            .register(SecTaskId(2), space, physmap)
+            .register(ProcessId(2), space, physmap)
             .expect("registration succeeds");
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
@@ -32721,7 +32860,7 @@ mod tests {
         let rng = unseeded_rng();
         aspaces
             .write()
-            .register(SecTaskId(2), space, physmap)
+            .register(ProcessId(2), space, physmap)
             .expect("registration succeeds");
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
@@ -32785,7 +32924,7 @@ mod tests {
         let rng = unseeded_rng();
         aspaces
             .write()
-            .register(SecTaskId(2), space, physmap)
+            .register(ProcessId(2), space, physmap)
             .expect("registration succeeds");
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
@@ -32872,7 +33011,7 @@ mod tests {
         let rng = unseeded_rng();
         aspaces
             .write()
-            .register(SecTaskId(2), space, physmap)
+            .register(ProcessId(2), space, physmap)
             .expect("registration succeeds");
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
@@ -32960,7 +33099,7 @@ mod tests {
         let rng = unseeded_rng();
         aspaces
             .write()
-            .register(SecTaskId(2), space, physmap)
+            .register(ProcessId(2), space, physmap)
             .expect("registration succeeds");
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
@@ -33022,7 +33161,7 @@ mod tests {
         let rng = unseeded_rng();
         aspaces
             .write()
-            .register(SecTaskId(2), space, physmap)
+            .register(ProcessId(2), space, physmap)
             .expect("registration succeeds");
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
@@ -33104,7 +33243,7 @@ mod tests {
         let rng = unseeded_rng();
         aspaces
             .write()
-            .register(SecTaskId(2), space, physmap)
+            .register(ProcessId(2), space, physmap)
             .expect("registration succeeds");
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
@@ -33184,7 +33323,7 @@ mod tests {
         let rng = unseeded_rng();
         aspaces
             .write()
-            .register(SecTaskId(2), space, physmap)
+            .register(ProcessId(2), space, physmap)
             .expect("registration succeeds");
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
@@ -33271,7 +33410,7 @@ mod tests {
         let rng = unseeded_rng();
         aspaces
             .write()
-            .register(SecTaskId(2), space, physmap)
+            .register(ProcessId(2), space, physmap)
             .expect("registration succeeds");
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
@@ -33287,7 +33426,7 @@ mod tests {
         .with_filesystem(fs);
 
         assert_eq!(h.fs_chdir(&ctx, 0x1000, "/Users/bob".len()), Ok(0));
-        assert_eq!(aspaces.read().cwd(SecTaskId(2)), "/Users/bob");
+        assert_eq!(aspaces.read().cwd(ProcessId(2)), "/Users/bob");
         // The target was re-authorised as a directory (resolve-only, the
         // `DIRECTORY` flag, neither read nor write).
         assert_eq!(
@@ -33314,12 +33453,12 @@ mod tests {
         let rng = unseeded_rng();
         aspaces
             .write()
-            .register(SecTaskId(2), space, physmap)
+            .register(ProcessId(2), space, physmap)
             .expect("registration succeeds");
         // A directory the caller is already sitting in.
         aspaces
             .write()
-            .set_cwd(SecTaskId(2), alloc::string::String::from("/Users"));
+            .set_cwd(ProcessId(2), alloc::string::String::from("/Users"));
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
         let caps = make_caps_record(2, &[CapabilityId::FS_ACCESS], sink);
@@ -33340,7 +33479,7 @@ mod tests {
             Err(Errno::PermissionDenied)
         );
         // The refused chdir never reached `set_cwd`.
-        assert_eq!(aspaces.read().cwd(SecTaskId(2)), "/Users");
+        assert_eq!(aspaces.read().cwd(ProcessId(2)), "/Users");
     }
 
     /// A relative path handed to `fs_open` resolves against the caller's
@@ -33358,11 +33497,11 @@ mod tests {
         let rng = unseeded_rng();
         aspaces
             .write()
-            .register(SecTaskId(2), space, physmap)
+            .register(ProcessId(2), space, physmap)
             .expect("registration succeeds");
         aspaces
             .write()
-            .set_cwd(SecTaskId(2), alloc::string::String::from("/Users"));
+            .set_cwd(ProcessId(2), alloc::string::String::from("/Users"));
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
         let caps = make_caps_record(2, &[CapabilityId::FS_ACCESS], sink);
@@ -33403,7 +33542,7 @@ mod tests {
         let rng = unseeded_rng();
         aspaces
             .write()
-            .register(SecTaskId(2), space, physmap)
+            .register(ProcessId(2), space, physmap)
             .expect("registration succeeds");
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
@@ -33444,7 +33583,7 @@ mod tests {
         let rng = unseeded_rng();
         aspaces
             .write()
-            .register(SecTaskId(2), space, physmap)
+            .register(ProcessId(2), space, physmap)
             .expect("registration succeeds");
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
@@ -33467,7 +33606,7 @@ mod tests {
             fs.calls().is_empty(),
             "resolution failed before the VFS was touched"
         );
-        assert_eq!(aspaces.read().open_file_entry(SecTaskId(2), 4), None);
+        assert_eq!(aspaces.read().open_file_entry(ProcessId(2), 4), None);
     }
 
     /// An `id::<volume-id>/…` path opens the same backing object as the
@@ -33489,7 +33628,7 @@ mod tests {
         let rng = unseeded_rng();
         aspaces
             .write()
-            .register(SecTaskId(2), space, physmap)
+            .register(ProcessId(2), space, physmap)
             .expect("registration succeeds");
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
@@ -33538,7 +33677,7 @@ mod tests {
         let rng = unseeded_rng();
         aspaces
             .write()
-            .register(SecTaskId(2), space, physmap)
+            .register(ProcessId(2), space, physmap)
             .expect("registration succeeds");
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
@@ -33561,7 +33700,7 @@ mod tests {
             fs.calls().is_empty(),
             "resolution failed before the VFS was touched"
         );
-        assert_eq!(aspaces.read().open_file_entry(SecTaskId(2), 4), None);
+        assert_eq!(aspaces.read().open_file_entry(ProcessId(2), 4), None);
     }
 
     /// `fs_set_mode` copies the path in, resolves it, and reaches the
@@ -33579,7 +33718,7 @@ mod tests {
         let rng = unseeded_rng();
         aspaces
             .write()
-            .register(SecTaskId(2), space, physmap)
+            .register(ProcessId(2), space, physmap)
             .expect("registration succeeds");
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
@@ -33626,7 +33765,7 @@ mod tests {
         let rng = unseeded_rng();
         aspaces
             .write()
-            .register(SecTaskId(2), space, physmap)
+            .register(ProcessId(2), space, physmap)
             .expect("registration succeeds");
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
@@ -33715,11 +33854,11 @@ mod tests {
         let rng = unseeded_rng();
         aspaces
             .write()
-            .register(SecTaskId(2), space, physmap)
+            .register(ProcessId(2), space, physmap)
             .expect("registration succeeds");
         aspaces
             .write()
-            .set_cwd(SecTaskId(2), alloc::string::String::from("/Users/bob"));
+            .set_cwd(ProcessId(2), alloc::string::String::from("/Users/bob"));
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
         // No `CAP_FS_ACCESS`: reading one's own directory needs no capability.
@@ -33822,7 +33961,7 @@ mod tests {
         let rng = unseeded_rng();
         aspaces
             .write()
-            .register(SecTaskId(tid), space, physmap)
+            .register(ProcessId(tid), space, physmap)
             .expect("registration succeeds");
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
@@ -33893,7 +34032,7 @@ mod tests {
         .with_introspect(source);
         aspaces
             .write()
-            .set_streams(SecTaskId(tid), DescriptorTable::standard_on(0));
+            .set_streams(ProcessId(tid), DescriptorTable::standard_on(0));
 
         let reply = b"process-list-reply-frame";
 
