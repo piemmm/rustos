@@ -565,7 +565,15 @@ pub extern "C" fn kernel_main(_dtb: u64) -> ! {
     ) else {
         qemu_exit::exit_failure(FAIL_LIVE_BUILD);
     };
-    let live = Arc::new(ProcessSpace::new(Box::new(live)));
+    // The process's switch-in hook and its port's enter-user handle travel
+    // with the space so a thread created later resumes the same way. This
+    // vertical's program runs on the boot root with no root switch of its own,
+    // so the hook only has to be a real, callable no-op.
+    let live = Arc::new(ProcessSpace::new(
+        Box::new(live),
+        Arc::new(|_stack_top: u64, _tls_base: u64| {}),
+        &tairix_arch_aarch64::userentry::USER_MODE,
+    ));
 
     // Bring up the EL1 vectors + GICv2 and install the dispatch callback so the
     // program's `svc`s are handled. Interrupts stay masked — the cooperative

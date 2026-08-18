@@ -58,13 +58,14 @@ use alloc::boxed::Box;
 use alloc::sync::Arc;
 
 use tairix_abi::rxe::LoadImage;
-use tairix_arch_api::EnterUser;
 use tairix_arch_x86_64::paging::{
     activate_user_root, AddressSpace as ArchAddressSpace, PageTablePool, KERNEL_VMA_BASE,
 };
 use tairix_arch_x86_64::syscall_entry;
-use tairix_arch_x86_64::userentry::UserMode;
-use tairix_kernel_core::{spawn_image, InitSpawn, InitSpawnCtx, ProcessSpace, SpawnMode};
+use tairix_arch_x86_64::userentry::{set_user_thread_pointer, USER_MODE};
+use tairix_kernel_core::{
+    spawn_image, InitSpawn, InitSpawnCtx, ProcessResume, ProcessSpace, SpawnMode, UserThreadEntry,
+};
 use tairix_kernel_mem::{
     AddressSpace, DirectPhysMap, LiveSpace, PhysMap, UserAddressSpace, VirtAddr,
 };
@@ -212,25 +213,13 @@ impl InitSpawn for X86_64InitSpawn {
             return;
         };
 
-        // The user-mode transition, boxed for the scheduler task body the
-        // core wraps PID 1 in. `enter_user` diverges into ring 3, so the
-        // closure never truly returns (its `!` coerces to `()`).
-        let user_mode = UserMode::new();
-        let enter: Box<dyn FnMut() + Send> = Box::new(move || {
-            // SAFETY: `space` is the active address space and the `syscall`
-            // entry + production dispatch callback are installed, so the
-            // entered program's first `syscall` is handled.
-            // `build_process_image` mapped the entry/stack as user pages.
-            unsafe { user_mode.enter_user(entry) }
-        });
-
-        // PID 1's user-address-space reactivation hook (`plans/SPAWN.md` SP2):
-        // the core runs it on the dispatcher's context immediately before
-        // every switch into PID 1. It reloads CR3 to PID 1's own root
-        // (isolation) and repoints the per-CPU `syscall` entry stack at
-        // PID 1's own kernel stack (the value the runtime hands it). It
-        // captures only the `u64` root, so it is `Send`.
-        let pre_resume: Box<dyn FnMut(u64) + Send> = Box::new(move |stack_top: u64| {
+        // PID 1's switch-in hook (`plans/SPAWN.md` SP2): the core runs it on
+        // the dispatcher's context immediately before every switch into any
+        // thread of PID 1. It reloads CR3 to PID 1's own root (isolation),
+        // repoints the per-CPU `syscall` entry stack at the switching-in
+        // thread's own kernel stack, and reinstalls that thread's thread
+        // pointer. It captures only the `u64` root, so it is `Send`.
+        let pre_resume: ProcessResume = Arc::new(move |stack_top: u64, tls_base: u64| {
             // `set_kernel_rsp0` repoints **both** PID 1's `syscall` entry
             // stack (`gs:0`) and its trap entry stack (`TSS.RSP0`) at PID 1's
             // own kernel stack — the latter is what makes an involuntary
@@ -240,6 +229,13 @@ impl InitSpawn for X86_64InitSpawn {
             // kinds). A rejected value leaves the slots unchanged and the next
             // entry faults loudly (fail closed).
             let _ = syscall_entry::set_kernel_rsp0(BOOT_CPU, stack_top);
+            // The `FS` base is privileged on this port, so the kernel — not
+            // the thread — maintains it: every switch-in reinstalls the
+            // switching-in thread's own value (`plans/THREADS.md` decision 7).
+            // SAFETY: this runs at CPL 0 on the dispatcher's context, on the
+            // CPU about to enter that thread, which is exactly
+            // `set_user_thread_pointer`'s contract.
+            unsafe { set_user_thread_pointer(tls_base) };
             // SAFETY: paging is enabled and `init_root_phys` is the PML4 of
             // PID 1's space, which maps the low identity + higher-half kernel
             // window the running dispatcher executes from — exactly
@@ -285,7 +281,13 @@ impl InitSpawn for X86_64InitSpawn {
                     windows.file_pages,
                 )
                 .ok()
-                .map(|live| Arc::new(ProcessSpace::new(Box::new(live))))
+                .map(|live| {
+                    Arc::new(ProcessSpace::new(
+                        Box::new(live),
+                        Arc::clone(&pre_resume),
+                        &USER_MODE,
+                    ))
+                })
             }
             None => None,
         };
@@ -320,7 +322,10 @@ impl InitSpawn for X86_64InitSpawn {
                 kernel_stack,
                 pre_resume,
                 live,
-                enter,
+                UserThreadEntry {
+                    port: &USER_MODE,
+                    regs: entry,
+                },
             );
         }
     }

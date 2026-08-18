@@ -7472,7 +7472,7 @@ load-relative. Docs: `docs/src/architecture/fault-diagnostics.md`.
 
 ---
 
-## THREADS — lightweight threads within a process (`plans/THREADS.md`)  **[T1+T2+T3a DONE; T3b PLANNED]**
+## THREADS — lightweight threads within a process (`plans/THREADS.md`)  **[T1+T2+T3a+T3b-k DONE; T3b-u PLANNED]**
 
 **Dependencies:** `plans/SPAWN.md` SP1–SP5 (the process model, all landed).
 
@@ -7490,11 +7490,15 @@ from the thread throughout the kernel's state, so the compiler rejects a site
 that scopes one to the other), T3a the process address space (**done**,
 behaviour-preserving: `kernel/core`'s `ProcessSpace` is an `Arc`-shared,
 spin-locked live address space every thread of the group clones, replacing the
-one-task-per-space `&mut` publication), T3b threads end to end — syscalls
-109–112 (`thread_create`, `thread_exit`, `futex_wait`, `futex_wake`),
-`LimitKind::Threads`, the per-arch TLS-register slices, `kernel/core`'s
-`threads.rs` + `futex.rs`, the `lib/rt` runtime (spawn/join/detach, futex
-`Mutex`/`Condvar`), and per-arch QEMU verticals.
+one-task-per-space `&mut` publication), T3b-k the kernel half of threads
+(**done**: syscalls 109–112 — `thread_create`, `thread_exit`, `futex_wait`,
+`futex_wake` — `LimitKind::Threads`, `UserEntry::tls_base` with each port
+programming its own psABI thread-pointer register, kernel-owned thread stacks
+behind a structurally unbacked guard page, `kernel/core`'s `threads.rs` +
+`futex.rs`, and process-directed signal/exit fan-out over the thread group), and
+T3b-u the userland half — the `lib/rt` runtime (spawn/join/detach, futex
+`Mutex`/`Condvar`), the handler-level host tests, the per-arch QEMU verticals,
+and the docs.
 
 ---
 

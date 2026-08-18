@@ -32,9 +32,10 @@ use tairix_arch_aarch64::paging::{
     activate_user_root, configured_identity_gigapages, AddressSpace as ArchAddressSpace,
     PageTablePool,
 };
-use tairix_arch_aarch64::userentry::UserMode;
-use tairix_arch_api::EnterUser;
-use tairix_kernel_core::{spawn_image, InitSpawn, InitSpawnCtx, ProcessSpace, SpawnMode};
+use tairix_arch_aarch64::userentry::USER_MODE;
+use tairix_kernel_core::{
+    spawn_image, InitSpawn, InitSpawnCtx, ProcessResume, ProcessSpace, SpawnMode, UserThreadEntry,
+};
 use tairix_kernel_mem::{AddressSpace, LiveSpace, PhysMap, UserAddressSpace, VirtAddr};
 use tairix_kernel_syscall::SYSCALL_TABLE_HASH;
 
@@ -179,18 +180,6 @@ impl InitSpawn for Aarch64InitSpawn {
             return;
         };
 
-        // The user-mode transition, boxed for the scheduler task body the
-        // core wraps PID 1 in. `enter_user` diverges into EL0, so the
-        // closure never truly returns (its `!` coerces to `()`).
-        let user_mode = UserMode::new();
-        let enter: Box<dyn FnMut() + Send> = Box::new(move || {
-            // SAFETY: `space` is the active address space and the EL1 trap
-            // vector + production dispatch callback are installed, so the
-            // entered program's first `svc` is handled. `build_process_image`
-            // mapped the entry/stack as user-accessible pages.
-            unsafe { user_mode.enter_user(entry) }
-        });
-
         // PID 1's user-address-space reactivation hook (`plans/SPAWN.md`
         // SP2): the core runs it on the dispatcher's context immediately
         // before every switch into PID 1, so the task `eret`s back into EL0
@@ -200,7 +189,7 @@ impl InitSpawn for Aarch64InitSpawn {
         // The hook is handed the task's kernel-stack top (the x86_64 port
         // uses it to repoint its per-CPU syscall entry stack); aarch64
         // reuses `SP_EL1` implicitly and so ignores it (`plans/PI.md` §X).
-        let pre_resume: Box<dyn FnMut(u64) + Send> = Box::new(move |_stack_top: u64| {
+        let pre_resume: ProcessResume = Arc::new(move |_stack_top: u64, _tls_base: u64| {
             // SAFETY: the MMU is already enabled and `init_root_phys` is the
             // L1 root of PID 1's space, which identity-maps the low kernel
             // window the running kernel executes from — exactly
@@ -253,7 +242,13 @@ impl InitSpawn for Aarch64InitSpawn {
                     windows.file_pages,
                 )
                 .ok()
-                .map(|live| Arc::new(ProcessSpace::new(Box::new(live))))
+                .map(|live| {
+                    Arc::new(ProcessSpace::new(
+                        Box::new(live),
+                        Arc::clone(&pre_resume),
+                        &USER_MODE,
+                    ))
+                })
             }
             None => None,
         };
@@ -300,7 +295,10 @@ impl InitSpawn for Aarch64InitSpawn {
                 kernel_stack,
                 pre_resume,
                 live,
-                enter,
+                UserThreadEntry {
+                    port: &USER_MODE,
+                    regs: entry,
+                },
             );
         }
     }

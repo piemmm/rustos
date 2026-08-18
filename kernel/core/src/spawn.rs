@@ -117,20 +117,18 @@ pub trait InitSpawnCtx {
     /// slice. `kernel_main` drains the boot CPU's run queue until PID 1
     /// (and anything it spawns) has exited, then halts fail-closed.
     ///
-    /// `enter` is the arch-specific user-mode transition boxed as a
-    /// `FnMut()`: `EnterUser::enter_user` diverges, so the closure never
-    /// truly returns (its `!` coerces to `()`); modelling it as `FnMut()`
-    /// keeps this boundary free of a `dyn FnMut() -> !` bound. It becomes
-    /// the kthread's work body, invoked once on the task's first dispatch.
+    /// `entry` is the port handle plus the register state PID 1's first
+    /// thread is entered with ([`UserThreadEntry`]); the runtime makes it the
+    /// kthread's work body, entered once on the task's first dispatch, and the
+    /// transition diverges.
     ///
-    /// `pre_resume` is the arch-specific user-address-space reactivation
-    /// hook (`plans/SPAWN.md` SP2): the runtime calls it on the
-    /// dispatcher's context immediately before every switch into PID 1, so
-    /// the task `eret`s back into EL0 under its own page-table root and
-    /// stays hardware-isolated from any sibling process.
-    /// It captures only the arch root word, so it is `Send`. Its presence
-    /// also enrols PID 1 in the per-CPU resume table so its trap path can
-    /// suspend it.
+    /// `pre_resume` is the process's switch-in hook ([`ProcessResume`],
+    /// `plans/SPAWN.md` SP2): the runtime binds it to this thread's thread
+    /// pointer and calls it on the dispatcher's context immediately before
+    /// every switch into PID 1, so the task `eret`s back into EL0 under its
+    /// own page-table root and stays hardware-isolated from any sibling
+    /// process. Its presence also enrols PID 1 in the per-CPU resume table so
+    /// its trap path can suspend it.
     ///
     /// `space` is the registry-storable, `Send + Sync` snapshot of PID 1's
     /// user mappings (an arch port's *live* `AddressSpace` is not `Sync`
@@ -187,9 +185,9 @@ pub trait InitSpawnCtx {
         physmap: Box<dyn PhysMap + Send + Sync>,
         stack_span: StackSpan,
         stack: Box<dyn crate::kthread::KernelStack + Send>,
-        pre_resume: Box<dyn FnMut(u64) + Send>,
+        pre_resume: ProcessResume,
         live: Option<Arc<ProcessSpace>>,
-        enter: Box<dyn FnMut() + Send>,
+        entry: UserThreadEntry,
     );
 
     /// Admit a resumable **kernel-only** service kthread that runs
@@ -648,10 +646,14 @@ where
         }],
     );
 
+    // The process's first thread has no thread pointer: thread-local
+    // *storage* is the layer above this one (`plans/THREADS.md` decision 8),
+    // and a thread created later carries its own value from `thread_create`.
     Ok(UserEntry::new(
         image.entry,
         image.stack_top,
         image.start_block,
+        0,
     ))
 }
 
@@ -829,6 +831,61 @@ impl ProgramRegistry {
 /// until the kernel binary installs a populated one (fail closed; mirrors [`crate::NULL_CONSOLE`]).
 pub static EMPTY_PROGRAM_REGISTRY: ProgramRegistry = ProgramRegistry::EMPTY;
 
+/// A process's switch-in hook: the register program its port runs, on the
+/// dispatcher's context, immediately before every switch into **any** of its
+/// threads (`plans/THREADS.md` decision 9).
+///
+/// It receives the switching-in thread's own kernel-stack top (a port whose
+/// syscall entry does not implicitly land on it repoints its per-CPU entry
+/// stack) and that thread's thread-pointer value (a port whose psABI thread
+/// pointer is a *privileged* register — x86_64's `FS` base — reloads it here;
+/// the ports whose register is user-writable frame it instead and ignore the
+/// argument).
+///
+/// It is shared, not owned: every thread of the process resumes under the same
+/// page-table root, so the hook is cloned per thread rather than rebuilt, which
+/// is what lets `kernel/core` create a thread without a new per-arch producer.
+pub type ProcessResume = Arc<dyn Fn(u64, u64) + Send + Sync>;
+
+/// Bind a process's [`ProcessResume`] hook to one thread's `tls_base`,
+/// producing the per-thread switch-in hook the kthread runtime stores.
+///
+/// The one definition every admission path shares — PID 1, a spawned child's
+/// deferred load, and `thread_create` — so the per-thread and per-process
+/// halves of the hook can never be composed two different ways.
+#[must_use]
+pub fn thread_pre_resume(hook: &ProcessResume, tls_base: u64) -> Box<dyn FnMut(u64) + Send> {
+    let hook = Arc::clone(hook);
+    Box::new(move |stack_top: u64| hook(stack_top, tls_base))
+}
+
+/// The port handle and register state one thread is entered in user mode with.
+///
+/// `Copy` and `Send`: the port handle is a `'static` borrow of a zero-sized
+/// per-port singleton and [`UserEntry`] is plain register values, so a thread's
+/// entry travels into its kthread body without an allocation.
+#[derive(Copy, Clone)]
+pub struct UserThreadEntry {
+    /// The port's "enter user mode" handle.
+    pub port: &'static dyn EnterUser,
+    /// The register state to enter the thread with.
+    pub regs: UserEntry,
+}
+
+impl UserThreadEntry {
+    /// Diverge into user mode at [`Self::regs`].
+    ///
+    /// # Safety
+    ///
+    /// As [`EnterUser::enter_user`]: the thread's address space must be the
+    /// active one on the calling CPU (its switch-in hook has run) and the
+    /// user→kernel trap path installed, so its first syscall is handled.
+    pub unsafe fn enter(self) -> ! {
+        // SAFETY: forwarded contract.
+        unsafe { self.port.enter_user(self.regs) }
+    }
+}
+
 /// Why admitting a freshly built process as a runnable task failed.
 ///
 /// [`admit_errno`] maps each variant onto a stable [`Errno`] for the
@@ -880,17 +937,20 @@ pub struct BuiltImage {
     /// from, so the child's `mem_map` / `mmio_map` mutate its own space.
     /// [`None`] retains no live space and those syscalls fail closed.
     pub live: Option<Arc<ProcessSpace>>,
-    /// The child's page-table-root reactivation hook, run on the
-    /// dispatcher's context before every switch into the child so it enters
-    /// user mode under its own isolated root. Handed the task's kernel-stack
-    /// top (x86_64 repoints its per-CPU entry stack; aarch64/riscv64 ignore
-    /// it).
-    pub pre_resume: Box<dyn FnMut(u64) + Send>,
-    /// The arch-specific user-mode transition; it diverges, so its `!`
-    /// coerces to `()`. The loading body invokes it once, after
-    /// [`crate::kthread::Yielder::become_user`] has installed `pre_resume`
-    /// and `live`.
-    pub enter: Box<dyn FnMut() + Send>,
+    /// The child process's switch-in hook (see [`ProcessResume`]): the
+    /// register program that puts the child's own page-table root — and, on a
+    /// port whose thread pointer is privileged, the switching-in thread's
+    /// thread pointer — in place before every switch into any of its threads.
+    ///
+    /// Shared rather than owned, so a thread the child creates later resumes
+    /// through the same hook without a second per-arch producer
+    /// (`plans/THREADS.md` decision 9).
+    pub pre_resume: ProcessResume,
+    /// The register state the child's **first** thread is entered with, and the
+    /// port handle that performs the transition. The loading body enters it
+    /// once, after [`crate::kthread::Yielder::become_user`] has installed the
+    /// per-thread hook and the process address space.
+    pub entry: UserThreadEntry,
 }
 
 /// The build-only subset of the spawn context an [`ArchImageBuilder`] reads
@@ -1509,9 +1569,9 @@ mod tests {
             _physmap: Box<dyn PhysMap + Send + Sync>,
             _stack_span: StackSpan,
             _stack: Box<dyn crate::kthread::KernelStack + Send>,
-            _pre_resume: Box<dyn FnMut(u64) + Send>,
+            _pre_resume: ProcessResume,
             _live: Option<Arc<ProcessSpace>>,
-            _enter: Box<dyn FnMut() + Send>,
+            _entry: UserThreadEntry,
         ) {
             unreachable!("the default spawn_driver_process returns before admitting a process")
         }

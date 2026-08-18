@@ -455,6 +455,46 @@ impl<P: PageTable> AddressSpace<P> {
         Ok(Frame::containing(PhysAddr::new(paddr)))
     }
 
+    /// Tear down the single page containing the page-aligned `vaddr` even
+    /// when a coarse block covers it, flushing its TLB entry on the calling
+    /// CPU.
+    ///
+    /// This is the kernel-stack guard-page teardown (`plans/PI.md` G1–G3)
+    /// applied to a *live* root: the page is re-expressed at 4 KiB
+    /// granularity ([`HalAddressSpace::split_block`], which only adds table
+    /// levels reproducing the existing translation and so disturbs no live
+    /// address) and then unmapped. Unlike [`Self::unmap`] it does not name
+    /// the freed frame — the guard page's frame belongs to the stack arena,
+    /// not to this space — and it is **idempotent**: a page already unmapped
+    /// (an arena region handed back and re-handed inside the same root) is
+    /// success, since the post-condition "this page does not translate" is
+    /// already met.
+    ///
+    /// # Errors
+    ///
+    /// [`PageTableError`] when the split cannot be performed (a port with no
+    /// block-split support, or an exhausted page-table pool) or the unmap is
+    /// refused for any reason other than the page already being absent.
+    pub fn unmap_single_page(&mut self, vaddr: u64) -> Result<(), PageTableError> {
+        match self.table.split_block(vaddr) {
+            Ok(()) => {}
+            // Nothing mapped at `vaddr`: the page already does not
+            // translate, which is the post-condition asked for.
+            Err(MapError::NotMapped) => return Ok(()),
+            Err(other) => return Err(from_map_error(other)),
+        }
+        match self.table.unmap(vaddr) {
+            Ok(_) => {}
+            Err(MapError::NotMapped) => return Ok(()),
+            Err(other) => return Err(from_map_error(other)),
+        }
+        if let Ok(page) = Page::from_addr(VirtAddr::new(vaddr)) {
+            self.live.remove(&page);
+        }
+        self.table.flush_page(vaddr);
+        Ok(())
+    }
+
     /// Translate `page` to `(frame, flags)`, or `None` if unmapped.
     #[must_use]
     pub fn translate(&self, page: Page) -> Option<(Frame, MapFlags)> {

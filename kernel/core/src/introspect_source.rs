@@ -608,6 +608,9 @@ impl<A: KernelArch + 'static> IntrospectSource for KernelIntrospectSource<A> {
         // reports zero — the honest "none measured" answer, never a
         // fabricated count (the array stays `LimitKind::COUNT` long and
         // positional, never omitting a kind).
+        // The thread count is the `Threads` limit's live usage, read from the
+        // authoritative thread-group table rather than counted anywhere else.
+        let thread_usage = self.state.caps.read().thread_count(ProcessId(task_id.0)) as u64;
         let (limits, aspace_usage, stack_usage, pinned_usage) = {
             let aspaces = self.state.aspaces.read();
             let process = ProcessId(task_id.0);
@@ -632,6 +635,7 @@ impl<A: KernelArch + 'static> IntrospectSource for KernelIntrospectSource<A> {
                 LimitKind::AddressSpaceBytes => aspace_usage,
                 LimitKind::StackBytes => stack_usage,
                 LimitKind::PinnedMemoryBytes => pinned_usage,
+                LimitKind::Threads => thread_usage,
                 _ => 0,
             };
             let record = ResourceLimitRecord::new(kind, limits.get(kind), usage);

@@ -1,5 +1,7 @@
-//! The one live, mutable user address space of a process, shared by every
-//! thread of its thread group (`plans/THREADS.md` decision 4).
+//! The user-execution context a process shares with every thread of its
+//! thread group (`plans/THREADS.md` decision 4): its one live, mutable
+//! address space, and the port's register program for resuming a thread in
+//! it.
 //!
 //! A process's address space is process-scoped state, but the tasks that
 //! mutate it are threads. [`ProcessSpace`] is therefore refcounted and
@@ -9,6 +11,14 @@
 //! the lock for the duration of one operation. Ownership no longer rests
 //! with a single task, so a second thread of the same process is a matter of
 //! cloning the handle rather than of finding a new owner.
+//!
+//! The handle also carries the process's [`ProcessResume`] hook and its
+//! port's [`EnterUser`] handle, because those are the other two things
+//! process-wide that creating a thread needs. Keeping all three together is
+//! what makes `thread_create` arch-neutral: it reaches the caller's own
+//! handle ([`crate::kthread::current_process_space`]) and builds the new
+//! thread's switch-in hook and entry from it, with no new per-arch producer
+//! (decision 9).
 //!
 //! # Why a spin lock
 //!
@@ -34,8 +44,11 @@
 
 use alloc::boxed::Box;
 
+use tairix_arch_api::{EnterUser, UserEntry};
 use tairix_kernel_mem::LiveUserSpace;
 use tairix_sync::SpinLock;
+
+use crate::spawn::{thread_pre_resume, ProcessResume, UserThreadEntry};
 
 /// A process's live, mutable user address space.
 ///
@@ -46,14 +59,40 @@ use tairix_sync::SpinLock;
 /// stack, anonymous, device and page-table alike — to the allocator.
 pub struct ProcessSpace {
     space: SpinLock<Box<dyn LiveUserSpace + Send>>,
+    /// The port's switch-in hook for this process, shared by every thread.
+    resume: ProcessResume,
+    /// The port's "enter user mode" handle, so a thread created later is
+    /// entered through the same transition the first one was.
+    port: &'static dyn EnterUser,
+}
+
+#[cfg(test)]
+impl ProcessSpace {
+    /// A host-test context over `space`: an inert switch-in hook and a port
+    /// double whose transition is never executed, so a test whose subject is
+    /// the address-space half spells neither.
+    pub(crate) fn for_test(space: Box<dyn LiveUserSpace + Send>) -> Self {
+        Self::new(
+            space,
+            crate::test_arch::inert_process_resume(),
+            &crate::test_arch::NEVER_ENTER_USER,
+        )
+    }
 }
 
 impl ProcessSpace {
-    /// Wrap `space` as the process's shared live address space.
+    /// Wrap `space`, the process's switch-in hook, and its port's enter-user
+    /// handle as the process's shared user-execution context.
     #[must_use]
-    pub fn new(space: Box<dyn LiveUserSpace + Send>) -> Self {
+    pub fn new(
+        space: Box<dyn LiveUserSpace + Send>,
+        resume: ProcessResume,
+        port: &'static dyn EnterUser,
+    ) -> Self {
         Self {
             space: SpinLock::new(space),
+            resume,
+            port,
         }
     }
 
@@ -64,6 +103,22 @@ impl ProcessSpace {
     pub fn with<R>(&self, f: impl FnOnce(&mut dyn LiveUserSpace) -> R) -> R {
         let mut guard = self.space.lock();
         f(&mut **guard)
+    }
+
+    /// The per-thread switch-in hook for a thread of this process whose
+    /// thread pointer is `tls_base`.
+    #[must_use]
+    pub fn thread_pre_resume(&self, tls_base: u64) -> Box<dyn FnMut(u64) + Send> {
+        thread_pre_resume(&self.resume, tls_base)
+    }
+
+    /// The entry a thread of this process is dropped into user mode with.
+    #[must_use]
+    pub fn thread_entry(&self, regs: UserEntry) -> UserThreadEntry {
+        UserThreadEntry {
+            port: self.port,
+            regs,
+        }
     }
 }
 
@@ -113,7 +168,7 @@ mod tests {
 
     #[test]
     fn with_hands_the_closure_one_shared_space() {
-        let shared = ProcessSpace::new(host_space());
+        let shared = ProcessSpace::for_test(host_space());
         let first = shared
             .with(|space| space.reserve_anonymous(2))
             .expect("reservation fits the window");
@@ -127,7 +182,7 @@ mod tests {
 
     #[test]
     fn the_lock_excludes_a_second_borrow_while_one_is_live() {
-        let shared = ProcessSpace::new(host_space());
+        let shared = ProcessSpace::for_test(host_space());
         shared.with(|_| {
             assert!(
                 shared.space.try_lock().is_none(),
@@ -159,7 +214,7 @@ mod tests {
         const SECOND_CPU: u32 = 44;
 
         let shared: &'static ProcessSpace =
-            StdBox::leak(StdBox::new(ProcessSpace::new(host_space())));
+            StdBox::leak(StdBox::new(ProcessSpace::for_test(host_space())));
         let _first = crate::kthread::publish_live_space_for_test(FIRST_CPU, shared);
         let _second = crate::kthread::publish_live_space_for_test(SECOND_CPU, shared);
 

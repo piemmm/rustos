@@ -211,9 +211,9 @@ pub struct KernelSyscallHandlers<'a, A>
 where
     A: KernelArch + 'static,
 {
-    sched: &'a Scheduler<A>,
-    caps: &'a RwLock<CapTable>,
-    arch: &'a A,
+    pub(crate) sched: &'a Scheduler<A>,
+    pub(crate) caps: &'a RwLock<CapTable>,
+    pub(crate) arch: &'a A,
     audit: &'a (dyn Sink + Sync),
     /// The kernel's **diagnostic** log sink — the same sink the kernel emits
     /// its own boot/runtime records through (`kernel/arch/*` routes it to the
@@ -250,7 +250,7 @@ where
     /// handler reach the caller's mappings without coupling the
     /// decoupled dispatcher (`kernel/syscall`) to `kernel/mem`; increment D wires the deferred `ipc_send` /
     /// `ipc_recv` / `cap_delegate` / `random_get` copies through it.
-    aspaces: &'a RwLock<AddressSpaceRegistry>,
+    pub(crate) aspaces: &'a RwLock<AddressSpaceRegistry>,
     /// The kernel's single cryptographic random output reserve
     /// ([`crate::random::RandomReserve`]), consulted by
     /// `random_get` to draw CSPRNG output before copying it into the
@@ -281,7 +281,7 @@ where
     /// closed with [`Errno::NotImplemented`] (the spawn
     /// subsystem is not wired). Borrowed for the handler's lifetime,
     /// exactly like the other registries.
-    frames: Option<&'a FrameAllocator>,
+    pub(crate) frames: Option<&'a FrameAllocator>,
     /// The kernel's live frame allocator as a `'static` borrow, handed to
     /// the spawn producer so it can build a child's **page tables** out of
     /// reclaimable RAM rather than a fixed-size `.bss` pool (the spawn capacity scales with discovered RAM and grows on
@@ -292,7 +292,7 @@ where
     /// while it is `None` the producer fails closed. Held
     /// `'static` because the kernel allocator lives for the running kernel's
     /// lifetime, exactly like the other `'static` boot-installed seams.
-    page_table_frames: Option<&'static FrameAllocator>,
+    pub(crate) page_table_frames: Option<&'static FrameAllocator>,
     /// The embedded-program registry the `spawn` syscall resolves a path
     /// against (`plans/SPAWN.md` SP3). Defaults to the shared empty
     /// registry, so a `spawn` of any path fails closed with
@@ -337,7 +337,7 @@ where
     /// [`NULL_PROCESS_WAIT`] (fail closed with [`Errno::NotImplemented`]); the boot path installs the concrete producer
     /// through [`Self::with_process_wait`] once `SP6b` lands. Held as a
     /// `'static` borrow, exactly like the console device and spawn producer.
-    process_wait: &'static (dyn ProcessWait + 'static),
+    pub(crate) process_wait: &'static (dyn ProcessWait + 'static),
     /// The scheduler-side process-signal producer the `signal` syscall drives
     /// to deliver a control signal to one of the caller's children
     /// (`plans/SPAWN.md` SP7). Defaults to [`NULL_PROCESS_SIGNAL`] (fail
@@ -1281,9 +1281,9 @@ where
     /// A syscall buffer inside an untouched `file_map` region has no
     /// resident page yet, so the plain copy walk reports the miss as
     /// [`UaccessError::NotMapped`] with the failing page's base. This
-    /// helper offers exactly that page to [`Self::resolve_file_fault`],
-    /// then [`Self::resolve_stack_fault`] — the same region/span tables
-    /// and identities the hardware fault path uses — and retries the copy
+    /// helper offers exactly that page to the shared miss resolver — the
+    /// same resolvers, in the same order, the hardware fault path uses — and
+    /// retries the copy
     /// against the re-frozen snapshot, so `write(fd, mapped, n)` works
     /// without pre-touching the mapping and a syscall buffer on a
     /// not-yet-grown stack page is backed exactly as a hardware fault
@@ -1315,16 +1315,134 @@ where
                 Some(Ok(())) => return Ok(()),
                 Some(Err(UaccessError::NotMapped { va })) if budget > 0 => {
                     budget -= 1;
-                    if !self.resolve_file_fault(caller.process(), va)
-                        && !self.resolve_stack_fault(caller.process(), caller.task_id, va)
-                        && !self.resolve_anon_fault(caller.process(), va)
-                    {
+                    if !self.resolve_user_miss(caller, va) {
                         return Err(Errno::BadAddress);
                     }
                 }
                 Some(Err(err)) => return Err(copy_fault_errno(err)),
             }
         }
+    }
+
+    /// Copy `src` out to the caller's user buffer at `uaddr`, resolving a
+    /// not-resident destination page on the way — the write counterpart of
+    /// [`Self::copy_in_user`].
+    ///
+    /// A kernel-initiated write to a page the process has not touched (or that
+    /// the compressed tier parked) must back the page exactly as a hardware
+    /// store fault would, or the write is silently lost. The one consumer that
+    /// cannot tolerate that is the thread-exit clear-on-exit word
+    /// (`plans/THREADS.md` decision 5): a joiner blocked on that word would
+    /// wait forever if the store were dropped.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::copy_in_user`].
+    pub fn copy_out_user(
+        &self,
+        caller: &CallerContext<'_>,
+        uaddr: u64,
+        src: &[u8],
+    ) -> Result<(), Errno> {
+        let mut budget = src.len() / PAGE_SIZE + 2;
+        loop {
+            let outcome = self.with_caller_aspace(caller, |space, physmap| {
+                copy_out(space, physmap, VirtAddr::new(uaddr), src)
+            });
+            match outcome {
+                None => return Err(Errno::BadAddress),
+                Some(Ok(())) => return Ok(()),
+                Some(Err(UaccessError::NotMapped { va })) if budget > 0 => {
+                    budget -= 1;
+                    if !self.resolve_user_miss(caller, va) {
+                        return Err(Errno::BadAddress);
+                    }
+                }
+                Some(Err(err)) => return Err(copy_fault_errno(err)),
+            }
+        }
+    }
+
+    /// The blocking half of `futex_wait`: re-test the word the caller named and,
+    /// if it still holds `expected`, park until woken, timed out, or terminated.
+    ///
+    /// The caller has already registered on the key's wait queue, which is what
+    /// makes the test-then-park sequence race-free. The word is read through the
+    /// fault-aware `copy_from_user` boundary, so a *first-touch* futex word —
+    /// one whose page the process has reserved but never written — is faulted in
+    /// and read rather than reported as a bad address.
+    ///
+    /// A single park is correct and deliberate: a wake (real or spurious)
+    /// returns `Ok(0)` and the caller re-tests its own condition, which is the
+    /// contract `futex_wait` publishes. Looping here instead would hide a
+    /// genuine wake from the userland lock that has to see it.
+    fn futex_park(
+        &self,
+        caller: &CallerContext<'_>,
+        uaddr: u64,
+        expected: u32,
+        deadline_ns: u64,
+    ) -> SyscallResult {
+        let mut word = [0u8; 4];
+        self.copy_in_user(caller, uaddr, &mut word)?;
+        if u32::from_le_bytes(word) != expected {
+            // The condition changed under the caller: it re-tests and retries.
+            // This is the lost-wake-up race closing, not a failure.
+            return Err(Errno::WouldBlock);
+        }
+        let cpu = SchedulerArch::current_cpu(self.arch);
+        if !reschedule_current(cpu, RescheduleAction::Park) {
+            // No resume handle is published for this CPU, so the caller is not a
+            // resumable task and cannot be parked. Fail closed rather than
+            // return a "woken" the caller would answer with a spin.
+            return Err(Errno::NotImplemented);
+        }
+        // A termination deferred against this thread unwinds the wait; the kill
+        // lands at the syscall boundary and this errno never reaches user space.
+        if crate::procsignal::kill_pending(caller.task_id.0) {
+            return Err(Errno::Interrupted);
+        }
+        if deadline_ns != crate::waitq::NO_DEADLINE && self.arch.monotonic_ns(cpu) >= deadline_ns {
+            return Err(Errno::TimedOut);
+        }
+        Ok(0)
+    }
+
+    /// Back the not-resident user page containing `va` for `caller`, offering
+    /// the resolvers in the **same order** the hardware fault path uses.
+    ///
+    /// The order is load-bearing, not stylistic. A page the compressed
+    /// (`ramzip`) tier parked is still *reserved* anonymous memory, so
+    /// [`Self::resolve_anon_fault`] would map a freshly zeroed frame over it
+    /// and destroy the contents: the compressed tier must therefore be offered
+    /// first, exactly as the hardware fault path (`resolve_user_fault`) does.
+    /// Sharing one definition between the copy path and the trap path is what
+    /// keeps the two from drifting apart again — before this, the copy path
+    /// offered the compressed tier *nowhere*, so a syscall staging a buffer
+    /// from a parked page silently read a freshly zeroed frame.
+    ///
+    /// Returns `false` when the miss is not resolvable, so the caller fails
+    /// closed rather than retrying forever.
+    fn resolve_user_miss(&self, caller: &CallerContext<'_>, va: u64) -> bool {
+        let process = caller.process();
+        if self.resolve_file_fault(process, va) {
+            return true;
+        }
+        if self.resolve_stack_fault(process, caller.task_id, va) {
+            return true;
+        }
+        match self.resolve_ramzip_fault(process, va) {
+            RamzipFaultOutcome::Handled => return true,
+            // An unrecoverable entry (already audited) must not fall through
+            // to the anonymous handler, which would zero the page and turn a
+            // detected integrity failure into silent corruption.
+            RamzipFaultOutcome::Fatal(_) => return false,
+            // `NoEntry` — and any future (`#[non_exhaustive]`) outcome — falls
+            // through to the anonymous handler, which fails closed on a page
+            // no reservation covers.
+            _ => {}
+        }
+        self.resolve_anon_fault(process, va)
     }
 
     /// Validate and stage `spawn`'s optional startup-strings block from the
@@ -1601,7 +1719,7 @@ where
     /// a CPU with no live space published, falls back to the wholesale
     /// re-freeze — so the delta is a cost reduction, never a correctness
     /// dependency.
-    fn publish_region_mapping(&self, process: ProcessId, base: u64, page_count: u64) {
+    pub(crate) fn publish_region_mapping(&self, process: ProcessId, base: u64, page_count: u64) {
         let cpu = SchedulerArch::current_cpu(self.arch);
         let absorbed = crate::kthread::with_current_live_space(cpu, |live| {
             let mut aspaces = self.aspaces.write();
@@ -4066,6 +4184,14 @@ where
                 ],
             );
         }
+        // `exit` ends the whole **process**, so every sibling thread stops
+        // first (`plans/THREADS.md` decision 10): one left running against the
+        // address space this handler is about to reclaim would turn its own
+        // legitimate accesses into wild faults. The siblings record no status
+        // and land no teardown of their own — the status above and the
+        // reclamation below are this thread's.
+        self.process_signal
+            .terminate_siblings(caller.process(), caller.task_id);
         // The scheduler reap itself is driven by the reschedule path, not
         // here (`plans/SPAWN.md` SP2b) — the dispatch hook returns
         // `DispatchOutcome::Reschedule { action: Exit, .. }` and the
@@ -4441,6 +4567,128 @@ where
         // entered the Supervisor reads the empty cell as `Unset` and the
         // stored `os.loginType` default decides.
         Ok(crate::boot_session::LATE_BOOT_SESSION.get().as_u64())
+    }
+
+    fn thread_create(
+        &self,
+        caller: &CallerContext<'_>,
+        entry: u64,
+        arg: u64,
+        stack_len: usize,
+        tls_base: u64,
+        clear_on_exit: u64,
+    ) -> SyscallResult {
+        // The dispatcher applies no capability gate (a thread grants no
+        // authority the caller does not already hold), so every check is here
+        // and every one of them runs *before* any state changes.
+        //
+        // Each user-supplied address is validated by reading a word through the
+        // fault-aware `copy_from_user` boundary, which proves it names mapped
+        // memory of the *caller's own* address space — the only space the
+        // registry will resolve for it. `entry` is a code address, and code
+        // pages are readable on every Tier-1 port, so the probe covers it too;
+        // whether it is genuinely *executable* is the hardware's answer on the
+        // first fetch, and a thread that faults there dies alone.
+        let mut probe = [0u8; 4];
+        self.copy_in_user(caller, entry, &mut probe)?;
+        if clear_on_exit != 0 {
+            // The word the kernel will zero and futex-wake must be a naturally
+            // aligned `u32` of the caller's own memory: a misaligned or foreign
+            // address is refused now rather than discovered at thread death,
+            // when there is nobody left to report it to.
+            if !clear_on_exit.is_multiple_of(4) {
+                return Err(Errno::OutOfRange);
+            }
+            self.copy_in_user(caller, clear_on_exit, &mut probe)?;
+        }
+        if tls_base != 0 {
+            // The thread pointer must name real user memory. This is not
+            // cosmetic: on a port whose thread-pointer register is privileged
+            // (x86_64's `FS` base) the kernel writes this value itself, and a
+            // non-canonical one would fault *inside the kernel* on every switch
+            // into the thread. Requiring it to be readable in the caller's own
+            // space forecloses that entirely, and every thread-local layout
+            // puts the thread control block at the thread pointer anyway.
+            self.copy_in_user(caller, tls_base, &mut probe)?;
+        }
+        let stack_soft = self
+            .aspaces
+            .read()
+            .limits(caller.process())
+            .get(LimitKind::StackBytes)
+            .soft;
+        let stack_bytes = crate::threads::resolve_stack_bytes(stack_len, stack_soft)?;
+        crate::threads::create(
+            self,
+            caller,
+            crate::threads::ThreadRequest {
+                entry,
+                arg,
+                stack_bytes,
+                tls_base,
+                clear_on_exit,
+            },
+        )
+    }
+
+    fn thread_exit(&self, caller: &CallerContext<'_>) -> SyscallResult {
+        // The scheduler reap is driven by the reschedule path, exactly as for
+        // `exit`: the dispatch boundary turns this syscall number into
+        // `RescheduleAction::Exit`, and this handler performs only the state
+        // release the reschedule path does not.
+        crate::threads::exit(self, caller)
+    }
+
+    fn futex_wait(
+        &self,
+        caller: &CallerContext<'_>,
+        uaddr: u64,
+        expected: u32,
+        timeout_ns: u64,
+    ) -> SyscallResult {
+        // A futex word is a naturally aligned `u32`; a misaligned address could
+        // straddle two pages and is refused before anything is registered.
+        if !uaddr.is_multiple_of(4) {
+            return Err(Errno::OutOfRange);
+        }
+        let process = caller.process();
+        let key = crate::futex::FutexKey { process, uaddr };
+        let cpu = SchedulerArch::current_cpu(self.arch);
+        let task = caller.task_id.0;
+        // A saturating add keeps a `u64::MAX` timeout at `NO_DEADLINE`
+        // (explicit wake only) instead of wrapping to a tiny value.
+        let deadline_ns = if timeout_ns == u64::MAX {
+            crate::waitq::NO_DEADLINE
+        } else {
+            self.arch.monotonic_ns(cpu).saturating_add(timeout_ns)
+        };
+
+        // Register *before* reading the word, so a wake landing in the window
+        // between the read and the park is not lost: the waker then unparks a
+        // task the scheduler's wake-pending token re-readies at its park
+        // commit.
+        let queue = crate::futex::register(key, task, deadline_ns);
+        if deadline_ns != crate::waitq::NO_DEADLINE {
+            crate::waitq::rearm_timed_wakeup();
+        }
+        let outcome = self.futex_park(caller, uaddr, expected, deadline_ns);
+        drop(queue);
+        crate::futex::deregister(key, task);
+        if deadline_ns != crate::waitq::NO_DEADLINE {
+            crate::waitq::rearm_timed_wakeup();
+        }
+        outcome
+    }
+
+    fn futex_wake(&self, caller: &CallerContext<'_>, uaddr: u64, count: u32) -> SyscallResult {
+        if !uaddr.is_multiple_of(4) {
+            return Err(Errno::OutOfRange);
+        }
+        // The key names the caller's *own* process, resolved from its
+        // kernel-attested record, so a wake can never reach another principal's
+        // waiters however the address is chosen.
+        let woken = crate::futex::wake_installed(caller.process(), uaddr, count as usize);
+        Ok(woken as u64)
     }
 
     fn terminal_size(
@@ -9497,6 +9745,10 @@ fn reclaim_process_bookkeeping(
         // Its per-thread registry records (the user-stack span) go with it.
         aspaces.write().withdraw_thread(SecTaskId(thread));
     }
+    // Drop every futex key the process held. A thread still registered on one
+    // is already dead, so nothing is woken; leaving the queues behind would
+    // strand kernel memory against a process that no longer exists.
+    crate::futex::release_process(process);
     // Prune the dead process's own child rows from the wait bookkeeping: a
     // dead parent can never reap, so a row it never collected — a running
     // orphan's link or an unreaped zombie — would be stranded forever.
@@ -10033,13 +10285,13 @@ impl tairix_appload::Clock for RuntimeClock<'_> {
 }
 
 /// The pieces the loading body needs to upgrade itself into a user task once
-/// its image is built, verified, and registered: the address-space-root
-/// reactivation hook, the process address space (for a task whose producer
-/// wired one), and the user-mode entry thunk.
+/// its image is built, verified, and registered: the process's switch-in hook,
+/// the process address space (for a task whose producer wired one), and the
+/// entry its first thread is dropped into user mode with.
 struct ReadyToEnter {
-    pre_resume: Box<dyn FnMut(u64) + Send>,
+    pre_resume: crate::spawn::ProcessResume,
     live: Option<alloc::sync::Arc<crate::procspace::ProcessSpace>>,
-    enter: Box<dyn FnMut() + Send>,
+    entry: crate::spawn::UserThreadEntry,
 }
 
 /// Park the loading child while the application store's readiness latch is
@@ -10189,7 +10441,7 @@ fn build_from_bytes(
     Ok(ReadyToEnter {
         pre_resume: image.pre_resume,
         live: image.live,
-        enter: image.enter,
+        entry: image.entry,
     })
 }
 
@@ -10248,6 +10500,45 @@ fn build_child_image(
             )
         }
     }
+}
+
+/// Upgrade the loading child into a user task and enter it, never returning.
+///
+/// Its effective capability record and frozen address space were installed by
+/// the build, so it is never dispatchable as a user task under the admit-time
+/// placeholder authority. Its first thread carries the process's switch-in hook
+/// bound to that thread's own thread pointer.
+fn enter_built_child<C: tairix_arch_api::ContextSwitch + Copy>(
+    yielder: &mut Yielder<C>,
+    ready: ReadyToEnter,
+) {
+    let pre_resume = crate::spawn::thread_pre_resume(&ready.pre_resume, ready.entry.regs.tls_base);
+    yielder.become_user(pre_resume, ready.live);
+    // SAFETY: the upgrade above installed this thread's switch-in hook and
+    // process address space, and the dispatch step that resumes us runs the
+    // hook, so the child's own root is active and the trap path installed.
+    unsafe { ready.entry.enter() }
+}
+
+/// Fail a loading child closed: audit the refusal, record the reserved
+/// load-failure exit status its parent reaps, and release the admit-time
+/// bookkeeping it holds (it never reached user mode, so it acquired nothing
+/// beyond that subset). Returning from the body makes the task terminal.
+fn refuse_built_child(
+    services: &'static crate::spawn_services::SpawnServices,
+    sec_id: ProcessId,
+    errno: Errno,
+) {
+    emit_load_refusal(services.audit(), sec_id, errno);
+    services
+        .process_wait()
+        .record_exit(sec_id, tairix_abi::load_failure_status(errno));
+    reclaim_process_bookkeeping(
+        services.caps(),
+        services.aspaces(),
+        services.process_wait(),
+        sec_id,
+    );
 }
 
 /// Audit a deferred load refusal, attributed to the failing child `sec_id`.
@@ -10386,32 +10677,8 @@ where
             match build_child_image(
                 services, sec_id, task, &plan, &body_seed, guard, &arg_refs, &env_refs,
             ) {
-                Ok(ready) => {
-                    // The effective capability record and the frozen address
-                    // space are installed (inside `build_child_image`) before
-                    // this upgrade, so the child is never dispatchable as a
-                    // user task under the placeholder authority.
-                    yielder.become_user(ready.pre_resume, ready.live);
-                    let mut enter = ready.enter;
-                    enter();
-                }
-                Err(errno) => {
-                    // Attributed to the child: audit the refusal, record the
-                    // reserved load-failure exit status the parent reaps, and
-                    // release the admit-time bookkeeping the child holds
-                    // (it never reached user mode, so it acquired nothing
-                    // beyond that subset). Returning makes the task terminal.
-                    emit_load_refusal(services.audit(), sec_id, errno);
-                    services
-                        .process_wait()
-                        .record_exit(sec_id, tairix_abi::load_failure_status(errno));
-                    reclaim_process_bookkeeping(
-                        services.caps(),
-                        services.aspaces(),
-                        services.process_wait(),
-                        sec_id,
-                    );
-                }
+                Ok(ready) => enter_built_child(yielder, ready),
+                Err(errno) => refuse_built_child(services, sec_id, errno),
             }
         };
 
@@ -11185,7 +11452,12 @@ where
         // death and reclaimed — the taken (and cleared) pending kill is
         // then simply superseded by the exit in flight.
         if let Some(signal) = crate::procsignal::syscall_exit_take_kill(sched_task_id) {
-            if raw_number != SyscallNumber::EXIT.as_u16() {
+            // A completing `exit` — or a `thread_exit` that *was* the process's
+            // last thread — already recorded its own death and reclaimed, so the
+            // taken pending kill is superseded by the exit in flight.
+            if raw_number != SyscallNumber::EXIT.as_u16()
+                && raw_number != SyscallNumber::THREAD_EXIT.as_u16()
+            {
                 return self.handlers.land_pending_kill(
                     caller_process,
                     signal,
@@ -11452,7 +11724,9 @@ fn ordinary_completion(result: SyscallResult, cpu: CpuId, woke: bool) -> Dispatc
 /// caller must be suspended with, or `None` for an ordinary syscall that
 /// returns straight to user space (`plans/SPAWN.md` SP2).
 ///
-/// `yield` re-enqueues the caller; `exit` reaps it. Every other syscall
+/// `yield` re-enqueues the caller; `exit` and `thread_exit` reap it (the
+/// difference between them is which state the *handler* released, never how the
+/// task is retired). Every other syscall
 /// (`stream_write`, `ipc_*`, `cap_*`, `clock_get`, `irq_*`, `random_get`)
 /// returns to the same EL0 task without a context switch, so it is `None`.
 /// This is the single place the dispatch path names the rescheduling
@@ -11460,7 +11734,9 @@ fn ordinary_completion(result: SyscallResult, cpu: CpuId, woke: bool) -> Dispatc
 fn reschedule_action_for(raw_number: u16) -> Option<RescheduleAction> {
     if raw_number == SyscallNumber::YIELD.as_u16() {
         Some(RescheduleAction::Yield)
-    } else if raw_number == SyscallNumber::EXIT.as_u16() {
+    } else if raw_number == SyscallNumber::EXIT.as_u16()
+        || raw_number == SyscallNumber::THREAD_EXIT.as_u16()
+    {
         Some(RescheduleAction::Exit)
     } else {
         None
@@ -14963,15 +15239,18 @@ mod tests {
                 Box::new(SimPhysMap::new(PhysAddr::new(0), PAGE_SIZE));
             let stack_span = crate::aspace::StackSpan::new(0x2000, 0x2000, 0x3000)
                 .expect("the host test span is page-aligned and well-formed");
-            // Inert closures: a host test never enters user mode or reactivates
-            // a page-table root.
+            // Inert port double: a host test never enters user mode or
+            // reactivates a page-table root.
             Ok(BuiltImage {
                 frozen,
                 physmap,
                 stack_span,
                 live: None,
-                pre_resume: Box::new(|_stack_top| {}),
-                enter: Box::new(|| {}),
+                pre_resume: crate::test_arch::inert_process_resume(),
+                entry: crate::spawn::UserThreadEntry {
+                    port: &crate::test_arch::NEVER_ENTER_USER,
+                    regs: tairix_arch_api::UserEntry::new(0x1000, 0x3000, 0, 0),
+                },
             })
         }
     }
@@ -22335,7 +22614,7 @@ mod tests {
             });
             let observer: *const Self = &raw const *boxed;
             (
-                Box::leak(Box::new(crate::procspace::ProcessSpace::new(boxed))),
+                Box::leak(Box::new(crate::procspace::ProcessSpace::for_test(boxed))),
                 observer,
             )
         }
@@ -22346,6 +22625,10 @@ mod tests {
     }
 
     impl LiveUserSpace for PublishedLive {
+        fn unmap_kernel_stack_guard(&mut self, _guard: u64) -> Result<(), LiveSpaceError> {
+            Err(LiveSpaceError::Anon(AnonError::OutOfMemory))
+        }
+
         fn map_anonymous(&mut self, _base: u64, _pages: u64) -> Result<u64, LiveSpaceError> {
             Err(LiveSpaceError::Anon(AnonError::OutOfMemory))
         }

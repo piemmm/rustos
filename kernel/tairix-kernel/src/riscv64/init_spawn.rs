@@ -36,12 +36,13 @@ use alloc::boxed::Box;
 use alloc::sync::Arc;
 
 use tairix_abi::rxe::LoadImage;
-use tairix_arch_api::EnterUser;
 use tairix_arch_riscv64::paging::{
     activate_user_root, AddressSpace as ArchAddressSpace, PageTablePool,
 };
-use tairix_arch_riscv64::userentry::UserMode;
-use tairix_kernel_core::{spawn_image, InitSpawn, InitSpawnCtx, ProcessSpace, SpawnMode};
+use tairix_arch_riscv64::userentry::USER_MODE;
+use tairix_kernel_core::{
+    spawn_image, InitSpawn, InitSpawnCtx, ProcessResume, ProcessSpace, SpawnMode, UserThreadEntry,
+};
 use tairix_kernel_mem::{
     AddressSpace, DirectPhysMap, LiveSpace, PhysMap, UserAddressSpace, VirtAddr,
 };
@@ -179,18 +180,6 @@ impl InitSpawn for RiscvInitSpawn {
             return;
         };
 
-        // The user-mode transition, boxed for the scheduler task body the core
-        // wraps PID 1 in. `enter_user` diverges into U-mode, so the closure
-        // never truly returns (its `!` coerces to `()`).
-        let user_mode = UserMode::new();
-        let enter: Box<dyn FnMut() + Send> = Box::new(move || {
-            // SAFETY: `space` is the active address space and the S-mode trap
-            // vector + production dispatch callback are installed, so the
-            // entered program's first `ecall` is handled. `build_process_image`
-            // mapped the entry/stack as user-accessible pages.
-            unsafe { user_mode.enter_user(entry) }
-        });
-
         // PID 1's user-address-space reactivation hook (`plans/SPAWN.md` SP2):
         // the core runs it on the dispatcher's context immediately before every
         // switch into PID 1, so the task `sret`s back into U-mode under its own
@@ -200,7 +189,7 @@ impl InitSpawn for RiscvInitSpawn {
         // and re-armed by the trap vector from each task's own kernel-stack
         // frame on every U-return, so a trap always lands on *its* kernel stack
         // with no dispatcher-side repointing.
-        let pre_resume: Box<dyn FnMut(u64) + Send> = Box::new(move |_stack_top: u64| {
+        let pre_resume: ProcessResume = Arc::new(move |_stack_top: u64, _tls_base: u64| {
             // SAFETY: paging is enabled and `init_root_phys` is the Sv39 root
             // of PID 1's space, which identity-maps the low kernel window the
             // running kernel executes from — exactly `activate_user_root`'s
@@ -245,7 +234,13 @@ impl InitSpawn for RiscvInitSpawn {
                     windows.file_pages,
                 )
                 .ok()
-                .map(|live| Arc::new(ProcessSpace::new(Box::new(live))))
+                .map(|live| {
+                    Arc::new(ProcessSpace::new(
+                        Box::new(live),
+                        Arc::clone(&pre_resume),
+                        &USER_MODE,
+                    ))
+                })
             }
             None => None,
         };
@@ -278,7 +273,10 @@ impl InitSpawn for RiscvInitSpawn {
                 kernel_stack,
                 pre_resume,
                 live,
-                enter,
+                UserThreadEntry {
+                    port: &USER_MODE,
+                    regs: entry,
+                },
             );
         }
     }

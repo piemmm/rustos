@@ -403,7 +403,7 @@ mod kernel {
         // and `user_sp` tops the USER|R|W stack, both mapped above; the
         // dispatch callback is installed and the GDT user selectors / TSS
         // / `syscall` entry were installed during boot.
-        unsafe { UserMode::new().enter_user(UserEntry::new(user_entry, user_sp, 0)) }
+        unsafe { UserMode::new().enter_user(UserEntry::new(user_entry, user_sp, 0, 0)) }
     }
 
     /// Forward to the shared bridge in `tairix_kernel`.

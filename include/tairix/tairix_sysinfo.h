@@ -122,7 +122,7 @@
 #define TAIRIX_USER_DIRECTORY_RECORD_WIRE_LEN 40u
 
 /* Byte length of a full RESOURCE_LIMITS response: one record per LimitKind. */
-#define TAIRIX_SYSINFO_RESOURCE_LIMITS_REPORT_LEN 160u
+#define TAIRIX_SYSINFO_RESOURCE_LIMITS_REPORT_LEN 192u
 
 /* Envelope prefixing every sysinfo request; encoded little-endian on the wire. */
 typedef struct tairix_sysinfo_request_header {

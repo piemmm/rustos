@@ -978,6 +978,7 @@ const fn limit_name(kind: LimitKind) -> &'static str {
         LimitKind::Processes => "Processes",
         LimitKind::StackBytes => "Stack",
         LimitKind::PinnedMemoryBytes => "Pinned memory",
+        LimitKind::Threads => "Threads",
     }
 }
 
@@ -991,7 +992,7 @@ fn bound(kind: LimitKind, value: u64) -> String {
         LimitKind::AddressSpaceBytes | LimitKind::StackBytes | LimitKind::PinnedMemoryBytes => {
             format_bytes(value)
         }
-        LimitKind::OpenStreams | LimitKind::Processes => value.to_string(),
+        LimitKind::OpenStreams | LimitKind::Processes | LimitKind::Threads => value.to_string(),
     }
 }
 

@@ -71,6 +71,15 @@ pub enum LimitKind {
     /// further anonymous growth, so an abusive pin cannot exempt
     /// unbounded memory from pressure management.
     PinnedMemoryBytes = 4,
+    /// Maximum number of live threads the process may hold — its own thread
+    /// group's size, counting the leader (the `thread_create` capacity,
+    /// `plans/THREADS.md` decision 11).
+    ///
+    /// A settable bound rather than a `MAX_THREADS` const, so a busy server
+    /// scales with the machine while one runaway process cannot exhaust the
+    /// kernel-stack arena for everyone else; live usage is the process's
+    /// current thread count.
+    Threads = 5,
 }
 
 impl LimitKind {
@@ -78,7 +87,7 @@ impl LimitKind {
     ///
     /// Equals one past the largest discriminant; a per-task limit array is
     /// sized by this constant so adding a variant grows the storage in step.
-    pub const COUNT: usize = 5;
+    pub const COUNT: usize = 6;
 
     /// Every [`LimitKind`] in discriminant order.
     ///
@@ -91,6 +100,7 @@ impl LimitKind {
         Self::Processes,
         Self::StackBytes,
         Self::PinnedMemoryBytes,
+        Self::Threads,
     ];
 
     /// Every [`LimitKind`] in discriminant order, paired with its canonical
@@ -106,6 +116,7 @@ impl LimitKind {
         (Self::Processes, "processes"),
         (Self::StackBytes, "stack-bytes"),
         (Self::PinnedMemoryBytes, "pinned-memory-bytes"),
+        (Self::Threads, "threads"),
     ];
 
     /// Raw on-wire discriminant.
@@ -128,6 +139,7 @@ impl LimitKind {
             2 => Ok(Self::Processes),
             3 => Ok(Self::StackBytes),
             4 => Ok(Self::PinnedMemoryBytes),
+            5 => Ok(Self::Threads),
             _ => Err(Errno::OutOfRange),
         }
     }
@@ -275,7 +287,8 @@ mod tests {
         assert_eq!(LimitKind::Processes.as_u32(), 2);
         assert_eq!(LimitKind::StackBytes.as_u32(), 3);
         assert_eq!(LimitKind::PinnedMemoryBytes.as_u32(), 4);
-        assert_eq!(LimitKind::COUNT, 5);
+        assert_eq!(LimitKind::Threads.as_u32(), 5);
+        assert_eq!(LimitKind::COUNT, 6);
     }
 
     #[test]
@@ -294,6 +307,7 @@ mod tests {
     #[test]
     fn names_are_frozen_and_round_trip() {
         assert_eq!(LimitKind::Processes.name(), "processes");
+        assert_eq!(LimitKind::Threads.name(), "threads");
         for kind in LimitKind::ALL {
             assert_eq!(LimitKind::from_name(kind.name()), Some(kind));
         }

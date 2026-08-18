@@ -285,6 +285,8 @@ mod kernel {
                 user_entry,
                 user_sp,
                 u64::from(EXPECTED_CAP.as_u16()),
+                // This vertical's program uses no thread-local storage.
+                0,
             ))
         }
 

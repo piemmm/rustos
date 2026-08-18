@@ -110,3 +110,49 @@ fn the_user_entry_eret_masks_asynchronous_exceptions_before_the_return_state() {
     );
     assert_nothing_unmasks(&lines[mask..eret]);
 }
+
+/// The psABI thread pointer must be saved on entry and restored on the way
+/// out, at the same frame offset, so several threads of one process do not
+/// share one thread-local storage base (`plans/THREADS.md` decision 7).
+#[test]
+fn the_trap_frame_carries_the_thread_pointer_across_a_context_switch() {
+    let lines = instruction_lines(include_str!("vectors.s"));
+    let handler = line_of(&lines, "bl tairix_aarch64_trap_handler");
+    let save = line_of(&lines, "mrs x2, TPIDR_EL0");
+    let store = line_of(&lines, "str x2, [sp, #800]");
+    let load = line_of(&lines, "ldr x2, [sp, #800]");
+    let restore = line_of(&lines, "msr TPIDR_EL0, x2");
+    let eret = line_of(&lines, "eret");
+
+    assert!(
+        save < handler && store < handler,
+        "the thread pointer belongs to the entry path, before the handler call",
+    );
+    assert_eq!(save + 1, store, "the read is stored straight away");
+    assert!(
+        handler < load,
+        "the reload belongs to the return path, after the handler call",
+    );
+    assert_eq!(
+        load + 1,
+        restore,
+        "the loaded word is written straight back"
+    );
+    assert!(
+        restore < eret,
+        "the thread pointer is restored before the `eret` resumes the thread",
+    );
+}
+
+/// A freshly entered thread gets its own thread pointer rather than whatever
+/// the previous occupant of the CPU left in the register.
+#[test]
+fn the_user_entry_seeds_the_thread_pointer() {
+    let lines = instruction_lines(include_str!("userentry.rs"));
+    let mask = line_of(&lines, "\"msr DAIFSet, #0xf\",");
+    let tls = line_of(&lines, "\"msr TPIDR_EL0, {tls}\",");
+    let eret = line_of(&lines, "\"eret\",");
+
+    assert!(mask < tls, "programmed with exceptions already masked");
+    assert!(tls < eret, "seeded before the `eret` consumes it");
+}

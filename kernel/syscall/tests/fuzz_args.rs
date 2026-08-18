@@ -189,6 +189,36 @@ impl SyscallHandlers for AcceptingHandlers {
         *self.invocations.borrow_mut() += 1;
         Ok(0)
     }
+    fn thread_create(
+        &self,
+        _c: &CallerContext<'_>,
+        _entry: u64,
+        _arg: u64,
+        _stack_len: usize,
+        _tls_base: u64,
+        _clear_on_exit: u64,
+    ) -> SyscallResult {
+        *self.invocations.borrow_mut() += 1;
+        Ok(0)
+    }
+    fn thread_exit(&self, _c: &CallerContext<'_>) -> SyscallResult {
+        *self.invocations.borrow_mut() += 1;
+        Ok(0)
+    }
+    fn futex_wait(
+        &self,
+        _c: &CallerContext<'_>,
+        _uaddr: u64,
+        _expected: u32,
+        _timeout_ns: u64,
+    ) -> SyscallResult {
+        *self.invocations.borrow_mut() += 1;
+        Ok(0)
+    }
+    fn futex_wake(&self, _c: &CallerContext<'_>, _uaddr: u64, _count: u32) -> SyscallResult {
+        *self.invocations.borrow_mut() += 1;
+        Ok(0)
+    }
     fn stream_read(
         &self,
         _c: &CallerContext<'_>,

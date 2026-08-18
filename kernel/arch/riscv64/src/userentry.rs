@@ -56,13 +56,23 @@ impl UserMode {
     }
 }
 
+/// The single, `'static` [`UserMode`] the kernel borrows as this port's
+/// `&'static dyn EnterUser` handle.
+///
+/// A process's [`UserMode`] handle is carried alongside its address space so a
+/// thread created later is entered through the same transition its first
+/// thread was, with no per-arch producer of its own
+/// (`plans/THREADS.md` decision 9). The type is zero-sized, so one shared
+/// instance serves every CPU.
+pub static USER_MODE: UserMode = UserMode::new();
+
 impl EnterUser for UserMode {
     unsafe fn enter_user(&self, regs: UserEntry) -> ! {
         // SAFETY: the caller's `EnterUser::enter_user` contract
         // guarantees `regs.entry` is a U-accessible executable VA and
         // `regs.stack_pointer` a U-accessible writable stack top in the
         // active address space, and that the trap vector is installed.
-        unsafe { enter_user_mode(regs.entry, regs.stack_pointer, regs.arg0) }
+        unsafe { enter_user_mode(regs.entry, regs.stack_pointer, regs.arg0, regs.tls_base) }
     }
 }
 
@@ -100,7 +110,8 @@ const USER_ENTRY_SSTATUS_CLEAR: u64 = SSTATUS_SPP | SSTATUS_SPIE | SSTATUS_SIE;
 const _: () = assert!(USER_ENTRY_SSTATUS_CLEAR & SSTATUS_SIE != 0);
 const _: () = assert!(USER_ENTRY_SSTATUS_SET & USER_ENTRY_SSTATUS_CLEAR == 0);
 
-/// Drop to U-mode at `entry` with stack pointer `sp` and `a0` set.
+/// Drop to U-mode at `entry` with stack pointer `sp`, thread pointer
+/// `tls_base`, and `a0` set.
 ///
 /// # Safety
 ///
@@ -108,7 +119,7 @@ const _: () = assert!(USER_ENTRY_SSTATUS_SET & USER_ENTRY_SSTATUS_CLEAR == 0);
 /// executable virtual address, `sp` a valid U-accessible writable stack
 /// top, and the trap vector must be installed. Diverges via `sret`.
 #[cfg(all(target_arch = "riscv64", target_os = "none"))]
-unsafe fn enter_user_mode(entry: u64, sp: u64, a0: u64) -> ! {
+unsafe fn enter_user_mode(entry: u64, sp: u64, a0: u64, tls_base: u64) -> ! {
     use crate::trap::{TRAP_ANCHOR_BYTES, TRAP_ANCHOR_KTP_OFFSET};
 
     // SAFETY: the-sanctioned assembly carve-out (no Rust spelling for
@@ -120,8 +131,10 @@ unsafe fn enter_user_mode(entry: u64, sp: u64, a0: u64) -> ! {
     // hart's `tp` there cannot touch a live frame; the trap vector then swaps
     // to that address on the next U->S trap and rebuilds its frame beneath it
     // (`trap.s`). `csrw sepc` and the `sp`/`a0` moves load the U-mode entry
-    // state, `mv tp, zero` keeps the kernel's hart identity out of U-mode,
-    // and `sret` performs the documented S→U transition. The caller's safety
+    // state, loading `tp` with the thread's own thread pointer keeps the
+    // kernel's hart identity out of U-mode (the anchor above already holds
+    // the copy the trap vector needs), and `sret` performs the documented
+    // S→U transition. The caller's safety
     // contract guarantees the mapped entry/stack. `options(noreturn)` matches
     // the divergence, and `sp` is deliberately left as the user stack — no
     // output operand is possible alongside `noreturn`, so `sp` itself carries
@@ -135,7 +148,7 @@ unsafe fn enter_user_mode(entry: u64, sp: u64, a0: u64) -> ! {
             "csrw sscratch, sp",
             "csrw sepc, {entry}",
             "mv sp, {sp}",
-            "mv tp, zero",
+            "mv tp, {tls}",
             "sret",
             set = in(reg) USER_ENTRY_SSTATUS_SET,
             clr = in(reg) USER_ENTRY_SSTATUS_CLEAR,
@@ -143,6 +156,7 @@ unsafe fn enter_user_mode(entry: u64, sp: u64, a0: u64) -> ! {
             ktp_off = const TRAP_ANCHOR_KTP_OFFSET,
             entry = in(reg) entry,
             sp = in(reg) sp,
+            tls = in(reg) tls_base,
             in("a0") a0,
             options(noreturn),
         );
@@ -159,7 +173,7 @@ unsafe fn enter_user_mode(entry: u64, sp: u64, a0: u64) -> ! {
 /// Never call on the host; see [`EnterUser::enter_user`] for the
 /// bare-metal contract.
 #[cfg(not(all(target_arch = "riscv64", target_os = "none")))]
-unsafe fn enter_user_mode(_entry: u64, _sp: u64, _a0: u64) -> ! {
+unsafe fn enter_user_mode(_entry: u64, _sp: u64, _a0: u64, _tls_base: u64) -> ! {
     unreachable!("enter_user_mode is only meaningful on the bare-metal riscv64 target")
 }
 

@@ -2153,6 +2153,86 @@ impl SyscallNumber {
     /// principal's data at a session boundary. Returns `0`.
     pub const TERMINAL_PURGE: Self = Self(108);
 
+    /// Create a second thread of execution inside the calling process's own
+    /// address space, returning its thread id (`plans/THREADS.md` T3b).
+    ///
+    /// Arguments: `entry: *const ()` — the U-mode entry address the new thread
+    /// starts at, which must lie in an executable mapping of the caller's own
+    /// space; `arg: u64` — the value placed in the first-argument register
+    /// there; `stack_len: usize` — the thread's user-stack size, or
+    /// [`crate::THREAD_STACK_DEFAULT`] for the caller's effective
+    /// `stack-bytes` bound; `tls_base: u64` — the thread's initial thread
+    /// pointer (`TPIDR_EL0` / `tp` / `IA32_FS_BASE`), `0` for none;
+    /// `clear_on_exit: *mut u32` — a word in the caller's own space the kernel
+    /// zeroes and futex-wakes when this thread dies, `0` for none. Returns the
+    /// new thread id, or `-errno`.
+    ///
+    /// The kernel reserves the thread's stack — **and the unbacked guard page
+    /// below it** — out of the process's own anonymous window, so a stack
+    /// overrun faults deterministically, two threads can never share a stack,
+    /// and the whole region is released when the thread dies (`plans/THREADS.md`
+    /// decision 5a). The reservation is charged against the caller's
+    /// `stack-bytes` bound and the new thread against its `threads` bound, both
+    /// fail-closed.
+    ///
+    /// Unprivileged: a thread runs in the caller's *own* hardware-isolated
+    /// address space under the caller's own single capability record, so it
+    /// grants no authority over anything else — the same reasoning that makes
+    /// [`Self::MEM_MAP`] unprivileged. Audited: a new schedulable principal is
+    /// a lifecycle event, exactly as [`Self::SPAWN`] is.
+    pub const THREAD_CREATE: Self = Self(109);
+
+    /// End the calling thread without ending its siblings
+    /// (`plans/THREADS.md` T3b).
+    ///
+    /// No arguments and no return: the thread's `clear_on_exit` word (if it
+    /// named one) is zeroed and futex-woken, its stack and per-thread kernel
+    /// state are released, and it is reaped. The **last** thread of a process
+    /// to end is a process exit — the process's status is `0`, exactly as
+    /// falling off the end of `main` gives.
+    ///
+    /// Ending oneself needs no capability. Audited for the same reason
+    /// [`Self::EXIT`] is.
+    pub const THREAD_EXIT: Self = Self(110);
+
+    /// Block until the 32-bit word at `uaddr` is changed and woken, unless it
+    /// no longer holds `expected` (`plans/THREADS.md` decision 5).
+    ///
+    /// Arguments: `uaddr: *const u32` — a naturally aligned word in the
+    /// caller's own address space; `expected: u32` — the value the caller
+    /// observed before deciding to block; `timeout_ns: u64` — a relative
+    /// timeout, or [`u64::MAX`] for "no timeout". Returns `0` when woken by
+    /// [`Self::FUTEX_WAKE`], or `-errno`: [`crate::Errno::WouldBlock`] when the
+    /// word does not hold `expected` (the caller re-tests and retries — this is
+    /// the lost-wake-up race closing, not a failure),
+    /// [`crate::Errno::TimedOut`] when the timeout elapses, and
+    /// [`crate::Errno::Interrupted`] when the thread is being terminated.
+    ///
+    /// This is the one generic blocking primitive userland builds a mutex,
+    /// condition variable, and thread join over, so an *uncontended* lock is
+    /// pure user-space atomics and never enters the kernel at all. The wait key
+    /// is `(process, uaddr)`: address spaces are per-process and isolated, so a
+    /// key is unforgeable and names nothing outside the caller. Unprivileged
+    /// and unaudited — a hot, self-scoped blocking primitive that decides no
+    /// security question.
+    pub const FUTEX_WAIT: Self = Self(111);
+
+    /// Wake up to `count` threads of the calling process blocked in
+    /// [`Self::FUTEX_WAIT`] on `uaddr`, returning how many were woken.
+    ///
+    /// Arguments: `uaddr: *const u32` — the same word the waiters named;
+    /// `count: u32` — the maximum number of waiters to release
+    /// ([`u32::MAX`] for "all of them"). Returns the number woken, or
+    /// `-errno`.
+    ///
+    /// Waiters are released oldest-first, so repeated contention cannot move an
+    /// older waiter behind newer arrivals and a `count` of 1 is a genuine
+    /// wake-one rather than a thundering herd. Waking nobody is success
+    /// (`0`): by the register-before-retest discipline a waiter that is not yet
+    /// parked re-tests the word itself. Unprivileged and unaudited, as
+    /// [`Self::FUTEX_WAIT`].
+    pub const FUTEX_WAKE: Self = Self(112);
+
     /// Inclusive upper bound on the syscall identifier space in `abi-v1`.
     pub const MAX: u16 = 1023;
 

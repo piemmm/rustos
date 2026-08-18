@@ -37,12 +37,12 @@ use tairix_abi::Errno;
 use tairix_arch_aarch64::paging::{
     activate_user_root, configured_identity_gigapages, AddressSpace as ArchAddressSpace,
 };
-use tairix_arch_aarch64::userentry::UserMode;
+use tairix_arch_aarch64::userentry::USER_MODE;
 use tairix_arch_api::mmu::AddressSpace as MmuAddressSpace;
-use tairix_arch_api::EnterUser;
 use tairix_kernel_core::{
     refuse_build, spawn_caller_errno, spawn_image, ArchImageBuilder, BoxStack, BuiltImage,
-    ImageBuildCtx, KernelStack, ProcessSpace, SpawnMode, SpawnRequest,
+    ImageBuildCtx, KernelStack, ProcessResume, ProcessSpace, SpawnMode, SpawnRequest,
+    UserThreadEntry,
 };
 use tairix_kernel_mem::{
     AddressSpace, DirectPhysMap, FrameAllocator, FrameTableSource, LiveSpace, PhysAddr, PhysMap,
@@ -355,24 +355,12 @@ impl ArchImageBuilder for Aarch64ProcessSpawn {
         // before every switch into the child, so it `eret`s into EL0 under
         // its own `TTBR0_EL1` root. It captures only the `u64` root, so it is
         // `Send`. aarch64 reuses `SP_EL1` and ignores the stack-top argument.
-        let pre_resume: Box<dyn FnMut(u64) + Send> = Box::new(move |_stack_top: u64| {
+        let pre_resume: ProcessResume = Arc::new(move |_stack_top: u64, _tls_base: u64| {
             // SAFETY: the MMU is already enabled and `child_root_phys` is the
             // L1 root of the child's space, which identity-maps the low
             // kernel window the running kernel executes from — exactly
             // `activate_user_root`'s contract.
             unsafe { activate_user_root(child_root_phys) };
-        });
-
-        // The user-mode transition, boxed for the loading body to invoke
-        // once `become_user` has installed the hook. `enter_user` diverges
-        // into EL0, so its `!` coerces to `()`.
-        let user_mode = UserMode::new();
-        let enter: Box<dyn FnMut() + Send> = Box::new(move || {
-            // SAFETY: by the time this body runs the child has been
-            // dispatched, so its `pre_resume` hook has activated `space` and
-            // the EL1 trap vector + production dispatch callback are
-            // installed; the child's first `svc` is handled.
-            unsafe { user_mode.enter_user(entry) }
         });
 
         // Freeze the just-built mappings into the registry-storable,
@@ -407,7 +395,13 @@ impl ArchImageBuilder for Aarch64ProcessSpawn {
                     windows.file_pages,
                 )
                 .ok()
-                .map(|live| Arc::new(ProcessSpace::new(Box::new(live))))
+                .map(|live| {
+                    Arc::new(ProcessSpace::new(
+                        Box::new(live),
+                        Arc::clone(&pre_resume),
+                        &USER_MODE,
+                    ))
+                })
             }
             None => None,
         };
@@ -420,7 +414,10 @@ impl ArchImageBuilder for Aarch64ProcessSpawn {
             stack_span,
             live,
             pre_resume,
-            enter,
+            entry: UserThreadEntry {
+                port: &USER_MODE,
+                regs: entry,
+            },
         })
     }
 }

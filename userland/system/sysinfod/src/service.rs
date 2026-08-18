@@ -1481,6 +1481,11 @@ mod tests {
                     ResourceLimit::new(1 << 20, 1 << 20).unwrap(),
                     0,
                 ),
+                ResourceLimitRecord::new(
+                    LimitKind::Threads,
+                    ResourceLimit::new(16, 64).unwrap(),
+                    1,
+                ),
             ])
         }
     }

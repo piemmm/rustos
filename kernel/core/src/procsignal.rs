@@ -22,13 +22,14 @@
 //! place of the fail-closed floor.
 
 use alloc::collections::{BTreeMap, BTreeSet};
+use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
 use tairix_abi::{Errno, Signal};
 use tairix_kernel_sched_api::{ExitDisposition, SchedError, SchedulerArch, SchedulerPolicy};
-use tairix_kernel_sec::{ProcessId, TaskId};
+use tairix_kernel_sec::{CapTable, ProcessId, TaskId};
 use tairix_sync::once::OnceCell;
-use tairix_sync::SpinLock;
+use tairix_sync::{RwLock, SpinLock};
 
 use crate::procwait::{KernelProcessWait, ProcessWait};
 
@@ -615,6 +616,25 @@ pub trait ProcessSignal: Sync {
     /// ([`NullProcessSignal`]) returns [`Errno::NotImplemented`] to mark an
     /// inert interface.
     fn signal_task(&self, target: ProcessId, signal: Signal) -> Result<(), Errno>;
+
+    /// Terminate every thread of `process` **except** `keep`, without recording
+    /// an exit status or reclaiming the process
+    /// (`plans/THREADS.md` decision 10).
+    ///
+    /// The group-exit half of `exit(code)`. `exit` ends the whole process, so
+    /// its siblings must stop — a sibling left running against an address space
+    /// the exiting thread is about to reclaim would turn its own legitimate
+    /// accesses into wild faults — but the *status* and the reclamation belong
+    /// to the calling thread, which records and drives them itself. So this
+    /// stops the siblings and nothing more: no `wait` status is written (that
+    /// would overwrite the real exit code with a signalled one) and no second
+    /// process teardown is landed.
+    ///
+    /// The default is a no-op: a single-threaded process has no siblings, and a
+    /// producer with no thread-group table cannot see any.
+    fn terminate_siblings(&self, process: ProcessId, keep: TaskId) {
+        let _ = (process, keep);
+    }
 }
 
 /// The process-signal producer installed before any real one exists.
@@ -682,6 +702,19 @@ where
     /// The live scheduler this producer drives to deliver a signal
     /// (unpark / exit the target task).
     scheduler: &'static P,
+    /// The authoritative thread-group table, so a process-directed signal
+    /// reaches **every** thread of its target (`plans/THREADS.md` decision
+    /// 10).
+    ///
+    /// A signal names a PID, but only threads are schedulable: parking,
+    /// unparking, and exiting all name a thread. Delivering to the leader
+    /// alone would leave a killed process's siblings running against a
+    /// reclaimed address space — a wild-fault hazard, not a behavioural
+    /// nuance — and would leave a stopped process still executing. [`None`]
+    /// on a host fixture that wired no table; delivery then treats the
+    /// target as the single-threaded process its PID names, which is what
+    /// every process was before threads existed.
+    caps: Option<&'static RwLock<CapTable>>,
     /// The boot-installed [`TaskReclaim`] seam a terminating signal drives
     /// (set-once; the dispatch hook is leaked *after* this producer is
     /// built, so the reference arrives through
@@ -697,13 +730,59 @@ where
     P: SchedulerPolicy<A> + Send + Sync + 'static,
 {
     /// Build a producer that resolves children and records against `wait`
-    /// and delivers through `scheduler`.
+    /// and delivers through `scheduler`, fanning a process-directed signal out
+    /// over the thread groups `caps` holds.
     #[must_use]
-    pub const fn new(wait: &'static KernelProcessWait<A>, scheduler: &'static P) -> Self {
+    pub const fn new(
+        wait: &'static KernelProcessWait<A>,
+        scheduler: &'static P,
+        caps: &'static RwLock<CapTable>,
+    ) -> Self {
         Self {
             wait,
             scheduler,
+            caps: Some(caps),
             reclaim: OnceCell::new(),
+        }
+    }
+
+    /// A producer with no thread-group table: every target is treated as the
+    /// single-threaded process its PID names.
+    ///
+    /// The shape a host fixture of the signal bookkeeping alone needs — it
+    /// registers no capability records, so there is no group to resolve.
+    #[must_use]
+    pub const fn without_thread_groups(
+        wait: &'static KernelProcessWait<A>,
+        scheduler: &'static P,
+    ) -> Self {
+        Self {
+            wait,
+            scheduler,
+            caps: None,
+            reclaim: OnceCell::new(),
+        }
+    }
+
+    /// Every live thread of `process`, in ascending id order.
+    ///
+    /// A process whose group the table does not know — a boot principal, a
+    /// kernel task, or a host fixture with no table — is its own single
+    /// thread: a process id *is* its leader thread's id, so this degrades to
+    /// exactly the pre-threads behaviour rather than delivering nothing.
+    fn threads_of(&self, process: ProcessId) -> Vec<u64> {
+        let listed = match self.caps {
+            Some(caps) => caps
+                .read()
+                .threads_of(process)
+                .map(|thread| thread.0)
+                .collect(),
+            None => Vec::new(),
+        };
+        if listed.is_empty() {
+            alloc::vec![process.0]
+        } else {
+            listed
         }
     }
 
@@ -732,17 +811,34 @@ where
     /// the scheduler no longer knows (it exited between authorisation and
     /// delivery) fails closed with [`Errno::NotFound`].
     fn resume(&self, child: ProcessId) -> Result<(), Errno> {
+        let threads = self.threads_of(child);
         // Lift the stop overlay *before* the unpark, so the dispatch that
         // the unpark makes possible finds the task runnable rather than
-        // re-parking it.
-        STOPPED_TASKS.lock().remove(&child.0);
+        // re-parking it. Every thread of the group is lifted: a continue that
+        // released only the leader would leave the process half-stopped.
+        {
+            let mut stopped = STOPPED_TASKS.lock();
+            for thread in &threads {
+                stopped.remove(thread);
+            }
+        }
         // The resume also clears any stop the parent never observed: a
         // stale "stopped" report after the child is running again would
         // mislead the job table.
         self.wait.record_continue(child);
-        match self.scheduler.unpark(child.0) {
-            Ok(()) | Err(SchedError::InvalidState) => Ok(()),
-            Err(_) => Err(Errno::NotFound),
+        // The delivery succeeds when *some* thread of the group was resumable;
+        // a group the scheduler no longer knows at all fails closed.
+        let mut resumed = false;
+        for thread in threads {
+            match self.scheduler.unpark(thread) {
+                Ok(()) | Err(SchedError::InvalidState) => resumed = true,
+                Err(_) => {}
+            }
+        }
+        if resumed {
+            Ok(())
+        } else {
+            Err(Errno::NotFound)
         }
     }
 
@@ -754,12 +850,31 @@ where
     /// longer knows fails closed with [`Errno::NotFound`] and leaves no
     /// overlay entry behind.
     fn stop(&self, child: ProcessId) -> Result<(), Errno> {
-        STOPPED_TASKS.lock().insert(child.0);
-        if self.scheduler.park(child.0).is_ok() {
+        let threads = self.threads_of(child);
+        // Mark every thread of the group *first* — so a wake racing any park
+        // cannot slip one back onto a CPU — then park them all. Stopping only
+        // the leader would leave the rest of the process running, which is not
+        // what "stopped" means to a job-control shell.
+        {
+            let mut stopped = STOPPED_TASKS.lock();
+            for thread in &threads {
+                stopped.insert(*thread);
+            }
+        }
+        let mut parked = false;
+        for thread in &threads {
+            if self.scheduler.park(*thread).is_ok() {
+                parked = true;
+            }
+        }
+        if parked {
             self.wait.record_stop(child, Signal::Stop);
             Ok(())
         } else {
-            STOPPED_TASKS.lock().remove(&child.0);
+            let mut stopped = STOPPED_TASKS.lock();
+            for thread in &threads {
+                stopped.remove(thread);
+            }
             Err(Errno::NotFound)
         }
     }
@@ -793,33 +908,59 @@ where
     /// recorded. Only a child that is neither in a syscall nor executing
     /// ([`ExitDisposition::Quiesced`]) is reaped and reclaimed inline here.
     fn terminate(&self, child: ProcessId, signal: Signal) -> Result<(), Errno> {
+        // A terminating signal names a process, so it kills the whole thread
+        // group: every thread is driven to its own stopping point, and the
+        // reap+reclaim lands exactly once, when the *last* of them is down
+        // (`plans/THREADS.md` decision 10). Reclaiming while any sibling still
+        // executes would turn its legitimate accesses into wild faults, which
+        // is the same hazard the per-thread deferral below exists to avoid.
+        let threads = self.threads_of(child);
+        let mut reached = false;
+        for thread in threads {
+            if self.terminate_thread(child, thread, signal).is_ok() {
+                reached = true;
+            }
+        }
+        if reached {
+            Ok(())
+        } else {
+            Err(Errno::NotFound)
+        }
+    }
+
+    /// Drive one `thread` of the doomed `child` process to its stopping point.
+    ///
+    /// The three dispositions are exactly the single-threaded ones; what
+    /// changes with a group is *when* the shared teardown runs, which
+    /// [`Self::land_thread_down`] decides.
+    fn terminate_thread(&self, child: ProcessId, thread: u64, signal: Signal) -> Result<(), Errno> {
         {
             let mut gate = KILL_GATE.lock();
-            if gate.in_syscall.contains(&child.0) {
-                gate.pending.entry(child.0).or_insert(signal);
+            if gate.in_syscall.contains(&thread) {
+                gate.pending.entry(thread).or_insert(signal);
                 drop(gate);
-                // A stopped child must still die: lift its overlay entry so
+                // A stopped thread must still die: lift its overlay entry so
                 // the wake below runs it to its boundary instead of the
                 // dispatch shim re-parking it forever.
-                STOPPED_TASKS.lock().remove(&child.0);
-                // Wake the child out of any in-kernel park. Every park loop
+                STOPPED_TASKS.lock().remove(&thread);
+                // Wake it out of any in-kernel park. Every park loop
                 // re-tests its condition after a wake and consults the kill
                 // gate, so a spurious wake is harmless and a doomed waiter
-                // unwinds promptly. `InvalidState` means the child is
+                // unwinds promptly. `InvalidState` means the thread is
                 // runnable or running — it reaches its boundary by itself.
-                match self.scheduler.unpark(child.0) {
+                match self.scheduler.unpark(thread) {
                     Ok(()) | Err(SchedError::InvalidState) => return Ok(()),
                     Err(_) => return Err(Errno::NotFound),
                 }
             }
         }
-        // A stopped child can be killed: lift its overlay entry so the set
+        // A stopped thread can be killed: lift its overlay entry so the set
         // never accumulates entries for dead tasks, whichever disposition
         // the scheduler reports.
-        match self.scheduler.exit(child.0) {
+        match self.scheduler.exit(thread) {
             Ok(ExitDisposition::Quiesced) => {
-                STOPPED_TASKS.lock().remove(&child.0);
-                self.land_termination(child, signal);
+                STOPPED_TASKS.lock().remove(&thread);
+                self.land_thread_down(child, thread, signal);
                 Ok(())
             }
             Ok(ExitDisposition::Deferred) => {
@@ -830,19 +971,77 @@ where
                 // dispatch loop land it once the owning dispatch has retired
                 // the task (the scheduler already IPI'd that CPU). The
                 // delivery is still complete from the caller's view — the
-                // child is doomed and its `wait` reap follows.
-                STOPPED_TASKS.lock().remove(&child.0);
-                defer_running_kill(child.0, child, signal);
+                // thread is doomed and its group's `wait` reap follows.
+                STOPPED_TASKS.lock().remove(&thread);
+                defer_running_kill(thread, child, signal);
                 Ok(())
             }
             Ok(ExitDisposition::AlreadyExited) => {
-                // A prior termination already owns this task's teardown, or
+                // A prior termination already owns this thread's teardown, or
                 // it exited on its own between authorisation and here.
-                // Reclaim runs exactly once, so there is nothing to do.
-                STOPPED_TASKS.lock().remove(&child.0);
+                // Teardown runs exactly once, so there is nothing to do.
+                STOPPED_TASKS.lock().remove(&thread);
                 Ok(())
             }
             Err(_) => Err(Errno::NotFound),
+        }
+    }
+
+    /// Drive one sibling `thread` of an exiting process to its stopping point,
+    /// recording no status and landing no process teardown.
+    ///
+    /// A sibling caught mid-syscall is gated exactly as a signalled kill gates
+    /// it (its own unwind must release what only it can), and one still
+    /// executing in user mode is deferred as a *plain* reclaim — never a
+    /// signalled one, whose landing would write a `128 + n` status over the exit
+    /// code the exiting thread already recorded.
+    fn stop_sibling(&self, process: ProcessId, thread: u64) {
+        {
+            let mut gate = KILL_GATE.lock();
+            if gate.in_syscall.contains(&thread) {
+                gate.pending.entry(thread).or_insert(Signal::Kill);
+                drop(gate);
+                STOPPED_TASKS.lock().remove(&thread);
+                let _ = self.scheduler.unpark(thread);
+                return;
+            }
+        }
+        match self.scheduler.exit(thread) {
+            Ok(ExitDisposition::Quiesced | ExitDisposition::AlreadyExited) => {
+                STOPPED_TASKS.lock().remove(&thread);
+                if let Some(caps) = self.caps {
+                    let _ = caps.write().remove_thread(TaskId(thread));
+                }
+            }
+            Ok(ExitDisposition::Deferred) => {
+                STOPPED_TASKS.lock().remove(&thread);
+                defer_plain_reclaim(thread, process);
+            }
+            // A thread the scheduler no longer knows needs no stopping.
+            Err(_) => {}
+        }
+    }
+
+    /// Retire one quiesced `thread` of `child` and, when it was the group's
+    /// last, land the process's reap + reclaim.
+    ///
+    /// This is the single point that decides "the process is gone": a
+    /// multi-threaded victim reclaims its address space only once every thread
+    /// has stopped executing, whether each stopped inline
+    /// ([`ExitDisposition::Quiesced`]) or at the dispatch loop's later landing.
+    fn land_thread_down(&self, child: ProcessId, thread: u64, signal: Signal) {
+        let remaining = match self.caps {
+            // Dropping the thread's alias is what makes the count fall; a
+            // thread the table does not know leaves the count where it was, so
+            // the group is treated as down (the pre-threads shape).
+            Some(caps) => caps
+                .write()
+                .remove_thread(TaskId(thread))
+                .map_or(0, |(_, remaining)| remaining),
+            None => 0,
+        };
+        if remaining == 0 {
+            self.land_termination(child, signal);
         }
     }
 
@@ -904,15 +1103,16 @@ where
     A: SchedulerArch + Send + Sync + 'static,
     P: SchedulerPolicy<A> + Send + Sync + 'static,
 {
-    fn land_deferred_teardown(&self, _thread: TaskId, teardown: DeferredTeardown) {
+    fn land_deferred_teardown(&self, thread: TaskId, teardown: DeferredTeardown) {
         // The thread has returned to the dispatch loop and executes nowhere,
         // so the teardown deferred at request time is now safe. The process
         // it owes is carried by the deferral itself.
         match teardown {
             // A signalled kill: the very reap+reclaim the immediate
-            // terminate path runs, one definition.
+            // terminate path runs, one definition — and, for a multi-threaded
+            // victim, only once its last thread is down.
             DeferredTeardown::Signalled { process, signal } => {
-                self.land_termination(process, signal);
+                self.land_thread_down(process, thread.0, signal);
             }
             // A driver unload whose process was still executing: reclaim its
             // kernel resources only, with no `wait` reap (a driver is not a
@@ -931,6 +1131,15 @@ where
     A: SchedulerArch + Send + Sync + 'static,
     P: SchedulerPolicy<A> + Send + Sync + 'static,
 {
+    fn terminate_siblings(&self, process: ProcessId, keep: TaskId) {
+        for thread in self.threads_of(process) {
+            if thread == keep.0 {
+                continue;
+            }
+            self.stop_sibling(process, thread);
+        }
+    }
+
     fn resolve_child(&self, sender: ProcessId, pid: i32) -> Result<ProcessId, Errno> {
         // The `wait` producer already owns the parent/child bookkeeping, so
         // who-parents-whom is answered in one place for both syscalls. A
@@ -1118,7 +1327,7 @@ mod tests {
     #[test]
     fn signalling_a_non_child_fails_closed() {
         let (wait, scheduler) = scaffold();
-        let signaller = KernelProcessSignal::new(wait, scheduler);
+        let signaller = KernelProcessSignal::without_thread_groups(wait, scheduler);
         // A caller with no children resolves nothing to signal.
         assert_eq!(
             signal_child(&signaller, ProcessId(1), 2, Signal::Terminate),
@@ -1142,7 +1351,7 @@ mod tests {
         let (wait, scheduler) = scaffold();
         let (child, child_pid) = spawn_child(scheduler);
         wait.register_child(ProcessId(7), ProcessId(child));
-        let signaller = KernelProcessSignal::new(wait, scheduler);
+        let signaller = KernelProcessSignal::without_thread_groups(wait, scheduler);
 
         assert_eq!(
             signal_child(&signaller, ProcessId(7), child_pid, Signal::Terminate),
@@ -1180,7 +1389,7 @@ mod tests {
         let (wait, scheduler) = scaffold();
         let (child, child_pid) = spawn_child(scheduler);
         wait.register_child(ProcessId(7), ProcessId(child));
-        let signaller = KernelProcessSignal::new(wait, scheduler);
+        let signaller = KernelProcessSignal::without_thread_groups(wait, scheduler);
 
         // The child is mid-syscall: its handler may hold kernel state only
         // its own unwind can release (a mount's `SleepLock`, an in-flight
@@ -1212,7 +1421,7 @@ mod tests {
         let (wait, scheduler) = scaffold();
         let (child, child_pid) = spawn_child(scheduler);
         wait.register_child(ProcessId(7), ProcessId(child));
-        let signaller = KernelProcessSignal::new(wait, scheduler);
+        let signaller = KernelProcessSignal::without_thread_groups(wait, scheduler);
 
         syscall_enter(child);
         assert_eq!(
@@ -1256,7 +1465,7 @@ mod tests {
         let (wait, scheduler) = scaffold();
         let (child, child_pid) = spawn_child(scheduler);
         wait.register_child(ProcessId(7), ProcessId(child));
-        let signaller = KernelProcessSignal::new(wait, scheduler);
+        let signaller = KernelProcessSignal::without_thread_groups(wait, scheduler);
         signaller
             .install_task_reclaim(&RecordingReclaim)
             .expect("first install on this producer");
@@ -1488,7 +1697,7 @@ mod tests {
         let (wait, scheduler) = scaffold();
         let (child, _pid) = spawn_child(scheduler);
         wait.register_child(ProcessId(7), ProcessId(child));
-        let signaller = KernelProcessSignal::new(wait, scheduler);
+        let signaller = KernelProcessSignal::without_thread_groups(wait, scheduler);
         signaller
             .install_task_reclaim(&RecordingReclaim)
             .expect("first install on this producer");
@@ -1535,7 +1744,7 @@ mod tests {
         let (wait, scheduler) = scaffold();
         let (child, child_pid) = spawn_child(scheduler);
         wait.register_child(ProcessId(7), ProcessId(child));
-        let signaller = KernelProcessSignal::new(wait, scheduler);
+        let signaller = KernelProcessSignal::without_thread_groups(wait, scheduler);
 
         assert_eq!(
             signal_child(&signaller, ProcessId(7), child_pid, Signal::Kill),
@@ -1558,7 +1767,7 @@ mod tests {
         let (wait, scheduler) = scaffold();
         let (child, child_pid) = spawn_child(scheduler);
         wait.register_child(ProcessId(7), ProcessId(child));
-        let signaller = KernelProcessSignal::new(wait, scheduler);
+        let signaller = KernelProcessSignal::without_thread_groups(wait, scheduler);
 
         assert_eq!(
             signal_child(&signaller, ProcessId(7), child_pid, Signal::Interrupt),
@@ -1582,7 +1791,7 @@ mod tests {
         let (wait, scheduler) = scaffold();
         let (child, child_pid) = spawn_child(scheduler);
         wait.register_child(ProcessId(7), ProcessId(child));
-        let signaller = KernelProcessSignal::new(wait, scheduler);
+        let signaller = KernelProcessSignal::without_thread_groups(wait, scheduler);
 
         assert_eq!(
             signal_child(&signaller, ProcessId(7), child_pid, Signal::Stop),
@@ -1620,7 +1829,7 @@ mod tests {
         let (wait, scheduler) = scaffold();
         let (child, child_pid) = spawn_child(scheduler);
         wait.register_child(ProcessId(7), ProcessId(child));
-        let signaller = KernelProcessSignal::new(wait, scheduler);
+        let signaller = KernelProcessSignal::without_thread_groups(wait, scheduler);
 
         assert_eq!(
             signal_child(&signaller, ProcessId(7), child_pid, Signal::Stop),
@@ -1648,7 +1857,7 @@ mod tests {
         let (wait, scheduler) = scaffold();
         let (child, child_pid) = spawn_child(scheduler);
         wait.register_child(ProcessId(7), ProcessId(child));
-        let signaller = KernelProcessSignal::new(wait, scheduler);
+        let signaller = KernelProcessSignal::without_thread_groups(wait, scheduler);
 
         assert_eq!(
             signal_child(&signaller, ProcessId(7), child_pid, Signal::Stop),
@@ -1677,7 +1886,7 @@ mod tests {
         let (wait, scheduler) = scaffold();
         let (child, _child_pid) = spawn_child(scheduler);
         wait.register_child(ProcessId(7), ProcessId(child));
-        let signaller = KernelProcessSignal::new(wait, scheduler);
+        let signaller = KernelProcessSignal::without_thread_groups(wait, scheduler);
 
         // The console path never delivers Continue/Terminate/Kill.
         for signal in [Signal::Continue, Signal::Terminate, Signal::Kill] {
@@ -1708,7 +1917,7 @@ mod tests {
     #[test]
     fn foreground_deliver_to_a_dead_target_fails_closed() {
         let (wait, scheduler) = scaffold();
-        let signaller = KernelProcessSignal::new(wait, scheduler);
+        let signaller = KernelProcessSignal::without_thread_groups(wait, scheduler);
         // Task 9999 was never admitted: the delivery reaches no one.
         assert_eq!(
             signaller.deliver(ProcessId(9999), Signal::Interrupt),
@@ -1741,7 +1950,7 @@ mod tests {
         let (wait, scheduler) = scaffold();
         let (child, child_pid) = spawn_child(scheduler);
         wait.register_child(ProcessId(7), ProcessId(child));
-        let signaller = KernelProcessSignal::new(wait, scheduler);
+        let signaller = KernelProcessSignal::without_thread_groups(wait, scheduler);
 
         // The child is runnable, not stopped, so Continue succeeds as a no-op
         // (it neither terminates the child nor records an exit).
@@ -1835,7 +2044,7 @@ mod tests {
         let (child, child_pid) = spawn_child(scheduler);
         clear_intake(child);
         wait.register_child(ProcessId(7), ProcessId(child));
-        let signaller = KernelProcessSignal::new(wait, scheduler);
+        let signaller = KernelProcessSignal::without_thread_groups(wait, scheduler);
 
         intake_enable(child);
         // The interrupt is recorded, not delivered as a termination: the
@@ -1875,7 +2084,7 @@ mod tests {
         let (child, child_pid) = spawn_child(scheduler);
         clear_intake(child);
         wait.register_child(ProcessId(7), ProcessId(child));
-        let signaller = KernelProcessSignal::new(wait, scheduler);
+        let signaller = KernelProcessSignal::without_thread_groups(wait, scheduler);
 
         intake_enable(child);
         assert_eq!(
@@ -1909,7 +2118,7 @@ mod tests {
         let (child, _child_pid) = spawn_child(scheduler);
         clear_intake(child);
         wait.register_child(ProcessId(7), ProcessId(child));
-        let signaller = KernelProcessSignal::new(wait, scheduler);
+        let signaller = KernelProcessSignal::without_thread_groups(wait, scheduler);
 
         intake_enable(child);
         // The console `^C` is observed, not fatal …
@@ -1939,7 +2148,7 @@ mod tests {
         let (wait, scheduler) = scaffold();
         let (child, child_pid) = spawn_child(scheduler);
         wait.register_child(ProcessId(7), ProcessId(child));
-        let signaller = KernelProcessSignal::new(wait, scheduler);
+        let signaller = KernelProcessSignal::without_thread_groups(wait, scheduler);
 
         assert_eq!(
             signal_child(&signaller, ProcessId(7), child_pid, Signal::Terminate),

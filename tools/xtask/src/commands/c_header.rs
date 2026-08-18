@@ -79,7 +79,8 @@ use tairix_abi::{
     SEG_FLAG_WRITE, SPAWN_UID_INHERIT, STDINFO_FD, STDINFO_VERSION_CURRENT, STDINFO_VERSION_V1,
     SYSCALLS, SYSCALL_MAX_ARGS, SYSCALL_TABLE_HASH_LEN, SYSINFO_MAX_PAYLOAD_LEN,
     SYSINFO_QUERY_NAME_MAX, SYSINFO_QUERY_RECORD_LEN, SYSINFO_REQUEST_MAGIC,
-    SYSINFO_VERSION_CURRENT, SYSINFO_VERSION_V1, SYSTEM_LIBRARIES_DIR, USER_DIRECTORY_NAME_MAX,
+    SYSINFO_VERSION_CURRENT, SYSINFO_VERSION_V1, SYSTEM_LIBRARIES_DIR, THREAD_STACK_DEFAULT,
+    USER_DIRECTORY_NAME_MAX,
 };
 
 /// Default on-disk location of the generated C ABI header set, relative to
@@ -1325,6 +1326,15 @@ fn generate_process() -> String {
     let _ = writeln!(
         out,
         "#define TAIRIX_SPAWN_UID_INHERIT ((uint32_t){SPAWN_UID_INHERIT:#x}u)"
+    );
+    out.push_str(
+        "/* `stack_len` argument to tairix_sys_thread_create: give the new thread the\n\
+         \x20* kernel's default per-thread stack (the caller's effective stack-bytes\n\
+         \x20* bound) instead of naming a size. */\n",
+    );
+    let _ = writeln!(
+        out,
+        "#define TAIRIX_THREAD_STACK_DEFAULT ((uintptr_t){THREAD_STACK_DEFAULT}u)"
     );
     out.push('\n');
 

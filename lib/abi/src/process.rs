@@ -588,6 +588,17 @@ pub const CONSOLE_INHERIT: u64 = u64::MAX;
 /// spawn (there is no setuid-self).
 pub const SPAWN_UID_INHERIT: u32 = u32::MAX;
 
+/// The `stack_len` argument to [`crate::SyscallNumber::THREAD_CREATE`] that
+/// asks for the kernel's default per-thread stack size instead of naming one.
+///
+/// The default is the caller's own effective `stack-bytes` bound
+/// ([`crate::LimitKind::StackBytes`]) — the same policy that sizes the process's
+/// first thread — so a `ulimit` tightening applies to threads with no second
+/// definition of the number in userland, and a caller that wants less simply
+/// names a smaller length. Zero is the natural spelling: a thread cannot run on
+/// a zero-byte stack, so the value can never be mistaken for a real request.
+pub const THREAD_STACK_DEFAULT: usize = 0;
+
 /// Highest console index a descriptor can record — the inclusive bound of
 /// the [`DescriptorTable`] per-descriptor console field (`u8`).
 ///

@@ -281,13 +281,33 @@ impl WaitQueue {
     /// the register-before-retest lost-wake discipline while avoiding a
     /// thundering herd. O(log n).
     pub fn wake_one(&self, arch: &dyn WaitQueueArch) -> bool {
-        let task = self.waiters.lock().order.values().next().copied();
-        if let Some(task) = task {
-            arch.unpark(task);
-            true
-        } else {
-            false
+        self.wake_n(arch, 1) == 1
+    }
+
+    /// Wake the `count` oldest registered waiters, returning how many were
+    /// woken (fewer than `count` when fewer are waiting).
+    ///
+    /// The counted form of [`Self::wake_one`], and its one definition: a futex
+    /// wake releases a caller-chosen number of waiters, and repeating
+    /// `wake_one` would keep re-waking the same head (a waiter stays
+    /// registered until it resumes and deregisters itself, which is what
+    /// preserves the lost-wake discipline). The ids are collected in FIFO
+    /// order under the lock and the lock released *before* any `unpark`, so
+    /// the scheduler's locks are never taken while holding this one.
+    /// O(log n + woken).
+    pub fn wake_n(&self, arch: &dyn WaitQueueArch, count: usize) -> usize {
+        let ids: Vec<TaskId> = self
+            .waiters
+            .lock()
+            .order
+            .values()
+            .take(count)
+            .copied()
+            .collect();
+        for &id in &ids {
+            arch.unpark(id);
         }
+        ids.len()
     }
 
     /// The oldest registered task without waking or removing it.
@@ -814,6 +834,11 @@ fn run_timed_sweep(arch: &dyn WaitQueueArch) {
     // caller whose device wedged so its `call_reap` observes the timeout,
     // rather than parking it forever.
     CALL_WAITQ.sweep(arch, now);
+    // The futex queues are per-key and created on demand, so they are swept
+    // through their own module rather than named here (`plans/THREADS.md`
+    // decision 5): a timed `futex_wait` is released exactly like any other
+    // timed wait.
+    crate::futex::sweep(arch, now);
     // Re-arm to the soonest pending deadline across *every* timed
     // wait-queue, so no finite timeout is dropped because another queue
     // armed a later one-shot (the nearest armed
@@ -944,7 +969,7 @@ pub fn console_deregister(task: TaskId, deadline_ns: u64) {
 
 /// The soonest finite deadline pending across **every** timed wait-queue
 /// (`HW_TREE_WAITQ`, `IRQ_WAITQ`, `CONSOLE_WAITQ`, `USERS_DB_WAITQ`,
-/// `PIPE_WAITQ`, `CALL_WAITQ`), or
+/// `PIPE_WAITQ`, `CALL_WAITQ`, and the per-key futex queues), or
 /// [`None`] if none has one. A park site arms the one-shot to this so
 /// registering a *later* deadline never delays an already-pending earlier
 /// wake.
@@ -959,6 +984,9 @@ pub fn nearest_timed_deadline() -> Option<u64> {
         // A finite per-request deadline armed by `call_post` (the async
         // block transport). Infinite (`ipc_call`) registrations arm nothing.
         CALL_WAITQ.earliest_deadline(),
+        // A timed `futex_wait` — a condition variable's bounded wait — over
+        // the per-key queues created on demand.
+        crate::futex::earliest_deadline(),
     ]
     .into_iter()
     .flatten()

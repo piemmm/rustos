@@ -91,6 +91,7 @@ pub mod filemap;
 pub mod foreground;
 pub mod fs;
 pub mod fswatch;
+pub mod futex;
 pub mod groups;
 pub mod hwtree;
 pub mod init;
@@ -129,6 +130,7 @@ pub mod spawn;
 pub mod spawn_services;
 pub mod syscalls;
 pub mod syscfg;
+pub mod threads;
 pub mod useradmin;
 pub mod users;
 pub mod waitq;
@@ -252,9 +254,10 @@ pub use sleeplock::{SleepGuard, SleepLock};
 pub use smp::{run_secondary, SecondaryExit};
 pub use spawn::{
     admit_errno, may_spawn_any_mode, refuse_build, spawn_and_enter, spawn_caller_errno,
-    spawn_image, AdmitError, ArchImageBuilder, BuiltImage, EmbeddedProgram, ImageBuildCtx,
-    InitSpawn, InitSpawnCtx, NullArchImageBuilder, ProgramRegistry, SpawnCallerError, SpawnMode,
-    SpawnRequest, EMPTY_PROGRAM_REGISTRY, NULL_ARCH_IMAGE_BUILDER,
+    spawn_image, thread_pre_resume, AdmitError, ArchImageBuilder, BuiltImage, EmbeddedProgram,
+    ImageBuildCtx, InitSpawn, InitSpawnCtx, NullArchImageBuilder, ProcessResume, ProgramRegistry,
+    SpawnCallerError, SpawnMode, SpawnRequest, UserThreadEntry, EMPTY_PROGRAM_REGISTRY,
+    NULL_ARCH_IMAGE_BUILDER,
 };
 pub use spawn_services::{
     install_spawn_services, installed_spawn_services, ArchSpawnRuntime, SpawnRuntime,

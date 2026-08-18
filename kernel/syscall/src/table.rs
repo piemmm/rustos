@@ -149,6 +149,16 @@ pub fn sandbox_allows(number: SyscallNumber) -> bool {
             | SyscallNumber::FS_CLOSE
             | SyscallNumber::MEM_MAP
             | SyscallNumber::MEM_UNMAP
+            // Threads and the futex are self-scoped: a thread runs in the
+            // sandbox's *own* address space under its *own* (empty) capability
+            // record, and a futex key names a word inside that space. Neither
+            // reaches anything the sandbox could not already reach, and a
+            // sandboxed parser that can block on a word rather than spin is
+            // strictly better behaved.
+            | SyscallNumber::THREAD_CREATE
+            | SyscallNumber::THREAD_EXIT
+            | SyscallNumber::FUTEX_WAIT
+            | SyscallNumber::FUTEX_WAKE
     )
 }
 
@@ -2527,6 +2537,101 @@ pub trait SyscallHandlers {
     /// [`tairix_abi::BootSession::Unset`] — so there is no unwired state to
     /// fail closed from.
     fn boot_session_get(&self, caller: &CallerContext<'_>) -> SyscallResult;
+
+    /// Create a second thread of execution inside the calling process's own
+    /// address space, returning its thread id (`plans/THREADS.md` T3b).
+    ///
+    /// The dispatcher has already checked that `entry` is a non-null `UserPtr`
+    /// and that `stack_len` fits in `usize`; it attaches **no** capability gate,
+    /// because a thread runs in the caller's *own* isolated space under the
+    /// caller's *own* single capability record and so grants no authority over
+    /// anything else. The implementation must therefore bound the request
+    /// instead: refuse a process already at its `threads` limit and a
+    /// `stack_len` past its `stack-bytes` limit **before** touching any state,
+    /// and validate that `entry`, `tls_base`, and `clear_on_exit` name memory of
+    /// the caller's own address space (a non-canonical `tls_base` is not merely
+    /// useless — on a port whose thread-pointer register is privileged, writing
+    /// one would fault inside the kernel).
+    ///
+    /// `stack_len` of [`tairix_abi::THREAD_STACK_DEFAULT`] asks for the caller's
+    /// effective `stack-bytes` bound. The **kernel** reserves the stack, behind
+    /// an unbacked guard page, and releases it when the thread dies; user space
+    /// supplies no base. `clear_on_exit`, when non-zero, names a `u32` the
+    /// implementation zeroes and futex-wakes on that death, which is what a
+    /// userland `join` blocks on.
+    ///
+    /// The default implementation fails closed with [`Errno::NotImplemented`].
+    fn thread_create(
+        &self,
+        _caller: &CallerContext<'_>,
+        _entry: u64,
+        _arg: u64,
+        _stack_len: usize,
+        _tls_base: u64,
+        _clear_on_exit: u64,
+    ) -> SyscallResult {
+        Err(Errno::NotImplemented)
+    }
+
+    /// End the calling thread without ending its siblings
+    /// (`plans/THREADS.md` T3b).
+    ///
+    /// No arguments and no capability (ending oneself grants nothing). The
+    /// implementation zeroes and futex-wakes the thread's `clear_on_exit` word,
+    /// releases its stack and per-thread kernel state, and — when it was the
+    /// **last** thread of its process — performs the whole process exit with
+    /// status `0`. The dispatch boundary turns this syscall number into the
+    /// scheduler `Exit` that reaps the task, exactly as it does for
+    /// [`Self::exit`], so the implementation never drives the scheduler itself.
+    ///
+    /// The default implementation fails closed with [`Errno::NotImplemented`].
+    fn thread_exit(&self, _caller: &CallerContext<'_>) -> SyscallResult {
+        Err(Errno::NotImplemented)
+    }
+
+    /// Block until the 32-bit word at `uaddr` is woken, unless it no longer
+    /// holds `expected` (`plans/THREADS.md` decision 5).
+    ///
+    /// The dispatcher has already checked that `uaddr` is a non-null `UserPtr`
+    /// and decoded `expected`/`timeout_ns`; it attaches no capability gate,
+    /// because the wait key is `(process, uaddr)` and so names nothing outside
+    /// the caller's own address space. The implementation must reject a
+    /// misaligned `uaddr` and read the word through the validated
+    /// `copy_from_user` boundary — never a raw dereference — registering on the
+    /// wait queue **before** that read so a wake landing in the window between
+    /// the read and the park is not lost.
+    ///
+    /// Returns `Ok(0)` when woken, [`Errno::WouldBlock`] when the word already
+    /// holds something else (the caller re-tests and retries — this is the race
+    /// closing, not a failure), [`Errno::TimedOut`] when the relative
+    /// `timeout_ns` elapses ([`u64::MAX`] means no timeout), and
+    /// [`Errno::Interrupted`] when the thread is being terminated.
+    ///
+    /// The default implementation fails closed with [`Errno::NotImplemented`].
+    fn futex_wait(
+        &self,
+        _caller: &CallerContext<'_>,
+        _uaddr: u64,
+        _expected: u32,
+        _timeout_ns: u64,
+    ) -> SyscallResult {
+        Err(Errno::NotImplemented)
+    }
+
+    /// Wake up to `count` threads of the calling process blocked in
+    /// [`Self::futex_wait`] on `uaddr`, returning how many were woken.
+    ///
+    /// The dispatcher has already checked that `uaddr` is a non-null `UserPtr`
+    /// and decoded `count`. Waiters are released oldest-first, so a `count` of 1
+    /// is a genuine wake-one rather than a thundering herd, and
+    /// [`u32::MAX`] wakes every waiter. Waking nobody is success: by the
+    /// register-before-retest discipline a thread that has not parked yet
+    /// re-tests the word itself.
+    ///
+    /// The default implementation fails closed with [`Errno::NotImplemented`].
+    fn futex_wake(&self, _caller: &CallerContext<'_>, _uaddr: u64, _count: u32) -> SyscallResult {
+        Err(Errno::NotImplemented)
+    }
 }
 
 /// Architecture-neutral syscall dispatcher.
@@ -2734,6 +2839,21 @@ impl<'a, H: SyscallHandlers + ?Sized, S: Sink + ?Sized> Dispatcher<'a, H, S> {
             SyscallNumber::MEM_UNMAP => {
                 let len = decode_len(args.0[1])?;
                 self.handlers.mem_unmap(caller, args.0[0], len)
+            }
+            SyscallNumber::THREAD_CREATE => {
+                let stack_len = decode_len(args.0[2])?;
+                self.handlers.thread_create(
+                    caller, args.0[0], args.0[1], stack_len, args.0[3], args.0[4],
+                )
+            }
+            SyscallNumber::THREAD_EXIT => self.handlers.thread_exit(caller),
+            SyscallNumber::FUTEX_WAIT => {
+                self.handlers
+                    .futex_wait(caller, args.0[0], decode_u32(args.0[1]), args.0[2])
+            }
+            SyscallNumber::FUTEX_WAKE => {
+                self.handlers
+                    .futex_wake(caller, args.0[0], decode_u32(args.0[1]))
             }
             SyscallNumber::MEM_PIN => self.handlers.mem_pin(caller),
             SyscallNumber::MEM_UNPIN => self.handlers.mem_unpin(caller),
@@ -3987,6 +4107,39 @@ mod tests {
             #[allow(clippy::cast_sign_loss)]
             Ok(u64::from(pid as u32))
         }
+        fn thread_create(
+            &self,
+            _c: &CallerContext<'_>,
+            entry: u64,
+            arg: u64,
+            stack_len: usize,
+            tls_base: u64,
+            clear_on_exit: u64,
+        ) -> SyscallResult {
+            self.record("thread_create");
+            // Echo the decoded arguments back, folded, so the reachability
+            // test can assert the dispatcher decoded every one of them
+            // without wiring a real scheduler here.
+            Ok(entry ^ arg ^ stack_len as u64 ^ tls_base ^ clear_on_exit)
+        }
+        fn thread_exit(&self, _c: &CallerContext<'_>) -> SyscallResult {
+            self.record("thread_exit");
+            Ok(0)
+        }
+        fn futex_wait(
+            &self,
+            _c: &CallerContext<'_>,
+            uaddr: u64,
+            expected: u32,
+            timeout_ns: u64,
+        ) -> SyscallResult {
+            self.record("futex_wait");
+            Ok(uaddr ^ u64::from(expected) ^ timeout_ns)
+        }
+        fn futex_wake(&self, _c: &CallerContext<'_>, uaddr: u64, count: u32) -> SyscallResult {
+            self.record("futex_wake");
+            Ok(uaddr ^ u64::from(count))
+        }
         fn terminal_purge(&self, _c: &CallerContext<'_>, fd: u32) -> SyscallResult {
             self.record("terminal_purge");
             // Echo the decoded descriptor back so the reachability test can
@@ -4878,10 +5031,14 @@ mod tests {
                 "fs_close",
                 "fs_read",
                 "fs_write",
+                "futex_wait",
+                "futex_wake",
                 "mem_map",
                 "mem_unmap",
                 "stream_read",
                 "stream_write",
+                "thread_create",
+                "thread_exit",
                 "yield",
             ]
         );

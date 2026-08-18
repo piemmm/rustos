@@ -529,6 +529,7 @@ mod tests {
         file_reserves: Vec<u64>,
         file_page_maps: Vec<(u64, usize)>,
         file_releases: Vec<(u64, u64)>,
+        stack_guard_unmaps: Vec<u64>,
         next: Option<LiveSpaceError>,
     }
 
@@ -549,6 +550,14 @@ mod tests {
     const FILE_RESIDENT: u64 = 3;
 
     impl LiveUserSpace for FakeLive {
+        fn unmap_kernel_stack_guard(&mut self, guard: u64) -> Result<(), LiveSpaceError> {
+            self.stack_guard_unmaps.push(guard);
+            match self.next.take() {
+                Some(err) => Err(err),
+                None => Ok(()),
+            }
+        }
+
         fn map_anonymous(&mut self, base_va: u64, page_count: u64) -> Result<u64, LiveSpaceError> {
             self.anon_maps.push((base_va, page_count));
             match self.next.take() {
@@ -797,7 +806,7 @@ mod tests {
     fn leak_fake_with(fake: FakeLive) -> (&'static ProcessSpace, *const FakeLive) {
         let boxed = Box::new(fake);
         let ptr: *const FakeLive = &raw const *boxed;
-        (Box::leak(Box::new(ProcessSpace::new(boxed))), ptr)
+        (Box::leak(Box::new(ProcessSpace::for_test(boxed))), ptr)
     }
 
     const PAGE: usize = 4096;

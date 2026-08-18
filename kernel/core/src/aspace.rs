@@ -84,6 +84,31 @@ use crate::rlimit::LimitSet;
 struct ThreadStack {
     process: ProcessId,
     span: StackSpan,
+    /// What the kernel reserved *for this thread alone* and releases when it
+    /// dies. [`None`] for a process's first thread, whose stack the spawn
+    /// layout placed inside the image it built and whose death reclaims the
+    /// whole address space anyway.
+    owned: Option<OwnedThreadStack>,
+}
+
+/// The per-thread resources `thread_create` reserved and `thread_exit`
+/// releases (`plans/THREADS.md` decision 5a).
+///
+/// A thread created at runtime owns memory the process did not have before it:
+/// its `[guard | stack]` reservation, and — when it named one — the word the
+/// kernel zeroes and futex-wakes on its death so a joiner is released. The
+/// kernel holds both because only the kernel can release the stack safely:
+/// the thread runs on it right up to the syscall that ends it.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct OwnedThreadStack {
+    /// Base of the whole `[guard | stack]` anonymous reservation, guard page
+    /// included, as returned by the live space's reservation.
+    pub reserve_base: u64,
+    /// Pages in that reservation, guard page included.
+    pub reserve_pages: u64,
+    /// User address of the word to zero and futex-wake on this thread's
+    /// death, or `0` for none.
+    pub clear_on_exit: u64,
 }
 
 /// Why registering a task's address space was refused.
@@ -1419,14 +1444,57 @@ impl AddressSpaceRegistry {
     /// fatal (fail closed). The `task` argument is the kernel-trusted id
     /// the admission path minted, never a caller-supplied value.
     pub fn set_stack_span(&mut self, process: ProcessId, thread: TaskId, span: StackSpan) {
+        self.record_thread_stack(process, thread, span, None);
+    }
+
+    /// Record a runtime-created thread's stack span **and** the resources the
+    /// kernel must release when that thread dies
+    /// ([`OwnedThreadStack`]).
+    ///
+    /// The `thread_create` counterpart of [`Self::set_stack_span`]: a thread
+    /// the kernel reserved a stack for owns that reservation, so the extent
+    /// travels with the span rather than in a second map that could fall out
+    /// of step with it.
+    pub fn set_owned_thread_stack(
+        &mut self,
+        process: ProcessId,
+        thread: TaskId,
+        span: StackSpan,
+        owned: OwnedThreadStack,
+    ) {
+        self.record_thread_stack(process, thread, span, Some(owned));
+    }
+
+    /// The shared store behind [`Self::set_stack_span`] and
+    /// [`Self::set_owned_thread_stack`], so the committed-stack accounting has
+    /// one definition.
+    fn record_thread_stack(
+        &mut self,
+        process: ProcessId,
+        thread: TaskId,
+        span: StackSpan,
+        owned: Option<OwnedThreadStack>,
+    ) {
         let committed = span.committed_bytes();
-        if let Some(previous) = self
-            .stack_spans
-            .insert(thread, ThreadStack { process, span })
-        {
+        if let Some(previous) = self.stack_spans.insert(
+            thread,
+            ThreadStack {
+                process,
+                span,
+                owned,
+            },
+        ) {
             self.release_committed_stack(previous.process, previous.span.committed_bytes());
         }
         *self.stack_committed.entry(process).or_default() += committed;
+    }
+
+    /// The resources a runtime-created `thread` owns, or [`None`] for a
+    /// process's first thread (or an unknown one — fail closed: nothing to
+    /// release).
+    #[must_use]
+    pub fn owned_thread_stack(&self, thread: TaskId) -> Option<OwnedThreadStack> {
+        self.stack_spans.get(&thread).and_then(|held| held.owned)
     }
 
     /// Subtract `bytes` from `process`'s committed-stack total, dropping the

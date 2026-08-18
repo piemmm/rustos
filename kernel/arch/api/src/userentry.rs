@@ -51,6 +51,10 @@
 ///   (`a0` on riscv64, `x0` on aarch64, `rdi` on x86_64). The kernel
 ///   passes the user address of the `tairix_abi::process` startup-vector
 ///   block here so the program's startup object can find its arguments.
+/// * [`Self::tls_base`] — the initial *thread pointer*, the per-thread
+///   register the psABI reserves for thread-local storage
+///   (`TPIDR_EL0` on aarch64, `tp` on riscv64, `IA32_FS_BASE` on
+///   x86_64). `0` leaves the thread without one.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub struct UserEntry {
     /// Relocated entry-point virtual address.
@@ -60,16 +64,28 @@ pub struct UserEntry {
     /// Value of the first-argument register on entry (the startup-vector
     /// block address).
     pub arg0: u64,
+    /// Initial thread-pointer value, or `0` for none.
+    ///
+    /// Each port programs its own psABI thread-pointer register from this
+    /// (`plans/THREADS.md` decision 7). Two of the three registers are
+    /// architecturally *user-writable*, so on those the value is only a
+    /// seed: the thread may replace it, and the port's trap frame — which
+    /// lives on that thread's own kernel stack — carries it across every
+    /// trap and context switch, which is what makes it per-thread. On
+    /// x86_64 the register is privileged, so the kernel holds the value and
+    /// reloads it before each switch into the thread.
+    pub tls_base: u64,
 }
 
 impl UserEntry {
-    /// Construct a [`UserEntry`] from its three register values.
+    /// Construct a [`UserEntry`] from its four register values.
     #[must_use]
-    pub const fn new(entry: u64, stack_pointer: u64, arg0: u64) -> Self {
+    pub const fn new(entry: u64, stack_pointer: u64, arg0: u64, tls_base: u64) -> Self {
         Self {
             entry,
             stack_pointer,
             arg0,
+            tls_base,
         }
     }
 }
@@ -101,6 +117,11 @@ pub trait EnterUser: Send + Sync {
     ///   vector) is installed, so a syscall from the new program is
     ///   handled rather than faulting into an unconfigured state.
     ///
+    /// [`UserEntry::tls_base`] needs no such guarantee: the thread pointer
+    /// is an opaque register value the entered thread interprets itself, so
+    /// an unmapped or nonsensical value can only fault that thread's own
+    /// accesses.
+    ///
     /// The transition diverges: control passes to user mode and never
     /// returns to the caller.
     unsafe fn enter_user(&self, regs: UserEntry) -> !;
@@ -112,10 +133,11 @@ mod tests {
 
     #[test]
     fn user_entry_preserves_its_register_values() {
-        let regs = UserEntry::new(0x1000, 0x8000, 0xdead_beef);
+        let regs = UserEntry::new(0x1000, 0x8000, 0xdead_beef, 0x7f00_0000);
         assert_eq!(regs.entry, 0x1000);
         assert_eq!(regs.stack_pointer, 0x8000);
         assert_eq!(regs.arg0, 0xdead_beef);
+        assert_eq!(regs.tls_base, 0x7f00_0000);
         // The constructor and the struct literal agree.
         assert_eq!(
             regs,
@@ -123,8 +145,29 @@ mod tests {
                 entry: 0x1000,
                 stack_pointer: 0x8000,
                 arg0: 0xdead_beef,
+                tls_base: 0x7f00_0000,
             }
         );
+    }
+
+    /// Two threads of one process differ only in the stack and thread
+    /// pointer: the entry address and argument register are the caller's
+    /// choice, but the thread pointer is what makes thread-local storage
+    /// per-thread rather than per-process.
+    #[test]
+    fn threads_of_one_process_carry_distinct_thread_pointers() {
+        let first = UserEntry::new(0x1000, 0x8000, 0, 0x7f00_0000);
+        let second = UserEntry::new(0x1000, 0x9000, 0, 0x7f01_0000);
+        assert_eq!(first.entry, second.entry);
+        assert_ne!(first.tls_base, second.tls_base);
+        assert_ne!(first.stack_pointer, second.stack_pointer);
+    }
+
+    /// A thread with no thread-local storage is spelled `0`, so a port can
+    /// tell "no thread pointer" from a real address without a second flag.
+    #[test]
+    fn a_thread_without_thread_local_storage_carries_zero() {
+        assert_eq!(UserEntry::new(0x1000, 0x8000, 0, 0).tls_base, 0);
     }
 
     /// A trivial port double: the trait must be object-safe so the

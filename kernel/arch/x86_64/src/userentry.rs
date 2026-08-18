@@ -12,6 +12,18 @@
 //! verticals reach it through the HAL rather than copying the `asm!`
 //! block.
 //!
+//! # The thread pointer
+//!
+//! x86_64's psABI thread pointer is the **`FS` base**, and unlike aarch64's
+//! `TPIDR_EL0` and riscv64's `tp` it is not a user-writable register: with
+//! `CR4.FSGSBASE` off, ring 3 cannot program it and `wrmsr IA32_FS_BASE` is a
+//! CPL-0 instruction. The kernel therefore *owns* each thread's value: it is
+//! programmed here at entry and reprogrammed by
+//! [`crate::userentry::set_user_thread_pointer`] before every switch into the
+//! thread, out of the thread's own switch-in hook (`plans/THREADS.md`
+//! decision 7). The syscall
+//! entry stub never touches `FS`, so nothing else has to save or restore it.
+//!
 //! # Interrupt and GS state on entry
 //!
 //! `RFLAGS` is built with `IF` **set**, so ring 3 runs with interrupts
@@ -55,6 +67,16 @@ impl UserMode {
     }
 }
 
+/// The single, `'static` [`UserMode`] the kernel borrows as this port's
+/// `&'static dyn EnterUser` handle.
+///
+/// A process's [`UserMode`] handle is carried alongside its address space so a
+/// thread created later is entered through the same transition its first
+/// thread was, with no per-arch producer of its own
+/// (`plans/THREADS.md` decision 9). The type is zero-sized, so one shared
+/// instance serves every CPU.
+pub static USER_MODE: UserMode = UserMode::new();
+
 impl EnterUser for UserMode {
     unsafe fn enter_user(&self, regs: UserEntry) -> ! {
         // SAFETY: the caller's `EnterUser::enter_user` contract
@@ -62,6 +84,10 @@ impl EnterUser for UserMode {
         // `regs.stack_pointer` a ring-3-writable stack top in the active
         // address space, and that the syscall/exception entry path is
         // installed.
+        // SAFETY (thread pointer): `IA32_FS_BASE` is a per-thread scratch
+        // base the kernel itself never dereferences, so any value is safe;
+        // this runs at CPL 0 on the CPU about to enter the thread.
+        unsafe { set_user_thread_pointer(regs.tls_base) };
         unsafe { enter_ring3(regs.entry, regs.stack_pointer, regs.arg0) }
     }
 }
@@ -81,6 +107,62 @@ const USER_SS: u64 = ((crate::gdt::USER_DS_INDEX << 3) | 3) as u64;
 /// and riscv64's U-mode supervisor-timer rule).
 #[cfg(all(target_arch = "x86_64", target_os = "none"))]
 const USER_RFLAGS: u64 = (1 << 1) | (1 << 9);
+
+/// The `IA32_FS_BASE` MSR (Intel SDM Vol 4 §2.1): the base the `fs:` segment
+/// prefix adds, and the x86_64 psABI thread pointer.
+#[cfg(all(target_arch = "x86_64", target_os = "none"))]
+const IA32_FS_BASE: u32 = 0xC000_0100;
+
+/// Program the calling CPU's user thread pointer (`IA32_FS_BASE`) to
+/// `tls_base`.
+///
+/// Called at user entry and again from a thread's switch-in hook, because the
+/// register is privileged: ring 3 cannot maintain it itself and the kernel
+/// never saves it in a trap frame, so the value has to be (re)installed by the
+/// side that knows which thread is about to run.
+///
+/// # Safety
+///
+/// The caller must run at CPL 0 on the CPU that is about to execute the thread
+/// `tls_base` belongs to. The value itself needs no guarantee: the kernel never
+/// dereferences `FS`, so a nonsensical base can only fault that thread's own
+/// accesses.
+#[cfg(all(target_arch = "x86_64", target_os = "none"))]
+pub unsafe fn set_user_thread_pointer(tls_base: u64) {
+    // `wrmsr` takes the 64-bit value as two 32-bit halves in `edx:eax`
+    // (Intel SDM Vol 2B §4.3); the masks split it exactly.
+    let lo = (tls_base & 0xFFFF_FFFF) as u32;
+    let hi = ((tls_base >> 32) & 0xFFFF_FFFF) as u32;
+    // SAFETY: `wrmsr` writes `edx:eax` to the MSR named in `ecx`.
+    // `IA32_FS_BASE` is unconditionally present in long mode and accepts any
+    // canonical base; the instruction touches no memory and is privileged
+    // (CPL 0, which this function's contract requires). A non-canonical value
+    // would `#GP` here rather than corrupt anything, and only a value the
+    // calling thread chose for itself can reach this.
+    unsafe {
+        core::arch::asm!(
+            "wrmsr",
+            in("ecx") IA32_FS_BASE,
+            in("eax") lo,
+            in("edx") hi,
+            options(nomem, nostack, preserves_flags),
+        );
+    }
+}
+
+/// Host substitute: there is no `IA32_FS_BASE` to program off the bare-metal
+/// target. Never linked into a kernel image and never reached on the host (the
+/// `threads_qemu_x86_64` vertical proves each thread presents its own thread
+/// pointer).
+///
+/// # Safety
+///
+/// Carries the same contract as the bare-metal definition above, so the two
+/// `cfg` arms present one `unsafe` API. The host body is inert.
+#[cfg(not(all(target_arch = "x86_64", target_os = "none")))]
+pub unsafe fn set_user_thread_pointer(tls_base: u64) {
+    let _ = tls_base;
+}
 
 /// Drop to ring 3 at `entry` with stack pointer `sp` and `rdi` set.
 ///

@@ -529,6 +529,12 @@ fn publish_wait_queue_arch<A: KernelArch + 'static>(state: &'static KernelState<
     // but does not needlessly switch away from it, avoiding the
     // per-quantum address-space/TLB churn that path would otherwise incur).
     crate::preempt::install_competitor_gate(wait_arch);
+    // Size the futex's key→queue table from the discovered CPU count, so
+    // threads contending on *distinct* locks do not serialise on one bucket
+    // lock (`plans/THREADS.md` decision 5). Correctness never depends on the
+    // count — only contention does — so a build that skipped this still blocks
+    // and wakes exactly as specified.
+    crate::futex::init_buckets(state.scheduler.cpu_count() as usize);
 }
 
 /// Type-erased secondary-CPU hand-off over the boot-leaked
@@ -1419,26 +1425,31 @@ impl<A: KernelArch + 'static> InitSpawnCtx for KernelInitSpawner<'_, A> {
         physmap: Box<dyn PhysMap + Send + Sync>,
         stack_span: crate::aspace::StackSpan,
         stack: Box<dyn crate::kthread::KernelStack + Send>,
-        pre_resume: Box<dyn FnMut(u64) + Send>,
+        pre_resume: crate::spawn::ProcessResume,
         live: Option<alloc::sync::Arc<crate::procspace::ProcessSpace>>,
-        mut enter: Box<dyn FnMut() + Send>,
+        entry: crate::spawn::UserThreadEntry,
     ) {
         let cpu: CpuId = SchedulerArch::current_cpu(self.arch);
 
         // Admit PID 1 as a resumable **user kthread** (`plans/SPAWN.md`
         // SP2): the work body performs the user-mode transition on the
-        // task's own kernel stack, and the `pre_resume` hook reactivates
+        // task's own kernel stack, and the switch-in hook reactivates
         // PID 1's address-space root before every switch into it so it
         // `eret`s back into EL0 under the correct translation regime.
-        // `enter` diverges into EL0, so the work never returns through the
-        // trampoline's terminal `Exit` — PID 1 leaves EL0 only through a
+        // The transition diverges into EL0, so the work never returns through
+        // the trampoline's terminal `Exit` — PID 1 leaves EL0 only through a
         // rescheduling syscall (`yield`/`exit`), whose trap path suspends
-        // it back to the scheduler. The unit `()` the work yields satisfies
-        // the `FnMut(&mut Yielder<_>)` body signature for the (impossible)
-        // case the transition ever returned.
+        // it back to the scheduler.
         let work = move |_yielder: &mut crate::kthread::Yielder<A::Cs>| {
-            enter();
+            // SAFETY: this runs on PID 1's own first dispatch, so its
+            // switch-in hook has already activated its address space, and
+            // this method's contract has the trap path installed.
+            unsafe { entry.enter() }
         };
+        // PID 1's first thread carries the process hook bound to its own
+        // thread pointer (`0` — thread-local storage is the layer above this
+        // one).
+        let pre_resume = crate::spawn::thread_pre_resume(&pre_resume, entry.regs.tls_base);
         let cs = self.arch.context_switch();
         // When the seam retained a live, mutable address space, admit PID 1
         // with it so its `mem_map` / `mmio_map` syscalls mutate its own
@@ -2076,6 +2087,10 @@ fn run_phases<A: KernelArch>(
     let process_signal_concrete = Box::leak(Box::new(crate::procsignal::KernelProcessSignal::new(
         process_wait_concrete,
         &state.scheduler,
+        // The thread-group table, so a signal to a PID reaches every thread of
+        // that process rather than its leader alone (`plans/THREADS.md`
+        // decision 10).
+        &state.caps,
     )));
     let process_signal: &'static (dyn crate::procsignal::ProcessSignal + 'static) =
         process_signal_concrete;

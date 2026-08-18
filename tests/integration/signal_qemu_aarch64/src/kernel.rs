@@ -640,9 +640,15 @@ pub extern "C" fn kernel_main(_dtb: u64) -> ! {
         Box::leak(Box::new(KernelProcessWait::new(producer_arch)));
     *WAIT_PRODUCER.lock() = Some(wait_producer);
     // The signal producer composes over the same wait bookkeeping and the live
-    // scheduler — one source of truth for the parent/child relationship.
+    // scheduler — one source of truth for the parent/child relationship. This
+    // vertical registers no capability records, so it wires no thread-group
+    // table either: each target is the single-threaded process its PID names,
+    // which is exactly what this fixture builds.
     let signal_producer: &'static KernelProcessSignal<Aarch64Arch, Scheduler<Aarch64Arch>> =
-        Box::leak(Box::new(KernelProcessSignal::new(wait_producer, sched)));
+        Box::leak(Box::new(KernelProcessSignal::without_thread_groups(
+            wait_producer,
+            sched,
+        )));
     *SIGNAL_PRODUCER.lock() = Some(signal_producer);
 
     // Admit the child, then lay out the parent's startup arguments with the

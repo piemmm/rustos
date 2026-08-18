@@ -22,12 +22,12 @@
 //   2. The 816-byte frame is 16-byte aligned (SP stays 16-aligned, an
 //      AArch64 requirement) and holds x0..x30 (offsets 0..240) followed by
 //      the per-exception return state `ELR_EL1`/`SPSR_EL1`/`SP_EL0`
-//      (offsets 248/256/264), FPCR/FPSR (offsets 272/280), and q0..q31
-//      (offsets 288..799); callee-saved x19..x28/x29 are preserved by
-//      the `extern "C"` handler but saved here anyway so the frame layout
-//      is uniform and the restore is symmetric. The first 31 slots are the
-//      `[u64; SAVED_GPRS]` frame `crate::syscall_entry` reads, so their
-//      offsets must not move.
+//      (offsets 248/256/264), FPCR/FPSR (offsets 272/280), q0..q31
+//      (offsets 288..799), and `TPIDR_EL0` (offset 800); callee-saved
+//      x19..x28/x29 are preserved by the `extern "C"` handler but saved here
+//      anyway so the frame layout is uniform and the restore is symmetric.
+//      The first 31 slots are the `[u64; SAVED_GPRS]` frame
+//      `crate::syscall_entry` reads, so their offsets must not move.
 //   3. `ELR_EL1`/`SPSR_EL1`/`SP_EL0` are saved into the frame on entry and
 //      written back before `eret`, so the interrupted context resumes
 //      correctly **even if a cooperative context switch ran another task
@@ -51,6 +51,15 @@
 //      be sampled (`plans/WATCHDOG.md`). Masking here keeps the sampler out
 //      of the restore tail only — never out of the handler body, which is
 //      the span worth observing.
+//   5. `TPIDR_EL0` — the AArch64 psABI thread pointer — is framed for the
+//      same reason as `SP_EL0`, but the reason is per-*thread* rather than
+//      per-exception: several threads of one process share an address space,
+//      so the register is the only thing distinguishing their thread-local
+//      storage. It is architecturally writable by EL0, so the kernel must not
+//      hold a value of its own and overwrite a thread's own write; saving and
+//      restoring it here — in a frame that lives on the interrupting thread's
+//      own kernel stack — makes it per-thread and context-switch-safe by
+//      construction (`plans/THREADS.md` decision 7).
 
 .section .text
 .balign 0x800
@@ -188,6 +197,12 @@ tairix_aarch64_trap_common:
     mrs     x2, SP_EL0
     str     x2, [sp, #264]
 
+    // The psABI thread pointer, per-thread rather than per-exception
+    // (invariant 5): several threads of one process share one address space,
+    // so this register is what makes their thread-local storage distinct.
+    mrs     x2, TPIDR_EL0
+    str     x2, [sp, #800]
+
     // Preserve the complete interrupted FP/SIMD state. An IRQ can suspend
     // this handler while another task runs and uses arbitrary vector
     // registers, so preserving only the AAPCS64 callee-saved subset would
@@ -236,6 +251,8 @@ tairix_aarch64_trap_common:
     msr     SPSR_EL1, x3
     ldr     x2, [sp, #264]
     msr     SP_EL0, x2
+    ldr     x2, [sp, #800]
+    msr     TPIDR_EL0, x2
 
     ldp     x2, x3, [sp, #272]
     msr     FPCR, x2

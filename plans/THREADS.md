@@ -1,6 +1,7 @@
 # THREADS.md — lightweight threads (multiple threads per process)
 
-Status: **T1, T2 and T3a done; T3b planned.**
+Status: **T1, T2, T3a and T3b's kernel half done; T3b's userland half and its
+verticals remain.**
 
 Binding under `AGENTS.md`. Read `plans/SPAWN.md` (the process model this builds
 on), `plans/PI.md` RV1 (the riscv64 trap protocol T1 reworked), and
@@ -64,6 +65,26 @@ a shared, locked `ProcessSpace` rather than one task's property. What remains
    `Mutex`, and `Condvar` are all built in userland over one generic blocking
    primitive and an uncontended lock never enters the kernel. Userland therefore
    never busy-waits (§2.23).
+5a. **The kernel owns a thread's user stack, guard page and all.**
+   `thread_create` takes a `stack_len`, never a caller-supplied base: the
+   kernel reserves `guard + stack` out of the process's own anonymous window,
+   leaves the guard page unreserved so an overrun faults instead of being
+   demand-backed, charges the reservation against `LimitKind::StackBytes`, and
+   releases the whole region at thread teardown. A caller-supplied base cannot
+   carry a real guard page under the demand-paged anonymous model (every page of
+   a `mem_map` reservation is backed on touch, and the page below one is free for
+   an unrelated mapping), it would need an overlap check against every sibling's
+   stack span to stop two threads sharing one stack, and it leaks a detached
+   thread's stack because nothing observes that death. Kernel ownership
+   forecloses all three by construction, so `lib/rt` owns no stack memory and
+   needs no retired-stack cache. A `stack_len` of `THREAD_STACK_DEFAULT` (`0`)
+   asks for the caller's effective `LimitKind::StackBytes` soft bound, so the
+   default is the one live policy rather than a second constant in userland
+   (§24.2). Because the five values then fit the argument registers, there is no
+   `thread_create` request struct and no `flags` word: a flags word with no
+   defined bit would be the speculative surface §2.4 forbids, and the same
+   reasoning drops `FutexFlags` (the futex key is always `(ProcessId, VA)`, the
+   timeout is always relative nanoseconds with `u64::MAX` for none).
 6. **Futex key = `(ProcessId, user VA)`.** Address spaces are per-process and
    isolated, so this is sound and unforgeable. Cross-process (shm-backed)
    process-shared futexes are a *different* abstraction and deliberately out of
@@ -177,67 +198,134 @@ The handle threads through `InitSpawnCtx::admit_init`, `BuiltImage::live`,
 `Option<Arc<ProcessSpace>>`, and each of the six per-arch producers wraps its
 own `LiveSpace` in one.
 
-### T3b — threads end to end `[ ]`
+### T3b-k — the kernel half of threads `[x]`
 
-**ABI** (`lib/abi`, `lib/abi-sys`, regenerated `include/`, recomputed
-`SYSCALL_TABLE_HASH`): `SyscallNumber` 109–112 — `THREAD_CREATE`, `THREAD_EXIT`,
-`FUTEX_WAIT`, `FUTEX_WAKE` — with their `SyscallSpec` rows, the `thread_create`
-request struct (entry, arg, stack base/len, tls base, clear-on-exit pointer,
-flags), `FutexFlags`, `LimitKind::Threads`, the C stubs, and marshalling tests.
-All four are **unprivileged**: creating a thread in one's own address space
-grants no authority over anything else — the reasoning that made `mem_map`
-unprivileged — and the capacity is bounded by `LimitKind::Threads` instead.
-`thread_create` is audited; the futex pair is not (a hot, non-security-relevant
-blocking primitive).
+**Done.** The syscall surface is live and complete: a program can create a
+thread, block on a futex, wake one, and end a thread or its whole group, and the
+kernel gets every bound, guard page, and teardown right. What is missing is a
+*Rust wrapper* for it (T3b-u) — nothing kernel-side is stubbed or deferred.
 
-**Arch HAL** (`kernel/arch/api/src/userentry.rs` + three ports + conformance):
-`UserEntry::tls_base`; aarch64 `TPIDR_EL0` framed in `vectors.s` beside
-`ELR_EL1`/`SPSR_EL1`/`SP_EL0`; riscv64 `tp` seeded at entry (already framed by
-T1); x86_64 `IA32_FS_BASE` set at entry and reloaded from `pre_resume`.
+**ABI** (`lib/abi`, `lib/abi-sys`, regenerated `include/`): `SyscallNumber`
+109–112 — `THREAD_CREATE`, `THREAD_EXIT`, `FUTEX_WAIT`, `FUTEX_WAKE` — with their
+`SyscallSpec` rows, the `THREAD_STACK_DEFAULT` selector, `LimitKind::Threads`,
+and the C stubs. `thread_create(entry, arg, stack_len, tls_base, clear_on_exit)`
+returns the new TID (decision 5a: no request struct, no flags word). All four are
+**unprivileged**: a thread runs in the caller's own space under the caller's own
+capability record, so it grants no authority — the reasoning that made `mem_map`
+unprivileged — and the capacity is bounded by `LimitKind::Threads` (whose default
+is unlimited, so the real bound is the growable kernel-stack arena failing closed,
+§24.1) and `LimitKind::StackBytes`. `thread_create`/`thread_exit` are audited (a
+principal's lifecycle); the futex pair is not.
 
-**`kernel/core`**:
-- decision 9 — `BuiltImage::pre_resume` becomes `Arc<dyn Fn(u64 /*kernel stack
-  top*/, u64 /*tls base*/) + Send + Sync>`, `BuiltImage` carries
-  `user_entry: &'static dyn EnterUser` plus the `UserEntry` register state
-  instead of a boxed `enter` thunk, and the six per-arch producers stop
-  building an entry closure — `kernel/core` builds each thread's from the port
-  handle, so a new thread needs no new per-arch producer (§2.21).
-- `threads.rs` — `thread_create`: limit check *before* state, validate entry,
-  stack, tls and clear-word all lie in the caller's own space through the
-  existing uaccess boundary, reserve the kernel stack, `spawn_parked`, register
-  the thread (caps alias, stack span, TLS), then `unpark` — the same
-  parked-then-install-then-unpark discipline `spawn` uses, so no CPU can
-  dispatch a thread before its state exists. `thread_exit`: zero the
-  clear-on-exit word, futex-wake it, withdraw per-thread state, reap; last
-  thread ⇒ process exit. Group exit and signal fan-out over `procsignal`'s
-  existing deferred teardown.
-- `futex.rs` — a bucket array sized from discovered CPUs (§24.1), each bucket a
-  `BTreeMap<FutexKey, WaitQueue>` created on demand and dropped when empty, so
-  the FIFO wake-one fairness, the O(log n) deadline index, and the lost-wake-up
-  discipline are `waitq.rs`'s existing tested definitions rather than a second
-  wait implementation. Enrols in `run_timed_sweep` and `nearest_timed_deadline`
-  so a timed `futex_wait` cannot be dropped. `futex_wait` faults the word in
-  through the existing `resolve_anon_fault` and retries once, so a first-touch
-  futex word is not a spurious `BadAddress`.
-- `syscalls.rs` — the four handlers, seam wiring, host tests.
-- `kernel/syscall/src/table.rs` — dispatch arms, `MockHandlers`, reachability
-  tests, and the sandbox allow-list decision (threads and futex are
-  self-scoped, so a parser sandbox may use them).
+**Arch HAL** `UserEntry::tls_base`, with each port programming its own psABI
+thread-pointer register. aarch64 frames `TPIDR_EL0` in `vectors.s` at offset 800
+(inside the existing 816-byte frame, which had 16 bytes of tail padding) and
+seeds it at entry; riscv64 seeds `tp` at entry (T1 already framed it as
+`user_tp`); x86_64 writes `IA32_FS_BASE` at entry and **reloads it from the
+switch-in hook**, because that register is privileged and the kernel therefore
+owns the value. Framing is what makes the register per-thread on the two ports
+where user code may write it, and is why a user write is respected there. Each
+port exposes a `'static USER_MODE` singleton so a thread created later is entered
+through the same transition its process's first thread was.
 
-**`lib/rt`** — `thread.rs`: `Thread::spawn(FnOnce)` (stack via `mem_map` with a
-guard page, thread control block, closure ownership transfer),
-`JoinHandle::join`/`detach`; `sync.rs`: futex `Mutex` + `Condvar` whose
-uncontended paths are pure userland atomics. The TCB address is passed as both
-the entry argument and the thread's `tls_base`, so the thread is psABI-conforming
-even before a TLS layer exists.
+**`kernel/mem`** `AddressSpace::unmap_single_page` (split the covering block,
+unmap, local TLB flush — idempotent) and `LiveUserSpace::unmap_kernel_stack_guard`,
+so a thread's kernel-stack guard page can be re-expressed as unmapped in the
+process's **live** root. The first thread gets that during the image build, while
+its root is still inactive; a thread created later has no such moment, and
+without it an overrun of its kernel stack would silently corrupt the
+neighbouring arena region (`ArenaStack` has no canary — the unmapped page *is*
+its guard).
 
-**Tests** — host unit tests in every touched crate, plus a `threads_program`
-fixture and `threads_qemu_{aarch64,riscv64,x86_64}` verticals modelled on
-`tests/integration/mem_map_qemu_*`: N threads over one address space increment a
-shared counter under a futex `Mutex`, a `Condvar` rendezvous proves a blocking
-wake rather than a spin, `join` proves clear-on-exit plus futex wake, the
-dispatch callback proves each thread presents its own thread-pointer value, and
-a group `exit` proves every sibling dies. Fail-loud finishers throughout.
+**`kernel/core`**
+- decision 9 — `BuiltImage::pre_resume` is a cloneable per-process
+  `ProcessResume = Arc<dyn Fn(u64 /*kernel stack top*/, u64 /*tls base*/) + Send
+  + Sync>` and `BuiltImage` carries a `UserThreadEntry` (the port's
+  `&'static dyn EnterUser` plus the `UserEntry` register state) instead of a
+  boxed `enter` thunk. All six per-arch producers stopped building an entry
+  closure; `kernel/core` builds each thread's hook and entry itself, so a new
+  thread needs no new per-arch producer (§2.21).
+- `ProcessSpace` is the process's whole shared *execution context*: the locked
+  live space **plus** its `ProcessResume` hook and port handle, so
+  `thread_create` reaches all three from one handle.
+  `kthread::current_process_space` clones the `Arc` out of the per-CPU
+  publication (no refcount traffic on the switch path, an
+  `Arc::increment_strong_count` only when a thread is created).
+- `threads.rs` — `thread_create`: bounds before state, then the kernel reserves
+  `[guard | stack]` in the process's own anonymous window, records **only** the
+  stack half as a `StackSpan`, and leaves the guard page reserved-but-unrecorded
+  so a fault there resolves through neither the growth nor the anonymous handler
+  and stays fatal. One page at the top is backed eagerly (a `StackSpan` must
+  name a committed page and the thread's first instruction may push); everything
+  below demand-faults through the *existing* `resolve_stack_fault`, which already
+  bounds growth by `StackBytes`. Then `spawn_parked`, register (caps alias, stack
+  span, owned-stack record), `unpark` — the discipline `spawn` established, so no
+  CPU can dispatch a thread before its state exists. Every failure path releases
+  the reservation. `thread_exit`: zero the clear-on-exit word through the
+  fault-aware copy boundary, futex-wake it, release the stack reservation and the
+  per-thread bookkeeping; the **last** thread out is a process exit with status
+  `0`.
+- `futex.rs` — a bucket array sized from discovered CPUs (four per CPU, §24.1),
+  each bucket a `BTreeMap<FutexKey, Arc<WaitQueue>>` created on demand and
+  dropped when its last waiter leaves. Registration and removal both happen under
+  the bucket lock, which is what makes "remove when empty" safe; the queue handle
+  is cloned out and the bucket lock **released** before any `unpark`, so a futex
+  lock is never held across a scheduler lock. `WaitQueue` gained `wake_n` (the
+  counted form `wake_one` now delegates to), because repeating `wake_one` would
+  re-wake the same FIFO head. The module enrols in `run_timed_sweep` and
+  `nearest_timed_deadline`, and a dead process's keys are dropped by the shared
+  reclaim.
+- `syscalls.rs` — the four handlers. `thread_create` validates `entry`,
+  `clear_on_exit`, and `tls_base` by reading a word through the fault-aware
+  `copy_from_user` boundary, which proves each names mapped memory of the
+  *caller's own* space. For `tls_base` that is a real defence, not hygiene: on
+  x86_64 the kernel writes that value to a privileged MSR itself, so a
+  non-canonical one would `#GP` **inside the kernel** on every switch into the
+  thread.
+- decision 10 — a process-directed signal fans out over the group.
+  `KernelProcessSignal` holds the thread-group table; stop/continue mark and
+  park/unpark *every* thread, and terminate drives each to its own stopping point
+  with the reap+reclaim landing exactly once, when the last is down. `exit(code)`
+  stops its siblings first (as a *plain* reclaim, so no `128 + n` status
+  overwrites the real exit code) before recording its status and reclaiming — a
+  sibling left running against a reclaimed address space would wild-fault.
+- `kernel/syscall/src/table.rs` — dispatch arms, `MockHandlers`, and the sandbox
+  allow-list (threads and the futex are self-scoped, and a sandboxed parser that
+  blocks on a word rather than spinning is strictly better behaved).
+
+**Two defects found and fixed on the way** (§2.18): `copy_in_user` offered the
+compressed-tier (`ramzip`) resolver **nowhere**, so a syscall staging a buffer
+from a page the tier had parked got `resolve_anon_fault`'s freshly zeroed frame
+instead of the data — silent corruption. Both copy directions now share one
+`resolve_user_miss` that offers the resolvers in the same order the hardware
+fault path does, and a `copy_out_user` was added as its write counterpart (the
+thread-exit clear word cannot tolerate a dropped store: a joiner would wait
+forever).
+
+### T3b-u — the userland half and the verticals `[ ]`
+
+**`lib/rt`** — `thread.rs`: `Thread::spawn(FnOnce)` (thread control block,
+closure ownership transfer), `JoinHandle::join`/`detach`; `sync.rs`: futex
+`Mutex` + `Condvar` whose uncontended paths are pure userland atomics. The
+runtime owns **no** stack memory: the kernel reserves and releases it
+(decision 5a), so `spawn` passes only a length and `detach` needs no
+retired-stack cache. The TCB address is passed as both the entry argument and
+the thread's `tls_base`, so a thread is psABI-conforming before a TLS layer
+exists.
+
+**Tests** — handler-level host tests for the four syscalls (creation refusals at
+each bound, the `futex_wait` compare-and-block and its timeout, group exit
+killing every sibling), a regression test for the `copy_in_user` ramzip ordering
+fix, plus a `threads_program` fixture and `threads_qemu_{aarch64,riscv64,x86_64}`
+verticals modelled on `tests/integration/mem_map_qemu_*`: N threads over one
+address space increment a shared counter under a futex `Mutex`, a `Condvar`
+rendezvous proves a blocking wake rather than a spin, `join` proves clear-on-exit
+plus futex wake, each thread presents its own thread-pointer value, and a group
+`exit` proves every sibling dies. Fail-loud finishers throughout.
+
+The pure policy is already host-tested (`threads.rs`'s stack-size resolution and
+guard-page span derivation, `futex.rs`'s key isolation, FIFO wake ordering,
+deadline sweep, and per-process key teardown).
 
 **Docs** — `docs/src/architecture/threads.md`, plus `multitasking.md`,
 `syscalls.md`, `memory.md`, `resource-limits.md`, `security.md` (the futex key

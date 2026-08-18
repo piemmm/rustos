@@ -3,7 +3,8 @@
 //!
 //! Dropping a freshly built process image into EL0 is the `eret`
 //! sequence: mask the asynchronous exceptions, program `SP_EL0` with the
-//! user stack pointer, `ELR_EL1` with the entry point, and `SPSR_EL1` to
+//! user stack pointer, `TPIDR_EL0` with the thread pointer, `ELR_EL1`
+//! with the entry point, and `SPSR_EL1` to
 //! "EL0t with IRQ unmasked" (so EL0 runs **preemptible** — a
 //! generic-timer interrupt taken in user mode drives the P-1 preemptive
 //! reschedule, `plans/PI.md` D2b-2b-A P-1), set the first-argument
@@ -11,6 +12,14 @@
 //! transition. This is the one definition of that sequence; the CC2/CC3
 //! QEMU verticals reach it through the HAL rather than copying the
 //! `asm!` block.
+//!
+//! # The thread pointer
+//!
+//! `TPIDR_EL0` is seeded here and thereafter framed by `vectors.s` on every
+//! trap, so it is genuinely per-thread and an EL0 write to it is respected
+//! (`plans/THREADS.md` decision 7). Seeding it at entry also keeps a freshly
+//! entered thread from inheriting whatever the previous occupant of this CPU
+//! left in the register.
 //!
 //! [`crate::userentry::el0_spsr`] is that `SPSR`, and a debug image whose
 //! watchdog cadence is delivered as a non-maskable FIQ additionally leaves
@@ -36,13 +45,23 @@ impl UserMode {
     }
 }
 
+/// The single, `'static` [`UserMode`] the kernel borrows as this port's
+/// `&'static dyn EnterUser` handle.
+///
+/// A process's [`UserMode`] handle is carried alongside its address space so a
+/// thread created later is entered through the same transition its first
+/// thread was, with no per-arch producer of its own
+/// (`plans/THREADS.md` decision 9). The type is zero-sized, so one shared
+/// instance serves every CPU.
+pub static USER_MODE: UserMode = UserMode::new();
+
 impl EnterUser for UserMode {
     unsafe fn enter_user(&self, regs: UserEntry) -> ! {
         // SAFETY: the caller's `EnterUser::enter_user` contract
         // guarantees `regs.entry` is an EL0-executable VA and
         // `regs.stack_pointer` an EL0-writable stack top in the active
         // address space, and that the EL1 vector table is installed.
-        unsafe { enter_el0(regs.entry, regs.stack_pointer, regs.arg0) }
+        unsafe { enter_el0(regs.entry, regs.stack_pointer, regs.arg0, regs.tls_base) }
     }
 }
 
@@ -99,7 +118,8 @@ pub const fn el0_spsr(fiq_cadence: bool) -> u64 {
     }
 }
 
-/// Drop to EL0 at `entry` with `SP_EL0` = `sp` and `x0` set.
+/// Drop to EL0 at `entry` with `SP_EL0` = `sp`, `TPIDR_EL0` = `tls_base`,
+/// and `x0` set.
 ///
 /// The sequence opens by masking every asynchronous exception, because
 /// `ELR_EL1`/`SPSR_EL1` are single-copy registers: an interrupt taken
@@ -117,7 +137,7 @@ pub const fn el0_spsr(fiq_cadence: bool) -> u64 {
 /// virtual address, `sp` a valid EL0-writable stack top, and the EL1
 /// vector table must be installed. Diverges via `eret`.
 #[cfg(all(target_arch = "aarch64", target_os = "none"))]
-unsafe fn enter_el0(entry: u64, sp: u64, x0: u64) -> ! {
+unsafe fn enter_el0(entry: u64, sp: u64, x0: u64, tls_base: u64) -> ! {
     // Whether EL0 keeps `DAIF.F` clear is a run-time property of the
     // hardware, not of the build, so it is read from the boot probe rather
     // than a compile-time constant.
@@ -128,8 +148,10 @@ unsafe fn enter_el0(entry: u64, sp: u64, x0: u64) -> ! {
     // SAFETY: the-sanctioned assembly carve-out (no Rust spelling for
     // `eret` or the EL1 system-register writes). Masking `DAIF` only
     // changes this CPU's exception masks, which the `eret` then replaces
-    // from `SPSR_EL1`. Writing `SP_EL0`/`ELR_EL1`/`SPSR_EL1` loads the EL0
-    // entry state; `eret` performs the documented EL1→EL0 transition (a
+    // from `SPSR_EL1`. Writing `SP_EL0`/`TPIDR_EL0`/`ELR_EL1`/`SPSR_EL1`
+    // loads the EL0 entry state; `TPIDR_EL0` is an EL0-writable scratch
+    // register the kernel itself never reads, so any value is safe there.
+    // `eret` performs the documented EL1→EL0 transition (a
     // context-synchronising event). The caller's safety contract
     // guarantees the mapped entry/stack. `options(noreturn)` matches the
     // divergence.
@@ -137,10 +159,12 @@ unsafe fn enter_el0(entry: u64, sp: u64, x0: u64) -> ! {
         core::arch::asm!(
             "msr DAIFSet, #0xf",
             "msr SP_EL0, {sp}",
+            "msr TPIDR_EL0, {tls}",
             "msr ELR_EL1, {entry}",
             "msr SPSR_EL1, {spsr}",
             "eret",
             sp = in(reg) sp,
+            tls = in(reg) tls_base,
             entry = in(reg) entry,
             spsr = in(reg) spsr,
             in("x0") x0,
@@ -159,7 +183,7 @@ unsafe fn enter_el0(entry: u64, sp: u64, x0: u64) -> ! {
 /// Never call on the host; see [`EnterUser::enter_user`] for the
 /// bare-metal contract.
 #[cfg(not(all(target_arch = "aarch64", target_os = "none")))]
-unsafe fn enter_el0(_entry: u64, _sp: u64, _x0: u64) -> ! {
+unsafe fn enter_el0(_entry: u64, _sp: u64, _x0: u64, _tls_base: u64) -> ! {
     unreachable!("enter_el0 is only meaningful on the bare-metal aarch64 target")
 }
 

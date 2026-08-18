@@ -2690,6 +2690,87 @@ pub const SYSCALLS: &[SyscallSpec] = &[
         required_capability: Some(CapabilityId::CONSOLE_WRITE),
         audit: true,
     },
+    SyscallSpec {
+        number: SyscallNumber::THREAD_CREATE,
+        name: "thread_create",
+        arg_count: 5,
+        args: [
+            AbiType::UserPtr,
+            AbiType::U64,
+            AbiType::Len,
+            AbiType::U64,
+            AbiType::U64,
+            AbiType::Unit,
+        ],
+        ret: AbiType::U64,
+        // A thread runs in the caller's *own* isolated address space under the
+        // caller's own single capability record, so creating one grants no
+        // authority over anything else — the unprivileged baseline `mem_map`
+        // established. The capacity it consumes is bounded by the settable
+        // `threads` and `stack-bytes` limits instead of by a capability.
+        // Audited: a new schedulable principal is a lifecycle event, like
+        // `spawn`.
+        required_capability: None,
+        audit: true,
+    },
+    SyscallSpec {
+        number: SyscallNumber::THREAD_EXIT,
+        name: "thread_exit",
+        arg_count: 0,
+        args: [
+            AbiType::Unit,
+            AbiType::Unit,
+            AbiType::Unit,
+            AbiType::Unit,
+            AbiType::Unit,
+            AbiType::Unit,
+        ],
+        ret: AbiType::Unit,
+        // Ending oneself needs no capability; audited for the same
+        // process-lifecycle reason `exit` is (the last thread out *is* the
+        // process exit).
+        required_capability: None,
+        audit: true,
+    },
+    SyscallSpec {
+        number: SyscallNumber::FUTEX_WAIT,
+        name: "futex_wait",
+        arg_count: 3,
+        args: [
+            AbiType::UserPtr,
+            AbiType::U32,
+            AbiType::U64,
+            AbiType::Unit,
+            AbiType::Unit,
+            AbiType::Unit,
+        ],
+        ret: AbiType::Errno,
+        // The wait key is `(process, uaddr)`, so the call names nothing
+        // outside the caller's own address space: unprivileged, exactly as
+        // `mem_map`. Not audited — it is the hot blocking primitive every
+        // userland mutex and condition variable contends through and it
+        // decides no security question; a per-call record would drown the log.
+        required_capability: None,
+        audit: false,
+    },
+    SyscallSpec {
+        number: SyscallNumber::FUTEX_WAKE,
+        name: "futex_wake",
+        arg_count: 2,
+        args: [
+            AbiType::UserPtr,
+            AbiType::U32,
+            AbiType::Unit,
+            AbiType::Unit,
+            AbiType::Unit,
+            AbiType::Unit,
+        ],
+        ret: AbiType::U64,
+        // The release half of `futex_wait`; same self-scoped, unprivileged,
+        // unaudited posture.
+        required_capability: None,
+        audit: false,
+    },
 ];
 
 /// Length, in bytes, of the canonical encoding stored in

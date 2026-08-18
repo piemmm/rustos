@@ -132,6 +132,10 @@ extern "C" {
 #define TAIRIX_SYS_CALL_GRANT 106u
 #define TAIRIX_SYS_BOOT_SESSION_GET 107u
 #define TAIRIX_SYS_TERMINAL_PURGE 108u
+#define TAIRIX_SYS_THREAD_CREATE 109u
+#define TAIRIX_SYS_THREAD_EXIT 110u
+#define TAIRIX_SYS_FUTEX_WAIT 111u
+#define TAIRIX_SYS_FUTEX_WAKE 112u
 
 /* wait() flag bits (uint32_t). Every undefined bit is reserved and must be zero;
 * with the NONBLOCK bit set, wait() polls and returns TAIRIX_E_WOULD_BLOCK when a
@@ -392,6 +396,10 @@ int32_t tairix_sys_system_power(uint32_t a0);
 uint64_t tairix_sys_call_grant(uint64_t a0, uint64_t a1);
 uint64_t tairix_sys_boot_session_get(void);
 int32_t tairix_sys_terminal_purge(uint32_t a0);
+uint64_t tairix_sys_thread_create(void * a0, uint64_t a1, uintptr_t a2, uint64_t a3, uint64_t a4);
+void tairix_sys_thread_exit(void);
+int32_t tairix_sys_futex_wait(void * a0, uint32_t a1, uint64_t a2);
+uint64_t tairix_sys_futex_wake(void * a0, uint32_t a1);
 
 #ifdef __cplusplus
 } /* extern "C" */

@@ -89,15 +89,15 @@ fn the_user_entry_masks_supervisor_interrupts_before_it_arms_sscratch() {
 }
 
 /// The anchor must carry this hart's kernel `tp` before `sscratch` names it,
-/// and U-mode must be entered with a thread pointer of its own rather than
-/// inheriting the kernel's hart identity.
+/// and U-mode must be entered with the entered thread's *own* thread pointer
+/// rather than inheriting the kernel's hart identity.
 #[test]
-fn the_user_entry_publishes_the_kernel_tp_then_clears_it_for_user_mode() {
+fn the_user_entry_publishes_the_kernel_tp_then_loads_the_threads_own() {
     let src = include_str!("userentry.rs");
     let carve = only(src, "\"addi sp, sp, -{anchor_bytes}\",");
     let publish = only(src, "\"sd tp, {ktp_off}(sp)\",");
     let arm = only(src, "\"csrw sscratch, sp\",");
-    let clear = only(src, "\"mv tp, zero\",");
+    let load = only(src, "\"mv tp, {tls}\",");
     let sret = only(src, "\"sret\",");
 
     assert!(carve < publish, "the anchor is carved before it is written");
@@ -107,12 +107,12 @@ fn the_user_entry_publishes_the_kernel_tp_then_clears_it_for_user_mode() {
          hart's `tp`, so the next U->S trap would reload an unset word",
     );
     assert!(
-        publish < clear,
-        "`tp` is zeroed before its kernel value is published, so the anchor \
-         records zero instead of this hart's identity",
+        publish < load,
+        "`tp` is replaced before its kernel value is published, so the anchor \
+         records the thread pointer instead of this hart's identity",
     );
     assert!(
-        clear < sret,
+        load < sret,
         "U-mode would inherit the kernel's hart identity in `tp`",
     );
 }

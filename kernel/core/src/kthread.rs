@@ -1400,6 +1400,41 @@ pub fn with_current_live_space<R>(
     Some(space.with(f))
 }
 
+/// Clone the handle to the **process address space** of the thread currently
+/// switched in on `cpu`, or [`None`] (fail closed) when that CPU has no
+/// published space.
+///
+/// This is what `thread_create` reaches for: creating a thread needs the
+/// process's whole user-execution context — its live address space to reserve
+/// the new stack in, its switch-in hook, and its port's enter-user handle — and
+/// an owning [`Arc`] to clone into the new thread's control block, not the
+/// borrowed view [`with_current_live_space`] gives. Taking a *clone* is what
+/// keeps the new thread's handle alive independently of the creating thread's.
+///
+/// # Safety of the reconstruction
+///
+/// The published pointer was formed by [`Arc::as_ptr`] from the `Arc` the
+/// running thread's control block owns, and the slot is `Some` only while a
+/// thread of that process runs on `cpu`, so the allocation is live for the
+/// duration of this call. Incrementing the strong count before reconstructing
+/// an owning handle is exactly what [`Arc::clone`] does, so the borrowed
+/// publication is left intact rather than consumed.
+#[must_use]
+pub fn current_process_space(cpu: CpuId) -> Option<Arc<ProcessSpace>> {
+    let state = cpu_state::get(cpu)?;
+    // Lift the (Copy) pointer out from under the slot lock before touching the
+    // refcount, exactly as `with_current_live_space` does.
+    let ptr = {
+        let guard = state.live_space.lock();
+        *guard
+    }?;
+    // SAFETY: see the reconstruction argument above.
+    unsafe {
+        Arc::increment_strong_count(ptr.0);
+        Some(Arc::from_raw(ptr.0))
+    }
+}
+
 /// Test-only: publish `space` as the current process space for `cpu`,
 /// returning a guard that clears the slot when dropped.
 ///

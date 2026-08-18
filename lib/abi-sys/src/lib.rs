@@ -95,6 +95,10 @@ const NUM_USERS_ADMIN: u64 = SyscallNumber::USERS_ADMIN.as_u16() as u64;
 const NUM_CONSOLE_COUNT: u64 = SyscallNumber::CONSOLE_COUNT.as_u16() as u64;
 const NUM_STREAM_INPUT_MODE: u64 = SyscallNumber::STREAM_INPUT_MODE.as_u16() as u64;
 const NUM_TERMINAL_PURGE: u64 = SyscallNumber::TERMINAL_PURGE.as_u16() as u64;
+const NUM_THREAD_CREATE: u64 = SyscallNumber::THREAD_CREATE.as_u16() as u64;
+const NUM_THREAD_EXIT: u64 = SyscallNumber::THREAD_EXIT.as_u16() as u64;
+const NUM_FUTEX_WAIT: u64 = SyscallNumber::FUTEX_WAIT.as_u16() as u64;
+const NUM_FUTEX_WAKE: u64 = SyscallNumber::FUTEX_WAKE.as_u16() as u64;
 
 /// `console_foreground` syscall number (as above).
 const NUM_CONSOLE_FOREGROUND: u64 = SyscallNumber::CONSOLE_FOREGROUND.as_u16() as u64;
@@ -236,6 +240,105 @@ pub extern "C" fn sys_exit(code: i32) -> ! {
         unsafe {
             let _ = raw_syscall(NUM_EXIT, [i32_arg(code), 0, 0, 0, 0, 0]);
         }
+    }
+}
+
+/// `thread_create`: start a second thread of execution in the calling
+/// process's own address space at `entry` (`SyscallNumber::THREAD_CREATE`).
+/// Returns the new thread id, or a `TAIRIX_E_*` code reinterpreted into the
+/// result.
+///
+/// `arg` lands in the new thread's first-argument register, `stack_len` sizes
+/// the stack the **kernel** reserves for it (`TAIRIX_THREAD_STACK_DEFAULT` for
+/// the caller's effective `stack-bytes` bound) behind an unbacked guard page,
+/// `tls_base` seeds its thread pointer, and `clear_on_exit` — when non-null —
+/// names a `uint32_t` the kernel zeroes and futex-wakes when the thread dies,
+/// which is how a join is built. The kernel validates every argument against
+/// the caller's own space and fails closed (`plans/THREADS.md` T3b).
+#[must_use]
+#[export_name = "tairix_sys_thread_create"]
+pub extern "C" fn sys_thread_create(
+    entry: *mut c_void,
+    arg: u64,
+    stack_len: usize,
+    tls_base: u64,
+    clear_on_exit: *mut c_void,
+) -> u64 {
+    // SAFETY: see `sys_yield`. No pointer is dereferenced here; the kernel
+    // validates `entry` and `clear_on_exit` against the caller's own address
+    // space before it builds anything.
+    unsafe {
+        raw_syscall(
+            NUM_THREAD_CREATE,
+            [
+                ptr_arg(entry),
+                arg,
+                stack_len as u64,
+                tls_base,
+                ptr_arg(clear_on_exit),
+                0,
+            ],
+        )
+    }
+}
+
+/// `thread_exit`: end the calling thread without ending its siblings
+/// (`SyscallNumber::THREAD_EXIT`).
+///
+/// This function does not return. The kernel zeroes and futex-wakes the
+/// thread's `clear_on_exit` word, releases its stack and per-thread state, and
+/// reaps it; the last thread of a process to end is a process exit. Should a
+/// broken kernel nonetheless return, the stub re-issues the call rather than
+/// returning to a C caller that has no continuation — a fail-closed loop over
+/// the terminating syscall, not a busy-wait.
+#[export_name = "tairix_sys_thread_exit"]
+pub extern "C" fn sys_thread_exit() -> ! {
+    loop {
+        // SAFETY: see `sys_yield`. `thread_exit` takes no arguments.
+        unsafe {
+            let _ = raw_syscall(NUM_THREAD_EXIT, NO_ARGS);
+        }
+    }
+}
+
+/// `futex_wait`: block until the `uint32_t` at `uaddr` is woken, unless it no
+/// longer holds `expected` (`SyscallNumber::FUTEX_WAIT`). Returns a
+/// `TAIRIX_E_*` code — `TAIRIX_E_WOULD_BLOCK` when the word already changed
+/// (re-test and retry), `TAIRIX_E_TIMED_OUT` when `timeout_ns` elapses.
+///
+/// `timeout_ns` is relative; `UINT64_MAX` means "no timeout". This is the one
+/// blocking primitive a userland mutex, condition variable, and thread join are
+/// built over, so an uncontended lock never enters the kernel.
+#[must_use]
+#[export_name = "tairix_sys_futex_wait"]
+pub extern "C" fn sys_futex_wait(uaddr: *mut c_void, expected: u32, timeout_ns: u64) -> i32 {
+    // SAFETY: see `sys_yield`. The kernel validates `uaddr` against the
+    // caller's own address space and reads the word itself.
+    unsafe {
+        ret_i32(raw_syscall(
+            NUM_FUTEX_WAIT,
+            [ptr_arg(uaddr), u64::from(expected), timeout_ns, 0, 0, 0],
+        ))
+    }
+}
+
+/// `futex_wake`: wake up to `count` threads of the calling process blocked in
+/// [`sys_futex_wait`] on `uaddr` (`SyscallNumber::FUTEX_WAKE`). Returns how
+/// many were woken, or a `TAIRIX_E_*` code reinterpreted into the result.
+///
+/// `UINT32_MAX` wakes every waiter; waiters are released oldest-first, so a
+/// `count` of 1 is a genuine wake-one rather than a thundering herd. Waking
+/// nobody is success.
+#[must_use]
+#[export_name = "tairix_sys_futex_wake"]
+pub extern "C" fn sys_futex_wake(uaddr: *mut c_void, count: u32) -> u64 {
+    // SAFETY: see `sys_yield`. No pointer is dereferenced here; `uaddr` is the
+    // wait key the kernel resolves against the caller's own space.
+    unsafe {
+        raw_syscall(
+            NUM_FUTEX_WAKE,
+            [ptr_arg(uaddr), u64::from(count), 0, 0, 0, 0],
+        )
     }
 }
 
@@ -2788,6 +2891,10 @@ mod tests {
         (NUM_SCHED_SET_PRIORITY, "sched_set_priority", 2),
         (NUM_SYSTEM_POWER, "system_power", 1),
         (NUM_BOOT_SESSION_GET, "boot_session_get", 0),
+        (NUM_THREAD_CREATE, "thread_create", 5),
+        (NUM_THREAD_EXIT, "thread_exit", 0),
+        (NUM_FUTEX_WAIT, "futex_wait", 3),
+        (NUM_FUTEX_WAKE, "futex_wake", 2),
     ];
 
     #[test]
@@ -3424,6 +3531,75 @@ mod tests {
         assert_eq!(args[1], 1);
         assert_eq!(args[2], 0x10_0000);
         assert_eq!(&args[3..], &[0, 0, 0]);
+    }
+
+    #[test]
+    fn thread_create_marshals_entry_arg_stack_tls_and_clear_word() {
+        let mut clear = 1u32;
+        let clear_ptr = core::ptr::addr_of_mut!(clear).cast::<c_void>();
+        let entry = 0x40_1000usize as *mut c_void;
+        let (number, args) = capture(7, || {
+            assert_eq!(
+                sys_thread_create(entry, 0xABCD, 0x2000, 0x7F00, clear_ptr),
+                7
+            );
+        });
+        assert_eq!(number, NUM_THREAD_CREATE);
+        assert_eq!(args[0], 0x40_1000);
+        assert_eq!(args[1], 0xABCD);
+        assert_eq!(args[2], 0x2000);
+        assert_eq!(args[3], 0x7F00);
+        assert_eq!(args[4], clear_ptr as u64);
+        assert_eq!(args[5], 0);
+        // The stub marshals only; it never touches the clear-on-exit word.
+        assert_eq!(clear, 1);
+    }
+
+    #[test]
+    fn thread_create_marshals_the_absent_clear_word_and_default_stack() {
+        let entry = 0x40_2000usize as *mut c_void;
+        let (number, args) = capture(9, || {
+            assert_eq!(
+                sys_thread_create(
+                    entry,
+                    0,
+                    tairix_abi::THREAD_STACK_DEFAULT,
+                    0,
+                    core::ptr::null_mut()
+                ),
+                9
+            );
+        });
+        assert_eq!(number, NUM_THREAD_CREATE);
+        assert_eq!(args[0], 0x40_2000);
+        assert_eq!(&args[1..], &[0, 0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn futex_wait_marshals_word_expected_and_timeout() {
+        let mut word = 3u32;
+        let ptr = core::ptr::addr_of_mut!(word).cast::<c_void>();
+        let (number, args) = capture(0, || {
+            assert_eq!(sys_futex_wait(ptr, 3, u64::MAX), 0);
+        });
+        assert_eq!(number, NUM_FUTEX_WAIT);
+        assert_eq!(args[0], ptr as u64);
+        assert_eq!(args[1], 3);
+        assert_eq!(args[2], u64::MAX);
+        assert_eq!(&args[3..], &[0, 0, 0]);
+    }
+
+    #[test]
+    fn futex_wake_marshals_word_and_count() {
+        let mut word = 0u32;
+        let ptr = core::ptr::addr_of_mut!(word).cast::<c_void>();
+        let (number, args) = capture(2, || {
+            assert_eq!(sys_futex_wake(ptr, u32::MAX), 2);
+        });
+        assert_eq!(number, NUM_FUTEX_WAKE);
+        assert_eq!(args[0], ptr as u64);
+        assert_eq!(args[1], u64::from(u32::MAX));
+        assert_eq!(&args[2..], &[0, 0, 0, 0]);
     }
 
     #[test]

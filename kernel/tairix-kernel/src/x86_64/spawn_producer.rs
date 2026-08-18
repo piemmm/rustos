@@ -46,15 +46,15 @@ use alloc::sync::Arc;
 use tairix_abi::rxe::LoadImage;
 use tairix_abi::Errno;
 use tairix_arch_api::mmu::AddressSpace as MmuAddressSpace;
-use tairix_arch_api::EnterUser;
 use tairix_arch_x86_64::paging::{
     activate_user_root, AddressSpace as ArchAddressSpace, KERNEL_VMA_BASE,
 };
 use tairix_arch_x86_64::syscall_entry;
-use tairix_arch_x86_64::userentry::UserMode;
+use tairix_arch_x86_64::userentry::{set_user_thread_pointer, USER_MODE};
 use tairix_kernel_core::{
     refuse_build, spawn_caller_errno, spawn_image, ArchImageBuilder, BoxStack, BuiltImage,
-    ImageBuildCtx, KernelStack, ProcessSpace, SpawnMode, SpawnRequest,
+    ImageBuildCtx, KernelStack, ProcessResume, ProcessSpace, SpawnMode, SpawnRequest,
+    UserThreadEntry,
 };
 use tairix_kernel_mem::{
     AddressSpace, DirectPhysMap, FrameAllocator, FrameTableSource, LiveSpace, PhysMap,
@@ -304,13 +304,14 @@ impl ArchImageBuilder for X86_64ProcessSpawn {
         }
         .map_err(spawn_caller_errno)?;
 
-        // The child's user-address-space reactivation hook (`plans/SPAWN.md`
-        // SP2, `plans/PI.md` X1): the core runs it on the dispatcher's context
-        // immediately before every switch into the child. It reloads CR3 to
-        // the child's own root (isolation) and repoints the per-CPU
-        // `syscall` entry stack at the child's own kernel stack (the value the
-        // runtime hands it). It captures only the `u64` root, so it is `Send`.
-        let pre_resume: Box<dyn FnMut(u64) + Send> = Box::new(move |stack_top: u64| {
+        // The child's switch-in hook (`plans/SPAWN.md` SP2, `plans/PI.md` X1):
+        // the core runs it on the dispatcher's context immediately before every
+        // switch into any thread of the child. It reloads CR3 to the child's
+        // own root (isolation), repoints the per-CPU `syscall` entry stack at
+        // the switching-in thread's own kernel stack, and reinstalls that
+        // thread's thread pointer. It captures only the `u64` root, so it is
+        // `Send`.
+        let pre_resume: ProcessResume = Arc::new(move |stack_top: u64, tls_base: u64| {
             // `set_kernel_rsp0` repoints **both** the child's `syscall` entry
             // stack (`gs:0`) and its trap entry stack (`TSS.RSP0`) at the
             // child's own kernel stack — the latter is what makes an involuntary
@@ -321,24 +322,18 @@ impl ArchImageBuilder for X86_64ProcessSpawn {
             // value (validated canonical/aligned/kernel-half) leaves the slots
             // unchanged and the next entry faults loudly (fail closed).
             let _ = syscall_entry::set_kernel_rsp0(BOOT_CPU, stack_top);
+            // The `FS` base is privileged on this port, so the kernel — not
+            // the thread — maintains it: every switch-in reinstalls the
+            // switching-in thread's own value (`plans/THREADS.md` decision 7).
+            // SAFETY: this runs at CPL 0 on the dispatcher's context, on the
+            // CPU about to enter that thread, which is exactly
+            // `set_user_thread_pointer`'s contract.
+            unsafe { set_user_thread_pointer(tls_base) };
             // SAFETY: paging is enabled and `child_root_phys` is the PML4 of
             // the child's space, which identity-maps the low kernel window the
             // running dispatcher executes from and mirrors the higher-half
             // kernel window — exactly `activate_user_root`'s contract.
             unsafe { activate_user_root(child_root_phys) };
-        });
-
-        // The user-mode transition, boxed for the scheduler task body the core
-        // wraps the child in. `enter_user` diverges into ring 3, so the
-        // closure never truly returns (its `!` coerces to `()`).
-        let user_mode = UserMode::new();
-        let enter: Box<dyn FnMut() + Send> = Box::new(move || {
-            // SAFETY: by the time this body runs the child has been
-            // dispatched, so its `pre_resume` hook has activated `space` and
-            // the `syscall` entry + production dispatch callback are installed;
-            // the child's first `syscall` is handled. `build_process_image`
-            // mapped the entry/stack as user pages.
-            unsafe { user_mode.enter_user(entry) }
         });
 
         // Freeze the just-built mappings into the registry-storable,
@@ -379,7 +374,13 @@ impl ArchImageBuilder for X86_64ProcessSpawn {
                     windows.file_pages,
                 )
                 .ok()
-                .map(|live| Arc::new(ProcessSpace::new(Box::new(live))))
+                .map(|live| {
+                    Arc::new(ProcessSpace::new(
+                        Box::new(live),
+                        Arc::clone(&pre_resume),
+                        &USER_MODE,
+                    ))
+                })
             }
             None => None,
         };
@@ -392,7 +393,10 @@ impl ArchImageBuilder for X86_64ProcessSpawn {
             stack_span,
             live,
             pre_resume,
-            enter,
+            entry: UserThreadEntry {
+                port: &USER_MODE,
+                regs: entry,
+            },
         })
     }
 }

@@ -34,6 +34,10 @@
  * caller's own credential (any other value switches to that user, which
  * requires TAIRIX_CAP_SPAWN_AS_USER). */
 #define TAIRIX_SPAWN_UID_INHERIT ((uint32_t)0xffffffffu)
+/* `stack_len` argument to tairix_sys_thread_create: give the new thread the
+ * kernel's default per-thread stack (the caller's effective stack-bytes
+ * bound) instead of naming a size. */
+#define TAIRIX_THREAD_STACK_DEFAULT ((uintptr_t)0u)
 
 /* Packed little-endian wire size of a startup-vector header, in bytes. */
 #define TAIRIX_PROCESS_START_HEADER_WIRE_LEN 40u

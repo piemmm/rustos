@@ -46,12 +46,12 @@ use alloc::sync::Arc;
 use tairix_abi::rxe::LoadImage;
 use tairix_abi::Errno;
 use tairix_arch_api::mmu::AddressSpace as MmuAddressSpace;
-use tairix_arch_api::EnterUser;
 use tairix_arch_riscv64::paging::{activate_user_root, AddressSpace as ArchAddressSpace};
-use tairix_arch_riscv64::userentry::UserMode;
+use tairix_arch_riscv64::userentry::USER_MODE;
 use tairix_kernel_core::{
     refuse_build, spawn_caller_errno, spawn_image, ArchImageBuilder, BoxStack, BuiltImage,
-    ImageBuildCtx, KernelStack, ProcessSpace, SpawnMode, SpawnRequest,
+    ImageBuildCtx, KernelStack, ProcessResume, ProcessSpace, SpawnMode, SpawnRequest,
+    UserThreadEntry,
 };
 use tairix_kernel_mem::{
     AddressSpace, DirectPhysMap, FrameAllocator, FrameTableSource, LiveSpace, PhysMap,
@@ -276,24 +276,12 @@ impl ArchImageBuilder for RiscvProcessSpawn {
         // its own `satp` root. It captures only the `u64` root, so it is
         // `Send`. The kernel-stack top it is handed is unused on riscv64
         // (`sscratch` is per-task hardware state armed by `enter_user`).
-        let pre_resume: Box<dyn FnMut(u64) + Send> = Box::new(move |_stack_top: u64| {
+        let pre_resume: ProcessResume = Arc::new(move |_stack_top: u64, _tls_base: u64| {
             // SAFETY: paging is enabled and `child_root_phys` is the Sv39 root
             // of the child's space, which identity-maps the low kernel window
             // the running kernel executes from — exactly `activate_user_root`'s
             // contract.
             unsafe { activate_user_root(child_root_phys) };
-        });
-
-        // The user-mode transition, boxed for the loading body to invoke once
-        // `become_user` has installed the hook. `enter_user` diverges into
-        // U-mode, so its `!` coerces to `()`.
-        let user_mode = UserMode::new();
-        let enter: Box<dyn FnMut() + Send> = Box::new(move || {
-            // SAFETY: by the time this body runs the child has been dispatched,
-            // so its `pre_resume` hook has activated `space` and the S-mode
-            // trap vector + production dispatch callback are installed; the
-            // child's first `ecall` is handled.
-            unsafe { user_mode.enter_user(entry) }
         });
 
         // Freeze the just-built mappings into the registry-storable,
@@ -326,7 +314,13 @@ impl ArchImageBuilder for RiscvProcessSpawn {
                     windows.file_pages,
                 )
                 .ok()
-                .map(|live| Arc::new(ProcessSpace::new(Box::new(live))))
+                .map(|live| {
+                    Arc::new(ProcessSpace::new(
+                        Box::new(live),
+                        Arc::clone(&pre_resume),
+                        &USER_MODE,
+                    ))
+                })
             }
             None => None,
         };
@@ -339,7 +333,10 @@ impl ArchImageBuilder for RiscvProcessSpawn {
             stack_span,
             live,
             pre_resume,
-            enter,
+            entry: UserThreadEntry {
+                port: &USER_MODE,
+                regs: entry,
+            },
         })
     }
 }

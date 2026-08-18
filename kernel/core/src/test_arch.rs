@@ -407,3 +407,28 @@ impl KernelArch for TestArch {
         // Returns for the same reason [`Self::poweroff`] does.
     }
 }
+
+/// A host port double for the Arch HAL "enter user mode" surface.
+///
+/// Entering user mode is only meaningful on a bare-metal target, so a host
+/// test can never execute the transition — but it still has to *name* a port
+/// handle to build a [`crate::ProcessSpace`] or a
+/// [`crate::BuiltImage`]. This is that handle, in one place rather than
+/// re-declared in every test module.
+pub struct NeverEnterUser;
+
+impl tairix_arch_api::EnterUser for NeverEnterUser {
+    unsafe fn enter_user(&self, _regs: tairix_arch_api::UserEntry) -> ! {
+        unreachable!("enter_user is only meaningful on the bare-metal target")
+    }
+}
+
+/// The shared `'static` [`NeverEnterUser`] host tests borrow.
+pub static NEVER_ENTER_USER: NeverEnterUser = NeverEnterUser;
+
+/// A switch-in hook that records nothing, for a host test whose subject is
+/// not the port's register program.
+#[must_use]
+pub fn inert_process_resume() -> crate::spawn::ProcessResume {
+    alloc::sync::Arc::new(|_stack_top: u64, _tls_base: u64| {})
+}
