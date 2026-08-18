@@ -309,6 +309,19 @@ is session glue. Given a `&mut tairix_wm::Compositor` and the taskbar's own
   the bar at `LibraryLayout::panel`'s origin, and rounds it the same way;
   closing the popup removes the popup window.
 
+Each of the five surfaces is placed asking for a backdrop blur of the theme's
+`chrome_backdrop_blur`. They are drawn with the theme's floating ground — each
+surface's own colour role at the palette's `chrome_alpha` — which reads as
+frosted glass only over a blurred backdrop, so the two
+are one decision and are taken from the theme at the one place a surface is
+placed — never after, where a window would show for a frame wearing the
+frosting of whatever was placed before it. The pinboard's own backdrop menu
+goes through the same placement and asks for none: it covers what it opens
+over. The bar itself now floats clear of the screen edges it faces
+(`Metrics::taskbar_margin`), so all four of its corners round against
+wallpaper; `DesktopShell::work_area` still keeps a maximized window out of the
+whole band from that screen edge to the bar's inner side, gap included.
+
 `present` repaints **only the surfaces the taskbar latched as changed**
 (`TaskbarRepaint`, drained once by `DesktopShell::present`). The bar, the
 library popup, the context menu, the notification popover, and the capsule's

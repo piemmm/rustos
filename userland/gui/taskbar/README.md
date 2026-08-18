@@ -1,20 +1,29 @@
 # tairix-taskbar
 
 The TAIRiX traditional desktop **taskbar** (`AGENTS.md` §10, `PLAN.md`
-Stage 7, `plans/NEW-TASKBAR.md`): a GNOME/Windows-style bar pinned to a
-configured screen edge.
+Stage 7, `plans/NEW-TASKBAR.md`): a GNOME/Windows-style bar at a configured
+screen edge. It floats clear of the three screen-facing sides by the theme's
+`Metrics::taskbar_margin` — `5` logical pixels in both built-in themes — and
+keeps its normal thickness on the work-area side.
 
 This crate is the Stage 7 **layout, model, and rendering** increment. It
 owns:
 
 - **Layout** — `TaskbarConfig` (edge, thickness, per-region extents) and
-  `BarLayout::compute`, which lays the bar out along its main axis: the two
+  `BarLayout::compute`, which insets the bar by `taskbar_margin` on the three
+  sides facing the screen edge, then lays it out along its main axis: the two
   permanent leading launcher buttons (**Library**, then **Files** — fixed
   order, never removable) divided by the **separator** rule, the **pin strip**
   between the launchers and tasks, the running-task list in the middle, the
   notification-icon area packed before the clock, and the clock anchored to
-  the trailing end. All arithmetic saturates, so a degenerate screen size
-  fails closed inside the bar (`AGENTS.md` §2.9).
+  the trailing end. The margin is scaled through `Scale::scale_length` and
+  clamped so a screen too small to hold it still lays out a bar. Every region
+  is laid out *inside* the bar's own rim — the placer is pulled in by one
+  `plate_border` on both axes — so a hovered or pressed slot cannot wash over
+  the surface's edge; `BarLayout::bar` remains the whole rectangle, rim
+  included, and a bar too thin to spare two rims keeps its content instead. All
+  arithmetic saturates, so a degenerate screen size fails closed inside the bar
+  (`AGENTS.md` §2.9).
 - **The separator** — `BarLayout::separator`, a rule one `border_thickness`
   along the bar's main axis (floored at one physical pixel so it survives a
   small scale), spanning the cross axis inset by one `control_inset` from
@@ -24,7 +33,8 @@ owns:
   peer of the pins rather than of the library. It is decoration: `hit_test`
   never reports it, and a bar too short to reach it or too thin to inset it
   simply lays out `Rect::EMPTY` and draws nothing.
-- **Variable DPI** — the bar's extents, thickness, and corner radius are
+- **Variable DPI** — the bar's extents, thickness, corner radius, and edge
+  margin are
   *logical* pixels (the screen dimensions are physical). `BarLayout::compute`
   takes a `tairix-geometry` `Scale` and converts the logical lengths to
   physical pixels through the one shared `Scale::scale_length` (`AGENTS.md`
@@ -98,8 +108,29 @@ owns:
   `LibraryLaunch { entry }`; the session resolves the bundle and launches
   it — the taskbar cannot spawn processes (`AGENTS.md` §16.5).
   `Taskbar::library_layout` computes the popup geometry (outward from the
-  bar on every edge, clamped to the screen, chrome measured by probing the
-  shared `Panel` rather than re-deriving it, §2.2).
+  bar on every edge, clamped along the bar's own span so it cannot enter the
+  wallpaper gap, chrome measured by probing the shared `Panel` rather than
+  re-deriving it, §2.2).
+- **Floating chrome** — the bar adopts its theme's floating form once
+  (`Theme::floating`, in `Taskbar::new` and `apply_theme`), so the bar, every
+  popup it opens — the program-library panel, context menu, notification
+  popover, and Switchboard readout — and every control drawn on them are
+  translucent by construction. The session requests the theme's
+  `Metrics::chrome_backdrop_blur` — `7` logical pixels in both built-in themes
+  — behind each surface, and along-bar popup placement is clamped to the bar's
+  own span, so no popup enters the wallpaper gap. Each surface keeps the colour
+  role it wears solid and takes the palette's `chrome_alpha` (the bar, menu and
+  readout `surface_raised`; a `Panel` `surface`), so a resting row is exactly
+  its panel; a plate raised on one — an icon's hover wash, the search field,
+  the readout's action button, a notification card — takes the step-more-solid
+  `chrome_plate_alpha`, and a scroll channel the ground's own. A surface's own
+  rim is its edge rather than a mark on it, so it takes that same
+  `chrome_alpha` and reads a step lighter than the ground on the dark theme, a
+  step darker on the light one — the bar's 1 px border, drawn by the one shared
+  `paint_surface_plate` recipe. Ink and semantic marks stay solid: icons,
+  labels, a control's rim, focus rings, role fills, rails, beads.
+  Each surface draws one translucent layer, so a floating panel has no separate
+  header band.
 - **Task list and pin strip** — `TaskList` tracks one entry per top-level
   window; `PinStrip` holds the resolved views of the user's pinned shortcuts.
   Both use the familiar click-to-activate / minimise-restore rule. Both pins
@@ -173,9 +204,12 @@ owns:
   and the clock are drawn on top. `pin_icon_side` and `task_icon_side` expose
   the exact pixel geometry of each kind of slot, so owners rasterise at the
   drawn size; both slots are icon-only, so the two agree wherever the
-  configured extents do — and by default they do. The surface is rectangular —
-  the window manager rounds it — and the colour/blit algebra is reused from
-  `lib/*` (`AGENTS.md` §2.2).
+  configured extents do — and by default they do. The bar's own background is
+  the shared floating-surface plate (`tairix_controls::paint_surface_plate`),
+  the recipe every popup it opens already wears: a rim one `plate_border` thick
+  in the palette's `rim`, then the raised ground inside it, both rounded by
+  `BarLayout::corner_radius`. The colour/blit algebra is reused from `lib/*`
+  (`AGENTS.md` §2.2).
   The renderer holds a `tairix-reclaim` `ReclaimCache` of the rasterised
   notification glyphs across frames, built by `icon_cache` from the shared
   desktop cache policy (`tairix_reclaim::desktop::disposable_ui_cache`,
@@ -212,11 +246,13 @@ owns:
 
 ## Rounded edges
 
-The taskbar does not draw its own rounded corners. `BarLayout::corner_radius`
-carries the radius from the active theme's `taskbar_corner_radius`; the window
-manager applies it through its single anti-aliased rounded-corner path, the
-same one it uses for windows. There is no second implementation
-(`AGENTS.md` §2.2).
+`BarLayout::corner_radius` carries the radius from the active theme's
+`taskbar_corner_radius`. The window manager cuts the bar window to it through
+its single anti-aliased rounded-corner path, the same one it uses for windows,
+and the bar's own background plate is laid down at that same radius so its rim
+follows the silhouette the cut leaves instead of squaring off across it. Both
+round through `lib/raster`'s one coverage path; there is no second
+implementation (`AGENTS.md` §2.2).
 
 ## Dependencies and layering
 

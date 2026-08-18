@@ -8,9 +8,21 @@ default dark theme and a light theme switchable at runtime.
 This crate is pure theme *data*. A `Theme` is a table of:
 
 - `Palette` — semantic `Rgba` colour roles (`desktop`, `surface`,
-  `surface_raised`, `on_surface`, `on_surface_muted`, `accent`, `on_accent`,
-  `selection_fill`, `border`). Roles are fixed fields, so a theme can never
-  omit one and a consumer can never ask for one that does not exist.
+  `surface_raised`, `on_surface`, `on_surface_muted`, `accent`,
+  `on_accent`, `selection_fill`, `border`), plus the two floating-chrome
+  opacities. Roles are fixed fields, so a theme can never omit one and a
+  consumer can never ask for one that does not exist.
+  `chrome_alpha` (`179`) is how opaque a floating desktop-chrome surface is —
+  the taskbar and the popups it opens, laid over a backdrop the compositor
+  blurs by `chrome_backdrop_blur`. Such a surface keeps whichever colour role
+  it wears when solid and takes this alpha, so a frosted bar is recognisably
+  the same grey a solid one was and what is behind it reads through; anything
+  that reads as *part* of it — a list row, a menu row — takes the same alpha,
+  which is what keeps a resting row exactly its ground rather than a patch on
+  it. `chrome_plate_alpha` (`217`) is the step more solid a control plate
+  *raised* on that surface takes — a button, a text field, a card — so it reads
+  as furniture standing on the glass rather than a hole cut in it. Both are
+  alphas, not colours; `255` draws chrome solid.
   `selection_fill` is the plate a selected item is filled
   with — each theme's own `accent` at three tenths opacity (`#d1550f4d` on dark,
   `#c8500c4d` on light), authored per theme so a theme can tune its weight
@@ -19,7 +31,10 @@ This crate is pure theme *data*. A `Theme` is a table of:
   to tint rather than to cover.
 - `Metrics` — corner radii (window, taskbar, popup) and border thickness,
   the data the window manager's single anti-aliased rounded-corner path
-  consumes, plus `selection_backdrop_blur`, how far the *backdrop* behind a
+  consumes; `taskbar_margin`, how far the bar stands off the three screen edges
+  it faces (`5`), and `chrome_backdrop_blur`, how far the backdrop behind it
+  and its popups is blurred (`7`); plus `selection_backdrop_blur`, how far the
+  *backdrop* behind a
   selected item is blurred, in logical pixels (`6` in both themes). The fill
   itself keeps a crisp edge; the pixels it covers — a window's surface, the
   wallpaper — are frosted through the same filter the compositor frosts a
@@ -79,6 +94,14 @@ This crate is pure theme *data*. A `Theme` is a table of:
   one deliberate break from the tight ladder the other roles keep.
 - `CursorSet` — one cursor asset id per `CursorKind`, referencing assets
   under `/System/Graphics`.
+
+A theme also carries the **ground** its surfaces are drawn on (`SurfaceGround`,
+reported by `Theme::ground`): `Opaque` by default, and `Floating` on the copy
+`Theme::floating()` returns — the theme the taskbar draws its bar and its
+popups with. The ground rides on the theme rather than on each control, so
+everything drawn with one theme agrees and no control can be forgotten and left
+an opaque patch; `lib/controls` is where a background becomes the chrome alpha
+for its layer.
 
 The crate owns no rendering or compositing arithmetic — that lives in the
 shared rasteriser `lib/raster`. A consumer converts a theme `Rgba` into the

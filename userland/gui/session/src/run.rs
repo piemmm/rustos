@@ -103,7 +103,7 @@ mod program {
         WaitStatus, CONSOLE_INHERIT, ORIGIN_WIRE_LEN, SPAWN_UID_INHERIT, WAIT_PID_ANY,
     };
     use tairix_browse::{
-        association_from_appinfo, AppAssociation, DirectorySource, VfsDirectorySource,
+        association_from_appinfo, AppAssociation, DirectorySource, GridView, VfsDirectorySource,
     };
     use tairix_caps::CapabilitySet;
     use tairix_desktop_session::switchuser::{
@@ -141,7 +141,7 @@ mod program {
     use tairix_window::{
         event_endpoint_for, CallerIdentity, EventSink, PinDecision, WindowServer, WINDOW_REPLY_MAX,
     };
-    use tairix_wm::{chrome_cache, frost_cache, Compositor, InputResponse, Rect, Surface};
+    use tairix_wm::{chrome_cache, frost_cache, Compositor, InputResponse, Rect, Region, Surface};
 
     extern crate alloc;
 
@@ -2330,11 +2330,6 @@ mod program {
                     &launched,
                 );
             }
-            // Glue each open popup back onto the window that owns it, so
-            // nothing raised anywhere else this wake can land between a
-            // parent and its menu or sheet. Idle when no popup is open, and
-            // before the lock so the lock still ends up above everything.
-            windows.keep_popups_stacked(&mut compositor);
             // Nothing an application does may surface over a locked
             // screen: whatever opened, raised, or resized behind the lock
             // this wake, the lock goes back on top before the frame is
@@ -2704,7 +2699,7 @@ mod program {
                 // row and the equivalent gesture produce the very same
                 // action; the session merely carries it out.
                 let acted = desktop.command(command, associations, now_ns);
-                let redraw = acted.redraw
+                let whole = acted.relisted
                     | apply_desktop_action(
                         acted.action,
                         pinboard,
@@ -2718,7 +2713,7 @@ mod program {
                     refresh_library(shell, compositor);
                     *associations = desktop_associations(shell);
                 }
-                if redraw {
+                if whole {
                     shell.present_desktop(compositor, desktop);
                 }
             }
@@ -3605,38 +3600,48 @@ mod program {
         associations: &mut alloc::vec::Vec<AppAssociation>,
         now_ns: u64,
     ) {
+        let pointer = shell.router().pointer();
+        let layout = shell.desktop_layout(compositor, desktop);
+        // Every gesture reports the icon cells it changed here, and only
+        // those are repainted: a click that moves focus between a window and
+        // the desktop must cost a focus ring, not a screen.
+        let mut damage = Region::new();
         // The desktop holds the keyboard exactly when no window does, so the
         // focus ring follows the window manager's one notion of focus rather
         // than a second one kept here.
-        let mut redraw = desktop.set_focused(shell.router().focused().is_none());
-        let pointer = shell.router().pointer();
-        let layout = shell.desktop_layout(compositor, desktop);
+        desktop.set_focused(shell.router().focused().is_none(), &layout, &mut damage);
         let acted = match outcome {
             tairix_desktop_session::ShellOutcome::WindowManager(response) => match response {
                 InputResponse::DesktopPointerMoved => {
-                    desktop.pointer_moved(pointer, &layout, now_ns)
+                    desktop.pointer_moved(pointer, &layout, now_ns, &mut damage)
                 }
                 InputResponse::DesktopPressed => {
-                    desktop.press(pointer, &layout, now_ns, associations)
+                    desktop.press(pointer, &layout, now_ns, associations, &mut damage)
                 }
-                InputResponse::DesktopSecondaryPressed => desktop.context_press(pointer, &layout),
+                InputResponse::DesktopSecondaryPressed => {
+                    desktop.context_press(pointer, &layout, &mut damage)
+                }
                 InputResponse::DesktopKey { key, pressed, .. } => {
-                    desktop.key(*key, *pressed, &layout, associations)
+                    desktop.key(*key, *pressed, &layout, associations, &mut damage)
                 }
-                _ => departed(desktop, compositor, pointer),
+                _ => departed(desktop, compositor, pointer, &layout, &mut damage),
             },
-            _ => departed(desktop, compositor, pointer),
+            _ => departed(desktop, compositor, pointer, &layout, &mut damage),
         };
-        redraw |= acted.redraw;
-        redraw |= apply_desktop_action(
-            acted.action,
-            pinboard,
-            desktop,
-            shell,
-            compositor,
-            launched,
-            now_ns,
-        );
+        // A re-list moved the icons themselves, so no cell of the layout the
+        // gesture reported against describes the new column: that, and the
+        // settings and folder edits `apply_desktop_action` performs, are the
+        // changes that genuinely repaint the whole layer.
+        let whole = acted.relisted
+            | apply_desktop_action(
+                acted.action,
+                pinboard,
+                desktop,
+                shell,
+                compositor,
+                launched,
+                now_ns,
+            );
         if acted.relisted {
             // The user's own files demonstrably changed under the desktop, so
             // this is the honest moment to re-read what is installed as well:
@@ -3646,14 +3651,16 @@ mod program {
             refresh_library(shell, compositor);
             *associations = desktop_associations(shell);
         }
-        if redraw {
+        if whole {
             shell.present_desktop(compositor, desktop);
+        } else if !damage.is_empty() {
+            shell.present_desktop_area(compositor, desktop, &damage);
         }
     }
 
     /// Carry out one desktop action, whether a gesture on the icon column
     /// named it or a chosen backdrop-menu row did, and answer whether the
-    /// desktop layer must be repainted.
+    /// whole desktop layer must be repainted.
     ///
     /// The single place every [`DesktopAction`] is honoured, so a
     /// double-click and the equivalent menu row can never disagree about
@@ -3802,9 +3809,11 @@ mod program {
         desktop: &mut Desktop<S>,
         compositor: &Compositor,
         pointer: tairix_wm::Point,
+        layout: &GridView,
+        damage: &mut Region,
     ) -> DesktopOutcome {
         if compositor.window_at(pointer).is_some() {
-            return desktop.pointer_left();
+            return desktop.pointer_left(layout, damage);
         }
         DesktopOutcome::ignored()
     }

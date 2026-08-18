@@ -43,6 +43,7 @@ use tairix_abi::switchboard_ipc::TraySummary;
 use tairix_abi::Errno;
 use tairix_browse::{DirectorySource, GridView};
 use tairix_cursor::{CursorRegistry, CursorSetId, CursorTheme};
+use tairix_geometry::Region;
 use tairix_icon::{
     artwork_cache, ArtworkCache, ArtworkRasteriser, ArtworkReader, IconArtworkSource, IconSet,
 };
@@ -50,8 +51,8 @@ use tairix_log::Sink;
 use tairix_proglib::Catalog;
 use tairix_reclaim::PressureGauge;
 use tairix_taskbar::{
-    icon_cache, ActivateOutcome, PinView, TaskId, TaskbarConfig, TaskbarRenderer, TaskbarResponse,
-    TransientNotification,
+    icon_cache, ActivateOutcome, Edge, PinView, TaskId, TaskbarConfig, TaskbarRenderer,
+    TaskbarResponse, TransientNotification,
 };
 use tairix_wallpaper::Backdrop;
 use tairix_wm::{
@@ -486,8 +487,8 @@ impl DesktopShell {
         Some(window)
     }
 
-    /// Open `surface` as an undecorated window at `origin`, raise it above
-    /// everything, and focus it — *without* listing it on the taskbar.
+    /// Open `surface` as an undecorated window at `origin` belonging to
+    /// `parent`, and focus it — *without* listing it on the taskbar.
     ///
     /// This is how an app-owned popup surface (a context menu, a settings
     /// sheet) is placed. A popup belongs to the window that opened it, so it is
@@ -497,19 +498,22 @@ impl DesktopShell {
     /// deactivates the parent's frame exactly as the session's own trusted
     /// modal surfaces do.
     ///
-    /// Returns the new [`WindowId`]. It cannot fail: no task id is minted, so
-    /// there is no id space to exhaust.
+    /// It is opened as its parent's *transient*
+    /// ([`Compositor::add_transient_window`]), so the window manager stacks
+    /// the pair together from here on and nothing has to re-assert the
+    /// arrangement per frame. Returns `None`, opening nothing, for a parent
+    /// the compositor does not know.
     pub fn open_popup_window(
         &mut self,
         compositor: &mut Compositor,
+        parent: WindowId,
         origin: Point,
         surface: Surface,
-    ) -> WindowId {
-        let window = compositor.add_window(origin, surface);
-        compositor.raise(window);
+    ) -> Option<WindowId> {
+        let window = compositor.add_transient_window(parent, origin, surface)?;
         self.router.focus(window, compositor);
         self.sync_active_frame(compositor);
-        window
+        Some(window)
     }
 
     /// Close the popup window `window` opened by
@@ -672,13 +676,14 @@ impl DesktopShell {
     /// physical pixels at the output's density.
     ///
     /// A maximized window fills this rectangle, not the whole physical display
-    /// (spec §5), so it never covers the taskbar. The bar hugs one full screen
-    /// edge, so the work area is the screen minus that edge band.
+    /// (spec §5), so it never covers the taskbar. The bar occupies a band on
+    /// one screen edge, so the work area is the screen minus that band.
     #[must_use]
     pub fn work_area(&self, compositor: &Compositor) -> Rect {
         let screen = compositor.screen_rect();
-        let bar = self.session.taskbar().layout(compositor.scale()).bar;
-        work_area_excluding(screen, bar)
+        let taskbar = self.session.taskbar();
+        let bar = taskbar.layout(compositor.scale()).bar;
+        work_area_excluding(screen, bar, taskbar.config().edge)
     }
 
     /// Install a loaded notification-icon set on the renderer, replacing the
@@ -792,20 +797,21 @@ impl DesktopShell {
         self.wallpaper = wallpaper;
     }
 
-    /// Repaint the desktop layer — the wallpaper (or the backdrop colour the
-    /// settings name) with the icon column over it — beneath every window.
+    /// Repaint the whole desktop layer — the wallpaper (or the backdrop colour
+    /// the settings name) with the icon column over it — beneath every window.
+    ///
+    /// This is for the changes that genuinely alter the whole layer: bring-up,
+    /// a new wallpaper, a theme switch, a re-list that moved the icons. A
+    /// change confined to some icons goes through
+    /// [`present_desktop_area`](Self::present_desktop_area) instead.
     ///
     /// The layer is repainted in place, into the screen-sized buffer the
-    /// compositor already holds, because a hover, a moved selection, or a
-    /// re-list repaints it often and a whole screen of pixels is not something
-    /// to re-allocate per frame. It is opaque and covers the screen: the
-    /// wallpaper is blitted at the origin, and the backdrop colour is laid down
-    /// first wherever the wallpaper does not reach (which, with no wallpaper at
-    /// all, is everywhere). The icons are then drawn over it, laid out in the
-    /// work area — which excludes the taskbar's band — so nothing is ever drawn
-    /// under the bar. Each icon's artwork is resolved through the same
-    /// seat-wide cache and seams the taskbar draws from, at exactly the slot
-    /// side the tile will paint it in, and an icon the store cannot supply
+    /// compositor already holds, so even a whole-layer repaint costs a paint
+    /// rather than a paint plus a multi-megabyte allocation. Icons are laid out
+    /// in the work area — which excludes the taskbar's band — so nothing is
+    /// ever drawn under the bar. Each icon's artwork is resolved through the
+    /// same seat-wide cache and seams the taskbar draws from, at exactly the
+    /// slot side the tile will paint it in, and an icon the store cannot supply
     /// falls back to its built-in glyph.
     ///
     /// Fails closed: a screen-sized layer the heap will not give back leaves
@@ -814,6 +820,33 @@ impl DesktopShell {
         &mut self,
         compositor: &mut Compositor,
         desktop: &Desktop<S>,
+    ) {
+        let whole = Region::from(compositor.screen_rect());
+        self.present_desktop_area(compositor, desktop, &whole);
+    }
+
+    /// Repaint just the parts of the desktop layer covered by `area`.
+    ///
+    /// This is the ordinary path, and [`present_desktop`](Self::present_desktop)
+    /// is the whole-screen case of it: the desktop's own gestures report the
+    /// icon cells they changed, so taking the hover, moving a selection, or
+    /// gaining and losing the keyboard costs those cells. Repainting the layer
+    /// whole for a highlight would recomposite every window above it and blur
+    /// every frosted backdrop over it again, which is why the model reports
+    /// cells rather than a flag.
+    ///
+    /// Every rectangle is painted the same way, so a partial repaint and a
+    /// whole one cannot disagree about a pixel: the backdrop colour goes down
+    /// first, the wallpaper composites over it, and the icons that reach the
+    /// rectangle draw over that. Laying the colour down under the wallpaper is
+    /// what makes a letterboxed or centred picture show the user's chosen
+    /// backdrop in the margins it does not cover, rather than whatever the
+    /// previous frame happened to leave there.
+    pub fn present_desktop_area<S: DirectorySource>(
+        &mut self,
+        compositor: &mut Compositor,
+        desktop: &Desktop<S>,
+        area: &Region,
     ) {
         let screen = compositor.screen_rect();
         let scale = compositor.scale();
@@ -824,18 +857,24 @@ impl DesktopShell {
         let cache = &mut self.artwork;
         let reader = self.artwork_reader.as_mut();
         let rasteriser = self.artwork_rasteriser.as_mut();
-        compositor.repaint_desktop(|surface| {
-            let covered = wallpaper.is_some_and(|paper| {
-                paper.width() >= screen.width && paper.height() >= screen.height
-            });
-            if !covered {
-                surface.fill_rect(0, 0, screen.width, screen.height, backdrop);
-            }
-            if let Some(paper) = wallpaper {
-                surface.blit(0, 0, paper);
-            }
+        compositor.repaint_desktop(area, |surface, rects| {
             let mut artwork = IconArtworkSource::new(cache, reader, rasteriser);
-            desktop.render(surface, &layout, scale, theme, &mut artwork);
+            for rect in rects {
+                // The layer sits at the screen origin and every rectangle is
+                // clipped to it, so its corner is a surface coordinate; a
+                // rectangle that somehow is not addressable is left alone
+                // rather than painted somewhere else.
+                let (Ok(x), Ok(y)) = (u32::try_from(rect.left()), u32::try_from(rect.top())) else {
+                    continue;
+                };
+                surface.with_clip(x, y, rect.width, rect.height, |surface| {
+                    surface.fill_rect(0, 0, screen.width, screen.height, backdrop);
+                    if let Some(paper) = wallpaper {
+                        surface.blit(0, 0, paper);
+                    }
+                    desktop.render(surface, &layout, scale, theme, &mut artwork, *rect);
+                });
+            }
         });
     }
 
@@ -874,12 +913,14 @@ impl DesktopShell {
         let local = Rect::new(0, 0, bounds.width, bounds.height);
         menu.render(&mut surface, local, scale, theme);
         let corners = Corners::from_radius(scale.scale_length(theme.metrics().popup_corner_radius));
+        // The backdrop's own menu is not the taskbar's floating chrome: it
+        // covers what it opens over, so nothing behind it is frosted.
         self.pinboard_window = Some(place(
             compositor,
             self.pinboard_window,
             bounds.origin,
             surface,
-            corners,
+            (corners, 0),
         ));
     }
 
@@ -1424,29 +1465,51 @@ pub(crate) const fn continues(so_far: i32, next: i32) -> bool {
     so_far == 0 || next == 0 || (so_far < 0) == (next < 0)
 }
 
-/// The screen rectangle with the taskbar's edge band removed.
+/// The screen rectangle with the band the taskbar occupies on `edge` removed.
 ///
-/// The taskbar hugs one full screen edge (top, bottom, left, or right), so the
-/// work area is the screen minus that band. A bar that does not span a full
-/// edge (it never should) leaves the whole screen usable rather than guessing.
-fn work_area_excluding(screen: Rect, bar: Rect) -> Rect {
-    if bar.width >= screen.width && bar.height < screen.height {
-        // A horizontal bar on the top or bottom edge.
-        let height = screen.height.saturating_sub(bar.height);
-        if bar.top() <= screen.top() {
-            Rect::new(screen.left(), bar.bottom(), screen.width, height)
-        } else {
-            Rect::new(screen.left(), screen.top(), screen.width, height)
+/// The band runs from that screen edge to the bar's inner side, so it covers
+/// the bar *and* the wallpaper margin the bar floats above: the gap is behind
+/// the bar from the work area's point of view, and a window given it could
+/// only be reached through the bar.
+///
+/// The bar's own edge is asked for rather than inferred from its rectangle,
+/// because a floating bar spans no screen edge to infer it from. A bar the
+/// screen does not contain leaves the whole screen usable rather than
+/// guessing.
+fn work_area_excluding(screen: Rect, bar: Rect, edge: Edge) -> Rect {
+    let clamp = |value: i32, lo: i32, hi: i32| value.max(lo).min(hi);
+    let span = |from: i32, to: i32| u32::try_from(to.saturating_sub(from)).unwrap_or(0);
+    match edge {
+        Edge::Top => {
+            let top = clamp(bar.bottom(), screen.top(), screen.bottom());
+            Rect::new(screen.left(), top, screen.width, span(top, screen.bottom()))
         }
-    } else if bar.height >= screen.height && bar.width < screen.width {
-        // A vertical bar on the left or right edge.
-        let width = screen.width.saturating_sub(bar.width);
-        if bar.left() <= screen.left() {
-            Rect::new(bar.right(), screen.top(), width, screen.height)
-        } else {
-            Rect::new(screen.left(), screen.top(), width, screen.height)
+        Edge::Bottom => {
+            let bottom = clamp(bar.top(), screen.top(), screen.bottom());
+            Rect::new(
+                screen.left(),
+                screen.top(),
+                screen.width,
+                span(screen.top(), bottom),
+            )
         }
-    } else {
-        screen
+        Edge::Left => {
+            let left = clamp(bar.right(), screen.left(), screen.right());
+            Rect::new(
+                left,
+                screen.top(),
+                span(left, screen.right()),
+                screen.height,
+            )
+        }
+        Edge::Right => {
+            let right = clamp(bar.left(), screen.left(), screen.right());
+            Rect::new(
+                screen.left(),
+                screen.top(),
+                span(screen.left(), right),
+                screen.height,
+            )
+        }
     }
 }

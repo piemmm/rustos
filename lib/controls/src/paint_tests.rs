@@ -16,9 +16,11 @@ use alloc::vec::Vec;
 use tairix_geometry::Point;
 use tairix_input::{InputEvent, PointerButton};
 use tairix_raster::Color;
-use tairix_theme::{Rgba, Theme};
+use tairix_theme::{Appearance, Rgba, Theme};
 
-use crate::paint::{grab_after, resolve_frame, route_pointer, FrameColors};
+use crate::paint::{
+    grab_after, ground_fill, resolve_frame, route_pointer, ChromeLayer, FrameColors,
+};
 use crate::state::{
     AuthorityState, ControlRole, ControlState, FocusState, PlateSeating, PointerState,
     ValidationState,
@@ -256,14 +258,32 @@ fn hover_washes_a_quiet_plate_and_lifts_its_rim_without_colouring_its_label() {
 }
 
 #[test]
-fn focus_lifts_a_quiet_rim_and_is_reported_to_the_renderer() {
+fn focus_keeps_the_quiet_rim_so_its_ring_is_the_only_accent_line() {
     let theme = Theme::dark();
     let palette = theme.palette();
     let mut state = ControlState::idle();
     state.focus.focused = true;
     let frame = resolve_frame(&theme, ControlRole::Neutral, state);
-    assert_eq!(frame.rim, rgb(palette.rim_active));
+    assert_eq!(
+        frame.rim,
+        rgb(palette.rim),
+        "an accent rim outside the accent ring is a doubled border"
+    );
     assert!(frame.focused);
+
+    // The pointer arriving on a focused control must not put the second line
+    // back: the wash reports the pointer instead.
+    for pointer in [PointerState::Hover, PointerState::Pressed] {
+        let mut on_it = state;
+        on_it.pointer = pointer;
+        let frame = resolve_frame(&theme, ControlRole::Neutral, on_it);
+        assert_eq!(frame.rim, rgb(palette.rim), "{pointer:?} lifted the rim");
+        assert_ne!(
+            frame.plate,
+            rgb(palette.surface_raised),
+            "{pointer:?} is then stated nowhere at all"
+        );
+    }
 }
 
 #[test]
@@ -304,8 +324,13 @@ fn focus_wins_over_field_membership_on_the_same_control() {
     let frame = resolve_frame(&theme, ControlRole::Neutral, state);
     assert_eq!(
         frame.rim,
-        rgb(palette.rim_active),
-        "the focused member takes the full active rim, not the partial lift"
+        rgb(palette.rim),
+        "the focused member states focus with its ring, not with a lifted edge"
+    );
+    assert_ne!(
+        frame.rim,
+        resolve_frame(&theme, ControlRole::Neutral, field_member()).rim,
+        "and so cannot be mistaken for a mere member of the field"
     );
     assert!(frame.focused);
 }
@@ -699,4 +724,105 @@ fn a_press_grabs_the_child_under_the_pointer_and_its_release_lets_go() {
     assert_eq!(grab_after(None, &press, Some(3)), Some(3));
     assert_eq!(grab_after(Some(3), &moved, Some(1)), Some(3));
     assert_eq!(grab_after(Some(3), &release, Some(1)), None);
+}
+
+// --- Floating desktop chrome -------------------------------------------
+
+#[test]
+fn a_background_on_floating_chrome_keeps_its_colour_and_takes_the_layers_alpha() {
+    for theme in [Theme::dark(), Theme::light()] {
+        let p = *theme.palette();
+        let chrome = theme.clone().floating();
+        for fill in [
+            p.surface,
+            p.surface_raised,
+            p.surface_hover,
+            p.surface_pressed,
+        ] {
+            for (layer, alpha) in [
+                (ChromeLayer::Ground, p.chrome_alpha),
+                (ChromeLayer::Plate, p.chrome_plate_alpha),
+            ] {
+                let laid = ground_fill(&chrome, fill, layer);
+                assert_eq!(
+                    (laid.r, laid.g, laid.b),
+                    (fill.r, fill.g, fill.b),
+                    "{}: {layer:?} retinted the theme's own colour",
+                    theme.name()
+                );
+                assert_eq!(laid.a, alpha, "{}: {layer:?}", theme.name());
+                assert_eq!(
+                    ground_fill(&theme, fill, layer),
+                    fill,
+                    "{}: an ordinary surface let the desktop through",
+                    theme.name()
+                );
+            }
+        }
+        assert!(
+            p.chrome_alpha < p.chrome_plate_alpha,
+            "{}: a plate no more solid than its ground is a hole in the glass",
+            theme.name()
+        );
+    }
+}
+
+/// A quiet plate is a *background* and goes see-through on floating chrome; a
+/// role fill is the statement itself and must not, or a primary action would
+/// be diluted by whatever wallpaper happened to be behind it.
+#[test]
+fn a_role_fill_stays_solid_on_floating_chrome_but_a_quiet_plate_does_not() {
+    for theme in [Theme::dark(), Theme::light()] {
+        let chrome = theme.clone().floating();
+        let resting = pointer(PointerState::None);
+
+        let quiet = resolve_frame(&chrome, ControlRole::Neutral, resting);
+        assert_eq!(
+            quiet.plate,
+            rgb(theme
+                .palette()
+                .surface_raised
+                .with_alpha(theme.palette().chrome_plate_alpha)),
+            "{}: a quiet plate covered the backdrop",
+            theme.name()
+        );
+        assert_eq!(
+            quiet.rim,
+            resolve_frame(&theme, ControlRole::Neutral, resting).rim,
+            "{}: the rim is the plate's edge, drawn to be seen",
+            theme.name()
+        );
+
+        for role in [ControlRole::Primary, ControlRole::Recovery] {
+            assert_eq!(
+                resolve_frame(&chrome, role, resting).plate,
+                resolve_frame(&theme, role, resting).plate,
+                "{}: {role:?} diluted its own statement",
+                theme.name()
+            );
+        }
+    }
+}
+
+/// The pointer wash is the whole of the feedback for a control that wears no
+/// perimeter — a taskbar icon — so on chrome it must still part company with
+/// the surface under it, in whichever direction the appearance requires.
+#[test]
+fn the_pointer_wash_on_floating_chrome_reads_against_the_ground_on_both_themes() {
+    for theme in [Theme::dark(), Theme::light()] {
+        let p = *theme.palette();
+        let chrome = theme.clone().floating();
+        let wash = ground_fill(&chrome, p.surface_hover, ChromeLayer::Plate);
+        let ground = ground_fill(&chrome, p.surface_raised, ChromeLayer::Ground);
+        assert!(wash.a < 255, "{}: the wash covers", theme.name());
+
+        let weight = |c: Rgba| u32::from(c.r) + u32::from(c.g) + u32::from(c.b);
+        let lighter = weight(wash) > weight(ground);
+        assert_eq!(
+            lighter,
+            theme.appearance() == Appearance::Dark,
+            "{}: the wash moves the wrong way for this appearance",
+            theme.name()
+        );
+    }
 }

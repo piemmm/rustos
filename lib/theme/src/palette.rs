@@ -23,6 +23,25 @@ pub struct Palette {
     /// A raised/alternate fill (the taskbar, menus, headers) that must
     /// read as distinct from [`surface`](Self::surface).
     pub surface_raised: Rgba,
+    /// How opaque a *floating desktop-chrome* surface is — the taskbar and
+    /// the popups it puts on screen, laid over a backdrop blurred by
+    /// [`Metrics::chrome_backdrop_blur`](crate::Metrics::chrome_backdrop_blur).
+    ///
+    /// The surface keeps whichever colour role it would wear solid and takes
+    /// this alpha instead, so a frosted bar is recognisably the same grey as a
+    /// solid one and the wallpaper behind it reads through as a wash. Anything
+    /// that reads as *part* of that surface — a list row, a menu row — takes
+    /// it too, which is what keeps a resting row exactly its ground.
+    ///
+    /// `255` draws chrome solid.
+    pub chrome_alpha: u8,
+    /// How opaque a control *plate* raised on floating chrome is — a button,
+    /// a text field, a card.
+    ///
+    /// A step more solid than [`chrome_alpha`](Self::chrome_alpha), so a
+    /// control reads as furniture standing on the glass rather than a hole cut
+    /// in it, while the backdrop still shows through.
+    pub chrome_plate_alpha: u8,
     /// Primary foreground (text, icons) drawn on
     /// [`surface`](Self::surface) and
     /// [`surface_raised`](Self::surface_raised).

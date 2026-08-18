@@ -1,7 +1,7 @@
 //! Windows: a placed surface with compositing attributes.
 
 use tairix_controls::{
-    FrameInsets, TitleBarEvent, WindowActivationState, WindowFrame, WindowSizeState,
+    FrameInsets, FrameRim, TitleBarEvent, WindowActivationState, WindowFrame, WindowSizeState,
 };
 use tairix_icon::IconKind;
 use tairix_input::{InputEvent, Key};
@@ -9,10 +9,10 @@ use tairix_reclaim::CachedBytes;
 use tairix_theme::{CursorKind, Theme};
 
 use crate::chrome::WindowChrome;
-use crate::color::{div255, Pixel};
+use crate::color::{div255, DitherRow, Pixel};
 use crate::corner::Corners;
 use crate::geometry::{Point, Rect, Region, Scale};
-use crate::surface::{self, Surface};
+use crate::surface::{self, blend_run, Surface};
 use crate::viewport::RootViewport;
 
 /// An opaque, compositor-minted window identifier.
@@ -71,6 +71,10 @@ pub struct Window {
     viewport: Option<RootViewport>,
     frame: Option<WindowFrame>,
     band: Option<FrameInsets>,
+    /// The frame's own rim at the active scale and theme, resolved with
+    /// `band`: the shape the window is cut to, and the plate its client is
+    /// clipped to. `None` for an undecorated window.
+    rim: Option<FrameRim>,
     /// The owning application's identity artwork, rasterised at the title
     /// bar's slot side for the active scale. One small square per decorated
     /// window, re-derivable from the owner's bundle at any time, so it is
@@ -90,6 +94,14 @@ pub struct Window {
     /// to present them again. Off until the embedder says otherwise, so a
     /// window nobody can repaint is never released.
     app_presented: bool,
+    /// The window this one is a *transient* of — the surface it belongs to
+    /// and is stacked immediately above (a menu's or a sheet's owner) — or
+    /// `None` for a top-level window that stands on its own.
+    ///
+    /// Stacking reads it: a restack moves an owner and its transients
+    /// together, which is what keeps a menu on its own window and stops
+    /// anything landing between the two.
+    parent: Option<WindowId>,
     /// The smallest client extent the owning application declared it can lay
     /// out at, in physical pixels; `(0, 0)` for an application that declared
     /// none and is content at any size.
@@ -123,10 +135,12 @@ impl Window {
             viewport: None,
             frame: None,
             band: None,
+            rim: None,
             identity_artwork: None,
             size_state: WindowSizeState::Restored,
             restore_outer: None,
             app_presented: false,
+            parent: None,
             min_client: (0, 0),
         }
     }
@@ -143,10 +157,47 @@ impl Window {
         self.origin
     }
 
+    /// The window this one is a transient of, or `None` when it stands on
+    /// its own.
+    #[must_use]
+    pub const fn parent(&self) -> Option<WindowId> {
+        self.parent
+    }
+
+    /// Make this window a transient of `parent`, or a top-level window again
+    /// when `parent` is `None`.
+    ///
+    /// Only the compositor calls this, and only where it restacks the family
+    /// in the same breath: the link and the stacking it implies are
+    /// established together, so no frame can see one without the other.
+    pub(crate) fn set_parent(&mut self, parent: Option<WindowId>) {
+        self.parent = parent;
+    }
+
     /// Per-window opacity (`255` opaque).
     #[must_use]
     pub const fn opacity(&self) -> u8 {
         self.opacity
+    }
+
+    /// Whether this window's own pixels leave what is composed beneath its
+    /// rectangle showing through it as a *field*, so the compositor is worth
+    /// retaining that backdrop for.
+    ///
+    /// Two things do it: a backdrop blur, which reads the backdrop to blur it,
+    /// and a whole-window opacity below full, which admits it everywhere. Both
+    /// make every frame that touches the window recompose the entire stack
+    /// beneath it, which is what retaining pays for.
+    ///
+    /// Deliberately *not* here: an antialiased corner, whose backdrop is a few
+    /// pixels of arc, and a client that paints alpha into its own content,
+    /// which cannot be known without reading every pixel of it. Both still
+    /// composite correctly — they simply blend the layers below rather than
+    /// copying a retained picture of them, which is what a window that reads
+    /// only a sliver of its backdrop should do.
+    #[must_use]
+    pub const fn reads_backdrop(&self) -> bool {
+        self.blur_radius > 0 || self.opacity < u8::MAX
     }
 
     /// Backdrop-blur radius in *logical* pixels (`0` for no blur): how far
@@ -462,41 +513,48 @@ impl Window {
             client_x: self.origin.x.saturating_add_unsigned(inset_x),
             client_cols,
             opacity: self.opacity,
-            rounding: self.row_rounding(ly),
+            cut: content_row.and_then(|sy| self.row_cut(sy)),
         })
     }
 
     /// This window's decoration spans for outer-local row `ly` (`0` at the
-    /// outer top edge): the top strip's row while `ly` is in the title band,
+    /// outer top edge): the top strip's row while `ly` is in the top band,
     /// the bottom strip's row while it is in the bottom band, or — for a row
-    /// that crosses the client's own vertical range — the left strip's row
-    /// at the outer left edge together with the right strip's row at the
-    /// client's right edge. Both spans are empty for an undecorated window,
-    /// and a row is never in more than one of these cases, so at most one
-    /// side of the pair is ever non-empty outside the middle case.
+    /// between them — the left strip's row at the outer left edge together
+    /// with the right strip's row at the client's right edge. Both spans are
+    /// empty for an undecorated window, and a row is never in more than one of
+    /// these cases, so at most one side of the pair is ever non-empty outside
+    /// the middle case.
+    ///
+    /// The bands are the ones [`local_furniture_bands`](Self::local_furniture_bands)
+    /// rendered, so a corner arc's rows take the full-width top or bottom strip
+    /// even where the client also has pixels on them: what is drawn there is
+    /// the rim's curve, and the client is clipped out of it
+    /// ([`client_cut`](Self::client_cut)).
     fn decoration_spans<'a>(
         &'a self,
         ly: u32,
         chrome: Option<&'a WindowChrome>,
     ) -> [DecorationSpan<'a>; 2] {
-        let (Some(insets), Some(chrome)) = (self.band, chrome) else {
+        let (Some(chrome), Some(_)) = (chrome, self.band) else {
             return [DecorationSpan::EMPTY; 2];
         };
-        if ly < insets.top {
+        let (top_depth, bottom_depth) = self.corner_depths();
+        if ly < top_depth {
             return [
                 DecorationSpan::new(chrome.top_row(ly), self.origin.x),
                 DecorationSpan::EMPTY,
             ];
         }
         let (_, oh) = self.outer_size();
-        let bottom_start = oh.saturating_sub(insets.bottom);
+        let bottom_start = oh.saturating_sub(bottom_depth);
         if ly >= bottom_start {
             return [
                 DecorationSpan::new(chrome.bottom_row(ly - bottom_start), self.origin.x),
                 DecorationSpan::EMPTY,
             ];
         }
-        let side_row = ly - insets.top;
+        let side_row = ly - top_depth;
         let right_x = self.client_rect().right();
         [
             DecorationSpan::new(chrome.left_row(side_row), self.origin.x),
@@ -534,35 +592,82 @@ impl Window {
         (client.width, client.height)
     }
 
-    /// The rounded shape this window's rectangle is cut to, or `None` where
-    /// every pixel of it is fully covered. A decorated window's rounding
-    /// belongs to the frame rim and is baked into the decoration as partial
-    /// alpha, so its rectangular client rounds nothing.
+    /// The rounded shape this window's outer rectangle is cut to, or `None`
+    /// where every pixel of it is fully covered.
     ///
-    /// This is the single definition of the window's *shape*: both the
-    /// window's own pixels ([`Self::row`]) and any effect confined to the
-    /// window's rectangle (the compositor's frosted backdrop) weight
-    /// themselves by it, so they can never disagree about where the
-    /// window's edge is. A rounded window is undecorated, so the extent the
-    /// shape is measured against is equally its outer [`bounds`](Self::bounds).
+    /// A decorated window takes its frame's rim radius and an undecorated one
+    /// its own corner selection; either way the extent is its outer
+    /// [`bounds`](Self::bounds), so a caller weights by it in window-local
+    /// coordinates without knowing which kind it holds.
+    ///
+    /// This is the single definition of the window's *silhouette*: the
+    /// decoration bakes it into its own pixels as partial alpha, and any
+    /// effect confined to the window's rectangle (the compositor's frosted
+    /// backdrop) weights itself by it, so a frosted corner cannot square off
+    /// what the rim curves around.
     pub(crate) fn shape(&self) -> Option<WindowShape> {
-        match (self.band, self.corners) {
-            (None, corners @ Corners::Rounded { .. }) => Some(WindowShape {
+        let (ow, oh) = self.outer_size();
+        let corners = match self.rim {
+            Some(rim) => Corners::from_radius(rim.radius),
+            None => self.corners,
+        };
+        match corners {
+            Corners::Rounded { .. } => Some(WindowShape {
                 corners,
-                width: self.client_size.0,
-                height: self.client_size.1,
+                width: ow,
+                height: oh,
             }),
-            _ => None,
+            Corners::Square => None,
         }
     }
 
-    /// Row `ly` of this window's [`shape`](Self::shape), resolved once for a
-    /// whole row so a column costs a coverage lookup rather than a fresh
-    /// shape decision.
-    pub(crate) fn row_rounding(&self, ly: u32) -> Option<RowRounding> {
-        Some(RowRounding {
-            shape: self.shape()?,
+    /// The shape this window's *client* pixels are clipped to, or `None` where
+    /// none of them is clipped.
+    ///
+    /// An undecorated window's client is the window, so the shape is its own
+    /// [`silhouette`](Self::shape) and its coverage anti-aliases the edge the
+    /// client itself presents. A decorated window's client is clipped to the
+    /// *plate* the frame fills inside its rim: content that reached the rim
+    /// would draw over the very curve the rim traces, and content past it
+    /// would square off the window's corner altogether.
+    fn client_cut(&self) -> Option<ClientCut> {
+        let shape = self.shape()?;
+        let Some(rim) = self.rim else {
+            return Some(ClientCut {
+                shape,
+                offset: (0, 0),
+            });
+        };
+        let (inset, radius) = rim.plate();
+        let (ow, oh) = self.outer_size();
+        let insets = self.band?;
+        Some(ClientCut {
+            shape: WindowShape {
+                corners: Corners::from_radius(radius),
+                width: ow.saturating_sub(inset.saturating_mul(2)),
+                height: oh.saturating_sub(inset.saturating_mul(2)),
+            },
+            offset: (
+                insets.left.saturating_sub(inset),
+                insets.top.saturating_sub(inset),
+            ),
+        })
+    }
+
+    /// The [`client_cut`](Self::client_cut) across content row `sy`, or `None`
+    /// where every client pixel of that row is fully inside it.
+    ///
+    /// Resolved once for a whole row, so a column costs a coverage lookup
+    /// rather than a fresh shape decision — and a row no arc reaches keeps the
+    /// unclipped path, which is what lets an opaque run be copied
+    /// ([`WindowRow::opaque_run`]) everywhere but the corners.
+    fn row_cut(&self, sy: u32) -> Option<RowCut> {
+        let cut = self.client_cut()?;
+        let (lx0, ly) = (cut.offset.0, sy.saturating_add(cut.offset.1));
+        cut.shape.clips_row(ly).then_some(RowCut {
+            shape: cut.shape,
             ly,
+            lx0,
         })
     }
 
@@ -577,6 +682,10 @@ impl Window {
     /// (`Compositor::present_accelerated`) uses to bake a window into a
     /// premultiplied layer. `chrome` is this window's rendered furniture,
     /// resolved by the caller exactly as for [`Self::row`].
+    ///
+    /// The ordered dither is read at the pixel's **screen** position, not the
+    /// layer's, so a window baked into a layer holds exactly the pixels the
+    /// software composite would have written at the same place.
     pub(crate) fn sample_local(
         &self,
         lx: u32,
@@ -585,7 +694,8 @@ impl Window {
     ) -> Option<Pixel> {
         let x = self.origin.x.checked_add(i32::try_from(lx).ok()?)?;
         let y = self.origin.y.checked_add(i32::try_from(ly).ok()?)?;
-        self.row(y, chrome)?.sample(x)
+        self.row(y, chrome)?
+            .sample(x, DitherRow::at(y.cast_unsigned()).bias(x.cast_unsigned()))
     }
 
     /// Move the window to `origin`, returning whether it actually changed
@@ -677,6 +787,7 @@ impl Window {
     /// runtime DPI or theme change re-sizes the reserved band.
     pub(crate) fn refresh_band(&mut self, scale: Scale, theme: &Theme) {
         self.band = self.frame.as_ref().map(|f| f.insets(scale, theme));
+        self.rim = self.frame.as_ref().map(|f| f.rim(scale, theme));
     }
 
     /// Set the decorated window's activation, so the frame rim, title, and
@@ -941,23 +1052,55 @@ impl Window {
     /// window's origin, and [`render_chrome`](Self::render_chrome) paints
     /// directly in this local space, so the four rectangles are derived
     /// once rather than separately in each caller.
+    ///
+    /// The top and bottom strips reach at least the rim's corner radius, even
+    /// where the reserved inset is thinner: a corner arc's rows must be drawn
+    /// as *furniture* over their whole width, or the client's square row would
+    /// be the only pixels there and the curve the rim traces could not be seen
+    /// at all. The side strips take only the rows between them, so no strip
+    /// retains a pixel another already holds.
     fn local_furniture_bands(&self) -> [Rect; 4] {
         let Some(insets) = self.band else {
             return [Rect::EMPTY; 4];
         };
         let (ow, oh) = self.outer_size();
         let outer = Rect::new(0, 0, ow, oh);
-        let client = Rect::new(
-            i32::try_from(insets.left).unwrap_or(i32::MAX),
-            i32::try_from(insets.top).unwrap_or(i32::MAX),
-            self.client_size.0,
-            self.client_size.1,
+        let (top_depth, bottom_depth) = self.corner_depths();
+        let middle = oh.saturating_sub(top_depth).saturating_sub(bottom_depth);
+        let side_top = outer.top().saturating_add_unsigned(top_depth);
+        let top = Rect::new(outer.left(), outer.top(), outer.width, top_depth);
+        let bottom = Rect::new(
+            outer.left(),
+            outer.bottom().saturating_sub_unsigned(bottom_depth),
+            outer.width,
+            bottom_depth,
         );
-        let top = Rect::new(outer.left(), outer.top(), outer.width, insets.top);
-        let bottom = Rect::new(outer.left(), client.bottom(), outer.width, insets.bottom);
-        let left = Rect::new(outer.left(), client.top(), insets.left, client.height);
-        let right = Rect::new(client.right(), client.top(), insets.right, client.height);
+        let left = Rect::new(outer.left(), side_top, insets.left, middle);
+        let right = Rect::new(
+            outer.right().saturating_sub_unsigned(insets.right),
+            side_top,
+            insets.right,
+            middle,
+        );
         [top, bottom, left, right]
+    }
+
+    /// How deep the top and bottom furniture strips are: the reserved inset,
+    /// grown to the rim's corner radius where the arc reaches further in than
+    /// the inset does, and never past the rows the window has.
+    ///
+    /// [`decoration_spans`](Self::decoration_spans) maps rows to strips by
+    /// exactly these depths, so the pixels rendered and the pixels sampled
+    /// cannot disagree.
+    fn corner_depths(&self) -> (u32, u32) {
+        let Some(insets) = self.band else {
+            return (0, 0);
+        };
+        let (_, oh) = self.outer_size();
+        let arc = self.rim.map_or(0, |rim| rim.radius);
+        let top = insets.top.max(arc).min(oh);
+        let bottom = insets.bottom.max(arc).min(oh.saturating_sub(top));
+        (top, bottom)
     }
 
     /// The reserved furniture bands in screen coordinates — the top (title),
@@ -1035,34 +1178,163 @@ pub(crate) struct WindowRow<'a> {
     client_cols: u32,
     /// Alpha applied to every pixel this row draws.
     opacity: u8,
-    /// Rounded-corner coverage across the row, or `None` where every
-    /// column is fully covered.
-    rounding: Option<RowRounding>,
+    /// The clip the client's own pixels meet on this row, or `None` where
+    /// every one of them is fully inside it.
+    cut: Option<RowCut>,
 }
 
 impl WindowRow<'_> {
     /// The composited contribution at screen column `x`: the source pixel
-    /// scaled by the combined opacity and rounded-corner coverage, or
-    /// `None` where this window draws nothing there.
+    /// scaled by the combined opacity and clip coverage, or `None` where this
+    /// window draws nothing there.
+    ///
+    /// A client pixel the clip does not fully cover gives way to the
+    /// decoration, because on such a column the frame's own arc — its rim and
+    /// the plate inside it — is what the window's curve is made of. Only where
+    /// there is no decoration to give way to does the coverage anti-alias the
+    /// client's own edge, which is how a plain rounded window (a popup, the
+    /// taskbar) presents its corners.
+    ///
+    /// `bias` is this pixel's share of the composite's ordered dither, taken
+    /// here as well as in the blend because scaling by an opacity is the same
+    /// loss of tonal resolution: a translucent window's own gradients would
+    /// otherwise step before they ever reached the backdrop.
     #[must_use]
-    pub(crate) fn sample(&self, x: i32) -> Option<Pixel> {
+    pub(crate) fn sample(&self, x: i32, bias: u32) -> Option<Pixel> {
         if let Some(lx) = x
             .checked_sub(self.client_x)
             .and_then(|d| u32::try_from(d).ok())
         {
             if lx < self.client_cols {
+                let coverage = self.cut.map_or(u8::MAX, |cut| cut.coverage(lx));
+                if coverage == u8::MAX {
+                    return Some(
+                        self.content
+                            .get(lx as usize)?
+                            .scale_alpha_biased(self.opacity, bias),
+                    );
+                }
+                if let Some(pixel) = self.decoration_sample(x) {
+                    return Some(pixel.scale_alpha_biased(self.opacity, bias));
+                }
                 let pixel = *self.content.get(lx as usize)?;
-                let alpha = match self.rounding {
-                    Some(rounding) => combine(self.opacity, rounding.coverage(lx)),
-                    None => self.opacity,
-                };
-                return Some(pixel.scale_alpha(alpha));
+                return Some(pixel.scale_alpha_biased(combine(self.opacity, coverage), bias));
             }
         }
-        if let Some(pixel) = self.decoration[0].sample(x) {
-            return Some(pixel.scale_alpha(self.opacity));
+        Some(
+            self.decoration_sample(x)?
+                .scale_alpha_biased(self.opacity, bias),
+        )
+    }
+
+    /// The decoration pixel at screen column `x`, from whichever of the row's
+    /// two furniture spans holds it.
+    fn decoration_sample(&self, x: i32) -> Option<Pixel> {
+        self.decoration[0]
+            .sample(x)
+            .or_else(|| self.decoration[1].sample(x))
+    }
+
+    /// Blend this row's contribution over `dst`, whose first pixel is screen
+    /// column `first_x`, and report how many columns it contributed to — the
+    /// blend count the frame counters read, which counts a contribution
+    /// whatever its alpha, exactly as sampling column by column did.
+    ///
+    /// Outside its rounded corners a window's contribution to a row is three
+    /// straight runs — the two furniture strips and the client's own drawable
+    /// pixels — laid at a single opacity, so the row is composited a *run* at
+    /// a time through the shared span blend rather than a column at a time
+    /// through [`sample`](Self::sample). The arithmetic is the same operator
+    /// at the same rounding; what goes is the per-column layer decision, which
+    /// is what the composite was actually spending its time on.
+    ///
+    /// Two rows keep the column-by-column path, because on them the three runs
+    /// are not the whole truth: a row the shape cuts, where coverage varies
+    /// across the arc and the frame's own rim takes precedence over the client
+    /// beneath it, and the row of a window whose furniture somehow reaches
+    /// into its client columns, where that same precedence decides. The second
+    /// cannot arise from the furniture bands this window manager lays out — a
+    /// strip that overlaps the client is a corner row, and those are cut — so
+    /// it is a guard against a layout that has changed rather than a case in
+    /// use, and it fails onto the slower path rather than into the wrong
+    /// pixels.
+    pub(crate) fn blend_into(&self, dst: &mut [Pixel], first_x: i32, dither: DitherRow) -> u64 {
+        if self.cut.is_some() || self.decoration.iter().any(|s| self.overlaps_client(s)) {
+            let mut blended = 0;
+            for (dst, x) in dst.iter_mut().zip(first_x..) {
+                let bias = dither.bias(x.cast_unsigned());
+                if let Some(src) = self.sample(x, bias) {
+                    *dst = src.over_biased(*dst, bias);
+                    blended += 1;
+                }
+            }
+            return blended;
         }
-        Some(self.decoration[1].sample(x)?.scale_alpha(self.opacity))
+        let mut blended = blend_run(
+            dst,
+            first_x,
+            self.drawable(),
+            self.client_x,
+            self.opacity,
+            dither,
+        );
+        for span in &self.decoration {
+            blended += blend_run(dst, first_x, span.pixels, span.x, self.opacity, dither);
+        }
+        blended
+    }
+
+    /// The client pixels this row actually draws: the content row, never
+    /// longer than the columns the client owns, so a gutter-clipped tail draws
+    /// nothing rather than spilling past the gutter.
+    fn drawable(&self) -> &[Pixel] {
+        let cols = usize::try_from(self.client_cols).unwrap_or(usize::MAX);
+        self.content
+            .get(..cols.min(self.content.len()))
+            .unwrap_or(&[])
+    }
+
+    /// Whether `span` reaches any column the client owns, where
+    /// [`sample`](Self::sample) decides between the two by coverage rather
+    /// than by position.
+    fn overlaps_client(&self, span: &DecorationSpan<'_>) -> bool {
+        let Ok(len) = i64::try_from(span.pixels.len()) else {
+            return true;
+        };
+        if len == 0 || self.client_cols == 0 {
+            return false;
+        }
+        let client = i64::from(self.client_x);
+        i64::from(span.x) < client + i64::from(self.client_cols) && i64::from(span.x) + len > client
+    }
+
+    /// How many columns from screen column `x` towards `limit` cannot begin an
+    /// [`opaque_run`](Self::opaque_run), so a caller that has just been
+    /// refused one knows how far to compose before asking again.
+    ///
+    /// Always at least one column, so a caller stepping by it makes progress
+    /// whatever it was refused for.
+    #[must_use]
+    pub(crate) fn blend_len(&self, x: i32, limit: i32) -> usize {
+        let all = usize::try_from(i64::from(limit) - i64::from(x)).unwrap_or(0);
+        if self.opacity != u8::MAX || self.cut.is_some() {
+            return all;
+        }
+        let Ok(lx) = usize::try_from(i64::from(x) - i64::from(self.client_x)) else {
+            // Before the client's own pixels, where no run can start.
+            return usize::try_from(i64::from(self.client_x) - i64::from(x))
+                .unwrap_or(all)
+                .clamp(1, all.max(1));
+        };
+        // Past the client's own pixels — the furniture beyond the gutter, or a
+        // short content buffer — nothing further along the row can begin one.
+        let Some(span) = self.drawable().get(lx..).filter(|s| !s.is_empty()) else {
+            return all;
+        };
+        span.iter()
+            .take_while(|pixel| pixel.a != u8::MAX)
+            .count()
+            .clamp(1, all.max(1))
     }
 
     /// The longest run of source pixels this row contributes from screen
@@ -1072,13 +1344,13 @@ impl WindowRow<'_> {
     /// A caller may copy such a run and skip every layer below it without
     /// changing one byte of the result, because *over* with a fully opaque
     /// source is the source. Three things must hold, and they are the only
-    /// three: full window opacity and no rounded-corner coverage on the row
-    /// (either would scale the pixel), and a source alpha of 255. Only the
-    /// client's own pixels qualify — furniture is left to the general blend,
-    /// which keeps this a loop specialisation rather than a second blend.
+    /// three: full window opacity and no clip on the row (either would scale
+    /// or drop the pixel), and a source alpha of 255. Only the client's own
+    /// pixels qualify — furniture is left to the general blend, which keeps
+    /// this a loop specialisation rather than a second blend.
     #[must_use]
     pub(crate) fn opaque_run(&self, x: i32, limit: i32) -> Option<&[Pixel]> {
-        if self.opacity != u8::MAX || self.rounding.is_some() {
+        if self.opacity != u8::MAX || self.cut.is_some() {
             return None;
         }
         let start = usize::try_from(x.checked_sub(self.client_x)?).ok()?;
@@ -1141,19 +1413,48 @@ impl WindowShape {
     pub(crate) fn coverage(self, lx: u32, ly: u32) -> u8 {
         self.corners.coverage(lx, ly, self.width, self.height)
     }
+
+    /// How far in from its own edges this shape can weight a pixel by less than
+    /// full coverage: the radius it actually rounds by, clamped as the shared
+    /// rounded-rectangle definition clamps it. A pixel at least this far inside
+    /// every edge is fully covered, whatever the corner style.
+    pub(crate) fn corner_reach(self) -> u32 {
+        self.corners.radius(self.width, self.height)
+    }
+
+    /// Whether row `ly` carries an arc at all: `false` where the shape covers
+    /// every column of it.
+    fn clips_row(self, ly: u32) -> bool {
+        self.corners.clips_row(ly, self.width, self.height)
+    }
 }
 
-/// The rounded-corner coverage a plain window applies across one row.
+/// The shape a window's client pixels are clipped to, and where the client
+/// sits inside it: `offset` is the client's top-left in the shape's own
+/// coordinates, which is the rim thickness in from the outer rectangle for a
+/// decorated window and nothing at all for a plain one.
 #[derive(Copy, Clone)]
-pub(crate) struct RowRounding {
+struct ClientCut {
     shape: WindowShape,
-    ly: u32,
+    offset: (u32, u32),
 }
 
-impl RowRounding {
-    /// Coverage in `0..=255` for content column `lx` of this row.
+/// One content row of a window's [`ClientCut`], addressed in client columns:
+/// both `ly` and `lx0` are already in the shape's own coordinates, so a column
+/// costs one addition and one coverage lookup.
+#[derive(Copy, Clone)]
+pub(crate) struct RowCut {
+    shape: WindowShape,
+    /// This row in the shape's own coordinates.
+    ly: u32,
+    /// The shape column the client's first pixel sits at.
+    lx0: u32,
+}
+
+impl RowCut {
+    /// Coverage in `0..=255` for client column `lx` of this row.
     pub(crate) fn coverage(self, lx: u32) -> u8 {
-        self.shape.coverage(lx, self.ly)
+        self.shape.coverage(lx.saturating_add(self.lx0), self.ly)
     }
 }
 

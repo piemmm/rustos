@@ -33,15 +33,16 @@ use tairix_geometry::{Point, Rect, Region, Scale};
 use tairix_icon::IconKind;
 use tairix_input::{InputEvent, Key, NamedKey, PointerButton};
 use tairix_raster::{div255, round_rect_coverage, BlurScratch, Color, Surface};
-use tairix_theme::{Rgba, TextRole, Theme};
+use tairix_theme::{Rgba, SurfaceGround, TextRole, Theme};
 
 use crate::button::{Button, ButtonAction};
 use crate::damage;
 use crate::paint::{
-    dominant_color, draw_outline, foreground, grab_after, heavy_contrast, icon_slot_side, inset,
-    key_activation, paint_bead, paint_chevron, paint_count_badge, paint_icon_slot, plate_border,
-    pointer_activation, press_latch, rail_thickness, resolve_bead, resolve_rail, role_font,
-    route_pointer, seam_thickness, seam_width, surface_rect, to_i32, ChevronDir, FULL_COLOUR,
+    dominant_color, draw_outline, foreground, grab_after, ground_fill, heavy_contrast,
+    icon_slot_side, inset, key_activation, paint_bead, paint_chevron, paint_count_badge,
+    paint_icon_slot, paint_surface_plate, plate_border, pointer_activation, press_latch,
+    rail_thickness, resolve_bead, resolve_rail, role_font, route_pointer, seam_thickness,
+    seam_width, surface_rect, to_i32, ChevronDir, ChromeLayer, FULL_COLOUR,
 };
 use crate::state::{
     ControlDisposition, ControlRole, ControlState, FocusState, PointerState, RenderInvariant,
@@ -159,12 +160,22 @@ fn paint_row(
     // raised surface (and is further distinguished by its accent rail below); a
     // hovered row takes the shared pointer wash, so the pointer never imitates
     // selection; a resting row is the base surface.
-    let fill = match state.pointer {
-        crate::state::PointerState::Pressed => palette.surface_pressed,
-        _ if selected => palette.surface_raised,
-        crate::state::PointerState::Hover => palette.surface_hover,
-        _ => palette.surface,
-    };
+    //
+    // A row is part of the surface it sits in rather than a plate on it, so on
+    // floating chrome all four take the ground's own alpha: a resting row is
+    // then exactly its ground, and the pointer wash reads as the glass
+    // lightening (or, on a light theme, deepening) rather than as a solid bar
+    // laid across it.
+    let fill = ground_fill(
+        theme,
+        match state.pointer {
+            crate::state::PointerState::Pressed => palette.surface_pressed,
+            _ if selected => palette.surface_raised,
+            crate::state::PointerState::Hover => palette.surface_hover,
+            _ => palette.surface,
+        },
+        ChromeLayer::Ground,
+    );
     surface.fill_rect(x, y, w, h, Color::from(fill));
 
     // Leading rails: a *fixed* two-rail gutter is always reserved on the
@@ -1794,19 +1805,16 @@ impl Card {
             .min(w / 2)
             .min(h / 2);
 
-        // The plate: Signal Rim then the raised card surface.
-        surface.fill_round_rect(x, y, w, h, radius, Color::from(palette.rim));
-        let Some((ix, iy, iw, ih)) = inset(x, y, w, h, border) else {
+        // The plate: Signal Rim then the raised card surface. A card is always
+        // raised *on* a surface rather than being one, so on floating chrome it
+        // reads at the plate's weight and stays legible over the popover behind
+        // it instead of dissolving into it.
+        let plate = (palette.surface_raised, ChromeLayer::Plate);
+        let Some((ix, iy, iw, ih)) =
+            paint_surface_plate(surface, (x, y, w, h), (radius, border), theme, plate)
+        else {
             return;
         };
-        surface.fill_round_rect(
-            ix,
-            iy,
-            iw,
-            ih,
-            radius.saturating_sub(border),
-            Color::from(palette.surface_raised),
-        );
 
         // The leading dominant-state rail down the card's leading edge.
         let rail_w = rail_thickness(theme, scale).min(iw);
@@ -2728,23 +2736,22 @@ impl Panel {
             .min(w / 2)
             .min(h / 2);
 
-        // The plate: Signal Rim then the base surface (content area).
-        surface.fill_round_rect(x, y, w, h, radius, Color::from(palette.rim));
-        let Some((ix, iy, iw, ih)) = inset(x, y, w, h, border) else {
+        // The plate: Signal Rim then the ground (content area).
+        let plate = (palette.surface, ChromeLayer::Ground);
+        let Some((ix, iy, iw, ih)) =
+            paint_surface_plate(surface, (x, y, w, h), (radius, border), theme, plate)
+        else {
             return;
         };
-        surface.fill_round_rect(
-            ix,
-            iy,
-            iw,
-            ih,
-            radius.saturating_sub(border),
-            Color::from(palette.surface),
-        );
 
         // The header band on the raised surface, with a leading dominant rail.
+        // A floating panel lays down one ground and no more: banding a second
+        // translucent fill over it would deepen the header by however opaque
+        // the ground happens to be, so the rail and title carry it instead.
         let hh = Self::header_height(scale, theme).min(ih);
-        surface.fill_rect(ix, iy, iw, hh, Color::from(palette.surface_raised));
+        if theme.ground() == SurfaceGround::Opaque {
+            surface.fill_rect(ix, iy, iw, hh, Color::from(palette.surface_raised));
+        }
         let rail_w = rail_thickness(theme, scale).min(iw);
         surface.fill_rect(
             ix,

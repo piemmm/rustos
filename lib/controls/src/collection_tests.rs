@@ -26,7 +26,7 @@ use tairix_font::{BitmapFont, ELLIPSIS};
 use tairix_geometry::{to_i32, Point, Rect, Scale};
 use tairix_icon::IconKind;
 use tairix_input::{InputEvent, Key, NamedKey, PointerButton};
-use tairix_raster::{div255, Color, Pixel, Surface};
+use tairix_raster::{div255, Color, DitherRow, Pixel, Surface, ROUND_NEAREST};
 use tairix_theme::{Rgba, Theme};
 
 use crate::button::{Button, ButtonContent};
@@ -1667,8 +1667,15 @@ fn selected_state() -> ControlState {
     ControlState::idle().with_selection(SelectionState::Selected)
 }
 
-/// The mark's fill at `fade` strength, composited over `behind`.
-fn fill_over(theme: &Theme, behind: Pixel, fade: u8) -> Pixel {
+/// The mark's fill at `fade` strength, composited over `behind`, rounded at
+/// `bias`.
+///
+/// A translucent fill over a picture is laid through the surface's ordered
+/// dither, so an exact expectation reads the bias of the very pixel it is
+/// compared against ([`fill_at`]); a caller only measuring how much detail
+/// survives across a row passes [`ROUND_NEAREST`], since a half-level cannot
+/// matter to it.
+fn fill_over(theme: &Theme, behind: Pixel, fade: u8, bias: u32) -> Pixel {
     let base = theme.palette().selection_fill;
     Color::rgba(
         base.r,
@@ -1677,7 +1684,18 @@ fn fill_over(theme: &Theme, behind: Pixel, fade: u8) -> Pixel {
         div255(u32::from(base.a) * u32::from(fade)),
     )
     .premultiply()
-    .over(behind)
+    .over_biased(behind, bias)
+}
+
+/// The full-strength mark over [`BEHIND`] as it must land at surface pixel
+/// `(x, y)`.
+fn fill_at(theme: &Theme, x: u32, y: u32) -> Pixel {
+    fill_over(
+        theme,
+        BEHIND.premultiply(),
+        u8::MAX,
+        DitherRow::at(y).bias(x),
+    )
 }
 
 /// The row across the tile on which nothing but the mark is drawn — between
@@ -1707,7 +1725,6 @@ fn the_selection_fill_has_a_hard_edge() {
     let clear = clear_row(&theme);
     let resting = tile_over_backdrop(ControlState::idle(), &theme, None);
     let s = tile_over_backdrop(selected_state(), &theme, None);
-    let full = fill_over(&theme, BEHIND.premultiply(), u8::MAX);
 
     // Across the whole row, and down the centre from the tile's own top edge:
     // one step up at the edge, then flat. Each sample is first shown to carry
@@ -1721,7 +1738,11 @@ fn the_selection_fill_has_a_hard_edge() {
             Some(BEHIND.premultiply()),
             "({x},{y}) is not a bare part of the tile"
         );
-        assert_eq!(s.get(x, y), Some(full), "({x},{y}) is not the plain fill");
+        assert_eq!(
+            s.get(x, y),
+            Some(fill_at(&theme, x, y)),
+            "({x},{y}) is not the plain fill"
+        );
     }
     // A blend throughout, never the flat accent that would hide what the tile
     // sits on.
@@ -1741,7 +1762,6 @@ fn the_selection_fill_is_rounded_rather_than_square() {
     );
     let s = tile_over_backdrop(selected_state(), &theme, None);
     let behind = BEHIND.premultiply();
-    let full = fill_over(&theme, behind, u8::MAX);
 
     for corner in [(0, 0), (TW - 1, 0), (0, TH - 1), (TW - 1, TH - 1)] {
         assert_eq!(
@@ -1753,12 +1773,12 @@ fn the_selection_fill_is_rounded_rather_than_square() {
     // Clear of the arc on the same rows and columns the corners sit on, the
     // plate is already at full strength: it is the corner that is cut away,
     // not the edge that is faded.
-    assert_eq!(s.get(radius, 0), Some(full));
-    assert_eq!(s.get(0, radius), Some(full));
+    assert_eq!(s.get(radius, 0), Some(fill_at(&theme, radius, 0)));
+    assert_eq!(s.get(0, radius), Some(fill_at(&theme, 0, radius)));
     let arc = (0..radius)
         .flat_map(|y| (0..radius).map(move |x| (x, y)))
-        .filter_map(|(x, y)| s.get(x, y))
-        .any(|p| p != behind && p != full);
+        .filter_map(|(x, y)| Some((x, y, s.get(x, y)?)))
+        .any(|(x, y, p)| p != behind && p != fill_at(&theme, x, y));
     assert!(
         arc,
         "the corner is a step rather than an anti-aliased curve"
@@ -1836,7 +1856,7 @@ fn a_selected_tile_frosts_the_backdrop_behind_it() {
     // what the reported defect looked like.
     let tinted: Vec<Pixel> = (AROUND..AROUND + TW)
         .filter_map(|x| plain.get(x, row))
-        .map(|behind| fill_over(&theme, behind, u8::MAX))
+        .map(|behind| fill_over(&theme, behind, u8::MAX, ROUND_NEAREST))
         .collect();
     let unfrosted: u32 = tinted.windows(2).map(|p| distance(p[0], p[1])).sum();
     let got = detail(&frosted, row, AROUND, AROUND + TW);
@@ -1887,7 +1907,7 @@ fn a_frosted_backdrop_keeps_the_shapes_that_were_behind_it() {
         middle
             .clone()
             .filter_map(|x| plain.get(x, row))
-            .map(|behind| fill_over(&theme, behind, u8::MAX)),
+            .map(|behind| fill_over(&theme, behind, u8::MAX, ROUND_NEAREST)),
     );
     let got = span(middle.filter_map(|x| frosted.get(x, row)));
     assert!(tinted > 0, "the backdrop carries no shape to keep");
@@ -2855,6 +2875,70 @@ fn panel_surface(panel: &Panel, theme: &Theme) -> Surface {
     let mut s = Surface::new(PW, PH).expect("surface");
     panel.render(&mut s, Rect::new(0, 0, PW, PH), Scale::ONE, theme);
     s
+}
+
+/// The library popup is a floating `Panel`, and it has two ways to come out
+/// wrong: a ground merely composited over the rim it is drawn on top of
+/// returns opaque, and a header band laid over the ground would deepen it to
+/// an opacity no theme authored. Both leave every colour looking plausible.
+#[test]
+fn a_floating_panel_lays_one_see_through_ground_and_no_second_layer() {
+    for theme in [Theme::dark(), Theme::light()] {
+        // A panel's ground is its own surface role, let through at the
+        // theme's chrome alpha — which is what keeps a resting row, drawn in
+        // that same role, exactly its ground rather than a patch on it.
+        let chrome = premul(
+            theme
+                .palette()
+                .surface
+                .with_alpha(theme.palette().chrome_alpha),
+        );
+        let bounds = Rect::new(0, 0, PW, PH);
+        let panel = Panel::new("Programs");
+        let chrome_theme = theme.clone().floating();
+        let floating = panel_surface(&panel, &chrome_theme);
+        let header = panel
+            .header_rect(bounds, Scale::ONE, &theme)
+            .expect("header");
+
+        let content = floating.get(PW / 2, PH - 2).expect("in bounds");
+        assert_eq!(content, chrome, "{}: opaque ground", theme.name());
+        assert!(content.a < 255, "{}: the chrome covers", theme.name());
+
+        // The header reads as one layer with the content, not two stacked.
+        let band_y = u32::try_from(header.top()).expect("on surface") + header.height / 2;
+        assert_eq!(
+            floating.get(PW - 2, band_y),
+            Some(chrome),
+            "{}: the header band deepened the ground",
+            theme.name()
+        );
+        // The rim survives as the surface's edge, at the surface's own weight:
+        // it is part of the glass, not a hard line drawn on it.
+        let rim = premul(theme.palette().rim.with_alpha(theme.palette().chrome_alpha));
+        assert_eq!(
+            floating.get(0, PH / 2),
+            Some(rim),
+            "{}: the laid ground ate the rim",
+            theme.name()
+        );
+        assert_ne!(rim, chrome, "{}: the edge must read", theme.name());
+
+        // An ordinary panel keeps its opaque content and its raised header.
+        let opaque = panel_surface(&Panel::new("Programs"), &theme);
+        assert_eq!(
+            opaque.get(PW / 2, PH - 2),
+            Some(premul(theme.palette().surface)),
+            "{}: an ordinary panel changed",
+            theme.name()
+        );
+        assert_eq!(
+            opaque.get(PW - 2, band_y),
+            Some(premul(theme.palette().surface_raised)),
+            "{}: an ordinary panel lost its header band",
+            theme.name()
+        );
+    }
 }
 
 #[test]

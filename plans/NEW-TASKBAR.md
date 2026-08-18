@@ -1,9 +1,7 @@
 # NEW-TASKBAR.md — the taskbar / icon bar becomes first-class
 
-Binding under `AGENTS.md`. This is the staged build plan that takes the
-Stage 7 taskbar (`userland/gui/taskbar`, `tairix-taskbar`) from today's
-edge-pinned layout + start-menu-with-session-controls skeleton into the
-full **icon bar** the desktop needs:
+Binding under `AGENTS.md`. This plan records the completed Stage 7 taskbar
+(`userland/gui/taskbar`, `tairix-taskbar`), a floating **icon bar** with:
 
 - a permanent left-most **Program Library** launcher — a first-class,
   folder-organised catalog of installed applications (Accessories,
@@ -148,13 +146,56 @@ the remaining pieces together and fills the gaps.
 
 ## 1. Final bar layout (left → right, horizontal bottom bar)
 
+The bar floats at its configured edge. `Metrics::taskbar_margin` is `5`
+logical pixels in both built-in themes, scaled through `Scale::scale_length`
+and applied to the three sides facing the screen edge; the fourth side faces
+the work area and keeps the bar's thickness. A too-small screen clamps the
+margin and still lays out the bar.
+
+The bar is drawn as the shared floating surface plate
+(`tairix_controls::paint_surface_plate`, the recipe every popup it opens also
+wears): a rim one `plate_border` thick in the palette's `rim` tone, then the
+ground inside it, both at the chrome weight below and both rounded by
+`taskbar_corner_radius` — the same radius the compositor cuts the bar window
+to, so the rim follows the silhouette rather than squaring off across it. The
+rim reads a step lighter than the ground on a dark theme and a step darker on a
+light one, and stays see-through.
+
+Every region the bar lays out sits *inside* that rim: `BarLayout::compute`
+places the bar's own rectangle, then lays the content out through a placer
+pulled in by one `plate_border` on both axes, so a hovered or pressed slot's
+plate cannot wash over the surface's edge. `BarLayout::bar` is still the whole
+rectangle, rim included. A bar too thin to spare two rims keeps its content
+rather than the inset.
+
+The bar adopts its theme's floating form (`Theme::floating`, in `Taskbar::new`
+and `apply_theme`), so the bar, its program-library panel, context menu,
+notification popover, and Switchboard readout — and every control drawn on any
+of them — are floating chrome by construction, with nothing told separately and
+nothing left an opaque patch. Each surface keeps the colour role it wears solid
+and takes the palette's `chrome_alpha`: the bar, the menu, and the readout
+ground in `surface_raised`, the two panels in `surface`. A plate raised on one
+— a launcher's hover wash, the library's search field, the readout's *Open
+Switchboard* button, a notification card — takes the step-more-solid
+`chrome_plate_alpha`, while a row, a menu row, and the scroll channel take the
+ground's own. Marks stay solid: an accent highlight, a rail, a bead, a rim, a
+focus ring, every icon and label. The session requests `chrome_backdrop_blur` —
+`7` logical pixels in both built-in themes — behind each surface, which is what
+the translucency reads against.
+
+A pinned shortcut and a running task have a hover look but no pressed one,
+unlike the two launcher buttons, which compress. Whether the strip should state
+a held slot at all is an open question for the furniture spec
+(`plans/GUI-CONTROLS-DESIGN.md`), not a decision to make in the renderer.
+
+Along-bar popup placement is clamped to the bar's own span, so no popup enters
+the wallpaper gap. Floating panels draw no separate header band.
+
 ```
-┌──────────────────────────────────────────────────────────────────────────┐
-│ [Library] │ [Files] [pin] [pin] … │  running tasks …  │ [tray…] │ [Switch]│
-└──────────────────────────────────────────────────────────────────────────┘
-  library      the applications:       task list           notif.    always
-  launcher     Files (fixed) then      (existing)          area      right-most
-  (fixed)      user pins (reorderable)
+wallpaper gap  ┌──────────────────────────────────────────────────────────┐  wallpaper gap
+               │ [Library] │ [Files] [pin] [pin] … │ running … │ [Switch]   │
+               └──────────────────────────────────────────────────────────┘
+                                      wallpaper gap
 ```
 
 - **Leading, fixed order, not reorderable:** `Library` (Program Library
@@ -560,7 +601,7 @@ What now stands:
   placeholder ("No programs are catalogued" / "No matching programs").
   Opening is deterministic (search cleared, all folders expanded, cursor and
   scroll at top, keyboard on search). Geometry (`Taskbar::library_layout`)
-  opens outward on every edge, clamps to the screen, sizes to the rows
+  opens outward on every edge, clamps along the bar's own span, sizes to the rows
   capped by the available space, and **probes** the shared `Panel` chrome
   rather than re-deriving it; the WM rounds the panel with the same radius
   the chrome draws (§2.2). Controls are static renderers, so reduced motion

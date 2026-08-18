@@ -712,8 +712,9 @@ offered *before* the write-fatal file rule (§7o) — backs **every page
 from the committed base down to the faulting page** with fresh zeroed
 `RW` pages through the installed `mem_map` producer, lowers the recorded
 committed base per page (the live usage `sysinfo limits` reports for
-`stack-bytes`), and re-freezes the registry snapshot once. Growth is
-contiguous by construction: a large frame whose first touch lands several
+`stack-bytes`), and publishes exactly the pages it backed into the registry
+snapshot. Growth is contiguous by construction: a large frame whose first
+touch lands several
 pages below the committed base (the compiler owes no page-by-page probe
 order) can never strand an unmapped hole above the low-water mark, so
 "every span page at/above the committed base is resident" is an
@@ -763,12 +764,29 @@ task with a large resident set paid its page count times that list's length,
 inside one non-preemptible syscall. That is tens of seconds under emulation,
 during which the CPU's dispatch loop makes no progress at all and the session
 appears frozen (observed as a ten-second in-kernel stall inside `mem_unmap`
-while the desktop was live). Every path that knows *which* pages changed
-therefore publishes them as in-place deltas instead: the fault paths publish
-the one page they backed, and `mem_unmap` drops exactly the pages of the
-region it released. `mem_map` publishes nothing at all — a reservation commits
-no frame and writes no page-table entry, so the snapshot is already correct.
-Removing by delta is also what makes the removal unconditional: the wholesale
+while the desktop was live).
+
+Every path that knows *which* pages changed therefore publishes exactly those,
+through the one pair `publish_region_mapping` / `publish_region_teardown`:
+
+| Path | What it publishes |
+|---|---|
+| `mem_map` | nothing — a reservation commits no frame and writes no page-table entry, so the snapshot is already correct |
+| `mem_unmap`, `file_unmap` | the pages of the region it released |
+| `shm_create`, `shm_map`, `mmio_map`, `dma_alloc` | the pages of the region it mapped |
+| `shm_unmap`, `dma_free` | the pages of the region it released, as the owning layer reports the extent |
+| anonymous / file / compressed-page fault | the one page it backed |
+| stack growth | the pages the walk backed |
+| a compressed-tier batch (a warm/cluster restore, a direct-reclaim sweep) | several pages at once with no list reported, so these — and only these — re-freeze |
+
+The mapping half matters most where the address space is largest: the desktop
+session maps a frame region for every window an app opens, so a context menu's
+few pages used to rebuild a snapshot holding the wallpaper, the back buffer and
+every window's pixels — four times per menu, counting the app's own side and
+the close. Likewise a file-backed fault publishing one page is what keeps
+reading an N-page mapping O(N) rather than O(N²).
+
+Publishing by delta is also what makes a *removal* unconditional: the wholesale
 re-freeze is a no-op for a task with no live space published on the current
 CPU, which would leave freed pages still translating in the snapshot the copy
 path walks. A snapshot that cannot absorb an in-place delta falls back to the
@@ -1653,9 +1671,10 @@ costs only the pages actually touched, `AGENTS.md` §26.7):
   `FileRegion`, reads the single covering page through the secured VFS
   **under the mapping-time identity** (owner/mode/ACL re-applied on every
   fault), and maps it read-only, never executable (`filemap::FILE_FLAGS`;
-  a short tail page is zero-filled past end-of-file). The registry
-  snapshot is re-frozen so the copy path sees the new page, and the task
-  retries the faulting instruction. A **write** fault is offered through
+  a short tail page is zero-filled past end-of-file). That one page is
+  published into the registry snapshot so the copy path sees it — one page,
+  not a whole-space rebuild, which is what keeps reading an N-page mapping
+  O(N) — and the task retries the faulting instruction. A **write** fault is offered through
   the same seam with the port-attested `write` verdict (aarch64
   `ESR.WnR`, riscv64 store/AMO `scause`, x86_64 `#PF` `W/R`) but is never
   *resolved*: file mappings are read-only, so it can never be made valid
@@ -1699,7 +1718,8 @@ costs only the pages actually touched, `AGENTS.md` §26.7):
   `(base, len)` region the caller mapped (validated against the per-task
   region table before any teardown): resident pages are unmapped and their
   frames zeroed on free, never-touched holes cost nothing, the accounting
-  is credited, and the snapshot re-frozen so freed pages leave it. Task
+  is credited, and the region's own pages dropped from the snapshot so freed
+  pages leave it. Task
   exit reclaims resident pages through the live space's drop and the region
   records through the registry withdraw.
 - **The kernel copy path resolves misses too.** A syscall buffer inside an

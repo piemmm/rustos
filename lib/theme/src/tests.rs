@@ -3,11 +3,11 @@
 use alloc::string::String;
 
 use crate::motion::MotionInteraction;
-use crate::theme::SELECTION_ALPHA;
+use crate::theme::{CHROME_ALPHA, CHROME_PLATE_ALPHA, SELECTION_ALPHA};
 use crate::{
     Appearance, Contrast, CursorKind, CursorSet, Density, Fade, FamilyKey, FontWeight, Fonts,
-    Metrics, MotionTheme, Palette, Rgba, SignalRole, TextRole, Theme, ThemeError, ThemeId,
-    ThemeRegistry, Timeline,
+    Metrics, MotionTheme, Palette, Rgba, SignalRole, SurfaceGround, TextRole, Theme, ThemeError,
+    ThemeId, ThemeRegistry, Timeline,
 };
 
 #[test]
@@ -431,6 +431,63 @@ fn a_selection_fill_only_tints_what_is_behind_it() {
 }
 
 #[test]
+fn floating_chrome_lets_the_desktop_through_and_raises_its_plates() {
+    // Floating chrome is the theme's own surfaces at a lesser opacity, so a
+    // frosted bar is the grey a solid one was. A plate raised on it is a step
+    // more solid than the ground, or a button reads as a hole in the glass;
+    // and the backdrop has to be blurred, or the icons sit on detail.
+    for theme in [Theme::dark(), Theme::light()] {
+        let p = theme.palette();
+        assert_eq!(p.chrome_alpha, CHROME_ALPHA);
+        assert_eq!(p.chrome_plate_alpha, CHROME_PLATE_ALPHA);
+        assert!(
+            p.chrome_alpha < p.chrome_plate_alpha,
+            "{}: a raised plate is no more solid than its ground",
+            theme.name()
+        );
+        assert!(
+            p.chrome_plate_alpha < 255,
+            "{}: a plate that covers frosts nothing",
+            theme.name()
+        );
+        assert!(
+            theme.metrics().chrome_backdrop_blur > 0,
+            "{}: a see-through bar over a sharp backdrop has icons on rubble",
+            theme.name()
+        );
+    }
+}
+
+#[test]
+fn a_theme_draws_opaque_until_it_is_asked_for_floating_chrome() {
+    // The ground rides on the theme a surface is drawn with, so a window's
+    // controls cannot become see-through by accident.
+    let theme = Theme::dark();
+    assert_eq!(theme.ground(), SurfaceGround::Opaque);
+    let floating = theme.clone().floating();
+    assert_eq!(floating.ground(), SurfaceGround::Floating);
+    assert_eq!(
+        floating.palette(),
+        theme.palette(),
+        "floating chrome retunes no colour role"
+    );
+    assert_eq!(floating.id(), theme.id());
+}
+
+#[test]
+fn the_taskbar_stands_off_the_screen_edges_it_faces() {
+    // The margin is what makes the bar float; a theme that zeroed it would
+    // put the wallpaper back under the bar's rounded corners.
+    for theme in [Theme::dark(), Theme::light()] {
+        assert!(
+            theme.metrics().taskbar_margin > 0,
+            "{}: the bar hugs the screen edge",
+            theme.name()
+        );
+    }
+}
+
+#[test]
 fn builtin_surfaces_are_opaque_and_distinct() {
     for theme in [Theme::dark(), Theme::light()] {
         let p = theme.palette();
@@ -729,6 +786,8 @@ fn sample_theme(id: ThemeId) -> Theme {
             desktop: Rgba::rgb(0, 0, 0),
             surface: Rgba::rgb(10, 10, 10),
             surface_raised: Rgba::rgb(20, 20, 20),
+            chrome_alpha: 128,
+            chrome_plate_alpha: 192,
             on_surface: Rgba::rgb(240, 240, 240),
             on_surface_muted: Rgba::rgb(160, 160, 160),
             accent: Rgba::rgb(80, 140, 255),
@@ -757,6 +816,8 @@ fn sample_theme(id: ThemeId) -> Theme {
         Metrics {
             window_corner_radius: 4,
             taskbar_corner_radius: 4,
+            taskbar_margin: 3,
+            chrome_backdrop_blur: 5,
             popup_corner_radius: 4,
             border_thickness: 1,
             scrollbar_breadth: 12,

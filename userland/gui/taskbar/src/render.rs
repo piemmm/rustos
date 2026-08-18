@@ -12,13 +12,16 @@
 //! task's from the bundle that opened its window, so a running application
 //! is recognised whether or not it is pinned. The one mark the bar draws for
 //! itself is the [`BarLayout::separator`] rule dividing the Library launcher
-//! from everything after it, filled in [`Palette::border`] through the same
-//! [`Surface`] fill as the bar's own background.
-//! The surface is the window manager's to place and round:
-//! the taskbar paints a *rectangular* buffer and the compositor applies
-//! [`BarLayout::corner_radius`] through its single anti-aliased
-//! rounded-corner path, exactly as it rounds windows. There is no rounding —
-//! and no colour algebra — here.
+//! from everything after it, filled in [`Palette::border`].
+//! The bar's own background is the shared floating-surface plate
+//! ([`paint_surface_plate`]) the popups it opens already wear: a rim one
+//! [`plate_border`] thick in [`Palette::rim`] at the theme's chrome weight,
+//! then the raised ground inside it, both rounded by
+//! [`BarLayout::corner_radius`]. That is the same radius the window manager
+//! cuts the bar window to through its single anti-aliased rounded-corner
+//! path, exactly as it rounds windows, so the rim follows the bar's real
+//! silhouette instead of squaring off across the cut. Placing the surface
+//! stays the window manager's job.
 //!
 //! [`TaskbarRenderer::render_menu`] paints the open context menu: the shared
 //! `lib/controls` [`Menu`](tairix_controls::Menu) plate at the geometry
@@ -57,7 +60,10 @@
 
 use tairix_controls::shell::Notification;
 use tairix_controls::state::{ActivityState, ValidationState};
-use tairix_controls::{ControlRole, ControlState, PointerState, TaskVisibility, TaskbarItem};
+use tairix_controls::{
+    paint_surface_plate, plate_border, ChromeLayer, ControlRole, ControlState, PointerState,
+    TaskVisibility, TaskbarItem,
+};
 use tairix_font::BitmapFont;
 use tairix_geometry::{Point, Rect, Scale};
 use tairix_icon::{IconArtwork, IconKind, IconRequest, IconSet};
@@ -247,6 +253,20 @@ impl TaskbarRenderer {
     /// usable ([`NoArtwork`](tairix_icon::NoArtwork) resolves entirely to
     /// glyphs).
     ///
+    /// The bar's background is the shared floating-surface plate
+    /// ([`paint_surface_plate`]): a rim one [`plate_border`] thick in the
+    /// palette's `rim`, then the raised ground inside it, both at the
+    /// palette's `chrome_alpha` and both rounded by
+    /// [`BarLayout::corner_radius`]. The rim is the bar's own edge rather than
+    /// a mark on it, so it takes the same weight as the ground and reads a
+    /// step lighter than it on a dark theme, a step darker on a light one.
+    /// Those two are the bar's translucent layers — the wallpaper and the
+    /// windows behind read through them over the backdrop the compositor
+    /// blurs. A slot's hover or press wash is a plate laid on them, a step
+    /// more solid, and the ink on top (the glyphs, the clock, the separator
+    /// rule, every seam and bead) is drawn solid so it reads against whatever
+    /// wallpaper is behind.
+    ///
     /// Returns `None` only if the bar's pixel dimensions cannot be allocated
     /// (a surface that could never exist), so the caller fails closed rather
     /// than panicking. The window manager presents the
@@ -271,7 +291,15 @@ impl TaskbarRenderer {
         // every other caption on the desktop.
         let clock_font = BitmapFont::for_role(theme.fonts(), TextRole::Caption, scale);
 
-        surface.fill(theme.palette().surface_raised.into());
+        // The bar wears the same plate as the popups it opens; its regions are
+        // laid out in screen space, so the interior the plate reports is moot.
+        let _ = paint_surface_plate(
+            &mut surface,
+            (0, 0, layout.bar.width, layout.bar.height),
+            (layout.corner_radius, plate_border(theme, scale)),
+            theme,
+            (theme.palette().surface_raised, ChromeLayer::Ground),
+        );
         for (button, rect, kind) in [
             (taskbar.library_button(), layout.library, IconKind::Library),
             (taskbar.files_button(), layout.files, IconKind::Folder),

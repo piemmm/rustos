@@ -4,11 +4,11 @@ extern crate alloc;
 
 use tairix_abi::driver::display::{
     AccelCaps, AccelLayer, AcceleratedDisplay, DamageRect, Display, DisplayFormat, DisplayMode,
+    MAX_DAMAGE_RECTS,
 };
 use tairix_abi::DriverError;
 
 use crate::color::{div255, Color, Pixel};
-use crate::compositor::MAX_PRESENT_REGIONS;
 use crate::corner::Corners;
 use crate::geometry::{Point, Rect, Region};
 use crate::surface::Surface;
@@ -72,6 +72,21 @@ fn present_content<T>(
     comp.present_window_content(id, w, h, convert)
 }
 
+/// Fill `colour` over exactly the rectangles a desktop repaint handed out,
+/// which is the contract every real painter keeps: nothing outside them is
+/// marked, so nothing outside them may be written.
+fn paint_desktop_rects(surface: &mut Surface, rects: &[Rect], colour: Color) {
+    for rect in rects {
+        surface.with_clip(
+            rect.left().unsigned_abs(),
+            rect.top().unsigned_abs(),
+            rect.width,
+            rect.height,
+            |surface| surface.fill(colour),
+        );
+    }
+}
+
 /// Read the RGBA scan-out bytes of frame pixel `(x, y)`.
 fn frame_pixel(comp: &Compositor, x: u32, y: u32) -> [u8; 4] {
     let info = comp.mode();
@@ -82,14 +97,19 @@ fn frame_pixel(comp: &Compositor, x: u32, y: u32) -> [u8; 4] {
 
 /// A display seam that records the last presented frame and, separately,
 /// how many times each of [`Display::present`] (a whole-frame present) and
-/// [`Display::present_region`] (naming the exact rectangle presented) were
+/// [`Display::present_rects`] (naming the exact rectangles presented) were
 /// called, or always fails when `fail` is set.
 struct MockDisplay {
     mode: DisplayMode,
     last: alloc::vec::Vec<u8>,
     fail: bool,
     full_presents: usize,
+    /// Every rectangle presented, in order.
     regions: alloc::vec::Vec<DamageRect>,
+    /// Calls that named rectangles. A frame publishes itself once however
+    /// scattered it is, so this is what separates one call naming two
+    /// rectangles from a call per rectangle.
+    rect_presents: usize,
 }
 
 impl MockDisplay {
@@ -100,6 +120,7 @@ impl MockDisplay {
             fail: false,
             full_presents: 0,
             regions: alloc::vec::Vec::new(),
+            rect_presents: 0,
         }
     }
 
@@ -126,9 +147,11 @@ impl Display for MockDisplay {
         Ok(())
     }
 
-    fn present_region(&mut self, frame: &[u8], damage: DamageRect) -> Result<(), DriverError> {
+    fn present_rects(&mut self, frame: &[u8], damage: &[DamageRect]) -> Result<(), DriverError> {
+        DamageRect::validate_list(damage, &self.mode)?;
         self.record(frame)?;
-        self.regions.push(damage);
+        self.regions.extend_from_slice(damage);
+        self.rect_presents += 1;
         Ok(())
     }
 }
@@ -160,6 +183,22 @@ fn zero_radius_fully_covers() {
 fn rounded_corner_pixel_is_clipped() {
     // The extreme corner of a generous radius is entirely outside.
     assert_eq!(Corners::Rounded { radius: 8 }.coverage(0, 0, 20, 20), 0);
+}
+
+#[test]
+fn only_the_corner_bands_clip_a_row() {
+    // What a per-row decision may skip: a row no arc reaches is fully covered
+    // at every column, so the compositor pays for coverage at the corners only.
+    let rounded = Corners::Rounded { radius: 8 };
+    assert!(rounded.clips_row(0, 20, 20));
+    assert!(rounded.clips_row(7, 20, 20));
+    assert!(!rounded.clips_row(8, 20, 20));
+    assert!(!rounded.clips_row(11, 20, 20));
+    assert!(rounded.clips_row(12, 20, 20));
+    assert!(rounded.clips_row(19, 20, 20));
+    // A square window, and a radius clamped away by a short side, clip nothing.
+    assert!(!Corners::Square.clips_row(0, 20, 20));
+    assert!(!Corners::Rounded { radius: 8 }.clips_row(0, 20, 1));
 }
 
 #[test]
@@ -319,6 +358,91 @@ fn opaque_window_overwrites_background() {
     assert_eq!(frame_pixel(&c, 3, 3), [0, 0, 255, 255]); // background again
 }
 
+/// A picture that ramps *slowly* down the screen — one level per row, the
+/// tonal shape of a wallpaper's sky and the one a translucent field over it
+/// can flatten into bands. A steep ramp cannot band: it outruns the levels
+/// the blend takes away.
+fn ramp_surface(side: u32) -> Surface {
+    let mut surface = Surface::new(side, side).expect("surface allocates");
+    for y in 0..side {
+        let level = u8::try_from(y).unwrap_or(u8::MAX);
+        surface.fill_rect(0, y, side, 1, Color::rgb(level, level, level));
+    }
+    surface
+}
+
+/// The longest run of consecutive frame rows carrying the same tone across
+/// `columns`, and how many distinct tones those rows hold.
+///
+/// A row's tone is the sum of its green scan-out bytes, so it resolves the row
+/// to a fraction of a level rather than to the one level a single pixel can
+/// hold. The scene below ramps in one direction and a blend is monotone in
+/// what it covers, so a tone that changes is a tone not seen before.
+fn frame_bands(comp: &Compositor, rows: core::ops::Range<u32>, columns: u32) -> (u32, u32) {
+    let tone = |y: u32| -> u32 {
+        (0..columns)
+            .map(|x| u32::from(frame_pixel(comp, x, y)[1]))
+            .sum()
+    };
+    let mut previous = tone(rows.start);
+    let (mut longest, mut run, mut tones) = (1, 1, 1);
+    for y in rows.skip(1) {
+        let here = tone(y);
+        if here == previous {
+            run += 1;
+            longest = longest.max(run);
+        } else {
+            run = 1;
+            tones += 1;
+            previous = here;
+        }
+    }
+    (longest, tones)
+}
+
+/// A translucent window over a smoothly shaded desktop must not band it.
+///
+/// The blend has only `256 - alpha` output levels for the 256 the picture
+/// beneath it held, so rounding every pixel alike answers a whole ramp with a
+/// handful of tones: at alpha 224 this scene came out as eight plateaus eight
+/// rows deep. The composite spreads that rounding over the area instead, and
+/// the ramp survives.
+#[test]
+fn a_translucent_window_does_not_band_the_desktop_beneath_it() {
+    const SIDE: u32 = 64;
+    let mut c = new_compositor(mode(SIDE, SIDE), BLUE).expect("compositor");
+    c.set_desktop(ramp_surface(SIDE));
+    let veil = Surface::filled(SIDE, SIDE, Color::rgba(11, 14, 16, 224).premultiply())
+        .expect("surface allocates");
+    c.add_window(Point::ORIGIN, veil);
+
+    c.composite();
+
+    let (band, tones) = frame_bands(&c, 0..SIDE, SIDE);
+    assert!(band <= 3, "the window flattened {band} rows into one tone");
+    assert!(
+        tones >= 32,
+        "only {tones} of {SIDE} tones survived the window"
+    );
+}
+
+/// The same guarantee for the desktop layer's own blend: a translucent
+/// wallpaper over the root fill is the same shape of composite.
+#[test]
+fn a_translucent_desktop_layer_does_not_band_over_the_background() {
+    const SIDE: u32 = 64;
+    let mut c = new_compositor(mode(SIDE, SIDE), BLUE).expect("compositor");
+    let mut ramp = ramp_surface(SIDE);
+    ramp.fill_round_rect(0, 0, SIDE, SIDE, 0, Color::rgba(11, 14, 16, 224));
+    c.set_desktop(ramp);
+
+    c.composite();
+
+    let (band, tones) = frame_bands(&c, 0..SIDE, SIDE);
+    assert!(band <= 3, "the desktop layer flattened {band} rows");
+    assert!(tones >= 32, "only {tones} of {SIDE} tones survived");
+}
+
 #[test]
 fn top_window_wins_z_order() {
     let mut c = new_compositor(mode(2, 2), BLUE).expect("compositor");
@@ -357,8 +481,12 @@ fn raising_the_topmost_window_repaints_nothing() {
     assert_eq!(c.window_at(Point::new(6, 6)), Some(under));
 }
 
+/// Raising a partly covered window repaints exactly the part that was
+/// covered. The rest of it was already the front-most thing at those pixels,
+/// so the move cannot have changed them, and claiming otherwise would drop
+/// every frost over them for nothing.
 #[test]
-fn raising_a_covered_window_still_restacks_and_repaints_it() {
+fn raising_a_covered_window_repaints_only_where_it_was_covered() {
     let mut c = new_compositor(mode(8, 8), BLUE).expect("compositor");
     let under = c.add_window(Point::ORIGIN, opaque(6, 6, RED));
     c.add_window(Point::ORIGIN, opaque(4, 4, GREEN));
@@ -366,7 +494,351 @@ fn raising_a_covered_window_still_restacks_and_repaints_it() {
 
     assert!(c.raise(under));
     assert_eq!(c.window_at(Point::ORIGIN), Some(under));
-    assert_eq!(composite_checked(&mut c).rects(), &[Rect::new(0, 0, 6, 6)]);
+    assert_eq!(composite_checked(&mut c).rects(), &[Rect::new(0, 0, 4, 4)]);
+    // Tighter damage is only right if the frame is: red now shows where green
+    // covered it, and the pixels outside the overlap never moved.
+    assert_eq!(frame_pixel(&c, 0, 0), [255, 0, 0, 255]);
+    assert_eq!(frame_pixel(&c, 5, 5), [255, 0, 0, 255]);
+    assert_eq!(frame_pixel(&c, 7, 7), [0, 0, 255, 255]);
+}
+
+/// A pointer moving over an open menu is the hover the desktop redraws most
+/// often, and every one of those frames re-derives where the menu sits. A
+/// window whose family is already arranged must therefore restack nothing and
+/// damage nothing — a frosted owner asked to prove its own arrangement pays a
+/// window's worth of blur to be told what it already knew.
+#[test]
+fn re_asserting_a_transients_stacking_over_a_frosted_owner_costs_nothing() {
+    let mut c = new_compositor(mode(64, 64), BLUE).expect("compositor");
+    let owner = c.add_window(Point::ORIGIN, opaque(48, 48, RED));
+    assert!(c.set_opacity(owner, 128));
+    assert!(c.set_backdrop_blur(owner, 4));
+    let menu = c
+        .add_transient_window(owner, Point::new(8, 8), opaque(12, 12, GREEN))
+        .expect("the owner is a window");
+    composite_checked(&mut c);
+
+    assert!(c.raise(owner), "the owner is known");
+    assert!(c.raise(menu), "the menu is known");
+
+    assert!(
+        !c.has_damage(),
+        "re-asserting the arrangement already in force damaged the screen"
+    );
+    assert!(composite_checked(&mut c).is_empty());
+    assert!(c.frame_stats().is_idle(), "{:?}", c.frame_stats());
+}
+
+/// Opening a menu on the window that already holds the front costs the menu's
+/// own rectangle, not its owner's whole frosted frame: the owner has not
+/// moved in the stack, so its retained backdrop is still exactly right.
+#[test]
+fn opening_a_transient_on_the_front_window_repaints_only_the_transient() {
+    let mut c = new_compositor(mode(64, 64), BLUE).expect("compositor");
+    let owner = c.add_window(Point::ORIGIN, opaque(48, 48, RED));
+    assert!(c.set_opacity(owner, 128));
+    assert!(c.set_backdrop_blur(owner, 4));
+    composite_checked(&mut c);
+
+    let menu = c
+        .add_transient_window(owner, Point::new(8, 8), opaque(12, 12, GREEN))
+        .expect("the owner is a window");
+
+    assert_eq!(
+        composite_checked(&mut c).rects(),
+        &[Rect::new(8, 8, 12, 12)]
+    );
+    assert_eq!(c.frame_stats().blur_px, 0, "the owner was re-blurred");
+    assert_eq!(c.window_at(Point::new(10, 10)), Some(menu));
+}
+
+/// Opening a menu on a frosted window that is *not* the front one costs the
+/// menu's rectangle too. This is the production arrangement, not an unusual
+/// one: the taskbar is a window and it sits above every application window, so
+/// an app is essentially never frontmost. The raise that brings the family up
+/// therefore crosses the bar — and crossing a window it does not overlap
+/// changes no pixel, so the owner keeps the frost it already had.
+#[test]
+fn opening_a_transient_on_a_window_under_the_bar_keeps_its_frost() {
+    let mut c = new_compositor(mode(64, 64), BLUE).expect("compositor");
+    let owner = c.add_window(Point::ORIGIN, opaque(48, 48, RED));
+    assert!(c.set_opacity(owner, 128));
+    assert!(c.set_backdrop_blur(owner, 4));
+    // A bar along the bottom edge, above the window and clear of it.
+    let bar = c.add_window(Point::new(0, 56), opaque(64, 8, GREEN));
+    composite_checked(&mut c);
+    assert_eq!(c.frost_cache_len(), 1, "the owner's backdrop was retained");
+
+    let menu = c
+        .add_transient_window(owner, Point::new(8, 8), opaque(12, 12, GREEN))
+        .expect("the owner is a window");
+
+    assert_eq!(
+        composite_checked(&mut c).rects(),
+        &[Rect::new(8, 8, 12, 12)],
+        "opening the menu repainted more than the menu"
+    );
+    let stats = c.frame_stats();
+    assert_eq!(
+        stats.blur_px, 0,
+        "the owner was re-blurred to open a menu on it"
+    );
+    assert_eq!(stats.damaged_px, 12 * 12, "{stats:?}");
+    // The raise really happened, and the bar really was crossed.
+    assert_eq!(c.window_at(Point::new(10, 10)), Some(menu));
+    assert_eq!(c.window_at(Point::new(2, 58)), Some(bar));
+    assert!(c.raise(bar), "the bar is known");
+    assert_eq!(c.window_at(Point::new(2, 58)), Some(bar));
+}
+
+/// The reported defect, end to end: right-click a frosted, translucent
+/// terminal under the taskbar, then click back in the terminal to dismiss the
+/// menu. Both gestures used to re-blur and re-present the whole window,
+/// because the bar re-asserts itself topmost between them and every restack
+/// marked the family's own footprint.
+#[test]
+fn opening_and_dismissing_a_menu_under_the_bar_never_reblurs_the_window() {
+    let mut c = new_compositor(mode(320, 240), BLUE).expect("compositor");
+    let term = c.add_window(Point::new(20, 20), opaque(200, 140, RED));
+    assert!(c.set_opacity(term, 128));
+    assert!(c.set_backdrop_blur(term, 6));
+    let bar = c.add_window(Point::new(0, 232), opaque(320, 8, GREEN));
+    composite_checked(&mut c);
+    assert_eq!(c.frost_cache_len(), 1, "the terminal retained a backdrop");
+
+    // Right-click: the app opens a popup, which brings the family forward
+    // over the bar.
+    let menu = c
+        .add_transient_window(term, Point::new(60, 50), opaque(44, 36, GREEN))
+        .expect("the owner is a window");
+    assert_eq!(
+        composite_checked(&mut c).rects(),
+        &[Rect::new(60, 50, 44, 36)],
+        "opening the menu repainted more than the menu"
+    );
+    assert_eq!(c.frame_stats().blur_px, 0, "the window was re-blurred");
+
+    // The session puts the bar back on top on its next wake.
+    assert!(c.raise(bar));
+    assert!(
+        composite_checked(&mut c).is_empty(),
+        "the bar's move repainted"
+    );
+
+    // The dismissing click lands in the terminal, so click-to-activate raises
+    // it — back over the bar it does not overlap.
+    assert!(c.raise(term));
+    assert!(
+        composite_checked(&mut c).is_empty(),
+        "the dismissing click repainted the window"
+    );
+    assert_eq!(c.frame_stats().blur_px, 0, "the window was re-blurred");
+
+    // …and the popup goes, costing its own rectangle and nothing more.
+    c.remove(menu);
+    assert_eq!(
+        composite_checked(&mut c).rects(),
+        &[Rect::new(60, 50, 44, 36)]
+    );
+    assert_eq!(c.frame_stats().blur_px, 0, "the window was re-blurred");
+    assert_eq!(
+        c.frost_cache_len(),
+        1,
+        "the backdrop was thrown away and blurred again"
+    );
+}
+
+/// Compose `c` from scratch and return the frame, without changing what it
+/// shows: a reveal strength it does not already hold marks the whole screen,
+/// and a full reveal is byte-identical to never having heard of the fade.
+///
+/// This is the oracle for "did the damage a restack marked miss a pixel?" — a
+/// frame composed incrementally must equal the same screen composed whole.
+fn frame_recomposed(c: &mut Compositor) -> alloc::vec::Vec<u8> {
+    assert!(c.set_reveal(200), "the fade is settable");
+    c.composite();
+    assert!(c.set_reveal(u8::MAX), "the fade is settable");
+    c.composite();
+    c.frame().to_vec()
+}
+
+/// Marking only what a restack crossed must lose no pixel. Each arrangement is
+/// composed incrementally across a raise and a lower, and every step is
+/// compared with the same screen composed whole.
+#[test]
+fn a_restacks_tight_damage_composes_what_a_whole_recomposite_would() {
+    // Overlaps of every kind against the window that moves: none, partial,
+    // total, and a shape that surrounds it.
+    let others: &[&[(i32, i32, u32, u32)]] = &[
+        &[(48, 0, 16, 16)],
+        &[(12, 12, 20, 20)],
+        &[(0, 0, 40, 40)],
+        &[(0, 0, 64, 6), (0, 58, 64, 6), (44, 0, 20, 64)],
+        &[(8, 8, 12, 12), (30, 4, 24, 40), (0, 40, 30, 24)],
+    ];
+    for (case, rects) in others.iter().enumerate() {
+        for translucent in [false, true] {
+            for blur in [0, 5] {
+                let mut c = new_compositor(mode(64, 64), BLUE).expect("compositor");
+                let moving = c.add_window(Point::new(4, 4), opaque(36, 36, RED));
+                if translucent {
+                    assert!(c.set_opacity(moving, 144));
+                }
+                if blur > 0 {
+                    assert!(c.set_backdrop_blur(moving, blur));
+                }
+                let menu = c
+                    .add_transient_window(moving, Point::new(10, 10), opaque(10, 8, GREEN))
+                    .expect("the owner is a window");
+                for (i, (x, y, w, h)) in rects.iter().enumerate() {
+                    let colour = if i % 2 == 0 { GREEN } else { RED };
+                    c.add_window(Point::new(*x, *y), opaque(*w, *h, colour));
+                }
+                composite_checked(&mut c);
+                let what = alloc::format!("case {case}, translucent {translucent}, blur {blur}");
+
+                // The family goes down, then comes back up. Either move that
+                // marks too little shows here as a stale pixel.
+                for step in [
+                    StepUnder::Lower,
+                    StepUnder::RaiseOwner,
+                    StepUnder::RaiseMenu,
+                ] {
+                    let moved = match step {
+                        StepUnder::Lower => c.lower(moving),
+                        StepUnder::RaiseOwner => c.raise(moving),
+                        StepUnder::RaiseMenu => c.raise(menu),
+                    };
+                    composite_checked(&mut c);
+                    let incremental = c.frame().to_vec();
+                    let whole = frame_recomposed(&mut c);
+                    assert_eq!(
+                        incremental, whole,
+                        "{what}, {step:?} (moved {moved}) left a stale pixel"
+                    );
+                }
+            }
+        }
+    }
+}
+
+/// The restacks the sweep above drives, named so a failure says which one.
+#[derive(Clone, Copy, Debug)]
+enum StepUnder {
+    Lower,
+    RaiseOwner,
+    RaiseMenu,
+}
+
+/// Reordering windows that do not overlap changes no pixel, so it costs
+/// nothing: the same fact from the other direction, and the one that keeps a
+/// click on a frosted window from re-blurring it just to bring it forward.
+#[test]
+fn raising_a_window_past_windows_it_does_not_overlap_costs_nothing() {
+    let mut c = new_compositor(mode(64, 64), BLUE).expect("compositor");
+    let left = c.add_window(Point::ORIGIN, opaque(20, 20, RED));
+    assert!(c.set_opacity(left, 128));
+    assert!(c.set_backdrop_blur(left, 4));
+    c.add_window(Point::new(40, 0), opaque(20, 20, GREEN));
+    c.add_window(Point::new(40, 40), opaque(20, 20, RED));
+    composite_checked(&mut c);
+    let before = c.frame().to_vec();
+
+    assert!(c.raise(left), "the window moves to the front");
+
+    assert!(
+        !c.has_damage(),
+        "passing windows it never touches damaged the screen"
+    );
+    assert!(composite_checked(&mut c).is_empty());
+    assert_eq!(c.frame_stats().blur_px, 0);
+    // Nothing moved because nothing could: the frame is the one it was.
+    assert_eq!(c.frame(), before.as_slice());
+}
+
+/// The invariant the old per-frame re-assert existed to protect, now held by
+/// the restack itself: whatever else is raised, a menu stays directly above
+/// the window that owns it.
+#[test]
+fn nothing_can_be_raised_between_a_window_and_its_transient() {
+    let mut c = new_compositor(mode(32, 32), BLUE).expect("compositor");
+    let owner = c.add_window(Point::ORIGIN, opaque(32, 32, RED));
+    let intruder = c.add_window(Point::ORIGIN, opaque(32, 32, GREEN));
+    let menu = c
+        .add_transient_window(owner, Point::new(4, 4), opaque(8, 8, BLUE))
+        .expect("the owner is a window");
+    // Opening the menu brought its owner with it, over the intruder.
+    assert_eq!(c.window_at(Point::new(6, 6)), Some(menu));
+    assert_eq!(c.window_at(Point::new(20, 20)), Some(owner));
+
+    // An intruder raised over the pair goes over *both* of them, never
+    // between: it is the front window, and the menu is still on its owner.
+    assert!(c.raise(intruder));
+    assert_eq!(c.window_at(Point::new(6, 6)), Some(intruder));
+    assert!(c.raise(owner), "a click on the owner brings its menu back");
+    assert_eq!(c.window_at(Point::new(6, 6)), Some(menu));
+    assert_eq!(c.window_at(Point::new(20, 20)), Some(owner));
+
+    // And a raise of the menu itself arranges the pair the same way round.
+    assert!(c.raise(intruder));
+    assert!(c.raise(menu));
+    assert_eq!(c.window_at(Point::new(6, 6)), Some(menu));
+    assert_eq!(c.window_at(Point::new(20, 20)), Some(owner));
+}
+
+/// A window sent to the back takes the menu it owns with it: a transient left
+/// behind would float over windows it does not belong to.
+#[test]
+fn lowering_a_window_takes_its_transient_with_it() {
+    let mut c = new_compositor(mode(32, 32), BLUE).expect("compositor");
+    let owner = c.add_window(Point::ORIGIN, opaque(32, 32, RED));
+    let menu = c
+        .add_transient_window(owner, Point::new(4, 4), opaque(8, 8, BLUE))
+        .expect("the owner is a window");
+    let other = c.add_window(Point::ORIGIN, opaque(32, 32, GREEN));
+    assert!(c.lower(owner));
+
+    assert_eq!(c.window_at(Point::new(6, 6)), Some(other));
+    assert!(c.remove(other));
+    // Beneath it the pair kept its order, owner below its menu.
+    assert_eq!(c.window_at(Point::new(6, 6)), Some(menu));
+    assert_eq!(c.window_at(Point::new(20, 20)), Some(owner));
+    // Lowering the menu lowers the family it belongs to, not just itself.
+    assert!(c.lower(menu));
+    assert_eq!(c.window_at(Point::new(6, 6)), Some(menu));
+}
+
+#[test]
+fn a_transient_needs_a_window_to_belong_to() {
+    let mut c = new_compositor(mode(8, 8), BLUE).expect("compositor");
+    let gone = c.add_window(Point::ORIGIN, opaque(8, 8, RED));
+    assert!(c.remove(gone));
+
+    assert!(
+        c.add_transient_window(gone, Point::ORIGIN, opaque(4, 4, GREEN))
+            .is_none(),
+        "a transient of a window that is not there has no place to hold"
+    );
+    assert_eq!(c.window_count(), 0);
+}
+
+/// A menu outliving the window that owned it stands on its own rather than
+/// naming a window that has gone — so a later raise cannot try to bring a
+/// dead owner along.
+#[test]
+fn a_transient_whose_owner_closes_stands_on_its_own() {
+    let mut c = new_compositor(mode(32, 32), BLUE).expect("compositor");
+    let owner = c.add_window(Point::ORIGIN, opaque(32, 32, RED));
+    let menu = c
+        .add_transient_window(owner, Point::new(4, 4), opaque(8, 8, BLUE))
+        .expect("the owner is a window");
+    let other = c.add_window(Point::ORIGIN, opaque(32, 32, GREEN));
+
+    assert!(c.remove(owner));
+    assert_eq!(c.window(menu).and_then(crate::window::Window::parent), None);
+    assert!(c.raise(menu));
+    assert_eq!(c.window_at(Point::new(6, 6)), Some(menu));
+    assert_eq!(c.window_at(Point::new(20, 20)), Some(other));
 }
 
 #[test]
@@ -725,13 +1197,19 @@ fn a_present_with_no_damage_never_touches_the_display() {
     assert!(display.last.is_empty(), "the driver was not called at all");
 }
 
+/// The reported stall's shape, at the compositor's own boundary: a frame
+/// that changed two far-apart places — a popup and the title band its owner
+/// repainted — publishes itself in **one** call naming both rectangles.
+/// One call per rectangle was what made the driver copy a box spanning them,
+/// twice.
 #[test]
-fn two_disjoint_dirty_rectangles_present_exactly_those_rectangles() {
+fn two_disjoint_dirty_rectangles_present_exactly_those_rectangles_in_one_call() {
     let m = mode(64, 64);
     let mut c = new_compositor(m, BLUE).expect("compositor");
     let mut display = MockDisplay::new(m);
     assert!(c.present(&mut display).is_ok());
     display.full_presents = 0;
+    display.rect_presents = 0;
 
     // A repaint at the top-left and one at the bottom-right: their bounding
     // box is nearly the whole screen, the changed pixels are two small
@@ -743,6 +1221,10 @@ fn two_disjoint_dirty_rectangles_present_exactly_those_rectangles() {
     assert_eq!(
         display.full_presents, 0,
         "a partial frame is not a full present"
+    );
+    assert_eq!(
+        display.rect_presents, 1,
+        "a frame publishes itself once, whatever it changed"
     );
     assert_eq!(display.regions.len(), 2);
     assert!(display.regions.contains(&DamageRect {
@@ -776,23 +1258,27 @@ fn whole_screen_damage_presents_the_frame_once() {
     );
 }
 
+/// Past the list's bound the frame presents its bounding box: over-covering
+/// costs pixels, dropping a rectangle would leave stale ones on screen. It
+/// is still one call — the bound is what the message can carry, not how
+/// often a frame may publish.
 #[test]
-fn more_dirty_rectangles_than_the_limit_collapse_to_one_bounding_present() {
+fn more_dirty_rectangles_than_the_list_holds_collapse_to_one_bounding_present() {
     let m = mode(64, 64);
     let mut c = new_compositor(m, BLUE).expect("compositor");
     let mut display = MockDisplay::new(m);
     assert!(c.present(&mut display).is_ok());
     display.full_presents = 0;
+    display.rect_presents = 0;
 
-    // One more scattered rectangle than the per-rectangle path carries:
-    // their round trips would cost more than one call copying their box.
-    let count = i32::try_from(MAX_PRESENT_REGIONS + 1).expect("a small limit");
+    let count = i32::try_from(MAX_DAMAGE_RECTS + 1).expect("a small limit");
     for step in 0..count {
         c.add_window(Point::new(step * 6, 0), opaque(4, 4, RED));
     }
     assert!(c.present(&mut display).is_ok());
 
     assert_eq!(display.full_presents, 0);
+    assert_eq!(display.rect_presents, 1);
     let width = u32::try_from((count - 1) * 6 + 4).expect("on screen");
     assert_eq!(
         display.regions,
@@ -803,6 +1289,18 @@ fn more_dirty_rectangles_than_the_limit_collapse_to_one_bounding_present() {
             height_px: 4,
         }]
     );
+
+    // Exactly the bound still names every rectangle: the degradation begins
+    // one past it, not at it.
+    let mut c = new_compositor(m, BLUE).expect("compositor");
+    let mut display = MockDisplay::new(m);
+    assert!(c.present(&mut display).is_ok());
+    display.regions.clear();
+    for step in 0..count - 1 {
+        c.add_window(Point::new(step * 6, 0), opaque(4, 4, RED));
+    }
+    assert!(c.present(&mut display).is_ok());
+    assert_eq!(display.regions.len(), MAX_DAMAGE_RECTS);
 }
 
 // ---- shared theme integration (lib/theme) ---------------------------
@@ -1822,6 +2320,32 @@ fn hidden_window_is_omitted_from_the_layer_stack() {
     assert_eq!(display.layers.len(), 1, "only the background remains");
 }
 
+/// An engine blends a layer over what is beneath it in the scan-out's own 8
+/// bits with a fixed rounding, which is exactly what bands a picture under a
+/// translucent field. The compositor keeps such a scene for itself, where the
+/// blend can spread its rounding across the area, as it already does for a
+/// backdrop blur.
+#[test]
+fn a_translucent_window_takes_the_software_path_the_engine_cannot_dither() {
+    let mut c = new_compositor(mode(8, 8), BLUE).expect("compositor");
+    let win = c.add_window(Point::new(1, 1), opaque(2, 2, RED));
+    assert!(c.set_opacity(win, 200));
+    let mut display = MockAccel::new(mode(8, 8), generous_caps());
+
+    c.present_accelerated(&mut display).expect("present");
+
+    assert!(display.layers.is_empty(), "no layer stack was handed over");
+    assert!(
+        !display.software_frame.is_empty(),
+        "the frame went through the software composite"
+    );
+
+    // Opaque again, and the engine serves the scene as before.
+    assert!(c.set_opacity(win, 255));
+    c.present_accelerated(&mut display).expect("present");
+    assert_eq!(display.layers.len(), 2, "background + window");
+}
+
 #[test]
 fn accelerated_present_falls_back_when_over_layer_budget() {
     let mut c = new_compositor(mode(8, 8), BLUE).expect("compositor");
@@ -1957,6 +2481,16 @@ fn the_blur_is_confined_to_the_window_rectangle() {
     }
     let [r, _, b, _] = frame_pixel(&frosted, 5, 2);
     assert!(r > 0 && b > 0, "inside the window the edge is spread");
+}
+
+/// Fill a window's whole content with `color` and report all of it as changed:
+/// the largest damage an application can present.
+fn repaint_all(color: Color) -> impl FnOnce(&mut Surface) -> (bool, Rect) {
+    move |content| {
+        content.fill(color);
+        let damage = Rect::new(0, 0, content.width(), content.height());
+        (true, damage)
+    }
 }
 
 /// Paint one green pixel into a window's content and report exactly that
@@ -2603,11 +3137,114 @@ fn a_focus_flip_repaints_only_the_furniture() {
     // The title rim, by contrast, is dirty.
     assert!(c.damage_covers(Point::new(centre(bounds).x, bounds.top())));
 
-    // The furniture bands never overlap the client (the separate furniture
-    // paint/hit map the design language requires).
+    // The furniture bands reach into the client only where the rim's own curve
+    // does: a corner arc is drawn as frame, and everything further in than the
+    // radius belongs to the client alone (the separate furniture paint/hit map
+    // the design language requires).
+    let radius = c
+        .scale()
+        .scale_length(c.theme().metrics().window_corner_radius);
+    let interior = Rect::new(
+        client.left().saturating_add_unsigned(radius),
+        client.top().saturating_add_unsigned(radius),
+        client.width.saturating_sub(radius.saturating_mul(2)),
+        client.height.saturating_sub(radius.saturating_mul(2)),
+    );
+    assert!(
+        !interior.is_empty(),
+        "the test window must have an interior"
+    );
     for band in c.window(id).unwrap().furniture_bands() {
-        assert!(band.intersection(&client).is_empty());
+        assert!(band.intersection(&interior).is_empty());
     }
+}
+
+#[test]
+fn a_decorated_windows_content_cannot_square_off_its_rounded_corner() {
+    // What the window composites to is exactly the shape its rim traces: a
+    // pixel the shape does not reach shows the desktop, and every pixel it does
+    // reach is drawn. The application's own rows are square, so without the
+    // clip they reached the bottom corners and covered the curve.
+    let (mut c, id) = decorated_compositor();
+    c.composite();
+    let bounds = c.window(id).expect("window").bounds();
+    let shape = c
+        .window(id)
+        .expect("window")
+        .shape()
+        .expect("a decorated window is rounded");
+    let desktop = [BLUE.r, BLUE.g, BLUE.b, 255];
+    for ly in 0..bounds.height {
+        for lx in 0..bounds.width {
+            let px = frame_pixel(
+                &c,
+                bounds.left().cast_unsigned() + lx,
+                bounds.top().cast_unsigned() + ly,
+            );
+            assert_eq!(
+                px != desktop,
+                shape.coverage(lx, ly) > 0,
+                "({lx}, {ly}) is not the shape the rim traces"
+            );
+        }
+    }
+}
+
+#[test]
+fn clipping_the_client_to_the_curve_costs_it_nothing_else() {
+    // The clip takes the corner arcs and nothing more: every client pixel
+    // further in than the radius is still the application's own, whatever the
+    // theme's band and radius are.
+    for theme in [Theme::dark(), Theme::light()] {
+        let (mut c, id) = decorated_compositor();
+        c.set_theme(theme.clone());
+        assert_eq!(c.theme().id(), theme.id(), "the theme is in effect");
+        c.composite();
+        let client = c.window_client_rect(id).expect("client rect");
+        for y in client.top()..client.bottom() {
+            for x in client.left()..client.right() {
+                if in_a_client_corner(&c, client, Point::new(x, y)) {
+                    continue;
+                }
+                assert_eq!(
+                    frame_pixel(&c, x.cast_unsigned(), y.cast_unsigned()),
+                    [RED.r, RED.g, RED.b, 255],
+                    "the client's own pixel at ({x}, {y}) must survive the clip"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn a_decorated_frosted_window_leaves_the_corner_outside_its_rim_alone() {
+    // The frost is confined to the shape the rim traces, not to the window's
+    // rectangle, so a corner the window does not cover keeps the desktop it
+    // had. The backdrop changes colour under the corner, so a blur that
+    // reached it could not go unnoticed.
+    let scene = |blur: u16| {
+        let mut c = new_compositor(mode(64, 64), BLUE).expect("compositor");
+        c.add_window(Point::ORIGIN, opaque(30, 64, RED));
+        let glass = c.add_window(Point::new(28, 0), clear(30, 40));
+        assert!(c.set_window_frame(glass, WindowFrame::new(decorated())));
+        if blur > 0 {
+            assert!(c.set_backdrop_blur(glass, blur));
+        }
+        c.composite();
+        c
+    };
+    let plain = scene(0);
+    let frosted = scene(3);
+    assert_eq!(
+        frame_pixel(&frosted, 28, 0),
+        frame_pixel(&plain, 28, 0),
+        "the corner the rim curves away from keeps its unfrosted pixel"
+    );
+    assert_ne!(
+        frame_pixel(&frosted, 30, 30),
+        frame_pixel(&plain, 30, 30),
+        "the covered client is frosted"
+    );
 }
 
 #[test]
@@ -3837,6 +4474,24 @@ fn titled_window(c: &mut Compositor, x: i32, y: i32, client: u32, title: &str) -
     id
 }
 
+/// Whether client-space `point` lies where a decorated window's own rim curves
+/// through its client area: within the theme's window corner radius of both a
+/// vertical and a horizontal client edge, at this compositor's scale.
+///
+/// The frame owns those pixels — the client is clipped out of them so the curve
+/// the rim traces is what shows there — so a test asking what the *client*
+/// draws asks outside them. An arc reaches no further than its radius from a
+/// corner, so content bleeding anywhere else cannot hide behind this.
+fn in_a_client_corner(c: &Compositor, client: Rect, point: Point) -> bool {
+    let radius = c
+        .scale()
+        .scale_length(c.theme().metrics().window_corner_radius)
+        .cast_signed();
+    let dx = (point.x - client.left()).min(client.right() - 1 - point.x);
+    let dy = (point.y - client.top()).min(client.bottom() - 1 - point.y);
+    dx < radius && dy < radius
+}
+
 /// The bytes one such window's furniture costs the cache, measured rather
 /// than assumed, so a budget expressed in whole entries stays correct when
 /// the theme's band metrics change.
@@ -4333,7 +4988,7 @@ fn a_hidden_window_s_furniture_is_evicted_before_a_visible_one_s() {
     assert!(c.chrome_resident(newcomer));
 }
 
-// ---- retained frosted backdrops --------------------------------------
+// ---- retained backdrops ----------------------------------------------
 
 /// One scene composed twice: once reusing retained frosts, once blurring
 /// afresh every frame.
@@ -4441,8 +5096,21 @@ fn every_change_around_a_frosted_window_composes_the_frame_a_fresh_blur_would() 
     both.settle("the window below shown");
     both.both(|c| c.set_background(RED));
     both.settle("the root fill recoloured");
-    both.both(|c| c.repaint_desktop(|surface| surface.fill(GREEN)));
+    both.both(|c| {
+        let whole = Region::from(c.screen_rect());
+        c.repaint_desktop(&whole, |surface, rects| {
+            paint_desktop_rects(surface, rects, GREEN);
+        })
+    });
     both.settle("the desktop layer repainted");
+    both.both(|c| {
+        let mut area = Region::new();
+        area.add(Rect::new(4, 3, 9, 6));
+        c.repaint_desktop(&area, |surface, rects| {
+            paint_desktop_rects(surface, rects, BLUE);
+        })
+    });
+    both.settle("part of the desktop layer repainted");
 
     // The frosted window's own geometry, shape, radius, and density.
     both.both(|c| c.move_window(glass, Point::new(7, 5)));
@@ -4541,6 +5209,295 @@ fn a_window_dragged_across_a_frosted_one_never_costs_a_re_blur() {
         c.frost_cache_stats().hits(),
         served + 5,
         "every frame of the drag served the retained frost"
+    );
+}
+
+#[test]
+fn dragging_a_frosted_window_blurs_only_the_border_the_move_uncovers() {
+    // The interaction this cache was least good at: the frosted window itself
+    // being dragged. Its rectangle moves, so the frost taken for the old one no
+    // longer describes it — but the layers *beneath* it did not move, so every
+    // pixel far enough inside both rectangles that neither the blur's
+    // replication nor the shape's corners can reach it is still exactly right.
+    // Only the border is blurred again.
+    const SIDE: (u32, u32) = (200, 140);
+    const RADIUS: u16 = 4;
+    let mut c = new_compositor(mode(320, 240), BLUE).expect("compositor");
+    c.add_window(Point::ORIGIN, opaque(320, 240, GREEN));
+    let glass = c.add_window(Point::new(40, 40), clear(SIDE.0, SIDE.1));
+    assert!(c.set_backdrop_blur(glass, RADIUS));
+    composite_checked(&mut c);
+    let whole = u64::from(SIDE.0 * SIDE.1);
+    assert_eq!(
+        c.frame_stats().blur_px,
+        whole,
+        "the first frame has nothing to keep"
+    );
+
+    // A pointer sample's worth of movement, several times over, so the steady
+    // state of a drag is what is measured and not just its first step.
+    for step in 1..=5 {
+        assert!(c.move_window(glass, Point::new(40 + step * 3, 40 + step * 3)));
+        assert!(
+            c.frost_resident(glass),
+            "moving a window changes nothing beneath it, so its frost survives"
+        );
+        composite_checked(&mut c);
+        let blurred = c.frame_stats().blur_px;
+        assert!(blurred > 0, "the border it uncovered must be blurred");
+        assert!(
+            blurred * 5 < whole,
+            "step {step} blurred {blurred} of {whole} pixels; the border of a \
+             three-pixel move is a small fraction of the window"
+        );
+    }
+
+    // A jump far enough to leave no shared core at all falls back to blurring
+    // the whole rectangle rather than producing a seam.
+    assert!(c.move_window(glass, Point::new(300, 220)));
+    composite_checked(&mut c);
+    assert_eq!(
+        c.frame_stats().blur_px,
+        20 * 20,
+        "a window jumped clear of itself keeps nothing, and only its \
+         on-screen part is frosted"
+    );
+}
+
+#[test]
+fn every_change_around_a_translucent_window_composes_the_frame_a_fresh_one_would() {
+    // The same sweep as the frosted one above, over a window that is merely
+    // translucent. It retains its backdrop through the same cache — a blur of
+    // radius zero leaves the composed layers exactly as they were — so every
+    // way the picture beneath it can change has to drop it, and a frame that
+    // kept one it should not have differs from a frame that composed the stack
+    // afresh.
+    let mut both = BothWays::new(mode(40, 24));
+    let under = both.both(|c| c.add_window(Point::ORIGIN, opaque(40, 24, GREEN)));
+    let glass = both.both(|c| c.add_window(Point::new(6, 4), opaque(20, 14, RED)));
+    let over = both.both(|c| c.add_window(Point::new(30, 2), opaque(8, 8, BLUE)));
+    both.both(|c| c.set_opacity(glass, 160));
+    both.settle("the first translucent backdrop");
+
+    both.both(|c| present_content(c, glass, paint_dot));
+    both.settle("the translucent window's own content");
+    both.both(|c| {
+        c.set_cursor(solid_cursor(4, RED), Point::new(12, 9));
+        true
+    });
+    both.settle("a cursor over it");
+    both.both(|c| c.move_cursor(Point::new(14, 10)));
+    both.settle("a cursor moved over it");
+    both.both(|c| c.set_reveal(128));
+    both.settle("a partial reveal");
+    both.both(|c| c.set_reveal(u8::MAX));
+    both.settle("a full reveal");
+
+    // Above it: nothing its backdrop reads.
+    both.both(|c| c.move_window(over, Point::new(20, 6)));
+    both.settle("the window above dragged onto it");
+    both.both(|c| c.move_window(over, Point::new(14, 8)));
+    both.settle("the window above dragged across it");
+
+    // Beneath it: everything its backdrop reads.
+    both.both(|c| present_content(c, under, paint_dot));
+    both.settle("the window below presented");
+    both.both(|c| c.move_window(under, Point::new(1, 0)));
+    both.settle("the window below moved");
+    both.both(|c| c.set_visible(under, false));
+    both.settle("the window below hidden");
+    both.both(|c| c.set_visible(under, true));
+    both.settle("the window below shown");
+    both.both(|c| c.set_background(GREEN));
+    both.settle("the root fill recoloured");
+    both.both(|c| {
+        let whole = Region::from(c.screen_rect());
+        c.repaint_desktop(&whole, |surface, rects| {
+            paint_desktop_rects(surface, rects, RED);
+        })
+    });
+    both.settle("the desktop layer repainted");
+    both.both(|c| {
+        let mut area = Region::new();
+        area.add(Rect::new(5, 6, 8, 7));
+        c.repaint_desktop(&area, |surface, rects| {
+            paint_desktop_rects(surface, rects, BLUE);
+        })
+    });
+    both.settle("part of the desktop layer repainted");
+
+    // Its own geometry and shape, each of which decides how much survives.
+    both.both(|c| c.move_window(glass, Point::new(7, 5)));
+    both.settle("moved a pointer sample");
+    both.both(|c| c.move_window(glass, Point::new(26, 14)));
+    both.settle("moved clear of where it was");
+    both.both(|c| c.resize_window_client(glass, 22, 12));
+    both.settle("resized");
+    both.both(|c| c.set_corners(glass, Corners::Rounded { radius: 5 }));
+    both.settle("rounded");
+    both.both(|c| c.set_opacity(glass, 90));
+    both.settle("faded further");
+    both.both(|c| c.set_scale(Scale::from_percent(200).expect("valid scale")));
+    both.settle("the density changed");
+    both.both(|c| c.set_scale(Scale::ONE));
+    both.settle("the density restored");
+
+    // Restacking, and a second translucent window overlapping it, so each
+    // reads what the other wrote.
+    both.both(|c| c.raise(glass));
+    both.settle("raised");
+    both.both(|c| c.lower(glass));
+    both.settle("lowered");
+    let second = both.both(|c| c.add_window(Point::new(18, 8), opaque(16, 12, GREEN)));
+    both.both(|c| c.set_opacity(second, 128));
+    both.settle("a second overlapping translucent window");
+    both.both(|c| c.move_window(second, Point::new(20, 9)));
+    both.settle("the second one moved");
+    both.both(|c| present_content(c, under, paint_dot));
+    both.settle("under both of them");
+
+    // Off the screen edge, where the retained rectangle is clipped, then a
+    // blur added on top of the opacity and finally taken away again.
+    both.both(|c| c.move_window(glass, Point::new(-6, -4)));
+    both.settle("partly off screen");
+    both.both(|c| present_content(c, glass, paint_dot));
+    both.settle("the clipped window's own content");
+    both.both(|c| c.set_backdrop_blur(glass, 3));
+    both.settle("blurred as well as translucent");
+    both.both(|c| c.set_backdrop_blur(glass, 0));
+    both.settle("the blur taken away");
+    both.both(|c| c.set_opacity(glass, u8::MAX));
+    both.settle("made opaque, so it retains nothing");
+    both.both(|c| c.remove(second));
+    both.settle("the second one removed");
+    both.both(|c| c.remove(glass));
+    both.settle("the last one removed");
+}
+
+/// Apply `act` to two compositors, requiring both to take it, so the pair
+/// stays in the same state and their frame counters stay comparable.
+fn apply_to_both(a: &mut Compositor, b: &mut Compositor, act: impl Fn(&mut Compositor) -> bool) {
+    assert!(act(a) && act(b), "both stacks take the act");
+}
+
+#[test]
+fn dragging_a_translucent_window_keeps_the_backdrop_it_already_composed() {
+    // The complaint this closes: a translucent window was the *slowest* thing
+    // to drag, because every pointer sample recomposed the whole stack beneath
+    // it. Moving it disturbs nothing below, so all of the backdrop the two
+    // positions share is still exactly right and only the sliver the move
+    // uncovers has to be composed.
+    // Two compositors given identical scenes and identical moves, one keeping
+    // its backdrops and one composing every frame from the root fill up, so
+    // the counters below are the same frame's work measured two ways rather
+    // than two different frames compared.
+    let mut kept = new_compositor(mode(320, 240), BLUE).expect("compositor");
+    let mut fresh = new_compositor(mode(320, 240), BLUE).expect("compositor");
+    fresh.set_frost_reuse(false);
+    let whole = u64::from(200 * 140_u32);
+    apply_to_both(&mut kept, &mut fresh, |c| {
+        c.add_window(Point::ORIGIN, opaque(320, 240, GREEN));
+        // Translucent, so the layer beneath the dragged window has to be
+        // blended rather than copied by the opaque-run path — which is what
+        // makes it something a retained backdrop can spare.
+        let mid = c.add_window(Point::new(20, 20), opaque(260, 190, RED));
+        c.set_opacity(mid, 200)
+    });
+    let glass = kept.add_window(Point::new(40, 40), opaque(200, 140, BLUE));
+    assert_eq!(
+        fresh.add_window(Point::new(40, 40), opaque(200, 140, BLUE)),
+        glass,
+        "ids are handed out in order, so the two stacks stay identical"
+    );
+    apply_to_both(&mut kept, &mut fresh, |c| c.set_opacity(glass, 160));
+    composite_checked(&mut kept);
+    composite_checked(&mut fresh);
+    assert!(kept.frost_resident(glass), "its backdrop is retained");
+
+    for step in 1..=5 {
+        apply_to_both(&mut kept, &mut fresh, |c| {
+            c.move_window(glass, Point::new(40 + step * 3, 40 + step * 3))
+        });
+        composite_checked(&mut kept);
+        composite_checked(&mut fresh);
+        let (with, without) = (kept.frame_stats(), fresh.frame_stats());
+        assert_eq!(
+            (with.blur_px, without.blur_px),
+            (0, 0),
+            "step {step}: nothing in this scene is blurred"
+        );
+        // Keeping the backdrop also keeps the damaged rectangle down to what
+        // the move actually disturbed: a window that must recompose its
+        // backdrop is promoted to its whole bounds first, so the stack beneath
+        // it is resolved over more of the screen as well as more deeply.
+        assert!(
+            with.damaged_px < without.damaged_px,
+            "step {step} damaged {} pixels keeping the backdrop and {} without",
+            with.damaged_px,
+            without.damaged_px
+        );
+        // Its own pixels still blend over the whole rectangle; what the kept
+        // backdrop spares is resolving the layers under it at all — neither
+        // blended nor copied.
+        let resolved = |s: crate::FrameStats| s.blended_px + s.opaque_px;
+        assert!(
+            resolved(with) < whole * 5 / 4,
+            "step {step} resolved {} layer contributions over a {whole}-pixel \
+             window; a kept backdrop leaves the window itself and the sliver \
+             the move uncovered",
+            resolved(with)
+        );
+        assert!(
+            resolved(without) > resolved(with) * 2,
+            "step {step} resolved {} contributions with the backdrop kept \
+             against {} without it; keeping it must spare the stack beneath",
+            resolved(with),
+            resolved(without)
+        );
+    }
+
+    // Both took the same route to the same screen: the saving is work not
+    // done, never a different picture.
+    assert_eq!(kept.frame(), fresh.frame(), "the two screens are identical");
+}
+
+#[test]
+fn a_reused_frost_spares_composing_the_layers_it_covers() {
+    // A frost is copied over whatever is beneath it, so composing that stack
+    // first is work the copy throws away. The window's own pixels still blend
+    // over the frost — one contribution per pixel — and nothing else does.
+    let mut c = new_compositor(mode(40, 24), BLUE).expect("compositor");
+    let under = c.add_window(Point::ORIGIN, opaque(40, 24, GREEN));
+    let glass = c.add_window(Point::new(6, 4), clear(20, 14));
+    assert!(c.set_backdrop_blur(glass, 3));
+    // Translucent as well as frosted, which is the window this is about: an
+    // opaque one would have its pixels copied rather than blended.
+    assert!(c.set_opacity(glass, 200));
+    composite_checked(&mut c);
+    assert!(c.frost_resident(glass));
+
+    // The frosted window repaints all of itself: the frost is reused whole.
+    assert_eq!(present_content(&mut c, glass, repaint_all(RED)), Some(true));
+    composite_checked(&mut c);
+    let stats = c.frame_stats();
+    assert_eq!(stats.blur_px, 0, "a retained frost is copied, not blurred");
+    assert_eq!(
+        (stats.damaged_px, stats.blended_px, stats.opaque_px),
+        (20 * 14, 20 * 14, 0),
+        "one blend per pixel — the window over its frost — and the window \
+         beneath it, which the frost hides, neither blended nor copied"
+    );
+
+    // The same damage with nothing retained pays for that stack: the blur has
+    // to read it.
+    assert_eq!(
+        present_content(&mut c, under, repaint_all(GREEN)),
+        Some(true)
+    );
+    composite_checked(&mut c);
+    assert!(
+        c.frame_stats().opaque_px >= 20 * 14,
+        "a recomputed frost must resolve the layers it blurs"
     );
 }
 
@@ -4836,19 +5793,26 @@ fn tearing_the_seat_down_releases_every_frost() {
 /// A gauge private to the content-release ladder tests: they move the band,
 /// and the shared [`NORMAL_PRESSURE`] must stay at normal for the tests
 /// running beside them.
-static CONTENT_PRESSURE: ReportedPressure = ReportedPressure::unknown();
-
-/// A compositor whose content-release ladder is driven by
-/// [`CONTENT_PRESSURE`], started at the normal band.
-fn releasable_compositor(mode: DisplayMode, background: Color) -> Compositor {
-    CONTENT_PRESSURE.report(PressureBand::Normal);
+/// A compositor whose content-release ladder is driven by `pressure`, started
+/// at the normal band.
+///
+/// The gauge belongs to the calling test, never to the crate: these tests
+/// drive it to different bands and the test binary runs them in parallel, so a
+/// gauge shared between them would let one test's band decide another's
+/// assertion.
+fn releasable_compositor(
+    pressure: &'static ReportedPressure,
+    mode: DisplayMode,
+    background: Color,
+) -> Compositor {
+    pressure.report(PressureBand::Normal);
     NORMAL_PRESSURE.report(PressureBand::Normal);
     Compositor::new(
         mode,
         background,
         test_chrome_cache(),
-        frost_cache(TEST_SEAT, TEST_FB_BYTES, &CONTENT_PRESSURE, &TEST_SINK),
-        &CONTENT_PRESSURE,
+        frost_cache(TEST_SEAT, TEST_FB_BYTES, pressure, &TEST_SINK),
+        pressure,
     )
     .expect("compositor")
 }
@@ -4906,26 +5870,27 @@ fn releasing_content_overwrites_the_pixels_before_dropping_them() {
 
 #[test]
 fn releasing_content_drops_the_retained_bytes_to_zero() {
-    let mut c = releasable_compositor(mode(320, 240), BLUE);
+    static PRESSURE: ReportedPressure = ReportedPressure::unknown();
+    let mut c = releasable_compositor(&PRESSURE, mode(320, 240), BLUE);
     let id = app_window(&mut c, 20, 20, 60, "held");
     assert!(c.set_visible(id, false));
     c.composite();
     let held = c.content_bytes();
     assert_eq!(held, 60 * 60 * size_of::<Pixel>());
 
-    CONTENT_PRESSURE.report(PressureBand::Mild);
+    PRESSURE.report(PressureBand::Mild);
     assert_eq!(c.release_content_under_pressure(None), held);
     assert_eq!(c.content_bytes(), 0);
     assert!(!c.window(id).expect("window").has_content());
-    CONTENT_PRESSURE.report(PressureBand::Normal);
 }
 
 #[test]
 fn a_released_window_composites_as_transparent_and_leaves_the_desktop_identical() {
+    static PRESSURE: ReportedPressure = ReportedPressure::unknown();
     // The desktop shows through where the pixels were; every other pixel
     // on screen — background, furniture, the window beside it — is
     // untouched.
-    let mut c = releasable_compositor(mode(200, 160), BLUE);
+    let mut c = releasable_compositor(&PRESSURE, mode(200, 160), BLUE);
     let kept = app_window(&mut c, 10, 10, 40, "kept");
     present_full(&mut c, kept, GREEN);
     let dropped = app_window(&mut c, 120, 10, 40, "dropped");
@@ -4935,22 +5900,32 @@ fn a_released_window_composites_as_transparent_and_leaves_the_desktop_identical(
     let client = c.window_client_rect(dropped).expect("client rect");
     let before = c.frame().to_vec();
 
-    CONTENT_PRESSURE.report(PressureBand::Critical);
+    PRESSURE.report(PressureBand::Critical);
     assert!(c.release_content_under_pressure(Some(kept)) > 0);
     c.composite();
-    CONTENT_PRESSURE.report(PressureBand::Normal);
+    PRESSURE.report(PressureBand::Normal);
 
-    // The released window's client area is now the desktop background.
+    // The released window's client area is now the desktop background — except
+    // at the corners its own rim curves through, which are frame, not client.
+    let desktop = [BLUE.r, BLUE.g, BLUE.b, 255];
+    let mut corner_drawn = false;
     for y in client.top()..client.bottom() {
         for x in client.left()..client.right() {
             let px = frame_pixel(&c, x.cast_unsigned(), y.cast_unsigned());
+            if in_a_client_corner(&c, client, Point::new(x, y)) {
+                corner_drawn |= px != desktop;
+                continue;
+            }
             assert_eq!(
-                px,
-                [BLUE.r, BLUE.g, BLUE.b, 255],
+                px, desktop,
                 "the released client area must show the desktop at ({x}, {y})"
             );
         }
     }
+    assert!(
+        corner_drawn,
+        "a released window still draws the curve its rim traces"
+    );
     // Everything outside it is byte-for-byte what it was.
     let after = c.frame().to_vec();
     let stride = c.mode().stride_bytes;
@@ -4971,16 +5946,17 @@ fn a_released_window_composites_as_transparent_and_leaves_the_desktop_identical(
 
 #[test]
 fn a_released_window_still_hit_tests_shows_furniture_focuses_and_resizes() {
-    let mut c = releasable_compositor(mode(240, 200), BLUE);
+    static PRESSURE: ReportedPressure = ReportedPressure::unknown();
+    let mut c = releasable_compositor(&PRESSURE, mode(240, 200), BLUE);
     let id = app_window(&mut c, 20, 20, 60, "live");
     present_full(&mut c, id, RED);
     c.composite();
     let bounds = c.window(id).expect("window").bounds();
     let title_band = c.window(id).expect("window").furniture_bands()[0];
 
-    CONTENT_PRESSURE.report(PressureBand::Critical);
+    PRESSURE.report(PressureBand::Critical);
     assert!(c.release_content_under_pressure(None) > 0);
-    CONTENT_PRESSURE.report(PressureBand::Normal);
+    PRESSURE.report(PressureBand::Normal);
     c.composite();
 
     // Still hit-tests over its whole outer rectangle.
@@ -5011,15 +5987,16 @@ fn a_released_window_still_hit_tests_shows_furniture_focuses_and_resizes() {
 
 #[test]
 fn a_full_window_present_after_release_restores_pixel_identical_content() {
-    let mut c = releasable_compositor(mode(200, 160), BLUE);
+    static PRESSURE: ReportedPressure = ReportedPressure::unknown();
+    let mut c = releasable_compositor(&PRESSURE, mode(200, 160), BLUE);
     let id = app_window(&mut c, 20, 20, 50, "restored");
     present_full(&mut c, id, GREEN);
     c.composite();
     let before = c.frame().to_vec();
 
-    CONTENT_PRESSURE.report(PressureBand::Critical);
+    PRESSURE.report(PressureBand::Critical);
     assert!(c.release_content_under_pressure(None) > 0);
-    CONTENT_PRESSURE.report(PressureBand::Normal);
+    PRESSURE.report(PressureBand::Normal);
     c.composite();
     assert_ne!(before, c.frame(), "the release must be visible");
 
@@ -5035,7 +6012,8 @@ fn a_full_window_present_after_release_restores_pixel_identical_content() {
 
 #[test]
 fn the_release_ladder_follows_the_pressure_band() {
-    let mut c = releasable_compositor(mode(320, 240), BLUE);
+    static PRESSURE: ReportedPressure = ReportedPressure::unknown();
+    let mut c = releasable_compositor(&PRESSURE, mode(320, 240), BLUE);
     let focused = app_window(&mut c, 10, 10, 40, "focused");
     let unfocused = app_window(&mut c, 100, 10, 40, "unfocused");
     let hidden = app_window(&mut c, 200, 10, 40, "hidden");
@@ -5046,12 +6024,12 @@ fn the_release_ladder_follows_the_pressure_band() {
     let content = |c: &Compositor, id: WindowId| c.window(id).expect("window").has_content();
 
     // Normal: memory is plentiful and every release costs a repaint.
-    CONTENT_PRESSURE.report(PressureBand::Normal);
+    PRESSURE.report(PressureBand::Normal);
     assert_eq!(c.release_content_under_pressure(Some(focused)), 0);
     assert!(content(&c, focused) && content(&c, unfocused) && content(&c, hidden));
 
     // Mild: only what nobody is looking at.
-    CONTENT_PRESSURE.report(PressureBand::Mild);
+    PRESSURE.report(PressureBand::Mild);
     assert!(c.release_content_under_pressure(Some(focused)) > 0);
     assert!(content(&c, focused), "the focused window is never released");
     assert!(content(&c, unfocused), "a visible window survives mild");
@@ -5059,7 +6037,7 @@ fn the_release_ladder_follows_the_pressure_band() {
     assert_eq!(c.release_content_under_pressure(Some(focused)), 0);
 
     // Critical: visible but unfocused goes too; the focused one never does.
-    CONTENT_PRESSURE.report(PressureBand::Critical);
+    PRESSURE.report(PressureBand::Critical);
     assert!(c.release_content_under_pressure(Some(focused)) > 0);
     assert!(
         content(&c, focused),
@@ -5071,12 +6049,12 @@ fn the_release_ladder_follows_the_pressure_band() {
     present_full(&mut c, focused, RED);
     assert!(c.release_content_under_pressure(None) > 0);
     assert!(!content(&c, focused));
-    CONTENT_PRESSURE.report(PressureBand::Normal);
 }
 
 #[test]
 fn each_release_queues_exactly_one_redraw_request() {
-    let mut c = releasable_compositor(mode(320, 240), BLUE);
+    static PRESSURE: ReportedPressure = ReportedPressure::unknown();
+    let mut c = releasable_compositor(&PRESSURE, mode(320, 240), BLUE);
     let visible = app_window(&mut c, 10, 10, 40, "visible");
     let hidden = app_window(&mut c, 120, 10, 40, "hidden");
     assert!(c.set_visible(hidden, false));
@@ -5084,7 +6062,7 @@ fn each_release_queues_exactly_one_redraw_request() {
     // Hiding a window that still holds its pixels asks for nothing.
     assert!(c.pending_redraws().is_empty());
 
-    CONTENT_PRESSURE.report(PressureBand::Critical);
+    PRESSURE.report(PressureBand::Critical);
     assert!(c.release_content_under_pressure(None) > 0);
     let mut queued = c.pending_redraws();
     queued.sort_unstable_by_key(|id| id.0);
@@ -5101,15 +6079,15 @@ fn each_release_queues_exactly_one_redraw_request() {
     // Showing a window whose pixels are gone asks again, once.
     assert!(c.set_visible(hidden, true));
     assert_eq!(c.pending_redraws(), alloc::vec![hidden]);
-    CONTENT_PRESSURE.report(PressureBand::Normal);
 }
 
 #[test]
 fn an_app_that_ignores_the_redraw_request_leaves_its_window_blank_and_the_desktop_runs_on() {
+    static PRESSURE: ReportedPressure = ReportedPressure::unknown();
     // The event is advisory: a client that never answers simply shows the
     // desktop through its client area. Nothing panics, nothing spins, and
     // every other window keeps compositing.
-    let mut c = releasable_compositor(mode(240, 200), BLUE);
+    let mut c = releasable_compositor(&PRESSURE, mode(240, 200), BLUE);
     let answering = app_window(&mut c, 10, 10, 40, "answers");
     present_full(&mut c, answering, GREEN);
     let silent = app_window(&mut c, 120, 10, 40, "silent");
@@ -5117,9 +6095,9 @@ fn an_app_that_ignores_the_redraw_request_leaves_its_window_blank_and_the_deskto
     c.composite();
     let _ = c.pending_redraws();
 
-    CONTENT_PRESSURE.report(PressureBand::Critical);
+    PRESSURE.report(PressureBand::Critical);
     assert!(c.release_content_under_pressure(None) > 0);
-    CONTENT_PRESSURE.report(PressureBand::Normal);
+    PRESSURE.report(PressureBand::Normal);
     // Both apps were asked; only one of them answers.
     let mut asked = c.pending_redraws();
     asked.sort_unstable_by_key(|id| id.0);
@@ -5132,6 +6110,9 @@ fn an_app_that_ignores_the_redraw_request_leaves_its_window_blank_and_the_deskto
     let silent_client = c.window_client_rect(silent).expect("client rect");
     for y in silent_client.top()..silent_client.bottom() {
         for x in silent_client.left()..silent_client.right() {
+            if in_a_client_corner(&c, silent_client, Point::new(x, y)) {
+                continue;
+            }
             assert_eq!(
                 frame_pixel(&c, x.cast_unsigned(), y.cast_unsigned()),
                 [BLUE.r, BLUE.g, BLUE.b, 255],
@@ -5159,9 +6140,10 @@ fn an_app_that_ignores_the_redraw_request_leaves_its_window_blank_and_the_deskto
 
 #[test]
 fn tearing_content_down_wipes_every_window_and_asks_nobody_to_redraw() {
+    static PRESSURE: ReportedPressure = ReportedPressure::unknown();
     // The seat is going away, so there is nobody left to present: the
     // pixels are overwritten and no request is raised.
-    let mut c = releasable_compositor(mode(240, 200), BLUE);
+    let mut c = releasable_compositor(&PRESSURE, mode(240, 200), BLUE);
     let a = app_window(&mut c, 10, 10, 40, "a");
     let b = app_window(&mut c, 120, 10, 40, "b");
     present_full(&mut c, a, RED);
@@ -5169,10 +6151,10 @@ fn tearing_content_down_wipes_every_window_and_asks_nobody_to_redraw() {
     c.composite();
     assert!(c.content_bytes() > 0);
 
-    CONTENT_PRESSURE.report(PressureBand::Critical);
+    PRESSURE.report(PressureBand::Critical);
     assert!(c.release_content_under_pressure(None) > 0);
     c.teardown_content();
-    CONTENT_PRESSURE.report(PressureBand::Normal);
+    PRESSURE.report(PressureBand::Normal);
     assert_eq!(c.content_bytes(), 0);
     assert!(!c.window(a).expect("window").has_content());
     assert!(!c.window(b).expect("window").has_content());
@@ -5184,10 +6166,11 @@ fn tearing_content_down_wipes_every_window_and_asks_nobody_to_redraw() {
 
 #[test]
 fn a_window_the_embedder_paints_itself_is_never_released() {
+    static PRESSURE: ReportedPressure = ReportedPressure::unknown();
     // The taskbar, a session dialog, the lock screen: nobody would answer
     // a redraw request for them, so releasing their pixels would blank
     // them permanently. An un-declared window keeps every pixel.
-    let mut c = releasable_compositor(mode(240, 200), BLUE);
+    let mut c = releasable_compositor(&PRESSURE, mode(240, 200), BLUE);
     let session_painted = titled_window(&mut c, 10, 10, 40, "bar");
     let app = app_window(&mut c, 120, 10, 40, "app");
     assert!(!c
@@ -5196,9 +6179,9 @@ fn a_window_the_embedder_paints_itself_is_never_released() {
         .is_app_presented());
     c.composite();
 
-    CONTENT_PRESSURE.report(PressureBand::Critical);
+    PRESSURE.report(PressureBand::Critical);
     assert!(c.release_content_under_pressure(None) > 0);
-    CONTENT_PRESSURE.report(PressureBand::Normal);
+    PRESSURE.report(PressureBand::Normal);
     assert!(
         c.window(session_painted).expect("window").has_content(),
         "a window nobody can redraw must keep its pixels"
@@ -5209,9 +6192,9 @@ fn a_window_the_embedder_paints_itself_is_never_released() {
     // Hiding it does not change that: even invisible, no client would
     // present it again.
     assert!(c.set_visible(session_painted, false));
-    CONTENT_PRESSURE.report(PressureBand::Mild);
+    PRESSURE.report(PressureBand::Mild);
     assert_eq!(c.release_content_under_pressure(None), 0);
-    CONTENT_PRESSURE.report(PressureBand::Normal);
+    PRESSURE.report(PressureBand::Normal);
     assert!(c.window(session_painted).expect("window").has_content());
     assert!(c.pending_redraws().is_empty());
 }
@@ -5286,7 +6269,11 @@ fn repainting_the_desktop_layer_reuses_its_buffer_and_damages_its_footprint() {
 
     // With no layer installed the first repaint allocates one at exactly the
     // screen's extent, whatever the painter chooses to draw into it.
-    assert!(c.repaint_desktop(|surface| surface.fill(GREEN)));
+    let whole = Region::from(c.screen_rect());
+    assert!(c.repaint_desktop(&whole, |surface, rects| {
+        assert_eq!(rects, [Rect::new(0, 0, 20, 20)], "the whole layer");
+        paint_desktop_rects(surface, rects, GREEN);
+    }));
     assert_eq!(c.desktop_bounds(), Some(Rect::new(0, 0, 20, 20)));
     assert!(c.has_damage());
     c.composite();
@@ -5295,13 +6282,67 @@ fn repainting_the_desktop_layer_reuses_its_buffer_and_damages_its_footprint() {
     // A second repaint paints into that very buffer: the painter sees the
     // pixels the previous one left, which is what lets a wallpapered desktop
     // touch only the tiles that changed.
-    assert!(c.repaint_desktop(|surface| {
+    let mut corner = Region::new();
+    corner.add(Rect::new(0, 0, 4, 4));
+    assert!(c.repaint_desktop(&corner, |surface, rects| {
         assert_eq!(surface.get(10, 10), Some(GREEN.premultiply()));
-        surface.fill_rect(0, 0, 4, 4, RED);
+        paint_desktop_rects(surface, rects, RED);
     }));
     c.composite();
     assert_eq!(frame_pixel(&c, 2, 2), [255, 0, 0, 255]);
     assert_eq!(frame_pixel(&c, 10, 10), [0, 255, 0, 255], "kept its pixels");
+}
+
+/// A repaint of part of the layer is the ordinary case — an icon takes the
+/// hover — and it must cost that part. The layer is the bottom of the stack,
+/// so marking all of it would recomposite every window above it and blur
+/// every frosted backdrop over it again.
+#[test]
+fn repainting_part_of_the_desktop_layer_marks_only_that_part() {
+    let mut c = new_compositor(mode(20, 20), BLUE).expect("compositor");
+    c.set_desktop(opaque(20, 20, GREEN));
+    c.composite();
+    assert!(!c.has_damage());
+
+    let mut area = Region::new();
+    area.add(Rect::new(2, 3, 5, 4));
+    assert!(c.repaint_desktop(&area, |surface, rects| {
+        assert_eq!(rects, [Rect::new(2, 3, 5, 4)], "only what was asked for");
+        paint_desktop_rects(surface, rects, RED);
+    }));
+    let composed = c.composite();
+    assert_eq!(
+        composed.rects(),
+        [Rect::new(2, 3, 5, 4)],
+        "the rectangle, not the screen"
+    );
+    assert_eq!(c.frame_stats().damaged_px, 20);
+    assert_eq!(frame_pixel(&c, 3, 4), [255, 0, 0, 255]);
+    assert_eq!(frame_pixel(&c, 10, 10), [0, 255, 0, 255], "untouched");
+
+    // Two disjoint cells — the icon that lost the hover and the one that took
+    // it — are two rectangles, and the pixels between them are not repainted.
+    let mut cells = Region::new();
+    cells.add(Rect::new(1, 1, 2, 2));
+    cells.add(Rect::new(16, 16, 2, 2));
+    assert!(c.repaint_desktop(&cells, |surface, rects| {
+        assert_eq!(rects.len(), 2, "two cells, two rectangles");
+        paint_desktop_rects(surface, rects, BLUE);
+    }));
+    let composed = c.composite();
+    assert_eq!(composed.rects().len(), 2, "two cells, still two");
+    assert_eq!(
+        c.frame_stats().damaged_px,
+        8,
+        "both cells and nothing between them"
+    );
+
+    // An area the layer does not cover damages nothing at all, rather than
+    // falling back to the whole layer.
+    let mut off = Region::new();
+    off.add(Rect::new(40, 40, 4, 4));
+    assert!(c.repaint_desktop(&off, |_, _| panic!("nothing to paint")));
+    assert!(!c.has_damage(), "no pixel of the layer was asked for");
 }
 
 #[test]
@@ -5311,9 +6352,14 @@ fn repainting_the_desktop_layer_re_allocates_when_the_screen_size_changed() {
     // installed a partial layer) is replaced by a screen-sized one rather
     // than painted into at the wrong size.
     c.set_desktop(opaque(8, 8, GREEN));
-    assert!(c.repaint_desktop(|surface| {
+    // Asking for one small rectangle still paints the whole fresh layer: a
+    // buffer that has just been allocated holds no pixels worth preserving.
+    let mut area = Region::new();
+    area.add(Rect::new(1, 1, 2, 2));
+    assert!(c.repaint_desktop(&area, |surface, rects| {
         assert_eq!((surface.width(), surface.height()), (20, 20));
-        surface.fill(RED);
+        assert_eq!(rects, [Rect::new(0, 0, 20, 20)], "a fresh layer, whole");
+        paint_desktop_rects(surface, rects, RED);
     }));
     assert_eq!(c.desktop_bounds(), Some(Rect::new(0, 0, 20, 20)));
     c.composite();

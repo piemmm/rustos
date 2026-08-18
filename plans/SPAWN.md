@@ -1173,8 +1173,8 @@ enforced nowhere yet). Session-to-session working notes:
    bottom maps one zeroed `RW` page through the installed `MemMap`
    producer (`MapFlags::FIXED` at the faulting page — `LiveSpace::
    map_anonymous` already accepts any unmapped page-aligned VA and fails
-   closed on the already-resident race), then re-freezes the registry
-   snapshot, exactly as `resolve_file_fault` does.
+   closed on the already-resident race), then publishes exactly the pages it
+   backed into the registry snapshot, exactly as `resolve_file_fault` does.
 3. **`StackBytes` is enforced at the growth path, fail closed.** Growth
    stops at the effective soft bound (per-task `LimitSet`, inherited and
    intersected at spawn); a fault past the limit or below the span stays
@@ -1218,7 +1218,8 @@ enforced nowhere yet). Session-to-session working notes:
   zeroed `RW` pages through the installed `MemMap` producer
   (`MapFlags::FIXED`, `Errno::BadAddress` folded per page as the benign
   resident race), lowering the committed base per page (truthful even on
-  a mid-walk frame exhaustion), and re-freezing the snapshot once.
+  a mid-walk frame exhaustion), and publishing exactly that page range
+  into the snapshot.
   Contiguous growth is the invariant that makes a large frame's
   first-touch-anywhere order safe: no unmapped hole can ever strand above
   the low-water mark (the single-faulting-page walk it replaced wrongly

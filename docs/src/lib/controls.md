@@ -176,6 +176,15 @@ Nothing about the control's feedback is discarded, only moved off the edge:
   groups a row with its own actions inside a panel, and the icon strip has no
   such groups.
 
+A focused control shows **exactly one accent line, and it is the ring**, drawn
+a border inside the plate. Its perimeter keeps the quiet resting rim — under
+the pointer too, where a hover would otherwise lift it — because a ring with a
+second accent edge around it reads as a doubled border rather than as one mark.
+What tells focus from hover is therefore *where* the line sits, not its colour,
+and the pointer still states itself in the plate wash. A rim carrying a role or
+a disposition (a destructive edge, a pending check) is that control's own
+statement and is never demoted for the ring.
+
 `IconButton` is the only family that carries the choice (`IconButton::seated`),
 because it is the only one that appears on both kinds of surface — a window
 toolbar and the desktop's icon strip. `shell::TaskbarItem`, `shell::TraySignal`
@@ -184,6 +193,65 @@ window's title band — and are bar-seated by construction; everything else is
 panel-seated. That is why a window command shows a hover as a plate wash and
 never as an edge: an edge on a command would read as a line drawn round the
 window's corner.
+
+## Surface ground: opaque or floating chrome
+
+Seating says what a control sitting *on* a surface wears. The **ground** is its
+counterpart: whether the backgrounds drawn with a theme cover what is behind
+them or let it through. It is `tairix_theme::SurfaceGround`, and it rides on the
+theme a surface is drawn with (`Theme::floating`, reported by `Theme::ground`)
+rather than on each control, so everything drawn on one surface agrees without
+any of them being told separately — and none can be forgotten and left an opaque
+patch.
+
+- `Opaque` (the default) — backgrounds are the palette's own colours and hide
+  what is behind them.
+- `Floating` — desktop chrome over a backdrop the compositor blurs by
+  `chrome_backdrop_blur`: a background keeps its colour role and takes the
+  palette's chrome alpha for its layer, so the wallpaper and the windows behind
+  read through as a wash of their colours.
+
+Adopting it belongs to whoever puts the surface on screen, the only party that
+knows what is behind it. On the desktop that is the taskbar, which takes the
+floating theme once, so the bar, the four popups it opens, and every control on
+them are translucent by construction; a window's own menus and the pinboard's
+backdrop menu stay opaque, because they cover what they open over. A floating
+surface keeps the role it wears when solid — the bar, its context menu and the
+tray readout ground in `surface_raised`, a `Panel` in `surface` — which is what
+preserves the relationships the theme authored: a resting row still matches its
+panel, a hover wash still steps away from it.
+
+`ground_fill(theme, fill, layer)` is the one rule, and `ChromeLayer` is the only
+choice a call site makes: `Ground` for the surface and anything that reads as
+*part* of it (a list row, a menu row, a scrollbar channel), which is what keeps
+a resting row exactly its ground rather than a patch on it; `Plate`, a step more
+solid, for a control raised on it (a button, a text field, a notification card),
+so it reads as furniture standing on the glass rather than a hole cut in it.
+
+Two rules keep it honest. **Only backgrounds pass through it**: a semantic mark
+— a role fill, a menu's highlighted command, a pressure rail, a Signal Bead, a
+focus ring, a control's own Signal Rim — stays solid, because it has to read
+against whatever wallpaper is behind it, and a mark diluted by the backdrop is
+one a user can miss. A *surface's* own rim is the exception that proves the
+rule: it is that surface's edge rather than a mark on it, so it takes the
+surface's weight and reads as the same glass one step lighter (one step darker
+on a light theme) instead of a hard line the wallpaper cannot reach through.
+**A background is laid down, never composited**: composited over
+the pass beneath it, a translucent fill comes back more opaque than the theme
+authored and the surface frosts nothing, while an opaque colour covers either
+way — the same byte wherever the shape fully covers a pixel, and one rounding
+rather than two on a corner arc — so this is the ordinary path too rather than
+a second one for chrome. One translucent layer per surface follows from the
+same arithmetic: a floating `Panel` draws no header band and states its header
+with the rail and title it already has.
+
+`paint_surface_plate(surface, rect, (radius, border), theme, (fill, layer))` is
+the recipe every surface's own background is drawn by — the rim as a rounded
+ring, then the ground inside it, reporting the interior the caller draws into.
+It is public because the taskbar *is* such a surface without being a control in
+this crate, and `plate_border` beside it is the one rim thickness the whole
+desktop states its edges at, so a surface painted outside this crate cannot
+invent a second.
 
 ## Owner-supplied icon artwork
 

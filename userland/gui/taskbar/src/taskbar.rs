@@ -165,7 +165,7 @@ impl Taskbar {
     pub fn new(config: TaskbarConfig, theme: &Theme) -> Self {
         Self {
             config,
-            theme: theme.clone(),
+            theme: theme.clone().floating(),
             library_button: IconButton::new(IconKind::Library, ControlRole::Neutral)
                 .seated(PlateSeating::Bar),
             files_button: IconButton::new(IconKind::Folder, ControlRole::Neutral)
@@ -191,6 +191,12 @@ impl Taskbar {
     }
 
     /// The active theme the bar lays out and paints with.
+    ///
+    /// It is the desktop theme in its *floating* form: the bar and every popup
+    /// it opens are chrome over a blurred backdrop, so their backgrounds let
+    /// what is behind them through. Adopting it once here is what makes that
+    /// true of everything the bar draws — no control is told separately, and
+    /// none can be left an opaque patch.
     #[must_use]
     pub const fn theme(&self) -> &Theme {
         &self.theme
@@ -499,7 +505,7 @@ impl Taskbar {
     /// runtime dark/light switch needs no relayout of the model. Every
     /// surface draws from the theme's palette, so every surface repaints.
     pub fn apply_theme(&mut self, theme: &Theme) {
-        self.theme = theme.clone();
+        self.theme = theme.clone().floating();
         self.repaint = TaskbarRepaint::ALL;
     }
 

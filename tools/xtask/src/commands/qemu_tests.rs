@@ -5507,13 +5507,13 @@ static TESTS: &[QemuTest] = &[
             ScreendumpPlan {
                 marker: AUTOLOAD_DESKTOP_REVEALED_MARKER,
                 occurrences: 1,
-                suffix: "bare-bar",
+                suffix: TASKBAR_BARE_BAR_DUMP,
                 assert: assert_bare_bar_dark_screendump,
             },
             ScreendumpPlan {
                 marker: tairix_test_taskbar_pin_qemu_aarch64::SWITCHBOARD_PANEL_MARKER,
                 occurrences: 1,
-                suffix: "pinned-bar",
+                suffix: TASKBAR_PINNED_BAR_DUMP,
                 assert: assert_pinned_bar_dark_screendump,
             },
         ],
@@ -7441,6 +7441,12 @@ fn rect_centre(rect: tairix_geometry::Rect, what: &str) -> Result<tairix_geometr
 /// above the nothing an empty slot covers.
 const MIN_PIN_GLYPH_SHARE: f64 = 0.05;
 
+/// The taskbar-pin vertical's two screendump names. The pinned frame is read
+/// against the bare one, so the pair is named here rather than only in the
+/// plan that schedules them.
+const TASKBAR_BARE_BAR_DUMP: &str = "bare-bar";
+const TASKBAR_PINNED_BAR_DUMP: &str = "pinned-bar";
+
 /// The screen rectangle of the bar's first pin slot, reconstructed through
 /// the production taskbar's own layout code with a single pin in the strip
 /// — exactly the state the session leaves the bar in once a pin is
@@ -7469,33 +7475,48 @@ fn taskbar_pin_slot_rect(theme: &tairix_theme::Theme) -> Result<tairix_geometry:
         .ok_or_else(|| "taskbar pin script: the bar reserves no first pin slot".to_string())
 }
 
-/// The share of the bar's first pin slot whose pixels differ from the bar's
-/// own plate colour — the fraction a drawn pin's glyph covers. An empty
-/// slot is the bar fill and nothing else, so it measures exactly zero.
+/// The share of the bar's first pin slot whose pixels differ from the same
+/// slot in `bare` — the fraction a drawn pin's glyph covers.
+///
+/// The bar is floating chrome: a translucent fill over a backdrop the
+/// compositor blurs, so an empty slot has no single expected colour to test
+/// against. What it does have is the pixels that very slot showed earlier in
+/// the same run, before anything was pinned. Reading one screen position
+/// across the two frames holds the wallpaper, the blur, and the bar's own
+/// fill fixed, so what is left is the pin — a direct measure of what the
+/// script's gesture drew, rather than of a colour the bar no longer has.
+///
+/// Nothing else disturbs the slot between the dumps: the script's last
+/// gesture leaves the pointer on the trailing Switchboard capsule, so the
+/// leading pin slot carries no hover of its own.
 fn pin_slot_glyph_share(
     t: &QemuTest,
     path: &Path,
-    image: &tairix_qemu::screendump::Image,
+    frames: (
+        &tairix_qemu::screendump::Image,
+        &tairix_qemu::screendump::Image,
+    ),
     theme: &tairix_theme::Theme,
 ) -> Result<f64, String> {
+    let (image, bare) = frames;
     let slot = taskbar_pin_slot_rect(theme)?;
-    let plate = theme.palette().surface_raised;
-    let bar = (plate.r, plate.g, plate.b);
     #[allow(clippy::cast_sign_loss)] // The bar's slots are at positive screen offsets.
     let (left, top) = (slot.left() as u32, slot.top() as u32);
     let mut total = 0u64;
     let mut glyph = 0u64;
     for y in top..top + slot.height {
         for x in left..left + slot.width {
-            let pixel = image.pixel(x, y).map_err(|e| {
-                format!(
-                    "test --qemu ({}): screendump {} lacks the bar's first pin slot: {e}",
-                    t.package,
-                    path.display(),
-                )
-            })?;
+            let read = |from: &tairix_qemu::screendump::Image| {
+                from.pixel(x, y).map_err(|e| {
+                    format!(
+                        "test --qemu ({}): screendump {} lacks the bar's first pin slot: {e}",
+                        t.package,
+                        path.display(),
+                    )
+                })
+            };
             total += 1;
-            if pixel != bar {
+            if read(image)? != read(bare)? {
                 glyph += 1;
             }
         }
@@ -7508,28 +7529,49 @@ fn pin_slot_glyph_share(
     })
 }
 
-/// [`ScreendumpPlan`] assertion for the taskbar-pin vertical's **first**
-/// dump, taken on the first fully-revealed desktop frame: the dark-theme
-/// session has composited its own wallpaper, and the bar's first pin slot
-/// is nothing but the bar's own fill. That is the baseline the second dump
-/// is read against — the strip is provably empty before the script pins
-/// anything, so a glyph found there later can only be the pin this run
-/// created.
-fn assert_bare_bar_dark_screendump(t: &QemuTest, path: &Path) -> Result<(), String> {
-    let theme = tairix_theme::Theme::dark();
-    let image = read_screendump(t, path)?;
-    assert_desktop_wallpaper(t, path, &image, &theme, &[])?;
-    let share = pin_slot_glyph_share(t, path, &image, &theme)?;
-    if share > 0.0 {
+/// The bare-bar dump taken earlier in the same run, beside `path`.
+///
+/// The runner names a dump after the plan entry that scheduled it, so the
+/// pinned frame's own path names its baseline; a `path` that is not the
+/// pinned dump is a wiring mistake and fails closed rather than reading some
+/// other frame.
+fn bare_bar_dump_path(t: &QemuTest, path: &Path) -> Result<PathBuf, String> {
+    let name = path.file_name().and_then(|n| n.to_str()).ok_or_else(|| {
+        format!(
+            "test --qemu ({}): screendump {} has no readable file name",
+            t.package,
+            path.display(),
+        )
+    })?;
+    let bare = name.replace(
+        &format!(".{TASKBAR_PINNED_BAR_DUMP}."),
+        &format!(".{TASKBAR_BARE_BAR_DUMP}."),
+    );
+    if bare == name {
         return Err(format!(
-            "test --qemu ({}): screendump {} already shows something in the bar's first pin \
-             slot before anything was pinned: {share:.3} of the slot differs from the bar's \
-             own plate colour (expected none)",
+            "test --qemu ({}): screendump {} is not the pinned-bar dump, so the bare-bar \
+             frame it is read against cannot be named",
             t.package,
             path.display(),
         ));
     }
-    Ok(())
+    Ok(path.with_file_name(bare))
+}
+
+/// [`ScreendumpPlan`] assertion for the taskbar-pin vertical's **first**
+/// dump, taken on the first fully-revealed desktop frame: the dark-theme
+/// session has composited its own wallpaper, and the bar carries nothing the
+/// script has pinned yet.
+///
+/// This frame is also the baseline the second dump is read against
+/// ([`pin_slot_glyph_share`]), which is what turns "a glyph is in the slot"
+/// into "this run's gesture drew it there": the two frames are the same
+/// screen, so a pin slot that differs between them differs *because of the
+/// pinning*.
+fn assert_bare_bar_dark_screendump(t: &QemuTest, path: &Path) -> Result<(), String> {
+    let theme = tairix_theme::Theme::dark();
+    let image = read_screendump(t, path)?;
+    assert_desktop_wallpaper(t, path, &image, &theme, &[])
 }
 
 /// [`ScreendumpPlan`] assertion for the taskbar-pin vertical's **second**
@@ -7548,12 +7590,13 @@ fn assert_bare_bar_dark_screendump(t: &QemuTest, path: &Path) -> Result<(), Stri
 fn assert_pinned_bar_dark_screendump(t: &QemuTest, path: &Path) -> Result<(), String> {
     let theme = tairix_theme::Theme::dark();
     let image = read_screendump(t, path)?;
-    let share = pin_slot_glyph_share(t, path, &image, &theme)?;
+    let bare = read_screendump(t, &bare_bar_dump_path(t, path)?)?;
+    let share = pin_slot_glyph_share(t, path, (&image, &bare), &theme)?;
     if share < MIN_PIN_GLYPH_SHARE {
         return Err(format!(
             "test --qemu ({}): screendump {} shows no pin in the bar's first slot: only \
-             {share:.3} of the slot differs from the bar's own plate colour (expected >= \
-             {MIN_PIN_GLYPH_SHARE})",
+             {share:.3} of the slot differs from the same slot before anything was pinned \
+             (expected >= {MIN_PIN_GLYPH_SHARE})",
             t.package,
             path.display(),
         ));
@@ -8835,7 +8878,7 @@ fn finish_run(t: &QemuTest, kernel: &Path, spec: Spec) -> Result<(), String> {
         Outcome::Timeout { budget, serial } => {
             persist_failure_serial(t.package, &serial_log, &serial)?;
             Err(format!(
-                "test --qemu ({}) TIMEOUT after {budget:?} with no serial output (no retries per AGENTS.md §7; full serial: {})\n--- serial ---\n{serial}\n--- end ---",
+                "test --qemu ({}) HUNG: the guest fell silent for its whole {budget:?} inactivity budget; the transcript's last line is the stall point (no retries per AGENTS.md §7; full serial: {})\n--- serial ---\n{serial}\n--- end ---",
                 t.package,
                 serial_log.display()
             ))

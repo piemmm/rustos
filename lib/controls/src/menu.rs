@@ -23,8 +23,9 @@ use tairix_theme::{TextRole, Theme};
 
 use crate::damage;
 use crate::paint::{
-    draw_outline, heavy_contrast, inset, paint_bead, paint_chevron, plate_border, resolve_bead,
-    role_font, surface_rect, text_plate_height, to_i32, ChevronDir,
+    draw_outline, ground_fill, heavy_contrast, inset, paint_bead, paint_chevron,
+    paint_surface_plate, plate_border, resolve_bead, role_font, surface_rect, text_plate_height,
+    to_i32, ChevronDir, ChromeLayer,
 };
 use crate::state::{ControlDisposition, ControlRole, ControlState, RenderInvariant};
 
@@ -217,6 +218,11 @@ impl MenuItem {
         // its emphasis colour (danger for a destructive item, else accent); a
         // non-actionable current row (denied, disabled, pending) shows only a
         // quiet pressed tint so it never masquerades as an available action.
+        //
+        // The emphasis colour is the statement itself, so it stays solid even
+        // on floating chrome, where a wallpaper reading through it could leave
+        // the highlighted command the same weight as the rest. The quiet tint
+        // is only a background and takes the surface's own alpha.
         if current {
             let fill = if actionable {
                 match self.role {
@@ -225,7 +231,7 @@ impl MenuItem {
                     _ => palette.accent,
                 }
             } else {
-                palette.surface_pressed
+                ground_fill(theme, palette.surface_pressed, ChromeLayer::Ground)
             };
             surface.fill_rect(x, y, w, h, Color::from(fill));
         }
@@ -716,19 +722,13 @@ impl Menu {
             .min(w / 2)
             .min(h / 2);
 
-        // The elevated command plate: Signal Rim then the raised surface.
-        surface.fill_round_rect(x, y, w, h, radius, Color::from(palette.rim));
-        let Some((ix, iy, iw, ih)) = inset(x, y, w, h, border) else {
+        // The elevated command plate: Signal Rim then the ground.
+        let plate = (palette.surface_raised, ChromeLayer::Ground);
+        let Some((ix, iy, iw, ih)) =
+            paint_surface_plate(surface, (x, y, w, h), (radius, border), theme, plate)
+        else {
             return;
         };
-        surface.fill_round_rect(
-            ix,
-            iy,
-            iw,
-            ih,
-            radius.saturating_sub(border),
-            Color::from(palette.surface_raised),
-        );
 
         let rule = Self::divider_rule(scale, theme);
         let gap = Self::divider_gap(scale, theme);

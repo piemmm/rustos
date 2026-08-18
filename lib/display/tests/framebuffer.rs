@@ -167,7 +167,7 @@ fn present_handles_non_word_multiple_surface() {
 }
 
 #[test]
-fn present_region_blits_only_the_damaged_span() {
+fn present_rects_blits_only_the_damaged_spans() {
     let host = MockHost::full(8);
     let mut fb = Framebuffer::open(&host, config(4, 2, 16)).expect("open");
     let frame = vec![0xEEu8; 32];
@@ -177,7 +177,7 @@ fn present_region_blits_only_the_damaged_span() {
         width_px: 2,
         height_px: 1,
     };
-    fb.present_region(&frame, damage).expect("region present");
+    fb.present_rects(&frame, &[damage]).expect("region present");
     let mapper = host.mapper.as_ref().expect("mapper");
     // Row 1, pixels 1..3 (bytes 20..28) carry the frame; all else is 0.
     for off in 0..32 {
@@ -186,8 +186,59 @@ fn present_region_blits_only_the_damaged_span() {
     }
 }
 
+/// One call carries a whole frame's damage: each rectangle is blitted at
+/// its own size, and a bad one anywhere in the list leaves the surface
+/// untouched rather than half-updated.
 #[test]
-fn present_region_fails_closed_on_bad_damage_and_short_frame() {
+fn present_rects_blits_a_whole_list_or_none_of_it() {
+    let host = MockHost::full(8);
+    let mut fb = Framebuffer::open(&host, config(4, 2, 16)).expect("open");
+    let frame = vec![0xEEu8; 32];
+    let corners = [
+        DamageRect {
+            x: 0,
+            y: 0,
+            width_px: 1,
+            height_px: 1,
+        },
+        DamageRect {
+            x: 3,
+            y: 1,
+            width_px: 1,
+            height_px: 1,
+        },
+    ];
+
+    // A rectangle escaping the surface refuses the whole list, including
+    // the good rectangle ahead of it.
+    let escaping = [
+        corners[0],
+        DamageRect {
+            x: 3,
+            y: 0,
+            width_px: 2,
+            height_px: 1,
+        },
+    ];
+    assert_eq!(
+        fb.present_rects(&frame, &escaping),
+        Err(DriverError::LengthOutOfRange)
+    );
+    let mapper = host.mapper.as_ref().expect("mapper");
+    for off in 0..32 {
+        assert_eq!(mapper.byte(off), 0x00, "byte {off} was written anyway");
+    }
+
+    fb.present_rects(&frame, &corners).expect("both corners");
+    // Only the two corner pixels: bytes 0..4 and 28..32.
+    for off in 0..32 {
+        let expected = if (4..28).contains(&off) { 0x00 } else { 0xEE };
+        assert_eq!(mapper.byte(off), expected, "byte {off}");
+    }
+}
+
+#[test]
+fn present_rects_fails_closed_on_bad_damage_and_short_frame() {
     let host = MockHost::full(8);
     let mut fb = Framebuffer::open(&host, config(4, 2, 16)).expect("open");
     let frame = vec![0xEEu8; 32];
@@ -207,7 +258,7 @@ fn present_region_fails_closed_on_bad_damage_and_short_frame() {
         },
     ] {
         assert_eq!(
-            fb.present_region(&frame, damage),
+            fb.present_rects(&frame, &[damage]),
             Err(DriverError::LengthOutOfRange)
         );
     }
@@ -219,7 +270,7 @@ fn present_region_fails_closed_on_bad_damage_and_short_frame() {
         height_px: 2,
     };
     assert_eq!(
-        fb.present_region(&frame[..16], full),
+        fb.present_rects(&frame[..16], &[full]),
         Err(DriverError::BufferTooSmall)
     );
     let mapper = host.mapper.as_ref().expect("mapper");
@@ -229,7 +280,7 @@ fn present_region_fails_closed_on_bad_damage_and_short_frame() {
 }
 
 #[test]
-fn present_region_is_seat_gated_before_any_write() {
+fn present_rects_is_seat_gated_before_any_write() {
     let host = MockHost {
         mmio_map: true,
         mapper: Some(MockMapper::new(8, true)),
@@ -246,7 +297,7 @@ fn present_region_is_seat_gated_before_any_write() {
         height_px: 1,
     };
     assert_eq!(
-        fb.present_region(&frame, damage),
+        fb.present_rects(&frame, &[damage]),
         Err(DriverError::SeatRevoked)
     );
     let mapper = host.mapper.as_ref().expect("mapper");

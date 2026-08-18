@@ -105,21 +105,37 @@ This crate owns:
   the `colour <= alpha` invariant survives and no halo appears at a
   translucent edge; samples past an edge replicate it, which keeps the
   divisor constant and leaves a uniform field exactly unchanged.
-  `frost_region` is the effect itself: it copies one rectangle of a surface,
-  blurs the copy, and mixes it back weighted by a caller-supplied per-pixel
-  coverage, so a rounded shape fades from frosted to untouched across its own
-  arc rather than showing a square edge. Coverage is asked at coordinates
-  relative to the rectangle's *own* top-left, so a rectangle the surface edge
-  or the active clip window cuts short still reads its whole shape while the
-  frost touches only what the bounds and the clip admit. A zero radius, an
-  empty or wholly off-surface rectangle, and a scratch that cannot be grown
-  each leave the surface exactly as it was. `BlurScratch` holds the copy and
-  the blur's intermediate across calls — grown on demand, reused, and handed
-  back by `release` — so the per-frame caller (the compositor frosting a
-  window's backdrop) allocates nothing once it is warm. The effect was the
-  window manager's alone until the graphical login screen needed it behind a
-  selected account tile, and neither the login screen nor any other `lib/*`
-  consumer may depend on the window manager.
+  `frost_region` is the effect itself: it blurs one rectangle of a surface and
+  mixes the result back weighted by a caller-supplied per-pixel coverage, so a
+  rounded shape fades from frosted to untouched across its own arc rather than
+  showing a square edge. Coverage is asked at coordinates relative to the
+  rectangle's *own* top-left, so a rectangle the surface edge or the active clip
+  window cuts short still reads its whole shape while the frost touches only
+  what the bounds and the clip admit. A zero radius, an empty or wholly
+  off-surface rectangle, and a scratch that cannot be grown each leave the
+  surface exactly as it was. Nothing is written until both passes are done,
+  which is what lets the horizontal one read the surface's own rows rather than
+  a copy of them. `BlurScratch` holds the blurred pixels and the pass-to-pass
+  intermediate across calls — grown on demand, reused, and handed back by
+  `release` — so the per-frame caller (the compositor frosting a window's
+  backdrop) allocates nothing once it is warm. The effect was the window
+  manager's alone until the graphical login screen needed it behind a selected
+  account tile, and neither the login screen nor any other `lib/*` consumer may
+  depend on the window manager.
+
+  `frost_region_around` frosts the same rectangle **except** a kept inner
+  block, and writes exactly the pixels the whole-rectangle frost would write
+  around it — proved by a differential sweep over random blocks, radii and
+  coverages. The rectangle still decides the answer: samples replicate at *its*
+  edges and coverage is read at its own coordinates, so a border is never a
+  smaller frost of a smaller rectangle, which would spread a clipped
+  neighbourhood and seam against the pixels it was kept beside. The border's
+  four bands are all blurred before any is mixed back, because a band's
+  neighbourhood reaches into the bands next to it and what it must read there
+  is the *unfrosted* surface. Its caller is the compositor: a frosted window
+  that has moved keeps every retained pixel neither the blur's replication nor
+  its own corners can reach, and pays for the border alone instead of a whole
+  blur per pointer sample.
 
   Each pass costs a load, a running-sum update, a multiply and a store per
   sample. The window is the same size for every output — replicated edges keep
@@ -135,21 +151,38 @@ This crate owns:
   output is byte-identical to a naive `O(area·radius)` average, which
   `blur_tests` asserts over a spread of shapes and radii including the
   single-row, single-column and radius-wider-than-the-region cases.
-- `Surface::blit` — composite one surface over another through the `over`
-  path, clipping a negative origin or an over-large source, so a
+- `blend_span` — composite a run of source pixels over a run of destination
+  pixels, each source scaled by a factor on its way in and both roundings
+  taken at the row's ordered dither. This is the crate's **one span
+  composite**, and every blended run in the desktop goes through it: a blit,
+  and the window manager laying a translucent window's row over the picture
+  beneath it, are the same walk, so a blended pixel is the same arithmetic
+  wherever it comes from. The two slices are paired by position and the
+  shorter ends the walk; the dither is read at each pixel's own *surface*
+  column, so a run split anywhere writes exactly what the whole run wrote and
+  a moving segment boundary can never leave a seam (`color_tests`).
+- `Surface::blit` — composite one surface over another through `blend_span`,
+  clipping a negative origin or an over-large source, so a
   transparent-background sprite (a rasterised cursor or icon) lays onto the
   destination without a rectangular halo.
+- `Surface::overwrite` — the same walk, but each source pixel **replaces**
+  the pixel it lands on. A snapshot is a copy, not a composite: the window
+  manager retains the backdrop beneath a translucent or blurred window with
+  this, and at a screenful a frame the difference between a row copy and
+  reading and blending every pixel is worth having. Sharing one geometry walk
+  with `blit` is what keeps the two clipping identically.
 - `Surface::blit_desaturated` — the same walk with each source pixel pulled
   toward its own luminance first (`Pixel::desaturate`: BT.601 luma, `255`
   identity, `0` pure grey). One definition of saturation reduction, applied on
   the way in, so a caller that draws the same sprite hot and greyed — a window
   title bar's identity icon, focused and not — keeps one cached copy of it.
 - `Surface::fill_vertical_gradient` — a top-to-bottom colour ramp, one span
-  fill per row. Interpolation is in *straight* alpha and premultiplied per
-  row, so a ramp that fades out keeps its hue instead of being dragged toward
-  black. The ramp is evaluated in the rectangle's own coordinates, so a
-  clipped gradient shows the band the whole rectangle would have had rather
-  than a re-scaled one.
+  fill per row. Interpolation is in *straight* alpha, so a ramp that fades out
+  keeps its hue instead of being dragged toward black. The ramp is evaluated in
+  the rectangle's own coordinates, so a clipped gradient shows the band the
+  whole rectangle would have had rather than a re-scaled one. This is the
+  crate's one *wash*, and washes round differently from every other paint — see
+  below.
 - `Surface::mask_to_round_rect` — confine content already painted on a surface
   to a rounded shape: everything outside is cleared and corner pixels are
   scaled by the shared coverage. This is what a *fill* cannot do — a rounded
@@ -162,6 +195,10 @@ This crate owns:
   `Surface::fill_round_rect`'s Reactive Alloy control plates, and the mask
   above all round through this one function, so they never drift apart
   (`AGENTS.md` §2.2).
+- `round_rect_radius` — the radius that coverage actually rounds by: the
+  requested one clamped to half the shorter side. A caller reasoning about
+  *where* a shape's corners are — which rows carry an arc at all, as the
+  compositor asks per window row — reads the clamp rather than restating it.
 - `resample` / `resample_rows` — the single image resampler the whole desktop
   scales through: the icon pipeline fitting a bundle's artwork into a slot and
   the wallpaper pipeline placing a photograph onto a screen are the same
@@ -205,7 +242,11 @@ panel is — rather than a coverage evaluation per pixel.
 A fully opaque source keeps none of the destination, so `Pixel::over` returns
 it unchanged and a full-coverage opaque span is a single slice fill rather
 than a per-pixel blend. A translucent source still takes the general
-Porter–Duff path.
+Porter–Duff path — as a *run* through `blend_span`, so the layer decision,
+the coordinate conversion, and the bounds checks around the arithmetic are
+paid once per run rather than once per pixel. Measurement is what settled
+that shape: in the window manager's composite the arithmetic itself was
+under half the cost of a blended pixel, and the dispatch around it the rest.
 
 `row_span_mut` is the row-at-a-time write seam for a consumer that composites
 through a mask of its own — `lib/font`'s glyph blitter scales a text colour by
@@ -213,6 +254,47 @@ a coverage bitmap through it — so such a consumer also pays one bounds check
 and one index computation per row instead of per pixel. It returns the column
 the span really starts at, so a caller pairing it with its own mask advances
 that mask by whatever leading columns the clip withheld.
+
+## Rounding, and why a translucent paint dithers
+
+Every operator here rounds at a caller-chosen point: `div255_biased(value,
+bias)` is the one divide, and `ROUND_NEAREST` (127) *is* nearest rounding,
+because a quotient's fractional part is a multiple of 1/255 and can never fall
+exactly half way. `div255`, `Pixel::over`, `Pixel::scale_alpha` and the mixer
+are that same arithmetic at that same bias, so naming the rounding point added
+no second definition and moved no existing pixel.
+
+It matters because compositing into 8 bits *loses* levels: a source of alpha
+`a` admits only `256 - a` of the 256 the destination held. Round every pixel
+of a large translucent field the same way and a smoothly varying picture under
+it resolves into flat plateaus with a hard step between them — banding. No
+extra arithmetic precision fixes it; the levels to say it with are gone.
+
+So a **translucent composite into a surface** rounds at a per-pixel bias from
+the ordered (Bayer 8×8) `DitherRow`: a value between two levels lands on the
+lower one in some pixels and the higher one in others, and the area mean
+carries the fraction. A heavy wash over a 64-row ramp keeps 37 of its 64 tones
+apart where a fixed rounding kept nine. That covers the gradient wash, a
+translucent `fill_rect`/`fill_round_rect` plate and its anti-aliased arc, and
+`frost_region`'s mix-back — one rule, no exceptions to remember. The
+compositor (`userland/gui/wm`) reads the same `DitherRow` at each pixel's
+screen position, so a window blended over the wallpaper rounds exactly as a
+wash over it would.
+
+Three properties make it safe to apply everywhere:
+
+- The bias is a pure function of the pixel's **surface** coordinates, so frames
+  are reproducible, two spans that meet cannot seam, and a rectangle
+  recomposited on its own lands where the whole-surface pass would have put it.
+- The tile's mean bias is exactly `ROUND_NEAREST`, so a dithered paint neither
+  lightens nor darkens what it covers, and no pixel is ever more than one level
+  from the undithered answer.
+- A wash of the colour already underneath it is exactly the identity at every
+  bias, so a flat backdrop gains no noise from a paint it cannot see.
+
+An *opaque* source keeps none of the destination, so it stays a slice fill with
+no dither work at all — which is also why the compositor's opaque-run copy path
+is untouched.
 
 ## The resampler
 

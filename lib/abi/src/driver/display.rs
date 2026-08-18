@@ -82,6 +82,23 @@ impl DisplayFormat {
     }
 }
 
+/// The most rectangles one present may name.
+///
+/// A present carries its damage inline — as a slice through
+/// [`Display::present_rects`] in process, and in the fixed-width
+/// [`DisplayRequest::Present`](crate::display_ipc::DisplayRequest) frame on
+/// the wire — so this is a format bound the decoder enforces, not a capacity
+/// that grows with the machine: a hostile request can never make a service
+/// iterate further than this.
+///
+/// A frame's damage is a handful of disjoint places — a popup and the title
+/// band its owner repaints, or the two rectangles a moved cursor leaves —
+/// and eight of them keep the request frame at 152 bytes, small enough that
+/// the whole request stays one plain copyable value. A producer holding more
+/// rectangles than this presents their bounding box instead: over-covering
+/// costs pixels, losing a rectangle would cost correctness.
+pub const MAX_DAMAGE_RECTS: usize = 8;
+
 /// One axis-aligned pixel rectangle of a presented frame, in surface
 /// coordinates (origin top-left) — the *damage* a present names as changed
 /// since the previous frame, so a driver can blit only the touched pixels.
@@ -142,6 +159,26 @@ impl DamageRect {
         let bottom = self.y as u64 + self.height_px as u64;
         if right > mode.width_px as u64 || bottom > mode.height_px as u64 {
             return Err(DriverError::LengthOutOfRange);
+        }
+        Ok(())
+    }
+
+    /// Check a whole present's damage list against `mode`.
+    ///
+    /// The list is checked before its first pixel is read, so a bad
+    /// rectangle refuses the present rather than half-applying it.
+    ///
+    /// # Errors
+    ///
+    /// [`DriverError::LengthOutOfRange`] if the list is empty, holds more
+    /// than [`MAX_DAMAGE_RECTS`] rectangles, or any rectangle is empty or
+    /// falls outside the surface.
+    pub fn validate_list(damage: &[Self], mode: &DisplayMode) -> Result<(), DriverError> {
+        if damage.is_empty() || damage.len() > MAX_DAMAGE_RECTS {
+            return Err(DriverError::LengthOutOfRange);
+        }
+        for rect in damage {
+            rect.validate_in(mode)?;
         }
         Ok(())
     }
@@ -213,17 +250,27 @@ pub trait Display {
     /// Present a fully-rendered frame of which only `damage` changed.
     ///
     /// `frame` carries the **whole** surface exactly as for
-    /// [`Self::present`]; `damage` names the rectangle that differs from
+    /// [`Self::present`]; `damage` names the rectangles that differ from
     /// the previously presented frame, so a driver whose scan-out path is
-    /// a copy can blit only the touched pixels. The default forwards to
-    /// the full-frame [`Self::present`] — a correct (if unoptimised)
-    /// implementation for every existing driver — after validating
-    /// `damage` against the active mode, so a malformed rectangle is
-    /// refused identically on both paths.
+    /// a copy can blit only the touched pixels. It holds one to
+    /// [`MAX_DAMAGE_RECTS`] rectangles and the caller keeps them disjoint,
+    /// so no pixel is blitted twice.
+    ///
+    /// **One call carries a whole frame's damage.** A frame that changed two
+    /// far-apart places — a menu and the title band its owner repainted —
+    /// costs one dispatch and two rectangle-sized blits, never a blit of the
+    /// box spanning them, and never one dispatch per rectangle.
+    ///
+    /// The default forwards to the full-frame [`Self::present`] — a correct
+    /// (if unoptimised) implementation for every existing driver — after
+    /// validating the whole list against the active mode, so a malformed
+    /// rectangle is refused identically on both paths and nothing is
+    /// presented partially.
     ///
     /// # Errors
     ///
-    /// * [`DriverError::LengthOutOfRange`] if `damage` is empty or falls
+    /// * [`DriverError::LengthOutOfRange`] if the list is empty, longer than
+    ///   [`MAX_DAMAGE_RECTS`], or holds a rectangle that is empty or falls
     ///   outside the active mode's surface.
     /// * Everything [`Self::present`] can return.
     ///
@@ -232,9 +279,9 @@ pub trait Display {
     /// Caller must present the driver's
     /// [`DriverHandle`](crate::driver::DriverHandle), exactly as for
     /// [`Self::present`].
-    fn present_region(&mut self, frame: &[u8], damage: DamageRect) -> Result<(), DriverError> {
+    fn present_rects(&mut self, frame: &[u8], damage: &[DamageRect]) -> Result<(), DriverError> {
         let mode = self.mode_info()?;
-        damage.validate_in(&mode)?;
+        DamageRect::validate_list(damage, &mode)?;
         self.present(frame)
     }
 }

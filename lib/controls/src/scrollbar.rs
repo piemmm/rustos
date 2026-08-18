@@ -25,7 +25,10 @@ use tairix_raster::{Color, Surface};
 use tairix_theme::Theme;
 
 use crate::damage;
-use crate::paint::{draw_outline, heavy_contrast, paint_chevron, surface_rect, to_i32, ChevronDir};
+use crate::paint::{
+    draw_outline, ground_fill, heavy_contrast, paint_chevron, surface_rect, to_i32, ChevronDir,
+    ChromeLayer,
+};
 use crate::scroll::{ScrollGeometry, ScrollModel, ScrollOrientation, ThumbSpan, TrackHit};
 use crate::state::{ControlDisposition, ControlState, PointerState, RenderInvariant};
 
@@ -529,7 +532,11 @@ impl ScrollBar {
             return;
         };
         let palette = theme.palette();
-        surface.fill_rect(bx, by, bw, bh, Color::from(palette.scroll_track));
+        // The channel is recessed *into* the surface rather than raised on it,
+        // so on floating chrome it takes the ground's own weight and a bar down
+        // a frosted popup is not an opaque strip.
+        let channel = ground_fill(theme, palette.scroll_track, ChromeLayer::Ground);
+        surface.fill_rect(bx, by, bw, bh, Color::from(channel));
 
         let active = self.is_active();
         let disposition = self.state.disposition();

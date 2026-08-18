@@ -195,23 +195,27 @@ impl Display for Framebuffer<'_> {
         self.blit(frame)
     }
 
-    fn present_region(&mut self, frame: &[u8], damage: DamageRect) -> Result<(), DriverError> {
+    fn present_rects(&mut self, frame: &[u8], damage: &[DamageRect]) -> Result<(), DriverError> {
         // Same order as the full present: the lease first, then every
-        // bound, then the surface.
+        // bound of the whole list, then the surface — so a bad rectangle
+        // late in the list refuses the present instead of leaving the ones
+        // before it on screen.
         if let Some(gate) = self.seat {
             gate.check_present()?;
         }
-        damage.validate_in(&self.mode)?;
+        DamageRect::validate_list(damage, &self.mode)?;
         if frame.len() < self.surface_len {
             return Err(DriverError::BufferTooSmall);
         }
         let stride = self.mode.stride_bytes as usize;
         let bpp = self.mode.format.bytes_per_pixel() as usize;
-        let x0 = damage.x as usize * bpp;
-        let span = damage.width_px as usize * bpp;
-        for row in 0..damage.height_px as usize {
-            let offset = (damage.y as usize + row) * stride + x0;
-            self.blit_span(frame, offset, span)?;
+        for rect in damage {
+            let x0 = rect.x as usize * bpp;
+            let span = rect.width_px as usize * bpp;
+            for row in 0..rect.height_px as usize {
+                let offset = (rect.y as usize + row) * stride + x0;
+                self.blit_span(frame, offset, span)?;
+            }
         }
         Ok(())
     }

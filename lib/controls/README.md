@@ -153,6 +153,51 @@ family that appears on both a window toolbar and the desktop's icon strip.
 `shell::TaskbarItem` and `shell::TraySignal` exist only on the bar and are
 bar-seated by construction; every other family is panel-seated.
 
+A focused control shows **exactly one accent line, and it is the ring**, a
+border inside the plate. The perimeter keeps its quiet resting rim — under the
+pointer too, where a hover would otherwise lift it — because a ring with a
+second accent edge around it reads as a doubled border. Focus is told from
+hover by *where* the line sits, not by its colour, and the pointer still states
+itself in the plate wash. A rim carrying a role or a disposition (a destructive
+edge, a pending check) is that control's own statement and keeps it.
+
+## Surface ground: opaque or floating chrome
+
+The **ground** is seating's counterpart: whether the backgrounds drawn with a
+theme cover what is behind them or let it through. `tairix_theme::SurfaceGround`
+rides on the theme a surface is drawn with (`Theme::floating`, reported by
+`Theme::ground`) rather than on each control, so everything drawn on one surface
+agrees and none can be forgotten and left an opaque patch. `Opaque` (the
+default) draws the palette's own colours; `Floating` — desktop chrome over a
+backdrop the compositor blurs — keeps each background's colour role and takes
+the palette's chrome alpha for its layer, so a floating surface preserves the
+relationships the theme authored (a `Menu` still grounds in `surface_raised`, a
+`Panel` in `surface`).
+
+`ground_fill(theme, fill, layer)` is that one rule, and `ChromeLayer` the only
+choice at a call site: `Ground` for the surface and anything reading as *part*
+of it (a list row, a menu row, a scrollbar channel), so a resting row is exactly
+its ground rather than a patch on it; `Plate`, a step more solid, for a control
+raised on it (a button, a text field, a card), furniture on the glass rather
+than a hole cut in it. Only backgrounds pass through it — a semantic mark (a
+role fill, a menu's highlighted command, a pressure rail, a bead, a focus ring,
+a control's own Signal Rim) stays solid, because it must read against whatever
+wallpaper is behind it; a *surface's* rim is its edge rather than a mark on it,
+so it takes the surface's own weight and reads as the same glass a step lighter
+(a step darker on a light theme). And a background is **laid down**, never
+composited: composited over
+the pass beneath it a translucent fill would come back more opaque than the
+theme authored and frost nothing, while an opaque colour covers either way —
+the same byte wherever the shape fully covers a pixel, one rounding rather than
+two on a corner arc. One translucent layer per surface follows: a floating
+`Panel` draws no header band and states its header with the rail and title it
+already has.
+
+`paint_surface_plate` (rim ring, then the ground inside it, reporting the
+interior) and `plate_border` (the desktop's one rim thickness) are public: the
+taskbar is such a surface without being a control here, and it must not invent
+a second edge recipe.
+
 ## Owner-supplied icon artwork
 
 A `shell::TaskbarItem`, a `collection::IconTile`, a `collection::ListRow`, and

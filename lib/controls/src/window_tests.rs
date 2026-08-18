@@ -16,7 +16,7 @@ use tairix_font::BitmapFont;
 use tairix_geometry::{Point, Rect, Region, Scale};
 use tairix_icon::IconKind;
 use tairix_input::{InputEvent, Key, NamedKey, PointerButton};
-use tairix_raster::{Color, Pixel, Surface};
+use tairix_raster::{round_rect_coverage, Color, Pixel, Surface};
 use tairix_theme::{Rgba, TextRole, Theme};
 
 use alloc::string::String;
@@ -715,6 +715,50 @@ fn the_minimum_outer_size_leaves_a_usable_band_and_a_real_client() {
                 "the floor round-trips through the band {insets:?}"
             );
         }
+    }
+}
+
+#[test]
+fn nothing_the_frame_draws_squares_off_its_rounded_corner() {
+    // The title bar used to fill its whole band — in the very colour the
+    // frame's plate had already laid down, rounded — which squared the two top
+    // corners off. Every pixel outside the rim's arc stays untouched, whatever
+    // the bar has to draw.
+    for theme in [Theme::dark(), Theme::light()] {
+        let mut frame = WindowFrame::new(furniture());
+        frame
+            .title_bar_mut()
+            .set_title("/Users/root/Documents/Projects/tairix");
+        let (w, h) = (200, 120);
+        let mut surface = Surface::new(w, h).expect("surface");
+        frame.render(
+            &mut surface,
+            Rect::new(0, 0, w, h),
+            Scale::ONE,
+            &theme,
+            None,
+        );
+
+        let radius = frame.rim(Scale::ONE, &theme).radius;
+        assert!(radius > 0, "{}: rounds its windows", theme.name());
+        for y in 0..h {
+            for x in 0..w {
+                let drawn = surface.get(x, y) != Some(Pixel::TRANSPARENT);
+                assert_eq!(
+                    drawn,
+                    round_rect_coverage(x, y, w, h, radius) > 0,
+                    "{}: ({x}, {y}) is not the shape the rim traces",
+                    theme.name()
+                );
+            }
+        }
+        // And the rim itself resumes where the arc gives way to a straight run.
+        assert_eq!(
+            surface.get(radius, 0),
+            Some(premul(theme.palette().frame)),
+            "{}: the top rim",
+            theme.name()
+        );
     }
 }
 

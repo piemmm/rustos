@@ -699,7 +699,16 @@ enum Damage {
     /// One control-sized rectangle inside the top window, as a hover flip
     /// does. A blurred window widens this to its own bounds.
     SmallRect,
+    /// The top window moves one pointer sample's worth, as dragging it by
+    /// its title bar does. Its own pixels are untouched — only its origin
+    /// moves — so this is the case a retained frost has to survive.
+    Drag,
 }
+
+/// How far a dragged window travels between two pointer samples. A hand
+/// moving a window across the screen at interactive rates delivers a few
+/// pixels per sample, not one and not a hundred.
+const DRAG_STEP: i32 = 6;
 
 /// What the window stack under test is made of.
 #[derive(Copy, Clone)]
@@ -713,6 +722,8 @@ struct CompositeWarm {
     compositor: RefCell<Compositor>,
     top: WindowId,
     client: (u32, u32),
+    /// Where the top window sits when it is not being dragged.
+    origin: Point,
     flip: Cell<bool>,
 }
 
@@ -730,6 +741,16 @@ fn composite(harness: &BenchHarness<'_>) -> Result<Vec<Measurement>, String> {
             Damage::SmallRect => {
                 let (width, height) = warm.client;
                 compositor.present_window_content(warm.top, width, height, |_| ((), SMALL_DAMAGE));
+            }
+            Damage::Drag => {
+                // Two origins a sample apart, alternated, so a long run of
+                // timed frames each moves the window without walking it off
+                // the screen.
+                let flip = warm.flip.get();
+                warm.flip.set(!flip);
+                let step = if flip { DRAG_STEP } else { 0 };
+                let origin = warm.origin;
+                compositor.move_window(warm.top, Point::new(origin.x + step, origin.y + step));
             }
         }
         region_pixels(&compositor.composite())
@@ -757,6 +778,9 @@ fn composite(harness: &BenchHarness<'_>) -> Result<Vec<Measurement>, String> {
             Stack::BackdropBlur,
             Damage::SmallRect,
         ),
+        ("drag, opaque stack", Stack::Opaque, Damage::Drag),
+        ("drag, translucent stack", Stack::Translucent, Damage::Drag),
+        ("drag, backdrop blur", Stack::BackdropBlur, Damage::Drag),
     ];
     let mut rows = Vec::new();
     for (case, stack, damage) in cases {
@@ -816,9 +840,9 @@ fn scene(stack: Stack) -> Result<CompositeWarm, String> {
                 compositor.set_backdrop_blur(id, 12);
             }
         }
-        top = Some((id, width, height));
+        top = Some((id, origin, width, height));
     }
-    let (top, width, height) =
+    let (top, origin, width, height) =
         top.ok_or_else(|| "bench: the composite scene has no windows".to_string())?;
     // Compose once so the measured frames start from a settled screen.
     compositor.composite();
@@ -826,6 +850,7 @@ fn scene(stack: Stack) -> Result<CompositeWarm, String> {
         compositor: RefCell::new(compositor),
         top,
         client: (width, height),
+        origin,
         flip: Cell::new(false),
     })
 }

@@ -1,13 +1,22 @@
 # FIX-DESKTOP-SPEEDUP — Software-compositor and GUI redraw performance
 
-Status: **A done, B done, C mostly done, D done** (C.0, C.1, C.2, C.4b, C.4c,
+Status: **A done, B done, C mostly done, D done** (B.5 dithers every blended
+pixel and B.6 composes a segment a layer at a time; C.0, C.1, C.2, C.4b, C.4c,
 C.5 landed — every control family reports what it repaints from both input
 paths, and a host now reports its own two kinds of change through the same two
 guarded writes; C.3 has landed for `userland/apps/widgets` with its differential
 proof and five apps remain; C.4a withdrawn as a performance item after
-measurement; D.1–D.4 and D.7 landed, D.5 is a User decision, D.6 is a follow-up
-the measurement exposed).
-E planned.
+measurement; D.1–D.4 and D.7–D.12 landed — a frosted window that moves now keeps
+the frost the move cannot reach, the layers a frost covers are no longer
+composed, and *any* window that reads its backdrop retains one, so a translucent
+drag went from the desktop's slowest to cheaper than a blurred one — D.5 is a
+User decision and D.6 a follow-up the measurements exposed).
+E.1 and E.2 done — a frame is presented **once**, naming every disjoint
+rectangle it changed, so the present path no longer rotates the frame ring
+per rectangle nor copies a bounding box spanning them; E.3/E.4 (frame
+pacing) planned. H done — the kernel no longer re-freezes a task's whole
+address-space snapshot when a syscall or fault maps or releases a region it
+can name, which is what made a popup-window menu cost ~300 ms on a Pi 4B.
 Stages A–E need no hardware acceleration, no kernel change, and no new
 syscall; F needs a `plans/FIX-HARDWARE-FEATURES.md` correction; G is gated on
 a User decision (§15.7) because it is kernel work.
@@ -78,8 +87,8 @@ full-window repaint and a full-window recomposite. Traced end to end:
 | 7 | app present | `client.present(id, 0, DamageRect::full(mode))` — **whole window, always**, after an unpremultiply-and-copy of every pixel into the shared frame | `files`, `terminal`, `viewer`, `wallpaper`, `widgets`, `switchboard` `run.rs` |
 | 8 | session | converts and **diffs every declared pixel** against the window's surface — a whole-window pass per sample | `session::windows::convert_damage` |
 | 9 | compositor | the frost is recomputed over the whole window every time, 2 box-blur passes, **4 integer divides per pixel per pass**, **never cached** | `wm::compositor::blur_backdrop`, `lib/raster/src/blur.rs` `blur_line`/`mean` |
-| 10 | compositor | every damaged pixel: `WindowRow::sample` → `scale_alpha` → `Pixel::over` (4 × `div255`). **No opaque fast path, no occlusion culling** | `wm::compositor::compose_pixel`, `wm::window::WindowRow::sample` |
-| 11 | present | up to `MAX_PRESENT_REGIONS` (8) separate `present_region` round trips, each rotating the 2-frame ring and copying a growing **bounding-box union** of stale damage | `lib/display/src/client.rs` `RemoteDisplay::push`/`copy_region` |
+| 10 | compositor | every damaged pixel: `WindowRow::sample` → `scale_alpha` → `Pixel::over` (4 × `div255`). **No opaque fast path, no occlusion culling** | the per-column walk since replaced by `wm::compositor::compose_segment` |
+| 11 | present | one round trip **per dirty rectangle**, each rotating the 2-frame ring and copying a growing **bounding-box union** of stale damage | the per-rectangle present since replaced by one `Display::present_rects` per frame (E.2) |
 
 Rows 5–10 are the "plummets when the pointer crosses a control-rich window"
 symptom. Rows 9+10 are the "slow when blur or transparency is in use"
@@ -123,7 +132,10 @@ Two build-level facts make any measurement taken today meaningless:
    scene both ways and asserts equality. A change that alters output
    (half-resolution blur, a different rounding) is a *deliberate,
    documented rendering decision with a visual test*, never a silent
-   tweak — and is called out as a decision below.
+   tweak — and is called out as a decision below. Exactly one such change
+   has been made: B.5's per-pixel dither on a *blended* pixel, whose bound
+   (mean unchanged, never more than one level) is stated there; a copied
+   or opaque pixel is still byte-identical.
 3. **Tests assert work, not wall-clock (§7, no flaky tests).** CI gates
    on deterministic counters — pixels blended, rects presented, controls
    repainted, IPC round trips, cache hits — which are load-independent. A
@@ -238,7 +250,7 @@ evidence.
 column that each replace what is beneath them exactly; `compose_row` (the
 row loop, lifted out of `compose_span`) copies such a run into the back
 buffer with `copy_from_slice`, encodes it with one `encode_run`, and takes
-every other column through the unchanged `compose_pixel` → `Pixel::over`.
+every other column through the unchanged blend path (now `compose_segment`).
 
 A loop specialisation, not a second blend: the blended branch calls the
 same `Pixel::over`, and *over* with a fully opaque source **is** the
@@ -296,6 +308,70 @@ no `abi-check` involvement: this is not ABI surface.
 
 **Acceptance:** identical frames, blended-pixel counter down on the
 occlusion and opaque scenarios.
+
+### B.5 Blended pixels are dithered  **[done]**
+
+A blend into the 8-bit back buffer admits only `256 - a` of the 256 levels the
+picture beneath it held, so one fixed rounding stepped a smooth wallpaper into
+plateaus under a translucent window or a frosted panel — invisible on a small
+QEMU screen, unmistakable on a 1080-row Pi display. Every blended pixel now
+rounds at its own bias from `tairix_raster::DitherRow`, resolved once per
+screen row in `compose_span` and indexed by the screen column;
+`WindowRow::sample` scales opacity and corner coverage at the same bias, and
+`Surface::frost_region`'s mix-back does the same.
+
+This is a **deliberate rendering change** under invariant 2, and the bound it
+keeps is stated rather than assumed: the dither's tile mean is exactly
+`ROUND_NEAREST`, so nothing lightens or darkens, and no pixel moves more than
+one level from the undithered answer. It is not a second blend (invariant 1):
+`div255` *is* `(value + 127) / 255`, so the biased divide is the same
+arithmetic with its rounding point named, and every unbiased operator
+delegates to it — which is why all 251 pre-existing WM frame tests stayed
+byte-identical.
+
+Cost is confined to pixels that were already blending: one mask and one load.
+The B.1 opaque run is untouched — it copies — so the fast path pays nothing,
+and the counters are unchanged.
+
+The hardware path keeps the same guarantee by *not* taking work it cannot do:
+an engine blends a layer in the scan-out's own 8 bits with a fixed rounding
+and no layer stack can express a per-pixel dither, so
+`Compositor::has_translucent_window` sends a window-wide translucency through
+software exactly as a backdrop blur does, and a baked layer
+(`Window::sample_local`) reads the dither at the pixel's *screen* position so
+it holds what the software composite would have written
+(`plans/FIX-DISPLAY-ACCELERATION.md` A.3).
+
+### B.6 A segment is composed a layer at a time, not a pixel at a time  **[done]**
+B.1's opaque runs are copied; everything else went through a per-*column* walk
+that, for each pixel, asked the desktop layer, then every window row, then the
+cursor, what it contributed. Decomposition on the bench (each stage disabled in
+turn, same binary) put **1.7 ns/px** in the row loop, write and encode, and
+**18.2 ns/px** inside that walk at ~2.4 layer contributions a pixel — so the
+colour arithmetic was under half of a blended pixel and the dispatch around it
+the rest. (Cross-crate call overhead was tested and ruled out: marking every
+`lib/raster` colour primitive `#[inline]` moved the drag by under 1%.)
+
+The columns between two copyable runs are now one **segment**, composed a layer
+at a time across its whole width: the base fill, the desktop row, each window
+row back to front, then the cursor. Each is a straight run of source pixels at a
+screen column and a constant opacity, laid through `lib/raster`'s one span
+composite, `blend_span` — which `Surface::blit` also takes, so a blended pixel
+is the same arithmetic wherever it comes from and there is no second blend loop
+(§2.2). `compose_pixel` is deleted, not left beside it (§2.14).
+
+What keeps it exact: a window row is three straight runs (two furniture strips
+and the client's drawable pixels) *except* where the shape cuts it, and there
+`WindowRow::blend_into` keeps the column-by-column walk, as does the cursor. The
+dither is read at each pixel's own surface column, so a run split anywhere
+writes what the whole run wrote and a segment boundary that moves with a window
+cannot seam.
+
+Measured: full-screen opaque **2.98 → 0.61 ns/px**, 64×24 opaque **2.54 → 0.96**,
+drag opaque **1.24 → 0.47**, full-screen translucent **10.04 → 5.99**, 64×24
+blur **9.74 → 6.30**. All 256 existing compositor frame tests stayed
+byte-identical, which is the correctness argument; `color_tests` adds the
+run-versus-per-pixel differential and the split-at-every-boundary equality.
 
 ---
 
@@ -667,7 +743,7 @@ still passes unchanged.
 
 ---
 
-## Stage D — Make blur cost what it changes  **[D.1–D.4, D.7 done; D.5 is a User decision]**
+## Stage D — Make blur cost what it changes  **[D.1–D.4, D.7–D.12 done; D.5 is a User decision]**
 
 ### D.1 Damage below a frost invalidates it; the window's own content does not  **[done]**
 Every `damage.add` in the compositor is gone, replaced by three funnels that
@@ -685,9 +761,12 @@ which retained frosts survive:
   content, position, size, shape or furniture. Drops the frosts of windows
   stacked *above* that one, and of neither its own nor any below. A frosted
   window is blended over a blur of the layers **below** it, so nothing at or
-  above its own layer is part of its frost. This covers both dominant
-  interactions — the pointer moving inside a frosted terminal, and a window
-  dragged across one — and neither now costs a re-blur.
+  above its own layer is part of its frost. This covers two of the three
+  dominant interactions — the pointer moving inside a frosted terminal, and a
+  window dragged across one — and neither costs a re-blur. The third, the
+  frosted window's *own* drag, is D.8: `mark_layer` spares its frost too, but
+  its rectangle has moved, so what survives is decided per pixel rather than
+  wholesale.
 - `mark_overlay(rect)` — a change no frost can read: the cursor, composed after
   every window, and the screen reveal, applied only as a pixel is encoded for
   scan-out. Drops nothing, so a pointer sample and a fade step keep every frost.
@@ -793,7 +872,7 @@ No indexing, no `unwrap`, no panic path.
   after a trim; teardown releases everything.
 - Docs: `lib/raster/README.md`, the `Reciprocal` and `blur_line` rustdoc,
   `userland/gui/wm/README.md`, `frost.rs`'s module docs,
-  `docs/src/desktop/wm.md` (a *Retained frosted backdrops* section), and
+  `docs/src/desktop/wm.md` (a *Retained backdrops* section), and
   `plans/SMARTRAM.md` (the frost cache as a reclaim client).
 
 **Measured** (release, `cargo xtask bench`, the same scenes as the Stage A
@@ -836,13 +915,12 @@ changed nothing:
 
 - `raise` on the window already at the front restacked a `Vec` tail back into
   its own slot, then marked the whole window and invalidated every frost from
-  that index up. `SessionWindows::keep_popups_stacked` runs immediately before
-  every composite while any popup is open and raises the parent and the popup
-  each time, so **opening a menu re-blurred the parent's whole window on every
-  wake**; `InputRouter::press_primary`/`press_secondary` raise unconditionally
-  too, so every click into an already-focused frosted window re-blurred it.
-  Measured on a 20×14 frosted window: `damaged_px`/`blur_px` `280`/`280` per
-  redundant raise, now `0`/`0`.
+  that index up. `InputRouter::press_primary`/`press_secondary` raise
+  unconditionally, so every click into an already-focused frosted window
+  re-blurred it. Measured on a 20×14 frosted window: `damaged_px`/`blur_px`
+  `280`/`280` per redundant raise, now `0`/`0`. A *pair* of windows defeated
+  this guard — an owner with a popup above it is never itself at the front —
+  which is what D.10 closes structurally.
 - `set_active_frame` re-asserting the activation a frame already shows, and
   `set_window_title` re-setting the label the bar already reads, each re-marked
   their furniture bands *and* dropped that window's chrome-cache entry.
@@ -874,6 +952,297 @@ band or invalidates a cache entry of its own:
   resize grabber it drives as a gesture engine (the WM's chrome draws no
   grabber) reports into a sink behind `ResizeGrab::gesture`.
 
+### D.8 A frosted window that moves keeps the frost the move cannot reach  **[done]**
+The third dominant interaction, and the one the cache was worst at: dragging
+the frosted window itself. Its backdrop does not move, so the retained frost is
+still exactly right — in *screen* coordinates — wherever neither difference
+between the two positions applies. Only two differences exist, and both are
+confined to a border:
+
+- the blur **replicates** at its rectangle's edges, so a pixel less than
+  `radius_px` inside either position's on-screen rectangle averaged a different
+  set of samples;
+- the shape **weights** the mix at a window-local coordinate, so a pixel within
+  a corner's reach of either position's own rectangle was mixed at a different
+  coverage.
+
+So `FrostedBackdrop::reuse` answers `FrostPlan::{Whole, Core(rect), Blur}`,
+where the core is the shared rectangle taken in by the larger of the two
+reaches. A differing blur radius keeps nothing (every pixel is a different
+average); a resize and a corner change are **not** special cases, because the
+coverage argument holds for them word for word — which is why `reuse` compares
+no shapes for equality. `matches` is gone: an entry is released only when
+nothing can be kept from it.
+
+`Surface::frost_region_around` is the raster half: frost a rectangle *except* a
+kept inner block, writing exactly what the whole-rectangle frost would write
+around it. `blur_line` generalised into `blur_span` (the outputs of a line, not
+all of them), so `box_blur` and the partial path share one sliding window;
+`frost_region` and `frost_region_around` share one private `frost`, so a border
+and a whole cannot round, replicate, weight, or dither differently. Two things
+that had to be got right, both found by the tests rather than argued:
+
+- **All four border bands are blurred before any is mixed back.** A band's
+  neighbourhood reaches into the bands beside it, and what it must read there is
+  the backdrop, not the frost of it. Blurring and mixing band by band seams.
+- **`blur_span` confines its source to the line before walking it.** The walk
+  reads a clamped edge by letting a strided iterator run out, which held while
+  the scratch ended with the line and broke the moment several bands shared one
+  max-sized scratch — a band then read a neighbour's pixels as its replicated
+  edge.
+
+The frost also no longer copies the rectangle out before blurring it: nothing is
+written until both passes are done, so the horizontal pass reads the surface's
+own rows. That removes a whole pass over the area from every frost, and it is
+the *small* part of this work — 0.7% of a full-screen re-frost, which the two
+blur passes and the plane composite dominate.
+
+**The layers a frost covers are no longer composed** (`compose_plane`,
+`frost_spared`). A frost is copied over whatever is beneath it, so composing
+that stack first is work the copy throws away — and for a dragged frosted
+window it was a whole window's worth of blending per pointer sample. A frame
+composes below a frost only outside what the frost will write: nothing at all
+under one reused whole, and only the ring the border blur *reads* (the core
+taken in by the radius) under one reused in part. The remainder is composed as
+the disjoint rectangles `Region::subtract` gives, never as the box around them.
+The pair cannot disagree about a vanished entry: `frost_spared` and
+`frost_segment` both consult the cache with only a composite in between, so a
+missing frost composes the plane and blurs in full.
+
+A frost the frame recomputed any part of is captured whole, so the next frame
+compares against where the window is *now*; otherwise the core would erode a
+sample at a time until nothing was left of it.
+
+**Measured** (`cargo xtask bench --filter composite`, 1280×800, a 560×360
+backdrop-blurred translucent window over two overlapping windows, moved 6 px a
+frame). Both figures are taken from the *same* binary, with only this
+behaviour disabled for the baseline, so the pair differs in nothing else:
+
+- Drag, backdrop blur: **7.05 ms → 3.03 ms** a sample (34.06 → 14.64 ns/px),
+  a factor of **2.3**.
+- A `64×24` repaint inside a frosted window: **40.6 → 15.0 µs** (26.44 → 9.79
+  ns/px), from the spared plane alone — the frost was already reused whole here,
+  so this is the layers beneath it no longer being composed.
+- Drag, opaque stack unchanged (0.484 → 0.471 ns/px) and the full-screen cases
+  unchanged (opaque 2.91 → 2.87, translucent 9.57 → 9.55), so nothing was
+  traded for it.
+
+The counters carry the claim in CI: a three-pixel move blurs under a
+fifth of the window, and a reused frost resolves *no* pixel of the layer beneath
+it. B.6 and D.9 took the blurred drag further still, to **9.30 ns/px**.
+
+### D.9 Any window that reads its backdrop retains one  **[done]**
+A frost is a cache of the composed plane, and a window with no blur had none, so
+every pointer sample of a plainly translucent drag re-blended the whole stack
+beneath it — measured at **19.89 ns/px**, the slowest window on the desktop to
+drag, worse than the blurred one.
+
+The expected shape of the fix was a *second* cache for the unblurred plane. It
+was not needed and would have been the duplication §2.2 forbids: **a blur of
+radius zero leaves the composed layers exactly as it found them**, so the
+retained entry already *is* the composed backdrop and the whole retention path —
+the epoch, the invalidation funnels, the `reuse` core/whole/blur decision, the
+spared-plane composite, the wipe on release — applies unchanged. All that was
+missing was admission. One predicate, `Window::reads_backdrop` (a blur, or a
+whole-window opacity below full), replaced the two `blur_radius() == 0` gates in
+`compose_plan` and `recompose_rect`.
+
+Deliberately excluded, because their backdrop is not a field: an antialiased
+corner (a few pixels of arc) and a client painting alpha into its own content
+(unknowable without reading every pixel). Both still composite correctly through
+the blend path.
+
+Two defects were found and fixed with it:
+
+- `blur_px` counted a radius-zero frost as blurred, reporting blur work that
+  never happened. Gated on `radius > 0`.
+- `FrostedBackdrop::capture` composited the snapshot onto a fresh transparent
+  surface through `blit`, reading and blending every pixel of a screenful. A
+  snapshot is a copy: `Surface::overwrite` is the same shared blit walk laying
+  rows down whole.
+
+Measured (`cargo xtask bench --filter composite`, 1280×800, a 560×360 window
+moved 6 px a frame over two more translucent windows):
+
+- Drag, translucent stack: **19.89 → 6.95 ns/px** (4.12 → 1.44 ms), a factor of
+  **2.9**. It is now cheaper than the blurred drag rather than dearer.
+- Drag, backdrop blur: **15.30 → 9.30 ns/px**, from B.6 and the cheaper capture.
+
+Gated by two tests: a change-by-change sweep composing one scene twice — every
+backdrop retained against every backdrop recomposed — asserting the scan-out and
+the back buffer are byte-identical at each of ~30 steps; and a drag measured on
+two compositors driven identically, asserting the retaining one resolves under
+half the layer contributions and under the damaged area of the other while
+producing the same screen. The second fails without the admission change.
+
+### D.10 A window and the menu it owns are one thing to restack  **[done]**
+The backdrop is only retained while nothing *marks* the window, and one caller
+marked it on **every wake**: the desktop re-asserted each open popup's stacking
+immediately before compositing, as `raise(parent)` then `raise(popup)`. D.7's
+guard cannot help a pair — with its popup above it the parent is never the front
+window — so the two ping-ponged past each other every frame, and each raise
+dropped the parent's frost and marked its whole rectangle. Hovering a menu over a
+translucent, backdrop-blurred terminal therefore re-blurred, re-captured and
+re-presented the entire window per pointer sample: on a 1080p Pi 4B, most of a
+megapixel tens of times a second for one highlighted row. The observed symptom
+was ~2 frames a second while the pointer moved over an open menu, with the same
+window perfectly fast when the menu was closed.
+
+The fix is to make the coupling the compositor's, where a restack happens, rather
+than a per-frame repair:
+
+- `Window` carries `parent: Option<WindowId>` — the window it is a *transient*
+  of. `Compositor::add_transient_window(parent, origin, surface)` records it and
+  inserts the popup directly above its owner and any transient already there,
+  refusing an unknown owner (fail closed, §5.4).
+- `raise` and `lower` move the **family** — owner immediately below its
+  transients — whichever member is named, through one private `restack_family`.
+  So nothing can be raised between the two, which is the invariant the re-assert
+  existed to protect, now held by construction.
+- A family already at the end it is being moved to is left completely alone: no
+  restack, no damage, no dropped frost, and not one allocation (the settled check
+  is a count and two slice reads).
+- `SessionWindows::keep_popups_stacked` and its `popups` counter are **deleted**;
+  `DesktopShell::open_popup_window` takes the owner and returns `Option`.
+  `Compositor::remove` clears the transient link of anything the removed window
+  owned, so no stale link can outlive a window.
+
+A deliberate behaviour change comes with it, and is an improvement: the old
+two-`raise` idiom forced the owner to the very front of the stack for as long as
+its menu lived, so no other window — nor the taskbar — could be raised over a
+window with a menu open. The family restack keeps the pair glued without pinning
+it topmost.
+
+Measured, and now gated in CI by counters rather than a claim: re-asserting an
+unchanged arrangement over a frosted owner marked `2304`/`2304` `damaged_px`/
+`blur_px` — 100% of a 48×48 window — and now marks `0`/`0` with an empty damage
+region. Opening a menu on the front window damages the menu's own rectangle and
+blurs nothing (it was the owner's whole frame). Four further tests hold the
+semantics: an intruder raised over a pair goes above both and never between, a
+lower takes the family down, a transient of an absent owner is refused, and an
+orphaned transient stands on its own.
+
+**The app half, in the same change.** The terminal republished its whole menu
+plate per pointer sample as well, because `ContextMenu` reported
+`MenuOutcome::Changed` for every routed event: `lib/controls`' `Menu` already
+fills a `damage::sink()` with the rows it redraws and reports *nothing* for a
+sample that leaves the highlight where it was, and that report was collected and
+thrown away. `ContextMenu::outcome` now reads it — `Ignored` when nothing was
+reported — so a sample inside the highlighted row costs no render, no frame copy,
+and no present, while crossing into another row still repaints. `Settings` had
+the same defect on the same seam (its own fall-through called an inert event
+`Changed`), fixed at the one boundary in `Settings::on_pointer`. A round that
+reported *something* still repaints the whole plate, deliberately: a change the
+sheet composes above its controls — a switched tab's body — is wider than the
+rectangle the control that caused it reports. Per-rectangle *presenting* of a
+plate is not attempted here; it needs a retained overlay surface and belongs with
+E.2's rect-list present.
+
+### D.11 The desktop layer repaints the icons that changed, not the screen  **[done]**
+The same defect as D.10 — a needless whole-window mark — one layer lower, and
+worse, because the desktop layer is the **bottom** of the stack: marking all of
+it recomposites every window above it and drops every frosted backdrop over it.
+`Desktop`'s gestures returned a `redraw: bool`, the session answered it with
+`present_desktop`, and that marked the layer's whole footprint. A click that
+moved focus between a window and the wallpaper therefore re-blurred and
+re-presented the entire screen: on a 1080p Pi 4B the pointer froze for ~800 ms
+per click, in both directions (clicking into the terminal *cleared* the desktop's
+selection, clicking the wallpaper *set* it, and either way the focus ring moved).
+Every hover sample over the icon column paid the same price.
+
+That is what made it ~800 ms rather than ~80: the wake loop drains the whole
+pointer batch and routes **each** outcome, so the click and the motion samples
+queued around it each repainted the entire layer — a 2 M-pixel wallpaper blit
+plus every icon and its label — before the one composite at the end of the
+batch. Coalescing the batch would only have hidden it; the paint itself had to
+stop being screen-sized.
+
+- `DesktopOutcome::redraw` is **deleted**. `set_focused`, `pointer_moved`,
+  `pointer_left`, `press`, `context_press`, and `key` each take a
+  `tairix_geometry::Region` damage sink and add the *cell rectangle* of every
+  icon whose appearance changed — hover left and hover taken, old selection and
+  new, the selected icon whose Focus Ring appeared or disappeared. One private
+  `Desktop::mark_cell` spells that rule once. `IconTile::render` draws strictly
+  inside its cell, so the cell is the whole of repainting the icon.
+- A gesture that changes nothing visible adds nothing: a focus flip with nothing
+  selected, or motion inside the icon already hovered, composes **no frame**.
+- `Compositor::repaint_desktop(area, paint)` hands the painter the rectangles of
+  `area` clipped to the layer and marks exactly those. A freshly allocated layer
+  is still painted whole — it holds no pixels a partial paint could preserve.
+- `DesktopShell::present_desktop_area` paints each rectangle under a narrowed
+  surface clip and passes it to `Desktop::render`, which skips every cell it does
+  not reach. `present_desktop` is now the whole-screen case of the same call,
+  kept for the changes that genuinely alter the whole layer: bring-up, a new
+  wallpaper, a theme switch, adopted settings, and a re-list that moved the icons
+  (which is why a re-list reports `relisted` rather than cells).
+
+Gated by counters, not a claim: over a translucent, backdrop-blurred window a
+focus flip composes exactly the ring's own cell with `blur_px 0`, and with
+nothing selected it composes no frame at all. Correctness is held by a
+differential test — two identical screens driven through six gestures (hover
+arrive, hover move, press, focus lost, focus gained, pointer left), one
+presenting the reported cells and the other the whole layer, asserting
+byte-identical scan-out — so a partial paint that forgot the wallpaper,
+mis-clipped a tile, or left a stale highlight cannot pass as the cheaper path.
+
+**A latent rendering defect fixed in the same change.** The layer's painter
+skipped the backdrop fill whenever the wallpaper surface was screen-sized
+(`covered`), but `lib/sandbox` leaves a letterboxed or centred placement's
+margins *fully transparent* on purpose, "so the desktop's own backdrop shows
+through". Those margins therefore showed the root fill on the first paint and
+whatever the previous frame had drawn there afterwards — stale icons. The
+backdrop colour is now laid down first and the wallpaper composited over it,
+which is also what makes a partial repaint total; `covered` is gone.
+
+### D.12 A restack marks where it crossed, not what it moved  **[done]**
+D.10 stopped the desktop from re-asserting an arrangement that already held, and
+that fixed hovering an open menu. It did **not** fix opening or closing one,
+because those *do* move the family, and a move marked every pixel of it. The
+taskbar is a window above every application window, so an app is essentially
+never frontmost: the raise that brings a family forward always crosses the bar,
+and the bar's own `keep_topmost` re-assert crosses back. Each crossing marked a
+1000×700 translucent, backdrop-blurred terminal in full and dropped its retained
+frost. The observed symptom was ~600 ms with the pointer frozen when the menu
+opened and ~600 ms again when a click elsewhere dismissed it — the same stall
+twice, from one cause, which is why it was symmetric.
+
+The fix is the fact the marking was missing: **reordering two windows that do
+not overlap changes no pixel.** Nothing is drawn differently, and no frost sees
+a different backdrop, so there is nothing to mark. `restack_family` now asks
+`crossed_bounds` for the windows the family actually swaps sides with — those
+above it when moving to the front, below it when moving to the back, visible
+only — and marks each moved member's bounds **intersected** with each of them.
+Windows on the far side keep their relative order with the family and so see
+exactly the stack they always did.
+
+Measured on the reported arrangement (1920×1080, a 1000×700 window at 50%
+opacity and radius 12, a 1920×40 bar, a 220×180 menu), the four steps of the
+gesture, before → after:
+
+| Step | `damaged_px` | `blur_px` |
+|---|---|---|
+| Open the menu | 700 000 → **39 600** | 700 000 → **0** |
+| Bar re-asserts topmost | 76 800 → **0** | 0 → 0 |
+| Dismissing click raises the terminal | 700 000 → **39 600**¹ | 700 000 → **0** |
+| Popup removed | 39 600 → 39 600 | 0 → 0 |
+
+¹ zero when the click does not also move the menu; the table's figure is the
+menu's own rectangle, which the popup's removal repaints in either case.
+
+The bar row is a third win and a continuous one: the re-assert marked its own
+76 800 pixels on **every** wake it moved, so every pointer sample composed,
+encoded and presented the whole bar.
+
+Gated by three tests, each proved to fail before the change: the reported
+gesture end to end (open under the bar → bar re-assert → dismissing raise →
+popup removed, asserting the menu's rectangle, `blur_px 0`, and that the frost
+cache still holds the entry it started with); opening a transient on a window
+under the bar; and a raise past windows it does not overlap, which additionally
+asserts the frame is byte-identical afterwards — tighter damage is only correct
+if the pixels are. The existing whole-family invariants (nothing lands between
+an owner and its transient, `lower` takes the family) are unchanged and still
+pass, so the coupling was not loosened to buy the saving.
+
 ---
 
 ## Stage E — One present per frame, and a frame deadline
@@ -885,20 +1254,39 @@ shape (§2.2, §2.13).
 ### E.1 Keep the damage region disjoint  **[done in C.0]**
 The damage region is `tairix_geometry::Region`, whose rectangles are
 disjoint and band-canonical, so a scattered frame stays scattered rather
-than coalescing to unions. What remains for E is the *present* side:
-`Compositor::present` still collapses to the bounding box past
-`MAX_PRESENT_REGIONS`, which E.2 replaces with a rect list.
+than coalescing to unions. E.2 carries that all the way to the driver.
 
-### E.2 One present per frame, carrying a list of rects
-`RemoteDisplay::push` rotates the 2-frame ring **per `present_region`
-call** and refreshes `union(stale, damage)` as a **bounding rect**: with
-8 rects that is 8 IPC round trips, each copying a growing box — in the
-worst case ~8 near-full-screen copies for a frame that changed a few
-thousand pixels. Change the `Present` request in place to carry a
-bounded **list** of rects (count bounded by a discovered/negotiated
-limit, not a magic const, §24.1); the ring rotates once per frame and the
-per-frame stale set is tracked per rect rather than as one box. Align the
-request shape with `PresentLayers` so the accelerated path reuses it.
+### E.2 One present per frame, carrying a list of rects  **[done]**
+A frame is presented **once**, naming every disjoint rectangle it changed.
+`Display::present_rects(&[DamageRect])` is the one damage-aware present —
+there is no per-rectangle entry point beside it — and the
+`DISPLAY_ENDPOINT` `Present` request carries a fixed-width, self-validating
+`DamageList` of up to `MAX_DAMAGE_RECTS` rectangles, the one wire shape
+`plans/FIX-DISPLAY-ACCELERATION.md` Stage B extends rather than a second.
+
+The invariants this establishes, which later work must keep:
+
+- **The ring rotates once per frame.** `RemoteDisplay` holds each frame's
+  outstanding damage as a disjoint `tairix_geometry::Region`, so a buffer
+  catching up copies the rectangles it missed rather than one box spanning
+  them. The region's budget is *derived* — ring depth ×
+  `MAX_DAMAGE_RECTS` — so a double-buffered desktop's scattered catch-up
+  never degrades to that box. A buffer is still wholly current after its
+  present, which is what lets a driver scan it out in full.
+- **Covering the screen and spanning it are different questions.**
+  `tairix_display::damage_list` is the single place that chooses between the
+  rectangle list, its bounding box (past the bound) and the whole-frame
+  present. Two far-apart corners span the screen while changing a few dozen
+  pixels; deciding on the bounding box, as the compositor used to, made them
+  a whole-screen present.
+- **The whole list is validated before any pixel is blitted**
+  (`DamageRect::validate_list`), so a bad rectangle refuses the present
+  rather than leaving the ones before it on screen.
+- **`MAX_DAMAGE_RECTS` is a format bound (§24.4), not a capacity**: it is
+  what one fixed-width request carries, and a producer holding more
+  rectangles presents their bounding box. There is no *per-call* rectangle
+  limit to reintroduce — a frame publishes once, so no cost model trades
+  rectangles against round trips any more.
 
 ### E.3 One-shot frame pacing in the session
 There is no pacing today: the session composites once per wake, as fast
@@ -910,20 +1298,15 @@ under an input flood and is the seam
 `plans/FIX-DISPLAY-ACCELERATION.md` Stage E hangs real vsync off.
 
 ### E.4 Tests + docs
-- Region: two far-apart small rects present two small rects, never the
-  screen; a pathological scatter degrades to the documented budget, not
-  unbounded round trips.
-- Present: N dirty rects produce **one** transport call and one ring
-  rotation; stale tracking still guarantees no stale pixel is shown (the
-  existing double-buffer tests must pass unchanged).
+The present-side tests and docs landed with E.2 (one transport call per
+frame however scattered; a rectangle-sized catch-up copy; the existing
+double-buffer tests unchanged). What remains is pacing:
+
 - Pacing: a flood of M motion samples inside one deadline produces one
   composite; an idle session arms no timer and consumes no CPU; the
   deadline never busy-waits (assert on the wait call, not on timing).
-- Docs: `docs/src/drivers/display.md` protocol table; `lib/display`
-  rustdoc; `plans/FIX-DISPLAY-ACCELERATION.md` cross-reference (§13).
 
-**Acceptance:** present calls per frame == 1, no stale-pixel regression,
-CPU at idle unchanged from parked.
+**Acceptance:** CPU at idle unchanged from parked.
 
 ---
 
@@ -1070,8 +1453,67 @@ Stated so a later change cannot quietly take a shortcut:
 | E | disjoint region, one present per frame, one-shot pacing | B, C, D | `Present` rect list (with FIX-DISPLAY-ACCELERATION Stage B) | no |
 | F | `lib/cpuops` `ByPriority` raster candidates (aarch64 first) | B, C, (D, E), F.0 decision | no | no |
 | G | user-space FP/SSE enablement | User decision | target floor | yes |
+| H | publish a region's own pages instead of re-freezing the space | — | no | yes |
 
 A–E are expected to dominate F entirely.
+
+---
+
+## Stage H — the kernel cost of a popup window  **[done]**
+
+Not a compositor stage, and recorded here because this is where a reader
+chasing "opening a menu is slow" arrives. The cost was **below** every
+stage above it, and it is why a menu drawn inside a window was instant
+while the same menu in its own window was not.
+
+### H.1 What it was
+`terminal.app` is the only app whose menus are separate **popup windows**
+(`files.app`, the pinboard and the switchboard draw theirs into their own
+surface). A popup window therefore costs, per open: `shm_create` +
+`shm_grant` in the app and `shm_map` in the session; per close, an unmap on
+each side. **Every one of those syscalls re-froze the caller's entire
+address-space snapshot** — `AddressSpace::freeze` walks the page table and
+allocates a fresh node per resident page, and the kernel heap places a node
+by scanning its free list (`plans/FIX-KHEAP.md`). The session is the largest
+address space on the machine (wallpaper, back buffer, every window's
+pixels), so four of those per menu, inside non-preemptible syscalls, is the
+stall — and it is invisible at QEMU screen sizes because the session's
+resident set is a fraction of a 1080p one.
+
+### H.2 The fix
+Every path that knows *which* pages it changed publishes exactly those,
+through one pair in `kernel/core/src/syscalls.rs`:
+`publish_region_mapping` (reads each page's resolved mapping from the live
+space) and `publish_region_teardown` (removes them, unconditionally — a
+re-freeze is a no-op on a CPU with no published live space, which would
+leave freed pages translating). Both fall back to the wholesale re-freeze
+only when a snapshot cannot absorb a delta, so the delta is a cost
+reduction and never a correctness dependency. `sharedreg::unmap`,
+`DmaPool::free_at`, `LiveUserSpace::free_dma` and `DmaAllocFacility::free`
+now report the byte extent they released, because those were the only two
+releases whose caller did not already hold it.
+
+Two further instances of the same defect were found by reading and fixed in
+the same change: the **file-backed fault** path re-froze the whole snapshot
+per faulted page (making an N-page mapping O(N²) to read — the very hazard
+the single-page delta was introduced for on the anonymous path), and the
+stack-growth walk re-froze after committing a page range it had just
+computed. Only two callers re-freeze now, both compressed-tier batches that
+move several pages at once and report no list: the ramzip warm/cluster
+restore and the direct-reclaim compress-out sweep.
+
+### H.3 The gate
+`shm_map_and_unmap_publish_only_the_regions_own_pages`: a task with 64
+resident pages maps and unmaps a one-page shared region and must end with a
+snapshot of exactly three pages and **zero** whole-space freezes. Proved to
+fail before the fix — the snapshot held 67 pages, the whole resident set the
+rebuild imported. A work count, not a timing (invariant 3).
+
+### H.4 What this does *not* close
+The remaining desktop cost of an app-owned popup window is the app's own
+whole-surface repaint (C.3) and the session's convert-and-diff of it. Moving
+menus out of apps altogether is `plans/NEW-MENUS.md`, an architectural
+change rather than a performance one now that this is fixed.
 
 ---
 

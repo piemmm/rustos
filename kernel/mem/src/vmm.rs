@@ -575,11 +575,12 @@ impl<P: PageTable> AddressSpace<P> {
 /// only `Copy` plain-old-data (`page -> (frame, flags)`), so it is
 /// unconditionally `Send + Sync` and outlives the source space.
 ///
-/// It reflects the mappings present **when it was frozen**. Every syscall
-/// that mutates a task's live space (`mem_map` / `mem_unmap` / `mmio_map`
-/// / `dma_alloc`) re-freezes and re-registers a fresh snapshot, so the
-/// registry's view always describes the current mappings — the registry
-/// is never widened to a live mutable view.
+/// It reflects the mappings present **when it was frozen**, kept current by
+/// the kernel publishing each change into it: a syscall or fault that knows
+/// which pages it changed applies them through [`Self::apply_page_delta`],
+/// and only a whole-space event with no smaller delta to name re-freezes and
+/// re-registers. Either way the registry's view describes the current
+/// mappings — and it is never widened to a live mutable view.
 pub struct FrozenAddressSpace {
     mappings: BTreeMap<Page, (Frame, MapFlags)>,
 }

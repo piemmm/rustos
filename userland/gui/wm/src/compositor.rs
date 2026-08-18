@@ -17,12 +17,13 @@
 
 use alloc::vec;
 use alloc::vec::Vec;
+use core::ops::Range;
 
 use tairix_abi::driver::display::{
-    AccelCaps, AccelLayer, AcceleratedDisplay, Display, DisplayMode,
+    AccelCaps, AccelLayer, AcceleratedDisplay, DamageRect, Display, DisplayMode, MAX_DAMAGE_RECTS,
 };
 use tairix_abi::DriverError;
-use tairix_display::{scanout_len, sub_screen_damage, ChannelOrder};
+use tairix_display::{damage_list, scanout_len, ChannelOrder};
 
 use tairix_controls::{damage, FurniturePart, TitleBarEvent, WindowFrame};
 use tairix_cursor::{CursorImage, PlacedCursor};
@@ -33,12 +34,12 @@ use tairix_reclaim::{CacheAccounting, PressureBand, PressureGauge, ReclaimCache,
 use tairix_theme::{CursorKind, Theme};
 
 use crate::chrome::{ChromeEpoch, WindowChrome};
-use crate::color::{div255, Color, Pixel};
+use crate::color::{div255, Color, DitherRow, Pixel};
 use crate::corner::Corners;
-use crate::frost::{FrostEpoch, FrostedBackdrop};
+use crate::frost::{inset, FrostEpoch, FrostPlan, FrostedBackdrop};
 use crate::geometry::{Point, Rect, Region, Scale};
 use crate::stats::{area_px, FrameCounters, FrameStats};
-use crate::surface::Surface;
+use crate::surface::{blend_run, Surface};
 use crate::viewport::{FurnitureHit, RootViewport};
 use crate::window::{Window, WindowId, WindowRow};
 
@@ -52,6 +53,15 @@ use crate::window::{Window, WindowId, WindowRow};
 /// every healthy frame, so it allocates nothing at all, and when it does
 /// fill it holds only the windows covering the damage.
 type ChromeFallback = Vec<(WindowId, WindowChrome)>;
+
+/// Which end of the z-order a restack moves a window's family to.
+#[derive(Copy, Clone, Eq, PartialEq)]
+enum StackEnd {
+    /// The front, above every other window: a raise.
+    Front,
+    /// The back, below every other window: a put-to-back.
+    Back,
+}
 
 /// A software compositing window manager surface.
 ///
@@ -137,15 +147,20 @@ pub struct Compositor {
     pending_frost: Vec<(WindowId, FrostedBackdrop)>,
     /// What the frame in flight decided about each window's retained frost,
     /// by z-index: `None` until it has been asked, then whether the frame
-    /// may copy the retained one.
+    /// may copy the retained one, and how much of it.
     ///
     /// The plan's fixed-point sweep and the composite that follows it both
     /// need the answer, and asking twice would both cost a second lookup and
     /// risk the two reading differently. Reset by each
     /// [`compose_plan`](Self::compose_plan), so an index can never carry a
     /// decision taken about a window that has since moved or gone.
-    frost_decision: Vec<Option<bool>>,
+    frost_decision: Vec<Option<FrostPlan>>,
     damage: Region,
+    /// Where a segment of a damaged rectangle still has to compose the layers
+    /// below a frosted window: the rectangle less whatever the frost is about
+    /// to write over. Held here, and cleared per use, so a frame's segments
+    /// reuse its buffers instead of allocating a region each.
+    plane: Region,
     /// What the frame in flight has cost so far, reset by each
     /// [`composite`](Compositor::composite) and read back through
     /// [`frame_stats`](Compositor::frame_stats).
@@ -230,6 +245,7 @@ impl Compositor {
             pending_frost: Vec::new(),
             frost_decision: Vec::new(),
             damage: Region::new(),
+            plane: Region::new(),
             stats: FrameCounters::new(),
             #[cfg(test)]
             opaque_runs: true,
@@ -392,9 +408,11 @@ impl Compositor {
                 frost.invalidate(&window.id());
                 // A frame that has already been told it may reuse this one is
                 // told otherwise here, rather than asking the cache a second
-                // time for an answer this call has just determined.
+                // time for an answer this call has just determined. Rewriting
+                // it is also what keeps the plan and the cache in step: a frame
+                // may never read a decision to copy a frost this dropped.
                 if let Some(decision) = frost_decision.get_mut(index) {
-                    *decision = Some(false);
+                    *decision = Some(FrostPlan::Blur);
                 }
             }
         }
@@ -549,8 +567,9 @@ impl Compositor {
         self.scale.scale_length(u32::from(window.blur_radius()))
     }
 
-    /// Whether the frame in flight may copy the retained frost of the window
-    /// at z-index `index` instead of blurring its backdrop again.
+    /// What the frame in flight will do about the frost of the window at
+    /// z-index `index`: copy the retained one whole, copy its still-valid core
+    /// and blur the border around it, or blur the whole rectangle.
     ///
     /// Asked of the cache once per frame and remembered
     /// ([`frost_decision`](Self::frost_decision)), because the plan and the
@@ -560,10 +579,10 @@ impl Compositor {
     /// frame never composed, and it would seam.
     ///
     /// This is the one counted lookup: a hit is a frost the frame goes on to
-    /// copy, a miss one it has to blur, and the recency the lookup touches is
-    /// what keeps a frost every frame reuses ahead of one nothing has looked
-    /// at when the band forces an eviction.
-    fn frost_reusable(&mut self, index: usize) -> bool {
+    /// copy from, whole or in part, a miss one it has to blur outright, and the
+    /// recency the lookup touches is what keeps a frost every frame reuses
+    /// ahead of one nothing has looked at when the band forces an eviction.
+    fn frost_plan(&mut self, index: usize) -> FrostPlan {
         if let Some(Some(decided)) = self.frost_decision.get(index).copied() {
             return decided;
         }
@@ -574,35 +593,39 @@ impl Compositor {
         decided
     }
 
-    /// Ask the cache whether it still holds the frost the window at z-index
-    /// `index` needs, counting the lookup.
+    /// Ask the cache how much of the frost the window at z-index `index` needs
+    /// it still holds, counting the lookup.
     ///
-    /// A retained entry whose rectangle, radius, or shape no longer match is
-    /// released *before* the lookup rather than rejected after it, so the
-    /// frame counts one honest miss and the superseded pixels stop being
-    /// charged at once instead of waiting to be evicted. Eviction under
-    /// pressure is likewise the lookup's own answer: an entry the band takes
-    /// as this call enforces it simply reads as absent.
-    fn ask_frost(&mut self, index: usize) -> bool {
+    /// A retained entry nothing can be kept from is released *before* the
+    /// lookup rather than rejected after it, so the frame counts one honest
+    /// miss and the superseded pixels stop being charged at once instead of
+    /// waiting to be evicted. Eviction under pressure is likewise the lookup's
+    /// own answer: an entry the band takes as this call enforces it simply
+    /// reads as absent.
+    fn ask_frost(&mut self, index: usize) -> FrostPlan {
         #[cfg(test)]
         if !self.frost_reuse {
-            return false;
+            return FrostPlan::Blur;
         }
+        let screen = self.screen_rect();
         let Some(window) = self.windows.get(index) else {
-            return false;
+            return FrostPlan::Blur;
         };
         let (id, shape) = (window.id(), window.shape());
         let bounds = window.bounds();
         let radius_px = self.blur_radius_px(window);
         let epoch = self.frost_epoch();
-        if self
+        let kept = self
             .frost
             .peek(&epoch, &id)
-            .is_some_and(|retained| !retained.matches(bounds, radius_px, shape))
-        {
+            .map(|retained| retained.reuse(bounds, screen, radius_px, shape));
+        if kept == Some(FrostPlan::Blur) {
             self.frost.invalidate(&id);
         }
-        self.frost.get_or_build(&epoch, id, || None).is_some()
+        match self.frost.get_or_build(&epoch, id, || None) {
+            Some(_) => kept.unwrap_or(FrostPlan::Blur),
+            None => FrostPlan::Blur,
+        }
     }
 
     /// Frosted backdrops currently retained, one entry per backdrop-blurred
@@ -616,7 +639,7 @@ impl Compositor {
     /// epoch — which entry survived, not merely how many did.
     #[cfg(test)]
     pub(crate) fn frost_resident(&self, id: WindowId) -> bool {
-        self.frost.peek(&self.frost_epoch(), &id).is_some()
+        self.frost_retained(id)
     }
 
     /// Bytes the frost cache currently has charged: retained frosted pixels
@@ -908,26 +931,45 @@ impl Compositor {
         }
     }
 
-    /// Repaint the desktop layer in place through `paint`, keeping the
-    /// screen-sized buffer it is already drawn into, and mark its footprint
-    /// dirty.
+    /// Repaint the parts of the desktop layer covered by `area` through
+    /// `paint`, keeping the screen-sized buffer it is already drawn into, and
+    /// mark exactly those parts dirty.
     ///
     /// The desktop is repainted whenever its owner's model changes — an icon
     /// takes the hover, a selection moves, the folder re-lists — which is
-    /// often, and the layer is a whole screen of pixels. Handing the existing
-    /// buffer back to the painter means those repaints cost a paint, not a
-    /// paint plus a multi-megabyte allocation the heap may refuse. A layer
-    /// that is absent, or sized for a screen this output no longer has, is
-    /// allocated fresh at the current screen size; `paint` then always sees a
-    /// surface of exactly [`screen_rect`](Self::screen_rect)'s extent, and
-    /// receives it exactly as the previous frame left it (it is the painter's
-    /// job to lay down its own background, which is cheaper than a clear this
-    /// method cannot know is redundant).
+    /// often, and the layer is a whole screen of pixels. Two things follow,
+    /// and this method is where both are paid:
+    ///
+    /// * Handing the existing buffer back to the painter means a repaint
+    ///   costs a paint, not a paint plus a multi-megabyte allocation the heap
+    ///   may refuse.
+    /// * Painting and marking only `area` means an icon taking the hover
+    ///   costs that icon. Marking the whole layer would not merely repaint a
+    ///   screen: the desktop is the bottom layer, so every window above it
+    ///   would recomposite and every frosted backdrop over the marked pixels
+    ///   would be thrown away and blurred again — a screenful of work to
+    ///   redraw one label.
+    ///
+    /// `paint` receives the surface and the rectangles to paint, already
+    /// clipped to the layer and disjoint; it must write inside them and
+    /// nowhere else, since nothing outside them is marked. It sees the
+    /// surface exactly as the previous frame left it, so it lays down its own
+    /// background over each rectangle rather than relying on a clear this
+    /// method cannot know is redundant.
+    ///
+    /// A layer that is absent, or sized for a screen this output no longer
+    /// has, is allocated fresh at the current screen size and painted whole
+    /// however little `area` asked for — a buffer with no pixels worth keeping
+    /// has nothing for a partial paint to preserve.
     ///
     /// Returns `false` — having changed and damaged nothing — when no such
     /// surface could be allocated, so a heap that will not give back a screen
     /// of pixels leaves the desktop exactly as it was rather than blanking it.
-    pub fn repaint_desktop(&mut self, paint: impl FnOnce(&mut Surface)) -> bool {
+    pub fn repaint_desktop(
+        &mut self,
+        area: &Region,
+        paint: impl FnOnce(&mut Surface, &[Rect]),
+    ) -> bool {
         let screen = self.screen_rect();
         let fits = self
             .desktop
@@ -939,12 +981,25 @@ impl Compositor {
             };
             self.set_desktop(fresh);
         }
+        let Some(layer) = self.desktop_bounds() else {
+            return false;
+        };
+        let painted = if fits {
+            let mut region = area.clone();
+            region.clip(layer);
+            region
+        } else {
+            Region::from(layer)
+        };
+        if painted.is_empty() {
+            return true;
+        }
         let Some(surface) = self.desktop.as_mut() else {
             return false;
         };
-        paint(surface);
-        if let Some(covered) = self.desktop_bounds() {
-            self.mark(covered);
+        paint(surface, painted.rects());
+        for rect in painted.rects() {
+            self.mark(*rect);
         }
         true
     }
@@ -979,6 +1034,53 @@ impl Compositor {
         self.windows.push(window);
         self.mark_layer(id, bounds);
         id
+    }
+
+    /// Add `surface` as a window `parent` owns — a *transient*: the menu or
+    /// sheet that window opened — at `origin`, stacked directly above its
+    /// owner and any transient already there. Returns its identifier, or
+    /// `None` for an unknown `parent`.
+    ///
+    /// A transient is not a window in its own right. It is composed above its
+    /// owner and restacked with it ([`raise`](Self::raise),
+    /// [`lower`](Self::lower)), so nothing can be raised between the two and
+    /// no caller has to re-assert the arrangement afterwards. Refusing an
+    /// unknown owner is the fail-closed half of that: a transient whose owner
+    /// does not exist would have no place in the stack to hold.
+    ///
+    /// Only the new window's own bounds are marked dirty when its owner
+    /// already holds the front — which is the ordinary case, a menu opening on
+    /// the focused window — so opening one costs its own rectangle rather than
+    /// its owner's whole frame.
+    pub fn add_transient_window(
+        &mut self,
+        parent: WindowId,
+        origin: Point,
+        surface: Surface,
+    ) -> Option<WindowId> {
+        let above = self.family_top(parent)?;
+        let id = WindowId(self.next_id);
+        self.next_id += 1;
+        let mut window = Window::new(id, origin, surface);
+        window.set_parent(Some(parent));
+        let bounds = window.bounds();
+        self.windows.insert(above, window);
+        self.mark_layer(id, bounds);
+        self.restack_family(parent, StackEnd::Front);
+        Some(id)
+    }
+
+    /// The stack index directly above `parent` and every transient it already
+    /// owns — where the next one belongs — or `None` when `parent` is not a
+    /// window here.
+    fn family_top(&self, parent: WindowId) -> Option<usize> {
+        let mut top = self.index_of(parent)?;
+        for (index, window) in self.windows.iter().enumerate() {
+            if window.parent() == Some(parent) {
+                top = top.max(index);
+            }
+        }
+        Some(top.saturating_add(1))
     }
 
     /// Borrow a window by id.
@@ -1170,44 +1272,163 @@ impl Compositor {
     }
 
     /// Raise a window to the top of the z-order; its bounds are marked
-    /// dirty. Raising the window already at the front marks no damage and
-    /// still returns `true` (only an unknown `id` returns `false`).
+    /// dirty. Raising a window whose family already holds the front marks no
+    /// damage and still returns `true` (only an unknown `id` returns
+    /// `false`).
+    ///
+    /// A window and its transients ([`add_transient_window`]) rise together
+    /// and keep their order, so raising either the owner or its menu brings
+    /// the pair, and neither can be left stranded under a window that was
+    /// raised between them.
+    ///
+    /// [`add_transient_window`]: Self::add_transient_window
     pub fn raise(&mut self, id: WindowId) -> bool {
-        let Some(index) = self.index_of(id) else {
+        if self.index_of(id).is_none() {
             return false;
-        };
-        if index.saturating_add(1) == self.windows.len() {
-            // Already at the front: nothing to restack, nothing to repaint.
-            return true;
         }
-        let window = self.windows.remove(index);
-        let bounds = window.bounds();
-        self.windows.push(window);
-        // Restacked first: a window's own frosted backdrop is a function of
-        // its place in the stack, and marking is what drops it. Only the
-        // windows the raise passed changed which layers they see, and after
-        // the move they occupy this index upwards; the ones that were already
-        // below it see the same stack as before.
-        self.mark_from(bounds, index);
+        self.restack_family(self.family_root(id), StackEnd::Front);
         true
     }
 
     /// Send a window to the bottom of the z-order (put-to-back), keeping it
     /// visible; its bounds are marked dirty so whatever it was covering
     /// recomposites. Returns `false` for an unknown id.
+    ///
+    /// The family goes as a unit, exactly as [`raise`](Self::raise) brings
+    /// it: a window sent to the back takes the menu it owns with it, rather
+    /// than leaving it floating over windows it does not belong to.
     pub fn lower(&mut self, id: WindowId) -> bool {
-        let Some(index) = self.index_of(id) else {
+        if self.index_of(id).is_none() {
+            return false;
+        }
+        self.restack_family(self.family_root(id), StackEnd::Back);
+        true
+    }
+
+    /// The window every restack moves as one with `id`: the window it is a
+    /// transient of, or `id` itself when it owns its place in the stack.
+    fn family_root(&self, id: WindowId) -> WindowId {
+        self.window(id).and_then(Window::parent).unwrap_or(id)
+    }
+
+    /// How many windows `id` owns as transients.
+    ///
+    /// A transient's own transients are not counted, because none exist: a
+    /// popup is opened by a window, never by another popup, and a chain would
+    /// need a stacking rule of its own rather than this one applied twice.
+    fn transients(&self, id: WindowId) -> usize {
+        self.windows
+            .iter()
+            .filter(|window| window.parent() == Some(id))
+            .count()
+    }
+
+    /// Move `root`'s family to one end of the z-order, owner first, and mark
+    /// what the move changed. Reports whether anything actually moved.
+    ///
+    /// A family already sitting at that end is left completely alone — no
+    /// restack, no damage, no dropped backdrop, and not so much as an
+    /// allocation. That is the common case, not a rare one: an owner and its
+    /// menu spend their whole life at the front, and re-deriving an
+    /// arrangement that already holds must not cost a window's worth of blur
+    /// to be told nothing changed.
+    ///
+    /// **A move marks where the family and the windows it crossed overlap,
+    /// and nothing else.** Reordering two windows that do not overlap changes
+    /// no pixel: nothing is drawn differently, and no frost sees a different
+    /// backdrop. Marking the whole family instead would drop the owner's own
+    /// retained frost every time — a menu opening on a window with anything at
+    /// all above it would re-blur the entire window, which is the expensive
+    /// case, not the rare one, because the taskbar sits above app windows.
+    fn restack_family(&mut self, root: WindowId, end: StackEnd) -> bool {
+        let Some(root_at) = self.index_of(root) else {
             return false;
         };
-        if index == 0 {
-            // Already at the back: nothing to restack, nothing to repaint.
-            return true;
+        let owned = self.transients(root);
+        let first = match end {
+            StackEnd::Front => self.windows.len().saturating_sub(owned.saturating_add(1)),
+            StackEnd::Back => 0,
+        };
+        if root_at == first && self.family_is_placed(root, first, owned) {
+            return false;
         }
-        let window = self.windows.remove(index);
-        let bounds = window.bounds();
-        self.windows.insert(0, window);
-        self.mark(bounds);
+        // The lowest window the move disturbs: everything below it sees the
+        // same stack it always did, so its retained backdrop still holds.
+        let low = root_at.min(first);
+        let mut order = Vec::with_capacity(owned.saturating_add(1));
+        order.push(root);
+        order.extend(
+            self.windows
+                .iter()
+                .filter(|window| window.parent() == Some(root))
+                .map(Window::id),
+        );
+        let crossed = self.crossed_bounds(&order, end);
+        let mut taken = Vec::with_capacity(order.len());
+        // Top-down, so each removal leaves the indices below it untouched.
+        for id in order.iter().rev() {
+            if let Some(index) = self.index_of(*id) {
+                taken.push(self.windows.remove(index));
+            }
+        }
+        let mut moved = Vec::with_capacity(taken.len());
+        for (offset, window) in taken.into_iter().rev().enumerate() {
+            moved.push(window.bounds());
+            let at = first.saturating_add(offset).min(self.windows.len());
+            self.windows.insert(at, window);
+        }
+        // Restacked first: a window's own frosted backdrop is a function of
+        // its place in the stack, and marking is what drops it.
+        for bounds in moved {
+            for over in &crossed {
+                self.mark_from(bounds.intersection(over), low);
+            }
+        }
         true
+    }
+
+    /// The bounds of every window `family` swaps places with when it moves to
+    /// `end` — the only windows the move can put on the other side of it.
+    ///
+    /// The family lands contiguously at one end, so moving to the front puts it
+    /// above everything that was above its *lowest* member, and moving to the
+    /// back puts it below everything that was below its *highest*. Windows
+    /// beyond that keep their relative order with the family and so see exactly
+    /// the stack they always did. An invisible window contributes no pixel to
+    /// any composite, so crossing one changes nothing.
+    fn crossed_bounds(&self, family: &[WindowId], end: StackEnd) -> Vec<Rect> {
+        let indices = family.iter().filter_map(|id| self.index_of(*id));
+        let (lowest, highest) = indices.fold((usize::MAX, 0), |(low, high), at| {
+            (low.min(at), high.max(at))
+        });
+        self.windows
+            .iter()
+            .enumerate()
+            .filter(|(at, window)| {
+                window.is_visible()
+                    && !family.contains(&window.id())
+                    && match end {
+                        StackEnd::Front => *at > lowest,
+                        StackEnd::Back => *at < highest,
+                    }
+            })
+            .map(|(_, window)| window.bounds())
+            .collect()
+    }
+
+    /// Whether `root`'s family already occupies the stack from `first`
+    /// upwards: the owner there, and each of the `owned` windows above it one
+    /// of its transients.
+    ///
+    /// Their order among themselves is not examined, because it cannot be
+    /// wrong: a restack preserves it, so any arrangement of a family's own
+    /// transients above their owner is the one a restack would produce.
+    fn family_is_placed(&self, root: WindowId, first: usize, owned: usize) -> bool {
+        self.windows.get(first).map(Window::id) == Some(root)
+            && self
+                .windows
+                .get(first.saturating_add(1)..first.saturating_add(1).saturating_add(owned))
+                .is_some_and(|above| above.iter().all(|w| w.parent() == Some(root)))
     }
 
     /// Toggle the decorated, resizable window named by `id` between restored
@@ -1248,6 +1469,14 @@ impl Compositor {
         self.chrome.invalidate(&id);
         self.frost.invalidate(&id);
         self.pending_redraws.retain(|pending| *pending != id);
+        // A transient outliving its owner stands on its own: the window engine
+        // tears a window's popups down with it, and until each arrives the
+        // link must not name a window that has gone.
+        for other in &mut self.windows {
+            if other.parent() == Some(id) {
+                other.set_parent(None);
+            }
+        }
         window.release_content();
         // The windows that were above the removed one start at its index now,
         // and they are the only ones whose backdrop lost anything.
@@ -1720,8 +1949,8 @@ impl Compositor {
     /// Returns the [`Region`] actually recomposited — the
     /// screen-clipped rectangles every mutation marked dirty since the
     /// last composite, plus the cursor's own damage (see below) — empty
-    /// when nothing was dirty. Presenting each of its rectangles individually
-    /// (via [`Display::present_region`]) moves bytes proportional to what
+    /// when nothing was dirty. Naming each of its rectangles in the present
+    /// (via [`Display::present_rects`]) moves bytes proportional to what
     /// changed rather than their bounding box, which can span far more of
     /// the screen than the union of the pixels that actually moved (a
     /// dirty taskbar strip plus a cursor near the opposite edge, say).
@@ -1870,7 +2099,7 @@ impl Compositor {
                 let Some(window) = self.windows.get(index) else {
                     continue;
                 };
-                if !window.is_visible() || window.blur_radius() == 0 {
+                if !window.is_visible() || !window.reads_backdrop() {
                     continue;
                 }
                 let bounds = window.bounds().intersection(&screen);
@@ -1887,8 +2116,12 @@ impl Compositor {
                         .any(|claimed| !claimed.intersection(&bounds).is_empty());
                 // Whether the cache still holds this window's frost is asked
                 // only of a window the frame is going to compose, so an
-                // untouched one costs no lookup and counts as neither.
-                if !touched || self.frost_reusable(index) {
+                // untouched one costs no lookup and counts as neither. A frost
+                // that survives only in part is promoted like one that must be
+                // blurred outright: its border is blurred, and a border blurred
+                // over a strip of damage would spread a neighbourhood clipped to
+                // that strip.
+                if !touched || self.frost_plan(index) == FrostPlan::Whole {
                     continue;
                 }
                 let claimed = claim(&mut plan, bounds);
@@ -2014,45 +2247,34 @@ impl Compositor {
     /// No damage means nothing changed since the last present, so this
     /// does nothing at all and does not call `display` — a wake that
     /// changed nothing must not cost a scan-out copy or a driver blit.
-    /// A composited region spanning the whole screen takes the full
-    /// [`Display::present`] path. Otherwise each composited rectangle is
-    /// handed to [`Display::present_region`] individually, so the bytes
-    /// moved are proportional to what actually changed rather than the
-    /// bounding box of a scattered set of dirty rectangles (a taskbar
-    /// strip and a cursor near the opposite edge, say) — unless there are
-    /// more than [`MAX_PRESENT_REGIONS`] of them, in which case a single
-    /// bounding-box present replaces the whole batch (see its docs for
-    /// why). Whatever is finally presented — a single rectangle from the
-    /// per-rectangle path or the fallback bounding box — still takes the
-    /// full-screen path if it turns out to cover the whole screen.
+    ///
+    /// **A frame is presented once, naming everything it changed.** Damage
+    /// that covers the screen takes the full [`Display::present`] path;
+    /// anything else takes [`Display::present_rects`], whose list is the
+    /// frame's disjoint dirty rectangles (`damage_list` chooses between the
+    /// two, and degrades to the bounding box past [`MAX_DAMAGE_RECTS`]). The
+    /// bytes moved are therefore proportional to what actually changed
+    /// rather than to the box around it — a taskbar strip and a cursor near
+    /// the opposite edge cost those two rectangles even though the box
+    /// between them is the screen — and a scattered frame costs one dispatch
+    /// rather than one per rectangle.
     ///
     /// # Errors
     ///
     /// Propagates any [`DriverError`] the display driver returns from
-    /// [`Display::present`] / [`Display::present_region`].
+    /// [`Display::present`] / [`Display::present_rects`].
     pub fn present(&mut self, display: &mut dyn Display) -> Result<(), DriverError> {
         self.stats.begin_frame();
         let region = self.recompose_damage();
         if region.is_empty() {
             return Ok(());
         }
-        let Some(bounding_damage) = sub_screen_damage(&region.bounds(), &self.mode) else {
-            self.stats.bump_present();
-            return display.present(&self.frame);
-        };
-        let rects = region.rects();
-        if rects.len() > MAX_PRESENT_REGIONS {
-            self.stats.bump_present();
-            return display.present_region(&self.frame, bounding_damage);
+        self.stats.bump_present();
+        let mut list = [DamageRect::full(&self.mode); MAX_DAMAGE_RECTS];
+        match damage_list(&region, &self.mode, &mut list) {
+            Some(rects) => display.present_rects(&self.frame, rects),
+            None => display.present(&self.frame),
         }
-        for &rect in rects {
-            self.stats.bump_present();
-            match sub_screen_damage(&rect, &self.mode) {
-                Some(damage) => display.present_region(&self.frame, damage)?,
-                None => display.present(&self.frame)?,
-            }
-        }
-        Ok(())
     }
 
     /// Present via the display's hardware layer engine when it can serve
@@ -2084,7 +2306,7 @@ impl Compositor {
         // A hardware layer is composed from its own pixels alone and cannot
         // sample what is already behind it, so a backdrop blur has no layer
         // encoding at all and the whole frame goes through software.
-        let layers = if self.has_backdrop_blur() {
+        let layers = if self.has_backdrop_blur() || self.has_translucent_window() {
             None
         } else {
             // Every visible window becomes its own layer here, so every one
@@ -2102,6 +2324,23 @@ impl Compositor {
             self.stats.bump_present();
             display.present(&self.frame)
         }
+    }
+
+    /// Whether any visible window is translucent as a whole.
+    ///
+    /// Such a window is a large field the *engine* would have to blend over
+    /// what is beneath it, and an engine blends in the scan-out's own 8 bits
+    /// with a fixed rounding: the wallpaper under it would arrive in the
+    /// `256 - opacity` levels that leaves and step into bands. The composite
+    /// this crate performs spends that missing resolution across the area
+    /// instead ([`DitherRow`]), which no layer stack can express, so the
+    /// frame goes through software exactly as a backdrop blur does. A
+    /// window's own antialiased corner is not this case — its partial
+    /// coverage is an edge a few pixels wide, with no gradient to band.
+    fn has_translucent_window(&self) -> bool {
+        self.windows
+            .iter()
+            .any(|window| window.is_visible() && window.opacity() != u8::MAX)
     }
 
     /// Encode the current scene as hardware layers, or `None` if the
@@ -2246,6 +2485,12 @@ impl Compositor {
     /// Only the last segment encodes the scan-out frame, so the
     /// intermediate stages cost no wasted encoding.
     ///
+    /// The layers below a frost are composed only where the frost will not
+    /// write over them ([`frost_spared`](Self::frost_spared)). A retained frost
+    /// is copied on top of whatever is there, so composing the stack underneath
+    /// it first is work the copy throws away — for a frosted terminal being
+    /// dragged, a whole window's worth of blending per pointer sample.
+    ///
     /// [`compose_span`]: Self::compose_span
     fn recompose_rect(
         &mut self,
@@ -2260,46 +2505,147 @@ impl Compositor {
             let Some(index) = hits.get(split).copied() else {
                 continue;
             };
-            if self.windows.get(index).is_none_or(|w| w.blur_radius() == 0) {
+            if self.windows.get(index).is_none_or(|w| !w.reads_backdrop()) {
                 continue;
             }
-            self.compose_span(area, under, hits.get(start..split), fallback, false);
-            self.frost_segment(index, area);
+            let plan = self.frost_plan(index);
+            self.compose_plane(
+                area,
+                self.frost_spared(index, plan),
+                under,
+                hits.get(start..split),
+                fallback,
+            );
+            self.frost_segment(index, plan, area);
             start = split;
             under = None;
         }
         self.compose_span(area, under, hits.get(start..), fallback, true);
     }
 
-    /// Put the frosted backdrop of the window at `index` into the back buffer
-    /// where `area` reaches it: the retained one where it is still valid,
-    /// otherwise blurred afresh and kept for the next frame.
+    /// Compose the layers `span` names over `area` except `spared`, which the
+    /// frost above them is about to write over.
     ///
-    /// The two produce the same bytes — the retained copy *is* the blur's own
+    /// The remainder is composed as the disjoint rectangles it is, never as the
+    /// box around them: for a window whose frost survives in full that
+    /// remainder is usually nothing at all, and for one whose border has to be
+    /// blurred it is the ring the border reads from. Both are strictly less than
+    /// the rectangle, and neither is a different composite — the same
+    /// [`compose_span`](Self::compose_span) writes the same pixels, over fewer
+    /// columns.
+    fn compose_plane(
+        &mut self,
+        area: Rect,
+        spared: Rect,
+        under: Option<Pixel>,
+        span: Option<&[usize]>,
+        fallback: &ChromeFallback,
+    ) {
+        if spared.is_empty() {
+            self.compose_span(area, under, span, fallback, false);
+            return;
+        }
+        // Taken out and put back so the region keeps the buffers it grew;
+        // composing borrows the compositor mutably.
+        let mut plane = core::mem::take(&mut self.plane);
+        plane.clear();
+        plane.add(area);
+        plane.subtract(spared);
+        for rect in plane.rects() {
+            self.compose_span(*rect, under, span, fallback, false);
+        }
+        self.plane = plane;
+    }
+
+    /// The part of the window at z-index `index` its frost will write over
+    /// without reading, so the layers below need not be composed there.
+    ///
+    /// A whole retained frost is copied over its entire rectangle, so all of it
+    /// is spared. A frost kept only in its core has its border blurred, and that
+    /// blur *reads* the backdrop up to `radius` inside the core, so only the
+    /// core taken in by the radius is spared. A frost being blurred outright
+    /// reads the whole rectangle and spares nothing.
+    ///
+    /// Nothing is spared for a frost the cache no longer holds, which the plan
+    /// says cannot happen — every path that drops an entry rewrites the plan —
+    /// but asking here and copying in [`frost_segment`](Self::frost_segment)
+    /// with only a composite in between is what makes the pair agree by
+    /// construction rather than by that argument.
+    fn frost_spared(&self, index: usize, plan: FrostPlan) -> Rect {
+        let Some(window) = self.windows.get(index) else {
+            return Rect::EMPTY;
+        };
+        match plan {
+            FrostPlan::Whole if self.frost_retained(window.id()) => {
+                window.bounds().intersection(&self.screen_rect())
+            }
+            FrostPlan::Core(core) => inset(core, self.blur_radius_px(window)),
+            FrostPlan::Whole | FrostPlan::Blur => Rect::EMPTY,
+        }
+    }
+
+    /// Whether the cache holds a frost for the window `id` names at the current
+    /// epoch, without counting a lookup or touching its recency.
+    fn frost_retained(&self, id: WindowId) -> bool {
+        self.frost.peek(&self.frost_epoch(), &id).is_some()
+    }
+
+    /// Copy `keep` of the retained frost of the window `id` names into the back
+    /// buffer, reporting whether there was one to copy.
+    fn restore_frost(&mut self, id: WindowId, keep: Rect) -> bool {
+        let epoch = self.frost_epoch();
+        let Self { frost, back, .. } = self;
+        let Some(retained) = frost.peek(&epoch, &id) else {
+            return false;
+        };
+        retained.restore(back, keep);
+        true
+    }
+
+    /// Put the frosted backdrop of the window at `index` into the back buffer
+    /// where `area` reaches it, doing as little of the blur as `plan` allows.
+    ///
+    /// Every arm produces the same bytes — a retained frost *is* the blur's own
     /// output, taken from this buffer when it was last computed — so this is a
-    /// specialisation of the blur, never a second frosting. What differs is the
-    /// extent: a recompute needs the window's whole rectangle, which the plan
-    /// guarantees is inside `area` because it promoted it
-    /// ([`compose_plan`](Self::compose_plan)), while a copy needs only the part
-    /// of the rectangle this rectangle of damage actually touches.
-    fn frost_segment(&mut self, index: usize, area: Rect) {
+    /// specialisation of the blur, never a second frosting. What differs is how
+    /// much of the rectangle has to be blurred again:
+    ///
+    /// - [`Whole`](FrostPlan::Whole): none of it. A copy needs only the part of
+    ///   the rectangle this rectangle of damage actually touches.
+    /// - [`Core`](FrostPlan::Core): the border around the core, which the plan
+    ///   guarantees is inside `area` because it promoted the whole window. The
+    ///   border is blurred *before* the core is copied back, because the border's
+    ///   own neighbourhood reaches into the core and what it must read there is
+    ///   the backdrop, not the frost of it.
+    /// - [`Blur`](FrostPlan::Blur): all of it.
+    ///
+    /// A frost the frame recomputed any part of is captured whole, so the next
+    /// frame compares against where the window is *now* rather than eroding the
+    /// same core until nothing is left of it.
+    fn frost_segment(&mut self, index: usize, plan: FrostPlan, area: Rect) {
         let screen = self.screen_rect();
-        let reusable = self.frost_reusable(index);
         let Some(window) = self.windows.get(index) else {
             return;
         };
         let (id, shape) = (window.id(), window.shape());
         let bounds = window.bounds();
         let radius_px = self.blur_radius_px(window);
-        if reusable {
-            let epoch = self.frost_epoch();
-            let Self { frost, back, .. } = self;
-            if let Some(retained) = frost.peek(&epoch, &id) {
-                retained.restore(back, area);
-                return;
+        match plan {
+            FrostPlan::Whole => {
+                if self.restore_frost(id, area) {
+                    return;
+                }
+                // Unreachable while the plan and the cache agree, and correct
+                // anyway: nothing was spared for a frost that is not there, so
+                // the layers below this rectangle were composed after all.
+                self.blur_backdrop(index, Rect::EMPTY);
             }
+            FrostPlan::Core(core) => {
+                self.blur_backdrop(index, core);
+                self.restore_frost(id, core);
+            }
+            FrostPlan::Blur => self.blur_backdrop(index, Rect::EMPTY),
         }
-        self.blur_backdrop(index);
         // Nothing is lost when the copy cannot be taken: the frame is already
         // frosted, and the next one blurs again.
         if let Some(captured) =
@@ -2337,7 +2683,7 @@ impl Compositor {
     /// culls per *run* rather than per window, so a window that covers only
     /// part of a dirty rectangle, or whose own pixels are opaque only in
     /// places, still saves exactly the blending it can. Columns no run covers
-    /// take the same [`compose_pixel`] path they always did, over the same
+    /// take the same [`compose_segment`] path they always did, over the same
     /// [`Pixel::over`], so this is a loop specialisation and never a second
     /// blend.
     ///
@@ -2420,6 +2766,7 @@ impl Compositor {
                     .iter()
                     .filter_map(|(window, chrome)| window.row(y, *chrome)),
             );
+            let dither = DitherRow::at(py);
             let cursor_row = cursor.and_then(|c| c.local_row(y).map(|ly| (c, ly)));
             let desktop_row = desktop.map(|layer| crate::surface::row(layer, py));
             let Some((_, back_row)) = back.row_span_mut(py, left, area.width) else {
@@ -2452,7 +2799,13 @@ impl Compositor {
                 back: back_row,
                 frame: encode.then_some(frame_row),
             };
-            let work = compose_row(&layers, targets, area.left(), order, reveal);
+            let work = compose_row(
+                &layers,
+                targets,
+                area.left(),
+                order,
+                RowRound { reveal, dither },
+            );
             if encode {
                 stats.add_encoded(u64::from(area.width));
             }
@@ -2463,7 +2816,9 @@ impl Compositor {
 
     /// Frost the back buffer inside the rectangle of the window at `index`,
     /// weighted by that window's own shape coverage, leaving a frosted
-    /// backdrop for the window's pixels to be blended over.
+    /// backdrop for the window's pixels to be blended over — everywhere except
+    /// `keep`, whose pixels the caller is about to copy from the frost it
+    /// retained.
     ///
     /// The rectangle is the window's whole on-screen bounds every time —
     /// the compose plan promotes it whenever a frost must be recomputed — so
@@ -2473,11 +2828,17 @@ impl Compositor {
     /// untouched across exactly the arc the window's own pixels fade over
     /// and no square edge shows outside a rounded window.
     ///
-    /// The shared frost ([`Surface::frost_region`]) confines the effect to
-    /// that rectangle and replicates its edges, so it can never pull a
-    /// neighbour's pixels into a window nor write outside its own bounds,
-    /// and it works in the scratch this compositor owns and reuses.
-    fn blur_backdrop(&mut self, index: usize) {
+    /// `keep` is the whole rectangle's own answer being reused, not a smaller
+    /// frost: the shared frost still replicates at the rectangle's edges and
+    /// reads coverage at the rectangle's coordinates, so the border it writes
+    /// around `keep` is bit-for-bit what a full blur would have written there
+    /// (`Surface::frost_region_around`). An empty `keep` frosts all of it.
+    ///
+    /// The shared frost confines the effect to that rectangle and replicates
+    /// its edges, so it can never pull a neighbour's pixels into a window nor
+    /// write outside its own bounds, and it works in the scratch this
+    /// compositor owns and reuses.
+    fn blur_backdrop(&mut self, index: usize, keep: Rect) {
         let screen = self.screen_rect();
         let radius = self
             .windows
@@ -2506,12 +2867,29 @@ impl Compositor {
         let shape_x = u32::try_from(region.left().saturating_sub(bounds.left())).unwrap_or(0);
         let shape_y = u32::try_from(region.top().saturating_sub(bounds.top())).unwrap_or(0);
         let shape = window.shape();
-        stats.add_blur(area_px(region.width, region.height));
-        back.frost_region(
+        let kept = keep.intersection(&region);
+        let (cols, rows) = (
+            local_span(kept.left(), kept.right(), region.left()),
+            local_span(kept.top(), kept.bottom(), region.top()),
+        );
+        // Only a real blur is charged. A window that retains its backdrop
+        // without one — translucent but unblurred — comes through here with
+        // radius zero, and the shared frost leaves the composed layers exactly
+        // as it found them, so counting those pixels would report blur work
+        // that never happened.
+        if radius > 0 {
+            stats.add_blur(
+                area_px(region.width, region.height)
+                    .saturating_sub(area_px(kept.width, kept.height)),
+            );
+        }
+        back.frost_region_around(
             left,
             top,
             region.width,
             region.height,
+            cols,
+            rows,
             radius,
             blur_scratch,
             |lx, ly| {
@@ -2521,6 +2899,14 @@ impl Compositor {
             },
         );
     }
+}
+
+/// `start..end`, screen coordinates, as the offsets from `origin` a surface
+/// rectangle is spelled in — empty where the rectangle is.
+fn local_span(start: i32, end: i32, origin: i32) -> Range<u32> {
+    let offset = |at: i32| u32::try_from(at.saturating_sub(origin)).unwrap_or(0);
+    let (from, until) = (offset(start), offset(end));
+    from..until.max(from)
 }
 
 /// One screen row's resolved layers, bottom to top.
@@ -2544,6 +2930,15 @@ struct RowTargets<'a> {
     frame: Option<&'a mut [u8]>,
 }
 
+/// How a composed row rounds into its 8-bit targets: the screen reveal the
+/// scan-out byte is dimmed by, and the ordered dither every blend on the row
+/// varies its rounding with.
+#[derive(Copy, Clone)]
+struct RowRound {
+    reveal: u8,
+    dither: DitherRow,
+}
+
 /// What composing one row cost.
 struct RowWork {
     /// Layer contributions blended.
@@ -2556,17 +2951,20 @@ struct RowWork {
 /// carries frame bytes — the scan-out frame, from screen column `first_col`.
 ///
 /// Opaque runs of the front-most window are copied whole and everything below
-/// them is skipped; every other column takes [`compose_pixel`]. A run whose
-/// destination slice cannot be resolved encodes nothing and falls through to
-/// the general path, so the frame can never be left holding stale bytes.
+/// them is skipped; the columns between two such runs are composed as one
+/// **segment** ([`compose_segment`]), and a row with no copyable run at all is
+/// one segment from end to end. A run whose destination slice cannot be
+/// resolved encodes nothing and falls through to the general path, so the
+/// frame can never be left holding stale bytes.
 fn compose_row(
     layers: &RowLayers<'_>,
     targets: RowTargets<'_>,
     first_col: i32,
     order: ChannelOrder,
-    reveal: u8,
+    round: RowRound,
 ) -> RowWork {
     let RowTargets { back, mut frame } = targets;
+    let RowRound { reveal, dither } = round;
     let cols = back.len();
     let limit = first_col.saturating_add_unsigned(u32::try_from(cols).unwrap_or(u32::MAX));
     let mut work = RowWork {
@@ -2603,65 +3001,91 @@ fn compose_row(
                 continue;
             }
         }
-        let Some(dst) = back.get_mut(col) else {
+        // As far as the front-most window's next copyable run, so the columns
+        // between two runs are composed in one pass rather than one at a time.
+        let segment = layers
+            .front
+            .map_or(cols - col, |row| row.blend_len(x, limit))
+            .clamp(1, cols - col);
+        let Some(dst) = back.get_mut(col..col + segment) else {
             break;
         };
-        let (acc, blends) = compose_pixel(
-            layers.under.unwrap_or(*dst),
-            x,
-            layers.desktop,
-            layers.windows,
-            layers.cursor,
-        );
-        work.blended = work.blended.saturating_add(u64::from(blends));
-        *dst = acc;
+        work.blended = work
+            .blended
+            .saturating_add(compose_segment(dst, layers, x, dither));
         if let Some(bytes) = frame
             .as_deref_mut()
-            .and_then(|bytes| bytes.get_mut(col * 4..col * 4 + 4))
+            .and_then(|bytes| bytes.get_mut(col * 4..(col + segment) * 4))
         {
-            bytes.copy_from_slice(&order.encode(revealed(acc, reveal)));
+            encode_segment(bytes, dst, order, reveal);
         }
-        col += 1;
-        x = x.saturating_add(1);
+        col += segment;
+        x = x.saturating_add_unsigned(u32::try_from(segment).unwrap_or(u32::MAX));
     }
     work
 }
 
-/// The composited pixel at screen column `x` of an already-resolved
-/// scanline: the desktop layer, then each window row back-to-front, then
-/// the cursor, each blended *over* `under`. Returns that pixel and how many
-/// layers were blended to reach it, which is the per-pixel cost the frame
+/// Compose the columns of one screen row that `dst` covers, from screen column
+/// `first_x`: the root fill or whatever the back buffer already held, then the
+/// desktop layer, then each window row back to front, then the cursor. Returns
+/// how many layer contributions were blended, which is the cost the frame
 /// counters report.
 ///
-/// `cursor` carries the overlay and the image-local row this scanline is,
-/// already resolved by the caller, or `None` where the cursor draws nothing
-/// on this row.
-fn compose_pixel(
-    under: Pixel,
-    x: i32,
-    desktop_row: Option<&[Pixel]>,
-    rows: &[WindowRow<'_>],
-    cursor: Option<(&PlacedCursor, u32)>,
-) -> (Pixel, u32) {
-    let mut acc = under;
-    let mut blends = 0;
-    if let Some(src) = desktop_pixel(desktop_row, x) {
-        acc = src.over(acc);
-        blends += 1;
+/// The layers are laid **one at a time over the whole segment**, not one column
+/// at a time through the whole stack. Each is a straight run of source pixels
+/// at a screen column and a constant opacity ([`blend_run`]), so the arithmetic
+/// per pixel is the same *over* at the same rounding while the layer decision,
+/// the coordinate conversion, and the bounds checks around it are paid once per
+/// run instead of once per pixel — which measurement showed was where a
+/// translucent composite's time actually went. A pixel still sees the layers in
+/// exactly the order it saw them column by column, so the result is unchanged.
+///
+/// A window row the shape cuts, and the cursor, keep the column-by-column walk
+/// inside their own contribution ([`WindowRow::blend_into`]); they are a few
+/// rows of a frame, and their coverage genuinely varies per column.
+fn compose_segment(
+    dst: &mut [Pixel],
+    layers: &RowLayers<'_>,
+    first_x: i32,
+    dither: DitherRow,
+) -> u64 {
+    if let Some(base) = layers.under {
+        dst.fill(base);
     }
-    for row in rows {
-        if let Some(src) = row.sample(x) {
-            acc = src.over(acc);
-            blends += 1;
+    // The desktop layer is a whole screen row, so its first pixel is screen
+    // column zero.
+    let mut blended = layers.desktop.map_or(0, |desktop| {
+        blend_run(dst, first_x, desktop, 0, u8::MAX, dither)
+    });
+    for row in layers.windows {
+        blended = blended.saturating_add(row.blend_into(dst, first_x, dither));
+    }
+    if let Some((cursor, ly)) = layers.cursor {
+        for (dst, x) in dst.iter_mut().zip(first_x..) {
+            let bias = dither.bias(x.cast_unsigned());
+            if let Some(src) = cursor.sample_row(x, ly) {
+                *dst = src.over_biased(*dst, bias);
+                blended = blended.saturating_add(1);
+            }
         }
     }
-    if let Some((cursor, ly)) = cursor {
-        if let Some(src) = cursor.sample_row(x, ly) {
-            acc = src.over(acc);
-            blends += 1;
-        }
+    blended
+}
+
+/// Encode `pixels` into `bytes` as scan-out, dimmed by the screen reveal.
+///
+/// A fully-revealed screen — every frame but the few of a fade — is the shared
+/// run encoder over the whole segment.
+fn encode_segment(bytes: &mut [u8], pixels: &[Pixel], order: ChannelOrder, reveal: u8) {
+    if reveal == u8::MAX {
+        // Four bytes per pixel of the segment by construction, so the shared
+        // encoder takes all of them.
+        let _encoded = order.encode_run(pixels, bytes);
+        return;
     }
-    (acc, blends)
+    for (slot, pixel) in bytes.as_chunks_mut::<4>().0.iter_mut().zip(pixels) {
+        *slot = order.encode(revealed(*pixel, reveal));
+    }
 }
 
 /// `pixel` as the screen reveal presents it: scaled towards black by
@@ -2681,15 +3105,6 @@ fn revealed(pixel: Pixel, strength: u8) -> Pixel {
         b: div255(u32::from(pixel.b) * s),
         a: pixel.a,
     }
-}
-
-/// The desktop layer's pixel at screen column `x` on an already-resolved
-/// scanline, or `None` where the layer does not reach (no layer at all, a row
-/// past its height, or a column past its width) — there the root fill shows
-/// through, exactly as it did before a layer was installed.
-fn desktop_pixel(row: Option<&[Pixel]>, x: i32) -> Option<Pixel> {
-    let column = usize::try_from(x).ok()?;
-    row?.get(column).copied()
 }
 
 /// Whether `window` can contribute a pixel inside `area`: it is visible
@@ -2777,24 +3192,3 @@ impl LayerBuf {
         }
     }
 }
-
-/// The most rectangles [`Compositor::present`] will hand to
-/// [`Display::present_region`] individually before falling back to a
-/// single bounding-box present.
-///
-/// Each `present_region` call is a synchronous IPC round trip to the
-/// display service: its fixed dispatch cost (marshalling the message,
-/// the context switch into the driver and back) is paid once per call no
-/// matter how few pixels the rectangle covers, while the *marginal* cost
-/// of a larger copy is just more bytes memcpy'd — the measured whole
-/// 1024×768×4 frame copy this crate optimises away (~108 microseconds
-/// for almost 3.2 MiB) puts that marginal cost at a small fraction of a
-/// microsecond per extra kilobyte. The fixed per-call cost therefore
-/// dominates well before the combined bounding box grows large: past a
-/// handful of rectangles, the sum of their round trips costs more than
-/// one call that copies their (larger) bounding box in a single trip.
-/// Eight keeps the common cases — a moved window plus the cursor, a
-/// couple of repainted widgets — on the cheap per-rectangle path while
-/// capping a pathological scattered-damage frame at one round trip
-/// instead of dozens.
-pub const MAX_PRESENT_REGIONS: usize = 8;

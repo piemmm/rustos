@@ -327,7 +327,7 @@ where
             .map_err(live_errno)
     }
 
-    fn free(&self, cpu_va: u64) -> Result<(), Errno> {
+    fn free(&self, cpu_va: u64) -> Result<usize, Errno> {
         let cpu = self.arch.current_cpu();
         with_current_live_space(cpu, |space| space.free_dma(cpu_va))
             .ok_or(Errno::NotImplemented)?
@@ -682,11 +682,11 @@ mod tests {
             }
         }
 
-        fn free_dma(&mut self, cpu_va: u64) -> Result<(), LiveSpaceError> {
+        fn free_dma(&mut self, cpu_va: u64) -> Result<usize, LiveSpaceError> {
             self.dma_frees.push(cpu_va);
             match self.next.take() {
                 Some(err) => Err(err),
-                None => Ok(()),
+                None => Ok(tairix_kernel_mem::PAGE_SIZE),
             }
         }
 

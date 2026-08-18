@@ -571,18 +571,75 @@ fn denied_paints_a_lock_bead_in_the_interior() {
 
 // --- Focus and pressed appearance --------------------------------------
 
+/// A translucent plate *composited* over the ground beneath it comes back
+/// more opaque than the theme authored, and the control then frosts nothing
+/// while every colour still looks plausible. It has to be laid down.
 #[test]
-fn focus_lifts_the_rim_to_the_active_colour() {
+fn a_button_on_floating_chrome_lays_its_plate_down_rather_than_over_the_ground() {
+    for theme in [Theme::dark(), Theme::light()] {
+        let palette = theme.palette();
+        let want = premul(
+            palette
+                .surface_raised
+                .with_alpha(palette.chrome_plate_alpha),
+        );
+        let mut surface =
+            Surface::filled(W, H, premul(palette.surface)).expect("an opaque ground to draw on");
+        Button::labelled("OK").render(
+            &mut surface,
+            Rect::new(0, 0, W, H),
+            Scale::ONE,
+            &theme.clone().floating(),
+        );
+
+        // Just inside the top border, clear of the centred label.
+        let plate = surface.get(W / 2, 2).expect("in bounds");
+        assert_eq!(plate, want, "{}: the plate covers", theme.name());
+        assert!(plate.a < 255, "{}: the plate covers", theme.name());
+        // The rim is a mark, not a background: it stays the edge it was.
+        assert_eq!(
+            surface.get(0, H / 2),
+            Some(premul(palette.rim)),
+            "{}: the laid plate ate the rim",
+            theme.name()
+        );
+
+        // An ordinary button on a window is untouched by the option existing.
+        assert_eq!(
+            render(&Button::labelled("OK"), &theme).get(W / 2, 2),
+            Some(premul(palette.surface_raised)),
+            "{}: an ordinary button changed",
+            theme.name()
+        );
+    }
+}
+
+#[test]
+fn focus_draws_exactly_one_accent_line_and_leaves_the_rim_quiet() {
     let theme = Theme::dark();
+    let quiet = premul(theme.palette().rim);
+    let accent = premul(theme.palette().rim_active);
     let mut button = Button::labelled("OK");
     let resting = render(&button, &theme);
     button.set_focused(true);
     let focused = render(&button, &theme);
-    assert_eq!(resting.get(0, H / 2), Some(premul(theme.palette().rim)));
+
+    assert_eq!(resting.get(0, H / 2), Some(quiet));
     assert_eq!(
         focused.get(0, H / 2),
-        Some(premul(theme.palette().rim_active))
+        Some(quiet),
+        "the ring is the focus mark, so the perimeter stays the resting edge"
     );
+    // One line per side: the ring, a border inside the plate. Counting the
+    // row is what tells a single ring from the ring-plus-lifted-rim pair a
+    // reader sees as a doubled border.
+    let line = |surface: &Surface| {
+        (0..W)
+            .filter(|x| surface.get(*x, H / 2) == Some(accent))
+            .count()
+    };
+    assert_eq!(line(&resting), 0, "a resting button states nothing");
+    assert_eq!(line(&focused), 2, "one accent line down each side");
 }
 
 #[test]

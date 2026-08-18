@@ -24,10 +24,14 @@
 //! * **Every bound is checked before any pixel access.** The configured
 //!   geometry must equal the active mode exactly, the mapped region must
 //!   hold every frame, the frame index must name a configured frame, and
-//!   the damage rectangle must lie inside the mode; each failure is a
-//!   typed refusal, never a clamp.
+//!   *every* damage rectangle must lie inside the mode — the whole list is
+//!   checked before the first is blitted, so one bad rectangle refuses the
+//!   present rather than half-applying it. Each failure is a typed
+//!   refusal, never a clamp.
 
-use tairix_abi::display_ipc::{encode_mode_reply, DisplayRequest, DISPLAY_MODE_REPLY_LEN};
+use tairix_abi::display_ipc::{
+    encode_mode_reply, DamageList, DisplayRequest, DISPLAY_MODE_REPLY_LEN,
+};
 use tairix_abi::driver::display::{DamageRect, Display, DisplayFormat, DisplayMode};
 use tairix_abi::reply::{encode_status_reply, STATUS_REPLY_LEN};
 use tairix_abi::Errno;
@@ -277,7 +281,7 @@ impl<M: ShmMapper> DisplayServer<M> {
         seat_id: u64,
         generation: u64,
         frame_index: u32,
-        damage: DamageRect,
+        damage: DamageList,
     ) -> Result<(), Errno> {
         let configured = self.configured.as_ref().ok_or(Errno::NotFound)?;
         // Frames are bound to the lease that granted them: a caller on a
@@ -289,18 +293,20 @@ impl<M: ShmMapper> DisplayServer<M> {
         if frame_index >= configured.frame_count {
             return Err(Errno::OutOfRange);
         }
-        damage
-            .validate_in(&configured.mode)
+        let rects = damage.rects();
+        DamageRect::validate_list(rects, &configured.mode)
             .map_err(tairix_abi::DriverError::as_errno)?;
         let offset = configured.frame_len * frame_index as usize;
         let bytes = configured.region.bytes();
         let frame = bytes
             .get(offset..offset + configured.frame_len)
             .ok_or(Errno::LengthOutOfRange)?;
-        let result = if damage.covers(&configured.mode) {
+        // A rectangle covering the surface makes the rest of the list
+        // redundant: the full blit already writes every pixel they name.
+        let result = if rects.iter().any(|rect| rect.covers(&configured.mode)) {
             display.present(frame)
         } else {
-            display.present_region(frame, damage)
+            display.present_rects(frame, rects)
         };
         let result = result.map_err(tairix_abi::DriverError::as_errno);
         if result.is_ok() {

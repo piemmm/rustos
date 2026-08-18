@@ -3,6 +3,7 @@
 use tairix_reclaim::CachedBytes;
 
 use crate::color::{Color, Pixel};
+use crate::dither::DitherRow;
 use crate::paint::Paint;
 use crate::round::round_rect_coverage;
 use crate::scan::FillRule;
@@ -321,7 +322,16 @@ fn reference_round_rect(
             let Some(dst) = surface.get(col, row) else {
                 continue;
             };
-            surface.set(col, row, source.scale_alpha(coverage).over(dst));
+            // A translucent composite rounds at the pixel's own share of the
+            // surface's ordered dither, arc and interior alike.
+            let bias = DitherRow::at(row).bias(col);
+            surface.set(
+                col,
+                row,
+                source
+                    .scale_alpha_biased(coverage, bias)
+                    .over_biased(dst, bias),
+            );
         }
     }
 }
@@ -652,6 +662,72 @@ fn blit_composites_only_opaque_source_pixels() {
 }
 
 #[test]
+fn overwrite_replaces_what_it_lands_on_where_a_blit_would_composite() {
+    // A snapshot is a copy, not a composite: the compositor retains the
+    // backdrop beneath a translucent or blurred window with this, and a
+    // transparent source pixel must arrive as transparent rather than leave
+    // the old contents showing.
+    let mut copied = Surface::new(4, 4).expect("allocates");
+    copied.fill(BLUE);
+    let mut composited = Surface::new(4, 4).expect("allocates");
+    composited.fill(BLUE);
+    let mut src = Surface::new(2, 2).expect("allocates");
+    src.set(0, 0, RED.premultiply());
+    src.set(1, 0, Color::rgba(0, 200, 40, 128).premultiply());
+
+    copied.overwrite(1, 1, &src);
+    composited.blit(1, 1, &src);
+    assert_eq!(copied.get(1, 1), Some(RED.premultiply()));
+    assert_eq!(
+        copied.get(2, 2),
+        Some(Pixel::TRANSPARENT),
+        "a transparent source pixel replaces, it does not skip"
+    );
+    assert_ne!(
+        copied.pixels(),
+        composited.pixels(),
+        "the two differ exactly where the source was not opaque"
+    );
+    // Outside the footprint neither touched anything.
+    assert_eq!(copied.get(0, 0), Some(BLUE.premultiply()));
+}
+
+#[test]
+fn overwriting_a_whole_surface_reproduces_it_exactly() {
+    // The property the retained backdrop rests on: what comes back is what
+    // was there, byte for byte, translucent pixels included.
+    let mut source = Surface::new(5, 3).expect("allocates");
+    source.fill(BLUE);
+    source.set(2, 1, Color::rgba(10, 20, 30, 90).premultiply());
+    source.set(4, 2, Pixel::TRANSPARENT);
+    let mut taken = Surface::new(5, 3).expect("allocates");
+    taken.fill(RED);
+    taken.overwrite(0, 0, &source);
+    assert_eq!(taken.pixels(), source.pixels());
+}
+
+#[test]
+fn an_overwrite_clips_exactly_as_a_plain_blit_does() {
+    // The two share one geometry walk, so a source hanging off an edge must
+    // land on precisely the same pixels either way.
+    let mut src = Surface::new(3, 3).expect("allocates");
+    src.fill(RED);
+    for at in [(-2i32, -1i32), (3, 2), (-4, -4), (2, 0)] {
+        let mut copied = Surface::new(4, 4).expect("allocates");
+        copied.fill(BLUE);
+        let mut blitted = Surface::new(4, 4).expect("allocates");
+        blitted.fill(BLUE);
+        copied.overwrite(at.0, at.1, &src);
+        blitted.blit(at.0, at.1, &src);
+        assert_eq!(
+            copied.pixels(),
+            blitted.pixels(),
+            "an opaque source at {at:?} copies and composites alike"
+        );
+    }
+}
+
+#[test]
 fn blit_desaturated_greys_the_source_without_touching_it() {
     let mut dst = Surface::new(2, 2).expect("allocates");
     let mut src = Surface::new(2, 2).expect("allocates");
@@ -684,6 +760,111 @@ fn a_desaturated_blit_clips_exactly_as_a_plain_one_does() {
     dst.blit_desaturated(-1, -1, &src, 0);
     let grey = RED.premultiply().desaturate(0);
     assert!(dst.pixels().iter().all(|p| *p == grey));
+}
+
+#[test]
+fn set_round_rect_lays_a_translucent_ground_a_fill_could_not() {
+    // The point of the primitive: a half-opaque colour composited over an
+    // opaque plate comes back opaque, so a surface that must be see-through
+    // has to *replace* what it covers.
+    let ground = Color::rgba(20, 26, 30, 128);
+    let mut laid = Surface::new(8, 8).expect("allocates");
+    laid.fill(BLUE);
+    laid.set_round_rect(0, 0, 8, 8, 0, ground);
+    assert_eq!(laid.get(4, 4), Some(ground.premultiply()));
+
+    let mut filled = Surface::new(8, 8).expect("allocates");
+    filled.fill(BLUE);
+    filled.fill_round_rect(0, 0, 8, 8, 0, ground);
+    assert_eq!(filled.get(4, 4).map(|p| p.a), Some(255));
+}
+
+/// Every control background is *laid down* rather than composited, so that a
+/// translucent one keeps the alpha its theme authored. This is what makes
+/// that safe for the opaque ones: an opaque colour covers what is under it
+/// either way. Wherever the shape fully covers a pixel the two are the same
+/// byte; on an arc pixel both compute the same blend, laying it down with a
+/// single rounding where compositing rounds the source and the destination
+/// separately, so it can land one level nearer the exact value and never
+/// further.
+#[test]
+fn laying_an_opaque_colour_down_matches_compositing_it_to_within_a_rounding() {
+    let under = Color::rgba(254, 3, 200, 255);
+    let over = Color::rgba(1, 251, 40, 255);
+    for radius in [0, 1, 5, 8] {
+        let mut laid = Surface::new(16, 16).expect("allocates");
+        laid.fill(under);
+        laid.set_round_rect(0, 0, 16, 16, radius, over);
+
+        let mut composited = Surface::new(16, 16).expect("allocates");
+        composited.fill(under);
+        composited.fill_round_rect(0, 0, 16, 16, radius, over);
+
+        let exact = |x: u32, y: u32| {
+            let inset = radius.saturating_add(1);
+            (inset..16 - inset).contains(&x) || (inset..16 - inset).contains(&y)
+        };
+        for y in 0..16 {
+            for x in 0..16 {
+                let (a, b) = (
+                    laid.get(x, y).expect("in bounds"),
+                    composited.get(x, y).expect("in bounds"),
+                );
+                let apart = [(a.r, b.r), (a.g, b.g), (a.b, b.b), (a.a, b.a)]
+                    .into_iter()
+                    .map(|(l, r)| u32::from(l.abs_diff(r)))
+                    .max()
+                    .unwrap_or(0);
+                if exact(x, y) {
+                    assert_eq!(a, b, "r{radius} ({x},{y}) is fully covered");
+                } else {
+                    assert!(apart <= 1, "r{radius} ({x},{y}): {a:?} vs {b:?}");
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn set_round_rect_leaves_everything_outside_its_shape_alone() {
+    let mut surface = Surface::new(8, 8).expect("allocates");
+    surface.fill(RED);
+    let red = RED.premultiply();
+    surface.set_round_rect(2, 2, 4, 4, 0, Color::rgba(0, 0, 0, 0));
+    assert_eq!(surface.get(1, 4), Some(red), "the column beside it");
+    assert_eq!(surface.get(4, 1), Some(red), "the row above it");
+    assert_eq!(
+        surface.get(3, 3),
+        Some(Pixel::TRANSPARENT),
+        "and inside it is exactly what was laid"
+    );
+}
+
+#[test]
+fn set_round_rect_mixes_an_arc_pixel_toward_the_ground() {
+    // A pixel the arc partly covers keeps that fraction of what was under
+    // it, so the rim a floating plate is laid over still shows through its
+    // own arc instead of being punched out to a translucent notch.
+    let mut surface = Surface::new(16, 16).expect("allocates");
+    surface.fill(RED);
+    let red = RED.premultiply();
+    let ground = Color::rgba(0, 0, 40, 128);
+    let laid = ground.premultiply();
+    surface.set_round_rect(0, 0, 16, 16, 6, ground);
+
+    let partial = (0..6u32)
+        .flat_map(|x| (0..6u32).map(move |y| (x, y)))
+        .filter_map(|(x, y)| surface.get(x, y))
+        .find(|p| p.a > laid.a && p.a < red.a);
+    assert!(
+        partial.is_some(),
+        "no pixel on the arc kept part of what was under it"
+    );
+    assert_eq!(
+        surface.get(0, 0),
+        Some(red),
+        "and the corner the arc misses entirely is untouched"
+    );
 }
 
 #[test]
@@ -933,6 +1114,139 @@ fn a_clipped_gradient_keeps_the_ramp_the_whole_rectangle_would_have_had() {
     }
     assert_eq!(clipped.get(0, 1), Some(Pixel::TRANSPARENT));
     assert_eq!(clipped.get(0, 4), Some(Pixel::TRANSPARENT));
+}
+
+/// A picture for a wash to be laid over: an opaque vertical ramp, one grey
+/// level per row.
+fn grey_ramp(width: u32, height: u32) -> Surface {
+    let mut picture = Surface::new(width, height).expect("allocates");
+    for y in 0..height {
+        let level = u8::try_from(y).unwrap_or(u8::MAX);
+        picture.fill_rect(0, y, width, 1, Color::rgb(level, level, level));
+    }
+    picture
+}
+
+/// One row's *area* tone: the sum of its green channels, which resolves the
+/// row to a fraction of a level rather than to the one level a single pixel
+/// can hold.
+fn row_tone(surface: &Surface, y: u32) -> u32 {
+    (0..surface.width())
+        .filter_map(|x| surface.get(x, y))
+        .map(|pixel| u32::from(pixel.g))
+        .sum()
+}
+
+/// The longest run of consecutive rows of `surface` carrying the same area
+/// tone — a flat plateau, which is what a band is — and how many distinct
+/// tones the rows hold between them.
+///
+/// The scenes below ramp in one direction and a wash is monotone in what it
+/// covers, so a tone that changes is a tone not seen before and counting the
+/// changes counts the distinct tones.
+fn tone_plateaus(surface: &Surface) -> (u32, u32) {
+    let mut previous = row_tone(surface, 0);
+    let (mut longest, mut run, mut tones) = (1, 1, 1);
+    for y in 1..surface.height() {
+        let tone = row_tone(surface, y);
+        if tone == previous {
+            run += 1;
+            longest = longest.max(run);
+        } else {
+            run = 1;
+            tones += 1;
+            previous = tone;
+        }
+    }
+    (longest, tones)
+}
+
+#[test]
+fn a_heavy_wash_over_a_ramp_keeps_the_ramp_distinguishable() {
+    // A wash of alpha `a` has only `256 - a` levels to say what the picture
+    // under it said in 256, so rounding every pixel the same way flattens a
+    // slow ramp into wide plateaus with a step between them — the banding a
+    // darkened wallpaper showed. Spreading that rounding across the area
+    // keeps neighbouring rows apart: at alpha 224 the plateaus were nine rows
+    // deep and only nine of 64 rows were distinguishable at all.
+    for alpha in [176, 200, 224] {
+        let mut washed = grey_ramp(64, 64);
+        let wash = Color::rgba(11, 14, 16, alpha);
+        washed.fill_vertical_gradient(0, 0, 64, 64, wash, wash);
+
+        let (plateau, tones) = tone_plateaus(&washed);
+        assert!(plateau <= 3, "alpha {alpha} flattened {plateau} rows");
+        assert!(tones >= 24, "alpha {alpha} left only {tones} of 64 tones");
+    }
+}
+
+#[test]
+fn a_wash_spreads_its_rounding_error_over_the_area() {
+    // A flat wash over a flat picture whose exact result falls between two
+    // levels: one tile's pixels must average to that result rather than all
+    // taking the nearer level, which is the tonal resolution the ramp above
+    // survives on. Exactly `100 * 127 / 255 = 49.8` per pixel here, so the
+    // tile of 64 owes 3187.45 and a fixed rounding pays 3200.
+    let half_black = Color::rgba(0, 0, 0, 128);
+    let mut washed = Surface::new(8, 8).expect("allocates");
+    washed.fill(Color::rgb(100, 100, 100));
+    washed.fill_vertical_gradient(0, 0, 8, 8, half_black, half_black);
+
+    let tile: u32 = (0..8).map(|y| row_tone(&washed, y)).sum();
+    let owed = 100 * 127 * 64 / 255;
+    assert!(
+        tile.abs_diff(owed) <= 1,
+        "the tile paid {tile} against {owed} owed"
+    );
+}
+
+#[test]
+fn a_wash_of_the_colour_underneath_it_leaves_the_surface_exactly_as_it_was() {
+    // The flat desktop backdrop behind the login column is washed in its own
+    // colour, so the wash must be an identity there whatever its alpha:
+    // dithering only the picture's share of the blend would sprinkle a
+    // half-level of noise over a surface that has nothing to smooth.
+    let desktop = Color::rgb(11, 14, 16);
+    for alpha in [1, 64, 128, 140, 224, 254] {
+        let mut surface = Surface::new(8, 8).expect("allocates");
+        surface.fill(desktop);
+        let wash = Color::rgba(desktop.r, desktop.g, desktop.b, alpha);
+        surface.fill_vertical_gradient(0, 0, 8, 8, wash, wash);
+
+        for y in 0..8 {
+            for x in 0..8 {
+                assert_eq!(
+                    surface.get(x, y),
+                    Some(desktop.premultiply()),
+                    "alpha {alpha} at ({x}, {y})"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn a_wash_leaves_every_pixel_premultiplied() {
+    // Every channel takes the same rounding bias, so a colour channel can
+    // never round above the alpha it is premultiplied by — including over a
+    // destination that is itself translucent.
+    let mut surface = Surface::new(8, 8).expect("allocates");
+    for y in 0..8 {
+        let ground = Color::rgba(255, 200, 100, u8::try_from(y * 36).unwrap_or(u8::MAX));
+        surface.fill_rect(0, y, 8, 1, ground);
+    }
+    let wash = Color::rgba(200, 150, 90, 96);
+    surface.fill_vertical_gradient(0, 0, 8, 8, wash, Color::rgba(30, 40, 50, 200));
+
+    for y in 0..8 {
+        for x in 0..8 {
+            let pixel = surface.get(x, y).expect("in bounds");
+            assert!(
+                pixel.r <= pixel.a && pixel.g <= pixel.a && pixel.b <= pixel.a,
+                "({x}, {y}) came out unpremultiplied: {pixel:?}"
+            );
+        }
+    }
 }
 
 // ---- rounded-rect mask ----------------------------------------------

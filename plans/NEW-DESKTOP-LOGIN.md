@@ -414,7 +414,13 @@ login screen's — it opens on the chooser.
   vertical wash in the theme's own desktop colour, so the chrome at the top
   and the field in the middle stay legible over a bright photograph; because
   the wash *is* the desktop colour it composites to nothing over a plain
-  backdrop. The picture is never blurred *wholesale*: frosting a whole
+  backdrop. Scrim and wash are **one** pass per pixel — the ends carry the
+  alpha the two compose to — because a darkened picture holds fewer output
+  levels than input levels, and rounding it twice, every pixel alike, banded
+  a smooth sky into plateaus tens of rows deep on a 1080-row screen. The one
+  dithered wash in `lib/raster` spends that missing resolution across the
+  area; the entry/exit veil is the same shape and goes through it too. The
+  picture is never blurred *wholesale*: frosting a whole
   wallpaper to make text sit on it hides the picture the user chose, so the
   scrim and the wash do the legibility work honestly. The shared frost stays
   where it belongs — the compositor's window backdrops, and the wallpaper

@@ -3500,11 +3500,12 @@ transfer, landed in increments:
   `DisplayServer` engine — decode → `call_peer_seat` lease gate on every
   request, lease-generation-bound configure state, bounded present — the
   `DisplayClient`/`RemoteDisplay` halves with per-frame stale-damage
-  double-buffer bookkeeping, and the hoisted linear-surface engine
+  double-buffer bookkeeping (a disjoint, budgeted `Region` per frame), and
+  the hoisted linear-surface engine
   `Framebuffer`/`FramebufferConfig` the three framebuffer QEMU verticals
-  drive as non-driver consumers), the in-place `Display::present_region`
-  evolution (full-blit default; the WM compositor threads its damage
-  bounds through it), the
+  drive as non-driver consumers), the in-place `Display::present_rects`
+  evolution (full-blit default; one present per frame naming every
+  disjoint rectangle the compositor touched), the
   distinct `Errno::DeviceFault` (`DriverError::as_errno` maps
   `DeviceFault`/`Busy` to `DeviceFault`/`WouldBlock`), the
   `HwResourceKind::Framebuffer` scan-out resource (geometry-carrying
@@ -7471,7 +7472,36 @@ load-relative. Docs: `docs/src/architecture/fault-diagnostics.md`.
 
 ---
 
-## FIX-DESKTOP-SPEEDUP — desktop redraw speed without hardware acceleration (`plans/FIX-DESKTOP-SPEEDUP.md`)  **[A DONE, B DONE, C MOSTLY DONE, D DONE]**
+## NEW-MENUS — menus owned by the desktop, not by the app (`plans/NEW-MENUS.md`)  **[PLANNED, NOT STARTED]**
+
+**Dependencies:** Stage 7 (compositor, session, controls). Independent of
+`plans/FIX-DESKTOP-SPEEDUP.md`, which closed the performance reason for it
+(H): a popup-window menu is no longer expensive, so this is an
+**architecture** change and must not be justified on speed.
+
+**The defect it closes.** Every menu is drawn and driven by the app that
+owns it, so nothing models "the menu that is up": two apps can each have one
+open, the shell around `lib/controls`' `Menu` (placement, grab, dismissal,
+submenu traversal, owner death) is spelled four times, the compositor cannot
+cache pixels it does not own, and an in-window menu can be clipped by its own
+window. The fix is a session-owned singleton: the app sends a bounded menu
+*model* and an anchor, the desktop places/draws/grabs/dismisses, and the app
+receives one outcome — chosen, dismissed, or refused.
+
+**Staged (detail in the plan; do not duplicate it here, §13):** M0 the model
+and the wire, M1 the session's menu service, M2 migrate and **delete** each
+app's menu shell, M3 the plate becomes a cached damage-reporting surface.
+
+**Escalated for decision (§15.7):**
+
+1. M0's transport — inline bounded rows in the request frame, or the model
+   in a granted shared region. Blocks all of M0.
+2. Whether the taskbar's start menu is in scope, or legitimately stays a
+   bespoke launcher surface.
+
+---
+
+## FIX-DESKTOP-SPEEDUP — desktop redraw speed without hardware acceleration (`plans/FIX-DESKTOP-SPEEDUP.md`)  **[A DONE, B DONE, C MOSTLY DONE, D DONE, E.1+E.2 DONE, H DONE]**
 
 **Dependencies:** Stage 7 (compositor, taskbar, controls). Independent of
 `plans/FIX-DISPLAY-ACCELERATION.md` — that is the hardware half; this is
@@ -7485,9 +7515,8 @@ shared frame, and the session converts and diffs every one of them. The
 compositor itself is *not* the bottleneck here — `convert_damage` already
 compares each presented pixel with what is there and reports only the
 sub-rectangle that genuinely changed — so the waste is entirely upstream, and
-closing it needs every control model change to report damage (C.1), not just
-the pointer path that now does. A frame still presents up to eight
-separate region round trips each copying a growing bounding box (E).
+closing it needs each app to present the rectangles it changed (C.3), which
+has landed for `userland/apps/widgets` and remains for five apps.
 
 **Staged (detail in the plan; do not duplicate it here, §13):**
 
@@ -7517,8 +7546,9 @@ separate region round trips each copying a growing bounding box (E).
   cannot name a pixel type without closing the cycle `abi → raster →
   theme/reclaim → abi`). Bit-identity is proven by composing each scene
   twice, with the copy path on and off, and comparing bytes.
-- **C — repaint the control, not the window. [C.0, C.2, C.4b, C.4c, C.5 done;
-  C.1 partly; C.3 blocked; C.4a withdrawn]** `tairix_geometry::Region` is the one
+- **C — repaint the control, not the window. [C.0, C.1, C.2, C.4b, C.4c, C.5
+  done; C.3 done for `widgets`, five apps remain; C.4a withdrawn]**
+  `tairix_geometry::Region` is the one
   region type (pairwise-disjoint band-canonical rectangles, a linear merge
   walk, an optional rectangle budget), and the WM's private copy is deleted;
   the compositor consumes it through a compose plan that promotes a
@@ -7547,10 +7577,8 @@ separate region round trips each copying a growing bounding box (E).
   and C.4a is **withdrawn**:
   building a `BitmapFont` is a theme read and arithmetic — no lock, client
   call or cache lookup — so hoisting it cannot buy measurable time, and only
-  the dead parameters it exposed are worth removing. Remaining: the
-  keyboard/value control families and the old-bounds memory (C.1), and
-  — blocked until C.1 is complete — apps presenting real rects (C.3), which
-  today would silently drop changes no reported rectangle covers.
+  the dead parameters it exposed are worth removing. Remaining: the five apps
+  that still present their whole surface (C.3).
 - **D — blur costs what it changes. [D.1–D.4 done; D.5 is decision 2 below;
   D.6 is an unmeasured follow-up]** A frosted window's backdrop is retained
   (`userland/gui/wm/src/frost.rs`, `frost_cache`) because that blur is a
@@ -7588,15 +7616,31 @@ separate region round trips each copying a growing bounding box (E).
   **17.98 → 16.52 ns/px**, opaque cases unchanged. Bit-identity is proven by
   composing one scene twice — reusing frosts and blurring afresh — and by a
   naive `O(area·radius)` blur oracle.
-- **E — one present per frame.** The disjoint damage region landed with C.0;
-  what remains is a bounded rect *list* in one `Present` (same evolution as
-  `plans/FIX-DISPLAY-ACCELERATION.md` Stage B), and one-shot tickless
-  frame pacing (§17.1, never a periodic tick).
+- **E — one present per frame. [E.1, E.2 done; pacing planned]** A frame is
+  presented **once**, naming every disjoint rectangle it changed:
+  `Display::present_rects` and the `DamageList` the `Present` request carries
+  replaced the per-rectangle `present_region`, so the frame ring rotates once
+  per frame and the driver blits the rectangles instead of the bounding box
+  spanning them. What remains is one-shot tickless frame pacing (§17.1, never
+  a periodic tick).
 - **F — CPU-dispatched raster kernels.** `lib/cpuops` `ByPriority`
   candidates on the `lib/pagezero` template, aarch64 NEON first. Gated on
   the P3b axis correction below; may not land before B–C.
 - **G — user-space FP/SSE enablement (kernel work).** Gated on a User
   decision; carries defect D37 below.
+- **H — the kernel cost of a popup window. [done]** A context menu took
+  ~300 ms to appear on a Pi 4B while an in-window menu was instant, and the
+  cause was in the kernel, not the compositor: `terminal.app` is the only app
+  whose menu is a separate **window**, so it alone calls `shm_create` /
+  `shm_grant` and makes the session call `shm_map` (then both unmap), and
+  **every mapping and unmapping syscall re-froze the caller's whole
+  address-space snapshot** — a page-table walk plus a heap node per resident
+  page, inside one non-preemptible syscall, over the largest address space on
+  the machine. Each such path now publishes only its own region's pages
+  through `publish_region_mapping` / `publish_region_teardown`. The same
+  defect on the **file-backed fault** path (a whole re-freeze per faulted
+  page, i.e. O(N²) to read an N-page mapping) and on stack growth is fixed
+  with it. Detail in `docs/src/architecture/memory.md`.
 
 **Escalated for decision (§15.7):**
 

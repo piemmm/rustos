@@ -31,6 +31,28 @@ fn has_pixel(surface: &Surface, want: Pixel) -> bool {
     surface.pixels().contains(&want)
 }
 
+/// The tallest run of consecutive rows in any one column carrying `want`.
+///
+/// A divider is a *line*, so this is what asks whether one was drawn. A single
+/// pixel that happens to land on the same colour — a plate's blend rounding
+/// there under the surface's ordered dither — is not a divider, and a test
+/// that scanned for the bare colour would have called it one.
+fn tallest_column_run(surface: &Surface, want: Pixel) -> u32 {
+    let mut tallest = 0;
+    for x in 0..surface.width() {
+        let mut run = 0;
+        for y in 0..surface.height() {
+            run = if surface.get(x, y) == Some(want) {
+                run + 1
+            } else {
+                0
+            };
+            tallest = tallest.max(run);
+        }
+    }
+    tallest
+}
+
 fn region_has(surface: &Surface, xr: (u32, u32), yr: (u32, u32), want: Pixel) -> bool {
     (xr.0..xr.1)
         .flat_map(|x| (yr.0..yr.1).map(move |y| (x, y)))
@@ -100,8 +122,13 @@ fn a_group_boundary_draws_a_divider() {
         &Toolbar::new().with_icon(icon(), 0).with_icon(icon(), 0),
         &theme,
     );
-    assert!(has_pixel(&grouped, premul(theme.palette().border)));
-    assert!(!has_pixel(&one_group, premul(theme.palette().border)));
+    let border = premul(theme.palette().border);
+    let drawn = tallest_column_run(&grouped, border);
+    assert!(drawn > 1, "a group boundary drew no divider line");
+    assert!(
+        tallest_column_run(&one_group, border) < drawn,
+        "a single group drew a divider of its own"
+    );
 }
 
 #[test]

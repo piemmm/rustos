@@ -17,6 +17,20 @@
 /// Sub-samples per axis. `SUBSAMPLES * SUBSAMPLES` coverage levels.
 const SUBSAMPLES: u32 = 4;
 
+/// The radius a `width`×`height` rounded rectangle is actually rounded by:
+/// `radius` clamped to half its shorter side, so an over-large radius yields
+/// a stadium/circle rather than out-of-bounds geometry (fail closed). `0`
+/// rounds nothing.
+///
+/// [`round_rect_coverage`] rounds by exactly this, and it is published so a
+/// caller reasoning about *where* a shape's corners are — which rows carry an
+/// arc at all, how far one reaches in — reads the same clamp the coverage
+/// applies rather than restating it.
+#[must_use]
+pub fn round_rect_radius(width: u32, height: u32, radius: u32) -> u32 {
+    radius.min(width / 2).min(height / 2)
+}
+
 /// Coverage in `0..=255` for pixel `(x, y)` of a `width`×`height` rounded
 /// rectangle with corner `radius`.
 ///
@@ -24,12 +38,11 @@ const SUBSAMPLES: u32 = 4;
 /// returns `255`, and a pixel straddling a corner arc returns the fraction of
 /// its area that is inside, quantised to the supersample grid. A `radius` of
 /// `0` (or a degenerate zero-size rectangle) is square, so every in-bounds
-/// pixel is fully covered. The `radius` is clamped to half the shorter side,
-/// so an over-large radius yields a stadium/circle rather than out-of-bounds
-/// geometry (fail closed).
+/// pixel is fully covered. The `radius` is [clamped](round_rect_radius) to
+/// half the shorter side.
 #[must_use]
 pub fn round_rect_coverage(x: u32, y: u32, width: u32, height: u32, radius: u32) -> u8 {
-    let radius = radius.min(width / 2).min(height / 2);
+    let radius = round_rect_radius(width, height, radius);
     if radius == 0 {
         return 255;
     }
@@ -94,7 +107,7 @@ fn axis_distance(pos: u64, low: u64, high: u64) -> u64 {
 
 #[cfg(test)]
 mod tests {
-    use super::{coverage_supersampled, round_rect_coverage};
+    use super::{coverage_supersampled, round_rect_coverage, round_rect_radius};
 
     #[test]
     fn zero_radius_is_square_everywhere() {
@@ -134,6 +147,53 @@ mod tests {
         assert_eq!(round_rect_coverage(10, 5, 20, 10, 200), 255);
     }
 
+    /// The published radius is the one the coverage actually rounds by, so a
+    /// caller reasoning about where the arcs are and the coverage itself can
+    /// never disagree.
+    #[test]
+    fn published_radius_is_the_radius_coverage_rounds_by() {
+        for &(width, height) in &[(1, 1), (2, 2), (20, 20), (20, 10), (17, 9)] {
+            for radius in [0u32, 1, 5, 8, 200] {
+                let effective = round_rect_radius(width, height, radius);
+                assert!(
+                    effective * 2 <= width.min(height),
+                    "{effective} rounds past half of {width}x{height}"
+                );
+                for y in 0..height {
+                    for x in 0..width {
+                        assert_eq!(
+                            round_rect_coverage(x, y, width, height, radius),
+                            round_rect_coverage(x, y, width, height, effective),
+                            "({x},{y}) on {width}x{height} r={radius} vs r={effective}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// Partial coverage lives only in the corner bands: every column of a row
+    /// clear of both of them is fully covered. A caller that decides per row
+    /// whether an arc can reach it — the compositor cutting a window's client
+    /// to its frame's plate — therefore skips nothing by skipping such a row.
+    #[test]
+    fn a_row_clear_of_the_corner_bands_is_fully_covered() {
+        for &(width, height) in &[(20, 20), (40, 30), (17, 9)] {
+            for radius in [1u32, 5, 8, 200] {
+                let r = round_rect_radius(width, height, radius);
+                for y in r..height - r {
+                    for x in 0..width {
+                        assert_eq!(
+                            round_rect_coverage(x, y, width, height, radius),
+                            255,
+                            "({x},{y}) on {width}x{height} r={radius} is not solid"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
     /// The interior fast path in [`round_rect_coverage`] is a pure
     /// optimisation: it must produce the exact byte the full supersampled scan
     /// would for every pixel, so only the cost changes, never a pixel.
@@ -141,7 +201,7 @@ mod tests {
     fn interior_fast_path_is_identical_to_full_supersampling() {
         for &(width, height) in &[(1, 1), (2, 2), (17, 9), (40, 30), (256, 192)] {
             for radius in [1u32, 2, 5, 8, 16, 64, 200] {
-                let clamped = radius.min(width / 2).min(height / 2);
+                let clamped = round_rect_radius(width, height, radius);
                 for y in 0..height {
                     for x in 0..width {
                         let got = round_rect_coverage(x, y, width, height, radius);

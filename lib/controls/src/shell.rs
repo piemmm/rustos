@@ -25,9 +25,9 @@ use crate::collection::{Card, CardAction};
 use crate::damage;
 use crate::paint::{
     foreground, inset, key_activation, paint_bead, paint_count_badge, paint_icon_slot, paint_plate,
-    plate_border, pointer_activation, rail_thickness, resolve_bead, resolve_frame, resolve_rail,
-    role_font, seam_thickness, seam_width, surface_rect, text_plate_height, to_i32, BeadShape,
-    PlateStyle, FULL_COLOUR,
+    paint_surface_plate, plate_border, pointer_activation, rail_thickness, resolve_bead,
+    resolve_frame, resolve_rail, role_font, seam_thickness, seam_width, surface_rect,
+    text_plate_height, to_i32, BeadShape, ChromeLayer, PlateStyle, FULL_COLOUR,
 };
 use crate::state::{
     ControlDisposition, ControlRole, ControlState, PlateSeating, PointerState, RecoveryState,
@@ -1117,21 +1117,16 @@ impl TraySignal {
         let palette = theme.palette();
         let border = plate_border(theme, scale);
         let radius = scale.scale_length(theme.metrics().popup_corner_radius);
-        surface.fill_round_rect(x, y, w, h, radius, Color::from(palette.rim));
-        if let Some((ix, iy, iw, ih)) = inset(x, y, w, h, border) {
-            surface.fill_round_rect(
-                ix,
-                iy,
-                iw,
-                ih,
-                radius.saturating_sub(border),
-                Color::from(palette.surface_raised),
-            );
-        }
+        let plate = (palette.surface_raised, ChromeLayer::Ground);
+        let Some((ix, iy, iw, _)) =
+            paint_surface_plate(surface, (x, y, w, h), (radius, border), theme, plate)
+        else {
+            return;
+        };
         let pad = scale.scale_length(theme.metrics().control_inset).max(1);
-        let text_x = to_i32(x + border + pad);
-        let mut text_y = to_i32(y + border + pad);
-        let text_w = w.saturating_sub((border + pad).saturating_mul(2));
+        let text_x = to_i32(ix + pad);
+        let mut text_y = to_i32(iy + pad);
+        let text_w = iw.saturating_sub(pad.saturating_mul(2));
         if text_w > 0 {
             let fitted = font.truncate_to_width(&self.label, text_w);
             font.draw_text(

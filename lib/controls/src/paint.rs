@@ -14,7 +14,7 @@ use tairix_geometry::{Rect, Region, Scale};
 use tairix_icon::{builtin_icon, IconKind};
 use tairix_input::{InputEvent, Key, NamedKey, PointerButton};
 use tairix_raster::{Color, Surface};
-use tairix_theme::{Contrast, Palette, Rgba, SignalRole, TextRole, Theme};
+use tairix_theme::{Contrast, Palette, Rgba, SignalRole, SurfaceGround, TextRole, Theme};
 
 pub(crate) use tairix_geometry::to_i32;
 
@@ -23,6 +23,41 @@ use crate::state::{
     ActivityState, ControlDisposition, ControlRole, ControlState, PlateSeating, PointerState,
     PressureKind, PressureState, RecoveryState, ValidationState,
 };
+
+/// Which layer of a floating desktop-chrome surface a background belongs to,
+/// and so how much of the blurred backdrop reads through it.
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
+pub enum ChromeLayer {
+    /// The surface itself, and anything that reads as *part* of it — a list
+    /// row, a menu row. Both take the same alpha, which is what keeps a
+    /// resting row exactly its ground rather than a patch on it.
+    Ground,
+    /// A plate raised on that surface: a button, a text field, a card. A step
+    /// more solid, so it reads as an object standing on the glass.
+    Plate,
+}
+
+/// A background `fill` as it is laid down on the ground `theme` draws with.
+///
+/// On an ordinary surface a background is the colour the palette names. On
+/// floating chrome it keeps that colour and takes the theme's chrome alpha for
+/// its layer, so every background of one surface lets the backdrop through at
+/// one authored weight instead of each family choosing its own.
+///
+/// Only *backgrounds* pass through here. A semantic mark — an accent or danger
+/// fill, a pressure rail, a bead, a focus ring — stays solid: it has to read
+/// against whatever the wallpaper happens to be behind it, and a mark diluted
+/// by the backdrop is one a user can miss.
+#[must_use]
+pub fn ground_fill(theme: &Theme, fill: Rgba, layer: ChromeLayer) -> Rgba {
+    match theme.ground() {
+        SurfaceGround::Opaque => fill,
+        SurfaceGround::Floating => fill.with_alpha(match layer {
+            ChromeLayer::Ground => theme.palette().chrome_alpha,
+            ChromeLayer::Plate => theme.palette().chrome_plate_alpha,
+        }),
+    }
+}
 
 /// The face a control draws a run of `role` text in.
 ///
@@ -124,8 +159,12 @@ pub(crate) fn inset(x: u32, y: u32, w: u32, h: u32, by: u32) -> Option<(u32, u32
 
 /// The scaled plate border/rim thickness, doubled under heavy contrast so a
 /// high-contrast theme strengthens the rim before adding any glow.
+///
+/// This is how thick *every* rim on the desktop is, so a surface painted
+/// outside this crate ([`paint_surface_plate`]) states the same edge weight as
+/// the controls seated on it.
 #[must_use]
-pub(crate) fn plate_border(theme: &Theme, scale: Scale) -> u32 {
+pub fn plate_border(theme: &Theme, scale: Scale) -> u32 {
     scale
         .scale_length(theme.metrics().border_thickness)
         .max(1)
@@ -649,6 +688,22 @@ pub(crate) fn resolve_frame(theme: &Theme, role: ControlRole, state: ControlStat
         }
     };
 
+    // What a quiet control lifts its edge to while the pointer or the keyboard
+    // is on it. A control drawing its focus ring keeps the quiet edge instead:
+    // the ring inside the plate is the accent line, and a second one around it
+    // reads as a doubled border rather than as one mark.
+    let lifted_rim = if state.focus.focused {
+        palette.rim
+    } else {
+        palette.rim_active
+    };
+
+    // A plate carrying no role colour is a *background*, so on floating chrome
+    // it lets the blurred backdrop through. A role fill is not a background: an
+    // accent or danger plate is the statement itself and must read against
+    // whatever wallpaper is behind it, so those two arms stay solid.
+    let raised = |fill: Rgba| ground_fill(theme, fill, ChromeLayer::Plate);
+
     // The fourth element marks the *quiet resting* frame: the single arm in
     // which a control states nothing of its own, and so the only one in which
     // a bar-seated control wears no plate ([`FrameColors::face`]). It is
@@ -665,9 +720,9 @@ pub(crate) fn resolve_frame(theme: &Theme, role: ControlRole, state: ControlStat
             let fill = filled_plate(color, pointer);
             (fill, fill, palette.on_accent, false)
         }
-        Emphasis::Outlined(color) => (palette.surface_raised, color, color, false),
+        Emphasis::Outlined(color) => (raised(palette.surface_raised), color, color, false),
         Emphasis::Quiet if disposition == ControlDisposition::DisabledByState => (
-            palette.surface,
+            raised(palette.surface),
             palette.border,
             palette.on_surface_muted,
             false,
@@ -675,8 +730,8 @@ pub(crate) fn resolve_frame(theme: &Theme, role: ControlRole, state: ControlStat
         // A quiet control has no colour of its own, so a press borrows the
         // active rim for both its edge and its label.
         Emphasis::Quiet if pointer == PointerState::Pressed => (
-            palette.surface_pressed,
-            palette.rim_active,
+            raised(palette.surface_pressed),
+            lifted_rim,
             palette.rim_active,
             false,
         ),
@@ -684,24 +739,24 @@ pub(crate) fn resolve_frame(theme: &Theme, role: ControlRole, state: ControlStat
         // the whole of the feedback for a control that wears no rim at all, and
         // on a plated one it reads as the plate warming under the pointer.
         Emphasis::Quiet if pointer == PointerState::Hover => (
-            palette.surface_hover,
-            palette.rim_active,
+            raised(palette.surface_hover),
+            lifted_rim,
             palette.on_surface,
             false,
         ),
-        // Keyboard focus states itself on the rim and the ring, never on the
-        // plate: the wash belongs to the pointer, so a control the keyboard is
-        // merely resting on is not mistaken for one under the cursor. It is
-        // still not *resting*, so a bar-seated control keeps a plate to draw
-        // its ring inside.
+        // Keyboard focus states itself on the ring, never on the plate: the
+        // wash belongs to the pointer, so a control the keyboard is merely
+        // resting on is not mistaken for one under the cursor. It is still not
+        // *resting*, so a bar-seated control keeps a plate to draw its ring
+        // inside.
         Emphasis::Quiet if state.focus.focused => (
-            palette.surface_raised,
-            palette.rim_active,
+            raised(palette.surface_raised),
+            lifted_rim,
             palette.on_surface,
             false,
         ),
         Emphasis::Quiet => (
-            palette.surface_raised,
+            raised(palette.surface_raised),
             palette.rim,
             palette.on_surface,
             true,
@@ -788,6 +843,48 @@ pub(crate) fn resolve_bead(theme: &Theme, state: ControlState) -> Option<(Color,
     Some((Color::from(bead.0), bead.1))
 }
 
+/// Paint the plate of a surface — a menu, a panel, a readout, the taskbar —
+/// as the Signal Rim around its `fill`, and report the interior the caller
+/// draws its content into.
+///
+/// `rect` is the whole surface in its own pixels and `shape` is its
+/// `(radius, border)`: the outer corner radius and the rim thickness
+/// ([`plate_border`]) the ground is inset by.
+///
+/// `fill` is the colour role the surface wears and the chrome layer it counts
+/// as: [`ChromeLayer::Ground`] for a surface put on screen in its own right,
+/// [`ChromeLayer::Plate`] for one raised on another (a card inside a popover),
+/// which is what keeps the card readable instead of dissolving into the
+/// popover behind it.
+///
+/// The rim takes the surface's own weight rather than staying solid: it is
+/// this surface's edge, not a mark on it, so on floating chrome it is the same
+/// glass one step lighter (one step darker on a light theme) instead of a hard
+/// line the wallpaper cannot reach through.
+///
+/// Both passes lay their colour down rather than compositing it: a translucent
+/// fill composited over the pass beneath it comes back more opaque than the
+/// theme authored, and for an opaque one the two are identical.
+#[must_use]
+pub fn paint_surface_plate(
+    surface: &mut Surface,
+    rect: (u32, u32, u32, u32),
+    shape: (u32, u32),
+    theme: &Theme,
+    fill: (Rgba, ChromeLayer),
+) -> Option<(u32, u32, u32, u32)> {
+    let (x, y, w, h) = rect;
+    let (radius, border) = shape;
+    let (color, layer) = fill;
+    let rim = ground_fill(theme, theme.palette().rim, ChromeLayer::Ground);
+    surface.set_round_rect(x, y, w, h, radius, Color::from(rim));
+    let (ix, iy, iw, ih) = inset(x, y, w, h, border)?;
+    let inner = radius.saturating_sub(border);
+    let ground = Color::from(ground_fill(theme, color, layer));
+    surface.set_round_rect(ix, iy, iw, ih, inner, ground);
+    Some((ix, iy, iw, ih))
+}
+
 /// The colours and geometry of one Alloy Plate, grouped so the shared
 /// plate-drawing routine takes a single style rather than a long argument
 /// list.
@@ -800,24 +897,34 @@ pub(crate) struct PlateStyle {
     pub plate: Color,
     /// Signal Rim perimeter.
     pub rim: Color,
-    /// Whether to draw the double-rim focus ring.
+    /// Whether to draw the focus ring.
     pub focused: bool,
     /// The focus-ring colour.
     pub ring: Color,
 }
 
 /// Paint an Alloy Plate: the Signal Rim as a rounded rect, the inner plate
-/// inset by the border, and — when focused — a double-rim focus ring, so a
-/// focused control is distinct from a hovered one without relying on colour.
+/// inset by the border, and — when focused — one accent focus ring a border
+/// inside the plate, so a focused control is distinct from a hovered one by
+/// where its accent line sits rather than by colour alone.
 ///
 /// This is the one plate-drawing definition every rounded control frame uses,
 /// so the rim, inner plate, and focus ring can never diverge between families.
+///
+/// Every pass **lays its colour down** rather than compositing it. A plate is
+/// a background, and a translucent one composited over the pass beneath it
+/// comes back more opaque than the theme authored — a control on floating
+/// chrome would frost nothing. An opaque colour covers what is under it either
+/// way, so this is the ordinary path too rather than a second one for chrome:
+/// it is the same byte wherever the shape fully covers a pixel, and on an arc
+/// pixel it rounds the blend once instead of twice, which lands no further
+/// from the exact value (`lib/raster`).
 pub(crate) fn paint_plate(surface: &mut Surface, rect: (u32, u32, u32, u32), style: &PlateStyle) {
     let (x, y, w, h) = rect;
     if w == 0 || h == 0 {
         return;
     }
-    surface.fill_round_rect(x, y, w, h, style.radius, style.rim);
+    surface.set_round_rect(x, y, w, h, style.radius, style.rim);
     let Some((ix, iy, iw, ih)) = inset(x, y, w, h, style.border) else {
         return;
     };
@@ -826,15 +933,15 @@ pub(crate) fn paint_plate(surface: &mut Surface, rect: (u32, u32, u32, u32), sty
     // single fill: the perimeter pass has already painted every pixel the
     // inner pass would, so repeating it is pure waste on a repaint path.
     if style.plate != style.rim {
-        surface.fill_round_rect(ix, iy, iw, ih, inner_radius, style.plate);
+        surface.set_round_rect(ix, iy, iw, ih, inner_radius, style.plate);
     }
 
     if style.focused {
         let gap = style.border;
         if let Some((fx, fy, fw, fh)) = inset(ix, iy, iw, ih, gap) {
-            surface.fill_round_rect(fx, fy, fw, fh, inner_radius.saturating_sub(gap), style.ring);
+            surface.set_round_rect(fx, fy, fw, fh, inner_radius.saturating_sub(gap), style.ring);
             if let Some((px, py, pw, ph)) = inset(fx, fy, fw, fh, style.border) {
-                surface.fill_round_rect(
+                surface.set_round_rect(
                     px,
                     py,
                     pw,

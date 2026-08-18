@@ -2,9 +2,9 @@
 //! per-pixel and run encoders agreeing byte for byte, the frame sizing,
 //! and the damage conversion.
 
-use super::{scanout_len, sub_screen_damage, ChannelOrder};
-use tairix_abi::driver::display::{DisplayFormat, DisplayMode};
-use tairix_geometry::Rect;
+use super::{damage_list, scanout_len, sub_screen_damage, ChannelOrder};
+use tairix_abi::driver::display::{DamageRect, DisplayFormat, DisplayMode, MAX_DAMAGE_RECTS};
+use tairix_geometry::{Rect, Region};
 use tairix_raster::Pixel;
 
 /// Every order the encoder knows; each run test proves all of them.
@@ -219,4 +219,92 @@ fn an_empty_or_unrepresentable_rectangle_falls_back_to_the_whole_frame() {
     // frame rather than a wrong region.
     assert!(sub_screen_damage(&Rect::new(-1, 8, 16, 12), &mode).is_none());
     assert!(sub_screen_damage(&Rect::new(4, -1, 16, 12), &mode).is_none());
+}
+
+/// A scratch list, filled as a caller's is: every slot holds a real
+/// rectangle, so an unfilled one can never be mistaken for damage.
+fn scratch(mode: &DisplayMode) -> [DamageRect; MAX_DAMAGE_RECTS] {
+    [DamageRect::full(mode); MAX_DAMAGE_RECTS]
+}
+
+/// A scattered frame's rectangles reach the list as themselves — the whole
+/// point of a list present, since their bounding box here **is** the screen
+/// while the damage is thirty-two pixels. Answering on the box was what made
+/// two far-apart corners cost a whole-screen present.
+#[test]
+fn corners_that_span_the_screen_are_named_not_collapsed() {
+    let mode = mode(64, 48, DisplayFormat::Rgba8888);
+    let mut region = Region::new();
+    region.add(Rect::new(0, 0, 4, 4));
+    region.add(Rect::new(60, 44, 4, 4));
+    assert_eq!(
+        sub_screen_damage(&region.bounds(), &mode),
+        None,
+        "the box around them really does cover the screen"
+    );
+
+    let mut out = scratch(&mode);
+    assert_eq!(
+        damage_list(&region, &mode, &mut out),
+        Some(
+            [
+                DamageRect {
+                    x: 0,
+                    y: 0,
+                    width_px: 4,
+                    height_px: 4
+                },
+                DamageRect {
+                    x: 60,
+                    y: 44,
+                    width_px: 4,
+                    height_px: 4
+                },
+            ]
+            .as_slice()
+        )
+    );
+}
+
+/// Damage that really is the surface presents the whole frame instead.
+#[test]
+fn whole_surface_damage_asks_for_the_whole_frame() {
+    let mode = mode(64, 48, DisplayFormat::Rgba8888);
+    let mut region = Region::new();
+    region.add(Rect::new(0, 0, 64, 48));
+    let mut out = scratch(&mode);
+    assert_eq!(damage_list(&region, &mode, &mut out), None);
+}
+
+/// Past the list's bound the answer is the bounding box alone: over-covering
+/// costs pixels, dropping a rectangle would leave stale ones on screen.
+#[test]
+fn a_region_past_the_bound_degrades_to_its_bounding_box() {
+    let mode = mode(64, 48, DisplayFormat::Rgba8888);
+    let scattered = |count: usize| {
+        let mut region = Region::new();
+        for step in 0..count {
+            let x = i32::try_from(step * 6).expect("on screen");
+            region.add(Rect::new(x, 0, 4, 4));
+        }
+        region
+    };
+
+    let region = scattered(MAX_DAMAGE_RECTS + 1);
+    assert!(region.rects().len() > MAX_DAMAGE_RECTS);
+    let bounds = sub_screen_damage(&region.bounds(), &mode).expect("a sub-region");
+    let mut out = scratch(&mode);
+    assert_eq!(
+        damage_list(&region, &mode, &mut out),
+        Some([bounds].as_slice())
+    );
+
+    // Exactly the bound is still named rectangle by rectangle: the
+    // degradation begins one past it, not at it.
+    let region = scattered(MAX_DAMAGE_RECTS);
+    let mut out = scratch(&mode);
+    assert_eq!(
+        damage_list(&region, &mode, &mut out).map(<[DamageRect]>::len),
+        Some(MAX_DAMAGE_RECTS)
+    );
 }

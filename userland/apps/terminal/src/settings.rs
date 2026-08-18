@@ -277,11 +277,36 @@ impl Settings {
 
     /// Route one pointer event; `viewport` is the whole window client rect.
     ///
-    /// The sheet is modal, so it claims every event a drawable panel can see;
-    /// only a viewport too small for the panel to have a content rectangle at
-    /// all leaves an event [`SheetOutcome::Ignored`] for the caller, and even
-    /// then a press still dismisses.
+    /// The sheet is modal, so it claims every event a drawable panel can see.
+    /// [`SheetOutcome::Ignored`] means only that there is nothing for the
+    /// caller to do — a viewport too small for the panel to have a content
+    /// rectangle at all (a press still dismisses), or an event that left every
+    /// drawn field where it was.
+    ///
+    /// That second case is the pointer resting or drifting inside one control:
+    /// its controls report the pixels they redraw, and an event none of them
+    /// redrew anything for must not cost the caller a re-render and a
+    /// re-publish of the whole plate. A round that reported *something* is
+    /// [`SheetOutcome::Changed`] whole, because a change the sheet composes
+    /// above its controls — a switched tab's body — is wider than the
+    /// rectangle the control that caused it reports.
     pub fn on_pointer(
+        &mut self,
+        event: &InputEvent,
+        viewport: Rect,
+        scale: Scale,
+        theme: &Theme,
+        damage: &mut Region,
+    ) -> SheetOutcome {
+        match self.route_pointer(event, viewport, scale, theme, damage) {
+            SheetOutcome::Changed if damage.is_empty() => SheetOutcome::Ignored,
+            settled => settled,
+        }
+    }
+
+    /// Where the pointer event actually goes: the tabs, the body's rows, the
+    /// scrollbar, then the footer, in the order they are drawn in.
+    fn route_pointer(
         &mut self,
         event: &InputEvent,
         viewport: Rect,

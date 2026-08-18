@@ -12,6 +12,17 @@
 //! than wrapping: a leading button that does not fit is [`Rect::EMPTY`] and
 //! can never be hit.
 //!
+//! The bar **floats**: it stands off the three screen edges it faces by the
+//! theme's [`taskbar_margin`](tairix_theme::Metrics::taskbar_margin), so the
+//! wallpaper runs unbroken around it. Every region — and every popup opened
+//! from one — is placed from [`BarLayout::bar`], so the margin is spent in
+//! one place and everything follows it.
+//!
+//! Inside the bar, every region is laid out within the bar's own rim (one
+//! [`plate_border`] on each side), so a hovered or pressed slot washes up to
+//! the rim and never over it. [`BarLayout::bar`] itself is the whole bar,
+//! rim included.
+//!
 //! The layout also carries the taskbar's [`corner_radius`](BarLayout::corner_radius),
 //! sourced from the active theme. The taskbar does not round its own corners:
 //! the window manager applies this radius through its single anti-aliased
@@ -19,7 +30,7 @@
 
 use alloc::vec::Vec;
 
-use tairix_controls::{ControlRole, Panel, TraySignal};
+use tairix_controls::{plate_border, ControlRole, Panel, TraySignal};
 use tairix_geometry::{Point, Rect, Scale};
 use tairix_theme::Theme;
 
@@ -50,7 +61,9 @@ pub enum Hit {
 /// The fully computed geometry of a taskbar.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct BarLayout {
-    /// The whole bar.
+    /// The whole bar — rim included — standing off the three screen edges it
+    /// faces by the theme's taskbar margin. Every other region here is laid
+    /// out inside that rim.
     pub bar: Rect,
     /// The corner radius the window manager applies to the bar. `0` is square.
     pub corner_radius: u32,
@@ -103,6 +116,15 @@ impl BarLayout {
     /// metrics are *logical* pixels authored at the reference density;
     /// `scale` converts those logical lengths into physical pixels so the bar
     /// stays a comfortable physical size across panel densities.
+    ///
+    /// The bar is inset from the three screen edges it faces by the theme's
+    /// [`taskbar_margin`](tairix_theme::Metrics::taskbar_margin) — for a
+    /// bottom bar the left, right, and bottom. Its thickness is unchanged:
+    /// the fourth side faces the work area and the margin never widens it.
+    ///
+    /// Regions are then laid out inside the bar's rim, one [`plate_border`]
+    /// in on every side, so nothing the bar seats can paint over the edge the
+    /// renderer draws. [`bar`](Self::bar) keeps the whole rectangle.
     #[must_use]
     pub fn compute(
         config: &TaskbarConfig,
@@ -117,75 +139,80 @@ impl BarLayout {
         let metrics = theme.metrics();
         let corner_radius = scale.scale_length(metrics.taskbar_corner_radius);
         let orientation = config.edge.orientation();
-        let (main_total, cross_size) = match orientation {
+        let (main_screen, cross_screen) = match orientation {
             Orientation::Horizontal => (config.screen_width, config.screen_height),
             Orientation::Vertical => (config.screen_height, config.screen_width),
         };
-        let thickness = config.thickness.min(cross_size);
+        // The gap the bar floats in, spent once: at both ends of the main
+        // axis and against the cross edge the bar faces. A screen too small
+        // to afford it keeps the bar rather than the gap — the margin never
+        // takes half an axis, nor the bar's last pixel of length.
+        let margin = scale
+            .scale_length(metrics.taskbar_margin)
+            .min(main_screen.saturating_sub(1) / 2)
+            .min(cross_screen / 2);
+        let main_total = main_screen.saturating_sub(margin.saturating_mul(2));
+        let thickness = config.thickness.min(cross_screen.saturating_sub(margin));
+        // The bar's own rim, spent once: it belongs to the bar rather than to
+        // what stands on it, so every region is laid out inside it and a
+        // hovered slot cannot wash over the surface's edge. A bar too thin to
+        // spare two rims keeps its content rather than the inset.
+        let border = plate_border(theme, scale)
+            .min(main_total.saturating_sub(1) / 2)
+            .min(thickness.saturating_sub(1) / 2);
         let cross_origin = if config.edge.at_trailing_cross_edge() {
-            to_i32(cross_size.saturating_sub(thickness))
+            to_i32(
+                cross_screen
+                    .saturating_sub(thickness)
+                    .saturating_sub(margin),
+            )
         } else {
-            0
+            to_i32(margin)
         };
-        let placer = Placer {
+        let bar_placer = Placer {
             orientation,
+            main_origin: margin,
             cross_origin,
             thickness,
         };
 
-        let bar = placer.place(0, main_total);
+        let bar = bar_placer.place(0, main_total);
+
+        let placer = bar_placer.inside(border);
+        let content_total = main_total.saturating_sub(border.saturating_mul(2));
 
         // The rule divides two adjacent controls of one strip: the theme's
         // control gap spaces it, and the padding a control keeps from its
         // plate edge insets it so the bar's rounded ends stay clear. Flooring
         // at one physical pixel keeps it from vanishing at a small scale.
         let rule = scale.scale_length(metrics.border_thickness).max(1);
-        let margin = scale.scale_length(metrics.control_gap);
+        let rule_gap = scale.scale_length(metrics.control_gap);
         let inset = scale.scale_length(metrics.control_inset);
-        let gutter = rule.saturating_add(margin.saturating_mul(2));
+        let gutter = rule.saturating_add(rule_gap.saturating_mul(2));
 
-        let library = slot(&placer, 0, config.launcher_extent, 0, main_total);
-        let rule_start = config.launcher_extent.saturating_add(margin);
-        let separator = clip(rule_start, rule, 0, main_total).map_or(Rect::EMPTY, |(off, len)| {
-            placer.place_inset(off, len, inset)
-        });
+        let library = slot(&placer, 0, config.launcher_extent, 0, content_total);
+        let rule_start = config.launcher_extent.saturating_add(rule_gap);
+        let separator = clip(rule_start, rule, 0, content_total)
+            .map_or(Rect::EMPTY, |(off, len)| {
+                placer.place_inset(off, len, inset)
+            });
         let files_start = config.launcher_extent.saturating_add(gutter);
-        let files = slot(&placer, files_start, config.launcher_extent, 0, main_total);
+        let files = slot(
+            &placer,
+            files_start,
+            config.launcher_extent,
+            0,
+            content_total,
+        );
         let leading_len = files_start
             .saturating_add(config.launcher_extent)
-            .min(main_total);
+            .min(content_total);
 
-        // The trailing regions clip against the permanent leading launchers
-        // (never the reverse), so a degenerate screen shrinks the clock and
-        // icons to nothing rather than overlaying them on a launcher. The
-        // Switchboard capsule is placed first among them: the system readout
-        // survives preferentially, so the clock and icons collapse before it
-        // does — only the leading launchers outrank it.
-        let switch_start = main_total
-            .saturating_sub(config.switch_extent)
-            .max(leading_len);
-        let switchboard = placer.place(switch_start, main_total.saturating_sub(switch_start));
+        let trailing = trailing_end(&placer, config, (leading_len, content_total), icon_count);
 
-        let clock_start = switch_start
-            .saturating_sub(config.clock_extent)
-            .max(leading_len);
-        let clock = placer.place(clock_start, switch_start.saturating_sub(clock_start));
-
-        let notif_total = config.icon_extent.saturating_mul(to_u32(icon_count));
-        let notif_start = clock_start.saturating_sub(notif_total).max(leading_len);
-        let notification_area = placer.place(notif_start, clock_start.saturating_sub(notif_start));
-        let notifications = slots(
-            &placer,
-            notif_start,
-            config.icon_extent,
-            icon_count,
-            notif_start,
-            clock_start,
-        );
-
-        let pin_start = leading_len.min(notif_start);
+        let pin_start = leading_len.min(trailing.start);
         let pin_total = config.pin_extent.saturating_mul(to_u32(pin_count));
-        let pin_end = pin_start.saturating_add(pin_total).min(notif_start);
+        let pin_end = pin_start.saturating_add(pin_total).min(trailing.start);
         let pin_strip = placer.place(pin_start, pin_end.saturating_sub(pin_start));
         let pins = slots(
             &placer,
@@ -193,18 +220,18 @@ impl BarLayout {
             config.pin_extent,
             pin_count,
             pin_start,
-            notif_start,
+            trailing.start,
         );
 
-        let task_start = pin_end.min(notif_start);
-        let task_list = placer.place(task_start, notif_start.saturating_sub(task_start));
+        let task_start = pin_end.min(trailing.start);
+        let task_list = placer.place(task_start, trailing.start.saturating_sub(task_start));
         let tasks = slots(
             &placer,
             task_start,
             config.task_extent,
             task_count,
             task_start,
-            notif_start,
+            trailing.start,
         );
 
         Self {
@@ -217,10 +244,10 @@ impl BarLayout {
             pins,
             task_list,
             tasks,
-            notification_area,
-            notifications,
-            clock,
-            switchboard,
+            notification_area: trailing.notification_area,
+            notifications: trailing.notifications,
+            clock: trailing.clock,
+            switchboard: trailing.switchboard,
         }
     }
 
@@ -287,6 +314,62 @@ impl BarLayout {
     }
 }
 
+/// The regions anchored to the bar's trailing end.
+struct TrailingEnd {
+    switchboard: Rect,
+    clock: Rect,
+    notification_area: Rect,
+    notifications: Vec<Rect>,
+    /// Where the group begins: the pins and tasks before it stop here.
+    start: u32,
+}
+
+/// Place the trailing regions within `span` — `(the offset the leading
+/// launchers end at, the content region's main-axis length)`.
+///
+/// They clip against the permanent leading launchers and never the reverse,
+/// so a degenerate screen shrinks the clock and icons to nothing rather than
+/// overlaying them on a launcher. The Switchboard capsule is placed first
+/// among them: the system readout survives preferentially, so the clock and
+/// icons collapse before it does — only the leading launchers outrank it.
+fn trailing_end(
+    placer: &Placer,
+    config: &TaskbarConfig,
+    span: (u32, u32),
+    icon_count: usize,
+) -> TrailingEnd {
+    let (leading_len, content_total) = span;
+    let switch_start = content_total
+        .saturating_sub(config.switch_extent)
+        .max(leading_len);
+    let switchboard = placer.place(switch_start, content_total.saturating_sub(switch_start));
+
+    let clock_start = switch_start
+        .saturating_sub(config.clock_extent)
+        .max(leading_len);
+    let clock = placer.place(clock_start, switch_start.saturating_sub(clock_start));
+
+    let notif_total = config.icon_extent.saturating_mul(to_u32(icon_count));
+    let start = clock_start.saturating_sub(notif_total).max(leading_len);
+    let notification_area = placer.place(start, clock_start.saturating_sub(start));
+    let notifications = slots(
+        placer,
+        start,
+        config.icon_extent,
+        icon_count,
+        start,
+        clock_start,
+    );
+
+    TrailingEnd {
+        switchboard,
+        clock,
+        notification_area,
+        notifications,
+        start,
+    }
+}
+
 /// Width of the notification popover panel, in *logical* pixels at the
 /// reference density.
 const NOTIF_POPUP_WIDTH: u32 = 300;
@@ -306,7 +389,7 @@ const NOTIF_TITLE: &str = "Notifications";
 
 /// The notification popover's chrome: the shared [`Panel`], anchored back at
 /// the notification region. Built with the same role as the library popup so
-/// the two popovers share one chrome recipe (§2.2).
+/// the two popovers share one chrome recipe.
 pub(crate) fn notif_panel(anchor: Point) -> Panel {
     Panel::new(NOTIF_TITLE)
         .with_role(ControlRole::Navigation)
@@ -403,15 +486,7 @@ impl NotificationsLayout {
         let panel_height = chrome.overhead.saturating_add(content_height);
 
         let anchor_rect = bar.notification_area.union(&bar.clock);
-        let origin = panel_origin(
-            edge,
-            bar.bar,
-            anchor_rect,
-            width,
-            panel_height,
-            screen_width,
-            screen_height,
-        );
+        let origin = panel_origin(edge, bar.bar, anchor_rect, width, panel_height);
         let panel = Rect::new(origin.x, origin.y, width, panel_height);
         let anchor = Point::new(
             anchor_rect
@@ -505,15 +580,7 @@ impl TrayReadoutLayout {
         let (width, height) = signal.readout_size(scale, theme);
         let width = width.min(screen_width).max(1);
         let height = height.min(screen_height).max(1);
-        let origin = panel_origin(
-            edge,
-            bar.bar,
-            bar.switchboard,
-            width,
-            height,
-            screen_width,
-            screen_height,
-        );
+        let origin = panel_origin(edge, bar.bar, bar.switchboard, width, height);
         Self {
             panel: Rect::new(origin.x, origin.y, width, height),
             corner_radius,
@@ -539,8 +606,14 @@ fn before_midpoint(slot: &Rect, point: Point, horizontal: bool) -> bool {
 }
 
 /// Maps a main-axis interval to a screen [`Rect`] for one bar orientation.
+///
+/// Intervals are local to the region being placed: it starts at main-axis
+/// zero, and this is where its origin — the margin the bar floats in, plus
+/// the rim the bar's contents sit inside — is added, so a region is offset
+/// exactly once.
 struct Placer {
     orientation: Orientation,
+    main_origin: u32,
     cross_origin: i32,
     thickness: u32,
 }
@@ -548,10 +621,23 @@ struct Placer {
 impl Placer {
     /// The rectangle for main-axis interval `[main_off, main_off + main_len)`.
     fn place(&self, main_off: u32, main_len: u32) -> Rect {
-        let off = to_i32(main_off);
+        let off = to_i32(main_off.saturating_add(self.main_origin));
         match self.orientation {
             Orientation::Horizontal => Rect::new(off, self.cross_origin, main_len, self.thickness),
             Orientation::Vertical => Rect::new(self.cross_origin, off, self.thickness, main_len),
+        }
+    }
+
+    /// The placer for what stands *on* the surface: the same axis mapping
+    /// pulled in by `border` on both axes, so a region laid out through it
+    /// falls inside the surface's own rim instead of over it. The caller
+    /// shortens the main-axis length to match.
+    fn inside(&self, border: u32) -> Self {
+        Self {
+            orientation: self.orientation,
+            main_origin: self.main_origin.saturating_add(border),
+            cross_origin: self.cross_origin.saturating_add(to_i32(border)),
+            thickness: self.thickness.saturating_sub(border.saturating_mul(2)),
         }
     }
 
@@ -563,7 +649,7 @@ impl Placer {
         if main_len == 0 || breadth == 0 {
             return Rect::EMPTY;
         }
-        let off = to_i32(main_off);
+        let off = to_i32(main_off.saturating_add(self.main_origin));
         let cross = self.cross_origin.saturating_add(to_i32(cross_inset));
         match self.orientation {
             Orientation::Horizontal => Rect::new(off, cross, main_len, breadth),

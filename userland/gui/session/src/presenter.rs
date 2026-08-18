@@ -27,6 +27,7 @@
 
 use tairix_icon::IconArtwork;
 use tairix_taskbar::{Taskbar, TaskbarRenderer, TaskbarRepaint};
+use tairix_theme::Theme;
 use tairix_wm::{Compositor, Corners, Point, Scale, Surface, WindowId};
 
 /// Presents a taskbar, its program-library popup, its context menu, the
@@ -213,7 +214,7 @@ impl TaskbarPresenter {
             self.bar,
             layout.bar.origin,
             surface,
-            corners,
+            (corners, chrome_blur(taskbar.theme())),
         ));
     }
 
@@ -242,7 +243,7 @@ impl TaskbarPresenter {
             self.popup,
             layout.panel.origin,
             surface,
-            corners,
+            (corners, chrome_blur(taskbar.theme())),
         ));
     }
 
@@ -271,7 +272,7 @@ impl TaskbarPresenter {
             self.menu,
             layout.panel.origin,
             surface,
-            corners,
+            (corners, chrome_blur(taskbar.theme())),
         ));
     }
 
@@ -308,7 +309,7 @@ impl TaskbarPresenter {
             self.notifications,
             layout.panel.origin,
             surface,
-            corners,
+            (corners, chrome_blur(taskbar.theme())),
         ));
     }
 
@@ -345,37 +346,56 @@ impl TaskbarPresenter {
             self.readout,
             layout.panel.origin,
             surface,
-            corners,
+            (corners, chrome_blur(taskbar.theme())),
         ));
     }
 }
 
-/// Update an existing compositor window in place, or add a new one, and apply
-/// `corners`. Returns the window's id.
+/// How far the backdrop behind the desktop's floating chrome is blurred, in
+/// the *logical* pixels the compositor resolves against the output's density.
+///
+/// The bar and every popup it opens are drawn with the theme's floating
+/// ground, which only reads as frosted glass over a blurred backdrop — so the
+/// two are the same theme's decision and are taken from it here rather than
+/// restated per surface.
+fn chrome_blur(theme: &Theme) -> u16 {
+    u16::try_from(theme.metrics().chrome_backdrop_blur).unwrap_or(u16::MAX)
+}
+
+/// Update an existing compositor window in place, or add a new one, and give
+/// it the `(corners, backdrop blur)` look it is placed with. Returns the
+/// window's id.
 ///
 /// An `existing` id that the compositor no longer knows (the embedder removed
 /// the window) is treated as absent, so the window is re-created rather than
 /// the update being silently dropped.
 ///
+/// The blur is in logical pixels, `0` for a surface that covers what is behind
+/// it. A caller states it here rather than after placing, so a surface can
+/// never be shown for a frame wearing the frosting of whatever was last placed.
+///
 /// Shared with the shell's own popup surfaces (the pinboard's context menu), so
-/// every menu and popup window in the session is placed, re-surfaced, and
-/// rounded by one definition.
+/// every menu and popup window in the session is placed, re-surfaced, rounded,
+/// and frosted by one definition.
 pub(crate) fn place(
     compositor: &mut Compositor,
     existing: Option<WindowId>,
     origin: Point,
     surface: Surface,
-    corners: Corners,
+    look: (Corners, u16),
 ) -> WindowId {
+    let (corners, blur_px) = look;
     if let Some(id) = existing {
         if compositor.window(id).is_some() {
             compositor.set_surface(id, surface);
             compositor.move_window(id, origin);
             compositor.set_corners(id, corners);
+            compositor.set_backdrop_blur(id, blur_px);
             return id;
         }
     }
     let id = compositor.add_window(origin, surface);
     compositor.set_corners(id, corners);
+    compositor.set_backdrop_blur(id, blur_px);
     id
 }

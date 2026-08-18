@@ -11,7 +11,7 @@
 //! through, so window corners and control corners can never diverge. This type
 //! only carries the per-window Square/Rounded *choice* the theme drives.
 
-use tairix_raster::round_rect_coverage;
+use tairix_raster::{round_rect_coverage, round_rect_radius};
 
 /// Per-window corner-rounding selection.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -40,6 +40,29 @@ impl Corners {
         } else {
             Self::Rounded { radius }
         }
+    }
+
+    /// The radius this style rounds a `width`×`height` surface by: the
+    /// requested radius clamped to what that surface can carry, `0` where it
+    /// rounds nothing.
+    #[must_use]
+    pub(crate) fn radius(self, width: u32, height: u32) -> u32 {
+        match self {
+            Self::Square => 0,
+            Self::Rounded { radius } => round_rect_radius(width, height, radius),
+        }
+    }
+
+    /// Whether row `y` of a `width`×`height` surface carries an arc at all:
+    /// `false` where the style covers every column of it fully.
+    ///
+    /// Partial coverage lives only in the corner bands, so a caller that
+    /// decides once per row whether the corners can reach it — the compositor
+    /// resolving a window row — skips nothing by trusting this.
+    #[must_use]
+    pub(crate) fn clips_row(self, y: u32, width: u32, height: u32) -> bool {
+        let radius = self.radius(width, height);
+        radius > 0 && (y < radius || y >= height.saturating_sub(radius))
     }
 
     /// Coverage in `0..=255` for pixel `(x, y)` of a `width`×`height`

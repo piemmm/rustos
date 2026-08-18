@@ -28,13 +28,14 @@ where reachable, **does not actually save work**:
 1. **The accelerated path never crosses the process boundary.** The
    runtime path is `userland/gui/session/run.rs` →
    `Compositor::composite()` (software blend into one back buffer) →
-   `RemoteDisplay::present`/`present_region` → `DisplayClient` `ipc_call`
+   `RemoteDisplay::present`/`present_rects` → `DisplayClient` `ipc_call`
    to `DISPLAY_ENDPOINT` → `DisplayServer` in the driver's `Run` binary →
    software `Display::present`. `lib/display` speaks a **software-frame-
    only** wire protocol (`DisplayRequest::{Query,Configure,Present}`,
    `lib/abi/src/display_ipc.rs`): one shm frame region indexed by frame
-   number plus a `DamageRect`. `RemoteDisplay` implements only `Display`,
-   **not** `AcceleratedDisplay`. So `Compositor::present_accelerated`
+   number plus a `DamageList` of up to `MAX_DAMAGE_RECTS` rectangles.
+   `RemoteDisplay` implements only `Display`, **not**
+   `AcceleratedDisplay`. So `Compositor::present_accelerated`
    (which already exists) is exercised only by an in-process mock in
    `userland/gui/wm/src/tests.rs` — it is dead in production.
 
@@ -63,6 +64,25 @@ where reachable, **does not actually save work**:
    signalled via `irq_bind`/`irq_wait` (never a busy-poll, §2.23), which
    also feeds `plans/FIX-DESKTOP.md` responsiveness.
 
+6. **One backdrop-blurred window disables acceleration for the whole
+   frame**, and the desktop now always has one. `Compositor::encode_layers`
+   refuses the layer path outright when any visible window asks for a
+   backdrop blur, because a hardware plane cannot read what is beneath it;
+   the frame falls back to the software composite. The taskbar and every
+   popup it opens are floating chrome over a blurred backdrop
+   (`plans/GUI-CONTROLS-DESIGN.md`, "Surface ground"), so on a desktop
+   session that refusal is permanent, not occasional: the accelerated path
+   as it stands can only serve a headless or bar-less configuration. This
+   is a real cost of the desktop's look, not a bug in either half — the
+   software path is the mandatory always-available fallback (§17.3) and
+   `plans/FIX-DESKTOP-SPEEDUP.md` is what keeps it fast. Closing it means
+   compositing *only* the frosted surfaces in software and handing the
+   hardware the rest: the blurred region is bounded (the bar and one popup),
+   its backdrop is what the layers below already contain, and a baked layer
+   is exactly the shape Stage A gives such a surface. Until that lands, the
+   accelerated path's win is measured on scenes without chrome, and a
+   measurement quoted from one must say so.
+
 ---
 
 ## Goal / invariants (bind every stage)
@@ -80,6 +100,21 @@ where reachable, **does not actually save work**:
   `lib/raster`; no second blend is forked. The WM composites in software
   *only* the layers hardware cannot source directly; those baked results
   become their own layer.
+- **The engine is never handed a blend that would band**
+  (`plans/FIX-DESKTOP-SPEEDUP.md` B.5). A hardware layer is blended in the
+  scan-out's own 8 bits with one fixed rounding, so a *translucent field*
+  over a picture arrives in the `256 - a` levels that leaves and steps a
+  smooth wallpaper into plateaus; the software composite spends that
+  missing resolution across the area with a per-pixel ordered dither, which
+  no layer stack can express. `Compositor::has_translucent_window`
+  therefore refuses the layer path for a window-wide translucency exactly
+  as a backdrop blur does. A layer's own antialiased *edge* is not this
+  case — a few pixels of partial coverage have no gradient to band — so
+  ordinary rounded windows keep the hardware path. A stage that wants the
+  hardware to blend translucency must first give the engine an honest,
+  *proven* way to say it blends without banding (a high-precision or
+  dithered blend); until such a capability has a live producer and
+  consumer it is not added (§2.4), and translucency is baked or refused.
 - **Roll our own** (§2.12): the virtio-gpu protocol is implemented in-
   tree on `lib/virtio`, not an external crate.
 - **Fail closed, seat-gated, no ambient authority** (§5.4): every
@@ -157,6 +192,12 @@ Stage A adds no speculative caps; `max_layers`, `max_width_px`,
   window shm frame (no `LayerBuf`, no `sample_local`); only layers the
   hardware cannot source (rounded corners, per-region alpha, translucency
   beyond `per_layer_opacity`) are baked in software into their own layer.
+  A baked layer keeps the software path's own rounding: `sample_local`
+  reads the ordered dither at the pixel's **screen** position, so the baked
+  pixels are the ones the software composite would have written there. A
+  translucency the *engine* would blend is refused outright, per the
+  no-banding invariant above — baking cannot help there, because the
+  banding would happen in the engine's blend, not in the bake.
 - `lib/abi` C header (`cargo xtask c-header --write`) regenerated;
   `cargo xtask abi-check` green.
 
@@ -257,9 +298,10 @@ doorbell and reads of device-written ring entries:
   via `lib/drvrt`/`dma_alloc`), `SET_SCANOUT`.
 - `TRANSFER_TO_HOST_2D` + `RESOURCE_FLUSH`.
 - `Display::present` = transfer whole frame + flush;
-  `Display::present_region` maps a `DamageRect` **straight** onto
-  `TRANSFER_TO_HOST_2D` + `RESOURCE_FLUSH` of the damaged rect (host-side
-  damage — a real win over the whole-frame blit even before layers).
+  `Display::present_rects` maps each `DamageRect` of the list **straight**
+  onto `TRANSFER_TO_HOST_2D` + `RESOURCE_FLUSH` of that rect (host-side
+  damage — a real win over the whole-frame blit even before layers), so a
+  scattered frame is one call's worth of small transfers.
 
 ### C.3 `AcceleratedDisplay` via blob resources / multi-scanout
 - Where the QEMU build supports it, wrap each `AccelLayer` shm region as a

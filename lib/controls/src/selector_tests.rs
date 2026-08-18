@@ -250,17 +250,24 @@ fn pending_toggle_shows_a_heat_seam() {
 // --- Focus and high contrast -------------------------------------------
 
 #[test]
-fn focus_lifts_the_rim_to_the_active_colour() {
+fn focus_rings_inside_the_box_and_leaves_the_rim_quiet() {
     let theme = Theme::dark();
+    let quiet = premul(theme.palette().rim);
+    let accent = premul(theme.palette().rim_active);
     let mut checkbox = Checkbox::new("X", SelectionState::Unselected);
     let resting = checkbox_surface(&checkbox, &theme);
     checkbox.set_focused(true);
     let focused = checkbox_surface(&checkbox, &theme);
-    assert_eq!(resting.get(0, H / 2), Some(premul(theme.palette().rim)));
+
+    assert_eq!(resting.get(0, H / 2), Some(quiet));
     assert_eq!(
         focused.get(0, H / 2),
-        Some(premul(theme.palette().rim_active))
+        Some(quiet),
+        "the ring is the focus mark, so the perimeter stays the resting edge"
     );
+    let ring = |surface: &Surface| (0..W).any(|x| surface.get(x, H / 2) == Some(accent));
+    assert!(!ring(&resting));
+    assert!(ring(&focused), "the focused box shows its ring");
 }
 
 #[test]

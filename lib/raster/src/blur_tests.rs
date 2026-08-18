@@ -13,6 +13,7 @@
 //! [`frost_region`]: Surface::frost_region
 
 use core::cell::RefCell;
+use core::ops::Range;
 
 use alloc::vec;
 use alloc::vec::Vec;
@@ -20,7 +21,8 @@ use alloc::vec::Vec;
 use tairix_rng::RandU64;
 
 use super::{box_blur, BlurScratch, Reciprocal, RECIPROCAL_MAX_COUNT, RECIPROCAL_SHIFT};
-use crate::color::{div255, Pixel};
+use crate::color::{div255_biased, Pixel, ROUND_NEAREST};
+use crate::dither::DitherRow;
 use crate::round::round_rect_coverage;
 use crate::surface::Surface;
 
@@ -463,30 +465,58 @@ fn zero_coverage_leaves_the_whole_surface_untouched() {
     assert_eq!(after, before, "a coverage of nothing frosts nothing");
 }
 
+/// A partial coverage is a translucent field over a picture, so the mix takes
+/// the surface's ordered dither: the expectation is the same weighted average
+/// rounded at each pixel's own bias, read at its **surface** position (the
+/// rectangle starts at `(1, 1)`), not at a fixed rounding.
 #[test]
-fn partial_coverage_is_the_weighted_mix_of_the_original_and_the_blur() {
+fn partial_coverage_is_the_dithered_weighted_mix_of_the_original_and_the_blur() {
     const WEIGHT: u8 = 64;
+    const RECT: (u32, u32, u32, u32) = (1, 1, 5, 4);
     let before = patterned(8, 6);
-    let original = block(&before, 1, 1, 5, 4);
+    let original = block(&before, RECT.0, RECT.1, RECT.2, RECT.3);
     let blur = blurred(&original, 5, 4, 2);
     let keep = u32::from(255 - WEIGHT);
     let take = u32::from(WEIGHT);
-    let channel = |from: u8, to: u8| div255(u32::from(from) * keep + u32::from(to) * take);
-    let expected: Vec<Pixel> = original
-        .iter()
-        .zip(&blur)
-        .map(|(from, to)| Pixel {
+    let mixed = |from: Pixel, to: Pixel, bias: u32| {
+        let channel =
+            |from: u8, to: u8| div255_biased(u32::from(from) * keep + u32::from(to) * take, bias);
+        Pixel {
             r: channel(from.r, to.r),
             g: channel(from.g, to.g),
             b: channel(from.b, to.b),
             a: channel(from.a, to.a),
+        }
+    };
+    let expected: Vec<Pixel> = original
+        .iter()
+        .zip(&blur)
+        .enumerate()
+        .map(|(index, (from, to))| {
+            let column = RECT.0 + u32::try_from(index).unwrap_or(0) % RECT.2;
+            let row = RECT.1 + u32::try_from(index).unwrap_or(0) / RECT.2;
+            mixed(*from, *to, DitherRow::at(row).bias(column))
         })
         .collect();
     assert_ne!(expected, original, "a partial mix is not the original");
     assert_ne!(expected, blur, "a partial mix is not the blur");
 
-    let after = frosted(before, (1, 1, 5, 4), 2, WEIGHT);
-    assert_eq!(block(&after, 1, 1, 5, 4), expected);
+    let after = frosted(before, RECT, 2, WEIGHT);
+    assert_eq!(block(&after, RECT.0, RECT.1, RECT.2, RECT.3), expected);
+
+    // The dither only ever chooses between the two levels the exact mix falls
+    // between, so no pixel is more than a level from the undithered answer.
+    for ((from, to), got) in original.iter().zip(&blur).zip(&expected) {
+        let nearest = mixed(*from, *to, ROUND_NEAREST);
+        for (a, b) in [
+            (got.r, nearest.r),
+            (got.g, nearest.g),
+            (got.b, nearest.b),
+            (got.a, nearest.a),
+        ] {
+            assert!(a.abs_diff(b) <= 1, "{a} is more than a level from {b}");
+        }
+    }
 }
 
 #[test]
@@ -575,6 +605,136 @@ fn a_clip_confines_the_frost_and_the_shape_still_reads_from_the_rectangle() {
         "what the clip admits is frosted"
     );
     outside_is_untouched(&after, &before, (3, 4, 4, 3));
+}
+
+/// `surface` with `[x, x+w) × [y, y+h)` frosted around the kept `cols` × `rows`
+/// block, at a constant coverage.
+fn frosted_around(
+    mut surface: Surface,
+    (x, y, w, h): (u32, u32, u32, u32),
+    (cols, rows): (Range<u32>, Range<u32>),
+    radius: u32,
+    weight: u8,
+) -> Surface {
+    surface.frost_region_around(
+        x,
+        y,
+        w,
+        h,
+        cols,
+        rows,
+        radius,
+        &mut BlurScratch::new(),
+        |_, _| weight,
+    );
+    surface
+}
+
+/// Frosting the border around a kept block, then putting back what the block
+/// held before, is bit-for-bit the whole frost.
+///
+/// This is the compositor's drag path: the retained backdrop of a window that
+/// has moved is still exact in the middle, so only the border is recomputed and
+/// the middle is copied from the frost of the previous frame. If the border
+/// disagreed with the whole frost by one level anywhere — a neighbourhood
+/// clipped to the border, a replication edge read from the band instead of the
+/// rectangle, a dither read from the band's own corner, or one band reading
+/// another band's already-frosted pixels — the join would show as an edge that
+/// travels with the window.
+#[test]
+fn a_frosted_border_around_a_kept_block_is_exactly_the_whole_frost() {
+    let mut rng = TestRng::new(0x9A11_0F20_57D1_7E20);
+    let rect = (2u32, 1, 13, 11);
+    for radius in [1u32, 2, 3, 7] {
+        // Full coverage, a rounded weight, and none at all: the mix and its
+        // dither are part of what must agree, not just the blur.
+        for weight in [255u8, 176, 0] {
+            let before = patterned(17, 14);
+            let whole = frosted(before.clone(), rect, radius, weight);
+            for _ in 0..24 {
+                let keep = (span_within(&mut rng, rect.2), span_within(&mut rng, rect.3));
+                let mut border = frosted_around(before.clone(), rect, keep.clone(), radius, weight);
+                let kept = (
+                    rect.0 + keep.0.start,
+                    rect.1 + keep.1.start,
+                    keep.0.end - keep.0.start,
+                    keep.1.end - keep.1.start,
+                );
+                // What the block held is the caller's own business: it kept the
+                // earlier frost of those very pixels.
+                assert_eq!(
+                    block(&border, kept.0, kept.1, kept.2, kept.3),
+                    block(&before, kept.0, kept.1, kept.2, kept.3),
+                    "the kept block is left alone"
+                );
+                for row in kept.1..kept.1 + kept.3 {
+                    for column in kept.0..kept.0 + kept.2 {
+                        border.set(column, row, whole.get(column, row).expect("in the surface"));
+                    }
+                }
+                assert_eq!(
+                    border, whole,
+                    "a radius-{radius} frost at coverage {weight} around the kept \
+                     columns {:?} rows {:?}",
+                    keep.0, keep.1
+                );
+            }
+        }
+    }
+}
+
+/// A non-empty sub-range of `0..extent`.
+fn span_within(rng: &mut TestRng, extent: u32) -> Range<u32> {
+    let start = rng.next_u32() % extent;
+    let len = 1 + rng.next_u32() % (extent - start);
+    start..start + len
+}
+
+/// A kept block touching an edge leaves fewer than four border bands, and a
+/// block covering the whole rectangle leaves none — neither is a special case
+/// the caller has to know about.
+#[test]
+fn a_kept_block_against_an_edge_still_frosts_exactly_the_rest() {
+    let rect = (1u32, 2, 10, 8);
+    let before = patterned(13, 12);
+    let whole = frosted(before.clone(), rect, 2, 255);
+    for keep in [
+        (0..4, 0..8),  // the whole left side: no top, bottom, or left band
+        (0..10, 0..3), // the whole top: only a bottom band
+        (6..10, 5..8), // a corner: no bottom or right band
+        (0..10, 0..8), // everything: nothing to frost at all
+    ] {
+        let mut border = frosted_around(before.clone(), rect, keep.clone(), 2, 255);
+        for row in keep.1.clone() {
+            for column in keep.0.clone() {
+                let (x, y) = (rect.0 + column, rect.1 + row);
+                border.set(x, y, whole.get(x, y).expect("in the surface"));
+            }
+        }
+        assert_eq!(
+            border, whole,
+            "keeping columns {:?} rows {:?}",
+            keep.0, keep.1
+        );
+    }
+}
+
+/// Keeping nothing is the whole frost, so a caller with an empty core need not
+/// choose between two calls.
+#[test]
+fn keeping_nothing_frosts_the_whole_rectangle() {
+    let rect = (2u32, 2, 9, 7);
+    let before = patterned(13, 11);
+    let whole = frosted(before.clone(), rect, 3, 255);
+    for keep in [(0..0, 0..0), (4..4, 0..7), (0..9, 3..3), (99..120, 0..7)] {
+        assert_eq!(
+            frosted_around(before.clone(), rect, keep.clone(), 3, 255),
+            whole,
+            "keeping columns {:?} rows {:?} covers no pixels",
+            keep.0,
+            keep.1
+        );
+    }
 }
 
 #[test]

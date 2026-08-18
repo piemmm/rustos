@@ -363,11 +363,14 @@ pub trait LiveUserSpace: Send {
     /// base of a live carve in this space fails closed (covering a forged,
     /// stale, or double free) without releasing anything.
     ///
+    /// Reports the byte length released, so a caller can drop exactly those
+    /// pages from the address-space snapshot rather than rebuilding it.
+    ///
     /// # Errors
     ///
     /// [`LiveSpaceError::Dma`] — [`DmaError::UnknownBuffer`] when `cpu_va` is
     /// not the base of a live DMA carve of this space.
-    fn free_dma(&mut self, cpu_va: u64) -> Result<(), LiveSpaceError>;
+    fn free_dma(&mut self, cpu_va: u64) -> Result<usize, LiveSpaceError>;
 
     /// Map `len` bytes of an existing, kernel-owned, physically-contiguous
     /// **shared-memory region** beginning at `phys_base` into this space as
@@ -978,14 +981,14 @@ where
         })
     }
 
-    fn free_dma(&mut self, cpu_va: u64) -> Result<(), LiveSpaceError> {
-        self.dma.free_at(
+    fn free_dma(&mut self, cpu_va: u64) -> Result<usize, LiveSpaceError> {
+        let released = self.dma.free_at(
             &mut self.space,
             self.frames,
             &self.physmap,
             VirtAddr::new(cpu_va),
         )?;
-        Ok(())
+        Ok(released)
     }
 
     fn map_shared(&mut self, phys_base: u64, len: usize) -> Result<u64, LiveSpaceError> {

@@ -284,6 +284,7 @@ pub use decision::{Dialog, DialogAction, HelpTip, HelpTipAction, Tooltip};
 pub use menu::{Menu, MenuAction, MenuItem};
 pub use metric::{MetricInstrument, MetricLayout, MetricTile, StatusPill};
 pub use nav::{Breadcrumb, BreadcrumbAction, Crumb};
+pub use paint::{ground_fill, paint_surface_plate, plate_border, ChromeLayer};
 pub use rail::{ActionRail, RailAction};
 pub use record::{EventMark, Fact, FactList, Timeline, TimelineEvent};
 pub use scroll::{
@@ -306,9 +307,9 @@ pub use text::{SearchField, TextAction, TextField};
 pub use toolbar::{ToolActivation, Toolbar, ToolbarAction};
 pub use value::{Progress, Slider, SliderAction};
 pub use window::{
-    FrameInsets, FrameLayout, FurniturePart, ResizeEdge, ResizeEvent, ResizeGrabber, ScrollCorner,
-    TitleBar, TitleBarEvent, TitleBarLayout, TitleHit, WindowControl, WindowControlAction,
-    WindowFrame,
+    FrameInsets, FrameLayout, FrameRim, FurniturePart, ResizeEdge, ResizeEvent, ResizeGrabber,
+    ScrollCorner, TitleBar, TitleBarEvent, TitleBarLayout, TitleHit, WindowControl,
+    WindowControlAction, WindowFrame,
 };
 
 #[cfg(test)]

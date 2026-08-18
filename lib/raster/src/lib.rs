@@ -19,7 +19,12 @@
 //! gradient carries.
 //!
 //! There is exactly one definition of the colour algebra here, so it is
-//! never duplicated into a sibling crate. A theme [`Rgba`] token
+//! never duplicated into a sibling crate. Compositing over an 8-bit
+//! destination holds fewer levels than the picture beneath it had, so every
+//! operator rounds at a caller-chosen bias ([`div255_biased`]): the plain
+//! form rounds to nearest, and a translucent field — a wash here, a
+//! translucent window in the compositor — varies it per pixel from a
+//! [`DitherRow`] and stays smooth instead of contouring. A theme [`Rgba`] token
 //! meets that algebra at a single edge — [`From<Rgba>`](Color) — which
 //! is why this crate depends on `lib/theme`: the conversion is owned in
 //! one place rather than re-implemented by each consumer.
@@ -35,6 +40,7 @@ extern crate alloc;
 pub mod affine;
 pub mod blur;
 pub mod color;
+pub mod dither;
 pub mod paint;
 pub mod resample;
 pub mod round;
@@ -46,9 +52,10 @@ mod tests;
 
 pub use affine::Affine;
 pub use blur::{box_blur, BlurScratch};
-pub use color::{div255, Color, Pixel};
+pub use color::{blend_span, div255, div255_biased, Color, Pixel, ROUND_NEAREST};
+pub use dither::DitherRow;
 pub use paint::{Gradient, GradientKind, GradientStop, Paint, SpreadMethod};
 pub use resample::{resample, resample_rows, Region, ResampleError, Rgba8Image};
-pub use round::round_rect_coverage;
+pub use round::{round_rect_coverage, round_rect_radius};
 pub use scan::FillRule;
 pub use surface::{Surface, SUBPIXEL};

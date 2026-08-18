@@ -22,6 +22,9 @@ The compositor turns a stack of windows into one scan-out frame:
    background, bottom-to-top in z-order, using the Porter–Duff *over*
    operator (`Pixel::over`). It returns the `Region` it actually
    recomposited (screen-clipped), which is what the present step moves.
+   Each blend rounds at that pixel's own share of the shared ordered
+   dither (see [Dithered blending](#dithered-blending)); an opaque run is
+   copied rather than blended and pays nothing for it.
 3. Each composited pixel is scaled by the screen reveal (see
    [Screen reveal](#screen-reveal)) and encoded into a byte frame laid out
    for the active `DisplayMode` (`Rgba8888` or `Bgra8888`).
@@ -35,6 +38,21 @@ and a blend rather than a coordinate conversion, a layer decision, and a
 `y * stride + x * 4` offset recomputed per pixel. Only windows whose
 bounds overlap the dirty rectangle are considered at all.
 
+Within a row, the columns between two copied opaque runs are one **segment**,
+and a segment is composed a *layer* at a time across its whole width — the
+base fill, the desktop row, each window row back to front, then the cursor —
+not a column at a time through the whole stack. Each layer is a straight run
+of source pixels at a screen column and a constant opacity, laid through
+`lib/raster`'s one span composite (`blend_span`), which is the same walk
+`Surface::blit` takes: one blended pixel is the same arithmetic wherever it
+comes from. The order a pixel sees its layers in is unchanged and the frames
+are byte-identical; what the segment saves is the per-column dispatch around
+the arithmetic, which measurement showed was the larger half of a translucent
+composite. Full-screen opaque composition fell from 2.98 ns/px to 0.61 and the
+translucent case from 10.04 to 5.99. Rows where coverage genuinely varies per
+column — a rounded corner's arc, and the cursor — keep the column-by-column
+walk inside their own contribution.
+
 Because the root background is forced opaque, the final screen is always
 fully opaque and its premultiplied channels equal their straight-alpha
 form on scan-out.
@@ -47,6 +65,37 @@ cursor re-blend on top unchanged — and returns `false` without damaging
 anything when the colour is already in effect, so a caller can skip a
 redundant present.
 
+## Dithered blending
+
+A blend into the 8-bit back buffer cannot hold what it was given: a source
+of alpha `a` admits only `256 - a` of the 256 levels the picture beneath it
+held. Round every pixel the same way and a smoothly shaded wallpaper under a
+translucent window — or under a frosted panel — collapses into wide flat
+stripes with a hard step between them. It is invisible on a small test
+display and unmistakable on a 1080-row screen.
+
+Every blended pixel therefore rounds at its own bias from
+`tairix_raster::DitherRow`: values between two levels land on the lower one
+in some pixels and the higher one in others, and the area mean carries the
+fraction. The row is resolved once per **screen** row and indexed by the
+screen column, and `WindowRow::sample` scales window opacity and
+rounded-corner coverage at the same bias, so a translucent window's own
+gradients survive too. This is one shared definition with the rest of the
+rasteriser — the login screen's scrim, a translucent plate, and
+`frost_region`'s mix-back all round the same way — not a compositor-local
+trick.
+
+Three properties make it safe on the frame path:
+
+- The bias is a pure function of the screen position, so a recomposited
+  rectangle matches the frame it replaces exactly, two damage rectangles
+  that meet cannot seam, and a still frame never shimmers.
+- The tile's mean bias is plain nearest rounding, so nothing lightens or
+  darkens and no pixel is ever more than one level from the undithered
+  answer.
+- Opaque runs are copied whole, so the cost falls only where a blend was
+  already being paid: one mask and one load per blended pixel.
+
 ## Screen reveal
 
 `Compositor::set_reveal(strength)` scales the whole screen toward black:
@@ -56,7 +105,7 @@ nothing else in the compositor reads it.
 
 It is applied at exactly one point — the step in `compose_span` where a
 composited pixel becomes a scan-out byte — so every present path
-(`composite`, `present`, `present_region`, the accelerated path's software
+(`composite`, `present`, the accelerated path's software
 fallback) dims each pixel exactly once. The back buffer deliberately keeps
 the **true** composed colour: a frosted window samples the backdrop out of
 it, and a blur-split rectangle re-reads it for its second segment, so
@@ -87,6 +136,19 @@ reach, and one larger is clipped — the layer is never a reason to fail a
 frame. Installing, replacing, or clearing it damages exactly its old and
 new footprints, precisely as any other surface replacement does.
 
+`Compositor::repaint_desktop(area, paint)` repaints it in place: the owner
+keeps the screen-sized buffer it already has (a repaint costs a paint, not a
+multi-megabyte allocation) and `paint` receives the surface together with the
+rectangles of `area` clipped to the layer, painting inside them and nowhere
+else. Only those rectangles are marked, and that matters far more than the
+paint itself: the desktop is the **bottom** layer, so marking all of it
+recomposites every window above it and throws away every frosted backdrop over
+it. An icon taking the hover must cost that icon, not a screenful of blur. A
+layer that is absent or sized for a screen this output no longer has is
+allocated fresh and painted whole, since it holds no pixels a partial paint
+could preserve; a heap that will not give one back leaves the desktop exactly
+as it was rather than blanking it.
+
 Pointer and keyboard input that resolves to no window is reported to the
 desktop layer's owner rather than swallowed: see *Input routing*, below.
 
@@ -112,7 +174,14 @@ unconditionally (`Compositor::has_backdrop_blur`): a hardware layer is
 composed from its own pixels alone and cannot sample what is already
 behind it, so a scene with any visible frosted window has no layer
 encoding at all and goes through software rather than presenting a frame
-the frosting is missing from. An **in-flight screen reveal** takes it too:
+the frosting is missing from. A **translucent window** takes it as well
+(`Compositor::has_translucent_window`): the engine would blend that layer
+over what is beneath it in the scan-out's own 8 bits with a fixed rounding,
+which is exactly what bands a picture under a translucent field, and no
+layer stack can express a per-pixel dither. A window's own anti-aliased
+corner is not this case — partial coverage a few pixels wide has no gradient
+to band — so ordinary rounded windows still take the hardware path. An
+**in-flight screen reveal** takes it too:
 the engine scans a layer out as the driver was handed it, so nothing it
 composes passes through the dimming and the screen would show at full
 strength while the fade ran. `encode_layers` therefore declines while
@@ -147,8 +216,40 @@ is the opt-out. Coverage in `0..=255` is computed by deterministic
 supersampling on a fixed grid (no `sqrt`, which `core` lacks), so a pixel
 on a corner arc receives anti-aliased partial coverage and the
 anti-aliasing is exactly reproducible in tests. The radius is clamped to
-half the shorter side. The taskbar's rounded edges reuse this same path
-rather than a second implementation (`AGENTS.md` §2.2).
+half the shorter side (`round_rect_radius`, the same clamp the coverage
+applies). The taskbar's rounded edges reuse this same path rather than a
+second implementation (`AGENTS.md` §2.2) — and because the bar floats clear
+of the screen edges it faces (`Metrics::taskbar_margin`), all four of its
+corners now round against wallpaper rather than two of them against the
+screen edge.
+
+`Window::shape` is the one silhouette a window is cut to, whichever kind it
+is: a **decorated** window takes its frame's rim radius (`WindowFrame::rim`)
+and a plain one its own corner style, and either way the extent is the outer
+rectangle. Both the window's own pixels and the frosted backdrop confined to
+its rectangle weight themselves by it.
+
+A rounded silhouette leaves a curve where a rectangle would have a corner, and
+an application's rows are square, so the window manager keeps content out of
+that curve two ways:
+
+- **The client is clipped to the frame's plate.** A decorated window's client
+  pixels are cut to the rounded plate the frame fills inside its rim
+  (`FrameRim::plate` — the concentric inset and radius the frame itself draws
+  from). A pixel the plate does not fully cover belongs to the frame, whose own
+  arc — the rim and the plate behind it — is what the curve is made of, so
+  content can neither draw over the rim nor square off the corner. A plain
+  window has no rim and no furniture to give way to, so its coverage
+  anti-aliases its own edge exactly as before.
+- **A corner row is furniture over its whole width.** The top and bottom
+  furniture strips reach at least the rim's radius even where the reserved band
+  is thinner than that, and the side strips take only the rows between them, so
+  the frame's own render supplies every pixel of a corner row. A window whose
+  content has been released still draws its curve.
+
+The title bar draws no ground of its own: the frame has already laid its plate
+under the whole window, rounded, so filling the band again would square off the
+very corners the rim curves around — in the colour that is already there.
 
 ## Backdrop blur
 
@@ -161,6 +262,20 @@ window's radius over the window channel
 (`WindowClient::set_backdrop_blur`, below), which the protocol bounds at
 `WINDOW_BACKDROP_BLUR_MAX_PX` — a validation limit on the compositor's
 per-frame work, not a capacity that grows.
+
+The desktop's own chrome is the standing consumer: the session places the
+taskbar and every popup it opens — the program-library launcher, the bar's
+context menu, the notification popover, the Switchboard capsule's readout —
+with the theme's `chrome_backdrop_blur`, because each is drawn on a
+translucent ground that only reads as frosted glass over a blurred backdrop
+(`plans/GUI-CONTROLS-DESIGN.md`, "Surface ground"). It is asked for as the
+surface is placed, so a chrome window is never shown for a frame wearing the
+frosting of whatever was placed before it. The pinboard's own backdrop menu
+asks for none: it covers what it opens over. A desktop session therefore
+always has at least one frosted window, which is why the accelerated layer
+path — a hardware plane cannot read what is beneath it — currently falls back
+to this software composite for the whole frame
+(`plans/FIX-DISPLAY-ACCELERATION.md`).
 
 The radius is a desktop length, so it is authored once and converted to
 physical pixels through the output's own `Scale::scale_length`, exactly as
@@ -178,18 +293,32 @@ segment it further.
 
 The effect itself is `lib/raster`'s shared `Surface::frost_region` — the
 one frosted glass the desktop has, which the login screen frosting a
-selected account tile draws through too. It copies the rectangle out of the
-back buffer, blurs the copy, and mixes the blurred pixels back over the
-originals at a per-pixel weight the caller supplies.
+selected account tile draws through too. It reads the rectangle out of the
+back buffer a row at a time, blurs it, and mixes the blurred pixels back over
+the originals at a per-pixel weight the caller supplies.
 
 The blur is a **separable box blur**: a horizontal pass then a vertical
 one, each carrying a running sum so the window slides by one add and one
 subtract per output. The cost is proportional to the rectangle's *area*
-whatever the radius, never to area × radius. The copy and the pass-to-pass
+whatever the radius, never to area × radius. Nothing is written until both
+passes are done, which is what lets the horizontal one read the surface
+directly instead of a copy of it. The blurred pixels and the pass-to-pass
 intermediate live in one `tairix_raster::BlurScratch` the compositor owns,
 grown to the largest frosted rectangle the session has needed and reused,
 so a frosted window allocates nothing after its first frame; a mode change
 releases it rather than pinning the old screen's worth of pixels.
+
+`Surface::frost_region_around` frosts the same rectangle *except* a kept
+inner block, writing exactly the pixels the whole-rectangle frost would write
+around it. The rectangle still decides the answer — samples replicate at its
+edges and coverage is read at its own coordinates — so a border is never a
+smaller frost of a smaller rectangle, which would spread a clipped
+neighbourhood and seam against the pixels it was kept beside. The border's
+bands are all blurred before any is mixed back, because a band's own
+neighbourhood reaches into the bands next to it and what it must read there is
+the backdrop, not the frost of it. This is what a dragged frosted window costs
+instead of a whole blur (see [Retained
+backdrops](#retained-backdrops)).
 
 Every channel is averaged, alpha included: on premultiplied data that is
 the same convex combination of the contributing colours that compositing
@@ -294,10 +423,12 @@ whole while unrelated damage elsewhere stays exactly as tight as it was
 marked. Two frosted windows that overlap merge into a single rectangle,
 because each reads what the other wrote.
 
-When the frost does **not** have to be recomputed there is no neighbourhood to
-spread and no promotion at all: the retained frost is copied back and the
-damage stays the rectangle it was marked as. See [Retained frosted
-backdrops](#retained-frosted-backdrops).
+When the frost does **not** have to be recomputed at all there is no
+neighbourhood to spread and no promotion either: the retained frost is copied
+back and the damage stays the rectangle it was marked as. A frost that survives
+only in part is promoted like one that must be blurred outright, because its
+border is blurred. See [Retained
+backdrops](#retained-backdrops).
 
 **An update that changes nothing marks nothing.** `move_window` to the
 origin a window already has, and `set_corners` / `set_visible` /
@@ -396,21 +527,32 @@ number of bytes:
   all, so a wake that changed nothing costs neither the whole-frame
   shared-memory copy nor the driver blit. The first frame still shows: a
   new compositor marks the whole screen dirty.
-- **Whole-screen damage is one `Display::present`.**
-- **Anything else is one `Display::present_region` per disjoint dirty
-  rectangle**, so the bytes moved are proportional to what changed rather
-  than to the bounding box of scattered damage — a dirty taskbar strip
-  along the bottom edge plus a cursor near the top is two small blits,
-  not a near-full-screen one.
-- **Past `MAX_PRESENT_REGIONS` rectangles, one bounding-box present
-  replaces the batch.** Each region present is a synchronous round trip to
-  the display service whose fixed cost is paid however few pixels it
-  carries, while a larger copy costs only more bytes; beyond a handful of
-  rectangles the round trips cost more than one call copying their box.
+- **A frame is presented once, naming everything it changed.** Damage
+  that covers the screen is one `Display::present`; anything else is one
+  `Display::present_rects` carrying the frame's disjoint dirty
+  rectangles. The bytes moved are proportional to what changed rather
+  than to the box around it — a dirty taskbar strip along the bottom edge
+  plus a cursor near the top is two small blits, not a near-full-screen
+  one — and a scattered frame costs one round trip, not one per
+  rectangle.
+- **Covering the screen and spanning it are different questions.** Two
+  far-apart corners have a bounding box the size of the screen while
+  changing a few dozen pixels, so the whole-frame path is reserved for
+  damage that really is the surface. `tairix_display::damage_list` is the
+  one place that decides, and the client's frame ring honours the same
+  distinction: a buffer catching up copies the rectangles it missed, not
+  the box around them.
+- **Past `MAX_DAMAGE_RECTS` rectangles the list degrades to its bounding
+  box** — over-covering costs pixels, dropping a rectangle would leave
+  stale ones on screen. It is still one present: the bound is what one
+  message carries, not how often a frame may publish.
 
-## Retained frosted backdrops
+## Retained backdrops
 
-A frost is a function of exactly four things: the pixels the layers beneath it
+A window that is **translucent, backdrop-blurred, or both** is composed over
+the picture beneath its rectangle, so a frame that touches it otherwise
+recomposes that whole stack. That backdrop is a function of exactly four
+things: the pixels the layers beneath it
 composed, the window's own rectangle, its physical blur radius, and the window
 shape the blurred copy is mixed back through. It is **not** a function of
 anything at or above its own layer — the blur happens before the window's own
@@ -419,25 +561,62 @@ afterwards. The pointer moving inside a frosted terminal and a window dragged
 across one, the two dominant interactions on the desktop, therefore change
 nothing the frost reads, yet either used to re-blur the whole window per sample:
 two separable passes over every pixel of it, measured at 17.4 ms for a 64×24
-repaint against 0.9 µs for the same repaint over an opaque stack.
+repaint against 0.9 µs for the same repaint over an opaque stack. Dragging the
+frosted window *itself* changes nothing beneath it either, and that is the third
+case the cache answers.
 
 The compositor keeps each frosted window's backdrop instead, in a bounded,
 pressure-governed cache on the same terms as the window furniture above:
 ceilinged at one screenful of pixels (no more of it can be visible at once),
 released when the memory-pressure band tightens, and **wiped** on release,
-because a frost is a blurred image of whatever the user had on screen. The same
+because a frost is a blurred image of whatever the user had on screen — and an
+unblurred backdrop is a plain one, so the wipe matters more, not less. The same
 repaint now costs 26 µs.
 
-How a retained frost is known to be still right:
+A plainly translucent window — no blur — is the same problem without the two
+blur passes, and takes the same path: a blur of radius zero leaves the composed
+layers exactly as it found them, so the retained entry *is* the composed
+backdrop and `Window::reads_backdrop` is the one predicate deciding which
+windows are worth keeping one for (a whole-window opacity below full, or a
+blur). There is no second cache and no second copy of the reuse rule. Dragging
+a translucent unblurred terminal fell from **19.89 ns/px** a pointer sample to
+**6.95** — it was the slowest window on the desktop to drag and is now cheaper
+than a frosted one, which itself fell from **15.30** to **9.30**. A backdrop is
+snapshotted with `Surface::overwrite`, a row copy, rather than composited onto
+a blank surface.
+
+An antialiased corner is deliberately *not* enough to retain a backdrop for:
+its backdrop is a few pixels of arc, not a field. Nor is a client that paints
+alpha into its own content, which cannot be known without reading every pixel
+of it. Both still composite correctly — they blend the layers below instead of
+copying a retained picture of them.
+
+How a retained backdrop is known to be still right:
 
 - **The rectangle, the radius, and the shape are recorded in the entry** and
-  compared on every lookup. A moved, resized, re-rounded, re-radiused, or
-  rescaled window fails that comparison and is blurred again, so the check
-  holds even if the compositor forgot to say anything had changed. The
-  rectangle recorded is the window's whole one, not the part of it on screen: a
-  window pushed off an edge is frosted from the row and column the screen
-  begins at while its shape is still read from its own top-left, so two
-  positions that clip to the same on-screen rectangle are two different frosts.
+  consulted on every lookup, so the check holds even if the compositor forgot
+  to say anything had changed. A radius that differs keeps nothing: every pixel
+  is a different average. Geometry is the interesting case, and it is answered
+  by *how much* survives rather than yes or no (below). The rectangle recorded
+  is the window's whole one, not the part of it on screen: a window pushed off
+  an edge is frosted from the row and column the screen begins at while its
+  shape is still read from its own top-left, so two positions that clip to the
+  same on-screen rectangle weight the same pixels differently.
+- **A window that has moved, resized, or changed shape keeps everything the
+  change cannot reach.** Its backdrop did not move, so in *screen* coordinates
+  the retained pixels are still exactly what a fresh blur would write wherever
+  neither difference between the two positions applies: the blur replicates at
+  its rectangle's edges, so a pixel less than the radius inside either
+  position's on-screen rectangle averaged a different set of samples, and the
+  shape weights the mix at a window-local coordinate, so a pixel within a
+  corner's reach of either position's own rectangle was mixed at a different
+  coverage. Both are confined to a border, so the shared rectangle taken in by
+  the larger of the two reaches is copied and only that border is blurred
+  again. Dragging a frosted terminal was the interaction this cache was worst
+  at — every sample re-blurred the whole window *and* re-composed the entire
+  stack beneath it — and a three-pixel sample now blurs under a fifth of it. A
+  jump that leaves no shared core keeps nothing and blurs the whole rectangle,
+  so the fallback is the old cost and never a seam.
 - **The pixels beneath it cannot be self-checked** without reading the ones the
   copy was meant to save, so the entry is dropped when the compositor marks
   damage that could have changed them. Marking distinguishes three cases: a
@@ -449,13 +628,26 @@ How a retained frost is known to be still right:
   drops every frost it reaches; and a change no frost can read at all — the
   cursor overlay, composed after every window, and the screen reveal, applied
   only as a pixel is encoded for scan-out — drops none.
-- **Whether a frost may be reused is asked once per frame and remembered.** The
-  recompose plan and the composite that follows it both need the answer, and
+- **How much of a frost may be reused is asked once per frame and remembered.**
+  The recompose plan and the composite that follows it both need the answer, and
   two lookups could disagree — which would leave a window the plan did not
   widen for being blurred over a rectangle whose lower layers the frame never
   composed. That one lookup is also what the cache counts, so a reuse reads as
   a hit and refreshes the entry's recency: the frost every frame serves must
-  not be the first one a pressured cache gives back.
+  not be the first one a pressured cache gives back. A frost that survives only
+  in part is promoted like one that must be blurred outright, because its
+  border is blurred and a border blurred over a strip of damage would spread a
+  neighbourhood clipped to that strip.
+- **The layers a frost covers are not composed at all.** A frost is copied on
+  top of whatever is beneath it, so composing that stack first is work the copy
+  throws away — a whole window's worth of blending per pointer sample for a
+  dragged terminal. The frame composes the layers below only outside what the
+  frost will write over: nothing at all under a frost reused whole, and only the
+  ring the border blur reads under one reused in part. What is left is composed
+  as the disjoint rectangles it is, never as the box around them.
+- **A frost the frame recomputed any part of is captured whole**, so the next
+  frame compares against where the window is now rather than eroding the same
+  core until nothing is left of it.
 - **Recomputing one frost drops any frost above it that overlaps**, because a
   blur spreads the change far past the rectangle that caused it, so the window
   above reads different bytes even where the damage never reached.
@@ -479,7 +671,10 @@ mutations (content presents above, below and inside the frost, cursor motion, a
 fade, restacking, geometry, radius, corner, scale, theme and mode changes,
 overlapping frosts, a frost clipped by the screen edge, and window removal) and
 require the scan-out frame *and* the back buffer to be byte-identical after
-every one.
+every one. The partial reuse a moved window takes is held to the same bar from
+both ends: that sweep covers it, and `lib/raster` proves separately that
+frosting a border around a kept block is bit-for-bit the whole frost, over
+random blocks, radii and coverages.
 
 ## What one frame cost (`FrameStats`)
 
@@ -535,8 +730,8 @@ bar (`plans/GUI-CONTROLS-DESIGN.md` §6).
   `WindowFrame` and reserves a furniture band *around* the client from the
   frame's `FrameInsets` at the active `Scale` and `Theme`: the window's
   outer `bounds` grow to hold the decoration and the content surface is
-  presented inset at `window_client_rect`, so the client never overlaps the
-  furniture. That band is the border plus the title bar above and the **thin
+  presented inset at `window_client_rect`, so the client never receives frame
+  input. That band is the border plus the title bar above and the **thin
   frame rim** on the other three edges — the same for a resizable window as
   for a fixed one, because a band wide enough to grab would show as dead
   space around every app's content. A resizable window's extra grab room
@@ -560,10 +755,14 @@ bar (`plans/GUI-CONTROLS-DESIGN.md` §6).
   them (`Window::row` /
   `Window::sample_local`), for both the software and the
   hardware-accelerated present paths; a screen row needs at most two of
-  them, since a row is either in the title/bottom band or crosses the client
-  between the two side borders. The furniture is animation-free, so it is
-  reduced-motion correct by construction, and high contrast thickens the
-  command-glyph strokes.
+  them, since a row is either in the top/bottom strip or crosses the client
+  between the two side borders. Those two strips are as deep as the rim's
+  corner radius wherever the reserved band is thinner (above), so on a corner
+  row the frame draws the curve and the client is clipped out of it — which is
+  the only way furniture and client share a row, and it reaches no further in
+  than the radius. The furniture is animation-free, so it is reduced-motion
+  correct by construction, and high contrast thickens the command-glyph
+  strokes.
 - **Retention (bounded and reclaimable).** The strips are *derived* pixels,
   so the compositor holds them in one shared, pressure-governed
   `ReclaimCache` keyed by `WindowId` rather than each window pinning its own
@@ -657,7 +856,9 @@ bar (`plans/GUI-CONTROLS-DESIGN.md` §6).
   the window, marks its taskbar entry minimised, drops focus, and returns
   `WindowEvent::Minimized`; **PutToBack** restacks to the bottom of the
   z-order with no app-ward event; **SizeToggle** maximizes to the session work
-  area (screen minus the taskbar) or restores, returning `WindowEvent::Resized`
+  area (the screen minus the band the taskbar holds, which runs from that
+  screen edge to the bar's inner side and so includes the wallpaper margin the
+  bar floats above) or restores, returning `WindowEvent::Resized`
   with the new client size (nothing for a non-resizable window). These ride the
   existing window path, owner-validated by the engine; there is no ambient
   authority and no privileged force-quit button (`AGENTS.md` §4, §5.4).
@@ -851,22 +1052,43 @@ parent, which any app can open for any transient overlay
 - **Undecorated by construction, not by a flag.**
   `ShellWindowHost::popup_opened` opens it through
   `DesktopShell::open_popup_window`, which adds the window to the
-  compositor and raises it but never calls `decorate_window` and never
-  opens a taskbar entry — the same path the session's own trusted file
-  picker already takes. No protocol "undecorated" bit exists to be
+  compositor as its parent's transient but never calls `decorate_window`
+  and never opens a taskbar entry — the same path the session's own trusted
+  file picker already takes. No protocol "undecorated" bit exists to be
   forged.
-- **Stacked directly above its parent.** The compositor's z-order is one
-  flat stack, so the session re-asserts the coupling once per wake,
-  immediately before `present`
-  (`SessionWindows::keep_popups_stacked` → `raise(parent)` then
-  `raise(popup)`), exactly as the lock overlay keeps itself topmost.
-  Nothing raised earlier in that frame can land between a parent and its
-  popup, and the compositor gains no popup concept of its own.
+- **Stacked directly above its parent, by the restack itself.** A popup is
+  its parent's **transient**: `Compositor::add_transient_window` records
+  the link and inserts the popup directly above its owner (and any
+  transient already there), and every restack from then on moves the family
+  as a unit, owner immediately below — `raise` and `lower` alike, whichever
+  member is named. So nothing raised anywhere can land between a parent and
+  its popup, and no caller re-asserts the arrangement per frame. That
+  matters for more than tidiness: a re-assert *drops* the parent's retained
+  frosted backdrop, and re-deriving an arrangement that already held cost a
+  frosted, translucent terminal a full-window blur on every pointer sample
+  its open menu saw. A family already at the end it is being moved to is
+  left completely alone — no restack, no damage, not even an allocation.
+  Raising an unrelated window puts it in front of *both*, as a desktop
+  should: a window with a menu open is not pinned above its neighbours (nor
+  above the taskbar) for as long as the menu lives.
+- **A restack marks only where the family and the windows it crossed
+  overlap.** Reordering two windows that do not overlap changes no pixel —
+  nothing is drawn differently and no frost sees a different backdrop — so
+  the move damages nothing. This is what makes opening a menu cheap in the
+  arrangement that actually ships: the taskbar is a window above every
+  application window, so an app is essentially never frontmost, and the
+  raise that brings a family up crosses the bar. Marking the family's whole
+  footprint instead threw away the owner's frosted backdrop every time,
+  costing a 1000×700 translucent, blurred terminal a full-window blur
+  (`blur_px 700000`) to open a 220×180 menu on it; it now costs the menu
+  (`damaged_px 39600`, `blur_px 0`).
 - **Parent death takes the popup with it.** Closing the parent — over the
   channel, from the frame's close control, or by the owning client dying
   (`client_exited`) — tears down every popup keyed to it; a `Close` naming
   the popup's own id tears down only the popup. The session drops the
-  parent→popup link on either path, so no stale link can outlive a window.
+  parent→popup link on either path, and `Compositor::remove` clears the
+  transient link of anything the removed window owned, so no stale link can
+  outlive a window on either side.
 - **Presenting is unchanged.** `Present`, `SetBackdropBlur`, and `Close`
   act on a popup's id exactly as on a top-level id, and the popup's own
   events (pointer, key) arrive under its own window id with

@@ -1396,6 +1396,7 @@ You are not exempt from any rule above. In addition:
     | Icon artwork: the raster/vector/glyph asset tiers, the icon vocabulary, the content-type registry that picks an icon, build-time asset discovery, and the sandboxed decode cache every surface draws through | `plans/ICONS.md` |
     | Vector assets: the SVG decoder (`lib/svg`) — the path/shape grammar, curve flattening, strokes, transforms, the style cascade, gradients, its fixed input bounds, and its deliberate non-goals | `plans/SVG.md` |
     | Compositor window decorations: server-side window furniture (title bar, frame, controls, resize grabber) | `plans/COMPOSITOR-WORK.md` |
+    | Menus: who owns a menu's pixels and behaviour, the one-menu-at-a-time rule, the app's request/outcome contract | `plans/NEW-MENUS.md` |
     | Display / GPU acceleration: hardware layer compositing, the `AcceleratedDisplay`/`AccelLayer` ABI, virtio-gpu, HVS, zero-copy layers, damage, vsync flips | `plans/FIX-DISPLAY-ACCELERATION.md` |
     | Desktop redraw speed without hardware acceleration: compositor occlusion/opaque runs, per-control damage, the frosted-backdrop cache, present batching, frame pacing, and CPU-dispatched raster kernels | `plans/FIX-DESKTOP-SPEEDUP.md` |
     | Storage namespace: drives, volumes, aliases, paths, resource references | `docs/src/filesystem/drives.md` (binding spec); `plans/ALIAS.md`; `plans/DRIVES.md` |

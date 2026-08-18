@@ -34,7 +34,7 @@ use tairix_proglib::{
 };
 use tairix_reclaim::{CacheLedger, PressureBand, ReclaimCache, ReportedPressure};
 use tairix_taskbar::{
-    icon_cache, ActivateOutcome, IconEpoch, LibraryRow, PinView, TaskId, TaskbarConfig,
+    icon_cache, ActivateOutcome, Edge, IconEpoch, LibraryRow, PinView, TaskId, TaskbarConfig,
     TaskbarRenderer, TaskbarRepaint, TaskbarResponse,
 };
 use tairix_taskpins::PinTarget;
@@ -2033,18 +2033,25 @@ fn motion_is_ignored_and_repaints_only_when_the_hover_changes() {
         "a motion that crosses no control repaints no part of the bar"
     );
 
-    // Motion onto the library button. The bar is itself a compositor
-    // window, so the window manager reports the motion over it; nothing is
-    // forwarded, because no application owns the bar.
+    // Motion onto the library button, asked of the layout rather than
+    // spelled out: the bar floats clear of the screen edge, so its buttons
+    // are nowhere a screen coordinate can name. The bar is itself a
+    // compositor window, so the window manager reports the motion over it;
+    // nothing is forwarded, because no application owns the bar.
+    let onto = centre(shell.session().taskbar().layout(Scale::ONE).library);
     let outcomes = shell
-        .pump(&mut MemoryInput::new(&[moved(24, 1060)]), &mut comp, 0)
+        .pump(
+            &mut MemoryInput::new(&[moved(onto.x, onto.y)]),
+            &mut comp,
+            0,
+        )
         .expect("source does not fault");
     assert_eq!(
         outcomes,
         [ShellOutcome::WindowManager(
             InputResponse::ClientPointerMoved {
                 window: bar,
-                local: Point::new(24, 20),
+                local: Point::new(onto.x - bar_rect.left(), onto.y - bar_rect.top()),
             }
         )]
     );
@@ -7065,8 +7072,10 @@ fn a_desktop_with_no_artwork_at_all_still_draws_every_icon_from_its_glyphs() {
 
 use crate::desktop::Desktop;
 use crate::pinboard::PinboardMenu;
+use tairix_browse::GridView;
 use tairix_wallpaper::{Backdrop, PinboardSettings, Rgb};
 use tairix_window::WindowHost;
+use tairix_wm::{Region, Window};
 
 /// The row stride, in bytes, of the [`headless_desktop`] frame.
 const FRAME_STRIDE: usize = 640 * 4;
@@ -7080,6 +7089,23 @@ fn pinboard_desktop() -> Desktop<TreeSource> {
     desktop.relist(0);
     desktop
 }
+
+/// The centre of the icon at `index`, in screen coordinates.
+fn centre_of(layout: &GridView, index: usize) -> Point {
+    let cell = layout.cell_rect(0, index).expect("a shown icon");
+    Point::new(
+        cell.left() + i32::try_from(cell.width / 2).unwrap_or(0),
+        cell.top() + i32::try_from(cell.height / 2).unwrap_or(0),
+    )
+}
+
+/// A point on the backdrop that no icon reaches: inside the margin the icon
+/// column is inset by.
+const EMPTY_BACKDROP: Point = Point::new(2, 2);
+
+/// One desktop gesture, reporting the cells it changed into a damage sink.
+/// The lifetime is spelled because each gesture borrows the layout it acts on.
+type Gesture<'a> = dyn Fn(&mut Desktop<TreeSource>, &mut Region) + 'a;
 
 /// `desktop` with its backdrop set to the flat colour `rgb`.
 fn with_backdrop(desktop: &mut Desktop<TreeSource>, rgb: Rgb) {
@@ -7183,6 +7209,197 @@ fn the_desktop_layer_paints_the_wallpaper_when_one_is_set() {
     );
 }
 
+/// A wallpaper that does not cover the screen — a centred or letterboxed
+/// picture, delivered as a screen-sized surface with transparent margins —
+/// shows the backdrop colour the settings name in the margins it leaves.
+///
+/// The layer is painted into the same buffer every frame, so a margin that
+/// took no paint would keep whatever the previous frame drew there: an icon
+/// that has since moved, or nothing at all.
+#[test]
+fn a_wallpaper_that_does_not_cover_the_screen_shows_the_backdrop_in_its_margins() {
+    let (mut shell, mut comp) = headless_desktop();
+    let mut desktop = pinboard_desktop();
+    with_backdrop(&mut desktop, Rgb::new(10, 20, 30));
+
+    // The sandbox draws an under-sized placement into a screen-sized canvas
+    // and leaves every pixel outside it fully transparent.
+    let mut paper = Surface::new(640, 480).expect("a screen-sized wallpaper");
+    paper.fill_rect(220, 140, 200, 200, Color::rgb(200, 100, 50));
+    shell.set_wallpaper(Some(paper));
+    shell.present_desktop(&mut comp, &desktop);
+    comp.composite();
+
+    let inside = frame_pixel(&comp, 300, 200);
+    assert!(
+        inside.contains(&200) && inside.contains(&100) && inside.contains(&50),
+        "the picture itself is drawn, got {inside:?}"
+    );
+    let (x, y) = CLEAR_OF_EVERYTHING;
+    let margin = frame_pixel(&comp, x, y);
+    assert_eq!(margin[3], 255, "the layer is opaque everywhere");
+    assert!(
+        margin.contains(&10) && margin.contains(&20) && margin.contains(&30),
+        "the margin shows the chosen backdrop, not the root fill, got {margin:?}"
+    );
+}
+
+/// A window over the desktop, translucent and backdrop-blurred: a terminal on
+/// frosted glass, which is what makes a needless desktop repaint expensive.
+fn frosted_window(shell: &mut DesktopShell, comp: &mut Compositor) -> WindowId {
+    let window = shell
+        .open_window(comp, Point::new(200, 60), app_surface(), "Terminal")
+        .expect("opens");
+    assert!(comp.set_opacity(window, 128));
+    assert!(comp.set_backdrop_blur(window, 8));
+    window
+}
+
+/// Clicking between a window and the wallpaper moves the keyboard, which
+/// moves the desktop's Focus Ring — one icon's worth of pixels.
+///
+/// It must cost that. The desktop is the bottom layer, so repainting it whole
+/// marks the whole screen: every window above it recomposites and every
+/// frosted backdrop over it is thrown away and blurred again. On a 1080p
+/// screen that is most of a megapixel of blur per click, which is felt as the
+/// pointer freezing.
+#[test]
+fn moving_focus_between_a_window_and_the_desktop_repaints_one_icon() {
+    let (mut shell, mut comp) = headless_desktop();
+    let mut desktop = pinboard_desktop();
+    with_backdrop(&mut desktop, Rgb::new(10, 20, 30));
+    let window = frosted_window(&mut shell, &mut comp);
+    shell.present_desktop(&mut comp, &desktop);
+    let layout = shell.desktop_layout(&comp, &desktop);
+    let cell = layout.cell_rect(0, 1).expect("a shown icon");
+
+    // An icon is selected and the desktop holds the keyboard, exactly as it
+    // does before the user clicks into the terminal.
+    let mut damage = Region::new();
+    desktop.press(centre_of(&layout, 1), &layout, 0, &[], &mut damage);
+    shell.present_desktop_area(&mut comp, &desktop, &damage);
+    comp.composite();
+    assert!(!comp.has_damage(), "the opening frames have been drained");
+    assert_eq!(desktop.selected(), Some(1));
+
+    // The click into the terminal: the window takes the keyboard, so the ring
+    // leaves the selected icon.
+    damage.clear();
+    desktop.set_focused(false, &layout, &mut damage);
+    assert_eq!(damage.rects(), [cell], "the ring's own cell, nothing more");
+    shell.present_desktop_area(&mut comp, &desktop, &damage);
+    let composed = comp.composite();
+    assert_eq!(composed.rects(), [cell], "the frame recomposed one cell");
+    assert_eq!(
+        comp.frame_stats().blur_px,
+        0,
+        "the window's frosted backdrop was kept, not blurred again"
+    );
+    assert!(
+        comp.frame_stats().damaged_px < 640 * 480 / 10,
+        "a focus click must not cost a screen, got {}",
+        comp.frame_stats().damaged_px
+    );
+
+    // And the click back onto the wallpaper, which brings the ring back.
+    damage.clear();
+    desktop.set_focused(true, &layout, &mut damage);
+    assert_eq!(damage.rects(), [cell]);
+    shell.present_desktop_area(&mut comp, &desktop, &damage);
+    comp.composite();
+    assert_eq!(comp.frame_stats().blur_px, 0, "still no re-blur");
+
+    // With nothing selected there is no ring to move, so the same click
+    // changes no pixel at all and asks for no frame.
+    damage.clear();
+    desktop.press(EMPTY_BACKDROP, &layout, 1, &[], &mut damage);
+    shell.present_desktop_area(&mut comp, &desktop, &damage);
+    comp.composite();
+    assert_eq!(desktop.selected(), None);
+    damage.clear();
+    desktop.set_focused(false, &layout, &mut damage);
+    assert!(damage.is_empty(), "no selection, no ring, no repaint");
+    shell.present_desktop_area(&mut comp, &desktop, &damage);
+    assert!(!comp.has_damage(), "and no frame to compose");
+    assert_eq!(comp.window(window).map(Window::opacity), Some(128));
+}
+
+/// Repainting part of the desktop layer must produce the very pixels a whole
+/// repaint would have: the same backdrop, the same wallpaper over it, and the
+/// same icons over that.
+///
+/// Two identical screens are driven through the same gestures, one presenting
+/// the cells the model reported and the other presenting the whole layer, and
+/// their scan-out is compared byte for byte — so a partial paint that forgot
+/// the wallpaper, mis-clipped a tile, or left a stale highlight behind cannot
+/// pass as the cheaper path.
+#[test]
+fn a_partial_desktop_repaint_draws_what_a_whole_one_would() {
+    let mut cheap = headless_desktop();
+    let mut whole = headless_desktop();
+    // Striped on both axes, at periods no cell origin is a multiple of: the
+    // partial paint draws the wallpaper at its true screen position and
+    // writes only inside the cell, so a picture shifted by even a few pixels
+    // would show here where a flat one could not.
+    let mut paper = Surface::new(640, 480).expect("a screen-sized wallpaper");
+    for row in 0..480 / 8 {
+        let shade = u8::try_from(row * 3 % 200).unwrap_or(0);
+        paper.fill_rect(0, row * 8, 640, 4, Color::rgb(shade, 100, 200 - shade));
+    }
+    for column in 0..640 / 16 {
+        let shade = u8::try_from(column * 5 % 200).unwrap_or(0);
+        paper.fill_rect(column * 16, 0, 8, 480, Color::rgb(40, shade, 120));
+    }
+    for (shell, comp) in [&mut cheap, &mut whole] {
+        shell.set_wallpaper(Some(paper.clone()));
+        frosted_window(shell, comp);
+    }
+    let mut desktops = [pinboard_desktop(), pinboard_desktop()];
+    for desktop in &mut desktops {
+        with_backdrop(desktop, Rgb::new(10, 20, 30));
+    }
+    let layout = cheap.0.desktop_layout(&cheap.1, &desktops[0]);
+
+    // Every gesture the pointer and keyboard produce over the icon column,
+    // each of which reports its own cells.
+    let first = centre_of(&layout, 0);
+    let second = centre_of(&layout, 1);
+    let gestures: [&Gesture<'_>; 6] = [
+        &|d, dmg| {
+            d.pointer_moved(first, &layout, 0, dmg);
+        },
+        &|d, dmg| {
+            d.pointer_moved(second, &layout, 1, dmg);
+        },
+        &|d, dmg| {
+            d.press(second, &layout, 2, &[], dmg);
+        },
+        &|d, dmg| d.set_focused(false, &layout, dmg),
+        &|d, dmg| d.set_focused(true, &layout, dmg),
+        &|d, dmg| {
+            d.pointer_left(&layout, dmg);
+        },
+    ];
+    for (step, gesture) in gestures.iter().enumerate() {
+        let mut damage = Region::new();
+        gesture(&mut desktops[0], &mut damage);
+        cheap
+            .0
+            .present_desktop_area(&mut cheap.1, &desktops[0], &damage);
+        cheap.1.composite();
+
+        gesture(&mut desktops[1], &mut Region::new());
+        whole.0.present_desktop(&mut whole.1, &desktops[1]);
+        whole.1.composite();
+
+        assert_eq!(
+            cheap.1.frame(),
+            whole.1.frame(),
+            "the cheap path drew a different screen at step {step}"
+        );
+    }
+}
+
 #[test]
 fn the_pinboard_menu_is_shown_as_its_own_window_and_taken_down_when_it_closes() {
     let (mut shell, mut comp) = headless_desktop();
@@ -7239,6 +7456,189 @@ fn the_pinboard_menu_is_shown_as_its_own_window_and_taken_down_when_it_closes() 
         "closing the menu takes its window down"
     );
     assert_eq!(comp.window_count(), before);
+}
+
+/// The backdrop blur `window` asks the compositor for.
+fn blur_of(comp: &Compositor, window: Option<WindowId>, what: &str) -> u16 {
+    let id = window.unwrap_or_else(|| panic!("{what} is on screen"));
+    comp.window(id)
+        .expect("a placed window is live")
+        .blur_radius()
+}
+
+/// The blur the active theme asks for behind its floating chrome.
+fn chrome_blur(shell: &DesktopShell) -> u16 {
+    let radius = shell
+        .session()
+        .active_theme()
+        .metrics()
+        .chrome_backdrop_blur;
+    let blur = u16::try_from(radius).expect("a desktop length fits");
+    assert!(blur > 0, "the theme asks for no frosting at all");
+    blur
+}
+
+/// Every surface the taskbar puts on screen is floating chrome: it is drawn
+/// on the theme's translucent fill, which reads as frosted glass only if the
+/// compositor blurs what is behind it, so each asks for that as it is placed.
+#[test]
+fn the_bar_and_its_library_popup_frost_what_is_behind_them() {
+    let mut shell = shell();
+    let mut comp = compositor();
+    shell.present(&mut comp);
+    let blur = chrome_blur(&shell);
+    assert_eq!(
+        blur_of(&comp, shell.presenter().bar_window(), "the bar"),
+        blur
+    );
+
+    shell
+        .session_mut()
+        .taskbar_mut()
+        .library_mut()
+        .set_catalog(office_and_games());
+    let library = centre(shell.session().taskbar().layout(Scale::ONE).library);
+    shell.handle(moved(library.x, library.y), &mut comp, 0);
+    shell.handle(PRIMARY_PRESS, &mut comp, 0);
+    assert_eq!(
+        blur_of(&comp, shell.presenter().popup_window(), "the library popup"),
+        blur
+    );
+}
+
+/// The bar's other three surfaces are the same chrome. Each is opened the
+/// way the desktop opens it, on its own shell: the ones that are modal would
+/// otherwise swallow the input that raises the next.
+#[test]
+fn the_bars_menu_popover_and_readout_frost_what_is_behind_them() {
+    let mut menued = shell();
+    let mut comp = compositor();
+    let blur = chrome_blur(&menued);
+    menued.set_pins(&mut comp, vec![PinView::new("Files", IconKind::AppBundle)]);
+    let pin = pin_slot_point(&menued, 0);
+    menued.handle(moved(pin.x, pin.y), &mut comp, 0);
+    menued.handle(SECONDARY_PRESS, &mut comp, 0);
+    assert_eq!(
+        blur_of(&comp, menued.presenter().menu_window(), "the context menu"),
+        blur
+    );
+
+    let mut hovered = shell();
+    let mut comp = compositor();
+    hovered.present(&mut comp);
+    let capsule = capsule_point(&hovered);
+    hovered.handle(moved(capsule.x, capsule.y), &mut comp, 0);
+    assert_eq!(
+        blur_of(&comp, hovered.presenter().readout_window(), "the readout"),
+        blur
+    );
+
+    let mut notified = shell();
+    let mut comp = compositor();
+    notified.apply_notify(
+        &mut comp,
+        42,
+        NotifyRequest::Raise {
+            key: 1,
+            severity: NotifySeverity::Warning,
+            title: NotifyTitle::new("Battery low").expect("title"),
+            body: NotifyBody::new("12% remaining").expect("body"),
+        },
+    );
+    assert_eq!(
+        blur_of(
+            &comp,
+            notified.presenter().notifications_window(),
+            "the notification popover"
+        ),
+        blur
+    );
+}
+
+/// The desktop's own backdrop menu is not the bar's chrome: it covers what it
+/// opens over, so nothing behind it is blurred for it.
+#[test]
+fn the_backdrops_own_menu_frosts_nothing() {
+    let (mut shell, mut comp) = headless_desktop();
+    let mut menu = PinboardMenu::new();
+    menu.open(Point::new(100, 100), true, &PinboardSettings::default());
+    shell.present_pinboard_menu(&mut comp, &menu);
+    let id = shell.pinboard_window().expect("an open menu is placed");
+    assert_eq!(
+        comp.window(id).expect("live").blur_radius(),
+        0,
+        "an opaque menu paid for a blur nothing shows through"
+    );
+}
+
+/// The bar stands clear of the screen edges it faces, and the band it
+/// reserves runs from its own edge to its inner side. A maximized window
+/// therefore never covers the bar, and never claims the wallpaper gap behind
+/// it either — that gap can only be reached through the bar.
+#[test]
+fn a_floating_bar_reserves_the_whole_band_from_its_screen_edge() {
+    for edge in [Edge::Top, Edge::Bottom, Edge::Left, Edge::Right] {
+        let shell = shell_for(TaskbarConfig {
+            edge,
+            ..TaskbarConfig::bottom_bar(1920, 1080)
+        });
+        let comp = compositor();
+        let screen = comp.screen_rect();
+        let bar = shell.session().taskbar().layout(comp.scale()).bar;
+        let area = shell.work_area(&comp);
+
+        let gap = match edge {
+            Edge::Top => bar.top() - screen.top(),
+            Edge::Bottom => screen.bottom() - bar.bottom(),
+            Edge::Left => bar.left() - screen.left(),
+            Edge::Right => screen.right() - bar.right(),
+        };
+        assert!(
+            gap > 0,
+            "{edge:?}: the bar hugs its screen edge, so nothing below tests a gap"
+        );
+
+        // Toward the screen edge from the bar is the wallpaper gap; away from
+        // it is the first row or column a window may have.
+        let (in_gap, in_bar, past_bar) = match edge {
+            Edge::Top => (
+                Point::new(bar.left(), screen.top()),
+                Point::new(bar.left(), bar.top()),
+                Point::new(bar.left(), bar.bottom()),
+            ),
+            Edge::Bottom => (
+                Point::new(bar.left(), screen.bottom() - 1),
+                Point::new(bar.left(), bar.bottom() - 1),
+                Point::new(bar.left(), bar.top() - 1),
+            ),
+            Edge::Left => (
+                Point::new(screen.left(), bar.top()),
+                Point::new(bar.left(), bar.top()),
+                Point::new(bar.right(), bar.top()),
+            ),
+            Edge::Right => (
+                Point::new(screen.right() - 1, bar.top()),
+                Point::new(bar.right() - 1, bar.top()),
+                Point::new(bar.left() - 1, bar.top()),
+            ),
+        };
+        assert!(
+            !area.contains(in_gap),
+            "{edge:?}: the wallpaper gap {in_gap:?} was handed to a window ({area:?})"
+        );
+        assert!(
+            !area.contains(in_bar),
+            "{edge:?}: a maximized window would cover the bar ({area:?} over {bar:?})"
+        );
+        assert!(
+            area.contains(past_bar),
+            "{edge:?}: the row past the bar {past_bar:?} is usable ({area:?})"
+        );
+        assert!(
+            area.width <= screen.width && area.height <= screen.height,
+            "{edge:?}: the work area left the screen"
+        );
+    }
 }
 
 /// Every session-owned surface reads the compositor's density rather than
@@ -7559,8 +7959,11 @@ fn closing_a_popup_leaves_its_parent_and_its_task_alone() {
     assert!(shell.session().taskbar().tasks().is_empty());
 }
 
+/// A popup is opened as its parent's transient, so the window manager keeps
+/// the pair together by itself. The session re-asserts nothing per frame: it
+/// is the restack that holds the arrangement, wherever the raise comes from.
 #[test]
-fn keep_popups_stacked_reglues_a_popup_onto_its_parent() {
+fn a_popup_is_glued_above_its_parent_by_every_restack() {
     let mut shell = shell();
     let mut comp = compositor();
     let mut windows = SessionWindows::new();
@@ -7568,57 +7971,87 @@ fn keep_popups_stacked_reglues_a_popup_onto_its_parent() {
         open_parent_and_popup(&mut shell, &mut comp, &mut windows, (10, 20), (200, 160));
     let bounds = comp.window(popup).expect("popup is live").bounds();
     let over_popup = Point::new(bounds.left() + 1, bounds.top() + 1);
+    let client = comp.window_client_rect(parent).expect("parent client");
 
-    // A third window opened over the pair covers the popup: the parent is
-    // no longer at the top and the popup is buried with it.
+    // A third window opened over the pair is simply in front of both: the
+    // popup is buried *with* its parent, never separated from it.
     let intruder = shell
         .open_window(&mut comp, bounds.origin, app_surface(), "Intruder")
         .expect("opens");
     assert_eq!(comp.window_at(over_popup), Some(intruder));
 
-    windows.keep_popups_stacked(&mut comp);
-
+    // Raising the parent — a click on the terminal, the taskbar activating
+    // its task — brings its popup back with it, still directly above it.
+    assert!(comp.raise(parent));
     assert_eq!(
         comp.window_at(over_popup),
         Some(popup),
-        "the pair is raised as a unit, popup on top"
+        "the pair rose as a unit, popup on top"
     );
     // Directly above: a point the parent covers but the popup does not is
     // the parent's, so nothing landed between them.
-    let client = comp.window_client_rect(parent).expect("parent client");
+    assert_eq!(comp.window_at(client.origin), Some(parent));
+
+    // And the intruder raised again takes the front from both of them
+    // without ever slipping between them.
+    assert!(comp.raise(intruder));
+    assert_eq!(comp.window_at(over_popup), Some(intruder));
+    assert!(comp.raise(popup), "a raise of the popup arranges the pair");
+    assert_eq!(comp.window_at(over_popup), Some(popup));
     assert_eq!(comp.window_at(client.origin), Some(parent));
 }
 
+/// Hovering an open menu is the frame the desktop draws most often: the app
+/// repaints its popup, and *nothing else about the screen changes*. With a
+/// translucent, backdrop-blurred parent — a terminal set to frosted glass —
+/// that frame must cost the popup's rectangle and no more, or every pointer
+/// sample re-blurs a whole window.
 #[test]
-fn keep_popups_stacked_is_idle_with_no_popup_open() {
+fn hovering_an_open_popup_repaints_only_the_popup() {
     let mut shell = shell();
     let mut comp = compositor();
     let mut windows = SessionWindows::new();
+    let (parent, popup) =
+        open_parent_and_popup(&mut shell, &mut comp, &mut windows, (10, 20), (200, 160));
+    assert!(comp.set_opacity(parent, 128));
+    assert!(comp.set_backdrop_blur(parent, 8));
+    comp.composite();
+    assert!(!comp.has_damage(), "the opening frame has been drained");
+
+    // The app redraws its menu row and presents it; the session serves that
+    // present exactly as the serve loop does.
+    let popup_bounds = comp.window(popup).expect("popup is live").bounds();
+    let content = comp
+        .window_client_rect(popup)
+        .expect("the popup has a client");
     with_window_host(&mut shell, &mut comp, &mut windows, |host| {
         assert_eq!(
-            host.window_opened(
-                window_owner(1),
-                1,
-                &served_mode(320, 240),
-                "Terminal",
-                resizable_sizing(),
+            host.window_presented(
+                2,
+                &served_mode(popup_bounds.width, popup_bounds.height),
+                &vec![0x40; (popup_bounds.width * popup_bounds.height * 4) as usize],
+                DamageRect {
+                    x: 0,
+                    y: 0,
+                    width_px: popup_bounds.width,
+                    height_px: popup_bounds.height,
+                },
             ),
             Ok(())
         );
     });
-    let parent = windows.wm_id(1).expect("live");
-    let intruder = shell
-        .open_window(&mut comp, Point::new(0, 0), app_surface(), "Intruder")
-        .expect("opens");
 
-    windows.keep_popups_stacked(&mut comp);
-
+    let damage = comp.composite();
     assert_eq!(
-        comp.window_at(Point::new(1, 1)),
-        Some(intruder),
-        "with no popup open the stack is left exactly as it was"
+        damage.rects(),
+        &[content],
+        "the hover repainted more than the popup itself"
     );
-    assert!(comp.window(parent).is_some());
+    assert_eq!(
+        comp.frame_stats().blur_px,
+        0,
+        "the parent's frosted backdrop was thrown away and blurred again"
+    );
 }
 
 // ---- the desktop's reveal from black ----
@@ -7697,7 +8130,7 @@ impl Display for RefusingDisplay {
         Err(DriverError::Busy)
     }
 
-    fn present_region(&mut self, _frame: &[u8], _damage: DamageRect) -> Result<(), DriverError> {
+    fn present_rects(&mut self, _frame: &[u8], _damage: &[DamageRect]) -> Result<(), DriverError> {
         self.refusals += 1;
         Err(DriverError::Busy)
     }
@@ -8506,5 +8939,109 @@ fn a_second_window_of_the_same_application_reuses_the_resolved_icon() {
         (1, 0),
         "which the one shared cache served for both slots without a second \
          artwork fetch or decode: only the bundle's own manifest is re-read"
+    );
+}
+
+/// The reported stall, through the real window host: right-clicking a frosted,
+/// translucent terminal and dismissing the menu must not re-blur the window.
+///
+/// The hand-built compositor scenes prove the restack rule; this proves the
+/// *session's* own sequence obeys it — a popup opened above a window that sits
+/// under the taskbar, painted, closed, and the owner refocused.
+#[test]
+fn a_popup_over_a_frosted_window_never_reblurs_it() {
+    let mut shell = shell();
+    let mut comp = compositor();
+    let mut windows = SessionWindows::new();
+
+    comp.set_desktop(
+        Surface::filled(1920, 1080, Color::rgb(40, 60, 90).premultiply()).expect("desktop"),
+    );
+    // The bar window exists before any app window, as in a live session.
+    shell.present(&mut comp);
+    with_window_host(&mut shell, &mut comp, &mut windows, |host| {
+        assert_eq!(
+            host.window_opened(
+                window_owner(1),
+                1,
+                &served_mode(1000, 700),
+                "Terminal",
+                resizable_sizing(),
+            ),
+            Ok(())
+        );
+    });
+    let parent = windows.wm_id(1).expect("parent live");
+    assert!(comp.set_opacity(parent, 128));
+    assert!(comp.set_backdrop_blur(parent, 12));
+    // Compose until nothing is dirty, so the backdrop is retained.
+    for _ in 0..4 {
+        comp.composite();
+    }
+    // The bar is frosted too, so the count is the session's, not a constant;
+    // what matters is that none of the gestures below drops one.
+    let retained = comp.frost_cache_len();
+    assert!(retained >= 1, "the window retained no backdrop");
+    let window_px = 1000 * 700;
+
+    // The right-click: the app opens its menu as a popup.
+    with_window_host(&mut shell, &mut comp, &mut windows, |host| {
+        assert_eq!(
+            host.popup_opened(2, 1, 100, 100, &served_mode(220, 180)),
+            Ok(())
+        );
+    });
+    comp.composite();
+    let opened = comp.frame_stats();
+    assert_eq!(opened.blur_px, 0, "opening the menu re-blurred the window");
+    assert!(
+        opened.damaged_px < window_px / 8,
+        "opening the menu repainted most of the window: {opened:?}"
+    );
+    assert_eq!(
+        comp.frost_cache_len(),
+        retained,
+        "a backdrop was thrown away"
+    );
+
+    // The app paints the menu into its popup.
+    let frame = vec![0xffu8; 220 * 180 * 4];
+    with_window_host(&mut shell, &mut comp, &mut windows, |host| {
+        assert_eq!(
+            host.window_presented(
+                2,
+                &served_mode(220, 180),
+                &frame,
+                DamageRect::full(&served_mode(220, 180))
+            ),
+            Ok(())
+        );
+    });
+    comp.composite();
+    let painted = comp.frame_stats();
+    assert_eq!(
+        painted.blur_px, 0,
+        "painting the menu re-blurred the window"
+    );
+    assert_eq!(painted.damaged_px, 220 * 180, "{painted:?}");
+
+    // The dismissing click: the popup goes and the terminal takes focus back.
+    let popup = windows.wm_id(2).expect("popup live");
+    assert!(shell.close_popup_window(&mut comp, popup));
+    assert!(comp.set_active_frame(parent, true));
+    comp.composite();
+    let closed = comp.frame_stats();
+    assert_eq!(
+        closed.blur_px, 0,
+        "dismissing the menu re-blurred the window"
+    );
+    assert!(
+        closed.damaged_px < window_px / 8,
+        "dismissing the menu repainted most of the window: {closed:?}"
+    );
+    assert_eq!(
+        comp.frost_cache_len(),
+        retained,
+        "a backdrop was thrown away"
     );
 }

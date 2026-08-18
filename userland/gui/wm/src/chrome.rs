@@ -17,6 +17,12 @@
 //! client area, so a tall or wide window's decoration does not grow past
 //! what its border thickness needs.
 //!
+//! The top and bottom strips are as deep as the rim's corner radius wherever
+//! the reserved inset is thinner than it, because a corner arc must be drawn as
+//! furniture over the whole width of its rows or the client's square row would
+//! be the only pixels there. The window decides those depths; the strips here
+//! are simply cut to the rectangles it gives.
+//!
 //! # Retained by the compositor, not by the window
 //!
 //! The strips are *derived* pixels: losing them costs a re-render and never
@@ -205,8 +211,9 @@ impl WindowChrome {
     }
 
     /// Row `local_y` of the left border strip — `local_y` counted from the
-    /// client's own top edge — spanning the left inset width, or empty when
-    /// there is no left border or the row is out of range.
+    /// strip's own top edge, i.e. from the bottom of the top band — spanning
+    /// the left inset width, or empty when there is no left border or the row
+    /// is out of range.
     pub(crate) fn left_row(&self, local_y: u32) -> &[Pixel] {
         self.left
             .as_ref()
@@ -214,8 +221,9 @@ impl WindowChrome {
     }
 
     /// Row `local_y` of the right border strip — `local_y` counted from the
-    /// client's own top edge — spanning the right inset width, or empty when
-    /// there is no right border or the row is out of range.
+    /// strip's own top edge, i.e. from the bottom of the top band — spanning
+    /// the right inset width, or empty when there is no right border or the row
+    /// is out of range.
     pub(crate) fn right_row(&self, local_y: u32) -> &[Pixel] {
         self.right
             .as_ref()
