@@ -124,6 +124,14 @@ One document, one engine, one writer.
   (§5). A wallpaper that will not decode falls back to the backdrop colour,
   reports why on `stderr`, and is remembered as refused so a bad file costs
   one attempt, not one per frame.
+- **The read is a streamed whole-file read, not a per-kilobyte one.** Both the
+  session and the chooser stage a wallpaper through `tairix_rt`'s one
+  whole-file policy (`read_fd_to_end`, 64 KiB per `fs_read`), so a multi-
+  megabyte master costs on the order of a hundred syscalls rather than
+  thousands. This is the load path's dominant cost on real storage, not the
+  decode: a 3840×2160 JPEG decodes in tens of milliseconds, while reading it a
+  kilobyte at a time cost one trap per kilobyte and, behind an SD or USB
+  volume, seconds. Neither side may keep a chunk size of its own.
 - **Prepared once, per (path, fit, screen).** The sandbox returns the image
   already placed at exactly the screen size; the session holds that one
   prepared surface and blits it as the desktop layer's base. It is

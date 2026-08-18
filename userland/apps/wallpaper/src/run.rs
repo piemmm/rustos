@@ -45,11 +45,10 @@ mod program {
     extern crate alloc;
 
     use alloc::string::String;
-    use alloc::vec;
     use alloc::vec::Vec;
 
     use tairix_abi::driver::display::{DamageRect, DisplayFormat, DisplayMode};
-    use tairix_abi::fs::{OpenFlags, FS_IO_MAX};
+    use tairix_abi::fs::OpenFlags;
     use tairix_abi::input::KeyInput;
     use tairix_abi::pinboard_ipc::{PinboardDocument, PinboardRequest, PINBOARD_ENDPOINT};
     use tairix_abi::reply::{decode_status_reply, STATUS_REPLY_LEN};
@@ -111,12 +110,6 @@ mod program {
 
     /// The window title the desktop lists this app under.
     const TITLE: &str = "Wallpaper";
-
-    /// Bytes of one `fs_read` while streaming a file, bounded by the
-    /// filesystem's own per-call maximum. A wallpaper master is megabytes,
-    /// so a whole-page read keeps the syscall count proportionate rather
-    /// than paying one call per kilobyte.
-    const READ_CHUNK: usize = 64 * 1024;
 
     /// Recover the [`Errno`] a syscall encoded as a negative register
     /// (`-ret`); an unrecognised code fails closed as
@@ -223,18 +216,15 @@ mod program {
 
     /// The bounded read itself; [`read_bounded`] owns closing the
     /// descriptor so every exit from here releases it.
+    ///
+    /// The streaming is the runtime's one whole-file policy, so the chooser
+    /// and the desktop session cannot drift to different chunk sizes for the
+    /// same wallpaper master. It answers one chunk past `max`, which is what
+    /// lets an oversize file be *refused* here rather than silently truncated
+    /// into a decode that would fail with no reason a user can act on.
     fn read_open_fd(fd: u32, max: usize) -> Option<Vec<u8>> {
-        let mut content = Vec::new();
-        let mut chunk = vec![0u8; READ_CHUNK.min(FS_IO_MAX)];
-        while content.len() < max {
-            let want = chunk.len().min(max - content.len());
-            let got = tairix_rt::fs_read(fd, content.len() as u64, &mut chunk[..want]).ok()?;
-            if got == 0 {
-                break;
-            }
-            content.extend_from_slice(&chunk[..got]);
-        }
-        Some(content)
+        let content = tairix_rt::read_fd_to_end(fd, max).ok()?;
+        (content.len() <= max).then_some(content)
     }
 
     /// The pinboard settings in effect for the launching user, so the
@@ -359,7 +349,12 @@ mod program {
                 return None;
             }
         };
-        let bytes = read_bounded(fd, MAX_WALLPAPER_BYTES)?;
+        let Some(bytes) = read_bounded(fd, MAX_WALLPAPER_BYTES) else {
+            report(&alloc::format!(
+                "{spelled}: unreadable, or larger than {MAX_WALLPAPER_BYTES} bytes; not shown"
+            ));
+            return None;
+        };
         match render_wallpaper_for_screen(sandbox, screen, width, height, fit, &bytes) {
             Ok(rgba) => Surface::from_rgba8(width, height, &rgba),
             Err(failure) => {

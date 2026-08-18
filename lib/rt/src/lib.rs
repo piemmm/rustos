@@ -4652,6 +4652,50 @@ pub fn read_dir_all(path: &[u8]) -> Result<alloc::vec::Vec<u8>, i64> {
     })
 }
 
+/// Bytes of one `fs_read` while streaming a whole file.
+///
+/// A whole-file consumer reads documents of megabytes — a wallpaper master, a
+/// program catalog — so the staging buffer is sized to keep the syscall count
+/// proportionate to the file. Reading such a document a kilobyte at a time
+/// costs thousands of traps and, on real storage, seconds; sixty-four kibibytes
+/// is a hundredfold fewer while staying well inside the kernel's own
+/// per-transfer cap ([`tairix_abi::fs::FS_IO_MAX`]).
+const FILE_STREAM_CHUNK: usize = 64 * 1024;
+
+// One staging buffer must be transferable by one syscall, and non-empty, or
+// the read below could not make progress. Held at compile time so the read
+// itself needs no runtime clamp.
+const _: () = assert!(FILE_STREAM_CHUNK > 0 && FILE_STREAM_CHUNK <= tairix_abi::fs::FS_IO_MAX);
+
+/// Read the open descriptor `fd` from its start until end-of-file, stopping one
+/// chunk past `cap`.
+///
+/// The one whole-file streaming policy every consumer shares, so no caller
+/// re-derives the chunk size and none can quietly pick a slower one. Answering
+/// *past* the cap rather than truncating at it is what lets a caller tell an
+/// oversize document from one that exactly fits: a length above `cap` is the
+/// whole-document refusal to state, never a silently shortened answer the
+/// caller would go on to parse.
+///
+/// # Errors
+///
+/// The raw negative kernel result (`-errno`) of the failing `fs_read`.
+pub fn read_fd_to_end(fd: u32, cap: usize) -> Result<alloc::vec::Vec<u8>, i64> {
+    let mut bytes = alloc::vec::Vec::new();
+    let mut chunk = alloc::vec![0u8; FILE_STREAM_CHUNK];
+    while bytes.len() <= cap {
+        let offset = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
+        // `fs_read` holds its answer inside the buffer it was handed, so the
+        // count always names a prefix of `chunk`.
+        let taken = fs_read(fd, offset, &mut chunk)?;
+        let Some(read) = chunk.get(..taken).filter(|read| !read.is_empty()) else {
+            break;
+        };
+        bytes.extend_from_slice(read);
+    }
+    Ok(bytes)
+}
+
 /// Define the program's entry point.
 ///
 /// `$entry` must be a `fn() -> i32`; the macro exports the runtime's
@@ -6631,6 +6675,51 @@ mod tests {
         let flags = OpenFlags::from_bits(u32::try_from(args[2]).expect("flag bits fit u32"))
             .expect("open_dir requests a legal flag combination");
         assert!(flags.contains(OpenFlags::DIRECTORY));
+    }
+
+    #[test]
+    fn read_fd_to_end_stages_a_whole_chunk_per_syscall() {
+        // The regression guard for the desktop's wallpaper read: staging a
+        // kilobyte at a time cost one syscall per kilobyte, thousands of them
+        // for a wallpaper master. The transfer length the call asks for is what
+        // decides that, so it is asserted rather than the bytes returned.
+        let want = -i64::from(tairix_abi::Errno::NotImplemented.as_i32());
+        let neg = u64::from_ne_bytes(want.to_ne_bytes());
+        let (number, args) = capture(neg, || {
+            assert_eq!(read_fd_to_end(7, 8 * 1024 * 1024).err(), Some(want));
+        });
+        assert_eq!(number, NUM_FS_READ);
+        assert_eq!(args[0], 7);
+        assert_eq!(args[1], 0, "the first read starts at the file's own start");
+        assert_eq!(
+            args[3],
+            u64::try_from(FILE_STREAM_CHUNK).expect("the chunk fits u64")
+        );
+    }
+
+    #[test]
+    fn read_fd_to_end_answers_empty_at_end_of_file() {
+        seam::arm(0);
+        assert_eq!(read_fd_to_end(3, 4096), Ok(alloc::vec::Vec::new()));
+    }
+
+    #[test]
+    fn read_fd_to_end_stops_one_chunk_past_the_cap() {
+        // Every read reports a full staging buffer, so the loop only ends on
+        // the cap: it must terminate, and answer *past* the cap so the caller
+        // can tell an oversize document from one that exactly fits.
+        seam::arm(u64::try_from(FILE_STREAM_CHUNK).expect("the chunk fits u64"));
+        let cap = FILE_STREAM_CHUNK + 1;
+        let got = read_fd_to_end(3, cap).expect("a reporting read succeeds");
+        assert!(got.len() > cap, "the answer states the oversize");
+        assert_eq!(got.len(), 2 * FILE_STREAM_CHUNK);
+    }
+
+    #[test]
+    fn read_fd_to_end_surfaces_the_read_refusal_unchanged() {
+        let want = -i64::from(tairix_abi::Errno::PermissionDenied.as_i32());
+        seam::arm(u64::from_ne_bytes(want.to_ne_bytes()));
+        assert_eq!(read_fd_to_end(3, 4096).err(), Some(want));
     }
 
     #[test]

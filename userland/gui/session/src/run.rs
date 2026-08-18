@@ -3949,6 +3949,12 @@ mod program {
     /// wallpaper at the wallpaper cap — so a second, differently-bounded
     /// reader cannot exist. An answer longer than `cap` is the caller's
     /// whole-document refusal to state.
+    ///
+    /// The streaming is the runtime's one whole-file policy
+    /// ([`tairix_rt::read_fd_to_end`]), so the desktop cannot drift to a chunk
+    /// size of its own: a wallpaper master is megabytes, and reading one a
+    /// kilobyte per syscall spent thousands of traps — seconds of them on real
+    /// storage — before the decoder saw a byte.
     fn read_file(path: &str, cap: usize) -> Result<alloc::vec::Vec<u8>, Errno> {
         let ret = tairix_rt::fs_open(path.as_bytes(), OpenFlags::READ);
         if ret < 0 {
@@ -3957,26 +3963,9 @@ mod program {
         #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
         // `ret >= 0` checked above; it is a descriptor number.
         let fd = ret as u32;
-        let outcome = read_to_end(fd, cap);
+        let outcome = tairix_rt::read_fd_to_end(fd, cap).map_err(Errno::from_syscall);
         let _ = tairix_rt::fs_close(fd);
         outcome
-    }
-
-    /// Read `fd` from the start until end-of-file, stopping one chunk past
-    /// `cap` (the caller treats the oversize as the whole-document refusal it
-    /// is).
-    fn read_to_end(fd: u32, cap: usize) -> Result<alloc::vec::Vec<u8>, Errno> {
-        let mut bytes = alloc::vec::Vec::new();
-        let mut chunk = [0u8; 1024];
-        while bytes.len() <= cap {
-            let read = tairix_rt::fs_read(fd, bytes.len() as u64, &mut chunk)
-                .map_err(Errno::from_syscall)?;
-            if read == 0 {
-                break;
-            }
-            bytes.extend_from_slice(&chunk[..read]);
-        }
-        Ok(bytes)
     }
 
     /// Spawn a desktop app under the session's own identity and console,

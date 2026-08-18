@@ -75,6 +75,27 @@ descriptor I/O path parameterised only by where the position comes from, so the
 direction gate, capability checks, and copy boundaries cannot drift between
 them.
 
+## Whole-document reads
+
+A consumer that wants a whole file rather than a stream — a settings document, a
+program catalog, a wallpaper master — calls `read_fd_to_end(fd, cap)`. It is the
+one whole-file streaming policy in the tree, and it exists so that the *chunk
+size* is decided once:
+
+- The staging buffer is `FILE_STREAM_CHUNK` (64 KiB), held at compile time to be
+  non-empty and no larger than the kernel's own per-transfer cap (`FS_IO_MAX`).
+  Staging a kilobyte at a time instead costs one syscall per kilobyte — thousands
+  of traps for a multi-megabyte document, and seconds of them on real storage.
+- It answers *one chunk past* `cap` rather than truncating at it, so a caller can
+  tell an oversize document from one that exactly fits: a length above `cap` is
+  the whole-document refusal to state, never a silently shortened answer the
+  caller would go on to parse.
+- A refused read surfaces the kernel's `-errno` unchanged.
+
+Directory listings have their own shared policy (`read_dir_all` over
+`read_all_growing`), because the kernel delivers a listing whole-or-not and so
+grows a buffer rather than streaming chunks.
+
 ## Buffering
 
 - `BufWriter` coalesces many small writes into a single underlying write. Its
