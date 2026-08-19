@@ -41,6 +41,7 @@
 use alloc::collections::BTreeMap;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
+use core::convert::Infallible;
 
 use tairix_kernel_sched_api::TaskId;
 use tairix_kernel_sec::ProcessId;
@@ -73,54 +74,83 @@ type Bucket = SpinLock<BTreeMap<FutexKey, Arc<WaitQueue>>>;
 /// same policy.
 const BUCKETS_PER_CPU: usize = 4;
 
-/// The boot-sized bucket array (set once per boot by [`init_buckets`]).
+/// The resolved bucket table, published **exactly once** — by
+/// [`init_buckets`] at boot, or by the first resolution that finds none.
+///
+/// An *empty* table is the published "nothing ever sized one" answer, so that
+/// decision costs no allocation and cannot fail; [`buckets`] maps it onto
+/// [`FALLBACK_BUCKET`].
 static BUCKETS: OnceCell<Vec<Bucket>> = OnceCell::new();
 
 /// The single bucket a build that never sized the table uses.
 ///
-/// Correctness never depends on the bucket count — only contention does — so
+/// The bucket *count* is a contention choice, not a correctness one, so
 /// falling back to one bucket is honest rather than fail-closed: a futex still
 /// blocks and wakes exactly as specified, it just serialises unrelated keys.
 static FALLBACK_BUCKET: Bucket = SpinLock::new(BTreeMap::new());
 
 /// Size the bucket table from the discovered CPU count.
 ///
-/// Called once per boot, beside the other scheduler-derived publications. A
-/// second call changes nothing (one boot sizes one table).
+/// Called once per boot, beside the other scheduler-derived publications, and
+/// necessarily **before the first key resolves** — a table installed after
+/// that is refused, because a key resolves to a bucket by index into whichever
+/// table was live, so swapping tables mid-flight would strand a registered
+/// waiter in a bucket no waker looks in.
 pub fn init_buckets(cpu_count: usize) {
+    if BUCKETS.is_initialised() {
+        return;
+    }
     let count = cpu_count.max(1) * BUCKETS_PER_CPU;
-    let mut buckets = Vec::with_capacity(count);
+    let mut buckets = Vec::new();
+    if buckets.try_reserve_exact(count).is_err() {
+        // Deterministic OOM, never a panic: the single-bucket table stands.
+        return;
+    }
     for _ in 0..count {
         buckets.push(SpinLock::new(BTreeMap::new()));
     }
     let _ = BUCKETS.set(buckets);
 }
 
-/// The live bucket table.
+/// The live bucket table, fixed for the rest of this boot by the first
+/// resolution.
+///
+/// One atomic decision point, so a key can never resolve against two different
+/// tables: whoever reaches here first publishes the answer — boot's sized
+/// table, or the empty "never sized" one — and every later resolution reads
+/// that same publication.
 fn buckets() -> &'static [Bucket] {
-    match BUCKETS.get() {
-        Ok(Some(table)) => table.as_slice(),
-        // Unsized (or a poisoned initialiser): one bucket, same semantics.
+    match BUCKETS.get_or_try_init(|| Ok::<Vec<Bucket>, Infallible>(Vec::new())) {
+        Ok(table) if !table.is_empty() => table.as_slice(),
+        // The published empty table (nothing sized one), or a poisoned cell an
+        // infallible initialiser cannot actually produce: one bucket.
         _ => core::slice::from_ref(&FALLBACK_BUCKET),
     }
 }
 
-/// The bucket a key belongs to.
+/// The index `key` hashes to in a table of `len` buckets.
 ///
 /// Fibonacci hashing (multiply by the 64-bit golden-ratio odd constant, whose
 /// high bits mix every input bit) over the process id combined with the word
 /// index. Shifting the address by two drops the always-zero alignment bits, so
 /// adjacent words in one lock array land in different buckets instead of
 /// crowding one.
-fn bucket_of(key: FutexKey) -> &'static Bucket {
+///
+/// A `len` of zero folds to one so the index is always computable; [`buckets`]
+/// never yields an empty table.
+fn bucket_index(key: FutexKey, len: usize) -> usize {
     const GOLDEN: u64 = 0x9E37_79B9_7F4A_7C15;
-    let table = buckets();
     let mixed =
         key.process.0.wrapping_mul(GOLDEN).rotate_left(31) ^ (key.uaddr >> 2).wrapping_mul(GOLDEN);
-    // `table.len()` is at least one, so the remainder is in range. The high
-    // bits carry the mixing, so they are the ones folded down.
-    let index = (mixed >> 32) as usize % table.len();
-    &table[index]
+    // The high bits carry the mixing, so they are the ones folded down.
+    (mixed >> 32) as usize % len.max(1)
+}
+
+/// The bucket a key belongs to.
+fn bucket_of(key: FutexKey) -> &'static Bucket {
+    let table = buckets();
+    // `table.len()` is at least one, so the index is in range.
+    &table[bucket_index(key, table.len())]
 }
 
 /// Register `thread` as a waiter on `key` with an absolute monotonic
@@ -400,21 +430,80 @@ mod tests {
         deregister(other, 22);
     }
 
+    /// A per-CPU-sized table is only worth having if neighbouring lock words
+    /// do not all crowd one bucket.
+    ///
+    /// Asserted against the pure index function rather than by installing a
+    /// table: the live table is fixed for the boot by its first use, so a test
+    /// that sized it would decide which table every *other* test's keys resolve
+    /// against — and one that registered a key before the swap would then wake
+    /// against a bucket its waiter is not in.
     #[test]
     fn adjacent_words_of_one_lock_array_spread_across_buckets() {
-        // A per-CPU-sized table is only worth having if neighbouring lock
-        // words do not all crowd one bucket.
-        init_buckets(8);
-        let table_len = buckets().len();
-        assert!(table_len > 1, "the boot-sized table has several buckets");
+        let len = 8 * BUCKETS_PER_CPU;
         let mut seen = alloc::collections::BTreeSet::new();
         for word in 0..16u64 {
-            let b = bucket_of(key(0x9008, 0x4000 + word * 4));
-            seen.insert(core::ptr::from_ref(b) as usize);
+            seen.insert(bucket_index(key(0x9008, 0x4000 + word * 4), len));
         }
         assert!(
             seen.len() > 1,
             "16 adjacent lock words landed in a single bucket"
         );
+    }
+
+    /// One process's whole lock array must not collapse onto one bucket
+    /// either — the process id is mixed, not just the address.
+    #[test]
+    fn distinct_processes_at_one_address_spread_across_buckets() {
+        let len = 8 * BUCKETS_PER_CPU;
+        let mut seen = alloc::collections::BTreeSet::new();
+        for process in 0..16u64 {
+            seen.insert(bucket_index(key(0x9100 + process, 0x4000), len));
+        }
+        assert!(
+            seen.len() > 1,
+            "16 processes' words at one address landed in a single bucket"
+        );
+    }
+
+    /// Every index the hash produces is a valid subscript, including for the
+    /// degenerate one-bucket table the never-sized build resolves against.
+    #[test]
+    fn a_bucket_index_is_always_in_range() {
+        for len in [1usize, 2, 3, 4 * BUCKETS_PER_CPU, 128 * BUCKETS_PER_CPU] {
+            for word in 0..64u64 {
+                let index = bucket_index(key(word, word * 4), len);
+                assert!(index < len, "index {index} out of a {len}-bucket table");
+            }
+        }
+    }
+
+    /// The table is fixed for the boot by its first use: a sizing that arrives
+    /// after a key has resolved is refused rather than stranding that key's
+    /// waiters in a bucket no waker looks in.
+    ///
+    /// The whole test binary shares one table and every sibling test resolves a
+    /// key, so by the time this runs the table is already latched — precisely
+    /// the state being asserted. A swap here made the sibling wake and sweep
+    /// tests fail intermittently, with a waiter the waker could not find
+    /// (`plans/OPEN-DEFECTS.md` D45).
+    #[test]
+    fn a_resolved_table_is_never_swapped_out_from_under_a_live_key() {
+        let k = key(0x9009, 0x4000);
+        let _queue = register(k, 31, NO_DEADLINE);
+        let before = core::ptr::from_ref(bucket_of(k)) as usize;
+        let len_before = buckets().len();
+
+        // A late sizing must change nothing: neither the table nor where this
+        // live key resolves.
+        init_buckets(8);
+        assert_eq!(buckets().len(), len_before, "the live table was replaced");
+        assert_eq!(
+            core::ptr::from_ref(bucket_of(k)) as usize,
+            before,
+            "a live key moved bucket"
+        );
+        assert_eq!(wake(&MockArch::new(), k, 1), 1, "the waiter is still found");
+        deregister(k, 31);
     }
 }

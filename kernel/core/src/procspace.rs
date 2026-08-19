@@ -122,53 +122,56 @@ impl ProcessSpace {
     }
 }
 
+/// A host [`LiveSpace`](tairix_kernel_mem::LiveSpace) over simulated RAM — the
+/// production space over the host page-table and physical-map doubles, so a
+/// test exercises the real thing rather than a bespoke stub.
+///
+/// Shared by this module's own tests and [`crate::kthread`]'s, which needs a
+/// process space to hang off a control block.
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    extern crate std;
-    use std::boxed::Box as StdBox;
-
+pub(crate) fn host_test_space() -> Box<dyn LiveUserSpace + Send> {
     use tairix_kernel_mem::{
         AddressSpace, BootMemoryMap, FrameAllocator, HostPageTable, LiveSpace, MemoryRegion,
         PhysAddr, RegionKind, SimPhysMap, VirtAddr, PAGE_SIZE,
     };
 
-    /// A host `LiveSpace` over simulated RAM — the same double the
-    /// `live_producer` tests use, so the lock wrapper is exercised over a
-    /// real `LiveUserSpace` rather than a bespoke stub.
-    fn host_space() -> Box<dyn LiveUserSpace + Send> {
-        let mut map = BootMemoryMap::new();
-        map.push(MemoryRegion {
-            kind: RegionKind::Usable,
-            start: PhysAddr::new((PAGE_SIZE * 16) as u64),
-            length: (256 * PAGE_SIZE) as u64,
-        });
-        let frames: &'static FrameAllocator =
-            StdBox::leak(StdBox::new(FrameAllocator::new(&map).expect("allocator")));
-        let sim = SimPhysMap::new(PhysAddr::new((PAGE_SIZE * 16) as u64), 256 * PAGE_SIZE);
-        let live = LiveSpace::new(
-            AddressSpace::new(HostPageTable::new()),
-            sim,
-            frames,
-            VirtAddr::new(0x4000_0000),
-            8,
-            VirtAddr::new(0x5000_0000),
-            8,
-            VirtAddr::new(0x6000_0000),
-            8,
-            VirtAddr::new(0x7000_0000),
-            8,
-            VirtAddr::new(0x8000_0000),
-            8,
-        )
-        .expect("windows are valid");
-        Box::new(live)
-    }
+    let mut map = BootMemoryMap::new();
+    map.push(MemoryRegion {
+        kind: RegionKind::Usable,
+        start: PhysAddr::new((PAGE_SIZE * 16) as u64),
+        length: (256 * PAGE_SIZE) as u64,
+    });
+    let frames: &'static FrameAllocator =
+        Box::leak(Box::new(FrameAllocator::new(&map).expect("allocator")));
+    let sim = SimPhysMap::new(PhysAddr::new((PAGE_SIZE * 16) as u64), 256 * PAGE_SIZE);
+    let live = LiveSpace::new(
+        AddressSpace::new(HostPageTable::new()),
+        sim,
+        frames,
+        VirtAddr::new(0x4000_0000),
+        8,
+        VirtAddr::new(0x5000_0000),
+        8,
+        VirtAddr::new(0x6000_0000),
+        8,
+        VirtAddr::new(0x7000_0000),
+        8,
+        VirtAddr::new(0x8000_0000),
+        8,
+    )
+    .expect("windows are valid");
+    Box::new(live)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use alloc::sync::Arc;
 
     #[test]
     fn with_hands_the_closure_one_shared_space() {
-        let shared = ProcessSpace::for_test(host_space());
+        let shared = ProcessSpace::for_test(host_test_space());
         let first = shared
             .with(|space| space.reserve_anonymous(2))
             .expect("reservation fits the window");
@@ -182,7 +185,7 @@ mod tests {
 
     #[test]
     fn the_lock_excludes_a_second_borrow_while_one_is_live() {
-        let shared = ProcessSpace::for_test(host_space());
+        let shared = ProcessSpace::for_test(host_test_space());
         shared.with(|_| {
             assert!(
                 shared.space.try_lock().is_none(),
@@ -213,9 +216,8 @@ mod tests {
         const FIRST_CPU: u32 = 43;
         const SECOND_CPU: u32 = 44;
 
-        let shared: &'static ProcessSpace =
-            StdBox::leak(StdBox::new(ProcessSpace::for_test(host_space())));
-        let _first = crate::kthread::publish_live_space_for_test(FIRST_CPU, shared);
+        let shared = Arc::new(ProcessSpace::for_test(host_test_space()));
+        let _first = crate::kthread::publish_live_space_for_test(FIRST_CPU, Arc::clone(&shared));
         let _second = crate::kthread::publish_live_space_for_test(SECOND_CPU, shared);
 
         let from_first =
@@ -230,5 +232,56 @@ mod tests {
             from_first, from_second,
             "the second CPU observed the first CPU's reservation"
         );
+    }
+
+    /// `thread_create`'s handle comes out of the publication's **own**
+    /// refcount, and taking it leaves the publication intact.
+    ///
+    /// The per-CPU slot holds a bare pointer so the switch path pays no
+    /// refcount traffic, which makes "the pointer always addresses the inside of
+    /// a live `Arc`" the invariant the reconstruction rests on: published a
+    /// leaked `Box` instead and the increment writes to the neighbouring heap
+    /// block below the value (`plans/OPEN-DEFECTS.md` D45). Watching the count
+    /// move on the handle that was published is what pins the increment to the
+    /// right allocation.
+    #[test]
+    fn the_published_handle_is_what_a_reconstruction_shares() {
+        // A CPU no other test in this crate publishes on, so the global
+        // per-CPU slot is unshared under a parallel run.
+        const CPU: u32 = 47;
+
+        let shared = Arc::new(ProcessSpace::for_test(host_test_space()));
+        let published = crate::kthread::publish_live_space_for_test(CPU, Arc::clone(&shared));
+        assert_eq!(
+            Arc::strong_count(&shared),
+            2,
+            "the publication owns one share; the slot only borrows"
+        );
+
+        let reconstructed =
+            crate::kthread::current_process_space(CPU).expect("the slot is published");
+        assert!(
+            Arc::ptr_eq(&shared, &reconstructed),
+            "the reconstruction names the published allocation"
+        );
+        assert_eq!(
+            Arc::strong_count(&shared),
+            3,
+            "the reconstruction took a share of this allocation's own count"
+        );
+
+        drop(reconstructed);
+        assert_eq!(
+            Arc::strong_count(&shared),
+            2,
+            "dropping it releases that share and leaves the publication intact"
+        );
+
+        drop(published);
+        assert!(
+            crate::kthread::current_process_space(CPU).is_none(),
+            "a cleared slot fails closed rather than handing out a stale space"
+        );
+        assert_eq!(Arc::strong_count(&shared), 1);
     }
 }

@@ -34,10 +34,12 @@ The open items, in priority order:
   `lib/collections`) were audited against §27. All are complete; `waitq`
   (D2) was the sole thin slice. One latent watch-item (the slab
   free-slot scan) is recorded and staged (not a live defect).
-- **D45 — two `kernel/core` syscall tests corrupt the host heap when run
-  concurrently.** Minimised to a two-test reproducer; blocks the §7 gate's
-  test phase. Whether it is test isolation or a live `unsafe` write on the
-  address-space snapshot path is the open question.
+- **D45 — the per-CPU live-space publication accepted a non-`Arc` pointer —
+  DONE.** Its `Arc` refcount write therefore landed out of bounds, corrupting
+  the host heap and failing the §7 gate's test phase. It was a real unsound
+  `unsafe` write, not test isolation: the `Arc` provenance is now a type
+  invariant. Two further defects fell out of it (a dispatch refusal that left
+  stale per-CPU publications, and a futex bucket table swapped under live keys).
 - **D5 — `mem-pin-migration` intermittent multi-vCPU-TCG stall — DONE.**
   Root-caused to a lost-wakeup in the vertical's own secondary-CPU idle
   loop and fixed structurally (not a load artifact, not a budget bump).
@@ -2649,63 +2651,70 @@ including that the guard region is not a legitimate frame. End to end, the
 in 1–6 rounds of five concurrent guests before the fix and stayed clean over
 155 runs after it.
 
-## D45 — two `kernel/core` syscall tests corrupt the host heap when run concurrently (OPEN)
+## D45 — the per-CPU live-space publication accepted a non-`Arc` pointer, so its refcount write landed out of bounds — DONE
 
-**Symptom.** `cargo test --workspace` intermittently dies with
-`SIGILL`/`SIGABRT` inside the `tairix-kernel-core` lib-test binary — the
-whole-project gate's test phase fails outright — and the abort is glibc's
-`corrupted size vs. prev_size` from `free`. So it is genuine heap corruption,
-not a failed assertion.
+**State:** fixed. Presented as `cargo test --workspace` intermittently dying
+with `SIGABRT` inside the `tairix-kernel-core` lib-test binary — glibc's
+`corrupted size vs. prev_size` from `free`, i.e. genuine heap corruption, not a
+failed assertion — which failed the whole-project gate's test phase. Minimised
+to two `syscalls::tests` run concurrently (either alone was clean at any thread
+count).
 
-**Reproduced and minimised** (not a load artefact, §7):
+**Root cause — a real unsound `unsafe` write, not test isolation.** The
+per-CPU live-space slot holds a bare `*const ProcessSpace` so the
+context-switch path pays no refcount traffic, and `kthread::
+current_process_space` (what `thread_create` reaches) reconstructed an owning
+`Arc` from it via `Arc::increment_strong_count` + `Arc::from_raw`. That is only
+sound because the production publisher forms the pointer with `Arc::as_ptr`.
+The invariant lived in a comment, not the type — so the *second* publisher,
+`publish_live_space_for_test`, took a `&'static ProcessSpace` from a leaked
+`Box` and published it. The increment then wrote eight bytes **16 bytes before**
+the value (the neighbouring glibc chunk's `prev_size`), and the matching
+decrement on drop could take a fabricated count to zero and free a pointer
+before a live allocation. ASAN named it exactly: `WRITE of size 8 ... 16 bytes
+before 56-byte region`, from `current_process_space` → `threads::exit`.
 
-```
-$ BIN=target/debug/deps/tairix_kernel_core-<hash>
-$ for i in $(seq 40); do "$BIN" --quiet >/dev/null || echo fail; done   # ~4/40
-$ "$BIN" --test-threads=1 --quiet                                        # 0/25 — clean
-$ "$BIN" syscalls::tests --test-threads=2 --quiet                        # ~50%
-$ "$BIN" --exact --test-threads=2 \
-    syscalls::tests::a_dying_threads_stack_leaves_nothing_translating_in_the_process_snapshot \
-    syscalls::tests::a_faulted_page_of_a_mapped_region_becomes_reachable_through_the_snapshot
-                                                                         # ~3/12
-```
+**Fix.** `LiveSpacePtr`'s field is private and its only constructor,
+`LiveSpacePtr::borrowed(&Arc<ProcessSpace>)`, borrows from a live `Arc`, so a
+publication that is not `Arc`-derived is now unrepresentable; the two `unsafe`
+reads are its `reborrow` / `clone_owner` methods, whose remaining obligation is
+liveness alone (the publication protocol's own property). The test publisher
+takes an `Arc` **by value** and holds it in the publish guard, standing in for
+the running thread's control-block clone, so the test path has production's
+shape rather than a second one.
 
-Either test alone, at any thread count, is clean; the pair concurrently is
-not. Both drive the process address-space snapshot and the live space, so they
-share process-global kernel state — the address-space registry and the test
-frame pool — that neither serialises on.
+**A second defect found on the way (§2.18):** `dispatch_step`'s D44
+foreign-stack refusal ran *after* `publish_resume` + `publish_live_space` and
+returned `Exit` without clearing either. The scheduler then reaps the task and
+drops its `ThreadControl` — and the `Arc<ProcessSpace>` clone with it — leaving
+the CPU naming a freed control block: the next `reschedule_current` there would
+switch into a reaped context, and a kernel kthread's dispatch never clears the
+live-space slot, so a stale publication survives its whole run. The refusal now
+runs before the switch-in hook and both publications, so a refused task leaves
+the CPU naming nothing and never activates its user root either.
 
-**Ruled out already.** Not the per-CPU state table: under `cfg(test)`
-`cpu_state::get` indexes a fixed-size `TEST_STATE` array with a bounds-checked
-`get`, and `cpu_state::install` uses an isolated cell per test, so neither test's
-CPU slot (45 and 0 respectively — both tests deliberately pick unshared slots)
-can write outside it.
+**A third, in the futex (§2.18):** `bucket_of` resolved a key by index into
+whichever bucket table was live, and `init_buckets` could install the sized
+table *after* keys had resolved against the single-bucket fallback — stranding
+a registered waiter in a bucket no waker or deadline sweep looks in, which is a
+lost wakeup that never resolves. The table is now published exactly once (an
+empty `Vec` is the "never sized" answer, so latching it costs no allocation and
+cannot fail) and a later sizing is refused; `init_buckets` also uses
+`try_reserve_exact`, so a boot-time OOM degrades to the single bucket instead of
+aborting. The `bucket_index` hash is factored out as a pure function, so the
+spread properties are host-tested without any test installing a table.
 
-**What is not yet known, and must be settled before a fix is chosen.**
-Whether the corruption is *only* the tests racing on shared global fixtures,
-or whether the paths they drive (`publish_region_mapping` /
-`publish_region_teardown` and the dying-thread stack release, both from
-`plans/THREADS.md` T3b-k) contain an `unsafe` write whose bounds depend on
-state the other test mutates. The second would be a live kernel defect, not a
-test-isolation one, and the answer decides everything below.
-
-**Fix shape, once that is settled.** If it is isolation: give every
-`kernel/core` test that installs or mutates process-global kernel state one
-shared serialising guard, the way `lib/rt`'s cell registry does
-(`lib/rt/src/thread.rs`'s `registry_lock`), so a test can never observe
-another's install — 397 tests in `syscalls::tests` alone, so the guard must be
-taken by construction (a helper every test builds its world through) rather
-than remembered per test. If it is a real out-of-bounds write, fix that and
-keep the isolation guard anyway.
-
-**Regression cover (lands with the fix, §7).** The minimised two-test
-concurrent run above, plus the whole binary at the harness's default thread
-count, repeated enough times to make the ~25% reproduction rate a certainty
-(`cargo xtask ci-long` already repeats each test concurrently and is the
-natural home).
-
-**Blocks.** The §7 whole-project gate cannot be green while this stands: the
-test phase fails at a rate high enough that any full run is likely to trip it.
+**Regression cover.** `procspace::tests::
+the_published_handle_is_what_a_reconstruction_shares` pins the strong count
+moving on the *published* allocation across a reconstruction and back;
+`kthread::tests::a_refused_dispatch_step_publishes_nothing_for_the_cpu` requires
+a refused step to run no switch-in hook and leave neither publication (all three
+of its assertions fail on the pre-fix source);
+`futex::tests::a_resolved_table_is_never_swapped_out_from_under_a_live_key` plus
+the two spread tests and `a_bucket_index_is_always_in_range` pin the table. End
+to end the minimised pair is the witness: ~1/20 aborts before the fix and 3/3
+ASAN heap-buffer-overflow reports, then 60/60 clean, the whole binary 100/100 at
+the harness's default thread count, and 5/5 clean under ASAN.
 
 ## Non-goals / do not do
 

@@ -1,6 +1,7 @@
 //! Discovered-CPU-sized scheduler continuation state.
 
 use alloc::boxed::Box;
+use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
 // `AtomicU32` backs only the debug-diagnostics pre-silence-backtrace length,
@@ -28,8 +29,61 @@ pub(crate) struct ResumeHandle {
 /// pays no refcount traffic: the running thread's control block holds an
 /// `Arc` clone for its whole life, which keeps the pointee alive for exactly
 /// as long as the publication can be observed.
+///
+/// The pointer's [`Arc`] provenance is a **type** invariant, not a documented
+/// convention: [`Self::borrowed`] is the only constructor, so every published
+/// handle addresses the inside of a real `Arc` allocation and
+/// [`Self::clone_owner`]'s refcount increment lands on that allocation's own
+/// counter. A publisher able to name a plain (leaked-`Box`) `ProcessSpace`
+/// would turn that increment into an out-of-bounds write to the bytes
+/// *preceding* the value and its matching decrement into a wild free.
 #[derive(Copy, Clone)]
-pub(crate) struct LiveSpacePtr(pub(crate) *const ProcessSpace);
+pub(crate) struct LiveSpacePtr(*const ProcessSpace);
+
+impl LiveSpacePtr {
+    /// Borrow `space`'s pointee for publication, leaving its strong count
+    /// untouched.
+    pub(crate) fn borrowed(space: &Arc<ProcessSpace>) -> Self {
+        Self(Arc::as_ptr(space))
+    }
+
+    /// Reborrow the published space as shared, for at most as long as the
+    /// owning `Arc` lives.
+    ///
+    /// # Safety
+    ///
+    /// The `Arc` this handle was borrowed from must be live for all of `'a`.
+    /// The publication protocol guarantees that: a slot holds `Some` only
+    /// while a thread whose control block owns a clone runs on that CPU.
+    pub(crate) unsafe fn reborrow<'a>(self) -> &'a ProcessSpace {
+        // SAFETY: the pointer came from `Arc::as_ptr` on a live `Arc` (the
+        // only constructor), so it is aligned, initialised, and — by the
+        // caller's contract — still inside a live allocation. `ProcessSpace`
+        // locks internally, so a shared reborrow grants no unsynchronised
+        // access to its interior.
+        unsafe { &*self.0 }
+    }
+
+    /// Clone the owning handle this publication borrows from.
+    ///
+    /// Incrementing the strong count before reconstructing is exactly what
+    /// [`Arc::clone`] does, so the borrowed publication is left intact rather
+    /// than consumed.
+    ///
+    /// # Safety
+    ///
+    /// As [`Self::reborrow`]: the owning `Arc` must still be live.
+    pub(crate) unsafe fn clone_owner(self) -> Arc<ProcessSpace> {
+        // SAFETY: the pointer came from `Arc::as_ptr` on a live `Arc` (the
+        // only constructor) and the caller guarantees the allocation still
+        // is, so the increment targets that allocation's own strong count and
+        // the reconstructed handle owns the share it just took.
+        unsafe {
+            Arc::increment_strong_count(self.0);
+            Arc::from_raw(self.0)
+        }
+    }
+}
 
 /// Maximum stack frames the watchdog records per liveness sample.
 ///
@@ -58,8 +112,10 @@ pub(crate) const LOCK_STACK_MAX: usize = 8;
 
 // SAFETY: `ProcessSpace` is `Sync` (it locks internally), and the kthread
 // publication protocol keeps the pointee alive for as long as the slot can be
-// observed — the running thread's control block holds an `Arc` clone. The raw
-// pointer is only ever reborrowed as a shared `&ProcessSpace`.
+// observed — the running thread's control block holds an `Arc` clone. The
+// pointer is only ever reborrowed as a shared `&ProcessSpace` or used to take a
+// share of that `Arc`'s own strong count, both of which are sound to do from
+// any CPU.
 unsafe impl Send for LiveSpacePtr {}
 
 /// All kernel-core state indexed by a dense discovered CPU id.

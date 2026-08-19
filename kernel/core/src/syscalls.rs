@@ -23056,21 +23056,23 @@ mod tests {
     }
 
     impl PublishedLive {
-        /// Wrap `space` in a leaked [`crate::procspace::ProcessSpace`] — the
-        /// `'static` shape `publish_live_space_for_test` takes — returning
-        /// the handle to publish and a raw pointer for reading the recording
-        /// back once the handler has released the space's lock
-        /// (single-threaded). A test leak is bounded by the process.
+        /// Wrap `space` in the refcounted [`crate::procspace::ProcessSpace`]
+        /// `publish_live_space_for_test` publishes, returning the handle to
+        /// publish and a raw pointer for reading the recording back once the
+        /// handler has released the space's lock (single-threaded).
+        ///
+        /// The double stays boxed inside the space, so the observer address is
+        /// stable while the publication's guard holds the handle alive.
         fn published(
             space: AddressSpace<HostPageTable>,
-        ) -> (&'static crate::procspace::ProcessSpace, *const Self) {
+        ) -> (Arc<crate::procspace::ProcessSpace>, *const Self) {
             let boxed = Box::new(Self {
                 space,
                 freezes: core::sync::atomic::AtomicUsize::new(0),
             });
             let observer: *const Self = &raw const *boxed;
             (
-                Box::leak(Box::new(crate::procspace::ProcessSpace::for_test(boxed))),
+                Arc::new(crate::procspace::ProcessSpace::for_test(boxed)),
                 observer,
             )
         }

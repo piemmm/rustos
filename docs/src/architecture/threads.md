@@ -149,6 +149,12 @@ instead of spinning.
   discipline. Queues are held in a bucket array sized from the discovered CPU
   count (four buckets per CPU), created on demand per live key and dropped once
   the last waiter leaves, so an idle process holds no futex state.
+* **The bucket table is fixed by its first use.** A key resolves to a bucket by
+  index into whichever table is live, so boot sizes the table before any thread
+  exists to wait and a sizing that arrives later is refused: a table swapped
+  between a registration and its wake would strand the waiter in a bucket no
+  waker looks in. The count is a contention choice only — a build that never
+  sized one still blocks and wakes exactly as specified, on a single bucket.
 * **No futex lock is ever held across a scheduler lock.** A waker clones the
   queue handle out from under the bucket lock and releases it before any
   `unpark`, so the bucket locks cannot participate in a lock cycle with the

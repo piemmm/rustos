@@ -985,6 +985,16 @@ process's threads (`plans/PI.md` 5d-0-ii (b′); `plans/THREADS.md` decision 4).
   two cores are serialised rather than racing (`AGENTS.md` §4). `f` must not
   park while it holds the lock. The
   `spawn_user_kthread_with_stack_live` admission entry carries the handle.
+- **The publication's `Arc` provenance is a type invariant.** The slot holds a
+  `LiveSpacePtr`, whose only constructor borrows from a live
+  `Arc<ProcessSpace>` — because `thread_create` reconstructs an owning handle
+  from the publication (`current_process_space`), which takes a share of that
+  allocation's own strong count. A pointer to a `ProcessSpace` that was never
+  inside an `Arc` would turn that increment into an out-of-bounds write to the
+  bytes preceding the value, so the type refuses to be built from one. A
+  dispatch step that *refuses* a task (a foreign suspension point) returns
+  before publishing anything, so a reaped control block can never be named by
+  a per-CPU slot.
 - **The production producers.** `kernel/core::live_producer` provides
   `LiveMemMap<A>` (`MemMap`) and `LiveMmioMap<A>` (`MmioMapFacility`); each
   holds a `&'static A` (mirroring `KernelProcessWait`), reads

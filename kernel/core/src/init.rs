@@ -531,9 +531,11 @@ fn publish_wait_queue_arch<A: KernelArch + 'static>(state: &'static KernelState<
     crate::preempt::install_competitor_gate(wait_arch);
     // Size the futex's key→queue table from the discovered CPU count, so
     // threads contending on *distinct* locks do not serialise on one bucket
-    // lock (`plans/THREADS.md` decision 5). Correctness never depends on the
-    // count — only contention does — so a build that skipped this still blocks
-    // and wakes exactly as specified.
+    // lock (`plans/THREADS.md` decision 5). Here in boot publication, before
+    // any thread exists to wait: the table is fixed by its first use, so a
+    // sizing that arrived after a key had resolved would be refused. The count
+    // itself is a contention choice — a build that skipped this still blocks
+    // and wakes exactly as specified, on one bucket.
     crate::futex::init_buckets(state.scheduler.cpu_count() as usize);
 }
 

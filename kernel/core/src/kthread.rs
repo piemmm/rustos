@@ -1177,6 +1177,28 @@ where
         RunState::Running => {}
     }
 
+    // A suspension point must lie on this task's *own* kernel stack. Anything
+    // else is a foreign continuation somebody wrote into this save area, and
+    // switching into it would run another task's kernel context — unwinding
+    // that task's syscall handler and `eret`ing its user registers — under
+    // *this* task's page-table root, so the innocent task dies on a fault it
+    // never took (`plans/OPEN-DEFECTS.md` D44). Fail the task closed instead:
+    // its context can no longer be trusted, exactly as a guard violation.
+    //
+    // Checked here, before the switch-in hook activates the user root and
+    // before either per-CPU publication below, so a refused task leaves this
+    // CPU naming nothing: a resume handle or live-space pointer published for a
+    // task the scheduler then reaps would dangle into its freed control block.
+    // SAFETY: exclusive dispatcher-side access to `*ctl` (see above).
+    let saved = unsafe { (*ctl).task_ctx.stack_pointer };
+    // SAFETY: as above.
+    if !unsafe { (*ctl).stack.carries(saved) } {
+        unsafe {
+            (*ctl).state = RunState::Finished;
+        }
+        return TaskAction::Exit;
+    }
+
     // A loading task that finished building its user image deposited the
     // upgrade through `become_user`; install it here, dispatcher-side —
     // the side that owns `pre_resume`/`live` — before deciding user-ness,
@@ -1241,23 +1263,6 @@ where
         crate::watchdog::KernelBreadcrumb::KernelBody
     };
     crate::watchdog::note_kernel_breadcrumb(cpu, entered, 0);
-
-    // A suspension point must lie on this task's *own* kernel stack. Anything
-    // else is a foreign continuation somebody wrote into this save area, and
-    // switching into it would run another task's kernel context — unwinding
-    // that task's syscall handler and `eret`ing its user registers — under
-    // *this* task's page-table root, so the innocent task dies on a fault it
-    // never took (`plans/OPEN-DEFECTS.md` D44). Fail the task closed instead:
-    // its context can no longer be trusted, exactly as a guard violation.
-    // SAFETY: exclusive dispatcher-side access to `*ctl` (see above).
-    let saved = unsafe { (*ctl).task_ctx.stack_pointer };
-    // SAFETY: as above.
-    if !unsafe { (*ctl).stack.carries(saved) } {
-        unsafe {
-            (*ctl).state = RunState::Finished;
-        }
-        return TaskAction::Exit;
-    }
 
     // SAFETY: switch into the task. `dispatch_ctx` saves our (the
     // dispatcher's) context; `task_ctx` was made runnable by `prepare`
@@ -1386,12 +1391,13 @@ where
 {
     // SAFETY: dispatcher-side exclusive access to `*ctl` (the kthread
     // raw-pointer protocol; see `dispatch_step`). The shared borrow of the
-    // `Arc` is taken only to form the raw pointer published below; the `Arc`
-    // itself stays in the control block, so the pointee outlives the slot.
-    let ptr = unsafe { (*ctl).live.as_ref().map(Arc::as_ptr) };
+    // `Arc` is taken only to form the borrowed handle published below; the
+    // `Arc` itself stays in the control block, so the pointee outlives the
+    // slot.
+    let ptr = unsafe { (*ctl).live.as_ref().map(LiveSpacePtr::borrowed) };
     if let Some(ptr) = ptr {
         if let Some(state) = cpu_state::get(cpu) {
-            *state.live_space.lock() = Some(LiveSpacePtr(ptr));
+            *state.live_space.lock() = Some(ptr);
         }
     }
 }
@@ -1441,7 +1447,7 @@ pub fn with_current_live_space<R>(
     }?;
     // SAFETY: see the function's borrow argument — the pointee is kept alive
     // by the running thread's own `Arc` clone.
-    let space: &ProcessSpace = unsafe { &*ptr.0 };
+    let space: &ProcessSpace = unsafe { ptr.reborrow() };
     Some(space.with(f))
 }
 
@@ -1458,12 +1464,11 @@ pub fn with_current_live_space<R>(
 ///
 /// # Safety of the reconstruction
 ///
-/// The published pointer was formed by [`Arc::as_ptr`] from the `Arc` the
-/// running thread's control block owns, and the slot is `Some` only while a
-/// thread of that process runs on `cpu`, so the allocation is live for the
-/// duration of this call. Incrementing the strong count before reconstructing
-/// an owning handle is exactly what [`Arc::clone`] does, so the borrowed
-/// publication is left intact rather than consumed.
+/// A published handle can only be formed by borrowing from a live
+/// `Arc<ProcessSpace>`, so the refcount this takes a share of is that
+/// allocation's own; and the slot is `Some` only while a thread of that
+/// process runs on `cpu`, so the allocation is live for the duration of this
+/// call.
 #[must_use]
 pub fn current_process_space(cpu: CpuId) -> Option<Arc<ProcessSpace>> {
     let state = cpu_state::get(cpu)?;
@@ -1474,21 +1479,22 @@ pub fn current_process_space(cpu: CpuId) -> Option<Arc<ProcessSpace>> {
         *guard
     }?;
     // SAFETY: see the reconstruction argument above.
-    unsafe {
-        Arc::increment_strong_count(ptr.0);
-        Some(Arc::from_raw(ptr.0))
-    }
+    Some(unsafe { ptr.clone_owner() })
 }
 
-/// Test-only: publish `space` as the current process space for `cpu`,
-/// returning a guard that clears the slot when dropped.
+/// Test-only publication of a process space on a CPU, holding the strong
+/// reference the publication borrows from — the stand-in for the running
+/// thread's control block, which owns one for its whole life.
 ///
-/// Lets sibling in-crate test modules (notably `live_producer`) exercise the
-/// [`with_current_live_space`] path without driving a full context switch.
-/// `space` must outlive the returned guard (the published pointer borrows it).
+/// Owning the `Arc` here is what makes the test publication the same shape as
+/// the production one: the slot cannot outlive the allocation it names, so
+/// [`current_process_space`]'s reconstruction finds a live refcount.
 #[cfg(test)]
 pub(crate) struct LiveSpacePublishGuard {
     cpu: CpuId,
+    /// Kept solely to hold the publication's pointee alive; the slot borrows
+    /// from it.
+    _owner: Arc<ProcessSpace>,
 }
 
 #[cfg(test)]
@@ -1498,15 +1504,20 @@ impl Drop for LiveSpacePublishGuard {
     }
 }
 
+/// Test-only: publish `space` as the current process space for `cpu`,
+/// returning a guard that clears the slot when dropped.
+///
+/// Lets sibling in-crate test modules (notably `live_producer`) exercise the
+/// [`with_current_live_space`] path without driving a full context switch.
 #[cfg(test)]
 pub(crate) fn publish_live_space_for_test(
     cpu: CpuId,
-    space: &'static ProcessSpace,
+    space: Arc<ProcessSpace>,
 ) -> LiveSpacePublishGuard {
     if let Some(state) = cpu_state::get(cpu) {
-        *state.live_space.lock() = Some(LiveSpacePtr(core::ptr::from_ref(space)));
+        *state.live_space.lock() = Some(LiveSpacePtr::borrowed(&space));
     }
-    LiveSpacePublishGuard { cpu }
+    LiveSpacePublishGuard { cpu, _owner: space }
 }
 
 #[cfg(test)]
@@ -2045,6 +2056,51 @@ mod tests {
         // switches in again.
         assert_eq!(dispatch_step(&mut control, cpu), TaskAction::Exit);
         assert_eq!(rec.switches.load(Ordering::SeqCst), switches);
+    }
+
+    /// A refused task leaves this CPU naming nothing.
+    ///
+    /// The refusal above reports `Exit`, so the scheduler reaps the task and
+    /// drops its control block — and with it the `Arc<ProcessSpace>` clone the
+    /// live-space publication borrows from. A resume handle or live-space
+    /// pointer published before the refusal therefore dangles into freed
+    /// memory, and the next `reschedule_current` on this CPU would switch into
+    /// a reaped context. The check runs before either publication for exactly
+    /// that reason.
+    #[test]
+    fn a_refused_dispatch_step_publishes_nothing_for_the_cpu() {
+        let rec = recorder();
+        let hits = leak_counter();
+        let cpu: CpuId = 35;
+        let mut control = user_control_with(RecordingCs(rec), BoxStack::new(), hits);
+        control.live = Some(Arc::new(crate::procspace::ProcessSpace::for_test(
+            crate::procspace::host_test_space(),
+        )));
+
+        // One ordinary step seeds a real suspension point, publishes both
+        // handles across the switch, and clears them on the way back.
+        assert_eq!(dispatch_step(&mut control, cpu), TaskAction::Yield);
+        assert_eq!(hits.load(Ordering::SeqCst), 1);
+
+        // Poke in a foreign suspension point, as a park against another task's
+        // control block would have left behind.
+        let foreign = BoxStack::new();
+        control.task_ctx.stack_pointer = foreign.top() - 64;
+        assert_eq!(dispatch_step(&mut control, cpu), TaskAction::Exit);
+        assert_eq!(
+            hits.load(Ordering::SeqCst),
+            1,
+            "a refused task's switch-in hook must not run, so its user root is \
+             never activated"
+        );
+        assert!(
+            current_process_space(cpu).is_none(),
+            "a refused task must leave no live-space publication to dangle"
+        );
+        assert!(
+            !reschedule_current(cpu, RescheduleAction::Yield),
+            "a refused task must leave no resume handle to switch into"
+        );
     }
 
     #[test]

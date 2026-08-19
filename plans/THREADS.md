@@ -166,7 +166,13 @@ table, and signal targets.
 per-CPU slot publishes a borrowed `*const ProcessSpace` (no refcount traffic on
 the switch path) and `with_current_live_space` reborrows it and takes the lock,
 so the old "only one task per space" `&mut` argument is replaced by real
-exclusion. A **spin** lock, not a `SleepLock`: the demand-paging fault resolver
+exclusion. The pointer's `Arc` provenance is a *type* invariant —
+`LiveSpacePtr::borrowed` is its only constructor — because
+`current_process_space` reconstructs an owning handle out of the publication's
+own strong count; a publisher able to name a `ProcessSpace` that was never
+inside an `Arc` turns that increment into an out-of-bounds write
+(`plans/OPEN-DEFECTS.md` D45). A dispatch step that refuses a task publishes
+nothing, so no per-CPU slot can name a control block the scheduler then reaps. A **spin** lock, not a `SleepLock`: the demand-paging fault resolver
 runs with IRQ masked and cannot park. The discipline is *never park while holding
 it*, which holds because every `LiveUserSpace` method is park-free (frame alloc +
 page-table write + TLB flush) and file content is read into a kernel buffer
@@ -214,8 +220,11 @@ the machine overcommit.
 `threads.rs` (the reservation, the recorded span, the born-parked ordering, and
 the teardown); `futex.rs` (a per-CPU-sized bucket array of on-demand `WaitQueue`s,
 `wake_n`, enrolment in the timed sweep and the nearest-deadline arming, and
-per-process key teardown); the four handlers, each validating its addresses
-through the fault-aware copy boundary; and decision 10's group fan-out.
+per-process key teardown — the bucket table is fixed by its first use, so boot
+sizes it before any thread can wait and a later sizing is refused rather than
+stranding a live key's waiters in a bucket no waker looks in); the four
+handlers, each validating its addresses through the fault-aware copy boundary;
+and decision 10's group fan-out.
 
 **Defects fixed on the way:** `copy_in_user` offered the compressed-tier
 (`ramzip`) resolver **nowhere**, so a syscall staging a buffer from a parked page

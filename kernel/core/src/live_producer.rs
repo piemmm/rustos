@@ -497,6 +497,7 @@ mod tests {
     use super::*;
 
     extern crate std;
+    use alloc::sync::Arc;
     use std::boxed::Box;
     use std::vec::Vec;
 
@@ -801,27 +802,29 @@ mod tests {
         arch
     }
 
-    /// Wrap `fake` in a leaked [`ProcessSpace`] — the `'static` shape
-    /// [`publish_live_space_for_test`] requires (the production space is held
-    /// by the process's threads for their whole lives) — returning the handle
-    /// to publish and a raw pointer to inspect the recording after the
-    /// producer call (the space's lock is released by then; single-threaded).
-    /// A test leak is bounded by the process.
-    fn leak_fake() -> (&'static ProcessSpace, *const FakeLive) {
-        leak_fake_with(FakeLive::default())
+    /// Wrap `fake` in the refcounted [`ProcessSpace`]
+    /// [`publish_live_space_for_test`] publishes — the same shape a process's
+    /// threads hold for their whole lives — returning the handle to publish and
+    /// a raw pointer to inspect the recording after the producer call (the
+    /// space's lock is released by then; single-threaded).
+    ///
+    /// The `FakeLive` stays boxed inside the space, so its address is stable
+    /// for as long as the publication's guard holds the handle alive.
+    fn shared_fake() -> (Arc<ProcessSpace>, *const FakeLive) {
+        shared_fake_with(FakeLive::default())
     }
 
-    fn leak_fake_with(fake: FakeLive) -> (&'static ProcessSpace, *const FakeLive) {
+    fn shared_fake_with(fake: FakeLive) -> (Arc<ProcessSpace>, *const FakeLive) {
         let boxed = Box::new(fake);
         let ptr: *const FakeLive = &raw const *boxed;
-        (Box::leak(Box::new(ProcessSpace::for_test(boxed))), ptr)
+        (Arc::new(ProcessSpace::for_test(boxed)), ptr)
     }
 
     const PAGE: usize = 4096;
 
     #[test]
     fn mem_map_routes_a_fixed_request_to_the_current_live_space() {
-        let (fake, ptr) = leak_fake();
+        let (fake, ptr) = shared_fake();
         let _guard = publish_live_space_for_test(1, fake);
 
         let producer = LiveMemMap::new(arch_at(1));
@@ -837,7 +840,7 @@ mod tests {
 
     #[test]
     fn mem_map_unmap_routes_to_the_current_live_space() {
-        let (fake, ptr) = leak_fake();
+        let (fake, ptr) = shared_fake();
         let _guard = publish_live_space_for_test(2, fake);
 
         let producer = LiveMemMap::new(arch_at(2));
@@ -849,7 +852,7 @@ mod tests {
 
     #[test]
     fn mem_map_non_fixed_routes_to_the_placement_allocator() {
-        let (fake, ptr) = leak_fake();
+        let (fake, ptr) = shared_fake();
         let _guard = publish_live_space_for_test(3, fake);
 
         let producer = LiveMemMap::new(arch_at(3));
@@ -867,7 +870,7 @@ mod tests {
 
     #[test]
     fn mem_map_reserve_non_fixed_routes_to_the_placement_reservation() {
-        let (fake, ptr) = leak_fake();
+        let (fake, ptr) = shared_fake();
         let _guard = publish_live_space_for_test(9, fake);
 
         let producer = LiveMemMap::new(arch_at(9));
@@ -885,7 +888,7 @@ mod tests {
 
     #[test]
     fn mem_map_reserve_fixed_routes_to_the_placed_reservation() {
-        let (fake, ptr) = leak_fake();
+        let (fake, ptr) = shared_fake();
         let _guard = publish_live_space_for_test(10, fake);
 
         let producer = LiveMemMap::new(arch_at(10));
@@ -922,7 +925,7 @@ mod tests {
 
     #[test]
     fn mem_map_folds_an_out_of_memory_error() {
-        let (fake, _ptr) = leak_fake_with(FakeLive {
+        let (fake, _ptr) = shared_fake_with(FakeLive {
             next: Some(LiveSpaceError::Anon(AnonError::OutOfMemory)),
             ..FakeLive::default()
         });
@@ -937,7 +940,7 @@ mod tests {
 
     #[test]
     fn file_map_reserve_routes_to_the_current_live_space() {
-        let (fake, ptr) = leak_fake();
+        let (fake, ptr) = shared_fake();
         let _guard = publish_live_space_for_test(12, fake);
 
         let producer = LiveMemMap::new(arch_at(12));
@@ -951,7 +954,7 @@ mod tests {
 
     #[test]
     fn file_map_page_and_release_route_to_the_current_live_space() {
-        let (fake, ptr) = leak_fake();
+        let (fake, ptr) = shared_fake();
         let _guard = publish_live_space_for_test(13, fake);
 
         let producer = LiveMemMap::new(arch_at(13));
@@ -990,7 +993,7 @@ mod tests {
 
     #[test]
     fn mmio_map_routes_a_granted_window_to_the_current_live_space() {
-        let (fake, ptr) = leak_fake();
+        let (fake, ptr) = shared_fake();
         let _guard = publish_live_space_for_test(6, fake);
 
         let producer = LiveMmioMap::new(arch_at(6));
@@ -1005,7 +1008,7 @@ mod tests {
 
     #[test]
     fn mmio_map_routes_a_write_combining_framebuffer_to_the_scanout_path() {
-        let (fake, ptr) = leak_fake();
+        let (fake, ptr) = shared_fake();
         let _guard = publish_live_space_for_test(15, fake);
 
         let producer = LiveMmioMap::new(arch_at(15));
@@ -1037,7 +1040,7 @@ mod tests {
 
     #[test]
     fn mmio_map_folds_a_no_virtual_space_error() {
-        let (fake, _ptr) = leak_fake_with(FakeLive {
+        let (fake, _ptr) = shared_fake_with(FakeLive {
             next: Some(LiveSpaceError::Mmio(MmioError::NoVirtualSpace)),
             ..FakeLive::default()
         });
@@ -1052,7 +1055,7 @@ mod tests {
 
     #[test]
     fn dma_alloc_routes_a_carve_to_the_current_live_space() {
-        let (fake, ptr) = leak_fake();
+        let (fake, ptr) = shared_fake();
         let _guard = publish_live_space_for_test(16, fake);
 
         let producer = LiveDmaAlloc::new(arch_at(16));
@@ -1079,7 +1082,7 @@ mod tests {
 
     #[test]
     fn dma_alloc_folds_an_addressing_limit_error_to_out_of_range() {
-        let (fake, _ptr) = leak_fake_with(FakeLive {
+        let (fake, _ptr) = shared_fake_with(FakeLive {
             next: Some(LiveSpaceError::Dma(DmaError::AddrLimitExceeded)),
             ..FakeLive::default()
         });
