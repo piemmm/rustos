@@ -10,8 +10,11 @@ use alloc::string::String;
 use tairix_log::DiscardSink;
 use tairix_reclaim::{CacheBudget, CachedBytes, PressureBand, ReclaimOwner, ReportedPressure};
 
-use super::tests::{cache_at, caching_client, client_with, glyph_lookups, INTER};
 use super::*;
+use crate::client::tests::{
+    cache_at, caching_client, client_with, glyph_lookups, LocalClient, INTER,
+};
+use crate::client::FontClient;
 
 use crate::font::{BitmapFont, ELLIPSIS};
 use crate::glyph_cache::glyph_cache_budget;
@@ -30,11 +33,11 @@ const HEIGHT: u32 = 20;
 fn measuring_client(
     band: PressureBand,
     memo_budget: CacheBudget,
-) -> (GlyphClient, &'static ReportedPressure) {
+) -> (LocalClient, &'static ReportedPressure) {
     static SINK: DiscardSink = DiscardSink;
 
     let (mut client, gauge) = caching_client(band, glyph_cache_budget(1 << 30));
-    client.measure = Some(ReclaimCache::new(
+    client.caches.measure = Some(ReclaimCache::new(
         "test.font.measure",
         measure_cache_candidate(ReclaimOwner::UserlandProcess("test.font")),
         memo_budget,
@@ -45,13 +48,14 @@ fn measuring_client(
 }
 
 /// A comfortable machine: room for both caches, band reported normal.
-fn roomy_client() -> (GlyphClient, &'static ReportedPressure) {
+fn roomy_client() -> (LocalClient, &'static ReportedPressure) {
     measuring_client(PressureBand::Normal, glyph_cache_budget(1 << 30))
 }
 
 /// Lookups the memo itself has answered or missed.
-fn memo_lookups(client: &GlyphClient) -> u64 {
+fn memo_lookups(client: &LocalClient) -> u64 {
     let accounting = client
+        .caches
         .measure
         .as_ref()
         .expect("a memo is installed")
@@ -59,8 +63,13 @@ fn memo_lookups(client: &GlyphClient) -> u64 {
     accounting.hits() + accounting.misses()
 }
 
-fn memo_entries(client: &GlyphClient) -> usize {
-    client.measure.as_ref().expect("a memo is installed").len()
+fn memo_entries(client: &LocalClient) -> usize {
+    client
+        .caches
+        .measure
+        .as_ref()
+        .expect("a memo is installed")
+        .len()
 }
 
 fn char_count(text: &str) -> u64 {
@@ -73,7 +82,7 @@ fn char_count(text: &str) -> u64 {
 /// An independent reference, deliberately not sharing code with the thing it
 /// checks, so a differential test can catch the memo answering differently
 /// from the walk it replaced.
-fn reference_width(client: &mut GlyphClient, family: FamilyKey, text: &str) -> u32 {
+fn reference_width(client: &mut LocalClient, family: FamilyKey, text: &str) -> u32 {
     text.chars().fold(0u32, |width, scalar| {
         let advance = client
             .with_glyph(scalar, family, HEIGHT, FontWeight::Regular, |glyph| {
@@ -86,7 +95,7 @@ fn reference_width(client: &mut GlyphClient, family: FamilyKey, text: &str) -> u
 
 /// The truncation as it was computed before the memo.
 fn reference_truncate<'a>(
-    client: &mut GlyphClient,
+    client: &mut LocalClient,
     family: FamilyKey,
     text: &'a str,
     width: u32,
@@ -111,7 +120,7 @@ fn reference_truncate<'a>(
 
 /// The elision as it was computed before the memo.
 fn reference_elide<'a>(
-    client: &mut GlyphClient,
+    client: &mut LocalClient,
     family: FamilyKey,
     text: &'a str,
     width: u32,
@@ -280,7 +289,7 @@ fn a_new_advance_source_invalidates_every_retained_measurement() {
     let before = font.width_on(&mut client, text);
     assert_eq!(memo_entries(&client), 1);
 
-    client.install_transport(Box::new(SolidTestTransport));
+    client.install_advance_source(Box::new(SolidTestTransport));
 
     let after = font.width_on(&mut client, text);
     assert_eq!(
@@ -290,6 +299,7 @@ fn a_new_advance_source_invalidates_every_retained_measurement() {
     assert_eq!(memo_entries(&client), 1, "a stale entry survived");
     assert_eq!(
         client
+            .caches
             .measure
             .as_ref()
             .expect("a memo is installed")
@@ -335,7 +345,7 @@ fn a_band_that_tightens_hands_the_retained_measurements_back() {
     assert_eq!(memo_entries(&client), 1);
 
     gauge.report(PressureBand::Mild);
-    assert!(client.trim() > 0, "the trim released nothing");
+    assert!(client.caches.trim() > 0, "the trim released nothing");
     assert_eq!(memo_entries(&client), 0);
     assert_eq!(
         font.width_on(&mut client, text),
@@ -363,7 +373,7 @@ fn a_service_that_answers_metrics_but_no_glyph_measures_zero_and_retains_nothing
 
     let (_, gauge) = cache_at(PressureBand::Normal, glyph_cache_budget(1 << 30));
     let mut client = client_with(MetricsOnly);
-    client.measure = Some(ReclaimCache::new(
+    client.caches.measure = Some(ReclaimCache::new(
         "test.font.measure",
         measure_cache_candidate(ReclaimOwner::UserlandProcess("test.font")),
         glyph_cache_budget(1 << 30),

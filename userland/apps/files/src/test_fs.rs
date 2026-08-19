@@ -11,7 +11,7 @@ use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
 use tairix_abi::Errno;
-use tairix_browse::{Browser, DirectorySource, Entry};
+use tairix_browse::{Browser, DirectorySource, Listing};
 
 /// An in-memory directory tree: a path either lists (empty) or is refused.
 pub struct FakeFs {
@@ -40,7 +40,7 @@ impl FakeFs {
 }
 
 impl DirectorySource for FakeFs {
-    fn list(&mut self, components: &[String]) -> Result<Vec<Entry>, Errno> {
+    fn list(&mut self, components: &[String]) -> Result<Listing, Errno> {
         let mut path = String::new();
         for component in components {
             path.push('/');
@@ -50,7 +50,7 @@ impl DirectorySource for FakeFs {
             path.push('/');
         }
         if self.listable.contains(&path) {
-            Ok(Vec::new())
+            Ok(Listing::Ready(Vec::new()))
         } else {
             Err(Errno::PermissionDenied)
         }

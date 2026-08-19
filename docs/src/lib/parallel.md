@@ -105,6 +105,16 @@ cares can say so.
 
 ## Testing
 
+The `test-util` feature exports `Reversed`, the runner every consumer proves
+bit-identity against: it reports a width it does not have and runs its pieces
+**backwards on the calling thread**, so a comparison against `SERIAL` is a proof
+about how a pass *divides* rather than about thread timing. It lives here because
+the `unsafe impl` belongs beside the trait whose obligations it discharges, and
+because the compositor, the frost, and the window-frame codec were otherwise
+each spelling the same eight lines. `Reversed::widest` reports the most pieces
+any dispatch asked for, so a test can assert the work really was split rather
+than assume it.
+
 Host tests cover the split policy at and around its boundaries, `for_each`
 visiting each element exactly once, that the order pieces run in cannot change the
 result, the unvisited-element case a skipping runner produces, the no-worker

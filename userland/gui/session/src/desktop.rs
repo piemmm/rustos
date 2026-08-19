@@ -69,7 +69,7 @@ use tairix_browse::render::{grid_metrics, grid_tile};
 use tairix_browse::{
     applications_for, entry_icon_request, media_for_entry, sort_entries, suggest_new_dir_name,
     AppAssociation, ClickKind, DirectorySource, DoubleClickTracker, Entry, EntryKind, GridFill,
-    GridFlow, GridView, SortDirection, SortKey, SortMode,
+    GridFlow, GridView, Listing, SortDirection, SortKey, SortMode,
 };
 use tairix_controls::state::{ControlState, FocusState, PointerState, SelectionState};
 use tairix_controls::IconTile;
@@ -372,15 +372,24 @@ impl<S: DirectorySource> Desktop<S> {
         DesktopOutcome::ignored()
     }
 
-    /// Re-list the folder now, whatever the rate limit says: the caller knows
-    /// something changed (bring-up, or an action the session itself performed
-    /// on the folder). Returns whether the shown set changed.
+    /// Ask for a fresh listing of the folder now, whatever the rate limit says:
+    /// the caller knows something changed (bring-up, or an action the session
+    /// itself performed on the folder). Returns whether the shown set changed.
     ///
     /// A listing the source refuses leaves the desktop empty and selects
     /// nothing rather than showing a stale or guessed folder.
+    ///
+    /// A source that reads the folder elsewhere answers "not yet", and this
+    /// changes nothing at all — the icons already on screen stay there, and the
+    /// caller calls again on the wake that says the read finished. Blanking the
+    /// column while a read is in flight would make every re-list flicker.
     pub fn relist(&mut self, now_ns: u64) -> bool {
         self.listed_at_ns = Some(now_ns);
-        let mut entries = self.source.list(&self.folder).unwrap_or_default();
+        let mut entries = match self.source.list(&self.folder) {
+            Ok(Listing::Ready(entries)) => entries,
+            Ok(Listing::Pending) => return false,
+            Err(_) => Vec::new(),
+        };
         sort_entries(&mut entries, sort_mode(self.settings.sort));
         if entries == self.entries {
             return false;

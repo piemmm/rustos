@@ -18,7 +18,7 @@
 
 use tairix_abi::driver::display::{DamageRect, DisplayFormat, DisplayMode, MAX_DAMAGE_RECTS};
 use tairix_geometry::{Rect, Region};
-use tairix_raster::Pixel;
+use tairix_raster::{Color, Pixel};
 
 /// The byte order a display format wants each pixel written in.
 ///
@@ -59,6 +59,38 @@ impl ChannelOrder {
             Self::Rgba => [pixel.r, pixel.g, pixel.b, pixel.a],
             Self::Bgra => [pixel.b, pixel.g, pixel.r, pixel.a],
         }
+    }
+
+    /// Encode one premultiplied pixel as the four **straight-alpha** bytes a
+    /// window frame holds.
+    ///
+    /// Unlike [`encode`](Self::encode), which writes to an opaque scan-out
+    /// frame where a premultiplied channel already equals its straight form,
+    /// this un-premultiplies first: a window frame carries the app's own alpha,
+    /// so a translucent region has to survive the round trip. The inverse is
+    /// [`decode_straight`](Self::decode_straight).
+    #[must_use]
+    pub fn encode_straight(self, pixel: Pixel) -> [u8; 4] {
+        let colour = pixel.unpremultiply();
+        match self {
+            Self::Rgba => [colour.r, colour.g, colour.b, colour.a],
+            Self::Bgra => [colour.b, colour.g, colour.r, colour.a],
+        }
+    }
+
+    /// Decode four straight-alpha window-frame bytes into a premultiplied
+    /// pixel — the inverse of [`encode_straight`](Self::encode_straight).
+    ///
+    /// The alpha byte is the app's own and is honoured, so a compositor can
+    /// blend a translucent window region correctly.
+    #[must_use]
+    pub fn decode_straight(self, bytes: [u8; 4]) -> Pixel {
+        let [b0, b1, b2, b3] = bytes;
+        match self {
+            Self::Rgba => Color::rgba(b0, b1, b2, b3),
+            Self::Bgra => Color::rgba(b2, b1, b0, b3),
+        }
+        .premultiply()
     }
 
     /// Encode a run of premultiplied pixels into `out`, returning the number

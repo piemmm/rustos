@@ -47,6 +47,11 @@ tairix-icon = { path = "../../../lib/icon", version = "=0.0.0" }
 # allocator, the syscall wrappers). These are bare-metal only; on the host
 # the binary is an inert stub with no dependencies.
 [target.'cfg(target_os = "none")'.dependencies]
+# The window-frame pixel codec (`tairix_display::winframe`): the one
+# definition of the straight-alpha conversion between this program's own
+# surface and the shared frame the desktop session reads, so no app carries a
+# private copy of the channel-order decision.
+tairix-display = { path = "../../../lib/display", version = "=0.0.0" }
 tairix-abi = { path = "../../../lib/abi", version = "=0.0.0" }
 tairix-window = { path = "../../../lib/window", version = "=0.0.0" }
 tairix-rt = { path = "../../../lib/rt", version = "=0.0.0" }

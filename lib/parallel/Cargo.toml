@@ -17,6 +17,10 @@ workspace = true
 # must stay linkable in-kernel, where there is no userland thread to spawn.
 default = ["pool"]
 pool = ["dep:tairix-rt", "dep:tairix-abi"]
+# The order-shuffling `Reversed` runner a pass's host tests prove bit-identity
+# against. A consumer enables it as a dev-dependency feature; this crate's own
+# tests reach it through `cfg(test)`, so it is never part of a production build.
+test-util = []
 
 [dependencies]
 # The thread and futex primitives the pool is built on: a worker is a
@@ -25,3 +29,4 @@ pool = ["dep:tairix-rt", "dep:tairix-abi"]
 tairix-rt = { path = "../rt", version = "=0.0.0", optional = true }
 # `Errno`, for reporting how many workers the kernel would grant.
 tairix-abi = { path = "../abi", version = "=0.0.0", optional = true }
+

@@ -244,11 +244,33 @@ ladder and the desktop's DPI scale together.
 - A program links the real transport with the `tairix-font/rt` feature, which
   routes each request through `tairix_rt::ipc_call(FONT_ENDPOINT, …)`.
 - A host test installs a mock (`set_font_transport`, or the `test-util`
-  `SolidTestTransport`), so the blitter is exercised with no service running
-  and `lib/font`'s own host tests never pull `tairix-rt`.
+  `SolidTestTransport`), so the blitter is exercised with no service running.
 - With **no** transport installed, a draw composites nothing and fails closed
   (`AGENTS.md` §5.4) rather than reaching for any local font data.
 
-This mirrors how `lib/display` gates its `rt` transport non-default and lets
-each consumer opt in, so the render libraries stay host-testable and the
-headless build (`AGENTS.md` §17.3) is unaffected.
+The `rt` feature still gates only the *production* transport (and the
+RAM-derived cache budget it needs), so the headless build (`AGENTS.md` §17.3)
+is unaffected and a host test never has to stand a service up.
+
+### Two locks, and never both at once
+
+The client is process-global, and userland is multi-threaded
+(`plans/THREADS.md`), so its state is locked — with the runtime's futex mutex
+rather than a spinlock, because a preempted holder would otherwise make a
+waiter burn a whole quantum against a thread that is not running.
+
+The state is split, and the split is the discipline:
+
+- **The caches** — glyph coverage, line metrics, measured text — are pure
+  memory, and their lock is held for the span of one measurement or one drawn
+  run so a warm run pays a single acquisition.
+- **The channel** — the one transport and its reply buffer — has its own lock,
+  and that one *is* held across the `fontd` round trip, which is what it is
+  for.
+
+A fetch **releases the caches before taking the channel**, so the caches lock
+never spans a syscall and no thread ever holds both. There is therefore no lock
+order to get wrong. A cache hit is served from inside the cache; a miss is
+served from the freshly fetched value with no lock held at all, and the value is
+offered to the cache afterwards, so the coverage blit is off both locks and the
+one lookup is counted once.

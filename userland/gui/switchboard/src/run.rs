@@ -75,6 +75,7 @@ mod program {
         CapabilityId, CapabilityQuery, Errno, Origin, PowerAction, ProcId, SchedPriority, Signal,
         SignalIntakeOp, WaitSetOp, WaitSourceKind, ORIGIN_WIRE_LEN,
     };
+    use tairix_display::{winframe, SERIAL};
     use tairix_font::BitmapFont;
     use tairix_geometry::{Point, Rect, Scale};
     use tairix_input::{InputEvent, Key, NamedKey, PointerButton};
@@ -479,17 +480,15 @@ mod program {
                 theme,
                 panel_font(theme, desktop.scale()),
             );
-            let pixels = window.surface.pixels();
-            let frame = window.frames.as_mut();
-            for (index, pixel) in pixels.iter().enumerate() {
-                let color = pixel.unpremultiply();
-                let at = index * 4;
-                let Some(slot) = frame.get_mut(at..at + 4) else {
-                    return Err(Errno::LengthOutOfRange);
-                };
-                slot.copy_from_slice(&[color.r, color.g, color.b, color.a]);
-            }
-            client.present(window.id, 0, DamageRect::full(&window.mode))
+            let damage = DamageRect::full(&window.mode);
+            winframe::encode(
+                &window.surface,
+                window.frames.as_mut(),
+                &window.mode,
+                damage,
+                &SERIAL,
+            )?;
+            client.present(window.id, 0, damage)
         }
 
         fn render_inputs(&self) -> Option<RenderInputs> {

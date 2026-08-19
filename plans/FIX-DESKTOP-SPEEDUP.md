@@ -592,7 +592,9 @@ per pointer sample became one control-sized one:
    through `row_span_mut`), so no control needs changing.
 3. **Convert and present only that rectangle**, which is where the app's
    unpremultiply-and-copy and the session's convert-and-diff both stop being
-   whole-window.
+   whole-window. The conversion itself is no longer the app's to write: it is
+   `tairix_display::winframe::encode` (Stage J), so an app's remaining work here
+   is retaining its surface, clipping its draw, and naming the rectangle.
 
 A round that changed the view but reported nothing presents the **whole window**
 — not nothing. Over-covering costs pixels; under-covering leaves a stale frame,
@@ -1400,10 +1402,45 @@ park on a futex and never spin. Detail: `docs/src/lib/parallel.md`.
   can have reached their loop, allocates on workers inside a nested dispatch, and
   drops the pool to join them.
 
-**Still open:** the pool serves the compositor alone. `lib/cpuops`-dispatched
-per-pixel kernels (Stage F) are orthogonal and compose with it; `lib/controls`'
-selection frost stays on the calling thread, which is right for a small rounded
-plate.
+**Still open:** `lib/cpuops`-dispatched per-pixel kernels (Stage F) are
+orthogonal and compose with the pool; `lib/controls`' selection frost stays on
+the calling thread, which is right for a small rounded plate.
+
+---
+
+## Stage J — The one whole-window pass above the compositor  **[done]**
+
+Of the three whole-window passes a repaint costs above the compositor (Stage C),
+one is not the app's to shrink: converting an application's presented
+straight-alpha frame into the compositor's own window surface, and reporting the
+pixels that genuinely changed. The **app** declares the damage, so a client that
+repaints everything makes the desktop convert everything — C.3 is the answer for
+the two passes inside the app, and it cannot be the answer for this one.
+
+- **One definition, not seven.** The conversion was hand-rolled once in the
+  session and once in each of six programs, each carrying its own copy of the
+  channel-order decision — the duplication §2.2 forbids, and a place a channel
+  swap could hide. It is now `tairix_display::winframe`, beside the
+  `ChannelOrder` the scan-out path already owns: `encode` writes a surface out as
+  the straight-alpha bytes a window frame holds, `decode` reads a frame in and
+  answers the changed sub-rectangle. The scan-out encoder is deliberately *not*
+  reused for it — the screen is opaque, a window frame is not — so the pair sits
+  beside it as `encode_straight` / `decode_straight`.
+- **Spread, because it cannot be bounded.** Both directions are row-independent
+  and expressed over `lib/parallel`'s `JobRunner`. The session hands the decode
+  the compositor's own runner, read back through `Compositor::job_runner` so the
+  conversion and the composite cannot disagree about how wide the machine is. An
+  app passes the calling-thread runner: it decides how much it presents, and a
+  pool per app would be threads and stacks spent on a pass C.3 removes.
+- **Bit-identity under splitting** is proven against `tairix_parallel::Reversed`
+  — the shared order-shuffling runner, promoted out of the three private copies
+  `lib/raster`, `userland/gui/wm`, and this work would otherwise have had, so the
+  `unsafe impl` lives once, beside the trait whose obligations it discharges.
+- **Fail closed, unchanged.** Every index either direction uses is validated
+  before the first write (and more strictly than the hand-rolled loops were: a
+  row span wider than the stride is now refused rather than relied on), so a
+  hostile geometry refuses the whole conversion rather than leaving a window
+  half-converted.
 
 ---
 
@@ -1551,6 +1588,8 @@ Stated so a later change cannot quietly take a shortcut:
 | F | `lib/cpuops` `ByPriority` raster candidates (aarch64 first) | B, C, (D, E), F.0 decision | no | no |
 | G | user-space FP/SSE enablement | User decision | target floor | yes |
 | H | publish a region's own pages instead of re-freezing the space | — | no | yes |
+| I | compose a dirty rectangle's rows in bands across a worker pool | A, B, D | no | no |
+| J | one window-frame codec, and the desktop's decode spread across it | A, I | no | no |
 
 A–E are expected to dominate F entirely.
 

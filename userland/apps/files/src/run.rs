@@ -111,6 +111,7 @@ mod program {
     use tairix_controls::decision::Dialog;
     use tairix_controls::text::{TextAction, TextField};
     use tairix_controls::Menu;
+    use tairix_display::{winframe, SERIAL};
     use tairix_geometry::{Point, Rect, Scale};
     use tairix_help::{own_short_help, BundleHelp};
     use tairix_icon::{
@@ -1149,16 +1150,10 @@ mod program {
         if let Some(operation) = overlays.operation.as_ref() {
             draw_progress_dialog(&mut surface, &operation.progress, scale, theme, viewport);
         }
-        for (i, pixel) in surface.pixels().iter().enumerate() {
-            let color = pixel.unpremultiply();
-            let at = i * 4;
-            let Some(slot) = target.frame.get_mut(at..at + 4) else {
-                return Err(Errno::LengthOutOfRange);
-            };
-            slot.copy_from_slice(&[color.r, color.g, color.b, color.a]);
-        }
+        let damage = DamageRect::full(mode);
+        winframe::encode(&surface, target.frame, mode, damage, &SERIAL)?;
         let window = target.window;
-        target.client.present(window, 0, DamageRect::full(mode))
+        target.client.present(window, 0, damage)
     }
 
     /// Apply one delivered event to the browser, reporting whether the

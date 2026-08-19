@@ -647,8 +647,11 @@ const AUTOLOAD_LOGIN_DIALOGUE: &str = "root\nroot\ndesktop\n";
 /// ordered: visible desktop → verified dump → mouse motion → the guest's
 /// `kind=pointer` witness → PASS — a run can neither pass without showing
 /// the desktop nor exit before the host holds the pixels. It also puts
-/// every later stage after the fade, so the dumps that sample wallpaper
-/// beside a served window measure the desktop rather than the fade.
+/// every later stage after the fade *and* after the wallpaper's first
+/// preparation — the session holds the witness back while that is in flight,
+/// since the wallpaper is read and decoded on a worker thread — so the dumps
+/// that sample wallpaper measure the desktop rather than the fade or the
+/// fallback colour.
 const AUTOLOAD_DESKTOP_REVEALED_MARKER: &str = tairix_desktop_session::DESKTOP_REVEALED_MESSAGE;
 
 /// `true` if `text` begins with `prefix`.

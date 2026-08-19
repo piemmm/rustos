@@ -260,6 +260,25 @@ impl<S: DirectorySource, F: FnMut() -> S> SessionPicker<S, F> {
         })
     }
 
+    /// Ask the source again for a navigation whose listing had not arrived,
+    /// repainting and retitling when it lands.
+    ///
+    /// This is what the session calls on the wake that says its listing worker
+    /// finished — never a poll. With no pick showing, or nothing pending, it
+    /// does nothing. A listing the source now refuses drops the pending
+    /// navigation and repaints, so the "listing" cue clears and the picker is
+    /// left exactly where it was (fail closed).
+    pub fn resume(
+        &mut self,
+        shell: &mut DesktopShell,
+        compositor: &mut Compositor,
+    ) -> Option<ConcludedPick> {
+        self.navigate(shell, compositor, |browser| match browser.resume() {
+            Ok(true) | Err(_) => NavOutcome::Redraw,
+            Ok(false) => NavOutcome::None,
+        })
+    }
+
     /// Run one navigation step against the active browser, repaint on a
     /// change, retitle the window when the step moved to another directory,
     /// and conclude when the step chose a file.

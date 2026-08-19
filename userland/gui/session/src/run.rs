@@ -103,7 +103,7 @@ mod program {
         WaitStatus, CONSOLE_INHERIT, ORIGIN_WIRE_LEN, SPAWN_UID_INHERIT, WAIT_PID_ANY,
     };
     use tairix_browse::{
-        association_from_appinfo, AppAssociation, DirectorySource, GridView, VfsDirectorySource,
+        association_from_appinfo, AppAssociation, DirectorySource, Entry, GridView, Listing,
     };
     use tairix_caps::CapabilitySet;
     use tairix_desktop_session::switchuser::{
@@ -117,12 +117,13 @@ mod program {
         window_control_event, Answer, ArtworkFileReader, ArtworkSandbox, CliError, Command,
         ConcludedPick, ConfirmPrompt, Delivery, Desktop, DesktopAction, DesktopActivation,
         DesktopOutcome, DesktopShell, DeviceInputSource, DragOrigin, FrameContent, HangTracker,
-        HoldBack, IconRasteriser, InputSource, KeyboardInputSource, LaunchTable, LockedDrain,
-        OwnerWindow, PickConclusion, PinBridge, PinService, PinboardMenu, PinboardMenuOutcome,
-        PinboardStore, PinboardStoreError, PresentedOwners, ResolvedPin, ScreenFade, ScreenLock,
-        SeatEventReader, SeatInputChannel, SessionFileReader, SessionFileWriter, SessionPicker,
-        SessionPins, SessionWindows, ShellWindowHost, SwitchboardMailbox, SwitchboardOutcome,
-        SwitchboardServe, FILES_LABEL, FILES_RUN_PATH, SWITCHBOARD_CALL_REFUSED, SWITCHBOARD_LABEL,
+        HoldBack, IconRasteriser, InputSource, KeyboardInputSource, LaunchTable, ListingClient,
+        ListingDesk, LockedDrain, OwnerWindow, PickConclusion, PinBridge, PinService, PinboardMenu,
+        PinboardMenuOutcome, PinboardStore, PinboardStoreError, Prepared, PresentedOwners,
+        ResolvedPin, ScreenFade, ScreenLock, SeatEventReader, SeatInputChannel, SessionFileReader,
+        SessionFileWriter, SessionPicker, SessionPins, SessionWindows, ShellWindowHost,
+        SwitchboardMailbox, SwitchboardOutcome, SwitchboardServe, WallpaperDesk, WallpaperSource,
+        FILES_LABEL, FILES_RUN_PATH, SWITCHBOARD_CALL_REFUSED, SWITCHBOARD_LABEL,
         SWITCHBOARD_RUN_PATH, USAGE, WALLPAPER_LABEL, WALLPAPER_RUN_PATH,
     };
     use tairix_display::{DisplayClient, DisplayTransport, RemoteDisplay, RtShmMapper};
@@ -139,7 +140,7 @@ mod program {
     use tairix_sandbox::{ParserSandbox, ServeEnd};
     use tairix_taskbar::{TaskId, TaskbarConfig, TaskbarResponse};
     use tairix_taskpins::PinTarget;
-    use tairix_wallpaper::{PinboardSettings, WallpaperChoice, WallpaperFit, MAX_WALLPAPER_BYTES};
+    use tairix_wallpaper::{PinboardSettings, MAX_WALLPAPER_BYTES};
     use tairix_window::{
         event_endpoint_for, CallerIdentity, EventSink, PinDecision, WindowServer, WINDOW_REPLY_MAX,
     };
@@ -278,6 +279,20 @@ mod program {
     /// mailbox: the session authority telling a background desktop it is the
     /// foreground one again, or that it must end.
     const WAKE_TOKEN: u64 = 9;
+
+    /// The wait-set token of the session's worker wake pipe: a directory read or
+    /// a wallpaper preparation the session asked for has finished, so whichever
+    /// consumer was waiting can adopt it and repaint.
+    const WORKER_TOKEN: u64 = 10;
+
+    /// Bytes drained from the worker wake pipe per wake.
+    ///
+    /// A worker writes one byte per delivered answer, and there are three
+    /// consumers between the two workers, so this is comfortably more than can
+    /// ever be outstanding — and the member is a level-triggered peek, so
+    /// anything a short drain left behind re-reports on the very next wait rather
+    /// than being lost.
+    const WORKER_NUDGE_DRAIN: usize = 8;
 
     /// Queued-wake capacity of the mailbox. The authority sends one wake per
     /// switch and the loop drains it on the very next turn, so a handful of
@@ -984,6 +999,46 @@ mod program {
         }
     }
 
+    /// Stops the session's worker threads on every way out of [`session`], so
+    /// none is left reading a directory or decoding a picture for a desktop that
+    /// has ended.
+    ///
+    /// The handles are *detached* rather than joined: a worker mid-read of a slow
+    /// disk would otherwise hold the teardown for as long as that disk takes, and
+    /// it has nothing left to write to — each leaves at its next turn round its
+    /// loop, and the desk it shares is kept alive by its own handle until then.
+    struct WorkerGuard {
+        listings: alloc::sync::Arc<Listings>,
+        wallpapers: alloc::sync::Arc<Wallpapers>,
+    }
+
+    impl Drop for WorkerGuard {
+        fn drop(&mut self) {
+            self.listings.stop();
+            self.wallpapers.stop();
+        }
+    }
+
+    /// Spawn one named session worker, stating a refusal once.
+    ///
+    /// A kernel that will not grant the thread is not a failure: the work moves
+    /// back onto the serve loop, which is exactly where it used to be.
+    fn spawn_worker(
+        what: &str,
+        body: impl FnOnce() + Send + 'static,
+    ) -> Option<tairix_rt::thread::JoinHandle<()>> {
+        match tairix_rt::thread::Thread::spawn(body) {
+            Ok(handle) => Some(handle),
+            Err(err) => {
+                let _ = writeln!(
+                    Stderr,
+                    "desktop: no {what} thread ({err:?}); that work runs on the serve loop"
+                );
+                None
+            }
+        }
+    }
+
     /// The shared frame region the display service scans out of, kept so a
     /// session that steps aside can give it back and a resumed one can be
     /// handed a region shaped for the mode now in force.
@@ -1114,6 +1169,7 @@ mod program {
         shell: &'a mut DesktopShell,
         desktop: &'a Desktop<S>,
         pinboard: &'a mut PinboardPanel,
+        wallpapers: &'a Wallpapers,
         fade: &'a mut ScreenFade,
         set: u64,
     }
@@ -1189,7 +1245,13 @@ mod program {
             }
             self.shell
                 .set_output_layout(bar_config(&mode), self.compositor);
-            prepare_wallpaper(self.pinboard, self.shell, self.desktop, self.compositor);
+            prepare_wallpaper(
+                self.pinboard,
+                self.wallpapers,
+                self.shell,
+                self.desktop,
+                self.compositor,
+            );
             self.shell.present_desktop(self.compositor, self.desktop);
             Ok(())
         }
@@ -1321,12 +1383,11 @@ mod program {
         };
         let mut keyboard = KeyboardInputSource::new(SeatInputChannel::new(KeyboardReader));
 
-        // One parser-sandbox worker for every untrusted image this session
-        // decodes: the desktop's icon artwork and the user's wallpaper
-        // alike. Both are attacker-influenced files, both are decoded in a
-        // capability-empty re-entry of this binary rather than in this
-        // address space, and sharing the one worker keeps a second decode
-        // path from existing.
+        // The serve loop's own parser-sandbox worker: this binary re-entered as
+        // a capability-empty child, where the desktop's untrusted icon artwork
+        // is decoded rather than in this address space. The wallpaper's worker
+        // thread owns a second one of its own, so a picture can be prepared
+        // without holding the loop and no sandbox handle crosses a thread.
         let sandbox: SharedSandbox = alloc::rc::Rc::new(core::cell::RefCell::new(
             ParserSandbox::new(RtLauncher::own_binary(), tairix_rt::LogSink),
         ));
@@ -1359,6 +1420,55 @@ mod program {
         // re-resolves before its next present.
         let mut pins = load_pin_service();
 
+        // The listing worker, and the pipe it nudges the serve loop through.
+        // Both directory-listing consumers below — the icon column and the
+        // trusted picker — go through it, so a slow disk costs a repaint's
+        // delay rather than a frozen desktop. A pipe the kernel refuses, or a
+        // thread it will not grant, leaves the listings on the serve loop's own
+        // task: slower under load, never wrong, and stated once.
+        let (worker_wake_read, worker_wake) = if let Ok((read, write)) = tairix_rt::pipe_create() {
+            (Some(read), WorkerWake { fd: Some(write) })
+        } else {
+            io::write_stderr_line(
+                "desktop: no worker wake pipe; directory listings and the wallpaper are prepared \
+                 on the serve loop",
+            );
+            (None, WorkerWake { fd: None })
+        };
+        let worker_wake = alloc::sync::Arc::new(worker_wake);
+        let listings = alloc::sync::Arc::new(Listings::new(alloc::sync::Arc::clone(&worker_wake)));
+        let wallpapers =
+            alloc::sync::Arc::new(Wallpapers::new(alloc::sync::Arc::clone(&worker_wake)));
+        // One worker per kind of work, spawned only where there is a wake to
+        // deliver through. Each handle is held for the session's life; the
+        // worker's own `Arc` keeps its desk alive either way.
+        let (listing_worker, wallpaper_worker) = worker_wake_read.map_or((None, None), |_| {
+            let listing = {
+                let served = alloc::sync::Arc::clone(&listings);
+                spawn_worker("listing", move || served.serve())
+            };
+            let wallpaper = {
+                let served = alloc::sync::Arc::clone(&wallpapers);
+                spawn_worker("wallpaper", move || served.serve())
+            };
+            (listing, wallpaper)
+        });
+        // With no worker there is nobody to answer a recorded request, so the
+        // desk is stopped and that work happens on this task instead.
+        if listing_worker.is_none() {
+            listings.stop();
+        }
+        if wallpaper_worker.is_none() {
+            wallpapers.stop();
+        }
+        // Every way out of this function stops both workers. The guard is
+        // declared after the handles, so it runs first: the desks stop, then the
+        // handles detach.
+        let _worker_guard = WorkerGuard {
+            listings: alloc::sync::Arc::clone(&listings),
+            wallpapers: alloc::sync::Arc::clone(&wallpapers),
+        };
+
         // The desktop's own icon column: the logged-in user's `Desktop`
         // folder, listed through the same capability-checked directory call
         // the trusted picker uses, under the session's own identity. An
@@ -1370,9 +1480,10 @@ mod program {
             .unwrap_or_default();
         desktop_folder.push(alloc::string::String::from("Desktop"));
         let mut desktop = Desktop::new(
-            VfsDirectorySource::new(|path: &str| {
-                tairix_rt::read_dir_all(path.as_bytes()).map_err(Errno::from_syscall)
-            }),
+            AsyncDirectorySource {
+                listings: alloc::sync::Arc::clone(&listings),
+                client: ListingClient::Pinboard,
+            },
             desktop_folder,
         );
         // The user's pinboard settings, with the same fail-closed posture as
@@ -1394,7 +1505,13 @@ mod program {
         // worker, once. A wallpaper that cannot be read or rendered leaves
         // the backdrop colour showing and states why — the desktop never
         // fails over a picture.
-        prepare_wallpaper(&mut pinboard, &mut shell, &desktop, &compositor);
+        let backdrop_ready = prepare_wallpaper(
+            &mut pinboard,
+            &wallpapers,
+            &mut shell,
+            &desktop,
+            &compositor,
+        );
 
         // First frame: place the bar, paint the desktop's icons beneath
         // every window, install the pointer cursor at the seat's initial
@@ -1410,6 +1527,10 @@ mod program {
         // to be shown: begun any earlier, the fade would spend itself on
         // bring-up with nothing on screen yet.
         let mut fade = ScreenFade::begin(tairix_rt::clock_get(), &mut compositor);
+        // The reveal witness says a user can see the desktop, so it waits for the
+        // backdrop they chose rather than announcing a frame that carries the
+        // fallback colour in its place.
+        fade.set_awaiting_backdrop(!backdrop_ready);
         if let Err(code) = present(&mut shell, &mut compositor, &mut display, &mut fade) {
             return code;
         }
@@ -1566,6 +1687,23 @@ mod program {
         {
             return fail(EXIT_WAIT_FAILED, "child wait refused");
         }
+        // The workers' wake: readable exactly when a directory read or a
+        // wallpaper preparation has finished. A refused add is fatal rather than
+        // tolerated — a worker whose answers nobody collects would leave the
+        // desktop listing forever, and the session must not park on a set that
+        // cannot report it.
+        if let Some(read) = worker_wake_read {
+            if tairix_rt::waitset_ctl(
+                set,
+                WaitSetOp::Add,
+                WaitSourceKind::Stream,
+                u64::from(read),
+                WORKER_TOKEN,
+            ) != 0
+            {
+                return fail(EXIT_WAIT_FAILED, "listing wake wait refused");
+            }
+        }
         // `watch` re-reads the band as it registers the member, closing the
         // race between the bring-up read above and this registration — a
         // move in between would otherwise never be seen.
@@ -1634,10 +1772,10 @@ mod program {
             .and_then(|home| core::str::from_utf8(home).ok())
             .and_then(|home| tairix_browse::vfs::components_from_absolute_path(home).ok())
             .unwrap_or_default();
-        let mut picker = SessionPicker::new(|| {
-            VfsDirectorySource::new(|path: &str| {
-                tairix_rt::read_dir_all(path.as_bytes()).map_err(Errno::from_syscall)
-            })
+        let picker_listings = alloc::sync::Arc::clone(&listings);
+        let mut picker = SessionPicker::new(move || AsyncDirectorySource {
+            listings: alloc::sync::Arc::clone(&picker_listings),
+            client: ListingClient::Picker,
         })
         .starting_at(picker_start);
         // The trusted confirmation prompt for a power transition. It is the
@@ -1869,6 +2007,7 @@ mod program {
                 {
                     let result = serve_pinboard(
                         &mut pinboard,
+                        &wallpapers,
                         &mut desktop,
                         &mut shell,
                         &mut compositor,
@@ -1902,6 +2041,43 @@ mod program {
                             focused = None;
                         }
                     }
+                }
+            } else if token == WORKER_TOKEN {
+                // A worker finished something. Drain the nudge bytes (the member
+                // is a level-triggered peek, so anything left re-reports on the
+                // next wait and nothing is lost), then offer every consumer the
+                // chance to adopt what arrived. Each is a no-op unless it was the
+                // one waiting, so one wake serves whichever it was.
+                let mut nudge = [0u8; WORKER_NUDGE_DRAIN];
+                if let Some(read) = worker_wake_read {
+                    let _ = tairix_rt::fs_read(read, 0, &mut nudge);
+                }
+                let relisted = desktop.relist(tairix_rt::clock_get());
+                let papered = prepare_wallpaper(
+                    &mut pinboard,
+                    &wallpapers,
+                    &mut shell,
+                    &desktop,
+                    &compositor,
+                );
+                if papered {
+                    fade.set_awaiting_backdrop(false);
+                }
+                if relisted || papered {
+                    shell.present_desktop(&mut compositor, &desktop);
+                }
+                if let Some(concluded) = picker.resume(&mut shell, &mut compositor) {
+                    conclude_pick(
+                        concluded,
+                        &mut server,
+                        &mut sink,
+                        &mut shell,
+                        &mut compositor,
+                        &mut windows,
+                        &identity,
+                        &mut picker,
+                        &mut pins,
+                    );
                 }
             } else if token == PRESSURE_TOKEN {
                 // The machine's memory-pressure band moved. Read it and, if
@@ -2033,6 +2209,7 @@ mod program {
                             shell: &mut shell,
                             desktop: &desktop,
                             pinboard: &mut pinboard,
+                            wallpapers: &wallpapers,
                             fade: &mut fade,
                             set,
                         };
@@ -2109,6 +2286,7 @@ mod program {
                 let now_ns = tairix_rt::clock_get();
                 if drain_pinboard_menu(
                     &mut pinboard,
+                    &wallpapers,
                     &mut pointer,
                     &mut keyboard,
                     &mut desktop,
@@ -2144,6 +2322,7 @@ mod program {
                     route_desktop(
                         &outcome,
                         &mut pinboard,
+                        &wallpapers,
                         &mut desktop,
                         &mut shell,
                         &mut compositor,
@@ -2187,6 +2366,7 @@ mod program {
                                     shell: &mut shell,
                                     desktop: &desktop,
                                     pinboard: &mut pinboard,
+                                    wallpapers: &wallpapers,
                                     fade: &mut fade,
                                     set,
                                 },
@@ -2211,6 +2391,7 @@ mod program {
                             route_desktop(
                                 &outcome,
                                 &mut pinboard,
+                                &wallpapers,
                                 &mut desktop,
                                 &mut shell,
                                 &mut compositor,
@@ -2254,6 +2435,7 @@ mod program {
                                             shell: &mut shell,
                                             desktop: &desktop,
                                             pinboard: &mut pinboard,
+                                            wallpapers: &wallpapers,
                                             fade: &mut fade,
                                             set,
                                         },
@@ -2387,6 +2569,301 @@ mod program {
         matches: alloc::vec::Vec<Option<TaskId>>,
     }
 
+    /// The one nudge the session's worker threads wake its serve loop with: a
+    /// byte on a pipe whose read end is a wait-set member.
+    ///
+    /// Shared by every worker rather than one pipe each. The serve loop's arm
+    /// offers each consumer the chance to adopt whatever arrived, and a consumer
+    /// with nothing waiting costs a branch — so a second token, a second drain,
+    /// and a second descriptor would buy nothing.
+    struct WorkerWake {
+        /// `None` when the pipe could not be created, in which case the session
+        /// does the work on its own task: slower under load, never wrong.
+        fd: Option<u32>,
+    }
+
+    impl WorkerWake {
+        /// Nudge the serve loop.
+        ///
+        /// A refused write is dropped rather than retried: the only thing it can
+        /// mean is that the session is not draining, and a worker that spun on
+        /// it would be the busy-wait the charter forbids. The answer stays on its
+        /// desk, so the next wake for any reason still delivers it.
+        fn nudge(&self) {
+            if let Some(fd) = self.fd {
+                let _ = tairix_rt::fs_write(fd, 0, &[1u8]);
+            }
+        }
+    }
+
+    /// The desktop's wallpaper, prepared on a worker thread that owns its **own**
+    /// sandbox worker.
+    ///
+    /// The icon rasteriser keeps the shared sandbox handle on the session's own
+    /// task, untouched; this thread creates a second capability-empty worker
+    /// inside itself, so no sandbox handle ever crosses a thread boundary. The
+    /// policy is the host-tested [`WallpaperDesk`].
+    struct Wallpapers {
+        desk: tairix_rt::sync::Mutex<WallpaperDesk>,
+        work: tairix_rt::sync::Condvar,
+        wake: alloc::sync::Arc<WorkerWake>,
+    }
+
+    impl Wallpapers {
+        fn new(wake: alloc::sync::Arc<WorkerWake>) -> Self {
+            Self {
+                desk: tairix_rt::sync::Mutex::new(WallpaperDesk::new()),
+                work: tairix_rt::sync::Condvar::new(),
+                wake,
+            }
+        }
+
+        /// One preparer's whole life: park until a picture is wanted, read it,
+        /// decode it in this thread's own sandbox, and deliver the surface.
+        ///
+        /// The sandbox is built here, once, and reused for every later
+        /// preparation — the same lifetime the session's own handle has, and the
+        /// reason this thread rather than the session owns it.
+        fn serve(&self) {
+            let mut sandbox = ParserSandbox::new(RtLauncher::own_binary(), tairix_rt::LogSink);
+            loop {
+                let job = {
+                    let mut desk = self.desk.lock();
+                    loop {
+                        if desk.stopping() {
+                            return;
+                        }
+                        if let Some(job) = desk.next_job() {
+                            break job;
+                        }
+                        desk = self.work.wait(desk);
+                    }
+                };
+                // The read and the sandbox round trip, with no lock held: these
+                // are the calls that used to stall the desktop.
+                let outcome = prepare_wallpaper_surface(&mut sandbox, &job);
+                if self.desk.lock().deliver(job, outcome) {
+                    self.wake.nudge();
+                }
+            }
+        }
+
+        /// Record `source` as wanted and wake a preparer.
+        ///
+        /// With no preparer to answer it the picture is prepared on the calling
+        /// thread instead, exactly as the session did before it had one: a
+        /// recorded request nobody will serve would leave the backdrop bare
+        /// forever.
+        fn request(&self, source: &WallpaperSource, own: &SharedSandbox) -> Prepared {
+            let deferred = {
+                let mut desk = self.desk.lock();
+                if desk.stopping() {
+                    None
+                } else {
+                    Some(desk.take(source))
+                }
+            };
+            let Some(prepared) = deferred else {
+                if source.image_path().is_none() {
+                    return Prepared::Ready {
+                        surface: None,
+                        refusal: None,
+                    };
+                }
+                return match prepare_wallpaper_surface(&mut own.borrow_mut(), source) {
+                    Ok(surface) => Prepared::Ready {
+                        surface: Some(surface),
+                        refusal: None,
+                    },
+                    Err(refusal) => Prepared::Ready {
+                        surface: None,
+                        refusal: Some(refusal),
+                    },
+                };
+            };
+            if matches!(prepared, Prepared::Pending) {
+                self.work.notify_one();
+            }
+            prepared
+        }
+
+        /// Ask the preparer to leave.
+        fn stop(&self) {
+            self.desk.lock().stop();
+            self.work.notify_all();
+        }
+    }
+
+    /// Read the image `source` names, place it over its screen in `sandbox`, and
+    /// rebuild the result as the surface the compositor blits.
+    ///
+    /// Every refusal — a file that cannot be read, one larger than any wallpaper,
+    /// a malformed image, a crashed worker, or a reply whose pixels do not fill
+    /// the screen — *answers* the reason rather than writing it, because this runs
+    /// on a worker thread and `stderr` is one descriptor a formatted line reaches
+    /// in several writes. The session states it, once, on its own thread; the
+    /// desktop falls back to the backdrop colour instead of failing over a
+    /// picture.
+    fn prepare_wallpaper_surface<L: tairix_sandbox::Launcher, S: tairix_log::Sink>(
+        sandbox: &mut ParserSandbox<L, S>,
+        source: &WallpaperSource,
+    ) -> Result<Surface, alloc::string::String> {
+        let Some(path) = source.image_path() else {
+            return Err(alloc::string::String::from(
+                "desktop: no wallpaper image to prepare; using the backdrop colour",
+            ));
+        };
+        let bytes = match read_file(path, MAX_WALLPAPER_BYTES) {
+            Ok(bytes) if bytes.len() > MAX_WALLPAPER_BYTES => {
+                return Err(alloc::format!(
+                    "desktop: wallpaper {path} is larger than any wallpaper the desktop renders; \
+                     using the backdrop colour"
+                ));
+            }
+            Ok(bytes) => bytes,
+            Err(err) => {
+                return Err(alloc::format!(
+                    "desktop: wallpaper {path} could not be read ({err}); using the backdrop \
+                     colour"
+                ));
+            }
+        };
+        let placed = render_wallpaper(sandbox, source.width, source.height, source.fit, &bytes)
+            .map_err(|err| {
+                alloc::format!(
+                    "desktop: wallpaper {path} could not be rendered ({err}); using the backdrop \
+                     colour"
+                )
+            })?;
+        Surface::from_rgba8(source.width, source.height, &placed).ok_or_else(|| {
+            alloc::format!(
+                "desktop: wallpaper {path} did not fill the screen; using the backdrop colour"
+            )
+        })
+    }
+
+    /// The desktop's directory listings, read on a worker thread so a slow or
+    /// contended disk cannot stall the compositor, the seat drain, or an
+    /// application blocked in a window call.
+    ///
+    /// The policy — who asked for what, which answer is stale, whose turn it is
+    /// — is the host-tested [`ListingDesk`]; this adds only the three things a
+    /// real program brings: the runtime's futex mutex for exclusion, a
+    /// condition variable the worker parks on with nothing to do (never a
+    /// spin), and the write end of the pipe whose read end is a wait-set
+    /// member, so the session learns an answer landed through the very loop it
+    /// already parks in — no new ABI and no second wake mechanism.
+    struct Listings {
+        desk: tairix_rt::sync::Mutex<ListingDesk>,
+        /// Signalled when a request is recorded, and on teardown.
+        work: tairix_rt::sync::Condvar,
+        wake: alloc::sync::Arc<WorkerWake>,
+    }
+
+    impl Listings {
+        /// A desk with no worker yet.
+        fn new(wake: alloc::sync::Arc<WorkerWake>) -> Self {
+            Self {
+                desk: tairix_rt::sync::Mutex::new(ListingDesk::new()),
+                work: tairix_rt::sync::Condvar::new(),
+                wake,
+            }
+        }
+
+        /// One worker's whole life: park until there is a directory to read,
+        /// read it, deliver it, wake the session.
+        ///
+        /// Leaves when the desk stops. A read that nobody wants any more is
+        /// delivered all the same and reports itself unwanted, so no wake is
+        /// owed for it — a user clicking through directories does not make the
+        /// session repaint once per abandoned read.
+        fn serve(&self) {
+            loop {
+                let job = {
+                    let mut desk = self.desk.lock();
+                    loop {
+                        if desk.stopping() {
+                            return;
+                        }
+                        if let Some(job) = desk.next_job() {
+                            break job;
+                        }
+                        desk = self.work.wait(desk);
+                    }
+                };
+                let (client, target) = job;
+                // The read itself, with no lock held: this is the call that can
+                // take as long as the disk takes.
+                let result = read_directory(&target);
+                if self.desk.lock().deliver(client, target, result) {
+                    self.wake.nudge();
+                }
+            }
+        }
+
+        /// Record `components` as `client`'s request and wake a worker.
+        ///
+        /// With no worker to answer it — the kernel granted no thread, or the
+        /// session is tearing down — the read happens on the calling thread
+        /// instead, which is exactly what the session did before it had one. A
+        /// recorded request nobody will ever serve would leave the desktop
+        /// listing forever, so the degradation is a real read, not a wait.
+        fn request(
+            &self,
+            client: ListingClient,
+            components: &[alloc::string::String],
+        ) -> Result<Listing, Errno> {
+            let deferred = {
+                let mut desk = self.desk.lock();
+                if desk.stopping() {
+                    None
+                } else {
+                    Some(desk.take(client, components))
+                }
+            };
+            let Some(listing) = deferred else {
+                return read_directory(components).map(Listing::Ready);
+            };
+            if matches!(listing, Ok(Listing::Pending)) {
+                self.work.notify_one();
+            }
+            listing
+        }
+
+        /// Ask the workers to leave and wake every one of them.
+        fn stop(&self) {
+            self.desk.lock().stop();
+            self.work.notify_all();
+        }
+    }
+
+    /// Read the directory named by root-first `components` under this session's
+    /// own identity, through the same validated path spelling and stream decode
+    /// the synchronous source uses.
+    fn read_directory(components: &[alloc::string::String]) -> Result<Vec<Entry>, Errno> {
+        let path = tairix_browse::vfs::absolute_path(components)?;
+        let stream = tairix_rt::read_dir_all(path.as_bytes()).map_err(Errno::from_syscall)?;
+        tairix_browse::vfs::entries_from_dir_stream(&stream)
+    }
+
+    /// One consumer's view of [`Listings`]: a [`DirectorySource`] that records a
+    /// request and answers with whatever has come back.
+    ///
+    /// Cheap to clone, because the picker builds a fresh browser per pick and
+    /// both consumers must reach the one worker rather than each starting their
+    /// own.
+    #[derive(Clone)]
+    struct AsyncDirectorySource {
+        listings: alloc::sync::Arc<Listings>,
+        client: ListingClient,
+    }
+
+    impl DirectorySource for AsyncDirectorySource {
+        fn list(&mut self, components: &[alloc::string::String]) -> Result<Listing, Errno> {
+            self.listings.request(self.client, components)
+        }
+    }
+
     /// The pool each composite's per-pixel work is spread across: one
     /// participant per online CPU, of which the serve loop's own thread is one.
     ///
@@ -2420,12 +2897,16 @@ mod program {
         pool
     }
 
-    /// The one parser-sandbox worker the icon artwork and the wallpaper
-    /// preparation both decode through: this binary re-entered as a single
-    /// capability-empty worker, never a second one spawned for wallpaper
-    /// alone. Shared because the shell owns the icon rasteriser behind a
-    /// boxed trait object while the wallpaper preparation below needs the
-    /// very same live worker from the serve loop's own state.
+    /// The serve loop's own parser-sandbox worker: this binary re-entered as a
+    /// capability-empty child, which every untrusted icon is decoded in.
+    ///
+    /// Shared behind an `Rc` because the shell owns the icon rasteriser behind a
+    /// boxed trait object while the loop needs the very same live worker from its
+    /// own state — and *not* `Send`, deliberately: the wallpaper's worker thread
+    /// creates its own rather than borrowing this one, so a handle never crosses
+    /// a thread and the icon path is unchanged by any of it. It is also the
+    /// fallback the wallpaper is prepared through when the kernel grants no
+    /// thread.
     type SharedSandbox =
         alloc::rc::Rc<core::cell::RefCell<ParserSandbox<RtLauncher, tairix_rt::LogSink>>>;
 
@@ -2446,8 +2927,9 @@ mod program {
 
     /// The session's pinboard state, kept beside the loop: the backdrop's
     /// context menu, the per-user settings store changes are persisted
-    /// through, the sandbox worker the wallpaper is decoded in, and what the
-    /// wallpaper surface now on screen was prepared from.
+    /// through, the loop's own sandbox worker (the wallpaper's fallback when no
+    /// thread was granted), and what the wallpaper surface now on screen was
+    /// prepared from.
     ///
     /// The settings themselves are *not* here: the desktop model owns them,
     /// so there is exactly one copy of what is in force.
@@ -2456,22 +2938,6 @@ mod program {
         store: PinboardStore,
         sandbox: SharedSandbox,
         prepared: Option<WallpaperSource>,
-    }
-
-    /// What the wallpaper surface currently installed in the shell was
-    /// prepared from.
-    ///
-    /// Preparing a wallpaper reads a file and runs a sandboxed decode, so it
-    /// happens only when one of these inputs really changed — never on a
-    /// frame path. It is recorded *before* the attempt is made, so a file
-    /// that cannot be read or rendered costs one refusal rather than one per
-    /// frame.
-    #[derive(Clone, Eq, PartialEq)]
-    struct WallpaperSource {
-        choice: WallpaperChoice,
-        fit: WallpaperFit,
-        width: u32,
-        height: u32,
     }
 
     /// Load the user's pinboard settings into `desktop` (reporting an
@@ -2498,103 +2964,46 @@ mod program {
         }
     }
 
-    /// Prepare the wallpaper the desktop layer is painted over and install it
-    /// in the shell, doing nothing at all when the surface already on screen
-    /// was prepared from exactly these settings at exactly this screen size.
+    /// Ask for the wallpaper the desktop layer should be painted over, and
+    /// install it when it is ready.
     ///
-    /// The chosen file is read under the session's own identity, bounded by
-    /// the shared wallpaper cap, and fitted to the whole screen in the
-    /// sandbox worker — so untrusted image bytes are never decoded in this
-    /// address space. A wallpaper that cannot be read or rendered installs
-    /// no surface, leaving the backdrop colour as the whole base, and states
-    /// why once.
+    /// Called both when something changed (bring-up, a settings apply, a resume
+    /// at a new mode) and on the wake that says a preparation finished, because
+    /// the two are the same question: *is what the desktop wants what is
+    /// installed?* Answering it costs a comparison when nothing changed, so a
+    /// wake the desktop has already acted on is almost free.
+    ///
+    /// Reads a file and runs a sandboxed decode, so it happens on a worker
+    /// thread; the desktop keeps painting whatever it has until the answer
+    /// lands, and a wallpaper that cannot be read or rendered installs no
+    /// surface and leaves the backdrop colour showing (stated once, by the
+    /// worker that observed it). Answers whether the desktop layer needs
+    /// repainting.
     fn prepare_wallpaper<S: DirectorySource>(
         pinboard: &mut PinboardPanel,
+        wallpapers: &Wallpapers,
         shell: &mut DesktopShell,
         desktop: &Desktop<S>,
         compositor: &Compositor,
-    ) {
-        let settings = desktop.settings();
-        let screen = compositor.screen_rect();
-        let wanted = WallpaperSource {
-            choice: settings.wallpaper.clone(),
-            fit: settings.fit,
-            width: screen.width,
-            height: screen.height,
-        };
+    ) -> bool {
+        let wanted = WallpaperSource::wanted(desktop.settings(), compositor.screen_rect());
         if pinboard.prepared.as_ref() == Some(&wanted) {
-            return;
+            return false;
         }
-        let WallpaperChoice::Image(path) = &wanted.choice else {
-            pinboard.prepared = Some(wanted);
-            shell.set_wallpaper(None);
-            return;
-        };
-        let surface = render_wallpaper_surface(
-            &pinboard.sandbox,
-            path.as_str(),
-            wanted.fit,
-            wanted.width,
-            wanted.height,
-        );
-        pinboard.prepared = Some(wanted);
-        shell.set_wallpaper(surface);
-    }
-
-    /// Read the image at `path`, place it over a `width` × `height` screen
-    /// under `fit` in the sandbox worker, and rebuild the result as the
-    /// surface the compositor blits.
-    ///
-    /// Every refusal — a file that cannot be read, one larger than any
-    /// wallpaper, a malformed image, a crashed worker, or a reply whose
-    /// pixels do not fill the screen — answers `None` with its reason on
-    /// `stderr`, so the desktop falls back to the backdrop colour instead of
-    /// failing over a picture.
-    fn render_wallpaper_surface(
-        sandbox: &SharedSandbox,
-        path: &str,
-        fit: WallpaperFit,
-        width: u32,
-        height: u32,
-    ) -> Option<Surface> {
-        let bytes = match read_file(path, MAX_WALLPAPER_BYTES) {
-            Ok(bytes) if bytes.len() > MAX_WALLPAPER_BYTES => {
-                let _ = writeln!(
-                    Stderr,
-                    "desktop: wallpaper {path} is larger than any wallpaper the desktop renders; \
-                     using the backdrop colour"
-                );
-                return None;
+        match wallpapers.request(&wanted, &pinboard.sandbox) {
+            Prepared::Pending => false,
+            Prepared::Ready { surface, refusal } => {
+                // Stated here, on the serve loop's own thread, so a worker's
+                // diagnosis cannot interleave with anything else reaching
+                // `stderr`.
+                if let Some(reason) = refusal {
+                    let _ = writeln!(Stderr, "{reason}");
+                }
+                pinboard.prepared = Some(wanted);
+                shell.set_wallpaper(surface);
+                true
             }
-            Ok(bytes) => bytes,
-            Err(err) => {
-                let _ = writeln!(
-                    Stderr,
-                    "desktop: wallpaper {path} could not be read ({err}); \
-                     using the backdrop colour"
-                );
-                return None;
-            }
-        };
-        let placed = match render_wallpaper(&mut sandbox.borrow_mut(), width, height, fit, &bytes) {
-            Ok(placed) => placed,
-            Err(err) => {
-                let _ = writeln!(
-                    Stderr,
-                    "desktop: wallpaper {path} could not be rendered ({err}); \
-                     using the backdrop colour"
-                );
-                return None;
-            }
-        };
-        let surface = Surface::from_rgba8(width, height, &placed);
-        if surface.is_none() {
-            let _ = writeln!(
-                Stderr,
-                "desktop: wallpaper {path} did not fill the screen; using the backdrop colour"
-            );
         }
-        surface
     }
 
     /// Drain the seat's pointer and keyboard straight into the open backdrop
@@ -2610,6 +3019,7 @@ mod program {
     #[allow(clippy::too_many_arguments)] // The desktop's whole mutable state, threaded explicitly.
     fn drain_pinboard_menu<S: DirectorySource>(
         pinboard: &mut PinboardPanel,
+        wallpapers: &Wallpapers,
         pointer: &mut DeviceInputSource<SeatInputChannel<PointerReader>>,
         keyboard: &mut KeyboardInputSource<SeatInputChannel<KeyboardReader>>,
         desktop: &mut Desktop<S>,
@@ -2655,6 +3065,7 @@ mod program {
                     settle_pinboard_menu(
                         acted,
                         pinboard,
+                        wallpapers,
                         desktop,
                         shell,
                         compositor,
@@ -2692,6 +3103,7 @@ mod program {
                     settle_pinboard_menu(
                         acted,
                         pinboard,
+                        wallpapers,
                         desktop,
                         shell,
                         compositor,
@@ -2714,6 +3126,7 @@ mod program {
     fn settle_pinboard_menu<S: DirectorySource>(
         acted: PinboardMenuOutcome,
         pinboard: &mut PinboardPanel,
+        wallpapers: &Wallpapers,
         desktop: &mut Desktop<S>,
         shell: &mut DesktopShell,
         compositor: &mut Compositor,
@@ -2739,6 +3152,7 @@ mod program {
                     | apply_desktop_action(
                         acted.action,
                         pinboard,
+                        wallpapers,
                         desktop,
                         shell,
                         compositor,
@@ -2771,6 +3185,7 @@ mod program {
     #[allow(clippy::too_many_arguments)] // The desktop's whole mutable state, threaded explicitly.
     fn serve_pinboard<S: DirectorySource>(
         pinboard: &mut PinboardPanel,
+        wallpapers: &Wallpapers,
         desktop: &mut Desktop<S>,
         shell: &mut DesktopShell,
         compositor: &mut Compositor,
@@ -2791,6 +3206,7 @@ mod program {
         adopt_pinboard_settings(
             settings,
             pinboard,
+            wallpapers,
             desktop,
             shell,
             compositor,
@@ -3629,6 +4045,7 @@ mod program {
     fn route_desktop<S: DirectorySource>(
         outcome: &tairix_desktop_session::ShellOutcome,
         pinboard: &mut PinboardPanel,
+        wallpapers: &Wallpapers,
         desktop: &mut Desktop<S>,
         shell: &mut DesktopShell,
         compositor: &mut Compositor,
@@ -3672,6 +4089,7 @@ mod program {
             | apply_desktop_action(
                 acted.action,
                 pinboard,
+                wallpapers,
                 desktop,
                 shell,
                 compositor,
@@ -3707,6 +4125,7 @@ mod program {
     fn apply_desktop_action<S: DirectorySource>(
         action: Option<DesktopAction>,
         pinboard: &mut PinboardPanel,
+        wallpapers: &Wallpapers,
         desktop: &mut Desktop<S>,
         shell: &mut DesktopShell,
         compositor: &mut Compositor,
@@ -3748,10 +4167,10 @@ mod program {
             Some(DesktopAction::CreateFolder { path }) => {
                 create_desktop_folder(&path, desktop, now_ns)
             }
-            Some(DesktopAction::AdoptSettings(settings)) => {
-                adopt_pinboard_settings(settings, pinboard, desktop, shell, compositor, now_ns)
-                    .is_ok()
-            }
+            Some(DesktopAction::AdoptSettings(settings)) => adopt_pinboard_settings(
+                settings, pinboard, wallpapers, desktop, shell, compositor, now_ns,
+            )
+            .is_ok(),
             Some(DesktopAction::ChangeBackground) => {
                 let _ = record_launch(
                     launched,
@@ -3807,9 +4226,11 @@ mod program {
     ///
     /// The [`PinboardStoreError`] the store refused with; nothing was
     /// adopted.
+    #[allow(clippy::too_many_arguments)] // The desktop's whole settings state, threaded explicitly.
     fn adopt_pinboard_settings<S: DirectorySource>(
         settings: PinboardSettings,
         pinboard: &mut PinboardPanel,
+        wallpapers: &Wallpapers,
         desktop: &mut Desktop<S>,
         shell: &mut DesktopShell,
         compositor: &mut Compositor,
@@ -3826,7 +4247,7 @@ mod program {
             desktop.relist(now_ns);
         }
         if change.wallpaper {
-            prepare_wallpaper(pinboard, shell, desktop, compositor);
+            prepare_wallpaper(pinboard, wallpapers, shell, desktop, compositor);
         }
         // A re-layout, a re-list, and a new wallpaper all show as the same
         // repaint of the desktop layer, so one present covers whichever of

@@ -14,7 +14,18 @@ tairix-abi = { path = "../abi", version = "=0.0.0" }
 # (the compositor and the graphical login screen) already speak.
 tairix-geometry = { path = "../geometry", version = "=0.0.0" }
 tairix-raster = { path = "../raster", version = "=0.0.0" }
+# The `JobRunner` contract a window-frame conversion's independent row bands are
+# handed through. Default features off: only the trait and the calling-thread
+# runner are wanted here, never the thread pool — an embedder supplies that.
+tairix-parallel = { path = "../parallel", version = "=0.0.0", default-features = false }
 tairix-rt = { path = "../rt", version = "=0.0.0", optional = true }
+
+[dev-dependencies]
+# The shared order-shuffling runner the window-frame codec's bit-identity tests
+# split a conversion with.
+tairix-parallel = { path = "../parallel", version = "=0.0.0", default-features = false, features = [
+    "test-util",
+] }
 
 [features]
 # The production, syscall-backed `ShmMapper` (`rt` module): pulled in only

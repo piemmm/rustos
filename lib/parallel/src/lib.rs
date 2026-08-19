@@ -130,6 +130,62 @@ pub fn bands(runner: &dyn JobRunner, units: usize, grain: usize) -> usize {
     affordable.clamp(1, width.saturating_mul(OVERSUBSCRIPTION))
 }
 
+/// A runner that reports a width it does not have and runs its pieces
+/// **backwards** on the calling thread.
+///
+/// Test scaffolding, behind the `test-util` feature: a pass proves its output
+/// does not depend on which piece runs first by composing the same input
+/// through [`SERIAL`] and through this, and comparing bytes. Running the pieces
+/// on one thread is what makes that a proof about the *split* rather than about
+/// thread timing — bit-identity cannot be a matter of luck.
+///
+/// It lives here rather than in each pass's own tests because the `unsafe impl`
+/// belongs beside the trait whose obligations it discharges, and because three
+/// crates were otherwise spelling the same eight lines.
+#[cfg(any(test, feature = "test-util"))]
+#[derive(Debug, Default)]
+pub struct Reversed {
+    width: usize,
+    /// The largest number of pieces any dispatch asked for, so a test can see
+    /// whether the work was split at all rather than assuming it was.
+    widest: core::sync::atomic::AtomicUsize,
+}
+
+#[cfg(any(test, feature = "test-util"))]
+impl Reversed {
+    /// A runner claiming to be `width` participants wide.
+    #[must_use]
+    pub const fn new(width: usize) -> Self {
+        Self {
+            width,
+            widest: core::sync::atomic::AtomicUsize::new(0),
+        }
+    }
+
+    /// The most pieces any dispatch on this runner asked for.
+    #[must_use]
+    pub fn widest(&self) -> usize {
+        self.widest.load(core::sync::atomic::Ordering::Relaxed)
+    }
+}
+
+// SAFETY: each index of `0..count` is passed exactly once, from the calling
+// thread, and every call has returned before `run` does.
+#[cfg(any(test, feature = "test-util"))]
+unsafe impl JobRunner for Reversed {
+    fn width(&self) -> usize {
+        self.width
+    }
+
+    fn run(&self, count: usize, job: &(dyn Fn(usize) + Sync)) {
+        self.widest
+            .fetch_max(count, core::sync::atomic::Ordering::Relaxed);
+        for index in (0..count).rev() {
+            job(index);
+        }
+    }
+}
+
 /// A raw pointer to the elements of one [`for_each`] call, shared with that
 /// call's jobs.
 ///
@@ -197,25 +253,6 @@ pub fn for_each<T: Send>(runner: &dyn JobRunner, items: &mut [T], visit: &(dyn F
 mod tests {
     use super::*;
 
-    /// A runner that reports a width it does not have and runs the jobs
-    /// backwards on the calling thread: enough to prove a pass's output does not
-    /// depend on the order its pieces run in, without needing a real thread.
-    struct Reversed(usize);
-
-    // SAFETY: each index of `0..count` is passed exactly once, from the calling
-    // thread, and every call has returned before `run` does.
-    unsafe impl JobRunner for Reversed {
-        fn width(&self) -> usize {
-            self.0
-        }
-
-        fn run(&self, count: usize, job: &(dyn Fn(usize) + Sync)) {
-            for index in (0..count).rev() {
-                job(index);
-            }
-        }
-    }
-
     /// A runner that drops the last job, so the "an unvisited element is a bug,
     /// not unsoundness" claim is exercised rather than only argued.
     struct Forgetful;
@@ -250,19 +287,19 @@ mod tests {
         let mut backwards = [0u32; 16];
         let stamp = |slot: &mut u32| *slot = *slot * 2 + 1;
         for_each(&SERIAL, &mut forwards, &stamp);
-        for_each(&Reversed(4), &mut backwards, &stamp);
+        for_each(&Reversed::new(4), &mut backwards, &stamp);
         assert_eq!(forwards, backwards);
     }
 
     #[test]
     fn an_empty_slice_visits_nothing_and_one_element_is_visited_on_the_caller() {
         let mut nothing: [u32; 0] = [];
-        for_each(&Reversed(4), &mut nothing, &|_| {
+        for_each(&Reversed::new(4), &mut nothing, &|_| {
             panic!("no element to visit")
         });
 
         let mut one = [7u32];
-        for_each(&Reversed(4), &mut one, &|item| *item += 1);
+        for_each(&Reversed::new(4), &mut one, &|item| *item += 1);
         assert_eq!(one, [8]);
     }
 
@@ -278,7 +315,7 @@ mod tests {
 
     #[test]
     fn no_work_is_split_into_no_pieces() {
-        assert_eq!(bands(&Reversed(8), 0, 1), 0);
+        assert_eq!(bands(&Reversed::new(8), 0, 1), 0);
         assert_eq!(bands(&SERIAL, 0, 1), 0);
     }
 
@@ -289,15 +326,15 @@ mod tests {
 
     #[test]
     fn work_below_one_grain_is_not_split() {
-        assert_eq!(bands(&Reversed(8), 15, 16), 1);
-        assert_eq!(bands(&Reversed(8), 16, 16), 1);
-        assert_eq!(bands(&Reversed(8), 31, 16), 1);
-        assert_eq!(bands(&Reversed(8), 32, 16), 2);
+        assert_eq!(bands(&Reversed::new(8), 15, 16), 1);
+        assert_eq!(bands(&Reversed::new(8), 16, 16), 1);
+        assert_eq!(bands(&Reversed::new(8), 31, 16), 1);
+        assert_eq!(bands(&Reversed::new(8), 32, 16), 2);
     }
 
     #[test]
     fn the_split_never_exceeds_the_runner_s_oversubscribed_width() {
-        let runner = Reversed(4);
+        let runner = Reversed::new(4);
         assert_eq!(
             bands(&runner, 1_000_000, 1),
             4 * OVERSUBSCRIPTION,
@@ -308,12 +345,12 @@ mod tests {
     /// A zero grain would divide by zero; it reads as one unit per piece.
     #[test]
     fn a_zero_grain_reads_as_one_unit_per_piece() {
-        assert_eq!(bands(&Reversed(2), 3, 0), 3);
+        assert_eq!(bands(&Reversed::new(2), 3, 0), 3);
     }
 
     /// A runner claiming an absurd width must not overflow the bound.
     #[test]
     fn an_absurd_width_still_yields_a_usable_split() {
-        assert_eq!(bands(&Reversed(usize::MAX), 10, 1), 10);
+        assert_eq!(bands(&Reversed::new(usize::MAX), 10, 1), 10);
     }
 }

@@ -47,7 +47,7 @@ use tairix_theme::{Fonts, TextRole};
 use tairix_vt::char_width;
 
 use crate::atlas;
-use crate::client::{self, GlyphClient};
+use crate::client::{self, FontClient};
 use crate::measure::MeasuredText;
 
 /// The mark that ends a line the text outgrew: HORIZONTAL ELLIPSIS.
@@ -323,7 +323,7 @@ impl BitmapFont {
     }
 
     /// [`advance`](Self::advance) against a client the caller already holds.
-    pub(crate) fn advance_on(self, client: &mut GlyphClient, ch: char) -> u32 {
+    pub(crate) fn advance_on(self, client: &mut impl FontClient, ch: char) -> u32 {
         match self.monospace_advance_on(client) {
             Some(cell) => Self::cell_step(cell, ch),
             None => self.glyph_advance_on(client, ch),
@@ -332,7 +332,7 @@ impl BitmapFont {
 
     /// The advance the face's own glyph for `ch` reports, or zero when the
     /// service cannot supply it (fail closed, never a guessed width).
-    fn glyph_advance_on(self, client: &mut GlyphClient, ch: char) -> u32 {
+    fn glyph_advance_on(self, client: &mut impl FontClient, ch: char) -> u32 {
         client
             .with_glyph(ch, self.family, self.pixel_height, self.weight, |glyph| {
                 glyph.advance
@@ -342,7 +342,7 @@ impl BitmapFont {
 
     /// [`monospace_advance`](Self::monospace_advance) against a client the
     /// caller already holds.
-    pub(crate) fn monospace_advance_on(self, client: &mut GlyphClient) -> Option<u32> {
+    pub(crate) fn monospace_advance_on(self, client: &mut impl FontClient) -> Option<u32> {
         let advance = client
             .metrics(self.family, self.pixel_height, self.weight)
             .monospace_advance;
@@ -351,7 +351,7 @@ impl BitmapFont {
 
     /// [`text_width`](Self::text_width) against a client the caller already
     /// holds.
-    pub(crate) fn width_on(self, client: &mut GlyphClient, text: &str) -> u32 {
+    pub(crate) fn width_on(self, client: &mut impl FontClient, text: &str) -> u32 {
         if let Some(cell) = self.monospace_advance_on(client) {
             return text.chars().fold(0, |width, ch| {
                 width.saturating_add(Self::cell_step(cell, ch))
@@ -374,7 +374,7 @@ impl BitmapFont {
     /// the last character the memo says fits.
     pub(crate) fn fitting_bytes_on(
         self,
-        client: &mut GlyphClient,
+        client: &mut impl FontClient,
         text: &str,
         width: u32,
     ) -> usize {
@@ -397,7 +397,7 @@ impl BitmapFont {
     /// already holds, as a byte length and the flag.
     pub(crate) fn elision_on(
         self,
-        client: &mut GlyphClient,
+        client: &mut impl FontClient,
         text: &str,
         width: u32,
     ) -> (usize, bool) {
@@ -481,7 +481,7 @@ impl BitmapFont {
     /// holds.
     pub(crate) fn draw_on(
         self,
-        client: &mut GlyphClient,
+        client: &mut impl FontClient,
         surface: &mut Surface,
         x: i32,
         y: i32,
@@ -756,8 +756,10 @@ mod blit_tests {
     use tairix_raster::{Color, Pixel, Surface};
     use tairix_reclaim::PressureBand;
 
-    use super::{advance_step, coverage_sources, draw_coverage_glyph, BitmapFont, GlyphClient};
+    use super::{advance_step, coverage_sources, draw_coverage_glyph, BitmapFont};
+    use crate::client::tests::LocalClient;
     use crate::client::tests::{caching_client, glyph_lookups, INTER};
+    use crate::client::FontClient;
     use crate::glyph_cache::{glyph_cache_budget, CachedGlyph};
 
     /// The straightforward blit: walk every glyph pixel, clip it, and
@@ -879,7 +881,7 @@ mod blit_tests {
     /// same pixels and leaves the pen in the very same place; it lives only
     /// here, so production keeps one definition of the run.
     fn reference_draw(
-        client: &mut GlyphClient,
+        client: &mut impl FontClient,
         font: BitmapFont,
         surface: &mut Surface,
         x: i32,
@@ -901,7 +903,7 @@ mod blit_tests {
 
     /// A client whose glyph cache is installed and already holds `text`, so a
     /// lookup count is what the *run* costs rather than its first fetches.
-    fn warm_client(font: BitmapFont, text: &str) -> GlyphClient {
+    fn warm_client(font: BitmapFont, text: &str) -> LocalClient {
         let (mut client, _gauge) =
             caching_client(PressureBand::Normal, glyph_cache_budget(1 << 30));
         let mut scratch = Surface::new(4, 4).expect("allocates");

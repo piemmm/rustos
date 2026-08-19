@@ -73,6 +73,26 @@ from what running elsewhere saves — leaves an opaque or translucent full-scree
 composite within 1% of undivided, and a full-screen backdrop blur 2.6% behind. That
 is the price the other seven participants are bought with.
 
+### The one whole-window pass above the compositor
+
+An application's `Present` hands the session a frame of straight-alpha bytes and
+declares which rectangle it changed. Converting that rectangle into the window's
+own content surface is the third pass a repaint costs above the compositor, and
+it is the one the session **cannot** make smaller: the app declares the damage,
+so a client that repaints everything makes the desktop convert everything. It is
+therefore spread across the same participants a composite uses —
+`Compositor::job_runner` reads the installed runner back, so the conversion and
+the composite share one answer about how wide the machine is rather than two
+installations that could drift.
+
+Both directions of that conversion are one definition,
+`tairix_display::winframe`, beside the channel-order decision the scan-out path
+already owns: `encode` is what an app writes its surface out through and `decode`
+is what the session reads it back in through, reporting the sub-rectangle whose
+pixels genuinely changed. An app passes the calling-thread runner rather than a
+pool, and the asymmetry is deliberate: an app decides how much it presents and
+should present only what it changed.
+
 Within a row, the columns between two copied opaque runs are one **segment**,
 and a segment is composed a *layer* at a time across its whole width — the
 base fill, the desktop row, each window row back to front, then the cursor —

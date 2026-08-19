@@ -3481,8 +3481,12 @@ transfer, landed in increments:
   hash — read-only text/rodata is one physical frame set shared across
   every instance, writable pages are COW, cost tracks the working set not
   the whole binary, and no unverified byte is ever mapped (the page-cache
-  sharing Linux has, plus verification it does not). Audit done; no
-  implementation has landed.
+  sharing Linux has, plus verification it does not). **DESK-1…DESK-4 have
+  landed** (asynchronous launch, the loud launcher/shell/terminal/login
+  diagnosis, and the desktop's directory listings and wallpaper preparation
+  moved onto `lib/rt` worker threads woken through the session's own wait-set);
+  DESK-5…DESK-7 — the verified shared image cache, demand paging and COW, and
+  the docs sweep — remain.
 - **The display-client present path (`plans/DISPLAY.md` D7) — the
   graphical session goes live.** The binding design is fixed there
   (zero-copy shm double-buffer frames, per-present kernel lease check,
@@ -7550,7 +7554,7 @@ app's menu shell, M3 the plate becomes a cached damage-reporting surface.
 
 ---
 
-## FIX-DESKTOP-SPEEDUP — desktop redraw speed without hardware acceleration (`plans/FIX-DESKTOP-SPEEDUP.md`)  **[A DONE, B DONE, C MOSTLY DONE, D DONE, E.1+E.2 DONE, H DONE, I DONE]**
+## FIX-DESKTOP-SPEEDUP — desktop redraw speed without hardware acceleration (`plans/FIX-DESKTOP-SPEEDUP.md`)  **[A DONE, B DONE, C MOSTLY DONE, D DONE, E.1+E.2 DONE, H DONE, I DONE, J DONE]**
 
 **Dependencies:** Stage 7 (compositor, taskbar, controls). Independent of
 `plans/FIX-DISPLAY-ACCELERATION.md` — that is the hardware half; this is

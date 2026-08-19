@@ -179,6 +179,7 @@ pub mod input;
 pub mod keyboard;
 pub mod launch;
 pub mod library;
+pub mod listing;
 pub mod lock;
 pub mod picker;
 pub mod pinboard;
@@ -192,6 +193,7 @@ pub mod switchboard;
 pub mod switchuser;
 pub mod tasks;
 pub mod vigil;
+pub mod wallpaper;
 pub mod windows;
 
 #[cfg(test)]
@@ -224,6 +226,7 @@ pub use input::{SessionInputResponse, SessionInputRouter};
 pub use keyboard::{KeyInputChannel, KeyboardInputSource};
 pub use launch::{admitted_pid, launch_failure_report, reap_launched, LaunchTable, LaunchedApp};
 pub use library::{load_library, LoadedLibrary};
+pub use listing::{ListingClient, ListingDesk};
 pub use lock::{LockOutcome, LockedDrain, ScreenLock};
 pub use picker::{
     ConcludedPick, PickConclusion, PickerSlot, SessionPicker, PICKER_ORIGIN, PICKER_TITLE,
@@ -254,6 +257,7 @@ pub use switchuser::{
 };
 pub use tasks::TaskBridge;
 pub use vigil::{HangTracker, UNRESPONSIVE_AFTER_NS};
+pub use wallpaper::{Prepared, WallpaperDesk, WallpaperSource};
 pub use windows::{
     desktop_info, resolve_window_identities, window_control_alternate_event, window_control_event,
     SessionWindows, ShellWindowHost,

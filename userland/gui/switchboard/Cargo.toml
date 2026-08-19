@@ -76,6 +76,11 @@ tairix-font = { path = "../../../lib/font", version = "=0.0.0" }
 # is actually built for; on the host none of them are linked, and the font
 # crate falls back to its host transport.
 [target.'cfg(target_os = "none")'.dependencies]
+# The window-frame pixel codec (`tairix_display::winframe`): the one
+# definition of the straight-alpha conversion between this program's own
+# surface and the shared frame the desktop session reads, so no app carries a
+# private copy of the channel-order decision.
+tairix-display = { path = "../../../lib/display", version = "=0.0.0" }
 tairix-rt = { path = "../../../lib/rt", version = "=0.0.0", optional = true }
 tairix-procinfo = { path = "../../../lib/procinfo", version = "=0.0.0", features = [
     "program",

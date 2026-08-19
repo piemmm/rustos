@@ -2859,6 +2859,19 @@ impl Compositor {
         self.runner = runner;
     }
 
+    /// The runner installed by [`set_job_runner`](Self::set_job_runner).
+    ///
+    /// A session converts an application's presented frame into that window's
+    /// own content surface — a whole-window pass it cannot bound, since the app
+    /// declares the damage — and spreads it across the very same participants
+    /// the composite uses. Reading the installed runner back is what keeps one
+    /// answer to "how wide is this machine" rather than two installations that
+    /// could drift.
+    #[must_use]
+    pub fn job_runner(&self) -> &'static dyn JobRunner {
+        self.runner
+    }
+
     /// Frost the back buffer inside the rectangle of the window at `index`,
     /// weighted by that window's own shape coverage, leaving a frosted
     /// backdrop for the window's pixels to be blended over — everywhere except

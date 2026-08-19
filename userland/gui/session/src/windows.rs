@@ -21,9 +21,10 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use tairix_abi::desktop::DesktopInfo;
-use tairix_abi::driver::display::{DamageRect, DisplayFormat, DisplayMode};
+use tairix_abi::driver::display::{DamageRect, DisplayMode};
 use tairix_abi::window_ipc::WindowEvent;
 use tairix_abi::{Errno, ProcId};
+use tairix_display::winframe;
 use tairix_icon::{IconKind, IconRequest};
 use tairix_window::{PinDecision, WindowSizing};
 use tairix_wm::{Color, Compositor, Point, Rect, Surface, WindowControlKind, WindowId};
@@ -509,16 +510,24 @@ impl tairix_window::WindowHost for ShellWindowHost<'_> {
         // frame around the client is the session's, the pixels inside it
         // are the app's. The engine validated the damage against the
         // window's surface and handed a frame slice sized from the mode,
-        // but every index in `convert_damage` is still checked: a
+        // but every index the conversion uses is still checked: a
         // disagreement refuses the present rather than reading out of
         // bounds, and refuses it before writing anything. A window the
         // compositor no longer knows, or one whose pixels cannot be
         // allocated, fails closed.
+        //
+        // The rows go across the machine's cores, because this is the one
+        // whole-window pass the session cannot bound: the app declares the
+        // damage, so a client that repaints everything makes the desktop
+        // convert everything. Read back rather than installed here, so the
+        // conversion and the composite share one answer about how wide the
+        // machine is.
+        let runner = self.compositor.job_runner();
         let Some(result) = self.compositor.present_window_content(
             wm,
             surface.width_px,
             surface.height_px,
-            |content| match convert_damage(content, surface, frame, damage) {
+            |content| match winframe::decode(frame, content, surface, damage, runner) {
                 Ok(changed) => (Ok(()), changed),
                 Err(err) => (Err(err), Rect::EMPTY),
             },
@@ -657,151 +666,6 @@ pub fn desktop_info(compositor: &Compositor) -> Result<DesktopInfo, Errno> {
         scale,
         compositor.theme().appearance(),
     )
-}
-
-/// Convert the pixels of `damage` from the presented `frame` (laid out
-/// per `mode`) into `surface`, returning the sub-rectangle of `damage`
-/// whose pixels the conversion actually *changed* — [`Rect::EMPTY`] when
-/// the presented pixels were identical to the ones already there.
-///
-/// The returned rectangle is the window's real damage, and it is what
-/// keeps a repaint proportional to the change. An app re-renders its
-/// whole composition and presents whole-window damage, because a toolkit
-/// generally cannot say which pixels its own paint touched; taking that
-/// claim at face value would recomposite every pixel of the window for a
-/// hover highlight a few rows tall. The comparison is exact — a pixel
-/// reported unchanged carries the byte-identical value it already had —
-/// and costs one extra read on a loop that already reads the frame and
-/// writes the surface.
-///
-/// Fails closed: every index the conversion will use is validated before
-/// the first write, so a malformed or hostile geometry refuses the whole
-/// present rather than leaving the window half-converted.
-fn convert_damage(
-    surface: &mut Surface,
-    mode: &DisplayMode,
-    frame: &[u8],
-    damage: DamageRect,
-) -> Result<Rect, Errno> {
-    let bpp = mode.format.bytes_per_pixel() as usize;
-    let x_end = damage
-        .x
-        .checked_add(damage.width_px)
-        .ok_or(Errno::OutOfRange)?;
-    let y_end = damage
-        .y
-        .checked_add(damage.height_px)
-        .ok_or(Errno::OutOfRange)?;
-    if x_end > surface.width() || y_end > surface.height() {
-        return Err(Errno::OutOfRange);
-    }
-    // The alpha byte is the app's own and honoured (premultiplied for the
-    // compositor's blend), so an app can render translucent regions. A
-    // format this bridge does not know how to convert is refused, never
-    // guessed (the enum is non-exhaustive by design). Resolving it once
-    // keeps the decision off the per-pixel path.
-    let decode: fn([u8; 4]) -> Color = match mode.format {
-        DisplayFormat::Rgba8888 => |b| Color::rgba(b[0], b[1], b[2], b[3]),
-        DisplayFormat::Bgra8888 => |b| Color::rgba(b[2], b[1], b[0], b[3]),
-        _ => return Err(Errno::OutOfRange),
-    };
-    let stride = mode.stride_bytes as usize;
-    let start = (damage.x as usize)
-        .checked_mul(bpp)
-        .ok_or(Errno::OutOfRange)?;
-    let span = (damage.width_px as usize)
-        .checked_mul(bpp)
-        .ok_or(Errno::OutOfRange)?;
-    // Prove every row of the request is inside `frame` before a single
-    // pixel is written: a refusal must leave the window exactly as it
-    // was, never half-converted.
-    let row_offset = |y: u32| -> Result<usize, Errno> {
-        (y as usize)
-            .checked_mul(stride)
-            .and_then(|row| row.checked_add(start))
-            .ok_or(Errno::OutOfRange)
-    };
-    for y in damage.y..y_end {
-        let offset = row_offset(y)?;
-        let end = offset.checked_add(span).ok_or(Errno::OutOfRange)?;
-        if end > frame.len() {
-            return Err(Errno::OutOfRange);
-        }
-    }
-
-    let columns = damage.width_px as usize;
-    let mut changed = DamageBounds::default();
-    for y in damage.y..y_end {
-        let offset = row_offset(y)?;
-        let (Some(source), Some((_, target))) = (
-            frame.get(offset..offset.saturating_add(span)),
-            surface.row_span_mut(y, damage.x, damage.width_px),
-        ) else {
-            return Err(Errno::OutOfRange);
-        };
-        // The surface span is the width the request claimed, or the whole
-        // present is refused: a row shortened for any reason must never
-        // silently convert part of a scanline.
-        if target.len() != columns {
-            return Err(Errno::OutOfRange);
-        }
-        // One row address and one bounds check per row, not per pixel: this
-        // loop runs over every damaged pixel of every application repaint.
-        for (index, (chunk, slot)) in source.chunks_exact(bpp).zip(target).enumerate() {
-            let [b0, b1, b2, b3, ..] = *chunk else {
-                return Err(Errno::OutOfRange);
-            };
-            let pixel = decode([b0, b1, b2, b3]).premultiply();
-            if *slot == pixel {
-                continue;
-            }
-            *slot = pixel;
-            let Ok(step) = u32::try_from(index) else {
-                return Err(Errno::OutOfRange);
-            };
-            changed.include(damage.x.saturating_add(step), y);
-        }
-    }
-    changed.rect()
-}
-
-/// The bounding box of the pixels a conversion changed, accumulated as
-/// inclusive edges so an untouched conversion stays distinguishable from
-/// one that changed the single pixel at the origin.
-#[derive(Default)]
-struct DamageBounds {
-    edges: Option<(u32, u32, u32, u32)>,
-}
-
-impl DamageBounds {
-    /// Grow the box to cover the changed pixel `(x, y)`.
-    fn include(&mut self, x: u32, y: u32) {
-        self.edges = Some(match self.edges {
-            None => (x, y, x, y),
-            Some((left, top, right, bottom)) => {
-                (left.min(x), top.min(y), right.max(x), bottom.max(y))
-            }
-        });
-    }
-
-    /// The accumulated box as a surface-local rectangle, or
-    /// [`Rect::EMPTY`] when nothing changed. Fails closed rather than
-    /// wrapping if a surface is somehow wider than the coordinate space
-    /// the compositor addresses.
-    fn rect(self) -> Result<Rect, Errno> {
-        let Some((left, top, right, bottom)) = self.edges else {
-            return Ok(Rect::EMPTY);
-        };
-        let (Ok(x), Ok(y)) = (i32::try_from(left), i32::try_from(top)) else {
-            return Err(Errno::OutOfRange);
-        };
-        Ok(Rect::new(
-            x,
-            y,
-            right.saturating_sub(left).saturating_add(1),
-            bottom.saturating_sub(top).saturating_add(1),
-        ))
-    }
 }
 
 #[cfg(test)]

@@ -102,7 +102,9 @@ the payload exceeds the pre-Korean size ceiling.
   disagree.
 - `client` — the process-global font-service client behind `render`: the
   injected transport seam to `fontd` and the byte-budgeted local glyph cache
-  fetched coverage is memoised in. See *Rendering at a chosen size* below.
+  fetched coverage is memoised in, under two futex-mutex-guarded halves (the
+  caches, never held across a syscall; the channel, held across the round trip)
+  of which no thread ever holds both. See *Rendering at a chosen size* below.
 - `glyph_cache` — the one cached-glyph declaration (behind `glyph-cache`,
   pulled in by `render`): the retained value type, its reclaim
   classification, and the RAM-derived byte budget. `fontd` builds its own

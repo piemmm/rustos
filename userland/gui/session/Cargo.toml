@@ -24,6 +24,14 @@ tairix-taskbar = { path = "../taskbar", version = "=0.0.0" }
 # through the window manager's single anti-aliased rounded-corner path (§2.2).
 # Composing two GUI crates is the permitted `userland/gui/*` edge (§17.4).
 tairix-wm = { path = "../wm", version = "=0.0.0" }
+# The window-frame pixel codec (`winframe`): the one definition of the
+# straight-alpha conversion between an app's presented frame and the
+# compositor's own window surface, beside the channel-order decision the
+# scan-out path already owns. The session drives the decode direction across
+# the compositor's own participants. (The `rt` feature — the syscall-backed
+# `ShmMapper` and the display client — is added for the freestanding build
+# below; the library half needs only the codec.)
+tairix-display = { path = "../../../lib/display", version = "=0.0.0" }
 # The program-library catalog engine (plans/NEW-TASKBAR.md): the session
 # reads the machine store and the user's overlay under its own identity,
 # merges them through the one shared `merge`, and resolves a popup launch's

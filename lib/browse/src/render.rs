@@ -148,12 +148,57 @@ pub fn render<S: DirectorySource>(
     );
 
     let content = content_viewport(area, scale, theme);
+    if awaiting_listing(browser) {
+        draw_listing_cue(&mut surface, scale, theme, content);
+        return Some(surface);
+    }
     match browser.view_mode() {
         ViewMode::List => draw_list(&mut surface, scale, theme, browser, content),
         ViewMode::Grid => draw_grid(&mut surface, scale, theme, browser, content, artwork),
     }
     draw_scrollbar(&mut surface, scale, theme, browser, area);
     Some(surface)
+}
+
+/// What the listing area says while a directory read is still in flight.
+///
+/// One definition, so the drawn cue and any observer of it (a test, a QEMU
+/// vertical reading the scan-out) agree on the exact text.
+pub const LISTING_MESSAGE: &str = "Listing…";
+
+/// Whether the listing area should show [`LISTING_MESSAGE`] instead of items.
+///
+/// Two cases, one rule. A read of *somewhere else* is in flight, so the items on
+/// screen belong to a directory the user has already asked to leave and showing
+/// them as if current would be a lie. Or there are no items to show at all — a
+/// window that has just opened — where a blank area says nothing. A re-read of
+/// the directory already shown is neither: it keeps its items, so a periodic
+/// re-list cannot make the view flicker.
+fn awaiting_listing<S: DirectorySource>(browser: &Browser<S>) -> bool {
+    match browser.listing_target() {
+        None => false,
+        Some(target) => target != browser.components() || browser.entries().is_empty(),
+    }
+}
+
+/// Draw [`LISTING_MESSAGE`] centred in `content`, in the muted ink an inactive
+/// label uses: it is a state, not an error.
+fn draw_listing_cue(surface: &mut Surface, scale: Scale, theme: &Theme, content: Rect) {
+    let font = BitmapFont::for_role(theme.fonts(), TextRole::Body, scale);
+    let width = font.text_width(LISTING_MESSAGE);
+    let x = content
+        .left()
+        .saturating_add_unsigned(content.width.saturating_sub(width) / 2);
+    let y = content
+        .top()
+        .saturating_add_unsigned(content.height.saturating_sub(font.glyph_height()) / 2);
+    font.draw_text(
+        surface,
+        x,
+        y,
+        LISTING_MESSAGE,
+        theme.palette().on_surface_muted.into(),
+    );
 }
 
 /// The manager-only chrome drawn around the shared browser view.

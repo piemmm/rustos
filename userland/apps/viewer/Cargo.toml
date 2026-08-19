@@ -52,6 +52,11 @@ path = "src/run.rs"
 # the bare-metal targets it is actually built for; on the host the
 # binary is an inert stub with no extra dependencies.
 [target.'cfg(target_os = "none")'.dependencies]
+# The window-frame pixel codec (`tairix_display::winframe`): the one
+# definition of the straight-alpha conversion between this program's own
+# surface and the shared frame the desktop session reads, so no app carries a
+# private copy of the channel-order decision.
+tairix-display = { path = "../../../lib/display", version = "=0.0.0" }
 # The app half of the window channel: `WindowClient` (create / present /
 # pick_file / close) and `WindowEvents` (the typed, parked event wait).
 tairix-window = { path = "../../../lib/window", version = "=0.0.0" }

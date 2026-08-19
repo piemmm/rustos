@@ -2731,7 +2731,7 @@ fn aw3_click_through_produces_the_staged_outcomes() {
 use crate::picker::{PickConclusion, PickerSlot, SessionPicker, PICKER_ORIGIN};
 use tairix_abi::input::{KeyInput, KeyValue, Modifiers, NamedKeyCode};
 use tairix_browse::render::chrome_height;
-use tairix_browse::{DirectorySource, Entry};
+use tairix_browse::{DirectorySource, Entry, Listing};
 
 /// An in-memory directory tree keyed by the joined component path, the
 /// picker's stand-in for the session-authority VFS listing.
@@ -2753,9 +2753,13 @@ impl TreeSource {
 }
 
 impl DirectorySource for TreeSource {
-    fn list(&mut self, components: &[String]) -> Result<Vec<Entry>, Errno> {
+    fn list(&mut self, components: &[String]) -> Result<Listing, Errno> {
         let key = components.join("/");
-        self.dirs.get(&key).cloned().ok_or(Errno::NotFound)
+        self.dirs
+            .get(&key)
+            .cloned()
+            .map(Listing::Ready)
+            .ok_or(Errno::NotFound)
     }
 }
 
@@ -2764,7 +2768,7 @@ impl DirectorySource for TreeSource {
 struct RefusingSource;
 
 impl DirectorySource for RefusingSource {
-    fn list(&mut self, _components: &[String]) -> Result<Vec<Entry>, Errno> {
+    fn list(&mut self, _components: &[String]) -> Result<Listing, Errno> {
         Err(Errno::PermissionDenied)
     }
 }
@@ -8221,6 +8225,38 @@ fn the_desktop_reveals_from_black_over_the_themes_session_fade() {
 /// The stall this guards: the loop steps the reveal, spends real time
 /// presenting that frame, and only then works out its park. A span that ended
 /// in between still owes the frame that completes the reveal, or the desktop
+/// The reveal witness must not fire while the user's own backdrop is still being
+/// prepared: the wallpaper is read and decoded on a worker thread, and the frame
+/// on screen until it lands carries the fallback colour in its place. The
+/// desktop QEMU verticals gate their scan-out readback on this witness and check
+/// a wallpaper pixel, so a witness that fired early would read the wrong screen.
+#[test]
+fn the_reveal_witness_waits_for_the_first_backdrop() {
+    let mut comp = compositor();
+    let (_, wakes) = session_fade(&comp);
+    let end = wakes[wakes.len() - 1];
+    let sink = RecordingSink::new();
+    let mut fade = ScreenFade::begin(SESSION_START_NS, &mut comp);
+
+    fade.set_awaiting_backdrop(true);
+    fade.advance(end + 1, &mut comp);
+    assert_eq!(comp.reveal(), u8::MAX, "the fade itself is unaffected");
+    fade.presented(&sink);
+    assert_eq!(
+        sink.witnesses(),
+        0,
+        "the desktop was announced visible before its wallpaper arrived"
+    );
+
+    // The preparation resolves — installed, refused, or never wanted — and the
+    // frame that carries it is the one the witness follows.
+    fade.set_awaiting_backdrop(false);
+    fade.presented(&sink);
+    assert_eq!(sink.witnesses(), 1);
+    fade.presented(&sink);
+    assert_eq!(sink.witnesses(), 1, "the witness is still one-shot");
+}
+
 /// parks indefinitely one step short of visible.
 #[test]
 fn a_fade_that_ended_while_its_frame_was_presented_still_tightens_the_park() {

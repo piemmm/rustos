@@ -69,6 +69,17 @@ can never diverge in navigation semantics, listing policy, or look.
   engine never fabricates an entry: it shows exactly what its source
   returns, with every permission decision staying in the VFS behind the
   source under the composing process's own identity.
+- **A listing may not be ready yet** (`Listing`, `Browser::resume`): a source
+  that reads the directory on the calling thread answers `Listing::Ready`; one
+  that reads it *elsewhere* — the desktop session, whose event loop must not
+  stall on a slow disk — answers `Listing::Pending`, and the embedder asks again
+  when its own wake says the answer has landed. Pending is never an error and an
+  error is never retried by waiting. A pending navigation has moved **nothing**:
+  `resume` commits the location, the entries, and exactly the history change the
+  original gesture owed, all at once, so the transactional guarantee above is
+  unchanged and a refusal that arrives late is reported in place.
+  `Browser::is_listing` / `listing_target` are what a view draws its cue from.
+  Nothing in the engine polls, waits, or sleeps.
 - **Navigation history** (`Browser`): a bounded back /
   forward stack (`go_back` / `go_forward`, with `can_go_back` /
   `can_go_forward` supplying the enable state of the Back / Forward toolbar

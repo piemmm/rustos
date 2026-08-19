@@ -11,6 +11,16 @@
 //! path policy live in the VFS, not here. The browser shows exactly the
 //! entries the source returns — it never fabricates a `/proc`/`/sys`-style
 //! synthetic entry.
+//!
+//! # A listing may not be ready yet
+//!
+//! A source that reads the directory on the calling thread answers
+//! [`Listing::Ready`] and is the simple case. A source that reads it
+//! *elsewhere* — the desktop session, whose event loop must not stall on a
+//! directory a slow disk is still walking — answers [`Listing::Pending`], and
+//! the embedder asks again when its own wake says the answer has landed
+//! (`Browser::resume`). Nothing here ever polls or waits: the trait reports
+//! what it has, and the party that owns the wake decides when to ask again.
 
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -18,6 +28,24 @@ use alloc::vec::Vec;
 use tairix_abi::Errno;
 
 use crate::entry::Entry;
+
+/// What a source has for a directory right now.
+///
+/// Two answers, both of them normal: the children, or "not yet". A refusal is
+/// the `Err` half of the enclosing [`Result`] and is a third thing entirely —
+/// pending is never an error, and an error is never retried by waiting.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum Listing {
+    /// The children, in the source's own stable order.
+    Ready(Vec<Entry>),
+    /// The read is under way somewhere else and the answer will arrive later.
+    ///
+    /// The source has taken note of the request; the *embedder* is what asks
+    /// again, when whatever it parks on says the answer has landed. A source
+    /// that returns this and never becomes ready simply leaves the view where
+    /// it was — it can never make the browser spin.
+    Pending,
+}
 
 /// A read-only view of the filesystem's directory structure.
 pub trait DirectorySource {
@@ -28,13 +56,18 @@ pub trait DirectorySource {
     /// iteration order is the source's own stable order. The browser does not
     /// sort, filter, or add to them.
     ///
+    /// A source that reads the directory itself always answers
+    /// [`Listing::Ready`]. One that reads it elsewhere answers
+    /// [`Listing::Pending`] and is asked again later; asking with the same
+    /// `components` must not start a second read.
+    ///
     /// # Errors
     ///
     /// Returns the kernel boundary's [`Errno`] when the directory cannot be
     /// listed — for example [`Errno::PermissionDenied`] when the caller lacks
     /// the capability to read it or [`Errno::NotFound`]
     /// when it does not exist.
-    fn list(&mut self, components: &[String]) -> Result<Vec<Entry>, Errno>;
+    fn list(&mut self, components: &[String]) -> Result<Listing, Errno>;
 
     /// Whether the directory named by `components` holds at least one child.
     ///

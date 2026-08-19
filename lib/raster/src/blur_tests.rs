@@ -448,25 +448,6 @@ impl Recorder {
     }
 }
 
-/// A runner that reports a width it does not have and runs the pieces
-/// **backwards** on the calling thread, so a comparison against it is a proof
-/// about how a frost divides rather than about thread timing.
-struct Split(usize);
-
-// SAFETY: each index of `0..count` is passed exactly once, on the calling
-// thread, and every call has returned before `run` does.
-unsafe impl tairix_parallel::JobRunner for Split {
-    fn width(&self) -> usize {
-        self.0
-    }
-
-    fn run(&self, count: usize, job: &(dyn Fn(usize) + Sync)) {
-        for index in (0..count).rev() {
-            job(index);
-        }
-    }
-}
-
 /// Every pixel of `after` outside `[x, x+w) × [y, y+h)` still carries what
 /// `before` had there.
 fn outside_is_untouched(after: &Surface, before: &Surface, (x, y, w, h): (u32, u32, u32, u32)) {
@@ -1011,7 +992,13 @@ fn a_frost_divided_into_pieces_is_exactly_the_undivided_frost() {
                 let before = patterned(26, 21);
                 let whole = frosted(before.clone(), rect, radius, weight);
                 for width in [2usize, 3, 8, 64] {
-                    let divided = frosted_via(&Split(width), before.clone(), rect, radius, weight);
+                    let divided = frosted_via(
+                        &tairix_parallel::Reversed::new(width),
+                        before.clone(),
+                        rect,
+                        radius,
+                        weight,
+                    );
                     assert_eq!(
                         divided, whole,
                         "{rect:?} r{radius} w{weight} divided {width} ways"
@@ -1038,7 +1025,7 @@ fn a_divided_border_frost_is_exactly_the_undivided_border_frost() {
                 let whole = frosted_around(before.clone(), rect, keep.clone(), radius, weight);
                 for width in [2usize, 5, 16] {
                     let divided = frosted_around_via(
-                        &Split(width),
+                        &tairix_parallel::Reversed::new(width),
                         before.clone(),
                         rect,
                         keep.clone(),
@@ -1073,7 +1060,7 @@ fn a_scratch_reused_across_divided_and_undivided_frosts_carries_nothing() {
         rect.3,
         4,
         &mut shared,
-        &Split(8),
+        &tairix_parallel::Reversed::new(8),
         |_, _| 255,
     );
     assert_eq!(divided, expected);

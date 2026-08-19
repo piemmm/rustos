@@ -53,6 +53,11 @@ tairix-path = { path = "../../../lib/path", version = "=0.0.0" }
 # bare-metal targets it is actually built for; on the host those parts of the
 # binary are not compiled at all.
 [target.'cfg(target_os = "none")'.dependencies]
+# The window-frame pixel codec (`tairix_display::winframe`): the one
+# definition of the straight-alpha conversion between this program's own
+# surface and the shared frame the desktop session reads, so no app carries a
+# private copy of the channel-order decision.
+tairix-display = { path = "../../../lib/display", version = "=0.0.0" }
 # The shared icon vocabulary's draw-site artwork seam: the reclaim-governed
 # `ArtworkCache` this app builds through the one shared `artwork_cache`
 # constructor, and the `IconArtworkSource` that binds it to the read and

@@ -57,6 +57,7 @@ mod program {
     use tairix_abi::{
         Errno, Origin, ProcId, WaitSetOp, WaitSourceKind, DOCUMENT_ROLE_ARG, ORIGIN_WIRE_LEN, STDIN,
     };
+    use tairix_display::{winframe, SERIAL};
     use tairix_geometry::{Point, Scale};
     use tairix_rt::io::{Stderr, Write};
     use tairix_theme::ThemeRegistry;
@@ -231,15 +232,9 @@ mod program {
         frame: &mut [u8],
         mode: &DisplayMode,
     ) -> Result<(), Errno> {
-        for (i, pixel) in surface.pixels().iter().enumerate() {
-            let color = pixel.unpremultiply();
-            let at = i * 4;
-            let Some(slot) = frame.get_mut(at..at + 4) else {
-                return Err(Errno::LengthOutOfRange);
-            };
-            slot.copy_from_slice(&[color.r, color.g, color.b, color.a]);
-        }
-        client.present(window, 0, DamageRect::full(mode))
+        let damage = DamageRect::full(mode);
+        winframe::encode(surface, frame, mode, damage, &SERIAL)?;
+        client.present(window, 0, damage)
     }
 
     /// A `width_px` × `height_px` RGBA window mode, one frame's worth per

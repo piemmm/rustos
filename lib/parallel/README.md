@@ -60,6 +60,13 @@ grain. There is no fixed ceiling on pieces, work units, or dispatches.
 
 ## Testing
 
+`Reversed` (feature `test-util`) is the runner every consumer proves bit-identity
+against: it reports a width it does not have and runs its pieces backwards on the
+calling thread, so a comparison against `SERIAL` is a proof about how a pass
+*divides* rather than about thread timing. It lives here because the `unsafe impl`
+belongs beside the trait whose obligations it discharges, and because three
+crates were otherwise spelling the same eight lines.
+
 Host tests cover the pure half: the split policy at and around its boundaries,
 `for_each` visiting each element exactly once, that the order pieces run in
 cannot change the result, the unvisited-element case a skipping runner produces,

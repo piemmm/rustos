@@ -794,6 +794,13 @@ and the witness lands there, so a consumer waiting on it never waits for a
 fade that will not happen. It is said once and never repeated, and a fade
 heading for black never says it at all: it reaches black, not visibility.
 
+It also waits for the desktop's **first backdrop**. The wallpaper is read and
+decoded on a worker thread, so the frames before it lands carry the fallback
+colour where the user's picture belongs — which is no more "the desktop" than a
+half-faded frame is. `ScreenFade::set_awaiting_backdrop` holds the witness until
+that first preparation resolves (installed, refused, or never wanted), and the
+frame that carries it is the one the witness follows.
+
 Its id and message are defined once beside the reveal and imported by the
 desktop QEMU verticals, which gate their screendump on the rendered text,
 so emitter and consumer cannot drift.
@@ -934,6 +941,60 @@ the frame and writes the surface, so it adds one read per pixel and no
 allocation. It fails closed: every index the conversion will use is validated
 before the first write, so a malformed or hostile geometry refuses the whole
 present rather than leaving the window half-converted.
+
+Both directions of that conversion are one definition,
+`tairix_display::winframe`, beside the channel-order decision the scan-out path
+already owns: an app writes its surface out through `encode` and the session
+reads it back in through `decode`. And because it is the one whole-window pass
+the session *cannot* bound — the app declares the damage — its rows are spread
+across the same participants a composite uses, read back from the compositor
+(`Compositor::job_runner`) so the two share one answer about how wide the
+machine is.
+
+## Directory listings and the wallpaper are prepared off the loop
+
+Two things the desktop needs are reads of arbitrary length on arbitrary
+hardware: listing a directory (`fs_open` + `fs_readdir`) and preparing the
+wallpaper (a bounded file read, then a round trip through a sandbox worker).
+Run on the session's own task either one stalls the compositor, the seat drain,
+and every application blocked in a window call for as long as the disk takes.
+Both therefore run on `lib/rt` worker threads.
+
+The arrangement is the same shape twice, and the shape is a **desk**: a
+host-tested state machine (`ListingDesk`, `WallpaperDesk`) holding what each
+consumer asked for, what has come back, and the staleness rule that discards an
+answer for somewhere the desktop has since left. The `Run` binary adds the three
+things a real program brings — the runtime's futex mutex for exclusion, a
+condition variable the worker parks on with nothing to do, and one byte on a
+pipe whose read end is a wait-set member. So the session learns an answer landed
+through the very loop it already parks in: no new ABI, no second wake mechanism,
+and nothing anywhere spins.
+
+- **Two listing consumers, named rather than counted.** The icon column and the
+  trusted file picker each have their own slot, and the worker serves them
+  round-robin, so a picker walking a deep tree can never hold the icon column's
+  re-list behind it.
+- **The picker gains a real pending state.** `Browser` records the navigation
+  and *moves nothing* — not the location, not the entries, not either history —
+  until the listing arrives; `Browser::resume` commits it. A listing that is
+  refused when it does arrive drops the pending navigation and leaves the view
+  exactly where it was, so a refusal is reported in place rather than stranding
+  the user in a directory the session could not read. While a read of somewhere
+  *else* is in flight the listing area says so (`Listing…`), because the items on
+  screen belong to a directory the user has already asked to leave; a re-read of
+  what is already shown keeps its items, so a periodic re-list cannot flicker.
+- **The wallpaper's worker owns its own sandbox.** The icon rasteriser keeps the
+  loop's own sandbox handle, untouched and deliberately not `Send`; the wallpaper
+  thread creates a second capability-empty worker inside itself, so no sandbox
+  handle ever crosses a thread boundary.
+- **A refusal travels with the answer.** `stderr` is one descriptor and a
+  formatted line reaches it in several writes, so a worker stating a reason where
+  it noticed it could interleave with anything else writing at the same moment.
+  The worker answers *why* instead; the serve loop states it, once, on its own
+  thread.
+- **A refused thread is not a failure.** A kernel that grants no thread, or a
+  pipe it refuses, is stated once and that work happens on the serve loop —
+  exactly where it used to be. Slower under load, never wrong.
 
 ## Running-task list ↔ window stack
 

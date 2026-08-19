@@ -30,7 +30,7 @@ use crate::execute::{
 use crate::media::MediaType;
 use crate::places::{PlaceKind, Places, Volume};
 use crate::select::Selection;
-use crate::source::DirectorySource;
+use crate::source::{DirectorySource, Listing};
 
 /// The absolute-path key the mock indexes a directory by — the one shared
 /// spelling, so tests, the model, and the VFS engine agree on the path
@@ -708,7 +708,7 @@ impl MockFs {
 }
 
 impl DirectorySource for MockFs {
-    fn list(&mut self, components: &[String]) -> Result<Vec<Entry>, Errno> {
+    fn list(&mut self, components: &[String]) -> Result<Listing, Errno> {
         let path = key(components);
         if self.denied.contains(&path) {
             return Err(Errno::PermissionDenied);
@@ -721,10 +721,14 @@ impl DirectorySource for MockFs {
         }
         if path == "/" && count > 1 {
             if let Some(after) = &self.root_after_refresh {
-                return Ok(after.clone());
+                return Ok(Listing::Ready(after.clone()));
             }
         }
-        self.dirs.get(&path).cloned().ok_or(Errno::NotFound)
+        self.dirs
+            .get(&path)
+            .cloned()
+            .map(Listing::Ready)
+            .ok_or(Errno::NotFound)
     }
 }
 
@@ -6686,10 +6690,11 @@ mod occupancy {
     }
 
     impl DirectorySource for ProbeFs {
-        fn list(&mut self, components: &[String]) -> Result<Vec<Entry>, Errno> {
+        fn list(&mut self, components: &[String]) -> Result<Listing, Errno> {
             self.dirs
                 .get(&key(components))
                 .cloned()
+                .map(Listing::Ready)
                 .ok_or(Errno::NotFound)
         }
 
@@ -6991,5 +6996,281 @@ mod entry_labels {
         let folder = one_entry_list(Entry::directory("thing"));
         let file = one_entry_list(Entry::file("thing"));
         assert_ne!(folder.pixels(), file.pixels());
+    }
+}
+
+/// The asynchronous-source half of the navigation model: a listing that is not
+/// ready yet, and the `resume` that commits it.
+mod deferred {
+    use super::*;
+
+    use alloc::rc::Rc;
+    use core::cell::RefCell;
+
+    /// A source that answers `Pending` for every directory until the test says
+    /// the answer has landed — the shape a session's worker-thread source has,
+    /// with the wake replaced by a test's own `deliver`.
+    #[derive(Clone)]
+    struct Deferred {
+        tree: BTreeMap<String, Vec<Entry>>,
+        /// Directories whose answer has been delivered.
+        ready: Rc<RefCell<BTreeSet<String>>>,
+        /// Directories the source has been asked for, in order, so a test can
+        /// see that asking twice for the same one starts no second read.
+        asked: Rc<RefCell<Vec<String>>>,
+        /// Directories that answer with a refusal once delivered.
+        refused: Rc<RefCell<BTreeSet<String>>>,
+    }
+
+    impl Deferred {
+        fn new(tree: BTreeMap<String, Vec<Entry>>) -> Self {
+            Self {
+                tree,
+                ready: Rc::new(RefCell::new(BTreeSet::new())),
+                asked: Rc::new(RefCell::new(Vec::new())),
+                refused: Rc::new(RefCell::new(BTreeSet::new())),
+            }
+        }
+
+        fn deliver(&self, path: &str) {
+            self.ready.borrow_mut().insert(String::from(path));
+        }
+
+        fn refuse(&self, path: &str) {
+            self.refused.borrow_mut().insert(String::from(path));
+            self.deliver(path);
+        }
+
+        fn asked_for(&self, path: &str) -> usize {
+            self.asked
+                .borrow()
+                .iter()
+                .filter(|asked| asked.as_str() == path)
+                .count()
+        }
+    }
+
+    impl DirectorySource for Deferred {
+        fn list(&mut self, components: &[String]) -> Result<Listing, Errno> {
+            let path = key(components);
+            if !self.ready.borrow().contains(&path) {
+                self.asked.borrow_mut().push(path);
+                return Ok(Listing::Pending);
+            }
+            if self.refused.borrow().contains(&path) {
+                return Err(Errno::PermissionDenied);
+            }
+            self.tree
+                .get(&path)
+                .cloned()
+                .map(Listing::Ready)
+                .ok_or(Errno::NotFound)
+        }
+    }
+
+    fn tree() -> BTreeMap<String, Vec<Entry>> {
+        let mut tree = BTreeMap::new();
+        tree.insert(
+            String::from("/"),
+            alloc::vec![Entry::directory("Users"), Entry::file("readme")],
+        );
+        tree.insert(String::from("/Users"), alloc::vec![Entry::file("who")]);
+        tree
+    }
+
+    fn browser() -> (Browser<Deferred>, Deferred) {
+        let source = Deferred::new(tree());
+        let browser = Browser::open_root(source.clone()).expect("open");
+        (browser, source)
+    }
+
+    #[test]
+    fn an_open_whose_listing_is_not_ready_yet_is_empty_and_listing() {
+        let (browser, source) = browser();
+        assert!(browser.is_listing());
+        assert_eq!(browser.listing_target(), Some(&[][..]));
+        assert!(browser.entries().is_empty());
+        assert_eq!(source.asked_for("/"), 1);
+    }
+
+    #[test]
+    fn resume_starts_no_second_read_and_commits_when_the_answer_lands() {
+        let (mut browser, source) = browser();
+        assert!(!browser.resume().expect("resume"), "nothing arrived yet");
+        assert!(browser.entries().is_empty());
+        assert_eq!(
+            source.asked_for("/"),
+            2,
+            "each ask is the source's own to deduplicate; the browser asks once per resume"
+        );
+
+        source.deliver("/");
+        assert!(browser.resume().expect("resume"), "the answer committed");
+        assert!(!browser.is_listing());
+        assert_eq!(browser.entries().len(), 2);
+        assert!(!browser.resume().expect("resume"), "nothing left pending");
+    }
+
+    #[test]
+    fn a_pending_navigation_moves_nothing_until_it_commits() {
+        let (mut browser, source) = browser();
+        source.deliver("/");
+        browser.resume().expect("resume");
+
+        let before = browser.components().to_vec();
+        let _ = browser.select(0);
+        browser.open_selected().expect("navigate");
+        assert!(browser.is_listing());
+        assert_eq!(
+            browser.components(),
+            before.as_slice(),
+            "the location moved before the listing arrived"
+        );
+        assert!(!browser.can_go_back(), "the history moved early");
+        assert_eq!(browser.entries().len(), 2, "the entries were thrown away");
+
+        source.deliver("/Users");
+        assert!(browser.resume().expect("resume"));
+        assert_eq!(browser.components(), ["Users"]);
+        assert!(browser.can_go_back(), "the departure was not recorded");
+        assert_eq!(browser.entries().len(), 1);
+    }
+
+    #[test]
+    fn a_second_navigation_replaces_the_pending_one() {
+        let (mut browser, source) = browser();
+        source.deliver("/");
+        browser.resume().expect("resume");
+
+        let _ = browser.select(0);
+        browser.open_selected().expect("navigate");
+        assert_eq!(browser.listing_target(), Some(&[String::from("Users")][..]));
+        // Asking to re-read where it still is, while `/Users` is in flight: the
+        // last gesture wins and the earlier target is forgotten.
+        source.ready.borrow_mut().clear();
+        browser.refresh().expect("refresh");
+        assert_eq!(browser.listing_target(), Some(&[][..]));
+        source.deliver("/Users");
+        assert!(
+            !browser.resume().expect("resume"),
+            "the abandoned target must not commit"
+        );
+    }
+
+    #[test]
+    fn a_refused_pending_listing_leaves_the_browser_where_it_was() {
+        let (mut browser, source) = browser();
+        source.deliver("/");
+        browser.resume().expect("resume");
+
+        let _ = browser.select(0);
+        browser.open_selected().expect("navigate");
+        source.refuse("/Users");
+        assert!(matches!(
+            browser.resume(),
+            Err(BrowseError::Source(Errno::PermissionDenied))
+        ));
+        assert!(!browser.is_listing(), "a refusal leaves nothing pending");
+        assert!(browser.components().is_empty(), "the location moved");
+        assert!(!browser.can_go_back(), "the history moved");
+        assert_eq!(browser.entries().len(), 2, "the entries were lost");
+    }
+
+    #[test]
+    fn back_and_forward_commit_their_own_history_move() {
+        let (mut browser, source) = browser();
+        source.deliver("/");
+        source.deliver("/Users");
+        browser.resume().expect("resume");
+        let _ = browser.select(0);
+        browser.open_selected().expect("navigate");
+        browser.resume().expect("resume");
+        assert_eq!(browser.components(), ["Users"]);
+
+        // Back and forward are pending too, and each commits exactly the move
+        // its own step owes.
+        source.ready.borrow_mut().clear();
+        assert!(browser.go_back().expect("back"));
+        assert_eq!(browser.components(), ["Users"], "back moved early");
+        source.deliver("/");
+        assert!(browser.resume().expect("resume"));
+        assert!(browser.components().is_empty());
+        assert!(browser.can_go_forward());
+
+        source.ready.borrow_mut().clear();
+        assert!(browser.go_forward().expect("forward"));
+        source.deliver("/Users");
+        assert!(browser.resume().expect("resume"));
+        assert_eq!(browser.components(), ["Users"]);
+        assert!(browser.can_go_back());
+        assert!(!browser.can_go_forward());
+    }
+
+    #[test]
+    fn a_refresh_that_is_pending_keeps_showing_what_it_had() {
+        let (mut browser, source) = browser();
+        source.deliver("/");
+        browser.resume().expect("resume");
+
+        source.ready.borrow_mut().clear();
+        browser.refresh().expect("refresh");
+        assert!(browser.is_listing());
+        assert_eq!(browser.entries().len(), 2, "a reload blanked the view");
+        source.deliver("/");
+        assert!(browser.resume().expect("resume"));
+        assert_eq!(browser.entries().len(), 2);
+    }
+}
+
+/// The listing cue: what the view shows while a read is in flight.
+mod listing_cue {
+    use super::*;
+    use crate::render::LISTING_MESSAGE;
+
+    /// A source that never answers, so every view built over it is listing.
+    struct NeverReady;
+
+    impl DirectorySource for NeverReady {
+        fn list(&mut self, _components: &[String]) -> Result<Listing, Errno> {
+            Ok(Listing::Pending)
+        }
+    }
+
+    fn painted<S: DirectorySource>(browser: &Browser<S>) -> Surface {
+        crate::render(
+            browser,
+            Scale::ONE,
+            &Theme::dark(),
+            Rect::new(0, 0, 320, 240),
+            &crate::ManagerChrome::none(),
+            &mut NoArtwork,
+        )
+        .expect("the view renders")
+    }
+
+    #[test]
+    fn the_cue_is_shown_while_a_first_listing_is_in_flight() {
+        let waiting = Browser::open_root(NeverReady).expect("open");
+        let ready = Browser::open_root(MockFs::fixture()).expect("open");
+        assert!(waiting.is_listing());
+        assert_ne!(
+            painted(&waiting).pixels(),
+            painted(&ready).pixels(),
+            "a listing view drew the same pixels as a listed one"
+        );
+        assert!(!LISTING_MESSAGE.is_empty(), "the cue has text to draw");
+    }
+
+    #[test]
+    fn a_reload_of_what_is_already_shown_keeps_showing_it() {
+        // A re-read of the current directory must not blank the view: a
+        // periodic re-list would otherwise flicker every time.
+        let mut browser = Browser::open_root(MockFs::fixture()).expect("open");
+        let settled = painted(&browser).pixels().to_vec();
+        let mut deferring = Browser::open_root(MockFs::fixture()).expect("open");
+        deferring.refresh().expect("refresh");
+        assert!(!deferring.is_listing(), "the mock source answers at once");
+        browser.refresh().expect("refresh");
+        assert_eq!(painted(&browser).pixels(), settled.as_slice());
     }
 }

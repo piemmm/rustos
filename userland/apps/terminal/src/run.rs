@@ -58,6 +58,7 @@ mod program {
         Errno, Origin, ProcId, WaitSetOp, WaitSourceKind, WaitStatus, ORIGIN_WIRE_LEN,
     };
     use tairix_controls::damage;
+    use tairix_display::{winframe, SERIAL};
     use tairix_font::BitmapFont;
     use tairix_geometry::{Point, Rect, Scale};
     use tairix_input::InputEvent;
@@ -632,10 +633,10 @@ mod program {
 
     /// Copy `area` of `surface` into the shared `frame` shaped as `mode`.
     ///
-    /// The window channel carries straight-alpha bytes while a
-    /// [`Surface`] holds premultiplied pixels, so this is where the two meet.
-    /// One row address and one bounds check per row, not per pixel: this runs
-    /// over every damaged pixel of every repaint.
+    /// `area` is clipped to the surface first, so a caller may name a
+    /// rectangle the screen has since outgrown; the conversion itself is the
+    /// one shared window-frame codec, on this thread (a terminal presents only
+    /// what its grid changed, so there is nothing here worth another core).
     fn write_frame(
         surface: &Surface,
         frame: &mut [u8],
@@ -649,34 +650,13 @@ mod program {
         let (Ok(x), Ok(y)) = (u32::try_from(clipped.left()), u32::try_from(clipped.top())) else {
             return Err(Errno::OutOfRange);
         };
-        let bpp = BYTES_PER_PIXEL as usize;
-        let columns = clipped.width as usize;
-        let width = surface.width() as usize;
-        let stride = mode.stride_bytes as usize;
-        let span = columns.checked_mul(bpp).ok_or(Errno::OutOfRange)?;
-        let start = (x as usize).checked_mul(bpp).ok_or(Errno::OutOfRange)?;
-        let pixels = surface.pixels();
-        for row in y..y.saturating_add(clipped.height) {
-            let source = (row as usize)
-                .checked_mul(width)
-                .and_then(|offset| offset.checked_add(x as usize))
-                .ok_or(Errno::OutOfRange)?;
-            let target = (row as usize)
-                .checked_mul(stride)
-                .and_then(|offset| offset.checked_add(start))
-                .ok_or(Errno::OutOfRange)?;
-            let (Some(read), Some(write)) = (
-                pixels.get(source..source.saturating_add(columns)),
-                frame.get_mut(target..target.saturating_add(span)),
-            ) else {
-                return Err(Errno::OutOfRange);
-            };
-            for (pixel, slot) in read.iter().zip(write.chunks_exact_mut(bpp)) {
-                let color = pixel.unpremultiply();
-                slot.copy_from_slice(&[color.r, color.g, color.b, color.a]);
-            }
-        }
-        Ok(())
+        let damage = DamageRect {
+            x,
+            y,
+            width_px: clipped.width,
+            height_px: clipped.height,
+        };
+        winframe::encode(surface, frame, mode, damage, &SERIAL)
     }
 
     /// Everything the program holds about how the screen currently looks.

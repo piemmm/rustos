@@ -951,6 +951,7 @@ version = "0.0.0"
 dependencies = [
  "tairix-abi",
  "tairix-geometry",
+ "tairix-parallel",
  "tairix-raster",
  "tairix-rt",
 ]
@@ -1336,6 +1337,7 @@ dependencies = [
  "tairix-abi",
  "tairix-browse",
  "tairix-controls",
+ "tairix-display",
  "tairix-font",
  "tairix-geometry",
  "tairix-help",
@@ -1361,7 +1363,6 @@ dependencies = [
  "tairix-raster",
  "tairix-reclaim",
  "tairix-rt",
- "tairix-sync",
  "tairix-theme",
  "tairix-vt",
 ]
@@ -2332,6 +2333,7 @@ version = "0.0.0"
 dependencies = [
  "tairix-abi",
  "tairix-controls",
+ "tairix-display",
  "tairix-font",
  "tairix-geometry",
  "tairix-icon",
@@ -2462,6 +2464,7 @@ version = "0.0.0"
 dependencies = [
  "tairix-abi",
  "tairix-controls",
+ "tairix-display",
  "tairix-font",
  "tairix-geometry",
  "tairix-input",
@@ -4943,6 +4946,7 @@ version = "0.0.0"
 dependencies = [
  "tairix-abi",
  "tairix-controls",
+ "tairix-display",
  "tairix-font",
  "tairix-geometry",
  "tairix-input",
@@ -5017,6 +5021,7 @@ dependencies = [
  "tairix-abi",
  "tairix-browse",
  "tairix-controls",
+ "tairix-display",
  "tairix-font",
  "tairix-geometry",
  "tairix-icon",
@@ -5056,6 +5061,7 @@ version = "0.0.0"
 dependencies = [
  "tairix-abi",
  "tairix-controls",
+ "tairix-display",
  "tairix-font",
  "tairix-geometry",
  "tairix-icon",

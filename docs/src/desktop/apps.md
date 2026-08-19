@@ -103,6 +103,22 @@ the entries the source returns — it never fabricates a `/proc`/`/sys`-style
 synthetic entry (`AGENTS.md` §16.1). Each entry is an `Entry` carrying a name,
 an `EntryKind`, and the display metadata a file manager needs (see below).
 
+The answer is a `Listing`, and it has two normal forms. A source that reads the
+directory on the calling thread answers `Listing::Ready` and is the simple case.
+One that reads it *elsewhere* — the desktop session, whose event loop must not
+stall on a directory a slow disk is still walking — answers `Listing::Pending`,
+and the embedder asks again when its own wake says the answer has landed. A
+refusal is the `Err` half and is a third thing entirely: pending is never an
+error, and an error is never retried by waiting. Nothing in the engine polls or
+sleeps; the party that owns the wake decides when to ask again.
+
+While a navigation is pending the browser has moved **nothing** — not the
+location, not the entries, not either history. `Browser::resume` asks the source
+again and commits the move (with exactly the history change the original gesture
+owed) only once the listing is there, so the transactional, fail-closed guarantee
+a synchronous listing had is unchanged: a refusal leaves the view precisely where
+it was. `Browser::is_listing` is what the shared renderer draws its cue from.
+
 ### Entries, kinds, and the shared sort
 
 An `Entry` carries its name, its `EntryKind`, its apparent `size`, and its

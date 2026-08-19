@@ -18,18 +18,14 @@ tairix-raster = { path = "../raster", version = "=0.0.0", optional = true }
 # The one Unicode terminal-column width definition. The bitmap blitter uses it
 # to advance wide CJK scalars by the same two cells every terminal grid reserves.
 tairix-vt = { path = "../vt", version = "=0.0.0", optional = true }
-# The spinlock guarding the process-global font-service client and its glyph
-# cache. Only the `render` blitter has a client; the atlas-only view stays
-# lock-free.
-tairix-sync = { path = "../sync", version = "=0.0.0", optional = true }
 # The font-service wire protocol shared by this client and the `fontd` service
 # (§2.2): the render path parses TrueType nowhere, it asks `fontd` for glyph
 # coverage over `FONT_ENDPOINT`. Only the `render` blitter needs it.
 tairix-abi = { path = "../abi", version = "=0.0.0", optional = true }
-# The runtime `ipc_call` transport the render path uses to reach `fontd` in a
-# real program. Off by default so host tests (which inject a mock transport)
-# and the atlas-only console view never pull the runtime in; a program links
-# it by enabling `tairix-font/rt`.
+# The futex mutex guarding the process-global font-service client, and (under
+# `rt`) the `ipc_call` transport the render path reaches `fontd` with. The lock
+# is held across that round trip, so it has to be one a waiter parks on rather
+# than spins on; the atlas-only console view has no client and links neither.
 tairix-rt = { path = "../rt", version = "=0.0.0", optional = true }
 # The authored design tokens a text role resolves to (size in logical pixels
 # and weight) and the one logical->physical scale that converts that size to a
@@ -71,7 +67,7 @@ default = ["render"]
 render = [
     "dep:tairix-raster",
     "dep:tairix-vt",
-    "dep:tairix-sync",
+    "dep:tairix-rt",
     "dep:tairix-abi",
     "dep:tairix-theme",
     "dep:tairix-geometry",
@@ -87,7 +83,7 @@ glyph-cache = ["dep:tairix-reclaim"]
 # without any explicit setup; host tests leave it off and inject a mock. It
 # also defaults the client's glyph cache lazily, sized from the machine's
 # total RAM through `tairix-procinfo`.
-rt = ["render", "dep:tairix-rt", "dep:tairix-procinfo"]
+rt = ["render", "dep:tairix-procinfo"]
 # A deterministic solid-coverage test transport (`SolidTestTransport`),
 # installed lazily on first draw. A text-drawing consumer enables this as a
 # dev-dependency feature so its host tests render without a running `fontd`;

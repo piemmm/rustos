@@ -20,7 +20,11 @@
 //! Reaching full strength is announced once, as [`DESKTOP_REVEALED`]: until
 //! then the desktop is on screen but dark, so "a frame was presented" is not
 //! yet "a user can see the desktop". A departure never announces it; the
-//! witness says the desktop became visible, not that it stopped being.
+//! witness says the desktop became visible, not that it stopped being. Nor does
+//! a screen still waiting for its first backdrop: the wallpaper is prepared on a
+//! worker thread, and a frame carrying the backdrop colour in its place is not
+//! yet the desktop the user configured
+//! ([`ScreenFade::set_awaiting_backdrop`]).
 
 use tairix_log::{log, Event, EventId, Level, Sink};
 use tairix_theme::{Fade, MotionInteraction};
@@ -54,6 +58,11 @@ pub const DESKTOP_REVEALED_MESSAGE: &str = "desktop fully revealed on screen";
 pub struct ScreenFade {
     fade: Fade,
     announced: bool,
+    /// Whether the desktop's first backdrop is still being prepared, which
+    /// holds the reveal witness back ([`awaiting_backdrop`]).
+    ///
+    /// [`awaiting_backdrop`]: ScreenFade::awaiting_backdrop
+    awaiting_backdrop: bool,
 }
 
 impl ScreenFade {
@@ -70,6 +79,7 @@ impl ScreenFade {
             // and this fade has not touched it yet.
             fade: Fade::start(now_ns, 0, 0, 0),
             announced: false,
+            awaiting_backdrop: false,
         };
         screen.arrive(now_ns, compositor);
         screen
@@ -124,6 +134,18 @@ impl ScreenFade {
         park_within(park_ns, self.fade.next_frame_in(now_ns))
     }
 
+    /// Note whether the desktop's first backdrop is still being prepared.
+    ///
+    /// The witness below says a *user can see the desktop*, so it must not fire
+    /// while the wallpaper they chose is still being read and decoded: the frame
+    /// on screen would carry the backdrop colour, not their desktop. Set while
+    /// the first preparation is in flight and cleared once it resolves —
+    /// installed, refused, or never wanted. It gates the announcement only; the
+    /// fade itself, and every frame it draws, are unaffected.
+    pub fn set_awaiting_backdrop(&mut self, awaiting: bool) {
+        self.awaiting_backdrop = awaiting;
+    }
+
     /// Announce, once, that the frame just handed to the display carried the
     /// fully-revealed screen.
     ///
@@ -132,9 +154,16 @@ impl ScreenFade {
     /// still fading is dark to a degree, so nothing is said until the fade
     /// has settled; a reduced-motion theme is settled from its first frame,
     /// which is where its witness lands. A fade heading for black says
-    /// nothing at all, whichever end it reaches.
+    /// nothing at all, whichever end it reaches. Nor does a screen still
+    /// waiting for its first backdrop ([`set_awaiting_backdrop`]).
+    ///
+    /// [`set_awaiting_backdrop`]: Self::set_awaiting_backdrop
     pub fn presented<S: Sink + ?Sized>(&mut self, sink: &S) {
-        if self.announced || self.fade.running() || self.fade.target() != u8::MAX {
+        if self.announced
+            || self.awaiting_backdrop
+            || self.fade.running()
+            || self.fade.target() != u8::MAX
+        {
             return;
         }
         self.announced = true;

@@ -31,7 +31,7 @@ use crate::owner_edit::{validate_owner, OwnerChange, OwnerError};
 use crate::rename::{validate_new_name, RenameError};
 use crate::select::Selection;
 use crate::sort::{sort_entries, SortMode};
-use crate::source::DirectorySource;
+use crate::source::{DirectorySource, Listing};
 use tairix_controls::scroll::{ScrollModel, ScrollOrientation, ScrollRange};
 use tairix_controls::ScrollBar;
 
@@ -74,6 +74,41 @@ pub struct Browser<S: DirectorySource> {
     /// first; the last is where [`go_forward`](Self::go_forward) returns to.
     /// Cleared by any fresh navigation, as a browser's forward history is.
     forward: VecDeque<Vec<String>>,
+    /// The navigation waiting on its listing, if any.
+    ///
+    /// Nothing else in this struct moves while it is set: the location, the
+    /// entries, and both histories are still the ones on screen, so a listing
+    /// that never arrives leaves the view exactly where it was and a refused one
+    /// is reported in place. [`resume`](Self::resume) is what commits it.
+    pending: Option<Pending>,
+}
+
+/// A navigation whose listing has not arrived yet: where it is going, and which
+/// history move committing it owes.
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct Pending {
+    target: Vec<String>,
+    step: Step,
+}
+
+/// Which history move a [`Pending`] navigation commits.
+///
+/// The move is deliberately *not* applied when the navigation is started, so a
+/// pending listing has changed nothing a caller can observe. Committing applies
+/// exactly what the synchronous path applied, from one place, so the two cannot
+/// diverge.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+enum Step {
+    /// A fresh navigation: record the departure, clear the forward history.
+    Fresh,
+    /// [`go_back`](Browser::go_back): pop the back history, push the departure
+    /// forward.
+    Back,
+    /// [`go_forward`](Browser::go_forward): pop the forward history, push the
+    /// departure back.
+    Forward,
+    /// A re-read of the directory already shown: no history change.
+    Reload,
 }
 
 impl<S: DirectorySource> Browser<S> {
@@ -105,7 +140,21 @@ impl<S: DirectorySource> Browser<S> {
     /// to a directory it can list (e.g. the root) rather than open nothing.
     pub fn open_at(mut source: S, components: Vec<String>) -> Result<Self, BrowseError> {
         let sort_mode = SortMode::default_order();
-        let mut entries = source.list(&components).map_err(BrowseError::Source)?;
+        // A source that reads elsewhere opens empty and listing: the browser is
+        // usable (its location is known, its chrome draws) and the entries
+        // arrive with the first `resume`.
+        let listed = source.list(&components).map_err(BrowseError::Source)?;
+        let pending = match listed {
+            Listing::Ready(_) => None,
+            Listing::Pending => Some(Pending {
+                target: components.clone(),
+                step: Step::Reload,
+            }),
+        };
+        let mut entries = match listed {
+            Listing::Ready(entries) => entries,
+            Listing::Pending => Vec::new(),
+        };
         sort_entries(&mut entries, sort_mode);
         let mut selection = Selection::new();
         if !entries.is_empty() {
@@ -126,6 +175,7 @@ impl<S: DirectorySource> Browser<S> {
             ),
             back: VecDeque::new(),
             forward: VecDeque::new(),
+            pending,
         })
     }
 
@@ -470,11 +520,8 @@ impl<S: DirectorySource> Browser<S> {
     /// Returns [`BrowseError::Source`] if the directory can no longer be
     /// listed; the previously loaded entries are left untouched.
     pub fn refresh(&mut self) -> Result<(), BrowseError> {
-        let entries = self
-            .source
-            .list(&self.components)
-            .map_err(BrowseError::Source)?;
-        self.adopt_entries(entries);
+        let target = self.components.clone();
+        self.begin(target, Step::Reload)?;
         Ok(())
     }
 
@@ -858,11 +905,7 @@ impl<S: DirectorySource> Browser<S> {
         let Some(target) = self.back.back().cloned() else {
             return Ok(false);
         };
-        let entries = self.source.list(&target).map_err(BrowseError::Source)?;
-        self.back.pop_back();
-        let previous = mem::replace(&mut self.components, target);
-        Self::push_bounded(&mut self.forward, previous);
-        self.adopt_entries(entries);
+        self.begin(target, Step::Back)?;
         Ok(true)
     }
 
@@ -880,11 +923,7 @@ impl<S: DirectorySource> Browser<S> {
         let Some(target) = self.forward.back().cloned() else {
             return Ok(false);
         };
-        let entries = self.source.list(&target).map_err(BrowseError::Source)?;
-        self.forward.pop_back();
-        let previous = mem::replace(&mut self.components, target);
-        Self::push_bounded(&mut self.back, previous);
-        self.adopt_entries(entries);
+        self.begin(target, Step::Forward)?;
         Ok(true)
     }
 
@@ -896,12 +935,103 @@ impl<S: DirectorySource> Browser<S> {
     /// changes, so a refused or failing read leaves the browser — and its
     /// history — exactly where they were.
     fn navigate_recording(&mut self, target: Vec<String>) -> Result<(), BrowseError> {
-        let entries = self.source.list(&target).map_err(BrowseError::Source)?;
-        let previous = mem::replace(&mut self.components, target);
-        Self::push_bounded(&mut self.back, previous);
-        self.forward.clear();
+        self.begin(target, Step::Fresh)
+    }
+
+    /// Ask the source for `target` and either commit the move at once or record
+    /// it as pending.
+    ///
+    /// The one place a navigation starts, whichever gesture asked for it, so
+    /// "listed then moved" and "recorded then committed" are decided once. A
+    /// refusal changes nothing at all — not the location, not the entries, not
+    /// either history — and a pending navigation replaces any earlier one, so a
+    /// user clicking twice goes where they last clicked rather than queueing.
+    fn begin(&mut self, target: Vec<String>, step: Step) -> Result<(), BrowseError> {
+        match self.source.list(&target).map_err(BrowseError::Source)? {
+            Listing::Ready(entries) => {
+                self.pending = None;
+                self.commit(target, step, entries);
+                Ok(())
+            }
+            Listing::Pending => {
+                self.pending = Some(Pending { target, step });
+                Ok(())
+            }
+        }
+    }
+
+    /// Apply the history move `step` owes, adopt `target` as the location, and
+    /// adopt `entries`.
+    fn commit(&mut self, target: Vec<String>, step: Step, entries: Vec<Entry>) {
+        match step {
+            Step::Reload => {}
+            Step::Fresh => {
+                let previous = mem::replace(&mut self.components, target);
+                Self::push_bounded(&mut self.back, previous);
+                self.forward.clear();
+            }
+            Step::Back => {
+                self.back.pop_back();
+                let previous = mem::replace(&mut self.components, target);
+                Self::push_bounded(&mut self.forward, previous);
+            }
+            Step::Forward => {
+                self.forward.pop_back();
+                let previous = mem::replace(&mut self.components, target);
+                Self::push_bounded(&mut self.back, previous);
+            }
+        }
         self.adopt_entries(entries);
-        Ok(())
+    }
+
+    /// Whether a navigation is waiting on its listing.
+    ///
+    /// A view draws its "listing…" cue from this. The location and entries it
+    /// shows are still the ones it had, so the cue is the only thing that
+    /// changes while a read is in flight.
+    #[must_use]
+    pub const fn is_listing(&self) -> bool {
+        self.pending.is_some()
+    }
+
+    /// Where the pending navigation is going, or `None` when nothing is
+    /// pending.
+    #[must_use]
+    pub fn listing_target(&self) -> Option<&[String]> {
+        self.pending
+            .as_ref()
+            .map(|pending| pending.target.as_slice())
+    }
+
+    /// Ask the source again for the pending navigation's listing, committing it
+    /// if it has arrived.
+    ///
+    /// `Ok(true)` when the move committed (the caller repaints), `Ok(false)`
+    /// when nothing was pending or the answer has still not arrived. This is
+    /// what an embedder calls on the wake that says its worker finished — it is
+    /// never a poll, and calling it with nothing pending costs one branch.
+    ///
+    /// # Errors
+    ///
+    /// [`BrowseError::Source`] if the directory can no longer be listed. The
+    /// pending navigation is dropped and the browser stays exactly where it
+    /// was, so a refused listing is reported in place rather than stranding the
+    /// view in a directory it could not read.
+    pub fn resume(&mut self) -> Result<bool, BrowseError> {
+        let Some(pending) = self.pending.take() else {
+            return Ok(false);
+        };
+        match self.source.list(&pending.target) {
+            Ok(Listing::Ready(entries)) => {
+                self.commit(pending.target, pending.step, entries);
+                Ok(true)
+            }
+            Ok(Listing::Pending) => {
+                self.pending = Some(pending);
+                Ok(false)
+            }
+            Err(errno) => Err(BrowseError::Source(errno)),
+        }
     }
 
     /// Push `location` onto `stack`, dropping the oldest entries to keep the

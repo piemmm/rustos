@@ -182,7 +182,7 @@ pub use rename::{validate_new_name, RenameError};
 pub use render::{render, ManagerChrome};
 pub use select::Selection;
 pub use sort::{sort_entries, SortDirection, SortKey, SortMode};
-pub use source::DirectorySource;
+pub use source::{DirectorySource, Listing};
 pub use trash::{
     empty_trash_plan, trash_dest_path, trash_dir, trash_strategy, DeleteDisposition, TrashError,
     TrashStrategy, MAX_TRASH_NAME_ATTEMPTS,

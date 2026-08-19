@@ -42,6 +42,19 @@ and the client can never drift apart.
   unencodable mode or format is `None`, and a run writes whole pixels
   only, stopping at whichever of its two slices ends first and reporting
   the count the caller checks.
+- **Window-frame codec** (`winframe`): the same pixel/byte boundary for the
+  frame a *window* channel carries, in both directions — `encode` writes an
+  app's premultiplied surface out as the straight-alpha bytes the frame holds,
+  and `decode` reads a presented frame into the compositor's own window surface
+  and reports the sub-rectangle whose pixels genuinely changed. It lives beside
+  the scan-out encode because the channel-order decision is the same one, and no
+  program may hold a second opinion about which byte is red. Both directions are
+  row-independent and are expressed over `lib/parallel`'s `JobRunner`: the
+  desktop hands the decode a real pool because it cannot bound a pass whose size
+  the app declares, and an app encodes on its own thread because it *can* — it
+  should present only what it changed. Every index is validated before the first
+  write, so a hostile geometry refuses the whole conversion rather than leaving a
+  window half-converted.
 - **Client** (`DisplayClient` / `RemoteDisplay`): the session-side half
   over the injected `DisplayTransport` seam. `RemoteDisplay` implements
   the existing `tairix_abi` `Display` trait over the client's own

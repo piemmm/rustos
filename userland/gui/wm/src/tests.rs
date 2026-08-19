@@ -6643,52 +6643,22 @@ fn a_mode_change_keeps_a_reveal_in_flight() {
 
 // ---- banded (parallel) compositing -----------------------------------
 
-/// A job runner that reports a width it does not have and runs the pieces
-/// **backwards** on the calling thread.
+/// The shared order-shuffling runner, installed on a compositor.
 ///
 /// It exercises exactly what a real pool changes about a composite: how many
 /// bands a rectangle is split into and in what order they run. Running them on
 /// one thread is what makes the comparison below a proof about the *split*
 /// rather than about thread timing — bit-identity cannot be a matter of luck.
-struct Banded {
-    width: usize,
-    /// The largest number of pieces any dispatch asked for, so a test can see
-    /// whether a rectangle was split at all.
-    widest: core::sync::atomic::AtomicUsize,
-}
+type Banded = tairix_parallel::Reversed;
 
-// SAFETY: each index of `0..count` is passed exactly once, from the calling
-// thread, and every call has returned before `run` does.
-unsafe impl tairix_parallel::JobRunner for Banded {
-    fn width(&self) -> usize {
-        self.width
-    }
-
-    fn run(&self, count: usize, job: &(dyn Fn(usize) + Sync)) {
-        self.widest
-            .fetch_max(count, core::sync::atomic::Ordering::Relaxed);
-        for index in (0..count).rev() {
-            job(index);
-        }
-    }
-}
-
-impl Banded {
-    /// A runner of this width, leaked so it can be installed as the
-    /// `&'static dyn JobRunner` an embedder would hand over. One per test, so
-    /// tests running concurrently cannot see each other's counts.
-    fn install(width: usize, into: &mut Compositor) -> &'static Self {
-        let runner: &'static Self = alloc::boxed::Box::leak(alloc::boxed::Box::new(Self {
-            width,
-            widest: core::sync::atomic::AtomicUsize::new(0),
-        }));
-        into.set_job_runner(runner);
-        runner
-    }
-
-    fn widest(&self) -> usize {
-        self.widest.load(core::sync::atomic::Ordering::Relaxed)
-    }
+/// A runner of this width, leaked so it can be installed as the
+/// `&'static dyn JobRunner` an embedder would hand over. One per test, so tests
+/// running concurrently cannot see each other's counts.
+fn install_banded(width: usize, into: &mut Compositor) -> &'static Banded {
+    let runner: &'static Banded =
+        alloc::boxed::Box::leak(alloc::boxed::Box::new(Banded::new(width)));
+    into.set_job_runner(runner);
+    runner
 }
 
 /// Two compositors given identical scenes, one composing each rectangle on the
@@ -6704,7 +6674,7 @@ impl BandedWays {
     fn new(mode: DisplayMode) -> Self {
         let whole = new_compositor(mode, BLUE).expect("compositor");
         let mut banded = new_compositor(mode, BLUE).expect("compositor");
-        let runner = Banded::install(8, &mut banded);
+        let runner = install_banded(8, &mut banded);
         Self {
             whole,
             banded,
@@ -6819,7 +6789,7 @@ fn a_repaint_too_small_to_be_worth_a_hand_off_is_never_split() {
     // The other half of the grain policy: a pointer-motion-sized repaint stays
     // on the calling thread, so it pays no dispatch at all.
     let mut c = new_compositor(mode(320, 240), BLUE).expect("compositor");
-    let runner = Banded::install(8, &mut c);
+    let runner = install_banded(8, &mut c);
     let id = c.add_window(Point::new(10, 10), opaque(64, 24, RED));
     c.composite();
     assert!(
@@ -6844,7 +6814,7 @@ fn a_one_participant_runner_composes_exactly_what_no_runner_does() {
     // one, and the compositor then takes the same path it takes with the
     // default serial runner.
     let mut c = new_compositor(mode(64, 48), BLUE).expect("compositor");
-    let runner = Banded::install(1, &mut c);
+    let runner = install_banded(1, &mut c);
     c.add_window(Point::new(4, 4), opaque(20, 16, RED));
     c.composite();
     assert_eq!(

@@ -74,6 +74,11 @@ tairix-parallel = { path = "../../../lib/parallel", version = "=0.0.0", default-
 # The compositor's host tests draw window-title text, so they inject the
 # shared solid test transport via the `test-util` feature (never `fontd`).
 [dev-dependencies]
+# The shared order-shuffling runner the composite's bit-identity tests split a
+# frame with, so this crate keeps no private copy of it.
+tairix-parallel = { path = "../../../lib/parallel", version = "=0.0.0", default-features = false, features = [
+    "test-util",
+] }
 tairix-font = { path = "../../../lib/font", version = "=0.0.0", features = ["test-util"] }
 
 [lints]

@@ -26,7 +26,7 @@ use tairix_abi::Errno;
 use tairix_font::ELLIPSIS;
 
 use crate::entry::{Entry, EntryKind};
-use crate::source::DirectorySource;
+use crate::source::{DirectorySource, Listing};
 
 // The listing returned here is in the source's own stream order; the
 // `Browser` applies the shared sort. This function only decodes and maps,
@@ -301,10 +301,11 @@ where
     F: FnMut(&str) -> Result<Vec<u8>, Errno>,
     P: FnMut(&str, &mut [u8]) -> Result<usize, Errno>,
 {
-    fn list(&mut self, components: &[String]) -> Result<Vec<Entry>, Errno> {
+    fn list(&mut self, components: &[String]) -> Result<Listing, Errno> {
         let path = absolute_path(components)?;
         let stream = (self.fetch)(&path)?;
-        entries_from_dir_stream(&stream)
+        // The fetch is this thread's own read, so the answer is always ready.
+        entries_from_dir_stream(&stream).map(Listing::Ready)
     }
 
     fn has_children(&mut self, components: &[String]) -> Result<bool, Errno> {

@@ -10,7 +10,7 @@ use alloc::vec::Vec;
 use core::cell::RefCell;
 
 use tairix_abi::{Errno, Time64};
-use tairix_browse::{AppAssociation, DirectorySource, Entry, EntryKind, GridView};
+use tairix_browse::{AppAssociation, DirectorySource, Entry, EntryKind, GridView, Listing};
 use tairix_controls::{ActivityState, MenuItem};
 use tairix_geometry::{Point, Rect, Region, Scale};
 use tairix_icon::NoArtwork;
@@ -33,7 +33,7 @@ use crate::pinboard::{PinboardCommand, PinboardMenu, PinboardMenuOutcome};
 /// source back out.
 #[derive(Default)]
 struct Folder {
-    answer: Option<Result<Vec<Entry>, Errno>>,
+    answer: Option<Result<Listing, Errno>>,
     listings: usize,
 }
 
@@ -41,7 +41,7 @@ struct Folder {
 struct FakeDir(Rc<RefCell<Folder>>);
 
 impl DirectorySource for FakeDir {
-    fn list(&mut self, _components: &[String]) -> Result<Vec<Entry>, Errno> {
+    fn list(&mut self, _components: &[String]) -> Result<Listing, Errno> {
         let mut folder = self.0.borrow_mut();
         folder.listings = folder.listings.saturating_add(1);
         folder
@@ -54,7 +54,7 @@ impl DirectorySource for FakeDir {
 /// A shared folder holding `entries`.
 fn holding(entries: Vec<Entry>) -> Rc<RefCell<Folder>> {
     Rc::new(RefCell::new(Folder {
-        answer: Some(Ok(entries)),
+        answer: Some(Ok(Listing::Ready(entries))),
         listings: 0,
     }))
 }
@@ -194,7 +194,11 @@ fn a_relist_keeps_the_selection_on_the_same_named_icon() {
 
     // A file appears ahead of it: the selection follows the name, not the
     // index, so the user's selection cannot silently jump to another icon.
-    folder.borrow_mut().answer = Some(Ok(vec![file("a.txt"), file("b.txt"), file("c.txt")]));
+    folder.borrow_mut().answer = Some(Ok(Listing::Ready(vec![
+        file("a.txt"),
+        file("b.txt"),
+        file("c.txt"),
+    ])));
     assert!(desktop.relist(1));
     assert_eq!(desktop.selected(), Some(2));
     assert_eq!(desktop.entries()[2].name(), "c.txt");
@@ -206,7 +210,7 @@ fn a_relist_that_removes_the_selected_icon_selects_nothing() {
     let mut desktop = desktop_over(&folder);
     let layout = layout_of(&desktop);
     desktop.press(centre_of(&layout, 1), &layout, 0, &[], &mut Region::new());
-    folder.borrow_mut().answer = Some(Ok(vec![file("a.txt")]));
+    folder.borrow_mut().answer = Some(Ok(Listing::Ready(vec![file("a.txt")])));
     assert!(desktop.relist(1));
     assert_eq!(desktop.selected(), None);
 }
@@ -1001,7 +1005,7 @@ fn a_sort_or_arrangement_row_asks_the_embedder_to_adopt_the_edit() {
 fn refresh_relists_now_and_the_remaining_rows_name_their_own_action() {
     let folder = holding(vec![file("a.txt")]);
     let mut desktop = desktop_over(&folder);
-    folder.borrow_mut().answer = Some(Ok(vec![file("a.txt"), file("b.txt")]));
+    folder.borrow_mut().answer = Some(Ok(Listing::Ready(vec![file("a.txt"), file("b.txt")])));
 
     // A re-list reports no cell: the icons themselves moved, so the caller
     // repaints the whole layer instead of any cell of the layout it replaced.

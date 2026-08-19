@@ -22,7 +22,10 @@
 //! The crate also hosts [`framebuffer::Framebuffer`] — the generic
 //! linear-surface engine the framebuffer service's `Run` binary scans
 //! out through (and the framebuffer QEMU verticals drive directly), so
-//! the surface blit has exactly one definition.
+//! the surface blit has exactly one definition — and [`winframe`], the
+//! pixel/byte boundary of a **window** frame, which is the same
+//! channel-order decision as the scan-out path's and therefore has to be
+//! defined beside it rather than re-derived by every app.
 
 #![no_std]
 // The engine is unsafe-free by construction; only the feature-gated `rt`
@@ -32,19 +35,27 @@
 #![deny(unsafe_code)]
 #![deny(missing_docs)]
 
+extern crate alloc;
+
 pub mod client;
 pub mod framebuffer;
 #[cfg(feature = "rt")]
 pub mod rt;
 pub mod scanout;
 pub mod server;
+pub mod winframe;
 
 pub use client::{DisplayClient, DisplayTransport, RemoteDisplay};
 pub use framebuffer::{Framebuffer, FramebufferConfig};
 #[cfg(feature = "rt")]
 pub use rt::{RtShmMapper, RtShmRegion};
 pub use scanout::{damage_list, scanout_len, sub_screen_damage, ChannelOrder};
+// The runner contract and the calling-thread runner a window-frame conversion
+// names, re-exported so a program that converts its own frame does not take a
+// second dependency to spell one constant (one definition, as `tairix_wm`
+// re-exports the pointer vocabulary it consumes).
 pub use server::{DisplayServer, FrameRegion, SeatCheck, ShmMapper, DISPLAY_REPLY_MAX};
+pub use tairix_parallel::{JobRunner, SERIAL};
 
 use tairix_abi::{DriverError, Errno};
 

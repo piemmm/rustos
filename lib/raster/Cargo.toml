@@ -31,6 +31,11 @@ tairix-reclaim = { path = "../reclaim", version = "=0.0.0" }
 tairix-util = { path = "../util", version = "=0.0.0" }
 
 [dev-dependencies]
+# The shared order-shuffling runner the frost's bit-identity tests compose
+# against, so this crate keeps no private copy of it.
+tairix-parallel = { path = "../parallel", version = "=0.0.0", default-features = false, features = [
+    "test-util",
+] }
 # The workspace's own fast non-cryptographic generator, for the differential
 # sweeps that prove the sliding-window blur and its reciprocal multiply agree
 # with a naive reference over random content. A private generator written in the

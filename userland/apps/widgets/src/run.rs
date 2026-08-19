@@ -36,6 +36,7 @@ mod program {
     use tairix_abi::input::KeyInput;
     use tairix_abi::window_ipc::{PointerAction, WindowEvent, WINDOW_ENDPOINT};
     use tairix_abi::{Errno, Origin, ProcId, ORIGIN_WIRE_LEN};
+    use tairix_display::{winframe, SERIAL};
     use tairix_font::BitmapFont;
     use tairix_geometry::{Point, Rect, Region, Scale};
     use tairix_input::InputEvent;
@@ -143,48 +144,6 @@ mod program {
         }
     }
 
-    /// Convert `damage`'s pixels out of `surface` into the shared `frame`.
-    ///
-    /// Only that rectangle is converted, because it is also the only one the
-    /// present declares: the session copies exactly it and leaves the rest of
-    /// the window as it already was.
-    fn convert_damage(
-        surface: &Surface,
-        frame: &mut [u8],
-        mode: &DisplayMode,
-        damage: DamageRect,
-    ) -> Result<(), Errno> {
-        let stride = mode.stride_bytes as usize;
-        let columns = surface.width() as usize;
-        let x = damage.x as usize;
-        let span = damage.width_px as usize;
-        let short = || Errno::LengthOutOfRange;
-        let bytes = span.checked_mul(4).ok_or_else(short)?;
-        for y in damage.y..damage.y.saturating_add(damage.height_px) {
-            let from = (y as usize)
-                .checked_mul(columns)
-                .and_then(|row| row.checked_add(x))
-                .and_then(|lo| lo.checked_add(span).map(|hi| lo..hi))
-                .ok_or_else(short)?;
-            let at = (y as usize)
-                .checked_mul(stride)
-                .and_then(|row| row.checked_add(x * 4))
-                .and_then(|lo| lo.checked_add(bytes).map(|hi| lo..hi))
-                .ok_or_else(short)?;
-            let (Some(row), Some(slot)) = (surface.pixels().get(from), frame.get_mut(at)) else {
-                return Err(short());
-            };
-            // The slot is exactly `span` whole pixels by construction, so the
-            // ragged tail this splits off is always empty.
-            let (out, _tail) = slot.as_chunks_mut::<4>();
-            for (pixel, target) in row.iter().zip(out) {
-                let color = pixel.unpremultiply();
-                *target = [color.r, color.g, color.b, color.a];
-            }
-        }
-        Ok(())
-    }
-
     /// The live window channel this app owns: the transport to the desktop
     /// session, its session-assigned window id, and the surface it draws into.
     /// Grouped so the event loop and the first present take one receiver
@@ -228,7 +187,7 @@ mod program {
                 damage.height_px,
                 |surface| gallery.render(surface, viewport, scale, theme, font),
             );
-            convert_damage(&self.surface, frames, mode, damage)?;
+            winframe::encode(&self.surface, frames, mode, damage, &SERIAL)?;
             self.client.present(self.window, 0, damage)
         }
     }

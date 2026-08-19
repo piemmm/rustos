@@ -108,6 +108,14 @@ Three properties make this affordable:
   geometry changes. Nothing decodes, resamples, or parses on a frame path.
   The surface is held in the shared reclaimable-memory model, so a machine
   under pressure drops it and re-prepares on demand.
+- **Prepared elsewhere.** The read and the sandbox round trip run on a worker
+  thread that owns its **own** capability-empty sandbox worker, so the desktop
+  comes up without waiting for a picture and a settings change does not freeze
+  it. The icon rasteriser keeps the serve loop's own sandbox handle, untouched.
+  The desktop keeps painting whatever it has until the new surface arrives; a
+  picture prepared for a screen size or a choice the desktop has since left is
+  discarded rather than stretched onto the wrong screen. See
+  [the session](session.md).
 
 A wallpaper that will not decode is not fatal: the desktop falls back to
 the backdrop colour, reports why on `stderr`, and remembers the refusal, so

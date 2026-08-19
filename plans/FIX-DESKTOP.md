@@ -276,24 +276,20 @@ made **in place**; no `spawn2` alias, no compatibility shim.
   `plans/THREADS.md`; the rejection stands on its own merits and never rested on
   their absence.)
 
-### 2.5 The picker listing (same defect, same principle)
+### 2.5 The picker listing and the wallpaper (same defect, same principle)
 
-The file picker's directory read (`read_dir_all`) runs on the
-compositor thread. The first-class fix is symmetric: a directory listing
-that backs an interactive UI must not block the UI loop.
+A directory listing (`read_dir_all`) and the wallpaper's read-and-decode both
+ran on the compositor thread. The first-class fix is symmetric: work that backs
+an interactive UI and takes as long as the hardware takes must not block the UI
+loop.
 
-Two acceptable resolutions, decided in DESK-4:
-
-- Make `read_dir_all` / the browse `DirectorySource` **incremental and
-  bounded** so a listing is drained across wait-set wakes (the browser
-  engine already pages large listings), never in one blocking call; or
-- Serve the picker's listing over the same async pattern (a listing the
-  session requests and drains without parking the compositor).
-
-The chosen form must keep the picker's existing capability discipline
-(the session lists under its own authority; the app lists nothing) and
-its fail-closed behaviour (a refused listing shows nothing, never a
-guess).
+The resolution taken in DESK-4 is the asynchronous one: the session requests the
+work, a `lib/rt` worker thread does it, and the answer arrives through the
+wait-set the session already parks in. It keeps the picker's capability
+discipline (the session lists under its own authority; the app lists nothing) and
+its fail-closed behaviour — a refused listing leaves the view exactly where it
+was, never a guess — and it gives the view a real pending state rather than a
+silent stall. Details in DESK-4 (§4).
 
 ### 2.6 Beyond Linux — demand-paged, copy-on-write, verified shared images
 
@@ -602,35 +598,47 @@ Each stage is independently reviewable and must leave the whole-project
 - **Tests:** shell reports a failed foreground launch with its reason;
   job control stays responsive during a load.
 
-### DESK-4 — Picker listing off the compositor thread
-- **Deliverables:** make the picker's directory listing non-blocking per
-  §2.5 (incremental/bounded drain, or async listing), in `lib/browse` /
-  the session picker, preserving the capability + fail-closed discipline.
-- **Tests:** navigating a large directory in the picker does not block
-  the compositor (present/input advances mid-listing); a refused listing
-  shows nothing.
-- **Mechanism now available.** Userland has threads (`plans/THREADS.md`), and
-  a worker's completion can wake the session's existing wait-set with no new
-  ABI: a pipe's read end is a `WaitSourceKind::Stream` member, threads share
-  the descriptor table, so a worker writes one byte and the loop wakes on it.
-  So the *transport* question is settled; two design questions are not, and
-  both were fixed by decisions elsewhere, so they are for the User to reopen
-  rather than for an implementer to take (§15.7):
-  1. **The `DirectorySource` contract is synchronous by construction.**
-     `lib/browse`'s engine calls the source from inside
-     `SessionPicker::handle_click` / `handle_key` and expects the entries
-     back. Either resolution in §2.5 changes that contract and gives the
-     picker a *pending* state it does not have today — a user-visible
-     behaviour change (what a click shows while the listing is in flight),
-     not an internal refactor. Which of the two forms §2.5 offers is the one
-     to build has never been decided.
-  2. **The wallpaper and icon decode share one sandbox worker, deliberately.**
-     The session holds it as `Rc<RefCell<ParserSandbox<…>>>` — "never a second
-     one spawned for wallpaper alone" — which is not `Send`. Moving the
-     wallpaper's read-and-place off the loop therefore means either a second
-     sandbox worker, contradicting that decision, or making the one handle
-     cross-thread, which changes the icon path with it. Both are reversals of
-     a stated design, not implementation details.
+### DESK-4 — Directory listings and the wallpaper off the loop
+- **Done.** Both reads that can take arbitrary time on arbitrary hardware now
+  run on `lib/rt` worker threads, woken back into the session through one byte
+  on a pipe whose read end is a `WaitSourceKind::Stream` wait-set member — no
+  new ABI, no second wake mechanism, nothing spinning.
+- **The shape, twice.** A *desk* is the host-tested policy — what each consumer
+  asked for, what has come back, the staleness rule that discards an answer for
+  somewhere the desktop has since left — with no lock, thread, or syscall in it:
+  `ListingDesk` (`userland/gui/session/src/listing.rs`) and `WallpaperDesk`
+  (`wallpaper.rs`). The `Run` binary adds the runtime's futex mutex, a condition
+  variable the worker parks on, and the shared `WorkerWake`.
+- **Listings.** Two consumers — the desktop icon column and the trusted picker —
+  are *named*, not counted (a structural fact of the session, not a capacity),
+  with a slot each and round-robin service, so a picker walking a deep tree
+  cannot hold the icon column's re-list behind it.
+- **The `DirectorySource` contract** (escalation 1, resolved) now answers
+  `Listing::Ready | Listing::Pending`, `Err` being a third thing entirely.
+  `Browser` records a pending navigation and **moves nothing** until
+  `Browser::resume` commits it — location, entries, and both histories are
+  untouched — so the transactional fail-closed guarantee is exactly what it was
+  and a refusal is reported in place. The renderer draws `Listing…` in the
+  listing area while a read of *somewhere else* is in flight (the items on
+  screen belong to a directory the user asked to leave); a re-read of what is
+  already shown keeps its items, so a periodic re-list cannot flicker.
+- **The wallpaper's sandbox** (escalation 2, resolved as a *second* worker): the
+  icon rasteriser keeps the serve loop's own handle, untouched and deliberately
+  not `Send`; the wallpaper thread creates its own capability-empty worker
+  inside itself, so no sandbox handle crosses a thread boundary.
+- **Degradation.** A refused pipe or a refused thread is stated once and that
+  work happens on the serve loop, exactly where it used to be.
+- **Not in scope, and why.** `DirectorySource::has_children` (the optional
+  occupancy cue) stays synchronous: it is a bounded one-record read, it is
+  already permitted to answer `NotImplemented`, and neither session consumer
+  asks for it — the desktop icon column and the picker both take the default.
+  The file manager, which does opt in, blocks only its own loop.
+- **Tests:** the desk policies host-tested beside their code (handshake,
+  dedup, staleness, round-robin fairness, stop); `lib/browse`'s `deferred`
+  suite drives a `Browser` end to end over a never-ready source (pending open,
+  resume, nothing moves early, second navigation replaces the first, refusal
+  leaves the view put, back/forward commit their own history move, a pending
+  reload keeps its items); the cue's two render cases.
 
 ### DESK-5 — Verified shared image cache (`kernel/mem`)
 - **Deliverables:** the per-boot, content-hash-keyed verified image
@@ -797,7 +805,8 @@ Each stage is independently reviewable and must leave the whole-project
     reap report; the terminal (`shell_load_failure_classifies_reserved_statuses`)
     and login (`session_that_fails_its_async_load_is_reported_as_a_launch_failure`)
     cover their classifications.
-- **DESK-4 … DESK-7 — planned.**
+- **DESK-4 — done** (§4 above).
+- **DESK-5 … DESK-7 — planned.**
 
 ---
 
