@@ -44,7 +44,8 @@ frozen from the first release.
 - **`LimitKind`** is the closed, versioned set of resources a limit can
   govern. Today: `AddressSpaceBytes` (the `mem_map` capacity), `OpenStreams`
   (the descriptor-table capacity), `Processes` (the `spawn` fan-out),
-  `StackBytes` (the per-task stack), and `PinnedMemoryBytes` (the bytes a
+  `StackBytes` (the per-task stack), `Threads` (the threads one process may
+  hold — see the [threads page](./threads.md)), and `PinnedMemoryBytes` (the bytes a
   process may hold pinned — exempt from the compressed `ramzip` tier —
   through `mem_pin`, `plans/STRESSTEST.md` ST2). Discriminants never move; a
   new resource takes the next free discriminant and bumps

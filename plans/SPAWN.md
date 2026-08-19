@@ -208,7 +208,9 @@ next dispatch — **no separate EL0-frame save area and no new HAL trait**
   path and in-kernel blocking primitives call — it lifts the handle out
   from under the lock *before* the suspending switch (no lock across the
   hand-off) and **fails closed** (`false`) for an unpublished/out-of-range
-  CPU (the pre-dispatch boot flow, a host test).
+  CPU (the pre-dispatch boot flow, a host test). `cpu` is always the CPU
+  the caller has *just* read, never one remembered across a park
+  (`plans/OPEN-DEFECTS.md` D44).
 - `kthread`: a `pre_resume: Option<PreResume>` hook on `ThreadControl`
   whose `Some`-ness marks a **user** kthread; `dispatch_step` now takes
   `cpu`, runs `pre_resume` (the per-task address-space reactivation seam)

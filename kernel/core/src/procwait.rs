@@ -562,20 +562,6 @@ where
             table: SpinLock::new(ProcessTable::new()),
         }
     }
-
-    /// Record that `child` was terminated by a signal, carrying `status`, and
-    /// wake any parent parked in [`ProcessWait::wait`].
-    ///
-    /// Reuses the same table mutation and wake `record_exit` performs for a
-    /// self-exiting child, so a signalled child is reaped through the one
-    /// [`ProcessTable::reap`] primitive exactly like one that called `exit`
-    /// itself — the parent cannot tell the two apart except by the `128 + n`
-    /// status the signal producer records here.
-    pub fn record_signalled_exit(&self, child: ProcessId, status: i32) {
-        self.table.lock().record_exit(child, status);
-        // Release the lock above before waking a parent parked in `wait`.
-        crate::waitq::procwait_wake();
-    }
 }
 
 impl<A> KernelProcessWait<A>
@@ -1032,12 +1018,12 @@ mod tests {
     }
 
     #[test]
-    fn record_signalled_exit_makes_the_child_reapable_with_its_status() {
+    fn a_signalled_exit_makes_the_child_reapable_with_its_status() {
         let p = producer();
         p.register_child(ProcessId(1), ProcessId(2));
         // A signalled child becomes a reapable zombie carrying the signal's
         // termination status, indistinguishable from a self-exit to `reap`.
-        p.record_signalled_exit(ProcessId(2), 130);
+        p.record_exit(ProcessId(2), 130);
         assert_eq!(
             p.wait(ProcessId(1), WAIT_PID_ANY, WaitFlags::empty()),
             Ok(WaitedChild {

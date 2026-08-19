@@ -56,7 +56,7 @@ use tairix_kernel_mem::{
 };
 use tairix_kernel_sched_api::SchedulerArch;
 use tairix_kernel_sched_cfq::{Scheduler, SchedulerConfig};
-use tairix_kernel_sec::{CapTable, ProcessId, TaskId as SecTaskId};
+use tairix_kernel_sec::{CapTable, ProcessId};
 use tairix_log::{log, Event, EventId, Level};
 use tairix_sync::RwLock;
 

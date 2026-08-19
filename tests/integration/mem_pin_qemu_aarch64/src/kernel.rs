@@ -80,7 +80,7 @@ use tairix_kernel_mem::{
 use tairix_kernel_sched_api::StepOutcome;
 use tairix_kernel_sched_api::{Priority, SchedulerArch};
 use tairix_kernel_sched_cfq::{Scheduler, SchedulerConfig};
-use tairix_kernel_sec::{CapTable, ProcessId, TaskCapabilities, TaskId as SecTaskId, UserId};
+use tairix_kernel_sec::{CapTable, ProcessId, TaskCapabilities, UserId};
 use tairix_log::{log, Event, EventId, Level};
 use tairix_sync::RwLock;
 

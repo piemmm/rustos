@@ -951,13 +951,16 @@ polls the task is `Parked`, so it can be woken and re-dispatched
 (work-stolen) onto a **different** CPU than it parked on. The suspend
 mechanism — `reschedule_current(cpu, Park)` — is keyed to a specific
 CPU's resume handle, so it must be told the CPU the task occupies *right
-now*, not a CPU id captured once before the loop: a stale id misses the
-resume handle, the suspend silently fails, and the fallback
-`yield_current` clears the task's live current-task slot while it keeps
-running — the task then returns to user space with no recorded current
-task and its next syscall faults the core closed. Every wait loop
-therefore parks through one shared helper that reads the live CPU on each
-call, so a mid-wait migration is always handled.
+now*, never a CPU id captured once before the loop: a stale id selects the
+handle of whichever task now runs on that core and suspends **that** task
+instead, writing the caller's continuation into its save area and switching
+to its dispatcher — the two then resume each other's kernel contexts under
+the wrong page-table root and the innocent task dies on a fault it never
+took (`plans/OPEN-DEFECTS.md` D44). Every wait loop therefore reads the live
+CPU inside the loop, at each park, so a mid-wait migration is always
+handled; `dispatch_step` additionally refuses to switch into a suspension
+point that is not on the task's own kernel stack, so a mispairing fails
+closed instead of corrupting.
 
 The **same live-CPU rule binds the syscall completion path**, not only
 the park loop. The dispatch hook reads the caller's CPU once at entry to

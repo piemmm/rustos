@@ -223,6 +223,10 @@ mod kernel {
             let top = self.guard + STACK_GUARD_BYTES + KTHREAD_STACK_BYTES as u64;
             top & !0xF
         }
+
+        fn usable_bytes(&self) -> u64 {
+            KTHREAD_STACK_BYTES as u64
+        }
     }
 
     /// The synchronous-exception handler the trap vector invokes. The

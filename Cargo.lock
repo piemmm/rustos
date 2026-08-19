@@ -4496,6 +4496,82 @@ dependencies = [
 ]
 
 [[package]]
+name = "tairix-test-threads"
+version = "0.0.0"
+dependencies = [
+ "tairix-rt",
+]
+
+[[package]]
+name = "tairix-test-threads-qemu-aarch64"
+version = "0.0.0"
+dependencies = [
+ "tairix-abi",
+ "tairix-arch-aarch64",
+ "tairix-arch-api",
+ "tairix-caps",
+ "tairix-fdt",
+ "tairix-itest-harness",
+ "tairix-kalloc",
+ "tairix-kernel",
+ "tairix-kernel-core",
+ "tairix-kernel-ipc",
+ "tairix-kernel-irq",
+ "tairix-kernel-mem",
+ "tairix-kernel-sched-api",
+ "tairix-kernel-sched-cfq",
+ "tairix-kernel-sec",
+ "tairix-kernel-syscall",
+ "tairix-log",
+ "tairix-sync",
+]
+
+[[package]]
+name = "tairix-test-threads-qemu-riscv64"
+version = "0.0.0"
+dependencies = [
+ "tairix-abi",
+ "tairix-arch-api",
+ "tairix-arch-riscv64",
+ "tairix-caps",
+ "tairix-itest-harness",
+ "tairix-kalloc",
+ "tairix-kernel",
+ "tairix-kernel-core",
+ "tairix-kernel-ipc",
+ "tairix-kernel-irq",
+ "tairix-kernel-mem",
+ "tairix-kernel-sched-api",
+ "tairix-kernel-sched-cfq",
+ "tairix-kernel-sec",
+ "tairix-kernel-syscall",
+ "tairix-log",
+ "tairix-sync",
+]
+
+[[package]]
+name = "tairix-test-threads-qemu-x86_64"
+version = "0.0.0"
+dependencies = [
+ "tairix-abi",
+ "tairix-arch-api",
+ "tairix-arch-x86_64",
+ "tairix-caps",
+ "tairix-itest-harness",
+ "tairix-kernel",
+ "tairix-kernel-core",
+ "tairix-kernel-ipc",
+ "tairix-kernel-irq",
+ "tairix-kernel-mem",
+ "tairix-kernel-sched-api",
+ "tairix-kernel-sched-cfq",
+ "tairix-kernel-sec",
+ "tairix-kernel-syscall",
+ "tairix-log",
+ "tairix-sync",
+]
+
+[[package]]
 name = "tairix-test-timer-preempt-qemu-aarch64"
 version = "0.0.0"
 dependencies = [

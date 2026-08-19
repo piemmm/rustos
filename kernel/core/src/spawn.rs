@@ -355,9 +355,12 @@ pub trait InitSpawnCtx {
     /// bound hardware-tree node vanishes the manager asks the kernel to
     /// unload the driver it loaded for it. The production implementation:
     ///
-    /// * reaps the driver's scheduler task (so it is never dispatched again
-    ///   and its kernel stack, live address space, and page-table frames are
-    ///   reclaimed when its control block drops);
+    /// * reaps every scheduler task of the driver's **thread group** (so none
+    ///   is ever dispatched again and their kernel stacks, the process's live
+    ///   address space, and its page-table frames are reclaimed when the last
+    ///   control block drops) — a driver that created threads of its own
+    ///   (`plans/THREADS.md`) must not leave one running against the state
+    ///   this teardown withdraws, with no path left to stop it;
     /// * withdraws its address-space-registry entry — reclaiming its
     ///   device-resource grants, standard streams, resource limits, and
     ///   matched-node record (no stale grant can outlive the driver);

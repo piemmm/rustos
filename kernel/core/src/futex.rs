@@ -204,6 +204,23 @@ pub fn release_process(process: ProcessId) {
     }
 }
 
+/// The absolute monotonic deadline a `futex_wait`'s relative `timeout_ns`
+/// names, or [`crate::waitq::NO_DEADLINE`] when the caller asked for none.
+///
+/// [`u64::MAX`] is the ABI's "no timeout" spelling. Every other value is added
+/// to `now_ns` and clamped one nanosecond short of that sentinel, so a span long
+/// enough to saturate still names a *deadline* the sweep fires rather than
+/// silently becoming an indefinite wait.
+#[must_use]
+pub fn deadline_for(now_ns: u64, timeout_ns: u64) -> u64 {
+    if timeout_ns == u64::MAX {
+        return crate::waitq::NO_DEADLINE;
+    }
+    now_ns
+        .saturating_add(timeout_ns)
+        .min(crate::waitq::NO_DEADLINE - 1)
+}
+
 /// The soonest finite deadline any futex waiter is holding, or [`None`].
 ///
 /// Folded into the kernel's nearest-armed-wakeup so a timed `futex_wait`
@@ -350,6 +367,22 @@ mod tests {
         sweep(&arch, 500);
         assert_eq!(arch.taken(), std::vec![11]);
         deregister(k, 11);
+    }
+
+    #[test]
+    fn a_relative_timeout_becomes_an_absolute_deadline_that_cannot_read_as_none() {
+        assert_eq!(deadline_for(1_000, 500), 1_500);
+        assert_eq!(deadline_for(0, 0), 0, "an elapsed timeout is due at once");
+        assert_eq!(
+            deadline_for(1_000, u64::MAX),
+            NO_DEADLINE,
+            "the ABI's u64::MAX means explicit wake only"
+        );
+        // A span that saturates must still name a real deadline: rounding up to
+        // the sentinel would turn a timed wait into an indefinite one.
+        let saturated = deadline_for(u64::MAX - 1, u64::MAX - 1);
+        assert_eq!(saturated, NO_DEADLINE - 1);
+        assert_ne!(saturated, NO_DEADLINE);
     }
 
     #[test]

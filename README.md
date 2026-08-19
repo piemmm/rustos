@@ -63,6 +63,7 @@ for filesystems, the feature section below.
 | Cross-CPU TLB shootdown | ✓ | ✓ | ✓ | — |
 | Syscall entry | ✓ | ✓ | ✓ | ✓ |
 | User-mode execution (ring 3 / EL0 / U-mode) | ✓ | ✓ | ✓ | — |
+| Threads within a process (`thread_create`, futex) | ✓ | ✓ | ✓ | — |
 | C-callable ABI (`abi-v1`, non-Rust) | ✓ | ✓ | ✓ | — |
 | Machine power-off / restart (`system_power`) | ◐ restart | ✓ PSCI | ✓ SBI | — |
 | Side-channel mitigation | ✓ | ✓ | ✓ | ✓ |

@@ -128,6 +128,14 @@ The open items, in priority order:
   rather than fixed inline because it is a shared-tooling concurrency
   concern unrelated to that feature.
 
+- **D44 — a console reader's re-park used the CPU id it remembered before its
+  first park, suspending whichever task now ran there — DONE.** `elsh` was
+  killed for a fault it never took. Root-caused to a stale per-CPU index in
+  `BlockingConsoleRead::read_until`, which read the CPU once before its
+  poll-and-park loop; fixed by reading it at each park, plus a fail-closed
+  dispatcher check that a suspension point lies on the task's own kernel stack.
+  See the full entry below.
+
 - **D15 — `autoload-input-qemu-aarch64` freeze at the PTY Ctrl-C stage,
   timing-perturbable by an unrelated binary-size change — OPEN (for the
   PTY owner).** While landing the RFC 3168 TCP ECN engine (`plans/NETWORK.md`
@@ -2564,6 +2572,78 @@ hand-copied offsets that used to sit in `syscall_entry_tests.rs` — and pins
 the entry ordering (nothing between the swap and the reload may read `tp`)
 and the U-return publish-before-restore ordering. `sret_tests.rs` gained the
 matching `enter_user` anchor/`tp`-clearing ordering test.
+
+## D44 — a console reader's re-park used a remembered CPU id, so it suspended another core's task — DONE
+
+**State:** fixed. Presented as `tairix-test-stress-qemu-aarch64` failing under
+the concurrent `cargo xtask ci` matrix while passing in isolation: `elsh` was
+killed moments after it reaped `sysmon` and reclaimed the console foreground,
+with the kernel naming a wild fault the shell had not taken —
+
+```
+[  9.488] DEBUG id=5000 syscall dispatched task=9 comm=elsh sc=wait
+[  9.488] DEBUG id=5000 syscall dispatched task=9 comm=elsh sc=console_foreground
+root@tairix ~%
+[  9.552] WARN  id=4034 task killed by unresolvable user fault task=9 name=elsh
+                write=false fault_class=wild fault_offset=null_page region_offset=0
+[  9.555] INFO  id=10004 session ended task=8 user=root exit_code=139
+```
+
+**Root cause.** Resume handles are per-CPU: `reschedule_current` suspended the
+task published for the CPU id its *caller* passed. `BlockingConsoleRead::
+read_until` read that id **once, before** its poll-and-park loop. A console
+reader parks, is woken by the next keystroke, and re-parks — and between two
+parks the scheduler may dispatch it on a different core. Every re-park after a
+migration therefore named the core the reader had *left*, and suspended
+whichever task the dispatcher had since published there: the caller's
+continuation was written into that victim's `ThreadControl::task_ctx` and the
+caller switched to the victim's dispatcher.
+
+The victim was `elsh`, parked in its own console read. When the scheduler next
+dispatched it, `dispatch_step` switched into a save area holding a **foreign**
+kernel stack pointer, so the CPU unwound another task's syscall handler and
+`eret`ed that task's user registers — under `elsh`'s page-table root. Every TAIRiX
+program is a PIE at the same load bias, so the foreign registers addressed real
+pages of `elsh`'s space: the wild stack pointer sat ~180 KiB below `elsh`'s own,
+the growth resolver dutifully backed 17 pristine pages of `elsh`'s stack for a
+fault that was not its, and the next epilogue read zeros and `ret`ed to address
+`0`. The load dependence is a migration-frequency effect, nothing more.
+
+**Evidence that pinned it.** The faulting EL0 frame was built on a kernel stack
+(`0x44cffa00`) that was not `elsh`'s (`0x44c77a00`), on a CPU whose current-task
+slot named `elsh` while `elsh`'s own syscalls had just run on another core; the
+wild user stack pointer matched the `stress` workers' stack top (`0x1000872000`,
+their `enter_user` value) rather than `elsh`'s (`0x10008a2000`); and a
+dispatcher-side assertion caught `elsh`'s saved kernel stack pointer sitting
+above its own stack top.
+
+**Fix.** `BlockingConsoleRead::read_until` now reads the live CPU **at each
+park**, inside its loop, exactly as every other wait loop in the kernel already
+did (`procwait`, `sleeplock`, `blockwait`, `blkclient`, the pipe and stream
+waits, `park_current_task` — whose own rustdoc had already named this hazard).
+The caller's task id is still read once, because a task's id does not change
+across a migration; only the CPU does.
+
+Backstop (§2.17): `dispatch_step` now proves a suspension point belongs to the
+task before switching into it — the saved kernel stack pointer must lie on that
+task's own stack (`KernelStack::carries`, over the new
+`KernelStack::usable_bytes`) — and fails the task closed exactly as a
+stack-guard violation does. A future mispairing anywhere on the park path is
+then a deterministic refusal, never silent cross-task corruption.
+
+**Regression cover.** `kernel/core::console::tests::
+a_parking_read_resolves_the_live_cpu_at_every_park` counts the reader's
+`current_cpu` reads (`TestArch` now records them) and requires the park to have
+resolved one for itself; it fails on the pre-fix source with `saw 1`.
+`kernel/core::kthread::tests::
+dispatch_step_refuses_a_suspension_point_on_a_foreign_stack` pokes a foreign
+stack pointer into a save area and requires the step to refuse — verified to
+fail on the pre-fix source, which switched into it — and
+`a_kernel_stack_carries_only_its_own_usable_region` pins the predicate,
+including that the guard region is not a legitimate frame. End to end, the
+`stress-qemu-aarch64` vertical is the acceptance witness: the reproduction ran
+in 1–6 rounds of five concurrent guests before the fix and stayed clean over
+155 runs after it.
 
 ## Non-goals / do not do
 

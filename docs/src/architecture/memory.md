@@ -1005,6 +1005,24 @@ spawned EL0 program maps a minted virtio-MMIO window grant, reads its
 write a sentinel → read it back → `mem_unmap`). The `dma_alloc` DMA half is
 the remaining staged 5d-0-ii (c) follow-on.
 
+## 7e-t. A thread's user stack
+
+`thread_create` reserves each new thread's stack out of the process's **own**
+anonymous window, with one unbacked guard page below it, and releases the whole
+region at thread teardown. The span it records covers only the stack half, so a
+fault in the guard page resolves through neither the growth handler (§7c) nor the
+anonymous handler and stays fatal — the structural overrun defence, not a canary.
+One page at the top is backed eagerly, because a span must name a committed page
+and the thread's first instruction may push; everything below faults in through
+the same `resolve_stack_fault` growth path a process's first thread uses, bounded
+by the same `stack-bytes` limit.
+
+The reservation is address space only (`reserve_anonymous_growable`), not the
+up-front no-overcommit charge a `mem_map` reservation takes: a stack's depth is
+unknown and mostly untouched, so headroom is taken per growth step and the release
+credits back nothing it never charged. Why the kernel owns the stack rather than
+accepting a caller-supplied base is the [threads page](./threads.md).
+
 ## 7f. Non-`FIXED` `mem_map` placement allocator (`anon_window`)
 
 A non-`FIXED` `mem_map` asks the kernel to choose the base. That placement

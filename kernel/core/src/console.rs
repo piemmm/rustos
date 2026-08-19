@@ -1238,13 +1238,15 @@ where
         if buf.is_empty() {
             return Ok(0);
         }
-        let cpu = self.arch.current_cpu();
         // The current caller to register on `CONSOLE_WAITQ` so a producer can
         // `unpark` it, when a scheduler waker hook is installed. [`None`] on a
         // host build of an unrelated path (no scheduler): such a caller can
         // still drain immediately-available bytes, but an empty poll fails
         // closed rather than busy-spinning, since it cannot park, exactly as the process-wait producer does.
-        let parkable: Option<_> = crate::waitq::wait_arch().and_then(|hook| hook.current_task(cpu));
+        // The task id is stable for the caller's whole read; the *CPU* is not,
+        // so it is read afresh at each park below.
+        let parkable: Option<_> =
+            crate::waitq::wait_arch().and_then(|hook| hook.current_task(self.arch.current_cpu()));
         loop {
             // The nearest one-shot wake this wait needs: the secret
             // feedback's animation frame (armed only while a password
@@ -1336,7 +1338,15 @@ where
             if deadline != crate::waitq::NO_DEADLINE {
                 crate::waitq::rearm_timed_wakeup();
             }
-            let parked = reschedule_current(cpu, RescheduleAction::Park);
+            // The **live** CPU, read at every park, never one remembered from
+            // before the loop: between two polls this task is parked, so it can
+            // be woken and re-dispatched onto a different core, and a stale id
+            // would name the core it left — suspending whichever task the
+            // dispatcher has since published there, writing this caller's
+            // continuation into that victim's save area
+            // (`plans/OPEN-DEFECTS.md` D44). Every other wait loop reads it the
+            // same way.
+            let parked = reschedule_current(self.arch.current_cpu(), RescheduleAction::Park);
             crate::waitq::console_deregister(task, deadline);
             // A `false` means no resumable user kthread is published on this
             // CPU — fail closed rather than busy-spin, as the process-wait
@@ -1611,6 +1621,62 @@ mod tests {
         // adapter reports the empty read without polling or parking.
         assert_eq!(blocking.read(&mut []), Ok(0));
         assert_eq!(INNER.polls.load(Ordering::Relaxed), 0);
+    }
+
+    /// A [`WaitQueueArch`] that makes a caller *parkable* so the blocking read
+    /// reaches its park, and reports a task id so the wait-queue registration
+    /// is real. Installed idempotently: the hook is set-once per process and
+    /// the crate's tests share one binary, so whichever module installed first
+    /// wins — every candidate reports a task, which is all this needs.
+    struct ParkableWaitArch;
+
+    impl crate::waitq::WaitQueueArch for ParkableWaitArch {
+        fn unpark(&self, _id: tairix_kernel_sched_api::TaskId) {}
+        fn now_ns(&self) -> u64 {
+            0
+        }
+        fn set_wakeup(&self, _deadline_ns: Option<u64>) {}
+        fn current_cpu(&self) -> Option<tairix_kernel_sched_api::CpuId> {
+            Some(0)
+        }
+        fn current_task(
+            &self,
+            _cpu: tairix_kernel_sched_api::CpuId,
+        ) -> Option<tairix_kernel_sched_api::TaskId> {
+            Some(0x5044)
+        }
+    }
+
+    static PARKABLE_WAIT_ARCH: ParkableWaitArch = ParkableWaitArch;
+
+    #[test]
+    fn a_parking_read_resolves_the_live_cpu_at_every_park() {
+        // `plans/OPEN-DEFECTS.md` D44. Between two polls the reader is parked,
+        // so it can be woken and re-dispatched onto a different core; a CPU id
+        // read once before the loop names the core it left, and the suspend
+        // then lands on whichever task the dispatcher published there. The read
+        // must therefore resolve the CPU *at* each park, which shows up as more
+        // than the single read the caller's own task lookup costs.
+        static INNER: ScriptedRead = ScriptedRead::with_bytes(&[]);
+
+        let _ = crate::waitq::install_wait_arch(&PARKABLE_WAIT_ARCH);
+        let hook = crate::waitq::wait_arch().expect("a wait-arch hook is installed");
+        assert!(
+            hook.current_task(0).is_some(),
+            "the effective hook must make the caller parkable, or no park is reached"
+        );
+        let arch = leaked_arch();
+        let blocking = BlockingConsoleRead::new(arch, &INNER, None);
+        let mut buf = [0u8; 8];
+        // The park itself fails closed (no resume handle is published for a
+        // host caller), so the read reports it — but only after the park read
+        // the live CPU for itself.
+        assert_eq!(blocking.read(&mut buf), Err(Errno::NotImplemented));
+        assert!(
+            arch.current_cpu_reads() >= 2,
+            "the park must resolve the live CPU, not reuse one read before the loop (saw {})",
+            arch.current_cpu_reads()
+        );
     }
 
     #[test]

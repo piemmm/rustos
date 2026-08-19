@@ -16,6 +16,7 @@
 - [Kernel memory subsystem](./architecture/memory.md)
 - [Kernel scheduler](./architecture/scheduler.md)
 - [Kernel multitasking and the kthread runtime](./architecture/multitasking.md)
+- [Threads within a process](./architecture/threads.md)
 - [Kernel security subsystem](./architecture/security.md)
 - [Kernel IPC subsystem](./architecture/ipc.md)
 - [Kernel syscall subsystem](./architecture/syscalls.md)

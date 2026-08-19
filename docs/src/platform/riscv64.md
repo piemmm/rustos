@@ -259,6 +259,12 @@ The vector therefore:
   the anchor (so a task resumed on a different hart re-enters U-mode under
   that hart's true identity) and then restores the user's value.
 
+  Framing `tp` is also what makes it usable as a **per-thread** pointer at
+  all: `thread_create` seeds each new thread's `tp` at user entry, and because
+  the frame lives on that thread's own kernel stack the value follows the
+  thread rather than the hart — see the [threads
+  page](../architecture/threads.md).
+
   Because the frame lives on the trapping task's own kernel stack, that
   makes the thread pointer genuinely **per task**: U-mode keeps a value of
   its own across every trap and every context switch, which is the

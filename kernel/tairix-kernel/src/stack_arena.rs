@@ -220,6 +220,10 @@ unsafe impl KernelStack for ArenaStack {
         // wastes nothing, but keeps the contract explicit.
         top & !(STACK_ALIGN - 1)
     }
+
+    fn usable_bytes(&self) -> u64 {
+        KTHREAD_STACK_BYTES as u64
+    }
     // `check_guard` keeps the default `Ok(())`: the guard page is *unmapped*
     // in the owning task's root, so an overrun faults in hardware. There is
     // no poison canary to verify (and reading the page under a different

@@ -345,7 +345,7 @@ where
     /// landed); the boot path installs the concrete producer through
     /// [`Self::with_process_signal`] once `SP7b` lands. Held as a `'static`
     /// borrow, exactly like the process-wait producer.
-    process_signal: &'static (dyn ProcessSignal + 'static),
+    pub(crate) process_signal: &'static (dyn ProcessSignal + 'static),
     /// The kernel-held user database the `users_db_read` syscall serves
     /// (`plans/PI.md` P11). Defaults to [`NULL_USERS_DB`] (fail closed
     /// with [`Errno::NotImplemented`]); the boot path
@@ -1684,7 +1684,7 @@ where
     /// published on this CPU, which would leave freed pages translating in
     /// the snapshot the copy path walks — reachable memory the task no
     /// longer owns. Removing by delta cannot silently skip that.
-    fn publish_region_teardown(&self, process: ProcessId, base: u64, page_count: u64) {
+    pub(crate) fn publish_region_teardown(&self, process: ProcessId, base: u64, page_count: u64) {
         let absorbed = {
             let mut aspaces = self.aspaces.write();
             fold_region_pages(base, page_count, |page| {
@@ -1989,35 +1989,65 @@ where
                 self.crashes.record(crash);
             }
         }
-        self.process_wait.record_exit(process, FAULT_EXIT_CODE);
-        self.reclaim_process_resources(process);
+        // A fault kills the whole process, so its siblings stop first and the
+        // teardown lands only once the group's last thread is down: reclaiming
+        // the address space while a sibling still executes on another CPU would
+        // free its page-table root from under it.
+        self.process_signal
+            .terminate_siblings(process, thread, FAULT_EXIT_CODE);
+        self.land_thread_down(process, thread, Some(FAULT_EXIT_CODE));
     }
 
-    /// Land a termination that was deferred while `task` was inside the
+    /// Retire `thread` from its thread group and, when it was the group's last
+    /// thread still executing, record `status` for the parent's `wait` and
+    /// reclaim the process.
+    ///
+    /// **The one place that decides "the process is gone."** Every death funnels
+    /// through it — `exit`, `thread_exit`, a fault kill, a deferred kill, a
+    /// signalled kill, and a driver unload — because the decision is the same
+    /// one in each: a process's address space, capability record, endpoints, and
+    /// open files may be released only when no thread of it is executing any
+    /// longer. A path that reclaimed on its own would free the page-table root
+    /// under a sibling still running on another CPU.
+    ///
+    /// `status` is [`None`] for a teardown that owes no `wait` reap (a driver
+    /// unload). Returns whether the group went down, so a caller with per-thread
+    /// work of its own can skip what the process teardown subsumes.
+    pub(crate) fn land_thread_down(
+        &self,
+        process: ProcessId,
+        thread: SecTaskId,
+        status: Option<i32>,
+    ) -> bool {
+        if crate::threads::retire(self.caps, self.aspaces, thread) != 0 {
+            return false;
+        }
+        if let Some(status) = status {
+            self.process_wait.record_exit(process, status);
+        }
+        self.reclaim_process_resources(process);
+        true
+    }
+
+    /// Land a death that was deferred while `thread` was inside the
     /// just-completed syscall — the involuntary sibling of the `exit`
     /// handler, driven by the dispatch boundary once the handler has
     /// unwound and released everything it held (the mount `SleepLock`, any
     /// in-flight block-I/O descriptor, every handler-local buffer).
     ///
-    /// Records the signal's `128 + n` status so the parent's `wait` reaps
-    /// a signalled exit, reclaims the task's kernel resources exactly as
-    /// the immediate terminate path does, and suspends the task with an
-    /// `Exit` action so the scheduler reaps it — the completed syscall's
-    /// result never reaches user space.
+    /// Retires the thread through the one shared landing rule — so `status` is
+    /// recorded and the process reclaimed only when this was the group's last
+    /// thread — and suspends the thread with an `Exit` action so the scheduler
+    /// reaps it; the completed syscall's result never reaches user space.
     pub(crate) fn land_pending_kill(
         &self,
         process: ProcessId,
-        signal: Signal,
+        thread: SecTaskId,
+        status: i32,
         result: SyscallResult,
         cpu: CpuId,
     ) -> DispatchOutcome {
-        // `termination_status` is `Some` for every signal the terminate
-        // path defers (Terminate/Interrupt/Kill); mirror the immediate
-        // path's shape rather than fabricate a status.
-        if let Some(status) = signal.termination_status() {
-            self.process_wait.record_exit(process, status);
-        }
-        self.reclaim_process_resources(process);
+        self.land_thread_down(process, thread, Some(status));
         DispatchOutcome::Reschedule {
             result,
             action: RescheduleAction::Exit,
@@ -4186,12 +4216,12 @@ where
         }
         // `exit` ends the whole **process**, so every sibling thread stops
         // first (`plans/THREADS.md` decision 10): one left running against the
-        // address space this handler is about to reclaim would turn its own
-        // legitimate accesses into wild faults. The siblings record no status
-        // and land no teardown of their own — the status above and the
-        // reclamation below are this thread's.
+        // address space this process is about to lose would turn its own
+        // legitimate accesses into wild faults. Each sibling carries this
+        // thread's `code`, so whichever of them lands last records the real exit
+        // code rather than a synthesised signalled status.
         self.process_signal
-            .terminate_siblings(caller.process(), caller.task_id);
+            .terminate_siblings(caller.process(), caller.task_id, code);
         // The scheduler reap itself is driven by the reschedule path, not
         // here (`plans/SPAWN.md` SP2b) — the dispatch hook returns
         // `DispatchOutcome::Reschedule { action: Exit, .. }` and the
@@ -4200,11 +4230,11 @@ where
         // `Scheduler::exit` here as well would mutate scheduler state
         // re-entrantly from inside the in-flight `step` the exiting
         // kthread runs under. This handler performs only the kernel-state
-        // reclamation the reschedule path does not — the shared
-        // [`Self::reclaim_process_resources`] the signal-terminate path also
-        // drives, so a task that exits and a task that is killed release
-        // exactly the same resources.
-        self.reclaim_process_resources(caller.process());
+        // reclamation the reschedule path does not, through the one shared
+        // landing rule every death funnels through — so a task that exits and a
+        // task that is killed release exactly the same resources, and neither
+        // releases them while a sibling still executes.
+        self.land_thread_down(caller.process(), caller.task_id, Some(code));
         Ok(0)
     }
 
@@ -4611,13 +4641,18 @@ where
             // puts the thread control block at the thread pointer anyway.
             self.copy_in_user(caller, tls_base, &mut probe)?;
         }
-        let stack_soft = self
-            .aspaces
-            .read()
-            .limits(caller.process())
-            .get(LimitKind::StackBytes)
-            .soft;
-        let stack_bytes = crate::threads::resolve_stack_bytes(stack_len, stack_soft)?;
+        // Both request bounds, read from one snapshot of the process's limit
+        // set: the group's capacity and the stack's size. Bounds before state —
+        // nothing below this point is reached by a request the process's own
+        // `ulimit` forbids.
+        let limits = self.aspaces.read().limits(caller.process());
+        if self.caps.read().thread_count(caller.process()) as u64
+            >= limits.get(LimitKind::Threads).soft
+        {
+            return Err(Errno::OutOfRange);
+        }
+        let stack_bytes =
+            crate::threads::resolve_stack_bytes(stack_len, limits.get(LimitKind::StackBytes).soft)?;
         crate::threads::create(
             self,
             caller,
@@ -4655,13 +4690,7 @@ where
         let key = crate::futex::FutexKey { process, uaddr };
         let cpu = SchedulerArch::current_cpu(self.arch);
         let task = caller.task_id.0;
-        // A saturating add keeps a `u64::MAX` timeout at `NO_DEADLINE`
-        // (explicit wake only) instead of wrapping to a tiny value.
-        let deadline_ns = if timeout_ns == u64::MAX {
-            crate::waitq::NO_DEADLINE
-        } else {
-            self.arch.monotonic_ns(cpu).saturating_add(timeout_ns)
-        };
+        let deadline_ns = crate::futex::deadline_for(self.arch.monotonic_ns(cpu), timeout_ns);
 
         // Register *before* reading the word, so a wake landing in the window
         // between the read and the park is not lost: the waker then unparks a
@@ -10819,17 +10848,9 @@ enum ParkStep {
 }
 
 /// Park the calling task off the run queue for one wait iteration,
-/// suspending it on the CPU it is running on **right now**.
-///
-/// The live CPU is read here, on every call, never captured once before a
-/// wait loop: a parked task can be woken and re-dispatched (work-stolen)
-/// onto a different core, so a `CpuId` captured before the first park goes
-/// stale after any migration. Passing a stale id to `reschedule_current`
-/// misses that core's resume handle, so the suspend fails and the
-/// `yield_current` fallback clears the task's live current-task slot while
-/// it keeps running — the task then returns to user space with no recorded
-/// current task and its next syscall faults the core closed. Reading the
-/// live CPU keeps the suspend keyed to the core the task actually occupies.
+/// suspending it on the CPU it is running on **right now** — which
+/// [`crate::kthread::reschedule_current`] resolves itself, so a wait loop
+/// that migrates across a park cannot suspend the wrong core's task.
 ///
 /// `reschedule_current` returns `false` only for a caller that is not a
 /// resumable user kthread (a host test with no live dispatch loop); the
@@ -11345,12 +11366,12 @@ impl<A> crate::procsignal::TaskReclaim for KernelDispatchHook<'_, A>
 where
     A: KernelArch + 'static,
 {
-    fn reclaim(&self, task: u64) {
+    fn land_thread_down(&self, process: ProcessId, thread: SecTaskId, status: Option<i32>) {
         // The signal-terminate path's teardown is the exit handler's
         // teardown — one definition, reached through the boot-installed
         // seam because the signal producer cannot borrow the handlers
         // directly.
-        self.handlers.reclaim_process_resources(ProcessId(task));
+        let _ = self.handlers.land_thread_down(process, thread, status);
     }
 }
 
@@ -11451,16 +11472,17 @@ where
         // space. A completing `exit` syscall already recorded its own
         // death and reclaimed — the taken (and cleared) pending kill is
         // then simply superseded by the exit in flight.
-        if let Some(signal) = crate::procsignal::syscall_exit_take_kill(sched_task_id) {
-            // A completing `exit` — or a `thread_exit` that *was* the process's
-            // last thread — already recorded its own death and reclaimed, so the
-            // taken pending kill is superseded by the exit in flight.
+        if let Some(status) = crate::procsignal::syscall_exit_take_kill(sched_task_id) {
+            // A completing `exit` — or a `thread_exit` — already retired this
+            // thread through the shared landing rule, so the taken pending kill
+            // is superseded by the exit in flight.
             if raw_number != SyscallNumber::EXIT.as_u16()
                 && raw_number != SyscallNumber::THREAD_EXIT.as_u16()
             {
                 return self.handlers.land_pending_kill(
                     caller_process,
-                    signal,
+                    SecTaskId(sched_task_id),
+                    status,
                     result,
                     completion_cpu,
                 );
@@ -11753,7 +11775,7 @@ mod tests {
     use alloc::sync::Arc;
     use tairix_abi::input::{KeyValue, Modifiers};
     use tairix_abi::seat::SEAT_PRIMARY;
-    use tairix_abi::{CapabilityId, DescriptorTable, Errno, STDIN, STDOUT};
+    use tairix_abi::{CapabilityId, DescriptorTable, Errno, STDIN, STDOUT, THREAD_STACK_DEFAULT};
     use tairix_caps::CapabilitySet;
     use tairix_kernel_ipc::{CallEndpoint, CallEndpointLimits, Port, RecvCall};
     use tairix_kernel_irq::{IrqTable, UnsupportedController};
@@ -12048,6 +12070,397 @@ mod tests {
         // The capability record was evicted as part of the security
         // cleanup the reschedule path does not perform.
         assert!(table.read().is_empty());
+    }
+
+    /// The state a `thread_create` / futex handler test needs: a caller whose
+    /// address space maps exactly one readable user page at `0x1000` (holding
+    /// `payload`), so a probe of an address inside it succeeds and one outside
+    /// it fails closed.
+    struct ThreadFixture {
+        table: RwLock<CapTable>,
+        ipc: RwLock<PortRegistry>,
+        aspaces: RwLock<AddressSpaceRegistry>,
+        rng: RwLock<Box<dyn RandomReserve + Send + Sync>>,
+        irq: IrqTable,
+        ctl: UnsupportedController,
+        caps: TaskCapabilities,
+    }
+
+    /// The one mapped user address a thread-handler test probes through.
+    const THREAD_MAPPED: u64 = 0x1000;
+
+    /// An address no page of the fixture's space covers, so every probe of it is
+    /// a fail-closed refusal.
+    const THREAD_UNMAPPED: u64 = 0x9000_0000;
+
+    impl ThreadFixture {
+        fn new(task: u64, payload: &[u8], sink: &'static (dyn Sink + Sync)) -> Self {
+            let table = RwLock::new(CapTable::new());
+            table.write().insert(make_caps_record(task, &[], sink));
+            let aspaces = RwLock::new(AddressSpaceRegistry::new());
+            let (space, physmap) = send_aspace(MapFlags::READ | MapFlags::USER, payload);
+            aspaces
+                .write()
+                .register(ProcessId(task), space, physmap)
+                .expect("a fresh process registers once");
+            Self {
+                table,
+                ipc: RwLock::new(PortRegistry::new()),
+                aspaces,
+                rng: unseeded_rng(),
+                irq: IrqTable::new(31),
+                ctl: UnsupportedController,
+                caps: make_caps_record(task, &[], sink),
+            }
+        }
+
+        fn context(&self, task: u64) -> CallerContext<'_> {
+            CallerContext {
+                task_id: SecTaskId(task),
+                caps: &self.caps,
+            }
+        }
+
+        fn handlers<'a>(
+            &'a self,
+            sched: &'a Scheduler<TestArch>,
+            arch: &'a Arc<TestArch>,
+            sink: &'a (dyn Sink + Sync),
+        ) -> KernelSyscallHandlers<'a, TestArch> {
+            KernelSyscallHandlers::new(
+                sched,
+                &self.table,
+                arch,
+                sink,
+                &self.irq,
+                &self.ctl,
+                &self.ipc,
+                &self.aspaces,
+                &self.rng,
+            )
+        }
+    }
+
+    /// `thread_create` validates every user-supplied address against the
+    /// caller's **own** space before it touches any state: an entry, a
+    /// clear-on-exit word, or a thread pointer naming memory the caller does not
+    /// own is refused, and a misaligned clear-on-exit word is refused before the
+    /// thread exists rather than discovered at its death, when there would be
+    /// nobody left to report it to.
+    #[test]
+    fn thread_create_refuses_every_address_outside_the_callers_own_space() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let fixture = ThreadFixture::new(60, &[0u8; 8], sink);
+        let ctx = fixture.context(60);
+        let h = fixture.handlers(&sched, &arch, sink);
+
+        // An entry address in no mapping of the caller's space.
+        assert_eq!(
+            h.thread_create(&ctx, THREAD_UNMAPPED, 0, THREAD_STACK_DEFAULT, 0, 0),
+            Err(Errno::BadAddress)
+        );
+        // A clear-on-exit word that is not naturally aligned: the kernel writes
+        // a `u32` there, and a misaligned one could straddle two pages.
+        assert_eq!(
+            h.thread_create(
+                &ctx,
+                THREAD_MAPPED,
+                0,
+                THREAD_STACK_DEFAULT,
+                0,
+                THREAD_MAPPED + 2
+            ),
+            Err(Errno::OutOfRange)
+        );
+        // An aligned clear-on-exit word outside the caller's space.
+        assert_eq!(
+            h.thread_create(
+                &ctx,
+                THREAD_MAPPED,
+                0,
+                THREAD_STACK_DEFAULT,
+                0,
+                THREAD_UNMAPPED
+            ),
+            Err(Errno::BadAddress)
+        );
+        // A thread pointer outside the caller's space. On a port whose
+        // thread-pointer register is privileged the kernel writes this value
+        // itself, so a bad one would fault *inside* the kernel on every switch
+        // into the thread.
+        assert_eq!(
+            h.thread_create(
+                &ctx,
+                THREAD_MAPPED,
+                0,
+                THREAD_STACK_DEFAULT,
+                THREAD_UNMAPPED,
+                0
+            ),
+            Err(Errno::BadAddress)
+        );
+    }
+
+    /// A stack the process's own `stack-bytes` bound forbids is refused, never
+    /// silently clamped — and a request that rounds to nothing is refused too.
+    #[test]
+    fn thread_create_refuses_a_stack_its_process_bound_forbids() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let fixture = ThreadFixture::new(61, &[0u8; 8], sink);
+        let ctx = fixture.context(61);
+
+        fixture.aspaces.write().set_limit(
+            ProcessId(61),
+            LimitKind::StackBytes,
+            ResourceLimit {
+                soft: 64 * 1024,
+                hard: 64 * 1024,
+            },
+        );
+        let h = fixture.handlers(&sched, &arch, sink);
+
+        assert_eq!(
+            h.thread_create(&ctx, THREAD_MAPPED, 0, 128 * 1024, 0, 0),
+            Err(Errno::OutOfRange),
+            "a stack past the process's own bound is refused, not clamped"
+        );
+        // Zero is the "default" selector, so it is *not* the empty request; a
+        // process whose bound is zero has no stack to give a thread at all.
+        fixture.aspaces.write().set_limit(
+            ProcessId(61),
+            LimitKind::StackBytes,
+            ResourceLimit { soft: 0, hard: 0 },
+        );
+        assert_eq!(
+            h.thread_create(&ctx, THREAD_MAPPED, 0, THREAD_STACK_DEFAULT, 0, 0),
+            Err(Errno::LengthOutOfRange)
+        );
+    }
+
+    /// A process already at its `threads` bound admits no more, and the refusal
+    /// is a typed error rather than a panic or a silent success.
+    #[test]
+    fn thread_create_refuses_a_process_at_its_threads_bound() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let fixture = ThreadFixture::new(62, &[0u8; 8], sink);
+        let ctx = fixture.context(62);
+
+        // The leader already occupies the group, so a bound of one is reached.
+        fixture.aspaces.write().set_limit(
+            ProcessId(62),
+            LimitKind::Threads,
+            ResourceLimit { soft: 1, hard: 1 },
+        );
+        let h = fixture.handlers(&sched, &arch, sink);
+        assert_eq!(
+            h.thread_create(&ctx, THREAD_MAPPED, 0, THREAD_STACK_DEFAULT, 0, 0),
+            Err(Errno::OutOfRange)
+        );
+    }
+
+    /// `futex_wait` refuses a misaligned word before registering anything, and
+    /// answers `WouldBlock` — not a park — when the word no longer holds the
+    /// value the caller observed. That is the lost-wake-up race closing: the
+    /// caller re-tests its own condition and retries.
+    #[test]
+    fn futex_wait_refuses_a_misaligned_word_and_declines_to_park_on_a_changed_one() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        // The futex word at `THREAD_MAPPED` holds 5.
+        let fixture = ThreadFixture::new(63, &5u32.to_le_bytes(), sink);
+        let ctx = fixture.context(63);
+        let h = fixture.handlers(&sched, &arch, sink);
+
+        assert_eq!(
+            h.futex_wait(&ctx, THREAD_MAPPED + 1, 5, u64::MAX),
+            Err(Errno::OutOfRange),
+            "a word that could straddle two pages is refused before any \
+             registration"
+        );
+        assert_eq!(
+            h.futex_wait(&ctx, THREAD_MAPPED, 6, u64::MAX),
+            Err(Errno::WouldBlock),
+            "the word changed under the caller: re-test and retry, never park"
+        );
+        // A word the caller does not own is a fail-closed refusal, not a park on
+        // an address the kernel cannot read.
+        assert_eq!(
+            h.futex_wait(&ctx, THREAD_UNMAPPED, 0, u64::MAX),
+            Err(Errno::BadAddress)
+        );
+        // The value *does* match here, so the handler reaches the park — which
+        // fails closed on a host fixture with no resumable task rather than
+        // reporting a wake the caller would answer with a spin.
+        assert_eq!(
+            h.futex_wait(&ctx, THREAD_MAPPED, 5, u64::MAX),
+            Err(Errno::NotImplemented)
+        );
+        // Nothing was left registered by any of the refusals above.
+        assert_eq!(h.futex_wake(&ctx, THREAD_MAPPED, u32::MAX), Ok(0));
+    }
+
+    /// `futex_wake` refuses a misaligned word, and waking a word nobody waits on
+    /// is success reporting zero — a waiter that has not parked yet re-tests the
+    /// word itself, so there is nothing to report as an error.
+    #[test]
+    fn futex_wake_refuses_a_misaligned_word_and_waking_nobody_is_success() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let fixture = ThreadFixture::new(64, &[0u8; 8], sink);
+        let ctx = fixture.context(64);
+        let h = fixture.handlers(&sched, &arch, sink);
+
+        assert_eq!(
+            h.futex_wake(&ctx, THREAD_MAPPED + 3, 1),
+            Err(Errno::OutOfRange)
+        );
+        assert_eq!(h.futex_wake(&ctx, THREAD_MAPPED, 1), Ok(0));
+        assert_eq!(h.futex_wake(&ctx, THREAD_MAPPED, u32::MAX), Ok(0));
+    }
+
+    /// `plans/THREADS.md` decision 10 regression: the process teardown lands
+    /// exactly once, when the group's **last** thread is down.
+    ///
+    /// Retiring a thread while a sibling is still registered must leave every
+    /// process-scoped record standing — the address space above all. The defect
+    /// this pins down freed the process's page-table root while a sibling was
+    /// still executing on another CPU, which is a wild fault at best and a
+    /// zeroed live root at worst.
+    #[test]
+    fn a_process_is_torn_down_only_once_its_last_thread_is_down() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+
+        // A two-thread process: the leader (40) plus a sibling (41) aliased onto
+        // the same capability record, exactly as `thread_create` registers one.
+        table.write().insert(make_caps_record(40, &[], sink));
+        table
+            .write()
+            .register_thread(SecTaskId(41), ProcessId(40))
+            .expect("the sibling aliases the live record");
+        let wait_arch: &'static TestArch = Box::leak(Box::new(TestArch::with_cpus(1)));
+        let wait: &'static crate::procwait::KernelProcessWait<TestArch> =
+            Box::leak(Box::new(crate::procwait::KernelProcessWait::new(wait_arch)));
+        crate::procwait::ProcessWait::register_child(wait, ProcessId(2), ProcessId(40));
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        )
+        .with_process_wait(wait);
+        // A process-scoped record whose survival is observable: an open pipe
+        // pair, which the address-space entry owns.
+        let (read_fd, _write_fd) = aspaces.write().open_pipe(ProcessId(40)).expect("pair fits");
+
+        // The leader retires first: the group survives, so nothing
+        // process-scoped is released and no status is recorded.
+        assert!(
+            !h.land_thread_down(ProcessId(40), SecTaskId(40), Some(7)),
+            "the group still holds the sibling"
+        );
+        assert!(
+            table.read().caps_of_process(ProcessId(40)).is_some(),
+            "the process's capability record belongs to its surviving sibling"
+        );
+        assert!(
+            aspaces
+                .read()
+                .open_file_entry(ProcessId(40), read_fd)
+                .is_some(),
+            "the surviving sibling still owns the process's open files"
+        );
+        assert_eq!(
+            crate::procwait::ProcessWait::poll(
+                wait,
+                ProcessId(2),
+                tairix_abi::WAIT_PID_ANY,
+                WaitFlags::empty()
+            ),
+            Err(Errno::WouldBlock),
+            "a parent must not reap a child whose thread group is still alive"
+        );
+
+        // The sibling is the last out: now the process is gone, carrying the
+        // status the *first* thread declared rather than the sibling's own.
+        assert!(
+            h.land_thread_down(ProcessId(40), SecTaskId(41), Some(7)),
+            "the last thread down tears the process down"
+        );
+        assert!(table.read().caps_of_process(ProcessId(40)).is_none());
+        assert!(aspaces
+            .read()
+            .open_file_entry(ProcessId(40), read_fd)
+            .is_none());
+        assert_eq!(
+            crate::procwait::ProcessWait::poll(
+                wait,
+                ProcessId(2),
+                tairix_abi::WAIT_PID_ANY,
+                WaitFlags::empty()
+            ),
+            Ok(crate::procwait::WaitedChild {
+                pid: 40,
+                status: tairix_abi::WaitStatus::Exited(7)
+            })
+        );
+    }
+
+    /// A landing that owes no `wait` reap (a driver unload) still retires the
+    /// thread and reclaims the process, but mints no zombie for a parent.
+    #[test]
+    fn a_landing_without_a_status_reclaims_but_records_no_exit() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+
+        table.write().insert(make_caps_record(44, &[], sink));
+        let wait_arch: &'static TestArch = Box::leak(Box::new(TestArch::with_cpus(1)));
+        let wait: &'static crate::procwait::KernelProcessWait<TestArch> =
+            Box::leak(Box::new(crate::procwait::KernelProcessWait::new(wait_arch)));
+        crate::procwait::ProcessWait::register_child(wait, ProcessId(2), ProcessId(44));
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        )
+        .with_process_wait(wait);
+
+        assert!(h.land_thread_down(ProcessId(44), SecTaskId(44), None));
+        assert!(table.read().caps_of_process(ProcessId(44)).is_none());
+        assert_eq!(
+            crate::procwait::ProcessWait::poll(
+                wait,
+                ProcessId(2),
+                tairix_abi::WAIT_PID_ANY,
+                WaitFlags::empty()
+            ),
+            Err(Errno::WouldBlock),
+            "no status was owed, so the child is not reapable"
+        );
     }
 
     /// `plans/SPAWN.md` `SP10b` regression: the `exit` handler withdraws the
@@ -18900,7 +19313,10 @@ mod tests {
         )
         .with_process_wait(wait);
 
-        let outcome = h.land_pending_kill(ProcessId(9), Signal::Terminate, Ok(0), 0);
+        let status = Signal::Terminate
+            .termination_status()
+            .expect("Terminate carries a 128 + n status");
+        let outcome = h.land_pending_kill(ProcessId(9), SecTaskId(9), status, Ok(0), 0);
 
         // The task is suspended with an `Exit` action on its own CPU; the
         // completed syscall's result rides along but never reaches user
@@ -18909,7 +19325,6 @@ mod tests {
             outcome,
             DispatchOutcome::Reschedule {
                 action: RescheduleAction::Exit,
-                cpu: 0,
                 ..
             }
         ));
@@ -22163,6 +22578,9 @@ mod tests {
         maps: tairix_sync::SpinLock<Vec<(usize, u32, u64)>>,
         map_result: tairix_sync::SpinLock<Result<(), Errno>>,
         fail_from: tairix_sync::SpinLock<Option<usize>>,
+        /// Page counts the growth path took no-overcommit headroom for, so a
+        /// test can assert a reservation is not charged twice.
+        commits: tairix_sync::SpinLock<Vec<u64>>,
     }
     impl StackGrowMemMap {
         fn new() -> Self {
@@ -22170,6 +22588,7 @@ mod tests {
                 maps: tairix_sync::SpinLock::new(Vec::new()),
                 map_result: tairix_sync::SpinLock::new(Ok(())),
                 fail_from: tairix_sync::SpinLock::new(None),
+                commits: tairix_sync::SpinLock::new(Vec::new()),
             }
         }
     }
@@ -22185,10 +22604,11 @@ mod tests {
             // delegates.
             self.map(len, flags, addr_hint)
         }
-        fn commit(&self, _pages: u64) -> Result<(), Errno> {
+        fn commit(&self, pages: u64) -> Result<(), Errno> {
             // The no-overcommit headroom reservation always succeeds in this
             // double; the tests drive the exhaustion path through `map`'s
             // `fail_from`, which is where the fixtures model frame pressure.
+            self.commits.lock().push(pages);
             Ok(())
         }
         fn map(
@@ -22278,6 +22698,42 @@ mod tests {
                 .committed_base(),
             deep
         );
+    }
+
+    /// Growth takes the no-overcommit headroom for the pages it is about to
+    /// back, whichever thread's stack it is.
+    ///
+    /// A stack span is address space; only the pages a thread actually descends
+    /// onto are charged, exactly once each, at the step that maps them. That is
+    /// what makes a thread's stack cost its working set rather than its worst
+    /// case — a `thread_create` reservation that charged its whole extent would
+    /// bill a thread eight megabytes of RAM to push one frame.
+    #[test]
+    fn stack_growth_takes_the_headroom_for_the_pages_it_backs() {
+        let (producer, aspaces, h, _sink) = stack_fault_fixture();
+        let page = PAGE_SIZE as u64;
+
+        // The leader's span: one page down, one page charged.
+        assert!(h.resolve_stack_fault(ProcessId(2), SecTaskId(2), STACK_COMMITTED_BASE - 1));
+        assert_eq!(*producer.commits.lock(), std::vec![1]);
+
+        // A `thread_create` stack: the same rule, and a three-page jump charges
+        // exactly the three pages the walk backs.
+        let span =
+            crate::aspace::StackSpan::new(STACK_RESERVE_BASE, STACK_COMMITTED_BASE, STACK_TOP)
+                .expect("the fixture span is page-aligned and well-formed");
+        aspaces.write().set_owned_thread_stack(
+            ProcessId(2),
+            SecTaskId(3),
+            span,
+            crate::aspace::OwnedThreadStack {
+                reserve_base: STACK_RESERVE_BASE - page,
+                reserve_pages: (STACK_TOP - STACK_RESERVE_BASE) / page + 1,
+                clear_on_exit: 0,
+            },
+        );
+        assert!(h.resolve_stack_fault(ProcessId(2), SecTaskId(3), STACK_COMMITTED_BASE - 3 * page));
+        assert_eq!(*producer.commits.lock(), std::vec![1, 3]);
     }
 
     /// While the task is pinned, stack growth is additionally bounded by
@@ -22586,10 +23042,10 @@ mod tests {
 
     /// A minimal published live space whose [`LiveUserSpace::freeze`] returns
     /// a snapshot of an inner [`AddressSpace`] — standing in for the live
-    /// space a real `mem_map` would have grown. Only `freeze` and
-    /// `translate_page` are exercised; the mutating methods are unreachable
-    /// in these tests (the producer is the fake `RecordingMemMap` or a
-    /// recording facility), so they fail closed.
+    /// space a real `mem_map` would have grown. `freeze`, `translate_page` and
+    /// `unmap_anonymous` are honoured against that inner space; the remaining
+    /// mutating methods are unreachable in these tests (the producer is the
+    /// fake `RecordingMemMap` or a recording facility), so they fail closed.
     ///
     /// `freezes` counts the whole-space rebuilds, whose cost is proportional
     /// to the space's resident set — the number a test asserts on to show a
@@ -22638,14 +23094,24 @@ mod tests {
         fn reserve_anonymous(&mut self, _pages: u64) -> Result<u64, LiveSpaceError> {
             Err(LiveSpaceError::Anon(AnonError::OutOfMemory))
         }
+        fn reserve_anonymous_growable(&mut self, _pages: u64) -> Result<u64, LiveSpaceError> {
+            Err(LiveSpaceError::Anon(AnonError::OutOfMemory))
+        }
         fn commit_anonymous(&mut self, _pages: u64) -> Result<(), LiveSpaceError> {
             Err(LiveSpaceError::Anon(AnonError::OutOfMemory))
         }
         fn reserve_anonymous_at(&mut self, _base: u64, _pages: u64) -> Result<u64, LiveSpaceError> {
             Err(LiveSpaceError::Anon(AnonError::OutOfMemory))
         }
-        fn unmap_anonymous(&mut self, _base: u64, _pages: u64) -> Result<(), LiveSpaceError> {
-            Err(LiveSpaceError::Anon(AnonError::NotMapped))
+        fn unmap_anonymous(&mut self, base: u64, pages: u64) -> Result<(), LiveSpaceError> {
+            // Honoured against the inner space so a release is observable: a
+            // page that was never resident is a sparse (demand-paged) hole, not
+            // a failure.
+            for index in 0..pages {
+                let va = base + index * PAGE_SIZE as u64;
+                let _ = self.space.unmap_single_page(va);
+            }
+            Ok(())
         }
         fn reserve_file_region(&mut self, _pages: u64) -> Result<u64, LiveSpaceError> {
             Err(LiveSpaceError::Anon(AnonError::OutOfMemory))
@@ -22925,6 +23391,102 @@ mod tests {
             space.translate(elsewhere),
             Some((Frame(13), MapFlags::READ | MapFlags::USER)),
             "a page outside the released region is untouched"
+        );
+    }
+
+    /// A dying thread's stack reservation leaves nothing translating in its
+    /// process's snapshot — the isolation half of `thread_exit`.
+    ///
+    /// The frames go back to the allocator, which may hand them to another
+    /// principal, while the *process* lives on: a translation left in the
+    /// snapshot the copy path walks would let a surviving sibling's syscall
+    /// buffer read and write another principal's memory. The release therefore
+    /// publishes the region's teardown exactly as `mem_unmap` does.
+    #[test]
+    fn a_dying_threads_stack_leaves_nothing_translating_in_the_process_snapshot() {
+        // A CPU slot no other test in this crate publishes on, so the global
+        // per-CPU publication is unshared under a parallel run.
+        const CPU: u32 = 45;
+
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(64));
+        arch.set_current_cpu(CPU);
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+
+        // A two-thread process: the leader (50) plus a sibling (51) whose
+        // kernel-owned `[guard | stack]` reservation is the two pages at
+        // `0x30_0000`, both resident.
+        let leader = ProcessId(50);
+        let sibling = SecTaskId(51);
+        let guard_page = 0x30_0000u64;
+        let stack_page = guard_page + PAGE_SIZE as u64;
+        let resident = Page::from_addr(VirtAddr::new(stack_page)).expect("aligned");
+        let elsewhere = Page::from_addr(VirtAddr::new(0x40_0000)).expect("aligned");
+        let mut space = AddressSpace::new(HostPageTable::new());
+        for (page, frame) in [(resident, Frame(21)), (elsewhere, Frame(22))] {
+            space
+                .map(page, frame, MapFlags::READ | MapFlags::USER)
+                .expect("map page");
+        }
+        aspaces
+            .write()
+            .register(
+                leader,
+                Box::new(space.freeze()),
+                Box::new(SimPhysMap::new(PhysAddr::new(0), PAGE_SIZE)),
+            )
+            .expect("register snapshot");
+        let span = crate::aspace::StackSpan::new(stack_page, stack_page, stack_page + 0x1000)
+            .expect("well-formed");
+        aspaces.write().set_owned_thread_stack(
+            leader,
+            sibling,
+            span,
+            crate::aspace::OwnedThreadStack {
+                reserve_base: guard_page,
+                reserve_pages: 2,
+                clear_on_exit: 0,
+            },
+        );
+        table.write().insert(make_caps_record(50, &[], sink));
+        table
+            .write()
+            .register_thread(sibling, leader)
+            .expect("the sibling aliases the live record");
+
+        let (live, _observer) = PublishedLive::published(space);
+        let _guard = crate::kthread::publish_live_space_for_test(CPU, live);
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        );
+        let caps = make_caps_record(50, &[], sink);
+        let ctx = CallerContext {
+            task_id: sibling,
+            caps: &caps,
+        };
+
+        assert_eq!(crate::threads::exit(&h, &ctx), Ok(0));
+
+        let reg = aspaces.read();
+        let (snapshot, _) = reg
+            .resolve(leader)
+            .expect("the process outlives its sibling thread");
+        assert!(
+            snapshot.translate(resident).is_none(),
+            "the dead thread's stack page must not stay reachable through the \
+             surviving process's snapshot"
+        );
+        assert_eq!(
+            snapshot.translate(elsewhere),
+            Some((Frame(22), MapFlags::READ | MapFlags::USER)),
+            "a page outside the released reservation is untouched"
         );
     }
 

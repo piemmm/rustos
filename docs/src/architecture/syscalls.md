@@ -152,6 +152,10 @@ release onward the table is frozen and new behaviour ships as `abi-v2`.
 | 106 | `call_grant`   | `IpcEndpoint` (delegated), `IpcEndpoint` (recipient) | `u64` (handle) | `CAP_IPC_ENDPOINT` | yes |
 | 107 | `boot_session_get` | —                                   | `u64` (session) | —           | no    |
 | 108 | `terminal_purge` | `u32 fd`                              | `errno` | `CAP_CONSOLE_WRITE` (+ `CAP_CONSOLE_READ` in-handler) | yes |
+| 109 | `thread_create` | `entry`, `u64 arg`, `len stack_len`, `u64 tls_base`, `user_ptr clear_on_exit` | `u64` (tid) | — | yes |
+| 110 | `thread_exit`  | —                                       | `unit`  | —                       | yes |
+| 111 | `futex_wait`   | `user_ptr uaddr`, `u32 expected`, `u64 timeout_ns` | `errno` | —             | no  |
+| 112 | `futex_wake`   | `user_ptr uaddr`, `u32 count`           | `u64` (woken) | —                 | no  |
 
 (Syscall numbers 39–45 — `msi_alloc`, `shm_create`/`shm_map`/`shm_unmap`,
 `waitset_create`/`waitset_ctl`/`waitset_wait` — and 76–77 — `file_map`/
@@ -1511,6 +1515,24 @@ byte as the consumer drains it — a typed password transits it, so the
 buffer retains no cleartext (`AGENTS.md` §4 / §23.1). The first-party Rust
 wrapper is `tairix_rt::console_input`; the C stub is
 `tairix_sys_console_input`.
+
+## Threads and the futex (109–112)
+
+`thread_create` / `thread_exit` / `futex_wait` / `futex_wake` are the thread
+surface. All four are **unprivileged**: a thread runs in the caller's own
+hardware-isolated address space under the caller's own capability record, so it
+grants no authority — the reasoning that makes `mem_map` unprivileged — and the
+capacity is bounded by the `threads` and `stack-bytes` resource limits rather
+than by a capability. The lifecycle pair is audited (a new schedulable principal,
+exactly as `spawn` is); the futex pair is not, being a hot, self-scoped blocking
+primitive that decides no security question.
+
+The kernel owns a thread's stack and its guard page, the futex key is
+`(process, user VA)` and therefore unforgeable, and a process's teardown lands
+only once the group's last thread is down. The full design — the thread-group
+model, the per-arch thread pointer, the futex structure, and the userland
+`Mutex`/`Condvar`/`join` built over it — is the [threads
+page](./threads.md).
 
 ## Standard streams (fd 0/1/2/3)
 

@@ -1,0 +1,24 @@
+[package]
+name = "tairix-test-threads"
+description = "THREADS stage T3b-u fixture: a separately-linked pure-Rust user-mode program built once and driven in five argv-selected roles, so the consuming verticals prove the lightweight-thread stack end to end. `parent` spawns and reaps the other roles through the production spawn + wait syscalls; `counter` runs N threads over one address space incrementing a shared counter under a futex Mutex and joins each for its value; `rendezvous` proves a Condvar wait genuinely blocks (a spinning wait would starve the notifier on a single-CPU cooperative drive); `tls` proves each thread's psABI thread pointer is its own and survives a trap; `groupexit` proves exit(code) terminates every sibling. Built PIE for a native Tier-1 target and converted to an rxe blob by the consuming test's build script."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "tairix-test-threads"
+path = "src/main.rs"
+
+# The program is a pure-Rust TAIRiX program, so it links the pure-Rust userland
+# runtime `tairix-rt` — never the C ABI (`crt0` + `abi-sys`), which exists
+# solely for non-Rust programs. Only on the native Tier-1 targets
+# (`target_os = "none"`); on the host it is an inert stub so
+# `cargo build --workspace` / clippy still cover it.
+[target.'cfg(target_os = "none")'.dependencies]
+tairix-rt = { path = "../../../lib/rt", version = "=0.0.0" }

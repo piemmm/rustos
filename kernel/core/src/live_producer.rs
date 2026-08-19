@@ -582,6 +582,14 @@ mod tests {
             }
         }
 
+        fn reserve_anonymous_growable(&mut self, page_count: u64) -> Result<u64, LiveSpaceError> {
+            self.anon_reserves.push(page_count);
+            match self.next.take() {
+                Some(err) => Err(err),
+                None => Ok(PLACED_BASE),
+            }
+        }
+
         fn commit_anonymous(&mut self, page_count: u64) -> Result<(), LiveSpaceError> {
             self.anon_commits.push(page_count);
             match self.next.take() {

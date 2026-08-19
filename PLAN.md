@@ -7472,15 +7472,18 @@ load-relative. Docs: `docs/src/architecture/fault-diagnostics.md`.
 
 ---
 
-## THREADS — lightweight threads within a process (`plans/THREADS.md`)  **[T1+T2+T3a+T3b-k DONE; T3b-u PLANNED]**
+## THREADS — lightweight threads within a process (`plans/THREADS.md`)  **[DONE]**
 
 **Dependencies:** `plans/SPAWN.md` SP1–SP5 (the process model, all landed).
 
-**The gap it closes.** There is no way to run two threads over one heap: a
-program that wants concurrency must `spawn` a whole separate address space and
-talk over IPC. THREADS adds the thread-group model and the shared address space
-(done), then a futex, per-thread thread pointers, and the `lib/rt` thread
-runtime.
+**What it delivers.** A program can run several threads over one heap instead of
+`spawn`ing a separate address space and talking over IPC. A process is a thread
+group; each thread is its own scheduler task with its own kernel stack,
+kernel-owned user stack behind a structurally unbacked guard page, and psABI
+thread pointer, over one address space, one capability record, and one descriptor
+table. `Thread::spawn`/`join`/`detach` and a futex `Mutex`/`Condvar` are the
+program-facing surface, and an uncontended lock never enters the kernel. Docs:
+`docs/src/architecture/threads.md`.
 
 **Staged (detail in the plan; do not duplicate it here, §13):** T1 the riscv64
 `tp`/`sscratch` trap-protocol fix (**done**, `plans/OPEN-DEFECTS.md` D43), T2
@@ -7496,9 +7499,25 @@ one-task-per-space `&mut` publication), T3b-k the kernel half of threads
 programming its own psABI thread-pointer register, kernel-owned thread stacks
 behind a structurally unbacked guard page, `kernel/core`'s `threads.rs` +
 `futex.rs`, and process-directed signal/exit fan-out over the thread group), and
-T3b-u the userland half — the `lib/rt` runtime (spawn/join/detach, futex
-`Mutex`/`Condvar`), the handler-level host tests, the per-arch QEMU verticals,
-and the docs.
+and T3b-u the userland half (**done**: `lib/rt`'s `thread` + `sync` modules —
+`Thread::spawn`/`Builder`, `JoinHandle::join`/`detach` over a recycled rendezvous
+cell whose clear-on-exit word the kernel writes, and futex `Mutex`/`Condvar` whose
+uncontended paths are pure userland atomics — plus the handler-level host tests
+and the `threads_qemu_{aarch64,riscv64,x86_64}` verticals).
+
+**Defects fixed on the way** (§2.18): the process teardown could run while a
+sibling thread was still executing on another CPU, freeing its page-table root
+from under it. `exit`, the fault kill, and the gate-deferred kill each performed
+their own teardown; all five death paths (with `thread_exit` and the driver-store
+unload, which stopped only a driver's leader task) now funnel through one landing
+rule that tears a process down only when the group's **last** thread is down, with
+the terminal status carried through the deferral so a sibling's `128 + n` can
+never overwrite a real exit code. A dying thread's stack release additionally
+publishes its teardown into the process's registry snapshot, so a surviving
+sibling's syscall buffer cannot resolve through frames the allocator has since
+handed to another principal; and a thread's stack reservation takes its
+no-overcommit headroom per growth step rather than for its whole extent, so a
+thread costs the RAM of its working set rather than of its `stack-bytes` bound.
 
 ---
 

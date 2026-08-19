@@ -185,6 +185,26 @@ pub unsafe trait KernelStack {
     /// aligned to `STACK_ALIGN`.
     fn top(&self) -> u64;
 
+    /// Bytes of usable stack below [`Self::top`], so a caller can decide
+    /// whether an address lies on *this* task's stack ([`Self::carries`]).
+    ///
+    /// Excludes any guard region: an address in the guard is an overrun
+    /// ([`Self::check_guard`]), not a legitimate frame.
+    fn usable_bytes(&self) -> u64;
+
+    /// Whether `addr` lies inside this stack's usable region — the test that
+    /// tells the dispatcher whether a task's recorded suspension point is on
+    /// its *own* stack rather than another task's.
+    ///
+    /// The one definition every stack source shares; a source that reports
+    /// zero usable bytes carries nothing and answers `false`, so an unknown
+    /// stack fails closed.
+    fn carries(&self, addr: u64) -> bool {
+        let top = self.top();
+        let usable = self.usable_bytes();
+        usable != 0 && addr < top && top - addr <= usable
+    }
+
     /// Check this stack's overrun guard, if it has one.
     ///
     /// Returns [`StackGuardViolation`] if the task has run off the bottom of
@@ -266,6 +286,10 @@ unsafe impl KernelStack for BoxStack {
         top & !(STACK_ALIGN as u64 - 1)
     }
 
+    fn usable_bytes(&self) -> u64 {
+        KTHREAD_STACK_BYTES as u64
+    }
+
     fn check_guard(&self) -> Result<(), StackGuardViolation> {
         // Verify the canary: the top `STACK_GUARD_CANARY_BYTES` of the guard,
         // immediately below the usable base, which a contiguous downward
@@ -292,6 +316,10 @@ unsafe impl KernelStack for BoxStack {
 unsafe impl KernelStack for Box<dyn KernelStack + Send> {
     fn top(&self) -> u64 {
         (**self).top()
+    }
+
+    fn usable_bytes(&self) -> u64 {
+        (**self).usable_bytes()
     }
 
     fn check_guard(&self) -> Result<(), StackGuardViolation> {
@@ -1214,6 +1242,23 @@ where
     };
     crate::watchdog::note_kernel_breadcrumb(cpu, entered, 0);
 
+    // A suspension point must lie on this task's *own* kernel stack. Anything
+    // else is a foreign continuation somebody wrote into this save area, and
+    // switching into it would run another task's kernel context — unwinding
+    // that task's syscall handler and `eret`ing its user registers — under
+    // *this* task's page-table root, so the innocent task dies on a fault it
+    // never took (`plans/OPEN-DEFECTS.md` D44). Fail the task closed instead:
+    // its context can no longer be trusted, exactly as a guard violation.
+    // SAFETY: exclusive dispatcher-side access to `*ctl` (see above).
+    let saved = unsafe { (*ctl).task_ctx.stack_pointer };
+    // SAFETY: as above.
+    if !unsafe { (*ctl).stack.carries(saved) } {
+        unsafe {
+            (*ctl).state = RunState::Finished;
+        }
+        return TaskAction::Exit;
+    }
+
     // SAFETY: switch into the task. `dispatch_ctx` saves our (the
     // dispatcher's) context; `task_ctx` was made runnable by `prepare`
     // (first step) or a prior `Yielder` suspension (later steps), so it
@@ -1867,6 +1912,10 @@ mod tests {
         fn top(&self) -> u64 {
             self.top
         }
+
+        fn usable_bytes(&self) -> u64 {
+            KTHREAD_STACK_BYTES as u64
+        }
     }
 
     impl Drop for SlabStack {
@@ -1964,6 +2013,58 @@ mod tests {
         // After the dispatcher retires the handle, the slot is empty again.
         clear_resume(cpu);
         assert!(!reschedule_current(cpu, RescheduleAction::Yield));
+    }
+
+    #[test]
+    fn dispatch_step_refuses_a_suspension_point_on_a_foreign_stack() {
+        // `plans/OPEN-DEFECTS.md` D44's fail-closed backstop: a saved kernel
+        // stack pointer that does not lie on the task's own stack is a foreign
+        // continuation somebody wrote into this save area. Switching into it
+        // would run another task's kernel context under this task's page-table
+        // root, so the step fails the task closed instead.
+        let rec = recorder();
+        let cpu: CpuId = 34;
+        let mut control = control_with(RecordingCs(rec), BoxStack::new());
+
+        // One ordinary step seeds a real, in-bounds suspension point.
+        assert_eq!(dispatch_step(&mut control, cpu), TaskAction::Yield);
+        let switches = rec.switches.load(Ordering::SeqCst);
+        assert!(control.stack.carries(control.task_ctx.stack_pointer));
+
+        // Now poke a pointer into a *different* stack, exactly as a park
+        // against a foreign control block would have left behind.
+        let foreign = BoxStack::new();
+        control.task_ctx.stack_pointer = foreign.top() - 64;
+        assert_eq!(dispatch_step(&mut control, cpu), TaskAction::Exit);
+        assert_eq!(
+            rec.switches.load(Ordering::SeqCst),
+            switches,
+            "a foreign suspension point must not be switched into"
+        );
+        // The task is terminal: every later step reports `Exit` and never
+        // switches in again.
+        assert_eq!(dispatch_step(&mut control, cpu), TaskAction::Exit);
+        assert_eq!(rec.switches.load(Ordering::SeqCst), switches);
+    }
+
+    #[test]
+    fn a_kernel_stack_carries_only_its_own_usable_region() {
+        let stack = BoxStack::new();
+        let top = stack.top();
+        assert!(stack.carries(top - 8), "one word below the top is on-stack");
+        assert!(
+            stack.carries(top - stack.usable_bytes()),
+            "the usable base is on-stack"
+        );
+        assert!(!stack.carries(top), "the exclusive top is past the end");
+        assert!(
+            !stack.carries(top - stack.usable_bytes() - 8),
+            "the guard region below the usable base is not a legitimate frame"
+        );
+        assert!(
+            !stack.carries(0),
+            "a null suspension point is never on-stack"
+        );
     }
 
     #[test]
@@ -2162,6 +2263,10 @@ mod tests {
         fn top(&self) -> u64 {
             0x1_0000
         }
+
+        fn usable_bytes(&self) -> u64 {
+            0x1_0000
+        }
     }
 
     /// A [`KernelStack`] over a real [`BoxStack`] whose guard check can be
@@ -2178,6 +2283,10 @@ mod tests {
     unsafe impl KernelStack for GuardDouble {
         fn top(&self) -> u64 {
             self.inner.top()
+        }
+
+        fn usable_bytes(&self) -> u64 {
+            self.inner.usable_bytes()
         }
 
         fn check_guard(&self) -> Result<(), StackGuardViolation> {

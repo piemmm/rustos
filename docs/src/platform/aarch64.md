@@ -2312,8 +2312,14 @@ the metal acceptance signal.
 The aarch64 port implements the Arch HAL `PerCpu` slice (`AGENTS.md`
 §17.2) in `kernel/arch/aarch64::percpu_hal` over the **`TPIDR_EL1`**
 system register — the EL1-private thread pointer the kernel uses as its
-per-CPU anchor (the EL0 `TPIDR_EL0` belongs to user TLS and is never
-touched). `PerCpuStorage::read_self_base` / `write_self_base` are a
+per-CPU anchor. The EL0 `TPIDR_EL0` is a *different* register and belongs to
+user TLS: it is the psABI thread pointer `thread_create` programs per thread,
+architecturally user-writable, framed at offset 800 of the EL0 trap frame in
+`vectors.s` (inside the existing 816-byte frame, which had 16 bytes of tail
+padding) and seeded at user entry. Because the frame lives on that thread's own
+kernel stack, the register is per-thread and context-switch-safe by construction,
+and a user write to it is respected — see the [threads
+page](../architecture/threads.md). `PerCpuStorage::read_self_base` / `write_self_base` are a
 single `mrs` / `msr TPIDR_EL1`. Production stores the validated dense
 `CpuId`: the boot CPU publishes id 0 after ordering the discovered
 topology, and the shared secondary trampoline publishes its PSCI/spin-table

@@ -85,6 +85,10 @@ pub mod net;
 
 pub mod pressure;
 
+pub mod sync;
+
+pub mod thread;
+
 pub use startup::{arg, arg_count, args, cpu_features, env, env_count, env_var};
 
 // The `mem_map`-backed global allocator. Compiled for the native targets that
@@ -400,6 +404,18 @@ const NUM_FD_GRANT: u64 = SyscallNumber::FD_GRANT.as_u16() as u64;
 
 /// `fd_redeem` syscall number (as above).
 const NUM_FD_REDEEM: u64 = SyscallNumber::FD_REDEEM.as_u16() as u64;
+
+/// `thread_create` syscall number (as above).
+const NUM_THREAD_CREATE: u64 = SyscallNumber::THREAD_CREATE.as_u16() as u64;
+
+/// `thread_exit` syscall number (as above).
+const NUM_THREAD_EXIT: u64 = SyscallNumber::THREAD_EXIT.as_u16() as u64;
+
+/// `futex_wait` syscall number (as above).
+const NUM_FUTEX_WAIT: u64 = SyscallNumber::FUTEX_WAIT.as_u16() as u64;
+
+/// `futex_wake` syscall number (as above).
+const NUM_FUTEX_WAKE: u64 = SyscallNumber::FUTEX_WAKE.as_u16() as u64;
 
 /// Marshal a 32-bit signed argument into its register value following the
 /// `abi-v1` `I32` convention (sign-extend through `i64`).
@@ -1598,6 +1614,147 @@ pub fn mem_pin() -> i64 {
     // the capability and the pinned-memory bound on the far side of the
     // trap. No user pointer is passed.
     let ret = unsafe { raw_syscall(NUM_MEM_PIN, [0; 6]) };
+    ret as i64
+}
+
+/// Create a second thread of execution inside the calling process's own
+/// address space (`SyscallNumber::THREAD_CREATE`, `plans/THREADS.md` T3b),
+/// returning its thread id or `-errno`.
+///
+/// `entry` is the address the new thread begins executing at and `arg` the
+/// value placed in its first-argument register; `stack_len` is the user-stack
+/// size to reserve, or [`tairix_abi::THREAD_STACK_DEFAULT`] for the caller's
+/// effective `stack-bytes` bound; `tls_base` is the thread's initial thread
+/// pointer (`0` for none); `clear_on_exit` is a naturally aligned `u32` in the
+/// caller's own memory the kernel zeroes and futex-wakes when this thread
+/// dies (`0` for none).
+///
+/// The **kernel** reserves the thread's stack and the unbacked guard page
+/// below it, and releases the whole region when the thread dies — so the
+/// runtime owns no stack memory, a stack overrun faults deterministically, and
+/// a detached thread cannot leak its stack. Unprivileged: the new thread runs
+/// in the caller's own isolated space under the caller's own capability record,
+/// so it grants no authority.
+///
+/// This is the raw marshalling wrapper. [`thread::Thread::spawn`] is the safe
+/// surface a program uses: it owns the closure transfer, the join rendezvous,
+/// and the thread's own `thread_exit`.
+///
+/// # Safety
+///
+/// `entry` must name a function in an executable mapping of this process that
+/// obeys the freestanding thread-entry contract: it takes `arg` in the
+/// first-argument register and **never returns** (there is no return address to
+/// resume — it must end by calling [`thread_exit`] or `exit`). `clear_on_exit`,
+/// when non-zero, must remain a live, naturally aligned `u32` this process owns
+/// until the thread dies, because the kernel writes it at that moment; freeing
+/// it earlier would let the kernel zero four bytes of unrelated memory.
+/// `tls_base`, when non-zero, must name readable memory of this process.
+#[must_use]
+#[allow(clippy::cast_possible_wrap)] // The kernel guarantees the i64 thread_create-result encoding (tid > 0, else -errno).
+pub unsafe fn thread_create(
+    entry: u64,
+    arg: u64,
+    stack_len: usize,
+    tls_base: u64,
+    clear_on_exit: u64,
+) -> i64 {
+    // SAFETY: `raw_syscall` is always safe to invoke — the kernel validates
+    // every argument on the far side of the trap, probing `entry`, `tls_base`,
+    // and `clear_on_exit` against this process's own mappings before it admits
+    // the thread. The obligations this wrapper's own contract adds are the
+    // caller's (an entry that never returns, a clear-on-exit word that outlives
+    // the thread).
+    let ret = unsafe {
+        raw_syscall(
+            NUM_THREAD_CREATE,
+            [entry, arg, stack_len as u64, tls_base, clear_on_exit, 0],
+        )
+    };
+    ret as i64
+}
+
+/// End the calling thread without ending its siblings
+/// (`SyscallNumber::THREAD_EXIT`, `plans/THREADS.md` T3b).
+///
+/// Never returns. The thread's clear-on-exit word is zeroed and futex-woken
+/// (releasing a joiner), its stack and per-thread kernel state are released,
+/// and it is reaped. The **last** thread of a process to end is a process exit
+/// with status `0` — exactly what falling off the end of `main` gives.
+///
+/// A correct kernel never returns control here; should it nonetheless do so,
+/// this must not return to a caller that has no continuation, so it re-issues
+/// the call. That is a fail-closed loop over a terminating syscall, not a
+/// busy-wait.
+pub fn thread_exit() -> ! {
+    loop {
+        // SAFETY: `raw_syscall` is always safe to invoke — the kernel
+        // validates the call on the far side of the trap. `thread_exit` takes
+        // no arguments and dereferences no user pointer.
+        unsafe {
+            let _ = raw_syscall(NUM_THREAD_EXIT, [0; 6]);
+        }
+    }
+}
+
+/// Block until the 32-bit word at `uaddr` is woken, unless it no longer holds
+/// `expected` (`SyscallNumber::FUTEX_WAIT`, `plans/THREADS.md` decision 5).
+///
+/// `timeout_ns` is a relative timeout, [`u64::MAX`] for none. Returns `0` when
+/// woken, or `-errno`: [`tairix_abi::Errno::WouldBlock`] when the word does not
+/// hold `expected` (the caller re-tests and retries — the lost-wake-up race
+/// closing, not a failure), [`tairix_abi::Errno::TimedOut`] when the timeout
+/// elapses, and [`tairix_abi::Errno::Interrupted`] when the thread is being
+/// terminated.
+///
+/// A wake is **advisory**: the caller always re-tests its own condition, so a
+/// spurious wake costs one loop iteration. This is the one blocking primitive
+/// [`sync::Mutex`], [`sync::Condvar`], and [`thread::JoinHandle::join`] are
+/// built over, which is what keeps an uncontended lock pure user-space atomics.
+///
+/// # Safety
+///
+/// `uaddr` must name a naturally aligned, live `u32` in this process's own
+/// address space for the duration of the call: the kernel reads that word to
+/// decide whether to park.
+#[must_use]
+#[allow(clippy::cast_possible_wrap)] // The kernel guarantees the i64 errno-result encoding (0, else -errno).
+pub unsafe fn futex_wait(uaddr: u64, expected: u32, timeout_ns: u64) -> i64 {
+    // SAFETY: `raw_syscall` is always safe to invoke; the kernel validates
+    // `uaddr`'s alignment and resolves it against this process's own space
+    // before reading it. Keeping the word live for the call is the caller's
+    // obligation, stated above.
+    let ret = unsafe {
+        raw_syscall(
+            NUM_FUTEX_WAIT,
+            [uaddr, u64::from(expected), timeout_ns, 0, 0, 0],
+        )
+    };
+    ret as i64
+}
+
+/// Wake up to `count` threads of the calling process blocked in
+/// [`futex_wait`] on `uaddr` (`SyscallNumber::FUTEX_WAKE`), returning how many
+/// were woken or `-errno`.
+///
+/// Waiters are released oldest-first, so a `count` of 1 is a genuine wake-one
+/// rather than a thundering herd, and repeated contention cannot move an older
+/// waiter behind newer arrivals. [`u32::MAX`] wakes all of them. Waking nobody
+/// is success: a waiter that has not parked yet re-tests the word itself.
+///
+/// # Safety
+///
+/// `uaddr` must be a naturally aligned address in this process's own address
+/// space — the same word the waiters named. The kernel dereferences nothing
+/// here (the key is `(process, address)`), so an address naming no live word
+/// simply wakes no one.
+#[must_use]
+#[allow(clippy::cast_possible_wrap)] // The kernel guarantees the i64 count-result encoding (count >= 0, else -errno).
+pub unsafe fn futex_wake(uaddr: u64, count: u32) -> i64 {
+    // SAFETY: `raw_syscall` is always safe to invoke; the futex key is
+    // `(this process, uaddr)`, resolved from the caller's kernel-attested
+    // record, so a wake can never reach another principal's waiters.
+    let ret = unsafe { raw_syscall(NUM_FUTEX_WAKE, [uaddr, u64::from(count), 0, 0, 0, 0]) };
     ret as i64
 }
 

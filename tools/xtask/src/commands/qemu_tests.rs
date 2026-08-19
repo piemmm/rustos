@@ -3128,6 +3128,79 @@ static TESTS: &[QemuTest] = &[
         pointer_script: None,
         serial: &[],
     },
+    // The THREADS `T3b-u` lightweight-thread vertical (aarch64): prove threads
+    // end to end over the production `KernelDispatchHook` chassis, which here
+    // also carries a real `KernelProcessSignal` — a group `exit` has to drive
+    // every sibling to its stopping point, and `thread_create` refuses a group
+    // that cannot be stopped. The six-role fixture program's parent is spawned
+    // through the production `InitSpawnCtx::spawn_driver_process` seam and
+    // drives each child through production `spawn` + `wait`: `counter`
+    // (contended futex `Mutex` over one address space), `rendezvous` (a
+    // `Condvar` wait that completes only because it genuinely parked — a spin
+    // would starve the notifier on this single-CPU cooperative drive), `tls`
+    // (each thread reads its own magic through its psABI thread pointer, before
+    // and after a trap), `exitearly` (the kernel's clear-on-exit word releases
+    // a joiner), and `groupexit` (a sibling parked in the kernel, reapable only
+    // because the group exit reached it). PASS once the chassis reaps a parent
+    // exit of 0. Single CPU and a 60-second budget match the sibling
+    // boot-then-do-fixed-work tests.
+    QemuTest {
+        package: "tairix-test-threads-qemu-aarch64",
+        binary: "tairix-test-threads-qemu-aarch64",
+        target: "aarch64-unknown-none",
+        cpus: 1,
+        timeout: Duration::from_secs(60),
+        disk_sectors: None,
+        netstack_peer: NetPeerMode::None,
+        ramfb: false,
+        fs_disk: FsDisk::None,
+        keyboard: None,
+        typed_keys: &[],
+        screendumps: &[],
+        pointer_script: None,
+        serial: &[],
+    },
+    // The riscv64 twin of the threads vertical above: the same six-role fixture
+    // program and production chassis, driven on the riscv64 `virt` board through
+    // the S-mode trap path, so each thread's `tp` is the port's own per-task
+    // thread pointer.
+    QemuTest {
+        package: "tairix-test-threads-qemu-riscv64",
+        binary: "tairix-test-threads-qemu-riscv64",
+        target: "riscv64gc-unknown-none-elf",
+        cpus: 1,
+        timeout: Duration::from_secs(60),
+        disk_sectors: None,
+        netstack_peer: NetPeerMode::None,
+        ramfb: false,
+        fs_disk: FsDisk::None,
+        keyboard: None,
+        typed_keys: &[],
+        screendumps: &[],
+        pointer_script: None,
+        serial: &[],
+    },
+    // The x86_64 twin of the threads verticals above: the same six-role fixture
+    // program, driven through the shared production board bring-up
+    // (`bring_up_bsp`) with the hook installed into the production
+    // `DISPATCH_SLOT`, so each thread's `FS` base is reloaded by the kernel at
+    // every switch-in (the register is privileged on this port).
+    QemuTest {
+        package: "tairix-test-threads-qemu-x86_64",
+        binary: "tairix-test-threads-qemu-x86_64",
+        target: "x86_64-unknown-none",
+        cpus: 1,
+        timeout: Duration::from_secs(60),
+        disk_sectors: None,
+        netstack_peer: NetPeerMode::None,
+        ramfb: false,
+        fs_disk: FsDisk::None,
+        keyboard: None,
+        typed_keys: &[],
+        screendumps: &[],
+        pointer_script: None,
+        serial: &[],
+    },
     // The S8b parser-sandbox vertical (`docs/src/security/sandbox.md`;
     // `.junie/fstree-next-plan.md` S8b): prove the `lib/sandbox` seam end
     // to end over the S8a kernel sandbox spawn mode on the aarch64 `virt`

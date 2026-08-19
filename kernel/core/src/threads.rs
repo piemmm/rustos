@@ -33,14 +33,15 @@
 
 use alloc::sync::Arc;
 
-use tairix_abi::{Errno, LimitKind, RLIMIT_INFINITY};
+use tairix_abi::{Errno, RLIMIT_INFINITY};
 use tairix_arch_api::UserEntry;
 use tairix_kernel_mem::PAGE_SIZE;
 use tairix_kernel_sched_api::{Priority, SchedulerArch};
-use tairix_kernel_sec::{TaskId as SecTaskId, ThreadRegisterError};
+use tairix_kernel_sec::{CapTable, ProcessId, TaskId as SecTaskId, ThreadRegisterError};
 use tairix_kernel_syscall::{CallerContext, SyscallResult};
+use tairix_sync::RwLock;
 
-use crate::aspace::{OwnedThreadStack, StackSpan};
+use crate::aspace::{AddressSpaceRegistry, OwnedThreadStack, StackSpan};
 use crate::bootinfo::KernelArch;
 use crate::procspace::ProcessSpace;
 use crate::rlimit::DEFAULT_STACK_LIMIT_BYTES;
@@ -179,13 +180,14 @@ where
     let frames = handlers.frames.ok_or(Errno::NotImplemented)?;
     let services =
         crate::spawn_services::installed_spawn_services().ok_or(Errno::NotImplemented)?;
-
-    // Capacity before state: the thread bound, then the stack bound.
-    let live_threads = handlers.caps.read().thread_count(process) as u64;
-    let limits = handlers.aspaces.read().limits(process);
-    if live_threads >= limits.get(LimitKind::Threads).soft {
-        return Err(Errno::OutOfRange);
+    // A group whose siblings cannot be driven to a stopping point can never be
+    // torn down: its death would either strand the process's kernel state or
+    // reclaim its address space from under a running sibling. Refuse the second
+    // thread rather than build that process.
+    if !handlers.process_signal.can_stop_group() {
+        return Err(Errno::NotImplemented);
     }
+
     let stack_bytes = request.stack_bytes;
 
     // The thread's kernel stack, and its guard page re-expressed as unmapped in
@@ -201,22 +203,31 @@ where
             .map_err(|_| Errno::NoSpace)?;
     }
 
-    // Reserve `[guard | stack]` in the process's own anonymous window. Nothing
-    // is backed yet except the one page below the top, which the span names as
-    // committed so the thread's first push lands on real memory.
+    // Reserve `[guard | stack]` in the process's own anonymous window — address
+    // space only. A stack is a span whose depth is unknown and mostly untouched,
+    // so its physical headroom is taken as it descends, exactly as a process's
+    // first thread's growth room is; charging the whole extent would bill a
+    // thread the RAM of its worst case (the default asks for the process's whole
+    // `stack-bytes` bound) to push one frame.
     let reserve_pages = thread_reserve_pages(stack_bytes);
     let reserve_base = space
-        .with(|live| live.reserve_anonymous(reserve_pages))
+        .with(|live| live.reserve_anonymous_growable(reserve_pages))
         .map_err(|_| Errno::OutOfMemory)?;
     let Some(span) = thread_stack_span(reserve_base, stack_bytes) else {
-        release_reservation(&space, reserve_base, reserve_pages);
+        release_reservation(handlers, &space, process, reserve_base, reserve_pages);
         return Err(Errno::OutOfRange);
     };
+    // The one page the span names as committed, so the thread's first push lands
+    // on real memory: its headroom is taken and consumed here, the same
+    // commit-then-map pair the growth path performs per step.
     if space
-        .with(|live| live.map_anonymous(span.committed_base(), THREAD_STACK_COMMIT_PAGES))
+        .with(|live| {
+            live.commit_anonymous(THREAD_STACK_COMMIT_PAGES)
+                .and_then(|()| live.map_anonymous(span.committed_base(), THREAD_STACK_COMMIT_PAGES))
+        })
         .is_err()
     {
-        release_reservation(&space, reserve_base, reserve_pages);
+        release_reservation(handlers, &space, process, reserve_base, reserve_pages);
         return Err(Errno::OutOfMemory);
     }
     // Publish the freshly backed page into the registry snapshot, so a syscall
@@ -256,7 +267,7 @@ where
         true,
     );
     let Ok(task_id) = admitted else {
-        release_reservation(&space, reserve_base, reserve_pages);
+        release_reservation(handlers, &space, process, reserve_base, reserve_pages);
         return Err(Errno::NoSpace);
     };
     let thread = SecTaskId(task_id);
@@ -268,7 +279,7 @@ where
     // authority the dispatcher cannot resolve.
     if let Err(error) = handlers.caps.write().register_thread(thread, process) {
         let _ = handlers.sched.exit(task_id);
-        release_reservation(&space, reserve_base, reserve_pages);
+        release_reservation(handlers, &space, process, reserve_base, reserve_pages);
         return Err(match error {
             ThreadRegisterError::AlreadyPresent => Errno::AlreadyExists,
             // `UnknownProcess` and any future variant: the caller's own record
@@ -292,7 +303,11 @@ where
     // retire it and fail closed.
     if handlers.sched.unpark(task_id).is_err() {
         let _ = handlers.sched.exit(task_id);
-        release_thread_state(handlers, &space, thread);
+        release_reservation(handlers, &space, process, reserve_base, reserve_pages);
+        // Retire the thread that never ran through the one shared rule. The
+        // creating thread is still registered, so the group survives and no
+        // process teardown lands.
+        let _ = handlers.land_thread_down(process, thread, None);
         return Err(Errno::NoSpace);
     }
     Ok(task_id)
@@ -302,9 +317,11 @@ where
 ///
 /// The **last** thread of a process to end is a process exit: its status is `0`
 /// (falling off the end of `main` gives the same), and the whole process's
-/// kernel state is reclaimed. Any earlier thread releases only its own stack,
-/// span, and capability alias; the process's address space, descriptors, and
-/// limits belong to the group and its remaining threads still need them.
+/// kernel state is reclaimed — the one shared landing rule
+/// (`KernelSyscallHandlers::land_thread_down`) decides that, so `thread_exit`
+/// carries no second copy of it. Any earlier thread returns only its own stack
+/// reservation; the process's address space, descriptors, and limits belong to
+/// the group and its remaining threads still need them.
 ///
 /// Either way the thread's clear-on-exit word is zeroed and futex-woken first,
 /// so a joiner is released before the thread's memory goes away.
@@ -318,32 +335,67 @@ where
 {
     let process = caller.process();
     let thread = caller.task_id;
-    let last = handlers.caps.read().thread_count(process) <= 1;
+    // Read the owned-stack record before retiring the thread: the landing rule
+    // withdraws the per-thread registry entry that holds it.
+    let owned = handlers.aspaces.read().owned_thread_stack(thread);
 
     // Release a joiner before anything is torn down: it observes the zeroed
-    // word and may then unmap the thread control block it was watching.
-    notify_thread_death(handlers, caller);
+    // word and may then free the thread control block it was watching.
+    notify_thread_death(handlers, caller, owned);
 
-    if last {
-        // The group is empty: this is the process's exit. Record the status the
-        // parent's `wait` reaps, then run the one shared reclamation the `exit`
-        // syscall and the signal-terminate path both drive.
-        handlers.process_wait.record_exit(process, 0);
-        handlers.reclaim_process_resources(process);
+    // The last thread out is the process's exit, and dropping the whole address
+    // space reclaims this stack wholesale — so the per-thread release below runs
+    // only while a sibling survives.
+    if handlers.land_thread_down(process, thread, Some(0)) {
         return Ok(0);
     }
-
-    // A sibling remains: release only what this thread owns.
-    let cpu = SchedulerArch::current_cpu(handlers.arch);
-    if let Some(space) = crate::kthread::current_process_space(cpu) {
-        release_thread_state(handlers, &space, thread);
-    } else {
-        // No live space to return the reservation to (a build that retained
-        // none never reserved one either); the per-thread bookkeeping still
-        // goes.
-        drop_thread_bookkeeping(handlers, thread);
+    if let (Some(owned), Some(space)) = (owned, current_space(handlers)) {
+        release_reservation(
+            handlers,
+            &space,
+            process,
+            owned.reserve_base,
+            owned.reserve_pages,
+        );
     }
     Ok(0)
+}
+
+/// Retire one thread's per-thread kernel state, returning how many threads of
+/// its group are still live.
+///
+/// The per-thread half of **every** death, so a group's member count can only
+/// ever fall through one definition: the syscall-side landing rule
+/// (`KernelSyscallHandlers::land_thread_down`) and the driver-store unload both
+/// reach it. What it retires is the thread's own and nothing the group shares —
+/// its signal-intake, kill-gate and running-kill overlays, its user-stack span,
+/// and its capability alias. Task ids are never reused, so an entry left behind
+/// could never be reclaimed later.
+///
+/// Dropping the capability alias is what makes the count fall, so a thread the
+/// table never knew leaves it where it was and reads as the group's last — the
+/// single-threaded shape every process had before threads existed.
+pub fn retire(
+    caps: &RwLock<CapTable>,
+    aspaces: &RwLock<AddressSpaceRegistry>,
+    thread: SecTaskId,
+) -> usize {
+    crate::procsignal::clear_intake(thread.0);
+    crate::procsignal::clear_kill_gate(thread.0);
+    crate::procsignal::clear_running_kill(thread.0);
+    aspaces.write().withdraw_thread(thread);
+    caps.write()
+        .remove_thread(thread)
+        .map_or(0, |(_, remaining)| remaining)
+}
+
+/// The process's shared execution context on the CPU this thread is running on,
+/// or [`None`] in a build that retained none (which reserved no stack either).
+fn current_space<A>(handlers: &KernelSyscallHandlers<'_, A>) -> Option<Arc<ProcessSpace>>
+where
+    A: KernelArch + 'static,
+{
+    crate::kthread::current_process_space(SchedulerArch::current_cpu(handlers.arch))
 }
 
 /// Zero the calling thread's clear-on-exit word and wake whoever is blocked on
@@ -354,11 +406,14 @@ where
 /// the *dying* thread's own bookkeeping, not a reason to leave the process in a
 /// half-torn-down state. The wake is issued regardless of whether the store
 /// landed, because a joiner re-tests the word and a spurious wake is harmless.
-fn notify_thread_death<A>(handlers: &KernelSyscallHandlers<'_, A>, caller: &CallerContext<'_>)
-where
+fn notify_thread_death<A>(
+    handlers: &KernelSyscallHandlers<'_, A>,
+    caller: &CallerContext<'_>,
+    owned: Option<OwnedThreadStack>,
+) where
     A: KernelArch + 'static,
 {
-    let Some(owned) = handlers.aspaces.read().owned_thread_stack(caller.task_id) else {
+    let Some(owned) = owned else {
         return;
     };
     if owned.clear_on_exit == 0 {
@@ -371,40 +426,33 @@ where
     let _ = crate::futex::wake_installed(caller.process(), owned.clear_on_exit, usize::MAX);
 }
 
-/// Return `thread`'s stack reservation to the process's anonymous window and
-/// drop its per-thread kernel bookkeeping.
-fn release_thread_state<A>(
+/// Release a `[guard | stack]` reservation, unmapping whatever pages the thread
+/// made resident (each frame zeroed on the way out), returning the range to the
+/// process's anonymous window, and dropping those pages from the process's
+/// registry snapshot.
+///
+/// The snapshot half is not bookkeeping: a translation left behind there is
+/// memory the process no longer owns that its **surviving** threads' syscall
+/// buffers would still resolve through, so a freed frame handed to another
+/// principal would be readable and writable across the isolation boundary. Only
+/// published on a successful unmap — a refused one left the pages mapped, and
+/// dropping live translations would fail the copy path closed for memory the
+/// process does hold.
+fn release_reservation<A>(
     handlers: &KernelSyscallHandlers<'_, A>,
     space: &Arc<ProcessSpace>,
-    thread: SecTaskId,
+    process: ProcessId,
+    reserve_base: u64,
+    reserve_pages: u64,
 ) where
     A: KernelArch + 'static,
 {
-    if let Some(owned) = handlers.aspaces.read().owned_thread_stack(thread) {
-        release_reservation(space, owned.reserve_base, owned.reserve_pages);
+    if space
+        .with(|live| live.unmap_anonymous(reserve_base, reserve_pages))
+        .is_ok()
+    {
+        handlers.publish_region_teardown(process, reserve_base, reserve_pages);
     }
-    drop_thread_bookkeeping(handlers, thread);
-}
-
-/// Drop `thread`'s capability alias and stack span (the per-thread halves of
-/// the process's state), leaving every process-scoped record for its siblings.
-fn drop_thread_bookkeeping<A>(handlers: &KernelSyscallHandlers<'_, A>, thread: SecTaskId)
-where
-    A: KernelArch + 'static,
-{
-    handlers.aspaces.write().withdraw_thread(thread);
-    handlers.caps.write().remove_thread(thread);
-}
-
-/// Release a `[guard | stack]` reservation, unmapping whatever pages the thread
-/// made resident (each frame zeroed on the way out) and returning the range to
-/// the process's anonymous window.
-///
-/// A refusal is a bookkeeping mismatch, not something a caller can act on: the
-/// thread is dying either way, and the reservation is reclaimed wholesale when
-/// the process's space is dropped.
-fn release_reservation(space: &Arc<ProcessSpace>, reserve_base: u64, reserve_pages: u64) {
-    let _ = space.with(|live| live.unmap_anonymous(reserve_base, reserve_pages));
 }
 
 #[cfg(test)]

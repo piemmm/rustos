@@ -156,12 +156,17 @@ struct KillGate {
     /// [`syscall_exit_take_kill`] — i.e. inside a syscall dispatch,
     /// parked or running.
     in_syscall: BTreeSet<u64>,
-    /// The first termination signal deferred against each in-syscall
-    /// task. First request wins: a later `Kill` against an
-    /// already-doomed task changes nothing (it is already dying at the
-    /// same boundary), matching the immediate path where a second
-    /// signal finds the child already gone.
-    pending: BTreeMap<u64, Signal>,
+    /// The terminal status the first death deferred against each in-syscall
+    /// thread will record for its process. First request wins: a later `Kill`
+    /// against an already-doomed thread changes nothing (it is already dying at
+    /// the same boundary), matching the immediate path where a second signal
+    /// finds the child already gone.
+    ///
+    /// A *status*, not a signal, because the three deaths that defer here carry
+    /// different ones and none may overwrite another: a signalled kill's
+    /// `128 + n`, a group `exit(code)`'s own code, and a fault kill's crash
+    /// status.
+    pending: BTreeMap<u64, i32>,
 }
 
 /// The one kill-gate instance shared by the signal producer and the
@@ -183,12 +188,12 @@ static KILL_GATE: SpinLock<KillGate> = SpinLock::new(KillGate {
 pub fn syscall_enter(task: u64) {
     let migrated = take_running_kill(task);
     match migrated {
-        Some(DeferredTeardown::Signalled { signal, .. }) => {
+        Some(DeferredTeardown::Exit { status, .. }) => {
             let mut gate = KILL_GATE.lock();
             gate.in_syscall.insert(task);
-            gate.pending.entry(task).or_insert(signal);
+            gate.pending.entry(task).or_insert(status);
         }
-        // A plain (driver-unload) teardown carries no signal for the kill
+        // A plain (driver-unload) teardown records no status for the kill
         // gate; leave it deferred for the dispatch loop, which reclaims once
         // the driver's dispatch retires it (honouring any `Park` in between
         // so handler state is never reclaimed under).
@@ -205,11 +210,11 @@ pub fn syscall_enter(task: u64) {
 /// Mark `task` as leaving its syscall dispatch and take any termination
 /// deferred against it while it was inside.
 ///
-/// `Some(signal)` obliges the caller to land the kill now: the handler
-/// has unwound (every lock and buffer it held is released), so this is
-/// the first safe point the task can die at.
+/// `Some(status)` obliges the caller to land the death now, recording that
+/// status for the process: the handler has unwound (every lock and buffer it
+/// held is released), so this is the first safe point the thread can die at.
 #[must_use]
-pub fn syscall_exit_take_kill(task: u64) -> Option<Signal> {
+pub fn syscall_exit_take_kill(task: u64) -> Option<i32> {
     let mut gate = KILL_GATE.lock();
     gate.in_syscall.remove(&task);
     gate.pending.remove(&task)
@@ -271,15 +276,16 @@ static PENDING_RUNNING_KILLS: AtomicUsize = AtomicUsize::new(0);
 /// straight without the dispatch loop needing to resolve one from the other.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum DeferredTeardown {
-    /// A terminating signal was delivered: record `128 + n` for the
-    /// parent's `wait` **and** reclaim (the signal-terminate path).
-    Signalled {
+    /// The process dies carrying this terminal status: record it for the
+    /// parent's `wait` **and** reclaim, once the group's last thread is down.
+    Exit {
         /// The process to reap and reclaim.
         process: ProcessId,
-        /// The signal whose status the parent's `wait` reports.
-        signal: Signal,
+        /// The status the parent's `wait` reports — a signal's `128 + n`, a
+        /// group `exit`'s own code, or a fault kill's crash status.
+        status: i32,
     },
-    /// A non-signal teardown (an unloaded driver whose process was still
+    /// A non-status teardown (an unloaded driver whose process was still
     /// executing): reclaim its kernel resources only, no `wait` reap.
     Plain {
         /// The process to reclaim.
@@ -287,12 +293,12 @@ pub enum DeferredTeardown {
     },
 }
 
-/// Record a termination of `process` deferred against its still-executing
-/// thread `task`. First request wins: a later signal against an
+/// Record a death of `process` carrying `status`, deferred against its
+/// still-executing thread `task`. First request wins: a later signal against an
 /// already-doomed task changes nothing (it is already dying at the same
 /// rendezvous), matching the immediate and in-syscall paths.
-pub fn defer_running_kill(task: u64, process: ProcessId, signal: Signal) {
-    insert_deferred(task, DeferredTeardown::Signalled { process, signal });
+pub fn defer_running_kill(task: u64, process: ProcessId, status: i32) {
+    insert_deferred(task, DeferredTeardown::Exit { process, status });
 }
 
 /// Record a non-signal teardown of `process` deferred against its
@@ -484,22 +490,25 @@ pub fn foreground_signal_installed() -> bool {
     matches!(FOREGROUND_SIGNAL.get(), Ok(Some(_)))
 }
 
-/// Reclaims every kernel-held resource of a task that terminated without
-/// running its own `exit` syscall — the seam through which the
-/// signal-terminate path drives the same
-/// `KernelSyscallHandlers::reclaim_process_resources` the `exit` handler
-/// runs (IRQ bindings, served call endpoints, shared memory, wait-sets,
-/// console foreground ownership, the capability record, and the
-/// address-space registry entry whose open pipe ends wake their parked
-/// peers). One definition of task teardown, two death paths. Installed
-/// per producer instance ([`KernelProcessSignal::install_task_reclaim`])
-/// rather than through a process-global slot, so each host-test fixture
-/// observes only its own terminations.
+/// Retires one thread of a dying process and, once the group's **last** thread
+/// is down, tears the process itself down — the seam through which the
+/// signal-terminate path drives the one
+/// `KernelSyscallHandlers::land_thread_down` every death path shares (the
+/// `exit` and `thread_exit` syscalls, the fault kill, the deferred kill, and a
+/// driver unload).
+///
+/// Installed per producer instance
+/// ([`KernelProcessSignal::install_task_reclaim`]) rather than through a
+/// process-global slot, so each host-test fixture observes only its own
+/// terminations.
 pub trait TaskReclaim: Sync {
-    /// Release every kernel-held resource of the dead task `task` (its
-    /// scheduler/security id). Idempotent: reclaiming an already-reclaimed
-    /// or never-registered task is a no-op.
-    fn reclaim(&self, task: u64);
+    /// Retire `thread` from `process`'s thread group and, when it was the last
+    /// thread of the group still executing, record `status` (when a `wait` reap
+    /// is owed) and release every kernel-held resource of the process.
+    ///
+    /// Idempotent: retiring an already-retired or never-registered thread is a
+    /// no-op, and the process teardown runs exactly once.
+    fn land_thread_down(&self, process: ProcessId, thread: TaskId, status: Option<i32>);
 }
 
 /// Error returned when [`KernelProcessSignal::install_task_reclaim`] is
@@ -617,23 +626,36 @@ pub trait ProcessSignal: Sync {
     /// inert interface.
     fn signal_task(&self, target: ProcessId, signal: Signal) -> Result<(), Errno>;
 
-    /// Terminate every thread of `process` **except** `keep`, without recording
-    /// an exit status or reclaiming the process
-    /// (`plans/THREADS.md` decision 10).
+    /// Drive every thread of `process` **except** `keep` to its stopping point,
+    /// so the process carries `status` and nothing of the group is still
+    /// executing when it is reclaimed (`plans/THREADS.md` decision 10).
     ///
-    /// The group-exit half of `exit(code)`. `exit` ends the whole process, so
-    /// its siblings must stop — a sibling left running against an address space
-    /// the exiting thread is about to reclaim would turn its own legitimate
-    /// accesses into wild faults — but the *status* and the reclamation belong
-    /// to the calling thread, which records and drives them itself. So this
-    /// stops the siblings and nothing more: no `wait` status is written (that
-    /// would overwrite the real exit code with a signalled one) and no second
-    /// process teardown is landed.
+    /// The group-death half of `exit(code)` and of a fault kill. Each sibling
+    /// either quiesces immediately — its per-thread state retired through the
+    /// installed landing seam — or is still inside a syscall / executing in user
+    /// mode, in which case the death is *deferred* against it carrying `status`,
+    /// and whichever thread of the group lands last records that status and
+    /// reclaims the process. That is why `status` is threaded through here
+    /// rather than recorded by the calling thread up front: a `128 + n` written
+    /// by a sibling's deferral would overwrite the real exit code.
     ///
     /// The default is a no-op: a single-threaded process has no siblings, and a
     /// producer with no thread-group table cannot see any.
-    fn terminate_siblings(&self, process: ProcessId, keep: TaskId) {
-        let _ = (process, keep);
+    fn terminate_siblings(&self, process: ProcessId, keep: TaskId, status: i32) {
+        let _ = (process, keep, status);
+    }
+
+    /// Whether this producer can drive a whole thread group to its stopping
+    /// point.
+    ///
+    /// The prerequisite for admitting a *second* thread into a process: a group
+    /// whose siblings cannot be stopped can never be torn down, so
+    /// `thread_create` fails closed rather than building a process whose death
+    /// would either strand its kernel state or reclaim its address space from
+    /// under a running sibling. Defaults to `false` — an inert producer stops
+    /// nothing.
+    fn can_stop_group(&self) -> bool {
+        false
     }
 }
 
@@ -908,6 +930,11 @@ where
     /// recorded. Only a child that is neither in a syscall nor executing
     /// ([`ExitDisposition::Quiesced`]) is reaped and reclaimed inline here.
     fn terminate(&self, child: ProcessId, signal: Signal) -> Result<(), Errno> {
+        // Only a terminating signal reaches here, so it names a `128 + n`
+        // status; a non-terminating one is refused rather than assumed.
+        let Some(status) = signal.termination_status() else {
+            return Err(Errno::OutOfRange);
+        };
         // A terminating signal names a process, so it kills the whole thread
         // group: every thread is driven to its own stopping point, and the
         // reap+reclaim lands exactly once, when the *last* of them is down
@@ -917,7 +944,7 @@ where
         let threads = self.threads_of(child);
         let mut reached = false;
         for thread in threads {
-            if self.terminate_thread(child, thread, signal).is_ok() {
+            if self.terminate_thread(child, thread, status).is_ok() {
                 reached = true;
             }
         }
@@ -928,16 +955,17 @@ where
         }
     }
 
-    /// Drive one `thread` of the doomed `child` process to its stopping point.
+    /// Drive one `thread` of the doomed `child` process to its stopping point,
+    /// the process to carry `status`.
     ///
     /// The three dispositions are exactly the single-threaded ones; what
-    /// changes with a group is *when* the shared teardown runs, which
-    /// [`Self::land_thread_down`] decides.
-    fn terminate_thread(&self, child: ProcessId, thread: u64, signal: Signal) -> Result<(), Errno> {
+    /// changes with a group is *when* the shared teardown runs, which the
+    /// installed landing seam decides.
+    fn terminate_thread(&self, child: ProcessId, thread: u64, status: i32) -> Result<(), Errno> {
         {
             let mut gate = KILL_GATE.lock();
             if gate.in_syscall.contains(&thread) {
-                gate.pending.entry(thread).or_insert(signal);
+                gate.pending.entry(thread).or_insert(status);
                 drop(gate);
                 // A stopped thread must still die: lift its overlay entry so
                 // the wake below runs it to its boundary instead of the
@@ -960,7 +988,7 @@ where
         match self.scheduler.exit(thread) {
             Ok(ExitDisposition::Quiesced) => {
                 STOPPED_TASKS.lock().remove(&thread);
-                self.land_thread_down(child, thread, signal);
+                self.land(child, thread, Some(status));
                 Ok(())
             }
             Ok(ExitDisposition::Deferred) => {
@@ -973,7 +1001,7 @@ where
                 // delivery is still complete from the caller's view — the
                 // thread is doomed and its group's `wait` reap follows.
                 STOPPED_TASKS.lock().remove(&thread);
-                defer_running_kill(thread, child, signal);
+                defer_running_kill(thread, child, status);
                 Ok(())
             }
             Ok(ExitDisposition::AlreadyExited) => {
@@ -987,19 +1015,20 @@ where
         }
     }
 
-    /// Drive one sibling `thread` of an exiting process to its stopping point,
-    /// recording no status and landing no process teardown.
+    /// Drive one sibling `thread` of a dying process to its stopping point, the
+    /// process to carry `status`.
     ///
     /// A sibling caught mid-syscall is gated exactly as a signalled kill gates
     /// it (its own unwind must release what only it can), and one still
-    /// executing in user mode is deferred as a *plain* reclaim — never a
-    /// signalled one, whose landing would write a `128 + n` status over the exit
-    /// code the exiting thread already recorded.
-    fn stop_sibling(&self, process: ProcessId, thread: u64) {
+    /// executing in user mode has the death deferred against it. Both deferrals
+    /// carry `status` — the dying thread's own, never a synthesised `128 + n`
+    /// that would overwrite it — because whichever thread of the group lands
+    /// last is the one that records it.
+    fn stop_sibling(&self, process: ProcessId, thread: u64, status: i32) {
         {
             let mut gate = KILL_GATE.lock();
             if gate.in_syscall.contains(&thread) {
-                gate.pending.entry(thread).or_insert(Signal::Kill);
+                gate.pending.entry(thread).or_insert(status);
                 drop(gate);
                 STOPPED_TASKS.lock().remove(&thread);
                 let _ = self.scheduler.unpark(thread);
@@ -1009,60 +1038,31 @@ where
         match self.scheduler.exit(thread) {
             Ok(ExitDisposition::Quiesced | ExitDisposition::AlreadyExited) => {
                 STOPPED_TASKS.lock().remove(&thread);
-                if let Some(caps) = self.caps {
-                    let _ = caps.write().remove_thread(TaskId(thread));
-                }
+                self.land(process, thread, Some(status));
             }
             Ok(ExitDisposition::Deferred) => {
                 STOPPED_TASKS.lock().remove(&thread);
-                defer_plain_reclaim(thread, process);
+                defer_running_kill(thread, process, status);
             }
             // A thread the scheduler no longer knows needs no stopping.
             Err(_) => {}
         }
     }
 
-    /// Retire one quiesced `thread` of `child` and, when it was the group's
-    /// last, land the process's reap + reclaim.
-    ///
-    /// This is the single point that decides "the process is gone": a
-    /// multi-threaded victim reclaims its address space only once every thread
-    /// has stopped executing, whether each stopped inline
-    /// ([`ExitDisposition::Quiesced`]) or at the dispatch loop's later landing.
-    fn land_thread_down(&self, child: ProcessId, thread: u64, signal: Signal) {
-        let remaining = match self.caps {
-            // Dropping the thread's alias is what makes the count fall; a
-            // thread the table does not know leaves the count where it was, so
-            // the group is treated as down (the pre-threads shape).
-            Some(caps) => caps
-                .write()
-                .remove_thread(TaskId(thread))
-                .map_or(0, |(_, remaining)| remaining),
-            None => 0,
-        };
-        if remaining == 0 {
-            self.land_termination(child, signal);
-        }
-    }
-
-    /// Record the signalled-exit status and reclaim `child`'s kernel
-    /// resources — the teardown a killed task never runs itself. The one
-    /// definition shared by the immediate ([`ExitDisposition::Quiesced`])
-    /// terminate arm and the deferred dispatch-loop landing
-    /// ([`DeferredKillLander`]), so both death timings tear down identically.
-    fn land_termination(&self, child: ProcessId, signal: Signal) {
-        // `termination_status` is `Some` for every terminating signal
-        // (Terminate/Kill/Interrupt); this is never reached for
-        // Continue or Stop.
-        if let Some(status) = signal.termination_status() {
-            self.wait.record_signalled_exit(child, status);
-        }
-        // The victim never runs its own `exit` handler, so drive the shared
-        // teardown here: without it a killed task's capability record, IRQ
-        // bindings, endpoints, and open files (pipe ends whose peers park
-        // forever) would leak.
+    /// Retire one quiesced `thread` of `process` through the installed landing
+    /// seam, which tears the process down — and records `status` for the
+    /// parent's `wait` — once the group's last thread is down.
+    fn land(&self, process: ProcessId, thread: u64, status: Option<i32>) {
         if let Ok(Some(hook)) = self.reclaim.get() {
-            hook.reclaim(child.0);
+            hook.land_thread_down(process, TaskId(thread), status);
+            return;
+        }
+        // No landing seam installed. Such a build registered no kernel
+        // resources to reclaim and holds no thread-group table, so this thread
+        // *is* its group — but a parent's `wait` is still owed the status, and
+        // dropping it would leave the parent blocked on a child that is gone.
+        if let Some(status) = status {
+            self.wait.record_exit(process, status);
         }
     }
 
@@ -1108,19 +1108,17 @@ where
         // so the teardown deferred at request time is now safe. The process
         // it owes is carried by the deferral itself.
         match teardown {
-            // A signalled kill: the very reap+reclaim the immediate
-            // terminate path runs, one definition — and, for a multi-threaded
-            // victim, only once its last thread is down.
-            DeferredTeardown::Signalled { process, signal } => {
-                self.land_thread_down(process, thread.0, signal);
+            // The very reap+reclaim the immediate terminate path runs, one
+            // definition — and, for a multi-threaded victim, only once its last
+            // thread is down.
+            DeferredTeardown::Exit { process, status } => {
+                self.land(process, thread.0, Some(status));
             }
             // A driver unload whose process was still executing: reclaim its
             // kernel resources only, with no `wait` reap (a driver is not a
             // waited-for child).
             DeferredTeardown::Plain { process } => {
-                if let Ok(Some(hook)) = self.reclaim.get() {
-                    hook.reclaim(process.0);
-                }
+                self.land(process, thread.0, None);
             }
         }
     }
@@ -1131,13 +1129,20 @@ where
     A: SchedulerArch + Send + Sync + 'static,
     P: SchedulerPolicy<A> + Send + Sync + 'static,
 {
-    fn terminate_siblings(&self, process: ProcessId, keep: TaskId) {
+    fn terminate_siblings(&self, process: ProcessId, keep: TaskId, status: i32) {
         for thread in self.threads_of(process) {
             if thread == keep.0 {
                 continue;
             }
-            self.stop_sibling(process, thread);
+            self.stop_sibling(process, thread, status);
         }
+    }
+
+    fn can_stop_group(&self) -> bool {
+        // Without the thread-group table a fan-out sees no siblings at all, so
+        // a second thread of a process could never be driven to its stopping
+        // point.
+        self.caps.is_some()
     }
 
     fn resolve_child(&self, sender: ProcessId, pid: i32) -> Result<ProcessId, Errno> {
@@ -1273,6 +1278,39 @@ mod tests {
         let wait: &'static KernelProcessWait<TestArch> =
             Box::leak(Box::new(KernelProcessWait::new(wait_arch)));
         (wait, scheduler)
+    }
+
+    /// A landing seam that records the retirements the producer drove it with,
+    /// so a test can assert the fan-out reached a thread without reimplementing
+    /// the production landing rule
+    /// (`KernelSyscallHandlers::land_thread_down`) in a double.
+    ///
+    /// A producer-level fixture installs one only when it asserts *that* the
+    /// seam is driven. Without one the producer records the terminal status
+    /// through its own wait producer — the degenerate path for a build that
+    /// registered no kernel resources — which is what the other tests here
+    /// observe.
+    struct LandingRecorder {
+        landed: SpinLock<Vec<(u64, Option<i32>)>>,
+    }
+
+    impl LandingRecorder {
+        const fn new() -> Self {
+            Self {
+                landed: SpinLock::new(Vec::new()),
+            }
+        }
+
+        /// Whether the producer retired `thread` carrying `status`.
+        fn landed(&self, thread: u64, status: Option<i32>) -> bool {
+            self.landed.lock().contains(&(thread, status))
+        }
+    }
+
+    impl TaskReclaim for LandingRecorder {
+        fn land_thread_down(&self, _process: ProcessId, thread: TaskId, status: Option<i32>) {
+            self.landed.lock().push((thread.0, status));
+        }
     }
 
     /// Admit a task on `scheduler` and return its id as an `i32` pid, failing
@@ -1411,7 +1449,10 @@ mod tests {
             Err(Errno::WouldBlock)
         );
         // The syscall boundary takes the deferred kill exactly once.
-        assert_eq!(syscall_exit_take_kill(child), Some(Signal::Kill));
+        assert_eq!(
+            syscall_exit_take_kill(child),
+            Signal::Kill.termination_status()
+        );
         assert_eq!(syscall_exit_take_kill(child), None);
     }
 
@@ -1436,45 +1477,35 @@ mod tests {
             signal_child(&signaller, ProcessId(7), child_pid, Signal::Kill),
             Ok(())
         );
-        assert_eq!(syscall_exit_take_kill(child), Some(Signal::Terminate));
+        assert_eq!(
+            syscall_exit_take_kill(child),
+            Signal::Terminate.termination_status()
+        );
         assert_eq!(scheduler.live_task_count(), 1);
     }
 
-    /// Every task id the test [`TaskReclaim`] hook was handed — the
-    /// witness that a terminate drives the shared task teardown
-    /// (`plans/SPAWN.md` SP10: a killed pipeline member must release its
-    /// open pipe ends, or its peer parks forever).
-    static RECLAIMED: SpinLock<BTreeSet<u64>> = SpinLock::new(BTreeSet::new());
-
-    struct RecordingReclaim;
-    impl TaskReclaim for RecordingReclaim {
-        fn reclaim(&self, task: u64) {
-            RECLAIMED.lock().insert(task);
-        }
-    }
-
-    /// A terminating signal drives the installed [`TaskReclaim`] seam
-    /// with the victim's id — the kill-path half of the one task
-    /// teardown the `exit` handler runs directly (regression: before the
-    /// seam existed a killed task leaked its capability record, IRQ
-    /// bindings, endpoints, and open files, and a pipe peer parked
-    /// forever).
+    /// A terminating signal drives the installed landing seam with the
+    /// victim's thread and its `128 + n` status — the kill-path half of the one
+    /// teardown the `exit` handler runs (regression: before the seam existed a
+    /// killed task leaked its capability record, IRQ bindings, endpoints, and
+    /// open files, and a pipe peer parked forever).
     #[test]
-    fn terminate_drives_the_installed_task_reclaim() {
+    fn terminate_drives_the_installed_landing_seam() {
         let _overlay = stopped_overlay_test_lock();
         let (wait, scheduler) = scaffold();
         let (child, child_pid) = spawn_child(scheduler);
         wait.register_child(ProcessId(7), ProcessId(child));
         let signaller = KernelProcessSignal::without_thread_groups(wait, scheduler);
+        let landed: &'static LandingRecorder = Box::leak(Box::new(LandingRecorder::new()));
         signaller
-            .install_task_reclaim(&RecordingReclaim)
+            .install_task_reclaim(landed)
             .expect("first install on this producer");
 
         assert_eq!(
             signal_child(&signaller, ProcessId(7), child_pid, Signal::Kill),
             Ok(())
         );
-        assert!(RECLAIMED.lock().contains(&child));
+        assert!(landed.landed(child, Some(137)));
     }
 
     /// Deferring a user-mode kill records it (first-request-wins) and the
@@ -1489,9 +1520,9 @@ mod tests {
         let _ = take_running_kill(b);
         let before = PENDING_RUNNING_KILLS.load(Ordering::Relaxed);
 
-        defer_running_kill(a, ProcessId(a), Signal::Kill);
-        // First request wins: a later signal against the same task is ignored.
-        defer_running_kill(a, ProcessId(a), Signal::Terminate);
+        defer_running_kill(a, ProcessId(a), 137);
+        // First request wins: a later death against the same task is ignored.
+        defer_running_kill(a, ProcessId(a), 143);
         assert_eq!(
             PENDING_RUNNING_KILLS.load(Ordering::Relaxed),
             before + 1,
@@ -1499,11 +1530,11 @@ mod tests {
         );
         assert_eq!(
             take_running_kill(a),
-            Some(DeferredTeardown::Signalled {
+            Some(DeferredTeardown::Exit {
                 process: ProcessId(a),
-                signal: Signal::Kill
+                status: 137
             }),
-            "the first-recorded signal is taken"
+            "the first-recorded status is taken"
         );
         assert_eq!(take_running_kill(a), None, "taken exactly once");
         assert_eq!(PENDING_RUNNING_KILLS.load(Ordering::Relaxed), before);
@@ -1511,7 +1542,7 @@ mod tests {
         // `clear_running_kill` drops an entry without landing it (the
         // self-exit/fault teardown path, so the dispatch loop never lands a
         // kill for an already-reclaimed task).
-        defer_running_kill(b, ProcessId(b), Signal::Kill);
+        defer_running_kill(b, ProcessId(b), 137);
         clear_running_kill(b);
         assert_eq!(take_running_kill(b), None);
         assert_eq!(PENDING_RUNNING_KILLS.load(Ordering::Relaxed), before);
@@ -1529,7 +1560,7 @@ mod tests {
         let _ = take_running_kill(plain_id);
 
         // A signalled kill migrates into the gate and out of RUNNING_KILLS.
-        defer_running_kill(sig_id, ProcessId(sig_id), Signal::Terminate);
+        defer_running_kill(sig_id, ProcessId(sig_id), 143);
         syscall_enter(sig_id);
         assert_eq!(
             take_running_kill(sig_id),
@@ -1537,7 +1568,7 @@ mod tests {
             "migrated out of RUNNING_KILLS"
         );
         assert!(kill_pending(sig_id), "now owed at the syscall boundary");
-        assert_eq!(syscall_exit_take_kill(sig_id), Some(Signal::Terminate));
+        assert_eq!(syscall_exit_take_kill(sig_id), Some(143));
 
         // A plain reclaim carries no signal for the gate; it stays deferred
         // for the dispatch loop.
@@ -1571,10 +1602,8 @@ mod tests {
     impl DeferredKillLander for TestLander {
         fn land_deferred_teardown(&self, task: TaskId, teardown: DeferredTeardown) {
             match teardown {
-                DeferredTeardown::Signalled { signal, .. } => {
-                    if let Some(status) = signal.termination_status() {
-                        LAND_REAPED.lock().insert(task.0, status);
-                    }
+                DeferredTeardown::Exit { status, .. } => {
+                    LAND_REAPED.lock().insert(task.0, status);
                     LAND_RECLAIMED.lock().insert(task.0);
                 }
                 DeferredTeardown::Plain { .. } => {
@@ -1618,7 +1647,7 @@ mod tests {
 
         // The scheduler reported the victim still-executing, so terminate
         // deferred rather than landing: the entry is pending and untouched.
-        defer_running_kill(child, ProcessId(child), Signal::Kill);
+        defer_running_kill(child, ProcessId(child), 137);
         assert!(!LAND_RECLAIMED.lock().contains(&child));
 
         // The dispatch loop lands it once the task has retired (executes
@@ -1650,7 +1679,7 @@ mod tests {
         let _ = take_running_kill(child);
         LAND_RECLAIMED.lock().remove(&child);
 
-        defer_running_kill(child, ProcessId(child), Signal::Kill);
+        defer_running_kill(child, ProcessId(child), 137);
         clear_running_kill(child);
         land_running_kill(child);
         assert_eq!(take_running_kill(child), None, "nothing left to land");
@@ -1688,39 +1717,35 @@ mod tests {
         }
     }
 
-    /// The real [`KernelProcessSignal`] lander maps a deferred `Signalled`
-    /// teardown to the same reap + reclaim the immediate terminate path runs
-    /// (one definition), and a `Plain` teardown to a reclaim only.
+    /// The real [`KernelProcessSignal`] lander drives the *same* landing seam
+    /// the immediate terminate path does (one definition), passing an `Exit`
+    /// teardown's status through and a `Plain` teardown's absence of one — so a
+    /// driver unload reclaims without minting a zombie no parent will reap.
+    /// Whether a status then reaches the wait table is the landing rule's own
+    /// contract, tested against the real implementation in `syscalls`.
     #[test]
-    fn the_signal_producer_lander_reaps_and_reclaims() {
+    fn the_signal_producer_lander_lands_with_and_without_a_status() {
         let _overlay = stopped_overlay_test_lock();
         let (wait, scheduler) = scaffold();
         let (child, _pid) = spawn_child(scheduler);
         wait.register_child(ProcessId(7), ProcessId(child));
         let signaller = KernelProcessSignal::without_thread_groups(wait, scheduler);
+        let landed: &'static LandingRecorder = Box::leak(Box::new(LandingRecorder::new()));
         signaller
-            .install_task_reclaim(&RecordingReclaim)
+            .install_task_reclaim(landed)
             .expect("first install on this producer");
 
-        // Signalled: reclaim the resources and record the kill's 137 status.
         signaller.land_deferred_teardown(
             TaskId(child),
-            DeferredTeardown::Signalled {
+            DeferredTeardown::Exit {
                 process: ProcessId(child),
-                signal: Signal::Kill,
+                status: 137,
             },
         );
-        assert!(RECLAIMED.lock().contains(&child));
-        let pid = u32::try_from(child).expect("host task id fits u32");
-        assert_eq!(
-            wait.wait(ProcessId(7), tairix_abi::WAIT_PID_ANY, WaitFlags::empty()),
-            Ok(WaitedChild {
-                pid,
-                status: WaitStatus::Exited(137)
-            })
-        );
+        assert!(landed.landed(child, Some(137)));
 
-        // Plain: reclaim only, no reap (a second, unregistered driver id).
+        // A driver unload whose process was still executing: a second,
+        // unregistered id, landed with no status.
         let driver = scheduler
             .spawn(0, Priority::Normal, |_| TaskAction::Exit)
             .expect("driver task");
@@ -1730,12 +1755,7 @@ mod tests {
                 process: ProcessId(driver),
             },
         );
-        assert!(RECLAIMED.lock().contains(&driver));
-        assert_eq!(
-            wait.poll(ProcessId(7), tairix_abi::WAIT_PID_ANY, WaitFlags::empty()),
-            Err(Errno::NotFound),
-            "a plain reclaim records no reap"
-        );
+        assert!(landed.landed(driver, None));
     }
 
     #[test]

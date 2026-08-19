@@ -9,6 +9,13 @@ rustdoc on `kernel/core`'s `kthread` module, the [scheduler
 page](./scheduler.md), and [`AGENTS.md`](../../../AGENTS.md) §17.1
 (pluggable scheduler) and §17.2 (the Arch HAL).
 
+A process is a **thread group**: several of these kthreads may share one
+address space, one heap, and one capability record. Everything specific to
+that — creating a thread, the per-arch thread pointer, the futex, and the
+rule that a process is torn down only once its last thread is down — is the
+[threads page](./threads.md); this page stays about what makes one task
+resumable.
+
 ## Why a kthread runtime exists
 
 A `kernel/sched` task is admitted with a body closure
@@ -115,9 +122,27 @@ The arch-neutral half lives in `kernel/core` and is host-proven:
   `switch` (so no lock is held across the hand-off), and suspends the
   running kthread back to the dispatcher. It **fails closed** (returns
   `false`) when no kthread is published for the CPU — the pre-dispatch
-  boot flow or a host test — so the caller falls back (an ordinary syscall
+  boot flow, or a host test — so the caller falls back (an ordinary syscall
   return, or a bounded CPU park) rather than an unsound switch (§2.9,
   §5.4).
+
+  **`cpu` is always the CPU the caller has just read, never one remembered
+  across a park.** Resume handles are per-CPU, so suspending the caller is only
+  correct against the core it occupies at that instant. Between two polls a
+  waiting task is parked, so it can be woken and re-dispatched onto a different
+  core; a remembered id then names the core it left, and the suspend lands on
+  whichever task the dispatcher has since published there — writing the
+  caller's continuation into that victim's save area and switching to its
+  dispatcher. The two would then resume each other's kernel contexts under the
+  wrong page-table root, and the innocent task dies on a fault it never took
+  (`plans/OPEN-DEFECTS.md` D44). Every wait loop therefore reads the CPU inside
+  the loop, at each park.
+* **A suspension point is proven to be the task's own.** Before switching in,
+  `dispatch_step` checks the saved kernel stack pointer against the task's own
+  stack (`KernelStack::carries`, over `KernelStack::usable_bytes`) and fails the
+  task closed — exactly as a stack-guard violation does — rather than switching
+  into a foreign continuation. The fail-closed backstop for the class above, so
+  a mispairing can never become silent cross-task corruption (§2.17).
 * **Discovered-sized per-CPU state + `pre_resume` hook.** Scheduler
   initialization fallibly allocates one `cpu_state` slot per validated
   discovered CPU; there is no compile-time CPU ceiling. Each slot owns the

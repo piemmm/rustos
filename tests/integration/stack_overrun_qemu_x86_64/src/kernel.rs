@@ -147,6 +147,10 @@ unsafe impl KernelStack for ArenaTestStack {
         let top = self.guard + STACK_GUARD_BYTES + KTHREAD_STACK_BYTES as u64;
         top & !0xF
     }
+
+    fn usable_bytes(&self) -> u64 {
+        KTHREAD_STACK_BYTES as u64
+    }
 }
 
 fn note(level: Level, id: EventId, message: &'static str) {

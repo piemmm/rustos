@@ -33,6 +33,7 @@
 //! producer that calls these — this layer knows only the page table, the
 //! direct map, the frame allocator, and the device-window allocator.
 
+use alloc::collections::BTreeSet;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
 
@@ -190,6 +191,28 @@ pub trait LiveUserSpace: Send {
     /// [`LiveSpaceError::Anon`] — [`AnonError::OutOfMemory`] when the heap
     /// window is exhausted, or the precise placement error otherwise.
     fn reserve_anonymous(&mut self, page_count: u64) -> Result<u64, LiveSpaceError>;
+
+    /// Reserve `page_count` pages of *address space* at a kernel-chosen base
+    /// for a demand-paged anonymous region whose physical headroom the caller
+    /// takes **incrementally**, one growth step at a time
+    /// ([`Self::commit_anonymous`]) — the thread-stack shape.
+    ///
+    /// The placement is [`Self::reserve_anonymous`]'s; what differs is the
+    /// no-overcommit bargain. A `mem_map` reservation commits every page up
+    /// front so a first touch can never fail, which is right for a region whose
+    /// pages a program means to use. A *stack* is a span whose depth is unknown
+    /// and mostly untouched, so committing its whole extent would charge a
+    /// thread the RAM of its worst case — a process's first thread's growth room
+    /// carries no commitment for exactly that reason, and a thread's must not
+    /// differ. Growth therefore takes headroom as it descends and fails closed
+    /// there, and the release credits back nothing (a page that never faulted in
+    /// was never committed).
+    ///
+    /// # Errors
+    ///
+    /// [`LiveSpaceError::Anon`] — [`AnonError::OutOfMemory`] when the heap
+    /// window is exhausted, or the precise placement error otherwise.
+    fn reserve_anonymous_growable(&mut self, page_count: u64) -> Result<u64, LiveSpaceError>;
 
     /// Reserve exactly the `page_count`-page anonymous region based at the
     /// page-aligned `base_va` (the `FIXED` `mem_map`), returning `base_va`.
@@ -626,6 +649,15 @@ pub struct LiveSpace<P: PageTable, M: PhysMap> {
     /// on teardown ([`Drop`]) so a task that dies with untouched
     /// reservations returns exactly its outstanding commitment to the pool.
     committed_unbacked: u64,
+    /// Bases of anonymous reservations whose physical headroom is taken one
+    /// growth step at a time ([`LiveUserSpace::reserve_anonymous_growable`] —
+    /// a thread stack) rather than in full at reservation time (`mem_map`).
+    ///
+    /// It is what a *release* consults: an up-front-committed region credits
+    /// back the headroom of every page that never faulted in, whereas such a
+    /// page of a growable region was never committed, so crediting it would
+    /// hand the pool budget it never received and let the machine overcommit.
+    growable: BTreeSet<u64>,
 }
 
 impl<P: PageTable, M: PhysMap> LiveSpace<P, M> {
@@ -710,6 +742,7 @@ impl<P: PageTable, M: PhysMap> LiveSpace<P, M> {
             space_id: next_space_id(),
             scanner: ColdPageScanner::new(),
             committed_unbacked: 0,
+            growable: BTreeSet::new(),
         })
     }
 
@@ -830,7 +863,18 @@ where
         // (an eager, fully-resident region leaves nothing to release). The
         // resident pages already left the committed tally when they faulted
         // in; their frames were just freed above.
-        let unbacked = page_count.saturating_sub(resident);
+        //
+        // A growable region's unbacked pages were never committed at all, so
+        // crediting them would hand the pool budget it never received — the
+        // machine would then believe it has more headroom than it does and
+        // overcommit. Whatever such a region *did* commit was consumed by the
+        // growth step that mapped it; anything an interrupted step left
+        // outstanding is returned when the space is dropped.
+        let unbacked = if self.growable.remove(&base_va) {
+            0
+        } else {
+            page_count.saturating_sub(resident)
+        };
         if unbacked > 0 {
             self.frames.uncommit(unbacked);
             self.committed_unbacked = self.committed_unbacked.saturating_sub(unbacked);
@@ -865,6 +909,14 @@ where
                 Err(err.into())
             }
         }
+    }
+
+    fn reserve_anonymous_growable(&mut self, page_count: u64) -> Result<u64, LiveSpaceError> {
+        // Address space only: the caller commits as the region grows, so
+        // nothing is charged against the no-overcommit budget here.
+        let base_va = self.anon.allocate(page_count)?;
+        self.growable.insert(base_va);
+        Ok(base_va)
     }
 
     fn reserve_anonymous_at(
@@ -1622,6 +1674,65 @@ mod tests {
         live.unmap_anonymous(base, 4).expect("sparse release");
         assert_eq!(frames.committed_frames(), 0, "every commitment released");
         assert_eq!(live.space().mapped_pages(), 0);
+    }
+
+    #[test]
+    fn a_growable_reservation_charges_only_the_pages_it_grows_onto() {
+        // A thread stack: address space up front, headroom as it descends. The
+        // whole point is that reserving a large span costs no RAM — a thread
+        // whose default stack is the process's whole `stack-bytes` bound must
+        // not be billed eight megabytes to push one frame — and the release
+        // must credit back only what was actually charged. Crediting the
+        // untouched pages (the `mem_map` rule) would hand the pool budget it
+        // never received and let the machine overcommit.
+        let frames = leaked_frames();
+        let (mut live, _sim) = live_over(frames);
+        // An untouched `mem_map` reservation held alive across the release, so
+        // an over-credit is *visible*: the global tally saturates at zero, so a
+        // release that credited the six never-charged pages would silently read
+        // the same as a correct one without a standing commitment to eat into.
+        let held = live.reserve_anonymous(4).expect("heap window has room");
+        assert_eq!(frames.committed_frames(), 4);
+
+        let base = live
+            .reserve_anonymous_growable(8)
+            .expect("heap window has room");
+        assert_eq!(
+            frames.committed_frames(),
+            4,
+            "an eight-page span costs no physical headroom of its own"
+        );
+
+        // Grow onto two pages, the commit-then-map pair the growth path uses.
+        live.commit_anonymous(2).expect("headroom for two pages");
+        assert_eq!(frames.committed_frames(), 6);
+        for index in 0..2 {
+            live.map_anonymous(base + index * PAGE_SIZE as u64, 1)
+                .expect("back one page");
+        }
+        assert_eq!(
+            frames.committed_frames(),
+            4,
+            "both commitments became residency"
+        );
+        assert_eq!(live.space().mapped_pages(), 2);
+
+        // Release: the two resident frames go back, and the six pages that were
+        // never committed credit nothing — the standing reservation is untouched.
+        live.unmap_anonymous(base, 8).expect("sparse release");
+        assert_eq!(
+            frames.committed_frames(),
+            4,
+            "the release credited back headroom it never charged"
+        );
+        assert_eq!(live.space().mapped_pages(), 0);
+        // The placement is reusable, so the window is not leaked either.
+        assert_eq!(live.reserve_anonymous_growable(8), Ok(base));
+        // The standing `mem_map` reservation still releases correctly: its own
+        // four never-touched pages, and no more.
+        live.unmap_anonymous(held, 4)
+            .expect("release the reservation");
+        assert_eq!(frames.committed_frames(), 0);
     }
 
     #[test]

@@ -27,6 +27,15 @@ directory, and signal targets. Thread-scoped: the schedulable identity itself
 (park, unpark, wake), the user-stack span, and the in-kernel kill gate that
 lands a deferred termination when a *thread* leaves its syscall.
 
+Two consequences of that split are load-bearing security properties, both
+detailed on the [threads page](./threads.md). A futex wait key is
+`(ProcessId, user VA)`, resolved from the caller's kernel-attested record and
+never from the caller, so a key is unforgeable and names nothing outside the
+process's own isolated space. And a process's teardown — its address space,
+capability record, endpoints, and open files — lands only once the group's
+**last** thread has stopped executing, because releasing it while a sibling
+still runs would free that sibling's page-table root from under it.
+
 It depends only on `lib/sync`, `kernel/mem`, and the shared
 `lib/abi`, `lib/caps`, `lib/crypto`, and `lib/log` crates (Stage 2.4
 brief). Filesystem ACLs, IPC dispatch checks, and syscall plumbing live

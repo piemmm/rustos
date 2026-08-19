@@ -1730,23 +1730,44 @@ impl<A: KernelArch + 'static> InitSpawnCtx for KernelInitSpawner<'_, A> {
             return Err(Errno::NotFound);
         }
 
-        // Reap the scheduler task: mark it Exited (never dispatched again) and
-        // drop its body, reclaiming its kernel stack, live address space, and
-        // page-table frames. A parked driver (the common case — a driver
-        // blocked in `irq_wait` / a served-endpoint park) drops immediately;
-        // a vanished id is a benign no-op. Idempotent, never a panic.
+        // Reap the driver's scheduler tasks: mark each Exited (never dispatched
+        // again) and drop its body, reclaiming its kernel stack and, with the
+        // last of them, the process's live address space and page-table frames.
+        // A parked driver (the common case — one blocked in `irq_wait` / a
+        // served-endpoint park) drops immediately; a vanished id is a benign
+        // no-op. Idempotent, never a panic.
         //
-        // A driver whose process is *still executing* on another CPU cannot
-        // have its resources reclaimed here: withdrawing its address space
-        // while its own code still runs would turn a legitimate access into
-        // a wild fault (the same defect the signal-terminate path fixes). The
-        // scheduler reports such a driver `Deferred`; defer the whole
-        // teardown to the dispatch loop, which reclaims it once the driver's
-        // dispatch retires it (the scheduler already IPI'd that CPU). The
-        // unload is committed — audit it now — and the deferred reclaim runs
-        // the same shared task teardown this path performs inline.
-        if let Ok(ExitDisposition::Deferred) = self.scheduler.exit(sched_id) {
-            crate::procsignal::defer_plain_reclaim(sched_id, sec_id);
+        // The unit is the driver's whole **thread group**: a user-space driver
+        // may have created threads of its own (`plans/THREADS.md`), and one left
+        // running would keep executing against the state this teardown withdraws
+        // with no path left to stop it. A build that registered no capability
+        // record still has the leader task to stop.
+        //
+        // A thread that is *still executing* on another CPU cannot be reclaimed
+        // here: withdrawing the address space while its own code still runs
+        // would turn a legitimate access into a wild fault (the same defect the
+        // signal-terminate path fixes). The scheduler reports such a thread
+        // `Deferred`; defer the whole teardown to the dispatch loop, which
+        // reclaims the process through the one shared landing rule once the last
+        // of them retires (the scheduler already IPI'd that CPU). The unload is
+        // committed either way — audit it now.
+        let mut threads: alloc::vec::Vec<u64> =
+            self.caps.read().threads_of(sec_id).map(|t| t.0).collect();
+        if threads.is_empty() {
+            threads.push(sched_id);
+        }
+        let mut deferred = false;
+        for thread in threads {
+            if let Ok(ExitDisposition::Deferred) = self.scheduler.exit(thread) {
+                crate::procsignal::defer_plain_reclaim(thread, sec_id);
+                deferred = true;
+            } else {
+                // Down now: retire its per-thread state so the group's count can
+                // reach zero and a deferred sibling's landing knows it was last.
+                let _ = crate::threads::retire(self.caps, self.aspaces, SecTaskId(thread));
+            }
+        }
+        if deferred {
             let mut handle_buf = [0u8; 16];
             emit(
                 self.audit,
@@ -3028,6 +3049,80 @@ mod tests {
         // A second teardown of the now-gone handle is a benign idempotent
         // miss — never a panic, never a double-reclaim.
         assert_eq!(ctx.terminate_driver_process(handle), Err(Errno::NotFound));
+    }
+
+    /// Unloading a driver stops its whole thread group, not just its leader.
+    ///
+    /// A user-space driver may create threads of its own, and this teardown
+    /// withdraws the state they run against. A sibling left live would keep
+    /// executing with its capability record gone and no path left to stop it —
+    /// an unkillable runaway holding a core.
+    #[test]
+    fn terminate_driver_process_stops_every_thread_of_the_group() {
+        let log_sink: &'static TestSink = Box::leak(Box::new(TestSink::new()));
+        let audit_sink: &'static TestSink = Box::leak(Box::new(TestSink::new()));
+        let boot = bootinfo_with(log_sink, audit_sink, make_memory_map());
+        let (state, process_wait) = run_phases(boot, log_sink, audit_sink).expect("phases succeed");
+
+        let ctx = KernelInitSpawner::new(
+            state.frame_allocator,
+            audit_sink,
+            &state.scheduler,
+            &state.caps,
+            &state.aspaces,
+            state.arch.as_ref(),
+            process_wait,
+            &state.irq,
+            &crate::devres::NULL_SHARED_MEM_FACILITY,
+        );
+
+        // A two-thread driver: its leader plus one thread aliased onto the same
+        // capability record, exactly as `thread_create` registers one.
+        let leader = state
+            .scheduler
+            .spawn(0, Priority::Normal, |_| {
+                tairix_kernel_sched_api::TaskAction::Exit
+            })
+            .expect("the driver's leader is admitted");
+        let sibling = state
+            .scheduler
+            .spawn(0, Priority::Normal, |_| {
+                tairix_kernel_sched_api::TaskAction::Exit
+            })
+            .expect("the thread it created is admitted");
+        let sec = SecProcessId(leader);
+        let mut caps = CapabilitySet::empty();
+        caps.insert(tairix_abi::CapabilityId::DRV_LOAD);
+        state.caps.write().insert(TaskCapabilities::derive(
+            sec,
+            UserId(0),
+            caps,
+            caps,
+            audit_sink,
+        ));
+        state
+            .caps
+            .write()
+            .register_thread(SecTaskId(sibling), sec)
+            .expect("the sibling aliases the live record");
+        let live_before = state.scheduler.live_task_count();
+
+        assert_eq!(ctx.terminate_driver_process(leader), Ok(()));
+
+        assert_eq!(
+            state.scheduler.live_task_count(),
+            live_before - 2,
+            "both threads of the group are retired, not only the leader"
+        );
+        assert!(
+            state.caps.read().caps_of_process(sec).is_none(),
+            "the process's capability record goes with its last thread"
+        );
+        assert_eq!(
+            state.caps.read().thread_count(sec),
+            0,
+            "no thread of the group is left aliased onto a reclaimed record"
+        );
     }
 
     #[test]

@@ -106,6 +106,10 @@ pub fn next_event_stamp() -> u64 {
 pub struct TestArch {
     cpu_count: u32,
     current: AtomicU32,
+    /// Number of [`SchedulerArch::current_cpu`] reads observed, so a test can
+    /// prove a wait loop resolves the live CPU at each park rather than reusing
+    /// one it read before the loop (`plans/OPEN-DEFECTS.md` D44).
+    current_cpu_reads: AtomicU64,
     ticks: AtomicU64,
     halts: AtomicU64,
     ipis: AtomicU64,
@@ -160,6 +164,7 @@ impl TestArch {
         Self {
             cpu_count,
             current: AtomicU32::new(0),
+            current_cpu_reads: AtomicU64::new(0),
             ticks: AtomicU64::new(0),
             halts: AtomicU64::new(0),
             ipis: AtomicU64::new(0),
@@ -182,6 +187,13 @@ impl TestArch {
     ///
     /// Tests use this to simulate panic handlers fired from a non-boot
     /// CPU.
+    /// Number of [`SchedulerArch::current_cpu`] reads this handle has served.
+    #[must_use]
+    pub fn current_cpu_reads(&self) -> u64 {
+        self.current_cpu_reads.load(Ordering::Relaxed)
+    }
+
+    /// Point [`SchedulerArch::current_cpu`] at `cpu`.
     pub fn set_current_cpu(&self, cpu: CpuId) {
         assert!(cpu < self.cpu_count, "current cpu out of range");
         self.current.store(cpu, Ordering::Relaxed);
@@ -310,6 +322,7 @@ impl TestArch {
 
 impl SchedulerArch for TestArch {
     fn current_cpu(&self) -> CpuId {
+        self.current_cpu_reads.fetch_add(1, Ordering::Relaxed);
         self.current.load(Ordering::Relaxed)
     }
 
