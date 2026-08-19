@@ -32,10 +32,13 @@ tairix-abi-trap = { path = "../abi-trap", version = "=0.0.0" }
 # not each tool privately — supports resource references (`AGENTS.md` §2.2).
 tairix-resref = { path = "../resref", version = "=0.0.0" }
 
-# The `SpinLock` that guards the `mem_map`-backed global allocator's shared
-# free-span state (`src/heap.rs`). First-party (`AGENTS.md` §2.12); the one
-# deduplicated lock the workspace shares (`AGENTS.md` §2.2, §6).
+# The `SpinLock` guarding the process-wide cache-report registry
+# (`src/cachereport.rs`), whose critical sections are a few pointer writes on the
+# program's own serve loop. The global allocator does *not* use it: a heap
+# critical section maps pages, so it parks on the runtime's own futex `Mutex`
+# instead of spinning (`src/heap.rs`).
 tairix-sync = { path = "../sync", version = "=0.0.0" }
+
 
 # The structured `Event`/`Sink`/`Level` logging vocabulary the `LogSink`
 # implements: a first-party program builds `tairix_log::Event`s and the

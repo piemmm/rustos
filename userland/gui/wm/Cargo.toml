@@ -64,6 +64,12 @@ tairix-reclaim = { path = "../../../lib/reclaim", version = "=0.0.0" }
 # audit sink is typed against (§2.2): the controller never invents its own
 # logging vocabulary.
 tairix-log = { path = "../../../lib/log", version = "=0.0.0" }
+# The `JobRunner` contract a composite's independent row bands are handed
+# through. `default-features = false` takes the contract and the serial runner
+# alone: the compositor never creates a thread, it composes on whatever runner
+# its embedder installed, so a headless or single-core build links no thread
+# machinery at all (§2.16, §17.3).
+tairix-parallel = { path = "../../../lib/parallel", version = "=0.0.0", default-features = false }
 
 # The compositor's host tests draw window-title text, so they inject the
 # shared solid test transport via the `test-util` feature (never `fontd`).

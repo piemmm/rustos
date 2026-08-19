@@ -34,6 +34,10 @@ The open items, in priority order:
   `lib/collections`) were audited against §27. All are complete; `waitq`
   (D2) was the sole thin slice. One latent watch-item (the slab
   free-slot scan) is recorded and staged (not a live defect).
+- **D45 — two `kernel/core` syscall tests corrupt the host heap when run
+  concurrently.** Minimised to a two-test reproducer; blocks the §7 gate's
+  test phase. Whether it is test isolation or a live `unsafe` write on the
+  address-space snapshot path is the open question.
 - **D5 — `mem-pin-migration` intermittent multi-vCPU-TCG stall — DONE.**
   Root-caused to a lost-wakeup in the vertical's own secondary-CPU idle
   loop and fixed structurally (not a load artifact, not a budget bump).
@@ -2644,6 +2648,64 @@ including that the guard region is not a legitimate frame. End to end, the
 `stress-qemu-aarch64` vertical is the acceptance witness: the reproduction ran
 in 1–6 rounds of five concurrent guests before the fix and stayed clean over
 155 runs after it.
+
+## D45 — two `kernel/core` syscall tests corrupt the host heap when run concurrently (OPEN)
+
+**Symptom.** `cargo test --workspace` intermittently dies with
+`SIGILL`/`SIGABRT` inside the `tairix-kernel-core` lib-test binary — the
+whole-project gate's test phase fails outright — and the abort is glibc's
+`corrupted size vs. prev_size` from `free`. So it is genuine heap corruption,
+not a failed assertion.
+
+**Reproduced and minimised** (not a load artefact, §7):
+
+```
+$ BIN=target/debug/deps/tairix_kernel_core-<hash>
+$ for i in $(seq 40); do "$BIN" --quiet >/dev/null || echo fail; done   # ~4/40
+$ "$BIN" --test-threads=1 --quiet                                        # 0/25 — clean
+$ "$BIN" syscalls::tests --test-threads=2 --quiet                        # ~50%
+$ "$BIN" --exact --test-threads=2 \
+    syscalls::tests::a_dying_threads_stack_leaves_nothing_translating_in_the_process_snapshot \
+    syscalls::tests::a_faulted_page_of_a_mapped_region_becomes_reachable_through_the_snapshot
+                                                                         # ~3/12
+```
+
+Either test alone, at any thread count, is clean; the pair concurrently is
+not. Both drive the process address-space snapshot and the live space, so they
+share process-global kernel state — the address-space registry and the test
+frame pool — that neither serialises on.
+
+**Ruled out already.** Not the per-CPU state table: under `cfg(test)`
+`cpu_state::get` indexes a fixed-size `TEST_STATE` array with a bounds-checked
+`get`, and `cpu_state::install` uses an isolated cell per test, so neither test's
+CPU slot (45 and 0 respectively — both tests deliberately pick unshared slots)
+can write outside it.
+
+**What is not yet known, and must be settled before a fix is chosen.**
+Whether the corruption is *only* the tests racing on shared global fixtures,
+or whether the paths they drive (`publish_region_mapping` /
+`publish_region_teardown` and the dying-thread stack release, both from
+`plans/THREADS.md` T3b-k) contain an `unsafe` write whose bounds depend on
+state the other test mutates. The second would be a live kernel defect, not a
+test-isolation one, and the answer decides everything below.
+
+**Fix shape, once that is settled.** If it is isolation: give every
+`kernel/core` test that installs or mutates process-global kernel state one
+shared serialising guard, the way `lib/rt`'s cell registry does
+(`lib/rt/src/thread.rs`'s `registry_lock`), so a test can never observe
+another's install — 397 tests in `syscalls::tests` alone, so the guard must be
+taken by construction (a helper every test builds its world through) rather
+than remembered per test. If it is a real out-of-bounds write, fix that and
+keep the isolation guard anyway.
+
+**Regression cover (lands with the fix, §7).** The minimised two-test
+concurrent run above, plus the whole binary at the harness's default thread
+count, repeated enough times to make the ~25% reproduction rate a certainty
+(`cargo xtask ci-long` already repeats each test concurrently and is the
+natural home).
+
+**Blocks.** The §7 whole-project gate cannot be green while this stands: the
+test phase fails at a rate high enough that any full run is likely to trip it.
 
 ## Non-goals / do not do
 

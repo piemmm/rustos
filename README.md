@@ -64,6 +64,7 @@ for filesystems, the feature section below.
 | Syscall entry | ✓ | ✓ | ✓ | ✓ |
 | User-mode execution (ring 3 / EL0 / U-mode) | ✓ | ✓ | ✓ | — |
 | Threads within a process (`thread_create`, futex) | ✓ | ✓ | ✓ | — |
+| Multi-core software compositing (banded composite + blur) | ✓ | ✓ | ✓ | — |
 | C-callable ABI (`abi-v1`, non-Rust) | ✓ | ✓ | ✓ | — |
 | Machine power-off / restart (`system_power`) | ◐ restart | ✓ PSCI | ✓ SBI | — |
 | Side-channel mitigation | ✓ | ✓ | ✓ | ✓ |

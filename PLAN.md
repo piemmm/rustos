@@ -7550,7 +7550,7 @@ app's menu shell, M3 the plate becomes a cached damage-reporting surface.
 
 ---
 
-## FIX-DESKTOP-SPEEDUP — desktop redraw speed without hardware acceleration (`plans/FIX-DESKTOP-SPEEDUP.md`)  **[A DONE, B DONE, C MOSTLY DONE, D DONE, E.1+E.2 DONE, H DONE]**
+## FIX-DESKTOP-SPEEDUP — desktop redraw speed without hardware acceleration (`plans/FIX-DESKTOP-SPEEDUP.md`)  **[A DONE, B DONE, C MOSTLY DONE, D DONE, E.1+E.2 DONE, H DONE, I DONE]**
 
 **Dependencies:** Stage 7 (compositor, taskbar, controls). Independent of
 `plans/FIX-DISPLAY-ACCELERATION.md` — that is the hardware half; this is
@@ -7677,6 +7677,30 @@ has landed for `userland/apps/widgets` and remains for five apps.
   the P3b axis correction below; may not land before B–C.
 - **G — user-space FP/SSE enablement (kernel work).** Gated on a User
   decision; carries defect D37 below.
+- **I — compose on every core the machine has. [done]** The desktop
+  composited on one core while the rest of the machine idled. A dirty
+  rectangle's rows are independent by construction — each writes one
+  back-buffer row and that row's scan-out bytes, and reads only immutable
+  window content — so they are now composed in bands across a worker pool,
+  and a frost's column pieces with them. `lib/parallel` is the engine
+  (`docs/src/lib/parallel.md`): the `JobRunner` contract a pass expresses its
+  independent work through, the one index-to-element erasure, the one split
+  policy, and the fork-join pool over `lib/rt` threads whose workers park on a
+  futex and never spin. `Compositor::set_job_runner` installs it; the default
+  composes on the calling thread, which is what a single-CPU machine, a
+  headless build and a refused thread all keep. The session sizes the pool from
+  the online CPU count read through the System Information API, never a
+  constant. Bit-identity is proven by composing each scene whole and split into
+  backwards-running bands and comparing the frame, the back buffer and every
+  `FrameStats` count; a rectangle below one band's pixel budget is never split,
+  so a pointer-motion repaint pays what it always did. **Defects fixed on the
+  way** (§2.18): the `lib/rt` global allocator guarded its free-span state with
+  a **spin** lock — its rustdoc still claiming userland was single-threaded —
+  so two threads allocating at once burned a slice spinning through a critical
+  section that maps pages, and on one core without preemption wedged outright;
+  it now takes the runtime's futex `Mutex`. And `Pool::with_workers` waits for
+  every worker to read its starting epoch, without which a worker that had not
+  run yet would park without acknowledging the first dispatch.
 - **H — the kernel cost of a popup window. [done]** A context menu took
   ~300 ms to appear on a Pi 4B while an in-window menu was instant, and the
   cause was in the kernel, not the compositor: `terminal.app` is the only app

@@ -12,8 +12,10 @@
 //!
 //! [`frost_region`]: Surface::frost_region
 
-use core::cell::RefCell;
+extern crate std;
+
 use core::ops::Range;
+use std::sync::Mutex;
 
 use alloc::vec;
 use alloc::vec::Vec;
@@ -394,15 +396,75 @@ fn block(surface: &Surface, x: u32, y: u32, w: u32, h: u32) -> Vec<Pixel> {
     out
 }
 
-/// `surface` with `[x, x+w) × [y, y+h)` frosted at a constant coverage.
-fn frosted(
+/// `surface` with `[x, x+w) × [y, y+h)` frosted at a constant coverage, composed
+/// on the calling thread.
+fn frosted(surface: Surface, rect: (u32, u32, u32, u32), radius: u32, weight: u8) -> Surface {
+    frosted_via(&tairix_parallel::SERIAL, surface, rect, radius, weight)
+}
+
+/// As [`frosted`], but with the frost's pieces run through `runner`.
+fn frosted_via(
+    runner: &dyn tairix_parallel::JobRunner,
     mut surface: Surface,
     (x, y, w, h): (u32, u32, u32, u32),
     radius: u32,
     weight: u8,
 ) -> Surface {
-    surface.frost_region(x, y, w, h, radius, &mut BlurScratch::new(), |_, _| weight);
+    surface.frost_region(
+        x,
+        y,
+        w,
+        h,
+        radius,
+        &mut BlurScratch::new(),
+        runner,
+        |_, _| weight,
+    );
     surface
+}
+
+/// The coordinates a frost asked its shape about, in the order it asked.
+///
+/// A coverage closure is shared across a frost's pieces, so it must be `Sync`; a
+/// plain `RefCell` would not be. Ordering still holds for the tests that assert
+/// on it, because they run the frost through the serial runner.
+struct Recorder(Mutex<Vec<(u32, u32)>>);
+
+impl Recorder {
+    fn new() -> Self {
+        Self(Mutex::new(Vec::new()))
+    }
+
+    /// Record one asked-about coordinate and answer full coverage.
+    fn record(&self, lx: u32, ly: u32) -> u8 {
+        if let Ok(mut asked) = self.0.lock() {
+            asked.push((lx, ly));
+        }
+        255
+    }
+
+    fn taken(self) -> Vec<(u32, u32)> {
+        self.0.into_inner().unwrap_or_default()
+    }
+}
+
+/// A runner that reports a width it does not have and runs the pieces
+/// **backwards** on the calling thread, so a comparison against it is a proof
+/// about how a frost divides rather than about thread timing.
+struct Split(usize);
+
+// SAFETY: each index of `0..count` is passed exactly once, on the calling
+// thread, and every call has returned before `run` does.
+unsafe impl tairix_parallel::JobRunner for Split {
+    fn width(&self) -> usize {
+        self.0
+    }
+
+    fn run(&self, count: usize, job: &(dyn Fn(usize) + Sync)) {
+        for index in (0..count).rev() {
+            job(index);
+        }
+    }
 }
 
 /// Every pixel of `after` outside `[x, x+w) × [y, y+h)` still carries what
@@ -526,9 +588,16 @@ fn a_rounded_coverage_frosts_the_centre_and_spares_the_corner() {
     let before = patterned(SIDE, SIDE);
     let expected = blurred(before.pixels(), SIDE as usize, SIDE as usize, 2);
     let mut after = before.clone();
-    after.frost_region(0, 0, SIDE, SIDE, 2, &mut BlurScratch::new(), |lx, ly| {
-        round_rect_coverage(lx, ly, SIDE, SIDE, RADIUS)
-    });
+    after.frost_region(
+        0,
+        0,
+        SIDE,
+        SIDE,
+        2,
+        &mut BlurScratch::new(),
+        &tairix_parallel::SERIAL,
+        |lx, ly| round_rect_coverage(lx, ly, SIDE, SIDE, RADIUS),
+    );
 
     assert_eq!(
         round_rect_coverage(0, 0, SIDE, SIDE, RADIUS),
@@ -554,17 +623,23 @@ fn a_rounded_coverage_frosts_the_centre_and_spares_the_corner() {
 fn a_region_clipped_by_the_surface_edge_frosts_only_what_is_on_it() {
     let before = patterned(8, 8);
     let mut after = before.clone();
-    let asked = RefCell::new(Vec::new());
-    after.frost_region(5, 6, 9, 7, 2, &mut BlurScratch::new(), |lx, ly| {
-        asked.borrow_mut().push((lx, ly));
-        255
-    });
+    let asked = Recorder::new();
+    after.frost_region(
+        5,
+        6,
+        9,
+        7,
+        2,
+        &mut BlurScratch::new(),
+        &tairix_parallel::SERIAL,
+        |lx, ly| asked.record(lx, ly),
+    );
 
     let admitted: Vec<(u32, u32)> = (0..2)
         .flat_map(|ly| (0..3).map(move |lx| (lx, ly)))
         .collect();
     assert_eq!(
-        asked.into_inner(),
+        asked.taken(),
         admitted,
         "only the part on the surface is asked about, at its rectangle-relative place"
     );
@@ -585,12 +660,18 @@ fn a_region_clipped_by_the_surface_edge_frosts_only_what_is_on_it() {
 fn a_clip_confines_the_frost_and_the_shape_still_reads_from_the_rectangle() {
     let before = patterned(10, 10);
     let mut after = before.clone();
-    let asked = RefCell::new(Vec::new());
+    let asked = Recorder::new();
     after.with_clip(3, 4, 4, 3, |surface| {
-        surface.frost_region(1, 2, 8, 7, 2, &mut BlurScratch::new(), |lx, ly| {
-            asked.borrow_mut().push((lx, ly));
-            255
-        });
+        surface.frost_region(
+            1,
+            2,
+            8,
+            7,
+            2,
+            &mut BlurScratch::new(),
+            &tairix_parallel::SERIAL,
+            |lx, ly| asked.record(lx, ly),
+        );
     });
 
     // The clip cuts two columns and two rows off the rectangle's leading
@@ -598,7 +679,7 @@ fn a_clip_confines_the_frost_and_the_shape_still_reads_from_the_rectangle() {
     let admitted: Vec<(u32, u32)> = (2..5)
         .flat_map(|ly| (2..6).map(move |lx| (lx, ly)))
         .collect();
-    assert_eq!(asked.into_inner(), admitted);
+    assert_eq!(asked.taken(), admitted);
     assert_eq!(
         block(&after, 3, 4, 4, 3),
         blurred(&block(&before, 3, 4, 4, 3), 4, 3, 2),
@@ -610,6 +691,25 @@ fn a_clip_confines_the_frost_and_the_shape_still_reads_from_the_rectangle() {
 /// `surface` with `[x, x+w) × [y, y+h)` frosted around the kept `cols` × `rows`
 /// block, at a constant coverage.
 fn frosted_around(
+    surface: Surface,
+    rect: (u32, u32, u32, u32),
+    keep: (Range<u32>, Range<u32>),
+    radius: u32,
+    weight: u8,
+) -> Surface {
+    frosted_around_via(
+        &tairix_parallel::SERIAL,
+        surface,
+        rect,
+        keep,
+        radius,
+        weight,
+    )
+}
+
+/// As [`frosted_around`], but with the frost's pieces run through `runner`.
+fn frosted_around_via(
+    runner: &dyn tairix_parallel::JobRunner,
     mut surface: Surface,
     (x, y, w, h): (u32, u32, u32, u32),
     (cols, rows): (Range<u32>, Range<u32>),
@@ -625,6 +725,7 @@ fn frosted_around(
         rows,
         radius,
         &mut BlurScratch::new(),
+        runner,
         |_, _| weight,
     );
     surface
@@ -742,7 +843,16 @@ fn a_frost_with_nothing_to_do_leaves_the_surface_exactly_as_it_was() {
     let untouched = patterned(6, 4);
 
     let mut disabled = untouched.clone();
-    disabled.frost_region(0, 0, 6, 4, 0, &mut BlurScratch::new(), |_, _| 255);
+    disabled.frost_region(
+        0,
+        0,
+        6,
+        4,
+        0,
+        &mut BlurScratch::new(),
+        &tairix_parallel::SERIAL,
+        |_, _| 255,
+    );
     assert_eq!(disabled, untouched, "a radius of zero frosts nothing");
 
     for (w, h) in [(0, 3), (3, 0), (0, 0)] {
@@ -768,7 +878,16 @@ fn a_frost_with_nothing_to_do_leaves_the_surface_exactly_as_it_was() {
 fn an_empty_surface_has_nothing_to_frost() {
     for (w, h) in [(0, 0), (0, 5), (5, 0)] {
         let mut surface = Surface::new(w, h).expect("allocates");
-        surface.frost_region(0, 0, 5, 5, 3, &mut BlurScratch::new(), |_, _| 255);
+        surface.frost_region(
+            0,
+            0,
+            5,
+            5,
+            3,
+            &mut BlurScratch::new(),
+            &tairix_parallel::SERIAL,
+            |_, _| 255,
+        );
         assert!(
             surface.pixels().is_empty(),
             "{w}x{h} has no pixels to frost"
@@ -796,12 +915,48 @@ fn an_absurd_radius_saturates_rather_than_panicking() {
 fn a_reused_scratch_carries_nothing_between_frosts() {
     let mut warm = BlurScratch::new();
     let mut shared = patterned(9, 8);
-    shared.frost_region(1, 1, 7, 5, 3, &mut warm, |_, _| 255);
-    shared.frost_region(0, 2, 4, 3, 2, &mut warm, |_, _| 200);
+    shared.frost_region(
+        1,
+        1,
+        7,
+        5,
+        3,
+        &mut warm,
+        &tairix_parallel::SERIAL,
+        |_, _| 255,
+    );
+    shared.frost_region(
+        0,
+        2,
+        4,
+        3,
+        2,
+        &mut warm,
+        &tairix_parallel::SERIAL,
+        |_, _| 200,
+    );
 
     let mut fresh = patterned(9, 8);
-    fresh.frost_region(1, 1, 7, 5, 3, &mut BlurScratch::new(), |_, _| 255);
-    fresh.frost_region(0, 2, 4, 3, 2, &mut BlurScratch::new(), |_, _| 200);
+    fresh.frost_region(
+        1,
+        1,
+        7,
+        5,
+        3,
+        &mut BlurScratch::new(),
+        &tairix_parallel::SERIAL,
+        |_, _| 255,
+    );
+    fresh.frost_region(
+        0,
+        2,
+        4,
+        3,
+        2,
+        &mut BlurScratch::new(),
+        &tairix_parallel::SERIAL,
+        |_, _| 200,
+    );
 
     assert_eq!(shared, fresh, "a warm scratch frosts as a fresh one does");
 }
@@ -810,9 +965,132 @@ fn a_reused_scratch_carries_nothing_between_frosts() {
 fn a_released_scratch_grows_again_and_frosts_the_same() {
     let mut scratch = BlurScratch::default();
     let mut first = patterned(8, 6);
-    first.frost_region(0, 0, 8, 6, 3, &mut scratch, |_, _| 255);
+    first.frost_region(
+        0,
+        0,
+        8,
+        6,
+        3,
+        &mut scratch,
+        &tairix_parallel::SERIAL,
+        |_, _| 255,
+    );
     scratch.release();
     let mut second = patterned(8, 6);
-    second.frost_region(0, 0, 8, 6, 3, &mut scratch, |_, _| 255);
+    second.frost_region(
+        0,
+        0,
+        8,
+        6,
+        3,
+        &mut scratch,
+        &tairix_parallel::SERIAL,
+        |_, _| 255,
+    );
     assert_eq!(first, second, "releasing the memory changes no result");
+}
+
+/// A frost divided into pieces is bit-for-bit the undivided frost.
+///
+/// This is what parallel frosting rests on. A piece reads the whole rectangle's
+/// rows and reads coverage at the rectangle's own coordinates, so replication at
+/// the edges, the dither bias, and the shape weight are all the same wherever the
+/// division falls — and running the pieces backwards proves the answer cannot
+/// depend on their order either. If any of that were only nearly true, a divided
+/// frost would show a seam at every piece boundary.
+#[test]
+fn a_frost_divided_into_pieces_is_exactly_the_undivided_frost() {
+    for rect in [
+        (0u32, 0u32, 23u32, 17u32),
+        (2, 3, 19, 11),
+        (5, 1, 1, 14),
+        (1, 5, 21, 1),
+    ] {
+        for radius in [1u32, 2, 5, 11] {
+            for weight in [255u8, 176, 1, 0] {
+                let before = patterned(26, 21);
+                let whole = frosted(before.clone(), rect, radius, weight);
+                for width in [2usize, 3, 8, 64] {
+                    let divided = frosted_via(&Split(width), before.clone(), rect, radius, weight);
+                    assert_eq!(
+                        divided, whole,
+                        "{rect:?} r{radius} w{weight} divided {width} ways"
+                    );
+                }
+            }
+        }
+    }
+}
+
+/// The border case divided as well: a kept block leaves up to four row bands, and
+/// each of those is divided across its columns — the most pieces a frost ever
+/// makes, and the arrangement where a piece's neighbourhood most obviously
+/// reaches outside it.
+#[test]
+fn a_divided_border_frost_is_exactly_the_undivided_border_frost() {
+    let mut rng = TestRng::new(0x5B1F_2C77_04AE_9931);
+    let rect = (2u32, 1, 17, 13);
+    for radius in [1u32, 3, 6] {
+        for weight in [255u8, 200, 0] {
+            let before = patterned(21, 16);
+            for _ in 0..16 {
+                let keep = (span_within(&mut rng, rect.2), span_within(&mut rng, rect.3));
+                let whole = frosted_around(before.clone(), rect, keep.clone(), radius, weight);
+                for width in [2usize, 5, 16] {
+                    let divided = frosted_around_via(
+                        &Split(width),
+                        before.clone(),
+                        rect,
+                        keep.clone(),
+                        radius,
+                        weight,
+                    );
+                    assert_eq!(
+                        divided, whole,
+                        "{rect:?} r{radius} w{weight} keep {keep:?} divided {width} ways"
+                    );
+                }
+            }
+        }
+    }
+}
+
+/// A scratch reused between a divided frost and an undivided one carries nothing
+/// between them: the piece list is rebuilt, and the buffers are grown but never
+/// read past what the current frost wrote.
+#[test]
+fn a_scratch_reused_across_divided_and_undivided_frosts_carries_nothing() {
+    let before = patterned(24, 18);
+    let rect = (1u32, 2, 20, 14);
+    let expected = frosted(before.clone(), rect, 4, 255);
+
+    let mut shared = BlurScratch::new();
+    let mut divided = before.clone();
+    divided.frost_region(
+        rect.0,
+        rect.1,
+        rect.2,
+        rect.3,
+        4,
+        &mut shared,
+        &Split(8),
+        |_, _| 255,
+    );
+    assert_eq!(divided, expected);
+
+    let mut again = before.clone();
+    again.frost_region(
+        rect.0,
+        rect.1,
+        rect.2,
+        rect.3,
+        4,
+        &mut shared,
+        &tairix_parallel::SERIAL,
+        |_, _| 255,
+    );
+    assert_eq!(
+        again, expected,
+        "the scratch a divided frost left behind must not change an undivided one"
+    );
 }

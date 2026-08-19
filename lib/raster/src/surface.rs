@@ -933,14 +933,64 @@ impl Surface {
     /// [`set`](Self::set)'s contract at row granularity.
     #[must_use]
     pub fn row_span_mut(&mut self, y: u32, x: u32, w: u32) -> Option<(u32, &mut [Pixel])> {
-        if y < self.clip.y0 || y >= self.clip.y1 {
-            return None;
+        let (first, offsets) = span_offsets(self.clip, self.width, 0, y, x, w)?;
+        Some((first, self.pixels.get_mut(offsets)?))
+    }
+
+    /// Borrow the pixels of row `y` from column `x`, for at most `w` columns,
+    /// with the column the returned span actually starts at — the read-only
+    /// counterpart of [`row_span_mut`](Self::row_span_mut), admitting exactly the
+    /// same pixels.
+    ///
+    /// A pass that only *reads* the surface takes this, so several of its pieces
+    /// can read it at once: the backdrop blur's neighbourhood sampling reads rows
+    /// its own output does not write, and asking for them mutably would make the
+    /// pass exclusive for no reason.
+    #[must_use]
+    pub fn row_span(&self, y: u32, x: u32, w: u32) -> Option<(u32, &[Pixel])> {
+        let (first, offsets) = span_offsets(self.clip, self.width, 0, y, x, w)?;
+        Some((first, self.pixels.get(offsets)?))
+    }
+
+    /// Split the rows `rows` admits into bands of `rows_per_band` whole rows,
+    /// each an exclusively-borrowed block a pass may write independently of the
+    /// others (the last band is short where the rows do not divide evenly).
+    ///
+    /// This is how a per-row pass becomes a parallel one: the bands partition the
+    /// requested rows, so no two of them name a single pixel, and each carries
+    /// the surface's own width and active clip window — a band therefore admits
+    /// exactly the pixels [`row_span_mut`](Self::row_span_mut) would have.
+    ///
+    /// The split is stated as a band *size* rather than a band count so that a
+    /// caller splitting a second buffer alongside the surface — a compositor's
+    /// scan-out frame beside its back buffer — can step both by the same number
+    /// of rows and know band *i* of each names the same rows.
+    ///
+    /// Rows outside the surface or outside the clip window are dropped, so a
+    /// caller need not pre-clamp; `rows_per_band` of `0` reads as `1`, and
+    /// nothing admitted yields no bands.
+    pub fn row_bands_mut(&mut self, rows: Range<u32>, rows_per_band: u32) -> RowBands<'_> {
+        let admitted = rows.start.max(self.clip.y0)..rows.end.min(self.clip.y1);
+        let span = admitted.end.saturating_sub(admitted.start);
+        let per_band = rows_per_band.max(1);
+        let block = usize::try_from(u64::from(per_band) * u64::from(self.width))
+            .ok()
+            .filter(|block| *block > 0 && span > 0)
+            .and_then(|block| {
+                let start =
+                    usize::try_from(u64::from(admitted.start) * u64::from(self.width)).ok()?;
+                let len = usize::try_from(u64::from(span) * u64::from(self.width)).ok()?;
+                let end = start.checked_add(len)?;
+                Some((block, self.pixels.get_mut(start..end)?))
+            });
+        let (block, pixels) = block.unwrap_or((1, &mut []));
+        RowBands {
+            chunks: pixels.chunks_mut(block),
+            next_row: admitted.start,
+            rows_per_band: per_band,
+            width: self.width,
+            clip: self.clip,
         }
-        let columns = self.clip.columns(x, w)?;
-        let start = self.row_start(y)?;
-        let lo = start.checked_add(columns.start as usize)?;
-        let hi = start.checked_add(columns.end as usize)?;
-        Some((columns.start, self.pixels.get_mut(lo..hi)?))
     }
 
     /// The part of `[x, x+w) × [y, y+h)` a write reaches — the rectangle
@@ -986,6 +1036,108 @@ impl Surface {
         usize::try_from(offset).ok()
     }
 }
+
+/// Row `y`'s admitted columns `[x, x+w)` as the column the span starts at and
+/// the pixel offsets it occupies, inside a row-major block of `width`-pixel rows
+/// whose first row is `base_row`. `None` when nothing is admitted.
+///
+/// The one definition of the clip-and-index arithmetic every row-granular borrow
+/// goes through — the whole surface's rows and one band's alike — so a band can
+/// never admit a pixel the surface would not, or the other way round.
+fn span_offsets(
+    clip: ClipRect,
+    width: u32,
+    base_row: u32,
+    y: u32,
+    x: u32,
+    w: u32,
+) -> Option<(u32, Range<usize>)> {
+    // The window is already intersected with the surface bounds, so admitting the
+    // row here also proves it is in bounds.
+    if y < clip.y0 || y >= clip.y1 || y < base_row {
+        return None;
+    }
+    let columns = clip.columns(x, w)?;
+    let local = u64::from(y.checked_sub(base_row)?);
+    let start = usize::try_from(local * u64::from(width)).ok()?;
+    let lo = start.checked_add(usize::try_from(columns.start).ok()?)?;
+    let hi = start.checked_add(usize::try_from(columns.end).ok()?)?;
+    Some((columns.start, lo..hi))
+}
+
+/// One band of [`Surface::row_bands_mut`]: a contiguous block of whole surface
+/// rows, borrowed exclusively.
+///
+/// A band is written exactly as the surface is — [`row_span_mut`] honours the
+/// same clip window and yields the same pixels — but only for the rows it owns,
+/// which is what lets a pass write several bands at once.
+///
+/// [`row_span_mut`]: RowBand::row_span_mut
+pub struct RowBand<'a> {
+    pixels: &'a mut [Pixel],
+    /// The surface rows this band covers.
+    rows: Range<u32>,
+    width: u32,
+    clip: ClipRect,
+}
+
+impl RowBand<'_> {
+    /// The surface rows this band owns.
+    #[must_use]
+    pub fn rows(&self) -> Range<u32> {
+        self.rows.clone()
+    }
+
+    /// Borrow the writable pixels of row `y` from column `x`, for at most `w`
+    /// columns, with the column the returned span actually starts at.
+    ///
+    /// `None` for a row this band does not own, and otherwise exactly what
+    /// [`Surface::row_span_mut`] answers for the same arguments.
+    #[must_use]
+    pub fn row_span_mut(&mut self, y: u32, x: u32, w: u32) -> Option<(u32, &mut [Pixel])> {
+        if y < self.rows.start || y >= self.rows.end {
+            return None;
+        }
+        let (first, offsets) = span_offsets(self.clip, self.width, self.rows.start, y, x, w)?;
+        Some((first, self.pixels.get_mut(offsets)?))
+    }
+}
+
+/// The bands [`Surface::row_bands_mut`] splits a row range into.
+pub struct RowBands<'a> {
+    chunks: core::slice::ChunksMut<'a, Pixel>,
+    /// The first surface row of the next band.
+    next_row: u32,
+    rows_per_band: u32,
+    width: u32,
+    clip: ClipRect,
+}
+
+impl<'a> Iterator for RowBands<'a> {
+    type Item = RowBand<'a>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let pixels = self.chunks.next()?;
+        let start = self.next_row;
+        // The last band is short when the rows do not divide evenly, so its extent
+        // comes from the chunk it actually got rather than from the nominal size.
+        let rows = u32::try_from(pixels.len() / usize::try_from(self.width).unwrap_or(1))
+            .unwrap_or(self.rows_per_band);
+        self.next_row = start.saturating_add(rows);
+        Some(RowBand {
+            pixels,
+            rows: start..start.saturating_add(rows),
+            width: self.width,
+            clip: self.clip,
+        })
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        self.chunks.size_hint()
+    }
+}
+
+impl ExactSizeIterator for RowBands<'_> {}
 
 /// The side a [`Surface::layered`] composite is enlarged towards before it is
 /// averaged down, in pixels.

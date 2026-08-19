@@ -889,7 +889,7 @@ fn resolve_cpu_leaf(
     transport: &dyn Transport,
     leaf: &str,
 ) -> Result<(InfoValue, Authorization), ResolveInfoError> {
-    let cpus = query_cpu_info(transport)?;
+    let cpus = cpu_info(transport)?;
     let value = match leaf {
         "count" => cpus.len().to_string(),
         "vendor" | "model" => cpus
@@ -908,9 +908,14 @@ fn resolve_cpu_leaf(
     Ok((info, Authorization::Unprivileged))
 }
 
-/// Page through the per-CPU processor-info records via the ungated
-/// `CPU_INFO` query. Returns records in ascending CPU order.
-fn query_cpu_info(transport: &dyn Transport) -> Result<Vec<CpuInfoRecord>, ResolveInfoError> {
+/// Every online core's processor-info record, paged through the ungated
+/// `CPU_INFO` query and returned in ascending CPU order.
+///
+/// This is the one place the query is walked, so a consumer that wants the
+/// *count* of online CPUs — the desktop sizing its compositing worker pool from
+/// the machine rather than from a constant — reads it here rather than re-deriving
+/// the paging.
+pub fn cpu_info(transport: &dyn Transport) -> Result<Vec<CpuInfoRecord>, ResolveInfoError> {
     /// Records requested per page: bounds the reply without bounding how
     /// many CPUs the machine may have.
     const PAGE: u16 = 64;

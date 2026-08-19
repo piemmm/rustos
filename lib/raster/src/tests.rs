@@ -1389,3 +1389,122 @@ fn a_large_layered_composite_is_painted_without_enlargement() {
     paint(&mut direct);
     assert_eq!(layered, direct);
 }
+
+// ---- row bands ------------------------------------------------------
+
+/// Paint a surface a row at a time through `Surface::row_span_mut`, then paint
+/// an identical one through bands, and require the two to be the same pixels.
+/// This is the property every parallel pass rests on.
+fn banded_and_whole_agree(width: u32, height: u32, rows_per_band: u32) {
+    let paint = |y: u32, span: &mut [Pixel]| {
+        for (x, pixel) in span.iter_mut().enumerate() {
+            let x = u32::try_from(x).unwrap_or(0);
+            *pixel = Color::rgb((x % 251) as u8, (y % 253) as u8, 42).premultiply();
+        }
+    };
+
+    let mut whole = Surface::new(width, height).expect("allocates");
+    for y in 0..height {
+        if let Some((_, span)) = whole.row_span_mut(y, 0, width) {
+            paint(y, span);
+        }
+    }
+
+    let mut banded = Surface::new(width, height).expect("allocates");
+    let mut covered = 0u32;
+    for mut band in banded.row_bands_mut(0..height, rows_per_band) {
+        let rows = band.rows();
+        covered += rows.end - rows.start;
+        for y in rows {
+            if let Some((_, span)) = band.row_span_mut(y, 0, width) {
+                paint(y, span);
+            }
+        }
+    }
+    assert_eq!(covered, height, "the bands must partition the rows");
+    assert_eq!(banded, whole);
+}
+
+#[test]
+fn bands_partition_the_rows_and_paint_what_the_whole_surface_would() {
+    // Includes sizes that do not divide the height, a band per row, and the
+    // whole range in one band (the serial case a single-CPU machine takes).
+    for rows_per_band in [1, 2, 3, 4, 7, 16, 64] {
+        banded_and_whole_agree(9, 7, rows_per_band);
+    }
+}
+
+#[test]
+fn a_band_refuses_a_row_it_does_not_own() {
+    let mut surface = Surface::new(4, 6).expect("allocates");
+    let mut bands = surface.row_bands_mut(0..6, 2);
+    let mut first = bands.next().expect("two rows of six");
+    assert_eq!(first.rows(), 0..2);
+    assert!(first.row_span_mut(0, 0, 4).is_some());
+    assert!(first.row_span_mut(1, 0, 4).is_some());
+    assert!(
+        first.row_span_mut(2, 0, 4).is_none(),
+        "a band must not reach into the next band's rows"
+    );
+}
+
+#[test]
+fn a_band_of_a_row_subrange_starts_where_it_was_asked_to() {
+    let mut surface = Surface::new(4, 8).expect("allocates");
+    let spans: alloc::vec::Vec<_> = surface
+        .row_bands_mut(3..7, 2)
+        .map(|band| band.rows())
+        .collect();
+    assert_eq!(spans, alloc::vec![3..5, 5..7]);
+}
+
+#[test]
+fn no_rows_no_bands() {
+    let mut surface = Surface::new(4, 4).expect("allocates");
+    assert_eq!(surface.row_bands_mut(2..2, 4).count(), 0);
+    // A zero band size reads as one row per band rather than dividing by zero.
+    assert_eq!(surface.row_bands_mut(0..4, 0).count(), 4);
+    // Rows past the end are dropped rather than fabricated.
+    assert_eq!(surface.row_bands_mut(9..12, 2).count(), 0);
+    let mut empty = Surface::new(0, 0).expect("an empty surface still allocates");
+    assert_eq!(empty.row_bands_mut(0..1, 2).count(), 0);
+}
+
+/// A band carries the surface's active clip window, so a clipped parallel pass
+/// withholds exactly the pixels a clipped serial one does.
+#[test]
+fn a_band_honours_the_clip_window_the_surface_carries() {
+    let mut surface = Surface::new(8, 8).expect("allocates");
+    surface.with_clip(2, 1, 4, 5, |clipped| {
+        let bands: alloc::vec::Vec<_> = clipped
+            .row_bands_mut(0..8, 3)
+            .map(|band| band.rows())
+            .collect();
+        assert_eq!(bands, alloc::vec![1..4, 4..6], "clipped rows only");
+    });
+    // Outside the clipped paint the window is the whole surface again, so a band
+    // of it admits every column.
+    let mut whole = surface.row_bands_mut(0..8, 8);
+    let mut band = whole.next().expect("the whole surface");
+    let (first, span) = band.row_span_mut(0, 0, 8).expect("row zero");
+    assert_eq!((first, span.len()), (0, 8));
+}
+
+/// The read-only row span admits exactly what the writable one does, which is
+/// what lets a blur read a neighbourhood while several of its pieces run.
+#[test]
+fn the_read_only_row_span_admits_what_the_writable_one_does() {
+    let mut surface = Surface::new(6, 4).expect("allocates");
+    surface.set(3, 2, Color::rgb(9, 9, 9).premultiply());
+    for y in [0, 2, 3, 4, 9] {
+        for (x, w) in [(0, 6), (1, 3), (5, 4), (6, 1), (0, 0)] {
+            let readable = surface.row_span(y, x, w).map(|(at, span)| (at, span.len()));
+            let writable = surface
+                .row_span_mut(y, x, w)
+                .map(|(at, span)| (at, span.len()));
+            assert_eq!(readable, writable, "row {y}, columns {x}+{w}");
+        }
+    }
+    let (_, span) = surface.row_span(2, 0, 6).expect("row two");
+    assert_eq!(span[3], Color::rgb(9, 9, 9).premultiply());
+}

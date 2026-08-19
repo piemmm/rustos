@@ -286,6 +286,8 @@ tairix-util = { path = "../../lib/util", version = "=0.0.0" }
 # SMART5).
 tairix-reclaim = { path = "../../lib/reclaim", version = "=0.0.0" }
 tairix-log = { path = "../../lib/log", version = "=0.0.0" }
+# The `JobRunner` contract the bench families measure a divided pass through.
+tairix-parallel = { path = "../../lib/parallel", version = "=0.0.0" }
 # The compositing window manager: `bench` times `Compositor::composite` over a
 # real window stack — the very code the desktop runs each frame — so the
 # whole-frame figure describes production compositing rather than a

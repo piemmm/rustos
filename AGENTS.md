@@ -590,6 +590,7 @@ tairix/
 │   ├── net/             # Network protocol engine (wire protocols).
 │   ├── netconfig/       # network.conf per-interface configuration store engine.
 │   ├── pagezero/        # Page/region zeroing.
+│   ├── parallel/        # Bounded data-parallel work engine (JobRunner + pool).
 │   ├── partition/       # Shared, scheme-neutral partition-table layer (MBR/GPT).
 │   ├── path/            # Shared filesystem path-spelling parser.
 │   ├── pci/             # PCI/PCIe configuration-access mechanism library.

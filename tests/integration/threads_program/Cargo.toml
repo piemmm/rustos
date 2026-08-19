@@ -1,6 +1,6 @@
 [package]
 name = "tairix-test-threads"
-description = "THREADS stage T3b-u fixture: a separately-linked pure-Rust user-mode program built once and driven in five argv-selected roles, so the consuming verticals prove the lightweight-thread stack end to end. `parent` spawns and reaps the other roles through the production spawn + wait syscalls; `counter` runs N threads over one address space incrementing a shared counter under a futex Mutex and joins each for its value; `rendezvous` proves a Condvar wait genuinely blocks (a spinning wait would starve the notifier on a single-CPU cooperative drive); `tls` proves each thread's psABI thread pointer is its own and survives a trap; `groupexit` proves exit(code) terminates every sibling. Built PIE for a native Tier-1 target and converted to an rxe blob by the consuming test's build script."
+description = "THREADS stage T3b-u fixture: a separately-linked pure-Rust user-mode program built once and driven in seven argv-selected roles, so the consuming verticals prove the lightweight-thread stack end to end. `parent` spawns and reaps the other roles through the production spawn + wait syscalls; `counter` runs N threads over one address space incrementing a shared counter under a futex Mutex and joins each for its value; `rendezvous` proves a Condvar wait genuinely blocks (a spinning wait would starve the notifier on a single-CPU cooperative drive); `tls` proves each thread's psABI thread pointer is its own and survives a trap; `groupexit` proves exit(code) terminates every sibling. Built PIE for a native Tier-1 target and converted to an rxe blob by the consuming test's build script."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -22,3 +22,5 @@ path = "src/main.rs"
 # `cargo build --workspace` / clippy still cover it.
 [target.'cfg(target_os = "none")'.dependencies]
 tairix-rt = { path = "../../../lib/rt", version = "=0.0.0" }
+# The fork-join worker pool the `parallel` role drives on real threads.
+tairix-parallel = { path = "../../../lib/parallel", version = "=0.0.0" }

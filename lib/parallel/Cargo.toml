@@ -1,0 +1,27 @@
+[package]
+name = "tairix-parallel"
+description = "TAIRiX bounded data-parallel work engine: the JobRunner contract a pass expresses its independent work through, the allocation-free index-to-element erasure (for_each), the one band-split policy, and — behind the default `pool` feature — the process-wide fork-join worker pool over lib/rt threads whose workers park on a futex and never spin (AGENTS.md §2.16/§2.23/§24.1; plans/THREADS.md)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[features]
+# The worker pool. Off for a consumer that only names the `JobRunner` contract
+# — `lib/raster` expresses its passes' independent work through the trait and
+# must stay linkable in-kernel, where there is no userland thread to spawn.
+default = ["pool"]
+pool = ["dep:tairix-rt", "dep:tairix-abi"]
+
+[dependencies]
+# The thread and futex primitives the pool is built on: a worker is a
+# `lib/rt` thread, and a parked worker waits on a futex word rather than
+# spinning.
+tairix-rt = { path = "../rt", version = "=0.0.0", optional = true }
+# `Errno`, for reporting how many workers the kernel would grant.
+tairix-abi = { path = "../abi", version = "=0.0.0", optional = true }

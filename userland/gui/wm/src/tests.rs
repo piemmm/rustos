@@ -6640,3 +6640,216 @@ fn a_mode_change_keeps_a_reveal_in_flight() {
     c.composite();
     assert_eq!(frame_pixel(&c, 20, 18), [0, 0, 0, 255]);
 }
+
+// ---- banded (parallel) compositing -----------------------------------
+
+/// A job runner that reports a width it does not have and runs the pieces
+/// **backwards** on the calling thread.
+///
+/// It exercises exactly what a real pool changes about a composite: how many
+/// bands a rectangle is split into and in what order they run. Running them on
+/// one thread is what makes the comparison below a proof about the *split*
+/// rather than about thread timing — bit-identity cannot be a matter of luck.
+struct Banded {
+    width: usize,
+    /// The largest number of pieces any dispatch asked for, so a test can see
+    /// whether a rectangle was split at all.
+    widest: core::sync::atomic::AtomicUsize,
+}
+
+// SAFETY: each index of `0..count` is passed exactly once, from the calling
+// thread, and every call has returned before `run` does.
+unsafe impl tairix_parallel::JobRunner for Banded {
+    fn width(&self) -> usize {
+        self.width
+    }
+
+    fn run(&self, count: usize, job: &(dyn Fn(usize) + Sync)) {
+        self.widest
+            .fetch_max(count, core::sync::atomic::Ordering::Relaxed);
+        for index in (0..count).rev() {
+            job(index);
+        }
+    }
+}
+
+impl Banded {
+    /// A runner of this width, leaked so it can be installed as the
+    /// `&'static dyn JobRunner` an embedder would hand over. One per test, so
+    /// tests running concurrently cannot see each other's counts.
+    fn install(width: usize, into: &mut Compositor) -> &'static Self {
+        let runner: &'static Self = alloc::boxed::Box::leak(alloc::boxed::Box::new(Self {
+            width,
+            widest: core::sync::atomic::AtomicUsize::new(0),
+        }));
+        into.set_job_runner(runner);
+        runner
+    }
+
+    fn widest(&self) -> usize {
+        self.widest.load(core::sync::atomic::Ordering::Relaxed)
+    }
+}
+
+/// Two compositors given identical scenes, one composing each rectangle on the
+/// calling thread and one splitting every rectangle into bands that run in
+/// reverse order.
+struct BandedWays {
+    whole: Compositor,
+    banded: Compositor,
+    runner: &'static Banded,
+}
+
+impl BandedWays {
+    fn new(mode: DisplayMode) -> Self {
+        let whole = new_compositor(mode, BLUE).expect("compositor");
+        let mut banded = new_compositor(mode, BLUE).expect("compositor");
+        let runner = Banded::install(8, &mut banded);
+        Self {
+            whole,
+            banded,
+            runner,
+        }
+    }
+
+    /// Apply `act` to both, asserting they agree on what it returned — window
+    /// ids are handed out in order, so the two stacks stay identical.
+    fn both<T>(&mut self, act: impl Fn(&mut Compositor) -> T) -> T
+    where
+        T: core::fmt::Debug + PartialEq,
+    {
+        let whole = act(&mut self.whole);
+        let banded = act(&mut self.banded);
+        assert_eq!(whole, banded, "the two compositors took different paths");
+        whole
+    }
+
+    /// Composite both and require every byte, and every counted pixel, to
+    /// agree.
+    fn settle(&mut self, step: &str) {
+        let one = self.whole.composite();
+        let many = self.banded.composite();
+        assert_eq!(one, many, "damage differs after {step}");
+        assert_eq!(
+            self.whole.frame(),
+            self.banded.frame(),
+            "scan-out differs after {step}"
+        );
+        assert_eq!(
+            self.whole.back_buffer().pixels(),
+            self.banded.back_buffer().pixels(),
+            "back buffer differs after {step}"
+        );
+        assert_eq!(
+            self.whole.frame_stats(),
+            self.banded.frame_stats(),
+            "frame cost differs after {step}"
+        );
+    }
+}
+
+#[test]
+fn splitting_a_composite_into_bands_changes_nothing_it_draws() {
+    // The whole claim parallel compositing rests on: a rectangle composed in
+    // bands, in any order, is byte-for-byte the rectangle composed in one pass,
+    // and it costs the same counted work. Every kind of layer a band can meet
+    // is in the scene — the root fill, the desktop layer, opaque and translucent
+    // windows, decorated furniture, a rounded shape, a blurred backdrop, the
+    // cursor overlay, and a screen fade.
+    let mut both = BandedWays::new(mode(256, 192));
+    both.settle("the first whole-screen frame");
+
+    both.both(|c| {
+        let mut desktop = opaque(256, 192, GREEN);
+        desktop.fill_rect(10, 10, 60, 40, RED);
+        c.set_desktop(desktop);
+    });
+    both.settle("a desktop layer");
+
+    let under = both.both(|c| c.add_window(Point::new(8, 6), opaque(180, 120, RED)));
+    both.settle("an opaque window");
+
+    let glass = both.both(|c| c.add_window(Point::new(40, 30), opaque(150, 110, BLUE)));
+    both.both(|c| c.set_opacity(glass, 150));
+    both.settle("a translucent window over it");
+
+    both.both(|c| c.set_corners(glass, Corners::Rounded { radius: 9 }));
+    both.settle("rounded");
+
+    both.both(|c| c.set_backdrop_blur(glass, 4));
+    both.settle("blurred as well as translucent");
+
+    both.both(|c| c.move_window(glass, Point::new(46, 34)));
+    both.settle("dragged, so a retained backdrop is copied back");
+
+    both.both(|c| present_content(c, under, paint_dot));
+    both.settle("the window underneath repainted");
+
+    both.both(|c| c.set_window_frame(glass, WindowFrame::new(decorated())));
+    both.both(|c| c.set_window_title(glass, "Banded"));
+    both.settle("decorated, so furniture is drawn");
+
+    both.both(|c| {
+        c.set_cursor(solid_cursor(12, GREEN), Point::new(90, 70));
+        true
+    });
+    both.settle("a cursor overlay");
+
+    both.both(|c| c.set_reveal(128));
+    both.settle("a screen fade in flight");
+
+    both.both(|c| c.set_reveal(u8::MAX));
+    both.settle("the fade over");
+
+    both.both(|c| c.move_window(glass, Point::new(-20, -12)));
+    both.settle("partly off the screen edge");
+
+    both.both(|c| c.remove(glass));
+    both.settle("removed");
+
+    assert!(
+        both.runner.widest() > 1,
+        "a scene this size must have split at least one rectangle, or the test \
+         proves nothing"
+    );
+}
+
+#[test]
+fn a_repaint_too_small_to_be_worth_a_hand_off_is_never_split() {
+    // The other half of the grain policy: a pointer-motion-sized repaint stays
+    // on the calling thread, so it pays no dispatch at all.
+    let mut c = new_compositor(mode(320, 240), BLUE).expect("compositor");
+    let runner = Banded::install(8, &mut c);
+    let id = c.add_window(Point::new(10, 10), opaque(64, 24, RED));
+    c.composite();
+    assert!(
+        runner.widest() > 1,
+        "the first frame is the whole screen and is worth splitting"
+    );
+
+    let before = runner.widest();
+    c.set_opacity(id, 200);
+    c.composite();
+    assert_eq!(
+        runner.widest(),
+        before,
+        "a 64x24 rectangle is fewer pixels than one band's worth, so it is \
+         composed where it was asked for"
+    );
+}
+
+#[test]
+fn a_one_participant_runner_composes_exactly_what_no_runner_does() {
+    // The single-CPU and headless case: a pool that got no worker reports width
+    // one, and the compositor then takes the same path it takes with the
+    // default serial runner.
+    let mut c = new_compositor(mode(64, 48), BLUE).expect("compositor");
+    let runner = Banded::install(1, &mut c);
+    c.add_window(Point::new(4, 4), opaque(20, 16, RED));
+    c.composite();
+    assert_eq!(
+        runner.widest(),
+        0,
+        "a one-participant runner is never dispatched to"
+    );
+}

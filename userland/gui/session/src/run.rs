@@ -131,6 +131,8 @@ mod program {
     use tairix_log::{
         log, Event as LogEvent, Field as LogField, FieldValue as LogFieldValue, Level as LogLevel,
     };
+    use tairix_parallel::Pool;
+    use tairix_procinfo::IpcTransport;
     use tairix_rt::io::{self, Stderr, Write};
     use tairix_sandbox::imagerender::{rasterise_icon, render_wallpaper, ImageRenderService};
     use tairix_sandbox::rt::{serve_stdio, worker_role, RtLauncher};
@@ -1311,6 +1313,7 @@ mod program {
         ) else {
             return fail(EXIT_BAD_MODE, "compositor rejected the queried mode");
         };
+        compositor.set_job_runner(composite_pool());
         let screen = Rect::new(0, 0, mode.width_px, mode.height_px);
         let Ok(mut pointer) = DeviceInputSource::new(SeatInputChannel::new(PointerReader), screen)
         else {
@@ -2382,6 +2385,39 @@ mod program {
         service: PinService<VfsFileReader, VfsFileWriter>,
         resolved: alloc::vec::Vec<ResolvedPin>,
         matches: alloc::vec::Vec<Option<TaskId>>,
+    }
+
+    /// The pool each composite's per-pixel work is spread across: one
+    /// participant per online CPU, of which the serve loop's own thread is one.
+    ///
+    /// The count is *discovered* through the System Information API — the only
+    /// interface live machine facts come from — never a constant, so the same
+    /// binary uses a four-core Pi's cores and a server's without a rebuild. A
+    /// machine that reports one CPU, and a session that cannot reach the service
+    /// or is refused a thread, all compose on the serve loop's own thread and pay
+    /// nothing for the machinery: fewer cores is slower, never wrong.
+    ///
+    /// The pool lives as long as the session does, so it is created once here and
+    /// leaked deliberately — its workers are process-lifetime threads, and a
+    /// pool torn down at some arbitrary point would only mean joining them again
+    /// at exit.
+    fn composite_pool() -> &'static Pool {
+        let online = tairix_procinfo::cpu_info(&IpcTransport).map_or(1, |cpus| cpus.len());
+        let pool: &'static Pool =
+            alloc::boxed::Box::leak(alloc::boxed::Box::new(Pool::for_cpus(online)));
+        // Fewer workers than the machine has cores is a refusal worth stating:
+        // the desktop still draws, more slowly than the hardware allows.
+        let wanted = online.saturating_sub(1);
+        if pool.worker_count() < wanted {
+            let _ = writeln!(
+                Stderr,
+                "desktop: composing on {} of {online} cores (the kernel granted \
+                 {} of {wanted} compositing threads)",
+                pool.worker_count().saturating_add(1),
+                pool.worker_count(),
+            );
+        }
+        pool
     }
 
     /// The one parser-sandbox worker the icon artwork and the wallpaper

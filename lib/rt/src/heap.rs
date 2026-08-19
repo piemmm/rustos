@@ -63,7 +63,7 @@
 
 use core::alloc::{GlobalAlloc, Layout};
 
-use tairix_sync::SpinLock;
+use crate::sync::Mutex;
 
 /// Page size of every Tier-1 target's smallest translation granule. The arena
 /// grows in whole pages, and `mem_map` rounds its length up to this.
@@ -484,15 +484,24 @@ fn align_up(addr: usize, align: usize) -> Option<usize> {
     addr.checked_add(mask).map(|v| v & !mask)
 }
 
-/// A `mem_map`/`mem_unmap`-backed heap with [`HeapState`] under a [`SpinLock`].
+/// A `mem_map`/`mem_unmap`-backed heap with [`HeapState`] under the runtime's
+/// futex [`Mutex`].
 ///
 /// Generic over the [`Pager`] (arena pages) and the [`SpanStore`] (the growable
-/// free-span table) so the same allocator logic is driven by the real syscalls
-/// in production and by host fixtures in the unit tests. The lock makes the
-/// allocator `Sync`, which the [`GlobalAlloc`] contract requires even though
-/// current TAIRiX userland processes are single-threaded.
+/// free-span table) so the same allocator logic is driven by the real syscalls in
+/// production and by host fixtures in the unit tests.
+///
+/// A **futex** mutex, not a spin lock. A process has threads
+/// (`plans/THREADS.md`), so two of them can be in here at once, and the thread
+/// that loses waits for a critical section it cannot shorten: a page mapped
+/// through `mem_map`, a metadata page grown, a free-span table walked. Spinning
+/// through that burns the waiter's whole slice on a machine with more threads than
+/// cores, and on one core it cannot make progress at all until the holder is
+/// preempted. Parking gives the CPU straight back to the holder. The uncontended
+/// acquire is the same pair of atomics either way, so the common case — one
+/// thread allocating — pays nothing for this.
 struct Heap<P: Pager, S: SpanStore> {
-    state: SpinLock<HeapState<S>>,
+    state: Mutex<HeapState<S>>,
     pager: P,
 }
 
@@ -500,7 +509,7 @@ impl<P: Pager, S: SpanStore> Heap<P, S> {
     /// A fresh, empty heap over `pager` and `store`.
     const fn new(pager: P, store: S) -> Self {
         Self {
-            state: SpinLock::new(HeapState::new(store)),
+            state: Mutex::new(HeapState::new(store)),
             pager,
         }
     }
@@ -509,7 +518,7 @@ impl<P: Pager, S: SpanStore> Heap<P, S> {
 // SAFETY: every allocation address is computed and bounds-checked by
 // `HeapState` (no raw pointer arithmetic without a checked
 // wrapper) and the returned pointer denotes memory the kernel just mapped `RW`
-// into this process's own space. The `SpinLock` serialises all access to the
+// into this process's own space. The `Mutex` serialises all access to the
 // shared `HeapState`.
 unsafe impl<P: Pager, S: SpanStore> GlobalAlloc for Heap<P, S> {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
@@ -619,14 +628,14 @@ impl SpanStore for MappedSpanStore {
         // kernel — `Span`'s all-zero bit pattern is the valid empty slot), and
         // `META_BASE` is a multiple of the page size and thus of `align_of::<
         // Span>()`. The heap only ever reads the first `count <= cap` slots,
-        // and all access is serialised by the `Heap` `SpinLock`, so this is the
+        // and all access is serialised by the `Heap` `Mutex`, so this is the
         // sole live reference. When `cap == 0` the pointer is unused because
         // the slice is empty.
         unsafe { core::slice::from_raw_parts(META_BASE as *const Span, self.cap) }
     }
 
     fn slots_mut(&mut self) -> &mut [Span] {
-        // SAFETY: as for `slots`; `&mut self` and the `Heap` `SpinLock`
+        // SAFETY: as for `slots`; `&mut self` and the `Heap` `Mutex`
         // guarantee this is the only reference to the mapped metadata region.
         unsafe { core::slice::from_raw_parts_mut(META_BASE as *mut Span, self.cap) }
     }

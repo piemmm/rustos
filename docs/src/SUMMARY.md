@@ -73,6 +73,7 @@
   - [`tairix-multiboot2`](./lib/multiboot2.md)
   - [`tairix-net`](./lib/net.md)
   - [`tairix-netconfig`](./lib/netconfig.md)
+  - [`tairix-parallel`](./lib/parallel.md)
   - [`tairix-path`](./lib/path.md)
   - [`tairix-proglib`](./lib/proglib.md)
   - [`tairix-raid`](./lib/raid.md)

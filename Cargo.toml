@@ -80,6 +80,7 @@ members = [
     "lib/net",
     "lib/netconfig",
     "lib/pagezero",
+    "lib/parallel",
     "lib/partition",
     "lib/path",
     "lib/pci",

@@ -9,6 +9,10 @@ repository.workspace = true
 publish.workspace = true
 
 [dependencies]
+# The `JobRunner` contract a frost's independent pieces are handed through.
+# `default-features = false` takes the contract and the serial runner alone: this
+# crate creates no thread and must stay linkable where there is none (§17.4).
+tairix-parallel = { path = "../parallel", version = "=0.0.0", default-features = false }
 # The single shared theme definition (§10): a theme `Rgba` token meets the
 # compositing arithmetic at exactly one edge — `From<Rgba> for Color` — so the
 # window manager and the taskbar turn a theme colour into a renderable colour

@@ -35,6 +35,7 @@ use tairix_display::ChannelOrder;
 use tairix_font::{glyph_cache_budget, glyph_cache_candidate, set_glyph_cache, BitmapFont};
 use tairix_geometry::Scale;
 use tairix_log::DiscardSink;
+use tairix_parallel::JobRunner;
 use tairix_raster::{box_blur, BlurScratch, Color, Pixel, Rgba8Image, Surface};
 use tairix_reclaim::{PressureBand, ReclaimCache, ReclaimOwner, ReportedPressure};
 use tairix_theme::{TextRole, Theme};
@@ -505,6 +506,39 @@ fn warm_font_client() {
     ));
 }
 
+/// How many pieces the "split" rows below divide a pass into.
+const BAND_WIDTH: usize = 8;
+
+/// A runner that reports a width it does not have and runs every piece on the
+/// calling thread.
+///
+/// It isolates what *dividing* a pass costs from what running its pieces
+/// elsewhere saves. This host has no syscall trap and therefore no worker
+/// thread, so the saving cannot be measured here — the desktop's QEMU verticals
+/// measure that on real cores. What these rows must show is that the division
+/// itself is close to free.
+struct Banded(usize);
+
+// SAFETY: each index of `0..count` is passed exactly once, on the calling
+// thread, and every call has returned before `run` does.
+unsafe impl JobRunner for Banded {
+    fn width(&self) -> usize {
+        self.0
+    }
+
+    fn run(&self, count: usize, job: &(dyn Fn(usize) + Sync)) {
+        for index in 0..count {
+            job(index);
+        }
+    }
+}
+
+static BANDED: Banded = Banded(BAND_WIDTH);
+
+/// The two runners the families below measure through.
+const SERIAL_RUNNER: &'static dyn JobRunner = &tairix_parallel::SERIAL;
+const BANDED_RUNNER: &'static dyn JobRunner = &BANDED;
+
 fn blur(harness: &BenchHarness<'_>) -> Result<Vec<Measurement>, String> {
     struct BoxWarm {
         region: RefCell<Vec<Pixel>>,
@@ -527,7 +561,10 @@ fn blur(harness: &BenchHarness<'_>) -> Result<Vec<Measurement>, String> {
         region.first().copied()
     }
 
-    fn run_frost(radius: u32, warm: &FrostWarm) -> Option<Pixel> {
+    fn run_frost(
+        (radius, runner): (u32, &'static dyn JobRunner),
+        warm: &FrostWarm,
+    ) -> Option<Pixel> {
         let mut surface = warm.surface.borrow_mut();
         let mut scratch = warm.scratch.borrow_mut();
         surface.frost_region(
@@ -537,6 +574,7 @@ fn blur(harness: &BenchHarness<'_>) -> Result<Vec<Measurement>, String> {
             warm.height,
             radius,
             &mut scratch,
+            runner,
             |_, _| u8::MAX,
         );
         surface.get(0, 0)
@@ -571,7 +609,17 @@ fn blur(harness: &BenchHarness<'_>) -> Result<Vec<Measurement>, String> {
         rows.push(Measurement::new(
             format!("frost_region {width}x{height} r{radius}"),
             pixels,
-            harness.median_cycles(radius, run_frost, &frost_warm),
+            harness.median_cycles((radius, SERIAL_RUNNER), run_frost, &frost_warm),
+        ));
+    }
+    // The same frost split into pieces that still run on this thread, so the
+    // difference from the row above is what dividing the work costs and nothing
+    // else.
+    for radius in [4u32, 12, 24] {
+        rows.push(Measurement::new(
+            format!("frost_region {width}x{height} r{radius} split x{BAND_WIDTH}"),
+            pixels,
+            harness.median_cycles((radius, BANDED_RUNNER), run_frost, &frost_warm),
         ));
     }
     Ok(rows)
@@ -784,17 +832,22 @@ fn composite(harness: &BenchHarness<'_>) -> Result<Vec<Measurement>, String> {
     ];
     let mut rows = Vec::new();
     for (case, stack, damage) in cases {
-        let warm = scene(stack)?;
-        // The first present establishes the window's content buffer and
-        // dirties its whole client area; the second reports the steady-state
-        // damage this case actually recomposites per frame.
-        run(damage, &warm);
-        let pixels = run(damage, &warm);
-        rows.push(Measurement::new(
-            case.to_string(),
-            pixels,
-            harness.median_cycles(damage, run, &warm),
-        ));
+        for (label, runner) in [
+            (String::new(), SERIAL_RUNNER),
+            (format!(" split x{BAND_WIDTH}"), BANDED_RUNNER),
+        ] {
+            let warm = scene(stack, runner)?;
+            // The first present establishes the window's content buffer and
+            // dirties its whole client area; the second reports the steady-state
+            // damage this case actually recomposites per frame.
+            run(damage, &warm);
+            let pixels = run(damage, &warm);
+            rows.push(Measurement::new(
+                format!("{case}{label}"),
+                pixels,
+                harness.median_cycles(damage, run, &warm),
+            ));
+        }
     }
     Ok(rows)
 }
@@ -808,7 +861,7 @@ fn region_pixels(region: &Region) -> u64 {
 }
 
 /// A compositor holding a representative three-window stack.
-fn scene(stack: Stack) -> Result<CompositeWarm, String> {
+fn scene(stack: Stack, runner: &'static dyn JobRunner) -> Result<CompositeWarm, String> {
     PRESSURE.report(PressureBand::Normal);
     let mode = DisplayMode {
         width_px: SCREEN_W,
@@ -821,6 +874,7 @@ fn scene(stack: Stack) -> Result<CompositeWarm, String> {
     let frost = frost_cache(SEAT_PRIMARY, frame_bytes, &PRESSURE, &SINK);
     let mut compositor = Compositor::new(mode, Color::rgb(18, 20, 26), chrome, frost, &PRESSURE)
         .ok_or_else(|| format!("bench: no compositor for {SCREEN_W}x{SCREEN_H}"))?;
+    compositor.set_job_runner(runner);
 
     let layout = [
         (Point::new(40, 60), 900u32, 560u32),

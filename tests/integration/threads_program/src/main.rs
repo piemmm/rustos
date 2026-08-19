@@ -25,6 +25,11 @@
 //! * **`exitearly`** — a thread that ends itself with `thread_exit` instead of
 //!   returning a value: the joiner must be released by the kernel's clear-on-exit
 //!   wake and report `Died`, never wait forever.
+//! * **`parallel <workers> <rounds>`** — builds a real `lib/parallel` worker
+//!   pool and runs a divided pass through it `rounds` times, comparing every
+//!   round against the same pass run on one thread. Proves the fork-join
+//!   protocol itself: the epoch wake, the claim, the barrier over workers, the
+//!   erased dispatch pointer's lifetime, nested dispatch, and the join at drop.
 //! * **`groupexit <code>`** — parks a sibling thread on a condition variable
 //!   nobody will ever notify, then `exit(code)`. The process can only be reaped
 //!   if the group exit drove that parked sibling to its stopping point; a fan-out
@@ -49,6 +54,7 @@ mod program {
     use alloc::boxed::Box;
     use alloc::vec::Vec;
 
+    use tairix_parallel::JobRunner;
     use tairix_rt::sync::{Condvar, Mutex};
     use tairix_rt::thread::{Builder, JoinError, Thread};
 
@@ -77,6 +83,12 @@ mod program {
     const FAIL_PARENT: i32 = 28;
     /// Exit code: an unknown or absent role — a wiring defect.
     const FAIL_ROLE: i32 = 29;
+    /// Exit code: the pool was granted no worker thread, so the `parallel` role
+    /// would have proved nothing about running pieces elsewhere.
+    const FAIL_POOL: i32 = 30;
+    /// Exit code: a divided pass did not produce what the undivided one did —
+    /// a piece run twice, a piece not run, or a race between them.
+    const FAIL_PARALLEL: i32 = 31;
 
     /// The counter every `counter` thread contends for. A single shared word
     /// behind a futex mutex: if the threads did not share one address space the
@@ -332,6 +344,7 @@ mod program {
         b"/bin/th-rendezvous",
         b"/bin/th-tls",
         b"/bin/th-exitearly",
+        b"/bin/th-parallel",
         b"/bin/th-groupexit",
     ];
 
@@ -367,6 +380,127 @@ mod program {
         0
     }
 
+    /// One piece of the `parallel` role's pass: where its slots start in the
+    /// whole buffer, and the slots themselves.
+    struct Piece<'a> {
+        base: u64,
+        slots: &'a mut [u64],
+    }
+
+    /// The value slot `index` must end up holding. Deliberately a few dependent
+    /// operations rather than one, so a piece takes long enough for the pieces to
+    /// genuinely overlap in time.
+    fn slot_value(index: u64) -> u64 {
+        let mut acc = index ^ 0x9E37_79B9_7F4A_7C15;
+        for _ in 0..64 {
+            acc = acc
+                .rotate_left(7)
+                .wrapping_mul(0x2545_F491_4F6C_DD1D)
+                .wrapping_add(index);
+        }
+        acc
+    }
+
+    /// Run the pass over `buffer` through `runner`, dividing it into `pieces`.
+    ///
+    /// Each slot is *added* to rather than assigned, so a piece run twice doubles
+    /// its slots and a piece not run leaves them zero: both show up as a
+    /// mismatch, which an assignment would hide.
+    fn stamp(buffer: &mut [u64], runner: &dyn tairix_parallel::JobRunner, pieces: usize) {
+        let per = buffer.len().div_ceil(pieces.max(1)).max(1);
+        let mut split: Vec<Piece<'_>> = Vec::new();
+        let mut base = 0u64;
+        for slots in buffer.chunks_mut(per) {
+            let len = slots.len() as u64;
+            split.push(Piece { base, slots });
+            base = base.wrapping_add(len);
+        }
+        tairix_parallel::for_each(runner, &mut split, &|piece| {
+            for (offset, slot) in piece.slots.iter_mut().enumerate() {
+                let index = piece.base.wrapping_add(offset as u64);
+                *slot = slot.wrapping_add(slot_value(index));
+            }
+        });
+    }
+
+    /// The `parallel` role: prove the fork-join pool on real threads.
+    fn parallel() -> i32 {
+        let (Some(workers), Some(rounds)) = (
+            tairix_rt::arg(2).and_then(parse_u64),
+            tairix_rt::arg(3).and_then(parse_u64),
+        ) else {
+            return FAIL_ARGS;
+        };
+        /// Slots the pass covers. Large enough that a piece is real work, small
+        /// enough to stay well inside the fixture's frame budget.
+        const SLOTS: usize = 2048;
+
+        let pool = tairix_parallel::Pool::with_workers(workers as usize);
+        if pool.worker_count() == 0 {
+            return FAIL_POOL;
+        }
+        let pieces = pool.width() * 3;
+
+        // Dispatched before anything else, so the workers have had as little
+        // chance to reach their loop as the runtime allows. A pool that let a
+        // dispatch begin before its workers were up would wait here for an
+        // acknowledgement none of them could give, and this role would hang
+        // instead of failing — which is exactly how that defect showed itself.
+        let mut first = alloc::vec![0u64; 64];
+        stamp(&mut first, &pool, pieces);
+        if first.iter().any(|slot| *slot == 0) {
+            return FAIL_PARALLEL;
+        }
+
+        // The oracle: the very same pass on this thread alone.
+        let mut oracle = alloc::vec![0u64; SLOTS];
+        stamp(&mut oracle, &tairix_parallel::SERIAL, pieces);
+
+        for _ in 0..rounds {
+            let mut divided = alloc::vec![0u64; SLOTS];
+            stamp(&mut divided, &pool, pieces);
+            if divided != oracle {
+                return FAIL_PARALLEL;
+            }
+        }
+
+        // A dispatch issued from inside a piece must run on the calling thread
+        // rather than wait for the pool it is occupying.
+        let mut outer = alloc::vec![0u64; 16];
+        let nested_ok = core::sync::atomic::AtomicBool::new(true);
+        {
+            let mut split: Vec<Piece<'_>> = outer
+                .chunks_mut(4)
+                .enumerate()
+                .map(|(index, slots)| Piece {
+                    base: index as u64,
+                    slots,
+                })
+                .collect();
+            tairix_parallel::for_each(&pool, &mut split, &|piece| {
+                let mut inner = alloc::vec![0u64; 8];
+                stamp(&mut inner, &pool, 4);
+                if inner.iter().any(|slot| *slot == 0) {
+                    nested_ok.store(false, core::sync::atomic::Ordering::Relaxed);
+                }
+                for slot in piece.slots.iter_mut() {
+                    *slot = 1;
+                }
+            });
+        }
+        if !nested_ok.load(core::sync::atomic::Ordering::Relaxed)
+            || outer.iter().any(|slot| *slot != 1)
+        {
+            return FAIL_PARALLEL;
+        }
+
+        // Dropping the pool stops and joins every worker. A worker that never
+        // woke, or a join that never completed, hangs here and the vertical
+        // reports the timeout rather than passing.
+        drop(pool);
+        0
+    }
+
     /// Program entry point: dispatch on the role argument the registry row
     /// pinned (`arg(1)`). An absent or unknown role is a wiring defect and a
     /// distinct failure code (fail closed, never a default role).
@@ -377,6 +511,7 @@ mod program {
             Some(b"rendezvous") => rendezvous(),
             Some(b"tls") => tls(),
             Some(b"exitearly") => exit_early(),
+            Some(b"parallel") => parallel(),
             Some(b"groupexit") => group_exit(),
             _ => FAIL_ROLE,
         }

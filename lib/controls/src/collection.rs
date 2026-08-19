@@ -2491,9 +2491,19 @@ fn paint_selection_fill(
     let radius = plate_radius(scale, theme);
     let blur = scale.scale_length(theme.metrics().selection_backdrop_blur);
     let mut scratch = BlurScratch::new();
-    surface.frost_region(x, y, w, h, blur, &mut scratch, |lx, ly| {
-        div255(u32::from(round_rect_coverage(lx, ly, w, h, radius)) * u32::from(fade))
-    });
+    // Composed on the calling thread: a selection mark is a small rounded plate,
+    // far below the pixel count that makes handing pieces to another core worth
+    // its dispatch.
+    surface.frost_region(
+        x,
+        y,
+        w,
+        h,
+        blur,
+        &mut scratch,
+        &tairix_parallel::SERIAL,
+        |lx, ly| div255(u32::from(round_rect_coverage(lx, ly, w, h, radius)) * u32::from(fade)),
+    );
     fill_panel(
         surface,
         rect,

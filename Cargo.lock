@@ -785,6 +785,7 @@ dependencies = [
  "tairix-geometry",
  "tairix-icon",
  "tairix-input",
+ "tairix-parallel",
  "tairix-raster",
  "tairix-theme",
  "tairix-util",
@@ -874,6 +875,7 @@ dependencies = [
  "tairix-help",
  "tairix-icon",
  "tairix-log",
+ "tairix-parallel",
  "tairix-procinfo",
  "tairix-proglib",
  "tairix-raster",
@@ -2038,6 +2040,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "tairix-parallel"
+version = "0.0.0"
+dependencies = [
+ "tairix-abi",
+ "tairix-rt",
+]
+
+[[package]]
 name = "tairix-partition"
 version = "0.0.0"
 dependencies = [
@@ -2134,6 +2144,7 @@ dependencies = [
 name = "tairix-raster"
 version = "0.0.0"
 dependencies = [
+ "tairix-parallel",
  "tairix-reclaim",
  "tairix-rng",
  "tairix-theme",
@@ -4499,6 +4510,7 @@ dependencies = [
 name = "tairix-test-threads"
 version = "0.0.0"
 dependencies = [
+ "tairix-parallel",
  "tairix-rt",
 ]
 
@@ -5078,6 +5090,7 @@ dependencies = [
  "tairix-icon",
  "tairix-input",
  "tairix-log",
+ "tairix-parallel",
  "tairix-raster",
  "tairix-reclaim",
  "tairix-theme",
@@ -5127,6 +5140,7 @@ dependencies = [
  "tairix-log",
  "tairix-mkimage",
  "tairix-net",
+ "tairix-parallel",
  "tairix-proglib",
  "tairix-qemu",
  "tairix-raster",

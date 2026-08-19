@@ -25,6 +25,11 @@
 //! * `exitearly` — a thread that ends itself with `thread_exit` releases its
 //!   joiner (through the kernel's word, not a store of its own) and reports
 //!   that it produced no value;
+//! * `parallel` — a real `lib/parallel` worker pool runs a divided pass many
+//!   times and every round matches the same pass run on one thread, proving the
+//!   fork-join protocol on real threads: the epoch wake, the claim, the barrier
+//!   over workers, the erased dispatch pointer's lifetime, nested dispatch, and
+//!   the join at drop.
 //! * `groupexit` — a sibling parked in the kernel on a condition variable
 //!   nobody notifies, then `exit(code)`: the process is reapable only because
 //!   the group exit reached that parked thread.
@@ -104,6 +109,16 @@ const COUNTER_INCREMENTS: u64 = 250;
 /// Threads the `tls` role runs, each with its own thread-local block.
 const TLS_THREADS: u64 = 3;
 
+/// Worker threads the `parallel` role's pool asks the kernel for. Three beside
+/// the dispatching thread, so the fork-join barrier genuinely waits for several
+/// acknowledgements while staying inside the frame pool below.
+const PARALLEL_WORKERS: u64 = 3;
+
+/// Rounds the `parallel` role runs its divided pass for. Enough repetitions that
+/// a lost wake or a mis-claimed piece cannot pass by luck; the pass itself is
+/// small.
+const PARALLEL_ROUNDS: u64 = 32;
+
 /// The status the `groupexit` role ends its process with. Named once here and
 /// threaded into *both* the `groupexit` row (the code it exits with) and the
 /// `parent` row (the code it must observe), so the two cannot drift.
@@ -136,6 +151,10 @@ static COUNTER_THREADS_ARG: [u8; DEC_MAX] = dec_bytes(COUNTER_THREADS);
 static COUNTER_INCREMENTS_ARG: [u8; DEC_MAX] = dec_bytes(COUNTER_INCREMENTS);
 /// [`TLS_THREADS`] as a decimal argument-vector value.
 static TLS_THREADS_ARG: [u8; DEC_MAX] = dec_bytes(TLS_THREADS);
+/// [`PARALLEL_WORKERS`] as a decimal argument-vector value.
+static PARALLEL_WORKERS_ARG: [u8; DEC_MAX] = dec_bytes(PARALLEL_WORKERS);
+/// [`PARALLEL_ROUNDS`] as a decimal argument-vector value.
+static PARALLEL_ROUNDS_ARG: [u8; DEC_MAX] = dec_bytes(PARALLEL_ROUNDS);
 /// [`GROUP_EXIT_CODE`] as a decimal argument-vector value.
 static GROUP_EXIT_CODE_ARG: [u8; DEC_MAX] = dec_bytes(GROUP_EXIT_CODE);
 
@@ -320,7 +339,7 @@ fn parent_caps() -> CapabilitySet {
 /// parent's child paths against: one `rxe` image, one row per role, each
 /// pinning its role word and its numeric parameters through the registered
 /// default argument vector.
-static CHILD_PROGRAMS: [EmbeddedProgram; 5] = [
+static CHILD_PROGRAMS: [EmbeddedProgram; 6] = [
     EmbeddedProgram {
         path: b"/bin/th-counter",
         rxe: PROGRAM_RXE,
@@ -349,6 +368,17 @@ static CHILD_PROGRAMS: [EmbeddedProgram; 5] = [
         rxe: PROGRAM_RXE,
         caps: &[],
         args: &[b"th", b"exitearly"],
+    },
+    EmbeddedProgram {
+        path: b"/bin/th-parallel",
+        rxe: PROGRAM_RXE,
+        caps: &[],
+        args: &[
+            b"th",
+            b"parallel",
+            &PARALLEL_WORKERS_ARG,
+            &PARALLEL_ROUNDS_ARG,
+        ],
     },
     EmbeddedProgram {
         path: b"/bin/th-groupexit",

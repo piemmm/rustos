@@ -9,6 +9,10 @@ repository.workspace = true
 publish.workspace = true
 
 [dependencies]
+# The `JobRunner` contract a frosted selection mark names when it says it is
+# composed on the calling thread. `default-features = false`: no thread machinery
+# is linked, only the contract and the serial runner.
+tairix-parallel = { path = "../parallel", version = "=0.0.0", default-features = false }
 # Shared logical geometry (`Rect`/`Scale`): a drawn control lays its anatomy
 # out in logical pixels and converts to physical through the one shared scale.
 tairix-geometry = { path = "../geometry", version = "=0.0.0" }

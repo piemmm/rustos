@@ -1,6 +1,6 @@
 # FIX-DESKTOP-SPEEDUP — Software-compositor and GUI redraw performance
 
-Status: **A done, B done, C mostly done, D done** (B.5 dithers every blended
+Status: **A done, B done, C mostly done, D done, I done** (B.5 dithers every blended
 pixel and B.6 composes a segment a layer at a time; C.0, C.1, C.2, C.4b, C.4c,
 C.5 landed — every control family reports what it repaints from both input
 paths, and a host now reports its own two kinds of change through the same two
@@ -17,7 +17,9 @@ per rectangle nor copies a bounding box spanning them; E.3/E.4 (frame
 pacing) planned. H done — the kernel no longer re-freezes a task's whole
 address-space snapshot when a syscall or fault maps or releases a region it
 can name, which is what made a popup-window menu cost ~300 ms on a Pi 4B.
-Stages A–E need no hardware acceleration, no kernel change, and no new
+I done — a composite is spread across a worker pool sized from the discovered
+online CPU count, bit-identically and with the small-repaint path untouched.
+Stages A–E and I need no hardware acceleration, no kernel change, and no new
 syscall; F needs a `plans/FIX-HARDWARE-FEATURES.md` correction; G is gated on
 a User decision (§15.7) because it is kernel work.
 
@@ -1347,6 +1349,61 @@ double-buffer tests unchanged). What remains is pacing:
   deadline never busy-waits (assert on the wait call, not on timing).
 
 **Acceptance:** CPU at idle unchanged from parked.
+
+---
+
+## Stage I — Compose on every core the machine has  **[done]**
+
+The desktop composited on one core while the rest of the machine idled. Now the
+rows of a dirty rectangle — independent by construction, since each writes one
+back-buffer row and the scan-out bytes of that row and reads only immutable
+window content — are composed in bands across a worker pool, and a frost's
+column pieces with them. `lib/parallel` is the engine: the `JobRunner` contract
+a pass expresses its independent work through, the one index-to-element erasure,
+the one split policy, and the fork-join pool over `lib/rt` threads whose workers
+park on a futex and never spin. Detail: `docs/src/lib/parallel.md`.
+
+- **Where it is installed.** `Compositor::set_job_runner`; the default composes
+  on the calling thread, which is what a single-CPU machine, a headless build,
+  and a process the kernel would grant no thread all keep. The session sizes the
+  pool from the online CPU count it reads through the System Information API —
+  never a constant — and states on `stderr` when it was granted fewer threads
+  than the machine has cores.
+- **Bit-identity, not near-identity.** The compositor composes each scene twice
+  in its own tests — once whole, once split into bands that run backwards — and
+  compares the scan-out frame, the back buffer, and every counted pixel of
+  `FrameStats`; the frost does the same over rectangles, radii, coverages and
+  random kept blocks. Each band tallies its own work and folds it in once it is
+  done, so a split frame reports exactly what a whole one does.
+- **What splitting costs.** A rectangle below one band's pixel budget is composed
+  on the calling thread with no atomics, so a pointer-motion repaint pays what it
+  always did. Measured on a development host, dividing eight ways while still
+  running the pieces on one thread leaves opaque and translucent full-screen
+  composites within 1% and a full-screen backdrop blur 2.6% behind — the price
+  the other seven participants are bought with. A frost asks for exactly one
+  piece per participant rather than several, because each piece re-primes its
+  sliding window at its own first column.
+- **Defects fixed on the way** (§2.18): the `lib/rt` global allocator guarded its
+  free-span state with a **spin** lock, whose own rustdoc still claimed userland
+  processes were single-threaded. Two threads allocating at once therefore
+  burned a whole slice spinning through a critical section that maps pages — and
+  on one core without preemption could not make progress at all, which is how it
+  presented: a wedge, not a slowdown. It now takes the runtime's futex `Mutex`,
+  which parks. Separately, the pool's dispatch barrier is over *workers*, so
+  `Pool::with_workers` waits for every worker to read its starting epoch before
+  returning; without that a worker that had not run yet would read the epoch
+  already bumped, decide the dispatch was one it had seen, and park without
+  acknowledging.
+- **Verticals.** The `parallel` role of `threads_qemu_{aarch64,riscv64,x86_64}`
+  runs a divided pass through a real multi-worker pool many times over, compares
+  every round against the same pass on one thread, dispatches before the workers
+  can have reached their loop, allocates on workers inside a nested dispatch, and
+  drops the pool to join them.
+
+**Still open:** the pool serves the compositor alone. `lib/cpuops`-dispatched
+per-pixel kernels (Stage F) are orthogonal and compose with it; `lib/controls`'
+selection frost stays on the calling thread, which is right for a small rounded
+plate.
 
 ---
 

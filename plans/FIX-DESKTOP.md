@@ -269,9 +269,12 @@ made **in place**; no `spawn2` alias, no compatibility shim.
   parent/child window-teardown (`CHILD_TOKEN`) and `wait` reaping, and
   re-introduces a blocking hop somewhere. The kernel-side async spawn
   keeps the desktop the parent and changes only *timing*.
-- **Spawning on a second desktop thread.** Rejected: userland has no
-  thread primitive, and it would still block *a* desktop task on I/O;
-  the defect belongs to the launch path, and that is where it is fixed.
+- **Spawning on a second desktop thread.** Rejected: it would still block *a*
+  desktop task on I/O, and every other caller of `spawn` would keep the freeze.
+  The defect belongs to the launch path, so that is where it is fixed — and once
+  fixed there, no caller needs a thread for it. (Userland does now have threads,
+  `plans/THREADS.md`; the rejection stands on its own merits and never rested on
+  their absence.)
 
 ### 2.5 The picker listing (same defect, same principle)
 
@@ -606,6 +609,28 @@ Each stage is independently reviewable and must leave the whole-project
 - **Tests:** navigating a large directory in the picker does not block
   the compositor (present/input advances mid-listing); a refused listing
   shows nothing.
+- **Mechanism now available.** Userland has threads (`plans/THREADS.md`), and
+  a worker's completion can wake the session's existing wait-set with no new
+  ABI: a pipe's read end is a `WaitSourceKind::Stream` member, threads share
+  the descriptor table, so a worker writes one byte and the loop wakes on it.
+  So the *transport* question is settled; two design questions are not, and
+  both were fixed by decisions elsewhere, so they are for the User to reopen
+  rather than for an implementer to take (§15.7):
+  1. **The `DirectorySource` contract is synchronous by construction.**
+     `lib/browse`'s engine calls the source from inside
+     `SessionPicker::handle_click` / `handle_key` and expects the entries
+     back. Either resolution in §2.5 changes that contract and gives the
+     picker a *pending* state it does not have today — a user-visible
+     behaviour change (what a click shows while the listing is in flight),
+     not an internal refactor. Which of the two forms §2.5 offers is the one
+     to build has never been decided.
+  2. **The wallpaper and icon decode share one sandbox worker, deliberately.**
+     The session holds it as `Rc<RefCell<ParserSandbox<…>>>` — "never a second
+     one spawned for wallpaper alone" — which is not `Send`. Moving the
+     wallpaper's read-and-place off the loop therefore means either a second
+     sandbox worker, contradicting that decision, or making the one handle
+     cross-thread, which changes the icon path with it. Both are reversals of
+     a stated design, not implementation details.
 
 ### DESK-5 — Verified shared image cache (`kernel/mem`)
 - **Deliverables:** the per-boot, content-hash-keyed verified image

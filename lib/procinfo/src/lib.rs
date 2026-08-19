@@ -141,7 +141,7 @@ pub use resinfo::{
     ResourceResponse, ResponsePayload, Sensitivity, Unit, ValueKind, MAX_INFO_VALUE_LEN,
     MAX_METRIC_NAME_LEN, MAX_QUERY_LEN, RESINFO_VERSION_CURRENT, RESINFO_VERSION_V1,
 };
-pub use resolve::{resolve, ResolveInfoError};
+pub use resolve::{cpu_info, resolve, ResolveInfoError};
 pub use resolver::{for_each_resolver_server, RESOLVER_SERVER_PAGE};
 pub use transport::{Output, Transport};
 pub use users::{for_each_user, user_name, user_names, USER_DIRECTORY_PAGE};

@@ -38,6 +38,41 @@ and a blend rather than a coordinate conversion, a layer decision, and a
 `y * stride + x * 4` offset recomputed per pixel. Only windows whose
 bounds overlap the dirty rectangle are considered at all.
 
+## Spread across the machine's cores
+
+A composited row writes one row of the back buffer and the scan-out bytes of that
+row, and reads only immutable window content — so the rows of a dirty rectangle are
+independent by construction, and bands of them can be composed at the same time on
+different cores. `Compositor::set_job_runner` is where an embedder hands over the
+worker pool that runs them (`lib/parallel`); the default runs every band on the
+calling thread, which is what a single-CPU machine, a headless build, and a process
+the kernel would grant no thread all keep.
+
+Splitting changes wall-clock cost and nothing else. The composed pixels are
+bit-for-bit what one thread produces whatever order the bands run in, which the
+compositor's own tests assert by composing each scene twice — once whole, once split
+into bands that run backwards — and comparing the scan-out frame, the back buffer,
+and every counted pixel of `FrameStats`.
+
+Two things decide whether a rectangle is split at all:
+
+- **A band must be worth its hand-off.** A dispatch costs a wake syscall and the
+  workers' park syscalls, so a rectangle below one band's pixel budget is composed
+  on the calling thread with no atomics. That is why a pointer-motion repaint of a
+  few rows costs what it always did, while a full-screen recomposite goes wide.
+- **The backdrop blur splits differently.** A frost's pieces are column divisions
+  of the window's rectangle, because the vertical pass slides a window down each
+  column; the mix back over the surface is split by *rows* instead, since that is
+  what it writes. Each piece re-primes its sliding window at its own first column,
+  which costs `radius` samples per row the undivided pass paid once — so a frost
+  asks for exactly one piece per participant rather than several.
+
+Measured on a development host (`cargo xtask bench`), dividing a pass eight ways
+while still running the pieces on one thread — which isolates what dividing costs
+from what running elsewhere saves — leaves an opaque or translucent full-screen
+composite within 1% of undivided, and a full-screen backdrop blur 2.6% behind. That
+is the price the other seven participants are bought with.
+
 Within a row, the columns between two copied opaque runs are one **segment**,
 and a segment is composed a *layer* at a time across its whole width — the
 base fill, the desktop row, each window row back to front, then the cursor —
@@ -701,6 +736,10 @@ wrapped one would read as a suspiciously small frame.
 | `dirty_rects` | Dirty rectangles the frame recomposed. |
 | `present_calls` | Calls the frame made into the display driver to publish itself — the round trips of the section above. |
 | `chrome_hits` / `chrome_misses` | Window-furniture lookups served from the retained cache versus rendered again, whether the cache then kept them or refused. |
+
+The counts are independent of how the frame was divided: each band tallies its own
+work and folds it in once it is done, so a band never touches shared state while it
+runs and a split frame reports exactly what a whole one does.
 
 The reading that matters is **damaged vs blended vs screen pixels**: damage
 far below the screen means the damage tracking is working, and blends far

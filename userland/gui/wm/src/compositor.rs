@@ -29,6 +29,7 @@ use tairix_controls::{damage, FurniturePart, TitleBarEvent, WindowFrame};
 use tairix_cursor::{CursorImage, PlacedCursor};
 use tairix_icon::IconKind;
 use tairix_input::{InputEvent, Key};
+use tairix_parallel::JobRunner;
 use tairix_raster::BlurScratch;
 use tairix_reclaim::{CacheAccounting, PressureBand, PressureGauge, ReclaimCache, Served};
 use tairix_theme::{CursorKind, Theme};
@@ -53,6 +54,16 @@ use crate::window::{Window, WindowId, WindowRow};
 /// every healthy frame, so it allocates nothing at all, and when it does
 /// fill it holds only the windows covering the damage.
 type ChromeFallback = Vec<(WindowId, WindowChrome)>;
+
+/// The fewest pixels a band of a composited rectangle carries before it is worth
+/// handing to another core.
+///
+/// A dispatch costs a wake syscall and the workers' park syscalls; a band of this
+/// many pixels costs hundreds of microseconds of blending, which dwarfs them
+/// several times over even on a slow core. Below it the rectangle is composed on
+/// the calling thread with no atomics at all, which is why a pointer-motion
+/// repaint of a few rows pays exactly what it did before a pool existed.
+const MIN_PARALLEL_BAND_PX: usize = 16_384;
 
 /// Which end of the z-order a restack moves a window's family to.
 #[derive(Copy, Clone, Eq, PartialEq)]
@@ -155,6 +166,10 @@ pub struct Compositor {
     /// [`compose_plan`](Self::compose_plan), so an index can never carry a
     /// decision taken about a window that has since moved or gone.
     frost_decision: Vec<Option<FrostPlan>>,
+    /// Where each composite's per-pixel work is run
+    /// ([`set_job_runner`](Self::set_job_runner)). The calling thread alone until
+    /// an embedder hands over a worker pool.
+    runner: &'static dyn JobRunner,
     damage: Region,
     /// Where a segment of a damaged rectangle still has to compose the layers
     /// below a frosted window: the rectangle less whatever the frost is about
@@ -244,6 +259,7 @@ impl Compositor {
             blur_scratch: BlurScratch::new(),
             pending_frost: Vec::new(),
             frost_decision: Vec::new(),
+            runner: &tairix_parallel::SERIAL,
             damage: Region::new(),
             plane: Region::new(),
             stats: FrameCounters::new(),
@@ -2710,6 +2726,7 @@ impl Compositor {
         let opaque_runs = self.opaque_runs;
         #[cfg(not(test))]
         let opaque_runs = true;
+        let runner = self.runner;
         let Self {
             mode,
             order,
@@ -2739,11 +2756,8 @@ impl Compositor {
         else {
             return;
         };
-        let (Ok(left), Some(first_byte), Some(row_bytes)) = (
-            u32::try_from(area.left()),
-            first_col.checked_mul(4),
-            cols.checked_mul(4),
-        ) else {
+        let (Some(first_byte), Some(row_bytes)) = (first_col.checked_mul(4), cols.checked_mul(4))
+        else {
             return;
         };
         // Which window draws here and which furniture it draws from are
@@ -2757,61 +2771,92 @@ impl Compositor {
                 resolve_chrome(chrome, &epoch, window.id(), fallback),
             ))
         }));
-        let mut rows: Vec<WindowRow<'_>> = Vec::with_capacity(span.len());
-        for y in area.top()..area.bottom() {
-            let Ok(py) = u32::try_from(y) else { continue };
-            rows.clear();
-            rows.extend(
-                sources
-                    .iter()
-                    .filter_map(|(window, chrome)| window.row(y, *chrome)),
-            );
-            let dither = DitherRow::at(py);
-            let cursor_row = cursor.and_then(|c| c.local_row(y).map(|ly| (c, ly)));
-            let desktop_row = desktop.map(|layer| crate::surface::row(layer, py));
-            let Some((_, back_row)) = back.row_span_mut(py, left, area.width) else {
-                continue;
-            };
-            // Resolved even when this segment does not encode, so every
-            // segment over one rectangle keeps or skips exactly the same
-            // rows and the back buffer can never drift from the frame.
-            let Some(frame_row) = (py as usize)
-                .checked_mul(stride)
-                .and_then(|row_start| row_start.checked_add(first_byte))
-                .and_then(|start| frame.get_mut(start..start.checked_add(row_bytes)?))
-            else {
-                continue;
-            };
-            // The screen reveal is applied as a pixel is encoded, so a fade
-            // in flight has no run a plain copy could serve; the cursor is
-            // resolved per row, so only the few rows it draws on lose the
-            // fast path.
-            let layers = RowLayers {
-                under,
-                desktop: desktop_row,
-                windows: &rows,
-                cursor: cursor_row,
-                front: rows.last().filter(|_| {
-                    opaque_runs && cursor_row.is_none() && (!encode || reveal == u8::MAX)
-                }),
-            };
-            let targets = RowTargets {
-                back: back_row,
-                frame: encode.then_some(frame_row),
-            };
-            let work = compose_row(
-                &layers,
-                targets,
-                area.left(),
-                order,
-                RowRound { reveal, dither },
-            );
-            if encode {
-                stats.add_encoded(u64::from(area.width));
-            }
-            stats.add_blended(work.blended);
-            stats.add_opaque(work.copied);
+        let shared = SpanShared {
+            area,
+            under,
+            desktop,
+            sources: &sources,
+            cursor,
+            order,
+            reveal,
+            opaque_runs,
+            encode,
+            stride,
+            first_byte,
+            row_bytes,
+        };
+        // The rectangle is screen-clipped before it gets here, so its rows are
+        // exactly the back buffer's and the conversion cannot lose one.
+        let (Ok(top), Ok(bottom)) = (u32::try_from(area.top()), u32::try_from(area.bottom()))
+        else {
+            return;
+        };
+        let rows = usize::try_from(bottom.saturating_sub(top)).unwrap_or(0);
+        if rows == 0 {
+            return;
         }
+        // A band is worth handing off only once it carries enough pixels to
+        // dwarf the dispatch, so the grain is a pixel budget expressed in this
+        // rectangle's own rows: a narrow rectangle needs many rows to reach it,
+        // a full-width one needs few.
+        let count =
+            tairix_parallel::bands(runner, rows, MIN_PARALLEL_BAND_PX.div_ceil(cols.max(1)));
+        let per_band = u32::try_from(rows.div_ceil(count.max(1)))
+            .unwrap_or(u32::MAX)
+            .max(1);
+        // Resolved once for the whole rectangle rather than per row, and the
+        // band split below divides exactly this region: a segment that cannot
+        // reach its scan-out bytes composes nothing, so the back buffer can
+        // never drift from the frame.
+        let (Some(band_bytes), Some(region)) = (
+            usize::try_from(per_band)
+                .ok()
+                .and_then(|n| n.checked_mul(stride)),
+            frame_region(frame, top, bottom, stride),
+        ) else {
+            return;
+        };
+        // Both splits step the same number of rows over the same row span, so
+        // band *i* owns the scan-out bytes of exactly the rows it composes.
+        let mut bands = back
+            .row_bands_mut(top..bottom, per_band)
+            .zip(region.chunks_mut(band_bytes))
+            .map(|(back, frame)| SpanBand {
+                back,
+                frame,
+                work: BandWork::default(),
+            });
+        if count <= 1 {
+            // One band is the whole rectangle: no vector, no dispatch, and the
+            // same per-row body a wide composite runs.
+            if let Some(mut only) = bands.next() {
+                compose_band(&shared, &mut only);
+                only.work.record(stats);
+            }
+            return;
+        }
+        let mut split: Vec<SpanBand<'_>> = bands.collect();
+        tairix_parallel::for_each(runner, &mut split, &|band| compose_band(&shared, band));
+        for band in &split {
+            band.work.record(stats);
+        }
+    }
+
+    /// Spread each composite's per-pixel work across `runner`'s participants.
+    ///
+    /// A composite is a stack of passes over rectangles whose rows are
+    /// independent by construction — each writes one row of the back buffer and
+    /// the scan-out bytes of that row, and reads only immutable window content —
+    /// so handing bands of them to other cores changes the wall-clock cost and
+    /// nothing else: the composed pixels are bit-for-bit what one thread
+    /// produces, whatever order the bands run in.
+    ///
+    /// The default is [`tairix_parallel::SERIAL`], which composes on the calling
+    /// thread. A single-CPU machine, a headless build, and a process the kernel
+    /// would grant no thread all keep exactly that, and pay nothing for the
+    /// machinery they do not use.
+    pub fn set_job_runner(&mut self, runner: &'static dyn JobRunner) {
+        self.runner = runner;
     }
 
     /// Frost the back buffer inside the rectangle of the window at `index`,
@@ -2844,6 +2889,7 @@ impl Compositor {
             .windows
             .get(index)
             .map_or(0, |window| self.blur_radius_px(window));
+        let runner = self.runner;
         let Self {
             windows,
             back,
@@ -2892,6 +2938,7 @@ impl Compositor {
             rows,
             radius,
             blur_scratch,
+            runner,
             |lx, ly| {
                 shape.map_or(255, |shape| {
                     shape.coverage(shape_x.saturating_add(lx), shape_y.saturating_add(ly))
@@ -2937,6 +2984,144 @@ struct RowTargets<'a> {
 struct RowRound {
     reveal: u8,
     dither: DitherRow,
+}
+
+/// Everything a band of one segment reads. Identical for every band of it, so it
+/// is resolved once per rectangle and shared.
+struct SpanShared<'a> {
+    area: Rect,
+    /// What the layers compose over, or `None` to continue from the back buffer.
+    under: Option<Pixel>,
+    desktop: Option<&'a Surface>,
+    /// Each covering window with the furniture it draws from.
+    sources: &'a [(&'a Window, Option<&'a WindowChrome>)],
+    cursor: Option<&'a PlacedCursor>,
+    order: ChannelOrder,
+    reveal: u8,
+    opaque_runs: bool,
+    encode: bool,
+    /// Scan-out bytes per screen row.
+    stride: usize,
+    /// Byte offset of the rectangle's first column within a scan-out row.
+    first_byte: usize,
+    /// Bytes one row of the rectangle occupies.
+    row_bytes: usize,
+}
+
+/// One band of a segment: the back-buffer rows it owns, the scan-out bytes of
+/// exactly those rows, and what composing them cost.
+struct SpanBand<'a> {
+    back: tairix_raster::RowBand<'a>,
+    frame: &'a mut [u8],
+    work: BandWork,
+}
+
+/// What composing one band cost, tallied in the band and folded into the frame's
+/// counters once it is done — so a band never touches shared state while it runs.
+#[derive(Default)]
+struct BandWork {
+    blended: u64,
+    copied: u64,
+    encoded: u64,
+}
+
+impl BandWork {
+    /// Fold this band's cost into the frame's counters.
+    fn record(&self, stats: &mut FrameCounters) {
+        stats.add_blended(self.blended);
+        stats.add_opaque(self.copied);
+        stats.add_encoded(self.encoded);
+    }
+}
+
+/// The scan-out bytes of rows `[top, bottom)`, or `None` when the frame does not
+/// hold them.
+fn frame_region(frame: &mut [u8], top: u32, bottom: u32, stride: usize) -> Option<&mut [u8]> {
+    let start = usize::try_from(top).ok()?.checked_mul(stride)?;
+    let end = usize::try_from(bottom).ok()?.checked_mul(stride)?;
+    frame.get_mut(start..end)
+}
+
+/// Compose one band's rows of a segment.
+///
+/// This is the whole of a segment's per-row work, whichever way the rectangle was
+/// split: a rectangle composed on the calling thread is one band through here, and
+/// a rectangle spread across cores is several. There is no second row loop.
+fn compose_band(shared: &SpanShared<'_>, band: &mut SpanBand<'_>) {
+    let SpanShared {
+        area,
+        under,
+        desktop,
+        sources,
+        cursor,
+        order,
+        reveal,
+        opaque_runs,
+        encode,
+        stride,
+        first_byte,
+        row_bytes,
+    } = *shared;
+    let Ok(left) = u32::try_from(area.left()) else {
+        return;
+    };
+    let rows = band.back.rows();
+    let base = rows.start;
+    let mut window_rows: Vec<WindowRow<'_>> = Vec::with_capacity(sources.len());
+    for py in rows {
+        let Ok(y) = i32::try_from(py) else { continue };
+        window_rows.clear();
+        window_rows.extend(
+            sources
+                .iter()
+                .filter_map(|(window, chrome)| window.row(y, *chrome)),
+        );
+        let dither = DitherRow::at(py);
+        let cursor_row = cursor.and_then(|c| c.local_row(y).map(|ly| (c, ly)));
+        let desktop_row = desktop.map(|layer| crate::surface::row(layer, py));
+        let Some((_, back_row)) = band.back.row_span_mut(py, left, area.width) else {
+            continue;
+        };
+        // Resolved even when this segment does not encode, so every segment over
+        // one rectangle keeps or skips exactly the same rows and the back buffer
+        // can never drift from the frame.
+        let Some(frame_row) = usize::try_from(py.saturating_sub(base))
+            .ok()
+            .and_then(|local| local.checked_mul(stride))
+            .and_then(|row_start| row_start.checked_add(first_byte))
+            .and_then(|start| band.frame.get_mut(start..start.checked_add(row_bytes)?))
+        else {
+            continue;
+        };
+        // The screen reveal is applied as a pixel is encoded, so a fade in flight
+        // has no run a plain copy could serve; the cursor is resolved per row, so
+        // only the few rows it draws on lose the fast path.
+        let layers = RowLayers {
+            under,
+            desktop: desktop_row,
+            windows: &window_rows,
+            cursor: cursor_row,
+            front: window_rows
+                .last()
+                .filter(|_| opaque_runs && cursor_row.is_none() && (!encode || reveal == u8::MAX)),
+        };
+        let targets = RowTargets {
+            back: back_row,
+            frame: encode.then_some(frame_row),
+        };
+        let work = compose_row(
+            &layers,
+            targets,
+            area.left(),
+            order,
+            RowRound { reveal, dither },
+        );
+        if encode {
+            band.work.encoded = band.work.encoded.saturating_add(u64::from(area.width));
+        }
+        band.work.blended = band.work.blended.saturating_add(work.blended);
+        band.work.copied = band.work.copied.saturating_add(work.copied);
+    }
 }
 
 /// What composing one row cost.

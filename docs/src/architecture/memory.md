@@ -933,6 +933,16 @@ is the consumer the `mem_map` ABI exists for (§7c).
   on map and on free (§7c), so memory entering or leaving the process is clean;
   a process reusing its own freed bytes within its own heap is not a security
   boundary, so the heap does not re-zero on the hot path.
+- **Guarded by a futex mutex, never a spin lock.** A process has threads
+  (`plans/THREADS.md`), so two of them can be inside the allocator at once, and
+  the thread that loses waits for a critical section it cannot shorten: a page
+  mapped through `mem_map`, a metadata page grown, a free-span table walked.
+  Spinning through that burns the waiter's whole slice on a machine with more
+  threads than cores, and on one core it cannot make progress at all until the
+  holder is preempted — a multi-threaded program allocating on several threads
+  will wedge outright where preemption is absent. The heap therefore takes
+  `tairix_rt::sync::Mutex`, which parks; the uncontended acquire is the same pair
+  of atomics either way, so the common case pays nothing for it.
 
 The pure free-span bookkeeping is host-unit-tested over a fake pager; the
 aarch64 `-M virt` vertical `tests/integration/heap_qemu_aarch64` proves it end

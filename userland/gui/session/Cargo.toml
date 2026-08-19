@@ -47,6 +47,10 @@ tairix-log = { path = "../../../lib/log", version = "=0.0.0" }
 # ungated memory-pressure band through it when the kernel wakes the loop on
 # a band change, rather than opening a second query path of its own (§2.2).
 tairix-procinfo = { path = "../../../lib/procinfo", version = "=0.0.0" }
+# The compositing worker pool the session sizes from the discovered online CPU
+# count and hands to the compositor. The default `pool` feature is what makes
+# this the one place in the desktop that creates a thread.
+tairix-parallel = { path = "../../../lib/parallel", version = "=0.0.0" }
 # The shared pixel surface: a pin's sandbox-rasterised icon artwork is
 # rebuilt into the premultiplied surface the taskbar's shared control blits
 # (one colour-algebra home).
