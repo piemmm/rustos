@@ -1,0 +1,19 @@
+# Signed-AppInfo manifest source for the `ln` command app
+# (plans/SYMLINKS.md S4). Discovered by the build's app-bundle composer;
+# the capability list is the bundle's request, intersected with the
+# launching user's grants. CAP_CONSOLE_WRITE covers the `-v` reports, the
+# short help, and the stderr diagnostics; CAP_FS_ACCESS covers the link
+# creation, the destination probe, the `-f`/`-i` removal, and the
+# short-help read of the bundle's own Help/ documents — every one of them
+# still authorised per inode by the secured VFS under the caller's
+# attested identity. CAP_CONSOLE_READ covers the one line `-i` reads from
+# the inherited standard input, exactly as `cp -i` and `mv -i` request it.
+id = "os.tairix.ln"
+name = "ln"
+version = "0.1.0"
+kind = "command"
+capabilities = ["CAP_CONSOLE_WRITE", "CAP_CONSOLE_READ", "CAP_FS_ACCESS"]
+# This bundle's own 256x256 icon master in its Resources/ (plans/ICONS.md):
+# a raster master, because the command-app family's identity is a rendered
+# tile rather than a tintable silhouette.
+library-icon = "ln.png"

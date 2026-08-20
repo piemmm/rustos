@@ -40,6 +40,12 @@ Quando é dado mais de um operando — e sempre com `-R` — a listagem de
 cada diretório é precedida por um cabeçalho `path:` e os blocos são
 separados por uma linha em branco.
 
+Uma ligação simbólica aparece com a letra de tipo `l` e, no formato longo,
+como `nome -> alvo` — o alvo exactamente como está guardado, não
+resolvido, que é o que a ligação contém. Uma ligação pendente lista-se
+portanto normalmente; só uma postura que a resolva (`-L`, ou `-H` para um
+operando) comunica um alvo inalcançável.
+
 ## OPTIONS
 
 - `-t` — ordenar pela data mostrada, a mais recente primeiro.
@@ -96,6 +102,18 @@ separados por uma linha em branco.
   são (a predefinição quando a saída não é um terminal).
 - `-r, --reverse` — inverter a ordem de ordenação.
 - `-R, --recursive` — listar os subdiretórios recursivamente.
+- `-L, --dereference` — mostrar a informação do ficheiro que cada ligação
+  simbólica nomeia, em vez da ligação, onde quer que apareça uma. Uma
+  ligação cujo alvo não se consegue alcançar é comunicada na saída de erro e
+  a listagem continua, com estado de saída diferente de zero.
+- `-H, --dereference-command-line` — desreferenciar apenas as ligações
+  simbólicas nomeadas na linha de comandos; as ligações dentro de uma
+  listagem mantêm-se ligações. Ganha a última de `-L` e `-H`.
+- `--dereference-command-line-symlink-to-dir` — o comportamento por omissão
+  quando nenhuma opção de formato impõe outro: uma ligação da linha de
+  comandos *para um directório* é desreferenciada, pelo que `ls linkdir`
+  lista o directório, enquanto qualquer outra ligação se mostra como
+  ligação. `-l`, `-d` e `-F` mostram em vez disso cada ligação.
 - `-s, --size` — imprimir o tamanho alocado de cada entrada em blocos
   de 1024 bytes (escalado por `-h`), com uma linha `total` por listagem
   de diretório.

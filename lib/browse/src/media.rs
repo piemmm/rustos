@@ -423,18 +423,23 @@ pub fn media_for_name(name: &str) -> Option<MediaType> {
 /// extension is unrecognised (or absent) — fail closed to the generic type.
 #[must_use]
 pub fn media_for_entry(entry: &Entry, parent: &[String]) -> MediaType {
-    match entry.kind() {
-        EntryKind::Directory => MediaType::InodeDirectory,
-        EntryKind::Bundle => {
+    // A link classifies as what it *names*: a shortcut to a folder is drawn
+    // and opened as a folder. A link that resolves to nothing has no content
+    // type at all, so it falls closed to the generic one.
+    match entry.kind().resolved() {
+        Some(EntryKind::Directory) => MediaType::InodeDirectory,
+        Some(EntryKind::Bundle) => {
             if is_system_service_store(parent) {
                 MediaType::TairixService
             } else {
                 MediaType::TairixApp
             }
         }
-        EntryKind::File => {
+        Some(EntryKind::File) => {
             media_for_name(entry.name()).unwrap_or(MediaType::ApplicationOctetStream)
         }
+        // `resolved` never yields a link, and a dangling one yields nothing.
+        Some(EntryKind::Link(_)) | None => MediaType::ApplicationOctetStream,
     }
 }
 

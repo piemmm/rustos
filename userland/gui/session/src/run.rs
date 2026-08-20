@@ -3099,7 +3099,11 @@ mod program {
     fn read_directory(components: &[alloc::string::String]) -> Result<Vec<Entry>, Errno> {
         let path = tairix_browse::vfs::absolute_path(components)?;
         let stream = tairix_rt::read_dir_all(path.as_bytes()).map_err(Errno::from_syscall)?;
-        tairix_browse::vfs::entries_from_dir_stream(&stream)
+        tairix_browse::vfs::entries_from_dir_stream(
+            &path,
+            &stream,
+            &mut tairix_browse::RtLinkReader,
+        )
     }
 
     /// One consumer's view of [`Listings`]: a [`DirectorySource`] that records a

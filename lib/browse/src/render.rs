@@ -659,8 +659,9 @@ pub fn scroll_pointer<S: DirectorySource>(
 }
 
 /// Build the [`TableRow`] for one list entry: a leading name cell carrying the
-/// entry's `icon`, a trailing numeric size cell (blank for a directory or
-/// bundle, which carry no meaningful byte size), and a modified-date cell.
+/// entry's `icon`, a trailing numeric size cell (blank for a directory, a
+/// bundle, or a link, none of which carries a meaningful byte size — a link's
+/// own size is the length of the path it stores), and a modified-date cell.
 ///
 /// `icon` is the shared classification ([`icon_for_entry`]) the grid tile
 /// draws too, so a row and a tile can never picture the same entry

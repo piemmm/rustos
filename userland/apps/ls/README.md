@@ -48,6 +48,9 @@ ls [-aACdFghlmnopQrRsSx1] [-w cols] [--] [path...]
   -w, --width <cols>     output width in columns (0 = unlimited)
   -x                     columns, filled left-to-right
   -1                     one name per line (default when not a terminal)
+  -L, --dereference      show what each symbolic link names, not the link
+  -H, --dereference-command-line
+                         dereference only the command-line operands
   -?                     show this command's short help (also `--help`)
 ```
 
@@ -61,10 +64,37 @@ rather than guessing.
 
 With no path operand `ls` lists the current directory. Short options may
 be combined (e.g. `-la`). `--` ends option parsing: every later argument
-is a path. The long format has no link-count or timestamp column (the
-filesystem contract carries neither yet) and renders owner/group as
-numeric ids — the GNU numeric fallback — because name resolution needs
-the capability-gated user database.
+is a path. The long format has no link-count column (this filesystem
+contract carries no hard links, so a count would be fabricated) and
+renders owner/group as numeric ids — the GNU numeric fallback — because
+name resolution needs the capability-gated user database.
+
+## Symbolic links
+
+A link renders with the type letter `l` and, in the long format, as
+`name -> target`: the target exactly as it was stored, unresolved, which
+is what the link holds. The four GNU dereference postures are all
+implemented, and which one is in force decides what every row is:
+
+- `-l`, `-d`, and `-F` show **every** link as itself — the only reading
+  under which a *dangling* link can be described at all.
+- Otherwise a command-line operand that is a link **to a directory** is
+  resolved, so `ls linkdir` lists the directory while a link to a file, or
+  one that dangles, still shows itself.
+- `-H` resolves every command-line operand; links inside a listing still
+  show themselves.
+- `-L` resolves every link wherever it appears — which is also the only
+  posture under which `-R` can walk into a directory a link names, so a
+  directory reached a second time through its own chain is reported
+  (`not listing already-listed directory`) and not descended.
+
+A path that cannot be inspected or read never ends the listing: the reason
+goes to standard error, that path is skipped, and the remaining operands
+and entries are still listed. A skipped *entry* renders with its type
+letter and `?` for every cell a stat would have filled — never a
+fabricated zero. The exit status is the GNU grade: `0` when everything
+listed, `1` for a problem inside a listing, `2` for a command-line operand
+that could not be reached (or a usage error).
 
 ## A render machine, not a data source
 
@@ -74,14 +104,17 @@ listing to the terminal. The operations that reach the outside world are
 injected seams, mirroring the other userland crates (`cat`'s
 `FileSource`, `man`'s `BundleStore`, `sysinfo`'s `Transport`):
 
-- `Listing` — stat a path and read a directory's whole listing in one
-  call, mirroring the kernel's one-shot `fs_readdir` contract. An
-  entry's kind is the VFS's own `FileKind` (no parallel kind enum); the
-  per-entry stat behind the long format's columns, the `-S` size sort,
-  and `-F`'s execute-bit check is paid only when one of them asks for
-  it.
-- `Output` — write the rendered listing to the terminal and advisory
-  records to the standard information stream (fd 3), best-effort.
+- `Listing` — stat a path (in the `stat` or `lstat` reading the posture
+  selects, per path), read a link's stored target, and read a directory's
+  whole listing in one call, mirroring the kernel's one-shot `fs_readdir`
+  contract. An entry's kind is the VFS's own `FileKind` (no parallel kind
+  enum); the per-entry stat behind the long format's columns, the `-S`
+  size sort, `-F`'s execute-bit check, and `-L`'s resolution is paid only
+  when one of them asks for it, and a link's target is read only by the
+  format that prints it.
+- `Output` — write the rendered listing to the terminal, a skipped path's
+  reason to the error stream, and advisory records to the standard
+  information stream (fd 3), best-effort.
 - `tairix_help::HelpSource` — the tool's own `Help/` tree, read by the
   short-help switches.
 

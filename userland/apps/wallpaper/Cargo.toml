@@ -58,6 +58,10 @@ path = "src/run.rs"
 # bare-metal targets it is actually built for; on the host the binary is an
 # inert stub with no extra dependencies.
 [target.'cfg(target_os = "none")'.dependencies]
+# The browser engine's production symbolic-link reader (`RtLinkReader`): the
+# `fs_readlink` + resolving `fs_stat` pair a listed link needs, written once in
+# `lib/browse` so no surface carries its own copy of those two calls.
+tairix-browse = { path = "../../../lib/browse", version = "=0.0.0", features = ["rt"] }
 # The window-frame pixel codec (`tairix_display::winframe`): the one
 # definition of the straight-alpha conversion between this program's own
 # surface and the shared frame the desktop session reads, so no app carries a

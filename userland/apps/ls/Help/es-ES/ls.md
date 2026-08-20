@@ -42,6 +42,13 @@ Cuando se dan varios operandos — y siempre bajo `-R` — la lista de
 cada directorio va precedida de un encabezado `ruta:`, y los bloques
 se separan con una línea en blanco.
 
+Un enlace simbólico se muestra con la letra de tipo `l` y, en el formato
+largo, como `nombre -> destino` — el destino exactamente como está
+guardado, sin resolver, que es lo que el enlace contiene. Un enlace
+colgado se lista por tanto con normalidad; solo una postura que lo
+resuelva (`-L`, o `-H` para un operando) informa de un destino
+inalcanzable.
+
 ## OPTIONS
 
 - `-t` — ordenar por la marca de tiempo mostrada, la más reciente
@@ -98,6 +105,18 @@ se separan con una línea en blanco.
   (el valor predeterminado cuando la salida no es una terminal).
 - `-r, --reverse` — invertir el orden de clasificación.
 - `-R, --recursive` — listar los subdirectorios recursivamente.
+- `-L, --dereference` — mostrar la información del archivo que nombra cada
+  enlace simbólico, en lugar del enlace, dondequiera que aparezca uno. Un
+  enlace cuyo destino no se puede alcanzar se informa en la salida de error
+  y el listado continúa, con estado de salida distinto de cero.
+- `-H, --dereference-command-line` — desreferenciar solo los enlaces
+  simbólicos nombrados en la línea de órdenes; los enlaces dentro de un
+  listado se muestran como enlaces. Gana el último de `-L` y `-H`.
+- `--dereference-command-line-symlink-to-dir` — el comportamiento por
+  omisión cuando ninguna opción de formato impone otro: un enlace de la
+  línea de órdenes *a un directorio* se desreferencia, así que
+  `ls linkdir` lista el directorio, mientras cualquier otro enlace se
+  muestra como enlace. `-l`, `-d` y `-F` muestran en cambio cada enlace.
 - `-s, --size` — mostrar el tamaño asignado de cada entrada en bloques
   de 1024 bytes (escalado con `-h`), con una línea `total` por
   directorio listado.

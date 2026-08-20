@@ -25,8 +25,60 @@ use tairix_abi::fs::{DirEntries, FileKind, FS_PATH_MAX};
 use tairix_abi::Errno;
 use tairix_font::ELLIPSIS;
 
-use crate::entry::{Entry, EntryKind};
+use crate::entry::{Entry, EntryKind, LinkResolution};
 use crate::source::{DirectorySource, Listing};
+
+/// What a listed symbolic link holds, as the browser must see it.
+///
+/// A `fs_readdir` stream reports *that* a child is a link and nothing more, so
+/// both facts a file manager needs come from here: the target the link stores
+/// (which the user is shown) and what that target resolves to (which every
+/// verb acts on).
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LinkInfo {
+    /// The target the link stores, **verbatim** — possibly relative, possibly
+    /// naming nothing. It is data, never a path this engine walks.
+    pub target: String,
+    /// The kind the target resolves to, or [`None`] when the target cannot be
+    /// reached at all: a dangling link, or one the caller may not follow.
+    pub kind: Option<FileKind>,
+}
+
+/// Describes a listed symbolic link — the one thing a directory stream cannot
+/// carry.
+///
+/// Kept a seam for the same reason the directory fetch is: the calls it makes
+/// are the caller's own capability-checked ones, and keeping them injected is
+/// what lets the whole classification run in `cargo test` with no kernel. It
+/// is consulted only for entries the stream already reported as links, so a
+/// directory of plain files costs nothing.
+pub trait LinkReader {
+    /// Describe the symbolic link at the absolute `path`, or [`None`] when
+    /// even its stored target could not be read (a refusal, or a mounted
+    /// format that stores no links).
+    fn describe(&mut self, path: &str) -> Option<LinkInfo>;
+}
+
+/// A [`LinkReader`] that describes nothing, so every link classifies as
+/// dangling.
+///
+/// For a caller listing a tree that cannot hold links — a store the build
+/// itself authored — and for tests that plant none. It is never the right
+/// choice for a user's own directory: a link there would be shown as broken
+/// when it is not.
+pub struct NoLinks;
+
+impl LinkReader for NoLinks {
+    fn describe(&mut self, _path: &str) -> Option<LinkInfo> {
+        None
+    }
+}
+
+impl<F: FnMut(&str) -> Option<LinkInfo>> LinkReader for F {
+    fn describe(&mut self, path: &str) -> Option<LinkInfo> {
+        self(path)
+    }
+}
 
 // The listing returned here is in the source's own stream order; the
 // `Browser` applies the shared sort. This function only decodes and maps,
@@ -218,13 +270,36 @@ pub fn absolute_path(components: &[String]) -> Result<String, Errno> {
 ///
 /// Any [`Errno`] the stream walker surfaces, or [`Errno::OutOfRange`] for a
 /// name that is not UTF-8.
-pub fn entries_from_dir_stream(stream: &[u8]) -> Result<Vec<Entry>, Errno> {
+pub fn entries_from_dir_stream(
+    directory: &str,
+    stream: &[u8],
+    links: &mut dyn LinkReader,
+) -> Result<Vec<Entry>, Errno> {
     let mut entries = Vec::new();
     for item in DirEntries::new(stream) {
         let entry = item?;
         let name = core::str::from_utf8(entry.name).map_err(|_| Errno::OutOfRange)?;
-        let kind = EntryKind::for_listing(matches!(entry.kind, FileKind::Directory), name);
-        entries.push(Entry::new(name, kind, entry.size, entry.modified));
+        // Only a link costs a second call: the stream already carries every
+        // other kind outright, and carries neither a link's target nor what
+        // that target is.
+        let described = match entry.kind {
+            FileKind::Symlink => links.describe(&tairix_path::join(directory, name)),
+            FileKind::Directory | FileKind::Regular => None,
+        };
+        let resolution = described.as_ref().and_then(|link| {
+            link.kind.map(|kind| LinkResolution {
+                kind,
+                target_name: tairix_path::leaf_name(&link.target),
+            })
+        });
+        let kind = EntryKind::for_listing(entry.kind, name, resolution);
+        let mut built = Entry::new(name, kind, entry.size, entry.modified);
+        // A link whose target could not be reached still shows the spelling it
+        // stores: that spelling is exactly what tells a user why it is broken.
+        if let Some(link) = described {
+            built = built.with_target(link.target);
+        }
+        entries.push(built);
     }
     Ok(entries)
 }
@@ -245,8 +320,9 @@ pub fn entries_from_dir_stream(stream: &[u8]) -> Result<Vec<Entry>, Errno> {
 /// the plain folder. That is the trusted file picker's deliberate choice — a
 /// read-only chooser gains nothing from the cue, so it reads no directory it
 /// is not showing. [`probing`](VfsDirectorySource::probing) opts in.
-pub struct VfsDirectorySource<F, P = NoProbe> {
+pub struct VfsDirectorySource<F, L, P = NoProbe> {
     fetch: F,
+    links: L,
     probe: Option<P>,
 }
 
@@ -265,19 +341,26 @@ pub type NoProbe = fn(&str, &mut [u8]) -> Result<usize, Errno>;
 /// count.
 const PROBE_BUF_LEN: usize = tairix_abi::fs::DirEntry::HEADER_LEN + tairix_abi::fs::FS_NAME_MAX;
 
-impl<F> VfsDirectorySource<F>
+impl<F, L> VfsDirectorySource<F, L>
 where
     F: FnMut(&str) -> Result<Vec<u8>, Errno>,
+    L: LinkReader,
 {
-    /// Build the source over `fetch`, the capability-checked directory read.
-    pub fn new(fetch: F) -> Self {
-        Self { fetch, probe: None }
+    /// Build the source over `fetch`, the capability-checked directory read,
+    /// and `links`, which describes the symbolic links the listing reports.
+    pub fn new(fetch: F, links: L) -> Self {
+        Self {
+            fetch,
+            links,
+            probe: None,
+        }
     }
 }
 
-impl<F, P> VfsDirectorySource<F, P>
+impl<F, L, P> VfsDirectorySource<F, L, P>
 where
     F: FnMut(&str) -> Result<Vec<u8>, Errno>,
+    L: LinkReader,
     P: FnMut(&str, &mut [u8]) -> Result<usize, Errno>,
 {
     /// Build the source over `fetch` and an occupancy `probe`.
@@ -288,24 +371,26 @@ where
     /// `Dir::read`. It is handed a one-record buffer, never a listing-sized
     /// one, so the call costs the same on an empty directory and on one with a
     /// hundred thousand children.
-    pub fn probing(fetch: F, probe: P) -> Self {
+    pub fn probing(fetch: F, links: L, probe: P) -> Self {
         Self {
             fetch,
+            links,
             probe: Some(probe),
         }
     }
 }
 
-impl<F, P> DirectorySource for VfsDirectorySource<F, P>
+impl<F, L, P> DirectorySource for VfsDirectorySource<F, L, P>
 where
     F: FnMut(&str) -> Result<Vec<u8>, Errno>,
+    L: LinkReader,
     P: FnMut(&str, &mut [u8]) -> Result<usize, Errno>,
 {
     fn list(&mut self, components: &[String]) -> Result<Listing, Errno> {
         let path = absolute_path(components)?;
         let stream = (self.fetch)(&path)?;
         // The fetch is this thread's own read, so the answer is always ready.
-        entries_from_dir_stream(&stream).map(Listing::Ready)
+        entries_from_dir_stream(&path, &stream, &mut self.links).map(Listing::Ready)
     }
 
     fn has_children(&mut self, components: &[String]) -> Result<bool, Errno> {
@@ -317,5 +402,45 @@ where
             Ok(_) | Err(Errno::BufferTooSmall) => Ok(true),
             Err(errno) => Err(errno),
         }
+    }
+}
+
+/// The production [`LinkReader`]: the kernel-authorised `fs_readlink` plus one
+/// resolving `fs_stat`.
+///
+/// It adds no authority — both calls are the caller's own, authorised per
+/// inode under its attested identity — and it fails closed: a link whose
+/// target cannot be read is described as nothing at all, and one whose target
+/// cannot be *reached* is described with no kind, which classifies it as
+/// dangling rather than guessing.
+///
+/// One implementation, shared by every surface that lists a directory the user
+/// can put a link in (the file manager, the desktop, the trusted picker, the
+/// wallpaper catalog), so the two calls are never re-derived.
+#[cfg(feature = "rt")]
+pub struct RtLinkReader;
+
+#[cfg(feature = "rt")]
+impl LinkReader for RtLinkReader {
+    fn describe(&mut self, path: &str) -> Option<LinkInfo> {
+        // The target is bounded by `FS_SYMLINK_MAX`, and `fs_readlink`
+        // refuses an undersized buffer rather than truncating a target — a
+        // truncated one would name somewhere else entirely — so one buffer of
+        // that size always suffices.
+        let mut buf = alloc::vec![0u8; tairix_abi::fs::FS_SYMLINK_MAX];
+        let ret = tairix_rt::fs_readlink(path.as_bytes(), &mut buf);
+        let len = usize::try_from(ret).ok()?;
+        let target = core::str::from_utf8(buf.get(..len)?).ok()?;
+        // A resolve-only open with the *following* posture: no read authority
+        // is requested, the handle closes on drop, and a target that cannot be
+        // reached simply yields no kind.
+        let kind = tairix_rt::File::open(path.as_bytes(), tairix_abi::fs::OpenFlags::empty())
+            .ok()
+            .and_then(|file| file.stat().ok())
+            .map(|stat| stat.kind);
+        Some(LinkInfo {
+            target: String::from(target),
+            kind,
+        })
     }
 }

@@ -63,6 +63,31 @@ pub enum Indicator {
     Classify,
 }
 
+/// Which symbolic links a listing resolves — the GNU `ls` dereference
+/// posture, whose four states are what make `ls linkdir`, `ls -l linkdir`,
+/// `ls -H linkdir`, and `ls -L linkdir` four different listings.
+///
+/// The posture chosen here is not itself the per-path reading: it *selects*
+/// one ([`FinalLink`](crate::io::FinalLink)) for each path, differently for a
+/// command-line operand and for an entry inside a listed directory.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Dereference {
+    /// Describe every link itself, wherever it appears. Selected by the
+    /// formats that show a link's own metadata — `-l`, `-d`, and `-F` — and
+    /// by nothing else.
+    Never,
+    /// Resolve a command-line operand that is a link **to a directory**, so
+    /// `ls linkdir` lists the directory's contents; describe every other
+    /// link itself. The GNU default when no format flag forces
+    /// [`Never`](Self::Never).
+    CommandLineDirectory,
+    /// Resolve every command-line operand (`-H` / `--dereference-command-line`);
+    /// links inside a listed directory describe themselves.
+    CommandLine,
+    /// Resolve every link, wherever it appears (`-L` / `--dereference`).
+    Always,
+}
+
 /// How a byte count is scaled and rendered as a size.
 ///
 /// GNU `ls` keeps *two* of these independently: one for the long-format
@@ -331,6 +356,12 @@ pub struct Options {
     /// arrangement, literal quoting, and shown control characters — the GNU
     /// `--zero` posture.
     pub zero: bool,
+    /// Which symbolic links the listing resolves (`-L` / `-H` /
+    /// `--dereference-command-line-symlink-to-dir`). `None` selects the GNU
+    /// default, resolved once against the chosen format:
+    /// [`Dereference::Never`] when `-l`, `-d`, or `-F` shows a link's own
+    /// metadata, and [`Dereference::CommandLineDirectory`] otherwise.
+    pub dereference: Option<Dereference>,
     /// When to colourise names by kind (`--color[=WHEN]`). The default is
     /// [`ColorChoice::Auto`]: colour at an attested colour terminal, plain
     /// when piped, redirected, or on a console the kernel cannot attest. The
@@ -344,6 +375,25 @@ impl Options {
     #[must_use]
     pub fn is_long(self) -> bool {
         matches!(self.format, Some(Format::Long))
+    }
+
+    /// The effective dereference posture: the explicit `-L` / `-H` choice,
+    /// else the GNU default resolved against the chosen format.
+    ///
+    /// GNU makes the undefined posture [`Dereference::Never`] exactly when a
+    /// format that shows a link's *own* metadata is in force — `-l`, `-d`
+    /// (list the operand itself), or `-F` (whose indicator is the kind) —
+    /// and [`Dereference::CommandLineDirectory`] otherwise, which is what
+    /// makes a bare `ls linkdir` list the directory the link names.
+    #[must_use]
+    pub fn dereference(self) -> Dereference {
+        self.dereference.unwrap_or({
+            if self.is_long() || self.directory || self.indicator == Indicator::Classify {
+                Dereference::Never
+            } else {
+                Dereference::CommandLineDirectory
+            }
+        })
     }
 }
 
@@ -417,6 +467,7 @@ impl Options {
         group_directories_first: false,
         tabsize: DEFAULT_TABSIZE,
         zero: false,
+        dereference: None,
         color: ColorChoice::Auto,
     };
 }
@@ -444,7 +495,7 @@ pub enum Command {
 /// [`Command`].
 ///
 /// The grammar is the GNU `ls` surface,
-/// `ls [-aABCcdFfGghikIlmnopQrRsSTtUuvXx1] [-w cols] [-I PATTERN]`
+/// `ls [-aABCcdFfGgHhikILlmnopQrRsSTtUuvXx1] [-w cols] [-I PATTERN]`
 /// `[--block-size=SIZE] [--si] [--format=WORD] [--indicator-style=WORD]`
 /// `[--hide=PATTERN] [--time=WORD] [--time-style=STYLE] [--sort=WORD]`
 /// `[--full-time] [--author] [--file-type] [--group-directories-first]`
@@ -506,6 +557,19 @@ pub enum Command {
 ///   default otherwise). Only affects the non-escaping styles.
 /// * `-r` / `--reverse` — reverse the sort order.
 /// * `-R` / `--recursive` — list subdirectories recursively.
+/// * `-L` / `--dereference` — show information about the file each
+///   symbolic link names, rather than the link itself, wherever a link
+///   appears. A link whose target cannot be reached (a dangling link) is
+///   reported on standard error and the listing continues, with a non-zero
+///   exit status.
+/// * `-H` / `--dereference-command-line` — dereference only the symbolic
+///   links named on the command line; links inside a listed directory show
+///   themselves. The later of `-L` / `-H` wins.
+/// * `--dereference-command-line-symlink-to-dir` — the GNU default when no
+///   format flag forces otherwise: a command-line link *to a directory* is
+///   dereferenced (so `ls linkdir` lists the directory) and every other
+///   link shows itself. `-l`, `-d`, and `-F` instead default to showing
+///   every link itself.
 /// * `-s` / `--size` — print each entry's allocated size in blocks (scaled
 ///   by `-h` / `--si` / `--block-size` / `-k`), with a `total` line per
 ///   directory block.
@@ -734,6 +798,11 @@ fn apply_long<'a>(
         "recursive" => options.recursive = true,
         "inode" => options.inode = true,
         "zero" => options.zero = true,
+        "dereference" => options.dereference = Some(Dereference::Always),
+        "dereference-command-line" => options.dereference = Some(Dereference::CommandLine),
+        "dereference-command-line-symlink-to-dir" => {
+            options.dereference = Some(Dereference::CommandLineDirectory);
+        }
         "ignore-backups" => state.filters.ignore_backups = true,
         "ignore" => {
             state
@@ -811,6 +880,9 @@ fn apply_long<'a>(
 /// Apply one short-option cluster (`-la`, `-w80`, …). Returns `Ok(true)`
 /// when the cluster requests short help (`-?`), so the caller returns
 /// [`Command::Help`].
+// One flat short-option dispatch match, like `apply_long`; splitting it would
+// scatter the option table across helpers for no gain.
+#[allow(clippy::too_many_lines)]
 fn apply_short<'a>(
     letters: &'a str,
     state: &mut ParseState,
@@ -831,6 +903,8 @@ fn apply_short<'a>(
                 options.hide_owner = true;
             }
             'G' => options.hide_group = true,
+            'L' => options.dereference = Some(Dereference::Always),
+            'H' => options.dereference = Some(Dereference::CommandLine),
             'h' => {
                 options.file_size = SizeFormat::Human { si: false };
                 options.block_size = SizeFormat::Human { si: false };
@@ -2379,6 +2453,9 @@ mod tests {
                 "`--quoting-style=WORD`",
                 "`-r, --reverse`",
                 "`-R, --recursive`",
+                "`-L, --dereference`",
+                "`-H, --dereference-command-line`",
+                "`--dereference-command-line-symlink-to-dir`",
                 "`-s, --size`",
                 "`-S`",
                 "`-t`",

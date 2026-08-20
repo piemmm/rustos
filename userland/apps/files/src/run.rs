@@ -100,12 +100,12 @@ mod program {
         applications_for, association_from_appinfo, empty_trash_plan, paste_strategy, plan_paste,
         suggest_new_dir_name, trash_dest_path, trash_dir, trash_strategy, validate_new_name,
         Activation, AppAssociation, Browser, BundleSource, ClickKind, Clipboard, ClipboardOp,
-        ContextCommand, ContextMenuModel, CopyAction, CopyCursor, CopyWalk, DeleteAction,
+        ContextCommand, ContextMenuModel, CopyAction, CopyCursor, CopyKind, CopyWalk, DeleteAction,
         DeleteDisposition, DeletePlan, DeleteWalk, DirectorySource, DoubleClickTracker, EntryKind,
         ManagerChrome, ManagerTool, ManagerToolModel, OwnerChange, PasteItem, PasteStrategy,
-        Places, ProgressModel, ProgressOp, Properties, RenameError, ToolbarCommand, TrashStrategy,
-        VfsDirectorySource, ViewMode, Volume, VolumeId, MANAGER_TOOLS, WIN_HEIGHT, WIN_RESIZABLE,
-        WIN_WIDTH,
+        Places, ProgressModel, ProgressOp, Properties, RenameError, RtLinkReader, ToolbarCommand,
+        TrashStrategy, VfsDirectorySource, ViewMode, Volume, VolumeId, MANAGER_TOOLS, WIN_HEIGHT,
+        WIN_RESIZABLE, WIN_WIDTH,
     };
     use tairix_controls::damage;
     use tairix_controls::decision::Dialog;
@@ -567,7 +567,9 @@ mod program {
         let Ok(stream) = tairix_rt::read_dir_all(dir.as_bytes()) else {
             return;
         };
-        let Ok(entries) = tairix_browse::vfs::entries_from_dir_stream(&stream) else {
+        let Ok(entries) =
+            tairix_browse::vfs::entries_from_dir_stream(dir, &stream, &mut RtLinkReader)
+        else {
             return;
         };
         for entry in entries {
@@ -583,6 +585,41 @@ mod program {
                 collect_bundles(&path, depth + 1, out);
             }
         }
+    }
+
+    /// What a paste must do with a node of `kind`.
+    ///
+    /// A symbolic link is *recreated*: streaming its bytes would leave a
+    /// regular file holding the target's text, and following it would copy
+    /// something the link only points at.
+    fn copy_kind_of(kind: FileKind) -> CopyKind {
+        match kind {
+            FileKind::Directory => CopyKind::Directory,
+            FileKind::Regular => CopyKind::File,
+            FileKind::Symlink => CopyKind::Link,
+        }
+    }
+
+    /// Recreate the symbolic link `source` at `dest` with the same stored
+    /// target, or a terse reason.
+    ///
+    /// The target is copied verbatim and never resolved, so a relative one
+    /// still reads relative to the *new* link's own directory — which is what
+    /// duplicating a link means. Nothing is read or written through either
+    /// link.
+    fn recreate_link(source: &[String], dest: &[String]) -> Result<(), &'static str> {
+        let from = spell_path(source)?;
+        let to = spell_path(dest)?;
+        let mut buf = alloc::vec![0u8; tairix_abi::fs::FS_SYMLINK_MAX];
+        let read = tairix_rt::fs_readlink(from.as_bytes(), &mut buf);
+        let len = usize::try_from(read).map_err(|_| "a shortcut's target could not be read")?;
+        let target = buf
+            .get(..len)
+            .ok_or("a shortcut's target could not be read")?;
+        if tairix_rt::fs_symlink(target, to.as_bytes()) != 0 {
+            return Err("a shortcut could not be recreated");
+        }
+        Ok(())
     }
 
     /// Read the `AppInfo` manifest of the bundle at `bundle_path` and decode
@@ -1723,11 +1760,11 @@ mod program {
         let mut taken: alloc::vec::Vec<String> = read_children(&trash)
             .ok()?
             .into_iter()
-            .map(|(name, _is_directory)| name)
+            .map(|(name, _kind)| name)
             .collect();
         let mut moves = alloc::vec::Vec::with_capacity(plan.len());
         for target in plan.targets() {
-            let item_vol = VolumeId::new(stat_node(target.path())?.id.volume);
+            let item_vol = VolumeId::new(stat_name(target.path())?.id.volume);
             if trash_strategy(item_vol, trash_vol) != TrashStrategy::Move {
                 // A cross-volume target cannot be renamed into Trash; the whole
                 // removal takes the permanent path so the dialog stays honest.
@@ -1934,7 +1971,7 @@ mod program {
                 return true;
             };
             if is_list {
-                let Ok(children) = read_children(&path) else {
+                let Ok(children) = removal_children(&path) else {
                     report_delete_refused(&path);
                     return true;
                 };
@@ -2030,18 +2067,52 @@ mod program {
         }
     }
 
-    /// Read the children of the directory at `path` for a [`DeleteWalk`]
-    /// expansion: each child's leaf name and whether it is directory-backed,
-    /// through the same capability-checked listing call and shared decode the
-    /// browser navigates with, so the delete sees exactly what the browser
-    /// would.
-    fn read_children(path: &[String]) -> Result<alloc::vec::Vec<(String, bool)>, Errno> {
+    /// Read the children of the directory at `path`: each child's leaf name
+    /// and the browser's own classification of it, through the same
+    /// capability-checked listing call and shared decode the browser
+    /// navigates with, so a walk sees exactly what the browser would.
+    ///
+    /// One read serves both walks, each taking the reading it needs: the
+    /// delete walk asks whether a child is directory-backed *on disk*
+    /// ([`removal_children`]), while the copy walk asks what a copy must *do*
+    /// with it ([`copy_children`]) — which is not the same question for a
+    /// symbolic link.
+    fn read_children(path: &[String]) -> Result<alloc::vec::Vec<(String, EntryKind)>, Errno> {
         let spelled = tairix_browse::vfs::absolute_path(path)?;
         let stream = tairix_rt::read_dir_all(spelled.as_bytes()).map_err(errno_from)?;
-        let entries = tairix_browse::vfs::entries_from_dir_stream(&stream)?;
+        let entries =
+            tairix_browse::vfs::entries_from_dir_stream(&spelled, &stream, &mut RtLinkReader)?;
         Ok(entries
             .into_iter()
-            .map(|entry| (entry.name().to_string(), entry.is_directory_backed()))
+            .map(|entry| (entry.name().to_string(), entry.kind()))
+            .collect())
+    }
+
+    /// The children of `path` as a [`DeleteWalk`] expansion wants them:
+    /// whether each is directory-backed on disk, so a link is unlinked as the
+    /// leaf it is rather than recursed into.
+    fn removal_children(path: &[String]) -> Result<alloc::vec::Vec<(String, bool)>, Errno> {
+        Ok(read_children(path)?
+            .into_iter()
+            .map(|(name, kind)| (name, kind.is_directory_backed()))
+            .collect())
+    }
+
+    /// The children of `path` as a [`CopyWalk`] expansion wants them: what a
+    /// copy must do with each.
+    fn copy_children(path: &[String]) -> Result<alloc::vec::Vec<(String, CopyKind)>, Errno> {
+        Ok(read_children(path)?
+            .into_iter()
+            .map(|(name, kind)| {
+                let copy = if kind.is_directory_backed() {
+                    CopyKind::Directory
+                } else if kind.is_link() {
+                    CopyKind::Link
+                } else {
+                    CopyKind::File
+                };
+                (name, copy)
+            })
             .collect())
     }
 
@@ -2332,6 +2403,10 @@ mod program {
         List(alloc::vec::Vec<String>),
         /// Stream this leaf file's bytes from source to destination.
         CopyFile(alloc::vec::Vec<String>, alloc::vec::Vec<String>),
+        /// Recreate this symbolic link at the destination, with the target it
+        /// stores — never a byte-wise copy, which would leave a regular file
+        /// holding the target's text.
+        CopyLink(alloc::vec::Vec<String>, alloc::vec::Vec<String>),
     }
 
     /// The outcome of one [`Paste::step`] unit of work.
@@ -2412,11 +2487,17 @@ mod program {
             }
             let source = item.source().to_vec();
             let dest = item.dest().to_vec();
-            let Some(stat) = stat_node(&source) else {
+            // The name as typed: a symbolic link is what gets copied or
+            // moved, so its own kind decides *how* (recreate, never stream
+            // its bytes) and its own volume decides rename-vs-copy.
+            let Some(stat) = stat_name(&source) else {
                 return StepOutcome::Failed("a source item could not be read");
             };
             let source_vol = VolumeId::new(stat.id.volume);
-            let is_directory = matches!(stat.kind, FileKind::Directory);
+            let kind = copy_kind_of(stat.kind);
+            // A link is a leaf on disk however its target resolves, so the
+            // removal half of a cross-volume move unlinks the link itself.
+            let is_directory = kind == CopyKind::Directory;
             match paste_strategy(self.op, source_vol, self.dest_vol) {
                 PasteStrategy::Rename => match rename_item(&source, &dest) {
                     Ok(()) => {
@@ -2425,13 +2506,10 @@ mod program {
                     }
                     Err(reason) => StepOutcome::Failed(reason),
                 },
-                PasteStrategy::Copy => self.start_copy(source, dest, is_directory, None),
-                PasteStrategy::CopyThenDelete => self.start_copy(
-                    source.clone(),
-                    dest,
-                    is_directory,
-                    Some((source, is_directory)),
-                ),
+                PasteStrategy::Copy => self.start_copy(source, dest, kind, None),
+                PasteStrategy::CopyThenDelete => {
+                    self.start_copy(source.clone(), dest, kind, Some((source, is_directory)))
+                }
             }
         }
 
@@ -2440,10 +2518,10 @@ mod program {
             &mut self,
             source: alloc::vec::Vec<String>,
             dest: alloc::vec::Vec<String>,
-            is_directory: bool,
+            kind: CopyKind,
             then_delete: Option<(alloc::vec::Vec<String>, bool)>,
         ) -> StepOutcome {
-            match CopyWalk::from_items(alloc::vec![(source, dest, is_directory)]) {
+            match CopyWalk::from_items(alloc::vec![(source, dest, kind)]) {
                 Some(walk) => {
                     self.stage = PasteStage::Copying {
                         walk,
@@ -2500,6 +2578,9 @@ mod program {
                 Some(CopyAction::CopyFile { source, dest }) => {
                     Some(CopyStep::CopyFile(source.to_vec(), dest.to_vec()))
                 }
+                Some(CopyAction::CopyLink { source, dest }) => {
+                    Some(CopyStep::CopyLink(source.to_vec(), dest.to_vec()))
+                }
             };
             let Some(step) = next else {
                 // The tree is fully copied. A cross-volume move now removes the
@@ -2534,7 +2615,7 @@ mod program {
                     StepOutcome::Working
                 }
                 CopyStep::List(source) => {
-                    let Ok(children) = read_children(&source) else {
+                    let Ok(children) = copy_children(&source) else {
                         return StepOutcome::Failed("a folder could not be read");
                     };
                     if walk.expand(&children).is_err() {
@@ -2558,7 +2639,39 @@ mod program {
                     }
                     Err(reason) => StepOutcome::Failed(reason),
                 },
+                CopyStep::CopyLink(source, dest) => {
+                    self.step_copy_link(walk, &source, &dest, then_delete)
+                }
             }
+        }
+
+        /// Recreate one symbolic link at its destination and advance the walk
+        /// past it.
+        ///
+        /// A link is copied by being *recreated* with the target it stores:
+        /// streaming its bytes would leave a regular file holding the
+        /// target's text, and following it would copy something the link only
+        /// points at.
+        fn step_copy_link(
+            &mut self,
+            mut walk: CopyWalk,
+            source: &[String],
+            dest: &[String],
+            then_delete: Option<(alloc::vec::Vec<String>, bool)>,
+        ) -> StepOutcome {
+            if let Err(reason) = recreate_link(source, dest) {
+                return StepOutcome::Failed(reason);
+            }
+            if walk.copied_link().is_err() {
+                return StepOutcome::Failed("internal copy step error");
+            }
+            self.done += 1;
+            self.stage = PasteStage::Copying {
+                walk,
+                transfer: None,
+                then_delete,
+            };
+            StepOutcome::Working
         }
 
         /// Advance a cross-volume move's source removal by one step, over the
@@ -2575,7 +2688,7 @@ mod program {
                 return StepOutcome::Working;
             };
             if is_list {
-                let Ok(children) = read_children(&path) else {
+                let Ok(children) = removal_children(&path) else {
                     return StepOutcome::Failed("a moved source could not be removed");
                 };
                 if walk.expand(&children).is_err() {
@@ -2640,6 +2753,20 @@ mod program {
     fn stat_node(path: &[String]) -> Option<tairix_abi::fs::FileStat> {
         let spelled = tairix_browse::vfs::absolute_path(path).ok()?;
         tairix_rt::File::open(spelled.as_bytes(), OpenFlags::empty())
+            .and_then(|file| file.stat())
+            .ok()
+    }
+
+    /// Stat the node `path` **names**, without following a final symbolic
+    /// link — the POSIX `lstat` reading.
+    ///
+    /// This is the question every verb that acts on a *name* must ask: a link
+    /// is what gets copied, moved, or trashed, so its own kind and its own
+    /// volume are what decide how. [`stat_node`] answers the other question —
+    /// what the path leads to — which is what a *destination folder* is.
+    fn stat_name(path: &[String]) -> Option<tairix_abi::fs::FileStat> {
+        let spelled = tairix_browse::vfs::absolute_path(path).ok()?;
+        tairix_rt::File::open(spelled.as_bytes(), OpenFlags::NO_FOLLOW)
             .and_then(|file| file.stat())
             .ok()
     }
@@ -3167,7 +3294,7 @@ mod program {
         if browser.components() != trash.as_slice() {
             return (false, false);
         }
-        let Ok(children) = read_children(&trash) else {
+        let Ok(children) = removal_children(&trash) else {
             io::write_stderr_line("files: could not read the Trash folder");
             return (false, false);
         };
@@ -3299,15 +3426,26 @@ mod program {
         let Some(Ok(path)) = browser.selected_target_path() else {
             return None;
         };
-        let flags = if matches!(kind, EntryKind::File) {
-            OpenFlags::READ
-        } else {
-            OpenFlags::DIRECTORY
+        let flags = match kind {
+            // A link is described as *itself*, through a resolve-only
+            // `NO_FOLLOW` handle: that is the only reading under which a link
+            // to a file can be described at all, and it is what makes the
+            // permission string honestly read `l` rather than the target's
+            // kind. `stat` needs only a live handle, not an access bit.
+            EntryKind::Link(_) => OpenFlags::NO_FOLLOW,
+            EntryKind::File => OpenFlags::READ,
+            EntryKind::Directory | EntryKind::Bundle => OpenFlags::DIRECTORY,
         };
         let stat = tairix_rt::File::open(path.as_bytes(), flags)
             .and_then(|file| file.stat())
             .ok()?;
-        Some(Properties::from_stat(name, kind, &stat))
+        let properties = Properties::from_stat(name, kind, &stat);
+        // A link also shows where it points — the spelling it stores, which
+        // is what explains a broken one.
+        Some(match entry.target() {
+            Some(target) => properties.with_target(target),
+            None => properties,
+        })
     }
 
     /// Apply a primary-button press inside the open Properties overlay: if it
@@ -3788,12 +3926,14 @@ mod program {
     /// cannot hand the same one to the next.
     type LiveSource = VfsDirectorySource<
         fn(&str) -> Result<alloc::vec::Vec<u8>, Errno>,
+        RtLinkReader,
         fn(&str, &mut [u8]) -> Result<usize, Errno>,
     >;
 
-    /// One live source over [`list_directory`] and [`probe_directory`].
+    /// One live source over [`list_directory`], the shared production link
+    /// reader, and [`probe_directory`].
     fn live_source() -> LiveSource {
-        VfsDirectorySource::probing(list_directory, probe_directory)
+        VfsDirectorySource::probing(list_directory, RtLinkReader, probe_directory)
     }
 
     /// Open the manager's browser at the first location that actually lists,

@@ -24,8 +24,8 @@ use crate::delete::{DeleteAction, DeleteError, DeletePlan, DeleteWalk, MAX_DELET
 use crate::entry::Entry;
 use crate::error::BrowseError;
 use crate::execute::{
-    paste_strategy, CopyAction, CopyCursor, CopyError, CopyWalk, CopyWalkError, PasteStrategy,
-    VolumeId, COPY_CHUNK_LEN, MAX_COPY_DEPTH,
+    paste_strategy, CopyAction, CopyCursor, CopyError, CopyKind, CopyWalk, CopyWalkError,
+    PasteStrategy, VolumeId, COPY_CHUNK_LEN, MAX_COPY_DEPTH,
 };
 use crate::media::MediaType;
 use crate::places::{PlaceKind, Places, Volume};
@@ -1093,7 +1093,10 @@ fn the_chrome_scales_with_the_desktop_density_not_only_its_text() {
 use tairix_abi::fs::{DirEntry, FileKind, FS_PATH_MAX};
 use tairix_abi::time::Time64;
 
-use crate::vfs::{absolute_path, entries_from_dir_stream, VfsDirectorySource};
+use crate::entry::{LinkResolution, LinkTarget};
+use crate::vfs::{
+    absolute_path, entries_from_dir_stream, LinkInfo, LinkReader, NoLinks, VfsDirectorySource,
+};
 
 /// Encode `(name, kind)` children as one packed `DirEntry` stream.
 fn encoded_stream(children: &[(&[u8], FileKind)]) -> Vec<u8> {
@@ -1114,11 +1117,51 @@ fn encoded_stream(children: &[(&[u8], FileKind)]) -> Vec<u8> {
     buf
 }
 
-/// A source over an in-memory path → encoded-stream tree.
+/// A [`LinkReader`] over an in-memory table of `link path -> (target, kind)`,
+/// where a `None` kind is a link whose target cannot be reached.
+#[derive(Clone, Default)]
+struct FixtureLinks {
+    links: BTreeMap<String, (String, Option<FileKind>)>,
+}
+
+impl FixtureLinks {
+    /// A link at `path` naming `target`, which resolves to `kind` (or to
+    /// nothing when `kind` is `None`).
+    fn with(mut self, path: &str, target: &str, kind: Option<FileKind>) -> Self {
+        self.links
+            .insert(path.to_string(), (target.to_string(), kind));
+        self
+    }
+}
+
+impl LinkReader for FixtureLinks {
+    fn describe(&mut self, path: &str) -> Option<LinkInfo> {
+        self.links.get(path).map(|(target, kind)| LinkInfo {
+            target: target.clone(),
+            kind: *kind,
+        })
+    }
+}
+
+/// A source over an in-memory path → encoded-stream tree, with no links.
 fn tree_source(
     dirs: BTreeMap<String, Vec<u8>>,
-) -> VfsDirectorySource<impl FnMut(&str) -> Result<Vec<u8>, Errno>> {
-    VfsDirectorySource::new(move |path: &str| dirs.get(path).cloned().ok_or(Errno::NotFound))
+) -> VfsDirectorySource<impl FnMut(&str) -> Result<Vec<u8>, Errno>, NoLinks> {
+    VfsDirectorySource::new(
+        move |path: &str| dirs.get(path).cloned().ok_or(Errno::NotFound),
+        NoLinks,
+    )
+}
+
+/// A source over an in-memory tree whose links `links` describes.
+fn tree_source_with_links(
+    dirs: BTreeMap<String, Vec<u8>>,
+    links: FixtureLinks,
+) -> VfsDirectorySource<impl FnMut(&str) -> Result<Vec<u8>, Errno>, FixtureLinks> {
+    VfsDirectorySource::new(
+        move |path: &str| dirs.get(path).cloned().ok_or(Errno::NotFound),
+        links,
+    )
 }
 
 #[test]
@@ -1169,7 +1212,7 @@ fn entries_from_dir_stream_maps_names_and_kinds_in_order() {
         (b"Logs", FileKind::Directory),
         (b"motd.txt", FileKind::Regular),
     ]);
-    let entries = entries_from_dir_stream(&stream).expect("valid stream");
+    let entries = entries_from_dir_stream("/", &stream, &mut NoLinks).expect("valid stream");
     assert_eq!(
         entries,
         vec![Entry::directory("Logs"), Entry::file("motd.txt")]
@@ -1179,14 +1222,20 @@ fn entries_from_dir_stream_maps_names_and_kinds_in_order() {
 #[test]
 fn entries_from_dir_stream_refuses_a_non_utf8_name_whole() {
     let stream = encoded_stream(&[(b"ok", FileKind::Regular), (b"\xff\xfe", FileKind::Regular)]);
-    assert_eq!(entries_from_dir_stream(&stream), Err(Errno::OutOfRange));
+    assert_eq!(
+        entries_from_dir_stream("/", &stream, &mut NoLinks),
+        Err(Errno::OutOfRange)
+    );
 }
 
 #[test]
 fn entries_from_dir_stream_refuses_a_truncated_stream_whole() {
     let mut stream = encoded_stream(&[(b"ok", FileKind::Regular)]);
     stream.extend_from_slice(&[0u8; 3]);
-    assert_eq!(entries_from_dir_stream(&stream), Err(Errno::BufferTooSmall));
+    assert_eq!(
+        entries_from_dir_stream("/", &stream, &mut NoLinks),
+        Err(Errno::BufferTooSmall)
+    );
 }
 
 #[test]
@@ -1360,7 +1409,7 @@ fn entries_carry_size_and_modified_from_the_stream() {
         (b"data.bin", FileKind::Regular, 4096, modified),
         (b"Docs", FileKind::Directory, 0, Time64::from_secs(-100)),
     ]);
-    let entries = entries_from_dir_stream(&stream).expect("valid");
+    let entries = entries_from_dir_stream("/", &stream, &mut NoLinks).expect("valid");
     // The stream order is preserved here (the browser applies the sort).
     assert_eq!(entries[0].name(), "data.bin");
     assert_eq!(entries[0].size(), 4096);
@@ -1380,7 +1429,10 @@ fn a_bad_record_still_refuses_the_whole_listing() {
     let mut bad = encoded_stream_meta(&[(b"x", FileKind::Regular, 0, Time64::UNIX_EPOCH)]);
     bad[0] = 9;
     stream.extend_from_slice(&bad);
-    assert_eq!(entries_from_dir_stream(&stream), Err(Errno::OutOfRange));
+    assert_eq!(
+        entries_from_dir_stream("/", &stream, &mut NoLinks),
+        Err(Errno::OutOfRange)
+    );
 }
 
 #[test]
@@ -1406,7 +1458,7 @@ fn a_dot_app_directory_is_a_bundle_not_a_folder_to_descend() {
         // only a *directory* named <Name>.app is a bundle.
         (b"report.app", FileKind::Regular),
     ]);
-    let entries = entries_from_dir_stream(&stream).expect("valid");
+    let entries = entries_from_dir_stream("/", &stream, &mut NoLinks).expect("valid");
     assert_eq!(entries[0].kind(), EntryKind::Bundle);
     assert!(entries[0].is_bundle());
     assert!(!entries[0].is_directory(), "a bundle is not descended into");
@@ -3209,7 +3261,7 @@ use crate::activate::Activation;
 
 /// A tree source whose root holds a plain subdirectory, an application
 /// bundle, and a regular file — the three activation kinds side by side.
-fn activation_source() -> VfsDirectorySource<impl FnMut(&str) -> Result<Vec<u8>, Errno>> {
+fn activation_source() -> VfsDirectorySource<impl FnMut(&str) -> Result<Vec<u8>, Errno>, NoLinks> {
     let mut dirs = BTreeMap::new();
     dirs.insert(
         "/".to_string(),
@@ -4417,14 +4469,17 @@ fn copy_error_message_is_non_empty() {
 // ---- FM7b: the recursive-copy execution model (`CopyWalk`) ----
 
 /// Drive a [`CopyWalk`] to completion against an in-memory *source* tree keyed
-/// by absolute-path spelling → children `(name, is_directory)`, returning the
+/// by absolute-path spelling → children `(name, kind)`, returning the
 /// absolute *destination*-path spelling of every node in the order the copy
 /// performed it (a directory when created, a file when copied).
 ///
 /// A source directory absent from `tree` lists as empty. Every driver call
 /// must succeed — a walk driven strictly in step never errors — so any protocol
 /// slip is a test failure, not a swallowed result.
-fn drive_copy(walk: &mut CopyWalk, tree: &BTreeMap<String, Vec<(String, bool)>>) -> Vec<String> {
+fn drive_copy(
+    walk: &mut CopyWalk,
+    tree: &BTreeMap<String, Vec<(String, CopyKind)>>,
+) -> Vec<String> {
     let mut order = Vec::new();
     // A generous ceiling so a modelling bug (a walk that never completes) fails
     // the test rather than looping forever.
@@ -4443,6 +4498,10 @@ fn drive_copy(walk: &mut CopyWalk, tree: &BTreeMap<String, Vec<(String, bool)>>)
                 order.push(key(dest));
                 walk.copied_file().expect("copy file in step");
             }
+            Some(CopyAction::CopyLink { dest, .. }) => {
+                order.push(key(dest));
+                walk.copied_link().expect("copy link in step");
+            }
         }
     }
     panic!("copy walk did not complete within the step ceiling");
@@ -4453,7 +4512,7 @@ fn copy_walk_copies_a_single_file() {
     let mut walk = CopyWalk::from_items(vec![(
         comps(&["Users", "a.txt"]),
         comps(&["Storage", "a.txt"]),
-        false,
+        CopyKind::File,
     )])
     .expect("walk");
 
@@ -4477,7 +4536,7 @@ fn copy_walk_makes_the_destination_directory_before_listing_an_empty_one() {
     let mut walk = CopyWalk::from_items(vec![(
         comps(&["Users", "empty"]),
         comps(&["Storage", "empty"]),
-        true,
+        CopyKind::Directory,
     )])
     .expect("walk");
 
@@ -4505,20 +4564,23 @@ fn copy_walk_makes_the_destination_directory_before_listing_an_empty_one() {
 #[test]
 fn copy_walk_creates_containers_before_contents_depth_first() {
     // /Users/tree/{a.txt, sub/{b.txt}}, listed in that order → /Storage/tree.
-    let mut tree: BTreeMap<String, Vec<(String, bool)>> = BTreeMap::new();
+    let mut tree: BTreeMap<String, Vec<(String, CopyKind)>> = BTreeMap::new();
     tree.insert(
         key(&comps(&["Users", "tree"])),
-        vec![("a.txt".to_string(), false), ("sub".to_string(), true)],
+        vec![
+            ("a.txt".to_string(), CopyKind::File),
+            ("sub".to_string(), CopyKind::Directory),
+        ],
     );
     tree.insert(
         key(&comps(&["Users", "tree", "sub"])),
-        vec![("b.txt".to_string(), false)],
+        vec![("b.txt".to_string(), CopyKind::File)],
     );
 
     let mut walk = CopyWalk::from_items(vec![(
         comps(&["Users", "tree"]),
         comps(&["Storage", "tree"]),
-        true,
+        CopyKind::Directory,
     )])
     .expect("walk");
     let order = drive_copy(&mut walk, &tree);
@@ -4540,23 +4602,27 @@ fn copy_walk_creates_containers_before_contents_depth_first() {
 
 #[test]
 fn copy_walk_processes_multiple_items_in_order() {
-    let mut tree: BTreeMap<String, Vec<(String, bool)>> = BTreeMap::new();
+    let mut tree: BTreeMap<String, Vec<(String, CopyKind)>> = BTreeMap::new();
     tree.insert(
         key(&comps(&["Users", "dir"])),
-        vec![("inner".to_string(), false)],
+        vec![("inner".to_string(), CopyKind::File)],
     );
 
     let mut walk = CopyWalk::from_items(vec![
         (
             comps(&["Users", "first.txt"]),
             comps(&["Storage", "first.txt"]),
-            false,
+            CopyKind::File,
         ),
-        (comps(&["Users", "dir"]), comps(&["Storage", "dir"]), true),
+        (
+            comps(&["Users", "dir"]),
+            comps(&["Storage", "dir"]),
+            CopyKind::Directory,
+        ),
         (
             comps(&["Users", "last.txt"]),
             comps(&["Storage", "last.txt"]),
-            false,
+            CopyKind::File,
         ),
     ])
     .expect("walk");
@@ -4580,8 +4646,12 @@ fn copy_walk_expand_refuses_a_tree_deeper_than_the_bound() {
     // would name a child one component deeper than the bound.
     let deep: Vec<String> = (0..MAX_COPY_DEPTH).map(|i| format!("d{i}")).collect();
     assert_eq!(deep.len(), MAX_COPY_DEPTH);
-    let mut walk =
-        CopyWalk::from_items(vec![(deep, comps(&["Storage", "dst"]), true)]).expect("walk");
+    let mut walk = CopyWalk::from_items(vec![(
+        deep,
+        comps(&["Storage", "dst"]),
+        CopyKind::Directory,
+    )])
+    .expect("walk");
 
     // Make the destination, then the list step refuses to descend further.
     assert!(matches!(
@@ -4591,7 +4661,7 @@ fn copy_walk_expand_refuses_a_tree_deeper_than_the_bound() {
     walk.created().expect("dest dir made");
     assert!(matches!(walk.next_action(), Some(CopyAction::List { .. })));
     assert_eq!(
-        walk.expand(&[("child".to_string(), false)]),
+        walk.expand(&[("child".to_string(), CopyKind::File)]),
         Err(CopyWalkError::TooDeep)
     );
     // Refused, and the walk is left exactly where it was (fail closed): still a
@@ -4605,7 +4675,7 @@ fn copy_walk_fails_closed_when_driven_out_of_step() {
     let mut walk = CopyWalk::from_items(vec![(
         comps(&["Users", "a.txt"]),
         comps(&["Storage", "a.txt"]),
-        false,
+        CopyKind::File,
     )])
     .expect("walk");
     assert!(matches!(
@@ -4624,7 +4694,7 @@ fn copy_walk_fails_closed_when_driven_out_of_step() {
     let mut walk = CopyWalk::from_items(vec![(
         comps(&["Users", "d"]),
         comps(&["Storage", "d"]),
-        true,
+        CopyKind::Directory,
     )])
     .expect("walk");
     assert!(matches!(
@@ -4649,15 +4719,18 @@ fn copy_walk_fails_closed_when_driven_out_of_step() {
 
 #[test]
 fn copy_walk_holds_its_position_across_an_interruption() {
-    let mut tree: BTreeMap<String, Vec<(String, bool)>> = BTreeMap::new();
+    let mut tree: BTreeMap<String, Vec<(String, CopyKind)>> = BTreeMap::new();
     tree.insert(
         key(&comps(&["Users", "dir"])),
-        vec![("x".to_string(), false), ("y".to_string(), false)],
+        vec![
+            ("x".to_string(), CopyKind::File),
+            ("y".to_string(), CopyKind::File),
+        ],
     );
     let mut walk = CopyWalk::from_items(vec![(
         comps(&["Users", "dir"]),
         comps(&["Storage", "dir"]),
-        true,
+        CopyKind::Directory,
     )])
     .expect("walk");
 
@@ -4669,8 +4742,11 @@ fn copy_walk_holds_its_position_across_an_interruption() {
     ));
     walk.created().expect("dest dir made");
     assert!(matches!(walk.next_action(), Some(CopyAction::List { .. })));
-    walk.expand(&[("x".to_string(), false), ("y".to_string(), false)])
-        .expect("expand");
+    walk.expand(&[
+        ("x".to_string(), CopyKind::File),
+        ("y".to_string(), CopyKind::File),
+    ])
+    .expect("expand");
     if let Some(CopyAction::CopyFile { .. }) = walk.next_action() {
         walk.copied_file().expect("copy x");
     }
@@ -4690,13 +4766,18 @@ fn copy_walk_from_items_fails_closed() {
     // Nothing to copy.
     assert!(CopyWalk::from_items(vec![]).is_none());
     // A source or destination that names the root (an empty component list).
-    assert!(CopyWalk::from_items(vec![(Vec::new(), comps(&["Storage", "a"]), false)]).is_none());
-    assert!(CopyWalk::from_items(vec![(comps(&["Users", "a"]), Vec::new(), false)]).is_none());
+    assert!(
+        CopyWalk::from_items(vec![(Vec::new(), comps(&["Storage", "a"]), CopyKind::File)])
+            .is_none()
+    );
+    assert!(
+        CopyWalk::from_items(vec![(comps(&["Users", "a"]), Vec::new(), CopyKind::File)]).is_none()
+    );
     // A valid item builds a walk.
     assert!(CopyWalk::from_items(vec![(
         comps(&["Users", "a"]),
         comps(&["Storage", "a"]),
-        false
+        CopyKind::File
     )])
     .is_some());
 }
@@ -6799,6 +6880,7 @@ mod occupancy {
         ] {
             let mut source = VfsDirectorySource::probing(
                 |_: &str| Err::<Vec<u8>, _>(Errno::NotImplemented),
+                NoLinks,
                 move |_: &str, _: &mut [u8]| answer,
             );
             assert_eq!(source.has_children(&["d".to_string()]), Ok(want));
@@ -6807,6 +6889,7 @@ mod occupancy {
         // Any other refusal is surfaced, never guessed at.
         let mut refusing = VfsDirectorySource::probing(
             |_: &str| Err::<Vec<u8>, _>(Errno::NotImplemented),
+            NoLinks,
             |_: &str, _: &mut [u8]| Err(Errno::PermissionDenied),
         );
         assert_eq!(
@@ -6819,7 +6902,8 @@ mod occupancy {
     fn a_source_built_without_a_probe_offers_none() {
         // The trusted picker's source: it never reads a directory it is only
         // displaying, so the cue degrades to the plain folder.
-        let mut picker = VfsDirectorySource::new(|_: &str| Err::<Vec<u8>, _>(Errno::NotFound));
+        let mut picker =
+            VfsDirectorySource::new(|_: &str| Err::<Vec<u8>, _>(Errno::NotFound), NoLinks);
         assert_eq!(
             picker.has_children(&["d".to_string()]),
             Err(Errno::NotImplemented)
@@ -7295,5 +7379,293 @@ mod listing_cue {
         assert!(!deferring.is_listing(), "the mock source answers at once");
         browser.refresh().expect("refresh");
         assert_eq!(painted(&browser).pixels(), settled.as_slice());
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Symbolic links: two facts about one entry (`plans/SYMLINKS.md` S4)
+// ---------------------------------------------------------------------------
+
+/// The four link shapes side by side: to a folder, to a file, to a bundle,
+/// and one that names nothing.
+fn link_tree() -> (BTreeMap<String, Vec<u8>>, FixtureLinks) {
+    let mut dirs = BTreeMap::new();
+    dirs.insert(
+        "/".to_string(),
+        encoded_stream(&[
+            (b"Docs", FileKind::Symlink),
+            (b"notes", FileKind::Symlink),
+            (b"Editor", FileKind::Symlink),
+            (b"gone", FileKind::Symlink),
+            (b"plain.txt", FileKind::Regular),
+        ]),
+    );
+    let links = FixtureLinks::default()
+        .with("/Docs", "/Storage/docs", Some(FileKind::Directory))
+        .with("/notes", "/Users/me/notes.txt", Some(FileKind::Regular))
+        .with("/Editor", "/Apps/Editor.app", Some(FileKind::Directory))
+        .with("/gone", "../removed", None);
+    (dirs, links)
+}
+
+fn link_entries() -> Vec<Entry> {
+    let (dirs, mut links) = link_tree();
+    let stream = dirs.get("/").expect("root stream").clone();
+    entries_from_dir_stream("/", &stream, &mut links).expect("valid stream")
+}
+
+#[test]
+fn a_link_is_classified_by_its_target_and_still_shown_as_a_link() {
+    let entries = link_entries();
+    let kinds: Vec<EntryKind> = entries.iter().map(Entry::kind).collect();
+    assert_eq!(
+        kinds,
+        vec![
+            EntryKind::Link(LinkTarget::Directory),
+            EntryKind::Link(LinkTarget::File),
+            // The *target's* leaf name decides bundle-ness: a shortcut is
+            // named for the application, not for `<Name>.app`.
+            EntryKind::Link(LinkTarget::Bundle),
+            EntryKind::Link(LinkTarget::Dangling),
+            EntryKind::File,
+        ]
+    );
+    // Every link is still a link — the fact the user must see.
+    for entry in entries.iter().take(4) {
+        assert!(entry.is_link(), "{} reads as a link", entry.name());
+    }
+    assert!(!entries[4].is_link());
+}
+
+#[test]
+fn a_link_carries_the_target_it_stores_verbatim() {
+    let entries = link_entries();
+    assert_eq!(entries[0].target(), Some("/Storage/docs"));
+    // A dangling link still shows the spelling that explains why.
+    assert_eq!(entries[3].target(), Some("../removed"));
+    // A plain file has no target at all.
+    assert_eq!(entries[4].target(), None);
+}
+
+#[test]
+fn a_link_is_never_directory_backed_however_it_resolves() {
+    // The structural reading a management verb takes: removing a link must
+    // unlink the *link*, never recurse into the tree it points at.
+    let entries = link_entries();
+    for entry in &entries {
+        assert!(
+            !entry.is_directory_backed(),
+            "{} is a leaf on disk",
+            entry.name()
+        );
+    }
+    // A link to a directory is nevertheless one the browser descends.
+    assert!(entries[0].is_directory());
+    assert!(!entries[1].is_directory());
+}
+
+#[test]
+fn a_link_to_a_bundle_reads_as_a_bundle_and_a_dangling_one_does_not() {
+    let entries = link_entries();
+    assert!(entries[2].is_bundle());
+    assert!(!entries[3].is_bundle());
+    // Resolution is the content reading; a dangling link resolves to nothing
+    // rather than to a guessed kind.
+    assert_eq!(entries[2].kind().resolved(), Some(EntryKind::Bundle));
+    assert_eq!(entries[3].kind().resolved(), None);
+}
+
+#[test]
+fn a_link_a_reader_cannot_describe_is_dangling_not_a_file() {
+    // The fail-closed answer: with nothing describing the link, it is not
+    // silently downgraded to a plain file.
+    let (dirs, _) = link_tree();
+    let stream = dirs.get("/").expect("root stream").clone();
+    let entries = entries_from_dir_stream("/", &stream, &mut NoLinks).expect("valid stream");
+    for entry in entries.iter().take(4) {
+        assert_eq!(entry.kind(), EntryKind::Link(LinkTarget::Dangling));
+        assert_eq!(entry.target(), None);
+    }
+}
+
+#[test]
+fn the_classifier_refuses_to_trust_a_target_that_is_itself_a_link() {
+    // Resolution follows every hop, so a backing reporting a link as a
+    // resolved target is not trusted to name anything.
+    let kind = EntryKind::for_listing(
+        FileKind::Symlink,
+        "chain",
+        Some(LinkResolution {
+            kind: FileKind::Symlink,
+            target_name: "next",
+        }),
+    );
+    assert_eq!(kind, EntryKind::Link(LinkTarget::Dangling));
+}
+
+#[test]
+fn a_link_sorts_and_classifies_as_what_it_names() {
+    use crate::media::{media_for_entry, MediaType};
+    use crate::sort::{sort_entries, SortDirection, SortKey, SortMode};
+    let mut entries = link_entries();
+    sort_entries(
+        &mut entries,
+        SortMode {
+            key: SortKey::Kind,
+            direction: SortDirection::Ascending,
+        },
+    );
+    // Directories first, then bundles, then the leaves: a shortcut sorts
+    // with what it names.
+    let names: Vec<&str> = entries.iter().map(Entry::name).collect();
+    assert_eq!(names[0], "Docs");
+    assert_eq!(names[1], "Editor");
+    // And its content type is its target's.
+    let entries = link_entries();
+    assert_eq!(media_for_entry(&entries[0], &[]), MediaType::InodeDirectory);
+    assert_eq!(media_for_entry(&entries[2], &[]), MediaType::TairixApp);
+}
+
+#[test]
+fn activating_a_link_acts_on_what_it_names() {
+    let (dirs, links) = link_tree();
+    let mut dirs = dirs;
+    // The kernel resolves the link when a listing names it, so the path
+    // spelled *through* the link is what a descent reads.
+    dirs.insert("/Docs".to_string(), encoded_stream(&[]));
+    let mut browser = Browser::open_root(tree_source_with_links(dirs, links)).expect("open");
+
+    // A link to a directory descends *through* the link, so the browser's
+    // location reads as the user navigated.
+    select_named(&mut browser, "Docs");
+    assert_eq!(browser.activate_selected(), Ok(Activation::Descended));
+    assert_eq!(browser.components(), ["Docs".to_string()].as_slice());
+    browser.go_up().expect("climb back");
+
+    // A link to a file is opened through the link: the kernel follows the
+    // final link on open, so the link's own path names the right bytes.
+    select_named(&mut browser, "notes");
+    assert_eq!(
+        browser.activate_selected(),
+        Ok(Activation::OpenFile {
+            path: "/notes".to_string()
+        })
+    );
+
+    // A link to a bundle launches the **resolved** target, because the
+    // app-load gate judges the path it is handed and a link in the user's own
+    // directory is not in a store.
+    select_named(&mut browser, "Editor");
+    assert_eq!(
+        browser.activate_selected(),
+        Ok(Activation::LaunchBundle {
+            path: "/Apps/Editor.app".to_string()
+        })
+    );
+
+    // A link that names nothing has nothing to activate.
+    select_named(&mut browser, "gone");
+    assert_eq!(
+        browser.activate_selected(),
+        Err(crate::error::BrowseError::Source(Errno::NotFound))
+    );
+}
+
+/// Select the entry called `name` in the browser's *sorted* listing, so a
+/// test names what it means rather than a position the sort decides.
+fn select_named<S: DirectorySource>(browser: &mut Browser<S>, name: &str) {
+    let index = browser
+        .entries()
+        .iter()
+        .position(|entry| entry.name() == name)
+        .unwrap_or_else(|| panic!("the listing holds {name}"));
+    browser.select(index).expect("select");
+}
+
+#[test]
+fn a_relative_link_target_resolves_against_the_links_own_directory() {
+    // Concatenation, never a lexical collapse: a `..` is left for the kernel
+    // to resolve physically against the nodes the walk really passes through.
+    assert_eq!(
+        crate::entry::resolve_target("/Users/me", "notes.txt"),
+        "/Users/me/notes.txt"
+    );
+    assert_eq!(
+        crate::entry::resolve_target("/Users/me", "../shared/x"),
+        "/Users/me/../shared/x"
+    );
+    // An absolute target names itself.
+    assert_eq!(
+        crate::entry::resolve_target("/Users/me", "/Apps/Editor.app"),
+        "/Apps/Editor.app"
+    );
+    // A root parent is not doubled.
+    assert_eq!(crate::entry::resolve_target("/", "x"), "/x");
+}
+
+#[test]
+fn the_copy_walk_recreates_a_link_rather_than_streaming_its_bytes() {
+    let mut walk = CopyWalk::from_items(vec![(
+        comps(&["Users", "shortcut"]),
+        comps(&["Storage", "shortcut"]),
+        CopyKind::Link,
+    )])
+    .expect("walk");
+    match walk.next_action() {
+        Some(CopyAction::CopyLink { source, dest }) => {
+            assert_eq!(source, comps(&["Users", "shortcut"]).as_slice());
+            assert_eq!(dest, comps(&["Storage", "shortcut"]).as_slice());
+        }
+        other => panic!("expected a CopyLink, got {other:?}"),
+    }
+    // The acknowledgement must match the step: a link is not a file.
+    assert_eq!(walk.copied_file(), Err(CopyWalkError::OutOfStep));
+    walk.copied_link().expect("link copied");
+    assert!(walk.is_complete());
+    assert_eq!(walk.copied(), 1);
+}
+
+#[test]
+fn a_copied_tree_recreates_the_links_inside_it() {
+    let mut tree: BTreeMap<String, Vec<(String, CopyKind)>> = BTreeMap::new();
+    tree.insert(
+        "/Users/dir".to_string(),
+        vec![
+            ("a.txt".to_string(), CopyKind::File),
+            ("shortcut".to_string(), CopyKind::Link),
+        ],
+    );
+    let mut walk = CopyWalk::from_items(vec![(
+        comps(&["Users", "dir"]),
+        comps(&["Storage", "dir"]),
+        CopyKind::Directory,
+    )])
+    .expect("walk");
+    let order = drive_copy(&mut walk, &tree);
+    assert_eq!(
+        order,
+        vec![
+            "/Storage/dir".to_string(),
+            "/Storage/dir/a.txt".to_string(),
+            "/Storage/dir/shortcut".to_string(),
+        ]
+    );
+}
+
+#[test]
+fn open_with_is_offered_for_a_link_to_a_file_only() {
+    use crate::chrome::{ContextCommand, ContextMenuModel};
+    let (dirs, links) = link_tree();
+    let mut browser = Browser::open_root(tree_source_with_links(dirs, links)).expect("open");
+    for (name, offered) in [
+        ("Docs", false),
+        ("notes", true),
+        ("Editor", false),
+        ("gone", false),
+        ("plain.txt", true),
+    ] {
+        select_named(&mut browser, name);
+        let menu = ContextMenuModel::for_browser(&browser, false);
+        assert_eq!(menu.is_enabled(ContextCommand::OpenWith), offered, "{name}");
     }
 }

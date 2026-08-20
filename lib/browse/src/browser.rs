@@ -22,7 +22,7 @@ use tairix_abi::Errno;
 use crate::activate::Activation;
 use crate::clipboard::{Clipboard, ClipboardOp};
 use crate::delete::DeletePlan;
-use crate::entry::{Entry, EntryKind, Occupancy};
+use crate::entry::{resolve_target, Entry, EntryKind, LinkTarget, Occupancy};
 use crate::error::BrowseError;
 use crate::layout::ViewMode;
 use crate::mkdir::{validate_new_dir_name, MkdirError};
@@ -797,18 +797,41 @@ impl<S: DirectorySource> Browser<S> {
         let entry = self.entries.get(index).ok_or(BrowseError::NoSuchEntry)?;
         let kind = entry.kind();
         let name = String::from(entry.name());
+        // A link is activated as what it names, and the *path* it is
+        // activated by depends on which: a directory is descended through the
+        // link (the browser's location then reads as the user navigated), a
+        // file is opened through it (the kernel follows the final link on
+        // open), but a bundle must be launched by its **resolved** path —
+        // the app-load gate's store rule judges the path it is handed, and a
+        // link in the user's own directory is not in a store.
+        let launch = entry
+            .target()
+            .map(|target| resolve_target(&self.spelled_path(), target));
         match kind {
-            EntryKind::Directory => {
+            EntryKind::Directory | EntryKind::Link(LinkTarget::Directory) => {
                 self.open_index(index)?;
                 Ok(Activation::Descended)
             }
             EntryKind::Bundle => Ok(Activation::LaunchBundle {
                 path: self.child_target_path(&name)?,
             }),
-            EntryKind::File => Ok(Activation::OpenFile {
+            EntryKind::Link(LinkTarget::Bundle) => Ok(Activation::LaunchBundle {
+                path: launch.ok_or(BrowseError::Source(Errno::NotFound))?,
+            }),
+            EntryKind::File | EntryKind::Link(LinkTarget::File) => Ok(Activation::OpenFile {
                 path: self.child_target_path(&name)?,
             }),
+            // A link that resolves to nothing has nothing to activate; the
+            // caller reports the refusal rather than opening the link's own
+            // bytes, which are a path and not content.
+            EntryKind::Link(LinkTarget::Dangling) => Err(BrowseError::Source(Errno::NotFound)),
         }
+    }
+
+    /// The absolute path of the directory currently shown — the base a link's
+    /// relative target resolves against.
+    fn spelled_path(&self) -> String {
+        crate::vfs::spell_absolute_path(&self.components)
     }
 
     /// Spell the validated absolute path of a child named `name` in the current

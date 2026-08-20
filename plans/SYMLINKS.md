@@ -265,18 +265,103 @@ inline-data limit, and a zero-length target refused as corrupt. The `fuzz_mount`
 corpus gained a link in its base image and drives `read_link` over every entry
 it decodes.
 
-## Stage S4 — userland — **remaining**
+## Stage S4 — userland — **landed**
 
-- `userland/apps/ln` — a new command bundle with the GNU `ln` surface
-  (`-s`, `-f`, `-n`, `-T`, `-v`, `--`).
-- `ls`: `name -> target` under `-l`, plus `-L`/`-H` dereference flags.
-- `lib/browse`: classify a link by its resolved target while still showing
-  it as a link.
-- `userland/apps/fstree`: today it *refuses* a link with `OpError::IsALink`
-  rather than copying it byte-wise (which would silently make a regular file
-  holding the target's text) or removing its target. S4 gives it the real
-  operations — copy recreates the link, move and remove act on the link.
-- A `posix_fs_suite` symlink vertical.
+**`userland/apps/ln`** is a new command bundle carrying the GNU surface
+`-s`, `-f`, `-i`, `-n`, `-t`, `-T`, `-v`, `--` and every operand shape
+(`target`, `target link_name`, `target... directory`, `-t dir`). It is a
+planner over three seams (`FileSystem`/`Prompt`/`Output`), so every operand
+and replacement decision is host-provable.
+
+**Hard links do not exist in this ABI, so `-s` is required.** There is no
+`fs_link` syscall and no driver call behind one, so `ln` without `-s` has
+nothing to create: it reports that permanent limit before touching anything
+rather than quietly making a symbolic link, which is a different object. The
+hard-link-only switches (`-L`, `-P`, `-d`, `-F`) are refused for the same
+reason; `-b`/`-S` because no backup machinery exists anywhere in the tree
+(`cp`/`mv` omit them too); and `-r` because a target relative to the link's
+own directory needs a canonicalising resolution the ABI does not offer, and a
+*lexical* one would name a different node the moment a link were involved —
+decision 4's own trap. Whether hard links should exist at all is an open
+question for the User (see "Open" below).
+
+**A replacement removes the name first.** `-f`, and an approved `-i`, unlink
+the existing name *before* creating the link — a create or truncate follows a
+final link, so leaving one in place would act on whatever it pointed at. A
+directory is never replaced. This is the same rule `fstree` and the file
+manager now apply.
+
+**`ls`** implements the full GNU four-state dereference posture
+(`Dereference`), because three is not enough to describe the tool: `-l`/`-d`/
+`-F` show every link as itself; the default resolves a *command-line* link
+**to a directory** (so `ls linkdir` lists it) and nothing else; `-H` resolves
+every operand; `-L` resolves everywhere. The posture selects a per-path
+`FinalLink`, so one listing takes both readings — which is what `-H` is for.
+The long format prints `name -> target`, the target verbatim.
+
+The kind question is now asked by the *type*: `Row` carries the entry's kind
+(never unknown — the directory stream supplies it even when a stat is
+refused) beside an `Option<Metadata>`, so every former `is_dir()` site is an
+exhaustive `match`. A path that cannot be inspected no longer ends the
+listing: the reason goes to standard error, the path is skipped, and an
+`Outcome` grades how serious it was into GNU's exit status (`0` / `1` for a
+problem inside a listing / `2` for a command-line operand). A skipped entry
+renders its type letter and `?` for every stat-derived cell. `-R` under `-L`
+can walk into a directory a link names, so the walk carries the ancestor
+chain of node identities and reports `not listing already-listed directory`
+rather than looping. `lib/vt` gained `Role::Link` (bold cyan, GNU's `ln=`),
+and the long format paints a link's target in the role of what it names.
+
+**`lib/browse`** now carries *both* facts about a link, because a file
+manager needs both: `EntryKind::Link(LinkTarget)` shows the link while
+naming what it resolves to, and `Entry::target()` carries the stored spelling
+for display and launch. Bundle-ness is decided from the **target's** leaf
+name, so a desktop shortcut named `Editor` pointing at `/Apps/Editor.app`
+reads as an application — the shape S5 builds on. `is_directory_backed()` is
+`false` for every link however it resolves (a link is a leaf: removing one
+unlinks it, and recursing into one would walk a tree the name only points
+at), while `is_directory()`/`is_bundle()` follow the target, and
+`resolved()` is the content reading a sort, icon, or association takes. A
+`LinkReader` seam describes the links a listing reports (one production
+`RtLinkReader` under the crate's new `rt` feature, shared by the file
+manager, the desktop, the picker, and the wallpaper catalog); `NoLinks` is
+the honest "describes nothing" for a tree that cannot hold one. Activation
+descends or opens *through* the link and launches a bundle by its
+**resolved** path, because the app-load gate judges the path it is handed.
+
+**`userland/apps/fstree`** has the real operations and `OpError::IsALink` is
+deleted. Copy recreates the link with the same stored target; move and
+delete act on the link. Two defects were closed in the same change: the
+destination probe followed a final link, so a planted link inside a
+destination tree could have redirected a later create or truncate anywhere on
+the volume (`stat_kind` is now `NO_FOLLOW`), and a rename silently replaced
+an existing leaf of a different kind without asking. A conflict now names
+what it would replace (`… exists as a symbolic link`).
+
+**Closed in passing** (`AGENTS.md` §2.18): the graphical file manager's paste
+byte-copied a link — leaving a regular file holding the target's text — and
+followed it to decide directoryness. `CopyWalk` items now carry a `CopyKind`
+(file / directory / link) and yield a `CopyLink` step the app satisfies with
+`readlink` + `symlink`; the paste's source kind comes from a `NO_FOLLOW`
+stat. One directory read serves both walks, each taking the reading it needs.
+
+`lib/path` grew the two spellings this stage needed in more than one place —
+`leaf_name` and `join` — rather than a fifth private `basename` and a twelfth
+private `join` (§2.2). The remaining private copies are noted under "Open".
+
+A **`posix_fs_suite` symlink vertical** (`tests/symlink.rs`, 21 cases) drives
+the matrix against a real ARXFS volume: create/readlink round trip (a
+relative target with `..` included), `readlink`'s domain refusals, `lstat` vs
+`stat` reporting *different nodes*, a dangling link describable only under
+`Keep`, write and truncate reaching the target and leaving the link a link,
+both refused through a dangling link with nothing created, `O_CREAT` through
+a dangling link creating the target, `mkdir` over a live or dangling link
+refused `AlreadyExists`, `symlink` never replacing a name, unlink and rename
+acting on the link, a cycle and a self-cycle refused `LinkLoop`, a link
+listed as a link, a link not byte-readable, an interior link always followed,
+`..` in a target resolved *physically* (built so a lexical resolution would
+succeed and reach a different file), a link unable to escape its volume, and
+creation refused on a read-only mount and an unauthorised parent.
 
 ## Stage S5 — the desktop shortcut — **remaining**
 
@@ -286,6 +371,32 @@ identity, reporting a refusal loudly and never fatally. The desktop surface
 and `lib/browse` classify a symlinked bundle as a bundle and launch the
 **resolved** target, so `appload`'s store rule still sees a real store
 bundle; a dangling or non-store target is refused with its reason.
+
+---
+
+## Open — raised, not buried
+
+1. **Hard links do not exist, and nothing decides whether they should.**
+   There is no `fs_link` syscall, no driver `create_hard_link`, and no VFS
+   path, so `ln` refuses the operation as a permanent limit (above) — the
+   honest declared answer, and complete for `ln -s`. But `plans/APPS.md`
+   §12.1 Stage E envisages "symbolic/hard-link support", and ARXFS inodes
+   already carry an `nlink` field. Whether to add them is a **User
+   decision**, not an implementation detail: it is a new syscall, a new
+   driver-trait method, a per-format spelling (with FAT32/ADFS/ext4
+   refusals), the `.` / `..` accounting interaction, and the whole
+   "unlinking one name of many" lifecycle — a stage on the scale of S1–S3,
+   not a corner of S4. Until it is decided, `ln`'s refusal and the absent
+   `ls -l` link-count column are the documented state.
+
+2. **`basename`/`join` are still duplicated outside this change's blast
+   radius.** `lib/path` now owns `leaf_name` and `join`, and the crates this
+   stage touched use them, but nine private `join(parent, name)` copies
+   remain (`chmod`, `chown`, `rm`, `du`, `setcap`, `cp`, `getcap`, `mv`,
+   `lib/appload`) along with three private `basename`s (`cp`, `mv`, and the
+   `basename` app's own `basename_of`). Converting them is a mechanical §2.2
+   sweep across nine unrelated crates; it is deliberately **not** smuggled
+   into a symlink change.
 
 ---
 

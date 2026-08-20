@@ -69,7 +69,7 @@ use tairix_browse::render::{grid_metrics, grid_tile};
 use tairix_browse::{
     applications_for, entry_icon_request, media_for_entry, sort_entries, suggest_new_dir_name,
     AppAssociation, ClickKind, DirectorySource, DoubleClickTracker, Entry, EntryKind, GridFill,
-    GridFlow, GridView, Listing, SortDirection, SortKey, SortMode,
+    GridFlow, GridView, LinkTarget, Listing, SortDirection, SortKey, SortMode,
 };
 use tairix_controls::state::{ControlState, FocusState, PointerState, SelectionState};
 use tairix_controls::IconTile;
@@ -733,33 +733,65 @@ impl<S: DirectorySource> Desktop<S> {
     /// model picks for it, with the file as its argument. A file nothing is
     /// associated with is refused with a stated reason and nothing else
     /// happens.
+    ///
+    /// A **shortcut** — a symbolic link on the desktop — acts on what it
+    /// names: a folder or a file is opened through the link (the kernel
+    /// resolves the final link), while a bundle is launched by its *resolved*
+    /// path, because the app-load gate judges the path it is handed and a
+    /// link in the user's own `Desktop` folder is not in a program store. A
+    /// shortcut whose target has gone is refused with its reason, never
+    /// launched blind.
     fn activate(&self, index: usize, apps: &[AppAssociation]) -> DesktopOutcome {
         let Some(entry) = self.entries.get(index) else {
             return DesktopOutcome::ignored();
         };
         let path = self.path_of(entry.name());
+        let bundle_path = match entry.kind() {
+            EntryKind::Link(_) => match entry.target() {
+                Some(target) => tairix_browse::resolve_target(&self.folder_path(), target),
+                None => {
+                    return DesktopOutcome::acting(DesktopAction::Refuse(format!(
+                        "desktop: the shortcut '{}' names nothing\n",
+                        entry.name()
+                    )));
+                }
+            },
+            _ => path.clone(),
+        };
         match entry.kind() {
-            EntryKind::Directory => {
+            EntryKind::Directory | EntryKind::Link(LinkTarget::Directory) => {
                 DesktopOutcome::acting(DesktopAction::Activate(DesktopActivation::OpenFolder {
                     path,
                 }))
             }
-            EntryKind::Bundle => DesktopOutcome::acting(DesktopAction::Activate(launch_of(
-                &path,
-                bundle_label(entry.name()),
-                None,
-            ))),
-            EntryKind::File => match applications_for(entry.name(), apps).first() {
-                Some(app) => DesktopOutcome::acting(DesktopAction::Activate(launch_of(
-                    app.bundle_path(),
-                    app.name().to_string(),
-                    Some(path),
-                ))),
-                None => DesktopOutcome::acting(DesktopAction::Refuse(format!(
-                    "desktop: no installed application opens '{}'\n",
+            EntryKind::Bundle | EntryKind::Link(LinkTarget::Bundle) => {
+                DesktopOutcome::acting(DesktopAction::Activate(launch_of(
+                    &bundle_path,
+                    bundle_label(leaf_of(&bundle_path)),
+                    None,
+                )))
+            }
+            EntryKind::File | EntryKind::Link(LinkTarget::File) => {
+                match applications_for(entry.name(), apps).first() {
+                    Some(app) => DesktopOutcome::acting(DesktopAction::Activate(launch_of(
+                        app.bundle_path(),
+                        app.name().to_string(),
+                        Some(path),
+                    ))),
+                    None => DesktopOutcome::acting(DesktopAction::Refuse(format!(
+                        "desktop: no installed application opens '{}'\n",
+                        entry.name()
+                    ))),
+                }
+            }
+            // A shortcut whose target cannot be reached: reported, never
+            // launched or opened on the chance that it works.
+            EntryKind::Link(LinkTarget::Dangling) => {
+                DesktopOutcome::acting(DesktopAction::Refuse(format!(
+                    "desktop: the shortcut '{}' points at something that is not there\n",
                     entry.name()
-                ))),
-            },
+                )))
+            }
         }
     }
 
@@ -862,6 +894,13 @@ fn launch_of(bundle: &str, label: String, argument: Option<String>) -> DesktopAc
         label,
         argument,
     }
+}
+
+/// The final component of the absolute `path` — the name a resolved bundle is
+/// reported by. The one shared spelling rule, through the browser engine that
+/// already owns this app's path handling.
+fn leaf_of(path: &str) -> &str {
+    tairix_browse::leaf_name(path)
 }
 
 /// The name an application bundle is reported by: its directory name without

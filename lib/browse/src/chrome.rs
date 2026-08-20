@@ -468,8 +468,11 @@ impl ContextMenuModel {
             | ContextCommand::Delete => self.selection.is_some(),
             // Open With… offers a chooser of applications, which only a regular
             // file has: a directory descends and a bundle launches itself, so
-            // neither has an application to pick.
-            ContextCommand::OpenWith => self.selection == Some(EntryKind::File),
+            // neither has an application to pick. A link offers the chooser
+            // for what it *names*, because that is what opening it reaches.
+            ContextCommand::OpenWith => {
+                self.selection.and_then(EntryKind::resolved) == Some(EntryKind::File)
+            }
             ContextCommand::Paste => self.has_clipboard,
         }
     }

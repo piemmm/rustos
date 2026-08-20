@@ -677,6 +677,7 @@ dependencies = [
  "tairix-path",
  "tairix-raster",
  "tairix-reclaim",
+ "tairix-rt",
  "tairix-theme",
 ]
 
@@ -1849,6 +1850,16 @@ dependencies = [
  "tairix-abi",
  "tairix-input",
  "tairix-vt",
+]
+
+[[package]]
+name = "tairix-ln"
+version = "0.0.0"
+dependencies = [
+ "tairix-abi",
+ "tairix-help",
+ "tairix-path",
+ "tairix-rt",
 ]
 
 [[package]]

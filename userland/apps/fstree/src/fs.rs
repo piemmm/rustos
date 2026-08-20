@@ -20,7 +20,8 @@ use tairix_abi::{Errno, FileKind};
 pub struct FsEntry {
     /// The entry's name within its directory (a single component).
     pub name: String,
-    /// Whether the entry is a regular file or a directory.
+    /// The entry's **own** kind, as the stream reports it: a symbolic link
+    /// arrives as [`FileKind::Symlink`], never as what it names.
     pub kind: FileKind,
     /// Apparent length in bytes; `0` for a directory.
     pub size: u64,
@@ -145,14 +146,49 @@ pub trait Fs {
     /// such attribute was stored.
     fn attr_remove(&mut self, path: &str, key: &str) -> Result<(), Errno>;
 
-    /// The [`FileKind`] of the entry at `path` (a resolve-only stat), used
-    /// to probe a destination before any I/O.
+    /// The [`FileKind`] of the entry `path` **names** — a resolve-only stat
+    /// that does *not* follow a final symbolic link — used to probe a
+    /// destination before any I/O.
+    ///
+    /// Keeping the final link is what makes the probe safe: a link already
+    /// sitting at a destination must be seen as the link it is, because
+    /// creating or truncating "through" it would act on whatever it points
+    /// at, anywhere on the volume. Following it here would hand an attacker
+    /// who can plant a name inside a destination tree a redirect for every
+    /// later write.
     ///
     /// # Errors
     ///
     /// Any [`Errno`] the filesystem raises; [`Errno::NotFound`] means the
     /// path is absent, which the operations treat as "free to create".
     fn stat_kind(&mut self, path: &str) -> Result<FileKind, Errno>;
+
+    /// The target the symbolic link at `path` stores, verbatim.
+    ///
+    /// The final component is never followed — the call is about the link —
+    /// and the target comes back exactly as stored, still unresolved, which
+    /// is what recreating the link at a new name needs.
+    ///
+    /// # Errors
+    ///
+    /// Any [`Errno`] the filesystem raises; [`Errno::OutOfRange`] when `path`
+    /// names anything but a symbolic link, and [`Errno::NotSupported`] on a
+    /// mount whose format stores no links.
+    fn read_link(&mut self, path: &str) -> Result<String, Errno>;
+
+    /// Create a symbolic link at `path` whose stored target is `target`.
+    ///
+    /// `target` is stored verbatim and never resolved, so recreating a link
+    /// elsewhere reproduces exactly the spelling the original held. A new
+    /// link never replaces an existing name: an occupied `path` is
+    /// [`Errno::AlreadyExists`], so a caller that means to replace one
+    /// removes it first.
+    ///
+    /// # Errors
+    ///
+    /// Any [`Errno`] the filesystem raises — [`Errno::AlreadyExists`] for a
+    /// taken name, [`Errno::NotSupported`] on a format that stores no links.
+    fn create_link(&mut self, target: &str, path: &str) -> Result<(), Errno>;
 
     /// Read up to `buf.len()` bytes of the file at `path` from `offset`,
     /// returning the count read (`0` at end of file). A short read (fewer
@@ -186,7 +222,8 @@ pub trait Fs {
     /// Any [`Errno`] the filesystem raises — e.g. [`Errno::AlreadyExists`].
     fn mkdir(&mut self, path: &str) -> Result<(), Errno>;
 
-    /// Remove the regular file at `path` (unlink one link).
+    /// Remove the non-directory entry `path` names — the name as typed, so
+    /// removing a symbolic link removes the *link* and never what it names.
     ///
     /// # Errors
     ///

@@ -43,6 +43,13 @@ Bei mehreren Operanden — und stets unter `-R` — wird jeder
 Verzeichnisliste eine `pfad:`-Kopfzeile vorangestellt, und Blöcke
 werden durch eine Leerzeile getrennt.
 
+Eine symbolische Verknüpfung erscheint mit dem Typbuchstaben `l` und im
+Langformat als `Name -> Ziel` — das Ziel genau so, wie es gespeichert ist,
+unaufgelöst, denn das ist der Inhalt der Verknüpfung. Eine ins Leere
+zeigende Verknüpfung wird daher normal aufgelistet; nur eine auflösende
+Haltung (`-L`, oder `-H` für einen Operanden) meldet ein unerreichbares
+Ziel.
+
 ## OPTIONS
 
 - `-t` — nach dem angezeigten Zeitstempel sortieren, den neuesten
@@ -101,6 +108,19 @@ werden durch eine Leerzeile getrennt.
   (Standard, wenn die Ausgabe kein Terminal ist).
 - `-r, --reverse` — die Sortierreihenfolge umkehren.
 - `-R, --recursive` — Unterverzeichnisse rekursiv auflisten.
+- `-L, --dereference` — Angaben zu der Datei zeigen, die jede symbolische
+  Verknüpfung benennt, statt zur Verknüpfung selbst, wo immer eine
+  auftritt. Eine Verknüpfung, deren Ziel nicht erreichbar ist, wird auf der
+  Standardfehlerausgabe gemeldet, die Auflistung läuft weiter und der
+  Exit-Status ist ungleich null.
+- `-H, --dereference-command-line` — nur die auf der Befehlszeile genannten
+  symbolischen Verknüpfungen auflösen; Verknüpfungen innerhalb einer
+  Auflistung bleiben Verknüpfungen. Die spätere von `-L` und `-H` gewinnt.
+- `--dereference-command-line-symlink-to-dir` — der Standard, solange keine
+  Formatoption etwas anderes erzwingt: eine Verknüpfung der Befehlszeile
+  *auf ein Verzeichnis* wird aufgelöst, sodass `ls linkdir` das Verzeichnis
+  auflistet, während jede andere Verknüpfung sich selbst zeigt. `-l`, `-d`
+  und `-F` zeigen stattdessen jede Verknüpfung selbst.
 - `-s, --size` — die belegte Größe jedes Eintrags in 1024-Byte-Blöcken
   ausgeben (mit `-h` skaliert), mit einer `total`-Zeile je aufgelistetem
   Verzeichnis.

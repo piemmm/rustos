@@ -1021,6 +1021,75 @@ and the secured VFS still authorises every operation per-inode.
 refusal, first-failure-stops ordering, GNU `-v` wording), and the
 locale switch-drift pins.
 
+## `ln` — create symbolic links (`userland/apps/ln`)
+
+`tairix-ln` is the GNU coreutils `ln` (a `plans/SYMLINKS.md` S4 store
+bundle). It creates a symbolic link naming each target through
+`fs_symlink`, in every operand shape the GNU tool accepts: one operand
+links under the target's own name in the working directory; two make the
+second a directory to fill when it is one (or a link to one, unless `-n`)
+and the link's name otherwise; three or more require the last to be a
+directory; and `-t dir` makes every operand a target.
+
+**`-s` is required, because this ABI has no hard links.** There is no
+`fs_link` syscall and no driver call behind one, so `ln` without `-s` has
+nothing to create: it reports that permanent limit and creates nothing,
+rather than quietly making a symbolic link — a link and a second name for
+one inode are different objects, and substituting one for the other would
+be a different operation wearing the user's spelling. The hard-link-only
+switches (`-L`, `-P`, `-d`, `-F`) are refused for the same reason;
+`-b`/`-S` because this workspace has no backup machinery (`cp`/`mv` omit
+them too); and `-r` because computing a target relative to the link's own
+directory needs a canonicalising resolution the ABI does not offer, and a
+*lexical* one would name a different node the moment a link were involved —
+the very collapse the resolver forbids. Every refusal is a usage error
+naming the switch; nothing is silently ignored.
+
+The target is stored **verbatim** and never resolved: it may be relative,
+carry `..`, and name nothing at all, so `ln -s` may legitimately create a
+dangling link. Its *grammar* is still checked kernel-side before it is
+stored, so a target no resolver could walk is refused rather than written,
+and creating a link grants no authority over what it names — every later
+use is authorised component by component under the caller's own identity.
+
+A link name that is already taken is refused unless `-f` or `-i` says to
+replace it, and replacing it **removes** that name first: a create or
+truncate follows a final link, so leaving one in place would act on
+whatever it pointed at. A directory is never replaced. An unanswerable
+`-i` question is never consent, and the first failure stops the run before
+any later target, exactly as `cp` and `mv` do.
+
+### Grammar
+
+```
+ln -s [-finvT] [-t dir] [--] target... [link_name]
+```
+
+| Token            | Meaning                                            |
+|------------------|----------------------------------------------------|
+| `-s`, `--symbolic` | make symbolic links (required — see above)       |
+| `-f`, `--force`  | remove an existing link name, then create the link |
+| `-i`, `--interactive` | ask before removing an existing link name; later of `-f`/`-i` wins |
+| `-n`, `--no-dereference` | treat a link-to-directory destination as the name it also is |
+| `-v`, `--verbose` | report each link as `'link' -> 'target'`           |
+| `-t dir`, `--target-directory=dir` | create every link in `dir`       |
+| `-T`, `--no-target-directory` | the destination is a link name (exactly two operands) |
+| `-h`, `-?`, `--help` | show the tool's short help (wins immediately)  |
+| `--`             | end option parsing; every later argument is an operand |
+
+The crate is `no_std` (with `alloc`), has no `unsafe`, and no
+`unwrap`/`expect`/`panic!` in production paths. Its manifest requests
+`CAP_CONSOLE_WRITE`, `CAP_CONSOLE_READ` (the one line `-i` reads), and
+`CAP_FS_ACCESS` — within the session baseline — and the secured VFS still
+authorises every path per-inode. Exit status is the GNU `ln` shape: `0`
+when every link was created, `1` otherwise (there is no separate usage
+status). `cargo test -p tairix-ln` drives the parser (every operand shape,
+clusters, `--`, the `-t`/`-T` contradiction, refusals) and the engine over
+in-memory seams (the four destination readings, the taken-name refusal,
+`-f`/`-i` replacement removing the name first, the never-replaced
+directory, the hard-link refusal touching nothing, and a format that
+stores no links reporting its permanent limit).
+
 ## `head` — output the first part of files (`userland/apps/head`)
 
 `tairix-head` is the GNU coreutils `head` (`plans/APPS.md` §12.1 Stage C
@@ -1190,7 +1259,9 @@ The crate is `no_std` (with `alloc`), has no `unsafe`, and no
 `unwrap`/`expect`/`panic!` in production paths (`AGENTS.md` §2.9). Its
 dependencies are the audited `tairix-abi` vocabulary and the shared
 `tairix-help`/`tairix-vt` engines, so it never links a kernel or driver
-crate (`AGENTS.md` §17.4). Its manifest requests `CAP_CONSOLE_WRITE`
+crate (`AGENTS.md` §17.4). The long format carries **no link-count
+column**: this filesystem contract has no hard links, so a count would be
+fabricated. Its manifest requests `CAP_CONSOLE_WRITE`
 plus `CAP_FS_ACCESS` — within the session baseline — and the secured VFS
 still authorises every path per-inode under the caller's attested
 identity.
@@ -1198,7 +1269,7 @@ identity.
 ### Grammar
 
 ```
-ls [-aABbCcdFfGghikIlmNnopQqrRsSTtUuvXx1] [-w cols] [-I PATTERN] [--block-size=SIZE] [--si] [--format=WORD] [--indicator-style=WORD] [--hide=PATTERN] [--time=WORD] [--time-style=STYLE] [--sort=WORD] [--quoting-style=STYLE] [--full-time] [--author] [--file-type] [--group-directories-first] [--zero] [--color[=WHEN]] [--] [path...]
+ls [-aABbCcdFfGgHhikILlmNnopQqrRsSTtUuvXx1] [-w cols] [-I PATTERN] [--block-size=SIZE] [--si] [--format=WORD] [--indicator-style=WORD] [--hide=PATTERN] [--time=WORD] [--time-style=STYLE] [--sort=WORD] [--quoting-style=STYLE] [--full-time] [--author] [--file-type] [--group-directories-first] [--zero] [--color[=WHEN]] [--] [path...]
 ```
 
 | Token            | Meaning                                            |
@@ -1231,6 +1302,9 @@ ls [-aABbCcdFfGghikIlmNnopQqrRsSTtUuvXx1] [-w cols] [-I PATTERN] [--block-size=S
 | `--show-control-chars` | print nongraphic characters as-is (non-terminal default) |
 | `-r`, `--reverse` | reverse the sort order                            |
 | `-R`, `--recursive` | list subdirectories recursively                 |
+| `-L`, `--dereference` | show what each symbolic link names, not the link |
+| `-H`, `--dereference-command-line` | dereference only the command-line operands |
+| `--dereference-command-line-symlink-to-dir` | dereference a command-line link *to a directory* only (the default) |
 | `-s`, `--size`   | allocated size per entry, in blocks (scaled by `-h`/`--si`/`--block-size`) |
 | `-S`             | sort by size, largest first                        |
 | `-t`             | sort by the selected timestamp, newest first       |
@@ -1264,6 +1338,46 @@ may be combined into one argument (e.g. `-la` is `-l -a`); an
 unrecognised letter anywhere in such a cluster is a `LsError::Usage`
 error. The bare `-` is a path named `-`, not an option.
 
+### Symbolic links
+
+A link renders with the type letter `l` and, in the long format, as
+`name -> target` — the target exactly as stored, unresolved, which is what
+the link holds. Which links a listing *resolves* is the GNU four-state
+dereference posture, and it decides what every row is:
+
+| Posture | Selected by | Operands | Entries inside a listing |
+|---|---|---|---|
+| never | `-l`, `-d`, `-F` | the link itself | the link itself |
+| command-line link to a directory | the default otherwise | resolved only when it names a directory (so `ls linkdir` lists it) | the link itself |
+| command-line | `-H` | resolved | the link itself |
+| always | `-L` | resolved | resolved |
+
+The posture selects a per-path reading rather than one per listing, which is
+exactly what `-H` exists to express. A dangling link therefore lists normally
+under `-l`; only a posture that resolves it reports the target as
+unreachable.
+
+A path that cannot be inspected or read never ends the listing: the reason
+goes to standard error, that path is skipped, and the remaining operands and
+entries are still listed — which is what makes `ls -L` over a directory
+holding a dangling link useful. A skipped *entry* keeps the type letter the
+directory stream gave it and renders `?` for every cell a stat would have
+filled, never a fabricated zero. The exit status is the GNU grade: `0` when
+everything listed, `1` for a problem inside a listing, `2` for a command-line
+operand that could not be reached (or a usage error).
+
+Because `-L` is the only posture under which `-R` can walk into a directory a
+link names, the recursive walk carries the node identities of the directories
+it came through and reports `not listing already-listed directory` for one it
+reaches a second time, rather than following the loop until the path outgrows
+the kernel's bound.
+
+With `--color`, a link takes the shared scheme's link role (bold cyan, GNU's
+`ln=`) and the long format paints the `-> target` text in the role of what
+the target *is*; a target that cannot be reached is left plain, because the
+scheme names no orphan-link role and inventing a second colour vocabulary
+would be worse than an uncoloured target.
+
 ### A render machine, not a data source
 
 `run` asks the injected filesystem seam for the metadata of each operand
@@ -1272,14 +1386,17 @@ listing to the terminal in a single write. The operations that reach the
 outside world are injected seams, the same discipline as `cat`'s
 `FileSource`/`Output` and `man`'s `BundleStore`:
 
-- `Listing` — stat a path (to learn whether it is a directory) and read
-  a directory's whole listing in one call, mirroring the kernel's
+- `Listing` — stat a path in the `stat` or `lstat` reading the posture
+  selects *per path* (`FinalLink`), read a symbolic link's stored target,
+  and read a directory's whole listing in one call, mirroring the kernel's
   one-shot `fs_readdir` contract. An entry's kind is the VFS's own
   `FileKind` — no parallel kind enum to drift. The per-entry stat behind
-  the long format's columns, the `-S` size sort, and `-F`'s execute-bit
-  check is paid only when one of them asks for it.
-- `Output` — write the rendered listing to the terminal, and advisory
-  records to the standard information stream (fd 3), best-effort.
+  the long format's columns, the `-S` size sort, `-F`'s execute-bit check,
+  and `-L`'s resolution is paid only when one of them asks for it, and a
+  link's target is read only by the format that prints it.
+- `Output` — write the rendered listing to the terminal, a skipped path's
+  reason to the error stream, and advisory records to the standard
+  information stream (fd 3), best-effort.
 - `tairix_help::HelpSource` — the tool's own `Help/` tree, read by the
   short-help switches.
 

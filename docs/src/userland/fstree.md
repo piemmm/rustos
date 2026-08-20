@@ -264,6 +264,31 @@ The session runs inside the terminal's alternate screen and restores it (and coo
 on every exit path, stating any abnormal reason on standard error after
 the restore.
 
+## Symbolic links
+
+A link is shown as the link it is — the size column reads `<link>`, whose
+own byte count would only be the length of the path it stores — and every
+verb acts on the **name**, never on what the name points at:
+
+- **Copy** recreates the link with the same stored target, verbatim.
+  Streaming its bytes would leave a regular file holding the target's text,
+  and following it would copy something the link only points at. A dangling
+  link duplicates fine: a link is data.
+- **Move** and **delete** act on the link, because `fs_rename` and
+  `fs_unlink` keep the name as typed; what the link named survives
+  untouched.
+- A **link already at a destination** is a real loss, so the overwrite
+  question says so (`… exists as a symbolic link`) and an approved
+  replacement *removes* the link before creating the new object. That is
+  what keeps a create or truncate — both of which follow a final link —
+  from acting on whatever the link pointed at, anywhere on the volume. A
+  directory is never transferred onto a link: a link is a leaf however it
+  resolves.
+
+The destination probe is therefore a `NO_FOLLOW` stat — the name as typed.
+A *following* probe would hand anyone who can plant a name inside a
+destination tree a redirect for every later write out of it.
+
 ## Capabilities
 
 `CAP_CONSOLE_WRITE`, `CAP_CONSOLE_READ`, `CAP_FS_ACCESS`, and

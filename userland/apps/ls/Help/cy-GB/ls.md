@@ -40,6 +40,12 @@ Pan roddir mwy nag un operand — a bob amser o dan `-R` — rhagflaenir
 rhestriad pob cyfeiriadur gan bennawd `path:`, a gwahenir y blociau â
 llinell wag.
 
+Mae cysylltiad symbolaidd yn ymddangos â'r llythyren deip `l` ac, yn y
+fformat hir, fel `enw -> targed` — y targed yn union fel y'i cedwir, heb
+ei ddatrys, sef yr hyn y mae'r cysylltiad yn ei gadw. Felly rhestrir
+cysylltiad sy'n hongian fel arfer; dim ond ystum sy'n ei ddatrys (`-L`,
+neu `-H` ar gyfer operand) sy'n adrodd am darged na all gyrraedd.
+
 ## OPTIONS
 
 - `-t` — didoli yn ôl y stamp amser a ddangosir, y diweddaraf yn
@@ -99,6 +105,18 @@ llinell wag.
   rhagosodiad pan nad terfynell yw'r allbwn).
 - `-r, --reverse` — gwrthdroi trefn y didoli.
 - `-R, --recursive` — rhestru is-gyfeiriaduron yn ailadroddus.
+- `-L, --dereference` — dangos gwybodaeth am y ffeil y mae pob cysylltiad
+  symbolaidd yn ei henwi, yn lle'r cysylltiad ei hun, lle bynnag y bo
+  cysylltiad. Adroddir am gysylltiad na all gyrraedd ei darged ar y llif
+  gwallau ac fe barha'r rhestru, gyda statws gorffen nad yw'n sero.
+- `-H, --dereference-command-line` — dadgyfeirio dim ond y cysylltiadau
+  symbolaidd a enwir ar y llinell orchymyn; mae cysylltiadau o fewn rhestr
+  yn dangos eu hunain. Yr olaf o `-L` a `-H` sy'n ennill.
+- `--dereference-command-line-symlink-to-dir` — y rhagosodiad pan nad yw
+  unrhyw faner fformat yn gorfodi fel arall: dadgyfeirir cysylltiad o'r
+  llinell orchymyn *at gyfeiriadur*, felly mae `ls linkdir` yn rhestru'r
+  cyfeiriadur, tra bod pob cysylltiad arall yn dangos ei hun. Mae `-l`,
+  `-d` ac `-F` yn dangos pob cysylltiad ei hun yn lle hynny.
 - `-s, --size` — argraffu maint neilltuedig pob cofnod mewn blociau
   1024-beit (wedi'i raddio gan `-h`), gyda llinell `total` fesul
   rhestriad cyfeiriadur.

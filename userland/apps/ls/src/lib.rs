@@ -38,13 +38,24 @@
 //! `fs.hidden_entries_omitted` record (`AGENTS.md` §20.1) — advisory only,
 //! never affecting the listing, ordering, or exit status.
 //!
+//! # Symbolic links
+//!
+//! A link renders with the type letter `l` and, under `-l`, as
+//! `name -> target` — the target exactly as stored, unresolved. Which links
+//! a listing *resolves* is the GNU four-state posture
+//! ([`command::Dereference`]), selected per path so `-H` can
+//! dereference an operand while the links inside a listing still show
+//! themselves. A path that cannot be inspected is reported on the error
+//! stream and skipped, and the [`client::Outcome`] grades how
+//! serious that was; a skipped entry keeps its type letter and renders `?`
+//! for every cell a stat would have filled.
+//!
 //! # Fail closed
 //!
-//! An unknown option is a [`LsError::Usage`] that lists nothing; an operand
-//! (or, under `-l`, a directory entry) that cannot be stat'd surfaces the
-//! underlying [`Errno`](tairix_abi::Errno) as [`LsError::Stat`] and stops; a
-//! directory that cannot be read is [`LsError::Read`]; a failed terminal
-//! write is [`LsError::Output`]. There is no partial-guess path and no panic.
+//! An unknown option is a [`LsError::Usage`] that lists nothing; a failed
+//! terminal write is [`LsError::Output`] and is the one failure that stops
+//! the run — with nowhere to write, there is nothing left to do. Every other
+//! refusal is reported and skipped, never guessed at, and nothing panics.
 //!
 //! # Module map
 //!
@@ -78,7 +89,7 @@ pub mod command;
 pub mod error;
 pub mod io;
 
-pub use client::{run, USAGE};
-pub use command::{parse, Command};
+pub use client::{run, Outcome, USAGE};
+pub use command::{parse, Command, Dereference};
 pub use error::LsError;
-pub use io::{Entry, Listing, Metadata, Output};
+pub use io::{Entry, FinalLink, Listing, Metadata, Output};

@@ -39,8 +39,14 @@ the output matches the GNU tool's numeric fallback (`-n` renders
 identically). The timestamp is the modified time by default; `-c`,
 `-u`, and `--time` select which of the four timestamps is shown (and
 sorted by), and `--time-style` — or `--full-time` — sets its format.
-There is still no link-count column because the filesystem contract
-does not carry hard links yet; it will appear when it does.
+There is no link-count column: this filesystem contract carries no hard
+links, so a count would be fabricated.
+
+A symbolic link renders with the type letter `l` and, in the long format,
+as `name -> target` — the target exactly as it is stored, unresolved, which
+is what the link holds. A dangling link therefore lists normally; only a
+posture that resolves it (`-L`, or `-H` for an operand) reports the target
+as unreachable.
 
 Names are quoted so that awkward characters are visible and safe to
 paste back into a shell: at a terminal the default is `shell-escape`
@@ -116,6 +122,18 @@ separated by a blank line.
   default when the output is not a terminal).
 - `-r, --reverse` — reverse the sort order.
 - `-R, --recursive` — list subdirectories recursively.
+- `-L, --dereference` — show information about the file each symbolic
+  link names, rather than the link itself, wherever a link appears. A link
+  whose target cannot be reached is reported on standard error and the
+  listing continues, with a non-zero exit status.
+- `-H, --dereference-command-line` — dereference only the symbolic links
+  named on the command line; links inside a listing show themselves. The
+  later of `-L` and `-H` wins.
+- `--dereference-command-line-symlink-to-dir` — the default when no format
+  flag forces otherwise: a command-line link *to a directory* is
+  dereferenced, so `ls linkdir` lists the directory, while every other link
+  shows itself. `-l`, `-d`, and `-F` instead default to showing every link
+  itself.
 - `-s, --size` — print each entry's allocated size in blocks (scaled by
   `-h` / `--si` / `--block-size` / `-k`), with a `total` line per
   directory listing.

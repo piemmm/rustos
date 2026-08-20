@@ -41,6 +41,12 @@ Quand plusieurs opérandes sont donnés — et toujours sous `-R` — la
 liste de chaque répertoire est précédée d'un en-tête `chemin:`, et les
 blocs sont séparés par une ligne vide.
 
+Un lien symbolique s'affiche avec la lettre de type `l` et, au format
+long, sous la forme `nom -> cible` — la cible exactement telle qu'elle est
+stockée, non résolue, c'est-à-dire ce que le lien contient. Un lien qui
+pend se liste donc normalement ; seule une posture qui le résout (`-L`, ou
+`-H` pour un opérande) signale une cible inatteignable.
+
 ## OPTIONS
 
 - `-t` — trier par l'horodatage affiché, le plus récent en premier.
@@ -102,6 +108,18 @@ blocs sont séparés par une ligne vide.
   terminal).
 - `-r, --reverse` — inverser l'ordre de tri.
 - `-R, --recursive` — lister les sous-répertoires récursivement.
+- `-L, --dereference` — afficher les informations du fichier que chaque
+  lien symbolique nomme, plutôt que celles du lien, partout où un lien
+  apparaît. Un lien dont la cible est inatteignable est signalé sur la
+  sortie d'erreur et le listage continue, avec un code de sortie non nul.
+- `-H, --dereference-command-line` — ne déréférencer que les liens
+  symboliques nommés sur la ligne de commande ; les liens à l'intérieur d'un
+  listage restent des liens. Le dernier de `-L` et `-H` l'emporte.
+- `--dereference-command-line-symlink-to-dir` — le comportement par défaut
+  quand aucune option de format n'en impose un autre : un lien de la ligne
+  de commande *vers un répertoire* est déréférencé, donc `ls linkdir` liste
+  le répertoire, tandis que tout autre lien reste un lien. `-l`, `-d` et
+  `-F` affichent au contraire chaque lien lui-même.
 - `-s, --size` — afficher la taille allouée de chaque entrée en blocs de
   1024 octets (mise à l'échelle avec `-h`), avec une ligne `total` par
   répertoire listé.

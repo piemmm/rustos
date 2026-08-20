@@ -190,6 +190,7 @@ members = [
     "userland/apps/groupadd",
     "userland/apps/head",
     "userland/apps/host",
+    "userland/apps/ln",
     "userland/apps/ls",
     "userland/apps/lspci",
     "userland/apps/lsusb",

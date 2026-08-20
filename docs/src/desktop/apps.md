@@ -126,13 +126,44 @@ last-modification `Time64` — the size and timestamp mapped straight from the
 one `fs_readdir` stream the source already produced (each
 `tairix_abi::fs::DirEntry` reports them), so the browser never opens and
 `fs_stat`s every child to fill a listing (`AGENTS.md` §2.16). `EntryKind`
-refines the VFS's file/directory split with the one distinction a manager
-must make structurally: a `<Name>.app` directory is a `Bundle` — a sealed
-unit the user launches, not a folder to descend into (`AGENTS.md` §16.5). The
-engine only *models* the distinction (`Entry::is_bundle`, and `is_directory`
-is `false` for a bundle so `open_index` refuses to descend); deciding what a
-bundle activation *does* is the launching layer's job (staged for a later
-increment).
+refines the VFS's file/directory/link split with the one distinction a
+manager must make structurally: a `<Name>.app` directory is a `Bundle` — a
+sealed unit the user launches, not a folder to descend into
+(`AGENTS.md` §16.5). The engine only *models* the distinction
+(`Entry::is_bundle`, and `is_directory` is `false` for a bundle so
+`open_index` refuses to descend); deciding what a bundle activation *does*
+is the launching layer's job.
+
+A **symbolic link** is two facts about one entry, and a file manager needs
+both: it must *show* the link and *act* on the target. So
+`EntryKind::Link(LinkTarget)` carries the resolution beside the link rather
+than being flattened into it, and `Entry::target()` carries the spelling the
+link stores (verbatim — possibly relative, possibly naming nothing), which
+the properties sheet shows and a launch resolves. Three readings follow, and
+they are deliberately different questions:
+
+- `is_directory()` / `is_bundle()` follow the **target**, so a shortcut to a
+  folder is descended and a shortcut to an application launches.
+- `is_directory_backed()` is `false` for *every* link however it resolves —
+  the **structural** reading a management verb takes. A link is a leaf on
+  disk: removing one unlinks the link (never `UnlinkFlags::DIRECTORY`), and
+  recursing into one would walk a tree the name only points at.
+- `resolved()` is the **content** reading a sort key, an icon, or an
+  application association takes; a link that names nothing resolves to
+  `None` rather than to a guessed kind.
+
+Bundle-ness is decided from the **target's** leaf name, not the link's: a
+desktop shortcut is named for the application (`Editor`) while its target is
+the bundle (`/Apps/Editor.app`), so classifying on the link's own name would
+show a shortcut to an application as a plain folder. A `fs_readdir` stream
+reports only *that* a child is a link, so the resolution comes from an
+injected `LinkReader` (`readlink` plus one resolving `fs_stat`, paid only for
+the link entries; the shipped `RtLinkReader` is the one implementation every
+surface shares). A link the reader cannot describe classifies as
+`LinkTarget::Dangling` — the honest answer, never a silent downgrade to a
+plain file. Activation descends or opens *through* the link, but launches a
+bundle by its **resolved** path, because the app-load gate judges the path it
+is handed and a link in the user's own directory is not in a program store.
 
 `SortMode` (`SortKey` — `Name`/`Size`/`Modified` — plus a `SortDirection`)
 is the one listing order both the file manager and the trusted picker share
@@ -1338,7 +1369,10 @@ the drawn panel that paints it is described below.
 `EntryKind`, and the `fs_stat` `FileStat` the app read for it into the
 display-ready fields the panel renders: a human kind label (`Folder` / `File` /
 `Application` — the `EntryKind` distinguishes a sealed `<Name>.app` bundle from
-an ordinary directory), the apparent `size` and on-disk `allocated` bytes (both
+an ordinary directory — or, for a symbolic link, `Alias to folder` / `Alias to
+file` / `Alias to application`, and `Broken alias` when it names nothing
+reachable, with `with_target` attaching the spelling the link stores so the
+panel can show where it points), the apparent `size` and on-disk `allocated` bytes (both
 via the shared `format_size`, never one derived from the other), the raw mode
 and its four-digit octal spelling, the ten-character permission string
 (`drwxr-xr-x`), the owning uid/gid, and the four `Time64` stamps rendered as
@@ -1350,7 +1384,7 @@ which renders blank rather than as a fabricated `1970-01-01` wall time
 so the two can never disagree on what a mode means (`AGENTS.md` §2.2); the
 permission string's leading type indicator reads from the structural
 `FileStat::kind`, so a bundle is *labelled* "Application" yet honestly shows a
-directory's `d`. The model reads nothing and holds no authority: the app
+directory's `d`, and a link labelled "Alias to folder" still shows `l`. The model reads nothing and holds no authority: the app
 performs the one capability-checked `fs_stat` under the user's own identity and
 hands the result here, so the trusted picker composes the same view.
 

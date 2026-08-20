@@ -9,6 +9,17 @@
 //! the first refused step aborts the operation with the kernel's own
 //! [`Errno`], and a partially written file is removed rather than left
 //! looking complete.
+//!
+//! # A symbolic link is a name, not the thing it names
+//!
+//! Every verb acts on the link: a copy **recreates** it with the same stored
+//! target (streaming its bytes would leave a regular file holding the
+//! target's text), and a move or a delete acts on the link while what it
+//! named survives. A link already sitting at a destination is asked about and
+//! then **removed** before the new object is created, because a create or
+//! truncate follows a final link and would otherwise act on whatever it
+//! pointed at — which is why the destination probe never follows one
+//! ([`crate::fs::Fs::stat_kind`]).
 
 use alloc::format;
 use alloc::string::{String, ToString};
@@ -41,14 +52,6 @@ pub enum OpError {
     /// A filesystem step was refused; carries the path and the kernel's
     /// [`Errno`]. When mid-copy, the partial target has been removed.
     Fs(String, Errno),
-    /// The entry is a symbolic link, and this engine transfers and removes
-    /// file and directory content only.
-    ///
-    /// Copying a link byte-wise would silently make a *regular file* holding
-    /// the target's text, and removing one by its target would delete the
-    /// wrong object — so the whole operation is refused with the link named
-    /// rather than either wrong thing being done.
-    IsALink(String),
 }
 
 impl OpError {
@@ -61,7 +64,6 @@ impl OpError {
             Self::IntoItself => String::from("cannot copy or move a directory into itself"),
             Self::KindMismatch(path) => format!("{path}: exists with a different kind"),
             Self::Fs(path, errno) => format!("{path}: {errno:?}"),
-            Self::IsALink(path) => format!("{path}: is a symbolic link"),
         }
     }
 }
@@ -176,14 +178,18 @@ pub enum OpKind {
     Delete,
 }
 
-/// A target that already exists as a regular file, awaiting the user's
-/// per-file decision.
+/// A target name that is already taken, awaiting the user's per-entry
+/// decision.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Conflict {
-    /// The source file whose transfer is paused.
+    /// The source entry whose transfer is paused.
     pub src: String,
-    /// The existing target the transfer would overwrite.
+    /// The existing name the transfer would replace.
     pub dst: String,
+    /// What that name currently holds, so the question names it: replacing a
+    /// symbolic link is a different thing from overwriting a file's bytes,
+    /// and the user is told which they are agreeing to.
+    pub occupant: FileKind,
 }
 
 /// The user's answer to a [`Conflict`].
@@ -213,23 +219,24 @@ pub enum OpProgress {
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum Work {
     /// Rename one entry atomically, falling back to a transfer when the
-    /// volumes differ. `clobber` marks a rename the user already approved
-    /// over an existing target — the target is probed *before* the rename,
-    /// so an existing file is asked about, never silently replaced.
+    /// volumes differ. `approved` carries what the user already agreed to
+    /// replace — the destination is probed *before* the rename, so an
+    /// existing name is asked about, never silently replaced.
     Rename {
         src: String,
         kind: FileKind,
         dst: String,
-        clobber: bool,
+        approved: Option<FileKind>,
     },
     /// Copy one entry to `dst` (recursing into a directory by pushing its
-    /// children); on a move, a copied file's source is removed in the same
-    /// step. `clobber` marks a transfer the user already approved.
+    /// children, recreating a symbolic link); on a move, a copied entry's
+    /// source is removed in the same step. `approved` carries what the user
+    /// already agreed to replace.
     Transfer {
         src: String,
         kind: FileKind,
         dst: String,
-        clobber: bool,
+        approved: Option<FileKind>,
     },
     /// Remove one entry (expanding a directory into child removals plus a
     /// directory removal beneath them).
@@ -272,7 +279,7 @@ impl FileOp {
                 src: String::from(src),
                 kind,
                 dst: String::from(target),
-                clobber: false,
+                approved: None,
             },
         )
     }
@@ -288,7 +295,7 @@ impl FileOp {
                 src: String::from(src),
                 kind,
                 dst: String::from(target),
-                clobber: false,
+                approved: None,
             },
         )
     }
@@ -371,14 +378,14 @@ impl FileOp {
                     src,
                     kind,
                     dst,
-                    clobber,
-                } => self.step_rename(fs, src, kind, dst, clobber),
+                    approved,
+                } => self.step_rename(fs, src, kind, dst, approved),
                 Work::Transfer {
                     src,
                     kind,
                     dst,
-                    clobber,
-                } => self.step_transfer(fs, src, kind, dst, clobber),
+                    approved,
+                } => self.step_transfer(fs, src, kind, dst, approved),
                 Work::Remove { path, kind } => self.step_remove(fs, &path, kind),
                 Work::RemoveEmptiedDir { path } => self.step_remove_emptied(fs, &path),
             };
@@ -417,27 +424,29 @@ impl FileOp {
         src: String,
         kind: FileKind,
         dst: String,
-        clobber: bool,
+        approved: Option<FileKind>,
     ) -> Result<(), StepEnd> {
-        if !clobber {
-            match probe(fs, &dst).map_err(StepEnd::Failed)? {
-                Some(FileKind::Regular) if kind == FileKind::Regular => {
-                    return Err(self.pause(
-                        src.clone(),
-                        dst.clone(),
-                        Work::Rename {
-                            src,
-                            kind,
-                            dst,
-                            clobber: true,
-                        },
-                    ));
-                }
-                // Absent: free to rename into. A directory target was
-                // already redirected into by the planner; whatever remains
-                // (dir over file, dir over dir) is the kernel's to judge —
-                // the rename below surfaces its refusal unchanged.
-                _ => {}
+        if approved.is_none() {
+            // A rename replaces an existing destination atomically when the
+            // two are kind-compatible, so *any* occupied leaf name is asked
+            // about — a link included, because replacing one is a real loss
+            // the user must agree to. A directory target was already
+            // redirected into by the planner; whatever remains (dir over
+            // file, dir over dir) is the kernel's to judge, and the rename
+            // below surfaces its refusal unchanged.
+            let occupant = probe(fs, &dst).map_err(StepEnd::Failed)?;
+            if let Some(occupant) = occupant.filter(|held| replaces_leaf(kind, *held)) {
+                return Err(self.pause(
+                    src.clone(),
+                    dst.clone(),
+                    occupant,
+                    Work::Rename {
+                        src,
+                        kind,
+                        dst,
+                        approved: Some(occupant),
+                    },
+                ));
             }
         }
         match fs.rename(&src, &dst) {
@@ -450,7 +459,7 @@ impl FileOp {
                     src,
                     kind,
                     dst,
-                    clobber,
+                    approved,
                 });
                 Ok(())
             }
@@ -464,55 +473,85 @@ impl FileOp {
         src: String,
         kind: FileKind,
         dst: String,
-        clobber: bool,
+        approved: Option<FileKind>,
     ) -> Result<(), StepEnd> {
         match kind {
-            FileKind::Regular => {
-                if !clobber {
+            // A leaf — a file's bytes or a link's stored target — replaces an
+            // occupied name only with the user's agreement, and replacing it
+            // *removes* that name first so nothing is ever written through a
+            // link that was already sitting there.
+            FileKind::Regular | FileKind::Symlink => {
+                let approved = if approved.is_some() {
+                    approved
+                } else {
                     match probe(fs, &dst).map_err(StepEnd::Failed)? {
-                        None => {}
-                        Some(FileKind::Regular) => {
+                        None => None,
+                        Some(FileKind::Directory) => {
+                            return Err(StepEnd::Failed(OpError::KindMismatch(dst)));
+                        }
+                        Some(held) => {
                             return Err(self.pause(
                                 src.clone(),
                                 dst.clone(),
+                                held,
                                 Work::Transfer {
                                     src,
                                     kind,
                                     dst,
-                                    clobber: true,
+                                    approved: Some(held),
                                 },
                             ));
                         }
-                        Some(FileKind::Directory) => {
-                            return Err(StepEnd::Failed(OpError::KindMismatch(dst)));
+                    }
+                };
+                // An approved link occupant is unlinked before the new object
+                // is created: a create or truncate *follows* a final link, so
+                // leaving one in place would act on whatever it names.
+                if approved == Some(FileKind::Symlink) {
+                    fs.remove_file(&dst)
+                        .map_err(|errno| StepEnd::Failed(OpError::Fs(dst.clone(), errno)))?;
+                }
+                match kind {
+                    // A link is *recreated* with the target it stores. Copying
+                    // its bytes would leave a regular file holding the
+                    // target's text, and following it would copy something the
+                    // link only points at.
+                    FileKind::Symlink => {
+                        let target = fs
+                            .read_link(&src)
+                            .map_err(|errno| OpError::Fs(String::from(&src), errno))
+                            .map_err(StepEnd::Failed)?;
+                        // A new link never replaces a name, so an approved
+                        // file occupant is removed here too.
+                        if approved == Some(FileKind::Regular) {
+                            fs.remove_file(&dst).map_err(|errno| {
+                                StepEnd::Failed(OpError::Fs(dst.clone(), errno))
+                            })?;
                         }
-                        // Overwriting a link would write through it to
-                        // whatever it names; refuse and name the link.
-                        Some(FileKind::Symlink) => {
-                            return Err(StepEnd::Failed(OpError::IsALink(dst)));
-                        }
+                        fs.create_link(&target, &dst)
+                            .map_err(|errno| StepEnd::Failed(OpError::Fs(dst.clone(), errno)))?;
+                    }
+                    FileKind::Regular | FileKind::Directory => {
+                        copy_file(fs, &src, &dst).map_err(StepEnd::Failed)?;
                     }
                 }
-                copy_file(fs, &src, &dst).map_err(StepEnd::Failed)?;
                 if self.kind == OpKind::Move {
+                    // The name as typed: removing a link removes the link,
+                    // never what it names.
                     fs.remove_file(&src)
                         .map_err(|errno| StepEnd::Failed(OpError::Fs(src.clone(), errno)))?;
                 }
                 self.done += 1;
                 Ok(())
             }
-            FileKind::Symlink => Err(StepEnd::Failed(OpError::IsALink(src))),
             FileKind::Directory => {
                 match probe(fs, &dst).map_err(StepEnd::Failed)? {
                     // An existing directory target is merged into.
                     Some(FileKind::Directory) => {}
-                    Some(FileKind::Regular) => {
+                    // A leaf cannot hold a directory's contents, and a link
+                    // is a leaf however it resolves.
+                    Some(FileKind::Regular | FileKind::Symlink) => {
                         return Err(StepEnd::Failed(OpError::KindMismatch(dst)));
-                    }
-                    // A link already at the destination is not something
-                    // this engine may merge into or overwrite blind.
-                    Some(FileKind::Symlink) => {
-                        return Err(StepEnd::Failed(OpError::IsALink(dst)));
                     }
                     None => {
                         fs.mkdir(&dst)
@@ -533,7 +572,7 @@ impl FileOp {
                         src: join(&src, &entry.name),
                         kind: entry.kind,
                         dst: join(&dst, &entry.name),
-                        clobber: false,
+                        approved: None,
                     });
                 }
                 Ok(())
@@ -543,8 +582,9 @@ impl FileOp {
 
     fn step_remove(&mut self, fs: &mut dyn Fs, path: &str, kind: FileKind) -> Result<(), StepEnd> {
         match kind {
-            FileKind::Symlink => Err(StepEnd::Failed(OpError::IsALink(String::from(path)))),
-            FileKind::Regular => {
+            // A link is removed as the leaf it is: `fs_unlink` keeps the name
+            // as typed, so what the link points at is untouched.
+            FileKind::Symlink | FileKind::Regular => {
                 fs.remove_file(path)
                     .map_err(|errno| StepEnd::Failed(OpError::Fs(String::from(path), errno)))?;
                 self.done += 1;
@@ -584,10 +624,28 @@ impl FileOp {
         Ok(())
     }
 
-    fn pause(&mut self, src: String, dst: String, approved: Work) -> StepEnd {
-        self.conflict = Some((Conflict { src, dst }, approved));
+    fn pause(&mut self, src: String, dst: String, occupant: FileKind, approved: Work) -> StepEnd {
+        self.conflict = Some((Conflict { src, dst, occupant }, approved));
         StepEnd::Paused
     }
+}
+
+/// Whether moving a `src` of this kind onto a name already holding
+/// `occupant` replaces a *leaf* — the case the user is asked about.
+///
+/// Two leaves (a file or a link either side) replace one another and lose
+/// what was there, so the question is real. A directory on either side is
+/// not this engine's to judge: the planner already redirected into an
+/// existing directory, and anything left is the kernel's refusal to
+/// surface.
+const fn replaces_leaf(src: FileKind, occupant: FileKind) -> bool {
+    is_leaf(src) && is_leaf(occupant)
+}
+
+/// Whether a node of this kind is a leaf — something a transfer replaces
+/// whole rather than merges into.
+const fn is_leaf(kind: FileKind) -> bool {
+    matches!(kind, FileKind::Regular | FileKind::Symlink)
 }
 
 /// Why a step ended without completing.

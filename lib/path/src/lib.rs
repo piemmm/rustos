@@ -670,6 +670,52 @@ pub fn validate_file_name(name: &str) -> Result<(), PathError> {
     validate_component(name)
 }
 
+/// The final component of the spelling `path` — its POSIX *base name*.
+///
+/// Trailing `/`s are ignored, so `/a/b/` names `b`. A spelling that holds
+/// nothing but a root names that root: `/` for the view root, and the alias
+/// root itself for a `Name:/` prefix (decided by [`alias_root_len`], so an
+/// alias root plays exactly the role POSIX gives `/`). The empty spelling
+/// names nothing.
+///
+/// Purely lexical, like [`parse`]: nothing is resolved, normalised, or
+/// opened, and the result is a borrow of `path`.
+#[must_use]
+pub fn leaf_name(path: &str) -> &str {
+    if path.is_empty() {
+        return "";
+    }
+    let root_len = alias_root_len(path).unwrap_or(0);
+    let trimmed = path[root_len..].trim_end_matches('/');
+    if trimmed.is_empty() {
+        return if root_len > 0 { &path[..root_len] } else { "/" };
+    }
+    match trimmed.rfind('/') {
+        Some(slash) => &trimmed[slash + 1..],
+        None => trimmed,
+    }
+}
+
+/// `name` appended to the directory spelling `parent`, with exactly one `/`
+/// between them.
+///
+/// A `parent` that already ends in `/` — the view root `/`, an alias root
+/// `Home:/` — is not doubled, so a child of the root is `/name` and never
+/// `//name`. Purely lexical: neither part is validated or resolved, so the
+/// kernel stays the one authority over what the result names. A caller that
+/// must reject a malformed `name` first spells it through
+/// [`validate_file_name`].
+#[must_use]
+pub fn join(parent: &str, name: &str) -> String {
+    let mut path = String::with_capacity(parent.len() + 1 + name.len());
+    path.push_str(parent);
+    if !parent.ends_with('/') {
+        path.push('/');
+    }
+    path.push_str(name);
+    path
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1090,5 +1136,39 @@ mod tests {
         // An invalid alias name is not a root.
         assert_eq!(alias_root_len(":/x"), None);
         assert_eq!(alias_root_len("Ho/me:/x"), None);
+    }
+
+    #[test]
+    fn leaf_name_takes_the_final_component() {
+        assert_eq!(leaf_name("/usr/lib"), "lib");
+        assert_eq!(leaf_name("dir/file.txt"), "file.txt");
+        assert_eq!(leaf_name("file"), "file");
+        // Trailing slash runs are ignored.
+        assert_eq!(leaf_name("/a/b/"), "b");
+        assert_eq!(leaf_name("/a/b///"), "b");
+        assert_eq!(leaf_name("a//b"), "b");
+    }
+
+    #[test]
+    fn leaf_name_of_a_bare_root_is_that_root() {
+        assert_eq!(leaf_name("/"), "/");
+        assert_eq!(leaf_name("///"), "/");
+        assert_eq!(leaf_name("Home:/"), "Home:/");
+        assert_eq!(leaf_name("Home://"), "Home:/");
+        // An alias root plays the role POSIX gives `/`.
+        assert_eq!(leaf_name("Home:/tools"), "tools");
+        // The empty spelling names nothing.
+        assert_eq!(leaf_name(""), "");
+    }
+
+    #[test]
+    fn join_inserts_exactly_one_separator() {
+        assert_eq!(join("/a", "b"), "/a/b");
+        assert_eq!(join("/a/", "b"), "/a/b");
+        // A child of a root is never `//name`.
+        assert_eq!(join("/", "b"), "/b");
+        assert_eq!(join("Home:/", "b"), "Home:/b");
+        // A relative parent joins the same way.
+        assert_eq!(join("a", "b"), "a/b");
     }
 }

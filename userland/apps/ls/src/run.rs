@@ -37,11 +37,11 @@ mod program {
     use alloc::string::String;
     use alloc::vec::Vec;
 
-    use tairix_abi::fs::{DirEntries, OpenFlags};
+    use tairix_abi::fs::{DirEntries, OpenFlags, FS_SYMLINK_MAX};
     use tairix_abi::time::Time64;
     use tairix_abi::Errno;
     use tairix_help::BundleHelp;
-    use tairix_ls::{parse, run, Entry, Listing, Metadata, Output, USAGE};
+    use tairix_ls::{parse, run, Entry, FinalLink, Listing, Metadata, Output, USAGE};
     use tairix_rt::io::{write_stderr_line, StdInfo, Stdout, Write};
     use tairix_rt::File;
 
@@ -53,11 +53,18 @@ mod program {
     struct RtListing;
 
     impl Listing for RtListing {
-        fn stat(&self, path: &str) -> Result<Metadata, Errno> {
+        fn stat(&self, path: &str, links: FinalLink) -> Result<Metadata, Errno> {
             // A resolve-only open: no read authority is requested, the
             // handle is closed on drop, and only the metadata is learned.
-            let file =
-                File::open(path.as_bytes(), OpenFlags::empty()).map_err(Errno::from_syscall)?;
+            // The follow posture is fixed once, here, by the open's flags,
+            // and every operation served for that handle re-derives it — so
+            // a `NO_FOLLOW` handle is the `lstat` reading and can describe
+            // even a dangling link.
+            let flags = match links {
+                FinalLink::Keep => OpenFlags::NO_FOLLOW,
+                FinalLink::Follow => OpenFlags::empty(),
+            };
+            let file = File::open(path.as_bytes(), flags).map_err(Errno::from_syscall)?;
             let stat = file.stat().map_err(Errno::from_syscall)?;
             Ok(Metadata {
                 kind: stat.kind,
@@ -66,9 +73,29 @@ mod program {
                 allocated: stat.allocated,
                 uid: stat.uid,
                 gid: stat.gid,
-                inode: stat.id.node,
+                id: stat.id,
                 times: stat.times,
             })
+        }
+
+        fn read_link(&self, path: &str) -> Result<String, Errno> {
+            // One call, one buffer: `fs_readlink` refuses an undersized
+            // buffer rather than truncating a target — a truncated one would
+            // name somewhere else entirely — and a target is bounded by
+            // `FS_SYMLINK_MAX`, so a buffer of that size always suffices.
+            let mut buf = alloc::vec![0u8; FS_SYMLINK_MAX];
+            let ret = tairix_rt::fs_readlink(path.as_bytes(), &mut buf);
+            if ret < 0 {
+                return Err(Errno::from_syscall(ret));
+            }
+            let len = usize::try_from(ret).map_err(|_| Errno::OutOfRange)?;
+            let target = buf.get(..len).ok_or(Errno::OutOfRange)?;
+            // A stored target is UTF-8 by the grammar the kernel checked
+            // before storing it; anything else is a corrupt or hostile
+            // volume, refused rather than lossily shown.
+            core::str::from_utf8(target)
+                .map(String::from)
+                .map_err(|_| Errno::OutOfRange)
         }
 
         fn read_dir(&self, path: &str) -> Result<Vec<Entry>, Errno> {
@@ -109,6 +136,14 @@ mod program {
             Stdout.write_all(bytes).map_err(|_| Errno::NotImplemented)
         }
 
+        fn error(&self, message: &str) {
+            // The reason a path was skipped goes to fd 2, where a reader and
+            // a script both see it while the listing itself still reaches
+            // fd 1. Best-effort: a console that will not take the diagnostic
+            // is not a reason to abandon the listing.
+            write_stderr_line(message);
+        }
+
         fn info(&self, record: &[u8]) {
             // fd 3 is ignorable by contract: unattached is a no-op and a
             // short write is never an error a listing depends on.
@@ -130,9 +165,11 @@ mod program {
     /// Program entry point. `tairix-rt`'s `_start` calls it once the runtime
     /// is set up and routes its return value through the `exit` syscall.
     ///
-    /// Exit codes: `0` on success, `1` on a filesystem or output failure,
-    /// `2` on a usage error (a malformed argument vector or an unrecognised
-    /// option).
+    /// Exit codes are the GNU `ls` grades: `0` when everything listed, `1`
+    /// for a minor problem (an entry or subdirectory inside a listing that
+    /// could not be reached — each one already reported on standard error),
+    /// and `2` for serious trouble (a usage error, a command-line operand
+    /// that could not be reached, or a failure to write the listing at all).
     fn main() -> i32 {
         // A malformed (non-UTF-8) argument vector is a usage error, reported
         // rather than guessed at.
@@ -165,10 +202,10 @@ mod program {
             &BundleHelp::new("ls"),
             &RtOutput,
         ) {
-            Ok(()) => 0,
+            Ok(outcome) => outcome.exit_status(),
             Err(err) => {
                 write_stderr_line(&format!("ls: {err}"));
-                1
+                2
             }
         }
     }

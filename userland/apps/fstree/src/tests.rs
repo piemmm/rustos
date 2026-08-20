@@ -66,6 +66,9 @@ struct FakeFs {
     /// When set, every attribute call answers `NotSupported` — the
     /// FAT32/ext4-class mount the view states honestly.
     attrs_unsupported: bool,
+    /// The target every symbolic link in the tree stores, keyed by link
+    /// path — the only thing a link holds.
+    links: BTreeMap<String, String>,
 }
 
 impl FakeFs {
@@ -73,6 +76,7 @@ impl FakeFs {
         Self {
             dirs: BTreeMap::new(),
             files: BTreeMap::new(),
+            links: BTreeMap::new(),
             modes: BTreeMap::new(),
             denied: Vec::new(),
             set_denied: Vec::new(),
@@ -119,6 +123,18 @@ impl FakeFs {
         }
         self.dirs.insert(path.to_owned(), entries);
         self
+    }
+
+    /// Register a symbolic link at `path` storing `target`. The link's own
+    /// name is what `stat_kind` reports; nothing is resolved.
+    fn link(mut self, path: &str, target: &str) -> Self {
+        self.links.insert(path.to_owned(), target.to_owned());
+        self
+    }
+
+    /// The target stored for the link at `path`, if any.
+    fn link_target(&self, path: &str) -> Option<String> {
+        self.links.get(path).cloned()
     }
 
     fn mode(mut self, path: &str, mode: u32) -> Self {
@@ -291,10 +307,45 @@ impl Fs for FakeFs {
         if self.dirs.contains_key(path) {
             return Ok(FileKind::Directory);
         }
+        // The name as typed: a link describes itself, never its target.
+        if self.links.contains_key(path) {
+            return Ok(FileKind::Symlink);
+        }
         if self.files.contains_key(path) {
             return Ok(FileKind::Regular);
         }
         Err(Errno::NotFound)
+    }
+
+    fn read_link(&mut self, path: &str) -> Result<String, Errno> {
+        if self.denied.iter().any(|denied| denied == path) {
+            return Err(Errno::PermissionDenied);
+        }
+        self.links.get(path).cloned().ok_or(Errno::OutOfRange)
+    }
+
+    fn create_link(&mut self, target: &str, path: &str) -> Result<(), Errno> {
+        if self.denied.iter().any(|denied| denied == path) {
+            return Err(Errno::PermissionDenied);
+        }
+        // A new link never replaces an existing name.
+        if self.links.contains_key(path)
+            || self.files.contains_key(path)
+            || self.dirs.contains_key(path)
+        {
+            return Err(Errno::AlreadyExists);
+        }
+        self.links.insert(path.to_owned(), target.to_owned());
+        self.upsert_entry(
+            parent_of(path),
+            FsEntry {
+                name: basename(path).to_owned(),
+                kind: FileKind::Symlink,
+                size: target.len() as u64,
+                modified: Time64::UNIX_EPOCH,
+            },
+        );
+        Ok(())
     }
 
     fn read(&mut self, path: &str, offset: u64, buf: &mut [u8]) -> Result<usize, Errno> {
@@ -377,7 +428,10 @@ impl Fs for FakeFs {
     }
 
     fn remove_file(&mut self, path: &str) -> Result<(), Errno> {
-        if self.files.remove(path).is_none() {
+        // The name as typed: a link is unlinked as the leaf it is, and what
+        // it names is untouched.
+        let removed = self.links.remove(path).is_some() || self.files.remove(path).is_some();
+        if !removed {
             return Err(Errno::NotFound);
         }
         self.drop_entry(path);
@@ -403,7 +457,27 @@ impl Fs for FakeFs {
             // The kernel refuses renaming onto an existing directory.
             return Err(Errno::AlreadyExists);
         }
+        // A rename moves the *name*, so a link travels as the link it is and
+        // what it points at is untouched. A leaf destination is replaced, as
+        // the kernel's rename does.
+        if let Some(target) = self.links.remove(src) {
+            self.files.remove(dst);
+            self.links.insert(dst.to_owned(), target.clone());
+            self.drop_entry(src);
+            self.drop_entry(dst);
+            self.upsert_entry(
+                parent_of(dst),
+                FsEntry {
+                    name: basename(dst).to_owned(),
+                    kind: FileKind::Symlink,
+                    size: target.len() as u64,
+                    modified: Time64::UNIX_EPOCH,
+                },
+            );
+            return Ok(RenameOutcome::Renamed);
+        }
         if let Some(bytes) = self.files.remove(src) {
+            self.links.remove(dst);
             self.files.insert(dst.to_owned(), bytes.clone());
             self.drop_entry(src);
             self.upsert_entry(
@@ -472,6 +546,17 @@ fn dir(name: &str) -> FsEntry {
     }
 }
 
+/// A symbolic-link *entry* named `name`, whose size is the length of the
+/// target it stores — the only thing a link holds.
+fn link_entry(name: &str, target: &str) -> FsEntry {
+    FsEntry {
+        name: name.to_owned(),
+        kind: FileKind::Symlink,
+        size: target.len() as u64,
+        modified: Time64::UNIX_EPOCH,
+    }
+}
+
 /// The standard fixture: `/` holds `docs/`, `.hidden/`, `b.txt`, `a.rs`,
 /// `big`; `/docs` holds `guide.md`; `/.hidden` holds one file; `/locked`
 /// is denied.
@@ -508,6 +593,24 @@ fn mode_prompt(m: &Model) -> ModePrompt {
         Some(Prompt::Mode(prompt)) => prompt,
         other => panic!("expected the mode prompt, got {other:?}"),
     }
+}
+
+/// The prompt line the given model paints — the last row of a rendered
+/// window, which is where every prompt is drawn.
+fn prompt_line(m: &Model) -> String {
+    let mut window = Window::new(Pos::new(0, 0), Size::new(24, 90));
+    render(m, &mut window);
+    row_text(&window, 23)
+}
+
+/// The whole rendered screen of `m`, as text.
+fn painted_text(m: &Model) -> String {
+    let mut window = Window::new(Pos::new(0, 0), Size::new(24, 90));
+    render(m, &mut window);
+    (0..24)
+        .map(|row| row_text(&window, row))
+        .collect::<alloc::vec::Vec<_>>()
+        .join("\n")
 }
 
 fn row_text(window: &Window, row: u16) -> String {
@@ -2274,6 +2377,16 @@ impl Fs for SparseFs {
         Ok(FileKind::Regular)
     }
 
+    fn read_link(&mut self, _path: &str) -> Result<String, Errno> {
+        // Every node in this fixture is a plain byte source, so nothing here
+        // is a link to read.
+        Err(Errno::OutOfRange)
+    }
+
+    fn create_link(&mut self, _target: &str, _path: &str) -> Result<(), Errno> {
+        Err(Errno::PermissionDenied)
+    }
+
     fn read(&mut self, _path: &str, offset: u64, buf: &mut [u8]) -> Result<usize, Errno> {
         if offset >= self.size {
             return Ok(0);
@@ -3615,4 +3728,177 @@ fn the_session_resizes_its_window_and_repaints_at_the_new_size() {
         output.windows(6).any(|w| w == b"row012"),
         "the grown window repainted the whole listing"
     );
+}
+
+// --- File operations: symbolic links (`plans/SYMLINKS.md` S4) --------------
+
+/// The link fixture: `/` holds a link to a file, one to a directory, and one
+/// that names nothing, beside the ordinary entries a transfer targets.
+fn link_fixture() -> FakeFs {
+    FakeFs::new()
+        .dir(
+            "/",
+            vec![
+                dir("docs"),
+                file("a.rs", 30, 1_000),
+                file("b.txt", 10, 2_000),
+                link_entry("to-file", "/a.rs"),
+                link_entry("to-dir", "/docs"),
+                link_entry("gone", "../removed"),
+            ],
+        )
+        .dir("/docs", vec![file("guide.md", 5, 4_000)])
+        .link("/to-file", "/a.rs")
+        .link("/to-dir", "/docs")
+        .link("/gone", "../removed")
+        .mode("/", 0o755)
+}
+
+/// The index of the file-pane row named `name` in the model's listing.
+fn row_of(m: &Model, name: &str) -> usize {
+    m.files
+        .iter()
+        .position(|entry| entry.name == name)
+        .unwrap_or_else(|| panic!("the listing holds {name}"))
+}
+
+#[test]
+fn copying_a_link_recreates_it_with_the_same_target() {
+    let mut fs = link_fixture();
+    let mut m = model(&mut fs);
+    m.pane = Pane::Files;
+    m.file_cursor = row_of(&m, "to-file");
+    handle_event(&mut m, &mut fs, &mut decode(), &Event::Char('c'));
+    type_text(&mut m, &mut fs, "/copy-of-link");
+    handle_event(&mut m, &mut fs, &mut decode(), &Event::Enter);
+    // A link, holding the same spelling — never a regular file holding the
+    // target's text.
+    assert_eq!(fs.stat_kind("/copy-of-link"), Ok(FileKind::Symlink));
+    assert_eq!(fs.link_target("/copy-of-link").as_deref(), Some("/a.rs"));
+    // Nothing was read or written through the link.
+    assert_eq!(fs.contents("/copy-of-link"), None);
+    // The source link and its target are untouched.
+    assert_eq!(fs.stat_kind("/to-file"), Ok(FileKind::Symlink));
+    assert_eq!(fs.contents("/a.rs"), Some(vec![b'x'; 30]));
+}
+
+#[test]
+fn copying_a_dangling_link_still_recreates_it() {
+    // A link is data: what it names has no bearing on duplicating it.
+    let mut fs = link_fixture();
+    let mut m = model(&mut fs);
+    m.pane = Pane::Files;
+    m.file_cursor = row_of(&m, "gone");
+    handle_event(&mut m, &mut fs, &mut decode(), &Event::Char('c'));
+    type_text(&mut m, &mut fs, "/still-gone");
+    handle_event(&mut m, &mut fs, &mut decode(), &Event::Enter);
+    assert_eq!(fs.stat_kind("/still-gone"), Ok(FileKind::Symlink));
+    assert_eq!(fs.link_target("/still-gone").as_deref(), Some("../removed"));
+}
+
+#[test]
+fn copying_a_tree_recreates_the_links_inside_it() {
+    let mut fs = FakeFs::new()
+        .dir("/", vec![dir("tree"), file("a.rs", 30, 1_000)])
+        .dir("/tree", vec![file("f", 3, 0), link_entry("inner", "/a.rs")])
+        .link("/tree/inner", "/a.rs")
+        .mode("/", 0o755);
+    let mut m = model(&mut fs);
+    m.pane = Pane::Files;
+    m.file_cursor = row_of(&m, "tree");
+    handle_event(&mut m, &mut fs, &mut decode(), &Event::Char('c'));
+    type_text(&mut m, &mut fs, "/tree-copy");
+    handle_event(&mut m, &mut fs, &mut decode(), &Event::Enter);
+    assert_eq!(fs.contents("/tree-copy/f"), Some(vec![b'x'; 3]));
+    assert_eq!(fs.stat_kind("/tree-copy/inner"), Ok(FileKind::Symlink));
+    assert_eq!(fs.link_target("/tree-copy/inner").as_deref(), Some("/a.rs"));
+}
+
+#[test]
+fn deleting_a_link_removes_the_link_and_not_its_target() {
+    let mut fs = link_fixture();
+    let mut m = model(&mut fs);
+    m.pane = Pane::Files;
+    m.file_cursor = row_of(&m, "to-dir");
+    handle_event(&mut m, &mut fs, &mut decode(), &Event::Char('d'));
+    handle_event(&mut m, &mut fs, &mut decode(), &Event::Char('y'));
+    assert_eq!(fs.stat_kind("/to-dir"), Err(Errno::NotFound));
+    // The directory the link named is still there, with its contents.
+    assert!(fs.has_dir("/docs"));
+    assert_eq!(fs.contents("/docs/guide.md"), Some(vec![b'x'; 5]));
+}
+
+#[test]
+fn moving_a_link_moves_the_link() {
+    let mut fs = link_fixture().cross("/other").dir("/other", vec![]);
+    let mut m = model(&mut fs);
+    m.pane = Pane::Files;
+    m.file_cursor = row_of(&m, "to-file");
+    handle_event(&mut m, &mut fs, &mut decode(), &Event::Char('m'));
+    // A cross-volume move cannot rename, so it recreates the link and
+    // removes the original — still never touching the target.
+    type_text(&mut m, &mut fs, "/other/moved");
+    handle_event(&mut m, &mut fs, &mut decode(), &Event::Enter);
+    assert_eq!(fs.stat_kind("/other/moved"), Ok(FileKind::Symlink));
+    assert_eq!(fs.link_target("/other/moved").as_deref(), Some("/a.rs"));
+    assert_eq!(fs.stat_kind("/to-file"), Err(Errno::NotFound));
+    assert_eq!(fs.contents("/a.rs"), Some(vec![b'x'; 30]));
+}
+
+#[test]
+fn a_link_at_the_destination_is_asked_about_and_replaced_not_written_through() {
+    let mut fs = link_fixture();
+    let mut m = model(&mut fs);
+    m.pane = Pane::Files;
+    m.file_cursor = row_of(&m, "b.txt");
+    handle_event(&mut m, &mut fs, &mut decode(), &Event::Char('c'));
+    type_text(&mut m, &mut fs, "/to-file");
+    handle_event(&mut m, &mut fs, &mut decode(), &Event::Enter);
+    // The question is asked, and says what would be replaced.
+    assert!(matches!(m.prompt, Some(Prompt::Overwrite(_))));
+    assert!(
+        prompt_line(&m).contains("symbolic link"),
+        "{}",
+        prompt_line(&m)
+    );
+    // Nothing has happened yet: the link stands and its target is intact.
+    assert_eq!(fs.stat_kind("/to-file"), Ok(FileKind::Symlink));
+    assert_eq!(fs.contents("/a.rs"), Some(vec![b'x'; 30]));
+    handle_event(&mut m, &mut fs, &mut decode(), &Event::Char('o'));
+    // The *link* was replaced by the copy; the file it named is untouched,
+    // which is what "never written through" means.
+    assert_eq!(fs.stat_kind("/to-file"), Ok(FileKind::Regular));
+    assert_eq!(fs.contents("/to-file"), Some(vec![b'x'; 10]));
+    assert_eq!(fs.contents("/a.rs"), Some(vec![b'x'; 30]));
+}
+
+#[test]
+fn a_directory_is_never_transferred_onto_a_link() {
+    let mut fs = link_fixture();
+    let mut m = model(&mut fs);
+    m.pane = Pane::Files;
+    m.file_cursor = row_of(&m, "docs");
+    handle_event(&mut m, &mut fs, &mut decode(), &Event::Char('c'));
+    // A link is a leaf, so a directory cannot merge into it.
+    type_text(&mut m, &mut fs, "/gone");
+    handle_event(&mut m, &mut fs, &mut decode(), &Event::Enter);
+    assert!(
+        m.message
+            .clone()
+            .expect("refused")
+            .contains("different kind"),
+        "{:?}",
+        m.message
+    );
+    assert_eq!(fs.stat_kind("/gone"), Ok(FileKind::Symlink));
+}
+
+#[test]
+fn the_file_pane_shows_a_link_as_a_link() {
+    let mut fs = link_fixture();
+    let m = model(&mut fs);
+    // The size column names what the row is; a link's own byte count is the
+    // length of the path it stores, which is not a size a reader wants.
+    let text = painted_text(&m);
+    assert!(text.contains("<link>"), "{text}");
 }

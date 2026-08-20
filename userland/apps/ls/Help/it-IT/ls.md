@@ -42,6 +42,13 @@ Quando sono dati più operandi — e sempre sotto `-R` — l'elenco di
 ogni directory è preceduto da un'intestazione `percorso:`, e i
 blocchi sono separati da una riga vuota.
 
+Un collegamento simbolico appare con la lettera di tipo `l` e, nel formato
+lungo, come `nome -> destinazione` — la destinazione esattamente come è
+memorizzata, non risolta, cioè ciò che il collegamento contiene. Un
+collegamento pendente si elenca quindi normalmente; solo una postura che
+lo risolve (`-L`, o `-H` per un operando) segnala una destinazione
+irraggiungibile.
+
 ## OPTIONS
 
 - `-t` — ordinare per la marca temporale mostrata, la più recente per
@@ -101,6 +108,20 @@ blocchi sono separati da una riga vuota.
   sono (il valore predefinito quando l'output non è un terminale).
 - `-r, --reverse` — invertire l'ordine di ordinamento.
 - `-R, --recursive` — elencare le sottodirectory ricorsivamente.
+- `-L, --dereference` — mostrare le informazioni del file che ogni
+  collegamento simbolico nomina, anziché quelle del collegamento, dovunque
+  ne appaia uno. Un collegamento la cui destinazione è irraggiungibile è
+  segnalato sull'uscita di errore e l'elenco continua, con stato di uscita
+  non nullo.
+- `-H, --dereference-command-line` — dereferenziare solo i collegamenti
+  simbolici nominati sulla riga di comando; quelli dentro un elenco restano
+  collegamenti. Vince l'ultimo fra `-L` e `-H`.
+- `--dereference-command-line-symlink-to-dir` — il comportamento
+  predefinito quando nessuna opzione di formato ne impone un altro: un
+  collegamento della riga di comando *a una directory* è dereferenziato,
+  così `ls linkdir` elenca la directory, mentre ogni altro collegamento
+  resta un collegamento. `-l`, `-d` e `-F` mostrano invece ogni
+  collegamento.
 - `-s, --size` — stampare la dimensione allocata di ogni voce in blocchi
   da 1024 byte (scalata con `-h`), con una riga `total` per ogni
   directory elencata.

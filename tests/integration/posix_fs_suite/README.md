@@ -27,6 +27,7 @@ per-inode-security delegation methods.
 | `tests/layout.rs`    | §16 top-level names, read-only `/System`, read-only mount  |
 | `tests/errno.rs`     | The stable `Errno` each `VfsError` surfaces                |
 | `tests/pathname.rs`  | Absolute-only paths; `.`/`..`, NUL, over-long refused      |
+| `tests/symlink.rs`   | `symlink`/`readlink`, `lstat` vs `stat`, the follow matrix, physical `..`, `ELOOP` |
 
 ## Scope
 

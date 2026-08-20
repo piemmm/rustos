@@ -7,9 +7,10 @@ use alloc::vec::Vec;
 use core::cmp::Reverse;
 use core::fmt::Write as _;
 
+use tairix_abi::fs::{FileId, FileKind};
 use tairix_abi::stdinfo::{Human, Severity, StdInfoKind, StdInfoRecord};
 use tairix_abi::time::Time64;
-use tairix_abi::NodeTimes;
+use tairix_abi::Errno;
 use tairix_curses::downgrade;
 use tairix_fsmeta::calendar::CivilTime;
 use tairix_help::{own_short_help, HelpSource};
@@ -17,11 +18,11 @@ use tairix_termcap::{ColorChoice, ColorDepth};
 use tairix_vt::{encode_into, str_width, Op, Role, Sgr};
 
 use crate::command::{
-    Command, Filters, Format, Hidden, Indicator, Options, QuotingStyle, SizeFormat, Sort,
-    TimeField, TimeStyle,
+    Command, Dereference, Filters, Format, Hidden, Indicator, Options, QuotingStyle, SizeFormat,
+    Sort, TimeField, TimeStyle,
 };
 use crate::error::LsError;
-use crate::io::{Entry, Listing, Metadata, Output};
+use crate::io::{Entry, FinalLink, Listing, Metadata, Output};
 
 /// The usage banner a usage error is reported with, and the fallback the
 /// short-help switches print when `ls`'s own Help tree is unavailable.
@@ -44,15 +45,17 @@ const OWN_WORD: &str = "ls";
 /// is given, each directory's listing is preceded by a `path:` header and
 /// blocks are separated by a blank line — the POSIX model.
 ///
+/// A path that cannot be inspected or read does **not** end the listing: the
+/// reason is written to the error stream, that path is skipped, and the
+/// [`Outcome`] records how serious it was so the caller can exit non-zero —
+/// the GNU behaviour, and the only way `ls -L` over a directory holding a
+/// dangling link can list the rest of it.
+///
 /// # Errors
 ///
-/// * [`LsError::Stat`] — an operand (or, under `-l`, a directory entry)
-///   could not be inspected; carries the underlying
-///   [`Errno`](tairix_abi::Errno) (e.g. [`Errno::NotFound`]).
-/// * [`LsError::Read`] — a directory could not be read.
-/// * [`LsError::Output`] — writing the terminal failed.
-///
-/// [`Errno::NotFound`]: tairix_abi::Errno::NotFound
+/// * [`LsError::Output`] — writing the listing to the terminal failed. This
+///   is the one failure that stops the run: with nowhere to write, there is
+///   nothing left to do.
 pub fn run(
     command: Command,
     locale: Option<&str>,
@@ -61,14 +64,129 @@ pub fn run(
     fs: &dyn Listing,
     help: &dyn HelpSource,
     out: &dyn Output,
-) -> Result<(), LsError> {
+) -> Result<Outcome, LsError> {
     match command {
-        Command::Help => short_help(locale, help, out),
+        Command::Help => short_help(locale, help, out).map(|()| Outcome::Complete),
         Command::List {
             options,
             filters,
             paths,
         } => list(options, &filters, &paths, now, term, fs, out),
+    }
+}
+
+/// How completely a listing that reached the end of its operands ran.
+///
+/// GNU `ls` grades its exit status: everything listed is `0`, a *minor*
+/// problem — an entry or subdirectory inside a listing that could not be
+/// reached — is `1`, and *serious trouble* — a command-line operand that
+/// could not be reached at all — is `2`. The reason is always reported on
+/// the error stream as it happens; this is only the grade the caller turns
+/// into that status.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd)]
+pub enum Outcome {
+    /// Every operand and entry was listed.
+    Complete,
+    /// Something inside a listing could not be reached; it was reported and
+    /// the listing continued. Exit `1`.
+    MinorProblem,
+    /// A command-line operand could not be reached; it was reported and
+    /// skipped. Exit `2`.
+    SeriousProblem,
+}
+
+impl Outcome {
+    /// The exit status a caller reports for this outcome.
+    #[must_use]
+    pub const fn exit_status(self) -> i32 {
+        match self {
+            Self::Complete => 0,
+            Self::MinorProblem => 1,
+            Self::SeriousProblem => 2,
+        }
+    }
+
+    /// Keep the more serious of two outcomes, so one bad entry in a long
+    /// listing cannot be forgotten by a later good one.
+    fn worse(self, other: Self) -> Self {
+        if other > self {
+            other
+        } else {
+            self
+        }
+    }
+}
+
+/// The `-> target` a long-format row shows for a symbolic link.
+///
+/// `resolved` is filled only when colour is active, which is the only thing
+/// that needs it: GNU paints the target text in the role of what the target
+/// *is*. A target that cannot be reached carries `None` and is painted
+/// plain — the shared scheme names no orphan-link role, and inventing a
+/// second colour vocabulary here would be worse than an uncoloured target.
+struct LinkText {
+    target: String,
+    resolved: Option<Metadata>,
+}
+
+/// One row of a listing: the name, the kind the listing shows it as, the
+/// metadata behind it, and — for a link — the target the long format prints.
+///
+/// `kind` is never unknown, because the directory stream reports every
+/// child's own kind even when the per-entry stat is refused; that is what
+/// lets an unstattable row still render its type letter rather than a `?`.
+/// `stat` is absent when the listing needs no stat field at all *or* when
+/// the stat was refused (a dangling link under `-L`); every cell it would
+/// have filled then renders GNU's `?` rather than a fabricated zero. The one
+/// constructor takes `kind` from the stat whenever there is one, so the two
+/// cannot disagree.
+struct Row {
+    name: String,
+    kind: FileKind,
+    stat: Option<Metadata>,
+    link: Option<LinkText>,
+}
+
+impl Row {
+    /// A row for `name` whose stat succeeded.
+    fn stated(name: String, meta: Metadata) -> Self {
+        Self {
+            name,
+            kind: meta.kind,
+            stat: Some(meta),
+            link: None,
+        }
+    }
+
+    /// A row for `name` with no stat behind it: either none was needed
+    /// (`kind` then comes from the directory stream) or the stat was refused.
+    fn unstated(name: String, kind: FileKind) -> Self {
+        Self {
+            name,
+            kind,
+            stat: None,
+            link: None,
+        }
+    }
+
+    /// This row with its long-format link target attached.
+    fn with_link(mut self, link: Option<LinkText>) -> Self {
+        self.link = link;
+        self
+    }
+
+    /// The size a sort compares and the long format prints; `0` when no stat
+    /// stands behind the row, which is what GNU compares for one it could
+    /// not inspect.
+    fn size(&self) -> u64 {
+        self.stat.map_or(0, |meta| meta.size)
+    }
+
+    /// The on-disk allocation the `-s` cell and the `total` line sum; `0`
+    /// without a stat, so an unstattable entry adds nothing to the total
+    /// rather than a guess.
+    fn allocated(&self) -> u64 {
+        self.stat.map_or(0, |meta| meta.allocated)
     }
 }
 
@@ -106,7 +224,7 @@ fn list(
     term: Option<&str>,
     fs: &dyn Listing,
     out: &dyn Output,
-) -> Result<(), LsError> {
+) -> Result<Outcome, LsError> {
     // The attested console width is the one signal that decides the GNU
     // arrangement, the quoting default, and (with `--color` and `TERM`) the
     // colour. It is read once here and reused for all three.
@@ -115,14 +233,39 @@ fn list(
     // forces a per-entry `stat` (the kind and execute bit decide the
     // colour), exactly as the GNU tool stats when colouring.
     let painter = Painter::resolve(options.color, terminal, term);
-    let mut files: Vec<(String, Metadata)> = Vec::new();
-    let mut dirs: Vec<String> = Vec::new();
+    // The dereference posture is resolved once from the whole command line,
+    // then applied differently to an operand and to an entry inside a
+    // listing — the distinction `-H` exists to draw.
+    let deref = options.dereference();
+    let mut outcome = Outcome::Complete;
+    let mut files: Vec<Row> = Vec::new();
+    let mut dirs: Vec<(String, FileId)> = Vec::new();
     for path in paths {
-        let meta = fs.stat(path).map_err(LsError::Stat)?;
-        if meta.kind.is_dir() && !options.directory {
-            dirs.push(path.clone());
+        let meta = match operand_meta(path, deref, fs) {
+            Ok(meta) => meta,
+            // A command-line operand that cannot be reached is GNU's
+            // "serious trouble": the reason is reported, the operand is
+            // skipped, and the remaining operands are still listed.
+            Err(errno) => {
+                report(out, path, errno);
+                outcome = outcome.worse(Outcome::SeriousProblem);
+                continue;
+            }
+        };
+        // Whether the operand's *contents* are what gets listed. Only a
+        // directory has contents, and `-d` asks for the operand itself; a
+        // link resolved to a directory arrives here already reporting
+        // `Directory`, which is what makes `ls linkdir` list it.
+        let contents = match meta.kind {
+            FileKind::Directory => !options.directory,
+            FileKind::Regular | FileKind::Symlink => false,
+        };
+        if contents {
+            dirs.push((path.clone(), meta.id));
         } else {
-            files.push((path.clone(), meta));
+            let row = Row::stated(path.clone(), meta);
+            let link = link_text(path, &row, options, painter, fs);
+            files.push(row.with_link(link));
         }
     }
 
@@ -156,13 +299,104 @@ fn list(
         render_rows(&mut buf, &files, options, format, width, ctx);
         write_block(out, &mut buf)?;
     }
+    let walk = Walk {
+        options,
+        filters,
+        deref,
+        format,
+        width,
+        headered,
+        ctx,
+    };
+    let (walked, hidden) = list_directories(dirs, &walk, fs, out, &mut buf, &mut first)?;
+    outcome = outcome.worse(walked);
+    hidden_omitted += hidden;
+
+    if hidden_omitted > 0 {
+        emit_omission_record(out, hidden_omitted);
+    }
+    Ok(outcome)
+}
+
+/// Everything the directory walk needs that does not change between blocks.
+struct Walk<'a> {
+    options: Options,
+    filters: &'a Filters,
+    deref: Dereference,
+    format: Format,
+    width: usize,
+    headered: bool,
+    ctx: RenderCtx,
+}
+
+/// Walk `dirs` depth-first, rendering and **writing** one block per
+/// directory, and report how completely it ran plus how many entries the
+/// default dotfile filter hid.
+///
+/// Each block is written the moment its directory has been read, so a
+/// recursive listing shows progress immediately and memory stays bounded by
+/// the largest single directory rather than the whole tree.
+fn list_directories(
+    dirs: Vec<(String, FileId)>,
+    walk: &Walk<'_>,
+    fs: &dyn Listing,
+    out: &dyn Output,
+    buf: &mut String,
+    first: &mut bool,
+) -> Result<(Outcome, u64), LsError> {
+    let Walk {
+        options,
+        filters,
+        deref,
+        format,
+        width,
+        headered,
+        ctx,
+    } = *walk;
+    let mut outcome = Outcome::Complete;
+    let mut hidden_omitted: u64 = 0;
+    // A cycle needs a link, so the ancestor chain is only tracked when `-R`
+    // recursion and a dereferencing posture can actually produce one.
+    let track_cycles = options.recursive && deref == Dereference::Always;
     // A depth-first worklist: operands are pushed reversed so they pop in
     // command-line order, and a listed directory's children are pushed
     // reversed so they pop in rendered order.
+    let mut dirs = dirs;
     dirs.reverse();
-    let mut pending = dirs;
-    while let Some(path) = pending.pop() {
-        let mut entries = fs.read_dir(&path).map_err(LsError::Read)?;
+    let mut pending: Vec<Pending> = dirs
+        .into_iter()
+        .map(|(path, id)| Pending {
+            path,
+            chain: if track_cycles {
+                alloc::vec![id]
+            } else {
+                Vec::new()
+            },
+            operand: true,
+        })
+        .collect();
+    while let Some(item) = pending.pop() {
+        let Pending {
+            path,
+            chain,
+            operand,
+        } = item;
+        let mut entries = match fs.read_dir(&path) {
+            Ok(entries) => entries,
+            // An unreadable directory is reported and skipped: a listing of
+            // twenty operands must not be lost to the one the caller may not
+            // open. A command-line operand is serious trouble; a directory
+            // reached by recursing is a minor problem.
+            Err(errno) => {
+                report_unreadable(out, &path, errno);
+                outcome = outcome.worse(if operand {
+                    Outcome::SeriousProblem
+                } else {
+                    Outcome::MinorProblem
+                });
+                continue;
+            }
+        };
         // Two filtering stages, in GNU's order. First the default dotfile
         // rule, whose omissions are counted for the advisory record (a
         // surprising, non-requested hiding). Then the explicit `-B`/`-I`/
@@ -179,29 +413,114 @@ fn list(
         }
         let show_hidden = options.hidden != Hidden::Skip;
         entries.retain(|entry| !filters.suppresses(&entry.name, show_hidden));
-        let mut rows = rows_for(&path, &entries, options, painter.is_active(), fs)?;
+        let listed = rows_for(&path, &entries, options, deref, ctx.painter, fs, out);
+        let mut rows = listed.rows;
+        outcome = outcome.worse(listed.outcome);
         sort_rows(&mut rows, options);
-        open_block(&mut buf, &mut first, headered.then_some(path.as_str()));
+        open_block(buf, first, headered.then_some(path.as_str()));
         if options.size || options.is_long() {
-            render_total(&mut buf, &rows, options);
+            render_total(buf, &rows, options);
         }
-        render_rows(&mut buf, &rows, options, format, width, ctx);
-        write_block(out, &mut buf)?;
+        render_rows(buf, &rows, options, format, width, ctx);
+        write_block(out, buf)?;
         if options.recursive {
-            // `.`/`..` never recurse — a listing must terminate even when
-            // `-a` renders them.
-            for (name, meta) in rows.iter().rev() {
-                if meta.kind.is_dir() && name != "." && name != ".." {
-                    pending.push(join(&path, name));
+            for row in rows.iter().rev() {
+                // `.`/`..` never recurse — a listing must terminate even
+                // when `-a` renders them — and a row shown *as* a link is
+                // not descended: only a posture that already resolved it
+                // reports `Directory` here.
+                let descend = match row.kind {
+                    FileKind::Directory => row.name != "." && row.name != "..",
+                    FileKind::Regular | FileKind::Symlink => false,
+                };
+                if !descend {
+                    continue;
                 }
+                let child = join(&path, &row.name);
+                let id = row.stat.map_or(FileId::NONE, |meta| meta.id);
+                // A directory already on the chain that led here was reached
+                // through a link pointing back at it; report it once and do
+                // not descend, exactly as GNU does, rather than walking the
+                // loop until the path outgrows the kernel's bound.
+                if track_cycles && !id.is_none() && chain.contains(&id) {
+                    report_cycle(out, &child);
+                    outcome = outcome.worse(Outcome::MinorProblem);
+                    continue;
+                }
+                let mut child_chain = chain.clone();
+                if track_cycles {
+                    child_chain.push(id);
+                }
+                pending.push(Pending {
+                    path: child,
+                    chain: child_chain,
+                    operand: false,
+                });
             }
         }
     }
+    Ok((outcome, hidden_omitted))
+}
 
-    if hidden_omitted > 0 {
-        emit_omission_record(out, hidden_omitted);
+/// One directory still to be listed.
+struct Pending {
+    path: String,
+    /// Node identities of the directories this one was reached through,
+    /// starting at the operand — empty unless a cycle is possible at all
+    /// (`-R` with `-L`).
+    ///
+    /// A cycle requires a symbolic link, and every format that stores one
+    /// reports node identities, so a tracked chain is never made of
+    /// unusable [`FileId::NONE`]s in practice; an identity-less entry is
+    /// simply not compared.
+    chain: Vec<FileId>,
+    /// Whether the directory was named on the command line, which decides
+    /// how serious a failure to read it is.
+    operand: bool,
+}
+
+/// The [`Metadata`] a *command-line operand* is described by, applying the
+/// GNU dereference rule for operands.
+///
+/// [`Dereference::Always`] and [`Dereference::CommandLine`] resolve the
+/// operand outright, so a dangling one is the error `stat(2)` reports.
+/// [`Dereference::CommandLineDirectory`] resolves it *only* if that yields a
+/// directory — which is what makes `ls linkdir` list the directory while
+/// `ls dangling` and `ls linkfile` still describe the link — and
+/// [`Dereference::Never`] always describes the operand itself.
+fn operand_meta(path: &str, deref: Dereference, fs: &dyn Listing) -> Result<Metadata, Errno> {
+    match deref {
+        Dereference::Never => fs.stat(path, FinalLink::Keep),
+        Dereference::Always | Dereference::CommandLine => fs.stat(path, FinalLink::Follow),
+        Dereference::CommandLineDirectory => match fs.stat(path, FinalLink::Follow) {
+            Ok(meta) if meta.kind.is_dir() => Ok(meta),
+            // Resolved to a non-directory, or dangled: describe the operand
+            // itself. Any *other* refusal is the operand's real answer and
+            // is reported as it stands.
+            Ok(_) | Err(Errno::NotFound) => fs.stat(path, FinalLink::Keep),
+            Err(errno) => Err(errno),
+        },
     }
-    Ok(())
+}
+
+/// Report that a path could not be inspected, in the GNU shape.
+fn report(out: &dyn Output, path: &str, errno: Errno) {
+    out.error(&format!("{OWN_WORD}: cannot access '{path}': {errno}"));
+}
+
+/// Report that a directory could not be read, in the GNU shape.
+fn report_unreadable(out: &dyn Output, path: &str, errno: Errno) {
+    out.error(&format!(
+        "{OWN_WORD}: cannot open directory '{path}': {errno}"
+    ));
+}
+
+/// Report a directory `-R` reached again through a link back into its own
+/// chain, in the GNU shape.
+fn report_cycle(out: &dyn Output, path: &str) {
+    out.error(&format!(
+        "{OWN_WORD}: not listing already-listed directory: '{path}'"
+    ));
 }
 
 /// Write one rendered block to the terminal and reset the buffer for the
@@ -217,11 +536,12 @@ fn write_block(out: &dyn Output, buf: &mut String) -> Result<(), LsError> {
 ///
 /// The long format renders mode/owner/group/size/date, `-s` renders
 /// allocated blocks, `-i` renders the node number, a size or time sort
-/// compares those fields, `-F` needs the mode's execute bits for `*`, and
-/// active colour needs them for the executable role — everything else
-/// renders names straight off the one `read_dir`, so the per-entry `stat` is
-/// paid only when asked for.
-fn needs_stat(options: Options, color_active: bool) -> bool {
+/// compares those fields, `-F` needs the mode's execute bits for `*`, active
+/// colour needs them for the executable role, and a dereferencing posture
+/// needs one because the directory stream reports a link's *own* kind —
+/// everything else renders names straight off the one `read_dir`, so the
+/// per-entry `stat` is paid only when asked for.
+fn needs_stat(options: Options, entry_links: FinalLink, color_active: bool) -> bool {
     options.is_long()
         || options.size
         || options.inode
@@ -229,44 +549,106 @@ fn needs_stat(options: Options, color_active: bool) -> bool {
         || options.sort == Sort::Time
         || options.indicator == Indicator::Classify
         || color_active
+        || entry_links == FinalLink::Follow
+}
+
+/// The reading a listing's *entries* take: only `-L` resolves them; `-H`
+/// deliberately stops at the command line.
+fn entry_links(deref: Dereference) -> FinalLink {
+    match deref {
+        Dereference::Always => FinalLink::Follow,
+        Dereference::Never | Dereference::CommandLine | Dereference::CommandLineDirectory => {
+            FinalLink::Keep
+        }
+    }
+}
+
+/// One directory block's rows, and how completely they could be inspected.
+struct Listed {
+    rows: Vec<Row>,
+    outcome: Outcome,
 }
 
 /// The rendered rows of one directory block: each entry's name, with its
-/// metadata attached.
+/// metadata and — for a link the long format prints — its target attached.
+///
+/// An entry that cannot be inspected is *kept*: the reason is reported, the
+/// row renders its type letter from the directory stream and `?` for every
+/// stat-derived cell, and the outcome records the minor problem. That is what
+/// `ls -L` over a directory holding a dangling link must do — report it and
+/// list the rest.
 fn rows_for(
     dir: &str,
     entries: &[Entry],
     options: Options,
-    color_active: bool,
+    deref: Dereference,
+    painter: Painter,
     fs: &dyn Listing,
-) -> Result<Vec<(String, Metadata)>, LsError> {
+    out: &dyn Output,
+) -> Listed {
+    let links = entry_links(deref);
+    let wanted = needs_stat(options, links, painter.is_active());
     let mut rows = Vec::with_capacity(entries.len());
+    let mut outcome = Outcome::Complete;
     for entry in entries {
-        let meta = if needs_stat(options, color_active) {
-            fs.stat(&join(dir, &entry.name)).map_err(LsError::Stat)?
-        } else {
-            // The kind from the directory stream stands in and the zeroed
-            // fields are unread.
-            Metadata {
-                kind: entry.kind,
-                mode: 0,
-                size: 0,
-                allocated: 0,
-                uid: 0,
-                gid: 0,
-                inode: 0,
-                times: NodeTimes::default(),
+        let path = join(dir, &entry.name);
+        let row = if wanted {
+            match fs.stat(&path, links) {
+                Ok(meta) => Row::stated(entry.name.clone(), meta),
+                Err(errno) => {
+                    report(out, &path, errno);
+                    outcome = outcome.worse(Outcome::MinorProblem);
+                    Row::unstated(entry.name.clone(), entry.kind)
+                }
             }
+        } else {
+            // No cell in this listing reads a stat field, so none is paid
+            // for; the kind from the directory stream is all it needs.
+            Row::unstated(entry.name.clone(), entry.kind)
         };
-        rows.push((entry.name.clone(), meta));
+        let link = link_text(&path, &row, options, painter, fs);
+        rows.push(row.with_link(link));
     }
-    Ok(rows)
+    Listed { rows, outcome }
+}
+
+/// The `-> target` a long-format row shows, for a row the listing shows *as*
+/// a symbolic link.
+///
+/// Reading a link's target is a separate call because a link's content is a
+/// path, never bytes; it is paid only for the format that prints it. When
+/// colour is active the target is additionally resolved so its text is
+/// painted in the role of what it names — GNU's behaviour — and a target
+/// that cannot be reached simply carries no role.
+fn link_text(
+    path: &str,
+    row: &Row,
+    options: Options,
+    painter: Painter,
+    fs: &dyn Listing,
+) -> Option<LinkText> {
+    if !options.is_long() || row.kind != FileKind::Symlink {
+        return None;
+    }
+    let target = fs.read_link(path).ok()?;
+    let resolved = painter
+        .is_active()
+        .then(|| fs.stat(path, FinalLink::Follow).ok())
+        .flatten();
+    Some(LinkText { target, resolved })
 }
 
 /// The timestamp `options` selects for the long-format date column and the
 /// `-t` sort: modified (the default), accessed (`-u`), changed (`-c`), or
 /// created (`--time=birth`).
-fn selected_time(meta: &Metadata, field: TimeField) -> Time64 {
+///
+/// A row with no stat behind it has no timestamp at all, and reports the
+/// epoch — what GNU compares for an entry it could not inspect — rather than
+/// a fabricated one; the long format still renders it as `?`.
+fn selected_time(row: &Row, field: TimeField) -> Time64 {
+    let Some(meta) = row.stat else {
+        return Time64::UNIX_EPOCH;
+    };
     match field {
         TimeField::Modified => meta.times.modified,
         TimeField::Accessed => meta.times.accessed,
@@ -288,28 +670,31 @@ fn extension(name: &str) -> &str {
 
 /// Order `rows` by the selected sort key, reversed under `-r`, then — under
 /// `--group-directories-first` — float directories to the front.
-fn sort_rows(rows: &mut [(String, Metadata)], options: Options) {
+fn sort_rows(rows: &mut [Row], options: Options) {
     match options.sort {
         // No sort: keep the directory (read) order the filesystem returned.
         Sort::None => {}
-        Sort::Name => rows.sort_by(|a, b| a.0.cmp(&b.0)),
+        Sort::Name => rows.sort_by(|a, b| a.name.cmp(&b.name)),
         // Largest first, ties by name — the GNU `-S` order.
-        Sort::Size => rows.sort_by(|a, b| b.1.size.cmp(&a.1.size).then_with(|| a.0.cmp(&b.0))),
+        Sort::Size => {
+            rows.sort_by(|a, b| b.size().cmp(&a.size()).then_with(|| a.name.cmp(&b.name)));
+        }
         // Newest first, ties by name — the GNU `-t` order.
         Sort::Time => rows.sort_by(|a, b| {
-            selected_time(&b.1, options.time_field)
-                .cmp(&selected_time(&a.1, options.time_field))
-                .then_with(|| a.0.cmp(&b.0))
+            selected_time(b, options.time_field)
+                .cmp(&selected_time(a, options.time_field))
+                .then_with(|| a.name.cmp(&b.name))
         }),
         // By extension, ties by name — the GNU `-X` order.
         Sort::Extension => rows.sort_by(|a, b| {
-            extension(&a.0)
-                .cmp(extension(&b.0))
-                .then_with(|| a.0.cmp(&b.0))
+            extension(&a.name)
+                .cmp(extension(&b.name))
+                .then_with(|| a.name.cmp(&b.name))
         }),
         // Natural version order, ties by name — the GNU `-v` order.
         Sort::Version => rows.sort_by(|a, b| {
-            version::filevercmp(a.0.as_bytes(), b.0.as_bytes()).then_with(|| a.0.cmp(&b.0))
+            version::filevercmp(a.name.as_bytes(), b.name.as_bytes())
+                .then_with(|| a.name.cmp(&b.name))
         }),
     }
     if options.reverse {
@@ -317,9 +702,11 @@ fn sort_rows(rows: &mut [(String, Metadata)], options: Options) {
     }
     // Directories first is applied *after* the sort and the reverse, as a
     // stable partition: it keeps the sorted order within each group and puts
-    // directories first regardless of `-r` — the GNU behaviour.
+    // directories first regardless of `-r` — the GNU behaviour. A row shown
+    // as a link is not a directory here however its target resolves; only a
+    // posture that resolved it already reports `Directory`.
     if options.group_directories_first {
-        rows.sort_by_key(|row| Reverse(row.1.kind.is_dir()));
+        rows.sort_by_key(|row| Reverse(row.kind.is_dir()));
     }
 }
 
@@ -376,11 +763,19 @@ fn render_size(format: SizeFormat, bytes: u64) -> String {
     }
 }
 
-/// The `-s` blocks cell for one entry: its allocated storage rendered in the
-/// [`block_size`](Options::block_size) scaling.
-fn blocks_cell(meta: Metadata, options: Options) -> String {
-    render_size(options.block_size, meta.allocated)
+/// The `-s` blocks cell for one row: its allocated storage rendered in the
+/// [`block_size`](Options::block_size) scaling, or `?` when no stat stands
+/// behind the row.
+fn blocks_cell(row: &Row, options: Options) -> String {
+    match row.stat {
+        Some(meta) => render_size(options.block_size, meta.allocated),
+        None => String::from(UNKNOWN_CELL),
+    }
 }
+
+/// What every stat-derived cell renders when the stat was refused: GNU's
+/// single `?`, never a fabricated zero.
+const UNKNOWN_CELL: &str = "?";
 
 /// The `total` line of one directory block, printed for every directory
 /// listing under `-l` or `-s` as in the GNU tool: the summed allocated bytes
@@ -388,8 +783,8 @@ fn blocks_cell(meta: Metadata, options: Options) -> String {
 /// [`block_size`](Options::block_size) scaling (GNU sums the raw block
 /// counts, then scales, so the total is the scaling of the sum — not the sum
 /// of the per-entry cells).
-fn render_total(buf: &mut String, rows: &[(String, Metadata)], options: Options) {
-    let total: u64 = rows.iter().map(|(_, meta)| meta.allocated).sum();
+fn render_total(buf: &mut String, rows: &[Row], options: Options) {
+    let total: u64 = rows.iter().map(Row::allocated).sum();
     let _ = write!(buf, "total {}", render_size(options.block_size, total));
     buf.push(line_terminator(options));
 }
@@ -445,7 +840,7 @@ struct RenderCtx {
 /// and `width` — it is always one entry per line.
 fn render_rows(
     buf: &mut String,
-    rows: &[(String, Metadata)],
+    rows: &[Row],
     options: Options,
     format: Format,
     width: usize,
@@ -505,8 +900,7 @@ struct RenderedCell {
 /// no prefix, followed by the decorated (and, under colour, painted) name.
 /// The inode precedes the blocks, as in the GNU tool.
 fn entry_cell(
-    name: &str,
-    meta: Metadata,
+    row: &Row,
     options: Options,
     inode_width: usize,
     blocks_width: usize,
@@ -517,18 +911,27 @@ fn entry_cell(
     // Writing into a `String` is infallible, so the `fmt::Result`s are
     // discarded deliberately.
     if options.inode {
-        let _ = write!(text, "{:>inode_width$} ", meta.inode);
+        let _ = write!(text, "{:>inode_width$} ", inode_cell(row));
     }
     if options.size {
-        let _ = write!(text, "{:>blocks_width$} ", blocks_cell(meta, options));
+        let _ = write!(text, "{:>blocks_width$} ", blocks_cell(row, options));
     }
     // The prefixes are plain ASCII, so their display width is their length.
     let prefix_width = str_width(&text);
-    let name_cell = decorate(name, meta, options, quoting, painter);
+    let name_cell = decorate(row, options, quoting, painter);
     text.push_str(&name_cell.text);
     RenderedCell {
         text,
         width: prefix_width + name_cell.width,
+    }
+}
+
+/// The `-i` node-number cell for one row, or `?` when no stat stands behind
+/// it.
+fn inode_cell(row: &Row) -> String {
+    match row.stat {
+        Some(meta) => format!("{}", meta.id.node),
+        None => String::from(UNKNOWN_CELL),
     }
 }
 
@@ -537,28 +940,17 @@ fn entry_cell(
 /// block's width, when `-s` is set.
 fn render_one_per_line(
     buf: &mut String,
-    rows: &[(String, Metadata)],
+    rows: &[Row],
     options: Options,
     quoting: Quoting,
     painter: Painter,
 ) {
     let inode_width = inode_column_width(rows, options);
     let blocks_width = size_column_width(rows, options);
-    for (name, meta) in rows {
+    for row in rows {
         // The name is last on the line, so its (possibly coloured) text is
         // appended verbatim — no column depends on its width here.
-        buf.push_str(
-            &entry_cell(
-                name,
-                *meta,
-                options,
-                inode_width,
-                blocks_width,
-                quoting,
-                painter,
-            )
-            .text,
-        );
+        buf.push_str(&entry_cell(row, options, inode_width, blocks_width, quoting, painter).text);
         buf.push(line_terminator(options));
     }
 }
@@ -568,7 +960,7 @@ fn render_one_per_line(
 /// line begins with the name, no leading space — the GNU `-m` layout.
 fn render_commas(
     buf: &mut String,
-    rows: &[(String, Metadata)],
+    rows: &[Row],
     options: Options,
     width: usize,
     quoting: Quoting,
@@ -580,8 +972,8 @@ fn render_commas(
     // `-m` does not pad the `-i` inode or `-s` blocks cell (GNU prints them
     // inline), so the cell is built with zero prefix widths.
     let mut pos = 0usize;
-    for (index, (name, meta)) in rows.iter().enumerate() {
-        let cell = entry_cell(name, *meta, options, 0, 0, quoting, painter);
+    for (index, row) in rows.iter().enumerate() {
+        let cell = entry_cell(row, options, 0, 0, quoting, painter);
         // Wrap on the cell's plain display width, never the escape bytes.
         let len = cell.width;
         if index > 0 {
@@ -621,7 +1013,7 @@ enum Fill {
 /// each line carries no trailing padding.
 fn render_grid(
     buf: &mut String,
-    rows: &[(String, Metadata)],
+    rows: &[Row],
     options: Options,
     width: usize,
     fill: Fill,
@@ -636,17 +1028,7 @@ fn render_grid(
     let blocks_width = size_column_width(rows, options);
     let cells: Vec<RenderedCell> = rows
         .iter()
-        .map(|(name, meta)| {
-            entry_cell(
-                name,
-                *meta,
-                options,
-                inode_width,
-                blocks_width,
-                quoting,
-                painter,
-            )
-        })
+        .map(|row| entry_cell(row, options, inode_width, blocks_width, quoting, painter))
         .collect();
     // The grid is laid out on each cell's *plain* display width, so a
     // coloured cell occupies exactly the columns its uncoloured form would —
@@ -758,122 +1140,128 @@ fn grid_layout(widths: &[usize], width: usize, fill: Fill) -> GridLayout {
 }
 
 /// Width of the widest `-i` inode cell in `rows` (0 when `-i` is off).
-fn inode_column_width(rows: &[(String, Metadata)], options: Options) -> usize {
+fn inode_column_width(rows: &[Row], options: Options) -> usize {
     if !options.inode {
         return 0;
     }
     rows.iter()
-        .map(|(_, meta)| decimal_len(meta.inode))
+        .map(|row| inode_cell(row).len())
         .max()
         .unwrap_or(1)
 }
 
-/// Digits in the decimal rendering of `value` (at least one, for `0`).
-fn decimal_len(value: u64) -> usize {
-    let mut digits = 1;
-    let mut rest = value;
-    while rest >= 10 {
-        rest /= 10;
-        digits += 1;
-    }
-    digits
-}
-
 /// Width of the widest `-s` blocks cell in `rows` (0 when `-s` is off).
-fn size_column_width(rows: &[(String, Metadata)], options: Options) -> usize {
+fn size_column_width(rows: &[Row], options: Options) -> usize {
     if !options.size {
         return 0;
     }
     rows.iter()
-        .map(|(_, meta)| blocks_cell(*meta, options).len())
+        .map(|row| blocks_cell(row, options).len())
         .max()
         .unwrap_or(1)
 }
 
 /// Render the long format: the optional `-i` inode and `-s` blocks columns,
 /// then mode, numeric owner and group (unless hidden by `-g` / `-o`), size,
-/// the selected timestamp, and finally the decorated name, with each
-/// numeric column right-aligned and the date column padded so the names
-/// align.
+/// the selected timestamp, and finally the decorated name — followed by
+/// ` -> target` for a row shown as a symbolic link — with each numeric column
+/// right-aligned and the date column padded so the names align.
 ///
 /// Owner and group are numeric ids: resolving names needs the
 /// capability-gated user database, which a listing must not demand — the
 /// GNU tool falls back to numbers for exactly this case (`-n` renders the
-/// same). There is **no link-count column**: the VFS has no hard links yet,
-/// so a fabricated count would be a lie — a documented divergence from GNU
-/// (see the Help document). The timestamp column shows the time selected by
+/// same). There is **no link-count column**: the VFS has no hard links, so a
+/// fabricated count would be a lie — a documented divergence from GNU (see
+/// the Help document). The timestamp column shows the time selected by
 /// `-c` / `-u` / `--time` (modified by default), rendered in the style
 /// chosen by `--time-style` / `--full-time`.
+///
+/// A row whose stat was refused renders every stat-derived cell as `?` and
+/// keeps the type letter the directory stream gave it, exactly as GNU does —
+/// which is how `ls -lL` shows a dangling link it has already reported.
 fn render_long(
     buf: &mut String,
-    rows: &[(String, Metadata)],
+    rows: &[Row],
     options: Options,
     now: Time64,
     quoting: Quoting,
     painter: Painter,
 ) {
-    let size_cell = |meta: &Metadata| render_size(options.file_size, meta.size);
-    let date_cell = |meta: &Metadata| {
-        render_time(
-            selected_time(meta, options.time_field),
+    let size_cell = |row: &Row| match row.stat {
+        Some(meta) => render_size(options.file_size, meta.size),
+        None => String::from(UNKNOWN_CELL),
+    };
+    let date_cell = |row: &Row| match row.stat {
+        Some(_) => render_time(
+            selected_time(row, options.time_field),
             options.time_style,
             now,
-        )
+        ),
+        None => String::from(UNKNOWN_CELL),
     };
-    let width_of = |cell: fn(&Metadata) -> String| {
-        rows.iter()
-            .map(|(_, meta)| cell(meta).len())
-            .max()
-            .unwrap_or(1)
+    let owner_cell = |row: &Row| match row.stat {
+        Some(meta) => format!("{}", meta.uid),
+        None => String::from(UNKNOWN_CELL),
     };
-    let uid_width = width_of(|meta| format!("{}", meta.uid));
-    let gid_width = width_of(|meta| format!("{}", meta.gid));
+    let group_cell = |row: &Row| match row.stat {
+        Some(meta) => format!("{}", meta.gid),
+        None => String::from(UNKNOWN_CELL),
+    };
+    let width_of =
+        |cell: &dyn Fn(&Row) -> String| rows.iter().map(|row| cell(row).len()).max().unwrap_or(1);
+    let uid_width = width_of(&owner_cell);
+    let gid_width = width_of(&group_cell);
     // The `--author` column repeats the owning user (TAIRiX has no separate
     // author), so it is the same values and width as the owner column.
     let author_width = uid_width;
-    let size_width = rows
-        .iter()
-        .map(|(_, meta)| size_cell(meta).len())
-        .max()
-        .unwrap_or(1);
+    let size_width = width_of(&size_cell);
     // The date column is padded to its widest rendering so the names align;
     // within one style every row is the same width except `iso`, whose
     // recent and old forms differ.
     let date_width = rows
         .iter()
-        .map(|(_, meta)| date_cell(meta).len())
+        .map(|row| date_cell(row).len())
         .max()
         .unwrap_or(0);
     let inode_width = inode_column_width(rows, options);
     let blocks_width = size_column_width(rows, options);
-    for (name, meta) in rows {
+    for row in rows {
         // Writing into a `String` is infallible, so the `fmt::Result` is
         // discarded deliberately.
         if options.inode {
-            let _ = write!(buf, "{:>inode_width$} ", meta.inode);
+            let _ = write!(buf, "{:>inode_width$} ", inode_cell(row));
         }
         if options.size {
-            let _ = write!(buf, "{:>blocks_width$} ", blocks_cell(*meta, options));
+            let _ = write!(buf, "{:>blocks_width$} ", blocks_cell(row, options));
         }
-        let _ = write!(buf, "{}", mode_string(*meta));
+        let _ = write!(buf, "{}", mode_string(row));
         if !options.hide_owner {
-            let _ = write!(buf, " {:>uid_width$}", meta.uid);
+            let _ = write!(buf, " {:>uid_width$}", owner_cell(row));
         }
         if options.author {
-            let _ = write!(buf, " {:>author_width$}", meta.uid);
+            let _ = write!(buf, " {:>author_width$}", owner_cell(row));
         }
         if !options.hide_group {
-            let _ = write!(buf, " {:>gid_width$}", meta.gid);
+            let _ = write!(buf, " {:>gid_width$}", group_cell(row));
         }
         // The name is the last field on the line, so its (possibly coloured)
         // text is emitted verbatim — no column follows it to be shifted.
         let _ = write!(
             buf,
             " {:>size_width$} {:<date_width$} {}",
-            size_cell(meta),
-            date_cell(meta),
-            decorate(name, *meta, options, quoting, painter).text
+            size_cell(row),
+            date_cell(row),
+            decorate(row, options, quoting, painter).text
         );
+        // `name -> target` for a link: the target is quoted in the same style
+        // as the name and painted in the role of what it names, and the
+        // indicator suffix (already appended above) stays on the *link*, as
+        // in the GNU tool.
+        if let Some(link) = &row.link {
+            let target = quoting.render(&link.target);
+            let role = link.resolved.as_ref().and_then(role_of);
+            let _ = write!(buf, " -> {}", painter.paint(role, &target));
+        }
         buf.push(line_terminator(options));
     }
 }
@@ -941,39 +1329,41 @@ fn render_time(stamp: Time64, style: TimeStyle, now: Time64) -> String {
     }
 }
 
-/// The rendered form of one name: quoted in the resolved [`Quoting`] style
-/// and, when colour is active, painted in its kind's scheme role; the `-p` /
-/// `-F` / `--file-type` indicator suffix is appended *after* the closing
-/// quote (and after the colour reset), uncoloured, exactly as in the GNU
-/// tool. With the VFS's two kinds only directories carry a `/`; `-F`
-/// additionally marks executables with `*`, while `--file-type` never does.
+/// The rendered form of one row's name: quoted in the resolved [`Quoting`]
+/// style and, when colour is active, painted in its kind's scheme role; the
+/// `-p` / `-F` / `--file-type` indicator suffix is appended *after* the
+/// closing quote (and after the colour reset), uncoloured, exactly as in the
+/// GNU tool. A directory carries `/`, a symbolic link carries `@` under
+/// `--file-type` and `-F`, and `-F` additionally marks executables with `*`.
 ///
 /// The returned [`RenderedCell`] carries the plain display width — the
 /// quoted name plus any suffix — so colour never shifts a column.
-fn decorate(
-    name: &str,
-    meta: Metadata,
-    options: Options,
-    quoting: Quoting,
-    painter: Painter,
-) -> RenderedCell {
-    let quoted = quoting.render(name);
+fn decorate(row: &Row, options: Options, quoting: Quoting, painter: Painter) -> RenderedCell {
+    let quoted = quoting.render(&row.name);
     let mut width = str_width(&quoted);
     // Colour wraps only the name text; the indicator suffix is appended
     // afterwards, outside the colour, as the GNU tool does by default.
-    let mut text = painter.paint(role_for(meta), &quoted);
+    let mut text = painter.paint(role_for(row), &quoted);
     let suffix = match options.indicator {
         Indicator::None => None,
-        Indicator::Slash | Indicator::FileType => meta.kind.is_dir().then_some('/'),
-        Indicator::Classify => {
-            if meta.kind.is_dir() {
-                Some('/')
-            } else if meta.mode & 0o111 != 0 {
-                Some('*')
-            } else {
-                None
-            }
-        }
+        // `-p` marks directories only; `--file-type` marks every kind it can
+        // name, which here adds the link's `@`.
+        Indicator::Slash => match row.kind {
+            FileKind::Directory => Some('/'),
+            FileKind::Regular | FileKind::Symlink => None,
+        },
+        Indicator::FileType => match row.kind {
+            FileKind::Directory => Some('/'),
+            FileKind::Symlink => Some('@'),
+            FileKind::Regular => None,
+        },
+        Indicator::Classify => match row.kind {
+            FileKind::Directory => Some('/'),
+            FileKind::Symlink => Some('@'),
+            // The execute bit needs a stat; a row without one is left
+            // unmarked rather than guessed at.
+            FileKind::Regular => row.stat.filter(|meta| meta.mode & 0o111 != 0).map(|_| '*'),
+        },
     };
     if let Some(suffix) = suffix {
         text.push(suffix);
@@ -982,17 +1372,29 @@ fn decorate(
     RenderedCell { text, width }
 }
 
-/// The scheme [`Role`] a file's colour comes from, or [`None`] for a plain
-/// (uncoloured) regular file. Directories take the directory role;
-/// executable regular files take the executable role. The VFS exposes only
-/// these two kinds today, so the mapping is deliberately small.
-fn role_for(meta: Metadata) -> Option<Role> {
-    if meta.kind.is_dir() {
-        Some(Role::Directory)
-    } else if meta.mode & 0o111 != 0 {
-        Some(Role::Executable)
-    } else {
-        None
+/// The scheme [`Role`] a row's name is painted in, or [`None`] for a plain
+/// (uncoloured) regular file.
+///
+/// A row shown as a link takes the link role whatever its target is — the
+/// name on the line *is* the link. A row with no stat behind it can only be
+/// coloured by its kind, which is exactly what a dangling link under `-L`
+/// leaves to work with.
+fn role_for(row: &Row) -> Option<Role> {
+    match row.kind {
+        FileKind::Directory => Some(Role::Directory),
+        FileKind::Symlink => Some(Role::Link),
+        FileKind::Regular => row.stat.as_ref().and_then(role_of),
+    }
+}
+
+/// The scheme [`Role`] a stat'd node's own kind and mode name — the role the
+/// long format paints a link's *target* text in, where the node behind the
+/// name is all there is to go on.
+fn role_of(meta: &Metadata) -> Option<Role> {
+    match meta.kind {
+        FileKind::Directory => Some(Role::Directory),
+        FileKind::Symlink => Some(Role::Link),
+        FileKind::Regular => (meta.mode & 0o111 != 0).then_some(Role::Executable),
     }
 }
 
@@ -1300,10 +1702,23 @@ fn human_size(size: u64, base: u64) -> String {
 /// The permission-bit spelling is the one shared `tairix_abi::fs::mode_string`
 /// definition, so `ls -l` and the file manager's properties view never
 /// disagree on what a mode means; the bytes it returns are always ASCII.
-fn mode_string(meta: Metadata) -> String {
-    tairix_abi::fs::mode_string(meta.kind, meta.mode)
+///
+/// A row with no stat behind it keeps its type letter — which the directory
+/// stream gave it — and renders the nine permission characters as `?`, the
+/// GNU spelling for a mode it could not read.
+fn mode_string(row: &Row) -> String {
+    let mode = row.stat.map_or(0, |meta| meta.mode);
+    let spelling = tairix_abi::fs::mode_string(row.kind, mode);
+    spelling
         .iter()
-        .map(|&b| b as char)
+        .enumerate()
+        .map(|(index, &byte)| {
+            if index == 0 || row.stat.is_some() {
+                byte as char
+            } else {
+                '?'
+            }
+        })
         .collect()
 }
 
@@ -1550,13 +1965,13 @@ mod version {
 
 #[cfg(test)]
 mod tests {
-    use super::{run, USAGE};
+    use super::{run, Outcome, USAGE};
     use crate::command::{
-        Command, Filters, Format, Hidden, Indicator, Options, QuotingStyle, SizeFormat, Sort,
-        TimeField, TimeStyle,
+        Command, Dereference, Filters, Format, Hidden, Indicator, Options, QuotingStyle,
+        SizeFormat, Sort, TimeField, TimeStyle,
     };
     use crate::error::LsError;
-    use crate::io::{Entry, Listing, Metadata, Output};
+    use crate::io::{Entry, FinalLink, Listing, Metadata, Output};
     use alloc::format;
     use alloc::string::{String, ToString};
     use alloc::vec::Vec;
@@ -1568,22 +1983,165 @@ mod tests {
     use tairix_help::{HelpSource, SourceError};
     use tairix_termcap::ColorChoice;
 
-    /// An in-memory tree: a stat table keyed by path plus, for directories,
-    /// the entries that path's `read_dir` returns.
+    /// An in-memory tree: a table of each path's **own** (`lstat`) metadata,
+    /// the stored target of every path that is a link, and — for directories
+    /// — the entries that path's `read_dir` returns.
+    ///
+    /// Following a link is done here, by walking the stored target under a
+    /// hop bound, so the fixture answers a `Follow` stat exactly as the VFS
+    /// would: the target's metadata, or `NotFound` when it dangles.
     struct TreeFs {
         stat: Vec<(String, Metadata)>,
+        links: Vec<(String, String)>,
         dirs: Vec<(String, Vec<Entry>)>,
+        /// The next node number a declared path is given, so two nodes of
+        /// the fixture are as distinguishable as two nodes of a real volume
+        /// — which is what the `-R` chain check compares.
+        next_node: u64,
     }
+
+    /// The fixture's hop bound, standing in for the VFS `SYMLINK_HOP_MAX`: a
+    /// cycle is refused rather than walked.
+    const FIXTURE_HOPS: u32 = 8;
 
     impl TreeFs {
         fn new() -> Self {
             Self {
                 stat: Vec::new(),
+                links: Vec::new(),
                 dirs: Vec::new(),
+                next_node: 1,
             }
         }
 
+        /// The next distinct node identity.
+        fn fresh_id(&mut self) -> tairix_abi::fs::FileId {
+            let node = self.next_node;
+            self.next_node += 1;
+            node_id(node)
+        }
+
+        /// A link *entry* named `name` inside the declared directory `dir`,
+        /// storing `target` verbatim (absolute, or relative to `dir`).
+        fn link_entry(mut self, dir: &str, name: &str, target: &str) -> Self {
+            let children = self
+                .dirs
+                .iter_mut()
+                .find(|(d, _)| d == dir)
+                .map(|(_, c)| c)
+                .expect("directory must be declared before its entries");
+            children.push(Entry {
+                name: name.to_string(),
+                kind: FileKind::Symlink,
+            });
+            self.link(&super::join(dir, name), target)
+        }
+
+        /// A link at `path` storing `target`, without listing it anywhere —
+        /// the operand form.
+        fn link(mut self, path: &str, target: &str) -> Self {
+            let size = target.len() as u64;
+            let id = self.fresh_id();
+            self.stat.push((
+                path.to_string(),
+                Metadata {
+                    // A link's mode is POSIX's `lrwxrwxrwx`.
+                    kind: FileKind::Symlink,
+                    mode: 0o777,
+                    size,
+                    allocated: size,
+                    uid: UID,
+                    gid: GID,
+                    id,
+                    times: NodeTimes::default(),
+                },
+            ));
+            self.links.push((path.to_string(), target.to_string()));
+            self
+        }
+
+        /// The metadata stored under the exact spelling `path`, if any.
+        fn exact(&self, path: &str) -> Option<Metadata> {
+            self.stat.iter().find(|(p, _)| p == path).map(|(_, m)| *m)
+        }
+
+        /// The target stored under the exact spelling `path`, if it is a
+        /// link.
+        fn exact_target(&self, path: &str) -> Option<String> {
+            self.links
+                .iter()
+                .find(|(p, _)| p == path)
+                .map(|(_, t)| t.clone())
+        }
+
+        /// `path` with every *interior* link resolved — the spelling the VFS
+        /// reaches the final component through, which is why `to-dir/inner`
+        /// finds `/sub/inner`. The final component is left as typed.
+        fn interior(&self, path: &str, hops: u32) -> String {
+            if hops == 0 || self.exact(path).is_some() {
+                return String::from(path);
+            }
+            let parent = parent_of(path);
+            let leaf = path.rsplit('/').next().unwrap_or(path);
+            if parent == path || leaf.is_empty() {
+                return String::from(path);
+            }
+            let real_parent = self.follow(parent, hops - 1);
+            if real_parent == parent {
+                return String::from(path);
+            }
+            self.interior(&super::join(&real_parent, leaf), hops - 1)
+        }
+
+        /// `path` with every link resolved, the final one included.
+        fn follow(&self, path: &str, hops: u32) -> String {
+            let here = self.interior(path, hops);
+            if hops == 0 {
+                return here;
+            }
+            match self.exact(&here) {
+                Some(meta) if meta.kind == FileKind::Symlink => match self.exact_target(&here) {
+                    Some(target) => {
+                        let next = if target.starts_with('/') {
+                            target
+                        } else {
+                            super::join(parent_of(&here), &target)
+                        };
+                        self.follow(&next, hops - 1)
+                    }
+                    None => here,
+                },
+                _ => here,
+            }
+        }
+
+        /// The metadata of `path` itself, following no final link — the
+        /// `Keep` reading.
+        fn own(&self, path: &str) -> Result<Metadata, Errno> {
+            self.exact(&self.interior(path, FIXTURE_HOPS))
+                .ok_or(Errno::NotFound)
+        }
+
+        /// The metadata of what `path` finally names — the `Follow` reading.
+        /// A chain that outlasts the hop bound is a cycle, refused rather
+        /// than walked.
+        fn resolve(&self, path: &str) -> Result<Metadata, Errno> {
+            let target = self.follow(path, FIXTURE_HOPS);
+            match self.exact(&target) {
+                Some(meta) if meta.kind == FileKind::Symlink => Err(Errno::LinkLoop),
+                Some(meta) => Ok(meta),
+                None => Err(Errno::NotFound),
+            }
+        }
+
+        /// The stored target of the link at `path`.
+        fn target_of(&self, path: &str) -> Result<String, Errno> {
+            self.exact_target(&self.interior(path, FIXTURE_HOPS))
+                .ok_or(Errno::OutOfRange)
+        }
+
         fn file(mut self, path: &str, mode: u32, size: u64) -> Self {
+            let id = self.fresh_id();
             self.stat.push((
                 path.to_string(),
                 Metadata {
@@ -1593,7 +2151,7 @@ mod tests {
                     allocated: size,
                     uid: UID,
                     gid: GID,
-                    inode: 0,
+                    id,
                     times: NodeTimes::default(),
                 },
             ));
@@ -1601,6 +2159,7 @@ mod tests {
         }
 
         fn dir(mut self, path: &str) -> Self {
+            let id = self.fresh_id();
             self.stat.push((
                 path.to_string(),
                 Metadata {
@@ -1610,7 +2169,7 @@ mod tests {
                     allocated: 0,
                     uid: UID,
                     gid: GID,
-                    inode: 0,
+                    id,
                     times: NodeTimes::default(),
                 },
             ));
@@ -1648,6 +2207,7 @@ mod tests {
                 name: name.to_string(),
                 kind,
             });
+            let id = self.fresh_id();
             self.stat.push((
                 super::join(dir, name),
                 Metadata {
@@ -1657,7 +2217,7 @@ mod tests {
                     allocated,
                     uid: UID,
                     gid: GID,
-                    inode: 0,
+                    id,
                     times: NodeTimes::default(),
                 },
             ));
@@ -1686,7 +2246,7 @@ mod tests {
                     allocated: 0,
                     uid: UID,
                     gid: GID,
-                    inode,
+                    id: node_id(inode),
                     times,
                 },
             ));
@@ -1695,18 +2255,27 @@ mod tests {
     }
 
     impl Listing for TreeFs {
-        fn stat(&self, path: &str) -> Result<Metadata, Errno> {
-            self.stat
-                .iter()
-                .find(|(p, _)| p == path)
-                .map(|(_, m)| *m)
-                .ok_or(Errno::NotFound)
+        fn stat(&self, path: &str, links: FinalLink) -> Result<Metadata, Errno> {
+            match links {
+                FinalLink::Keep => self.own(path),
+                FinalLink::Follow => self.resolve(path),
+            }
+        }
+
+        fn read_link(&self, path: &str) -> Result<String, Errno> {
+            // A non-link has no target to read, and neither has an absent
+            // path: the same domain refusal the kernel gives.
+            self.own(path)?;
+            self.target_of(path)
         }
 
         fn read_dir(&self, path: &str) -> Result<Vec<Entry>, Errno> {
+            // A directory handle opened without `NO_FOLLOW` lists what the
+            // final link names, so the fixture resolves before looking up.
+            let real = self.follow(path, FIXTURE_HOPS);
             self.dirs
                 .iter()
-                .find(|(d, _)| d == path)
+                .find(|(d, _)| *d == real)
                 .map(|(_, c)| c.clone())
                 .ok_or(Errno::NotFound)
         }
@@ -1717,7 +2286,7 @@ mod tests {
     struct FailingDir;
 
     impl Listing for FailingDir {
-        fn stat(&self, _path: &str) -> Result<Metadata, Errno> {
+        fn stat(&self, _path: &str, _links: FinalLink) -> Result<Metadata, Errno> {
             Ok(Metadata {
                 kind: FileKind::Directory,
                 mode: 0o755,
@@ -1725,13 +2294,35 @@ mod tests {
                 allocated: 0,
                 uid: UID,
                 gid: GID,
-                inode: 0,
+                id: node_id(0),
                 times: NodeTimes::default(),
             })
         }
 
+        fn read_link(&self, _path: &str) -> Result<String, Errno> {
+            Err(Errno::OutOfRange)
+        }
+
         fn read_dir(&self, _path: &str) -> Result<Vec<Entry>, Errno> {
             Err(Errno::PermissionDenied)
+        }
+    }
+
+    /// The fixture's node identity for node number `node`: one volume, so
+    /// two rows differ exactly when their node numbers do.
+    fn node_id(node: u64) -> tairix_abi::fs::FileId {
+        tairix_abi::fs::FileId {
+            volume: [1u8; 16],
+            node,
+        }
+    }
+
+    /// The directory part of `path`, for resolving a relative link target.
+    fn parent_of(path: &str) -> &str {
+        match path.rfind('/') {
+            Some(0) => "/",
+            Some(slash) => &path[..slash],
+            None => ".",
         }
     }
 
@@ -1779,6 +2370,8 @@ mod tests {
     struct Recorder {
         chunks: RefCell<Vec<Vec<u8>>>,
         records: RefCell<Vec<Vec<u8>>>,
+        /// The diagnostics the listing wrote to the error stream, in order.
+        errors: RefCell<Vec<String>>,
         fail: bool,
         /// The width [`Output::terminal_width`] reports; `None` models a
         /// non-terminal stdout (a pipe/file), which is the default the
@@ -1791,6 +2384,7 @@ mod tests {
             Self {
                 chunks: RefCell::new(Vec::new()),
                 records: RefCell::new(Vec::new()),
+                errors: RefCell::new(Vec::new()),
                 fail: false,
                 width: None,
             }
@@ -1803,6 +2397,7 @@ mod tests {
             Self {
                 chunks: RefCell::new(Vec::new()),
                 records: RefCell::new(Vec::new()),
+                errors: RefCell::new(Vec::new()),
                 fail: false,
                 width: Some(cols),
             }
@@ -1812,6 +2407,7 @@ mod tests {
             Self {
                 chunks: RefCell::new(Vec::new()),
                 records: RefCell::new(Vec::new()),
+                errors: RefCell::new(Vec::new()),
                 fail: true,
                 width: None,
             }
@@ -1830,6 +2426,10 @@ mod tests {
                 .collect()
         }
 
+        fn errors(&self) -> Vec<String> {
+            self.errors.borrow().clone()
+        }
+
         fn records(&self) -> Vec<String> {
             self.records
                 .borrow()
@@ -1846,6 +2446,10 @@ mod tests {
             }
             self.chunks.borrow_mut().push(bytes.to_vec());
             Ok(())
+        }
+
+        fn error(&self, message: &str) {
+            self.errors.borrow_mut().push(String::from(message));
         }
 
         fn info(&self, record: &[u8]) {
@@ -1901,7 +2505,7 @@ mod tests {
         )
     }
 
-    fn run_ls(command: Command, fs: &dyn Listing, out: &Recorder) -> Result<(), LsError> {
+    fn run_ls(command: Command, fs: &dyn Listing, out: &Recorder) -> Result<Outcome, LsError> {
         run(command, None, NOW, None, fs, &NoHelp, out)
     }
 
@@ -1912,7 +2516,7 @@ mod tests {
         term: Option<&str>,
         fs: &dyn Listing,
         out: &Recorder,
-    ) -> Result<(), LsError> {
+    ) -> Result<Outcome, LsError> {
         run(command, None, NOW, term, fs, &NoHelp, out)
     }
 
@@ -1922,7 +2526,7 @@ mod tests {
         let out = Recorder::new();
         assert_eq!(
             run(Command::Help, None, NOW, None, &fs, &OneDoc, &out),
-            Ok(())
+            Ok(Outcome::Complete)
         );
         let text = out.text();
         assert!(text.contains("ls — list directory contents"), "{text}");
@@ -1935,7 +2539,7 @@ mod tests {
         let out = Recorder::new();
         assert_eq!(
             run(Command::Help, None, NOW, None, &fs, &NoHelp, &out),
-            Ok(())
+            Ok(Outcome::Complete)
         );
         let mut expected = String::from(USAGE);
         expected.push('\n');
@@ -1950,7 +2554,10 @@ mod tests {
             .entry(".", "a", FileKind::Regular, 0o644, 0)
             .entry(".", "c", FileKind::Regular, 0o644, 0);
         let out = Recorder::new();
-        assert_eq!(run_ls(list(false, false, &["."]), &fs, &out), Ok(()));
+        assert_eq!(
+            run_ls(list(false, false, &["."]), &fs, &out),
+            Ok(Outcome::Complete)
+        );
         assert_eq!(out.text(), "a\nb\nc\n");
     }
 
@@ -1961,7 +2568,10 @@ mod tests {
             .entry(".", ".hidden", FileKind::Regular, 0o644, 0)
             .entry(".", "visible", FileKind::Regular, 0o644, 0);
         let out = Recorder::new();
-        assert_eq!(run_ls(list(false, false, &["."]), &fs, &out), Ok(()));
+        assert_eq!(
+            run_ls(list(false, false, &["."]), &fs, &out),
+            Ok(Outcome::Complete)
+        );
         assert_eq!(out.text(), "visible\n");
         let records = out.records();
         assert_eq!(records.len(), 1);
@@ -1986,7 +2596,10 @@ mod tests {
             .entry(".", ".hidden", FileKind::Regular, 0o644, 0)
             .entry(".", "visible", FileKind::Regular, 0o644, 0);
         let out = Recorder::new();
-        assert_eq!(run_ls(list(true, false, &["."]), &fs, &out), Ok(()));
+        assert_eq!(
+            run_ls(list(true, false, &["."]), &fs, &out),
+            Ok(Outcome::Complete)
+        );
         assert_eq!(out.text(), ".hidden\nvisible\n");
         assert!(out.records().is_empty());
     }
@@ -1997,7 +2610,10 @@ mod tests {
             .dir(".")
             .entry(".", "visible", FileKind::Regular, 0o644, 0);
         let out = Recorder::new();
-        assert_eq!(run_ls(list(false, false, &["."]), &fs, &out), Ok(()));
+        assert_eq!(
+            run_ls(list(false, false, &["."]), &fs, &out),
+            Ok(Outcome::Complete)
+        );
         assert!(out.records().is_empty());
     }
 
@@ -2012,7 +2628,7 @@ mod tests {
         let out = Recorder::new();
         assert_eq!(
             run_ls(list(false, false, &["dir1", "dir2"]), &fs, &out),
-            Ok(())
+            Ok(Outcome::Complete)
         );
         let records = out.records();
         assert_eq!(records.len(), 1);
@@ -2027,7 +2643,10 @@ mod tests {
     fn non_directory_operand_prints_its_name() {
         let fs = TreeFs::new().file("a.txt", 0o644, 12);
         let out = Recorder::new();
-        assert_eq!(run_ls(list(false, false, &["a.txt"]), &fs, &out), Ok(()));
+        assert_eq!(
+            run_ls(list(false, false, &["a.txt"]), &fs, &out),
+            Ok(Outcome::Complete)
+        );
         assert_eq!(out.text(), "a.txt\n");
     }
 
@@ -2045,7 +2664,7 @@ mod tests {
         };
         assert_eq!(
             run_ls(listing_with(Options::DEFAULT, filters, &["."]), &fs, &out),
-            Ok(())
+            Ok(Outcome::Complete)
         );
         assert_eq!(out.text(), "a\nc\n");
         // An explicitly requested filter is not advertised as an omission.
@@ -2071,7 +2690,7 @@ mod tests {
         };
         assert_eq!(
             run_ls(listing_with(options, filters, &["."]), &fs, &out),
-            Ok(())
+            Ok(Outcome::Complete)
         );
         // `-a` shows `.y`, but both backups (`b~` and the hidden `.x~`) are
         // gone: `-B` applies in every dotfile mode.
@@ -2097,7 +2716,7 @@ mod tests {
         let out = Recorder::new();
         assert_eq!(
             run_ls(listing_with(options, filters, &["."]), &fs, &out),
-            Ok(())
+            Ok(Outcome::Complete)
         );
         // `-I` applies under `-a` too: the object files are gone, the
         // dotfile stays.
@@ -2122,7 +2741,7 @@ mod tests {
                 &fs,
                 &out
             ),
-            Ok(())
+            Ok(Outcome::Complete)
         );
         assert_eq!(out.text(), "keep\n");
 
@@ -2134,7 +2753,7 @@ mod tests {
         };
         assert_eq!(
             run_ls(listing_with(options, filters, &["."]), &fs, &out),
-            Ok(())
+            Ok(Outcome::Complete)
         );
         assert_eq!(out.text(), "keep\nskip.tmp\n");
     }
@@ -2146,7 +2765,10 @@ mod tests {
             .entry(".", "d", FileKind::Directory, 0o755, 4096)
             .entry(".", "f", FileKind::Regular, 0o644, 7);
         let out = Recorder::new();
-        assert_eq!(run_ls(list(false, true, &["."]), &fs, &out), Ok(()));
+        assert_eq!(
+            run_ls(list(false, true, &["."]), &fs, &out),
+            Ok(Outcome::Complete)
+        );
         assert_eq!(
             out.text(),
             "total 5\ndrwxr-xr-x 1000 100 4096 Jan  1  1970 d\n\
@@ -2161,7 +2783,10 @@ mod tests {
             .dir("dir/")
             .entry("dir/", "f", FileKind::Regular, 0o600, 3);
         let out = Recorder::new();
-        assert_eq!(run_ls(list(false, true, &["dir/"]), &fs, &out), Ok(()));
+        assert_eq!(
+            run_ls(list(false, true, &["dir/"]), &fs, &out),
+            Ok(Outcome::Complete)
+        );
         assert_eq!(
             out.text(),
             "total 1\n-rw------- 1000 100 3 Jan  1  1970 f\n"
@@ -2174,7 +2799,10 @@ mod tests {
             .dir("dir")
             .entry("dir", "x", FileKind::Regular, 0o644, 0);
         let out = Recorder::new();
-        assert_eq!(run_ls(list(false, false, &["dir"]), &fs, &out), Ok(()));
+        assert_eq!(
+            run_ls(list(false, false, &["dir"]), &fs, &out),
+            Ok(Outcome::Complete)
+        );
         assert_eq!(out.text(), "x\n");
     }
 
@@ -2188,7 +2816,7 @@ mod tests {
         let out = Recorder::new();
         assert_eq!(
             run_ls(list(false, false, &["z.txt", "dir"]), &fs, &out),
-            Ok(())
+            Ok(Outcome::Complete)
         );
         assert_eq!(out.text(), "z.txt\n\ndir:\nx\ny\n");
     }
@@ -2203,7 +2831,7 @@ mod tests {
         let out = Recorder::new();
         assert_eq!(
             run_ls(list(false, false, &["dir1", "dir2"]), &fs, &out),
-            Ok(())
+            Ok(Outcome::Complete)
         );
         assert_eq!(out.text(), "dir1:\na\n\ndir2:\nb\n");
     }
@@ -2212,42 +2840,52 @@ mod tests {
     fn empty_directory_emits_nothing() {
         let fs = TreeFs::new().dir(".");
         let out = Recorder::new();
-        assert_eq!(run_ls(list(false, false, &["."]), &fs, &out), Ok(()));
-        assert_eq!(out.text(), "");
-    }
-
-    #[test]
-    fn missing_operand_fails_closed() {
-        let fs = TreeFs::new();
-        let out = Recorder::new();
         assert_eq!(
-            run_ls(list(false, false, &["absent"]), &fs, &out),
-            Err(LsError::Stat(Errno::NotFound))
+            run_ls(list(false, false, &["."]), &fs, &out),
+            Ok(Outcome::Complete)
         );
         assert_eq!(out.text(), "");
     }
 
     #[test]
-    fn a_stat_error_stops_before_listing_anything() {
-        // The present directory is never listed because the missing operand
-        // aborts first (operands are stat'd in order).
+    fn a_missing_operand_is_reported_and_graded_serious() {
+        let fs = TreeFs::new();
+        let out = Recorder::new();
+        assert_eq!(
+            run_ls(list(false, false, &["absent"]), &fs, &out),
+            Ok(Outcome::SeriousProblem)
+        );
+        assert_eq!(out.text(), "");
+        assert_eq!(out.errors(), ["ls: cannot access 'absent': not found"]);
+        assert_eq!(Outcome::SeriousProblem.exit_status(), 2);
+    }
+
+    #[test]
+    fn a_stat_error_reports_and_the_remaining_operands_still_list() {
+        // The GNU behaviour: the missing operand is reported on the error
+        // stream and skipped, and the operand after it is still listed.
         let fs = TreeFs::new()
             .dir("present")
             .entry("present", "x", FileKind::Regular, 0o644, 0);
         let out = Recorder::new();
         assert_eq!(
             run_ls(list(false, false, &["absent", "present"]), &fs, &out),
-            Err(LsError::Stat(Errno::NotFound))
+            Ok(Outcome::SeriousProblem)
         );
-        assert_eq!(out.text(), "");
+        assert_eq!(out.text(), "present:\nx\n");
+        assert_eq!(out.errors(), ["ls: cannot access 'absent': not found"]);
     }
 
     #[test]
-    fn a_read_dir_error_fails_closed() {
+    fn an_unreadable_operand_directory_is_reported_and_graded_serious() {
         let out = Recorder::new();
         assert_eq!(
             run_ls(list(false, false, &["dir"]), &FailingDir, &out),
-            Err(LsError::Read(Errno::PermissionDenied))
+            Ok(Outcome::SeriousProblem)
+        );
+        assert_eq!(
+            out.errors(),
+            ["ls: cannot open directory 'dir': permission denied"]
         );
     }
 
@@ -2281,7 +2919,7 @@ mod tests {
                 &fs,
                 &out,
             ),
-            Ok(())
+            Ok(Outcome::Complete)
         );
         assert_eq!(out.text(), "dir\n");
     }
@@ -2308,7 +2946,7 @@ mod tests {
                 &fs,
                 &out,
             ),
-            Ok(())
+            Ok(Outcome::Complete)
         );
         assert_eq!(out.text(), "top:\nsub\nz\n\ntop/sub:\nx\n");
     }
@@ -2338,7 +2976,7 @@ mod tests {
                 &fs,
                 &out,
             ),
-            Ok(())
+            Ok(Outcome::Complete)
         );
         assert_eq!(out.chunks(), ["top:\nsub\nz\n", "\ntop/sub:\nx\n"]);
     }
@@ -2347,9 +2985,11 @@ mod tests {
     /// listed: the traversal streamed them out when their directories were
     /// read, exactly as any streaming tool behaves.
     #[test]
-    fn a_read_dir_error_mid_recursion_keeps_the_blocks_already_written() {
+    fn a_read_dir_error_mid_recursion_is_reported_and_the_walk_continues() {
         // `sub` is announced by `top` but has no readable node, so its
-        // `read_dir` fails after `top`'s block has been written.
+        // `read_dir` fails after `top`'s block has been written. A
+        // subdirectory is a *minor* problem: it is reported and the rest of
+        // the traversal still runs.
         let fs = TreeFs::new()
             .dir("top")
             .entry("top", "sub", FileKind::Directory, 0o755, 0);
@@ -2366,9 +3006,14 @@ mod tests {
                 &fs,
                 &out,
             ),
-            Err(LsError::Read(Errno::NotFound))
+            Ok(Outcome::MinorProblem)
         );
         assert_eq!(out.text(), "top:\nsub\n");
+        assert_eq!(
+            out.errors(),
+            ["ls: cannot open directory 'top/sub': not found"]
+        );
+        assert_eq!(Outcome::MinorProblem.exit_status(), 1);
     }
 
     #[test]
@@ -2391,7 +3036,7 @@ mod tests {
                 &fs,
                 &out,
             ),
-            Ok(())
+            Ok(Outcome::Complete)
         );
         assert_eq!(out.text(), "c\nb\na\n");
     }
@@ -2417,7 +3062,7 @@ mod tests {
                 &fs,
                 &out,
             ),
-            Ok(())
+            Ok(Outcome::Complete)
         );
         assert_eq!(out.text(), "big\na-mid\nb-mid\nsmall\n");
     }
@@ -2443,7 +3088,7 @@ mod tests {
                 &fs,
                 &out,
             ),
-            Ok(())
+            Ok(Outcome::Complete)
         );
         assert_eq!(out.text(), "c\na\nb\n");
     }
@@ -2471,7 +3116,7 @@ mod tests {
                 &fs,
                 &out,
             ),
-            Ok(())
+            Ok(Outcome::Complete)
         );
         assert_eq!(out.text(), "readme\nc.c\na.txt\nb.txt\n");
     }
@@ -2497,7 +3142,7 @@ mod tests {
                 &fs,
                 &out,
             ),
-            Ok(())
+            Ok(Outcome::Complete)
         );
         assert_eq!(out.text(), "f1\nf2\nf10\n");
     }
@@ -2522,7 +3167,7 @@ mod tests {
                 &fs,
                 &out,
             ),
-            Ok(())
+            Ok(Outcome::Complete)
         );
         // Directories first, then the name sort within each group.
         assert_eq!(out.text(), "zdir\nafile\nbfile\n");
@@ -2550,7 +3195,7 @@ mod tests {
                 &fs,
                 &out,
             ),
-            Ok(())
+            Ok(Outcome::Complete)
         );
         // `-r` reverses within each group, but directories stay first.
         assert_eq!(out.text(), "zdir\nadir\nzfile\nafile\n");
@@ -2577,7 +3222,7 @@ mod tests {
                 &fs,
                 &out,
             ),
-            Ok(())
+            Ok(Outcome::Complete)
         );
         assert_eq!(out.text(), ".hidden\nb\na\n");
     }
@@ -2602,7 +3247,7 @@ mod tests {
                 &fs,
                 &out,
             ),
-            Ok(())
+            Ok(Outcome::Complete)
         );
         assert_eq!(out.text(), "a, b, c\n");
     }
@@ -2621,7 +3266,7 @@ mod tests {
         let out = Recorder::terminal(6);
         assert_eq!(
             run_ls(list_with(Options::DEFAULT, &["."]), &fs, &out),
-            Ok(())
+            Ok(Outcome::Complete)
         );
         assert_eq!(out.text(), "a  d\nb  e\nc\n");
     }
@@ -2636,7 +3281,7 @@ mod tests {
         let out = Recorder::terminal(80);
         assert_eq!(
             run_ls(list_with(Options::DEFAULT, &["."]), &fs, &out),
-            Ok(())
+            Ok(Outcome::Complete)
         );
         assert_eq!(out.text(), "a  b  c\n");
     }
@@ -2664,7 +3309,7 @@ mod tests {
                 &fs,
                 &out,
             ),
-            Ok(())
+            Ok(Outcome::Complete)
         );
         // rows = 2, cols = 2; column 0 width 5 (`alpha`), column 1 the last
         // on each line and so unpadded.
@@ -2694,7 +3339,7 @@ mod tests {
                 &fs,
                 &out,
             ),
-            Ok(())
+            Ok(Outcome::Complete)
         );
         assert_eq!(out.text(), "a  b\nc  d\ne\n");
     }
@@ -2718,7 +3363,7 @@ mod tests {
                 &fs,
                 &out,
             ),
-            Ok(())
+            Ok(Outcome::Complete)
         );
         assert_eq!(out.text(), "a\nb\n");
     }
@@ -2745,7 +3390,7 @@ mod tests {
                 &fs,
                 &out,
             ),
-            Ok(())
+            Ok(Outcome::Complete)
         );
         assert_eq!(out.text(), "another\nlongname\n");
     }
@@ -2772,7 +3417,7 @@ mod tests {
                 &fs,
                 &out,
             ),
-            Ok(())
+            Ok(Outcome::Complete)
         );
         assert_eq!(out.text(), "a, b,\nc, d\n");
     }
@@ -2799,7 +3444,7 @@ mod tests {
                 &fs,
                 &out,
             ),
-            Ok(())
+            Ok(Outcome::Complete)
         );
         assert_eq!(out.text(), "a  b  c\n");
     }
@@ -2942,7 +3587,7 @@ mod tests {
                 &fs,
                 &out,
             ),
-            Ok(())
+            Ok(Outcome::Complete)
         );
         assert_eq!(out.text(), "bin*\ndir/\nplain\n");
     }
@@ -2966,7 +3611,7 @@ mod tests {
                 &fs,
                 &out,
             ),
-            Ok(())
+            Ok(Outcome::Complete)
         );
         assert_eq!(out.text(), "bin\ndir/\n");
     }
@@ -2993,7 +3638,7 @@ mod tests {
                 &fs,
                 &out,
             ),
-            Ok(())
+            Ok(Outcome::Complete)
         );
         assert_eq!(
             out.text(),
@@ -3023,7 +3668,7 @@ mod tests {
                 &fs,
                 &hidden_owner,
             ),
-            Ok(())
+            Ok(Outcome::Complete)
         );
         assert_eq!(
             hidden_owner.text(),
@@ -3043,7 +3688,7 @@ mod tests {
                 &fs,
                 &hidden_group,
             ),
-            Ok(())
+            Ok(Outcome::Complete)
         );
         assert_eq!(
             hidden_group.text(),
@@ -3072,7 +3717,7 @@ mod tests {
                 &fs,
                 &out,
             ),
-            Ok(())
+            Ok(Outcome::Complete)
         );
         assert_eq!(out.text(), ".hidden\nvis\n");
         // Nothing was hidden *by default filtering*, so no advisory record.
@@ -3102,7 +3747,7 @@ mod tests {
                 &fs,
                 &out,
             ),
-            Ok(())
+            Ok(Outcome::Complete)
         );
         assert_eq!(out.text(), "total 16\n12 padded\n 4 sparse\n");
     }
@@ -3127,7 +3772,7 @@ mod tests {
                 &fs,
                 &out,
             ),
-            Ok(())
+            Ok(Outcome::Complete)
         );
         assert_eq!(
             out.text(),
@@ -3157,7 +3802,7 @@ mod tests {
                 &fs,
                 &out,
             ),
-            Ok(())
+            Ok(Outcome::Complete)
         );
         assert_eq!(out.text(), "total 1.1M\n4.0K a\n1.0M b\n");
     }
@@ -3182,7 +3827,7 @@ mod tests {
                 &fs,
                 &out,
             ),
-            Ok(())
+            Ok(Outcome::Complete)
         );
         assert_eq!(out.text(), "total 3\n1 a, 2 b\n");
     }
@@ -3205,7 +3850,7 @@ mod tests {
                 &fs,
                 &out,
             ),
-            Ok(())
+            Ok(Outcome::Complete)
         );
         assert_eq!(out.text(), "3 a.txt\n");
     }
@@ -3252,7 +3897,7 @@ mod tests {
                 &fs,
                 &out,
             ),
-            Ok(())
+            Ok(Outcome::Complete)
         );
         // The inode column is right-aligned to the widest number (`42`).
         assert_eq!(out.text(), "42 a\n 7 b\n");
@@ -3277,7 +3922,7 @@ mod tests {
                 &fs,
                 &out,
             ),
-            Ok(())
+            Ok(Outcome::Complete)
         );
         assert_eq!(
             out.text(),
@@ -3306,7 +3951,7 @@ mod tests {
                 &fs,
                 &out,
             ),
-            Ok(())
+            Ok(Outcome::Complete)
         );
         assert_eq!(out.text(), "new\nmid\nold\n");
     }
@@ -3332,7 +3977,7 @@ mod tests {
                 &fs,
                 &out,
             ),
-            Ok(())
+            Ok(Outcome::Complete)
         );
         assert_eq!(out.text(), "old\nnew\n");
     }
@@ -3362,7 +4007,7 @@ mod tests {
                     &fs,
                     &out,
                 ),
-                Ok(())
+                Ok(Outcome::Complete)
             );
             out.text()
         };
@@ -3402,7 +4047,7 @@ mod tests {
                     &fs,
                     &out,
                 ),
-                Ok(())
+                Ok(Outcome::Complete)
             );
             out.text()
         };
@@ -3441,7 +4086,7 @@ mod tests {
                 &fs,
                 &out,
             ),
-            Ok(())
+            Ok(Outcome::Complete)
         );
         assert_eq!(out.text(), "total 0\n-rw-r--r-- 1000 100 0 2023-11-14 f\n");
     }
@@ -3468,7 +4113,7 @@ mod tests {
                 &fs,
                 &out,
             ),
-            Ok(())
+            Ok(Outcome::Complete)
         );
         assert_eq!(
             out.text(),
@@ -3500,7 +4145,7 @@ mod tests {
                 &fs,
                 &out,
             ),
-            Ok(())
+            Ok(Outcome::Complete)
         );
         assert_eq!(out.text(), "total 16\n16 f\n");
     }
@@ -3527,7 +4172,7 @@ mod tests {
                 &fs,
                 &out,
             ),
-            Ok(())
+            Ok(Outcome::Complete)
         );
         assert_eq!(out.text(), "total 1\n1 a\n1 b\n");
     }
@@ -3553,7 +4198,7 @@ mod tests {
                 &fs,
                 &out,
             ),
-            Ok(())
+            Ok(Outcome::Complete)
         );
         assert_eq!(
             out.text(),
@@ -3582,7 +4227,7 @@ mod tests {
                 &fs,
                 &file_type,
             ),
-            Ok(())
+            Ok(Outcome::Complete)
         );
         assert_eq!(file_type.text(), "d/\nexe\n");
         // `-F` (classify) additionally stars the executable.
@@ -3599,7 +4244,7 @@ mod tests {
                 &fs,
                 &classify,
             ),
-            Ok(())
+            Ok(Outcome::Complete)
         );
         assert_eq!(classify.text(), "d/\nexe*\n");
     }
@@ -3625,7 +4270,7 @@ mod tests {
                 &fs,
                 &out,
             ),
-            Ok(())
+            Ok(Outcome::Complete)
         );
         assert_eq!(out.text(), "a\0b\0");
     }
@@ -3655,7 +4300,7 @@ mod tests {
                 &fs,
                 &tabbed,
             ),
-            Ok(())
+            Ok(Outcome::Complete)
         );
         assert_eq!(tabbed.text(), "abcdef\tcc\nbb\tdd\n");
         let spaced = Recorder::new();
@@ -3673,7 +4318,7 @@ mod tests {
                 &fs,
                 &spaced,
             ),
-            Ok(())
+            Ok(Outcome::Complete)
         );
         assert_eq!(spaced.text(), "abcdef  cc\nbb      dd\n");
     }
@@ -3851,4 +4496,417 @@ mod tests {
             format!("file.txt\n{EXE_ON}prog{OFF}*\n{DIR_ON}sub{OFF}/\n")
         );
     }
+
+    // --- Symbolic links -------------------------------------------------
+
+    /// A tree with the four link shapes the postures have to tell apart: a
+    /// link to a file, a link to a directory, a dangling link, and the
+    /// targets themselves.
+    fn link_fixture() -> TreeFs {
+        TreeFs::new()
+            .dir(".")
+            .entry(".", "target.txt", FileKind::Regular, 0o644, 7)
+            .link_entry(".", "to-file", "/target.txt")
+            .link_entry(".", "dangling", "/nowhere")
+            .dir("/sub")
+            .entry("/sub", "inner", FileKind::Regular, 0o644, 3)
+            .link_entry(".", "to-dir", "/sub")
+            .file("/target.txt", 0o644, 7)
+            // `x` and `./x` name the same node on a real volume; the fixture
+            // is keyed by spelling, so the bare forms an operand uses are
+            // declared too.
+            .link("to-dir", "/sub")
+            .link("to-file", "/target.txt")
+            .link("dangling", "/nowhere")
+    }
+
+    fn long_lines(out: &Recorder) -> Vec<String> {
+        out.text().lines().map(String::from).collect::<Vec<_>>()
+    }
+
+    #[test]
+    fn the_long_format_shows_a_link_and_its_target() {
+        // `-l` alone keeps every link: the type letter is `l`, the mode is
+        // the link's own, and the stored target follows the name.
+        let out = Recorder::new();
+        assert_eq!(
+            run_ls(list(false, true, &["."]), &link_fixture(), &out),
+            Ok(Outcome::Complete)
+        );
+        let lines = long_lines(&out);
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.starts_with("lrwxrwxrwx") && l.ends_with("to-file -> /target.txt")),
+            "{lines:?}"
+        );
+        // A dangling link is shown exactly like a live one: `-l` never
+        // resolves it, so there is nothing to fail.
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.starts_with("lrwxrwxrwx") && l.ends_with("dangling -> /nowhere")),
+            "{lines:?}"
+        );
+        assert!(out.errors().is_empty(), "{:?}", out.errors());
+    }
+
+    #[test]
+    fn dereference_everywhere_shows_the_targets_metadata() {
+        // `-L` resolves each entry, so the link to a file reads as a regular
+        // file of the target's size and the link to a directory as a
+        // directory — and neither shows a `-> target`, because neither row is
+        // a link any more.
+        let out = Recorder::new();
+        let command = list_with(
+            Options {
+                format: Some(Format::Long),
+                dereference: Some(Dereference::Always),
+                ..Options::DEFAULT
+            },
+            &["."],
+        );
+        assert_eq!(
+            run_ls(command, &link_fixture(), &out),
+            Ok(Outcome::MinorProblem)
+        );
+        let lines = long_lines(&out);
+        assert!(
+            lines.iter().any(|l| l.starts_with("-rw-r--r--")
+                && l.contains(" 7 ")
+                && l.ends_with("to-file")),
+            "{lines:?}"
+        );
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.starts_with("drwxr-xr-x") && l.ends_with("to-dir")),
+            "{lines:?}"
+        );
+        // A resolved row is no longer a link, so it shows no target; the
+        // dangling row keeps its `-> target`, which is all GNU has left to
+        // show for it.
+        for line in &lines {
+            if line.ends_with("to-file") || line.ends_with("to-dir") {
+                assert!(!line.contains(" -> "), "{line}");
+            }
+        }
+        assert!(
+            out.text().contains("dangling -> /nowhere"),
+            "{}",
+            out.text()
+        );
+    }
+
+    #[test]
+    fn a_dangling_link_under_dereference_is_reported_and_the_listing_continues() {
+        // The GNU shape: the reason on the error stream, a `?` row for what
+        // could not be inspected, the rest of the listing on standard
+        // output, and a non-zero grade.
+        let out = Recorder::new();
+        let command = list_with(
+            Options {
+                format: Some(Format::Long),
+                dereference: Some(Dereference::Always),
+                ..Options::DEFAULT
+            },
+            &["."],
+        );
+        assert_eq!(
+            run_ls(command, &link_fixture(), &out),
+            Ok(Outcome::MinorProblem)
+        );
+        assert_eq!(out.errors(), ["ls: cannot access './dangling': not found"]);
+        let lines = long_lines(&out);
+        // The type letter survives (the directory stream reported it); every
+        // stat-derived cell is `?`, never a fabricated zero.
+        let dangling = lines
+            .iter()
+            .find(|l| l.contains("dangling"))
+            .expect("the row is still listed");
+        assert!(dangling.starts_with("l?????????"), "{dangling}");
+        assert!(dangling.contains(" ? "), "{dangling}");
+        // The other entries listed normally.
+        assert!(lines.iter().any(|l| l.ends_with("target.txt")), "{lines:?}");
+    }
+
+    #[test]
+    fn a_dangling_link_operand_is_described_by_default_and_refused_under_dereference() {
+        // The bare posture describes the operand itself, so a dangling link
+        // lists fine; `-L` resolves it and reports the refusal.
+        let out = Recorder::new();
+        assert_eq!(
+            run_ls(
+                list(false, true, &["/nolink"]),
+                &link_fixture().link("/nolink", "/gone"),
+                &out
+            ),
+            Ok(Outcome::Complete)
+        );
+        assert!(out.text().ends_with("/nolink -> /gone\n"), "{}", out.text());
+
+        let out = Recorder::new();
+        let command = list_with(
+            Options {
+                format: Some(Format::Long),
+                dereference: Some(Dereference::Always),
+                ..Options::DEFAULT
+            },
+            &["/nolink"],
+        );
+        assert_eq!(
+            run_ls(command, &link_fixture().link("/nolink", "/gone"), &out),
+            Ok(Outcome::SeriousProblem)
+        );
+        assert_eq!(out.text(), "");
+        assert_eq!(out.errors(), ["ls: cannot access '/nolink': not found"]);
+    }
+
+    #[test]
+    fn the_default_posture_lists_a_command_line_link_to_a_directory() {
+        // The GNU default: a command-line link *to a directory* is resolved,
+        // so `ls to-dir` lists the directory's contents.
+        let out = Recorder::new();
+        assert_eq!(
+            run_ls(list(false, false, &["to-dir"]), &link_fixture(), &out),
+            Ok(Outcome::Complete)
+        );
+        assert_eq!(out.text(), "inner\n");
+    }
+
+    #[test]
+    fn the_long_format_lists_a_command_line_link_as_itself() {
+        // `-l` forces the `Never` posture, so the same operand is the link.
+        let out = Recorder::new();
+        assert_eq!(
+            run_ls(list(false, true, &["to-dir"]), &link_fixture(), &out),
+            Ok(Outcome::Complete)
+        );
+        assert!(out.text().starts_with("lrwxrwxrwx"), "{}", out.text());
+        assert!(out.text().ends_with("to-dir -> /sub\n"), "{}", out.text());
+    }
+
+    #[test]
+    fn dereference_command_line_resolves_only_the_operands() {
+        // `-H` resolves the operand — so `to-dir` becomes the directory and
+        // is listed — while the links *inside* a listing still show
+        // themselves.
+        let out = Recorder::new();
+        let command = list_with(
+            Options {
+                format: Some(Format::Long),
+                dereference: Some(Dereference::CommandLine),
+                ..Options::DEFAULT
+            },
+            &["to-dir", "."],
+        );
+        let outcome = run_ls(command, &link_fixture(), &out);
+        let text = out.text();
+        assert_eq!(outcome, Ok(Outcome::Complete), "{text} {:?}", out.errors());
+        // The operand's own block lists the directory behind the link.
+        assert!(text.contains("to-dir:\n"), "{text}");
+        assert!(text.contains("inner"), "{text}");
+        // Inside the `.` listing the links are still links.
+        assert!(text.contains("to-file -> /target.txt"), "{text}");
+    }
+
+    #[test]
+    fn the_file_type_indicator_marks_a_link_and_the_classify_one_does_too() {
+        for indicator in [Indicator::FileType, Indicator::Classify] {
+            let out = Recorder::new();
+            let command = list_with(
+                Options {
+                    format: Some(Format::OnePerLine),
+                    indicator,
+                    ..Options::DEFAULT
+                },
+                &["."],
+            );
+            assert_eq!(
+                run_ls(command, &link_fixture(), &out),
+                Ok(Outcome::Complete)
+            );
+            let text = out.text();
+            assert!(text.contains("to-file@\n"), "{indicator:?}: {text}");
+            assert!(text.contains("to-dir@\n"), "{indicator:?}: {text}");
+            assert!(text.contains("target.txt\n"), "{indicator:?}: {text}");
+        }
+        // `-p` marks directories only, so a link keeps its bare name.
+        let out = Recorder::new();
+        let command = list_with(
+            Options {
+                format: Some(Format::OnePerLine),
+                indicator: Indicator::Slash,
+                ..Options::DEFAULT
+            },
+            &["."],
+        );
+        assert_eq!(
+            run_ls(command, &link_fixture(), &out),
+            Ok(Outcome::Complete)
+        );
+        assert!(out.text().contains("to-file\n"), "{}", out.text());
+    }
+
+    #[test]
+    fn recursion_never_descends_a_link_unless_it_was_resolved() {
+        // `-R` alone: `to-dir` is a link, so its target is not walked.
+        let out = Recorder::new();
+        let command = list_with(
+            Options {
+                recursive: true,
+                ..Options::DEFAULT
+            },
+            &["."],
+        );
+        assert_eq!(
+            run_ls(command, &link_fixture(), &out),
+            Ok(Outcome::Complete)
+        );
+        assert!(!out.text().contains("inner"), "{}", out.text());
+
+        // `-RL` resolves each entry, so the directory behind the link *is*
+        // walked.
+        let out = Recorder::new();
+        let command = list_with(
+            Options {
+                recursive: true,
+                dereference: Some(Dereference::Always),
+                ..Options::DEFAULT
+            },
+            &["."],
+        );
+        assert_eq!(
+            run_ls(command, &link_fixture(), &out),
+            Ok(Outcome::MinorProblem)
+        );
+        assert!(out.text().contains("inner"), "{}", out.text());
+    }
+
+    #[test]
+    fn a_cycle_under_recursive_dereference_is_reported_once_and_not_walked() {
+        // `loop` points back at the directory that holds it, so `-RL` would
+        // descend for ever; the already-listed directory is reported and
+        // skipped instead.
+        let fs = TreeFs::new()
+            .dir("/top")
+            .entry("/top", "f", FileKind::Regular, 0o644, 0)
+            .link_entry("/top", "loop", "/top");
+        let out = Recorder::new();
+        let command = list_with(
+            Options {
+                recursive: true,
+                dereference: Some(Dereference::Always),
+                ..Options::DEFAULT
+            },
+            &["/top"],
+        );
+        assert_eq!(run_ls(command, &fs, &out), Ok(Outcome::MinorProblem));
+        assert_eq!(
+            out.errors(),
+            ["ls: not listing already-listed directory: '/top/loop'"]
+        );
+        // The listing itself is finite and complete.
+        assert_eq!(out.text(), "/top:\nf\nloop\n");
+    }
+
+    #[test]
+    fn colour_paints_a_link_and_its_target_by_what_each_is() {
+        // The link name takes the link role; the target text takes the role
+        // of what it names — a directory here.
+        let out = Recorder::new();
+        let command = list_with(
+            Options {
+                color: ColorChoice::Always,
+                format: Some(Format::Long),
+                ..Options::DEFAULT
+            },
+            &["to-dir"],
+        );
+        run_ls_term(command, Some("xterm-256color"), &link_fixture(), &out)
+            .expect("listing succeeds");
+        let text = out.text();
+        assert!(
+            text.contains(&format!("{LINK_ON}to-dir{OFF} -> {DIR_ON}/sub{OFF}")),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn a_link_target_that_cannot_be_reached_is_left_uncoloured() {
+        let out = Recorder::new();
+        let command = list_with(
+            Options {
+                color: ColorChoice::Always,
+                format: Some(Format::Long),
+                ..Options::DEFAULT
+            },
+            &["dangling"],
+        );
+        run_ls_term(command, Some("xterm-256color"), &link_fixture(), &out)
+            .expect("listing succeeds");
+        let text = out.text();
+        assert!(
+            text.contains(&format!("{LINK_ON}dangling{OFF} -> /nowhere")),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn read_link_is_not_paid_outside_the_long_format() {
+        // Only the format that prints `-> target` reads it, so a listing that
+        // never shows one asks for nothing.
+        let fs = CountingLinks::new(link_fixture());
+        let out = Recorder::new();
+        assert_eq!(
+            run_ls(list(false, false, &["."]), &fs, &out),
+            Ok(Outcome::Complete)
+        );
+        assert_eq!(fs.read_links(), 0);
+        let out = Recorder::new();
+        assert_eq!(
+            run_ls(list(false, true, &["."]), &fs, &out),
+            Ok(Outcome::Complete)
+        );
+        // One per link row, and only for the link rows.
+        assert_eq!(fs.read_links(), 3);
+    }
+
+    /// A [`Listing`] that counts its `read_link` calls, so a test can prove
+    /// the target read is paid only where it is printed.
+    struct CountingLinks {
+        inner: TreeFs,
+        reads: RefCell<usize>,
+    }
+
+    impl CountingLinks {
+        fn new(inner: TreeFs) -> Self {
+            Self {
+                inner,
+                reads: RefCell::new(0),
+            }
+        }
+
+        fn read_links(&self) -> usize {
+            *self.reads.borrow()
+        }
+    }
+
+    impl Listing for CountingLinks {
+        fn stat(&self, path: &str, links: FinalLink) -> Result<Metadata, Errno> {
+            self.inner.stat(path, links)
+        }
+
+        fn read_link(&self, path: &str) -> Result<String, Errno> {
+            *self.reads.borrow_mut() += 1;
+            self.inner.read_link(path)
+        }
+
+        fn read_dir(&self, path: &str) -> Result<Vec<Entry>, Errno> {
+            self.inner.read_dir(path)
+        }
+    }
+
+    /// The standard-scheme SGR run for the link role (bold + cyan).
+    const LINK_ON: &str = "\u{1b}[1m\u{1b}[36m";
 }

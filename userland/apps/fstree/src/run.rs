@@ -42,7 +42,7 @@ mod program {
     use alloc::string::String;
     use alloc::vec::Vec;
 
-    use tairix_abi::fs::{DirEntry, OpenFlags, FS_IO_MAX, FS_MODE_MASK};
+    use tairix_abi::fs::{DirEntry, OpenFlags, FS_IO_MAX, FS_MODE_MASK, FS_SYMLINK_MAX};
     use tairix_abi::{Errno, FileKind, InputMode, UnlinkFlags, STDOUT};
     use tairix_curses::{InputMode as CursesInputMode, Screen, Size, StreamTty};
     use tairix_fstree::{
@@ -315,12 +315,45 @@ mod program {
         }
 
         fn stat_kind(&mut self, path: &str) -> Result<FileKind, Errno> {
-            // A resolve-only open: no read authority is requested, the
-            // handle is closed on drop, and only the metadata is learned.
+            // A resolve-only, `NO_FOLLOW` open: no read authority is
+            // requested, the handle is closed on drop, and the *name as
+            // typed* is described. Following a final link here would let one
+            // already sitting at a destination decide what a later create or
+            // truncate acts on — anywhere on the volume.
             let file =
-                File::open(path.as_bytes(), OpenFlags::empty()).map_err(Errno::from_syscall)?;
+                File::open(path.as_bytes(), OpenFlags::NO_FOLLOW).map_err(Errno::from_syscall)?;
             let stat = file.stat().map_err(Errno::from_syscall)?;
             Ok(stat.kind)
+        }
+
+        fn read_link(&mut self, path: &str) -> Result<String, Errno> {
+            // One call, one buffer: `fs_readlink` refuses an undersized
+            // buffer rather than truncating a target — a truncated one would
+            // name somewhere else entirely — and a target is bounded by
+            // `FS_SYMLINK_MAX`.
+            let mut buf = alloc::vec![0u8; FS_SYMLINK_MAX];
+            let ret = tairix_rt::fs_readlink(path.as_bytes(), &mut buf);
+            if ret < 0 {
+                return Err(Errno::from_syscall(ret));
+            }
+            let len = usize::try_from(ret).map_err(|_| Errno::OutOfRange)?;
+            let target = buf.get(..len).ok_or(Errno::OutOfRange)?;
+            // A stored target is UTF-8 by the grammar the kernel checked
+            // before storing it; anything else is a corrupt or hostile
+            // volume, refused rather than lossily copied onward.
+            core::str::from_utf8(target)
+                .map(String::from)
+                .map_err(|_| Errno::OutOfRange)
+        }
+
+        fn create_link(&mut self, target: &str, path: &str) -> Result<(), Errno> {
+            // Target first, then the link — the `symlink(2)` argument order.
+            let ret = tairix_rt::fs_symlink(target.as_bytes(), path.as_bytes());
+            if ret != 0 {
+                return Err(Errno::from_syscall(ret));
+            }
+            self.forget(path);
+            Ok(())
         }
 
         fn read(&mut self, path: &str, offset: u64, buf: &mut [u8]) -> Result<usize, Errno> {

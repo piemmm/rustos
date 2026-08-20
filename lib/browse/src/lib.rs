@@ -29,7 +29,9 @@
 //!
 //! # Module map
 //!
-//! * [`entry`] — the [`Entry`]/[`EntryKind`] listing vocabulary.
+//! * [`entry`] — the [`Entry`]/[`EntryKind`] listing vocabulary, including
+//!   the [`LinkTarget`] a symbolic link resolves to and the
+//!   [`resolve_target`] rule a relative one is reached through.
 //! * [`activate`](mod@activate) — the [`Activation`] dispatch-by-kind decision
 //!   (descend / launch a bundle / open a file) the manager and picker share.
 //! * [`click`](mod@click) — the [`DoubleClickTracker`] pure double-click
@@ -154,11 +156,13 @@ pub use clipboard::{plan_paste, Clipboard, ClipboardOp, PasteError, PasteItem, P
 pub use delete::{
     DeleteAction, DeleteError, DeletePlan, DeleteTarget, DeleteWalk, MAX_DELETE_DEPTH,
 };
-pub use entry::{is_bundle_name, Entry, EntryKind, Occupancy};
+pub use entry::{
+    is_bundle_name, resolve_target, Entry, EntryKind, LinkResolution, LinkTarget, Occupancy,
+};
 pub use error::BrowseError;
 pub use execute::{
-    paste_strategy, CopyAction, CopyChunk, CopyCursor, CopyError, CopyWalk, CopyWalkError,
-    PasteStrategy, VolumeId, COPY_CHUNK_LEN, MAX_COPY_DEPTH,
+    paste_strategy, CopyAction, CopyChunk, CopyCursor, CopyError, CopyKind, CopyWalk,
+    CopyWalkError, PasteStrategy, VolumeId, COPY_CHUNK_LEN, MAX_COPY_DEPTH,
 };
 pub use format::{format_date, format_datetime, format_size};
 pub use layout::{
@@ -177,11 +181,18 @@ pub use render::{render, ManagerChrome};
 pub use select::Selection;
 pub use sort::{sort_entries, SortDirection, SortKey, SortMode};
 pub use source::{DirectorySource, Listing};
+/// The one shared path-spelling rules a consumer of this engine needs beside
+/// it: the final component of a path, and the `parent`/`name` join. Re-exported
+/// rather than re-implemented so a surface that spells a resolved link target
+/// uses the same rule the engine does.
+pub use tairix_path::{join as join_child, leaf_name};
 pub use trash::{
     empty_trash_plan, trash_dest_path, trash_dir, trash_strategy, DeleteDisposition, TrashError,
     TrashStrategy, MAX_TRASH_NAME_ATTEMPTS,
 };
-pub use vfs::{NoProbe, VfsDirectorySource};
+#[cfg(feature = "rt")]
+pub use vfs::RtLinkReader;
+pub use vfs::{LinkInfo, LinkReader, NoLinks, NoProbe, VfsDirectorySource};
 
 /// Window content width of a browser view, in pixels — the one definition
 /// the files app's `Run` binary and the session's trusted picker size

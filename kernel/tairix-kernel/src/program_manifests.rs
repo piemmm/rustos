@@ -1139,6 +1139,7 @@ mod tests {
             ("groupadd", ProgramKind::Command, ADMIN_TOOL_REQUEST),
             ("head", ProgramKind::Command, FILE_TOOL_REQUEST),
             ("host", ProgramKind::Command, HOST_TOOL_REQUEST),
+            ("ln", ProgramKind::Command, FILE_TOOL_REQUEST),
             ("login", ProgramKind::Service, LOGIN_MANIFEST),
             ("ls", ProgramKind::Command, LS_MANIFEST),
             ("lspci", ProgramKind::Command, HW_LIST_TOOL_REQUEST),

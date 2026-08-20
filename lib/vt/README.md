@@ -14,7 +14,7 @@ TAIRiX's text stack. It is the single source of truth (`AGENTS.md` §2.2) for:
   *consumer* (the terminal emulator's `Grid`) and the *emitter* (the curses
   renderer),
 - the standard semantic colour **scheme** (`scheme::Role` / `scheme::Style`):
-  the one role-to-SGR palette (heading, directory, executable, error, …) every
+  the one role-to-SGR palette (heading, directory, executable, link, error, …) every
   colour-capable tool names roles from instead of raw colour numbers, so the
   scheme evolves as data. It holds the ideal colours only; degrading them to a
   terminal's depth is `lib/curses`'s one `downgrade` (truecolour → 256 → 16 →

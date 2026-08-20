@@ -15,6 +15,7 @@ use alloc::format;
 use alloc::string::String;
 
 use tairix_abi::time::Time64;
+use tairix_abi::FileKind;
 use tairix_curses::{truncate_to_width, Pos, Window};
 use tairix_vt::{Attributes, BasicColor, Color};
 
@@ -291,7 +292,7 @@ fn render_panes(model: &Model, window: &mut Window, body: u16, cols: u16) {
             .contains(&crate::model::join(&model.files_dir, &entry.name));
         let text = file_row(
             tagged,
-            entry.kind.is_dir(),
+            entry.kind,
             &entry.name,
             entry.size,
             entry.modified,
@@ -341,7 +342,7 @@ fn render_bare_tree(model: &Model, window: &mut Window, body: u16, cols: u16) {
 /// right-aligned.
 fn file_row(
     tagged: bool,
-    is_dir: bool,
+    kind: FileKind,
     name: &str,
     size: u64,
     modified: Time64,
@@ -349,10 +350,12 @@ fn file_row(
 ) -> String {
     let marker = if tagged { "*" } else { " " };
     let stamp = format_stamp(modified);
-    let size_text = if is_dir {
-        String::from("<dir>")
-    } else {
-        format!("{size}")
+    // A link's own `size` is the length of the path it stores, which is not a
+    // size a reader wants; the column names what the row *is* instead.
+    let size_text = match kind {
+        FileKind::Directory => String::from("<dir>"),
+        FileKind::Symlink => String::from("<link>"),
+        FileKind::Regular => format!("{size}"),
     };
     let tail = format!("{size_text:>12} {stamp:>16}");
     let name_width = width.saturating_sub(tail.len() + 3);
@@ -381,7 +384,14 @@ fn render_flat(model: &Model, window: &mut Window, body: u16, cols: u16) {
             None => String::from(rel),
         };
         let tagged = model.tags.contains(&entry.path);
-        let text = file_row(tagged, false, &shown, entry.size, entry.modified, width);
+        let text = file_row(
+            tagged,
+            FileKind::Regular,
+            &shown,
+            entry.size,
+            entry.modified,
+            width,
+        );
         let attrs = if index == model.flat_cursor {
             reverse
         } else if tagged {
@@ -844,7 +854,11 @@ fn prompt_line(prompt: &Prompt) -> String {
         }
         Prompt::Overwrite(paused) => match paused.op.conflict() {
             Some(conflict) => {
-                format!("{} exists — o)verwrite  s)kip  c)ancel", conflict.dst)
+                format!(
+                    "{} exists{} — o)verwrite  s)kip  c)ancel",
+                    conflict.dst,
+                    occupant_note(conflict.occupant)
+                )
             }
             // Unreachable by construction (the prompt exists only while a
             // conflict is paused), but fail closed rather than panic.
@@ -855,12 +869,26 @@ fn prompt_line(prompt: &Prompt) -> String {
         }
         Prompt::BatchOverwrite(paused) => match paused.batch.conflict() {
             Some(conflict) => {
-                format!("{} exists — o)verwrite  s)kip  c)ancel batch", conflict.dst)
+                format!(
+                    "{} exists{} — o)verwrite  s)kip  c)ancel batch",
+                    conflict.dst,
+                    occupant_note(conflict.occupant)
+                )
             }
             // Unreachable by construction (the prompt exists only while a
             // conflict is paused), but fail closed rather than panic.
             None => String::from("o)verwrite  s)kip  c)ancel batch"),
         },
+    }
+}
+
+/// What a conflicting name currently holds, when saying so changes the
+/// decision: replacing a symbolic link destroys the link rather than
+/// overwriting a file's bytes, so the question states it.
+fn occupant_note(occupant: FileKind) -> &'static str {
+    match occupant {
+        FileKind::Symlink => " as a symbolic link",
+        FileKind::Regular | FileKind::Directory => "",
     }
 }
 

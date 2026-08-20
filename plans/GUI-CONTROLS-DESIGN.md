@@ -42,7 +42,8 @@ buttons (Button, IconButton, SplitButton), boolean selectors (Toggle, Checkbox,
 Radio), value controls (Slider, Progress, Chart), text entry (TextField, SearchField),
 choice entry (ComboBox), navigation and command surfaces (Menu, MenuItem,
 Toolbar, Tabs), collection controls (ListRow, TableRow, TableCell, Card, Panel,
-MetricTile, StatusPill), decision surfaces (Dialog, Tooltip, HelpTip), shell surfaces
+MetricTile, StatusPill), record lists (FactList, Timeline), decision surfaces
+(Dialog, Tooltip, HelpTip), shell surfaces
 (Notification, TaskbarItem, TraySignal), and the window-manager furniture (WindowFrame,
 TitleBar, the WindowControl set — Close, Minimize, PutToBack, SizeToggle — the
 ResizeGrabber, the ScrollBar in both orientations, and the ScrollCorner) — is a
@@ -1346,6 +1347,88 @@ the *view*, not of the tile.
   means an icon stays where the user last saw it whatever the field's exact
   extent is, rather than drifting when that extent changes by a few pixels.
 
+### 11.36 FactList and Timeline
+
+The **record-list family**: two read-only instruments that state what a thing
+*is* and what has *happened* to it. Both sit beside MetricTile (§11.33),
+Progress (§11.7), and Chart (§11.35) in the read-only half of the design
+language — no pointer or keyboard handling, no action type, no interior
+mutability; the owner supplies every visible fact and re-renders when one
+changes.
+
+- **They report a record, not a measurement, and that is the family
+  boundary.** A metric tile's track and a chart's trace are tinted by the
+  resource's own semantic rail colour, because there the colour *is* the
+  resource's fixed identity (§11.33, §11.35). A fact and an event carry text,
+  not a resource, so neither takes a rail colour. Their optional tone is a
+  Signal Role naming a transient condition — healthy, denied, recovering —
+  exactly as a StatusPill's is (§11.33), and it is always *additional* to the
+  words, never the only thing carrying the meaning.
+- **An empty collection draws nothing at all** — no plate, no rule, no spine.
+  An empty frame would assert "this record exists and is known to be empty",
+  which neither control can know: only its owner can tell "nothing has
+  happened yet" from "we could not ask". The owner draws that sentence.
+- **A row draws only while a whole row still fits, and the remainder is
+  omitted rather than clipped mid-row** (fail closed). Half a fact is a
+  misreading; an absent fact is an absence the owner's own bounds explain.
+- One row pitch — the body font's line height plus the theme's control gap —
+  is shared by both controls and by the `row_height` a host lays out with, so
+  a surface stacking a fact list above a timeline cannot disagree with what
+  either actually draws.
+
+#### FactList
+
+A column of label/value pairs at a shared row pitch: the label quiet on the
+left, the value emphasised on the right, optionally separated by hairline
+rules.
+
+- **The value keeps its measured width and the label truncates first.** The
+  reading is what the reader came for, so a detail pane too narrow for both
+  loses a word of description rather than a digit. This is the opposite of a
+  ListRow (§11.13), where the name is the thing being read.
+- Values are right-aligned on one another across the whole list, so a column
+  of readings can be compared down its right edge rather than scanned for
+  where each number starts.
+- A separator is drawn only when the row *after* it also fits, so a truncated
+  list never ends on a rule promising a row that was not drawn.
+
+#### Timeline
+
+An ordered record of what happened and when: a connector spine down the left,
+a mark per event, a stamp column, and the event's text.
+
+- **The two event kinds differ by shape, not hue.** A routine step is a
+  hollow ring and a notable one a filled disc, so the distinction survives a
+  high-contrast theme, a monochrome display, and a reader who cannot separate
+  the tones. A Signal Role tone on a notable mark is emphasis on top of a
+  shape that already reads.
+- **The spine spans only from the first drawn mark's centre to the last, and
+  is omitted entirely for a single event.** A spine running to the edges of
+  the box would imply history before the first record and after the last —
+  the same fabrication a chart's flat floor line would be (§11.35).
+- The mark is the theme's Signal Bead extent, the same compact mark the shell
+  surfaces already draw their beads at, and the gutter is exactly the mark's
+  diameter with the spine down its centre — so the column that follows needs
+  to know nothing about the mark's geometry, and there is no second mark size
+  in the language.
+- The stamp column is as wide as the widest stamp in the timeline, measured
+  through the same font that draws it, so every stamp aligns on one shared
+  measurement rather than a guessed column width.
+- **Order is the owner's, and the control does not sort.** Oldest-first and
+  newest-first are both legitimate readings of a record, and which one a
+  surface wants is its own editorial decision. This is the deliberate
+  contrast with Chart (§11.35), where oldest-to-newest left-to-right is fixed
+  because the *shape* of a series only means anything against a known
+  direction.
+
+#### Present-day consumers
+
+Both controls exist because surfaces already need them, not ahead of one:
+`FactList` is the Switchboard's per-resource and per-cause readout and the
+body of the icon bar's manifest-attested **About** panel — which is why it
+must not tone a value into meaning the words do not carry, since the panel is
+system-drawn chrome stating a signed identity (§13). `Timeline` is the
+Switchboard's recovery and background-activity record.
 ---
 
 ## 12. Reactive State Patterns

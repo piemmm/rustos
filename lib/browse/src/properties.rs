@@ -24,7 +24,7 @@ use alloc::string::String;
 use tairix_abi::fs::{mode_string, FileKind, FileStat, FS_MODE_MASK};
 use tairix_abi::NodeTimes;
 
-use crate::entry::EntryKind;
+use crate::entry::{EntryKind, LinkTarget};
 use crate::format::{format_datetime, format_size};
 
 /// The display-ready summary of one node's metadata for the Properties panel.
@@ -39,6 +39,7 @@ use crate::format::{format_datetime, format_size};
 pub struct Properties {
     name: String,
     kind: EntryKind,
+    target: Option<String>,
     file_kind: FileKind,
     size: u64,
     allocated: u64,
@@ -56,6 +57,7 @@ impl Properties {
         Self {
             name: name.into(),
             kind,
+            target: None,
             file_kind: stat.kind,
             size: stat.size,
             allocated: stat.allocated,
@@ -72,20 +74,49 @@ impl Properties {
         &self.name
     }
 
+    /// This summary with the target a symbolic link stores attached, so the
+    /// panel can show where the link points.
+    ///
+    /// The spelling is the one the link holds, **verbatim** — possibly
+    /// relative, possibly naming nothing. That is the honest thing to show:
+    /// it is what the link *is*, and it is what tells a reader why a broken
+    /// one is broken.
+    #[must_use]
+    pub fn with_target(mut self, target: impl Into<String>) -> Self {
+        self.target = Some(target.into());
+        self
+    }
+
     /// The node's browser kind.
     #[must_use]
     pub const fn kind(&self) -> EntryKind {
         self.kind
     }
 
-    /// A short human label for the node's kind: `Folder`, `File`, or
-    /// `Application` (a `<Name>.app` bundle).
+    /// The target a symbolic link stores, verbatim, or [`None`] for a node
+    /// that is not one.
+    #[must_use]
+    pub fn target(&self) -> Option<&str> {
+        self.target.as_deref()
+    }
+
+    /// A short human label for the node's kind: `Folder`, `File`,
+    /// `Application` (a `<Name>.app` bundle), or — for a symbolic link — an
+    /// alias to whichever of those it names, and `Broken alias` when it names
+    /// nothing reachable.
     #[must_use]
     pub const fn kind_label(&self) -> &'static str {
         match self.kind {
             EntryKind::Directory => "Folder",
             EntryKind::File => "File",
             EntryKind::Bundle => "Application",
+            // A link is labelled by what it names, because that is what
+            // opening it reaches; a link that names nothing says so rather
+            // than borrowing a kind it does not have.
+            EntryKind::Link(LinkTarget::Directory) => "Alias to folder",
+            EntryKind::Link(LinkTarget::File) => "Alias to file",
+            EntryKind::Link(LinkTarget::Bundle) => "Alias to application",
+            EntryKind::Link(LinkTarget::Dangling) => "Broken alias",
         }
     }
 
@@ -258,6 +289,36 @@ mod tests {
         assert_eq!(p.accessed_display(), "");
         assert_eq!(p.changed_display(), "2023-11-14 22:13:20");
         assert_eq!(p.times().accessed, Time64::UNIX_EPOCH);
+    }
+
+    #[test]
+    fn a_link_is_labelled_by_what_it_names_and_shows_its_target() {
+        use crate::entry::LinkTarget;
+        // The structural stat kind is the link's own, so the permission
+        // string honestly leads with `l`; the label reads from what the
+        // target is.
+        let s = stat(FileKind::Symlink, 0o777);
+        let p = Properties::from_stat("Documents", EntryKind::Link(LinkTarget::Directory), &s)
+            .with_target("/Storage/docs");
+        assert_eq!(p.kind_label(), "Alias to folder");
+        assert_eq!(p.permissions(), "lrwxrwxrwx");
+        assert_eq!(p.target(), Some("/Storage/docs"));
+
+        let p = Properties::from_stat("Editor", EntryKind::Link(LinkTarget::Bundle), &s)
+            .with_target("/Apps/Editor.app");
+        assert_eq!(p.kind_label(), "Alias to application");
+
+        let p = Properties::from_stat("notes", EntryKind::Link(LinkTarget::File), &s);
+        assert_eq!(p.kind_label(), "Alias to file");
+        // No target was attached: absent, never fabricated.
+        assert_eq!(p.target(), None);
+
+        // A link that names nothing says so, and still shows the spelling
+        // that explains why.
+        let p = Properties::from_stat("gone", EntryKind::Link(LinkTarget::Dangling), &s)
+            .with_target("../removed");
+        assert_eq!(p.kind_label(), "Broken alias");
+        assert_eq!(p.target(), Some("../removed"));
     }
 
     #[test]

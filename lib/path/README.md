@@ -10,6 +10,17 @@ tools. That lexing and normalisation is identical wherever it happens, so it
 lives here once and every consumer imports it, rather than each embedding a
 private path parser. The shell does not own a path parser; it links this one.
 
+## Two spellings beside the parser
+
+`leaf_name(path)` is the POSIX base name (trailing `/`s ignored, a bare root
+naming itself, and a `Name:/` alias root playing exactly the role POSIX gives
+`/`), and `join(parent, name)` appends a child with exactly one separator so a
+child of a root is `/name` and never `//name`. Both are purely lexical, like
+`parse`: they resolve nothing and open nothing. They live here because more
+than one consumer needs them — a tool that names the link `ln -s target`
+creates, a browser that spells a resolved link target — and a private copy per
+consumer is the duplication the charter forbids.
+
 ## A spelling step, not a resolver
 
 This crate turns a string into a typed `Path` (a `Root` plus normalised

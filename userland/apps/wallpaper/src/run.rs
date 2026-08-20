@@ -326,7 +326,11 @@ mod program {
                 return Vec::new();
             }
         };
-        let Ok(entries) = tairix_browse::vfs::entries_from_dir_stream(&stream) else {
+        let Ok(entries) = tairix_browse::vfs::entries_from_dir_stream(
+            WALLPAPER_STORE,
+            &stream,
+            &mut tairix_browse::RtLinkReader,
+        ) else {
             report(&alloc::format!(
                 "{WALLPAPER_STORE}: listing not readable; no shipped wallpapers offered"
             ));

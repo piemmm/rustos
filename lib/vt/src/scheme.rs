@@ -46,6 +46,8 @@ pub enum Role {
     Directory,
     /// An executable file.
     Executable,
+    /// A symbolic link.
+    Link,
     /// A search match or highlighted span.
     Match,
     /// An error message.
@@ -64,12 +66,13 @@ pub enum Role {
 
 impl Role {
     /// Every [`Role`] in declaration order, for exhaustive iteration in tests.
-    pub const ALL: [Role; 12] = [
+    pub const ALL: [Role; 13] = [
         Role::Heading,
         Role::Emphasis,
         Role::Literal,
         Role::Directory,
         Role::Executable,
+        Role::Link,
         Role::Match,
         Role::Error,
         Role::Warning,
@@ -103,6 +106,9 @@ impl Role {
             // readable against a dark background where plain blue is dim.
             Role::Directory => Style::new(basic(BasicColor::BrightBlue)).bold(),
             Role::Executable => Style::new(basic(BasicColor::Green)).bold(),
+            // A link is the classic bold cyan, distinct from both the
+            // directory it may name and the plain file it may name.
+            Role::Link => Style::new(basic(BasicColor::Cyan)).bold(),
             Role::Match => Style::new(basic(BasicColor::BrightYellow)).bold(),
             // Error/Success are the red/green pair colour-vision deficiencies
             // confuse, so both also carry bold — the distinction never rests

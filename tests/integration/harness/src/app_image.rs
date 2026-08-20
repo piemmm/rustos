@@ -770,6 +770,7 @@ mod tests {
                 "groupadd",
                 "head",
                 "host",
+                "ln",
                 "login",
                 "ls",
                 "lspci",

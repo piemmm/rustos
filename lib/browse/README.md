@@ -9,7 +9,9 @@ desktop session's trusted file picker (`plans/CAPABILITY_USE.md` CU6)
 can never diverge in navigation semantics, listing policy, or look.
 
 - **Entries** (`Entry`/`EntryKind`): each listed child carries its name,
-  its kind, and the display metadata a file manager needs — apparent
+  its kind — including `Link(LinkTarget)`, which shows a symbolic link
+  *and* names what it resolves to, because a file manager needs both
+  facts — and the display metadata a file manager needs — apparent
   `size` and the modification `Time64` — mapped straight from the one
   `fs_readdir` stream the source already produced, so no child is opened
   and statted to fill a listing. `EntryKind` refines the VFS's

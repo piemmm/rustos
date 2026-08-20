@@ -149,10 +149,13 @@ fn name_cmp(a: &str, b: &str) -> Ordering {
 /// everything else) but coarser than [`crate::media::MediaType`] (which needs
 /// directory context this comparator does not have).
 const fn kind_rank(entry: &Entry) -> u8 {
-    match entry.kind() {
-        EntryKind::Directory => 0,
-        EntryKind::Bundle => 1,
-        EntryKind::File => 2,
+    // A link ranks with what it *names*, so a shortcut to a folder sorts
+    // among the folders; one that names nothing ranks with the files, where
+    // an unopenable leaf belongs.
+    match entry.kind().resolved() {
+        Some(EntryKind::Directory) => 0,
+        Some(EntryKind::Bundle) => 1,
+        Some(EntryKind::File | EntryKind::Link(_)) | None => 2,
     }
 }
 

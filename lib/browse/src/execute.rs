@@ -344,16 +344,54 @@ pub enum CopyAction<'a> {
         /// The destination file's root-first absolute component path.
         dest: &'a [String],
     },
+    /// Recreate the symbolic link `source` at `dest`: read the target
+    /// `source` stores and create a link at `dest` holding the same spelling,
+    /// then acknowledge with [`copied_link`](CopyWalk::copied_link).
+    ///
+    /// The target is copied **verbatim**, unresolved: a relative one still
+    /// reads relative to the *new* link's own directory, which is what
+    /// duplicating a link means. Nothing is read through the link and nothing
+    /// is written through it.
+    CopyLink {
+        /// The source link's root-first absolute component path.
+        source: &'a [String],
+        /// The new link's root-first absolute component path.
+        dest: &'a [String],
+    },
 }
 
-/// One node still to be copied: its source and destination paths, whether it is
-/// directory-backed, and — for a directory — whether its destination has been
-/// created yet.
+/// What a node being copied *is* — the three shapes a copy must tell apart.
+///
+/// The distinction is load-bearing, not cosmetic: streaming a symbolic link's
+/// bytes would silently produce a regular file holding the target's text, and
+/// *following* it would copy something the link only points at. A link is
+/// therefore copied by being **recreated** with the same stored target.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum CopyKind {
+    /// A regular file: copied by streaming its bytes.
+    File,
+    /// A directory (a bundle included): copied by creating the destination and
+    /// recursing into the source's children.
+    Directory,
+    /// A symbolic link: copied by recreating it with the target it stores.
+    Link,
+}
+
+impl CopyKind {
+    /// Whether this kind is copied by creating a destination directory and
+    /// recursing.
+    const fn recurses(self) -> bool {
+        matches!(self, Self::Directory)
+    }
+}
+
+/// One node still to be copied: its source and destination paths, what it is,
+/// and — for a directory — whether its destination has been created yet.
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct CopyFrame {
     source: Vec<String>,
     dest: Vec<String>,
-    is_directory: bool,
+    kind: CopyKind,
     created: bool,
 }
 
@@ -389,14 +427,14 @@ impl CopyWalk {
     /// nothing to copy — an empty item list, or any item whose source or
     /// destination names the root (an empty component list).
     ///
-    /// Each item is `(source, dest, is_directory)`: the source's root-first
-    /// absolute path, the destination path it takes under the paste target, and
-    /// whether it is directory-backed on disk. Refusing an empty or root-naming
-    /// set here means the copy verb is simply unavailable rather than a silent
-    /// no-op or a copy involving the root (§5.4), exactly as
+    /// Each item is `(source, dest, kind)`: the source's root-first absolute
+    /// path, the destination path it takes under the paste target, and what
+    /// the source is ([`CopyKind`]). Refusing an empty or root-naming set here
+    /// means the copy verb is simply unavailable rather than a silent no-op or
+    /// a copy involving the root (§5.4), exactly as
     /// [`DeletePlan::new`](crate::delete::DeletePlan::new) refuses one.
     #[must_use]
-    pub fn from_items(items: Vec<(Vec<String>, Vec<String>, bool)>) -> Option<Self> {
+    pub fn from_items(items: Vec<(Vec<String>, Vec<String>, CopyKind)>) -> Option<Self> {
         if items.is_empty()
             || items
                 .iter()
@@ -407,11 +445,11 @@ impl CopyWalk {
         let mut stack = Vec::with_capacity(items.len());
         // Push items in reverse so the first item is on top of the stack and the
         // walk processes them in order (mirrors `DeleteWalk::from_plan`).
-        for (source, dest, is_directory) in items.into_iter().rev() {
+        for (source, dest, kind) in items.into_iter().rev() {
             stack.push(CopyFrame {
                 source,
                 dest,
-                is_directory,
+                kind,
                 created: false,
             });
         }
@@ -439,21 +477,24 @@ impl CopyWalk {
     /// [`MakeDir`](CopyAction::MakeDir); a directory whose destination exists
     /// but whose contents have not been listed yet yields
     /// [`List`](CopyAction::List); a regular file yields
-    /// [`CopyFile`](CopyAction::CopyFile).
+    /// [`CopyFile`](CopyAction::CopyFile); a symbolic link yields
+    /// [`CopyLink`](CopyAction::CopyLink).
     #[must_use]
     pub fn next_action(&self) -> Option<CopyAction<'_>> {
         let top = self.stack.last()?;
-        if !top.is_directory {
-            Some(CopyAction::CopyFile {
+        match top.kind {
+            CopyKind::File => Some(CopyAction::CopyFile {
                 source: &top.source,
                 dest: &top.dest,
-            })
-        } else if top.created {
-            Some(CopyAction::List {
+            }),
+            CopyKind::Link => Some(CopyAction::CopyLink {
                 source: &top.source,
-            })
-        } else {
-            Some(CopyAction::MakeDir { dest: &top.dest })
+                dest: &top.dest,
+            }),
+            CopyKind::Directory if top.created => Some(CopyAction::List {
+                source: &top.source,
+            }),
+            CopyKind::Directory => Some(CopyAction::MakeDir { dest: &top.dest }),
         }
     }
 
@@ -471,7 +512,7 @@ impl CopyWalk {
     /// or a finished walk; the walk is left unchanged.
     pub fn created(&mut self) -> Result<(), CopyWalkError> {
         match self.stack.last_mut() {
-            Some(top) if top.is_directory && !top.created => {
+            Some(top) if top.kind.recurses() && !top.created => {
                 top.created = true;
                 self.copied += 1;
                 Ok(())
@@ -484,11 +525,11 @@ impl CopyWalk {
     /// [`List`](CopyAction::List) named, so each is copied into the destination
     /// directory already created for it.
     ///
-    /// `children` is each child's leaf name and whether it is directory-backed,
-    /// in the source's listing order; they are copied in that order. An empty
-    /// listing simply finishes the (now-known-empty) directory. Reporting the
-    /// listing finishes this directory frame and pushes its children, so the
-    /// directory itself was already counted by [`created`](Self::created).
+    /// `children` is each child's leaf name and what it is, in the source's
+    /// listing order; they are copied in that order. An empty listing simply
+    /// finishes the (now-known-empty) directory. Reporting the listing
+    /// finishes this directory frame and pushes its children, so the directory
+    /// itself was already counted by [`created`](Self::created).
     ///
     /// # Errors
     ///
@@ -497,13 +538,13 @@ impl CopyWalk {
     /// * [`CopyWalkError::OutOfStep`] — the current step is not a
     ///   [`List`](CopyAction::List) (a file, a not-yet-created directory, or a
     ///   finished walk).
-    pub fn expand(&mut self, children: &[(String, bool)]) -> Result<(), CopyWalkError> {
+    pub fn expand(&mut self, children: &[(String, CopyKind)]) -> Result<(), CopyWalkError> {
         // The listed directory is always the top frame (a `List` step is only
         // yielded for `stack.last()`), so copy out its paths and replace it with
         // its children — the destination is made and the listing is known, so
         // the directory frame has served its purpose.
         let (source, dest) = match self.stack.last() {
-            Some(top) if top.is_directory && top.created => {
+            Some(top) if top.kind.recurses() && top.created => {
                 if top.source.len() + 1 > MAX_COPY_DEPTH {
                     return Err(CopyWalkError::TooDeep);
                 }
@@ -514,7 +555,7 @@ impl CopyWalk {
         self.stack.pop();
         // Push children in reverse so they are copied in the source's listing
         // order (the first child ends up nearest the top of the stack).
-        for (name, is_directory) in children.iter().rev() {
+        for (name, kind) in children.iter().rev() {
             let mut child_source = source.clone();
             child_source.push(name.clone());
             let mut child_dest = dest.clone();
@@ -522,7 +563,7 @@ impl CopyWalk {
             self.stack.push(CopyFrame {
                 source: child_source,
                 dest: child_dest,
-                is_directory: *is_directory,
+                kind: *kind,
                 created: false,
             });
         }
@@ -538,8 +579,26 @@ impl CopyWalk {
     /// [`CopyFile`](CopyAction::CopyFile) — a directory, or a finished walk; the
     /// walk is left unchanged.
     pub fn copied_file(&mut self) -> Result<(), CopyWalkError> {
+        self.leaf_done(CopyKind::File)
+    }
+
+    /// Report that the link the last [`CopyLink`](CopyAction::CopyLink) named
+    /// has been recreated, advancing the walk past it and counting it.
+    ///
+    /// # Errors
+    ///
+    /// [`CopyWalkError::OutOfStep`] when the current step is not a
+    /// [`CopyLink`](CopyAction::CopyLink) — a file, a directory, or a finished
+    /// walk; the walk is left unchanged.
+    pub fn copied_link(&mut self) -> Result<(), CopyWalkError> {
+        self.leaf_done(CopyKind::Link)
+    }
+
+    /// Advance past the top frame when it is a leaf of exactly `kind`, so an
+    /// acknowledgement can never be applied to a step of a different shape.
+    fn leaf_done(&mut self, kind: CopyKind) -> Result<(), CopyWalkError> {
         match self.stack.last() {
-            Some(top) if !top.is_directory => {
+            Some(top) if top.kind == kind => {
                 self.stack.pop();
                 self.copied += 1;
                 Ok(())
