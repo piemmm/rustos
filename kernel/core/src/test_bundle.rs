@@ -21,11 +21,11 @@ use tairix_itest_harness::app_image::{compose_signed_appinfo, AppManifestSource}
 use tairix_kernel_syscall::SYSCALL_TABLE_HASH;
 
 use crate::appspawn::{AnchorVerifier, FsBundleStore};
-use crate::fs::{FilesystemService, ReaddirEntry};
+use crate::fs::{FilesystemService, FinalLink, ReaddirEntry};
 use crate::test_sink::TestSink;
 
 extern crate std;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 /// The deterministic test signing seed; its derived public key is the trust
 /// anchor the tests pin.
@@ -42,6 +42,9 @@ pub(crate) struct MemFs {
     pub(crate) files: BTreeMap<String, Vec<u8>>,
     read_calls: std::sync::Mutex<BTreeMap<String, usize>>,
     stat_error: Option<Errno>,
+    /// Paths the fixture reports as symbolic links rather than regular
+    /// files, so the bundle store's refusal of a link can be exercised.
+    links: BTreeSet<String>,
 }
 
 impl MemFs {
@@ -53,7 +56,16 @@ impl MemFs {
                 .collect(),
             read_calls: std::sync::Mutex::new(BTreeMap::new()),
             stat_error: None,
+            links: BTreeSet::new(),
         }
+    }
+
+    /// Report `path` as a symbolic link. Its bytes stay in the map, so a
+    /// reader that fails to check the kind would happily return them —
+    /// which is exactly what the bundle store must not do.
+    pub(crate) fn with_link(mut self, path: &str) -> Self {
+        self.links.insert(path.to_string());
+        self
     }
 
     /// Make [`FilesystemService::stat`] of a node that *exists* fail with
@@ -167,6 +179,7 @@ impl FilesystemService for MemFs {
         _uid: u32,
         _caps: &dyn CapabilityQuery,
         path: &str,
+        _final_link: FinalLink,
     ) -> Result<Vec<ReaddirEntry>, Errno> {
         let children = self.children(path);
         if children.is_empty() {
@@ -175,7 +188,13 @@ impl FilesystemService for MemFs {
         Ok(children)
     }
 
-    fn stat(&self, _uid: u32, _caps: &dyn CapabilityQuery, path: &str) -> Result<FileStat, Errno> {
+    fn stat(
+        &self,
+        _uid: u32,
+        _caps: &dyn CapabilityQuery,
+        path: &str,
+        _final_link: FinalLink,
+    ) -> Result<FileStat, Errno> {
         let file = self.files.get(path);
         // A directory iff any file lives beneath it.
         let prefix = if path.ends_with('/') {
@@ -196,7 +215,11 @@ impl FilesystemService for MemFs {
         // length, so the bundle store's `read_file` reserves exactly it.
         if let Some(body) = file {
             return Ok(FileStat {
-                kind: FileKind::Regular,
+                kind: if self.links.contains(path) {
+                    FileKind::Symlink
+                } else {
+                    FileKind::Regular
+                },
                 size: body.len() as u64,
                 allocated: body.len() as u64,
                 mode: 0o644,
@@ -219,6 +242,27 @@ impl FilesystemService for MemFs {
             });
         }
         Err(Errno::NotFound)
+    }
+
+    fn symlink(
+        &self,
+        _uid: u32,
+        _caps: &dyn CapabilityQuery,
+        _target: &str,
+        _path: &str,
+    ) -> Result<(), Errno> {
+        // The fixture's file map has no link object type; it refuses rather
+        // than approximating one with a regular file holding a path.
+        Err(Errno::NotSupported)
+    }
+
+    fn readlink(
+        &self,
+        _uid: u32,
+        _caps: &dyn CapabilityQuery,
+        _path: &str,
+    ) -> Result<String, Errno> {
+        Err(Errno::NotSupported)
     }
 
     fn truncate(

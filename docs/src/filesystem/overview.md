@@ -78,6 +78,8 @@ mutating ones a driver implementing both `FilesystemRead` and
 | `write_via`    | Write a file under a driver-backed mount.            |
 | `truncate_via` | Set a file's length under a driver-backed mount.     |
 | `remove_via`   | Unlink a child under a driver-backed mount.          |
+| `readlink_via` | Read a symbolic link's stored target.                |
+| `symlink_via`  | Create a symbolic link with a stored target.         |
 
 Each walks the in-RAM tree to the mount point — authorising **search
 permission on every ancestor** — then hands the remaining path components
@@ -98,7 +100,8 @@ Where that `Metadata` comes from is the one place the two policies differ:
 - The `*_via_secured` counterparts (`read_via_secured`,
   `list_via_secured`, `stat_via_secured`, `create_via_secured`,
   `mkdir_via_secured`, `write_via_secured`, `truncate_via_secured`,
-  `remove_via_secured`) instead read **each node's own stored §5.3
+  `remove_via_secured`, `readlink_via_secured`, `symlink_via_secured`)
+  instead read **each node's own stored §5.3
   record** through the driver's `FilesystemSecurity` surface and translate
   it (`Metadata::from_node_security`). The kernel host calls these for a
   driver such as [arxfs](./arxfs.md) that stores full per-inode owner,
@@ -135,9 +138,94 @@ read and a write through the shared, transport-generic device tail.
 
 A [`Path`] is absolute and normalised at parse time: relative paths, empty
 or over-long components, `.`/`..` traversal tokens, and embedded NUL bytes
-are rejected with `VfsError::InvalidPath`. Because the path type cannot
-represent a `..`, resolution can never escape the tree — there is no
-traversal logic to get wrong.
+are rejected with `VfsError::InvalidPath`. A **caller-supplied** path
+therefore cannot spell a `..` at all, so nothing a caller types can escape
+the tree.
+
+The one looser grammar is a *symbolic link's stored target* (below), which
+is on-disk data rather than a caller's spelling; it is parsed by
+`parse_link_target`, never by `Path::parse`, so widening it did not widen
+the caller boundary.
+
+## Symbolic links
+
+A node may be a `NodeKind::Symlink`, whose content is a **path** rather
+than bytes. Resolution follows one per component, under two fixed
+fail-closed bounds — at most `SYMLINK_HOP_MAX` (40) hops and
+`MAX_RESOLVE_STEPS` steps in one resolution — so a cycle or an over-long
+chain is refused with `VfsError::LinkLoop` instead of being walked. These
+are security bounds on untrusted on-disk structure, not capacities
+(`AGENTS.md` §24.4). The full design, including the decisions this page
+only summarises, is `plans/SYMLINKS.md`.
+
+- **A link in an interior position is always followed**: such a component
+  is being *used* as a directory, so what matters is what it names. Only
+  the **final** component's treatment varies, selected by `FinalLink`:
+  `Follow` is POSIX `stat`, `Keep` is POSIX `lstat`. `Keep` is what an
+  `OpenFlags::NO_FOLLOW` descriptor carries, and it is re-derived from the
+  handle (`FinalLink::for_open`) by every operation served for that
+  descriptor — so a stat or a listing can never contradict the open that
+  produced it. A dangling link is describable only under `Keep`;
+  `Follow` reports it as `VfsError::NotFound`.
+- **`..` is resolved physically, never lexically.** The walk keeps a stack
+  of the real nodes it passed through and `..` pops that stack, so it names
+  the directory the resolution actually came through rather than one a
+  link's spelling suggests.
+- **A link cannot escape the volume that stores it.** The stack starts at
+  the mounted volume's own root and never pops past it, so an absolute
+  target on a foreign volume resolves against *that volume's* root — a USB
+  stick's link cannot name `/System/Security`.
+- **Following a link never bypasses a permission check.** A spliced
+  target's components are authorised exactly as typed ones are: search
+  permission is required on every directory the resolution traverses,
+  whoever supplied its name.
+- **A link is not byte-readable.** Its target is reached only through
+  `readlink_via`; asking an open for byte access to something that really
+  is a link is refused with `Errno::LinkLoop`, and `FilesystemWrite::create`
+  refuses `NodeKind::Symlink` — a link is created only by `create_link`,
+  which carries the target.
+- **A target is stored verbatim and never resolved at creation.** It is
+  data, so creating a link authorises only the right to add a name in the
+  link's own parent and grants no authority over what it names; authority
+  is decided at each later use, per component. Its *grammar* is still
+  checked before it is stored, so a target this resolver could never walk
+  is refused rather than written.
+- **A format with no link object type refuses rather than approximating
+  one.** `FilesystemRead::read_link` and `FilesystemWrite::create_link`
+  default to `DriverError::Unsupported`, which surfaces as
+  `VfsError::NotSupported` — never a regular file whose contents merely
+  look like a path.
+
+### Which operations follow a final link
+
+The posture is a property of the operation, not a default, so each one names
+it. A walk reports the **place** its final name occupies — the directory
+holding the name and the name itself — because the driver mutation surface is
+keyed `(dir, name)` rather than by node; under `Follow` that is the *target's*
+place, which is what makes a write reach the target rather than the link.
+
+| Operation | Final link | Why |
+|---|---|---|
+| `read`, `write`, `truncate`, truncate-on-open, append | followed | POSIX acts on the file the link names. The write permission this VFS asks for on a write's parent therefore applies to the directory the target lives in, not the one the link sits in. |
+| `stat`, `readdir`, `open` | per the descriptor | `FinalLink::for_open` fixes it once from `OpenFlags::NO_FOLLOW`; every operation served for that handle re-derives it. |
+| `open` with `CREATE` | followed | Creating through a *dangling* link creates the file the link names, as POSIX specifies, rather than reporting the link's own name as taken. |
+| `mkdir` | kept | POSIX `mkdir` over a link is `AlreadyExists`, live target or dangling. |
+| `symlink` | kept | A new link never replaces an existing name. |
+| `unlink`, `rmdir`, `rename` (both ends) | kept | The call is about the name as typed; removing or moving a link never touches what it names. |
+| `readlink` | kept | The call is about the link. |
+| `chmod`, `chown`, extended attributes | followed | POSIX applies these to the target. |
+
+## Per-format link support
+
+| Format | Reads a link | Creates a link |
+|---|---|---|
+| ARXFS  | yes — inode kind `3`, target stored as node data (`arxfs-spec.md` §20) | yes |
+| ext4   | yes — both the fast (inline `i_block`) and slow (block-backed) spellings | no; this driver reads foreign links but does not author them |
+| FAT32  | no — the format has no link object type | no |
+| ADFS   | no — the format has no link object type | no |
+
+A "no" is `VfsError::NotSupported`: the permanent format (or driver) limit a
+caller can tell apart from a structural refusal, never a substituted file.
 
 [`Filesystem`]: ../abi/driver_traits.md
 [`Metadata`]: ./permissions.md

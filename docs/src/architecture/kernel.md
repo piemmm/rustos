@@ -293,15 +293,17 @@ record carries a capability token or any other secret.
 `FS_NODE_MUTATED` / `FS_MUTATION_DENIED` are the filesystem-mutation audit
 pair. Every state-changing filesystem syscall — `fs_mkdir`, `fs_unlink`
 (recorded as `rmdir` when the directory flag is set, else `unlink`),
-`fs_rename`, `fs_set_mode` (`chmod`), and `fs_set_owner` (`chown`) — emits
+`fs_rename`, `fs_symlink`, `fs_set_mode` (`chmod`), and `fs_set_owner`
+(`chown`) — emits
 exactly one record after the secured VFS decides it under the caller's
 kernel-attested identity: `FS_NODE_MUTATED` (`Info`) when the change was
 applied, `FS_MUTATION_DENIED` (`Warn`, carrying the refusal's `errno`) when
 the VFS refused it and nothing changed (fail closed). Both carry the
 operation (`op`), the caller's uid (`uid`), and the target `path`, plus the
 operation-specific content that makes the trail actionable: `to` (a rename's
-destination), `mode` (a chmod's new permission word, octal), and
-`owner`/`group` (a chown's new ids). Read-only operations are **not** audited
+destination), `target` (the path a new symbolic link stores, recorded because
+it is what changes how later resolutions behave), `mode` (a chmod's new
+permission word, octal), and `owner`/`group` (a chown's new ids). Read-only operations are **not** audited
 (only mutations are security-relevant decisions). Paths are bounded to the
 log field limit on a character boundary so an over-long path can never make
 the record fail to encode and drop — a mutation can never escape the trail.

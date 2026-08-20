@@ -163,9 +163,10 @@ impl NodeId {
 
 /// The kind of a filesystem node.
 ///
-/// `abi-v1` distinguishes only the two kinds the read surface needs;
-/// special-file kinds are introduced by a later trait version rather
-/// than by widening this enum.
+/// A closed set: a format that stores a kind this does not name reports
+/// [`DriverError::Unsupported`] rather than mapping it onto the nearest
+/// match, so an unrecognised on-disk kind can never be mistaken for a
+/// directory the VFS would descend or a file it would read.
 #[repr(u8)]
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
 pub enum NodeKind {
@@ -175,6 +176,11 @@ pub enum NodeKind {
     /// A regular file whose bytes are readable with
     /// [`FilesystemRead::read_at`].
     RegularFile = 1,
+    /// A symbolic link whose target path is read with
+    /// [`FilesystemRead::read_link`] and which is created only by
+    /// [`FilesystemWrite::create_link`] — never by
+    /// [`FilesystemWrite::create`], which carries no target to store.
+    Symlink = 2,
 }
 
 /// Structural metadata about a node, returned by
@@ -301,6 +307,29 @@ pub trait FilesystemRead {
     /// * [`DriverError::DeviceFault`] on an unrecoverable block read.
     fn read_at(&mut self, file: NodeId, offset: u64, buf: &mut [u8]) -> Result<usize, DriverError>;
 
+    /// Read the target path of the symbolic link `link` into `out`,
+    /// returning its length in bytes.
+    ///
+    /// The target is returned exactly as stored — not resolved, not
+    /// normalised, and with no terminator — because resolution is the VFS's
+    /// policy decision, made component by component under the caller's
+    /// attested identity, never the driver's.
+    ///
+    /// A format that has no symbolic links leaves this defaulted, so it
+    /// refuses rather than inventing a target.
+    ///
+    /// # Errors
+    ///
+    /// * [`DriverError::Unsupported`] if the format stores no links, or if
+    ///   `link` is not a [`NodeKind::Symlink`].
+    /// * [`DriverError::NotFound`] if `link` does not name a live node.
+    /// * [`DriverError::BufferTooSmall`] if the target does not fit `out`.
+    /// * [`DriverError::DeviceFault`] on an unrecoverable block read.
+    fn read_link(&mut self, link: NodeId, out: &mut [u8]) -> Result<usize, DriverError> {
+        let _ = (link, out);
+        Err(DriverError::Unsupported)
+    }
+
     /// Yield the next child of directory `dir` at or after `cursor`,
     /// writing the child's name into `name_out`.
     ///
@@ -377,7 +406,11 @@ pub trait FilesystemWrite {
     ///
     /// # Errors
     ///
-    /// * [`DriverError::Unsupported`] if `dir` is not a directory.
+    /// * [`DriverError::Unsupported`] if `dir` is not a directory, or if
+    ///   `kind` is [`NodeKind::Symlink`] — a link carries a target this
+    ///   call has nowhere to put, so it is created only by
+    ///   [`create_link`](Self::create_link) and never as a side effect of
+    ///   an empty-child create.
     /// * [`DriverError::Busy`] if a child named `name` already exists.
     /// * [`DriverError::LengthOutOfRange`] if `name` is empty or longer
     ///   than the filesystem's maximum component length.
@@ -385,6 +418,36 @@ pub trait FilesystemWrite {
     ///   (or a directory's initial data block) because it is full.
     /// * [`DriverError::DeviceFault`] if a block write fails.
     fn create(&mut self, dir: NodeId, name: &[u8], kind: NodeKind) -> Result<NodeId, DriverError>;
+
+    /// Create a symbolic link named `name` in directory `dir` whose stored
+    /// target is `target`, returning the new node's [`NodeId`].
+    ///
+    /// `target` is stored verbatim; the driver neither resolves nor
+    /// validates it as a path, so a link may legitimately dangle. The VFS
+    /// bounds its length before the call.
+    ///
+    /// A format that has no symbolic links leaves this defaulted, so it
+    /// refuses creation rather than substituting a copy or an empty file.
+    ///
+    /// # Errors
+    ///
+    /// * [`DriverError::Unsupported`] if the format stores no links, or if
+    ///   `dir` is not a directory.
+    /// * [`DriverError::Busy`] if a child named `name` already exists.
+    /// * [`DriverError::LengthOutOfRange`] if `name` is empty or longer than
+    ///   the filesystem's maximum component length, or if `target` is empty
+    ///   or longer than the format can store.
+    /// * [`DriverError::NoSpace`] if the volume cannot allocate the node.
+    /// * [`DriverError::DeviceFault`] if a block write fails.
+    fn create_link(
+        &mut self,
+        dir: NodeId,
+        name: &[u8],
+        target: &[u8],
+    ) -> Result<NodeId, DriverError> {
+        let _ = (dir, name, target);
+        Err(DriverError::Unsupported)
+    }
 
     /// Write `data` into the regular file `name` in directory `dir`
     /// starting at byte `offset`, returning the number of bytes written.

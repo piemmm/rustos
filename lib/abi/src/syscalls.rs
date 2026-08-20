@@ -2771,6 +2771,43 @@ pub const SYSCALLS: &[SyscallSpec] = &[
         required_capability: None,
         audit: false,
     },
+    SyscallSpec {
+        number: SyscallNumber::FS_SYMLINK,
+        name: "fs_symlink",
+        arg_count: 4,
+        args: [
+            // target ptr/len (stored verbatim), then the link's own path.
+            AbiType::UserPtr,
+            AbiType::Len,
+            AbiType::UserPtr,
+            AbiType::Len,
+            AbiType::Unit,
+            AbiType::Unit,
+        ],
+        ret: AbiType::Errno,
+        required_capability: Some(CapabilityId::FS_ACCESS),
+        // Adds a name that changes how later resolutions behave; audited
+        // like the other mutating filesystem calls.
+        audit: true,
+    },
+    SyscallSpec {
+        number: SyscallNumber::FS_READLINK,
+        name: "fs_readlink",
+        arg_count: 4,
+        args: [
+            // link path ptr/len, then the caller's output buffer.
+            AbiType::UserPtr,
+            AbiType::Len,
+            AbiType::UserPtr,
+            AbiType::Len,
+            AbiType::Unit,
+            AbiType::Unit,
+        ],
+        ret: AbiType::U64,
+        required_capability: Some(CapabilityId::FS_ACCESS),
+        // A pure read, high-volume like fs_stat; not audited per call.
+        audit: false,
+    },
 ];
 
 /// Length, in bytes, of the canonical encoding stored in

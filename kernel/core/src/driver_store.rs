@@ -55,7 +55,7 @@ use tairix_log::{Field, Level, Sink};
 use tairix_util::fmt::format_usize;
 
 use crate::audit::{emit, AuditEvent};
-use crate::fs::{Credentials, Path, Vfs, VfsError};
+use crate::fs::{Credentials, FinalLink, Path, Vfs, VfsError};
 
 /// Canonical, global absolute path of the signed-driver store
 /// (drivers live under `/System/Drivers/`).
@@ -176,7 +176,7 @@ fn walk_dir<F>(
     // store that simply does not exist all leave this subtree empty. A non-root listing failure is a skipped entry;
     // a missing store root is the legitimate "no drivers" case and is not
     // counted, because the empty result already says so.
-    let entries = match vfs.list_via_secured(cred, &dir_path, fs) {
+    let entries = match vfs.list_via_secured(cred, &dir_path, fs, FinalLink::Follow) {
         Ok(entries) => entries,
         Err(_) if depth == 0 => return,
         Err(_) => {
@@ -223,6 +223,11 @@ fn walk_dir<F>(
         // never re-resolves a child by path.
         match info.kind {
             NodeKind::RegularFile => drivers.push(child),
+            // A link in the driver store is neither a driver image nor a
+            // directory to descend, and following one would let a name
+            // outside the signed store decide what gets loaded. Skipped,
+            // and counted, so the refusal is visible rather than silent.
+            NodeKind::Symlink => *skipped += 1,
             NodeKind::Directory => {
                 if depth >= MAX_STORE_DEPTH {
                     // Deeper than the validation bound; refuse rather
@@ -396,7 +401,9 @@ impl DriverImageReader {
 
         // Bound the bundle against the validation maximum before reading a
         // single byte.
-        let info = self.vfs.stat_via_secured(&cred, &parsed, fs)?;
+        let info = self
+            .vfs
+            .stat_via_secured(&cred, &parsed, fs, FinalLink::Follow)?;
         if info.kind != NodeKind::RegularFile {
             return Err(DriverImageError::NotAFile);
         }

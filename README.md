@@ -110,6 +110,7 @@ Legend: `✓` provided (optional features count) · `◐` partial ·
 | Reflink / COW file clones | ✓ | — | ✓ | ✓ | ✓ |
 | Snapshots | — | — | ✓ | — | ✓ |
 | Sparse files (holes) | ✓ | ✓ | ✓ | ✓ | ✓ |
+| Symbolic links | ✓ target as node data | ✓ fast + slow | ✓ | ✓ | ✓ |
 | Crash consistency | ✓ COW | ✓ journal | ✓ COW | ✓ journal | ✓ COW |
 | Multi-device / RAID | — | — | ✓ | — | ✓ |
 | Online scrub | ✓ verify + metadata repair | — | ✓ | ✓ | ✓ |

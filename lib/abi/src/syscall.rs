@@ -2233,6 +2233,45 @@ impl SyscallNumber {
     /// [`Self::FUTEX_WAIT`].
     pub const FUTEX_WAKE: Self = Self(112);
 
+    /// Create a symbolic link.
+    ///
+    /// Arguments: `target: *const u8`, `target_len: usize` — the path to
+    /// store, verbatim and unresolved; `link: *const u8`,
+    /// `link_len: usize` — where the new link is created. Returns `0` or
+    /// `-errno`.
+    ///
+    /// The target is *data*, not a path the kernel walks: it is bounded by
+    /// [`crate::fs::FS_SYMLINK_MAX`] and stored as given, so a link may
+    /// legitimately dangle and creating one grants no authority over
+    /// whatever it names. Authority is decided where it always is — at the
+    /// **use** of a path, per component, under the caller's attested
+    /// identity — so this call checks only the caller's right to create a
+    /// name in the link's own parent directory.
+    ///
+    /// Requires `CAP_FS_ACCESS` and is audited: it adds a name that changes
+    /// how later resolutions behave.
+    pub const FS_SYMLINK: Self = Self(113);
+
+    /// Read a symbolic link's stored target.
+    ///
+    /// Arguments: `path: *const u8`, `path_len: usize` — the link itself;
+    /// `out: *mut u8`, `out_len: usize` — where the target is written.
+    /// Returns the target's length in bytes, or `-errno`.
+    ///
+    /// The **final** component is never followed — that is the whole point
+    /// of the call — while earlier components resolve normally. The target
+    /// is returned exactly as stored, with no terminator and no
+    /// normalisation, and [`crate::Errno::OutOfRange`] answers a path whose
+    /// final component is not a link, so a caller can never mistake a
+    /// regular file's contents for a target. An `out` too small to hold the
+    /// whole target fails closed with [`crate::Errno::BufferTooSmall`]
+    /// rather than returning a truncated path that would resolve somewhere
+    /// else.
+    ///
+    /// Requires `CAP_FS_ACCESS`. A pure read, unaudited like
+    /// [`Self::FS_STAT`].
+    pub const FS_READLINK: Self = Self(114);
+
     /// Inclusive upper bound on the syscall identifier space in `abi-v1`.
     pub const MAX: u16 = 1023;
 

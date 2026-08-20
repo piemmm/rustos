@@ -41,6 +41,14 @@ pub enum OpError {
     /// A filesystem step was refused; carries the path and the kernel's
     /// [`Errno`]. When mid-copy, the partial target has been removed.
     Fs(String, Errno),
+    /// The entry is a symbolic link, and this engine transfers and removes
+    /// file and directory content only.
+    ///
+    /// Copying a link byte-wise would silently make a *regular file* holding
+    /// the target's text, and removing one by its target would delete the
+    /// wrong object — so the whole operation is refused with the link named
+    /// rather than either wrong thing being done.
+    IsALink(String),
 }
 
 impl OpError {
@@ -53,6 +61,7 @@ impl OpError {
             Self::IntoItself => String::from("cannot copy or move a directory into itself"),
             Self::KindMismatch(path) => format!("{path}: exists with a different kind"),
             Self::Fs(path, errno) => format!("{path}: {errno:?}"),
+            Self::IsALink(path) => format!("{path}: is a symbolic link"),
         }
     }
 }
@@ -477,6 +486,11 @@ impl FileOp {
                         Some(FileKind::Directory) => {
                             return Err(StepEnd::Failed(OpError::KindMismatch(dst)));
                         }
+                        // Overwriting a link would write through it to
+                        // whatever it names; refuse and name the link.
+                        Some(FileKind::Symlink) => {
+                            return Err(StepEnd::Failed(OpError::IsALink(dst)));
+                        }
                     }
                 }
                 copy_file(fs, &src, &dst).map_err(StepEnd::Failed)?;
@@ -487,12 +501,18 @@ impl FileOp {
                 self.done += 1;
                 Ok(())
             }
+            FileKind::Symlink => Err(StepEnd::Failed(OpError::IsALink(src))),
             FileKind::Directory => {
                 match probe(fs, &dst).map_err(StepEnd::Failed)? {
                     // An existing directory target is merged into.
                     Some(FileKind::Directory) => {}
                     Some(FileKind::Regular) => {
                         return Err(StepEnd::Failed(OpError::KindMismatch(dst)));
+                    }
+                    // A link already at the destination is not something
+                    // this engine may merge into or overwrite blind.
+                    Some(FileKind::Symlink) => {
+                        return Err(StepEnd::Failed(OpError::IsALink(dst)));
                     }
                     None => {
                         fs.mkdir(&dst)
@@ -523,6 +543,7 @@ impl FileOp {
 
     fn step_remove(&mut self, fs: &mut dyn Fs, path: &str, kind: FileKind) -> Result<(), StepEnd> {
         match kind {
+            FileKind::Symlink => Err(StepEnd::Failed(OpError::IsALink(String::from(path)))),
             FileKind::Regular => {
                 fs.remove_file(path)
                     .map_err(|errno| StepEnd::Failed(OpError::Fs(String::from(path), errno)))?;

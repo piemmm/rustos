@@ -1,6 +1,6 @@
 [package]
 name = "tairix-test-appbar-qemu-aarch64"
-description = "plans/NEW-TASKBAR.md QEMU integration test: boot the graphical desktop on the aarch64 virt board, launch an application that declares an icon-bar presence, open the menu it declared from its bar slot, and choose a row"
+description = "plans/NEW-TASKBAR.md QEMU integration test: boot the graphical desktop on the aarch64 virt board, launch an application that declares an icon-bar presence, choose a row of the menu it declared from its bar slot, and take that slot's declared default action"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -12,9 +12,9 @@ publish = false
 workspace = true
 
 # The vertical's shared interaction contract (src/lib.rs): the application
-# whose bar is driven and the two markers the guest emits — read by both the
-# freestanding PASS gate and the host runner's script. `no_std` consts only,
-# host-buildable.
+# whose bar is driven and how many windows the whole script makes it open —
+# read by both the freestanding PASS gate and the host runner's script.
+# `no_std` consts only, host-buildable.
 [lib]
 path = "src/lib.rs"
 

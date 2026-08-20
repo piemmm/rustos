@@ -17,7 +17,7 @@ fn mkdir_creates_a_directory() {
         .expect("mkdir succeeds");
 
     let info = vfs
-        .stat_via_secured(&owner, &vol_path("d"), &mut fs)
+        .stat_via_secured(&owner, &vol_path("d"), &mut fs, FinalLink::Follow)
         .expect("stat the new directory");
     assert_eq!(info.kind, NodeKind::Directory);
 }
@@ -34,7 +34,7 @@ fn mkdir_creates_nested_directories() {
         .expect("mkdir a/b");
 
     let names: Vec<(NodeKind, String)> = vfs
-        .list_via_secured(&owner, &vol_path("a"), &mut fs)
+        .list_via_secured(&owner, &vol_path("a"), &mut fs, FinalLink::Follow)
         .expect("list a")
         .into_iter()
         .map(|(info, name)| (info.kind, name))

@@ -18,7 +18,7 @@ fn truncate_shrinks_a_file() {
         .expect("truncate to 4");
 
     let info = vfs
-        .stat_via_secured(&owner, &vol_path("f"), &mut fs)
+        .stat_via_secured(&owner, &vol_path("f"), &mut fs, FinalLink::Follow)
         .expect("stat");
     assert_eq!(info.size, 4);
 
@@ -44,7 +44,7 @@ fn truncate_grows_a_file_with_zero_fill() {
         .expect("grow to 8");
 
     let info = vfs
-        .stat_via_secured(&owner, &vol_path("g"), &mut fs)
+        .stat_via_secured(&owner, &vol_path("g"), &mut fs, FinalLink::Follow)
         .expect("stat");
     assert_eq!(info.size, 8);
 

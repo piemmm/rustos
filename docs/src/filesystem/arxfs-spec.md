@@ -78,6 +78,8 @@ configuration.
 | Time | All persistent timestamps use TAIRiX `Time64`. |
 | Security | POSIX bits + ACLs + capability gates on every inode. |
 | Extended metadata | Every inode has a namespaced extended-attribute store (encrypted, mirrored, COW); foreign per-file metadata (Acorn/Amiga/Atari/Mac) is preserved across copies (§21). |
+| Symbolic links | A first-class inode kind whose target is stored as node data; a volume holding one declares the `symlinks` incompatible feature so a reader without it refuses the volume rather than misreading it (§20). |
+| Feature declaration | The superblock carries an incompatible-feature word; a volume declaring a bit the reader does not implement is refused at mount, never mounted and misread (§4). |
 
 ---
 
@@ -138,6 +140,15 @@ superblock ring
       -> device-health tree
       -> rebuildable secondary indexes
 ```
+
+The superblock also carries an **incompatible-feature word**: a bitmap of
+on-disk structures a reader must understand to mount the volume at all. It is
+plaintext (a reader must consult it before it can unwrap a key) and is covered
+by the block's keyed authenticator, so a bit that survives the check is one the
+volume's own writer set. A volume declaring a bit outside the reader's
+supported set is **refused with that reason**, never mounted and misread. A bit
+is set the first time the volume uses the structure it names, so a volume that
+has never used one stays readable by a build that does not know it.
 
 Authoritative metadata:
 
@@ -244,6 +255,7 @@ metadata authenticator:      lib/crypto keyed hash/MAC (HMAC-SHA256)
 physical checksum:           CRC-32C (Castagnoli, fast, first-party via lib/crc32c)
 critical metadata copies:    2 minimum
 root history:                retained for rollback and safe discard
+symlink target maximum:      FS_SYMLINK_MAX (4096 bytes, the ABI path bound)
 ```
 
 A future ARXFS format may revise constants globally. A mounted v1 filesystem
@@ -628,9 +640,16 @@ requiring a fully mountable filesystem.
 Each inode stores:
 
 ```text
+kind (directory / regular file / symbolic link),
 owner uid, group gid, POSIX mode bits, ACL, optional capability requirement,
 created Time64, modified Time64, changed Time64
 ```
+
+A **symbolic link**'s mode is the conventional `lrwxrwxrwx`, and it gates
+nothing: resolution authorises every directory it traverses and then the
+target, exactly as it would for a path the caller typed, so following a link
+grants no authority the caller did not already have (§20). A link is stamped
+with its creator's ownership like any other node.
 
 ARXFS tracks **no access time (atime)**: updating a stamp on every read
 would defeat the copy-on-write model (a pure read would write metadata),
@@ -765,8 +784,22 @@ Minimum acceptance tests:
 - mkfs issues discard on discard-capable mock devices;
 - SMART/NVMe health deltas trigger required scrub/check actions;
 - Time64 persists dates before 1970, after 2038, and far-future values;
-- fuzz targets for mount, metadata decode, directory decode, compression decode,
-  check, and rescue.
+- fuzz targets for mount, metadata decode, directory decode, symbolic-link
+  decode, compression decode, check, and rescue;
+- a symbolic link's target round-trips verbatim across a remount, including a
+  maximum-length target spanning several blocks;
+- a link is never byte-readable, byte-writable, truncatable, or reflinkable,
+  and `create` refuses the link kind;
+- a link's blocks are accounted as data: the free-space rebuild agrees with the
+  live allocator, scrub verifies them through the data pipeline, and removing
+  the link returns them;
+- a volume declares the symlink feature only once it holds a link, a rolled
+  back creation leaves it undeclared, and `check` widens a declared set that
+  understates the volume;
+- a volume declaring an unsupported feature is refused at mount with that
+  reason;
+- a metadata copy that cannot be *read* is recovered from its companion, just
+  as one that fails to authenticate is.
 
 The implementing agent must run the full TAIRiX CI/test requirements from
 `AGENTS.md` before reporting completion. 
@@ -1195,18 +1228,45 @@ values above the single-block bound, and the per-family foreign-filesystem
 driver wiring (which lands with those drivers). These remain future work; this
 stage builds the foundation they consume.
 
+Stage 14 added **symbolic links** (§20) and the **incompatible-feature word**
+(§4) that keeps them honest. A link is an inode of on-disk kind `3` whose
+target is stored as node data, so it reuses the whole §5–§10 pipeline —
+checksums, authentication, encryption, dedupe — with no second storage path,
+and its blocks are accounted, scrubbed, and freed as the single-copy data
+records they are. The driver's `kind` became an enum rather than a
+directory/not-directory boolean, which is what forced every site that used to
+treat "not a directory" as "a regular file" to say what it means for a link:
+`read_at`, `write_at`, `truncate`, and `reflink` now refuse one fail-closed,
+`create` refuses the kind, `rescue` counts and skips one rather than emitting
+its target as file bytes, and `read_link`/`create_link` are the only ways in
+and out. A volume gains the `symlinks` feature bit from its first link (not at
+format time, so a link-free volume stays readable by a build without the
+feature) and `check` widens a word that understates the volume. The §16
+acceptance tests for this stage — target round-trip across a remount including
+a maximum-length multi-block target, every byte-content refusal, data-block
+accounting agreeing across a rebuild, the lazy-then-committed feature
+declaration and its rollback, an unsupported declared feature refusing the
+mount with its reason, `check` widening an understated word, and the extended
+`fuzz_mount` link-decode sweep — all pass, alongside the crash-replay sweep,
+the posix suite, and the QEMU vertical. The same stage closed a redundancy
+defect the §8 companion mirror had all along: a copy that failed to
+*authenticate* fell back to its mirror, but one that failed to **read** did
+not, so a single-sector media error defeated the very redundancy it was meant
+to survive. All three mirrored read paths — superblock slot, transaction root,
+and metadata block — now treat an unreadable copy as an absent one.
+
 ---
 
 ## 19. Sparse files (ZERO/Hole extents)
 
 Sparse-file support is mandatory, always enabled, and not tunable (the
-authoritative appendix is `.junie/SPARSE.md`). ARXFS stores a logical
+authoritative appendix is `plans/SPARSE.md`). ARXFS stores a logical
 all-zero range as metadata only — never a physical data record, a zstd
 payload, a dedupe chunk, or an encrypted data blob.
 
 **Representation.** A hole is an *unmapped* logical range. ARXFS represents
 holes **implicitly** as gaps between the per-file extent-tree mappings (§4,
-§6) — the form `.junie/SPARSE.md` §2/§3 permit alongside an explicit ZERO
+§6) — the form `plans/SPARSE.md` §2/§3 permit alongside an explicit ZERO
 extent. An extent run always names physical data; a logical block with no
 covering run is a hole. The extent map stays sorted by logical offset with no
 overlapping runs (the B-tree invariant, normalised by `extent_assign` /
@@ -1241,6 +1301,106 @@ holes) from allocated data (excludes holes, bar metadata overhead): a 10 MiB
 all-zero file reports a 10 MiB logical size and zero mapped data blocks. Because
 every volume is encrypted, a hole also leaves no plaintext data payload for the
 zero range; only the surrounding metadata is protected, as for any inode.
+
+---
+
+## 20. Symbolic links
+
+Symbolic links are a first-class ARXFS object kind. A link is an inode of
+on-disk kind `3` (beside `1` for a directory and `2` for a regular file)
+whose **stored target is its node data**. `Inode::decode` rejects any other
+kind value, so an undefined kind is corruption rather than something coerced
+onto the nearest match.
+
+The kind is an enum in the driver, not a directory/not-directory boolean.
+That is deliberate: the code it replaced asked "is this a directory?" and
+treated everything else as a regular file, which would have made a link a
+readable, writable, reflinkable file at half a dozen call sites the compiler
+could not have flagged.
+
+### 20.1 The target is node data
+
+A link's target goes through the ordinary file write path, so it is one
+`(inode, logical block)` extent map like any other content and there is no
+second storage path to checksum, encrypt, scrub, relocate, or repair. What
+that inherits, deliberately:
+
+- **Checksummed and authenticated.** The target passes the §5/§8 data
+  pipeline — physical checksum, AEAD, logical hash — so a corrupt target is
+  *detected* rather than resolved to some other path. This is the point of
+  reusing the data path rather than packing the target into the inode record.
+- **Never compressed in practice.** Compression operates on whole aligned
+  16-block clusters (§10) and a single-block record is always stored raw. A
+  target is at most `FS_SYMLINK_MAX` (4096) bytes, which is under one cluster
+  at every supported block size, so a link never reaches the compressor. Path
+  resolution reads a link per hop, and that path stays free of codec work by
+  construction rather than by a special case.
+- **Dedupe-eligible, on purpose.** Two links with the same target share a
+  chunk exactly as two files with the same bytes do — byte-verified before
+  sharing, refcounted, copied on write (§9). Excluding links would be a
+  `dedupe=off` knob for one object kind, which §1 forbids; and many desktop
+  shortcuts to one bundle is precisely the case sharing was built for.
+- **Sparse-safe by construction.** An all-zero target is unrepresentable: the
+  VFS grammar rejects an empty target and rejects NUL inside a component, so
+  the §19 hole path is never reached for a link.
+
+A link's blocks are therefore **data**, not a directory's mirrored metadata
+pairs. Allocation accounting, freeing, scrub, and the free-space rebuild all
+key on "is this node's content mirrored metadata?", which only a directory
+answers yes to, so a link's blocks are marked, verified, and returned as the
+single-copy data records they are.
+
+### 20.2 A link is not a byte stream
+
+The driver refuses, fail-closed, every operation that would treat a link's
+data as file content: `read_at`, `write_at`, `truncate`, and `reflink`. A
+reflink is the sharpest case — it clones data blocks into a fresh *regular
+file*, so cloning a link would silently produce a file holding the target's
+text instead of a second link. `create` refuses the link kind outright,
+because it carries no target to store; links are created only by
+`create_link`, which does.
+
+The target is read with `read_link` and nowhere else. It comes back exactly as
+stored — unresolved, unnormalised, with no terminator — because resolution is
+the VFS's decision, made component by component under the caller's attested
+identity. A buffer too small for the target is refused, never handed a
+truncated path.
+
+`rescue` (§12) **counts and skips** links rather than extracting them: its
+sink carries file bytes, so emitting a target through it would recreate the
+link on the destination as a regular file holding the target's text. An honest
+omission in the report beats a silent change of kind.
+
+### 20.3 Declaring the feature
+
+A volume that holds a link declares `INCOMPAT_SYMLINKS` in the superblock's
+incompatible-feature word (§4). A reader that does not know kind `3` would
+otherwise read a link inode as structurally invalid — reporting a sound volume
+as corrupt, or, in a reader less careful than this one, misreading it. The bit
+makes the refusal happen once at mount, with its reason, instead of at some
+arbitrary later inode read.
+
+The bit is set by the **first link the volume gets**, in the same transaction
+that mints it, and a rolled back creation takes it back with the rest of the
+transaction's state. It is deliberately not set at format time: a volume that
+has never held a link is not gratuitously made unmountable by a build that
+lacks the feature. Bumping the format version instead would have had exactly
+that effect on every existing volume, which is why the feature word exists.
+
+`check` (§12) validates the declaration against reality and **widens** a word
+that understates the volume. Both the inode tree and the superblock are sealed
+under the same key, so a volume can only reach that state through a driver
+defect — which is what an offline structural check is for. Widening fails safe
+in one direction only: a reader without the feature then refuses the volume
+rather than reading a link as a corrupt inode.
+
+### 20.4 What ARXFS does not decide
+
+ARXFS stores the bytes; it never resolves them. The hop bound, the physical
+`..` handling, the refusal to escape the volume, the per-component permission
+checks, and the `NO_FOLLOW` posture are all VFS policy and live in
+`plans/SYMLINKS.md`. The driver's whole contribution is a durable, integrity-
+checked place to keep a path.
 
 ---
 

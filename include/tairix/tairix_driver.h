@@ -100,6 +100,7 @@
 /* Filesystem node kind (uint8_t). */
 #define TAIRIX_NODE_KIND_DIRECTORY ((uint8_t)0u)
 #define TAIRIX_NODE_KIND_REGULAR_FILE ((uint8_t)1u)
+#define TAIRIX_NODE_KIND_SYMLINK ((uint8_t)2u)
 
 /* Driver input-event kind (uint8_t); distinct from the windowing TAIRIX_INPUT_KIND_*. */
 #define TAIRIX_INPUT_EVENT_KIND_KEY ((uint8_t)1u)

@@ -346,8 +346,10 @@ impl<B: Block> ARXFS<B> {
     }
 
     /// Verify one inode's metadata (its extent tree) and the live blocks it
-    /// maps: a file's data blocks through the integrity pipeline (classified
-    /// and recorded), a directory's blocks as mirrored metadata.
+    /// maps: a directory's blocks as mirrored metadata, and a regular file's
+    /// or a symbolic link's through the data integrity pipeline — a link's
+    /// target is stored as node data, so it is verified exactly like file
+    /// content (`docs/src/filesystem/arxfs-spec.md` §20).
     fn scrub_inode(
         &mut self,
         ino: u32,
@@ -362,13 +364,13 @@ impl<B: Block> ARXFS<B> {
             return Ok(());
         }
         let spec = extent_spec(ino);
-        let is_dir = inode.is_dir();
+        let mirrored = inode.kind.content_is_metadata();
         let entries = self.btree_collect_entries(inode.extent_root, spec)?;
         let mut buf = [0u8; MAX_BLOCK_SIZE];
         for (_, value) in entries {
             let ext = Extent::decode(&value)?;
             if ext.compressed {
-                if is_dir {
+                if mirrored {
                     // A directory never holds a compressed extent; record the
                     // impossible shape rather than scan the wrong blocks.
                     report.note_meta(MetaStatus::Unrepairable);
@@ -385,7 +387,7 @@ impl<B: Block> ARXFS<B> {
             }
             for b in 0..ext.len {
                 let block = ext.phys + b;
-                if is_dir {
+                if mirrored {
                     let status = self.scrub_meta(block, BlockType::Directory)?;
                     report.note_meta(status);
                 } else {
@@ -531,14 +533,15 @@ impl<B: Block> ARXFS<B> {
         report: &mut ScrubReport,
     ) -> Result<bool, DriverError> {
         // Build the authoritative referrer set per physical data block from
-        // every file's extents (directories are mirrored metadata, not shared
-        // chunks, so they never participate in dedupe).
+        // every file's and link's extents (a link's target is node data, so
+        // it shares chunks like any other; only directories are mirrored
+        // metadata rather than shared chunks and never participate).
         let mut referrers: BTreeMap<u64, Vec<Referrer>> = BTreeMap::new();
         for (ino_key, value) in inodes {
             let Some(inode) = Inode::decode(value)? else {
                 continue;
             };
-            if inode.is_dir() {
+            if inode.kind.content_is_metadata() {
                 continue;
             }
             let ino = u32::try_from(*ino_key).map_err(|_| DriverError::DeviceFault)?;

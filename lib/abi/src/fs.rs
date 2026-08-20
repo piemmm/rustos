@@ -29,6 +29,15 @@ use crate::Errno;
 /// path exceeding it is refused before any resolution begins.
 pub const FS_PATH_MAX: usize = 4096;
 
+/// Maximum length, in bytes, of a symbolic link's target.
+///
+/// A link's target *is* a path, so this is [`FS_PATH_MAX`] rather than an
+/// independent number: a smaller bound would make legal paths unnameable as
+/// a target, and a larger one could never resolve. Derived, never restated,
+/// so the two cannot drift apart. A target exceeding it is refused before
+/// any node is written.
+pub const FS_SYMLINK_MAX: usize = FS_PATH_MAX;
+
 /// Maximum number of bytes a single `fs_read` / `fs_write` transfers.
 ///
 /// A fail-closed bound on the per-call kernel staging buffer (the same role
@@ -105,10 +114,10 @@ pub const FS_ATTR_VALUE_MAX: usize = 3072;
 
 /// What an inode is, as reported by [`FileStat`] and each [`DirEntry`].
 ///
-/// Deliberately closed: the VFS distinguishes only regular files and
-/// directories at this layer (the on-disk driver may know more, but the
-/// userland contract does not), and an unknown discriminant on decode fails
-/// closed rather than being guessed.
+/// Deliberately closed, and an unknown discriminant on decode fails closed
+/// rather than being guessed. A [`Symlink`](Self::Symlink) is only ever
+/// reported for the link *itself* — a resolved path yields the target's
+/// kind — so a caller sees this variant exactly when it asked not to follow.
 #[repr(u8)]
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
 pub enum FileKind {
@@ -116,6 +125,8 @@ pub enum FileKind {
     Regular = 0,
     /// A directory: listable with `fs_readdir`.
     Directory = 1,
+    /// A symbolic link: its content is a path, read with `fs_readlink`.
+    Symlink = 2,
 }
 
 impl FileKind {
@@ -136,6 +147,7 @@ impl FileKind {
         match raw {
             0 => Ok(Self::Regular),
             1 => Ok(Self::Directory),
+            2 => Ok(Self::Symlink),
             _ => Err(Errno::OutOfRange),
         }
     }
@@ -145,12 +157,19 @@ impl FileKind {
     pub const fn is_dir(self) -> bool {
         matches!(self, Self::Directory)
     }
+
+    /// Whether this is a symbolic link.
+    #[must_use]
+    pub const fn is_symlink(self) -> bool {
+        matches!(self, Self::Symlink)
+    }
 }
 
 /// The ten-byte POSIX long-format mode string for a node, e.g. `drwxr-xr-x`.
 ///
-/// The first byte is the kind indicator — `d` for a directory, `-` for a
-/// regular file — and the next nine are the owner/group/other `rwx` triads
+/// The first byte is the kind indicator — `d` for a directory, `l` for a
+/// symbolic link, `-` for a regular file — and the next nine are the
+/// owner/group/other `rwx` triads
 /// taken from the low nine bits of `mode`: a set bit renders as its
 /// `r`/`w`/`x` letter, a clear bit as `-`. Every byte is ASCII, so the array
 /// is valid UTF-8 by construction and a caller may render it as a string
@@ -174,7 +193,11 @@ pub const fn mode_string(kind: FileKind, mode: u32) -> [u8; 10] {
         (0o001, b'x'),
     ];
     let mut out = [b'-'; 10];
-    out[0] = if kind.is_dir() { b'd' } else { b'-' };
+    out[0] = match kind {
+        FileKind::Directory => b'd',
+        FileKind::Symlink => b'l',
+        FileKind::Regular => b'-',
+    };
     let mut i = 0;
     while i < PERMISSIONS.len() {
         let (bit, ch) = PERMISSIONS[i];
@@ -222,6 +245,19 @@ impl OpenFlags {
     /// With [`CREATE`](Self::CREATE), fail closed if the file already
     /// exists (exclusive create).
     pub const EXCLUSIVE: Self = Self(1 << 6);
+    /// Do not follow a symbolic link in the **final** path component: the
+    /// handle names the link itself. Intermediate components are still
+    /// followed, exactly as `O_NOFOLLOW` specifies — a link anywhere but the
+    /// end is a path, not the target of the open.
+    ///
+    /// The link's bytes are not byte-readable, so this with
+    /// [`READ`](Self::READ) or [`WRITE`](Self::WRITE) fails closed with
+    /// [`Errno::LinkLoop`] *when the final component really is a link*; the
+    /// flag combination itself is legal, because the final component
+    /// usually is not one. A resolve-only handle (neither access bit) is
+    /// therefore the `lstat` posture: it stats the link rather than its
+    /// target.
+    pub const NO_FOLLOW: Self = Self(1 << 7);
 
     /// The set of all defined flag bits.
     const DEFINED_BITS: u32 = Self::READ.0
@@ -230,7 +266,8 @@ impl OpenFlags {
         | Self::TRUNCATE.0
         | Self::APPEND.0
         | Self::DIRECTORY.0
-        | Self::EXCLUSIVE.0;
+        | Self::EXCLUSIVE.0
+        | Self::NO_FOLLOW.0;
 
     /// An empty flag set.
     #[must_use]
@@ -297,6 +334,12 @@ impl OpenFlags {
     #[must_use]
     pub const fn is_write(self) -> bool {
         self.contains(Self::WRITE)
+    }
+
+    /// Whether the final component's symbolic link must not be followed.
+    #[must_use]
+    pub const fn is_no_follow(self) -> bool {
+        self.contains(Self::NO_FOLLOW)
     }
 }
 
@@ -706,7 +749,7 @@ mod tests {
     extern crate alloc;
     use super::{
         mode_string, DirEntries, DirEntry, FileId, FileKind, FileStat, NodeTimes, OpenFlags,
-        UnlinkFlags, FS_NAME_MAX,
+        UnlinkFlags, FS_NAME_MAX, FS_PATH_MAX, FS_SYMLINK_MAX,
     };
     use crate::time::Time64;
     use crate::Errno;
@@ -730,20 +773,55 @@ mod tests {
 
     #[test]
     fn file_kind_round_trips_and_rejects_unknown() {
-        for k in [FileKind::Regular, FileKind::Directory] {
+        for k in [FileKind::Regular, FileKind::Directory, FileKind::Symlink] {
             assert_eq!(FileKind::from_u8(k.as_u8()), Ok(k));
         }
-        assert_eq!(FileKind::from_u8(2), Err(Errno::OutOfRange));
+        assert_eq!(FileKind::from_u8(3), Err(Errno::OutOfRange));
         assert_eq!(FileKind::from_u8(0xFF), Err(Errno::OutOfRange));
         assert!(FileKind::Directory.is_dir());
         assert!(!FileKind::Regular.is_dir());
+        // A link is neither a directory nor byte content: exactly one
+        // predicate answers for each kind, so no caller can treat a link as
+        // a directory it may descend.
+        assert!(FileKind::Symlink.is_symlink());
+        assert!(!FileKind::Symlink.is_dir());
+        assert!(!FileKind::Directory.is_symlink());
+        assert!(!FileKind::Regular.is_symlink());
+    }
+
+    #[test]
+    fn mode_string_marks_a_symlink() {
+        // The kind indicator is the only difference; the triads are shared.
+        assert_eq!(&mode_string(FileKind::Symlink, 0o777), b"lrwxrwxrwx");
+        assert_eq!(&mode_string(FileKind::Directory, 0o777), b"drwxrwxrwx");
+        assert_eq!(&mode_string(FileKind::Regular, 0o777), b"-rwxrwxrwx");
     }
 
     #[test]
     fn open_flags_reject_reserved_bits() {
-        assert_eq!(OpenFlags::from_bits(1 << 7), Err(Errno::OutOfRange));
+        assert_eq!(OpenFlags::from_bits(1 << 8), Err(Errno::OutOfRange));
         assert_eq!(OpenFlags::from_bits(u32::MAX), Err(Errno::OutOfRange));
         assert_eq!(OpenFlags::from_bits(0).map(OpenFlags::bits), Ok(0));
+    }
+
+    #[test]
+    fn no_follow_is_defined_and_composes_with_access() {
+        // The flag combination is legal: the final component is usually not
+        // a link, and it is resolution — not `from_bits` — that refuses byte
+        // access to one that is.
+        let bare = OpenFlags::from_bits(OpenFlags::NO_FOLLOW.bits()).expect("defined");
+        assert!(bare.is_no_follow());
+        assert!(!bare.is_read() && !bare.is_write());
+        let reading = OpenFlags::from_bits(OpenFlags::NO_FOLLOW.union(OpenFlags::READ).bits())
+            .expect("defined");
+        assert!(reading.is_no_follow() && reading.is_read());
+        assert!(!OpenFlags::READ.is_no_follow());
+    }
+
+    #[test]
+    fn symlink_target_bound_is_the_path_bound() {
+        // Derived, never restated: a target is a path.
+        assert_eq!(FS_SYMLINK_MAX, FS_PATH_MAX);
     }
 
     #[test]

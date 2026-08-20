@@ -156,9 +156,15 @@ region, or a zero `inode_count`, is refused with `OutOfRange`.
   any depth).
 - Hash-tree (`htree`) interior nodes are not traversed; only the linear
   leaf layout is read (sufficient for small and moderate directories).
-- Inline-data and special files (symlinks, devices, FIFOs) are reported
-  as `NotFound` by `node_info` rather than surfaced as a node kind the
-  `abi-v1` read surface does not model.
+- Devices, FIFOs, and sockets are reported as `NotFound` by `node_info`
+  rather than surfaced as a node kind the `abi-v1` read surface does not
+  model.
+- Symbolic links are **read** in both on-disk spellings — fast (target
+  inline in `i_block`) and slow (block-backed) — but not **authored**:
+  `create_link` answers `Unsupported`, which the VFS surfaces as the
+  permanent `NotSupported` limit rather than a substituted regular file.
+  An inline-data link keeps its target in the inode's own extended-attribute
+  area, which this driver decodes nowhere, so it answers `Unsupported` too.
 
 ## Security
 

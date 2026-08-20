@@ -2290,6 +2290,10 @@ impl<B: Block> FilesystemSecurity for Fat32<B> {
         let mode = match info.kind {
             NodeKind::Directory => 0o755,
             NodeKind::RegularFile => 0o644,
+            // FAT32 stores no symbolic links, so `node_info` never reports
+            // one; refuse rather than invent a mode for a node this format
+            // cannot hold.
+            NodeKind::Symlink => return Err(DriverError::Unsupported),
         };
         Ok(NodeSecurity::new(mode, 0, 0))
     }

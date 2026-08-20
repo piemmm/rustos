@@ -7738,3 +7738,47 @@ has landed for `userland/apps/widgets` and remains for five apps.
    `mstatus.FS` handling, on a hard-float target whose userland uses
    `f64`). Noticed by reading (§2.18), unconfirmed; confirm and fix
    independently of any GUI work.
+
+---
+
+## SYMLINKS — first-class symbolic links (`plans/SYMLINKS.md`)  **[S1–S3 DONE; S4–S5 REMAINING]**
+
+`plans/SYMLINKS.md` is the binding design and carries the settled decisions,
+the fixed bounds, and the per-stage state; it is not repeated here. What a
+future contributor needs from this file:
+
+- **Why it exists.** Nothing in the tree had links — no `FileKind`, no
+  `NodeKind`, no syscall, no on-disk kind — and a desktop shortcut is a
+  symlink to an app bundle (`plans/PINBOARD.md`,
+  `plans/NEW-TASKBAR.md` T16), so the desktop shortcut (S5) cannot exist
+  until the filesystem does.
+- **Landed:** the ABI kind and flag, `fs_symlink` (113) / `fs_readlink`
+  (114) end to end through the secured VFS, the driver contract
+  (`read_link`/`create_link`, both defaulting to `Unsupported`), bounded
+  per-component resolution with physical `..`, the `lib/rt` wrappers, and
+  the on-disk spellings: ARXFS inode kind `3` with the target stored as node
+  data behind a new superblock **incompatible-feature word**, and ext4's
+  `read_link` for both the fast and slow spellings (ext4 reads foreign links
+  but does not author them).
+- **`lstat` is `OpenFlags::NO_FOLLOW`, not a `fs_stat` operand.** `fs_stat`
+  is fd-based, so the posture is fixed once at open and re-derived from the
+  handle by every operation served for that descriptor
+  (`FinalLink::for_open`) — one decision point, so a stat can never
+  contradict its own open.
+- **The follow posture belongs to the operation, and a walk reports a
+  *place*.** The driver mutation surface is keyed `(dir, name)`, not by node,
+  so VFS resolution yields the directory holding the final name and the name
+  itself; under `Follow` that is the *target's* place, which is what makes a
+  write reach the target. `write`/`truncate`/`O_CREAT` follow;
+  `mkdir`/`symlink`/`unlink`/`rmdir`/`rename` keep the name as typed. The
+  pre-existing, non-POSIX requirement of write permission on a write's parent
+  is unchanged and now applies to the *resolved* parent.
+- **An incompatible-feature word, not a format-version bump.** ARXFS gained a
+  `u64` feature word at an offset every existing v2 volume already has zeroed,
+  so no v2 volume is invalidated; a volume declaring an unsupported bit is
+  refused at mount with that reason. The `symlinks` bit is set by the first
+  link, not at format time, so a link-free volume stays readable by a build
+  without the feature.
+- **Remaining:** the userland surface (`ln`, `ls -l`, `lib/browse`, `fstree`,
+  a `posix_fs_suite` vertical) and the desktop shortcut. Each carries its own
+  gate.

@@ -19,7 +19,7 @@ fn rmdir_removes_an_empty_directory() {
         .expect("rmdir");
 
     assert_eq!(
-        vfs.stat_via_secured(&owner, &vol_path("empty"), &mut fs)
+        vfs.stat_via_secured(&owner, &vol_path("empty"), &mut fs, FinalLink::Follow)
             .map(|info| info.kind),
         Err(VfsError::NotFound)
     );
@@ -71,7 +71,7 @@ fn rmdir_of_a_file_is_not_a_directory() {
         Err(VfsError::NotADirectory)
     );
     // The refused removal left the file untouched.
-    vfs.stat_via_secured(&owner, &vol_path("plain"), &mut fs)
+    vfs.stat_via_secured(&owner, &vol_path("plain"), &mut fs, FinalLink::Follow)
         .expect("file survives");
 }
 

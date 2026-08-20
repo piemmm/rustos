@@ -20,7 +20,7 @@ use tairix_abi::CapabilityId;
 use tairix_kernel_sec::{GroupId, UserId};
 use tairix_sync::{RwLock, RwLockReadGuard, RwLockWriteGuard};
 
-use super::delegate::{DelegatedFs, DelegatedInfo};
+use super::delegate::{DelegatedFs, DelegatedInfo, FinalLink};
 use super::mount::MountTable;
 use super::path::{Path, ROOT_TEMPLATE};
 use super::perm::{Access, Credentials, Metadata, Mode};
@@ -202,9 +202,10 @@ impl Vfs {
         cred: &Credentials<'_>,
         path: &Path,
         fs: &mut dyn FilesystemRead,
+        final_link: FinalLink,
     ) -> Result<Vec<(DriverNodeInfo, String)>, VfsError> {
         let (template, remainder) = self.delegate_context(cred, path, false)?;
-        DelegatedFs::new(fs, template).list(cred, &remainder)
+        DelegatedFs::new(fs, template).list(cred, &remainder, final_link)
     }
 
     /// Report the structural metadata of a node under a driver-backed
@@ -223,9 +224,36 @@ impl Vfs {
         cred: &Credentials<'_>,
         path: &Path,
         fs: &mut dyn FilesystemRead,
+        final_link: FinalLink,
     ) -> Result<DelegatedInfo, VfsError> {
         let (template, remainder) = self.delegate_context(cred, path, false)?;
-        DelegatedFs::new(fs, template).stat(cred, &remainder)
+        DelegatedFs::new(fs, template).stat(cred, &remainder, final_link)
+    }
+
+    /// Read the stored target of the symbolic link at `path` under a
+    /// driver-backed mount, delegating to `fs`.
+    ///
+    /// The final component is never followed; the target comes back exactly
+    /// as it was stored. See [`Vfs::read_via`] for the resolution and
+    /// permission model.
+    ///
+    /// # Errors
+    ///
+    /// * [`VfsError::NotFound`] if no driver-backed mount covers `path` or
+    ///   the link does not exist.
+    /// * [`VfsError::InvalidPath`] if `path` names something other than a
+    ///   symbolic link.
+    /// * [`VfsError::NotSupported`] if the mounted format stores no links.
+    /// * [`VfsError::PermissionDenied`], [`VfsError::NotADirectory`],
+    ///   [`VfsError::LinkLoop`], or [`VfsError::Io`].
+    pub fn readlink_via(
+        &self,
+        cred: &Credentials<'_>,
+        path: &Path,
+        fs: &mut dyn FilesystemRead,
+    ) -> Result<String, VfsError> {
+        let (template, remainder) = self.delegate_context(cred, path, false)?;
+        DelegatedFs::new(fs, template).read_link(cred, &remainder)
     }
 
     /// Create an empty regular file under a driver-backed mount,
@@ -234,6 +262,11 @@ impl Vfs {
     /// The covering mount must be driver-backed and writable; resolution
     /// and the checks match [`Vfs::read_via`], plus write permission
     /// on the parent directory's template.
+    ///
+    /// This is the `open`-with-`O_CREAT` create, so a final symbolic link is
+    /// followed: creating through a *dangling* link creates the file the link
+    /// names, as POSIX specifies, rather than reporting the link's own name
+    /// as already taken.
     ///
     /// # Errors
     ///
@@ -249,12 +282,45 @@ impl Vfs {
         fs: &mut F,
     ) -> Result<(), VfsError> {
         let (template, remainder) = self.delegate_context(cred, path, true)?;
-        DelegatedFs::new(fs, template).create(cred, &remainder, DriverNodeKind::RegularFile)
+        DelegatedFs::new(fs, template).create(
+            cred,
+            &remainder,
+            DriverNodeKind::RegularFile,
+            FinalLink::Follow,
+        )
+    }
+
+    /// Create a symbolic link at `path` under a driver-backed mount whose
+    /// stored target is `target`, delegating to `fs`.
+    ///
+    /// `target` is stored verbatim and is never resolved here, so the call
+    /// authorises only the right to create a name in the link's own parent
+    /// and the link may legitimately dangle. See [`Vfs::create_via`] for the
+    /// resolution and permission model.
+    ///
+    /// # Errors
+    ///
+    /// * [`VfsError::InvalidPath`] if `target` fails the link-target
+    ///   grammar.
+    /// * [`VfsError::NotSupported`] if the mounted format has no link object
+    ///   type.
+    /// * Otherwise as for [`Vfs::create_via`].
+    pub fn symlink_via<F: FilesystemRead + FilesystemWrite + ?Sized>(
+        &self,
+        cred: &Credentials<'_>,
+        path: &Path,
+        fs: &mut F,
+        target: &str,
+    ) -> Result<(), VfsError> {
+        let (template, remainder) = self.delegate_context(cred, path, true)?;
+        DelegatedFs::new(fs, template).create_link(cred, &remainder, target)
     }
 
     /// Create a directory under a driver-backed mount, delegating to `fs`.
     ///
-    /// See [`Vfs::create_via`] for the resolution and permission model.
+    /// See [`Vfs::create_via`] for the resolution and permission model,
+    /// except that `mkdir` does **not** follow a final symbolic link: making
+    /// a directory over an existing link is [`VfsError::AlreadyExists`].
     ///
     /// # Errors
     ///
@@ -266,13 +332,21 @@ impl Vfs {
         fs: &mut F,
     ) -> Result<(), VfsError> {
         let (template, remainder) = self.delegate_context(cred, path, true)?;
-        DelegatedFs::new(fs, template).create(cred, &remainder, DriverNodeKind::Directory)
+        DelegatedFs::new(fs, template).create(
+            cred,
+            &remainder,
+            DriverNodeKind::Directory,
+            FinalLink::Keep,
+        )
     }
 
     /// Write `data` into a file under a driver-backed mount starting at
     /// `offset`, delegating to `fs` and returning the bytes written.
     ///
-    /// See [`Vfs::create_via`] for the resolution and permission model.
+    /// See [`Vfs::create_via`] for the resolution and permission model. A
+    /// final symbolic link is followed, so the bytes reach the target, and
+    /// the write permission this VFS asks for on a write's parent applies to
+    /// the directory the target actually lives in.
     ///
     /// # Errors
     ///
@@ -378,9 +452,10 @@ impl Vfs {
         cred: &Credentials<'_>,
         path: &Path,
         fs: &mut F,
+        final_link: FinalLink,
     ) -> Result<Vec<(DriverNodeInfo, String)>, VfsError> {
         let (template, remainder) = self.delegate_context(cred, path, false)?;
-        DelegatedFs::new_secured(fs, template).list(cred, &remainder)
+        DelegatedFs::new_secured(fs, template).list(cred, &remainder, final_link)
     }
 
     /// Per-inode counterpart of [`Vfs::stat_via`].
@@ -393,9 +468,25 @@ impl Vfs {
         cred: &Credentials<'_>,
         path: &Path,
         fs: &mut F,
+        final_link: FinalLink,
     ) -> Result<DelegatedInfo, VfsError> {
         let (template, remainder) = self.delegate_context(cred, path, false)?;
-        DelegatedFs::new_secured(fs, template).stat(cred, &remainder)
+        DelegatedFs::new_secured(fs, template).stat(cred, &remainder, final_link)
+    }
+
+    /// Per-inode counterpart of [`Vfs::readlink_via`].
+    ///
+    /// # Errors
+    ///
+    /// As [`Vfs::readlink_via`].
+    pub fn readlink_via_secured<F: FilesystemRead + FilesystemSecurity + ?Sized>(
+        &self,
+        cred: &Credentials<'_>,
+        path: &Path,
+        fs: &mut F,
+    ) -> Result<String, VfsError> {
+        let (template, remainder) = self.delegate_context(cred, path, false)?;
+        DelegatedFs::new_secured(fs, template).read_link(cred, &remainder)
     }
 
     /// Per-inode counterpart of [`Vfs::create_via`].
@@ -410,7 +501,30 @@ impl Vfs {
         fs: &mut F,
     ) -> Result<(), VfsError> {
         let (template, remainder) = self.delegate_context(cred, path, true)?;
-        DelegatedFs::new_secured(fs, template).create(cred, &remainder, DriverNodeKind::RegularFile)
+        DelegatedFs::new_secured(fs, template).create(
+            cred,
+            &remainder,
+            DriverNodeKind::RegularFile,
+            FinalLink::Follow,
+        )
+    }
+
+    /// Per-inode counterpart of [`Vfs::symlink_via`].
+    ///
+    /// # Errors
+    ///
+    /// As [`Vfs::symlink_via`].
+    pub fn symlink_via_secured<
+        F: FilesystemRead + FilesystemSecurity + FilesystemWrite + ?Sized,
+    >(
+        &self,
+        cred: &Credentials<'_>,
+        path: &Path,
+        fs: &mut F,
+        target: &str,
+    ) -> Result<(), VfsError> {
+        let (template, remainder) = self.delegate_context(cred, path, true)?;
+        DelegatedFs::new_secured(fs, template).create_link(cred, &remainder, target)
     }
 
     /// Per-inode counterpart of [`Vfs::mkdir_via`].
@@ -425,7 +539,12 @@ impl Vfs {
         fs: &mut F,
     ) -> Result<(), VfsError> {
         let (template, remainder) = self.delegate_context(cred, path, true)?;
-        DelegatedFs::new_secured(fs, template).create(cred, &remainder, DriverNodeKind::Directory)
+        DelegatedFs::new_secured(fs, template).create(
+            cred,
+            &remainder,
+            DriverNodeKind::Directory,
+            FinalLink::Keep,
+        )
     }
 
     /// Per-inode counterpart of [`Vfs::write_via`].

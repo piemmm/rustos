@@ -23,6 +23,8 @@
 use alloc::string::String;
 use alloc::vec::Vec;
 
+use super::delegate::FinalLink;
+
 use tairix_abi::sysinfo::{MountRecord, VolumeIoHealthRecord};
 use tairix_abi::time::Time64;
 use tairix_abi::{CapabilityQuery, Errno, FileKind, FileStat, OpenFlags, UnlinkFlags};
@@ -122,6 +124,11 @@ pub trait FilesystemService: Send + Sync {
     /// List the entries of the directory at `path`, each with the kind and
     /// sizes the mounted filesystem reports for it.
     ///
+    /// `final_link` is the resolution posture of the descriptor the listing
+    /// is served for: under [`FinalLink::Keep`] a `path` whose final
+    /// component is a symbolic link is *not* a directory, so it is refused
+    /// rather than silently listing the link's target.
+    ///
     /// # Errors
     ///
     /// The stable [`Errno`] for the VFS refusal (not a directory, permission
@@ -131,15 +138,65 @@ pub trait FilesystemService: Send + Sync {
         uid: u32,
         caps: &dyn CapabilityQuery,
         path: &str,
+        final_link: FinalLink,
     ) -> Result<Vec<ReaddirEntry>, Errno>;
 
     /// Report the structural metadata of the node at `path`.
+    ///
+    /// `final_link` selects between the POSIX `stat` and `lstat` readings:
+    /// [`FinalLink::Keep`] — the posture an [`OpenFlags::NO_FOLLOW`]
+    /// descriptor carries — reports a final symbolic link itself, including
+    /// a dangling one that following would report as absent.
     ///
     /// # Errors
     ///
     /// The stable [`Errno`] for the VFS refusal, or [`Errno::NotImplemented`]
     /// when no filesystem is mounted.
-    fn stat(&self, uid: u32, caps: &dyn CapabilityQuery, path: &str) -> Result<FileStat, Errno>;
+    fn stat(
+        &self,
+        uid: u32,
+        caps: &dyn CapabilityQuery,
+        path: &str,
+        final_link: FinalLink,
+    ) -> Result<FileStat, Errno>;
+
+    /// Create a symbolic link at the absolute `path` whose stored target is
+    /// `target`.
+    ///
+    /// `target` is stored verbatim and is never resolved here — it is data,
+    /// not a path the kernel walks — so the call authorises only the right
+    /// to create a name in the link's own parent, and the link may
+    /// legitimately dangle. Its grammar is checked before anything is
+    /// written.
+    ///
+    /// # Errors
+    ///
+    /// The stable [`Errno`] for the VFS refusal (an existing name, a
+    /// read-only mount, a permission denial), [`Errno::OutOfRange`] for a
+    /// target that fails the link-target grammar,
+    /// [`Errno::NotSupported`] when the covering mount's format has no link
+    /// object type, or [`Errno::NotImplemented`] when no filesystem is
+    /// mounted.
+    fn symlink(
+        &self,
+        uid: u32,
+        caps: &dyn CapabilityQuery,
+        target: &str,
+        path: &str,
+    ) -> Result<(), Errno>;
+
+    /// Read the stored target of the symbolic link at the absolute `path`.
+    ///
+    /// The final component is never followed and the target comes back
+    /// exactly as it was stored, still unresolved.
+    ///
+    /// # Errors
+    ///
+    /// The stable [`Errno`] for the VFS refusal, [`Errno::OutOfRange`] when
+    /// `path` names something other than a symbolic link,
+    /// [`Errno::NotSupported`] when the covering mount's format stores no
+    /// links, or [`Errno::NotImplemented`] when no filesystem is mounted.
+    fn readlink(&self, uid: u32, caps: &dyn CapabilityQuery, path: &str) -> Result<String, Errno>;
 
     /// Set the length of the regular file at `path` to `size` bytes.
     ///
@@ -463,11 +520,37 @@ impl FilesystemService for NullFilesystemService {
         _uid: u32,
         _caps: &dyn CapabilityQuery,
         _path: &str,
+        _final_link: FinalLink,
     ) -> Result<Vec<ReaddirEntry>, Errno> {
         Err(Errno::NotImplemented)
     }
 
-    fn stat(&self, _uid: u32, _caps: &dyn CapabilityQuery, _path: &str) -> Result<FileStat, Errno> {
+    fn stat(
+        &self,
+        _uid: u32,
+        _caps: &dyn CapabilityQuery,
+        _path: &str,
+        _final_link: FinalLink,
+    ) -> Result<FileStat, Errno> {
+        Err(Errno::NotImplemented)
+    }
+
+    fn symlink(
+        &self,
+        _uid: u32,
+        _caps: &dyn CapabilityQuery,
+        _target: &str,
+        _path: &str,
+    ) -> Result<(), Errno> {
+        Err(Errno::NotImplemented)
+    }
+
+    fn readlink(
+        &self,
+        _uid: u32,
+        _caps: &dyn CapabilityQuery,
+        _path: &str,
+    ) -> Result<String, Errno> {
         Err(Errno::NotImplemented)
     }
 

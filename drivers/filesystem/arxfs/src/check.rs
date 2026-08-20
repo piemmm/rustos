@@ -38,10 +38,11 @@ use tairix_log::{log, Event, EventId, Level, Sink};
 
 use crate::header::{BlockType, HEADER_LEN};
 use crate::scrub::{ScrubReport, ARXFS_RANGE_END, ARXFS_RANGE_START};
+use crate::superblock;
 use crate::transaction::TxnRoot;
 use crate::{
-    as_usize, extent_spec, inode_spec, rd_u32, Extent, Inode, ARXFS, DIRENT_SIZE, MAX_BLOCK_SIZE,
-    NAME_MAX, ROOT_INO,
+    as_usize, extent_spec, inode_spec, rd_u32, Extent, Inode, InodeKind, ARXFS, DIRENT_SIZE,
+    MAX_BLOCK_SIZE, NAME_MAX, ROOT_INO,
 };
 
 /// An offline `check` finished and the structure validated clean.
@@ -105,6 +106,11 @@ pub struct CheckReport {
     /// integrity faults, dangling directory entries, and refcount/reverse-ref
     /// divergences it could not reconcile).
     pub unrecoverable_findings: u64,
+    /// Incompatible-feature bits `check` had to add to the superblock because
+    /// the volume held the structure a bit names without declaring it.
+    /// Widening the declared set is always safe: it can only make a reader
+    /// that lacks the feature refuse the volume, never misread it.
+    pub features_declared: u32,
 }
 
 impl CheckReport {
@@ -115,6 +121,7 @@ impl CheckReport {
         self.verification.metadata_repaired != 0
             || self.verification.divergences_corrected != 0
             || self.orphans_reclaimed != 0
+            || self.features_declared != 0
     }
 
     /// Emit the closing check event to `sink` (log
@@ -166,6 +173,10 @@ pub struct RescueReport {
     pub blocks_skipped: u64,
     /// Inodes whose metadata (extent tree) could not be read at all.
     pub unreadable_inodes: u64,
+    /// Symbolic links the walk reached and deliberately did not extract: the
+    /// sink carries file bytes, so a link's target has nowhere to go that
+    /// would not silently turn it into a regular file.
+    pub links_skipped: u64,
 }
 
 impl RescueReport {
@@ -301,6 +312,11 @@ impl<B: Block> ARXFS<B> {
         // the root, validate every entry's target, and reclaim orphaned inodes.
         let reclaimed = self.check_directories_and_orphans(&mut report)?;
 
+        // The feature word must cover what the volume actually holds, or a
+        // reader lacking the feature would mount and misread instead of
+        // refusing.
+        report.features_declared = self.check_declared_features()?;
+
         let v = &report.verification;
         let divergences = v.refcount_divergences + v.reverse_ref_divergences;
         report.unrecoverable_findings = v.metadata_unrepairable
@@ -312,7 +328,38 @@ impl<B: Block> ARXFS<B> {
         report.structure_sound = report.unrecoverable_findings == 0;
         report.complete = true;
 
-        Ok((report, refcounts_corrected || reclaimed))
+        Ok((
+            report,
+            refcounts_corrected || reclaimed || report.features_declared != 0,
+        ))
+    }
+
+    /// Confirm the superblock's incompatible-feature word covers the
+    /// structure the volume really holds, widening it when it does not and
+    /// returning how many bits were added.
+    ///
+    /// Today the only such structure is a symbolic link. The write path sets
+    /// the bit in the very transaction that mints the first link, and both
+    /// the inode tree and the superblock are sealed under the same key, so a
+    /// volume can only reach here understating itself through a driver
+    /// defect — which is exactly what an offline structural check is for.
+    /// Widening fails safe in one direction only: a reader without the
+    /// feature then refuses the volume rather than reading a link as a
+    /// corrupt inode.
+    fn check_declared_features(&mut self) -> Result<u32, DriverError> {
+        if self.incompat & superblock::INCOMPAT_SYMLINKS != 0 {
+            return Ok(0);
+        }
+        for (_, value) in self.btree_collect_entries(self.inode_tree_root, inode_spec())? {
+            let Some(inode) = Inode::decode(&value)? else {
+                continue;
+            };
+            if inode.kind == InodeKind::Link {
+                self.incompat |= superblock::INCOMPAT_SYMLINKS;
+                return Ok(1);
+            }
+        }
+        Ok(0)
     }
 
     /// Collect a directory's `(child inode, is "." or "..")` entries, reusing
@@ -516,6 +563,12 @@ impl<B: Block> ARXFS<B> {
     /// cannot be read at all is counted as unreadable and skipped. An inode
     /// tree too damaged to enumerate leaves the report's root-found state but
     /// extracts nothing rather than failing.
+    ///
+    /// A symbolic link is **counted and skipped**, never extracted: the sink
+    /// takes file bytes, so emitting a link's target through it would recreate
+    /// the link on the destination as a regular file holding the target's
+    /// text — a silent change of kind, which is worse than an honest omission
+    /// (`docs/src/filesystem/arxfs-spec.md` §20).
     fn rescue_extract(
         &mut self,
         out: &mut dyn RescueSink,
@@ -530,8 +583,13 @@ impl<B: Block> ARXFS<B> {
             let Some(inode) = Inode::decode(&value)? else {
                 continue;
             };
-            if inode.is_dir() {
-                continue;
+            match inode.kind {
+                InodeKind::File => {}
+                InodeKind::Dir => continue,
+                InodeKind::Link => {
+                    report.links_skipped += 1;
+                    continue;
+                }
             }
             let ino = u32::try_from(ino_key).map_err(|_| DriverError::DeviceFault)?;
             report.files_mapped += 1;

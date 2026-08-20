@@ -156,6 +156,8 @@ release onward the table is frozen and new behaviour ships as `abi-v2`.
 | 110 | `thread_exit`  | —                                       | `unit`  | —                       | yes |
 | 111 | `futex_wait`   | `user_ptr uaddr`, `u32 expected`, `u64 timeout_ns` | `errno` | —             | no  |
 | 112 | `futex_wake`   | `user_ptr uaddr`, `u32 count`           | `u64` (woken) | —                 | no  |
+| 113 | `fs_symlink`   | `user_ptr` (target), `len`, `user_ptr` (link), `len` | `errno` | `CAP_FS_ACCESS` | yes |
+| 114 | `fs_readlink`  | `user_ptr` (path), `len`, `user_ptr` (out), `len` | `u64` (bytes) | `CAP_FS_ACCESS` | no |
 
 (Syscall numbers 39–45 — `msi_alloc`, `shm_create`/`shm_map`/`shm_unmap`,
 `waitset_create`/`waitset_ctl`/`waitset_wait` — and 76–77 — `file_map`/
@@ -197,6 +199,29 @@ its mode (write access does not imply chmod, and holding a capability grants
 no override), the covering mount must be writable, and a node carrying a
 `required_cap` gate demands that capability for this change as for any other
 access. The `chmod` command app and `fstree`'s mode editor are its callers.
+
+`fs_symlink` (no. 113) and `fs_readlink` (no. 114) are the `symlink(2)` /
+`readlink(2)` pair. `fs_symlink` takes the **target first**, then the link's
+own path: the target is the link's stored body, so it is bounded by
+`FS_SYMLINK_MAX`, UTF-8-checked, and grammar-checked, but never resolved —
+it may be relative and may carry `.`/`..`, and the resulting link may
+legitimately dangle. Creating one therefore authorises only the right to add
+a name in the link's own parent and grants **no** authority over what it
+names; authority is decided at each later *use*, per component, under the
+caller's attested identity. It mutates the namespace, so it is audited.
+`fs_readlink` never follows the final component and returns the target's byte
+length, refusing an undersized buffer with `Errno::BufferTooSmall` rather
+than handing back a truncated path that would name somewhere else; it is a
+pure read and is not audited per call. A path that is not a link is
+`Errno::OutOfRange`, and a mount whose format has no link object type is
+`Errno::NotSupported` — never an approximation. There is no `lstat` operand:
+`fs_stat` is fd-based, so the follow posture is fixed once, at open, by
+`OpenFlags::NO_FOLLOW`, and every operation served for that descriptor
+re-derives it — so a stat can never contradict its own open. A `NO_FOLLOW`
+open asking for byte access to something that really is a link is
+`Errno::LinkLoop`; the resolve-only handle is the `lstat` posture. The design
+is `plans/SYMLINKS.md`; the resolution rules are
+`docs/src/filesystem/overview.md`.
 
 `fs_set_owner` (no. 96) is the `chown(2)` / `chgrp(2)` shape: it reassigns the
 owning user and/or group of the node at a path. Either `uid` or `gid` may be
@@ -352,7 +377,7 @@ state. The matrix is exhaustive — anything not listed below is ungated:
 | `CAP_SYSINFO_INTROSPECT` | `sysinfo_introspect` |
 | `CAP_LOG_EMIT`     | `log_emit`                 |
 | `CAP_HW_EMIT`      | `hw_emit_node`, `hw_remove_node` |
-| `CAP_FS_ACCESS`    | `fs_open`, `fs_readdir`, `fs_stat`, `fs_truncate`, `fs_sync`, `fs_mkdir`, `fs_unlink`, `fs_rename`, `fs_set_mode`, `fs_set_owner`, `fs_attr_get`, `fs_attr_set`, `fs_attr_list`, `fs_attr_remove`, `fs_chdir` (the path-taking calls), and — enforced *in the handler* on a path-backed descriptor — `fs_read`, `fs_write`, `fs_close` |
+| `CAP_FS_ACCESS`    | `fs_open`, `fs_readdir`, `fs_stat`, `fs_truncate`, `fs_sync`, `fs_mkdir`, `fs_unlink`, `fs_rename`, `fs_symlink`, `fs_readlink`, `fs_set_mode`, `fs_set_owner`, `fs_attr_get`, `fs_attr_set`, `fs_attr_list`, `fs_attr_remove`, `fs_chdir` (the path-taking calls), and — enforced *in the handler* on a path-backed descriptor — `fs_read`, `fs_write`, `fs_close` |
 | `CAP_FS_CHOWN`     | `fs_set_owner` (the privileged per-inode rule inside the VFS: reassigning the uid or setting a non-member gid; the coarse dispatch gate stays `CAP_FS_ACCESS`) |
 | `CAP_TIME_SET`     | `wall_time_set`            |
 | `CAP_SCHED_REALTIME` | `sched_set_realtime`     |

@@ -91,8 +91,8 @@ use tairix_abi::{
     RandomFlags, ResourceLimit, SchedPriority, Signal, SignalIntakeOp, SpawnAttach, StreamMode,
     SyscallNumber, TerminalSize, Time64, UnlinkFlags, WaitFlags, WaitSetOp, WaitSourceKind,
     WallClockReading, WallTimeState, BOOT_ID_LEN, CONSOLE_INHERIT, FS_ATTR_KEY_MAX,
-    FS_ATTR_VALUE_MAX, FS_IO_MAX, FS_NAME_MAX, FS_PATH_MAX, LOG_FIELDS_MAX, LOG_RECORD_MAX,
-    PORT_NAME_MAX_LEN, PROCESS_START_MAX_TOTAL_LEN, PROC_ID_HEX_LEN, PROC_ID_LEN,
+    FS_ATTR_VALUE_MAX, FS_IO_MAX, FS_NAME_MAX, FS_PATH_MAX, FS_SYMLINK_MAX, LOG_FIELDS_MAX,
+    LOG_RECORD_MAX, PORT_NAME_MAX_LEN, PROCESS_START_MAX_TOTAL_LEN, PROC_ID_HEX_LEN, PROC_ID_LEN,
     RANDOM_REQUEST_MAX_BYTES, RESOURCE_REF_MAX, SPAWN_ATTACH_LEN, SPAWN_UID_INHERIT,
     TERMINAL_SIZE_WIRE_LEN, WAITSET_CHILD_ANY, WAIT_PID_ANY,
 };
@@ -2752,6 +2752,31 @@ where
         self.resolve_against_cwd(caller, raw)
     }
 
+    /// Copy a symbolic-link target of `len` bytes from the caller's address
+    /// space at `ptr`, for the `fs_symlink` handler.
+    ///
+    /// A target is **not** a [`crate::fs::Path`]: it is the link's stored
+    /// body, so it may be relative and may carry `.`/`..`, and it is never
+    /// resolved against the caller's working directory here. Only the bounds
+    /// and the UTF-8 shape are settled at this boundary — the grammar is the
+    /// secured VFS's to judge, and the bytes reach the link verbatim.
+    fn copy_link_target_in(
+        &self,
+        caller: &CallerContext<'_>,
+        ptr: u64,
+        len: usize,
+    ) -> Result<String, Errno> {
+        if len == 0 || len > FS_SYMLINK_MAX {
+            return Err(Errno::LengthOutOfRange);
+        }
+        let mut buf = vec![0u8; len];
+        self.copy_in_user(caller, ptr, &mut buf)?;
+        match String::from_utf8(buf) {
+            Ok(target) => Ok(target),
+            Err(_) => Err(Errno::OutOfRange),
+        }
+    }
+
     /// Copy an extended-attribute key of `len` bytes from the caller's
     /// address space at `ptr`, for the `fs_attr_*` handlers.
     ///
@@ -3553,7 +3578,10 @@ where
             return Ok(());
         }
         let (uid, effective) = credential.read_authority();
-        match self.filesystem.stat(uid, &effective, bundle) {
+        match self
+            .filesystem
+            .stat(uid, &effective, bundle, crate::fs::FinalLink::Follow)
+        {
             // A definitive absence lets the caller's search advance; every
             // other outcome — the bundle is present, or present but its
             // metadata lookup was refused — admits the loading child so the
@@ -3857,6 +3885,8 @@ enum FsAuditDetail<'a> {
     None,
     /// A `rename`: `to` is the destination path.
     Rename { to: &'a str },
+    /// A `symlink`: `target` is the path the new link stores.
+    Symlink { target: &'a str },
     /// A `set_mode` (chmod): `mode` is the new permission word.
     Mode { mode: u32 },
     /// A `set_owner` (chown): the new owner and owning group ids.
@@ -3961,6 +3991,18 @@ fn emit_fs_mutation(
                 value: tairix_log::FieldValue::Str(audit_path_field(to)),
             };
             crate::audit::emit(sink, level, event, &[op_f, uid_f, path_f, to_f, errno_f]);
+        }
+        FsAuditDetail::Symlink { target } => {
+            let target_f = Field {
+                key: "target",
+                value: tairix_log::FieldValue::Str(audit_path_field(target)),
+            };
+            crate::audit::emit(
+                sink,
+                level,
+                event,
+                &[op_f, uid_f, path_f, target_f, errno_f],
+            );
         }
         FsAuditDetail::Mode { mode } => {
             let mode_f = Field {
@@ -8641,14 +8683,19 @@ where
                         let Ok(fd) = u32::try_from(id) else {
                             return Err(Errno::NotFound);
                         };
-                        let path = {
+                        // The descriptor's own follow posture travels with
+                        // its path, so the watched node is the one the open
+                        // named — a `NO_FOLLOW` handle watches the link, not
+                        // whatever it currently points at.
+                        let (path, final_link) = {
                             let Some(handle) =
                                 self.aspaces.read().open_file_entry(caller.process(), fd)
                             else {
                                 return Err(Errno::NotFound);
                             };
+                            let link = crate::fs::FinalLink::for_open(handle.flags);
                             match handle.path() {
-                                Some(path) => String::from(path),
+                                Some(path) => (String::from(path), link),
                                 None => return Err(Errno::NotFound),
                             }
                         };
@@ -8656,7 +8703,9 @@ where
                         // A stat refusal (a raced removal, a permission
                         // denial) collapses onto the same `NotFound`; a
                         // backing with no distinct identity is not watchable.
-                        let Ok(stat) = self.filesystem.stat(uid, caller.caps.effective(), &path)
+                        let Ok(stat) =
+                            self.filesystem
+                                .stat(uid, caller.caps.effective(), &path, final_link)
                         else {
                             return Err(Errno::NotFound);
                         };
@@ -9244,10 +9293,15 @@ where
         let path = handle.path().ok_or(Errno::OutOfRange)?;
         let uid = caller.caps.owner().0;
         // The secured VFS enforces that the path is a directory the caller
-        // may list; a non-directory fails closed there.
-        let entries = self
-            .filesystem
-            .readdir(uid, caller.caps.effective(), path)?;
+        // may list; a non-directory fails closed there. A `NO_FOLLOW`
+        // descriptor names its final component itself, so a link is not a
+        // directory to it and the target is never listed in its place.
+        let entries = self.filesystem.readdir(
+            uid,
+            caller.caps.effective(),
+            path,
+            crate::fs::FinalLink::for_open(handle.flags),
+        )?;
         // Pack the listing into the `DirEntry` wire stream. A name the driver
         // reports that is empty or longer than `FS_NAME_MAX` is a structural
         // fault and fails the whole call closed (never a truncated record).
@@ -9297,7 +9351,22 @@ where
         // fail closed as an invalid operation for its kind.
         let path = handle.path().ok_or(Errno::OutOfRange)?;
         let uid = caller.caps.owner().0;
-        let stat = self.filesystem.stat(uid, caller.caps.effective(), path)?;
+        // The descriptor's own follow posture decides what is described: a
+        // handle opened `NO_FOLLOW` names the link, so this is `lstat` and
+        // reports the link itself — including a dangling one. Re-derived from
+        // the handle rather than taken as an operand, so a stat can never
+        // contradict the open that produced the descriptor.
+        //
+        // What this does not change: the descriptor records a *path*, so it
+        // re-resolves, and a rename between the open and the stat can still
+        // name a different node. That holds for every path-backed handle and
+        // is not something links introduce.
+        let stat = self.filesystem.stat(
+            uid,
+            caller.caps.effective(),
+            path,
+            crate::fs::FinalLink::for_open(handle.flags),
+        )?;
         // The whole record or nothing: an undersized buffer fails closed.
         if out_len < FileStat::WIRE_LEN {
             return Err(Errno::BufferTooSmall);
@@ -9438,6 +9507,70 @@ where
         );
         outcome?;
         Ok(0)
+    }
+
+    fn fs_symlink(
+        &self,
+        caller: &CallerContext<'_>,
+        target: u64,
+        target_len: usize,
+        link: u64,
+        link_len: usize,
+    ) -> SyscallResult {
+        // The dispatcher already checked `CAP_FS_ACCESS` and that both
+        // pointers are non-null `UserPtr`s. The target is the link's stored
+        // body, so it is bounded and UTF-8-checked but never resolved; the
+        // link's own path is an ordinary absolute path. Resolution, the
+        // target grammar, and the permission/mount-flag model are the secured
+        // VFS's, under the caller's attested identity.
+        let target = self.copy_link_target_in(caller, target, target_len)?;
+        let link = self.copy_path_in(caller, link, link_len)?;
+        let uid = caller.caps.owner().0;
+        let outcome = self
+            .filesystem
+            .symlink(uid, caller.caps.effective(), &target, &link);
+        emit_fs_mutation(
+            self.audit,
+            "symlink",
+            uid,
+            &link,
+            &FsAuditDetail::Symlink { target: &target },
+            outcome,
+        );
+        outcome?;
+        Ok(0)
+    }
+
+    fn fs_readlink(
+        &self,
+        caller: &CallerContext<'_>,
+        path: u64,
+        path_len: usize,
+        out: u64,
+        out_len: usize,
+    ) -> SyscallResult {
+        // The dispatcher already checked `CAP_FS_ACCESS` and that both
+        // pointers are non-null `UserPtr`s. The final component is never
+        // followed; a path naming anything but a link fails closed in the
+        // secured VFS.
+        let path = self.copy_path_in(caller, path, path_len)?;
+        let uid = caller.caps.owner().0;
+        let target = self
+            .filesystem
+            .readlink(uid, caller.caps.effective(), &path)?;
+        // The whole target or nothing: a truncated path would name somewhere
+        // else entirely, so an undersized buffer fails closed and the caller
+        // retries with a larger one.
+        if target.len() > out_len {
+            return Err(Errno::BufferTooSmall);
+        }
+        match self.with_caller_aspace(caller, |space, physmap| {
+            copy_out(space, physmap, VirtAddr::new(out), target.as_bytes())
+        }) {
+            Some(Ok(())) => Ok(target.len() as u64),
+            Some(Err(err)) => Err(copy_fault_errno(err)),
+            None => Err(Errno::BadAddress),
+        }
     }
 
     fn fs_set_mode(
@@ -16506,8 +16639,9 @@ mod tests {
             uid: u32,
             caps: &dyn tairix_abi::CapabilityQuery,
             path: &str,
+            final_link: crate::fs::FinalLink,
         ) -> Result<alloc::vec::Vec<crate::fs::ReaddirEntry>, Errno> {
-            self.inner.readdir(uid, caps, path)
+            self.inner.readdir(uid, caps, path, final_link)
         }
 
         fn stat(
@@ -16515,8 +16649,28 @@ mod tests {
             uid: u32,
             caps: &dyn tairix_abi::CapabilityQuery,
             path: &str,
+            final_link: crate::fs::FinalLink,
         ) -> Result<FileStat, Errno> {
-            self.inner.stat(uid, caps, path)
+            self.inner.stat(uid, caps, path, final_link)
+        }
+
+        fn symlink(
+            &self,
+            uid: u32,
+            caps: &dyn tairix_abi::CapabilityQuery,
+            target: &str,
+            path: &str,
+        ) -> Result<(), Errno> {
+            self.inner.symlink(uid, caps, target, path)
+        }
+
+        fn readlink(
+            &self,
+            uid: u32,
+            caps: &dyn tairix_abi::CapabilityQuery,
+            path: &str,
+        ) -> Result<alloc::string::String, Errno> {
+            self.inner.readlink(uid, caps, path)
         }
 
         fn truncate(
@@ -33225,6 +33379,11 @@ mod tests {
         /// what it accepted rather than what was staged.
         write_accept: Option<usize>,
         sync_err: Option<Errno>,
+        /// Refusal a `symlink` reports, or [`None`] to accept the creation.
+        symlink_err: Option<Errno>,
+        /// Target a `readlink` answers with, or [`None`] to refuse as "not a
+        /// symbolic link" (the shape a non-link path produces).
+        readlink_target: Option<String>,
         /// Shared-clock stamp of the whole-system flush, or `0` while no
         /// flush has been asked for, so a test can order the flush against
         /// an effect another double records.
@@ -33253,6 +33412,8 @@ mod tests {
                 open_err: None,
                 write_accept: None,
                 sync_err: None,
+                symlink_err: None,
+                readlink_target: None,
                 sync_stamp: core::sync::atomic::AtomicU64::new(0),
                 busy_endpoints: Vec::new(),
                 log: std::sync::Mutex::new(Vec::new()),
@@ -33343,8 +33504,11 @@ mod tests {
             uid: u32,
             _caps: &dyn tairix_abi::CapabilityQuery,
             path: &str,
+            final_link: crate::fs::FinalLink,
         ) -> Result<Vec<crate::fs::ReaddirEntry>, Errno> {
-            self.record(alloc::format!("readdir uid={uid} path={path}"));
+            self.record(alloc::format!(
+                "readdir uid={uid} path={path} link={final_link:?}"
+            ));
             Ok(self.entries.clone())
         }
 
@@ -33353,9 +33517,41 @@ mod tests {
             uid: u32,
             _caps: &dyn tairix_abi::CapabilityQuery,
             path: &str,
+            final_link: crate::fs::FinalLink,
         ) -> Result<FileStat, Errno> {
-            self.record(alloc::format!("stat uid={uid} path={path}"));
+            self.record(alloc::format!(
+                "stat uid={uid} path={path} link={final_link:?}"
+            ));
             Ok(self.stat)
+        }
+
+        fn symlink(
+            &self,
+            uid: u32,
+            _caps: &dyn tairix_abi::CapabilityQuery,
+            target: &str,
+            path: &str,
+        ) -> Result<(), Errno> {
+            self.record(alloc::format!(
+                "symlink uid={uid} target={target} path={path}"
+            ));
+            match self.symlink_err {
+                Some(err) => Err(err),
+                None => Ok(()),
+            }
+        }
+
+        fn readlink(
+            &self,
+            uid: u32,
+            _caps: &dyn tairix_abi::CapabilityQuery,
+            path: &str,
+        ) -> Result<alloc::string::String, Errno> {
+            self.record(alloc::format!("readlink uid={uid} path={path}"));
+            match self.readlink_target.clone() {
+                Some(target) => Ok(target),
+                None => Err(Errno::OutOfRange),
+            }
         }
 
         fn truncate(
@@ -34158,6 +34354,311 @@ mod tests {
         assert_eq!(
             h.fs_stat(&ctx, fd, 0x1000, FileStat::WIRE_LEN),
             Err(Errno::NotFound)
+        );
+    }
+
+    /// `fs_stat` describes what the *descriptor* names: a handle opened
+    /// `NO_FOLLOW` is the `lstat` posture, so the service is asked to keep a
+    /// final link rather than report its target. Re-derived from the handle,
+    /// never taken as an operand, so a stat cannot contradict its open.
+    #[test]
+    fn fs_stat_honours_the_handles_no_follow_posture() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let (space, physmap) =
+            send_aspace(MapFlags::READ | MapFlags::WRITE | MapFlags::USER, b"/link");
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        aspaces
+            .write()
+            .register(ProcessId(2), space, physmap)
+            .expect("registration succeeds");
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let caps = make_caps_record(2, &[CapabilityId::FS_ACCESS], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(2),
+            caps: &caps,
+        };
+        let fs: &'static RecordingFs = Box::leak(Box::new(RecordingFs::new()));
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        )
+        .with_filesystem(fs);
+
+        // A resolve-only `NO_FOLLOW` handle — what `lstat` holds.
+        let kept = u32::try_from(
+            h.fs_open(&ctx, 0x1000, "/link".len(), OpenFlags::NO_FOLLOW)
+                .expect("open the link itself"),
+        )
+        .unwrap();
+        let followed = u32::try_from(
+            h.fs_open(&ctx, 0x1000, "/link".len(), OpenFlags::READ)
+                .expect("open through the link"),
+        )
+        .unwrap();
+
+        h.fs_stat(&ctx, kept, 0x1000, FileStat::WIRE_LEN)
+            .expect("stat the link");
+        h.fs_stat(&ctx, followed, 0x1000, FileStat::WIRE_LEN)
+            .expect("stat the target");
+        // Also the listing path: the same posture rides on the descriptor.
+        let _ = h.fs_readdir(&ctx, kept, 0x1000, 96);
+        let _ = h.fs_readdir(&ctx, followed, 0x1000, 96);
+
+        let seen: Vec<String> = fs
+            .calls()
+            .into_iter()
+            .filter(|c| c.starts_with("stat ") || c.starts_with("readdir "))
+            .collect();
+        assert!(
+            seen.iter().map(String::as_str).eq([
+                "stat uid=1000 path=/link link=Keep",
+                "stat uid=1000 path=/link link=Follow",
+                "readdir uid=1000 path=/link link=Keep",
+                "readdir uid=1000 path=/link link=Follow",
+            ]),
+            "each operation carried its own descriptor's posture: {seen:?}"
+        );
+    }
+
+    /// `fs_symlink` copies the target and the link path in, reaches the
+    /// service with the target *first*, and audits the mutation with the
+    /// target recorded beside the path.
+    #[test]
+    fn fs_symlink_reaches_the_service_and_audits_the_mutation() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        // One page holding the target then the link path, back to back.
+        let target = "../real/name";
+        let link = "/Users/me/alias";
+        let mut staged = alloc::string::String::from(target);
+        staged.push_str(link);
+        let (space, physmap) = send_aspace(
+            MapFlags::READ | MapFlags::WRITE | MapFlags::USER,
+            staged.as_bytes(),
+        );
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        aspaces
+            .write()
+            .register(ProcessId(2), space, physmap)
+            .expect("registration succeeds");
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let caps = make_caps_record(2, &[CapabilityId::FS_ACCESS], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(2),
+            caps: &caps,
+        };
+        let fs: &'static RecordingFs = Box::leak(Box::new(RecordingFs::new()));
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        )
+        .with_filesystem(fs);
+
+        let link_ptr = 0x1000 + target.len() as u64;
+        assert_eq!(
+            h.fs_symlink(&ctx, 0x1000, target.len(), link_ptr, link.len()),
+            Ok(0)
+        );
+        assert_eq!(
+            fs.calls(),
+            alloc::vec![alloc::format!(
+                "symlink uid=1000 target={target} path={link}"
+            )],
+            "the target reached the service verbatim, unresolved"
+        );
+
+        let event = sink
+            .snapshot()
+            .into_iter()
+            .find(|e| e.id == AuditEvent::FsNodeMutated.id())
+            .expect("the mutation is audited");
+        assert_eq!(field_of(&event, "op"), "symlink");
+        assert_eq!(field_of(&event, "uid"), "1000");
+        assert_eq!(field_of(&event, "path"), link);
+        assert_eq!(field_of(&event, "target"), target);
+    }
+
+    /// A refused `fs_symlink` is audited too, carrying the refusal's errno —
+    /// no attempt to add a link, allowed or denied, escapes the trail.
+    #[test]
+    fn a_refused_fs_symlink_is_audited_with_its_errno() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let (space, physmap) = send_aspace(
+            MapFlags::READ | MapFlags::WRITE | MapFlags::USER,
+            b"/t/System/x",
+        );
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        aspaces
+            .write()
+            .register(ProcessId(2), space, physmap)
+            .expect("registration succeeds");
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let caps = make_caps_record(2, &[CapabilityId::FS_ACCESS], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(2),
+            caps: &caps,
+        };
+        let mut mock = RecordingFs::new();
+        mock.symlink_err = Some(Errno::PermissionDenied);
+        let fs: &'static RecordingFs = Box::leak(Box::new(mock));
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        )
+        .with_filesystem(fs);
+
+        assert_eq!(
+            h.fs_symlink(&ctx, 0x1000, 2, 0x1002, "/System/x".len()),
+            Err(Errno::PermissionDenied)
+        );
+        let event = sink
+            .snapshot()
+            .into_iter()
+            .find(|e| e.id == AuditEvent::FsMutationDenied.id())
+            .expect("the refusal is audited");
+        assert_eq!(field_of(&event, "op"), "symlink");
+        assert_eq!(field_of(&event, "path"), "/System/x");
+        assert_eq!(field_of(&event, "target"), "/t");
+        let mut buf = [0u8; 12];
+        assert_eq!(
+            field_of(&event, "errno"),
+            tairix_util::fmt::format_usize(Errno::PermissionDenied as usize, &mut buf)
+        );
+    }
+
+    /// `fs_symlink` refuses an empty, over-long, or non-UTF-8 target at the
+    /// boundary, before the service is touched at all.
+    #[test]
+    fn fs_symlink_refuses_a_malformed_target_before_the_service() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        // A lone continuation byte can never start a UTF-8 sequence.
+        let (space, physmap) =
+            send_aspace(MapFlags::READ | MapFlags::WRITE | MapFlags::USER, b"\xff/x");
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        aspaces
+            .write()
+            .register(ProcessId(2), space, physmap)
+            .expect("registration succeeds");
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let caps = make_caps_record(2, &[CapabilityId::FS_ACCESS], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(2),
+            caps: &caps,
+        };
+        let fs: &'static RecordingFs = Box::leak(Box::new(RecordingFs::new()));
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        )
+        .with_filesystem(fs);
+
+        // Empty and over-long targets are length refusals.
+        assert_eq!(
+            h.fs_symlink(&ctx, 0x1000, 0, 0x1001, 2),
+            Err(Errno::LengthOutOfRange)
+        );
+        assert_eq!(
+            h.fs_symlink(&ctx, 0x1000, FS_SYMLINK_MAX + 1, 0x1001, 2),
+            Err(Errno::LengthOutOfRange)
+        );
+        // A non-UTF-8 target is a shape refusal.
+        assert_eq!(
+            h.fs_symlink(&ctx, 0x1000, 1, 0x1001, 2),
+            Err(Errno::OutOfRange)
+        );
+        assert!(
+            fs.calls().is_empty(),
+            "every refusal landed before the service was reached"
+        );
+    }
+
+    /// `fs_readlink` copies the stored target out and returns its length; a
+    /// buffer too small for the whole target fails closed rather than
+    /// handing back a prefix that would name somewhere else.
+    #[test]
+    fn fs_readlink_copies_the_whole_target_or_fails_closed() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let (space, physmap) =
+            send_aspace(MapFlags::READ | MapFlags::WRITE | MapFlags::USER, b"/alias");
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        aspaces
+            .write()
+            .register(ProcessId(2), space, physmap)
+            .expect("registration succeeds");
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let caps = make_caps_record(2, &[CapabilityId::FS_ACCESS], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(2),
+            caps: &caps,
+        };
+        let mut mock = RecordingFs::new();
+        let target = "../real/name";
+        mock.readlink_target = Some(alloc::string::String::from(target));
+        let fs: &'static RecordingFs = Box::leak(Box::new(mock));
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        )
+        .with_filesystem(fs);
+
+        // Write the target into the tail of the page, clear of the path.
+        let out = 0x1000 + 0x100;
+        assert_eq!(
+            h.fs_readlink(&ctx, 0x1000, "/alias".len(), out, 64),
+            Ok(target.len() as u64)
+        );
+        let written = h
+            .with_caller_aspace(&ctx, |space, physmap| {
+                let mut buf = alloc::vec![0u8; target.len()];
+                copy_in(space, physmap, VirtAddr::new(out), &mut buf).expect("readable");
+                buf
+            })
+            .expect("caller space");
+        assert_eq!(written, target.as_bytes());
+
+        // One byte short of the whole target is refused, never truncated.
+        assert_eq!(
+            h.fs_readlink(&ctx, 0x1000, "/alias".len(), out, target.len() - 1),
+            Err(Errno::BufferTooSmall)
+        );
+        // A path that is not a link fails closed from the service.
+        let plain: &'static RecordingFs = Box::leak(Box::new(RecordingFs::new()));
+        let h2 = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        )
+        .with_filesystem(plain);
+        assert_eq!(
+            h2.fs_readlink(&ctx, 0x1000, "/alias".len(), out, 64),
+            Err(Errno::OutOfRange)
         );
     }
 

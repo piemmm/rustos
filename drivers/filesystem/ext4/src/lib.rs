@@ -73,6 +73,7 @@ use tairix_abi::driver::filesystem::{
     FilesystemWrite, NodeId, NodeInfo, NodeKind, NodeSecurity, NodeTimes, SecurityAcl,
     SecuritySubject, VolumeStats,
 };
+use tairix_abi::fs::FS_SYMLINK_MAX;
 use tairix_abi::time::Time64;
 use tairix_abi::{CapabilityId, DriverError, DriverHandle, DriverHost};
 
@@ -209,6 +210,12 @@ const NEW_EXTRA_ISIZE: u16 = 32;
 
 /// `i_flags`: the inode is mapped by an extent tree, not block pointers.
 const INODE_FLAG_EXTENTS: u32 = 0x0008_0000;
+/// `EXT4_INLINE_DATA_FL`: this inode's data lives in the inode's own
+/// extended-attribute area rather than in `i_block` or in data blocks. This
+/// driver decodes no inline data, so an inline-data node's content is a
+/// declared limit rather than something to guess at.
+const INODE_FLAG_INLINE_DATA: u32 = 0x1000_0000;
+
 /// `EXT4_HUGE_FILE_FL`: this inode's `i_blocks` counts filesystem blocks
 /// rather than 512-byte sectors (valid only under the `huge_file`
 /// read-only-compat feature).
@@ -231,6 +238,8 @@ const S_IFMT: u16 = 0xF000;
 const S_IFDIR: u16 = 0x4000;
 /// `i_mode` value for a regular file.
 const S_IFREG: u16 = 0x8000;
+/// `i_mode` type bits for a symbolic link.
+const S_IFLNK: u16 = 0xA000;
 
 /// Directory-entry `file_type` value for a regular file.
 const FT_REG: u8 = 1;
@@ -421,6 +430,11 @@ fn usize_of(value: u64) -> Result<usize, DriverError> {
 struct Layout {
     /// Filesystem block size in bytes (`1024 << s_log_block_size`).
     block_size: u32,
+    /// Allocation-cluster size in bytes (`1024 << s_log_cluster_size`).
+    /// Equal to `block_size` unless the volume carries `bigalloc`, whose
+    /// larger cluster is the unit `i_blocks` accounts an external
+    /// extended-attribute block in.
+    cluster_size: u32,
     /// Total blocks in the volume.
     blocks_count: u64,
     /// Inodes per block group.
@@ -504,6 +518,7 @@ impl Inode {
         match self.mode & S_IFMT {
             S_IFDIR => Some(NodeKind::Directory),
             S_IFREG => Some(NodeKind::RegularFile),
+            S_IFLNK => Some(NodeKind::Symlink),
             _ => None,
         }
     }
@@ -651,6 +666,17 @@ impl<B: Block> Ext4<B> {
         if block_size > MAX_BLOCK_SIZE {
             return Err(DriverError::Unsupported);
         }
+        // `s_log_cluster_size` equals `s_log_block_size` on a volume without
+        // `bigalloc`; a larger cluster is the unit `i_blocks` accounts an
+        // external extended-attribute block in. A value below the block size
+        // is nonsense, so the block size is the floor.
+        let log_cluster_size = le32(&sb, 0x1C);
+        let cluster_size = if log_cluster_size > 2 && log_cluster_size < 32 {
+            1024u32.checked_shl(log_cluster_size).unwrap_or(block_size)
+        } else {
+            block_size
+        }
+        .max(block_size);
 
         let inodes_per_group = le32(&sb, 0x28);
         let blocks_per_group = le32(&sb, 0x20);
@@ -721,6 +747,7 @@ impl<B: Block> Ext4<B> {
             block_count: dev_block_count,
             layout: Layout {
                 block_size,
+                cluster_size,
                 blocks_count,
                 inodes_per_group,
                 inode_size,
@@ -2545,11 +2572,42 @@ impl<B: Block> Ext4<B> {
     /// size, and the real allocation `i_blocks` tracks. The one
     /// definition `node_info` and `read_dir` both report, so the two can
     /// never disagree about a node's sizes.
+    /// Whether `inode`'s symbolic-link target is stored inline in `i_block`
+    /// (ext4's "fast symlink") rather than in data blocks.
+    ///
+    /// A fast symlink allocates no data at all, so `i_blocks` accounts for
+    /// nothing beyond an external extended-attribute block — the same test
+    /// Linux's `ext4_inode_is_fast_symlink` makes. A target longer than the
+    /// `i_block` array could not be inline whatever `i_blocks` says, so that
+    /// is checked first and the accounting is only consulted for one that
+    /// would fit.
+    fn is_fast_symlink(&self, inode: &Inode) -> bool {
+        if inode.size > I_BLOCK_LEN as u64 {
+            return false;
+        }
+        // `i_blocks` counts 512-byte sectors, or whole filesystem blocks for
+        // a huge-file inode; an external xattr block occupies one allocation
+        // cluster, which is the block size unless the volume is `bigalloc`.
+        let xattr = if inode.file_acl == 0 {
+            0
+        } else if inode.flags & INODE_FLAG_HUGE_FILE != 0 {
+            u64::from(self.layout.cluster_size / self.layout.block_size)
+        } else {
+            u64::from(self.layout.cluster_size / 512)
+        };
+        // A count *below* the allowance is corrupt accounting; treating it as
+        // inline keeps the read inside the length-checked `i_block` array
+        // rather than following a block map a fast symlink never wrote.
+        inode.blocks <= xattr
+    }
+
     fn inode_info(&self, inode: &Inode) -> Result<NodeInfo, DriverError> {
         let kind = inode.kind().ok_or(DriverError::NotFound)?;
         let size = match kind {
             NodeKind::Directory => 0,
-            NodeKind::RegularFile => inode.size,
+            // A link's `i_size` is its target's length, in both the fast
+            // (inline) and slow (block-backed) spellings.
+            NodeKind::RegularFile | NodeKind::Symlink => inode.size,
         };
         // `i_blocks` counts 512-byte sectors, or whole filesystem blocks
         // for a huge-file inode.
@@ -2597,9 +2655,48 @@ impl<B: Block> FilesystemRead for Ext4<B> {
         let inode = self.read_inode(ino)?;
         match inode.kind() {
             Some(NodeKind::RegularFile) => self.read_data(&inode, offset, buf),
-            Some(NodeKind::Directory) => Err(DriverError::Unsupported),
+            // A link's content is a path, reached with `read_link`; a
+            // directory's is its entries. Neither is a byte stream.
+            Some(NodeKind::Directory | NodeKind::Symlink) => Err(DriverError::Unsupported),
             None => Err(DriverError::NotFound),
         }
+    }
+
+    fn read_link(&mut self, link: NodeId, out: &mut [u8]) -> Result<usize, DriverError> {
+        let ino = node_inode(link)?;
+        let inode = self.read_inode(ino)?;
+        if inode.kind() != Some(NodeKind::Symlink) {
+            return Err(DriverError::Unsupported);
+        }
+        // An inline-data link keeps its target in the inode's own
+        // extended-attribute area, which this driver decodes nowhere: a
+        // declared limit, not a target to guess at.
+        if inode.flags & INODE_FLAG_INLINE_DATA != 0 {
+            return Err(DriverError::Unsupported);
+        }
+        // `i_size` is the target's length in both spellings, and a link with
+        // no target is structurally impossible.
+        let len = usize::try_from(inode.size).map_err(|_| DriverError::DeviceFault)?;
+        if len == 0 || len > FS_SYMLINK_MAX {
+            return Err(DriverError::DeviceFault);
+        }
+        if out.len() < len {
+            return Err(DriverError::BufferTooSmall);
+        }
+        if self.is_fast_symlink(&inode) {
+            // The "fast" spelling: the target is the raw `i_block` bytes, so
+            // it can be no longer than that array.
+            let inline = inode.block.get(..len).ok_or(DriverError::DeviceFault)?;
+            out[..len].copy_from_slice(inline);
+            return Ok(len);
+        }
+        // The "slow" spelling: the target is ordinary file data, read through
+        // the one data path so the extent/block-map handling is not
+        // duplicated.
+        if self.read_data(&inode, 0, &mut out[..len])? != len {
+            return Err(DriverError::DeviceFault);
+        }
+        Ok(len)
     }
 
     fn read_dir(
@@ -2995,6 +3092,12 @@ impl<B: Block> Ext4<B> {
 impl<B: Block> FilesystemWrite for Ext4<B> {
     fn create(&mut self, dir: NodeId, name: &[u8], kind: NodeKind) -> Result<NodeId, DriverError> {
         self.ensure_writable()?;
+        // A link carries a target this call has nowhere to put, so it is
+        // refused here and created only by `create_link`. Without this the
+        // `is_dir` test below would quietly make a regular file instead.
+        if kind == NodeKind::Symlink {
+            return Err(DriverError::Unsupported);
+        }
         validate_name(name)?;
         let dir_ino = node_inode(dir)?;
         let dir_inode = self.read_inode(dir_ino)?;

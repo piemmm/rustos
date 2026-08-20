@@ -1109,6 +1109,10 @@ impl<B: Block> FilesystemWrite for Adfs<B> {
                 object.attr = dir::ATTR_OWNER_READ | dir::ATTR_OWNER_WRITE;
                 self.dir_insert(dir_addr, dir_size, &object)?;
             }
+            // Acorn ADFS / FileCore has no symbolic-link object type, so the
+            // creation is refused rather than approximated by a file whose
+            // contents merely look like a path.
+            NodeKind::Symlink => return Err(DriverError::Unsupported),
             NodeKind::Directory => {
                 object.attr = dir::ATTR_DIRECTORY | dir::ATTR_OWNER_READ;
                 // 8-bit ADFS (the 1280-byte directory format) creates

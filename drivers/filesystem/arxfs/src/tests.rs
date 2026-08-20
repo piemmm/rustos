@@ -18,13 +18,17 @@ use tairix_fsmeta::preset;
 /// In-memory block device. Optionally drops writes once a budget is reached,
 /// modelling a power loss mid-commit: a dropped write simply never reaches the
 /// platter, and the driver's in-memory state is discarded by re-opening from
-/// the stored bytes.
+/// the stored bytes. It can also fail the *read* of named blocks, modelling
+/// the single-sector media error a mirrored metadata copy exists for.
 struct MemBlock {
     store: alloc::vec::Vec<u8>,
     block_size: u32,
     block_count: u64,
     writes: u32,
     write_budget: Option<u32>,
+    /// Blocks whose reads fail with a device fault, modelling unreadable
+    /// media at a specific LBA.
+    read_faults: BTreeSet<u64>,
     discard: Option<DiscardCapability>,
     discarded: alloc::vec::Vec<(u64, u64)>,
     health: DeviceHealth,
@@ -39,6 +43,7 @@ impl MemBlock {
             block_count,
             writes: 0,
             write_budget: None,
+            read_faults: BTreeSet::new(),
             discard: None,
             discarded: alloc::vec::Vec::new(),
             health: DeviceHealth::Unavailable,
@@ -52,10 +57,18 @@ impl MemBlock {
             block_count,
             writes: 0,
             write_budget: None,
+            read_faults: BTreeSet::new(),
             discard: None,
             discarded: alloc::vec::Vec::new(),
             health: DeviceHealth::Unavailable,
         }
+    }
+
+    /// Make every read of `lba` fail, so the driver has to recover the block
+    /// from its companion mirror rather than from an authentication failure.
+    fn fail_reads_of(mut self, lba: u64) -> Self {
+        self.read_faults.insert(lba);
+        self
     }
 
     /// Set the health telemetry this device reports, so the health path can
@@ -104,6 +117,10 @@ impl Block for MemBlock {
         let bs = self.block_size as usize;
         if buf.is_empty() || !buf.len().is_multiple_of(bs) {
             return Err(DriverError::BufferTooSmall);
+        }
+        let span = (buf.len() / bs) as u64;
+        if (lba..lba + span).any(|b| self.read_faults.contains(&b)) {
+            return Err(DriverError::DeviceFault);
         }
         let start = as_usize(lba) * bs;
         let end = start + buf.len();
@@ -3155,7 +3172,7 @@ fn check_reclaims_an_orphaned_inode() {
     fs.begin();
     let sec = Security::new(0o644, 0, 0);
     let orphan = fs
-        .alloc_inode(&Inode::empty(KIND_FILE, sec, fixed_clock()))
+        .alloc_inode(&Inode::empty(InodeKind::File, sec, fixed_clock()))
         .expect("alloc orphan");
     fs.commit().expect("commit orphan");
     assert!(fs.read_inode(orphan).is_ok(), "the orphan exists pre-check");
@@ -4478,7 +4495,7 @@ fn corruption_injection_data_block_faults_are_classified_not_repaired() {
 }
 
 // ---------------------------------------------------------------------------
-// Sparse files: ZERO/Hole extents (`.junie/SPARSE.md`). ARXFS represents a
+// Sparse files: ZERO/Hole extents (`plans/SPARSE.md`). ARXFS represents a
 // hole implicitly as a gap between extent mappings (permitted by); an
 // all-zero logical record is stored as such a hole rather than a physical
 // data record, and reads of a hole synthesise zero bytes.
@@ -4486,7 +4503,7 @@ fn corruption_injection_data_block_faults_are_classified_not_repaired() {
 
 /// The number of *physical data blocks* file `ino` maps: the sum of its
 /// extent-run lengths. A fully sparse range contributes nothing, so a hole
-/// costs zero data payload (`.junie/SPARSE.md` §14).
+/// costs zero data payload (`plans/SPARSE.md` §14).
 fn mapped_block_count(fs: &mut ARXFS<MemBlock>, ino: u32) -> u64 {
     let inode = fs.read_inode(ino).expect("read inode");
     let spec = extent_spec(ino);
@@ -4498,7 +4515,7 @@ fn mapped_block_count(fs: &mut ARXFS<MemBlock>, ino: u32) -> u64 {
 }
 
 /// Assert file `ino`'s committed extent map is sorted by logical offset and
-/// holds no overlapping runs (`.junie/SPARSE.md` §7).
+/// holds no overlapping runs (`plans/SPARSE.md` §7).
 fn assert_extents_ordered_and_disjoint(fs: &mut ARXFS<MemBlock>, ino: u32) {
     let inode = fs.read_inode(ino).expect("read inode");
     let spec = extent_spec(ino);
@@ -6424,4 +6441,408 @@ fn growing_past_the_region_relays_the_map_and_keeps_the_volume_sound() {
         ARXFS::open(MemBlock::from_bytes(bytes, 512, 12000), &TEST_KEY).expect("reopen grown");
     assert!(reopened.map_is_stamped_clean(), "the relaid map is adopted");
     assert_eq!(reopened.used_blocks(), live);
+}
+
+// ---------------------------------------------------------------------------
+// Symbolic links: the on-disk kind, the target stored as node data, and the
+// incompatible-feature declaration (`docs/src/filesystem/arxfs-spec.md` §20).
+// ---------------------------------------------------------------------------
+
+#[test]
+fn a_created_link_reports_its_kind_and_target_length() {
+    let mut fs = fmt(512, 256, 32);
+    let root = fs.root();
+    let target = b"/System/Commands/ls.app";
+    let node = fs
+        .create_link(root, b"alias", target)
+        .expect("create the link");
+
+    let info = fs.node_info(node).expect("stat the link");
+    assert_eq!(info.kind, NodeKind::Symlink);
+    assert_eq!(info.size, target.len() as u64);
+
+    let mut out = [0u8; 64];
+    assert_eq!(fs.read_link(node, &mut out), Ok(target.len()));
+    assert_eq!(&out[..target.len()], target);
+}
+
+#[test]
+fn a_links_target_survives_a_remount() {
+    // The target is ordinary node data, so it goes through the whole
+    // checksum / authenticate / encrypt pipeline and must read back
+    // byte-identical from the committed volume.
+    let mut fs = fmt(512, 256, 32);
+    let root = fs.root();
+    let target = b"../relative/with/../dots";
+    fs.create_link(root, b"alias", target)
+        .expect("create the link");
+    let bytes = fs.into_block().bytes();
+
+    let mut re = ARXFS::open(MemBlock::from_bytes(bytes, 512, 256), &TEST_KEY).expect("reopen");
+    let node = re.lookup(re.root(), b"alias").expect("lookup the link");
+    assert_eq!(re.node_info(node).expect("stat").kind, NodeKind::Symlink);
+    let mut out = [0u8; 64];
+    assert_eq!(re.read_link(node, &mut out), Ok(target.len()));
+    assert_eq!(&out[..target.len()], target);
+}
+
+#[test]
+fn a_maximum_length_target_round_trips_across_several_blocks() {
+    // `FS_SYMLINK_MAX` bytes exceed one 512-byte block's content capacity, so
+    // this exercises the multi-block extent path a target shares with file
+    // data — and proves the format's own limit is the ABI's, not smaller.
+    let mut fs = fmt(512, 1024, 32);
+    let root = fs.root();
+    let target = alloc::vec![b'x'; FS_SYMLINK_MAX];
+    let node = fs
+        .create_link(root, b"long", &target)
+        .expect("create a maximum-length link");
+    let mut out = alloc::vec![0u8; FS_SYMLINK_MAX];
+    assert_eq!(fs.read_link(node, &mut out), Ok(FS_SYMLINK_MAX));
+    assert_eq!(out, target);
+
+    // One byte more is refused, and nothing is left behind.
+    let over = alloc::vec![b'x'; FS_SYMLINK_MAX + 1];
+    assert_eq!(
+        fs.create_link(root, b"over", &over),
+        Err(DriverError::LengthOutOfRange)
+    );
+    assert_eq!(fs.lookup(root, b"over"), Err(DriverError::NotFound));
+    assert_eq!(
+        fs.create_link(root, b"empty", b""),
+        Err(DriverError::LengthOutOfRange)
+    );
+}
+
+#[test]
+fn a_link_is_never_byte_readable_and_never_byte_writable() {
+    // Its content is a path, reached only with `read_link`; the driver fails
+    // closed on its own rather than relying on the VFS to resolve first.
+    let mut fs = fmt(512, 256, 32);
+    let root = fs.root();
+    let node = fs
+        .create_link(root, b"alias", b"/target")
+        .expect("create the link");
+
+    let mut buf = [0u8; 8];
+    assert_eq!(fs.read_at(node, 0, &mut buf), Err(DriverError::Unsupported));
+    assert_eq!(
+        fs.write_at(root, b"alias", 0, b"clobber"),
+        Err(DriverError::Unsupported)
+    );
+    assert_eq!(
+        fs.truncate(root, b"alias", 0),
+        Err(DriverError::Unsupported)
+    );
+    // A reflink clones data blocks into a fresh regular file, which would
+    // silently turn the link into a file holding its target's text.
+    assert_eq!(
+        fs.reflink(root, b"alias", b"clone"),
+        Err(DriverError::Unsupported)
+    );
+    // The refusals changed nothing.
+    let mut out = [0u8; 16];
+    assert_eq!(fs.read_link(node, &mut out), Ok(7));
+    assert_eq!(&out[..7], b"/target");
+}
+
+#[test]
+fn create_refuses_a_link_kind_and_read_link_refuses_a_non_link() {
+    let mut fs = fmt(512, 256, 32);
+    let root = fs.root();
+    // A link carries a target `create` has nowhere to put.
+    assert_eq!(
+        fs.create(root, b"alias", NodeKind::Symlink),
+        Err(DriverError::Unsupported)
+    );
+    assert_eq!(fs.lookup(root, b"alias"), Err(DriverError::NotFound));
+
+    fs.create(root, b"file", NodeKind::RegularFile)
+        .expect("create a file");
+    let file = fs.lookup(root, b"file").expect("lookup");
+    let mut out = [0u8; 16];
+    assert_eq!(fs.read_link(file, &mut out), Err(DriverError::Unsupported));
+    assert_eq!(fs.read_link(root, &mut out), Err(DriverError::Unsupported));
+}
+
+#[test]
+fn read_link_refuses_an_undersized_buffer_rather_than_truncating() {
+    let mut fs = fmt(512, 256, 32);
+    let root = fs.root();
+    let node = fs
+        .create_link(root, b"alias", b"/a/long/enough/target")
+        .expect("create the link");
+    let mut small = [0u8; 4];
+    assert_eq!(
+        fs.read_link(node, &mut small),
+        Err(DriverError::BufferTooSmall)
+    );
+    assert_eq!(small, [0u8; 4]);
+}
+
+#[test]
+fn a_link_is_listed_as_a_link_and_its_blocks_are_accounted_as_data() {
+    let mut fs = fmt(512, 256, 32);
+    let root = fs.root();
+    fs.create_link(root, b"alias", &alloc::vec![b'y'; 1200])
+        .expect("create a multi-block link");
+
+    let mut name = [0u8; 255];
+    let entry = fs
+        .read_dir(root, 0, &mut name)
+        .expect("read_dir")
+        .expect("one entry");
+    assert_eq!(entry.info.kind, NodeKind::Symlink);
+    assert_eq!(entry.info.size, 1200);
+    assert!(
+        entry.info.allocated > 0,
+        "a link's target occupies real data blocks"
+    );
+
+    // A remount rebuilds the allocation map by walking the trees, so the
+    // rebuilt free count agreeing with the live one is what proves the walk
+    // accounts a link's target blocks as the single-copy data records they
+    // are, rather than as a directory's mirrored metadata pairs.
+    let live = fs.stats().expect("stats").free_blocks;
+    let bytes = fs.into_block().bytes();
+    let mut re = ARXFS::open(MemBlock::from_bytes(bytes, 512, 256), &TEST_KEY).expect("reopen");
+    assert_eq!(re.stats().expect("stats").free_blocks, live);
+
+    let root = re.root();
+    re.remove(root, b"alias").expect("remove the link");
+    assert_eq!(re.lookup(root, b"alias"), Err(DriverError::NotFound));
+    assert!(
+        re.stats().expect("stats").free_blocks > live,
+        "removing a link returns its target blocks"
+    );
+}
+
+#[test]
+fn a_link_renames_and_replaces_like_any_other_name() {
+    let mut fs = fmt(512, 256, 32);
+    let root = fs.root();
+    fs.create_link(root, b"alias", b"/target")
+        .expect("create the link");
+    fs.rename(root, b"alias", root, b"moved")
+        .expect("rename the link");
+    let node = fs.lookup(root, b"moved").expect("the moved link");
+    let mut out = [0u8; 16];
+    assert_eq!(fs.read_link(node, &mut out), Ok(7));
+
+    // A rename may replace a link with a file and a file with a link: both
+    // are non-directories, so the kind-compatibility rule permits it.
+    fs.create(root, b"plain", NodeKind::RegularFile)
+        .expect("create a file");
+    fs.rename(root, b"plain", root, b"moved")
+        .expect("a file replaces a link");
+    let replaced = fs.lookup(root, b"moved").expect("the replacement");
+    assert_eq!(
+        fs.node_info(replaced).expect("stat").kind,
+        NodeKind::RegularFile
+    );
+}
+
+#[test]
+fn a_volume_declares_the_symlink_feature_only_once_it_holds_a_link() {
+    // The bit is set by the first link, not at format time, so a volume that
+    // never holds one stays readable by a build that does not know the kind.
+    let mut fs = fmt(512, 256, 32);
+    assert_eq!(fs.incompat, 0);
+    let root = fs.root();
+    fs.create(root, b"file", NodeKind::RegularFile)
+        .expect("create a file");
+    assert_eq!(fs.incompat, 0, "an ordinary file declares nothing");
+
+    fs.create_link(root, b"alias", b"/target")
+        .expect("create the link");
+    assert_eq!(fs.incompat, superblock::INCOMPAT_SYMLINKS);
+
+    // And the declaration is committed, not merely in memory.
+    let bytes = fs.into_block().bytes();
+    let re = ARXFS::open(MemBlock::from_bytes(bytes, 512, 256), &TEST_KEY).expect("reopen");
+    assert_eq!(re.incompat, superblock::INCOMPAT_SYMLINKS);
+}
+
+#[test]
+fn a_refused_link_creation_leaves_the_feature_undeclared() {
+    // The bit is set before the link is minted, so a rolled-back transaction
+    // must take it back with the rest of the state.
+    let mut fs = fmt(512, 256, 32);
+    let root = fs.root();
+    fs.create(root, b"file", NodeKind::RegularFile)
+        .expect("create a file");
+    assert_eq!(
+        fs.create_link(root, b"file", b"/target"),
+        Err(DriverError::Busy)
+    );
+    assert_eq!(fs.incompat, 0);
+}
+
+#[test]
+fn an_unknown_declared_feature_refuses_the_mount_with_its_reason() {
+    // The word is covered by the keyed authenticator, so a bit that survives
+    // the check is one the volume's writer really set: refuse rather than
+    // mount and misread structure this build does not implement.
+    let fs = fmt(512, 256, 32);
+    let key = fs.mac_key;
+    let uuid = fs.fs_uuid;
+    let generation = fs.generation;
+    let root_phys = fs.root_phys;
+    let crypto_header = fs.crypto_header;
+    let mut bytes = fs.into_block().bytes();
+
+    // Re-seal every ring slot claiming a feature beyond this build's set.
+    let sb = Superblock {
+        block_size: 512,
+        total_blocks: 256,
+        inode_count: 32,
+        generation,
+        root_phys,
+        incompat: superblock::INCOMPAT_SUPPORTED | (1 << 63),
+    };
+    for slot in 0..RING_SLOTS {
+        for phys in [slot_block(slot), slot_block(slot) + 1] {
+            let mut block = [0u8; 512];
+            sb.seal(&mut block, uuid, slot_block(slot), &key, &crypto_header)
+                .expect("seal the slot");
+            let start = as_usize(phys) * 512;
+            bytes[start..start + 512].copy_from_slice(&block);
+        }
+    }
+
+    assert_eq!(
+        ARXFS::open(MemBlock::from_bytes(bytes, 512, 256), &TEST_KEY).err(),
+        Some(DriverError::Unsupported)
+    );
+}
+
+#[test]
+fn check_widens_a_declared_feature_set_that_understates_the_volume() {
+    // A volume holding a link but not declaring it could be mounted and
+    // misread by a link-unaware reader, so the offline check declares it.
+    let mut fs = fmt(512, 256, 32);
+    let root = fs.root();
+    fs.create_link(root, b"alias", b"/target")
+        .expect("create the link");
+    // Understate the volume, exactly as a driver defect would.
+    fs.incompat = 0;
+    fs.commit().expect("commit the understated word");
+
+    let report = fs.check(&GrantAll, &NullSink).expect("check");
+    assert_eq!(report.features_declared, 1);
+    assert!(report.made_repairs());
+    assert_eq!(fs.incompat, superblock::INCOMPAT_SYMLINKS);
+    // And it is idempotent: a correctly-declared volume needs no widening.
+    let again = fs.check(&GrantAll, &NullSink).expect("check again");
+    assert_eq!(again.features_declared, 0);
+}
+
+#[test]
+fn scrub_verifies_a_links_target_blocks_as_data() {
+    // A link's target is node data, so scrub runs it through the data
+    // integrity pipeline rather than treating it as mirrored metadata.
+    let mut fs = fmt(512, 256, 32);
+    let root = fs.root();
+    fs.create_link(root, b"alias", &alloc::vec![b'z'; 1200])
+        .expect("create a multi-block link");
+
+    let report = fs
+        .scrub(&GrantAll, &NullSink, ScrubBudget::Unlimited)
+        .expect("scrub");
+    assert!(report.data_blocks_checked > 0);
+    assert_eq!(report.metadata_unrepairable, 0);
+    assert_eq!(report.data_physical_faults, 0);
+    assert_eq!(report.data_aead_faults, 0);
+    assert_eq!(report.data_logical_faults, 0);
+    // The offline check agrees, and finds no orphan or dangling entry.
+    let check = fs.check(&GrantAll, &NullSink).expect("check");
+    assert!(check.structure_sound);
+    assert_eq!(check.orphaned_inodes, 0);
+    assert_eq!(check.dangling_entries, 0);
+}
+
+#[test]
+fn rescue_counts_a_link_rather_than_extracting_its_target_as_file_bytes() {
+    // The sink carries file bytes, so emitting a link's target through it
+    // would recreate the link as a regular file holding the target's text.
+    let mut fs = fmt(512, 256, 32);
+    let root = fs.root();
+    fs.create(root, b"file", NodeKind::RegularFile)
+        .expect("create a file");
+    assert_eq!(fs.write_at(root, b"file", 0, b"payload"), Ok(7));
+    fs.create_link(root, b"alias", b"/target")
+        .expect("create the link");
+    let bytes = fs.into_block().bytes();
+
+    let mut sink = CollectSink::new();
+    let report = ARXFS::rescue(
+        MemBlock::from_bytes(bytes, 512, 256),
+        &TEST_KEY,
+        &GrantAll,
+        &NullSink,
+        &mut sink,
+    )
+    .expect("rescue");
+    assert_eq!(report.links_skipped, 1);
+    assert_eq!(report.files_mapped, 1);
+    assert!(report.blocks_extracted > 0);
+    // Nothing the sink received carries the target's bytes.
+    assert!(
+        !sink
+            .blocks
+            .values()
+            .any(|data| data.starts_with(b"/target")),
+        "a link's target must never be emitted as file content"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Companion-mirror recovery: an unreadable copy is as absent as an
+// unauthenticated one (`docs/src/filesystem/arxfs-spec.md` §8).
+// ---------------------------------------------------------------------------
+
+#[test]
+fn an_unreadable_primary_superblock_slot_mounts_from_its_companion() {
+    let mut fs = fmt(512, 256, 32);
+    let root = fs.root();
+    fs.create(root, b"witness", NodeKind::RegularFile)
+        .expect("create");
+    let bytes = fs.into_block().bytes();
+    // The committed slot's primary block cannot be read at all.
+    let dev = MemBlock::from_bytes(bytes, 512, 256).fail_reads_of(slot_block(1));
+
+    let mut re = ARXFS::open(dev, &TEST_KEY).expect("mount from the companion");
+    re.lookup(re.root(), b"witness")
+        .expect("the committed content is intact");
+}
+
+#[test]
+fn an_unreadable_primary_transaction_root_mounts_from_its_companion() {
+    let mut fs = fmt(512, 256, 32);
+    let root = fs.root();
+    fs.create(root, b"witness", NodeKind::RegularFile)
+        .expect("create");
+    let root_phys = fs.root_phys;
+    let bytes = fs.into_block().bytes();
+    let dev = MemBlock::from_bytes(bytes, 512, 256).fail_reads_of(root_phys);
+
+    let mut re = ARXFS::open(dev, &TEST_KEY).expect("mount from the companion");
+    re.lookup(re.root(), b"witness")
+        .expect("the committed content is intact");
+}
+
+#[test]
+fn an_unreadable_primary_metadata_block_reads_from_its_companion() {
+    let mut fs = fmt(512, 256, 32);
+    let root = fs.root();
+    fs.create(root, b"witness", NodeKind::RegularFile)
+        .expect("create");
+    let inode_tree_root = fs.inode_tree_root;
+    let bytes = fs.into_block().bytes();
+    // A tree node's primary copy is unreadable; the lookup must still work.
+    let dev = MemBlock::from_bytes(bytes, 512, 256).fail_reads_of(inode_tree_root);
+
+    let mut re = ARXFS::open(dev, &TEST_KEY).expect("mount");
+    re.lookup(re.root(), b"witness")
+        .expect("the inode tree reads from its mirror");
 }

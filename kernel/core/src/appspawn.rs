@@ -58,7 +58,7 @@ use tairix_reclaim::{CacheBudget, MemoryPressure};
 use tairix_sync::RwLock;
 
 use crate::bootinfo::KernelArch;
-use crate::fs::FilesystemService;
+use crate::fs::{FilesystemService, FinalLink};
 use crate::launch_cache::LaunchCache;
 use crate::sched::SchedulerArch;
 
@@ -322,7 +322,16 @@ impl<'a> FsBundleStore<'a> {
     /// grew) stops at the stated size and the extra is refused closed by
     /// the caller's own length checks.
     fn read_file(&self, path: &str, max_len: usize) -> Result<Vec<u8>, Errno> {
-        let stat = self.fs.stat(self.uid, self.caps, path)?;
+        // A bundle is self-contained, so this read keeps a final link rather
+        // than following one: every part of the app is a real file inside its
+        // own folder, and a link could name something outside the bundle that
+        // the signature never covered. Enforced here, at the one read every
+        // bundle file goes through, rather than depending on each caller
+        // having checked a listing's kind first.
+        let stat = self.fs.stat(self.uid, self.caps, path, FinalLink::Keep)?;
+        if stat.kind == FileKind::Symlink {
+            return Err(Errno::NotSupported);
+        }
         let size = usize::try_from(stat.size).map_err(|_| Errno::LengthOutOfRange)?;
         if size > max_len {
             return Err(Errno::LengthOutOfRange);
@@ -368,7 +377,10 @@ impl<'a> FsBundleStore<'a> {
         } else {
             format!("{root}/{rel_dir}")
         };
-        for entry in self.fs.readdir(self.uid, self.caps, &abs_dir)? {
+        for entry in self
+            .fs
+            .readdir(self.uid, self.caps, &abs_dir, FinalLink::Follow)?
+        {
             let name = entry.name;
             let rel = if rel_dir.is_empty() {
                 name.clone()
@@ -393,6 +405,11 @@ impl<'a> FsBundleStore<'a> {
                 FileKind::Directory => {
                     self.collect_files(root, &rel, depth + 1, total, files)?;
                 }
+                // A bundle is self-contained: every part of the app is a
+                // real file inside its own folder. A link could name
+                // something outside the bundle the signature never covered,
+                // so the whole bundle is refused rather than partly loaded.
+                FileKind::Symlink => return Err(Errno::NotSupported),
             }
         }
         Ok(())
@@ -403,7 +420,7 @@ impl BundleStore for FsBundleStore<'_> {
     fn entries(&self, bundle: &str) -> Result<Vec<String>, Errno> {
         Ok(self
             .fs
-            .readdir(self.uid, self.caps, bundle)?
+            .readdir(self.uid, self.caps, bundle, FinalLink::Follow)?
             .into_iter()
             .map(|entry| entry.name)
             .collect())
@@ -650,6 +667,27 @@ mod tests {
             run_reads, help_reads,
             "Run is read once (the content-hash walk), not a second time for the entry image"
         );
+    }
+
+    #[test]
+    fn a_symlinked_bundle_file_is_refused_rather_than_read_through() {
+        // A bundle is self-contained, so a link inside one could name
+        // something outside it that the signature never covered. The
+        // manifest is the sharp case: it is read *before* the content walk
+        // that refuses a link entry, so the refusal has to live at the read
+        // itself rather than in a caller's kind check.
+        for path in [
+            "/System/Commands/ps.app/AppInfo",
+            "/System/Commands/ps.app/Run",
+        ] {
+            let (fs, anchor, _) = composed_bundle(vec![]);
+            let linked = fs.with_link(path);
+            assert_eq!(
+                load(&linked, anchor),
+                Err(AppError::Store(Errno::NotSupported)),
+                "a symlinked {path} must be refused, never read through"
+            );
+        }
     }
 
     #[test]

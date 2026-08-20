@@ -199,7 +199,7 @@ costs metadata only — never a physical data record, a zstd payload, a dedupe
 chunk, or an encrypted data blob — so a 10 MiB all-zero file reports a 10 MiB
 logical size while mapping **zero** data blocks. A **hole** is an unmapped
 logical range, represented *implicitly* as the gap between a file's extent-tree
-mappings (the form `.junie/SPARSE.md` §2/§3 permit), so it adds no on-disk field
+mappings (the form `plans/SPARSE.md` §2/§3 permit), so it adds no on-disk field
 and is simply the absence of an extent (`AGENTS.md` §2.2). The write path
 detects zeros **first** (`store_block`/`is_all_zero`): an all-zero logical record
 is caught before the logical hash, dedupe, compression, encryption, or
@@ -210,6 +210,38 @@ deduped or compressed; repeated *non-zero* data follows the normal zstd/RAW path
 (no RLE/FILL mode). Reads of a hole synthesise zeroes with no disk I/O,
 extending a file leaves a hole, shrinking frees only the real data extents, and
 scrub/check/rescue iterate only mapped runs so a hole is never read.
+
+## Symbolic links (`arxfs-spec.md` §20)
+
+A link is an inode of on-disk kind `3` (beside `1` directory, `2` regular file)
+whose **stored target is its node data**, so it reuses the whole existing
+pipeline — extents, AEAD, logical hash, physical checksum, dedupe — with no
+second storage path (`AGENTS.md` §2.2). Three consequences are deliberate
+rather than inherited: the compressor is never reached (a target is at most
+`FS_SYMLINK_MAX` = 4096 bytes, under one 16-block cluster at every supported
+block size, and a single-block record is always stored raw); dedupe *does*
+apply, since excluding one object kind would be a `dedupe=off` knob the
+mandatory profile forbids; and a link's blocks are **data**, so allocation
+accounting, freeing, scrub, and the free-space rebuild treat them as the
+single-copy records they are rather than as a directory's mirrored pairs.
+
+`Inode::kind` is an `InodeKind` enum, not a directory/not-directory boolean, so
+every site must say what it means for a link: `read_at`, `write_at`,
+`truncate`, and `reflink` refuse one fail-closed (a reflink most sharply — it
+clones data blocks into a fresh *regular file*, which would silently turn a
+link into a file holding the target's text), `create` refuses the kind, and
+`rescue` counts and skips a link rather than emitting its target through a
+byte-oriented sink. `create_link` and `read_link` are the only ways in and out;
+`read_link` returns the target verbatim and refuses an undersized buffer rather
+than truncating a path.
+
+A volume that holds a link declares `INCOMPAT_SYMLINKS` in the superblock's
+plaintext **incompatible-feature word**, so a reader that does not know the
+kind refuses the volume at mount with that reason instead of reading a link
+inode as corrupt. The bit is set by the *first* link, in that transaction (and
+rolled back with it), so a link-free volume stays readable by a build without
+the feature — which a format-version bump could not have preserved. `check`
+widens a word that understates the volume.
 
 ## Online scrub (`arxfs-spec.md` §12)
 
@@ -470,7 +502,7 @@ the transient records recover gracefully, and an unmirrored data block's fault
 is classified by its `DataFault` layer and surfaced fail-closed, never silently
 repaired.
 
-The **sparse-file tests** (`arxfs-spec.md` §19, `.junie/SPARSE.md` §17) cover
+The **sparse-file tests** (`arxfs-spec.md` §19, `plans/SPARSE.md` §17) cover
 all ten mandatory cases: a 10 MiB all-zero file with a 10 MiB logical size and
 zero mapped data blocks (also the encrypted-volume no-plaintext case, surviving
 a remount), a non-zero write splitting an extent map around a hole (ordered,

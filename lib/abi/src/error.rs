@@ -344,6 +344,18 @@ pub enum Errno {
     /// this code — a vanished device cannot be kept alive by pretending its
     /// volumes are still there.
     Busy = 41,
+    /// A path could not be resolved because it traverses too many symbolic
+    /// links, or because a link was found where the caller forbade one.
+    ///
+    /// The TAIRiX equivalent of POSIX `ELOOP`. Emitted when per-component
+    /// resolution exceeds its hop budget (a link cycle, or a chain longer
+    /// than the bound), when the resolved path would exceed
+    /// [`crate::fs::FS_PATH_MAX`], and when an open carrying
+    /// [`crate::fs::OpenFlags::NO_FOLLOW`] finds the final component really
+    /// is a link and byte access was asked for. Resolution stops and nothing
+    /// is opened, read, or written (fail closed) — a cycle is never walked
+    /// until the kernel runs out of stack.
+    LinkLoop = 42,
 }
 
 impl Errno {
@@ -420,6 +432,7 @@ impl Errno {
             39 => Some(Self::MediumError),
             40 => Some(Self::DeviceOffline),
             41 => Some(Self::Busy),
+            42 => Some(Self::LinkLoop),
             _ => None,
         }
     }
@@ -469,6 +482,7 @@ impl fmt::Display for Errno {
             Self::MediumError => "permanent medium error",
             Self::DeviceOffline => "device offline or removed",
             Self::Busy => "device or resource busy",
+            Self::LinkLoop => "too many symbolic links in path resolution",
         };
         f.write_str(message)
     }
@@ -522,6 +536,7 @@ mod tests {
         assert_eq!(Errno::MediumError.as_i32(), 39);
         assert_eq!(Errno::DeviceOffline.as_i32(), 40);
         assert_eq!(Errno::Busy.as_i32(), 41);
+        assert_eq!(Errno::LinkLoop.as_i32(), 42);
     }
 
     #[test]
@@ -570,11 +585,12 @@ mod tests {
             Errno::MediumError,
             Errno::DeviceOffline,
             Errno::Busy,
+            Errno::LinkLoop,
         ] {
             assert_eq!(Errno::from_i32(errno.as_i32()), Some(errno));
         }
         assert_eq!(Errno::from_i32(0), None);
-        assert_eq!(Errno::from_i32(42), None);
+        assert_eq!(Errno::from_i32(43), None);
         assert_eq!(Errno::from_i32(-1), None);
     }
 

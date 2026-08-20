@@ -35,6 +35,8 @@ enum RwNode {
     Dir(BTreeMap<String, usize>),
     /// A regular file: its byte contents.
     File(Vec<u8>),
+    /// A symbolic link: its stored target, verbatim and unresolved.
+    Link(Vec<u8>),
 }
 
 /// An in-memory read/write filesystem with a per-node security record.
@@ -154,6 +156,12 @@ impl FilesystemRead for RwMockFs {
                 allocated: data.len() as u64,
                 times: NodeTimes::default(),
             }),
+            RwNode::Link(target) => Ok(NodeInfo {
+                kind: NodeKind::Symlink,
+                size: target.len() as u64,
+                allocated: target.len() as u64,
+                times: NodeTimes::default(),
+            }),
         }
     }
 
@@ -178,6 +186,20 @@ impl FilesystemRead for RwMockFs {
         let n = core::cmp::min(buf.len(), data.len() - start);
         buf[..n].copy_from_slice(&data[start..start + n]);
         Ok(n)
+    }
+
+    fn read_link(&mut self, link: NodeId, out: &mut [u8]) -> Result<usize, DriverError> {
+        let idx = Self::index(link)?;
+        let RwNode::Link(target) = self.nodes.get(idx).ok_or(DriverError::NotFound)? else {
+            return Err(DriverError::Unsupported);
+        };
+        if out.len() < target.len() {
+            // The whole target or nothing: a truncated path would resolve
+            // somewhere else entirely.
+            return Err(DriverError::BufferTooSmall);
+        }
+        out[..target.len()].copy_from_slice(target);
+        Ok(target.len())
     }
 
     fn read_dir(
@@ -225,9 +247,41 @@ impl FilesystemWrite for RwMockFs {
         let node = match kind {
             NodeKind::Directory => RwNode::Dir(BTreeMap::new()),
             NodeKind::RegularFile => RwNode::File(Vec::new()),
+            // A link carries a target this call has nowhere to put.
+            NodeKind::Symlink => return Err(DriverError::Unsupported),
         };
         let new_index = self.nodes.len();
         self.nodes.push(node);
+        self.sec.push(NodeSecurity::new(
+            self.create_mode,
+            self.create_uid,
+            self.create_gid,
+        ));
+        self.attrs.push(AttrSet::new());
+        let dir_idx = Self::index(dir)?;
+        if let RwNode::Dir(children) = &mut self.nodes[dir_idx] {
+            children.insert(name, new_index);
+        }
+        Ok(NodeId::from_raw(new_index as u64 + 1))
+    }
+
+    fn create_link(
+        &mut self,
+        dir: NodeId,
+        name: &[u8],
+        target: &[u8],
+    ) -> Result<NodeId, DriverError> {
+        if self.child_index(dir, name)?.is_some() {
+            return Err(DriverError::Busy);
+        }
+        if target.is_empty() {
+            return Err(DriverError::LengthOutOfRange);
+        }
+        let name = core::str::from_utf8(name)
+            .map_err(|_| DriverError::LengthOutOfRange)?
+            .to_string();
+        let new_index = self.nodes.len();
+        self.nodes.push(RwNode::Link(target.to_vec()));
         self.sec.push(NodeSecurity::new(
             self.create_mode,
             self.create_uid,
@@ -439,7 +493,9 @@ impl FilesystemStats for RwMockFs {
             .nodes
             .iter()
             .map(|node| match node {
-                RwNode::File(bytes) => (bytes.len() as u64).div_ceil(u64::from(MOCK_BLOCK_SIZE)),
+                RwNode::File(bytes) | RwNode::Link(bytes) => {
+                    (bytes.len() as u64).div_ceil(u64::from(MOCK_BLOCK_SIZE))
+                }
                 RwNode::Dir(_) => 0,
             })
             .sum();

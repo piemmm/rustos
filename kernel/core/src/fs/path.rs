@@ -11,6 +11,8 @@
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
+use tairix_abi::fs::FS_SYMLINK_MAX;
+
 use super::VfsError;
 
 /// Maximum bytes in a single path component.
@@ -161,13 +163,110 @@ fn validate_component(name: &str) -> Result<(), VfsError> {
     if name == "." || name == ".." {
         return Err(VfsError::InvalidPath);
     }
-    if name.len() > MAX_COMPONENT_LEN {
+    validate_name(name)
+}
+
+/// The spelling checks every name must pass, whoever supplied it: bounded
+/// length, no NUL, no embedded separator.
+///
+/// Shared by [`Path::parse`] — which additionally forbids the `.`/`..`
+/// tokens — and by [`parse_link_target`], which permits them, so the two
+/// grammars cannot drift apart on what a *name* may contain.
+fn validate_name(name: &str) -> Result<(), VfsError> {
+    if name.is_empty() || name.len() > MAX_COMPONENT_LEN {
         return Err(VfsError::InvalidPath);
     }
     if name.bytes().any(|b| b == 0 || b == b'/') {
         return Err(VfsError::InvalidPath);
     }
     Ok(())
+}
+
+/// One step of a symbolic link's target.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum TargetStep {
+    /// Descend into the named child.
+    Name(String),
+    /// Ascend to the parent. Resolution clamps this at the filesystem root,
+    /// so no chain of them can escape the tree.
+    Up,
+}
+
+/// A parsed symbolic-link target.
+///
+/// Unlike a [`Path`], a target is *not* required to be absolute and *may*
+/// carry `.`/`..`: it is a POSIX link body, so it is whatever the link's
+/// author stored — including one authored by a foreign system on a foreign
+/// volume. The grammar is therefore looser than [`Path::parse`], and the
+/// safety comes from *resolution* rather than from spelling: a `..` is
+/// applied to the **walked node stack** (physically), never by collapsing
+/// text before the walk, so a `..` after a link cannot be tricked into
+/// naming a directory the walk never visited.
+///
+/// A `.` step is dropped at parse time: it is a no-op under both lexical
+/// and physical resolution, so representing it would only add a variant
+/// every consumer must handle.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LinkTarget {
+    absolute: bool,
+    steps: Vec<TargetStep>,
+}
+
+impl LinkTarget {
+    /// Whether the target restarts from the filesystem root.
+    #[must_use]
+    pub fn is_absolute(&self) -> bool {
+        self.absolute
+    }
+
+    /// The target's steps, in order.
+    #[must_use]
+    pub fn steps(&self) -> &[TargetStep] {
+        &self.steps
+    }
+}
+
+/// Parse a symbolic link's stored target.
+///
+/// The bytes are untrusted on-disk data, so every step is bounds- and
+/// shape-checked and the whole target is refused on any failure — a
+/// partially-parsed target is never resolved.
+///
+/// # Errors
+///
+/// Returns [`VfsError::InvalidPath`] if `text` is empty, longer than
+/// [`tairix_abi::fs::FS_SYMLINK_MAX`], carries an over-long name, a NUL, or
+/// more than [`MAX_PATH_COMPONENTS`] steps.
+pub fn parse_link_target(text: &str) -> Result<LinkTarget, VfsError> {
+    if text.is_empty() || text.len() > FS_SYMLINK_MAX {
+        return Err(VfsError::InvalidPath);
+    }
+    let (absolute, rest) = match text.strip_prefix('/') {
+        Some(rest) => (true, rest),
+        None => (false, text),
+    };
+    let mut steps = Vec::new();
+    for raw in rest.split('/') {
+        // A trailing slash, a `//` run, and a `.` are all no-ops.
+        if raw.is_empty() || raw == "." {
+            continue;
+        }
+        if steps.len() == MAX_PATH_COMPONENTS {
+            return Err(VfsError::InvalidPath);
+        }
+        if raw == ".." {
+            steps.push(TargetStep::Up);
+            continue;
+        }
+        validate_name(raw)?;
+        steps.push(TargetStep::Name(raw.to_string()));
+    }
+    // `/` alone is a legal target (the root); a bare empty relative target
+    // is not, and was rejected above.
+    if steps.is_empty() && !absolute {
+        return Err(VfsError::InvalidPath);
+    }
+    Ok(LinkTarget { absolute, steps })
 }
 
 #[cfg(test)]
@@ -230,6 +329,56 @@ mod tests {
         let p = Path::parse("/System/Logs/boot").expect("parses");
         let parent = p.parent().expect("has parent");
         assert_eq!(parent, Path::parse("/System/Logs").expect("parses"));
+    }
+
+    #[test]
+    fn link_target_keeps_dot_dot_and_drops_dot() {
+        let t = parse_link_target("a/./b/../c").expect("legal target");
+        assert!(!t.is_absolute());
+        assert_eq!(
+            t.steps(),
+            &[
+                TargetStep::Name("a".into()),
+                TargetStep::Name("b".into()),
+                TargetStep::Up,
+                TargetStep::Name("c".into()),
+            ]
+        );
+    }
+
+    #[test]
+    fn link_target_records_absoluteness() {
+        assert!(parse_link_target("/System/x").expect("legal").is_absolute());
+        assert!(!parse_link_target("System/x").expect("legal").is_absolute());
+        // `/` alone is the root and is legal; a bare relative nothing is not.
+        let root = parse_link_target("/").expect("root is a legal target");
+        assert!(root.is_absolute() && root.steps().is_empty());
+        assert_eq!(parse_link_target(""), Err(VfsError::InvalidPath));
+        assert_eq!(parse_link_target("."), Err(VfsError::InvalidPath));
+    }
+
+    #[test]
+    fn link_target_refuses_malformed_and_oversized_input() {
+        // Untrusted on-disk bytes: every bound refuses the whole target.
+        let long_name = "a".repeat(MAX_COMPONENT_LEN + 1);
+        assert_eq!(parse_link_target(&long_name), Err(VfsError::InvalidPath));
+        assert_eq!(parse_link_target("a b"), Err(VfsError::InvalidPath));
+        let too_deep = (0..=MAX_PATH_COMPONENTS)
+            .map(|_| "d")
+            .collect::<Vec<_>>()
+            .join("/");
+        assert_eq!(parse_link_target(&too_deep), Err(VfsError::InvalidPath));
+        let too_long = "/".to_string() + &"a/".repeat(FS_SYMLINK_MAX);
+        assert_eq!(parse_link_target(&too_long), Err(VfsError::InvalidPath));
+    }
+
+    #[test]
+    fn caller_supplied_paths_still_refuse_dot_tokens() {
+        // The looser target grammar must not have relaxed the syscall
+        // boundary: a caller's own path is as strict as it ever was.
+        assert_eq!(Path::parse("/a/../b"), Err(VfsError::InvalidPath));
+        assert_eq!(Path::parse("/a/./b"), Err(VfsError::InvalidPath));
+        assert_eq!(Path::parse("a/b"), Err(VfsError::InvalidPath));
     }
 
     #[test]

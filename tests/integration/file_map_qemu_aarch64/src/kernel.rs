@@ -28,6 +28,7 @@
 use core::panic::PanicInfo;
 
 use alloc::boxed::Box;
+use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 
@@ -51,7 +52,7 @@ use tairix_kalloc::FreeListAllocator;
 use tairix_kernel::aarch64::arch_wrapper::{Aarch64BinArch, UART_ONLY_CONSOLES};
 use tairix_kernel::aarch64::spawn_producer::{AARCH64_PROCESS_SPAWN, USER_IMAGE_BIAS};
 use tairix_kernel::dispatch_core::{dispatch_via_slot, read_raw_args, resolve_user_fault_via_slot};
-use tairix_kernel_core::fs::ReaddirEntry;
+use tairix_kernel_core::fs::{FinalLink, ReaddirEntry};
 use tairix_kernel_core::{
     AddressSpaceRegistry, BootReserve, DispatchCallbackSlot, EmbeddedProgram, FilesystemService,
     InitSpawnCtx, KernelArch, KernelDispatchHook, KernelInitSpawner, KernelProcessWait, LiveMemMap,
@@ -284,11 +285,37 @@ impl FilesystemService for FixtureFs {
         _uid: u32,
         _caps: &dyn CapabilityQuery,
         _path: &str,
+        _final_link: FinalLink,
     ) -> Result<Vec<ReaddirEntry>, Errno> {
         Err(Errno::NotImplemented)
     }
 
-    fn stat(&self, _uid: u32, _caps: &dyn CapabilityQuery, path: &str) -> Result<FileStat, Errno> {
+    fn symlink(
+        &self,
+        _uid: u32,
+        _caps: &dyn CapabilityQuery,
+        _target: &str,
+        _path: &str,
+    ) -> Result<(), Errno> {
+        Err(Errno::NotImplemented)
+    }
+
+    fn readlink(
+        &self,
+        _uid: u32,
+        _caps: &dyn CapabilityQuery,
+        _path: &str,
+    ) -> Result<String, Errno> {
+        Err(Errno::NotImplemented)
+    }
+
+    fn stat(
+        &self,
+        _uid: u32,
+        _caps: &dyn CapabilityQuery,
+        path: &str,
+        _final_link: FinalLink,
+    ) -> Result<FileStat, Errno> {
         if path != FIXTURE_PATH {
             return Err(Errno::NotFound);
         }

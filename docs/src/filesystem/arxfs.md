@@ -41,6 +41,14 @@ validates the geometry from the selected superblock slot.
 |                 | root, the inode-tree nodes, the per-file extent-tree      |
 |                 | nodes, directory blocks, and raw file-data blocks.        |
 
+The superblock also carries an **incompatible-feature word**: a plaintext
+bitmap of on-disk structures a reader must implement to mount at all, covered
+by the block's keyed authenticator. A volume declaring a bit this build does
+not know is refused with `DriverError::Unsupported` — refused with its reason
+rather than mounted and misread. Today the one bit is `symlinks`, and a volume
+gains it from its first link, never at format time, so a link-free volume stays
+readable by a build without the feature.
+
 Every **metadata** block is self-identifying (`AGENTS.md` §8 block
 identity): its first 128 bytes carry a magic, block type, format version,
 the volume UUID, an owner object, a generation, its logical and physical
@@ -362,7 +370,7 @@ chunk, or an encrypted data blob. A 10 MiB all-zero file reports a 10 MiB
 logical size while allocating **zero** data blocks.
 
 A **hole** is an unmapped logical range. ARXFS represents holes *implicitly*
-as the gaps between a file's extent-tree mappings (the form `.junie/SPARSE.md`
+as the gaps between a file's extent-tree mappings (the form `plans/SPARSE.md`
 §2/§3 permit alongside an explicit ZERO extent), so a hole adds no on-disk
 field and is simply the absence of an extent — there is nothing extra to
 checksum, encrypt, compress, dedupe, scrub, or trim.
@@ -384,6 +392,40 @@ frees the data extents beyond the new EOF and removed holes need no free. Scrub,
 check, and rescue iterate only the mapped extent runs, so a hole is never read
 and needs no data-block recovery. Because every volume is encrypted, a hole also
 leaves no plaintext data payload for the zero range.
+
+## Symbolic links (`arxfs-spec.md` §20)
+
+A link is an inode of on-disk kind `3` (beside `1` for a directory and `2` for
+a regular file) whose **stored target is its node data**: it goes through the
+ordinary file write path, so the target is checksummed, authenticated,
+encrypted, and dedupe-eligible exactly like file content, with no second
+storage path to maintain. The driver's `kind` is an enum rather than a
+directory/not-directory boolean, so every site that once treated "not a
+directory" as "a regular file" has to say what it means for a link.
+
+Three consequences worth stating rather than inheriting:
+
+- **The compressor is never reached.** A target is at most `FS_SYMLINK_MAX`
+  (4096) bytes, under one 16-block compression cluster at every supported block
+  size, and a single-block record is always stored raw. Resolution reads a link
+  per hop and that path stays codec-free by construction.
+- **Dedupe applies.** Two links with the same target share a chunk, byte-
+  verified before sharing and copied on write, as two identical files do.
+  Excluding one object kind would be a `dedupe=off` knob, which the mandatory
+  profile forbids — and many shortcuts to one bundle is what sharing is for.
+- **A link's blocks are data.** Only a directory's content blocks are mirrored
+  metadata pairs, so allocation accounting, freeing, scrub, and the free-space
+  rebuild all treat a link's target blocks as the single-copy data records they
+  are.
+
+`read_at`, `write_at`, `truncate`, and `reflink` refuse a link fail-closed — a
+reflink most sharply, since it clones data blocks into a fresh *regular file*
+and would silently turn a link into a file holding the target's text. `create`
+refuses the kind (it carries no target to store); `create_link` is the only way
+to make one and `read_link` the only way to read one, returning the target
+verbatim and refusing an undersized buffer rather than truncating a path.
+`rescue` counts and skips links rather than emitting a target through a
+byte-oriented sink.
 
 ## Online scrub (`arxfs-spec.md` §12)
 
@@ -877,7 +919,7 @@ gracefully (scrub restarts, health re-derives); and an unmirrored data block's
 fault is detected, classified by its `DataFault` layer, and surfaced as a
 fail-closed `DeviceFault`, never silently repaired.
 
-The **sparse-file acceptance tests** (`arxfs-spec.md` §19, `.junie/SPARSE.md`
+The **sparse-file acceptance tests** (`arxfs-spec.md` §19, `plans/SPARSE.md`
 §17) cover all ten mandatory cases: a 10 MiB all-zero file reporting a 10 MiB
 logical size while mapping **zero** data blocks (and reading back zero across a
 remount — also the encrypted-volume case, no plaintext payload); a non-zero

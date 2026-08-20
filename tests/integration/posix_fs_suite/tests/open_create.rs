@@ -14,7 +14,7 @@ fn create_makes_an_empty_regular_file() {
         .expect("create");
 
     let info = vfs
-        .stat_via_secured(&owner, &vol_path("f"), &mut fs)
+        .stat_via_secured(&owner, &vol_path("f"), &mut fs, FinalLink::Follow)
         .expect("stat");
     assert_eq!(info.kind, NodeKind::RegularFile);
     assert_eq!(info.size, 0);

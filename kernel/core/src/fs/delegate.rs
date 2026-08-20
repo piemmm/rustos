@@ -23,6 +23,7 @@
 
 use core::marker::PhantomData;
 
+use alloc::collections::VecDeque;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
@@ -31,14 +32,60 @@ use tairix_abi::driver::filesystem::{
     NodeKind, NodeTimes,
 };
 use tairix_abi::driver::DriverError;
-use tairix_abi::fs::{FS_GROUP_EXEC_BIT, FS_OWNER_UNCHANGED, FS_SETGID_BIT, FS_SETUID_BIT};
+use tairix_abi::fs::{
+    OpenFlags, FS_GROUP_EXEC_BIT, FS_OWNER_UNCHANGED, FS_SETGID_BIT, FS_SETUID_BIT, FS_SYMLINK_MAX,
+};
 use tairix_abi::CapabilityId;
 use tairix_fsmeta::{AttrKey, NamespaceAccess, KEY_MAX};
 use tairix_kernel_sec::{GroupId, UserId};
 
-use super::path::MAX_COMPONENT_LEN;
+use super::path::{parse_link_target, TargetStep, MAX_COMPONENT_LEN, MAX_PATH_COMPONENTS};
 use super::perm::{Access, Credentials, Metadata};
 use super::VfsError;
+
+/// Maximum symbolic links a single resolution may follow.
+///
+/// The conventional Unix `MAXSYMLINKS`. It is a fail-closed *security*
+/// bound on untrusted on-disk structure, not a capacity: a cycle is refused
+/// with [`VfsError::LinkLoop`] after this many hops rather than walked until
+/// the kernel runs out of stack.
+pub const SYMLINK_HOP_MAX: usize = 40;
+
+/// Maximum path steps a single resolution may consume.
+///
+/// Derived from the two bounds that produce steps — a caller's own path is
+/// at most [`MAX_PATH_COMPONENTS`], and each of the [`SYMLINK_HOP_MAX`]
+/// permitted hops may splice at most that many more — so the total work of
+/// one resolution is bounded even when every component is a link.
+pub const MAX_RESOLVE_STEPS: usize = MAX_PATH_COMPONENTS * (SYMLINK_HOP_MAX + 1);
+
+/// Whether a symbolic link in a path's **final** position is followed.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum FinalLink {
+    /// Resolve through it to whatever it names (the default posture).
+    Follow,
+    /// Stop at the link itself — the `lstat` / `readlink` / `unlink`
+    /// posture.
+    Keep,
+}
+
+impl FinalLink {
+    /// The posture an open descriptor's flags fix.
+    ///
+    /// [`OpenFlags::NO_FOLLOW`] makes the descriptor name the link itself,
+    /// so every resolution later performed on that descriptor's behalf has
+    /// to keep the link rather than report what it points at. Deriving it
+    /// here, once, is what stops an open and a subsequent stat through the
+    /// same handle from disagreeing.
+    #[must_use]
+    pub const fn for_open(flags: OpenFlags) -> Self {
+        if flags.is_no_follow() {
+            Self::Keep
+        } else {
+            Self::Follow
+        }
+    }
+}
 
 /// Structural metadata of a delegated node, paired with the VFS
 /// [`Metadata`] that governs it.
@@ -68,6 +115,56 @@ pub struct DelegatedInfo {
     pub times: NodeTimes,
 }
 
+/// One node a path walk stands on, with everything the walk learned about
+/// it: the driver's node id, the name that led there, and its structural and
+/// permission metadata.
+///
+/// Carrying the metadata makes `..` free — ascending re-reads nothing — and
+/// carrying the name is what lets a completed walk report the *place* its
+/// final component occupies, which every `(dir, name)`-keyed driver mutation
+/// needs.
+struct Walked {
+    node: NodeId,
+    /// The name this node was looked up under, or `None` for the mount root,
+    /// which no directory holds.
+    name: Option<String>,
+    info: NodeInfo,
+    meta: Metadata,
+}
+
+/// The place a path's final name occupies.
+///
+/// The driver mutation surface is keyed `(dir, name)` rather than by node,
+/// so a walk has to report where a name lives and not only what currently
+/// lives there. Under [`FinalLink::Follow`] the place is the place of
+/// whatever a final symbolic link *names*, which is what makes a write, a
+/// truncate, or an `O_CREAT` act on the target instead of on the link.
+struct Place {
+    /// The directory holding the name.
+    parent: NodeId,
+    /// That directory's own permission metadata, for a caller that must
+    /// authorise a change to its entries.
+    parent_meta: Metadata,
+    /// The final name within `parent`.
+    name: String,
+    /// The node occupying the place, looked up by the walk itself, or `None`
+    /// when the name is vacant.
+    found: Option<(NodeId, NodeInfo, Metadata)>,
+}
+
+/// Where a path walk ended.
+enum Walk {
+    /// The path named the mount point itself, which no directory holds — so
+    /// it is not a place anything can be created at or removed from.
+    Root {
+        node: NodeId,
+        info: NodeInfo,
+        meta: Metadata,
+    },
+    /// The path's final name lives in a directory.
+    Leaf(Place),
+}
+
 /// Maps a [`DriverError`] from the read surface onto the VFS error type.
 ///
 /// Only the errors the [`FilesystemRead`] surface documents can occur here:
@@ -95,6 +192,20 @@ const fn map_driver_error(error: DriverError) -> VfsError {
 const fn map_rename_error(error: DriverError) -> VfsError {
     match error {
         DriverError::Busy => VfsError::NotEmpty,
+        other => map_driver_error(other),
+    }
+}
+
+/// Maps a [`DriverError`] from a link operation onto the VFS error type.
+///
+/// A format with no link object type answers [`DriverError::Unsupported`],
+/// and a caller must be able to tell that permanent format limit from the
+/// path mapping's "a file was used as a directory": it becomes
+/// [`VfsError::NotSupported`], the refusal no retry can clear. Every other
+/// error maps as for any read ([`map_driver_error`]).
+const fn map_link_error(error: DriverError) -> VfsError {
+    match error {
+        DriverError::Unsupported => VfsError::NotSupported,
         other => map_driver_error(other),
     }
 }
@@ -541,22 +652,194 @@ impl<R: FilesystemRead + ?Sized, P: MetaPolicy<R>> DelegatedFs<'_, R, P> {
         cred: &Credentials<'_>,
         components: &[String],
     ) -> Result<(NodeId, NodeInfo, Metadata), VfsError> {
-        let mut node = self.fs.root();
-        let mut info = self.fs.node_info(node).map_err(map_driver_error)?;
-        let mut meta = P::metadata(self.fs, node, &self.template)?;
-        for component in components {
-            if info.kind != NodeKind::Directory {
+        self.resolve_final(cred, components, FinalLink::Follow)
+    }
+
+    /// Resolve `components` to the node they name, choosing whether a
+    /// symbolic link in the **final** position is followed.
+    ///
+    /// The [`Self::walk`] view for a caller that wants the node and nothing
+    /// else: a name nothing occupies is [`VfsError::NotFound`] here, which
+    /// is what every read operation owes its caller.
+    ///
+    /// # Errors
+    ///
+    /// [`VfsError::NotFound`] if the final name is vacant; otherwise as
+    /// [`Self::walk`].
+    fn resolve_final(
+        &mut self,
+        cred: &Credentials<'_>,
+        components: &[String],
+        final_link: FinalLink,
+    ) -> Result<(NodeId, NodeInfo, Metadata), VfsError> {
+        match self.walk(cred, components, final_link)? {
+            Walk::Root { node, info, meta } => Ok((node, info, meta)),
+            Walk::Leaf(place) => place.found.ok_or(VfsError::NotFound),
+        }
+    }
+
+    /// Walk `components` from the driver root, enforcing search (execute)
+    /// permission on every directory descended into, and report the
+    /// [`Place`] the final name occupies.
+    ///
+    /// Links in every position but the last are always followed: such a
+    /// component is being used as a directory, so what matters is what it
+    /// names. `final_link` decides the last one — [`FinalLink::Keep`] is the
+    /// `lstat`/`readlink`/`unlink` posture, where the call is about the link
+    /// itself.
+    ///
+    /// `..` is applied to the **walked stack** rather than by collapsing
+    /// text beforehand, so it names the directory this resolution actually
+    /// came through, not one a link's spelling suggests. The stack starts at
+    /// the filesystem root and `..` never pops past it, so no chain of them
+    /// escapes the tree (`/..` is `/`, as POSIX specifies).
+    ///
+    /// # Errors
+    ///
+    /// [`VfsError::LinkLoop`] if resolution exceeds [`SYMLINK_HOP_MAX`]
+    /// hops or [`MAX_RESOLVE_STEPS`] steps; otherwise as the caller's own
+    /// documented failures.
+    fn walk(
+        &mut self,
+        cred: &Credentials<'_>,
+        components: &[String],
+        final_link: FinalLink,
+    ) -> Result<Walk, VfsError> {
+        let root = self.fs.root();
+        // Root-first, and never emptied: `stack[0]` is the mount root, so
+        // popping for `..` is clamped by construction. Each entry keeps
+        // everything the walk learned about its node, so ascending costs no
+        // second read and the final entry knows its own name.
+        let mut stack = alloc::vec![Walked {
+            node: root,
+            name: None,
+            info: self.fs.node_info(root).map_err(map_driver_error)?,
+            meta: P::metadata(self.fs, root, &self.template)?,
+        }];
+
+        let mut pending: VecDeque<TargetStep> = components
+            .iter()
+            .map(|c| TargetStep::Name(c.clone()))
+            .collect();
+        let mut hops = 0usize;
+        let mut steps = 0usize;
+
+        while let Some(step) = pending.pop_front() {
+            steps += 1;
+            if steps > MAX_RESOLVE_STEPS {
+                return Err(VfsError::LinkLoop);
+            }
+            let name = match step {
+                TargetStep::Up => {
+                    // Ascend. Search permission on the parent was already
+                    // proven on the way down, so no second check is owed.
+                    if stack.len() > 1 {
+                        stack.pop();
+                    }
+                    continue;
+                }
+                TargetStep::Name(name) => name,
+            };
+
+            let Some(here) = stack.last() else {
+                return Err(VfsError::Io);
+            };
+            let parent = here.node;
+            if here.info.kind != NodeKind::Directory {
                 return Err(VfsError::NotADirectory);
             }
-            meta.authorize(cred, Access::Execute)?;
-            node = self
-                .fs
-                .lookup(node, component.as_bytes())
-                .map_err(map_driver_error)?;
-            info = self.fs.node_info(node).map_err(map_driver_error)?;
-            meta = P::metadata(self.fs, node, &self.template)?;
+            let parent_meta = here.meta.clone();
+            parent_meta.authorize(cred, Access::Execute)?;
+
+            let is_final = pending.is_empty();
+            let child = match self.fs.lookup(parent, name.as_bytes()) {
+                Ok(child) => child,
+                // A vacant *final* name is still a place — it is what a
+                // create acts on — so the walk reports it rather than
+                // failing. A vacant name anywhere earlier is a genuinely
+                // missing ancestor.
+                Err(DriverError::NotFound) if is_final => {
+                    return Ok(Walk::Leaf(Place {
+                        parent,
+                        parent_meta,
+                        name,
+                        found: None,
+                    }));
+                }
+                Err(err) => return Err(map_driver_error(err)),
+            };
+            let child_info = self.fs.node_info(child).map_err(map_driver_error)?;
+            let child_meta = P::metadata(self.fs, child, &self.template)?;
+
+            if child_info.kind == NodeKind::Symlink && !(is_final && final_link == FinalLink::Keep)
+            {
+                hops += 1;
+                if hops > SYMLINK_HOP_MAX {
+                    return Err(VfsError::LinkLoop);
+                }
+                let target = self.read_link_target(child, child_info.size)?;
+                let parsed = parse_link_target(&target)?;
+                // An absolute target restarts at the root; a relative one
+                // continues from the link's own parent, which is where the
+                // stack already stands (the link was never pushed).
+                if parsed.is_absolute() {
+                    stack.truncate(1);
+                }
+                for extra in parsed.steps().iter().rev() {
+                    pending.push_front(extra.clone());
+                }
+                continue;
+            }
+
+            stack.push(Walked {
+                node: child,
+                name: Some(name),
+                info: child_info,
+                meta: child_meta,
+            });
         }
-        Ok((node, info, meta))
+
+        let Some(Walked {
+            node,
+            name,
+            info,
+            meta,
+        }) = stack.pop()
+        else {
+            return Err(VfsError::Io);
+        };
+        match (name, stack.last()) {
+            // Only `stack[0]` — the mount root — carries no name, and no
+            // directory holds it.
+            (None, _) => Ok(Walk::Root { node, info, meta }),
+            (Some(name), Some(parent)) => Ok(Walk::Leaf(Place {
+                parent: parent.node,
+                parent_meta: parent.meta.clone(),
+                name,
+                found: Some((node, info, meta)),
+            })),
+            // A named entry is only ever pushed on top of the directory it
+            // was looked up in, so it always has a parent beneath it; fail
+            // closed rather than invent one.
+            (Some(_), None) => Err(VfsError::Io),
+        }
+    }
+
+    /// Read a link's stored target, sized from the node's own reported
+    /// length so nothing is truncated and no fixed buffer is guessed.
+    fn read_link_target(&mut self, node: NodeId, size: u64) -> Result<String, VfsError> {
+        let len = usize::try_from(size).map_err(|_| VfsError::InvalidPath)?;
+        if len == 0 || len > FS_SYMLINK_MAX {
+            return Err(VfsError::InvalidPath);
+        }
+        let mut buf = alloc::vec![0u8; len];
+        let read = self.fs.read_link(node, &mut buf).map_err(map_link_error)?;
+        if read != len {
+            // The driver disagreed with the length its own `node_info`
+            // reported; refuse rather than resolve a partial target.
+            return Err(VfsError::Io);
+        }
+        String::from_utf8(buf).map_err(|_| VfsError::InvalidPath)
     }
 
     /// Report the structural metadata of the node at `components`, paired
@@ -564,16 +847,22 @@ impl<R: FilesystemRead + ?Sized, P: MetaPolicy<R>> DelegatedFs<'_, R, P> {
     /// this needs search permission on every intermediate directory but
     /// none on the target itself.
     ///
+    /// `final_link` picks between the POSIX `stat` and `lstat` readings:
+    /// [`FinalLink::Keep`] reports a final symbolic link itself — including
+    /// a dangling one, which `Follow` reports as [`VfsError::NotFound`].
+    ///
     /// # Errors
     ///
     /// [`VfsError::NotFound`], [`VfsError::NotADirectory`],
-    /// [`VfsError::PermissionDenied`], or [`VfsError::Io`].
+    /// [`VfsError::PermissionDenied`], [`VfsError::LinkLoop`], or
+    /// [`VfsError::Io`].
     pub fn stat(
         &mut self,
         cred: &Credentials<'_>,
         components: &[String],
+        final_link: FinalLink,
     ) -> Result<DelegatedInfo, VfsError> {
-        let (node, info, meta) = self.resolve(cred, components)?;
+        let (node, info, meta) = self.resolve_final(cred, components, final_link)?;
         Ok(DelegatedInfo {
             kind: info.kind,
             size: info.size,
@@ -582,6 +871,33 @@ impl<R: FilesystemRead + ?Sized, P: MetaPolicy<R>> DelegatedFs<'_, R, P> {
             node: node.raw(),
             times: info.times,
         })
+    }
+
+    /// Read the stored target of the symbolic link at `components`.
+    ///
+    /// The final component is never followed — the call is about the link
+    /// itself — and the target comes back exactly as it was stored, still
+    /// unresolved. Like POSIX `readlink` this needs search permission on
+    /// every directory on the way to the link and none on the link.
+    ///
+    /// # Errors
+    ///
+    /// * [`VfsError::InvalidPath`] if the final component is not a symbolic
+    ///   link, or the bytes it stores are empty, over-long, or not UTF-8.
+    /// * [`VfsError::NotSupported`] if the mounted format stores no links.
+    /// * [`VfsError::NotFound`], [`VfsError::NotADirectory`],
+    ///   [`VfsError::PermissionDenied`], [`VfsError::LinkLoop`], or
+    ///   [`VfsError::Io`].
+    pub fn read_link(
+        &mut self,
+        cred: &Credentials<'_>,
+        components: &[String],
+    ) -> Result<String, VfsError> {
+        let (node, info, _) = self.resolve_final(cred, components, FinalLink::Keep)?;
+        if info.kind != NodeKind::Symlink {
+            return Err(VfsError::InvalidPath);
+        }
+        self.read_link_target(node, info.size)
     }
 
     /// Read up to `buf.len()` bytes from the file at `components` starting
@@ -631,8 +947,9 @@ impl<R: FilesystemRead + ?Sized, P: MetaPolicy<R>> DelegatedFs<'_, R, P> {
         &mut self,
         cred: &Credentials<'_>,
         components: &[String],
+        final_link: FinalLink,
     ) -> Result<Vec<(NodeInfo, String)>, VfsError> {
-        let (node, info, meta) = self.resolve(cred, components)?;
+        let (node, info, meta) = self.resolve_final(cred, components, final_link)?;
         if info.kind != NodeKind::Directory {
             return Err(VfsError::NotADirectory);
         }
@@ -661,30 +978,52 @@ impl<R: FilesystemRead + ?Sized, P: MetaPolicy<R>> DelegatedFs<'_, R, P> {
 }
 
 impl<F: FilesystemRead + FilesystemWrite + ?Sized, P: MetaPolicy<F>> DelegatedFs<'_, F, P> {
-    /// Resolve the parent directory of the leaf addressed by `components`,
+    /// Resolve the [`Place`] the leaf addressed by `components` occupies,
     /// authorising search on every ancestor and search + write on the
-    /// parent itself, judged against the parent's own metadata under the
-    /// active [`MetaPolicy`].
+    /// directory that holds the name, judged against that directory's own
+    /// metadata under the active [`MetaPolicy`].
     ///
-    /// Returns the parent's [`NodeId`]; an empty `components` slice (which
-    /// names the mount point itself) is rejected — the driver root cannot
-    /// be the target of a mutation.
-    fn parent_for_write(
+    /// `final_link` picks whether a final symbolic link is resolved through.
+    /// [`FinalLink::Follow`] makes this the place of what the link *names*,
+    /// so a write or a truncate reaches the target as POSIX requires;
+    /// [`FinalLink::Keep`] leaves it the link's own place, the posture
+    /// `unlink`, `rename`, `mkdir`, and `symlink` need because the call is
+    /// about the name as typed.
+    ///
+    /// Write permission is required on the holding directory. That is
+    /// stricter than POSIX, which authorises a write against the file alone;
+    /// it is this VFS's standing choice, and following a link only moves the
+    /// requirement onto the directory the mutation really lands in. The
+    /// authorisation is made *before* the occupant is inspected, so a caller
+    /// that may not write the directory learns nothing about what the name
+    /// holds.
+    ///
+    /// An empty `components` slice names the mount point itself and is
+    /// rejected — the driver root cannot be the target of a mutation.
+    fn place_for_write(
         &mut self,
         cred: &Credentials<'_>,
         components: &[String],
-    ) -> Result<NodeId, VfsError> {
-        let (_, parents) = components.split_last().ok_or(VfsError::InvalidPath)?;
-        let (parent, info, meta) = self.resolve(cred, parents)?;
-        if info.kind != NodeKind::Directory {
-            return Err(VfsError::NotADirectory);
+        final_link: FinalLink,
+    ) -> Result<Place, VfsError> {
+        match self.walk(cred, components, final_link)? {
+            Walk::Root { .. } => Err(VfsError::InvalidPath),
+            Walk::Leaf(place) => {
+                place.parent_meta.authorize(cred, Access::Execute)?;
+                place.parent_meta.authorize(cred, Access::Write)?;
+                Ok(place)
+            }
         }
-        meta.authorize(cred, Access::Execute)?;
-        meta.authorize(cred, Access::Write)?;
-        Ok(parent)
     }
 
     /// Create an empty child of `kind` at `components`.
+    ///
+    /// `final_link` is the posture the *caller's own* operation has for a
+    /// final symbolic link, and the two POSIX creates differ: `mkdir` passes
+    /// [`FinalLink::Keep`], so making a directory over an existing link is
+    /// [`VfsError::AlreadyExists`], while `open` with `O_CREAT` passes
+    /// [`FinalLink::Follow`], so creating through a *dangling* link creates
+    /// the file the link names.
     ///
     /// # Errors
     ///
@@ -697,17 +1036,15 @@ impl<F: FilesystemRead + FilesystemWrite + ?Sized, P: MetaPolicy<F>> DelegatedFs
         cred: &Credentials<'_>,
         components: &[String],
         kind: NodeKind,
+        final_link: FinalLink,
     ) -> Result<(), VfsError> {
-        let parent = self.parent_for_write(cred, components)?;
-        let name = components[components.len() - 1].as_bytes();
-        match self.fs.lookup(parent, name) {
-            Ok(_) => return Err(VfsError::AlreadyExists),
-            Err(DriverError::NotFound) => {}
-            Err(e) => return Err(map_driver_error(e)),
+        let place = self.place_for_write(cred, components, final_link)?;
+        if place.found.is_some() {
+            return Err(VfsError::AlreadyExists);
         }
         let node = self
             .fs
-            .create(parent, name, kind)
+            .create(place.parent, place.name.as_bytes(), kind)
             .map_err(map_driver_error)?;
         // The driver minted the node with its format's default record;
         // hand it to its creator before the create is observable, so the
@@ -716,15 +1053,65 @@ impl<F: FilesystemRead + FilesystemWrite + ?Sized, P: MetaPolicy<F>> DelegatedFs
         Ok(())
     }
 
+    /// Create a symbolic link at `components` whose stored target is
+    /// `target`.
+    ///
+    /// The target is **not** resolved here: it is data, so the only
+    /// authority the call needs is the right to create a name in the link's
+    /// own parent, and the link may legitimately dangle. Its *grammar* is
+    /// still checked against the one link-target parser before anything is
+    /// written, so a target this resolver could never walk is refused
+    /// rather than stored.
+    ///
+    /// # Errors
+    ///
+    /// * [`VfsError::InvalidPath`] if `components` is empty or `target`
+    ///   fails the link-target grammar.
+    /// * [`VfsError::AlreadyExists`] if a child of that name already exists.
+    /// * [`VfsError::NotSupported`] if the mounted format has no link object
+    ///   type — it refuses rather than approximating one.
+    /// * [`VfsError::PermissionDenied`], [`VfsError::NotADirectory`],
+    ///   [`VfsError::NotFound`] (a missing ancestor), or [`VfsError::Io`].
+    pub fn create_link(
+        &mut self,
+        cred: &Credentials<'_>,
+        components: &[String],
+        target: &str,
+    ) -> Result<(), VfsError> {
+        // Caller-supplied bytes, checked before any state is touched.
+        parse_link_target(target)?;
+        // The new name is the name as typed: making a link over an existing
+        // one replaces nothing, it is refused.
+        let place = self.place_for_write(cred, components, FinalLink::Keep)?;
+        if place.found.is_some() {
+            return Err(VfsError::AlreadyExists);
+        }
+        let node = self
+            .fs
+            .create_link(place.parent, place.name.as_bytes(), target.as_bytes())
+            .map_err(map_link_error)?;
+        // As for `create`: hand the node to its creator before the link is
+        // observable, so a caller is never locked out of one it just made.
+        P::stamp_creation(self.fs, node, cred)?;
+        Ok(())
+    }
+
     /// Write `data` into the file at `components` starting at `offset`,
     /// returning the number of bytes written.
+    ///
+    /// A final symbolic link is **followed**: POSIX writes the target, not
+    /// the link. Because the driver write surface is keyed `(dir, name)`, the
+    /// pair the write is issued against is the *resolved* node's own parent
+    /// and name, and the write permission this VFS asks for on a write's
+    /// parent therefore applies to the directory the bytes really land in.
     ///
     /// # Errors
     ///
     /// * [`VfsError::InvalidPath`] if `components` is empty.
     /// * [`VfsError::IsADirectory`] if `components` names a directory.
     /// * [`VfsError::PermissionDenied`], [`VfsError::NotFound`],
-    ///   [`VfsError::NotADirectory`], or [`VfsError::Io`].
+    ///   [`VfsError::NotADirectory`], [`VfsError::LinkLoop`], or
+    ///   [`VfsError::Io`].
     pub fn write(
         &mut self,
         cred: &Credentials<'_>,
@@ -732,18 +1119,17 @@ impl<F: FilesystemRead + FilesystemWrite + ?Sized, P: MetaPolicy<F>> DelegatedFs
         offset: u64,
         data: &[u8],
     ) -> Result<usize, VfsError> {
-        let parent = self.parent_for_write(cred, components)?;
-        let name = components[components.len() - 1].as_bytes();
-        let node = self.fs.lookup(parent, name).map_err(map_driver_error)?;
-        if self.fs.node_info(node).map_err(map_driver_error)?.kind == NodeKind::Directory {
-            return Err(VfsError::IsADirectory);
-        }
+        let place = self.place_for_write(cred, components, FinalLink::Follow)?;
+        let (_, info, _) = place.found.ok_or(VfsError::NotFound)?;
+        Self::deny_non_file(info.kind)?;
         self.fs
-            .write_at(parent, name, offset, data)
+            .write_at(place.parent, place.name.as_bytes(), offset, data)
             .map_err(map_driver_error)
     }
 
     /// Set the length of the file at `components` to `size`.
+    ///
+    /// A final symbolic link is followed, exactly as for [`Self::write`].
     ///
     /// # Errors
     ///
@@ -754,18 +1140,32 @@ impl<F: FilesystemRead + FilesystemWrite + ?Sized, P: MetaPolicy<F>> DelegatedFs
         components: &[String],
         size: u64,
     ) -> Result<(), VfsError> {
-        let parent = self.parent_for_write(cred, components)?;
-        let name = components[components.len() - 1].as_bytes();
-        let node = self.fs.lookup(parent, name).map_err(map_driver_error)?;
-        if self.fs.node_info(node).map_err(map_driver_error)?.kind == NodeKind::Directory {
-            return Err(VfsError::IsADirectory);
-        }
+        let place = self.place_for_write(cred, components, FinalLink::Follow)?;
+        let (_, info, _) = place.found.ok_or(VfsError::NotFound)?;
+        Self::deny_non_file(info.kind)?;
         self.fs
-            .truncate(parent, name, size)
+            .truncate(place.parent, place.name.as_bytes(), size)
             .map_err(map_driver_error)
     }
 
+    /// Refuse a node whose bytes a write may not touch.
+    ///
+    /// A directory's entries are not a byte stream, and a link's content is a
+    /// path — following it was the resolution's job, so a link reaching here
+    /// would mean a write about to corrupt one.
+    fn deny_non_file(kind: NodeKind) -> Result<(), VfsError> {
+        match kind {
+            NodeKind::RegularFile => Ok(()),
+            NodeKind::Directory => Err(VfsError::IsADirectory),
+            NodeKind::Symlink => Err(VfsError::LinkLoop),
+        }
+    }
+
     /// Unlink the child at `components`.
+    ///
+    /// A final symbolic link is **not** followed: POSIX unlinks the link, so
+    /// removing one never touches what it names — including a link whose
+    /// target is a non-empty directory.
     ///
     /// With `dir_only` the removal succeeds only when the child is an
     /// (empty) directory — the atomic `rmdir` posture, decided in the same
@@ -786,12 +1186,11 @@ impl<F: FilesystemRead + FilesystemWrite + ?Sized, P: MetaPolicy<F>> DelegatedFs
         components: &[String],
         dir_only: bool,
     ) -> Result<(), VfsError> {
-        let parent = self.parent_for_write(cred, components)?;
-        let name = components[components.len() - 1].as_bytes();
-        // Ensure it exists (distinguishing NotFound), and report NotEmpty
-        // for a non-empty directory rather than the driver's generic Busy.
-        let node = self.fs.lookup(parent, name).map_err(map_driver_error)?;
-        if self.fs.node_info(node).map_err(map_driver_error)?.kind == NodeKind::Directory {
+        let place = self.place_for_write(cred, components, FinalLink::Keep)?;
+        // The walk distinguishes NotFound, and an empty-directory check here
+        // reports NotEmpty rather than the driver's generic Busy.
+        let (node, info, _) = place.found.ok_or(VfsError::NotFound)?;
+        if info.kind == NodeKind::Directory {
             let mut name_buf = [0u8; MAX_COMPONENT_LEN];
             if self
                 .fs
@@ -804,11 +1203,17 @@ impl<F: FilesystemRead + FilesystemWrite + ?Sized, P: MetaPolicy<F>> DelegatedFs
         } else if dir_only {
             return Err(VfsError::NotADirectory);
         }
-        self.fs.remove(parent, name).map_err(map_driver_error)
+        self.fs
+            .remove(place.parent, place.name.as_bytes())
+            .map_err(map_driver_error)
     }
 
     /// Move the leaf at `src_components` to `dst_components` within the same
     /// delegated mount, preserving the node's identity and contents.
+    ///
+    /// Neither end follows a final symbolic link: POSIX renames the link
+    /// itself and replaces a link at the destination, never what either
+    /// names.
     ///
     /// Authorises search + write on both the source and destination parent
     /// directories; when a directory is moved to a *different* parent its
@@ -832,26 +1237,23 @@ impl<F: FilesystemRead + FilesystemWrite + ?Sized, P: MetaPolicy<F>> DelegatedFs
         src_components: &[String],
         dst_components: &[String],
     ) -> Result<(), VfsError> {
-        let src_parent = self.parent_for_write(cred, src_components)?;
-        let dst_parent = self.parent_for_write(cred, dst_components)?;
-        let src_name = src_components[src_components.len() - 1].as_bytes();
-        let dst_name = dst_components[dst_components.len() - 1].as_bytes();
+        let src = self.place_for_write(cred, src_components, FinalLink::Keep)?;
+        let dst = self.place_for_write(cred, dst_components, FinalLink::Keep)?;
+        let (_, src_info, src_meta) = src.found.ok_or(VfsError::NotFound)?;
 
         // A directory moved to a different parent has its `..` rewritten, so
         // write permission on the directory itself is required as well.
-        let src_node = self
-            .fs
-            .lookup(src_parent, src_name)
-            .map_err(map_driver_error)?;
-        if src_parent != dst_parent
-            && self.fs.node_info(src_node).map_err(map_driver_error)?.kind == NodeKind::Directory
-        {
-            let meta = P::metadata(self.fs, src_node, &self.template)?;
-            meta.authorize(cred, Access::Write)?;
+        if src.parent != dst.parent && src_info.kind == NodeKind::Directory {
+            src_meta.authorize(cred, Access::Write)?;
         }
 
         self.fs
-            .rename(src_parent, src_name, dst_parent, dst_name)
+            .rename(
+                src.parent,
+                src.name.as_bytes(),
+                dst.parent,
+                dst.name.as_bytes(),
+            )
             .map_err(map_rename_error)
     }
 }

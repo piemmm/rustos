@@ -60,7 +60,7 @@ pub mod volsvc;
 pub mod volumes;
 
 pub use blkclient::BlkClient;
-pub use delegate::{DelegatedFs, DelegatedInfo, MetaPolicy, PerInode, Uniform};
+pub use delegate::{DelegatedFs, DelegatedInfo, FinalLink, MetaPolicy, PerInode, Uniform};
 pub use fscache::CachedFs;
 pub use mount::{MountBacking, MountPoint, MountTable};
 pub use mounted::{
@@ -183,7 +183,7 @@ where
 
     // Bound the file against the format's own maximum before reading a
     // single byte.
-    let info = vfs.stat_via_secured(&cred, &path, fs)?;
+    let info = vfs.stat_via_secured(&cred, &path, fs, FinalLink::Follow)?;
     if info.kind != NodeKind::RegularFile {
         return Err(BootstrapReadError::NotAFile);
     }
@@ -263,6 +263,13 @@ pub enum VfsError {
     /// attributes (its driver carries no attribute facet). Retrying can
     /// never succeed on that mount; distinct from a driver fault.
     NotSupported,
+    /// Path resolution traversed too many symbolic links (a cycle, or a
+    /// chain longer than the hop budget), the spliced path outgrew its
+    /// bound, or a link was found where the caller forbade one.
+    ///
+    /// Resolution stops and nothing is opened, read, or written, so a link
+    /// cycle can never be walked until the kernel runs out of stack.
+    LinkLoop,
 }
 
 impl VfsError {
@@ -298,6 +305,7 @@ impl VfsError {
             Self::BufferTooSmall => Errno::BufferTooSmall,
             Self::NoSpace => Errno::NoSpace,
             Self::NotSupported => Errno::NotSupported,
+            Self::LinkLoop => Errno::LinkLoop,
         }
     }
 }
@@ -313,6 +321,7 @@ impl fmt::Display for VfsError {
             Self::NotEmpty => "directory not empty",
             Self::PermissionDenied => "permission denied",
             Self::ReadOnly => "read-only mount",
+            Self::LinkLoop => "too many symbolic links in path resolution",
             Self::CrossVolume => "paths on different volumes",
             Self::Io => "filesystem driver i/o error",
             Self::InvalidKey => "invalid attribute key",

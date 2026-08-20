@@ -2256,6 +2256,48 @@ pub trait SyscallHandlers {
         Err(Errno::NotImplemented)
     }
 
+    /// Create a symbolic link at absolute `link` (`link_len` bytes) whose
+    /// stored target is the `target_len` bytes at `target`.
+    ///
+    /// The dispatcher has already checked the caller holds
+    /// [`CapabilityId::FS_ACCESS`] and that both pointers are non-null
+    /// `UserPtr`s. The target is stored verbatim — it is data, not a path
+    /// the kernel walks here — so authority is decided at each later *use*
+    /// of the link, per component, never at creation.
+    ///
+    /// The default implementation fails closed with [`Errno::NotImplemented`].
+    fn fs_symlink(
+        &self,
+        _caller: &CallerContext<'_>,
+        _target: u64,
+        _target_len: usize,
+        _link: u64,
+        _link_len: usize,
+    ) -> SyscallResult {
+        Err(Errno::NotImplemented)
+    }
+
+    /// Read the target of the symbolic link at absolute `path` (`path_len`
+    /// bytes) into the caller's buffer at `out` (`out_len` bytes),
+    /// returning the target's length.
+    ///
+    /// The dispatcher has already checked the caller holds
+    /// [`CapabilityId::FS_ACCESS`] and that both pointers are non-null
+    /// `UserPtr`s. The final component is never followed; a path whose
+    /// final component is not a link fails closed.
+    ///
+    /// The default implementation fails closed with [`Errno::NotImplemented`].
+    fn fs_readlink(
+        &self,
+        _caller: &CallerContext<'_>,
+        _path: u64,
+        _path_len: usize,
+        _out: u64,
+        _out_len: usize,
+    ) -> SyscallResult {
+        Err(Errno::NotImplemented)
+    }
+
     /// Set the permission bits of the file or directory at the absolute
     /// path `path` (`path_len` bytes) to `mode` (the `chmod(2)` shape).
     ///
@@ -3307,6 +3349,18 @@ impl<'a, H: SyscallHandlers + ?Sized, S: Sink + ?Sized> Dispatcher<'a, H, S> {
                 let dst_len = decode_len(args.0[3])?;
                 self.handlers
                     .fs_rename(caller, args.0[0], src_len, args.0[2], dst_len)
+            }
+            SyscallNumber::FS_SYMLINK => {
+                let target_len = decode_len(args.0[1])?;
+                let link_len = decode_len(args.0[3])?;
+                self.handlers
+                    .fs_symlink(caller, args.0[0], target_len, args.0[2], link_len)
+            }
+            SyscallNumber::FS_READLINK => {
+                let path_len = decode_len(args.0[1])?;
+                let out_len = decode_len(args.0[3])?;
+                self.handlers
+                    .fs_readlink(caller, args.0[0], path_len, args.0[2], out_len)
             }
             SyscallNumber::FS_SET_MODE => {
                 // args[0] is the non-null path `UserPtr` (dispatcher-checked);
@@ -4702,6 +4756,30 @@ mod tests {
             _dst_len: usize,
         ) -> SyscallResult {
             self.record("fs_rename");
+            Ok(0)
+        }
+
+        fn fs_symlink(
+            &self,
+            _c: &CallerContext<'_>,
+            _target: u64,
+            _target_len: usize,
+            _link: u64,
+            _link_len: usize,
+        ) -> SyscallResult {
+            self.record("fs_symlink");
+            Ok(0)
+        }
+
+        fn fs_readlink(
+            &self,
+            _c: &CallerContext<'_>,
+            _path: u64,
+            _path_len: usize,
+            _out: u64,
+            _out_len: usize,
+        ) -> SyscallResult {
+            self.record("fs_readlink");
             Ok(0)
         }
 

@@ -729,6 +729,28 @@ impl SyscallHandlers for CountingHandlers {
         self.bump();
         Ok(0)
     }
+    fn fs_symlink(
+        &self,
+        _c: &CallerContext<'_>,
+        _target: u64,
+        _target_len: usize,
+        _link: u64,
+        _link_len: usize,
+    ) -> SyscallResult {
+        self.bump();
+        Ok(0)
+    }
+    fn fs_readlink(
+        &self,
+        _c: &CallerContext<'_>,
+        _path: u64,
+        _path_len: usize,
+        _out: u64,
+        _out_len: usize,
+    ) -> SyscallResult {
+        self.bump();
+        Ok(0)
+    }
     fn fs_set_mode(
         &self,
         _c: &CallerContext<'_>,

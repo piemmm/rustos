@@ -32,7 +32,7 @@ fn a_real_missing_lookup_surfaces_enoent() {
     let owner = cred(ROOT_UID, ROOT_GID, &caps);
 
     let err = vfs
-        .stat_via_secured(&owner, &vol_path("absent"), &mut fs)
+        .stat_via_secured(&owner, &vol_path("absent"), &mut fs, FinalLink::Follow)
         .map(|info| info.size)
         .expect_err("a missing path fails");
     assert_eq!(err.to_errno(), Errno::NotFound);

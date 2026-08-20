@@ -55,8 +55,15 @@ Resolving a path requires **search (execute) permission on every directory
 descended through**, mirroring POSIX. `stat`-style `metadata` therefore
 needs search permission along the path but no permission on the target
 itself; `read` additionally needs read permission on the file; `mkdir`,
-`create_file`, and `remove` need write permission on the *parent*
-directory.
+`create_file`, `symlink`, and `remove` need write permission on the
+*parent* directory.
+
+A **symbolic link** changes nothing here: search permission is required on
+every directory the resolution traverses whether the caller spelled that
+component or a link's target supplied it, so following a link can never
+reach a directory the caller could not have walked itself. Reading a link's
+own target (`readlink`) needs search permission on the way to it and none
+on the link, mirroring POSIX.
 
 ## Errors
 

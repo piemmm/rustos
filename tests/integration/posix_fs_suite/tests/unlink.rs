@@ -15,7 +15,7 @@ fn unlink_removes_a_file() {
         .expect("remove");
 
     assert_eq!(
-        vfs.stat_via_secured(&owner, &vol_path("gone"), &mut fs)
+        vfs.stat_via_secured(&owner, &vol_path("gone"), &mut fs, FinalLink::Follow)
             .map(|info| info.kind),
         Err(VfsError::NotFound)
     );

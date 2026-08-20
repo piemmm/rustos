@@ -353,6 +353,12 @@ const NUM_FS_MKDIR: u64 = SyscallNumber::FS_MKDIR.as_u16() as u64;
 const NUM_FS_UNLINK: u64 = SyscallNumber::FS_UNLINK.as_u16() as u64;
 const NUM_FS_RENAME: u64 = SyscallNumber::FS_RENAME.as_u16() as u64;
 
+/// `fs_symlink` syscall number (as above).
+const NUM_FS_SYMLINK: u64 = SyscallNumber::FS_SYMLINK.as_u16() as u64;
+
+/// `fs_readlink` syscall number (as above).
+const NUM_FS_READLINK: u64 = SyscallNumber::FS_READLINK.as_u16() as u64;
+
 /// `fs_set_mode` syscall number (as above).
 const NUM_FS_SET_MODE: u64 = SyscallNumber::FS_SET_MODE.as_u16() as u64;
 
@@ -4199,6 +4205,74 @@ pub fn fs_rename(src: &[u8], dst: &[u8]) -> i64 {
     ret as i64
 }
 
+/// Create a symbolic link at the absolute `link` whose stored target is
+/// `target` (`SyscallNumber::FS_SYMLINK`, the `symlink(2)` shape).
+///
+/// `target` is the link's **body**, not a path the kernel walks: it is stored
+/// verbatim, may be relative, may carry `.`/`..`, and is never resolved at
+/// creation — so the call authorises only the right to create a name in the
+/// link's own parent, and the resulting link may legitimately dangle. It
+/// carries at most [`tairix_abi::FS_SYMLINK_MAX`] bytes and must be valid
+/// UTF-8 that satisfies the kernel's link-target grammar; anything else is
+/// refused rather than stored.
+///
+/// Creating a link grants no authority over what it names: every later *use*
+/// re-authorises each component under the caller's attested identity. A
+/// format with no link object type refuses with `Errno::NotSupported` rather
+/// than approximating one. Returns `0` on success or `-errno`.
+#[must_use]
+#[allow(clippy::cast_possible_wrap)] // The kernel guarantees the i64 errno-result encoding (0, else -errno).
+pub fn fs_symlink(target: &[u8], link: &[u8]) -> i64 {
+    let target_ptr = target.as_ptr() as usize as u64;
+    let link_ptr = link.as_ptr() as usize as u64;
+    // SAFETY: `raw_syscall` is always safe to invoke; the kernel validates
+    // both `(ptr, len)` pairs against the caller's address space before
+    // reading them. `target`/`link` are live shared slices for the call.
+    let ret = unsafe {
+        raw_syscall(
+            NUM_FS_SYMLINK,
+            [
+                target_ptr,
+                target.len() as u64,
+                link_ptr,
+                link.len() as u64,
+                0,
+                0,
+            ],
+        )
+    };
+    ret as i64
+}
+
+/// Read the stored target of the symbolic link at the absolute `path` into
+/// `out` (`SyscallNumber::FS_READLINK`, the `readlink(2)` shape).
+///
+/// The final component is never followed — the call is about the link
+/// itself — and the target comes back exactly as it was stored, still
+/// unresolved. Returns the target's byte length on success or `-errno`:
+/// `Errno::OutOfRange` when `path` names anything but a symbolic link,
+/// `Errno::NotSupported` on a mount whose format stores no links, and
+/// `Errno::BufferTooSmall` when `out` cannot hold the whole target — never a
+/// truncated one, which would name somewhere else entirely, so the caller
+/// retries with a larger buffer.
+#[must_use]
+#[allow(clippy::cast_possible_wrap)] // The kernel guarantees the i64 errno-result encoding (length, else -errno).
+pub fn fs_readlink(path: &[u8], out: &mut [u8]) -> i64 {
+    let path_ptr = path.as_ptr() as usize as u64;
+    let out_ptr = out.as_mut_ptr() as usize as u64;
+    // SAFETY: `raw_syscall` is always safe to invoke; the kernel validates
+    // both `(ptr, len)` pairs against the caller's address space before
+    // touching them, and writes at most `out.len()` bytes. Both slices are
+    // live for the duration of the call.
+    let ret = unsafe {
+        raw_syscall(
+            NUM_FS_READLINK,
+            [path_ptr, path.len() as u64, out_ptr, out.len() as u64, 0, 0],
+        )
+    };
+    ret as i64
+}
+
 /// Set the permission bits of the file or directory at the absolute `path`
 /// to `mode` (`SyscallNumber::FS_SET_MODE`, the `chmod(2)` shape).
 ///
@@ -6702,6 +6776,47 @@ mod tests {
         assert_eq!(args[2], dst.as_ptr() as usize as u64);
         assert_eq!(args[3], dst.len() as u64);
         assert_eq!(&args[4..], &[0, 0]);
+    }
+
+    #[test]
+    fn fs_symlink_marshals_the_target_then_the_link() {
+        let target = b"../real/name";
+        let link = b"/Users/me/alias";
+        let (number, args) = capture(0, || {
+            assert_eq!(fs_symlink(target, link), 0);
+        });
+        assert_eq!(number, NUM_FS_SYMLINK);
+        assert_eq!(args[0], target.as_ptr() as usize as u64);
+        assert_eq!(args[1], target.len() as u64);
+        assert_eq!(args[2], link.as_ptr() as usize as u64);
+        assert_eq!(args[3], link.len() as u64);
+        assert_eq!(&args[4..], &[0, 0]);
+    }
+
+    #[test]
+    fn fs_readlink_marshals_the_path_then_the_output_buffer() {
+        let path = b"/Users/me/alias";
+        let mut out = [0u8; 32];
+        let (number, args) = capture(12, || {
+            assert_eq!(fs_readlink(path, &mut out), 12);
+        });
+        assert_eq!(number, NUM_FS_READLINK);
+        assert_eq!(args[0], path.as_ptr() as usize as u64);
+        assert_eq!(args[1], path.len() as u64);
+        assert_eq!(args[2], out.as_ptr() as usize as u64);
+        assert_eq!(args[3], out.len() as u64);
+        assert_eq!(&args[4..], &[0, 0]);
+    }
+
+    #[test]
+    fn fs_readlink_surfaces_negative_errno_encoding() {
+        // An undersized buffer is refused whole, never truncated.
+        let want = -i64::from(tairix_abi::Errno::BufferTooSmall.as_i32());
+        let neg = u64::from_ne_bytes(want.to_ne_bytes());
+        let mut out = [0u8; 1];
+        let (_, _) = capture(neg, || {
+            assert_eq!(fs_readlink(b"/Users/me/alias", &mut out), want);
+        });
     }
 
     #[test]

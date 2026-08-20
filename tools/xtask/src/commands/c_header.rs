@@ -140,6 +140,7 @@ const ERRNO_NAMES: &[(&str, Errno)] = &[
     ("MEDIUM_ERROR", Errno::MediumError),
     ("DEVICE_OFFLINE", Errno::DeviceOffline),
     ("BUSY", Errno::Busy),
+    ("LINK_LOOP", Errno::LinkLoop),
 ];
 
 /// One generated C header: its file name (relative to the include directory)
@@ -2029,6 +2030,11 @@ fn driver_emit_submodule_discriminants(out: &mut String) {
         "#define TAIRIX_NODE_KIND_REGULAR_FILE ((uint8_t){}u)",
         NodeKind::RegularFile as u8
     );
+    let _ = writeln!(
+        out,
+        "#define TAIRIX_NODE_KIND_SYMLINK ((uint8_t){}u)",
+        NodeKind::Symlink as u8
+    );
     out.push('\n');
 
     out.push_str(
@@ -2513,6 +2519,11 @@ fn emit_fs_contract(out: &mut String) {
         out,
         "#define TAIRIX_OPEN_FLAG_EXCLUSIVE {:#x}u",
         OpenFlags::EXCLUSIVE.bits()
+    );
+    let _ = writeln!(
+        out,
+        "#define TAIRIX_OPEN_FLAG_NO_FOLLOW {:#x}u",
+        OpenFlags::NO_FOLLOW.bits()
     );
     out.push('\n');
 

@@ -1788,3 +1788,180 @@ fn inode_time_corrupt_nanoseconds_fail_closed() {
         Err(tairix_abi::DriverError::DeviceFault)
     );
 }
+
+// ---------------------------------------------------------------------------
+// Symbolic links: both on-disk spellings ext4 uses for a target.
+// ---------------------------------------------------------------------------
+
+/// Target of the planted fast (inline `i_block`) symlink: short enough to fit
+/// the 60-byte array.
+const FAST_LINK_TARGET: &[u8] = b"/System/Commands/ls.app";
+/// Target of the planted slow (block-backed) symlink: longer than the
+/// `i_block` array, so it could not be inline whatever the accounting says.
+const SLOW_LINK_TARGET: &[u8] =
+    b"/Users/someone/Documents/a/deliberately/long/path/that/cannot/fit/inline";
+/// Free inode the fast symlink is planted at.
+const FAST_LINK_INO: u32 = 15;
+/// Free inode the slow symlink is planted at.
+const SLOW_LINK_INO: u32 = 16;
+/// Free data block holding the slow symlink's target.
+const SLOW_LINK_BLOCK: u32 = 15;
+
+/// Plant a **fast** symlink at `ino`: the target lives in the raw `i_block`
+/// array and the inode allocates nothing, so `i_blocks` stays zero.
+fn plant_fast_symlink(img: &mut [u8], ino: u32, target: &[u8]) {
+    let base = inode_offset(ino);
+    set_le16(img, base, S_IFLNK | 0o777);
+    set_le32(img, base + 0x04, u32c(target.len()));
+    set_le32(img, base + 0x20, 0);
+    let ib = base + I_BLOCK_OFFSET;
+    img[ib..ib + target.len()].copy_from_slice(target);
+}
+
+/// Plant a **slow** symlink at `ino`: the target is ordinary extent-mapped
+/// file data, accounted for in `i_blocks` like any other allocation.
+fn plant_slow_symlink(img: &mut [u8], ino: u32, target: &[u8], data_block: u32) {
+    write_extent_inode(
+        img,
+        ino,
+        S_IFLNK | 0o777,
+        u32c(target.len()),
+        &[(0, 1, data_block)],
+    );
+    set_le32(
+        img,
+        inode_offset(ino) + INODE_BLOCKS_LO,
+        u32c(FS_BLOCK / DEV_SECTOR),
+    );
+    let off = block_offset(data_block);
+    img[off..off + target.len()].copy_from_slice(target);
+}
+
+fn mount_with_links() -> Ext4<MockBlock> {
+    let mut img = build_image();
+    plant_fast_symlink(&mut img, FAST_LINK_INO, FAST_LINK_TARGET);
+    plant_slow_symlink(&mut img, SLOW_LINK_INO, SLOW_LINK_TARGET, SLOW_LINK_BLOCK);
+    Ext4::open(MockBlock { data: img }).expect("image is a valid ext4 volume")
+}
+
+#[test]
+fn a_fast_symlinks_target_is_read_from_the_inline_i_block() {
+    let mut fs = mount_with_links();
+    let node = NodeId::from_raw(u64::from(FAST_LINK_INO));
+    let info = fs.node_info(node).expect("stat the fast link");
+    assert_eq!(info.kind, NodeKind::Symlink);
+    assert_eq!(info.size, FAST_LINK_TARGET.len() as u64);
+
+    let mut out = [0u8; 128];
+    assert_eq!(fs.read_link(node, &mut out), Ok(FAST_LINK_TARGET.len()));
+    assert_eq!(&out[..FAST_LINK_TARGET.len()], FAST_LINK_TARGET);
+}
+
+#[test]
+fn a_slow_symlinks_target_is_read_from_its_data_blocks() {
+    let mut fs = mount_with_links();
+    let node = NodeId::from_raw(u64::from(SLOW_LINK_INO));
+    let info = fs.node_info(node).expect("stat the slow link");
+    assert_eq!(info.kind, NodeKind::Symlink);
+    assert_eq!(info.size, SLOW_LINK_TARGET.len() as u64);
+
+    let mut out = [0u8; 128];
+    assert_eq!(fs.read_link(node, &mut out), Ok(SLOW_LINK_TARGET.len()));
+    assert_eq!(&out[..SLOW_LINK_TARGET.len()], SLOW_LINK_TARGET);
+}
+
+#[test]
+fn a_short_target_with_allocated_blocks_is_read_as_a_slow_symlink() {
+    // The `i_blocks` accounting is the discriminator when a target would fit
+    // inline but is nevertheless block-backed: reading `i_block` would hand
+    // back extent-header bytes instead of a path.
+    let short: &[u8] = b"/tiny/target";
+    let mut img = build_image();
+    plant_slow_symlink(&mut img, FAST_LINK_INO, short, SLOW_LINK_BLOCK);
+    let mut fs = Ext4::open(MockBlock { data: img }).expect("valid volume");
+
+    let mut out = [0u8; 64];
+    let node = NodeId::from_raw(u64::from(FAST_LINK_INO));
+    assert_eq!(fs.read_link(node, &mut out), Ok(short.len()));
+    assert_eq!(&out[..short.len()], short);
+}
+
+#[test]
+fn read_link_refuses_a_non_link_and_an_undersized_buffer() {
+    let mut fs = mount_with_links();
+    let mut out = [0u8; 128];
+    // A regular file and a directory have no target.
+    assert_eq!(
+        fs.read_link(NodeId::from_raw(11), &mut out),
+        Err(DriverError::Unsupported)
+    );
+    assert_eq!(
+        fs.read_link(NodeId::from_raw(u64::from(ROOT_INODE)), &mut out),
+        Err(DriverError::Unsupported)
+    );
+    // A buffer too small is refused, never truncated.
+    let mut small = [0u8; 4];
+    assert_eq!(
+        fs.read_link(NodeId::from_raw(u64::from(FAST_LINK_INO)), &mut small),
+        Err(DriverError::BufferTooSmall)
+    );
+    assert_eq!(small, [0u8; 4]);
+}
+
+#[test]
+fn a_links_bytes_are_never_readable_and_a_link_is_never_creatable() {
+    let mut fs = mount_with_links();
+    let mut buf = [0u8; 16];
+    // A link's content is a path, not a byte stream.
+    assert_eq!(
+        fs.read_at(NodeId::from_raw(u64::from(FAST_LINK_INO)), 0, &mut buf),
+        Err(DriverError::Unsupported)
+    );
+    // This driver reads links but does not author them, so creation refuses
+    // rather than substituting a regular file holding the target's text.
+    let root = fs.root();
+    assert_eq!(
+        fs.create(root, b"alias", NodeKind::Symlink),
+        Err(DriverError::Unsupported)
+    );
+    assert_eq!(
+        fs.create_link(root, b"alias", b"/target"),
+        Err(DriverError::Unsupported)
+    );
+    assert_eq!(fs.lookup(root, b"alias"), Err(DriverError::NotFound));
+}
+
+#[test]
+fn an_inline_data_link_declares_the_limit_rather_than_guessing() {
+    // An inline-data inode keeps its content in the inode's own
+    // extended-attribute area, which this driver decodes nowhere.
+    let mut img = build_image();
+    plant_fast_symlink(&mut img, FAST_LINK_INO, FAST_LINK_TARGET);
+    set_le32(
+        &mut img,
+        inode_offset(FAST_LINK_INO) + 0x20,
+        INODE_FLAG_INLINE_DATA,
+    );
+    let mut fs = Ext4::open(MockBlock { data: img }).expect("valid volume");
+
+    let mut out = [0u8; 128];
+    assert_eq!(
+        fs.read_link(NodeId::from_raw(u64::from(FAST_LINK_INO)), &mut out),
+        Err(DriverError::Unsupported)
+    );
+}
+
+#[test]
+fn a_link_with_no_target_is_refused_as_corrupt() {
+    let mut img = build_image();
+    plant_fast_symlink(&mut img, FAST_LINK_INO, FAST_LINK_TARGET);
+    // A zero-length target is structurally impossible.
+    set_le32(&mut img, inode_offset(FAST_LINK_INO) + 0x04, 0);
+    let mut fs = Ext4::open(MockBlock { data: img }).expect("valid volume");
+
+    let mut out = [0u8; 128];
+    assert_eq!(
+        fs.read_link(NodeId::from_raw(u64::from(FAST_LINK_INO)), &mut out),
+        Err(DriverError::DeviceFault)
+    );
+}

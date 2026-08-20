@@ -17,7 +17,7 @@ fn readdir_lists_created_children() {
         .expect("mkdir gamma");
 
     let mut names: Vec<(NodeKind, String)> = vfs
-        .list_via_secured(&owner, &path(MOUNT), &mut fs)
+        .list_via_secured(&owner, &path(MOUNT), &mut fs, FinalLink::Follow)
         .expect("list mount root")
         .into_iter()
         .map(|(info, name)| (info.kind, name))
@@ -42,7 +42,7 @@ fn readdir_of_a_file_is_not_a_directory() {
     vfs.create_via_secured(&owner, &vol_path("file"), &mut fs)
         .expect("create");
     assert_eq!(
-        vfs.list_via_secured(&owner, &vol_path("file"), &mut fs),
+        vfs.list_via_secured(&owner, &vol_path("file"), &mut fs, FinalLink::Follow),
         Err(VfsError::NotADirectory)
     );
 }
@@ -56,7 +56,7 @@ fn readdir_of_empty_directory_is_empty() {
     vfs.mkdir_via_secured(&owner, &vol_path("empty"), &mut fs)
         .expect("mkdir");
     let names = vfs
-        .list_via_secured(&owner, &vol_path("empty"), &mut fs)
+        .list_via_secured(&owner, &vol_path("empty"), &mut fs, FinalLink::Follow)
         .expect("list");
     assert!(names.is_empty());
 }
@@ -73,7 +73,7 @@ fn stat_reports_size_after_writes() {
         .expect("write");
 
     let info = vfs
-        .stat_via_secured(&owner, &vol_path("sized"), &mut fs)
+        .stat_via_secured(&owner, &vol_path("sized"), &mut fs, FinalLink::Follow)
         .expect("stat");
     assert_eq!(info.kind, NodeKind::RegularFile);
     assert_eq!(info.size, 12);
@@ -86,7 +86,7 @@ fn stat_of_a_missing_path_is_not_found() {
     let owner = cred(ROOT_UID, ROOT_GID, &caps);
 
     assert_eq!(
-        vfs.stat_via_secured(&owner, &vol_path("ghost"), &mut fs)
+        vfs.stat_via_secured(&owner, &vol_path("ghost"), &mut fs, FinalLink::Follow)
             .map(|info| info.size),
         Err(VfsError::NotFound)
     );

@@ -182,7 +182,12 @@ impl<F: FilesystemRead> FilesystemSecurity for GroupMappedFs<F> {
         let info = self.inner.node_info(node)?;
         let mode = match info.kind {
             NodeKind::Directory => MAPPED_DIR_MODE,
-            NodeKind::RegularFile => MAPPED_FILE_MODE,
+            // A link gets the file mode, never a wider one. Traversal
+            // authority is decided by the directories the resolution walks
+            // and by the target it lands on, so a permissive mode on the
+            // link itself would grant nothing useful and would be the only
+            // fail-open value available here.
+            NodeKind::RegularFile | NodeKind::Symlink => MAPPED_FILE_MODE,
         };
         Ok(NodeSecurity::new(mode, 0, self.gid.0))
     }

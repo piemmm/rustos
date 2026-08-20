@@ -60,6 +60,7 @@ use tairix_abi::driver::filesystem::{
 pub use tairix_abi::driver::filesystem::{
     NodeSecurity as Security, SecurityAcl as AclEntry, SecuritySubject as AclSubject,
 };
+use tairix_abi::fs::FS_SYMLINK_MAX;
 use tairix_abi::time::Time64;
 use tairix_abi::{CapabilityId, DriverError, DriverHandle, DriverHost};
 use tairix_crypto::{AeadKey, MacKey};
@@ -288,10 +289,67 @@ const ROOT_INO: u32 = 1;
 
 /// `used` marker stored in a live inode's first word.
 const INODE_USED: u32 = 0x494E_4F44; // "INOD"
-/// On-disk inode `kind` value for a directory.
-const KIND_DIR: u32 = 1;
-/// On-disk inode `kind` value for a regular file.
-const KIND_FILE: u32 = 2;
+
+/// What an inode is.
+///
+/// A closed set decoded from the on-disk `kind` word, so a value the format
+/// does not define is rejected rather than coerced onto the nearest match.
+/// It is an enum rather than a `bool`-plus-`u32` precisely so that every
+/// place which used to ask "is this a directory?" and treat everything else
+/// as a regular file has to say what it means for a link too.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+enum InodeKind {
+    /// A directory. Its content blocks are mirrored metadata blocks
+    /// ([`BlockType::Directory`]), not single-copy data.
+    Dir,
+    /// A regular file. Its content blocks are single-copy data records.
+    File,
+    /// A symbolic link. Its stored target is held in its data blocks exactly
+    /// like a regular file's bytes (`docs/src/filesystem/arxfs-spec.md` §20),
+    /// so every data-accounting path treats it as data — but it is not
+    /// byte-readable, and only [`FilesystemRead::read_link`] surfaces the
+    /// target.
+    Link,
+}
+
+impl InodeKind {
+    /// The on-disk `kind` word.
+    const fn as_u32(self) -> u32 {
+        match self {
+            Self::Dir => 1,
+            Self::File => 2,
+            Self::Link => 3,
+        }
+    }
+
+    /// Recover a kind from its on-disk word, or `None` for a value this
+    /// format does not define.
+    const fn from_u32(raw: u32) -> Option<Self> {
+        match raw {
+            1 => Some(Self::Dir),
+            2 => Some(Self::File),
+            3 => Some(Self::Link),
+            _ => None,
+        }
+    }
+
+    /// The structural [`NodeKind`] the read surface reports.
+    const fn node_kind(self) -> NodeKind {
+        match self {
+            Self::Dir => NodeKind::Directory,
+            Self::File => NodeKind::RegularFile,
+            Self::Link => NodeKind::Symlink,
+        }
+    }
+
+    /// Whether this node's content blocks are **mirrored metadata** rather
+    /// than single-copy data. Only a directory's are, so allocation
+    /// accounting, freeing, and scrub all key on this and a link's target
+    /// blocks are accounted as the data records they are.
+    const fn content_is_metadata(self) -> bool {
+        matches!(self, Self::Dir)
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Little-endian field accessors over a byte slice. Total over an in-bounds
@@ -337,7 +395,7 @@ fn as_u32(value: usize) -> u32 {
 }
 
 /// Cheap, bounded, first-party all-zero scan over a write buffer
-/// (`docs/src/filesystem/arxfs-spec.md` §19; `.junie/SPARSE.md` §16). It
+/// (`docs/src/filesystem/arxfs-spec.md` §19; `plans/SPARSE.md` §16). It
 /// allocates nothing and never calls the compressor: an all-zero logical
 /// record becomes a metadata-only sparse hole rather than a physical data
 /// record.
@@ -456,7 +514,7 @@ const I_ATTR_ROOT: usize = 160;
 /// In-memory image of one on-disk inode.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 struct Inode {
-    kind: u32,
+    kind: InodeKind,
     sec: Security,
     nlink: u32,
     size: u64,
@@ -471,7 +529,7 @@ struct Inode {
 }
 
 impl Inode {
-    fn empty(kind: u32, sec: Security, now: Time64) -> Self {
+    fn empty(kind: InodeKind, sec: Security, now: Time64) -> Self {
         Self {
             kind,
             sec,
@@ -490,7 +548,7 @@ impl Inode {
     }
 
     fn is_dir(&self) -> bool {
-        self.kind == KIND_DIR
+        self.kind == InodeKind::Dir
     }
 
     /// Decode the inode record at `buf[..INODE_SIZE]`, returning `None` for
@@ -499,10 +557,7 @@ impl Inode {
         if rd_u32(buf, I_USED) != INODE_USED {
             return Ok(None);
         }
-        let kind = rd_u32(buf, I_KIND);
-        if kind != KIND_DIR && kind != KIND_FILE {
-            return Err(DriverError::DeviceFault);
-        }
+        let kind = InodeKind::from_u32(rd_u32(buf, I_KIND)).ok_or(DriverError::DeviceFault)?;
         let required_cap = match rd_u32(buf, I_REQCAP) {
             0 => None,
             raw => {
@@ -552,7 +607,7 @@ impl Inode {
             *byte = 0;
         }
         wr_u32(buf, I_USED, INODE_USED);
-        wr_u32(buf, I_KIND, self.kind);
+        wr_u32(buf, I_KIND, self.kind.as_u32());
         wr_u32(buf, I_MODE, self.sec.mode);
         wr_u32(buf, I_UID, self.sec.uid);
         wr_u32(buf, I_GID, self.sec.gid);
@@ -669,12 +724,18 @@ pub struct ARXFS<B: Block> {
     /// root records it. Held here rather than read back from the allocator so
     /// a grow can commit the region's new home before the map moves into it.
     alloc_map_start: u64,
+    /// Incompatible on-disk features the committed volume declares
+    /// (`superblock` module). A volume gains a bit the first time it uses the
+    /// structure that bit names, so a volume that never uses one stays
+    /// readable by a build that does not know it.
+    incompat: u64,
     saved_inode_tree_root: u64,
     saved_next_ino: u64,
     saved_chunk_tree_root: u64,
     saved_reverse_ref_tree_root: u64,
     saved_scrub_progress_root: u64,
     saved_health_baseline_root: u64,
+    saved_incompat: u64,
     clock: fn() -> Time64,
     /// When `true`, the repair-on-read paths (`read_meta`, `read_sb_slot`,
     /// `read_txn_root`) skip writing a good companion back over a bad primary,
@@ -900,12 +961,19 @@ impl<B: Block> ARXFS<B> {
         buf: &mut [u8],
     ) -> Result<BlockHeader, DriverError> {
         let bs = self.block_size;
-        self.read_block(phys, buf)?;
-        if let Ok(header) =
-            BlockHeader::decode_verify(&buf[..bs], expect_type, self.fs_uuid, phys, &self.mac_key)
-        {
-            self.decrypt_meta_payload(expect_type, buf, phys)?;
-            return Ok(header);
+        // A copy that cannot be read is as absent as one that fails to
+        // authenticate, so both fall through to the companion.
+        if self.read_block(phys, buf).is_ok() {
+            if let Ok(header) = BlockHeader::decode_verify(
+                &buf[..bs],
+                expect_type,
+                self.fs_uuid,
+                phys,
+                &self.mac_key,
+            ) {
+                self.decrypt_meta_payload(expect_type, buf, phys)?;
+                return Ok(header);
+            }
         }
         // Primary failed: fall back to the companion mirror, validating it
         // against the *primary's* identity (both copies carry that address).
@@ -1087,6 +1155,7 @@ impl<B: Block> ARXFS<B> {
         self.saved_reverse_ref_tree_root = self.reverse_ref_tree_root;
         self.saved_scrub_progress_root = self.scrub_progress_root;
         self.saved_health_baseline_root = self.health_baseline_root;
+        self.saved_incompat = self.incompat;
     }
 
     /// Discard an operation that failed before committing: restore the inode
@@ -1099,6 +1168,7 @@ impl<B: Block> ARXFS<B> {
         self.reverse_ref_tree_root = self.saved_reverse_ref_tree_root;
         self.scrub_progress_root = self.saved_scrub_progress_root;
         self.health_baseline_root = self.saved_health_baseline_root;
+        self.incompat = self.saved_incompat;
         let allocated = match self.allocator_mut() {
             Ok(alloc) => {
                 alloc.txn_freed.clear();
@@ -1223,6 +1293,7 @@ impl<B: Block> ARXFS<B> {
             inode_count: self.inode_hint,
             generation: next_gen,
             root_phys,
+            incompat: self.incompat,
         };
         sb.seal(
             &mut buf[..bs],
@@ -1276,12 +1347,17 @@ impl<B: Block> ARXFS<B> {
             free_count: total_blocks,
             alloc: None,
             alloc_map_start: 0,
+            // A fresh volume declares nothing; the committed word is adopted
+            // at mount and a feature bit is set by the first use of the
+            // structure it names.
+            incompat: 0,
             saved_inode_tree_root: 0,
             saved_next_ino: 0,
             saved_chunk_tree_root: 0,
             saved_reverse_ref_tree_root: 0,
             saved_scrub_progress_root: 0,
             saved_health_baseline_root: 0,
+            saved_incompat: 0,
             clock: epoch_clock,
             read_only: false,
             cluster_cache: None,
@@ -1350,7 +1426,7 @@ impl<B: Block> ARXFS<B> {
 
         fs.begin();
         let now = (fs.clock)();
-        let mut root = Inode::empty(KIND_DIR, Security::new(0o755, 0, 0), now);
+        let mut root = Inode::empty(InodeKind::Dir, Security::new(0o755, 0, 0), now);
         root.nlink = 2;
         // Insert "." and ".." through the normal directory-insertion path so
         // they occupy as many directory blocks as the device's block size
@@ -1451,7 +1527,7 @@ impl<B: Block> ARXFS<B> {
         let uuid_pin: Option<u128> = Some(fs.fs_uuid);
         for slot in 0..RING_SLOTS {
             let primary = slot_block(slot);
-            let Some((sb, uuid)) = fs.read_sb_slot(primary, uuid_pin, &mut buf) else {
+            let Some((sb, uuid)) = fs.read_sb_slot(primary, uuid_pin, &mut buf)? else {
                 continue;
             };
             // The superblock pins the *filesystem's* committed block count,
@@ -1484,6 +1560,7 @@ impl<B: Block> ARXFS<B> {
         fs.inode_hint = sb.inode_count;
         fs.generation = sb.generation;
         fs.root_phys = sb.root_phys;
+        fs.incompat = sb.incompat;
         fs.ring_pos = best_slot + 1;
         // Operate within the committed filesystem size, which may be smaller
         // than the backing device (the surplus tail is unused until a grow).
@@ -1726,28 +1803,44 @@ impl<B: Block> ARXFS<B> {
     /// Read a superblock-ring slot at primary block `primary`, falling back to
     /// its companion mirror and repairing the primary from a good companion
     /// (`docs/src/filesystem/arxfs-spec.md` §8). Returns the decoded slot and
-    /// its UUID, or `None` when neither copy authenticates (the ring scan then
+    /// its UUID, or `Ok(None)` when neither copy is usable (the ring scan then
     /// skips the slot). Authenticated under the volume's metadata-authentication
     /// key, recovered in [`Self::establish_keys`].
+    ///
+    /// A copy that cannot be **read** is as absent as one that fails to
+    /// authenticate — a media error on a single sector is exactly what the
+    /// mirror is for — so the fallback covers both.
+    ///
+    /// # Errors
+    ///
+    /// [`DriverError::Unsupported`] when a copy authenticates but declares an
+    /// on-disk feature this build does not implement: the volume is refused
+    /// with its reason rather than reported as unrecognisable.
     fn read_sb_slot(
         &mut self,
         primary: u64,
         uuid_pin: Option<u128>,
         buf: &mut [u8],
-    ) -> Option<(Superblock, u128)> {
+    ) -> Result<Option<(Superblock, u128)>, DriverError> {
         let bs = self.block_size;
-        self.read_block(primary, buf).ok()?;
-        if let Some((sb, uuid)) =
-            Superblock::try_decode(&buf[..bs], uuid_pin, primary, &self.mac_key)
-        {
-            return Some((sb, uuid));
+        if self.read_block(primary, buf).is_ok() {
+            if let Some(found) =
+                Superblock::try_decode(&buf[..bs], uuid_pin, primary, &self.mac_key)?
+            {
+                return Ok(Some(found));
+            }
         }
-        self.read_block(Self::companion(primary), buf).ok()?;
-        let (sb, uuid) = Superblock::try_decode(&buf[..bs], uuid_pin, primary, &self.mac_key)?;
+        if self.read_block(Self::companion(primary), buf).is_err() {
+            return Ok(None);
+        }
+        let Some(found) = Superblock::try_decode(&buf[..bs], uuid_pin, primary, &self.mac_key)?
+        else {
+            return Ok(None);
+        };
         if !self.read_only {
             let _ = self.write_block(primary, buf);
         }
-        Some((sb, uuid))
+        Ok(Some(found))
     }
 
     /// Read the transaction root at `root_phys`, falling back to its companion
@@ -1769,11 +1862,14 @@ impl<B: Block> ARXFS<B> {
     ) -> Result<TxnRoot, DriverError> {
         let bs = self.block_size;
         let key = self.mac_key;
-        self.read_block(root_phys, buf)?;
-        if let Ok(root) =
-            TxnRoot::decode_verify(&buf[..bs], uuid, root_phys, expect_generation, &key)
-        {
-            return Ok(root);
+        // A copy that cannot be read is as absent as one that fails to
+        // authenticate, so both fall through to the companion.
+        if self.read_block(root_phys, buf).is_ok() {
+            if let Ok(root) =
+                TxnRoot::decode_verify(&buf[..bs], uuid, root_phys, expect_generation, &key)
+            {
+                return Ok(root);
+            }
         }
         self.read_block(Self::companion(root_phys), buf)?;
         let root = TxnRoot::decode_verify(&buf[..bs], uuid, root_phys, expect_generation, &key)?;
@@ -1817,15 +1913,15 @@ impl<B: Block> ARXFS<B> {
             self.mark_meta_used_checked(node)?;
         }
         // A directory's content blocks are themselves metadata
-        // ([`BlockType::Directory`], mirrored pairs); a regular file's are
-        // single-copy data. Account for the directory mirror so the rebuilt
-        // free set matches the live one (`docs/src/filesystem/arxfs-spec.md`
-        // §5).
-        let is_dir = inode.is_dir();
+        // ([`BlockType::Directory`], mirrored pairs); a regular file's and a
+        // link's are single-copy data. Account for the directory mirror so
+        // the rebuilt free set matches the live one
+        // (`docs/src/filesystem/arxfs-spec.md` §5).
+        let mirrored = inode.kind.content_is_metadata();
         for (_, value) in extents {
             let ext = Extent::decode(&value)?;
             for b in 0..ext.stored {
-                if is_dir {
+                if mirrored {
                     self.mark_meta_used_checked(ext.phys + b)?;
                 } else {
                     self.mark_used_checked(ext.phys + b)?;
@@ -1994,7 +2090,7 @@ impl<B: Block> ARXFS<B> {
         blk: &mut [u8],
     ) -> Result<(), DriverError> {
         let capu = as_usize(self.data_capacity());
-        // Sparse storage pipeline (`.junie/SPARSE.md` §4, §6): an all-zero
+        // Sparse storage pipeline (`plans/SPARSE.md` §4, §6): an all-zero
         // logical record is detected before compression, dedupe, encryption,
         // or physical allocation and stored as a metadata-only hole. The old
         // physical block (if any) is released through the normal COW/refcount
@@ -2411,11 +2507,11 @@ impl<B: Block> ARXFS<B> {
     /// of its extent tree, leaving an empty zero-length file.
     ///
     /// A directory's content blocks are metadata mirrored pairs, so they are
-    /// freed with their companion ([`Self::free_meta`]); a regular file's are
-    /// single-copy data ([`Self::free_block`]).
+    /// freed with their companion ([`Self::free_meta`]); a regular file's and
+    /// a link's are single-copy data ([`Self::free_block`]).
     fn free_all_blocks(&mut self, inode: &mut Inode, ino: u32) -> Result<(), DriverError> {
         let spec = extent_spec(ino);
-        let is_dir = inode.is_dir();
+        let mirrored = inode.kind.content_is_metadata();
         for (start, value) in self.btree_collect_entries(inode.extent_root, spec)? {
             let ext = Extent::decode(&value)?;
             if ext.compressed {
@@ -2423,7 +2519,7 @@ impl<B: Block> ARXFS<B> {
                 continue;
             }
             for b in 0..ext.len {
-                if is_dir {
+                if mirrored {
                     self.free_meta(ext.phys + b);
                 } else {
                     self.release_block_ref(ext.phys + b, ino, start + b)?;
@@ -2440,6 +2536,26 @@ impl<B: Block> ARXFS<B> {
         inode.extent_root = 0;
         inode.size = 0;
         Ok(())
+    }
+
+    /// The structural [`NodeInfo`] of `inode` (number `ino`).
+    ///
+    /// The one definition `node_info` and `read_dir` both report, so a stat
+    /// and a listing can never disagree about a node's kind or its sizes.
+    fn inode_info(&mut self, ino: u32, inode: &Inode) -> Result<NodeInfo, DriverError> {
+        let allocated = self.allocated_bytes(inode, ino)?;
+        Ok(NodeInfo {
+            kind: inode.kind.node_kind(),
+            size: match inode.kind {
+                // A directory's entries are not a byte length.
+                InodeKind::Dir => 0,
+                // A link's size is its target's length, exactly as a file's
+                // is its content's.
+                InodeKind::File | InodeKind::Link => inode.size,
+            },
+            allocated,
+            times: inode.times,
+        })
     }
 
     fn dir_block_count(&self, dir: &Inode) -> u64 {
@@ -2955,15 +3071,18 @@ impl<B: Block> ARXFS<B> {
             return Err(DriverError::Busy);
         }
         let (kind_val, mode) = match kind {
-            NodeKind::Directory => (KIND_DIR, 0o755),
-            NodeKind::RegularFile => (KIND_FILE, 0o644),
+            NodeKind::Directory => (InodeKind::Dir, 0o755),
+            NodeKind::RegularFile => (InodeKind::File, 0o644),
+            // A link carries a target this call has nowhere to put, so it
+            // is created only by `create_link`.
+            NodeKind::Symlink => return Err(DriverError::Unsupported),
         };
         let mut child = Inode::empty(kind_val, Security::new(mode, 0, 0), now);
-        if kind_val == KIND_DIR {
+        if kind_val == InodeKind::Dir {
             child.nlink = 2;
         }
         let child_ino = self.alloc_inode(&child)?;
-        if kind_val == KIND_DIR {
+        if kind_val == InodeKind::Dir {
             // Insert "." and ".." through the normal insertion path so they
             // span as many directory blocks as the block size needs (a
             // 512-byte block holds only a single 263-byte slot).
@@ -2972,6 +3091,70 @@ impl<B: Block> ARXFS<B> {
             self.write_inode(child_ino, &child)?;
             dir_inode.nlink += 1;
         }
+        self.add_entry(&mut dir_inode, dir_ino, child_ino, name)?;
+        dir_inode.times.modified = now;
+        dir_inode.times.changed = now;
+        self.write_inode(dir_ino, &dir_inode)?;
+        self.commit()?;
+        Ok(NodeId::from_raw(u64::from(child_ino)))
+    }
+
+    /// Refuse a node whose data blocks do not hold file bytes.
+    ///
+    /// A directory's blocks are its entries, and a link's hold its target —
+    /// writing either as file content would corrupt structure rather than
+    /// data, so both fail closed even though the VFS resolves a final link
+    /// before it delegates a write.
+    fn deny_non_file_content(kind: InodeKind) -> Result<(), DriverError> {
+        match kind {
+            InodeKind::File => Ok(()),
+            InodeKind::Dir | InodeKind::Link => Err(DriverError::Unsupported),
+        }
+    }
+
+    /// Create the symbolic link `name` in `dir` holding `target`.
+    ///
+    /// The target is stored as the node's data through the ordinary file
+    /// write path (`docs/src/filesystem/arxfs-spec.md` §20), so it inherits
+    /// the volume's checksums, authentication, and encryption with no second
+    /// storage path — and the volume declares
+    /// [`INCOMPAT_SYMLINKS`](superblock::INCOMPAT_SYMLINKS) in the same
+    /// transaction, so a reader that does not know the kind refuses the
+    /// volume rather than misreading the link.
+    ///
+    /// The bytes are stored verbatim: ARXFS neither resolves nor validates
+    /// the target as a path (the VFS checked its grammar and bounded its
+    /// length), so a link may legitimately dangle.
+    fn create_link_inner(
+        &mut self,
+        dir: NodeId,
+        name: &[u8],
+        target: &[u8],
+    ) -> Result<NodeId, DriverError> {
+        Self::check_name(name)?;
+        if target.is_empty() || target.len() > FS_SYMLINK_MAX {
+            return Err(DriverError::LengthOutOfRange);
+        }
+        let now = (self.clock)();
+        let dir_ino = self.ino_of(dir)?;
+        let mut dir_inode = self.read_inode(dir_ino)?;
+        if !dir_inode.is_dir() {
+            return Err(DriverError::Unsupported);
+        }
+        if self.dir_lookup(&dir_inode, name)?.is_some() {
+            return Err(DriverError::Busy);
+        }
+        // Declared before the link is minted, so nothing this transaction
+        // writes can be reached from a volume that has not admitted to
+        // holding links; `rollback` restores it with the rest of the state.
+        self.incompat |= superblock::INCOMPAT_SYMLINKS;
+        // A link's own mode never gates access — resolution authorises the
+        // target — so the conventional world-traversable `lrwxrwxrwx` is
+        // stored, which is also what a listing shows.
+        let mut child = Inode::empty(InodeKind::Link, Security::new(0o777, 0, 0), now);
+        let child_ino = self.alloc_inode(&child)?;
+        self.write_file(&mut child, child_ino, 0, target)?;
+        self.write_inode(child_ino, &child)?;
         self.add_entry(&mut dir_inode, dir_ino, child_ino, name)?;
         dir_inode.times.modified = now;
         dir_inode.times.changed = now;
@@ -3003,13 +3186,14 @@ impl<B: Block> ARXFS<B> {
             .dir_lookup(&dir_inode, src_name)?
             .ok_or(DriverError::NotFound)?;
         let src = self.read_inode(src_ino)?;
-        if src.is_dir() {
-            return Err(DriverError::Unsupported);
-        }
+        // A reflink clones data blocks into a fresh regular file, so cloning
+        // a link would silently produce a file holding the target's text
+        // instead of a second link.
+        Self::deny_non_file_content(src.kind)?;
         if self.dir_lookup(&dir_inode, dst_name)?.is_some() {
             return Err(DriverError::Busy);
         }
-        let mut dst = Inode::empty(KIND_FILE, src.sec, now);
+        let mut dst = Inode::empty(InodeKind::File, src.sec, now);
         let dst_ino = self.alloc_inode(&dst)?;
         // Walk the source's extents: a raw run shares per block, a compressed
         // cluster shares its whole stored run in one reference.
@@ -3089,9 +3273,7 @@ impl<B: Block> ARXFS<B> {
             .dir_lookup(&dir_inode, name)?
             .ok_or(DriverError::NotFound)?;
         let mut child = self.read_inode(child_ino)?;
-        if child.is_dir() {
-            return Err(DriverError::Unsupported);
-        }
+        Self::deny_non_file_content(child.kind)?;
         let written = self.write_file(&mut child, child_ino, offset, data)?;
         let now = (self.clock)();
         child.times.modified = now;
@@ -3111,9 +3293,7 @@ impl<B: Block> ARXFS<B> {
             .dir_lookup(&dir_inode, name)?
             .ok_or(DriverError::NotFound)?;
         let mut child = self.read_inode(child_ino)?;
-        if child.is_dir() {
-            return Err(DriverError::Unsupported);
-        }
+        Self::deny_non_file_content(child.kind)?;
         self.truncate_file(&mut child, child_ino, size)?;
         let now = (self.clock)();
         child.times.modified = now;
@@ -3409,22 +3589,7 @@ impl<B: Block> FilesystemRead for ARXFS<B> {
     fn node_info(&mut self, node: NodeId) -> Result<NodeInfo, DriverError> {
         let ino = self.ino_of(node)?;
         let inode = self.read_inode(ino)?;
-        let allocated = self.allocated_bytes(&inode, ino)?;
-        if inode.is_dir() {
-            Ok(NodeInfo {
-                kind: NodeKind::Directory,
-                size: 0,
-                allocated,
-                times: inode.times,
-            })
-        } else {
-            Ok(NodeInfo {
-                kind: NodeKind::RegularFile,
-                size: inode.size,
-                allocated,
-                times: inode.times,
-            })
-        }
+        self.inode_info(ino, &inode)
     }
 
     fn lookup(&mut self, dir: NodeId, name: &[u8]) -> Result<NodeId, DriverError> {
@@ -3442,10 +3607,37 @@ impl<B: Block> FilesystemRead for ARXFS<B> {
     fn read_at(&mut self, file: NodeId, offset: u64, buf: &mut [u8]) -> Result<usize, DriverError> {
         let ino = self.ino_of(file)?;
         let inode = self.read_inode(ino)?;
-        if inode.is_dir() {
-            return Err(DriverError::Unsupported);
+        match inode.kind {
+            InodeKind::File => self.read_file(&inode, offset, buf),
+            // A directory's content is its entries; a link's is a path,
+            // reached only through `read_link`. Neither is a byte stream.
+            InodeKind::Dir | InodeKind::Link => Err(DriverError::Unsupported),
         }
-        self.read_file(&inode, offset, buf)
+    }
+
+    fn read_link(&mut self, link: NodeId, out: &mut [u8]) -> Result<usize, DriverError> {
+        let ino = self.ino_of(link)?;
+        let inode = self.read_inode(ino)?;
+        match inode.kind {
+            InodeKind::Link => {}
+            InodeKind::Dir | InodeKind::File => return Err(DriverError::Unsupported),
+        }
+        // The target is the node's whole content, so its recorded length is
+        // its length; a buffer that cannot hold it is refused rather than
+        // handed a truncated path.
+        let len = as_usize(inode.size);
+        if len == 0 || len > FS_SYMLINK_MAX {
+            return Err(DriverError::DeviceFault);
+        }
+        if out.len() < len {
+            return Err(DriverError::BufferTooSmall);
+        }
+        if self.read_file(&inode, 0, &mut out[..len])? != len {
+            // The extent map holds fewer bytes than the inode claims: the
+            // link is damaged, so refuse rather than resolve a partial path.
+            return Err(DriverError::DeviceFault);
+        }
+        Ok(len)
     }
 
     fn read_dir(
@@ -3502,22 +3694,7 @@ impl<B: Block> FilesystemRead for ARXFS<B> {
                 // returned with the entry, so a listing consumer never
                 // re-resolves the child by path to learn its sizes.
                 let child = self.read_inode(ino)?;
-                let allocated = self.allocated_bytes(&child, ino)?;
-                let child_info = if child.is_dir() {
-                    NodeInfo {
-                        kind: NodeKind::Directory,
-                        size: 0,
-                        allocated,
-                        times: child.times,
-                    }
-                } else {
-                    NodeInfo {
-                        kind: NodeKind::RegularFile,
-                        size: child.size,
-                        allocated,
-                        times: child.times,
-                    }
-                };
+                let child_info = self.inode_info(ino, &child)?;
                 return Ok(Some(DirEntry {
                     node: NodeId::from_raw(u64::from(ino)),
                     info: child_info,
@@ -3537,6 +3714,21 @@ impl<B: Block> FilesystemWrite for ARXFS<B> {
         self.deny_if_read_only()?;
         self.begin();
         let result = self.create_inner(dir, name, kind);
+        if result.is_err() {
+            self.rollback();
+        }
+        result
+    }
+
+    fn create_link(
+        &mut self,
+        dir: NodeId,
+        name: &[u8],
+        target: &[u8],
+    ) -> Result<NodeId, DriverError> {
+        self.deny_if_read_only()?;
+        self.begin();
+        let result = self.create_link_inner(dir, name, target);
         if result.is_err() {
             self.rollback();
         }

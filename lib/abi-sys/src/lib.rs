@@ -149,6 +149,8 @@ const NUM_FS_SYNC: u64 = SyscallNumber::FS_SYNC.as_u16() as u64;
 const NUM_FS_MKDIR: u64 = SyscallNumber::FS_MKDIR.as_u16() as u64;
 const NUM_FS_UNLINK: u64 = SyscallNumber::FS_UNLINK.as_u16() as u64;
 const NUM_FS_RENAME: u64 = SyscallNumber::FS_RENAME.as_u16() as u64;
+const NUM_FS_SYMLINK: u64 = SyscallNumber::FS_SYMLINK.as_u16() as u64;
+const NUM_FS_READLINK: u64 = SyscallNumber::FS_READLINK.as_u16() as u64;
 const NUM_FS_SET_MODE: u64 = SyscallNumber::FS_SET_MODE.as_u16() as u64;
 const NUM_FS_SET_OWNER: u64 = SyscallNumber::FS_SET_OWNER.as_u16() as u64;
 const NUM_FS_ATTR_GET: u64 = SyscallNumber::FS_ATTR_GET.as_u16() as u64;
@@ -2381,6 +2383,74 @@ pub extern "C" fn sys_fs_rename(
     }
 }
 
+/// `fs_symlink`: create a symbolic link at the absolute path
+/// `(link, link_len)` whose stored target is `(target, target_len)`
+/// (`SyscallNumber::FS_SYMLINK`). Returns a `TAIRIX_E_*` code.
+///
+/// Requires `TAIRIX_CAP_FS_ACCESS`. The target is stored verbatim and is
+/// never resolved by this call, so it may legitimately dangle and creating
+/// the link grants no authority over what it names; authority is checked at
+/// each later use of the path, component by component. The target is bounded
+/// by `TAIRIX_FS_SYMLINK_MAX`. The kernel validates both `(ptr, len)` pairs
+/// against the caller's address space before reading them.
+#[must_use]
+#[export_name = "tairix_sys_fs_symlink"]
+pub extern "C" fn sys_fs_symlink(
+    target: *mut c_void,
+    target_len: usize,
+    link: *mut c_void,
+    link_len: usize,
+) -> i32 {
+    // SAFETY: see `sys_ipc_send`; the kernel validates both `(ptr, len)`.
+    unsafe {
+        ret_i32(raw_syscall(
+            NUM_FS_SYMLINK,
+            [
+                ptr_arg(target),
+                target_len as u64,
+                ptr_arg(link),
+                link_len as u64,
+                0,
+                0,
+            ],
+        ))
+    }
+}
+
+/// `fs_readlink`: read the target of the symbolic link at the absolute path
+/// `(path, path_len)` into `(out, out_len)` (`SyscallNumber::FS_READLINK`).
+/// Returns the target's length in bytes, or a negated `TAIRIX_E_*` code.
+///
+/// Requires `TAIRIX_CAP_FS_ACCESS`. The **final** component is never
+/// followed — that is the point of the call — while earlier components
+/// resolve normally. The target is returned exactly as stored, with no
+/// terminator: a path whose final component is not a link fails closed, and
+/// an `out` too small for the whole target fails closed rather than
+/// returning a truncated path that would resolve elsewhere.
+#[must_use]
+#[export_name = "tairix_sys_fs_readlink"]
+pub extern "C" fn sys_fs_readlink(
+    path: *mut c_void,
+    path_len: usize,
+    out: *mut c_void,
+    out_len: usize,
+) -> u64 {
+    // SAFETY: see `sys_ipc_send`; the kernel validates both `(ptr, len)`.
+    unsafe {
+        raw_syscall(
+            NUM_FS_READLINK,
+            [
+                ptr_arg(path),
+                path_len as u64,
+                ptr_arg(out),
+                out_len as u64,
+                0,
+                0,
+            ],
+        )
+    }
+}
+
 /// `fs_set_mode`: set the permission bits of the file or directory at the
 /// absolute path `(path, path_len)` to `mode` (`SyscallNumber::FS_SET_MODE`,
 /// the `chmod(2)` shape). Returns a `TAIRIX_E_*` code.
@@ -2857,6 +2927,8 @@ mod tests {
         (NUM_FS_MKDIR, "fs_mkdir", 2),
         (NUM_FS_UNLINK, "fs_unlink", 3),
         (NUM_FS_RENAME, "fs_rename", 4),
+        (NUM_FS_SYMLINK, "fs_symlink", 4),
+        (NUM_FS_READLINK, "fs_readlink", 4),
         (NUM_CALL_PEER_ORIGIN, "call_peer_origin", 4),
         (NUM_WALL_TIME_GET, "wall_time_get", 2),
         (NUM_WALL_TIME_SET, "wall_time_set", 3),
@@ -4109,6 +4181,49 @@ mod tests {
         assert_eq!(args[0], ptr as usize as u64);
         assert_eq!(args[1], name.len() as u64);
         assert_eq!(&args[2..], &[0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn fs_symlink_marshals_the_target_then_the_link() {
+        // Argument order is target-first, matching the syscall spec: a
+        // transposition here would create the link at the target's name.
+        let mut target = *b"/Apps/Real.app";
+        let mut link = *b"/Users/me/Desktop/Real";
+        let target_ptr = target.as_mut_ptr().cast::<c_void>();
+        let link_ptr = link.as_mut_ptr().cast::<c_void>();
+        let (number, args) = capture(0, || {
+            assert_eq!(
+                sys_fs_symlink(target_ptr, target.len(), link_ptr, link.len()),
+                0
+            );
+        });
+        assert_eq!(number, NUM_FS_SYMLINK);
+        assert_eq!(args[0], target_ptr as usize as u64);
+        assert_eq!(args[1], target.len() as u64);
+        assert_eq!(args[2], link_ptr as usize as u64);
+        assert_eq!(args[3], link.len() as u64);
+        assert_eq!(&args[4..], &[0, 0]);
+    }
+
+    #[test]
+    fn fs_readlink_marshals_the_path_then_the_output_buffer() {
+        let mut path = *b"/Users/me/Desktop/Real";
+        let mut out = [0u8; 64];
+        let path_ptr = path.as_mut_ptr().cast::<c_void>();
+        let out_ptr = out.as_mut_ptr().cast::<c_void>();
+        // The raw return is the target length, not an errno.
+        let (number, args) = capture(14, || {
+            assert_eq!(
+                sys_fs_readlink(path_ptr, path.len(), out_ptr, out.len()),
+                14
+            );
+        });
+        assert_eq!(number, NUM_FS_READLINK);
+        assert_eq!(args[0], path_ptr as usize as u64);
+        assert_eq!(args[1], path.len() as u64);
+        assert_eq!(args[2], out_ptr as usize as u64);
+        assert_eq!(args[3], out.len() as u64);
+        assert_eq!(&args[4..], &[0, 0]);
     }
 
     #[test]

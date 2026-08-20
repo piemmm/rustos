@@ -8,9 +8,9 @@
 //! `transaction` / `btree` / `dedupe`) read from a backing store that, on a
 //! real system, may have been written by anything. The base image is
 //! populated with several files, a multi-extent file, **duplicate-content
-//! files, and a reflink** so the sweep spends its time near real inode-tree,
-//! extent-tree, chunk-tree, and reverse-reference nodes, not just the
-//! superblock ring. Per that decode path is driven by a fuzz harness
+//! files, a reflink, and a symbolic link** so the sweep spends its time near
+//! real inode-tree, extent-tree, chunk-tree, reverse-reference, and link
+//! nodes, not just the superblock ring. Per that decode path is driven by a fuzz harness
 //! whose single invariant is:
 //!
 //! * `open` never panics for any device contents — it returns `Ok` for a
@@ -19,10 +19,13 @@
 //! A mounted volume is then driven through the remaining decode paths the
 //! "fuzz targets" list enumerates: the **directory-block decode** path
 //! (`read_dir`/`lookup` decrypt and parse the encrypted dirent payload that
-//! the mount-time free-space walk never reads), the scrub-progress and
-//! health-baseline record decoders (`scrub`/`health`), the offline `check`
-//! re-walk, and the read-only `rescue` root scan. Each shares the same
-//! invariant: it returns a `Result`, never panics, and fails closed.
+//! the mount-time free-space walk never reads), the **symbolic-link decode**
+//! path (`read_link` over an inode of on-disk kind `3`, whose target is held
+//! as node data and reached through the same integrity pipeline as file
+//! bytes), the scrub-progress and health-baseline record decoders
+//! (`scrub`/`health`), the offline `check` re-walk, and the read-only
+//! `rescue` root scan. Each shares the same invariant: it returns a
+//! `Result`, never panics, and fails closed.
 //!
 //! TAIRiX pulls in no external fuzz runner: a per-run-seeded
 //! LCG draws pseudo-random images, and a structured sweep flips bytes of a real
@@ -221,11 +224,19 @@ fn walk_directories(fs: &mut ARXFS<MemBlock>) {
         }
         let mut cursor = 0u64;
         let mut steps = 0u32;
+        let mut target = [0u8; 4096];
         while let Ok(Some(entry)) = fs.read_dir(dir, cursor, &mut name) {
             let len = entry.name_len.min(name.len());
             let _ = fs.lookup(dir, &name[..len]);
-            if matches!(entry.info.kind, NodeKind::Directory) && depth < 8 {
-                stack.push((entry.node, depth + 1));
+            match entry.info.kind {
+                NodeKind::Directory if depth < 8 => stack.push((entry.node, depth + 1)),
+                // Drive the link decode path: a fuzzed inode may claim any
+                // kind and any target length, and `read_link` must answer
+                // with a `Result` for every one of them.
+                NodeKind::Symlink => {
+                    let _ = fs.read_link(entry.node, &mut target);
+                }
+                NodeKind::Directory | NodeKind::RegularFile => {}
             }
             // A fuzzed image may hand back any cursor; a non-advancing one
             // would loop forever, and the step budget bounds the rest.
@@ -331,6 +342,12 @@ fn formatted_image() -> Vec<u8> {
     // the reverse-reference tree even if the duplicate-content sharing above
     // is reclaimed; it is best-effort on the tiny fuzz device.
     let _ = fs.reflink(root, b"f0", b"f0clone");
+    // A symbolic link puts an inode of the new on-disk kind — and the data
+    // blocks holding its target — in the sweep's path, and makes the base
+    // image declare the symlink incompatible-feature bit so the sweep also
+    // hammers the superblock feature-word validation. Best-effort on the
+    // tiny fuzz device.
+    let _ = fs.create_link(root, b"alink", b"/f0");
     // Leave a scrub paused mid-pass so the base image carries a persisted
     // scrub-progress record (Stage 8): the sweep then hammers that on-disk
     // decode path too. Best-effort on the tiny fuzz device.

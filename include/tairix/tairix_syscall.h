@@ -136,6 +136,8 @@ extern "C" {
 #define TAIRIX_SYS_THREAD_EXIT 110u
 #define TAIRIX_SYS_FUTEX_WAIT 111u
 #define TAIRIX_SYS_FUTEX_WAKE 112u
+#define TAIRIX_SYS_FS_SYMLINK 113u
+#define TAIRIX_SYS_FS_READLINK 114u
 
 /* wait() flag bits (uint32_t). Every undefined bit is reserved and must be zero;
 * with the NONBLOCK bit set, wait() polls and returns TAIRIX_E_WOULD_BLOCK when a
@@ -206,6 +208,7 @@ typedef struct tairix_spawn_attach {
 #define TAIRIX_OPEN_FLAG_APPEND 0x10u
 #define TAIRIX_OPEN_FLAG_DIRECTORY 0x20u
 #define TAIRIX_OPEN_FLAG_EXCLUSIVE 0x40u
+#define TAIRIX_OPEN_FLAG_NO_FOLLOW 0x80u
 
 /* fs_unlink() flag bits (uint32_t). Every undefined bit is reserved and rejected
 * with TAIRIX_E_OUT_OF_RANGE. 0 removes the named file or (empty) directory; with
@@ -400,6 +403,8 @@ uint64_t tairix_sys_thread_create(void * a0, uint64_t a1, uintptr_t a2, uint64_t
 void tairix_sys_thread_exit(void);
 int32_t tairix_sys_futex_wait(void * a0, uint32_t a1, uint64_t a2);
 uint64_t tairix_sys_futex_wake(void * a0, uint32_t a1);
+int32_t tairix_sys_fs_symlink(void * a0, uintptr_t a1, void * a2, uintptr_t a3);
+uint64_t tairix_sys_fs_readlink(void * a0, uintptr_t a1, void * a2, uintptr_t a3);
 
 #ifdef __cplusplus
 } /* extern "C" */

@@ -33,7 +33,7 @@ use crate::fs::blkclient::{BlkHealthCountersAtomic, VolumeHealthSource};
 use crate::fs::memfs::RwMockFs;
 use crate::fs::perm::Credentials;
 use crate::fs::service::FilesystemService;
-use crate::fs::{Mode, MountBacking, Path, Vfs};
+use crate::fs::{FinalLink, Mode, MountBacking, Path, Vfs};
 
 /// The test principal that owns the mounted volume's files.
 const TEST_UID: u32 = 1000;
@@ -316,7 +316,7 @@ fn readdir_merges_direct_child_mounts_into_the_parent_listing() {
     let caps = caps();
 
     let entries = svc
-        .readdir(TEST_UID, &caps, "/Storage")
+        .readdir(TEST_UID, &caps, "/Storage", FinalLink::Follow)
         .expect("listing succeeds");
     let names: Vec<&str> = entries.iter().map(|e| e.name.as_str()).collect();
     assert!(
@@ -342,7 +342,7 @@ fn readdir_merges_direct_child_mounts_into_the_parent_listing() {
     // The merged name is not a phantom: it resolves through to the mounted
     // volume's own content.
     let inside = svc
-        .readdir(TEST_UID, &caps, "/Storage/usb1")
+        .readdir(TEST_UID, &caps, "/Storage/usb1", FinalLink::Follow)
         .expect("child volume lists");
     assert!(inside.iter().any(|e| e.name == "note"), "{inside:?}");
 }
@@ -395,7 +395,7 @@ fn an_uninstalled_mount_fails_closed_not_implemented() {
         Err(Errno::NotImplemented)
     );
     assert_eq!(
-        svc.stat(TEST_UID, &caps, &path("x")),
+        svc.stat(TEST_UID, &caps, &path("x"), FinalLink::Follow),
         Err(Errno::NotImplemented)
     );
 }
@@ -408,7 +408,7 @@ fn an_uninstalled_identity_fails_closed_not_implemented() {
     let svc = service(true, false, false);
     let caps = caps();
     assert_eq!(
-        svc.stat(TEST_UID, &caps, &path("x")),
+        svc.stat(TEST_UID, &caps, &path("x"), FinalLink::Follow),
         Err(Errno::NotImplemented)
     );
 }
@@ -420,7 +420,7 @@ fn an_unknown_principal_is_denied() {
     let svc = ready();
     let caps = caps();
     assert_eq!(
-        svc.stat(4242, &caps, &path("x")),
+        svc.stat(4242, &caps, &path("x"), FinalLink::Follow),
         Err(Errno::PermissionDenied)
     );
 }
@@ -435,7 +435,10 @@ fn the_system_principal_resolves_before_the_identity_table_installs() {
     // every pre-unlock store-bundle spawn.
     let svc = service(true, false, false);
     let caps = caps();
-    assert_eq!(svc.stat(0, &caps, &path("x")), Err(Errno::NotFound));
+    assert_eq!(
+        svc.stat(0, &caps, &path("x"), FinalLink::Follow),
+        Err(Errno::NotFound)
+    );
 }
 
 #[test]
@@ -445,9 +448,12 @@ fn an_installed_table_without_uid0_still_resolves_the_system_principal() {
     // bootstrap identity while every other unknown uid stays denied.
     let svc = ready();
     let caps = caps();
-    assert_eq!(svc.stat(0, &caps, &path("x")), Err(Errno::NotFound));
     assert_eq!(
-        svc.stat(4242, &caps, &path("x")),
+        svc.stat(0, &caps, &path("x"), FinalLink::Follow),
+        Err(Errno::NotFound)
+    );
+    assert_eq!(
+        svc.stat(4242, &caps, &path("x"), FinalLink::Follow),
         Err(Errno::PermissionDenied)
     );
 }
@@ -504,7 +510,9 @@ fn stat_reports_kind_size_and_attested_owner() {
     svc.write(TEST_UID, &caps, &p, 0, false, b"1234")
         .expect("write");
 
-    let st = svc.stat(TEST_UID, &caps, &p).expect("stat");
+    let st = svc
+        .stat(TEST_UID, &caps, &p, FinalLink::Follow)
+        .expect("stat");
     assert_eq!(st.kind, FileKind::Regular);
     assert_eq!(st.size, 4);
     assert_eq!(st.uid, TEST_UID);
@@ -525,7 +533,9 @@ fn mkdir_then_readdir_reports_each_entrys_kind() {
     )
     .expect("create file");
 
-    let mut entries = svc.readdir(TEST_UID, &caps, MOUNT).expect("readdir");
+    let mut entries = svc
+        .readdir(TEST_UID, &caps, MOUNT, FinalLink::Follow)
+        .expect("readdir");
     entries.sort_by(|a, b| a.name.cmp(&b.name));
     let kinds: Vec<(FileKind, &str)> = entries.iter().map(|e| (e.kind, e.name.as_str())).collect();
     assert_eq!(
@@ -574,13 +584,16 @@ fn directory_only_unlink_refuses_a_file_and_removes_an_empty_directory() {
         svc.unlink(TEST_UID, &caps, &file, UnlinkFlags::DIRECTORY),
         Err(Errno::NotADirectory)
     );
-    svc.stat(TEST_UID, &caps, &file)
+    svc.stat(TEST_UID, &caps, &file, FinalLink::Follow)
         .expect("file survives the refused dir-only removal");
     let dir = path("empty");
     svc.mkdir(TEST_UID, &caps, &dir).expect("mkdir");
     svc.unlink(TEST_UID, &caps, &dir, UnlinkFlags::DIRECTORY)
         .expect("dir-only remove of an empty directory");
-    assert_eq!(svc.stat(TEST_UID, &caps, &dir), Err(Errno::NotFound));
+    assert_eq!(
+        svc.stat(TEST_UID, &caps, &dir, FinalLink::Follow),
+        Err(Errno::NotFound)
+    );
 }
 
 #[test]
@@ -598,7 +611,12 @@ fn truncate_changes_the_size() {
     svc.write(TEST_UID, &caps, &p, 0, false, b"0123456789")
         .expect("write");
     svc.truncate(TEST_UID, &caps, &p, 4).expect("truncate");
-    assert_eq!(svc.stat(TEST_UID, &caps, &p).expect("stat").size, 4);
+    assert_eq!(
+        svc.stat(TEST_UID, &caps, &p, FinalLink::Follow)
+            .expect("stat")
+            .size,
+        4
+    );
 }
 
 #[test]
@@ -731,7 +749,9 @@ fn set_mode_rewrites_the_permission_bits_for_the_owner() {
 
     svc.set_mode(TEST_UID, &caps, &p, 0o600).expect("chmod");
 
-    let st = svc.stat(TEST_UID, &caps, &p).expect("stat");
+    let st = svc
+        .stat(TEST_UID, &caps, &p, FinalLink::Follow)
+        .expect("stat");
     assert_eq!(st.mode, 0o600);
     assert_eq!(st.uid, TEST_UID);
     assert_eq!(st.gid, TEST_GID);
@@ -842,12 +862,22 @@ fn set_owner_reassigns_the_uid_only_for_a_privileged_caller() {
         svc.set_owner(TEST_UID, &caps(), &p, 2000, FS_OWNER_UNCHANGED),
         Err(Errno::PermissionDenied)
     );
-    assert_eq!(svc.stat(TEST_UID, &caps(), &p).expect("stat").uid, TEST_UID);
+    assert_eq!(
+        svc.stat(TEST_UID, &caps(), &p, FinalLink::Follow)
+            .expect("stat")
+            .uid,
+        TEST_UID
+    );
 
     // Privileged (`CAP_FS_CHOWN`): the owner is reassigned.
     svc.set_owner(TEST_UID, &chown_caps(), &p, 2000, FS_OWNER_UNCHANGED)
         .expect("chown");
-    assert_eq!(svc.stat(TEST_UID, &caps(), &p).expect("stat").uid, 2000);
+    assert_eq!(
+        svc.stat(TEST_UID, &caps(), &p, FinalLink::Follow)
+            .expect("stat")
+            .uid,
+        2000
+    );
 }
 
 #[test]
@@ -860,7 +890,9 @@ fn set_owner_strips_the_setuid_bit_on_a_change() {
     svc.set_owner(TEST_UID, &chown_caps(), &p, 2000, FS_OWNER_UNCHANGED)
         .expect("chown");
 
-    let st = svc.stat(TEST_UID, &caps(), &p).expect("stat");
+    let st = svc
+        .stat(TEST_UID, &caps(), &p, FinalLink::Follow)
+        .expect("stat");
     assert_eq!(st.uid, 2000);
     // The setuid bit is gone; a reassigned file cannot stay setuid.
     assert_eq!(st.mode & 0o7777, 0o0755);
@@ -876,7 +908,12 @@ fn set_owner_group_change_to_a_non_member_group_is_denied_unprivileged() {
         svc.set_owner(TEST_UID, &caps(), &p, FS_OWNER_UNCHANGED, 55),
         Err(Errno::PermissionDenied)
     );
-    assert_eq!(svc.stat(TEST_UID, &caps(), &p).expect("stat").gid, TEST_GID);
+    assert_eq!(
+        svc.stat(TEST_UID, &caps(), &p, FinalLink::Follow)
+            .expect("stat")
+            .gid,
+        TEST_GID
+    );
 }
 
 #[test]
@@ -887,7 +924,12 @@ fn set_owner_group_change_to_a_member_group_is_allowed_unprivileged() {
     // succeeds — no capability needed.
     svc.set_owner(TEST_UID, &caps(), &p, FS_OWNER_UNCHANGED, 7)
         .expect("chgrp to a member group");
-    assert_eq!(svc.stat(TEST_UID, &caps(), &p).expect("stat").gid, 7);
+    assert_eq!(
+        svc.stat(TEST_UID, &caps(), &p, FinalLink::Follow)
+            .expect("stat")
+            .gid,
+        7
+    );
 }
 
 #[test]
@@ -897,7 +939,12 @@ fn set_owner_privileged_group_change_needs_no_membership() {
     // A `CAP_FS_CHOWN` holder may set any group, member or not.
     svc.set_owner(TEST_UID, &chown_caps(), &p, FS_OWNER_UNCHANGED, 55)
         .expect("privileged chgrp");
-    assert_eq!(svc.stat(TEST_UID, &caps(), &p).expect("stat").gid, 55);
+    assert_eq!(
+        svc.stat(TEST_UID, &caps(), &p, FinalLink::Follow)
+            .expect("stat")
+            .gid,
+        55
+    );
 }
 
 #[test]
@@ -913,7 +960,9 @@ fn set_owner_leaving_both_unchanged_is_a_noop_even_unprivileged() {
         FS_OWNER_UNCHANGED,
     )
     .expect("no-op chown");
-    let st = svc.stat(TEST_UID, &caps(), &p).expect("stat");
+    let st = svc
+        .stat(TEST_UID, &caps(), &p, FinalLink::Follow)
+        .expect("stat");
     assert_eq!(st.uid, TEST_UID);
     assert_eq!(st.gid, TEST_GID);
 }
@@ -1018,7 +1067,7 @@ fn an_ordinary_user_lists_the_system_owned_read_only_mount() {
 
     let caps = caps();
     let entries = svc
-        .readdir(TEST_UID, &caps, "/System")
+        .readdir(TEST_UID, &caps, "/System", FinalLink::Follow)
         .expect("an ordinary user lists /System");
     let names: Vec<&str> = entries.iter().map(|e| e.name.as_str()).collect();
     for expected in ["Kernel", "Drivers", "Logs", "Settings"] {
@@ -1535,5 +1584,340 @@ fn attrs_on_an_unsupporting_backing_are_a_typed_refusal() {
     assert_eq!(
         svc.attr_remove(TEST_UID, &caps, path, b"user.x"),
         Err(Errno::NotSupported)
+    );
+}
+
+// --- symbolic links at the service seam --------------------------------
+//
+// The VFS's own resolution matrix lives in `delegate_tests`; what these
+// cases pin down is the *service*: the two new operations, and the follow
+// posture an open fixes travelling with its descriptor so a later stat or
+// listing cannot contradict it.
+
+#[test]
+fn symlink_then_readlink_round_trips_the_stored_target() {
+    let svc = ready();
+    let caps = caps();
+    let link = path("alias");
+
+    svc.symlink(TEST_UID, &caps, "/target/name", &link)
+        .expect("create the link");
+    assert_eq!(
+        svc.readlink(TEST_UID, &caps, &link),
+        Ok(alloc::string::String::from("/target/name"))
+    );
+    // A second link of the same name is refused, not silently replaced.
+    assert_eq!(
+        svc.symlink(TEST_UID, &caps, "/other", &link),
+        Err(Errno::AlreadyExists)
+    );
+}
+
+#[test]
+fn readlink_of_a_non_link_fails_closed() {
+    let svc = ready();
+    let caps = caps();
+    let file = path("plain");
+    svc.open(
+        TEST_UID,
+        &caps,
+        &file,
+        OpenFlags::CREATE.union(OpenFlags::WRITE),
+    )
+    .expect("create");
+
+    assert_eq!(svc.readlink(TEST_UID, &caps, &file), Err(Errno::OutOfRange));
+    assert_eq!(
+        svc.readlink(TEST_UID, &caps, &path("absent")),
+        Err(Errno::NotFound)
+    );
+}
+
+#[test]
+fn symlink_on_a_read_only_mount_is_refused() {
+    let svc = service(true, true, true);
+    let caps = caps();
+    assert_eq!(
+        svc.symlink(TEST_UID, &caps, "/target", &path("alias")),
+        Err(Errno::PermissionDenied)
+    );
+}
+
+#[test]
+fn stat_describes_the_link_under_keep_and_its_target_under_follow() {
+    let svc = ready();
+    let caps = caps();
+    let file = path("real");
+    svc.open(
+        TEST_UID,
+        &caps,
+        &file,
+        OpenFlags::CREATE.union(OpenFlags::WRITE),
+    )
+    .expect("create");
+    svc.write(TEST_UID, &caps, &file, 0, false, b"1234")
+        .expect("write");
+    let link = path("alias");
+    let target = alloc::format!("/{}", "real");
+    svc.symlink(TEST_UID, &caps, &target, &link)
+        .expect("create the link");
+
+    let kept = svc
+        .stat(TEST_UID, &caps, &link, FinalLink::Keep)
+        .expect("lstat");
+    assert_eq!(kept.kind, FileKind::Symlink);
+    assert_eq!(kept.size, target.len() as u64);
+
+    let followed = svc
+        .stat(TEST_UID, &caps, &link, FinalLink::Follow)
+        .expect("stat");
+    assert_eq!(followed.kind, FileKind::Regular);
+    assert_eq!(followed.size, 4);
+}
+
+#[test]
+fn an_open_asking_for_bytes_of_a_link_it_may_not_follow_is_refused() {
+    let svc = ready();
+    let caps = caps();
+    let link = path("alias");
+    svc.symlink(TEST_UID, &caps, "/nowhere", &link)
+        .expect("create the link");
+
+    // A link stores a path, not bytes: `NO_FOLLOW` plus byte access over one
+    // that really is a link is the documented `LinkLoop` refusal.
+    for flags in [
+        OpenFlags::NO_FOLLOW.union(OpenFlags::READ),
+        OpenFlags::NO_FOLLOW.union(OpenFlags::WRITE),
+    ] {
+        assert_eq!(
+            svc.open(TEST_UID, &caps, &link, flags),
+            Err(Errno::LinkLoop),
+            "{flags:?} over a link must not yield a byte handle"
+        );
+    }
+    // The resolve-only handle — the `lstat` posture — is what succeeds, even
+    // though the target does not exist.
+    svc.open(TEST_UID, &caps, &link, OpenFlags::NO_FOLLOW)
+        .expect("a resolve-only handle on the link itself");
+}
+
+#[test]
+fn no_follow_does_not_disturb_an_open_whose_final_component_is_not_a_link() {
+    // The flag combination is legal because the final component usually is
+    // not a link; only a real one refuses.
+    let svc = ready();
+    let caps = caps();
+    let file = path("plain");
+    svc.open(
+        TEST_UID,
+        &caps,
+        &file,
+        OpenFlags::CREATE.union(OpenFlags::WRITE),
+    )
+    .expect("create");
+
+    svc.open(
+        TEST_UID,
+        &caps,
+        &file,
+        OpenFlags::NO_FOLLOW.union(OpenFlags::READ),
+    )
+    .expect("a regular file reads fine under NO_FOLLOW");
+}
+
+#[test]
+fn an_open_that_follows_a_link_to_a_directory_still_refuses_byte_access() {
+    let svc = ready();
+    let caps = caps();
+    svc.mkdir(TEST_UID, &caps, &path("dir")).expect("mkdir");
+    let link = path("todir");
+    svc.symlink(TEST_UID, &caps, "/dir", &link)
+        .expect("create the link");
+
+    // Following reaches the directory, so the ordinary "no byte access to a
+    // directory" rule applies to what the link names.
+    assert_eq!(
+        svc.open(TEST_UID, &caps, &link, OpenFlags::READ),
+        Err(Errno::OutOfRange)
+    );
+    // And a directory open through the link succeeds, because it is one.
+    svc.open(TEST_UID, &caps, &link, OpenFlags::DIRECTORY)
+        .expect("a directory open follows the link");
+    // Kept, the same name is not a directory at all.
+    assert_eq!(
+        svc.open(
+            TEST_UID,
+            &caps,
+            &link,
+            OpenFlags::DIRECTORY.union(OpenFlags::NO_FOLLOW)
+        ),
+        Err(Errno::NotADirectory)
+    );
+}
+
+#[test]
+fn readdir_under_keep_refuses_a_link_rather_than_listing_its_target() {
+    let svc = ready();
+    let caps = caps();
+    svc.mkdir(TEST_UID, &caps, &path("dir")).expect("mkdir");
+    // The fixture's driver mints a node `0o644`; a directory needs its
+    // search bit before anything can be created inside it.
+    svc.set_mode(TEST_UID, &caps, &path("dir"), 0o755)
+        .expect("make the directory traversable");
+    svc.open(
+        TEST_UID,
+        &caps,
+        &path("dir/inside"),
+        OpenFlags::CREATE.union(OpenFlags::WRITE),
+    )
+    .expect("create inside");
+    let link = path("todir");
+    svc.symlink(TEST_UID, &caps, "/dir", &link)
+        .expect("create the link");
+
+    let followed = svc
+        .readdir(TEST_UID, &caps, &link, FinalLink::Follow)
+        .expect("following lists the target");
+    assert!(followed.iter().any(|e| e.name == "inside"), "{followed:?}");
+    assert_eq!(
+        svc.readdir(TEST_UID, &caps, &link, FinalLink::Keep),
+        Err(Errno::NotADirectory)
+    );
+}
+
+#[test]
+fn readdir_reports_a_link_entry_as_a_link_never_as_its_target() {
+    let svc = ready();
+    let caps = caps();
+    svc.mkdir(TEST_UID, &caps, &path("dir")).expect("mkdir");
+    svc.symlink(TEST_UID, &caps, "/dir", &path("todir"))
+        .expect("create the link");
+
+    let mut entries = svc
+        .readdir(TEST_UID, &caps, MOUNT, FinalLink::Follow)
+        .expect("readdir");
+    entries.sort_by(|a, b| a.name.cmp(&b.name));
+    let kinds: Vec<(FileKind, &str)> = entries.iter().map(|e| (e.kind, e.name.as_str())).collect();
+    assert_eq!(
+        kinds,
+        alloc::vec![(FileKind::Directory, "dir"), (FileKind::Symlink, "todir")]
+    );
+}
+
+#[test]
+fn an_uninstalled_mount_refuses_both_link_operations() {
+    let svc = service(false, true, false);
+    let caps = caps();
+    assert_eq!(
+        svc.symlink(TEST_UID, &caps, "/t", &path("alias")),
+        Err(Errno::NotImplemented)
+    );
+    assert_eq!(
+        svc.readlink(TEST_UID, &caps, &path("alias")),
+        Err(Errno::NotImplemented)
+    );
+}
+
+#[test]
+fn an_open_creating_through_a_dangling_link_creates_the_target() {
+    // The `O_CREAT` half of "a write follows a final link": the create lands
+    // where the link points, so the link stops dangling rather than the open
+    // reporting the link's own name as already taken.
+    let svc = ready();
+    let caps = caps();
+    let link = path("alias");
+    svc.symlink(TEST_UID, &caps, "/made-later", &link)
+        .expect("create the link");
+
+    svc.open(
+        TEST_UID,
+        &caps,
+        &link,
+        OpenFlags::CREATE.union(OpenFlags::WRITE),
+    )
+    .expect("create through the dangling link");
+
+    let target = svc
+        .stat(TEST_UID, &caps, &path("made-later"), FinalLink::Keep)
+        .expect("the target was created");
+    assert_eq!(target.kind, FileKind::Regular);
+    // The link itself is untouched and now resolves.
+    assert_eq!(
+        svc.stat(TEST_UID, &caps, &link, FinalLink::Keep)
+            .expect("the link survived")
+            .kind,
+        FileKind::Symlink
+    );
+    assert_eq!(
+        svc.stat(TEST_UID, &caps, &link, FinalLink::Follow)
+            .expect("the link resolves")
+            .kind,
+        FileKind::Regular
+    );
+}
+
+#[test]
+fn writes_through_a_link_reach_the_target_and_leave_the_link_intact() {
+    let svc = ready();
+    let caps = caps();
+    let file = path("real");
+    svc.open(
+        TEST_UID,
+        &caps,
+        &file,
+        OpenFlags::CREATE.union(OpenFlags::WRITE),
+    )
+    .expect("create");
+    let link = path("alias");
+    svc.symlink(TEST_UID, &caps, "/real", &link)
+        .expect("create the link");
+
+    assert_eq!(
+        svc.write(TEST_UID, &caps, &link, 0, false, b"payload"),
+        Ok(7)
+    );
+    let mut buf = [0u8; 16];
+    assert_eq!(svc.read(TEST_UID, &caps, &file, 0, &mut buf), Ok(7));
+    assert_eq!(&buf[..7], b"payload");
+    // An append resolves the size through the link too.
+    assert_eq!(svc.write(TEST_UID, &caps, &link, 0, true, b"!"), Ok(1));
+    assert_eq!(
+        svc.stat(TEST_UID, &caps, &file, FinalLink::Follow)
+            .expect("stat the target")
+            .size,
+        8
+    );
+    // Truncate-on-open reaches the target, not the link.
+    svc.open(
+        TEST_UID,
+        &caps,
+        &link,
+        OpenFlags::WRITE.union(OpenFlags::TRUNCATE),
+    )
+    .expect("open the link for truncation");
+    assert_eq!(
+        svc.stat(TEST_UID, &caps, &file, FinalLink::Follow)
+            .expect("stat the target")
+            .size,
+        0
+    );
+    assert_eq!(
+        svc.readlink(TEST_UID, &caps, &link),
+        Ok(alloc::string::String::from("/real"))
+    );
+}
+
+#[test]
+fn mkdir_over_a_link_reports_it_as_already_existing() {
+    let svc = ready();
+    let caps = caps();
+    let link = path("alias");
+    svc.symlink(TEST_UID, &caps, "/absent", &link)
+        .expect("create the link");
+
+    assert_eq!(svc.mkdir(TEST_UID, &caps, &link), Err(Errno::AlreadyExists));
+    assert_eq!(
+        svc.stat(TEST_UID, &caps, &path("absent"), FinalLink::Keep),
+        Err(Errno::NotFound)
     );
 }

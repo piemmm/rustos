@@ -60,6 +60,7 @@ use crate::sleeplock::SleepLock;
 
 use super::blkclient::VolumeHealthSource;
 
+use super::delegate::FinalLink;
 use super::path::Path;
 use super::perm::Credentials;
 use super::service::{FilesystemService, ReaddirEntry};
@@ -748,6 +749,7 @@ fn file_kind(kind: DriverNodeKind) -> FileKind {
     match kind {
         DriverNodeKind::Directory => FileKind::Directory,
         DriverNodeKind::RegularFile => FileKind::Regular,
+        DriverNodeKind::Symlink => FileKind::Symlink,
     }
 }
 
@@ -786,7 +788,7 @@ where
         if !fswatch::watchers_present() {
             return;
         }
-        if let Ok(stat) = self.stat(uid, caps, path) {
+        if let Ok(stat) = self.stat(uid, caps, path, FinalLink::Follow) {
             if !stat.id.is_none() {
                 fswatch::note_change(stat.id);
             }
@@ -826,12 +828,27 @@ where
         // The closure reports what the open changed so the notify fires only
         // on a real mutation: `(created, truncated)` — a plain open of an
         // existing file changes nothing and wakes no watcher.
+        // `NO_FOLLOW` makes the open name the final component itself, so the
+        // resolution that decides the handle's kind keeps a link rather than
+        // reporting what it points at. The same posture rides on the handle
+        // and is re-derived by every later operation it serves, so an open
+        // and a later stat can never disagree.
+        let final_link = FinalLink::for_open(flags);
         let (created, truncated) = self.with_secured(uid, caps, path, |vfs, fs, cred, path| {
-            match vfs.stat_via_secured(cred, path, fs) {
+            match vfs.stat_via_secured(cred, path, fs, final_link) {
                 Ok(info) => {
                     // An exclusive create demands the path not already exist.
                     if flags.contains(OpenFlags::CREATE) && flags.contains(OpenFlags::EXCLUSIVE) {
                         return Err(VfsError::AlreadyExists);
+                    }
+                    // A link stores a path, not bytes, so asking for byte
+                    // access to one is refused; the resolve-only handle is
+                    // what `lstat` and `readlink` hold. Only reachable under
+                    // `NO_FOLLOW` — otherwise the link was already resolved
+                    // through.
+                    if info.kind == DriverNodeKind::Symlink && (flags.is_read() || flags.is_write())
+                    {
+                        return Err(VfsError::LinkLoop);
                     }
                     // A directory open must name a directory; a byte-access
                     // open must not name one.
@@ -906,7 +923,8 @@ where
             // current end of file (the journal-append posture), resolved under
             // the same lock so the size cannot change before the write.
             let offset = if append {
-                vfs.stat_via_secured(cred, path, fs)?.size
+                vfs.stat_via_secured(cred, path, fs, FinalLink::Follow)?
+                    .size
             } else {
                 offset
             };
@@ -924,6 +942,7 @@ where
         uid: u32,
         caps: &dyn CapabilityQuery,
         path: &str,
+        final_link: FinalLink,
     ) -> Result<Vec<ReaddirEntry>, Errno> {
         self.with_secured(uid, caps, path, |vfs, fs, cred, path| {
             // Each entry's kind and sizes come from the listing driver
@@ -933,7 +952,7 @@ where
             // exceptions), re-resolving it here would judge it against the
             // wrong volume and fail the whole listing closed, and each
             // re-resolution would repeat the child's full walk.
-            let entries = vfs.list_via_secured(cred, path, fs)?;
+            let entries = vfs.list_via_secured(cred, path, fs, final_link)?;
             let mut out: Vec<ReaddirEntry> = entries
                 .into_iter()
                 .map(|(info, name)| ReaddirEntry {
@@ -976,9 +995,15 @@ where
         })
     }
 
-    fn stat(&self, uid: u32, caps: &dyn CapabilityQuery, path: &str) -> Result<FileStat, Errno> {
+    fn stat(
+        &self,
+        uid: u32,
+        caps: &dyn CapabilityQuery,
+        path: &str,
+        final_link: FinalLink,
+    ) -> Result<FileStat, Errno> {
         self.with_secured(uid, caps, path, |vfs, fs, cred, path| {
-            let info = vfs.stat_via_secured(cred, path, fs)?;
+            let info = vfs.stat_via_secured(cred, path, fs, final_link)?;
             // Pair the driver's node number with the covering mount's volume
             // id to form the node's system-wide identity.
             let volume = vfs
@@ -1056,6 +1081,27 @@ where
         // `tail -F` watches for).
         self.note_parent(uid, caps, path);
         Ok(())
+    }
+
+    fn symlink(
+        &self,
+        uid: u32,
+        caps: &dyn CapabilityQuery,
+        target: &str,
+        path: &str,
+    ) -> Result<(), Errno> {
+        self.with_secured(uid, caps, path, |vfs, fs, cred, path| {
+            vfs.symlink_via_secured(cred, path, fs, target)
+        })?;
+        // A new name appeared under the parent directory.
+        self.note_parent(uid, caps, path);
+        Ok(())
+    }
+
+    fn readlink(&self, uid: u32, caps: &dyn CapabilityQuery, path: &str) -> Result<String, Errno> {
+        self.with_secured(uid, caps, path, |vfs, fs, cred, path| {
+            vfs.readlink_via_secured(cred, path, fs)
+        })
     }
 
     fn rename(

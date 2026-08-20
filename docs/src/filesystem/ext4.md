@@ -49,6 +49,28 @@ block mapping covers both on-disk layouts:
   double, and triple indirect blocks. A zero pointer is a sparse hole
   and reads as zeros.
 
+## Symbolic links
+
+A link's target is read with `read_link`, in both spellings ext4 uses. The
+**fast** form keeps the target in the raw 60-byte `i_block` array and allocates
+nothing; the **slow** form stores it as ordinary file data. `i_size` is the
+target's length either way, and the discriminator is the one Linux's
+`ext4_inode_is_fast_symlink` uses: a fast link allocates no data, so `i_blocks`
+accounts for nothing beyond an external extended-attribute block (one
+allocation cluster, which is the block size unless the volume carries
+`bigalloc`). A target longer than the `i_block` array could not be inline
+whatever the accounting says, so that is checked first and the accounting is
+consulted only for one that would fit.
+
+Two honest limits rather than guesses: an **inline-data** link keeps its target
+in the inode's own extended-attribute area, which this driver decodes nowhere,
+so it answers `Unsupported`; and this driver **reads** foreign links but does
+not **author** them, so `create_link` answers `Unsupported` too — the VFS
+surfaces both as `NotSupported`, the permanent limit a caller can tell from a
+structural refusal. A link is never byte-readable (`read_at` refuses one) and
+`create` refuses the link kind, so no path here can produce a regular file
+whose contents merely look like a path.
+
 ## Directories
 
 Directory blocks are scanned linearly, honouring each entry's record

@@ -34,7 +34,7 @@ use tairix_abi::{CapabilityId, CapabilityQuery, DriverError, Errno};
 use tairix_caps::CapabilitySet;
 use tairix_drv_fs_fat32::Fat32;
 use tairix_kernel_core::devres::{install_shared_mem_facility, SharedChunk, SharedMemFacility};
-use tairix_kernel_core::fs::FilesystemService;
+use tairix_kernel_core::fs::{FilesystemService, FinalLink};
 use tairix_kernel_core::{sharedreg, Vfs};
 use tairix_kernel_ipc::{CallEndpoint, CallEndpointLimits, EndpointId, RecvCall};
 use tairix_kernel_sec::captable::TaskCapabilities;
@@ -417,7 +417,12 @@ fn mount_record(source: &[u8]) -> MountRecord {
 fn assert_identity_mapped_access() {
     let mut buf = [0u8; 64];
     let stat = FS_SERVICE
-        .stat(MEMBER_UID, &NoCaps, "/Storage/usb1/hello.txt")
+        .stat(
+            MEMBER_UID,
+            &NoCaps,
+            "/Storage/usb1/hello.txt",
+            FinalLink::Follow,
+        )
         .expect("member stats the file");
     assert_eq!(
         (stat.mode, stat.uid, stat.gid),
