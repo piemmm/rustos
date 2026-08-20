@@ -22,6 +22,21 @@ use tairix_raster::Surface;
 
 use crate::tasks::{TaskId, TaskList};
 
+/// One catalogued application a bar surface will draw an icon for, and the
+/// pixel side it will draw it at, so an embedder can have it decoded before
+/// that surface is shown.
+///
+/// Deliberately not [`LibraryIconRequest`](crate::LibraryIconRequest): that
+/// carries the popup row an answer is handed back to, and a prefetch hands
+/// nothing back. Reusing it here would mean inventing a row number for a pin.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct IconWant {
+    /// The catalogued application whose own icon is wanted.
+    pub entry: EntryId,
+    /// The pixel side it will be drawn at.
+    pub side: u32,
+}
+
 /// One pinned shortcut as the session resolved it for display.
 ///
 /// The session builds these from the pin store, the program-library catalog

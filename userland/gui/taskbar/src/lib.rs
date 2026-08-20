@@ -93,7 +93,7 @@ pub use menu::{BarMenu, MenuLayout, MenuSubject, MENU_OPEN_ROW, MENU_PIN_ROW};
 pub use notifications::{
     IconId, NotificationArea, NotifySeverity, StatusKind, StatusSignal, TransientNotification,
 };
-pub use pins::{PinStrip, PinView};
+pub use pins::{IconWant, PinStrip, PinView};
 pub use render::{icon_cache, IconEpoch, TaskbarRenderer};
 pub use repaint::TaskbarRepaint;
 pub use system::{SystemAction, SystemPermits, SystemRow};

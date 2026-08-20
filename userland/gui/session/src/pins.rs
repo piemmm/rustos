@@ -26,7 +26,9 @@ use alloc::vec::Vec;
 
 use tairix_abi::{AppInfoHeader, Errno, APPINFO_WIRE_MAX};
 use tairix_geometry::{Point, Scale};
-use tairix_icon::{ArtworkCache, ArtworkRasteriser, ArtworkReader, IconKind, IconRequest};
+use tairix_icon::{
+    ArtworkCache, ArtworkRasteriser, ArtworkReader, ArtworkResolver, IconKind, IconRequest,
+};
 use tairix_proglib::{Catalog, EntryId, IconAsset};
 use tairix_taskbar::{BarLayout, LibraryIconRequest, PinView, TaskId, Taskbar};
 use tairix_taskpins::{
@@ -303,10 +305,8 @@ fn entry_icon_source(catalog: &Catalog, id: &EntryId) -> Option<PinIconSource> {
 pub const BUNDLE_RUN_SUFFIX: &str = "/Run";
 
 /// The path of `bundle`'s own signed manifest, `bundle` being the bundle
-/// *directory* (no trailing separator) — the one spelling every reader of a
-/// bundle's declared identity uses.
-#[must_use]
-pub fn bundle_manifest_path(bundle: &str) -> String {
+/// *directory* (no trailing separator).
+fn bundle_manifest_path(bundle: &str) -> String {
     format!("{bundle}/AppInfo")
 }
 
@@ -316,8 +316,7 @@ pub fn bundle_manifest_path(bundle: &str) -> String {
 /// `manifest` is the raw contents of [`bundle_manifest_path`]. An absent,
 /// over-long, or malformed manifest is `None`, so a caller degrades to the
 /// bundle's leaf identity rather than handling an error.
-#[must_use]
-pub fn decode_bundle_manifest(manifest: &[u8]) -> Option<AppInfoHeader> {
+fn decode_bundle_manifest(manifest: &[u8]) -> Option<AppInfoHeader> {
     if manifest.len() > APPINFO_WIRE_MAX {
         return None;
     }
@@ -332,8 +331,7 @@ pub fn decode_bundle_manifest(manifest: &[u8]) -> Option<AppInfoHeader> {
 /// ships. `None` when it declares no icon, or names one the shared asset
 /// check refuses — either way the caller stays on the shipped
 /// application-bundle artwork.
-#[must_use]
-pub fn bundle_icon_source(header: &AppInfoHeader, bundle: &str) -> Option<PinIconSource> {
+fn bundle_icon_source(header: &AppInfoHeader, bundle: &str) -> Option<PinIconSource> {
     header
         .library_icon()
         .and_then(|asset| IconAsset::new(asset).ok())
@@ -718,23 +716,17 @@ where
 /// through the shared [`ArtworkCache`]).
 ///
 /// The three inputs are positional: `matches[i]` is the running desktop
-/// task behind `resolved[i]`, or `None`. A missing artwork leaves the view
+/// task behind `pins[i]`, or `None`. A missing artwork leaves the view
 /// on the shared application-bundle glyph — the strip never blocks on, or
 /// fails over, a bad icon.
-pub fn build_pin_views<R, D>(
-    resolved: &[ResolvedPin],
+pub fn build_pin_views(
+    pins: &[ResolvedPin],
     matches: &[Option<TaskId>],
-    reader: &mut R,
-    rasteriser: &mut D,
+    resolver: &mut dyn ArtworkResolver,
     cache: &mut ArtworkCache,
     side: u32,
-) -> Vec<PinView>
-where
-    R: ArtworkReader + ?Sized,
-    D: ArtworkRasteriser + ?Sized,
-{
-    resolved
-        .iter()
+) -> Vec<PinView> {
+    pins.iter()
         .enumerate()
         .map(|(index, pin)| {
             let mut view = PinView::new(pin.label.as_str(), IconKind::AppBundle);
@@ -747,7 +739,7 @@ where
             if let Some(artwork) = pin
                 .icon
                 .as_ref()
-                .and_then(|source| cache.path_artwork(reader, rasteriser, &source.path(), side))
+                .and_then(|source| cache.path_artwork(resolver, &source.path(), side))
                 .cloned()
             {
                 view = view.with_artwork(artwork);
@@ -755,6 +747,38 @@ where
             view
         })
         .collect()
+}
+
+/// Ask `resolver` to start decoding every catalogued application's icon the
+/// bar's surfaces will draw, at the sides they draw them.
+///
+/// A decode is a read plus a sandbox round trip, so a surface that first asks
+/// for its icons as it paints shows a screenful of built-in glyphs and only
+/// replaces them a round trip per icon later. The bar names its whole set
+/// ([`Taskbar::catalog_icon_wants`]) the moment the catalog or the pin strip
+/// naming it changes, which is long before the launcher is opened, so the wait
+/// happens then rather than in front of the user.
+///
+/// Nothing is drawn and nothing is waited for: a resolver that produces on the
+/// calling thread prefetches nothing at all, so this costs a lookup per icon
+/// where there is no worker to hand the decode to.
+pub fn prefetch_bar_icons(
+    taskbar: &Taskbar,
+    scale: Scale,
+    resolver: &mut dyn ArtworkResolver,
+    cache: &mut ArtworkCache,
+) {
+    let catalog = taskbar.library().catalog();
+    for want in taskbar.catalog_icon_wants(scale) {
+        // The application's own icon where the catalog names one, else its class
+        // picture — the same order, and the same request, the paint resolves.
+        let asset = entry_icon_source(catalog, &want.entry).map(|source| source.path());
+        let request = asset.as_deref().map_or_else(
+            || IconRequest::kind(IconKind::AppBundle),
+            |path| IconRequest::asset(IconKind::AppBundle, path),
+        );
+        cache.prefetch(resolver, request, want.side);
+    }
 }
 
 /// Resolve the program-library popup's *visible* rows' icon artwork and set
@@ -779,16 +803,12 @@ where
 /// already holding artwork of the right pixel side is left alone, so
 /// re-resolving before each paint costs a lookup rather than a copy. A
 /// closed popup resolves nothing at all.
-pub fn resolve_library_icons<R, D>(
+pub fn resolve_library_icons(
     taskbar: &mut Taskbar,
     scale: Scale,
-    reader: &mut R,
-    rasteriser: &mut D,
+    resolver: &mut dyn ArtworkResolver,
     cache: &mut ArtworkCache,
-) where
-    R: ArtworkReader + ?Sized,
-    D: ArtworkRasteriser + ?Sized,
-{
+) {
     if !taskbar.library().is_open() {
         return;
     }
@@ -815,7 +835,7 @@ pub fn resolve_library_icons<R, D>(
             || IconRequest::kind(IconKind::AppBundle),
             |path| IconRequest::asset(IconKind::AppBundle, path),
         );
-        let art = cache.artwork(reader, rasteriser, request, side).cloned();
+        let art = cache.artwork(resolver, request, side).cloned();
         taskbar.set_library_row_artwork(row, art);
     }
 }

@@ -167,6 +167,7 @@
 
 extern crate alloc;
 
+pub mod artwork;
 pub mod assets;
 pub mod cli;
 pub mod config;
@@ -205,6 +206,7 @@ mod switchuser_tests;
 #[cfg(test)]
 mod tests;
 
+pub use artwork::{ArtworkDesk, ArtworkJob};
 pub use assets::{load_cursor_theme, load_icon_set, SessionFileReader, SessionFileWriter};
 pub use cli::{parse, CliError, Command, USAGE};
 pub use config::{
@@ -233,10 +235,9 @@ pub use picker::{
 };
 pub use pinboard::{PinboardCommand, PinboardMenu, PinboardMenuOutcome};
 pub use pins::{
-    build_pin_views, bundle_icon_source, bundle_manifest_path, decode_bundle_manifest,
-    resolve_library_icons, resolve_pin_drop, resolve_pins, ArtworkFileReader, ArtworkSandbox,
-    DragOffer, DragOrigin, IconRasteriser, PinBridge, PinEditError, PinIconSource, PinService,
-    ResolvedPin, SessionPins, BUNDLE_RUN_SUFFIX,
+    build_pin_views, prefetch_bar_icons, resolve_library_icons, resolve_pin_drop, resolve_pins,
+    ArtworkFileReader, ArtworkSandbox, DragOffer, DragOrigin, IconRasteriser, PinBridge,
+    PinEditError, PinIconSource, PinService, ResolvedPin, SessionPins, BUNDLE_RUN_SUFFIX,
 };
 pub use presenter::TaskbarPresenter;
 pub use seat::{SeatEventReader, SeatInputChannel};

@@ -119,7 +119,7 @@ decode, or a wrong-length reply all yield a cached `None`. Lookups return a
 **borrow** into the cache, never a clone, so a grid drawing many icons a frame
 reads each surface in place. `artwork_cache(label, seat, fb_bytes, pressure,
 sink)` builds the cache identically for both consumers, and
-`IconArtworkSource` binds a cache to its two seams so a renderer receives a
+`IconArtworkSource` binds a cache to its resolver so a renderer receives a
 plain `IconArtwork` lookup that knows nothing about I/O. `NoArtwork` is the
 all-glyph lookup a headless build or a test uses — it never resolves any
 artwork, so every draw site falls back to its built-in glyph.
@@ -128,6 +128,46 @@ A bundle is keyed by its *directory*, not by the asset its manifest names, so
 the manifest read is paid once per bundle and a bundle that declares no icon
 (or names one that will not decode) remembers that refusal too rather than
 re-reading it every frame.
+
+## Which thread does the decode
+
+A read plus a sandbox round trip is far too much to spend inside a
+compositor's paint, so `ArtworkResolver` is the seam between *deciding what a
+draw needs* and *producing it*:
+
+- `InlineArtwork::new(reader, rasteriser)` reads and decodes on the calling
+  thread. It is the whole of what a program without a worker thread needs, and
+  the path a process the kernel granted no thread falls back to.
+- A caller with a worker thread implements the trait over its own hand-off and
+  answers `Resolved::Pending` for a key it has just queued (the desktop
+  session's `ArtworkDesk` is the worked example). Nothing is retained, the draw
+  falls to the tier below — for the last tier, the built-in glyph — and the
+  same lookup serves the artwork once the pixels land.
+- Both produce the decode through `render_artwork`, so which thread ran it
+  cannot change what it produced.
+
+A pending tier **stops** the walk rather than falling through, because whether
+a later tier is reached at all depends on what this one turns out to be. A
+deferred request therefore costs exactly the reads a synchronous walk would,
+spread over as many answers as it has tiers to try.
+
+`ArtworkCache::prefetch` is what keeps that spreading invisible. A caller that
+knows what it is *about* to draw asks for it there, and the cache asks the
+resolver for the one tier it does not already hold — so the decode is finished
+before the frame that needs it. Without it, a surface showing a screenful of
+icons paints every one as a built-in glyph and replaces them a round trip per
+icon after the user is already looking at it. `InlineArtwork` prefetches
+nothing, which is right: it has nothing to prepare, and "preparing" would be
+the very stall the caller is avoiding.
+
+`artwork` hands out a borrow, which is right for a surface that paints from
+the cache and asks again next frame whatever the answer was. A caller that
+*stores* the picture instead — a window's title-bar identity, resolved once
+when the window opens — asks `owned_artwork` and receives an `ArtworkOutcome`:
+`Ready(surface)`, `Refused` (asking again would only repeat it), or `Pending`
+(ask again when the producer says the decode has landed). `owned_artwork` also
+hands back a decode the cache was too tight to retain, rather than throwing
+those pixels away.
 
 ## Stability
 

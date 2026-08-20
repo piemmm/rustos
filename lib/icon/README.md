@@ -82,6 +82,20 @@ over a resolution-independent design grid, so the same glyph is
   asset yields a cached `None` (`AGENTS.md` §2.9). `IconArtworkSource` hands a
   renderer a plain `IconArtwork` lookup, and `NoArtwork` is the all-glyph
   lookup a headless build or a test uses.
+- `ArtworkResolver` is the seam between deciding what a draw needs and
+  producing it, because a read plus a sandbox round trip must never happen
+  inside a paint. `InlineArtwork` reads and decodes on the calling thread; a
+  caller with a worker thread implements the trait over its own hand-off and
+  answers `Resolved::Pending` until the pixels land, so the draw takes the tier
+  below (ultimately the built-in glyph) and the same lookup serves the artwork
+  afterwards. Both go through `render_artwork`, so which thread ran the decode
+  cannot change what it produced. A caller that *stores* the picture rather
+  than drawing from the cache asks `owned_artwork` and gets an
+  `ArtworkOutcome`, which tells `Pending` (ask again) from `Refused` (do not).
+  `ArtworkCache::prefetch` is the other half: a caller that knows what it is
+  about to draw starts the decode then, so the frame that needs it never waits
+  — the difference between a launcher opening on its applications' own icons and
+  opening on glyphs it replaces one round trip at a time.
 
 ## Asset model
 

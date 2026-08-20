@@ -56,6 +56,8 @@ event loop** inherits the freeze:
 |---|---|---|
 | Desktop launcher | `userland/gui/session/src/run.rs` (the taskbar-launch arms — today the Files button and the program-library popup — `tairix_rt::spawn(...)`) | Compositor loop frozen for the whole launch. **The reported bug.** |
 | Desktop file picker | `userland/gui/session/src/run.rs` (the `SessionPicker`'s `VfsDirectorySource` calling `tairix_rt::read_dir_all` inside `picker.handle_click` / `handle_key`, on the `SEAT_TOKEN` path) | Compositor loop frozen while a directory is read from disk on every open/navigate. Same class of defect (synchronous I/O on the compositor thread), smaller blast radius. |
+| Desktop icon artwork | `userland/gui/session/src/run.rs` (every icon surface resolving through `tairix_icon::ArtworkCache` *inside* its paint) | Compositor loop frozen for a bounded read plus a sandbox round trip, per icon, the first time each is drawn at a given pixel side. Worst on bring-up and on opening the launcher. Fixed in DESK-8. |
+| Desktop program catalog | `userland/gui/session/src/run.rs` (`refresh_library` + `desktop_associations`, on the `OpenLibrary` arm and after a re-list) | Compositor loop frozen while the two catalog documents and then **one `AppInfo` per catalogued application** are read — on the very click that opens the launcher. Same class as the two above; **not yet fixed** (see §5). |
 | Shell foreground launch | `userland/shell/elsh/src/run.rs` (`spawn_attached`) | The shell cannot service its own input (job-control signals, `stdinfo`) during the load. Secondary. |
 | Terminal startup shell | `userland/apps/terminal/src/run.rs` (`spawn_attached`) | One-time, at terminal open. Minor. |
 | Login → session/shell | `userland/session/login/src/run.rs` (`spawn_as` / `spawn_with`) | One-time, at login. Minor. |
@@ -640,6 +642,114 @@ Each stage is independently reviewable and must leave the whole-project
   leaves the view put, back/forward commit their own history move, a pending
   reload keeps its items); the cue's two render cases.
 
+### DESK-8 — Icon artwork off the loop
+- **Done.** Resolving one icon costs a bounded VFS read plus a round trip to
+  the parser sandbox that decodes it, and every icon surface — the bar's pins
+  and task slots, the launcher popup's rows, a window's title-bar identity, the
+  desktop's own column — used to pay it *inside the paint*, on the serve loop. A
+  launcher opening on thirty applications paid it thirty times before its first
+  pixel. It now runs on a third `lib/rt` worker thread, woken back through the
+  same `WorkerWake` pipe DESK-4 built.
+- **The seam is in `lib/icon`, not the session.** `ArtworkResolver` separates
+  *deciding what a draw needs* from *producing it*: `InlineArtwork` reads and
+  decodes on the calling thread (what the file manager uses, and what a session
+  the kernel granted no thread falls back to), and a deferring implementation
+  answers `Resolved::Pending` until the pixels land. Both produce the decode
+  through the one `render_artwork`, so the thread cannot change the result. A
+  pending tier **stops** the tier walk rather than falling through, because
+  whether a later tier is reached depends on this one's answer — so a deferred
+  request costs exactly the reads a synchronous walk would, spread over as many
+  answers as it has tiers.
+- **The desk** is `ArtworkDesk` (`userland/gui/session/src/artwork.rs`), the
+  same shape DESK-4 established: host-tested policy with no lock, thread, or
+  syscall; the `Run` binary adds the futex mutex, the condition variable the
+  worker parks on, and the shared wake.
+- **Rounds.** The decode cache is budgeted, so it can be asked to hold more than
+  it will; without a rule a decode it declined to retain would be asked for
+  again by the very repaint its landing drove, for ever. Within a round a key
+  answered once is not decoded again, and a fresh round opens on any wake that
+  is *not* the worker's nudge — exactly when what is on screen can have changed.
+  Work in flight and answers not yet collected survive the boundary, so nothing
+  is computed twice for want of somewhere to keep it.
+- **One repaint per batch.** The worker nudges when its queue drains rather than
+  after each icon, so a bring-up wanting thirty of them costs the desktop one
+  repaint and they appear together; a lone icon empties the queue at once and
+  still lands the moment it is ready.
+- **Asked for early, not on the frame that needs it.** Moving the decode off the
+  loop removes the freeze but not the round trip, so a surface that first asks as
+  it *paints* shows a screenful of built-in glyphs and fills in one icon at a
+  time afterwards — which is exactly how it presented: a launcher opening on
+  generic pictures, a pinned application wearing its fallback, a window opening
+  under the shared application glyph. The desktop therefore **warms** what it
+  knows it will draw the moment it knows it: `ArtworkResolver::prefetch` and
+  `ArtworkCache::prefetch` are the seam (one tier — the first not already held —
+  asked for, nothing drawn, nothing waited on), `ArtworkDesk::want` is its half
+  of the desk, and the session drives it from the three places the set can
+  change: a catalog read, a pin re-resolve (`Taskbar::catalog_icon_wants`, the
+  popup's first screenful of rows plus every pinned application, sized from the
+  same layout the paint uses), and the launch table (`warm_launched_artwork`, at
+  the two sides a window wears — a spawn, a load, and the app's own bring-up
+  before there is a window to put one on). An icon already held asks for
+  nothing, and the inline resolver prefetches nothing at all, so a session with
+  no decoder thread is unchanged.
+- **One definition of the title-band icon side.** Warming a window's identity
+  needs the side *before* the window exists, and the band's height is the
+  theme's rather than any one window's — so `WindowFrame::identity_icon_side`
+  now states it and `Compositor::window_title_icon_side` reads it, replacing the
+  per-window frame-layout derivation it used to reconstruct. `id` decides only
+  whether there is an identity slot, never how big it is.
+- **Adopting a landing.** Most surfaces adopt by asking the cache again, which a
+  repaint does. The two that *store* the picture — the pin strip and a window's
+  title-bar/taskbar identity — are offered it again explicitly on the wake;
+  `ArtworkCache::owned_artwork` answers those callers `Ready`/`Refused`/`Pending`
+  so a refusal leaves the identification list and only a genuine wait stays on
+  it. That call also hands back a decode the cache was too tight to retain,
+  which the borrow-returning path could only throw away.
+- **A duplicate deleted on the way** (`§2.2`): the window-identity path had
+  hand-rolled the bundle tier (read the manifest, decode the header, derive the
+  asset, resolve *that*) beside `lib/icon`'s own. It now states
+  `IconRequest::bundle` like every other surface, so the second window of an
+  application costs no read at all rather than re-reading its manifest.
+- **The worker owns its own sandbox**, as the wallpaper worker does, so no
+  sandbox handle crosses a thread. On a desktop that got its threads the serve
+  loop's own sandbox child is never even spawned.
+- **Degradation.** A refused pipe or a refused thread is stated once and the
+  decode happens on the serve loop through `InlineArtwork`, exactly where it
+  used to be.
+- **Tests:** the desk policy host-tested beside its code (handshake, dedup by
+  key *and* pixel side, hand-out order, the round rule both ways, a stale queue
+  entry yielding no duplicate, teardown); `lib/icon`'s deferred suite (a pending
+  decode retains nothing, a landed one is served and retained, a pending tier
+  stops the walk, a landed refusal advances it one tier at a time,
+  `owned_artwork` telling `Pending` from `Refused`, and a picture handed back
+  from a cache under pressure); and the session's identity pair — a window
+  pending at open is pictured when the decode lands and then leaves the list, a
+  window whose application has no picture leaves it immediately.
+
+### DESK-9 — The program catalog off the loop
+- **Planned.** The last synchronous read left on the desktop's serve loop, and
+  the one on the most conspicuous gesture: pressing the Library button runs
+  `refresh_library` (both catalog documents) and then `desktop_associations`,
+  which reads **one `AppInfo` per catalogued application** — all on the
+  compositor's task, before the popup can appear. `refresh_pins`'
+  `resolve_pins` reads a bundle manifest per unresolved pin the same way. On a
+  warm VFS these are fast; on cold or contended storage they are the same
+  visible freeze DESK-4 and DESK-8 removed elsewhere.
+- **Why it is its own stage.** The catalog is not artwork: the taskbar's
+  library model has no "not yet" state, so unlike a picture that falls back to
+  a glyph there is nothing coherent to draw while the read is in flight. Making
+  it asynchronous means giving `LibraryPopup` a pending state (an empty popup
+  that fills, rather than a popup that does not open) and deciding what the
+  associations table answers while it is stale — a taskbar-model change, not a
+  worker-thread one, and out of scope for the change that landed DESK-8.
+- **Shape.** A fourth desk in the DESK-4/DESK-8 mould (request the catalog and
+  the association set, worker reads and merges, deliver, nudge, adopt on the
+  wake), plus the popup's pending state. The desk holds the *loaded* catalog,
+  never a partial one, so a popup is never shown half-populated.
+- **Deliverables:** the desk and its host tests, the popup's pending state and
+  its render case, the worker and its degradation path, and this stage
+  collapsed to its done-state.
+
 ### DESK-5 — Verified shared image cache (`kernel/mem`)
 - **Deliverables:** the per-boot, content-hash-keyed verified image
   cache of §2.6.1: a `kernel/mem` structure mapping a verified
@@ -806,6 +916,11 @@ Each stage is independently reviewable and must leave the whole-project
     and login (`session_that_fails_its_async_load_is_reported_as_a_launch_failure`)
     cover their classifications.
 - **DESK-4 — done** (§4 above).
+- **DESK-8 — done.** Icon artwork is decoded on a worker thread; no icon
+  resolution happens inside a paint.
+- **DESK-9 — planned.** The program-library catalog and the per-bundle
+  association reads are still synchronous on the serve loop; the audit table
+  (§1.1) names the sites.
 - **DESK-5 … DESK-7 — planned.**
 
 ---

@@ -812,15 +812,18 @@ impl TitleBar {
     /// The pixel side the identity icon paints at inside the title band
     /// `bounds`.
     ///
+    /// The pixel side the identity icon draws at inside a title band of
+    /// `bounds`.
+    ///
     /// `bounds` is the title band itself — the same rectangle passed to
     /// [`layout`](Self::layout) and [`render`](Self::render), never the whole
     /// window's bounds. This is the render geometry, exposed so an owner
-    /// rasterising the window's identity artwork produces it at exactly the
-    /// size [`render`](Self::render) will place. The side is the same whether
-    /// or not the bar carries an identity, so a caller can size artwork before
-    /// deciding to supply it.
+    /// rasterising the window's identity artwork produces it at exactly the size
+    /// [`render`](Self::render) will place. The side is the same whether or not
+    /// the bar carries an identity, so a caller can size artwork before deciding
+    /// to supply it — which is why it takes no bar at all.
     #[must_use]
-    pub fn icon_side(&self, bounds: Rect, scale: Scale, theme: &Theme) -> u32 {
+    pub fn icon_side(bounds: Rect, scale: Scale, theme: &Theme) -> u32 {
         icon_slot_side(
             role_font(theme, scale, TextRole::WindowTitle),
             bounds.height,
@@ -1395,6 +1398,20 @@ impl WindowFrame {
     /// A mutable reference to the frame's title bar (title, controls, input).
     pub fn title_bar_mut(&mut self) -> &mut TitleBar {
         &mut self.title_bar
+    }
+
+    /// The pixel side a decorated window's title-bar identity icon draws at.
+    ///
+    /// The title band's height and the font that sizes the slot inside it both
+    /// come from `theme` at `scale`, never from a particular window, so this is
+    /// the answer for *every* decorated window. That is what lets an owner have
+    /// an application's artwork decoded before the window that will wear it
+    /// exists, and it is the one definition of the side, so a frame already on
+    /// screen and one not yet created cannot disagree about it.
+    #[must_use]
+    pub fn identity_icon_side(scale: Scale, theme: &Theme) -> u32 {
+        let (_, title_h, _) = Self::edges(scale, theme);
+        TitleBar::icon_side(Rect::new(0, 0, 0, title_h), scale, theme)
     }
 
     /// The three scaled frame metrics — `(border, title_bar_height,

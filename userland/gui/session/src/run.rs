@@ -114,8 +114,8 @@ mod program {
         ensure_switchboard, load_library, maybe_send_frame_report, maybe_send_seat_report,
         open_tray, parse, reap_launched, relay_power, resolve_window_identities,
         serve_pinboard_apply, serve_switchboard_request, window_control_alternate_event,
-        window_control_event, Answer, ArtworkFileReader, ArtworkSandbox, CliError, Command,
-        ConcludedPick, ConfirmPrompt, Delivery, Desktop, DesktopAction, DesktopActivation,
+        window_control_event, Answer, ArtworkDesk, ArtworkFileReader, ArtworkSandbox, CliError,
+        Command, ConcludedPick, ConfirmPrompt, Delivery, Desktop, DesktopAction, DesktopActivation,
         DesktopOutcome, DesktopShell, DeviceInputSource, DragOrigin, FrameContent, HangTracker,
         HoldBack, IconRasteriser, InputSource, KeyboardInputSource, LaunchTable, ListingClient,
         ListingDesk, LockedDrain, OwnerWindow, PickConclusion, PinBridge, PinService, PinboardMenu,
@@ -129,6 +129,7 @@ mod program {
     use tairix_display::{DisplayClient, DisplayTransport, RemoteDisplay, RtShmMapper};
     use tairix_greeter::{Verdict, Verifier};
     use tairix_help::{own_short_help, BundleHelp};
+    use tairix_icon::{ArtworkKey, ArtworkResolver, InlineArtwork, Resolved};
     use tairix_log::{
         log, Event as LogEvent, Field as LogField, FieldValue as LogFieldValue, Level as LogLevel,
     };
@@ -1010,12 +1011,14 @@ mod program {
     struct WorkerGuard {
         listings: alloc::sync::Arc<Listings>,
         wallpapers: alloc::sync::Arc<Wallpapers>,
+        artworks: alloc::sync::Arc<Artworks>,
     }
 
     impl Drop for WorkerGuard {
         fn drop(&mut self) {
             self.listings.stop();
             self.wallpapers.stop();
+            self.artworks.stop();
         }
     }
 
@@ -1384,25 +1387,93 @@ mod program {
         let mut keyboard = KeyboardInputSource::new(SeatInputChannel::new(KeyboardReader));
 
         // The serve loop's own parser-sandbox worker: this binary re-entered as
-        // a capability-empty child, where the desktop's untrusted icon artwork
-        // is decoded rather than in this address space. The wallpaper's worker
-        // thread owns a second one of its own, so a picture can be prepared
-        // without holding the loop and no sandbox handle crosses a thread.
+        // a capability-empty child, where untrusted images are decoded rather
+        // than in this address space. The wallpaper and artwork threads own one
+        // each of their own, so no sandbox handle crosses a thread; this one is
+        // what both fall back to when the kernel grants no thread to hold them.
         let sandbox: SharedSandbox = alloc::rc::Rc::new(core::cell::RefCell::new(
             ParserSandbox::new(RtLauncher::own_binary(), tairix_rt::LogSink),
         ));
 
-        // The desktop's icon artwork — the shipped `/System/Graphics`
-        // masters and each bundle's own icon — is read through the
-        // session's own VFS identity and decoded in that worker. Until this
-        // call the shell draws every icon from its built-in glyphs, and it
-        // falls back to them again whenever either seam refuses.
-        shell.set_artwork_source(
-            alloc::boxed::Box::new(ArtworkFileReader(VfsFileReader)),
-            alloc::boxed::Box::new(ArtworkSandbox(SandboxRasteriser {
-                sandbox: alloc::rc::Rc::clone(&sandbox),
-            })),
-        );
+        // The session's workers, and the one pipe they all nudge the serve loop
+        // through: a directory read, an icon decode, and a wallpaper
+        // preparation are each a disk and a sandbox away, so each costs a
+        // repaint's delay rather than a frozen desktop. A pipe the kernel
+        // refuses, or a thread it will not grant, leaves that work on the serve
+        // loop's own task: slower under load, never wrong, and stated once.
+        let (worker_wake_read, worker_wake) = if let Ok((read, write)) = tairix_rt::pipe_create() {
+            (Some(read), WorkerWake { fd: Some(write) })
+        } else {
+            io::write_stderr_line(
+                "desktop: no worker wake pipe; directory listings, icon artwork, and the \
+                 wallpaper are prepared on the serve loop",
+            );
+            (None, WorkerWake { fd: None })
+        };
+        let worker_wake = alloc::sync::Arc::new(worker_wake);
+        let listings = alloc::sync::Arc::new(Listings::new(alloc::sync::Arc::clone(&worker_wake)));
+        let wallpapers =
+            alloc::sync::Arc::new(Wallpapers::new(alloc::sync::Arc::clone(&worker_wake)));
+        let artworks = alloc::sync::Arc::new(Artworks::new(alloc::sync::Arc::clone(&worker_wake)));
+        // One worker per kind of work, spawned only where there is a wake to
+        // deliver through. Each handle is held for the session's life; the
+        // worker's own `Arc` keeps its desk alive either way.
+        let (listing_worker, wallpaper_worker, artwork_worker) =
+            worker_wake_read.map_or((None, None, None), |_| {
+                let listing = {
+                    let served = alloc::sync::Arc::clone(&listings);
+                    spawn_worker("listing", move || served.serve())
+                };
+                let wallpaper = {
+                    let served = alloc::sync::Arc::clone(&wallpapers);
+                    spawn_worker("wallpaper", move || served.serve())
+                };
+                let artwork = {
+                    let served = alloc::sync::Arc::clone(&artworks);
+                    spawn_worker("icon", move || served.serve())
+                };
+                (listing, wallpaper, artwork)
+            });
+        // With no worker there is nobody to answer a recorded request, so the
+        // desk is stopped and that work happens on this task instead.
+        if listing_worker.is_none() {
+            listings.stop();
+        }
+        if wallpaper_worker.is_none() {
+            wallpapers.stop();
+        }
+        if artwork_worker.is_none() {
+            artworks.stop();
+        }
+        // Every way out of this function stops every worker. The guard is
+        // declared after the handles, so it runs first: the desks stop, then the
+        // handles detach.
+        let _worker_guard = WorkerGuard {
+            listings: alloc::sync::Arc::clone(&listings),
+            wallpapers: alloc::sync::Arc::clone(&wallpapers),
+            artworks: alloc::sync::Arc::clone(&artworks),
+        };
+
+        // The desktop's icon artwork — the shipped `/System/Graphics` masters
+        // and each bundle's own icon — is read through the session's own VFS
+        // identity and decoded in a sandbox worker. With a decoder thread that
+        // happens off this task and a paint that misses draws the built-in
+        // glyph until the pixels land; without one the read and the round trip
+        // happen here, exactly as they used to. Until this call the shell draws
+        // every icon from its built-in glyphs, and it falls back to them again
+        // whenever either seam refuses.
+        if artwork_worker.is_some() {
+            shell.set_artwork_resolver(alloc::boxed::Box::new(DeferredArtwork(
+                alloc::sync::Arc::clone(&artworks),
+            )));
+        } else {
+            shell.set_artwork_resolver(alloc::boxed::Box::new(InlineArtwork::new(
+                ArtworkFileReader(VfsFileReader),
+                ArtworkSandbox(SandboxRasteriser {
+                    sandbox: alloc::rc::Rc::clone(&sandbox),
+                }),
+            )));
+        }
 
         // The program library: read the machine store and the logged-in
         // user's overlay under the session's own identity, merge them, and
@@ -1419,55 +1490,6 @@ mod program {
         // or drop from an app) mark the service dirty and the loop
         // re-resolves before its next present.
         let mut pins = load_pin_service();
-
-        // The listing worker, and the pipe it nudges the serve loop through.
-        // Both directory-listing consumers below — the icon column and the
-        // trusted picker — go through it, so a slow disk costs a repaint's
-        // delay rather than a frozen desktop. A pipe the kernel refuses, or a
-        // thread it will not grant, leaves the listings on the serve loop's own
-        // task: slower under load, never wrong, and stated once.
-        let (worker_wake_read, worker_wake) = if let Ok((read, write)) = tairix_rt::pipe_create() {
-            (Some(read), WorkerWake { fd: Some(write) })
-        } else {
-            io::write_stderr_line(
-                "desktop: no worker wake pipe; directory listings and the wallpaper are prepared \
-                 on the serve loop",
-            );
-            (None, WorkerWake { fd: None })
-        };
-        let worker_wake = alloc::sync::Arc::new(worker_wake);
-        let listings = alloc::sync::Arc::new(Listings::new(alloc::sync::Arc::clone(&worker_wake)));
-        let wallpapers =
-            alloc::sync::Arc::new(Wallpapers::new(alloc::sync::Arc::clone(&worker_wake)));
-        // One worker per kind of work, spawned only where there is a wake to
-        // deliver through. Each handle is held for the session's life; the
-        // worker's own `Arc` keeps its desk alive either way.
-        let (listing_worker, wallpaper_worker) = worker_wake_read.map_or((None, None), |_| {
-            let listing = {
-                let served = alloc::sync::Arc::clone(&listings);
-                spawn_worker("listing", move || served.serve())
-            };
-            let wallpaper = {
-                let served = alloc::sync::Arc::clone(&wallpapers);
-                spawn_worker("wallpaper", move || served.serve())
-            };
-            (listing, wallpaper)
-        });
-        // With no worker there is nobody to answer a recorded request, so the
-        // desk is stopped and that work happens on this task instead.
-        if listing_worker.is_none() {
-            listings.stop();
-        }
-        if wallpaper_worker.is_none() {
-            wallpapers.stop();
-        }
-        // Every way out of this function stops both workers. The guard is
-        // declared after the handles, so it runs first: the desks stop, then the
-        // handles detach.
-        let _worker_guard = WorkerGuard {
-            listings: alloc::sync::Arc::clone(&listings),
-            wallpapers: alloc::sync::Arc::clone(&wallpapers),
-        };
 
         // The desktop's own icon column: the logged-in user's `Desktop`
         // folder, listed through the same capability-checked directory call
@@ -1859,6 +1881,16 @@ mod program {
                 tairix_rt::cachereport::publish_if_due();
                 continue;
             }
+            // Any wake but a worker's nudge is the desktop *acting*, so the
+            // icon decoder opens a fresh round: what is on screen may have
+            // changed, and every key it answered for the last round may be
+            // asked for again. A nudge does not, which is what stops a decode
+            // the cache declines to retain being asked for by the very repaint
+            // its landing drove — the desktop would otherwise repaint itself
+            // for ever over a cache it cannot fill.
+            if token != WORKER_TOKEN {
+                artworks.begin_round();
+            }
             // Dispatch on the woken member's token and handle only that
             // source: `call_recv` *blocks* when nothing is pending, so a
             // seat-input wake must never touch the window endpoint (and
@@ -2063,7 +2095,29 @@ mod program {
                 if papered {
                     fade.set_awaiting_backdrop(false);
                 }
-                if relisted || papered {
+                // Icon artwork that landed is drawn by asking for it again:
+                // every icon surface resolves through the one cache the
+                // decoder's answers go into, so a repaint is the whole of
+                // adopting them. A window's title-bar and taskbar identity are
+                // the exception — those *store* the picture, so the windows
+                // still waiting for one are offered it here.
+                let arted = artworks.take_landed();
+                if arted {
+                    // A pin's picture and a window's identity are *stored* on
+                    // the model rather than resolved as the surface paints, so
+                    // both are offered the artwork again before the present;
+                    // every other icon surface simply asks the cache once more.
+                    push_pin_views(&mut pins, &mut shell, &mut compositor);
+                    resolve_window_identities(
+                        &mut shell,
+                        &mut compositor,
+                        &mut windows,
+                        &launched,
+                        |owner| identity.pid_of(owner),
+                    );
+                    shell.present_icon_artwork(&mut compositor);
+                }
+                if relisted || papered || arted {
                     shell.present_desktop(&mut compositor, &desktop);
                 }
                 if let Some(concluded) = picker.resume(&mut shell, &mut compositor) {
@@ -2489,6 +2543,12 @@ mod program {
                 &owners[..named],
                 &mut RtSwitchboardMailbox,
             );
+            // A launch recorded this wake has a window coming — a spawn, a
+            // load, and the app's own bring-up away. Starting its icon now has
+            // the picture ready by the time there is a window to put it on,
+            // rather than the window opening on the shared application glyph
+            // and swapping it a decode later.
+            shell.warm_launched_artwork(&compositor, launched.bundles());
             // Bring the pin strip up to date before presenting: an edit
             // (pin, unpin, an accepted drop or app request) re-resolves the
             // store; otherwise only the cheap running-window matches are
@@ -2742,6 +2802,156 @@ mod program {
         })
     }
 
+    /// The desktop's icon artwork, decoded on a worker thread that owns its
+    /// **own** sandbox worker.
+    ///
+    /// Every icon the taskbar, the launcher popup, and the desktop's column
+    /// draw costs a bounded read plus a sandbox round trip the first time it is
+    /// asked for at a given pixel side. Run on the serve loop that was a visible
+    /// freeze — a launcher opening on thirty applications paid it thirty times
+    /// before its first pixel. Here it costs the frame that icon spends on its
+    /// built-in glyph instead. The policy is the host-tested [`ArtworkDesk`];
+    /// this adds the runtime's futex mutex for exclusion, a condition variable
+    /// the worker parks on with nothing to do (never a spin), and the shared
+    /// wake pipe the wait-set already watches.
+    struct Artworks {
+        desk: tairix_rt::sync::Mutex<ArtworkDesk>,
+        /// Signalled when a decode is recorded, and on teardown.
+        work: tairix_rt::sync::Condvar,
+        wake: alloc::sync::Arc<WorkerWake>,
+    }
+
+    impl Artworks {
+        fn new(wake: alloc::sync::Arc<WorkerWake>) -> Self {
+            Self {
+                desk: tairix_rt::sync::Mutex::new(ArtworkDesk::new()),
+                work: tairix_rt::sync::Condvar::new(),
+                wake,
+            }
+        }
+
+        /// One decoder's whole life: park until an icon is wanted, read it,
+        /// decode it in this thread's own sandbox, and deliver the pixels.
+        ///
+        /// The sandbox is built here, once, and reused for every later decode —
+        /// the same lifetime the session's own handle has, and the reason this
+        /// thread rather than the session owns it.
+        fn serve(&self) {
+            let mut reader = ArtworkFileReader(VfsFileReader);
+            let mut rasteriser = ArtworkSandbox(OwnedSandbox(ParserSandbox::new(
+                RtLauncher::own_binary(),
+                tairix_rt::LogSink,
+            )));
+            // Whether a delivery since the last nudge still owes the session
+            // one, so a batch drained without waking it cannot be stranded by a
+            // final job the desk no longer wants.
+            let mut owed = false;
+            loop {
+                let job = {
+                    let mut desk = self.desk.lock();
+                    loop {
+                        if desk.stopping() {
+                            return;
+                        }
+                        if let Some(job) = desk.next_job() {
+                            break job;
+                        }
+                        desk = self.work.wait(desk);
+                    }
+                };
+                // The read and the sandbox round trip, with no lock held: these
+                // are the calls that used to stall the desktop. The decode is
+                // the shared one, so what a worker produces is exactly what the
+                // calling thread would have.
+                let artwork =
+                    tairix_icon::render_artwork(&mut reader, &mut rasteriser, &job.key, job.side);
+                let (delivered, more) = {
+                    let mut desk = self.desk.lock();
+                    (desk.deliver(&job, artwork), desk.has_work())
+                };
+                owed |= delivered;
+                // Wake the session when the batch is drained rather than after
+                // every icon: a bring-up that wants thirty of them costs one
+                // repaint instead of thirty, and they appear together. A lone
+                // icon empties the queue immediately, so it still lands the
+                // moment it is ready.
+                if owed && !more {
+                    owed = false;
+                    self.wake.nudge();
+                }
+            }
+        }
+
+        /// Answer a paint's miss on `key` at `side`, waking a decoder if there
+        /// is anything for one to do.
+        ///
+        /// A notify with no decode outstanding wakes nobody and a worker already
+        /// running is not waiting to be told, so the signal is unconditional
+        /// rather than a second reading of the desk's own state.
+        fn resolve(&self, key: &ArtworkKey, side: u32) -> Resolved {
+            let (answer, wanted) = {
+                let mut desk = self.desk.lock();
+                let answer = desk.collect(key, side);
+                (answer, desk.has_work())
+            };
+            if wanted {
+                self.work.notify_one();
+            }
+            answer
+        }
+
+        /// Record `key` at `side` as wanted and wake a decoder, without waiting
+        /// for or collecting an answer.
+        ///
+        /// This is what a warm-up drives: the surface that will draw the icon is
+        /// not painting yet, so there is nothing to answer — only work to start.
+        fn want(&self, key: &ArtworkKey, side: u32) {
+            let wanted = {
+                let mut desk = self.desk.lock();
+                desk.want(key, side);
+                desk.has_work()
+            };
+            if wanted {
+                self.work.notify_one();
+            }
+        }
+
+        /// Whether a decode has landed since this was last asked.
+        fn take_landed(&self) -> bool {
+            self.desk.lock().take_landed()
+        }
+
+        /// Open a fresh round, because the desktop acted and what it draws may
+        /// have changed.
+        fn begin_round(&self) {
+            self.desk.lock().begin_round();
+        }
+
+        /// Ask the decoder to leave.
+        fn stop(&self) {
+            self.desk.lock().stop();
+            self.work.notify_all();
+        }
+    }
+
+    /// The serve loop's [`ArtworkResolver`]: whatever the decoder has already
+    /// produced, and otherwise a recorded decode and the built-in glyph for this
+    /// frame.
+    ///
+    /// Held by the shell behind a boxed trait object, which is why it owns its
+    /// handle to the desk rather than borrowing one.
+    struct DeferredArtwork(alloc::sync::Arc<Artworks>);
+
+    impl ArtworkResolver for DeferredArtwork {
+        fn resolve(&mut self, key: &ArtworkKey, side: u32) -> Resolved {
+            self.0.resolve(key, side)
+        }
+
+        fn prefetch(&mut self, key: &ArtworkKey, side: u32) {
+            self.0.want(key, side);
+        }
+    }
+
     /// The desktop's directory listings, read on a worker thread so a slow or
     /// contended disk cannot stall the compositor, the seat drain, or an
     /// application blocked in a window call.
@@ -2898,15 +3108,14 @@ mod program {
     }
 
     /// The serve loop's own parser-sandbox worker: this binary re-entered as a
-    /// capability-empty child, which every untrusted icon is decoded in.
+    /// capability-empty child, which an untrusted image is decoded in.
     ///
-    /// Shared behind an `Rc` because the shell owns the icon rasteriser behind a
-    /// boxed trait object while the loop needs the very same live worker from its
-    /// own state — and *not* `Send`, deliberately: the wallpaper's worker thread
-    /// creates its own rather than borrowing this one, so a handle never crosses
-    /// a thread and the icon path is unchanged by any of it. It is also the
-    /// fallback the wallpaper is prepared through when the kernel grants no
-    /// thread.
+    /// Shared behind an `Rc` because the loop's pinboard state and, where no
+    /// decoder thread was granted, the shell's boxed resolver both need the very
+    /// same live worker — and *not* `Send`, deliberately: each worker thread
+    /// creates its own rather than borrowing this one, so a sandbox handle never
+    /// crosses a thread. On a desktop that got its threads this is the fallback
+    /// path only, and its child is never even spawned.
     type SharedSandbox =
         alloc::rc::Rc<core::cell::RefCell<ParserSandbox<RtLauncher, tairix_rt::LogSink>>>;
 
@@ -2922,6 +3131,20 @@ mod program {
     impl IconRasteriser for SandboxRasteriser {
         fn rasterise(&mut self, side: u32, icon: &[u8]) -> Option<alloc::vec::Vec<u8>> {
             rasterise_icon(&mut self.sandbox.borrow_mut(), side, icon).ok()
+        }
+    }
+
+    /// The same decode over a sandbox worker the *calling thread* owns
+    /// outright.
+    ///
+    /// [`SandboxRasteriser`] shares the serve loop's handle behind an `Rc`,
+    /// which a thread cannot take and must not: the artwork worker builds one
+    /// of these instead, exactly as the wallpaper worker builds its own.
+    struct OwnedSandbox(ParserSandbox<RtLauncher, tairix_rt::LogSink>);
+
+    impl IconRasteriser for OwnedSandbox {
+        fn rasterise(&mut self, side: u32, icon: &[u8]) -> Option<alloc::vec::Vec<u8>> {
+            rasterise_icon(&mut self.0, side, icon).ok()
         }
     }
 
@@ -3301,16 +3524,13 @@ mod program {
     /// served from its one cache on every later push.
     fn push_pin_views(pins: &mut PinPanel, shell: &mut DesktopShell, compositor: &mut Compositor) {
         let side = shell.session().taskbar().pin_icon_side(compositor.scale());
-        let (cache, reader, rasteriser) = shell.artwork_parts();
-        let views = build_pin_views(
-            &pins.resolved,
-            &pins.matches,
-            reader,
-            rasteriser,
-            cache,
-            side,
-        );
+        let (cache, resolver) = shell.artwork_parts();
+        let views = build_pin_views(&pins.resolved, &pins.matches, resolver, cache, side);
         shell.set_pins(compositor, views);
+        // The strip it now holds names the applications whose icons it will
+        // draw, so anything not decoded yet is asked for before the next paint
+        // rather than by it.
+        shell.warm_icon_artwork(compositor);
     }
 
     /// Whether the serve loop carries on after an outcome was routed.
@@ -4359,6 +4579,7 @@ mod program {
             let _ = write!(Stderr, "{warning}");
         }
         shell.set_library(compositor, loaded.catalog);
+        shell.warm_icon_artwork(compositor);
     }
 
     /// The session's live file-reading seam: whole-file reads through the

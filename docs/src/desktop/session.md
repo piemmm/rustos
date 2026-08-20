@@ -97,14 +97,15 @@ machinery: they are the shared two-tier artwork layer (`lib/icon`'s
 `ArtworkCache` plus its `ArtworkReader` / `ArtworkRasteriser` seams), and the
 `DesktopShell` owns exactly one of each for the seat (`AGENTS.md` §2.2).
 
-- `DesktopShell::set_artwork_source(reader, rasteriser)` installs the live
-  seams — on a running system the VFS reader and the sandbox worker, in tests
-  a pair of fakes. A shell that is never given them starts with seams that
-  find and decode nothing, so a bare shell draws built-in glyphs rather than
-  failing.
-- `DesktopShell::artwork_parts` hands out the cache and both seams together,
+- `DesktopShell::set_artwork_resolver(resolver)` installs the live
+  `ArtworkResolver` — on a running system the desktop's icon-decoder thread
+  (below), or `InlineArtwork` over the VFS reader and the sandbox worker where
+  the kernel granted no thread; in tests an inline pair of fakes. A shell that
+  is never given one starts with a resolver that finds and decodes nothing, so
+  a bare shell draws built-in glyphs rather than failing.
+- `DesktopShell::artwork_parts` hands out the cache and the resolver together,
   which is how the embedder resolves pin views without borrowing the shell
-  three times.
+  twice.
 - The same cache answers the bar's `IconArtwork` lookup (through
   `IconArtworkSource`) for the shipped class masters under
   `/System/Graphics/Icons`, so the launcher buttons, a pin, a running task,
@@ -113,6 +114,53 @@ machinery: they are the shared two-tier artwork layer (`lib/icon`'s
 Every lookup is keyed by (what was resolved, pixel side), and a refusal is cached
 like a success, so an application whose icon will not decode costs one read
 and one sandbox round trip — not one per frame.
+
+### The decode happens on a worker thread
+
+A read plus a sandbox round trip is far too much to spend inside a paint: a
+launcher opening on thirty applications used to pay it thirty times, on the
+serve loop, before its first pixel reached the screen. The decode therefore
+runs on the session's **icon-decoder thread**, and the paint that misses draws
+the built-in glyph for that frame.
+
+- The policy is `tairix_desktop_session::ArtworkDesk`: what has been asked for,
+  what the worker is producing, what has come back, and what has already been
+  answered. It holds no lock, no thread, and no syscall, so every rule it
+  carries is a host test. The `Run` binary adds the runtime's futex mutex, a
+  condition variable the worker parks on (never a spin), and the shared wake
+  pipe the session's wait-set already watches.
+- The worker owns its **own** sandbox child, exactly as the wallpaper worker
+  does, so no sandbox handle ever crosses a thread. It decodes through
+  `tairix_icon::render_artwork` — the same function `InlineArtwork` calls — so
+  which thread ran it cannot change what it produced.
+- It nudges the session when its queue drains rather than after each icon, so a
+  bring-up wanting thirty of them costs one repaint and they appear together.
+- A **round** stops a landing chasing its own tail. The artwork cache is
+  budgeted, so it can be asked to hold more than it will; without a rule, a
+  decode it declined to retain would be asked for again by the very repaint the
+  landing drove. Within a round a key answered once is not decoded again, and
+  the session opens a fresh round on any wake that is not the worker's nudge —
+  which is exactly when what is on screen can have changed. Work in flight and
+  answers not yet collected both survive the boundary, so nothing is computed
+  twice for want of somewhere to keep it.
+- Most surfaces adopt a landing simply by asking the cache again. The two that
+  *store* the picture instead — the taskbar's pin strip and a window's
+  title-bar/taskbar identity — are offered it again explicitly on the wake.
+- **Asked for early, not on the frame that needs it.** A decode off the loop
+  still costs a round trip, so a surface that first asks as it *paints* shows a
+  screenful of glyphs and fills in one icon at a time afterwards. The desktop
+  therefore warms what it knows it will draw, the moment it knows it:
+  `DesktopShell::warm_icon_artwork` on every catalog read and pin re-resolve
+  (the launcher popup's first screenful of rows and every pinned application,
+  named by `Taskbar::catalog_icon_wants` from the same layout the paint uses),
+  and `DesktopShell::warm_launched_artwork` for every application in the launch
+  table at the two sides a window of it wears — a spawn, a load, and the app's
+  own bring-up before there is a window to put it on. Both go through
+  `ArtworkCache::prefetch`, so an icon already held asks for nothing and a
+  session with no decoder thread pays a lookup per icon and no more.
+- A kernel that grants no thread, or a wake pipe it refuses, leaves the decode
+  on the serve loop through `InlineArtwork`: slower under load, never wrong,
+  and stated once on `stderr`.
 
 ### The library popup's per-row icons
 

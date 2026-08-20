@@ -1282,7 +1282,7 @@ fn an_identity_leads_the_group_and_the_title_follows_it() {
 
     let bare = plain.layout(bounds, Scale::ONE, &theme);
     let with = identified.layout(bounds, Scale::ONE, &theme);
-    let side = identified.icon_side(bounds, Scale::ONE, &theme);
+    let side = TitleBar::icon_side(bounds, Scale::ONE, &theme);
     assert!(side > 0, "the band is tall enough for a slot");
     assert_eq!(with.icon.width, side);
     assert_eq!(with.icon.height, side);
@@ -1338,7 +1338,7 @@ fn an_identity_draws_its_artwork_and_falls_back_to_the_glyph() {
         "the built-in glyph fills the slot"
     );
 
-    let side = bar.icon_side(bounds, Scale::ONE, &theme);
+    let side = TitleBar::icon_side(bounds, Scale::ONE, &theme);
     let mut art = Surface::new(side, side).expect("artwork");
     art.fill_rect(0, 0, side, side, Color::from(theme.palette().accent));
     let drawn = paint(&bar, Some(&art));
@@ -1370,7 +1370,7 @@ fn the_identity_artwork_desaturates_with_the_frame() {
     let mut bar = TitleBar::new(furniture());
     bar.set_identity(Some(IconKind::AppBundle));
     bar.set_title("Report");
-    let side = bar.icon_side(bounds, Scale::ONE, &theme);
+    let side = TitleBar::icon_side(bounds, Scale::ONE, &theme);
     assert!(side > 0, "the band is tall enough for a slot");
     let mut art = Surface::new(side, side).expect("artwork");
     art.fill_rect(0, 0, side, side, Color::from(ink));

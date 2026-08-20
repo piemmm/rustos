@@ -22,13 +22,25 @@
 //! production), so the untrusted decode never runs in this library or in the
 //! renderer that consumes it.
 //!
+//! # Who does the decode, and on which thread
+//!
+//! A miss costs a read plus a sandbox round trip, which is far too much to
+//! spend inside a compositor's paint. [`ArtworkResolver`] is therefore the seam
+//! between *deciding what a draw needs* and *producing it*: [`InlineArtwork`]
+//! reads and decodes on the calling thread, and a caller with a worker thread
+//! implements the trait over its own hand-off and answers [`Resolved::Pending`]
+//! until the pixels land — the draw falls to the built-in glyph in the
+//! meantime and the same lookup serves the artwork once it is there. Both use
+//! [`render_artwork`], so an off-thread decode is the very same work the
+//! inline one would have done.
+//!
 //! [`ArtworkCache`] retains each decode — success *or* refusal — keyed by what
 //! was resolved and the requested side, over the one shared reclaimable-memory
 //! cache (`lib/reclaim`) so a crowded or crafted bundle store can never grow a
-//! session without bound. [`IconArtworkSource`] binds a cache to its two
-//! seams so a renderer can be handed a plain [`IconArtwork`] lookup that
-//! borrows the pixels without knowing anything about I/O, and [`NoArtwork`] is
-//! the all-glyph lookup a headless build or a test uses.
+//! session without bound. [`IconArtworkSource`] binds a cache to its resolver
+//! so a renderer can be handed a plain [`IconArtwork`] lookup that borrows the
+//! pixels without knowing anything about I/O, and [`NoArtwork`] is the
+//! all-glyph lookup a headless build or a test uses.
 
 use alloc::format;
 use alloc::string::String;
@@ -37,7 +49,9 @@ use alloc::vec::Vec;
 use tairix_abi::{AppInfoHeader, BundleEntry, APPINFO_WIRE_MAX};
 use tairix_log::Sink;
 use tairix_raster::Surface;
-use tairix_reclaim::{disposable_ui_cache, CacheLedger, CachedBytes, PressureGauge, ReclaimCache};
+use tairix_reclaim::{
+    disposable_ui_cache, CacheLedger, CachedBytes, PressureGauge, ReclaimCache, Served,
+};
 
 use crate::glyph::IconKind;
 
@@ -139,6 +153,83 @@ pub trait ArtworkRasteriser {
     /// Rasterise `bytes` to a `side`-pixel square of straight-alpha RGBA8, or
     /// refuse with `None`.
     fn rasterise(&mut self, side: u32, bytes: &[u8]) -> Option<Vec<u8>>;
+}
+
+impl<T: ArtworkReader + ?Sized> ArtworkReader for &mut T {
+    fn read(&mut self, path: &str) -> Option<Vec<u8>> {
+        (**self).read(path)
+    }
+}
+
+impl<T: ArtworkRasteriser + ?Sized> ArtworkRasteriser for &mut T {
+    fn rasterise(&mut self, side: u32, bytes: &[u8]) -> Option<Vec<u8>> {
+        (**self).rasterise(side, bytes)
+    }
+}
+
+/// What a resolver has for one cache slot.
+pub enum Resolved {
+    /// The decode has run. `None` is a refusal — an absent, over-long, or
+    /// undecodable asset — which the cache retains just like artwork, so the
+    /// same bad asset is never read twice.
+    Done(Option<Surface>),
+    /// Nobody has decoded it yet. The cache retains nothing and the draw site
+    /// falls back to the tier below, which for the last tier is the built-in
+    /// glyph; the same lookup answers with pixels once the producer has them.
+    Pending,
+}
+
+/// How one cache miss becomes pixels.
+///
+/// [`InlineArtwork`] is the whole of what a program without a worker thread
+/// needs. A program that has one implements this over its own hand-off so a
+/// paint never waits on a disk or a sandbox: it answers [`Resolved::Pending`]
+/// for a key it has just queued and [`Resolved::Done`] once the worker has
+/// delivered.
+pub trait ArtworkResolver {
+    /// Produce what `key` names at `side` pixels.
+    fn resolve(&mut self, key: &ArtworkKey, side: u32) -> Resolved;
+
+    /// Start producing `key` at `side` without waiting for it.
+    ///
+    /// A caller that knows what it is *about* to draw says so here, so the
+    /// decode is finished before the frame that needs it rather than after it.
+    /// Without that, a surface showing a screenful of icons paints every one of
+    /// them as a built-in glyph and only replaces them a round trip later.
+    ///
+    /// The default does nothing, which is right for a resolver that produces on
+    /// the calling thread: it has nothing to prepare, and "preparing" would be
+    /// exactly the stall a caller prefetches to avoid.
+    fn prefetch(&mut self, _key: &ArtworkKey, _side: u32) {}
+}
+
+/// The resolver that reads and decodes on the calling thread.
+///
+/// Correct wherever there is no worker thread to hand the decode to — a
+/// program with one window, a process the kernel granted no thread, a host
+/// test — and the exact work a worker performs, since both go through
+/// [`render_artwork`].
+pub struct InlineArtwork<R: ArtworkReader, D: ArtworkRasteriser> {
+    reader: R,
+    rasteriser: D,
+}
+
+impl<R: ArtworkReader, D: ArtworkRasteriser> InlineArtwork<R, D> {
+    /// Read through `reader` and decode through `rasteriser`.
+    pub const fn new(reader: R, rasteriser: D) -> Self {
+        Self { reader, rasteriser }
+    }
+}
+
+impl<R: ArtworkReader, D: ArtworkRasteriser> ArtworkResolver for InlineArtwork<R, D> {
+    fn resolve(&mut self, key: &ArtworkKey, side: u32) -> Resolved {
+        Resolved::Done(render_artwork(
+            &mut self.reader,
+            &mut self.rasteriser,
+            key,
+            side,
+        ))
+    }
 }
 
 /// A thing's *own* artwork, preferred over its kind's shipped artwork.
@@ -353,10 +444,34 @@ enum Slot {
     Served,
     /// Retained, but there is no artwork for it — the next tier answers.
     Empty,
-    /// The cache retained nothing (pressure forbids growth, or it has
-    /// disabled itself), so no borrow can be handed out however much work is
-    /// done.
-    Closed,
+    /// Produced but not retained (pressure forbids growth, or the cache has
+    /// disabled itself), so it is handed straight back: no borrow can be
+    /// served from the cache, but the pixels themselves exist.
+    Uncached(Option<Surface>),
+    /// The resolver has not produced it yet. Nothing is retained and no later
+    /// tier is tried, because whether one is even reached depends on this
+    /// answer.
+    Pending,
+}
+
+/// What one resolution produced, for a caller that copies the pixels out
+/// instead of drawing them from the cache in place.
+///
+/// A draw site that paints directly from the cache reads the borrow
+/// [`ArtworkCache::artwork`] hands it and needs no such distinction: it asks
+/// again next frame whatever the answer was. A caller that *stores* the
+/// picture — a window's title-bar identity, resolved once when the window
+/// opens — must know whether asking again would change anything.
+#[derive(Debug)]
+pub enum ArtworkOutcome {
+    /// The picture to use, copied out of the cache.
+    Ready(Surface),
+    /// Every tier of the request refused. The caller draws the built-in glyph,
+    /// and asking again would only repeat the refusal.
+    Refused,
+    /// A tier is still being produced. The caller draws the built-in glyph and
+    /// asks again once its resolver reports the decode has landed.
+    Pending,
 }
 
 /// The reclaim-governed decode cache, keyed by what was resolved and the pixel
@@ -422,25 +537,25 @@ impl ArtworkCache {
     }
 
     /// The artwork for one already-resolved asset `path` at `side` pixels,
-    /// with no fallback tier: served from the cache, or read through `reader`
-    /// (bounded by [`MAX_ARTWORK_BYTES`]), rasterised through `rasteriser`,
+    /// with no fallback tier: served from the cache, or produced through
+    /// `resolver` (a read bounded by [`MAX_ARTWORK_BYTES`] plus a decode),
     /// verified, and cached. A caller that wants the whole resolution order
     /// asks [`artwork`](Self::artwork) instead.
     ///
     /// `None` — also cached, so a bad asset is not re-read every frame — when
     /// the side is zero, the asset is unreadable, over-long, refused by the
-    /// decoder, or the returned pixel block is not exactly `side`×`side`. The
-    /// surface is borrowed, never cloned, so a grid draws from the cache in
-    /// place.
-    pub fn path_artwork<R: ArtworkReader + ?Sized, D: ArtworkRasteriser + ?Sized>(
+    /// decoder, or the returned pixel block is not exactly `side`×`side`. It
+    /// is also the answer while a deferring `resolver` is still producing the
+    /// decode, in which case a later call serves it. The surface is borrowed,
+    /// never cloned, so a grid draws from the cache in place.
+    pub fn path_artwork(
         &mut self,
-        reader: &mut R,
-        rasteriser: &mut D,
+        resolver: &mut dyn ArtworkResolver,
         path: &str,
         side: u32,
     ) -> Option<&Surface> {
         let key = (ArtworkKey::Asset(String::from(path)), side);
-        let _ = self.build_slot(&key, || render_icon(reader, rasteriser, path, side));
+        let _ = self.build_slot(&key, resolver);
         self.borrow_slot(&key)
     }
 
@@ -457,44 +572,122 @@ impl ArtworkCache {
     /// Each tier it reaches leaves a retained outcome behind, refusal
     /// included, so a kind that ships no artwork at all costs one read per
     /// class format once and none thereafter.
-    pub fn artwork<R: ArtworkReader + ?Sized, D: ArtworkRasteriser + ?Sized>(
+    ///
+    /// A deferring `resolver` walks the same order one tier per answer: a tier
+    /// still being produced stops the walk, because whether the next tier is
+    /// reached at all depends on what this one turns out to be. The request
+    /// therefore costs exactly the reads a synchronous walk would, spread over
+    /// as many frames as it has tiers to try.
+    pub fn artwork(
         &mut self,
-        reader: &mut R,
-        rasteriser: &mut D,
+        resolver: &mut dyn ArtworkResolver,
         request: IconRequest<'_>,
         side: u32,
     ) -> Option<&Surface> {
         let mut served = None;
         for tier in request.tiers() {
             let key = (tier.cache_key(), side);
-            match self.build_slot(&key, || render_key(reader, rasteriser, &key.0, side)) {
+            match self.build_slot(&key, resolver) {
                 Slot::Served => {
                     served = Some(key);
                     break;
                 }
                 // Nothing is being retained, so a later tier could only
                 // repeat the same refusal at the cost of another decode.
-                Slot::Closed => return None,
+                Slot::Uncached(_) | Slot::Pending => return None,
                 Slot::Empty => {}
             }
         }
         self.borrow_slot(&served?)
     }
 
-    /// Build `key`'s slot once (a refusal is retained as an empty slot), and
-    /// report whether it can serve.
-    fn build_slot<F: FnOnce() -> Option<Surface>>(
+    /// The picture for `request` at `side` pixels, copied out, together with
+    /// whether an answer is still to come.
+    ///
+    /// The same resolution order as [`artwork`](Self::artwork) — this differs
+    /// only in handing the caller an owned surface and an honest
+    /// [`ArtworkOutcome::Pending`], which is what a caller that stores the
+    /// picture rather than drawing it needs in order to know whether to ask
+    /// again. A cache too tight to retain the decode still yields the pixels
+    /// here rather than throwing them away.
+    pub fn owned_artwork(
         &mut self,
-        key: &(ArtworkKey, u32),
-        render: F,
-    ) -> Slot {
-        match self
-            .entries
-            .get_or_build(&(), key.clone(), || Some(CachedArtwork(render())))
-        {
-            Some(served) if !served.is_cached() => Slot::Closed,
+        resolver: &mut dyn ArtworkResolver,
+        request: IconRequest<'_>,
+        side: u32,
+    ) -> ArtworkOutcome {
+        let mut served = None;
+        for tier in request.tiers() {
+            let key = (tier.cache_key(), side);
+            match self.build_slot(&key, resolver) {
+                Slot::Served => {
+                    served = Some(key);
+                    break;
+                }
+                Slot::Pending => return ArtworkOutcome::Pending,
+                // Nothing is being retained, so a later tier could only
+                // repeat the same refusal at the cost of another decode.
+                Slot::Uncached(artwork) => {
+                    return artwork.map_or(ArtworkOutcome::Refused, ArtworkOutcome::Ready)
+                }
+                Slot::Empty => {}
+            }
+        }
+        served
+            .and_then(|key| self.borrow_slot(&key).cloned())
+            .map_or(ArtworkOutcome::Refused, ArtworkOutcome::Ready)
+    }
+
+    /// Start producing whatever `request` will resolve to at `side`, drawing
+    /// nothing and waiting for nothing.
+    ///
+    /// Exactly one tier is asked for: the first this cache does not already
+    /// hold, because resolution stops at the first tier that serves and a later
+    /// one is only reached if that one refuses. A request whose serving tier is
+    /// already retained asks for nothing at all, so warming a whole catalog
+    /// repeatedly costs a lookup per icon rather than a decode.
+    pub fn prefetch(
+        &mut self,
+        resolver: &mut dyn ArtworkResolver,
+        request: IconRequest<'_>,
+        side: u32,
+    ) {
+        for tier in request.tiers() {
+            let key = (tier.cache_key(), side);
+            match self.entries.peek(&(), &key) {
+                // This tier will serve, so no later one is reached.
+                Some(CachedArtwork(Some(_))) => return,
+                // A retained refusal: the next tier is the one that matters.
+                Some(CachedArtwork(None)) => {}
+                None => {
+                    resolver.prefetch(&key.0, side);
+                    return;
+                }
+            }
+        }
+    }
+
+    /// Build `key`'s slot once (a refusal is retained as an empty slot), and
+    /// report what came of it.
+    fn build_slot(&mut self, key: &(ArtworkKey, u32), resolver: &mut dyn ArtworkResolver) -> Slot {
+        let mut pending = false;
+        let built = match self.entries.get_or_build(&(), key.clone(), || {
+            match resolver.resolve(&key.0, key.1) {
+                Resolved::Done(artwork) => Some(CachedArtwork(artwork)),
+                Resolved::Pending => {
+                    pending = true;
+                    None
+                }
+            }
+        }) {
+            Some(Served::Uncached(artwork)) => Slot::Uncached(artwork.0),
             Some(served) if served.surface().is_some() => Slot::Served,
             _ => Slot::Empty,
+        };
+        if pending {
+            Slot::Pending
+        } else {
+            built
         }
     }
 
@@ -511,7 +704,12 @@ impl ArtworkCache {
 /// Read, rasterise, and verify whatever one cache slot names (the cache-miss
 /// path). A bundle resolves its manifest first; every other key is an asset
 /// path already.
-fn render_key<R: ArtworkReader + ?Sized, D: ArtworkRasteriser + ?Sized>(
+///
+/// Public because it is the whole of one decode: a worker thread running it
+/// off an [`ArtworkResolver`]'s hand-off performs the identical work
+/// [`InlineArtwork`] would have, so where the decode happens cannot change
+/// what it produces.
+pub fn render_artwork<R: ArtworkReader + ?Sized, D: ArtworkRasteriser + ?Sized>(
     reader: &mut R,
     rasteriser: &mut D,
     key: &ArtworkKey,
@@ -579,32 +777,24 @@ fn render_icon<R: ArtworkReader + ?Sized, D: ArtworkRasteriser + ?Sized>(
     Surface::from_rgba8(side, side, &pixels)
 }
 
-/// Binds an [`ArtworkCache`] to its two seams so it can be handed to a
+/// Binds an [`ArtworkCache`] to its resolver so it can be handed to a
 /// renderer as a plain [`IconArtwork`] lookup without the renderer knowing
-/// about I/O.
-pub struct IconArtworkSource<'a, R: ArtworkReader + ?Sized, D: ArtworkRasteriser + ?Sized> {
+/// about I/O — or about which thread the decode happens on.
+pub struct IconArtworkSource<'a> {
     cache: &'a mut ArtworkCache,
-    reader: &'a mut R,
-    rasteriser: &'a mut D,
+    resolver: &'a mut dyn ArtworkResolver,
 }
 
-impl<'a, R: ArtworkReader + ?Sized, D: ArtworkRasteriser + ?Sized> IconArtworkSource<'a, R, D> {
-    /// Bind `cache` to the `reader` and `rasteriser` it resolves through.
-    pub fn new(cache: &'a mut ArtworkCache, reader: &'a mut R, rasteriser: &'a mut D) -> Self {
-        Self {
-            cache,
-            reader,
-            rasteriser,
-        }
+impl<'a> IconArtworkSource<'a> {
+    /// Bind `cache` to the `resolver` its misses are produced through.
+    pub fn new(cache: &'a mut ArtworkCache, resolver: &'a mut dyn ArtworkResolver) -> Self {
+        Self { cache, resolver }
     }
 }
 
-impl<R: ArtworkReader + ?Sized, D: ArtworkRasteriser + ?Sized> IconArtwork
-    for IconArtworkSource<'_, R, D>
-{
+impl IconArtwork for IconArtworkSource<'_> {
     fn artwork(&mut self, request: IconRequest<'_>, side: u32) -> Option<&Surface> {
-        self.cache
-            .artwork(self.reader, self.rasteriser, request, side)
+        self.cache.artwork(self.resolver, request, side)
     }
 }
 

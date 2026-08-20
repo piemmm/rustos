@@ -116,7 +116,7 @@ mod program {
     use tairix_help::{own_short_help, BundleHelp};
     use tairix_icon::{
         artwork_cache, ArtworkCache, ArtworkRasteriser, ArtworkReader, IconArtworkSource,
-        MAX_ARTWORK_BYTES,
+        InlineArtwork, MAX_ARTWORK_BYTES,
     };
     use tairix_input::{Key, Modifiers, NamedKey};
     use tairix_procinfo::{IpcTransport, WalkStep};
@@ -661,7 +661,15 @@ mod program {
     }
 
     /// The grid's icon-artwork pipeline: the reclaim-governed decode cache and
-    /// the two seams it resolves a tile's artwork through.
+    /// the resolver it produces a tile's artwork through.
+    ///
+    /// The resolver is the inline one — the read and the sandbox round trip
+    /// happen on this app's own task. That is the right answer here and not the
+    /// desktop's: a file manager decides how much of its grid it presents, and
+    /// a worker thread and its stack per app window would cost more than the
+    /// pass it removes. The desktop session, which draws every application's
+    /// icon on behalf of every application, hands its decodes to a thread
+    /// instead (`plans/FIX-DESKTOP.md` DESK-8).
     ///
     /// The cache is built through the one shared constructor with this app's
     /// real seat, frame size, pressure gauge, and audit sink, so it is
@@ -673,10 +681,8 @@ mod program {
     struct IconPipeline {
         /// The retained decode outcomes, keyed by asset path and pixel side.
         cache: ArtworkCache,
-        /// Where an asset's encoded bytes come from.
-        reader: VfsArtworkReader,
-        /// Where the pixels come from.
-        rasteriser: SandboxRasteriser,
+        /// Where an asset's bytes are read and turned into pixels.
+        resolver: InlineArtwork<VfsArtworkReader, SandboxRasteriser>,
     }
 
     impl IconPipeline {
@@ -703,16 +709,18 @@ mod program {
             }
             Self {
                 cache,
-                reader: VfsArtworkReader,
-                rasteriser: SandboxRasteriser {
-                    sandbox: ParserSandbox::new(RtLauncher::own_binary(), tairix_rt::LogSink),
-                },
+                resolver: InlineArtwork::new(
+                    VfsArtworkReader,
+                    SandboxRasteriser {
+                        sandbox: ParserSandbox::new(RtLauncher::own_binary(), tairix_rt::LogSink),
+                    },
+                ),
             }
         }
 
-        /// The lookup a render is handed: the cache bound to its two seams.
-        fn source(&mut self) -> IconArtworkSource<'_, VfsArtworkReader, SandboxRasteriser> {
-            IconArtworkSource::new(&mut self.cache, &mut self.reader, &mut self.rasteriser)
+        /// The lookup a render is handed: the cache bound to its resolver.
+        fn source(&mut self) -> IconArtworkSource<'_> {
+            IconArtworkSource::new(&mut self.cache, &mut self.resolver)
         }
     }
 

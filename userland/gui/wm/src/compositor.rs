@@ -1695,17 +1695,27 @@ impl Compositor {
     /// paints at, or `None` for an unknown or undecorated window.
     ///
     /// This is the size an owner rasterises artwork at before handing it to
-    /// [`set_window_identity`](Self::set_window_identity): the compositor
-    /// resolves it from the window's own laid-out title band at the active
-    /// scale and theme, so a caller never has to reconstruct that geometry.
+    /// [`set_window_identity`](Self::set_window_identity): the frame states it
+    /// from the active scale and theme, so a caller never has to reconstruct
+    /// that geometry. Every decorated window shares the side — the title band's
+    /// height is the theme's, not any one window's — so `id` decides only
+    /// *whether* there is an identity slot, never how big it is.
     #[must_use]
     pub fn window_title_icon_side(&self, id: WindowId) -> Option<u32> {
-        let window = self.window(id)?;
-        let frame = window.frame()?;
-        let band = frame
-            .layout(window.bounds(), self.scale, &self.theme)
-            .title_bar;
-        Some(frame.title_bar().icon_side(band, self.scale, &self.theme))
+        self.window(id)?.frame()?;
+        Some(self.title_identity_icon_side())
+    }
+
+    /// The pixel side every decorated window's title-bar identity icon draws
+    /// at, at this compositor's scale and theme.
+    ///
+    /// The side is the theme's, not any one window's, so an embedder can have an
+    /// application's artwork decoded before the window that will wear it exists
+    /// — which is the difference between a window appearing with its own icon
+    /// and appearing with a glyph it replaces a decode later.
+    #[must_use]
+    pub fn title_identity_icon_side(&self) -> u32 {
+        WindowFrame::identity_icon_side(self.scale, &self.theme)
     }
 
     /// Classify the screen `point` against the furniture of the window named

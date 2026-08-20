@@ -81,19 +81,26 @@ way, consuming the offer.
 
 That read, decode, and cache are the shared artwork layer's, not this
 module's: `DesktopShell` owns exactly one `tairix_icon::ArtworkCache` for the
-seat plus the two seams it resolves through (`ArtworkReader` /
-`ArtworkRasteriser`), and every icon on the bar comes out of it — a pin, a
-running task, a program-library row, and the shipped raster masters behind
-the two launcher buttons (`AGENTS.md` §2.2).
+seat plus the one `ArtworkResolver` its misses are produced through, and every
+icon on the bar comes out of it — a pin, a running task, a program-library row,
+and the shipped raster masters behind the two launcher buttons (`AGENTS.md`
+§2.2).
 
-- `set_artwork_source(reader, rasteriser)` installs the live seams; the
-  thin `ArtworkFileReader` / `ArtworkSandbox` wrappers adapt the session's
-  own `SessionFileReader` and `IconRasteriser` to them, so there is one
-  reading seam and one sandbox, not two.
-- A shell that is never given them keeps seams that find and decode nothing,
-  so a bare shell is a working desktop drawn from built-in glyphs.
-- `artwork_parts()` lends the cache and both seams in one borrow — how
-  `build_pin_views` resolves a strip without borrowing the shell three times.
+- `set_artwork_resolver(resolver)` installs the live one. On a running desktop
+  that is the icon-decoder thread over `ArtworkDesk` (`artwork.rs`), so a read
+  and a sandbox round trip never happen inside a paint; where the kernel grants
+  no thread it is `InlineArtwork` over the thin `ArtworkFileReader` /
+  `ArtworkSandbox` wrappers, which adapt the session's own `SessionFileReader`
+  and `IconRasteriser`, so there is one reading seam and one sandbox, not two.
+- A shell that is never given one keeps a resolver that finds and decodes
+  nothing, so a bare shell is a working desktop drawn from built-in glyphs.
+- `artwork_parts()` lends the cache and the resolver in one borrow — how
+  `build_pin_views` resolves a strip without borrowing the shell twice.
+- `warm_icon_artwork` and `warm_launched_artwork` start the decodes the bar's
+  surfaces and a launching application's windows will need, at the moment the
+  catalog, the pin strip, or the launch table naming them changes. Without them
+  a decoder thread only moves the wait off the loop; with them the wait is over
+  before the surface that draws the icon is shown.
 - `trim_caches` shrinks it under memory pressure and `teardown` wipes it, on
   the same path as the cursor and glyph caches.
 

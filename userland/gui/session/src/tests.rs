@@ -6,7 +6,7 @@ use alloc::rc::Rc;
 use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
-use core::cell::RefCell;
+use core::cell::{Cell, RefCell};
 
 use tairix_abi::driver::display::{DamageRect, Display, DisplayFormat, DisplayMode};
 use tairix_abi::notify_ipc::{NotifyBody, NotifyRequest, NotifySeverity, NotifyTitle};
@@ -24,8 +24,8 @@ use tairix_controls::PointerState;
 use tairix_cursor::CursorTheme;
 use tairix_greeter::{Verdict, Verifier, UNNAMED_ACCOUNT};
 use tairix_icon::{
-    artwork_cache, icon_artwork_path, ArtworkCache, IconArtworkSource, IconKind, IconSet,
-    NoArtwork, MAX_ARTWORK_BYTES,
+    artwork_cache, icon_artwork_path, ArtworkCache, ArtworkResolver, IconArtworkSource, IconKind,
+    IconSet, InlineArtwork, NoArtwork, Resolved, MAX_ARTWORK_BYTES,
 };
 use tairix_log::{Event, Sink};
 use tairix_proglib::{
@@ -47,6 +47,7 @@ use tairix_wm::{
     Surface, WindowActivationState, WindowChrome, WindowId,
 };
 
+use crate::artwork::ArtworkDesk;
 use crate::shell::SettleWork;
 use crate::{
     build_pin_views, deliver_pending_open, desktop_info, drop_is_noteworthy, ensure_switchboard,
@@ -6528,17 +6529,29 @@ fn pin_artwork_is_decoded_once_per_path_and_side() {
     let path = artwork_source("/Apps/One.app").path();
 
     assert!(cache
-        .path_artwork(&mut reader, &mut rasteriser, &path, 16)
+        .path_artwork(
+            &mut InlineArtwork::new(&mut reader, &mut rasteriser),
+            &path,
+            16
+        )
         .is_some());
     assert!(cache
-        .path_artwork(&mut reader, &mut rasteriser, &path, 16)
+        .path_artwork(
+            &mut InlineArtwork::new(&mut reader, &mut rasteriser),
+            &path,
+            16
+        )
         .is_some());
     assert_eq!(rasteriser.0.calls, 1, "the second lookup is a cache hit");
 
     // A different side is a different entry: the artwork is rasterised
     // again at the new geometry rather than scaled from the old one.
     assert!(cache
-        .path_artwork(&mut reader, &mut rasteriser, &path, 32)
+        .path_artwork(
+            &mut InlineArtwork::new(&mut reader, &mut rasteriser),
+            &path,
+            32
+        )
         .is_some());
     assert_eq!(rasteriser.0.calls, 2);
 }
@@ -6552,10 +6565,18 @@ fn a_refused_pin_icon_is_refused_once_not_on_every_refresh() {
     let path = artwork_source("/Apps/Bad.app").path();
 
     assert!(cache
-        .path_artwork(&mut reader, &mut rasteriser, &path, 16)
+        .path_artwork(
+            &mut InlineArtwork::new(&mut reader, &mut rasteriser),
+            &path,
+            16
+        )
         .is_none());
     assert!(cache
-        .path_artwork(&mut reader, &mut rasteriser, &path, 16)
+        .path_artwork(
+            &mut InlineArtwork::new(&mut reader, &mut rasteriser),
+            &path,
+            16
+        )
         .is_none());
     assert_eq!(rasteriser.0.calls, 1, "the refusal is remembered");
 }
@@ -6578,7 +6599,11 @@ fn pin_artwork_never_outgrows_the_budget_its_output_allows() {
         let path = artwork_source(bundle).path();
         assert!(
             cache
-                .path_artwork(&mut reader, &mut rasteriser, &path, 32)
+                .path_artwork(
+                    &mut InlineArtwork::new(&mut reader, &mut rasteriser),
+                    &path,
+                    32
+                )
                 .is_some(),
             "every pin still gets its artwork, cached or not"
         );
@@ -6608,7 +6633,11 @@ fn pin_artwork_is_given_back_under_pressure_and_wiped_on_teardown() {
     let path = artwork_source("/Apps/One.app").path();
 
     assert!(cache
-        .path_artwork(&mut reader, &mut rasteriser, &path, 16)
+        .path_artwork(
+            &mut InlineArtwork::new(&mut reader, &mut rasteriser),
+            &path,
+            16
+        )
         .is_some());
     assert!(cache.charged_bytes() > 0);
 
@@ -6621,13 +6650,21 @@ fn pin_artwork_is_given_back_under_pressure_and_wiped_on_teardown() {
     // correctness never depended on the artwork, and answering pressure by
     // re-acquiring the pixels it just released would defeat the release.
     assert!(cache
-        .path_artwork(&mut reader, &mut rasteriser, &path, 16)
+        .path_artwork(
+            &mut InlineArtwork::new(&mut reader, &mut rasteriser),
+            &path,
+            16
+        )
         .is_none());
     assert_eq!(cache.charged_bytes(), 0, "no growth under pressure");
 
     PRESSURED.report(PressureBand::Normal);
     assert!(cache
-        .path_artwork(&mut reader, &mut rasteriser, &path, 16)
+        .path_artwork(
+            &mut InlineArtwork::new(&mut reader, &mut rasteriser),
+            &path,
+            16
+        )
         .is_some());
     assert!(cache.charged_bytes() > 0, "retention resumes when it may");
 
@@ -6772,16 +6809,14 @@ fn a_bundle_icon_is_read_and_decoded_once_and_reused_by_the_shared_cache() {
     let first = build_pin_views(
         &resolved,
         &[None],
-        &mut reader,
-        &mut rasteriser,
+        &mut InlineArtwork::new(&mut reader, &mut rasteriser),
         &mut cache,
         24,
     );
     let again = build_pin_views(
         &resolved,
         &[None],
-        &mut reader,
-        &mut rasteriser,
+        &mut InlineArtwork::new(&mut reader, &mut rasteriser),
         &mut cache,
         24,
     );
@@ -6819,8 +6854,7 @@ fn a_library_row_draws_its_own_applications_icon() {
     resolve_library_icons(
         session.taskbar_mut(),
         Scale::ONE,
-        &mut reader,
-        &mut rasteriser,
+        &mut InlineArtwork::new(&mut reader, &mut rasteriser),
         &mut cache,
     );
 
@@ -6830,6 +6864,101 @@ fn a_library_row_draws_its_own_applications_icon() {
         row_tint(&session, rows[0]),
         Some(BUNDLE_TINT),
         "the row shows the application's own icon, not the shipped master"
+    );
+}
+
+/// The reported defect: with the decode on a worker thread, the launcher
+/// popup and the pin strip drew a screenful of built-in glyphs and only
+/// replaced them a round trip *per icon* later — so a user opening the
+/// launcher saw generic pictures, and a pinned application wore its fallback.
+///
+/// The fix is that the desktop asks for the whole set the moment the catalog
+/// naming it is known, which is long before either surface is shown. This is
+/// that contract: after the warm-up and the decodes it started, the popup's
+/// very first resolution has every row's own icon, with nothing left for the
+/// worker to do.
+#[test]
+fn the_launcher_has_its_icons_before_it_is_first_drawn() {
+    /// A resolver over the real desk: it answers only what the desk has
+    /// already been delivered and records everything else — exactly what the
+    /// serve loop's own resolver does.
+    struct Deferring(Rc<RefCell<ArtworkDesk>>);
+
+    impl ArtworkResolver for Deferring {
+        fn resolve(&mut self, key: &tairix_icon::ArtworkKey, side: u32) -> Resolved {
+            self.0.borrow_mut().collect(key, side)
+        }
+
+        fn prefetch(&mut self, key: &tairix_icon::ArtworkKey, side: u32) {
+            self.0.borrow_mut().want(key, side);
+        }
+    }
+
+    NORMAL_PRESSURE.report(PressureBand::Normal);
+    let assets = shipped_app_bundle_master(
+        MemoryAssets::default().with("/Apps/one.app/Resources/icon.svg", &[BUNDLE_TINT]),
+    );
+    let desk = Rc::new(RefCell::new(ArtworkDesk::new()));
+    let mut cat = Catalog::new();
+    cat.insert(entry_with_icon("one", "One", Some("icon.svg")))
+        .expect("fits");
+
+    let mut comp = compositor();
+    let mut shell = shell();
+    shell.set_artwork_resolver(alloc::boxed::Box::new(Deferring(Rc::clone(&desk))));
+    shell.set_library(&mut comp, cat);
+    shell.warm_icon_artwork(&comp);
+
+    // The desktop has the catalog, so the decoder is asked for the whole set
+    // now — before the popup is opened or the strip is looked at.
+    assert!(
+        desk.borrow().has_work(),
+        "knowing the catalog must start the decodes"
+    );
+
+    // The worker does its work, and the desktop asks again as each batch lands
+    // — the serve loop's own round, since a tier that refuses is what makes the
+    // next one wanted. It runs dry, which is what makes the wait finite.
+    let mut reader = ArtworkFileReader(assets);
+    let mut rasteriser = ArtworkSandbox(TaggedRasteriser::new());
+    let mut decoded = 0;
+    let mut rounds = 0;
+    while desk.borrow().has_work() {
+        while let Some(job) = {
+            let taken = desk.borrow_mut().next_job();
+            taken
+        } {
+            let artwork =
+                tairix_icon::render_artwork(&mut reader, &mut rasteriser, &job.key, job.side);
+            assert!(desk.borrow_mut().deliver(&job, artwork));
+            decoded += 1;
+            assert!(decoded < 64, "the warm-up must be a bounded set");
+        }
+        shell.warm_icon_artwork(&comp);
+        rounds += 1;
+        assert!(
+            rounds < 8,
+            "the warm-up must run dry, not chase its own tail"
+        );
+    }
+    assert!(decoded > 0, "the warm-up asked for nothing at all");
+
+    // Now the user opens the launcher. Its very first paint draws the
+    // application's own icon, not a glyph it would replace a frame later.
+    let mut router = SessionInputRouter::new();
+    open_library(&mut router, &mut comp, shell.session_mut().taskbar_mut());
+    shell.present(&mut comp);
+
+    let rows = shown_entry_rows(shell.session());
+    assert_eq!(rows.len(), 1, "one entry, one row");
+    assert_eq!(
+        row_tint(shell.session(), rows[0]),
+        Some(BUNDLE_TINT),
+        "the first frame of the popup shows the application's own icon"
+    );
+    assert!(
+        rounds <= 3,
+        "one warm-up per tier at most, and there are three tiers"
     );
 }
 
@@ -6858,8 +6987,7 @@ fn a_library_row_whose_asset_will_not_serve_falls_back_and_never_blanks() {
     resolve_library_icons(
         session.taskbar_mut(),
         Scale::ONE,
-        &mut reader,
-        &mut rasteriser,
+        &mut InlineArtwork::new(&mut reader, &mut rasteriser),
         &mut cache,
     );
 
@@ -6888,8 +7016,7 @@ fn a_library_row_with_no_declared_icon_falls_back_to_the_shipped_artwork() {
     resolve_library_icons(
         session.taskbar_mut(),
         Scale::ONE,
-        &mut reader,
-        &mut rasteriser,
+        &mut InlineArtwork::new(&mut reader, &mut rasteriser),
         &mut cache,
     );
 
@@ -6938,8 +7065,7 @@ fn the_library_resolves_artwork_only_for_the_rows_it_shows() {
     resolve_library_icons(
         session.taskbar_mut(),
         Scale::ONE,
-        &mut reader,
-        &mut rasteriser,
+        &mut InlineArtwork::new(&mut reader, &mut rasteriser),
         &mut cache,
     );
 
@@ -6986,8 +7112,7 @@ fn a_desktop_with_no_artwork_at_all_still_draws_every_icon_from_its_glyphs() {
     let views = build_pin_views(
         &resolved,
         &[None],
-        &mut reader,
-        &mut rasteriser,
+        &mut InlineArtwork::new(&mut reader, &mut rasteriser),
         &mut cache,
         24,
     );
@@ -7001,8 +7126,7 @@ fn a_desktop_with_no_artwork_at_all_still_draws_every_icon_from_its_glyphs() {
     resolve_library_icons(
         session.taskbar_mut(),
         Scale::ONE,
-        &mut reader,
-        &mut rasteriser,
+        &mut InlineArtwork::new(&mut reader, &mut rasteriser),
         &mut cache,
     );
     for row in shown_entry_rows(&session) {
@@ -7016,7 +7140,8 @@ fn a_desktop_with_no_artwork_at_all_still_draws_every_icon_from_its_glyphs() {
     session.taskbar_mut().set_pins(views);
     let mut renderer = TaskbarRenderer::new(test_icon_cache());
     let mut presenter = TaskbarPresenter::new();
-    let mut source = IconArtworkSource::new(&mut cache, &mut reader, &mut rasteriser);
+    let mut inline = InlineArtwork::new(&mut reader, &mut rasteriser);
+    let mut source = IconArtworkSource::new(&mut cache, &mut inline);
     presenter.present(
         &mut comp,
         &mut renderer,
@@ -8699,10 +8824,10 @@ fn identity_desktop(
     let reader = Rc::new(RefCell::new(CountingAssets::new(assets)));
     let rasteriser = Rc::new(RefCell::new(TaggedRasteriser::new()));
     let mut shell = shell();
-    shell.set_artwork_source(
-        alloc::boxed::Box::new(ArtworkFileReader(Shared(Rc::clone(&reader)))),
-        alloc::boxed::Box::new(ArtworkSandbox(Shared(Rc::clone(&rasteriser)))),
-    );
+    shell.set_artwork_resolver(alloc::boxed::Box::new(InlineArtwork::new(
+        ArtworkFileReader(Shared(Rc::clone(&reader))),
+        ArtworkSandbox(Shared(Rc::clone(&rasteriser))),
+    )));
     (shell, compositor(), reader, rasteriser)
 }
 
@@ -8971,11 +9096,198 @@ fn a_second_window_of_the_same_application_reuses_the_resolved_icon() {
         "on its title bar and on its taskbar entry alike"
     );
     assert_eq!(
-        costs[1],
-        (1, 0),
-        "which the one shared cache served for both slots without a second \
-         artwork fetch or decode: only the bundle's own manifest is re-read"
+        costs[0].1, 2,
+        "the first window decodes the bundle's own icon once per slot side"
     );
+    assert_eq!(
+        costs[1],
+        (0, 0),
+        "and the second is served for both slots out of the one shared cache \
+         — the bundle's manifest is not read again either, because the cache \
+         is keyed by the bundle directory rather than by the asset it names"
+    );
+}
+
+/// The desktop's production resolver decodes on a worker thread, so a paint
+/// that misses is answered "not yet" and draws the built-in glyph. A window's
+/// title-bar and taskbar identity *store* the picture rather than re-resolving
+/// as they paint, so they have to be offered it again when it lands — this is
+/// that contract, exercised through the real resolution path with the landing
+/// under the test's control instead of a thread's.
+#[test]
+fn a_window_identity_pending_at_open_is_pictured_when_the_decode_lands() {
+    /// Refuses every decode until `landed` is set, exactly as the desk does
+    /// while its worker is still reading and rasterising.
+    struct Deferring {
+        inner: InlineArtwork<ArtworkFileReader<MemoryAssets>, ArtworkSandbox<TaggedRasteriser>>,
+        landed: Rc<Cell<bool>>,
+    }
+
+    impl ArtworkResolver for Deferring {
+        fn resolve(&mut self, key: &tairix_icon::ArtworkKey, side: u32) -> Resolved {
+            if self.landed.get() {
+                self.inner.resolve(key, side)
+            } else {
+                Resolved::Pending
+            }
+        }
+    }
+
+    let landed = Rc::new(Cell::new(false));
+    let mut shell = shell();
+    shell.set_artwork_resolver(alloc::boxed::Box::new(Deferring {
+        inner: InlineArtwork::new(
+            ArtworkFileReader(identity_bundle(
+                MemoryAssets::default(),
+                EDITOR_BUNDLE,
+                "Editor",
+                &[EDITOR_TINT],
+            )),
+            ArtworkSandbox(TaggedRasteriser::new()),
+        ),
+        landed: Rc::clone(&landed),
+    }));
+    let mut comp = compositor();
+    let mut windows = SessionWindows::new();
+    let launched = launched_bundles(&[(EDITOR_PID, EDITOR_BUNDLE)]);
+
+    open_owned_window(&mut shell, &mut comp, &mut windows, window_owner(1), 1);
+    resolve_window_identities(&mut shell, &mut comp, &mut windows, &launched, |_| {
+        Some(EDITOR_PID)
+    });
+    let wm = windows.wm_id(1).expect("live");
+    assert_eq!(
+        window_identity(&comp, wm),
+        (Some(IconKind::AppBundle), None),
+        "a decode still in flight leaves the slot on its built-in glyph"
+    );
+    assert_eq!(task_artwork(&shell, wm), None);
+
+    // The decode lands. Nothing else about the desktop changed, so the window
+    // is pictured only because it kept its place on the identification list.
+    landed.set(true);
+    resolve_window_identities(&mut shell, &mut comp, &mut windows, &launched, |_| {
+        Some(EDITOR_PID)
+    });
+    assert_eq!(
+        window_identity(&comp, wm).1,
+        Some(EDITOR_TINT),
+        "the landing pictures the title bar"
+    );
+    assert_eq!(
+        task_artwork(&shell, wm).map(|(tint, _)| tint),
+        Some(EDITOR_TINT),
+        "and the taskbar entry with it"
+    );
+
+    // Pictured, so it is off the list: a later landing has nothing to redo.
+    resolve_window_identities(&mut shell, &mut comp, &mut windows, &launched, |_| {
+        panic!("a window already wearing its picture was offered identification again")
+    });
+}
+
+/// A window opens a spawn, a load, and an application's own bring-up after the
+/// launch that started it, so its icon can be decoded in between. This is that:
+/// warming from the launch table leaves the window wearing its own picture on
+/// the frame it first appears in, rather than the shared application glyph.
+#[test]
+fn a_window_wears_its_own_icon_on_the_frame_it_opens_in() {
+    /// A resolver over the real desk, as the serve loop's own is.
+    struct Deferring(Rc<RefCell<ArtworkDesk>>);
+
+    impl ArtworkResolver for Deferring {
+        fn resolve(&mut self, key: &tairix_icon::ArtworkKey, side: u32) -> Resolved {
+            self.0.borrow_mut().collect(key, side)
+        }
+
+        fn prefetch(&mut self, key: &tairix_icon::ArtworkKey, side: u32) {
+            self.0.borrow_mut().want(key, side);
+        }
+    }
+
+    NORMAL_PRESSURE.report(PressureBand::Normal);
+    let desk = Rc::new(RefCell::new(ArtworkDesk::new()));
+    let mut comp = compositor();
+    let mut shell = shell();
+    shell.set_artwork_resolver(alloc::boxed::Box::new(Deferring(Rc::clone(&desk))));
+    let mut windows = SessionWindows::new();
+    let launched = launched_bundles(&[(EDITOR_PID, EDITOR_BUNDLE)]);
+
+    // The launch is recorded; no window exists yet. The desktop asks for the
+    // application's picture at both slot sides all the same.
+    shell.warm_launched_artwork(&comp, launched.bundles());
+    assert!(
+        desk.borrow().has_work(),
+        "a recorded launch must start its icon"
+    );
+
+    let mut reader = ArtworkFileReader(identity_bundle(
+        MemoryAssets::default(),
+        EDITOR_BUNDLE,
+        "Editor",
+        &[EDITOR_TINT],
+    ));
+    let mut rasteriser = ArtworkSandbox(TaggedRasteriser::new());
+    let mut rounds = 0;
+    while desk.borrow().has_work() {
+        while let Some(job) = {
+            let taken = desk.borrow_mut().next_job();
+            taken
+        } {
+            let artwork =
+                tairix_icon::render_artwork(&mut reader, &mut rasteriser, &job.key, job.side);
+            assert!(desk.borrow_mut().deliver(&job, artwork));
+        }
+        shell.warm_launched_artwork(&comp, launched.bundles());
+        rounds += 1;
+        assert!(rounds < 8, "the warm-up must run dry");
+    }
+
+    // Only now does the window open. Its first identification wears the
+    // picture, with nothing deferred for a later pass to finish.
+    open_owned_window(&mut shell, &mut comp, &mut windows, window_owner(1), 1);
+    resolve_window_identities(&mut shell, &mut comp, &mut windows, &launched, |_| {
+        Some(EDITOR_PID)
+    });
+    let wm = windows.wm_id(1).expect("live");
+    assert_eq!(
+        window_identity(&comp, wm).1,
+        Some(EDITOR_TINT),
+        "the window opens wearing its application's own icon"
+    );
+    assert_eq!(
+        task_artwork(&shell, wm).map(|(tint, _)| tint),
+        Some(EDITOR_TINT),
+        "and its taskbar entry with it"
+    );
+    resolve_window_identities(&mut shell, &mut comp, &mut windows, &launched, |_| {
+        panic!("a window pictured on its first pass was offered identification again")
+    });
+}
+
+/// A window whose application has no picture at all must not stay on the
+/// identification list: a refusal is an answer, and re-offering it on every
+/// landing for as long as the window is open would be work with no end.
+#[test]
+fn a_window_whose_application_has_no_picture_leaves_the_identification_list() {
+    let (mut shell, mut comp, _reader, _rasteriser) = identity_desktop(MemoryAssets::default());
+    let mut windows = SessionWindows::new();
+    let launched = launched_bundles(&[(EDITOR_PID, EDITOR_BUNDLE)]);
+
+    open_owned_window(&mut shell, &mut comp, &mut windows, window_owner(1), 1);
+    resolve_window_identities(&mut shell, &mut comp, &mut windows, &launched, |_| {
+        Some(EDITOR_PID)
+    });
+    let wm = windows.wm_id(1).expect("live");
+    assert_eq!(
+        window_identity(&comp, wm),
+        (Some(IconKind::AppBundle), None),
+        "no manifest and no class master: the built-in glyph, for good"
+    );
+
+    resolve_window_identities(&mut shell, &mut comp, &mut windows, &launched, |_| {
+        panic!("a refused identity was offered again")
+    });
 }
 
 /// The reported stall, through the real window host: right-clicking a frosted,

@@ -35,7 +35,7 @@ use crate::layout::{BarLayout, Hit, NotificationsLayout, TrayReadoutLayout};
 use crate::library::{LibraryLayout, LibraryPopup};
 use crate::menu::{BarMenu, MenuLayout, MenuSubject};
 use crate::notifications::{NotificationArea, StatusSignal, TransientNotification};
-use crate::pins::{PinStrip, PinView};
+use crate::pins::{IconWant, PinStrip, PinView};
 use crate::repaint::TaskbarRepaint;
 use crate::system::{self, SystemPermits};
 use crate::tasks::TaskList;
@@ -553,6 +553,19 @@ impl Taskbar {
         self.repaint |= parts;
     }
 
+    /// Latch the surfaces that draw an application's own picture, for an
+    /// embedder whose icon artwork arrived after they were last painted.
+    ///
+    /// The bar (its pinned shortcuts and its task slots) and the library popup
+    /// (its rows) are the two that do; the context menu, the notification
+    /// popover, and the instrument readout draw no application artwork at all,
+    /// so a decode landing must not cost their pixels. Which surfaces those are
+    /// is the bar's own knowledge, so it says so here rather than an embedder
+    /// guessing at a flag set.
+    pub fn request_icon_repaint(&mut self) {
+        self.request_repaint(TaskbarRepaint::BAR | TaskbarRepaint::LIBRARY);
+    }
+
     /// Compute the bar's geometry for its current pin, task, and icon counts
     /// at the desktop `scale` (the compositor's output density).
     #[must_use]
@@ -591,6 +604,45 @@ impl Taskbar {
             scale,
             &self.theme,
         )
+    }
+
+    /// Which catalogued applications the bar's surfaces will draw an icon for,
+    /// and at what pixel side, so an embedder can have those decoded before the
+    /// surface drawing them is shown.
+    ///
+    /// One want per (application, side) the bar would resolve if it were painted
+    /// now: the launcher popup's first screenful of rows at the row side they
+    /// draw at — the rows a user sees the instant the popup opens, which is the
+    /// one bar surface whose first paint happens long after bring-up — and every
+    /// pinned application at the strip's slot side. Both sides come from the same
+    /// layout the paint uses, so the two cannot disagree and a warmed icon is
+    /// never the wrong size.
+    ///
+    /// The bar's own furniture is deliberately absent: its buttons, task slots,
+    /// and tray are painted with the bar itself at bring-up, so their icons are
+    /// already being resolved before a user has anything to look at. What needs
+    /// asking for early is what a *later* gesture reveals.
+    ///
+    /// Naming the set is the bar's own knowledge, so it says so here rather than
+    /// an embedder guessing which of its surfaces draw what.
+    #[must_use]
+    pub fn catalog_icon_wants(&self, scale: Scale) -> Vec<IconWant> {
+        let rows =
+            self.library
+                .visible_icon_requests(&self.library_layout(scale), scale, &self.theme);
+        let pin_side = self.pin_icon_side(scale);
+        rows.into_iter()
+            .map(|request| IconWant {
+                entry: request.entry,
+                side: request.side,
+            })
+            .chain(self.pins.pins().iter().filter_map(|view| {
+                view.entry().map(|entry| IconWant {
+                    entry: entry.clone(),
+                    side: pin_side,
+                })
+            }))
+            .collect()
     }
 
     /// Compute the notification popover's geometry for the current

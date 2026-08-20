@@ -21,8 +21,9 @@ use tairix_reclaim::pressure::{PressureBand, ReportedPressure};
 
 use super::{
     artwork_cache, artwork_kind_for_file, icon_artwork_path, icon_vector_path, ArtworkCache,
-    ArtworkRasteriser, ArtworkReader, IconArtwork, IconArtworkSource, IconRequest, NoArtwork,
-    MAX_ARTWORK_BYTES, VECTOR_SUFFIX,
+    ArtworkKey, ArtworkOutcome, ArtworkRasteriser, ArtworkReader, ArtworkResolver, IconArtwork,
+    IconArtworkSource, IconRequest, InlineArtwork, NoArtwork, Resolved, Surface, MAX_ARTWORK_BYTES,
+    VECTOR_SUFFIX,
 };
 use crate::glyph::IconKind;
 use crate::load::ICON_KINDS;
@@ -153,7 +154,7 @@ fn a_readable_asset_rasterises_to_a_surface() {
     let mut reader = CountingReader::new().with("/a.png", vec![0u8; 10]);
     let mut ras = SquareRasteriser;
     let surface = c
-        .path_artwork(&mut reader, &mut ras, "/a.png", 4)
+        .path_artwork(&mut InlineArtwork::new(&mut reader, &mut ras), "/a.png", 4)
         .expect("artwork");
     assert_eq!(surface.width(), 4);
     assert_eq!(surface.height(), 4);
@@ -164,8 +165,12 @@ fn a_cached_hit_does_not_re_read() {
     let mut c = cache();
     let mut reader = CountingReader::new().with("/a.png", vec![1, 2, 3]);
     let mut ras = SquareRasteriser;
-    assert!(c.path_artwork(&mut reader, &mut ras, "/a.png", 8).is_some());
-    assert!(c.path_artwork(&mut reader, &mut ras, "/a.png", 8).is_some());
+    assert!(c
+        .path_artwork(&mut InlineArtwork::new(&mut reader, &mut ras), "/a.png", 8)
+        .is_some());
+    assert!(c
+        .path_artwork(&mut InlineArtwork::new(&mut reader, &mut ras), "/a.png", 8)
+        .is_some());
     assert_eq!(reader.reads, 1, "the second lookup served from the cache");
 }
 
@@ -175,10 +180,18 @@ fn an_unreadable_asset_caches_the_refusal() {
     let mut reader = CountingReader::new();
     let mut ras = SquareRasteriser;
     assert!(c
-        .path_artwork(&mut reader, &mut ras, "/missing.png", 8)
+        .path_artwork(
+            &mut InlineArtwork::new(&mut reader, &mut ras),
+            "/missing.png",
+            8
+        )
         .is_none());
     assert!(c
-        .path_artwork(&mut reader, &mut ras, "/missing.png", 8)
+        .path_artwork(
+            &mut InlineArtwork::new(&mut reader, &mut ras),
+            "/missing.png",
+            8
+        )
         .is_none());
     assert_eq!(reader.reads, 1, "the negative result was cached");
 }
@@ -189,7 +202,11 @@ fn an_oversize_asset_is_refused_before_rasterising() {
     let mut reader = CountingReader::new().with("/big.png", vec![0u8; MAX_ARTWORK_BYTES + 1]);
     let mut ras = PanicRasteriser;
     assert!(c
-        .path_artwork(&mut reader, &mut ras, "/big.png", 8)
+        .path_artwork(
+            &mut InlineArtwork::new(&mut reader, &mut ras),
+            "/big.png",
+            8
+        )
         .is_none());
 }
 
@@ -198,7 +215,9 @@ fn a_wrong_length_reply_is_refused() {
     let mut c = cache();
     let mut reader = CountingReader::new().with("/a.png", vec![0u8; 10]);
     let mut ras = ShortRasteriser;
-    assert!(c.path_artwork(&mut reader, &mut ras, "/a.png", 8).is_none());
+    assert!(c
+        .path_artwork(&mut InlineArtwork::new(&mut reader, &mut ras), "/a.png", 8)
+        .is_none());
 }
 
 #[test]
@@ -206,7 +225,9 @@ fn a_zero_side_is_refused_without_reading() {
     let mut c = cache();
     let mut reader = CountingReader::new().with("/a.png", vec![0u8; 10]);
     let mut ras = SquareRasteriser;
-    assert!(c.path_artwork(&mut reader, &mut ras, "/a.png", 0).is_none());
+    assert!(c
+        .path_artwork(&mut InlineArtwork::new(&mut reader, &mut ras), "/a.png", 0)
+        .is_none());
     assert_eq!(reader.reads, 0, "a zero side never reaches the reader");
 }
 
@@ -218,8 +239,7 @@ fn a_kind_request_resolves_the_raster_class_master() {
     let mut ras = SquareRasteriser;
     assert!(c
         .artwork(
-            &mut reader,
-            &mut ras,
+            &mut InlineArtwork::new(&mut reader, &mut ras),
             IconRequest::kind(IconKind::Folder),
             8
         )
@@ -236,8 +256,7 @@ fn a_kind_with_only_a_vector_master_resolves_through_the_vector_tier() {
     let mut ras = SquareRasteriser;
     assert!(c
         .artwork(
-            &mut reader,
-            &mut ras,
+            &mut InlineArtwork::new(&mut reader, &mut ras),
             IconRequest::kind(IconKind::Folder),
             8
         )
@@ -263,8 +282,7 @@ fn a_kind_shipping_both_formats_prefers_the_raster() {
     let mut ras = SquareRasteriser;
     assert!(c
         .artwork(
-            &mut reader,
-            &mut ras,
+            &mut InlineArtwork::new(&mut reader, &mut ras),
             IconRequest::kind(IconKind::Folder),
             8
         )
@@ -281,9 +299,13 @@ fn a_kind_with_no_class_master_is_remembered_as_having_none() {
     let mut reader = CountingReader::new();
     let mut ras = SquareRasteriser;
     let request = IconRequest::kind(IconKind::Folder);
-    assert!(c.artwork(&mut reader, &mut ras, request, 8).is_none());
+    assert!(c
+        .artwork(&mut InlineArtwork::new(&mut reader, &mut ras), request, 8)
+        .is_none());
     assert_eq!(reader.reads, 2, "each class format was tried once");
-    assert!(c.artwork(&mut reader, &mut ras, request, 8).is_none());
+    assert!(c
+        .artwork(&mut InlineArtwork::new(&mut reader, &mut ras), request, 8)
+        .is_none());
     assert_eq!(reader.reads, 2, "both refusals were retained");
 }
 
@@ -301,7 +323,8 @@ fn icon_artwork_source_resolves_through_the_cache() {
     let path = icon_artwork_path(IconKind::AppBundle);
     let mut reader = CountingReader::new().with(&path, vec![0u8; 10]);
     let mut ras = SquareRasteriser;
-    let mut source = IconArtworkSource::new(&mut c, &mut reader, &mut ras);
+    let mut inline = InlineArtwork::new(&mut reader, &mut ras);
+    let mut source = IconArtworkSource::new(&mut c, &mut inline);
     assert!(source
         .artwork(IconRequest::kind(IconKind::AppBundle), 8)
         .is_some());
@@ -357,8 +380,7 @@ fn a_bundle_draws_the_icon_its_own_manifest_names() {
     let mut ras = SquareRasteriser;
     let surface = c
         .artwork(
-            &mut reader,
-            &mut ras,
+            &mut InlineArtwork::new(&mut reader, &mut ras),
             IconRequest::bundle(IconKind::AppBundle, "/Apps/x.app"),
             8,
         )
@@ -377,8 +399,7 @@ fn a_bundle_with_no_icon_of_its_own_falls_back_to_its_kind() {
     let mut ras = SquareRasteriser;
     assert!(c
         .artwork(
-            &mut reader,
-            &mut ras,
+            &mut InlineArtwork::new(&mut reader, &mut ras),
             IconRequest::bundle(IconKind::AppBundle, "/Apps/x.app"),
             8,
         )
@@ -396,8 +417,7 @@ fn a_bundle_whose_icon_will_not_serve_falls_back_and_never_blanks() {
     let mut ras = SquareRasteriser;
     assert!(c
         .artwork(
-            &mut reader,
-            &mut ras,
+            &mut InlineArtwork::new(&mut reader, &mut ras),
             IconRequest::bundle(IconKind::AppBundle, "/Apps/x.app"),
             8,
         )
@@ -407,8 +427,7 @@ fn a_bundle_whose_icon_will_not_serve_falls_back_and_never_blanks() {
     let mut bare = CountingReader::new().with(&kind_path, vec![0u8; 10]);
     assert!(c
         .artwork(
-            &mut bare,
-            &mut ras,
+            &mut InlineArtwork::new(&mut bare, &mut ras),
             IconRequest::bundle(IconKind::AppBundle, "/Apps/bare.app"),
             8,
         )
@@ -428,8 +447,7 @@ fn a_bundle_icon_escaping_its_own_resources_is_refused() {
     let mut ras = SquareRasteriser;
     let surface = c
         .artwork(
-            &mut reader,
-            &mut ras,
+            &mut InlineArtwork::new(&mut reader, &mut ras),
             IconRequest::bundle(IconKind::AppBundle, "/Apps/x.app"),
             8,
         )
@@ -454,9 +472,13 @@ fn a_bundle_with_no_icon_re_reads_neither_its_manifest_nor_the_kind_asset() {
         .with(&kind_path, vec![0u8; 10]);
     let mut ras = SquareRasteriser;
     let request = IconRequest::bundle(IconKind::AppBundle, "/Apps/x.app");
-    assert!(c.artwork(&mut reader, &mut ras, request, 8).is_some());
+    assert!(c
+        .artwork(&mut InlineArtwork::new(&mut reader, &mut ras), request, 8)
+        .is_some());
     let after_first = reader.reads;
-    assert!(c.artwork(&mut reader, &mut ras, request, 8).is_some());
+    assert!(c
+        .artwork(&mut InlineArtwork::new(&mut reader, &mut ras), request, 8)
+        .is_some());
     assert_eq!(
         reader.reads, after_first,
         "both the manifest refusal and the class artwork were retained"
@@ -473,8 +495,7 @@ fn an_asset_request_prefers_the_named_asset_over_the_kind() {
     let mut ras = SquareRasteriser;
     assert!(c
         .artwork(
-            &mut reader,
-            &mut ras,
+            &mut InlineArtwork::new(&mut reader, &mut ras),
             IconRequest::asset(IconKind::AppBundle, "/Apps/x.app/Resources/x.png"),
             8,
         )
@@ -488,7 +509,9 @@ fn charged_bytes_grows_on_admit_and_teardown_clears() {
     assert_eq!(c.charged_bytes(), 0);
     let mut reader = CountingReader::new().with("/a.png", vec![0u8; 10]);
     let mut ras = SquareRasteriser;
-    assert!(c.path_artwork(&mut reader, &mut ras, "/a.png", 8).is_some());
+    assert!(c
+        .path_artwork(&mut InlineArtwork::new(&mut reader, &mut ras), "/a.png", 8)
+        .is_some());
     assert!(c.charged_bytes() > 0);
     c.teardown();
     assert_eq!(c.charged_bytes(), 0);
@@ -608,4 +631,248 @@ fn the_launcher_icons_draw_the_artwork_they_were_authored_with() {
             64 * 64
         );
     }
+}
+
+// ---------------------------------------------------------------------
+// The deferring resolver
+// ---------------------------------------------------------------------
+
+/// A resolver standing in for a worker thread: it answers `Pending` for a key
+/// it has not been *primed* with, records the ask, and answers `Done` once the
+/// test says the decode has landed.
+///
+/// This is the whole of what an off-thread producer looks like to the cache, so
+/// the rules below are the ones a real decoder thread depends on.
+struct Deferring {
+    ready: BTreeMap<(ArtworkKey, u32), Option<Surface>>,
+    asked: Vec<(ArtworkKey, u32)>,
+    warmed: Vec<(ArtworkKey, u32)>,
+}
+
+impl Deferring {
+    fn new() -> Self {
+        Self {
+            ready: BTreeMap::new(),
+            asked: Vec::new(),
+            warmed: Vec::new(),
+        }
+    }
+
+    /// Say that the decode of `key` at `side` has landed, as `artwork`.
+    fn land(&mut self, key: &ArtworkKey, side: u32, artwork: Option<Surface>) {
+        self.ready.insert((key.clone(), side), artwork);
+    }
+}
+
+impl ArtworkResolver for Deferring {
+    fn resolve(&mut self, key: &ArtworkKey, side: u32) -> Resolved {
+        self.asked.push((key.clone(), side));
+        self.ready
+            .remove(&(key.clone(), side))
+            .map_or(Resolved::Pending, Resolved::Done)
+    }
+
+    fn prefetch(&mut self, key: &ArtworkKey, side: u32) {
+        self.warmed.push((key.clone(), side));
+    }
+}
+
+fn square(side: u32) -> Surface {
+    Surface::new(side, side).expect("a square surface")
+}
+
+#[test]
+fn a_pending_decode_retains_nothing_and_draws_the_glyph() {
+    let mut c = cache();
+    let mut deferring = Deferring::new();
+    assert!(c.path_artwork(&mut deferring, "/a.png", 8).is_none());
+    assert_eq!(c.charged_bytes(), 0, "an unfinished decode retains nothing");
+    assert_eq!(deferring.asked.len(), 1);
+}
+
+#[test]
+fn a_landed_decode_is_served_and_retained_on_the_next_ask() {
+    let mut c = cache();
+    let mut deferring = Deferring::new();
+    assert!(c.path_artwork(&mut deferring, "/a.png", 8).is_none());
+
+    deferring.land(&ArtworkKey::Asset("/a.png".to_string()), 8, Some(square(8)));
+    assert_eq!(
+        c.path_artwork(&mut deferring, "/a.png", 8)
+            .map(Surface::width),
+        Some(8)
+    );
+    assert!(c.charged_bytes() > 0);
+
+    // Retained, so the resolver is not consulted a third time.
+    let asked = deferring.asked.len();
+    assert!(c.path_artwork(&mut deferring, "/a.png", 8).is_some());
+    assert_eq!(
+        deferring.asked.len(),
+        asked,
+        "the third ask was a cache hit"
+    );
+}
+
+/// Whether a later tier is reached at all depends on what this one turns out
+/// to be, so a pending tier stops the walk rather than racing ahead and
+/// decoding artwork the bundle's own icon would have replaced.
+#[test]
+fn a_pending_tier_stops_the_walk_rather_than_falling_through() {
+    let mut c = cache();
+    let mut deferring = Deferring::new();
+    let request = IconRequest::asset(IconKind::AppBundle, "/Apps/One.app/Resources/icon.png");
+    assert!(c.artwork(&mut deferring, request, 8).is_none());
+    assert_eq!(
+        deferring.asked,
+        vec![(
+            ArtworkKey::Asset("/Apps/One.app/Resources/icon.png".to_string()),
+            8
+        )],
+        "the class tiers were asked for before the thing's own icon resolved"
+    );
+}
+
+/// A refusal is an answer: it advances the walk, one tier per landing, and the
+/// request costs exactly the reads a synchronous walk would.
+#[test]
+fn a_landed_refusal_advances_the_walk_one_tier_at_a_time() {
+    let mut c = cache();
+    let mut deferring = Deferring::new();
+    let own = ArtworkKey::Asset("/Apps/One.app/Resources/icon.png".to_string());
+    let raster = ArtworkKey::Asset(icon_artwork_path(IconKind::AppBundle));
+    let request = IconRequest::asset(IconKind::AppBundle, "/Apps/One.app/Resources/icon.png");
+
+    deferring.land(&own, 8, None);
+    assert!(
+        c.artwork(&mut deferring, request, 8).is_none(),
+        "the own-icon tier refused, so the next tier is only now asked for"
+    );
+    assert_eq!(deferring.asked, vec![(own, 8), (raster.clone(), 8)]);
+
+    deferring.land(&raster, 8, Some(square(8)));
+    assert!(
+        c.artwork(&mut deferring, request, 8).is_some(),
+        "and the class master serves once it lands"
+    );
+}
+
+#[test]
+fn owned_artwork_tells_a_storing_caller_pending_from_refused() {
+    let mut c = cache();
+    let mut deferring = Deferring::new();
+    let request = IconRequest::kind(IconKind::AppBundle);
+    let raster = ArtworkKey::Asset(icon_artwork_path(IconKind::AppBundle));
+    let vector = ArtworkKey::Asset(icon_vector_path(IconKind::AppBundle));
+
+    assert!(matches!(
+        c.owned_artwork(&mut deferring, request, 8),
+        ArtworkOutcome::Pending
+    ));
+
+    deferring.land(&raster, 8, None);
+    assert!(
+        matches!(
+            c.owned_artwork(&mut deferring, request, 8),
+            ArtworkOutcome::Pending
+        ),
+        "the raster tier refused, so the vector tier is only now asked for"
+    );
+
+    deferring.land(&vector, 8, None);
+    assert!(
+        matches!(
+            c.owned_artwork(&mut deferring, request, 8),
+            ArtworkOutcome::Refused
+        ),
+        "both class tiers refused, so asking again would only repeat them"
+    );
+}
+
+#[test]
+fn owned_artwork_hands_back_a_picture_the_cache_could_not_retain() {
+    // A gauge of this test's own, so moving the band cannot perturb another's.
+    let gauge: &'static ReportedPressure = Box::leak(Box::new(ReportedPressure::unknown()));
+    gauge.report(PressureBand::Normal);
+    let sink: &'static DiscardSink = Box::leak(Box::new(DiscardSink));
+    let mut c = artwork_cache("test.icon-artwork", 1, 1920 * 1080 * 4, gauge, sink);
+    let mut reader = CountingReader::new().with("/a.png", vec![0u8; 10]);
+    let mut ras = SquareRasteriser;
+    let request = IconRequest::asset(IconKind::AppBundle, "/a.png");
+
+    gauge.report(PressureBand::Mild);
+    let inline = &mut InlineArtwork::new(&mut reader, &mut ras);
+    assert!(
+        c.artwork(inline, request, 8).is_none(),
+        "a borrow cannot be served out of a cache retaining nothing"
+    );
+    assert!(
+        matches!(
+            c.owned_artwork(inline, request, 8),
+            ArtworkOutcome::Ready(_)
+        ),
+        "but a caller that copies the pixels out gets the decode rather than \
+         seeing it thrown away"
+    );
+    assert_eq!(c.charged_bytes(), 0, "and still nothing is retained");
+}
+
+/// Warming asks the producer for the tier that will serve, and draws nothing —
+/// which is what lets a desktop have its icons decoded before the surface that
+/// shows them is ever painted.
+#[test]
+fn a_warm_up_asks_for_the_serving_tier_and_retains_nothing() {
+    let mut c = cache();
+    let mut deferring = Deferring::new();
+    let own = ArtworkKey::Asset("/Apps/One.app/Resources/icon.png".to_string());
+    let request = IconRequest::asset(IconKind::AppBundle, "/Apps/One.app/Resources/icon.png");
+
+    c.prefetch(&mut deferring, request, 8);
+    assert_eq!(deferring.warmed, vec![(own.clone(), 8)]);
+    assert!(deferring.asked.is_empty(), "a warm-up resolves nothing");
+    assert_eq!(c.charged_bytes(), 0, "and retains nothing");
+
+    // Warming the same request again asks for nothing new: the producer is
+    // already on it, and a desktop re-reading its catalog must not re-ask.
+    c.prefetch(&mut deferring, request, 8);
+    assert_eq!(
+        deferring.warmed.len(),
+        2,
+        "the cache holds no record of what was asked for, so the producer \
+         dedupes — this is only that it is asked, not that it decodes twice"
+    );
+
+    // Once it lands and is retained, the warm-up asks for nothing at all.
+    deferring.land(&own, 8, Some(square(8)));
+    assert!(c.artwork(&mut deferring, request, 8).is_some());
+    let warmed = deferring.warmed.len();
+    c.prefetch(&mut deferring, request, 8);
+    assert_eq!(
+        deferring.warmed.len(),
+        warmed,
+        "an icon already in the cache is not warmed again"
+    );
+}
+
+/// The tier a warm-up asks for is the first one not already held, so a class
+/// master whose raster form was refused is warmed at its vector form — the same
+/// tier the paint would reach.
+#[test]
+fn a_warm_up_skips_the_tiers_already_refused() {
+    let mut c = cache();
+    let mut deferring = Deferring::new();
+    let raster = ArtworkKey::Asset(icon_artwork_path(IconKind::AppBundle));
+    let vector = ArtworkKey::Asset(icon_vector_path(IconKind::AppBundle));
+    let request = IconRequest::kind(IconKind::AppBundle);
+
+    deferring.land(&raster, 8, None);
+    assert!(c.artwork(&mut deferring, request, 8).is_none());
+
+    deferring.warmed.clear();
+    c.prefetch(&mut deferring, request, 8);
+    assert_eq!(
+        deferring.warmed,
+        vec![(vector, 8)],
+        "the refused raster tier is retained, so the vector tier is what is wanted"
+    );
 }

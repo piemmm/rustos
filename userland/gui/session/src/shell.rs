@@ -45,7 +45,8 @@ use tairix_browse::{DirectorySource, GridView};
 use tairix_cursor::{CursorRegistry, CursorSetId, CursorTheme};
 use tairix_geometry::Region;
 use tairix_icon::{
-    artwork_cache, ArtworkCache, ArtworkRasteriser, ArtworkReader, IconArtworkSource, IconSet,
+    artwork_cache, ArtworkCache, ArtworkRasteriser, ArtworkReader, ArtworkResolver,
+    IconArtworkSource, IconKind, IconRequest, IconSet, InlineArtwork,
 };
 use tairix_log::Sink;
 use tairix_proglib::Catalog;
@@ -64,7 +65,7 @@ use tairix_wm::{
 use crate::desktop::Desktop;
 use crate::input::{SessionInputResponse, SessionInputRouter};
 use crate::pinboard::PinboardMenu;
-use crate::pins::resolve_library_icons;
+use crate::pins::{prefetch_bar_icons, resolve_library_icons};
 use crate::presenter::{place, TaskbarPresenter};
 use crate::session::DesktopSession;
 use crate::tasks::TaskBridge;
@@ -136,14 +137,13 @@ pub struct DesktopShell {
     /// `/System/Graphics` masters and each application bundle's own icon —
     /// keyed by asset path and pixel side.
     artwork: ArtworkCache,
-    /// Where the artwork bytes are read from, and what turns them into
-    /// pixels. Boxed because an embedder installs its own real seams (the
-    /// VFS reader and the parser sandbox) over the starting pair, which
-    /// find and decode nothing so a shell that was never given them draws
-    /// entirely from built-in glyphs rather than reaching for I/O it does
-    /// not hold.
-    artwork_reader: Box<dyn ArtworkReader>,
-    artwork_rasteriser: Box<dyn ArtworkRasteriser>,
+    /// How a miss in that cache becomes pixels — a read of the asset plus a
+    /// decode of it, on a worker thread where the embedder has one. Boxed
+    /// because the embedder installs its own over a starting resolver that
+    /// finds and decodes nothing, so a shell that was never given one draws
+    /// entirely from built-in glyphs rather than reaching for I/O it does not
+    /// hold.
+    artwork_resolver: Box<dyn ArtworkResolver>,
     /// The decorated window currently shown with its active frame rim, kept
     /// in step with the window manager's focused window by
     /// [`sync_active_frame`](Self::sync_active_frame). `None` when focus rests
@@ -199,8 +199,8 @@ impl core::fmt::Debug for DesktopShell {
 
 /// The artwork seams a shell starts with: nothing is found and nothing is
 /// decoded, so every icon falls back to its built-in glyph until the
-/// embedder installs the real filesystem and sandbox seams with
-/// [`DesktopShell::set_artwork_source`].
+/// embedder installs the real resolver with
+/// [`DesktopShell::set_artwork_resolver`].
 ///
 /// One type for both halves because both are the same refusal; two would be
 /// the same emptiness written twice.
@@ -237,7 +237,7 @@ impl DesktopShell {
     ///
     /// The shipped icon artwork starts unreachable — every icon draws its
     /// built-in glyph — until the embedder installs the seams that can read
-    /// and decode it with [`set_artwork_source`](Self::set_artwork_source).
+    /// and decode it with [`set_artwork_resolver`](Self::set_artwork_resolver).
     #[must_use]
     pub fn new(
         config: TaskbarConfig,
@@ -280,8 +280,7 @@ impl DesktopShell {
             tasks: TaskBridge::new(),
             cursor: CursorController::new(cursors),
             artwork,
-            artwork_reader: Box::new(NoArtworkSeam),
-            artwork_rasteriser: Box::new(NoArtworkSeam),
+            artwork_resolver: Box::new(InlineArtwork::new(NoArtworkSeam, NoArtworkSeam)),
             active_frame: None,
             wallpaper: None,
             pinboard_window: None,
@@ -297,42 +296,27 @@ impl DesktopShell {
         self.settled
     }
 
-    /// Install the seams the desktop's shipped and bundle-supplied icon
-    /// artwork is read and decoded through: `reader` fetches the asset
-    /// bytes and `rasteriser` turns them into pixels.
+    /// Install what the desktop's shipped and bundle-supplied icon artwork is
+    /// produced through: a read of the asset bytes plus a decode of them.
     ///
-    /// The embedder supplies the real pair — the session's file reader and
-    /// the parser sandbox that decodes untrusted image bytes outside this
-    /// address space. Until it does, both refuse, and every icon draws its
-    /// built-in glyph; a refusal after they are installed does the same, so
-    /// no slot can blank whatever the store holds.
-    pub fn set_artwork_source(
-        &mut self,
-        reader: Box<dyn ArtworkReader>,
-        rasteriser: Box<dyn ArtworkRasteriser>,
-    ) {
-        self.artwork_reader = reader;
-        self.artwork_rasteriser = rasteriser;
+    /// The embedder supplies the real one — the session's file reader and the
+    /// parser sandbox that decodes untrusted image bytes outside this address
+    /// space, either on the calling thread or on a worker. Until it does,
+    /// resolution refuses and every icon draws its built-in glyph; a refusal
+    /// after it is installed does the same, so no slot can blank whatever the
+    /// store holds.
+    pub fn set_artwork_resolver(&mut self, resolver: Box<dyn ArtworkResolver>) {
+        self.artwork_resolver = resolver;
     }
 
-    /// The artwork cache and the two seams it resolves through, borrowed
-    /// together.
+    /// The artwork cache and the resolver it produces misses through,
+    /// borrowed together.
     ///
-    /// One accessor rather than three because a caller needs all three at
-    /// once (they are the arguments of a single resolution) and three
-    /// separate borrows of the same shell cannot be held together.
-    pub fn artwork_parts(
-        &mut self,
-    ) -> (
-        &mut ArtworkCache,
-        &mut dyn ArtworkReader,
-        &mut dyn ArtworkRasteriser,
-    ) {
-        (
-            &mut self.artwork,
-            self.artwork_reader.as_mut(),
-            self.artwork_rasteriser.as_mut(),
-        )
+    /// One accessor rather than two because a caller needs both at once (they
+    /// are the arguments of a single resolution) and two separate borrows of
+    /// the same shell cannot be held together.
+    pub fn artwork_parts(&mut self) -> (&mut ArtworkCache, &mut dyn ArtworkResolver) {
+        (&mut self.artwork, self.artwork_resolver.as_mut())
     }
 
     /// Give back every rasterised pixel the current memory-pressure band
@@ -766,16 +750,11 @@ impl DesktopShell {
         resolve_library_icons(
             self.session.taskbar_mut(),
             compositor.scale(),
-            self.artwork_reader.as_mut(),
-            self.artwork_rasteriser.as_mut(),
+            self.artwork_resolver.as_mut(),
             &mut self.artwork,
         );
         let parts = self.session.taskbar_mut().take_repaint();
-        let mut artwork = IconArtworkSource::new(
-            &mut self.artwork,
-            self.artwork_reader.as_mut(),
-            self.artwork_rasteriser.as_mut(),
-        );
+        let mut artwork = IconArtworkSource::new(&mut self.artwork, self.artwork_resolver.as_mut());
         self.presenter.present(
             compositor,
             &mut self.renderer,
@@ -783,6 +762,64 @@ impl DesktopShell {
             parts,
             &mut artwork,
         );
+    }
+
+    /// Start decoding every icon the bar's surfaces will draw, so the surface
+    /// drawing them is never the first thing to ask for them.
+    ///
+    /// A decode is a read plus a sandbox round trip. Left to the paint, a
+    /// launcher opening on twenty applications shows twenty built-in glyphs and
+    /// replaces them a round trip per icon later; asked for here — when the
+    /// catalog or the pin strip that names them changes, which is long before
+    /// either surface is shown — the wait is already over. Nothing is drawn and
+    /// nothing is waited for, and a shell whose resolver produces on the
+    /// calling thread prefetches nothing at all.
+    pub fn warm_icon_artwork(&mut self, compositor: &Compositor) {
+        prefetch_bar_icons(
+            self.session.taskbar(),
+            compositor.scale(),
+            self.artwork_resolver.as_mut(),
+            &mut self.artwork,
+        );
+    }
+
+    /// Start decoding the icon of every application `bundles` names, at the two
+    /// sides a window of it will wear it in — its title band and its taskbar
+    /// slot.
+    ///
+    /// A window opens a good while after its application was launched: a spawn,
+    /// a load, and the app's own bring-up. Asking on the wake that recorded the
+    /// launch therefore has the picture ready by the time there is a window to
+    /// put it on; left to the window-open pass, a window appears wearing the
+    /// shared application glyph and swaps it for its own a decode later.
+    pub fn warm_launched_artwork<'a>(
+        &mut self,
+        compositor: &Compositor,
+        bundles: impl Iterator<Item = &'a str>,
+    ) {
+        let sides = [
+            self.session.taskbar().task_icon_side(compositor.scale()),
+            compositor.title_identity_icon_side(),
+        ];
+        for bundle in bundles {
+            let request = IconRequest::bundle(IconKind::AppBundle, bundle);
+            for side in sides {
+                self.artwork
+                    .prefetch(self.artwork_resolver.as_mut(), request, side);
+            }
+        }
+    }
+
+    /// Repaint the bar's icon-bearing surfaces, because artwork a previous
+    /// paint fell back to a built-in glyph for has since been decoded.
+    ///
+    /// The desktop's own icon column is the embedder's to repaint (it owns the
+    /// model the column is laid out from); this is the taskbar half of the same
+    /// answer, so a decode that lands is drawn wherever it belongs without the
+    /// embedder having to know which of the bar's five surfaces show icons.
+    pub fn present_icon_artwork(&mut self, compositor: &mut Compositor) {
+        self.session.taskbar_mut().request_icon_repaint();
+        self.present(compositor);
     }
 
     /// Install the screen-sized, already-fitted `wallpaper` the desktop layer
@@ -855,10 +892,9 @@ impl DesktopShell {
         let theme = self.session.active_theme();
         let wallpaper = self.wallpaper.as_ref();
         let cache = &mut self.artwork;
-        let reader = self.artwork_reader.as_mut();
-        let rasteriser = self.artwork_rasteriser.as_mut();
+        let resolver = self.artwork_resolver.as_mut();
         compositor.repaint_desktop(area, |surface, rects| {
-            let mut artwork = IconArtworkSource::new(cache, reader, rasteriser);
+            let mut artwork = IconArtworkSource::new(cache, resolver);
             for rect in rects {
                 // The layer sits at the screen origin and every rectangle is
                 // clipped to it, so its corner is a surface coordinate; a

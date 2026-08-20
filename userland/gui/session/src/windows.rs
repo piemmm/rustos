@@ -17,7 +17,6 @@
 //! its frame disagree.
 
 use alloc::collections::BTreeMap;
-use alloc::string::String;
 use alloc::vec::Vec;
 
 use tairix_abi::desktop::DesktopInfo;
@@ -25,15 +24,13 @@ use tairix_abi::driver::display::{DamageRect, DisplayMode};
 use tairix_abi::window_ipc::WindowEvent;
 use tairix_abi::{Errno, ProcId};
 use tairix_display::winframe;
-use tairix_icon::{IconKind, IconRequest};
+use tairix_icon::{ArtworkOutcome, IconKind, IconRequest};
 use tairix_window::{PinDecision, WindowSizing};
 use tairix_wm::{Color, Compositor, Point, Rect, Surface, WindowControlKind, WindowId};
 
 use crate::launch::LaunchTable;
 use crate::picker::PickerSlot;
-use crate::pins::{
-    bundle_icon_source, bundle_manifest_path, decode_bundle_manifest, PinBridge, BUNDLE_RUN_SUFFIX,
-};
+use crate::pins::{PinBridge, BUNDLE_RUN_SUFFIX};
 use crate::shell::DesktopShell;
 
 /// The freshly opened window's fill until the app's first present lands:
@@ -150,6 +147,17 @@ impl SessionWindows {
     /// list empty, so each window is offered for identification once.
     pub fn take_opened_owners(&mut self) -> Vec<(WindowId, ProcId)> {
         core::mem::take(&mut self.opened_owners)
+    }
+
+    /// Put a drained window back on the identification list because its
+    /// application's picture is still being decoded.
+    ///
+    /// A window is otherwise offered for identification once. One whose
+    /// artwork was not ready keeps its place instead, so the pass the landing
+    /// decode drives pictures it — rather than the window wearing the shared
+    /// application glyph for as long as it stays open.
+    pub fn defer_identity(&mut self, wm: WindowId, owner: ProcId) {
+        self.opened_owners.push((wm, owner));
     }
 
     /// Record the freshly opened window `ipc`, shown as `wm` and owned by
@@ -308,46 +316,37 @@ pub fn resolve_window_identities<F>(
         else {
             continue;
         };
-        // Read the bundle's manifest once and rasterise from it per slot:
-        // the two slots differ only in pixel side, and the declared source
-        // is the same answer for both.
-        let declared = bundle_icon_asset(shell, bundle);
         // An undecorated window draws no identity slot and reports no side;
         // it still has a taskbar entry to identify.
+        let mut waiting = false;
         if let Some(side) = compositor.window_title_icon_side(wm) {
-            let artwork = bundle_artwork(shell, declared.as_deref(), side);
+            let (artwork, pending) = bundle_artwork(shell, bundle, side);
+            waiting |= pending;
             compositor.set_window_identity(wm, IconKind::AppBundle, artwork);
         }
         if let Some(task) = shell.tasks().task_for(wm) {
             let side = shell.session().taskbar().task_icon_side(compositor.scale());
-            let artwork = bundle_artwork(shell, declared.as_deref(), side);
+            let (artwork, pending) = bundle_artwork(shell, bundle, side);
+            waiting |= pending;
             shell.set_task_artwork(compositor, task, artwork);
+        }
+        // Both slots store the picture rather than drawing it from the cache,
+        // so a decode still in flight has to be asked for again; the slot that
+        // did resolve is a cache hit on that second pass. A window already
+        // gone asks for nothing and so is never re-queued.
+        if waiting {
+            windows.defer_identity(wm, owner);
         }
     }
 }
 
-/// The asset path `bundle`'s own manifest declares its icon at, if it
-/// declares one that reads and decodes.
+/// The picture at `side` pixels for the application installed at the
+/// `bundle` directory, resolved through the session's one artwork cache.
 ///
 /// `bundle` is the bundle *directory* of the application the kernel attested
-/// owns the window, never a path an application sent. `None` — no manifest,
-/// a manifest that will not decode, or one declaring no icon — resolves the
-/// shipped application-bundle artwork instead, exactly as a pinned
-/// application does.
-fn bundle_icon_asset(shell: &mut DesktopShell, bundle: &str) -> Option<String> {
-    let manifest_path = bundle_manifest_path(bundle);
-    let (_, reader, _) = shell.artwork_parts();
-    reader
-        .read(&manifest_path)
-        .as_deref()
-        .and_then(decode_bundle_manifest)
-        .and_then(|header| bundle_icon_source(&header, bundle))
-        .map(|source| source.path())
-}
-
-/// The picture at `side` pixels for an application whose manifest declares
-/// its icon at `declared`, resolved through the session's one artwork cache
-/// and its sandboxed decode seam.
+/// owns the window, never a path an application sent, so the artwork layer
+/// reads and validates its manifest itself — the same bundle tier a
+/// file-manager tile resolves through, not a second reading of it here.
 ///
 /// `side` is the pixel side of the slot that draws it — the window's title
 /// band or the bar's task slot — so the artwork is rasterised at exactly the
@@ -355,13 +354,16 @@ fn bundle_icon_asset(shell: &mut DesktopShell, bundle: &str) -> Option<String> {
 /// from the cache. The shipped application-bundle artwork stands in for an
 /// application declaring no icon of its own; `None` when neither reads or
 /// decodes, leaving the slot on its built-in glyph.
-fn bundle_artwork(shell: &mut DesktopShell, declared: Option<&str>, side: u32) -> Option<Surface> {
-    let (cache, reader, rasteriser) = shell.artwork_parts();
-    let request = declared.map_or_else(
-        || IconRequest::kind(IconKind::AppBundle),
-        |path| IconRequest::asset(IconKind::AppBundle, path),
-    );
-    cache.artwork(reader, rasteriser, request, side).cloned()
+/// The second half of the answer is whether the decode is still in flight, so
+/// the caller knows to ask again rather than leaving the slot on its glyph.
+fn bundle_artwork(shell: &mut DesktopShell, bundle: &str, side: u32) -> (Option<Surface>, bool) {
+    let (cache, resolver) = shell.artwork_parts();
+    let request = IconRequest::bundle(IconKind::AppBundle, bundle);
+    match cache.owned_artwork(resolver, request, side) {
+        ArtworkOutcome::Ready(artwork) => (Some(artwork), false),
+        ArtworkOutcome::Refused => (None, false),
+        ArtworkOutcome::Pending => (None, true),
+    }
 }
 
 /// The [`WindowHost`] bridge one serve pass borrows: the desktop shell,

@@ -2050,7 +2050,7 @@ use alloc::boxed::Box;
 
 use tairix_icon::{
     artwork_cache, icon_artwork_path, ArtworkCache, ArtworkRasteriser, ArtworkReader,
-    IconArtworkSource, MAX_ARTWORK_BYTES,
+    IconArtworkSource, InlineArtwork, MAX_ARTWORK_BYTES,
 };
 use tairix_log::DiscardSink;
 use tairix_reclaim::pressure::{PressureBand, ReportedPressure};
@@ -2242,7 +2242,10 @@ fn a_grid_tile_blits_shipped_artwork_and_falls_back_to_the_glyph_without_it() {
     let drawn = grid_surface(
         &browser,
         vp,
-        &mut IconArtworkSource::new(&mut cache, &mut reader, &mut rasteriser),
+        &mut IconArtworkSource::new(
+            &mut cache,
+            &mut InlineArtwork::new(&mut reader, &mut rasteriser),
+        ),
     );
     assert_eq!(rasteriser.decodes, 1);
     assert!(shows(&drawn, art_colour), "the shipped artwork is blitted");
@@ -2255,7 +2258,10 @@ fn a_grid_tile_blits_shipped_artwork_and_falls_back_to_the_glyph_without_it() {
     let missing = grid_surface(
         &browser,
         vp,
-        &mut IconArtworkSource::new(&mut cache, &mut absent, &mut PanicRasteriser),
+        &mut IconArtworkSource::new(
+            &mut cache,
+            &mut InlineArtwork::new(&mut absent, &mut PanicRasteriser),
+        ),
     );
     assert_eq!(missing.pixels(), glyphs.pixels());
 
@@ -2268,7 +2274,10 @@ fn a_grid_tile_blits_shipped_artwork_and_falls_back_to_the_glyph_without_it() {
     let refused = grid_surface(
         &browser,
         vp,
-        &mut IconArtworkSource::new(&mut cache, &mut oversize, &mut PanicRasteriser),
+        &mut IconArtworkSource::new(
+            &mut cache,
+            &mut InlineArtwork::new(&mut oversize, &mut PanicRasteriser),
+        ),
     );
     assert_eq!(refused.pixels(), glyphs.pixels());
 }
@@ -2295,7 +2304,10 @@ fn a_bundle_tile_draws_the_icon_the_bundle_itself_carries() {
     let drawn = grid_surface(
         &browser,
         vp,
-        &mut IconArtworkSource::new(&mut cache, &mut reader, &mut rasteriser),
+        &mut IconArtworkSource::new(
+            &mut cache,
+            &mut InlineArtwork::new(&mut reader, &mut rasteriser),
+        ),
     );
 
     assert!(
@@ -2343,7 +2355,10 @@ fn a_bundle_with_no_icon_of_its_own_falls_back_to_the_class_artwork_then_the_gly
     let drawn = grid_surface(
         &browser,
         vp,
-        &mut IconArtworkSource::new(&mut cache, &mut reader, &mut rasteriser),
+        &mut IconArtworkSource::new(
+            &mut cache,
+            &mut InlineArtwork::new(&mut reader, &mut rasteriser),
+        ),
     );
     assert!(shows(&drawn, art_colour), "the class artwork is blitted");
     assert!(reader
@@ -2358,7 +2373,10 @@ fn a_bundle_with_no_icon_of_its_own_falls_back_to_the_class_artwork_then_the_gly
     let plain = grid_surface(
         &browser,
         vp,
-        &mut IconArtworkSource::new(&mut cache, &mut bare, &mut PanicRasteriser),
+        &mut IconArtworkSource::new(
+            &mut cache,
+            &mut InlineArtwork::new(&mut bare, &mut PanicRasteriser),
+        ),
     );
     assert_eq!(plain.pixels(), glyphs.pixels());
 }
@@ -2377,7 +2395,10 @@ fn a_rasteriser_reply_of_the_wrong_length_is_refused_and_never_reaches_the_frame
     let drawn = grid_surface(
         &browser,
         vp,
-        &mut IconArtworkSource::new(&mut cache, &mut reader, &mut ShortRasteriser),
+        &mut IconArtworkSource::new(
+            &mut cache,
+            &mut InlineArtwork::new(&mut reader, &mut ShortRasteriser),
+        ),
     );
     assert_eq!(drawn.width(), vp.width);
     assert_eq!(drawn.height(), vp.height);
@@ -2396,7 +2417,10 @@ fn a_hundred_tiles_of_one_kind_are_read_and_decoded_exactly_once() {
     let drawn = grid_surface(
         &browser,
         vp,
-        &mut IconArtworkSource::new(&mut cache, &mut reader, &mut rasteriser),
+        &mut IconArtworkSource::new(
+            &mut cache,
+            &mut InlineArtwork::new(&mut reader, &mut rasteriser),
+        ),
     );
     assert!(shows(&drawn, art_colour));
     // Every tile shares one `(asset, side)` key, so a hundred-entry grid
@@ -2423,7 +2447,10 @@ fn scrolling_to_new_entries_decodes_only_the_newly_visible_kinds() {
     grid_surface(
         &browser,
         vp,
-        &mut IconArtworkSource::new(&mut cache, &mut reader, &mut rasteriser),
+        &mut IconArtworkSource::new(
+            &mut cache,
+            &mut InlineArtwork::new(&mut reader, &mut rasteriser),
+        ),
     );
     assert_eq!(reader.read, core::slice::from_ref(&png));
     assert_eq!(rasteriser.decodes, 1);
@@ -2435,7 +2462,10 @@ fn scrolling_to_new_entries_decodes_only_the_newly_visible_kinds() {
     grid_surface(
         &browser,
         vp,
-        &mut IconArtworkSource::new(&mut cache, &mut reader, &mut rasteriser),
+        &mut IconArtworkSource::new(
+            &mut cache,
+            &mut InlineArtwork::new(&mut reader, &mut rasteriser),
+        ),
     );
     assert_eq!(reader.read, [png, text]);
     assert_eq!(rasteriser.decodes, 2);
@@ -2452,7 +2482,10 @@ fn teardown_releases_the_retained_artwork() {
     grid_surface(
         &browser,
         vp,
-        &mut IconArtworkSource::new(&mut cache, &mut reader, &mut rasteriser),
+        &mut IconArtworkSource::new(
+            &mut cache,
+            &mut InlineArtwork::new(&mut reader, &mut rasteriser),
+        ),
     );
     assert!(cache.charged_bytes() > 0, "the decode is retained");
 

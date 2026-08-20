@@ -31,6 +31,8 @@ use alloc::string::String;
 
 use tairix_abi::{load_failure_reason, WaitStatus};
 
+use crate::pins::BUNDLE_RUN_SUFFIX;
+
 /// The label used for a reaped child the launcher did not record (it should
 /// not happen — every desktop child is recorded at launch — but a diagnosis
 /// must never be dropped for want of a name).
@@ -108,6 +110,18 @@ impl LaunchTable {
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.children.is_empty()
+    }
+
+    /// The bundle directory of every live child launched from one, in pid
+    /// order.
+    ///
+    /// A child spawned from a bare program rather than a bundle contributes
+    /// nothing: its `run_path` has no `Run` leaf to strip, so there is no
+    /// bundle whose manifest could name an icon.
+    pub fn bundles(&self) -> impl Iterator<Item = &str> {
+        self.children
+            .values()
+            .filter_map(|app| app.run_path.strip_suffix(BUNDLE_RUN_SUFFIX))
     }
 }
 
