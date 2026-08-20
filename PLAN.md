@@ -3196,19 +3196,18 @@ glyph, resolved idempotently via the session's attested `LaunchTable`) and
 the fully keyboard-navigable, searchable, `lib/controls`-composed
 program-library popup (modal at both routers, fail-closed geometry, calm
 empty states, session-loaded catalog re-read on every open), with the
-generic start menu deleted — and **as pins** (T6/T7): the `lib/taskpins`
-per-user ordered pin store (`~/Settings/Taskbar/pins.conf`, fuzzed), the
-bar's pin strip + right-click context menu (shared `TaskbarItem`/`Menu`
-controls; live Running/Active/Minimized/Closed state derived from the task
-list; per-application icon artwork rasterised in the parser sandbox — the
-new `lib/image` fail-closed PNG decoder, `lib/compress` inflate/zlib, and
-the `lib/sandbox` icon-rasterisation service — with the class glyph as the
-fail-closed fallback), the session's store ownership (one read + one write
-seam, memory adopts an edit only after the write lands), and both
-pin-creation gestures over the window channel's new `PinBundle`/`DragOffer`/
-`DragWithdraw` ops (`BundleRef`-validated; files context action + the
-`lib/browse` `BundleDrag` drag source; drops resolve through the shared
-`resolve_pin_drop` policy at the strip's drop index) — and **as live
+generic start menu deleted — and **as an application strip** (T6/T7): one
+icon-only slot per running application, grouped by the bundle the kernel
+attested owns each process, with per-application icon artwork rasterised in
+the parser sandbox (the `lib/image` fail-closed PNG decoder, `lib/compress`
+inflate/zlib, and the `lib/sandbox` icon-rasterisation service) and the class
+glyph as the fail-closed fallback; the window channel's
+`SetAppBar`/`AppBarDefault`/`AppBarMenu` contract, by which an application
+declares its own presence, its own menu (bounded `AppMenu` rows, one submenu
+level, a session-drawn *About* row whose panel states the **signed**
+manifest), and whether it handles the slot's primary click; and the hover
+window picker (live thumbnails of each window's last presented frame, scaled
+through `lib/raster::resample`, opened only above one window) — and **as live
 status** (T8–T10): the notification area (the fuzzed `notify_ipc` channel
 over the seat-scoped `NOTIFY_ENDPOINT`, producer-attested relay,
 click-to-dismiss popover), and the always-rightmost **Switchboard tray**:
@@ -3336,10 +3335,13 @@ Shipped (headless-testable, model + renderer over injected seams):
     profile fix (`pie_build::cross_compile_pie_elf` reading `ImageProfile`)
     ships `installer` userland/drivers `--release`.
 - `userland/gui/taskbar` (permanent Library/Files launchers + program-library
-  popup + pin strip with its context menu + running-task list +
+  popup + the per-application slot strip with the menu each application
+  declares and its hover window picker + the window registry those two read +
   notification area/clock + the reserved Switchboard tray capsule) and
   `userland/gui/session` glue (theme registry, taskbar model, catalog
-  loading/merging, pin-store ownership + sandboxed icon pipeline, launch
+  loading/merging, the icon-bar service that groups windows under their
+  attested owner and resolves each slot's manifest-attested identity +
+  sandboxed icon pipeline, launch
   table, `DesktopShell` event loop / `TaskBridge`, the attested
   tray-summary relay + `HangTracker` hang detection, the owner-directed
   activate/restart requests served against the live window registry and

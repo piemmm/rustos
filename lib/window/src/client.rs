@@ -22,8 +22,8 @@ use tairix_abi::input::{
 };
 use tairix_abi::reply::decode_status_reply;
 use tairix_abi::window_ipc::{
-    decode_create_reply, decode_desktop_reply, BundleRef, PointerAction, WindowEvent,
-    WindowRequest, WindowTitle, WINDOW_CREATE_REPLY_LEN, WINDOW_DESKTOP_REPLY_LEN,
+    decode_create_reply, decode_desktop_reply, AppBar, PointerAction, WindowEvent, WindowRequest,
+    WindowTitle, WINDOW_CREATE_REPLY_LEN, WINDOW_DESKTOP_REPLY_LEN,
 };
 use tairix_abi::{Errno, ProcId};
 use tairix_geometry::{Point, Rect, Region};
@@ -562,61 +562,26 @@ impl<T: WindowTransport> WindowClient<T> {
         self.status_call(&request)
     }
 
-    /// Ask the session to pin `path` — an absolute `<Name>.app` bundle
-    /// path — to the taskbar on behalf of window `window_id`
-    /// (`plans/NEW-TASKBAR.md` T7).
+    /// Declare this **application's** presence on the desktop's icon bar:
+    /// where its bar events arrive, whether it handles the primary click
+    /// itself, and the menu a secondary press opens.
+    ///
+    /// Scoped to the process, not to a window, so an application keeps its
+    /// slot with no window open — which is what makes a "new window"
+    /// primary click and a *Quit* menu row reachable. Issuing it again
+    /// replaces the declaration whole, which is how a row's enablement or
+    /// mark changes.
     ///
     /// # Errors
     ///
-    /// * [`Errno::LengthOutOfRange`] / [`Errno::OutOfRange`] — a path the
-    ///   protocol refuses, caught before any call (never truncated).
-    /// * [`Errno::AlreadyExists`] — the bundle is already pinned.
-    /// * [`Errno::NoSpace`] — the pin store is full.
-    /// * [`Errno::PermissionDenied`] — the session refuses the pin, or
-    ///   `window_id` is not one of the caller's own windows.
+    /// * [`Errno::NotSupported`] — the session composes no icon bar. The
+    ///   declaration is incidental to the application's purpose, so the
+    ///   caller reports it and carries on rather than ending.
+    /// * [`Errno::OutOfRange`] — a reserved event endpoint, caught by the
+    ///   protocol before any call.
     /// * A transport failure, or a corrupt status frame.
-    pub fn pin_bundle(&mut self, window_id: u64, path: &str) -> Result<(), Errno> {
-        let path = BundleRef::new(path)?;
-        let request = WindowRequest::PinBundle {
-            window: window_id,
-            path,
-        }
-        .to_le_bytes();
-        self.status_call(&request)
-    }
-
-    /// Offer `path` — an absolute `<Name>.app` bundle path — as an
-    /// app-reference drag started in window `window_id`. A primary
-    /// release may later drop it onto the taskbar's pin strip.
-    ///
-    /// # Errors
-    ///
-    /// * [`Errno::LengthOutOfRange`] / [`Errno::OutOfRange`] — a path the
-    ///   protocol refuses, caught before any call (never truncated).
-    /// * [`Errno::PermissionDenied`] — the session refuses the offer, or
-    ///   `window_id` is not one of the caller's own windows.
-    /// * A transport failure, or a corrupt status frame.
-    pub fn drag_offer(&mut self, window_id: u64, path: &str) -> Result<(), Errno> {
-        let path = BundleRef::new(path)?;
-        let request = WindowRequest::DragOffer {
-            window: window_id,
-            path,
-        }
-        .to_le_bytes();
-        self.status_call(&request)
-    }
-
-    /// Withdraw a drag offer previously armed by [`Self::drag_offer`] for
-    /// window `window_id` (e.g. the app itself cancelled the drag with
-    /// Escape before a release).
-    ///
-    /// # Errors
-    ///
-    /// [`Errno::PermissionDenied`] if `window_id` is not one of the
-    /// caller's own windows, a transport failure, or a corrupt status
-    /// frame.
-    pub fn drag_withdraw(&mut self, window_id: u64) -> Result<(), Errno> {
-        let request = WindowRequest::DragWithdraw { window: window_id }.to_le_bytes();
+    pub fn set_app_bar(&mut self, bar: &AppBar) -> Result<(), Errno> {
+        let request = WindowRequest::SetAppBar(*bar).to_le_bytes();
         self.status_call(&request)
     }
 

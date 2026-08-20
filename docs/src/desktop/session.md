@@ -50,31 +50,82 @@ that same catalog — the entry's bundle names its `Run` binary — and spawned
 asynchronously under the session's own identity, with a refusal reported
 loudly and non-fatally (see *Launch bookkeeping*).
 
-## Pinned shortcuts
+## The icon bar
 
-The session owns the user's list of **pinned shortcuts** (`plans/NEW-TASKBAR.md`
-T6), stored as per-user configuration at `~/Settings/Taskbar/pins.conf` (the
-[`tairix-taskpins`](../lib/taskpins.md) store). It loads them with the same
-fail-closed posture as the library: an **absent** store is silently empty, and
-an **unusable** one contributes an empty list plus a loud `stderr` warning.
+The bar's middle is one slot per *running application*
+(`plans/NEW-TASKBAR.md`), and deciding which applications hold a slot — and
+what each one's slot offers — is the session's job. The `apps` module's
+`AppBarService` is that job.
 
-The session is the store's only writer. Every edit (pin, unpin, or a
-drag-and-drop insertion) rewrites the document whole through the one
-`SessionFileWriter` seam — the write-side twin of the reader — and the
-in-memory list adopts the edit **only after the write succeeded**, so memory
-and disk never diverge. A refused write leaves the bar exactly as it was,
-with a diagnostic reported on `stderr`.
+An application here is one **kernel-attested process**, and two facts put one
+on the bar, either alone being enough:
 
-### Resolution and icon pipeline
+- it **declared** an icon-bar presence over the window channel
+  (`WindowRequest::SetAppBar`, relayed to the service through the
+  `AppBarBridge` seam the window host borrows). A declaration keeps the slot
+  for the life of the process, windows or not — so *Quit* stays meaningful
+  and "open a fresh window" stays reachable. Re-declaring replaces the
+  previous declaration whole, which is how an application changes a row's
+  enablement or its mark.
+- it **owns a window**, which gives it a slot even with no declaration, so no
+  window is ever unreachable. Such a slot has no menu and no default action:
+  the session invents neither on an application's behalf.
 
-Resolution turns each stored `PinTarget` into the view the bar renders:
+Slots keep the order the session first saw each process in, so the strip never
+reshuffles under the pointer. A process leaves the bar when it has neither a
+declaration nor a window left — which, for a declaring application, is when
+the window engine proved the process gone and withdrew its declaration.
+`MAX_BAR_APPS` bounds the strip, so a process that declares from every fork it
+makes is refused rather than admitted to a slot nothing will draw.
 
-- an **`entry`** pin resolves through the merged program-library catalog (name,
-  icon asset, bundle);
-- a **`bundle`** pin resolves through its own bounded, fail-closed `AppInfo`
-  manifest read;
-- an **unresolvable** pin (e.g. an uncatalogued entry) keeps a best-effort
-  identity with no launch path, so it can still be seen and unpinned.
+### Identity is the manifest's, never the process's
+
+A slot's label, icon, and information-panel facts come from the **signed**
+`AppInfo` of the bundle the desktop launched that process from — resolved from
+the existing launch table and the window engine's attested owner records,
+never from anything an application sent. So an application cannot state an
+identity that is not its own inside system-drawn chrome
+(`AGENTS.md` §23.1). The manifest is read once per bundle and remembered while
+an application from it is on the bar, so a second copy of one application
+costs a lookup rather than a read.
+
+A process the desktop did **not** launch — a shell-spawned program — has no
+bundle to attest, so its slot carries a neutral label and no version, purpose,
+or author at all: the panel states what it read and never what it did not.
+
+`Taskbar::app_icon_side` exposes the exact pixel side a slot's icon paints at,
+so the session rasterises artwork at the drawn size.
+
+### Relaying the bar's outcomes
+
+Three taskbar responses reach the declaring process or its windows:
+
+- `AppDefault { app }` → the session delivers `WindowEvent::AppBarDefault`
+  through `WindowServer::deliver_app_event`, addressed to the route the
+  *declaration* recorded — never to anything the event carries — so a bar
+  event can only reach a process that asked to be on the bar.
+- `AppMenuChosen { app, item }` → the same path, carrying
+  `WindowEvent::AppBarMenu { item }`. The id is the application's own; the
+  session never interprets one.
+- `AppRaise { app }` → no application is told anything: the session raises and
+  focuses that application's most recently used window (the window registry's
+  own answer — the focused window when this application owns it, else the one
+  it handed focus to last, else the newest it opened).
+
+A refused delivery tears the owner's windows down exactly as a refused
+window-scoped send does.
+
+### The hover picker's thumbnails
+
+A `ShowWindowPicker { app }` response is answered with one cell per window,
+built by `picker_cells`: each carries that window's **last presented frame** —
+the compositor's own copy of pixels the session already holds, so no new
+authority is involved — scaled to the cell through `lib/raster::resample`,
+the one resampler on the desktop (`AGENTS.md` §2.2). A window whose pixels
+were released under memory pressure, or that has not presented yet, simply has
+no thumbnail and its cell draws the application's glyph.
+
+### Icon artwork
 
 Bundle icon bytes (SVG or PNG) are **untrusted third-party input**, so the
 session never decodes them in its own address space. Instead, they go to the
@@ -83,16 +134,12 @@ re-entered as a capability-empty worker ([the sandbox
 page](../security/sandbox.md)). The rasterised RGBA pixels are verified and
 cached per `(asset path, pixel side)`, including refusals; a missing or bad
 icon falls back to the shipped application-bundle artwork and then to the
-shared application-class glyph. `Taskbar::pin_icon_side` exposes the exact
-geometry so the session rasterises artwork at the drawn size.
-
-Running-window matches are recomputed cheaply each loop wake from the attested
-launch table and window ownership records, never from window titles.
+shared application-class glyph.
 
 ### One artwork store for the whole desktop
 
-The pins are not the only thing on the bar with an icon, so the read, the
-sandboxed decode, and the cache are **not** the pin module's private
+The application slots are not the only thing on the bar with an icon, so the
+read, the sandboxed decode, and the cache are **not** the icon bar's private
 machinery: they are the shared two-tier artwork layer (`lib/icon`'s
 `ArtworkCache` plus its `ArtworkReader` / `ArtworkRasteriser` seams), and the
 `DesktopShell` owns exactly one of each for the seat (`AGENTS.md` §2.2).
@@ -104,12 +151,12 @@ machinery: they are the shared two-tier artwork layer (`lib/icon`'s
   is never given one starts with a resolver that finds and decodes nothing, so
   a bare shell draws built-in glyphs rather than failing.
 - `DesktopShell::artwork_parts` hands out the cache and the resolver together,
-  which is how the embedder resolves pin views without borrowing the shell
-  twice.
+  which is how the embedder resolves the strip's slots without borrowing the
+  shell twice.
 - The same cache answers the bar's `IconArtwork` lookup (through
   `IconArtworkSource`) for the shipped class masters under
-  `/System/Graphics/Icons`, so the launcher buttons, a pin, a running task,
-  and a library row all draw out of one store and one budget.
+  `/System/Graphics/Icons`, so the launcher buttons, an application slot, a
+  picker cell, and a library row all draw out of one store and one budget.
 
 Every lookup is keyed by (what was resolved, pixel side), and a refusal is cached
 like a success, so an application whose icon will not decode costs one read
@@ -144,15 +191,15 @@ the built-in glyph for that frame.
   answers not yet collected both survive the boundary, so nothing is computed
   twice for want of somewhere to keep it.
 - Most surfaces adopt a landing simply by asking the cache again. The two that
-  *store* the picture instead — the taskbar's pin strip and a window's
-  title-bar/taskbar identity — are offered it again explicitly on the wake.
+  *store* the picture instead — the bar's application strip and a window's
+  title-bar identity — are offered it again explicitly on the wake.
 - **Asked for early, not on the frame that needs it.** A decode off the loop
   still costs a round trip, so a surface that first asks as it *paints* shows a
   screenful of glyphs and fills in one icon at a time afterwards. The desktop
   therefore warms what it knows it will draw, the moment it knows it:
-  `DesktopShell::warm_icon_artwork` on every catalog read and pin re-resolve
-  (the launcher popup's first screenful of rows and every pinned application,
-  named by `Taskbar::catalog_icon_wants` from the same layout the paint uses),
+  `DesktopShell::warm_icon_artwork` on every catalog read and strip re-resolve
+  (the launcher popup's first screenful of rows, named by
+  `Taskbar::catalog_icon_wants` from the same layout the paint uses),
   and `DesktopShell::warm_launched_artwork` for every application in the launch
   table at the two sides a window of it wears — a spawn, a load, and the app's
   own bring-up before there is a window to put it on. Both go through
@@ -165,7 +212,7 @@ the built-in glyph for that frame.
 ### The library popup's per-row icons
 
 A program-library row shows its own application's icon through exactly the
-pin resolution above, driven off what the popup says it is showing:
+resolution above, driven off what the popup says it is showing:
 `resolve_library_icons` asks the popup for its
 [visible icon requests](taskbar.md#each-applications-own-icon), resolves each
 row's bundle icon at that row's own pixel side, and files the answer back.
@@ -179,28 +226,6 @@ row that already holds right-sized artwork is skipped, and a closed popup
 resolves nothing. Filing artwork deliberately does **not** latch a repaint:
 latching from inside the pre-paint resolution would ask for another present
 every frame, forever.
-
-### Pin service and window-channel bridge
-
-`PinService` manages the live store, the one armed drag offer, and a dirty
-latch the loop drains to re-resolve views before its next present. It
-implements the window-channel bridge (`PinBridge`) through which apps ask to
-be pinned: a `PinBundle` request is validated (store-shaped path, decodable
-manifest) and applied fail-closed.
-
-A drag can start from either of two origins, named by `DragOrigin`: a served
-application window (`Window`, offering its own bundle path over the window
-channel) or the taskbar's program-library popup (`Library`, offering a
-catalogued entry it is dragged out of — see [Dragging a library entry to pin
-it](taskbar.md#dragging-a-library-entry-to-pin-it)). `offer_drag` /
-`withdraw_drag` arm and disarm the one live `DragOffer`, and `take_drag_for`
-consumes it only for the origin that armed it, so a release from one origin
-can never claim or withdraw a drag another origin started. `resolve_pin_drop`
-resolves the gesture: a primary release from the offering origin over the pin
-band re-validates the target through `pin_target_at` — a bundle path against
-its manifest, a library entry against the live catalog, so an application
-uninstalled between the drag and the drop is refused rather than pinned
-unlaunchable — and pins at the drop index; the offer is consumed either way.
 
 ## The desktop icon surface
 
@@ -273,16 +298,6 @@ periodically-waking desktop would keep a core busy to discover nothing
 refreshes the library catalog and the file associations
 (`DesktopOutcome::relisted`), so an application installed after bring-up is
 picked up without a restart.
-
-**Why the desktop is not a pin-drag source.** An installed application lives
-only in an application store — machine-wide, or the user's own — so a
-`.app` directory a user drops on their `Desktop` folder is a directory
-*shaped like* an application rather than an installed one, and
-`BundlePath`'s store rule correctly refuses it. Offering a pin gesture that
-could never succeed would be a promise the system cannot keep, not a
-feature; the pin drag source is the program-library popup instead (see *Pin
-service and window-channel bridge*, above), whose every row is a catalogued
-entry by construction.
 
 ### The pinboard settings live on the desktop model
 
@@ -408,9 +423,9 @@ window.
 
 A `tairix_taskbar::TaskbarResponse` flows out of `DesktopShell::handle` as a
 `ShellOutcome::Taskbar` value. The shell applies what its own state suffices
-for — a `TaskActivated` outcome drives the compositor through the
-`TaskBridge`, popup-internal changes just re-present — and the embedder (the
-`Run` binary) performs what needs capabilities the shell does not hold
+for — a `WindowChosen` outcome raises that window through the `TaskBridge`,
+popup-internal changes just re-present — and the embedder (the `Run` binary)
+performs what needs capabilities the shell does not hold
 (`AGENTS.md` §10, §16.5):
 
 - `OpenFiles` — the permanent Files button. The embedder opens the file
@@ -418,11 +433,13 @@ for — a `TaskActivated` outcome drives the compositor through the
   running and serving a window, that window is raised and focused
   (`DesktopShell::raise_window`); if its launch is still in flight, the
   press is already satisfied; only otherwise is the bundle spawned.
-- `ActivatePin { index }` — an idempotent launch-or-raise of the pin at
-  `index`, using the same rule as the Files button (the shared
-  `activate_bundle`).
-- `Unpin { index }` and `PinEntry { entry }` — edits the pin store and sets
-  the dirty latch; a refused edit is reported on `stderr`.
+- `AppDefault { app }` and `AppMenuChosen { app, item }` — relayed to the
+  declaring process through the route its declaration recorded (see *The icon
+  bar*).
+- `AppRaise { app }` — the session raises that application's most recently
+  used window; an application with none reported nothing in the first place.
+- `ShowWindowPicker { app }` — the session builds one thumbnail cell per
+  window and hands them back to the bar.
 - `LibraryLaunch { entry }` — a chosen library entry, resolved through the
   catalog and spawned (see *The program library*).
 - `OpenLibrary` — the popup opened; the embedder re-reads the stores so the
@@ -859,6 +876,35 @@ same grant is what finally lets the session's cache ledgers reach the log:
 they were wired to it long before any account could hold it, and were
 silently discarded until now.
 
+### Each served window's own visible witness
+
+`DESKTOP_REVEALED` says the desktop is visible; `WINDOW_SHOWN` ("served
+window first frame on screen") says one *application's* window is, once
+each, naming it in a `window` field. It is emitted from the same place and
+for the same reason: after a present that reached the display, because until
+that frame lands nobody has seen the window.
+
+The session is the only component that can say this. An application learns
+that its present was *accepted* and the compositor that a frame was
+*composed*, but neither sees a composed frame reach the display. Nor can an
+observer of the window channel work it out: a present, a backdrop-blur
+change, a retitle and an icon-bar declaration all answer with the same
+four-byte status reply, so "the reply after the create is the first present"
+is a guess about how many requests an application happens to make — and, on
+a shared rendezvous, about the other clients too.
+
+A window is announced only once its own first present has landed. Before
+that its body is the session's opening fill rather than the application's
+pixels, so a frame carrying it shows a blank window: `SessionWindows` tracks
+each window as awaited, then painted, then shown, and only the painted → shown
+step announces. A refused present leaves it awaited.
+
+Two readers depend on it. A user diagnosing an application that launched but
+showed nothing can tell "never drawn" from "never launched". And the icon-bar
+QEMU vertical gates both its screendumps and its bar gestures on it: a create
+reply would say only that the window exists, which is too early to photograph
+and too early to click.
+
 ## The screen lock
 
 Choosing *Lock Screen* in the taskbar's [system quick-actions
@@ -946,7 +992,7 @@ instant every router sees, and the one an in-memory test controls:
   pointer stays in step for the moment the surface closes, but its outcome is
   discarded — nothing is delivered to the windows beneath a modal surface;
 - otherwise a **press** goes to the taskbar iff the pointer is over the bar
-  (a secondary press there opens a pin's context menu; a middle press over
+  (a secondary press there opens the menu that application declared; a middle press over
   the Switchboard capsule switches to the previous task) or over one of its
   open non-modal popovers — the notification popover and the capsule's
   instrument readout — and a remaining primary or secondary press goes to
@@ -1060,16 +1106,19 @@ focus. Each operation is total and fails closed (`AGENTS.md` §2.9):
   only if the task-id space is exhausted;
 - `close` removes the window from the compositor and its task from the bar,
   dropping focus if the closed window held it; an untracked window is a no-op;
-- `activate` applies the bar's `ActivateOutcome` to the compositor — an
-  activated task is shown, raised, and focused; a minimised one is hidden and,
-  if it held focus, unfocused — and is a no-op for an unknown task;
+- `raise` shows, raises, and focuses a window — what choosing a cell in the
+  bar's hover picker asks for, and what a click on the slot of an application
+  that declared no default action asks for — and is a no-op for an unknown
+  window;
+- `minimize` is the title bar's own control's counterpart: it marks the entry
+  minimised, hides the window, and drops focus if it held it;
 - `sync_focus` mirrors a window-manager focus change (the user clicked a window
   directly, or pressed the desktop) back into the bar's highlight, returning
   whether the highlight moved so a click on a window that owns no task neither
   blanks the highlight nor forces a needless repaint.
 
 `DesktopShell` drives the bridge: `open_window` / `close_window` manage the
-lifecycle, `handle` applies a `TaskActivated` outcome to the compositor and
+lifecycle, `handle` applies a `WindowChosen` outcome to the compositor and
 mirrors a window-manager focus change into the bar, and the focus move uses the
 window manager's new `InputRouter::focus` / `unfocus` (validated against the
 compositor, fail-closed) so focusing a task by id keeps the keyboard owner in
@@ -1278,15 +1327,24 @@ fully revealed desktop; and a refused unlock animating on the session's
 clock, shortening the park while it runs and returning it untouched once it
 settles.
 
-It covers the library loader (`load_library`) and pin loader (`SessionPins`):
-absent stores silent and empty, parsed stores, the user overlay's per-field
-override winning, and malformed / oversized / non-UTF-8 stores each yielding an
-empty catalog/list plus one warning line. It covers `SessionPins` persistence
-and the refusing writer (memory and disk stay in step). It covers pin
-resolution (catalog, manifest, and unresolvable fallback) and the shared
-artwork store (rasterised artwork reaching a pin, refusals cached, verified
-pixel shape, one read and one decode per asset and side, the budget honoured,
-and a trim then a teardown giving the pixels back). It covers the library
+It covers the library loader (`load_library`): absent stores silent and empty,
+parsed stores, the user overlay's per-field override winning, and malformed /
+oversized / non-UTF-8 stores each yielding an empty catalog plus one warning
+line. It covers the icon bar's service: windows grouped under the process that
+owns them rather than one slot per window, a declaration holding a slot with
+no windows and leaving on withdrawal, a window alone holding a slot with no
+menu and no default action, a slot keeping its place while it lives, the
+strip's bound refusing a further declaration, the manifest-attested identity
+(and a bundle with no readable manifest stating only a name, and a process the
+desktop did not launch stating not even a version), one manifest read per
+bundle with the identity forgotten when nothing runs from it, and each slot
+carrying only its own process's declaration. It covers the picker's cells (one
+per window, captioned, a window with no frame yet carrying no thumbnail, and
+the refusal below a choice) and the thumbnail scaler itself. It covers the
+shared artwork store (rasterised artwork reaching a slot, refusals cached,
+verified pixel shape, one read and one decode per asset and side, the budget
+honoured, and a trim then a teardown giving the pixels back). It covers the
+library
 popup's per-row icons: a row drawing its own bundle's icon, an absent /
 over-long / undecodable asset and an entry declaring no icon all falling back
 to the shipped app-bundle artwork rather than blanking, only the rows the
@@ -1295,18 +1353,18 @@ whatsoever — the bar and popup drawing pixel-for-pixel what the glyph-only
 desktop draws.
 
 It covers `DesktopShell`: `pump` opening the popup from a press on the Library
-button and presenting it, `set_library`/`set_pins` handing catalog/pins over
-and refreshing open views, the full launch flow, `raise_window` restoring and
-focusing a minimised task, hover latching a present of the bar, fault
-propagation, `begin_move` arming a grab, `set_icons` installing a loaded set,
-and `teardown`. It covers `PinService` decisions, drag management for both
-`DragOrigin` values (a release from the origin that armed the offer
-consuming it, a release from the other origin claiming nothing), the
-`pin_target_at` admission for a bundle and for a catalogued entry, the
-`resolve_pin_drop` policy, and `TaskBridge` end to end through the shell:
-`open_window` listing, focusing, and presenting a new task; `close_window`
-removing the task and dropping focus; clicking a task slot minimising/restoring
-the window; and syncing focus to an untracked window.
+button and presenting it, `set_library`/`set_apps` handing the catalog and the
+strip over and refreshing open views, the full launch flow, `raise_window`
+restoring and focusing a minimised window, hover latching a present of the
+bar, fault propagation, `begin_move` arming a grab, `set_icons` installing a
+loaded set, and `teardown`. It covers the window host relaying a declaration
+and its withdrawal, a secondary press over a slot opening the declared menu as
+its own window (and a click away taking only that down), and the hover picker
+becoming its own window and its cell choice raising the window it names. And
+it covers `TaskBridge` end to end through the shell: `open_window` listing,
+focusing, and presenting a new window; `close_window` removing it and dropping
+focus; the title bar's minimise hiding it and a raise bringing it back; and
+syncing focus to an untracked window.
 
 It covers the Switchboard channel through `serve_switchboard_request` and its
 fake seams: a successful publish answering with the session's own `ProcId`

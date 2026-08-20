@@ -128,6 +128,29 @@ mod program {
         let _ = writeln!(Stderr, "wallpaper: {reason}");
     }
 
+    /// Declare this application's presence on the desktop's icon bar: a
+    /// *Quit* row and the session-drawn *About* row, with the primary click
+    /// left to the session so it raises the window.
+    ///
+    /// A refused declaration is an answer, not a death: the application says
+    /// so and carries on with no slot of its own — its window is still
+    /// reachable through the one the session derives from it.
+    fn declare_app_bar(client: &mut WindowClient<RtWindowTransport>, endpoint: u64) {
+        match tairix_window::quit_and_about(endpoint) {
+            Ok(bar) => {
+                if let Err(err) = client.set_app_bar(&bar) {
+                    report(&alloc::format!(
+                        "the desktop refused this application's icon-bar presence ({err}); \
+                         carrying on without one"
+                    ));
+                }
+            }
+            Err(err) => report(&alloc::format!(
+                "this application's icon-bar menu is invalid ({err:?}); carrying on without one"
+            )),
+        }
+    }
+
     /// State the abnormal-exit reason and hand `code` back for `main`.
     fn fail(code: i32, reason: &str) -> i32 {
         report(reason);
@@ -705,6 +728,12 @@ mod program {
         // --- Open the window (resizable: the grid re-lays out to each new
         // client size, down to the floor the window manager is told to hold)
         // and paint the first frame.
+        // The icon-bar presence first: a declared presence belongs to the
+        // process, so declaring it before this process owns a window is what
+        // makes its slot carry this menu from the moment it appears rather
+        // than being a slot the session derived from a window, which opens
+        // nothing.
+        declare_app_bar(&mut client, event_endpoint);
         let sizing = WindowSizing {
             resizable: true,
             min_width_px: MIN_WIN_WIDTH,
@@ -856,7 +885,13 @@ mod program {
                     );
                     ChooserAction::Changed
                 }
+                // The desktop asked, or *Quit* was chosen on the chooser's
+                // own icon-bar slot. A row the declaration never carried
+                // names no command and is ignored (fail closed).
                 WindowEvent::CloseRequested { .. } => ChooserAction::Close,
+                WindowEvent::AppBarMenu { item } if tairix_window::is_quit(item) => {
+                    ChooserAction::Close
+                }
                 // A key release repaints nothing: every control acts on the
                 // press. Focus changes and minimize leave the window's own
                 // content exactly as it was. A redraw request is already
@@ -871,7 +906,14 @@ mod program {
                 // A secondary press on Close asks to leave what the window is
                 // showing; the chooser has nothing to leave but itself, and a
                 // primary press already closes it.
+                // The chooser declares no default action, so the session
+                // raises its window on a click rather than telling it — an
+                // `AppBarDefault` therefore cannot arrive, and an
+                // `AppBarMenu` naming any other row names no command of the
+                // chooser's.
                 WindowEvent::AlternateCloseRequested { .. }
+                | WindowEvent::AppBarDefault
+                | WindowEvent::AppBarMenu { .. }
                 | WindowEvent::Key { .. }
                 | WindowEvent::Focus { .. }
                 | WindowEvent::Minimized { .. }

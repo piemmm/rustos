@@ -1,5 +1,5 @@
-//! Presenting the taskbar, its program-library popup, its context menu, and
-//! its popovers through the window manager.
+//! Presenting the taskbar, its program-library popup, its context menu, its
+//! hover window picker, and its popovers through the window manager.
 //!
 //! The taskbar models the desktop's bar and produces a *rectangular* pixel
 //! [`Surface`], and the window manager composites and
@@ -30,9 +30,9 @@ use tairix_taskbar::{Taskbar, TaskbarRenderer, TaskbarRepaint};
 use tairix_theme::Theme;
 use tairix_wm::{Compositor, Corners, Point, Scale, Surface, WindowId};
 
-/// Presents a taskbar, its program-library popup, its context menu, the
-/// notification popover, and the Switchboard capsule's instrument readout as
-/// window-manager windows.
+/// Presents a taskbar, its program-library popup, its context menu, its
+/// hover window picker, the notification popover, and the Switchboard
+/// capsule's instrument readout as window-manager windows.
 ///
 /// Build one with [`TaskbarPresenter::new`], then call
 /// [`present`](Self::present) whenever the taskbar's model or the active theme
@@ -44,6 +44,7 @@ pub struct TaskbarPresenter {
     bar: Option<WindowId>,
     popup: Option<WindowId>,
     menu: Option<WindowId>,
+    picker: Option<WindowId>,
     notifications: Option<WindowId>,
     readout: Option<WindowId>,
     /// The density the surfaces on screen were laid out at, so a runtime
@@ -60,6 +61,7 @@ impl TaskbarPresenter {
             bar: None,
             popup: None,
             menu: None,
+            picker: None,
             notifications: None,
             readout: None,
             presented_scale: None,
@@ -85,6 +87,14 @@ impl TaskbarPresenter {
     #[must_use]
     pub const fn menu_window(&self) -> Option<WindowId> {
         self.menu
+    }
+
+    /// The compositor window currently showing the open hover window
+    /// picker, or `None` while it is closed (or before its first
+    /// presentation).
+    #[must_use]
+    pub const fn picker_window(&self) -> Option<WindowId> {
+        self.picker
     }
 
     /// The compositor window currently showing the notification popover, or
@@ -114,10 +124,10 @@ impl TaskbarPresenter {
     /// window is removed.
     ///
     /// Repainting only the latched surfaces is what keeps a pointer moving
-    /// over one small open menu cheap: re-rendering all five surfaces and
-    /// pushing them back into the compositor costs milliseconds and damages
-    /// five window rectangles, where the menu alone costs a fraction of
-    /// that and damages one. A surface with no window yet is always
+    /// over one small open menu cheap: re-rendering every surface and
+    /// pushing them all back into the compositor costs milliseconds and
+    /// damages a window rectangle each, where the menu alone costs a
+    /// fraction of that and damages one. A surface with no window yet is always
     /// presented, whatever the latch says, so the first paint after startup
     /// (or after a [`teardown`](Self::teardown)) puts everything on screen.
     /// A change of desktop density is the one input the taskbar's own latch
@@ -125,7 +135,7 @@ impl TaskbarPresenter {
     /// scale that differs from the last presented one repaints everything.
     ///
     /// `artwork` is the shipped raster-icon lookup the bar draws its
-    /// launcher, pin, and task icons from; every slot falls back to its
+    /// launcher and application icons from; every slot falls back to its
     /// built-in glyph when the lookup has nothing, so a system with no
     /// installed graphics still presents a complete bar.
     ///
@@ -164,6 +174,9 @@ impl TaskbarPresenter {
         if parts.menu || self.menu.is_none() {
             self.present_menu(compositor, renderer, taskbar, scale);
         }
+        if parts.picker || self.picker.is_none() {
+            self.present_picker(compositor, renderer, taskbar, scale);
+        }
         if parts.notifications || self.notifications.is_none() {
             self.present_notifications(compositor, renderer, taskbar, scale);
         }
@@ -181,6 +194,9 @@ impl TaskbarPresenter {
             compositor.remove(id);
         }
         if let Some(id) = self.notifications.take() {
+            compositor.remove(id);
+        }
+        if let Some(id) = self.picker.take() {
             compositor.remove(id);
         }
         if let Some(id) = self.menu.take() {
@@ -270,6 +286,43 @@ impl TaskbarPresenter {
         self.menu = Some(place(
             compositor,
             self.menu,
+            layout.panel.origin,
+            surface,
+            (corners, chrome_blur(taskbar.theme())),
+        ));
+    }
+
+    /// Present the hover window picker while it is open, or remove it once
+    /// closed.
+    ///
+    /// The picker opens outward from the hovered application's slot at
+    /// [`PickerLayout::panel`]'s origin, rounded with
+    /// [`PickerLayout::corner_radius`]. Fails closed like the others: a
+    /// render whose surface cannot be allocated leaves the existing window
+    /// untouched.
+    ///
+    /// [`PickerLayout::panel`]: tairix_taskbar::PickerLayout::panel
+    /// [`PickerLayout::corner_radius`]: tairix_taskbar::PickerLayout::corner_radius
+    fn present_picker(
+        &mut self,
+        compositor: &mut Compositor,
+        renderer: &mut TaskbarRenderer,
+        taskbar: &Taskbar,
+        scale: Scale,
+    ) {
+        let Some(layout) = taskbar.picker_layout(scale) else {
+            if let Some(id) = self.picker.take() {
+                compositor.remove(id);
+            }
+            return;
+        };
+        let Some(surface) = renderer.render_picker(taskbar, scale) else {
+            return;
+        };
+        let corners = Corners::from_radius(layout.corner_radius);
+        self.picker = Some(place(
+            compositor,
+            self.picker,
             layout.panel.origin,
             surface,
             (corners, chrome_blur(taskbar.theme())),

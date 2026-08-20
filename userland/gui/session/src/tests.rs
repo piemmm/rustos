@@ -1,6 +1,5 @@
 //! Headless unit tests for the desktop session glue.
 
-use alloc::collections::BTreeMap;
 use alloc::format;
 use alloc::rc::Rc;
 use alloc::string::String;
@@ -15,10 +14,12 @@ use tairix_abi::switchboard_ipc::{
     SEAT_REPORT_OWNERS_MAX,
 };
 use tairix_abi::sysinfo::CACHE_LABEL_MAX;
+use tairix_abi::window_ipc::{
+    AppBar, AppMenu, AppMenuItemId, AppMenuLabel, AppMenuMark, AppMenuRow,
+};
 use tairix_abi::{
-    AppInfoHeader, DriverError, Errno, ProcId, ABI_VERSION_CURRENT, APPINFO_MAGIC,
-    APPINFO_WIRE_MAX, BUNDLE_ID_MAX, BUNDLE_NAME_MAX, BUNDLE_VERSION_MAX, LIBRARY_ICON_MAX,
-    SYSCALL_TABLE_HASH_LEN,
+    AppInfoHeader, DriverError, Errno, ProcId, ABI_VERSION_CURRENT, APPINFO_MAGIC, BUNDLE_ID_MAX,
+    BUNDLE_NAME_MAX, BUNDLE_VERSION_MAX, LIBRARY_ICON_MAX, SYSCALL_TABLE_HASH_LEN,
 };
 use tairix_controls::PointerState;
 use tairix_cursor::CursorTheme;
@@ -34,10 +35,9 @@ use tairix_proglib::{
 };
 use tairix_reclaim::{CacheLedger, PressureBand, ReclaimCache, ReportedPressure};
 use tairix_taskbar::{
-    icon_cache, ActivateOutcome, Edge, IconEpoch, LibraryRow, PinView, TaskId, TaskbarConfig,
-    TaskbarRenderer, TaskbarRepaint, TaskbarResponse,
+    icon_cache, Edge, IconEpoch, LibraryRow, TaskId, TaskbarConfig, TaskbarRenderer,
+    TaskbarRepaint, TaskbarResponse,
 };
-use tairix_taskpins::PinTarget;
 use tairix_theme::{
     Appearance, CursorKind, Metrics, MotionInteraction, Theme, ThemeError, ThemeId, Timeline,
 };
@@ -50,19 +50,18 @@ use tairix_wm::{
 use crate::artwork::ArtworkDesk;
 use crate::shell::SettleWork;
 use crate::{
-    build_pin_views, deliver_pending_open, desktop_info, drop_is_noteworthy, ensure_switchboard,
-    load_icon_set, load_library, maybe_send_frame_report, maybe_send_seat_report, open_tray,
-    resolve_library_icons, resolve_window_identities, serve_switchboard_request, ArtworkFileReader,
-    ArtworkSandbox, DesktopSession, DesktopShell, DragOrigin, FrameContent, IconRasteriser,
-    InputSource, LaunchTable, LockOutcome, LockedDrain, OwnerWindow, PinBridge, PinEditError,
-    PinIconSource, PinService, PresentedOwners, ResolvedPin, ScreenFade, ScreenLock,
-    SessionFileReader, SessionFileWriter, SessionInputResponse, SessionInputRouter, SessionPins,
-    SessionWindows, ShellOutcome, ShellWindowHost, SwitchboardMailbox, SwitchboardOutcome,
-    SwitchboardRefusal, SwitchboardServe, TaskBridge, TaskbarPresenter, BUNDLE_RUN_SUFFIX,
-    DESKTOP_REVEALED, DESKTOP_REVEALED_MESSAGE, DESKTOP_SESSION_RANGE_END,
-    DESKTOP_SESSION_RANGE_START, NO_DEADLINE_NS, SWITCHBOARD_RUN_PATH,
+    deliver_pending_open, desktop_info, drop_is_noteworthy, ensure_switchboard, load_icon_set,
+    load_library, maybe_send_frame_report, maybe_send_seat_report, open_tray, picker_cells,
+    resolve_library_icons, resolve_window_identities, serve_switchboard_request, thumbnail,
+    AppBarService, ArtworkFileReader, ArtworkSandbox, DesktopSession, DesktopShell, FrameContent,
+    IconRasteriser, InputSource, LaunchTable, LockOutcome, LockedDrain, OwnerWindow,
+    PresentedOwners, ScreenFade, ScreenLock, SessionFileReader, SessionInputResponse,
+    SessionInputRouter, SessionWindows, ShellOutcome, ShellWindowHost, SwitchboardMailbox,
+    SwitchboardOutcome, SwitchboardRefusal, SwitchboardServe, TaskBridge, TaskbarPresenter,
+    BUNDLE_RUN_SUFFIX, DESKTOP_REVEALED, DESKTOP_REVEALED_MESSAGE, DESKTOP_SESSION_RANGE_END,
+    DESKTOP_SESSION_RANGE_START, MAX_BAR_APPS, NO_DEADLINE_NS, SWITCHBOARD_RUN_PATH,
 };
-use tairix_window::{PinDecision, WindowSizing};
+use tairix_window::WindowSizing;
 
 /// A valid SVG asset (a single filled triangle on a square grid) that decodes
 /// to a non-empty vector form, so loading it is observably different from the
@@ -80,6 +79,8 @@ const MALFORMED_SVG: &[u8] = b"this is not an SVG document";
 #[derive(Default)]
 pub(crate) struct MemoryAssets {
     files: Vec<(String, Vec<u8>)>,
+    /// Every path read, in order, so a test can count reads.
+    reads: Vec<String>,
 }
 
 impl MemoryAssets {
@@ -87,10 +88,20 @@ impl MemoryAssets {
         self.files.push((String::from(path), bytes.to_vec()));
         self
     }
+
+    /// How many times `path` has been read, so a test can assert that a
+    /// resolution reads a manifest once rather than once per slot.
+    fn reads(&self, path: &str) -> usize {
+        self.reads
+            .iter()
+            .filter(|read| read.as_str() == path)
+            .count()
+    }
 }
 
 impl SessionFileReader for MemoryAssets {
     fn read(&mut self, path: &str) -> Result<Vec<u8>, Errno> {
+        self.reads.push(String::from(path));
         self.files
             .iter()
             .find(|(p, _)| p == path)
@@ -99,44 +110,9 @@ impl SessionFileReader for MemoryAssets {
     }
 }
 
-/// An in-memory [`SessionFileWriter`]: a path→bytes table recording writes,
-/// with an optional forced error to exercise the refusal paths.
-#[derive(Default)]
-pub(crate) struct MemoryWriter {
-    files: BTreeMap<String, Vec<u8>>,
-    force_error: Option<Errno>,
-}
-
-impl MemoryWriter {
-    fn with_error(mut self, error: Errno) -> Self {
-        self.force_error = Some(error);
-        self
-    }
-
-    fn written(&self, path: &str) -> Option<&[u8]> {
-        self.files.get(path).map(Vec::as_slice)
-    }
-}
-
 impl SessionFileReader for &mut MemoryAssets {
     fn read(&mut self, path: &str) -> Result<Vec<u8>, Errno> {
         (**self).read(path)
-    }
-}
-
-impl SessionFileWriter for MemoryWriter {
-    fn write(&mut self, path: &str, bytes: &[u8]) -> Result<(), Errno> {
-        if let Some(err) = self.force_error {
-            return Err(err);
-        }
-        self.files.insert(String::from(path), bytes.to_vec());
-        Ok(())
-    }
-}
-
-impl SessionFileWriter for &mut MemoryWriter {
-    fn write(&mut self, path: &str, bytes: &[u8]) -> Result<(), Errno> {
-        (**self).write(path, bytes)
     }
 }
 
@@ -196,6 +172,51 @@ pub(crate) fn test_pressure() -> &'static ReportedPressure {
 /// but equality, so `fill` only has to differ between owners.
 pub(crate) fn window_owner(fill: u8) -> ProcId {
     ProcId::from_raw([fill; tairix_abi::PROC_ID_LEN])
+}
+
+/// A distinct attested process per `index`, for tests that need more of them
+/// than a single byte spells.
+fn window_owner_wide(index: usize) -> ProcId {
+    let mut raw = [0u8; tairix_abi::PROC_ID_LEN];
+    raw[..core::mem::size_of::<u64>()].copy_from_slice(&(index as u64 + 1).to_le_bytes());
+    ProcId::from_raw(raw)
+}
+
+/// An icon-bar declaration offering *Quit*, with `default_action` as given.
+fn app_bar(default_action: bool) -> AppBar {
+    let mut menu = AppMenu::EMPTY;
+    menu.push(AppMenuRow::Item {
+        id: AppMenuItemId::new(1).expect("non-zero"),
+        label: AppMenuLabel::new("Quit").expect("short"),
+        enabled: true,
+        mark: AppMenuMark::None,
+    })
+    .expect("fits");
+    AppBar {
+        event_endpoint: 4,
+        default_action,
+        menu,
+    }
+}
+
+/// Run `resolve` over a real artwork cache and a resolver that serves
+/// nothing, so a slot's icon resolution is exercised without a decode.
+fn with_artwork<T>(resolve: impl FnOnce(&mut dyn ArtworkResolver, &mut ArtworkCache) -> T) -> T {
+    NORMAL_PRESSURE.report(PressureBand::Normal);
+    let mut cache = test_artwork_cache(&NORMAL_PRESSURE, TEST_FRAME_BYTES);
+    let mut reader = ArtworkFileReader(MemoryAssets::default());
+    let mut rasteriser = ArtworkSandbox(TaggedRasteriser::new());
+    let mut inline = InlineArtwork::new(&mut reader, &mut rasteriser);
+    resolve(&mut inline, &mut cache)
+}
+
+/// The processes the strip holds, in display order.
+fn owners(service: &mut AppBarService, windows: &[(ProcId, TaskId)]) -> Vec<ProcId> {
+    service
+        .strip(windows, |_| None)
+        .into_iter()
+        .map(|group| group.owner)
+        .collect()
 }
 
 /// A shell for `config`, with both rasterised-asset caches built through
@@ -1271,17 +1292,22 @@ fn a_non_primary_press_is_ignored() {
 }
 
 #[test]
-fn a_press_with_no_running_task_activates_a_fresh_one() {
-    // Guards the ActivateOutcome import and exercises the taskbar task path
-    // through the session router end to end.
+fn a_press_on_an_app_slot_reaches_the_taskbar_through_the_session_router() {
     let mut session = session();
     session.taskbar_mut().tasks_mut().add(TaskId(1), "Editor");
+    session
+        .taskbar_mut()
+        .set_apps(vec![tairix_taskbar::AppSlot::new(
+            "Editor",
+            IconKind::AppBundle,
+        )
+        .with_windows(vec![TaskId(1)])]);
     let mut comp = compositor();
     let mut router = SessionInputRouter::new();
 
-    let slot = session.taskbar().layout(Scale::ONE).tasks.first().copied();
+    let slot = session.taskbar().layout(Scale::ONE).apps.first().copied();
     let Some(slot) = slot else {
-        panic!("the inserted task has a slot");
+        panic!("the seated application has a slot");
     };
     let at = Point::new(slot.left() + 1, slot.top() + 1);
 
@@ -1299,12 +1325,11 @@ fn a_press_with_no_running_task_activates_a_fresh_one() {
         session.taskbar_mut(),
         0,
     );
-
-    let SessionInputResponse::Taskbar(TaskbarResponse::TaskActivated { outcome, .. }) = response
-    else {
-        panic!("a press on a task slot activates it, got {response:?}");
-    };
-    assert_eq!(outcome, ActivateOutcome::Activated);
+    assert_eq!(
+        response,
+        SessionInputResponse::Taskbar(TaskbarResponse::AppRaise { app: 0 }),
+        "the application declared no default action, so the session raises its window"
+    );
 }
 
 // ---- desktop shell: driving the desktop from a live input stream ----
@@ -2249,17 +2274,18 @@ fn app_surface() -> Surface {
     Surface::filled(320, 240, Color::rgb(40, 160, 90).premultiply()).expect("surface allocates")
 }
 
-/// The centre of the task slot at `index` on the bar laid out at 100%.
-fn task_slot_point(shell: &DesktopShell, index: usize) -> Point {
+/// The centre of the application slot at `index` on the bar laid out at
+/// 100%.
+fn slot_point(shell: &DesktopShell, index: usize) -> Point {
     let slot = shell
         .session()
         .taskbar()
         .layout(Scale::ONE)
-        .tasks
+        .apps
         .get(index)
         .copied()
-        .expect("the task has a slot");
-    assert!(!slot.is_empty(), "the task slot has a region");
+        .expect("the application has a slot");
+    assert!(!slot.is_empty(), "the application slot has a region");
     Point::new(slot.left() + 1, slot.top() + 1)
 }
 
@@ -2410,40 +2436,45 @@ fn minimizing_or_closing_the_focused_window_leaves_no_active_frame() {
 }
 
 #[test]
-fn clicking_a_task_minimises_then_restores_its_window() {
+fn a_minimised_window_comes_back_by_being_chosen_in_the_picker() {
+    // A slot is an application, so clicking it never minimises. The title
+    // bar's control minimises and the picker's cell brings it back.
     let mut shell = shell();
     let mut comp = compositor();
     let window = shell
         .open_window(&mut comp, Point::new(300, 200), app_surface(), "Editor")
         .expect("opens");
     let task = shell.tasks().task_for(window).expect("tracked");
-    let at = task_slot_point(&shell, 0);
-
-    // First click on the focused, non-minimised task minimises it: the window
-    // is hidden and focus is dropped.
-    shell.handle(moved(at.x, at.y), &mut comp, 0);
-    let outcome = shell.handle(PRIMARY_PRESS, &mut comp, 0);
-    assert_eq!(
-        outcome,
-        ShellOutcome::Taskbar(TaskbarResponse::TaskActivated {
-            id: task,
-            outcome: ActivateOutcome::Minimised,
-        })
+    shell.set_apps(
+        &mut comp,
+        vec![tairix_taskbar::AppSlot::new("Editor", IconKind::AppBundle).with_windows(vec![task])],
     );
+    let at = slot_point(&shell, 0);
+
+    assert!(shell.minimize_window(&mut comp, window));
     assert!(!comp.window(window).expect("still tracked").is_visible());
     assert_eq!(shell.router().focused(), None);
+    assert!(shell.session().taskbar().tasks().is_minimised(task));
 
-    // A second click restores and re-focuses it.
-    let outcome = shell.handle(PRIMARY_PRESS, &mut comp, 0);
+    // A click on the slot raises rather than toggling: the window comes
+    // back and no press can put it away again.
+    shell.handle(moved(at.x, at.y), &mut comp, 0);
     assert_eq!(
-        outcome,
-        ShellOutcome::Taskbar(TaskbarResponse::TaskActivated {
-            id: task,
-            outcome: ActivateOutcome::Activated,
-        })
+        shell.handle(PRIMARY_PRESS, &mut comp, 0),
+        ShellOutcome::Taskbar(TaskbarResponse::AppRaise { app: 0 })
     );
+    assert_eq!(
+        shell.handle(PRIMARY_PRESS, &mut comp, 0),
+        ShellOutcome::Taskbar(TaskbarResponse::AppRaise { app: 0 }),
+        "a second click is still a raise, never a minimise"
+    );
+
+    // Raising it — what a chosen picker cell asks the session for — shows,
+    // raises, and focuses it.
+    assert!(shell.raise_window(&mut comp, window));
     assert!(comp.window(window).expect("tracked").is_visible());
     assert_eq!(shell.router().focused(), Some(window));
+    assert!(!shell.session().taskbar().tasks().is_minimised(task));
 }
 
 #[test]
@@ -2522,22 +2553,12 @@ fn the_bridge_maps_windows_to_tasks_both_ways() {
 }
 
 #[test]
-fn activating_an_unknown_task_changes_nothing() {
+fn raising_an_unknown_task_changes_nothing() {
     let bridge = TaskBridge::new();
     let mut comp = compositor();
     let mut router = SessionInputRouter::new();
-    assert!(!bridge.activate(
-        &mut comp,
-        &mut router,
-        TaskId(999),
-        ActivateOutcome::Activated
-    ));
-    assert!(!bridge.activate(
-        &mut comp,
-        &mut router,
-        TaskId(999),
-        ActivateOutcome::Unknown
-    ));
+    assert!(!bridge.raise(&mut comp, &mut router, TaskId(999)));
+    assert_eq!(router.focused(), None);
 }
 
 #[test]
@@ -3175,13 +3196,12 @@ fn shell_raise_window_shows_and_focuses_tracked_tasks() {
         .open_window(&mut comp, Point::new(200, 200), app_surface(), "Files")
         .unwrap();
 
-    // Minimise.
-    let at = task_slot_point(&shell, 0);
-    shell.handle(moved(at.x, at.y), &mut comp, 0);
-    shell.handle(PRIMARY_PRESS, &mut comp, 0);
+    // Minimised from its title bar, so it is hidden and unfocused.
+    assert!(shell.minimize_window(&mut comp, id));
     assert!(!comp.window(id).unwrap().is_visible());
+    assert_eq!(shell.router().focused(), None);
 
-    // Raise.
+    // Raised again — what a chosen picker cell asks for.
     assert!(shell.raise_window(&mut comp, id));
     assert!(comp.window(id).unwrap().is_visible());
     assert_eq!(shell.router().focused(), Some(id));
@@ -3240,758 +3260,411 @@ fn full_launch_flow() {
 }
 
 #[test]
-fn session_pins_load_matrix() {
-    let home = "/Users/alice";
-    let path = tairix_taskpins::user_pins_path(home).unwrap();
-
-    // (a) absent store -> empty no warning
-    let (pins, warning) = SessionPins::load(&mut MemoryAssets::default(), Some(home));
-    assert!(pins.list().is_empty());
-    assert!(warning.is_none());
-
-    // (b) valid store -> parsed
-    let conf = "entry os.tairix.files\nbundle /Apps/editor.app\n";
-    let mut reader = MemoryAssets::default().with(&path, conf.as_bytes());
-    let (pins, warning) = SessionPins::load(&mut reader, Some(home));
-    assert_eq!(pins.list().len(), 2);
-    assert!(warning.is_none());
-
-    // (c) malformed -> empty + warning
-    let mut reader = MemoryAssets::default().with(&path, b"invalid line");
-    let (pins, warning) = SessionPins::load(&mut reader, Some(home));
-    assert!(pins.list().is_empty());
-    let w = warning.expect("warning");
-    assert!(w.contains(&path));
-    assert!(w.contains("unknown pin key"));
-
-    // (d) oversize
-    let mut reader =
-        MemoryAssets::default().with(&path, &vec![b'#'; tairix_taskpins::MAX_PINS_LEN + 1]);
-    let (pins, warning) = SessionPins::load(&mut reader, Some(home));
-    assert!(pins.list().is_empty());
-    assert!(warning.unwrap().contains("longer than any valid pin store"));
-
-    // (e) non-UTF-8
-    let mut reader = MemoryAssets::default().with(&path, b"\xff\xfe");
-    let (pins, warning) = SessionPins::load(&mut reader, Some(home));
-    assert!(pins.list().is_empty());
-    assert!(warning.unwrap().contains("not valid UTF-8"));
-
-    // (f) no home
-    let (pins, warning) = SessionPins::load(&mut MemoryAssets::default(), None);
-    assert!(pins.list().is_empty());
-    assert!(warning.is_none());
+fn the_strip_groups_windows_under_the_process_that_owns_them() {
+    let mut service = AppBarService::new();
+    let one = window_owner(1);
+    let two = window_owner(2);
+    let windows = vec![(one, TaskId(0)), (two, TaskId(1)), (one, TaskId(2))];
+    let strip = service.strip(&windows, |owner| {
+        (owner == one).then(|| String::from("/Apps/terminal.app"))
+    });
+    assert_eq!(strip.len(), 2, "one slot per process, not per window");
+    assert_eq!(strip[0].owner, one);
+    assert_eq!(strip[0].bundle.as_deref(), Some("/Apps/terminal.app"));
+    assert_eq!(strip[0].windows, vec![TaskId(0), TaskId(2)]);
+    assert_eq!(strip[1].owner, two);
+    assert_eq!(
+        strip[1].bundle, None,
+        "a process the desktop did not launch has no bundle to attest"
+    );
+    assert_eq!(strip[1].windows, vec![TaskId(1)]);
 }
 
 #[test]
-fn edit_persistence_and_refusal() {
-    let home = "/Users/alice";
-    let path = tairix_taskpins::user_pins_path(home).unwrap();
-    let mut reader = MemoryAssets::default();
-    let (mut pins, _) = SessionPins::load(&mut reader, Some(home));
-
-    let mut writer = MemoryWriter::default();
-    let entry = EntryId::new("os.tairix.files").unwrap();
-
-    // (a) pin_entry persists
-    let index = pins.pin_entry(&mut writer, entry.clone()).expect("pinned");
-    assert_eq!(index, 0);
-    assert_eq!(pins.list().len(), 1);
-    let written = writer.written(&path).expect("written");
-    assert_eq!(written, b"entry os.tairix.files\n");
-
-    // survives reload
-    let mut reader = MemoryAssets::default().with(&path, written);
-    let (pins2, _) = SessionPins::load(&mut reader, Some(home));
-    assert_eq!(pins2.list().len(), 1);
-
-    // (b) unpin rewrites
-    pins.unpin(&mut writer, 0).expect("unpinned");
-    assert!(pins.list().is_empty());
-    assert_eq!(writer.written(&path).unwrap(), b"");
-
-    // (c) refusing writer leaves memory unchanged
-    pins.pin_entry(&mut writer, entry).expect("pinned again");
-    let mut refusing = MemoryWriter::default().with_error(Errno::PermissionDenied);
-    let res = pins.unpin(&mut refusing, 0);
-    assert_eq!(res, Err(PinEditError::Write(Errno::PermissionDenied)));
-    assert_eq!(pins.list().len(), 1);
-
-    // (d) duplicates refuse
-    let res = pins.pin_entry(&mut writer, EntryId::new("os.tairix.files").unwrap());
-    assert_eq!(res, Err(PinEditError::AlreadyPinned));
-
-    // (e) no home refuses even with healthy writer
-    let (mut pins_no_home, _) = SessionPins::load(&mut MemoryAssets::default(), None);
-    let res = pins_no_home.pin_entry(&mut writer, EntryId::new("any").unwrap());
-    assert_eq!(res, Err(PinEditError::NoHome));
-
-    // (f) pin_at clamps an out-of-range index to the end
-    let (mut pins, _) = SessionPins::load(&mut MemoryAssets::default(), Some(home));
-    let index = pins
-        .pin_at(
-            &mut writer,
-            99,
-            PinTarget::Bundle(BundlePath::new("/Apps/editor.app").unwrap()),
-        )
-        .expect("pinned");
-    assert_eq!(index, 0);
-}
-
-#[test]
-fn pin_resolution() {
-    let mut catalog = Catalog::new();
-    let entry_id = EntryId::new("os.tairix.files").unwrap();
-    catalog
-        .insert(LibraryEntry::new(
-            entry_id.clone(),
-            DisplayName::new("Files").unwrap(),
-            BundlePath::new("/Apps/files.app").unwrap(),
-            LibraryCategory::Office,
-            Some(IconAsset::new("files.svg").unwrap()),
-        ))
-        .unwrap();
-
-    let mut list = tairix_taskpins::PinList::default();
-    list.pin(tairix_taskpins::PinTarget::Entry(entry_id.clone()))
-        .unwrap();
-    list.pin(tairix_taskpins::PinTarget::Entry(
-        EntryId::new("missing").unwrap(),
-    ))
-    .unwrap();
-    list.pin(tairix_taskpins::PinTarget::Bundle(
-        BundlePath::new("/Apps/editor.app").unwrap(),
-    ))
-    .unwrap();
-    list.pin(tairix_taskpins::PinTarget::Bundle(
-        BundlePath::new("/Apps/no-manifest.app").unwrap(),
-    ))
-    .unwrap();
-
-    let mut reader = MemoryAssets::default().with(
-        "/Apps/editor.app/AppInfo",
-        &manifest_fixture("Editor", Some("edit.svg")),
-    );
-
-    let resolved = crate::pins::resolve_pins(&mut reader, &list, &catalog);
-    assert_eq!(resolved.len(), 4);
-
-    // 1. Entry in catalog
-    assert_eq!(resolved[0].label, "Files");
-    assert_eq!(
-        resolved[0].run_path,
-        Some(String::from("/Apps/files.app/Run"))
-    );
-    assert_eq!(
-        resolved[0].icon,
-        Some(PinIconSource {
-            bundle: String::from("/Apps/files.app"),
-            asset: String::from("files.svg"),
-        })
-    );
-
-    // 2. Uncatalogued entry
-    assert_eq!(resolved[1].label, "missing");
-    assert_eq!(resolved[1].run_path, None);
-
-    // 3. Bundle with manifest
-    assert_eq!(resolved[2].label, "Editor");
-    assert_eq!(
-        resolved[2].run_path,
-        Some(String::from("/Apps/editor.app/Run"))
-    );
-    assert_eq!(
-        resolved[2].icon,
-        Some(PinIconSource {
-            bundle: String::from("/Apps/editor.app"),
-            asset: String::from("edit.svg"),
-        })
-    );
-
-    // 4. Bundle with no manifest
-    assert_eq!(resolved[3].label, "no-manifest");
-    assert_eq!(resolved[3].run_path, None);
-
-    // 5. Oversize manifest refused
-    let mut reader =
-        MemoryAssets::default().with("/Apps/big.app/AppInfo", &vec![0; APPINFO_WIRE_MAX + 1]);
-    let mut list = tairix_taskpins::PinList::default();
-    list.pin(tairix_taskpins::PinTarget::Bundle(
-        BundlePath::new("/Apps/big.app").unwrap(),
-    ))
-    .unwrap();
-    let resolved = crate::pins::resolve_pins(&mut reader, &list, &Catalog::new());
-    assert_eq!(resolved[0].label, "big");
-    assert_eq!(resolved[0].run_path, None);
-}
-
-#[test]
-fn pin_service_decisions() {
-    let mut reader =
-        MemoryAssets::default().with("/Apps/valid.app/AppInfo", &manifest_fixture("Valid", None));
-    let writer = MemoryWriter::default();
-    let pins = SessionPins::load(&mut reader, Some("/Users/alice")).0;
-    let mut service = PinService::new(reader, writer, pins);
-
-    // ok -> Pinned + dirty
+fn a_declaration_holds_a_slot_with_no_windows_and_leaves_on_withdrawal() {
+    let mut service = AppBarService::new();
+    let owner = window_owner(1);
     assert!(!service.take_dirty());
-    assert_eq!(
-        service.pin_bundle_at(0, "/Apps/valid.app"),
-        PinDecision::Pinned
+    service.declare(owner, &app_bar(true)).expect("declared");
+    assert!(
+        service.take_dirty(),
+        "a declaration latches the strip dirty"
     );
+
+    let strip = service.strip(&[], |_| None);
+    assert_eq!(strip.len(), 1, "a declaring application keeps its slot");
+    assert_eq!(strip[0].windows, Vec::new());
+    assert!(service.declaration(owner).is_some());
+
+    // Re-declaring replaces the declaration whole rather than adding a slot.
+    let mut menu = AppMenu::EMPTY;
+    menu.push(AppMenuRow::About).expect("fits");
+    service
+        .declare(
+            owner,
+            &AppBar {
+                event_endpoint: 9,
+                default_action: false,
+                menu,
+            },
+        )
+        .expect("re-declared");
+    assert_eq!(service.strip(&[], |_| None).len(), 1);
+    let declared = service.declaration(owner).expect("held");
+    assert!(!declared.default_action);
+    assert_eq!(declared.menu.len(), 1);
+
+    // The window engine proved the process gone: the slot goes with it.
+    service.withdraw(owner);
     assert!(service.take_dirty());
-    assert!(!service.take_dirty());
+    assert!(service.declaration(owner).is_none());
+    assert!(service.strip(&[], |_| None).is_empty());
+}
 
-    // AlreadyPinned
-    assert_eq!(
-        service.pin_bundle_at(0, "/Apps/valid.app"),
-        PinDecision::AlreadyPinned
-    );
-
-    // Refused (bad path)
-    assert_eq!(service.pin_bundle_at(0, "not-a-path"), PinDecision::Refused);
-
-    // Refused (missing manifest)
-    assert_eq!(
-        service.pin_bundle_at(0, "/Apps/missing.app"),
-        PinDecision::Refused
-    );
-
-    // Full
+#[test]
+fn a_window_alone_holds_a_slot_with_no_menu_and_no_default_action() {
+    let mut service = AppBarService::new();
+    let owner = window_owner(1);
+    let strip = service.strip(&[(owner, TaskId(0))], |_| None);
+    assert_eq!(strip.len(), 1, "no window is ever unreachable");
     let mut reader = MemoryAssets::default();
-    for i in 0..tairix_taskpins::MAX_PINS {
-        let path = format!("/Apps/app{i}.app");
-        reader
-            .files
-            .push((format!("{path}/AppInfo"), manifest_fixture("App", None)));
-    }
-    reader.files.push((
-        String::from("/Apps/full.app/AppInfo"),
-        manifest_fixture("Full", None),
-    ));
-
-    let mut writer = MemoryWriter::default();
-    let pins = SessionPins::load(&mut reader, Some("/Users/alice")).0;
-    let mut service = PinService::new(&mut reader, &mut writer, pins);
-    for i in 0..tairix_taskpins::MAX_PINS {
-        let path = format!("/Apps/app{i}.app");
-        assert_eq!(service.pin_bundle_at(i, &path), PinDecision::Pinned);
-    }
-    assert_eq!(
-        service.pin_bundle_at(99, "/Apps/full.app"),
-        PinDecision::Full
-    );
-}
-
-#[test]
-fn pin_service_drag_management() {
-    let mut service = PinService::new(
-        MemoryAssets::default(),
-        MemoryWriter::default(),
-        SessionPins::default(),
-    );
-    let path = "/Apps/editor.app";
-    let bundle = BundlePath::new(path).unwrap();
-
-    // offer
-    assert!(service.drag_offered(7, path));
-    assert!(service.drag_armed());
-
-    // different window leaves armed
-    assert_eq!(service.take_drag_for(DragOrigin::Window(9)), None);
-    assert!(service.drag_armed());
-
-    // the program library is a different origin too, and claims nothing a
-    // window offered
-    assert_eq!(service.take_drag_for(DragOrigin::Library), None);
-    assert!(service.drag_armed());
-
-    // same window consumes
-    assert_eq!(
-        service.take_drag_for(DragOrigin::Window(7)),
-        Some(PinTarget::Bundle(bundle))
-    );
-    assert!(!service.drag_armed());
-
-    // second offer replaces
-    service.drag_offered(7, "/Apps/one.app");
-    service.drag_offered(7, "/Apps/two.app");
-    assert_eq!(
-        service.take_drag_for(DragOrigin::Window(7)),
-        Some(PinTarget::Bundle(BundlePath::new("/Apps/two.app").unwrap()))
-    );
-
-    // a library drag arms and is consumed on the same terms, carrying the
-    // catalogued entry rather than a path guessed from a row label
-    let entry = EntryId::new("os.tairix.editor").unwrap();
-    service.offer_drag(DragOrigin::Library, PinTarget::Entry(entry.clone()));
-    assert!(service.drag_armed());
-    service.withdraw_drag(DragOrigin::Window(7)); // no effect
-    assert!(service.drag_armed());
-    assert_eq!(
-        service.take_drag_for(DragOrigin::Library),
-        Some(PinTarget::Entry(entry))
-    );
-    assert!(!service.drag_armed());
-
-    // withdraw
-    service.drag_offered(7, path);
-    service.drag_withdrawn(9); // no effect
-    assert!(service.drag_armed());
-    service.drag_withdrawn(7);
-    assert!(!service.drag_armed());
-
-    // malformed path
-    assert!(!service.drag_offered(7, "not-a-path"));
-    assert!(!service.drag_armed());
-}
-
-#[test]
-fn resolve_pin_drop_pins_on_the_band_and_ends_the_gesture_elsewhere() {
-    use crate::pins::resolve_pin_drop;
-    use tairix_geometry::{Point, Scale};
-    use tairix_taskbar::{Taskbar, TaskbarConfig};
-    use tairix_theme::Theme;
-
-    let bar = Taskbar::new(TaskbarConfig::bottom_bar(1000, 800), &Theme::dark());
-    let layout = bar.layout(Scale::ONE);
-    let on_band = Point::new(
-        layout.task_list.left() + 10,
-        layout.task_list.top() + i32::try_from(layout.task_list.height / 2).unwrap_or(0),
-    );
-    let service = || {
-        let reader = MemoryAssets::default().with(
-            "/Apps/editor.app/AppInfo",
-            &manifest_fixture("Editor", None),
-        );
-        PinService::new(reader, MemoryWriter::default(), {
-            SessionPins::load(&mut MemoryAssets::default(), Some("/Users/alice")).0
-        })
-    };
-    let library = catalog(&[("editor", "Editor", LibraryCategory::Office)]);
-    let dragged_entry = EntryId::new("os.tairix.editor").unwrap();
-
-    // Nothing armed: a release is never a drop.
-    let mut idle = service();
-    assert_eq!(
-        resolve_pin_drop(
-            &mut idle,
-            Some(DragOrigin::Window(7)),
-            &library,
-            &layout,
-            on_band
-        ),
-        None
-    );
-
-    // A release from an unserved window leaves the offer armed.
-    let mut unserved = service();
-    assert!(unserved.drag_offered(7, "/Apps/editor.app"));
-    assert_eq!(
-        resolve_pin_drop(&mut unserved, None, &library, &layout, on_band),
-        None
-    );
-    assert!(unserved.drag_armed());
-
-    // A release from the offering window over the pin band pins at the
-    // drop index and persists the store.
-    let mut landing = service();
-    assert!(landing.drag_offered(7, "/Apps/editor.app"));
-    assert_eq!(
-        resolve_pin_drop(
-            &mut landing,
-            Some(DragOrigin::Window(7)),
-            &library,
-            &layout,
-            on_band
-        ),
-        Some(PinDecision::Pinned)
-    );
-    assert!(!landing.drag_armed());
-    assert_eq!(landing.pins().list().len(), 1);
-    assert!(landing.take_dirty());
-
-    // A program dragged out of the library popup pins on exactly the same
-    // terms: one drop path, whichever surface the gesture started on.
-    let mut dragged = service();
-    dragged.offer_drag(DragOrigin::Library, PinTarget::Entry(dragged_entry.clone()));
-    assert_eq!(
-        resolve_pin_drop(
-            &mut dragged,
-            Some(DragOrigin::Window(7)),
-            &library,
-            &layout,
-            on_band
-        ),
-        None,
-        "a window's release cannot claim the library's drag"
-    );
-    assert!(dragged.drag_armed());
-    assert_eq!(
-        resolve_pin_drop(
-            &mut dragged,
-            Some(DragOrigin::Library),
-            &library,
-            &layout,
-            on_band
-        ),
-        Some(PinDecision::Pinned)
-    );
-    assert_eq!(
-        dragged.pins().list().get(0),
-        Some(&PinTarget::Entry(dragged_entry)),
-        "the store records the catalogued entry, not a guessed path"
-    );
-
-    // A release from the offering window away from the band ends the
-    // gesture without pinning (the offer is consumed either way).
-    let mut stray = service();
-    assert!(stray.drag_offered(7, "/Apps/editor.app"));
-    assert_eq!(
-        resolve_pin_drop(
-            &mut stray,
-            Some(DragOrigin::Window(7)),
-            &library,
-            &layout,
-            Point::new(2, 2)
-        ),
-        None
-    );
-    assert!(!stray.drag_armed());
-    assert_eq!(stray.pins().list().len(), 0);
-}
-
-/// Open the library popup and press the row labelled `label`, returning the
-/// entry that row names and the point pressed. Mirrors the user gesture:
-/// the Library button, then the row itself.
-fn press_library_row(
-    shell: &mut DesktopShell,
-    comp: &mut Compositor,
-    label: &str,
-) -> (EntryId, Point) {
-    shell.handle(moved(24, 1060), comp, 0);
-    shell.handle(PRIMARY_PRESS, comp, 0);
-    shell.handle(PRIMARY_RELEASE, comp, 0);
-    let layout = shell.session().taskbar().library_layout(Scale::ONE);
-    let index = shell
-        .session()
-        .taskbar()
-        .library()
-        .rows()
-        .iter()
-        .position(|row| matches!(row, LibraryRow::Entry { name, .. } if name.as_str() == label))
-        .expect("a row with that label");
-    let LibraryRow::Entry { id, .. } = shell.session().taskbar().library().rows()[index].clone()
-    else {
-        panic!("expected a program row");
-    };
-    let (_, rect) = layout
-        .rows
-        .iter()
-        .find(|(shown, _)| *shown == index)
-        .expect("the row is on screen");
-    let at = Point::new(
-        rect.left() + i32::try_from(rect.width / 2).expect("fits"),
-        rect.top() + i32::try_from(rect.height / 2).expect("fits"),
-    );
-    shell.handle(moved(at.x, at.y), comp, 0);
-    assert_eq!(
-        shell.handle(PRIMARY_PRESS, comp, 0),
-        ShellOutcome::Ignored,
-        "a press only arms the gesture"
-    );
-    (id, at)
-}
-
-/// A point far enough from `from` that the shared drag detector must call
-/// the motion a drag rather than a click.
-fn past_drag_threshold(from: Point) -> Point {
-    let travel = i32::try_from(tairix_browse::DRAG_THRESHOLD_PX).expect("small") + 1;
-    Point::new(from.x, from.y + travel)
-}
-
-/// The centre of the bar's pin band — where a drop pins.
-fn on_the_pin_band(shell: &DesktopShell) -> Point {
-    let layout = shell.session().taskbar().layout(Scale::ONE);
-    Point::new(
-        layout.task_list.left() + 10,
-        layout.task_list.top() + i32::try_from(layout.task_list.height / 2).expect("fits"),
-    )
-}
-
-/// A pin service over the in-memory seams with an empty store.
-fn library_pin_service() -> PinService<MemoryAssets, MemoryWriter> {
-    PinService::new(
-        MemoryAssets::default(),
-        MemoryWriter::default(),
-        SessionPins::load(&mut MemoryAssets::default(), Some("/Users/alice")).0,
-    )
-}
-
-/// Apply one shell outcome to `service` exactly as the live event loop
-/// does, so the host test drives the same glue the running desktop does.
-fn route_pin_drag(
-    outcome: &ShellOutcome,
-    shell: &DesktopShell,
-    service: &mut PinService<MemoryAssets, MemoryWriter>,
-    catalog: &Catalog,
-    pointer: Point,
-) -> Option<PinDecision> {
-    match outcome {
-        ShellOutcome::Taskbar(TaskbarResponse::PinDragOffered { entry }) => {
-            service.offer_drag(DragOrigin::Library, PinTarget::Entry(entry.clone()));
-            None
-        }
-        ShellOutcome::Taskbar(TaskbarResponse::PinDragDropped) => {
-            let layout = shell.session().taskbar().layout(Scale::ONE);
-            crate::pins::resolve_pin_drop(
-                service,
-                Some(DragOrigin::Library),
-                catalog,
-                &layout,
-                pointer,
-            )
-        }
-        ShellOutcome::Taskbar(
-            TaskbarResponse::PinDragWithdrawn | TaskbarResponse::LibraryDismissed,
-        ) => {
-            service.withdraw_drag(DragOrigin::Library);
-            None
-        }
-        _ => None,
-    }
-}
-
-#[test]
-fn dragging_a_program_out_of_the_library_onto_the_pin_band_pins_it() {
-    let mut shell = shell();
-    let mut comp = compositor();
-    let library = office_and_games();
-    shell
-        .session_mut()
-        .taskbar_mut()
-        .library_mut()
-        .set_catalog(library.clone());
-    let mut service = library_pin_service();
-
-    let (id, press) = press_library_row(&mut shell, &mut comp, "Chess");
-    let dragging = past_drag_threshold(press);
-    let offered = shell.handle(moved(dragging.x, dragging.y), &mut comp, 0);
-    assert_eq!(
-        offered,
-        ShellOutcome::Taskbar(TaskbarResponse::PinDragOffered { entry: id.clone() })
-    );
-    route_pin_drag(&offered, &shell, &mut service, &library, dragging);
-    assert!(service.drag_armed());
-
-    let band = on_the_pin_band(&shell);
-    shell.handle(moved(band.x, band.y), &mut comp, 0);
-    let dropped = shell.handle(PRIMARY_RELEASE, &mut comp, 0);
-    assert_eq!(
-        dropped,
-        ShellOutcome::Taskbar(TaskbarResponse::PinDragDropped)
-    );
-    assert_eq!(
-        route_pin_drag(&dropped, &shell, &mut service, &library, band),
-        Some(PinDecision::Pinned)
-    );
-
-    // The store records the catalogued entry itself, so the pin references
-    // an application the library can vouch for rather than a guessed path.
-    assert_eq!(
-        service.pins().list().get(0),
-        Some(&PinTarget::Entry(id)),
-        "the pin names the entry that was dragged"
-    );
-    assert!(!service.drag_armed(), "the gesture is fully unwound");
-}
-
-#[test]
-fn a_library_drag_released_away_from_the_pin_band_pins_nothing() {
-    let mut shell = shell();
-    let mut comp = compositor();
-    let library = office_and_games();
-    shell
-        .session_mut()
-        .taskbar_mut()
-        .library_mut()
-        .set_catalog(library.clone());
-    let mut service = library_pin_service();
-
-    let (_, press) = press_library_row(&mut shell, &mut comp, "Chess");
-    let dragging = past_drag_threshold(press);
-    let offered = shell.handle(moved(dragging.x, dragging.y), &mut comp, 0);
-    route_pin_drag(&offered, &shell, &mut service, &library, dragging);
-
-    // Released over the desktop, nowhere near the bar.
-    shell.handle(moved(600, 300), &mut comp, 0);
-    let dropped = shell.handle(PRIMARY_RELEASE, &mut comp, 0);
-    assert_eq!(
-        route_pin_drag(
-            &dropped,
-            &shell,
-            &mut service,
-            &library,
-            Point::new(600, 300)
-        ),
-        None
-    );
-    assert!(service.pins().list().is_empty());
+    let slots =
+        with_artwork(|resolver, cache| service.slots(&strip, &mut reader, (resolver, cache, 24)));
     assert!(
-        !service.drag_armed(),
-        "one gesture, one decision: the offer never lingers"
+        slots[0].menu().is_empty(),
+        "the session invents no menu on an application's behalf"
     );
+    assert!(!slots[0].handles_default());
 }
 
 #[test]
-fn dragging_a_program_that_is_already_pinned_does_not_duplicate_it() {
-    let mut shell = shell();
-    let mut comp = compositor();
-    let library = office_and_games();
-    shell
-        .session_mut()
-        .taskbar_mut()
-        .library_mut()
-        .set_catalog(library.clone());
-    let mut service = library_pin_service();
-    let chess = EntryId::new("os.tairix.chess").unwrap();
+fn a_slot_keeps_its_place_while_it_lives() {
+    let mut service = AppBarService::new();
+    let (first, second, third) = (window_owner(1), window_owner(2), window_owner(3));
+    service.declare(first, &app_bar(true)).expect("declared");
+    service.declare(second, &app_bar(true)).expect("declared");
     assert_eq!(
-        service.pin_target_at(0, PinTarget::Entry(chess.clone()), &library),
-        PinDecision::Pinned
+        owners(&mut service, &[]),
+        vec![first, second],
+        "slots appear in the order the session first saw them"
     );
 
-    let (_, press) = press_library_row(&mut shell, &mut comp, "Chess");
-    let dragging = past_drag_threshold(press);
-    let offered = shell.handle(moved(dragging.x, dragging.y), &mut comp, 0);
-    route_pin_drag(&offered, &shell, &mut service, &library, dragging);
+    // The middle application exits and a new one starts: the survivor keeps
+    // its place and the newcomer joins the end, so the strip never
+    // reshuffles under the pointer.
+    service.withdraw(first);
+    service.declare(third, &app_bar(false)).expect("declared");
+    assert_eq!(owners(&mut service, &[]), vec![second, third]);
+}
 
-    let band = on_the_pin_band(&shell);
-    shell.handle(moved(band.x, band.y), &mut comp, 0);
-    let dropped = shell.handle(PRIMARY_RELEASE, &mut comp, 0);
+#[test]
+fn a_declaration_is_refused_past_the_strips_bound() {
+    let mut service = AppBarService::new();
+    for index in 0..MAX_BAR_APPS {
+        service
+            .declare(window_owner_wide(index), &app_bar(false))
+            .expect("fits");
+    }
     assert_eq!(
-        route_pin_drag(&dropped, &shell, &mut service, &library, band),
-        Some(PinDecision::AlreadyPinned)
+        service.declare(window_owner_wide(MAX_BAR_APPS), &app_bar(false)),
+        Err(Errno::NoSpace),
+        "a fork bomb cannot grow the strip without bound"
     );
-    assert_eq!(service.pins().list().len(), 1, "still pinned exactly once");
-}
-
-#[test]
-fn a_drag_of_a_program_that_left_the_catalog_is_refused_and_pins_nothing() {
-    let mut shell = shell();
-    let mut comp = compositor();
-    let library = office_and_games();
-    shell
-        .session_mut()
-        .taskbar_mut()
-        .library_mut()
-        .set_catalog(library.clone());
-    let mut service = library_pin_service();
-
-    let (_, press) = press_library_row(&mut shell, &mut comp, "Chess");
-    let dragging = past_drag_threshold(press);
-    let offered = shell.handle(moved(dragging.x, dragging.y), &mut comp, 0);
-    route_pin_drag(&offered, &shell, &mut service, &library, dragging);
-
-    // The program is uninstalled while the pointer is still down: the drop
-    // re-checks the catalog, so a pin that could never launch is refused.
-    let without_chess = catalog(&[
-        ("write", "Write", LibraryCategory::Office),
-        ("calc", "Calc", LibraryCategory::Office),
-    ]);
-    let band = on_the_pin_band(&shell);
-    shell.handle(moved(band.x, band.y), &mut comp, 0);
-    let dropped = shell.handle(PRIMARY_RELEASE, &mut comp, 0);
+    // An application already on the bar may still re-declare at the bound.
     assert_eq!(
-        route_pin_drag(&dropped, &shell, &mut service, &without_chess, band),
-        Some(PinDecision::Refused)
+        service.declare(window_owner_wide(0), &app_bar(true)),
+        Ok(())
     );
-    assert!(service.pins().list().is_empty());
 }
 
 #[test]
-fn dismissing_the_popup_mid_drag_withdraws_the_offer() {
-    let mut shell = shell();
-    let mut comp = compositor();
-    let library = office_and_games();
-    shell
-        .session_mut()
-        .taskbar_mut()
-        .library_mut()
-        .set_catalog(library.clone());
-    let mut service = library_pin_service();
-
-    let (_, press) = press_library_row(&mut shell, &mut comp, "Chess");
-    let dragging = past_drag_threshold(press);
-    let offered = shell.handle(moved(dragging.x, dragging.y), &mut comp, 0);
-    route_pin_drag(&offered, &shell, &mut service, &library, dragging);
-    assert!(service.drag_armed());
-
-    let escape = key_press(Key::Named(NamedKey::Escape));
-    let withdrawn = shell.handle(escape, &mut comp, 0);
-    assert!(matches!(
-        withdrawn,
-        ShellOutcome::Taskbar(
-            TaskbarResponse::PinDragWithdrawn | TaskbarResponse::LibraryDismissed
-        )
-    ));
-    route_pin_drag(&withdrawn, &shell, &mut service, &library, dragging);
-    assert!(
-        !service.drag_armed(),
-        "a withdrawn drag can never pin later"
+fn a_slots_identity_is_the_signed_manifests_and_a_missing_one_states_only_a_name() {
+    let mut service = AppBarService::new();
+    let (named, bare, none) = (window_owner(1), window_owner(2), window_owner(3));
+    let mut reader = MemoryAssets::default().with(
+        "/Apps/terminal.app/AppInfo",
+        &described_manifest_fixture("Terminal", "Runs a shell", "TAIRiX"),
     );
-    assert!(service.pins().list().is_empty());
-}
-
-#[test]
-fn secondary_press_over_pin_opens_taskbar_menu() {
-    let mut shell = shell();
-    let mut comp = compositor();
-
-    // Set one pin.
-    let views = vec![PinView::new("Files", IconKind::AppBundle)];
-    shell.set_pins(&mut comp, views);
-    assert_eq!(shell.session().taskbar().pins().len(), 1);
-
-    // Secondary press over the pin slot.
-    let at = pin_slot_point(&shell, 0);
-    shell.handle(moved(at.x, at.y), &mut comp, 0);
-    let outcome = shell.handle(SECONDARY_PRESS, &mut comp, 0);
-
-    assert_eq!(outcome, ShellOutcome::Ignored);
-    assert!(shell.session().taskbar().menu().is_open());
-    assert!(shell.presenter().menu_window().is_some());
-
-    // While menu is open, it is modal.
-    // Primary press inside menu (e.g. at menu origin, usually first row is Open/Launch).
-    let menu_rect = shell
-        .session()
-        .taskbar()
-        .menu_layout(Scale::ONE)
-        .unwrap()
-        .panel;
-    let first_row = Point::new(menu_rect.left() + 10, menu_rect.top() + 10);
-
-    shell.handle(moved(first_row.x, first_row.y), &mut comp, 0);
-    // Many controls activate on release.
-    shell.handle(PRIMARY_PRESS, &mut comp, 0);
-    let outcome = shell.handle(
-        InputEvent::PointerReleased {
-            button: PointerButton::Primary,
+    let strip = service.strip(
+        &[(named, TaskId(0)), (bare, TaskId(1)), (none, TaskId(2))],
+        |owner| {
+            if owner == named {
+                Some(String::from("/Apps/terminal.app"))
+            } else if owner == bare {
+                Some(String::from("/Apps/ghost.app"))
+            } else {
+                None
+            }
         },
-        &mut comp,
-        0,
+    );
+    let slots =
+        with_artwork(|resolver, cache| service.slots(&strip, &mut reader, (resolver, cache, 24)));
+
+    // The manifest's own fields, never anything the process claims.
+    assert_eq!(slots[0].label(), "Terminal");
+    assert_eq!(slots[0].identity().version, "1");
+    assert_eq!(slots[0].identity().purpose.as_deref(), Some("Runs a shell"));
+    assert_eq!(slots[0].identity().author.as_deref(), Some("TAIRiX"));
+
+    // A bundle with no readable manifest states its leaf name and nothing
+    // it did not read.
+    assert_eq!(slots[1].label(), "ghost");
+    assert_eq!(slots[1].identity().version, "");
+    assert_eq!(slots[1].identity().purpose, None);
+
+    // A process the desktop did not launch has nothing attesting an
+    // identity, so its slot never wears a name it was handed.
+    assert_eq!(slots[2].label(), "Application");
+    assert_eq!(slots[2].identity().version, "");
+}
+
+#[test]
+fn a_manifest_is_read_once_per_bundle_and_forgotten_when_nothing_runs_from_it() {
+    let mut service = AppBarService::new();
+    let (one, two) = (window_owner(1), window_owner(2));
+    let mut reader = MemoryAssets::default().with(
+        "/Apps/terminal.app/AppInfo",
+        &manifest_fixture("Terminal", None),
+    );
+    let bundle = |_| Some(String::from("/Apps/terminal.app"));
+
+    let strip = service.strip(&[(one, TaskId(0)), (two, TaskId(1))], bundle);
+    let _ =
+        with_artwork(|resolver, cache| service.slots(&strip, &mut reader, (resolver, cache, 24)));
+    assert_eq!(
+        reader.reads("/Apps/terminal.app/AppInfo"),
+        1,
+        "two applications from one bundle read its manifest once"
     );
 
-    // For a not-running pin, first row should be ActivatePin (which means launch).
-    if let ShellOutcome::Taskbar(TaskbarResponse::ActivatePin { index }) = outcome {
-        assert_eq!(index, 0);
-    } else {
-        panic!("expected ActivatePin, got {outcome:?}");
-    }
+    // The bundle's last application leaves, so its identity is dropped
+    // rather than held for a process that will never return.
+    let strip = service.strip(&[], bundle);
+    assert!(strip.is_empty());
+    let strip = service.strip(&[(one, TaskId(0))], bundle);
+    let _ =
+        with_artwork(|resolver, cache| service.slots(&strip, &mut reader, (resolver, cache, 24)));
+    assert_eq!(reader.reads("/Apps/terminal.app/AppInfo"), 2);
+}
 
+#[test]
+fn a_slot_carries_the_declaration_its_own_process_made() {
+    let mut service = AppBarService::new();
+    let (declaring, silent) = (window_owner(1), window_owner(2));
+    service
+        .declare(declaring, &app_bar(true))
+        .expect("declared");
+    let strip = service.strip(&[(silent, TaskId(0))], |_| None);
+    let mut reader = MemoryAssets::default();
+    let slots =
+        with_artwork(|resolver, cache| service.slots(&strip, &mut reader, (resolver, cache, 24)));
+    assert_eq!(slots.len(), 2);
+    assert!(slots[0].handles_default(), "the declaring process's slot");
+    assert!(!slots[0].menu().is_empty());
+    assert!(
+        !slots[1].handles_default(),
+        "one process's declaration never reaches another's slot"
+    );
+    assert!(slots[1].menu().is_empty());
+}
+
+#[test]
+fn a_thumbnail_scales_a_windows_frame_to_the_cell() {
+    let magenta = Color {
+        r: 255,
+        g: 0,
+        b: 255,
+        a: 255,
+    };
+    let frame = Surface::filled(200, 120, magenta.premultiply()).expect("a frame");
+    let scaled = thumbnail(&frame, 40, 24).expect("scaled");
+    assert_eq!((scaled.width(), scaled.height()), (40, 24));
+    assert_eq!(
+        scaled.get(20, 12),
+        Some(magenta.premultiply()),
+        "the window's own pixels, resampled rather than re-drawn"
+    );
+    // A degenerate frame or cell is refused rather than guessed at, so the
+    // cell falls back to the application's glyph.
+    assert!(thumbnail(&frame, 0, 24).is_none());
+    assert!(thumbnail(&Surface::new(0, 0).expect("empty"), 8, 8).is_none());
+}
+
+#[test]
+fn picker_cells_caption_each_window_and_refuse_below_a_choice() {
+    let mut bar = tairix_taskbar::Taskbar::new(
+        TaskbarConfig::bottom_bar(1000, 800),
+        &tairix_theme::Theme::dark(),
+    );
+    bar.tasks_mut().add(TaskId(1), "Shell");
+    bar.tasks_mut().add(TaskId(2), "Logs");
+    bar.set_apps(vec![
+        tairix_taskbar::AppSlot::new("Terminal", IconKind::AppBundle)
+            .with_windows(vec![TaskId(1), TaskId(2)]),
+        tairix_taskbar::AppSlot::new("Editor", IconKind::AppBundle).with_windows(vec![TaskId(1)]),
+    ]);
+    let magenta = Color {
+        r: 255,
+        g: 0,
+        b: 255,
+        a: 255,
+    };
+
+    let cells = picker_cells(&bar, 0, (32, 20), |task| {
+        (task == TaskId(1)).then(|| Surface::filled(64, 40, magenta.premultiply()).expect("frame"))
+    });
+    assert_eq!(cells.len(), 2);
+    assert_eq!(cells[0].window(), TaskId(1));
+    assert_eq!(cells[0].title(), "Shell");
+    assert_eq!(
+        cells[0].thumbnail().map(|art| (art.width(), art.height())),
+        Some((32, 20))
+    );
+    assert_eq!(cells[1].title(), "Logs");
+    assert!(
+        cells[1].thumbnail().is_none(),
+        "a window with no frame yet has no thumbnail, and its cell draws the glyph"
+    );
+
+    // One window is no choice, and an unknown application is no application.
+    assert!(picker_cells(&bar, 1, (32, 20), |_| None).is_empty());
+    assert!(picker_cells(&bar, 9, (32, 20), |_| None).is_empty());
+}
+
+#[test]
+fn the_window_host_relays_a_declaration_and_its_withdrawal() {
+    let (mut shell, mut comp) = (shell(), compositor());
+    let mut windows = SessionWindows::new();
+    let mut picker = SessionPicker::new(TreeSource::fixture);
+    let mut apps = AppBarService::new();
+    let owner = window_owner(1);
+    {
+        let mut host = ShellWindowHost {
+            shell: &mut shell,
+            compositor: &mut comp,
+            windows: &mut windows,
+            picker: &mut picker,
+            apps: &mut apps,
+        };
+        tairix_window::WindowHost::app_bar_declared(&mut host, owner, &app_bar(true))
+            .expect("the session lists it");
+        tairix_window::WindowHost::app_bar_withdrawn(&mut host, window_owner(9));
+    }
+    assert!(apps.declaration(owner).is_some());
+    assert!(
+        apps.declaration(window_owner(9)).is_none(),
+        "withdrawing a presence nobody declared changes nothing"
+    );
+    {
+        let mut host = ShellWindowHost {
+            shell: &mut shell,
+            compositor: &mut comp,
+            windows: &mut windows,
+            picker: &mut picker,
+            apps: &mut apps,
+        };
+        tairix_window::WindowHost::app_bar_withdrawn(&mut host, owner);
+    }
+    assert!(apps.declaration(owner).is_none());
+}
+
+#[test]
+fn secondary_press_over_an_app_slot_opens_the_menu_it_declared() {
+    let mut shell = shell();
+    let mut comp = compositor();
+    let mut menu = AppMenu::EMPTY;
+    menu.push(AppMenuRow::Item {
+        id: AppMenuItemId::new(1).expect("non-zero"),
+        label: AppMenuLabel::new("Quit").expect("short"),
+        enabled: true,
+        mark: AppMenuMark::None,
+    })
+    .expect("fits");
+    shell.set_apps(
+        &mut comp,
+        vec![
+            tairix_taskbar::AppSlot::new("Terminal", IconKind::AppBundle)
+                .with_declaration(menu, true),
+        ],
+    );
+
+    let at = app_slot_point(&shell, 0);
+    shell.handle(moved(at.x, at.y), &mut comp, 0);
+    assert_eq!(
+        shell.handle(SECONDARY_PRESS, &mut comp, 0),
+        ShellOutcome::Ignored,
+        "opening a menu acts on nothing by itself"
+    );
+    assert!(shell.session().taskbar().menu().is_open());
+    assert!(
+        shell.presenter().menu_window().is_some(),
+        "the menu is shown as its own window"
+    );
+
+    // A click away takes only the menu down.
+    shell.handle(moved(900, 300), &mut comp, 0);
+    shell.handle(PRIMARY_PRESS, &mut comp, 0);
     assert!(!shell.session().taskbar().menu().is_open());
-    // Presenter should have removed the window.
     assert!(shell.presenter().menu_window().is_none());
+}
+
+#[test]
+fn hovering_a_two_window_app_shows_the_picker_as_its_own_window() {
+    let mut shell = shell();
+    let mut comp = compositor();
+    shell
+        .session_mut()
+        .taskbar_mut()
+        .tasks_mut()
+        .add(TaskId(1), "Shell");
+    shell
+        .session_mut()
+        .taskbar_mut()
+        .tasks_mut()
+        .add(TaskId(2), "Logs");
+    shell.set_apps(
+        &mut comp,
+        vec![
+            tairix_taskbar::AppSlot::new("Terminal", IconKind::AppBundle)
+                .with_windows(vec![TaskId(1), TaskId(2)]),
+        ],
+    );
+    assert!(shell.presenter().picker_window().is_none());
+
+    let at = app_slot_point(&shell, 0);
+    assert_eq!(
+        shell.handle(moved(at.x, at.y), &mut comp, 0),
+        ShellOutcome::Taskbar(TaskbarResponse::ShowWindowPicker { app: 0 }),
+        "the session owns the windows' pixels, so it is asked for the cells"
+    );
+
+    // The embedder answers with the cells and the picker becomes a window.
+    let cell = shell.session().taskbar().picker_thumbnail_size(Scale::ONE);
+    let entries = picker_cells(shell.session().taskbar(), 0, cell, |_| None);
+    shell.show_window_picker(&mut comp, 0, entries);
+    assert!(shell.session().taskbar().picker().is_open());
+    assert!(shell.presenter().picker_window().is_some());
+
+    // Pressing a cell chooses that window: the shell raises it and the
+    // picker goes down with the choice.
+    let layout = shell
+        .session()
+        .taskbar()
+        .picker_layout(Scale::ONE)
+        .expect("open");
+    let cell = centre(layout.cells[1]);
+    shell.handle(moved(cell.x, cell.y), &mut comp, 0);
+    assert_eq!(
+        shell.handle(PRIMARY_PRESS, &mut comp, 0),
+        ShellOutcome::Taskbar(TaskbarResponse::WindowChosen { id: TaskId(2) })
+    );
+    assert!(!shell.session().taskbar().picker().is_open());
+    assert!(shell.presenter().picker_window().is_none());
+    assert_eq!(
+        shell.session().taskbar().tasks().focused(),
+        Some(TaskId(2)),
+        "the chosen window is the focused one"
+    );
 }
 
 #[test]
@@ -4012,20 +3685,20 @@ fn secondary_press_over_window_reaches_window_manager() {
 }
 
 #[test]
-fn shell_set_pins_re_presents_and_updates_length() {
+fn shell_set_apps_re_presents_and_updates_the_strip() {
     let mut shell = shell();
     let mut comp = compositor();
 
-    assert_eq!(shell.session().taskbar().pins().len(), 0);
+    assert_eq!(shell.session().taskbar().apps().len(), 0);
 
-    let views = vec![
-        PinView::new("One", IconKind::AppBundle),
-        PinView::new("Two", IconKind::AppBundle),
-    ];
-    shell.set_pins(&mut comp, views);
-    assert_eq!(shell.session().taskbar().pins().len(), 2);
-
-    // Check that it's presented (compositor window for bar exists and is updated)
+    shell.set_apps(
+        &mut comp,
+        vec![
+            tairix_taskbar::AppSlot::new("One", IconKind::AppBundle),
+            tairix_taskbar::AppSlot::new("Two", IconKind::AppBundle),
+        ],
+    );
+    assert_eq!(shell.session().taskbar().apps().len(), 2);
     assert!(shell.presenter().bar_window().is_some());
 }
 
@@ -4038,10 +3711,23 @@ fn centre(rect: tairix_wm::Rect) -> Point {
     )
 }
 
-fn pin_slot_point(shell: &DesktopShell, index: usize) -> Point {
+fn app_slot_point(shell: &DesktopShell, index: usize) -> Point {
     let layout = shell.session().taskbar().layout(Scale::ONE);
-    let slot = layout.pins.get(index).expect("pin slot");
+    let slot = layout.apps.get(index).expect("an application slot");
     centre(*slot)
+}
+
+/// A manifest stating the two optional identity fields as well, for the
+/// information panel's own attestation.
+fn described_manifest_fixture(name: &str, purpose: &str, author: &str) -> Vec<u8> {
+    let mut bytes = manifest_fixture(name, None);
+    let mut header = AppInfoHeader::from_bytes(&bytes).expect("the fixture decodes");
+    header.purpose_len = u8::try_from(purpose.len()).expect("short");
+    header.purpose[..purpose.len()].copy_from_slice(purpose.as_bytes());
+    header.author_len = u8::try_from(author.len()).expect("short");
+    header.author[..author.len()].copy_from_slice(author.as_bytes());
+    bytes = header.to_le_bytes().to_vec();
+    bytes
 }
 
 pub(crate) fn manifest_fixture(name: &str, icon: Option<&str>) -> Vec<u8> {
@@ -4054,13 +3740,17 @@ pub(crate) fn manifest_fixture(name: &str, icon: Option<&str>) -> Vec<u8> {
         id_len: 2,
         name_len: u8::try_from(name.len()).unwrap(),
         version_len: 1,
+        purpose_len: 0,
+        author_len: 0,
         library_icon_len: u8::try_from(icon.map_or(0, str::len)).unwrap(),
         library: tairix_abi::LibraryCategory::to_wire(Some(tairix_abi::LibraryCategory::Other)),
-        reserved0: [0; 3],
+        reserved0: [0; 1],
         id: [0; BUNDLE_ID_MAX],
         name: [0; BUNDLE_NAME_MAX],
         version: [0; BUNDLE_VERSION_MAX],
         library_icon: [0; LIBRARY_ICON_MAX],
+        purpose: [0; tairix_abi::BUNDLE_PURPOSE_MAX],
+        author: [0; tairix_abi::BUNDLE_AUTHOR_MAX],
         syscall_table_hash: [0; SYSCALL_TABLE_HASH_LEN],
         content_hash: [0; 32],
         signer_pubkey: [0; 32],
@@ -4526,10 +4216,7 @@ fn scroll_over_the_capsule_cycles_tasks_through_the_router() {
     let outcome = shell.handle(InputEvent::PointerScrolled { dx: 0, dy: 1 }, &mut comp, 0);
     assert_eq!(
         outcome,
-        ShellOutcome::Taskbar(TaskbarResponse::TaskActivated {
-            id: first_task,
-            outcome: ActivateOutcome::Activated,
-        })
+        ShellOutcome::Taskbar(TaskbarResponse::WindowChosen { id: first_task })
     );
     assert_eq!(
         shell.session().taskbar().tasks().focused(),
@@ -4566,10 +4253,7 @@ fn middle_press_over_the_capsule_switches_to_the_previous_task() {
     let outcome = shell.handle(MIDDLE_PRESS, &mut comp, 0);
     assert_eq!(
         outcome,
-        ShellOutcome::Taskbar(TaskbarResponse::TaskActivated {
-            id: first_task,
-            outcome: ActivateOutcome::Activated,
-        })
+        ShellOutcome::Taskbar(TaskbarResponse::WindowChosen { id: first_task })
     );
 
     // The handover made the second task the previous one: middle-click
@@ -4577,10 +4261,7 @@ fn middle_press_over_the_capsule_switches_to_the_previous_task() {
     let outcome = shell.handle(MIDDLE_PRESS, &mut comp, 0);
     assert_eq!(
         outcome,
-        ShellOutcome::Taskbar(TaskbarResponse::TaskActivated {
-            id: second_task,
-            outcome: ActivateOutcome::Activated,
-        })
+        ShellOutcome::Taskbar(TaskbarResponse::WindowChosen { id: second_task })
     );
 
     // A middle press on the open desktop is inert.
@@ -6490,20 +6171,17 @@ impl IconRasteriser for CountingRasteriser {
     }
 }
 
-/// A bundle asset the fake reader will serve. The bytes never reach a
-/// real decoder here — the rasteriser above is injected — so any
+/// The path of a bundle asset the fake reader will serve. The bytes never
+/// reach a real decoder here — the rasteriser above is injected — so any
 /// non-empty payload stands for the artwork.
-fn artwork_source(bundle: &str) -> PinIconSource {
-    PinIconSource {
-        bundle: String::from(bundle),
-        asset: String::from("icon.svg"),
-    }
+fn artwork_source(bundle: &str) -> String {
+    format!("{bundle}/Resources/icon.svg")
 }
 
 fn artwork_assets(bundles: &[&str]) -> ArtworkFileReader<MemoryAssets> {
     let mut assets = MemoryAssets::default();
     for bundle in bundles {
-        assets = assets.with(&artwork_source(bundle).path(), VALID_SVG);
+        assets = assets.with(&artwork_source(bundle), VALID_SVG);
     }
     ArtworkFileReader(assets)
 }
@@ -6526,7 +6204,7 @@ fn pin_artwork_is_decoded_once_per_path_and_side() {
     let mut cache = test_artwork_cache(&NORMAL_PRESSURE, TEST_FRAME_BYTES);
     let mut reader = artwork_assets(&["/Apps/One.app"]);
     let mut rasteriser = ArtworkSandbox(CountingRasteriser::working());
-    let path = artwork_source("/Apps/One.app").path();
+    let path = artwork_source("/Apps/One.app");
 
     assert!(cache
         .path_artwork(
@@ -6562,7 +6240,7 @@ fn a_refused_pin_icon_is_refused_once_not_on_every_refresh() {
     let mut cache = test_artwork_cache(&NORMAL_PRESSURE, TEST_FRAME_BYTES);
     let mut reader = artwork_assets(&["/Apps/Bad.app"]);
     let mut rasteriser = ArtworkSandbox(CountingRasteriser::refusing());
-    let path = artwork_source("/Apps/Bad.app").path();
+    let path = artwork_source("/Apps/Bad.app");
 
     assert!(cache
         .path_artwork(
@@ -6596,7 +6274,7 @@ fn pin_artwork_never_outgrows_the_budget_its_output_allows() {
     let mut rasteriser = ArtworkSandbox(CountingRasteriser::working());
 
     for bundle in &bundles {
-        let path = artwork_source(bundle).path();
+        let path = artwork_source(bundle);
         assert!(
             cache
                 .path_artwork(
@@ -6630,7 +6308,7 @@ fn pin_artwork_is_given_back_under_pressure_and_wiped_on_teardown() {
     let mut cache = test_artwork_cache(&PRESSURED, TEST_FRAME_BYTES);
     let mut reader = artwork_assets(&["/Apps/One.app"]);
     let mut rasteriser = ArtworkSandbox(CountingRasteriser::working());
-    let path = artwork_source("/Apps/One.app").path();
+    let path = artwork_source("/Apps/One.app");
 
     assert!(cache
         .path_artwork(
@@ -6788,45 +6466,44 @@ fn row_tint(session: &DesktopSession, row: usize) -> Option<u8> {
 
 #[test]
 fn a_bundle_icon_is_read_and_decoded_once_and_reused_by_the_shared_cache() {
-    // Two pushes of the same strip must cost one read and one decode: the
-    // pins and the library share the one cache the shell owns, so a
-    // re-resolve before a paint is a lookup, not a fresh decode of the
-    // same file.
+    // Two resolutions of the same strip must cost one read and one decode:
+    // the icon bar and the library share the one cache the shell owns, so a
+    // re-resolve before a paint is a lookup, not a fresh decode of the same
+    // file.
     NORMAL_PRESSURE.report(PressureBand::Normal);
     let mut cache = test_artwork_cache(&NORMAL_PRESSURE, TEST_FRAME_BYTES);
-    let source = artwork_source("/Apps/One.app");
+    let bundle = "/Apps/One.app";
     let mut reader = ArtworkFileReader(CountingAssets::new(
-        MemoryAssets::default().with(&source.path(), &[BUNDLE_TINT]),
+        MemoryAssets::default()
+            .with(
+                &format!("{bundle}/AppInfo"),
+                &manifest_fixture("One", Some("icon.svg")),
+            )
+            .with(&artwork_source(bundle), &[BUNDLE_TINT]),
     ));
     let mut rasteriser = ArtworkSandbox(TaggedRasteriser::new());
-    let resolved = vec![ResolvedPin {
-        label: String::from("One"),
-        entry: None,
-        run_path: Some(String::from("/Apps/One.app/Run")),
-        icon: Some(source),
-    }];
-
-    let first = build_pin_views(
-        &resolved,
-        &[None],
-        &mut InlineArtwork::new(&mut reader, &mut rasteriser),
-        &mut cache,
-        24,
+    let mut manifests = MemoryAssets::default().with(
+        &format!("{bundle}/AppInfo"),
+        &manifest_fixture("One", Some("icon.svg")),
     );
-    let again = build_pin_views(
-        &resolved,
-        &[None],
-        &mut InlineArtwork::new(&mut reader, &mut rasteriser),
-        &mut cache,
-        24,
-    );
+    let mut service = AppBarService::new();
+    let strip = service.strip(&[(window_owner(1), TaskId(0))], |_| {
+        Some(String::from(bundle))
+    });
 
-    assert_eq!(reader.0.reads, 1, "the asset is read once, then cached");
-    assert_eq!(rasteriser.0.calls, 1, "and decoded once");
-    let tint = |views: &[PinView]| {
-        views
+    let mut resolve = || {
+        let mut inline = InlineArtwork::new(&mut reader, &mut rasteriser);
+        service.slots(&strip, &mut manifests, (&mut inline, &mut cache, 24))
+    };
+    let first = resolve();
+    let again = resolve();
+
+    assert_eq!(reader.0.reads, 2, "the manifest and the asset, each once");
+    assert_eq!(rasteriser.0.calls, 1, "and one decode");
+    let tint = |slots: &[tairix_taskbar::AppSlot]| {
+        slots
             .first()
-            .and_then(PinView::artwork)
+            .and_then(tairix_taskbar::AppSlot::artwork)
             .and_then(|art| art.pixels().first().copied())
             .map(|pixel| pixel.r)
     };
@@ -7101,24 +6778,20 @@ fn a_desktop_with_no_artwork_at_all_still_draws_every_icon_from_its_glyphs() {
     let mut reader = ArtworkFileReader(MemoryAssets::default());
     let mut rasteriser = ArtworkSandbox(TaggedRasteriser::new());
 
-    // The pin strip: a pin whose bundle declares an icon nothing will
-    // serve still yields a view, so the strip keeps its slot.
-    let resolved = vec![ResolvedPin {
-        label: String::from("One"),
-        entry: None,
-        run_path: Some(String::from("/Apps/one.app/Run")),
-        icon: Some(artwork_source("/Apps/one.app")),
-    }];
-    let views = build_pin_views(
-        &resolved,
-        &[None],
-        &mut InlineArtwork::new(&mut reader, &mut rasteriser),
-        &mut cache,
-        24,
-    );
-    assert_eq!(views.len(), 1, "the pin is still shown");
+    // The application strip: a slot whose bundle declares an icon nothing
+    // will serve still exists, so the strip keeps it.
+    let mut service = AppBarService::new();
+    let strip = service.strip(&[(window_owner(1), TaskId(0))], |_| {
+        Some(String::from("/Apps/one.app"))
+    });
+    let mut manifests = MemoryAssets::default();
+    let slots = {
+        let mut inline = InlineArtwork::new(&mut reader, &mut rasteriser);
+        service.slots(&strip, &mut manifests, (&mut inline, &mut cache, 24))
+    };
+    assert_eq!(slots.len(), 1, "the slot is still shown");
     assert!(
-        views[0].artwork().is_none(),
+        slots[0].artwork().is_none(),
         "with nothing to read there is no artwork — the slot draws its glyph"
     );
 
@@ -7137,7 +6810,7 @@ fn a_desktop_with_no_artwork_at_all_still_draws_every_icon_from_its_glyphs() {
     // can serve nothing, once through the do-nothing lookup. Identical
     // pixels means the empty-store desktop is exactly the glyph desktop,
     // and a bar drawn from glyphs is not a blank bar.
-    session.taskbar_mut().set_pins(views);
+    session.taskbar_mut().set_apps(slots);
     let mut renderer = TaskbarRenderer::new(test_icon_cache());
     let mut presenter = TaskbarPresenter::new();
     let mut inline = InlineArtwork::new(&mut reader, &mut rasteriser);
@@ -7643,9 +7316,13 @@ fn the_bars_menu_popover_and_readout_frost_what_is_behind_them() {
     let mut menued = shell();
     let mut comp = compositor();
     let blur = chrome_blur(&menued);
-    menued.set_pins(&mut comp, vec![PinView::new("Files", IconKind::AppBundle)]);
-    let pin = pin_slot_point(&menued, 0);
-    menued.handle(moved(pin.x, pin.y), &mut comp, 0);
+    menued.set_apps(
+        &mut comp,
+        vec![tairix_taskbar::AppSlot::new("Files", IconKind::AppBundle)
+            .with_declaration(app_bar(true).menu, true)],
+    );
+    let slot = app_slot_point(&menued, 0);
+    menued.handle(moved(slot.x, slot.y), &mut comp, 0);
     menued.handle(SECONDARY_PRESS, &mut comp, 0);
     assert_eq!(
         blur_of(&comp, menued.presenter().menu_window(), "the context menu"),
@@ -7880,18 +7557,14 @@ fn desktop_info_reports_compositor_state() {
 
     let mut shell = shell();
     let mut picker = SessionPicker::new(TreeSource::fixture);
-    let mut pins = PinService::new(
-        MemoryAssets::default(),
-        MemoryWriter::default(),
-        SessionPins::default(),
-    );
+    let mut apps = AppBarService::new();
     let mut windows = SessionWindows::new();
     let mut host = ShellWindowHost {
         shell: &mut shell,
         compositor: &mut comp,
         windows: &mut windows,
         picker: &mut picker,
-        pins: &mut pins,
+        apps: &mut apps,
     };
 
     // What an application is actually handed, whole: the record is one
@@ -7932,17 +7605,13 @@ fn with_window_host<R>(
     body: impl FnOnce(&mut ShellWindowHost<'_>) -> R,
 ) -> R {
     let mut picker = SessionPicker::new(TreeSource::fixture);
-    let mut pins = PinService::new(
-        MemoryAssets::default(),
-        MemoryWriter::default(),
-        SessionPins::default(),
-    );
+    let mut apps = AppBarService::new();
     let mut host = ShellWindowHost {
         shell,
         compositor: comp,
         windows,
         picker: &mut picker,
-        pins: &mut pins,
+        apps: &mut apps,
     };
     body(&mut host)
 }
@@ -8862,18 +8531,6 @@ fn launched_bundles(records: &[(u64, &str)]) -> LaunchTable {
     launched
 }
 
-/// The opaque tint and pixel side of the artwork the taskbar draws for the
-/// task presenting window `wm`. `None` when the entry keeps the shared
-/// application icon, so a test can tell "its own picture" from "the generic
-/// one".
-fn task_artwork(shell: &DesktopShell, wm: WindowId) -> Option<(u8, u32)> {
-    let task = shell.tasks().task_for(wm)?;
-    let bar = shell.session().taskbar();
-    let entry = bar.tasks().entries().iter().find(|e| e.id == task)?;
-    let artwork = entry.artwork.as_ref()?;
-    Some((artwork.pixels().first()?.r, artwork.width()))
-}
-
 /// The identity the decorated window `wm` wears, and the opaque tint of the
 /// artwork drawn in its slot when it has any.
 fn window_identity(comp: &Compositor, wm: WindowId) -> (Option<IconKind>, Option<u8>) {
@@ -8927,14 +8584,6 @@ fn a_windows_identity_comes_from_the_bundle_the_desktop_launched() {
         side,
         "rasterised at exactly the slot the title bar draws"
     );
-    assert_eq!(
-        task_artwork(&shell, wm),
-        Some((
-            EDITOR_TINT,
-            shell.session().taskbar().task_icon_side(comp.scale())
-        )),
-        "and the window's taskbar entry wears the same bundle's icon, at its own slot's size"
-    );
 }
 
 #[test]
@@ -8963,11 +8612,6 @@ fn a_window_whose_owner_the_desktop_did_not_launch_gets_no_identity() {
         window_identity(&comp, wm),
         (None, None),
         "an application that cannot be named wears no badge"
-    );
-    assert_eq!(
-        task_artwork(&shell, wm),
-        None,
-        "and its taskbar entry keeps the shared application icon"
     );
 }
 
@@ -9009,14 +8653,6 @@ fn one_owners_pid_cannot_yield_another_bundles_icon() {
         Some(CHESS_TINT),
         "each window wears the icon of the bundle its own attested owner runs"
     );
-    assert_eq!(
-        (
-            task_artwork(&shell, editor).map(|(tint, _)| tint),
-            task_artwork(&shell, chess).map(|(tint, _)| tint)
-        ),
-        (Some(EDITOR_TINT), Some(CHESS_TINT)),
-        "and so does each window's own taskbar entry: two running applications, two icons"
-    );
 }
 
 #[test]
@@ -9046,11 +8682,6 @@ fn a_window_opens_and_keeps_its_identity_when_the_icon_cannot_be_resolved() {
         window_identity(&comp, wm),
         (Some(IconKind::AppBundle), None),
         "a refused picture leaves the identity on its built-in glyph"
-    );
-    assert_eq!(
-        task_artwork(&shell, wm),
-        None,
-        "and leaves the taskbar entry on the shared application icon"
     );
 }
 
@@ -9091,20 +8722,15 @@ fn a_second_window_of_the_same_application_reuses_the_resolved_icon() {
         "the second window wears the same icon"
     );
     assert_eq!(
-        task_artwork(&shell, second).map(|(tint, _)| tint),
-        Some(EDITOR_TINT),
-        "on its title bar and on its taskbar entry alike"
-    );
-    assert_eq!(
-        costs[0].1, 2,
-        "the first window decodes the bundle's own icon once per slot side"
+        costs[0].1, 1,
+        "the first window decodes the bundle's own icon once, at its slot side"
     );
     assert_eq!(
         costs[1],
         (0, 0),
-        "and the second is served for both slots out of the one shared cache \
-         — the bundle's manifest is not read again either, because the cache \
-         is keyed by the bundle directory rather than by the asset it names"
+        "and the second is served out of the one shared cache — the bundle's \
+         manifest is not read again either, because the cache is keyed by the \
+         bundle directory rather than by the asset it names"
     );
 }
 
@@ -9161,7 +8787,6 @@ fn a_window_identity_pending_at_open_is_pictured_when_the_decode_lands() {
         (Some(IconKind::AppBundle), None),
         "a decode still in flight leaves the slot on its built-in glyph"
     );
-    assert_eq!(task_artwork(&shell, wm), None);
 
     // The decode lands. Nothing else about the desktop changed, so the window
     // is pictured only because it kept its place on the identification list.
@@ -9173,11 +8798,6 @@ fn a_window_identity_pending_at_open_is_pictured_when_the_decode_lands() {
         window_identity(&comp, wm).1,
         Some(EDITOR_TINT),
         "the landing pictures the title bar"
-    );
-    assert_eq!(
-        task_artwork(&shell, wm).map(|(tint, _)| tint),
-        Some(EDITOR_TINT),
-        "and the taskbar entry with it"
     );
 
     // Pictured, so it is off the list: a later landing has nothing to redo.
@@ -9214,7 +8834,8 @@ fn a_window_wears_its_own_icon_on_the_frame_it_opens_in() {
     let launched = launched_bundles(&[(EDITOR_PID, EDITOR_BUNDLE)]);
 
     // The launch is recorded; no window exists yet. The desktop asks for the
-    // application's picture at both slot sides all the same.
+    // application's picture at both the bar's and the title band's slot
+    // sides all the same.
     shell.warm_launched_artwork(&comp, launched.bundles());
     assert!(
         desk.borrow().has_work(),
@@ -9254,11 +8875,6 @@ fn a_window_wears_its_own_icon_on_the_frame_it_opens_in() {
         window_identity(&comp, wm).1,
         Some(EDITOR_TINT),
         "the window opens wearing its application's own icon"
-    );
-    assert_eq!(
-        task_artwork(&shell, wm).map(|(tint, _)| tint),
-        Some(EDITOR_TINT),
-        "and its taskbar entry with it"
     );
     resolve_window_identities(&mut shell, &mut comp, &mut windows, &launched, |_| {
         panic!("a window pictured on its first pass was offered identification again")

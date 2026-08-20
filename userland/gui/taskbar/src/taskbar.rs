@@ -29,13 +29,14 @@ use tairix_proglib::EntryId;
 use tairix_raster::Surface;
 use tairix_theme::Theme;
 
+use crate::apps::{AppSlot, AppStrip};
 use crate::clock::Clock;
 use crate::edge::Edge;
 use crate::layout::{BarLayout, Hit, NotificationsLayout, TrayReadoutLayout};
-use crate::library::{LibraryLayout, LibraryPopup};
+use crate::library::{LibraryIconRequest, LibraryLayout, LibraryPopup};
 use crate::menu::{BarMenu, MenuLayout, MenuSubject};
 use crate::notifications::{NotificationArea, StatusSignal, TransientNotification};
-use crate::pins::{IconWant, PinStrip, PinView};
+use crate::picker::{PickerEntry, PickerLayout, WindowPicker};
 use crate::repaint::TaskbarRepaint;
 use crate::system::{self, SystemPermits};
 use crate::tasks::TaskList;
@@ -63,12 +64,10 @@ pub struct TaskbarConfig {
     pub thickness: u32,
     /// Main-axis length of each leading launcher button (Library, Files).
     pub launcher_extent: u32,
-    /// Main-axis length of each pinned-shortcut slot.
-    pub pin_extent: u32,
-    /// Main-axis length of each task slot. An icon-only slot takes a pin's
-    /// extent, so running applications and pinned shortcuts read as one strip
-    /// of equal icons rather than a row of captions.
-    pub task_extent: u32,
+    /// Main-axis length of each running-application slot. An icon-only
+    /// slot, so a run of applications reads as one strip of equal icons
+    /// rather than a row of captions.
+    pub app_extent: u32,
     /// Main-axis length of each notification icon.
     pub icon_extent: u32,
     /// Main-axis length of the clock.
@@ -93,8 +92,7 @@ impl TaskbarConfig {
             screen_height: self.screen_height,
             thickness: scale.scale_length(self.thickness),
             launcher_extent: scale.scale_length(self.launcher_extent),
-            pin_extent: scale.scale_length(self.pin_extent),
-            task_extent: scale.scale_length(self.task_extent),
+            app_extent: scale.scale_length(self.app_extent),
             icon_extent: scale.scale_length(self.icon_extent),
             clock_extent: scale.scale_length(self.clock_extent),
             switch_extent: scale.scale_length(self.switch_extent),
@@ -111,8 +109,7 @@ impl TaskbarConfig {
             screen_height,
             thickness: 40,
             launcher_extent: 48,
-            pin_extent: 48,
-            task_extent: 48,
+            app_extent: 48,
             icon_extent: 24,
             clock_extent: 80,
             switch_extent: 44,
@@ -136,10 +133,10 @@ pub struct Taskbar {
     library_button: IconButton,
     files_button: IconButton,
     library: LibraryPopup,
-    pins: PinStrip,
+    apps: AppStrip,
+    picker: WindowPicker,
     menu: BarMenu,
     tasks: TaskList,
-    task_hover: Option<usize>,
     notifications: NotificationArea,
     clock: Clock,
     tray: SwitchboardTray,
@@ -171,10 +168,10 @@ impl Taskbar {
             files_button: IconButton::new(IconKind::Folder, ControlRole::Neutral)
                 .seated(PlateSeating::Bar),
             library: LibraryPopup::new(),
-            pins: PinStrip::new(),
+            apps: AppStrip::new(),
+            picker: WindowPicker::new(),
             menu: BarMenu::new(),
             tasks: TaskList::new(),
-            task_hover: None,
             notifications: NotificationArea::new(),
             clock: Clock::new(),
             tray: SwitchboardTray::new(),
@@ -270,18 +267,36 @@ impl Taskbar {
         self.library.set_row_artwork(row, artwork);
     }
 
-    /// The pin strip.
+    /// The application strip.
     #[must_use]
-    pub const fn pins(&self) -> &PinStrip {
-        &self.pins
+    pub const fn apps(&self) -> &AppStrip {
+        &self.apps
     }
 
-    /// Replace the pin strip's resolved views — how the session hands the
-    /// bar its pins (and their running-window matches) whenever the store,
-    /// the catalog, or the launch table changes. The pin strip draws on the
-    /// bar itself, so this latches only [`bar`](TaskbarRepaint::bar).
-    pub fn set_pins(&mut self, pins: Vec<PinView>) {
-        self.pins.set_pins(pins);
+    /// The window picker, open over one application's windows or closed.
+    #[must_use]
+    pub const fn picker(&self) -> &WindowPicker {
+        &self.picker
+    }
+
+    /// Replace the strip's resolved application slots — how the session
+    /// hands the bar its running applications (their identities, artwork,
+    /// windows, and declarations) whenever a process starts, exits, opens or
+    /// closes a window, or re-declares its icon-bar presence.
+    ///
+    /// A picker open over an application the new set no longer has more than
+    /// one window for is closed with it, so the bar can never show a picker
+    /// for windows that are gone. The strip draws on the bar itself, so this
+    /// latches [`bar`](TaskbarRepaint::bar) (and the picker when one closes).
+    pub fn set_apps(&mut self, apps: Vec<AppSlot>) {
+        let stale = self.picker.app().is_none_or(|index| {
+            apps.get(index)
+                .is_none_or(|app| app.windows().len() < crate::picker::PICKER_MIN_WINDOWS)
+        });
+        if stale {
+            self.close_picker();
+        }
+        self.apps.set_apps(apps);
         self.repaint |= TaskbarRepaint::BAR;
     }
 
@@ -298,12 +313,6 @@ impl Taskbar {
     /// here, so a sample that changes no pixel must repaint nothing.
     pub(crate) fn menu_routing_mut(&mut self) -> &mut BarMenu {
         &mut self.menu
-    }
-
-    /// The hovered task-slot index, if the pointer rests on one.
-    #[must_use]
-    pub const fn task_hover(&self) -> Option<usize> {
-        self.task_hover
     }
 
     /// The running-task list.
@@ -556,8 +565,8 @@ impl Taskbar {
     /// Latch the surfaces that draw an application's own picture, for an
     /// embedder whose icon artwork arrived after they were last painted.
     ///
-    /// The bar (its pinned shortcuts and its task slots) and the library popup
-    /// (its rows) are the two that do; the context menu, the notification
+    /// The bar (its application slots) and the library popup (its rows) are
+    /// the two that do; the context menu, the notification
     /// popover, and the instrument readout draw no application artwork at all,
     /// so a decode landing must not cost their pixels. Which surfaces those are
     /// is the bar's own knowledge, so it says so here rather than an embedder
@@ -566,17 +575,29 @@ impl Taskbar {
         self.request_repaint(TaskbarRepaint::BAR | TaskbarRepaint::LIBRARY);
     }
 
-    /// Compute the bar's geometry for its current pin, task, and icon counts
-    /// at the desktop `scale` (the compositor's output density).
+    /// Compute the bar's geometry for its current application and icon
+    /// counts at the desktop `scale` (the compositor's output density).
     #[must_use]
     pub fn layout(&self, scale: Scale) -> BarLayout {
         BarLayout::compute(
             &self.config,
             &self.theme,
             scale,
-            self.pins.len(),
-            self.tasks.len(),
+            self.apps.len(),
             self.notifications.signal_count(),
+        )
+    }
+
+    /// Compute the open window picker's geometry, or `None` while it is
+    /// closed (nothing to present).
+    #[must_use]
+    pub fn picker_layout(&self, scale: Scale) -> Option<PickerLayout> {
+        self.picker.layout(
+            self.config.edge,
+            self.config.screen_width,
+            self.config.screen_height,
+            scale,
+            &self.theme,
         )
     }
 
@@ -610,39 +631,25 @@ impl Taskbar {
     /// and at what pixel side, so an embedder can have those decoded before the
     /// surface drawing them is shown.
     ///
-    /// One want per (application, side) the bar would resolve if it were painted
-    /// now: the launcher popup's first screenful of rows at the row side they
-    /// draw at — the rows a user sees the instant the popup opens, which is the
-    /// one bar surface whose first paint happens long after bring-up — and every
-    /// pinned application at the strip's slot side. Both sides come from the same
-    /// layout the paint uses, so the two cannot disagree and a warmed icon is
-    /// never the wrong size.
+    /// One want per (application, side) the bar would resolve if it were
+    /// painted now: the launcher popup's first screenful of rows at the row
+    /// side they draw at — the rows a user sees the instant the popup opens,
+    /// which is the one bar surface whose first paint happens long after
+    /// bring-up. The side comes from the same layout the paint uses, so the
+    /// two cannot disagree and a warmed icon is never the wrong size.
     ///
-    /// The bar's own furniture is deliberately absent: its buttons, task slots,
-    /// and tray are painted with the bar itself at bring-up, so their icons are
-    /// already being resolved before a user has anything to look at. What needs
-    /// asking for early is what a *later* gesture reveals.
+    /// The bar's own furniture is deliberately absent: its buttons,
+    /// application slots, and tray are painted with the bar itself at
+    /// bring-up, so their icons are already being resolved before a user has
+    /// anything to look at. What needs asking for early is what a *later*
+    /// gesture reveals.
     ///
-    /// Naming the set is the bar's own knowledge, so it says so here rather than
-    /// an embedder guessing which of its surfaces draw what.
+    /// Naming the set is the bar's own knowledge, so it says so here rather
+    /// than an embedder guessing which of its surfaces draw what.
     #[must_use]
-    pub fn catalog_icon_wants(&self, scale: Scale) -> Vec<IconWant> {
-        let rows =
-            self.library
-                .visible_icon_requests(&self.library_layout(scale), scale, &self.theme);
-        let pin_side = self.pin_icon_side(scale);
-        rows.into_iter()
-            .map(|request| IconWant {
-                entry: request.entry,
-                side: request.side,
-            })
-            .chain(self.pins.pins().iter().filter_map(|view| {
-                view.entry().map(|entry| IconWant {
-                    entry: entry.clone(),
-                    side: pin_side,
-                })
-            }))
-            .collect()
+    pub fn catalog_icon_wants(&self, scale: Scale) -> Vec<LibraryIconRequest> {
+        self.library
+            .visible_icon_requests(&self.library_layout(scale), scale, &self.theme)
     }
 
     /// Compute the notification popover's geometry for the current
@@ -724,43 +731,114 @@ impl Taskbar {
         TaskbarItem::new(IconKind::AppBundle).icon_side(bounds, scale, &self.theme)
     }
 
-    /// The pixel side a pinned shortcut's icon paints at, at the desktop
-    /// `scale` — the session rasterises per-application artwork at exactly
-    /// this size, through the same control geometry the renderer paints
-    /// with, so the artwork and the slot can never disagree.
+    /// The pixel side a running application's icon paints at, at the
+    /// desktop `scale` — the session rasterises per-application artwork at
+    /// exactly this size, through the same control geometry the renderer
+    /// paints with, so the artwork and the slot can never disagree.
     #[must_use]
-    pub fn pin_icon_side(&self, scale: Scale) -> u32 {
-        self.slot_icon_side(self.config.pin_extent, scale)
+    pub fn app_icon_side(&self, scale: Scale) -> u32 {
+        self.slot_icon_side(self.config.app_extent, scale)
     }
 
-    /// The pixel side a running task's icon paints at, at the desktop
-    /// `scale` — the counterpart of [`pin_icon_side`](Self::pin_icon_side)
-    /// for the task list. Both slots are icon-only, so the two agree wherever
-    /// the configured extents do.
+    /// The pixel size the session rasterises a window's frame to for one
+    /// hover-picker cell, at the desktop `scale`.
+    ///
+    /// Asked of the control that will paint the cell, so the thumbnail the
+    /// session scales and the rectangle the cell blits it into can never
+    /// disagree.
     #[must_use]
-    pub fn task_icon_side(&self, scale: Scale) -> u32 {
-        self.slot_icon_side(self.config.task_extent, scale)
+    pub fn picker_thumbnail_size(&self, scale: Scale) -> (u32, u32) {
+        crate::picker::thumbnail_size(scale, &self.theme)
     }
 
-    /// Open the context menu for the pin at `index`, anchored at its slot.
-    /// The menu is its own overlay surface, so this latches only
-    /// [`menu`](TaskbarRepaint::menu).
-    pub(crate) fn open_pin_menu(&mut self, index: usize, anchor: Rect) {
-        let running = self
-            .pins
-            .get(index)
-            .and_then(PinView::window)
-            .is_some_and(|id| self.tasks.entries().iter().any(|entry| entry.id == id));
-        self.menu.open(MenuSubject::Pin { index, running }, anchor);
+    /// Open the icon-bar menu the application at `index` declared, anchored
+    /// at its slot. The menu is its own overlay surface, so this latches
+    /// only [`menu`](TaskbarRepaint::menu).
+    ///
+    /// An application that declared no menu opens nothing at all — a
+    /// secondary press on its slot is simply claimed — so the bar never
+    /// shows an empty plate on the application's behalf.
+    pub(crate) fn open_app_menu(&mut self, index: usize, anchor: Rect) {
+        let Some(app) = self.apps.get(index) else {
+            return;
+        };
+        if app.menu().is_empty() {
+            return;
+        }
+        let subject = MenuSubject::App {
+            index,
+            menu: *app.menu(),
+            identity: app.identity().clone(),
+        };
+        self.menu.open(subject, anchor);
         self.repaint |= TaskbarRepaint::MENU;
+    }
+
+    /// Open the window picker over the application at `index`, anchored at
+    /// its slot, offering `entries` (one per window, in open order).
+    ///
+    /// Refused for an application with fewer than
+    /// [`PICKER_MIN_WINDOWS`](crate::picker::PICKER_MIN_WINDOWS) windows:
+    /// with one window there is nothing to choose. Returns whether the
+    /// picker is now open.
+    pub(crate) fn open_picker(
+        &mut self,
+        index: usize,
+        anchor: Rect,
+        entries: Vec<PickerEntry>,
+    ) -> bool {
+        let Some(app) = self.apps.get(index) else {
+            return false;
+        };
+        let icon = app.icon();
+        if self.picker.open(index, anchor, icon, entries) {
+            self.repaint |= TaskbarRepaint::PICKER;
+            return true;
+        }
+        false
+    }
+
+    /// Track the hovered picker cell, latching the picker's own repaint when
+    /// the highlight moves.
+    pub(crate) fn track_picker_hover(&mut self, cell: Option<usize>) {
+        if self.picker.set_hover(cell) {
+            self.repaint |= TaskbarRepaint::PICKER;
+        }
+    }
+
+    /// Show the window picker over the application at `app`, with one cell
+    /// per window as the embedder resolved them.
+    ///
+    /// The answer to [`TaskbarResponse::ShowWindowPicker`]: the embedder owns
+    /// the windows' pixels, so it builds the cells and the bar places and
+    /// draws them. Refused, changing nothing, for an unknown application or
+    /// for fewer cells than there is a choice between.
+    ///
+    /// [`TaskbarResponse::ShowWindowPicker`]: crate::TaskbarResponse::ShowWindowPicker
+    pub fn show_window_picker(&mut self, app: usize, entries: Vec<PickerEntry>, scale: Scale) {
+        let anchor = self
+            .layout(scale)
+            .apps
+            .get(app)
+            .copied()
+            .unwrap_or(Rect::EMPTY);
+        self.open_picker(app, anchor, entries);
+    }
+
+    /// Close the window picker, latching a repaint if it had been open.
+    pub(crate) fn close_picker(&mut self) -> bool {
+        if self.picker.close() {
+            self.repaint |= TaskbarRepaint::PICKER;
+            return true;
+        }
+        false
     }
 
     /// Open the context menu for a program-library entry row, anchored at
     /// that row. Latches only [`menu`](TaskbarRepaint::menu): the popup
     /// beneath is unaffected by an overlay opening on top of it.
     pub(crate) fn open_entry_menu(&mut self, entry: EntryId, anchor: Rect) {
-        let pinned = self.pins.position_of_entry(&entry);
-        self.menu.open(MenuSubject::Entry { entry, pinned }, anchor);
+        self.menu.open(MenuSubject::Entry { entry }, anchor);
         self.repaint |= TaskbarRepaint::MENU;
     }
 
@@ -820,7 +898,7 @@ impl Taskbar {
     }
 
     /// Track the pointer for the bar's hover feedback — the leading
-    /// buttons, the pin slots, the task slots, and the Switchboard capsule
+    /// buttons, the application slots, and the Switchboard capsule
     /// (whose readout expands on hover) — latching a repaint when any visual
     /// state changes.
     ///
@@ -845,13 +923,8 @@ impl Taskbar {
         };
         let mut bar_changed = set_pointer(&mut self.library_button, library_pointer);
         bar_changed |= set_pointer(&mut self.files_button, files_pointer);
-        let pin_hover = layout.pins.iter().position(|slot| slot.contains(point));
-        bar_changed |= self.pins.set_hover(pin_hover);
-        let task_hover = layout.tasks.iter().position(|slot| slot.contains(point));
-        if self.task_hover != task_hover {
-            self.task_hover = task_hover;
-            bar_changed = true;
-        }
+        let app_hover = layout.apps.iter().position(|slot| slot.contains(point));
+        bar_changed |= self.apps.set_hover(app_hover);
         if bar_changed {
             self.repaint |= TaskbarRepaint::BAR;
         }

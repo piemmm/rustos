@@ -10,13 +10,18 @@
 //!   the merged `lib/proglib` catalog), and **Files**, which opens the file
 //!   manager. Both are shared `lib/controls` icon buttons drawn with
 //!   `lib/icon` glyphs.
-//! - **Pin strip** — a [`PinStrip`] of user-pinned application shortcuts
-//!   (the per-user `lib/taskpins` store, resolved by the session into
-//!   [`PinView`]s): icon-only slots that launch when idle and follow the
-//!   click-to-activate rule when their application is running, with a
-//!   right-click [`BarMenu`] offering *Open* and *Unpin*.
-//! - **Middle** — a [`TaskList`]: one entry per top-level window, with
-//!   click-to-activate and minimise/restore.
+//! - **Middle** — the [`AppStrip`]: one icon-only slot per *running
+//!   application*, resolved by the session from the bundle the kernel
+//!   attested owns each process. A primary click performs the application's
+//!   own default action (or, for an application that declared none, raises
+//!   its most recently used window); hovering a slot whose application owns
+//!   more than one window opens the [`WindowPicker`] to choose between them;
+//!   and a secondary press opens the [`BarMenu`] over the menu the
+//!   *application itself* declared — minimally a *Quit* row and an *About*
+//!   row whose submenu is the application's information panel, drawn from
+//!   its signed manifest. An application that declared no menu opens
+//!   nothing. The windows themselves stay in the [`TaskList`], the one
+//!   window registry the picker and the Switchboard capsule both read.
 //! - **Trailing end** — the [`NotificationArea`]: the persistent status
 //!   signals (network, volume, battery) drawn as calm glyphs, plus a card
 //!   popover for the transient notifications a producer service raises over
@@ -64,6 +69,7 @@
 
 extern crate alloc;
 
+pub mod apps;
 pub mod clock;
 pub mod edge;
 pub mod input;
@@ -71,7 +77,7 @@ pub mod layout;
 pub mod library;
 pub mod menu;
 pub mod notifications;
-pub mod pins;
+pub mod picker;
 pub mod render;
 pub mod repaint;
 pub mod system;
@@ -82,6 +88,7 @@ pub mod tray;
 #[cfg(test)]
 mod tests;
 
+pub use apps::{AppIdentity, AppSlot, AppStrip};
 pub use clock::Clock;
 pub use edge::{Edge, Orientation};
 pub use input::{TaskbarInput, TaskbarResponse};
@@ -89,14 +96,14 @@ pub use layout::{BarLayout, Hit, NotificationCard, NotificationsLayout, TrayRead
 pub use library::{
     folder_label, LibraryFocus, LibraryIconRequest, LibraryLayout, LibraryPopup, LibraryRow,
 };
-pub use menu::{BarMenu, MenuLayout, MenuSubject, MENU_OPEN_ROW, MENU_PIN_ROW};
+pub use menu::{BarMenu, MenuLayout, MenuSubject, MENU_OPEN_ROW};
 pub use notifications::{
     IconId, NotificationArea, NotifySeverity, StatusKind, StatusSignal, TransientNotification,
 };
-pub use pins::{IconWant, PinStrip, PinView};
+pub use picker::{PickerEntry, PickerLayout, WindowPicker, PICKER_MIN_WINDOWS};
 pub use render::{icon_cache, IconEpoch, TaskbarRenderer};
 pub use repaint::TaskbarRepaint;
 pub use system::{SystemAction, SystemPermits, SystemRow};
 pub use taskbar::{Taskbar, TaskbarConfig};
-pub use tasks::{ActivateOutcome, TaskEntry, TaskId, TaskList};
+pub use tasks::{TaskEntry, TaskId, TaskList};
 pub use tray::SwitchboardTray;

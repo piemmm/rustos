@@ -85,6 +85,34 @@ mod program {
             .unwrap_or(Errno::NotImplemented)
     }
 
+    /// Declare this application's presence on the desktop's icon bar: a
+    /// *Quit* row and the session-drawn *About* row, with the primary click
+    /// left to the session so it raises the window.
+    ///
+    /// A refused declaration is an answer, not a death: the application says
+    /// so and carries on with no slot of its own — its window is still
+    /// reachable through the one the session derives from it.
+    fn declare_app_bar(client: &mut WindowClient<RtWindowTransport>, endpoint: u64) {
+        match tairix_window::quit_and_about(endpoint) {
+            Ok(bar) => {
+                if let Err(err) = client.set_app_bar(&bar) {
+                    let _ = writeln!(
+                        Stderr,
+                        "widgets: the desktop refused this application's icon-bar presence \
+                         ({err}); carrying on without one"
+                    );
+                }
+            }
+            Err(err) => {
+                let _ = writeln!(
+                    Stderr,
+                    "widgets: this application's icon-bar menu is invalid ({err:?}); carrying \
+                     on without one"
+                );
+            }
+        }
+    }
+
     /// State the abnormal-exit reason on `stderr` (fail loud) and hand back
     /// `code` for `main`.
     fn fail(code: i32, reason: &str) -> i32 {
@@ -208,7 +236,11 @@ mod program {
     ) -> (bool, bool) {
         let viewport = Rect::new(0, 0, mode.width_px, mode.height_px);
         match event {
+            // The desktop asked, or *Quit* was chosen on the gallery's own
+            // icon-bar slot. A row the declaration never carried names no
+            // command and is ignored (fail closed).
             WindowEvent::CloseRequested { .. } => (false, true),
+            WindowEvent::AppBarMenu { item } if tairix_window::is_quit(*item) => (false, true),
             WindowEvent::Key {
                 key: pressed @ KeyInput::Pressed { .. },
                 ..
@@ -243,7 +275,13 @@ mod program {
             // changed. The rest are events the gallery does not act on: a
             // secondary press on Close asks to leave what the window is
             // showing, and the gallery has nothing to leave but itself.
+            // The gallery declares no default action, so the session raises
+            // its one window on a click rather than telling it — an
+            // `AppBarDefault` therefore cannot arrive, and an `AppBarMenu`
+            // naming any other row names no command of the gallery's.
             WindowEvent::AlternateCloseRequested { .. }
+            | WindowEvent::AppBarDefault
+            | WindowEvent::AppBarMenu { .. }
             | WindowEvent::Key { .. }
             | WindowEvent::Focus { .. }
             | WindowEvent::Minimized { .. }
@@ -393,6 +431,12 @@ mod program {
         scale: Scale,
         frames: &mut [u8],
     ) -> Result<(GalleryWindow, ProcId, Gallery), i32> {
+        // The icon-bar presence first: a declared presence belongs to the
+        // process, so declaring it before this process owns a window is what
+        // makes its slot carry this menu from the moment it appears rather
+        // than being a slot the session derived from a window, which opens
+        // nothing.
+        declare_app_bar(&mut client, event_endpoint);
         // Fixed size: the gallery is never resized, so it declares no floor.
         let Ok((window, server)) = client.create(
             grant,

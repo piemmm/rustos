@@ -2,55 +2,33 @@
 //!
 //! There is one [`TaskEntry`] per top-level window. At most one task is
 //! *focused* (the active window). A task is independently *minimised* or
-//! not. Clicking a task entry follows the familiar taskbar rule
-//! ([`TaskList::activate`]): clicking the focused, non-minimised task
-//! minimises it; clicking any other task (or a minimised one) restores and
-//! focuses it. The list also remembers the [`previous`](TaskList::previous)
-//! task — the one focused immediately before the last handover to a
-//! different task — the MRU-of-two behind the Switchboard capsule's
-//! middle-click switch.
+//! not. The list also remembers the [`previous`](TaskList::previous) task —
+//! the one focused immediately before the last handover to a different task
+//! — the MRU-of-two behind the Switchboard capsule's middle-click switch.
+//!
+//! The bar draws none of this: an icon-bar slot is an *application*
+//! ([`AppStrip`](crate::AppStrip)), and a window is reached through the
+//! hover [`WindowPicker`](crate::WindowPicker). This is the one window
+//! registry both of those read, together with the Switchboard capsule's
+//! scroll-to-cycle and middle-click previous-task gestures.
 
 use alloc::string::String;
 use alloc::vec::Vec;
-
-use tairix_raster::Surface;
 
 /// A stable identifier for a task, matching the window manager's top-level
 /// window id.
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Hash, Ord, PartialOrd)]
 pub struct TaskId(pub u64);
 
-/// One running task: the window id, its title, the owning application's own
-/// icon, and whether it is minimised.
+/// One running task: the window id, its title, and whether it is minimised.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TaskEntry {
     /// The task's window id.
     pub id: TaskId,
-    /// The window title. Model data, not ink: the slot draws the icon alone,
-    /// and this is what a context surface — the task menu — reads.
+    /// The window title, as the hover picker's cell caption states it.
     pub title: String,
     /// `true` when the window is minimised (hidden but still running).
     pub minimised: bool,
-    /// The owning application's own rasterised icon, as the session resolved
-    /// it from the bundle the kernel attested opened the window
-    /// ([`set_artwork`](TaskList::set_artwork)).
-    ///
-    /// `None` — no attested bundle, or a bundle whose artwork would not read
-    /// or decode — leaves the entry on the shared application-bundle icon, so
-    /// a slot is never blank.
-    pub artwork: Option<Surface>,
-}
-
-/// What [`TaskList::activate`] did, so the caller can drive the window
-/// manager accordingly.
-#[derive(Copy, Clone, Debug, Eq, PartialEq)]
-pub enum ActivateOutcome {
-    /// The task is now focused and restored (raise + activate it).
-    Activated,
-    /// The previously focused task was minimised (hide it).
-    Minimised,
-    /// No task has that id; nothing changed.
-    Unknown,
 }
 
 /// The ordered list of running tasks plus the focused one and the
@@ -153,25 +131,7 @@ impl TaskList {
             id,
             title: title.into(),
             minimised: false,
-            artwork: None,
         });
-        true
-    }
-
-    /// Give the task with `id` the icon of the application that opened its
-    /// window, so a running window is recognised by its own application
-    /// rather than by the shared application-bundle icon.
-    ///
-    /// The session resolves the picture from the bundle the kernel attested
-    /// owns the window — never anything the application sent — and rasterises
-    /// it at the slot's own pixel side; `None` clears it back to the shared
-    /// icon. Returns `false`, changing nothing, for an unknown id (fail
-    /// closed).
-    pub fn set_artwork(&mut self, id: TaskId, artwork: Option<Surface>) -> bool {
-        let Some(index) = self.position(id) else {
-            return false;
-        };
-        self.entries[index].artwork = artwork;
         true
     }
 
@@ -205,36 +165,15 @@ impl TaskList {
         true
     }
 
-    /// Apply the click-to-activate / minimise rule to the task with `id`.
-    pub fn activate(&mut self, id: TaskId) -> ActivateOutcome {
-        let Some(index) = self.position(id) else {
-            return ActivateOutcome::Unknown;
-        };
-        if self.focused == Some(id) && !self.entries[index].minimised {
-            self.entries[index].minimised = true;
-            self.focused = None;
-            ActivateOutcome::Minimised
-        } else {
-            if self.focused != Some(id) {
-                self.previous = self.focused;
-            }
-            self.entries[index].minimised = false;
-            self.focused = Some(id);
-            ActivateOutcome::Activated
-        }
-    }
-
-    /// Minimise the task with `id` unconditionally, dropping focus if it
-    /// held it.
+    /// Minimise the task with `id`, dropping focus if it held it.
     ///
-    /// This is the window-manager-driven counterpart to [`activate`]'s
-    /// toggle: the title-bar minimize control (and any other direct
-    /// "minimise this window" request) minimises regardless of the current
-    /// focus/minimised state, where [`activate`] toggles. An already
-    /// minimised task stays minimised. Returns `false`, changing nothing,
-    /// for an unknown id (fail closed).
-    ///
-    /// [`activate`]: Self::activate
+    /// Minimising is a *window* command — the title bar's own control, and
+    /// the only way a window leaves the screen without closing — so it
+    /// applies regardless of the current focus or minimised state. An
+    /// already minimised task stays minimised. Returns `false`, changing
+    /// nothing, for an unknown id (fail closed). A window is restored by
+    /// being focused again ([`set_focused`](Self::set_focused)), which is
+    /// what choosing its cell in the hover picker does.
     pub fn minimise(&mut self, id: TaskId) -> bool {
         let Some(index) = self.position(id) else {
             return false;

@@ -1,11 +1,12 @@
 # GUI-TERMINAL — the first-class graphical terminal
 
 Binding under `AGENTS.md`. This plan owns everything about `terminal.app` as a
-*graphical* program: how large it opens, the user profile behind it, the
-right-click menu, the settings sheet, the colour schemes, and the screen
-effects. The emulator itself — the VT parser, the grid, the pty seam — belongs
-to `plans/APPWIN.md` AW4, `plans/PTY.md`, and `plans/CURSES.md`; nothing here
-restates them.
+*graphical* program: how large it opens, that it is **one process with many
+windows** and what that costs, its icon-bar presence, the user profile behind
+it, the right-click menu, the settings sheet, the colour schemes, and the
+screen effects. The emulator itself — the VT parser, the grid, the pty seam —
+belongs to `plans/APPWIN.md` AW4, `plans/PTY.md`, and `plans/CURSES.md`;
+nothing here restates them.
 
 Read alongside: `plans/GUI-CONTROLS-DESIGN.md` (the Reactive Alloy control
 language every surface here is built from), `plans/APPWIN.md` (the window
@@ -375,6 +376,64 @@ exactly one, and an unchanged grid reports nothing and presents nothing.
 
 ---
 
+## 14. One process, many windows
+
+**Status: done.**
+
+A terminal window is not an application: the application is the emulator, and
+each window is one hosted shell. `terminal.app` is therefore **one process
+with a `Vec` of windows**, each carrying its own pseudo-terminal, shell child,
+screen model, retained picture, `Look`, and overlay, over **one** wait-set
+that carries one event mailbox for the whole process plus that window's own
+shell-output and child members. Opening another window costs a pty, a spawn, a
+frame region, and two wait-set members; it costs no second process, no second
+event mailbox, and no second icon-bar slot. `MAX_WINDOWS` bounds the
+process's own resources; the last window closing ends it.
+
+Two things make it work:
+
+- **Every event is demuxed on the window id it carries.** The one mailbox
+  serves every window and every window's popup, so the drain resolves which
+  window (or which window's overlay) an event belongs to before routing it.
+  An id neither names is a window that has just closed and the event has
+  nowhere to land — dropped, never guessed at.
+- **Each window's wait-set tokens are minted from a monotonic slot**, not an
+  index into a list that shifts, so a token names the same window for as long
+  as that window lives and is never reused after it goes. A window's members
+  are removed with the window.
+
+The user's profile is the *user's*, not a window's, so a setting changed in
+one window's sheet re-derives every window's look and reshapes every grid; the
+sheet that made the change is the only surface re-presented on top of that.
+
+## 15. Its icon-bar presence
+
+**Status: done.**
+
+The terminal declares one presence on the desktop's icon bar
+(`tairix_terminal::appbar`, `plans/NEW-TASKBAR.md` T7) whose slot stands for
+the emulator, not for any one window:
+
+- **`default_action: true`** — a primary click on the slot is the terminal's
+  to handle, and means *New window*. A terminal's windows are
+  interchangeable, so raising one of them is less use than making another.
+- **It is declared before the first window is opened.** A declared presence
+  belongs to the *process*, so the declaration goes out first and the slot
+  carries this menu and this default action from the moment it appears.
+  Declared after a window, the session meanwhile derives a slot from that
+  window alone — one that opens no menu and does nothing when clicked — so
+  for as long as the gap lasts the bar shows a slot that answers nothing.
+  Every application that declares a presence does it in this order.
+- **The menu** is *New window*, a separator, *Quit*, and the session-drawn
+  *About* row. The row ids live in the `appbar` module rather than in the
+  program body, because two independent readers need them: the running
+  program, which matches a chosen row back to a command, and the desktop QEMU
+  vertical, which reconstructs the menu to know where to click.
+- **A refused declaration is an answer, not a death.** A terminal whose
+  declaration the desktop refuses says so on `stderr` and carries on with no
+  slot of its own; its windows are still reachable through the slot the
+  session derives from them.
+
 ## 13. What remains
 
 Nothing in the sections above. Recognised later work, none of it blocking:
@@ -388,7 +447,8 @@ Nothing in the sections above. Recognised later work, none of it blocking:
   wheel and a scrollbar something to do.
 - **Selection and clipboard.** There is no system clipboard yet; when one
   exists the terminal gains select/copy/paste and the menu gains its rows.
-- **A profile per window.** Today one document serves every terminal window.
-  Named profiles a user can switch between would be a registry of documents
-  under the same store directory.
+- **A profile per window.** Today one document serves every terminal window,
+  and a change in one window's sheet reaches them all — which is right for a
+  *user's* profile. Named profiles a user could switch a single window to
+  would be a registry of documents under the same store directory.
 

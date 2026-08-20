@@ -1,8 +1,10 @@
 # NEW-MENUS — menus owned by the desktop, not by the app
 
-Status: **planned, not started.** Nothing in this document has been built.
-It exists so the design is fixed before any of it is, and so a future
-change cannot re-derive it (§13).
+Status: **partly landed.** M0's open transport decision is **settled** —
+*inline bounded rows* — and the first surface built on it, the icon bar's
+app-declared menu, is **done** (`plans/NEW-TASKBAR.md` T7). M1 (the
+session's general per-seat menu service), M2 (migrating the four in-app
+menu shells to it), and M3 (the cached compositor plate) remain planned.
 
 Binding under `AGENTS.md` (§3, §15.18).
 
@@ -98,29 +100,39 @@ Every menu in the system is drawn and driven by the app that owns it, so:
 
 ---
 
-## Stage M0 — the model and the wire
+## Stage M0 — the model and the wire — **transport settled; the icon bar's menu done**
 
-- `lib/abi/src/window_ipc.rs` gains a menu request and a menu outcome
-  event, under the same discipline as every other window request.
-- **The open question this stage must settle: how a variable-length model
-  crosses a fixed-width frame.** Two candidates, and the choice is a
-  §15.7 decision because it sets the ABI shape:
-  - *inline, bounded* — a fixed array of rows, each a fixed-capacity
-    label; simplest to validate and to fuzz, costs a large request frame;
-  - *by shared region* — the model in the client's own shm region, granted
-    for the call; matches how frames already travel, but adds a mapping to
-    a path that is meant to be cheap.
-- Either way the model is: an ordered list of rows, each `Item`
-  (label, enabled, mark: none/check/radio, an app-chosen `id`, optional
-  accelerator text), `Separator`, or `Submenu` (label, enabled, nested
-  rows to a bounded depth). Ids are the app's; the session never
-  interprets them.
-- The outcome is exactly one of: `Chosen(id)`, `Dismissed`, or
-  `Refused(reason)` — delivered once, to the requesting window, as a
-  window event.
-- Tests: encode/decode round trip at every bound, a refusal for each way a
-  model can be malformed (empty, over-long label, over-deep submenu, a
-  separator claiming an id), the reserved-tail check, and a fuzz harness.
+**The transport decision is `inline bounded rows`.** The icon-bar model is
+small (≤ 12 rows, ≤ 1 submenu level, ≤ 36 label bytes), so a fixed frame is
+the simplest thing to validate and to fuzz and adds no mapping to a path
+that must be cheap. A granted shared region was the alternative and is
+rejected: it would put an `shm_grant` and a map on every menu open for a
+payload that fits in the frame the window channel already carries. The
+choice binds every menu request, not only the icon bar's.
+
+What is **built** on that decision (`plans/NEW-TASKBAR.md` T7): the
+`AppMenu` model in `lib/abi/src/window_ipc.rs` — an ordered, bounded list of
+rows, each `Item { id, label, enabled, mark: none/check/radio }`,
+`Separator`, `Submenu { label, enabled }` (one level, by parent index), or
+`About` (session-rendered from the bundle's signed manifest; the app
+supplies none of its text). Ids are the app's, non-zero and unique within a
+menu; the session never interprets one. The wire decoder is held to the
+**same** shape rule as the builder, so a menu that crossed the wire is
+exactly a menu that could have been built, and both are fuzzed in
+`lib/abi/tests/fuzz_decode.rs`. It is carried by
+`WindowRequest::SetAppBar`, a caller-scoped declaration rather than a
+per-open request, because an icon-bar menu belongs to the *application*
+rather than to one gesture; the outcome is the application-scoped
+`WindowEvent::AppBarMenu { item }`, delivered through the route the
+declaration recorded.
+
+What **remains** for a general per-window menu (M1's request): a
+per-gesture open carrying an anchor, and the three-way outcome
+`Chosen(id)` / `Dismissed` / `Refused(reason)` delivered once to the
+requesting window. The row model itself is done and is reused verbatim — a
+second menu model would be the duplication §2.2 forbids. Accelerator text
+is not in the built model and is added with M1, which is the first surface
+that has any.
 
 ## Stage M1 — the session's menu service
 
@@ -173,8 +185,8 @@ two rows rather than the plate.
 
 ## Decisions required (§15.7)
 
-1. **M0's transport**: inline bounded rows, or a granted shared region.
-   Blocks all of M0.
+1. ~~**M0's transport**: inline bounded rows, or a granted shared region.~~
+   **Settled: inline bounded rows** (see M0), and built on.
 2. **Whether the taskbar's start menu is in scope** (M2 step 5), or stays
    a bespoke surface because its rows are launcher entries with icons
    rather than a menu model.

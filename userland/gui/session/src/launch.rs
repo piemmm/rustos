@@ -31,7 +31,7 @@ use alloc::string::String;
 
 use tairix_abi::{load_failure_reason, WaitStatus};
 
-use crate::pins::BUNDLE_RUN_SUFFIX;
+use crate::apps::BUNDLE_RUN_SUFFIX;
 
 /// The label used for a reaped child the launcher did not record (it should
 /// not happen — every desktop child is recorded at launch — but a diagnosis

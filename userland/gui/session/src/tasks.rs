@@ -1,10 +1,10 @@
 //! Keeping the taskbar's running-task list in step with the window stack.
 //!
-//! The taskbar models a running-task list — one
-//! [`TaskEntry`](tairix_taskbar::TaskEntry) per top-level window, with the
-//! click-to-activate / minimise rule — but it owns no window
-//! manager, and the window manager owns no task list. So
-//! joining the two is session glue, and [`TaskBridge`] is that glue.
+//! The taskbar models a window registry — one
+//! [`TaskEntry`](tairix_taskbar::TaskEntry) per top-level window, read by
+//! its hover window picker and its Switchboard capsule — but it owns no
+//! window manager, and the window manager owns no task list. So joining the
+//! two is session glue, and [`TaskBridge`] is that glue.
 //!
 //! A task is named by a [`TaskId`] and a window by a
 //! [`WindowId`]; the window manager mints the latter as an
@@ -19,9 +19,9 @@
 //!   as a running task, and focuses it (a freshly opened window takes focus).
 //! * [`close`](TaskBridge::close) removes a window from the compositor and its
 //!   task from the bar, dropping focus if the closed window held it.
-//! * [`activate`](TaskBridge::activate) applies the taskbar's
-//!   [`ActivateOutcome`] to the compositor: an activated task is shown, raised,
-//!   and focused; a minimised one is hidden and unfocused.
+//! * [`raise`](TaskBridge::raise) shows, raises, and focuses a task's window
+//!   — what choosing a cell in the bar's window picker, or the bar's own
+//!   raise-the-application click, asks for.
 //! * [`sync_focus`](TaskBridge::sync_focus) mirrors a window-manager focus
 //!   change (the user clicked a window directly) back into the bar's highlight.
 //!
@@ -32,7 +32,7 @@
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use tairix_taskbar::{ActivateOutcome, TaskId, Taskbar};
+use tairix_taskbar::{TaskId, Taskbar};
 use tairix_wm::{Compositor, Point, Surface, WindowId};
 
 use crate::input::SessionInputRouter;
@@ -160,46 +160,33 @@ impl TaskBridge {
         true
     }
 
-    /// Apply the taskbar's [`ActivateOutcome`] for `task` to the compositor.
+    /// Show, raise, and focus `task`'s window.
     ///
-    /// An [`Activated`](ActivateOutcome::Activated) task is made visible,
-    /// raised to the top, and focused; a [`Minimised`](ActivateOutcome::Minimised)
-    /// one is hidden and, if it held focus, unfocused. The taskbar has already
-    /// updated its own model (it computed the outcome); this brings the window
-    /// manager into step. Returns `false`, changing nothing, for an
-    /// [`Unknown`](ActivateOutcome::Unknown) outcome or a task the bridge does
-    /// not track.
-    pub fn activate(
+    /// What choosing a cell in the bar's hover window picker asks for, and
+    /// what a click on the slot of an application that declared no default
+    /// action asks for. The taskbar has already restored the entry in its
+    /// own model; this brings the window manager into step. Returns
+    /// `false`, changing nothing, for a task the bridge does not track.
+    pub fn raise(
         &self,
         compositor: &mut Compositor,
         router: &mut SessionInputRouter,
         task: TaskId,
-        outcome: ActivateOutcome,
     ) -> bool {
         let Some(window) = self.window_for(task) else {
             return false;
         };
-        match outcome {
-            ActivateOutcome::Activated => show_raise_focus(compositor, router, window),
-            ActivateOutcome::Minimised => {
-                compositor.set_visible(window, false);
-                if router.focused() == Some(window) {
-                    router.unfocus();
-                }
-                true
-            }
-            ActivateOutcome::Unknown => false,
-        }
+        show_raise_focus(compositor, router, window)
     }
 
     /// Minimise `window`: mark its taskbar entry minimised, hide it in the
     /// compositor, and drop focus if it held it.
     ///
-    /// This is the title-bar minimize control's counterpart to a taskbar
-    /// click landing on [`ActivateOutcome::Minimised`]: it minimises
-    /// unconditionally (the window manager decided to minimise), where a
-    /// taskbar click toggles. Returns `false`, changing nothing, for a
-    /// window the bridge does not track.
+    /// Minimising is the title bar's own control — an icon-bar slot is an
+    /// application, not a window, so it offers no minimise of its own — and
+    /// a minimised window comes back by being chosen in the hover picker.
+    /// Returns `false`, changing nothing, for a window the bridge does not
+    /// track.
     pub fn minimize(
         &self,
         compositor: &mut Compositor,
@@ -264,9 +251,9 @@ fn focus_window(
 }
 
 /// Show `window`, raise it to the top of the stack, and give it keyboard
-/// focus — the one path shared by [`TaskBridge::open`] and the activated case
-/// of [`TaskBridge::activate`]. Returns whether focus moved
-/// (it does not when the compositor no longer knows `window`).
+/// focus — the one path shared by [`TaskBridge::open`] and
+/// [`TaskBridge::raise`]. Returns whether focus moved (it does not when the
+/// compositor no longer knows `window`).
 fn show_raise_focus(
     compositor: &mut Compositor,
     router: &mut SessionInputRouter,

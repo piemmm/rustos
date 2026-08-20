@@ -13,8 +13,8 @@ owns:
   `BarLayout::compute`, which insets the bar by `taskbar_margin` on the three
   sides facing the screen edge, then lays it out along its main axis: the two
   permanent leading launcher buttons (**Library**, then **Files** — fixed
-  order, never removable) divided by the **separator** rule, the **pin strip**
-  between the launchers and tasks, the running-task list in the middle, the
+  order, never removable) divided by the **separator** rule, the
+  **application strip** in the middle, the
   notification-icon area packed before the clock, and the clock anchored to
   the trailing end. The margin is scaled through `Scale::scale_length` and
   clamped so a screen too small to hold it still lays out a bar. Every region
@@ -28,9 +28,9 @@ owns:
   along the bar's main axis (floored at one physical pixel so it survives a
   small scale), spanning the cross axis inset by one `control_inset` from
   both long edges, filled in the theme's `border` colour. It sits a
-  `control_gap` past the Library button and pushes Files, the pins, and every
+  `control_gap` past the Library button and pushes Files, the applications, and every
   trailing region along by the whole gutter, so the file manager reads as a
-  peer of the pins rather than of the library. It is decoration: `hit_test`
+  peer of the applications rather than of the library. It is decoration: `hit_test`
   never reports it, and a bar too short to reach it or too thin to inset it
   simply lays out `Rect::EMPTY` and draws nothing.
 - **Variable DPI** — the bar's extents, thickness, corner radius, and edge
@@ -74,7 +74,7 @@ owns:
   nothing at all when it is empty; only the compositor-supplied `Scale` stays
   the embedder's own.
 - **Hit-testing** — `BarLayout::hit_test` maps a pointer to the `Hit` element
-  under it (the Library button, the Files button, a pin, a task, a
+  under it (the Library button, the Files button, an application, a
   notification icon, the clock, or the Switchboard capsule) for input
   routing. A region slot that does not fit is `Rect::EMPTY` and is never hit,
   and the separator is not a region at all: a press on the rule lands on the
@@ -82,8 +82,12 @@ owns:
 - **Input routing** — `TaskbarInput` consumes the shared `tairix-input`
   `InputEvent` stream (the same one the window manager routes) and turns a
   primary press into a typed `TaskbarResponse`: `OpenLibrary` (the Library
-  button opened the popup), `OpenFiles`, pin activation (`ActivatePin`), the
-  task activate/minimise rule (`TaskActivated`), or a notification-icon / clock
+  button opened the popup), `OpenFiles`, an application's declared default
+  action (`AppDefault`) or the raise the session performs in its place
+  (`AppRaise`), a chosen row of the menu an application declared
+  (`AppMenuChosen`), a hover asking for the window picker
+  (`ShowWindowPicker`) and a cell chosen in it (`WindowChosen`), or a
+  notification-icon / clock
   press. While the context menu OR the program-library popup is open it is
   modal and consumes the whole stream — presses, releases, scroll, and keys
   all route into the modal surface; a press on the Library button toggles the
@@ -131,25 +135,31 @@ owns:
   labels, a control's rim, focus rings, role fills, rails, beads.
   Each surface draws one translucent layer, so a floating panel has no separate
   header band.
-- **Task list and pin strip** — `TaskList` tracks one entry per top-level
-  window; `PinStrip` holds the resolved views of the user's pinned shortcuts.
-  Both use the familiar click-to-activate / minimise-restore rule. Both pins
-  and tasks are rendered as `TaskbarItem` controls, and both carry
-  per-application artwork the session hands in: a pin's from the bundle it
-  points at (on its `PinView`, along with its matched running window), a
-  task's from the bundle the kernel attested opened its window
-  (`TaskList::set_artwork`), so an open window shows its own application's
-  icon whether or not that application is pinned.
-  `set_focused` mirrors focus into the highlight. A slot's `TaskVisibility`
-  states itself with the presence mark on its lower edge: the full-width accent
-  seam for the active window, a short muted mark for one merely running, and
-  nothing at all for `TaskVisibility::Closed` — a pinned application that is
-  not running rests as its bare icon on the bar until hovered or focused, so it
-  can never masquerade as a running task.
+- **Window registry and application strip** — `TaskList` is the one registry
+  of top-level windows (id, title, minimised), read by the hover picker and by
+  the Switchboard capsule's cycle and previous-window gestures; `AppStrip`
+  holds the session's resolved slots, one per *running application*, each
+  carrying the label, class glyph, and artwork the session resolved from the
+  bundle the kernel attested owns that process, the windows it owns, and the
+  declaration it made. A slot is drawn as an icon-only `TaskbarItem` with no
+  presence, focus, or minimised mark at all: the bar shows which applications
+  are running by showing them, and a window is reached through the picker.
+- **The hover window picker** — `WindowPicker`, opened over a slot whose
+  application owns at least `PICKER_MIN_WINDOWS` (two) windows. The session
+  supplies one `PickerEntry` per window — its title and its last presented
+  frame, scaled to the cell — and a press on a cell reports
+  `WindowChosen { id }`. It opens only where there is a choice to make, so no
+  dwell timer is needed and single-window applications never flash a popup;
+  it takes no keyboard and closes when the pointer leaves.
 - **The context menu** — `BarMenu`, the bar's one right-click surface. A
-  secondary press on a pin or a library entry opens this menu. Choosing a row
-  reports a typed `TaskbarResponse` (`ActivatePin`, `Unpin`, `PinEntry`, or
-  `LibraryLaunch`); the session performs the action.
+  secondary press on an **application slot** opens the menu that *application*
+  declared over the window channel — and nothing at all when it declared none
+  — with one row the bar owns: *About*, whose submenu is a `FactList` of the
+  bundle's **signed** manifest, so an application cannot state an identity
+  that is not its own. A secondary press on a library entry row opens a single
+  *Open* row, and one on the Switchboard capsule opens the system menu below.
+  Choosing a row reports a typed `TaskbarResponse` (`AppMenuChosen`,
+  `LibraryLaunch`, or a system action); the session performs it.
 - **The system menu** — the start-menu session controls, whose shape is the
   one ordered `system::ROWS` table (inspect the machine, change how it looks,
   then secure, leave, or stop it). The bar holds none of that authority: it
@@ -190,10 +200,10 @@ owns:
   `tairix-raster` `Surface` using the taskbar's own theme, taking the caller's
   `tairix_icon::IconArtwork` lookup as its last argument: the two leading
   `IconButton`s draw with their live hover state over the shipped `Library`
-  and `Folder` artwork, then each **pin** and **task slot** is drawn as the
-  same icon-only `TaskbarItem`: one centred, plate-sized icon and its status
-  marks, never a label, so pins and running tasks read as one strip of equal
-  icons. A window's title stays model data the context menu reads
+  and `Folder` artwork, then each **application slot** is drawn as the same
+  icon-only `TaskbarItem`: one centred, plate-sized icon, never a label, so a
+  run of applications reads as one strip of equal
+  icons. An application's label stays model data a context surface reads
   (`TaskEntry::title`), never ink on the bar. Every icon on the bar is
   **bar-seated** (`tairix_controls::PlateSeating::Bar`): it wears no perimeter
   in any state and no plate at all while it has nothing of its own to state, so

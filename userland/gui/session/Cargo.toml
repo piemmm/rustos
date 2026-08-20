@@ -41,7 +41,6 @@ tairix-proglib = { path = "../../../lib/proglib", version = "=0.0.0" }
 # reads and rewrites the user's own `~/Settings/Taskbar/pins.conf` under the
 # user's identity and resolves each pin for the bar. The bar itself never
 # touches the VFS.
-tairix-taskpins = { path = "../../../lib/taskpins", version = "=0.0.0" }
 # The shared reclaimable-memory model (plans/SMARTRAM.md SMART5): the
 # session is the party that knows the output's frame size, the seat, and the
 # process pressure gauge, so it builds the window manager's cursor cache and

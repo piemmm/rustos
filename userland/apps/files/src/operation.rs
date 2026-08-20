@@ -77,9 +77,14 @@ pub fn operation_control(
         // on the next step. A desktop change is already adopted by the caller
         // before this is reached. The alternate close means "leave this folder",
         // which would move the listing the running operation is walking, so it
-        // is ignored while the panel is up rather than deferred. The rest is
-        // input that must not navigate behind the modal panel.
+        // is ignored while the panel is up rather than deferred. An icon-bar
+        // click or menu row names the whole application, and acting on it
+        // would take the running operation somewhere the user cannot see, so
+        // it too waits for the panel to go. The rest is input that must not
+        // navigate behind the modal panel.
         WindowEvent::AlternateCloseRequested { .. }
+        | WindowEvent::AppBarDefault
+        | WindowEvent::AppBarMenu { .. }
         | WindowEvent::Key { .. }
         | WindowEvent::Focus { .. }
         | WindowEvent::Minimized { .. }

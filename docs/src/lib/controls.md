@@ -55,7 +55,7 @@ under the floor and are unchanged.
 | `collection` | `ListRow`, `TableRow`, `TableCell`, `TableHeader`, `Card`, `Panel` |
 | `scroll`, `scrollbar` | the geometry engine and the one `ScrollBar` over it |
 | `window` | `WindowFrame`, `TitleBar`, `WindowControl`, `ResizeGrabber` |
-| `shell` | `Notification`, `TaskbarItem`, `TraySignal` |
+| `shell` | `Notification`, `TaskbarItem`, `WindowPreview`, `TraySignal` |
 | `decision` | `Dialog`, `Tooltip`, `HelpTip` |
 
 Every one of them resolves its colours, metrics, corner radii, **and text
@@ -169,8 +169,10 @@ Nothing about the control's feedback is discarded, only moved off the edge:
 - A **disposition** (denied, failed-closed, pending, disabled) states itself on
   the glyph tint and its shape-coded Signal Bead rather than a coloured edge, so
   it stays legible without colour vision.
-- Presence, activity, and pressure use the marks the control already owns: the
-  `TaskbarItem` presence mark, the Heat Seam, the Pressure Rail, the bead.
+- Activity and pressure use the marks the control already owns: the Heat Seam,
+  the Pressure Rail, the bead. An icon-bar slot states no *window* state at
+  all: it is an application, and windows are shown in the picker
+  (`shell::WindowPreview`).
 - Focus Field membership (below) is the one signal a bar-seated control cannot
   make, because membership is drawn only as a lift of the rim. A Focus Field
   groups a row with its own actions inside a panel, and the icon strip has no
@@ -187,7 +189,8 @@ statement and is never demoted for the ring.
 
 `IconButton` is the only family that carries the choice (`IconButton::seated`),
 because it is the only one that appears on both kinds of surface — a window
-toolbar and the desktop's icon strip. `shell::TaskbarItem`, `shell::TraySignal`
+toolbar and the desktop's icon strip. `shell::TaskbarItem`,
+`shell::WindowPreview`, `shell::TraySignal`
 and `window::WindowControl` exist only on a bar — the desktop's icon strip and a
 window's title band — and are bar-seated by construction; everything else is
 panel-seated. That is why a window command shows a hover as a plate wash and
@@ -255,8 +258,9 @@ invent a second.
 
 ## Owner-supplied icon artwork
 
-Six controls draw an icon whose artwork their owner may already hold
-rasterised: a `shell::TaskbarItem`, a `shell::TraySignal`, a
+Seven controls draw an image whose pixels their owner may already hold
+rasterised: a `shell::TaskbarItem`, a `shell::WindowPreview` (its window's
+scaled frame), a `shell::TraySignal`, a
 `collection::IconTile`, a `collection::ListRow`, a `button::IconButton`, and a
 `window::TitleBar` (its owning application's identity icon). Each offers the
 same pair — one query and one parameter:

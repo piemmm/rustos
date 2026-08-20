@@ -622,19 +622,6 @@ fn a_bare_bar_seated_control_never_hides_a_focus_ring() {
 }
 
 #[test]
-fn a_deliberate_plate_is_worn_even_on_a_bar() {
-    let theme = Theme::dark();
-    let recessed = rgb(theme.palette().surface);
-    let frame =
-        resolve_frame(&theme, ControlRole::Neutral, ControlState::idle()).with_plate(recessed);
-    assert_eq!(
-        frame.face(PlateSeating::Bar),
-        Some((recessed, recessed)),
-        "a chosen fill is a statement, and still wears no rim"
-    );
-}
-
-#[test]
 fn light_theme_keeps_the_same_invariants() {
     let theme = Theme::light();
     let palette = theme.palette();

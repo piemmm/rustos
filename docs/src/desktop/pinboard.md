@@ -41,7 +41,7 @@ Nothing about the pinboard lives in the kernel or in a driver.
 
 One small text document per user, at
 `<home>/Settings/Pinboard/pinboard.conf`, in the same bounded, fail-closed
-`key value` grammar the [taskbar's pins](../lib/taskpins.md) use. It carries
+`key value` grammar the shared per-user settings stores use. It carries
 five keys: which wallpaper, how it is fitted, the backdrop colour behind it,
 which corner the icons arrange from, and how they are sorted.
 [The `lib/wallpaper` page](../lib/wallpaper.md) is the reference for the

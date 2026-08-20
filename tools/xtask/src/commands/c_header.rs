@@ -4236,7 +4236,7 @@ mod tests {
             ("tairix_ipc.h", "} tairix_ipc_message_header_t;", size_of::<IpcMessageHeader>(), 32, align_of::<IpcMessageHeader>(), 8),
             ("tairix_ipc.h", "} tairix_port_name_t;", size_of::<PortName>(), 32, align_of::<PortName>(), 1),
             ("tairix_manifest.h", "} tairix_manifest_header_t;", size_of::<ManifestHeader>(), 144, align_of::<ManifestHeader>(), 4),
-            ("tairix_appinfo.h", "} tairix_appinfo_header_t;", size_of::<AppInfoHeader>(), 408, align_of::<AppInfoHeader>(), 4),
+            ("tairix_appinfo.h", "} tairix_appinfo_header_t;", size_of::<AppInfoHeader>(), 568, align_of::<AppInfoHeader>(), 4),
             ("tairix_rxe.h", "} tairix_load_header_t;", size_of::<LoadHeader>(), 56, align_of::<LoadHeader>(), 8),
             ("tairix_process.h", "} tairix_process_start_header_t;", size_of::<ProcessStartHeader>(), 40, align_of::<ProcessStartHeader>(), 8),
             ("tairix_process.h", "} tairix_string_slot_t;", size_of::<StringSlot>(), 8, align_of::<StringSlot>(), 4),

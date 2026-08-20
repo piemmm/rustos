@@ -16,7 +16,10 @@ use tairix_abi::driver::display::{DamageRect, DisplayFormat, DisplayMode};
 use tairix_abi::input::{KeyInput, KeyValue, Modifiers, PointerButtonCode};
 use tairix_abi::origin::{ProcId, PROC_ID_LEN};
 use tairix_abi::reply::decode_status_reply;
-use tairix_abi::window_ipc::{PointerAction, WindowEvent, WindowRequest, WINDOW_TITLE_MAX};
+use tairix_abi::window_ipc::{
+    AppBar, AppMenu, AppMenuItemId, AppMenuLabel, AppMenuRow, PointerAction, WindowEvent,
+    WindowRequest, WINDOW_TITLE_MAX,
+};
 use tairix_abi::Errno;
 use tairix_display::{FrameRegion, ShmMapper};
 use tairix_geometry::{Rect, Region, Scale};
@@ -26,7 +29,7 @@ use crate::client::{
 };
 use crate::desktop::Desktop;
 use crate::server::{
-    CallerIdentity, EventSink, PinDecision, PopupSpec, WindowHost, WindowServer, WindowSizing,
+    CallerIdentity, EventSink, PopupSpec, WindowHost, WindowServer, WindowSizing,
     WINDOWS_PER_CLIENT_MAX, WINDOW_REPLY_MAX,
 };
 
@@ -120,7 +123,7 @@ impl CallerIdentity for MockIdentity {
 }
 
 /// A host recording every bridge call, optionally refusing opens, picker
-/// requests, pins, and drag offers.
+/// requests.
 struct RecordingHost {
     opened: Vec<(ProcId, u64, DisplayMode, String, WindowSizing)>,
     popups: Vec<(u64, u64, i32, i32, DisplayMode)>,
@@ -128,20 +131,16 @@ struct RecordingHost {
     resized: Vec<(u64, DisplayMode)>,
     closed: Vec<u64>,
     picks: Vec<u64>,
-    pins: Vec<(ProcId, u64, String)>,
-    drag_offers: Vec<(ProcId, u64, String)>,
-    drag_withdraws: Vec<(ProcId, u64)>,
     blur_sets: Vec<(u64, u16)>,
     retitled: Vec<(u64, String)>,
+    app_bars: Vec<(ProcId, AppBar)>,
+    app_bars_withdrawn: Vec<ProcId>,
+    refuse_app_bar: Option<Errno>,
     refuse_open: bool,
     refuse_popup: bool,
     refuse_resize: Option<Errno>,
     refuse_retitle: Option<Errno>,
     refuse_pick: Option<Errno>,
-    /// The outcome the next `PinBundle` receives.
-    pin_decision: PinDecision,
-    /// Whether the next `DragOffer` is accepted.
-    drag_offer_accepts: bool,
     /// The desktop this host composites, or the refusal a host with no
     /// screen to describe answers with.
     desktop: Result<DesktopInfo, Errno>,
@@ -156,18 +155,16 @@ impl Default for RecordingHost {
             resized: Vec::new(),
             closed: Vec::new(),
             picks: Vec::new(),
-            pins: Vec::new(),
-            drag_offers: Vec::new(),
-            drag_withdraws: Vec::new(),
             blur_sets: Vec::new(),
             retitled: Vec::new(),
+            app_bars: Vec::new(),
+            app_bars_withdrawn: Vec::new(),
+            refuse_app_bar: None,
             refuse_open: false,
             refuse_popup: false,
             refuse_resize: None,
             refuse_retitle: None,
             refuse_pick: None,
-            pin_decision: PinDecision::Pinned,
-            drag_offer_accepts: true,
             desktop: Ok(sample_desktop()),
         }
     }
@@ -254,18 +251,16 @@ impl WindowHost for RecordingHost {
         Ok(())
     }
 
-    fn pin_requested(&mut self, owner: ProcId, window: u64, path: &str) -> PinDecision {
-        self.pins.push((owner, window, String::from(path)));
-        self.pin_decision
+    fn app_bar_declared(&mut self, owner: ProcId, bar: &AppBar) -> Result<(), Errno> {
+        if let Some(err) = self.refuse_app_bar {
+            return Err(err);
+        }
+        self.app_bars.push((owner, *bar));
+        Ok(())
     }
 
-    fn drag_offered(&mut self, owner: ProcId, window: u64, path: &str) -> bool {
-        self.drag_offers.push((owner, window, String::from(path)));
-        self.drag_offer_accepts
-    }
-
-    fn drag_withdrawn(&mut self, owner: ProcId, window: u64) {
-        self.drag_withdraws.push((owner, window));
+    fn app_bar_withdrawn(&mut self, owner: ProcId) {
+        self.app_bars_withdrawn.push(owner);
     }
 
     fn backdrop_blur_set(&mut self, window: u64, radius_px: u16) {
@@ -277,8 +272,8 @@ impl WindowHost for RecordingHost {
     }
 }
 
-/// A host implementing only the mandatory bridge methods, so the
-/// trait's fail-closed defaults for pinning and dragging run untouched.
+/// A host implementing only the mandatory bridge methods, so the trait's
+/// own defaults run untouched.
 struct MinimalHost;
 
 impl WindowHost for MinimalHost {
@@ -1452,84 +1447,6 @@ fn a_refused_picker_leaves_no_pending_pick() {
 }
 
 #[test]
-fn pin_bundle_is_owner_bound_and_reaches_the_host_with_the_right_arguments() {
-    let loopback = Loopback::with_regions(&[(7, FRAME_LEN)]);
-    let mut client = WindowClient::new(Rc::clone(&loopback));
-    let window = create_id(&mut client, 7, EVENTS_A, 1, "a").expect("a");
-
-    // A window the caller does not own answers exactly like one that
-    // never existed, and the host is never told.
-    loopback.borrow_mut().ticket = TICKET_B;
-    assert_eq!(
-        client.pin_bundle(window, "/Apps/Editor.app"),
-        Err(Errno::NotFound)
-    );
-    assert!(loopback.borrow().host.pins.is_empty());
-    loopback.borrow_mut().ticket = TICKET_A;
-
-    // The owner's request reaches the host with its attested identity,
-    // the window, and the exact path.
-    client
-        .pin_bundle(window, "/Apps/Editor.app")
-        .expect("pinned");
-    assert_eq!(
-        loopback.borrow().host.pins,
-        alloc::vec![(proc_id(0xA1), window, String::from("/Apps/Editor.app"))]
-    );
-}
-
-#[test]
-fn pin_decision_maps_to_the_documented_status() {
-    let loopback = Loopback::with_regions(&[(7, FRAME_LEN)]);
-    let mut client = WindowClient::new(Rc::clone(&loopback));
-    let window = create_id(&mut client, 7, EVENTS_A, 1, "a").expect("a");
-
-    for (decision, expected) in [
-        (PinDecision::Pinned, Ok(())),
-        (PinDecision::AlreadyPinned, Err(Errno::AlreadyExists)),
-        (PinDecision::Full, Err(Errno::NoSpace)),
-        (PinDecision::Refused, Err(Errno::PermissionDenied)),
-    ] {
-        loopback.borrow_mut().host.pin_decision = decision;
-        assert_eq!(client.pin_bundle(window, "/Apps/Editor.app"), expected);
-    }
-}
-
-#[test]
-fn drag_offer_and_withdraw_are_owner_bound_and_reach_the_host() {
-    let loopback = Loopback::with_regions(&[(7, FRAME_LEN)]);
-    let mut client = WindowClient::new(Rc::clone(&loopback));
-    let window = create_id(&mut client, 7, EVENTS_A, 1, "a").expect("a");
-
-    // A window the caller does not own is refused for both requests,
-    // and the host is never told.
-    loopback.borrow_mut().ticket = TICKET_B;
-    assert_eq!(
-        client.drag_offer(window, "/Apps/Editor.app"),
-        Err(Errno::NotFound)
-    );
-    assert_eq!(client.drag_withdraw(window), Err(Errno::NotFound));
-    assert!(loopback.borrow().host.drag_offers.is_empty());
-    assert!(loopback.borrow().host.drag_withdraws.is_empty());
-    loopback.borrow_mut().ticket = TICKET_A;
-
-    // The owner's offer reaches the host with its attested identity, the
-    // window, and the exact path; the later withdraw reaches it too.
-    client
-        .drag_offer(window, "/Apps/Editor.app")
-        .expect("offered");
-    assert_eq!(
-        loopback.borrow().host.drag_offers,
-        alloc::vec![(proc_id(0xA1), window, String::from("/Apps/Editor.app"))]
-    );
-    client.drag_withdraw(window).expect("withdrawn");
-    assert_eq!(
-        loopback.borrow().host.drag_withdraws,
-        alloc::vec![(proc_id(0xA1), window)]
-    );
-}
-
-#[test]
 fn set_backdrop_blur_is_owner_bound_and_reaches_the_host() {
     let loopback = Loopback::with_regions(&[(7, FRAME_LEN)]);
     let mut client = WindowClient::new(Rc::clone(&loopback));
@@ -1554,26 +1471,10 @@ fn set_backdrop_blur_is_owner_bound_and_reaches_the_host() {
 }
 
 #[test]
-fn a_refused_drag_offer_maps_to_permission_denied() {
-    let loopback = Loopback::with_regions(&[(7, FRAME_LEN)]);
-    let mut client = WindowClient::new(Rc::clone(&loopback));
-    let window = create_id(&mut client, 7, EVENTS_A, 1, "a").expect("a");
-
-    loopback.borrow_mut().host.drag_offer_accepts = false;
-    assert_eq!(
-        client.drag_offer(window, "/Apps/Editor.app"),
-        Err(Errno::PermissionDenied)
-    );
-    // The gesture is never fatal to the window: a withdraw (or a fresh
-    // offer once the host recovers) still succeeds.
-    assert_eq!(client.drag_withdraw(window), Ok(()));
-}
-
-#[test]
-fn pin_and_drag_default_to_fail_closed_refusal() {
-    // A host implementing only the mandatory bridge methods exercises
-    // the trait's own defaults: a host that has not wired up pinning or
-    // dragging must refuse rather than silently accept.
+fn backdrop_blur_defaults_to_an_accepted_no_op() {
+    // A host implementing only the mandatory bridge methods exercises the
+    // trait's own default: a host with no compositor to tell accepts the
+    // radius and draws nothing, rather than failing a request it validated.
     let mapper = MockMapper::with_regions(&[(7, FRAME_LEN)]);
     let mut server = WindowServer::new(mapper, SERVER);
     let mut host = MinimalHost;
@@ -1597,29 +1498,8 @@ fn pin_and_drag_default_to_fail_closed_refusal() {
     let len = server.serve(&mut host, &mut identity, TICKET_A, &create, &mut reply);
     let (window, _) = tairix_abi::window_ipc::decode_create_reply(&reply[..len]).expect("created");
 
-    let path = tairix_abi::window_ipc::BundleRef::new("/Apps/Editor.app").expect("valid path");
-    let pin = WindowRequest::PinBundle { window, path }.to_le_bytes();
-    let len = server.serve(&mut host, &mut identity, TICKET_A, &pin, &mut reply);
-    assert_eq!(
-        decode_status_reply(&reply[..len]),
-        Err(Errno::PermissionDenied)
-    );
-
-    let offer = WindowRequest::DragOffer { window, path }.to_le_bytes();
-    let len = server.serve(&mut host, &mut identity, TICKET_A, &offer, &mut reply);
-    assert_eq!(
-        decode_status_reply(&reply[..len]),
-        Err(Errno::PermissionDenied)
-    );
-
-    // Withdrawing is infallible for an owned window even with no offer
-    // to disarm: the default handler simply has nothing to do.
-    let withdraw = WindowRequest::DragWithdraw { window }.to_le_bytes();
-    let len = server.serve(&mut host, &mut identity, TICKET_A, &withdraw, &mut reply);
-    assert_eq!(decode_status_reply(&reply[..len]), Ok(()));
-
-    // Setting the backdrop blur is likewise infallible for an owned
-    // window: the default handler has no compositor to tell.
+    // Setting the backdrop blur is infallible for an owned window: the
+    // default handler has no compositor to tell.
     let blur = WindowRequest::SetBackdropBlur {
         window_id: window,
         radius_px: 8,
@@ -1627,6 +1507,187 @@ fn pin_and_drag_default_to_fail_closed_refusal() {
     .to_le_bytes();
     let len = server.serve(&mut host, &mut identity, TICKET_A, &blur, &mut reply);
     assert_eq!(decode_status_reply(&reply[..len]), Ok(()));
+}
+
+/// The declaration a test application makes: it handles the click and
+/// offers one chooseable row plus the session-rendered About row.
+fn sample_app_bar(endpoint: u64) -> AppBar {
+    let mut menu = AppMenu::EMPTY;
+    menu.push(AppMenuRow::Item {
+        id: AppMenuItemId::new(1).expect("a valid id"),
+        label: AppMenuLabel::new("New window").expect("a valid label"),
+        enabled: true,
+        mark: tairix_abi::window_ipc::AppMenuMark::None,
+    })
+    .expect("room");
+    menu.push(AppMenuRow::About).expect("room");
+    AppBar {
+        event_endpoint: endpoint,
+        default_action: true,
+        menu,
+    }
+}
+
+#[test]
+fn an_icon_bar_declaration_reaches_the_host_and_routes_its_events() {
+    let loopback = Loopback::with_regions(&[(7, FRAME_LEN)]);
+    let mut client = WindowClient::new(Rc::clone(&loopback));
+    let bar = sample_app_bar(EVENTS_A);
+
+    // The declaration needs no window: an application claims a slot under
+    // its own attested identity, whether or not it has anything open.
+    client.set_app_bar(&bar).expect("declared");
+    assert_eq!(
+        loopback.borrow().host.app_bars,
+        alloc::vec![(proc_id(0xA1), bar)]
+    );
+
+    // Its events route to the endpoint the declaration named, and carry no
+    // window id.
+    let mut sink = QueueSink::default();
+    for event in [
+        WindowEvent::AppBarDefault,
+        WindowEvent::AppBarMenu {
+            item: AppMenuItemId::new(1).expect("a valid id"),
+        },
+    ] {
+        loopback
+            .borrow_mut()
+            .server
+            .deliver_app_event(&mut sink, proc_id(0xA1), &event)
+            .expect("delivered");
+    }
+    assert_eq!(
+        sink.delivered,
+        alloc::vec![
+            (EVENTS_A, WindowEvent::AppBarDefault.to_le_bytes()),
+            (
+                EVENTS_A,
+                WindowEvent::AppBarMenu {
+                    item: AppMenuItemId::new(1).expect("a valid id")
+                }
+                .to_le_bytes()
+            )
+        ]
+    );
+
+    // A re-declaration replaces the route whole rather than accumulating
+    // one, so an application that moves its mailbox is not delivered to
+    // both.
+    let moved = sample_app_bar(EVENTS_B);
+    client.set_app_bar(&moved).expect("re-declared");
+    let mut sink = QueueSink::default();
+    loopback
+        .borrow_mut()
+        .server
+        .deliver_app_event(&mut sink, proc_id(0xA1), &WindowEvent::AppBarDefault)
+        .expect("delivered");
+    assert_eq!(
+        sink.delivered,
+        alloc::vec![(EVENTS_B, WindowEvent::AppBarDefault.to_le_bytes())]
+    );
+}
+
+#[test]
+fn icon_bar_delivery_fails_closed_without_a_declaration() {
+    let loopback = Loopback::with_regions(&[(7, FRAME_LEN)]);
+    let mut client = WindowClient::new(Rc::clone(&loopback));
+    let mut sink = QueueSink::default();
+
+    // An application that never declared a presence has nowhere for a bar
+    // event to go, so the delivery is refused rather than guessed at.
+    assert_eq!(
+        loopback.borrow_mut().server.deliver_app_event(
+            &mut sink,
+            proc_id(0xA1),
+            &WindowEvent::AppBarDefault
+        ),
+        Err(Errno::NotFound)
+    );
+
+    // A refused declaration records no route either: the engine remembers
+    // one only once the host accepted it.
+    loopback.borrow_mut().host.refuse_app_bar = Some(Errno::NotSupported);
+    assert_eq!(
+        client.set_app_bar(&sample_app_bar(EVENTS_A)),
+        Err(Errno::NotSupported)
+    );
+    assert_eq!(
+        loopback.borrow_mut().server.deliver_app_event(
+            &mut sink,
+            proc_id(0xA1),
+            &WindowEvent::AppBarDefault
+        ),
+        Err(Errno::NotFound)
+    );
+    loopback.borrow_mut().host.refuse_app_bar = None;
+
+    // The two delivery paths are not interchangeable: a window-scoped
+    // event on the application path (and the reverse) is a routing bug and
+    // is refused, never delivered to the wrong place.
+    client
+        .set_app_bar(&sample_app_bar(EVENTS_A))
+        .expect("declared");
+    let window = create_id(&mut client, 7, EVENTS_A, 1, "a").expect("a");
+    assert_eq!(
+        loopback.borrow_mut().server.deliver_app_event(
+            &mut sink,
+            proc_id(0xA1),
+            &WindowEvent::CloseRequested { window_id: window }
+        ),
+        Err(Errno::OutOfRange)
+    );
+    assert_eq!(
+        loopback
+            .borrow_mut()
+            .server
+            .deliver_event(&mut sink, &WindowEvent::AppBarDefault),
+        Err(Errno::OutOfRange)
+    );
+    assert!(sink.delivered.is_empty());
+}
+
+#[test]
+fn a_dead_clients_icon_bar_presence_is_withdrawn() {
+    let loopback = Loopback::with_regions(&[(7, FRAME_LEN)]);
+    let mut client = WindowClient::new(Rc::clone(&loopback));
+    client
+        .set_app_bar(&sample_app_bar(EVENTS_A))
+        .expect("declared");
+
+    let owner = proc_id(0xA1);
+    {
+        let mut borrowed = loopback.borrow_mut();
+        let Loopback { server, host, .. } = &mut *borrowed;
+        server.client_exited(host, owner);
+    }
+    assert_eq!(
+        loopback.borrow().host.app_bars_withdrawn,
+        alloc::vec![owner]
+    );
+
+    // The route is gone with it, so a late bar event has nowhere to land.
+    let mut sink = QueueSink::default();
+    assert_eq!(
+        loopback.borrow_mut().server.deliver_app_event(
+            &mut sink,
+            owner,
+            &WindowEvent::AppBarDefault
+        ),
+        Err(Errno::NotFound)
+    );
+
+    // A client that never declared one is not reported as withdrawing it.
+    let other = proc_id(0xB2);
+    {
+        let mut borrowed = loopback.borrow_mut();
+        let Loopback { server, host, .. } = &mut *borrowed;
+        server.client_exited(host, other);
+    }
+    assert_eq!(
+        loopback.borrow().host.app_bars_withdrawn,
+        alloc::vec![owner]
+    );
 }
 
 #[test]

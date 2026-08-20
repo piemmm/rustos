@@ -1,18 +1,19 @@
 //! Which of the taskbar's rendered surfaces need repainting.
 //!
-//! The taskbar presents up to five independent pixel surfaces at once: the
-//! bar strip, the program-library popup, the context menu, the notification
-//! popover, and the Switchboard capsule's expanded readout. A hover moving
-//! within a small popup, or a highlight moving inside an open menu, changes
-//! only that one surface's pixels — the other four are untouched. Latching a
-//! single flag for all five (as the bar once did) forces the embedder to
-//! re-render and re-composite every surface for every such change, which is
-//! measurably wasteful: repainting the bar and the library popup cost more
-//! than ten times what repainting the context menu alone costs, so a single
-//! flag turns cheap, frequent hovers into the most expensive path on the
-//! desktop. [`TaskbarRepaint`] names each surface separately so
+//! The taskbar presents up to six independent pixel surfaces at once: the
+//! bar strip, the program-library popup, the context menu, the window
+//! picker, the notification popover, and the Switchboard capsule's expanded
+//! readout. A hover moving within a small popup, or a highlight moving
+//! inside an open menu, changes only that one surface's pixels — the others
+//! are untouched. Latching a single flag for all of them (as the bar once
+//! did) forces the embedder to re-render and re-composite every surface for
+//! every such change, which is measurably wasteful: repainting the bar and
+//! the library popup cost more than ten times what repainting the context
+//! menu alone costs, so a single flag turns cheap, frequent hovers into the
+//! most expensive path on the desktop. [`TaskbarRepaint`] names each surface
+//! separately so
 //! [`Taskbar::take_repaint`](crate::Taskbar::take_repaint) tells the embedder
-//! exactly which of the five actually changed.
+//! exactly which of them actually changed.
 //!
 //! [`Taskbar`](crate::Taskbar) latches this per-part rather than as one bit,
 //! and its per-site latches are attributed by construction: a state change
@@ -25,13 +26,13 @@ use core::ops::{BitOr, BitOrAssign};
 
 /// Which of the taskbar's rendered surfaces need repainting.
 ///
-/// See the [module docs](self) for why this is five flags rather than one,
+/// See the [module docs](self) for why this is six flags rather than one,
 /// and [`Taskbar::take_repaint`](crate::Taskbar::take_repaint) for the exact
 /// contract each flag promises.
-// The five surfaces are independent yes/no facts about one frame, not a state
+// The surfaces are independent yes/no facts about one frame, not a state
 // machine: every combination is legal and is produced in practice (a menu
 // hover latches one, opening the library popup latches two, a theme swap
-// latches all five). Folding them into an enum or sub-structs would hide
+// latches all of them). Folding them into an enum or sub-structs would hide
 // which surface a latch site actually dirties, which is the whole point of
 // the type.
 #[allow(clippy::struct_excessive_bools)]
@@ -43,6 +44,8 @@ pub struct TaskbarRepaint {
     pub library: bool,
     /// The bar's context menu.
     pub menu: bool,
+    /// The window picker an application slot opens on hover.
+    pub picker: bool,
     /// The notification popover.
     pub notifications: bool,
     /// The Switchboard capsule's expanded instrument readout.
@@ -55,6 +58,7 @@ impl TaskbarRepaint {
         bar: false,
         library: false,
         menu: false,
+        picker: false,
         notifications: false,
         readout: false,
     };
@@ -77,6 +81,12 @@ impl TaskbarRepaint {
         ..Self::NONE
     };
 
+    /// Only the window picker.
+    pub const PICKER: Self = Self {
+        picker: true,
+        ..Self::NONE
+    };
+
     /// Only the notification popover.
     pub const NOTIFICATIONS: Self = Self {
         notifications: true,
@@ -90,11 +100,12 @@ impl TaskbarRepaint {
     };
 
     /// Every surface — a theme, scale, or edge change alters the geometry or
-    /// palette every one of the five draws with.
+    /// palette every one of them draws with.
     pub const ALL: Self = Self {
         bar: true,
         library: true,
         menu: true,
+        picker: true,
         notifications: true,
         readout: true,
     };
@@ -102,7 +113,7 @@ impl TaskbarRepaint {
     /// Whether any surface is latched.
     #[must_use]
     pub const fn any(self) -> bool {
-        self.bar || self.library || self.menu || self.notifications || self.readout
+        self.bar || self.library || self.menu || self.picker || self.notifications || self.readout
     }
 }
 
@@ -114,6 +125,7 @@ impl BitOr for TaskbarRepaint {
             bar: self.bar || rhs.bar,
             library: self.library || rhs.library,
             menu: self.menu || rhs.menu,
+            picker: self.picker || rhs.picker,
             notifications: self.notifications || rhs.notifications,
             readout: self.readout || rhs.readout,
         }

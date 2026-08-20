@@ -19,12 +19,13 @@
 //!   the scrollbar, or dismissing on a click-away. Nothing leaks to the
 //!   windows beneath a modal popup.
 //! * **Otherwise the taskbar claims a press** when the pointer lands on the
-//!   bar *or* on one of its open, non-modal popovers (the notification
-//!   popover and the Switchboard capsule's instrument readout); every other
-//!   press goes to the window manager. The two never both act on one press,
-//!   so a click on the bar or a notification card never also activates a
-//!   window behind it. The popovers open outward from the bar and never
-//!   overlap it, so the taskbar surfaces never contend for a press.
+//!   bar *or* on one of its open, non-modal surfaces (the hover window
+//!   picker, the notification popover, and the Switchboard capsule's
+//!   instrument readout); every other press goes to the window manager. The
+//!   two never both act on one press, so a click on a picker cell or a
+//!   notification card never also activates a window behind it. Each of
+//!   those surfaces opens outward from the bar and never overlaps it, so the
+//!   taskbar surfaces never contend for a press.
 //! * **A middle press routes to the taskbar over the bar or a popover**
 //!   (over the Switchboard capsule it switches to the previous task) and is
 //!   ignored elsewhere — the window manager has no middle-button action.
@@ -214,15 +215,19 @@ impl SessionInputRouter {
             InputEvent::PointerPressed { button } => {
                 // A press belongs to whichever surface owns the pixel under
                 // the pointer: the bar claims presses over itself (a
-                // secondary press there opens a pin's context menu; a middle
-                // press over the capsule switches to the previous task), an
-                // open non-modal popover — the notification popover or the
-                // capsule's readout — claims presses over it, and the window
-                // manager takes every remaining primary or secondary press.
-                // The popovers open outward and never overlap the bar, so
+                // secondary press there opens the menu the application under
+                // it declared; a middle press over the capsule switches to
+                // the previous task), an open non-modal surface — the hover
+                // window picker, the notification popover, or the capsule's
+                // readout — claims presses over it, and the window manager
+                // takes every remaining primary or secondary press. Each of
+                // those surfaces opens outward and never overlaps the bar, so
                 // the taskbar surfaces never contend.
                 let pointer = self.taskbar.pointer();
                 let on_taskbar = taskbar.hit_test(pointer, scale).is_some()
+                    || taskbar
+                        .picker_layout(scale)
+                        .is_some_and(|picker| picker.panel.contains(pointer))
                     || taskbar
                         .notifications_layout(scale)
                         .is_some_and(|popover| popover.contains(pointer))

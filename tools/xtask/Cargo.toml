@@ -224,11 +224,10 @@ tairix-fwcfg = { path = "../../lib/fwcfg", version = "=0.0.0" }
 # script rebuilds the popup's rows over a `Catalog` reconstructed from the
 # same manifests — one engine, no drifting literals (plans/NEW-TASKBAR.md).
 tairix-proglib = { path = "../../lib/proglib", version = "=0.0.0" }
-# The Switchboard monitor service and the shared icon vocabulary: the T15
-# taskbar-pin vertical measures the overview panel's own window envelope in
-# the dumped scan-out and rebuilds the bar's pin slot with the same class
-# glyph the session seeds a pin with — the one definition of each
-# (plans/NEW-TASKBAR.md T15, AGENTS.md §2.2).
+# The Switchboard monitor service and the shared icon vocabulary: the
+# desktop verticals measure a served window's own envelope in the dumped
+# scan-out and rebuild the bar's slots with the same class glyph the session
+# seeds one with — the one definition of each (AGENTS.md §2.2).
 tairix-switchboard = { path = "../../userland/gui/switchboard", version = "=0.0.0" }
 tairix-icon = { path = "../../lib/icon", version = "=0.0.0" }
 # The desktop's own PNG decoder. The image build decodes every icon it is
@@ -258,19 +257,18 @@ tairix-svg = { path = "../../lib/svg", version = "=0.0.0" }
 # is not held to — and the desktop screendump assertions recompute the
 # wallpaper the guest composites from those same definitions.
 tairix-wallpaper = { path = "../../lib/wallpaper", version = "=0.0.0" }
-# The shared pointer input-event vocabulary: the T15 script raises the real
-# context menu by driving the production bar router with the very events the
-# guest will receive, so the menu geometry it clicks is the model's own.
+# The shared pointer input-event vocabulary: the icon-bar script raises the
+# real context menu by driving the production bar router with the very events
+# the guest will receive, so the menu geometry it clicks is the model's own.
 tairix-input = { path = "../../lib/input", version = "=0.0.0" }
 # The autoload desktop vertical's shared interaction contract (delivery
 # counts), defined once in the test crate's lib target beside the guest
 # PASS gate that also consumes it.
 tairix-test-autoload-input-qemu-aarch64 = { path = "../../tests/integration/autoload_input_qemu_aarch64", version = "=0.0.0" }
-# The taskbar-pin vertical's shared interaction contract (the pinned
-# application, the window-endpoint call position that means the Switchboard
-# panel is painted, and the marker the guest emits there), defined once in
+# The icon-bar vertical's shared interaction contract (the application whose
+# bar is driven and the two window markers the guest emits), defined once in
 # that test crate's lib target beside the guest PASS gate.
-tairix-test-taskbar-pin-qemu-aarch64 = { path = "../../tests/integration/taskbar_pin_qemu_aarch64", version = "=0.0.0" }
+tairix-test-appbar-qemu-aarch64 = { path = "../../tests/integration/appbar_qemu_aarch64", version = "=0.0.0" }
 # The kernel/ipc audit vocabulary: the AW3 vertical's markers key on the
 # `MessageDelivered` / `CallReplied` records the kernel emits for the
 # window channel — the shared definitions, never literals.

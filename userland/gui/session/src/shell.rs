@@ -52,8 +52,8 @@ use tairix_log::Sink;
 use tairix_proglib::Catalog;
 use tairix_reclaim::PressureGauge;
 use tairix_taskbar::{
-    icon_cache, ActivateOutcome, Edge, PinView, TaskId, TaskbarConfig, TaskbarRenderer,
-    TaskbarResponse, TransientNotification,
+    icon_cache, AppSlot, Edge, PickerEntry, TaskbarConfig, TaskbarRenderer, TaskbarResponse,
+    TransientNotification,
 };
 use tairix_wallpaper::Backdrop;
 use tairix_wm::{
@@ -62,10 +62,10 @@ use tairix_wm::{
     WindowSizeState,
 };
 
+use crate::apps::{prefetch_bar_icons, resolve_library_icons};
 use crate::desktop::Desktop;
 use crate::input::{SessionInputResponse, SessionInputRouter};
 use crate::pinboard::PinboardMenu;
-use crate::pins::{prefetch_bar_icons, resolve_library_icons};
 use crate::presenter::{place, TaskbarPresenter};
 use crate::session::DesktopSession;
 use crate::tasks::TaskBridge;
@@ -798,7 +798,7 @@ impl DesktopShell {
         bundles: impl Iterator<Item = &'a str>,
     ) {
         let sides = [
-            self.session.taskbar().task_icon_side(compositor.scale()),
+            self.session.taskbar().app_icon_side(compositor.scale()),
             compositor.title_identity_icon_side(),
         ];
         for bundle in bundles {
@@ -1019,38 +1019,33 @@ impl DesktopShell {
         self.present(compositor);
     }
 
-    /// Hand the taskbar's pin strip the session's freshly resolved pin views
-    /// and re-present, so the strip reflects an edit or a changed
-    /// running-window match in the same frame.
-    pub fn set_pins(&mut self, compositor: &mut Compositor, pins: Vec<PinView>) {
-        self.session.taskbar_mut().set_pins(pins);
+    /// Hand the taskbar's application strip the session's freshly resolved
+    /// slots and re-present, so the strip reflects a launch, an exit, a
+    /// window opening or closing, or a re-declaration in the same frame.
+    pub fn set_apps(&mut self, compositor: &mut Compositor, apps: Vec<AppSlot>) {
+        self.session.taskbar_mut().set_apps(apps);
         self.present(compositor);
     }
 
-    /// Give the running task `task` the icon of the application that opened
-    /// its window and re-present, so the bar shows that application's own
-    /// icon rather than the shared one — the task counterpart of
-    /// [`set_pins`](Self::set_pins).
+    /// Open the bar's hover window picker over the application at strip
+    /// index `app` with one cell per window, and re-present.
     ///
-    /// The picture is the session's, resolved from the bundle the kernel
-    /// attested owns the window and rasterised at the bar's own slot side
-    /// ([`Taskbar::task_icon_side`](tairix_taskbar::Taskbar::task_icon_side));
-    /// `None` leaves the entry on the shared application icon. A task the bar
-    /// does not know changes nothing.
-    pub fn set_task_artwork(
+    /// The answer to
+    /// [`ShowWindowPicker`](TaskbarResponse::ShowWindowPicker): the session
+    /// owns the windows' pixels, so it builds the cells and the bar places
+    /// and draws them. Refused, changing nothing, for fewer cells than
+    /// there is a choice between.
+    pub fn show_window_picker(
         &mut self,
         compositor: &mut Compositor,
-        task: TaskId,
-        artwork: Option<Surface>,
+        app: usize,
+        entries: Vec<PickerEntry>,
     ) {
-        if self
-            .session
+        let scale = compositor.scale();
+        self.session
             .taskbar_mut()
-            .tasks_mut()
-            .set_artwork(task, artwork)
-        {
-            self.present(compositor);
-        }
+            .show_window_picker(app, entries, scale);
+        self.present(compositor);
     }
 
     /// Relay a decoded notification request from an attested `producer` to the
@@ -1190,12 +1185,7 @@ impl DesktopShell {
             .taskbar_mut()
             .tasks_mut()
             .set_focused(Some(task));
-        let raised = self.tasks.activate(
-            compositor,
-            &mut self.router,
-            task,
-            ActivateOutcome::Activated,
-        );
+        let raised = self.tasks.raise(compositor, &mut self.router, task);
         if raised {
             self.sync_active_frame(compositor);
             self.present(compositor);
@@ -1254,9 +1244,12 @@ impl DesktopShell {
             }
             SessionInputResponse::Taskbar(response) => {
                 match response {
-                    TaskbarResponse::TaskActivated { id, outcome } => {
-                        self.tasks
-                            .activate(compositor, &mut self.router, id, outcome);
+                    // Choosing a window — in the hover picker, or through the
+                    // Switchboard capsule's cycle and previous-task gestures —
+                    // raises it. The bar has already restored and highlighted
+                    // it in its own model.
+                    TaskbarResponse::WindowChosen { id } => {
+                        self.tasks.raise(compositor, &mut self.router, id);
                     }
                     // A user dismiss clears the notification from the model
                     // the session owns; the repaint latch it sets drives the

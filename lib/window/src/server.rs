@@ -40,29 +40,11 @@ use tairix_abi::driver::display::{DamageRect, DisplayFormat, DisplayMode};
 use tairix_abi::origin::ProcId;
 use tairix_abi::reply::{encode_status_reply, STATUS_REPLY_LEN};
 use tairix_abi::window_ipc::{
-    encode_create_reply, encode_desktop_reply, WindowEvent, WindowRequest, WindowTitle,
+    encode_create_reply, encode_desktop_reply, AppBar, WindowEvent, WindowRequest, WindowTitle,
     WINDOW_CREATE_REPLY_LEN, WINDOW_DESKTOP_REPLY_LEN,
 };
 use tairix_abi::Errno;
 use tairix_display::{FrameRegion, ShmMapper};
-
-/// Outcome of a validated `PinBundle`, decided by
-/// [`WindowHost::pin_requested`] and mapped to the request's status
-/// reply.
-#[derive(Copy, Clone, Debug, Eq, PartialEq)]
-pub enum PinDecision {
-    /// The bundle was pinned; the reply is `Ok`.
-    Pinned,
-    /// The bundle was already pinned; the reply is `Errno::AlreadyExists`.
-    AlreadyPinned,
-    /// The pin store has no room for another shortcut; the reply is
-    /// `Errno::NoSpace`.
-    Full,
-    /// The host declines to pin the bundle for any other reason (it does
-    /// not serve pinning, or the bundle failed the host's own checks);
-    /// the reply is `Errno::PermissionDenied`.
-    Refused,
-}
 
 /// Upper bound, in bytes, of any reply [`WindowServer::serve`] writes,
 /// so one fixed buffer holds every outcome: the create frame, the desktop
@@ -226,33 +208,35 @@ pub trait WindowHost {
     /// to the client and no pick is recorded.
     fn pick_requested(&mut self, window_id: u64) -> Result<(), Errno>;
 
-    /// A validated `PinBundle`: the attested `owner` of live `window`
-    /// asked to pin `path` to the taskbar (`plans/NEW-TASKBAR.md` T7).
+    /// A validated `SetAppBar`: the attested `owner` declared (or
+    /// re-declared) its presence on the desktop's icon bar — its event
+    /// route, whether it handles the primary click, and its menu, all
+    /// already bounded and shape-checked by the engine's ABI decode.
     ///
-    /// The default refuses every pin: a host that does not compose a
-    /// taskbar (or has not wired one up yet) must fail closed rather
-    /// than silently drop or half-apply the gesture.
-    fn pin_requested(&mut self, owner: ProcId, window: u64, path: &str) -> PinDecision {
-        let _ = (owner, window, path);
-        PinDecision::Refused
+    /// A re-declaration replaces the previous one whole; that is how an
+    /// application changes a row's enablement or its mark.
+    ///
+    /// The default refuses: a host that composes no icon bar cannot honour
+    /// a slot, and telling the application so is more honest than
+    /// accepting a declaration nothing will ever draw.
+    ///
+    /// # Errors
+    ///
+    /// Any [`Errno`] the host cannot list the application under; the
+    /// refusal is relayed to the client, which reports it and carries on.
+    fn app_bar_declared(&mut self, owner: ProcId, bar: &AppBar) -> Result<(), Errno> {
+        let _ = (owner, bar);
+        Err(Errno::NotSupported)
     }
 
-    /// A validated `DragOffer`: an app-reference drag naming `path`
-    /// started in the attested `owner`'s live `window`. `true` arms the
-    /// offer for a later drop; `false` (the default) refuses — a host
-    /// with no drag-drop route must fail closed rather than pretend to
-    /// track an offer it cannot honour.
-    fn drag_offered(&mut self, owner: ProcId, window: u64, path: &str) -> bool {
-        let _ = (owner, window, path);
-        false
-    }
-
-    /// A validated `DragWithdraw`: the attested `owner` cancelled the
-    /// drag it started in its live `window`. Infallible: disarming an
-    /// offer that was never armed (including one the host itself
-    /// refused) is a no-op, so the default does nothing.
-    fn drag_withdrawn(&mut self, owner: ProcId, window: u64) {
-        let _ = (owner, window);
+    /// The attested `owner` is gone; drop the icon-bar presence it
+    /// declared, if any. Infallible: the engine has already forgotten the
+    /// route, and the host must not resurrect the slot.
+    ///
+    /// Called from [`WindowServer::client_exited`] only for a client that
+    /// actually held a declaration, so a host need not filter.
+    fn app_bar_withdrawn(&mut self, owner: ProcId) {
+        let _ = owner;
     }
 
     /// A validated `SetBackdropBlur`: the attested owner of live `window`
@@ -433,6 +417,11 @@ pub struct WindowServer<M: ShmMapper> {
     /// The next window id to mint. Ids start at 1 and are never reused,
     /// so a stale id held by an app can never name a newer window.
     next_id: u64,
+    /// Where each application that declared an icon-bar presence receives
+    /// its bar events. The declaration's *content* is the host's — the
+    /// engine keeps only the route, so an application-scoped event can be
+    /// delivered without asking the host where it goes.
+    app_bars: BTreeMap<ProcId, u64>,
 }
 
 impl<M: ShmMapper> WindowServer<M> {
@@ -445,6 +434,7 @@ impl<M: ShmMapper> WindowServer<M> {
             server,
             windows: BTreeMap::new(),
             next_id: 1,
+            app_bars: BTreeMap::new(),
         }
     }
 
@@ -609,15 +599,7 @@ impl<M: ShmMapper> WindowServer<M> {
                 reply,
                 self.set_title(host, caller, window_id, title.as_str()),
             ),
-            WindowRequest::PinBundle { window, path } => {
-                status(reply, self.pin_bundle(host, caller, window, path.as_str()))
-            }
-            WindowRequest::DragOffer { window, path } => {
-                status(reply, self.drag_offer(host, caller, window, path.as_str()))
-            }
-            WindowRequest::DragWithdraw { window } => {
-                status(reply, self.drag_withdraw(host, caller, window))
-            }
+            WindowRequest::SetAppBar(ref bar) => status(reply, self.set_app_bar(host, caller, bar)),
             WindowRequest::SetBackdropBlur {
                 window_id,
                 radius_px,
@@ -883,53 +865,20 @@ impl<M: ShmMapper> WindowServer<M> {
         host.window_retitled(window_id, title)
     }
 
-    /// Ask the host to pin `path` on behalf of `caller`'s window
-    /// `window_id`, mapping the [`PinDecision`] to the request's status
-    /// reply.
-    fn pin_bundle(
+    /// Record `caller`'s icon-bar declaration and hand it to the host.
+    ///
+    /// The route is remembered only once the host accepted the
+    /// declaration, so a refused one leaves nothing behind to deliver a
+    /// bar event to (fail closed), and a re-declaration replaces the
+    /// previous route rather than accumulating one.
+    fn set_app_bar(
         &mut self,
         host: &mut dyn WindowHost,
         caller: ProcId,
-        window_id: u64,
-        path: &str,
+        bar: &AppBar,
     ) -> Result<(), Errno> {
-        owned_window(&self.windows, caller, window_id)?;
-        match host.pin_requested(caller, window_id, path) {
-            PinDecision::Pinned => Ok(()),
-            PinDecision::AlreadyPinned => Err(Errno::AlreadyExists),
-            PinDecision::Full => Err(Errno::NoSpace),
-            PinDecision::Refused => Err(Errno::PermissionDenied),
-        }
-    }
-
-    /// Ask the host to arm a drag offer of `path` on behalf of `caller`'s
-    /// window `window_id`.
-    fn drag_offer(
-        &mut self,
-        host: &mut dyn WindowHost,
-        caller: ProcId,
-        window_id: u64,
-        path: &str,
-    ) -> Result<(), Errno> {
-        owned_window(&self.windows, caller, window_id)?;
-        if host.drag_offered(caller, window_id, path) {
-            Ok(())
-        } else {
-            Err(Errno::PermissionDenied)
-        }
-    }
-
-    /// Tell the host to disarm `caller`'s drag offer, if any, for window
-    /// `window_id`. Always succeeds for an owned window: there is
-    /// nothing left to fail once ownership holds.
-    fn drag_withdraw(
-        &mut self,
-        host: &mut dyn WindowHost,
-        caller: ProcId,
-        window_id: u64,
-    ) -> Result<(), Errno> {
-        owned_window(&self.windows, caller, window_id)?;
-        host.drag_withdrawn(caller, window_id);
+        host.app_bar_declared(caller, bar)?;
+        self.app_bars.insert(caller, bar.event_endpoint);
         Ok(())
     }
 
@@ -998,6 +947,37 @@ impl<M: ShmMapper> WindowServer<M> {
             self.windows.remove(&id);
             host.window_closed(id);
         }
+        if self.app_bars.remove(&client).is_some() {
+            host.app_bar_withdrawn(client);
+        }
+    }
+
+    /// Route one application-scoped event — an icon-bar click or menu
+    /// outcome — to the application that declared the bar presence it
+    /// belongs to.
+    ///
+    /// The destination comes from the declaration the engine recorded, not
+    /// from the event, so the session cannot address a bar event to a
+    /// process that never asked to be on the bar.
+    ///
+    /// # Errors
+    ///
+    /// * [`Errno::OutOfRange`] — `event` is window-scoped; those go
+    ///   through [`Self::deliver_event`].
+    /// * [`Errno::NotFound`] — `app` declared no icon-bar presence (it
+    ///   never did, or it has exited); the session drops the event.
+    /// * Any [`Errno`] the sink surfaces.
+    pub fn deliver_app_event(
+        &mut self,
+        sink: &mut dyn EventSink,
+        app: ProcId,
+        event: &WindowEvent,
+    ) -> Result<(), Errno> {
+        if event.window_id().is_some() {
+            return Err(Errno::OutOfRange);
+        }
+        let endpoint = *self.app_bars.get(&app).ok_or(Errno::NotFound)?;
+        sink.deliver(endpoint, event)
     }
 
     /// Route one event to the owning app of the window it addresses:
@@ -1016,8 +996,9 @@ impl<M: ShmMapper> WindowServer<M> {
     /// * [`Errno::NotFound`] — no such window (it was closed, or never
     ///   existed); the session drops the event.
     /// * [`Errno::OutOfRange`] — a pointer event outside the window's
-    ///   surface, or a pick conclusion with no pick pending (a routing
-    ///   bug, refused rather than delivered).
+    ///   surface, a pick conclusion with no pick pending (a routing bug,
+    ///   refused rather than delivered), or an application-scoped event
+    ///   (those go through [`Self::deliver_app_event`]).
     /// * Any [`Errno`] the sink surfaces; a refused delivery leaves a
     ///   pending pick pending (the session decides whether to retry or
     ///   tear the client down). A sink that *accepts* the conclusion is
@@ -1029,7 +1010,7 @@ impl<M: ShmMapper> WindowServer<M> {
     ) -> Result<(), Errno> {
         let record = self
             .windows
-            .get_mut(&event.window_id())
+            .get_mut(&event.window_id().ok_or(Errno::OutOfRange)?)
             .ok_or(Errno::NotFound)?;
         if let WindowEvent::Pointer { x, y, .. } = *event {
             if x >= record.surface.width_px || y >= record.surface.height_px {

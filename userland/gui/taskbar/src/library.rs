@@ -35,20 +35,6 @@
 //!   launches the first match; `Escape` clears a non-empty search, and
 //!   dismisses the popup once the search is empty.
 //!
-//! # Dragging a program out to pin it
-//!
-//! The popup is the desktop's pin drag source (`plans/NEW-TASKBAR.md` T7).
-//! A primary press on an entry row arms the shared [`BundleDrag`] detector
-//! rather than launching at once; motion beyond the shared threshold offers
-//! that row's application, and the release that ends the gesture is the
-//! drop. A press-and-release that never travelled is an ordinary click and
-//! launches, so the gesture costs the click nothing.
-//!
-//! Every row is a *catalogued entry* by construction, so the offer names an
-//! [`EntryId`] and the pin store records that identity directly — no path is
-//! guessed and nothing the catalog cannot vouch for can be pinned. Folder
-//! headers arm nothing: they still toggle on the press.
-//!
 //! Everything fails closed: a press on no row changes nothing, a launch is
 //! only ever reported for a row that exists, an offer whose row has gone is
 //! abandoned rather than guessed at, and degenerate geometry (a screen too
@@ -58,7 +44,6 @@
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use tairix_browse::BundleDrag;
 use tairix_controls::{
     ControlRole, ControlState, FocusState, ListRow, Panel, PointerState, ScrollBar, ScrollModel,
     ScrollOrientation, ScrollRange, SearchField, TextAction,
@@ -170,15 +155,6 @@ pub(crate) enum PopupOutcome {
     Changed,
     /// The user chose the entry with this identifier; the popup has closed.
     Launch(EntryId),
-    /// A pressed entry row has travelled beyond the shared drag threshold:
-    /// the user is dragging this application out of the popup to pin it.
-    DragOffered(EntryId),
-    /// The pressed pointer was released while a drag was offered. Where it
-    /// landed decides whether anything is pinned; the gesture is over either
-    /// way.
-    DragDropped,
-    /// `Escape` abandoned an offered drag. The popup stays open.
-    DragWithdrawn,
     /// The user dismissed the popup (click-away or `Escape`); it has closed.
     Dismiss,
 }
@@ -236,10 +212,6 @@ pub struct LibraryPopup {
     collapsed: Vec<LibraryCategory>,
     search: SearchField,
     scroll: ScrollBar,
-    /// The shared drag detector deciding when a pressed entry row's motion
-    /// has become a drag — the same rule the file manager uses, so the two
-    /// can never disagree about what a gesture means.
-    drag: BundleDrag,
     /// The entry row a primary press landed on, remembered so a release over
     /// the same row is a plain click that launches it.
     pressed: Option<usize>,
@@ -273,7 +245,6 @@ impl LibraryPopup {
                 ScrollOrientation::Vertical,
                 ScrollModel::new(ScrollRange::EMPTY, 1, 1),
             ),
-            drag: BundleDrag::new(),
             pressed: None,
             rows: Vec::new(),
             row_artwork: Vec::new(),
@@ -612,20 +583,12 @@ impl LibraryPopup {
                     self.hover = hover;
                     changed = true;
                 }
-                if let Some(row) = self.drag.motion(point) {
-                    match self.entry_at(row) {
-                        Some(entry) => return PopupOutcome::DragOffered(entry),
-                        // The rows changed under the gesture, so there is
-                        // nothing to offer and no offer to withdraw later.
-                        None => self.drag.offer_failed(),
-                    }
-                }
                 changed_outcome(changed)
             }
             InputEvent::PointerPressed {
                 button: PointerButton::Primary,
             } => {
-                self.disarm_drag();
+                self.pressed = None;
                 if layout.search.contains(point) {
                     self.focus_search();
                     return PopupOutcome::Changed;
@@ -637,14 +600,13 @@ impl LibraryPopup {
                     return changed_outcome(changed);
                 }
                 if let Some(index) = layout.row_at(point) {
-                    // A folder header has nothing to drag, so it acts at
-                    // once; an entry row arms instead, and launches on the
-                    // release that ends the press as an ordinary click.
+                    // A folder header toggles on the press; an entry row
+                    // launches on the release that ends the press, so a
+                    // press-and-move-away never launches the wrong thing.
                     if self.entry_at(index).is_none() {
                         return self.activate(index, layout.visible_rows);
                     }
                     self.pressed = Some(index);
-                    self.drag.press(index, true, point);
                     self.current = Some(index);
                     self.focus = LibraryFocus::Rows;
                     return PopupOutcome::Changed;
@@ -668,13 +630,11 @@ impl LibraryPopup {
             InputEvent::PointerReleased {
                 button: PointerButton::Primary,
             } => {
-                let offered = self.drag.is_offered();
-                let pressed = self.pressed.take();
-                self.drag.release();
-                if offered {
-                    return PopupOutcome::DragDropped;
-                }
-                match pressed.filter(|&row| layout.row_at(point) == Some(row)) {
+                match self
+                    .pressed
+                    .take()
+                    .filter(|&row| layout.row_at(point) == Some(row))
+                {
                     Some(row) => self.activate(row, layout.visible_rows),
                     None => changed_outcome(changed),
                 }
@@ -708,12 +668,6 @@ impl LibraryPopup {
         damage: &mut Region,
     ) -> PopupOutcome {
         self.sync_scroll(layout);
-        // Escape abandons an offered drag before it means anything else, so
-        // the user can back out of a drag without losing the popup as well.
-        if key == Key::Named(NamedKey::Escape) && self.drag.cancel() {
-            self.pressed = None;
-            return PopupOutcome::DragWithdrawn;
-        }
         if key == Key::Named(NamedKey::Tab) {
             return self.toggle_focus(layout.visible_rows);
         }
@@ -817,13 +771,6 @@ impl LibraryPopup {
             LibraryRow::Entry { id, .. } => Some(id.clone()),
             LibraryRow::Folder { .. } => None,
         }
-    }
-
-    /// End any gesture a previous press left behind, so a fresh press never
-    /// inherits a stale arming.
-    fn disarm_drag(&mut self) {
-        self.pressed = None;
-        self.drag.release();
     }
 
     /// Activate the row at `index`: toggle a folder, launch an entry.
@@ -1051,13 +998,12 @@ impl LibraryPopup {
         // window between here and the next resolution never blanks.
         self.row_artwork.clear();
         self.row_artwork.resize_with(self.rows.len(), || None);
-        // An armed press is keyed to the old indices too, so it cannot be
-        // allowed to launch or offer whatever now sits at that position. Both
-        // halves of the gesture go: the pressed row *and* the drag detector
-        // that still holds it, or a rebuild reachable with the button held
-        // (typing into the filter, folding a folder) would let the next
-        // motion offer a different program than the one pressed.
-        self.disarm_drag();
+        // A remembered press is keyed to the old indices too, so it cannot be
+        // allowed to launch whatever now sits at that position: a rebuild
+        // reachable with the button held (typing into the filter, folding a
+        // folder) would otherwise launch a different program than the one
+        // pressed.
+        self.pressed = None;
     }
 
     /// The index of the first visible row for a viewport of `visible` rows.

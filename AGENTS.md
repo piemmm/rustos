@@ -611,7 +611,6 @@ tairix/
 │   ├── svg/             # Shared fail-closed no_std SVG decoder.
 │   ├── sync/            # Synchronisation primitives (locks, epoch, Once).
 │   ├── sysconfig/       # Boot-time system-configuration store engine.
-│   ├── taskpins/        # Per-user taskbar pinned-shortcut store engine.
 │   ├── termcap/         # Compiled-in TERM->capability database.
 │   ├── theme/           # Shared desktop theme definition (dark/light).
 │   ├── tty/             # Shared tty line discipline (echo/ONLCR/^C).
@@ -639,7 +638,7 @@ tairix/
 │   │   └── shell/       # Default POSIX-ish shell with job control.
 │   ├── gui/             # Graphical desktop components.
 │   │   ├── wm/          # Compositing window manager.
-│   │   ├── taskbar/     # Traditional desktop taskbar (GNOME/Windows-style).
+│   │   ├── taskbar/     # Desktop icon bar: launchers + per-application slots.
 │   │   ├── session/     # Desktop session glue (theme + taskbar model).
 │   │   └── switchboard/ # System-overview monitor service (tray feed).
 │   ├── net/             # Userland networking services.
@@ -1384,7 +1383,7 @@ You are not exempt from any rule above. In addition:
     | The graphical file manager (`files.app`): clickable icons, open/launch, rename, move/copy/delete, properties | `plans/NEW-FILEMANAGER.md` |
     | Desktop responsiveness: non-blocking app launch (no UI freeze while an app loads), asynchronous process launch | `plans/FIX-DESKTOP.md` |
     | The desktop pinboard: the wallpaper (default set, fit modes, sandboxed decode, per-user settings store), the `Desktop` folder's icon arrangement and sort order, the backdrop context menu, and the wallpaper chooser app | `plans/PINBOARD.md` |
-    | The taskbar / icon bar: the program-library launcher + folder catalog, the file-manager icon, user-pinned app shortcuts (pin/drag), the notification area, and the always-rightmost Switchboard system-overview icon | `plans/NEW-TASKBAR.md` |
+    | The taskbar / icon bar: the program-library launcher + folder catalog, the file-manager icon, the per-application slot strip with its app-declared menu and hover window picker, the notification area, and the always-rightmost Switchboard system-overview icon | `plans/NEW-TASKBAR.md` |
     | The Switchboard window: its sections, chrome, the controls it composes, and which readings are real measurements versus awaiting an interface | `plans/NEW-SWITCHBOARD.md` |
     | Service manager: service lifecycle/readiness, discovery vs registration vs on-demand endpoint activation, system- vs user-scope managers, idle linger, stop/shutdown ordering, restart policy | `plans/NEW-SERVICEMANAGER.md` |
     | The shell (`elsh`) | `plans/SHELL.md` |

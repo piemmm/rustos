@@ -279,6 +279,26 @@ impl Surface {
         })
     }
 
+    /// The surface as straight-alpha RGBA8 bytes in row-major order — the
+    /// exact inverse of [`from_rgba8`](Self::from_rgba8).
+    ///
+    /// Straight alpha, because that is the interchange form: it is what an
+    /// image decoder produces and what [`resample`](crate::resample()) filters,
+    /// so a surface that has to be scaled (a window's frame down to a picker
+    /// thumbnail) comes back through this one conversion rather than a
+    /// caller's own colour algebra. The un-premultiply is the crate's single
+    /// [`Pixel::unpremultiply`] path, which returns an opaque pixel
+    /// channel-for-channel, so an opaque surface converts as a plain copy.
+    #[must_use]
+    pub fn to_rgba8(&self) -> Vec<u8> {
+        let mut out = Vec::with_capacity(self.pixels.len() * 4);
+        for pixel in &self.pixels {
+            let color = pixel.unpremultiply();
+            out.extend_from_slice(&[color.r, color.g, color.b, color.a]);
+        }
+        out
+    }
+
     /// Surface width in pixels.
     #[must_use]
     pub const fn width(&self) -> u32 {

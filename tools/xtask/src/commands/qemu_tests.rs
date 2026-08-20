@@ -654,6 +654,27 @@ const AUTOLOAD_LOGIN_DIALOGUE: &str = "root\nroot\ndesktop\n";
 /// fallback colour.
 const AUTOLOAD_DESKTOP_REVEALED_MARKER: &str = tairix_desktop_session::DESKTOP_REVEALED_MESSAGE;
 
+/// Serial marker after which the icon-bar vertical reads the screen and
+/// injects its next gesture: the session's per-window `WINDOW_SHOWN` log
+/// record — the witness that a frame carrying that served window's first
+/// painted pixels reached the display. Imported from the session crate's own
+/// definition, so the emitter and this consumer can never drift.
+///
+/// It is the only honest gate for both. A create reply says the window
+/// *exists*, not that anything has been drawn into it — its body is still the
+/// session's own opening fill — so a dump taken there races the application's
+/// first paint, and a click sent there races the session's own re-resolution
+/// of the bar. Nothing on the window channel distinguishes a present from any
+/// other request either: a present, a backdrop-blur change, a retitle and an
+/// icon-bar declaration all answer with the same four-byte status reply. Only
+/// the session can say a window is visible, so it does.
+///
+/// The vertical counts occurrences of it, which is attributable here because
+/// the launched application is the only client that opens a window: the
+/// desktop's own surfaces are session-painted compositor windows and never
+/// call the window channel.
+const APPBAR_WINDOW_SHOWN_MARKER: &str = tairix_desktop_session::WINDOW_SHOWN_MESSAGE;
+
 /// `true` if `text` begins with `prefix`.
 const fn starts_with_bytes(text: &[u8], prefix: &[u8]) -> bool {
     if text.len() < prefix.len() {
@@ -5556,10 +5577,10 @@ static TESTS: &[QemuTest] = &[
         pointer_script: Some(autoload_desktop_pointer_script),
         serial: &[],
     },
-    // `plans/NEW-TASKBAR.md` T15: the taskbar **pin + Switchboard**
-    // vertical. A deliberately short, dedicated sibling of the autoload
-    // desktop vertical above rather than a fifth stage on it, so a gate
-    // mis-count in one choreography cannot wedge the other
+    // `plans/NEW-TASKBAR.md`: the desktop **icon-bar** vertical. A
+    // deliberately short, dedicated sibling of the autoload desktop vertical
+    // above rather than a further stage on it, so a gate mis-count in one
+    // choreography cannot wedge the other
     // (`plans/OPEN-DEFECTS.md` D19/D20).
     //
     // It boots the same graphical world — the `FsDisk::AutoloadRootDisk`
@@ -5567,20 +5588,24 @@ static TESTS: &[QemuTest] = &[
     // virtio-input and framebuffer driver bundles, the complete app +
     // service store, and the seeded program-library catalog — types the
     // unlock passphrase, logs in, and starts `desktop`. The pointer script
-    // then does what no host test can: opens the program library,
-    // right-clicks an entry to raise its context menu, chooses *Pin to
-    // taskbar*, dismisses the popup, opens the Switchboard from its
-    // trailing capsule, and clicks the pin that gesture created.
+    // then does what no host test can: opens the program library, launches
+    // the terminal from its row, right-clicks the slot the session gave that
+    // process on the bar, chooses the *New window* row of the menu the
+    // application itself declared, and finally primary-clicks that same slot
+    // to take the default action the declaration claimed.
     //
-    // PASS needs all three of the guest's witnesses: the audited `mkdir`
-    // that brings the per-user pin store's directory into existence on the
-    // volume, the reserved window endpoint serving the Switchboard panel's
-    // create *and* first present, and an `APP_LOADED` naming the pinned
-    // bundle — an application no other stage of any vertical launches, so
-    // the load can only be the pin's. Two dumps read the bar itself: the
-    // first proves the pin slot is bare before anything is pinned, the
-    // second that it carries the pin's glyph with the Switchboard panel
-    // beside it.
+    // PASS needs both of the guest's witnesses: an `APP_LOADED` naming the
+    // terminal's bundle, and three window creates served on the reserved
+    // endpoint. The desktop's own surfaces are session-painted compositor
+    // windows and never call the window channel, so the two creates after
+    // the launch can only be the chosen row and the declared default action
+    // reaching the application. Three dumps read the screen — the bar before
+    // anything runs, the bar and window once the application is up, and both
+    // windows with the application still holding exactly one slot — each
+    // gated on the session's own witness that the frame is on screen, and
+    // each verified before the runner sends the gesture that follows it. The
+    // last window is opened by the last gesture, so the guest cannot exit
+    // before the final dump is safely read back.
     //
     // Single CPU (PID 1, the unlock kthread, the autoloaded drivers, the
     // session, and its children share the boot CPU). The 300-second budget
@@ -5588,8 +5613,8 @@ static TESTS: &[QemuTest] = &[
     // the longest the guest may fall silent, never a runtime deadline, so
     // co-scheduling cannot turn a merely slow guest into a timeout.
     QemuTest {
-        package: "tairix-test-taskbar-pin-qemu-aarch64",
-        binary: "tairix-test-taskbar-pin-qemu-aarch64",
+        package: "tairix-test-appbar-qemu-aarch64",
+        binary: "tairix-test-appbar-qemu-aarch64",
         target: "aarch64-unknown-none",
         cpus: 1,
         timeout: Duration::from_secs(300),
@@ -5615,17 +5640,23 @@ static TESTS: &[QemuTest] = &[
             ScreendumpPlan {
                 marker: AUTOLOAD_DESKTOP_REVEALED_MARKER,
                 occurrences: 1,
-                suffix: TASKBAR_BARE_BAR_DUMP,
+                suffix: APPBAR_BARE_BAR_DUMP,
                 assert: assert_bare_bar_dark_screendump,
             },
             ScreendumpPlan {
-                marker: tairix_test_taskbar_pin_qemu_aarch64::SWITCHBOARD_PANEL_MARKER,
+                marker: APPBAR_WINDOW_SHOWN_MARKER,
                 occurrences: 1,
-                suffix: TASKBAR_PINNED_BAR_DUMP,
-                assert: assert_pinned_bar_dark_screendump,
+                suffix: APPBAR_ONE_WINDOW_DUMP,
+                assert: assert_one_window_dark_screendump,
+            },
+            ScreendumpPlan {
+                marker: APPBAR_WINDOW_SHOWN_MARKER,
+                occurrences: 2,
+                suffix: APPBAR_TWO_WINDOWS_DUMP,
+                assert: assert_two_windows_dark_screendump,
             },
         ],
-        pointer_script: Some(taskbar_pin_pointer_script),
+        pointer_script: Some(appbar_pointer_script),
         serial: &[],
     },
     // `plans/NEW-DESKTOP-LOGIN.md` G7.1: a display-capable machine that
@@ -7542,28 +7573,45 @@ fn rect_centre(rect: tairix_geometry::Rect, what: &str) -> Result<tairix_geometr
     ))
 }
 
-/// The smallest share of the bar's first pin slot a drawn pin must cover:
-/// a resting pin whose application is not running draws no plate at all,
-/// only its centred class glyph on the bar's own fill, and that glyph is a
-/// shape rather than a filled box. Well under what a glyph covers, and far
-/// above the nothing an empty slot covers.
-const MIN_PIN_GLYPH_SHARE: f64 = 0.05;
+/// The smallest share of the bar's first application slot a drawn slot must
+/// cover: a resting slot draws no plate at all, only its centred class glyph
+/// on the bar's own fill, and that glyph is a shape rather than a filled box.
+/// Well under what a glyph covers, and far above the nothing an empty slot
+/// covers.
+const MIN_APP_GLYPH_SHARE: f64 = 0.05;
 
-/// The taskbar-pin vertical's two screendump names. The pinned frame is read
-/// against the bare one, so the pair is named here rather than only in the
-/// plan that schedules them.
-const TASKBAR_BARE_BAR_DUMP: &str = "bare-bar";
-const TASKBAR_PINNED_BAR_DUMP: &str = "pinned-bar";
+/// The most of an *unoccupied* application slot that may differ from the same
+/// slot before anything was running.
+///
+/// Zero: the bar is translucent chrome over a blurred backdrop, so an empty
+/// slot's pixels are a function of the wallpaper and of whatever is behind
+/// the bar — and the vertical's windows cascade from the top left and never
+/// reach it. Nothing else moves there, so reading the same empty slot in two
+/// frames of one run gives the same bytes, and any difference at all is a
+/// slot the bar drew.
+const MAX_BARE_APP_SLOT_SHARE: f64 = 0.0;
 
-/// The screen rectangle of the bar's first pin slot, reconstructed through
-/// the production taskbar's own layout code with a single pin in the strip
-/// — exactly the state the session leaves the bar in once a pin is
-/// persisted and re-resolved. The view carries the shared class glyph the
-/// session seeds every pin with; only the strip's *length* reaches the
-/// layout, so a bare view places the slot identically to a fully resolved
-/// one.
-fn taskbar_pin_slot_rect(theme: &tairix_theme::Theme) -> Result<tairix_geometry::Rect, String> {
-    use tairix_taskbar::{PinView, Taskbar, TaskbarConfig};
+/// The icon-bar vertical's screendump names. The frames carrying the running
+/// application are read against the bare one, so the set is named here rather
+/// than only in the plan that schedules them.
+const APPBAR_BARE_BAR_DUMP: &str = "bare-bar";
+const APPBAR_ONE_WINDOW_DUMP: &str = "one-window";
+const APPBAR_TWO_WINDOWS_DUMP: &str = "two-windows";
+
+/// The screen rectangle of the bar's application slot at `index`,
+/// reconstructed through the production taskbar's own layout code.
+///
+/// The strip is laid out from its leading edge, one `app_extent` per slot, so
+/// a slot's rectangle depends only on its index — which is what lets the same
+/// helper name both the slot the running application occupies and the one
+/// beside it, where a second slot *would* be drawn if the bar wrongly showed
+/// windows rather than applications. Only the strip's *length* reaches the
+/// layout, so a bare slot places identically to a fully resolved one.
+fn appbar_slot_rect(
+    theme: &tairix_theme::Theme,
+    index: usize,
+) -> Result<tairix_geometry::Rect, String> {
+    use tairix_taskbar::{AppSlot, Taskbar, TaskbarConfig};
     let mut taskbar = Taskbar::new(
         TaskbarConfig::bottom_bar(
             tairix_fwcfg::RAMFB_CONSOLE_WIDTH_PX,
@@ -7571,33 +7619,37 @@ fn taskbar_pin_slot_rect(theme: &tairix_theme::Theme) -> Result<tairix_geometry:
         ),
         theme,
     );
-    taskbar.set_pins(vec![PinView::new(
-        tairix_test_taskbar_pin_qemu_aarch64::PIN_APP_NAME,
-        tairix_icon::IconKind::AppBundle,
-    )]);
+    taskbar.set_apps(
+        (0..=index)
+            .map(|_| {
+                AppSlot::new(
+                    tairix_test_appbar_qemu_aarch64::BAR_APP_NAME,
+                    tairix_icon::IconKind::AppBundle,
+                )
+            })
+            .collect(),
+    );
     taskbar
         .layout(tairix_geometry::Scale::ONE)
-        .pins
-        .first()
+        .apps
+        .get(index)
         .copied()
-        .ok_or_else(|| "taskbar pin script: the bar reserves no first pin slot".to_string())
+        .ok_or_else(|| format!("icon-bar script: the bar reserves no application slot {index}"))
 }
 
-/// The share of the bar's first pin slot whose pixels differ from the same
-/// slot in `bare` — the fraction a drawn pin's glyph covers.
+/// The share of the bar's application slot `index` whose pixels differ from
+/// the same slot in `bare` — the fraction a drawn slot's glyph covers, and
+/// for an unoccupied slot the noise floor of reading the same bar twice.
 ///
 /// The bar is floating chrome: a translucent fill over a backdrop the
 /// compositor blurs, so an empty slot has no single expected colour to test
 /// against. What it does have is the pixels that very slot showed earlier in
-/// the same run, before anything was pinned. Reading one screen position
+/// the same run, before anything was running. Reading one screen position
 /// across the two frames holds the wallpaper, the blur, and the bar's own
-/// fill fixed, so what is left is the pin — a direct measure of what the
-/// script's gesture drew, rather than of a colour the bar no longer has.
-///
-/// Nothing else disturbs the slot between the dumps: the script's last
-/// gesture leaves the pointer on the trailing Switchboard capsule, so the
-/// leading pin slot carries no hover of its own.
-fn pin_slot_glyph_share(
+/// fill fixed, so what is left is the application — a direct measure of what
+/// the script's gesture put there, rather than of a colour the bar no longer
+/// has.
+fn app_slot_glyph_share(
     t: &QemuTest,
     path: &Path,
     frames: (
@@ -7605,9 +7657,10 @@ fn pin_slot_glyph_share(
         &tairix_qemu::screendump::Image,
     ),
     theme: &tairix_theme::Theme,
+    index: usize,
 ) -> Result<f64, String> {
     let (image, bare) = frames;
-    let slot = taskbar_pin_slot_rect(theme)?;
+    let slot = appbar_slot_rect(theme, index)?;
     #[allow(clippy::cast_sign_loss)] // The bar's slots are at positive screen offsets.
     let (left, top) = (slot.left() as u32, slot.top() as u32);
     let mut total = 0u64;
@@ -7617,7 +7670,8 @@ fn pin_slot_glyph_share(
             let read = |from: &tairix_qemu::screendump::Image| {
                 from.pixel(x, y).map_err(|e| {
                     format!(
-                        "test --qemu ({}): screendump {} lacks the bar's first pin slot: {e}",
+                        "test --qemu ({}): screendump {} lacks the bar's first application slot: \
+                         {e}",
                         t.package,
                         path.display(),
                     )
@@ -7639,10 +7693,10 @@ fn pin_slot_glyph_share(
 
 /// The bare-bar dump taken earlier in the same run, beside `path`.
 ///
-/// The runner names a dump after the plan entry that scheduled it, so the
-/// pinned frame's own path names its baseline; a `path` that is not the
-/// pinned dump is a wiring mistake and fails closed rather than reading some
-/// other frame.
+/// The runner names a dump after the plan entry that scheduled it, so a
+/// running-application frame's own path names its baseline; a `path` that is
+/// not one of those frames is a wiring mistake and fails closed rather than
+/// reading some other frame.
 fn bare_bar_dump_path(t: &QemuTest, path: &Path) -> Result<PathBuf, String> {
     let name = path.file_name().and_then(|n| n.to_str()).ok_or_else(|| {
         format!(
@@ -7651,14 +7705,19 @@ fn bare_bar_dump_path(t: &QemuTest, path: &Path) -> Result<PathBuf, String> {
             path.display(),
         )
     })?;
-    let bare = name.replace(
-        &format!(".{TASKBAR_PINNED_BAR_DUMP}."),
-        &format!(".{TASKBAR_BARE_BAR_DUMP}."),
-    );
+    let bare = name
+        .replace(
+            &format!(".{APPBAR_ONE_WINDOW_DUMP}."),
+            &format!(".{APPBAR_BARE_BAR_DUMP}."),
+        )
+        .replace(
+            &format!(".{APPBAR_TWO_WINDOWS_DUMP}."),
+            &format!(".{APPBAR_BARE_BAR_DUMP}."),
+        );
     if bare == name {
         return Err(format!(
-            "test --qemu ({}): screendump {} is not the pinned-bar dump, so the bare-bar \
-             frame it is read against cannot be named",
+            "test --qemu ({}): screendump {} is not one of the running-application dumps, \
+             so the bare-bar frame it is read against cannot be named",
             t.package,
             path.display(),
         ));
@@ -7666,212 +7725,112 @@ fn bare_bar_dump_path(t: &QemuTest, path: &Path) -> Result<PathBuf, String> {
     Ok(path.with_file_name(bare))
 }
 
-/// [`ScreendumpPlan`] assertion for the taskbar-pin vertical's **first**
-/// dump, taken on the first fully-revealed desktop frame: the dark-theme
-/// session has composited its own wallpaper, and the bar carries nothing the
-/// script has pinned yet.
+/// [`ScreendumpPlan`] assertion for the icon-bar vertical's **first** dump,
+/// taken on the first fully-revealed desktop frame: the dark-theme session
+/// has composited its own wallpaper, and the bar carries no application the
+/// script has launched yet.
 ///
-/// This frame is also the baseline the second dump is read against
-/// ([`pin_slot_glyph_share`]), which is what turns "a glyph is in the slot"
-/// into "this run's gesture drew it there": the two frames are the same
-/// screen, so a pin slot that differs between them differs *because of the
-/// pinning*.
+/// This frame is also the baseline the later dumps are read against
+/// ([`app_slot_glyph_share`]), which is what turns "a glyph is in the slot"
+/// into "this run's gesture put it there": the frames are the same screen, so
+/// an application slot that differs between them differs *because of the
+/// launch*.
 fn assert_bare_bar_dark_screendump(t: &QemuTest, path: &Path) -> Result<(), String> {
     let theme = tairix_theme::Theme::dark();
     let image = read_screendump(t, path)?;
     assert_desktop_wallpaper(t, path, &image, &theme, &[])
 }
 
-/// [`ScreendumpPlan`] assertion for the taskbar-pin vertical's **second**
-/// dump, taken once the Switchboard panel has been created and painted:
-/// the bar's first pin slot now carries the pinned application's glyph,
-/// the panel covers its own cascade slot, and the composited desktop is
-/// still behind them. One frame, three facts: the pin the script created
-/// is on the bar the user sees, and the Switchboard the capsule opened is
-/// on the screen with it.
+/// [`ScreendumpPlan`] assertion for the icon-bar vertical's **second** dump,
+/// taken once the launched application's first window has been created and
+/// painted: the bar's first application slot now carries that application's
+/// glyph, its window covers the first cascade slot, and the composited
+/// desktop is still behind them.
 ///
 /// Unlike the first dump this one deliberately does **not** sample the
-/// wallpaper across the whole frame: the panel covers most of this output,
-/// and the pin the script just clicked leaves the pointer on the bar. The
-/// desktop's presence is measured where it is genuinely expected instead —
-/// exactly, over the bare column beside the panel.
-fn assert_pinned_bar_dark_screendump(t: &QemuTest, path: &Path) -> Result<(), String> {
+/// wallpaper across the whole frame: the window covers a large part of this
+/// output. The desktop's presence is measured where it is genuinely expected
+/// instead — exactly, over the bare column beside the window.
+fn assert_one_window_dark_screendump(t: &QemuTest, path: &Path) -> Result<(), String> {
     let theme = tairix_theme::Theme::dark();
     let image = read_screendump(t, path)?;
     let bare = read_screendump(t, &bare_bar_dump_path(t, path)?)?;
-    let share = pin_slot_glyph_share(t, path, (&image, &bare), &theme)?;
-    if share < MIN_PIN_GLYPH_SHARE {
-        return Err(format!(
-            "test --qemu ({}): screendump {} shows no pin in the bar's first slot: only \
-             {share:.3} of the slot differs from the same slot before anything was pinned \
-             (expected >= {MIN_PIN_GLYPH_SHARE})",
-            t.package,
-            path.display(),
-        ));
-    }
-    let panel = served_window_layout(
-        0,
-        tairix_switchboard::WIN_WIDTH,
-        tairix_switchboard::WIN_HEIGHT,
-        tairix_switchboard::WIN_RESIZABLE,
-        &theme,
-    )
-    .outer;
-    assert_window_region_covered(t, path, &image, panel, "Switchboard")?;
-    assert_desktop_beside_window(
-        t,
-        path,
-        &image,
-        &theme,
-        panel,
-        &[tray_readout_band(&theme)?],
-    )
+    assert_app_slot_drawn(t, path, (&image, &bare), &theme)?;
+    assert_no_second_app_slot(t, path, (&image, &bare), &theme)?;
+    assert_cascade_slot_covered(t, path, &image, &theme, 0)
 }
 
-/// The band the taskbar's Switchboard readout opens into: the rows between
-/// the top of that popover and the bar it grows out of, across the screen.
+/// [`ScreendumpPlan`] assertion for the icon-bar vertical's **third** dump,
+/// taken once the chosen *New window* row has opened a second window: both
+/// cascade slots are covered, and the one application still holds exactly one
+/// slot on the bar.
 ///
-/// The vertical's script clicks the tray capsule to open the Switchboard, so
-/// the readout stands open beside the served panel while the pointer rests
-/// on the capsule — composited desktop, not wallpaper. Its *height* is fixed
-/// by its shape (a state line, a value line, and the primary action), so the
-/// production layout reproduces it exactly here; its *width* follows the
-/// live figure it shows, which no host reconstruction can know. The band is
-/// therefore the rows the popover occupies at the full width: an assertion
-/// gives up those rows and no other pixel of the frame.
-fn tray_readout_band(theme: &tairix_theme::Theme) -> Result<tairix_geometry::Rect, String> {
-    use tairix_abi::switchboard_ipc::{TrayPermille, TraySummary};
-    use tairix_input::{InputEvent, PointerButton};
-    use tairix_taskbar::{Taskbar, TaskbarConfig, TaskbarInput};
-
-    let scale = tairix_geometry::Scale::ONE;
-    let width = tairix_fwcfg::RAMFB_CONSOLE_WIDTH_PX;
-    let mut taskbar = Taskbar::new(
-        TaskbarConfig::bottom_bar(width, tairix_fwcfg::RAMFB_CONSOLE_HEIGHT_PX),
-        theme,
-    );
-    // The shape a running Switchboard publishes: a measured CPU figure and
-    // no pressure, which is the readout the guest shows.
-    let cpu_busy_permille = TrayPermille::new(500)
-        .map_err(|e| format!("taskbar reconstruction: tray CPU figure refused: {e:?}"))?;
-    taskbar.set_tray_summary(Some(TraySummary {
-        jobs: 0,
-        recovery: 0,
-        cpu_busy_permille,
-        pressure: None,
-        top_task: None,
-        power_capable: false,
-    }));
-    let capsule = rect_centre(taskbar.layout(scale).switchboard, "Switchboard capsule")?;
-    let mut router = TaskbarInput::new();
-    for event in [
-        InputEvent::PointerMoved { to: capsule },
-        InputEvent::PointerPressed {
-            button: PointerButton::Primary,
-        },
-        InputEvent::PointerReleased {
-            button: PointerButton::Primary,
-        },
-    ] {
-        router.handle(event, &mut taskbar, scale, 0);
+/// That last fact is the point of the frame: the bar shows *applications*, so
+/// a second window of one application must not put a second slot beside it.
+fn assert_two_windows_dark_screendump(t: &QemuTest, path: &Path) -> Result<(), String> {
+    let theme = tairix_theme::Theme::dark();
+    let image = read_screendump(t, path)?;
+    let bare = read_screendump(t, &bare_bar_dump_path(t, path)?)?;
+    assert_app_slot_drawn(t, path, (&image, &bare), &theme)?;
+    assert_no_second_app_slot(t, path, (&image, &bare), &theme)?;
+    for slot in 0..2 {
+        assert_cascade_slot_covered(t, path, &image, &theme, slot)?;
     }
-    let panel = taskbar
-        .tray_readout_layout(scale)
-        .ok_or_else(|| {
-            "taskbar reconstruction: the capsule click left the tray readout collapsed".to_string()
-        })?
-        .panel;
-    Ok(tairix_geometry::Rect::new(
-        0,
-        panel.top(),
-        width,
-        panel.height,
-    ))
+    Ok(())
 }
 
-/// The column between `window`'s right edge and the screen's is bare
-/// composited desktop — every pixel exactly the wallpaper the desktop's
-/// own pipeline draws there ([`expected_wallpaper`]), save where the
-/// desktop's own chrome covers it ([`desktop_chrome_regions`]: the taskbar,
-/// the icon column, the pointer).
+/// Assert a window body covers the cascade slot `slot` of the decoded
+/// `image`: a probe square just inside that slot's client origin is
+/// overwhelmingly *not* the wallpaper the desktop draws behind it.
 ///
-/// The precise complement of [`assert_window_region_covered`]: together
-/// they say the frame is the desktop with exactly that window on it, with
-/// no tolerance factor invented for either. A window tall enough to reach
-/// the taskbar has that bar drawn beside it, which is the composited
-/// desktop working correctly rather than a wallpaper mismatch — hence the
-/// chrome is skipped from the one definition of where the desktop draws it,
-/// and a floor on the pixels actually compared keeps the assertion from
-/// passing on an empty column. `covered` names any further surface the
-/// script left standing beside the window (see [`tray_readout_band`]).
-fn assert_desktop_beside_window(
+/// A probe rather than the whole window rectangle, because the terminal's
+/// window is whatever its character grid measures in the face the running
+/// font service resolved — a size no host reconstruction can know. The
+/// cascade *origin* and the frame's own insets are the session's and the
+/// window manager's, so the corner the probe reads is exact.
+fn assert_cascade_slot_covered(
     t: &QemuTest,
     path: &Path,
     image: &tairix_qemu::screendump::Image,
     theme: &tairix_theme::Theme,
-    window: tairix_geometry::Rect,
-    covered: &[tairix_geometry::Rect],
+    slot: u64,
 ) -> Result<(), String> {
-    /// A column so nearly covered that fewer pixels remain is not one this
-    /// assertion can judge.
-    const MIN_COMPARED: usize = 1024;
-    let wallpaper = expected_wallpaper()?;
-    let chrome = desktop_chrome_regions(theme, covered);
-    let mut compared = 0usize;
+    /// Side of the probe square, in pixels: comfortably inside the smallest
+    /// window the terminal can open (one character cell plus its furniture).
+    const PROBE_PX: u32 = 24;
+    let aim = served_client_aim(slot, tairix_terminal::WIN_RESIZABLE, theme);
     #[allow(clippy::cast_sign_loss)] // A cascade slot is a positive screen offset.
-    let (left, top, bottom) = (
-        window.right() as u32 + WINDOW_EDGE_CLEARANCE_PX,
-        window.top() as u32,
-        window.bottom() as u32,
-    );
-    if left >= image.width || top >= bottom {
-        return Err(format!(
-            "test --qemu ({}): screendump {} leaves no bare desktop beside the served window",
-            t.package,
-            path.display(),
-        ));
-    }
-    for y in top..bottom {
-        for x in left..image.width {
-            let point = tairix_geometry::Point::new(
-                i32::try_from(x).unwrap_or(i32::MAX),
-                i32::try_from(y).unwrap_or(i32::MAX),
-            );
-            if chrome.iter().any(|rect| rect.contains(point)) {
-                continue;
-            }
+    let probe = tairix_geometry::Rect::new(aim.x, aim.y, PROBE_PX, PROBE_PX);
+    let wallpaper = expected_wallpaper()?;
+    #[allow(clippy::cast_sign_loss)] // A cascade slot is a positive screen offset.
+    let (left, top) = (probe.left() as u32, probe.top() as u32);
+    let mut covered = 0u64;
+    let mut total = 0u64;
+    for y in top..top + probe.height {
+        for x in left..left + probe.width {
             let pixel = image.pixel(x, y).map_err(|e| {
                 format!(
-                    "test --qemu ({}): screendump {} lacks the column beside the served \
-                     window: {e}",
+                    "test --qemu ({}): screendump {} lacks cascade slot {slot}: {e}",
                     t.package,
                     path.display(),
                 )
             })?;
-            let expected = wallpaper.rgb_at(x, y).ok_or_else(|| {
-                format!(
-                    "test --qemu ({}): screendump {}: ({x}, {y}) is outside the recomputed \
-                     wallpaper",
-                    t.package,
-                    path.display(),
-                )
-            })?;
-            if pixel != expected {
-                return Err(format!(
-                    "test --qemu ({}): screendump {} is not the composited desktop beside the \
-                     served window: ({x}, {y}) is {pixel:?}, but the desktop's own wallpaper \
-                     draws {expected:?} there",
-                    t.package,
-                    path.display(),
-                ));
+            total += 1;
+            if Some(pixel) != wallpaper.rgb_at(x, y) {
+                covered += 1;
             }
-            compared += 1;
         }
     }
-    if compared < MIN_COMPARED {
+    #[allow(clippy::cast_precision_loss)] // Probe pixel counts are tiny.
+    let share = if total == 0 {
+        0.0
+    } else {
+        covered as f64 / total as f64
+    };
+    if share < 0.95 {
         return Err(format!(
-            "test --qemu ({}): screendump {} leaves only {compared} comparable desktop pixels \
-             beside the served window (expected >= {MIN_COMPARED})",
+            "test --qemu ({}): screendump {} shows no window over cascade slot {slot}: only \
+             {share:.3} of the probe differs from the wallpaper behind it",
             t.package,
             path.display(),
         ));
@@ -7879,43 +7838,96 @@ fn assert_desktop_beside_window(
     Ok(())
 }
 
-/// Build the T15 taskbar-pin click script: open the program library,
-/// right-click an entry to raise its context menu, choose *Pin to
-/// taskbar*, dismiss the popup, open the Switchboard from its capsule,
-/// and finally click the pin the earlier gesture created — which launches
-/// the pinned application (`plans/NEW-TASKBAR.md` T15).
+/// Assert the bar's first application slot carries a drawn glyph, measured
+/// against the same slot in the bare frame.
+fn assert_app_slot_drawn(
+    t: &QemuTest,
+    path: &Path,
+    frames: (
+        &tairix_qemu::screendump::Image,
+        &tairix_qemu::screendump::Image,
+    ),
+    theme: &tairix_theme::Theme,
+) -> Result<(), String> {
+    let share = app_slot_glyph_share(t, path, frames, theme, 0)?;
+    if share < MIN_APP_GLYPH_SHARE {
+        return Err(format!(
+            "test --qemu ({}): screendump {} shows no application in the bar's first slot: \
+             only {share:.3} of the slot differs from the same slot before anything was \
+             running (expected >= {MIN_APP_GLYPH_SHARE})",
+            t.package,
+            path.display(),
+        ));
+    }
+    Ok(())
+}
+
+/// Assert the bar has drawn **no** second application slot: the strip's next
+/// slot along is exactly as it was before anything was running.
 ///
-/// Every coordinate is computed by driving the **production** taskbar
-/// model with the very events the guest will receive: the popup is opened,
-/// its rows are read from the same catalog the planted store seeds
-/// ([`reconstructed_library`]), the secondary press raises the real
-/// context menu, and the pin row's rectangle comes from the shared
-/// `Menu::row_rect` the guest hit-tests with. Nothing here is a
-/// hand-copied pixel, and nothing assumes a layout the product does not
-/// produce.
+/// This is what "the bar shows applications, not windows" means as a claim
+/// about pixels, and it is the reason the two-window frame is taken at all.
+/// Without it a regression that gave every window its own slot would still
+/// satisfy every other assertion in this vertical, because they all read the
+/// *first* slot.
+fn assert_no_second_app_slot(
+    t: &QemuTest,
+    path: &Path,
+    frames: (
+        &tairix_qemu::screendump::Image,
+        &tairix_qemu::screendump::Image,
+    ),
+    theme: &tairix_theme::Theme,
+) -> Result<(), String> {
+    let share = app_slot_glyph_share(t, path, frames, theme, 1)?;
+    if share > MAX_BARE_APP_SLOT_SHARE {
+        return Err(format!(
+            "test --qemu ({}): screendump {} shows a second application slot on the bar: \
+             {share:.3} of the slot beside the running application differs from the same \
+             slot before anything was running (expected <= {MAX_BARE_APP_SLOT_SHARE}). One \
+             application's windows must share one slot",
+            t.package,
+            path.display(),
+        ));
+    }
+    Ok(())
+}
+
+/// Build the icon-bar vertical's injection script: launch the terminal from
+/// the program library, right-click the slot the session gives its process on
+/// the bar, choose the *New window* row of the menu the application declared,
+/// then primary-click that same slot to take its declared default action.
 ///
-/// # Step gating
+/// Every rectangle is reconstructed by driving the **production** taskbar
+/// model — the same layout, hit-testing, and menu-building code the guest
+/// runs — so the script clicks where the guest actually draws rather than at
+/// coordinates copied from a screenshot. The declared menu itself comes from
+/// the terminal's own `appbar` module, so the row this clicks is named once
+/// rather than restated by position.
 ///
-/// The guest applies injected events strictly in device order and the bar
-/// model updates synchronously on each press, so every step up to and
-/// including the Switchboard capsule keys on the session's
-/// `DESKTOP_REVEALED` witness alone — none of them depends on state an
-/// earlier step created, and the capsule's own rectangle is independent of
-/// the pin strip's length.
+/// Every gate is **causal** rather than timed, and each is the strongest fact
+/// the emitting side can honestly state:
 ///
-/// The final pin click is the one step that does: the slot only exists
-/// once the session has persisted the pin *and* re-resolved its strip. It
-/// therefore waits for the guest's Switchboard-panel marker, which is a
-/// **causal** gate rather than a timed one. Serving a window-endpoint call
-/// is a different wake of the session's serve loop from the input wake
-/// that pinned, and the session re-resolves its pin strip before it parks
-/// at the end of every wake — so the panel cannot be painted until the pin
-/// is live in the bar the guest hit-tests, however heavily the host is
-/// loaded. (The runner additionally holds the click while the second dump
-/// is unread, so that dump captures the bar with the pin and without the
-/// application it launches.)
+/// - The desktop's own reveal witness opens the script, so nothing is
+///   injected before there is a bar to hit.
+/// - The two slot gestures wait on the session's per-window
+///   [`APPBAR_WINDOW_SHOWN_MARKER`]: the *first* occurrence for the
+///   right-click, the *second* for the final primary click. That witness
+///   follows a frame the session actually put on screen, so by then the
+///   application has declared its bar (it declares before it opens a window,
+///   `plans/GUI-TERMINAL.md` §15), the session has grouped that window under
+///   its attested owner, and the strip has been re-resolved and drawn. A
+///   create reply would say only that the window exists.
+/// - The menu row's click follows its right-click immediately — that press is
+///   a synchronous input wake, so the plate is up before the next injected
+///   step is read.
+///
+/// The final primary click is also what keeps the guest alive long enough to
+/// be photographed: it opens the third window, which is the create that
+/// completes the guest's PASS, and the runner sends no pointer step until
+/// every dump already asked for has been read back and parsed.
 #[allow(clippy::too_many_lines)] // One linear, ordered click-through script; splitting it would obscure the staging.
-fn taskbar_pin_pointer_script() -> Result<Vec<tairix_qemu::PointerStep>, String> {
+fn appbar_pointer_script() -> Result<Vec<tairix_qemu::PointerStep>, String> {
     use tairix_abi::seat::SEAT_PRIMARY;
     use tairix_desktop_session::DesktopShell;
     use tairix_geometry::{Point, Scale};
@@ -7923,31 +7935,23 @@ fn taskbar_pin_pointer_script() -> Result<Vec<tairix_qemu::PointerStep>, String>
     use tairix_log::DiscardSink;
     use tairix_qemu::{MouseButton, PointerAction, PointerStep};
     use tairix_reclaim::ReportedPressure;
-    use tairix_taskbar::{LibraryRow, TaskbarConfig, TaskbarInput, MENU_PIN_ROW};
-    use tairix_test_taskbar_pin_qemu_aarch64::{PIN_APP_NAME, SWITCHBOARD_PANEL_MARKER};
-
-    /// How far in from the screen's top-right corner the popup-dismissing
-    /// click lands: clear of the screen edge, on the bare desktop this
-    /// vertical has not put anything on. The point is checked against the
-    /// popup and the bar below rather than assumed clear.
-    const DESKTOP_MARGIN_PX: i32 = 32;
+    use tairix_taskbar::{AppSlot, LibraryRow, TaskbarConfig, TaskbarInput};
+    use tairix_test_appbar_qemu_aarch64::BAR_APP_NAME;
 
     // The shell exists only to reproduce the guest's layout arithmetic and
-    // its input routing, so the script clicks exactly where the guest
-    // draws. It never rasterises anything and owns no display, so it is
-    // wired truthfully rather than plausibly: no display backing (a
-    // zero-sized backing budgets nothing) and a gauge that has never been
-    // told a band (which answers critical, so nothing is admitted).
+    // its input routing, so the script clicks exactly where the guest draws.
+    // It never rasterises anything and owns no display, so it is wired
+    // truthfully rather than plausibly: no display backing (a zero-sized
+    // backing budgets nothing) and a gauge that has never been told a band
+    // (which answers critical, so nothing is admitted).
     static NO_PRESSURE_FEED: ReportedPressure = ReportedPressure::unknown();
     static DISCARD_SINK: DiscardSink = DiscardSink;
 
     let width = tairix_fwcfg::RAMFB_CONSOLE_WIDTH_PX;
     let height = tairix_fwcfg::RAMFB_CONSOLE_HEIGHT_PX;
     let scale = Scale::ONE;
-    // One instant for the whole reconstruction: the model is driven only
-    // for geometry, and no rectangle here depends on how long a press was
-    // held (the capsule's quick-tap/hold split changes which section opens,
-    // never where anything is drawn).
+    // One instant for the whole reconstruction: the model is driven only for
+    // geometry, and no rectangle here depends on how long a press was held.
     let now_ns: u64 = 0;
     let mut shell = DesktopShell::new(
         TaskbarConfig::bottom_bar(width, height),
@@ -7957,8 +7961,8 @@ fn taskbar_pin_pointer_script() -> Result<Vec<tairix_qemu::PointerStep>, String>
         &DISCARD_SINK,
     );
     // The popup lists the same catalog the guest session merges from the
-    // planted machine store, so the reconstructed rows sit exactly where
-    // the guest draws them.
+    // planted machine store, so the reconstructed rows sit exactly where the
+    // guest draws them.
     shell
         .session_mut()
         .taskbar_mut()
@@ -7967,7 +7971,6 @@ fn taskbar_pin_pointer_script() -> Result<Vec<tairix_qemu::PointerStep>, String>
 
     let bar = shell.session().taskbar().layout(scale);
     let library_button = rect_centre(bar.library, "Library button")?;
-    let switchboard_capsule = rect_centre(bar.switchboard, "Switchboard capsule")?;
 
     let mut router = TaskbarInput::new();
     let mut press_at = |shell: &mut DesktopShell, at: Point, button: PointerButton| {
@@ -7990,11 +7993,11 @@ fn taskbar_pin_pointer_script() -> Result<Vec<tairix_qemu::PointerStep>, String>
     // Open the program-library popup, exactly as the first click will.
     press_at(&mut shell, library_button, PointerButton::Primary);
 
-    // The popup's row for the application this vertical pins — keyed by the
-    // bundle it launches (the same on-disk identity the guest PASS witness
-    // attributes by), never a display-name literal.
+    // The popup's row for the application whose bar this drives — keyed by
+    // the bundle it launches (the same on-disk identity the guest PASS
+    // witness attributes by), never a display-name literal.
     let bundle = format!(
-        "{}/{PIN_APP_NAME}{}",
+        "{}/{BAR_APP_NAME}{}",
         tairix_abi::SYSTEM_APPLICATION_STORE,
         tairix_abi::BUNDLE_SUFFIX
     );
@@ -8010,58 +8013,76 @@ fn taskbar_pin_pointer_script() -> Result<Vec<tairix_qemu::PointerStep>, String>
                 .is_some_and(|entry| entry.bundle().as_str() == bundle),
             LibraryRow::Folder { .. } => false,
         })
-        .ok_or_else(|| format!("taskbar pin script: no library entry launches {bundle}"))?;
-    let layout = taskbar.library_layout(scale);
-    let entry_row = layout
-        .rows
-        .iter()
-        .find(|&&(index, _)| index == row)
-        .map(|&(_, rect)| rect)
-        .ok_or_else(|| format!("taskbar pin script: {bundle}'s row is not visible in the popup"))?;
-    let popup_panel = layout.panel;
-    let entry_row = rect_centre(entry_row, "library entry row")?;
-
-    // Raise that entry's context menu with a secondary press, then read the
-    // *Pin to taskbar* row's rectangle out of the menu the model opened.
-    press_at(&mut shell, entry_row, PointerButton::Secondary);
-    let taskbar = shell.session().taskbar();
-    let menu = taskbar
-        .menu_layout(scale)
-        .ok_or_else(|| "taskbar pin script: the entry context menu did not open".to_string())?;
-    let pin_row = taskbar
-        .menu()
-        .control()
-        .row_rect(MENU_PIN_ROW, menu.panel, scale, taskbar.theme())
-        .ok_or_else(|| "taskbar pin script: the menu has no pin row".to_string())?;
-    let pin_row = rect_centre(pin_row, "Pin to taskbar row")?;
-
-    // Choosing the row closes the menu but leaves the popup open, and the
-    // popup is modal: the next press outside it is spent dismissing it. So
-    // the script spends that press deliberately, on bare desktop, rather
-    // than losing the Switchboard click to it.
-    let dismiss = Point::new(
-        #[allow(clippy::cast_possible_wrap)] // Screen extents are far below i32::MAX.
-        {
-            width as i32 - DESKTOP_MARGIN_PX
-        },
-        DESKTOP_MARGIN_PX,
-    );
-    if popup_panel.contains(dismiss) || bar.bar.contains(dismiss) {
-        return Err(
-            "taskbar pin script: the dismissing click does not land on bare desktop".to_string(),
-        );
-    }
-
-    // The slot the pin will occupy, in the strip the session re-resolves
-    // once the store is written.
-    let pin_slot = rect_centre(
-        taskbar_pin_slot_rect(shell.session().taskbar().theme())?,
-        "first pin slot",
+        .ok_or_else(|| format!("icon-bar script: {bundle} is not listed in the program library"))?;
+    let entry_row = rect_centre(
+        taskbar
+            .library_layout(scale)
+            .rows
+            .iter()
+            .find(|(shown, _)| *shown == row)
+            .map(|(_, rect)| *rect)
+            .ok_or_else(|| {
+                "icon-bar script: the terminal's row is not visible in the popup".to_string()
+            })?,
+        "terminal library entry",
     )?;
 
-    // Relative-motion arithmetic: the pointer starts at an unknown
-    // position (the session centres it), so the first move overshoots both
-    // axes leftward/upward; the guest clamps at (0, 0), making every later
+    // Launching from a row closes the popup and puts the application on the
+    // bar, so the model is advanced to the state the guest will be in: one
+    // slot, carrying the declaration the terminal makes.
+    press_at(&mut shell, entry_row, PointerButton::Primary);
+    let declared = tairix_terminal::appbar::declaration(0)
+        .map_err(|err| format!("icon-bar script: the terminal's declaration is invalid: {err}"))?;
+    shell
+        .session_mut()
+        .taskbar_mut()
+        .set_apps(vec![AppSlot::new(
+            BAR_APP_NAME,
+            tairix_icon::IconKind::AppBundle,
+        )
+        .with_declaration(declared.menu, declared.default_action)]);
+
+    // The slot the session gives the running application, and the menu a
+    // secondary press there opens.
+    let slot = rect_centre(
+        appbar_slot_rect(shell.session().taskbar().theme(), 0)?,
+        "slot",
+    )?;
+    press_at(&mut shell, slot, PointerButton::Secondary);
+    if !shell.session().taskbar().menu().is_open() {
+        return Err("icon-bar script: a secondary press on the slot opened no menu".to_string());
+    }
+    // The *New window* row, named from the declaration rather than by
+    // position: the rows the bar draws skip the declared separator, so
+    // counting them here would restate a rule the model already applies.
+    let menu_layout = shell
+        .session()
+        .taskbar()
+        .menu_layout(scale)
+        .ok_or_else(|| "icon-bar script: the open menu lays nothing out".to_string())?;
+    let control = shell.session().taskbar().menu().control();
+    let row = control
+        .items()
+        .iter()
+        .position(|item| item.label() == TERMINAL_NEW_WINDOW_LABEL)
+        .ok_or_else(|| {
+            format!("icon-bar script: the menu has no {TERMINAL_NEW_WINDOW_LABEL:?} row")
+        })?;
+    let new_window = rect_centre(
+        control
+            .row_rect(
+                row,
+                menu_layout.panel,
+                scale,
+                shell.session().taskbar().theme(),
+            )
+            .ok_or_else(|| "icon-bar script: the chosen row lays nothing out".to_string())?,
+        "New window row",
+    )?;
+
+    // Relative-motion arithmetic: the pointer starts at an unknown position
+    // (the session centres it), so the first move overshoots both axes
+    // leftward/upward; the guest clamps at (0, 0), making every later
     // displacement exact.
     #[allow(clippy::cast_possible_wrap)] // Screen extents are far below i32::MAX.
     let pin_cursor = PointerAction::Move {
@@ -8077,7 +8098,6 @@ fn taskbar_pin_pointer_script() -> Result<Vec<tairix_qemu::PointerStep>, String>
         ready_occurrences: 1,
         action,
     };
-    let ready = AUTOLOAD_DESKTOP_REVEALED_MARKER;
     let click = |marker: &str, button: MouseButton, from: Point, to: Point| {
         [
             step(marker, move_by(from, to)),
@@ -8085,6 +8105,7 @@ fn taskbar_pin_pointer_script() -> Result<Vec<tairix_qemu::PointerStep>, String>
             step(marker, PointerAction::Release(button)),
         ]
     };
+    let ready = AUTOLOAD_DESKTOP_REVEALED_MARKER;
     let mut steps = vec![step(ready, pin_cursor)];
     steps.extend(click(
         ready,
@@ -8094,26 +8115,52 @@ fn taskbar_pin_pointer_script() -> Result<Vec<tairix_qemu::PointerStep>, String>
     ));
     steps.extend(click(
         ready,
-        MouseButton::Secondary,
+        MouseButton::Primary,
         library_button,
         entry_row,
     ));
-    steps.extend(click(ready, MouseButton::Primary, entry_row, pin_row));
-    steps.extend(click(ready, MouseButton::Primary, pin_row, dismiss));
+    // The application's first window is on screen, so its slot is drawn and
+    // carries the declaration it made before opening that window.
     steps.extend(click(
-        ready,
-        MouseButton::Primary,
-        dismiss,
-        switchboard_capsule,
+        APPBAR_WINDOW_SHOWN_MARKER,
+        MouseButton::Secondary,
+        entry_row,
+        slot,
     ));
     steps.extend(click(
-        SWITCHBOARD_PANEL_MARKER,
+        APPBAR_WINDOW_SHOWN_MARKER,
         MouseButton::Primary,
-        switchboard_capsule,
-        pin_slot,
+        slot,
+        new_window,
     ));
+    // The chosen row's window is on screen too — the frame the third dump
+    // reads. The pointer is still on that row, so this walks back to the
+    // slot and presses it: the declaration claims the application handles a
+    // primary click, so this is its default action rather than a raise, and
+    // the window it opens is the guest's last witness.
+    steps.extend(
+        click(
+            APPBAR_WINDOW_SHOWN_MARKER,
+            MouseButton::Primary,
+            new_window,
+            slot,
+        )
+        .map(|mut step| {
+            step.ready_occurrences = 2;
+            step
+        }),
+    );
     Ok(steps)
 }
+
+/// The label the terminal gives its *New window* row, as the script names the
+/// row to click.
+///
+/// The label is the application's own declaration text, so it is read back
+/// from the row the model built rather than compared against a literal the
+/// script keeps: this constant is only the spelling the terminal's own
+/// `appbar` module declares.
+const TERMINAL_NEW_WINDOW_LABEL: &str = "New window";
 
 /// The virtio-input readiness marker the pointer-button vertical's guest
 /// logs once its (single) mouse driver instance has armed its event

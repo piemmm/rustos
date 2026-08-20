@@ -55,6 +55,17 @@ pub const BUNDLE_NAME_MAX: usize = 64;
 /// Maximum length, in bytes, of a bundle version string.
 pub const BUNDLE_VERSION_MAX: usize = 32;
 
+/// Maximum length, in bytes, of a bundle's one-line purpose — what the
+/// application is *for*, as its own signed manifest states it.
+///
+/// A line, not a description: the desktop draws it in the application's
+/// info panel beside its name and version, so it is bounded to what reads
+/// as one line rather than to what an author might want to write.
+pub const BUNDLE_PURPOSE_MAX: usize = 96;
+
+/// Maximum length, in bytes, of a bundle's author attribution.
+pub const BUNDLE_AUTHOR_MAX: usize = 64;
+
 /// Maximum length, in bytes, of one declared MIME-type string.
 pub const MIME_TYPE_MAX: usize = 64;
 
@@ -624,6 +635,12 @@ pub struct AppInfoHeader {
     /// Valid byte count of the inline `version` buffer
     /// (`<= BUNDLE_VERSION_MAX`).
     pub version_len: u8,
+    /// Valid byte count of the inline `purpose` buffer
+    /// (`<= BUNDLE_PURPOSE_MAX`); zero when the bundle states none.
+    pub purpose_len: u8,
+    /// Valid byte count of the inline `author` buffer
+    /// (`<= BUNDLE_AUTHOR_MAX`); zero when the bundle names none.
+    pub author_len: u8,
     /// Valid byte count of the inline `library_icon` buffer
     /// (`<= LIBRARY_ICON_MAX`); zero when the bundle declares no icon.
     /// Independent of `library`: the icon is the bundle's own identity,
@@ -636,7 +653,7 @@ pub struct AppInfoHeader {
     /// plain command app and service), else the folder it is filed under.
     pub library: u8,
     /// Reserved; must be zero in `abi-v1`.
-    pub reserved0: [u8; 3],
+    pub reserved0: [u8; 1],
     /// Bundle identifier bytes; the valid prefix is `id_len` long.
     pub id: [u8; BUNDLE_ID_MAX],
     /// Human-readable name bytes; the valid prefix is `name_len` long.
@@ -649,6 +666,13 @@ pub struct AppInfoHeader {
     /// and a draw site then falls back to its class artwork and, failing
     /// that, to the built-in glyph.
     pub library_icon: [u8; LIBRARY_ICON_MAX],
+    /// One-line purpose bytes; the valid prefix is `purpose_len` long. All
+    /// zero when the bundle states none, and the info panel then simply
+    /// omits the line rather than inventing one.
+    pub purpose: [u8; BUNDLE_PURPOSE_MAX],
+    /// Author-attribution bytes; the valid prefix is `author_len` long. All
+    /// zero when the bundle names none.
+    pub author: [u8; BUNDLE_AUTHOR_MAX],
     /// SHA-256 of the kernel syscall table this bundle was linked against.
     pub syscall_table_hash: [u8; SYSCALL_TABLE_HASH_LEN],
     /// Digest binding the signature to the bundle's contents
@@ -669,13 +693,17 @@ impl AppInfoHeader {
     const OFF_VERSION_LEN: usize = 18;
     const OFF_LIBRARY_ICON_LEN: usize = 19;
     const OFF_LIBRARY: usize = 20;
-    const OFF_RESERVED0: usize = 21;
-    const RESERVED0_LEN: usize = 3;
+    const OFF_PURPOSE_LEN: usize = 21;
+    const OFF_AUTHOR_LEN: usize = 22;
+    const OFF_RESERVED0: usize = 23;
+    const RESERVED0_LEN: usize = 1;
     const OFF_ID: usize = 24;
     const OFF_NAME: usize = Self::OFF_ID + BUNDLE_ID_MAX;
     const OFF_VERSION: usize = Self::OFF_NAME + BUNDLE_NAME_MAX;
     const OFF_LIBRARY_ICON: usize = Self::OFF_VERSION + BUNDLE_VERSION_MAX;
-    const OFF_SYSCALL_HASH: usize = Self::OFF_LIBRARY_ICON + LIBRARY_ICON_MAX;
+    const OFF_PURPOSE: usize = Self::OFF_LIBRARY_ICON + LIBRARY_ICON_MAX;
+    const OFF_AUTHOR: usize = Self::OFF_PURPOSE + BUNDLE_PURPOSE_MAX;
+    const OFF_SYSCALL_HASH: usize = Self::OFF_AUTHOR + BUNDLE_AUTHOR_MAX;
     const OFF_CONTENT_HASH: usize = Self::OFF_SYSCALL_HASH + SYSCALL_TABLE_HASH_LEN;
     const OFF_SIGNER: usize = Self::OFF_CONTENT_HASH + 32;
     const OFF_SIGNATURE: usize = Self::OFF_SIGNER + 32;
@@ -711,6 +739,8 @@ impl AppInfoHeader {
         out[Self::OFF_VERSION_LEN] = self.version_len;
         out[Self::OFF_LIBRARY_ICON_LEN] = self.library_icon_len;
         out[Self::OFF_LIBRARY] = self.library;
+        out[Self::OFF_PURPOSE_LEN] = self.purpose_len;
+        out[Self::OFF_AUTHOR_LEN] = self.author_len;
         out[Self::OFF_RESERVED0..Self::OFF_RESERVED0 + Self::RESERVED0_LEN]
             .copy_from_slice(&self.reserved0);
         out[Self::OFF_ID..Self::OFF_ID + BUNDLE_ID_MAX].copy_from_slice(&self.id);
@@ -719,6 +749,9 @@ impl AppInfoHeader {
             .copy_from_slice(&self.version);
         out[Self::OFF_LIBRARY_ICON..Self::OFF_LIBRARY_ICON + LIBRARY_ICON_MAX]
             .copy_from_slice(&self.library_icon);
+        out[Self::OFF_PURPOSE..Self::OFF_PURPOSE + BUNDLE_PURPOSE_MAX]
+            .copy_from_slice(&self.purpose);
+        out[Self::OFF_AUTHOR..Self::OFF_AUTHOR + BUNDLE_AUTHOR_MAX].copy_from_slice(&self.author);
         out[Self::OFF_SYSCALL_HASH..Self::OFF_SYSCALL_HASH + SYSCALL_TABLE_HASH_LEN]
             .copy_from_slice(&self.syscall_table_hash);
         out[Self::OFF_CONTENT_HASH..Self::OFF_CONTENT_HASH + 32]
@@ -769,6 +802,8 @@ impl AppInfoHeader {
         let version_len = bytes[Self::OFF_VERSION_LEN];
         let library_icon_len = bytes[Self::OFF_LIBRARY_ICON_LEN];
         let library = bytes[Self::OFF_LIBRARY];
+        let purpose_len = bytes[Self::OFF_PURPOSE_LEN];
+        let author_len = bytes[Self::OFF_AUTHOR_LEN];
         let mut reserved0 = [0u8; Self::RESERVED0_LEN];
         reserved0.copy_from_slice(
             &bytes[Self::OFF_RESERVED0..Self::OFF_RESERVED0 + Self::RESERVED0_LEN],
@@ -788,6 +823,10 @@ impl AppInfoHeader {
         library_icon.copy_from_slice(
             &bytes[Self::OFF_LIBRARY_ICON..Self::OFF_LIBRARY_ICON + LIBRARY_ICON_MAX],
         );
+        let mut purpose = [0u8; BUNDLE_PURPOSE_MAX];
+        purpose.copy_from_slice(&bytes[Self::OFF_PURPOSE..Self::OFF_PURPOSE + BUNDLE_PURPOSE_MAX]);
+        let mut author = [0u8; BUNDLE_AUTHOR_MAX];
+        author.copy_from_slice(&bytes[Self::OFF_AUTHOR..Self::OFF_AUTHOR + BUNDLE_AUTHOR_MAX]);
         let mut syscall_table_hash = [0u8; SYSCALL_TABLE_HASH_LEN];
         syscall_table_hash.copy_from_slice(
             &bytes[Self::OFF_SYSCALL_HASH..Self::OFF_SYSCALL_HASH + SYSCALL_TABLE_HASH_LEN],
@@ -808,6 +847,8 @@ impl AppInfoHeader {
             id_len,
             name_len,
             version_len,
+            purpose_len,
+            author_len,
             library_icon_len,
             library,
             reserved0,
@@ -815,6 +856,8 @@ impl AppInfoHeader {
             name,
             version,
             library_icon,
+            purpose,
+            author,
             syscall_table_hash,
             content_hash,
             signer_pubkey,
@@ -828,6 +871,8 @@ impl AppInfoHeader {
             LIBRARY_ICON_MAX,
             &header.library_icon,
         )?;
+        validate_optional_text(header.purpose_len, BUNDLE_PURPOSE_MAX, &header.purpose)?;
+        validate_optional_text(header.author_len, BUNDLE_AUTHOR_MAX, &header.author)?;
         Ok(header)
     }
 
@@ -869,6 +914,30 @@ impl AppInfoHeader {
             return None;
         }
         Some(inline_str(&self.library_icon, self.library_icon_len))
+    }
+
+    /// The bundle's one-line purpose, or `None` when it states none.
+    ///
+    /// Read only from the *signed* manifest, so the info panel the desktop
+    /// draws states what the bundle's signer said it is for — never what
+    /// the running process claims.
+    #[must_use]
+    pub fn bundle_purpose(&self) -> Option<&str> {
+        if self.purpose_len == 0 {
+            return None;
+        }
+        Some(inline_str(&self.purpose, self.purpose_len))
+    }
+
+    /// The bundle's author attribution, or `None` when it names none. Read
+    /// from the signed manifest for the same reason as
+    /// [`bundle_purpose`](Self::bundle_purpose).
+    #[must_use]
+    pub fn bundle_author(&self) -> Option<&str> {
+        if self.author_len == 0 {
+            return None;
+        }
+        Some(inline_str(&self.author, self.author_len))
     }
 
     /// Number of body bytes a manifest with these counts must carry: the
@@ -1075,6 +1144,8 @@ mod tests {
         let (name, name_len) = inline("Example Editor");
         let (version, version_len) = inline("1.2.3");
         let (library_icon, library_icon_len) = inline("editor.svg");
+        let (purpose, purpose_len) = inline("Edit text files");
+        let (author, author_len) = inline("Example Software");
         AppInfoHeader {
             magic: APPINFO_MAGIC,
             abi_version: ABI_VERSION_CURRENT,
@@ -1084,13 +1155,17 @@ mod tests {
             id_len,
             name_len,
             version_len,
+            purpose_len,
+            author_len,
             library_icon_len,
             library: LibraryCategory::to_wire(Some(LibraryCategory::Office)),
-            reserved0: [0; 3],
+            reserved0: [0; 1],
             id,
             name,
             version,
             library_icon,
+            purpose,
+            author,
             syscall_table_hash: [0xAB; SYSCALL_TABLE_HASH_LEN],
             content_hash: [0xCD; 32],
             signer_pubkey: [0xEF; 32],
@@ -1263,7 +1338,7 @@ mod tests {
 
     #[test]
     fn header_wire_size_is_frozen() {
-        assert_eq!(AppInfoHeader::WIRE_LEN, 408);
+        assert_eq!(AppInfoHeader::WIRE_LEN, 568);
         assert_eq!(
             AppInfoHeader::WIRE_LEN,
             core::mem::size_of::<AppInfoHeader>()
@@ -1394,7 +1469,7 @@ mod tests {
         );
 
         let mut h = sample();
-        h.reserved0 = [0, 1, 0];
+        h.reserved0 = [1];
         assert_eq!(
             AppInfoHeader::from_bytes(&h.to_le_bytes()),
             Err(Errno::BadMagic)

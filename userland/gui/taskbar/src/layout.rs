@@ -1,13 +1,13 @@
 //! The computed geometry of the taskbar and pointer hit-testing.
 //!
-//! [`BarLayout::compute`] turns a [`TaskbarConfig`] plus the current pin,
-//! task, and icon counts into the screen [`Rect`] of every region: the bar
-//! itself, the two permanent leading launcher buttons (Library, then Files —
-//! never reordered, never removed), the separator rule that divides the
-//! Library launcher from everything after it, the pin strip (and a slot per
-//! pinned shortcut), the task list (and a slot per task), the notification
-//! area (and a slot per icon), the clock, and the Switchboard tray capsule
-//! anchored at the very trailing end. All arithmetic saturates, so a
+//! [`BarLayout::compute`] turns a [`TaskbarConfig`] plus the current
+//! application and icon counts into the screen [`Rect`] of every region: the
+//! bar itself, the two permanent leading launcher buttons (Library, then
+//! Files — never reordered, never removed), the separator rule that divides
+//! the Library launcher from everything after it, the application strip (and
+//! a slot per running application), the notification area (and a slot per
+//! icon), the clock, and the Switchboard tray capsule anchored at the very
+//! trailing end. All arithmetic saturates, so a
 //! pathological screen size or extent fails closed inside the bar rather
 //! than wrapping: a leading button that does not fit is [`Rect::EMPTY`] and
 //! can never be hit.
@@ -46,10 +46,8 @@ pub enum Hit {
     Library,
     /// The Files launcher button (opens the file manager).
     Files,
-    /// The pinned shortcut at this index into [`BarLayout::pins`].
-    Pin(usize),
-    /// The task slot at this index into [`BarLayout::tasks`].
-    Task(usize),
+    /// The running application at this index into [`BarLayout::apps`].
+    App(usize),
     /// The notification icon at this index into [`BarLayout::notifications`].
     Notification(usize),
     /// The clock.
@@ -81,18 +79,12 @@ pub struct BarLayout {
     /// manager reads as a peer of the pins rather than of the library.
     /// [`Rect::EMPTY`] when the bar is too short to hold it.
     pub files: Rect,
-    /// The pin strip, between the leading launchers and the task list.
-    /// Zero-length (but still positioned) when nothing is pinned.
-    pub pin_strip: Rect,
-    /// One slot per pinned shortcut, in pin order. A pin that does not fit
-    /// is [`Rect::EMPTY`].
-    pub pins: Vec<Rect>,
-    /// The region available to the task list, between the pin strip and the
-    /// notification area.
-    pub task_list: Rect,
-    /// One slot per running task, in task order. A task that does not fit in
-    /// the task-list region is [`Rect::EMPTY`].
-    pub tasks: Vec<Rect>,
+    /// The region the running applications occupy, between the leading
+    /// launchers and the notification area.
+    pub app_strip: Rect,
+    /// One slot per running application, in strip order. An application that
+    /// does not fit in the strip is [`Rect::EMPTY`].
+    pub apps: Vec<Rect>,
     /// The notification-icon area, immediately before the clock.
     pub notification_area: Rect,
     /// One slot per icon, in icon order. An icon that does not fit is
@@ -106,10 +98,10 @@ pub struct BarLayout {
 }
 
 impl BarLayout {
-    /// Compute the layout for `config` with `pin_count` pinned shortcuts,
-    /// `task_count` running tasks, and `icon_count` notification icons,
-    /// taking the bar's corner radius, separator rule, and the rule's
-    /// spacing from `theme` at the desktop `scale`.
+    /// Compute the layout for `config` with `app_count` running
+    /// applications and `icon_count` notification icons, taking the bar's
+    /// corner radius, separator rule, and the rule's spacing from `theme` at
+    /// the desktop `scale`.
     ///
     /// The screen dimensions in `config` are *physical* pixels (the real
     /// framebuffer), while the bar's extents and thickness and the theme's
@@ -130,8 +122,7 @@ impl BarLayout {
         config: &TaskbarConfig,
         theme: &Theme,
         scale: Scale,
-        pin_count: usize,
-        task_count: usize,
+        app_count: usize,
         icon_count: usize,
     ) -> Self {
         let scaled = config.scaled(scale);
@@ -210,27 +201,14 @@ impl BarLayout {
 
         let trailing = trailing_end(&placer, config, (leading_len, content_total), icon_count);
 
-        let pin_start = leading_len.min(trailing.start);
-        let pin_total = config.pin_extent.saturating_mul(to_u32(pin_count));
-        let pin_end = pin_start.saturating_add(pin_total).min(trailing.start);
-        let pin_strip = placer.place(pin_start, pin_end.saturating_sub(pin_start));
-        let pins = slots(
+        let app_start = leading_len.min(trailing.start);
+        let app_strip = placer.place(app_start, trailing.start.saturating_sub(app_start));
+        let apps = slots(
             &placer,
-            pin_start,
-            config.pin_extent,
-            pin_count,
-            pin_start,
-            trailing.start,
-        );
-
-        let task_start = pin_end.min(trailing.start);
-        let task_list = placer.place(task_start, trailing.start.saturating_sub(task_start));
-        let tasks = slots(
-            &placer,
-            task_start,
-            config.task_extent,
-            task_count,
-            task_start,
+            app_start,
+            config.app_extent,
+            app_count,
+            app_start,
             trailing.start,
         );
 
@@ -240,10 +218,8 @@ impl BarLayout {
             library,
             separator,
             files,
-            pin_strip,
-            pins,
-            task_list,
-            tasks,
+            app_strip,
+            apps,
             notification_area: trailing.notification_area,
             notifications: trailing.notifications,
             clock: trailing.clock,
@@ -277,40 +253,10 @@ impl BarLayout {
         if let Some(index) = index_of(&self.notifications, point) {
             return Some(Hit::Notification(index));
         }
-        if let Some(index) = index_of(&self.pins, point) {
-            return Some(Hit::Pin(index));
-        }
-        if let Some(index) = index_of(&self.tasks, point) {
-            return Some(Hit::Task(index));
+        if let Some(index) = index_of(&self.apps, point) {
+            return Some(Hit::App(index));
         }
         None
-    }
-
-    /// The pin-list insertion index for an application reference dropped at
-    /// `point`, or `None` when the point is outside the strip's drop band.
-    ///
-    /// The drop band spans the pin strip *and* the task-list region beside
-    /// it, so a first pin can land on an empty strip (whose own rectangle is
-    /// zero-length) and a drop just past the last slot appends — matching
-    /// the familiar desktop gesture. Within the strip the index is chosen by
-    /// slot midpoints: dropping on the leading half of a pin inserts before
-    /// it, on the trailing half after it.
-    #[must_use]
-    pub fn pin_drop_index(&self, point: Point) -> Option<usize> {
-        if !self.pin_strip.contains(point) && !self.task_list.contains(point) {
-            return None;
-        }
-        // The main axis is decided once from the bar's own shape (a bar spans
-        // its screen edge, so the longer side is the main axis) — a slot's
-        // shape cannot be trusted for this because a near-square slot, or the
-        // zero-length strip of the very first drop, reads ambiguously.
-        let horizontal = self.bar.width >= self.bar.height;
-        let index = self
-            .pins
-            .iter()
-            .take_while(|slot| !slot.is_empty() && !before_midpoint(slot, point, horizontal))
-            .count();
-        Some(index)
     }
 }
 
@@ -320,7 +266,7 @@ struct TrailingEnd {
     clock: Rect,
     notification_area: Rect,
     notifications: Vec<Rect>,
-    /// Where the group begins: the pins and tasks before it stop here.
+    /// Where the group begins: the application strip before it stops here.
     start: u32,
 }
 
@@ -592,17 +538,6 @@ impl TrayReadoutLayout {
     pub fn contains(&self, point: Point) -> bool {
         self.panel.contains(point)
     }
-}
-
-/// Whether `point` sits before `slot`'s main-axis midpoint — the "insert
-/// before this slot" half — on the given bar axis.
-fn before_midpoint(slot: &Rect, point: Point, horizontal: bool) -> bool {
-    let (position, start, extent) = if horizontal {
-        (point.x, slot.left(), slot.width)
-    } else {
-        (point.y, slot.top(), slot.height)
-    };
-    position < start.saturating_add(to_i32(extent / 2))
 }
 
 /// Maps a main-axis interval to a screen [`Rect`] for one bar orientation.

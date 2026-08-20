@@ -178,10 +178,12 @@
 //! manager enforces authority and performs the cooperative window operation.
 //!
 //! The [`shell`] module is the shell-surface family — [`Notification`],
-//! [`TaskbarItem`], and [`TraySignal`]. A notification is a [`Card`] carrying
-//! semantic beads plus a source attribution; a taskbar item is an icon-only
-//! slot combining application identity with a [`TaskVisibility`] window state,
-//! activity, attention, and recovery/authority beads; a tray signal is a compact
+//! [`TaskbarItem`], [`WindowPreview`], and [`TraySignal`]. A notification is a
+//! [`Card`] carrying semantic beads plus a source attribution; an icon-bar item
+//! is an icon-only slot combining application identity with activity,
+//! attention, and recovery/authority beads; a window preview is a captioned
+//! thumbnail of one window, the picker cell an icon-bar slot opens on hover
+//! when its application owns more than one; a tray signal is a compact
 //! status capsule that shows an optional [`TrayBadge`] (a count or alert
 //! encoding the dominant live state) on its top-trailing corner, stacks
 //! severity-ordered beads starting after it, and expands to an instrument
@@ -281,7 +283,7 @@ pub use collection::{
 };
 pub use combo::{ComboAction, ComboBox};
 pub use decision::{Dialog, DialogAction, HelpTip, HelpTipAction, Tooltip};
-pub use menu::{Menu, MenuAction, MenuItem};
+pub use menu::{Menu, MenuAction, MenuItem, MenuMark};
 pub use metric::{MetricInstrument, MetricLayout, MetricTile, StatusPill};
 pub use nav::{Breadcrumb, BreadcrumbAction, Crumb};
 pub use paint::{ground_fill, paint_surface_plate, plate_border, ChromeLayer};
@@ -293,8 +295,8 @@ pub use scroll::{
 pub use scrollbar::{ScrollAction, ScrollBar, ScrollPart};
 pub use selector::{Checkbox, Radio, SelectorAction, Toggle};
 pub use shell::{
-    Notification, NotificationAction, TaskVisibility, TaskbarItem, TaskbarItemAction, TrayBadge,
-    TrayBadgeContent, TrayBadgeTone, TraySignal, TraySignalAction,
+    Notification, NotificationAction, TaskbarItem, TaskbarItemAction, TrayBadge, TrayBadgeContent,
+    TrayBadgeTone, TraySignal, TraySignalAction, WindowPreview, WindowPreviewAction,
 };
 pub use state::{
     ActivityState, AuthorityState, ControlDisposition, ControlKind, ControlRole, ControlState,

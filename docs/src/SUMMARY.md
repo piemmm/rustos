@@ -84,7 +84,6 @@
   - [`tairix-sandbox`](./lib/sandbox.md)
   - [`tairix-supervisor`](./lib/supervisor.md)
   - [`tairix-sysconfig`](./lib/sysconfig.md)
-  - [`tairix-taskpins`](./lib/taskpins.md)
   - [`tairix-termcap`](./lib/termcap.md)
   - [`tairix-usb`](./lib/usb.md)
   - [`tairix-users`](./lib/users.md)

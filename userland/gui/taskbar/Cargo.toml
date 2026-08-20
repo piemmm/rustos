@@ -1,6 +1,6 @@
 [package]
 name = "tairix-taskbar"
-description = "TAIRiX traditional desktop taskbar: edge-pinned layout, permanent Library/Files launchers with the program-library popup, running-task list, and notification area + clock (§10 — PLAN.md Stage 7)."
+description = "TAIRiX traditional desktop icon bar: edge-pinned layout, permanent Library/Files launchers with the program-library popup, a per-application slot strip with an app-declared menu and hover window picker, and the notification area + clock (§10 — PLAN.md Stage 7)."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -60,12 +60,6 @@ tairix-reclaim = { path = "../../../lib/reclaim", version = "=0.0.0" }
 # audit sink is typed against (§2.2): the renderer never invents its own
 # logging vocabulary.
 tairix-log = { path = "../../../lib/log", version = "=0.0.0" }
-# The shared directory-browser engine's pure drag detector (`BundleDrag`):
-# the program-library popup is the desktop's pin drag source, and it decides
-# "has this press become a drag?" with the same rule the file manager uses
-# rather than a second threshold of its own.
-tairix-browse = { path = "../../../lib/browse", version = "=0.0.0" }
-
 # The bar renderer's host tests draw text, so they inject the shared solid
 # test transport via the `test-util` feature (never a running `fontd`).
 [dev-dependencies]

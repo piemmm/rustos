@@ -70,7 +70,10 @@ use tairix_abi::time::{Duration64, Time64};
 use tairix_abi::users_admin::{
     decode_group_list, decode_user_list, UsersAdminRequest, USERS_ADMIN_MAX_REQUEST,
 };
-use tairix_abi::window_ipc::{decode_create_reply, BundleRef, WindowEvent, WindowRequest};
+use tairix_abi::window_ipc::{
+    decode_create_reply, AppBar, AppMenu, AppMenuItemId, AppMenuLabel, AppMenuMark, AppMenuRow,
+    WindowEvent, WindowRequest,
+};
 use tairix_abi::{
     AppInfoHeader, IpcMessageHeader, LoadImage, ManifestHeader, NeededLibrary, PortName,
     ReadyCondition, ServiceLimit, ServiceManifest, ServiceUnit, SYSCALL_TABLE_HASH_LEN,
@@ -1015,19 +1018,59 @@ fn structured_reply_inputs_with_corrupted_fields_never_panic() {
 }
 
 #[test]
-fn structured_window_pin_and_drag_inputs_with_corrupted_fields_never_panic() {
-    // Walk the accepted/rejected boundary of the taskbar pin/drag
-    // requests from well-formed frames: a random byte-level mutation of
-    // any of these must never panic, and the mutated bytes are exactly
-    // as likely to land on the bundle-path length or content as on the
-    // header — the decoder's fail-closed shape covers all of it.
-    let path = BundleRef::new("/Apps/Editor.app").expect("a valid path");
-    let frames = [
-        WindowRequest::PinBundle { window: 5, path }.to_le_bytes(),
-        WindowRequest::DragOffer { window: 5, path }.to_le_bytes(),
-        WindowRequest::DragWithdraw { window: 5 }.to_le_bytes(),
+fn structured_icon_bar_inputs_with_corrupted_fields_never_panic() {
+    // Walk the accepted/rejected boundary of the icon-bar declaration and
+    // its two outcome events from well-formed frames. A bit-flip lands as
+    // readily on a row's kind, flag byte, parent index, label length, or
+    // item id as on the header, and every one of them must fail closed.
+    let mut menu = AppMenu::EMPTY;
+    menu.push(AppMenuRow::Submenu {
+        label: AppMenuLabel::new("Display").expect("a valid label"),
+        enabled: true,
+    })
+    .expect("room for a submenu");
+    menu.push_under(
+        AppMenuRow::Item {
+            id: AppMenuItemId::new(1).expect("a valid id"),
+            label: AppMenuLabel::new("Full screen").expect("a valid label"),
+            enabled: true,
+            mark: AppMenuMark::Check,
+        },
+        0,
+    )
+    .expect("room inside it");
+    menu.push(AppMenuRow::Separator).expect("a separator");
+    menu.push(AppMenuRow::About).expect("an About row");
+    menu.push(AppMenuRow::Item {
+        id: AppMenuItemId::new(2).expect("a valid id"),
+        label: AppMenuLabel::new("Quit").expect("a valid label"),
+        enabled: true,
+        mark: AppMenuMark::None,
+    })
+    .expect("room for Quit");
+    let declare = WindowRequest::SetAppBar(AppBar {
+        event_endpoint: 0xE117_0000_0000_0009,
+        default_action: true,
+        menu,
+    })
+    .to_le_bytes();
+    for mut base in [declare] {
+        for byte in 0..base.len() {
+            for bit in 0..8u32 {
+                base[byte] ^= 1 << bit;
+                exercise(&base);
+                base[byte] ^= 1 << bit;
+            }
+        }
+    }
+    let events = [
+        WindowEvent::AppBarDefault.to_le_bytes(),
+        WindowEvent::AppBarMenu {
+            item: AppMenuItemId::new(7).expect("a valid id"),
+        }
+        .to_le_bytes(),
     ];
-    for mut base in frames {
+    for mut base in events {
         for byte in 0..base.len() {
             for bit in 0..8u32 {
                 base[byte] ^= 1 << bit;

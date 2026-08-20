@@ -21,8 +21,8 @@ use tairix_theme::{Rgba, Theme};
 use crate::button::{Button, ButtonContent};
 use crate::damage::sink;
 use crate::shell::{
-    Notification, NotificationAction, TaskVisibility, TaskbarItem, TaskbarItemAction, TrayBadge,
-    TrayBadgeContent, TrayBadgeTone, TraySignal, TraySignalAction,
+    Notification, NotificationAction, TaskbarItem, TaskbarItemAction, TrayBadge, TrayBadgeContent,
+    TrayBadgeTone, TraySignal, TraySignalAction, WindowPreview, WindowPreviewAction,
 };
 use crate::state::{
     ActivityState, AuthorityState, ControlRole, ControlState, PointerState, PressureKind,
@@ -227,7 +227,7 @@ fn task_surface(item: &TaskbarItem, theme: &Theme, scale: Scale) -> Surface {
 }
 
 #[test]
-fn taskbar_item_rests_bare_on_the_bar_and_marks_its_presence() {
+fn taskbar_item_rests_bare_on_the_bar() {
     for theme in [Theme::dark(), Theme::light()] {
         let item = TaskbarItem::new(IconKind::Generic);
         let s = task_surface(&item, &theme, Scale::ONE);
@@ -247,61 +247,25 @@ fn taskbar_item_rests_bare_on_the_bar_and_marks_its_presence() {
             "{}: a bar-seated item wears no rim",
             theme.name()
         );
-        // A running window states itself with a short muted mark on the lower
-        // edge instead — the only thing that tells it from a closed pin.
+        // And it marks nothing on its lower edge: every slot on the icon bar
+        // is a running application, so a "running" seam would mark them all
+        // alike and say nothing.
         assert!(
-            region_has(
+            !region_has(
                 &s,
-                (TW / 3, TW - TW / 3),
-                (TH - 3, TH - 1),
+                (0, TW),
+                (TH - 3, TH),
                 premul(theme.palette().on_surface_muted)
             ),
-            "{}: a running item shows its presence mark",
+            "{}: a slot draws no presence mark",
+            theme.name()
+        );
+        assert!(
+            !region_has(&s, (0, TW), (TH - 3, TH), premul(theme.palette().accent)),
+            "{}: nor a focus seam",
             theme.name()
         );
     }
-}
-
-#[test]
-fn taskbar_item_presence_mark_tells_running_from_closed_and_active() {
-    let theme = Theme::dark();
-    let palette = theme.palette();
-    let lower = (TH - 3, TH - 1);
-    let leading = (0, TW / 4);
-
-    // A closed pin marks nothing at all: no window, no presence.
-    let closed = task_surface(
-        &TaskbarItem::new(IconKind::Generic).with_visibility(TaskVisibility::Closed),
-        &theme,
-        Scale::ONE,
-    );
-    assert!(!region_has(
-        &closed,
-        (0, TW),
-        lower,
-        premul(palette.on_surface_muted)
-    ));
-    assert!(!region_has(&closed, (0, TW), lower, premul(palette.accent)));
-
-    // A running window's mark is short and centred, so the leading end of the
-    // lower edge stays clear — the active window's full-width seam does not.
-    let running = task_surface(
-        &TaskbarItem::new(IconKind::Generic).with_visibility(TaskVisibility::Running),
-        &theme,
-        Scale::ONE,
-    );
-    assert!(!region_has(
-        &running,
-        leading,
-        lower,
-        premul(palette.on_surface_muted)
-    ));
-    let active = task_surface(
-        &TaskbarItem::new(IconKind::Generic).with_visibility(TaskVisibility::Active),
-        &theme,
-        Scale::ONE,
-    );
-    assert!(region_has(&active, leading, lower, premul(palette.accent)));
 }
 
 #[test]
@@ -325,29 +289,6 @@ fn taskbar_item_washes_its_plate_under_the_pointer_without_an_edge() {
             theme.name()
         );
     }
-}
-
-#[test]
-fn taskbar_item_active_shows_lower_accent_seam() {
-    let theme = Theme::dark();
-    let item = TaskbarItem::new(IconKind::Generic).with_visibility(TaskVisibility::Active);
-    let s = task_surface(&item, &theme, Scale::ONE);
-    assert!(region_has(
-        &s,
-        (TW / 3, TW - TW / 3),
-        (TH - 3, TH - 1),
-        premul(theme.palette().accent)
-    ));
-}
-
-#[test]
-fn taskbar_item_minimized_recesses_and_marks() {
-    let theme = Theme::dark();
-    let item = TaskbarItem::new(IconKind::Generic).with_visibility(TaskVisibility::Minimized);
-    let s = task_surface(&item, &theme, Scale::ONE);
-    // Recessed plate (flat surface, not raised) and a leading non-colour tick.
-    assert!(has_pixel(&s, premul(theme.palette().surface)));
-    assert!(has_pixel(&s, premul(theme.palette().on_surface_muted)));
 }
 
 #[test]
@@ -407,7 +348,7 @@ fn taskbar_item_activates_by_pointer_and_keyboard() {
 #[test]
 fn taskbar_item_high_contrast_and_scale_render() {
     let hc = high_contrast();
-    let item = TaskbarItem::new(IconKind::Generic).with_visibility(TaskVisibility::Active);
+    let item = TaskbarItem::new(IconKind::Generic);
     let s = task_surface(&item, &hc, scale2());
     assert!(has_pixel(&s, premul(hc.palette().on_surface)));
 }
@@ -442,7 +383,7 @@ fn taskbar_item_draws_its_icon_and_nothing_beside_it() {
     // space beside it carries no ink at all — a title drawn there would read
     // as a second, unequal kind of button on a strip of equal icons.
     let bounds = Rect::new(0, 0, TW, TH);
-    let item = TaskbarItem::new(IconKind::AppBundle).with_visibility(TaskVisibility::Running);
+    let item = TaskbarItem::new(IconKind::AppBundle);
     let side = item.icon_side(bounds, Scale::ONE, &theme);
     assert!(side > 0);
     let mut s = Surface::new(TW, TH).expect("surface");
@@ -504,46 +445,9 @@ fn taskbar_item_artwork_replaces_the_builtin_glyph_at_any_slot_shape() {
 }
 
 #[test]
-fn taskbar_item_closed_rests_quiet_and_plates_on_hover() {
-    let theme = Theme::dark();
-    let bounds = Rect::new(0, 0, PS, PS);
-    let closed = TaskbarItem::new(IconKind::AppBundle).with_visibility(TaskVisibility::Closed);
-    let mut rest = Surface::new(PS, PS).expect("surface");
-    closed.render(&mut rest, bounds, Scale::ONE, &theme, None);
-    // At rest a closed pin shows no plate or rim — only the glyph sits on
-    // the bar — so it never masquerades as a running task.
-    assert!(!has_pixel(&rest, premul(theme.palette().surface_raised)));
-    assert!(!has_pixel(&rest, premul(theme.palette().rim)));
-    assert!(has_pixel(&rest, premul(theme.palette().on_surface)));
-    // Hover raises the plate like any other slot.
-    let hovered = closed.with_state(ControlState::idle().with_pointer(PointerState::Hover));
-    let mut hover = Surface::new(PS, PS).expect("surface");
-    hovered.render(&mut hover, bounds, Scale::ONE, &theme, None);
-    assert_ne!(rest.pixels(), hover.pixels());
-    // A denied closed pin still shows its plate and lock bead (a marked
-    // state is never hidden by the quiet resting look).
-    let denied = TaskbarItem::new(IconKind::AppBundle)
-        .with_visibility(TaskVisibility::Closed)
-        .with_state(ControlState::idle().with_authority(AuthorityState::Denied));
-    let mut d = Surface::new(PS, PS).expect("surface");
-    denied.render(&mut d, bounds, Scale::ONE, &theme, None);
-    assert!(has_pixel(&d, premul(theme.palette().denied)));
-}
-
-#[test]
 fn taskbar_item_keeps_status_furniture_in_a_square_slot() {
     let theme = Theme::dark();
     let bounds = Rect::new(0, 0, PS, PS);
-    // The active seam still paints along the bottom edge of a compact slot.
-    let active = TaskbarItem::new(IconKind::AppBundle).with_visibility(TaskVisibility::Active);
-    let mut s = Surface::new(PS, PS).expect("surface");
-    active.render(&mut s, bounds, Scale::ONE, &theme, None);
-    assert!(region_has(
-        &s,
-        (PS / 3, PS - PS / 3),
-        (PS - 3, PS - 1),
-        premul(theme.palette().accent)
-    ));
     // A denied compact slot still shows the lock bead and refuses to act.
     let mut denied = TaskbarItem::new(IconKind::AppBundle)
         .with_state(ControlState::idle().with_authority(AuthorityState::Denied));
@@ -553,6 +457,115 @@ fn taskbar_item_keeps_status_furniture_in_a_square_slot() {
     assert_eq!(denied.on_pointer(&moved(20, 20), bounds, &mut sink()), None);
     assert_eq!(denied.on_pointer(&PRESS, bounds, &mut sink()), None);
     assert_eq!(denied.on_pointer(&RELEASE, bounds, &mut sink()), None);
+}
+
+// --- WindowPreview (spec §11.26) ---------------------------------------
+
+/// A picker cell: wide enough for a landscape thumbnail and a caption line.
+const PW: u32 = 160;
+const PH: u32 = 120;
+
+#[test]
+fn window_preview_draws_its_thumbnail_and_caption() {
+    for theme in [Theme::dark(), Theme::light()] {
+        let bounds = Rect::new(0, 0, PW, PH);
+        let preview = WindowPreview::new("notes.txt", IconKind::AppBundle);
+        let thumb = preview.thumbnail_bounds(bounds, Scale::ONE, &theme);
+        assert!(!thumb.is_empty());
+        // The caption line sits below the thumbnail, inside the plate.
+        assert!(thumb.bottom() < i32::try_from(PH).expect("a modest cell"));
+
+        let magenta = Color::rgb(255, 0, 255).premultiply();
+        let image = Surface::filled(thumb.width, thumb.height, magenta).expect("thumbnail");
+        let mut s = Surface::new(PW, PH).expect("surface");
+        preview.render(&mut s, bounds, Scale::ONE, &theme, Some(&image));
+        // The owner-scaled frame is blitted exactly where the query said.
+        assert!(has_pixel(&s, magenta));
+        // And the caption's ink is under it, not over it.
+        assert!(
+            region_has(
+                &s,
+                (0, PW),
+                (u32::try_from(thumb.top()).expect("fits") + thumb.height, PH),
+                premul(theme.palette().on_surface)
+            ),
+            "{}: the caption is drawn below the thumbnail",
+            theme.name()
+        );
+    }
+}
+
+#[test]
+fn window_preview_without_a_thumbnail_falls_back_to_its_glyph() {
+    // A window that has not presented yet, or whose pixels were released
+    // under memory pressure, still states something: the cell can never come
+    // up blank.
+    let theme = Theme::dark();
+    let bounds = Rect::new(0, 0, PW, PH);
+    let preview = WindowPreview::new("Terminal", IconKind::AppBundle);
+    let mut s = Surface::new(PW, PH).expect("surface");
+    preview.render(&mut s, bounds, Scale::ONE, &theme, None);
+    assert!(has_pixel(&s, premul(theme.palette().on_surface)));
+}
+
+#[test]
+fn window_preview_thumbnail_bounds_are_empty_for_a_degenerate_cell() {
+    let theme = Theme::dark();
+    let preview = WindowPreview::new("x", IconKind::AppBundle);
+    assert!(preview
+        .thumbnail_bounds(Rect::new(0, 0, 0, 0), Scale::ONE, &theme)
+        .is_empty());
+    // A cell with no room for a caption line above the plate's padding has
+    // nowhere to put a thumbnail either, and says so rather than drawing
+    // outside itself.
+    assert!(preview
+        .thumbnail_bounds(Rect::new(0, 0, PW, 4), Scale::ONE, &theme)
+        .is_empty());
+}
+
+#[test]
+fn window_preview_activates_by_pointer_and_keyboard() {
+    let bounds = Rect::new(0, 0, PW, PH);
+    let mut preview = WindowPreview::new("Terminal", IconKind::AppBundle);
+    assert_eq!(
+        preview.on_pointer(&moved(10, 10), bounds, &mut sink()),
+        None
+    );
+    assert_eq!(preview.on_pointer(&PRESS, bounds, &mut sink()), None);
+    assert_eq!(
+        preview.on_pointer(&RELEASE, bounds, &mut sink()),
+        Some(WindowPreviewAction::Activated)
+    );
+    // A release away from the cell is not an activation.
+    assert_eq!(preview.on_pointer(&PRESS, bounds, &mut sink()), None);
+    assert_eq!(
+        preview.on_pointer(&moved(-5, -5), bounds, &mut sink()),
+        None
+    );
+    assert_eq!(preview.on_pointer(&RELEASE, bounds, &mut sink()), None);
+
+    assert_eq!(preview.on_key(Key::Char(' ')), None);
+    preview.set_focused(true);
+    assert_eq!(
+        preview.on_key(Key::Char(' ')),
+        Some(WindowPreviewAction::Activated)
+    );
+}
+
+#[test]
+fn window_preview_equality_is_a_repaint_gate() {
+    // Equal previews draw the same pixels, so a picker may compare them to
+    // decide whether to repaint; the pointer position is not part of that.
+    let bounds = Rect::new(0, 0, PW, PH);
+    let mut a = WindowPreview::new("Terminal", IconKind::AppBundle);
+    let b = a.clone();
+    assert_eq!(a, b);
+    assert_eq!(a.on_pointer(&moved(400, 400), bounds, &mut sink()), None);
+    assert_eq!(a, b, "a pointer sample outside the cell changes no pixel");
+    assert_ne!(
+        WindowPreview::new("Terminal", IconKind::AppBundle),
+        WindowPreview::new("Editor", IconKind::AppBundle)
+    );
 }
 
 // --- TraySignal (spec §11.27) ------------------------------------------

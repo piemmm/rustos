@@ -24,6 +24,11 @@ id = "os.tairix.wallpaper"
 name = "wallpaper"
 version = "0.1.0"
 kind = "application"
+# The identity the desktop's icon-bar information panel states, drawn from
+# this *signed* manifest rather than from anything the running process says
+# about itself (plans/NEW-TASKBAR.md).
+purpose = "Choose the desktop backdrop"
+author = "The TAIRiX Project"
 capabilities = ["CAP_CONSOLE_WRITE", "CAP_FS_ACCESS", "CAP_SHM", "CAP_PROC_SPAWN"]
 # A windowed, user-facing application: list it in the desktop's program
 # library beside the other desktop-settings tools.

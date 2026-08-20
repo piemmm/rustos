@@ -1,5 +1,5 @@
-//! Build script for the taskbar pin + Switchboard QEMU vertical
-//! (`plans/NEW-TASKBAR.md` T15).
+//! Build script for the icon-bar QEMU vertical
+//! (`plans/NEW-TASKBAR.md`).
 //!
 //! Two jobs on the freestanding `aarch64-unknown-none` target, identical to
 //! every other aarch64 `virt` vertical:

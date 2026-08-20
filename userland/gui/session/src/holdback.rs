@@ -22,6 +22,12 @@
 //! round-robin — one event each per pass — so a window with a long backlog
 //! cannot starve its sibling's `Resized`.
 //!
+//! An application-scoped event — an icon-bar click or menu outcome — names
+//! no window, so it queues under the destination's `None` slot and takes
+//! its turn beside the windows in the same round-robin. It is a *discrete*
+//! occurrence: a *New window* row chosen twice must open two windows, so
+//! neither folds into the other.
+//!
 //! # Folding
 //!
 //! Each kind folds by the rule its own quantity obeys, so a destination
@@ -117,10 +123,11 @@ pub struct Flushed {
     pub gone: Vec<u64>,
 }
 
-/// What the session owes each `(destination mailbox, window)` pair.
+/// What the session owes each `(destination mailbox, window)` pair, the
+/// `None` window naming the destination's application-scoped queue.
 #[derive(Debug, Default)]
 pub struct HoldBack {
-    owed: BTreeMap<(u64, u64), VecDeque<WindowEvent>>,
+    owed: BTreeMap<(u64, Option<u64>), VecDeque<WindowEvent>>,
 }
 
 impl HoldBack {
@@ -187,9 +194,9 @@ impl HoldBack {
     }
 
     /// How much `endpoint` owes `window_id` — the queue depth the fold and
-    /// the bound act on.
+    /// the bound act on. `None` asks after its application-scoped queue.
     #[must_use]
-    pub fn depth(&self, endpoint: u64, window_id: u64) -> usize {
+    pub fn depth(&self, endpoint: u64, window_id: Option<u64>) -> usize {
         self.owed
             .get(&(endpoint, window_id))
             .map_or(0, VecDeque::len)
@@ -199,7 +206,7 @@ impl HoldBack {
     /// events have nowhere to land. Returns `true` when something was
     /// discarded, so the caller knows a wake is armed and must be dropped.
     pub fn forget(&mut self, endpoint: u64) -> bool {
-        let windows: Vec<u64> = self.windows_of(endpoint).collect();
+        let windows: Vec<Option<u64>> = self.windows_of(endpoint).collect();
         for window_id in &windows {
             self.owed.remove(&(endpoint, *window_id));
         }
@@ -242,7 +249,7 @@ impl HoldBack {
         // Fixed for the whole drain: `send` cannot add to the hold-back, so
         // the only change under it is a queue emptying, which `get_mut`
         // then simply misses.
-        let windows: Vec<u64> = self.windows_of(endpoint).collect();
+        let windows: Vec<Option<u64>> = self.windows_of(endpoint).collect();
         loop {
             let mut served = false;
             for window_id in &windows {
@@ -283,10 +290,11 @@ impl HoldBack {
         seen
     }
 
-    /// The windows `endpoint` owes something to, in id order.
-    fn windows_of(&self, endpoint: u64) -> impl Iterator<Item = u64> + '_ {
+    /// The windows `endpoint` owes something to, in id order, the `None`
+    /// slot (its application-scoped queue) first.
+    fn windows_of(&self, endpoint: u64) -> impl Iterator<Item = Option<u64>> + '_ {
         self.owed
-            .range((endpoint, u64::MIN)..=(endpoint, u64::MAX))
+            .range((endpoint, None)..=(endpoint, Some(u64::MAX)))
             .map(|((_, window_id), _)| *window_id)
     }
 }

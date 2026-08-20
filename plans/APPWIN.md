@@ -123,6 +123,20 @@ speculative:
   `Pointer`, `CloseRequested`, `RedrawRequested`). `WINDOW_ENDPOINT`
   (`0x5749_1001`) joined `is_reserved_endpoint`; the decoders are
   enrolled in `fuzz_decode`.
+- **The icon-bar declaration** (`plans/NEW-TASKBAR.md` T7) is the one
+  *caller-scoped* request on this channel: `WindowRequest::SetAppBar(AppBar)`
+  names no window, because an application's presence on the desktop's icon
+  bar belongs to the process rather than to any one of its windows. It
+  carries the event route, whether the application handles its slot's primary
+  click, and a bounded `AppMenu` (≤ 12 rows, ≤ 36 label bytes, one submenu
+  level, a session-rendered `About` row), and it is idempotent-replace. Its
+  two answers — `WindowEvent::AppBarDefault` and `AppBarMenu { item }` — are
+  likewise **application-scoped**, which is why `WindowEvent::window_id()`
+  returns `Option<u64>` and why `WindowServer` has two delivery paths that
+  each refuse the other's events: `deliver_app_event` addresses a bar event
+  through the route the *declaration* recorded, never anything the event
+  carries. `WindowHost::app_bar_declared` defaults to **refuse**
+  (`Errno::NotSupported`), so a host that composes no icon bar fails closed.
 - `lib/window` — both halves over injected seams (the `lib/display`
   precedent): `WindowServer` (decode → `CallerIdentity` attestation
   (`call_peer_origin`) → owner/bounds validation → the `WindowHost`
@@ -371,7 +385,9 @@ Done. What now holds:
 - **Consumer**: the terminal's context menu and settings sheet are each a
   popup, sized from the overlay's own preferred extent rather than the
   window's, with popup-local event coordinates demultiplexed on
-  `WindowEvent::window_id` (`plans/GUI-TERMINAL.md` §9).
+  `WindowEvent::window_id` (`plans/GUI-TERMINAL.md` §9) — which, since the
+  terminal became one process with many windows, is also how a delivery is
+  attributed to the *window* it belongs to.
 - Coverage: `lib/abi` round-trip + fail-closed decode tests (reserved
   tail, zero ids, reserved endpoint, signed/negative offsets),
   `lib/window` loopback popup suite (round trip, present/close on the

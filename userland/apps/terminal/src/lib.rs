@@ -100,6 +100,7 @@
 
 extern crate alloc;
 
+pub mod appbar;
 pub mod effects;
 pub mod grid;
 pub mod layout;
@@ -114,6 +115,7 @@ pub mod spawned;
 pub mod swatch;
 pub mod terminal;
 
+pub use appbar::{BarCommand, DEFAULT_ACTION as BAR_DEFAULT_ACTION};
 pub use effects::{Afterglow, Effects, Phase};
 pub use grid::Grid;
 pub use layout::{COLS, ROWS};

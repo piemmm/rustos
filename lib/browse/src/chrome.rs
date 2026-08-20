@@ -336,11 +336,6 @@ pub enum ContextCommand {
     /// for a regular file — a directory descends and a bundle launches itself,
     /// so neither has an application to choose.
     OpenWith,
-    /// Ask the desktop session to pin the selected application bundle to the
-    /// taskbar (the app sends the window channel's pin request with the
-    /// bundle's absolute path). Offered only for a bundle — pinning names an
-    /// installed application, which no plain file or directory is.
-    PinToTaskbar,
     /// Rename the selected entry in place
     /// ([`rename_selected`](Browser::rename_selected)).
     Rename,
@@ -372,7 +367,6 @@ pub enum ContextCommand {
 pub const CONTEXT_COMMANDS: &[ContextCommand] = &[
     ContextCommand::Open,
     ContextCommand::OpenWith,
-    ContextCommand::PinToTaskbar,
     ContextCommand::Rename,
     ContextCommand::Cut,
     ContextCommand::Copy,
@@ -390,7 +384,6 @@ impl ContextCommand {
         match self {
             Self::Open => "Open",
             Self::OpenWith => "Open With\u{2026}",
-            Self::PinToTaskbar => "Pin to taskbar",
             Self::Rename => "Rename",
             Self::Cut => "Cut",
             Self::Copy => "Copy",
@@ -407,9 +400,9 @@ impl ContextCommand {
     pub const fn shortcut(self) -> &'static str {
         match self {
             Self::Open => "Enter",
-            // Open With… and Pin to taskbar are pointer-only commands (no
-            // keyboard accelerator binds them), so they advertise none.
-            Self::OpenWith | Self::PinToTaskbar => "",
+            // Open With… is a pointer-only command (no keyboard accelerator
+            // binds it), so it advertises none.
+            Self::OpenWith => "",
             Self::Rename => "F2",
             Self::Cut => "Ctrl+X",
             Self::Copy => "Ctrl+C",
@@ -477,9 +470,6 @@ impl ContextMenuModel {
             // file has: a directory descends and a bundle launches itself, so
             // neither has an application to pick.
             ContextCommand::OpenWith => self.selection == Some(EntryKind::File),
-            // Pinning names an installed application, so only a bundle
-            // selection can be pinned to the taskbar.
-            ContextCommand::PinToTaskbar => self.selection == Some(EntryKind::Bundle),
             ContextCommand::Paste => self.has_clipboard,
         }
     }

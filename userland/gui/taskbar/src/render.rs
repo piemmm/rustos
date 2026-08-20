@@ -5,7 +5,8 @@
 //! two permanent leading launchers are the shared `lib/controls`
 //! [`IconButton`](tairix_controls::IconButton)s the model owns, painted with
 //! their live hover/pressed state; every pinned shortcut and running task is
-//! one shared icon-only [`TaskbarItem`] slot, so the bar's application
+//! one shared icon-only [`TaskbarItem`](tairix_controls::TaskbarItem) slot,
+//! so the bar's application
 //! buttons have exactly one visual recipe and read as one strip of equal
 //! icons. Per-application artwork (rasterised by the session) is
 //! blitted through the control: a pin's from the bundle it points at, a
@@ -60,10 +61,7 @@
 
 use tairix_controls::shell::Notification;
 use tairix_controls::state::{ActivityState, ValidationState};
-use tairix_controls::{
-    paint_surface_plate, plate_border, ChromeLayer, ControlRole, ControlState, PointerState,
-    TaskVisibility, TaskbarItem,
-};
+use tairix_controls::{paint_surface_plate, plate_border, ChromeLayer, ControlRole, ControlState};
 use tairix_font::BitmapFont;
 use tairix_geometry::{Point, Rect, Scale};
 use tairix_icon::{IconArtwork, IconKind, IconRequest, IconSet};
@@ -75,7 +73,6 @@ use tairix_theme::{Palette, TextRole};
 use crate::layout::BarLayout;
 use crate::library::{chrome_panel, list_row, popup_font, LibraryFocus};
 use crate::notifications::{NotificationArea, NotifySeverity, TransientNotification};
-use crate::pins::PinView;
 use crate::taskbar::Taskbar;
 
 /// Padding in pixels between a notification slot's edge and its icon glyph.
@@ -321,53 +318,20 @@ impl TaskbarRenderer {
             theme.palette().border.into(),
         );
 
-        let strip = taskbar.pins();
-        for (index, slot) in layout.pins.iter().enumerate() {
+        let strip = taskbar.apps();
+        for (index, slot) in layout.apps.iter().enumerate() {
             if slot.is_empty() {
                 continue;
             }
-            let Some(item) = strip.item(index, taskbar.tasks()) else {
+            let (Some(item), Some(app)) = (strip.item(index), strip.get(index)) else {
                 continue;
             };
-            let view = strip.get(index);
-            let kind = view.map_or(IconKind::AppBundle, PinView::icon);
+            // The slot wears its own application's icon, resolved by the
+            // session from the bundle the kernel attested owns the process,
+            // so an application is recognised by its own picture.
             let bounds = local_rect(*slot, origin);
             let side = item.icon_side(bounds, scale, theme);
-            let art = slot_artwork(view.and_then(PinView::artwork), kind, side, artwork);
-            item.render(&mut surface, bounds, scale, theme, art);
-        }
-
-        for (index, (slot, entry)) in layout
-            .tasks
-            .iter()
-            .zip(taskbar.tasks().entries())
-            .enumerate()
-        {
-            if slot.is_empty() {
-                continue;
-            }
-            let visibility = if taskbar.tasks().focused() == Some(entry.id) {
-                TaskVisibility::Active
-            } else if entry.minimised {
-                TaskVisibility::Minimized
-            } else {
-                TaskVisibility::Running
-            };
-            let pointer = if taskbar.task_hover() == Some(index) {
-                PointerState::Hover
-            } else {
-                PointerState::None
-            };
-            // The window wears its own application's icon, resolved by the
-            // session from the bundle the kernel attested opened it, so an
-            // application is recognised on the bar whether or not it is
-            // pinned.
-            let item = TaskbarItem::new(IconKind::AppBundle)
-                .with_visibility(visibility)
-                .with_state(ControlState::idle().with_pointer(pointer));
-            let bounds = local_rect(*slot, origin);
-            let side = item.icon_side(bounds, scale, theme);
-            let art = slot_artwork(entry.artwork.as_ref(), IconKind::AppBundle, side, artwork);
+            let art = slot_artwork(app.artwork(), app.icon(), side, artwork);
             item.render(&mut surface, bounds, scale, theme, art);
         }
 
@@ -391,8 +355,13 @@ impl TaskbarRenderer {
         Some(surface)
     }
 
-    /// Paint the open context menu into a [`Surface`] using the taskbar's
-    /// own theme.
+    /// Paint the open context menu — and whatever is open beside it — into a
+    /// [`Surface`] using the taskbar's own theme.
+    ///
+    /// One surface holds the menu plate and its open submenu or information
+    /// panel together, because they are one transient the session presents as
+    /// one window: a submenu is part of the menu, not a second thing stacked
+    /// against it.
     ///
     /// Returns `None` when the menu is closed (there is nothing to draw) or
     /// when its pixel dimensions cannot be allocated, so the caller fails
@@ -403,12 +372,78 @@ impl TaskbarRenderer {
     pub fn render_menu(&self, taskbar: &Taskbar, scale: Scale) -> Option<Surface> {
         let layout = taskbar.menu_layout(scale)?;
         let theme = taskbar.theme();
+        let bounds = layout.bounds();
+        let mut surface = Surface::new(bounds.width, bounds.height)?;
+        let origin = bounds.origin;
+        taskbar.menu().control().render(
+            &mut surface,
+            local_rect(layout.panel, origin),
+            scale,
+            theme,
+        );
+        if !layout.child.is_empty() {
+            let child = local_rect(layout.child, origin);
+            if let Some(submenu) = taskbar.menu().submenu() {
+                submenu.render(&mut surface, child, scale, theme);
+            } else if let Some(facts) = taskbar.menu().info_panel() {
+                // The information panel is a plate of facts, not a menu, so
+                // it wears the same floating surface recipe every popup the
+                // bar opens does and states its facts on it.
+                let _ = paint_surface_plate(
+                    &mut surface,
+                    (
+                        u32::try_from(child.left()).unwrap_or(0),
+                        u32::try_from(child.top()).unwrap_or(0),
+                        child.width,
+                        child.height,
+                    ),
+                    (layout.corner_radius, plate_border(theme, scale)),
+                    theme,
+                    (theme.palette().surface_raised, ChromeLayer::Ground),
+                );
+                facts.render(&mut surface, child, scale, theme);
+            }
+        }
+        Some(surface)
+    }
+
+    /// Paint the open window picker into a [`Surface`] using the taskbar's
+    /// own theme.
+    ///
+    /// Each cell draws the thumbnail the embedder supplied for that window,
+    /// falling back to the application's own glyph when it has none, so a
+    /// cell always states something. Returns `None` when the picker is
+    /// closed or its dimensions cannot be allocated (fail closed).
+    #[must_use]
+    pub fn render_picker(&self, taskbar: &Taskbar, scale: Scale) -> Option<Surface> {
+        let layout = taskbar.picker_layout(scale)?;
+        let theme = taskbar.theme();
         let mut surface = Surface::new(layout.panel.width, layout.panel.height)?;
-        let local = Rect::new(0, 0, layout.panel.width, layout.panel.height);
-        taskbar
-            .menu()
-            .control()
-            .render(&mut surface, local, scale, theme);
+        let origin = layout.panel.origin;
+        let _ = paint_surface_plate(
+            &mut surface,
+            (0, 0, layout.panel.width, layout.panel.height),
+            (layout.corner_radius, plate_border(theme, scale)),
+            theme,
+            (theme.palette().surface_raised, ChromeLayer::Ground),
+        );
+        let picker = taskbar.picker();
+        for (index, cell) in layout.cells.iter().enumerate() {
+            if cell.is_empty() {
+                continue;
+            }
+            let (Some(preview), Some(entry)) = (picker.preview(index), picker.entries().get(index))
+            else {
+                continue;
+            };
+            preview.render(
+                &mut surface,
+                local_rect(*cell, origin),
+                scale,
+                theme,
+                entry.thumbnail(),
+            );
+        }
         Some(surface)
     }
 

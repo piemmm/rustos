@@ -17,6 +17,11 @@ id = "os.tairix.viewer"
 name = "viewer"
 version = "0.1.0"
 kind = "application"
+# The identity the desktop's icon-bar information panel states, drawn from
+# this *signed* manifest rather than from anything the running process says
+# about itself (plans/NEW-TASKBAR.md).
+purpose = "Read a text document in a window"
+author = "The TAIRiX Project"
 capabilities = ["CAP_CONSOLE_WRITE", "CAP_SHM"]
 # File-type associations: the text content the viewer can display. The file
 # manager offers the viewer as an "Open With…" candidate for a file of one of

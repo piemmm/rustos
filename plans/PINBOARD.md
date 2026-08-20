@@ -8,10 +8,12 @@ settings all three read.
 `AGENTS.md` is binding and wins over this document wherever they disagree.
 This spec defers to its companions and MUST stay consistent with them:
 
-- **Desktop icons** — `plans/NEW-TASKBAR.md` T7/T16 owns the desktop icon
-  surface, its grid, and why the desktop is not a taskbar-pin drag source.
-  This document changes exactly one thing there: the icon flow becomes a
-  user setting (§4) instead of a fixed trailing column.
+- **Desktop icons** — `plans/NEW-TASKBAR.md` T16 owns the desktop icon
+  surface and its grid. This document changes exactly one thing there: the
+  icon flow becomes a user setting (§4) instead of a fixed trailing column.
+  A desktop icon is a **shortcut** — a symlink to a bundle — not a taskbar
+  pin: taskbar pinning does not exist, and applications reach the bar by
+  running (`plans/NEW-TASKBAR.md` T6/T7).
 - **Compositor** — `plans/COMPOSITOR-WORK.md` and `userland/gui/wm` own the
   desktop layer (`Compositor::set_desktop`). The pinboard paints into that
   one layer; it never becomes a window and never gains a second layer. It is
@@ -27,9 +29,10 @@ This spec defers to its companions and MUST stay consistent with them:
   and the chooser are built from. No new control family is defined here.
 - **Bundles / help / resolution** — `plans/APPS.md` owns the `.app` bundle
   the chooser ships as.
-- **Settings stores** — `lib/taskpins` is the pattern the settings document
-  follows: a bounded, fail-closed, line-grammar text document under the
-  user's own `Settings/` tree.
+- **Settings stores** — the shared per-user store pattern the settings
+  document follows: a bounded, fail-closed, line-grammar text document under
+  the user's own `Settings/` tree, exactly as `lib/proglib`'s user overlay
+  does.
 
 ## Terminology
 
@@ -83,7 +86,7 @@ One document, one engine, one writer.
 
 - **Path** — `<home>/Settings/Pinboard/pinboard.conf`, spelled once by
   `tairix_wallpaper::user_settings_path`.
-- **Grammar** — the shared per-user store grammar (`lib/taskpins`): one
+- **Grammar** — the shared per-user store grammar: one
   `key value` setting per line, `#` comments, blank lines ignored. The key
   registry is closed; an unknown key, a duplicate key, an over-long line, an
   over-long document, or an unparsable value refuses the whole document.

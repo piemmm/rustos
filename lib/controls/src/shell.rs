@@ -1,8 +1,9 @@
-//! Shell-surface controls: [`Notification`], [`TaskbarItem`], and
-//! [`TraySignal`] (spec §11.25–§11.27).
+//! Shell-surface controls: [`Notification`], [`TaskbarItem`],
+//! [`WindowPreview`], and [`TraySignal`] (spec §11.25–§11.27).
 //!
 //! These are the desktop's *shell* surfaces — the transient message, the
-//! taskbar entry, and the notification-area status capsule. Each is a
+//! icon-bar entry, the window-picker cell, and the notification-area status
+//! capsule. Each is a
 //! first-class Reactive Alloy control drawn over the shared `crate::paint`
 //! core (plate, rail, Heat Seam, Signal Bead) and the shared `lib/theme`
 //! tokens, so nothing here restates a visual recipe. A
@@ -25,8 +26,8 @@ use crate::collection::{Card, CardAction};
 use crate::damage;
 use crate::paint::{
     foreground, inset, key_activation, paint_bead, paint_count_badge, paint_icon_slot, paint_plate,
-    paint_surface_plate, plate_border, pointer_activation, rail_thickness, resolve_bead,
-    resolve_frame, resolve_rail, role_font, seam_thickness, seam_width, surface_rect,
+    paint_surface_plate, paint_text_line, plate_border, pointer_activation, rail_thickness,
+    resolve_bead, resolve_frame, resolve_rail, role_font, seam_thickness, seam_width, surface_rect,
     text_plate_height, to_i32, BeadShape, ChromeLayer, PlateStyle, FULL_COLOUR,
 };
 use crate::state::{
@@ -238,78 +239,36 @@ pub enum TaskbarItemAction {
     Activated,
 }
 
-/// A taskbar item's window-visibility state (spec §11.26).
+/// An icon-bar slot for one running application (spec §11.26).
 ///
-/// These are mutually exclusive — a window cannot be both the active window and
-/// minimized at once, and a pinned shortcut with no window at all is neither —
-/// so they are one enum rather than independent flags (illegal states
-/// unrepresentable).
-#[derive(Copy, Clone, Debug, Eq, PartialEq, Default)]
-pub enum TaskVisibility {
-    /// No window: a pinned shortcut whose application is not running. It shows
-    /// nothing but its icon until hovered or focused, so a launcher-only slot
-    /// never masquerades as a running task.
-    Closed,
-    /// Running and visible, but not the active window — shown with a short
-    /// muted presence mark on the lower edge.
-    #[default]
-    Running,
-    /// The active (focused) window — shown with a full-width accent seam on
-    /// the lower edge, so it differs from a merely running window in length as
-    /// well as in hue.
-    Active,
-    /// Minimized — a recessed plate and a non-colour mark alongside the
-    /// presence mark, still restorable.
-    Minimized,
-}
-
-/// How much of a slot's lower edge a *running* item's presence mark covers, in
-/// permille of the plate width.
+/// A slot states application identity (its icon), live activity, and
+/// attention on one Alloy Plate. It is always seated in the bar
+/// ([`PlateSeating::Bar`]), so it wears no perimeter and shows no plate at
+/// all while it rests: a run of applications reads as one bar rather than a
+/// row of boxes, and every state is stated *inside* the slot. Hover, press,
+/// or keyboard focus raise the plate as a wash. Background work shows a Heat
+/// Seam; an attention request or a recovery/denied state shows a shape-coded
+/// Signal Bead (spec §13, §15). It renders state and reports
+/// [`TaskbarItemAction`]; the owner performs the application operation.
 ///
-/// Short enough to read as a mark rather than an edge, so the active window's
-/// full-width accent seam is distinguishable from it at a glance and by length
-/// alone.
-const PRESENCE_MARK_PERMILLE: u64 = 380;
-
-/// The width of a running item's presence mark inside an `inner_w`-wide plate:
-/// [`PRESENCE_MARK_PERMILLE`] of the plate, rounded up to one pixel so presence
-/// is never silently dropped in a narrow slot, and never wider than the plate
-/// itself.
-#[must_use]
-fn presence_mark_width(inner_w: u32) -> u32 {
-    let scaled = u64::from(inner_w) * PRESENCE_MARK_PERMILLE / 1000;
-    u32::try_from(scaled).unwrap_or(inner_w).max(1).min(inner_w)
-}
-
-/// A taskbar entry for one application/window (spec §11.26).
+/// **A slot draws no running/focused mark.** Every slot on the icon bar *is*
+/// a running application — the bar lists nothing else — so a "this one is
+/// running" seam would mark every slot alike, and which window holds focus
+/// is stated by that window's own chrome rather than by a mark on the
+/// application it belongs to.
 ///
-/// A taskbar item combines application identity (its icon), live activity,
-/// attention, and window-visibility state on one Alloy Plate. It is
-/// always seated in the bar ([`PlateSeating::Bar`]), so it wears no perimeter
-/// and shows no plate at all while it rests: a run of pins and tasks reads as
-/// one bar rather than a row of boxes, and every state is stated *inside* the
-/// slot. An item with a window shows a lower presence mark — a short muted one
-/// while merely running, the full-width accent seam for the *active* window; a
-/// minimized window's item recesses its plate and shows a distinct non-colour
-/// mark while remaining restorable; background work shows a Heat Seam; an
-/// attention request or a recovery/denied state shows a shape-coded Signal Bead
-/// (spec §13, §15). It renders state and reports [`TaskbarItemAction`]; the
-/// owner performs the window operation.
+/// The slot draws a centred, plate-sized icon and no text. A window title is
+/// the owner's model data, not the item's: it belongs to the owner's context
+/// surfaces (the window picker, the application menu), and a title change
+/// must not repaint a bar whose pixels are identical.
 ///
-/// The slot draws a centred, plate-sized icon and no text, which is what makes
-/// a pin and a running task the same shape of button. The window title is the
-/// owner's model data, not the item's: a title change must not repaint a bar
-/// whose pixels are identical.
-///
-/// Equal items draw the same pixels, so a taskbar may use `==` as its repaint
-/// gate: the icon, window visibility, attention flag, and visible state
-/// compare. The pointer coordinate and press latch do not — no render path
-/// reads either.
+/// Equal items draw the same pixels, so an icon bar may use `==` as its
+/// repaint gate: the icon, attention flag, and visible state compare. The
+/// pointer coordinate and press latch do not — no render path reads either.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TaskbarItem {
     icon: IconKind,
     state: ControlState,
-    visibility: TaskVisibility,
     attention: bool,
     /// The last pointer position — hit-testing input, never drawn.
     pointer: RenderInvariant<Point>,
@@ -318,13 +277,12 @@ pub struct TaskbarItem {
 }
 
 impl TaskbarItem {
-    /// A running, inactive taskbar item showing the given icon.
+    /// A resting icon-bar slot showing the given icon.
     #[must_use]
     pub fn new(icon: IconKind) -> Self {
         Self {
             icon,
             state: ControlState::idle(),
-            visibility: TaskVisibility::Running,
             attention: false,
             pointer: RenderInvariant::new(Point::ORIGIN),
             armed: RenderInvariant::new(false),
@@ -335,13 +293,6 @@ impl TaskbarItem {
     #[must_use]
     pub fn with_state(mut self, state: ControlState) -> Self {
         self.state = state;
-        self
-    }
-
-    /// This item with the given window-visibility state.
-    #[must_use]
-    pub fn with_visibility(mut self, visibility: TaskVisibility) -> Self {
-        self.visibility = visibility;
         self
     }
 
@@ -368,26 +319,9 @@ impl TaskbarItem {
         self.state.focus.focused = focused;
     }
 
-    /// Set the item's window-visibility state.
-    pub fn set_visibility(&mut self, visibility: TaskVisibility) {
-        self.visibility = visibility;
-    }
-
-    /// The item's window-visibility state.
-    #[must_use]
-    pub fn visibility(&self) -> TaskVisibility {
-        self.visibility
-    }
-
     /// Set whether this item is requesting attention.
     pub fn set_attention(&mut self, attention: bool) {
         self.attention = attention;
-    }
-
-    /// Whether this item is the active window's entry.
-    #[must_use]
-    pub fn is_active(&self) -> bool {
-        self.visibility == TaskVisibility::Active
     }
 
     /// The Signal Bead the item shows, if any: an authority/recovery/complete
@@ -443,19 +377,9 @@ impl TaskbarItem {
         let radius = scale.scale_length(metrics.control_corner_radius);
         let frame = resolve_frame(theme, ControlRole::Neutral, self.state);
 
-        // An item rests without a plate at all — only its icon and its presence
-        // mark sit on the bar — so a strip of pins and tasks reads as one bar
-        // and a launcher-only slot never masquerades as a running task; hover,
-        // press, or keyboard focus raise the plate as a wash. A minimized item
-        // instead recesses its plate deliberately (a flatter fill than the bar)
-        // so it reads as put-away without relying on colour.
-        let recessed = self.visibility == TaskVisibility::Minimized
-            && self.state.disposition() != ControlDisposition::DisabledByState;
-        let frame = if recessed {
-            frame.with_plate(Color::from(palette.surface))
-        } else {
-            frame
-        };
+        // A slot rests without a plate at all — only its icon sits on the bar
+        // — so a run of applications reads as one bar; hover, press, or
+        // keyboard focus raise the plate as a wash.
         if let Some((plate, rim)) = frame.face(PlateSeating::Bar) {
             paint_plate(
                 surface,
@@ -498,7 +422,6 @@ impl TaskbarItem {
         self.paint_status(
             surface,
             (inner_x, inner_y, inner_w, inner_h),
-            border,
             bead_size,
             scale,
             theme,
@@ -520,79 +443,28 @@ impl TaskbarItem {
         paint_icon_slot(surface, (x, y, side), self.icon, tint, artwork, FULL_COLOUR);
     }
 
-    /// The presence mark an item with a window shows on its lower edge: the
-    /// full-width accent seam for the active window, a short muted mark for a
-    /// running or minimized one, and nothing for a pinned shortcut that is not
-    /// running.
-    ///
-    /// This is what tells a running application from a closed launcher pin on a
-    /// bar where no control wears a perimeter, so the two differ in *length* as
-    /// well as in hue and stay legible without colour vision.
-    fn presence_mark(&self, inner_w: u32, theme: &Theme) -> Option<(Color, u32)> {
-        let palette = theme.palette();
-        match self.visibility {
-            TaskVisibility::Closed => None,
-            TaskVisibility::Active => Some((Color::from(palette.accent), inner_w)),
-            TaskVisibility::Running | TaskVisibility::Minimized => Some((
-                Color::from(palette.on_surface_muted),
-                presence_mark_width(inner_w),
-            )),
-        }
-    }
-
-    /// Paint the item's status edges and marks: the lower presence mark, the
-    /// activity Heat Seam above it, the minimized non-colour tick, and the
-    /// top-trailing Signal Bead.
+    /// Paint the item's status marks: the activity Heat Seam on the lower
+    /// edge and the top-trailing Signal Bead.
     fn paint_status(
         &self,
         surface: &mut Surface,
         inner: (u32, u32, u32, u32),
-        border: u32,
         bead_size: u32,
         scale: Scale,
         theme: &Theme,
     ) {
         let (inner_x, inner_y, inner_w, inner_h) = inner;
         let palette = theme.palette();
-        // Bottom edge: the presence mark sits on the very bottom; the activity
-        // Heat Seam sits just above it so both read at once.
         let seam_h = seam_thickness(theme, scale).min(inner_h);
-        let mut seam_floor = inner_y + inner_h;
-        if let Some((color, mark_w)) = self.presence_mark(inner_w, theme) {
-            surface.fill_rect(
-                inner_x + (inner_w.saturating_sub(mark_w)) / 2,
-                seam_floor - seam_h,
-                mark_w,
-                seam_h,
-                color,
-            );
-            seam_floor = seam_floor.saturating_sub(seam_h);
-        }
         let activity_w = seam_width(self.state.activity, inner_w);
-        if activity_w > 0 && seam_floor > inner_y + seam_h {
+        if activity_w > 0 && inner_h > seam_h {
             surface.fill_rect(
                 inner_x,
-                seam_floor - seam_h,
+                inner_y + inner_h - seam_h,
                 activity_w,
                 seam_h,
                 Color::from(palette.accent),
             );
-        }
-
-        // A minimized item's distinct non-colour mark: a short muted tick on
-        // the leading edge (present regardless of hue).
-        if self.visibility == TaskVisibility::Minimized {
-            let tick_h = inner_h / 3;
-            if tick_h > 0 {
-                let ty = inner_y + (inner_h.saturating_sub(tick_h)) / 2;
-                surface.fill_rect(
-                    inner_x,
-                    ty,
-                    border.max(1),
-                    tick_h,
-                    Color::from(palette.on_surface_muted),
-                );
-            }
         }
 
         // The top-trailing Signal Bead.
@@ -631,6 +503,228 @@ impl TaskbarItem {
     /// [`TaskbarItemAction::Activated`].
     pub fn on_key(&mut self, key: Key) -> Option<TaskbarItemAction> {
         key_activation(self.state, key).then_some(TaskbarItemAction::Activated)
+    }
+}
+
+// --- WindowPreview -----------------------------------------------------
+
+/// The outcome of feeding input to a [`WindowPreview`].
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum WindowPreviewAction {
+    /// The preview was activated (clicked, or Space/Enter while focused);
+    /// the owner raises and focuses the window it stands for.
+    Activated,
+}
+
+/// One cell of the window picker an icon-bar slot opens: a captioned
+/// thumbnail of a single window (spec §11.26).
+///
+/// Where a [`TaskbarItem`] is one *application*, a preview is one *window* of
+/// it — so this is the surface that names a window, and the caption is the
+/// window's own title. The thumbnail is a scaled copy of that window's last
+/// presented frame, pre-rasterised by the owner at
+/// [`thumbnail_bounds`](Self::thumbnail_bounds) exactly as every other
+/// control takes owner-supplied artwork: a control never scales a live
+/// surface on a paint path, and never parses image bytes.
+///
+/// A window with no thumbnail yet (one that has not presented, or whose
+/// pixels the owner released under memory pressure) draws its application's
+/// class glyph in the thumbnail's place, so a cell can never come up blank.
+///
+/// Equal previews draw the same pixels, so a picker may use `==` as its
+/// repaint gate: the caption, the glyph, and the visible state compare. The
+/// pointer coordinate and press latch do not — no render path reads either.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct WindowPreview {
+    caption: String,
+    icon: IconKind,
+    state: ControlState,
+    /// The last pointer position — hit-testing input, never drawn.
+    pointer: RenderInvariant<Point>,
+    /// The press latch; the press *look* lives in `state.pointer`.
+    armed: RenderInvariant<bool>,
+}
+
+impl WindowPreview {
+    /// A resting preview captioned `caption`, falling back to `icon` when no
+    /// thumbnail is supplied.
+    #[must_use]
+    pub fn new(caption: impl Into<String>, icon: IconKind) -> Self {
+        Self {
+            caption: caption.into(),
+            icon,
+            state: ControlState::idle(),
+            pointer: RenderInvariant::new(Point::ORIGIN),
+            armed: RenderInvariant::new(false),
+        }
+    }
+
+    /// This preview with the given composed state.
+    #[must_use]
+    pub fn with_state(mut self, state: ControlState) -> Self {
+        self.state = state;
+        self
+    }
+
+    /// The preview's composed state.
+    #[must_use]
+    pub fn state(&self) -> ControlState {
+        self.state
+    }
+
+    /// Replace the preview's composed state.
+    pub fn set_state(&mut self, state: ControlState) {
+        self.state = state;
+    }
+
+    /// Set the preview's keyboard focus.
+    pub fn set_focused(&mut self, focused: bool) {
+        self.state.focus.focused = focused;
+    }
+
+    /// The window's title, as the caption states it.
+    #[must_use]
+    pub fn caption(&self) -> &str {
+        &self.caption
+    }
+
+    /// The rectangle inside `bounds` the thumbnail occupies: the plate's
+    /// interior above the one caption line.
+    ///
+    /// This is the render geometry itself, exposed so an owner scaling a
+    /// window's frame produces it at exactly the size
+    /// [`render`](Self::render) will place — the two can never disagree, and
+    /// a picker sizes a whole row of thumbnails from this one query.
+    /// [`Rect::EMPTY`] when `bounds` cannot hold a caption and a thumbnail.
+    #[must_use]
+    pub fn thumbnail_bounds(&self, bounds: Rect, scale: Scale, theme: &Theme) -> Rect {
+        let Some((x, y, w, h)) = surface_rect(bounds) else {
+            return Rect::EMPTY;
+        };
+        let border = plate_border(theme, scale);
+        let pad = scale.scale_length(theme.metrics().control_inset);
+        let font = role_font(theme, scale, TextRole::Body);
+        let caption_h = font.line_height().saturating_add(pad);
+        let inner_w = w.saturating_sub(border.saturating_add(pad).saturating_mul(2));
+        let inner_h = h
+            .saturating_sub(border.saturating_add(pad).saturating_mul(2))
+            .saturating_sub(caption_h);
+        if inner_w == 0 || inner_h == 0 {
+            return Rect::EMPTY;
+        }
+        Rect::new(
+            to_i32(x.saturating_add(border).saturating_add(pad)),
+            to_i32(y.saturating_add(border).saturating_add(pad)),
+            inner_w,
+            inner_h,
+        )
+    }
+
+    /// Paint the preview into `surface` at `bounds` for the active theme.
+    ///
+    /// `thumbnail` is the window's own scaled frame, pre-rasterised by the
+    /// owner at [`thumbnail_bounds`](Self::thumbnail_bounds); `None` falls
+    /// back to the class glyph so the cell always states something.
+    pub fn render(
+        &self,
+        surface: &mut Surface,
+        bounds: Rect,
+        scale: Scale,
+        theme: &Theme,
+        thumbnail: Option<&Surface>,
+    ) {
+        let Some((x, y, w, h)) = surface_rect(bounds) else {
+            return;
+        };
+        let palette = theme.palette();
+        let metrics = theme.metrics();
+        let border = plate_border(theme, scale);
+        let radius = scale.scale_length(metrics.control_corner_radius);
+        let frame = resolve_frame(theme, ControlRole::Neutral, self.state);
+        if let Some((plate, rim)) = frame.face(PlateSeating::Panel) {
+            paint_plate(
+                surface,
+                (x, y, w, h),
+                &PlateStyle {
+                    radius,
+                    border,
+                    plate,
+                    rim,
+                    focused: frame.focused,
+                    ring: Color::from(palette.rim_active),
+                },
+            );
+        }
+
+        let thumb = self.thumbnail_bounds(bounds, scale, theme);
+        if thumb.is_empty() {
+            return;
+        }
+        let (tx, ty, tw, th) = (thumb.left(), thumb.top(), thumb.width, thumb.height);
+        // The owner scaled the frame to exactly this rectangle, so the copy
+        // is a straight blit — the pixels are already right. A window with no
+        // frame yet draws its application's glyph in its place.
+        if let Some(image) = thumbnail {
+            surface.blit(tx, ty, image);
+        } else {
+            let side = tw.min(th);
+            paint_icon_slot(
+                surface,
+                (
+                    u32::try_from(tx).unwrap_or(0) + (tw.saturating_sub(side)) / 2,
+                    u32::try_from(ty).unwrap_or(0) + (th.saturating_sub(side)) / 2,
+                    side,
+                ),
+                self.icon,
+                frame.label,
+                None,
+                FULL_COLOUR,
+            );
+        }
+
+        let pad = scale.scale_length(metrics.control_inset);
+        let font = role_font(theme, scale, TextRole::Body);
+        let caption_y = u32::try_from(ty).unwrap_or(0).saturating_add(th);
+        paint_text_line(
+            surface,
+            &self.caption,
+            (
+                u32::try_from(tx).unwrap_or(0),
+                caption_y.saturating_add(pad),
+            ),
+            (y.saturating_add(h).saturating_sub(border), tw, 0),
+            font,
+            frame.label,
+        );
+    }
+
+    /// Feed a pointer event; a completed primary click reports
+    /// [`WindowPreviewAction::Activated`].
+    pub fn on_pointer(
+        &mut self,
+        event: &InputEvent,
+        bounds: Rect,
+        damage: &mut Region,
+    ) -> Option<WindowPreviewAction> {
+        if let InputEvent::PointerMoved { to } = event {
+            *self.pointer = *to;
+        }
+        let inside = bounds.contains(*self.pointer);
+        pointer_activation(
+            &mut self.state,
+            &mut self.armed,
+            event,
+            inside,
+            bounds,
+            damage,
+        )
+        .then_some(WindowPreviewAction::Activated)
+    }
+
+    /// Feed a key event; Space or Enter while focused reports
+    /// [`WindowPreviewAction::Activated`].
+    pub fn on_key(&mut self, key: Key) -> Option<WindowPreviewAction> {
+        key_activation(self.state, key).then_some(WindowPreviewAction::Activated)
     }
 }
 

@@ -548,20 +548,6 @@ impl FrameColors {
             PlateSeating::Bar => Some((self.plate, self.plate)),
         }
     }
-
-    /// The same frame wearing `plate` instead of its resolved fill.
-    ///
-    /// A deliberate fill is a statement, so the frame stops being the quiet
-    /// resting one: a bar-seated control that recesses its plate to read as
-    /// put-away paints that recess rather than dropping the plate entirely.
-    #[must_use]
-    pub(crate) fn with_plate(self, plate: Color) -> Self {
-        Self {
-            plate,
-            resting: false,
-            ..self
-        }
-    }
 }
 
 /// How strongly a control's role is stated on its surface.

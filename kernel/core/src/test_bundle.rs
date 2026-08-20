@@ -361,6 +361,8 @@ pub(crate) fn composed_bundle(caps: Vec<CapabilityId>) -> (MemFs, [u8; 32], Vec<
         associations: Vec::new(),
         library: None,
         library_icon: None,
+        purpose: None,
+        author: None,
     };
     let composed = compose_signed_appinfo(
         &SEED,

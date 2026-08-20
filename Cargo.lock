@@ -883,7 +883,6 @@ dependencies = [
  "tairix-rt",
  "tairix-sandbox",
  "tairix-taskbar",
- "tairix-taskpins",
  "tairix-theme",
  "tairix-wallpaper",
  "tairix-window",
@@ -2420,7 +2419,6 @@ name = "tairix-taskbar"
 version = "0.0.0"
 dependencies = [
  "tairix-abi",
- "tairix-browse",
  "tairix-controls",
  "tairix-font",
  "tairix-geometry",
@@ -2431,15 +2429,6 @@ dependencies = [
  "tairix-raster",
  "tairix-reclaim",
  "tairix-theme",
-]
-
-[[package]]
-name = "tairix-taskpins"
-version = "0.0.0"
-dependencies = [
- "tairix-fuzzseed",
- "tairix-proglib",
- "tairix-util",
 ]
 
 [[package]]
@@ -2544,6 +2533,21 @@ dependencies = [
  "tairix-arch-api",
  "tairix-arch-x86_64",
  "tairix-itest-harness",
+]
+
+[[package]]
+name = "tairix-test-appbar-qemu-aarch64"
+version = "0.0.0"
+dependencies = [
+ "tairix-abi",
+ "tairix-appload",
+ "tairix-arch-aarch64",
+ "tairix-itest-harness",
+ "tairix-kalloc",
+ "tairix-kernel",
+ "tairix-kernel-ipc",
+ "tairix-log",
+ "tairix-util",
 ]
 
 [[package]]
@@ -4475,23 +4479,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "tairix-test-taskbar-pin-qemu-aarch64"
-version = "0.0.0"
-dependencies = [
- "tairix-abi",
- "tairix-appload",
- "tairix-arch-aarch64",
- "tairix-itest-harness",
- "tairix-kalloc",
- "tairix-kernel",
- "tairix-kernel-core",
- "tairix-kernel-ipc",
- "tairix-log",
- "tairix-taskpins",
- "tairix-util",
-]
-
-[[package]]
 name = "tairix-test-tcpecho"
 version = "0.0.0"
 dependencies = [
@@ -5157,13 +5144,13 @@ dependencies = [
  "tairix-syshelp",
  "tairix-taskbar",
  "tairix-terminal",
+ "tairix-test-appbar-qemu-aarch64",
  "tairix-test-arxfs-image",
  "tairix-test-autoload-input-qemu-aarch64",
  "tairix-test-encrypted-root-image",
  "tairix-test-fat32-image",
  "tairix-test-memsoak",
  "tairix-test-netstack-wire",
- "tairix-test-taskbar-pin-qemu-aarch64",
  "tairix-test-tcpecho",
  "tairix-test-tcpserve",
  "tairix-theme",

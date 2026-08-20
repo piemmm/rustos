@@ -6,7 +6,7 @@ GNOME/Windows-style bar at a configured screen edge (`AGENTS.md` §10,
 screen-facing sides by the theme's `Metrics::taskbar_margin` and keeps its
 normal thickness on the work-area side. This page describes the **layout,
 model, and rendering**: the geometry of every region, pointer hit-testing for
-input routing, the program-library popup / pin-strip / task-list /
+input routing, the program-library popup / application-strip /
 notification-area / Switchboard-tray state machines, the bar's right-click
 **context menu**,
 and painting those regions — including the clock label's **text** — into a
@@ -74,14 +74,10 @@ From the leading end to the trailing end:
   never removable (`plans/NEW-TASKBAR.md` T4) — and they are quiet peers: on an
   icon strip no single icon is the primary action of the surface, so neither
   carries a role fill.
-- **Pin strip** — one compact square slot per user-pinned application
-  shortcut, in the user's stored order, between the launchers and the task
-  list (`plans/NEW-TASKBAR.md` T6). Zero-length (but still positioned) when
-  nothing is pinned; `BarLayout::pin_drop_index` maps a drop point in the
-  strip-plus-task band to the pin-list insertion index for the
-  drag-to-taskbar gesture (see *Dragging a library entry to pin it*).
-- **Task list** — the flexible middle region, between the pin strip
-  and the notification area, holding one fixed-width slot per running task.
+- **Application strip** — the flexible middle region, between the launchers
+  and the notification area, holding one fixed-width icon-only slot per
+  *running application* in the order the session first saw each of them (see
+  *The application strip*).
 - **Notification area** — status/notification icons, packed immediately
   before the clock.
 - **Clock** — immediately before the Switchboard capsule. Its display text is
@@ -95,36 +91,36 @@ From the leading end to the trailing end:
   derive, dominant state hung > pressure > jobs > recovery > calm, with the
   working seam / pressure rail / recovery posture composed orthogonally, and
   an absent service deriving the calm capsule (fail closed). Its slot is
-  computed **first** among the trailing regions, so the clock, icons, pins,
-  and tasks can never displace it — only the permanent leading launchers
+  computed **first** among the trailing regions, so the clock, the icons, and
+  the applications can never displace it — only the permanent leading launchers
   outrank it on a degenerate screen. Hover expands the capsule's instrument
   readout, presented like the other popovers
   (`Taskbar::tray_readout_layout`), and a press resolves as a tap or a hold
   (see *The Switchboard capsule's tap-or-hold gesture*).
 
-`BarLayout::compute` turns the config plus the current pin, task, and icon
+`BarLayout::compute` turns the config plus the current application and icon
 counts into the screen `Rect` of every region. All arithmetic saturates, so a
 pathological screen size or extent fails closed *inside* the bar rather than
-wrapping (`AGENTS.md` §2.9); a launcher, pin, task, or icon slot that does
+wrapping (`AGENTS.md` §2.9); a launcher, application, or icon slot that does
 not fit its region is `Rect::EMPTY` and therefore never hit, and the trailing
 regions clip against the permanent leading launchers (never the reverse), so
 a degenerate screen shrinks the clock and icons to nothing — and, last of
 all, the Switchboard capsule — rather than overlaying them on a launcher.
 `BarLayout::hit_test`
 maps a pointer to the `Hit` element under it (the Library button, the Files
-button, a pin index, a task index, a notification index, the clock, or the
+button, an application index, a notification index, the clock, or the
 Switchboard capsule), which
 is what input routing dispatches (see *Input routing*).
 
 ## The separator rule
 
-The program library is the bar's one *system* launcher; the file manager,
-like a pin, is an application. `BarLayout::separator` states that grouping
+The program library is the bar's one *system* launcher; the file manager is
+an application. `BarLayout::separator` states that grouping
 with a single rule immediately after the Library button, so the leading end
 of a horizontal bar reads
 
 ```text
-[ library ] | [ files ][ pin ][ pin ] ...
+[ library ] | [ files ][ app ][ app ] ...
 ```
 
 and a vertical bar reads the same way top-to-bottom, the rule crossing the
@@ -137,10 +133,10 @@ once and read by both the painter and the tests:
 - **Length** — the bar's thickness less one `control_inset` at each end, so
   the rule stops short of both long edges and never runs into the rounded
   corners the compositor applies.
-- **Gutter** — the rule plus one `control_gap` on each side. Files, the pins,
-  the task list, and every trailing region begin one whole gutter past the
-  Library button; the trailing clip floor moves with them, so a degenerate
-  screen still collapses the clock and icons before the launchers.
+- **Gutter** — the rule plus one `control_gap` on each side. Files, the
+  application strip, and every trailing region begin one whole gutter past
+  the Library button; the trailing clip floor moves with them, so a
+  degenerate screen still collapses the clock and icons before the launchers.
 - **Colour** — the theme palette's `border`, the same role every other
   separator on the desktop uses.
 
@@ -211,7 +207,7 @@ them.
 **The contract.** Every change that alters what a surface draws latches that
 surface, and a change touching several latches all of them:
 
-- a hover moving between bar buttons, pins, or task slots → `bar`;
+- a hover moving between bar buttons or application slots → `bar`;
 - a highlight moving inside the open context menu → `menu`;
 - opening or closing the popup → `library` **and** `bar` (the Library button
   reads as visually held open);
@@ -279,25 +275,24 @@ colour role from the `Palette`. Its last argument is the caller's
   through a plain `Surface` fill — the renderer draws the laid-out
   `BarLayout::separator` rectangle and knows nothing of the gutter
   arithmetic behind it (`AGENTS.md` §2.2);
-- each **pin slot** and each **task slot** is one shared `tairix-controls`
-  `TaskbarItem` — the bar's application buttons have exactly one visual
-  recipe (`AGENTS.md` §2.2), and that recipe is icon-only: a centred icon
-  sized off the plate, no label, in a slot the same extent as a pin's, so a
-  run of pins and running tasks reads as one strip of equal icons. A window's
-  title is model data (`TaskEntry::title`) the context menu reads, never ink
-  on the bar. The item's `TaskVisibility` paints the state through
-  the **presence mark** on the lower edge: the **active** window's item takes
-  the full-width accent seam, a merely **running** one a short centred muted
-  mark (so presence and activation differ in length as well as in hue), a
-  **minimised** one that same mark plus a recessed plate and the muted leading
-  tick, and a **closed** pin (its application not running) no mark and no plate
-  at all — only the icon sits on the bar — until hovered;
-- a pin's and a running task's per-application **artwork** (the owning
-  bundle's icon, read and rasterised by the session through the sandboxed
-  icon pipeline — see [the session](session.md)) is blitted through the
-  control in place of the built-in glyph. A task's comes from the bundle the
-  kernel attested opened its window, so an open window is recognised by its
-  own application whether or not that application is pinned;
+- each **application slot** is one shared `tairix-controls` `TaskbarItem` —
+  the bar's application buttons have exactly one visual recipe
+  (`AGENTS.md` §2.2), and that recipe is icon-only: a centred icon sized off
+  the plate, no label, in a slot the same extent as a launcher's, so a run of
+  applications reads as one strip of equal icons. The application's label is
+  model data (`AppSlot::label`) a context surface reads, never ink on the bar,
+  and a slot carries **no** presence, focus, or minimised mark: it rests as a
+  bare glyph on the bar and washes lighter under the pointer, and nothing
+  else;
+- each slot's per-application **artwork** (the owning bundle's icon, read and
+  rasterised by the session through the sandboxed icon pipeline — see
+  [the session](session.md)) is blitted through the control in place of the
+  built-in glyph. It comes from the bundle the kernel attested owns the
+  process, so an application is recognised by its own picture;
+- each **picker cell** is one shared `tairix-controls` `WindowPreview`: a
+  captioned thumbnail of that window's last presented frame, scaled by the
+  session to the cell's own thumbnail rectangle, falling back to the
+  application's class glyph when a window has no frame yet;
 - each notification icon slot draws a **scalable vector glyph** (see
   *Notification icons* below), tinted in the **muted** foreground colour;
 - the **Switchboard capsule** is the shared `tairix-controls` `TraySignal`
@@ -365,16 +360,16 @@ Every application icon the bar draws resolves through **one** rule, written
 once in `render` rather than restated per slot (`AGENTS.md` §2.2):
 
 1. the artwork its owner already supplied for that specific application (a
-   `PinView`'s bundle icon, a running task's own bundle icon, a library row's
-   own icon), else
+   running application's own bundle icon, a library row's own icon, a picker
+   cell's window thumbnail), else
 2. the artwork the `IconArtwork` lookup holds for the slot's `IconKind` — the
    shipped class master under `/System/Graphics/Icons`, else
 3. the control's built-in vector glyph.
 
 The bar reads no file and decodes no image: it *asks* the lookup the session
-owns, at exactly the pixel side the slot will be drawn at (`pin_icon_side`,
-`task_icon_side`, and the controls' own `icon_side`), so nothing is ever
-rescaled at draw time. Because the third rung always exists, resolution is
+owns, at exactly the pixel side the slot will be drawn at (`app_icon_side`,
+`picker_thumbnail_size`, and the controls' own `icon_side`), so nothing is
+ever rescaled at draw time. Because the third rung always exists, resolution is
 **total**: a lookup that
 answers nothing — `tairix_icon::NoArtwork`, a machine with no
 `/System/Graphics`, or a cache that is giving memory back under pressure —
@@ -481,7 +476,7 @@ the popup is closed (`AGENTS.md` §2.9).
 ### Each application's own icon
 
 An entry row shows the icon its bundle ships, and the popup carries that
-artwork the same way the pin strip does: the owner resolves it, the bar only
+artwork the same way the application strip does: the owner resolves it, the bar only
 draws it (`AGENTS.md` §2.2, §17.4). Three methods express the split:
 
 - `LibraryPopup::visible_icon_requests(layout, scale, theme)` reports one
@@ -500,94 +495,128 @@ application's icon on another's row. A row with no artwork draws the
 app-bundle glyph, which is why a library still lists legibly on a system with
 no artwork at all.
 
-## Task list
+## The window registry
 
-`TaskList` holds one `TaskEntry` per top-level window. At most one task is
-*focused*; a task is independently *minimised*. `TaskList::activate` applies
-the familiar click rule and reports the `ActivateOutcome` so the caller can
-drive the window manager:
+`TaskList` holds one `TaskEntry` per top-level window: its id, its title, and
+whether it is minimised. At most one window is *focused*, and the list also
+remembers the *previous* window — the one focused immediately before the last
+handover to a different one, the MRU-of-two behind the Switchboard capsule's
+middle-click switch.
 
-- clicking the focused, non-minimised task **minimises** it and drops focus;
-- clicking any other task (or a minimised one) **restores and focuses** it.
+The bar draws none of it. A slot on the bar is an **application**, and a
+window is reached through the hover picker; this is the one registry those two
+read, together with the capsule's scroll-to-cycle and previous-task gestures.
+Focusing a window restores it, which is what choosing its picker cell does;
+minimising is the title bar's own control and the only way a window leaves the
+screen without closing. Adding a window with a duplicate id, or
+removing/retitling/minimising an unknown one, changes nothing and is reported
+as such — the window manager assigns unique ids, so a clash signals a bug
+rather than a benign retry.
 
-Adding a task with a duplicate id, or removing/activating an unknown id,
-changes nothing and is reported as such — the window manager assigns unique
-ids, so a clash signals a bug rather than a benign retry.
+## The application strip
 
-## Pinned shortcuts
+`AppStrip` holds the session's resolved view of each running application
+(`plans/NEW-TASKBAR.md`). The session hands the bar one `AppSlot` per
+application — its display label and class glyph, its rasterised bundle
+artwork, the windows it owns (by id, never a second copy of their state), the
+menu it declared over the window channel, and whether it handles the slot's
+primary click — through `Taskbar::set_apps`. `Taskbar::app_icon_side` exposes
+the exact pixel side a slot's icon paints at, through the same control
+geometry the renderer uses, so the session rasterises artwork at exactly the
+drawn size.
 
-`PinStrip` holds the session's *resolved view* of each pin
-(`plans/NEW-TASKBAR.md` T6): pins are per-user configuration (the
-[`tairix-taskpins`](../lib/taskpins.md) store, read and written by the
-session under the user's own identity), and the bar receives one `PinView`
-per pin — a display label, the class glyph, its optional rasterised bundle
-artwork, the program-library entry it references (when it is an `entry`
-pin), and the running desktop window it currently matches, if any
-(`Taskbar::set_pins`). The strip derives each pin's live `TaskVisibility`
-from the `TaskList` at paint time — Active when its matched window is
-focused, Minimized when minimised, Running otherwise, and Closed when it
-has no live window (including a stale match, fail closed) — so there is
-never a second copy of window state to fall out of step.
+**A slot carries no presence or focus mark.** The bar shows which
+applications are running by showing them at all; there is no running bar
+under a slot, no focus seam, and no recessed minimised plate. Only the
+pointer's own wash distinguishes one slot from another.
 
-A primary press on a pin with a live window follows the task list's own
-click-to-activate / minimise rule (reported as `TaskActivated`); one with
-no window reports `ActivatePin { index }` and the session launches the
-pinned bundle. `Taskbar::pin_icon_side` exposes the exact pixel side a pin
-icon paints at (through the same control geometry the renderer uses), so
-the session rasterises artwork at exactly the drawn size.
+**Which applications hold a slot** is the session's answer, not the bar's
+(see [the session's icon bar](session.md#the-icon-bar)): an application that
+declared a presence keeps its slot for the life of its process, windows or
+not, and one that declared nothing but owns a window still gets a slot — with
+no menu and no default action — so no window is ever unreachable.
 
-## Dragging a library entry to pin it
+Because those two cases differ, an application declares its presence
+**before** it opens its first window. A declared presence belongs to the
+process, so declaring it first is what makes the slot carry the
+application's menu and default action from the moment it appears. Declared
+after a window, the session meanwhile derives a slot from that window alone,
+and for as long as the gap lasts the bar shows a slot that opens no menu and
+does nothing when clicked. All five shipped declaring applications go in this
+order.
 
-A pin is created by dragging a program out of the **program-library popup**
-and releasing it over the bar's pin band (`plans/NEW-TASKBAR.md` T7). The
-popup is the drag source because every row it lists is a *catalogued entry*
-by construction, so the gesture names an `EntryId` the store can record
-directly — nothing is guessed from a path, and nothing the catalog cannot
-vouch for can be pinned.
+A primary press on a slot reports one of three things:
 
-The gesture is the shared `lib/browse` `BundleDrag` threshold detector, the
-same one the file manager uses to drag a bundle out of a window, so there is
-one definition of "this press became a drag" on the desktop
-(`AGENTS.md` §2.2):
+- `AppDefault { app }` when the application declared that it handles the
+  click. The session relays it as an `AppBarDefault` event and does nothing
+  else — one click, one actor. (The terminal opens a fresh window here.)
+- `AppRaise { app }` when it declared no default action but owns a window: the
+  session raises and focuses its most recently used one.
+- `Ignored` when it has neither — the honest answer, never a guessed one.
 
-- a primary press on an **entry row** arms the detector instead of launching
-  at once (a folder header has nothing to drag and still toggles on the
-  press);
-- motion past the shared threshold reports `PinDragOffered { entry }` — once
-  per gesture, never repeatedly as the pointer keeps moving;
-- the release that ends the press reports `PinDragDropped`; where it landed
-  is the session's to resolve, and the popup stays open;
-- a press-and-release that never travelled is an ordinary click and
-  launches, so the gesture costs the click nothing;
-- `Escape` mid-drag reports `PinDragWithdrawn` and keeps the popup open, so
-  backing out of a drag does not also cost the user the listing;
-- a fresh press always supersedes an earlier arming, an offer whose row no
-  longer names an entry is abandoned rather than guessed at, and dismissing
-  the popup mid-drag withdraws the offer session-side, so a gesture never
-  outlives the popup it started in.
+The old click-to-minimise toggle is deliberately gone: a slot is an
+application, not a window. Minimising lives on the title bar, and a minimised
+window comes back by being chosen in the hover picker.
 
-The popup reports these as `PopupOutcome::{DragOffered, DragDropped,
-DragWithdrawn}` and the router surfaces them as the corresponding
-`TaskbarResponse`. The bar performs nothing: the session arms, withdraws, and
-resolves the offer, re-checking the entry against the live catalog at the
-drop and mapping the drop point through `BarLayout::pin_drop_index` (see
-[the session's pin service](session.md#pin-service-and-window-channel-bridge)).
-An entry already pinned is not duplicated.
+## The hover window picker
+
+`WindowPicker` is the surface that chooses between one application's windows.
+Hovering a slot whose application owns at least `PICKER_MIN_WINDOWS` (two)
+windows reports `ShowWindowPicker { app }`; the session — which owns the
+windows' pixels — answers with one `PickerEntry` per window through
+`Taskbar::show_window_picker`, and the bar lays out a row of captioned
+thumbnail cells opening outward from the slot, clamped onto the screen.
+
+**It opens only above one window.** With a single window there is nothing to
+choose, and the slot's own click already reaches it, so sweeping the pointer
+along a bar of ordinary single-window applications pops nothing up. That is
+what makes a hover-opened surface tolerable without a dwell timer: the picker
+appears exactly where there is a choice to make, and the bar needs no clock to
+decide it.
+
+It is a pointer surface and nothing else. A press on a cell reports
+`WindowChosen { id }` (the session raises and focuses that window, which also
+restores it if it was minimised); a press on the plate's own chrome is claimed
+and does nothing; it takes no keyboard, so the focused window keeps its keys;
+and it closes the moment the pointer leaves both it and the slot it hangs
+from, when the slot is clicked, or when the application stops having a choice
+to offer. A cell whose window has no thumbnail yet draws that
+*application's* glyph rather than a hole.
 
 ## The context menu
 
 `BarMenu` is the bar's one right-click surface, composed from the shared
-`tairix-controls` `Menu`. A secondary press on a pin opens it over that pin
-(*Open* / *Unpin*, with *Open* restoring a running window or launching
-otherwise); a secondary press on a program-library **entry row** in the
-open popup opens it over that entry (*Open* / *Pin to taskbar*, or *Unpin
-from taskbar* when the entry is already pinned). The menu opens outward
-from the bar edge, anchored at the slot or row it is about, clamped to the
-bar's own span (`Taskbar::menu_layout`), and is presented by the session as its own
-small rounded window above the bar. Choosing a row reports a typed response
-(`ActivatePin` / `Unpin { index }` / `PinEntry { entry }` /
-`LibraryLaunch`); the menu itself performs nothing — the session edits the
-store and re-resolves the strip (`AGENTS.md` §5.4).
+`tairix-controls` `Menu`. It opens over one of three subjects:
+
+- **A running application's slot**, showing the menu that *application*
+  declared over the window channel — and nothing at all when it declared
+  none, so the bar never invents one on an application's behalf. Every
+  top-level declared row draws in declaration order with the enablement and
+  mark it asked for; a declared separator opens the group its next row begins
+  rather than becoming a choosable row; a declared `Submenu` row opens its
+  children beside the plate (one level deep, flipped to the leading side when
+  the trailing side would leave the screen); and choosing a row reports
+  `AppMenuChosen { app, item }`, which the session relays back to the
+  declaring process. The bar never interprets an id.
+
+  The one row inside such a menu that is the bar's own is **About**: its
+  submenu is the application's information panel, a `FactList` of the
+  bundle's *signed* manifest — name, version, and its purpose and author when
+  the manifest states them. An application declares only that the row exists,
+  so it cannot state an identity that is not its own inside system-drawn
+  chrome, and an omitted field is absent rather than a blank row. The panel is
+  attached to the menu: dismissing the menu takes it away with it, and
+  `Escape` inside it steps back to the menu rather than closing both.
+- **A program-library entry row** in the open popup: a single *Open* row,
+  reported as `LibraryLaunch`.
+- **The Switchboard capsule**: the desktop's system quick-actions menu (see
+  *The system quick-actions menu*).
+
+The menu opens outward from the bar edge, anchored at the slot or row it is
+about, clamped to the screen (`Taskbar::menu_layout`), and the session
+presents the plate and whatever is open beside it as **one** rounded window
+above the bar — a submenu is part of the menu, not a second window to keep
+stacked against it. The menu itself performs nothing (`AGENTS.md` §5.4).
 
 ## Input routing
 
@@ -595,9 +624,9 @@ store and re-resolves the strip (`AGENTS.md` §5.4).
 manager's `InputRouter`. It consumes the **same** shared `tairix-input`
 `InputEvent` stream the compositor routes (`AGENTS.md` §17.4, §2.2), tracking
 the pointer position from motion events (which also drives the leading
-buttons', pin slots', and task slots' hover feedback through the repaint
-latch). With the popup and menu closed it acts only on a primary or
-secondary press, hit-tested against the current
+buttons' and application slots' hover feedback through the repaint latch,
+and opens or closes the hover window picker). With the popup and menu closed
+it acts only on a primary or secondary press, hit-tested against the current
 `BarLayout` and reported as a `TaskbarResponse`:
 
 - a primary press on the **Library button** opens the program-library popup
@@ -605,11 +634,13 @@ secondary press, hit-tested against the current
 - a primary press on the **Files button** reports `OpenFiles` — the session
   opens the file manager, raising an already-open files window rather than
   launching a second copy;
-- a primary press on a **pin slot** activates the pin (see *Pinned
-  shortcuts*), and a **secondary** press on one opens its context menu;
-- a primary press on a **task slot** applies the click-to-activate /
-  minimise rule and reports the `ActivateOutcome`
-  (`TaskActivated { id, outcome }`);
+- a primary press on an **application slot** performs that application's
+  default action, or raises its most recently used window (see *The
+  application strip*), and a **secondary** press on one opens the menu that
+  application declared;
+- a primary press on an open **picker cell** chooses that window
+  (`WindowChosen { id }`); one on the picker's own plate is claimed and
+  closes it;
 - a primary press on a **notification icon** reports its `IconId`
   (`NotificationActivated`);
 - a primary press on the **clock** reports `ClockPressed`;
@@ -627,20 +658,23 @@ changes nothing and is reported as `Ignored` (fail closed, `AGENTS.md` §2.9).
 
 While the context menu is **open** it is the top modal layer: the whole
 stream routes into it first — motion highlights rows, a primary press-and-
-release chooses, arrows and `Enter` drive it from the keyboard, `Escape`
-dismisses, and a press outside its plate dismisses **only the menu**,
+release chooses, arrows and `Enter` drive it from the keyboard, `Right`
+opens the highlighted row's submenu or information panel, `Escape` steps
+back out of an open child and then dismisses, and a press outside the plate
+(and outside whatever is open beside it) dismisses **only the menu**,
 leaving whatever is beneath for the next click (one click does one thing,
-`AGENTS.md` §2.1).
+`AGENTS.md` §2.1). The hover picker is *not* modal: it claims a press over
+its own plate and nothing else.
 
 While the popup is **open** the router treats it as modal and consumes the
 whole event stream — presses, releases, scroll, and keys all route into the
 popup, so a click lands on exactly one thing (`AGENTS.md` §2.1):
 
 - a primary press on a **folder header** toggles it at once; a primary press
-  on an **entry row** arms the drag gesture instead, and the release that
-  ends the press launches the entry (`LibraryLaunch { entry }`, closing the
-  popup) unless the pointer travelled far enough to become a drag (see
-  *Dragging a library entry to pin it*);
+  on an **entry row** arms the click instead, and the release that ends the
+  press launches the entry (`LibraryLaunch { entry }`, closing the popup) —
+  unless the pointer left the row it pressed, in which case nothing is
+  launched, so a press-and-move-away never launches the wrong thing;
 - a primary press on the **Library button** toggles the popup shut
   (`LibraryDismissed`);
 - a press **anywhere else** — any button — dismisses the popup without
@@ -747,15 +781,32 @@ latches its surfaces even when the caller changes nothing, reading through the
 immutable accessors latches nothing, a repeated pointer sample over the open
 popup latches nothing, and `NONE` / `ALL` / `any()` / `|` compose as
 documented.
-The pin tests cover the strip's placement between the launchers and the
-task list (and its reflow as pins come and go), pin hit-testing on every
-edge, the drop-index mapping (leading/trailing halves, the empty-strip
-first drop, appends past the last slot, vertical bars), the live visibility
-derivation (running / active / minimised / closed / stale match), pin
-activation (launch vs the task click rule), the context menu's rows,
-modality, keyboard path, click-away, entry pin/unpin verb switch, menu
-geometry on every edge, and the rendered pin slots — artwork override,
-built-in glyph fallback, and a focused pin's full-width accent seam.
+The application-strip tests cover the strip's span from the launchers to the
+trailing group, slot hit-testing on every edge, a slot's square matching a
+launcher's at more than one scale, degenerate fail-closed clipping, the
+accessors the session pushes through, a stale hover clamped away by a fresh
+strip, and the absence of any presence or focus mark. The declared-menu tests
+cover the exact rows an application's declaration draws (order, marks,
+disabled rows, the separator folded into the next row's group break, the
+submenu's own child excluded from the top level, the bar's own *About* row),
+a menu at the format row cap, a disabled row that cannot be chosen, the
+relayed row ids (including from inside a one-level submenu), `Escape` stepping
+out of an open child before dismissing, an application that declared no menu
+opening nothing at all, and the information panel: the manifest-attested facts
+in order, an omitted purpose or author absent rather than blank, a pointer over
+the panel claimed and inert, and the panel disappearing with the menu that
+carried it. The click tests cover all three left-click cases (a declared
+default action reaching the application, a raise for an application that
+declared none, nothing at all for one with neither) and that a second click
+never minimises. The picker tests cover the refusal below two windows, the
+open at two, the cell layout on every edge with a clipped cell that can never
+be hit, the highlight latching the picker alone, a cell choice raising (and
+restoring) that window, a press on the plate's own chrome, the absence of a
+keyboard path, closing on pointer departure and on a slot click, the close
+that comes with losing the second window, survival of a strip update that
+keeps the choice, the refusal to open under a modal surface, and the rendered
+cells (a window's own frame, and the application's glyph where a window has
+none).
 The popup model tests cover taxonomy-ordered folders with name-sorted
 entries, hidden empty folders, folder labels, the calm empty and no-match
 placeholders, the deterministic reopen state, case-insensitive filtering with
@@ -764,13 +815,11 @@ movement, folder fold/expand from both pointer and keyboard, focus cycling
 with type-to-filter, and cursor-follows-view scrolling. The input tests cover
 both buttons' presses, click-away dismissal that activates nothing beneath,
 secondary-press dismissal, wheel scrolling of an overflowing popup, and hover
-repaint latching. The drag-to-pin tests cover the whole gesture: a press that
-barely moves is still a click and launches, travel past the shared threshold
-offers the entry exactly once however far the pointer goes on, the release is
-a drop that launches neither the pressed row nor the row it ended over and
-leaves the popup open, `Escape` withdraws and keeps the popup open (the
-release that follows drops nothing and a second `Escape` dismisses as ever),
-and a folder header arms nothing.
+repaint latching. The row-click tests cover the whole gesture: a press that
+barely moves is still a click and launches, a release away from the row that
+was pressed launches nothing (nor the row the pointer ended over), a rebuild
+under a held press launches nothing at all, and a folder header acts on the
+press and arms nothing.
 The rendering tests probe painted pixels for the bar regions; the bar's own rim
 (the theme's rim tone at the chrome weight on both built-in themes, the ground
 one `plate_border` further in, lighter than that ground on the dark theme and
@@ -781,20 +830,19 @@ no rim of their own, and no reactive edge); a hovered or pressed slot inking
 inside itself and never over the bar's rim, on both themes; the hover wash
 appearing under the pointer in that slot alone and never as an edge; the
 Library button compressed while
-its popup is open; focused / unfocused / minimised task fills; notification
+its popup is open; notification
 glyphs (including the unknown-asset fallback and cache retint on theme
-switch); the clock's text; a running task's centred icon with no title ink
-anywhere beside it, and its slot matching a pin's at more than one scale; and
+switch); the clock's text; an application slot's centred icon with no label
+ink anywhere beside it; and
 the popup's panel, rows, hover/selection states, placeholder ink, scrollbar,
 and dark / light /
 high-contrast rendering.
 The icon-artwork tests drive `render` with a recording lookup: the two
 launcher buttons ask for the `Library` and `Folder` kinds at their drawn side
 and blit what comes back, an application slot with no artwork of its own
-falls back to its kind's artwork before the glyph, two unpinned running tasks
-each draw their own application's picture and only their own (a task the
-session could not attribute keeping the shared glyph, and artwork offered for
-a window the bar does not list changing nothing), the popup asks only for
+falls back to its kind's artwork before the glyph, two running applications
+each draw their own picture and only their own (one the session could not
+attribute keeping the shared glyph), the popup asks only for
 the entry rows the viewport shows (and, after a scroll, only for the rows
 that just appeared), a rebuild drops stale row artwork, and a bar rendered
 through `NoArtwork` still draws every element from its built-in glyphs — the
@@ -813,17 +861,20 @@ fail-closed cases, and pixel probes of the capsule, rail, seam, and badge
 tones across themes.
 
 Those tests all run the model headless. What only a real machine can show
-is that the bar is wired to the volume and to the services around it, and
-`tests/integration/taskbar_pin_qemu_aarch64` proves that on the aarch64
-`virt` board: it boots the graphical session, opens the program library,
-raises an entry's context menu with a secondary press, chooses *Pin to
-taskbar*, opens the Switchboard from its capsule, and clicks the pin the
-gesture created. Its coordinates are not hand-copied — the host script
-drives this very crate's `TaskbarInput` with the events the guest will
-receive and reads the rectangles back out of `Taskbar::layout`,
-`Taskbar::menu_layout`, and `Menu::row_rect` — and it passes only when the
-pin store's directory is created on disk, the Switchboard panel is served
-and painted, and the *pinned bundle* is loaded. Two scan-out readbacks
-check the bar itself: the first pin slot is uniformly the bar's own plate
-colour before anything is pinned, and carries the shortcut's glyph
-afterwards with the panel beside it.
+is that the bar is wired to the running applications around it, and
+`tests/integration/appbar_qemu_aarch64` proves that on the aarch64 `virt`
+board: it boots the graphical session, opens the program library, launches
+the terminal from its row, right-clicks the slot the session gave that
+process, and chooses *New window* from the menu the **application itself**
+declared. Its coordinates are not hand-copied — the host script drives this
+very crate's `TaskbarInput` with the events the guest will receive and reads
+the rectangles back out of `Taskbar::layout`, `Taskbar::menu_layout`, and
+`Menu::row_rect`, with the menu built from the terminal's own declaration —
+and it passes only when the terminal's bundle is loaded, its first window is
+created and painted, and a *second* create follows: nothing else the script
+injects opens a window, and the desktop's own surfaces are session-painted
+compositor windows that never call the window channel, so that second window
+can only be the chosen row reaching the application. Three scan-out readbacks
+check the screen: the bar before anything runs, the slot carrying the
+application's glyph with its window up, and both windows with the one
+application still holding exactly one slot.

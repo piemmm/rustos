@@ -9,10 +9,15 @@ Binding under `AGENTS.md`. This plan records the completed Stage 7 taskbar
   as an installer adds shortcuts;
 - to its right, a permanent **File Manager** icon that opens `files.app`
   on its default view;
-- then a user-editable strip of **pinned application shortcuts** (created by
-  dragging an application out of the file manager or the program-library
-  popup onto the bar, or by right-click → *Pin to taskbar*; the desktop is
-  deliberately not a drag source — T7 states why);
+- then the **application strip**: one icon-only slot per *running
+  application*, each slot standing for one kernel-attested process. A primary
+  click performs the application's own declared default action (or, for one
+  that declared none, raises its most recently used window); hovering a slot
+  whose application owns more than one window opens the window picker; and a
+  secondary press opens the menu that **the application itself** declared,
+  whose *About* row shows a session-drawn information panel of its bundle's
+  **signed** manifest. There is no pinning: applications are launched from
+  the program library or from a desktop shortcut;
 - on the right, the **notification area**;
 - and, always right-most and immovable, the **Switchboard** icon — the
   system-overview surface that implements `plans/desktop1.png` and
@@ -24,7 +29,7 @@ Alloy `lib/controls` vocabulary every surface here composes — **no second
 control implementation**, §2.2), `plans/APPS.md` (bundle model, command
 resolution, `lib/cmdres`), `plans/APPWIN.md` (AW2 window channel, AW5
 `lib/browse` engine, the CU6 one-shot delegation), `plans/NEW-FILEMANAGER.md`
-(the `files` app + the *Pin to taskbar* context action), `plans/DISPLAY.md`
+(the `files` app), `plans/DISPLAY.md`
 (the seat/display model), `plans/FIX-DESKTOP.md` (non-blocking async launch),
 and `plans/CAPABILITY_USE.md` (CU6 capability sizing). Every rule in all of
 them applies here without exception.
@@ -37,7 +42,7 @@ change today is allowed; it requires regenerating the C header
 ## Status
 
 `done` — **T1–T16 complete**, including T15's documentation deliverable and
-its QEMU pin + Switchboard vertical, and T16's desktop icon surface.
+its QEMU icon-bar vertical, and T16's desktop icon surface.
 Each stage's done-state section below records what it now guarantees. The
 **Switchboard tray** is landed whole
 (T9/T10): the immovable trailing-most capsule slot with the
@@ -57,12 +62,14 @@ entry model, store grammar, fail-closed parse, canonical render, `merge`,
 rescan` discovery, and the image-build catalog seeding (T3 —
 `tools/mkimage`). The library **UI** layer is landed too: the two permanent
 leading launchers and the program-library popup (T4/T5); the generic start
-menu is gone. The **pin** layer is landed whole (T6/T7 — see their
-done-state sections below): the `lib/taskpins` store, the bar's pin strip +
-context menu, the session's pin ownership with the sandboxed per-app icon
-pipeline (`lib/image` PNG + `lib/compress` inflate/zlib + the
-`lib/sandbox` icon-rasterisation service), and both pin-creation gestures
-(right-click *Pin to taskbar* and drag-to-taskbar). The **notification
+menu is gone. The **application strip** is landed whole (T6/T7 — see their
+done-state sections below): the bar's per-application slots, the
+`SetAppBar`/`AppBarDefault`/`AppBarMenu` window-channel contract an
+application declares its own presence and menu through, the hover window
+picker, the session's grouping of windows under their attested owner with the
+manifest-attested slot identity, and the sandboxed per-app icon pipeline
+(`lib/image` PNG + `lib/compress` inflate/zlib + the `lib/sandbox`
+icon-rasterisation service). The **notification
 area** is first-class too (T8 — see its done-state section below): the
 versioned, fuzzed `notify_ipc` channel (`lib/abi`) over a seat-scoped
 `NOTIFY_ENDPOINT` the kernel binds only for the desktop's live seat lease,
@@ -72,7 +79,8 @@ attesting each producer, relaying raise/clear, presenting the
 click-to-dismiss popover, and dropping a dead producer's notifications on
 exit. The rest of the starting point is Stage 7 as it stands:
 `tairix-taskbar` models the
-launchers / popup / pins / task list / notification area / clock and emits
+launchers / popup / application strip / window registry / picker /
+notification area / clock and emits
 typed `TaskbarResponse`s; `tairix-session` presents the bar, popup, and
 menu through the compositor, owns the theme, loads/merges the catalog
 stores, and resolves those responses (`plans/FIX-DESKTOP.md` async launch
@@ -85,7 +93,8 @@ the remaining pieces together and fills the gaps.
 ## 0. Scope and decisions (binding for this plan)
 
 - **One control implementation, ever (§2.2).** Every visible surface here —
-  the library launcher, the file-manager button, pinned-shortcut icons, the
+  the library launcher, the file-manager button, the application slots and
+  their hover picker's cells, the
   notification tray, the Switchboard icon, and the whole Switchboard window —
   is composed from the shared Reactive Alloy controls in `lib/controls`
   (`Button`/`IconButton`, `Menu`/`MenuItem`, `ListRow`/`Card`/`Panel`,
@@ -140,9 +149,9 @@ the remaining pieces together and fills the gaps.
   it composes, dark/light + high-contrast + reduced-motion, complete
   pointer/keyboard/focus behaviour, and tests — or, if a stage is genuinely
   too large, its landed part is complete and the remainder is staged here and
-  surfaced (§15.7). A foundational primitive (the catalog engine, the pin
-  store, the tray-signal feed) is the complete abstraction, not its first
-  caller's slice (§27).
+  surfaced (§15.7). A foundational primitive (the catalog engine, the bounded
+  icon-bar menu model, the tray-signal feed) is the complete abstraction, not
+  its first caller's slice (§27).
 
 ## 1. Final bar layout (left → right, horizontal bottom bar)
 
@@ -183,9 +192,9 @@ focus ring, every icon and label. The session requests `chrome_backdrop_blur` �
 `7` logical pixels in both built-in themes — behind each surface, which is what
 the translucency reads against.
 
-A pinned shortcut and a running task have a hover look but no pressed one,
-unlike the two launcher buttons, which compress. Whether the strip should state
-a held slot at all is an open question for the furniture spec
+An application slot has a hover look but no pressed one, unlike the two
+launcher buttons, which compress. Whether the strip should state a held slot
+at all is an open question for the furniture spec
 (`plans/GUI-CONTROLS-DESIGN.md`), not a decision to make in the renderer.
 
 Along-bar popup placement is clamped to the bar's own span, so no popup enters
@@ -193,35 +202,35 @@ the wallpaper gap. Floating panels draw no separate header band.
 
 ```
 wallpaper gap  ┌──────────────────────────────────────────────────────────┐  wallpaper gap
-               │ [Library] │ [Files] [pin] [pin] … │ running … │ [Switch]   │
+               │ [Library] │ [Files] [app] [app] [app] …        │ [Switch]   │
                └──────────────────────────────────────────────────────────┘
                                       wallpaper gap
 ```
 
 - **Leading, fixed order, not reorderable:** `Library` (Program Library
   launcher) then `Files` (file manager). These two are permanent and cannot be
-  unpinned or moved.
+  removed or moved: they are *launchers*, not slots.
 - **Separator rule:** the rule after `Library` is the only one the bar
   actually paints — the other `│` above are group boundaries in this sketch.
   It is one `border_thickness` along the main axis (floored at one physical
   pixel), inset one `control_inset` from both long edges so it clears the
   bar's rounded ends, in the palette's `border` colour, with one `control_gap`
-  either side. `Files`, the pins, and every trailing region begin one whole
-  gutter past `Library`, which puts the file manager on the applications' side
+  either side. `Files`, the application strip, and every trailing region begin
+  one whole gutter past `Library`, which puts the file manager on the applications' side
   of the rule rather than the library's. It is decoration:
   `BarLayout::hit_test` has no case for it, so a press on the rule reaches the
   bare bar. Laid out once as `BarLayout::separator` and drawn from that rect,
   never re-derived by the painter (§2.2); `Rect::EMPTY` — and so unpainted —
   when the bar is too short to reach it or too thin to inset it.
-- **Pinned shortcuts:** a user-ordered, reorderable strip after the permanent
-  icons. Empty by default; populated by pin gestures (T7).
-- **Running-task list:** the existing `TaskList` region (one `TaskbarItem` per
-  top-level window), unchanged in purpose.
+- **Application strip:** one `TaskbarItem` per *running application*, in the
+  order the session first saw each process, after the permanent launchers.
+  Empty when nothing is running. A window is reached through the hover picker
+  a slot opens, never through a slot of its own (T6/T7).
 - **Notification area:** status icons + transient notifications, left of the
   clock; the clock sits between it and the Switchboard icon (desktop1
   panel 1).
 - **Switchboard icon:** always the trailing-most element, reserved, immovable;
-  no pin, task, or tray icon may occupy or displace its slot.
+  no application or tray icon may occupy or displace its slot.
 - Vertical / top / right edges reflow along the cross axis by the existing
   `Edge`/`Orientation` model; "left/right" above is main-axis leading/trailing.
 
@@ -241,15 +250,11 @@ New / changed homes, all obeying the one-way `userland/gui/* → lib/*` edge:
   overlay merge. Modeled exactly on `lib/sysconfig` (grammar + closed registry
   + fail-closed parser + render, no I/O, no authority). Consumed by the
   installer, the `applib` admin command, and the taskbar/session. (T1)
-- `lib/taskpins` **(new, `no_std`)** — the shared **pinned-shortcut store**:
-  the per-user ordered pin list, its on-disk grammar, fail-closed parse,
-  render, and the add/remove/reorder operations. Kept separate from
-  `lib/proglib` because a pin references a library entry / bundle but is
-  per-user ordering state, a distinct concern with a distinct store. (T6)
 - `lib/abi` — extend `AppInfo` with the optional `library` listing (the
-  opt-in folder byte + `library-icon` asset) so the library is *discovered*
-  from bundles (T3); add the taskbar↔Switchboard **tray-signal summary**
-  record and the **library-edit** / **pin** / **Switchboard-control** IPC
+  opt-in folder byte + `library-icon` asset, and the `purpose`/`author`
+  fields the information panel states) so the library is *discovered* from
+  bundles (T3); add the taskbar↔Switchboard **tray-signal summary** record and
+  the **library-edit** / **icon-bar** / **Switchboard-control** IPC
   vocabularies under the usual ABI discipline (versioned, hashed, fuzzed).
 - `lib/controls` — add the shared controls the mockups need that do not yet
   exist (the **MetricTile** resource reading, **PressureRail**,
@@ -257,12 +262,13 @@ New / changed homes, all obeying the one-way `userland/gui/* → lib/*` edge:
   refinements) so both the taskbar icon and the Switchboard window compose
   them (T9, T11–T14). The Switchboard app's own screen composition is
   extended (Pressure + Activities sections) in place (§2.13).
-- `userland/gui/taskbar` — the leading library+files buttons, the pin strip,
-  the reserved Switchboard slot, and the richer notification area (T4, T6, T8,
-  T9).
-- `userland/gui/session` — the glue: launch library/pin/files bundles, relay
-  pin gestures, present the library popup, forward Switchboard open/reveal,
-  relay the tray-signal summary to the taskbar (T4–T9).
+- `userland/gui/taskbar` — the leading library+files buttons, the application
+  strip with its declared menu and hover picker, the reserved Switchboard
+  slot, and the richer notification area (T4, T6, T7, T8, T9).
+- `userland/gui/session` — the glue: launch library/files bundles, hold every
+  application's icon-bar declaration and relay its outcomes, build the
+  picker's thumbnails, present the library popup, forward Switchboard
+  open/reveal, relay the tray-signal summary to the taskbar (T4–T9).
 - `userland/gui/switchboard` **(new)** — the Switchboard component: a
   long-running monitor service that samples the system and publishes the
   tray-signal summary + serves the on-demand overview window, whose screen is
@@ -316,9 +322,9 @@ the authority at the right granularity and, if so, uses it.
   that would hold and enforce it. The enforcement point is the §5.3 per-inode
   policy the kernel VFS already applies under the caller's attested identity
   — the store is a system-owned file an ordinary account reads but cannot
-  rewrite, and the kernel logs the denial. The **per-user** overlay and the
-  per-user pin store likewise need no new capability: they are ordinary §5.3
-  file-permission writes under the user's own `/Users/<u>/Settings/` identity.
+  rewrite, and the kernel logs the denial. The **per-user** overlay likewise
+  needs no new capability: it is an ordinary §5.3 file-permission write under
+  the user's own `/Users/<u>/Settings/` identity.
 - `CAP_SYSINFO_GLOBAL` / `CAP_SYSINFO_KERNEL` / `CAP_SYSINFO_HW` — **existing**
   (§16.6); the Switchboard component requests them to read the live overview.
   No new capability is minted for reading.
@@ -393,11 +399,11 @@ the authority at the right granularity and, if so, uses it.
   system store. Merge policy: the user overlay is applied over the machine
   catalog (user hide/rename/re-file wins; user-only entries append). The
   merge is one pure, exhaustively-tested function in `lib/proglib`.
-- **Per-user pins:** `/Users/<u>/Settings/Taskbar/pins.conf` — grammar owned
-  by `lib/taskpins`: an ordered list of pin records, each referencing a
-  library entry `id` (or a bundle path for a pin that is not catalogued),
-  plus its display order. Written under the user's own identity (no new cap).
-- All three are **untrusted input** to every reader: bounded length, alloc
+  The application strip has no store at all: it is derived from live state —
+  the declarations the window engine attested and the windows each process
+  owns — on every wake it can have changed, so there is nothing about it to
+  keep in step with a document.
+- Both are **untrusted input** to every reader: bounded length, alloc
   discipline per crate policy, fail closed on anything not fully understood
   (unknown key, bad category, duplicate id, oversize), and a reader that
   cannot fully parse runs on an empty store rather than guessing (§2.9, §5.4,
@@ -409,7 +415,8 @@ the authority at the right granularity and, if so, uses it.
 
 Each stage is independently reviewable, ends green on the whole-project gate
 (§7), and lands its surface fully (§27). Stages are ordered by dependency;
-T1–T3 (library data), T4–T5 (library UI), T6–T7 (pins), T8–T9 (tray + icon),
+T1–T3 (library data), T4–T5 (library UI), T6–T7 (the application strip and
+the app→bar contract), T8–T9 (tray + icon),
 T10–T13 (Switchboard), T14 (fidelity), T15 (docs/gate), T16 (the desktop icon
 surface). T9 needs the T10 tray-signal feed for its live states, so the two
 land together.
@@ -629,11 +636,11 @@ What now stands:
   site, driven purely by the drained per-surface latch: every model change
   latches the surfaces it alters, so a pointer crossing no control presents
   nothing at all.
-- **Deliberate deviation, recorded**: the staged text had T5 "offer" the
-  right-click *Pin to taskbar* typed action with its session path arriving
-  in T7. A typed action emitted before any consumer exists is speculative
-  surface (§2.4/§23.3), so the pin affordance — context surface, typed
-  action, and session path — lands **whole in T6/T7** with the pin store.
+- **Deliberate deviation, recorded**: the staged text had T5 "offer" a
+  right-click *Pin to taskbar* typed action. Pinning is gone from the design
+  (T6/T7); an entry row's context menu offers a single *Open* row, which is
+  the only thing the popup can do to a row that its own click does not
+  already do.
   Right-press inside the panel is claimed (modal) and does nothing today.
 
 Tested in the taskbar suite (rows/sort/hide-empty/placeholders, keyboard
@@ -643,177 +650,164 @@ flow end-to-end, open-popup refresh), and the AW4 QEMU vertical, which now
 opens the popup from the planted machine store and launches the terminal
 through its catalog entry (keyed by bundle identity, not display text).
 
-## T6 — Pinned shortcuts: model, store, and taskbar region — **done**
+## T6 — The application strip: one slot per running application — **done**
 
-What now stands, and the invariants a future change must keep:
+The bar's middle is one icon-only slot per *running application*, where an
+application is one kernel-attested process. What now stands:
 
-- **`lib/taskpins`** (in §3 + `PLAN.md`; fuzzed by `tests/fuzz_taskpins.rs`)
-  is the per-user ordered pin store engine: one line per pin (`entry <id>` /
-  `bundle <path>`, `#` comments), stored order = display order, targets
-  deduplicated, whole-document fail-closed refusals with the 1-based line
-  (`PinsError`), canonical render that round-trips byte-for-byte, fixed
-  bounds (`MAX_PINS = 128`, line/document caps derived from the field caps),
-  and `PinList` operations `pin`/`pin_at`/`unpin`/`move_pin`/`position`. It
-  reuses `tairix-proglib`'s validated `EntryId`/`BundlePath` so a pin's
-  reference can never diverge from the catalog's own validation. The store
-  is `~/Settings/Taskbar/pins.conf` (`user_pins_path`); there is no
-  machine-wide pin store — pins are per-user state only.
-- **The bar** (`tairix-taskbar`) has a pin strip between the permanent
-  launchers and the task list: `TaskbarConfig::pin_extent`, per-pin slots in
-  `BarLayout::pins` (+ `pin_strip`), `Hit::Pin(index)`, and
-  `BarLayout::pin_drop_index` (the strip-plus-task-list drop band, indexed
-  by slot midpoints — T7's drop target). The session hands it resolved
-  `PinView`s (label, class glyph, optional artwork, optional entry id,
-  optional matched window); `PinStrip` derives each pin's live
-  `TaskVisibility` from the `TaskList` at paint time (Active/Minimized/
-  Running; `Closed` for no or stale window — fail closed), so window state
-  has exactly one home. Every pin and every task slot paints as the shared
-  `lib/controls` `TaskbarItem` — one visual recipe, icon-only: a centred
-  plate-sized icon and its status marks, never a label, in slots of one
-  extent, so pins and running tasks read as one strip of equal icons and a
-  window's title stays model data (`TaskEntry::title`) the context menu
-  reads. The as-built control extensions recorded in
-  `plans/GUI-CONTROLS-DESIGN.md` §11.26 are the
-  `TaskVisibility::Closed` quiet-at-rest state and owner-supplied
-  pre-rasterised artwork (the control never parses image bytes;
-  `TaskbarItem::icon_side` / `Taskbar::pin_icon_side` /
-  `Taskbar::task_icon_side` expose the exact drawn geometry). A running
-  task carries its **own** application's icon (`TaskEntry::artwork`, set
-  through `TaskList::set_artwork`), resolved by the session from the
-  bundle the kernel attested opened the window — so an open window is
-  recognised by its application whether or not that application is
-  pinned, and no pin match can lend an identity to a window whose owner
-  is not attested.
-- **Deliberate deviation, recorded**: the staged `PinContext(index)`
-  response is not how the context surface landed. The bar owns its one
-  right-click menu (`BarMenu`, composed from the shared `Menu` control,
-  opened by a secondary press on a pin, modal, outward-opening, presented
-  by the session as a third window beside the bar and popup) and emits
-  *typed outcomes* instead: *Open* → `TaskActivated` (restore/focus) or
-  `ActivatePin { index }` (launch), *Unpin* → `Unpin { index }`. A pin
-  press follows the task click rule when its window is live and reports
-  `ActivatePin` otherwise. This keeps presentation in the bar and authority
-  in the session, exactly like the popup.
-- **The session** (`tairix-desktop-session`) owns the store: it loads with
-  the library's fail-closed posture (absent → empty; unusable → empty plus
-  a loud stderr reason), edits through the one `SessionFileWriter` seam
-  (whole-document rewrite; memory adopts an edit only after the write
-  succeeded, so memory and disk never diverge), resolves each pin for
-  display (an `entry` pin through the merged catalog; a `bundle` pin
-  through its own bounded fail-closed `AppInfo` read; an unresolvable pin
-  keeps a best-effort identity with no launch path so it can still be
-  unpinned), matches running windows through the attested launch table +
-  window ownership (never titles), and re-resolves on a dirty latch before
-  the next present. `ActivatePin` resolves through the same idempotent
-  launch-or-raise rule as the Files button (the shared `activate_bundle`).
-- **A running task's label follows its window's title.** An app that retitles
-  its window over the channel (`WindowRequest::SetTitle`) moves the title bar
-  and the bar entry from one call (`TaskBridge::retitle` →
-  `TaskList::retitle`), so the two can never name different subjects; a
-  session-owned undecorated window relabels on the bar alone.
-- **Per-application icons land here too** (beyond the staged text — task
-  direction): a bundle icon (the manifest's `library_icon` asset, SVG or
-  PNG), a pin's and a running window's alike, is untrusted third-party
-  input, so the session never decodes it in-process. New `lib/image`
-  (complete fail-closed PNG decoder) +
-  `lib/compress` `inflate`/`zlib` (RFC 1951/1950 decode) + the
-  `lib/sandbox` **image-rendering service** (`imagerender`: SVG via
-  `lib/svg`/`lib/icon`, PNG via `lib/image` with alpha-weighted box-filter
-  scaling and aspect-fit centring; capped input 256 KiB, side ≤ 512) do the
-  decode in a capability-empty worker — the session's own binary re-entered
-  in worker mode — and the session verifies, caches (per asset path × side,
-  refusals included), and falls back to the shared class glyph on any
-  refusal.
+- **The bar** (`tairix-taskbar`) has an application strip between the
+  permanent launchers and the trailing group: `TaskbarConfig::app_extent`,
+  per-application slots in `BarLayout::apps` (+ `app_strip`), and
+  `Hit::App(index)`. The session hands it resolved `AppSlot`s (label, class
+  glyph, optional artwork, the windows it owns, its declaration, and its
+  manifest-attested `AppIdentity`) through `Taskbar::set_apps`; `AppStrip`
+  holds them in the order the session supplies and tracks the hover. Each
+  slot paints as the shared `lib/controls` `TaskbarItem` — one visual recipe,
+  icon-only: a centred plate-sized icon, never a label, in slots of one
+  extent, so a run of applications reads as one strip of equal icons.
+- **A slot carries no presence or focus mark.** The presence/accent-seam and
+  minimised-plate marks (and the `TaskVisibility` model behind them) are
+  **deleted** from `TaskbarItem`: the bar shows which applications are
+  running by showing them at all, and a window is reached through the hover
+  picker. Only hover, press, focus, and attention states remain.
+- **`TaskList` is retained as the one window registry** — id, title,
+  minimised — read by the hover picker and by the Switchboard capsule's
+  scroll-to-cycle and middle-click previous-window gestures. It is not drawn.
+  Its click-to-activate/minimise toggle and its per-window artwork are gone
+  with the per-window slots they served; focusing a window restores it, and
+  minimising is the title bar's own control.
+- **The three left-click cases**, resolved from the declaration alone:
+  `AppDefault { app }` when the application declared it handles the click,
+  `AppRaise { app }` when it declared none but owns a window, and nothing at
+  all when it has neither — the honest answer, never a guessed one.
+- **The session** (`tairix-desktop-session`, `apps.rs`) owns the strip:
+  `AppBarService` holds every application's declaration as the window engine
+  attested it, groups each live served window under the process that owns it
+  (the existing launch table + the engine's attested owner records, never a
+  window title), keeps a declaring application's slot for the life of its
+  process, drops a slot only when it has neither a declaration nor a window,
+  bounds the strip at `MAX_BAR_APPS`, and resolves each slot's label, icon,
+  and information-panel identity from the **signed** `AppInfo` of the bundle
+  the desktop launched that process from — read once per bundle. A process
+  the desktop did not launch has no bundle to attest and states no version,
+  purpose, or author at all.
+- **Per-application icons**: a bundle icon (the manifest's `library_icon`
+  asset, SVG or PNG) is untrusted third-party input, so the session never
+  decodes it in-process. `lib/image` (complete fail-closed PNG decoder) +
+  `lib/compress` `inflate`/`zlib` (RFC 1951/1950 decode) + the `lib/sandbox`
+  **image-rendering service** (`imagerender`: SVG via `lib/svg`/`lib/icon`,
+  PNG via `lib/image` with alpha-weighted box-filter scaling and aspect-fit
+  centring; capped input 256 KiB, side ≤ 512) do the decode in a
+  capability-empty worker — the session's own binary re-entered in worker
+  mode — and the session verifies, caches (per asset path × side, refusals
+  included), and falls back to the shared class glyph on any refusal.
+  `Taskbar::app_icon_side` exposes the exact drawn geometry so nothing is
+  rescaled at draw time.
+- **A window's title still follows its own retitle**: an app that retitles
+  over the channel (`WindowRequest::SetTitle`) moves the title bar and the
+  registry entry from one call (`TaskBridge::retitle` → `TaskList::retitle`),
+  so the two can never name different subjects, and the picker's caption
+  follows.
 
-Tested in the taskpins suite (grammar round-trip, refusal matrix with
-exact lines, operation semantics, fuzz), the taskbar suite (strip layout/
-reflow/clipping on all four edges, drop-index mapping, visibility
-derivation, pin activation split, menu rows/modality/keyboard/click-away,
-artwork and glyph pixel probes, each running task drawing its own
-application's artwork and only its own), the controls suite
-(Closed state, artwork, icon-side probe, an icon drawn with no ink beside
-it), the session suite
-(store load matrix, edit persistence + refusing writer, resolution matrix,
-service decisions, drag/drop policy, secondary-press menu routing), and
-the sandbox suite (the icon service's happy paths, refusals, hostile
-replies, and fuzz).
+Tested in the taskbar suite (strip span and slot layout on all four edges,
+hit-testing, degenerate clipping, a slot's square matching a launcher's at
+more than one scale, a stale hover clamped by a fresh strip, the absence of
+any presence mark in the painted pixels, per-application artwork with the
+class-glyph fallback), the controls suite (the icon-only recipe, artwork,
+icon-side probe, an icon drawn with no ink beside it), and the session suite
+(the grouping matrix, declaration lifetime, the strip bound, the
+manifest-attested identity and its absences, one manifest read per bundle,
+and each slot carrying only its own process's declaration).
 
-## T7 — Pin gestures: *Pin to taskbar* + drag-to-taskbar — **done**
+## T7 — The app→bar contract: declared presence, menu, and picker — **done**
 
-The two ways a user creates a pin. What now stands:
+How an application puts itself on the bar and says what its slot offers.
+What now stands:
 
-- **The wire**: the app-window channel gained three ops, evolved in place
-  (`abi-v1` unfrozen): `WindowRequest::PinBundle` (6), `DragOffer` (7), and
-  `DragWithdraw` (8), each carrying the validated bounded `BundleRef` path
-  newtype (`WINDOW_BUNDLE_PATH_MAX = 512`, UTF-8, no control characters,
-  zero-tail enforced); `WindowRequest::WIRE_LEN` widened to 530 for every
-  op (one fixed frame, the house decode style). All three round-trip and
-  fuzz through `lib/abi`'s window-IPC suites; the engine validates window
-  ownership before dispatching any of them, and the `WindowHost` bridge
-  methods default to **refuse** (`PinDecision::Refused` / `false`), so a
-  host that does not serve pinning fails closed.
-- **Right-click → Pin to taskbar**: `lib/browse` gained
-  `ContextCommand::PinToTaskbar` (ordered after *Open with…*, enabled iff
-  the selection is a bundle via the shared `EntryKind` classifier — the
-  menu model now carries the selection's kind); the files app dispatches it
-  through `WindowClient::pin_bundle` and reports a refusal (already pinned
-  / bar full / refused) as one terse stderr line, never fatally. The
-  session's `PinBridge::pin_requested` validates fail-closed — store-shaped
-  path, decodable manifest — and appends via `lib/taskpins`. The library
-  popup's right-click *Pin* rides the same session path as an **entry** pin
-  (`PinEntry { entry }` through the bar's context menu, T6), so a
-  catalogued app pins by its catalog identity and an uncatalogued bundle by
-  its path.
-- **Drag-to-taskbar**: there are exactly **two** drag sources, and both
-  drive `lib/browse`'s one pure `BundleDrag` detector (primary press arms;
-  the first motion beyond `DRAG_THRESHOLD_PX = 6` offers exactly once per
-  gesture; `Escape` withdraws; a release disarms locally; a refused offer
-  disarms silently) — the **files app**, offering a bundle row's path over
-  its window channel, and the **program-library popup**, offering the
-  pressed row's `EntryId` (a folder header arms nothing and still folds on
-  the press; a press that never travels is an ordinary click and launches).
-  The session arms at most **one** offer, keyed by `DragOrigin`
-  (`Window(id)` or `Library`): `take_drag_for` / `withdraw_drag` act only
-  for the origin that armed it, so neither source can claim or withdraw the
-  other's gesture, and dismissing the popup withdraws its offer rather than
-  leaving it armed for a later click. The drop is the shared host-tested
-  `resolve_pin_drop` policy: a primary release from the offering origin
-  consumes the offer either way; landing on the pin band
-  (`BarLayout::pin_drop_index` — the strip plus the task-list region, so a
-  first pin lands on an empty strip) re-validates the target through
-  `PinService::pin_target_at` — a bundle against its manifest, an entry
-  against the live catalog — and pins at the drop index; anywhere else the
-  gesture simply ends. An already-pinned target is refused rather than
-  duplicated, and an application uninstalled between the drag and the drop
-  is refused rather than recorded as a pin that can never launch.
-- **The desktop is deliberately not a drag source, and never will be.** An
-  installed application lives **only** in an application store — machine-wide
-  `/Apps`, or the user's own `/Users/<u>/Applications`. A `.app` directory a user
-  drops in their `Desktop` folder is therefore a directory *shaped like* an
-  application, not an installed one, and `BundlePath`'s store rule correctly
-  refuses it: the pin store may only record something the system can vouch
-  for and launch. A desktop pin gesture could never succeed — and a gesture
-  that can never succeed is not a feature, it is a promise the system cannot
-  keep. The program library is the source instead because every row it
-  lists is a **catalogued entry by construction**, so the gesture names an
-  identity the store records directly (`PinTarget::Entry`) with nothing
-  guessed from a path. Pinning something that only *lives* on the desktop is
-  served by installing it — `applib add` (T2) catalogues a bundle, after
-  which it is a library row like any other. The desktop icon surface itself
-  is T16.
+- **The wire**: the app-window channel gained one caller-scoped request,
+  evolved in place (`abi-v1` unfrozen): `WindowRequest::SetAppBar(AppBar)`
+  (op 13), carrying the event route, whether the application handles the
+  slot's primary click, and a bounded `AppMenu`. It is idempotent-replace, so
+  an application re-declares to change a row's enablement or its mark. Two
+  application-scoped events answer it: `WindowEvent::AppBarDefault` and
+  `AppBarMenu { item }`, which is why `WindowEvent::window_id()` is now
+  `Option<u64>`. The pin ops (`PinBundle`/`DragOffer`/`DragWithdraw`) and
+  `BundleRef` are **deleted**, and `WindowRequest::WIRE_LEN` is 522 — the
+  app-bar block is the widest, so the hot Present path did not grow.
+- **The menu model** is `AppMenu`: at most `APP_MENU_MAX_ROWS` (12) rows,
+  each at most `APP_MENU_LABEL_MAX` (36) label bytes, one submenu level via a
+  parent index, and row kinds `Item { id, label, enabled, mark }`,
+  `Separator`, `Submenu { label, enabled }`, and `About`. Item ids are
+  non-zero and unique within a menu, so an outcome names exactly one row. The
+  wire decoder is held to the **same** `check_shape` rule as the builder, so
+  a menu that crossed the wire is exactly a menu that could have been built;
+  both are fuzzed in `lib/abi/tests/fuzz_decode.rs`.
+- **The information panel is manifest-attested.** The application declares
+  only that an `About` row exists; the panel is the session's own `FactList`
+  of the bundle's **signed** `AppInfo` — name, version, and the new optional
+  `purpose` and `author` fields (`BUNDLE_PURPOSE_MAX = 96`,
+  `BUNDLE_AUTHOR_MAX = 64`; `AppInfoHeader::WIRE_LEN` 408 → 568). An
+  application therefore cannot state an identity that is not its own inside
+  system-drawn chrome, and an omitted field is absent rather than blank.
+- **A declaration precedes its declarer's first window.** All five declaring
+  applications call `set_app_bar` before they open a window, because a
+  declared presence belongs to the process: declared first, the slot carries
+  the application's menu and default action from the moment it appears.
+  Declared after a window, the session meanwhile derives a slot from that
+  window alone — no menu, no default action — so the bar briefly shows a slot
+  that answers nothing. The icon-bar QEMU vertical (T15) is what covers the
+  ordering: its bar gestures are gated on the session's own witness that the
+  first window is on screen, which the declaration now strictly precedes.
+- **The engine** (`lib/window`) attests the caller, validates the model on
+  decode, and hands it to `WindowHost::app_bar_declared(owner, bar)` — which
+  **defaults to refuse** (`Errno::NotSupported`), so a host that composes no
+  icon bar fails closed. The route is recorded only once the host accepted,
+  dropped in `client_exited` (which also calls `app_bar_withdrawn`), and
+  `deliver_app_event` addresses a bar event through *that* recorded route
+  rather than anything the event carries. Each delivery path refuses the
+  other's events. `WindowClient::set_app_bar` is the client half, and
+  `lib/window`'s `appbar::quit_and_about` is the one definition of the
+  commonest declaration (a *Quit* row plus `About`, no default action) that
+  `files`, `viewer`, `wallpaper`, and `widgets` all share.
+- **The bar draws exactly what was declared.** `MenuSubject::App` renders
+  every top-level declared row in declaration order with its enablement and
+  mark; a declared separator opens the group its next row begins rather than
+  becoming a choosable row; a declared submenu's children open beside the
+  plate (one level, flipped when the trailing side would leave the screen);
+  and the *About* row's child is the information panel. Choosing a row
+  reports `AppMenuChosen { app, item }` and the session relays the id
+  straight back — the bar never interprets one. An application that declared
+  no menu opens **nothing**.
+- **The hover window picker** (`WindowPicker`) opens at
+  `PICKER_MIN_WINDOWS` (two) windows and no fewer, which is why no dwell
+  timer is needed: the picker appears exactly where there is a choice to
+  make. The session answers `ShowWindowPicker { app }` with one
+  `PickerEntry` per window, each carrying that window's **last presented
+  frame** — pixels the compositor already holds — scaled to the cell through
+  `lib/raster::resample` (whose `Surface::to_rgba8` inverse now completes the
+  crate's `from_rgba8`). A press on a cell reports `WindowChosen { id }`; the
+  picker takes no keyboard and closes when the pointer leaves, when the slot
+  is clicked, or when the application stops having a choice to offer.
+- **`terminal.app` is now one process with many windows.** Each window
+  carries its own pty, shell child, screen model, retained picture, look, and
+  overlay, over one wait-set with one event mailbox for the process plus a
+  shell-output and child member per window. It declares `default_action: true`
+  with rows *New window*, a separator, *Quit*, and `About`
+  (`tairix_terminal::appbar`), so its slot opens a fresh window on a click
+  and its menu can close them all. `MAX_WINDOWS` bounds the process's own
+  resources; the last window closing ends it.
 
-Tested in the abi suites (round-trip + refusal matrix + fuzz for the three
-ops), the window-engine suite (ownership binding, decision→status mapping,
-fail-closed defaults), the browse suites (menu row/order/enable rules; the
-drag detector's arm/threshold/one-offer/withdraw semantics), the taskbar
-suite (the library popup's gesture end to end: a press that barely moves
-still launches, one offer per gesture however far the pointer goes on, the
-release drops without launching either the pressed row or the row it ended
-over, `Escape` withdraws and keeps the popup open, and a folder header arms
-nothing), and the session suite (request validation decisions, drag
-management including origin isolation — one origin's withdraw leaves the
-other's offer armed — and the drop-policy matrix: unarmed / unserved window
-/ landing drop persists at the index / stray release ends the gesture).
+Tested in the `lib/abi` window-IPC suites (the builder's and the decoder's
+shared shape rule, every refusal, the reserved tail, fuzz), the `lib/window`
+suites (the refusing default, the route recorded only on acceptance and
+dropped at teardown, each delivery path refusing the other's events, and the
+shared declaration's rows), the taskbar suite (the declared rows/marks/
+disabled rows, the row cap, the relayed ids including from a submenu, the
+information panel and its absences, an application with no menu opening
+nothing, the three click cases, and the picker end to end), the terminal
+suite (the declaration and its row → command mapping), and the session suite
+(the window host relaying a declaration and its withdrawal, the picker
+becoming its own window, and a cell choice raising the window it names).
 
 ## T8 — Notification area upgrade — **done**
 
@@ -872,7 +866,7 @@ producer→attest→relay→dismiss path with producer isolation).
 What now stands:
 - `userland/gui/taskbar`: the trailing-most slot is reserved for the
   Switchboard capsule. It is computed **first** among the trailing regions,
-  so pins, tasks, notifications, and the clock can never displace it (only
+  so applications, notifications, and the clock can never displace it (only
   the permanent leading launchers outrank it on a degenerate screen);
   `hit_test` → `Hit::Switchboard`. The mockup microinteractions landed
   (desktop1 panel 6): scroll over the capsule cycles the running tasks
@@ -1442,67 +1436,85 @@ exactly on the first action button's left edge.
 ## T15 — Documentation, integration tests, and the validation gate
 
 **Documentation: done.** `docs/src/desktop/taskbar.md` (icon-bar layout,
-program library, pins, notification area), `docs/src/desktop/switchboard.md`
+program library, application strip, declared menu, hover picker, notification
+area), `docs/src/desktop/switchboard.md`
 (the system-overview surface, feed, sections, actions, capabilities, and the
-relayed power transition), `docs/src/desktop/session.md` (every quick-action
-outcome and the trusted power-confirmation prompt),
+relayed power transition), `docs/src/desktop/session.md` (the icon-bar service,
+every quick-action outcome, and the trusted power-confirmation prompt),
 `docs/src/desktop/theming.md` (the live Light/Dark control), and the
-`docs/src/lib/` pages for `proglib`/`taskpins`/`controls`/`image` are current
+`docs/src/lib/` pages for `proglib`/`controls`/`image` are current
 against the built surfaces, as is the crate `README.md` beside the monitor
 service. The `README.md` support matrix needs no row: the desktop is
 architecture-neutral, and the security matrix's re-authenticated screen-lock
 row already covers T13.
 
-**Prerequisite settled while landing this stage.** A pinned shortcut only
-survives if the pin store can be written, and `<home>/Settings/Taskbar/` is
-two levels below the home while the session's writer creates exactly one
-parent. Homes were being created bare — no `Settings/`, no `Desktop/`, none
-of the fixed shape — so the very first per-user write of any kind failed
-`NotFound` on a real install. The home's shape is now one shared definition
-(`tairix_users::{HOME_MODE, HOME_SUBDIRS}`, `plans/USERS.md` U1) that the
-`CAP_USER_ADMIN` provisioning path, `tools/mkimage`, and the QEMU users-root
-fixture all read, so a pin written in the guest lands on a home shaped like a
-real one.
+**Prerequisite settled while landing this stage.** Homes were being created
+bare — no `Settings/`, no `Desktop/`, none of the fixed shape — so the very
+first per-user write of any kind failed `NotFound` on a real install. The
+home's shape is now one shared definition (`tairix_users::{HOME_MODE,
+HOME_SUBDIRS}`, `plans/USERS.md` U1) that the `CAP_USER_ADMIN` provisioning
+path, `tools/mkimage`, and the QEMU users-root fixture all read.
 
-**QEMU vertical: done.** `tests/integration/taskbar_pin_qemu_aarch64` is a
+**QEMU vertical: done.** `tests/integration/appbar_qemu_aarch64` is a
 dedicated short vertical rather than a fourth stage on the already long
 `autoload_input_qemu_aarch64` choreography, so a gate mis-count in one
 cannot wedge the other (D20). It boots the same graphical world (the
 `AutoloadRootDisk` image, unlock → login → `desktop`), then opens the
-program library, secondary-presses an entry row to raise its context menu,
-chooses *Pin to taskbar*, spends one press dismissing the modal popup,
-opens the Switchboard from its capsule, and clicks the pin it created.
+program library, launches the terminal from its row, right-clicks the slot
+the session gave that process on the bar, chooses *New window* from the menu
+the **application itself** declared, and finally primary-clicks that same
+slot to take the default action the declaration claimed.
 
 What holds it together:
 - **Every coordinate is the product's own.** The script drives a host
   `DesktopShell` with the very events the guest will receive — through
   `TaskbarInput`, over a `Catalog` rebuilt from the same manifests the image
   plants (`reconstructed_library`) — so the menu it clicks is the menu the
-  model opened, its pin row comes from `Menu::row_rect` at the exported
-  `MENU_PIN_ROW`, and the pin slot from `Taskbar::layout` with one
-  `PinView`. Nothing is a hand-copied pixel.
-- **Three PASS witnesses, each attributable to one act**: the audited
-  `mkdir` of the pin store's own directory (`PINS_SETTINGS_SUBDIR`, which a
-  provisioned home does not carry), the window endpoint serving the panel's
-  create *and* first present, and an `APP_LOADED` naming the pinned bundle
-  — `widgets`, which no other stage of any vertical launches, and which
-  needs no picker, no filesystem, and no ambient authority.
-- **The pin click is gated causally, not by a timer.** Serving a
-  window-endpoint call is a different wake of the session's serve loop from
-  the input wake that pinned, and the session re-resolves its pin strip
-  before parking at the end of every wake — so the guest's
-  panel-presented marker cannot appear until the pin is live in the bar the
-  guest hit-tests, under any host load. (Every earlier step keys on the
-  display service's first-present witness alone: the guest applies injected
-  events in device order, and the capsule's rect is independent of the
-  strip's length.)
-- **Two dumps read the bar itself.** The first proves the first pin slot is
-  *uniformly* the bar's own plate colour before anything is pinned; the
-  second that it now carries the pin's class glyph, that the panel covers
-  its cascade slot, and that the column beside the panel is bare desktop.
-  The second deliberately does not require the desktop colour to dominate
-  the frame — a 760×560 panel covers more than half this output, so that
-  would assert something untrue.
+  model opened, built from the terminal's own `appbar::declaration`, and its
+  row comes from `Menu::row_rect` at the row the declaration named rather
+  than at a counted position. Nothing is a hand-copied pixel.
+- **Two PASS witnesses, each attributable act by act**: an `APP_LOADED`
+  naming the terminal's bundle, and **three** window creates on the reserved
+  endpoint — recognised by the wire length unique to a create among that
+  endpoint's replies. The desktop's own surfaces are session-painted
+  compositor windows that never call the window channel, so the launched
+  application is the only client that opens one: the three are its launch
+  window, the chosen *New window* row, and the slot's declared default
+  action. That attests the whole contract — the declaration was accepted, the
+  slot was the declaring process's, and both outcomes were delivered to it.
+- **Each side gates on what it can honestly state.** The guest's audit sink
+  sees kernel audit records, so it counts creates. The host reads the serial
+  transcript, so it gates on the session's own per-window `WINDOW_SHOWN`
+  announcement — the witness that a frame carrying that window's first
+  painted pixels reached the display. Neither infers the other's facts:
+  on this endpoint a present, a blur change, a retitle and a declaration all
+  answer with the same four-byte status reply, so "the reply after the create
+  is the first present" is a guess about how many requests an application
+  makes, and on a shared rendezvous a guess about the other clients too.
+- **Every gesture is gated causally, not by a timer.** The bar gestures wait
+  on `WINDOW_SHOWN`: by then the application has declared its bar (it
+  declares before opening a window), the session has grouped that window
+  under its attested owner, and the strip has been re-resolved and drawn — so
+  the slot is live in the bar the guest hit-tests, under any host load. A
+  create reply would say only that the window exists, which is too early both
+  to photograph and to click.
+- **The guest cannot exit out from under the evidence.** The last window is
+  opened by the last gesture, and the runner sends no pointer step until
+  every dump already asked for has been read back and parsed — so the create
+  that completes the PASS cannot happen until the final dump is on disk.
+- **Three dumps read the screen.** The bar before anything runs (the
+  baseline the others are read against, and the frame that proves the
+  composited wallpaper); the first application slot carrying that
+  application's glyph with its window over the first cascade slot; and both
+  windows up with the one application still holding exactly one slot — the
+  frame that proves the bar shows applications rather than windows. That last
+  claim is asserted rather than merely described: the slot *beside* the
+  running application must be pixel-identical to the bare frame, so a
+  regression giving each window its own slot fails here instead of satisfying
+  assertions that all read the first slot. A window is probed at its cascade
+  slot rather than by its whole rectangle, because the terminal's window is
+  whatever its character grid measures in the face the running font service
+  resolved, which no host reconstruction can know.
 
 **Defect found and fixed by this vertical.** The capsule press relays
 `OpenPanel` to the pid the launch table names, but a process exists from
@@ -1587,8 +1599,6 @@ now stands:
   the folder also refreshes the library catalog and the file associations
   (`DesktopOutcome::relisted`), so an application installed after bring-up
   is picked up without a restart.
-- **Not a pin drag source** — T7 states why the store rule makes a desktop
-  pin gesture one that could never succeed.
 
 Tested in the wm suite (the layer draws over the background and under every
 window, a layer smaller than the screen leaves the background showing,
@@ -1612,7 +1622,12 @@ Docs: `userland/gui/wm/README.md`, `userland/gui/session/README.md`,
 ## Open questions to resolve in review (stop and ask, §15.7)
 
 None outstanding. The settled ones are recorded in their own done-state
-sections: the pin drag source is the program library and deliberately not
-the desktop (T7); `CAP_PROC_CONTROL` was minted with its live enforcement
-point — no earlier capability fit — and the monitor service is
-session-spawned, with the capsule degrading calmly when it is absent (T10).
+sections: the icon-bar menu's transport is inline bounded rows, which is also
+`plans/NEW-MENUS.md`'s M0 decision (T7); bar presence is *declared* rather
+than derived, so an application keeps its slot for the life of its process
+(T6); the information panel is manifest-attested rather than app-supplied, so
+no application can spoof an identity in system chrome (T7); the picker opens
+only at two windows, which is why it needs no dwell timer (T7);
+`CAP_PROC_CONTROL` was minted with its live enforcement point — no earlier
+capability fit — and the monitor service is session-spawned, with the capsule
+degrading calmly when it is absent (T10).

@@ -41,8 +41,8 @@ use ed25519_dalek::{Signer, SigningKey};
 use tairix_abi::{
     digest_bundle_contents, AppInfoHeader, BundleFileDigest, CapabilityId, LibraryCategory,
     ProgramKind, ABI_VERSION_CURRENT, APPINFO_MAGIC, APPINFO_MAX_CAPABILITIES, APPINFO_MAX_MIME,
-    BUNDLE_ID_MAX, BUNDLE_NAME_MAX, BUNDLE_SUFFIX, BUNDLE_VERSION_MAX, LIBRARY_ICON_MAX,
-    MIME_ENTRY_LEN, MIME_TYPE_MAX,
+    BUNDLE_AUTHOR_MAX, BUNDLE_ID_MAX, BUNDLE_NAME_MAX, BUNDLE_PURPOSE_MAX, BUNDLE_SUFFIX,
+    BUNDLE_VERSION_MAX, LIBRARY_ICON_MAX, MIME_ENTRY_LEN, MIME_TYPE_MAX,
 };
 use tairix_crypto::sha256;
 
@@ -106,6 +106,13 @@ pub struct AppManifestSource {
     /// site falls back to the bundle's class artwork and then to the
     /// built-in glyph (`plans/ICONS.md`).
     pub library_icon: Option<String>,
+    /// The bundle's one-line purpose — what the application is *for* — as
+    /// the desktop's application-information panel states it. `None` means
+    /// the panel simply omits the line.
+    pub purpose: Option<String>,
+    /// The bundle's author attribution, shown in the same panel. `None`
+    /// means the panel omits it.
+    pub author: Option<String>,
 }
 
 impl AppManifestSource {
@@ -118,8 +125,8 @@ impl AppManifestSource {
     /// over-long or empty identity field, a name that is not a plain
     /// command word, an unknown `kind`, an unknown or duplicate `CAP_*`
     /// name, a capability list exceeding the manifest bound, an unknown
-    /// library folder, an over-long `library-icon`, or a `library` on a
-    /// `service`.
+    /// library folder, an over-long `library-icon`, `purpose`, or `author`,
+    /// or a `library` on a `service`.
     pub fn parse(text: &str) -> Result<Self, AppImageError> {
         let ctx = APP_MANIFEST_SOURCE;
         let mut id = None;
@@ -130,6 +137,8 @@ impl AppManifestSource {
         let mut associations = None;
         let mut library = None;
         let mut library_icon = None;
+        let mut purpose = None;
+        let mut author = None;
         for (index, raw) in text.lines().enumerate() {
             let line = raw.trim();
             if line.is_empty() || line.starts_with('#') {
@@ -155,6 +164,8 @@ impl AppManifestSource {
                 "library-icon" => {
                     set(&at, key, &mut library_icon, parse_string(&at, value)?)?;
                 }
+                "purpose" => set(&at, key, &mut purpose, parse_string(&at, value)?)?,
+                "author" => set(&at, key, &mut author, parse_string(&at, value)?)?,
                 other => {
                     return Err(AppImageError::new(&at, format!("unknown key `{other}`")));
                 }
@@ -174,6 +185,8 @@ impl AppManifestSource {
             associations: associations.unwrap_or_default(),
             library,
             library_icon,
+            purpose,
+            author,
         };
         manifest.validate()?;
         Ok(manifest)
@@ -212,6 +225,12 @@ impl AppManifestSource {
         }
         if let Some(icon) = &self.library_icon {
             check_len(ctx, "library-icon", icon, LIBRARY_ICON_MAX)?;
+        }
+        if let Some(purpose) = &self.purpose {
+            check_len(ctx, "purpose", purpose, BUNDLE_PURPOSE_MAX)?;
+        }
+        if let Some(author) = &self.author {
+            check_len(ctx, "author", author, BUNDLE_AUTHOR_MAX)?;
         }
         if self.library.is_some() && self.kind == ProgramKind::Service {
             // A service is a daemon, not a user-facing application; listing
@@ -509,12 +528,22 @@ pub fn compose_signed_appinfo(
             Some(icon) => inline_len(ctx, "library-icon", icon, LIBRARY_ICON_MAX)?,
             None => 0,
         },
+        purpose_len: match &manifest.purpose {
+            Some(purpose) => inline_len(ctx, "purpose", purpose, BUNDLE_PURPOSE_MAX)?,
+            None => 0,
+        },
+        author_len: match &manifest.author {
+            Some(author) => inline_len(ctx, "author", author, BUNDLE_AUTHOR_MAX)?,
+            None => 0,
+        },
         library: LibraryCategory::to_wire(manifest.library),
-        reserved0: [0; 3],
+        reserved0: [0; 1],
         id: inline_buf(&manifest.id),
         name: inline_buf(&manifest.name),
         version: inline_buf(&manifest.version),
         library_icon: inline_buf(manifest.library_icon.as_deref().unwrap_or("")),
+        purpose: inline_buf(manifest.purpose.as_deref().unwrap_or("")),
+        author: inline_buf(manifest.author.as_deref().unwrap_or("")),
         syscall_table_hash,
         content_hash,
         signer_pubkey,

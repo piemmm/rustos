@@ -36,7 +36,7 @@
 /* Maximum length, in bytes, of a bundle's library icon asset name. */
 #define TAIRIX_LIBRARY_ICON_MAX 64u
 /* Packed little-endian wire size of an AppInfo header, in bytes. */
-#define TAIRIX_APPINFO_HEADER_WIRE_LEN 408u
+#define TAIRIX_APPINFO_HEADER_WIRE_LEN 568u
 
 /* Curated, OS-provided shared-library directory (AGENTS.md sec.16.4). */
 #define TAIRIX_SYSTEM_LIBRARIES_DIR "/System/Libraries"

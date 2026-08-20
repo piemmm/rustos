@@ -25,7 +25,7 @@ use crate::damage;
 use crate::paint::{
     draw_outline, ground_fill, heavy_contrast, inset, paint_bead, paint_chevron,
     paint_surface_plate, plate_border, resolve_bead, role_font, surface_rect, text_plate_height,
-    to_i32, ChevronDir, ChromeLayer,
+    to_i32, BeadShape, ChevronDir, ChromeLayer,
 };
 use crate::state::{ControlDisposition, ControlRole, ControlState, RenderInvariant};
 
@@ -47,6 +47,25 @@ pub enum MenuAction {
     Dismissed,
 }
 
+/// The mark a [`MenuItem`] draws in its leading icon column to state a
+/// setting the row carries.
+///
+/// A tick is an independent setting the row turns on; a bullet is the chosen
+/// member of a group of alternatives. Both are drawn in the icon column every
+/// row reserves, so a marked row's label still lines up with an unmarked
+/// one's, and both are shapes rather than colours so the state is legible
+/// without colour vision.
+#[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
+pub enum MenuMark {
+    /// No mark.
+    #[default]
+    None,
+    /// A tick: an independent setting this row turns on.
+    Check,
+    /// A filled bullet: the chosen member of a group of alternatives.
+    Radio,
+}
+
 /// One row of a menu (spec §11.10): a label with an optional leading icon,
 /// trailing shortcut, submenu marker, and — for a disabled row — a reason.
 ///
@@ -66,6 +85,7 @@ pub struct MenuItem {
     label: String,
     shortcut: Option<String>,
     icon: Option<IconKind>,
+    mark: MenuMark,
     submenu: bool,
     reason: Option<String>,
     role: ControlRole,
@@ -81,6 +101,7 @@ impl MenuItem {
             label: label.into(),
             shortcut: None,
             icon: None,
+            mark: MenuMark::None,
             submenu: false,
             reason: None,
             role: ControlRole::Neutral,
@@ -100,6 +121,16 @@ impl MenuItem {
     #[must_use]
     pub fn with_icon(mut self, icon: IconKind) -> Self {
         self.icon = Some(icon);
+        self
+    }
+
+    /// This item drawing `mark` in its leading icon column.
+    ///
+    /// A row states either an icon or a mark, never both: they share the one
+    /// reserved column, so a mark replaces the icon rather than crowding it.
+    #[must_use]
+    pub fn with_mark(mut self, mark: MenuMark) -> Self {
+        self.mark = mark;
         self
     }
 
@@ -297,16 +328,25 @@ impl MenuItem {
         let mut cursor = left;
         let icon_slot = glyph_h.min(h.saturating_sub(border.saturating_mul(2)));
 
-        // Leading icon (optional). The icon column is reserved even for a row
-        // with no icon, so a menu's labels line up (text stability, spec §14).
-        if let Some(kind) = self.icon {
-            if icon_slot > 0 {
+        // Leading icon or mark (both optional, and mutually exclusive: they
+        // share the one column). The column is reserved even for a row with
+        // neither, so a menu's labels line up (text stability, spec §14).
+        if icon_slot > 0 {
+            if let Some(kind) = self.icon {
                 if let Some(image) =
                     builtin_icon(kind, Color::from(label_color)).rasterise(icon_slot)
                 {
                     let iy = to_i32(y) + (to_i32(h) - to_i32(icon_slot)).max(0) / 2;
                     surface.blit(to_i32(cursor), iy, &image);
                 }
+            } else {
+                let my = y + (h.saturating_sub(icon_slot)) / 2;
+                paint_menu_mark(
+                    surface,
+                    (cursor, my, icon_slot),
+                    self.mark,
+                    Color::from(label_color),
+                );
             }
         }
         cursor = cursor.saturating_add(icon_slot).saturating_add(pad);
@@ -911,6 +951,32 @@ impl Menu {
             Key::Named(NamedKey::Enter) | Key::Char(' ') => self.activate(self.current?),
             Key::Named(NamedKey::Escape) => Some(MenuAction::Dismissed),
             _ => None,
+        }
+    }
+}
+
+/// Paint `mark` into the `side`-pixel column at `(x, y)` in `color`.
+///
+/// A tick reuses the shared Signal Bead check shape and a bullet the shared
+/// rounded-rectangle fill at half-side radius, so neither is a second
+/// spelling of a shape the control set already draws.
+fn paint_menu_mark(surface: &mut Surface, slot: (u32, u32, u32), mark: MenuMark, color: Color) {
+    let (x, y, side) = slot;
+    match mark {
+        MenuMark::None => {}
+        MenuMark::Check => paint_bead(surface, x, y, side, color, BeadShape::Check),
+        MenuMark::Radio => {
+            // A bullet reads at about half the column, centred, so it is a
+            // mark rather than a filled cell.
+            let d = (side / 2).max(1);
+            surface.fill_round_rect(
+                x + (side.saturating_sub(d)) / 2,
+                y + (side.saturating_sub(d)) / 2,
+                d,
+                d,
+                d / 2,
+                color,
+            );
         }
     }
 }

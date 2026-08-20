@@ -427,6 +427,37 @@ fn from_rgba8_zero_size_matches_surface_new() {
     assert_eq!(Surface::from_rgba8(0, 0, &[]), Surface::new(0, 0));
 }
 
+// ---- to_rgba8 ----------------------------------------------------------
+
+#[test]
+fn to_rgba8_round_trips_an_opaque_surface_byte_for_byte() {
+    let rgba = [
+        255, 0, 0, 255, //
+        0, 255, 0, 255, //
+        0, 0, 255, 255, //
+        10, 20, 30, 255,
+    ];
+    let s = Surface::from_rgba8(2, 2, &rgba).expect("length matches");
+    assert_eq!(s.to_rgba8(), rgba, "an opaque surface converts as a copy");
+}
+
+#[test]
+fn to_rgba8_recovers_straight_alpha_and_forgets_a_transparent_colour() {
+    let rgba = [
+        255, 0, 0, 128, // half-alpha red survives the round trip
+        0, 255, 0, 0, // a transparent pixel carries no colour to recover
+    ];
+    let s = Surface::from_rgba8(2, 1, &rgba).expect("length matches");
+    assert_eq!(s.to_rgba8(), [255, 0, 0, 128, 0, 0, 0, 0]);
+}
+
+#[test]
+fn to_rgba8_is_exactly_four_bytes_a_pixel() {
+    let s = Surface::filled(3, 5, RED.premultiply()).expect("allocates");
+    assert_eq!(s.to_rgba8().len(), 3 * 5 * 4);
+    assert!(Surface::new(0, 0).expect("allocates").to_rgba8().is_empty());
+}
+
 // ---- anti-aliased polygon fill --------------------------------------
 
 #[test]

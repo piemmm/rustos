@@ -21,17 +21,35 @@ use alloc::vec::Vec;
 
 use tairix_abi::desktop::DesktopInfo;
 use tairix_abi::driver::display::{DamageRect, DisplayMode};
-use tairix_abi::window_ipc::WindowEvent;
+use tairix_abi::window_ipc::{AppBar, WindowEvent};
 use tairix_abi::{Errno, ProcId};
 use tairix_display::winframe;
 use tairix_icon::{ArtworkOutcome, IconKind, IconRequest};
-use tairix_window::{PinDecision, WindowSizing};
+use tairix_log::EventId;
+use tairix_window::WindowSizing;
 use tairix_wm::{Color, Compositor, Point, Rect, Surface, WindowControlKind, WindowId};
 
+use crate::apps::{AppBarBridge, BUNDLE_RUN_SUFFIX};
 use crate::launch::LaunchTable;
 use crate::picker::PickerSlot;
-use crate::pins::{PinBridge, BUNDLE_RUN_SUFFIX};
 use crate::shell::DesktopShell;
+
+/// Event id of the one-shot announcement that a served window's first
+/// painted frame reached the display, in the desktop session's reserved
+/// range (`DESKTOP_SESSION_RANGE_START`).
+///
+/// The session is the only component that knows this: an application learns
+/// that its present was *accepted*, and the compositor that a frame was
+/// *composed*, but only the session sees a composed frame carrying that
+/// window reach the display. So "the window is visible" is announced here or
+/// nowhere, and anything else asking the question — a user diagnosing an
+/// application that launched but showed nothing, the icon-bar QEMU vertical
+/// deciding when the screen is worth reading — reads this one record.
+pub const WINDOW_SHOWN: EventId = EventId(20_003);
+
+/// The exact message [`WINDOW_SHOWN`] is emitted with. A log consumer
+/// matches on this constant rather than on a copy of its text.
+pub const WINDOW_SHOWN_MESSAGE: &str = "served window first frame on screen";
 
 /// The freshly opened window's fill until the app's first present lands:
 /// an opaque near-black, so an app that is slow to render shows a blank
@@ -51,6 +69,20 @@ const CASCADE_STEP: i32 = 32;
 /// [`CASCADE_ORIGIN`], so late windows never walk off screen.
 const CASCADE_WRAP: i32 = 8;
 
+/// How far a served window has got towards being visible, so the
+/// [`WINDOW_SHOWN`] announcement is made once and only for a window whose
+/// pixels genuinely reached the screen.
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum FirstFrame {
+    /// Opened, but no present has been served into it yet: the window body
+    /// is still [`OPEN_FILL`] and there is nothing of the app's to see.
+    Awaited,
+    /// A present landed, so the next frame the display takes carries it.
+    Painted,
+    /// A frame carrying it reached the display, and that was announced.
+    Shown,
+}
+
 /// One served window's session-side state.
 struct WindowRecord {
     /// The compositor window presenting this served window. The window's
@@ -64,6 +96,8 @@ struct WindowRecord {
     /// teardown the surface takes, and the window manager holds the same
     /// link itself for stacking, so no re-assertion happens here.
     parent: Option<WindowId>,
+    /// How far this window has got towards being seen.
+    first_frame: FirstFrame,
 }
 
 /// The session's bookkeeping for every live served window.
@@ -110,6 +144,27 @@ impl SessionWindows {
     /// clearing the set so the next report decision starts fresh.
     pub fn take_presented(&mut self) -> Vec<u64> {
         core::mem::take(&mut self.presented)
+    }
+
+    /// Report every served window whose first painted frame has just reached
+    /// the display, once each.
+    ///
+    /// Called immediately after a frame was handed to the display, which is
+    /// what makes the claim true: a window the application has presented into
+    /// is carried by that frame, so it is on screen now. A window still
+    /// awaiting its first present says nothing — its body is the session's own
+    /// opening fill, not the application's pixels — and one already announced
+    /// is not announced again.
+    ///
+    /// Takes a reporter rather than returning a collection so an idle wake —
+    /// which is nearly every wake — allocates nothing.
+    pub fn report_newly_shown(&mut self, mut report: impl FnMut(u64)) {
+        for (&ipc, record) in &mut self.records {
+            if record.first_frame == FirstFrame::Painted {
+                record.first_frame = FirstFrame::Shown;
+                report(ipc);
+            }
+        }
     }
 
     /// Every live served window, as `(window-channel id, compositor id)`
@@ -163,7 +218,14 @@ impl SessionWindows {
     /// Record the freshly opened window `ipc`, shown as `wm` and owned by
     /// `parent` when it is a popup.
     fn insert(&mut self, ipc: u64, wm: WindowId, parent: Option<WindowId>) {
-        self.records.insert(ipc, WindowRecord { wm, parent });
+        self.records.insert(
+            ipc,
+            WindowRecord {
+                wm,
+                parent,
+                first_frame: FirstFrame::Awaited,
+            },
+        );
         self.by_wm.insert(wm, ipc);
     }
 
@@ -275,30 +337,28 @@ pub fn window_control_alternate_event(
     }
 }
 
-/// Give every window opened since the last pass the icon of the
-/// application that opened it — on its own title bar *and* on its taskbar
-/// entry, both from this one resolution, so the two can never show
-/// different applications.
+/// Give every window opened since the last pass the title-bar icon of the
+/// application that opened it.
 ///
 /// `windows` supplies each freshly opened compositor window paired with the
 /// kernel-attested process that opened it, `task_of` resolves that process
 /// to the task id the desktop's launch records are keyed by, and `launched`
 /// is those records. Nothing an application sent is consulted, so no
-/// program can wear another's identity.
+/// program can wear another's identity. The icon bar's own slot resolves
+/// its picture from the same bundle through the same cache
+/// ([`AppBarService::slots`](crate::apps::AppBarService::slots)), so the
+/// two surfaces cannot show different applications.
 ///
 /// A window whose owner this desktop did not launch — a shell-spawned
 /// program, a child process — is left with no identity, so its title keeps
-/// the whole band and its taskbar entry keeps the shared application icon,
-/// rather than either wearing a badge for an application that cannot be
-/// named. An identified bundle whose declared artwork is absent, refused,
-/// or undecodable keeps the identity and loses only the picture: both
-/// surfaces fall back to the shared application-bundle artwork and then to
-/// their built-in glyph. Resolution never fails a window; it is already
-/// open.
+/// the whole band rather than wearing a badge for an application that
+/// cannot be named. An identified bundle whose declared artwork is absent,
+/// refused, or undecodable keeps the identity and loses only the picture,
+/// falling back to the shared application-bundle artwork and then to the
+/// built-in glyph. Resolution never fails a window; it is already open.
 ///
-/// Each icon is resolved through the session's one artwork cache, at the
-/// pixel side of the slot that draws it — the window's own title band, and
-/// the bar's own task slot — so a second window of the same application
+/// The icon is resolved through the session's one artwork cache at the
+/// title band's own pixel side, so a second window of the same application
 /// costs a lookup rather than a read and a decode.
 pub fn resolve_window_identities<F>(
     shell: &mut DesktopShell,
@@ -316,25 +376,18 @@ pub fn resolve_window_identities<F>(
         else {
             continue;
         };
-        // An undecorated window draws no identity slot and reports no side;
-        // it still has a taskbar entry to identify.
-        let mut waiting = false;
-        if let Some(side) = compositor.window_title_icon_side(wm) {
-            let (artwork, pending) = bundle_artwork(shell, bundle, side);
-            waiting |= pending;
-            compositor.set_window_identity(wm, IconKind::AppBundle, artwork);
-        }
-        if let Some(task) = shell.tasks().task_for(wm) {
-            let side = shell.session().taskbar().task_icon_side(compositor.scale());
-            let (artwork, pending) = bundle_artwork(shell, bundle, side);
-            waiting |= pending;
-            shell.set_task_artwork(compositor, task, artwork);
-        }
-        // Both slots store the picture rather than drawing it from the cache,
-        // so a decode still in flight has to be asked for again; the slot that
-        // did resolve is a cache hit on that second pass. A window already
-        // gone asks for nothing and so is never re-queued.
-        if waiting {
+        // An undecorated window draws no identity slot and reports no side,
+        // so there is nothing to resolve for it.
+        let Some(side) = compositor.window_title_icon_side(wm) else {
+            continue;
+        };
+        let (artwork, pending) = bundle_artwork(shell, bundle, side);
+        compositor.set_window_identity(wm, IconKind::AppBundle, artwork);
+        // The band stores the picture rather than drawing it from the cache,
+        // so a decode still in flight has to be asked for again; the second
+        // pass is a cache hit. A window already gone asks for nothing and so
+        // is never re-queued.
+        if pending {
             windows.defer_identity(wm, owner);
         }
     }
@@ -383,9 +436,10 @@ pub struct ShellWindowHost<'a> {
     /// validated `PickFile` opens it, and a closing window takes its own
     /// pick down with it.
     pub picker: &'a mut dyn PickerSlot,
-    /// The session's pin service ([`PinService`](crate::pins::PinService)
-    /// in production): a validated pin request or drag offer lands here.
-    pub pins: &'a mut dyn PinBridge,
+    /// The session's icon-bar service
+    /// ([`AppBarService`](crate::apps::AppBarService) in production): a
+    /// validated icon-bar declaration lands here.
+    pub apps: &'a mut dyn AppBarBridge,
 }
 
 impl tairix_window::WindowHost for ShellWindowHost<'_> {
@@ -542,6 +596,14 @@ impl tairix_window::WindowHost for ShellWindowHost<'_> {
         if !self.windows.presented.contains(&window_id) {
             self.windows.presented.push(window_id);
         }
+        // The window now holds the app's own pixels, so the next frame the
+        // display takes is the one that shows it. Only the first present
+        // moves this on; a window already on screen stays announced.
+        if let Some(record) = self.windows.records.get_mut(&window_id) {
+            if record.first_frame == FirstFrame::Awaited {
+                record.first_frame = FirstFrame::Painted;
+            }
+        }
         Ok(())
     }
 
@@ -610,19 +672,15 @@ impl tairix_window::WindowHost for ShellWindowHost<'_> {
         self.picker.begin(window_id, self.shell, self.compositor)
     }
 
-    fn pin_requested(&mut self, _owner: ProcId, _window: u64, path: &str) -> PinDecision {
-        // The engine attested the caller and validated window ownership;
-        // the pin service validates the bundle itself and applies (or
-        // refuses) the edit under the session's own identity.
-        self.pins.pin_requested(path)
+    fn app_bar_declared(&mut self, owner: ProcId, bar: &AppBar) -> Result<(), Errno> {
+        // The engine attested the caller and bounded the declaration; the
+        // icon-bar service records it, and the strip is re-resolved from the
+        // dirty latch before the next present.
+        self.apps.app_bar_declared(owner, bar)
     }
 
-    fn drag_offered(&mut self, _owner: ProcId, window: u64, path: &str) -> bool {
-        self.pins.drag_offered(window, path)
-    }
-
-    fn drag_withdrawn(&mut self, _owner: ProcId, window: u64) {
-        self.pins.drag_withdrawn(window);
+    fn app_bar_withdrawn(&mut self, owner: ProcId) {
+        self.apps.app_bar_withdrawn(owner);
     }
 
     fn backdrop_blur_set(&mut self, window_id: u64, radius_px: u16) {
@@ -741,20 +799,24 @@ mod tests {
         }
     }
 
-    /// A pin seam that refuses everything: these tests exercise the window
-    /// lifecycle, not pinning (which has its own suite in `crate::tests`).
-    struct RefusingPins;
+    /// An icon-bar seam that records what the bridge relayed: these tests
+    /// exercise the window lifecycle, and the icon bar has its own suite in
+    /// `crate::tests`.
+    #[derive(Default)]
+    struct RecordingBar {
+        declared: Vec<ProcId>,
+        withdrawn: Vec<ProcId>,
+    }
 
-    impl crate::pins::PinBridge for RefusingPins {
-        fn pin_requested(&mut self, _path: &str) -> PinDecision {
-            PinDecision::Refused
+    impl AppBarBridge for RecordingBar {
+        fn app_bar_declared(&mut self, owner: ProcId, _bar: &AppBar) -> Result<(), Errno> {
+            self.declared.push(owner);
+            Ok(())
         }
 
-        fn drag_offered(&mut self, _window: u64, _path: &str) -> bool {
-            false
+        fn app_bar_withdrawn(&mut self, owner: ProcId) {
+            self.withdrawn.push(owner);
         }
-
-        fn drag_withdrawn(&mut self, _window: u64) {}
     }
 
     /// An accepted open composes a focused desktop window, records both
@@ -770,7 +832,7 @@ mod tests {
                 compositor: &mut compositor,
                 windows: &mut windows,
                 picker: &mut picker,
-                pins: &mut RefusingPins,
+                apps: &mut RecordingBar::default(),
             };
             host.window_opened(
                 window_owner(1),
@@ -825,7 +887,7 @@ mod tests {
                     compositor: &mut compositor,
                     windows: &mut windows,
                     picker: &mut picker,
-                    pins: &mut RefusingPins,
+                    apps: &mut RecordingBar::default(),
                 };
                 host.window_opened(window_owner(1), 1, &m, "w", WindowSizing::default())
                     .expect("opens");
@@ -860,6 +922,140 @@ mod tests {
         }
     }
 
+    /// A served window is announced on screen once its first present has
+    /// landed and a frame has been taken — once, and never before.
+    #[test]
+    fn a_window_is_reported_shown_once_its_first_frame_has_been_taken() {
+        let (mut shell, mut compositor) = desktop();
+        let mut windows = SessionWindows::new();
+        let mut picker = RecordingSlot::default();
+        let m = mode(4, 4, DisplayFormat::Rgba8888);
+        {
+            let mut host = ShellWindowHost {
+                shell: &mut shell,
+                compositor: &mut compositor,
+                windows: &mut windows,
+                picker: &mut picker,
+                apps: &mut RecordingBar::default(),
+            };
+            host.window_opened(window_owner(1), 1, &m, "w", WindowSizing::default())
+                .expect("opens");
+        }
+        // Opened but never presented: the body is the session's own fill, so
+        // there is nothing of the application's to announce.
+        assert_eq!(shown(&mut windows), Vec::<u64>::new());
+        {
+            let mut host = ShellWindowHost {
+                shell: &mut shell,
+                compositor: &mut compositor,
+                windows: &mut windows,
+                picker: &mut picker,
+                apps: &mut RecordingBar::default(),
+            };
+            host.window_presented(1, &m, &[0u8; 4 * 4 * 4], whole(&m))
+                .expect("presents");
+        }
+        assert_eq!(shown(&mut windows), alloc::vec![1]);
+        // The announcement is one-shot: a later frame, and a later present,
+        // say nothing more about a window already seen.
+        assert_eq!(shown(&mut windows), Vec::<u64>::new());
+        {
+            let mut host = ShellWindowHost {
+                shell: &mut shell,
+                compositor: &mut compositor,
+                windows: &mut windows,
+                picker: &mut picker,
+                apps: &mut RecordingBar::default(),
+            };
+            host.window_presented(1, &m, &[0u8; 4 * 4 * 4], whole(&m))
+                .expect("presents again");
+        }
+        assert_eq!(shown(&mut windows), Vec::<u64>::new());
+    }
+
+    /// Each window is announced on its own first frame, so one application
+    /// opening a second window announces exactly that window — which is what
+    /// makes the announcement a per-window fact rather than a per-app one.
+    #[test]
+    fn each_window_is_reported_on_its_own_first_frame() {
+        let (mut shell, mut compositor) = desktop();
+        let mut windows = SessionWindows::new();
+        let mut picker = RecordingSlot::default();
+        let m = mode(4, 4, DisplayFormat::Rgba8888);
+        let owner = window_owner(1);
+        {
+            let mut host = ShellWindowHost {
+                shell: &mut shell,
+                compositor: &mut compositor,
+                windows: &mut windows,
+                picker: &mut picker,
+                apps: &mut RecordingBar::default(),
+            };
+            host.window_opened(owner, 1, &m, "one", WindowSizing::default())
+                .expect("opens");
+            host.window_opened(owner, 2, &m, "two", WindowSizing::default())
+                .expect("opens");
+            host.window_presented(1, &m, &[0u8; 4 * 4 * 4], whole(&m))
+                .expect("presents");
+        }
+        // Only the window that painted; its sibling is still awaited.
+        assert_eq!(shown(&mut windows), alloc::vec![1]);
+        {
+            let mut host = ShellWindowHost {
+                shell: &mut shell,
+                compositor: &mut compositor,
+                windows: &mut windows,
+                picker: &mut picker,
+                apps: &mut RecordingBar::default(),
+            };
+            host.window_presented(2, &m, &[0u8; 4 * 4 * 4], whole(&m))
+                .expect("presents");
+        }
+        assert_eq!(shown(&mut windows), alloc::vec![2]);
+    }
+
+    /// A refused present leaves the window unseen: nothing was drawn, so a
+    /// frame taken afterwards carries no pixels of the application's to
+    /// announce.
+    #[test]
+    fn a_refused_present_reports_no_window_shown() {
+        let (mut shell, mut compositor) = desktop();
+        let mut windows = SessionWindows::new();
+        let mut picker = RecordingSlot::default();
+        let m = mode(4, 4, DisplayFormat::Rgba8888);
+        {
+            let mut host = ShellWindowHost {
+                shell: &mut shell,
+                compositor: &mut compositor,
+                windows: &mut windows,
+                picker: &mut picker,
+                apps: &mut RecordingBar::default(),
+            };
+            host.window_opened(window_owner(1), 1, &m, "w", WindowSizing::default())
+                .expect("opens");
+            // A frame shorter than the mode describes is refused.
+            assert!(host.window_presented(1, &m, &[0u8; 4], whole(&m)).is_err());
+        }
+        assert_eq!(shown(&mut windows), Vec::<u64>::new());
+    }
+
+    /// Damage covering the whole of `m`.
+    fn whole(m: &DisplayMode) -> DamageRect {
+        DamageRect {
+            x: 0,
+            y: 0,
+            width_px: m.width_px,
+            height_px: m.height_px,
+        }
+    }
+
+    /// The windows `windows` reports as newly on screen, in report order.
+    fn shown(windows: &mut SessionWindows) -> Vec<u64> {
+        let mut seen = Vec::new();
+        windows.report_newly_shown(|window| seen.push(window));
+        seen
+    }
+
     /// A present whose damage or frame disagrees with the recorded
     /// surface refuses fail-closed instead of indexing out of bounds,
     /// and an unknown window is `NotFound`.
@@ -873,7 +1069,7 @@ mod tests {
             compositor: &mut compositor,
             windows: &mut windows,
             picker: &mut picker,
-            pins: &mut RefusingPins,
+            apps: &mut RecordingBar::default(),
         };
         let m = mode(4, 4, DisplayFormat::Rgba8888);
         host.window_opened(window_owner(1), 1, &m, "w", WindowSizing::default())
@@ -941,7 +1137,7 @@ mod tests {
                 compositor: &mut compositor,
                 windows: &mut windows,
                 picker: &mut picker,
-                pins: &mut RefusingPins,
+                apps: &mut RecordingBar::default(),
             };
             host.window_opened(window_owner(1), 1, &m, "w", RESIZABLE)
                 .expect("opens");
@@ -971,7 +1167,7 @@ mod tests {
             compositor: &mut compositor,
             windows: &mut windows,
             picker: &mut picker,
-            pins: &mut RefusingPins,
+            apps: &mut RecordingBar::default(),
         };
         let mut next = frame;
         next[0..4].copy_from_slice(&[0xFF, 0x00, 0x00, 0xFF]);
@@ -1016,7 +1212,7 @@ mod tests {
                 compositor: &mut compositor,
                 windows: &mut windows,
                 picker: &mut picker,
-                pins: &mut RefusingPins,
+                apps: &mut RecordingBar::default(),
             };
             host.window_opened(window_owner(1), 1, &m, "w", WindowSizing::default())
                 .expect("opens");
@@ -1032,7 +1228,7 @@ mod tests {
                 compositor: &mut compositor,
                 windows: &mut windows,
                 picker: &mut picker,
-                pins: &mut RefusingPins,
+                apps: &mut RecordingBar::default(),
             };
             host.window_presented(1, &m, &frame, full)
                 .expect("the repeat present is accepted");
@@ -1065,7 +1261,7 @@ mod tests {
                 compositor: &mut compositor,
                 windows: &mut windows,
                 picker: &mut picker,
-                pins: &mut RefusingPins,
+                apps: &mut RecordingBar::default(),
             };
             host.window_opened(window_owner(1), 1, &m, "w", WindowSizing::default())
                 .expect("opens");
@@ -1084,7 +1280,7 @@ mod tests {
                 compositor: &mut compositor,
                 windows: &mut windows,
                 picker: &mut picker,
-                pins: &mut RefusingPins,
+                apps: &mut RecordingBar::default(),
             };
             host.window_presented(1, &m, &frame, full)
                 .expect("the second present lands");
@@ -1113,7 +1309,7 @@ mod tests {
                 compositor: &mut compositor,
                 windows: &mut windows,
                 picker: &mut picker,
-                pins: &mut RefusingPins,
+                apps: &mut RecordingBar::default(),
             };
             host.window_opened(window_owner(1), 1, &m, "w", WindowSizing::default())
                 .expect("opens");
@@ -1157,7 +1353,7 @@ mod tests {
             compositor: &mut compositor,
             windows: &mut windows,
             picker: &mut picker,
-            pins: &mut RefusingPins,
+            apps: &mut RecordingBar::default(),
         };
         let m = mode(8, 8, DisplayFormat::Rgba8888);
         host.window_opened(window_owner(1), 1, &m, "w", WindowSizing::default())
@@ -1182,7 +1378,7 @@ mod tests {
                 compositor: &mut compositor,
                 windows: &mut windows,
                 picker: &mut picker,
-                pins: &mut RefusingPins,
+                apps: &mut RecordingBar::default(),
             };
             host.window_opened(
                 window_owner(1),
@@ -1224,7 +1420,7 @@ mod tests {
                 compositor: &mut compositor,
                 windows: &mut windows,
                 picker: &mut picker,
-                pins: &mut RefusingPins,
+                apps: &mut RecordingBar::default(),
             };
             open_one_sized(&mut host, 3, RESIZABLE)
         };
@@ -1274,7 +1470,7 @@ mod tests {
                 compositor: &mut compositor,
                 windows: &mut windows,
                 picker: &mut picker,
-                pins: &mut RefusingPins,
+                apps: &mut RecordingBar::default(),
             };
             host.window_opened(
                 window_owner(1),
@@ -1478,7 +1674,7 @@ mod tests {
                 compositor: &mut compositor,
                 windows: &mut windows,
                 picker: &mut picker,
-                pins: &mut RefusingPins,
+                apps: &mut RecordingBar::default(),
             };
             (
                 open_one_sized(
@@ -1529,7 +1725,7 @@ mod tests {
                 compositor: &mut compositor,
                 windows: &mut windows,
                 picker: &mut picker,
-                pins: &mut RefusingPins,
+                apps: &mut RecordingBar::default(),
             };
             let wm = open_one(&mut host, 7);
             // A compositor window the session does not track (e.g. the taskbar
@@ -1576,7 +1772,7 @@ mod tests {
                 compositor: &mut compositor,
                 windows: &mut windows,
                 picker: &mut picker,
-                pins: &mut RefusingPins,
+                apps: &mut RecordingBar::default(),
             };
             open_one(&mut host, 7)
         };
@@ -1631,7 +1827,7 @@ mod tests {
             compositor: &mut compositor,
             windows: &mut windows,
             picker: &mut picker,
-            pins: &mut RefusingPins,
+            apps: &mut RecordingBar::default(),
         };
         let first = open_one(&mut host, 7);
         let second = open_one(&mut host, 8);
@@ -1685,7 +1881,7 @@ mod tests {
                 compositor: &mut compositor,
                 windows: &mut windows,
                 picker: &mut picker,
-                pins: &mut RefusingPins,
+                apps: &mut RecordingBar::default(),
             };
             open_one(&mut host, 7)
         };
@@ -1718,7 +1914,7 @@ mod tests {
                 compositor: &mut compositor,
                 windows: &mut windows,
                 picker: &mut picker,
-                pins: &mut RefusingPins,
+                apps: &mut RecordingBar::default(),
             };
             let back = open_one(&mut host, 7);
             let front = open_one(&mut host, 9);
@@ -1758,7 +1954,7 @@ mod tests {
                 compositor: &mut compositor,
                 windows: &mut windows,
                 picker: &mut picker,
-                pins: &mut RefusingPins,
+                apps: &mut RecordingBar::default(),
             };
             open_one(&mut host, 7)
         };
@@ -1826,7 +2022,7 @@ mod tests {
             compositor: &mut compositor,
             windows: &mut windows,
             picker: &mut picker,
-            pins: &mut RefusingPins,
+            apps: &mut RecordingBar::default(),
         };
         let wm = open_one(&mut host, 7);
         // A resize moves the client geometry the compositor draws and lays
@@ -1853,7 +2049,7 @@ mod tests {
                 compositor: &mut compositor,
                 windows: &mut windows,
                 picker: &mut picker,
-                pins: &mut RefusingPins,
+                apps: &mut RecordingBar::default(),
             };
             let wm = open_one(&mut host, 7);
             host.window_retitled(7, "Files - Documents")
@@ -1893,7 +2089,7 @@ mod tests {
             compositor: &mut compositor,
             windows: &mut windows,
             picker: &mut picker,
-            pins: &mut RefusingPins,
+            apps: &mut RecordingBar::default(),
         };
         let m = mode(8, 8, DisplayFormat::Rgba8888);
         host.window_opened(window_owner(1), 1, &m, "w", WindowSizing::default())
@@ -1929,7 +2125,7 @@ mod tests {
                 compositor: &mut compositor,
                 windows: &mut windows,
                 picker: &mut picker,
-                pins: &mut RefusingPins,
+                apps: &mut RecordingBar::default(),
             };
             (
                 open_one_sized(&mut host, 1, WindowSizing::default()),

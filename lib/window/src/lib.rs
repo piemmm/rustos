@@ -31,17 +31,19 @@
 
 extern crate alloc;
 
+pub mod appbar;
 pub mod client;
 pub mod desktop;
 pub mod server;
 
+pub use appbar::{is_quit, quit_and_about, QUIT_ROW};
 pub use client::{
     damage_in, event_endpoint_for, key_input_event, pointer_input_events, present_damage,
     EventSource, Repaint, WindowClient, WindowEvents, WindowTransport, EVENT_MAILBOX_CAPACITY,
 };
 pub use desktop::Desktop;
 pub use server::{
-    CallerIdentity, EventSink, PinDecision, PopupSpec, WindowHost, WindowServer, WindowSizing,
+    CallerIdentity, EventSink, PopupSpec, WindowHost, WindowServer, WindowSizing,
     WINDOWS_PER_CLIENT_MAX, WINDOW_REPLY_MAX,
 };
 

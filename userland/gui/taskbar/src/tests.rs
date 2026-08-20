@@ -8,9 +8,12 @@ use tairix_abi::switchboard_ipc::{
     CommandSection, TrayPermille, TrayPressure, TrayPressureCount, TrayPressureKind, TraySummary,
     TrayTask, TrayTaskName,
 };
+use tairix_abi::window_ipc::{
+    AppMenu, AppMenuItemId, AppMenuLabel, AppMenuMark, AppMenuRow, APP_MENU_MAX_ROWS,
+};
 use tairix_controls::{
-    damage, ground_fill, plate_border, ActivityState, ChromeLayer, ControlState, PressureKind,
-    PressureState, RecoveryState, TaskVisibility, TrayBadgeContent, TrayBadgeTone,
+    damage, ground_fill, plate_border, ActivityState, ChromeLayer, ControlState, MenuItem,
+    MenuMark, PressureKind, PressureState, RecoveryState, TrayBadgeContent, TrayBadgeTone,
 };
 use tairix_geometry::{Point, Rect, Scale};
 use tairix_icon::{IconArtwork, IconKind, IconRequest, IconSet, NoArtwork};
@@ -60,19 +63,20 @@ fn pressured_renderer(gauge: &'static ReportedPressure) -> TaskbarRenderer {
     TaskbarRenderer::new(icon_cache(TEST_SEAT, TEST_FB_BYTES, gauge, &TEST_SINK))
 }
 
+use crate::apps::{AppIdentity, AppSlot};
 use crate::edge::{Edge, Orientation};
 use crate::input::{TaskbarInput, TaskbarResponse, LONG_PRESS_AFTER_NS};
 use crate::layout::Hit;
 use crate::library::{folder_label, LibraryFocus, LibraryRow};
-use crate::menu::MenuSubject;
+use crate::menu::{MenuSubject, MENU_OPEN_ROW};
 use crate::notifications::{
     IconId, NotifySeverity, StatusKind, StatusSignal, TransientNotification,
 };
-use crate::pins::PinView;
+use crate::picker::{PickerEntry, PICKER_MIN_WINDOWS};
 use crate::render::{icon_cache, IconEpoch, TaskbarRenderer};
 use crate::repaint::TaskbarRepaint;
 use crate::taskbar::{Taskbar, TaskbarConfig};
-use crate::tasks::{ActivateOutcome, TaskId, TaskList};
+use crate::tasks::{TaskId, TaskList};
 use crate::tray::derive_signal;
 
 /// A fixed monotonic time for tests that do not care about the Switchboard
@@ -113,6 +117,49 @@ fn office_and_games() -> Catalog {
         ("calc", "Calc", LibraryCategory::Office),
         ("chess", "Chess", LibraryCategory::Games),
     ])
+}
+
+/// A validated icon-bar menu row label.
+fn menu_label(text: &str) -> AppMenuLabel {
+    AppMenuLabel::new(text).expect("a short label")
+}
+
+/// An enabled, unmarked chooseable row.
+fn item(id: u16, label: &str) -> AppMenuRow {
+    AppMenuRow::Item {
+        id: AppMenuItemId::new(id).expect("a non-zero id"),
+        label: menu_label(label),
+        enabled: true,
+        mark: AppMenuMark::None,
+    }
+}
+
+/// The menu a well-behaved application declares: an action, a rule, *Quit*,
+/// and the session-drawn *About* row.
+fn declared_menu() -> AppMenu {
+    let mut menu = AppMenu::EMPTY;
+    menu.push(item(1, "New window")).expect("fits");
+    menu.push(AppMenuRow::Separator).expect("fits");
+    menu.push(item(2, "Quit")).expect("fits");
+    menu.push(AppMenuRow::About).expect("fits");
+    menu
+}
+
+/// An application slot for `label`, no windows and no declaration — what
+/// the session resolves for a process that put nothing on the bar itself.
+fn app(label: &str) -> AppSlot {
+    AppSlot::new(label, IconKind::AppBundle)
+}
+
+/// The identity a signed manifest states for `name`, with both optional
+/// fields present.
+fn identity(name: &str) -> AppIdentity {
+    AppIdentity {
+        name: String::from(name),
+        version: String::from("1.2.3"),
+        purpose: Some(String::from("Does one thing well")),
+        author: Some(String::from("TAIRiX")),
+    }
 }
 
 /// A bottom-bar taskbar over the standard fixture with its popup closed,
@@ -235,22 +282,34 @@ fn tasks_add_unfocused_and_reject_duplicates() {
 }
 
 #[test]
-fn task_activate_focuses_then_minimises() {
+fn minimising_drops_focus_and_focusing_restores() {
     let mut tasks = TaskList::new();
     tasks.add(TaskId(1), "Editor");
-    assert_eq!(tasks.activate(TaskId(1)), ActivateOutcome::Activated);
+    assert!(tasks.set_focused(Some(TaskId(1))));
     assert_eq!(tasks.focused(), Some(TaskId(1)));
-    assert_eq!(tasks.activate(TaskId(1)), ActivateOutcome::Minimised);
+
+    assert!(tasks.minimise(TaskId(1)));
     assert!(tasks.is_minimised(TaskId(1)));
     assert_eq!(tasks.focused(), None);
-    assert_eq!(tasks.activate(TaskId(9)), ActivateOutcome::Unknown);
+    assert!(
+        tasks.minimise(TaskId(1)),
+        "already minimised stays minimised"
+    );
+
+    // Focusing a window restores it — which is what choosing its cell in
+    // the hover picker does.
+    assert!(tasks.set_focused(Some(TaskId(1))));
+    assert!(!tasks.is_minimised(TaskId(1)));
+
+    assert!(!tasks.minimise(TaskId(9)), "an unknown id fails closed");
+    assert!(!tasks.is_minimised(TaskId(9)));
 }
 
 #[test]
 fn task_remove_clears_focus() {
     let mut tasks = TaskList::new();
     tasks.add(TaskId(1), "Editor");
-    tasks.activate(TaskId(1));
+    tasks.set_focused(Some(TaskId(1)));
     assert!(tasks.remove(TaskId(1)));
     assert_eq!(tasks.focused(), None);
     assert!(tasks.is_empty());
@@ -291,12 +350,15 @@ fn previous_task_remembers_the_last_real_handover() {
     tasks.set_focused(Some(TaskId(3)));
     assert_eq!(tasks.previous(), None);
 
-    // The activate toggle's restore path records the handover too.
-    tasks.activate(TaskId(1));
+    // Restoring a minimised window is a handover like any other.
+    tasks.set_focused(Some(TaskId(1)));
     assert_eq!(tasks.previous(), Some(TaskId(3)));
-    // Minimising (activating the focused task) is not a handover.
-    tasks.activate(TaskId(1));
-    assert_eq!(tasks.previous(), Some(TaskId(3)));
+    tasks.minimise(TaskId(1));
+    assert_eq!(
+        tasks.previous(),
+        Some(TaskId(3)),
+        "minimising is not a handover"
+    );
     // A closing task is forgotten rather than resurrected later.
     tasks.remove(TaskId(3));
     assert_eq!(tasks.previous(), None);
@@ -472,7 +534,7 @@ fn leading_launchers_partition_the_leading_end() {
     // content strip; Files follows the whole 17 px gutter.
     assert_eq!(layout.separator, Rect::new(62, 766, 1, 18));
     assert_eq!(layout.files, Rect::new(71, 756, 48, 38));
-    assert_eq!(layout.task_list.left(), 119);
+    assert_eq!(layout.app_strip.left(), 119);
     // The Switchboard capsule owns the trailing end of that strip; the clock
     // ends where it starts.
     assert_eq!(layout.switchboard, Rect::new(950, 756, 44, 38));
@@ -482,7 +544,7 @@ fn leading_launchers_partition_the_leading_end() {
 #[test]
 fn hit_testing_resolves_every_region() {
     let mut bar = bottom_bar();
-    bar.tasks_mut().add(TaskId(1), "Editor");
+    bar.set_apps(alloc::vec![app("Editor")]);
     bar.set_status_signals(alloc::vec![StatusSignal::new(
         IconId(7),
         StatusKind::Network
@@ -498,8 +560,8 @@ fn hit_testing_resolves_every_region() {
         Some(Hit::Files)
     );
     assert_eq!(
-        bar.hit_test(centre_of(layout.tasks[0]), Scale::ONE),
-        Some(Hit::Task(0))
+        bar.hit_test(centre_of(layout.apps[0]), Scale::ONE),
+        Some(Hit::App(0))
     );
     assert_eq!(
         bar.hit_test(centre_of(layout.notifications[0]), Scale::ONE),
@@ -514,8 +576,8 @@ fn hit_testing_resolves_every_region() {
         Some(Hit::Switchboard)
     );
     assert_eq!(bar.hit_test(Point::new(500, 100), Scale::ONE), None);
-    // A gap between the last task slot and the notification area is the
-    // bare bar: inside the bar, on no region.
+    // A gap between the last application slot and the notification area is
+    // the bare bar: inside the bar, on no region.
     assert_eq!(bar.hit_test(Point::new(500, 780), Scale::ONE), None);
 }
 
@@ -611,8 +673,7 @@ fn the_separator_gutter_shifts_the_files_launcher_and_everything_after_it() {
     let gutter =
         i32::try_from(metrics.border_thickness + metrics.control_gap * 2).expect("a modest gutter");
     let mut bar = bottom_bar();
-    bar.set_pins(alloc::vec![PinView::new("Pin", IconKind::AppBundle)]);
-    bar.tasks_mut().add(TaskId(1), "Editor");
+    bar.set_apps(alloc::vec![app("Editor")]);
     let layout = bar.layout(Scale::ONE);
     let launcher = i32::try_from(layout.library.width).expect("a modest launcher");
 
@@ -627,9 +688,8 @@ fn the_separator_gutter_shifts_the_files_launcher_and_everything_after_it() {
         "the library keeps the leading end"
     );
     assert_eq!(layout.files.left(), leading + launcher + gutter);
-    assert_eq!(layout.pins[0].left(), leading + launcher * 2 + gutter);
-    assert_eq!(layout.pin_strip.left(), layout.files.right());
-    assert_eq!(layout.tasks[0].left(), layout.pins[0].right());
+    assert_eq!(layout.app_strip.left(), layout.files.right());
+    assert_eq!(layout.apps[0].left(), layout.app_strip.left());
 }
 
 #[test]
@@ -748,8 +808,7 @@ fn a_bar_too_small_for_its_rim_keeps_its_content_inside_itself() {
                     ..TaskbarConfig::bottom_bar(screen_w, screen_h)
                 };
                 let mut bar = Taskbar::new(config, &theme);
-                bar.set_pins(alloc::vec![PinView::new("Pin", IconKind::AppBundle)]);
-                bar.tasks_mut().add(TaskId(1), "Editor");
+                bar.set_apps(alloc::vec![app("Editor")]);
                 let layout = bar.layout(scale);
                 let frame = layout.bar;
                 let at = alloc::format!("{percent}% {screen_w}x{screen_h} {edge:?}");
@@ -763,10 +822,8 @@ fn a_bar_too_small_for_its_rim_keeps_its_content_inside_itself() {
                     ("library", layout.library),
                     ("separator", layout.separator),
                     ("files", layout.files),
-                    ("pin strip", layout.pin_strip),
-                    ("pin", layout.pins[0]),
-                    ("task list", layout.task_list),
-                    ("task", layout.tasks[0]),
+                    ("application strip", layout.app_strip),
+                    ("application slot", layout.apps[0]),
                     ("notification area", layout.notification_area),
                     ("clock", layout.clock),
                     ("switchboard", layout.switchboard),
@@ -795,104 +852,88 @@ fn a_bar_too_small_for_its_rim_keeps_its_content_inside_itself() {
 }
 
 #[test]
-fn overflowing_task_slot_is_clipped_to_empty() {
+fn overflowing_app_slot_is_clipped_to_empty() {
     let mut bar = bottom_bar();
-    // The task region of this screen holds 15 whole 48 px slots, so 24
-    // windows put the later slots well past its trailing edge.
-    for index in 0..24 {
-        bar.tasks_mut().add(TaskId(index), "Task");
-    }
+    // The strip of this screen holds 15 whole 48 px slots, so 24 running
+    // applications put the later slots well past its trailing edge.
+    let apps: Vec<AppSlot> = (0..24).map(|_| app("App")).collect();
+    bar.set_apps(apps);
     let layout = bar.layout(Scale::ONE);
-    assert!(layout.tasks[0].width > 0);
+    assert!(layout.apps[0].width > 0);
     assert!(
-        layout.tasks.last().expect("24 slots").is_empty(),
+        layout.apps.last().expect("24 slots").is_empty(),
         "a slot past the region clips to empty"
     );
 }
 
 #[test]
-fn a_task_slot_is_the_same_square_as_a_pin_slot() {
+fn an_app_slot_is_a_square_the_launchers_share() {
     let mut bar = bottom_bar();
-    bar.set_pins(alloc::vec![PinView::new("Pin", IconKind::AppBundle)]);
-    bar.tasks_mut()
-        .add(TaskId(1), "A window title far wider than any slot");
+    bar.set_apps(alloc::vec![app("A window title far wider than any slot")]);
     for percent in [100, 200] {
         let scale = Scale::from_percent(percent).expect("a valid scale");
         let layout = bar.layout(scale);
-        let pin = layout.pins[0];
-        let task = layout.tasks[0];
+        let slot = layout.apps[0];
         assert_eq!(
-            (task.width, task.height),
-            (pin.width, pin.height),
-            "{percent}%: an icon-only task takes a pin's slot, so the two read as one strip"
+            (slot.width, slot.height),
+            (layout.library.width, layout.library.height),
+            "{percent}%: an icon-only slot takes a launcher's square, so the bar reads as one strip"
         );
-        assert_eq!(
-            bar.task_icon_side(scale),
-            bar.pin_icon_side(scale),
-            "{percent}%: and draws its icon at the same size"
+        assert!(
+            bar.app_icon_side(scale) > 0 && bar.app_icon_side(scale) <= slot.width,
+            "{percent}%: and draws its icon inside it"
         );
     }
 }
 
 #[test]
-fn pin_strip_sits_between_launchers_and_tasks() {
+fn the_app_strip_spans_the_launchers_to_the_trailing_end() {
     let mut bar = bottom_bar();
-    // Initially empty.
+    // Empty: the strip is still the whole region between the launchers and
+    // the trailing group, so a first application has somewhere to land.
     let layout = bar.layout(Scale::ONE);
-    assert_eq!(layout.pin_strip.width, 0);
-    assert_eq!(layout.pin_strip.left(), layout.files.right());
-    assert_eq!(layout.task_list.left(), layout.pin_strip.right());
+    assert!(layout.apps.is_empty());
+    assert_eq!(layout.app_strip.left(), layout.files.right());
+    assert_eq!(layout.app_strip.right(), layout.notification_area.left());
 
-    // Add two pins.
-    bar.set_pins(alloc::vec![
-        PinView::new("Pin 1", IconKind::AppBundle),
-        PinView::new("Pin 2", IconKind::AppBundle),
-    ]);
+    bar.set_apps(alloc::vec![app("One"), app("Two")]);
     let layout = bar.layout(Scale::ONE);
-    assert_eq!(layout.pins.len(), 2);
-    assert_eq!(layout.pin_strip.width, 48 * 2);
-    assert_eq!(layout.pin_strip.left(), layout.files.right());
-    assert_eq!(layout.pins[0].left(), layout.pin_strip.left());
-    assert_eq!(layout.pins[1].left(), layout.pins[0].right());
-    assert_eq!(layout.task_list.left(), layout.pin_strip.right());
+    assert_eq!(layout.apps.len(), 2);
+    assert_eq!(layout.app_strip.left(), layout.files.right());
+    assert_eq!(layout.apps[0].left(), layout.app_strip.left());
+    assert_eq!(layout.apps[1].left(), layout.apps[0].right());
+    assert_eq!(layout.apps[0].width, 48);
 }
 
 #[test]
-fn adding_pins_reflows_the_task_region() {
-    let mut bar = bottom_bar();
-    let empty_tasks = bar.layout(Scale::ONE).task_list;
-    bar.set_pins(alloc::vec![PinView::new("Pin", IconKind::AppBundle)]);
-    let one_pin_tasks = bar.layout(Scale::ONE).task_list;
-    assert!(one_pin_tasks.width < empty_tasks.width);
-    assert_eq!(one_pin_tasks.left(), empty_tasks.left() + 48);
-}
-
-#[test]
-fn pin_slots_clip_fail_closed_on_a_tiny_screen() {
+fn app_slots_clip_fail_closed_on_a_tiny_screen() {
     let mut bar = Taskbar::new(TaskbarConfig::bottom_bar(261, 40), &Theme::dark());
     // Launchers (48+48) plus the separator gutter (17) take 113. Switchboard
     // (44) plus clock (80) take 124. Screen 261, less the two 5 px margins
     // the bar floats in and the two 1 px rims its content sits inside, leaves
-    // 249. Remaining for pins/tasks: 249 - 237 = 12.
-    bar.set_pins(alloc::vec![PinView::new("Pin", IconKind::AppBundle)]);
+    // 249. Remaining for the application strip: 249 - 237 = 12.
+    bar.set_apps(alloc::vec![app("App")]);
     let layout = bar.layout(Scale::ONE);
     assert_eq!(layout.library.width, 48);
     assert_eq!(layout.files.width, 48);
-    assert_eq!(layout.pins[0].width, 12, "pin clips to fit");
-    assert!(layout.task_list.is_empty(), "no room for tasks");
+    assert_eq!(layout.apps[0].width, 12, "the slot clips to fit");
 
-    // Even smaller: pin is empty.
+    // Even smaller: the slot is empty and can never be hit.
     let mut bar = Taskbar::new(TaskbarConfig::bottom_bar(217, 40), &Theme::dark());
-    bar.set_pins(alloc::vec![PinView::new("Pin", IconKind::AppBundle)]);
+    bar.set_apps(alloc::vec![app("App")]);
     let layout = bar.layout(Scale::ONE);
-    assert!(layout.pins[0].is_empty());
+    assert!(layout.apps[0].is_empty());
+    assert!(
+        layout.app_strip.is_empty(),
+        "with no room for a slot there is no strip either, so nothing can be hit"
+    );
 }
 
 #[test]
-fn pin_strip_positions_on_all_four_edges() {
+fn app_strip_positions_on_all_four_edges() {
     let theme = Theme::dark();
     // Across the bar the strip spans the thickness less the two rims it sits
-    // inside; along the bar it is one pin extent.
+    // inside; along the bar each slot is one application extent.
     let border = plate_border(&theme, Scale::ONE);
     for edge in [Edge::Top, Edge::Bottom, Edge::Left, Edge::Right] {
         let config = TaskbarConfig {
@@ -900,18 +941,18 @@ fn pin_strip_positions_on_all_four_edges() {
             ..TaskbarConfig::bottom_bar(1000, 800)
         };
         let mut bar = Taskbar::new(config, &theme);
-        bar.set_pins(alloc::vec![PinView::new("Pin", IconKind::AppBundle)]);
+        bar.set_apps(alloc::vec![app("App")]);
         let layout = bar.layout(Scale::ONE);
-        assert!(!layout.pin_strip.is_empty(), "{edge:?}");
-        assert_eq!(layout.pins.len(), 1, "{edge:?}");
+        assert!(!layout.app_strip.is_empty(), "{edge:?}");
+        assert_eq!(layout.apps.len(), 1, "{edge:?}");
         match edge.orientation() {
             Orientation::Horizontal => {
-                assert_eq!(layout.pin_strip.height, layout.bar.height - border * 2);
-                assert_eq!(layout.pin_strip.width, 48);
+                assert_eq!(layout.app_strip.height, layout.bar.height - border * 2);
+                assert_eq!(layout.apps[0].width, 48);
             }
             Orientation::Vertical => {
-                assert_eq!(layout.pin_strip.width, layout.bar.width - border * 2);
-                assert_eq!(layout.pin_strip.height, 48);
+                assert_eq!(layout.app_strip.width, layout.bar.width - border * 2);
+                assert_eq!(layout.apps[0].height, 48);
             }
         }
     }
@@ -1129,78 +1170,6 @@ fn hit_testing_follows_the_scale() {
     assert_eq!(bar.hit_test(Point::new(142, 780), scale), Some(Hit::Files));
 }
 
-#[test]
-fn pin_drop_index_finds_the_slot_or_append_point() {
-    let mut bar = bottom_bar();
-    let layout = bar.layout(Scale::ONE);
-    // Initially empty strip. Drop in the task-list band (where the first pin would land).
-    assert_eq!(layout.pin_drop_index(Point::new(120, 780)), Some(0));
-    // Outside the strip/task band (e.g. on the clock).
-    assert_eq!(layout.pin_drop_index(Point::new(950, 780)), None);
-
-    // Add one pin.
-    bar.set_pins(alloc::vec![PinView::new("Pin 0", IconKind::AppBundle)]);
-    let layout = bar.layout(Scale::ONE);
-    let slot = layout.pins[0];
-    // Leading half of pin 0 -> Some(0).
-    assert_eq!(
-        layout.pin_drop_index(Point::new(slot.left() + 10, 780)),
-        Some(0)
-    );
-    // Trailing half of pin 0 -> Some(1).
-    assert_eq!(
-        layout.pin_drop_index(Point::new(slot.right() - 10, 780)),
-        Some(1)
-    );
-    // Past the pin in the task band -> Some(1).
-    assert_eq!(
-        layout.pin_drop_index(Point::new(slot.right() + 10, 780)),
-        Some(1)
-    );
-}
-
-#[test]
-fn pin_drop_index_works_on_vertical_bars() {
-    let mut bar = Taskbar::new(TaskbarConfig::bottom_bar(1000, 800), &Theme::dark());
-    bar.set_config(TaskbarConfig {
-        edge: Edge::Left,
-        ..*bar.config()
-    });
-    bar.set_pins(alloc::vec![PinView::new("Pin 0", IconKind::AppBundle)]);
-    let layout = bar.layout(Scale::ONE);
-    let slot = layout.pins[0];
-    // Leading (top) half -> Some(0).
-    assert_eq!(
-        layout.pin_drop_index(Point::new(20, slot.top() + 10)),
-        Some(0)
-    );
-    // Trailing (bottom) half -> Some(1).
-    assert_eq!(
-        layout.pin_drop_index(Point::new(20, slot.bottom() - 10)),
-        Some(1)
-    );
-}
-
-#[test]
-fn hit_testing_resolves_pins() {
-    let mut bar = bottom_bar();
-    bar.set_pins(alloc::vec![PinView::new("Pin", IconKind::AppBundle)]);
-    let layout = bar.layout(Scale::ONE);
-    let centre = centre_of(layout.pins[0]);
-    assert_eq!(bar.hit_test(centre, Scale::ONE), Some(Hit::Pin(0)));
-
-    // Pins do not shadow launchers or tasks.
-    assert_eq!(
-        bar.hit_test(centre_of(layout.library), Scale::ONE),
-        Some(Hit::Library)
-    );
-    assert_eq!(
-        bar.hit_test(Point::new(layout.task_list.left() + 10, 780), Scale::ONE),
-        None,
-        "empty task list hits nothing"
-    );
-}
-
 // ---- theming --------------------------------------------------------
 
 #[test]
@@ -1242,86 +1211,55 @@ fn set_config_latches_every_surface() {
 }
 
 #[test]
-fn pin_visibility_derives_from_the_task_list() {
+fn set_apps_clamps_a_stale_hover() {
     let mut bar = bottom_bar();
-    let entry_id = EntryId::new("os.tairix.editor").unwrap();
-    let task_id = TaskId(1);
-    bar.set_pins(alloc::vec![
-        PinView::new("Editor", IconKind::AppBundle)
-            .with_entry(entry_id.clone())
-            .with_window(task_id),
-        PinView::new("Stale", IconKind::AppBundle).with_window(TaskId(999)),
-        PinView::new("None", IconKind::AppBundle),
-    ]);
-
-    // Index 0: Matched window but not in task list -> Closed.
-    assert_eq!(
-        bar.pins().visibility(0, bar.tasks()),
-        TaskVisibility::Closed
-    );
-    // Index 1: Stale window id -> Closed.
-    assert_eq!(
-        bar.pins().visibility(1, bar.tasks()),
-        TaskVisibility::Closed
-    );
-    // Index 2: No window -> Closed.
-    assert_eq!(
-        bar.pins().visibility(2, bar.tasks()),
-        TaskVisibility::Closed
-    );
-
-    // Add the task for the editor.
-    bar.tasks_mut().add(task_id, "Editor");
-    assert_eq!(
-        bar.pins().visibility(0, bar.tasks()),
-        TaskVisibility::Running
-    );
-
-    // Focus it.
-    bar.tasks_mut().set_focused(Some(task_id));
-    assert_eq!(
-        bar.pins().visibility(0, bar.tasks()),
-        TaskVisibility::Active
-    );
-
-    // Minimise it.
-    bar.tasks_mut().minimise(task_id);
-    assert_eq!(
-        bar.pins().visibility(0, bar.tasks()),
-        TaskVisibility::Minimized
-    );
-}
-
-#[test]
-fn set_pins_clamps_a_stale_hover() {
-    let mut bar = bottom_bar();
-    bar.set_pins(alloc::vec![
-        PinView::new("Pin 0", IconKind::AppBundle),
-        PinView::new("Pin 1", IconKind::AppBundle),
-    ]);
+    bar.set_apps(alloc::vec![app("One"), app("Two")]);
     let layout = bar.layout(Scale::ONE);
-    let pin1 = centre_of(layout.pins[1]);
-    bar.track_hover(pin1, Scale::ONE, &mut damage::sink());
-    assert_eq!(bar.pins().hover(), Some(1));
+    let second = centre_of(layout.apps[1]);
+    bar.track_hover(second, Scale::ONE, &mut damage::sink());
+    assert_eq!(bar.apps().hover(), Some(1));
 
-    // Replace with one pin: hover is clamped to None.
-    bar.set_pins(alloc::vec![PinView::new("Pin 0", IconKind::AppBundle)]);
-    assert_eq!(bar.pins().hover(), None);
+    // Replace with one slot: the hover is clamped away rather than left
+    // naming a slot that is gone.
+    bar.set_apps(alloc::vec![app("One")]);
+    assert_eq!(bar.apps().hover(), None);
 }
 
 #[test]
-fn pin_accessors_resolve_correctly() {
+fn app_slot_accessors_report_what_the_session_resolved() {
     let mut bar = bottom_bar();
-    let entry_id = EntryId::new("os.tairix.editor").unwrap();
-    let task_id = TaskId(1);
-    bar.set_pins(alloc::vec![PinView::new("Editor", IconKind::AppBundle)
-        .with_entry(entry_id.clone())
-        .with_window(task_id)]);
+    let art = Surface::filled(16, 16, Color::rgb(255, 0, 255).premultiply()).expect("artwork");
+    bar.set_apps(alloc::vec![app("Editor")
+        .with_artwork(art)
+        .with_windows(alloc::vec![TaskId(1), TaskId(2)])
+        .with_declaration(declared_menu(), true)
+        .with_identity(identity("Editor"))]);
 
-    assert_eq!(bar.pins().len(), 1);
-    assert_eq!(bar.pins().position_of_entry(&entry_id), Some(0));
-    assert_eq!(bar.pins().get(0).unwrap().window(), Some(task_id));
-    assert_eq!(bar.pins().get(0).unwrap().label(), "Editor");
+    assert_eq!(bar.apps().len(), 1);
+    assert!(!bar.apps().is_empty());
+    let slot = bar.apps().get(0).expect("one slot");
+    assert_eq!(slot.label(), "Editor");
+    assert_eq!(slot.icon(), IconKind::AppBundle);
+    assert!(slot.artwork().is_some());
+    assert_eq!(slot.windows(), &[TaskId(1), TaskId(2)]);
+    assert!(slot.handles_default());
+    assert_eq!(slot.menu(), &declared_menu());
+    assert_eq!(slot.identity(), &identity("Editor"));
+}
+
+#[test]
+fn an_undeclared_app_slot_carries_its_label_as_its_whole_identity() {
+    // A process the session gave a slot because it owns a window, without a
+    // declaration of its own: no menu, no default action, and an identity
+    // that states only the name — never a fabricated version or author.
+    let slot = app("Unattributed");
+    assert!(slot.menu().is_empty());
+    assert!(!slot.handles_default());
+    assert!(slot.windows().is_empty());
+    assert_eq!(slot.identity().name, "Unattributed");
+    assert_eq!(slot.identity().version, "");
+    assert_eq!(slot.identity().purpose, None);
+    assert_eq!(slot.identity().author, None);
 }
 
 // ---- input: bar ------------------------------------------------------
@@ -1358,18 +1296,74 @@ fn files_press_reports_open_files() {
 }
 
 #[test]
-fn task_press_applies_the_activate_rule() {
+fn a_click_on_a_declared_default_action_reaches_the_application() {
     let mut bar = bottom_bar();
-    bar.tasks_mut().add(TaskId(1), "Editor");
+    bar.set_apps(alloc::vec![app("Terminal")
+        .with_windows(alloc::vec![TaskId(1)])
+        .with_declaration(declared_menu(), true)]);
     let mut input = TaskbarInput::new();
-    let slot = centre_of(bar.layout(Scale::ONE).tasks[0]);
+    let slot = centre_of(bar.layout(Scale::ONE).apps[0]);
     assert_eq!(
         press_at(&mut input, &mut bar, slot.x, slot.y),
-        TaskbarResponse::TaskActivated {
-            id: TaskId(1),
-            outcome: ActivateOutcome::Activated,
-        }
+        TaskbarResponse::AppDefault { app: 0 },
+        "the application declared it handles the click, so it gets it"
     );
+    assert_eq!(
+        bar.tasks().focused(),
+        None,
+        "the session raises nothing behind the application's back"
+    );
+}
+
+#[test]
+fn a_click_with_no_default_action_raises_the_applications_window() {
+    let mut bar = bottom_bar();
+    bar.tasks_mut().add(TaskId(4), "Widgets");
+    bar.set_apps(alloc::vec![app("Widgets")
+        .with_windows(alloc::vec![TaskId(4)])
+        .with_declaration(declared_menu(), false)]);
+    let mut input = TaskbarInput::new();
+    let slot = centre_of(bar.layout(Scale::ONE).apps[0]);
+    assert_eq!(
+        press_at(&mut input, &mut bar, slot.x, slot.y),
+        TaskbarResponse::AppRaise { app: 0 }
+    );
+}
+
+#[test]
+fn a_click_on_an_application_with_no_windows_and_no_action_does_nothing() {
+    let mut bar = bottom_bar();
+    bar.set_apps(alloc::vec![
+        app("Idle").with_declaration(declared_menu(), false)
+    ]);
+    let mut input = TaskbarInput::new();
+    let slot = centre_of(bar.layout(Scale::ONE).apps[0]);
+    assert_eq!(
+        press_at(&mut input, &mut bar, slot.x, slot.y),
+        TaskbarResponse::Ignored,
+        "nothing to raise and nothing declared: the honest answer is nothing"
+    );
+}
+
+#[test]
+fn a_second_click_on_the_focused_application_never_minimises_it() {
+    // A slot is an application, not a window: the old click-to-minimise
+    // toggle is gone, and minimising lives on the title bar and in the
+    // picker instead.
+    let mut bar = bottom_bar();
+    bar.tasks_mut().add(TaskId(1), "Editor");
+    bar.tasks_mut().set_focused(Some(TaskId(1)));
+    bar.set_apps(alloc::vec![
+        app("Editor").with_windows(alloc::vec![TaskId(1)])
+    ]);
+    let mut input = TaskbarInput::new();
+    let slot = centre_of(bar.layout(Scale::ONE).apps[0]);
+    assert_eq!(
+        press_at(&mut input, &mut bar, slot.x, slot.y),
+        TaskbarResponse::AppRaise { app: 0 }
+    );
+    assert!(!bar.tasks().is_minimised(TaskId(1)));
+    assert_eq!(bar.tasks().focused(), Some(TaskId(1)));
 }
 
 #[test]
@@ -1394,112 +1388,391 @@ fn status_icon_press_is_inert_and_clock_reports() {
     );
 }
 
-#[test]
-fn pin_press_activates_or_applies_task_rule() {
-    let mut bar = bottom_bar();
-    let task_id = TaskId(1);
-    bar.set_pins(alloc::vec![
-        PinView::new("Launch", IconKind::AppBundle),
-        PinView::new("Run", IconKind::AppBundle).with_window(task_id),
-    ]);
-    let mut input = TaskbarInput::new();
-    let layout = bar.layout(Scale::ONE);
-
-    // Primary press on pin 0 (no window) -> ActivatePin.
-    let slot0 = centre_of(layout.pins[0]);
-    assert_eq!(
-        press_at(&mut input, &mut bar, slot0.x, slot0.y),
-        TaskbarResponse::ActivatePin { index: 0 }
-    );
-
-    // Primary press on pin 1 (has window, but window not in task list) -> ActivatePin.
-    let slot1 = centre_of(layout.pins[1]);
-    assert_eq!(
-        press_at(&mut input, &mut bar, slot1.x, slot1.y),
-        TaskbarResponse::ActivatePin { index: 1 }
-    );
-
-    // Add task for pin 1.
-    bar.tasks_mut().add(task_id, "Running");
-    // Primary press on pin 1 (has window in list) -> TaskActivated.
-    assert_eq!(
-        press_at(&mut input, &mut bar, slot1.x, slot1.y),
-        TaskbarResponse::TaskActivated {
-            id: task_id,
-            outcome: ActivateOutcome::Activated,
-        }
-    );
-
-    // Toggle: Second click on focused pinned window minimises.
-    bar.tasks_mut().set_focused(Some(task_id));
-    assert_eq!(
-        press_at(&mut input, &mut bar, slot1.x, slot1.y),
-        TaskbarResponse::TaskActivated {
-            id: task_id,
-            outcome: ActivateOutcome::Minimised,
-        }
-    );
-}
-
-#[test]
-fn secondary_press_on_pin_opens_menu() {
-    let mut bar = bottom_bar();
-    bar.set_pins(alloc::vec![PinView::new("Pin", IconKind::AppBundle)]);
-    let mut input = TaskbarInput::new();
-    let slot = centre_of(bar.layout(Scale::ONE).pins[0]);
+/// Seat one application on the bar and open the menu it declared with a
+/// secondary press on its slot, returning the slot's centre.
+fn open_app_menu(input: &mut TaskbarInput, bar: &mut Taskbar) -> Point {
+    let slot = centre_of(bar.layout(Scale::ONE).apps[0]);
     input.handle(
         InputEvent::PointerMoved { to: slot },
-        &mut bar,
+        bar,
         Scale::ONE,
         NOW_NS,
     );
-
     assert_eq!(
         input.handle(
             InputEvent::PointerPressed {
                 button: PointerButton::Secondary,
             },
-            &mut bar,
+            bar,
             Scale::ONE,
             NOW_NS,
         ),
         TaskbarResponse::Ignored,
-        "secondary press is Ignored but opens the menu"
+        "opening a menu acts on nothing by itself"
     );
+    slot
+}
+
+/// A bar with one application whose declared menu is [`declared_menu`].
+fn bar_with_declared_app() -> Taskbar {
+    let mut bar = bottom_bar();
+    bar.set_apps(alloc::vec![app("Terminal")
+        .with_declaration(declared_menu(), true)
+        .with_identity(identity("Terminal"))]);
+    let _ = bar.take_repaint();
+    bar
+}
+
+#[test]
+fn secondary_press_on_an_app_slot_opens_the_menu_it_declared() {
+    let mut bar = bar_with_declared_app();
+    let mut input = TaskbarInput::new();
+    open_app_menu(&mut input, &mut bar);
     assert!(bar.menu().is_open());
     assert_eq!(
         bar.menu().subject(),
-        Some(&MenuSubject::Pin {
+        Some(&MenuSubject::App {
             index: 0,
-            running: false
+            menu: declared_menu(),
+            identity: identity("Terminal"),
         })
     );
 }
 
 #[test]
-fn menu_is_modal_and_dismisses_on_click_away_or_escape() {
+fn an_application_that_declared_no_menu_opens_nothing() {
     let mut bar = bottom_bar();
-    bar.set_pins(alloc::vec![PinView::new("Pin", IconKind::AppBundle)]);
+    // A process the session gave a slot for its windows alone: no
+    // declaration, so a secondary press is claimed and shows no plate.
+    bar.set_apps(alloc::vec![app("Unattributed")]);
+    let _ = bar.take_repaint();
     let mut input = TaskbarInput::new();
-    let slot = centre_of(bar.layout(Scale::ONE).pins[0]);
-    input.handle(
-        InputEvent::PointerMoved { to: slot },
-        &mut bar,
-        Scale::ONE,
-        NOW_NS,
+    open_app_menu(&mut input, &mut bar);
+    assert!(
+        !bar.menu().is_open(),
+        "the bar never invents a menu on an application's behalf"
     );
-    input.handle(
-        InputEvent::PointerPressed {
-            button: PointerButton::Secondary,
-        },
-        &mut bar,
-        Scale::ONE,
-        NOW_NS,
+    assert!(
+        bar.menu_layout(Scale::ONE).is_none(),
+        "and there is nothing to present"
+    );
+    assert_eq!(
+        bar.take_repaint(),
+        TaskbarRepaint::BAR,
+        "only the slot's own hover feedback changed"
+    );
+}
+
+#[test]
+fn the_menu_draws_exactly_the_rows_the_application_declared() {
+    let mut menu = AppMenu::EMPTY;
+    menu.push(item(1, "New window")).expect("fits");
+    menu.push(AppMenuRow::Item {
+        id: AppMenuItemId::new(2).expect("non-zero"),
+        label: menu_label("Wrap lines"),
+        enabled: true,
+        mark: AppMenuMark::Check,
+    })
+    .expect("fits");
+    menu.push(AppMenuRow::Item {
+        id: AppMenuItemId::new(3).expect("non-zero"),
+        label: menu_label("Green screen"),
+        enabled: true,
+        mark: AppMenuMark::Radio,
+    })
+    .expect("fits");
+    menu.push(AppMenuRow::Item {
+        id: AppMenuItemId::new(4).expect("non-zero"),
+        label: menu_label("Paste"),
+        enabled: false,
+        mark: AppMenuMark::None,
+    })
+    .expect("fits");
+    menu.push(AppMenuRow::Separator).expect("fits");
+    menu.push(AppMenuRow::Submenu {
+        label: menu_label("Profile"),
+        enabled: true,
+    })
+    .expect("fits");
+    menu.push_under(item(5, "Amber"), 5).expect("fits");
+    menu.push(AppMenuRow::About).expect("fits");
+
+    let mut bar = bottom_bar();
+    bar.set_apps(alloc::vec![app("Terminal")
+        .with_declaration(menu, true)
+        .with_identity(identity("Terminal"))]);
+    let mut input = TaskbarInput::new();
+    open_app_menu(&mut input, &mut bar);
+
+    // Every top-level declared row draws, in declaration order, with the
+    // enablement and mark the application asked for; the declared separator
+    // opens the group its next row begins rather than becoming a row; the
+    // submenu's own child is not a top-level row; and the About row is the
+    // one row whose label and submenu are the bar's.
+    assert_eq!(
+        bar.menu().control().items(),
+        &[
+            MenuItem::new("New window"),
+            MenuItem::new("Wrap lines").with_mark(MenuMark::Check),
+            MenuItem::new("Green screen").with_mark(MenuMark::Radio),
+            MenuItem::new("Paste").with_state(ControlState::disabled()),
+            MenuItem::new("Profile")
+                .with_submenu(true)
+                .with_group_break(true),
+            MenuItem::new("About").with_submenu(true),
+        ]
+    );
+}
+
+#[test]
+fn a_menu_at_the_row_cap_draws_every_row_it_declared() {
+    // The format bound is a bound, not a truncation point: a menu that fills
+    // it draws all of its rows, and nothing beyond it can be declared.
+    let mut menu = AppMenu::EMPTY;
+    for row in 0..APP_MENU_MAX_ROWS {
+        let id = u16::try_from(row + 1).expect("a small id");
+        menu.push(item(id, "Row")).expect("fits");
+    }
+    assert_eq!(menu.len(), APP_MENU_MAX_ROWS);
+    assert!(menu.push(item(99, "Overflow")).is_err(), "the cap holds");
+
+    let mut bar = bottom_bar();
+    bar.set_apps(alloc::vec![app("Busy")
+        .with_declaration(menu, false)
+        .with_identity(identity("Busy"))]);
+    let mut input = TaskbarInput::new();
+    open_app_menu(&mut input, &mut bar);
+    assert_eq!(bar.menu().control().items().len(), APP_MENU_MAX_ROWS);
+
+    // The last row is still reachable and reports its own id.
+    press_key(&mut input, &mut bar, Key::Named(NamedKey::End));
+    assert_eq!(
+        press_key(&mut input, &mut bar, Key::Named(NamedKey::Enter)),
+        TaskbarResponse::AppMenuChosen {
+            app: 0,
+            item: AppMenuItemId::new(u16::try_from(APP_MENU_MAX_ROWS).expect("small"))
+                .expect("non-zero"),
+        }
+    );
+}
+
+#[test]
+fn a_disabled_declared_row_cannot_be_chosen() {
+    let mut menu = AppMenu::EMPTY;
+    menu.push(AppMenuRow::Item {
+        id: AppMenuItemId::new(9).expect("non-zero"),
+        label: menu_label("Paste"),
+        enabled: false,
+        mark: AppMenuMark::None,
+    })
+    .expect("fits");
+    let mut bar = bottom_bar();
+    bar.set_apps(alloc::vec![app("Terminal")
+        .with_declaration(menu, true)
+        .with_identity(identity("Terminal"))]);
+    let mut input = TaskbarInput::new();
+    open_app_menu(&mut input, &mut bar);
+
+    press_key(&mut input, &mut bar, Key::Named(NamedKey::Down));
+    assert_eq!(
+        press_key(&mut input, &mut bar, Key::Named(NamedKey::Enter)),
+        TaskbarResponse::Ignored,
+        "a disabled row never acts"
+    );
+    assert!(bar.menu().is_open(), "and never closes the menu either");
+}
+
+#[test]
+fn choosing_a_declared_row_relays_the_applications_own_id() {
+    let mut bar = bar_with_declared_app();
+    let mut input = TaskbarInput::new();
+    open_app_menu(&mut input, &mut bar);
+
+    // Down/Enter chooses the first declared row, "New window" (id 1).
+    press_key(&mut input, &mut bar, Key::Named(NamedKey::Down));
+    assert_eq!(
+        press_key(&mut input, &mut bar, Key::Named(NamedKey::Enter)),
+        TaskbarResponse::AppMenuChosen {
+            app: 0,
+            item: AppMenuItemId::new(1).expect("non-zero"),
+        }
+    );
+    assert!(!bar.menu().is_open(), "a choice closes the menu");
+
+    // Down/Down/Enter chooses "Quit" (id 2) — the separator between them is
+    // not a row, so the second press lands on the command after it.
+    open_app_menu(&mut input, &mut bar);
+    press_key(&mut input, &mut bar, Key::Named(NamedKey::Down));
+    press_key(&mut input, &mut bar, Key::Named(NamedKey::Down));
+    assert_eq!(
+        press_key(&mut input, &mut bar, Key::Named(NamedKey::Enter)),
+        TaskbarResponse::AppMenuChosen {
+            app: 0,
+            item: AppMenuItemId::new(2).expect("non-zero"),
+        }
+    );
+}
+
+#[test]
+fn a_declared_submenu_opens_and_its_rows_report_their_own_ids() {
+    let mut menu = AppMenu::EMPTY;
+    menu.push(AppMenuRow::Submenu {
+        label: menu_label("Profile"),
+        enabled: true,
+    })
+    .expect("fits");
+    menu.push_under(item(7, "Amber"), 0).expect("fits");
+    menu.push_under(item(8, "Green"), 0).expect("fits");
+    let mut bar = bottom_bar();
+    bar.set_apps(alloc::vec![app("Terminal")
+        .with_declaration(menu, true)
+        .with_identity(identity("Terminal"))]);
+    let mut input = TaskbarInput::new();
+    open_app_menu(&mut input, &mut bar);
+
+    // Right opens the submenu the highlighted row hangs off itself.
+    press_key(&mut input, &mut bar, Key::Named(NamedKey::Down));
+    press_key(&mut input, &mut bar, Key::Named(NamedKey::Right));
+    let submenu = bar.menu().submenu().expect("the submenu is open");
+    assert_eq!(
+        submenu
+            .items()
+            .iter()
+            .map(MenuItem::label)
+            .collect::<Vec<_>>(),
+        alloc::vec!["Amber", "Green"]
+    );
+    let layout = bar.menu_layout(Scale::ONE).expect("menu layout");
+    assert!(!layout.child.is_empty(), "and lays out beside the plate");
+    assert_eq!(layout.bounds(), layout.panel.union(&layout.child));
+
+    // Down/Down/Enter inside it chooses "Green" (id 8).
+    press_key(&mut input, &mut bar, Key::Named(NamedKey::Down));
+    press_key(&mut input, &mut bar, Key::Named(NamedKey::Down));
+    assert_eq!(
+        press_key(&mut input, &mut bar, Key::Named(NamedKey::Enter)),
+        TaskbarResponse::AppMenuChosen {
+            app: 0,
+            item: AppMenuItemId::new(8).expect("non-zero"),
+        }
+    );
+    assert!(!bar.menu().is_open());
+}
+
+#[test]
+fn escape_inside_a_declared_submenu_closes_only_the_submenu() {
+    let mut menu = AppMenu::EMPTY;
+    menu.push(AppMenuRow::Submenu {
+        label: menu_label("Profile"),
+        enabled: true,
+    })
+    .expect("fits");
+    menu.push_under(item(7, "Amber"), 0).expect("fits");
+    let mut bar = bottom_bar();
+    bar.set_apps(alloc::vec![app("Terminal")
+        .with_declaration(menu, true)
+        .with_identity(identity("Terminal"))]);
+    let mut input = TaskbarInput::new();
+    open_app_menu(&mut input, &mut bar);
+    press_key(&mut input, &mut bar, Key::Named(NamedKey::Down));
+    press_key(&mut input, &mut bar, Key::Named(NamedKey::Right));
+    assert!(bar.menu().submenu().is_some());
+
+    press_key(&mut input, &mut bar, Key::Named(NamedKey::Escape));
+    assert!(bar.menu().submenu().is_none(), "one key, one step back");
+    assert!(bar.menu().is_open());
+    press_key(&mut input, &mut bar, Key::Named(NamedKey::Escape));
+    assert!(!bar.menu().is_open());
+}
+
+#[test]
+fn about_opens_the_manifest_attested_information_panel() {
+    let mut bar = bar_with_declared_app();
+    let mut input = TaskbarInput::new();
+    open_app_menu(&mut input, &mut bar);
+
+    // The About row is the last of the three top-level rows.
+    press_key(&mut input, &mut bar, Key::Named(NamedKey::End));
+    press_key(&mut input, &mut bar, Key::Named(NamedKey::Right));
+    let facts = bar.menu().info_panel().expect("the panel is open");
+    assert_eq!(
+        facts
+            .facts()
+            .iter()
+            .map(|fact| (fact.label(), fact.value()))
+            .collect::<Vec<_>>(),
+        alloc::vec![
+            ("Name", "Terminal"),
+            ("Version", "1.2.3"),
+            ("Purpose", "Does one thing well"),
+            ("Author", "TAIRiX"),
+        ],
+        "the panel states the signed manifest, never what the process claims"
+    );
+    assert!(
+        bar.menu().submenu().is_none(),
+        "the panel is facts, not a menu of rows"
+    );
+    let layout = bar.menu_layout(Scale::ONE).expect("menu layout");
+    assert!(!layout.child.is_empty());
+
+    // A pointer over the panel is claimed and offers nothing to choose.
+    let inside = centre_of(layout.child);
+    assert_eq!(
+        press_at(&mut input, &mut bar, inside.x, inside.y),
+        TaskbarResponse::Ignored
     );
     assert!(bar.menu().is_open());
 
+    // The panel is attached to the menu: dismissing the menu takes it away.
+    assert_eq!(
+        press_at(&mut input, &mut bar, 500, 100),
+        TaskbarResponse::Ignored
+    );
+    assert!(!bar.menu().is_open());
+    assert!(
+        bar.menu().info_panel().is_none(),
+        "the panel disappears with the menu that carried it"
+    );
+}
+
+#[test]
+fn a_manifest_without_purpose_or_author_states_only_what_it_has() {
+    let mut bar = bottom_bar();
+    bar.set_apps(alloc::vec![app("Sparse")
+        .with_declaration(declared_menu(), false)
+        .with_identity(AppIdentity {
+            name: String::from("Sparse"),
+            version: String::from("0.1"),
+            purpose: None,
+            author: None,
+        })]);
+    let mut input = TaskbarInput::new();
+    open_app_menu(&mut input, &mut bar);
+    press_key(&mut input, &mut bar, Key::Named(NamedKey::End));
+    press_key(&mut input, &mut bar, Key::Named(NamedKey::Right));
+    let facts = bar.menu().info_panel().expect("the panel is open");
+    assert_eq!(
+        facts
+            .facts()
+            .iter()
+            .map(|fact| (fact.label(), fact.value()))
+            .collect::<Vec<_>>(),
+        alloc::vec![("Name", "Sparse"), ("Version", "0.1")],
+        "an omitted field is absent, never a blank row"
+    );
+}
+
+#[test]
+fn menu_is_modal_and_dismisses_on_click_away_or_escape() {
+    let mut bar = bar_with_declared_app();
+    let mut input = TaskbarInput::new();
+    let slot = open_app_menu(&mut input, &mut bar);
+    assert!(bar.menu().is_open());
+
     // Motion over the menu highlights rows. The pointer also leaves the
-    // pin slot it started on, so the bar's own hover feedback latches too.
+    // application slot it started on, so the bar's own hover feedback
+    // latches too.
     let menu_layout = bar.menu_layout(Scale::ONE).unwrap();
     let menu_item_0 = Point::new(menu_layout.panel.left() + 5, menu_layout.panel.top() + 5);
     let _ = bar.take_repaint();
@@ -1512,7 +1785,7 @@ fn menu_is_modal_and_dismisses_on_click_away_or_escape() {
     assert_eq!(
         bar.take_repaint(),
         TaskbarRepaint::BAR | TaskbarRepaint::MENU,
-        "leaving the pin repaints the bar, and the new highlight repaints the menu"
+        "leaving the slot repaints the bar, and the new highlight repaints the menu"
     );
     assert_eq!(bar.menu().control().current(), Some(0));
 
@@ -1537,7 +1810,7 @@ fn menu_is_modal_and_dismisses_on_click_away_or_escape() {
     );
     assert!(!bar.menu().is_open());
 
-    // Move pointer back to pin before reopening.
+    // Move pointer back to the slot before reopening.
     input.handle(
         InputEvent::PointerMoved { to: slot },
         &mut bar,
@@ -1564,24 +1837,9 @@ fn menu_is_modal_and_dismisses_on_click_away_or_escape() {
 
 #[test]
 fn keyboard_highlight_moves_in_the_menu_latch_only_the_menu() {
-    let mut bar = bottom_bar();
-    bar.set_pins(alloc::vec![PinView::new("Pin", IconKind::AppBundle)]);
+    let mut bar = bar_with_declared_app();
     let mut input = TaskbarInput::new();
-    let slot = centre_of(bar.layout(Scale::ONE).pins[0]);
-    input.handle(
-        InputEvent::PointerMoved { to: slot },
-        &mut bar,
-        Scale::ONE,
-        NOW_NS,
-    );
-    input.handle(
-        InputEvent::PointerPressed {
-            button: PointerButton::Secondary,
-        },
-        &mut bar,
-        Scale::ONE,
-        NOW_NS,
-    );
+    open_app_menu(&mut input, &mut bar);
     assert!(bar.menu().is_open());
 
     // The keyboard never touches pointer hover, so a highlight move this
@@ -1597,38 +1855,7 @@ fn keyboard_highlight_moves_in_the_menu_latch_only_the_menu() {
 }
 
 #[test]
-fn menu_keyboard_navigation_chooses_rows() {
-    let mut bar = bottom_bar();
-    bar.set_pins(alloc::vec![PinView::new("Pin", IconKind::AppBundle)]);
-    let mut input = TaskbarInput::new();
-    let slot = centre_of(bar.layout(Scale::ONE).pins[0]);
-    input.handle(
-        InputEvent::PointerMoved { to: slot },
-        &mut bar,
-        Scale::ONE,
-        NOW_NS,
-    );
-    input.handle(
-        InputEvent::PointerPressed {
-            button: PointerButton::Secondary,
-        },
-        &mut bar,
-        Scale::ONE,
-        NOW_NS,
-    );
-
-    // Down/Down/Enter chooses row 1 ("Unpin").
-    press_key(&mut input, &mut bar, Key::Named(NamedKey::Down));
-    press_key(&mut input, &mut bar, Key::Named(NamedKey::Down));
-    assert_eq!(
-        press_key(&mut input, &mut bar, Key::Named(NamedKey::Enter)),
-        TaskbarResponse::Unpin { index: 0 }
-    );
-    assert!(!bar.menu().is_open());
-}
-
-#[test]
-fn entry_menu_offers_pin_or_unpin_and_launches() {
+fn entry_menu_launches_the_row_it_was_opened_on() {
     let mut bar = bottom_bar();
     let mut input = TaskbarInput::new();
     open_library(&mut input, &mut bar);
@@ -1657,22 +1884,30 @@ fn entry_menu_offers_pin_or_unpin_and_launches() {
         NOW_NS,
     );
     assert!(bar.menu().is_open());
-    assert!(matches!(
+    assert_eq!(
         bar.menu().subject(),
-        Some(MenuSubject::Entry { pinned: None, .. })
-    ));
+        Some(&MenuSubject::Entry {
+            entry: entry_id.clone()
+        })
+    );
 
-    // Move pointer over menu row 0.
+    // Move pointer over the Open row.
     let menu_layout = bar.menu_layout(Scale::ONE).unwrap();
-    let menu_item_0 = Point::new(menu_layout.panel.left() + 5, menu_layout.panel.top() + 5);
+    let open_row = bar
+        .menu()
+        .control()
+        .row_rect(MENU_OPEN_ROW, menu_layout.panel, Scale::ONE, bar.theme())
+        .expect("the Open row lays out");
+    let over = centre_of(open_row);
     input.handle(
-        InputEvent::PointerMoved { to: menu_item_0 },
+        InputEvent::PointerMoved { to: over },
         &mut bar,
         Scale::ONE,
         NOW_NS,
     );
 
-    // Press and release to activate.
+    // Press and release to activate: launching from the entry menu behaves
+    // exactly like launching from the row itself, and closes the popup.
     input.handle(
         InputEvent::PointerPressed {
             button: PointerButton::Primary,
@@ -1681,7 +1916,6 @@ fn entry_menu_offers_pin_or_unpin_and_launches() {
         Scale::ONE,
         NOW_NS,
     );
-    // Choose row 0 ("Open") -> LibraryLaunch and closes popup.
     assert_eq!(
         input.handle(
             InputEvent::PointerReleased {
@@ -1691,68 +1925,10 @@ fn entry_menu_offers_pin_or_unpin_and_launches() {
             Scale::ONE,
             NOW_NS,
         ),
-        TaskbarResponse::LibraryLaunch {
-            entry: entry_id.clone()
-        }
+        TaskbarResponse::LibraryLaunch { entry: entry_id }
     );
     assert!(!bar.menu().is_open());
     assert!(!bar.library().is_open());
-
-    // Pin it and check verb switch.
-    bar.set_pins(alloc::vec![
-        PinView::new("App", IconKind::AppBundle).with_entry(entry_id.clone())
-    ]);
-    open_library(&mut input, &mut bar);
-    input.handle(
-        InputEvent::PointerMoved { to: inside },
-        &mut bar,
-        Scale::ONE,
-        NOW_NS,
-    );
-    input.handle(
-        InputEvent::PointerPressed {
-            button: PointerButton::Secondary,
-        },
-        &mut bar,
-        Scale::ONE,
-        NOW_NS,
-    );
-    assert!(matches!(
-        bar.menu().subject(),
-        Some(MenuSubject::Entry {
-            pinned: Some(0),
-            ..
-        })
-    ));
-}
-
-#[test]
-fn unpin_from_entry_menu_identifies_the_pin_index() {
-    let mut bar = bottom_bar();
-    let entry_id = EntryId::new("os.tairix.app").unwrap();
-    bar.set_pins(alloc::vec![
-        PinView::new("Other", IconKind::AppBundle),
-        PinView::new("Target", IconKind::AppBundle).with_entry(entry_id.clone()),
-    ]);
-    let mut input = TaskbarInput::new();
-    open_library(&mut input, &mut bar);
-
-    // Open menu for the entry.
-    bar.menu_routing_mut().open(
-        MenuSubject::Entry {
-            entry: entry_id,
-            pinned: Some(1),
-        },
-        Rect::EMPTY,
-    );
-
-    // Choose row 1 ("Unpin from taskbar").
-    press_key(&mut input, &mut bar, Key::Named(NamedKey::Down));
-    press_key(&mut input, &mut bar, Key::Named(NamedKey::Down));
-    assert_eq!(
-        press_key(&mut input, &mut bar, Key::Named(NamedKey::Enter)),
-        TaskbarResponse::Unpin { index: 1 }
-    );
 }
 
 #[test]
@@ -1846,6 +2022,468 @@ fn motion_tracks_the_pointer_and_latches_hover_changes() {
     );
 }
 
+// ---- the hover window picker ------------------------------------------
+
+/// One picker cell per window the list holds, captioned with its title.
+fn cells(bar: &Taskbar, app: usize) -> Vec<PickerEntry> {
+    bar.apps()
+        .get(app)
+        .expect("a slot")
+        .windows()
+        .iter()
+        .map(|&id| {
+            let title = bar
+                .tasks()
+                .entries()
+                .iter()
+                .find(|entry| entry.id == id)
+                .map_or("", |entry| entry.title.as_str());
+            PickerEntry::new(id, title)
+        })
+        .collect()
+}
+
+#[test]
+fn hovering_one_window_asks_for_no_picker() {
+    let mut bar = bottom_bar();
+    bar.tasks_mut().add(TaskId(1), "Only");
+    bar.set_apps(alloc::vec![
+        app("Editor").with_windows(alloc::vec![TaskId(1)])
+    ]);
+    let mut input = TaskbarInput::new();
+    let slot = centre_of(bar.layout(Scale::ONE).apps[0]);
+    assert_eq!(
+        moved_at(&mut input, &mut bar, slot, NOW_NS),
+        TaskbarResponse::Ignored,
+        "one window is no choice, so sweeping the bar pops nothing up"
+    );
+    assert!(!bar.picker().is_open());
+    assert!(bar.picker_layout(Scale::ONE).is_none());
+}
+
+#[test]
+fn hovering_two_windows_asks_for_the_picker() {
+    let mut bar = bottom_bar();
+    for id in 1..=2 {
+        bar.tasks_mut().add(TaskId(id), format!("Window {id}"));
+    }
+    bar.set_apps(alloc::vec![
+        app("Terminal").with_windows(alloc::vec![TaskId(1), TaskId(2)])
+    ]);
+    let mut input = TaskbarInput::new();
+    let slot = centre_of(bar.layout(Scale::ONE).apps[0]);
+    assert_eq!(
+        moved_at(&mut input, &mut bar, slot, NOW_NS),
+        TaskbarResponse::ShowWindowPicker { app: 0 }
+    );
+    // The bar owns no window pixels, so it asks and waits: nothing is open
+    // until the embedder answers with the cells.
+    assert!(!bar.picker().is_open());
+
+    bar.show_window_picker(0, cells(&bar, 0), Scale::ONE);
+    assert!(bar.picker().is_open());
+    assert_eq!(bar.picker().app(), Some(0));
+    assert_eq!(bar.picker().entries().len(), 2);
+    assert_eq!(
+        bar.take_repaint(),
+        TaskbarRepaint::BAR | TaskbarRepaint::PICKER,
+        "the slot took the pointer's wash on the way in, and the picker opened"
+    );
+
+    // A further sample over the same slot asks again for nothing.
+    assert_eq!(
+        moved_at(&mut input, &mut bar, slot, NOW_NS),
+        TaskbarResponse::Ignored
+    );
+}
+
+#[test]
+fn the_picker_refuses_fewer_cells_than_a_choice() {
+    let mut bar = bottom_bar();
+    bar.tasks_mut().add(TaskId(1), "Only");
+    bar.set_apps(alloc::vec![
+        app("Editor").with_windows(alloc::vec![TaskId(1), TaskId(2)])
+    ]);
+    let _ = bar.take_repaint();
+
+    // Fewer than PICKER_MIN_WINDOWS cells: a picker with nothing to choose
+    // is not a picker, so it is refused and nothing repaints.
+    assert_eq!(PICKER_MIN_WINDOWS, 2);
+    bar.show_window_picker(
+        0,
+        alloc::vec![PickerEntry::new(TaskId(1), "Only")],
+        Scale::ONE,
+    );
+    assert!(!bar.picker().is_open());
+    bar.show_window_picker(0, Vec::new(), Scale::ONE);
+    assert!(!bar.picker().is_open());
+    assert_eq!(bar.take_repaint(), TaskbarRepaint::NONE);
+
+    // An unknown application is refused for the same reason.
+    bar.show_window_picker(
+        9,
+        alloc::vec![
+            PickerEntry::new(TaskId(1), "A"),
+            PickerEntry::new(TaskId(2), "B")
+        ],
+        Scale::ONE,
+    );
+    assert!(!bar.picker().is_open());
+}
+
+#[test]
+fn the_picker_lays_a_cell_out_per_window_and_stays_on_screen() {
+    let mut bar = bottom_bar();
+    for id in 1..=3 {
+        bar.tasks_mut().add(TaskId(id), format!("Window {id}"));
+    }
+    bar.set_apps(alloc::vec![app("Terminal").with_windows(alloc::vec![
+        TaskId(1),
+        TaskId(2),
+        TaskId(3)
+    ])]);
+    bar.show_window_picker(0, cells(&bar, 0), Scale::ONE);
+
+    for edge in [Edge::Top, Edge::Bottom, Edge::Left, Edge::Right] {
+        let mut edged = bar.clone();
+        edged.set_config(TaskbarConfig {
+            edge,
+            ..*bar.config()
+        });
+        edged.show_window_picker(0, cells(&edged, 0), Scale::ONE);
+        let layout = edged.picker_layout(Scale::ONE).expect("open");
+        let screen = Rect::new(0, 0, 1000, 800);
+        assert_eq!(
+            layout.panel.intersection(&screen),
+            layout.panel,
+            "{edge:?}: the plate stays on the screen"
+        );
+        assert_eq!(layout.cells.len(), 3, "{edge:?}");
+        for (index, cell) in layout.cells.iter().enumerate() {
+            assert!(!cell.is_empty(), "{edge:?}: cell {index} fits");
+            assert_eq!(
+                cell.intersection(&layout.panel),
+                *cell,
+                "{edge:?}: cell {index} lies inside the plate"
+            );
+        }
+        assert_eq!(
+            layout.corner_radius,
+            Theme::dark().metrics().popup_corner_radius,
+            "{edge:?}: the plate and the window round together"
+        );
+    }
+}
+
+#[test]
+fn a_cell_that_does_not_fit_is_empty_and_can_never_be_hit() {
+    // A narrow screen leaves room for a cell or two; the rest clip away
+    // rather than being drawn past the plate.
+    let mut bar = Taskbar::new(TaskbarConfig::bottom_bar(300, 400), &Theme::dark());
+    let windows: Vec<TaskId> = (1..=6).map(TaskId).collect();
+    for &id in &windows {
+        bar.tasks_mut().add(id, "W");
+    }
+    bar.set_apps(alloc::vec![app("Terminal").with_windows(windows.clone())]);
+    bar.show_window_picker(
+        0,
+        windows
+            .iter()
+            .map(|&id| PickerEntry::new(id, "W"))
+            .collect(),
+        Scale::ONE,
+    );
+    let layout = bar.picker_layout(Scale::ONE).expect("open");
+    assert!(layout.cells.iter().any(Rect::is_empty), "some cells clip");
+    for cell in &layout.cells {
+        if cell.is_empty() {
+            continue;
+        }
+        assert_eq!(cell.intersection(&layout.panel), *cell);
+    }
+    // An empty cell is never the answer to a hit test at any point.
+    let empty_index = layout
+        .cells
+        .iter()
+        .position(Rect::is_empty)
+        .expect("a clipped cell");
+    for point in [Point::ORIGIN, centre_of(layout.panel)] {
+        assert_ne!(bar.picker().cell_at(&layout, point), Some(empty_index));
+    }
+}
+
+#[test]
+fn hovering_a_cell_highlights_only_the_picker() {
+    let mut bar = bottom_bar();
+    for id in 1..=2 {
+        bar.tasks_mut().add(TaskId(id), format!("Window {id}"));
+    }
+    bar.set_apps(alloc::vec![
+        app("Terminal").with_windows(alloc::vec![TaskId(1), TaskId(2)])
+    ]);
+    bar.show_window_picker(0, cells(&bar, 0), Scale::ONE);
+    let layout = bar.picker_layout(Scale::ONE).expect("open");
+    let mut input = TaskbarInput::new();
+    let _ = bar.take_repaint();
+
+    let cell = centre_of(layout.cells[1]);
+    assert_eq!(
+        moved_at(&mut input, &mut bar, cell, NOW_NS),
+        TaskbarResponse::Ignored
+    );
+    assert_eq!(bar.picker().hover(), Some(1));
+    assert_eq!(
+        bar.take_repaint(),
+        TaskbarRepaint::PICKER,
+        "moving the highlight repaints the picker alone"
+    );
+    // A second sample on the same cell changes nothing further.
+    assert_eq!(
+        moved_at(&mut input, &mut bar, cell, NOW_NS),
+        TaskbarResponse::Ignored
+    );
+    assert_eq!(bar.take_repaint(), TaskbarRepaint::NONE);
+}
+
+#[test]
+fn pressing_a_cell_chooses_that_window_and_closes_the_picker() {
+    let mut bar = bottom_bar();
+    for id in 1..=2 {
+        bar.tasks_mut().add(TaskId(id), format!("Window {id}"));
+    }
+    bar.set_apps(alloc::vec![
+        app("Terminal").with_windows(alloc::vec![TaskId(1), TaskId(2)])
+    ]);
+    bar.tasks_mut().minimise(TaskId(2));
+    bar.show_window_picker(0, cells(&bar, 0), Scale::ONE);
+    let layout = bar.picker_layout(Scale::ONE).expect("open");
+    let mut input = TaskbarInput::new();
+
+    let cell = centre_of(layout.cells[1]);
+    assert_eq!(
+        press_at(&mut input, &mut bar, cell.x, cell.y),
+        TaskbarResponse::WindowChosen { id: TaskId(2) }
+    );
+    assert!(!bar.picker().is_open(), "a choice closes the picker");
+    assert_eq!(bar.tasks().focused(), Some(TaskId(2)));
+    assert!(
+        !bar.tasks().is_minimised(TaskId(2)),
+        "choosing a minimised window restores it"
+    );
+}
+
+#[test]
+fn pressing_the_pickers_own_chrome_is_claimed_and_does_nothing() {
+    let mut bar = bottom_bar();
+    for id in 1..=2 {
+        bar.tasks_mut().add(TaskId(id), format!("Window {id}"));
+    }
+    bar.set_apps(alloc::vec![
+        app("Terminal").with_windows(alloc::vec![TaskId(1), TaskId(2)])
+    ]);
+    bar.show_window_picker(0, cells(&bar, 0), Scale::ONE);
+    let layout = bar.picker_layout(Scale::ONE).expect("open");
+    let mut input = TaskbarInput::new();
+
+    // The plate's own rim: inside the panel, on no cell. The press is
+    // claimed so it never falls through to the slot beneath.
+    let rim = Point::new(layout.panel.left(), layout.panel.top());
+    assert_eq!(bar.picker().cell_at(&layout, rim), None);
+    assert_eq!(
+        press_at(&mut input, &mut bar, rim.x, rim.y),
+        TaskbarResponse::Ignored
+    );
+    assert!(!bar.picker().is_open(), "and the picker closes with it");
+    assert_eq!(bar.tasks().focused(), None);
+}
+
+#[test]
+fn the_picker_takes_no_keyboard() {
+    let mut bar = bottom_bar();
+    for id in 1..=2 {
+        bar.tasks_mut().add(TaskId(id), format!("Window {id}"));
+    }
+    bar.set_apps(alloc::vec![
+        app("Terminal").with_windows(alloc::vec![TaskId(1), TaskId(2)])
+    ]);
+    bar.show_window_picker(0, cells(&bar, 0), Scale::ONE);
+    let mut input = TaskbarInput::new();
+    // A hover surface holds no keyboard: the focused window keeps its keys,
+    // and the picker goes when the pointer does.
+    assert_eq!(
+        press_key(&mut input, &mut bar, Key::Named(NamedKey::Escape)),
+        TaskbarResponse::Ignored
+    );
+    assert!(bar.picker().is_open());
+}
+
+#[test]
+fn leaving_the_slot_closes_the_picker() {
+    let mut bar = bottom_bar();
+    for id in 1..=2 {
+        bar.tasks_mut().add(TaskId(id), format!("Window {id}"));
+    }
+    bar.set_apps(alloc::vec![
+        app("Terminal").with_windows(alloc::vec![TaskId(1), TaskId(2)])
+    ]);
+    bar.show_window_picker(0, cells(&bar, 0), Scale::ONE);
+    let mut input = TaskbarInput::new();
+    let _ = moved_at(&mut input, &mut bar, Point::new(500, 400), NOW_NS);
+    assert!(!bar.picker().is_open());
+}
+
+#[test]
+fn losing_the_second_window_closes_the_picker_with_it() {
+    let mut bar = bottom_bar();
+    for id in 1..=2 {
+        bar.tasks_mut().add(TaskId(id), format!("Window {id}"));
+    }
+    bar.set_apps(alloc::vec![
+        app("Terminal").with_windows(alloc::vec![TaskId(1), TaskId(2)])
+    ]);
+    bar.show_window_picker(0, cells(&bar, 0), Scale::ONE);
+    assert!(bar.picker().is_open());
+    let _ = bar.take_repaint();
+
+    // The application closed one of its two windows, so the session hands
+    // the bar a fresh strip: the picker has nothing left to choose between
+    // and must not survive showing windows that are gone.
+    bar.tasks_mut().remove(TaskId(2));
+    bar.set_apps(alloc::vec![
+        app("Terminal").with_windows(alloc::vec![TaskId(1)])
+    ]);
+    assert!(!bar.picker().is_open());
+    assert!(bar.picker_layout(Scale::ONE).is_none());
+    assert_eq!(
+        bar.take_repaint(),
+        TaskbarRepaint::BAR | TaskbarRepaint::PICKER
+    );
+}
+
+#[test]
+fn the_picker_survives_a_strip_update_that_keeps_the_choice() {
+    let mut bar = bottom_bar();
+    for id in 1..=3 {
+        bar.tasks_mut().add(TaskId(id), format!("Window {id}"));
+    }
+    bar.set_apps(alloc::vec![app("Terminal").with_windows(alloc::vec![
+        TaskId(1),
+        TaskId(2),
+        TaskId(3)
+    ])]);
+    bar.show_window_picker(0, cells(&bar, 0), Scale::ONE);
+    bar.tasks_mut().remove(TaskId(3));
+    bar.set_apps(alloc::vec![
+        app("Terminal").with_windows(alloc::vec![TaskId(1), TaskId(2)])
+    ]);
+    assert!(
+        bar.picker().is_open(),
+        "two windows is still a choice, so the picker stays"
+    );
+}
+
+#[test]
+fn a_modal_surface_keeps_the_picker_from_opening_underneath_it() {
+    let mut bar = bottom_bar();
+    for id in 1..=2 {
+        bar.tasks_mut().add(TaskId(id), format!("Window {id}"));
+    }
+    bar.set_apps(alloc::vec![app("Terminal")
+        .with_windows(alloc::vec![TaskId(1), TaskId(2)])
+        .with_declaration(declared_menu(), true)]);
+    let mut input = TaskbarInput::new();
+    let slot = centre_of(bar.layout(Scale::ONE).apps[0]);
+
+    // With the declared menu up, a sample over the slot asks for no picker:
+    // the user could not reach one under a modal surface.
+    open_app_menu(&mut input, &mut bar);
+    assert_eq!(
+        moved_at(&mut input, &mut bar, slot, NOW_NS),
+        TaskbarResponse::Ignored
+    );
+    assert!(!bar.picker().is_open());
+
+    // Same with the library popup.
+    bar.close_menu();
+    open_library(&mut input, &mut bar);
+    assert!(matches!(
+        moved_at(&mut input, &mut bar, slot, NOW_NS),
+        TaskbarResponse::Ignored
+    ));
+    assert!(!bar.picker().is_open());
+}
+
+#[test]
+fn clicking_the_slot_closes_the_picker_and_acts_on_the_application() {
+    let mut bar = bottom_bar();
+    for id in 1..=2 {
+        bar.tasks_mut().add(TaskId(id), format!("Window {id}"));
+    }
+    bar.set_apps(alloc::vec![app("Terminal")
+        .with_windows(alloc::vec![TaskId(1), TaskId(2)])
+        .with_declaration(declared_menu(), true)]);
+    bar.show_window_picker(0, cells(&bar, 0), Scale::ONE);
+    let mut input = TaskbarInput::new();
+    let slot = centre_of(bar.layout(Scale::ONE).apps[0]);
+    assert_eq!(
+        press_at(&mut input, &mut bar, slot.x, slot.y),
+        TaskbarResponse::AppDefault { app: 0 },
+        "the user decided on the application rather than one of its windows"
+    );
+    assert!(!bar.picker().is_open());
+}
+
+#[test]
+fn render_picker_paints_a_thumbnail_or_the_applications_glyph() {
+    let theme = Theme::dark();
+    let mut bar = bottom_bar();
+    for id in 1..=2 {
+        bar.tasks_mut().add(TaskId(id), format!("Window {id}"));
+    }
+    bar.set_apps(alloc::vec![
+        app("Terminal").with_windows(alloc::vec![TaskId(1), TaskId(2)])
+    ]);
+    let renderer = TaskbarRenderer::new(test_icon_cache());
+    assert!(
+        renderer.render_picker(&bar, Scale::ONE).is_none(),
+        "a closed picker draws nothing"
+    );
+
+    let magenta = Color::rgb(255, 0, 255).premultiply();
+    bar.show_window_picker(
+        0,
+        alloc::vec![
+            PickerEntry::new(TaskId(1), "Shell")
+                .with_thumbnail(Surface::filled(64, 40, magenta).expect("a frame")),
+            PickerEntry::new(TaskId(2), "Logs"),
+        ],
+        Scale::ONE,
+    );
+    let layout = bar.picker_layout(Scale::ONE).expect("open");
+    let surface = renderer
+        .render_picker(&bar, Scale::ONE)
+        .expect("picker renders");
+    assert_eq!(surface.width(), layout.panel.width);
+    assert_eq!(surface.height(), layout.panel.height);
+
+    // Cell 0 shows the window's own frame…
+    assert!(region_has_pixel(
+        &surface,
+        layout.panel,
+        layout.cells[0],
+        magenta
+    ));
+    // …and cell 1, which has no frame yet, draws the application's glyph
+    // rather than a hole.
+    assert!(region_has_role_ink(
+        &surface,
+        layout.panel,
+        layout.cells[1],
+        theme.palette().on_surface,
+        floating_ground(&theme, theme.palette().surface_raised),
+    ));
+}
+
 // ---- input: open popup ----------------------------------------------
 
 #[test]
@@ -1880,18 +2518,25 @@ fn opening_and_closing_the_library_popup_latches_the_popup_and_the_bar() {
 fn click_away_dismisses_without_acting_on_what_it_hit() {
     let mut bar = bottom_bar();
     bar.tasks_mut().add(TaskId(1), "Editor");
+    bar.set_apps(alloc::vec![app("Editor")
+        .with_windows(alloc::vec![TaskId(1)])
+        .with_declaration(declared_menu(), true)]);
     let mut input = TaskbarInput::new();
     open_library(&mut input, &mut bar);
 
-    // Press on a task slot while the popup is open: one click does one
-    // thing — the popup closes and the task is NOT activated.
-    let slot = centre_of(bar.layout(Scale::ONE).tasks[0]);
+    // Press on an application slot while the popup is open: one click does
+    // one thing — the popup closes and the application is not acted on.
+    let slot = centre_of(bar.layout(Scale::ONE).apps[0]);
     assert_eq!(
         press_at(&mut input, &mut bar, slot.x, slot.y),
         TaskbarResponse::LibraryDismissed
     );
     assert!(!bar.library().is_open());
-    assert_eq!(bar.tasks().focused(), None, "the task was not activated");
+    assert_eq!(
+        bar.tasks().focused(),
+        None,
+        "the application was not acted on"
+    );
 }
 
 #[test]
@@ -1980,8 +2625,10 @@ fn clicking_an_entry_launches_it() {
 }
 
 /// Open the popup and press the visible "Chess" entry row, returning its
-/// catalog identifier and the press point — the start of every pin-drag
-/// gesture the tests below drive.
+/// catalog identifier and the press point.
+///
+/// An entry row launches on the *release* that ends the press, so a press
+/// alone is where every click gesture below starts.
 fn press_chess_row(input: &mut TaskbarInput, bar: &mut Taskbar) -> (EntryId, Point) {
     open_library(input, bar);
     let (index, rect) = visible_row_where(
@@ -2000,91 +2647,13 @@ fn press_chess_row(input: &mut TaskbarInput, bar: &mut Taskbar) -> (EntryId, Poi
     (id, centre)
 }
 
-/// A point far enough from `from` that the shared drag detector must treat
-/// the motion as a drag.
-fn beyond_drag_threshold(from: Point) -> Point {
-    let travel = i32::try_from(tairix_browse::DRAG_THRESHOLD_PX).expect("small") + 1;
-    Point::new(from.x, from.y + travel)
-}
-
-#[test]
-fn dragging_a_library_row_offers_that_entry_for_pinning() {
-    let mut bar = bottom_bar();
-    let mut input = TaskbarInput::new();
-    let (id, press) = press_chess_row(&mut input, &mut bar);
-
-    let away = beyond_drag_threshold(press);
-    assert_eq!(
-        moved_at(&mut input, &mut bar, away, NOW_NS),
-        TaskbarResponse::PinDragOffered { entry: id }
-    );
-    // Exactly one offer per gesture: further travel adds nothing.
-    assert_eq!(
-        moved_at(&mut input, &mut bar, beyond_drag_threshold(away), NOW_NS),
-        TaskbarResponse::Ignored
-    );
-    assert!(
-        bar.library().is_open(),
-        "the popup stays up while the drag is in flight"
-    );
-}
-
-#[test]
-fn releasing_a_dragged_library_row_reports_the_drop() {
-    let mut bar = bottom_bar();
-    let mut input = TaskbarInput::new();
-    let (id, press) = press_chess_row(&mut input, &mut bar);
-
-    assert_eq!(
-        moved_at(&mut input, &mut bar, beyond_drag_threshold(press), NOW_NS),
-        TaskbarResponse::PinDragOffered { entry: id }
-    );
-    // The release is the drop; where it landed is the session's to resolve,
-    // and a dragged row is never also launched.
-    assert_eq!(
-        release_at(&mut input, &mut bar, NOW_NS),
-        TaskbarResponse::PinDragDropped
-    );
-    assert!(bar.library().is_open(), "a drag never launches the row");
-}
-
-#[test]
-fn escape_during_a_library_drag_withdraws_it_and_keeps_the_popup() {
-    let mut bar = bottom_bar();
-    let mut input = TaskbarInput::new();
-    let (id, press) = press_chess_row(&mut input, &mut bar);
-
-    assert_eq!(
-        moved_at(&mut input, &mut bar, beyond_drag_threshold(press), NOW_NS),
-        TaskbarResponse::PinDragOffered { entry: id }
-    );
-    assert_eq!(
-        press_key(&mut input, &mut bar, Key::Named(NamedKey::Escape)),
-        TaskbarResponse::PinDragWithdrawn
-    );
-    assert!(
-        bar.library().is_open(),
-        "abandoning the drag keeps the popup"
-    );
-    // The gesture is over: the release that follows drops nothing, and a
-    // second Escape means what it always did.
-    assert_eq!(
-        release_at(&mut input, &mut bar, NOW_NS),
-        TaskbarResponse::Ignored
-    );
-    assert_eq!(
-        press_key(&mut input, &mut bar, Key::Named(NamedKey::Escape)),
-        TaskbarResponse::LibraryDismissed
-    );
-}
-
 #[test]
 fn a_press_that_barely_moves_is_still_a_click() {
     let mut bar = bottom_bar();
     let mut input = TaskbarInput::new();
     let (id, press) = press_chess_row(&mut input, &mut bar);
 
-    // Jitter within the shared threshold is not a drag.
+    // Jitter within the pressed row is still that row's click.
     assert_eq!(
         moved_at(
             &mut input,
@@ -2106,30 +2675,27 @@ fn a_release_away_from_the_pressed_row_launches_nothing() {
     let mut input = TaskbarInput::new();
     let (_, press) = press_chess_row(&mut input, &mut bar);
 
-    // Far enough to be a drag, so the release is a drop rather than a
-    // launch — and the row the pointer ended over is not launched either.
-    let away = beyond_drag_threshold(press);
-    assert!(matches!(
-        moved_at(&mut input, &mut bar, away, NOW_NS),
-        TaskbarResponse::PinDragOffered { .. }
-    ));
+    // The pointer left the row it pressed, so the release completes no
+    // click — and the row it ended over is not launched either.
+    let elsewhere = Point::new(press.x, press.y + 200);
+    let _ = moved_at(&mut input, &mut bar, elsewhere, NOW_NS);
     assert_eq!(
         release_at(&mut input, &mut bar, NOW_NS),
-        TaskbarResponse::PinDragDropped
+        TaskbarResponse::Ignored
     );
     assert!(bar.library().is_open());
 }
 
 #[test]
-fn a_rebuild_under_a_held_press_offers_nothing() {
+fn a_rebuild_under_a_held_press_launches_nothing() {
     let mut bar = bottom_bar();
     let mut input = TaskbarInput::new();
     let (id, press) = press_chess_row(&mut input, &mut bar);
 
     // Typing filters the list while the button is still down, so the row the
-    // press was keyed to is gone. The armed gesture must go with it: a motion
-    // past the threshold now would otherwise offer whatever moved into that
-    // position, which is not the program the user pressed.
+    // press was keyed to is gone. The armed press must go with it: releasing
+    // now would otherwise launch whatever moved into that position, which is
+    // not the program the user pressed.
     press_key(&mut input, &mut bar, Key::Char('w'));
     assert_eq!(bar.library().search_text(), "w");
     assert!(
@@ -2140,20 +2706,16 @@ fn a_rebuild_under_a_held_press_offers_nothing() {
         "the filter dropped the pressed entry"
     );
 
-    assert_eq!(
-        moved_at(&mut input, &mut bar, beyond_drag_threshold(press), NOW_NS),
-        TaskbarResponse::Ignored,
-        "a rebuilt list has no armed press to turn into an offer"
-    );
+    let _ = moved_at(&mut input, &mut bar, press, NOW_NS);
     assert_eq!(
         release_at(&mut input, &mut bar, NOW_NS),
         TaskbarResponse::Ignored,
-        "and nothing to drop or launch on release"
+        "a rebuilt list has nothing armed to launch"
     );
 }
 
 #[test]
-fn a_folder_header_arms_no_drag() {
+fn a_folder_header_acts_on_the_press_and_arms_nothing() {
     let mut bar = bottom_bar();
     let mut input = TaskbarInput::new();
     open_library(&mut input, &mut bar);
@@ -2162,15 +2724,11 @@ fn a_folder_header_arms_no_drag() {
     })
     .expect("the Office folder is visible");
 
-    // A header acts on the press (it folds), so there is nothing armed for a
-    // later motion to turn into an offer.
+    // A header folds on the press, so there is nothing armed for the
+    // release to complete.
     let centre = centre_of(rect);
     assert_eq!(
         press_at(&mut input, &mut bar, centre.x, centre.y),
-        TaskbarResponse::Ignored
-    );
-    assert_eq!(
-        moved_at(&mut input, &mut bar, beyond_drag_threshold(centre), NOW_NS),
         TaskbarResponse::Ignored
     );
     assert_eq!(
@@ -3029,11 +3587,12 @@ fn a_hovered_or_pressed_slot_never_washes_over_the_bar_rim() {
         let palette = theme.palette();
         let rim = floating_ground(&theme, palette.rim);
         let name = theme.name();
-        // A pin wears the pointer's wash and nothing else — the strip has no
-        // held state of its own — so a press on one still reads as a hover.
-        for (slot_label, pinned, held) in [
+        // An application slot wears the pointer's wash and nothing else —
+        // the strip has no held state of its own — so a press on one still
+        // reads as a hover.
+        for (slot_label, on_strip, held) in [
             ("library", false, palette.surface_pressed),
-            ("pin", true, palette.surface_hover),
+            ("application", true, palette.surface_hover),
         ] {
             for (state, wash) in [
                 ("hovered", floating_plate(&theme, palette.surface_hover)),
@@ -3041,11 +3600,11 @@ fn a_hovered_or_pressed_slot_never_washes_over_the_bar_rim() {
             ] {
                 let mut bar = bottom_bar();
                 bar.apply_theme(&theme);
-                bar.set_pins(alloc::vec![PinView::new("Pin", IconKind::AppBundle)]);
+                bar.set_apps(alloc::vec![app("App")]);
                 let layout = bar.layout(Scale::ONE);
                 let frame = layout.bar;
-                let slot = if pinned {
-                    layout.pins[0]
+                let slot = if on_strip {
+                    layout.apps[0]
                 } else {
                     layout.library
                 };
@@ -3239,66 +3798,36 @@ fn the_library_button_reads_as_held_down_while_its_popup_is_open() {
 }
 
 #[test]
-fn focused_task_shows_the_accent_seam_and_others_stay_quiet() {
+fn an_app_slot_carries_no_presence_or_focus_mark() {
+    // An icon-bar slot is an application, not a window: there is no running
+    // bar, no focus seam, and no recessed minimised plate under it. Only the
+    // pointer's own wash distinguishes one slot from another.
     let theme = Theme::dark();
     let mut bar = bottom_bar();
     bar.tasks_mut().add(TaskId(1), "Editor");
-    bar.tasks_mut().add(TaskId(2), "Browser");
-    bar.tasks_mut().activate(TaskId(1));
+    bar.tasks_mut().set_focused(Some(TaskId(1)));
+    bar.set_apps(alloc::vec![
+        app("Editor").with_windows(alloc::vec![TaskId(1)]),
+        app("Idle"),
+    ]);
 
     let layout = bar.layout(Scale::ONE);
     let surface = TaskbarRenderer::new(test_icon_cache())
         .render(&bar, Scale::ONE, &mut NoArtwork)
         .expect("bar renders");
-    // The focused task's shared control draws the lower accent seam…
-    let seam = Rect::new(
-        layout.tasks[0].left(),
-        layout.tasks[0].bottom() - 6,
-        layout.tasks[0].width,
-        6,
-    );
-    assert!(region_has_pixel(
-        &surface,
-        layout.bar,
-        seam,
-        role(theme.palette().accent)
-    ));
-    // …and the unfocused task shows no accent anywhere in its slot.
-    assert!(!region_has_pixel(
-        &surface,
-        layout.bar,
-        layout.tasks[1],
-        role(theme.palette().accent)
-    ));
-}
-
-#[test]
-fn minimised_task_recedes_into_the_bar() {
-    let theme = Theme::dark();
-    let mut bar = bottom_bar();
-    bar.tasks_mut().add(TaskId(1), "Editor");
-    bar.tasks_mut().activate(TaskId(1));
-    bar.tasks_mut().minimise(TaskId(1));
-
-    let layout = bar.layout(Scale::ONE);
-    let surface = TaskbarRenderer::new(test_icon_cache())
-        .render(&bar, Scale::ONE, &mut NoArtwork)
-        .expect("bar renders");
-    // The minimised task's shared control recesses its plate to the flat
-    // surface colour, distinct from the raised bar background, and marks it
-    // with the muted leading tick.
-    assert!(region_has_pixel(
-        &surface,
-        layout.bar,
-        layout.tasks[0],
-        role(theme.palette().surface)
-    ));
-    assert!(region_has_pixel(
-        &surface,
-        layout.bar,
-        layout.tasks[0],
-        role(theme.palette().on_surface_muted)
-    ));
+    for (label, slot) in [
+        ("the focused application's", layout.apps[0]),
+        ("an idle application's", layout.apps[1]),
+    ] {
+        assert!(
+            !region_has_pixel(&surface, layout.bar, slot, role(theme.palette().accent)),
+            "{label} slot draws no accent mark"
+        );
+        assert!(
+            !region_has_pixel(&surface, layout.bar, slot, role(theme.palette().surface)),
+            "{label} slot draws no recessed plate"
+        );
+    }
 }
 
 #[test]
@@ -3474,22 +4003,24 @@ fn theme_switch_repaints_the_bar() {
 }
 
 #[test]
-fn pin_and_menu_actions_latch_repaints() {
+fn app_strip_and_menu_actions_latch_repaints() {
     let mut bar = bottom_bar();
     let _ = bar.take_repaint();
 
-    // set_pins draws on the bar's own pin strip: bar only.
-    bar.set_pins(alloc::vec![PinView::new("Pin", IconKind::AppBundle)]);
+    // set_apps draws on the bar's own strip: bar only.
+    bar.set_apps(alloc::vec![
+        app("App").with_declaration(declared_menu(), true)
+    ]);
     assert_eq!(bar.take_repaint(), TaskbarRepaint::BAR);
 
     // Opening the menu is its own overlay: menu only.
-    bar.open_pin_menu(0, Rect::EMPTY);
+    bar.open_app_menu(0, Rect::EMPTY);
     assert_eq!(bar.take_repaint(), TaskbarRepaint::MENU);
 
-    // Motion over a pin changes the bar's own hover feedback: bar only.
+    // Motion over a slot changes the bar's own hover feedback: bar only.
     let layout = bar.layout(Scale::ONE);
-    let pin_centre = centre_of(layout.pins[0]);
-    bar.track_hover(pin_centre, Scale::ONE, &mut damage::sink());
+    let slot = centre_of(layout.apps[0]);
+    bar.track_hover(slot, Scale::ONE, &mut damage::sink());
     assert_eq!(bar.take_repaint(), TaskbarRepaint::BAR);
 
     // Closing the menu: menu only.
@@ -3530,20 +4061,20 @@ fn clock_label_paints_and_an_empty_clock_paints_nothing() {
 }
 
 #[test]
-fn a_running_task_draws_its_icon_and_no_title_beside_it() {
+fn an_app_slot_draws_its_icon_and_no_label_beside_it() {
     let theme = Theme::dark();
     let mut bar = bottom_bar();
-    let title = "An enormously long window title that cannot fit";
-    bar.tasks_mut().add(TaskId(1), title);
+    let label = "An enormously long application name that cannot fit";
+    bar.set_apps(alloc::vec![app(label)]);
     let layout = bar.layout(Scale::ONE);
-    let slot = layout.tasks[0];
+    let slot = layout.apps[0];
     let surface = TaskbarRenderer::new(test_icon_cache())
         .render(&bar, Scale::ONE, &mut NoArtwork)
         .expect("bar renders");
 
     // The drawn icon, centred in the slot, with a pixel of slack either side
     // for the renderer's odd-remainder rounding.
-    let side = bar.task_icon_side(Scale::ONE);
+    let side = bar.app_icon_side(Scale::ONE);
     let inset = i32::try_from(slot.width.saturating_sub(side) / 2).expect("a slot-sized inset");
     let band = Rect::new(slot.left() + inset - 1, slot.top(), side + 2, slot.height);
     let bar_fill = floating_ground(&theme, theme.palette().surface_raised);
@@ -3585,117 +4116,84 @@ fn a_running_task_draws_its_icon_and_no_title_beside_it() {
         );
     }
 
-    // The title is the model's own data — the context menu reads it — never
+    // The label is the model's own data — a context surface reads it — never
     // decoration on the slot.
-    assert_eq!(bar.tasks().entries()[0].title, title);
+    assert_eq!(bar.apps().get(0).expect("one slot").label(), label);
 }
 
 #[test]
-fn pins_render_artwork_or_fallback_glyph() {
+fn app_slots_render_artwork_or_the_fallback_glyph() {
     let theme = Theme::dark();
     let mut bar = bottom_bar();
-    // Pin 0: Magenta artwork.
     let magenta = Color::rgb(255, 0, 255).premultiply();
-    bar.set_pins(alloc::vec![
-        PinView::new("Art", IconKind::AppBundle)
-            .with_artwork(Surface::filled(16, 16, magenta).unwrap()),
-        PinView::new("Glyph", IconKind::AppBundle),
+    bar.set_apps(alloc::vec![
+        app("Art").with_artwork(Surface::filled(16, 16, magenta).unwrap()),
+        app("Glyph"),
     ]);
     let layout = bar.layout(Scale::ONE);
     let surface = TaskbarRenderer::new(test_icon_cache())
         .render(&bar, Scale::ONE, &mut NoArtwork)
         .expect("bar renders");
 
-    // Pin 0 shows the magenta artwork.
+    // Slot 0 shows the magenta artwork the session rasterised for it.
     assert!(region_has_pixel(
         &surface,
         layout.bar,
-        layout.pins[0],
+        layout.apps[0],
         magenta
     ));
 
-    // Pin 1 shows the AppBundle glyph (on_surface ink).
+    // Slot 1 shows the AppBundle glyph (on_surface ink).
     assert!(region_has_role_ink(
         &surface,
         layout.bar,
-        layout.pins[1],
+        layout.apps[1],
         theme.palette().on_surface,
         floating_ground(&theme, theme.palette().surface_raised),
     ));
 }
 
 #[test]
-fn active_pin_shows_the_accent_seam() {
-    let theme = Theme::dark();
-    let mut bar = bottom_bar();
-    let task_id = TaskId(1);
-    bar.set_pins(alloc::vec![
-        PinView::new("App", IconKind::AppBundle).with_window(task_id)
-    ]);
-    bar.tasks_mut().add(task_id, "App");
-    bar.tasks_mut().set_focused(Some(task_id));
-
-    let layout = bar.layout(Scale::ONE);
-    let surface = TaskbarRenderer::new(test_icon_cache())
-        .render(&bar, Scale::ONE, &mut NoArtwork)
-        .expect("bar renders");
-
-    // The pin slot (not just the task slot) shows the accent seam.
-    assert!(region_has_pixel(
-        &surface,
-        layout.bar,
-        layout.pins[0],
-        role(theme.palette().accent)
-    ));
-}
-
-#[test]
-fn each_running_task_draws_its_own_application_artwork() {
+fn each_app_slot_draws_its_own_application_artwork() {
     let mut bar = bottom_bar();
     let magenta = Color::rgb(255, 0, 255).premultiply();
     let cyan = Color::rgb(0, 255, 255).premultiply();
-    // Neither window is pinned: a window wears the icon of the application
-    // that opened it, whether or not the user pinned that application.
-    bar.tasks_mut().add(TaskId(1), "Magenta");
-    bar.tasks_mut().add(TaskId(2), "Cyan");
-    assert!(bar
-        .tasks_mut()
-        .set_artwork(TaskId(1), Some(Surface::filled(16, 16, magenta).unwrap())));
-    assert!(bar
-        .tasks_mut()
-        .set_artwork(TaskId(2), Some(Surface::filled(16, 16, cyan).unwrap())));
+    bar.set_apps(alloc::vec![
+        app("Magenta").with_artwork(Surface::filled(16, 16, magenta).unwrap()),
+        app("Cyan").with_artwork(Surface::filled(16, 16, cyan).unwrap()),
+    ]);
 
     let layout = bar.layout(Scale::ONE);
     let surface = TaskbarRenderer::new(test_icon_cache())
         .render(&bar, Scale::ONE, &mut NoArtwork)
         .expect("bar renders");
 
-    // Each slot shows its own window's picture and only its own: one
+    // Each slot shows its own application's picture and only its own: one
     // application's icon on every slot would be the defect this closes.
     for (slot, own, other) in [(0, magenta, cyan), (1, cyan, magenta)] {
         assert!(region_has_pixel(
             &surface,
             layout.bar,
-            layout.tasks[slot],
+            layout.apps[slot],
             own
         ));
         assert!(!region_has_pixel(
             &surface,
             layout.bar,
-            layout.tasks[slot],
+            layout.apps[slot],
             other
         ));
     }
 }
 
 #[test]
-fn a_task_with_no_resolved_artwork_keeps_the_shared_application_glyph() {
+fn an_app_slot_with_no_resolved_artwork_keeps_the_shared_application_glyph() {
     let theme = Theme::dark();
     let mut bar = bottom_bar();
-    // A window this desktop cannot attribute to a bundle: the session
+    // A process this desktop cannot attribute to a bundle: the session
     // resolves no picture for it, and the slot must still read as an
     // application rather than as a blank plate.
-    bar.tasks_mut().add(TaskId(1), "Unattributed");
+    bar.set_apps(alloc::vec![app("Unattributed")]);
 
     let layout = bar.layout(Scale::ONE);
     let surface = TaskbarRenderer::new(test_icon_cache())
@@ -3705,22 +4203,10 @@ fn a_task_with_no_resolved_artwork_keeps_the_shared_application_glyph() {
     assert!(region_has_role_ink(
         &surface,
         layout.bar,
-        layout.tasks[0],
+        layout.apps[0],
         theme.palette().on_surface,
         floating_ground(&theme, theme.palette().surface_raised),
     ));
-}
-
-#[test]
-fn artwork_for_a_window_the_bar_does_not_list_changes_nothing() {
-    let mut bar = bottom_bar();
-    bar.tasks_mut().add(TaskId(1), "App");
-    let magenta = Color::rgb(255, 0, 255).premultiply();
-
-    assert!(!bar
-        .tasks_mut()
-        .set_artwork(TaskId(9), Some(Surface::filled(16, 16, magenta).unwrap())));
-    assert!(bar.tasks().entries()[0].artwork.is_none());
 }
 
 /// A stand-in for the shipped `/System/Graphics` icon set: it answers the
@@ -3833,13 +4319,10 @@ fn an_application_slot_falls_back_to_its_kinds_artwork_before_the_glyph() {
     let mut bar = bottom_bar();
     let own = Color::rgb(255, 0, 255);
     let bundle = Color::rgb(0, 255, 0);
-    let task_id = TaskId(2);
-    bar.set_pins(alloc::vec![
-        PinView::new("Own", IconKind::AppBundle)
-            .with_artwork(Surface::filled(16, 16, own.premultiply()).expect("artwork")),
-        PinView::new("Shipped", IconKind::AppBundle).with_window(task_id),
+    bar.set_apps(alloc::vec![
+        app("Own").with_artwork(Surface::filled(16, 16, own.premultiply()).expect("artwork")),
+        app("Shipped"),
     ]);
-    bar.tasks_mut().add(task_id, "Shipped");
     let mut artwork = FakeArtwork::new(&[(IconKind::AppBundle, bundle)]);
 
     let layout = bar.layout(Scale::ONE);
@@ -3847,26 +4330,19 @@ fn an_application_slot_falls_back_to_its_kinds_artwork_before_the_glyph() {
         .render(&bar, Scale::ONE, &mut artwork)
         .expect("bar renders");
 
-    // A pin carrying its application's own icon keeps it: the shipped
-    // class artwork is the fallback, never an override.
+    // A slot carrying its application's own icon keeps it: the shipped class
+    // artwork is the fallback, never an override.
     assert!(region_has_pixel(
         &surface,
         layout.bar,
-        layout.pins[0],
+        layout.apps[0],
         own.premultiply()
     ));
-    // The pin with no icon of its own, and the running task that borrows
-    // from it, both show the shipped app-bundle artwork.
+    // The slot with no icon of its own shows the shipped app-bundle artwork.
     assert!(region_has_pixel(
         &surface,
         layout.bar,
-        layout.pins[1],
-        bundle.premultiply()
-    ));
-    assert!(region_has_pixel(
-        &surface,
-        layout.bar,
-        layout.tasks[0],
+        layout.apps[1],
         bundle.premultiply()
     ));
 }
@@ -3875,8 +4351,7 @@ fn an_application_slot_falls_back_to_its_kinds_artwork_before_the_glyph() {
 fn a_bar_with_no_artwork_at_all_still_draws_every_element() {
     let theme = Theme::dark();
     let mut bar = bar_with_status_signals();
-    bar.set_pins(alloc::vec![PinView::new("Pin", IconKind::AppBundle)]);
-    bar.tasks_mut().add(TaskId(1), "Task");
+    bar.set_apps(alloc::vec![app("App")]);
     bar.clock_mut().set_label("12:34");
 
     let layout = bar.layout(Scale::ONE);
@@ -3889,8 +4364,7 @@ fn a_bar_with_no_artwork_at_all_still_draws_every_element() {
     for (label, rect) in [
         ("library", layout.library),
         ("files", layout.files),
-        ("pin", layout.pins[0]),
-        ("task", layout.tasks[0]),
+        ("application", layout.apps[0]),
         ("status signal", layout.notifications[0]),
         ("clock", layout.clock),
     ] {
@@ -3915,21 +4389,14 @@ fn a_bar_with_no_artwork_at_all_still_draws_every_element() {
 
 #[test]
 fn render_menu_paints_the_modal_plate_and_follows_theme() {
-    let mut bar = bottom_bar();
-    bar.set_pins(alloc::vec![PinView::new("Pin", IconKind::AppBundle)]);
+    let mut bar = bar_with_declared_app();
     let renderer = TaskbarRenderer::new(test_icon_cache());
 
     // None when closed.
     assert!(renderer.render_menu(&bar, Scale::ONE).is_none());
 
     // Open and check render.
-    bar.menu_routing_mut().open(
-        MenuSubject::Pin {
-            index: 0,
-            running: false,
-        },
-        Rect::new(100, 760, 48, 40),
-    );
+    bar.open_app_menu(0, Rect::new(100, 760, 48, 40));
     let layout = bar.menu_layout(Scale::ONE).expect("menu layout");
     let dark = renderer
         .render_menu(&bar, Scale::ONE)
@@ -4947,42 +5414,27 @@ fn scroll_over_the_capsule_cycles_tasks() {
     // No focused task: scrolling forward starts at the first entry.
     assert_eq!(
         scroll_at(&mut input, &mut bar, capsule, 0, 1),
-        TaskbarResponse::TaskActivated {
-            id: TaskId(1),
-            outcome: ActivateOutcome::Activated
-        }
+        TaskbarResponse::WindowChosen { id: TaskId(1) }
     );
     // Forward again advances...
     assert_eq!(
         scroll_at(&mut input, &mut bar, capsule, 0, 1),
-        TaskbarResponse::TaskActivated {
-            id: TaskId(2),
-            outcome: ActivateOutcome::Activated
-        }
+        TaskbarResponse::WindowChosen { id: TaskId(2) }
     );
     // ...and backward returns (dx is the fallback when dy is zero).
     assert_eq!(
         scroll_at(&mut input, &mut bar, capsule, -1, 0),
-        TaskbarResponse::TaskActivated {
-            id: TaskId(1),
-            outcome: ActivateOutcome::Activated
-        }
+        TaskbarResponse::WindowChosen { id: TaskId(1) }
     );
     // Backward from the first entry wraps to the last.
     assert_eq!(
         scroll_at(&mut input, &mut bar, capsule, 0, -2),
-        TaskbarResponse::TaskActivated {
-            id: TaskId(3),
-            outcome: ActivateOutcome::Activated
-        }
+        TaskbarResponse::WindowChosen { id: TaskId(3) }
     );
     // Forward from the last wraps to the first.
     assert_eq!(
         scroll_at(&mut input, &mut bar, capsule, 0, 3),
-        TaskbarResponse::TaskActivated {
-            id: TaskId(1),
-            outcome: ActivateOutcome::Activated
-        }
+        TaskbarResponse::WindowChosen { id: TaskId(1) }
     );
     // A zero-delta scroll and a scroll elsewhere change nothing.
     assert_eq!(
@@ -5011,10 +5463,7 @@ fn scroll_with_no_focus_and_no_tasks_fails_closed() {
     // No focused task: scrolling backward starts at the last entry.
     assert_eq!(
         scroll_at(&mut input, &mut bar, capsule, 0, -1),
-        TaskbarResponse::TaskActivated {
-            id: TaskId(8),
-            outcome: ActivateOutcome::Activated
-        }
+        TaskbarResponse::WindowChosen { id: TaskId(8) }
     );
 }
 
@@ -5028,10 +5477,7 @@ fn scroll_over_the_open_readout_also_cycles() {
     let inside = centre_of(readout.panel);
     assert_eq!(
         scroll_at(&mut input, &mut bar, inside, 0, 1),
-        TaskbarResponse::TaskActivated {
-            id: TaskId(1),
-            outcome: ActivateOutcome::Activated
-        }
+        TaskbarResponse::WindowChosen { id: TaskId(1) }
     );
 }
 
@@ -5040,26 +5486,20 @@ fn middle_press_switches_to_the_previous_task() {
     let mut bar = bottom_bar();
     bar.tasks_mut().add(TaskId(1), "Editor");
     bar.tasks_mut().add(TaskId(2), "Browser");
-    bar.tasks_mut().activate(TaskId(1));
-    bar.tasks_mut().activate(TaskId(2));
+    bar.tasks_mut().set_focused(Some(TaskId(1)));
+    bar.tasks_mut().set_focused(Some(TaskId(2)));
     assert_eq!(bar.tasks().previous(), Some(TaskId(1)));
 
     let mut input = TaskbarInput::new();
     let capsule = centre_of(bar.layout(Scale::ONE).switchboard);
     assert_eq!(
         middle_press_at(&mut input, &mut bar, capsule),
-        TaskbarResponse::TaskActivated {
-            id: TaskId(1),
-            outcome: ActivateOutcome::Activated
-        }
+        TaskbarResponse::WindowChosen { id: TaskId(1) }
     );
     // The switch itself was a handover: pressing again toggles back.
     assert_eq!(
         middle_press_at(&mut input, &mut bar, capsule),
-        TaskbarResponse::TaskActivated {
-            id: TaskId(2),
-            outcome: ActivateOutcome::Activated
-        }
+        TaskbarResponse::WindowChosen { id: TaskId(2) }
     );
     // Elsewhere the middle button stays inert.
     assert_eq!(
@@ -5072,7 +5512,7 @@ fn middle_press_switches_to_the_previous_task() {
 fn middle_press_fails_closed_without_a_previous_task() {
     let mut bar = bottom_bar();
     bar.tasks_mut().add(TaskId(1), "Editor");
-    bar.tasks_mut().activate(TaskId(1));
+    bar.tasks_mut().set_focused(Some(TaskId(1)));
     let mut input = TaskbarInput::new();
     let capsule = centre_of(bar.layout(Scale::ONE).switchboard);
     // Focus arrived from the desktop: there is no previous task yet.
@@ -5083,7 +5523,7 @@ fn middle_press_fails_closed_without_a_previous_task() {
 
     // A remembered task that closed is forgotten, never resurrected.
     bar.tasks_mut().add(TaskId(2), "Browser");
-    bar.tasks_mut().activate(TaskId(2));
+    bar.tasks_mut().set_focused(Some(TaskId(2)));
     assert_eq!(bar.tasks().previous(), Some(TaskId(1)));
     bar.tasks_mut().remove(TaskId(1));
     assert_eq!(bar.tasks().previous(), None);
@@ -5575,15 +6015,8 @@ fn every_popup_the_bar_opens_grounds_itself_in_the_floating_chrome() {
         theme.palette().surface,
     );
 
-    let mut bar = bottom_bar();
-    bar.set_pins(alloc::vec![PinView::new("Pin", IconKind::AppBundle)]);
-    bar.menu_routing_mut().open(
-        MenuSubject::Pin {
-            index: 0,
-            running: false,
-        },
-        Rect::new(100, 760, 48, 40),
-    );
+    let mut bar = bar_with_declared_app();
+    bar.open_app_menu(0, Rect::new(100, 760, 48, 40));
     let menu = bar.menu_layout(Scale::ONE).expect("menu layout");
     grounded(
         "context menu",
@@ -5639,6 +6072,7 @@ fn taskbar_repaint_none_and_all_are_the_expected_extremes() {
         TaskbarRepaint::BAR
             | TaskbarRepaint::LIBRARY
             | TaskbarRepaint::MENU
+            | TaskbarRepaint::PICKER
             | TaskbarRepaint::NOTIFICATIONS
             | TaskbarRepaint::READOUT,
         TaskbarRepaint::ALL
@@ -5703,6 +6137,7 @@ fn taskbar_repaint_bit_or_composes_without_losing_either_side() {
             bar: true,
             library: false,
             menu: true,
+            picker: false,
             notifications: false,
             readout: false,
         }
@@ -5786,8 +6221,9 @@ fn reading_through_an_immutable_accessor_latches_nothing() {
     assert!(bar.clock().label().is_empty());
     assert!(!bar.tray().is_expanded());
     assert_eq!(bar.notifications().signal_count(), 0);
-    assert_eq!(bar.pins().len(), 0);
-    assert_eq!(bar.task_hover(), None);
+    assert_eq!(bar.apps().len(), 0);
+    assert_eq!(bar.apps().hover(), None);
+    assert!(!bar.picker().is_open());
 
     assert_eq!(
         bar.take_repaint(),

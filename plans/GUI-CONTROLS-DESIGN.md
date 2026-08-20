@@ -556,9 +556,8 @@ plated control would say on its edge, it says inside its own slot:
 - **A disposition** — denied, failed-closed, pending, disabled — states itself
   on the glyph tint and on its shape-coded Signal Bead (§13, §15) instead of on
   a coloured edge, so it stays legible without colour vision.
-- **Presence, activity, and pressure** state themselves on the marks a control
-  already owns: the presence mark (§11.26), the Heat Seam, the Pressure Rail,
-  and the Signal Bead.
+- **Activity and pressure** state themselves on the marks a control already
+  owns: the Heat Seam, the Pressure Rail, and the Signal Bead.
 - **Focus Field membership** (§15) is the one signal a bar-seated control
   cannot make, because membership is drawn *only* as a lift of the rim. Nothing
   is lost: a Focus Field groups a row with its own actions inside a panel, and
@@ -569,7 +568,7 @@ Under a **high-contrast** theme a bar-seated control does not grow a rim back:
 the strip's legibility is the theme's to strengthen, in the palette rather than
 in code. Such a theme widens the gap between its bar fill and its
 `surface_hover` / `surface_pressed` plates, exactly as it deepens every other
-role; the shape-coded beads, presence marks, and the focus ring are unchanged
+role; the shape-coded beads, marks, and the focus ring are unchanged
 because none of them relies on an edge in the first place.
 
 The icon strip — launchers, pinned shortcuts, running-task buttons, and the
@@ -1008,43 +1007,31 @@ Notifications use cards with semantic beads. They should remain compact and acti
 - Recovery available: recovery bead and clear action.
 - Denied action: Authority Mark with source application or service name.
 
-### 11.26 TaskbarItem
+### 11.26 TaskbarItem and WindowPreview
 
-Taskbar items combine application identity (the icon), activity, attention, and
-window-visibility state on one Alloy Plate. They are **bar seated** (§10): an
-item wears no Signal Rim, and rests with no plate at all, so a strip of pins and
-tasks reads as one bar and every state is stated inside the slot.
+The desktop's icon bar shows **applications**, and its hover picker shows one
+application's **windows**. Those are two controls, because they answer two
+different questions.
 
-#### Presentation
+#### TaskbarItem — one application
 
-Every item draws one centred icon filling the plate (`icon_content_side`), so a
-running task and a pinned shortcut are the same square slot and the bar reads as
-one strip of equal icons rather than a row of captions. The item carries no text
-at all: a window's title lives in the bar's own model (`TaskEntry::title`), which
-is what a context surface — a menu, a tooltip — reads.
+A taskbar item combines application identity (the icon), activity, and
+attention on one Alloy Plate. It is **bar seated** (§10): an item wears no
+Signal Rim, and rests with no plate at all, so a strip of applications reads
+as one bar and every state is stated inside the slot.
 
-#### Visibility states
+Every item draws one centred icon filling the plate (`icon_content_side`), so
+a run of applications reads as one strip of equal icons rather than a row of
+captions. The item carries no text at all: an application's label lives in the
+bar's own model, which is what a context surface — a menu, a tooltip — reads.
 
-A taskbar item's window-visibility state ([`TaskVisibility`]) is stated by the
-**presence mark** on the lower edge: whether the item has a window at all, and
-whether that window is the active one. Presence and activation differ in
-*length* as well as in hue, so they are distinguishable without colour vision
-and on a bar where nothing wears an edge.
-
-- **Running** — visible but not the active window. A short muted presence mark
-  (a fraction of the slot width, centred) on the lower edge.
-- **Active** — the focused window. The full-width accent seam on the lower edge.
-- **Minimized** — the presence mark plus a recessed plate and a distinct
-  non-color mark (short muted tick on the leading edge).
-- **Closed** — a pinned shortcut whose application is not running. No presence
-  mark and no plate: only its icon sits on the bar until hovered or focused, so
-  a launcher-only slot never masquerades as a running task.
-
-The presence mark is what tells a running application from a closed launcher
-pin, so it is never dropped: in a slot too narrow for its proportion it rounds
-up to one pixel rather than vanishing.
-
-#### Anatomy and artwork
+**It states no window state at all.** A slot is an application, not a window,
+so there is no presence mark, no focus seam, and no recessed minimised plate:
+whether a window is focused or hidden is a fact about a *window*, and the
+picker below is where windows are shown. What remains is the pointer's own
+hover and press wash, keyboard focus, the Heat Seam for background work, and
+the top-trailing Signal Bead for an attention request or a recovery/denied
+state.
 
 The item draws its identity from a built-in class glyph tinted for the
 resolved frame, or from **owner-supplied artwork** (pre-rasterised pixels).
@@ -1052,12 +1039,33 @@ The control never parses image bytes; [`icon_side`] exposes the exact pixel
 geometry (sized off the text line for labelled items, or the plate for
 icon-only items) so owners rasterise at exactly the drawn size.
 
-#### Status furniture
+#### WindowPreview — one window
 
-Background work shows a Heat Seam on the lower edge (just above the presence
-mark when there is one, so both read at once). An attention request or
-recovery/denied state shows a shape-coded Signal Bead on the top-trailing
-corner.
+A window preview is one cell of the picker an icon-bar slot opens: a captioned
+thumbnail of a single window. Where a `TaskbarItem` is one application, a
+preview is one *window* of it — so this is the surface that names a window,
+and the caption is the window's own title.
+
+The thumbnail is a scaled copy of that window's last presented frame,
+pre-rasterised by the owner at [`thumbnail_bounds`], exactly as every other
+control takes owner-supplied artwork: a control never scales a live surface on
+a paint path, and never parses image bytes. A window with no thumbnail yet —
+one that has not presented, or whose pixels the owner released under memory
+pressure — draws its application's class glyph in the thumbnail's place, so a
+cell can never come up blank.
+
+Equal previews draw the same pixels, so a picker may use `==` as its repaint
+gate: the caption, the glyph, and the visible state compare, while the pointer
+coordinate and the press latch do not.
+
+#### MenuMark — a menu row's state
+
+A menu row states an independent setting or a chosen alternative with a
+**mark** in the leading icon column ([`MenuMark`]: none, a tick, or a filled
+bullet). A row states either an icon or a mark, never both: they share the one
+reserved column, so a mark replaces the icon rather than crowding it, and a
+marked row's label still lines up with an unmarked one's. Both are shapes
+rather than colours, so the state is legible without colour vision.
 
 ### 11.27 TraySignal
 

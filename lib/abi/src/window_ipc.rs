@@ -33,6 +33,7 @@
 //! size declared by a window that cannot be resized, or a dirty reserved
 //! field refuses rather than guessing.
 
+use crate::bounded_text::BoundedText;
 use crate::desktop::DesktopInfo;
 use crate::driver::display::{DamageRect, DisplayFormat};
 use crate::input::KeyInput;
@@ -80,16 +81,6 @@ pub const WINDOW_MAX_REQUEST: usize = WindowRequest::WIRE_LEN;
 /// Maximum encoded length, in bytes, of a window title.
 pub const WINDOW_TITLE_MAX: usize = 64;
 
-/// Maximum encoded length, in bytes, of a taskbar pin/drag bundle path.
-///
-/// Deliberately its own constant, mirroring `lib/proglib`'s catalog-engine
-/// bundle-path bound: this crate cannot import that bound without inverting
-/// the dependency layering (`lib/proglib` depends on `lib/abi`, never the
-/// reverse), so the two are independently maintained. A path longer than
-/// this can never name a real store bundle, so nothing legitimate is ever
-/// refused by the bound.
-pub const WINDOW_BUNDLE_PATH_MAX: usize = 512;
-
 /// Widest backdrop-blur radius a window may request, in **logical** pixels
 /// ([`WindowRequest::SetBackdropBlur`]).
 ///
@@ -100,6 +91,297 @@ pub const WINDOW_BUNDLE_PATH_MAX: usize = 512;
 /// each backdrop's edges and the physical radius after the desktop's UI
 /// scale is applied, so a client cannot ask for an unbounded one.
 pub const WINDOW_BACKDROP_BLUR_MAX_PX: u16 = 64;
+
+/// Most rows one application's icon-bar menu may declare
+/// ([`AppMenu`]).
+///
+/// A **format** bound, not a capacity: an icon-bar menu names an
+/// application's few whole-application verbs (a *New window*, its options
+/// submenu, *About*, *Quit*), so a dozen rows is generous for what the
+/// surface is *for* — and the frame every window request shares stays the
+/// size it already was. A hostile client cannot widen it, and a legitimate
+/// one has no use for more.
+pub const APP_MENU_MAX_ROWS: usize = 12;
+
+/// Maximum encoded length, in bytes, of one icon-bar menu row's label.
+pub const APP_MENU_LABEL_MAX: usize = 36;
+
+/// A validated icon-bar menu row label: bounded UTF-8 with no control
+/// characters, over the shared [`BoundedText`] validator.
+///
+/// A label crosses a trust boundary into session-drawn chrome and carries
+/// no authority — it is a name, not a credential. An empty label is
+/// admissible in the type and refused per row kind: only a row that draws
+/// text requires one ([`AppMenuRow`]).
+pub type AppMenuLabel = BoundedText<0, APP_MENU_LABEL_MAX>;
+
+/// The mark an [`AppMenuRow::Item`] draws beside its label.
+///
+/// Closed, and an unknown discriminant on decode fails closed rather than
+/// being guessed at.
+#[repr(u8)]
+#[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
+pub enum AppMenuMark {
+    /// No mark.
+    #[default]
+    None = 0,
+    /// A tick: an independent setting this row turns on.
+    Check = 1,
+    /// A filled bullet: the chosen member of a group of alternatives.
+    Radio = 2,
+}
+
+impl AppMenuMark {
+    /// Recover a mark from its wire discriminant.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::OutOfRange`] for an unknown value (fail closed — never
+    /// guess an unrecognised mark).
+    const fn from_u8(raw: u8) -> Result<Self, Errno> {
+        match raw {
+            0 => Ok(Self::None),
+            1 => Ok(Self::Check),
+            2 => Ok(Self::Radio),
+            _ => Err(Errno::OutOfRange),
+        }
+    }
+}
+
+/// One row of an application's icon-bar menu.
+///
+/// The row kinds are exactly what an icon-bar menu is made of, so a row
+/// that cannot mean anything is unrepresentable: only an
+/// [`Item`](Self::Item) carries an id, and only the session-rendered
+/// [`About`](Self::About) row has content the application does not
+/// describe.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum AppMenuRow {
+    /// A chooseable row. Choosing it delivers
+    /// [`WindowEvent::AppBarMenu`] carrying `id` to the declaring
+    /// application, which decides what it means — the session never
+    /// interprets an id.
+    Item {
+        /// The application's own id for this row; never zero, and unique
+        /// within one menu, so an outcome names exactly one row.
+        id: AppMenuItemId,
+        /// The row's label.
+        label: AppMenuLabel,
+        /// Whether the row may be chosen. A disabled row draws greyed and
+        /// never acts (fail closed).
+        enabled: bool,
+        /// The mark drawn beside the label.
+        mark: AppMenuMark,
+    },
+    /// A horizontal rule grouping the rows around it. Never chooseable.
+    Separator,
+    /// A row that opens a submenu holding the rows that name it as their
+    /// parent. Never chooseable itself, and never nested inside another
+    /// submenu — an icon-bar menu is one level deep.
+    Submenu {
+        /// The row's label.
+        label: AppMenuLabel,
+        /// Whether the submenu opens. A disabled submenu draws greyed and
+        /// never opens.
+        enabled: bool,
+    },
+    /// The application-information row: an *About* row whose submenu is the
+    /// session's own info panel, drawn from the **signed manifest** of the
+    /// bundle the kernel attested owns the declaring process.
+    ///
+    /// The application declares only that the row exists; it supplies none
+    /// of the panel's text, so it cannot state an identity that is not its
+    /// own. At most one such row per menu, always at the top level.
+    About,
+}
+
+/// An [`AppMenuRow::Item`]'s application-chosen id: any non-zero `u16`.
+///
+/// Zero is reserved so a decoded outcome can never be confused with an
+/// absent id.
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
+pub struct AppMenuItemId(u16);
+
+impl AppMenuItemId {
+    /// Build an item id.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::OutOfRange`] if `raw` is zero, which names no row.
+    pub const fn new(raw: u16) -> Result<Self, Errno> {
+        if raw == 0 {
+            return Err(Errno::OutOfRange);
+        }
+        Ok(Self(raw))
+    }
+
+    /// The raw id.
+    #[must_use]
+    pub const fn get(self) -> u16 {
+        self.0
+    }
+}
+
+/// An application's icon-bar menu: an ordered, bounded list of rows, each
+/// either at the top level or inside an earlier [`AppMenuRow::Submenu`].
+///
+/// Nesting is one level by construction: a row's `parent` names an earlier
+/// row that is a submenu, and a submenu row itself has no parent. Building
+/// a menu therefore cannot produce a shape the session would have to
+/// re-reject.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct AppMenu {
+    rows: [(AppMenuRow, u8); APP_MENU_MAX_ROWS],
+    len: u8,
+}
+
+impl AppMenu {
+    /// The empty menu: an application on the icon bar that offers no menu
+    /// at all, which is a legitimate declaration (a secondary press on its
+    /// slot then opens nothing).
+    pub const EMPTY: Self = Self {
+        rows: [(AppMenuRow::Separator, 0); APP_MENU_MAX_ROWS],
+        len: 0,
+    };
+
+    /// Append `row` at the top level.
+    ///
+    /// # Errors
+    ///
+    /// * [`Errno::NoSpace`] — the menu already holds
+    ///   [`APP_MENU_MAX_ROWS`] rows.
+    /// * [`Errno::OutOfRange`] — the row cannot stand at the top level, or
+    ///   duplicates something the menu already holds (a second
+    ///   [`AppMenuRow::About`], a repeated item id, a labelled row with no
+    ///   label, a separator or About row carrying a label).
+    pub fn push(&mut self, row: AppMenuRow) -> Result<(), Errno> {
+        self.push_row(row, None)
+    }
+
+    /// Append `row` inside the submenu opened by the row at `parent`
+    /// (0-based, as [`Self::rows`] reports it).
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::push`], plus [`Errno::OutOfRange`] when `parent` does not
+    /// name an earlier [`AppMenuRow::Submenu`], or when `row` is itself a
+    /// submenu or an About row (neither nests).
+    pub fn push_under(&mut self, row: AppMenuRow, parent: usize) -> Result<(), Errno> {
+        let parent = u8::try_from(parent).map_err(|_| Errno::OutOfRange)?;
+        self.push_row(row, Some(parent))
+    }
+
+    /// The rows in declaration order, each with the 0-based index of the
+    /// submenu row that owns it, or `None` at the top level.
+    pub fn rows(&self) -> impl Iterator<Item = (AppMenuRow, Option<usize>)> + '_ {
+        self.rows[..usize::from(self.len)]
+            .iter()
+            .map(|&(row, parent)| {
+                (
+                    (row),
+                    (parent != PARENT_NONE).then_some(usize::from(parent)),
+                )
+            })
+    }
+
+    /// The number of declared rows.
+    #[must_use]
+    pub const fn len(&self) -> usize {
+        self.len as usize
+    }
+
+    /// Whether the menu declares no rows at all.
+    #[must_use]
+    pub const fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
+    /// The shared append: validate `row` against the rows already held and
+    /// record it with its parent.
+    fn push_row(&mut self, row: AppMenuRow, parent: Option<u8>) -> Result<(), Errno> {
+        let at = usize::from(self.len);
+        if at == APP_MENU_MAX_ROWS {
+            return Err(Errno::NoSpace);
+        }
+        self.check_shape(row, parent, at)?;
+        self.rows[at] = (row, parent.unwrap_or(PARENT_NONE));
+        self.len = self.len.saturating_add(1);
+        Ok(())
+    }
+
+    /// Whether `row` may be appended at index `at` under `parent`: the one
+    /// rule the builder and the wire decoder both apply, so a menu that
+    /// crossed the wire is exactly a menu that could have been built.
+    fn check_shape(&self, row: AppMenuRow, parent: Option<u8>, at: usize) -> Result<(), Errno> {
+        if let Some(parent) = parent {
+            let parent = usize::from(parent);
+            if parent >= at {
+                return Err(Errno::OutOfRange);
+            }
+            if !matches!(self.rows[parent].0, AppMenuRow::Submenu { .. })
+                || self.rows[parent].1 != PARENT_NONE
+            {
+                return Err(Errno::OutOfRange);
+            }
+        }
+        match row {
+            AppMenuRow::Item { id, label, .. } => {
+                if label.is_empty() {
+                    return Err(Errno::OutOfRange);
+                }
+                if self.rows[..at].iter().any(
+                    |&(held, _)| matches!(held, AppMenuRow::Item { id: held, .. } if held == id),
+                ) {
+                    return Err(Errno::OutOfRange);
+                }
+            }
+            AppMenuRow::Separator => {}
+            AppMenuRow::Submenu { label, .. } => {
+                if label.is_empty() || parent.is_some() {
+                    return Err(Errno::OutOfRange);
+                }
+            }
+            AppMenuRow::About => {
+                if parent.is_some()
+                    || self.rows[..at]
+                        .iter()
+                        .any(|&(held, _)| matches!(held, AppMenuRow::About))
+                {
+                    return Err(Errno::OutOfRange);
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+/// An application's whole icon-bar declaration: where the bar's events
+/// reach it, whether it handles the primary click itself, and its menu.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct AppBar {
+    /// The declaring application's own endpoint the session delivers
+    /// [`WindowEvent::AppBarDefault`] and [`WindowEvent::AppBarMenu`] to.
+    /// Never a reserved endpoint.
+    pub event_endpoint: u64,
+    /// Whether a primary click on the application's slot is delivered to
+    /// the application ([`WindowEvent::AppBarDefault`]).
+    ///
+    /// `false` leaves the click to the session's own default — raise and
+    /// focus the application's most recently used window, and do nothing
+    /// at all when it has none — which is what an application whose slot
+    /// simply fronts one window wants.
+    pub default_action: bool,
+    /// The menu a secondary press on the slot opens. Empty means the
+    /// application offers no menu, which the session honours by opening
+    /// nothing.
+    pub menu: AppMenu,
+}
+
+/// The `parent` byte value meaning "this row is at the top level".
+///
+/// `u8::MAX` rather than zero, so a parent index needs no bias: row 0 is a
+/// legitimate submenu parent and spells itself.
+const PARENT_NONE: u8 = u8::MAX;
 
 /// A validated window title: bounded UTF-8 with no control characters.
 ///
@@ -167,81 +449,19 @@ impl core::fmt::Debug for WindowTitle {
     }
 }
 
-/// A validated taskbar pin/drag bundle-path reference: bounded UTF-8 with
-/// no control characters and no `#` (the resource-reference fragment
-/// separator, so a pinned path can never be mistaken for one).
-///
-/// The path crosses a trust boundary into the session's pin store and drag
-/// routing, so it is validated at construction and again at decode: at
-/// least one and at most [`WINDOW_BUNDLE_PATH_MAX`] bytes, well-formed
-/// UTF-8, no control characters, and no `#` — a malformed path is refused,
-/// never sanitised.
-#[derive(Copy, Clone, Eq, PartialEq)]
-pub struct BundleRef {
-    bytes: [u8; WINDOW_BUNDLE_PATH_MAX],
-    len: u16,
-}
-
-impl BundleRef {
-    /// Build a bundle reference from `text`, validating length and content.
-    ///
-    /// # Errors
-    ///
-    /// * [`Errno::LengthOutOfRange`] — empty, or longer than
-    ///   [`WINDOW_BUNDLE_PATH_MAX`] bytes when UTF-8 encoded.
-    /// * [`Errno::OutOfRange`] — contains a control character or `#`.
-    pub fn new(text: &str) -> Result<Self, Errno> {
-        let len = u16::try_from(text.len()).map_err(|_| Errno::LengthOutOfRange)?;
-        if text.is_empty() || text.len() > WINDOW_BUNDLE_PATH_MAX {
-            return Err(Errno::LengthOutOfRange);
-        }
-        if text.chars().any(|c| char::is_control(c) || c == '#') {
-            return Err(Errno::OutOfRange);
-        }
-        let mut bytes = [0u8; WINDOW_BUNDLE_PATH_MAX];
-        bytes[..text.len()].copy_from_slice(text.as_bytes());
-        Ok(Self { bytes, len })
-    }
-
-    /// The path text.
-    #[must_use]
-    pub fn as_str(&self) -> &str {
-        // The buffer was validated as UTF-8 at construction/decode; an
-        // impossible failure yields the empty path, never a panic.
-        core::str::from_utf8(&self.bytes[..usize::from(self.len)]).unwrap_or("")
-    }
-
-    /// Decode a bundle reference from its fixed-width wire image: one
-    /// length prefix's worth of validated text, with the tail required
-    /// zero.
-    fn from_wire(len: u16, bytes: &[u8; WINDOW_BUNDLE_PATH_MAX]) -> Result<Self, Errno> {
-        let len_usize = usize::from(len);
-        if len_usize == 0 || len_usize > WINDOW_BUNDLE_PATH_MAX {
-            return Err(Errno::LengthOutOfRange);
-        }
-        if bytes[len_usize..].iter().any(|&b| b != 0) {
-            return Err(Errno::BadMagic);
-        }
-        let text = core::str::from_utf8(&bytes[..len_usize]).map_err(|_| Errno::OutOfRange)?;
-        if text.chars().any(|c| char::is_control(c) || c == '#') {
-            return Err(Errno::OutOfRange);
-        }
-        Ok(Self { bytes: *bytes, len })
-    }
-}
-
-impl core::fmt::Debug for BundleRef {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        f.debug_tuple("BundleRef").field(&self.as_str()).finish()
-    }
-}
-
 /// One window-channel operation (`plans/APPWIN.md` AW2).
 ///
 /// Every request acts on the caller's **own** windows: the session derives
 /// ownership from the kernel-attested identity of the in-flight caller,
 /// never from a claimed id, so the window id here is a name, not a
 /// credential.
+// `SetAppBar` carries its whole bounded menu inline: a fixed-frame wire
+// request is `Copy` and allocation-free, so the enum's size is its largest
+// variant's by design. Boxing to equalise the variants would force an
+// allocation into an ABI decode type and drop `Copy` — the wrong trade for a
+// transient per-call request that is encoded and dropped, never stored in
+// bulk — so the size difference is deliberate.
+#[allow(clippy::large_enum_variant)]
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum WindowRequest {
     /// Open a window over the caller's granted frame region: map the
@@ -418,35 +638,6 @@ pub enum WindowRequest {
         /// The requesting app's own window the pick concludes to.
         window_id: u64,
     },
-    /// A user gesture in this window asked to pin `path` to the taskbar
-    /// (`plans/NEW-TASKBAR.md` T7). The session validates that the bundle
-    /// exists and is launchable and adds the pin, replying the outcome as
-    /// the shared status frame: `Errno::AlreadyExists` when the bundle is
-    /// already pinned, `Errno::NoSpace` when the pin store is full, or
-    /// `Errno::PermissionDenied` when the host refuses pinning outright.
-    PinBundle {
-        /// The requesting app's own window the gesture originated in.
-        window: u64,
-        /// The bundle path offered for pinning.
-        path: BundleRef,
-    },
-    /// An app-reference drag naming `path` started in this window; a
-    /// primary release may drop it onto the taskbar's pin strip. The
-    /// session tracks the offer against the window until it is withdrawn
-    /// ([`Self::DragWithdraw`]) or the drop concludes elsewhere.
-    DragOffer {
-        /// The requesting app's own window the drag originated in.
-        window: u64,
-        /// The bundle path being dragged.
-        path: BundleRef,
-    },
-    /// The drag started by a preceding [`Self::DragOffer`] on this window
-    /// was cancelled by the app itself (e.g. the user pressed Escape
-    /// before releasing); disarm the offer without a drop.
-    DragWithdraw {
-        /// The window whose offer is withdrawn.
-        window: u64,
-    },
     /// Set window `window_id`'s backdrop-blur radius, in **logical** pixels
     /// (at most [`WINDOW_BACKDROP_BLUR_MAX_PX`]): the compositor blurs
     /// whatever is already composited behind the window's rectangle before
@@ -479,6 +670,23 @@ pub enum WindowRequest {
     /// gating it would only force every application to guess at facts the
     /// user can see by looking at their monitor.
     QueryDesktop,
+    /// Declare (or re-declare) the calling **application's** presence on
+    /// the desktop's icon bar: where its bar events reach it, whether it
+    /// handles the primary click itself, and the menu a secondary press
+    /// opens.
+    ///
+    /// Scoped to the caller, not to a window — it is the *application*
+    /// that occupies a slot, so the slot outlives any one window and an
+    /// application with no window open at all still has somewhere to be
+    /// clicked. The session keeps the declaration until the calling
+    /// process exits; re-issuing it replaces the previous one whole, which
+    /// is how an application changes a row's enablement or its mark.
+    ///
+    /// It carries no capability: an application asks only to be listed
+    /// under its own attested identity, and the session draws the slot
+    /// from the bundle the kernel attested owns the caller — never from
+    /// anything the caller claims.
+    SetAppBar(AppBar),
 }
 
 /// Wire operation discriminant of [`WindowRequest::Create`].
@@ -491,12 +699,6 @@ const OP_CLOSE: u16 = 3;
 const OP_PICK_FILE: u16 = 4;
 /// Wire operation discriminant of [`WindowRequest::Resize`].
 const OP_RESIZE: u16 = 5;
-/// Wire operation discriminant of [`WindowRequest::PinBundle`].
-const OP_PIN_BUNDLE: u16 = 6;
-/// Wire operation discriminant of [`WindowRequest::DragOffer`].
-const OP_DRAG_OFFER: u16 = 7;
-/// Wire operation discriminant of [`WindowRequest::DragWithdraw`].
-const OP_DRAG_WITHDRAW: u16 = 8;
 /// Wire operation discriminant of [`WindowRequest::QueryDesktop`].
 const OP_QUERY_DESKTOP: u16 = 9;
 /// Wire operation discriminant of [`WindowRequest::SetBackdropBlur`].
@@ -505,6 +707,8 @@ const OP_SET_BACKDROP_BLUR: u16 = 10;
 const OP_CREATE_POPUP: u16 = 11;
 /// Wire operation discriminant of [`WindowRequest::SetTitle`].
 const OP_SET_TITLE: u16 = 12;
+/// Wire operation discriminant of [`WindowRequest::SetAppBar`].
+const OP_SET_APP_BAR: u16 = 13;
 
 /// Byte offset, within the fixed frame, of a [`WindowRequest::CreatePopup`]
 /// operand tail that follows the shared frame-layout block: the parent
@@ -535,12 +739,6 @@ const CREATE_MIN_HEIGHT_OFFSET: usize = CREATE_MIN_WIDTH_OFFSET + 4;
 /// First reserved byte after a [`WindowRequest::Create`] operand block.
 const CREATE_RESERVED_FROM: usize = CREATE_MIN_HEIGHT_OFFSET + 4;
 
-/// Byte offset, within the fixed frame, of a bundle-path payload's
-/// length-prefixed text — shared by [`WindowRequest::PinBundle`] and
-/// [`WindowRequest::DragOffer`], which carry an identical window id +
-/// path shape.
-const BUNDLE_PATH_OFFSET: usize = 18;
-
 /// Byte offset, within the fixed frame, of a [`WindowRequest::SetTitle`]
 /// title length, immediately after the window id it retitles.
 const SET_TITLE_LEN_OFFSET: usize = 16;
@@ -549,12 +747,64 @@ const SET_TITLE_TEXT_OFFSET: usize = SET_TITLE_LEN_OFFSET + 1;
 /// First reserved byte after a [`WindowRequest::SetTitle`] operand block.
 const SET_TITLE_RESERVED_FROM: usize = SET_TITLE_TEXT_OFFSET + WINDOW_TITLE_MAX;
 
+/// Byte offset, within the fixed frame, of a
+/// [`WindowRequest::SetAppBar`]'s flag byte, immediately after the event
+/// endpoint it routes to.
+const APP_BAR_FLAGS_OFFSET: usize = 16;
+/// Byte offset of a [`WindowRequest::SetAppBar`]'s declared row count.
+const APP_BAR_ROW_COUNT_OFFSET: usize = APP_BAR_FLAGS_OFFSET + 1;
+/// Byte offset of the first of a [`WindowRequest::SetAppBar`]'s
+/// [`APP_MENU_MAX_ROWS`] fixed-width row records.
+const APP_BAR_ROWS_OFFSET: usize = APP_BAR_ROW_COUNT_OFFSET + 1;
+/// Encoded size, in bytes, of one icon-bar menu row: its kind, flag byte,
+/// parent, label length, and item id, then its fixed-width label field.
+const APP_MENU_ROW_WIRE_LEN: usize = APP_MENU_ROW_LABEL_OFFSET + APP_MENU_LABEL_MAX;
+/// Byte offset, within one icon-bar menu row record, of its flag byte.
+const APP_MENU_ROW_FLAGS_OFFSET: usize = 1;
+/// Byte offset, within one row record, of the 0-based index of the submenu
+/// row that owns it ([`PARENT_NONE`] at the top level).
+const APP_MENU_ROW_PARENT_OFFSET: usize = 2;
+/// Byte offset, within one row record, of its label's length prefix.
+const APP_MENU_ROW_LABEL_LEN_OFFSET: usize = 3;
+/// Byte offset, within one row record, of its item id.
+const APP_MENU_ROW_ID_OFFSET: usize = 4;
+/// Byte offset, within one row record, of its fixed-width label text.
+const APP_MENU_ROW_LABEL_OFFSET: usize = APP_MENU_ROW_ID_OFFSET + 2;
+/// First reserved byte after a [`WindowRequest::SetAppBar`] operand block.
+const APP_BAR_RESERVED_FROM: usize =
+    APP_BAR_ROWS_OFFSET + APP_MENU_MAX_ROWS * APP_MENU_ROW_WIRE_LEN;
+
+/// The only flag bit [`WindowRequest::SetAppBar`]'s flag byte defines:
+/// the application handles the primary click itself.
+const APP_BAR_FLAG_DEFAULT_ACTION: u8 = 1 << 0;
+/// Bit of an icon-bar menu row's flag byte meaning "this row is enabled".
+const APP_MENU_ROW_FLAG_ENABLED: u8 = 1 << 0;
+/// Bits of an icon-bar menu row's flag byte holding its [`AppMenuMark`].
+const APP_MENU_ROW_MARK_MASK: u8 = 0b110;
+/// Bit position of [`APP_MENU_ROW_MARK_MASK`] within the flag byte.
+const APP_MENU_ROW_MARK_SHIFT: u32 = 1;
+
+/// Wire kind of [`AppMenuRow::Item`].
+const APP_MENU_KIND_ITEM: u8 = 1;
+/// Wire kind of [`AppMenuRow::Separator`].
+const APP_MENU_KIND_SEPARATOR: u8 = 2;
+/// Wire kind of [`AppMenuRow::Submenu`].
+const APP_MENU_KIND_SUBMENU: u8 = 3;
+/// Wire kind of [`AppMenuRow::About`].
+const APP_MENU_KIND_ABOUT: u8 = 4;
+
 impl WindowRequest {
-    /// Encoded size on the wire: magic (4), version (2), op (2), and a
-    /// 522-byte operation block whose unused tail must be zero (a pin/drag
-    /// bundle path is now the widest: an 8-byte window id, a 2-byte
-    /// length, and up to [`WINDOW_BUNDLE_PATH_MAX`] path bytes).
-    pub const WIRE_LEN: usize = 4 + 2 + 2 + 8 + 2 + WINDOW_BUNDLE_PATH_MAX;
+    /// Encoded size on the wire: magic (4), version (2), op (2), and one
+    /// operation block whose unused tail must be zero. Sized to the widest
+    /// block any operation carries — [`Self::SetAppBar`]'s icon-bar
+    /// declaration, whose bounded menu is the largest — so every operation
+    /// shares one frame shape and a short operation's tail is checked,
+    /// never trusted.
+    pub const WIRE_LEN: usize = if CREATE_RESERVED_FROM > APP_BAR_RESERVED_FROM {
+        CREATE_RESERVED_FROM
+    } else {
+        APP_BAR_RESERVED_FROM
+    };
 
     /// Encode `self` little-endian.
     #[must_use]
@@ -578,11 +828,9 @@ impl WindowRequest {
             Self::PickFile { .. } => OP_PICK_FILE,
             Self::Resize { .. } => OP_RESIZE,
             Self::SetTitle { .. } => OP_SET_TITLE,
-            Self::PinBundle { .. } => OP_PIN_BUNDLE,
-            Self::DragOffer { .. } => OP_DRAG_OFFER,
-            Self::DragWithdraw { .. } => OP_DRAG_WITHDRAW,
             Self::SetBackdropBlur { .. } => OP_SET_BACKDROP_BLUR,
             Self::QueryDesktop => OP_QUERY_DESKTOP,
+            Self::SetAppBar(_) => OP_SET_APP_BAR,
         }
     }
 
@@ -653,10 +901,6 @@ impl WindowRequest {
                 .write_to(out);
             }
             Self::SetTitle { window_id, title } => encode_set_title(out, window_id, &title),
-            Self::PinBundle { window, path } | Self::DragOffer { window, path } => {
-                encode_bundle_path(out, window, &path);
-            }
-            Self::DragWithdraw { window } => put_u64(out, 8, window),
             Self::SetBackdropBlur {
                 window_id,
                 radius_px,
@@ -665,6 +909,7 @@ impl WindowRequest {
                 put_u16(out, 16, radius_px);
             }
             Self::QueryDesktop => {}
+            Self::SetAppBar(ref bar) => write_app_bar(out, bar),
         }
     }
 
@@ -718,19 +963,17 @@ impl WindowRequest {
     /// # Errors
     ///
     /// * [`Errno::BufferTooSmall`] — `bytes` cannot hold a whole request.
-    /// * [`Errno::BadMagic`] — wrong magic, a dirty reserved tail, a dirty
-    ///   title tail, or a dirty bundle-path tail.
+    /// * [`Errno::BadMagic`] — wrong magic, a dirty reserved tail, or a
+    ///   dirty title tail.
     /// * [`Errno::AbiVersionUnsupported`] — not `window-v1`.
     /// * [`Errno::OutOfRange`] — an operation or pixel format outside the
-    ///   closed set, a malformed title, a zero window id, a reserved event
-    ///   endpoint, or a bundle path that is not UTF-8 or holds a control
-    ///   character or `#`.
+    ///   closed set, a malformed title, a zero window id, or a reserved
+    ///   event endpoint.
     /// * [`Errno::LengthOutOfRange`] — a frame count outside
     ///   `1..=WINDOW_MAX_FRAMES`, a zero-extent geometry, a stride too
     ///   small for one scanline, an over-long title length, a minimum
     ///   client size declared by a window that is not resizable, an empty
-    ///   damage rectangle, a bundle-path length outside
-    ///   `1..=WINDOW_BUNDLE_PATH_MAX`, or a backdrop-blur radius above
+    ///   damage rectangle, or a backdrop-blur radius above
     ///   [`WINDOW_BACKDROP_BLUR_MAX_PX`].
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, Errno> {
         if bytes.len() < Self::WIRE_LEN {
@@ -791,19 +1034,7 @@ impl WindowRequest {
                 })
             }
             OP_SET_TITLE => read_set_title(bytes),
-            OP_PIN_BUNDLE => {
-                let (window, path) = read_bundle_path(bytes)?;
-                Ok(Self::PinBundle { window, path })
-            }
-            OP_DRAG_OFFER => {
-                let (window, path) = read_bundle_path(bytes)?;
-                Ok(Self::DragOffer { window, path })
-            }
-            OP_DRAG_WITHDRAW => {
-                reserved_zero(bytes, 16)?;
-                let window = nonzero_window_id(read_u64(bytes, 8))?;
-                Ok(Self::DragWithdraw { window })
-            }
+            OP_SET_APP_BAR => read_app_bar(bytes),
             OP_SET_BACKDROP_BLUR => {
                 reserved_zero(bytes, 18)?;
                 let window_id = nonzero_window_id(read_u64(bytes, 8))?;
@@ -838,6 +1069,138 @@ fn read_set_title(bytes: &[u8]) -> Result<WindowRequest, Errno> {
     Ok(WindowRequest::SetTitle { window_id, title })
 }
 
+/// Write an icon-bar declaration's operand block: the event route, the flag
+/// byte, the declared row count, and one fixed-width record per row
+/// (mirrors [`read_app_bar`]). Rows past the declared count stay zero, so
+/// one menu has exactly one encoding.
+fn write_app_bar(out: &mut [u8; WindowRequest::WIRE_LEN], bar: &AppBar) {
+    put_u64(out, 8, bar.event_endpoint);
+    out[APP_BAR_FLAGS_OFFSET] = if bar.default_action {
+        APP_BAR_FLAG_DEFAULT_ACTION
+    } else {
+        0
+    };
+    out[APP_BAR_ROW_COUNT_OFFSET] = bar.menu.len;
+    for (index, (row, parent)) in bar.menu.rows().enumerate() {
+        let at = APP_BAR_ROWS_OFFSET + index * APP_MENU_ROW_WIRE_LEN;
+        let (kind, enabled, mark, id, label) = match row {
+            AppMenuRow::Item {
+                id,
+                label,
+                enabled,
+                mark,
+            } => (APP_MENU_KIND_ITEM, enabled, mark, id.get(), Some(label)),
+            AppMenuRow::Separator => (APP_MENU_KIND_SEPARATOR, false, AppMenuMark::None, 0, None),
+            AppMenuRow::Submenu { label, enabled } => (
+                APP_MENU_KIND_SUBMENU,
+                enabled,
+                AppMenuMark::None,
+                0,
+                Some(label),
+            ),
+            AppMenuRow::About => (APP_MENU_KIND_ABOUT, false, AppMenuMark::None, 0, None),
+        };
+        out[at] = kind;
+        out[at + APP_MENU_ROW_FLAGS_OFFSET] = (u8::from(enabled) * APP_MENU_ROW_FLAG_ENABLED)
+            | ((mark as u8) << APP_MENU_ROW_MARK_SHIFT);
+        // A parent index names an earlier row of a menu bounded to
+        // `APP_MENU_MAX_ROWS`, so it always fits a byte; the builder refused
+        // anything wider before it reached the array.
+        out[at + APP_MENU_ROW_PARENT_OFFSET] = parent
+            .and_then(|parent| u8::try_from(parent).ok())
+            .unwrap_or(PARENT_NONE);
+        put_u16(out, at + APP_MENU_ROW_ID_OFFSET, id);
+        if let Some(label) = label {
+            out[at + APP_MENU_ROW_LABEL_LEN_OFFSET] = label.len_byte();
+            let text = at + APP_MENU_ROW_LABEL_OFFSET;
+            out[text..text + APP_MENU_LABEL_MAX].copy_from_slice(label.raw_bytes());
+        }
+    }
+}
+
+/// Decode an icon-bar declaration, refusing anything a builder could not
+/// have produced (mirrors [`write_app_bar`]).
+///
+/// Every row goes through the same [`AppMenu::push_row`] shape rule the
+/// builder applies, so a menu that crossed the wire is exactly a menu an
+/// application could have constructed — there is no second, weaker set of
+/// rules on the receiving side.
+fn read_app_bar(bytes: &[u8]) -> Result<WindowRequest, Errno> {
+    reserved_zero(bytes, APP_BAR_RESERVED_FROM)?;
+    let event_endpoint = read_u64(bytes, 8);
+    if crate::ipc::is_reserved_endpoint(event_endpoint) {
+        return Err(Errno::OutOfRange);
+    }
+    let flags = bytes[APP_BAR_FLAGS_OFFSET];
+    if flags & !APP_BAR_FLAG_DEFAULT_ACTION != 0 {
+        return Err(Errno::OutOfRange);
+    }
+    let count = usize::from(bytes[APP_BAR_ROW_COUNT_OFFSET]);
+    if count > APP_MENU_MAX_ROWS {
+        return Err(Errno::LengthOutOfRange);
+    }
+    let rows_from = APP_BAR_ROWS_OFFSET + count * APP_MENU_ROW_WIRE_LEN;
+    if bytes[rows_from..APP_BAR_RESERVED_FROM]
+        .iter()
+        .any(|&b| b != 0)
+    {
+        return Err(Errno::BadMagic);
+    }
+    let mut menu = AppMenu::EMPTY;
+    for index in 0..count {
+        let at = APP_BAR_ROWS_OFFSET + index * APP_MENU_ROW_WIRE_LEN;
+        let (row, parent) = read_app_menu_row(&bytes[at..at + APP_MENU_ROW_WIRE_LEN])?;
+        menu.push_row(row, parent)?;
+    }
+    Ok(WindowRequest::SetAppBar(AppBar {
+        event_endpoint,
+        default_action: flags & APP_BAR_FLAG_DEFAULT_ACTION != 0,
+        menu,
+    }))
+}
+
+/// Decode one fixed-width icon-bar menu row record and the parent it names.
+///
+/// A field a row's kind does not use must be zero, so a row has exactly one
+/// encoding and a client cannot smuggle bytes through an ignored field.
+fn read_app_menu_row(record: &[u8]) -> Result<(AppMenuRow, Option<u8>), Errno> {
+    let flags = record[APP_MENU_ROW_FLAGS_OFFSET];
+    if flags & !(APP_MENU_ROW_FLAG_ENABLED | APP_MENU_ROW_MARK_MASK) != 0 {
+        return Err(Errno::OutOfRange);
+    }
+    let enabled = flags & APP_MENU_ROW_FLAG_ENABLED != 0;
+    let mark = AppMenuMark::from_u8((flags & APP_MENU_ROW_MARK_MASK) >> APP_MENU_ROW_MARK_SHIFT)?;
+    let parent = match record[APP_MENU_ROW_PARENT_OFFSET] {
+        PARENT_NONE => None,
+        parent => Some(parent),
+    };
+    let id = read_u16(record, APP_MENU_ROW_ID_OFFSET);
+    let mut label_bytes = [0u8; APP_MENU_LABEL_MAX];
+    label_bytes.copy_from_slice(
+        &record[APP_MENU_ROW_LABEL_OFFSET..APP_MENU_ROW_LABEL_OFFSET + APP_MENU_LABEL_MAX],
+    );
+    let label = AppMenuLabel::from_wire(record[APP_MENU_ROW_LABEL_LEN_OFFSET], &label_bytes)?;
+    let unlabelled = label.is_empty() && !enabled && mark == AppMenuMark::None && id == 0;
+    let row = match record[0] {
+        APP_MENU_KIND_ITEM => AppMenuRow::Item {
+            id: AppMenuItemId::new(id)?,
+            label,
+            enabled,
+            mark,
+        },
+        APP_MENU_KIND_SEPARATOR if unlabelled => AppMenuRow::Separator,
+        APP_MENU_KIND_SUBMENU if mark == AppMenuMark::None && id == 0 => {
+            AppMenuRow::Submenu { label, enabled }
+        }
+        APP_MENU_KIND_ABOUT if unlabelled => AppMenuRow::About,
+        APP_MENU_KIND_SEPARATOR | APP_MENU_KIND_SUBMENU | APP_MENU_KIND_ABOUT => {
+            return Err(Errno::OutOfRange)
+        }
+        _ => return Err(Errno::OutOfRange),
+    };
+    Ok((row, parent))
+}
+
 /// Write `title` into the fixed-width title field whose length byte sits at
 /// `len_at` and whose text follows it.
 ///
@@ -854,32 +1217,6 @@ fn encode_title(out: &mut [u8], len_at: usize, title: &WindowTitle) {
 fn encode_set_title(out: &mut [u8; WindowRequest::WIRE_LEN], window_id: u64, title: &WindowTitle) {
     put_u64(out, 8, window_id);
     encode_title(out, SET_TITLE_LEN_OFFSET, title);
-}
-
-/// Encode the window id + bundle-path payload [`WindowRequest::PinBundle`]
-/// and [`WindowRequest::DragOffer`] share verbatim (mirrors
-/// [`read_bundle_path`]): the path fills the rest of the fixed frame, so
-/// there is no separate reserved tail to zero.
-fn encode_bundle_path(out: &mut [u8; WindowRequest::WIRE_LEN], window: u64, path: &BundleRef) {
-    put_u64(out, 8, window);
-    put_u16(out, 16, path.len);
-    out[BUNDLE_PATH_OFFSET..BUNDLE_PATH_OFFSET + WINDOW_BUNDLE_PATH_MAX]
-        .copy_from_slice(&path.bytes);
-}
-
-/// Decode the window id + [`BundleRef`] payload [`WindowRequest::PinBundle`]
-/// and [`WindowRequest::DragOffer`] share verbatim at the same wire offsets:
-/// an owning window id followed by a length-prefixed bundle path filling
-/// the rest of the fixed frame. The one definition both request arms share,
-/// so the path bounds can never diverge between pinning and dragging.
-fn read_bundle_path(bytes: &[u8]) -> Result<(u64, BundleRef), Errno> {
-    let window = nonzero_window_id(read_u64(bytes, 8))?;
-    let path_len = read_u16(bytes, 16);
-    let mut path_bytes = [0u8; WINDOW_BUNDLE_PATH_MAX];
-    path_bytes
-        .copy_from_slice(&bytes[BUNDLE_PATH_OFFSET..BUNDLE_PATH_OFFSET + WINDOW_BUNDLE_PATH_MAX]);
-    let path = BundleRef::from_wire(path_len, &path_bytes)?;
-    Ok((window, path))
 }
 
 /// Decode the operands of a [`WindowRequest::Create`]: the granted region
@@ -1152,6 +1489,10 @@ const EV_REDRAW_REQUESTED: u16 = 10;
 const EV_DESKTOP_CHANGED: u16 = 11;
 /// Wire event discriminant of [`WindowEvent::AlternateCloseRequested`].
 const EV_ALTERNATE_CLOSE_REQUESTED: u16 = 12;
+/// Wire kind of [`WindowEvent::AppBarDefault`].
+const EV_APP_BAR_DEFAULT: u16 = 13;
+/// Wire kind of [`WindowEvent::AppBarMenu`].
+const EV_APP_BAR_MENU: u16 = 14;
 
 /// Wire pointer-action discriminant of [`PointerAction::Moved`].
 const PTR_MOVED: u16 = 0;
@@ -1335,6 +1676,24 @@ pub enum WindowEvent {
         /// The desktop as it now is.
         desktop: DesktopInfo,
     },
+    /// A primary click landed on the application's icon-bar slot, and the
+    /// application declared that it handles that click itself
+    /// ([`AppBar::default_action`]).
+    ///
+    /// Addressed to the **application**, not to a window: an application
+    /// whose default action is "open a new window" has no window to
+    /// address it to. The application decides what the click means.
+    AppBarDefault,
+    /// The user chose a row of the application's own icon-bar menu.
+    ///
+    /// Addressed to the application for the same reason as
+    /// [`Self::AppBarDefault`]. The id is the one the application gave the
+    /// row; the session never interprets it, and never sends an id the
+    /// declaration did not carry.
+    AppBarMenu {
+        /// The chosen row's application-chosen id.
+        item: AppMenuItemId,
+    },
 }
 
 impl WindowEvent {
@@ -1343,9 +1702,12 @@ impl WindowEvent {
     /// (the embedded [`KeyInput`] record is the widest).
     pub const WIRE_LEN: usize = 40;
 
-    /// The window this event addresses.
+    /// The window this event addresses, or `None` for an event addressed
+    /// to the whole application rather than to one of its windows (the
+    /// icon-bar events, which an application with no window open still
+    /// receives).
     #[must_use]
-    pub const fn window_id(&self) -> u64 {
+    pub const fn window_id(&self) -> Option<u64> {
         match *self {
             Self::Focus { window_id, .. }
             | Self::Key { window_id, .. }
@@ -1358,7 +1720,8 @@ impl WindowEvent {
             | Self::Resized { window_id, .. }
             | Self::RedrawRequested { window_id }
             | Self::Scrolled { window_id, .. }
-            | Self::DesktopChanged { window_id, .. } => window_id,
+            | Self::DesktopChanged { window_id, .. } => Some(window_id),
+            Self::AppBarDefault | Self::AppBarMenu { .. } => None,
         }
     }
 
@@ -1368,7 +1731,7 @@ impl WindowEvent {
         let mut out = [0u8; Self::WIRE_LEN];
         put_u32(&mut out, 0, WINDOW_EVENT_MAGIC);
         put_u16(&mut out, 4, WINDOW_VERSION_V1);
-        put_u64(&mut out, 8, self.window_id());
+        put_u64(&mut out, 8, self.window_id().unwrap_or(0));
         match *self {
             Self::Focus { focused, .. } => {
                 put_u16(&mut out, 6, EV_FOCUS);
@@ -1427,6 +1790,13 @@ impl WindowEvent {
             Self::RedrawRequested { .. } => {
                 put_u16(&mut out, 6, EV_REDRAW_REQUESTED);
             }
+            Self::AppBarDefault => {
+                put_u16(&mut out, 6, EV_APP_BAR_DEFAULT);
+            }
+            Self::AppBarMenu { item } => {
+                put_u16(&mut out, 6, EV_APP_BAR_MENU);
+                put_u16(&mut out, 16, item.get());
+            }
         }
         out
     }
@@ -1440,7 +1810,9 @@ impl WindowEvent {
     ///   malformed embedded key record.
     /// * [`Errno::AbiVersionUnsupported`] — not `window-v1`.
     /// * [`Errno::OutOfRange`] — an event kind, focus flag, pointer
-    ///   action, or button outside the closed set, or a zero window id.
+    ///   action, or button outside the closed set, a zero window id on a
+    ///   window-scoped event, a non-zero one on an application-scoped
+    ///   event, or a zero icon-bar menu item id.
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, Errno> {
         if bytes.len() < Self::WIRE_LEN {
             return Err(Errno::BufferTooSmall);
@@ -1452,6 +1824,12 @@ impl WindowEvent {
             return Err(Errno::AbiVersionUnsupported);
         }
         let kind = read_u16(bytes, 6);
+        // The icon-bar events address the application, not a window, so
+        // their window-id field must be zero: a non-zero one would be a
+        // second, contradictory addressing of the same event.
+        if let Some(event) = read_app_scoped_event(kind, bytes) {
+            return event;
+        }
         let window_id = nonzero_window_id(read_u64(bytes, 8))?;
         if let Some(event) = read_id_only_event(kind, window_id, bytes) {
             return event;
@@ -1535,6 +1913,36 @@ impl WindowEvent {
     }
 }
 
+/// Decode an event addressed to the whole application rather than to one
+/// of its windows, or `None` when `kind` names a window-scoped event.
+///
+/// The window-id field must be zero: an icon-bar event names no window, and
+/// a non-zero field would be a second, contradictory addressing of it.
+fn read_app_scoped_event(kind: u16, bytes: &[u8]) -> Option<Result<WindowEvent, Errno>> {
+    let event = match kind {
+        EV_APP_BAR_DEFAULT => {
+            if let Err(err) = event_reserved_zero(bytes, 16) {
+                return Some(Err(err));
+            }
+            WindowEvent::AppBarDefault
+        }
+        EV_APP_BAR_MENU => {
+            if let Err(err) = event_reserved_zero(bytes, 18) {
+                return Some(Err(err));
+            }
+            match AppMenuItemId::new(read_u16(bytes, 16)) {
+                Ok(item) => WindowEvent::AppBarMenu { item },
+                Err(err) => return Some(Err(err)),
+            }
+        }
+        _ => return None,
+    };
+    if read_u64(bytes, 8) != 0 {
+        return Some(Err(Errno::OutOfRange));
+    }
+    Some(Ok(event))
+}
+
 /// Decode an event whose whole payload is its window id, or `None` when
 /// `kind` names an event that carries more than that.
 ///
@@ -1570,10 +1978,12 @@ fn event_reserved_zero(bytes: &[u8], from: usize) -> Result<(), Errno> {
 mod tests {
     use super::{
         decode_create_reply, decode_desktop_reply, encode_create_reply, encode_desktop_reply,
-        BundleRef, PointerAction, WindowEvent, WindowRequest, WindowTitle,
-        CREATE_MIN_HEIGHT_OFFSET, CREATE_MIN_WIDTH_OFFSET, CREATE_RESERVED_FROM,
-        CREATE_RESIZABLE_OFFSET, SET_TITLE_LEN_OFFSET, SET_TITLE_RESERVED_FROM,
-        SET_TITLE_TEXT_OFFSET, WINDOW_BACKDROP_BLUR_MAX_PX, WINDOW_BUNDLE_PATH_MAX,
+        AppBar, AppMenu, AppMenuItemId, AppMenuLabel, AppMenuMark, AppMenuRow, PointerAction,
+        WindowEvent, WindowRequest, WindowTitle, APP_BAR_FLAGS_OFFSET, APP_BAR_RESERVED_FROM,
+        APP_BAR_ROWS_OFFSET, APP_BAR_ROW_COUNT_OFFSET, APP_MENU_LABEL_MAX, APP_MENU_MAX_ROWS,
+        APP_MENU_ROW_WIRE_LEN, CREATE_MIN_HEIGHT_OFFSET, CREATE_MIN_WIDTH_OFFSET,
+        CREATE_RESERVED_FROM, CREATE_RESIZABLE_OFFSET, SET_TITLE_LEN_OFFSET,
+        SET_TITLE_RESERVED_FROM, SET_TITLE_TEXT_OFFSET, WINDOW_BACKDROP_BLUR_MAX_PX,
         WINDOW_CREATE_REPLY_LEN, WINDOW_DESKTOP_REPLY_LEN, WINDOW_ENDPOINT, WINDOW_EVENT_MAGIC,
         WINDOW_MAX_FRAMES, WINDOW_REQUEST_MAGIC, WINDOW_TITLE_MAX,
     };
@@ -1678,33 +2088,84 @@ mod tests {
         );
     }
 
-    #[test]
-    fn bundle_refs_validate_length_and_content() {
-        let widest = "p".repeat(WINDOW_BUNDLE_PATH_MAX);
-        assert_eq!(
-            BundleRef::new(&widest).expect("max length fits").as_str(),
-            widest
-        );
-        assert_eq!(BundleRef::new("").unwrap_err(), Errno::LengthOutOfRange);
-        let over = "p".repeat(WINDOW_BUNDLE_PATH_MAX + 1);
-        assert_eq!(BundleRef::new(&over).unwrap_err(), Errno::LengthOutOfRange);
-        assert_eq!(
-            BundleRef::new("/Apps/bad\x1bescape.app").unwrap_err(),
-            Errno::OutOfRange
-        );
-        assert_eq!(
-            BundleRef::new("/Apps/two\nlines.app").unwrap_err(),
-            Errno::OutOfRange
-        );
-        assert_eq!(
-            BundleRef::new("/Apps/frag#ment.app").unwrap_err(),
-            Errno::OutOfRange
-        );
+    /// A menu with one row of every kind, a submenu holding two of them,
+    /// and every marking — the shape the wire tests exercise.
+    fn sample_menu() -> AppMenu {
+        let mut menu = AppMenu::EMPTY;
+        menu.push(AppMenuRow::Item {
+            id: AppMenuItemId::new(1).expect("a valid id"),
+            label: AppMenuLabel::new("New window").expect("a valid label"),
+            enabled: true,
+            mark: AppMenuMark::None,
+        })
+        .expect("room for the first row");
+        menu.push(AppMenuRow::Submenu {
+            label: AppMenuLabel::new("Display").expect("a valid label"),
+            enabled: true,
+        })
+        .expect("room for a submenu");
+        menu.push_under(
+            AppMenuRow::Item {
+                id: AppMenuItemId::new(2).expect("a valid id"),
+                label: AppMenuLabel::new("Full screen").expect("a valid label"),
+                enabled: true,
+                mark: AppMenuMark::Check,
+            },
+            1,
+        )
+        .expect("room inside the submenu");
+        menu.push_under(AppMenuRow::Separator, 1)
+            .expect("a separator inside a submenu");
+        menu.push_under(
+            AppMenuRow::Item {
+                id: AppMenuItemId::new(3).expect("a valid id"),
+                label: AppMenuLabel::new("Green").expect("a valid label"),
+                enabled: false,
+                mark: AppMenuMark::Radio,
+            },
+            1,
+        )
+        .expect("room inside the submenu");
+        menu.push(AppMenuRow::Separator).expect("a separator");
+        menu.push(AppMenuRow::About).expect("an About row");
+        menu.push(AppMenuRow::Item {
+            id: AppMenuItemId::new(4).expect("a valid id"),
+            label: AppMenuLabel::new("Quit").expect("a valid label"),
+            enabled: true,
+            mark: AppMenuMark::None,
+        })
+        .expect("room for Quit");
+        menu
+    }
+
+    /// The sample declaration: the sample menu, delivered to a plain
+    /// (non-reserved) endpoint, with the application handling the click.
+    fn sample_app_bar() -> AppBar {
+        AppBar {
+            event_endpoint: 0xE117_0000_0000_0009,
+            default_action: true,
+            menu: sample_menu(),
+        }
+    }
+
+    /// A full menu of widest-label rows — the frame's own upper bound.
+    fn widest_menu() -> AppMenu {
+        let mut menu = AppMenu::EMPTY;
+        let label = AppMenuLabel::new(&"l".repeat(APP_MENU_LABEL_MAX)).expect("the widest label");
+        for id in 1..=APP_MENU_MAX_ROWS {
+            menu.push(AppMenuRow::Item {
+                id: AppMenuItemId::new(u16::try_from(id).expect("fits")).expect("a valid id"),
+                label,
+                enabled: true,
+                mark: AppMenuMark::None,
+            })
+            .expect("room for every row");
+        }
+        menu
     }
 
     #[test]
     fn requests_round_trip() {
-        let widest_path = BundleRef::new(&"p".repeat(WINDOW_BUNDLE_PATH_MAX)).expect("max path");
         for request in [
             sample_create(),
             sample_create_popup(),
@@ -1728,23 +2189,6 @@ mod tests {
                 window_id: 3,
                 title: WindowTitle::new(&"t".repeat(WINDOW_TITLE_MAX)).expect("the widest title"),
             },
-            WindowRequest::PinBundle {
-                window: 5,
-                path: BundleRef::new("/Apps/Editor.app").expect("a valid path"),
-            },
-            WindowRequest::PinBundle {
-                window: 5,
-                path: widest_path,
-            },
-            WindowRequest::DragOffer {
-                window: 5,
-                path: BundleRef::new("/Apps/Editor.app").expect("a valid path"),
-            },
-            WindowRequest::DragOffer {
-                window: 5,
-                path: widest_path,
-            },
-            WindowRequest::DragWithdraw { window: 5 },
             WindowRequest::SetBackdropBlur {
                 window_id: 5,
                 radius_px: 0,
@@ -1753,10 +2197,170 @@ mod tests {
                 window_id: 5,
                 radius_px: WINDOW_BACKDROP_BLUR_MAX_PX,
             },
+            WindowRequest::SetAppBar(AppBar {
+                event_endpoint: 0xE117_0000_0000_0009,
+                default_action: false,
+                menu: AppMenu::EMPTY,
+            }),
+            WindowRequest::SetAppBar(sample_app_bar()),
+            WindowRequest::SetAppBar(AppBar {
+                event_endpoint: 0xE117_0000_0000_0009,
+                default_action: true,
+                menu: widest_menu(),
+            }),
         ] {
             let bytes = request.to_le_bytes();
             assert_eq!(WindowRequest::from_bytes(&bytes), Ok(request));
         }
+    }
+
+    #[test]
+    fn app_menus_refuse_a_shape_no_menu_can_have() {
+        let label = AppMenuLabel::new("Row").expect("a valid label");
+        let item = |id| AppMenuRow::Item {
+            id: AppMenuItemId::new(id).expect("a valid id"),
+            label,
+            enabled: true,
+            mark: AppMenuMark::None,
+        };
+
+        // A zero item id names no row.
+        assert_eq!(AppMenuItemId::new(0), Err(Errno::OutOfRange));
+
+        // A labelled row must carry a label; a separator and an About row
+        // must not (their text is not the application's to write).
+        let mut menu = AppMenu::EMPTY;
+        assert_eq!(
+            menu.push(AppMenuRow::Item {
+                id: AppMenuItemId::new(1).expect("a valid id"),
+                label: AppMenuLabel::new("").expect("the empty label"),
+                enabled: true,
+                mark: AppMenuMark::None,
+            }),
+            Err(Errno::OutOfRange)
+        );
+        assert_eq!(
+            menu.push(AppMenuRow::Submenu {
+                label: AppMenuLabel::new("").expect("the empty label"),
+                enabled: true,
+            }),
+            Err(Errno::OutOfRange)
+        );
+
+        // A duplicate item id would make an outcome ambiguous.
+        menu.push(item(1)).expect("the first row");
+        assert_eq!(menu.push(item(1)), Err(Errno::OutOfRange));
+
+        // At most one About row: two info panels mean nothing.
+        menu.push(AppMenuRow::About).expect("the About row");
+        assert_eq!(menu.push(AppMenuRow::About), Err(Errno::OutOfRange));
+
+        // A parent must name an earlier submenu row, and nesting is one
+        // level: neither a submenu nor an About row goes inside one.
+        assert_eq!(menu.push_under(item(2), 0), Err(Errno::OutOfRange));
+        assert_eq!(menu.push_under(item(2), 9), Err(Errno::OutOfRange));
+        menu.push(AppMenuRow::Submenu {
+            label,
+            enabled: true,
+        })
+        .expect("a submenu");
+        let submenu = menu.len() - 1;
+        assert_eq!(
+            menu.push_under(
+                AppMenuRow::Submenu {
+                    label,
+                    enabled: true
+                },
+                submenu
+            ),
+            Err(Errno::OutOfRange)
+        );
+        assert_eq!(
+            menu.push_under(AppMenuRow::About, submenu),
+            Err(Errno::OutOfRange)
+        );
+        menu.push_under(item(2), submenu).expect("a row inside it");
+
+        // The row bound is a format bound: the menu fills and refuses.
+        let mut full = AppMenu::EMPTY;
+        for id in 1..=APP_MENU_MAX_ROWS {
+            full.push(item(u16::try_from(id).expect("fits")))
+                .expect("room");
+        }
+        assert_eq!(full.len(), APP_MENU_MAX_ROWS);
+        assert_eq!(full.push(item(u16::MAX)), Err(Errno::NoSpace));
+    }
+
+    #[test]
+    fn set_app_bar_refuses_every_malformed_frame() {
+        let base = WindowRequest::SetAppBar(sample_app_bar()).to_le_bytes();
+
+        // The event route may not be a reserved (system-served) endpoint:
+        // an application cannot ask for its bar events to be delivered to
+        // one of the desktop's own rendezvous.
+        let mut reserved = base;
+        reserved[8..16].copy_from_slice(&WINDOW_ENDPOINT.to_le_bytes());
+        assert_eq!(WindowRequest::from_bytes(&reserved), Err(Errno::OutOfRange));
+
+        // Undefined flag bits are refused rather than ignored.
+        let mut flags = base;
+        flags[APP_BAR_FLAGS_OFFSET] |= 0b10;
+        assert_eq!(WindowRequest::from_bytes(&flags), Err(Errno::OutOfRange));
+
+        // A row count past the bound is refused.
+        let mut over = base;
+        over[APP_BAR_ROW_COUNT_OFFSET] = u8::try_from(APP_MENU_MAX_ROWS + 1).expect("fits");
+        assert_eq!(
+            WindowRequest::from_bytes(&over),
+            Err(Errno::LengthOutOfRange)
+        );
+
+        // Bytes in a row record past the declared count must be zero, so a
+        // menu has exactly one encoding and nothing rides along unread.
+        let mut trailing = base;
+        let declared = usize::from(base[APP_BAR_ROW_COUNT_OFFSET]);
+        trailing[APP_BAR_ROWS_OFFSET + declared * APP_MENU_ROW_WIRE_LEN] = 1;
+        assert_eq!(WindowRequest::from_bytes(&trailing), Err(Errno::BadMagic));
+
+        // The declaration is the widest operand block, so it defines the
+        // frame and has no reserved tail of its own — the zero-past-the-
+        // declared-count check above is its whole tail.
+        assert_eq!(APP_BAR_RESERVED_FROM, WindowRequest::WIRE_LEN);
+
+        // An unknown row kind, an undefined row flag bit, and the unused
+        // mark encoding are each refused.
+        let mut kind = base;
+        kind[APP_BAR_ROWS_OFFSET] = 0;
+        assert_eq!(WindowRequest::from_bytes(&kind), Err(Errno::OutOfRange));
+        let mut row_flags = base;
+        row_flags[APP_BAR_ROWS_OFFSET + 1] |= 0b1000;
+        assert_eq!(
+            WindowRequest::from_bytes(&row_flags),
+            Err(Errno::OutOfRange)
+        );
+        let mut mark = base;
+        mark[APP_BAR_ROWS_OFFSET + 1] |= 0b110;
+        assert_eq!(WindowRequest::from_bytes(&mark), Err(Errno::OutOfRange));
+
+        // A field the row's kind does not use must be zero: the separator
+        // at index 5 of the sample menu carries no label, id, or mark.
+        let separator = APP_BAR_ROWS_OFFSET + 5 * APP_MENU_ROW_WIRE_LEN;
+        let mut labelled_separator = base;
+        labelled_separator[separator + 3] = 1;
+        labelled_separator[separator + 6] = b'x';
+        assert_eq!(
+            WindowRequest::from_bytes(&labelled_separator),
+            Err(Errno::OutOfRange)
+        );
+
+        // And a decoded menu obeys exactly the builder's shape rule: a row
+        // claiming a parent that is not an earlier submenu is refused.
+        let mut bad_parent = base;
+        bad_parent[APP_BAR_ROWS_OFFSET + 2] = 0;
+        assert_eq!(
+            WindowRequest::from_bytes(&bad_parent),
+            Err(Errno::OutOfRange)
+        );
     }
 
     #[test]
@@ -1839,70 +2443,6 @@ mod tests {
     }
 
     #[test]
-    fn pin_and_drag_offer_refuse_malformed_ids_and_paths() {
-        let sample_path = BundleRef::new("/Apps/Editor.app").expect("a valid path");
-        for base in [
-            WindowRequest::PinBundle {
-                window: 5,
-                path: sample_path,
-            }
-            .to_le_bytes(),
-            WindowRequest::DragOffer {
-                window: 5,
-                path: sample_path,
-            }
-            .to_le_bytes(),
-        ] {
-            // A zero window id is refused.
-            let mut zero_window = base;
-            zero_window[8..16].copy_from_slice(&0u64.to_le_bytes());
-            assert_eq!(
-                WindowRequest::from_bytes(&zero_window),
-                Err(Errno::OutOfRange)
-            );
-
-            // A zero path length is refused.
-            let mut zero_len = base;
-            zero_len[16..18].copy_from_slice(&0u16.to_le_bytes());
-            assert_eq!(
-                WindowRequest::from_bytes(&zero_len),
-                Err(Errno::LengthOutOfRange)
-            );
-
-            // A path length past the fixed block is refused.
-            let over = u16::try_from(WINDOW_BUNDLE_PATH_MAX + 1).expect("fits a u16");
-            let mut over_len = base;
-            over_len[16..18].copy_from_slice(&over.to_le_bytes());
-            assert_eq!(
-                WindowRequest::from_bytes(&over_len),
-                Err(Errno::LengthOutOfRange)
-            );
-
-            // An embedded control character is refused.
-            let mut control_char = base;
-            control_char[18] = 0x01;
-            assert_eq!(
-                WindowRequest::from_bytes(&control_char),
-                Err(Errno::OutOfRange)
-            );
-
-            // Invalid UTF-8 is refused.
-            let mut invalid_utf8 = base;
-            invalid_utf8[18] = 0xFF;
-            assert_eq!(
-                WindowRequest::from_bytes(&invalid_utf8),
-                Err(Errno::OutOfRange)
-            );
-
-            // A dirty tail past the declared path length is refused.
-            let path_len = usize::from(u16::from_le_bytes([base[16], base[17]]));
-            let mut dirty_tail = base;
-            dirty_tail[18 + path_len] = 1;
-            assert_eq!(WindowRequest::from_bytes(&dirty_tail), Err(Errno::BadMagic));
-        }
-    }
-
-    #[test]
     fn set_title_refuses_a_zero_id_a_malformed_title_and_a_dirty_tail() {
         let base = WindowRequest::SetTitle {
             window_id: 9,
@@ -1946,16 +2486,6 @@ mod tests {
             WindowRequest::from_bytes(&dirty_reserved),
             Err(Errno::BadMagic)
         );
-    }
-
-    #[test]
-    fn drag_withdraw_refuses_a_zero_id_and_a_dirty_tail() {
-        let mut zero_id = WindowRequest::DragWithdraw { window: 9 }.to_le_bytes();
-        zero_id[8..16].copy_from_slice(&0u64.to_le_bytes());
-        assert_eq!(WindowRequest::from_bytes(&zero_id), Err(Errno::OutOfRange));
-        let mut dirty = WindowRequest::DragWithdraw { window: 9 }.to_le_bytes();
-        dirty[16] = 1;
-        assert_eq!(WindowRequest::from_bytes(&dirty), Err(Errno::BadMagic));
     }
 
     #[test]
@@ -2248,7 +2778,7 @@ mod tests {
         };
         let wire = event.to_le_bytes();
         assert_eq!(WindowEvent::from_bytes(&wire), Ok(event));
-        assert_eq!(event.window_id(), 7);
+        assert_eq!(event.window_id(), Some(7));
 
         // The record ends well before the frame does; the tail past it
         // must be zero.
@@ -2426,8 +2956,46 @@ mod tests {
         ] {
             let bytes = event.to_le_bytes();
             assert_eq!(WindowEvent::from_bytes(&bytes), Ok(event));
-            assert_eq!(event.window_id(), 4);
+            assert_eq!(event.window_id(), Some(4));
         }
+    }
+
+    #[test]
+    fn icon_bar_events_round_trip_and_address_no_window() {
+        for event in [
+            WindowEvent::AppBarDefault,
+            WindowEvent::AppBarMenu {
+                item: AppMenuItemId::new(1).expect("a valid id"),
+            },
+            WindowEvent::AppBarMenu {
+                item: AppMenuItemId::new(u16::MAX).expect("a valid id"),
+            },
+        ] {
+            let bytes = event.to_le_bytes();
+            assert_eq!(WindowEvent::from_bytes(&bytes), Ok(event));
+            // The application is the subject, so there is no window to name
+            // — and the wire field stays zero to say exactly that.
+            assert_eq!(event.window_id(), None);
+            assert_eq!(&bytes[8..16], &[0u8; 8]);
+        }
+    }
+
+    #[test]
+    fn an_icon_bar_event_naming_a_window_is_refused() {
+        // A window id on an application-scoped event is a second,
+        // contradictory addressing of it, so it is refused rather than
+        // silently ignored.
+        let mut named = WindowEvent::AppBarDefault.to_le_bytes();
+        named[8..16].copy_from_slice(&4u64.to_le_bytes());
+        assert_eq!(WindowEvent::from_bytes(&named), Err(Errno::OutOfRange));
+
+        // A zero item id names no row and is refused, never guessed at.
+        let mut zero_item = WindowEvent::AppBarMenu {
+            item: AppMenuItemId::new(3).expect("a valid id"),
+        }
+        .to_le_bytes();
+        zero_item[16..18].copy_from_slice(&0u16.to_le_bytes());
+        assert_eq!(WindowEvent::from_bytes(&zero_item), Err(Errno::OutOfRange));
     }
 
     #[test]

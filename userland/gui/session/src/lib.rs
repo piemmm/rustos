@@ -26,17 +26,21 @@
 //! [`LibraryLaunch`](tairix_taskbar::TaskbarResponse::LibraryLaunch)
 //! responses back through the catalog to spawn the chosen bundle.
 //!
-//! # Pinned shortcuts
+//! # The icon bar
 //!
-//! The bar's pin strip shows the user's pinned applications
-//! (`plans/NEW-TASKBAR.md` T6/T7): the [`pins`] module owns the per-user
-//! store (`~/Settings/Taskbar/pins.conf`, via `lib/taskpins`), loading it
-//! with the same fail-closed posture as the library, editing it through the
-//! [`SessionFileWriter`] seam with the in-memory list adopting an edit only
-//! after the write succeeded, and resolving each stored pin — through the
-//! merged catalog for an `entry` pin, through the bundle's own manifest for
-//! a `bundle` pin — into the [`ResolvedPin`]s the embedder turns into the
-//! bar's views, running-window matches, and launch paths.
+//! The bar's middle is one slot per *running application*
+//! (`plans/NEW-TASKBAR.md`): the [`apps`] module's [`AppBarService`] holds
+//! every application's icon-bar declaration as the window engine attested
+//! it, groups each live served window under the process that owns it, and
+//! resolves the label, icon, and information-panel identity of each slot
+//! from the **signed** `AppInfo` of the bundle the desktop launched that
+//! process from — so an application cannot state an identity that is not
+//! its own inside system-drawn chrome. A declaring application keeps its
+//! slot for the life of its process; one that declared nothing but owns a
+//! window gets a slot with no menu, so no window is unreachable. Hovering a
+//! slot whose application owns more than one window opens the bar's window
+//! picker, whose cells are the session's own copies of each window's last
+//! presented frame scaled through [`thumbnail`].
 //!
 //! # Presenting the taskbar through the window manager
 //!
@@ -143,15 +147,15 @@
 //! Switchboard tray capsule (`plans/NEW-TASKBAR.md` T9/T10) so a wedged
 //! app is visible without any fabricated heartbeat.
 //!
-//! # Running-task list ↔ window stack
+//! # Window registry ↔ window stack
 //!
-//! The taskbar models a running-task list but owns no window manager, and the
-//! window manager owns no task list. [`TaskBridge`] (the
+//! The taskbar models the window registry its picker and Switchboard capsule
+//! read, but owns no window manager, and the window manager owns no registry.
+//! [`TaskBridge`] (the
 //! [`tasks`] module) is the glue between them: it owns the correspondence
-//! between compositor windows and taskbar tasks, [`open`](TaskBridge::open)s
-//! and [`close`](TaskBridge::close)s top-level windows as running tasks,
-//! applies the bar's click-to-activate / minimise outcome to the compositor
-//! ([`activate`](TaskBridge::activate)), and mirrors a window-manager focus
+//! between compositor windows and registry entries, [`open`](TaskBridge::open)s
+//! and [`close`](TaskBridge::close)s top-level windows, raises a chosen one
+//! ([`raise`](TaskBridge::raise)), and mirrors a window-manager focus
 //! change back into the bar's highlight ([`sync_focus`](TaskBridge::sync_focus)).
 //! [`DesktopShell`] drives it: [`open_window`](DesktopShell::open_window) /
 //! [`close_window`](DesktopShell::close_window) manage the lifecycle, and
@@ -167,6 +171,7 @@
 
 extern crate alloc;
 
+pub mod apps;
 pub mod artwork;
 pub mod assets;
 pub mod cli;
@@ -184,7 +189,6 @@ pub mod listing;
 pub mod lock;
 pub mod picker;
 pub mod pinboard;
-pub mod pins;
 pub mod presenter;
 pub mod seat;
 pub mod session;
@@ -206,6 +210,11 @@ mod switchuser_tests;
 #[cfg(test)]
 mod tests;
 
+pub use apps::{
+    picker_cells, prefetch_bar_icons, resolve_library_icons, thumbnail, AppBarBridge,
+    AppBarService, AppGroup, ArtworkFileReader, ArtworkSandbox, Declaration, IconRasteriser,
+    BUNDLE_RUN_SUFFIX, MAX_BAR_APPS,
+};
 pub use artwork::{ArtworkDesk, ArtworkJob};
 pub use assets::{load_cursor_theme, load_icon_set, SessionFileReader, SessionFileWriter};
 pub use cli::{parse, CliError, Command, USAGE};
@@ -234,11 +243,6 @@ pub use picker::{
     ConcludedPick, PickConclusion, PickerSlot, SessionPicker, PICKER_ORIGIN, PICKER_TITLE,
 };
 pub use pinboard::{PinboardCommand, PinboardMenu, PinboardMenuOutcome};
-pub use pins::{
-    build_pin_views, prefetch_bar_icons, resolve_library_icons, resolve_pin_drop, resolve_pins,
-    ArtworkFileReader, ArtworkSandbox, DragOffer, DragOrigin, IconRasteriser, PinBridge,
-    PinEditError, PinIconSource, PinService, ResolvedPin, SessionPins, BUNDLE_RUN_SUFFIX,
-};
 pub use presenter::TaskbarPresenter;
 pub use seat::{SeatEventReader, SeatInputChannel};
 pub use session::DesktopSession;
@@ -261,5 +265,5 @@ pub use vigil::{HangTracker, UNRESPONSIVE_AFTER_NS};
 pub use wallpaper::{Prepared, WallpaperDesk, WallpaperSource};
 pub use windows::{
     desktop_info, resolve_window_identities, window_control_alternate_event, window_control_event,
-    SessionWindows, ShellWindowHost,
+    SessionWindows, ShellWindowHost, WINDOW_SHOWN, WINDOW_SHOWN_MESSAGE,
 };

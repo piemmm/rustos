@@ -276,7 +276,7 @@ fn a_later_state_edge_replaces_the_one_it_supersedes() {
     assert!(!hold(&mut held, resized(WINDOW, 200)));
 
     assert_eq!(
-        held.depth(MAILBOX, WINDOW),
+        held.depth(MAILBOX, Some(WINDOW)),
         2,
         "one resize is owed, not two"
     );
@@ -307,7 +307,7 @@ fn state_edges_of_different_kinds_are_each_owed() {
     for edge in edges {
         let _ = hold(&mut held, edge);
     }
-    assert_eq!(held.depth(MAILBOX, WINDOW), edges.len());
+    assert_eq!(held.depth(MAILBOX, Some(WINDOW)), edges.len());
 }
 
 /// A position is level-triggered and a wheel tick is additive, so a run of
@@ -365,7 +365,7 @@ fn overflow_sheds_input_and_never_a_state_edge_or_a_conclusion() {
         let _ = hold(&mut held, typed(WINDOW));
     }
 
-    assert_eq!(held.depth(MAILBOX, WINDOW), HOLD_BACK_CAPACITY);
+    assert_eq!(held.depth(MAILBOX, Some(WINDOW)), HOLD_BACK_CAPACITY);
     let drained = drain_events(&mut held);
     assert_eq!(
         drained.first(),
@@ -411,8 +411,8 @@ fn the_bound_is_per_window_not_per_owner() {
         let _ = hold(&mut held, typed(WINDOW));
     }
 
-    assert_eq!(held.depth(MAILBOX, WINDOW), HOLD_BACK_CAPACITY);
-    assert_eq!(held.depth(MAILBOX, SIBLING), 1);
+    assert_eq!(held.depth(MAILBOX, Some(WINDOW)), HOLD_BACK_CAPACITY);
+    assert_eq!(held.depth(MAILBOX, Some(SIBLING)), 1);
 }
 
 // --- Flushing --------------------------------------------------------------
@@ -458,7 +458,7 @@ fn a_mailbox_that_fills_again_keeps_the_rest_owed() {
     });
     assert!(report.settled.is_empty(), "the destination is not settled");
     assert!(report.gone.is_empty());
-    assert_eq!(held.depth(MAILBOX, WINDOW), 3);
+    assert_eq!(held.depth(MAILBOX, Some(WINDOW)), 3);
 
     assert_eq!(drain_events(&mut held).len(), 3);
     assert!(!held.owes(MAILBOX));
@@ -475,7 +475,7 @@ fn windows_are_served_round_robin_so_a_backlog_starves_no_sibling() {
     let _ = hold(&mut held, resized(SIBLING, 640));
 
     let mut room = 2;
-    let mut served: Vec<u64> = Vec::new();
+    let mut served: Vec<Option<u64>> = Vec::new();
     let _ = held.flush(|_, event| {
         if room == 0 {
             return Err(Errno::WouldBlock);
@@ -486,7 +486,7 @@ fn windows_are_served_round_robin_so_a_backlog_starves_no_sibling() {
     });
     assert_eq!(
         served,
-        vec![WINDOW, SIBLING],
+        vec![Some(WINDOW), Some(SIBLING)],
         "the sibling's resize got the second slot, not the backlog"
     );
 }

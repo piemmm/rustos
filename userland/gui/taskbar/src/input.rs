@@ -4,8 +4,8 @@
 //! [`InputEvent`]s into actions against a [`Taskbar`]: a primary-button press
 //! is hit-tested against the bar's computed [`BarLayout`](crate::BarLayout)
 //! and drives the model — opening the program-library popup, reporting the
-//! Files button, applying the click-to-activate / minimise rule to a task,
-//! or reporting a press on the clock. A press on a status signal is claimed
+//! Files button, performing a running application's default action, or
+//! reporting a press on the clock. A press on a status signal is claimed
 //! but inert (it is a live readout, not an action target), and a press on an
 //! open notification popover dismisses the card it lands on.
 //!
@@ -27,12 +27,20 @@
 //! otherwise.
 //!
 //! A secondary press opens the bar's one context surface
-//! ([`BarMenu`](crate::BarMenu)): on a pinned shortcut with the popup
-//! closed, or on a program-library entry row inside the open popup. While
+//! ([`BarMenu`](crate::BarMenu)): on a running application's slot with the
+//! popup closed — showing the menu that *application* declared, or nothing
+//! at all when it declared none — or on a program-library entry row inside
+//! the open popup. While
 //! the menu is open it is the top modal layer — the whole stream routes
 //! into it first, and a press outside its plate dismisses only the menu
 //! (one click does one thing), leaving whatever is beneath for the next
 //! click.
+//!
+//! Hovering a slot whose application owns more than one window opens the
+//! [`WindowPicker`](crate::WindowPicker), which is a pointer surface and
+//! nothing else: it takes no keyboard, a press on a cell chooses that
+//! window, a press on its own plate is claimed and does nothing, and it
+//! closes the moment the pointer leaves both it and the slot it hangs from.
 //!
 //! The Switchboard capsule at the trailing end has its own quiet
 //! microinteractions: a primary press and quick release opens Switchboard's
@@ -49,6 +57,7 @@
 //! previous task.
 
 use tairix_abi::switchboard_ipc::CommandSection;
+use tairix_abi::window_ipc::AppMenuItemId;
 use tairix_abi::PowerAction;
 use tairix_controls::{damage, TraySignalAction};
 use tairix_geometry::{Point, Rect, Region, Scale};
@@ -59,11 +68,11 @@ use tairix_theme::Appearance;
 use crate::layout::Hit;
 use crate::library::{LibraryRow, PopupOutcome};
 use crate::menu::{MenuChoice, MenuOutcome};
-use crate::pins::PinView;
+use crate::picker::{PickerEntry, PICKER_MIN_WINDOWS};
 use crate::repaint::TaskbarRepaint;
 use crate::system::{self, SystemAction};
 use crate::taskbar::Taskbar;
-use crate::tasks::{ActivateOutcome, TaskId};
+use crate::tasks::TaskId;
 
 /// How long a primary press on the Switchboard capsule must be held before
 /// it resolves as a long press (opening Recovery) rather than a quick click
@@ -87,26 +96,8 @@ pub enum TaskbarResponse {
     OpenLibrary,
     /// The program-library popup closed without launching anything — the
     /// Library button toggled it shut, a press outside dismissed it, or
-    /// `Escape` was pressed. The popup is also the pin drag source, so any
-    /// offer it had made is over with it: the embedder withdraws one if it
-    /// holds it.
+    /// `Escape` was pressed.
     LibraryDismissed,
-    /// A press on a program-library row has been dragged beyond the shared
-    /// threshold: the user is dragging this application out of the popup to
-    /// pin it. The embedder arms its pin offer for this catalogued entry;
-    /// exactly one offer fires per gesture.
-    PinDragOffered {
-        /// The catalog identifier of the dragged entry.
-        entry: EntryId,
-    },
-    /// The dragged application was released. The embedder resolves the drop
-    /// against the bar's pin band: a release over the band pins the offered
-    /// entry at the drop index, a release anywhere else simply ends the
-    /// gesture. Either way the offer is consumed.
-    PinDragDropped,
-    /// `Escape` abandoned the drag before it was dropped. The embedder
-    /// withdraws its offer; the popup stays open.
-    PinDragWithdrawn,
     /// A bundle was chosen to launch — an entry in the program-library
     /// popup (closing it), or a launch row of the system quick-actions menu.
     /// The embedder resolves the entry's bundle and launches it. Both
@@ -119,13 +110,44 @@ pub enum TaskbarResponse {
     /// The Files button was pressed. The embedder opens the file manager —
     /// raising an already-open files window rather than launching a second.
     OpenFiles,
-    /// A task slot was pressed, applying the click-to-activate / minimise
-    /// rule to that task.
-    TaskActivated {
-        /// The task whose slot was pressed.
+    /// A primary click landed on a running application's slot, and that
+    /// application declared that it handles the click itself. The embedder
+    /// relays it to the application as an icon-bar default action.
+    AppDefault {
+        /// The application's strip index.
+        app: usize,
+    },
+    /// A primary click landed on a running application's slot that declared
+    /// no default action of its own. The embedder raises and focuses that
+    /// application's most recently used window, and does nothing at all when
+    /// it has none.
+    AppRaise {
+        /// The application's strip index.
+        app: usize,
+    },
+    /// A row of the menu an application declared was chosen. The embedder
+    /// relays the application's own row id back to it; the bar never
+    /// interprets one.
+    AppMenuChosen {
+        /// The application's strip index.
+        app: usize,
+        /// The id the application gave the chosen row.
+        item: AppMenuItemId,
+    },
+    /// The pointer came to rest on a running application's slot whose
+    /// application owns more than one window. The embedder builds one cell
+    /// per window — it owns their pixels, so it is what can scale a
+    /// thumbnail — and hands them back through
+    /// [`Taskbar::show_window_picker`](crate::Taskbar::show_window_picker).
+    ShowWindowPicker {
+        /// The application's strip index.
+        app: usize,
+    },
+    /// A window was chosen in the hover picker. The embedder raises and
+    /// focuses it.
+    WindowChosen {
+        /// The chosen window.
         id: TaskId,
-        /// What the click did, so the caller can drive the window manager.
-        outcome: ActivateOutcome,
     },
     /// A raised notification's card was clicked to dismiss it. The embedder
     /// clears the notification identified by `(producer, key)` from the
@@ -138,26 +160,7 @@ pub enum TaskbarResponse {
     },
     /// The clock was pressed.
     ClockPressed,
-    /// A pinned shortcut with no running window was activated. The embedder
-    /// launches the pinned application (a pin whose application is already
-    /// running reports [`TaskActivated`](Self::TaskActivated) instead).
-    ActivatePin {
-        /// The pin's strip index.
-        index: usize,
-    },
-    /// *Unpin* was chosen for the pin at this index. The embedder removes
-    /// it from the per-user pin store and re-resolves the strip.
-    Unpin {
-        /// The pin's strip index.
-        index: usize,
-    },
-    /// *Pin to taskbar* was chosen for a program-library entry. The
-    /// embedder appends it to the per-user pin store and re-resolves the
-    /// strip.
-    PinEntry {
-        /// The catalog identifier of the entry to pin.
-        entry: EntryId,
-    },
+
     /// A gesture on the Switchboard capsule (or the readout's "Open
     /// Switchboard" safe action) asked to open the Switchboard window at a
     /// section. The embedder asks the Switchboard service to open — or, on
@@ -241,8 +244,8 @@ impl TaskbarInput {
     /// `now_ns`, returning what changed.
     ///
     /// With the popup and menu closed only a primary or secondary press
-    /// acts; pointer motion updates the tracked position (and the bar's
-    /// hover feedback), and every other event is
+    /// acts; pointer motion updates the tracked position, the bar's hover
+    /// feedback, and the hover window picker, and every other event is
     /// [`TaskbarResponse::Ignored`]. With the context menu open the whole
     /// stream routes into it; with the popup open it routes there (see the
     /// [module docs](self)).
@@ -262,12 +265,35 @@ impl TaskbarInput {
             if let Some(response) = self.continue_capsule_press(taskbar, scale, now_ns) {
                 return response;
             }
+            // The hover picker follows the pointer while no modal surface is
+            // up: a modal menu or popup owns the whole stream, and opening a
+            // picker underneath it would show a surface the user cannot
+            // reach.
+            if !taskbar.menu().is_open() && !taskbar.library().is_open() {
+                if let Some(response) = self.track_picker(taskbar, scale) {
+                    return response;
+                }
+            }
         }
         if taskbar.menu().is_open() {
             return self.route_to_menu(event, taskbar, scale, &mut damage);
         }
         if taskbar.library().is_open() {
             return self.route_to_popup(event, taskbar, scale, &mut damage);
+        }
+        // The picker is non-modal too, and takes a press that lands on it
+        // before the bar beneath does: choosing a window is what a press on
+        // a cell means, and a press on the picker's own chrome is claimed so
+        // it never falls through to the slot under it.
+        if matches!(
+            event,
+            InputEvent::PointerPressed {
+                button: PointerButton::Primary
+            }
+        ) {
+            if let Some(response) = self.press_picker(taskbar, scale) {
+                return response;
+            }
         }
         // The notification popover and the Switchboard readout are
         // non-modal: unlike the menu and library popup they do not swallow
@@ -384,14 +410,7 @@ impl TaskbarInput {
                 TaskbarResponse::OpenLibrary
             }
             Hit::Files => TaskbarResponse::OpenFiles,
-            Hit::Pin(index) => Self::activate_pin(taskbar, index),
-            Hit::Task(index) => {
-                let Some(id) = taskbar.tasks().entries().get(index).map(|entry| entry.id) else {
-                    return TaskbarResponse::Ignored;
-                };
-                let outcome = taskbar.tasks_mut().activate(id);
-                TaskbarResponse::TaskActivated { id, outcome }
-            }
+            Hit::App(index) => Self::activate_app(taskbar, index),
             // A status signal is a live readout, not an action target: the
             // press is claimed so it never falls through to the window
             // beneath, but it does nothing.
@@ -526,34 +545,31 @@ impl TaskbarInput {
         Self::focus_task(taskbar, id)
     }
 
-    /// Restore-and-focus the task with `id` (never the minimise toggle),
-    /// reporting the activation — or nothing when the task vanished (fail
-    /// closed).
+    /// Restore-and-focus the window with `id`, reporting the choice — or
+    /// nothing when the window vanished (fail closed).
     fn focus_task(taskbar: &mut Taskbar, id: TaskId) -> TaskbarResponse {
         if taskbar.tasks_mut().set_focused(Some(id)) {
-            TaskbarResponse::TaskActivated {
-                id,
-                outcome: ActivateOutcome::Activated,
-            }
+            TaskbarResponse::WindowChosen { id }
         } else {
             TaskbarResponse::Ignored
         }
     }
 
     /// Handle a secondary-button press at the current pointer position with
-    /// the popup and menu closed: a press on a pinned shortcut opens its
-    /// context menu, a press on the Switchboard capsule opens the desktop's
-    /// system quick-actions menu; anywhere else on the bar is claimed and
-    /// does nothing.
+    /// the popup and menu closed: a press on a running application's slot
+    /// opens the menu that application declared (and nothing at all when it
+    /// declared none), a press on the Switchboard capsule opens the
+    /// desktop's system quick-actions menu; anywhere else on the bar is
+    /// claimed and does nothing.
     ///
     /// Opening a menu acts on nothing by itself — the response is always
     /// `Ignored`, and only choosing a row reports an outcome.
     fn press_secondary(&mut self, taskbar: &mut Taskbar, scale: Scale) -> TaskbarResponse {
         let layout = taskbar.layout(scale);
         match layout.hit_test(self.pointer) {
-            Some(Hit::Pin(index)) => {
-                let anchor = layout.pins.get(index).copied().unwrap_or(Rect::EMPTY);
-                taskbar.open_pin_menu(index, anchor);
+            Some(Hit::App(index)) => {
+                let anchor = layout.apps.get(index).copied().unwrap_or(Rect::EMPTY);
+                taskbar.open_app_menu(index, anchor);
             }
             Some(Hit::Switchboard) => taskbar.open_system_menu(layout.switchboard),
             _ => {}
@@ -561,33 +577,87 @@ impl TaskbarInput {
         TaskbarResponse::Ignored
     }
 
-    /// Apply a click to the pin at `index`: a pin whose application has a
-    /// live window follows the same click-to-activate / minimise rule as
-    /// its task button; one with no window asks the embedder to launch it.
-    fn activate_pin(taskbar: &mut Taskbar, index: usize) -> TaskbarResponse {
-        if taskbar.pins().get(index).is_none() {
-            return TaskbarResponse::Ignored;
-        }
-        match Self::pin_window(taskbar, index) {
-            Some(id) => {
-                let outcome = taskbar.tasks_mut().activate(id);
-                TaskbarResponse::TaskActivated { id, outcome }
+    /// Follow the pointer with the hover window picker.
+    ///
+    /// A pointer inside the open picker drives its highlight; one over an
+    /// application slot whose application owns more than one window asks the
+    /// embedder to show the picker there (the embedder owns the windows'
+    /// pixels, so it builds the cells); one that has left both closes it.
+    /// Returns a response only when the embedder must act.
+    fn track_picker(&mut self, taskbar: &mut Taskbar, scale: Scale) -> Option<TaskbarResponse> {
+        if let Some(layout) = taskbar.picker_layout(scale) {
+            if layout.panel.contains(self.pointer) {
+                let cell = taskbar.picker().cell_at(&layout, self.pointer);
+                taskbar.track_picker_hover(cell);
+                return None;
             }
-            None => TaskbarResponse::ActivatePin { index },
+        }
+        let hovered = taskbar.apps().hover();
+        match hovered {
+            Some(index)
+                if taskbar
+                    .apps()
+                    .get(index)
+                    .is_some_and(|app| app.windows().len() >= PICKER_MIN_WINDOWS) =>
+            {
+                if taskbar.picker().app() == Some(index) {
+                    return None;
+                }
+                Some(TaskbarResponse::ShowWindowPicker { app: index })
+            }
+            _ => {
+                taskbar.close_picker();
+                None
+            }
         }
     }
 
-    /// The live window behind the pin at `index`: its matched window id,
-    /// only while the task list still knows that window (a stale match
-    /// reads as not running, fail closed).
-    fn pin_window(taskbar: &Taskbar, index: usize) -> Option<TaskId> {
-        let id = taskbar.pins().get(index).and_then(PinView::window)?;
-        taskbar
-            .tasks()
-            .entries()
-            .iter()
-            .any(|entry| entry.id == id)
-            .then_some(id)
+    /// Resolve a primary press that landed on the open picker: a press on a
+    /// cell chooses that window, one on the picker's own chrome is claimed
+    /// and does nothing. `None` when the picker is closed or the press
+    /// landed elsewhere.
+    fn press_picker(&mut self, taskbar: &mut Taskbar, scale: Scale) -> Option<TaskbarResponse> {
+        let layout = taskbar.picker_layout(scale)?;
+        if !layout.panel.contains(self.pointer) {
+            return None;
+        }
+        let chosen = taskbar
+            .picker()
+            .cell_at(&layout, self.pointer)
+            .and_then(|cell| {
+                taskbar
+                    .picker()
+                    .entries()
+                    .get(cell)
+                    .map(PickerEntry::window)
+            });
+        taskbar.close_picker();
+        match chosen {
+            Some(id) => Some(Self::focus_task(taskbar, id)),
+            None => Some(TaskbarResponse::Ignored),
+        }
+    }
+
+    /// Apply a primary click to the running application at `index`.
+    ///
+    /// An application that declared it handles the click gets it; one that
+    /// did not has its most recently used window raised instead, and an
+    /// application with neither a declaration nor a window does nothing —
+    /// the honest outcome, never a guessed one.
+    fn activate_app(taskbar: &mut Taskbar, index: usize) -> TaskbarResponse {
+        // A click closes the hover picker: the user has decided on the
+        // application rather than on one of its windows.
+        taskbar.close_picker();
+        let Some(app) = taskbar.apps().get(index) else {
+            return TaskbarResponse::Ignored;
+        };
+        if app.handles_default() {
+            return TaskbarResponse::AppDefault { app: index };
+        }
+        if app.windows().is_empty() {
+            return TaskbarResponse::Ignored;
+        }
+        TaskbarResponse::AppRaise { app: index }
     }
 
     /// Route one event into the open context menu (the top modal layer).
@@ -638,28 +708,15 @@ impl TaskbarInput {
     /// resolves.
     fn apply_choice(taskbar: &mut Taskbar, choice: MenuChoice) -> TaskbarResponse {
         match choice {
-            MenuChoice::RestorePin(index) => match Self::pin_window(taskbar, index) {
-                // *Open* on a running pin restores and focuses — never the
-                // press's minimise toggle.
-                Some(id) if taskbar.tasks_mut().set_focused(Some(id)) => {
-                    TaskbarResponse::TaskActivated {
-                        id,
-                        outcome: ActivateOutcome::Activated,
-                    }
-                }
-                // The window vanished while the menu was open: launching is
-                // the honest reading of *Open*.
-                _ => TaskbarResponse::ActivatePin { index },
-            },
-            MenuChoice::LaunchPin(index) => TaskbarResponse::ActivatePin { index },
-            MenuChoice::Unpin(index) => TaskbarResponse::Unpin { index },
+            MenuChoice::AppMenu { index, item } => {
+                TaskbarResponse::AppMenuChosen { app: index, item }
+            }
             MenuChoice::OpenEntry(entry) => {
                 // Launching from the entry menu behaves exactly like
                 // launching from the row itself: the popup closes.
                 taskbar.close_library();
                 TaskbarResponse::LibraryLaunch { entry }
             }
-            MenuChoice::PinEntry(entry) => TaskbarResponse::PinEntry { entry },
             MenuChoice::System(action) => Self::apply_system_action(action),
         }
     }
@@ -763,9 +820,6 @@ impl TaskbarInput {
                 taskbar.close_library();
                 TaskbarResponse::LibraryLaunch { entry }
             }
-            PopupOutcome::DragOffered(entry) => TaskbarResponse::PinDragOffered { entry },
-            PopupOutcome::DragDropped => TaskbarResponse::PinDragDropped,
-            PopupOutcome::DragWithdrawn => TaskbarResponse::PinDragWithdrawn,
             PopupOutcome::Dismiss => {
                 taskbar.close_library();
                 TaskbarResponse::LibraryDismissed
