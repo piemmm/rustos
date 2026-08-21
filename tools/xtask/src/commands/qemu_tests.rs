@@ -679,6 +679,11 @@ const AUTOLOAD_DESKTOP_REVEALED_MARKER: &str = tairix_desktop_session::DESKTOP_R
 /// call the window channel.
 const APPBAR_WINDOW_SHOWN_MARKER: &str = tairix_desktop_session::WINDOW_SHOWN_MESSAGE;
 
+/// Serial marker the elevated Date & Time vertical waits for before typing
+/// credentials into the session's credential prompt — the prompt's own
+/// announcement that it is on screen and holding the keyboard.
+const ELEVATE_PROMPT_SHOWN_MARKER: &str = tairix_desktop_session::ELEVATE_PROMPT_SHOWN_MESSAGE;
+
 /// `true` if `text` begins with `prefix`.
 const fn starts_with_bytes(text: &[u8], prefix: &[u8]) -> bool {
     if text.len() < prefix.len() {
@@ -5663,6 +5668,40 @@ static TESTS: &[QemuTest] = &[
         pointer_script: Some(appbar_pointer_script),
         serial: &[],
     },
+    // Elevated Date & Time launch: click the taskbar clock, choose
+    // *Set Date & Time…*, authenticate as the fixture root account through
+    // the session's credential prompt, and witness the Date & Time window.
+    // The guest latches APP_LOADED for datetime.app plus one window create
+    // after that load; the host types credentials once the prompt announces
+    // itself on serial. Single CPU, same inactivity budget as the icon-bar
+    // sibling so co-scheduling cannot turn a merely slow guest into a timeout.
+    QemuTest {
+        package: "tairix-test-datetime-elevate-qemu-aarch64",
+        binary: "tairix-test-datetime-elevate-qemu-aarch64",
+        target: "aarch64-unknown-none",
+        cpus: 1,
+        timeout: Duration::from_secs(300),
+        disk_sectors: None,
+        netstack_peer: NetPeerMode::None,
+        ramfb: true,
+        fs_disk: FsDisk::AutoloadRootDisk,
+        keyboard: None,
+        typed_keys: &[
+            (
+                AUTOLOAD_INPUT_KEY_MARKER,
+                AUTOLOAD_INPUT_ARMED_OCCURRENCES,
+                UNLOCK_PASSPHRASE_LINE,
+            ),
+            (AUTOLOAD_LOGIN_MARKER, 1, AUTOLOAD_LOGIN_DIALOGUE),
+            // The credential prompt is up and focused: offer the fixture
+            // account. Tab moves from the account field to the password;
+            // Enter submits. The broker starts datetime.app as that account.
+            (ELEVATE_PROMPT_SHOWN_MARKER, 1, "root\troot\n"),
+        ],
+        screendumps: &[],
+        pointer_script: Some(datetime_elevate_pointer_script),
+        serial: &[],
+    },
     // `plans/NEW-DESKTOP-LOGIN.md` G7.1: a display-capable machine that
     // nobody has configured boots to the **graphical** login screen on its
     // own. The sibling verticals above all plant `os.loginType text` because
@@ -7410,7 +7449,7 @@ fn assert_files_window_screendump(
         0,
         tairix_browse::WIN_WIDTH,
         tairix_browse::WIN_HEIGHT,
-        tairix_browse::WIN_RESIZABLE,
+        tairix_browse::WIN_SIZING.resizable(),
         theme,
     )
     .outer;
@@ -7917,8 +7956,142 @@ fn assert_no_slot_beyond_the_launched_app(
     Ok(())
 }
 
-/// Build the icon-bar vertical's injection script: launch the terminal from
-/// the program library, right-click the slot the session gives its process on
+/// Where the desktop draws the taskbar clock and, once that clock is
+/// pressed, the *Set Date & Time…* row of the menu it opens.
+///
+/// Both points come from driving the **production** taskbar model at run
+/// time — the same layout, hit-testing, and menu-building code the guest
+/// renders with — so the script clicks where the guest actually draws rather
+/// than at coordinates copied from a screenshot.
+fn datetime_elevate_aim_points() -> Result<(tairix_geometry::Point, tairix_geometry::Point), String>
+{
+    use tairix_abi::seat::SEAT_PRIMARY;
+    use tairix_desktop_session::DesktopShell;
+    use tairix_geometry::{Point, Scale};
+    use tairix_input::{InputEvent, PointerButton};
+    use tairix_log::DiscardSink;
+    use tairix_reclaim::ReportedPressure;
+    use tairix_taskbar::{TaskbarConfig, TaskbarInput};
+
+    static NO_PRESSURE_FEED: ReportedPressure = ReportedPressure::unknown();
+    static DISCARD_SINK: DiscardSink = DiscardSink;
+
+    let width = tairix_fwcfg::RAMFB_CONSOLE_WIDTH_PX;
+    let height = tairix_fwcfg::RAMFB_CONSOLE_HEIGHT_PX;
+    let scale = Scale::ONE;
+    let now_ns: u64 = 0;
+    let mut shell = DesktopShell::new(
+        TaskbarConfig::bottom_bar(width, height),
+        SEAT_PRIMARY,
+        0,
+        &NO_PRESSURE_FEED,
+        &DISCARD_SINK,
+    );
+    // The guest attests a broker, so the set-time row is actionable and
+    // lays out exactly as the host reconstructs it.
+    shell
+        .session_mut()
+        .taskbar_mut()
+        .set_elevation_available(true);
+
+    let mut router = TaskbarInput::new();
+    let mut press_at = |shell: &mut DesktopShell, at: Point, button: PointerButton| {
+        let taskbar = shell.session_mut().taskbar_mut();
+        router.handle(InputEvent::PointerMoved { to: at }, taskbar, scale, now_ns);
+        router.handle(
+            InputEvent::PointerPressed { button },
+            taskbar,
+            scale,
+            now_ns,
+        );
+        router.handle(
+            InputEvent::PointerReleased { button },
+            taskbar,
+            scale,
+            now_ns,
+        );
+    };
+
+    let bar = shell.session().taskbar().layout(scale);
+    let clock = rect_centre(bar.clock, "clock")?;
+
+    // Open the clock menu exactly as the first click will.
+    press_at(&mut shell, clock, PointerButton::Primary);
+    if !shell.session().taskbar().menu().is_open() {
+        return Err("datetime-elevate script: a press on the clock opened no menu".to_string());
+    }
+    let menu_layout = shell
+        .session()
+        .taskbar()
+        .menu_layout(scale)
+        .ok_or_else(|| "datetime-elevate script: the open menu lays nothing out".to_string())?;
+    let control = shell.session().taskbar().menu().control();
+    let set_label = tairix_taskbar::clock_menu::SET_ROW_LABEL;
+    let row = control
+        .items()
+        .iter()
+        .position(|item| item.label() == set_label)
+        .ok_or_else(|| format!("datetime-elevate script: the menu has no {set_label:?} row"))?;
+    let set_row = rect_centre(
+        control
+            .row_rect(
+                row,
+                menu_layout.panel,
+                scale,
+                shell.session().taskbar().theme(),
+            )
+            .ok_or_else(|| {
+                "datetime-elevate script: the set-time row lays nothing out".to_string()
+            })?,
+        "Set Date & Time row",
+    )?;
+    Ok((clock, set_row))
+}
+
+/// Click the taskbar clock, then the *Set Date & Time…* row, so the session
+/// opens its credential prompt.
+fn datetime_elevate_pointer_script() -> Result<Vec<tairix_qemu::PointerStep>, String> {
+    use tairix_geometry::Point;
+    use tairix_qemu::{MouseButton, PointerAction, PointerStep};
+
+    let (clock, set_row) = datetime_elevate_aim_points()?;
+
+    let width = tairix_fwcfg::RAMFB_CONSOLE_WIDTH_PX;
+    let height = tairix_fwcfg::RAMFB_CONSOLE_HEIGHT_PX;
+    #[allow(clippy::cast_possible_wrap)] // Screen extents are far below i32::MAX.
+    let pin_cursor = PointerAction::Move {
+        dx: -(2 * width as i32),
+        dy: -(2 * height as i32),
+    };
+    let move_by = |from: Point, to: Point| PointerAction::Move {
+        dx: to.x - from.x,
+        dy: to.y - from.y,
+    };
+    let step = |marker: &str, action: PointerAction| PointerStep {
+        ready_marker: marker.to_owned(),
+        ready_occurrences: 1,
+        action,
+    };
+    let aim_and_press = |marker: &str, button: MouseButton, from: Point, to: Point| {
+        [
+            step(marker, move_by(from, to)),
+            step(marker, PointerAction::Press(button)),
+            step(marker, PointerAction::Release(button)),
+        ]
+    };
+    let ready = AUTOLOAD_DESKTOP_REVEALED_MARKER;
+    let mut steps = vec![step(ready, pin_cursor)];
+    steps.extend(aim_and_press(
+        ready,
+        MouseButton::Primary,
+        Point::ORIGIN,
+        clock,
+    ));
+    steps.extend(aim_and_press(ready, MouseButton::Primary, clock, set_row));
+    Ok(steps)
+}
+
+/// Open the program library, right-click the slot the session gives its process on
 /// the bar, choose the *New window* row of the menu the application declared,
 /// then primary-click that same slot to take its declared default action.
 ///
@@ -7938,13 +8111,12 @@ fn assert_no_slot_beyond_the_launched_app(
 ///   [`APPBAR_WINDOW_SHOWN_MARKER`]: the *first* occurrence for the
 ///   right-click, the *second* for the final primary click. That witness
 ///   follows a frame the session actually put on screen, so by then the
-///   application has declared its bar (it declares before it opens a window,
-///   `plans/GUI-TERMINAL.md` §15), the session has grouped that window under
-///   its attested owner, and the strip has been re-resolved and drawn. A
-///   create reply would say only that the window exists.
+///   application has declared its bar (it declares before it opens a window),
+///   the session has grouped that window under its attested owner, and the
+///   strip has been re-resolved and drawn. A create reply would say only that
+///   the window exists.
 /// - The menu row's click follows its right-click immediately — that press is
-///   a synchronous input wake, so the plate is up before the next injected
-///   step is read.
+///   what opens the menu, so the row is on screen by construction.
 ///
 /// The final primary click is also what keeps the guest alive long enough to
 /// be photographed: it opens the third window, which is the create that
@@ -8352,7 +8524,7 @@ fn autoload_desktop_pointer_script() -> Result<Vec<tairix_qemu::PointerStep>, St
         0,
         tairix_browse::WIN_WIDTH,
         tairix_browse::WIN_HEIGHT,
-        tairix_browse::WIN_RESIZABLE,
+        tairix_browse::WIN_SIZING.resizable(),
         shell.session().active_theme(),
     )
     .client;
@@ -9201,7 +9373,7 @@ mod tests {
             0,
             tairix_browse::WIN_WIDTH,
             tairix_browse::WIN_HEIGHT,
-            tairix_browse::WIN_RESIZABLE,
+            tairix_browse::WIN_SIZING.resizable(),
             &theme,
         );
         assert_eq!(
@@ -9213,7 +9385,7 @@ mod tests {
             (tairix_browse::WIN_WIDTH, tairix_browse::WIN_HEIGHT),
         );
         let frame = tairix_controls::WindowFrame::new(tairix_controls::WindowFurnitureState {
-            resizable: tairix_browse::WIN_RESIZABLE,
+            resizable: tairix_browse::WIN_SIZING.resizable(),
             ..tairix_controls::WindowFurnitureState::default()
         });
         assert_eq!(
@@ -9242,7 +9414,7 @@ mod tests {
         // The frame's own hit map is the oracle here: deepening the theme's hit
         // slop past the aim inset fails this test rather than silently
         // resizing a window in a QEMU vertical.
-        let aim = served_client_aim(0, tairix_browse::WIN_RESIZABLE, &theme);
+        let aim = served_client_aim(0, tairix_browse::WIN_SIZING.resizable(), &theme);
         assert_eq!(
             frame.hit(layout.outer, Scale::ONE, &theme, aim),
             tairix_controls::FurniturePart::Client,

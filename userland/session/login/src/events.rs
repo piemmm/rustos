@@ -113,19 +113,27 @@ pub const LAUNCH_GRANTED: EventId = EventId(10_024);
 /// a failed re-authentication (cause never disclosed to the caller, only
 /// audited) or a spawn refusal.
 pub const LAUNCH_REFUSED: EventId = EventId(10_025);
+/// A program started for a [`tairix_abi::elevate::ElevateRequest::Launch`]
+/// request ended abnormally, and login is the only observer of how. Such a
+/// child inherits login's console, which under a graphical session is the
+/// framebuffer text console behind the desktop, so a reason it wrote to
+/// `stderr` reaches nobody; the reaper states it here instead. A clean exit
+/// records nothing.
+pub const LAUNCH_ENDED_ABNORMALLY: EventId = EventId(10_026);
 
 #[cfg(test)]
 mod tests {
     use super::{
         AUTH_FAILED, CONSOLE_ERROR, ELEVATE_GRANTED, ELEVATE_REFUSED, ELEVATE_UNAVAILABLE,
-        FONTD_STARTED, FONTD_UNAVAILABLE, GREETER_DEGRADED, GREETER_FAILED, LAUNCH_GRANTED,
-        LAUNCH_REFUSED, LOCKED_OUT, LOGIN_RANGE_END, LOGIN_RANGE_START, SESSION_ACCOUNTS_SENT,
-        SESSION_AUTH_GRANTED, SESSION_AUTH_REFUSED, SESSION_BACKGROUNDED, SESSION_ENDED,
-        SESSION_ENDED_ON_EXIT, SESSION_ENDPOINT_UNAVAILABLE, SESSION_LAUNCH_FAILED,
-        SESSION_REQUEST_REFUSED, SESSION_RESUMED, SESSION_STARTED, VERIFY_GRANTED, VERIFY_REFUSED,
+        FONTD_STARTED, FONTD_UNAVAILABLE, GREETER_DEGRADED, GREETER_FAILED,
+        LAUNCH_ENDED_ABNORMALLY, LAUNCH_GRANTED, LAUNCH_REFUSED, LOCKED_OUT, LOGIN_RANGE_END,
+        LOGIN_RANGE_START, SESSION_ACCOUNTS_SENT, SESSION_AUTH_GRANTED, SESSION_AUTH_REFUSED,
+        SESSION_BACKGROUNDED, SESSION_ENDED, SESSION_ENDED_ON_EXIT, SESSION_ENDPOINT_UNAVAILABLE,
+        SESSION_LAUNCH_FAILED, SESSION_REQUEST_REFUSED, SESSION_RESUMED, SESSION_STARTED,
+        VERIFY_GRANTED, VERIFY_REFUSED,
     };
 
-    const ALL: [u32; 25] = [
+    const ALL: [u32; 26] = [
         SESSION_STARTED.0,
         AUTH_FAILED.0,
         LOCKED_OUT.0,
@@ -151,6 +159,7 @@ mod tests {
         SESSION_ENDED_ON_EXIT.0,
         LAUNCH_GRANTED.0,
         LAUNCH_REFUSED.0,
+        LAUNCH_ENDED_ABNORMALLY.0,
     ];
 
     #[test]

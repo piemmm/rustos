@@ -770,9 +770,10 @@ menu and the row → command mapping are derived:
 
 The heading repeats the label the bar is *already* drawing rather than
 re-deriving a time of its own, so the menu and the bar beside it can never
-disagree. When no wall-clock time has been established this boot the bar's
-label is empty, and the row says so (*Time not set*) instead of showing a
-fabricated `00:00`.
+disagree. When no wall-clock time has been established this boot the bar draws
+`clock::UNSET_LABEL` (`--:--`) — the clock is pressable, and its menu is where
+a time is set, so it must stay visible and keep its width — and the heading
+states *Time not set* rather than repeating dashes or a fabricated `00:00`.
 
 Setting a clock needs `CAP_TIME_SET`, which the bar does not hold and a
 desktop session must never hold. The row therefore reports a typed response

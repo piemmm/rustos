@@ -1052,15 +1052,17 @@ this way with **no per-app decoration code** — the one place a served window i
 dressed is the window manager.
 
 Whether the frame is **resizable** is the opening app's own choice, carried on
-its window `Create` (`WindowRequest::Create { resizable, .. }` →
-`WindowClient::create`'s `sizing` argument, `WindowSizing { resizable, .. }` →
-`WindowHost::window_opened`). A resizable window gets a
+its window `Create` as the `WindowSizing` it asks for
+(`WindowRequest::Create { sizing, .. }` → `WindowClient::create`'s `sizing`
+argument → `WindowHost::window_opened`). `WindowSizing::Resizable` gets a
 live maximize/restore size toggle and the invisible resize edges above; the app
 re-lays-out to each new client size the window manager reports
 (`WindowEvent::Resized`), re-mapping its frame region with `WindowRequest::Resize`
-so the resize keeps the window identity. A fixed-size app passes `resizable:
-false` — every client pixel reaches it and the size-toggle is inert — so an
-app that renders at one size is never handed a size it did not ask to handle.
+so the resize keeps the window identity. A fixed-size app asks for
+`WindowSizing::Fixed` — every client pixel reaches it and the size-toggle is
+inert — so an app that renders at one size is never handed a size it did not
+ask to handle. The two travel as one value, so "fixed" cannot arrive carrying
+a minimum it would never be measured against.
 The file **viewer** (`userland/apps/viewer`) is a resizable app: it re-wraps
 its text to the new width, preserves the reader's scroll position across the
 resize, and fails closed (keeping the current surface) if a new frame region

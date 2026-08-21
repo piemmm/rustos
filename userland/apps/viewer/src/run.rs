@@ -537,8 +537,7 @@ mod program {
         // than being a slot the session derived from a window, which opens
         // nothing.
         declare_app_bar(client, event_endpoint);
-        let sizing = WindowSizing {
-            resizable: true,
+        let sizing = WindowSizing::Resizable {
             min_width_px: MIN_WIN_WIDTH,
             min_height_px: MIN_WIN_HEIGHT,
         };

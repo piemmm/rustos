@@ -127,7 +127,7 @@ mod program {
         ManagerChrome, ManagerTool, ManagerToolModel, OwnerChange, PasteItem, PasteStrategy,
         Places, ProgressModel, ProgressOp, Properties, RenameError, RtLinkReader, ToolbarCommand,
         TrashStrategy, VfsDirectorySource, ViewMode, Volume, VolumeId, MANAGER_TOOLS, WIN_HEIGHT,
-        WIN_RESIZABLE, WIN_WIDTH,
+        WIN_SIZING, WIN_WIDTH,
     };
     use tairix_controls::damage;
     use tairix_controls::decision::Dialog;
@@ -148,8 +148,7 @@ mod program {
     use tairix_sandbox::{ParserSandbox, ServeEnd};
     use tairix_theme::{Theme, ThemeRegistry};
     use tairix_window::{
-        pointer_input_events, Desktop, EventSource, WindowClient, WindowEvents, WindowSizing,
-        WindowTransport,
+        pointer_input_events, Desktop, EventSource, WindowClient, WindowEvents, WindowTransport,
     };
 
     use crate::appbar;
@@ -215,17 +214,6 @@ mod program {
     /// well-formed, assignable `u32` (non-numeric, empty, out of range, or the
     /// reserved "unchanged" sentinel).
     const OWNER_ID_HINT: &str = "Enter a valid numeric id.";
-
-    /// The smallest client width, in pixels, this window declares at create:
-    /// the floor the window manager holds an interactive resize to, so a
-    /// drag toward nothing stops at a window that still shows its chrome.
-    /// The app never re-imposes it — it lays out at whatever size it is
-    /// given, and the content clips gracefully below its natural size.
-    const MIN_WIN_WIDTH: u32 = 240;
-
-    /// The smallest client height the window declares (see
-    /// [`MIN_WIN_WIDTH`]).
-    const MIN_WIN_HEIGHT: u32 = 160;
 
     /// The RGBA8888 window surface `width_px` × `height_px`, its stride the
     /// tightly-packed four-bytes-per-pixel row. One definition so the initial
@@ -519,11 +507,7 @@ mod program {
             FRAME_COUNT,
             &mode,
             &title,
-            WindowSizing {
-                resizable: WIN_RESIZABLE,
-                min_width_px: MIN_WIN_WIDTH,
-                min_height_px: MIN_WIN_HEIGHT,
-            },
+            WIN_SIZING,
         ) else {
             report_error("the desktop session refused the window");
             return Err(EXIT_NO_WINDOW);

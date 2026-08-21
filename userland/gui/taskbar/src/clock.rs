@@ -6,8 +6,22 @@
 //! only the string to draw, so the bar carries no time ABI of its own
 //! (keeps absolute time in `lib/abi`). An empty label draws
 //! nothing.
+//!
+//! A clock the user can press is how a time gets *set*, so a machine with no
+//! wall time must still show one: [`UNSET_LABEL`] is what a caller draws
+//! then, and the menu's heading reads the same constant to say the time is
+//! unset.
 
 use alloc::string::String;
+
+/// The label a caller sets when no wall-clock time has been established.
+///
+/// `HH:mm`-shaped, so the clock keeps its place and its width, and
+/// unmistakably not a reading. The one definition of that spelling: the
+/// session spells an unset reading as this, and
+/// [`clock_menu`](crate::clock_menu) reads it back to state that the time is
+/// unset.
+pub const UNSET_LABEL: &str = "--:--";
 
 /// The clock's display label.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]

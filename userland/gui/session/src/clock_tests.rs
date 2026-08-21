@@ -7,7 +7,7 @@
 
 use tairix_abi::time::{Time64, WallClockReading, WallTimeState};
 
-use super::{spell, SessionClock};
+use super::{spell, SessionClock, UNSET_LABEL};
 use crate::switchuser::NO_DEADLINE_NS;
 
 /// Nanoseconds in one second, for readable deadlines.
@@ -36,15 +36,23 @@ fn a_reading_spells_the_hour_and_minute_zero_padded() {
 }
 
 #[test]
-fn an_unset_clock_draws_nothing_rather_than_a_fabricated_time() {
+fn an_unset_clock_shows_a_placeholder_rather_than_a_fabricated_time() {
     let unset = WallClockReading::new(Time64::UNIX_EPOCH, WallTimeState::Unset);
-    assert_eq!(spell(unset), "", "00:00 would be a time nobody set");
+    assert_eq!(
+        spell(unset),
+        UNSET_LABEL,
+        "00:00 would be a time nobody set"
+    );
     let mut clock = SessionClock::new();
     assert!(
-        !clock.adopt(unset, 0),
-        "an empty label is what the clock already had, so nothing repaints"
+        clock.adopt(unset, 0),
+        "the placeholder owes the bar a repaint, or the clock is never drawn"
     );
-    assert_eq!(clock.label(), "");
+    assert_eq!(clock.label(), UNSET_LABEL);
+    assert!(
+        !clock.adopt(unset, SEC),
+        "still unset a second later is the same label"
+    );
     // A firmware-seeded reading *is* set — plausible rather than verified,
     // but a real time — so it draws.
     let seeded = WallClockReading::new(Time64::from_secs(1_709_214_367), WallTimeState::Firmware);

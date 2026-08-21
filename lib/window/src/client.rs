@@ -304,19 +304,18 @@ impl<T: WindowTransport> WindowClient<T> {
     /// `title`, with this window's events delivered to the app's own
     /// `event_endpoint`.
     ///
-    /// `sizing` asks the window manager to present the window with a
-    /// resize grabber and a live maximize/restore size toggle; a
-    /// fixed-size app passes [`WindowSizing::default()`] and is offered
-    /// neither affordance (and never receives a
-    /// [`WindowEvent::Resized`]). A resizable app re-lays-out to each
-    /// reported size and re-maps its region with [`Self::resize`].
+    /// `sizing` says whether the window manager presents the window with a
+    /// resize grabber and a live maximize/restore size toggle: a fixed-size
+    /// app passes [`WindowSizing::Fixed`] and is offered neither affordance
+    /// (and never receives a [`WindowEvent::Resized`]), while a
+    /// [`WindowSizing::Resizable`] app re-lays-out to each reported size
+    /// and re-maps its region with [`Self::resize`].
     ///
-    /// A resizable app declares its smallest workable client here, once
-    /// ([`WindowSizing::min_width_px`]/[`WindowSizing::min_height_px`],
-    /// `0` for no minimum of its own). The **window manager** enforces
-    /// it and will not resize below it, so the app lays out at exactly
-    /// the size it is told; an app that resized itself back up instead
-    /// would fight the drag, frame by frame.
+    /// A resizable app declares its smallest workable client in that
+    /// variant, once (`0` for no minimum of its own). The **window
+    /// manager** enforces it and will not resize below it, so the app lays
+    /// out at exactly the size it is told; an app that resized itself back
+    /// up instead would fight the drag, frame by frame.
     ///
     /// The size is the app's own choice; [`Self::desktop`] is how it
     /// learns the screen it must fit on before making that choice.
@@ -355,9 +354,7 @@ impl<T: WindowTransport> WindowClient<T> {
             stride_bytes: surface.stride_bytes,
             format: surface.format,
             title,
-            resizable: sizing.resizable,
-            min_width_px: sizing.min_width_px,
-            min_height_px: sizing.min_height_px,
+            sizing,
         }
         .to_le_bytes();
         let mut reply = [0u8; WINDOW_CREATE_REPLY_LEN];

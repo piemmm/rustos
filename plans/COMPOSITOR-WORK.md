@@ -401,24 +401,26 @@ complete. What it now guarantees:
 An app can now ask to be resizable, and the file viewer does, end to end. What
 it guarantees:
 
-- **The `resizable` request rides the existing create, no new syscall.**
-  `WindowRequest::Create` carries a validated `resizable` flag (the reserved
-  byte after the title; decode refuses anything but `0`/`1`), threaded through
+- **The sizing request rides the existing create, no new syscall.**
+  `WindowRequest::Create` carries a validated `WindowSizing` (the resizable
+  byte after the title and the minimum pair; decode refuses a dirty flag byte
+  and a minimum on a window that is never resized), threaded through
   `WindowClient::create` → the engine's `CreateSpec` → `WindowHost::window_opened`
   → `DesktopShell::decorate_window`. A resizable-requested window is decorated
   with the resize grabber and a live maximize/restore size toggle; a fixed-size
-  app passes `false` and is offered neither (and never receives a `Resized`).
+  app asks for `WindowSizing::Fixed` and is offered neither (and never
+  receives a `Resized`).
   The mechanism is per-app opt-in, never forced on an app that renders at one
   size (`AGENTS.md` §2.4 — the app decides, the window manager honours it).
 - **The file viewer is the shipping resizable app.** `userland/apps/viewer`
-  opens `resizable: true`, and on every `WindowEvent::Resized` (an interactive
+  opens `WindowSizing::Resizable`, and on every `WindowEvent::Resized` (an interactive
   grab settling, or a maximize/restore) it allocates a fresh frame region at the
   new client size, `WindowRequest::Resize`s the window onto it, unmaps the old
   region **only after** the session adopts the new one, re-wraps its text to the
   new column count, and repaints — preserving the reader's scroll position. It
   fails closed (keeping the current surface, never crashing) if a new region
   cannot be allocated or the session refuses the re-map. The file manager
-  (`resizable: true`) re-lays-out its listing on `Resized`, and the terminal is
+  (`WIN_SIZING`) re-lays-out its listing on `Resized`, and the terminal is
   now resizable too (Stage G).
 - **The viewer's render is size-parameterized and host-tested.** `render_status`/
   `render_lines` take the current `width`/`height`, `visible_{rows,cols}_for`

@@ -450,18 +450,13 @@ mod program {
         declare_app_bar(&mut client, event_endpoint);
         // Fixed size: the window is a short form, and a resizable one would
         // only stretch six fields across empty space.
-        let sizing = WindowSizing {
-            resizable: false,
-            min_width_px: mode.width_px,
-            min_height_px: mode.height_px,
-        };
         let Ok((window, server)) = client.create(
             grant,
             event_endpoint,
             FRAME_COUNT,
             &mode,
             view::TITLE,
-            sizing,
+            WindowSizing::Fixed,
         ) else {
             return fail(EXIT_NO_WINDOW, "desktop session refused the window");
         };

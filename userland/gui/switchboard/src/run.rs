@@ -87,12 +87,11 @@ mod program {
     use tairix_rt::io::{self, Stderr, Write};
     use tairix_switchboard::{
         authenticate_command, probe_scopes, refusal_notice, CycleOutcome, DegradedField,
-        RenderInputs, Service, ServiceHost, Switchboard, SwitchboardAction, WaitToken,
-        MIN_WIN_HEIGHT, MIN_WIN_WIDTH, PANEL_TITLE, SESSION_REFUSED, WIN_HEIGHT, WIN_RESIZABLE,
-        WIN_WIDTH,
+        RenderInputs, Service, ServiceHost, Switchboard, SwitchboardAction, WaitToken, PANEL_TITLE,
+        SESSION_REFUSED, WIN_HEIGHT, WIN_SIZING, WIN_WIDTH,
     };
     use tairix_theme::{TextRole, Theme, ThemeRegistry};
-    use tairix_window::{Desktop, WindowClient, WindowSizing, WindowTransport};
+    use tairix_window::{Desktop, WindowClient, WindowTransport};
 
     /// Frames in the shared region. The window protocol serialises a
     /// present (the app is parked in the call while the session reads), so
@@ -407,11 +406,7 @@ mod program {
                 FRAME_COUNT,
                 &mode,
                 PANEL_TITLE,
-                WindowSizing {
-                    resizable: WIN_RESIZABLE,
-                    min_width_px: MIN_WIN_WIDTH,
-                    min_height_px: MIN_WIN_HEIGHT,
-                },
+                WIN_SIZING,
             );
             let (id, server) = match created {
                 Ok(pair) => pair,

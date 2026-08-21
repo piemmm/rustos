@@ -473,17 +473,20 @@ impl tairix_window::WindowHost for ShellWindowHost<'_> {
         // controls) and the frame rim are composed around the app's content.
         // The app never draws its own chrome; it reacts to the typed lifecycle
         // events the controls raise over the window path. The app's own
-        // `resizable` request decides whether a live size toggle and the
-        // invisible resize edges — which overlap the client's outer pixels
-        // rather than reserving a visible band — are offered.
+        // sizing choice decides whether a live size toggle and the invisible
+        // resize edges — which overlap the client's outer pixels rather than
+        // reserving a visible band — are offered.
         self.shell
-            .decorate_window(self.compositor, wm, title, sizing.resizable);
+            .decorate_window(self.compositor, wm, title, sizing.resizable());
         // The smallest client the app said it can lay out at bounds what a
         // *user* may drag the window down to, so a drag never squeezes the app
         // past the point where it resizes itself back and the two fight. The
         // window manager still enforces its own furniture floor over the top.
-        self.compositor
-            .set_window_min_client_size(wm, sizing.min_width_px, sizing.min_height_px);
+        self.compositor.set_window_min_client_size(
+            wm,
+            sizing.min_width_px(),
+            sizing.min_height_px(),
+        );
         // A served window's pixels come from the app, which the session can
         // ask to present them again, so the compositor may give them back
         // under memory pressure. Windows the session paints itself (the
@@ -741,8 +744,7 @@ mod tests {
 
     /// A resizable window declaring no minimum client extent of its own, so
     /// only the window manager's furniture floor bounds a drag.
-    const RESIZABLE: WindowSizing = WindowSizing {
-        resizable: true,
+    const RESIZABLE: WindowSizing = WindowSizing::Resizable {
         min_width_px: 0,
         min_height_px: 0,
     };
@@ -1680,8 +1682,7 @@ mod tests {
                 open_one_sized(
                     &mut host,
                     3,
-                    WindowSizing {
-                        resizable: true,
+                    WindowSizing::Resizable {
                         min_width_px: 900,
                         min_height_px: 700,
                     },

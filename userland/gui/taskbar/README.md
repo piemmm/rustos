@@ -184,12 +184,16 @@ owns:
   `clock_menu::ROWS` table: the reading the bar is drawing (a statement, not a
   command) and *Set Date & Time…* (`plans/NEW-TASKBAR.md` T17). The heading
   repeats the bar's own label rather than deriving a second time, so the two
-  cannot disagree, and an unset clock says so instead of showing a fabricated
-  one. Setting a clock is authority the bar does not hold, so the row reports
+  cannot disagree, and an unset clock says *Time not set* instead of repeating
+  the bar's `--:--` or showing a fabricated one.
+  Setting a clock is authority the bar does not hold, so the row reports
   a typed `SetDateTime` and the session asks for an account that may.
 - **Notification area** — `NotificationArea`, an ordered set of status icons.
 - **Clock** — `Clock` holds the display label the caller sets (formatting a
-  `Time64` value is an upstream concern, `AGENTS.md` §21).
+  `Time64` value is an upstream concern, `AGENTS.md` §21). `clock::UNSET_LABEL`
+  is the one spelling of "no wall time yet" (`--:--`): a pressable clock whose
+  menu is where a time gets set must stay visible, so a caller draws that
+  rather than nothing.
 - **Switchboard capsule** — `SwitchboardTray`, the immovable trailing-most
   slot (`plans/NEW-TASKBAR.md` T9/T11). One pure derive turns the summary
   the Switchboard service publishes, plus the session's count of

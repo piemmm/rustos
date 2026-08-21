@@ -497,7 +497,11 @@ program PID 1 `init`'s `session` directive launches and supervises
   prompt** (refusals indistinguishable), and its program spawned as the
   target account and reaped while the shell blocks in its `ipc_call`; the
   request buffer is zeroed on every path (it carries the offered
-  password). Elevation serialises per console (endpoint capacity 1) and a
+  password). A graphical caller posts the non-blocking `Launch` form
+  instead, so the started program is login's child to reap on its own
+  loop; its `stderr` is login's console, invisible behind the desktop, so
+  an abnormal exit is audited (`LAUNCH_ENDED_ABNORMALLY`) rather than lost.
+  Elevation serialises per console (endpoint capacity 1) and a
   login that cannot bind a rendezvous audits `ELEVATE_UNAVAILABLE` and
   runs broker-less sessions — requests then fail closed at the missing
   endpoint.
@@ -541,6 +545,9 @@ because external audit-log consumers key off them.
 | 10021 | `SESSION_RESUMED`       | Info  | an existing desktop session was woken to the foreground instead of a second one being started |
 | 10022 | `SESSION_BACKGROUNDED`  | Info  | the presenting session stepped aside and stays resumable |
 | 10023 | `SESSION_ENDED_ON_EXIT` | Info/Warn | a live session was told to end because the authority is exiting (`Warn` when the wake could not be delivered) |
+| 10024 | `LAUNCH_GRANTED`        | Info  | a `Launch` request re-authenticated and its program was started; no exit code is known yet |
+| 10025 | `LAUNCH_REFUSED`        | Warn  | a `Launch` request was refused (cause audited, never disclosed) |
+| 10026 | `LAUNCH_ENDED_ABNORMALLY` | Warn | a program started for a `Launch` request exited non-zero; a reserved load-failure status is named in words, any other code stated as the number |
 
 A refusal record names the account offered and the attested uid, never the
 offered secret, and never *which* credential fault it was: refusals stay

@@ -141,9 +141,10 @@ started on **one** reusable wait-set, so every wait parks on an event and
 nothing polls. A launched child is *login's*, not the requester's, so login
 owns collecting it: each is joined to that wait-set under its own token, and
 its exit wakes whichever supervision is parked, which then reaps
-non-blockingly. The sweep also runs whenever supervision begins, so an exit
-that landed between watches is not missed, and it drops any entry that is no
-longer login's to reap — keeping one would wake supervision for ever.
+non-blockingly and audits an exit that was not clean. The sweep also runs
+whenever supervision begins, so an exit that landed between watches is not
+missed, and it drops any entry that is no longer login's to reap — keeping
+one would wake supervision for ever.
 
 A login screen that exits without an accepted verdict is restarted; three
 consecutive failures
@@ -181,7 +182,15 @@ Login owns the reserved `EventId` range `10000..11000` (`AGENTS.md` §2.5,
 `SESSION_AUTH_GRANTED`, `SESSION_AUTH_REFUSED`, `SESSION_REQUEST_REFUSED`,
 `SESSION_ACCOUNTS_SENT`, `SESSION_ENDPOINT_UNAVAILABLE`,
 `GREETER_FAILED`, `GREETER_DEGRADED`, `SESSION_RESUMED`,
-`SESSION_BACKGROUNDED`, `SESSION_ENDED_ON_EXIT`.
+`SESSION_BACKGROUNDED`, `SESSION_ENDED_ON_EXIT`, `LAUNCH_GRANTED`,
+`LAUNCH_REFUSED`, `LAUNCH_ENDED_ABNORMALLY`.
+
+The last of those is the reaper's: a program started by a non-blocking
+elevated launch writes its `stderr` to login's console, which behind a
+desktop is the framebuffer text console nobody sees, so login states an
+abnormal exit where a user can find it — naming a reserved load-failure
+status in words through the one shared map, and otherwise stating the code.
+A clean exit records nothing.
 
 ## Tests
 
@@ -196,7 +205,9 @@ the elevation broker's decision table (grant + audit, foreign console
 refused before parsing, malformed refused without authentication,
 indistinguishable refusals, spawn refusal reported verbatim, and the
 non-blocking launch taking the launch seam rather than the blocking one,
-refused indistinguishably on a wrong password and audited apart).
+refused indistinguishably on a wrong password and audited apart, and its
+child's abnormal exit audited once — silently for a clean one, named in
+words for a reserved load-failure status and by code alone for any other).
 
 The `session-v1` surface is covered the same way: the broker refusing a
 caller whose attested uid is not the greeter and one on another console

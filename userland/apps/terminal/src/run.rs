@@ -99,13 +99,13 @@ mod program {
     use tairix_terminal::scheme::Painted;
     use tairix_terminal::settings::{preferred_extent, Settings, SheetOutcome};
     use tairix_terminal::{
-        shell_env, shell_load_failure, shell_wires, ShellSource, Terminal, TERM, WIN_RESIZABLE,
+        shell_env, shell_load_failure, shell_wires, win_sizing, ShellSource, Terminal, TERM,
     };
     use tairix_theme::{Theme, ThemeRegistry};
     use tairix_users::DEFAULT_SHELL;
     use tairix_window::{
         damage_in, event_endpoint_for, key_input_event, pointer_input_events, Desktop, PopupSpec,
-        WindowClient, WindowSizing, WindowTransport, EVENT_MAILBOX_CAPACITY,
+        WindowClient, WindowTransport, EVENT_MAILBOX_CAPACITY,
     };
 
     /// Exit code when the event mailbox or a wait-set member could not be
@@ -986,11 +986,7 @@ mod program {
             FRAME_COUNT,
             &mode,
             "Terminal",
-            WindowSizing {
-                resizable: WIN_RESIZABLE,
-                min_width_px,
-                min_height_px,
-            },
+            win_sizing(min_width_px, min_height_px),
         );
         let Ok((window, server)) = created else {
             let _ = tairix_rt::shm_unmap(base as u64, total);

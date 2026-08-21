@@ -17,6 +17,8 @@ use alloc::vec::Vec;
 
 use tairix_controls::{AuthorityState, ControlRole, ControlState, MenuItem};
 
+use crate::clock;
+
 /// One command the clock's menu can offer.
 ///
 /// A closed set: every variant has a row in [`ROWS`] and a typed outcome the
@@ -67,8 +69,8 @@ pub const SET_ROW_LABEL: &str = "Set Date & Time…";
 /// What the reading row states when no wall-clock time has been
 /// established this boot.
 ///
-/// The bar's label is empty then, and an empty row would read as a bug.
-/// Saying so is honest; showing `00:00` would be a fabricated time.
+/// The bar draws [`clock::UNSET_LABEL`] then, which is enough on a bar and
+/// too terse for a heading; showing `00:00` would be a fabricated time.
 pub const READING_UNSET_LABEL: &str = "Time not set";
 
 /// Why the set-time row cannot act: this session's console has no
@@ -83,8 +85,9 @@ pub const REASON_NO_BROKER: &str = "This session cannot authenticate to set the 
 /// told, and the refusing answer is the default.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ClockPermits {
-    /// The reading the bar is drawing, empty when the wall clock has never
-    /// been set. The menu states it; it never re-derives it.
+    /// The reading the bar is drawing, or [`clock::UNSET_LABEL`] when the
+    /// wall clock has never been set. The menu states it; it never re-derives
+    /// it.
     pub reading: String,
     /// Whether this session can re-authenticate an account to set the time
     /// with — that is, whether its console has an elevation broker.
@@ -102,10 +105,10 @@ pub fn rows(permits: &ClockPermits) -> Vec<MenuItem> {
     ROWS.iter()
         .map(|row| match row {
             ClockRow::Reading => {
-                let label = if permits.reading.is_empty() {
-                    READING_UNSET_LABEL
-                } else {
+                let label = if states_a_time(&permits.reading) {
                     permits.reading.as_str()
+                } else {
+                    READING_UNSET_LABEL
                 };
                 MenuItem::new(label).with_state(ControlState::disabled())
             }
@@ -124,6 +127,13 @@ pub fn rows(permits: &ClockPermits) -> Vec<MenuItem> {
             }
         })
         .collect()
+}
+
+/// Whether `label` is a reading rather than the bar's stand-in for no time
+/// at all — which the bar spells [`clock::UNSET_LABEL`], and which is empty
+/// before the first reading is spelled.
+fn states_a_time(label: &str) -> bool {
+    !label.is_empty() && label != clock::UNSET_LABEL
 }
 
 /// The command the row at `index` asks for, or `None` for an index that
@@ -162,8 +172,12 @@ mod tests {
 
     #[test]
     fn an_unset_clock_says_so_rather_than_showing_a_fabricated_time() {
-        let items = rows(&permits("", true));
-        assert_eq!(items[0].label(), READING_UNSET_LABEL);
+        // What the bar actually draws while the clock is unset, and the state
+        // before the first reading has been spelled at all.
+        for reading in [crate::clock::UNSET_LABEL, ""] {
+            let items = rows(&permits(reading, true));
+            assert_eq!(items[0].label(), READING_UNSET_LABEL);
+        }
     }
 
     #[test]

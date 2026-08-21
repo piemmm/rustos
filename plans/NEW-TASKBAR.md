@@ -1663,9 +1663,10 @@ it or the reverse):
 - **The heading states the bar's own label, never a second reading.** The
   session owns the wall clock and hands the bar the spelled text; the menu
   repeats that string. A menu that re-derived the time could disagree with
-  the bar beside it. An unset clock (nothing has established a wall time this
-  boot, so the label is empty) says *Time not set* rather than showing a
-  fabricated `00:00`.
+  the bar beside it. An unset clock — nothing has established a wall time this
+  boot, so the bar draws the `clock::UNSET_LABEL` placeholder rather than
+  vanishing — has its heading say *Time not set*, never a repeat of the
+  dashes and never a fabricated `00:00`.
 - **One console attestation serves two rows.** Whether the *Lock Screen* row
   (T13) can act and whether the set-time row can act are the **same** fact —
   does this session's console have a re-authentication broker — so the

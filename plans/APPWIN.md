@@ -223,9 +223,11 @@ Done. What now holds:
   window's footprint is the shared cascade origin — its **outer**
   top-left — with the app's client surface grown by the furniture band
   the window manager reserves (`WindowFrame::insets`, the same frame the
-  compositor decorates with), and each app declares its own resizability
-  once (`WIN_RESIZABLE`, beside its window size) because that flag sizes
-  the band. `served_window_layout` returns both rectangles, so a
+  compositor decorates with), and each app declares its own sizing once
+  (`WIN_SIZING`, beside its window size; the terminal, whose floor is a
+  runtime font measurement, derives `WIN_RESIZABLE` from that one
+  declaration) because resizability sizes the band.
+  `served_window_layout` returns both rectangles, so a
   screendump assertion measures the whole window while a click is
   measured inside the *client* and therefore reaches the application
   rather than the title bar above it.

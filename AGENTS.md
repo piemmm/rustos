@@ -614,6 +614,7 @@ tairix/
 │   ├── termcap/         # Compiled-in TERM->capability database.
 │   ├── theme/           # Shared desktop theme definition (dark/light).
 │   ├── tty/             # Shared tty line discipline (echo/ONLCR/^C).
+│   ├── tz/              # Civil time zones: compiled IANA rule store reader.
 │   ├── usb/             # Bus-agnostic xHCI USB host-controller protocol.
 │   ├── users/           # User-account database.
 │   ├── util/            # Strictly justified utilities.
@@ -675,6 +676,7 @@ tairix/
 │   ├── syshelp/         # Build-discovered shipped payload: bundle Help/Resources
 │   │                    #   trees and the desktop's icon artwork.
 │   ├── cc/              # Host-only C toolchain wrapper for the C-ABI test.
+│   ├── tzcompile/       # Host-only IANA tzdata -> zone-store compiler.
 │   ├── qemu/            # QEMU run scripts.
 │   └── ci/              # CI/build-host orchestration (thin xtask wrappers).
 │
@@ -1400,6 +1402,7 @@ You are not exempt from any rule above. In addition:
     | Menus: who owns a menu's pixels and behaviour, the one-menu-at-a-time rule, the app's request/outcome contract | `plans/NEW-MENUS.md` |
     | Display / GPU acceleration: hardware layer compositing, the `AcceleratedDisplay`/`AccelLayer` ABI, virtio-gpu, HVS, zero-copy layers, damage, vsync flips | `plans/FIX-DISPLAY-ACCELERATION.md` |
     | Desktop redraw speed without hardware acceleration: compositor occlusion/opaque runs, per-control damage, the frosted-backdrop cache, present batching, frame pacing, and CPU-dispatched raster kernels | `plans/FIX-DESKTOP-SPEEDUP.md` |
+    | Civil time zones: the vendored IANA rules, the compiled zone store, the `lib/tz` engine, the `TZ`/machine-setting/UTC resolution order, and local rendering | `plans/TIMEZONES.md` |
     | Storage namespace: drives, volumes, aliases, paths, resource references | `docs/src/filesystem/drives.md` (binding spec); `plans/ALIAS.md`; `plans/DRIVES.md` |
     | Links, symbolic and hard, and path canonicalisation: the `FileKind`/`NodeKind` kind, `NO_FOLLOW`, `fs_symlink`/`fs_readlink`/`fs_link`/`fs_realpath`, VFS per-component resolution with its hop bound and mount-projection floor, `RealpathMode`, the per-format on-disk spellings, the link-count lifecycle, `ln`/`ls`/`readlink`, desktop shortcuts | `plans/SYMLINKS.md` |
     | ARXFS | `docs/src/filesystem/arxfs-spec.md` (binding spec); `plans/ARXFS-METADATA.md`; `plans/ARXFS-SNAPSHOT.md`; `plans/ARXFS-FEC.md`; `plans/SPARSE.md` |
@@ -1538,6 +1541,7 @@ Authoritative subdirectories:
 │   ├── Keys/     # Local capability-authority signing material.
 │   └── Policy/   # MAC and capability policy.
 ├── Printing/    # Print spooler and drivers' user-space services.
+├── Zoneinfo/    # Compiled IANA civil-time zone rules, read-only shipped data.
 ├── Logs/        # Append-only structured logs (writable; nosuid,nodev,noexec).
 ├── Settings/    # Machine-wide settings (writable; nosuid,nodev,noexec).
 └── Services/    # Long-running system services. A service is an app:

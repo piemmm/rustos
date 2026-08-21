@@ -517,6 +517,13 @@ The open items, in priority order:
   `launch_argv`. The harness half compounded it: the autostarted file manager
   holds strip slot 0, so measuring "the launched application" there compared
   it with itself; the script now drives `APPBAR_LAUNCHED_SLOT`.
+- **D48 — a window `Create` an app could build but the session had to refuse,
+  and nothing said so — DONE.** `datetime.app` asked for a fixed-size window
+  *and* a minimum client size; the protocol refuses that pair, so the app
+  exited before it ever drew. `WindowSizing` is now a sum type, so the
+  combination cannot be spelled. Its second half was the silence: the elevated
+  child's `stderr` is login's console, invisible behind the desktop, so login
+  now audits an abnormal exit (`LAUNCH_ENDED_ABNORMALLY`) naming the reason.
 
 These are **distinct in kind**: D1 finishes an interrupt-model fix, D2
 and D4 are §27 foundational-completeness defects, D3 is an Arch-HAL
@@ -540,10 +547,12 @@ write path (open, needs a lock-abandon primitive), D37 is a suspected
 per-port context-switch gap found by reading, not by a failure (open, confirm
 before fixing), and D43 was a privilege-boundary defect of the same
 found-by-reading kind as D42 — a user-writable register the kernel trusted for
-its own per-CPU identity (fixed), and D47 was a dropped argv[0] in the desktop's
+its own per-CPU identity (fixed), D47 was a dropped argv[0] in the desktop's
 launch path that started a core component in the wrong role, behind a harness
-that measured the wrong slot (fixed). Do not collapse the open items into one
-change; land each on its own whole-project-green gate (§7).
+that measured the wrong slot (fixed), and D48 was a window request an app could
+build but the protocol had to refuse, dying in silence because a graphical
+elevation's `stderr` reaches no one (fixed). Do not collapse the
+open items into one change; land each on its own whole-project-green gate (§7).
 
 ## Coupling to be aware of
 
@@ -2845,6 +2854,52 @@ consecutive runs at ~20s each.
 **Regression cover.** `tairix_desktop_session::launch::tests::
 a_launch_names_the_program_before_its_arguments` fails on the pre-fix
 shape; the vertical itself covers the wiring end to end.
+
+## D48 — a window `Create` an app could build but the session had to refuse (DONE)
+
+The symptom: choosing *Set Date & Time…* from the desktop clock's menu showed
+the credential prompt, accepted the credentials, and then no window appeared.
+
+**Cause.** `WindowRequest::Create` carried a `resizable` flag *beside* a
+minimum client size, and its decoder refused `resizable = false` with a
+non-zero minimum — a window that is never resized has nothing to measure a
+floor against. `datetime.app` asked for exactly that: fixed size, minimum set
+to its own extent. Every launch of it therefore ended at the window create,
+having drawn nothing. A caller could build a request the server was obliged to
+reject, which is a defect in the type, not in either party.
+
+**Fix.** `WindowSizing` is a sum type — `Fixed`, or `Resizable { min_width_px,
+min_height_px }` — carried whole in `Create`. The contradictory pair has no
+spelling, so no app can construct it: `lib/abi`'s
+`every_sizing_an_app_can_ask_for_survives_the_round_trip` enumerates every
+sizing that exists and asserts each decodes back to itself. The wire decoder
+still refuses the pair, because a foreign encoder can still put those bytes on
+the wire. Each app now states one sizing: `datetime.app` `Fixed`; `lib/browse`
+and Switchboard publish a `WIN_SIZING` their harness reads back; the terminal,
+whose floor is a runtime font measurement, declares `win_sizing` and derives
+`WIN_RESIZABLE` from it.
+
+**Second half — the silence.** The app *did* state its reason on `stderr`, but
+an elevated child inherits login's console, which under a graphical session is
+the framebuffer text console behind the desktop: no consumer, no serial, no
+user. Login, the only observer of that exit, now audits an abnormal one
+(`LAUNCH_ENDED_ABNORMALLY`, `EventId(10_026)`) with the pid, the status, and
+the reason `tairix_abi::load_failure_reason` gives a reserved load status. A
+clean exit records nothing.
+
+**A misreading to not repeat.** The first diagnosis called this an elevation
+running under the wrong account, from `task capabilities derived … uid=1000
+caps=3`. Both fields were misread: `caps` is the *count* of derived
+capabilities (`kernel/sec/src/captable.rs`), so `caps=3` is all three the
+manifest requested, `CAP_TIME_SET` included; and uid 1000 *is* the seeded debug
+`root` account (`tools/mkimage/src/rootfs.rs`), i.e. the account the prompt
+authenticated. There was never a capability or account defect here.
+
+**Regression cover.** `tairix-test-datetime-elevate-qemu-aarch64` drives clock
+→ *Set Date & Time…* → prompt → typed credentials and passes only on two
+latches: an `APP_LOADED` naming the bundle, and a window create served on the
+reserved endpoint *after* it. It ran to the 600 s ceiling before the fix and
+now passes in ~20 s, five consecutive runs.
 
 ## Non-goals / do not do
 

@@ -39,6 +39,7 @@ use tairix_abi::desktop::DesktopInfo;
 use tairix_abi::driver::display::{DamageRect, DisplayFormat, DisplayMode};
 use tairix_abi::origin::ProcId;
 use tairix_abi::reply::{encode_status_reply, STATUS_REPLY_LEN};
+pub use tairix_abi::window_ipc::WindowSizing;
 use tairix_abi::window_ipc::{
     encode_create_reply, encode_desktop_reply, AppBar, WindowEvent, WindowRequest, WindowTitle,
     WINDOW_CREATE_REPLY_LEN, WINDOW_DESKTOP_REPLY_LEN,
@@ -92,11 +93,11 @@ pub trait WindowHost {
     /// the create: the engine unmaps the region and replies the refusal,
     /// keeping engine and host in lockstep.
     ///
-    /// The host is the **enforcer** of
-    /// [`WindowSizing::min_width_px`]/[`WindowSizing::min_height_px`]: it
-    /// resizes no smaller than the larger of that and its own frame
-    /// furniture's floor. The app states its minimum here once and lays out
-    /// at whatever size it is given, so nothing resizes itself back.
+    /// The host is the **enforcer** of a
+    /// [`WindowSizing::Resizable`]'s declared minimum: it resizes no
+    /// smaller than the larger of that and its own frame furniture's floor.
+    /// The app states its minimum here once and lays out at whatever size
+    /// it is given, so nothing resizes itself back.
     ///
     /// `owner` is the kernel-attested caller, not anything the client
     /// said — it is the only trustworthy answer to "which application is
@@ -302,40 +303,6 @@ const fn surface_of(
     }
 }
 
-/// What an app asks of the window manager's sizing of one window: whether
-/// it may be resized at all, and the smallest client it may be resized to.
-///
-/// The pair travels as one value because the minimum only means something
-/// for a resizable window — a minimum declared without `resizable` is
-/// refused at decode, since a window that is never resized can never be
-/// measured against a floor.
-///
-/// One definition serves both halves: the app fills it in for
-/// [`WindowClient::create`] and the engine hands the host the same value,
-/// so the two cannot drift.
-///
-/// [`WindowClient::create`]: crate::client::WindowClient::create
-#[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
-pub struct WindowSizing {
-    /// Whether the window manager presents the window with a resize
-    /// grabber and a live maximize/restore size toggle. A fixed-size app
-    /// leaves this `false` and is offered neither affordance (and never
-    /// receives a `WindowEvent::Resized`).
-    pub resizable: bool,
-    /// Smallest client width, in physical pixels, the window manager may
-    /// resize the window to; `0` declares no minimum of the app's own,
-    /// leaving the frame furniture's floor to stand alone.
-    ///
-    /// The window manager enforces it, never the app: an app states the
-    /// floor here once and then lays out at exactly the size it is told.
-    /// An app that resized itself back up instead would fight the drag,
-    /// frame by frame.
-    pub min_width_px: u32,
-    /// Smallest client height, in physical pixels, on the same terms as
-    /// [`min_width_px`](Self::min_width_px).
-    pub min_height_px: u32,
-}
-
 /// Everything one validated `Create` asks for, in one place, so the
 /// engine's create path takes the request as a unit.
 #[derive(Copy, Clone)]
@@ -508,9 +475,7 @@ impl<M: ShmMapper> WindowServer<M> {
                 stride_bytes,
                 format,
                 title,
-                resizable,
-                min_width_px,
-                min_height_px,
+                sizing,
             } => {
                 let spec = CreateSpec {
                     shm_handle,
@@ -518,11 +483,7 @@ impl<M: ShmMapper> WindowServer<M> {
                     frame_count,
                     surface: surface_of(width_px, height_px, stride_bytes, format),
                     title,
-                    sizing: WindowSizing {
-                        resizable,
-                        min_width_px,
-                        min_height_px,
-                    },
+                    sizing,
                 };
                 create_reply(reply, self.create(host, caller, spec), self.server)
             }

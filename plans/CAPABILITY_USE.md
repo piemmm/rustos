@@ -615,11 +615,16 @@ exist from CU3).
   exists.
 - Audit: `ELEVATE_GRANTED` / `ELEVATE_REFUSED` / `ELEVATE_UNAVAILABLE` /
   `VERIFY_GRANTED` / `VERIFY_REFUSED` / `LAUNCH_GRANTED` /
-  `LAUNCH_REFUSED` (login's 10_007–10_009, 10_012–10_013,
-  10_024–10_025); the launch pair is separate from the run pair because
-  no exit code exists at that point and the record names the pid login
-  now owns. Refusal causes (wrong password, unknown or locked account, no
-  attested uid) are audited but never disclosed — the requester sees one
+  `LAUNCH_REFUSED` / `LAUNCH_ENDED_ABNORMALLY` (login's 10_007–10_009,
+  10_012–10_013, 10_024–10_026); the launch pair is separate from the run
+  pair because no exit code exists at that point and the record names the
+  pid login now owns. The exit code arrives later, at the reap, and a
+  non-zero one is audited then: a launched child's `stderr` is login's
+  console, invisible behind a desktop, so the reaper is the only observer
+  that can state how it ended (a reserved load status is named in words
+  via `tairix_abi::load_failure_reason`, any other code as the number).
+  Refusal causes (wrong password, unknown or locked account, no attested
+  uid) are audited but never disclosed — the requester sees one
   indistinguishable `PermissionDenied`.
 - Tests: abi encode/decode round-trip and fail-closed rejects for all
   three request variants and all four reply variants (including a
@@ -631,7 +636,9 @@ exist from CU3).
   answered without ever invoking the launcher, an attested uid owning no
   account refused indistinguishably from a wrong password, an unattested
   caller refused before authenticating, a launch taking the launch seam
-  and never the blocking one); `lib/users` and the login
+  and never the blocking one, an abnormal exit audited once with a
+  reserved load status named in words and a clean exit audited not at
+  all); `lib/users` and the login
   `Authenticator` implementations tested for `authenticate_uid` parity
   with the username path; the shell builtin host-tested over the shared
   fixture (prompt + post + exit-code, refusal reporting, no post after a

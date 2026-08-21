@@ -18,7 +18,10 @@
 //! [`ElevateRequest::Launch`], which takes the identical
 //! re-authentication path and answers the started program's pid instead.
 //! The program is *login's* child either way, so the `Run` binary reaps a
-//! launched one on its own loop rather than leaving it a zombie.
+//! launched one on its own loop rather than leaving it a zombie, handing an
+//! abnormal exit to [`audit_launch_ended_abnormally`] — such a child's
+//! `stderr` is login's console, invisible behind a desktop, so the reaper is
+//! the only component that can state how it ended.
 //!
 //! The same endpoint also answers a narrower [`ElevateRequest::Verify`]
 //! request: re-authenticate the **caller's own** kernel-attested account and
@@ -369,6 +372,49 @@ fn audit_launch_refused(sink: &dyn Sink, cause: &str, username: &str, err: Errno
     );
 }
 
+/// Audit a program started for an
+/// [`ElevateRequest::Launch`] request that ended abnormally.
+///
+/// Login is the only component that can state this. Such a child inherits
+/// login's console — under a graphical session the framebuffer text console
+/// behind the desktop — so whatever it wrote to `stderr` before exiting
+/// reaches nobody; the observer of the exit records it where a user can find
+/// it. A clean exit (`status` 0) is a normal end and records nothing.
+///
+/// A status inside the reserved load-failure band is named in words through
+/// the one shared reverse map ([`tairix_abi::load_failure_reason`]); any
+/// other code is stated as the number alone, the most login can honestly say
+/// about a program it did not write.
+pub fn audit_launch_ended_abnormally(sink: &dyn Sink, pid: i32, status: i32) {
+    if status == 0 {
+        return;
+    }
+    let mut pid_buf = DecBuf::new();
+    let mut status_buf = DecBuf::new();
+    emit(
+        sink,
+        Level::Warn,
+        events::LAUNCH_ENDED_ABNORMALLY,
+        "elevated program ended abnormally",
+        &[
+            Field {
+                key: "pid",
+                value: tairix_log::FieldValue::Str(pid_buf.format(i128::from(pid))),
+            },
+            Field {
+                key: "status",
+                value: tairix_log::FieldValue::Str(status_buf.format(i128::from(status))),
+            },
+            Field {
+                key: "reason",
+                value: tairix_log::FieldValue::Str(
+                    tairix_abi::load_failure_reason(status).unwrap_or("-"),
+                ),
+            },
+        ],
+    );
+}
+
 fn audit_verify_granted(sink: &dyn Sink, uid: u32) {
     let mut uid_buf = DecBuf::new();
     emit(
@@ -407,14 +453,14 @@ fn audit_verify_refused(sink: &dyn Sink, cause: &str, err: Errno) {
 mod tests {
     extern crate std;
 
-    use super::{handle_elevate_request, ElevateLauncher};
+    use super::{audit_launch_ended_abnormally, handle_elevate_request, ElevateLauncher};
     use crate::events;
     use crate::session::{AuthenticatedUser, Authenticator, Credentials, Gid, Uid};
     use alloc::string::ToString;
     use alloc::vec::Vec;
     use core::cell::RefCell;
     use tairix_abi::elevate::{ElevateReply, ElevateRequest, ELEVATE_MAX_REQUEST};
-    use tairix_abi::Errno;
+    use tairix_abi::{Errno, LOAD_UNVERIFIED};
     use tairix_caps::CapabilitySet;
     use tairix_log::{Event, EventId, Sink};
 
@@ -489,21 +535,39 @@ mod tests {
         }
     }
 
-    /// Sink counting events by id.
+    /// Sink counting events by id and keeping each record's textual fields.
     #[derive(Default)]
     struct CountSink {
         seen: RefCell<Vec<EventId>>,
+        fields: RefCell<Vec<(alloc::string::String, alloc::string::String)>>,
     }
 
     impl CountSink {
         fn count(&self, id: EventId) -> usize {
             self.seen.borrow().iter().filter(|e| **e == id).count()
         }
+
+        /// The value the most recent record carried under `key`.
+        fn field(&self, key: &str) -> Option<alloc::string::String> {
+            self.fields
+                .borrow()
+                .iter()
+                .rev()
+                .find(|(k, _)| k == key)
+                .map(|(_, value)| value.clone())
+        }
     }
 
     impl Sink for CountSink {
         fn write_event(&self, event: &Event<'_>) {
             self.seen.borrow_mut().push(event.id);
+            for field in event.fields {
+                if let tairix_log::FieldValue::Str(value) = field.value {
+                    self.fields
+                        .borrow_mut()
+                        .push((field.key.to_string(), value.to_string()));
+                }
+            }
         }
     }
 
@@ -691,6 +755,42 @@ mod tests {
         assert!(launcher.launches.borrow().is_empty());
         assert_eq!(sink.count(events::ELEVATE_REFUSED), 1);
         assert_eq!(sink.count(events::LAUNCH_REFUSED), 0);
+    }
+
+    #[test]
+    fn a_launched_program_that_ended_abnormally_is_audited_once() {
+        let sink = CountSink::default();
+        audit_launch_ended_abnormally(&sink, 4210, 83);
+        assert_eq!(sink.count(events::LAUNCH_ENDED_ABNORMALLY), 1);
+        assert_eq!(sink.field("pid").as_deref(), Some("4210"));
+        assert_eq!(sink.field("status").as_deref(), Some("83"));
+    }
+
+    #[test]
+    fn a_launched_program_that_exited_cleanly_is_not_audited() {
+        let sink = CountSink::default();
+        audit_launch_ended_abnormally(&sink, 4210, 0);
+        assert_eq!(sink.count(events::LAUNCH_ENDED_ABNORMALLY), 0);
+    }
+
+    #[test]
+    fn a_reserved_load_failure_status_is_named_in_words() {
+        let sink = CountSink::default();
+        audit_launch_ended_abnormally(&sink, 4210, LOAD_UNVERIFIED);
+        assert_eq!(sink.count(events::LAUNCH_ENDED_ABNORMALLY), 1);
+        assert_eq!(
+            sink.field("reason").as_deref(),
+            tairix_abi::load_failure_reason(LOAD_UNVERIFIED)
+        );
+    }
+
+    #[test]
+    fn a_status_outside_the_load_band_states_the_code_and_invents_no_reason() {
+        let sink = CountSink::default();
+        audit_launch_ended_abnormally(&sink, 4210, 7);
+        assert!(tairix_abi::load_failure_reason(7).is_none());
+        assert_eq!(sink.field("status").as_deref(), Some("7"));
+        assert_eq!(sink.field("reason").as_deref(), Some("-"));
     }
 
     #[test]

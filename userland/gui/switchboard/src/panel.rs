@@ -18,6 +18,7 @@ use alloc::format;
 use alloc::string::String;
 
 use tairix_abi::switchboard_ipc::{CommandSection, FrameReport, SeatReport, SwitchboardRequest};
+use tairix_abi::window_ipc::WindowSizing;
 use tairix_abi::{CapabilityQuery, Errno, Signal};
 
 use crate::model::{
@@ -401,10 +402,15 @@ pub const WIN_WIDTH: u32 = 760;
 /// [`WIN_WIDTH`]).
 pub const WIN_HEIGHT: u32 = 560;
 
-/// Whether the overview window asks the window manager to decorate it
-/// resizable, which widens the furniture band reserved around the client
-/// (see [`WIN_WIDTH`]).
-pub const WIN_RESIZABLE: bool = true;
+/// The sizing the overview window asks the window manager for: resizable,
+/// down to the narrowest client its sections still seat (see [`WIN_WIDTH`]).
+///
+/// Resizable decoration widens the furniture band reserved around the
+/// client.
+pub const WIN_SIZING: WindowSizing = WindowSizing::Resizable {
+    min_width_px: MIN_WIN_WIDTH,
+    min_height_px: MIN_WIN_HEIGHT,
+};
 
 /// The narrowest client width the panel is laid out for, declared to the
 /// window manager when the window opens so a drag simply stops here rather

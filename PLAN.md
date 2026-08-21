@@ -4065,6 +4065,33 @@ Load-bearing decisions a future contributor needs:
   `tairix_browse::GridFlow` gained `ColumnsFromLeading` beside its existing
   mirror image.
 
+### Stage 7 follow-up — civil time zones (`plans/TIMEZONES.md`)
+
+**Status: planned.** Every surface that shows a timestamp shows UTC, and a
+machine cannot say which zone it is in. `plans/TIMEZONES.md` is the binding
+design and carries the deliverable list (TZ1–TZ8) and its current state; it is
+not repeated here.
+
+Load-bearing decisions a future contributor needs:
+
+- **The rules are IANA's data; every line of code is ours.** The vendored,
+  SHA-256-pinned `tzdata.zi` source text is compiled by a first-party host
+  tool (`tools/tzcompile`) into TAIRiX's own compact store; IANA's own `TZif`
+  build output is vendored as *test oracle* only and never shipped.
+- **`/System/Zoneinfo/zones.tzx`** is the shipped store, planted by
+  `tools/mkimage` from the pinned source (§16.2 amended; rationale in
+  "Charter Amendments"). Zone data is never compiled into a binary.
+- **`lib/tz`** (new `lib/*` crate) is the one engine: a total, fuzzed,
+  allocation-free `no_std` reader, `offset_at`/`local`/`instant_from_local`,
+  and the `TZ` → `/System/Settings/Timezone` → UTC resolution order every
+  consumer reads. A local time in a DST gap, or one that occurs twice, is a
+  typed error the caller resolves — never guessed.
+- **The calendar arithmetic is not duplicated:** local rendering shifts the
+  instant and reuses `tairix_fsmeta::calendar`, the same decomposition `ls` and
+  the desktop clock already read.
+- **Storage is unchanged:** absolute time stays UTC `Time64` on the wire and on
+  disk (§21); a zone applies only where a human reads or types a time.
+
 ---
 
 ## Stage 8 — Installer and Image Builders
@@ -6914,6 +6941,17 @@ of how much code was produced.
 
 Amendments to `AGENTS.md` (the binding charter) are logged here so an agent
 can see *why* a rule exists without diffing the charter's history.
+
+- **2026-08-21 — `/System/Zoneinfo` for the shipped civil-time zone rules.**
+  Amended §16.2's store list (owner decision, `plans/TIMEZONES.md`): the
+  compiled IANA zone tables are read-only OS-shipped data, so they belong
+  beside `Fonts/` and `Graphics/` rather than in `Settings/` (writable
+  machine-wide settings — the *choice* of zone lives there, not the rules) or
+  `Libraries/` (the closed curated shared-library set, §16.4). Shipping them as
+  a file rather than compiling them into a binary is what keeps the store
+  discoverable, replaceable with a newer IANA release, and out of every
+  program's image (§16.5's data-on-disk rule). No new capability guards it: the
+  ordinary per-inode read gate applies (§5.2 minimalism).
 
 - **2026-08-05 — Comments are terse, and a file's existing prose is not a
   precedent.** Amended §2.11 (and its §15.17 agent mirror and the §23.2 review

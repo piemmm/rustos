@@ -269,6 +269,9 @@ tairix-test-autoload-input-qemu-aarch64 = { path = "../../tests/integration/auto
 # bar is driven and the two window markers the guest emits), defined once in
 # that test crate's lib target beside the guest PASS gate.
 tairix-test-appbar-qemu-aarch64 = { path = "../../tests/integration/appbar_qemu_aarch64", version = "=0.0.0" }
+# The elevated Date & Time vertical's shared interaction contract (the
+# application the elevate path starts and the window count the guest latches).
+tairix-test-datetime-elevate-qemu-aarch64 = { path = "../../tests/integration/datetime_elevate_qemu_aarch64", version = "=0.0.0" }
 # The kernel/ipc audit vocabulary: the AW3 vertical's markers key on the
 # `MessageDelivered` / `CallReplied` records the kernel emits for the
 # window channel — the shared definitions, never literals.

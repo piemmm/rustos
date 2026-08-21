@@ -201,9 +201,11 @@ cannot use the blocking form — its reply arrives only once the elevated
 program has exited, so a desktop session posting it would stop serving
 windows to the very program it is waiting for, and the two would deadlock.
 It grants nothing extra: same account, same re-authentication, same
-`manifest ∩ ceiling` for the child, and its own audit pair
-(`LAUNCH_GRANTED` / `LAUNCH_REFUSED`). Because the started program is
-login's child rather than the requester's, login tracks it in its own
+`manifest ∩ ceiling` for the child, and its own audit records
+(`LAUNCH_GRANTED` / `LAUNCH_REFUSED`, plus `LAUNCH_ENDED_ABNORMALLY` when
+the child ends badly — its `stderr` is login's console, invisible behind a
+desktop, so the reaper is the only observer that can say so). Because the
+started program is login's child rather than the requester's, login tracks it in its own
 launched-pid table — joined to the wait-set it already parks in — and reaps
 it on the wake its exit produces; the requester never can, so no launch
 leaves a zombie. The desktop's use of it is the clock menu's *Set Date &

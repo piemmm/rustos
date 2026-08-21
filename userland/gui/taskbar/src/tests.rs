@@ -4108,7 +4108,24 @@ fn clock_label_paints_and_an_empty_clock_paints_nothing() {
             theme.palette().on_surface,
             floating_ground(&theme, theme.palette().surface_raised),
         ),
-        "an unset clock draws nothing"
+        "an empty label draws nothing"
+    );
+
+    // An unset wall clock is not an empty label: the clock is pressable and
+    // its menu is where a time is set, so the placeholder must be visible.
+    bar.clock_mut().set_label(crate::clock::UNSET_LABEL);
+    let unset = TaskbarRenderer::new(test_icon_cache())
+        .render(&bar, Scale::ONE, &mut NoArtwork)
+        .expect("bar renders");
+    assert!(
+        region_has_role_ink(
+            &unset,
+            layout.bar,
+            layout.clock,
+            theme.palette().on_surface,
+            floating_ground(&theme, theme.palette().surface_raised),
+        ),
+        "the unset placeholder is drawn"
     );
 
     bar.clock_mut().set_label("12:34");
@@ -6800,8 +6817,10 @@ fn the_clock_menu_states_the_reading_the_bar_is_drawing() {
 
 #[test]
 fn an_unset_clock_menu_says_so_rather_than_showing_a_fabricated_time() {
-    // Nothing has set the wall clock this boot, so the bar's label is empty.
+    // Nothing has set the wall clock this boot, so the bar draws its
+    // placeholder — which a heading repeating it would read as a time.
     let mut bar = bottom_bar();
+    bar.clock_mut().set_label(crate::clock::UNSET_LABEL);
     let mut input = TaskbarInput::new();
     open_clock_menu(&mut input, &mut bar);
 

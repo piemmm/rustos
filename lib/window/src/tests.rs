@@ -622,14 +622,13 @@ fn create_present_close_round_trips_through_the_loopback() {
 fn create_forwards_the_sizing_contract_to_the_host() {
     let loopback = Loopback::with_regions(&[(7, FRAME_LEN), (8, FRAME_LEN)]);
     let mut client = WindowClient::new(Rc::clone(&loopback));
-    let floor = WindowSizing {
-        resizable: true,
+    let floor = WindowSizing::Resizable {
         min_width_px: 240,
         min_height_px: 160,
     };
 
     client
-        .create(7, EVENTS_A, 1, &SURFACE, "fixed", WindowSizing::default())
+        .create(7, EVENTS_A, 1, &SURFACE, "fixed", WindowSizing::Fixed)
         .expect("fixed window");
     client
         .create(8, EVENTS_A, 1, &SURFACE, "resizable", floor)
@@ -644,7 +643,7 @@ fn create_forwards_the_sizing_contract_to_the_host() {
         .collect();
     // The host is the enforcer, so it receives the app's floor verbatim:
     // nothing between the two rounds, clamps, or drops it.
-    assert_eq!(sizings, alloc::vec![WindowSizing::default(), floor]);
+    assert_eq!(sizings, alloc::vec![WindowSizing::Fixed, floor]);
 }
 
 #[test]
@@ -656,8 +655,7 @@ fn a_below_minimum_resize_is_not_answered_with_a_resize_of_the_client_s_own() {
     // is the flicker this negotiation removes.
     let loopback = Loopback::with_regions(&[(7, FRAME_LEN)]);
     let mut client = WindowClient::new(Rc::clone(&loopback));
-    let floor = WindowSizing {
-        resizable: true,
+    let floor = WindowSizing::Resizable {
         min_width_px: 240,
         min_height_px: 160,
     };
@@ -1490,9 +1488,7 @@ fn backdrop_blur_defaults_to_an_accepted_no_op() {
         stride_bytes: SURFACE.stride_bytes,
         format: SURFACE.format,
         title: tairix_abi::window_ipc::WindowTitle::new("a").expect("valid title"),
-        resizable: false,
-        min_width_px: 0,
-        min_height_px: 0,
+        sizing: WindowSizing::Fixed,
     }
     .to_le_bytes();
     let len = server.serve(&mut host, &mut identity, TICKET_A, &create, &mut reply);

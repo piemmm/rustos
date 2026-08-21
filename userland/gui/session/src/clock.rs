@@ -14,14 +14,15 @@
 //! module's: `HH:mm` is the bar's own, and `CivilTime`'s rustdoc leaves
 //! presentation to each consumer.
 //!
-//! # An unset clock draws nothing
+//! # An unset clock says so, and is still a clock
 //!
 //! A machine whose wall time has never been established this boot reports
 //! [`WallTimeState::Unset`](tairix_abi::time::WallTimeState::Unset) — the
 //! Unix-epoch placeholder, which carries no real-world meaning. The label is
-//! then left **empty**, and an empty label draws nothing: `00:00` would be a
-//! fabricated time, and a bar that states one is worse than a bar with no
-//! clock on it.
+//! then the bar's own [`UNSET_LABEL`]: the shape of a time with no time in
+//! it. `00:00` would be a fabricated reading, and an empty label would leave
+//! the bar's clock — which is clickable, and whose menu is where a time is
+//! set — invisible at exactly the moment the user most needs to reach it.
 //!
 //! # One wake a minute, and none when nothing can be seen
 //!
@@ -39,6 +40,7 @@ use core::fmt::Write as _;
 
 use tairix_abi::time::{Time64, WallClockReading};
 use tairix_fsmeta::calendar::CivilTime;
+use tairix_taskbar::clock::UNSET_LABEL;
 
 use crate::switchuser::park_within;
 
@@ -52,8 +54,9 @@ const SECS_PER_MIN: i64 = 60;
 /// label goes stale.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct SessionClock {
-    /// The label last handed to the bar. Empty until a reading has been
-    /// spelled, and empty again for a reading that means nothing.
+    /// The label last handed to the bar. Empty only before the first reading
+    /// has been spelled; a reading that means nothing spells the bar's
+    /// [`UNSET_LABEL`].
     label: String,
     /// The monotonic instant the current label stops being right, or `None`
     /// before the first reading — there is then nothing to go stale.
@@ -70,7 +73,7 @@ impl SessionClock {
         }
     }
 
-    /// The label the bar should draw. Empty when no real wall time is known.
+    /// The label the bar should draw, empty only before the first reading.
     #[must_use]
     pub fn label(&self) -> &str {
         &self.label
@@ -112,7 +115,7 @@ impl SessionClock {
     }
 }
 
-/// The `HH:mm` spelling of `reading`, or the empty string when it states no
+/// The `HH:mm` spelling of `reading`, or [`UNSET_LABEL`] when it states no
 /// real time.
 ///
 /// Public because aiming at the clock is the same fact as reading it back: a
@@ -122,7 +125,7 @@ impl SessionClock {
 #[must_use]
 pub fn spell(reading: WallClockReading) -> String {
     if !reading.state().is_set() {
-        return String::new();
+        return String::from(UNSET_LABEL);
     }
     let civil = CivilTime::from_time64(reading.time());
     let mut out = String::new();

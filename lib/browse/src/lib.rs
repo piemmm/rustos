@@ -181,6 +181,7 @@ pub use render::{render, ManagerChrome};
 pub use select::Selection;
 pub use sort::{sort_entries, SortDirection, SortKey, SortMode};
 pub use source::{DirectorySource, Listing};
+pub use tairix_abi::window_ipc::WindowSizing;
 /// The one shared path-spelling rules a consumer of this engine needs beside
 /// it: the final component of a path, and the `parent`/`name` join. Re-exported
 /// rather than re-implemented so a surface that spells a resolved link target
@@ -209,14 +210,29 @@ pub const WIN_WIDTH: u32 = 480;
 /// further.
 pub const WIN_HEIGHT: u32 = 480;
 
-/// Whether a browser window asks the window manager to decorate it
-/// resizable, which widens the furniture band reserved around the client
-/// (see [`WIN_WIDTH`]).
+/// The smallest client width, in pixels, a browser window declares at
+/// create: the floor the window manager holds an interactive resize to, so a
+/// drag toward nothing stops at a window that still shows its chrome. The
+/// app never re-imposes it — it lays out at whatever size it is given, and
+/// the content clips gracefully below its natural size.
+const MIN_WIN_WIDTH: u32 = 240;
+
+/// The smallest client height a browser window declares (see
+/// [`MIN_WIN_WIDTH`]).
+const MIN_WIN_HEIGHT: u32 = 160;
+
+/// The sizing a browser window asks the window manager for: resizable, down
+/// to the smallest client a listing still reads at (see [`WIN_WIDTH`]).
 ///
 /// The app's `Create` request and the QEMU vertical's host-side
 /// reconstruction of the window's on-screen footprint read this one value,
-/// so the drawn window and the pixels a test looks at cannot disagree.
-pub const WIN_RESIZABLE: bool = true;
+/// so the drawn window and the pixels a test looks at cannot disagree —
+/// resizable decoration widens the furniture band reserved around the
+/// client.
+pub const WIN_SIZING: WindowSizing = WindowSizing::Resizable {
+    min_width_px: MIN_WIN_WIDTH,
+    min_height_px: MIN_WIN_HEIGHT,
+};
 
 /// The deepest directory nesting any of the file manager's recursive
 /// component-path filesystem walks will descend, counted in root-first path

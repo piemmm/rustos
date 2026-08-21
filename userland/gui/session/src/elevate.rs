@@ -64,6 +64,19 @@ pub const WIN_HEIGHT: u32 = 250;
 /// where the session actually puts it rather than at a re-derived guess.
 pub const ELEVATE_ORIGIN: Point = Point::new(280, 160);
 
+/// One-shot: the credential prompt is on screen and holding the keyboard.
+///
+/// Emitted when [`ElevatePrompt::ask`] successfully opens the window, so a
+/// host that must type into the fields can wait for a real surface rather
+/// than racing the click that asked for it. Id `20_004` is the next free
+/// slot in the desktop-session event range.
+pub const ELEVATE_PROMPT_SHOWN: tairix_log::EventId = tairix_log::EventId(20_004);
+
+/// The exact message [`ELEVATE_PROMPT_SHOWN`] is emitted with. A log
+/// consumer keys on this rendered text, so it is defined once beside the
+/// id and imported by both sides.
+pub const ELEVATE_PROMPT_SHOWN_MESSAGE: &str = "credential prompt on screen";
+
 /// Left and right inset of the fields within the window, in logical pixels.
 const FIELD_INSET: u32 = 18;
 
@@ -679,9 +692,10 @@ fn window_bounds(scale: Scale) -> Rect {
 ///
 /// The one definition of the fields' geometry, so the paint, the hit test, and
 /// the pointer routing all resolve the same rectangles rather than each
-/// re-deriving them. Exported within the crate so a host-side test clicks
-/// where the field actually is.
-pub(crate) fn field_rect(scale: Scale, index: u32) -> Rect {
+/// re-deriving them. Public so a host-side QEMU script clicks where the field
+/// actually is rather than restating the layout constants.
+#[must_use]
+pub fn field_rect(scale: Scale, index: u32) -> Rect {
     let inset = scale.scale_length(FIELD_INSET);
     let top = scale.scale_length(FIELD_TOP + FIELD_PITCH * index);
     let width = scale

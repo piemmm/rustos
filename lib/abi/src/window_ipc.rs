@@ -449,6 +449,73 @@ impl core::fmt::Debug for WindowTitle {
     }
 }
 
+/// How the window manager may size one window: fixed at its create
+/// geometry, or resizable down to the smallest client the app can lay out.
+///
+/// The two facts travel as one value rather than as a flag beside a pair of
+/// numbers that could contradict it: a window that is never resized has no
+/// floor to be measured against, so "fixed, minimum 640×480" is a statement
+/// that cannot be built, encoded, or decoded.
+///
+/// One definition serves both halves — the app fills it in for
+/// [`WindowRequest::Create`] and the session's window engine hands its host
+/// the same value — so the two cannot drift.
+#[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
+pub enum WindowSizing {
+    /// Neither a resize grabber nor a live maximize/restore size toggle is
+    /// offered, and the window never receives a [`WindowEvent::Resized`]:
+    /// its create geometry is its only size.
+    #[default]
+    Fixed,
+    /// A resize grabber and a live maximize/restore size toggle are offered,
+    /// and each new client extent arrives as [`WindowEvent::Resized`]; the
+    /// app re-lays-out and re-maps its frame region with
+    /// [`WindowRequest::Resize`].
+    Resizable {
+        /// Smallest client width, in physical pixels, an interactive resize
+        /// may reach; `0` declares no minimum of the app's own, leaving the
+        /// frame furniture's floor to stand alone.
+        ///
+        /// The window manager is the enforcer, never the app: a drag stops
+        /// at the larger of this and the furniture floor, so the app lays
+        /// out at exactly the size it is told. An app that resized itself
+        /// back up instead would fight the drag, frame by frame.
+        min_width_px: u32,
+        /// Smallest client height, in physical pixels, on the same terms as
+        /// [`min_width_px`](Self::Resizable::min_width_px).
+        min_height_px: u32,
+    },
+}
+
+impl WindowSizing {
+    /// Whether the window manager presents this window as resizable.
+    #[must_use]
+    pub const fn resizable(self) -> bool {
+        matches!(self, Self::Resizable { .. })
+    }
+
+    /// The smallest client width an interactive resize may reach, or `0`
+    /// where none is declared — including a fixed window, which is never
+    /// resized at all.
+    #[must_use]
+    pub const fn min_width_px(self) -> u32 {
+        match self {
+            Self::Fixed => 0,
+            Self::Resizable { min_width_px, .. } => min_width_px,
+        }
+    }
+
+    /// The smallest client height an interactive resize may reach, on the
+    /// same terms as [`min_width_px`](Self::min_width_px).
+    #[must_use]
+    pub const fn min_height_px(self) -> u32 {
+        match self {
+            Self::Fixed => 0,
+            Self::Resizable { min_height_px, .. } => min_height_px,
+        }
+    }
+}
+
 /// One window-channel operation (`plans/APPWIN.md` AW2).
 ///
 /// Every request acts on the caller's **own** windows: the session derives
@@ -487,30 +554,9 @@ pub enum WindowRequest {
         format: DisplayFormat,
         /// The window's title, listed on the taskbar.
         title: WindowTitle,
-        /// Whether the app wants the window manager to present the window
-        /// as resizable — a drawn resize grabber and a live maximize/
-        /// restore size toggle. A resizable app re-lays-out to each new
-        /// client size the window manager reports
-        /// ([`WindowEvent::Resized`]), re-mapping its frame region with
-        /// [`Self::Resize`]. A fixed-size app leaves this `false`: the
-        /// window manager offers neither affordance and never sends it a
-        /// size change.
-        resizable: bool,
-        /// Smallest client width, in physical pixels, this window may be
-        /// resized to; `0` declares no minimum of the app's own, leaving
-        /// the frame furniture's floor to stand alone.
-        ///
-        /// The window manager is the enforcer: an interactive resize stops
-        /// at the larger of this and its own furniture floor, so the app
-        /// lays out at exactly the size it is told and never resizes itself
-        /// back up — two floors fighting over one drag is the defect this
-        /// field exists to remove. A fixed-size window is never resized, so
-        /// a minimum declared without `resizable` is refused rather than
-        /// silently ignored.
-        min_width_px: u32,
-        /// Smallest client height, in physical pixels, on the same terms as
-        /// [`min_width_px`](Self::Create::min_width_px).
-        min_height_px: u32,
+        /// Whether the window manager may resize this window, and the
+        /// smallest client it may be resized to.
+        sizing: WindowSizing,
     },
     /// Open an **undecorated, app-positioned popup surface** stacked
     /// directly above the caller's own window `parent_window_id`: a
@@ -735,11 +781,11 @@ const POPUP_RESERVED_FROM: usize = POPUP_OFFSET_Y + 4;
 const CREATE_TITLE_LEN_OFFSET: usize = 41;
 /// Byte offset of a [`WindowRequest::Create`] title's text.
 const CREATE_TITLE_TEXT_OFFSET: usize = CREATE_TITLE_LEN_OFFSET + 1;
-/// Byte offset of [`WindowRequest::Create::resizable`].
+/// Byte offset of a [`WindowSizing`]'s resizable flag.
 const CREATE_RESIZABLE_OFFSET: usize = CREATE_TITLE_TEXT_OFFSET + WINDOW_TITLE_MAX;
-/// Byte offset of [`WindowRequest::Create::min_width_px`].
+/// Byte offset of [`WindowSizing::Resizable::min_width_px`].
 const CREATE_MIN_WIDTH_OFFSET: usize = CREATE_RESIZABLE_OFFSET + 1;
-/// Byte offset of [`WindowRequest::Create::min_height_px`].
+/// Byte offset of [`WindowSizing::Resizable::min_height_px`].
 const CREATE_MIN_HEIGHT_OFFSET: usize = CREATE_MIN_WIDTH_OFFSET + 4;
 /// First reserved byte after a [`WindowRequest::Create`] operand block.
 const CREATE_RESERVED_FROM: usize = CREATE_MIN_HEIGHT_OFFSET + 4;
@@ -931,9 +977,7 @@ impl WindowRequest {
             stride_bytes,
             format,
             title,
-            resizable,
-            min_width_px,
-            min_height_px,
+            sizing,
         } = *self
         else {
             return;
@@ -949,9 +993,9 @@ impl WindowRequest {
         }
         .write_to(out);
         encode_title(out, CREATE_TITLE_LEN_OFFSET, &title);
-        out[CREATE_RESIZABLE_OFFSET] = u8::from(resizable);
-        put_u32(out, CREATE_MIN_WIDTH_OFFSET, min_width_px);
-        put_u32(out, CREATE_MIN_HEIGHT_OFFSET, min_height_px);
+        out[CREATE_RESIZABLE_OFFSET] = u8::from(sizing.resizable());
+        put_u32(out, CREATE_MIN_WIDTH_OFFSET, sizing.min_width_px());
+        put_u32(out, CREATE_MIN_HEIGHT_OFFSET, sizing.min_height_px());
     }
 
     /// Decode from `bytes`, failing closed on any malformed input.
@@ -1249,16 +1293,6 @@ fn read_create(bytes: &[u8]) -> Result<WindowRequest, Errno> {
         &bytes[CREATE_TITLE_TEXT_OFFSET..CREATE_TITLE_TEXT_OFFSET + WINDOW_TITLE_MAX],
     );
     let title = WindowTitle::from_wire(bytes[CREATE_TITLE_LEN_OFFSET], &title_bytes)?;
-    let resizable = match bytes[CREATE_RESIZABLE_OFFSET] {
-        0 => false,
-        1 => true,
-        _ => return Err(Errno::OutOfRange),
-    };
-    let min_width_px = read_u32(bytes, CREATE_MIN_WIDTH_OFFSET);
-    let min_height_px = read_u32(bytes, CREATE_MIN_HEIGHT_OFFSET);
-    if !resizable && (min_width_px != 0 || min_height_px != 0) {
-        return Err(Errno::LengthOutOfRange);
-    }
     Ok(WindowRequest::Create {
         shm_handle,
         event_endpoint,
@@ -1268,10 +1302,28 @@ fn read_create(bytes: &[u8]) -> Result<WindowRequest, Errno> {
         stride_bytes: layout.stride_bytes,
         format: layout.format,
         title,
-        resizable,
-        min_width_px,
-        min_height_px,
+        sizing: read_sizing(bytes)?,
     })
+}
+
+/// Decode a `Create`'s sizing contract from the resizable flag and the two
+/// minimum fields that follow it.
+///
+/// A minimum stated by a window that is never resized is a contradiction
+/// [`WindowSizing`] cannot hold, so a frame carrying one is refused rather
+/// than silently stripped of the half that does not fit.
+fn read_sizing(bytes: &[u8]) -> Result<WindowSizing, Errno> {
+    let min_width_px = read_u32(bytes, CREATE_MIN_WIDTH_OFFSET);
+    let min_height_px = read_u32(bytes, CREATE_MIN_HEIGHT_OFFSET);
+    match bytes[CREATE_RESIZABLE_OFFSET] {
+        0 if min_width_px == 0 && min_height_px == 0 => Ok(WindowSizing::Fixed),
+        0 => Err(Errno::LengthOutOfRange),
+        1 => Ok(WindowSizing::Resizable {
+            min_width_px,
+            min_height_px,
+        }),
+        _ => Err(Errno::OutOfRange),
+    }
 }
 
 /// Decode the operands of a [`WindowRequest::CreatePopup`]: the granted
@@ -2010,14 +2062,14 @@ mod tests {
     use super::{
         decode_create_reply, decode_desktop_reply, encode_create_reply, encode_desktop_reply,
         AppBar, AppMenu, AppMenuItemId, AppMenuLabel, AppMenuMark, AppMenuRow, PointerAction,
-        WindowEvent, WindowRequest, WindowTitle, APP_BAR_FLAGS_OFFSET, APP_BAR_RESERVED_FROM,
-        APP_BAR_ROWS_OFFSET, APP_BAR_ROW_COUNT_OFFSET, APP_MENU_LABEL_MAX, APP_MENU_MAX_ROWS,
-        APP_MENU_ROW_WIRE_LEN, CREATE_MIN_HEIGHT_OFFSET, CREATE_MIN_WIDTH_OFFSET,
-        CREATE_RESERVED_FROM, CREATE_RESIZABLE_OFFSET, DESKTOP_REPLY_SERVER_OFFSET,
-        SET_TITLE_LEN_OFFSET, SET_TITLE_RESERVED_FROM, SET_TITLE_TEXT_OFFSET,
-        WINDOW_BACKDROP_BLUR_MAX_PX, WINDOW_CREATE_REPLY_LEN, WINDOW_DESKTOP_REPLY_LEN,
-        WINDOW_ENDPOINT, WINDOW_EVENT_MAGIC, WINDOW_MAX_FRAMES, WINDOW_REQUEST_MAGIC,
-        WINDOW_TITLE_MAX,
+        WindowEvent, WindowRequest, WindowSizing, WindowTitle, APP_BAR_FLAGS_OFFSET,
+        APP_BAR_RESERVED_FROM, APP_BAR_ROWS_OFFSET, APP_BAR_ROW_COUNT_OFFSET, APP_MENU_LABEL_MAX,
+        APP_MENU_MAX_ROWS, APP_MENU_ROW_WIRE_LEN, CREATE_MIN_HEIGHT_OFFSET,
+        CREATE_MIN_WIDTH_OFFSET, CREATE_RESERVED_FROM, CREATE_RESIZABLE_OFFSET,
+        DESKTOP_REPLY_SERVER_OFFSET, SET_TITLE_LEN_OFFSET, SET_TITLE_RESERVED_FROM,
+        SET_TITLE_TEXT_OFFSET, WINDOW_BACKDROP_BLUR_MAX_PX, WINDOW_CREATE_REPLY_LEN,
+        WINDOW_DESKTOP_REPLY_LEN, WINDOW_ENDPOINT, WINDOW_EVENT_MAGIC, WINDOW_MAX_FRAMES,
+        WINDOW_REQUEST_MAGIC, WINDOW_TITLE_MAX,
     };
     use crate::desktop::{Appearance, DesktopInfo};
     use crate::driver::display::{DamageRect, DisplayFormat};
@@ -2027,6 +2079,11 @@ mod tests {
     use crate::ProcId;
 
     fn sample_create() -> WindowRequest {
+        sample_create_sized(WindowSizing::Fixed)
+    }
+
+    /// The same window, opened with `sizing`.
+    fn sample_create_sized(sizing: WindowSizing) -> WindowRequest {
         WindowRequest::Create {
             shm_handle: 7,
             event_endpoint: 0x900d,
@@ -2036,28 +2093,17 @@ mod tests {
             stride_bytes: 1280,
             format: DisplayFormat::Bgra8888,
             title: WindowTitle::new("Files").expect("a valid title"),
-            resizable: false,
-            min_width_px: 0,
-            min_height_px: 0,
+            sizing,
         }
     }
 
     /// The same window opened **resizable**, declaring the smallest client
     /// size the window manager may resize it to.
     fn sample_create_min(min_width_px: u32, min_height_px: u32) -> WindowRequest {
-        let mut request = sample_create();
-        if let WindowRequest::Create {
-            resizable: ref mut flag,
-            min_width_px: ref mut min_w,
-            min_height_px: ref mut min_h,
-            ..
-        } = request
-        {
-            *flag = true;
-            *min_w = min_width_px;
-            *min_h = min_height_px;
-        }
-        request
+        sample_create_sized(WindowSizing::Resizable {
+            min_width_px,
+            min_height_px,
+        })
     }
 
     fn sample_present() -> WindowRequest {
@@ -2660,6 +2706,39 @@ mod tests {
         }
         // The fixed-size window that declares nothing still opens.
         assert!(WindowRequest::from_bytes(&sample_create().to_le_bytes()).is_ok());
+    }
+
+    #[test]
+    fn every_sizing_an_app_can_ask_for_survives_the_round_trip() {
+        // A create an app can build but the session must refuse is a launch
+        // that dies with no window, so the refusable combination has to be
+        // unspellable rather than merely rejected: these are every sizing
+        // that exists, and each decodes back to itself.
+        for sizing in [
+            WindowSizing::Fixed,
+            WindowSizing::Resizable {
+                min_width_px: 0,
+                min_height_px: 0,
+            },
+            WindowSizing::Resizable {
+                min_width_px: 240,
+                min_height_px: 160,
+            },
+            WindowSizing::Resizable {
+                min_width_px: u32::MAX,
+                min_height_px: u32::MAX,
+            },
+        ] {
+            let request = sample_create_sized(sizing);
+            assert_eq!(
+                WindowRequest::from_bytes(&request.to_le_bytes()),
+                Ok(request),
+                "{sizing:?} encodes a frame the session would refuse"
+            );
+        }
+        // An app that states no sizing gets the window that is never
+        // resized, not a resizable one with no floor.
+        assert_eq!(WindowSizing::default(), WindowSizing::Fixed);
     }
 
     #[test]

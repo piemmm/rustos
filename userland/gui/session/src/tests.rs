@@ -7647,8 +7647,7 @@ fn desktop_info_reports_compositor_state() {
 /// A resizable window declaring no minimum client extent of its own, so a
 /// drag is bounded by the window manager's furniture floor alone.
 fn resizable_sizing() -> WindowSizing {
-    WindowSizing {
-        resizable: true,
+    WindowSizing::Resizable {
         min_width_px: 0,
         min_height_px: 0,
     }

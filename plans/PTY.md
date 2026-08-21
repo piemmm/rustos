@@ -328,7 +328,7 @@ next time it reads input or repaints. What it guarantees:
   clamping the cursor, scroll region, saved cursor, and any alternate screen —
   the tty `TIOCSWINSZ` behaviour. Host-tested.
 - **The terminal app opts in.** `userland/apps/terminal` creates its window
-  `resizable: true` and, on each `WindowEvent::Resized`, re-maps its frame
+  through its own `win_sizing` and, on each `WindowEvent::Resized`, re-maps its frame
   region at the new client size (fail-closed, keeping the current surface on a
   refused re-map), derives the new grid from the shared monospace advance /
   line height, `Terminal::resize`s the screen, `pty_set_size`s the pty, and

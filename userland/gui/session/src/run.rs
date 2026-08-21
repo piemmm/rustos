@@ -124,9 +124,9 @@ mod program {
         ScreenLock, SeatEventReader, SeatInputChannel, SessionClock, SessionFileReader,
         SessionFileWriter, SessionPicker, SessionWindows, ShellWindowHost, SwitchboardMailbox,
         SwitchboardOutcome, SwitchboardServe, WallpaperDesk, WallpaperSource, BUNDLE_RUN_SUFFIX,
-        DATETIME_RUN_PATH, FILES_LABEL, FILES_RUN_PATH, SWITCHBOARD_CALL_REFUSED,
-        SWITCHBOARD_LABEL, SWITCHBOARD_RUN_PATH, USAGE, WALLPAPER_LABEL, WALLPAPER_RUN_PATH,
-        WINDOW_SHOWN, WINDOW_SHOWN_MESSAGE,
+        DATETIME_RUN_PATH, ELEVATE_PROMPT_SHOWN, ELEVATE_PROMPT_SHOWN_MESSAGE, FILES_LABEL,
+        FILES_RUN_PATH, SWITCHBOARD_CALL_REFUSED, SWITCHBOARD_LABEL, SWITCHBOARD_RUN_PATH, USAGE,
+        WALLPAPER_LABEL, WALLPAPER_RUN_PATH, WINDOW_SHOWN, WINDOW_SHOWN_MESSAGE,
     };
     use tairix_display::{DisplayClient, DisplayTransport, RemoteDisplay, RtShmMapper};
     use tairix_greeter::{Verdict, Verifier};
@@ -4276,7 +4276,20 @@ mod program {
                 // broker re-authenticates it and starts the application
                 // itself. A prompt that cannot be shown asks nothing and
                 // sets nothing.
-                if !elevate.ask(DATETIME_RUN_PATH, SET_TIME_PURPOSE, shell, compositor) {
+                if elevate.ask(DATETIME_RUN_PATH, SET_TIME_PURPOSE, shell, compositor) {
+                    // The prompt is focused and on screen: announce it so a
+                    // host that must type into the fields waits on a real
+                    // surface rather than racing the click that asked for it.
+                    log(
+                        &LOG_SINK,
+                        &LogEvent {
+                            level: LogLevel::Info,
+                            id: ELEVATE_PROMPT_SHOWN,
+                            message: ELEVATE_PROMPT_SHOWN_MESSAGE,
+                            fields: &[],
+                        },
+                    );
+                } else {
                     io::write_stderr_line(
                         "desktop: could not ask for an account; the clock was not changed",
                     );

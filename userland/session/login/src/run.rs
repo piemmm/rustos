@@ -97,12 +97,13 @@ mod program {
 
     use tairix_log::{log, Event, EventId, Field, FieldValue, Level};
     use tairix_login::{
-        configured_session_kind, effective_session_kind, end_live_sessions, events,
-        handle_elevate_request, handle_session_request, session_environment, session_program,
-        supervise, AttemptBudget, AuthenticatedUser, Authenticator, ConfigStore, ConsoleMode,
-        Credentials, CursesView, DbAccounts, DbLoad, LiveSessions, Login, LoginConfig, LoginError,
-        LoginStatus, LoginView, SessionDirectory, SessionKind, SessionLauncher, SessionOutcome,
-        SessionWaker, StatusSource, DESKTOP_SESSION_PATH, FONTD_SERVICE_PATH, GREETER_SERVICE_PATH,
+        audit_launch_ended_abnormally, configured_session_kind, effective_session_kind,
+        end_live_sessions, events, handle_elevate_request, handle_session_request,
+        session_environment, session_program, supervise, AttemptBudget, AuthenticatedUser,
+        Authenticator, ConfigStore, ConsoleMode, Credentials, CursesView, DbAccounts, DbLoad,
+        LiveSessions, Login, LoginConfig, LoginError, LoginStatus, LoginView, SessionDirectory,
+        SessionKind, SessionLauncher, SessionOutcome, SessionWaker, StatusSource,
+        DESKTOP_SESSION_PATH, FONTD_SERVICE_PATH, GREETER_SERVICE_PATH,
     };
     use tairix_procinfo::{call, IpcTransport};
     use tairix_rt::io::write_stderr_line;
@@ -577,9 +578,12 @@ mod program {
         /// Non-blocking throughout: one that is still running keeps its
         /// place and is collected on a later wake.
         fn reap_launched(&self) {
+            // `LogSink` carries no state, so the sweep names one here rather
+            // than threading a zero-sized parameter through every caller.
+            let sink = LogSink;
             let mut launched = self.launched.borrow_mut();
             launched.retain(|pid| {
-                if !launch_collected(*pid) {
+                if !launch_collected(*pid, sink) {
                     return true;
                 }
                 let _ = tairix_rt::waitset_ctl(
@@ -759,8 +763,21 @@ mod program {
     /// Whether `pid` needs tracking no longer: it was reaped, or it is no
     /// longer login's child to reap at all. Keeping an untrackable entry
     /// would re-wake supervision for ever.
-    fn launch_collected(pid: i32) -> bool {
-        !matches!(try_reap(pid), Reaped::Running)
+    ///
+    /// A collected exit that was not clean is audited on the way through:
+    /// this reap is the only place login learns how one of these children
+    /// ended, and their `stderr` is login's own console — invisible behind a
+    /// desktop — so nothing else can state the reason. One that is no longer
+    /// login's child has no status to state.
+    fn launch_collected(pid: i32, sink: LogSink) -> bool {
+        match try_reap(pid) {
+            Reaped::Exited(status) => {
+                audit_launch_ended_abnormally(&sink, pid, status);
+                true
+            }
+            Reaped::Gone => true,
+            Reaped::Running => false,
+        }
     }
 
     /// Reap `pid` and report its exit code if it has already exited, without

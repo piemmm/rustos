@@ -100,6 +100,8 @@
 
 extern crate alloc;
 
+use tairix_abi::window_ipc::WindowSizing;
+
 pub mod appbar;
 pub mod effects;
 pub mod grid;
@@ -142,17 +144,29 @@ pub use tairix_vt::{Attributes, Cell, Color};
 /// `plans/CURSES.md`.
 pub const TERM: &str = "xterm-256color";
 
-/// Whether the terminal's window asks the window manager to decorate it
-/// resizable, which widens the furniture band reserved around the client.
+/// The sizing the terminal's window asks the window manager for: resizable,
+/// bottoming out at one whole character cell.
 ///
-/// The app's `Create` request and the QEMU vertical's host-side
-/// reconstruction of the window's on-screen footprint read this one value.
-///
-/// There is deliberately no companion width or height: the terminal's window
-/// is whatever its [`COLS`]×[`ROWS`] screen measures in the face it is
-/// actually drawing with, which only the running font service can answer
+/// The floor is a parameter rather than a constant because it is whatever
+/// [`COLS`]×[`ROWS`] measures in the face the window is actually drawing
+/// with, which only the running font service can answer
 /// ([`layout::window_size`]).
-pub const WIN_RESIZABLE: bool = true;
+#[must_use]
+pub const fn win_sizing(min_width_px: u32, min_height_px: u32) -> WindowSizing {
+    WindowSizing::Resizable {
+        min_width_px,
+        min_height_px,
+    }
+}
+
+/// Whether the terminal's window is decorated resizable, which widens the
+/// furniture band reserved around the client.
+///
+/// Derived from [`win_sizing`] rather than stated a second time, so the
+/// window the app opens and the on-screen footprint the QEMU vertical
+/// reconstructs cannot disagree. The floor does not affect the band, so any
+/// value answers it.
+pub const WIN_RESIZABLE: bool = win_sizing(0, 0).resizable();
 
 #[cfg(test)]
 mod tests;
