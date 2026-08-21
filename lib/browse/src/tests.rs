@@ -7552,9 +7552,9 @@ fn activating_a_link_acts_on_what_it_names() {
         })
     );
 
-    // A link to a bundle launches the **resolved** target, because the
-    // app-load gate judges the path it is handed and a link in the user's own
-    // directory is not in a store.
+    // A link to a bundle launches the **resolved** target, because the spawn
+    // gate parses an entry point as `…/<Name>.app/Run` and a link named after
+    // the program is not that shape.
     select_named(&mut browser, "Editor");
     assert_eq!(
         browser.activate_selected(),

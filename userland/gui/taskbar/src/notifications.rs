@@ -14,7 +14,7 @@
 //! The model holds no authority and performs no I/O: the session owns the
 //! live feed (status signals from the tray-signal feed; notifications from
 //! the notification IPC) and hands it to the taskbar, exactly as it feeds the
-//! pin strip and the program library.
+//! application strip and the program library.
 
 use alloc::string::String;
 use alloc::vec::Vec;

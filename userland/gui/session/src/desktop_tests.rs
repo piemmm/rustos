@@ -10,10 +10,13 @@ use alloc::vec::Vec;
 use core::cell::RefCell;
 
 use tairix_abi::{Errno, Time64};
-use tairix_browse::{AppAssociation, DirectorySource, Entry, EntryKind, GridView, Listing};
+use tairix_browse::{
+    AppAssociation, DirectorySource, Entry, EntryKind, GridView, LinkTarget, Listing,
+};
 use tairix_controls::{ActivityState, MenuItem};
 use tairix_geometry::{Point, Rect, Region, Scale};
 use tairix_icon::NoArtwork;
+use tairix_proglib::{BundlePath, Catalog, DisplayName, EntryId, LibraryCategory, LibraryEntry};
 use tairix_raster::Surface;
 use tairix_theme::Theme;
 use tairix_wallpaper::{Backdrop, IconFlow, IconSort, PinboardSettings, Rgb, WallpaperChoice};
@@ -74,6 +77,12 @@ fn folder(name: &str) -> Entry {
 
 fn bundle(name: &str) -> Entry {
     Entry::new(name, EntryKind::Bundle, 0, Time64::UNIX_EPOCH)
+}
+
+/// A shortcut: a link the listing classified as `resolves` and whose stored
+/// spelling is `target`.
+fn link(name: &str, resolves: LinkTarget, target: &str) -> Entry {
+    Entry::new(name, EntryKind::Link(resolves), 0, Time64::UNIX_EPOCH).with_target(target)
 }
 
 /// The user's desktop folder, root-first.
@@ -152,6 +161,27 @@ fn centre_of(layout: &GridView, index: usize) -> Point {
 /// A point clear of every icon: inside the work area's margin, which no icon
 /// reaches under either arrangement.
 const EMPTY_DESKTOP: Point = Point::new(2, 2);
+
+/// The catalog identifier `id`, validated.
+fn entry_id(id: &str) -> EntryId {
+    EntryId::new(id).expect("a valid identifier")
+}
+
+/// A catalog holding exactly one entry: `id`, shown as `name`, launching the
+/// bundle at `bundle`.
+fn catalog_of(id: &str, name: &str, bundle: &str) -> Catalog {
+    let mut catalog = Catalog::new();
+    catalog
+        .insert(LibraryEntry::new(
+            entry_id(id),
+            DisplayName::new(name).expect("a valid display name"),
+            BundlePath::new(bundle).expect("a valid bundle path"),
+            LibraryCategory::Games,
+            None,
+        ))
+        .expect("the catalog holds one entry");
+    catalog
+}
 
 /// One "text/plain opens in the editor" association.
 fn editor() -> Vec<AppAssociation> {
@@ -580,6 +610,170 @@ fn a_file_no_application_opens_is_refused_with_its_reason_and_does_nothing_else(
         "the refusal names the file and is ready for the error stream"
     );
     assert_eq!(desktop.selected(), Some(0), "the icon stays selected");
+}
+
+#[test]
+fn a_shortcut_is_named_in_the_desktop_folder_and_stores_its_target_verbatim() {
+    let desktop = desktop_of(vec![]);
+    let catalog = catalog_of("os.tairix.chess", "Chess", "/Apps/games/chess.app");
+    assert_eq!(
+        desktop.shortcut_to(&catalog, &entry_id("os.tairix.chess")),
+        DesktopAction::CreateShortcut {
+            link: "/Users/ada/Desktop/Chess".to_string(),
+            target: "/Apps/games/chess.app".to_string(),
+        },
+        "the link is the entry's own name inside the desktop folder, and the \
+         target is the bundle directory, untouched"
+    );
+}
+
+#[test]
+fn a_shortcut_whose_entry_left_the_catalog_is_refused_rather_than_guessed() {
+    let desktop = desktop_of(vec![]);
+    assert_eq!(
+        desktop.shortcut_to(&Catalog::default(), &entry_id("os.tairix.chess")),
+        DesktopAction::Refuse(
+            "desktop: library entry os.tairix.chess is no longer catalogued\n".to_string()
+        )
+    );
+}
+
+#[test]
+fn a_display_name_the_shared_rule_refuses_is_refused_with_its_reason() {
+    // A display name is not automatically a file name: the library permits a
+    // `/` and a `:` in one, and the filesystem does not.
+    let desktop = desktop_of(vec![]);
+    for (name, reason) in [
+        (
+            "Chess/Deluxe",
+            "a file or directory name may not contain `/`",
+        ),
+        (
+            "Chess:1",
+            "path component contains a `:` (a reserved delimiter)",
+        ),
+        ("..", "`.` and `..` are not valid file or directory names"),
+    ] {
+        let catalog = catalog_of("os.tairix.chess", name, "/Apps/chess.app");
+        assert_eq!(
+            desktop.shortcut_to(&catalog, &entry_id("os.tairix.chess")),
+            DesktopAction::Refuse(alloc::format!(
+                "desktop: '{name}' cannot be a shortcut name ({reason})\n"
+            )),
+            "the one shared name rule's own reason is what the desktop reports"
+        );
+    }
+}
+
+#[test]
+fn a_shortcut_is_asked_for_even_where_the_name_is_already_taken() {
+    // The desktop never works a collision around: `fs_symlink` replaces no
+    // name, so the authoritative answer is the kernel's `AlreadyExists` at
+    // create time — not a second, differently-named shortcut chosen here off a
+    // listing that may already be stale.
+    let desktop = desktop_of(vec![file("Chess")]);
+    let catalog = catalog_of("os.tairix.chess", "Chess", "/Apps/chess.app");
+    assert_eq!(
+        desktop.shortcut_to(&catalog, &entry_id("os.tairix.chess")),
+        DesktopAction::CreateShortcut {
+            link: "/Users/ada/Desktop/Chess".to_string(),
+            target: "/Apps/chess.app".to_string(),
+        }
+    );
+}
+
+#[test]
+fn double_clicking_a_shortcut_to_a_bundle_launches_the_resolved_target() {
+    // The shortcut is named for the program, not for the bundle: bundle-ness
+    // is read off the *target's* leaf, and the launch must name the bundle the
+    // link resolves to, because the load gate judges the path it is handed.
+    let mut desktop = desktop_of(vec![link("Chess", LinkTarget::Bundle, "/Apps/chess.app")]);
+    let layout = layout_of(&desktop);
+    let at = centre_of(&layout, 0);
+    desktop.press(at, &layout, 0, &[], &mut Region::new());
+    assert_eq!(
+        desktop
+            .press(at, &layout, 1, &[], &mut Region::new())
+            .action,
+        Some(DesktopAction::Activate(DesktopActivation::Launch {
+            run_path: "/Apps/chess.app/Run".to_string(),
+            label: "chess".to_string(),
+            argument: None,
+        }))
+    );
+}
+
+#[test]
+fn double_clicking_a_shortcut_to_a_folder_or_a_file_acts_through_the_link() {
+    let mut desktop = desktop_of(vec![
+        link("Work", LinkTarget::Directory, "/Users/ada/Documents/Work"),
+        link("notes.txt", LinkTarget::File, "/Users/ada/Documents/n.txt"),
+    ]);
+    let layout = layout_of(&desktop);
+    let folder_at = centre_of(&layout, 0);
+    desktop.press(folder_at, &layout, 0, &[], &mut Region::new());
+    assert_eq!(
+        desktop
+            .press(folder_at, &layout, 1, &[], &mut Region::new())
+            .action,
+        Some(DesktopAction::Activate(DesktopActivation::OpenFolder {
+            path: "/Users/ada/Desktop/Work".to_string(),
+        })),
+        "a directory the link names is opened through the link, which the kernel resolves"
+    );
+    let file_at = centre_of(&layout, 1);
+    desktop.press(file_at, &layout, 2, &editor(), &mut Region::new());
+    assert_eq!(
+        desktop
+            .press(file_at, &layout, 3, &editor(), &mut Region::new())
+            .action,
+        Some(DesktopAction::Activate(DesktopActivation::Launch {
+            run_path: "/Apps/Edit.app/Run".to_string(),
+            label: "Edit".to_string(),
+            argument: Some("/Users/ada/Desktop/notes.txt".to_string()),
+        })),
+        "the association follows the target's kind and the argument is the link"
+    );
+}
+
+#[test]
+fn double_clicking_a_shortcut_whose_target_has_gone_is_refused_with_its_reason() {
+    let mut desktop = desktop_of(vec![link("Chess", LinkTarget::Dangling, "/Apps/chess.app")]);
+    let layout = layout_of(&desktop);
+    let at = centre_of(&layout, 0);
+    desktop.press(at, &layout, 0, &[], &mut Region::new());
+    let acted = desktop.press(at, &layout, 1, &editor(), &mut Region::new());
+    assert_eq!(
+        acted.action,
+        Some(DesktopAction::Refuse(
+            "desktop: the shortcut 'Chess' points at something that is not there\n".to_string()
+        )),
+        "a dangling shortcut is never launched on the chance that it works"
+    );
+    assert_eq!(desktop.selected(), Some(0), "the icon stays selected");
+}
+
+#[test]
+fn a_shortcut_that_names_nothing_at_all_is_refused_rather_than_opened() {
+    // A listing that reported a link but no target describes nothing to act
+    // on; the desktop says so instead of resolving an empty spelling.
+    let mut desktop = desktop_of(vec![Entry::new(
+        "Chess",
+        EntryKind::Link(LinkTarget::Bundle),
+        0,
+        Time64::UNIX_EPOCH,
+    )]);
+    let layout = layout_of(&desktop);
+    let at = centre_of(&layout, 0);
+    desktop.press(at, &layout, 0, &[], &mut Region::new());
+    assert_eq!(
+        desktop
+            .press(at, &layout, 1, &[], &mut Region::new())
+            .action,
+        Some(DesktopAction::Refuse(
+            "desktop: the shortcut 'Chess' names nothing\n".to_string()
+        ))
+    );
 }
 
 #[test]

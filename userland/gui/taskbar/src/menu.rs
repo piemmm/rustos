@@ -83,6 +83,9 @@ pub(crate) enum MenuChoice {
     },
     /// Launch this program-library entry.
     OpenEntry(EntryId),
+    /// Put a shortcut to this program-library entry's bundle on the user's
+    /// desktop.
+    ShortcutEntry(EntryId),
     /// Perform this system quick action.
     System(SystemAction),
 }
@@ -100,16 +103,48 @@ pub(crate) enum MenuOutcome {
     Dismissed,
 }
 
-/// The row index of *Open* in a program-library-entry context menu.
+/// One row of a program-library entry's context menu.
 ///
-/// `rows_for` builds that menu from this one definition and the menu's own
-/// `choose` reads the activated row back through it, so the order is stated
-/// once and a reordering cannot silently re-map what a row does. It is
-/// public because aiming *at* a row is the same fact as reading one back:
-/// the desktop's QEMU vertical clicks the row through [`Menu::row_rect`],
-/// and must name it from this one definition rather than restating its
-/// position.
-pub const MENU_OPEN_ROW: usize = 0;
+/// Both things the popup can do to a row that its own click cannot: launch
+/// the bundle, and put a shortcut to it on the desktop. The bar performs
+/// neither — each becomes a typed response the session carries out under its
+/// own authority.
+///
+/// Public because aiming *at* a row is the same fact as reading one back: an
+/// embedder's own test, or a QEMU pointer script, finds the row by the label
+/// [`EntryRow::label`] gives it rather than by restating its position.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum EntryRow {
+    /// Launch the entry's bundle.
+    Open,
+    /// Create a symbolic link to the entry's bundle in the user's own
+    /// `Desktop` folder.
+    Shortcut,
+}
+
+/// The rows a program-library entry's context menu offers, in row order.
+///
+/// The one definition of that menu: `rows_for` renders these labels and
+/// `choose` reads the activated index back through the same list, so a
+/// reordering cannot silently re-map what a row does.
+const ENTRY_ROWS: [EntryRow; 2] = [EntryRow::Open, EntryRow::Shortcut];
+
+impl EntryRow {
+    /// The label this row draws with.
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Open => "Open",
+            Self::Shortcut => "Create Desktop Shortcut",
+        }
+    }
+
+    /// The row the menu drew at `index`, or `None` for an index it never
+    /// drew.
+    fn at(index: usize) -> Option<Self> {
+        ENTRY_ROWS.get(index).copied()
+    }
+}
 
 /// What the open menu shows beside its own plate: nothing, a submenu of the
 /// application's own rows, or the application's information panel.
@@ -559,9 +594,15 @@ impl BarMenu {
                 let declared = self.declared.get(row).copied();
                 self.choose_declared(declared)
             }
-            (MenuSubject::Entry { entry }, MENU_OPEN_ROW) => {
+            (MenuSubject::Entry { entry }, row) => {
                 self.close();
-                MenuOutcome::Choose(MenuChoice::OpenEntry(entry))
+                match EntryRow::at(row) {
+                    Some(EntryRow::Open) => MenuOutcome::Choose(MenuChoice::OpenEntry(entry)),
+                    Some(EntryRow::Shortcut) => {
+                        MenuOutcome::Choose(MenuChoice::ShortcutEntry(entry))
+                    }
+                    None => MenuOutcome::Dismissed,
+                }
             }
             (MenuSubject::System { permits }, row) => {
                 self.close();
@@ -569,10 +610,6 @@ impl BarMenu {
                     Some(action) => MenuOutcome::Choose(MenuChoice::System(action)),
                     None => MenuOutcome::Dismissed,
                 }
-            }
-            _ => {
-                self.close();
-                MenuOutcome::Dismissed
             }
         }
     }
@@ -608,7 +645,13 @@ fn rows_for(subject: &MenuSubject) -> (Vec<MenuItem>, Vec<usize>) {
             }
             (items, declared)
         }
-        MenuSubject::Entry { .. } => (alloc::vec![MenuItem::new("Open")], Vec::new()),
+        MenuSubject::Entry { .. } => (
+            ENTRY_ROWS
+                .iter()
+                .map(|row| MenuItem::new(row.label()))
+                .collect(),
+            Vec::new(),
+        ),
         MenuSubject::System { permits } => (system::rows(*permits), Vec::new()),
     }
 }

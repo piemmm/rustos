@@ -68,7 +68,7 @@ use crate::edge::{Edge, Orientation};
 use crate::input::{TaskbarInput, TaskbarResponse, LONG_PRESS_AFTER_NS};
 use crate::layout::Hit;
 use crate::library::{folder_label, LibraryFocus, LibraryRow};
-use crate::menu::{MenuSubject, MENU_OPEN_ROW};
+use crate::menu::{EntryRow, MenuSubject};
 use crate::notifications::{
     IconId, NotifySeverity, StatusKind, StatusSignal, TransientNotification,
 };
@@ -236,6 +236,87 @@ fn visible_row_where(
         .iter()
         .find(|(index, _)| taskbar.library().rows().get(*index).is_some_and(&want))
         .copied()
+}
+
+/// Open the program-library popup, then open the context menu on its first
+/// visible entry row, and report the entry that row names.
+fn open_entry_menu(input: &mut TaskbarInput, taskbar: &mut Taskbar) -> EntryId {
+    open_library(input, taskbar);
+    let (row, rect) = visible_row_where(taskbar, |row| matches!(row, LibraryRow::Entry { .. }))
+        .expect("an entry row is visible");
+    let entry = match taskbar.library().rows().get(row).expect("the row exists") {
+        LibraryRow::Entry { id, .. } => id.clone(),
+        LibraryRow::Folder { .. } => panic!("not an entry"),
+    };
+    let inside = centre_of(rect);
+    input.handle(
+        InputEvent::PointerMoved { to: inside },
+        taskbar,
+        Scale::ONE,
+        NOW_NS,
+    );
+    input.handle(
+        InputEvent::PointerPressed {
+            button: PointerButton::Secondary,
+        },
+        taskbar,
+        Scale::ONE,
+        NOW_NS,
+    );
+    assert!(taskbar.menu().is_open());
+    assert_eq!(
+        taskbar.menu().subject(),
+        Some(&MenuSubject::Entry {
+            entry: entry.clone()
+        })
+    );
+    entry
+}
+
+/// Click `row` of the open entry menu and report what the bar answered.
+///
+/// The row is found by the label its one definition gives it, so a
+/// reordering moves the click with it rather than aiming at a stale index.
+fn choose_entry_row(
+    input: &mut TaskbarInput,
+    taskbar: &mut Taskbar,
+    row: EntryRow,
+) -> TaskbarResponse {
+    let layout = taskbar
+        .menu_layout(Scale::ONE)
+        .expect("the open menu lays out");
+    let control = taskbar.menu().control();
+    let index = control
+        .items()
+        .iter()
+        .position(|item| item.label() == row.label())
+        .expect("the row is drawn");
+    let rect = control
+        .row_rect(index, layout.panel, Scale::ONE, taskbar.theme())
+        .expect("the row lays out");
+    let over = centre_of(rect);
+    input.handle(
+        InputEvent::PointerMoved { to: over },
+        taskbar,
+        Scale::ONE,
+        NOW_NS,
+    );
+    input.handle(
+        InputEvent::PointerPressed {
+            button: PointerButton::Primary,
+        },
+        taskbar,
+        Scale::ONE,
+        NOW_NS,
+    );
+    input.handle(
+        InputEvent::PointerReleased {
+            button: PointerButton::Primary,
+        },
+        taskbar,
+        Scale::ONE,
+        NOW_NS,
+    )
 }
 
 /// A dark theme with `contrast` swapped in, for accessibility renders.
@@ -1858,77 +1939,54 @@ fn keyboard_highlight_moves_in_the_menu_latch_only_the_menu() {
 fn entry_menu_launches_the_row_it_was_opened_on() {
     let mut bar = bottom_bar();
     let mut input = TaskbarInput::new();
-    open_library(&mut input, &mut bar);
+    let entry_id = open_entry_menu(&mut input, &mut bar);
 
-    // Secondary press on an entry row opens the entry menu.
-    let (row_index, entry_rect) =
-        visible_row_where(&bar, |row| matches!(row, LibraryRow::Entry { .. }))
-            .expect("an entry row is visible");
-    let entry_id = match bar.library().rows().get(row_index).unwrap() {
-        LibraryRow::Entry { id, .. } => id.clone(),
-        LibraryRow::Folder { .. } => panic!("not an entry"),
-    };
-    let inside = centre_of(entry_rect);
-    input.handle(
-        InputEvent::PointerMoved { to: inside },
-        &mut bar,
-        Scale::ONE,
-        NOW_NS,
-    );
-    input.handle(
-        InputEvent::PointerPressed {
-            button: PointerButton::Secondary,
-        },
-        &mut bar,
-        Scale::ONE,
-        NOW_NS,
-    );
-    assert!(bar.menu().is_open());
+    // Launching from the entry menu behaves exactly like launching from the
+    // row itself, and closes the popup.
     assert_eq!(
-        bar.menu().subject(),
-        Some(&MenuSubject::Entry {
-            entry: entry_id.clone()
-        })
-    );
-
-    // Move pointer over the Open row.
-    let menu_layout = bar.menu_layout(Scale::ONE).unwrap();
-    let open_row = bar
-        .menu()
-        .control()
-        .row_rect(MENU_OPEN_ROW, menu_layout.panel, Scale::ONE, bar.theme())
-        .expect("the Open row lays out");
-    let over = centre_of(open_row);
-    input.handle(
-        InputEvent::PointerMoved { to: over },
-        &mut bar,
-        Scale::ONE,
-        NOW_NS,
-    );
-
-    // Press and release to activate: launching from the entry menu behaves
-    // exactly like launching from the row itself, and closes the popup.
-    input.handle(
-        InputEvent::PointerPressed {
-            button: PointerButton::Primary,
-        },
-        &mut bar,
-        Scale::ONE,
-        NOW_NS,
-    );
-    assert_eq!(
-        input.handle(
-            InputEvent::PointerReleased {
-                button: PointerButton::Primary,
-            },
-            &mut bar,
-            Scale::ONE,
-            NOW_NS,
-        ),
+        choose_entry_row(&mut input, &mut bar, EntryRow::Open),
         TaskbarResponse::LibraryLaunch { entry: entry_id }
     );
     assert!(!bar.menu().is_open());
     assert!(!bar.library().is_open());
+}
+
+#[test]
+fn entry_menu_asks_the_session_for_a_desktop_shortcut() {
+    let mut bar = bottom_bar();
+    let mut input = TaskbarInput::new();
+    let entry_id = open_entry_menu(&mut input, &mut bar);
+
+    // The bar writes nothing: it names the entry and the session, which
+    // holds the filesystem capability, makes the link. The popup closes for
+    // the same reason a launch closes it — it is modal, and the shortcut
+    // appears on the desktop behind it.
+    assert_eq!(
+        choose_entry_row(&mut input, &mut bar, EntryRow::Shortcut),
+        TaskbarResponse::CreateDesktopShortcut { entry: entry_id }
+    );
+    assert!(!bar.menu().is_open());
+    assert!(!bar.library().is_open());
+}
+
+#[test]
+fn entry_menu_offers_exactly_the_two_rows_it_defines() {
+    let mut bar = bottom_bar();
+    let mut input = TaskbarInput::new();
+    open_entry_menu(&mut input, &mut bar);
+
+    let labels: Vec<&str> = bar
+        .menu()
+        .control()
+        .items()
+        .iter()
+        .map(MenuItem::label)
+        .collect();
+    assert_eq!(
+        labels,
+        alloc::vec![EntryRow::Open.label(), EntryRow::Shortcut.label()],
+        "the rows the menu draws are the ones it defines, in order"
+    );
 }
 
 #[test]

@@ -607,8 +607,17 @@ to offer. A cell whose window has no thumbnail yet draws that
   chrome, and an omitted field is absent rather than a blank row. The panel is
   attached to the menu: dismissing the menu takes it away with it, and
   `Escape` inside it steps back to the menu rather than closing both.
-- **A program-library entry row** in the open popup: a single *Open* row,
-  reported as `LibraryLaunch`.
+- **A program-library entry row** in the open popup: the two things the popup
+  can do to a row that its own click cannot. *Open* is reported as
+  `LibraryLaunch`; *Create Desktop Shortcut* as `CreateDesktopShortcut`, which
+  the session turns into a symbolic link in the user's own `Desktop` folder —
+  named after the entry, pointing at its bundle directory
+  (`plans/SYMLINKS.md`). Both rows come from one `EntryRow` list, which
+  `rows_for` renders and `choose` reads the activated index back through, so a
+  reordering cannot silently re-map what a row does; `EntryRow::label` is the
+  one definition an embedder's test or a QEMU pointer script aims by. Either
+  row closes the popup: it is modal, so leaving it up would stand between the
+  user and what they asked for.
 - **The Switchboard capsule**: the desktop's system quick-actions menu (see
   *The system quick-actions menu*).
 

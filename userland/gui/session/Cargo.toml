@@ -37,10 +37,6 @@ tairix-display = { path = "../../../lib/display", version = "=0.0.0" }
 # merges them through the one shared `merge`, and resolves a popup launch's
 # `EntryId` back to its bundle path. The bar itself never touches the VFS.
 tairix-proglib = { path = "../../../lib/proglib", version = "=0.0.0" }
-# The pinned-shortcut store engine (plans/NEW-TASKBAR.md T6): the session
-# reads and rewrites the user's own `~/Settings/Taskbar/pins.conf` under the
-# user's identity and resolves each pin for the bar. The bar itself never
-# touches the VFS.
 # The shared reclaimable-memory model (plans/SMARTRAM.md SMART5): the
 # session is the party that knows the output's frame size, the seat, and the
 # process pressure gauge, so it builds the window manager's cursor cache and
@@ -58,8 +54,8 @@ tairix-procinfo = { path = "../../../lib/procinfo", version = "=0.0.0" }
 # count and hands to the compositor. The default `pool` feature is what makes
 # this the one place in the desktop that creates a thread.
 tairix-parallel = { path = "../../../lib/parallel", version = "=0.0.0" }
-# The shared pixel surface: a pin's sandbox-rasterised icon artwork is
-# rebuilt into the premultiplied surface the taskbar's shared control blits
+# The shared pixel surface: an application's sandbox-rasterised icon artwork
+# is rebuilt into the premultiplied surface the taskbar's shared control blits
 # (one colour-algebra home).
 tairix-raster = { path = "../../../lib/raster", version = "=0.0.0" }
 # The one logical->physical UI scale (§10): the picker resolves the theme's
@@ -84,6 +80,11 @@ tairix-window = { path = "../../../lib/window", version = "=0.0.0" }
 # files app drives, so the picker and the file manager can never diverge in
 # navigation semantics, listing policy, or look (§2.2, §6).
 tairix-browse = { path = "../../../lib/browse", version = "=0.0.0" }
+# The one shared filesystem name rule (plans/SYMLINKS.md S5): the desktop
+# validates a shortcut's name through `validate_file_name`, the same rule a
+# typed folder or rename name obeys, rather than carrying a second opinion
+# about what a name may be (§2.2).
+tairix-path = { path = "../../../lib/path", version = "=0.0.0" }
 # The shared text rasteriser: the trusted file picker renders (and hit-tests)
 # its listing at the theme's font size, so it resolves the `BitmapFont` it
 # hands to `tairix_browse::render` (§2.2).

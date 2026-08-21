@@ -51,7 +51,7 @@ pub trait SessionFileReader {
 /// [`SessionFileReader`].
 ///
 /// The session persists exactly one class of state: the user's own desktop
-/// configuration under their inherited home (today the taskbar pin store).
+/// configuration under their inherited home (the pinboard settings store).
 /// On a running system the write goes through the VFS under the session's
 /// own kernel-attested identity — creating the parent directory when the
 /// settings subtree does not exist yet, then replacing the document whole —

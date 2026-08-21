@@ -151,6 +151,13 @@ double-click activation ([desktop icons](./icons.md),
 - **Sort** — by name, kind, size, or date, drawn from the shared sort, so
   the desktop and the file manager agree on what each ordering means.
 
+A desktop icon is often a **shortcut** — a symbolic link the program
+library's row menu asked the session to make (`plans/SYMLINKS.md` S5, see
+[the session](./session.md#desktop-shortcuts)). It is classified and
+activated as what it *names*: bundle-ness reads off the target's own leaf, a
+folder or file is opened through the link, and one whose target has gone is
+refused with its reason rather than launched blind.
+
 ## The context menu
 
 A right-click on the backdrop opens the pinboard menu at the pointer, built

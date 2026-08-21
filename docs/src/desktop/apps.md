@@ -162,8 +162,8 @@ the link entries; the shipped `RtLinkReader` is the one implementation every
 surface shares). A link the reader cannot describe classifies as
 `LinkTarget::Dangling` — the honest answer, never a silent downgrade to a
 plain file. Activation descends or opens *through* the link, but launches a
-bundle by its **resolved** path, because the app-load gate judges the path it
-is handed and a link in the user's own directory is not in a program store.
+bundle by its **resolved** path, because the spawn gate parses an entry point
+as `…/<Name>.app/Run` and a link named after the program is not that shape.
 
 `SortMode` (`SortKey` — `Name`/`Size`/`Modified` — plus a `SortDirection`)
 is the one listing order both the file manager and the trusted picker share

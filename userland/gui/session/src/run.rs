@@ -110,19 +110,20 @@ mod program {
         SeatPresentation, SessionAuthority, SwitchUser, NO_DEADLINE_NS,
     };
     use tairix_desktop_session::{
-        admitted_pid, deliver_pending_open, desktop_info, drop_is_noteworthy, ensure_switchboard,
-        load_library, maybe_send_frame_report, maybe_send_seat_report, open_tray, parse,
-        picker_cells, reap_launched, relay_power, resolve_window_identities, serve_pinboard_apply,
-        serve_switchboard_request, window_control_alternate_event, window_control_event, Answer,
-        AppBarBridge, AppBarService, ArtworkDesk, ArtworkFileReader, ArtworkSandbox, CliError,
-        Command, ConcludedPick, ConfirmPrompt, Delivery, Desktop, DesktopAction, DesktopActivation,
-        DesktopOutcome, DesktopShell, DeviceInputSource, FrameContent, HangTracker, HoldBack,
-        IconRasteriser, InputSource, KeyboardInputSource, LaunchTable, ListingClient, ListingDesk,
-        LockedDrain, OwnerWindow, PickConclusion, PinboardMenu, PinboardMenuOutcome, PinboardStore,
-        PinboardStoreError, Prepared, PresentedOwners, ScreenFade, ScreenLock, SeatEventReader,
-        SeatInputChannel, SessionFileReader, SessionFileWriter, SessionPicker, SessionWindows,
-        ShellWindowHost, SwitchboardMailbox, SwitchboardOutcome, SwitchboardServe, WallpaperDesk,
-        WallpaperSource, BUNDLE_RUN_SUFFIX, FILES_LABEL, FILES_RUN_PATH, SWITCHBOARD_CALL_REFUSED,
+        admitted_pid, catalogued, deliver_pending_open, desktop_info, drop_is_noteworthy,
+        ensure_switchboard, load_library, maybe_send_frame_report, maybe_send_seat_report,
+        open_tray, parse, picker_cells, reap_launched, relay_power, resolve_window_identities,
+        serve_pinboard_apply, serve_switchboard_request, window_control_alternate_event,
+        window_control_event, Answer, AppBarBridge, AppBarService, ArtworkDesk, ArtworkFileReader,
+        ArtworkSandbox, CliError, Command, ConcludedPick, ConfirmPrompt, Delivery, Desktop,
+        DesktopAction, DesktopActivation, DesktopOutcome, DesktopShell, DeviceInputSource,
+        FrameContent, HangTracker, HoldBack, IconRasteriser, InputSource, KeyboardInputSource,
+        LaunchTable, ListingClient, ListingDesk, LockedDrain, OwnerWindow, PickConclusion,
+        PinboardMenu, PinboardMenuOutcome, PinboardStore, PinboardStoreError, Prepared,
+        PresentedOwners, ScreenFade, ScreenLock, SeatEventReader, SeatInputChannel,
+        SessionFileReader, SessionFileWriter, SessionPicker, SessionWindows, ShellWindowHost,
+        SwitchboardMailbox, SwitchboardOutcome, SwitchboardServe, WallpaperDesk, WallpaperSource,
+        BUNDLE_RUN_SUFFIX, FILES_LABEL, FILES_RUN_PATH, SWITCHBOARD_CALL_REFUSED,
         SWITCHBOARD_LABEL, SWITCHBOARD_RUN_PATH, USAGE, WALLPAPER_LABEL, WALLPAPER_RUN_PATH,
         WINDOW_SHOWN, WINDOW_SHOWN_MESSAGE,
     };
@@ -1524,8 +1525,8 @@ mod program {
             desktop_folder,
         );
         // The user's pinboard settings, with the same fail-closed posture as
-        // the pin store: absent → the defaults, silently (a fresh account);
-        // unusable → the defaults plus one loud reason. They are applied
+        // the program library: absent → the defaults, silently (a fresh
+        // account); unusable → the defaults plus one loud reason. Applied
         // *before* the first listing, so the very first frame already has
         // the user's own sort order and icon arrangement rather than
         // re-sorting a frame later.
@@ -3173,7 +3174,7 @@ mod program {
     /// parser-sandbox icon service — this binary re-entered as a
     /// capability-empty worker — and only a verified pixel block comes
     /// back. Any refusal (malformed image, crashed worker, unavailable
-    /// spawn) is `None`: the pin falls back to its class glyph.
+    /// spawn) is `None`: the slot falls back to its class glyph.
     struct SandboxRasteriser {
         sandbox: SharedSandbox,
     }
@@ -4172,11 +4173,13 @@ mod program {
                     );
                 }
             }
-            // An event no router acted on, and outcomes the shell has
-            // already fully applied with its own state: the
-            // click-to-activate/minimise rule, clearing a dismissed
-            // notification from the model, and the popup's own open/close.
-            // Nothing here needs a capability the shell lacks, so the
+            // An event no router acted on; outcomes the shell has already
+            // fully applied with its own state (the click-to-activate/minimise
+            // rule, clearing a dismissed notification from the model, the
+            // popup's own open/close); and the desktop shortcut, which
+            // `route_desktop` — the owner of that folder, its icons, and its
+            // one creation path — has already made and shown. Nothing here
+            // needs a capability this side of the routing holds, so the
             // session adds nothing. Listed rather than caught by a wildcard
             // so a new outcome fails the build instead of being dropped in
             // silence.
@@ -4186,7 +4189,8 @@ mod program {
                 | TaskbarResponse::LibraryDismissed
                 | TaskbarResponse::WindowChosen { .. }
                 | TaskbarResponse::DismissNotification { .. }
-                | TaskbarResponse::ClockPressed,
+                | TaskbarResponse::ClockPressed
+                | TaskbarResponse::CreateDesktopShortcut { .. },
             ) => {}
         }
         Routed::Continue
@@ -4358,20 +4362,19 @@ mod program {
             },
             _ => departed(desktop, compositor, pointer, &layout, &mut damage),
         };
+        // A shortcut the program library's row menu asked for is a change to
+        // *this* folder, so it is honoured beside the desktop's own gestures
+        // rather than through a second creation path. The two sources are
+        // exclusive — a taskbar outcome is never also a desktop gesture — and
+        // `or` says so without discarding either.
+        let action = shortcut_asked(outcome, shell, desktop).or(acted.action);
         // A re-list moved the icons themselves, so no cell of the layout the
         // gesture reported against describes the new column: that, and the
         // settings and folder edits `apply_desktop_action` performs, are the
         // changes that genuinely repaint the whole layer.
         let whole = acted.relisted
             | apply_desktop_action(
-                acted.action,
-                pinboard,
-                wallpapers,
-                desktop,
-                shell,
-                compositor,
-                launched,
-                now_ns,
+                action, pinboard, wallpapers, desktop, shell, compositor, launched, now_ns,
             );
         if acted.relisted {
             // The user's own files demonstrably changed under the desktop, so
@@ -4387,6 +4390,25 @@ mod program {
         } else if !damage.is_empty() {
             shell.present_desktop_area(compositor, desktop, &damage);
         }
+    }
+
+    /// The action a program-library *Create Desktop Shortcut* row asks for,
+    /// or `None` for every other outcome.
+    ///
+    /// The catalog the popup was handed is the one the shortcut is resolved
+    /// against, so a row can never launch one bundle and link another.
+    fn shortcut_asked<S: DirectorySource>(
+        outcome: &tairix_desktop_session::ShellOutcome,
+        shell: &DesktopShell,
+        desktop: &Desktop<S>,
+    ) -> Option<DesktopAction> {
+        let tairix_desktop_session::ShellOutcome::Taskbar(TaskbarResponse::CreateDesktopShortcut {
+            entry,
+        }) = outcome
+        else {
+            return None;
+        };
+        Some(desktop.shortcut_to(shell.session().taskbar().library().catalog(), entry))
     }
 
     /// Carry out one desktop action, whether a gesture on the icon column
@@ -4442,7 +4464,15 @@ mod program {
                 false
             }
             Some(DesktopAction::CreateFolder { path }) => {
-                create_desktop_folder(&path, desktop, now_ns)
+                let ret = tairix_rt::fs_mkdir(path.as_bytes());
+                settle_desktop_create(&path, ret, desktop, now_ns)
+            }
+            // Target first, then link: the stored target is data the kernel
+            // never resolves here, and a name already taken is the kernel's
+            // own refusal — this never replaces one.
+            Some(DesktopAction::CreateShortcut { link, target }) => {
+                let ret = tairix_rt::fs_symlink(target.as_bytes(), link.as_bytes());
+                settle_desktop_create(&link, ret, desktop, now_ns)
             }
             Some(DesktopAction::AdoptSettings(settings)) => adopt_pinboard_settings(
                 settings, pinboard, wallpapers, desktop, shell, compositor, now_ns,
@@ -4465,18 +4495,22 @@ mod program {
         }
     }
 
-    /// Create `path` under the session's own identity and show it, answering
-    /// whether the icon column changed.
+    /// Settle a name the session asked the filesystem to create at `path`,
+    /// whose call answered `ret`, and show the result — answering whether the
+    /// icon column changed.
     ///
-    /// A refusal — the folder already exists, the desktop folder is not
-    /// writable, the volume is full — is stated on `stderr` with the
-    /// kernel's own reason and leaves the desktop exactly as it was.
-    fn create_desktop_folder<S: DirectorySource>(
+    /// Both names the desktop creates — a folder and a shortcut — end here,
+    /// so a refusal reads the same whichever asked for it and the fresh name
+    /// appears the same way. A refusal (the name is already taken, the
+    /// desktop folder is not writable, the volume is full) is stated on
+    /// `stderr` with the kernel's own reason and leaves the desktop exactly
+    /// as it was.
+    fn settle_desktop_create<S: DirectorySource>(
         path: &str,
+        ret: i64,
         desktop: &mut Desktop<S>,
         now_ns: u64,
     ) -> bool {
-        let ret = tairix_rt::fs_mkdir(path.as_bytes());
         if ret < 0 {
             let _ = writeln!(
                 Stderr,
@@ -4556,7 +4590,7 @@ mod program {
     /// when the desktop launched one and it has a window up; do nothing
     /// while its launch is still in flight (no window yet — the press is
     /// already satisfied); spawn only when no desktop-launched copy is
-    /// alive. The one rule behind the Files button and every pin press.
+    /// alive. The one rule behind the Files button.
     #[allow(clippy::too_many_arguments)] // The serve loop's whole mutable state, threaded explicitly.
     fn activate_bundle(
         shell: &mut DesktopShell,
@@ -4605,16 +4639,13 @@ mod program {
         entry: &tairix_proglib::EntryId,
         launched: &mut LaunchTable,
     ) {
-        let library = shell.session().taskbar().library();
-        let Some(chosen) = library.catalog().entry(entry) else {
-            // The popup only reports entries from the catalog it was
-            // handed, so a miss means the catalog changed underneath the
-            // click; refuse loudly rather than spawning a guessed path.
-            let _ = writeln!(
-                Stderr,
-                "desktop: library entry {entry} is no longer catalogued"
-            );
-            return;
+        let catalog = shell.session().taskbar().library().catalog();
+        let chosen = match catalogued(catalog, entry) {
+            Ok(chosen) => chosen,
+            Err(reason) => {
+                let _ = write!(Stderr, "{reason}");
+                return;
+            }
         };
         let run_path = alloc::format!("{}/Run", chosen.bundle().as_str());
         let label = chosen.name().as_str();
@@ -4656,10 +4687,10 @@ mod program {
     /// The session's live file-writing seam: whole-document replacement
     /// through the kernel VFS under the session's own kernel-attested
     /// identity — the write-side twin of [`VfsFileReader`], used for the
-    /// user's own desktop configuration (the taskbar pin store). The
-    /// parent directory is created first (`~/Settings/Taskbar` does not
-    /// exist until the first pin), an existing directory being the
-    /// ordinary case; every permission decision is the kernel's.
+    /// user's own desktop configuration (the pinboard settings store). The
+    /// parent directory is created first (the settings subtree does not exist
+    /// until the first write), an existing directory being the ordinary case;
+    /// every permission decision is the kernel's.
     struct VfsFileWriter;
 
     impl SessionFileWriter for VfsFileWriter {
@@ -4689,8 +4720,8 @@ mod program {
     /// so no file can make the desktop slurp an arbitrary number of bytes.
     ///
     /// The one read path every document the session reads goes through — the
-    /// program-library and pin stores at the catalog cap, the user's
-    /// wallpaper at the wallpaper cap — so a second, differently-bounded
+    /// program-library and pinboard-settings stores at the catalog cap, the
+    /// user's wallpaper at the wallpaper cap — so a second, differently-bounded
     /// reader cannot exist. An answer longer than `cap` is the caller's
     /// whole-document refusal to state.
     ///

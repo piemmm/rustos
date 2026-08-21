@@ -770,7 +770,8 @@ impl DesktopShell {
     /// A decode is a read plus a sandbox round trip. Left to the paint, a
     /// launcher opening on twenty applications shows twenty built-in glyphs and
     /// replaces them a round trip per icon later; asked for here — when the
-    /// catalog or the pin strip that names them changes, which is long before
+    /// catalog or the application strip that names them changes, which is long
+    /// before
     /// either surface is shown — the wait is already over. Nothing is drawn and
     /// nothing is waited for, and a shell whose resolver produces on the
     /// calling thread prefetches nothing at all.

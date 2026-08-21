@@ -28,7 +28,8 @@
 //!   the notification IPC; then the clock; and anchored at the very end —
 //!   immovable, outranked only by the leading launchers — the Switchboard
 //!   tray capsule ([`SwitchboardTray`]): the desktop's live system readout,
-//!   with a hover/pinned instrument readout, scroll-to-cycle-tasks, and a
+//!   with an instrument readout that opens on hover or keyboard focus,
+//!   scroll-to-cycle-tasks, and a
 //!   middle-click switch to the previous task.
 //!
 //! The taskbar holds no authority and performs no I/O: pressing Files or
@@ -96,7 +97,7 @@ pub use layout::{BarLayout, Hit, NotificationCard, NotificationsLayout, TrayRead
 pub use library::{
     folder_label, LibraryFocus, LibraryIconRequest, LibraryLayout, LibraryPopup, LibraryRow,
 };
-pub use menu::{BarMenu, MenuLayout, MenuSubject, MENU_OPEN_ROW};
+pub use menu::{BarMenu, EntryRow, MenuLayout, MenuSubject};
 pub use notifications::{
     IconId, NotificationArea, NotifySeverity, StatusKind, StatusSignal, TransientNotification,
 };

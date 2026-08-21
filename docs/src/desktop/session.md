@@ -50,6 +50,36 @@ that same catalog — the entry's bundle names its `Run` binary — and spawned
 asynchronously under the session's own identity, with a refusal reported
 loudly and non-fatally (see *Launch bookkeeping*).
 
+Both things a row can ask for resolve through the **one** lookup,
+`library::catalogued`, so a row can never launch one bundle and link another,
+and a catalog that changed under the click is refused once, in one wording.
+
+### Desktop shortcuts
+
+`CreateDesktopShortcut { entry }` — the entry menu's second row
+(`plans/SYMLINKS.md` S5) — is a symbolic link the session creates in the
+user's own `Desktop` folder under its own identity. The desktop owns the
+naming, because it owns the folder: `Desktop::shortcut_to` takes the entry's
+**display name** as the link name and its `BundlePath` as the target, stored
+verbatim.
+
+- The target is the bundle **directory**, which is what makes the shortcut
+  read as an application: `lib/browse` decides bundle-ness from the target's
+  own leaf name, never from the link's.
+- A display name is not automatically a file name — the library permits a `/`
+  and a `:` in one — so it is validated through the one shared
+  `tairix_path::validate_file_name`, and a refusal carries that rule's own
+  reason.
+- **A name already taken is the kernel's answer.** `fs_symlink` replaces
+  nothing, so a collision is `AlreadyExists` at create time, reported as the
+  refusal it is. Picking a free name instead would silently make a second,
+  differently-named shortcut for a user who already has one, off a listing
+  the rate-limited re-list may have left stale.
+- The create runs target-first through the same `settle_desktop_create` tail
+  the new-folder create uses, so both state a refusal identically and both
+  show the fresh name by re-listing. A desktop never dies over a shortcut it
+  could not make (`AGENTS.md` §2.24).
+
 ## The icon bar
 
 The bar's middle is one slot per *running application*
@@ -442,6 +472,8 @@ performs what needs capabilities the shell does not hold
   window and hands them back to the bar.
 - `LibraryLaunch { entry }` — a chosen library entry, resolved through the
   catalog and spawned (see *The program library*).
+- `CreateDesktopShortcut { entry }` — a link to that entry's bundle in the
+  user's own `Desktop` folder (see *Desktop shortcuts*).
 - `OpenLibrary` — the popup opened; the embedder re-reads the stores so the
   listing is current.
 - `LibraryDismissed`, `NotificationActivated`, `ClockPressed` — surfaced for

@@ -7,6 +7,11 @@ surface. It exists because nothing in the tree had links — no `FileKind`, no
 syscall, no `NodeKind`, no on-disk kind — and a desktop shortcut is a symlink
 to an app bundle (`plans/PINBOARD.md`, `plans/NEW-TASKBAR.md` T16).
 
+`done` — **S1–S5 complete.** The settled decisions and bounds below are
+binding on anything that touches a link; each stage's section records what
+that part now guarantees. The one thing this plan deliberately does *not*
+answer is hard links (see "Open").
+
 ## Read first (§15.18)
 
 - `AGENTS.md` §2.13 (evolve in place), §5.4 (fail closed), §9 (the ABI
@@ -363,14 +368,69 @@ listed as a link, a link not byte-readable, an interior link always followed,
 succeed and reach a different file), a link unable to escape its volume, and
 creation refused on a read-only mount and an unauthorised parent.
 
-## Stage S5 — the desktop shortcut — **remaining**
+## Stage S5 — the desktop shortcut — **landed**
 
-The program library's row menu gains *Create desktop shortcut*; the session
-creates `~/Desktop/<Name>` → the entry's bundle path under the user's own
-identity, reporting a refusal loudly and never fatally. The desktop surface
-and `lib/browse` classify a symlinked bundle as a bundle and launch the
-**resolved** target, so `appload`'s store rule still sees a real store
-bundle; a dangling or non-store target is refused with its reason.
+**A program-library row offers two things its own click cannot.** The entry
+menu's rows are one list (`EntryRow` + `ENTRY_ROWS` in
+`userland/gui/taskbar/src/menu.rs`): *Open* and *Create Desktop Shortcut*.
+`rows_for` renders that list and `choose` reads the activated index back
+through it, so a reordering cannot silently re-map what a row does, and
+`EntryRow::label` is the one definition a test or a QEMU pointer script aims
+by. The bar writes nothing: the row becomes
+`TaskbarResponse::CreateDesktopShortcut { entry }` and closes the popup, for
+the same reason a launch does — the popup is modal, and leaving it up would
+stand between the user and the icon just asked for.
+
+**The session names the link and the desktop owns the naming.**
+`Desktop::shortcut_to(catalog, entry)` resolves the identifier through
+`library::catalogued` — the *one* lookup a launch also uses, so a row can
+never launch one bundle and link another — and answers a `DesktopAction`:
+
+- The link takes the entry's **display name**, the target is its
+  `BundlePath` verbatim. That is what exercises S4's classifier: bundle-ness
+  reads off the *target's* leaf, so `Chess` → `/Apps/chess.app` is an
+  application while the link's own name is just a name.
+- A display name is not automatically a file name (the library permits `/`
+  and `:` in one), so it is validated through the one shared
+  `tairix_path::validate_file_name` and a refusal carries that rule's own
+  reason.
+- **A name already taken is the kernel's answer, not a worked-around one.**
+  `fs_symlink` replaces nothing, so a collision is `AlreadyExists` at create
+  time. Choosing a free name instead would silently make a second,
+  differently-named shortcut for a user who already has one, off a listing
+  the rate-limited re-list may have left stale.
+
+`run.rs` honours `DesktopAction::CreateShortcut` with `fs_symlink` — target
+first, then link — through the same `settle_desktop_create` tail the new-folder
+create uses, so both state a refusal identically and both show the fresh name
+by re-listing. A refusal is loud and never fatal.
+
+**Launching the resolved target was S4's; the reason it matters was
+misstated.** `lib/appload` has **no** store-prefix rule: its gate is the
+bundle layout, the manifest, the ABI version, the syscall-table hash, the
+trust-anchored signature, the content hash, the request ∩ grants
+intersection, and the `Run` image's PIE/W^X/CFI invariants. What makes the
+*resolved* path necessary is the kernel: `appspawn::bundle_run_path` parses an
+entry point as a strict `…/<Name>.app/Run` with no traversal, so a link named
+`Chess` would yield `…/Chess/Run` and be refused before anything is read.
+`FsBundleStore` additionally reads every bundle file `NO_FOLLOW` and refuses
+one that is a link, and the store prefix decides only whether a verification
+result may be *cached* (`AppStore::cacheable_bundle`). A bundle outside a store
+is therefore admitted or refused on its **signature** and the caller's own read
+permission, never on its path — which is the stronger property.
+
+Tests: in the taskbar suite, the menu draws exactly the two rows it defines in
+order, and each reports its own response with the popup closed. In the session
+suite, a secondary press on a library row and a click on the shortcut row
+deliver `CreateDesktopShortcut` for that entry with the popup shut. In
+`desktop_tests`: the link is the entry's name inside the desktop folder with
+the bundle path stored verbatim; an entry that left the catalog is refused;
+each display name the shared rule rejects is refused with that rule's reason;
+a name already taken is still asked for; and the activation matrix — a
+shortcut to a bundle launches the **resolved** `Run`, one to a folder or a
+file acts through the link, a dangling one is refused with its reason and
+stays selected, and one that names nothing at all is refused rather than
+opened.
 
 ---
 
@@ -400,16 +460,26 @@ bundle; a dangling or non-store target is refused with its reason.
 
 ---
 
-## Definition of done (whole plan)
+## What the finished plan guarantees
 
-- Every exhaustive match over `FileKind`/`NodeKind` has a real, fail-closed
-  arm — never a catch-all (§5.4).
-- No caller-supplied path grammar was loosened: `Path::parse` still refuses
-  relative paths and `.`/`..`.
-- The resolution matrix above passes, and a link cannot escape its volume,
-  bypass a permission check, or be walked as a cycle.
-- Docs land with the code: this plan, the §15.18 jump-sheet row,
-  `docs/src/filesystem/` for the VFS and ARXFS spellings, and each touched
-  crate's `README.md`.
-- Whole-project gate green (§7): `cargo fmt --all`, one `cargo xtask ci`,
-  `cargo xtask fuzz --secs 5`, `tools/ci/soak.sh both --secs 20`.
+Every stage has landed; these are the properties the tree now holds, each
+covered by the tests its stage lists.
+
+- **Every exhaustive match over `FileKind`/`NodeKind` has a real, fail-closed
+  arm** — never a catch-all. `Inode::kind` became an `InodeKind` enum in S3
+  precisely so the compiler asks the question at every site.
+- **No caller-supplied path grammar was loosened.** `Path::parse` still
+  refuses relative paths and `.`/`..`; the looser target grammar is
+  `parse_link_target`'s alone, applied to on-disk data, never to a caller's
+  spelling.
+- **The resolution matrix holds:** a link cannot escape the volume that
+  stores it, cannot bypass a permission check on any directory the walk
+  traverses, and a cycle or an over-budget chain is `LinkLoop` rather than
+  walked. `..` after a link resolves physically.
+- **A format without links refuses rather than approximates**, and the
+  per-format support table in `docs/src/filesystem/overview.md` is the one
+  statement of which does what.
+- **Docs land with the code:** this plan, the §15.18 jump-sheet row,
+  `docs/src/filesystem/{overview,arxfs-spec}.md` for the VFS and ARXFS
+  spellings, `docs/src/desktop/{apps,taskbar,session}.md` for the userland
+  and desktop surfaces, and each touched crate's `README.md`.

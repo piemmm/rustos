@@ -76,7 +76,8 @@ pub struct BarLayout {
     pub separator: Rect,
     /// The Files launcher button, after the Library button and the separator
     /// — the first of everything the rule groups together, so the file
-    /// manager reads as a peer of the pins rather than of the library.
+    /// manager reads as a peer of the application slots rather than of the
+    /// library.
     /// [`Rect::EMPTY`] when the bar is too short to hold it.
     pub files: Rect,
     /// The region the running applications occupy, between the leading

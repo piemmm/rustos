@@ -35,7 +35,7 @@ use tairix_proglib::{
 };
 use tairix_reclaim::{CacheLedger, PressureBand, ReclaimCache, ReportedPressure};
 use tairix_taskbar::{
-    icon_cache, Edge, IconEpoch, LibraryRow, TaskId, TaskbarConfig, TaskbarRenderer,
+    icon_cache, Edge, EntryRow, IconEpoch, LibraryRow, TaskId, TaskbarConfig, TaskbarRenderer,
     TaskbarRepaint, TaskbarResponse,
 };
 use tairix_theme::{
@@ -2592,8 +2592,8 @@ fn syncing_focus_to_an_untracked_window_leaves_the_highlight() {
 }
 
 /// The AW3 QEMU vertical's full click-through, replayed on the host with
-/// the production shell construction and the ramfb console geometry: pin
-/// → start button (menu opens) → "Files" row (launch) → the served
+/// the production shell construction and the ramfb console geometry:
+/// start button (menu opens) → "Files" row (launch) → the served
 /// window (activate) → start button (menu reopens) → the appearance
 /// toggle (theme switches) → the window again (activate). Each staged
 /// outcome must appear exactly as the vertical's marker chain assumes,
@@ -2783,6 +2783,42 @@ impl DirectorySource for TreeSource {
             .map(Listing::Ready)
             .ok_or(Errno::NotFound)
     }
+}
+
+/// The centre of the open program-library popup's row for the entry shown as
+/// `label`.
+fn library_row_at(shell: &DesktopShell, label: &str) -> Point {
+    let layout = shell.session().taskbar().library_layout(Scale::ONE);
+    let index = shell
+        .session()
+        .taskbar()
+        .library()
+        .rows()
+        .iter()
+        .position(|r| matches!(r, LibraryRow::Entry { name, .. } if name.as_str() == label))
+        .expect("labelled row");
+    let (_, rect) = layout
+        .rows
+        .iter()
+        .find(|(i, _)| *i == index)
+        .expect("row rect");
+    centre(*rect)
+}
+
+/// The centre of the open context menu's row labelled `label`.
+fn menu_row_at(shell: &DesktopShell, label: &str) -> Point {
+    let taskbar = shell.session().taskbar();
+    let layout = taskbar.menu_layout(Scale::ONE).expect("the menu lays out");
+    let control = taskbar.menu().control();
+    let index = control
+        .items()
+        .iter()
+        .position(|item| item.label() == label)
+        .expect("labelled row");
+    let rect = control
+        .row_rect(index, layout.panel, Scale::ONE, taskbar.theme())
+        .expect("row rect");
+    centre(rect)
 }
 
 /// A source refusing every listing, standing in for a session whose
@@ -3221,30 +3257,9 @@ fn full_launch_flow() {
     shell.handle(moved(24, 1060), &mut comp, 0);
     shell.handle(PRIMARY_PRESS, &mut comp, 0);
 
-    let row_at = |shell: &DesktopShell, label: &str| -> Point {
-        let layout = shell.session().taskbar().library_layout(Scale::ONE);
-        let index = shell
-            .session()
-            .taskbar()
-            .library()
-            .rows()
-            .iter()
-            .position(|r| matches!(r, LibraryRow::Entry { name, .. } if name.as_str() == label))
-            .expect("labelled row");
-        let (_, rect) = layout
-            .rows
-            .iter()
-            .find(|(i, _)| *i == index)
-            .expect("row rect");
-        Point::new(
-            rect.left() + i32::try_from(rect.width / 2).expect("fits"),
-            rect.top() + i32::try_from(rect.height / 2).expect("fits"),
-        )
-    };
-
-    // A press on a program row arms the pin drag; the launch is the
-    // release that follows without the pointer leaving the row.
-    let at = row_at(&shell, "Calc");
+    // A press on a program row arms the click; the launch is the release
+    // that follows without the pointer leaving the row.
+    let at = library_row_at(&shell, "Calc");
     let outcome = shell.handle(moved(at.x, at.y), &mut comp, 0);
     assert_eq!(outcome, ShellOutcome::Ignored);
     assert_eq!(
@@ -3257,6 +3272,40 @@ fn full_launch_flow() {
         panic!("expected launch, got {outcome:?}");
     };
     assert_eq!(entry.as_str(), "os.tairix.calc");
+}
+
+#[test]
+fn the_entry_menus_shortcut_row_asks_the_embedder_to_make_one() {
+    let mut shell = shell();
+    let mut comp = compositor();
+    shell
+        .session_mut()
+        .taskbar_mut()
+        .library_mut()
+        .set_catalog(catalog(&[("chess", "Chess", LibraryCategory::Games)]));
+
+    // Open the popup, then the row's own context menu.
+    shell.handle(moved(24, 1060), &mut comp, 0);
+    shell.handle(PRIMARY_PRESS, &mut comp, 0);
+    let at = library_row_at(&shell, "Chess");
+    shell.handle(moved(at.x, at.y), &mut comp, 0);
+    shell.handle(SECONDARY_PRESS, &mut comp, 0);
+    assert!(shell.session().taskbar().menu().is_open());
+
+    // The shortcut row, found by the label its one definition gives it.
+    let row = menu_row_at(&shell, EntryRow::Shortcut.label());
+    shell.handle(moved(row.x, row.y), &mut comp, 0);
+    shell.handle(PRIMARY_PRESS, &mut comp, 0);
+    let outcome = shell.handle(PRIMARY_RELEASE, &mut comp, 0);
+
+    let ShellOutcome::Taskbar(TaskbarResponse::CreateDesktopShortcut { entry }) = outcome else {
+        panic!("expected a shortcut request, got {outcome:?}");
+    };
+    assert_eq!(entry.as_str(), "os.tairix.chess");
+    assert!(
+        !shell.session().taskbar().library().is_open(),
+        "the modal popup gets out of the way of the icon it just asked for"
+    );
 }
 
 #[test]
@@ -6283,7 +6332,7 @@ fn pin_artwork_never_outgrows_the_budget_its_output_allows() {
                     32
                 )
                 .is_some(),
-            "every pin still gets its artwork, cached or not"
+            "every slot still gets its artwork, cached or not"
         );
     }
     assert!(
@@ -6545,9 +6594,10 @@ fn a_library_row_draws_its_own_applications_icon() {
 }
 
 /// The reported defect: with the decode on a worker thread, the launcher
-/// popup and the pin strip drew a screenful of built-in glyphs and only
-/// replaced them a round trip *per icon* later — so a user opening the
-/// launcher saw generic pictures, and a pinned application wore its fallback.
+/// popup and the application strip drew a screenful of built-in glyphs and
+/// only replaced them a round trip *per icon* later — so a user opening the
+/// launcher saw generic pictures, and a running application wore its
+/// fallback.
 ///
 /// The fix is that the desktop asks for the whole set the moment the catalog
 /// naming it is known, which is long before either surface is shown. This is

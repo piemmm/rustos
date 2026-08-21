@@ -236,7 +236,7 @@ pub use holdback::{Delivery, Flushed, HoldBack, HOLD_BACK_CAPACITY};
 pub use input::{SessionInputResponse, SessionInputRouter};
 pub use keyboard::{KeyInputChannel, KeyboardInputSource};
 pub use launch::{admitted_pid, launch_failure_report, reap_launched, LaunchTable, LaunchedApp};
-pub use library::{load_library, LoadedLibrary};
+pub use library::{catalogued, load_library, LoadedLibrary};
 pub use listing::{ListingClient, ListingDesk};
 pub use lock::{LockOutcome, LockedDrain, ScreenLock};
 pub use picker::{

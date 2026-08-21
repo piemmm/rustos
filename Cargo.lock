@@ -877,6 +877,7 @@ dependencies = [
  "tairix-icon",
  "tairix-log",
  "tairix-parallel",
+ "tairix-path",
  "tairix-procinfo",
  "tairix-proglib",
  "tairix-raster",

@@ -31,17 +31,15 @@
 //! [`DoubleClickTracker`] for "is this the second click?" — so the desktop can
 //! never disagree with the file manager about what a gesture means.
 //!
-//! # Why the desktop is not a pin source
+//! # Shortcuts point *into* the desktop, never out of it
 //!
-//! Dragging an icon onto the taskbar's pin band is *not* a desktop gesture,
-//! deliberately. An installed application lives in an application store —
-//! machine-wide, or the user's own — and the pin store records exactly that:
-//! a `.app` directory a user drops on their `Desktop` is a directory shaped
-//! like an application, not an installed one, so pinning it could never
-//! succeed and offering the gesture would be a promise the system cannot
-//! keep. The pin drag source is the program-library popup, every row of
-//! which is a catalogued entry by construction; see
-//! [`tairix_taskbar::LibraryPopup`].
+//! The program library's row menu asks this folder for a shortcut
+//! ([`Desktop::shortcut_to`]) and never the other way round. A `.app`
+//! directory a user drops on their own `Desktop` is a directory *shaped* like
+//! an application, not a catalogued one, so the desktop is not a source a
+//! launcher can be populated from; the library's rows are catalogued entries
+//! by construction (see [`tairix_taskbar::LibraryPopup`]) and are what a
+//! shortcut is made from.
 //!
 //! # Why the re-list is gesture-driven
 //!
@@ -58,8 +56,8 @@
 //! cannot turn a gesture into a re-listing loop.
 //!
 //! The model holds no authority: it *names* what should happen
-//! ([`DesktopAction`]) and the embedder — which holds the spawn and pin
-//! capabilities — carries it out.
+//! ([`DesktopAction`]) and the embedder — which holds the spawn and
+//! filesystem capabilities — carries it out.
 
 use alloc::format;
 use alloc::string::{String, ToString};
@@ -75,11 +73,13 @@ use tairix_controls::state::{ControlState, FocusState, PointerState, SelectionSt
 use tairix_controls::IconTile;
 use tairix_geometry::{Point, Rect, Region, Scale};
 use tairix_icon::IconArtwork;
+use tairix_proglib::{Catalog, EntryId};
 use tairix_raster::Surface;
 use tairix_theme::Theme;
 use tairix_wallpaper::{IconFlow, IconSort, PinboardSettings};
 use tairix_wm::{Key, NamedKey};
 
+use crate::library::catalogued;
 use crate::pinboard::PinboardCommand;
 
 /// The inset, in logical pixels at the reference density, between the work
@@ -142,6 +142,20 @@ pub enum DesktopAction {
     CreateFolder {
         /// Absolute path of the directory to create.
         path: String,
+    },
+    /// Create a symbolic link — a desktop shortcut — at `link`, storing
+    /// `target` verbatim.
+    ///
+    /// The name is already spelled and already validated against the one
+    /// shared name rule ([`Desktop::shortcut_to`]), so the embedder only holds
+    /// the filesystem capability and makes the link. The target is stored as
+    /// *data* and never resolved here: a shortcut whose bundle is later
+    /// removed dangles honestly rather than being prevented at creation.
+    CreateShortcut {
+        /// Absolute path of the link to create, inside the desktop folder.
+        link: String,
+        /// The path the link stores, exactly as it was given.
+        target: String,
     },
     /// Adopt these settings: persist them to the user's own store and hand
     /// them back through [`Desktop::apply_settings`], which reports the work
@@ -291,6 +305,53 @@ impl<S: DirectorySource> Desktop<S> {
     #[must_use]
     pub fn folder_path(&self) -> String {
         tairix_browse::vfs::spell_absolute_path(&self.folder)
+    }
+
+    /// What creating a shortcut to the catalogued program `entry` asks for.
+    ///
+    /// The program library's row menu is the one caller: a shortcut is a
+    /// symbolic link in *this* folder, so the desktop — which owns the folder
+    /// and its naming — decides the name and spells the link, and the embedder
+    /// only makes it.
+    ///
+    /// The link takes the entry's **display name** and points at the bundle
+    /// *directory* it launches. That is what makes the shortcut read as an
+    /// application on the desktop: bundle-ness is decided from the target's own
+    /// leaf name, never from the link's, so `Chess` → `/Apps/chess.app` is an
+    /// application while the link itself is just a name. The target is carried
+    /// verbatim and never resolved here, so a shortcut whose bundle is later
+    /// removed dangles honestly rather than being prevented at creation.
+    ///
+    /// A display name is not automatically a file name: it must be one legal
+    /// filesystem component under the same shared
+    /// [`tairix_path::validate_file_name`] rule a typed folder or rename name
+    /// obeys, so the desktop and the file manager can never disagree about what
+    /// a name may be. A name that rule refuses — one carrying a `/` or a `:`,
+    /// say — is [`DesktopAction::Refuse`]d with the rule's own reason rather
+    /// than spelled into a path the create could only fail on.
+    ///
+    /// An existing name is **not** worked around: the link replaces nothing, so
+    /// a name already taken is the kernel's own `AlreadyExists` at create time
+    /// and is reported as the refusal it is. Picking a free name instead would
+    /// silently make a *second*, differently-named shortcut for a user who
+    /// already has one, and could only be decided against a listing that may
+    /// already be stale.
+    #[must_use]
+    pub fn shortcut_to(&self, catalog: &Catalog, entry: &EntryId) -> DesktopAction {
+        let chosen = match catalogued(catalog, entry) {
+            Ok(chosen) => chosen,
+            Err(reason) => return DesktopAction::Refuse(reason),
+        };
+        let name = chosen.name().as_str();
+        if let Err(err) = tairix_path::validate_file_name(name) {
+            return DesktopAction::Refuse(format!(
+                "desktop: '{name}' cannot be a shortcut name ({err})\n"
+            ));
+        }
+        DesktopAction::CreateShortcut {
+            link: self.path_of(name),
+            target: chosen.bundle().to_string(),
+        }
     }
 
     /// Adopt `settings`, reporting the work the edit implies.
@@ -737,10 +798,10 @@ impl<S: DirectorySource> Desktop<S> {
     /// A **shortcut** — a symbolic link on the desktop — acts on what it
     /// names: a folder or a file is opened through the link (the kernel
     /// resolves the final link), while a bundle is launched by its *resolved*
-    /// path, because the app-load gate judges the path it is handed and a
-    /// link in the user's own `Desktop` folder is not in a program store. A
-    /// shortcut whose target has gone is refused with its reason, never
-    /// launched blind.
+    /// path, because the spawn gate parses an entry point as
+    /// `…/<Name>.app/Run` and a shortcut named after the program is not that
+    /// shape. A shortcut whose target has gone is refused with its reason,
+    /// never launched blind.
     fn activate(&self, index: usize, apps: &[AppAssociation]) -> DesktopOutcome {
         let Some(entry) = self.entries.get(index) else {
             return DesktopOutcome::ignored();

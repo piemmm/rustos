@@ -21,7 +21,8 @@ use alloc::vec::Vec;
 
 use tairix_abi::Errno;
 use tairix_proglib::{
-    merge, parse, user_library_path, Catalog, MACHINE_LIBRARY_PATH, MAX_CATALOG_LEN,
+    merge, parse, user_library_path, Catalog, EntryId, LibraryEntry, MACHINE_LIBRARY_PATH,
+    MAX_CATALOG_LEN,
 };
 
 use crate::assets::SessionFileReader;
@@ -100,6 +101,27 @@ where
             Catalog::default()
         }
     }
+}
+
+/// Resolve `entry` against `catalog`, or the ready-to-print reason it no
+/// longer names a program.
+///
+/// Every act on a popup row — launching the bundle, and putting a shortcut to
+/// it on the desktop — resolves the same identifier through this one lookup,
+/// so a row can never act on two different bundles, and a catalog that changed
+/// under the click is refused once, in one wording. The popup only reports
+/// entries from the catalog it was handed, so a miss means exactly that: the
+/// caller refuses loudly rather than acting on a guessed path.
+///
+/// # Errors
+///
+/// The complete `stderr` line (newline-terminated, prefixed with the session's
+/// `desktop:` diagnosis convention) naming the identifier that is no longer
+/// catalogued.
+pub fn catalogued<'a>(catalog: &'a Catalog, entry: &EntryId) -> Result<&'a LibraryEntry, String> {
+    catalog
+        .entry(entry)
+        .ok_or_else(|| format!("desktop: library entry {entry} is no longer catalogued\n"))
 }
 
 /// One ready-to-print warning line for a store that cannot be used.

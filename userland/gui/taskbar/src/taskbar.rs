@@ -677,7 +677,8 @@ impl Taskbar {
     }
 
     /// Compute the Switchboard readout's geometry, or `None` while the
-    /// readout is collapsed (no hover, no pin) or the capsule's slot has no
+    /// readout is collapsed (no hover, no keyboard focus) or the capsule's
+    /// slot has no
     /// room on a degenerate bar.
     ///
     /// The readout opens outward from the Switchboard slot on the bar's

@@ -367,7 +367,7 @@ impl TaskbarPresenter {
     }
 
     /// Present the Switchboard capsule's instrument readout while it is
-    /// expanded (hovered or pinned), or remove it once collapsed.
+    /// expanded (hovered or keyboard-focused), or remove it once collapsed.
     ///
     /// The readout opens outward from the capsule's slot at
     /// [`TrayReadoutLayout::panel`]'s origin, rounded with

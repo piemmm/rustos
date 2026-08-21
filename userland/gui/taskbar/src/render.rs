@@ -4,15 +4,13 @@
 //! live state into a premultiplied-alpha [`Surface`] sized to the bar. The
 //! two permanent leading launchers are the shared `lib/controls`
 //! [`IconButton`](tairix_controls::IconButton)s the model owns, painted with
-//! their live hover/pressed state; every pinned shortcut and running task is
-//! one shared icon-only [`TaskbarItem`](tairix_controls::TaskbarItem) slot,
-//! so the bar's application
-//! buttons have exactly one visual recipe and read as one strip of equal
-//! icons. Per-application artwork (rasterised by the session) is
-//! blitted through the control: a pin's from the bundle it points at, a
-//! task's from the bundle that opened its window, so a running application
-//! is recognised whether or not it is pinned. The one mark the bar draws for
-//! itself is the [`BarLayout::separator`] rule dividing the Library launcher
+//! their live hover/pressed state; every running application is one shared
+//! icon-only [`TaskbarItem`](tairix_controls::TaskbarItem) slot, so the bar's
+//! application buttons have exactly one visual recipe and read as one strip
+//! of equal icons. Per-application artwork (rasterised by the session) is
+//! blitted through the control, drawn from the bundle the kernel attested
+//! opened the window, so a running application is recognised by what it
+//! actually is. The one mark the bar draws for itself is the [`BarLayout::separator`] rule dividing the Library launcher
 //! from everything after it, filled in [`Palette::border`].
 //! The bar's own background is the shared floating-surface plate
 //! ([`paint_surface_plate`]) the popups it opens already wear: a rim one
@@ -242,9 +240,9 @@ impl TaskbarRenderer {
     /// `artwork` is the desktop's shipped icon lookup: the two leading
     /// launchers draw the [`Library`](IconKind::Library) and
     /// [`Folder`](IconKind::Folder) artwork, the trailing Switchboard capsule
-    /// draws its own kind's, and a pinned shortcut or running task draws its
-    /// application's own artwork when it has one, its kind's shipped artwork
-    /// otherwise. Every one of those falls back to its
+    /// draws its own kind's, and a running application's slot draws its own
+    /// artwork when it has one, its kind's shipped artwork otherwise. Every
+    /// one of those falls back to its
     /// built-in glyph when the lookup returns `None` — the shared icon slot
     /// does that itself — so a system with no `/System/Graphics` is fully
     /// usable ([`NoArtwork`](tairix_icon::NoArtwork) resolves entirely to
@@ -713,13 +711,12 @@ fn draw_icon(
     surface.blit(x, y, &image);
 }
 
-/// Resolve the artwork an application slot (a pinned shortcut or a running
-/// task) draws: its own application artwork when it has one, else its kind's
-/// shipped artwork at `side`, else `None` for the control's built-in glyph.
+/// Resolve the artwork an application slot draws: its own application artwork
+/// when it has one, else its kind's shipped artwork at `side`, else `None` for
+/// the control's built-in glyph.
 ///
-/// One rule for both slot kinds so a pin and the task that matches it can
-/// never resolve their icon two different ways. The final glyph fallback is
-/// the shared icon slot's own, so `None` here is not a blank slot.
+/// The final glyph fallback is the shared icon slot's own, so `None` here is
+/// not a blank slot.
 fn slot_artwork<'a>(
     app: Option<&'a Surface>,
     kind: IconKind,

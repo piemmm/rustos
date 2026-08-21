@@ -156,10 +156,13 @@ owns:
   declared over the window channel — and nothing at all when it declared none
   — with one row the bar owns: *About*, whose submenu is a `FactList` of the
   bundle's **signed** manifest, so an application cannot state an identity
-  that is not its own. A secondary press on a library entry row opens a single
-  *Open* row, and one on the Switchboard capsule opens the system menu below.
+  that is not its own. A secondary press on a library entry row opens the one
+  `EntryRow` list — *Open* and *Create Desktop Shortcut*, the two things the
+  popup can do to a row that its own click cannot — and one on the Switchboard
+  capsule opens the system menu below.
   Choosing a row reports a typed `TaskbarResponse` (`AppMenuChosen`,
-  `LibraryLaunch`, or a system action); the session performs it.
+  `LibraryLaunch`, `CreateDesktopShortcut`, or a system action); the session
+  performs it.
 - **The system menu** — the start-menu session controls, whose shape is the
   one ordered `system::ROWS` table (inspect the machine, change how it looks,
   then secure, leave, or stop it). The bar holds none of that authority: it

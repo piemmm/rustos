@@ -426,8 +426,8 @@ impl ContextCommand {
 pub struct ContextMenuModel {
     /// What kind of entry is selected, through the one shared [`EntryKind`]
     /// classifier — `None` when the directory is empty — so the kind-scoped
-    /// rules (Open With… wants a file, Pin to taskbar wants a bundle) read
-    /// the same classification every other surface does.
+    /// rule (Open With… wants a regular file) reads the same classification
+    /// every other surface does.
     selection: Option<EntryKind>,
     has_clipboard: bool,
 }

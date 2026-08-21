@@ -802,8 +802,8 @@ impl<S: DirectorySource> Browser<S> {
         // link (the browser's location then reads as the user navigated), a
         // file is opened through it (the kernel follows the final link on
         // open), but a bundle must be launched by its **resolved** path —
-        // the app-load gate's store rule judges the path it is handed, and a
-        // link in the user's own directory is not in a store.
+        // the spawn gate parses an entry point as `…/<Name>.app/Run`, and a
+        // link named after the program is not that shape.
         let launch = entry
             .target()
             .map(|target| resolve_target(&self.spelled_path(), target));

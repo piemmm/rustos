@@ -107,6 +107,15 @@ pub enum TaskbarResponse {
         /// The catalog identifier of the chosen entry.
         entry: EntryId,
     },
+    /// A program-library entry's context menu asked for a **desktop
+    /// shortcut** to its bundle (closing the popup). The embedder — which
+    /// holds the filesystem capability — creates the link in the user's own
+    /// `Desktop` folder under its own identity; the bar writes nothing and
+    /// learns nothing about whether it worked.
+    CreateDesktopShortcut {
+        /// The catalog identifier of the entry to link to.
+        entry: EntryId,
+    },
     /// The Files button was pressed. The embedder opens the file manager —
     /// raising an already-open files window rather than launching a second.
     OpenFiles,
@@ -716,6 +725,13 @@ impl TaskbarInput {
                 // launching from the row itself: the popup closes.
                 taskbar.close_library();
                 TaskbarResponse::LibraryLaunch { entry }
+            }
+            MenuChoice::ShortcutEntry(entry) => {
+                // The shortcut appears on the desktop, and the popup is
+                // modal: leaving it up would stand between the user and the
+                // icon they just asked for.
+                taskbar.close_library();
+                TaskbarResponse::CreateDesktopShortcut { entry }
             }
             MenuChoice::System(action) => Self::apply_system_action(action),
         }

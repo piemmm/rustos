@@ -57,6 +57,17 @@ store (`AGENTS.md` §2.24, §5.4). The merged catalog is handed to the popup
 with `DesktopShell::set_library`; a `LibraryLaunch { entry }` response is
 resolved back through that catalog to the entry's bundle `Run` path.
 
+Both things an entry row can ask for go through the one `catalogued` lookup, so
+a row can never act on two different bundles. The second is
+`CreateDesktopShortcut { entry }` (`plans/SYMLINKS.md` S5):
+`Desktop::shortcut_to` names a symbolic link in the user's own `Desktop`
+folder after the entry's **display name** and points it at the bundle
+directory, stored verbatim — the target's own leaf is what makes the shortcut
+read as an application. A display name the one shared
+`tairix_path::validate_file_name` refuses is refused with that rule's reason,
+and a name already taken is the kernel's `AlreadyExists`: the link replaces
+nothing, and nothing here works a collision around.
+
 ## The icon bar and the icon pipeline
 
 `AppBarService` (`apps.rs`) holds every application's icon-bar declaration as

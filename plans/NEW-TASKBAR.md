@@ -638,9 +638,12 @@ What now stands:
   nothing at all.
 - **Deliberate deviation, recorded**: the staged text had T5 "offer" a
   right-click *Pin to taskbar* typed action. Pinning is gone from the design
-  (T6/T7); an entry row's context menu offers a single *Open* row, which is
-  the only thing the popup can do to a row that its own click does not
-  already do.
+  (T6/T7). An entry row's context menu offers the two things the popup can do
+  to a row that its own click cannot: *Open*, and *Create Desktop Shortcut*
+  — a symbolic link in the user's own `Desktop` folder, named after the entry
+  and pointing at its bundle, which the session creates under its own
+  identity (`plans/SYMLINKS.md` S5). Both rows come from the one `EntryRow`
+  list, so a reordering cannot re-map what a row does.
   Right-press inside the panel is claimed (modal) and does nothing today.
 
 Tested in the taskbar suite (rows/sort/hide-empty/placeholders, keyboard

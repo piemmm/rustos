@@ -4,7 +4,8 @@
 //!
 //! Settings are per-user configuration (`lib/wallpaper`), stored at
 //! `~/Settings/Pinboard/pinboard.conf` under the user's own identity — no
-//! new capability, exactly like the taskbar pin store. The session is the
+//! new capability, exactly like the program-library overlay. The session is
+//! the
 //! store's only writer: every change, whether the backdrop menu asked for
 //! it or the wallpaper chooser did, is rendered through the one
 //! `lib/wallpaper` engine and written through the one
@@ -128,7 +129,8 @@ impl PinboardApplyRefusal {
 impl PinboardStore {
     /// Load the user's pinboard settings.
     ///
-    /// Mirrors the pin store's posture exactly: an absent document is the
+    /// Mirrors the program library's posture exactly: an absent document is
+    /// the
     /// ordinary fresh-account state and silently yields the defaults; an
     /// unreadable, over-long, or malformed one also yields the defaults
     /// plus a ready-to-print warning line — the desktop always comes up on

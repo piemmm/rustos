@@ -100,9 +100,9 @@ pub fn folder_label(category: LibraryCategory) -> &'static str {
 /// The popup reports these for the entry rows it actually shows so the
 /// session (which holds the filesystem and decode capabilities the bar does
 /// not) resolves each row's icon and hands it back with
-/// [`LibraryPopup::set_row_artwork`] — the same render/resolve split the pin
-/// strip uses. Folder rows raise no request: they draw their built-in
-/// folder glyph.
+/// [`LibraryPopup::set_row_artwork`] — the same render/resolve split the
+/// application strip uses. Folder rows raise no request: they draw their
+/// built-in folder glyph.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct LibraryIconRequest {
     /// The row's index into [`LibraryPopup::rows`].
@@ -765,7 +765,7 @@ impl LibraryPopup {
 
     /// The catalog identifier of the *entry* row at `index`; `None` for a
     /// folder header or an index no row holds. The one place a row is turned
-    /// into the identity a launch or a pin names.
+    /// into the identity a launch or a shortcut names.
     fn entry_at(&self, index: usize) -> Option<EntryId> {
         match self.rows.get(index)? {
             LibraryRow::Entry { id, .. } => Some(id.clone()),
