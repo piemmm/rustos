@@ -545,6 +545,28 @@ covered by the tests its stage lists.
 - **A format without links refuses rather than approximates**, for either
   kind, and the per-format support table in
   `docs/src/filesystem/overview.md` is the one statement of which does what.
+- **Only the *format* may refuse; no wrapper may.** A `Filesystem*` impl
+  that wraps an inner driver owes its inner's whole surface, and the four
+  facet methods carrying an `Unsupported` default (`read_link`,
+  `create_link`, `link`, `attrs_fs`) are the ones a wrapper can refuse by
+  omission — silently, fail-closed, with no test noticing. The property is
+  stated once, in `kernel/core/src/fs/wrapper_conformance.rs`, and every
+  wrapper (`CachedFs`, `GroupMappedFs`, `Box<dyn KernelFs>`, the counting
+  test shim) runs that suite against a reference driver that supports
+  everything; a wrapper that *replaces* a method asserts the replacement
+  instead, so the divergence is declared. The suite's own premise — that
+  the reference driver supports every method — is itself a test, so no
+  wrapper's check can pass vacuously.
+- **Both link kinds are proved through the real service, not just the
+  driver.** `volume_service_tests`'
+  `link_round_trip_through_the_real_service_scenario` creates and reads
+  both kinds through the global `FS_SERVICE` over an attached ARXFS volume
+  served across a genuine call endpoint — so the link path is exercised
+  through `MountedFilesystemService` → `Box<dyn KernelFs>` → `CachedFs` →
+  `ARXFS`. Every other link test constructs a `Vfs` over a driver
+  directly, which is precisely why three wrappers could answer
+  `NotSupported` on every mounted volume while the `posix_fs_suite` link
+  verticals stayed green.
 - **A node's storage outlives every name but the last.** The count is the
   format's own, read and never derived, and the free happens at zero through
   one shared path — so no unlink can destroy data another name still reaches,

@@ -2716,6 +2716,51 @@ to end the minimised pair is the witness: ~1/20 aborts before the fix and 3/3
 ASAN heap-buffer-overflow reports, then 60/60 clean, the whole binary 100/100 at
 the harness's default thread count, and 5/5 clean under ASAN.
 
+## D46 — no discard reaches the hardware through a layer (partition half DONE, RAID and transport halves OPEN)
+
+**State:** D21's defect class — a defaulted `Block` method answered by a
+layer that was never told — for `discard`/`discard_capability` rather than
+`device_class`. The partition half is closed; two halves remain, and neither
+is a forwarding omission, which is why they are staged rather than swept in.
+
+**The partition half — closed.** `PartitionBlock` translated and forwarded
+every other operation but left both discard methods defaulted, so
+`discard_capability()` answered "unsupported" for every filesystem mounted
+on a partition — which is every real installation (MBR/GPT →
+`PartitionBlock` → ARXFS). ARXFS's whole discard engine
+(`drivers/filesystem/arxfs/src/discard.rs`) was therefore unreachable on
+real hardware while testing clean against a raw device. It now forwards
+through the same containment check a write gets (`inner_span`, one
+definition, so a window can never name a neighbour's blocks), and reports
+the device's granularity **only** when the window's start block is aligned
+to it — a misaligned window withdraws support rather than promising an
+alignment it cannot honour.
+
+**The RAID half — open, and a semantics question.** `RaidArray` dispatches
+both methods to the six level kinds, and *none* of them implements either,
+so the dispatch can only ever reach the trait default: every array reports
+no discard support. This is not a forward to add. Discard on a redundant
+array invalidates the redundancy that covers the discarded range — a parity
+strip computed over blocks the device may now return as anything — so each
+level owes a decision: recompute parity over the discarded range, refuse the
+range, or narrow it to whole stripes. Mirror and stripe are near-forwards;
+parity, dual-parity, triple-parity, and RAID10 are not.
+
+**The transport half — open, and an ABI change.** `BlkOp` has only
+`Geometry`/`Read`/`Write`/`Flush`, so `RemoteBlock` and `BlkClient` cannot
+express discard at all and their `Unsupported` is honest. Reaching a
+user-space block driver's device needs a new opcode plus its server half in
+`blkio::serve` and every block driver. The same wire gap drops
+[`BufferClass`] on the `*_with_class` pair, so a sensitive buffer's
+scrub-the-staging-copy request does not cross the seam — worth settling in
+the same change as the opcode, since both are the same missing field.
+
+**Done when:** each RAID level states and implements its discard posture
+with a test per level over a member that records the ranges it is asked to
+discard; the wire carries a discard opcode and the buffer class, with
+`RemoteBlock`/`BlkClient` forwarding both; and no layer answers either
+discard method from a trait default.
+
 ## Non-goals / do not do
 
 - Do NOT re-open the settled FIX-SYSCALL design decisions (no per-syscall

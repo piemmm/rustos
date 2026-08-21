@@ -47,8 +47,8 @@
 pub mod blkclient;
 mod delegate;
 mod fscache;
-#[cfg(test)]
-pub(crate) mod memfs;
+#[cfg(any(test, feature = "fs-conformance"))]
+pub mod memfs;
 pub mod mount;
 mod mounted;
 pub mod path;
@@ -58,6 +58,8 @@ pub mod service;
 mod vfs;
 pub mod volsvc;
 pub mod volumes;
+#[cfg(any(test, feature = "fs-conformance"))]
+pub mod wrapper_conformance;
 
 pub use blkclient::BlkClient;
 pub use delegate::{DelegatedFs, DelegatedInfo, FinalLink, MetaPolicy, PerInode, Uniform};

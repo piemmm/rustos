@@ -8,7 +8,9 @@ use super::*;
 use crate::gpt::{self, ENTRY_LEN, TYPE_GUID_ARXFS_ROOT, TYPE_GUID_EFI_SYSTEM};
 use crate::mbr::{self, MbrError, MBR_SECTOR_LEN};
 use tairix_abi::blkio::BlkDeviceClass;
-use tairix_abi::driver::block::{Block, BlockGeometry, DeviceHealth, HealthSnapshot};
+use tairix_abi::driver::block::{
+    Block, BlockGeometry, DeviceHealth, DiscardCapability, HealthSnapshot,
+};
 use tairix_abi::DriverError;
 
 /// An in-memory [`Block`] device over a byte vector, for building and
@@ -527,6 +529,108 @@ impl Block for TelemetryBlock {
             critical_warning: true,
         }))
     }
+}
+
+/// A device that supports discard at `granularity` and records the ranges
+/// it is asked to discard, so a window's translation is observable.
+struct DiscardingBlock {
+    inner: VecBlock,
+    granularity: u64,
+    discarded: Vec<(u64, u64)>,
+}
+
+impl DiscardingBlock {
+    fn new(granularity: u64) -> Self {
+        Self {
+            inner: VecBlock::new(512, 64),
+            granularity,
+            discarded: Vec::new(),
+        }
+    }
+}
+
+impl Block for DiscardingBlock {
+    fn geometry(&self) -> Result<BlockGeometry, DriverError> {
+        self.inner.geometry()
+    }
+
+    fn read_blocks(&mut self, lba: u64, buf: &mut [u8]) -> Result<(), DriverError> {
+        self.inner.read_blocks(lba, buf)
+    }
+
+    fn write_blocks(&mut self, lba: u64, buf: &[u8]) -> Result<(), DriverError> {
+        self.inner.write_blocks(lba, buf)
+    }
+
+    fn flush(&mut self) -> Result<(), DriverError> {
+        self.inner.flush()
+    }
+
+    fn discard_capability(&self) -> Result<DiscardCapability, DriverError> {
+        Ok(DiscardCapability {
+            supported: true,
+            granularity_blocks: self.granularity,
+            max_blocks_per_request: 32,
+        })
+    }
+
+    fn discard(&mut self, lba: u64, blocks: u64) -> Result<(), DriverError> {
+        self.discarded.push((lba, blocks));
+        Ok(())
+    }
+}
+
+#[test]
+fn window_forwards_discard_translated_into_the_disks_blocks() {
+    // Nearly every filesystem is mounted on a partition, so a window that
+    // inherited the "no discard" default would silently withhold every trim
+    // from the hardware — the same trap the class/health forwarding avoids.
+    let mut win = PartitionBlock::new(DiscardingBlock::new(4), 8, 16).expect("window fits");
+
+    let capability = win.discard_capability().expect("capability forwards");
+    assert!(
+        capability.supported,
+        "an aligned window reports the disk's discard support"
+    );
+    assert_eq!(capability.granularity_blocks, 4);
+    assert_eq!(capability.max_blocks_per_request, 32);
+
+    win.discard(4, 8).expect("an in-window discard is accepted");
+    assert_eq!(
+        win.device_mut().discarded,
+        vec![(12, 8)],
+        "the window's LBA is translated by its start block, never passed raw"
+    );
+}
+
+#[test]
+fn window_refuses_a_discard_reaching_outside_itself() {
+    // A discard destroys the range's contents, so the containment check is
+    // the same one a write gets: a window must never name a neighbouring
+    // partition's blocks.
+    let mut win = PartitionBlock::new(DiscardingBlock::new(1), 8, 16).expect("window fits");
+
+    assert_eq!(win.discard(12, 8), Err(DriverError::LengthOutOfRange));
+    assert_eq!(win.discard(u64::MAX, 2), Err(DriverError::LengthOutOfRange));
+    assert!(
+        win.device_mut().discarded.is_empty(),
+        "a refused discard reaches the device not at all"
+    );
+}
+
+#[test]
+fn a_misaligned_window_withdraws_discard_support() {
+    // The window starts at block 9, which is not a multiple of the device's
+    // 4-block granularity. Reporting that granularity anyway would make a
+    // caller that aligned its range correctly produce a device-misaligned
+    // request, so support is withdrawn rather than promised falsely.
+    let win = PartitionBlock::new(DiscardingBlock::new(4), 9, 16).expect("window fits");
+
+    assert!(
+        !win.discard_capability()
+            .expect("capability is answered")
+            .supported
+    );
 }
 
 #[test]

@@ -11,6 +11,12 @@
 //! test in this crate that touches those statics (the system-mount tests
 //! deliberately avoid them), and it runs as one sequential test function
 //! so the set-once cells are installed exactly once.
+//!
+//! Its scenarios extend past that first volume to the surprise-removal,
+//! re-insert, sibling-extent, and unknown-medium paths, and to the link
+//! round trip over an attached ARXFS volume — the one place both link
+//! kinds are driven through the real service and therefore through the
+//! production wrapper chain, which every other link test bypasses.
 
 extern crate std;
 
@@ -27,11 +33,12 @@ use tairix_abi::blkio::{
     BLK_DATA_LEN, BLK_REQUEST_LEN,
 };
 use tairix_abi::driver::block::{Block, BlockGeometry};
-use tairix_abi::driver::filesystem::{FilesystemRead, FilesystemWrite, NodeKind};
+use tairix_abi::driver::filesystem::{FilesystemRead, FilesystemWrite, NodeKind, NodeSecurity};
 use tairix_abi::sysinfo::{MountAvailability, MountRecord};
 use tairix_abi::volume::{VolumeAttachRequest, VolumeDetachRequest, VolumeFsType};
 use tairix_abi::{CapabilityId, CapabilityQuery, DriverError, Errno};
 use tairix_caps::CapabilitySet;
+use tairix_drv_fs_arxfs::{EntropySource, ARXFS, SYSTEM_VOLUME_KEY};
 use tairix_drv_fs_fat32::Fat32;
 use tairix_kernel_core::devres::{install_shared_mem_facility, SharedChunk, SharedMemFacility};
 use tairix_kernel_core::fs::{FilesystemService, FinalLink};
@@ -101,6 +108,14 @@ const BLOCK_SIZE: usize = 512;
 const BLOCK_SIZE_U32: u32 = 512;
 /// 64 MiB — comfortably past the FAT32 minimum cluster count.
 const SECTORS_64MIB: u64 = (64 << 20) / 512;
+
+/// Backing size for the ARXFS fixture volume: large enough for the
+/// format's metadata plus a handful of nodes, small enough that serving it
+/// block by block over the call endpoint stays quick.
+const SECTORS_8MIB: u64 = (8 << 20) / 512;
+
+/// Inode count the ARXFS fixture volume is formatted with.
+const ARXFS_INODES: u32 = 64;
 
 /// The shared-memory facility double behind the kernel window: one leaked
 /// `BLK_DATA_LEN` buffer serves every translation (the test creates one
@@ -595,6 +610,7 @@ fn attach_read_detach_lifecycle_over_a_served_fat32_volume() {
     mutated_reinsert_conflicts_scenario(window_ptr, facility);
     sibling_volumes_share_one_client_scenario(window_ptr, facility);
     unrecognised_medium_mounts_as_unknown_scenario(window_ptr, facility);
+    link_round_trip_through_the_real_service_scenario(window_ptr, facility);
 }
 
 /// The per-scenario facts for [`attach_then_yank`]: the owning task, the
@@ -686,6 +702,44 @@ fn dirty_surprise_removal_scenario(window_ptr: *mut u8, facility: &'static TestF
             .err(),
         Some(Errno::DeviceFault),
         "new I/O on an unavailable-dirty volume fails closed, cache included"
+    );
+    // The link and attribute surfaces fault like every other operation.
+    // Left at their ABI defaults the stub would answer `NotSupported`,
+    // reporting a yanked disk as a format that never had links or
+    // attributes — a permanent claim about a transient condition.
+    assert_eq!(
+        FS_SERVICE
+            .readlink(0, &NoCaps, "/Storage/usb2/hello.txt")
+            .err(),
+        Some(Errno::DeviceFault),
+        "readlink on a vanished volume is a device fault, not a format limit"
+    );
+    assert_eq!(
+        FS_SERVICE
+            .symlink(0, &NoCaps, "hello.txt", "/Storage/usb2/link")
+            .err(),
+        Some(Errno::DeviceFault),
+        "symlink on a vanished volume is a device fault, not a format limit"
+    );
+    assert_eq!(
+        FS_SERVICE
+            .link(
+                0,
+                &NoCaps,
+                "/Storage/usb2/hello.txt",
+                "/Storage/usb2/second",
+                FinalLink::Keep,
+            )
+            .err(),
+        Some(Errno::DeviceFault),
+        "link on a vanished volume is a device fault, not a format limit"
+    );
+    assert_eq!(
+        FS_SERVICE
+            .attr_get(0, &NoCaps, "/Storage/usb2/hello.txt", b"user.k", &mut buf)
+            .err(),
+        Some(Errno::DeviceFault),
+        "an attribute read on a vanished volume is a device fault, not a format limit"
     );
     assert_eq!(
         VOLUME_SERVICE.detach(&VolumeDetachRequest {
@@ -1280,4 +1334,139 @@ fn unrecognised_medium_mounts_as_unknown_scenario(
     server
         .join()
         .expect("unrecognised-medium scenario server thread");
+}
+
+/// Deterministic entropy for the fixture volume's key hierarchy. The
+/// image never leaves this test, so a counter is the right source: a real
+/// RNG would make the volume unreproducible for no gain.
+struct FixtureEntropy {
+    next: u8,
+}
+
+impl EntropySource for FixtureEntropy {
+    fn fill(&mut self, out: &mut [u8]) -> Result<(), DriverError> {
+        for byte in out.iter_mut() {
+            *byte = self.next;
+            self.next = self.next.wrapping_add(1);
+        }
+        Ok(())
+    }
+}
+
+/// Format an ARXFS image under the well-known volume key the attach path
+/// opens a removable ARXFS volume with, carrying one regular file.
+fn arxfs_image(payload: &[u8]) -> (RamBlock, [u8; 16]) {
+    let mut fs = ARXFS::format(
+        RamBlock::new(SECTORS_8MIB),
+        ARXFS_INODES,
+        &SYSTEM_VOLUME_KEY,
+        &mut FixtureEntropy { next: 1 },
+    )
+    .expect("format the fixture volume");
+    let root = fs.root();
+    fs.create(root, b"target.txt", NodeKind::RegularFile)
+        .expect("create");
+    fs.write_at(root, b"target.txt", 0, payload).expect("write");
+    // The volume root must admit the system principal the service calls as,
+    // because ARXFS carries its own per-inode records rather than taking a
+    // mount template.
+    fs.set_security(root, NodeSecurity::new(0o755, 0, 0))
+        .expect("root security");
+    let file = fs.lookup(root, b"target.txt").expect("resolves");
+    fs.set_security(file, NodeSecurity::new(0o644, 0, 0))
+        .expect("file security");
+    fs.flush().expect("commit the fixture");
+    let identity = fs.volume_uuid();
+    (fs.into_block(), identity)
+}
+
+/// Both link kinds, created and read back through the **real** global
+/// `FS_SERVICE` over a served, attached ARXFS volume.
+///
+/// Every other link test in the tree builds a `Vfs` over a driver
+/// directly and so never touches the production wrapper chain
+/// (`CachedFs` inside `Box<dyn KernelFs>` behind
+/// `MountedFilesystemService`). That is exactly how `read_link` /
+/// `create_link` / `link` came to sit at their trait defaults in three
+/// wrappers at once: the link surface answered "this volume has no links"
+/// on every genuinely mounted volume while the whole `posix_fs_suite`
+/// link vertical stayed green. This scenario is the one that would have
+/// failed.
+fn link_round_trip_through_the_real_service_scenario(
+    window_ptr: *mut u8,
+    facility: &'static TestFacility,
+) {
+    let (image, identity) = arxfs_image(b"link target payload");
+    let device_blocks = (image.data.len() / BLOCK_SIZE) as u64;
+    let endpoint_id = 0xB1D0_5E17_0000_000A_u64;
+    let endpoint = register_endpoint(endpoint_id, 0x70_100A);
+    let device = StdArc::new(Mutex::new(ServedDevice::new(image)));
+    let stop = StdArc::new(AtomicBool::new(false));
+    let server = serve(
+        StdArc::clone(&endpoint),
+        window_ptr as usize,
+        StdArc::clone(&device),
+        StdArc::clone(&stop),
+    );
+    let (_va, region_id) = sharedreg::create(facility, ProcessId(0x70_200A), 8).expect("region");
+
+    VOLUME_SERVICE
+        .attach(&VolumeAttachRequest {
+            endpoint: endpoint_id,
+            window: region_id,
+            first_lba: 0,
+            blocks: device_blocks,
+            fstype: VolumeFsType::ARXFS,
+            name: b"arx1",
+        })
+        .expect("attach the ARXFS volume");
+
+    // A symbolic link: created, then read back verbatim.
+    FS_SERVICE
+        .symlink(0, &NoCaps, "target.txt", "/Storage/arx1/alias")
+        .expect("symlink through the production service");
+    assert_eq!(
+        FS_SERVICE
+            .readlink(0, &NoCaps, "/Storage/arx1/alias")
+            .expect("readlink through the production service"),
+        String::from("target.txt"),
+        "the stored target comes back verbatim through the wrapper chain"
+    );
+    // Following it reaches the target's bytes, so the link resolves rather
+    // than merely existing.
+    let mut buf = [0u8; 64];
+    let read = FS_SERVICE
+        .read(0, &NoCaps, "/Storage/arx1/alias", 0, &mut buf)
+        .expect("read through the link");
+    assert_eq!(&buf[..read], b"link target payload");
+
+    // A hard link: a second name reaching the same node, with the count
+    // the format keeps visible through `stat`.
+    FS_SERVICE
+        .link(
+            0,
+            &NoCaps,
+            "/Storage/arx1/target.txt",
+            "/Storage/arx1/second",
+            FinalLink::Keep,
+        )
+        .expect("link through the production service");
+    let original = FS_SERVICE
+        .stat(0, &NoCaps, "/Storage/arx1/target.txt", FinalLink::Keep)
+        .expect("stat the first name");
+    let second = FS_SERVICE
+        .stat(0, &NoCaps, "/Storage/arx1/second", FinalLink::Keep)
+        .expect("stat the second name");
+    assert_eq!(original.id, second.id, "both names reach one node");
+    assert_eq!(original.nlink, 2, "the format's own count is carried up");
+    assert_eq!(second.nlink, 2);
+
+    VOLUME_SERVICE
+        .detach(&VolumeDetachRequest {
+            volume_id: identity,
+            force: false,
+        })
+        .expect("detach the ARXFS volume");
+    stop.store(true, Ordering::Relaxed);
+    server.join().expect("arxfs server thread");
 }

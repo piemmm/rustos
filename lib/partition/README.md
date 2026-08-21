@@ -35,6 +35,20 @@ validated fail-closed against an untrusted, possibly-hostile disk
   how a RAID member's own metadata — reserved blocks below the data
   window — is read and written.
 
+  A window is a range of the *same* hardware, so the device's own
+  answers pass through rather than being replaced by the trait defaults:
+  its I/O class, its health telemetry, and its discard support. Nearly
+  every filesystem is mounted on a partition, so a defaulted answer here
+  would hide a failing drive's counters from the scrub scheduler and
+  withhold every trim from the medium. Discard is additionally reported
+  only when the window's start block is **aligned** to the device's
+  discard granularity: a caller that aligns to what it is told must
+  produce a request the device accepts, so a misaligned window withdraws
+  support rather than promising an alignment it cannot honour. Every
+  translated operation — reads, writes, and discard alike — goes through
+  the one containment check, so a window can never name a neighbouring
+  partition's blocks.
+
 ## Trust and fail-closed behaviour
 
 The on-disk table is untrusted input. A short or unsigned MBR sector, an

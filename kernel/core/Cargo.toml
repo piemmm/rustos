@@ -52,6 +52,14 @@ watchdog-diagnostics = ["tairix-sync/lock-diagnostics"]
 # link the mock (`AGENTS.md` §1 — no hacks).
 test-arch = ["tairix-kernel-sched-api/test-arch"]
 
+# `fs-conformance` exposes the shared forwarding-conformance suite for the
+# mount-path filesystem wrappers (`src/fs/wrapper_conformance.rs`) and the
+# in-memory reference driver it drives them against. Wrappers live in this
+# crate *and* in `kernel/tairix-kernel`, so the suite has to cross a crate
+# boundary to reach them all; the feature keeps it (and the reference
+# driver) out of every production build. Not in the default set.
+fs-conformance = []
+
 [dependencies]
 # Stage 2.6 dependency rules (issue brief): kernel/core may depend on
 # every kernel/* crate that has landed (Stages 2.1–2.5) and on the

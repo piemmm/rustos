@@ -81,8 +81,9 @@ use core::sync::atomic::{AtomicU64, Ordering};
 use tairix_abi::blkio::BlkDeviceClass;
 use tairix_abi::driver::block::Block;
 use tairix_abi::driver::filesystem::{
-    DirEntry, FilesystemAttrsProvider, FilesystemRead, FilesystemSecurity, FilesystemStats,
-    FilesystemWrite, MountFlags, NodeId, NodeInfo, NodeKind, NodeSecurity, VolumeStats,
+    DirEntry, FilesystemAttrs, FilesystemAttrsFs, FilesystemAttrsProvider, FilesystemRead,
+    FilesystemSecurity, FilesystemStats, FilesystemWrite, MountFlags, NodeId, NodeInfo, NodeKind,
+    NodeSecurity, VolumeStats,
 };
 use tairix_abi::sysinfo::MountAvailability;
 use tairix_abi::volume::{VolumeAttachRequest, VolumeDetachRequest, VolumeFsType};
@@ -224,6 +225,12 @@ struct AttachedVolume {
 /// (drives.md §10 — removal fails existing handles per their object
 /// semantics). Replacing the real driver also drops its plaintext cache
 /// with it.
+///
+/// Every method of every facet is written out, including the ones the ABI
+/// defaults: a default would answer `Unsupported`, reporting a vanished
+/// disk as a *permanent* format limit ("this volume has no symbolic
+/// links") instead of the transient fault it is, and a caller cannot tell
+/// those apart.
 struct UnavailableFs;
 
 impl FilesystemRead for UnavailableFs {
@@ -259,6 +266,10 @@ impl FilesystemRead for UnavailableFs {
     ) -> Result<Option<DirEntry>, DriverError> {
         Err(DriverError::DeviceFault)
     }
+
+    fn read_link(&mut self, _link: NodeId, _out: &mut [u8]) -> Result<usize, DriverError> {
+        Err(DriverError::DeviceFault)
+    }
 }
 
 impl FilesystemWrite for UnavailableFs {
@@ -268,6 +279,19 @@ impl FilesystemWrite for UnavailableFs {
         _name: &[u8],
         _kind: NodeKind,
     ) -> Result<NodeId, DriverError> {
+        Err(DriverError::DeviceFault)
+    }
+
+    fn create_link(
+        &mut self,
+        _dir: NodeId,
+        _name: &[u8],
+        _target: &[u8],
+    ) -> Result<NodeId, DriverError> {
+        Err(DriverError::DeviceFault)
+    }
+
+    fn link(&mut self, _dir: NodeId, _name: &[u8], _node: NodeId) -> Result<(), DriverError> {
         Err(DriverError::DeviceFault)
     }
 
@@ -320,11 +344,44 @@ impl FilesystemStats for UnavailableFs {
     }
 }
 
-/// A detached volume serves no attribute store; the default facet answer
-/// (`None`) refuses the `fs_attr_*` surface with the typed
-/// unsupported-backing error, consistent with every other operation's
-/// fail-closed fault.
-impl FilesystemAttrsProvider for UnavailableFs {}
+impl FilesystemAttrs for UnavailableFs {
+    fn get_attr(
+        &mut self,
+        _node: NodeId,
+        _key: &[u8],
+        _value_out: &mut [u8],
+    ) -> Result<Option<usize>, DriverError> {
+        Err(DriverError::DeviceFault)
+    }
+
+    fn set_attr(&mut self, _node: NodeId, _key: &[u8], _value: &[u8]) -> Result<(), DriverError> {
+        Err(DriverError::DeviceFault)
+    }
+
+    fn list_attr(
+        &mut self,
+        _node: NodeId,
+        _index: u64,
+        _key_out: &mut [u8],
+    ) -> Result<Option<usize>, DriverError> {
+        Err(DriverError::DeviceFault)
+    }
+
+    fn remove_attr(&mut self, _node: NodeId, _key: &[u8]) -> Result<(), DriverError> {
+        Err(DriverError::DeviceFault)
+    }
+}
+
+/// The facet is handed out rather than answered `None`, for the same
+/// reason [`UnavailableFs::root`] returns a real-looking id: an
+/// `fs_attr_*` call is routed *into* the stub and faults honestly. `None`
+/// would say "this volume's format stores no attributes", which is a
+/// claim about the format rather than about the missing device.
+impl FilesystemAttrsProvider for UnavailableFs {
+    fn attrs_fs(&mut self) -> Option<&mut dyn FilesystemAttrsFs> {
+        Some(self)
+    }
+}
 
 /// The boot-installed wiring the service operates with.
 struct Wiring {

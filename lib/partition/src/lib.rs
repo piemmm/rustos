@@ -38,7 +38,7 @@ pub mod gpt;
 pub mod mbr;
 
 use tairix_abi::blkio::BlkDeviceClass;
-use tairix_abi::driver::block::{Block, BlockGeometry, DeviceHealth};
+use tairix_abi::driver::block::{Block, BlockGeometry, DeviceHealth, DiscardCapability};
 use tairix_abi::driver::BufferClass;
 use tairix_abi::DriverError;
 
@@ -319,6 +319,15 @@ impl<B: Block> PartitionBlock<B> {
             return Err(DriverError::BufferTooSmall);
         }
         let blocks = u64::try_from(buf_len / bs).map_err(|_| DriverError::LengthOutOfRange)?;
+        self.inner_span(lba, blocks)
+    }
+
+    /// Translate window-relative `lba` to the inner device, refusing a
+    /// `blocks`-long span that does not lie wholly inside the window.
+    ///
+    /// This is the one containment check every translated operation shares,
+    /// so a window can never address a neighbouring partition's blocks.
+    fn inner_span(&self, lba: u64, blocks: u64) -> Result<u64, DriverError> {
         let end = lba
             .checked_add(blocks)
             .ok_or(DriverError::LengthOutOfRange)?;
@@ -394,6 +403,37 @@ impl<B: Block> Block for PartitionBlock<B> {
     ) -> Result<(), DriverError> {
         let inner_lba = self.inner_lba(lba, buf.len())?;
         self.inner.write_blocks_with_class(inner_lba, buf, class)
+    }
+
+    /// Discard is the disk's capability, so it is reported — but only when
+    /// the window is *aligned* to the device's granularity. Nearly every
+    /// filesystem is mounted on a partition, so inheriting the "no discard"
+    /// default would silently withhold every trim from the hardware.
+    ///
+    /// A partition's start block need not be a multiple of the device's
+    /// discard granularity. Reporting the raw granularity for a misaligned
+    /// window would make a caller that dutifully aligned its range produce
+    /// a *device*-misaligned request, so support is withdrawn instead of
+    /// promising an alignment this window cannot honour.
+    fn discard_capability(&self) -> Result<DiscardCapability, DriverError> {
+        let capability = self.inner.discard_capability()?;
+        if !capability.supported
+            || capability.granularity_blocks == 0
+            || !self
+                .start_block
+                .is_multiple_of(capability.granularity_blocks)
+        {
+            return Ok(DiscardCapability::unsupported());
+        }
+        Ok(capability)
+    }
+
+    fn discard(&mut self, lba: u64, blocks: u64) -> Result<(), DriverError> {
+        // Translated through the same containment check as a write: a
+        // discard destroys the range's contents on the device, so a window
+        // must never be able to name blocks outside itself.
+        let inner_lba = self.inner_span(lba, blocks)?;
+        self.inner.discard(inner_lba, blocks)
     }
 }
 

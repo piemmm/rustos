@@ -6,6 +6,7 @@ use tairix_abi::driver::filesystem::{
     NodeInfo, NodeKind, NodeSecurity, NodeTimes, VolumeStats,
 };
 use tairix_abi::DriverError;
+use tairix_kernel_core::fs::wrapper_conformance as conformance;
 use tairix_kernel_sec::GroupId;
 
 /// A two-node double: node 1 is the root directory, node 2 a regular
@@ -189,4 +190,17 @@ fn the_late_cell_is_set_once_and_fail_closed_before_install() {
     // A second install is ignored, never a replacement of live policy.
     cell.install(GroupId(200));
     assert_eq!(cell.get(), Some(GroupId(100)));
+}
+
+#[test]
+fn the_identity_map_forwards_every_facet_method_it_does_not_replace() {
+    // The security facet is deliberately *replaced* — the mapped record is
+    // mount policy, not stored state — so it is asserted as a replacement
+    // rather than as a forward. Everything else must reach the driver.
+    let mut mapped = GroupMappedFs::new(conformance::fixture(), STORAGE);
+    conformance::assert_read_forwards(&mut mapped);
+    conformance::assert_write_forwards(&mut mapped);
+    conformance::assert_security_replaced(&mut mapped);
+    conformance::assert_stats_forwards(&mut mapped);
+    conformance::assert_attrs_forwards(&mut mapped);
 }

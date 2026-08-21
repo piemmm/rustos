@@ -1,134 +1,15 @@
 //! Host unit tests for the `/System` `fs_*` mount wiring (`system_mount`).
 //!
-//! These cover the two pieces that are testable without a live disk or the
-//! global boot statics: the production VFS layout the `/System` volume is
-//! mounted under ([`system_vfs`]), and the `Box<dyn KernelFs>` forwarding
-//! impls that let the board-specific mounted driver be the single concrete
-//! type the boot statics name. The live `install_system_mount` path (a
-//! second `'static` window onto the boot disk) is exercised by the FS QEMU
-//! vertical, not a host test.
+//! These cover the piece that is testable without a live disk or the global
+//! boot statics: the production VFS layout the `/System` volume is mounted
+//! under ([`system_vfs`]). The `Box<dyn KernelFs>` forwarding impls are
+//! covered by the shared wrapper conformance suite (`crate::kernel_fs`),
+//! and the live `install_system_mount` path (a second `'static` window onto
+//! the boot disk) is exercised by the FS QEMU vertical.
 
-use alloc::boxed::Box;
-
-use tairix_abi::driver::filesystem::{
-    DirEntry, FilesystemRead, FilesystemSecurity, FilesystemStats, FilesystemWrite, NodeId,
-    NodeInfo, NodeKind, NodeSecurity, VolumeStats,
-};
-use tairix_abi::DriverError;
 use tairix_kernel_core::Path;
 
-use tairix_abi::driver::filesystem::FilesystemAttrsProvider;
-
-use super::{system_vfs, KernelFs};
-
-/// A mock filesystem driver whose every method returns a distinct sentinel,
-/// so a forwarded call through `Box<dyn KernelFs>` is observable by its
-/// return value alone (no shared state, so the mock can be `'static`-boxed).
-struct SentinelFs;
-
-impl FilesystemRead for SentinelFs {
-    fn root(&self) -> NodeId {
-        NodeId::from_raw(7)
-    }
-
-    fn node_info(&mut self, _node: NodeId) -> Result<NodeInfo, DriverError> {
-        Err(DriverError::Unsupported)
-    }
-
-    fn lookup(&mut self, _dir: NodeId, _name: &[u8]) -> Result<NodeId, DriverError> {
-        Ok(NodeId::from_raw(11))
-    }
-
-    fn read_at(
-        &mut self,
-        _file: NodeId,
-        _offset: u64,
-        _buf: &mut [u8],
-    ) -> Result<usize, DriverError> {
-        Ok(3)
-    }
-
-    fn read_dir(
-        &mut self,
-        _dir: NodeId,
-        _index: u64,
-        _name_out: &mut [u8],
-    ) -> Result<Option<DirEntry>, DriverError> {
-        Ok(None)
-    }
-}
-
-impl FilesystemWrite for SentinelFs {
-    fn create(
-        &mut self,
-        _dir: NodeId,
-        _name: &[u8],
-        _kind: NodeKind,
-    ) -> Result<NodeId, DriverError> {
-        Ok(NodeId::from_raw(13))
-    }
-
-    fn write_at(
-        &mut self,
-        _dir: NodeId,
-        _name: &[u8],
-        _offset: u64,
-        _data: &[u8],
-    ) -> Result<usize, DriverError> {
-        Ok(5)
-    }
-
-    fn truncate(&mut self, _dir: NodeId, _name: &[u8], _size: u64) -> Result<(), DriverError> {
-        Ok(())
-    }
-
-    fn remove(&mut self, _dir: NodeId, _name: &[u8]) -> Result<(), DriverError> {
-        Ok(())
-    }
-
-    fn rename(
-        &mut self,
-        _src_dir: NodeId,
-        _src_name: &[u8],
-        _dst_dir: NodeId,
-        _dst_name: &[u8],
-    ) -> Result<(), DriverError> {
-        // A distinct sentinel so the forwarding test observes the call.
-        Err(DriverError::Busy)
-    }
-
-    fn flush(&mut self) -> Result<(), DriverError> {
-        Ok(())
-    }
-}
-
-impl FilesystemSecurity for SentinelFs {
-    fn security(&mut self, _node: NodeId) -> Result<NodeSecurity, DriverError> {
-        Ok(NodeSecurity::new(0o644, 1, 2))
-    }
-
-    fn set_security(&mut self, _node: NodeId, _security: NodeSecurity) -> Result<(), DriverError> {
-        // The same sentinel refusal the write surface reports.
-        Err(DriverError::Busy)
-    }
-}
-
-impl FilesystemStats for SentinelFs {
-    fn stats(&mut self) -> Result<VolumeStats, DriverError> {
-        Ok(VolumeStats {
-            block_size: 512,
-            total_blocks: 17,
-            free_blocks: 17,
-            avail_blocks: 17,
-            files: 0,
-            files_free: 0,
-        })
-    }
-}
-
-/// The sentinel observes structural forwarding; it stores no attributes,
-/// so the facet keeps its fail-closed default answer.
-impl FilesystemAttrsProvider for SentinelFs {}
+use super::system_vfs;
 
 #[test]
 fn system_vfs_mounts_the_writable_volume_as_root() {
@@ -268,66 +149,4 @@ fn system_vfs_carves_logs_and_settings_back_to_the_writable_volume() {
             "/System/{name} is rebased onto the volume's own /System/{name}"
         );
     }
-}
-
-#[test]
-fn boxed_kernel_fs_forwards_every_trait_method() {
-    // The `Box<dyn KernelFs>` forwarding impls must reach the inner driver:
-    // each method returns the inner mock's distinct sentinel.
-    let mut boxed: Box<dyn KernelFs> = Box::new(SentinelFs);
-
-    // FilesystemRead
-    let root = boxed.root();
-    assert_eq!(root.raw(), 7);
-    assert_eq!(boxed.lookup(root, b"x").expect("lookup forwards").raw(), 11);
-    let mut buf = [0u8; 8];
-    assert_eq!(
-        boxed
-            .read_at(NodeId::from_raw(1), 0, &mut buf)
-            .expect("read forwards"),
-        3
-    );
-    assert!(boxed
-        .read_dir(NodeId::from_raw(1), 0, &mut buf)
-        .expect("read_dir forwards")
-        .is_none());
-
-    // FilesystemWrite
-    assert_eq!(
-        boxed
-            .create(NodeId::from_raw(1), b"f", NodeKind::RegularFile)
-            .expect("create forwards")
-            .raw(),
-        13
-    );
-    assert_eq!(
-        boxed
-            .write_at(NodeId::from_raw(1), b"f", 0, b"data")
-            .expect("write forwards"),
-        5
-    );
-    boxed
-        .truncate(NodeId::from_raw(1), b"f", 0)
-        .expect("truncate forwards");
-    boxed
-        .remove(NodeId::from_raw(1), b"f")
-        .expect("remove forwards");
-    assert_eq!(
-        boxed.rename(NodeId::from_raw(1), b"a", NodeId::from_raw(1), b"b"),
-        Err(DriverError::Busy),
-        "rename forwards to the inner driver"
-    );
-    boxed.flush().expect("flush forwards");
-
-    // FilesystemSecurity
-    boxed
-        .security(NodeId::from_raw(1))
-        .expect("security forwards");
-
-    // FilesystemStats
-    assert_eq!(
-        boxed.stats().expect("stats forwards").total_blocks,
-        17,
-        "stats forwards to the inner driver"
-    );
 }

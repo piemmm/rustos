@@ -150,3 +150,28 @@ impl FilesystemAttrsProvider for Box<dyn KernelFs> {
         (**self).attrs_fs()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::KernelFs;
+    use alloc::boxed::Box;
+    use tairix_kernel_core::fs::wrapper_conformance as conformance;
+
+    /// The boxed mount driver is what the kernel's real filesystem service
+    /// holds, so a facet method it left defaulted refused on every mounted
+    /// volume while every test that built a driver directly still passed.
+    ///
+    /// The attribute facet is claimed here (through
+    /// [`FilesystemAttrsProvider`](tairix_abi::driver::filesystem::FilesystemAttrsProvider))
+    /// but `FilesystemAttrs` itself is not, so the provider hands out the
+    /// *inner* driver's view — which the suite drives.
+    #[test]
+    fn the_boxed_mount_driver_forwards_every_facet_method() {
+        let mut boxed: Box<dyn KernelFs> = Box::new(conformance::fixture());
+        conformance::assert_read_forwards(&mut boxed);
+        conformance::assert_write_forwards(&mut boxed);
+        conformance::assert_security_forwards(&mut boxed);
+        conformance::assert_stats_forwards(&mut boxed);
+        conformance::assert_attrs_forwards(&mut boxed);
+    }
+}

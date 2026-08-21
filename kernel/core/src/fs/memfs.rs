@@ -40,7 +40,7 @@ enum RwNode {
 }
 
 /// An in-memory read/write filesystem with a per-node security record.
-pub(crate) struct RwMockFs {
+pub struct RwMockFs {
     nodes: Vec<RwNode>,
     sec: Vec<NodeSecurity>,
     /// How many directory entries name each node, parallel to `nodes`.
@@ -59,9 +59,16 @@ pub(crate) struct RwMockFs {
     create_mode: u32,
 }
 
+impl Default for RwMockFs {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl RwMockFs {
     /// A fresh filesystem with an empty, admin-owned, world-traversable root.
-    pub(crate) fn new() -> Self {
+    #[must_use]
+    pub fn new() -> Self {
         Self {
             nodes: alloc::vec![RwNode::Dir(BTreeMap::new())],
             // Root is admin-owned and world-traversable by default, so a test
@@ -77,6 +84,7 @@ impl RwMockFs {
 
     /// Set the owner/mode a node created through the write surface receives,
     /// so a test can create files the resolving principal then owns.
+    #[cfg(test)]
     pub(crate) fn with_create_owner(mut self, uid: u32, gid: u32, mode: u32) -> Self {
         self.create_uid = uid;
         self.create_gid = gid;
@@ -85,12 +93,14 @@ impl RwMockFs {
     }
 
     /// Overwrite the root directory's security record.
+    #[cfg(test)]
     pub(crate) fn set_root_security(&mut self, sec: NodeSecurity) {
         self.sec[0] = sec;
     }
 
     /// Set `node`'s recorded name count, so a test can stand a node at the
     /// format's fixed ceiling without adding four billion names to reach it.
+    #[cfg(test)]
     pub(crate) fn set_link_count(&mut self, node: NodeId, count: u32) {
         if let Ok(idx) = Self::index(node) {
             if let Some(slot) = self.nlink.get_mut(idx) {

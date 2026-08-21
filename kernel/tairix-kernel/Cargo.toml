@@ -377,7 +377,13 @@ tairix-arch-riscv64 = { path = "../arch/riscv64", version = "=0.0.0" }
 # exposed by its host-only `test-arch` feature. Feature unification
 # applies only to this crate's test builds; production images never
 # enable it.
-tairix-kernel-core = { path = "../core", version = "=0.0.0", features = ["test-arch"] }
+# `fs-conformance` additionally exposes the shared wrapper forwarding suite
+# and its reference driver, which this crate's `GroupMappedFs` and
+# `Box<dyn KernelFs>` tests drive.
+tairix-kernel-core = { path = "../core", version = "=0.0.0", features = [
+    "test-arch",
+    "fs-conformance",
+] }
 # The `program_manifests` drift test discovers every program crate's
 # `AppInfo.toml` through the shared composer walk and pins it against the
 # embedded registry's capability lists, so the two sources cannot diverge

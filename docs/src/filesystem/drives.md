@@ -454,6 +454,14 @@ unsupported-resolver) is the *spelling* subset of this model; the resolve/open
 errors above are surfaced by the storage/filesystem subsystems that add the
 open-a-path ABI (§21).
 
+A vanished device answers the *device* error, never the *feature* one, on
+**every** operation. `FilesystemFeatureUnsupported` is a permanent claim about
+the format ("this volume has no symbolic links"); `DeviceUnavailable` is a
+condition a re-insert can clear, and a caller must be able to tell them apart.
+So the stand-in a removal installs under the volume's handle writes out every
+method of every facet it claims — including the ones the driver ABI defaults —
+because inheriting a default would answer the wrong one of these two.
+
 ## 23. Audit events
 
 Security-relevant namespace decisions are logged through `lib/log` with stable

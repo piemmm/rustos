@@ -9,6 +9,7 @@ use super::*;
 
 use crate::fs::memfs::RwMockFs;
 use crate::fs::perm::{Credentials, Metadata, Mode};
+use crate::fs::wrapper_conformance as conformance;
 use crate::fs::{MountBacking, Path, Vfs, VfsError};
 use crate::test_pressure::{free_for, pressured, unpressured, TestSource};
 use crate::test_sink::TestSink;
@@ -1041,4 +1042,53 @@ fn flipping_the_filesystem_switch_off_purges_the_cache() {
     cache.read_at(file, 0, &mut again).expect("still serves");
     assert_eq!(cache.accounting().total_bytes(), 0, "the purge dropped it");
     assert!(cache.accounting().teardowns() >= 1);
+}
+
+// ----------------------------------------------------------------------
+// Forwarding conformance
+// ----------------------------------------------------------------------
+
+/// The suite's premise: the reference driver itself supports every method
+/// of every facet.
+///
+/// Without this, a fixture that quietly stopped supporting an operation
+/// would make every wrapper's conformance check pass vacuously — the
+/// wrapper would be forwarding a refusal rather than inventing one, and
+/// the suite could not tell the difference.
+#[test]
+fn the_reference_driver_supports_every_facet_method() {
+    let mut fs = conformance::fixture();
+    conformance::assert_read_forwards(&mut fs);
+    conformance::assert_write_forwards(&mut fs);
+    conformance::assert_security_forwards(&mut fs);
+    conformance::assert_stats_forwards(&mut fs);
+    conformance::assert_attrs_forwards(&mut fs);
+}
+
+#[test]
+fn the_cache_forwards_every_facet_method() {
+    let mut cache = CachedFs::new(
+        conformance::fixture(),
+        budget(),
+        owner(),
+        unpressured(),
+        sink(),
+    );
+    conformance::assert_read_forwards(&mut cache);
+    conformance::assert_write_forwards(&mut cache);
+    conformance::assert_security_forwards(&mut cache);
+    conformance::assert_stats_forwards(&mut cache);
+    conformance::assert_attrs_forwards(&mut cache);
+}
+
+#[test]
+fn the_counting_shim_forwards_every_facet_method_it_claims() {
+    // The test shim stands between the cache and the driver in most of the
+    // tests above, so a method it silently defaulted would be attributed
+    // to the cache. It claims no attribute facet, so none is asserted.
+    let mut counting = Counting::new(conformance::fixture());
+    conformance::assert_read_forwards(&mut counting);
+    conformance::assert_write_forwards(&mut counting);
+    conformance::assert_security_forwards(&mut counting);
+    conformance::assert_stats_forwards(&mut counting);
 }
