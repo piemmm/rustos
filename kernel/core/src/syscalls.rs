@@ -3411,7 +3411,7 @@ where
         match parsed.root() {
             // An absolute `/`-view path is already normalised (`.`/`..`
             // collapsed, no escape); its components are the answer.
-            tairix_path::Root::View => Ok(render_view_path(parsed.components())),
+            tairix_path::Root::View => Ok(crate::fs::spell(parsed.components())),
             // A relative path is joined onto the caller's current working
             // directory and re-normalised as one absolute `/`-view string, so
             // a leading `..` pops the working directory and cannot escape the
@@ -3425,7 +3425,7 @@ where
                 }
                 joined.push_str(raw);
                 let abs = tairix_path::parse(&joined).map_err(|_| Errno::OutOfRange)?;
-                Ok(render_view_path(abs.components()))
+                Ok(crate::fs::spell(abs.components()))
             }
             // An alias spelling (`Alias:/…` or `alias::Name/…`) names a
             // first-class storage root; a machine alias is the canonical root
@@ -3439,7 +3439,7 @@ where
                 let mut components = Vec::with_capacity(parsed.components().len() + 1);
                 components.push(String::from(base));
                 components.extend(parsed.components().iter().cloned());
-                Ok(render_view_path(&components))
+                Ok(crate::fs::spell(&components))
             }
             // A durable volume-identity spelling (`id::<volume-id>/…`)
             // resolves through the volume forest to the `/`-view location
@@ -3450,7 +3450,7 @@ where
             tairix_path::Root::VolumeId(id) => {
                 let mut components = self.volumes.resolve(id.as_bytes()).ok_or(Errno::NotFound)?;
                 components.extend(parsed.components().iter().cloned());
-                Ok(render_view_path(&components))
+                Ok(crate::fs::spell(&components))
             }
         }
     }
@@ -4030,22 +4030,6 @@ fn emit_fs_mutation(
             );
         }
     }
-}
-
-/// Render a normalised `/`-view path from its components: `/` for the root,
-/// otherwise `/`-joined component names. Paired with
-/// [`KernelSyscallHandlers::resolve_against_cwd`], which produces the already
-/// normalised components through the shared path parser.
-fn render_view_path(components: &[String]) -> String {
-    if components.is_empty() {
-        return String::from("/");
-    }
-    let mut out = String::new();
-    for component in components {
-        out.push('/');
-        out.push_str(component);
-    }
-    out
 }
 
 /// Collapse every [`UaccessError`] onto the single stable
@@ -9616,6 +9600,39 @@ where
             copy_out(space, physmap, VirtAddr::new(out), target.as_bytes())
         }) {
             Some(Ok(())) => Ok(target.len() as u64),
+            Some(Err(err)) => Err(copy_fault_errno(err)),
+            None => Err(Errno::BadAddress),
+        }
+    }
+
+    fn fs_realpath(
+        &self,
+        caller: &CallerContext<'_>,
+        path: u64,
+        path_len: usize,
+        out: u64,
+        out_len: usize,
+        mode: tairix_abi::RealpathMode,
+    ) -> SyscallResult {
+        // The dispatcher already checked `CAP_FS_ACCESS`, that both pointers
+        // are non-null `UserPtr`s, and refused an undefined mode. Resolution
+        // — every link hop, every `..`, and the per-directory search check —
+        // is the secured VFS's under the caller's attested identity.
+        let path = self.copy_path_in(caller, path, path_len)?;
+        let uid = caller.caps.owner().0;
+        let canonical = self
+            .filesystem
+            .realpath(uid, caller.caps.effective(), &path, mode)?;
+        // The whole path or nothing: a prefix of a canonical path names a
+        // different node, so an undersized buffer fails closed and the
+        // caller retries with a larger one.
+        if canonical.len() > out_len {
+            return Err(Errno::BufferTooSmall);
+        }
+        match self.with_caller_aspace(caller, |space, physmap| {
+            copy_out(space, physmap, VirtAddr::new(out), canonical.as_bytes())
+        }) {
+            Some(Ok(())) => Ok(canonical.len() as u64),
             Some(Err(err)) => Err(copy_fault_errno(err)),
             None => Err(Errno::BadAddress),
         }
@@ -16719,6 +16736,16 @@ mod tests {
             path: &str,
         ) -> Result<alloc::string::String, Errno> {
             self.inner.readlink(uid, caps, path)
+        }
+
+        fn realpath(
+            &self,
+            uid: u32,
+            caps: &dyn tairix_abi::CapabilityQuery,
+            path: &str,
+            mode: tairix_abi::RealpathMode,
+        ) -> Result<alloc::string::String, Errno> {
+            self.inner.realpath(uid, caps, path, mode)
         }
 
         fn link(
@@ -33444,6 +33471,9 @@ mod tests {
         /// Target a `readlink` answers with, or [`None`] to refuse as "not a
         /// symbolic link" (the shape a non-link path produces).
         readlink_target: Option<String>,
+        /// Canonical path a `realpath` answers with, or [`None`] to refuse as
+        /// absent (the shape a path that does not resolve produces).
+        realpath: Option<String>,
         /// Shared-clock stamp of the whole-system flush, or `0` while no
         /// flush has been asked for, so a test can order the flush against
         /// an effect another double records.
@@ -33476,6 +33506,7 @@ mod tests {
                 symlink_err: None,
                 link_err: None,
                 readlink_target: None,
+                realpath: None,
                 sync_stamp: core::sync::atomic::AtomicU64::new(0),
                 busy_endpoints: Vec::new(),
                 log: std::sync::Mutex::new(Vec::new()),
@@ -33614,6 +33645,19 @@ mod tests {
                 Some(target) => Ok(target),
                 None => Err(Errno::OutOfRange),
             }
+        }
+
+        fn realpath(
+            &self,
+            uid: u32,
+            _caps: &dyn tairix_abi::CapabilityQuery,
+            path: &str,
+            mode: tairix_abi::RealpathMode,
+        ) -> Result<alloc::string::String, Errno> {
+            self.record(alloc::format!(
+                "realpath uid={uid} path={path} mode={mode:?}"
+            ));
+            self.realpath.clone().ok_or(Errno::NotFound)
         }
 
         fn link(
@@ -34913,6 +34957,103 @@ mod tests {
         assert_eq!(
             h2.fs_readlink(&ctx, 0x1000, "/alias".len(), out, 64),
             Err(Errno::OutOfRange)
+        );
+    }
+
+    /// `fs_realpath` copies the whole canonical path out and returns its
+    /// length, passes the caller's chosen reading through to the service,
+    /// and refuses a buffer too small rather than handing back a prefix that
+    /// would name a different node.
+    #[test]
+    fn fs_realpath_copies_the_whole_canonical_path_or_fails_closed() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let (space, physmap) =
+            send_aspace(MapFlags::READ | MapFlags::WRITE | MapFlags::USER, b"/alias");
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        aspaces
+            .write()
+            .register(ProcessId(2), space, physmap)
+            .expect("registration succeeds");
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let caps = make_caps_record(2, &[CapabilityId::FS_ACCESS], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(2),
+            caps: &caps,
+        };
+        let mut mock = RecordingFs::new();
+        let canonical = "/Storage/vol/real/name";
+        mock.realpath = Some(alloc::string::String::from(canonical));
+        let fs: &'static RecordingFs = Box::leak(Box::new(mock));
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        )
+        .with_filesystem(fs);
+
+        // Write the answer into the tail of the page, clear of the path.
+        let out = 0x1000 + 0x100;
+        assert_eq!(
+            h.fs_realpath(
+                &ctx,
+                0x1000,
+                "/alias".len(),
+                out,
+                64,
+                tairix_abi::RealpathMode::Final
+            ),
+            Ok(canonical.len() as u64)
+        );
+        let written = h
+            .with_caller_aspace(&ctx, |space, physmap| {
+                let mut buf = alloc::vec![0u8; canonical.len()];
+                copy_in(space, physmap, VirtAddr::new(out), &mut buf).expect("readable");
+                buf
+            })
+            .expect("caller space");
+        assert_eq!(written, canonical.as_bytes());
+        // The caller's reading reached the service rather than a default.
+        assert!(
+            fs.calls()
+                .iter()
+                .any(|c| c.contains("realpath") && c.contains("mode=Final")),
+            "{:?}",
+            fs.calls()
+        );
+
+        // One byte short of the whole path is refused, never truncated.
+        assert_eq!(
+            h.fs_realpath(
+                &ctx,
+                0x1000,
+                "/alias".len(),
+                out,
+                canonical.len() - 1,
+                tairix_abi::RealpathMode::Final
+            ),
+            Err(Errno::BufferTooSmall)
+        );
+        // A path the service cannot canonicalise fails closed.
+        let absent: &'static RecordingFs = Box::leak(Box::new(RecordingFs::new()));
+        let h2 = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        )
+        .with_filesystem(absent);
+        assert_eq!(
+            h2.fs_realpath(
+                &ctx,
+                0x1000,
+                "/alias".len(),
+                out,
+                64,
+                tairix_abi::RealpathMode::Existing
+            ),
+            Err(Errno::NotFound)
         );
     }
 

@@ -192,6 +192,25 @@ pub enum TargetStep {
     Up,
 }
 
+/// Spell a normalised `/`-view path from its components: `/` for the root,
+/// otherwise the `/`-joined component names.
+///
+/// The inverse of [`Path::parse`], and the one spelling both the
+/// cwd-relative resolver and the canonicalising walk answer with — so a
+/// path the kernel *reports* is spelled exactly as a path it *accepts*.
+#[must_use]
+pub fn spell(components: &[String]) -> String {
+    if components.is_empty() {
+        return String::from("/");
+    }
+    let mut out = String::with_capacity(components.iter().map(|c| c.len() + 1).sum());
+    for component in components {
+        out.push('/');
+        out.push_str(component);
+    }
+    out
+}
+
 /// A parsed symbolic-link target.
 ///
 /// Unlike a [`Path`], a target is *not* required to be absolute and *may*

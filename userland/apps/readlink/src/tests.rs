@@ -10,9 +10,14 @@ extern crate std;
 use std::collections::BTreeMap;
 
 /// An in-memory [`Filesystem`]: a path either stores a target or answers a
-/// scripted errno, exactly as the kernel does.
+/// scripted errno, exactly as the kernel does. `canonical` scripts the
+/// kernel's canonicalisation per `(path, mode)` — the tool never resolves
+/// anything itself, so a fixture is the only place an answer comes from.
 struct MockFs {
     links: BTreeMap<String, Result<String, Errno>>,
+    canonical: BTreeMap<(String, u32), Result<String, Errno>>,
+    /// Each `(path, mode)` the tool asked to canonicalise, in order.
+    asked: RefCell<Vec<(String, u32)>>,
 }
 
 impl MockFs {
@@ -22,7 +27,24 @@ impl MockFs {
                 .iter()
                 .map(|(path, answer)| ((*path).to_string(), answer.map(ToString::to_string)))
                 .collect(),
+            canonical: BTreeMap::new(),
+            asked: RefCell::new(Vec::new()),
         }
+    }
+
+    /// The same fixture, with scripted canonical answers.
+    fn with_canonical(mut self, entries: &[(&str, RealpathMode, Result<&str, Errno>)]) -> Self {
+        for (path, mode, answer) in entries {
+            self.canonical.insert(
+                ((*path).to_string(), mode.as_u32()),
+                answer.map(ToString::to_string),
+            );
+        }
+        self
+    }
+
+    fn asked(&self) -> Vec<(String, u32)> {
+        self.asked.borrow().clone()
     }
 }
 
@@ -31,6 +53,15 @@ impl Filesystem for MockFs {
         match self.links.get(path) {
             Some(answer) => answer.clone(),
             // An absent name is the kernel's `NotFound`, not a panic.
+            None => Err(Errno::NotFound),
+        }
+    }
+
+    fn realpath(&self, path: &str, mode: RealpathMode) -> Result<String, Errno> {
+        let key = (path.to_string(), mode.as_u32());
+        self.asked.borrow_mut().push(key.clone());
+        match self.canonical.get(&key) {
+            Some(answer) => answer.clone(),
             None => Err(Errno::NotFound),
         }
     }
@@ -119,6 +150,7 @@ fn no_operand_is_usage() {
 #[test]
 fn switches_and_clusters_parse() {
     let options = Options {
+        canonicalize: None,
         no_newline: true,
         zero: true,
         verbose: true,
@@ -151,24 +183,85 @@ fn help_switches_are_the_reserved_pair() {
 }
 
 #[test]
-fn the_canonicalisation_switches_fail_closed_naming_themselves() {
-    // Refused, never approximated: path resolution lives in the VFS, and a
-    // second implementation here could report a path the kernel resolves
-    // differently.
-    for (arg, spelled) in [
-        ("-f", "-f"),
-        ("-e", "-e"),
-        ("-m", "-m"),
-        ("--canonicalize", "--canonicalize"),
-        ("--canonicalize-existing", "--canonicalize-existing"),
-        ("--canonicalize-missing", "--canonicalize-missing"),
+fn each_canonicalisation_switch_selects_its_own_reading() {
+    for (arg, mode) in [
+        ("-f", RealpathMode::Final),
+        ("-e", RealpathMode::Existing),
+        ("-m", RealpathMode::Missing),
+        ("--canonicalize", RealpathMode::Final),
+        ("--canonicalize-existing", RealpathMode::Existing),
+        ("--canonicalize-missing", RealpathMode::Missing),
     ] {
-        assert_eq!(
-            parse(&[arg, "a"]),
-            Err(ReadlinkError::Unsupported(spelled.to_string())),
-            "{arg}"
+        let options = Options {
+            canonicalize: Some(mode),
+            ..Options::default()
+        };
+        assert_eq!(parse(&[arg, "a"]), Ok(print(options, &["a"])), "{arg}");
+    }
+}
+
+#[test]
+fn the_last_canonicalisation_switch_wins() {
+    // Alternatives, not modifiers: a later one replaces an earlier one
+    // rather than combining into a request with no meaning.
+    for (args, mode) in [
+        (["-e", "-m"], RealpathMode::Missing),
+        (["-m", "-f"], RealpathMode::Final),
+        (["-f", "-e"], RealpathMode::Existing),
+    ] {
+        assert!(
+            matches!(
+                parse(&[args[0], args[1], "a"]),
+                Ok(Command::Print { options, .. }) if options.canonicalize == Some(mode)
+            ),
+            "{args:?}"
         );
     }
+    // A cluster is read left to right like any other.
+    assert!(matches!(
+        parse(&["-efm", "a"]),
+        Ok(Command::Print { options, .. }) if options.canonicalize == Some(RealpathMode::Missing)
+    ));
+}
+
+#[test]
+fn canonicalisation_prints_the_kernels_answer_for_any_operand() {
+    // Under a canonicalisation switch the operand need not be a link, and
+    // the tool asks the kernel with exactly the reading it parsed — it never
+    // resolves anything itself.
+    let fs = MockFs::new(&[]).with_canonical(&[
+        ("/a/link", RealpathMode::Final, Ok("/b/real")),
+        ("/plain", RealpathMode::Final, Ok("/plain")),
+    ]);
+    let out = MockOut::default();
+    let err = MockOut::default();
+    let command = parse(&["-f", "/a/link", "/plain"]).expect("parse");
+    assert_eq!(run(command, None, &fs, &NoHelp, &out, &err), Ok(true));
+    assert_eq!(out.text(), "/b/real\n/plain\n");
+    assert_eq!(
+        fs.asked(),
+        alloc::vec![
+            ("/a/link".to_string(), RealpathMode::Final.as_u32()),
+            ("/plain".to_string(), RealpathMode::Final.as_u32()),
+        ]
+    );
+    assert_eq!(err.text(), "");
+}
+
+#[test]
+fn a_refused_canonicalisation_is_diagnosed_and_exits_non_zero() {
+    // The kernel's refusal reaches the caller unchanged, and the run
+    // continues to the remaining operands — the GNU behaviour.
+    let fs = MockFs::new(&[]).with_canonical(&[
+        ("/gone", RealpathMode::Existing, Err(Errno::NotFound)),
+        ("/here", RealpathMode::Existing, Ok("/here")),
+    ]);
+    let out = MockOut::default();
+    let err = MockOut::default();
+    let command = parse(&["-ev", "/gone", "/here"]).expect("parse");
+    assert_eq!(run(command, None, &fs, &NoHelp, &out, &err), Ok(false));
+    assert_eq!(out.text(), "/here\n");
+    assert!(err.text().contains("/gone"), "{}", err.text());
 }
 
 #[test]
@@ -306,6 +399,9 @@ fn help_documents_the_parser_switches() {
         let path = format!("{help_root}/{locale}/readlink.md");
         let text = fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {path}: {e}"));
         for switch in [
+            "`-f, --canonicalize`",
+            "`-e, --canonicalize-existing`",
+            "`-m, --canonicalize-missing`",
             "`-n, --no-newline`",
             "`-z, --zero`",
             "`-q, -s`",

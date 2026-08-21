@@ -21,15 +21,17 @@ the final component.
 * **`-n` cannot corrupt a multi-operand listing.** The delimiters between
   targets are what separate them, so with more than one operand `-n` is
   ignored and that is reported — never two paths run together on one line.
-* **`-f`/`-e`/`-m` fail closed rather than approximating.** Resolving every
-  component of a path — following each link, handling `..` physically,
-  enforcing the hop budget and the rule that a link cannot escape the
-  volume that stores it — is the VFS's one implementation
-  (`plans/SYMLINKS.md`). A userland copy that disagreed by one rule would
-  print a path the kernel resolves differently, so the three switches are
-  refused with that reason until the VFS exposes its own canonicalisation.
-  This is the posture `ln` takes for `-r` and `du` for `-x`: refused for a
-  stated reason, never stubbed.
+* **`-f`/`-e`/`-m` call the kernel's canonicalisation, never a second copy
+  of it.** Resolving every component of a path — following each link,
+  handling `..` physically, enforcing the hop budget, checking search
+  permission on every directory passed through, and the rule that a link
+  cannot resolve outside what its mount projects — is the VFS's one
+  implementation (`plans/SYMLINKS.md`), reached through `fs_realpath`. A
+  userland copy that disagreed by one rule would print a path the kernel
+  resolves differently, which is a security-relevant divergence rather
+  than a mere duplicate. The three switches are alternatives choosing how
+  much of the path must exist, so they are one parsed value and the last
+  one given wins.
 
 ## Layering & safety
 
@@ -46,14 +48,15 @@ The engine is pure: for one parsed `Command` it reads each operand's target
 through the injected `Filesystem` seam and renders the lines through two
 `Output` streams, so every behaviour is host-provable against in-memory
 fixtures with no kernel — the seam discipline of the sibling tools (`ln`'s
-`FileSystem`, `du`'s `Walk`). The production seam sizes its buffer from the
-ABI's own `FS_SYMLINK_MAX`, so one call always suffices and no growth loop
-exists.
+`FileSystem`, `du`'s `Walk`). The production seam sizes each buffer from
+the ABI's own bound for what it receives — `FS_SYMLINK_MAX` for a stored
+target, `FS_PATH_MAX` for a canonical path — so one call always suffices
+and no growth loop exists.
 
 ## Usage
 
 ```
-readlink [-nz] [-q | -s | -v] [--] file...
+readlink [-fem] [-nz] [-q | -s | -v] [--] file...
 ```
 
 ## Layout

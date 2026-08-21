@@ -4,7 +4,7 @@ readlink — print a symbolic link's target
 
 ## SYNOPSIS
 
-`readlink [-nz] [-q | -s | -v] [--] file...`
+`readlink [-fem] [-nz] [-q | -s | -v] [--] file...`
 
 ## DESCRIPTION
 
@@ -28,16 +28,27 @@ targets are what separate them.
 
 At least one operand is required. `--` ends option parsing.
 
-GNU's canonicalisation switches `-f`, `-e` and `-m` are **refused**, not
-approximated. Resolving every component of a path — following each link,
-handling `..` physically, enforcing the hop budget and the rule that a
-link cannot escape the volume that stores it — is the filesystem's one
-implementation. A second copy of it in this tool could print a path the
-filesystem resolves differently, so it fails closed until the filesystem
-offers that resolution itself.
+`-f`, `-e` and `-m` switch to **canonicalisation** instead: the one path
+that names what the operand resolves to, with every link followed and
+every `..` applied. Under any of them the operand need not be a link at
+all, and the three differ only in how much of the path must exist. They
+are alternatives rather than modifiers, so the last one given wins.
+
+That resolution is the filesystem's — physical `..`, the hop budget, a
+search-permission check on every directory passed through, and the rule
+that a link cannot resolve outside what its mount projects — and this
+tool *calls* it rather than walking links itself. A second copy of the
+algorithm that disagreed by one rule would print a path the filesystem
+resolves differently.
 
 ## OPTIONS
 
+- `-f, --canonicalize` — print the canonical path; every component but
+  the last must exist.
+- `-e, --canonicalize-existing` — print the canonical path; every
+  component must exist.
+- `-m, --canonicalize-missing` — print the canonical path; no component
+  need exist.
 - `-n, --no-newline` — do not print the delimiter after the last target
   (ignored, with a report, for more than one operand).
 - `-z, --zero` — end each target with NUL instead of newline.
@@ -50,6 +61,7 @@ offers that resolution itself.
 
 - `readlink Home:/Desktop/Notes` — print what one shortcut stores.
 - `readlink -v alias` — print it, and say why if it is not a link.
+- `readlink -f alias` — print what it resolves to, links and all.
 - `readlink -z a b | tr '\0' '\n'` — NUL-separated targets for a script.
 
 ## EXIT STATUS

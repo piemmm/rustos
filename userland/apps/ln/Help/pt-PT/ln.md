@@ -4,7 +4,7 @@ ln — criar ligações entre ficheiros
 
 ## SYNOPSIS
 
-`ln [-sLPdFfinvT] [-t dir] [--] target... [link_name]`
+`ln [-srLPdFfinvT] [-t dir] [--] target... [link_name]`
 
 ## DESCRIPTION
 
@@ -39,15 +39,22 @@ só volume, e a um directório nunca se dá um segundo nome — é por a
 árvore de ficheiros continuar a ser uma árvore que `..` designa o
 directório por onde realmente se passou.
 
-`-b`/`-S`
-são recusadas porque não existe maquinaria de cópias de segurança, e
-`-r` porque calcular um alvo relativo ao directório da ligação exige uma
-resolução canonizante que este sistema não oferece — uma lexical
-nomearia outro objecto assim que houvesse uma ligação envolvida.
+`-r` guarda o alvo de uma ligação simbólica relativo ao directório da
+própria ligação. O sistema de ficheiros canoniza primeiro ambas as
+metades, pelo que a diferença entre elas é exacta: dois caminhos
+canónicos não contêm `..` nem ligação alguma. A mesma aritmética sobre
+os operandos tal como escritos nomearia outro objecto assim que houvesse
+uma ligação envolvida. `-r` exige `-s`, porque uma ligação forte não
+guarda alvo que tornar relativo.
+
+`-b`/`-S` são recusadas porque não existe maquinaria de cópias de
+segurança.
 
 ## OPTIONS
 
 - `-s, --symbolic` — criar ligações simbólicas em vez de fixas.
+- `-r, --relative` — guardar o alvo de cada ligação simbólica relativo
+  ao directório da própria ligação. Exige `-s`.
 - `-L, --logical` — ligar fixamente aquilo que um alvo simbólico
   nomeia, em vez da própria ligação.
 - `-P, --physical` — ligar fixamente o alvo tal como escrito, sem

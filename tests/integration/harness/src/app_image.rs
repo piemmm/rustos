@@ -793,6 +793,7 @@ mod tests {
                 "seq",
                 "sleep",
                 "ss",
+                "stat",
                 "stress",
                 "switchboard",
                 "sysinfo",

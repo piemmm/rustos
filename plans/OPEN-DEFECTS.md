@@ -806,6 +806,16 @@ present, go straight to a full `cargo clean` — do not spend runs on `-p`
 cleans. Avoid interleaving concurrent host and cross-target cargo
 invocations that may be interrupted.
 
+A fourth instance confirmed both the signature and the remedy exactly: 1096
+zero-byte `.rmeta` files after a session that interleaved host `cargo
+test`/`clippy` runs with `--target aarch64-unknown-none` /
+`x86_64-unknown-none` / `riscv64gc-unknown-none-elf` builds, again a
+`can't find crate for tairix_arch_api` / `tairix_reclaim` cascade in
+`docs-check`, and again cleared only by a full `cargo clean` (347 766 files,
+123.8 GiB — which then costs a cold gate run). The practical discipline is
+therefore to **batch** the cross-target builds and lints separately from the
+host runs rather than alternating between them.
+
 **Recurrence, root-caused: a corrupt/stale build cache.** The same shape
 appeared again with three different symbols — `tairix_tty::read_bounded`,
 `tairix_tty::is_line_delimiter` (from `kernel/core`) and

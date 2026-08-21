@@ -4,7 +4,7 @@ readlink — mostrar el destino de un enlace simbólico
 
 ## SYNOPSIS
 
-`readlink [-nz] [-q | -s | -v] [--] archivo...`
+`readlink [-fem] [-nz] [-q | -s | -v] [--] archivo...`
 
 ## DESCRIPTION
 
@@ -29,17 +29,29 @@ son lo que los separa.
 
 Se requiere al menos un operando. `--` termina el análisis de opciones.
 
-Las opciones de canonización de GNU `-f`, `-e` y `-m` se **rechazan**, no
-se aproximan. Resolver cada componente de una ruta —seguir cada enlace,
-tratar `..` físicamente, aplicar el presupuesto de saltos y la regla de
-que un enlace no puede salir del volumen que lo almacena— es la única
-implementación del sistema de archivos. Una segunda copia aquí podría
-mostrar una ruta que el sistema de archivos resuelve de otro modo; por
-eso la opción falla hasta que el sistema de archivos ofrezca esa
-resolución él mismo.
+`-f`, `-e` y `-m` cambian en cambio a la **canonización**: la única ruta
+que nombra aquello a lo que el operando se resuelve, con cada enlace
+seguido y cada `..` aplicado. Con cualquiera de ellas el operando no
+necesita ser un enlace, y las tres sólo difieren en cuánto de la ruta
+debe existir. Son alternativas y no modificadores, así que gana la
+última dada.
+
+Esa resolución es del sistema de archivos —`..` físico, el presupuesto
+de saltos, una comprobación de permiso de búsqueda en cada directorio
+atravesado y la regla de que un enlace no puede resolverse fuera de lo
+que su montaje proyecta— y esta herramienta la *invoca* en vez de seguir
+enlaces por su cuenta. Una segunda copia del algoritmo que discrepara en
+una regla mostraría una ruta que el sistema de archivos resuelve de otro
+modo.
 
 ## OPTIONS
 
+- `-f, --canonicalize` — mostrar la ruta canónica; todos los
+  componentes menos el último deben existir.
+- `-e, --canonicalize-existing` — mostrar la ruta canónica; todos los
+  componentes deben existir.
+- `-m, --canonicalize-missing` — mostrar la ruta canónica; ningún
+  componente necesita existir.
 - `-n, --no-newline` — no mostrar el delimitador tras el último destino
   (se ignora, con aviso, para más de un operando).
 - `-z, --zero` — terminar cada destino con NUL en lugar de salto de
@@ -54,6 +66,8 @@ resolución él mismo.
 
 - `readlink Home:/Desktop/Notes` — mostrar lo que almacena un atajo.
 - `readlink -v alias` — mostrarlo, y decir por qué si no es un enlace.
+- `readlink -f alias` — mostrar aquello a lo que se resuelve, enlaces
+  incluidos.
 - `readlink -z a b | tr '\0' '\n'` — destinos separados por NUL para un
   guion.
 
@@ -62,8 +76,7 @@ resolución él mismo.
 - `0` — se mostró el destino de cada operando (o se escribió la ayuda
   breve).
 - `1` — al menos una lectura fue rechazada, o la salida falló.
-- `2` — no se entendió la línea de órdenes, o nombraba una opción de
-  canonización.
+- `2` — no se entendió la línea de órdenes.
 
 ## ENVIRONMENT
 

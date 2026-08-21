@@ -4,7 +4,7 @@ readlink — das Ziel einer symbolischen Verknüpfung ausgeben
 
 ## SYNOPSIS
 
-`readlink [-nz] [-q | -s | -v] [--] Datei...`
+`readlink [-fem] [-nz] [-q | -s | -v] [--] Datei...`
 
 ## DESCRIPTION
 
@@ -32,17 +32,29 @@ zwischen den Zielen sind es, die sie trennen.
 Mindestens ein Operand ist erforderlich. `--` beendet die
 Optionsauswertung.
 
-Die GNU-Kanonisierungsoptionen `-f`, `-e` und `-m` werden **abgewiesen**,
-nicht angenähert. Jede Komponente eines Pfades aufzulösen — jeder
-Verknüpfung folgen, `..` physisch behandeln, das Sprungbudget und die
-Regel durchsetzen, dass eine Verknüpfung den speichernden Datenträger
-nicht verlassen kann — ist die eine Implementierung des Dateisystems.
-Eine zweite Kopie hier könnte einen Pfad ausgeben, den das Dateisystem
-anders auflöst; die Option scheitert daher, bis das Dateisystem diese
-Auflösung selbst anbietet.
+`-f`, `-e` und `-m` schalten stattdessen auf **Kanonisierung** um: den
+einen Pfad, der benennt, worauf der Operand auflöst, mit jeder
+Verknüpfung verfolgt und jedem `..` angewandt. Unter keiner von ihnen
+muss der Operand überhaupt eine Verknüpfung sein; die drei unterscheiden
+sich nur darin, wie viel des Pfades vorhanden sein muss. Sie sind
+Alternativen und keine Zusätze, also gewinnt die letzte genannte.
+
+Diese Auflösung gehört dem Dateisystem — physisches `..`, das
+Sprungbudget, eine Suchrechtsprüfung für jedes durchlaufene Verzeichnis
+und die Regel, dass eine Verknüpfung nicht außerhalb dessen auflösen
+kann, was ihre Einhängung projiziert — und dieses Werkzeug *ruft* sie
+auf, statt selbst Verknüpfungen zu verfolgen. Eine zweite Kopie des
+Algorithmus, die in einer Regel abwiche, gäbe einen Pfad aus, den das
+Dateisystem anders auflöst.
 
 ## OPTIONS
 
+- `-f, --canonicalize` — den kanonischen Pfad ausgeben; jede Komponente
+  außer der letzten muss vorhanden sein.
+- `-e, --canonicalize-existing` — den kanonischen Pfad ausgeben; jede
+  Komponente muss vorhanden sein.
+- `-m, --canonicalize-missing` — den kanonischen Pfad ausgeben; keine
+  Komponente muss vorhanden sein.
 - `-n, --no-newline` — den Trenner nach dem letzten Ziel nicht ausgeben
   (bei mehr als einem Operanden ignoriert, mit Meldung).
 - `-z, --zero` — jedes Ziel mit NUL statt Zeilenumbruch beenden.
@@ -58,6 +70,8 @@ Auflösung selbst anbietet.
   speichert.
 - `readlink -v alias` — ausgeben und sagen, warum nicht, falls es keine
   Verknüpfung ist.
+- `readlink -f alias` — ausgeben, worauf es auflöst, Verknüpfungen und
+  alles.
 - `readlink -z a b | tr '\0' '\n'` — NUL-getrennte Ziele für ein
   Skript.
 
@@ -66,8 +80,7 @@ Auflösung selbst anbietet.
 - `0` — jedes Ziel wurde ausgegeben (oder die Kurzhilfe geschrieben).
 - `1` — mindestens eine Leseoperation wurde abgewiesen, oder die Ausgabe
   ist fehlgeschlagen.
-- `2` — die Befehlszeile wurde nicht verstanden oder nannte eine
-  Kanonisierungsoption.
+- `2` — die Befehlszeile wurde nicht verstanden.
 
 ## ENVIRONMENT
 

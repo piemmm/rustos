@@ -63,7 +63,8 @@ pub mod wrapper_conformance;
 
 pub use blkclient::BlkClient;
 pub use delegate::{
-    DelegatedEntry, DelegatedFs, DelegatedInfo, FinalLink, MetaPolicy, PerInode, Uniform,
+    DelegatedEntry, DelegatedFs, DelegatedInfo, FinalLink, MetaPolicy, MountProjection, PerInode,
+    Uniform,
 };
 pub use fscache::CachedFs;
 pub use mount::{MountBacking, MountPoint, MountTable};
@@ -72,7 +73,7 @@ pub use mounted::{
     MountedFilesystemService,
 };
 pub use path::{
-    resolve_machine_alias, Path, MAX_COMPONENT_LEN, MAX_PATH_COMPONENTS, ROOT_TEMPLATE,
+    resolve_machine_alias, spell, Path, MAX_COMPONENT_LEN, MAX_PATH_COMPONENTS, ROOT_TEMPLATE,
 };
 pub use perm::{Access, AclEntry, AclWho, Credentials, Metadata, Mode};
 pub use retained::{JournaledBlock, ReplaySnapshot, RetainedWrites};

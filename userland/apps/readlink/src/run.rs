@@ -9,9 +9,11 @@
 //! program's `main`.
 //!
 //! `main` collects the inherited argument vector, parses it, and reads each
-//! operand's stored target through `fs_readlink` under the caller's attested
-//! identity. The final component is never followed, so the answer is the
-//! link's own target rather than a resolution of it. The reserved
+//! operand's stored target through `fs_readlink` — or, under `-f`/`-e`/`-m`,
+//! its canonical path through `fs_realpath` — under the caller's attested
+//! identity. Without a canonicalisation switch the final component is never
+//! followed, so the answer is the link's own target rather than a resolution
+//! of it; with one, the kernel's own resolution answers. The reserved
 //! `-?`/`--help` switches render the tool's own Help document through the
 //! shared engine. The tool binds only to its inherited descriptors, never a
 //! console device.
@@ -31,16 +33,17 @@ mod program {
     use alloc::format;
     use alloc::string::String;
 
-    use tairix_abi::fs::FS_SYMLINK_MAX;
-    use tairix_abi::Errno;
+    use tairix_abi::fs::{FS_PATH_MAX, FS_SYMLINK_MAX};
+    use tairix_abi::{Errno, RealpathMode};
     use tairix_help::BundleHelp;
     use tairix_readlink::{parse, run, Filesystem, Output, USAGE};
     use tairix_rt::io::{write_stderr_line, Stderr, Stdout, Write};
 
-    /// The production [`Filesystem`] over `fs_readlink`.
+    /// The production [`Filesystem`] over `fs_readlink` and `fs_realpath`.
     ///
-    /// The buffer is the ABI's own target bound, so one call always suffices
-    /// and no growth loop is needed: a target longer than that cannot exist.
+    /// Each buffer is the ABI's own bound for what it receives, so one call
+    /// always suffices and no growth loop is needed: neither a stored target
+    /// nor a canonical path can be longer.
     struct RtFilesystem;
 
     impl Filesystem for RtFilesystem {
@@ -57,6 +60,18 @@ mod program {
             // refused rather than printed as replacement characters.
             let target = core::str::from_utf8(bytes).map_err(|_| Errno::OutOfRange)?;
             Ok(String::from(target))
+        }
+
+        fn realpath(&self, path: &str, mode: RealpathMode) -> Result<String, Errno> {
+            let mut buf = alloc::vec![0u8; FS_PATH_MAX];
+            let ret = tairix_rt::fs_realpath(path.as_bytes(), &mut buf, mode);
+            if ret < 0 {
+                return Err(Errno::from_syscall(ret));
+            }
+            let len = usize::try_from(ret).map_err(|_| Errno::OutOfRange)?;
+            let bytes = buf.get(..len).ok_or(Errno::OutOfRange)?;
+            let canonical = core::str::from_utf8(bytes).map_err(|_| Errno::OutOfRange)?;
+            Ok(String::from(canonical))
         }
     }
 
@@ -89,8 +104,7 @@ mod program {
     ///
     /// Exit codes: `0` when every target was printed, `1` when a read was
     /// refused or the output failed, `2` on a usage error (a malformed
-    /// argument vector, an unrecognised option, or a canonicalisation
-    /// switch this tool refuses).
+    /// argument vector, or an unrecognised option).
     fn main() -> i32 {
         // A malformed (non-UTF-8) argument vector is a usage error, reported
         // rather than guessed at.

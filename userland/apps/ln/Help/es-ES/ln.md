@@ -4,7 +4,7 @@ ln — crear enlaces entre archivos
 
 ## SYNOPSIS
 
-`ln [-sLPdFfinvT] [-t dir] [--] target... [link_name]`
+`ln [-srLPdFfinvT] [-t dir] [--] target... [link_name]`
 
 ## DESCRIPTION
 
@@ -39,14 +39,22 @@ nombre. Ambos nombres deben estar en un mismo volumen, y un directorio
 nunca recibe un segundo nombre — que el árbol de archivos siga siendo
 un árbol es lo que da sentido a `..`.
 
+`-r` almacena el destino de un enlace simbólico relativo al directorio
+del propio enlace. El sistema de archivos canoniza antes ambas mitades,
+así que la diferencia entre ellas es exacta: dos rutas canónicas no
+contienen `..` ni enlace alguno. La misma aritmética sobre los operandos
+tal como se escribieron nombraría otro objeto en cuanto hubiera un
+enlace por medio. `-r` necesita `-s`, porque un enlace duro no almacena
+destino que hacer relativo.
+
 `-b`/`-S` se rechazan porque no existe maquinaria de copias de
-seguridad, y `-r` porque calcular un destino relativo al directorio del
-enlace exige una resolución canonizadora que este sistema no ofrece —
-una léxica nombraría otro objeto en cuanto hubiera un enlace por medio.
+seguridad.
 
 ## OPTIONS
 
 - `-s, --symbolic` — crear enlaces simbólicos en lugar de duros.
+- `-r, --relative` — almacenar el destino de cada enlace simbólico
+  relativo al directorio del propio enlace. Necesita `-s`.
 - `-L, --logical` — enlazar de forma dura lo que nombra un destino
   simbólico, en lugar del propio enlace.
 - `-P, --physical` — enlazar de forma dura el destino tal como se

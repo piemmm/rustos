@@ -359,6 +359,7 @@ const NUM_FS_SYMLINK: u64 = SyscallNumber::FS_SYMLINK.as_u16() as u64;
 /// `fs_readlink` syscall number (as above).
 const NUM_FS_READLINK: u64 = SyscallNumber::FS_READLINK.as_u16() as u64;
 const NUM_FS_LINK: u64 = SyscallNumber::FS_LINK.as_u16() as u64;
+const NUM_FS_REALPATH: u64 = SyscallNumber::FS_REALPATH.as_u16() as u64;
 
 /// `fs_set_mode` syscall number (as above).
 const NUM_FS_SET_MODE: u64 = SyscallNumber::FS_SET_MODE.as_u16() as u64;
@@ -4317,6 +4318,49 @@ pub fn fs_readlink(path: &[u8], out: &mut [u8]) -> i64 {
     ret as i64
 }
 
+/// Canonicalise the absolute `path` into `out` (`SyscallNumber::FS_REALPATH`,
+/// the `realpath(3)` shape).
+///
+/// The kernel resolves every component itself — each symbolic link followed,
+/// each `..` applied to the nodes the walk really traversed, search
+/// permission required on every directory passed through — so the answer
+/// holds no `.`, no `..`, and no link, and is a path the same kernel would
+/// accept back. A tool must **not** canonicalise for itself: a userland walk
+/// that disagreed by one rule would print a path the kernel resolves
+/// elsewhere.
+///
+/// `mode` chooses how much of the path must exist: the three readings are
+/// GNU's `-e`, `-f`, and `-m`. Returns the canonical path's byte length on
+/// success or `-errno`: `Errno::NotFound` when `mode` requires a component
+/// that is absent, `Errno::LinkLoop` for a cycle or an over-budget chain,
+/// and `Errno::BufferTooSmall` when `out` cannot hold the whole path —
+/// never a prefix, which would name a different node, so the caller retries
+/// with a larger buffer.
+#[must_use]
+#[allow(clippy::cast_possible_wrap)] // The kernel guarantees the i64 errno-result encoding (length, else -errno).
+pub fn fs_realpath(path: &[u8], out: &mut [u8], mode: tairix_abi::RealpathMode) -> i64 {
+    let path_ptr = path.as_ptr() as usize as u64;
+    let out_ptr = out.as_mut_ptr() as usize as u64;
+    // SAFETY: `raw_syscall` is always safe to invoke; the kernel validates
+    // both `(ptr, len)` pairs against the caller's address space before
+    // touching them, and writes at most `out.len()` bytes. Both slices are
+    // live for the duration of the call.
+    let ret = unsafe {
+        raw_syscall(
+            NUM_FS_REALPATH,
+            [
+                path_ptr,
+                path.len() as u64,
+                out_ptr,
+                out.len() as u64,
+                u64::from(mode.as_u32()),
+                0,
+            ],
+        )
+    };
+    ret as i64
+}
+
 /// Set the permission bits of the file or directory at the absolute `path`
 /// to `mode` (`SyscallNumber::FS_SET_MODE`, the `chmod(2)` shape).
 ///
@@ -6850,6 +6894,47 @@ mod tests {
         assert_eq!(args[2], out.as_ptr() as usize as u64);
         assert_eq!(args[3], out.len() as u64);
         assert_eq!(&args[4..], &[0, 0]);
+    }
+
+    #[test]
+    fn fs_realpath_marshals_the_path_the_buffer_and_the_mode() {
+        let path = b"/Users/me/alias";
+        let mut out = [0u8; 64];
+        for mode in [
+            tairix_abi::RealpathMode::Existing,
+            tairix_abi::RealpathMode::Final,
+            tairix_abi::RealpathMode::Missing,
+        ] {
+            let (number, args) = capture(9, || {
+                assert_eq!(fs_realpath(path, &mut out, mode), 9);
+            });
+            assert_eq!(number, NUM_FS_REALPATH);
+            assert_eq!(args[0], path.as_ptr() as usize as u64);
+            assert_eq!(args[1], path.len() as u64);
+            assert_eq!(args[2], out.as_ptr() as usize as u64);
+            assert_eq!(args[3], out.len() as u64);
+            assert_eq!(args[4], u64::from(mode.as_u32()));
+            assert_eq!(&args[5..], &[0]);
+        }
+    }
+
+    #[test]
+    fn fs_realpath_surfaces_negative_errno_encoding() {
+        // A prefix of a canonical path names a different node, so an
+        // undersized buffer is refused whole rather than truncated.
+        let want = -i64::from(tairix_abi::Errno::BufferTooSmall.as_i32());
+        let neg = u64::from_ne_bytes(want.to_ne_bytes());
+        let mut out = [0u8; 1];
+        let (_, _) = capture(neg, || {
+            assert_eq!(
+                fs_realpath(
+                    b"/Users/me/alias",
+                    &mut out,
+                    tairix_abi::RealpathMode::Existing
+                ),
+                want
+            );
+        });
     }
 
     #[test]

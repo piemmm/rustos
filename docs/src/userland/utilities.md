@@ -1063,13 +1063,17 @@ directory) and quiet is the GNU default, `-v` diagnosing; either way the
 remaining operands are still read and the run exits non-zero. `-z` NUL-ends
 each target and `-n` drops the final delimiter — ignored, with a report, for
 more than one operand, because the delimiters are what separate the targets.
-GNU's `-f`/`-e`/`-m` canonicalisation is **refused**: resolving every
-component of a path (following each link, handling `..` physically, enforcing
-the hop budget and the rule that a link cannot escape the volume that stores
-it) is the VFS's one implementation, and a userland copy that disagreed by one
-rule would print a path the kernel resolves differently. That is the `ln -r` /
-`du -x` posture — refused for a stated reason, never stubbed — and it lifts
-when the VFS exposes canonicalisation itself.
+`-f`/`-e`/`-m` switch to **canonicalisation** instead: the one path that
+names what the operand resolves to, with every link followed and every `..`
+applied, and under any of them the operand need not be a link at all. They
+are alternatives choosing how much of the path must exist — every component
+(`-e`), all but the last (`-f`), or none (`-m`) — so they are one parsed
+value and the last one given wins. The resolution is the kernel's own
+(`fs_realpath`): physical `..`, the shared hop budget, a search-permission
+check on every directory passed through, and the rule that a link cannot
+resolve outside what its mount projects. The tool *calls* it rather than
+walking links itself, because a copy disagreeing by one rule would print a
+path the kernel resolves differently.
 
 Each is `no_std` (with `alloc`), has no `unsafe`, and requests
 `CAP_CONSOLE_WRITE` + `CAP_FS_ACCESS` and no `CAP_CONSOLE_READ`, because none
@@ -1092,14 +1096,17 @@ names reach one file and its storage survives until the last name goes.
 `-L` gives the second name to what a symbolic target *names*, `-P` — the
 default — links the target as spelled and follows no final link, and
 `-d`/`-F` accept a directory operand whose link is still refused
-`IsADirectory` (no principal may give a directory a second name). Two
-switches stay refused for reasons that are not about hard links:
-`-b`/`-S` because this workspace has no backup machinery (`cp`/`mv` omit
-them too), and `-r` because computing a target relative to the link's own
-directory needs a canonicalising resolution the ABI does not offer, and a
-*lexical* one would name a different node the moment a link were involved —
-the very collapse the resolver forbids. Every refusal is a usage error
-naming the switch; nothing is silently ignored.
+`IsADirectory` (no principal may give a directory a second name). `-r`/`--relative` stores a symbolic link's target relative to
+the link's own directory. It asks the kernel to canonicalise the target and
+the link's directory (`fs_realpath`) and then spells the difference: two
+canonical paths hold no `..` and no link, so the arithmetic is exact, whereas
+the same arithmetic on the operands as typed would name a different node the
+moment a link were involved — the very collapse the resolver forbids. `-r`
+without `-s` is a usage error, because a hard link stores no target to make
+relative. One switch group stays refused for a reason that is not about links
+at all: `-b`/`-S`, because this workspace has no backup machinery (`cp`/`mv`
+omit them too). Every refusal is a usage error naming the switch; nothing is
+silently ignored.
 
 The target is stored **verbatim** and never resolved: it may be relative,
 carry `..`, and name nothing at all, so `ln -s` may legitimately create a
@@ -1280,6 +1287,53 @@ the session baseline. `cargo test -p tairix-whoami` drives the parser
 engine against an in-memory directory fixture (found name, missing
 name, failed walk, failed identity read, closed terminal), the
 short-help fallback, and the locale switch-drift pin.
+
+## `stat` — report a file's or a filesystem's status (`userland/apps/stat`)
+
+`tairix-stat` is the GNU coreutils `stat` (a `plans/APPS.md` §12.1 Stage F
+store bundle). It renders the fields of one `fs_stat` per operand, either as
+the default report or through a `--format` / `--printf` string of GNU's own
+specifiers, and `-t`/`--terse` gives the one-line form of either.
+
+**Without `-L` a link is described as itself** — the reason the tool exists
+beside `ls`. `%N` shows the link and the target it stores, `%F` says
+`symbolic link`, and the sizes and stamps are the link's own; the production
+seam opens the path `NO_FOLLOW`, so the descriptor's flags fix the posture and
+the stat served for it cannot contradict its own open. `-L` resolves the final
+link and reports what it names.
+
+`-f` switches to the filesystem the operand lies on — the volume's block and
+inode counts, its block size, and the type its mount records — and that
+reading has a **different** specifier vocabulary. The format is parsed once,
+after the whole command line, so `-f` written after `-c` still decides which
+vocabulary applies, and an unknown or unserviceable directive is refused
+there, before any path is touched. A directive carries the printf flags,
+width, and precision (`%-10s`, `%06i`, `%.3n`); the default and terse forms
+are themselves formats, so one renderer serves every form.
+
+`%m` and `%o` come from the System Information mount snapshot, keyed on the
+**canonical** path (`fs_realpath`) and matched by whole components — so a link
+into another volume reports the volume it lands on, and `/vol` never claims
+`/volume/x`. `%U` comes from the ungated user directory `whoami` reads.
+Neither adds a capability. A fact that cannot be read renders `?`, or GNU's
+`UNKNOWN` for a name, never a plausible substitute.
+
+Four specifiers are **refused by name**, each for a concept TAIRiX genuinely
+lacks rather than a field left unimplemented: `%G` (the System Information API
+publishes a user directory and no group counterpart, so `%g` — the numeric id
+— is the honest field), `%t`/`%T` of the file vocabulary (there are no device
+special files to have a major or minor type, so the `-t` form omits those two
+columns instead of printing zeroes), and `%t` of the filesystem vocabulary (a
+volume carries no numeric type magic; `%T` names the type its mount records).
+Two report the TAIRiX concept in place of the Linux one: a volume is
+identified by a 16-byte id rather than a device number, so `%d` is that id in
+decimal and `%D` in hex — the same value in two spellings, and comparing two
+files' `%d` still answers exactly "are these on one volume?".
+
+An operand that cannot be read is diagnosed on standard error, the remaining
+operands are still described, and the run exits non-zero. The crate is
+`no_std` (with `alloc`), has no `unsafe`, and requests `CAP_CONSOLE_WRITE` +
+`CAP_FS_ACCESS` and no `CAP_CONSOLE_READ`, because it never prompts.
 
 ## `ls` — list directory contents (`userland/apps/ls`)
 

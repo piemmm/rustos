@@ -4,7 +4,7 @@ readlink — stampare il bersaglio di un collegamento simbolico
 
 ## SYNOPSIS
 
-`readlink [-nz] [-q | -s | -v] [--] file...`
+`readlink [-fem] [-nz] [-q | -s | -v] [--] file...`
 
 ## DESCRIPTION
 
@@ -30,16 +30,29 @@ bersagli sono ciò che li separa.
 
 Serve almeno un operando. `--` termina l'analisi delle opzioni.
 
-Le opzioni di canonizzazione GNU `-f`, `-e` e `-m` sono **rifiutate**, non
-approssimate. Risolvere ogni componente di un percorso — seguire ogni
-collegamento, trattare `..` fisicamente, applicare il budget di salti e la
-regola che un collegamento non può uscire dal volume che lo memorizza — è
-l'unica implementazione del filesystem. Una seconda copia qui potrebbe
-stampare un percorso che il filesystem risolve diversamente, quindi
-l'opzione fallisce finché il filesystem non offre quella risoluzione da sé.
+`-f`, `-e` e `-m` passano invece alla **canonizzazione**: l'unico
+percorso che nomina ciò a cui l'operando si risolve, con ogni
+collegamento seguito e ogni `..` applicato. Con nessuna di esse
+l'operando deve essere un collegamento, e le tre differiscono solo per
+quanta parte del percorso deve esistere. Sono alternative e non
+modificatori, quindi vince l'ultima data.
+
+Quella risoluzione è del filesystem — `..` fisico, il budget di salti,
+un controllo del permesso di ricerca su ogni directory attraversata e la
+regola che un collegamento non può risolversi fuori da ciò che il suo
+montaggio proietta — e questo strumento la *chiama* invece di seguire i
+collegamenti da sé. Una seconda copia dell'algoritmo che divergesse per
+una regola stamperebbe un percorso che il filesystem risolve
+diversamente.
 
 ## OPTIONS
 
+- `-f, --canonicalize` — stampare il percorso canonico; ogni componente
+  tranne l'ultimo deve esistere.
+- `-e, --canonicalize-existing` — stampare il percorso canonico; ogni
+  componente deve esistere.
+- `-m, --canonicalize-missing` — stampare il percorso canonico; nessun
+  componente deve esistere.
 - `-n, --no-newline` — non stampare il delimitatore dopo l'ultimo
   bersaglio (ignorato, con segnalazione, per più di un operando).
 - `-z, --zero` — terminare ogni bersaglio con NUL invece che con
@@ -56,6 +69,8 @@ l'opzione fallisce finché il filesystem non offre quella risoluzione da sé.
   memorizza.
 - `readlink -v alias` — stamparlo, e dire perché se non è un
   collegamento.
+- `readlink -f alias` — stampare ciò a cui si risolve, collegamenti
+  compresi.
 - `readlink -z a b | tr '\0' '\n'` — bersagli separati da NUL per uno
   script.
 
@@ -64,8 +79,7 @@ l'opzione fallisce finché il filesystem non offre quella risoluzione da sé.
 - `0` — il bersaglio di ogni operando è stato stampato (o è stata scritta
   la guida breve).
 - `1` — almeno una lettura è stata rifiutata, o l'output è fallito.
-- `2` — la riga di comando non è stata compresa, o nominava un'opzione di
-  canonizzazione.
+- `2` — la riga di comando non è stata compresa.
 
 ## ENVIRONMENT
 

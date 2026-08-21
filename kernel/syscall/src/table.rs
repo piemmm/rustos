@@ -11,9 +11,9 @@
 use tairix_abi::seat::ReleaseSurface;
 use tairix_abi::{
     spec_for, AbiType, CallRecvFlags, CapabilityId, Errno, IrqHandle, LinkFlags, MapFlags,
-    OpenFlags, PowerAction, RandomFlags, SchedPriority, Signal, SignalIntakeOp, SyscallNumber,
-    SyscallSpec, UnlinkFlags, WaitFlags, ENCODED_TABLE, FS_ATTR_KEY_MAX, FS_ATTR_VALUE_MAX,
-    FS_MODE_MASK, PROC_ID_HEX_LEN, SYSCALL_MAX_ARGS,
+    OpenFlags, PowerAction, RandomFlags, RealpathMode, SchedPriority, Signal, SignalIntakeOp,
+    SyscallNumber, SyscallSpec, UnlinkFlags, WaitFlags, ENCODED_TABLE, FS_ATTR_KEY_MAX,
+    FS_ATTR_VALUE_MAX, FS_MODE_MASK, PROC_ID_HEX_LEN, SYSCALL_MAX_ARGS,
 };
 use tairix_crypto::{sha256, Sha256Digest};
 use tairix_kernel_sec::{ProcessId, TaskCapabilities, TaskId};
@@ -2324,6 +2324,31 @@ pub trait SyscallHandlers {
         Err(Errno::NotImplemented)
     }
 
+    /// Canonicalise the absolute path `path` (`path_len` bytes) into the
+    /// caller's buffer at `out` (`out_len` bytes), returning the canonical
+    /// path's length.
+    ///
+    /// The dispatcher has already checked the caller holds
+    /// [`CapabilityId::FS_ACCESS`], that both pointers are non-null
+    /// `UserPtr`s, and refused an undefined `mode`. Every component is
+    /// resolved under the caller's attested identity — links followed, `..`
+    /// applied to the nodes really traversed — so the answer is the one path
+    /// the kernel's own resolution reaches; `mode` decides only how much of
+    /// the path must exist.
+    ///
+    /// The default implementation fails closed with [`Errno::NotImplemented`].
+    fn fs_realpath(
+        &self,
+        _caller: &CallerContext<'_>,
+        _path: u64,
+        _path_len: usize,
+        _out: u64,
+        _out_len: usize,
+        _mode: RealpathMode,
+    ) -> SyscallResult {
+        Err(Errno::NotImplemented)
+    }
+
     /// Set the permission bits of the file or directory at the absolute
     /// path `path` (`path_len` bytes) to `mode` (the `chmod(2)` shape).
     ///
@@ -3397,6 +3422,16 @@ impl<'a, H: SyscallHandlers + ?Sized, S: Sink + ?Sized> Dispatcher<'a, H, S> {
                 let flags = LinkFlags::from_bits(decode_u32(args.0[4]))?;
                 self.handlers
                     .fs_link(caller, args.0[0], existing_len, args.0[2], link_len, flags)
+            }
+            SyscallNumber::FS_REALPATH => {
+                // args[0]/args[2] are the non-null `UserPtr`s
+                // (dispatcher-checked); args[4] selects how much of the path
+                // must exist, refused here for any undefined value.
+                let path_len = decode_len(args.0[1])?;
+                let out_len = decode_len(args.0[3])?;
+                let mode = RealpathMode::from_raw(decode_u32(args.0[4]))?;
+                self.handlers
+                    .fs_realpath(caller, args.0[0], path_len, args.0[2], out_len, mode)
             }
             SyscallNumber::FS_SET_MODE => {
                 // args[0] is the non-null path `UserPtr` (dispatcher-checked);
@@ -4829,6 +4864,19 @@ mod tests {
             _flags: LinkFlags,
         ) -> SyscallResult {
             self.record("fs_link");
+            Ok(0)
+        }
+
+        fn fs_realpath(
+            &self,
+            _c: &CallerContext<'_>,
+            _path: u64,
+            _path_len: usize,
+            _out: u64,
+            _out_len: usize,
+            _mode: RealpathMode,
+        ) -> SyscallResult {
+            self.record("fs_realpath");
             Ok(0)
         }
 

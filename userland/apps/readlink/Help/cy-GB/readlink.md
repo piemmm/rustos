@@ -4,7 +4,7 @@ readlink — argraffu targed cyswllt symbolaidd
 
 ## SYNOPSIS
 
-`readlink [-nz] [-q | -s | -v] [--] ffeil...`
+`readlink [-fem] [-nz] [-q | -s | -v] [--] ffeil...`
 
 ## DESCRIPTION
 
@@ -32,16 +32,28 @@ targedau sy'n eu gwahanu.
 Mae angen un operand o leiaf. Mae `--` yn dod â dadansoddi dewisiadau i
 ben.
 
-Gwrthodir dewisiadau canoneiddio GNU `-f`, `-e` ac `-m`, heb eu
-brasamcanu. Datrys pob cydran llwybr — dilyn pob cyswllt, trin `..` yn
-gorfforol, gorfodi'r gyllideb naid a'r rheol na all cyswllt ddianc o'r
-gyfrol sy'n ei storio — yw unig weithrediad y system ffeiliau. Gallai ail
-gopi yma argraffu llwybr y mae'r system ffeiliau'n ei ddatrys yn wahanol,
-felly mae'r dewisiad yn methu hyd nes bod y system ffeiliau'n cynnig y
-datrysiad ei hun.
+Mae `-f`, `-e` ac `-m` yn newid i **ganoneiddio** yn lle hynny: yr unig
+lwybr sy'n enwi'r hyn y mae'r operand yn datrys iddo, gyda phob cyswllt
+wedi'i ddilyn a phob `..` wedi'i gymhwyso. O dan unrhyw un ohonynt nid
+oes angen i'r operand fod yn gyswllt o gwbl, ac nid yw'r tri'n
+gwahaniaethu ond yn faint o'r llwybr sy'n gorfod bodoli. Dewisiadau
+amgen ydynt, nid addasyddion, felly y diwethaf a roddir sy'n ennill.
+
+Y system ffeiliau sy'n berchen ar y datrysiad hwnnw — `..` corfforol,
+y gyllideb naid, gwiriad hawl chwilio ar bob cyfeiriadur a groesir, a'r
+rheol na all cyswllt ddatrys y tu allan i'r hyn y mae ei fowntiad yn ei
+daflunio — ac mae'r offeryn hwn yn ei *alw* yn lle dilyn cysylltiadau ei
+hun. Byddai ail gopi o'r algorithm a anghytunai ag un rheol yn argraffu
+llwybr y mae'r system ffeiliau'n ei ddatrys yn wahanol.
 
 ## OPTIONS
 
+- `-f, --canonicalize` — argraffu'r llwybr canonaidd; mae'n rhaid i bob
+  cydran ond yr olaf fodoli.
+- `-e, --canonicalize-existing` — argraffu'r llwybr canonaidd; mae'n
+  rhaid i bob cydran fodoli.
+- `-m, --canonicalize-missing` — argraffu'r llwybr canonaidd; nid oes
+  angen i unrhyw gydran fodoli.
 - `-n, --no-newline` — peidio ag argraffu'r amffinydd ar ôl y targed
   olaf (anwybyddir, gyda gair, am fwy nag un operand).
 - `-z, --zero` — gorffen pob targed â NUL yn lle llinell newydd.
@@ -56,6 +68,8 @@ datrysiad ei hun.
 - `readlink Home:/Desktop/Notes` — argraffu'r hyn y mae llwybr byr yn ei
   storio.
 - `readlink -v alias` — ei argraffu, a dweud pam os nad yw'n gyswllt.
+- `readlink -f alias` — argraffu'r hyn y mae'n datrys iddo, cysylltiadau
+  a'r cwbl.
 - `readlink -z a b | tr '\0' '\n'` — targedau wedi'u gwahanu â NUL i
   sgript.
 
@@ -63,8 +77,7 @@ datrysiad ei hun.
 
 - `0` — argraffwyd targed pob operand (neu ysgrifennwyd y cymorth byr).
 - `1` — gwrthodwyd un darlleniad o leiaf, neu methodd yr allbwn.
-- `2` — ni ddeallwyd y llinell orchymyn, neu enwodd ddewisiad
-  canoneiddio.
+- `2` — ni ddeallwyd y llinell orchymyn.
 
 ## ENVIRONMENT
 

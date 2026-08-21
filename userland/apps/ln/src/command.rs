@@ -45,6 +45,11 @@ pub struct Options {
     /// Create symbolic links (`-s`). Without it a hard link is made: a
     /// second directory entry for the target's own inode.
     pub symbolic: bool,
+    /// Store each symbolic link's target *relative to the link's own
+    /// directory* (`-r`). Only meaningful with `-s`, since a hard link
+    /// stores no target; `-r` without `-s` is a usage error rather than a
+    /// silently ignored switch.
+    pub relative: bool,
     /// Hard-link what a symbolic-link target *names* rather than the link
     /// itself (`-L`; `-P` is the default and clears it). Meaningless for
     /// `-s`, which stores the target verbatim and resolves nothing.
@@ -71,6 +76,7 @@ impl Options {
     /// The defaults of a bare `ln`.
     pub const DEFAULT: Self = Self {
         symbolic: false,
+        relative: false,
         dereference_target: false,
         allow_directory: false,
         clobber: Clobber::Refuse,
@@ -108,6 +114,8 @@ pub enum Command {
 ///
 /// * `-s` / `--symbolic` — make symbolic links. Without it `ln` makes a
 ///   hard link: a second directory entry for the target's own inode.
+/// * `-r` / `--relative` — store each symbolic link's target relative to
+///   the link's own directory. Requires `-s`.
 /// * `-L` / `--logical` — hard-link what a symbolic-link target *names*.
 /// * `-P` / `--physical` — hard-link the target as spelled, following no
 ///   final link. The default, and what POSIX `link()` does.
@@ -149,7 +157,8 @@ pub enum Command {
 ///
 /// * [`LnError::Usage`] — an unrecognised option, `-t` without a value, a
 ///   value given to a long option that takes none, or `-t` together with
-///   `-T` (the two readings contradict).
+///   `-T` (the two readings contradict), or `-r` without `-s` (a hard link
+///   stores no target to make relative).
 /// * [`LnError::MissingOperand`] — no operand at all.
 /// * [`LnError::MissingDestination`] — `-T` with a single operand.
 /// * [`LnError::ExtraOperand`] — `-T` with three or more operands.
@@ -182,6 +191,11 @@ pub fn parse(args: &[&str]) -> Result<Command, LnError> {
     // both is refused rather than one silently winning.
     if directory.is_some() && options.target_mode == TargetMode::NoDirectory {
         return Err(LnError::Usage);
+    }
+    // A hard link stores no target, so there is nothing for `-r` to make
+    // relative: refused rather than ignored, as GNU does.
+    if options.relative && !options.symbolic {
+        return Err(LnError::RelativeNeedsSymbolic);
     }
     if directory.is_some() {
         options.target_mode = TargetMode::Directory;
@@ -240,6 +254,7 @@ fn apply_long<'a, I: Iterator<Item = &'a &'a str>>(
     };
     match key {
         "symbolic" => flag(options, |o| o.symbolic = true),
+        "relative" => flag(options, |o| o.relative = true),
         "logical" => flag(options, |o| o.dereference_target = true),
         "physical" => flag(options, |o| o.dereference_target = false),
         "directory" => flag(options, |o| o.allow_directory = true),
@@ -273,6 +288,7 @@ fn apply_short<'a, I: Iterator<Item = &'a &'a str>>(
     for (index, flag) in cluster.char_indices() {
         match flag {
             's' => options.symbolic = true,
+            'r' => options.relative = true,
             'L' => options.dereference_target = true,
             'P' => options.dereference_target = false,
             'd' | 'F' => options.allow_directory = true,
@@ -497,6 +513,7 @@ mod tests {
             let text = fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {path}: {e}"));
             for switch in [
                 "`-s, --symbolic`",
+                "`-r, --relative`",
                 "`-f, --force`",
                 "`-i, --interactive`",
                 "`-n, --no-dereference`",

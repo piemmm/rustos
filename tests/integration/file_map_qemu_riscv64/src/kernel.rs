@@ -34,8 +34,8 @@ use alloc::sync::Arc;
 use alloc::vec::Vec;
 
 use tairix_abi::{
-    CapabilityId, CapabilityQuery, Errno, FileKind, FileStat, OpenFlags, UnlinkFlags, WaitFlags,
-    WaitStatus, SYSCALL_MAX_ARGS,
+    CapabilityId, CapabilityQuery, Errno, FileKind, FileStat, OpenFlags, RealpathMode, UnlinkFlags,
+    WaitFlags, WaitStatus, SYSCALL_MAX_ARGS,
 };
 use tairix_arch_api::CpuId;
 use tairix_arch_riscv64::fdt::Fdt;
@@ -305,6 +305,16 @@ impl FilesystemService for FixtureFs {
         _uid: u32,
         _caps: &dyn CapabilityQuery,
         _path: &str,
+    ) -> Result<String, Errno> {
+        Err(Errno::NotImplemented)
+    }
+
+    fn realpath(
+        &self,
+        _uid: u32,
+        _caps: &dyn CapabilityQuery,
+        _path: &str,
+        _mode: RealpathMode,
     ) -> Result<String, Errno> {
         Err(Errno::NotImplemented)
     }

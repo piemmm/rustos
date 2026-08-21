@@ -8,10 +8,13 @@
 //! `Removal`).
 //!
 //! The vocabulary is deliberately the *name as typed*: `ln` creates and
-//! replaces **names**, never what a name leads to, so the one question it
-//! asks the filesystem is what a name holds.
+//! replaces **names**, never what a name leads to, so the questions it asks
+//! the filesystem are what a name holds and — for `-r` alone — what a path
+//! canonically is.
 
-use tairix_abi::Errno;
+use alloc::string::String;
+
+use tairix_abi::{Errno, RealpathMode};
 
 /// What a link name already holds, as `ln` must see it.
 ///
@@ -80,6 +83,24 @@ pub trait FileSystem {
     /// [`Errno::PermissionDenied`] when the caller may not search the way
     /// there. An absent name is [`Occupant::Vacant`], never an error.
     fn occupant(&self, path: &str) -> Result<Occupant, Errno>;
+
+    /// The canonical path of `path`: the one path that names what it
+    /// resolves to, with every symbolic link followed and every `..`
+    /// applied, as the filesystem itself resolves it.
+    ///
+    /// `-r` needs it for both halves of the relative target it computes.
+    /// The tool never walks links to work this out: the answer must be the
+    /// filesystem's own, because a relative target computed against a
+    /// different reading of the tree would name a different node.
+    /// [`RealpathMode::Missing`] is the reading `-r` asks for — a link may
+    /// legitimately name something that does not exist yet.
+    ///
+    /// # Errors
+    ///
+    /// Any [`Errno`] the filesystem raises — a permission refusal on a
+    /// directory the resolution passes through, or [`Errno::LinkLoop`] for a
+    /// cycle.
+    fn canonicalize(&self, path: &str, mode: RealpathMode) -> Result<String, Errno>;
 
     /// Create the symbolic link `link` whose stored target is `target`.
     ///

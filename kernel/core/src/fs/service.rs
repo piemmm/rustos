@@ -27,7 +27,9 @@ use super::delegate::FinalLink;
 
 use tairix_abi::sysinfo::{MountRecord, VolumeIoHealthRecord};
 use tairix_abi::time::Time64;
-use tairix_abi::{CapabilityQuery, Errno, FileId, FileKind, FileStat, OpenFlags, UnlinkFlags};
+use tairix_abi::{
+    CapabilityQuery, Errno, FileId, FileKind, FileStat, OpenFlags, RealpathMode, UnlinkFlags,
+};
 
 /// One directory entry as [`FilesystemService::readdir`] reports it: the
 /// child's kind, its apparent and allocated sizes, its identity and name
@@ -207,6 +209,28 @@ pub trait FilesystemService: Send + Sync {
     /// [`Errno::NotSupported`] when the covering mount's format stores no
     /// links, or [`Errno::NotImplemented`] when no filesystem is mounted.
     fn readlink(&self, uid: u32, caps: &dyn CapabilityQuery, path: &str) -> Result<String, Errno>;
+
+    /// Canonicalise the absolute `path`: the one path that names what it
+    /// resolves to, with every symbolic link followed and every `..`
+    /// applied to the nodes the resolution really traversed.
+    ///
+    /// `mode` decides only how much of the path must exist. The answer holds
+    /// no `.`, no `..`, and no symbolic link, and is always a path this same
+    /// service would accept back.
+    ///
+    /// # Errors
+    ///
+    /// The stable [`Errno`] for the VFS refusal, [`Errno::NotFound`] when
+    /// `mode` requires a component that does not exist, [`Errno::LinkLoop`]
+    /// for a cycle or an over-budget chain, or [`Errno::NotImplemented`]
+    /// when no filesystem is mounted.
+    fn realpath(
+        &self,
+        uid: u32,
+        caps: &dyn CapabilityQuery,
+        path: &str,
+        mode: RealpathMode,
+    ) -> Result<String, Errno>;
 
     /// Add the absolute `link` as a second name for the node the absolute
     /// `existing` already names — a hard link.
@@ -588,6 +612,16 @@ impl FilesystemService for NullFilesystemService {
         _uid: u32,
         _caps: &dyn CapabilityQuery,
         _path: &str,
+    ) -> Result<String, Errno> {
+        Err(Errno::NotImplemented)
+    }
+
+    fn realpath(
+        &self,
+        _uid: u32,
+        _caps: &dyn CapabilityQuery,
+        _path: &str,
+        _mode: RealpathMode,
     ) -> Result<String, Errno> {
         Err(Errno::NotImplemented)
     }

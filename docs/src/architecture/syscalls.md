@@ -158,6 +158,8 @@ release onward the table is frozen and new behaviour ships as `abi-v2`.
 | 112 | `futex_wake`   | `user_ptr uaddr`, `u32 count`           | `u64` (woken) | —                 | no  |
 | 113 | `fs_symlink`   | `user_ptr` (target), `len`, `user_ptr` (link), `len` | `errno` | `CAP_FS_ACCESS` | yes |
 | 114 | `fs_readlink`  | `user_ptr` (path), `len`, `user_ptr` (out), `len` | `u64` (bytes) | `CAP_FS_ACCESS` | no |
+| 115 | `fs_link`      | `user_ptr` (existing), `len`, `user_ptr` (link), `len`, `u32 flags` | `errno` | `CAP_FS_ACCESS` | yes |
+| 116 | `fs_realpath`  | `user_ptr` (path), `len`, `user_ptr` (out), `len`, `u32 mode` | `u64` (bytes) | `CAP_FS_ACCESS` | no |
 
 (Syscall numbers 39–45 — `msi_alloc`, `shm_create`/`shm_map`/`shm_unmap`,
 `waitset_create`/`waitset_ctl`/`waitset_wait` — and 76–77 — `file_map`/
@@ -222,6 +224,40 @@ open asking for byte access to something that really is a link is
 `Errno::LinkLoop`; the resolve-only handle is the `lstat` posture. The design
 is `plans/SYMLINKS.md`; the resolution rules are
 `docs/src/filesystem/overview.md`.
+
+`fs_link` (no. 115) adds a **second name** for a node that already has one —
+POSIX `link(2)`. Both operands are absolute paths, and with an empty
+`LinkFlags` word *neither* final component is followed, so the inode that
+gains a name is the one the caller spelled and a symbolic link planted on the
+way cannot redirect the new name onto an object the caller never asked for;
+`LinkFlags::FOLLOW` is the `linkat(AT_SYMLINK_FOLLOW)` posture `ln -L` asks
+for, and the **new** name is never followed under either. The new name is
+authorised as an ordinary create in its own parent and confers no authority
+the caller did not already hold. Its own refusals are `Errno::IsADirectory`
+(the tree must stay a tree, so a directory never gains a second name — the
+VFS's refusal, not each format's), `Errno::CrossVolume` (a directory entry
+addresses an inode in its own backing), `Errno::TooManyLinks` (the format's
+fixed per-inode count would overflow, never wrapped), and
+`Errno::NotSupported` on a format holding one name per node. It mutates the
+namespace, so it is audited.
+
+`fs_realpath` (no. 116) canonicalises a path: every symbolic link followed,
+every `..` applied to the nodes the walk really traversed, and the one path
+that names the result returned in the caller's own namespace. It is the
+kernel's **one** canonicalisation, and the reason a tool must not write its
+own — the physical `..`, the shared hop budget that answers a cycle with
+`Errno::LinkLoop`, the search-permission check on every directory the
+resolution passes through, and the rule that a link cannot resolve outside
+what its mount projects are all properties of that walk, and a userland copy
+disagreeing by one of them would print a path the kernel resolves elsewhere.
+The `mode` operand is a `RealpathMode` value — `Existing` requires every
+component to exist, `Final` lets the last be absent, `Missing` lets any be —
+and an undefined value fails closed with `Errno::OutOfRange` at dispatch. The
+answer holds no `.`, no `..`, and no link, is written without a terminator,
+and is always a path the same kernel would accept back; an `out` too small
+for the whole path is `Errno::BufferTooSmall` rather than a prefix naming a
+different node. It is a pure read and is not audited per call. `readlink
+-f`/`-e`/`-m` and `ln -r` are its userland consumers.
 
 `fs_set_owner` (no. 96) is the `chown(2)` / `chgrp(2)` shape: it reassigns the
 owning user and/or group of the node at a path. Either `uid` or `gid` may be
@@ -377,7 +413,7 @@ state. The matrix is exhaustive — anything not listed below is ungated:
 | `CAP_SYSINFO_INTROSPECT` | `sysinfo_introspect` |
 | `CAP_LOG_EMIT`     | `log_emit`                 |
 | `CAP_HW_EMIT`      | `hw_emit_node`, `hw_remove_node` |
-| `CAP_FS_ACCESS`    | `fs_open`, `fs_readdir`, `fs_stat`, `fs_truncate`, `fs_sync`, `fs_mkdir`, `fs_unlink`, `fs_rename`, `fs_symlink`, `fs_readlink`, `fs_set_mode`, `fs_set_owner`, `fs_attr_get`, `fs_attr_set`, `fs_attr_list`, `fs_attr_remove`, `fs_chdir` (the path-taking calls), and — enforced *in the handler* on a path-backed descriptor — `fs_read`, `fs_write`, `fs_close` |
+| `CAP_FS_ACCESS`    | `fs_open`, `fs_readdir`, `fs_stat`, `fs_truncate`, `fs_sync`, `fs_mkdir`, `fs_unlink`, `fs_rename`, `fs_symlink`, `fs_readlink`, `fs_link`, `fs_realpath`, `fs_set_mode`, `fs_set_owner`, `fs_attr_get`, `fs_attr_set`, `fs_attr_list`, `fs_attr_remove`, `fs_chdir` (the path-taking calls), and — enforced *in the handler* on a path-backed descriptor — `fs_read`, `fs_write`, `fs_close` |
 | `CAP_FS_CHOWN`     | `fs_set_owner` (the privileged per-inode rule inside the VFS: reassigning the uid or setting a non-member gid; the coarse dispatch gate stays `CAP_FS_ACCESS`) |
 | `CAP_TIME_SET`     | `wall_time_set`            |
 | `CAP_SCHED_REALTIME` | `sched_set_realtime`     |

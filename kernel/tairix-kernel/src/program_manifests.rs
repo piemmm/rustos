@@ -1177,6 +1177,7 @@ mod tests {
             ("seq", ProgramKind::Command, PURE_TOOL_REQUEST),
             ("sleep", ProgramKind::Command, PURE_TOOL_REQUEST),
             ("ss", ProgramKind::Command, SS_TOOL_REQUEST),
+            ("stat", ProgramKind::Command, PURE_TOOL_REQUEST),
             ("stress", ProgramKind::Command, STRESS_MANIFEST),
             (
                 "switchboard",

@@ -8,13 +8,18 @@
 //! name, because the tree staying a tree is what makes the resolver's
 //! physical `..` well-defined.
 //!
-//! Two switch groups stay refused, neither for a reason about hard links:
-//! the backup switches (`-b`, `-S`), which this workspace has no backup
-//! machinery for, and `-r`/`--relative`, which would need a canonicalising
-//! path resolution the ABI does not offer (a *lexical* approximation would
-//! name a different node the moment a link were involved, which is exactly
-//! the lexical-`..` collapse the resolver forbids). Both are documented in
-//! the tool's `Help/` documents.
+//! `-r`/`--relative` stores a symbolic link's target relative to the link's
+//! own directory. It computes that from two paths the **kernel**
+//! canonicalised (`fs_realpath`), never from the operands as typed: two
+//! canonical paths hold no `..` and no link, so the difference between them
+//! is exact, whereas the same arithmetic on the spellings would name a
+//! different node the moment a link were involved — the lexical-`..`
+//! collapse the resolver forbids. `-r` without `-s` is a usage error: a hard
+//! link stores no target to make relative.
+//!
+//! One switch group stays refused, for a reason that is not about links at
+//! all: the backup switches (`-b`, `-S`), which this workspace has no backup
+//! machinery for. That is documented in the tool's `Help/` documents.
 //!
 //! # What this crate is
 //!

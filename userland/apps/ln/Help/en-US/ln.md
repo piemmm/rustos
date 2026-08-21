@@ -4,7 +4,7 @@ ln — create links between files
 
 ## SYNOPSIS
 
-`ln [-sLPdFfinvT] [-t dir] [--] target... [link_name]`
+`ln [-srLPdFfinvT] [-t dir] [--] target... [link_name]`
 
 ## DESCRIPTION
 
@@ -38,15 +38,20 @@ The first failure stops the run before any later target; links already
 made stay made. `--` ends option parsing: every later argument is an
 operand.
 
-`-b`/`-S` are refused because there is no backup machinery to invoke,
-and `-r` because computing a target relative to the link's own
-directory needs a canonicalising resolution this system does not offer
-— a lexical one would name a different object as soon as a link were
-involved.
+`-r` stores a symbolic link's target relative to the link's own
+directory. Both halves are canonicalised by the filesystem first, so
+the difference between them is exact: two canonical paths hold no `..`
+and no link. The same arithmetic on the operands as typed would name a
+different object as soon as a link were involved. `-r` needs `-s`,
+because a hard link stores no target to make relative.
+
+`-b`/`-S` are refused because there is no backup machinery to invoke.
 
 ## OPTIONS
 
 - `-s, --symbolic` — make symbolic links rather than hard ones.
+- `-r, --relative` — store each symbolic link's target relative to the
+  link's own directory. Requires `-s`.
 - `-L, --logical` — hard-link what a symbolic-link target names,
   rather than the link itself.
 - `-P, --physical` — hard-link the target exactly as spelled,

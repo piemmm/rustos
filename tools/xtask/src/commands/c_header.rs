@@ -54,7 +54,7 @@ use tairix_abi::{
     KernelMemoryStats, KeyInput, LibraryCategory, LibraryScope, LimitKind, LinkFlags, LoadAverage,
     LoadHeader, ManifestHeader, MapFlags, MountAvailability, MountListRequest, MountRecord,
     NamedKeyCode, NeededLibrary, OpenFlags, PointerButtonCode, PointerInput, PortName, PowerAction,
-    ProcessListRequest, ProcessRecord, ProcessStartHeader, ProcessState, RandomFlags,
+    ProcessListRequest, ProcessRecord, ProcessStartHeader, ProcessState, RandomFlags, RealpathMode,
     ResourceLimit, ResourceLimitRecord, RxePermission, SchedPriority, Segment, Severity, Signal,
     SignalIntakeOp, StdInfoKind, StringSlot, SysinfoQueryId, SysinfoRequestHeader, SystemIdentity,
     Time64, UnlinkFlags, Uptime, UserDirectoryRecord, UserDirectoryRequest, WaitFlags, WaitSetOp,
@@ -2559,6 +2559,26 @@ fn emit_fs_contract(out: &mut String) {
     out.push('\n');
 
     out.push_str(
+        "/* fs_realpath() mode (uint32_t). The three readings are alternatives, so this is\n\
+         * one value rather than bits, and any other value is rejected with\n\
+         * TAIRIX_E_OUT_OF_RANGE. EXISTING requires every component to exist, FINAL lets\n\
+         * the last one be absent, and MISSING lets any of them be. All three resolve\n\
+         * identically otherwise. */\n",
+    );
+    for (name, mode) in [
+        ("EXISTING", RealpathMode::Existing),
+        ("FINAL", RealpathMode::Final),
+        ("MISSING", RealpathMode::Missing),
+    ] {
+        let _ = writeln!(
+            out,
+            "#define TAIRIX_REALPATH_MODE_{name} {}u",
+            mode.as_u32()
+        );
+    }
+    out.push('\n');
+
+    out.push_str(
         "/* fs_set_mode() permission-bit mask (the `mode` argument, uint32_t): the\n\
          * owner/group/other rwx triads plus the setuid/setgid/sticky bits. A mode\n\
          * carrying any higher bit (a file-type bit, say) is rejected with\n\
@@ -3044,6 +3064,25 @@ mod tests {
                 "int32_t tairix_sys_fs_link(void * a0, uintptr_t a1, void * a2, uintptr_t a3, uint32_t a4);"
             ),
             "fs_link prototype carries the flags argument: {h}"
+        );
+        for (name, mode) in [
+            ("EXISTING", RealpathMode::Existing),
+            ("FINAL", RealpathMode::Final),
+            ("MISSING", RealpathMode::Missing),
+        ] {
+            assert!(
+                h.contains(&format!(
+                    "#define TAIRIX_REALPATH_MODE_{name} {}u",
+                    mode.as_u32()
+                )),
+                "fs_realpath {name} mode: {h}"
+            );
+        }
+        assert!(
+            h.contains(
+                "uint64_t tairix_sys_fs_realpath(void * a0, uintptr_t a1, void * a2, uintptr_t a3, uint32_t a4);"
+            ),
+            "fs_realpath prototype carries the mode argument: {h}"
         );
     }
 

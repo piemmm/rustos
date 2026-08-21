@@ -27,7 +27,7 @@ use alloc::vec::Vec;
 use tairix_abi::driver::block::Block;
 use tairix_abi::driver::filesystem::{FilesystemRead, FilesystemWrite, NodeKind};
 use tairix_abi::driver::input::{Input, InputEvent, InputEventKind, POINTER_BUTTON_CODE_BASE};
-use tairix_abi::{CapabilityId, DriverHandle, Errno};
+use tairix_abi::{CapabilityId, DriverHandle, Errno, RealpathMode};
 use tairix_caps::CapabilitySet;
 use tairix_crypto::Ed25519PublicKey;
 use tairix_drv_fs_arxfs::ARXFS;
@@ -396,6 +396,11 @@ pub fn fat32_round_trip<Tr: Transport>(
 /// file and read it back. Generic over the transport so the PCI and
 /// MMIO verticals run identical code.
 ///
+/// The tail then continues into [`link_vfs_round_trip`] over that same
+/// mounted volume, so the link and canonicalisation surface is exercised
+/// through the production filesystem cache on real hardware without a
+/// second device open.
+///
 /// The on-disk layout and the planted/written file names and contents
 /// come from the shared [`tairix_test_arxfs_image`] fixture — the same
 /// source of truth the host harness plants the backing image from (and
@@ -448,7 +453,7 @@ pub fn arxfs_round_trip<Tr: Transport>(
         return Err("new file round-trip mismatch");
     }
     env.log("virtio-qemu: arxfs write round-trip verified");
-    Ok(())
+    link_vfs_round_trip(env, fs)
 }
 
 /// users-root device tail: open the device over `transport`, mount the
@@ -503,6 +508,228 @@ pub fn users_db_load<Tr: Transport>(
         return Err("a wrong password must be refused");
     }
     env.log("virtio-qemu: users database authenticates");
+    Ok(())
+}
+
+/// Secured-VFS device tail: mount the planted arxfs volume through the
+/// **production filesystem cache**, then drive both link kinds and
+/// canonicalisation through the secured VFS — on real (emulated) hardware,
+/// in a freestanding build.
+///
+/// Every other link test builds a `Vfs` over a driver *directly*, so none of
+/// them touches a wrapper; that is exactly how `read_link` / `create_link` /
+/// `link` came to sit at their trait defaults in three wrappers at once
+/// (`plans/SYMLINKS.md`). A host test now covers the whole production chain,
+/// but a host test builds none of the freestanding halves. This tail closes
+/// the other half: the secured `Vfs` over `CachedFs` over `ARXFS`, across a
+/// real virtio device, compiled for a bare-metal target — so a wrapper that
+/// forwarded a link method by omission fails here rather than answering
+/// "this volume has no links" on every genuinely mounted volume.
+///
+/// It stops one layer below `MountedFilesystemService`, which the host test
+/// covers, because that service's `Send` bound cannot be met by a driver
+/// stack holding a borrowed `VirtioHost` — and asserting `Send` for one, or
+/// widening a kernel trait to host a test, would be the wrong trade. The
+/// layer it omits resolves the caller's groups and takes the per-mount lock;
+/// it holds no link logic of its own.
+fn link_vfs_round_trip<B: Block>(env: &dyn QemuEnv, fs: ARXFS<B>) -> Result<(), &'static str> {
+    use alloc::boxed::Box;
+    use tairix_abi::driver::filesystem::MountFlags;
+    use tairix_kernel_core::fs::{CachedFs, Credentials, Mode, MountBacking, Path, Vfs};
+    use tairix_kernel_sec::{GroupId, UserId};
+    use tairix_reclaim::{CacheBudget, FreeMemorySource, MemoryPressure, ReclaimOwner};
+
+    /// A sink the cache's reclaim decisions go to. This tail asserts the
+    /// filesystem's *behaviour*, not its audit trail — the host
+    /// `reclaim_integration_tests` cover that — and the environment's own
+    /// sink is not `Sync`, which the cache requires.
+    struct QuietSink;
+    impl tairix_log::Sink for QuietSink {
+        fn write_event(&self, _event: &tairix_log::Event<'_>) {}
+    }
+
+    /// A backing with ample free memory, so the cache's pressure gauge sits
+    /// in its normal band and reclaim never interferes with the round-trip.
+    struct AmpleMemory;
+    impl FreeMemorySource for AmpleMemory {
+        fn free_bytes(&self) -> usize {
+            1 << 28
+        }
+        fn total_bytes(&self) -> usize {
+            1 << 30
+        }
+    }
+
+    // The production wrapper every mounted volume is served through.
+    let source: &'static AmpleMemory = Box::leak(Box::new(AmpleMemory));
+    let pressure: &'static MemoryPressure = Box::leak(Box::new(MemoryPressure::over(source)));
+    let sink: &'static QuietSink = Box::leak(Box::new(QuietSink));
+    let mut cached = CachedFs::new(
+        fs,
+        CacheBudget::from_backing(1 << 22),
+        ReclaimOwner::FilesystemVolume { volume: 1 },
+        pressure,
+        sink,
+    );
+
+    // The in-RAM layout, with the volume mounted at its point. The fixture
+    // volume's nodes are owned by uid/gid 0, so that is the principal.
+    let owner = UserId(0);
+    let group = GroupId(0);
+    let mut vfs = Vfs::with_default_layout(owner, group);
+    let caps = CapabilitySet::empty();
+    let cred = Credentials {
+        uid: owner,
+        gid: group,
+        supplementary_gids: &[],
+        caps: &caps,
+    };
+    let mount = Path::parse(LINK_MOUNT).map_err(|_| "mount path")?;
+    vfs.mkdir(&cred, &mount, Mode::from_bits(0o755))
+        .map_err(|_| "create the mount point")?;
+    let handle = DriverHandle::from_raw(9).map_err(|_| "driver handle")?;
+    vfs.mounts_write()
+        .mount(
+            mount,
+            MountFlags::default(),
+            Some(MountBacking::new(handle, None)),
+        )
+        .map_err(|_| "mount the volume")?;
+    env.log("virtio-qemu: link-vfs volume projected");
+
+    let planted = core::str::from_utf8(tairix_test_arxfs_image::PLANTED_FILE_NAME)
+        .map_err(|_| "planted name")?;
+    symbolic_link_phase(&vfs, &mut cached, &cred, planted)?;
+    env.log("virtio-qemu: symbolic link round-trips through the cache");
+    canonical_path_phase(&vfs, &mut cached, &cred, planted)?;
+    env.log("virtio-qemu: canonicalisation round-trips through the cache");
+    hard_link_phase(&vfs, &mut cached, &cred, planted)?;
+    env.log("virtio-qemu: hard link round-trips through the cache");
+    Ok(())
+}
+
+/// The mount point [`link_vfs_round_trip`] projects the fixture volume at.
+const LINK_MOUNT: &str = "/Storage/arx";
+
+/// A path under [`LINK_MOUNT`], parsed through the one caller grammar.
+fn under(name: &str) -> Result<tairix_kernel_core::fs::Path, &'static str> {
+    tairix_kernel_core::fs::Path::parse(&alloc::format!("{LINK_MOUNT}/{name}")).map_err(|_| "path")
+}
+
+/// A symbolic link, created and read back verbatim through the cache, then
+/// resolved to its target's bytes — so it resolves rather than merely
+/// existing.
+fn symbolic_link_phase<F>(
+    vfs: &tairix_kernel_core::fs::Vfs,
+    cached: &mut F,
+    cred: &tairix_kernel_core::fs::Credentials<'_>,
+    planted: &str,
+) -> Result<(), &'static str>
+where
+    F: FilesystemRead + FilesystemWrite + tairix_abi::driver::filesystem::FilesystemSecurity,
+{
+    let alias = under("alias")?;
+    vfs.symlink_via_secured(cred, &alias, cached, planted)
+        .map_err(|_| "symlink through the cache")?;
+    if vfs
+        .readlink_via_secured(cred, &alias, cached)
+        .map_err(|_| "readlink through the cache")?
+        != planted
+    {
+        return Err("the stored target did not come back verbatim");
+    }
+    let mut buf = [0u8; 128];
+    let read = vfs
+        .read_via_secured(cred, &alias, cached, 0, &mut buf)
+        .map_err(|_| "read through the link")?;
+    if &buf[..read] != tairix_test_arxfs_image::PLANTED_FILE_CONTENT {
+        return Err("reading through the link reached the wrong bytes");
+    }
+    Ok(())
+}
+
+/// The link's canonical path is the target's, spelled in the caller's own
+/// namespace with the mount point included; and a vacant name is refused
+/// under the strict reading yet carried into the answer under the tolerant
+/// one, so both arms are live on real hardware.
+fn canonical_path_phase<F>(
+    vfs: &tairix_kernel_core::fs::Vfs,
+    cached: &mut F,
+    cred: &tairix_kernel_core::fs::Credentials<'_>,
+    planted: &str,
+) -> Result<(), &'static str>
+where
+    F: FilesystemRead + tairix_abi::driver::filesystem::FilesystemSecurity,
+{
+    let alias = under("alias")?;
+    if vfs
+        .realpath_via_secured(cred, &alias, cached, RealpathMode::Existing)
+        .map_err(|_| "realpath through the cache")?
+        != alloc::format!("{LINK_MOUNT}/{planted}")
+    {
+        return Err("the canonical path did not name the link's target");
+    }
+    let vacant = under("absent")?;
+    if vfs
+        .realpath_via_secured(cred, &vacant, cached, RealpathMode::Existing)
+        .is_ok()
+    {
+        return Err("a vacant name must be refused under the strict reading");
+    }
+    if vfs
+        .realpath_via_secured(cred, &vacant, cached, RealpathMode::Final)
+        .map_err(|_| "realpath of a vacant name")?
+        != alloc::format!("{LINK_MOUNT}/absent")
+    {
+        return Err("a vacant final name must be carried into the answer");
+    }
+    Ok(())
+}
+
+/// A second name reaching one node, with the count the format keeps carried
+/// up through the cache — and a directory refused, by the VFS rather than by
+/// the format, so the tree stays a tree on a live volume too.
+fn hard_link_phase<F>(
+    vfs: &tairix_kernel_core::fs::Vfs,
+    cached: &mut F,
+    cred: &tairix_kernel_core::fs::Credentials<'_>,
+    planted: &str,
+) -> Result<(), &'static str>
+where
+    F: FilesystemRead + FilesystemWrite + tairix_abi::driver::filesystem::FilesystemSecurity,
+{
+    use tairix_kernel_core::fs::{FinalLink, Path};
+
+    let target = under(planted)?;
+    let second = under("second")?;
+    vfs.link_via_secured(cred, &target, &second, cached, FinalLink::Keep)
+        .map_err(|_| "link through the cache")?;
+    let first = vfs
+        .stat_via_secured(cred, &target, cached, FinalLink::Keep)
+        .map_err(|_| "stat the first name")?;
+    let other = vfs
+        .stat_via_secured(cred, &second, cached, FinalLink::Keep)
+        .map_err(|_| "stat the second name")?;
+    if first.node != other.node {
+        return Err("the two names did not reach one node");
+    }
+    if first.nlink != 2 || other.nlink != 2 {
+        return Err("the format's own name count was not carried up");
+    }
+    let mut through = [0u8; 128];
+    let via_second = vfs
+        .read_via_secured(cred, &second, cached, 0, &mut through)
+        .map_err(|_| "read through the second name")?;
+    if &through[..via_second] != tairix_test_arxfs_image::PLANTED_FILE_CONTENT {
+        return Err("the second name reached the wrong bytes");
+    }
+    let mount = Path::parse(LINK_MOUNT).map_err(|_| "mount path")?;
+    if vfs
+        .link_via_secured(cred, &mount, &under("dirlink")?, cached, FinalLink::Keep)
+        .is_ok()
+    {
+        return Err("a directory must never gain a second name");
+    }
     Ok(())
 }
 
@@ -701,15 +928,13 @@ mod root_unlock {
                 return Ok(0);
             }
             let i = self.cursor.load(Ordering::Relaxed);
-            let byte = if i < disk_image::PASSPHRASE.len() {
-                disk_image::PASSPHRASE[i]
-            } else if i == disk_image::PASSPHRASE.len() {
-                b'\n'
-            } else {
+            let byte = match disk_image::PASSPHRASE.get(i) {
+                Some(&byte) => byte,
+                None if i == disk_image::PASSPHRASE.len() => b'\n',
                 // The passphrase line is spent; report end of input rather
                 // than looping, so a give-up path (a wrong unlock)
                 // terminates.
-                return Ok(0);
+                None => return Ok(0),
             };
             buf[0] = byte;
             self.cursor.store(i + 1, Ordering::Relaxed);

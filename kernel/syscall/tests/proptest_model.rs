@@ -34,7 +34,7 @@ use proptest::prelude::*;
 use tairix_abi::seat::ReleaseSurface;
 use tairix_abi::{
     AbiType, CapabilityId, Errno, IrqHandle, LinkFlags, OpenFlags, PowerAction, RandomFlags,
-    SyscallNumber, SyscallSpec, UnlinkFlags, SYSCALLS, SYSCALL_MAX_ARGS,
+    RealpathMode, SyscallNumber, SyscallSpec, UnlinkFlags, SYSCALLS, SYSCALL_MAX_ARGS,
 };
 use tairix_caps::CapabilitySet;
 use tairix_kernel_sec::{ProcessId, TaskCapabilities, TaskId, UserId};
@@ -759,6 +759,18 @@ impl SyscallHandlers for CountingHandlers {
         _link: u64,
         _link_len: usize,
         _flags: LinkFlags,
+    ) -> SyscallResult {
+        self.bump();
+        Ok(0)
+    }
+    fn fs_realpath(
+        &self,
+        _c: &CallerContext<'_>,
+        _path: u64,
+        _path_len: usize,
+        _out: u64,
+        _out_len: usize,
+        _mode: RealpathMode,
     ) -> SyscallResult {
         self.bump();
         Ok(0)

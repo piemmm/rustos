@@ -8,11 +8,13 @@ had links at all — no `FileKind`, no syscall, no `NodeKind`, no on-disk kind
 — and a desktop shortcut is a symlink to an app bundle
 (`plans/PINBOARD.md`, `plans/NEW-TASKBAR.md` T16).
 
-`done` — **S1–S7 complete.** The settled decisions and bounds below are
+`done` — **S1–S8 complete.** The settled decisions and bounds below are
 binding on anything that touches a link; each stage's section records what
 that part now guarantees. Hard links were an open User decision, were
 approved, and have landed, so this plan's subject is links generally rather
-than only the symbolic kind.
+than only the symbolic kind. Canonicalisation (S8) was likewise approved and
+has landed, which retired the `readlink -f`/`-e`/`-m` and `ln -r` refusals
+S4/S6 recorded.
 
 ## Read first (§15.18)
 
@@ -56,12 +58,19 @@ than only the symbolic kind.
    (`/a/link/../b` with `link -> /elsewhere` must reach `/elsewhere/../b`,
    never `/a/b`) and is forbidden here.
 
-5. **A link cannot escape the volume that stores it.** The walk's stack
-   starts at the mounted volume's own root and `..` never pops past index 0
-   (`/..` is `/`, as POSIX specifies), so an absolute target on a foreign
-   volume resolves against *that volume's* root. A USB stick's link therefore
-   cannot name `/System/Security`. This is deliberately stricter than POSIX,
-   where an absolute target names the global root.
+5. **A link cannot resolve outside what its mount projects.** The walk's
+   stack starts at the root the covering mount projects and `..` never pops
+   past index 0 (`/..` is `/`, as POSIX specifies), so an absolute target on
+   a foreign volume resolves against *that mount's* root. A USB stick's link
+   therefore cannot name `/System/Security`. This is deliberately stricter
+   than POSIX, where an absolute target names the global root.
+
+   For a **sub-mount** — a subtree of a larger volume bound at a mount point,
+   as `/System/Logs` is — the floor is the *subtree's* root and not the
+   driver's, so a link stored inside one cannot reach the rest of the volume
+   either. That is what makes the property total: every node a walk can reach
+   has a path under the mount point, which is exactly what canonicalisation
+   (S8) needs in order to be able to name every result it produces.
 
 6. **Following a link never bypasses a permission check.** A spliced target's
    components are authorised exactly as typed ones are: search permission is
@@ -575,6 +584,103 @@ unidentified node counted with the diagnostic written exactly once.
 
 ---
 
+## Stage S8 — canonicalisation — **landed**
+
+`fs_realpath` (**116**) answers the one path that names what a path resolves
+to: every symbolic link followed, every `..` applied to the nodes the walk
+really traversed, and the answer spelled in the caller's own namespace. It is
+`DelegatedFs::canonicalize` over the **same** walk every other operation
+uses, `Vfs::realpath_via{,_secured}`, `FilesystemService::realpath`, and the
+`kernel/core` handler, with the `lib/rt` wrapper and the `lib/abi-sys` C stub.
+
+**The mode is one value, not three flags.** `RealpathMode::{Existing, Final,
+Missing}` are GNU's `-e`/`-f`/`-m`, one apiece: they are alternatives
+choosing how much of the path must exist, so they cannot combine into a
+request with no meaning, and `from_raw` refuses any other value at dispatch.
+`Existing` is the zero value, so a caller passing an uninitialised word gets
+the strictest reading. Every mode resolves identically otherwise — including
+following a **final** link, which is what makes `readlink -f` report a
+target rather than a link.
+
+**A component that does not exist is carried, and `..` below it is the only
+reading available.** The descent keeps an `absent` tail beside the walked
+stack: once a lookup comes up vacant nothing above it is looked up (there is
+no node to resolve against and no metadata to authorise), a `Name` step
+appends to that tail, and an `Up` step pops it — returning to physical
+resolution when the tail empties. So `Missing` never leaks existence past a
+permission check: the search check on each traversed directory is proven
+*before* its child is looked up, exactly as for any other walk. The
+ordinary vacant-final-name case every create already relied on is the same
+mechanism with a one-element tail, so there is one loop rather than two.
+
+**A canonical path is one the kernel would accept back.** `Vfs` bounds the
+composed answer at `MAX_PATH_COMPONENTS` components and `FS_PATH_MAX` bytes
+(`VfsError::InvalidPath` otherwise), so a caller can feed the answer straight
+into another call without being refused for spelling.
+
+**The composition is total because the walk cannot leave its mount.** The
+answer is the covering mount point's path followed by the canonical
+remainder, which only works because `..` and an absolute link target are
+both floored at the *mount's* projected root. That made a sub-mount's floor
+load-bearing rather than incidental: the walk now resolves the mount's own
+`backing_subtree` once, to a `Walked` root, and the caller's path starts from
+*that* — so `stack[0]` is the mount root, the existing `truncate(1)` and
+"never pop past index 0" lines are unchanged, and the subtree stays a
+property of the **mount** (`MountProjection`) rather than being folded into
+the path. Passing the template and the subtree as one value is what stops a
+call site resolving against the driver root by omission.
+
+**Closed in passing** (`AGENTS.md` §2.18): a link stored inside a sub-mount
+could previously resolve *outside* the projected subtree — an absolute target
+or a `..` reached the whole volume, because the walk's floor was the driver
+root. Per-inode metadata still governed every node it reached, so this was a
+containment surprise rather than a permission escape, but an administrator
+who projects one subtree does not expect a planted link to be a doorway to
+the rest of the volume. Regression test:
+`mounted_tests::a_link_in_a_submount_cannot_resolve_outside_the_projected_subtree`,
+proved to fail on the pre-fix source (a volume-root decoy of the same name is
+what the old floor reached).
+
+**The userland refusals S4/S6 recorded are retired, not narrowed.**
+`readlink` implements `-f`/`-e`/`-m` — one parsed `Option<RealpathMode>`, last
+one wins, and under any of them the operand need not be a link. `ln`
+implements `-r`/`--relative`: it canonicalises the target and the link's own
+directory through `fs_realpath` and spells the difference between the two
+**canonical** paths, which is exact precisely because neither holds a `..` or
+a link; the same arithmetic on the operands as typed would be the lexical
+collapse decision 4 forbids. `-r` without `-s` is a usage error — a hard link
+stores no target to make relative. `-b`/`-S` stay refused, for a reason that
+was never about links.
+
+Tests: the mode round-trip and the refusal of an undefined value (ABI); the
+dispatcher's mode validation mirrored in the fuzz oracle and the proptest
+model; the handler copying the whole answer out, passing the caller's reading
+through, and refusing an undersized buffer; at the service seam every link
+followed to one answer, `..` through a link resolved *physically* (built so a
+lexical answer would name a live decoy), each mode's existence requirement, a
+dangling link's target named under `Final` and refused under `Existing`, a
+cycle refused under every mode, a directory nobody may search hiding what is
+under it, and a sub-mount answered with its own mount point; `relative_spelling`
+over seven canonical pairs, `-r` storing and *reporting* the relative target,
+`-r` without `-s` refused, and a refused canonicalisation naming its path;
+and the `readlink` parse/print matrix for the three switches.
+
+**The bare-metal half of S7's residual is closed.** The
+`arxfs_virtio_blk_pci_x86_64` tail now continues, over the *same* device open,
+into the secured VFS over the production `CachedFs` — creating and reading
+both link kinds, canonicalising a link and a vacant name, proving two names
+reach one node with the format's count carried up, and confirming a directory
+is refused. So the wrapper chain is exercised in a freestanding build on real
+(emulated) hardware, not only on the host. It stops one layer below
+`MountedFilesystemService`, which the host
+`volume_service_tests::link_round_trip_through_the_real_service_scenario`
+covers: that service's `Send` bound cannot be met by a driver stack holding a
+borrowed `VirtioHost`, and asserting `Send` for one — or widening a kernel
+trait to host a test — would be the wrong trade. The layer it omits resolves
+the caller's groups and takes the per-mount lock; it holds no link logic.
+
+---
+
 ## What the finished plan guarantees
 
 Every stage has landed; these are the properties the tree now holds, each
@@ -587,10 +693,16 @@ covered by the tests its stage lists.
   refuses relative paths and `.`/`..`; the looser target grammar is
   `parse_link_target`'s alone, applied to on-disk data, never to a caller's
   spelling.
-- **The resolution matrix holds:** a link cannot escape the volume that
-  stores it, cannot bypass a permission check on any directory the walk
-  traverses, and a cycle or an over-budget chain is `LinkLoop` rather than
-  walked. `..` after a link resolves physically.
+- **The resolution matrix holds:** a link cannot resolve outside what its
+  mount projects (a sub-mount's subtree included), cannot bypass a permission
+  check on any directory the walk traverses, and a cycle or an over-budget
+  chain is `LinkLoop` rather than walked. `..` after a link resolves
+  physically.
+- **There is one canonicalisation, and userland calls it.** `fs_realpath`
+  answers over the same walk every other operation uses, so a tool cannot
+  obtain a path the kernel would resolve elsewhere; `readlink -f`/`-e`/`-m`
+  and `ln -r` are its consumers. The answer is always a path this VFS would
+  accept back.
 - **A format without links refuses rather than approximates**, for either
   kind, and the per-format support table in
   `docs/src/filesystem/overview.md` is the one statement of which does what.

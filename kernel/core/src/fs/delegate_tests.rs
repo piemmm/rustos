@@ -14,7 +14,7 @@ use tairix_abi::driver::filesystem::{
     DirEntry, FilesystemRead, FilesystemWrite, MountFlags, NodeId, NodeInfo, NodeKind, NodeTimes,
 };
 use tairix_abi::driver::{DriverError, DriverHandle};
-use tairix_abi::fs::OpenFlags;
+use tairix_abi::fs::{OpenFlags, RealpathMode};
 use tairix_abi::time::Time64;
 use tairix_caps::CapabilitySet;
 use tairix_kernel_sec::{GroupId, UserId};
@@ -297,6 +297,62 @@ fn delegated_read_honours_offset_and_eof() {
     assert_eq!(
         vfs.read_via(&admin, &path, &mut fs, README_BODY.len() as u64, &mut buf),
         Ok(0)
+    );
+}
+
+/// The uniform-policy half of the canonicalisation pair answers the same
+/// `/`-view spelling as the per-inode half: the mount point followed by the
+/// canonical remainder, and the mount point itself for the mount point.
+#[test]
+fn delegated_realpath_spells_a_view_path_under_the_mount_point() {
+    let vfs = backed_vfs(0o755);
+    let caps = CapabilitySet::empty();
+    let admin = cred(ADMIN_UID, ADMIN_GID, &caps);
+    let mut fs = MockFs;
+    assert_eq!(
+        vfs.realpath_via(
+            &admin,
+            &p("/Storage/usb0/docs/readme.txt"),
+            &mut fs,
+            RealpathMode::Existing
+        ),
+        Ok(String::from("/Storage/usb0/docs/readme.txt"))
+    );
+    // The mount point is its own canonical name: the walk lands on the
+    // projected root, which contributes no component of its own.
+    assert_eq!(
+        vfs.realpath_via(&admin, &p("/Storage/usb0"), &mut fs, RealpathMode::Existing),
+        Ok(String::from("/Storage/usb0"))
+    );
+    // A vacant final name is refused under the strict reading and carried
+    // into the answer under the tolerant one.
+    let vacant = p("/Storage/usb0/docs/absent");
+    assert_eq!(
+        vfs.realpath_via(&admin, &vacant, &mut fs, RealpathMode::Existing),
+        Err(VfsError::NotFound)
+    );
+    assert_eq!(
+        vfs.realpath_via(&admin, &vacant, &mut fs, RealpathMode::Final),
+        Ok(String::from("/Storage/usb0/docs/absent"))
+    );
+    // Only `Missing` names a path whose *ancestor* is absent too.
+    let deep = p("/Storage/usb0/gone/away/leaf");
+    assert_eq!(
+        vfs.realpath_via(&admin, &deep, &mut fs, RealpathMode::Final),
+        Err(VfsError::NotFound)
+    );
+    assert_eq!(
+        vfs.realpath_via(&admin, &deep, &mut fs, RealpathMode::Missing),
+        Ok(String::from("/Storage/usb0/gone/away/leaf"))
+    );
+    // A directory the caller may not search hides what is under it from
+    // canonicalisation exactly as it does from a read: under the uniform
+    // policy the mount point's own mode is what every node is judged
+    // against, so a mount with no search bit refuses at the first step.
+    let closed = backed_vfs(0o600);
+    assert_eq!(
+        closed.realpath_via(&admin, &deep, &mut fs, RealpathMode::Missing),
+        Err(VfsError::PermissionDenied)
     );
 }
 

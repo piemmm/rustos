@@ -2305,6 +2305,34 @@ impl SyscallNumber {
     /// changes what a later resolution reaches.
     pub const FS_LINK: Self = Self(115);
 
+    /// Canonicalise an absolute path: resolve every symbolic link and every
+    /// `..` and report the one path that names the result.
+    ///
+    /// Arguments: `path: *const u8`, `path_len: usize` — the path to
+    /// canonicalise; `out: *mut u8`, `out_len: usize` — where the canonical
+    /// path is written; `mode: u32` — a [`crate::RealpathMode`] value
+    /// deciding how much of the path must exist. Returns the canonical
+    /// path's length in bytes, or `-errno`.
+    ///
+    /// This is the kernel's **one** canonicalisation, and the reason a tool
+    /// must not write its own: `..` is applied to the nodes the walk really
+    /// traversed rather than to the text (so `/a/link/../b` reaches what
+    /// `link` names, never `/a/b`), every link hop is charged against the
+    /// same fail-closed budget that answers a cycle with
+    /// [`crate::Errno::LinkLoop`], search permission is required on every
+    /// directory the resolution passes through, and a link cannot resolve
+    /// outside what its mount projects. A userland copy that disagreed by
+    /// one of those rules would print a path the kernel resolves elsewhere.
+    ///
+    /// The answer contains no `.`, no `..`, and no symbolic link, and is
+    /// written without a terminator. An `out` too small for the whole path
+    /// fails closed with [`crate::Errno::BufferTooSmall`] rather than
+    /// returning a prefix that names a different node.
+    ///
+    /// Requires `CAP_FS_ACCESS`. A pure read, unaudited like
+    /// [`Self::FS_READLINK`].
+    pub const FS_REALPATH: Self = Self(116);
+
     /// Inclusive upper bound on the syscall identifier space in `abi-v1`.
     pub const MAX: u16 = 1023;
 

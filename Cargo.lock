@@ -2358,6 +2358,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "tairix-stat"
+version = "0.0.0"
+dependencies = [
+ "tairix-abi",
+ "tairix-fsmeta",
+ "tairix-help",
+ "tairix-procinfo",
+ "tairix-rt",
+]
+
+[[package]]
 name = "tairix-stress"
 version = "0.0.0"
 dependencies = [
@@ -4818,6 +4829,7 @@ dependencies = [
  "tairix-kernel-virtio",
  "tairix-log",
  "tairix-pci",
+ "tairix-reclaim",
  "tairix-test-arxfs-image",
  "tairix-test-encrypted-root-image",
  "tairix-test-fat32-image",

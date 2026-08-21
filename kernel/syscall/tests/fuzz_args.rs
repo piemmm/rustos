@@ -29,8 +29,9 @@ use core::cell::RefCell;
 use tairix_abi::seat::ReleaseSurface;
 use tairix_abi::{
     spec_for, AbiType, CapabilityId, Errno, IrqHandle, LinkFlags, MapFlags, OpenFlags, PowerAction,
-    RandomFlags, SyscallNumber, UnlinkFlags, WaitFlags, ENCODED_TABLE_LEN, FS_ATTR_KEY_MAX,
-    FS_ATTR_VALUE_MAX, FS_MODE_MASK, SYSCALLS, SYSCALL_MAX_ARGS,
+    RandomFlags, RealpathMode, SyscallNumber, SyscallSpec, UnlinkFlags, WaitFlags,
+    ENCODED_TABLE_LEN, FS_ATTR_KEY_MAX, FS_ATTR_VALUE_MAX, FS_MODE_MASK, SYSCALLS,
+    SYSCALL_MAX_ARGS,
 };
 use tairix_caps::CapabilitySet;
 use tairix_kernel_sec::{ProcessId, TaskCapabilities, TaskId, UserId};
@@ -762,6 +763,18 @@ impl SyscallHandlers for AcceptingHandlers {
         *self.invocations.borrow_mut() += 1;
         Ok(0)
     }
+    fn fs_realpath(
+        &self,
+        _c: &CallerContext<'_>,
+        _path: u64,
+        _path_len: usize,
+        _out: u64,
+        _out_len: usize,
+        _mode: RealpathMode,
+    ) -> SyscallResult {
+        *self.invocations.borrow_mut() += 1;
+        Ok(0)
+    }
     fn fs_set_mode(
         &self,
         _c: &CallerContext<'_>,
@@ -930,6 +943,18 @@ fn would_accept(spec_idx: usize, raw_number: u16, args: &[u64; SYSCALL_MAX_ARGS]
             return false;
         }
     }
+    operand_semantics_accept(spec, args)
+}
+
+/// Whether the dispatcher's **per-operand** decodes accept `args`.
+///
+/// [`would_accept`] answers the shape question — the number is in range, the
+/// trailing slots are zero, every slot matches its `AbiType`. This answers
+/// the other half: each operand a syscall runs through a *typed* decode
+/// (a flags word, a closed enum, a bounded length) is mirrored through that
+/// same decode, never through a re-derived rule set, so the oracle and the
+/// dispatcher cannot drift.
+fn operand_semantics_accept(spec: &SyscallSpec, args: &[u64; SYSCALL_MAX_ARGS]) -> bool {
     // `random_get`'s flags argument carries an extra semantic check the
     // per-`AbiType` validator cannot express: the dispatcher runs the raw
     // `U32` through `RandomFlags::from_bits`, which rejects any reserved
@@ -1024,11 +1049,14 @@ fn would_accept(spec_idx: usize, raw_number: u16, args: &[u64; SYSCALL_MAX_ARGS]
         }
     }
     // A filesystem flags word runs through its own type's `from_bits`, which
-    // rejects any reserved bit. Mirror the dispatcher through those same
-    // predicates rather than re-listing each bit set here.
+    // rejects any reserved bit; `fs_realpath`'s mode word runs through
+    // `RealpathMode::from_raw`, which admits only the three defined readings.
+    // Mirror the dispatcher through those same predicates rather than
+    // re-listing each accepted value here.
     let flags_arg: Option<FlagsArg> = match spec.number {
         SyscallNumber::FS_UNLINK => Some((2, |b| UnlinkFlags::from_bits(b).is_ok())),
         SyscallNumber::FS_LINK => Some((4, |b| LinkFlags::from_bits(b).is_ok())),
+        SyscallNumber::FS_REALPATH => Some((4, |b| RealpathMode::from_raw(b).is_ok())),
         _ => None,
     };
     if let Some((slot, accepts)) = flags_arg {

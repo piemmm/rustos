@@ -33,7 +33,8 @@ use tairix_abi::driver::filesystem::{
 };
 use tairix_abi::driver::DriverError;
 use tairix_abi::fs::{
-    OpenFlags, FS_GROUP_EXEC_BIT, FS_OWNER_UNCHANGED, FS_SETGID_BIT, FS_SETUID_BIT, FS_SYMLINK_MAX,
+    OpenFlags, RealpathMode, FS_GROUP_EXEC_BIT, FS_OWNER_UNCHANGED, FS_SETGID_BIT, FS_SETUID_BIT,
+    FS_SYMLINK_MAX,
 };
 use tairix_abi::CapabilityId;
 use tairix_fsmeta::{AttrKey, NamespaceAccess, KEY_MAX};
@@ -176,6 +177,61 @@ struct Place {
     found: Option<(NodeId, NodeInfo, Metadata)>,
 }
 
+/// What a mount projects into the VFS path space: the permission template
+/// its delegated nodes are judged against, and the path *on the backing
+/// volume* at which it is rooted.
+///
+/// A whole-volume mount is rooted at the driver's own root directory (an
+/// empty [`subtree`](Self::subtree)); a **sub-mount** projects only a
+/// subtree of a larger volume. That subtree's root, never the driver root,
+/// is the floor a walk clamps `..` and an absolute link target to — so a
+/// link stored inside the mount cannot resolve to a node the mount does not
+/// project, and every node a walk reaches has a path under the mount point.
+///
+/// The two facts travel together because a walk needs both and neither is
+/// derivable from the path: passing them as one value is what stops a call
+/// site from resolving against the driver root by omission.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MountProjection {
+    /// The metadata delegated nodes are judged against under [`Uniform`],
+    /// and the mount point's own record under [`PerInode`].
+    pub template: Metadata,
+    /// The mount's root path on the backing volume, empty for a mount
+    /// rooted at the driver's own root.
+    pub subtree: Vec<String>,
+}
+
+/// Whether a descent may run out of tree before it runs out of steps.
+///
+/// A vacant *final* name is always reported rather than refused — it is the
+/// place a create acts on — so this governs only an **ancestor** that does
+/// not exist. Every ordinary operation refuses one: a write cannot land in a
+/// directory that is not there. Canonicalisation is the one caller that may
+/// ask for the rest of the path anyway, because naming a path that does not
+/// exist yet is what `realpath -m` is for.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+enum MissingSteps {
+    /// A missing ancestor is [`VfsError::NotFound`].
+    Refused,
+    /// A missing ancestor ends resolution; the steps below it are carried
+    /// through unresolved.
+    Carried,
+}
+
+/// Where a descent ended.
+enum Descent {
+    /// Every step resolved to a real node. The stack the walk stands on,
+    /// floor first and never empty.
+    Landed(Vec<Walked>),
+    /// The walk ran out of tree: the stack it reached, and the names below
+    /// it that nothing occupies. Exactly one name unless the descent was
+    /// permitted to carry a missing ancestor.
+    Absent {
+        stack: Vec<Walked>,
+        names: Vec<String>,
+    },
+}
+
 /// Where a path walk ended.
 enum Walk {
     /// The path named the mount point itself, which no directory holds — so
@@ -251,10 +307,10 @@ const fn map_link_error(error: DriverError) -> VfsError {
 ///
 /// `components` passed to the methods are the path *relative to the mount
 /// point* (the VFS strips the mount prefix); an empty slice names the mount
-/// point itself, i.e. the driver's root directory.
+/// point itself, i.e. the root the [`MountProjection`] describes.
 pub struct DelegatedFs<'fs, R: FilesystemRead + ?Sized, P = Uniform> {
     fs: &'fs mut R,
-    template: Metadata,
+    mount: MountProjection,
     _policy: PhantomData<P>,
 }
 
@@ -319,13 +375,13 @@ impl<R: FilesystemRead + FilesystemSecurity + ?Sized> MetaPolicy<R> for PerInode
 }
 
 impl<'fs, R: FilesystemRead + ?Sized> DelegatedFs<'fs, R, Uniform> {
-    /// Bind `fs` to the `template` metadata its mount point carries; every
-    /// node in the delegated subtree is judged against that one template.
+    /// Bind `fs` to what its mount projects; every node in the delegated
+    /// subtree is judged against the projection's one template.
     #[must_use]
-    pub fn new(fs: &'fs mut R, template: Metadata) -> Self {
+    pub fn new(fs: &'fs mut R, mount: MountProjection) -> Self {
         Self {
             fs,
-            template,
+            mount,
             _policy: PhantomData,
         }
     }
@@ -336,14 +392,15 @@ impl<'fs, R: FilesystemRead + FilesystemSecurity + ?Sized> DelegatedFs<'fs, R, P
     /// record (read through [`FilesystemSecurity`]) rather than the mount
     /// template.
     ///
-    /// `template` is retained only as the metadata of the mount point in
-    /// the in-RAM tree; the delegated walk consults the driver's per-inode
-    /// record for every node, including the driver root.
+    /// The projection's template is retained only as the metadata of the
+    /// mount point in the in-RAM tree; the delegated walk consults the
+    /// driver's per-inode record for every node, including the projected
+    /// root.
     #[must_use]
-    pub fn new_secured(fs: &'fs mut R, template: Metadata) -> Self {
+    pub fn new_secured(fs: &'fs mut R, mount: MountProjection) -> Self {
         Self {
             fs,
-            template,
+            mount,
             _policy: PhantomData,
         }
     }
@@ -721,8 +778,9 @@ impl<R: FilesystemRead + ?Sized, P: MetaPolicy<R>> DelegatedFs<'_, R, P> {
     /// `..` is applied to the **walked stack** rather than by collapsing
     /// text beforehand, so it names the directory this resolution actually
     /// came through, not one a link's spelling suggests. The stack starts at
-    /// the filesystem root and `..` never pops past it, so no chain of them
-    /// escapes the tree (`/..` is `/`, as POSIX specifies).
+    /// the root the mount projects and `..` never pops past it, so no chain
+    /// of them escapes what the mount projects (`/..` is `/`, as POSIX
+    /// specifies).
     ///
     /// # Errors
     ///
@@ -735,22 +793,204 @@ impl<R: FilesystemRead + ?Sized, P: MetaPolicy<R>> DelegatedFs<'_, R, P> {
         components: &[String],
         final_link: FinalLink,
     ) -> Result<Walk, VfsError> {
-        let root = self.fs.root();
-        // Root-first, and never emptied: `stack[0]` is the mount root, so
-        // popping for `..` is clamped by construction. Each entry keeps
-        // everything the walk learned about its node, so ascending costs no
-        // second read and the final entry knows its own name.
-        let mut stack = alloc::vec![Walked {
-            node: root,
-            name: None,
-            info: self.fs.node_info(root).map_err(map_driver_error)?,
-            meta: P::metadata(self.fs, root, &self.template)?,
-        }];
-
-        let mut pending: VecDeque<TargetStep> = components
+        let root = self.projected_root(cred)?;
+        let pending = components
             .iter()
             .map(|c| TargetStep::Name(c.clone()))
             .collect();
+        match self.walk_from(root, cred, pending, final_link, MissingSteps::Refused)? {
+            Descent::Landed(stack) => Self::landed(stack),
+            Descent::Absent { stack, mut names } => {
+                // With a missing ancestor refused, the only name a descent
+                // can report as absent is the final one, and that is the
+                // place a create acts on.
+                let (Some(name), Some(parent)) = (names.pop(), stack.last()) else {
+                    return Err(VfsError::Io);
+                };
+                if !names.is_empty() {
+                    return Err(VfsError::Io);
+                }
+                Ok(Walk::Leaf(Place {
+                    parent: parent.node,
+                    parent_meta: parent.meta.clone(),
+                    name,
+                    found: None,
+                }))
+            }
+        }
+    }
+
+    /// Canonicalise `components`: the path, relative to the mount's own
+    /// root, that names what they resolve to — with every symbolic link
+    /// followed and every `..` applied to the nodes the walk really
+    /// traversed.
+    ///
+    /// `mode` decides only how much of the path must exist. A component the
+    /// walk could not resolve is carried through unchanged, so the answer
+    /// still names the place the caller asked about; a `..` below the
+    /// deepest existing node pops that carried tail, which is the only
+    /// reading available where no node exists to ascend from.
+    ///
+    /// # Errors
+    ///
+    /// * [`VfsError::NotFound`] when `mode` requires a component that does
+    ///   not exist.
+    /// * [`VfsError::PermissionDenied`] when the caller may not search a
+    ///   directory the resolution passes through.
+    /// * [`VfsError::LinkLoop`] for a cycle or an over-budget chain,
+    ///   [`VfsError::NotADirectory`], [`VfsError::InvalidPath`], or
+    ///   [`VfsError::Io`].
+    pub fn canonicalize(
+        &mut self,
+        cred: &Credentials<'_>,
+        components: &[String],
+        mode: RealpathMode,
+    ) -> Result<Vec<String>, VfsError> {
+        let root = self.projected_root(cred)?;
+        let pending = components
+            .iter()
+            .map(|c| TargetStep::Name(c.clone()))
+            .collect();
+        let missing = if mode.tolerates_missing_intermediate() {
+            MissingSteps::Carried
+        } else {
+            MissingSteps::Refused
+        };
+        // Every reading resolves a final link: `readlink -f` on a link
+        // reports what it names, never the link.
+        let (stack, absent) =
+            match self.walk_from(root, cred, pending, FinalLink::Follow, missing)? {
+                Descent::Landed(stack) => (stack, Vec::new()),
+                Descent::Absent { stack, names } => {
+                    if !mode.tolerates_vacant_final() {
+                        return Err(VfsError::NotFound);
+                    }
+                    (stack, names)
+                }
+            };
+        // `stack[0]` is the mount's own root, which no directory holds and
+        // which the caller's mount point already names. Every entry above it
+        // was pushed with the name it was looked up under; a nameless one
+        // would silently drop a component and answer with a path naming a
+        // different node, so it fails closed instead.
+        let mut spelled = Vec::with_capacity(stack.len() - 1 + absent.len());
+        for walked in stack.into_iter().skip(1) {
+            spelled.push(walked.name.ok_or(VfsError::Io)?);
+        }
+        spelled.extend(absent);
+        Ok(spelled)
+    }
+
+    /// The [`Walk`] a landed descent reports.
+    fn landed(mut stack: Vec<Walked>) -> Result<Walk, VfsError> {
+        let Some(Walked {
+            node,
+            name,
+            info,
+            meta,
+        }) = stack.pop()
+        else {
+            return Err(VfsError::Io);
+        };
+        match (name, stack.last()) {
+            // Only `stack[0]` — the mount's own root — carries no name, and
+            // no directory this mount projects holds it.
+            (None, _) => Ok(Walk::Root { node, info, meta }),
+            (Some(name), Some(parent)) => Ok(Walk::Leaf(Place {
+                parent: parent.node,
+                parent_meta: parent.meta.clone(),
+                name,
+                found: Some((node, info, meta)),
+            })),
+            // A named entry is only ever pushed on top of the directory it
+            // was looked up in, so it always has a parent beneath it; fail
+            // closed rather than invent one.
+            (Some(_), None) => Err(VfsError::Io),
+        }
+    }
+
+    /// The node the mount projects as its root: the driver's own root for a
+    /// whole-volume mount, or the node the projection's subtree names for a
+    /// sub-mount.
+    ///
+    /// The subtree is a path *on the backing volume*, so it is resolved from
+    /// the driver root under the ordinary rules — search permission on every
+    /// directory descended, links followed — and only then becomes the floor
+    /// a caller's own walk clamps to.
+    ///
+    /// # Errors
+    ///
+    /// [`VfsError::NotFound`] if the subtree names nothing; otherwise as
+    /// [`Self::walk_from`].
+    fn projected_root(&mut self, cred: &Credentials<'_>) -> Result<Walked, VfsError> {
+        let node = self.fs.root();
+        let root = Walked {
+            node,
+            name: None,
+            info: self.fs.node_info(node).map_err(map_driver_error)?,
+            meta: P::metadata(self.fs, node, &self.mount.template)?,
+        };
+        if self.mount.subtree.is_empty() {
+            return Ok(root);
+        }
+        let pending = self
+            .mount
+            .subtree
+            .iter()
+            .map(|c| TargetStep::Name(c.clone()))
+            .collect();
+        match self.walk_from(
+            root,
+            cred,
+            pending,
+            FinalLink::Follow,
+            MissingSteps::Refused,
+        )? {
+            // The projected root is a *root* to everything above it: it is
+            // not an entry of any directory this mount projects, so the name
+            // it was found under is deliberately dropped.
+            Descent::Landed(mut stack) => stack.pop().map_or(Err(VfsError::Io), |top| {
+                Ok(Walked {
+                    node: top.node,
+                    name: None,
+                    info: top.info,
+                    meta: top.meta,
+                })
+            }),
+            // A mount whose projected root does not exist projects nothing.
+            Descent::Absent { .. } => Err(VfsError::NotFound),
+        }
+    }
+
+    /// Walk `pending` from `root`, which becomes the walk's floor.
+    ///
+    /// See [`Self::walk`] for the resolution model; this is the half that
+    /// takes the floor as a parameter, so the same loop resolves a mount's
+    /// own subtree from the driver root and a caller's path from the mount's
+    /// projected root.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::walk`].
+    fn walk_from(
+        &mut self,
+        root: Walked,
+        cred: &Credentials<'_>,
+        mut pending: VecDeque<TargetStep>,
+        final_link: FinalLink,
+        missing: MissingSteps,
+    ) -> Result<Descent, VfsError> {
+        // Root-first, and never emptied: `stack[0]` is the floor, so
+        // popping for `..` is clamped by construction. Each entry keeps
+        // everything the walk learned about its node, so ascending costs no
+        // second read and the final entry knows its own name.
+        let mut stack = alloc::vec![root];
+        // Names below the deepest existing node. Non-empty only once a
+        // lookup has come up vacant, and then nothing above it is looked up:
+        // a name in a directory that does not exist has nothing to resolve
+        // against and no metadata to authorise.
+        let mut absent: Vec<String> = Vec::new();
+
         let mut hops = 0usize;
         let mut steps = 0usize;
 
@@ -763,13 +1003,21 @@ impl<R: FilesystemRead + ?Sized, P: MetaPolicy<R>> DelegatedFs<'_, R, P> {
                 TargetStep::Up => {
                     // Ascend. Search permission on the parent was already
                     // proven on the way down, so no second check is owed.
-                    if stack.len() > 1 {
+                    // A `..` below the deepest existing node pops that tail
+                    // instead, and resolution resumes physically once the
+                    // walk is back on real nodes.
+                    if absent.pop().is_none() && stack.len() > 1 {
                         stack.pop();
                     }
                     continue;
                 }
                 TargetStep::Name(name) => name,
             };
+
+            if !absent.is_empty() {
+                absent.push(name);
+                continue;
+            }
 
             let Some(here) = stack.last() else {
                 return Err(VfsError::Io);
@@ -787,19 +1035,16 @@ impl<R: FilesystemRead + ?Sized, P: MetaPolicy<R>> DelegatedFs<'_, R, P> {
                 // A vacant *final* name is still a place — it is what a
                 // create acts on — so the walk reports it rather than
                 // failing. A vacant name anywhere earlier is a genuinely
-                // missing ancestor.
-                Err(DriverError::NotFound) if is_final => {
-                    return Ok(Walk::Leaf(Place {
-                        parent,
-                        parent_meta,
-                        name,
-                        found: None,
-                    }));
+                // missing ancestor, reported unless the caller asked to be
+                // told the rest of the path instead.
+                Err(DriverError::NotFound) if is_final || missing == MissingSteps::Carried => {
+                    absent.push(name);
+                    continue;
                 }
                 Err(err) => return Err(map_driver_error(err)),
             };
             let child_info = self.fs.node_info(child).map_err(map_driver_error)?;
-            let child_meta = P::metadata(self.fs, child, &self.template)?;
+            let child_meta = P::metadata(self.fs, child, &self.mount.template)?;
 
             if child_info.kind == NodeKind::Symlink && !(is_final && final_link == FinalLink::Keep)
             {
@@ -829,29 +1074,13 @@ impl<R: FilesystemRead + ?Sized, P: MetaPolicy<R>> DelegatedFs<'_, R, P> {
             });
         }
 
-        let Some(Walked {
-            node,
-            name,
-            info,
-            meta,
-        }) = stack.pop()
-        else {
-            return Err(VfsError::Io);
-        };
-        match (name, stack.last()) {
-            // Only `stack[0]` — the mount root — carries no name, and no
-            // directory holds it.
-            (None, _) => Ok(Walk::Root { node, info, meta }),
-            (Some(name), Some(parent)) => Ok(Walk::Leaf(Place {
-                parent: parent.node,
-                parent_meta: parent.meta.clone(),
-                name,
-                found: Some((node, info, meta)),
-            })),
-            // A named entry is only ever pushed on top of the directory it
-            // was looked up in, so it always has a parent beneath it; fail
-            // closed rather than invent one.
-            (Some(_), None) => Err(VfsError::Io),
+        if absent.is_empty() {
+            Ok(Descent::Landed(stack))
+        } else {
+            Ok(Descent::Absent {
+                stack,
+                names: absent,
+            })
         }
     }
 

@@ -3,7 +3,9 @@
 
 use alloc::format;
 use alloc::string::String;
+use alloc::vec::Vec;
 
+use tairix_abi::RealpathMode;
 use tairix_help::{own_short_help, HelpSource};
 use tairix_path::{join, leaf_name};
 
@@ -14,9 +16,10 @@ use crate::io::{FileSystem, Occupant, Output, Prompt};
 /// The usage banner a usage error is reported with, and the fallback the
 /// short-help switches print when `ln`'s own Help tree is unavailable.
 pub const USAGE: &str = "\
-usage: ln [-sLPdFfinvT] [-t dir] [--] target... [link_name]
+usage: ln [-srLPdFfinvT] [-t dir] [--] target... [link_name]
 
   -s, --symbolic             make symbolic links
+  -r, --relative             store the target relative to the link (needs -s)
   -L, --logical              hard-link what a link target names
   -P, --physical             hard-link the target as spelled (default)
   -d, -F, --directory        accept a directory operand (still refused)
@@ -65,6 +68,8 @@ const OWN_WORD: &str = "ln";
 /// * [`LnError::NotADirectory`] — a destination that must be a directory is
 ///   not one.
 /// * [`LnError::Stat`] — a link name could not be inspected.
+/// * [`LnError::Canonicalize`] — `-r` could not canonicalise the target or
+///   the link's own directory.
 /// * [`LnError::Remove`] — a taken name `-f`/`-i` approved could not be
 ///   removed.
 /// * [`LnError::Create`] — the link could not be created (a taken name
@@ -161,15 +166,90 @@ fn link_all(
             // The single-operand form: the target's own leaf name, here.
             (None, None) => String::from(leaf_name(target)),
         };
-        if !link_one(target, &link, options, fs, prompt)? {
+        // `-r` rewrites what gets *stored*; the operand still names the
+        // target, and the link name is untouched.
+        let stored = if options.relative {
+            relative_target(target, &link, fs)?
+        } else {
+            String::from(target)
+        };
+        if !link_one(&stored, &link, options, fs, prompt)? {
             continue;
         }
         if options.verbose {
-            out.write_all(format!("'{link}' -> '{target}'\n").as_bytes())
+            out.write_all(format!("'{link}' -> '{stored}'\n").as_bytes())
                 .map_err(LnError::Output)?;
         }
     }
     Ok(())
+}
+
+/// The `-r` target: `target` spelled relative to the directory `link` sits
+/// in.
+///
+/// Both halves are canonicalised by the **filesystem** first, which is what
+/// makes the arithmetic below safe to do lexically: two canonical paths hold
+/// no `.`, no `..`, and no symbolic link, so the `..`-and-names spelling
+/// between them resolves back to exactly the node the target named. Doing
+/// the same arithmetic on the paths as typed would be the lexical-`..`
+/// collapse the resolver forbids — it would name a different node the moment
+/// a link were involved.
+///
+/// [`RealpathMode::Missing`] is the reading asked for on both: a symbolic
+/// link may legitimately name something that does not exist yet, and the
+/// link's own directory may be about to be created.
+fn relative_target(target: &str, link: &str, fs: &dyn FileSystem) -> Result<String, LnError> {
+    let canonical_target = canonicalize(fs, target)?;
+    let link_directory = parent_of(link);
+    let canonical_base = canonicalize(fs, link_directory)?;
+    Ok(relative_spelling(&canonical_base, &canonical_target))
+}
+
+/// Canonicalise `path` through the filesystem, surfacing a refusal as
+/// [`LnError::Canonicalize`].
+fn canonicalize(fs: &dyn FileSystem, path: &str) -> Result<String, LnError> {
+    fs.canonicalize(path, RealpathMode::Missing)
+        .map_err(|errno| LnError::Canonicalize(String::from(path), errno))
+}
+
+/// The directory part of the link name `link`, as typed.
+///
+/// A name with no separator sits in the working directory, which the
+/// filesystem spells as `.` — the one place a relative spelling is asked for
+/// without a directory being named.
+fn parent_of(link: &str) -> &str {
+    match link.rfind('/') {
+        // A leading `/` is the root itself, not an empty directory name.
+        Some(0) => "/",
+        Some(slash) => &link[..slash],
+        None => ".",
+    }
+}
+
+/// `target` spelled relative to `base`, both already canonical.
+///
+/// The shared leading components are dropped, one `..` is emitted for each
+/// component of `base` that remains, and the rest of `target` follows. An
+/// empty result — the two naming the same node — is spelled `.`, as GNU's
+/// own `relpath` does.
+fn relative_spelling(base: &str, target: &str) -> String {
+    fn parts(path: &str) -> Vec<&str> {
+        path.split('/').filter(|part| !part.is_empty()).collect()
+    }
+    let base = parts(base);
+    let target = parts(target);
+    let shared = base
+        .iter()
+        .zip(target.iter())
+        .take_while(|(a, b)| a == b)
+        .count();
+    let mut spelled: Vec<&str> = alloc::vec::Vec::new();
+    spelled.resize(base.len() - shared, "..");
+    spelled.extend_from_slice(&target[shared..]);
+    if spelled.is_empty() {
+        return String::from(".");
+    }
+    spelled.join("/")
 }
 
 /// Create the single link `link` naming `target`, freeing a taken name first
@@ -245,10 +325,10 @@ mod tests {
     use alloc::vec::Vec;
     use core::cell::RefCell;
 
-    use tairix_abi::Errno;
+    use tairix_abi::{Errno, RealpathMode};
     use tairix_help::{HelpSource, SourceError};
 
-    use super::{run, USAGE};
+    use super::{relative_spelling, run, USAGE};
     use crate::command::parse;
     use crate::error::LnError;
     use crate::io::{FileSystem, Occupant, Output, Prompt};
@@ -264,9 +344,26 @@ mod tests {
         removed: RefCell<Vec<String>>,
         symlink_errno: Option<Errno>,
         link_errno: Option<Errno>,
+        /// Scripted canonical answers, `(path, canonical)`; a path with no
+        /// entry canonicalises to itself.
+        canonical: RefCell<Vec<(String, String)>>,
+        canonicalize_errno: Option<Errno>,
     }
 
     impl TreeFs {
+        /// The fixture with `pairs` as its scripted canonicalisation.
+        fn canonicalising(pairs: &[(&str, &str)]) -> Self {
+            Self {
+                canonical: RefCell::new(
+                    pairs
+                        .iter()
+                        .map(|(p, c)| (String::from(*p), String::from(*c)))
+                        .collect::<Vec<_>>(),
+                ),
+                ..Self::default()
+            }
+        }
+
         fn with(nodes: &[(&str, Occupant)]) -> Self {
             Self {
                 nodes: RefCell::new(
@@ -304,6 +401,21 @@ mod tests {
                 .iter()
                 .find(|(p, _)| p == path)
                 .map_or(Occupant::Vacant, |(_, o)| *o))
+        }
+
+        /// The scripted canonicalisation the kernel would perform: a
+        /// mapping, or the path unchanged when the fixture names no
+        /// rewrite. `ln` never resolves anything itself, so this is the
+        /// only source of a canonical answer.
+        fn canonicalize(&self, path: &str, _mode: RealpathMode) -> Result<String, Errno> {
+            if let Some(errno) = self.canonicalize_errno {
+                return Err(errno);
+            }
+            self.canonical
+                .borrow()
+                .iter()
+                .find(|(p, _)| p == path)
+                .map_or_else(|| Ok(String::from(path)), |(_, c)| Ok(c.clone()))
         }
 
         fn symlink(&self, target: &str, link: &str) -> Result<(), Errno> {
@@ -717,6 +829,83 @@ mod tests {
     }
 
     #[test]
+    fn relative_spelling_walks_up_then_down_between_two_canonical_paths() {
+        // Both inputs are canonical, so the arithmetic is exact: shared
+        // prefix dropped, one `..` per remaining base component, then the
+        // rest of the target.
+        for (base, target, want) in [
+            ("/a/b", "/a/b/c", "c"),
+            ("/a/b/c", "/a/b", ".."),
+            ("/a/b/c", "/a/x/y", "../../x/y"),
+            ("/a/b", "/a/b", "."),
+            ("/", "/a", "a"),
+            ("/a", "/", ".."),
+            ("/a/b", "/c", "../../c"),
+        ] {
+            assert_eq!(relative_spelling(base, target), want, "{base} -> {target}");
+        }
+    }
+
+    #[test]
+    fn relative_stores_the_target_relative_to_the_links_own_directory() {
+        // The kernel canonicalises both halves; `-r` only spells the
+        // difference. Here `/a/b/link` sits in `/a/b`, and the target
+        // canonicalises out of a link, so a lexical answer from the operands
+        // as typed would have been `../real/file` — a different node.
+        let fs = TreeFs::canonicalising(&[("/a/alias/file", "/x/real/file"), ("/a/b", "/a/b")]);
+        let out = Recorder::default();
+        assert_eq!(
+            go(&["-sr", "/a/alias/file", "/a/b/link"], &fs, &out),
+            Ok(())
+        );
+        assert_eq!(
+            fs.created(),
+            [(String::from("/a/b/link"), String::from("../../x/real/file"))]
+        );
+    }
+
+    #[test]
+    fn relative_reports_the_stored_target_not_the_operand() {
+        // `-v` must show what the link actually holds, or the report would
+        // describe a link that was never made.
+        let fs = TreeFs::canonicalising(&[]);
+        let out = Recorder::default();
+        assert_eq!(go(&["-srv", "/a/b/target", "/a/b/link"], &fs, &out), Ok(()));
+        assert_eq!(out.text(), "'/a/b/link' -> 'target'\n");
+    }
+
+    #[test]
+    fn relative_without_symbolic_is_refused() {
+        // A hard link stores no target, so there is nothing to make
+        // relative: refused rather than silently ignored.
+        assert_eq!(
+            parse(&["-r", "a", "b"]),
+            Err(LnError::RelativeNeedsSymbolic)
+        );
+        assert_eq!(
+            parse(&["--relative", "a", "b"]),
+            Err(LnError::RelativeNeedsSymbolic)
+        );
+    }
+
+    #[test]
+    fn a_refused_canonicalisation_names_the_path() {
+        let fs = TreeFs {
+            canonicalize_errno: Some(Errno::PermissionDenied),
+            ..TreeFs::default()
+        };
+        let out = Recorder::default();
+        assert_eq!(
+            go(&["-sr", "/a/target", "/b/link"], &fs, &out),
+            Err(LnError::Canonicalize(
+                String::from("/a/target"),
+                Errno::PermissionDenied
+            ))
+        );
+        assert!(fs.created().is_empty(), "nothing was created");
+    }
+
+    #[test]
     fn an_inspection_failure_names_the_path() {
         struct Refusing;
         impl FileSystem for Refusing {
@@ -730,6 +919,9 @@ mod tests {
                 Err(Errno::PermissionDenied)
             }
             fn remove(&self, _path: &str) -> Result<(), Errno> {
+                Err(Errno::PermissionDenied)
+            }
+            fn canonicalize(&self, _path: &str, _mode: RealpathMode) -> Result<String, Errno> {
                 Err(Errno::PermissionDenied)
             }
         }

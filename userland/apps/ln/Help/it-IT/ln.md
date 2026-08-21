@@ -4,7 +4,7 @@ ln — creare collegamenti fra file
 
 ## SYNOPSIS
 
-`ln [-sLPdFfinvT] [-t dir] [--] target... [link_name]`
+`ln [-srLPdFfinvT] [-t dir] [--] target... [link_name]`
 
 ## DESCRIPTION
 
@@ -40,15 +40,23 @@ nomi devono stare su un solo volume, e a una directory non si dà mai un
 secondo nome: è perché l'albero dei file resta un albero che `..`
 indica la directory da cui si è realmente passati.
 
-`-b`/`-S` sono rifiutate perché non esiste alcun
-meccanismo di copia di sicurezza, e `-r` perché calcolare una
-destinazione relativa alla directory del collegamento richiede una
-risoluzione canonizzante che questo sistema non offre — una lessicale
-nominerebbe un altro oggetto appena vi fosse un collegamento.
+`-r` memorizza il bersaglio di un collegamento simbolico relativamente
+alla directory del collegamento stesso. Il filesystem canonizza prima
+entrambe le metà, quindi la differenza fra esse è esatta: due percorsi
+canonici non contengono `..` né collegamenti. La stessa aritmetica sugli
+operandi così come scritti nominerebbe un altro oggetto appena vi fosse
+un collegamento. `-r` richiede `-s`, perché un collegamento fisico non
+memorizza alcun bersaglio da rendere relativo.
+
+`-b`/`-S` sono rifiutate perché non esiste alcun meccanismo di copia di
+sicurezza.
 
 ## OPTIONS
 
 - `-s, --symbolic` — creare collegamenti simbolici anziché fisici.
+- `-r, --relative` — memorizzare il bersaglio di ogni collegamento
+  simbolico relativamente alla directory del collegamento. Richiede
+  `-s`.
 - `-L, --logical` — collegare fisicamente ciò che una destinazione
   simbolica nomina, anziché il collegamento stesso.
 - `-P, --physical` — collegare fisicamente la destinazione così come

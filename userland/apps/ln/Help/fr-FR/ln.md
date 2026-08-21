@@ -4,7 +4,7 @@ ln — créer des liens entre fichiers
 
 ## SYNOPSIS
 
-`ln [-sLPdFfinvT] [-t dir] [--] target... [link_name]`
+`ln [-srLPdFfinvT] [-t dir] [--] target... [link_name]`
 
 ## DESCRIPTION
 
@@ -39,15 +39,22 @@ doivent être sur un même volume, et un répertoire ne reçoit jamais de
 second nom — c'est parce que l'arborescence reste un arbre que `..`
 désigne le répertoire par lequel on est réellement passé.
 
-`-b`/`-S` sont refusées car il n'existe aucun mécanisme de
-sauvegarde à invoquer, et `-r` car calculer une cible relative au
-répertoire du lien exige une résolution canonisante que ce système
-n'offre pas — une résolution lexicale nommerait un autre objet dès
-qu'un lien serait impliqué.
+`-r` stocke la cible d'un lien symbolique relativement au répertoire du
+lien lui-même. Le système de fichiers canonise d'abord les deux moitiés,
+donc la différence entre elles est exacte : deux chemins canoniques ne
+contiennent ni `..` ni lien. Le même calcul sur les opérandes tels
+qu'écrits nommerait un autre objet dès qu'un lien serait impliqué. `-r`
+exige `-s`, car un lien matériel ne stocke aucune cible à rendre
+relative.
+
+`-b`/`-S` sont refusées car il n'existe aucun mécanisme de sauvegarde à
+invoquer.
 
 ## OPTIONS
 
 - `-s, --symbolic` — créer des liens symboliques plutôt que physiques.
+- `-r, --relative` — stocker la cible de chaque lien symbolique
+  relativement au répertoire du lien. Exige `-s`.
 - `-L, --logical` — lier physiquement ce que désigne la cible quand
   celle-ci est un lien symbolique, plutôt que le lien lui-même.
 - `-P, --physical` — lier physiquement la cible telle qu'écrite, sans

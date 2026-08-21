@@ -4,7 +4,7 @@ ln — creu cysylltiadau rhwng ffeiliau
 
 ## SYNOPSIS
 
-`ln [-sLPdFfinvT] [-t dir] [--] target... [link_name]`
+`ln [-srLPdFfinvT] [-t dir] [--] target... [link_name]`
 
 ## DESCRIPTION
 
@@ -38,15 +38,21 @@ nes tynnu'r enw olaf. Rhaid i'r ddau enw fod ar un gyfrol, ac ni roddir
 ail enw i gyfeiriadur byth — am fod y goeden ffeiliau'n aros yn goeden
 y mae `..` yn golygu'r cyfeiriadur y daethpwyd trwyddo mewn gwirionedd.
 
-Gwrthodir `-b`/`-S` am nad oes peiriannwaith wrth gefn i'w alw, a `-r`
-am fod cyfrifo targed cymharol i gyfeiriadur y cysylltiad yn galw am
-ddatrysiad canoneiddio nad yw'r system hon yn ei gynnig — byddai un
-geiriadurol yn enwi gwrthrych gwahanol cyn gynted ag y byddai
-cysylltiad yn y cwestiwn.
+Mae `-r` yn storio targed cyswllt symbolaidd yn gymharol i gyfeiriadur y
+cyswllt ei hun. Mae'r system ffeiliau'n canoneiddio'r ddwy hanner yn
+gyntaf, felly mae'r gwahaniaeth rhyngddynt yn union: nid yw dau lwybr
+canonaidd yn cynnwys `..` na chyswllt. Byddai'r un rhifyddeg ar yr
+operandau fel y'u hysgrifennwyd yn enwi gwrthrych gwahanol cyn gynted ag
+y byddai cysylltiad yn y cwestiwn. Mae angen `-s` ar `-r`, am nad yw
+cyswllt caled yn storio targed i'w wneud yn gymharol.
+
+Gwrthodir `-b`/`-S` am nad oes peiriannwaith wrth gefn i'w alw.
 
 ## OPTIONS
 
 - `-s, --symbolic` — creu cysylltiadau symbolaidd yn lle rhai caled.
+- `-r, --relative` — storio targed pob cyswllt symbolaidd yn gymharol i
+  gyfeiriadur y cyswllt ei hun. Mae angen `-s`.
 - `-L, --logical` — cysylltu'n galed yr hyn y mae targed symbolaidd
   yn ei enwi, yn hytrach na'r cysylltiad ei hun.
 - `-P, --physical` — cysylltu'n galed y targed fel y'i sillafwyd, heb

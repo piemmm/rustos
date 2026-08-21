@@ -461,6 +461,79 @@ impl LinkFlags {
     }
 }
 
+/// How much of a path
+/// [`SyscallNumber::FS_REALPATH`](crate::SyscallNumber::FS_REALPATH)
+/// requires to exist.
+///
+/// The three readings are **alternatives**, not modifiers, so they are one
+/// value rather than independent bits: a caller asks for exactly one, and
+/// two of them cannot be combined into a request with no meaning. They are
+/// GNU's three canonicalisation switches, one apiece — `realpath -e` /
+/// `readlink -e` is [`Existing`](Self::Existing), `readlink -f` is
+/// [`Final`](Self::Final), and `readlink -m` is
+/// [`Missing`](Self::Missing).
+///
+/// Every reading canonicalises the same way: each component is resolved in
+/// turn under the caller's attested identity, every symbolic link is
+/// followed (including one in the final position), and `..` names the
+/// directory the walk actually came through. They differ only in whether a
+/// component that does not exist ends the call or is carried through to the
+/// answer — never in how much authority is checked, because a component
+/// that does not exist has nothing to authorise.
+#[repr(u32)]
+#[derive(Copy, Clone, Debug, Default, Eq, PartialEq, Hash)]
+pub enum RealpathMode {
+    /// Every component must exist. The strictest reading, and the zero
+    /// value, so a caller that passes an uninitialised word gets it.
+    #[default]
+    Existing = 0,
+    /// Every component but the **last** must exist; a vacant final name is
+    /// carried into the answer. This is what names a file a caller is about
+    /// to create.
+    Final = 1,
+    /// No component need exist: resolution runs as far as the volume goes
+    /// and the components it could not resolve are appended unchanged.
+    Missing = 2,
+}
+
+impl RealpathMode {
+    /// The reading `raw` selects, rejecting any other value.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::OutOfRange`] if `raw` is not one of the three defined
+    /// readings (an unknown request is rejected at the boundary, never
+    /// silently treated as one of them).
+    pub const fn from_raw(raw: u32) -> Result<Self, Errno> {
+        match raw {
+            0 => Ok(Self::Existing),
+            1 => Ok(Self::Final),
+            2 => Ok(Self::Missing),
+            _ => Err(Errno::OutOfRange),
+        }
+    }
+
+    /// Raw value, as carried on the ABI.
+    #[must_use]
+    pub const fn as_u32(self) -> u32 {
+        self as u32
+    }
+
+    /// Whether a **vacant final name** is carried into the answer rather
+    /// than refused.
+    #[must_use]
+    pub const fn tolerates_vacant_final(self) -> bool {
+        matches!(self, Self::Final | Self::Missing)
+    }
+
+    /// Whether a **missing intermediate** component is carried into the
+    /// answer rather than refused.
+    #[must_use]
+    pub const fn tolerates_missing_intermediate(self) -> bool {
+        matches!(self, Self::Missing)
+    }
+}
+
 /// The stable, system-wide identity of a filesystem node.
 ///
 /// A node is identified by the pair `(volume, node)`: `volume` is the
@@ -850,7 +923,7 @@ mod tests {
     extern crate alloc;
     use super::{
         mode_string, DirEntries, DirEntry, FileId, FileKind, FileStat, NodeTimes, OpenFlags,
-        UnlinkFlags, FS_NAME_MAX, FS_PATH_MAX, FS_SYMLINK_MAX,
+        RealpathMode, UnlinkFlags, FS_NAME_MAX, FS_PATH_MAX, FS_SYMLINK_MAX,
     };
     use crate::time::Time64;
     use crate::Errno;
@@ -936,6 +1009,36 @@ mod tests {
         let dir_only = UnlinkFlags::from_bits(UnlinkFlags::DIRECTORY.bits()).unwrap();
         assert!(dir_only.is_directory_only());
         assert_eq!(dir_only, UnlinkFlags::DIRECTORY);
+    }
+
+    #[test]
+    fn realpath_modes_round_trip_and_reject_an_undefined_value() {
+        for mode in [
+            RealpathMode::Existing,
+            RealpathMode::Final,
+            RealpathMode::Missing,
+        ] {
+            assert_eq!(RealpathMode::from_raw(mode.as_u32()), Ok(mode));
+        }
+        // The strictest reading is the zero value, so an uninitialised word
+        // asks for the one that refuses the most.
+        assert_eq!(RealpathMode::default(), RealpathMode::Existing);
+        assert_eq!(RealpathMode::Existing.as_u32(), 0);
+        // An undefined value is refused, never rounded to a neighbour.
+        assert_eq!(RealpathMode::from_raw(3), Err(Errno::OutOfRange));
+        assert_eq!(RealpathMode::from_raw(u32::MAX), Err(Errno::OutOfRange));
+    }
+
+    #[test]
+    fn realpath_modes_differ_only_in_what_may_be_absent() {
+        // `-e`: everything must exist. `-f`: the final name need not.
+        // `-m`: nothing need.
+        assert!(!RealpathMode::Existing.tolerates_vacant_final());
+        assert!(!RealpathMode::Existing.tolerates_missing_intermediate());
+        assert!(RealpathMode::Final.tolerates_vacant_final());
+        assert!(!RealpathMode::Final.tolerates_missing_intermediate());
+        assert!(RealpathMode::Missing.tolerates_vacant_final());
+        assert!(RealpathMode::Missing.tolerates_missing_intermediate());
     }
 
     #[test]

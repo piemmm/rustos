@@ -4,7 +4,7 @@ readlink — afficher la cible d'un lien symbolique
 
 ## SYNOPSIS
 
-`readlink [-nz] [-q | -s | -v] [--] fichier...`
+`readlink [-fem] [-nz] [-q | -s | -v] [--] fichier...`
 
 ## DESCRIPTION
 
@@ -30,17 +30,28 @@ cibles sont ce qui les sépare.
 
 Au moins un opérande est requis. `--` termine l'analyse des options.
 
-Les options de canonisation GNU `-f`, `-e` et `-m` sont **refusées**, non
-approchées. Résoudre chaque composant d'un chemin — suivre chaque lien,
-traiter `..` physiquement, appliquer le budget de sauts et la règle
-qu'un lien ne peut sortir du volume qui le stocke — est l'unique
-implémentation du système de fichiers. Une seconde copie ici pourrait
-afficher un chemin que le système de fichiers résout autrement : l'option
-échoue donc, jusqu'à ce que le système de fichiers offre cette résolution
-lui-même.
+`-f`, `-e` et `-m` basculent au contraire vers la **canonisation** : le
+seul chemin qui désigne ce à quoi l'opérande se résout, chaque lien suivi
+et chaque `..` appliqué. Sous aucune d'elles l'opérande n'a besoin d'être
+un lien, et les trois ne diffèrent que par la part du chemin qui doit
+exister. Ce sont des alternatives et non des modificateurs : la dernière
+donnée l'emporte.
+
+Cette résolution appartient au système de fichiers — `..` physique,
+budget de sauts, contrôle du droit de recherche sur chaque répertoire
+traversé, et la règle qu'un lien ne peut se résoudre en dehors de ce que
+son montage projette — et cet outil l'*appelle* au lieu de suivre les
+liens lui-même. Une seconde copie de l'algorithme qui divergerait d'une
+règle afficherait un chemin que le système de fichiers résout autrement.
 
 ## OPTIONS
 
+- `-f, --canonicalize` — afficher le chemin canonique ; tous les
+  composants sauf le dernier doivent exister.
+- `-e, --canonicalize-existing` — afficher le chemin canonique ; tous
+  les composants doivent exister.
+- `-m, --canonicalize-missing` — afficher le chemin canonique ; aucun
+  composant n'a besoin d'exister.
 - `-n, --no-newline` — ne pas afficher le délimiteur après la dernière
   cible (ignoré, avec un signalement, pour plus d'un opérande).
 - `-z, --zero` — terminer chaque cible par NUL au lieu d'un saut de
@@ -56,6 +67,7 @@ lui-même.
 - `readlink Home:/Desktop/Notes` — afficher ce que stocke un raccourci.
 - `readlink -v alias` — l'afficher, et dire pourquoi si ce n'est pas un
   lien.
+- `readlink -f alias` — afficher ce à quoi il se résout, liens compris.
 - `readlink -z a b | tr '\0' '\n'` — cibles séparées par NUL pour un
   script.
 
@@ -64,8 +76,7 @@ lui-même.
 - `0` — la cible de chaque opérande a été affichée (ou l'aide courte a
   été écrite).
 - `1` — au moins une lecture a été refusée, ou la sortie a échoué.
-- `2` — la ligne de commande n'a pas été comprise, ou nommait une option
-  de canonisation.
+- `2` — la ligne de commande n'a pas été comprise.
 
 ## ENVIRONMENT
 

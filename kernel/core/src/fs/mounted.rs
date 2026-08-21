@@ -49,7 +49,8 @@ use tairix_abi::driver::DriverHandle;
 use tairix_abi::sysinfo::{MountAvailability, MountRecord, MountVolumeState, VolumeIoHealthRecord};
 use tairix_abi::time::Time64;
 use tairix_abi::{
-    CapabilityQuery, Errno, FileId, FileKind, FileStat, OpenFlags, UnlinkFlags, FS_MODE_MASK,
+    CapabilityQuery, Errno, FileId, FileKind, FileStat, OpenFlags, RealpathMode, UnlinkFlags,
+    FS_MODE_MASK,
 };
 use tairix_caps::CapabilitySet;
 use tairix_kernel_sec::{GroupId, IdentityTable, UserId};
@@ -1157,6 +1158,18 @@ where
     fn readlink(&self, uid: u32, caps: &dyn CapabilityQuery, path: &str) -> Result<String, Errno> {
         self.with_secured(uid, caps, path, |vfs, fs, cred, path| {
             vfs.readlink_via_secured(cred, path, fs)
+        })
+    }
+
+    fn realpath(
+        &self,
+        uid: u32,
+        caps: &dyn CapabilityQuery,
+        path: &str,
+        mode: RealpathMode,
+    ) -> Result<String, Errno> {
+        self.with_secured(uid, caps, path, |vfs, fs, cred, path| {
+            vfs.realpath_via_secured(cred, path, fs, mode)
         })
     }
 

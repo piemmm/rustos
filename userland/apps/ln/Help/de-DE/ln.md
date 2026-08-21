@@ -4,7 +4,7 @@ ln — Verknüpfungen zwischen Dateien erstellen
 
 ## SYNOPSIS
 
-`ln [-sLPdFfinvT] [-t dir] [--] target... [link_name]`
+`ln [-srLPdFfinvT] [-t dir] [--] target... [link_name]`
 
 ## DESCRIPTION
 
@@ -40,15 +40,21 @@ Beide Namen müssen auf einem Datenträger liegen, und ein Verzeichnis
 erhält niemals einen zweiten Namen — dass der Dateibaum ein Baum
 bleibt, gibt `..` erst seine Bedeutung.
 
-`-b`/`-S` werden abgewiesen, weil es keine Sicherungsmechanik gibt, und `-r`, weil ein
-zum Verzeichnis der Verknüpfung relatives Ziel eine kanonisierende
-Auflösung braucht, die dieses System nicht bietet — eine lexikalische
-würde ein anderes Objekt benennen, sobald eine Verknüpfung im Spiel
-ist.
+`-r` speichert das Ziel einer symbolischen Verknüpfung relativ zum
+Verzeichnis der Verknüpfung selbst. Beide Hälften kanonisiert zuerst das
+Dateisystem, daher ist der Unterschied exakt: zwei kanonische Pfade
+enthalten kein `..` und keine Verknüpfung. Dieselbe Rechnung auf den
+Operanden, wie geschrieben, würde ein anderes Objekt benennen, sobald
+eine Verknüpfung im Spiel ist. `-r` braucht `-s`, denn eine harte
+Verknüpfung speichert kein Ziel, das relativ werden könnte.
+
+`-b`/`-S` werden abgewiesen, weil es keine Sicherungsmechanik gibt.
 
 ## OPTIONS
 
 - `-s, --symbolic` — symbolische statt harte Verknüpfungen erstellen.
+- `-r, --relative` — das Ziel jeder symbolischen Verknüpfung relativ zum
+  Verzeichnis der Verknüpfung speichern. Erfordert `-s`.
 - `-L, --logical` — das benennen, worauf ein symbolisches Ziel zeigt,
   statt die Verknüpfung selbst hart zu verknüpfen.
 - `-P, --physical` — das Ziel genau wie geschrieben hart verknüpfen,

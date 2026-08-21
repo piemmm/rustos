@@ -1082,26 +1082,29 @@ platform floor).
   that will share a `strftime` engine exists. ARXFS does not track atime
   (reports `accessed` = epoch). **Remaining:** `touch`, `cp -p`/`-u`,
   `mv -u`, `date -r`.
-- **Stage E — VFS links (the platform half and the link commands are done;
-  `cp`'s link options remain).** Symbolic *and* hard links are real in the
-  VFS and ARXFS, and `ln` (both kinds, `-L`/`-P`/`-d`/`-F`), `ls -L`/`-H`
+- **Stage E — VFS links (done).** Symbolic *and* hard links are real in the
+  VFS and ARXFS, and `ln` (both kinds, `-L`/`-P`/`-d`/`-F`/`-r`), `ls -L`/`-H`
   and its link-count column, `du`'s deduplication of a multiply-named file
-  (over the node identity the `fs_readdir` record now carries), and the
-  `readlink`, `link` and `unlink` command apps have landed — the design is
-  `plans/SYMLINKS.md`, not a separate one.
+  (over the node identity the `fs_readdir` record now carries), `cp`'s link
+  options, and the `readlink`, `link` and `unlink` command apps have landed —
+  the design is `plans/SYMLINKS.md`, not a separate one.
 
   The three new bundles are deliberately **minimal**: `link` and `unlink`
   take exactly the operands their POSIX call takes and carry no option but
   the reserved short help, because `ln` and `rm` are the tools with the
   option surface — a script that must make one hard link, or remove one
   name, gets a tool that *cannot* replace a name, follow a link, or recurse.
-  `readlink` prints the stored spelling and **refuses** GNU's `-f`/`-e`/`-m`
-  canonicalisation: resolving every component of a path is the VFS's one
-  implementation (physical `..`, the hop budget, per-component permission
-  checks, a link that cannot escape its volume), and a userland copy that
-  disagreed by one rule would print a path the kernel resolves differently.
-  That is the `ln -r` / `du -x` posture — refused for a stated reason,
-  never stubbed — and it lifts when the VFS exposes canonicalisation itself.
+  `readlink` implements GNU's `-f`/`-e`/`-m` by **calling** the VFS's one
+  canonicalisation (`fs_realpath`, `plans/SYMLINKS.md` S8) rather than
+  walking links itself: physical `..`, the hop budget, a per-component
+  permission check, and the mount-projection floor are properties of that
+  walk, and a userland copy disagreeing by one of them would print a path the
+  kernel resolves differently. The three switches are alternatives choosing
+  how much of the path must exist, so they are one parsed value and the last
+  one given wins. `ln -r`/`--relative` is the other consumer: it spells the
+  difference between two *canonical* paths — exact, because neither holds a
+  `..` or a link — and is a usage error without `-s`, since a hard link
+  stores no target to make relative.
 
   `cp` gained the link options too: `-l` (a second name for the source's
   node instead of a copy of its bytes), `-s` (a symbolic link naming the
@@ -1122,12 +1125,43 @@ platform floor).
   Lifting the refusal means adding that call — an ABI + VFS + per-driver
   change, its own entry, not a corner of this stage.
 
-  **Remaining:** the Stage E list also named "`stat`'s link fields", but
-  **there is no `stat` command app in the tree** and none is planned
-  elsewhere in this document, so that line presupposes a bundle that does
-  not exist: authoring a GNU `stat` is a Stage-B-sized bundle of its own (a
-  `--format`/`--printf` grammar over every `FileStat` field), not a
-  link-field addition, and needs its own entry before it is built.
+  The Stage E list originally also named "`stat`'s link fields", which
+  presupposed a bundle that did not exist. Authoring a GNU `stat` is a
+  bundle of its own rather than a link-field addition, so it is Stage F.
+- **Stage F — `stat` (done).** A full self-contained store bundle
+  (console-write + `CAP_FS_ACCESS`, store-only) rendering the fields of one
+  `fs_stat` per operand: the default report, `-c`/`--format`, `--printf`
+  (the two differing in exactly the trailing newline and whether backslash
+  escapes are interpreted), `-t`/`--terse`, `-L`/`--dereference`, and
+  `-f`/`--file-system` with its own separate specifier vocabulary over the
+  volume's `VolumeStats`. A directive carries the printf flags, width, and
+  precision (`%-10s`, `%06i`, `%.3n`), so the report lines up in columns;
+  the default and terse forms are themselves formats, so there is one
+  renderer rather than a hand-written report per form.
+
+  **Without `-L` a link is described as itself**, which is what the tool is
+  for beside `ls`: the production seam opens `NO_FOLLOW`, so the descriptor's
+  flags fix the posture and the stat served for it cannot contradict the open.
+  `%m` and `%o` come from the System Information mount snapshot, keyed on the
+  *canonical* path (`fs_realpath`) and matched by whole components, so a link
+  into another volume reports the volume it lands on and `/vol` never claims
+  `/volume/x`; `%U` comes from the ungated user directory `whoami` reads.
+  Neither adds a capability.
+
+  **Four specifiers are refused by name rather than fabricated**, each for a
+  concept TAIRiX genuinely lacks: `%G` (the System Information API publishes a
+  user directory and no group counterpart, so `%g` is the honest field),
+  `%t`/`%T` of the file vocabulary (no device special files, so no major or
+  minor type — the `-t` terse form omits those two columns rather than
+  printing zeroes), and `%t` of the filesystem vocabulary (a volume has no
+  numeric type magic; `%T` names the type its mount records). The refusal is
+  decided when the format is parsed, before any path is touched, so a format
+  the platform cannot serve never half-renders. **Two specifiers report the
+  TAIRiX concept**: a volume is identified by a 16-byte id rather than a
+  device number, so `%d` is that id in decimal and `%D` in hex — comparing
+  two files' `%d` still answers exactly "are these on one volume?". A fact
+  that cannot be read renders `?` (or GNU's `UNKNOWN` for a name), never a
+  plausible substitute.
 
 ## 12.2 Terminal colour, the standard scheme, and box drawing
 

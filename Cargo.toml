@@ -212,6 +212,7 @@ members = [
     "userland/apps/setcap",
     "userland/apps/sleep",
     "userland/apps/ss",
+    "userland/apps/stat",
     "userland/apps/stress",
     "userland/apps/sysmon",
     "userland/apps/tail",

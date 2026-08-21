@@ -81,6 +81,7 @@ mutating ones a driver implementing both `FilesystemRead` and
 | `readlink_via` | Read a symbolic link's stored target.                |
 | `symlink_via`  | Create a symbolic link with a stored target.         |
 | `link_via`     | Add a second name for an existing node (hard link).  |
+| `realpath_via` | Canonicalise a path: every link followed, every `..` applied. |
 
 Each walks the in-RAM tree to the mount point — authorising **search
 permission on every ancestor** — then hands the remaining path components
@@ -102,7 +103,7 @@ Where that `Metadata` comes from is the one place the two policies differ:
   `list_via_secured`, `stat_via_secured`, `create_via_secured`,
   `mkdir_via_secured`, `write_via_secured`, `truncate_via_secured`,
   `remove_via_secured`, `readlink_via_secured`, `symlink_via_secured`,
-  `link_via_secured`) instead read **each node's own stored §5.3
+  `link_via_secured`, `realpath_via_secured`) instead read **each node's own stored §5.3
   record** through the driver's `FilesystemSecurity` surface and translate
   it (`Metadata::from_node_security`). The kernel host calls these for a
   driver such as [arxfs](./arxfs.md) that stores full per-inode owner,
@@ -172,10 +173,16 @@ only summarises, is `plans/SYMLINKS.md`.
   of the real nodes it passed through and `..` pops that stack, so it names
   the directory the resolution actually came through rather than one a
   link's spelling suggests.
-- **A link cannot escape the volume that stores it.** The stack starts at
-  the mounted volume's own root and never pops past it, so an absolute
-  target on a foreign volume resolves against *that volume's* root — a USB
-  stick's link cannot name `/System/Security`.
+- **A link cannot resolve outside what its mount projects.** The stack
+  starts at the root the covering mount projects and never pops past it, so
+  an absolute target on a foreign volume resolves against *that mount's*
+  root — a USB stick's link cannot name `/System/Security`. For a
+  **sub-mount** (a subtree of a larger volume bound at a mount point, such
+  as `/System/Logs`) the floor is the subtree's own root rather than the
+  driver's, so a link stored inside one cannot reach the rest of the volume
+  either, and every node a walk reaches has a path under the mount point.
+  That totality is what makes canonicalisation (below) able to name every
+  result.
 - **Following a link never bypasses a permission check.** A spliced
   target's components are authorised exactly as typed ones are: search
   permission is required on every directory the resolution traverses,
@@ -217,6 +224,39 @@ place, which is what makes a write reach the target rather than the link.
 | `link` (existing name) | per the call | An empty `LinkFlags` keeps it, so the *link* gains the second name and one planted on the way cannot redirect it onto an object the caller never spelled (POSIX `link()`); `LinkFlags::FOLLOW` follows it, so its target does instead (`linkat(AT_SYMLINK_FOLLOW)`, what `ln -L` asks for). |
 | `link` (new name) | kept | A name being created; a create never replaces an existing name. |
 | `chmod`, `chown`, extended attributes | followed | POSIX applies these to the target. |
+
+
+## Canonicalisation
+
+`realpath_via{,_secured}` answers the **one** path that names what a path
+resolves to: every symbolic link followed, every `..` applied to the nodes
+the walk really traversed, and the answer spelled in the caller's own
+namespace — the covering mount point followed by the canonical remainder.
+It is the same walk every other operation uses, so a caller cannot obtain a
+path the kernel would resolve elsewhere. `fs_realpath` (116) exposes it, and
+`readlink -f`/`-e`/`-m` and `ln -r` are its userland consumers; a tool must
+not canonicalise for itself, because a copy that disagreed by one rule would
+print a path the kernel resolves differently.
+
+`RealpathMode` chooses how much of the path must exist, and nothing else:
+
+| Mode | Requirement | GNU switch |
+| --- | --- | --- |
+| `Existing` | every component exists | `readlink -e` |
+| `Final` | every component but the last | `readlink -f` |
+| `Missing` | none need exist | `readlink -m` |
+
+A component that does not exist is carried into the answer unchanged, and a
+`..` below the deepest existing node pops that carried tail — the only
+reading available where no node exists to ascend from. Nothing above the
+deepest existing node is looked up, so `Missing` never leaks existence past
+a permission check: search permission on each traversed directory is proven
+*before* the child is looked up, exactly as for any other walk.
+
+The answer is always a path this VFS would accept back — at most
+`MAX_PATH_COMPONENTS` components and `FS_PATH_MAX` bytes, else
+`VfsError::InvalidPath` — so a caller can feed it straight into another
+call without being refused for spelling.
 
 ## Per-format link support
 

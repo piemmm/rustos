@@ -152,6 +152,7 @@ const NUM_FS_RENAME: u64 = SyscallNumber::FS_RENAME.as_u16() as u64;
 const NUM_FS_SYMLINK: u64 = SyscallNumber::FS_SYMLINK.as_u16() as u64;
 const NUM_FS_READLINK: u64 = SyscallNumber::FS_READLINK.as_u16() as u64;
 const NUM_FS_LINK: u64 = SyscallNumber::FS_LINK.as_u16() as u64;
+const NUM_FS_REALPATH: u64 = SyscallNumber::FS_REALPATH.as_u16() as u64;
 const NUM_FS_SET_MODE: u64 = SyscallNumber::FS_SET_MODE.as_u16() as u64;
 const NUM_FS_SET_OWNER: u64 = SyscallNumber::FS_SET_OWNER.as_u16() as u64;
 const NUM_FS_ATTR_GET: u64 = SyscallNumber::FS_ATTR_GET.as_u16() as u64;
@@ -2490,6 +2491,44 @@ pub extern "C" fn sys_fs_readlink(
     }
 }
 
+/// `fs_realpath`: canonicalise the absolute path `(path, path_len)` into
+/// `(out, out_len)` (`SyscallNumber::FS_REALPATH`). Returns the canonical
+/// path's length in bytes, or a negated `TAIRIX_E_*` code.
+///
+/// Requires `TAIRIX_CAP_FS_ACCESS`. Every symbolic link and every `..` is
+/// resolved by the kernel's own resolution — `..` names the directory the
+/// walk really came through, a cycle fails closed with
+/// `TAIRIX_E_LINK_LOOP`, and search permission is required on every
+/// directory passed through — so the answer holds no `.`, `..`, or link.
+/// `mode` is a `TAIRIX_REALPATH_MODE_*` value deciding how much of the path
+/// must exist; an undefined value fails closed with `TAIRIX_E_OUT_OF_RANGE`, and
+/// an `out` too small for the whole path fails closed rather than returning
+/// a prefix that names a different node.
+#[must_use]
+#[export_name = "tairix_sys_fs_realpath"]
+pub extern "C" fn sys_fs_realpath(
+    path: *mut c_void,
+    path_len: usize,
+    out: *mut c_void,
+    out_len: usize,
+    mode: u32,
+) -> u64 {
+    // SAFETY: see `sys_ipc_send`; the kernel validates both `(ptr, len)`.
+    unsafe {
+        raw_syscall(
+            NUM_FS_REALPATH,
+            [
+                ptr_arg(path),
+                path_len as u64,
+                ptr_arg(out),
+                out_len as u64,
+                u64::from(mode),
+                0,
+            ],
+        )
+    }
+}
+
 /// `fs_set_mode`: set the permission bits of the file or directory at the
 /// absolute path `(path, path_len)` to `mode` (`SyscallNumber::FS_SET_MODE`,
 /// the `chmod(2)` shape). Returns a `TAIRIX_E_*` code.
@@ -2969,6 +3008,7 @@ mod tests {
         (NUM_FS_SYMLINK, "fs_symlink", 4),
         (NUM_FS_READLINK, "fs_readlink", 4),
         (NUM_FS_LINK, "fs_link", 5),
+        (NUM_FS_REALPATH, "fs_realpath", 5),
         (NUM_CALL_PEER_ORIGIN, "call_peer_origin", 4),
         (NUM_WALL_TIME_GET, "wall_time_get", 2),
         (NUM_WALL_TIME_SET, "wall_time_set", 3),

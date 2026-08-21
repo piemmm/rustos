@@ -21,7 +21,9 @@ use tairix_abi::driver::filesystem::{
 };
 use tairix_abi::driver::DriverHandle;
 use tairix_abi::sysinfo::MountAvailability;
-use tairix_abi::{CapabilityId, Errno, FileKind, OpenFlags, UnlinkFlags, FS_OWNER_UNCHANGED};
+use tairix_abi::{
+    CapabilityId, Errno, FileKind, OpenFlags, RealpathMode, UnlinkFlags, FS_OWNER_UNCHANGED,
+};
 use tairix_caps::CapabilitySet;
 use tairix_kernel_sec::{
     GroupId, GroupRecord, IdentityTable, IdentityTableBuilder, UserId, UserRecord,
@@ -381,6 +383,21 @@ fn service(
 /// A fully-installed writable service (the common case).
 fn ready() -> MountedFilesystemService<RwMockFs> {
     service(true, true, false)
+}
+
+/// A fully-installed writable service whose created directories are
+/// traversable (mode `0o755`), so a test can build a tree and then walk it.
+fn ready_traversable() -> MountedFilesystemService<RwMockFs> {
+    let cell: &'static LateFilesystem<RwMockFs> = Box::leak(Box::new(LateFilesystem::new()));
+    cell.install_vfs(vfs(false)).expect("install vfs");
+    let handle = DriverHandle::from_raw(9).expect("non-zero handle");
+    cell.register(handle, dir_driver(), "vol", "memfs", [0u8; 16])
+        .expect("register driver");
+    let identity: &'static LateIdentity = Box::leak(Box::new(LateIdentity::new()));
+    identity
+        .install(identity_table())
+        .expect("install identity");
+    MountedFilesystemService::new(cell, identity)
 }
 
 fn path(name: &str) -> alloc::string::String {
@@ -1995,5 +2012,335 @@ fn mkdir_over_a_link_reports_it_as_already_existing() {
     assert_eq!(
         svc.stat(TEST_UID, &caps, &path("absent"), FinalLink::Keep),
         Err(Errno::NotFound)
+    );
+}
+
+/// A symbolic link stored inside a **sub-mount** cannot resolve to a node
+/// the mount does not project: an absolute target names the mount's own
+/// root, and `..` cannot climb above it.
+///
+/// The volume carries a decoy `inside` at its own root and the real one
+/// inside the projected subtree, so each link's resolution names exactly one
+/// of them and the assertion distinguishes a clamped walk from a walk floored
+/// at the driver root.
+#[test]
+fn a_link_in_a_submount_cannot_resolve_outside_the_projected_subtree() {
+    let h = DriverHandle::from_raw(9).expect("handle");
+
+    let mut volume = dir_driver();
+    let vroot = volume.root();
+    // The decoy: same name, at the volume root, outside what the mount
+    // projects.
+    volume
+        .create(vroot, b"inside", NodeKind::RegularFile)
+        .expect("decoy");
+    let area = volume
+        .create(vroot, b"Area", NodeKind::Directory)
+        .expect("subtree");
+    volume
+        .create(area, b"inside", NodeKind::RegularFile)
+        .expect("projected file");
+    volume
+        .create_link(area, b"abs", b"/inside")
+        .expect("absolute link");
+    volume
+        .create_link(area, b"up", b"../inside")
+        .expect("ascending link");
+    volume
+        .write_at(vroot, b"inside", 0, b"V")
+        .expect("decoy contents");
+    volume
+        .write_at(area, b"inside", 0, b"I")
+        .expect("projected contents");
+
+    let mut vfs = Vfs::with_default_layout(UserId(TEST_UID), GroupId(TEST_GID));
+    let caps = caps();
+    let cred = Credentials {
+        uid: UserId(TEST_UID),
+        gid: GroupId(TEST_GID),
+        supplementary_gids: &[],
+        caps: &caps,
+    };
+    vfs.mkdir(
+        &cred,
+        &Path::parse("/Storage/area").expect("path"),
+        Mode::from_bits(0o755),
+    )
+    .expect("mount point");
+    vfs.mounts_write()
+        .mount_rebased(
+            Path::parse("/Storage/area").expect("path"),
+            MountFlags::NOSUID,
+            Some(MountBacking::new(h, None)),
+            alloc::vec![alloc::string::String::from("Area")],
+        )
+        .expect("rebased mount");
+
+    let cell: &'static LateFilesystem<RwMockFs> = Box::leak(Box::new(LateFilesystem::new()));
+    cell.install_vfs(vfs).expect("install vfs");
+    cell.register(h, volume, "vol", "memfs", [0u8; 16])
+        .expect("register");
+    let identity: &'static LateIdentity = Box::leak(Box::new(LateIdentity::new()));
+    identity.install(identity_table()).expect("identity");
+    let svc = MountedFilesystemService::new(cell, identity);
+
+    let mut buf = [0u8; 1];
+    // An absolute target names the mount's own root, so it reaches the
+    // projected file rather than the volume-root decoy.
+    assert_eq!(
+        svc.read(TEST_UID, &caps, "/Storage/area/abs", 0, &mut buf),
+        Ok(1)
+    );
+    assert_eq!(&buf, b"I");
+    // `..` is floored at the projected root, so ascending from the subtree
+    // stays inside it.
+    assert_eq!(
+        svc.read(TEST_UID, &caps, "/Storage/area/up", 0, &mut buf),
+        Ok(1)
+    );
+    assert_eq!(&buf, b"I");
+}
+
+// --- canonicalisation at the service seam ------------------------------
+//
+// The resolution matrix itself is the VFS's (`delegate_tests`); what these
+// cases pin down is the answer's *spelling* — a `/`-view path in the
+// caller's own namespace, mount point included — and the three readings of
+// how much of a path must exist.
+
+#[test]
+fn realpath_resolves_every_link_and_reports_a_view_path() {
+    let svc = ready_traversable();
+    let caps = caps();
+    let create = OpenFlags::CREATE.union(OpenFlags::WRITE);
+
+    svc.mkdir(TEST_UID, &caps, &path("dir")).expect("dir");
+    svc.open(TEST_UID, &caps, &path("dir/file"), create)
+        .expect("file");
+    // An interior link and a final link, so one answer proves both are
+    // followed.
+    svc.symlink(TEST_UID, &caps, "/dir", &path("d"))
+        .expect("interior link");
+    svc.symlink(TEST_UID, &caps, "file", &path("dir/f"))
+        .expect("final link");
+
+    let canonical = alloc::format!("{MOUNT}/dir/file");
+    for spelling in ["dir/file", "d/file", "dir/f", "d/f"] {
+        assert_eq!(
+            svc.realpath(TEST_UID, &caps, &path(spelling), RealpathMode::Existing),
+            Ok(canonical.clone()),
+            "canonicalising {spelling}"
+        );
+    }
+    // The mount point itself is its own canonical name.
+    assert_eq!(
+        svc.realpath(TEST_UID, &caps, MOUNT, RealpathMode::Existing),
+        Ok(alloc::string::String::from(MOUNT))
+    );
+}
+
+#[test]
+fn realpath_resolves_dot_dot_through_a_link_physically() {
+    let svc = ready_traversable();
+    let caps = caps();
+    let create = OpenFlags::CREATE.union(OpenFlags::WRITE);
+
+    // A caller may not spell `..` — the path grammar refuses it — so the
+    // only `..` a resolution ever meets comes from a link's stored target.
+    // `here/link` names `/there`, and `/there/up` stores `../sibling`: the
+    // `..` must pop the directory the walk really came through (`/there`),
+    // reaching the real `/sibling`, never the `/here/sibling` decoy a
+    // lexical collapse of `here/link/..` would name. Both exist, so a
+    // lexical answer would look plausible.
+    svc.mkdir(TEST_UID, &caps, &path("here")).expect("here");
+    svc.mkdir(TEST_UID, &caps, &path("there")).expect("there");
+    svc.open(TEST_UID, &caps, &path("sibling"), create)
+        .expect("real sibling");
+    svc.open(TEST_UID, &caps, &path("here/sibling"), create)
+        .expect("decoy sibling");
+    svc.symlink(TEST_UID, &caps, "/there", &path("here/link"))
+        .expect("link");
+    svc.symlink(TEST_UID, &caps, "../sibling", &path("there/up"))
+        .expect("ascending link");
+
+    assert_eq!(
+        svc.realpath(
+            TEST_UID,
+            &caps,
+            &path("here/link/up"),
+            RealpathMode::Existing
+        ),
+        Ok(alloc::format!("{MOUNT}/sibling"))
+    );
+}
+
+#[test]
+fn realpath_modes_decide_how_much_of_the_path_must_exist() {
+    let svc = ready_traversable();
+    let caps = caps();
+
+    svc.mkdir(TEST_UID, &caps, &path("dir")).expect("dir");
+
+    // A vacant final name: refused by `-e`, named by `-f` and `-m`.
+    let vacant = path("dir/absent");
+    let vacant_canonical = alloc::format!("{MOUNT}/dir/absent");
+    assert_eq!(
+        svc.realpath(TEST_UID, &caps, &vacant, RealpathMode::Existing),
+        Err(Errno::NotFound)
+    );
+    for mode in [RealpathMode::Final, RealpathMode::Missing] {
+        assert_eq!(
+            svc.realpath(TEST_UID, &caps, &vacant, mode),
+            Ok(vacant_canonical.clone())
+        );
+    }
+
+    // A missing *ancestor*: only `-m` names it.
+    let deep = path("gone/away/leaf");
+    for mode in [RealpathMode::Existing, RealpathMode::Final] {
+        assert_eq!(
+            svc.realpath(TEST_UID, &caps, &deep, mode),
+            Err(Errno::NotFound)
+        );
+    }
+    assert_eq!(
+        svc.realpath(TEST_UID, &caps, &deep, RealpathMode::Missing),
+        Ok(alloc::format!("{MOUNT}/gone/away/leaf"))
+    );
+}
+
+#[test]
+fn realpath_of_a_dangling_link_follows_its_target() {
+    let svc = ready_traversable();
+    let caps = caps();
+
+    svc.mkdir(TEST_UID, &caps, &path("dir")).expect("dir");
+    // A dangling link whose parent exists: `-f` names the target, `-e`
+    // refuses it. The link's own name is never the answer.
+    svc.symlink(TEST_UID, &caps, "/dir/nothing", &path("dangling"))
+        .expect("dangling link");
+    let link = path("dangling");
+    assert_eq!(
+        svc.realpath(TEST_UID, &caps, &link, RealpathMode::Existing),
+        Err(Errno::NotFound)
+    );
+    assert_eq!(
+        svc.realpath(TEST_UID, &caps, &link, RealpathMode::Final),
+        Ok(alloc::format!("{MOUNT}/dir/nothing"))
+    );
+
+    // A dangling link whose target's *parent* is absent too: `-f` refuses
+    // it (only the last component may be missing), `-m` names it.
+    svc.symlink(TEST_UID, &caps, "/gone/leaf", &path("deeper"))
+        .expect("deeper link");
+    let deeper = path("deeper");
+    assert_eq!(
+        svc.realpath(TEST_UID, &caps, &deeper, RealpathMode::Final),
+        Err(Errno::NotFound)
+    );
+    assert_eq!(
+        svc.realpath(TEST_UID, &caps, &deeper, RealpathMode::Missing),
+        Ok(alloc::format!("{MOUNT}/gone/leaf"))
+    );
+}
+
+#[test]
+fn realpath_refuses_a_cycle_and_needs_search_permission_on_the_way() {
+    let svc = ready_traversable();
+    let caps = caps();
+
+    svc.symlink(TEST_UID, &caps, "/loop", &path("loop"))
+        .expect("self-cycle");
+    for mode in [
+        RealpathMode::Existing,
+        RealpathMode::Final,
+        RealpathMode::Missing,
+    ] {
+        assert_eq!(
+            svc.realpath(TEST_UID, &caps, &path("loop"), mode),
+            Err(Errno::LinkLoop),
+            "a cycle is refused under every reading"
+        );
+    }
+
+    // A directory nobody may search — its owner included, since TAIRiX has
+    // no ambient root — hides what is under it from canonicalisation exactly
+    // as it does from a read. Asked under the most permissive reading, so it
+    // is the permission check refusing and not the absence.
+    svc.mkdir(TEST_UID, &caps, &path("closed")).expect("closed");
+    svc.set_mode(TEST_UID, &caps, &path("closed"), 0o600)
+        .expect("drop the search bit");
+    assert_eq!(
+        svc.realpath(
+            TEST_UID,
+            &caps,
+            &path("closed/inside"),
+            RealpathMode::Missing
+        ),
+        Err(Errno::PermissionDenied)
+    );
+}
+
+#[test]
+fn realpath_answers_a_submount_with_its_own_mount_point() {
+    // A sub-mount projects a subtree, so a canonical path names the mount
+    // point rather than the subtree's path on the backing volume — and a
+    // link inside it that tries to escape resolves within the projection.
+    let h = DriverHandle::from_raw(9).expect("handle");
+    let mut volume = dir_driver();
+    let vroot = volume.root();
+    let area = volume
+        .create(vroot, b"Area", NodeKind::Directory)
+        .expect("subtree");
+    volume
+        .create(area, b"inside", NodeKind::RegularFile)
+        .expect("file");
+    volume
+        .create_link(area, b"up", b"../inside")
+        .expect("ascending link");
+
+    let mut vfs = Vfs::with_default_layout(UserId(TEST_UID), GroupId(TEST_GID));
+    let caps = caps();
+    let cred = Credentials {
+        uid: UserId(TEST_UID),
+        gid: GroupId(TEST_GID),
+        supplementary_gids: &[],
+        caps: &caps,
+    };
+    vfs.mkdir(
+        &cred,
+        &Path::parse("/Storage/area").expect("path"),
+        Mode::from_bits(0o755),
+    )
+    .expect("mount point");
+    vfs.mounts_write()
+        .mount_rebased(
+            Path::parse("/Storage/area").expect("path"),
+            MountFlags::NOSUID,
+            Some(MountBacking::new(h, None)),
+            alloc::vec![alloc::string::String::from("Area")],
+        )
+        .expect("rebased mount");
+    let cell: &'static LateFilesystem<RwMockFs> = Box::leak(Box::new(LateFilesystem::new()));
+    cell.install_vfs(vfs).expect("install vfs");
+    cell.register(h, volume, "vol", "memfs", [0u8; 16])
+        .expect("register");
+    let identity: &'static LateIdentity = Box::leak(Box::new(LateIdentity::new()));
+    identity.install(identity_table()).expect("identity");
+    let svc = MountedFilesystemService::new(cell, identity);
+
+    let canonical = alloc::string::String::from("/Storage/area/inside");
+    assert_eq!(
+        svc.realpath(
+            TEST_UID,
+            &caps,
+            "/Storage/area/inside",
+            RealpathMode::Existing
+        ),
+        Ok(canonical.clone())
+    );
+    assert_eq!(
+        svc.realpath(TEST_UID, &caps, "/Storage/area/up", RealpathMode::Existing),
+        Ok(canonical)
     );
 }

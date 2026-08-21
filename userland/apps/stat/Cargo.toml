@@ -1,0 +1,54 @@
+[package]
+name = "tairix-stat"
+description = "TAIRiX `stat` CLI: report a file's or a filesystem's status (`plans/APPS.md` §12.1 Stage F)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+# The `Run` binary's freestanding userland runtime (`tairix-rt`) is an
+# optional, on-by-default build feature. `cargo build -p tairix-stat` builds
+# the tool program with it; host tooling builds only the pure *library*, so
+# the host test build never pulls the userland runtime's `_start` /
+# `#[global_allocator]` / panic handler.
+[features]
+default = ["program"]
+program = ["dep:tairix-rt"]
+
+# The package is both the `tairix-stat` library (the pure option grammar,
+# format grammar, and report engine) and the `Run` entry-point binary of the
+# `stat` tool. The binary is a freestanding pure-Rust program on the native
+# Tier-1 targets and an inert host stub elsewhere (see `src/run.rs`).
+[[bin]]
+name = "tairix-stat-run"
+path = "src/run.rs"
+
+[dependencies]
+# The frozen wire vocabulary: `FileStat`, `FileKind`, `VolumeStats`,
+# `Time64`, `Errno`, and the one `mode_string` renderer `ls` also prints.
+tairix-abi = { path = "../../../lib/abi", version = "=0.0.0" }
+# The one civil-date breakdown (`AGENTS.md` §2.2): `%x`/`%y`/`%z`/`%w`
+# decompose a `Time64` through the same `CivilTime` `ls`'s date column and
+# the login clock use, never a second calendar.
+tairix-fsmeta = { path = "../../../lib/fsmeta", version = "=0.0.0" }
+# The one help engine: locale fallback, the bounded structured-Markdown
+# parser, and the shared own-bundle short-help render the `-?`/`--help`
+# switches use (plans/APPS.md).
+tairix-help = { path = "../../../lib/help", version = "=0.0.0" }
+
+# For the freestanding `Run` binary only: the userland runtime `tairix-rt`
+# (`_start`, canary, panic handler, `mem_map` allocator, and the
+# standard-stream I/O), and the System Information client the mount
+# snapshot and the user directory are read through.
+[target.'cfg(target_os = "none")'.dependencies]
+tairix-rt = { path = "../../../lib/rt", version = "=0.0.0", optional = true }
+tairix-help = { path = "../../../lib/help", version = "=0.0.0", features = ["rt"] }
+# The `sysinfo-v1` client: the ungated `MOUNT_LIST` and `USER_DIRECTORY`
+# queries behind `-f`, `%m`, `%o`, and `%U` — the same client `df` and
+# `whoami` read, never a second request encoder.
+tairix-procinfo = { path = "../../../lib/procinfo", version = "=0.0.0", features = ["program"] }

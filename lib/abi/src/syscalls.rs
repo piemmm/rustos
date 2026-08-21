@@ -2831,6 +2831,26 @@ pub const SYSCALLS: &[SyscallSpec] = &[
         // changes when the node's storage is freed; audited like fs_symlink.
         audit: true,
     },
+    SyscallSpec {
+        number: SyscallNumber::FS_REALPATH,
+        name: "fs_realpath",
+        arg_count: 5,
+        args: [
+            // path ptr/len, then the caller's output buffer.
+            AbiType::UserPtr,
+            AbiType::Len,
+            AbiType::UserPtr,
+            AbiType::Len,
+            // The validated `RealpathMode` value: how much of the path must
+            // exist. An undefined value fails closed at dispatch.
+            AbiType::U32,
+            AbiType::Unit,
+        ],
+        ret: AbiType::U64,
+        required_capability: Some(CapabilityId::FS_ACCESS),
+        // A pure read like fs_readlink; not audited per call.
+        audit: false,
+    },
 ];
 
 /// Length, in bytes, of the canonical encoding stored in

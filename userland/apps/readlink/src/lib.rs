@@ -8,26 +8,29 @@
 //! made. An operand that is not a symbolic link has no target to print and
 //! is refused.
 //!
+//! `-f`/`-e`/`-m` switch to *canonicalisation* instead: the one path that
+//! names what the operand resolves to, with every link followed and every
+//! `..` applied. The three are alternatives choosing how much of the path
+//! must exist, so they are one value rather than three flags and the last
+//! one given wins — GNU's own rule. Under any of them the operand need not
+//! be a link at all.
+//!
 //! `-z` ends each line with NUL instead of newline, `-n` drops the final
 //! delimiter, and `-v`/`-q`/`-s` select whether a refusal is diagnosed —
 //! quiet is the GNU default. `-?`/`--help` render the tool's own short help
 //! from its bundled `Help/` tree through the shared `lib/help` engine
 //! (plans/APPS.md §4).
 //!
-//! # Why `-f`/`-e`/`-m` are refused rather than implemented
+//! # Canonicalisation is the kernel's, called rather than re-derived
 //!
-//! GNU's three canonicalisation switches resolve *every* component of a
-//! path, following each link they meet. That resolution already exists,
-//! exactly once, inside the VFS — with its physical `..`, its hop budget,
-//! its per-component permission checks, and its rule that a link cannot
-//! escape the volume that stores it (`plans/SYMLINKS.md`). Re-deriving it
-//! here from `fs_readlink` calls would be a second implementation of a
-//! security-relevant algorithm, and a userland copy that disagreed with the
-//! kernel by one rule would print a path the kernel resolves differently.
-//! So the three switches fail closed with [`ReadlinkError::Unsupported`]
-//! until the VFS exposes its own canonicalisation, rather than being
-//! stubbed or approximated — the same posture `ln` takes for `-r` and `du`
-//! for `-x`.
+//! Resolving every component of a path exists exactly once, inside the VFS
+//! — with its physical `..`, its hop budget, its per-component permission
+//! checks, and its rule that a link cannot resolve outside what its mount
+//! projects (`plans/SYMLINKS.md`). This tool therefore *calls* it through
+//! `fs_realpath` rather than walking links itself: a userland copy of that
+//! algorithm that disagreed with the kernel by one rule would print a path
+//! the kernel resolves differently, which is a security-relevant
+//! divergence and not merely a duplicate.
 //!
 //! # What this crate is
 //!
@@ -35,7 +38,8 @@
 //! operand's target and renders the lines. Everything that touches the
 //! outside world is an injected seam:
 //!
-//! * [`Filesystem`] — read one link's stored target.
+//! * [`Filesystem`] — read one link's stored target, or canonicalise one
+//!   path.
 //! * [`Output`] — the printed targets (fd 1) and the diagnostics (fd 2).
 //! * [`tairix_help::HelpSource`] — the tool's own `Help/` tree, read by the
 //!   short-help switches.
@@ -64,24 +68,31 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use core::fmt;
 
-use tairix_abi::Errno;
+use tairix_abi::{Errno, RealpathMode};
 use tairix_help::{own_short_help, HelpSource};
 
 /// The usage banner a usage error is reported with, and the fallback the
 /// short-help switches print when `readlink`'s own Help tree is
 /// unavailable.
 pub const USAGE: &str = "\
-usage: readlink [-nz] [-q | -s | -v] [--] file...
+usage: readlink [-fem] [-nz] [-q | -s | -v] [--] file...
 
-  -n, --no-newline  do not print the delimiter after the last target
-  -z, --zero        end each target with NUL instead of newline
-  -q, -s            do not diagnose a refused read (the default)
-  -v, --verbose     diagnose a refused read on standard error
-  -?, --help        show this message
+  -f, --canonicalize            resolve every component; all but the last
+                                  must exist
+  -e, --canonicalize-existing   resolve every component; all must exist
+  -m, --canonicalize-missing    resolve every component; none need exist
+  -n, --no-newline              do not print the delimiter after the last
+                                  target
+  -z, --zero                    end each target with NUL instead of newline
+  -q, -s                        do not diagnose a refused read (the default)
+  -v, --verbose                 diagnose a refused read on standard error
+  -?, --help                    show this message
 
-At least one operand is required. `--` ends option parsing. Each target
-is printed as stored, never resolved: use ls -l to see a link beside
-what it names.
+At least one operand is required. `--` ends option parsing. Without
+-f/-e/-m each operand must be a symbolic link and its target is printed
+as stored, never resolved; with one of them the operand may be anything
+and the kernel's own canonical path is printed. The last of -f/-e/-m
+given wins.
 ";
 
 /// `readlink`'s own command word: the short-help switches render its own
@@ -94,10 +105,6 @@ pub enum ReadlinkError {
     /// The command line carried an unrecognised option or named no operand.
     /// The caller should print [`USAGE`]. Nothing is printed.
     Usage,
-    /// A canonicalisation switch (`-f`, `-e`, `-m`) was given. Carries the
-    /// switch as spelled. The VFS owns path resolution, so this tool
-    /// refuses rather than re-deriving it (see the crate documentation).
-    Unsupported(String),
     /// Writing a target or a diagnostic failed. Carries the underlying
     /// [`Errno`]; a stream that stops accepting bytes is fatal.
     Output(Errno),
@@ -107,11 +114,6 @@ impl fmt::Display for ReadlinkError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Usage => f.write_str("invalid usage"),
-            Self::Unsupported(switch) => write!(
-                f,
-                "{switch} is not available: path canonicalisation is the filesystem's, \
-                 and this tool will not re-derive it"
-            ),
             Self::Output(errno) => write!(f, "terminal write failed: {errno}"),
         }
     }
@@ -120,6 +122,14 @@ impl fmt::Display for ReadlinkError {
 /// The parsed switches of a `readlink` run.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct Options {
+    /// `-f`/`-e`/`-m`: canonicalise instead of reading a stored target, and
+    /// how much of the path must exist. [`None`] is the default reading —
+    /// print the operand's own stored target.
+    ///
+    /// One value rather than three flags because the three switches are
+    /// alternatives, not modifiers: they cannot combine into a request with
+    /// no meaning, and the last one given simply replaces the others.
+    pub canonicalize: Option<RealpathMode>,
     /// `-n`/`--no-newline`: omit the delimiter after the last target.
     /// Ignored, with a diagnostic, when more than one operand is named —
     /// the GNU behaviour, because the delimiters between targets are what
@@ -162,7 +172,6 @@ pub enum Command {
 /// # Errors
 ///
 /// * [`ReadlinkError::Usage`] on an unrecognised option or no operand.
-/// * [`ReadlinkError::Unsupported`] for `-f`/`-e`/`-m`.
 pub fn parse(args: &[&str]) -> Result<Command, ReadlinkError> {
     let mut options = Options::default();
     let mut paths = Vec::new();
@@ -179,8 +188,12 @@ pub fn parse(args: &[&str]) -> Result<Command, ReadlinkError> {
                     "zero" => options.zero = true,
                     "verbose" => options.verbose = true,
                     "silent" | "quiet" => options.verbose = false,
-                    "canonicalize" | "canonicalize-existing" | "canonicalize-missing" => {
-                        return Err(ReadlinkError::Unsupported(String::from(arg)))
+                    "canonicalize" => options.canonicalize = Some(RealpathMode::Final),
+                    "canonicalize-existing" => {
+                        options.canonicalize = Some(RealpathMode::Existing);
+                    }
+                    "canonicalize-missing" => {
+                        options.canonicalize = Some(RealpathMode::Missing);
                     }
                     "help" => return Ok(Command::Help),
                     _ => return Err(ReadlinkError::Usage),
@@ -196,9 +209,9 @@ pub fn parse(args: &[&str]) -> Result<Command, ReadlinkError> {
                         'z' => options.zero = true,
                         'v' => options.verbose = true,
                         'q' | 's' => options.verbose = false,
-                        'f' | 'e' | 'm' => {
-                            return Err(ReadlinkError::Unsupported(format!("-{letter}")))
-                        }
+                        'f' => options.canonicalize = Some(RealpathMode::Final),
+                        'e' => options.canonicalize = Some(RealpathMode::Existing),
+                        'm' => options.canonicalize = Some(RealpathMode::Missing),
                         '?' => return Ok(Command::Help),
                         _ => return Err(ReadlinkError::Usage),
                     }
@@ -214,7 +227,7 @@ pub fn parse(args: &[&str]) -> Result<Command, ReadlinkError> {
     Ok(Command::Print { options, paths })
 }
 
-/// Reads a symbolic link's stored target.
+/// Reads a symbolic link's stored target, or canonicalises a path.
 pub trait Filesystem {
     /// The target the link at `path` stores, exactly as stored.
     ///
@@ -229,6 +242,19 @@ pub trait Filesystem {
     /// [`Errno::NotSupported`] on a format that stores no links, or a
     /// permission refusal.
     fn read_link(&self, path: &str) -> Result<String, Errno>;
+
+    /// The canonical path of `path` under `mode`, as the kernel resolves it.
+    ///
+    /// Every component is resolved, every link followed and every `..`
+    /// applied to the nodes the resolution really traversed, so the answer
+    /// holds no `.`, `..`, or link. `path` need not name a link.
+    ///
+    /// # Errors
+    ///
+    /// Any [`Errno`] the kernel raises — [`Errno::NotFound`] when `mode`
+    /// requires a component that is absent, [`Errno::LinkLoop`] for a cycle
+    /// or an over-budget chain, or a permission refusal.
+    fn realpath(&self, path: &str, mode: RealpathMode) -> Result<String, Errno>;
 }
 
 /// Writes rendered bytes to one of the tool's output streams.
@@ -285,7 +311,11 @@ pub fn run(
     let mut clean = true;
     let last = paths.len() - 1;
     for (index, path) in paths.iter().enumerate() {
-        match fs.read_link(path) {
+        let answer = match options.canonicalize {
+            Some(mode) => fs.realpath(path, mode),
+            None => fs.read_link(path),
+        };
+        match answer {
             Ok(target) => {
                 out.write_all(target.as_bytes())
                     .map_err(ReadlinkError::Output)?;

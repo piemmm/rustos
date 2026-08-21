@@ -139,6 +139,7 @@ extern "C" {
 #define TAIRIX_SYS_FS_SYMLINK 113u
 #define TAIRIX_SYS_FS_READLINK 114u
 #define TAIRIX_SYS_FS_LINK 115u
+#define TAIRIX_SYS_FS_REALPATH 116u
 
 /* wait() flag bits (uint32_t). Every undefined bit is reserved and must be zero;
 * with the NONBLOCK bit set, wait() polls and returns TAIRIX_E_WOULD_BLOCK when a
@@ -225,6 +226,15 @@ typedef struct tairix_spawn_attach {
 * name is given to what it names (the linkat(AT_SYMLINK_FOLLOW) posture). The new
 * name is never followed under either. */
 #define TAIRIX_LINK_FLAG_FOLLOW 0x1u
+
+/* fs_realpath() mode (uint32_t). The three readings are alternatives, so this is
+* one value rather than bits, and any other value is rejected with
+* TAIRIX_E_OUT_OF_RANGE. EXISTING requires every component to exist, FINAL lets
+* the last one be absent, and MISSING lets any of them be. All three resolve
+* identically otherwise. */
+#define TAIRIX_REALPATH_MODE_EXISTING 0u
+#define TAIRIX_REALPATH_MODE_FINAL 1u
+#define TAIRIX_REALPATH_MODE_MISSING 2u
 
 /* fs_set_mode() permission-bit mask (the `mode` argument, uint32_t): the
 * owner/group/other rwx triads plus the setuid/setgid/sticky bits. A mode
@@ -415,6 +425,7 @@ uint64_t tairix_sys_futex_wake(void * a0, uint32_t a1);
 int32_t tairix_sys_fs_symlink(void * a0, uintptr_t a1, void * a2, uintptr_t a3);
 uint64_t tairix_sys_fs_readlink(void * a0, uintptr_t a1, void * a2, uintptr_t a3);
 int32_t tairix_sys_fs_link(void * a0, uintptr_t a1, void * a2, uintptr_t a3, uint32_t a4);
+uint64_t tairix_sys_fs_realpath(void * a0, uintptr_t a1, void * a2, uintptr_t a3, uint32_t a4);
 
 #ifdef __cplusplus
 } /* extern "C" */

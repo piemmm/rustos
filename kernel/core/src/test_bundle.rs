@@ -13,7 +13,7 @@ use tairix_abi::rxe::{LoadHeader, RxePermission, Segment, LOAD_FLAG_PIE};
 use tairix_abi::ProgramKind;
 use tairix_abi::{
     BundleFileDigest, CapabilityId, CapabilityQuery, Errno, FileId, FileKind, FileStat, NodeTimes,
-    OpenFlags, UnlinkFlags, ABI_VERSION_CURRENT, LOAD_MAGIC,
+    OpenFlags, RealpathMode, UnlinkFlags, ABI_VERSION_CURRENT, LOAD_MAGIC,
 };
 use tairix_appload::{AppError, AppLoader, AppLoaderConfig, Clock, LoadedApp};
 use tairix_caps::CapabilitySet;
@@ -268,6 +268,16 @@ impl FilesystemService for MemFs {
         _uid: u32,
         _caps: &dyn CapabilityQuery,
         _path: &str,
+    ) -> Result<String, Errno> {
+        Err(Errno::NotSupported)
+    }
+
+    fn realpath(
+        &self,
+        _uid: u32,
+        _caps: &dyn CapabilityQuery,
+        _path: &str,
+        _mode: RealpathMode,
     ) -> Result<String, Errno> {
         Err(Errno::NotSupported)
     }

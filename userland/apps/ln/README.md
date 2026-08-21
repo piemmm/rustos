@@ -26,20 +26,21 @@ name, because the tree staying a tree is what makes the resolver's physical
 addresses an inode in its own backing — so a pair that crosses one is
 `CrossVolume`.
 
-Two GNU switches are deliberately refused rather than approximated, neither
-for a reason about hard links:
+`-r`/`--relative` stores a symbolic link's target relative to the link's own
+directory. It asks the **kernel** to canonicalise both halves first
+(`fs_realpath`) and then spells the difference: two canonical paths hold no
+`..` and no link, so the arithmetic is exact. Doing it on the operands as
+typed would be the lexical-`..` collapse the resolver forbids
+(`plans/SYMLINKS.md` decision 4) — it would name a different node the moment
+a link were involved. `-r` without `-s` is a usage error, because a hard link
+stores no target to make relative.
 
-- `-b`/`--backup` and `-S`/`--suffix` — this workspace has no backup
-  machinery at all (`cp` and `mv` omit them for the same reason), so a
-  "backup" would be a name the tool invented.
-- `-r`/`--relative` — computing a target relative to the link's own
-  directory needs a canonicalising path resolution (`realpath`) the ABI does
-  not offer. A *lexical* approximation would name a different node the moment
-  a link were involved, which is exactly the lexical-`..` collapse the
-  resolver forbids (`plans/SYMLINKS.md` decision 4).
-
-Every refusal is a usage error naming the switch; nothing is silently
-ignored. The divergences are documented in the tool's `Help/` documents.
+One GNU switch group stays refused rather than approximated, for a reason
+that is not about links: `-b`/`--backup` and `-S`/`--suffix`, because this
+workspace has no backup machinery at all (`cp` and `mv` omit them for the
+same reason), so a "backup" would be a name the tool invented. The refusal
+is a usage error naming the switch; nothing is silently ignored, and the
+divergence is documented in the tool's `Help/` documents.
 
 ## A target is data, not a path the tool walks
 

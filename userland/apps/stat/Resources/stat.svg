@@ -1,0 +1,27 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256">
+  <title>stat</title>
+  <!-- A document with a magnifier over it: the file, and its fields being
+       read out rather than its bytes. The page is a polygon with a folded
+       corner, the field lines are bars, and the magnifier is an octagonal
+       ring with a handle bar, because the desktop's SVG subset has no
+       curves, no strokes and no transforms. -->
+
+  <!-- Tile: rounded square, corners cut as integer line segments -->
+  <polygon fill="#3A5EA8" points="20,60 22,44 30,31 43,22 60,20 196,20 213,22 226,31 234,44 236,60 236,196 234,213 226,226 213,234 196,236 60,236 43,234 30,226 22,213 20,196"/>
+  <polygon fill="#4B72BF" points="20,60 22,44 30,31 43,22 60,20 196,20 213,22 226,31 234,44 236,60 236,92 20,92"/>
+
+  <!-- The page, with its corner folded -->
+  <polygon fill="#FFFFFF" points="56,52 152,52 192,92 192,204 56,204"/>
+  <polygon fill="#C8D6F0" points="152,52 192,92 152,92"/>
+
+  <!-- The fields: four bars, the last one short -->
+  <polygon fill="#3A5EA8" points="76,110 172,110 172,122 76,122"/>
+  <polygon fill="#3A5EA8" points="76,134 172,134 172,146 76,146"/>
+  <polygon fill="#3A5EA8" points="76,158 172,158 172,170 76,170"/>
+  <polygon fill="#7E9AD4" points="76,182 128,182 128,194 76,194"/>
+
+  <!-- The magnifier: an octagonal ring plus its handle -->
+  <polygon fill="#FFE08A" points="120,152 128,132 148,124 168,132 176,152 168,172 148,180 128,172"/>
+  <polygon fill="#4B72BF" points="132,152 138,138 148,134 158,138 164,152 158,166 148,170 138,166"/>
+  <polygon fill="#FFE08A" points="164,168 180,152 216,188 200,204"/>
+</svg>
