@@ -14,13 +14,13 @@ use alloc::vec::Vec;
 
 use tairix_abi::driver::filesystem::{
     FilesystemAttrs, FilesystemRead, FilesystemSecurity, FilesystemWrite, MountFlags,
-    NodeInfo as DriverNodeInfo, NodeKind as DriverNodeKind,
+    NodeKind as DriverNodeKind,
 };
 use tairix_abi::CapabilityId;
 use tairix_kernel_sec::{GroupId, UserId};
 use tairix_sync::{RwLock, RwLockReadGuard, RwLockWriteGuard};
 
-use super::delegate::{DelegatedFs, DelegatedInfo, FinalLink};
+use super::delegate::{DelegatedEntry, DelegatedFs, DelegatedInfo, FinalLink};
 use super::mount::MountTable;
 use super::path::{Path, ROOT_TEMPLATE};
 use super::perm::{Access, Credentials, Metadata, Mode};
@@ -181,8 +181,9 @@ impl Vfs {
     }
 
     /// List a directory under a driver-backed mount, delegating to `fs`.
-    /// Each entry carries the structural [`DriverNodeInfo`] and the
-    /// last-modification stamp the listing
+    /// Each [`DelegatedEntry`] carries the child's driver node number and
+    /// the structural [`NodeInfo`](tairix_abi::driver::filesystem::NodeInfo)
+    /// the listing
     /// driver reports, so a caller never re-resolves a child by path (a
     /// child path shadowed by another mount would be judged against the
     /// wrong volume, and each re-resolution would be a fresh full walk).
@@ -203,7 +204,7 @@ impl Vfs {
         path: &Path,
         fs: &mut dyn FilesystemRead,
         final_link: FinalLink,
-    ) -> Result<Vec<(DriverNodeInfo, String)>, VfsError> {
+    ) -> Result<Vec<DelegatedEntry>, VfsError> {
         let (template, remainder) = self.delegate_context(cred, path, false)?;
         DelegatedFs::new(fs, template).list(cred, &remainder, final_link)
     }
@@ -503,7 +504,7 @@ impl Vfs {
         path: &Path,
         fs: &mut F,
         final_link: FinalLink,
-    ) -> Result<Vec<(DriverNodeInfo, String)>, VfsError> {
+    ) -> Result<Vec<DelegatedEntry>, VfsError> {
         let (template, remainder) = self.delegate_context(cred, path, false)?;
         DelegatedFs::new_secured(fs, template).list(cred, &remainder, final_link)
     }

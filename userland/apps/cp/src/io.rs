@@ -8,57 +8,144 @@
 //! `cat`'s `FileSource`, `ls`'s `Listing`, `rm`'s `Removal`).
 
 use alloc::string::String;
-use tairix_abi::Errno;
+use tairix_abi::{Errno, FileId};
 
 /// What kind of object a path or directory entry is, as far as `cp` cares.
 ///
-/// The distinction `cp` needs is only "directory or not": a directory is
-/// reproduced (with `-r`) by [`FileSystem::mkdir`] and a recursive descent,
-/// while everything else — a regular file, a symbolic link followed to its
-/// target, a device node — is copied as a stream of bytes.
+/// A directory is reproduced (with `-r`) by [`FileSystem::mkdir`] and a
+/// recursive descent; a symbolic link is a third kind because `-P`/`-d`
+/// reproduce the *link* rather than what it names, and `-s` creates one;
+/// everything else — a regular file, a device node, a link followed to its
+/// target — is copied as a stream of bytes.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum EntryKind {
     /// A directory, whose entries `cp -r` reproduces under the destination.
     Directory,
-    /// Any non-directory object, copied as a byte stream.
+    /// Any non-directory, non-link object, copied as a byte stream.
     File,
+    /// A symbolic link. Only ever reported under [`Follow::Keep`]: a
+    /// following probe reports what the link names.
+    Symlink,
 }
 
-/// One directory entry: a name and its [`EntryKind`].
+/// Whether a probe describes the final component as typed or what it names.
+///
+/// `cp`'s default follows a final symbolic link — a copy of a link to a file
+/// is a copy of the file — while `-P`/`-d` keep it, so the *link* is
+/// reproduced. One operand rather than two seam methods, so the two
+/// postures cannot drift apart.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Follow {
+    /// Resolve a final symbolic link and describe what it names.
+    Target,
+    /// Describe the final component itself, so a link reports
+    /// [`EntryKind::Symlink`].
+    Keep,
+}
+
+/// What one probe learned about a path: what it is, and the identity that
+/// tells a second *name* for one node from a second node.
+///
+/// The identity and name count ride along because the one `fs_stat` (or the
+/// one directory listing) already reported them, and `--preserve=links`
+/// needs exactly them: without the identity, two sources naming one node are
+/// indistinguishable from two files and the copy would duplicate the data.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct Probe {
+    /// What kind of object it is.
+    pub kind: EntryKind,
+    /// Its stable system-wide identity. [`FileId::NONE`] for a backing that
+    /// offers none, which is therefore never compared for equality.
+    pub id: FileId,
+    /// How many directory entries name the node. A node named once cannot
+    /// be reached twice, which is what bounds `--preserve=links`' map to
+    /// the hard links a copy actually meets.
+    pub nlink: u32,
+}
+
+/// One directory entry: a name and what a probe of it found.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Entry {
     /// The entry's name within its directory (not a full path, and never
     /// `.` or `..` — the seam does not surface those).
     pub name: String,
-    /// What kind of object the entry is.
-    pub kind: EntryKind,
+    /// What the listing reported for it, as a [`Follow::Keep`] probe would:
+    /// a listing describes each child itself, never what a link names.
+    pub probe: Probe,
 }
 
 /// Inspects paths, reads sources, and creates destinations.
 ///
-/// The client first asks [`kind`](FileSystem::kind) what a source is. A
+/// The client first asks [`probe`](FileSystem::probe) what a source is. A
 /// non-directory source is streamed through [`read`](FileSystem::read) into a
 /// destination created with [`create`](FileSystem::create) and filled with
-/// [`write`](FileSystem::write). A directory source is reproduced by creating
-/// the destination directory with [`mkdir`](FileSystem::mkdir) (when it does
-/// not already exist), enumerating the source with
+/// [`write`](FileSystem::write) — unless a switch replaces the byte copy with
+/// a link: `-l` calls [`link`](FileSystem::link), `-s` calls
+/// [`symlink`](FileSystem::symlink), and `-P`/`-d` reproduce a link source
+/// through [`read_link`](FileSystem::read_link) plus
+/// [`symlink`](FileSystem::symlink). A directory source is reproduced by
+/// creating the destination directory with [`mkdir`](FileSystem::mkdir) (when
+/// it does not already exist), enumerating the source with
 /// [`read_dir`](FileSystem::read_dir) — calling it with an increasing `index`
-/// until it returns [`None`] — and recursing. [`remove_file`](FileSystem::remove_file)
+/// until it returns [`None`] — and recursing.
+/// [`remove_file`](FileSystem::remove_file)
 /// backs `-f`: a destination that cannot be created is removed and the create
 /// retried once.
 pub trait FileSystem {
-    /// Return the [`EntryKind`] of `path`.
+    /// Describe `path` under the given follow posture.
     ///
-    /// A final symbolic link is followed: a link to a regular file reports
-    /// [`EntryKind::File`]. A missing path reports [`Errno::NotFound`], which
-    /// the client treats as "absent" when probing a destination.
+    /// Under [`Follow::Target`] a final symbolic link is resolved, so a link
+    /// to a regular file reports [`EntryKind::File`]; under [`Follow::Keep`]
+    /// it reports [`EntryKind::Symlink`]. A missing path reports
+    /// [`Errno::NotFound`], which the client treats as "absent" when probing
+    /// a destination.
     ///
     /// # Errors
     ///
     /// Any [`Errno`] the filesystem raises — e.g. [`Errno::NotFound`] for a
     /// missing path or [`Errno::PermissionDenied`] when the caller may not
     /// reach it.
-    fn kind(&self, path: &str) -> Result<EntryKind, Errno>;
+    fn probe(&self, path: &str, follow: Follow) -> Result<Probe, Errno>;
+
+    /// The target the symbolic link at `path` stores, exactly as stored.
+    ///
+    /// Called only for a source a [`Follow::Keep`] probe reported as
+    /// [`EntryKind::Symlink`], so `-P`/`-d` can reproduce the link by
+    /// storing the same target. The target is data: it may be relative, may
+    /// carry `..`, and may name nothing, and it is reproduced verbatim
+    /// rather than resolved.
+    ///
+    /// # Errors
+    ///
+    /// Any [`Errno`] the filesystem raises while reading the link.
+    fn read_link(&self, path: &str) -> Result<String, Errno>;
+
+    /// Create the symbolic link `link` storing `target` verbatim.
+    ///
+    /// Backs `-s` (a link to each source) and the reproduction half of
+    /// `-P`/`-d` (a link storing what the source link stored).
+    ///
+    /// # Errors
+    ///
+    /// Any [`Errno`] the filesystem raises — [`Errno::AlreadyExists`] for a
+    /// taken name (a create never replaces one), or [`Errno::NotSupported`]
+    /// on a format that stores no links.
+    fn symlink(&self, target: &str, link: &str) -> Result<(), Errno>;
+
+    /// Add `new` as a second directory entry for the node `existing` names.
+    ///
+    /// Backs `-l` (link each source instead of copying it) and
+    /// `--preserve=links` (a second source naming one node becomes a second
+    /// name at the destination rather than a second copy). Neither name is
+    /// followed.
+    ///
+    /// # Errors
+    ///
+    /// Any [`Errno`] the filesystem raises — [`Errno::AlreadyExists`] for a
+    /// taken name, [`Errno::CrossVolume`] when the two names are on
+    /// different volumes, or [`Errno::NotSupported`] on a format that stores
+    /// one name per node.
+    fn link(&self, existing: &str, new: &str) -> Result<(), Errno>;
 
     /// Read up to `buf.len()` bytes of `path` starting at `offset`, returning
     /// the number of bytes written into `buf` (`0` at end-of-file).

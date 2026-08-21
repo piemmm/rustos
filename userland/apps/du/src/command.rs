@@ -3,7 +3,8 @@
 //! The option surface follows GNU coreutils `du`: `-a` reports every
 //! file, `-s` only the operands, `-c` appends a grand total, `-d`
 //! bounds the reported depth, `-S` excludes subdirectories from a
-//! directory's own row, `--apparent-size`/`-b` measure apparent bytes
+//! directory's own row, `-l` counts a multiply-named file once per name
+//! instead of once, `--apparent-size`/`-b` measure apparent bytes
 //! instead of allocated storage, and the unit options (`-k`, `-m`,
 //! `-h`, `--si`, `-B <size>`, `-b`) select the reporting scale, the
 //! later selection winning as in the GNU tool. `-0` NUL-terminates
@@ -55,6 +56,9 @@ pub struct Options {
     pub max_depth: Option<u64>,
     /// A directory's row excludes its subdirectories (`-S`).
     pub separate_dirs: bool,
+    /// Count a multiply-named file once per name rather than once
+    /// (`-l`/`--count-links`), the GNU opt-out of the deduplication.
+    pub count_links: bool,
     /// End each row with NUL instead of newline (`-0`).
     pub null_terminated: bool,
 }
@@ -70,6 +74,7 @@ impl Default for Options {
             scale: SizeScale::Blocks(1024),
             max_depth: None,
             separate_dirs: false,
+            count_links: false,
             null_terminated: false,
         }
     }
@@ -120,7 +125,6 @@ impl fmt::Display for ParseError {
 /// with the usage banner and exits `2`.
 pub fn parse(args: &[&str]) -> Result<Command, ParseError> {
     let mut options = Options::default();
-    let mut depth_selected = false;
     let mut index = 0;
     let mut options_ended = false;
     while index < args.len() {
@@ -134,93 +138,128 @@ pub fn parse(args: &[&str]) -> Result<Command, ParseError> {
             options_ended = true;
             continue;
         }
-        if let Some(long) = arg.strip_prefix("--") {
-            let (name, attached) = match long.split_once('=') {
-                Some((name, value)) => (name, Some(value)),
-                None => (long, None),
-            };
-            match name {
-                "help" => return Ok(Command::Help),
-                "all" => options.all = true,
-                "summarize" => options.summarize = true,
-                "total" => options.grand_total = true,
-                "apparent-size" => options.apparent_size = true,
-                "human-readable" => options.scale = SizeScale::HumanBinary,
-                "si" => options.scale = SizeScale::HumanDecimal,
-                "separate-dirs" => options.separate_dirs = true,
-                "null" => options.null_terminated = true,
-                "bytes" => {
-                    options.apparent_size = true;
-                    options.scale = SizeScale::Blocks(1);
-                }
-                "block-size" => {
-                    let value = take_value(attached, args, &mut index, "--block-size")?;
-                    options.scale = parse_block_size(value)
-                        .ok_or_else(|| ParseError::BadBlockSize(value.to_string()))?;
-                }
-                "max-depth" => {
-                    let value = take_value(attached, args, &mut index, "--max-depth")?;
-                    options.max_depth = Some(
-                        value
-                            .parse()
-                            .map_err(|_| ParseError::BadMaxDepth(value.to_string()))?,
-                    );
-                    depth_selected = true;
-                }
-                _ => return Err(ParseError::UnknownOption(arg.to_string())),
-            }
-            continue;
-        }
-        // A short-option cluster; `-B` and `-d` consume the rest of the
-        // cluster (or the next argument) as their value.
-        let mut cluster = arg[1..].chars();
-        while let Some(flag) = cluster.next() {
-            match flag {
-                '?' => return Ok(Command::Help),
-                'a' => options.all = true,
-                's' => options.summarize = true,
-                'c' => options.grand_total = true,
-                'S' => options.separate_dirs = true,
-                '0' => options.null_terminated = true,
-                'h' => options.scale = SizeScale::HumanBinary,
-                'k' => options.scale = SizeScale::Blocks(1024),
-                'm' => options.scale = SizeScale::Blocks(1024 * 1024),
-                'b' => {
-                    options.apparent_size = true;
-                    options.scale = SizeScale::Blocks(1);
-                }
-                'B' => {
-                    let rest = cluster.as_str();
-                    let value = take_cluster_value(rest, args, &mut index, "-B")?;
-                    options.scale = parse_block_size(value)
-                        .ok_or_else(|| ParseError::BadBlockSize(value.to_string()))?;
-                    break;
-                }
-                'd' => {
-                    let rest = cluster.as_str();
-                    let value = take_cluster_value(rest, args, &mut index, "-d")?;
-                    options.max_depth = Some(
-                        value
-                            .parse()
-                            .map_err(|_| ParseError::BadMaxDepth(value.to_string()))?,
-                    );
-                    depth_selected = true;
-                    break;
-                }
-                other => return Err(ParseError::UnknownOption(format!("-{other}"))),
-            }
+        let applied = if arg.starts_with("--") {
+            apply_long(arg, args, &mut index, &mut options)?
+        } else {
+            apply_short_cluster(arg, args, &mut index, &mut options)?
+        };
+        if matches!(applied, Applied::Help) {
+            return Ok(Command::Help);
         }
     }
     if options.summarize && options.all {
         return Err(ParseError::SummarizeConflictsWithAll);
     }
-    if options.summarize && depth_selected {
+    // `-d` is the only option that sets a depth during the scan, so a depth
+    // already present is exactly the `-s`/`-d` conflict.
+    if options.summarize && options.max_depth.is_some() {
         return Err(ParseError::SummarizeConflictsWithDepth);
     }
     if options.summarize {
         options.max_depth = Some(0);
     }
     Ok(Command::Report(options))
+}
+
+/// What one option argument asked for.
+enum Applied {
+    /// A short-help switch: nothing else on the command line matters.
+    Help,
+    /// The option was recorded in the caller's [`Options`].
+    Recorded,
+}
+
+/// Apply one `--name[=value]` argument. `arg` carries its `--` prefix so a
+/// refusal names the option exactly as the caller spelled it.
+fn apply_long(
+    arg: &str,
+    args: &[&str],
+    index: &mut usize,
+    options: &mut Options,
+) -> Result<Applied, ParseError> {
+    let (name, attached) = match arg[2..].split_once('=') {
+        Some((name, value)) => (name, Some(value)),
+        None => (&arg[2..], None),
+    };
+    match name {
+        "help" => return Ok(Applied::Help),
+        "all" => options.all = true,
+        "summarize" => options.summarize = true,
+        "total" => options.grand_total = true,
+        "apparent-size" => options.apparent_size = true,
+        "human-readable" => options.scale = SizeScale::HumanBinary,
+        "si" => options.scale = SizeScale::HumanDecimal,
+        "separate-dirs" => options.separate_dirs = true,
+        "count-links" => options.count_links = true,
+        "null" => options.null_terminated = true,
+        "bytes" => {
+            options.apparent_size = true;
+            options.scale = SizeScale::Blocks(1);
+        }
+        "block-size" => {
+            let value = take_value(attached, args, index, "--block-size")?;
+            options.scale = parse_block_size(value)
+                .ok_or_else(|| ParseError::BadBlockSize(value.to_string()))?;
+        }
+        "max-depth" => {
+            let value = take_value(attached, args, index, "--max-depth")?;
+            options.max_depth = Some(
+                value
+                    .parse()
+                    .map_err(|_| ParseError::BadMaxDepth(value.to_string()))?,
+            );
+        }
+        _ => return Err(ParseError::UnknownOption(arg.to_string())),
+    }
+    Ok(Applied::Recorded)
+}
+
+/// Apply one short-option cluster (`arg` carries its leading `-`).
+///
+/// `-B` and `-d` take a value, consuming the rest of the cluster (`-B1M`) or
+/// the next argument (`-B 1M`), so they end the cluster.
+fn apply_short_cluster(
+    arg: &str,
+    args: &[&str],
+    index: &mut usize,
+    options: &mut Options,
+) -> Result<Applied, ParseError> {
+    let mut cluster = arg[1..].chars();
+    while let Some(flag) = cluster.next() {
+        match flag {
+            '?' => return Ok(Applied::Help),
+            'a' => options.all = true,
+            's' => options.summarize = true,
+            'c' => options.grand_total = true,
+            'S' => options.separate_dirs = true,
+            'l' => options.count_links = true,
+            '0' => options.null_terminated = true,
+            'h' => options.scale = SizeScale::HumanBinary,
+            'k' => options.scale = SizeScale::Blocks(1024),
+            'm' => options.scale = SizeScale::Blocks(1024 * 1024),
+            'b' => {
+                options.apparent_size = true;
+                options.scale = SizeScale::Blocks(1);
+            }
+            'B' => {
+                let value = take_cluster_value(cluster.as_str(), args, index, "-B")?;
+                options.scale = parse_block_size(value)
+                    .ok_or_else(|| ParseError::BadBlockSize(value.to_string()))?;
+                break;
+            }
+            'd' => {
+                let value = take_cluster_value(cluster.as_str(), args, index, "-d")?;
+                options.max_depth = Some(
+                    value
+                        .parse()
+                        .map_err(|_| ParseError::BadMaxDepth(value.to_string()))?,
+                );
+                break;
+            }
+            other => return Err(ParseError::UnknownOption(format!("-{other}"))),
+        }
+    }
+    Ok(Applied::Recorded)
 }
 
 /// The value of a `--name value` / `--name=value` long option.
@@ -303,6 +342,14 @@ mod tests {
         assert!(options.null_terminated);
         assert_eq!(options.scale, SizeScale::Blocks(1024));
         assert_eq!(options.paths, vec!["docs".to_string(), "notes".to_string()]);
+    }
+
+    #[test]
+    fn count_links_opts_out_of_the_deduplication() {
+        assert!(!report(&[]).count_links, "deduplication is the default");
+        assert!(report(&["-l"]).count_links);
+        assert!(report(&["--count-links"]).count_links);
+        assert!(report(&["-al"]).count_links);
     }
 
     #[test]

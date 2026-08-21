@@ -31,6 +31,11 @@ pub enum TargetMode {
 }
 
 /// The full option set of one `cp` run.
+// The bools mirror GNU `cp`'s independent switches one-to-one (the `ls`/`rm`/
+// `du` Options precedent); folding them into state enums would obscure the
+// grammar they transcribe. The two that *are* alternatives rather than
+// independent flags — `-l`/`-s` — are the `Contents` enum below.
+#[allow(clippy::struct_excessive_bools)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Options {
     /// Descend into and reproduce directories (`-r`/`-R`). Without it, a
@@ -44,6 +49,30 @@ pub struct Options {
     pub verbose: bool,
     /// How the destination operand is interpreted (`-t` / `-T`).
     pub target_mode: TargetMode,
+    /// What a non-directory source becomes at the destination (`-l` / `-s`).
+    pub contents: Contents,
+    /// Reproduce a symbolic-link source as a link rather than following it
+    /// (`-P`/`--no-dereference`; `-d` sets this and `preserve_links`).
+    pub no_dereference: bool,
+    /// Give two sources naming one node two names at the destination rather
+    /// than two copies (`--preserve=links`; `-d` sets this too).
+    pub preserve_links: bool,
+}
+
+/// What a non-directory source becomes at the destination.
+///
+/// `-l` and `-s` are alternatives to copying the bytes, not modifiers of it,
+/// so they are one state rather than two flags — the later of the two wins,
+/// as in the GNU tool, and neither can silently combine with the other.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum Contents {
+    /// A copy of the source's bytes (the default).
+    #[default]
+    Bytes,
+    /// A second name for the source's own node (`-l`/`--link`).
+    HardLink,
+    /// A symbolic link naming the source (`-s`/`--symbolic-link`).
+    SymbolicLink,
 }
 
 impl Options {
@@ -54,6 +83,9 @@ impl Options {
         clobber: Clobber::Overwrite,
         verbose: false,
         target_mode: TargetMode::Inferred,
+        contents: Contents::Bytes,
+        no_dereference: false,
+        preserve_links: false,
     };
 }
 
@@ -78,16 +110,76 @@ pub enum Command {
     Help,
 }
 
+/// What one `--name[=value]` argument asked for, beyond the options it
+/// already recorded.
+enum Long {
+    /// A short-help switch: nothing else on the command line matters.
+    Help,
+    /// `--target-directory=dir`, carrying the directory.
+    TargetDirectory(String),
+    /// `--no-target-directory`.
+    NoTargetDirectory,
+    /// The option was recorded in the caller's [`Options`].
+    Recorded,
+}
+
+/// Apply one `--name[=value]` argument. `arg` carries its `--` prefix so a
+/// refusal names the option exactly as the caller spelled it.
+///
+/// # Errors
+///
+/// [`CpError::Usage`] for an unrecognised option or an empty `-t` value, and
+/// [`CpError::Unsupported`] for `-a`/`--archive` and the `--preserve` members
+/// this system cannot honour completely.
+fn apply_long(arg: &str, options: &mut Options) -> Result<Long, CpError> {
+    let name = &arg[2..];
+    if let Some(dir) = name.strip_prefix("target-directory=") {
+        if dir.is_empty() {
+            return Err(CpError::Usage);
+        }
+        return Ok(Long::TargetDirectory(String::from(dir)));
+    }
+    match name {
+        "recursive" => options.recursive = true,
+        "force" => options.force = true,
+        "interactive" => options.clobber = Clobber::Prompt,
+        "no-clobber" => options.clobber = Clobber::Skip,
+        "verbose" => options.verbose = true,
+        "no-target-directory" => return Ok(Long::NoTargetDirectory),
+        "link" => options.contents = Contents::HardLink,
+        "symbolic-link" => options.contents = Contents::SymbolicLink,
+        "no-dereference" => options.no_dereference = true,
+        "preserve=links" => options.preserve_links = true,
+        // `-a` is `-dR --preserve=all`, and `--preserve=all` includes the
+        // timestamps no call can set yet, so it is refused rather than
+        // delivered as a silently narrower `-dR`. `--preserve=links` is the
+        // one member of the set this tool can honour.
+        "archive" | "preserve" => return Err(CpError::Unsupported(String::from(arg))),
+        "help" => return Ok(Long::Help),
+        _ if name.starts_with("preserve=") => return Err(CpError::Unsupported(String::from(arg))),
+        _ => return Err(CpError::Usage),
+    }
+    Ok(Long::Recorded)
+}
+
 /// Parse `args` (the tool's arguments, excluding the program name) into a
 /// [`Command`].
 ///
 /// The grammar is the GNU `cp` surface,
-/// `cp [-finrRvT] [-t dir] [--] source... dest`:
+/// `cp [-dfilnPrRsvT] [-t dir] [--] source... dest`:
 ///
 /// * `-r` / `-R` / `--recursive` — copy directories and their contents.
 /// * `-f` / `--force` — remove an unwritable destination and retry.
 /// * `-i` / `--interactive` — ask before overwriting an existing file.
 /// * `-n` / `--no-clobber` — never overwrite an existing file.
+/// * `-l` / `--link` — a second name for the source's node, not a copy.
+/// * `-s` / `--symbolic-link` — a symbolic link naming the source.
+/// * `-P` / `--no-dereference` — reproduce a link source as a link.
+/// * `--preserve=links` — keep two sources' shared node shared.
+/// * `-d` — `-P` and `--preserve=links` together.
+/// * `-a` / `--archive` and the other `--preserve` members — a
+///   [`CpError::Unsupported`] refusal: `--preserve=all` includes the
+///   timestamps no call can set here, so they are not honoured in part.
 /// * `-v` / `--verbose` — report each copy.
 /// * `-t dir` / `--target-directory=dir` — copy every source into `dir`.
 /// * `-T` / `--no-target-directory` — treat the destination as a normal
@@ -125,23 +217,12 @@ pub fn parse(args: &[&str]) -> Result<Command, CpError> {
                 options_done = true;
                 continue;
             }
-            if let Some(name) = arg.strip_prefix("--") {
-                if let Some(dir) = name.strip_prefix("target-directory=") {
-                    if dir.is_empty() {
-                        return Err(CpError::Usage);
-                    }
-                    target_dir = Some(String::from(dir));
-                    continue;
-                }
-                match name {
-                    "recursive" => options.recursive = true,
-                    "force" => options.force = true,
-                    "interactive" => options.clobber = Clobber::Prompt,
-                    "no-clobber" => options.clobber = Clobber::Skip,
-                    "verbose" => options.verbose = true,
-                    "no-target-directory" => no_target_dir = true,
-                    "help" => return Ok(Command::Help),
-                    _ => return Err(CpError::Usage),
+            if arg.starts_with("--") {
+                match apply_long(arg, &mut options)? {
+                    Long::Help => return Ok(Command::Help),
+                    Long::TargetDirectory(dir) => target_dir = Some(dir),
+                    Long::NoTargetDirectory => no_target_dir = true,
+                    Long::Recorded => {}
                 }
                 continue;
             }
@@ -156,6 +237,15 @@ pub fn parse(args: &[&str]) -> Result<Command, CpError> {
                         'n' => options.clobber = Clobber::Skip,
                         'v' => options.verbose = true,
                         'T' => no_target_dir = true,
+                        'l' => options.contents = Contents::HardLink,
+                        's' => options.contents = Contents::SymbolicLink,
+                        'P' => options.no_dereference = true,
+                        // GNU's `-d` is exactly this pair.
+                        'd' => {
+                            options.no_dereference = true;
+                            options.preserve_links = true;
+                        }
+                        'a' => return Err(CpError::Unsupported(String::from("-a"))),
                         't' => {
                             // The value is the rest of the cluster
                             // (`-tdir`) or the next argument (`-t dir`).
@@ -212,7 +302,7 @@ pub fn parse(args: &[&str]) -> Result<Command, CpError> {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse, Clobber, Command, Options, TargetMode};
+    use super::{parse, Clobber, Command, Contents, Options, TargetMode};
     use crate::error::CpError;
     use alloc::string::{String, ToString};
     use alloc::vec::Vec;
@@ -413,6 +503,11 @@ mod tests {
                 "`-f, --force`",
                 "`-i, --interactive`",
                 "`-n, --no-clobber`",
+                "`-l, --link`",
+                "`-s, --symbolic-link`",
+                "`-P, --no-dereference`",
+                "`--preserve=links`",
+                "`-d`",
                 "`-v, --verbose`",
                 "`-t dir, --target-directory=dir`",
                 "`-T, --no-target-directory`",
@@ -424,6 +519,64 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn the_link_switches_are_one_last_wins_state() {
+        // `-l` and `-s` are alternatives to copying the bytes, not modifiers
+        // of it, so they cannot silently combine.
+        let hard = parse(&["-l", "a", "b"]).expect("parse");
+        assert!(
+            matches!(hard, Command::Copy { options, .. } if options.contents == Contents::HardLink)
+        );
+        let soft = parse(&["--symbolic-link", "a", "b"]).expect("parse");
+        assert!(
+            matches!(soft, Command::Copy { options, .. } if options.contents == Contents::SymbolicLink)
+        );
+        let last = parse(&["-l", "-s", "a", "b"]).expect("parse");
+        assert!(
+            matches!(last, Command::Copy { options, .. } if options.contents == Contents::SymbolicLink)
+        );
+        let back = parse(&["-s", "-l", "a", "b"]).expect("parse");
+        assert!(
+            matches!(back, Command::Copy { options, .. } if options.contents == Contents::HardLink)
+        );
+    }
+
+    #[test]
+    fn d_is_exactly_no_dereference_plus_preserve_links() {
+        // GNU defines `-d` as that pair, so it is spelled as the pair rather
+        // than as a third state that could drift from either half.
+        let d = parse(&["-d", "a", "b"]).expect("parse");
+        let Command::Copy { options, .. } = d else {
+            panic!("expected a copy");
+        };
+        assert!(options.no_dereference);
+        assert!(options.preserve_links);
+        let pair = parse(&["-P", "--preserve=links", "a", "b"]).expect("parse");
+        assert!(matches!(pair, Command::Copy { options: o, .. } if o == options));
+    }
+
+    #[test]
+    fn archive_and_the_other_preserve_members_are_refused_naming_themselves() {
+        // Refused, never narrowed: `--preserve=all` includes timestamps that
+        // no call can set, so honouring `-a` in part would report a
+        // preservation that did not happen.
+        for arg in [
+            "-a",
+            "--archive",
+            "--preserve",
+            "--preserve=all",
+            "--preserve=mode",
+        ] {
+            assert_eq!(
+                parse(&[arg, "a", "b"]),
+                Err(CpError::Unsupported(String::from(arg))),
+                "{arg}"
+            );
+        }
+        // The one member this tool can honour is accepted.
+        assert!(parse(&["--preserve=links", "a", "b"]).is_ok());
     }
 
     #[test]

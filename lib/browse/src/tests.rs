@@ -1108,6 +1108,8 @@ fn encoded_stream(children: &[(&[u8], FileKind)]) -> Vec<u8> {
             size: 0,
             allocated: 0,
             modified: Time64::UNIX_EPOCH,
+            id: tairix_abi::FileId::NONE,
+            nlink: 1,
             name,
         }
         .encode_into(&mut buf[off..])
@@ -1393,6 +1395,8 @@ fn encoded_stream_meta(children: &[(&[u8], FileKind, u64, Time64)]) -> Vec<u8> {
             size: *size,
             allocated: 0,
             modified: *modified,
+            id: tairix_abi::FileId::NONE,
+            nlink: 1,
             name,
         }
         .encode_into(&mut buf[off..])

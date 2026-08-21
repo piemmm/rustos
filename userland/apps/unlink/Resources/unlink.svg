@@ -1,0 +1,24 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256">
+  <title>unlink</title>
+  <!-- A chain of two rings, broken apart: the left ring is whole, the right
+       one is severed, and the gap between them carries two short spark
+       strokes. Each ring is a filled outer octagon with an inner octagon in
+       the tile colour punched through it, because the desktop's SVG subset
+       has no curves, no strokes and no transforms. -->
+
+  <!-- Tile: rounded square, corners cut as integer line segments -->
+  <polygon fill="#C0453C" points="20,60 22,44 30,31 43,22 60,20 196,20 213,22 226,31 234,44 236,60 236,196 234,213 226,226 213,234 196,236 60,236 43,234 30,226 22,213 20,196"/>
+  <polygon fill="#D2564C" points="20,60 22,44 30,31 43,22 60,20 196,20 213,22 226,31 234,44 236,60 236,92 20,92"/>
+
+  <!-- Left ring, whole -->
+  <polygon fill="#FFFFFF" points="36,128 40,110 51,96 66,88 84,86 108,86 108,116 84,116 74,119 68,128 74,137 84,140 108,140 108,170 84,170 66,168 51,160 40,146"/>
+  <polygon fill="#C0453C" points="60,128 63,118 70,111 80,108 108,108 108,118 84,118 72,122 66,128 72,134 84,138 108,138 108,148 80,148 70,145 63,138"/>
+
+  <!-- Right ring, severed: its inner edge is open toward the break -->
+  <polygon fill="#FFFFFF" points="220,128 216,146 205,160 190,168 172,170 148,170 148,140 172,140 182,137 188,128 182,119 172,116 148,116 148,86 172,86 190,88 205,96 216,110"/>
+  <polygon fill="#C0453C" points="196,128 193,138 186,145 176,148 148,148 148,138 172,138 184,134 190,128 184,122 172,118 148,118 148,108 176,108 186,111 193,118"/>
+
+  <!-- The break: two sparks in the gap -->
+  <polygon fill="#FFE08A" points="118,96 130,108 122,110 132,124 116,114 124,112"/>
+  <polygon fill="#FFE08A" points="138,160 126,148 134,146 124,132 140,142 132,144"/>
+</svg>

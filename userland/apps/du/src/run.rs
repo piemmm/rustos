@@ -70,6 +70,8 @@ mod program {
                 kind: stat.kind,
                 size: stat.size,
                 allocated: stat.allocated,
+                id: stat.id,
+                nlink: stat.nlink,
             })
         }
 
@@ -104,6 +106,8 @@ mod program {
                         kind: entry.kind,
                         size: entry.size,
                         allocated: entry.allocated,
+                        id: entry.id,
+                        nlink: entry.nlink,
                     },
                 });
             }

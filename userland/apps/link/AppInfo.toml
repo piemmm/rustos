@@ -1,0 +1,16 @@
+# Signed-AppInfo manifest source for the `link` command app
+# (plans/APPS.md §12.1 Stage E, plans/SYMLINKS.md S6). Discovered by the
+# build's app-bundle composer; the capability list is the bundle's request,
+# intersected with the launching user's grants. CAP_CONSOLE_WRITE covers the
+# short help and the stderr diagnostic; CAP_FS_ACCESS covers the one
+# `fs_link` and the short-help read of the bundle's own Help/ documents
+# through the secured VFS. The tool never prompts, so it requests no
+# CAP_CONSOLE_READ.
+id = "os.tairix.link"
+name = "link"
+version = "0.1.0"
+kind = "command"
+capabilities = ["CAP_CONSOLE_WRITE", "CAP_FS_ACCESS"]
+# This bundle's own square icon master in its Resources/ (plans/ICONS.md):
+# vector, the preferred form, so a slot rasterises it at the side it draws.
+library-icon = "link.svg"

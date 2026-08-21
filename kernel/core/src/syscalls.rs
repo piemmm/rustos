@@ -9315,6 +9315,8 @@ where
                 size: e.size,
                 allocated: e.allocated,
                 modified: e.modified,
+                id: e.id,
+                nlink: e.nlink,
                 name: e.name.as_bytes(),
             };
             let written = entry.encode_into(&mut rec)?;
@@ -34275,6 +34277,33 @@ mod tests {
     }
 
     /// `fs_readdir` packs the service's entries into the `DirEntry` stream;
+    /// Two listing entries on one volume, each with a distinct node number
+    /// and its own name count, so the packing test can compare what reached
+    /// the caller against what the service reported.
+    fn readdir_fixture() -> Vec<crate::fs::ReaddirEntry> {
+        let volume = [9u8; 16];
+        alloc::vec![
+            crate::fs::ReaddirEntry {
+                kind: FileKind::Directory,
+                size: 0,
+                allocated: 4096,
+                modified: Time64::from_secs(1_111),
+                id: tairix_abi::FileId { volume, node: 5 },
+                nlink: 2,
+                name: alloc::string::String::from("Logs"),
+            },
+            crate::fs::ReaddirEntry {
+                kind: FileKind::Regular,
+                size: 17,
+                allocated: 512,
+                modified: Time64::from_secs(2_222),
+                id: tairix_abi::FileId { volume, node: 6 },
+                nlink: 3,
+                name: alloc::string::String::from("motd"),
+            },
+        ]
+    }
+
     /// an undersized buffer fails closed without truncating.
     #[test]
     fn fs_readdir_packs_entries_and_rejects_a_small_buffer() {
@@ -34300,22 +34329,7 @@ mod tests {
             caps: &caps,
         };
         let mut mock = RecordingFs::new();
-        mock.entries = alloc::vec![
-            crate::fs::ReaddirEntry {
-                kind: FileKind::Directory,
-                size: 0,
-                allocated: 4096,
-                modified: Time64::from_secs(1_111),
-                name: alloc::string::String::from("Logs"),
-            },
-            crate::fs::ReaddirEntry {
-                kind: FileKind::Regular,
-                size: 17,
-                allocated: 512,
-                modified: Time64::from_secs(2_222),
-                name: alloc::string::String::from("motd"),
-            },
-        ];
+        mock.entries = readdir_fixture();
         let fs: &'static RecordingFs = Box::leak(Box::new(mock));
         let h = KernelSyscallHandlers::new(
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
@@ -34327,9 +34341,14 @@ mod tests {
                 .expect("open dir"),
         )
         .unwrap();
-        // Two records: (32 + 4) + (32 + 4) = 72 bytes.
-        let total = usize::try_from(h.fs_readdir(&ctx, fd, 0x1000, 96).expect("readdir")).unwrap();
-        assert_eq!(total, 72);
+        // Two records: (HEADER_LEN + 4) each.
+        let expected = 2 * (DirEntry::HEADER_LEN + 4);
+        let total = usize::try_from(
+            h.fs_readdir(&ctx, fd, 0x1000, expected + 24)
+                .expect("readdir"),
+        )
+        .unwrap();
+        assert_eq!(total, expected);
         let stream = h
             .with_caller_aspace(&ctx, |space, physmap| {
                 let mut buf = alloc::vec![0u8; total];
@@ -34348,6 +34367,12 @@ mod tests {
         assert_eq!(second.allocated, 512);
         assert_eq!(second.modified, Time64::from_secs(2_222));
         assert_eq!(second.name, b"motd");
+        // The identity and name count reach the caller intact: without them a
+        // walk cannot tell a second name for one node from a second node.
+        for (packed, source) in [first, second].iter().zip(readdir_fixture()) {
+            assert_eq!(packed.id, source.id);
+            assert_eq!(packed.nlink, source.nlink);
+        }
 
         // A buffer too small for the whole listing fails closed.
         assert_eq!(

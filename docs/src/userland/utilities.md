@@ -615,22 +615,29 @@ sparse or compressed files count what they really occupy;
 file, `-s` reports only the operands, `-c` appends a grand total, `-d`
 bounds the reported depth (sums are unaffected), `-S` excludes
 subdirectories from a directory's own row, `-0` NUL-terminates rows, and
+`-l` counts a multiply-named file once per name, and
 `-k`/`-m`/`-h`/`--si`/`-B <size>` select the scale through the shared
 `tairix_util::size` vocabulary (`AGENTS.md` §2.2), later selections
 winning as in GNU. The walk is an explicit frame stack (a deep tree can
 never exhaust the call stack) over the kernel-authorised `fs_*`
 syscalls, and it is I/O-frugal by design: every `fs_readdir` entry
-carries the child's kind, sizes, and modification stamp, so a directory
+carries the child's kind, sizes, modification stamp, node identity, and
+name count, so a directory
 of *n* children
 costs one open and one listing — never *n* per-child open/stat/close
 round-trips, each a fresh full path resolution on an uncached,
 authenticated volume; only operands are stat'ed individually. An
 unreachable operand is diagnosed on standard error and the walk
 continues (exit `1`), an unreadable directory contributing nothing
-rather than a guessed partial sum. `du` does not yet deduplicate a
-multiply-named file, so the GNU link-deduplication switches do not exist
-and a hard-linked file counts once per name it is reached through; `-x`
-awaits device identity (both documented in the bundle's `Help/`). Manifest: `CAP_CONSOLE_WRITE` + `CAP_FS_ACCESS`. `cargo test
+rather than a guessed partial sum. A file reached through more than one
+name is summed **once**, keyed on the identity the listing carries, and
+`-l`/`--count-links` is the GNU opt-out; only a non-directory whose name
+count exceeds one is remembered, so the seen-set holds the hard links the
+walk meets rather than one entry per node on the volume (`AGENTS.md`
+§24.1, §26.6), and a heap that cannot grow it — or a node whose backing
+offers no identity — makes the walk count every name and say so once on
+standard error rather than report a silently wrong total. `-x`
+awaits device identity (documented in the bundle's `Help/`). Manifest: `CAP_CONSOLE_WRITE` + `CAP_FS_ACCESS`. `cargo test
 -p tairix-du` drives the parser (clusters, values, conflicts), the
 post-order accumulation, every option's rendering, the diagnosed-path
 paths, and the thirteen-locale `OPTIONS` pinning against an in-memory
@@ -1020,6 +1027,54 @@ and the secured VFS still authorises every operation per-inode.
 (ancestor walks, existing-directory tolerance, the tolerated non-empty
 refusal, first-failure-stops ordering, GNU `-v` wording), and the
 locale switch-drift pins.
+
+## `link`, `unlink`, `readlink` — the minimal link commands (`userland/apps/{link,unlink,readlink}`)
+
+Three `plans/APPS.md` §12.1 Stage E store bundles, each the minimal tool its
+POSIX call deserves. `ln` and `rm` are the tools with the option surface;
+keeping these separate is the point — a script that must make one hard link,
+or remove one name, gets a tool that *cannot* replace a name, follow a link,
+or recurse, so a mistyped operand cannot become something larger.
+
+**`link existing new`** creates one hard link through `fs_link` with an empty
+`LinkFlags` word — POSIX `link()`, so **neither name is followed**: the node
+that gains a name is the one spelled, and a symbolic link planted at
+`existing` cannot redirect the new name at what it points to. Exactly two
+operands; anything else is a usage error before any filesystem call. All five
+refusals reach the caller unchanged, because each says something different:
+`AlreadyExists` (a create never replaces a name), `IsADirectory` (a directory
+has exactly one name everywhere), `CrossVolume` (a second name must live on
+the volume that stores the node), `TooManyLinks` (the format's per-node count
+would overflow), and `NotSupported` (the format stores one name per node — a
+permanent property, not a transient failure).
+
+**`unlink file`** removes exactly one name through `fs_unlink` with an empty
+`UnlinkFlags` word. The name is removed **as typed**, so a symbolic link is
+removed itself and never followed; a **directory** is the kernel's refusal, in
+the same locked walk that would have removed the entry, so no check-then-remove
+race exists. There is no `-f`, so an absent name is reported rather than
+ignored, and a second operand removes nothing.
+
+**`readlink file...`** prints the target each operand stores, exactly as
+stored — a link's target is data, not a path resolved when the link was made,
+so a relative, `..`-carrying, or dangling target prints as written. A
+non-link is refused (`OutOfRange`, the same domain reason for a file and a
+directory) and quiet is the GNU default, `-v` diagnosing; either way the
+remaining operands are still read and the run exits non-zero. `-z` NUL-ends
+each target and `-n` drops the final delimiter — ignored, with a report, for
+more than one operand, because the delimiters are what separate the targets.
+GNU's `-f`/`-e`/`-m` canonicalisation is **refused**: resolving every
+component of a path (following each link, handling `..` physically, enforcing
+the hop budget and the rule that a link cannot escape the volume that stores
+it) is the VFS's one implementation, and a userland copy that disagreed by one
+rule would print a path the kernel resolves differently. That is the `ln -r` /
+`du -x` posture — refused for a stated reason, never stubbed — and it lifts
+when the VFS exposes canonicalisation itself.
+
+Each is `no_std` (with `alloc`), has no `unsafe`, and requests
+`CAP_CONSOLE_WRITE` + `CAP_FS_ACCESS` and no `CAP_CONSOLE_READ`, because none
+of them prompts. Each ships a thirteen-locale `Help/` tree and its own icon
+master, and each is host-provable against in-memory seams with no kernel.
 
 ## `ln` — create symbolic links (`userland/apps/ln`)
 
@@ -1713,7 +1768,7 @@ kernel or driver crate (`AGENTS.md` §17.4).
 ### Grammar
 
 ```
-cp [-finrRvT] [-t dir] [--] source... dest
+cp [-dfilnPrRsvT] [-t dir] [--] source... dest
 ```
 
 | Token                     | Meaning                                            |
@@ -1722,10 +1777,29 @@ cp [-finrRvT] [-t dir] [--] source... dest
 | `-f`, `--force`           | remove an unwritable destination and retry         |
 | `-i`, `--interactive`     | ask before overwriting an existing file            |
 | `-n`, `--no-clobber`      | never overwrite an existing file                   |
+| `-l`, `--link`            | a second name for the source's node, not a copy    |
+| `-s`, `--symbolic-link`   | a symbolic link naming the source                  |
+| `-P`, `--no-dereference`  | reproduce a link source as a link, verbatim        |
+| `--preserve=links`        | keep two sources' shared node shared               |
+| `-d`                      | `-P` and `--preserve=links` together               |
 | `-v`, `--verbose`         | report each copy                                   |
 | `-t dir`, `--target-directory=dir` | copy every source into `dir`              |
 | `-T`, `--no-target-directory` | treat dest as a normal file (one source)      |
 | `-h`, `--help`            | print the usage banner (wins immediately)          |
+
+`-l` and `-s` are alternatives to copying rather than modifiers of it, so
+they are one last-wins state; `-P` stores the source link's own target
+verbatim, so a relative or dangling link survives the copy; and
+`--preserve=links` keys on the identity every `fs_stat`/`fs_readdir` record
+carries (`plans/SYMLINKS.md` S7), remembering only a node whose name count
+exceeds one — so the map holds the hard links a copy meets rather than one
+entry per node on the volume. Because a link is *created*, and a create never
+replaces a name, an occupied destination needs `-f` first; the byte copy
+truncates through its own create and needs none. `-a`/`--archive` and the
+other `--preserve` members are **refused**: `-a` is `-dR --preserve=all`,
+`--preserve=all` includes timestamps, and no syscall sets a timestamp, so
+honouring it would report a preservation that did not happen. `-dR` is the
+rest of `-a`.
 | `--`                      | end option parsing; every later argument is a path |
 | *source*                  | a file or directory to copy                        |
 | *dest*                    | the destination path (the last operand)            |

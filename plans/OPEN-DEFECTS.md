@@ -775,6 +775,25 @@ tairix-kernel --no-deps` succeeds too). `cargo xtask docs-check`
 `sccache`/`RUSTC_WRAPPER` and no shared `CARGO_TARGET_DIR`, so this is not
 a stale-cache artefact.
 
+**Recurred again, same mechanism, and the surgical remedy is not enough.**
+A third instance appeared as a *cascade* — `tairix_arch_api`,
+`tairix_reclaim`, `tairix_crypto`, `tairix_cpuops`, `tairix_fsmeta`,
+`tairix_devmatch`, `tairix_netconfig`, each a real unconditional `pub` item
+in a feature-less workspace crate — after interleaved host and
+`--target <triple> --keep-going` clippy runs. The signature was explicit:
+2111 **zero-byte** `.rmeta` files under `target/`, each with link count 1
+(never hardlinked into the cache) and timestamped to the minute of a build
+that was cut short, sitting beside healthy rmeta for the same crate.
+Two cheaper remedies **failed**: `cargo clean -p` of the named crates just
+moved the failure to the next consumer, and deleting the zero-byte files
+outright did not help either, because the *fingerprints* still recorded
+those units as fresh. Only a full `cargo clean` cleared it. So the practical
+rule is: on a "can't find crate for `<workspace crate>`" cascade, check for
+zero-byte `.rmeta` (`find target -name '*.rmeta' -size 0`) and, if any are
+present, go straight to a full `cargo clean` — do not spend runs on `-p`
+cleans. Avoid interleaving concurrent host and cross-target cargo
+invocations that may be interrupted.
+
 **Recurrence, root-caused: a corrupt/stale build cache.** The same shape
 appeared again with three different symbols — `tairix_tty::read_bounded`,
 `tairix_tty::is_line_delimiter` (from `kernel/core`) and

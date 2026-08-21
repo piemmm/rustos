@@ -40,8 +40,10 @@ mod program {
     use core::cell::RefCell;
 
     use tairix_abi::fs::{DirEntry, OpenFlags, FS_IO_MAX};
-    use tairix_abi::Errno;
-    use tairix_cp::{parse, run, Entry, EntryKind, FileSystem, Output, Prompt, USAGE};
+    use tairix_abi::{Errno, FileKind};
+    use tairix_cp::{
+        parse, run, Entry, EntryKind, FileSystem, Follow, Output, Probe, Prompt, USAGE,
+    };
     use tairix_help::BundleHelp;
     use tairix_rt::io::{self, write_stderr_line, Read, Stderr, Stdin, Stdout, Write};
     use tairix_rt::File;
@@ -87,10 +89,13 @@ mod program {
             let name = core::str::from_utf8(entry.name).map_err(|_| Errno::OutOfRange)?;
             entries.push(Entry {
                 name: String::from(name),
-                kind: if entry.kind.is_dir() {
-                    EntryKind::Directory
-                } else {
-                    EntryKind::File
+                // The listing already reported each child's kind, identity
+                // and name count, so a `cp` that needs them never re-stats
+                // a child by path.
+                probe: Probe {
+                    kind: entry_kind(entry.kind),
+                    id: entry.id,
+                    nlink: entry.nlink,
                 },
             });
         }
@@ -158,18 +163,71 @@ mod program {
         }
     }
 
+    /// Map a reported [`FileKind`] onto the distinction `cp` acts on.
+    fn entry_kind(kind: FileKind) -> EntryKind {
+        match kind {
+            FileKind::Directory => EntryKind::Directory,
+            FileKind::Symlink => EntryKind::Symlink,
+            FileKind::Regular => EntryKind::File,
+        }
+    }
+
     impl FileSystem for RtFileSystem {
-        fn kind(&self, path: &str) -> Result<EntryKind, Errno> {
+        fn probe(&self, path: &str, follow: Follow) -> Result<Probe, Errno> {
             // A resolve-only open: no read authority is requested, the
             // handle is closed on drop, and only the metadata is learned.
-            let file =
-                File::open(path.as_bytes(), OpenFlags::empty()).map_err(Errno::from_syscall)?;
+            // The handle's own posture is what `fs_stat` re-derives, so
+            // `NO_FOLLOW` is how a link is described as itself.
+            let flags = match follow {
+                Follow::Target => OpenFlags::empty(),
+                Follow::Keep => OpenFlags::NO_FOLLOW,
+            };
+            let file = File::open(path.as_bytes(), flags).map_err(Errno::from_syscall)?;
             let stat = file.stat().map_err(Errno::from_syscall)?;
-            Ok(if stat.kind.is_dir() {
-                EntryKind::Directory
-            } else {
-                EntryKind::File
+            Ok(Probe {
+                kind: entry_kind(stat.kind),
+                id: stat.id,
+                nlink: stat.nlink,
             })
+        }
+
+        fn read_link(&self, path: &str) -> Result<String, Errno> {
+            // The buffer is the ABI's own target bound, so one call always
+            // suffices: a longer target cannot exist.
+            let mut buf = alloc::vec![0u8; tairix_abi::fs::FS_SYMLINK_MAX];
+            let ret = tairix_rt::fs_readlink(path.as_bytes(), &mut buf);
+            if ret < 0 {
+                return Err(Errno::from_syscall(ret));
+            }
+            let len = usize::try_from(ret).map_err(|_| Errno::OutOfRange)?;
+            let bytes = buf.get(..len).ok_or(Errno::OutOfRange)?;
+            let target = core::str::from_utf8(bytes).map_err(|_| Errno::OutOfRange)?;
+            Ok(String::from(target))
+        }
+
+        fn symlink(&self, target: &str, link: &str) -> Result<(), Errno> {
+            let ret = tairix_rt::fs_symlink(target.as_bytes(), link.as_bytes());
+            if ret != 0 {
+                return Err(Errno::from_syscall(ret));
+            }
+            self.forget(link);
+            Ok(())
+        }
+
+        fn link(&self, existing: &str, new: &str) -> Result<(), Errno> {
+            // The empty flag word is POSIX `link()`: the node that gains a
+            // name is the one spelled, so a link at `existing` cannot
+            // redirect the new name at what it points to.
+            let ret = tairix_rt::fs_link(
+                existing.as_bytes(),
+                new.as_bytes(),
+                tairix_abi::LinkFlags::empty(),
+            );
+            if ret != 0 {
+                return Err(Errno::from_syscall(ret));
+            }
+            self.forget(new);
+            Ok(())
         }
 
         fn read(&self, path: &str, offset: u64, buf: &mut [u8]) -> Result<usize, Errno> {

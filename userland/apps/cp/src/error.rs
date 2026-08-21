@@ -1,5 +1,6 @@
 //! The outcomes of running a `cp` command.
 
+use alloc::string::String;
 use core::fmt;
 use tairix_abi::Errno;
 
@@ -9,13 +10,18 @@ use tairix_abi::Errno;
 /// useful diagnostic and set a process exit status, while leaning on the
 /// frozen [`Errno`] for the wire-level cause so it invents no parallel error
 /// set.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum CpError {
     /// The command line carried an unrecognised option, named fewer than two
     /// operands (`cp` needs at least one source and a destination), or aimed
     /// more than one source at a destination that is not a directory. The
     /// caller should print [`crate::USAGE`]. Nothing is copied.
     Usage,
+    /// An option whose complete behaviour needs work this system does not
+    /// have yet (`-a`/`--archive` and the `--preserve` set other than
+    /// `--preserve=links`). Carries the switch as spelled. Refused rather
+    /// than delivered as a silently narrower option.
+    Unsupported(String),
     /// A source named a directory but `-r` was not given. Nothing about that
     /// operand is copied (`cp` refuses to recurse implicitly).
     IsDirectory,
@@ -47,6 +53,12 @@ impl fmt::Display for CpError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Usage => f.write_str("invalid usage"),
+            Self::Unsupported(switch) => write!(
+                f,
+                "{switch} is not available: preserving a node's timestamps needs \
+                 a call this system does not have, so the option is refused \
+                 rather than honoured in part (--preserve=links is available)"
+            ),
             Self::IsDirectory => f.write_str("is a directory (use -r to copy)"),
             Self::NotADirectory => f.write_str("destination is not a directory"),
             Self::Stat(errno) => write!(f, "cannot access path: {errno}"),

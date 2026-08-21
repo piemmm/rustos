@@ -43,7 +43,7 @@ use core::sync::atomic::Ordering;
 
 use tairix_abi::driver::filesystem::{
     FilesystemAttrsProvider, FilesystemRead, FilesystemSecurity, FilesystemStats, FilesystemWrite,
-    NodeKind as DriverNodeKind, VolumeStats,
+    NodeInfo, NodeKind as DriverNodeKind, VolumeStats,
 };
 use tairix_abi::driver::DriverHandle;
 use tairix_abi::sysinfo::{MountAvailability, MountRecord, MountVolumeState, VolumeIoHealthRecord};
@@ -698,6 +698,20 @@ where
     /// the authoritative identity table — so an operation never sees a
     /// caller-supplied identity. The lock is held for the whole operation,
     /// including any device-completion park, then released.
+    /// The id of the volume backing the mount that covers `path` — the
+    /// volume half of every identity under it.
+    ///
+    /// Resolved once per call so a listing pairs one volume id with each
+    /// entry's own node number rather than re-resolving the mount per entry.
+    /// A mount with no backing volume has no id to report and answers
+    /// all-zero, which is [`FileId::NONE`]'s volume half.
+    fn volume_at(&self, vfs: &Vfs, path: &Path) -> [u8; 16] {
+        vfs.mounts()
+            .resolve(path)
+            .backing()
+            .map_or([0u8; 16], |handle| self.mount.volume_id(handle))
+    }
+
     fn with_secured<R>(
         &self,
         uid: u32,
@@ -770,6 +784,15 @@ where
             .ok_or_else(|| VfsError::NotFound.to_errno())?;
         self.mount.driver(handle)
     }
+}
+
+/// A node's system-wide identity: the driver's node number paired with the
+/// id of the volume it lives on.
+///
+/// The one place that pair is assembled, so a `stat` and a listing of the
+/// same node can never report different identities.
+const fn node_identity(volume: [u8; 16], node: u64) -> FileId {
+    FileId { volume, node }
 }
 
 /// Map a driver structural node kind to the userland [`FileKind`] the
@@ -982,17 +1005,23 @@ where
             // wrong volume and fail the whole listing closed, and each
             // re-resolution would repeat the child's full walk.
             let entries = vfs.list_via_secured(cred, path, fs, final_link)?;
+            // One mount resolution for the whole listing: every child of a
+            // directory lives on the directory's own volume, so the identity's
+            // volume half is the same for all of them.
+            let volume = self.volume_at(vfs, path);
             let mut out: Vec<ReaddirEntry> = entries
                 .into_iter()
-                .map(|(info, name)| ReaddirEntry {
-                    kind: file_kind(info.kind),
-                    size: info.size,
-                    allocated: info.allocated,
+                .map(|entry| ReaddirEntry {
+                    kind: file_kind(entry.info.kind),
+                    size: entry.info.size,
+                    allocated: entry.info.allocated,
                     // The readdir stream carries the cheap common-case
                     // modification stamp; a consumer wanting other times
                     // stats the entry.
-                    modified: info.times.modified,
-                    name,
+                    modified: entry.info.times.modified,
+                    id: node_identity(volume, entry.node),
+                    nlink: entry.info.nlink,
+                    name: entry.name,
                 })
                 .collect();
             // A covered mount point is part of its parent's listing even
@@ -1017,6 +1046,12 @@ where
                     size: 0,
                     allocated: 0,
                     modified: Time64::UNIX_EPOCH,
+                    // The parent volume holds no node of this name, so it has
+                    // no identity or name count of its own to report — the
+                    // same reason its sizes and stamp are the stampless
+                    // backing's placeholders.
+                    id: FileId::NONE,
+                    nlink: NodeInfo::SINGLE_NAME,
                     name: name.clone(),
                 });
             }
@@ -1033,13 +1068,7 @@ where
     ) -> Result<FileStat, Errno> {
         self.with_secured(uid, caps, path, |vfs, fs, cred, path| {
             let info = vfs.stat_via_secured(cred, path, fs, final_link)?;
-            // Pair the driver's node number with the covering mount's volume
-            // id to form the node's system-wide identity.
-            let volume = vfs
-                .mounts()
-                .resolve(path)
-                .backing()
-                .map_or([0u8; 16], |handle| self.mount.volume_id(handle));
+            let volume = self.volume_at(vfs, path);
             Ok(FileStat {
                 kind: file_kind(info.kind),
                 nlink: info.nlink,
@@ -1048,10 +1077,7 @@ where
                 mode: u32::from(info.meta.mode.bits()),
                 uid: info.meta.owner.0,
                 gid: info.meta.group.0,
-                id: FileId {
-                    volume,
-                    node: info.node,
-                },
+                id: node_identity(volume, info.node),
                 times: info.times,
             })
         })

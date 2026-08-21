@@ -34,6 +34,19 @@ caminho.
   existente; só uma resposta a começar por `y`/`Y` consente.
 - `-n, --no-clobber` — nunca sobrescrever um ficheiro existente. O
   mais tardio de `-i` e `-n` vence.
+- `-l, --link` — dar ao destino um segundo nome do nó da origem em vez de
+  copiar os seus bytes, de modo que os dois nomes não possam divergir numa
+  escrita posterior. Uma origem que é directório continua a exigir `-r`.
+- `-s, --symbolic-link` — criar uma ligação simbólica que nomeia a origem
+  em vez de a copiar.
+- `-P, --no-dereference` — reproduzir uma origem que é ligação simbólica
+  como uma ligação que guarda o mesmo destino, literalmente, em vez de
+  copiar aquilo que nomeia (assim uma ligação relativa ou pendente
+  sobrevive à cópia). Sem ela, uma ligação de origem é seguida.
+- `--preserve=links` — duas origens que nomeiam um só nó obtêm dois nomes
+  no destino em vez de duas cópias, pelo que a cópia não duplica o
+  armazenamento em silêncio.
+- `-d` — `-P` e `--preserve=links` juntas, como na ferramenta GNU.
 - `-v, --verbose` — reportar cada cópia como `'source' -> 'dest'`.
 - `-t dir, --target-directory=dir` — copiar todas as origens para
   `dir`, que tem de ser um diretório existente. O valor segue colado

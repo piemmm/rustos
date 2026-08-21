@@ -1082,15 +1082,52 @@ platform floor).
   that will share a `strftime` engine exists. ARXFS does not track atime
   (reports `accessed` = epoch). **Remaining:** `touch`, `cp -p`/`-u`,
   `mv -u`, `date -r`.
-- **Stage E — VFS links (the platform half is done; the remaining commands
-  are planned).** Symbolic *and* hard links are real in the VFS and ARXFS,
-  and `ln` (both kinds, `-L`/`-P`/`-d`/`-F`), `ls -L`/`-H` and its link-count
-  column, and `readlink`'s syscall have landed — the design is
-  `plans/SYMLINKS.md`, not a separate one. **Remaining:** the `readlink`,
-  `link`, and `unlink` command apps; `cp -l/-s/-d/-a`; `stat`'s link fields;
-  and `du`'s deduplication of a multiply-named file, which needs a node
-  identity on the userland `fs_readdir` record to key a seen-set on
-  (`plans/SYMLINKS.md` "Open").
+- **Stage E — VFS links (the platform half and the link commands are done;
+  `cp`'s link options remain).** Symbolic *and* hard links are real in the
+  VFS and ARXFS, and `ln` (both kinds, `-L`/`-P`/`-d`/`-F`), `ls -L`/`-H`
+  and its link-count column, `du`'s deduplication of a multiply-named file
+  (over the node identity the `fs_readdir` record now carries), and the
+  `readlink`, `link` and `unlink` command apps have landed — the design is
+  `plans/SYMLINKS.md`, not a separate one.
+
+  The three new bundles are deliberately **minimal**: `link` and `unlink`
+  take exactly the operands their POSIX call takes and carry no option but
+  the reserved short help, because `ln` and `rm` are the tools with the
+  option surface — a script that must make one hard link, or remove one
+  name, gets a tool that *cannot* replace a name, follow a link, or recurse.
+  `readlink` prints the stored spelling and **refuses** GNU's `-f`/`-e`/`-m`
+  canonicalisation: resolving every component of a path is the VFS's one
+  implementation (physical `..`, the hop budget, per-component permission
+  checks, a link that cannot escape its volume), and a userland copy that
+  disagreed by one rule would print a path the kernel resolves differently.
+  That is the `ln -r` / `du -x` posture — refused for a stated reason,
+  never stubbed — and it lifts when the VFS exposes canonicalisation itself.
+
+  `cp` gained the link options too: `-l` (a second name for the source's
+  node instead of a copy of its bytes), `-s` (a symbolic link naming the
+  source), `-P`/`--no-dereference` (reproduce a link source as a link
+  storing the same target, verbatim), and `--preserve=links` (two sources
+  naming one node get two *names* at the destination, keyed on the identity
+  the `fs_stat`/`fs_readdir` record now carries, remembering only nodes
+  whose name count exceeds one). `-d` is exactly `-P --preserve=links`,
+  spelled as the pair so its halves cannot drift. Because a link is
+  *created*, and a create never replaces a name, an occupied destination
+  needs `-f` first; the byte copy still truncates through its own create.
+
+  **`-a`/`--archive` and the rest of `--preserve` are refused, not
+  narrowed**: `-a` is `-dR --preserve=all`, `--preserve=all` includes a
+  node's timestamps, and **no syscall can set a timestamp** (`fs_set_mode`
+  and `fs_set_owner` exist; no `fs_set_times` does), so honouring `-a`
+  would report a preservation that did not happen. `-dR` is the rest of it.
+  Lifting the refusal means adding that call — an ABI + VFS + per-driver
+  change, its own entry, not a corner of this stage.
+
+  **Remaining:** the Stage E list also named "`stat`'s link fields", but
+  **there is no `stat` command app in the tree** and none is planned
+  elsewhere in this document, so that line presupposes a bundle that does
+  not exist: authoring a GNU `stat` is a Stage-B-sized bundle of its own (a
+  `--format`/`--printf` grammar over every `FileStat` field), not a
+  link-field addition, and needs its own entry before it is built.
 
 ## 12.2 Terminal colour, the standard scheme, and box drawing
 

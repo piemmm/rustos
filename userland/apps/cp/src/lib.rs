@@ -10,6 +10,29 @@
 //! a directory operand is a [`CpError::IsDirectory`]. This is the POSIX
 //! model.
 //!
+//! # Links, instead of bytes
+//!
+//! `-l` gives the destination a second *name* for the source's own node
+//! rather than a copy of its bytes, so the two cannot diverge on a later
+//! write; `-s` makes a symbolic link naming the source. They are
+//! alternatives to copying rather than modifiers of it, so they are one
+//! last-wins [`Contents`] state that cannot silently combine.
+//!
+//! `-P` reproduces a symbolic-link source as a link storing the same target,
+//! verbatim — so a relative or dangling link survives the copy — instead of
+//! following it. `--preserve=links` gives two sources naming one node two
+//! names at the destination rather than two copies, keyed on the identity
+//! every `fs_stat` and `fs_readdir` record carries; only a node whose name
+//! count exceeds one is remembered, so the map holds the hard links a copy
+//! meets rather than one entry per node on the volume. `-d` is exactly that
+//! pair, spelled as the pair so its halves cannot drift.
+//!
+//! `-a` and the `--preserve` set other than `--preserve=links` are refused
+//! ([`CpError::Unsupported`]): `-a` is `-dR --preserve=all`, and
+//! `--preserve=all` includes timestamps no call can set here, so honouring
+//! it would report a preservation that did not happen. `-dR` is the rest of
+//! it and is available.
+//!
 //! # What this crate is
 //!
 //! A **copy engine**, not a data source. For one parsed [`Command`] it asks
@@ -18,9 +41,10 @@
 //! reproduce. The operations that touch the outside world are the injected
 //! seams:
 //!
-//! * [`FileSystem`] — learn a path's kind, read a file's bytes and a
-//!   directory's entries, and create directories, files, and bytes (plus
-//!   remove a destination file for `-f`).
+//! * [`FileSystem`] — probe a path (under either follow posture), read a
+//!   file's bytes and a directory's entries, create directories, files and
+//!   bytes, make a symbolic link or a second name, and remove a destination
+//!   for `-f`.
 //! * [`Output`] — write the usage banner to the terminal.
 //!
 //! The binary that ships as `cp` wires the real syscall-backed filesystem and
@@ -70,6 +94,6 @@ pub mod error;
 pub mod io;
 
 pub use client::{run, USAGE};
-pub use command::{parse, Clobber, Command, Options, TargetMode};
+pub use command::{parse, Clobber, Command, Contents, Options, TargetMode};
 pub use error::CpError;
-pub use io::{Entry, EntryKind, FileSystem, Output, Prompt};
+pub use io::{Entry, EntryKind, FileSystem, Follow, Output, Probe, Prompt};

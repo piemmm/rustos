@@ -8,7 +8,7 @@ had links at all — no `FileKind`, no syscall, no `NodeKind`, no on-disk kind
 — and a desktop shortcut is a symlink to an app bundle
 (`plans/PINBOARD.md`, `plans/NEW-TASKBAR.md` T16).
 
-`done` — **S1–S6 complete.** The settled decisions and bounds below are
+`done` — **S1–S7 complete.** The settled decisions and bounds below are
 binding on anything that touches a link; each stage's section records what
 that part now guarantees. Hard links were an open User decision, were
 approved, and have landed, so this plan's subject is links generally rather
@@ -492,6 +492,31 @@ link-count column and both tools lost their divergence notes. `-b`/`-S` and
 `-r`/`--relative` stay refused for their own reasons, which are not about
 hard links.
 
+**`cp` reproduces links and preserves sharing.** `-l` gives the destination a
+second name for the source's node rather than a copy of its bytes; `-s` makes
+a symbolic link naming the source; `-P` reproduces a symbolic-link source as a
+link storing the same target verbatim, so a relative or dangling one survives
+the copy; and `--preserve=links` gives two sources naming one node two names
+at the destination, keyed on the identity S7's record carries and remembering
+only nodes whose count exceeds one. `-d` is exactly `-P --preserve=links`.
+`-a` is refused, because `--preserve=all` includes timestamps no syscall can
+set — a preservation reported but not performed would be worse than a refusal.
+
+**The three minimal link commands are their own bundles** (`plans/APPS.md`
+§12.1 Stage E): `link` and `unlink` take exactly the operands their POSIX
+call takes and carry no option but the reserved `-?`/`--help`, because `ln`
+and `rm` are the tools with the option surface — so a script that must make
+one hard link, or remove one name, gets a tool that cannot replace a name,
+follow a link, or recurse. `link` calls `fs_link` with an empty `LinkFlags`
+word, so neither name is followed and all five refusals (`AlreadyExists`,
+`IsADirectory`, `CrossVolume`, `TooManyLinks`, `NotSupported`) reach the
+caller unchanged. `unlink` calls `fs_unlink` with an empty `UnlinkFlags`
+word, so a directory is the kernel's refusal in the same locked walk that
+would have removed the entry. `readlink` prints the stored spelling and
+**refuses** GNU's `-f`/`-e`/`-m`: canonicalisation is this VFS's one
+implementation, and a userland copy of it that disagreed by one rule would
+print a path the kernel resolves differently.
+
 Tests: two names reach one inode and one `FileId`; a write through one is
 visible through the other; unlinking one leaves the other readable with its
 blocks allocated and unlinking the last frees both; the count is reported and
@@ -509,20 +534,44 @@ real ARXFS volume.
 
 ---
 
-## Open — raised, not buried
+## Stage S7 — the listing carries node identity — **landed**
 
-1. **`du` does not deduplicate a multiply-named file.** S6 made hard links
-   real, so a file reached through two names is now counted twice by `du` —
-   GNU `du` counts each inode once and `-l` opts out of that. The fix needs a
-   node identity on the **userland** `fs_readdir` record to key a seen-set on:
-   `tairix_abi::DirEntry` (the wire record `ls`/`du` decode) carries kind,
-   size, allocation, and mtime but no `FileId`, so `du` cannot tell two names
-   for one inode from two files. Widening that record is an ABI change with
-   its own encode/decode, fuzz, driver, and C-header work, and the seen-set
-   must be bounded rather than one entry per inode on a 100 TB volume (§24.1,
-   §26.6) — a stage of its own, not a corner of S6. Until it lands, `du`'s
-   `Help/` and README document the divergence and the GNU link-deduplication
-   switches stay absent rather than stubbed.
+`du` counted a multiply-named file once per name because the **userland**
+`fs_readdir` record had nothing to key a seen-set on. `tairix_abi::fs::DirEntry`
+now carries the child's `id: FileId` and `nlink: u32` beside its kind, sizes,
+and mtime (`HEADER_LEN` 32 → 60), for the same reason the sizes are already
+there: the listing driver has already read the child's record, so a walk that
+needs the identity reads it from the one listing instead of re-`stat`ing every
+child.
+
+**One assembly of the identity, resolved once per listing.** The driver's
+`DirEntry` always carried its `NodeId`; `DelegatedFs::list` was dropping it, so
+it now returns a named `DelegatedEntry { node, info, name }` rather than an
+`(info, name)` pair. `MountedFilesystemService` pairs it with the covering
+mount's volume id through the same `node_identity` a `stat` uses — every child
+of a directory is on the directory's own volume, so `volume_at` resolves the
+mount once for the whole listing rather than per entry. A covered mount point
+merged into its parent's listing reports `FileId::NONE` and
+`NodeInfo::SINGLE_NAME`, for the same reason its sizes and stamp are the
+stampless backing's placeholders: the parent volume holds no node of that name.
+
+**The seen-set is bounded by the hard links a walk meets, not by the volume.**
+`du` remembers only a non-directory whose `nlink` exceeds one — a node named
+once cannot be reached twice, and a directory's count always exceeds one while
+a tree walk reaches it once — so a 100 TB volume of ordinary files costs
+nothing (§24.1, §26.6). The set grows on demand from no fixed ceiling; a heap
+that refuses to grow it, or a node whose backing offers no identity, makes the
+walk count every name and say so once on standard error with a non-zero exit —
+an over-count that declares itself, never a silent one and never a merge that
+would *lose* real storage. `-l`/`--count-links` is the GNU opt-out.
+
+Tests: two names for one node decode to one `id` (ABI); the listing reports one
+identity for two names and distinct identities for distinct nodes, and agrees
+with `stat` on both (service); a merged mount point reports the placeholders;
+and, for `du`, a hard link summed once, `-l` counting every name, a
+deduplicated name keeping its own `-a` row at zero, two operands naming one
+node counted once, a singly-named file given twice counted twice, and an
+unidentified node counted with the diagnostic written exactly once.
 
 ---
 
@@ -567,6 +616,12 @@ covered by the tests its stage lists.
   directly, which is precisely why three wrappers could answer
   `NotSupported` on every mounted volume while the `posix_fs_suite` link
   verticals stayed green.
+- **A listing tells a second *name* from a second *node*.** Every
+  `fs_readdir` record carries the child's `FileId` and name count, so a
+  tree walk sums a hard-linked file once (`du`) without re-`stat`ing every
+  child, and the identity it reports is the one `fs_stat` reports for the
+  same node — assembled in one place from the covering mount's volume id
+  and the driver's node number.
 - **A node's storage outlives every name but the last.** The count is the
   format's own, read and never derived, and the free happens at zero through
   one shared path — so no unlink can destroy data another name still reaches,

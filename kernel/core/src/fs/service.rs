@@ -27,14 +27,15 @@ use super::delegate::FinalLink;
 
 use tairix_abi::sysinfo::{MountRecord, VolumeIoHealthRecord};
 use tairix_abi::time::Time64;
-use tairix_abi::{CapabilityQuery, Errno, FileKind, FileStat, OpenFlags, UnlinkFlags};
+use tairix_abi::{CapabilityQuery, Errno, FileId, FileKind, FileStat, OpenFlags, UnlinkFlags};
 
 /// One directory entry as [`FilesystemService::readdir`] reports it: the
-/// child's kind, its apparent and allocated sizes, and its name.
+/// child's kind, its apparent and allocated sizes, its identity and name
+/// count, and its name.
 ///
-/// The sizes ride along with the listing because the mounted filesystem
-/// already holds each child's metadata while producing the entry; a
-/// consumer that needs them (`du`) reads the one listing instead of
+/// The metadata rides along with the listing because the mounted filesystem
+/// already holds each child's while producing the entry; a
+/// consumer that needs it (`du`) reads the one listing instead of
 /// re-resolving every child by path, which on an uncached, authenticated
 /// volume is a fresh full walk per child.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -50,6 +51,15 @@ pub struct ReaddirEntry {
     /// format stores it ([`Time64::UNIX_EPOCH`] for a backing with no
     /// per-node stamp).
     pub modified: Time64,
+    /// The node this name resolves to — the same identity [`FileStat::id`]
+    /// reports for it, so two names for one node carry one `id`.
+    /// [`FileId::NONE`] for an entry the covering volume holds no node for
+    /// (a covered mount point listed in its parent).
+    pub id: FileId,
+    /// How many directory entries name this node, as the format records it
+    /// ([`NodeInfo::SINGLE_NAME`](tairix_abi::driver::filesystem::NodeInfo::SINGLE_NAME)
+    /// for a format that keeps no count).
+    pub nlink: u32,
     /// The entry's name (a single component, never `.`/`..`).
     pub name: String,
 }

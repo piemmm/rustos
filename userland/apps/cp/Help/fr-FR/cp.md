@@ -35,6 +35,20 @@ chemin.
   seule une réponse commençant par `y`/`Y` consent.
 - `-n, --no-clobber` — ne jamais écraser un fichier existant. Le
   dernier de `-i` et `-n` l'emporte.
+- `-l, --link` — donner à la destination un second nom du nœud de la
+  source au lieu de copier ses octets, de sorte que les deux noms ne
+  puissent diverger à une écriture ultérieure. Un répertoire source exige
+  toujours `-r`.
+- `-s, --symbolic-link` — créer un lien symbolique désignant la source au
+  lieu de la copier.
+- `-P, --no-dereference` — reproduire un lien symbolique source comme un
+  lien stockant la même cible, mot pour mot, au lieu de copier ce qu'il
+  désigne (ainsi un lien relatif ou cassé survit à la copie). Sans cette
+  option, un lien source est suivi.
+- `--preserve=links` — deux sources désignant un même nœud obtiennent
+  deux noms à la destination plutôt que deux copies, de sorte que la
+  copie ne double pas silencieusement le stockage.
+- `-d` — `-P` et `--preserve=links` ensemble, comme dans l'outil GNU.
 - `-v, --verbose` — signaler chaque copie sous la forme
   `'source' -> 'dest'`.
 - `-t dir, --target-directory=dir` — copier chaque source dans `dir`,

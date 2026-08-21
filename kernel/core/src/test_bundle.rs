@@ -110,6 +110,11 @@ impl MemFs {
                     size,
                     allocated: size,
                     modified: tairix_abi::time::Time64::UNIX_EPOCH,
+                    // A path-keyed fixture has no node objects to identify
+                    // and holds no second name for one — the same answers its
+                    // `stat` gives.
+                    id: FileId::NONE,
+                    nlink: 1,
                     name: name.to_string(),
                 });
             }

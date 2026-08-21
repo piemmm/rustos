@@ -27,9 +27,9 @@ Una ruta ilegible se informa en la salida de error estándar y el
 recorrido continúa con lo que queda; un directorio ilegible no aporta
 nada en lugar de una suma parcial adivinada.
 
-`du` aún no deduplica un archivo con varios nombres: uno alcanzado por
-dos nombres se cuenta una vez por nombre, y los conmutadores GNU de
-deduplicación de enlaces no existen; `-x` (un solo sistema de archivos) aún no está
+Un archivo alcanzado por más de un nombre se cuenta **una sola vez**, de
+modo que su almacenamiento no se informa dos veces; `-l` cuenta en
+cambio cada nombre. `-x` (un solo sistema de archivos) aún no está
 disponible; las variables de entorno de la familia `DU_BLOCK_SIZE` no
 se leen — la escala se elige solo mediante opciones.
 
@@ -46,6 +46,8 @@ se leen — la escala se elige solo mediante opciones.
   no cambian.
 - `-S, --separate-dirs` — la fila de un directorio excluye sus
   subdirectorios.
+- `-l, --count-links` — contar un archivo con varios nombres una vez
+  por nombre en lugar de una sola.
 - `--apparent-size` — medir longitudes aparentes en bytes, no el
   almacenamiento asignado.
 - `-b, --bytes` — tamaño aparente en bytes sueltos

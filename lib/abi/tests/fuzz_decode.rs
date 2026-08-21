@@ -982,6 +982,13 @@ fn structured_fs_inputs_with_corrupted_fields_never_panic() {
         size: 0,
         allocated: 4096,
         modified: Time64::new(1_234_567_890, 987_654_321).expect("canonical"),
+        // A non-trivial identity and count so the sweep also flips every
+        // bit of the two fields the listing gained.
+        id: tairix_abi::FileId {
+            volume: [0x5a; 16],
+            node: 0x0102_0304_0506_0708,
+        },
+        nlink: 3,
         name: b"inbox",
     }
     .encode_into(&mut dirent)

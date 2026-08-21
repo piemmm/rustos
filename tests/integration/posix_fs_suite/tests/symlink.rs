@@ -416,11 +416,11 @@ fn a_link_is_listed_as_a_link_by_its_parent() {
         .expect("list the volume root");
     let link = listing
         .iter()
-        .find(|(_, name)| name == "link")
+        .find(|entry| entry.name == "link")
         .expect("the link is listed");
     // The stream reports each child's *own* kind, so a link arrives as a
     // link however the listing was opened.
-    assert_eq!(link.0.kind, NodeKind::Symlink);
+    assert_eq!(link.info.kind, NodeKind::Symlink);
 }
 
 #[test]

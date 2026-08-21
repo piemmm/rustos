@@ -62,7 +62,9 @@ pub mod volumes;
 pub mod wrapper_conformance;
 
 pub use blkclient::BlkClient;
-pub use delegate::{DelegatedFs, DelegatedInfo, FinalLink, MetaPolicy, PerInode, Uniform};
+pub use delegate::{
+    DelegatedEntry, DelegatedFs, DelegatedInfo, FinalLink, MetaPolicy, PerInode, Uniform,
+};
 pub use fscache::CachedFs;
 pub use mount::{MountBacking, MountPoint, MountTable};
 pub use mounted::{

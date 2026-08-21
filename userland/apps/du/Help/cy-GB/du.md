@@ -28,9 +28,9 @@ Adroddir llwybr na ellir ei ddarllen ar y gwall safonol ac mae'r
 daith yn parhau gyda'r gweddill; nid yw cyfeiriadur annarllenadwy yn
 cyfrannu dim yn hytrach na swm rhannol wedi'i ddyfalu.
 
-Nid yw `du` eto'n dad-ddyblygu ffeil ag iddi fwy nag un enw: cyfrifir un
-y cyrhaeddir ati trwy ddau enw unwaith fesul enw, ac nid yw switshis
-dad-ddyblygu cysylltiadau GNU yn bodoli; nid yw `-x` (un system ffeiliau) ar gael eto; ni
+Cyfrifir ffeil y cyrhaeddir ati trwy fwy nag un enw **unwaith**, felly
+nid adroddir ei storfa ddwywaith; mae `-l` yn cyfrif pob enw yn lle
+hynny. Nid yw `-x` (un system ffeiliau) ar gael eto; ni
 ddarllenir newidynnau amgylchedd teulu `DU_BLOCK_SIZE` — dewisir y
 raddfa gan opsiynau'n unig.
 
@@ -46,6 +46,8 @@ raddfa gan opsiynau'n unig.
   cyfansymiau'n newid.
 - `-S, --separate-dirs` — mae rhes cyfeiriadur yn eithrio ei
   is-gyfeiriaduron.
+- `-l, --count-links` — cyfrif ffeil ag iddi fwy nag un enw unwaith
+  fesul enw yn lle unwaith.
 - `--apparent-size` — mesur hydoedd ymddangosiadol mewn beitiau, nid
   storfa a neilltuwyd.
 - `-b, --bytes` — maint ymddangosiadol mewn beitiau unigol

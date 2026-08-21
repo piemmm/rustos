@@ -37,7 +37,7 @@ fn mkdir_creates_nested_directories() {
         .list_via_secured(&owner, &vol_path("a"), &mut fs, FinalLink::Follow)
         .expect("list a")
         .into_iter()
-        .map(|(info, name)| (info.kind, name))
+        .map(|entry| (entry.info.kind, entry.name))
         .collect();
     assert_eq!(names, [(NodeKind::Directory, String::from("b"))]);
 }

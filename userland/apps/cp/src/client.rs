@@ -9,9 +9,9 @@ use alloc::vec::Vec;
 use tairix_help::{own_short_help, HelpSource};
 use tairix_path::{join, leaf_name};
 
-use crate::command::{Clobber, Command, Options, TargetMode};
+use crate::command::{Clobber, Command, Contents, Options, TargetMode};
 use crate::error::CpError;
-use crate::io::{Entry, EntryKind, FileSystem, Output, Prompt};
+use crate::io::{Entry, EntryKind, FileSystem, Follow, Output, Probe, Prompt};
 
 /// The fixed-size chunk used to stream a regular file from source to
 /// destination. Matches `cat`'s `READ_CHUNK` so the userland tools share one
@@ -21,12 +21,20 @@ const READ_CHUNK: usize = 4096;
 /// The usage banner a usage error is reported with, and the fallback the
 /// short-help switches print when `cp`'s own Help tree is unavailable.
 pub const USAGE: &str = "\
-usage: cp [-finrRvT] [-t dir] [--] source... dest
+usage: cp [-dfilnPrRsvT] [-t dir] [--] source... dest
 
   -r, -R, --recursive        copy directories and their contents
   -f, --force                remove an unwritable destination and retry
   -i, --interactive          ask before overwriting an existing file
   -n, --no-clobber           never overwrite an existing file
+  -l, --link                 give the destination a second name for the
+                             source's node instead of copying its bytes
+  -s, --symbolic-link        make a symbolic link naming the source
+  -P, --no-dereference       reproduce a symbolic-link source as a link
+                             rather than copying what it names
+  --preserve=links           two sources naming one node get two names at
+                             the destination, not two copies
+  -d                         -P and --preserve=links together
   -v, --verbose              report each copy
   -t dir, --target-directory=dir
                              copy every source into dir
@@ -37,6 +45,10 @@ With one source and a non-directory dest, the source is copied to dest. When
 dest is an existing directory (always, with more than one source) each source
 is copied into it under its base name. `--` ends option parsing: every later
 argument is a path.
+
+-a/--archive and the other --preserve members are refused: --preserve=all
+includes timestamps, which no call can set yet, so they are not honoured in
+part. Use -dR for the rest of -a.
 ";
 
 /// `cp`'s own command word: the short-help switches render its own Help
@@ -89,7 +101,14 @@ pub fn run(
             options,
             sources,
             dest,
-        } => copy_all(&sources, &dest, options, fs, prompt, out),
+        } => Copier {
+            options,
+            linked: Linked::default(),
+            fs,
+            prompt,
+            out,
+        }
+        .copy_all(&sources, &dest),
     }
 }
 
@@ -108,188 +127,339 @@ fn short_help(
     out.write_all(&bytes).map_err(CpError::Output)
 }
 
-/// Copy every source to `dest`, deciding per source whether the destination is
-/// `dest` itself or a child of `dest` named after the source.
-fn copy_all(
-    sources: &[String],
-    dest: &str,
+/// One `cp` run: its options, its seams, and the sharing it has preserved so
+/// far.
+///
+/// Bundling them is what keeps every step a two- or three-argument method
+/// rather than an eight-argument function — the shape `du`'s `Reporter` uses
+/// for the same reason.
+struct Copier<'a> {
     options: Options,
-    fs: &dyn FileSystem,
-    prompt: &dyn Prompt,
-    out: &dyn Output,
-) -> Result<(), CpError> {
-    let dest_is_dir = match options.target_mode {
-        // `-t`: the destination must be an existing directory.
-        TargetMode::Directory => match stat(dest, fs)? {
-            Some(EntryKind::Directory) => true,
-            Some(EntryKind::File) => return Err(CpError::NotADirectory),
-            None => return Err(CpError::Stat(tairix_abi::Errno::NotFound)),
-        },
-        // `-T`: the destination is a normal file for exactly one source.
-        TargetMode::NoDirectory => {
-            if sources.len() > 1 {
-                return Err(CpError::Usage);
-            }
-            false
+    /// The destinations already written for each multiply-named source node
+    /// (`--preserve=links`).
+    linked: Linked,
+    fs: &'a dyn FileSystem,
+    prompt: &'a dyn Prompt,
+    out: &'a dyn Output,
+}
+
+/// The destinations already written for each multiply-named source node, so
+/// `--preserve=links` gives a second source naming one node a second *name*
+/// rather than a second copy.
+///
+/// Only a node whose name count exceeds one is remembered — a node named once
+/// cannot be met twice — so the map holds the hard links a copy actually
+/// meets rather than one entry per node on the volume. It grows on demand
+/// from no fixed ceiling; a heap that refuses to grow it makes the copy fall
+/// back to copying the bytes, which is correct output rather than a failure,
+/// and the destinations simply are not linked.
+#[derive(Default)]
+struct Linked {
+    /// `(source node identity, the destination first written for it)`,
+    /// sorted by identity so a lookup is a binary search.
+    seen: Vec<(tairix_abi::FileId, String)>,
+}
+
+impl Linked {
+    /// The destination already written for `probe`'s node, if any.
+    fn destination_of(&self, probe: &Probe) -> Option<&str> {
+        if probe.nlink <= 1 || probe.id.is_none() {
+            return None;
         }
-        TargetMode::Inferred => matches!(stat(dest, fs)?, Some(EntryKind::Directory)),
-    };
-    // More than one source can only land inside a directory.
-    if sources.len() > 1 && !dest_is_dir {
-        return Err(CpError::Usage);
+        let at = self
+            .seen
+            .binary_search_by_key(&probe.id, |(id, _)| *id)
+            .ok()?;
+        self.seen.get(at).map(|(_, target)| target.as_str())
     }
-    for source in sources {
-        let target = if dest_is_dir {
-            join(dest, leaf_name(source))
-        } else {
-            String::from(dest)
+
+    /// Remember `target` as the destination written for `probe`'s node.
+    ///
+    /// A node that cannot recur, or one the backing offers no identity for,
+    /// is not remembered; nor is anything, if the heap cannot grow the map.
+    fn remember(&mut self, probe: &Probe, target: &str) {
+        if probe.nlink <= 1 || probe.id.is_none() {
+            return;
+        }
+        let Err(at) = self.seen.binary_search_by_key(&probe.id, |(id, _)| *id) else {
+            return;
         };
-        let kind = fs.kind(source).map_err(CpError::Stat)?;
-        copy_known(source, kind, &target, options, fs, prompt, out)?;
-    }
-    Ok(())
-}
-
-/// Report one copy under `-v`, in the GNU wording.
-fn report(options: Options, out: &dyn Output, source: &str, target: &str) -> Result<(), CpError> {
-    if !options.verbose {
-        return Ok(());
-    }
-    out.write_all(format!("'{source}' -> '{target}'\n").as_bytes())
-        .map_err(CpError::Output)
-}
-
-/// Copy an object whose [`EntryKind`] is already known (from the parent's
-/// directory entry, or from the operand's stat), recursing into directories.
-fn copy_known(
-    source: &str,
-    kind: EntryKind,
-    target: &str,
-    options: Options,
-    fs: &dyn FileSystem,
-    prompt: &dyn Prompt,
-    out: &dyn Output,
-) -> Result<(), CpError> {
-    match kind {
-        EntryKind::File => copy_file(source, target, options, fs, prompt, out),
-        EntryKind::Directory => {
-            if !options.recursive {
-                return Err(CpError::IsDirectory);
-            }
-            match stat(target, fs)? {
-                Some(EntryKind::Directory) => {}
-                Some(EntryKind::File) => return Err(CpError::NotADirectory),
-                None => {
-                    fs.mkdir(target).map_err(CpError::Create)?;
-                    report(options, out, source, target)?;
-                }
-            }
-            for entry in read_children(source, fs)? {
-                let child_source = join(source, &entry.name);
-                let child_target = join(target, &entry.name);
-                copy_known(
-                    &child_source,
-                    entry.kind,
-                    &child_target,
-                    options,
-                    fs,
-                    prompt,
-                    out,
-                )?;
-            }
-            Ok(())
+        if self.seen.try_reserve_exact(1).is_err() {
+            return;
         }
+        self.seen.insert(at, (probe.id, String::from(target)));
     }
 }
 
-/// Stream a regular file from `source` to `target`, honouring the
-/// existing-destination policy (`-n` skips, `-i` asks) and `-f` (remove a
-/// destination that cannot be created and retry the create once).
-fn copy_file(
-    source: &str,
-    target: &str,
-    options: Options,
-    fs: &dyn FileSystem,
-    prompt: &dyn Prompt,
-    out: &dyn Output,
-) -> Result<(), CpError> {
-    if stat(target, fs)?.is_some() {
-        match options.clobber {
-            Clobber::Overwrite => {}
-            Clobber::Skip => return Ok(()),
-            Clobber::Prompt => {
-                let question = format!("overwrite '{target}'?");
-                if !prompt.confirm(&question).map_err(CpError::Prompt)? {
+impl Copier<'_> {
+    /// Copy every source to `dest`, deciding per source whether the
+    /// destination is `dest` itself or a child of `dest` named after the
+    /// source.
+    fn copy_all(&mut self, sources: &[String], dest: &str) -> Result<(), CpError> {
+        // A destination is always probed through a final link: a directory
+        // reached by a link is still the directory the copies land in, and
+        // `-P`/`-d` are about how *sources* are read, never where output goes.
+        let dest_is_dir = match self.options.target_mode {
+            // `-t`: the destination must be an existing directory.
+            TargetMode::Directory => match self.stat(dest, Follow::Target)?.map(|p| p.kind) {
+                Some(EntryKind::Directory) => true,
+                Some(EntryKind::File | EntryKind::Symlink) => return Err(CpError::NotADirectory),
+                None => return Err(CpError::Stat(tairix_abi::Errno::NotFound)),
+            },
+            // `-T`: the destination is a normal file for exactly one source.
+            TargetMode::NoDirectory => {
+                if sources.len() > 1 {
+                    return Err(CpError::Usage);
+                }
+                false
+            }
+            TargetMode::Inferred => matches!(
+                self.stat(dest, Follow::Target)?.map(|p| p.kind),
+                Some(EntryKind::Directory)
+            ),
+        };
+        // More than one source can only land inside a directory.
+        if sources.len() > 1 && !dest_is_dir {
+            return Err(CpError::Usage);
+        }
+        for source in sources {
+            let target = if dest_is_dir {
+                join(dest, leaf_name(source))
+            } else {
+                String::from(dest)
+            };
+            let probe = self
+                .fs
+                .probe(source, self.source_follow())
+                .map_err(CpError::Stat)?;
+            self.copy_known(source, probe, &target)?;
+        }
+        Ok(())
+    }
+
+    /// Copy an object a probe already described (from the parent's directory
+    /// entry, or from the operand's own probe), recursing into directories.
+    fn copy_known(&mut self, source: &str, probe: Probe, target: &str) -> Result<(), CpError> {
+        match probe.kind {
+            EntryKind::File => self.reproduce_file(source, &probe, target),
+            // Only a `Follow::Keep` probe reports a link, i.e. only under
+            // `-P`/`-d`: the link itself is reproduced by storing the same
+            // target, verbatim, so a relative or dangling one survives.
+            EntryKind::Symlink => {
+                if !self.replaceable(target)? {
                     return Ok(());
                 }
+                let stored = self.fs.read_link(source).map_err(CpError::Read)?;
+                self.fs.symlink(&stored, target).map_err(CpError::Create)?;
+                self.report(source, target)
+            }
+            EntryKind::Directory => self.reproduce_directory(source, target),
+        }
+    }
+
+    /// Reproduce a directory source under `target` and recurse into it.
+    fn reproduce_directory(&mut self, source: &str, target: &str) -> Result<(), CpError> {
+        if !self.options.recursive {
+            return Err(CpError::IsDirectory);
+        }
+        match self.stat(target, Follow::Target)?.map(|p| p.kind) {
+            Some(EntryKind::Directory) => {}
+            Some(EntryKind::File | EntryKind::Symlink) => return Err(CpError::NotADirectory),
+            None => {
+                self.fs.mkdir(target).map_err(CpError::Create)?;
+                self.report(source, target)?;
             }
         }
-    }
-    create_destination(target, options.force, fs)?;
-    let mut offset: u64 = 0;
-    let mut buf = [0_u8; READ_CHUNK];
-    loop {
-        let read = fs.read(source, offset, &mut buf).map_err(CpError::Read)?;
-        if read == 0 {
-            return report(options, out, source, target);
+        for entry in self.read_children(source)? {
+            let child_source = join(source, &entry.name);
+            let child_target = join(target, &entry.name);
+            // A listing describes each child itself, so a child link needs a
+            // following probe unless `-P`/`-d` keeps it.
+            let child = if entry.probe.kind == EntryKind::Symlink && !self.options.no_dereference {
+                self.fs
+                    .probe(&child_source, Follow::Target)
+                    .map_err(CpError::Stat)?
+            } else {
+                entry.probe
+            };
+            self.copy_known(&child_source, child, &child_target)?;
         }
-        // A seam reporting more than the buffer holds would index out of
-        // bounds; refuse it rather than trust the count.
-        if read > buf.len() {
-            return Err(CpError::Read(tairix_abi::Errno::LengthOutOfRange));
+        Ok(())
+    }
+
+    /// Put a non-directory source at `target`: its bytes, a second name for
+    /// its node (`-l`, or `--preserve=links` meeting the node again), or a
+    /// symbolic link naming it (`-s`).
+    fn reproduce_file(&mut self, source: &str, probe: &Probe, target: &str) -> Result<(), CpError> {
+        // A node already written under another of its names becomes a second
+        // name there, whatever the contents mode: `--preserve=links` is about
+        // keeping the *sources'* sharing, so it outranks copying the bytes.
+        if let Some(first) = self.linked.destination_of(probe) {
+            // The borrow of `self.linked` ends with this copy of the name.
+            let first = String::from(first);
+            if !self.replaceable(target)? {
+                return Ok(());
+            }
+            self.fs.link(&first, target).map_err(CpError::Create)?;
+            return self.report(source, target);
         }
-        fs.write(target, offset, &buf[..read])
-            .map_err(CpError::Write)?;
-        offset = offset.saturating_add(read as u64);
-    }
-}
-
-/// Create `target`, or — with `-f` — remove it and retry the create once.
-fn create_destination(target: &str, force: bool, fs: &dyn FileSystem) -> Result<(), CpError> {
-    match fs.create(target) {
-        Ok(()) => Ok(()),
-        Err(_) if force => {
-            // The destination could not be created (e.g. it exists and is not
-            // writable). `-f` removes it and retries exactly once; a removal
-            // error is irrelevant if the retried create then succeeds.
-            let _ = fs.remove_file(target);
-            fs.create(target).map_err(CpError::Create)
+        match self.options.contents {
+            Contents::Bytes => self.copy_file(source, target)?,
+            Contents::HardLink => {
+                if !self.replaceable(target)? {
+                    return Ok(());
+                }
+                self.fs.link(source, target).map_err(CpError::Create)?;
+                self.report(source, target)?;
+            }
+            Contents::SymbolicLink => {
+                if !self.replaceable(target)? {
+                    return Ok(());
+                }
+                self.fs.symlink(source, target).map_err(CpError::Create)?;
+                self.report(source, target)?;
+            }
         }
-        Err(errno) => Err(CpError::Create(errno)),
+        if self.options.preserve_links {
+            self.linked.remember(probe, target);
+        }
+        Ok(())
     }
-}
 
-/// Read every entry of `path` into a vector, so the directory can be walked
-/// without depending on entry indices staying stable as the copy proceeds.
-fn read_children(path: &str, fs: &dyn FileSystem) -> Result<Vec<Entry>, CpError> {
-    let mut entries = Vec::new();
-    let mut index: u64 = 0;
-    while let Some(entry) = fs.read_dir(path, index).map_err(CpError::Read)? {
-        index = index.saturating_add(1);
-        entries.push(entry);
+    /// Whether the destination may be written: the existing-destination
+    /// policy (`-n` skips, `-i` asks), plus the removal `-f` needs before a
+    /// *create* that cannot overwrite.
+    ///
+    /// A link or a second name is created, and a create never replaces a
+    /// name, so an occupied destination must be removed first — unlike the
+    /// byte copy, which truncates through its own create. Without `-f` the
+    /// create fails and the kernel says why.
+    fn replaceable(&self, target: &str) -> Result<bool, CpError> {
+        if self.stat(target, Follow::Keep)?.is_none() {
+            return Ok(true);
+        }
+        if !self.consented(target)? {
+            return Ok(false);
+        }
+        if self.options.force {
+            // A removal error is irrelevant if the create then succeeds, and
+            // is reported by the create if it does not.
+            let _ = self.fs.remove_file(target);
+        }
+        Ok(true)
     }
-    Ok(entries)
-}
 
-/// Inspect `path`, mapping a missing path to [`None`] so a destination can be
-/// probed for existence without treating absence as a failure.
-fn stat(path: &str, fs: &dyn FileSystem) -> Result<Option<EntryKind>, CpError> {
-    match fs.kind(path) {
-        Ok(kind) => Ok(Some(kind)),
-        Err(tairix_abi::Errno::NotFound) => Ok(None),
-        Err(errno) => Err(CpError::Stat(errno)),
+    /// The existing-destination policy for a destination that is already
+    /// there: `-n` skips it, `-i` asks, and the default overwrites.
+    fn consented(&self, target: &str) -> Result<bool, CpError> {
+        match self.options.clobber {
+            Clobber::Overwrite => Ok(true),
+            Clobber::Skip => Ok(false),
+            Clobber::Prompt => self
+                .prompt
+                .confirm(&format!("overwrite '{target}'?"))
+                .map_err(CpError::Prompt),
+        }
+    }
+
+    /// Stream a regular file from `source` to `target`, honouring the
+    /// existing-destination policy and `-f` (remove a destination that
+    /// cannot be created and retry the create once).
+    fn copy_file(&self, source: &str, target: &str) -> Result<(), CpError> {
+        if self.stat(target, Follow::Keep)?.is_some() && !self.consented(target)? {
+            return Ok(());
+        }
+        self.create_destination(target)?;
+        let mut offset: u64 = 0;
+        let mut buf = [0_u8; READ_CHUNK];
+        loop {
+            let read = self
+                .fs
+                .read(source, offset, &mut buf)
+                .map_err(CpError::Read)?;
+            if read == 0 {
+                return self.report(source, target);
+            }
+            // A seam reporting more than the buffer holds would index out of
+            // bounds; refuse it rather than trust the count.
+            if read > buf.len() {
+                return Err(CpError::Read(tairix_abi::Errno::LengthOutOfRange));
+            }
+            self.fs
+                .write(target, offset, &buf[..read])
+                .map_err(CpError::Write)?;
+            offset = offset.saturating_add(read as u64);
+        }
+    }
+
+    /// Create `target`, or — with `-f` — remove it and retry the create once.
+    fn create_destination(&self, target: &str) -> Result<(), CpError> {
+        match self.fs.create(target) {
+            Ok(()) => Ok(()),
+            Err(_) if self.options.force => {
+                // The destination could not be created (e.g. it exists and is
+                // not writable). `-f` removes it and retries exactly once; a
+                // removal error is irrelevant if the retried create succeeds.
+                let _ = self.fs.remove_file(target);
+                self.fs.create(target).map_err(CpError::Create)
+            }
+            Err(errno) => Err(CpError::Create(errno)),
+        }
+    }
+
+    /// Read every entry of `path` into a vector, so the directory can be
+    /// walked without depending on entry indices staying stable as the copy
+    /// proceeds.
+    fn read_children(&self, path: &str) -> Result<Vec<Entry>, CpError> {
+        let mut entries = Vec::new();
+        let mut index: u64 = 0;
+        while let Some(entry) = self.fs.read_dir(path, index).map_err(CpError::Read)? {
+            index = index.saturating_add(1);
+            entries.push(entry);
+        }
+        Ok(entries)
+    }
+
+    /// Inspect `path`, mapping a missing path to [`None`] so a destination
+    /// can be probed for existence without treating absence as a failure.
+    fn stat(&self, path: &str, follow: Follow) -> Result<Option<Probe>, CpError> {
+        match self.fs.probe(path, follow) {
+            Ok(probe) => Ok(Some(probe)),
+            Err(tairix_abi::Errno::NotFound) => Ok(None),
+            Err(errno) => Err(CpError::Stat(errno)),
+        }
+    }
+
+    /// The follow posture this run's source probes use: `-P`/`-d` describe a
+    /// link source itself, everything else describes what it names.
+    const fn source_follow(&self) -> Follow {
+        if self.options.no_dereference {
+            Follow::Keep
+        } else {
+            Follow::Target
+        }
+    }
+
+    /// Report one copy under `-v`, in the GNU wording.
+    fn report(&self, source: &str, target: &str) -> Result<(), CpError> {
+        if !self.options.verbose {
+            return Ok(());
+        }
+        self.out
+            .write_all(format!("'{source}' -> '{target}'\n").as_bytes())
+            .map_err(CpError::Output)
     }
 }
 #[cfg(test)]
 mod tests {
     use super::{run as engine_run, USAGE};
-    use crate::command::{Clobber, Command, Options, TargetMode};
+    use crate::command::{Clobber, Command, Contents, Options, TargetMode};
     use crate::error::CpError;
-    use crate::io::{Entry, EntryKind, FileSystem, Output, Prompt};
+    use crate::io::{Entry, EntryKind, FileSystem, Follow, Output, Probe, Prompt};
     use alloc::string::{String, ToString};
     use alloc::vec::Vec;
     use core::cell::RefCell;
-    use tairix_abi::Errno;
+    use tairix_abi::{Errno, FileId};
     use tairix_help::{HelpSource, SourceError};
 
     /// A prompt no non-interactive run may ever reach.
@@ -395,6 +565,11 @@ mod tests {
         write_fail: Option<(String, Errno)>,
         /// Removals recorded in call order.
         removed: Vec<String>,
+        /// Symbolic links: `(path, stored target)`, the target verbatim.
+        symlinks: Vec<(String, String)>,
+        /// Second names: `(path, the path whose node it also names)`, so a
+        /// hard-linked pair shares one identity and one set of contents.
+        hard: Vec<(String, String)>,
     }
 
     impl MemFs {
@@ -407,6 +582,8 @@ mod tests {
                     read_fail: None,
                     write_fail: None,
                     removed: Vec::new(),
+                    symlinks: Vec::new(),
+                    hard: Vec::new(),
                 }),
             }
         }
@@ -422,6 +599,43 @@ mod tests {
         fn dir(self, path: &str) -> Self {
             self.state.borrow_mut().dirs.push(path.to_string());
             self
+        }
+
+        /// A symbolic link at `path` storing `target` verbatim.
+        fn symlink_at(self, path: &str, target: &str) -> Self {
+            self.state
+                .borrow_mut()
+                .symlinks
+                .push((path.to_string(), target.to_string()));
+            self
+        }
+
+        /// A second name at `path` for the node `object` already names.
+        fn second_name(self, path: &str, object: &str) -> Self {
+            self.state
+                .borrow_mut()
+                .hard
+                .push((path.to_string(), object.to_string()));
+            self
+        }
+
+        fn target_of(&self, path: &str) -> Option<String> {
+            self.state
+                .borrow()
+                .symlinks
+                .iter()
+                .find(|(p, _)| p == path)
+                .map(|(_, target)| target.clone())
+        }
+
+        fn names_of(&self, object: &str) -> usize {
+            1 + self
+                .state
+                .borrow()
+                .hard
+                .iter()
+                .filter(|(_, o)| o == object)
+                .count()
         }
 
         fn create_fails(self, path: &str, errno: Errno) -> Self {
@@ -486,24 +700,127 @@ mod tests {
         }
     }
 
-    impl FileSystem for MemFs {
-        fn kind(&self, path: &str) -> Result<EntryKind, Errno> {
-            let path = canon(path);
+    impl MemFs {
+        /// The path whose file object `path` names: itself, or the object a
+        /// second name shares. A symbolic link is **not** followed — the
+        /// posture `link` and a `Follow::Keep` probe need.
+        fn object_of(&self, path: &str) -> Option<String> {
             let state = self.state.borrow();
-            if state.dirs.iter().any(|p| p == path) {
-                return Ok(EntryKind::Directory);
-            }
             if state.files.iter().any(|(p, _)| p == path) {
-                return Ok(EntryKind::File);
+                return Some(path.to_string());
             }
-            Err(Errno::NotFound)
+            state
+                .hard
+                .iter()
+                .find(|(p, _)| p == path)
+                .map(|(_, object)| object.clone())
+        }
+
+        /// As [`MemFs::object_of`], but resolving a final symbolic link, the
+        /// way a read through a following descriptor reaches its target.
+        /// Bounded, so a cycle in the fixture cannot spin.
+        fn followed_object_of(&self, path: &str) -> Option<String> {
+            let mut name = path.to_string();
+            for _ in 0..8 {
+                if let Some(object) = self.object_of(&name) {
+                    return Some(object);
+                }
+                name = self.target_of(&name)?;
+            }
+            None
+        }
+
+        /// The identity and name count of the object at `object`: a distinct
+        /// non-zero node number per object, plus one name per second name.
+        fn identity(&self, object: &str) -> (FileId, u32) {
+            let index = self
+                .state
+                .borrow()
+                .files
+                .iter()
+                .position(|(p, _)| p == object)
+                .expect("the object is in the fixture");
+            (
+                FileId {
+                    volume: [2u8; 16],
+                    node: u64::try_from(index).expect("fixture index") + 1,
+                },
+                u32::try_from(self.names_of(object)).expect("fixture names"),
+            )
+        }
+    }
+
+    impl FileSystem for MemFs {
+        fn probe(&self, path: &str, follow: Follow) -> Result<Probe, Errno> {
+            let path = canon(path);
+            if let Some(target) = self.target_of(path) {
+                return match follow {
+                    // A link describes itself: no second name can exist for
+                    // one in this fixture, so one name is the whole truth.
+                    Follow::Keep => Ok(Probe {
+                        kind: EntryKind::Symlink,
+                        id: FileId::NONE,
+                        nlink: 1,
+                    }),
+                    // Following resolves to what the link names; a dangling
+                    // one is the kernel's `NotFound`.
+                    Follow::Target => self.probe(&target, follow),
+                };
+            }
+            if self.state.borrow().dirs.iter().any(|p| p == path) {
+                return Ok(Probe {
+                    kind: EntryKind::Directory,
+                    id: FileId::NONE,
+                    nlink: 2,
+                });
+            }
+            let object = self.object_of(path).ok_or(Errno::NotFound)?;
+            let (id, nlink) = self.identity(&object);
+            Ok(Probe {
+                kind: EntryKind::File,
+                id,
+                nlink,
+            })
+        }
+
+        fn read_link(&self, path: &str) -> Result<String, Errno> {
+            self.target_of(canon(path)).ok_or(Errno::OutOfRange)
+        }
+
+        fn symlink(&self, target: &str, link: &str) -> Result<(), Errno> {
+            let link = canon(link).to_string();
+            let mut state = self.state.borrow_mut();
+            if state.symlinks.iter().any(|(p, _)| *p == link)
+                || state.files.iter().any(|(p, _)| *p == link)
+                || state.dirs.contains(&link)
+            {
+                return Err(Errno::AlreadyExists);
+            }
+            state.symlinks.push((link, target.to_string()));
+            Ok(())
+        }
+
+        fn link(&self, existing: &str, new: &str) -> Result<(), Errno> {
+            let object = self.object_of(canon(existing)).ok_or(Errno::NotFound)?;
+            let new = canon(new).to_string();
+            let mut state = self.state.borrow_mut();
+            if state.files.iter().any(|(p, _)| *p == new)
+                || state.hard.iter().any(|(p, _)| *p == new)
+                || state.symlinks.iter().any(|(p, _)| *p == new)
+            {
+                return Err(Errno::AlreadyExists);
+            }
+            state.hard.push((new, object));
+            Ok(())
         }
 
         fn read(&self, path: &str, offset: u64, buf: &mut [u8]) -> Result<usize, Errno> {
-            let path = canon(path);
+            let named = canon(path);
+            let object = self.followed_object_of(named).ok_or(Errno::NotFound)?;
+            let path = object.as_str();
             let state = self.state.borrow();
             if let Some((p, errno)) = &state.read_fail {
-                if p == path {
+                if p == named {
                     return Err(*errno);
                 }
             }
@@ -529,22 +846,43 @@ mod tests {
             }
             // Derive the directory's children from every file and directory
             // whose immediate parent is `path`, in a stable insertion order.
-            let mut entries = Vec::new();
+            let mut names = Vec::new();
             for (p, _) in &state.files {
                 if parent_of(p) == path {
-                    entries.push(Entry {
-                        name: name_of(p).to_string(),
-                        kind: EntryKind::File,
-                    });
+                    names.push((p.clone(), EntryKind::File));
+                }
+            }
+            for (p, _) in &state.hard {
+                if parent_of(p) == path {
+                    names.push((p.clone(), EntryKind::File));
+                }
+            }
+            for (p, _) in &state.symlinks {
+                if parent_of(p) == path {
+                    names.push((p.clone(), EntryKind::Symlink));
                 }
             }
             for p in &state.dirs {
                 if parent_of(p) == path {
-                    entries.push(Entry {
-                        name: name_of(p).to_string(),
-                        kind: EntryKind::Directory,
-                    });
+                    names.push((p.clone(), EntryKind::Directory));
                 }
+            }
+            drop(state);
+            // A listing describes each child itself, carrying the identity
+            // and name count the real `fs_readdir` record now reports.
+            let mut entries = Vec::new();
+            for (p, kind) in names {
+                let (id, nlink) = match kind {
+                    EntryKind::File => self
+                        .object_of(&p)
+                        .map_or((FileId::NONE, 1), |object| self.identity(&object)),
+                    EntryKind::Directory => (FileId::NONE, 2),
+                    EntryKind::Symlink => (FileId::NONE, 1),
+                };
+                entries.push(Entry {
+                    name: name_of(&p).to_string(),
+                    probe: Probe { kind, id, nlink },
+                });
             }
             let idx = usize::try_from(index).map_err(|_| Errno::LengthOutOfRange)?;
             Ok(entries.into_iter().nth(idx))
@@ -660,6 +998,313 @@ mod tests {
             sources,
             dest,
         )
+    }
+
+    /// Assertions about the fixture state a link-making run produced.
+    impl MemFs {
+        fn is_second_name_of(&self, path: &str, object: &str) -> bool {
+            self.state
+                .borrow()
+                .hard
+                .iter()
+                .any(|(p, o)| p == path && o == object)
+        }
+    }
+
+    // --- -l: a second name instead of a copy ------------------------------
+
+    #[test]
+    fn link_gives_the_destination_a_second_name_rather_than_copying() {
+        // The point of `-l`: no second copy of the bytes exists, so the
+        // destination cannot diverge from the source on the next write.
+        let fs = MemFs::new().file("/a.txt", b"hello");
+        let out = Recorder::new();
+        assert_eq!(
+            run(
+                copy_with(
+                    Options {
+                        contents: Contents::HardLink,
+                        ..Options::DEFAULT
+                    },
+                    &["/a.txt"],
+                    "/b.txt"
+                ),
+                &fs,
+                &out
+            ),
+            Ok(())
+        );
+        assert!(fs.is_second_name_of("/b.txt", "/a.txt"));
+        assert!(
+            fs.contents("/b.txt").is_none(),
+            "no second copy of the bytes"
+        );
+        assert_eq!(fs.names_of("/a.txt"), 2);
+    }
+
+    #[test]
+    fn link_onto_a_taken_name_is_refused_without_force() {
+        // A create never replaces a name, so the kernel's `AlreadyExists`
+        // reaches the caller rather than a silent overwrite.
+        let fs = MemFs::new().file("/a.txt", b"hello").file("/b.txt", b"old");
+        let out = Recorder::new();
+        assert_eq!(
+            run(
+                copy_with(
+                    Options {
+                        contents: Contents::HardLink,
+                        ..Options::DEFAULT
+                    },
+                    &["/a.txt"],
+                    "/b.txt"
+                ),
+                &fs,
+                &out
+            ),
+            Err(CpError::Create(Errno::AlreadyExists))
+        );
+        assert_eq!(fs.contents("/b.txt"), Some(b"old".to_vec()));
+    }
+
+    #[test]
+    fn force_removes_the_taken_name_before_linking() {
+        let fs = MemFs::new().file("/a.txt", b"hello").file("/b.txt", b"old");
+        let out = Recorder::new();
+        assert_eq!(
+            run(
+                copy_with(
+                    Options {
+                        contents: Contents::HardLink,
+                        force: true,
+                        ..Options::DEFAULT
+                    },
+                    &["/a.txt"],
+                    "/b.txt"
+                ),
+                &fs,
+                &out
+            ),
+            Ok(())
+        );
+        assert_eq!(fs.removed(), Vec::from(["/b.txt".to_string()]));
+        assert!(fs.is_second_name_of("/b.txt", "/a.txt"));
+    }
+
+    // --- -s: a symbolic link naming the source ---------------------------
+
+    #[test]
+    fn symbolic_link_names_the_source_rather_than_copying_it() {
+        let fs = MemFs::new().file("/a.txt", b"hello");
+        let out = Recorder::new();
+        assert_eq!(
+            run(
+                copy_with(
+                    Options {
+                        contents: Contents::SymbolicLink,
+                        ..Options::DEFAULT
+                    },
+                    &["/a.txt"],
+                    "/b.txt"
+                ),
+                &fs,
+                &out
+            ),
+            Ok(())
+        );
+        assert_eq!(fs.target_of("/b.txt").as_deref(), Some("/a.txt"));
+        assert!(fs.contents("/b.txt").is_none());
+    }
+
+    // --- -P/-d: reproduce a link rather than following it ----------------
+
+    #[test]
+    fn without_no_dereference_a_link_source_is_followed_and_its_target_copied() {
+        // The default: a copy of a link to a file is a copy of the file.
+        let fs = MemFs::new()
+            .file("/a.txt", b"hello")
+            .symlink_at("/alias", "/a.txt");
+        let out = Recorder::new();
+        assert_eq!(
+            run(copy(false, false, &["/alias"], "/b.txt"), &fs, &out),
+            Ok(())
+        );
+        assert_eq!(fs.contents("/b.txt"), Some(b"hello".to_vec()));
+        assert!(fs.target_of("/b.txt").is_none(), "not reproduced as a link");
+    }
+
+    #[test]
+    fn no_dereference_reproduces_the_link_with_the_same_stored_target() {
+        // Verbatim: a relative target stays relative rather than being
+        // resolved against the source's directory.
+        let fs = MemFs::new()
+            .file("/a.txt", b"hello")
+            .symlink_at("/alias", "../elsewhere/a.txt");
+        let out = Recorder::new();
+        assert_eq!(
+            run(
+                copy_with(
+                    Options {
+                        no_dereference: true,
+                        ..Options::DEFAULT
+                    },
+                    &["/alias"],
+                    "/b"
+                ),
+                &fs,
+                &out
+            ),
+            Ok(())
+        );
+        assert_eq!(fs.target_of("/b").as_deref(), Some("../elsewhere/a.txt"));
+        assert!(fs.contents("/b").is_none());
+    }
+
+    #[test]
+    fn no_dereference_reproduces_a_dangling_link_too() {
+        // A link's target is data, so a link naming nothing is copyable —
+        // following it would be `NotFound`.
+        let fs = MemFs::new().symlink_at("/alias", "nowhere");
+        let out = Recorder::new();
+        assert_eq!(
+            run(
+                copy_with(
+                    Options {
+                        no_dereference: true,
+                        ..Options::DEFAULT
+                    },
+                    &["/alias"],
+                    "/b"
+                ),
+                &fs,
+                &out
+            ),
+            Ok(())
+        );
+        assert_eq!(fs.target_of("/b").as_deref(), Some("nowhere"));
+        // And the default posture cannot copy it at all.
+        let fs = MemFs::new().symlink_at("/alias", "nowhere");
+        assert_eq!(
+            run(copy(false, false, &["/alias"], "/c"), &fs, &Recorder::new()),
+            Err(CpError::Stat(Errno::NotFound))
+        );
+    }
+
+    #[test]
+    fn a_recursive_copy_reproduces_interior_links_under_no_dereference() {
+        let fs = MemFs::new()
+            .dir("/src")
+            .file("/src/real", b"bytes")
+            .symlink_at("/src/alias", "real");
+        let out = Recorder::new();
+        assert_eq!(
+            run(
+                copy_with(
+                    Options {
+                        recursive: true,
+                        no_dereference: true,
+                        ..Options::DEFAULT
+                    },
+                    &["/src"],
+                    "/dst"
+                ),
+                &fs,
+                &out
+            ),
+            Ok(())
+        );
+        assert_eq!(fs.contents("/dst/real"), Some(b"bytes".to_vec()));
+        assert_eq!(fs.target_of("/dst/alias").as_deref(), Some("real"));
+    }
+
+    #[test]
+    fn a_recursive_copy_follows_interior_links_by_default() {
+        let fs = MemFs::new()
+            .dir("/src")
+            .file("/src/real", b"bytes")
+            .symlink_at("/src/alias", "/src/real");
+        let out = Recorder::new();
+        assert_eq!(run(copy(true, false, &["/src"], "/dst"), &fs, &out), Ok(()));
+        assert_eq!(fs.contents("/dst/alias"), Some(b"bytes".to_vec()));
+        assert!(fs.target_of("/dst/alias").is_none());
+    }
+
+    // --- --preserve=links: keep the sources' sharing ----------------------
+
+    #[test]
+    fn preserve_links_gives_a_second_source_naming_one_node_a_second_name() {
+        // Two sources, one node: the destinations share a node too, so the
+        // copy does not silently double the storage.
+        let fs = MemFs::new()
+            .dir("/dst")
+            .file("/one", b"shared")
+            .second_name("/two", "/one");
+        let out = Recorder::new();
+        assert_eq!(
+            run(
+                copy_with(
+                    Options {
+                        preserve_links: true,
+                        ..Options::DEFAULT
+                    },
+                    &["/one", "/two"],
+                    "/dst"
+                ),
+                &fs,
+                &out
+            ),
+            Ok(())
+        );
+        assert_eq!(fs.contents("/dst/one"), Some(b"shared".to_vec()));
+        assert!(fs.is_second_name_of("/dst/two", "/dst/one"));
+        assert!(
+            fs.contents("/dst/two").is_none(),
+            "the second name is not a second copy"
+        );
+    }
+
+    #[test]
+    fn without_preserve_links_each_name_is_copied_separately() {
+        let fs = MemFs::new()
+            .dir("/dst")
+            .file("/one", b"shared")
+            .second_name("/two", "/one");
+        let out = Recorder::new();
+        assert_eq!(
+            run(copy(false, false, &["/one", "/two"], "/dst"), &fs, &out),
+            Ok(())
+        );
+        assert_eq!(fs.contents("/dst/one"), Some(b"shared".to_vec()));
+        assert_eq!(fs.contents("/dst/two"), Some(b"shared".to_vec()));
+        assert!(!fs.is_second_name_of("/dst/two", "/dst/one"));
+    }
+
+    #[test]
+    fn preserve_links_leaves_singly_named_sources_alone() {
+        // A node named once cannot be met twice, so nothing is remembered
+        // for it and two distinct files stay two files.
+        let fs = MemFs::new()
+            .dir("/dst")
+            .file("/one", b"a")
+            .file("/two", b"b");
+        let out = Recorder::new();
+        assert_eq!(
+            run(
+                copy_with(
+                    Options {
+                        preserve_links: true,
+                        ..Options::DEFAULT
+                    },
+                    &["/one", "/two"],
+                    "/dst"
+                ),
+                &fs,
+                &out
+            ),
+            Ok(())
+        );
+        assert_eq!(fs.contents("/dst/one"), Some(b"a".to_vec()));
+        assert_eq!(fs.contents("/dst/two"), Some(b"b".to_vec()));
+        assert!(!fs.is_second_name_of("/dst/two", "/dst/one"));
     }
 
     #[test]

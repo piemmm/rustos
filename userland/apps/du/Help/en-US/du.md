@@ -25,11 +25,10 @@ A path that cannot be read is reported on standard error and the walk
 continues with what remains; an unreadable directory contributes
 nothing rather than a guessed partial sum.
 
-`du` does not yet deduplicate a multiply-named file: one reached through
-two names is counted once per name, and the GNU link-deduplication
-switches do not exist; `-x` (one file system) is
-not yet available; the `DU_BLOCK_SIZE`-family environment variables are
-not read — the scale is selected by options alone.
+A file reached through more than one name is counted **once**, so its
+storage is not reported twice; `-l` counts every name instead. `-x` (one
+file system) is not yet available; the `DU_BLOCK_SIZE`-family environment
+variables are not read — the scale is selected by options alone.
 
 ## OPTIONS
 
@@ -41,6 +40,8 @@ not read — the scale is selected by options alone.
   an operand (`0` reports the operands only); totals are unaffected.
 - `-S, --separate-dirs` — a directory's row excludes its
   subdirectories.
+- `-l, --count-links` — count a multiply-named file once per name
+  instead of once.
 - `--apparent-size` — measure apparent byte lengths, not allocated
   storage.
 - `-b, --bytes` — apparent size in single bytes (`--apparent-size`

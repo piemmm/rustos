@@ -27,9 +27,9 @@ Un percorso illeggibile viene segnalato sull'errore standard e
 l'attraversamento continua con il resto; una directory illeggibile
 non contribuisce nulla anziché una somma parziale indovinata.
 
-`du` non deduplica ancora un file con più nomi: uno raggiunto da due
-nomi è contato una volta per nome, e le opzioni GNU di deduplicazione
-dei collegamenti non esistono; `-x` (un solo filesystem) non è ancora
+Un file raggiunto da più di un nome è contato **una sola volta**, così
+il suo spazio non è riportato due volte; `-l` conta invece ogni nome.
+`-x` (un solo filesystem) non è ancora
 disponibile; le variabili d'ambiente della famiglia `DU_BLOCK_SIZE`
 non vengono lette — la scala si sceglie solo con le opzioni.
 
@@ -45,6 +45,8 @@ non vengono lette — la scala si sceglie solo con le opzioni.
   cambiano.
 - `-S, --separate-dirs` — la riga di una directory esclude le sue
   sottodirectory.
+- `-l, --count-links` — contare un file con più nomi una volta per
+  nome invece di una sola.
 - `--apparent-size` — misurare le lunghezze apparenti in byte, non lo
   spazio allocato.
 - `-b, --bytes` — dimensione apparente in singoli byte

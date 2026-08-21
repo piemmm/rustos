@@ -8,12 +8,13 @@
 
 use alloc::string::String;
 use alloc::vec::Vec;
-use tairix_abi::{Errno, FileKind};
+use tairix_abi::{Errno, FileId, FileKind};
 
 /// The metadata of one filesystem node, as `du` consumes it: what it is,
-/// its apparent byte length, and the on-disk bytes its data actually
+/// its apparent byte length, the on-disk bytes its data actually
 /// occupies (the `fs_stat` `allocated` field, which the mounted format
-/// reports from its own accounting).
+/// reports from its own accounting), and the identity and name count that
+/// tell a second *name* for the node from a second node.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Metadata {
     /// Whether the node is a regular file or a directory.
@@ -22,6 +23,14 @@ pub struct Metadata {
     pub size: u64,
     /// Bytes of on-disk storage the node occupies (the default measure).
     pub allocated: u64,
+    /// The node's stable system-wide identity, so a file reached through
+    /// two names is summed once. [`FileId::NONE`] for a backing that
+    /// offers none, which is therefore never compared for equality.
+    pub id: FileId,
+    /// How many directory entries name this node, as the format records
+    /// it. A node named once cannot be reached twice, which is what keeps
+    /// the walk's seen-set to the hard links it actually meets.
+    pub nlink: u32,
 }
 
 /// One directory entry, as the walk consumes it.

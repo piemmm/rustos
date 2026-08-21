@@ -34,6 +34,21 @@ successivo è un percorso.
   esistente; acconsente solo una risposta che inizia con `y`/`Y`.
 - `-n, --no-clobber` — non sovrascrivere mai un file esistente. Vince
   l'ultimo tra `-i` e `-n`.
+- `-l, --link` — dare alla destinazione un secondo nome del nodo della
+  sorgente invece di copiarne i byte, così i due nomi non possono
+  divergere a una scrittura successiva. Una sorgente che è directory
+  richiede comunque `-r`.
+- `-s, --symbolic-link` — creare un collegamento simbolico che nomina la
+  sorgente invece di copiarla.
+- `-P, --no-dereference` — riprodurre una sorgente che è collegamento
+  simbolico come un collegamento che memorizza lo stesso bersaglio, alla
+  lettera, invece di copiare ciò che nomina (così un collegamento
+  relativo o pendente sopravvive alla copia). Senza di essa un
+  collegamento sorgente è seguito.
+- `--preserve=links` — due sorgenti che nominano un solo nodo ottengono
+  due nomi alla destinazione invece di due copie, così la copia non
+  raddoppia in silenzio lo spazio.
+- `-d` — `-P` e `--preserve=links` insieme, come nello strumento GNU.
 - `-v, --verbose` — riferire ogni copia come `'source' -> 'dest'`.
 - `-t dir, --target-directory=dir` — copiare ogni sorgente dentro
   `dir`, che deve essere una directory esistente. Il valore segue

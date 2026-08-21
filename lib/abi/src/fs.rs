@@ -653,14 +653,15 @@ pub const FS_NAME_MAX: usize = 255;
 ///
 /// `fs_readdir` fills the caller's buffer with consecutive records, each a
 /// fixed [`DirEntry::HEADER_LEN`]-byte header (kind, name length, size,
-/// allocated bytes, modification stamp) followed by exactly `name_len`
+/// allocated bytes, modification stamp, node identity, name count)
+/// followed by exactly `name_len`
 /// UTF-8 name bytes (no NUL). The reader walks the buffer with
 /// [`DirEntry::decode`]; the kernel
 /// writes it with [`DirEntry::encode_into`]. The packing lives here, once,
 /// so producer and consumer cannot disagree (no duplication).
 ///
-/// The record carries each entry's `size`, `allocated`, and `modified`
-/// because the
+/// The record carries each entry's `size`, `allocated`, `modified`, `id`,
+/// and `nlink` because the
 /// listing filesystem already holds the child's metadata while producing
 /// the entry; a consumer that needs per-entry sizes or stamps (`du`,
 /// `ls -l`, a file manager's listing) reads
@@ -669,6 +670,11 @@ pub const FS_NAME_MAX: usize = 255;
 /// re-resolution of the child's path (and a format such as FAT stores the
 /// stamp only in the parent's directory record, so the listing is the one
 /// place it is reportable at all).
+///
+/// `id` and `nlink` are what let a tree walk tell a second *name* for one
+/// node from a second *node*: `du` sums a hard-linked file once by keying a
+/// seen-set on `id`, and remembers only the entries whose `nlink` exceeds
+/// one, since a single-named node can never be reached twice.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub struct DirEntry<'a> {
     /// Whether the entry names a regular file or a directory.
@@ -684,14 +690,24 @@ pub struct DirEntry<'a> {
     /// A backing that stores no per-node stamp reports
     /// [`Time64::UNIX_EPOCH`], never a fabricated wall time.
     pub modified: Time64,
+    /// The node this name resolves to — the same stable identity
+    /// [`FileStat::id`] reports, so two names for one node carry one `id`.
+    /// [`FileId::NONE`] for an entry whose backing offers no identity (a
+    /// covered mount point listed in its parent), which is therefore never
+    /// a key a consumer may compare for equality.
+    pub id: FileId,
+    /// How many directory entries name this node — the [`FileStat::nlink`]
+    /// of the same node, read from the format and never derived.
+    pub nlink: u32,
     /// The entry's name (UTF-8, no terminator, never empty, never `.`/`..`).
     pub name: &'a [u8],
 }
 
 impl<'a> DirEntry<'a> {
     /// Size of the fixed per-entry header: `kind(1)` + `pad(1)` +
-    /// `name_len(2)` + `size(8)` + `allocated(8)` + `modified(12)`.
-    pub const HEADER_LEN: usize = 32;
+    /// `name_len(2)` + `size(8)` + `allocated(8)` + `modified(12)` +
+    /// `id.volume(16)` + `id.node(8)` + `nlink(4)`.
+    pub const HEADER_LEN: usize = 60;
 
     /// The total encoded length of this entry (header plus name).
     #[must_use]
@@ -727,6 +743,9 @@ impl<'a> DirEntry<'a> {
         out[4..12].copy_from_slice(&self.size.to_le_bytes());
         out[12..20].copy_from_slice(&self.allocated.to_le_bytes());
         out[20..32].copy_from_slice(&self.modified.to_le_bytes());
+        out[32..48].copy_from_slice(&self.id.volume);
+        put_u64(out, 48, self.id.node);
+        put_u32(out, 56, self.nlink);
         out[Self::HEADER_LEN..total].copy_from_slice(self.name);
         Ok(total)
     }
@@ -757,12 +776,19 @@ impl<'a> DirEntry<'a> {
         if bytes.len() < total {
             return Err(Errno::BufferTooSmall);
         }
+        let mut volume = [0u8; 16];
+        volume.copy_from_slice(&bytes[32..48]);
         Ok((
             Self {
                 kind,
                 size: read_u64(bytes, 4),
                 allocated: read_u64(bytes, 12),
                 modified: Time64::from_bytes(&bytes[20..32])?,
+                id: FileId {
+                    volume,
+                    node: read_u64(bytes, 48),
+                },
+                nlink: read_u32(bytes, 56),
                 name: &bytes[Self::HEADER_LEN..total],
             },
             total,
@@ -1015,6 +1041,11 @@ mod tests {
                 allocated: 4096,
                 // Pre-1970: the full signed range must round-trip.
                 modified: Time64::from_secs(-2_000_000_000),
+                id: FileId {
+                    volume: [7u8; 16],
+                    node: 42,
+                },
+                nlink: 2,
                 name: b"Logs",
             },
             DirEntry {
@@ -1023,6 +1054,11 @@ mod tests {
                 allocated: 0x0102_0304_0506_0708,
                 // Post-2038: never a 32-bit seconds wrap.
                 modified: Time64::new(4_000_000_000, 999_999_999).expect("canonical"),
+                id: FileId {
+                    volume: [0xab; 16],
+                    node: u64::MAX,
+                },
+                nlink: u32::MAX,
                 name: b"motd.txt",
             },
         ];
@@ -1042,6 +1078,8 @@ mod tests {
                 entry.size,
                 entry.allocated,
                 entry.modified,
+                entry.id,
+                entry.nlink,
                 entry.name.to_vec(),
             ));
             cursor += used;
@@ -1055,6 +1093,11 @@ mod tests {
                 0,
                 4096,
                 Time64::from_secs(-2_000_000_000),
+                FileId {
+                    volume: [7u8; 16],
+                    node: 42
+                },
+                2,
                 b"Logs".to_vec()
             )
         );
@@ -1065,9 +1108,51 @@ mod tests {
                 u64::MAX,
                 0x0102_0304_0506_0708,
                 Time64::new(4_000_000_000, 999_999_999).expect("canonical"),
+                FileId {
+                    volume: [0xab; 16],
+                    node: u64::MAX
+                },
+                u32::MAX,
                 b"motd.txt".to_vec()
             )
         );
+    }
+
+    #[test]
+    fn two_names_for_one_node_carry_one_identity() {
+        // The property `du`'s deduplication rests on: a second *name* is
+        // told from a second *node* by the identity, not by the name.
+        let id = FileId {
+            volume: [3u8; 16],
+            node: 9,
+        };
+        let stream = encoded_stream(&[
+            DirEntry {
+                kind: FileKind::Regular,
+                size: 12,
+                allocated: 4096,
+                modified: Time64::UNIX_EPOCH,
+                id,
+                nlink: 2,
+                name: b"first",
+            },
+            DirEntry {
+                kind: FileKind::Regular,
+                size: 12,
+                allocated: 4096,
+                modified: Time64::UNIX_EPOCH,
+                id,
+                nlink: 2,
+                name: b"second",
+            },
+        ]);
+        let decoded: alloc::vec::Vec<DirEntry<'_>> = DirEntries::new(&stream)
+            .collect::<Result<_, _>>()
+            .expect("valid");
+        assert_eq!(decoded.len(), 2);
+        assert_eq!(decoded[0].id, decoded[1].id);
+        assert_eq!(decoded[0].nlink, 2);
+        assert_ne!(decoded[0].name, decoded[1].name);
     }
 
     #[test]
@@ -1077,6 +1162,8 @@ mod tests {
             size: 1,
             allocated: 1,
             modified: Time64::UNIX_EPOCH,
+            id: FileId::NONE,
+            nlink: 1,
             name: b"f",
         };
         let mut buf = [0u8; DirEntry::HEADER_LEN + 1];
@@ -1094,6 +1181,8 @@ mod tests {
             size: 0,
             allocated: 0,
             modified: Time64::UNIX_EPOCH,
+            id: FileId::NONE,
+            nlink: 1,
             name: b"",
         };
         assert_eq!(empty.encode_into(&mut buf), Err(Errno::LengthOutOfRange));
@@ -1103,6 +1192,8 @@ mod tests {
             size: 0,
             allocated: 0,
             modified: Time64::UNIX_EPOCH,
+            id: FileId::NONE,
+            nlink: 1,
             name: &big,
         };
         let mut wide = vec![0u8; FS_NAME_MAX + 8];
@@ -1119,6 +1210,8 @@ mod tests {
             size: 0,
             allocated: 0,
             modified: Time64::UNIX_EPOCH,
+            id: FileId::NONE,
+            nlink: 1,
             name: b"abcd",
         };
         let mut buf = [0u8; DirEntry::HEADER_LEN + 2];
@@ -1127,9 +1220,18 @@ mod tests {
 
     #[test]
     fn dir_entry_decode_rejects_truncated_record() {
-        // Header claims a 4-byte name but only 2 follow.
-        let buf = [FileKind::Regular.as_u8(), 0, 4, 0, b'a', b'b'];
+        // A whole header claiming a 4-byte name, but only 2 follow.
+        let mut buf = [0u8; DirEntry::HEADER_LEN + 2];
+        buf[0] = FileKind::Regular.as_u8();
+        buf[2] = 4;
+        buf[DirEntry::HEADER_LEN] = b'a';
+        buf[DirEntry::HEADER_LEN + 1] = b'b';
         assert_eq!(DirEntry::decode(&buf), Err(Errno::BufferTooSmall));
+        // A header cut short before its last field, likewise.
+        assert_eq!(
+            DirEntry::decode(&buf[..DirEntry::HEADER_LEN - 1]),
+            Err(Errno::BufferTooSmall)
+        );
         assert_eq!(DirEntry::decode(&[0u8; 2]), Err(Errno::BufferTooSmall));
     }
 
@@ -1153,6 +1255,8 @@ mod tests {
                 size: 0,
                 allocated: 4096,
                 modified: Time64::UNIX_EPOCH,
+                id: FileId::NONE,
+                nlink: 1,
                 name: b"Logs",
             },
             DirEntry {
@@ -1160,6 +1264,8 @@ mod tests {
                 size: 7,
                 allocated: 4096,
                 modified: Time64::from_secs(4_000_000_000),
+                id: FileId::NONE,
+                nlink: 1,
                 name: b"motd.txt",
             },
         ]);
@@ -1189,6 +1295,8 @@ mod tests {
             size: 1,
             allocated: 1,
             modified: Time64::UNIX_EPOCH,
+            id: FileId::NONE,
+            nlink: 1,
             name: b"ok",
         }]);
         // A second record with an undefined kind byte: the walk must yield
@@ -1199,6 +1307,8 @@ mod tests {
             size: 0,
             allocated: 0,
             modified: Time64::UNIX_EPOCH,
+            id: FileId::NONE,
+            nlink: 1,
             name: b"x",
         }
         .encode_into(&mut bad)
@@ -1223,6 +1333,8 @@ mod tests {
             size: 0,
             allocated: 0,
             modified: Time64::UNIX_EPOCH,
+            id: FileId::NONE,
+            nlink: 1,
             name: b"Users",
         }]);
         // A dangling half header can never be a listing the caller shows.

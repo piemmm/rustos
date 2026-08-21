@@ -7,7 +7,8 @@
 //! option surface follows GNU coreutils (`AGENTS.md` §16.7): `-a` adds a
 //! row per file, `-s` reports only the operands, `-c` appends a grand
 //! total, `-d` bounds the reported depth, `-S` excludes subdirectories
-//! from a directory's own row, `--apparent-size`/`-b` measure apparent
+//! from a directory's own row, `-l` counts a multiply-named file once per
+//! name, `--apparent-size`/`-b` measure apparent
 //! byte lengths, and `-k`/`-m`/`-h`/`--si`/`-B <size>` select the scale.
 //! `-?`/`--help` render the tool's own short help from its bundled
 //! `Help/` tree through the shared `lib/help` engine (plans/APPS.md §4).
@@ -40,10 +41,17 @@
 //! occupies. `--apparent-size` (and `-b`) measure the apparent byte
 //! length instead. Block counts round **up** (a partially used block is a
 //! used block), through the one shared GNU size vocabulary in
-//! `lib/util` (`tairix_util::size`) that `df` uses too. TAIRiX has no
-//! hard links yet (`plans/APPS.md` Stage E), so no entry can be counted
-//! twice; GNU's `-l`/hard-link deduplication becomes meaningful only
-//! when links land.
+//! `lib/util` (`tairix_util::size`) that `df` uses too.
+//!
+//! A file reached through more than one name is summed **once**, as the
+//! GNU tool does; `-l`/`--count-links` opts out and counts every name. The
+//! key is the node identity each `fs_readdir`/`fs_stat` record carries, and
+//! only a node whose name count exceeds one is remembered — a node named
+//! once cannot be reached twice — so the seen-set holds the hard links the
+//! walk meets rather than one entry per node on the volume. It grows on
+//! demand from no fixed ceiling; a heap that refuses to grow it makes the
+//! walk count every name and say so on standard error (exit `1`), never
+//! silently.
 //!
 //! # Fail loud, degrade gracefully
 //!

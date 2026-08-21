@@ -4,7 +4,7 @@ use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use tairix_abi::{Errno, FileKind};
+use tairix_abi::{Errno, FileId, FileKind};
 use tairix_help::{own_short_help, HelpSource};
 use tairix_path::join;
 use tairix_util::size::{blocks_ceil, format_human, format_u128, SizeScale, SIZE_TEXT_MAX};
@@ -16,7 +16,7 @@ use crate::io::{Entry, Metadata, Output, Walk};
 /// The one-line usage banner, printed on a usage error and as the
 /// fallback when the bundled help document is unavailable.
 pub const USAGE: &str =
-    "usage: du [-a | -s] [-cS0] [-h | -k | -m | -b | --si | -B <size>] [--apparent-size] [-d <n>] [--] [file...]";
+    "usage: du [-a | -s] [-clS0] [-h | -k | -m | -b | --si | -B <size>] [--apparent-size] [-d <n>] [--] [file...]";
 
 /// The command word this bundle is named by, for the own-help lookup.
 const OWN_WORD: &str = "du";
@@ -54,6 +54,8 @@ pub fn run(
         err,
         clean: true,
         grand_total: 0,
+        counted: Counted::default(),
+        warned: false,
     };
     if options.paths.is_empty() {
         report.operand(".")?;
@@ -67,6 +69,63 @@ pub fn run(
         report.row(total, "total")?;
     }
     Ok(report.clean)
+}
+
+/// The multiply-named nodes this walk has already counted.
+///
+/// A node named once can never be reached twice, so only an entry whose
+/// `nlink` exceeds one is remembered: the set holds the hard links the walk
+/// actually meets, not one entry per node on the volume — which on a volume
+/// far larger than memory is the difference between a bounded cost and an
+/// unbounded one. Directories are excluded too: a directory's count is
+/// always above one (its own `.` and each child's `..`) yet the tree walk
+/// reaches it once, and the VFS refuses to give one a second name.
+///
+/// The set grows on demand from no fixed ceiling. A heap that refuses to
+/// grow it degrades to counting every name — the pre-deduplication answer —
+/// and the run says so on standard error and exits non-zero, so an
+/// over-count is never silent.
+#[derive(Default)]
+struct Counted {
+    /// The identities already counted, sorted so membership is a binary
+    /// search rather than a scan.
+    seen: Vec<FileId>,
+}
+
+/// What a node's identity says about whether to count its bytes.
+enum Sighting {
+    /// The first (or only) name for this node: count it.
+    First,
+    /// Another name for a node already counted: it contributes nothing.
+    Repeat,
+    /// Count it, but the node could not be remembered, so its other names
+    /// will be counted too — the caller reports the over-count.
+    Untracked,
+}
+
+impl Counted {
+    /// Record a sighting of `meta` and report whether its bytes count.
+    fn sight(&mut self, meta: &Metadata) -> Sighting {
+        if meta.kind == FileKind::Directory || meta.nlink <= 1 {
+            return Sighting::First;
+        }
+        // A backing that offers no identity cannot be keyed on one. Counting
+        // it risks a double count; merging it with the next such node would
+        // silently *lose* real storage, so it is counted and reported.
+        if meta.id.is_none() {
+            return Sighting::Untracked;
+        }
+        match self.seen.binary_search(&meta.id) {
+            Ok(_) => Sighting::Repeat,
+            Err(at) => {
+                if self.seen.try_reserve_exact(1).is_err() {
+                    return Sighting::Untracked;
+                }
+                self.seen.insert(at, meta.id);
+                Sighting::First
+            }
+        }
+    }
 }
 
 /// One in-flight directory of the iterative post-order walk.
@@ -93,6 +152,11 @@ struct Reporter<'a> {
     err: &'a dyn Output,
     clean: bool,
     grand_total: u128,
+    /// The names already counted, so a hard-linked file is summed once.
+    counted: Counted,
+    /// Whether the untracked-node diagnostic has already been written, so
+    /// it is reported once per run rather than once per entry.
+    warned: bool,
 }
 
 impl Reporter<'_> {
@@ -103,7 +167,7 @@ impl Reporter<'_> {
             Err(errno) => return self.diagnose(path, errno),
         };
         if meta.kind != FileKind::Directory {
-            let bytes = self.measure(&meta);
+            let bytes = self.contribution(&meta)?;
             self.grand_total += bytes;
             return self.row(bytes, path);
         }
@@ -161,7 +225,7 @@ impl Reporter<'_> {
                 }
                 continue;
             }
-            let bytes = self.measure(&child_meta);
+            let bytes = self.contribution(&child_meta)?;
             if let Some(frame) = stack.last_mut() {
                 frame.own_bytes += bytes;
                 frame.tree_bytes += bytes;
@@ -198,6 +262,41 @@ impl Reporter<'_> {
             own_bytes: own,
             tree_bytes: own,
         }))
+    }
+
+    /// The bytes a node contributes to the totals: its measured size, or
+    /// zero when another of its names has already been counted.
+    ///
+    /// `-l` counts every name, so the seen-set is neither consulted nor
+    /// grown under it.
+    fn contribution(&mut self, meta: &Metadata) -> Result<u128, DuError> {
+        let bytes = self.measure(meta);
+        if self.options.count_links {
+            return Ok(bytes);
+        }
+        match self.counted.sight(meta) {
+            Sighting::First => Ok(bytes),
+            Sighting::Repeat => Ok(0),
+            Sighting::Untracked => {
+                self.warn_untracked()?;
+                Ok(bytes)
+            }
+        }
+    }
+
+    /// Report, once, that the walk can no longer tell a repeated name from
+    /// a second file, so the totals count some storage more than once.
+    fn warn_untracked(&mut self) -> Result<(), DuError> {
+        self.clean = false;
+        if self.warned {
+            return Ok(());
+        }
+        self.warned = true;
+        self.err
+            .write_all(
+                b"du: cannot track every hard link; multiply-named files are counted once per name\n",
+            )
+            .map_err(DuError::Output)
     }
 
     /// The bytes a node contributes under the selected measure.
@@ -260,13 +359,19 @@ mod tests {
     use alloc::string::{String, ToString};
     use alloc::vec::Vec;
     use core::cell::RefCell;
-    use tairix_abi::{Errno, FileKind};
+    use tairix_abi::{Errno, FileId, FileKind};
     use tairix_help::{HelpSource, SourceError};
 
     /// One node of the in-memory tree fixture.
     enum Node {
         /// A regular file: `(apparent size, allocated bytes)`.
         File(u64, u64),
+        /// A second name for the file at this path — a hard link, so both
+        /// names report the one identity and the count of names.
+        Link(String),
+        /// A file whose backing offers no identity, as a mount point listed
+        /// through its parent does: `(size, allocated, name count)`.
+        Unidentified(u64, u64, u32),
         /// A directory: `(allocated bytes, entry names)`.
         Dir(u64, Vec<String>),
         /// A path whose stat is refused with this errno.
@@ -290,6 +395,10 @@ mod tests {
                             (*path).to_string(),
                             match node {
                                 Node::File(size, allocated) => Node::File(*size, *allocated),
+                                Node::Link(target) => Node::Link(target.clone()),
+                                Node::Unidentified(size, allocated, names) => {
+                                    Node::Unidentified(*size, *allocated, *names)
+                                }
                                 Node::Dir(own, names) => Node::Dir(*own, names.clone()),
                                 Node::Denied(errno) => Node::Denied(*errno),
                                 Node::Unlistable(own) => Node::Unlistable(*own),
@@ -301,18 +410,74 @@ mod tests {
         }
     }
 
+    impl MemFs {
+        /// The identity and name count of the file object at `object`: a
+        /// distinct node number per path that holds a file, plus one name
+        /// for every hard link naming it.
+        fn identity(&self, object: &str) -> (FileId, u32) {
+            let index = self
+                .nodes
+                .keys()
+                .position(|key| key == object)
+                .expect("the object is in the fixture");
+            let links = self
+                .nodes
+                .values()
+                .filter(|node| matches!(node, Node::Link(target) if target == object))
+                .count();
+            (
+                FileId {
+                    volume: [1u8; 16],
+                    // A distinct, non-zero number per object, so no real
+                    // node is ever mistaken for `FileId::NONE`.
+                    node: u64::try_from(index).expect("fixture index") + 1,
+                },
+                u32::try_from(links).expect("fixture links") + 1,
+            )
+        }
+    }
+
     impl Walk for MemFs {
         fn stat(&self, path: &str) -> Result<Metadata, Errno> {
             match self.nodes.get(path) {
-                Some(Node::File(size, allocated)) => Ok(Metadata {
+                Some(Node::File(size, allocated)) => {
+                    let (id, nlink) = self.identity(path);
+                    Ok(Metadata {
+                        kind: FileKind::Regular,
+                        size: *size,
+                        allocated: *allocated,
+                        id,
+                        nlink,
+                    })
+                }
+                Some(Node::Link(target)) => {
+                    let Some(Node::File(size, allocated)) = self.nodes.get(target) else {
+                        return Err(Errno::NotFound);
+                    };
+                    let (id, nlink) = self.identity(target);
+                    Ok(Metadata {
+                        kind: FileKind::Regular,
+                        size: *size,
+                        allocated: *allocated,
+                        id,
+                        nlink,
+                    })
+                }
+                Some(Node::Unidentified(size, allocated, nlink)) => Ok(Metadata {
                     kind: FileKind::Regular,
                     size: *size,
                     allocated: *allocated,
+                    id: FileId::NONE,
+                    nlink: *nlink,
                 }),
                 Some(Node::Dir(own, _) | Node::Unlistable(own)) => Ok(Metadata {
                     kind: FileKind::Directory,
                     size: 0,
                     allocated: *own,
+                    id: self.identity(path).0,
+                    // A directory's count includes its own `.` and each
+                    // child's `..`, so it always exceeds one.
+                    nlink: 2,
                 }),
                 Some(Node::Denied(errno)) => Err(*errno),
                 None => Err(Errno::NotFound),
@@ -403,6 +568,23 @@ mod tests {
         ])
     }
 
+    /// A tree whose one 4096-byte file is reached through two names, plus a
+    /// second, singly-named file so the deduplication is visibly selective.
+    fn linked_tree() -> MemFs {
+        MemFs::new(&[
+            (
+                "docs",
+                Node::Dir(
+                    512,
+                    alloc::vec!["one".to_string(), "other".to_string(), "two".to_string()],
+                ),
+            ),
+            ("docs/one", Node::File(3000, 4096)),
+            ("docs/other", Node::File(100, 1024)),
+            ("docs/two", Node::Link("docs/one".to_string())),
+        ])
+    }
+
     fn run_case(args: &[&str], fs: &MemFs) -> (bool, String, String) {
         let command = parse(args).expect("parse");
         let out = MemOut::default();
@@ -468,6 +650,79 @@ mod tests {
         let (clean, out, _) = run_case(&["-h", "docs"], &tree());
         assert!(clean);
         assert_eq!(out, "4.5K\tdocs/sub\n6.0K\tdocs\n");
+    }
+
+    #[test]
+    fn a_multiply_named_file_is_counted_once() {
+        // One 4096-byte file under two names, plus a 1024-byte file and the
+        // 512-byte directory: 512 + 4096 + 1024 = 5632 B → 6 blocks. Counting
+        // the linked file per name would give 9728 B → 10 blocks.
+        let (clean, out, err) = run_case(&["docs"], &linked_tree());
+        assert!(clean);
+        assert_eq!(out, "6\tdocs\n");
+        assert!(err.is_empty());
+    }
+
+    #[test]
+    fn count_links_counts_every_name() {
+        // `-l` is the GNU opt-out: 512 + 4096 + 1024 + 4096 = 9728 B → 10.
+        let (clean, out, err) = run_case(&["-l", "docs"], &linked_tree());
+        assert!(clean);
+        assert_eq!(out, "10\tdocs\n");
+        assert!(err.is_empty());
+    }
+
+    #[test]
+    fn a_deduplicated_name_still_gets_its_own_row_under_all() {
+        // Both names are listed — `du -a` reports names, not nodes — but the
+        // repeated one contributes nothing, to its own row or to the total.
+        let (clean, out, _) = run_case(&["-a", "docs"], &linked_tree());
+        assert!(clean);
+        assert_eq!(out, "4\tdocs/one\n1\tdocs/other\n0\tdocs/two\n6\tdocs\n");
+    }
+
+    #[test]
+    fn two_operands_naming_one_node_are_counted_once() {
+        // The seen-set spans the whole run, so a node given twice on the
+        // command line is summed once, and the grand total says so.
+        let (clean, out, err) = run_case(&["-c", "docs/one", "docs/two"], &linked_tree());
+        assert!(clean);
+        assert_eq!(out, "4\tdocs/one\n0\tdocs/two\n4\ttotal\n");
+        assert!(err.is_empty());
+    }
+
+    #[test]
+    fn a_singly_named_file_given_twice_is_counted_twice() {
+        // Deduplication is about a node's *names*, not about repeated
+        // operands: a file with one name cannot be the same node twice, so
+        // naming it twice counts it twice, exactly as the GNU tool does.
+        let (clean, out, _) = run_case(&["-c", "docs/other", "docs/other"], &linked_tree());
+        assert!(clean);
+        assert_eq!(out, "1\tdocs/other\n1\tdocs/other\n2\ttotal\n");
+    }
+
+    #[test]
+    fn a_node_with_no_identity_is_counted_and_reported() {
+        // A multiply-named node the backing offers no identity for cannot be
+        // keyed on one. Merging it would silently lose real storage, so it is
+        // counted — and the run says so and exits non-zero rather than
+        // reporting a wrong total as clean.
+        let fs = MemFs::new(&[
+            (
+                "docs",
+                Node::Dir(0, alloc::vec!["x".to_string(), "y".to_string()]),
+            ),
+            ("docs/x", Node::Unidentified(0, 1024, 2)),
+            ("docs/y", Node::Unidentified(0, 1024, 2)),
+        ]);
+        let (clean, out, err) = run_case(&["docs"], &fs);
+        assert!(!clean, "an over-count is not a clean run");
+        assert_eq!(out, "2\tdocs\n");
+        // Reported once, not once per entry.
+        assert_eq!(
+            err,
+            "du: cannot track every hard link; multiply-named files are counted once per name\n"
+        );
     }
 
     #[test]
@@ -567,6 +822,7 @@ mod tests {
                 "`--apparent-size`",
                 "`-d, --max-depth <n>`",
                 "`-S, --separate-dirs`",
+                "`-l, --count-links`",
                 "`-0, --null`",
                 "`-?, --help`",
             ] {

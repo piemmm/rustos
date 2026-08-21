@@ -24,6 +24,12 @@ is never treated as consent).
 The first failure stops the run before any later operand. `--` ends
 option parsing: every later argument is a path.
 
+GNU's `-a`/`--archive` and the `--preserve` set other than
+`--preserve=links` are **refused**, not narrowed. `-a` is
+`-dR --preserve=all`, and `--preserve=all` includes a node's timestamps,
+which no call on this system can set — so honouring `-a` would report a
+preservation that did not happen. Use `-dR` for the rest of it.
+
 ## OPTIONS
 
 - `-r, -R, --recursive` — copy directories and their contents.
@@ -33,6 +39,19 @@ option parsing: every later argument is a path.
   a reply beginning `y`/`Y` consents.
 - `-n, --no-clobber` — never overwrite an existing file. The later of
   `-i` and `-n` wins.
+- `-l, --link` — give the destination a second name for the source's own
+  node instead of copying its bytes, so the two names cannot diverge on a
+  later write. A directory source still needs `-r`.
+- `-s, --symbolic-link` — make a symbolic link naming the source instead
+  of copying it.
+- `-P, --no-dereference` — reproduce a symbolic-link source as a link
+  storing the same target, verbatim, rather than copying what it names
+  (so a relative or dangling link survives the copy). Without it a link
+  source is followed.
+- `--preserve=links` — two sources naming one node get two names at the
+  destination rather than two copies, so the copy does not silently
+  double the storage.
+- `-d` — `-P` and `--preserve=links` together, as in the GNU tool.
 - `-v, --verbose` — report each copy as `'source' -> 'dest'`.
 - `-t dir, --target-directory=dir` — copy every source into `dir`,
   which must be an existing directory. The value follows attached

@@ -1,0 +1,20 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256">
+  <title>readlink</title>
+  <!-- One chain ring with an arrow leaving it: the link, and the target it
+       names being read out. The ring is a filled outer octagon with an inner
+       octagon in the tile colour punched through it, and the arrow is a shaft
+       polygon plus a head triangle, because the desktop's SVG subset has no
+       curves, no strokes and no transforms. -->
+
+  <!-- Tile: rounded square, corners cut as integer line segments -->
+  <polygon fill="#3A5EA8" points="20,60 22,44 30,31 43,22 60,20 196,20 213,22 226,31 234,44 236,60 236,196 234,213 226,226 213,234 196,236 60,236 43,234 30,226 22,213 20,196"/>
+  <polygon fill="#4B72BF" points="20,60 22,44 30,31 43,22 60,20 196,20 213,22 226,31 234,44 236,60 236,92 20,92"/>
+
+  <!-- The ring, on the left -->
+  <polygon fill="#FFFFFF" points="36,128 40,110 51,96 66,88 84,86 112,86 112,116 84,116 74,119 68,128 74,137 84,140 112,140 112,170 84,170 66,168 51,160 40,146"/>
+  <polygon fill="#3A5EA8" points="60,128 63,118 70,111 80,108 112,108 112,118 84,118 72,122 66,128 72,134 84,138 112,138 112,148 80,148 70,145 63,138"/>
+
+  <!-- The arrow: the target being read out of the link -->
+  <polygon fill="#FFE08A" points="112,118 176,118 176,138 112,138"/>
+  <polygon fill="#FFE08A" points="170,98 220,128 170,158"/>
+</svg>

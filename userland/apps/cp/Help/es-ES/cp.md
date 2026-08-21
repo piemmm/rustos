@@ -34,6 +34,20 @@ posterior es una ruta.
   existente; solo consiente una respuesta que empiece por `y`/`Y`.
 - `-n, --no-clobber` — no sobrescribir nunca un archivo existente. El
   último de `-i` y `-n` gana.
+- `-l, --link` — dar al destino un segundo nombre del nodo de la fuente
+  en lugar de copiar sus bytes, de modo que los dos nombres no puedan
+  divergir en una escritura posterior. Una fuente que es directorio sigue
+  necesitando `-r`.
+- `-s, --symbolic-link` — crear un enlace simbólico que nombre la fuente
+  en lugar de copiarla.
+- `-P, --no-dereference` — reproducir una fuente que es enlace simbólico
+  como un enlace que almacena el mismo destino, literalmente, en lugar de
+  copiar lo que nombra (así un enlace relativo o roto sobrevive a la
+  copia). Sin ella se sigue un enlace de origen.
+- `--preserve=links` — dos fuentes que nombran un mismo nodo obtienen dos
+  nombres en el destino en lugar de dos copias, de modo que la copia no
+  duplica el almacenamiento en silencio.
+- `-d` — `-P` y `--preserve=links` juntas, como en la herramienta GNU.
 - `-v, --verbose` — informar de cada copia como `'source' -> 'dest'`.
 - `-t dir, --target-directory=dir` — copiar cada origen dentro de
   `dir`, que debe ser un directorio existente. El valor sigue adjunto

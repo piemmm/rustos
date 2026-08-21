@@ -311,7 +311,7 @@ fn delegated_list_of_mount_point_lists_driver_root() {
         .expect("list mount root");
     let kinds: Vec<(NodeKind, String)> = names
         .into_iter()
-        .map(|(info, name)| (info.kind, name))
+        .map(|entry| (entry.info.kind, entry.name))
         .collect();
     assert_eq!(
         kinds,
@@ -333,7 +333,14 @@ fn delegated_list_of_subdir() {
         .expect("list subdir");
     let entries: Vec<(NodeKind, u64, Time64, String)> = names
         .into_iter()
-        .map(|(info, name)| (info.kind, info.size, info.times.modified, name))
+        .map(|entry| {
+            (
+                entry.info.kind,
+                entry.info.size,
+                entry.info.times.modified,
+                entry.name,
+            )
+        })
         .collect();
     // The listing carries the child's own size and modification stamp,
     // read once by the driver.
@@ -543,7 +550,7 @@ fn delegated_mkdir_then_create_inside() {
         .expect("list");
     let kinds: Vec<(NodeKind, String)> = names
         .into_iter()
-        .map(|(info, name)| (info.kind, name))
+        .map(|entry| (entry.info.kind, entry.name))
         .collect();
     assert_eq!(kinds, [(NodeKind::RegularFile, String::from("inner.bin"))]);
 }
@@ -1142,7 +1149,7 @@ fn secured_list_of_mount_root_lists_driver_root() {
         .expect("secured list");
     let kinds: Vec<(NodeKind, String)> = names
         .into_iter()
-        .map(|(info, name)| (info.kind, name))
+        .map(|entry| (entry.info.kind, entry.name))
         .collect();
     assert_eq!(kinds, [(NodeKind::RegularFile, String::from("secret.txt"))]);
 }
@@ -1834,7 +1841,7 @@ fn keeping_the_final_link_refuses_to_list_it_as_a_directory() {
         .list_via(&admin, &path, &mut fs, FinalLink::Follow)
         .expect("following lists the target");
     assert_eq!(entries.len(), 1);
-    assert_eq!(entries[0].1, "leaf");
+    assert_eq!(entries[0].name, "leaf");
 }
 
 #[test]

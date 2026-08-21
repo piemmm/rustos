@@ -120,6 +120,25 @@ pub struct DelegatedInfo {
     pub times: NodeTimes,
 }
 
+/// One entry of a delegated directory listing: the child's name, the
+/// structural metadata the listing driver reported for it, and the driver's
+/// node number for it.
+///
+/// The node number is what lets a listing consumer tell a second *name* for
+/// one node from a second node — the hard-link deduplication `du` needs —
+/// without re-`stat`ing every child by path.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DelegatedEntry {
+    /// The driver's stable node number for the child (its [`NodeId`] raw
+    /// value), the same number [`DelegatedInfo::node`] reports for it.
+    pub node: u64,
+    /// The child's structural metadata (kind, name count, sizes, times), as
+    /// the listing driver read it.
+    pub info: NodeInfo,
+    /// The child's name (a single component, never `.`/`..`).
+    pub name: String,
+}
+
 /// One node a path walk stands on, with everything the walk learned about
 /// it: the driver's node id, the name that led there, and its structural and
 /// permission metadata.
@@ -938,14 +957,14 @@ impl<R: FilesystemRead + ?Sized, P: MetaPolicy<R>> DelegatedFs<'_, R, P> {
     }
 
     /// List the entries of the directory at `components`, in the driver's
-    /// stable on-disk order, each with the structural [`NodeInfo`] (which
-    /// carries the node's kind, sizes, and timestamps) the driver reports
-    /// for it.
+    /// stable on-disk order, each with the driver's node number and the
+    /// structural [`NodeInfo`] (which carries the node's kind, name count,
+    /// sizes, and timestamps) the driver reports for it.
     ///
-    /// The kind and sizes come from the listing driver itself, so a caller
-    /// never has to re-resolve each child by path — a child whose *path*
-    /// is shadowed by another mount would otherwise be judged against the
-    /// wrong volume, and on an uncached, authenticated volume every such
+    /// The kind, sizes, and identity come from the listing driver itself, so
+    /// a caller never has to re-resolve each child by path — a child whose
+    /// *path* is shadowed by another mount would otherwise be judged against
+    /// the wrong volume, and on an uncached, authenticated volume every such
     /// re-resolution is a fresh full walk.
     ///
     /// # Errors
@@ -960,7 +979,7 @@ impl<R: FilesystemRead + ?Sized, P: MetaPolicy<R>> DelegatedFs<'_, R, P> {
         cred: &Credentials<'_>,
         components: &[String],
         final_link: FinalLink,
-    ) -> Result<Vec<(NodeInfo, String)>, VfsError> {
+    ) -> Result<Vec<DelegatedEntry>, VfsError> {
         let (node, info, meta) = self.resolve_final(cred, components, final_link)?;
         if info.kind != NodeKind::Directory {
             return Err(VfsError::NotADirectory);
@@ -982,7 +1001,11 @@ impl<R: FilesystemRead + ?Sized, P: MetaPolicy<R>> DelegatedFs<'_, R, P> {
             }
             let name =
                 core::str::from_utf8(&name_buf[..entry.name_len]).map_err(|_| VfsError::Io)?;
-            entries.push((entry.info, name.to_string()));
+            entries.push(DelegatedEntry {
+                node: entry.node.raw(),
+                info: entry.info,
+                name: name.to_string(),
+            });
             cursor = entry.next_cursor;
         }
         Ok(entries)

@@ -27,9 +27,9 @@ Ein unlesbarer Pfad wird auf der Standardfehlerausgabe gemeldet, und
 der Lauf fährt mit dem Rest fort; ein unlesbares Verzeichnis trägt
 nichts bei statt einer geratenen Teilsumme.
 
-TAIRiX hat noch keine harten Verknüpfungen, daher kann kein Eintrag
-doppelt gezählt werden und die GNU-Schalter zur
-Verknüpfungs-Deduplizierung existieren nicht; `-x` (ein Dateisystem)
+Eine über mehr als einen Namen erreichbare Datei wird **einmal**
+gezählt, ihr Speicher also nicht doppelt gemeldet; `-l` zählt
+stattdessen jeden Namen. `-x` (ein Dateisystem)
 ist noch nicht verfügbar; die Umgebungsvariablen der
 `DU_BLOCK_SIZE`-Familie werden nicht gelesen — die Skala wird allein
 durch Optionen gewählt.
@@ -45,6 +45,8 @@ durch Optionen gewählt.
   bleiben unberührt.
 - `-S, --separate-dirs` — die Zeile eines Verzeichnisses schließt
   seine Unterverzeichnisse aus.
+- `-l, --count-links` — eine Datei mit mehreren Namen einmal pro Name
+  zählen statt einmal.
 - `--apparent-size` — scheinbare Bytelängen messen, nicht belegten
   Speicher.
 - `-b, --bytes` — scheinbare Größe in einzelnen Bytes

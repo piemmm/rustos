@@ -1,0 +1,26 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256">
+  <title>link</title>
+  <!-- Two interlocking rings of a chain. Each ring is a filled outer octagon
+       with an inner octagon in the tile colour punched through it, and the
+       two overlap at the centre, because the desktop's SVG subset has no
+       curves, no strokes and no transforms. -->
+
+  <!-- Tile: rounded square, corners cut as integer line segments -->
+  <polygon fill="#2F7F55" points="20,60 22,44 30,31 43,22 60,20 196,20 213,22 226,31 234,44 236,60 236,196 234,213 226,226 213,234 196,236 60,236 43,234 30,226 22,213 20,196"/>
+  <polygon fill="#3D9366" points="20,60 22,44 30,31 43,22 60,20 196,20 213,22 226,31 234,44 236,60 236,92 20,92"/>
+
+  <!-- Left ring -->
+  <polygon fill="#FFFFFF" points="36,128 40,110 51,96 66,88 84,86 128,86 128,116 84,116 74,119 68,128 74,137 84,140 128,140 128,170 84,170 66,168 51,160 40,146"/>
+  <polygon fill="#2F7F55" points="60,128 63,118 70,111 80,108 128,108 128,118 84,118 72,122 66,128 72,134 84,138 128,138 128,148 80,148 70,145 63,138"/>
+
+  <!-- Right ring, overlapping the left at the centre -->
+  <polygon fill="#FFFFFF" points="220,128 216,146 205,160 190,168 172,170 128,170 128,140 172,140 182,137 188,128 182,119 172,116 128,116 128,86 172,86 190,88 205,96 216,110"/>
+  <polygon fill="#2F7F55" points="196,128 193,138 186,145 176,148 128,148 128,138 172,138 184,134 190,128 184,122 172,118 128,118 128,108 176,108 186,111 193,118"/>
+
+  <!-- The overlap: the left ring's near edge drawn over the right one, so
+       the two read as interlocked rather than merely adjacent. -->
+  <polygon fill="#FFFFFF" points="118,86 138,86 138,116 118,116"/>
+  <polygon fill="#FFFFFF" points="118,140 138,140 138,170 118,170"/>
+  <polygon fill="#2F7F55" points="122,110 134,110 134,118 122,118"/>
+  <polygon fill="#2F7F55" points="122,138 134,138 134,146 122,146"/>
+</svg>

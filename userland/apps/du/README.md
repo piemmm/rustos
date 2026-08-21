@@ -8,7 +8,8 @@ occupies; with no operand it walks the current directory (`.`). The
 option surface follows GNU coreutils (`AGENTS.md` §16.7): `-a` adds a
 row per file, `-s` reports only the operands, `-c` appends a grand
 total, `-d` bounds the reported depth, `-S` excludes subdirectories from
-a directory's own row, `--apparent-size`/`-b` measure apparent byte
+a directory's own row, `-l` counts a multiply-named file once per name,
+`--apparent-size`/`-b` measure apparent byte
 lengths, `-k`/`-m`/`-h`/`--si`/`-B <size>` select the reporting scale,
 and `-0` NUL-terminates rows. `-?`/`--help` render the tool's own short
 help from its bundled `Help/` tree through the shared `lib/help` engine
@@ -18,13 +19,20 @@ The default measure is each node's **allocated** on-disk bytes (the
 `fs_stat` `allocated` field the mounted format reports), so sparse or
 compressed files report what they really occupy; block counts round up
 through the shared GNU size vocabulary in `lib/util`
-(`tairix_util::size`), the same definition `df` renders with. Documented
-divergences from GNU `du`: a multiply-named file is not yet deduplicated
-(the userland `fs_readdir` record carries no node identity to key a
-seen-set on, `plans/SYMLINKS.md` "Open"), so one reached through two
-names counts once per name and the GNU link-deduplication switches do
-not exist; there are no device ids, so `-x`/`--one-file-system` is
-staged behind that kernel work rather than stubbed; and the `DU_BLOCK_SIZE`-family environment
+(`tairix_util::size`), the same definition `df` renders with.
+
+A file reached through more than one name is summed **once**, as the GNU
+tool does, and `-l`/`--count-links` opts out. The key is the node
+identity every `fs_readdir` and `fs_stat` record carries; only a node
+whose name count exceeds one is remembered, because a node named once
+cannot be reached twice, so the seen-set holds the hard links the walk
+actually meets rather than one entry per node on the volume
+(`AGENTS.md` §24.1, §26.6). It grows on demand from no fixed ceiling; a
+heap that refuses to grow it makes the walk count every name and report
+that on standard error (exit `1`), never a silently wrong total.
+Documented divergences from GNU `du`: there are no device ids, so
+`-x`/`--one-file-system` is staged behind that kernel work rather than
+stubbed; and the `DU_BLOCK_SIZE`-family environment
 variables are not read — the scale is selected by options alone.
 
 The crate is `no_std` (with `alloc`), has no `unsafe`, and no
@@ -42,7 +50,7 @@ exhaust the call stack.
 ## Usage
 
 ```
-du [-a | -s] [-cS0] [-h | -k | -m | -b | --si | -B <size>]
+du [-a | -s] [-clS0] [-h | -k | -m | -b | --si | -B <size>]
    [--apparent-size] [-d <n>] [--] [file...]
 ```
 

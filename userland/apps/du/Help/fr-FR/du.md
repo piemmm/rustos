@@ -28,9 +28,9 @@ Un chemin illisible est signalé sur la sortie d'erreur standard et le
 parcours continue avec le reste ; un répertoire illisible ne
 contribue rien plutôt qu'une somme partielle devinée.
 
-`du` ne déduplique pas encore un fichier portant plusieurs noms : celui
-atteint par deux noms est compté une fois par nom, et les options GNU de
-déduplication de liens n'existent pas ; `-x` (un seul système de fichiers) n'est pas encore
+Un fichier atteint par plus d'un nom est compté **une seule fois**, donc
+son stockage n'est pas signalé deux fois ; `-l` compte au contraire
+chaque nom. `-x` (un seul système de fichiers) n'est pas encore
 disponible ; les variables d'environnement de la famille
 `DU_BLOCK_SIZE` ne sont pas lues — l'échelle est choisie par les
 options seules.
@@ -48,6 +48,8 @@ options seules.
   totaux ne changent pas.
 - `-S, --separate-dirs` — la ligne d'un répertoire exclut ses
   sous-répertoires.
+- `-l, --count-links` — compter un fichier portant plusieurs noms une
+  fois par nom au lieu d'une seule.
 - `--apparent-size` — mesurer les longueurs apparentes en octets, pas
   le stockage alloué.
 - `-b, --bytes` — taille apparente en octets simples

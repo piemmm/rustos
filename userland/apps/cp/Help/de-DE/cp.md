@@ -34,6 +34,21 @@ Pfad.
   fragen; nur eine mit `y`/`Y` beginnende Antwort stimmt zu.
 - `-n, --no-clobber` — eine bestehende Datei nie überschreiben. Das
   spätere von `-i` und `-n` gewinnt.
+- `-l, --link` — dem Ziel einen zweiten Namen für den Knoten der Quelle
+  geben statt deren Bytes zu kopieren, sodass die beiden Namen bei einem
+  späteren Schreibvorgang nicht auseinandergehen können. Eine
+  Quellverzeichnis braucht weiterhin `-r`.
+- `-s, --symbolic-link` — eine symbolische Verknüpfung anlegen, die die
+  Quelle benennt, statt sie zu kopieren.
+- `-P, --no-dereference` — eine symbolische Quellverknüpfung als
+  Verknüpfung mit demselben Ziel wortgetreu reproduzieren, statt das
+  Benannte zu kopieren (so übersteht eine relative oder ins Leere
+  zeigende Verknüpfung die Kopie). Ohne sie wird einer Quellverknüpfung
+  gefolgt.
+- `--preserve=links` — zwei Quellen, die einen Knoten benennen, erhalten
+  am Ziel zwei Namen statt zweier Kopien, sodass die Kopie den Speicher
+  nicht stillschweigend verdoppelt.
+- `-d` — `-P` und `--preserve=links` zusammen, wie im GNU-Werkzeug.
 - `-v, --verbose` — jede Kopie als `'source' -> 'dest'` melden.
 - `-t dir, --target-directory=dir` — jede Quelle nach `dir` kopieren,
   das ein bestehendes Verzeichnis sein muss. Der Wert folgt angehängt

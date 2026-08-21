@@ -27,9 +27,9 @@ Um caminho ilegível é reportado no erro padrão e o percurso continua
 com o resto; um diretório ilegível não contribui nada em vez de uma
 soma parcial adivinhada.
 
-O `du` ainda não desduplica um ficheiro com vários nomes: um alcançado
-por dois nomes é contado uma vez por nome, e os interruptores GNU de
-desduplicação de ligações não existem; `-x` (um só sistema de ficheiros) ainda não
+Um ficheiro alcançado por mais de um nome é contado **uma só vez**, pelo
+que o seu armazenamento não é reportado duas vezes; `-l` conta em vez
+disso cada nome. `-x` (um só sistema de ficheiros) ainda não
 está disponível; as variáveis de ambiente da família `DU_BLOCK_SIZE`
 não são lidas — a escala é escolhida apenas pelas opções.
 
@@ -44,6 +44,8 @@ não são lidas — a escala é escolhida apenas pelas opções.
   de um operando (`0` reporta só os operandos); os totais não mudam.
 - `-S, --separate-dirs` — a linha de um diretório exclui os seus
   subdiretórios.
+- `-l, --count-links` — contar um ficheiro com vários nomes uma vez
+  por nome em vez de uma só.
 - `--apparent-size` — medir comprimentos aparentes em bytes, não o
   armazenamento alocado.
 - `-b, --bytes` — tamanho aparente em bytes simples

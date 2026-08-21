@@ -1860,6 +1860,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "tairix-link"
+version = "0.0.0"
+dependencies = [
+ "tairix-abi",
+ "tairix-help",
+ "tairix-rt",
+]
+
+[[package]]
 name = "tairix-ln"
 version = "0.0.0"
 dependencies = [
@@ -2169,6 +2178,15 @@ dependencies = [
  "tairix-rng",
  "tairix-theme",
  "tairix-util",
+]
+
+[[package]]
+name = "tairix-readlink"
+version = "0.0.0"
+dependencies = [
+ "tairix-abi",
+ "tairix-help",
+ "tairix-rt",
 ]
 
 [[package]]
@@ -4887,6 +4905,15 @@ version = "0.0.0"
 dependencies = [
  "tairix-abi",
  "tairix-vt",
+]
+
+[[package]]
+name = "tairix-unlink"
+version = "0.0.0"
+dependencies = [
+ "tairix-abi",
+ "tairix-help",
+ "tairix-rt",
 ]
 
 [[package]]

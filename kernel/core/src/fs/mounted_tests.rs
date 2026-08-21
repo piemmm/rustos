@@ -338,6 +338,10 @@ fn readdir_merges_direct_child_mounts_into_the_parent_listing() {
     assert_eq!(usb1.kind, FileKind::Directory);
     assert_eq!((usb1.size, usb1.allocated), (0, 0));
     assert_eq!(usb1.modified, Time64::UNIX_EPOCH);
+    // The parent volume holds no node of that name, so it offers no identity
+    // or name count for it — a placeholder, never a key a walk may compare.
+    assert_eq!(usb1.id, tairix_abi::FileId::NONE);
+    assert_eq!(usb1.nlink, NodeInfo::SINGLE_NAME);
 
     // The merged name is not a phantom: it resolves through to the mounted
     // volume's own content.
@@ -542,6 +546,78 @@ fn mkdir_then_readdir_reports_each_entrys_kind() {
         kinds,
         alloc::vec![(FileKind::Regular, "file"), (FileKind::Directory, "sub"),]
     );
+}
+
+/// A listing reports each entry's system-wide identity and name count, so a
+/// walk can tell a second *name* for one node from a second node — the fact
+/// `du`'s hard-link deduplication rests on. Without the identity on the
+/// readdir record the two names below are indistinguishable from two files.
+#[test]
+fn readdir_reports_one_identity_for_two_names_of_one_node() {
+    let svc = ready();
+    let caps = caps();
+    svc.open(
+        TEST_UID,
+        &caps,
+        &path("first"),
+        OpenFlags::CREATE.union(OpenFlags::WRITE),
+    )
+    .expect("create");
+    svc.link(
+        TEST_UID,
+        &caps,
+        &path("first"),
+        &path("second"),
+        FinalLink::Keep,
+    )
+    .expect("second name");
+
+    let entries = svc
+        .readdir(TEST_UID, &caps, MOUNT, FinalLink::Follow)
+        .expect("readdir");
+    let first = entries
+        .iter()
+        .find(|e| e.name == "first")
+        .expect("first name listed");
+    let second = entries
+        .iter()
+        .find(|e| e.name == "second")
+        .expect("second name listed");
+    assert_eq!(first.id, second.id);
+    assert!(!first.id.is_none(), "a real volume names a real node");
+    assert_eq!((first.nlink, second.nlink), (2, 2));
+
+    // The listing's identity is the same one `stat` reports for the path, so
+    // the two views of a node cannot disagree about what it is.
+    let stat = svc
+        .stat(TEST_UID, &caps, &path("first"), FinalLink::Follow)
+        .expect("stat");
+    assert_eq!(stat.id, first.id);
+    assert_eq!(stat.nlink, first.nlink);
+}
+
+/// Two distinct single-named files are two identities, so a deduplicating
+/// walk never collapses them.
+#[test]
+fn readdir_reports_distinct_identities_for_distinct_nodes() {
+    let svc = ready();
+    let caps = caps();
+    for name in ["one", "two"] {
+        svc.open(
+            TEST_UID,
+            &caps,
+            &path(name),
+            OpenFlags::CREATE.union(OpenFlags::WRITE),
+        )
+        .expect("create");
+    }
+    let entries = svc
+        .readdir(TEST_UID, &caps, MOUNT, FinalLink::Follow)
+        .expect("readdir");
+    let ids: Vec<tairix_abi::FileId> = entries.iter().map(|e| e.id).collect();
+    assert_eq!(ids.len(), 2);
+    assert_ne!(ids[0], ids[1]);
+    assert!(entries.iter().all(|e| e.nlink == NodeInfo::SINGLE_NAME));
 }
 
 #[test]

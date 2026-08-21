@@ -124,8 +124,9 @@ it was. `Browser::is_listing` is what the shared renderer draws its cue from.
 An `Entry` carries its name, its `EntryKind`, its apparent `size`, and its
 last-modification `Time64` — the size and timestamp mapped straight from the
 one `fs_readdir` stream the source already produced (each
-`tairix_abi::fs::DirEntry` reports them), so the browser never opens and
-`fs_stat`s every child to fill a listing (`AGENTS.md` §2.16). `EntryKind`
+`tairix_abi::fs::DirEntry` reports them, alongside the node identity and name
+count a hard-link-aware walk such as `du` keys on), so the browser never opens
+and `fs_stat`s every child to fill a listing (`AGENTS.md` §2.16). `EntryKind`
 refines the VFS's file/directory/link split with the one distinction a
 manager must make structurally: a `<Name>.app` directory is a `Bundle` — a
 sealed unit the user launches, not a folder to descend into

@@ -34,6 +34,19 @@ diweddarach yn llwybr.
   ond ateb yn dechrau ag `y`/`Y` sy'n cydsynio.
 - `-n, --no-clobber` — peidio byth â throsysgrifo ffeil sy'n bodoli.
   Y diweddaraf o `-i` ac `-n` sy'n ennill.
+- `-l, --link` — rhoi i'r cyrchfan ail enw i nod y ffynhonnell yn lle
+  copïo ei beitiau, fel na all y ddau enw wahanu wrth ysgrifennu'n
+  ddiweddarach. Mae angen `-r` ar ffynhonnell sy'n gyfeiriadur o hyd.
+- `-s, --symbolic-link` — creu cyswllt symbolaidd sy'n enwi'r ffynhonnell
+  yn lle ei chopïo.
+- `-P, --no-dereference` — atgynhyrchu ffynhonnell sy'n gyswllt
+  symbolaidd fel cyswllt sy'n storio'r un targed, air am air, yn lle
+  copïo'r hyn y mae'n ei enwi (felly mae cyswllt cymharol neu grog yn
+  goroesi'r copi). Hebddi, dilynir cyswllt ffynhonnell.
+- `--preserve=links` — mae dwy ffynhonnell sy'n enwi un nod yn cael dau
+  enw yn y cyrchfan yn lle dau gopi, fel nad yw'r copi'n dyblu'r storfa'n
+  ddistaw.
+- `-d` — `-P` a `--preserve=links` gyda'i gilydd, fel yn yr offeryn GNU.
 - `-v, --verbose` — adrodd am bob copi fel `'source' -> 'dest'`.
 - `-t dir, --target-directory=dir` — copïo pob ffynhonnell i `dir`,
   y mae'n rhaid iddo fod yn gyfeiriadur sy'n bodoli. Daw'r gwerth

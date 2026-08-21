@@ -9,6 +9,39 @@ own base name. A directory source is copied only with `-r`, which
 reproduces the whole subtree; naming a directory without `-r` is an
 error. This is the POSIX model.
 
+## Links, instead of bytes
+
+`-l` gives the destination a **second name** for the source's own node
+rather than a copy of its bytes, so the two names cannot diverge on a later
+write; `-s` makes a **symbolic link** naming the source. Both are
+alternatives to copying, not modifiers of it, so they are one last-wins
+state (`Contents`) that cannot silently combine.
+
+`-P`/`--no-dereference` reproduces a symbolic-link source **as a link
+storing the same target, verbatim** — so a relative or dangling link
+survives the copy — instead of following it. `--preserve=links` gives two
+sources naming one node two *names* at the destination rather than two
+copies, keyed on the identity the `fs_stat`/`fs_readdir` record carries
+(`plans/SYMLINKS.md` S7): only a node whose name count exceeds one is
+remembered, so the map holds the hard links a copy actually meets rather
+than one entry per node on the volume, and it grows on demand from no fixed
+ceiling. `-d` is exactly that pair, as in the GNU tool, spelled as the pair
+so the two halves cannot drift.
+
+Because a link or a second name is *created*, and a create never replaces a
+name, an occupied destination must be removed first — `-f` does that, and
+without it the kernel's `AlreadyExists` reaches the caller rather than a
+silent overwrite. (The byte copy needs no removal: its own create
+truncates.)
+
+`-a`/`--archive` and the `--preserve` set other than `--preserve=links` are
+**refused**, not narrowed: `-a` is `-dR --preserve=all`, and
+`--preserve=all` includes a node's timestamps, which no call on this system
+can set, so honouring it would report a preservation that did not happen.
+`-dR` is the rest of `-a` and is available. This is the posture `ln` takes
+for `-r` and `readlink` for `-f`: refused for a stated reason, never
+stubbed.
+
 The crate is `no_std` (with `alloc`), has no `unsafe`, and no
 `unwrap`/`expect`/`panic!` in production paths (`AGENTS.md` §2.9). It
 depends only on the audited `tairix-abi` crate and the shared `lib/help`
@@ -22,12 +55,17 @@ the copy library and the `cp` command app's `Run` binary
 ## Usage
 
 ```
-cp [-finrRvT] [-t dir] [--] source... dest
+cp [-dfilnPrRsvT] [-t dir] [--] source... dest
 
   -r, -R, --recursive        copy directories and their contents
   -f, --force                remove an unwritable destination and retry
   -i, --interactive          ask before overwriting an existing file
   -n, --no-clobber           never overwrite an existing file
+  -l, --link                 a second name for the source's node
+  -s, --symbolic-link        a symbolic link naming the source
+  -P, --no-dereference       reproduce a link source as a link
+  --preserve=links           keep two sources' shared node shared
+  -d                         -P and --preserve=links together
   -v, --verbose              report each copy ('src' -> 'dst')
   -t dir, --target-directory=dir
                              copy every source into dir

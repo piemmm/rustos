@@ -185,7 +185,8 @@ fn walk_dir<F>(
         }
     };
 
-    for (info, name) in entries {
+    for entry in entries {
+        let name = entry.name;
         if drivers.len() >= MAX_STORE_DRIVERS {
             // The store presents more entries than the validation bound
             // permits; the surplus is refused fail-closed rather than growing the scan without limit.
@@ -221,7 +222,7 @@ fn walk_dir<F>(
 
         // The listing carries each entry's structural kind, so the walk
         // never re-resolves a child by path.
-        match info.kind {
+        match entry.info.kind {
             NodeKind::RegularFile => drivers.push(child),
             // A link in the driver store is neither a driver image nor a
             // directory to descend, and following one would let a name
