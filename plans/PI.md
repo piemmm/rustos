@@ -6,7 +6,7 @@ from "boots on the QEMU `virt` board" to "boots a real Raspberry Pi 4
 
 `AGENTS.md` is binding — read it, `PLAN.md`, and `plans/WIRING.md` first.
 Every rule in this file is binding too. The continuation prompt for fresh
-contexts is `.junie/next-pi-prompt.md`.
+contexts is this plan.
 
 **Note:** `abi-v1` is *not* frozen, despite what `AGENTS.md` / `PLAN.md`
 say — the standing task direction supersedes that language. Changing a
@@ -74,7 +74,7 @@ say — the standing task direction supersedes that language. Changing a
    deferred.
 
 8. **One increment per landing.** Land one complete, fully-gated stage,
-   update `PLAN.md` + this file, refresh `.junie/next-pi-prompt.md`, then
+   update `PLAN.md` + this file, refresh this plan, then
    start the next.
 
 9. **Metal re-verification is guaranteed, not speculative (operator

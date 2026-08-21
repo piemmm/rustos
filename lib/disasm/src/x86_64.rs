@@ -9,7 +9,7 @@
 //! byte renders as a `(bad)` single byte so the stream resynchronises
 //! exactly as binutils does. Three-byte maps (`0F 38` / `0F 3A`) and
 //! VEX/EVEX are rendered as `(bad)` for now; extending the maps is staged
-//! in `.junie/fstree-next-plan.md`.
+//! in `plans/APPS.md`.
 //!
 //! Rendering is Intel syntax as binutils prints it (`mov rax,QWORD PTR
 //! [rbp-0x8]`), with two documented simplifications: RIP-relative operands
@@ -837,7 +837,7 @@ fn opcode(
 ///
 /// `0F 38` / `0F 3A` three-byte opcodes and the SSE/AVX encodings are not
 /// yet in the tables and return `None` (rendered `(bad)`); extending the
-/// maps is staged in `.junie/fstree-next-plan.md`.
+/// maps is staged in `plans/APPS.md`.
 #[allow(clippy::too_many_lines)] // One exhaustive opcode map; splitting it would scatter the table.
 fn two_byte(
     reader: &mut Reader<'_>,

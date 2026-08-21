@@ -1,5 +1,5 @@
 //! The kernel call-endpoint registry: a map from [`EndpointId`] to the
-//! live [`CallEndpoint`] bound to it (Design D D2b — `.junie/next-pi-prompt.md`).
+//! live [`CallEndpoint`] bound to it (Design D D2b — `plans/PI.md`).
 //!
 //! A [`CallEndpoint`] (`kernel/ipc`) is the synchronous request/reply
 //! state machine the reactive driver-store file service is built on. The

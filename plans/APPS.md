@@ -787,16 +787,17 @@ the GNU coreutils surface and fills in the missing commands. Each stage is
 one properly-gated change; a stage's switch set is bounded by what the
 platform floor can honestly implement (userland `FileStat` now carries
 `NodeTimes` — four `Time64` stamps — as well as kind/size/mode/uid/gid, but
-the VFS still has no symbolic or hard links — so link-dependent behaviour is
-deliberately staged behind the floor work below).
+the VFS now has both symbolic and hard links, so the link-dependent
+behaviour Stage E stages is what remains of the *command* surface, not the
+platform floor).
 
 - **Stage A — GNU switches for the existing tools (done).** On the current
   floor: `cat` `-A -b -e -E -n -s -t -T -u -v` (bundled short flags, GNU
   `^`/`M-` notation); `ls` `-a -A -b -B -C -d -F -f -g -G -h -i -I -k -l -m -N -n -o -p -Q -q -r -R -s -S -t -T -u -U -v -w -x -X -1 --sort --group-directories-first --quoting-style --show-control-chars --ignore --hide --si --author --file-type --block-size --format --indicator-style --time --time-style --full-time --inode --no-group --kibibytes --tabsize --zero`
   (`-h` takes the GNU human-readable meaning — short help is `-?`/`--help` —
   and the invented `--long` synonym is retired; long format shows numeric
-  owner/group, the GNU numeric fallback, with no link-count column (the
-  VFS has no links yet); the sort
+  owner/group, the GNU numeric fallback, beside the link count the
+  filesystem records; the sort
   key is name by default, `-S` size, `-t` time, `-X` extension, `-v` natural
   version order (a faithful `filevercmp` port), `-U`/`-f` no sort (directory
   order, `-f` also enabling `-a` and disabling `-l`/`-s`), or `--sort=WORD`
@@ -1005,7 +1006,8 @@ deliberately staged behind the floor work below).
   stats — an unbacked mount truthfully reports empty names and the
   all-zero usage, which `df` hides by default and notes on fd 3
   (`fs.mounts_omitted`). Documented divergences: `du` has no link
-  deduplication (no hard links yet, Stage E) and no `-x` (no device
+  deduplication — a multiply-named file counts once per name until the
+  readdir record carries a node identity, Stage E — and no `-x` (no device
   identity); `df` stages `--output`/`--sync`; neither reads the
   `*_BLOCK_SIZE` environment family. `echo` and `pwd`
   from the first batch
@@ -1080,9 +1082,15 @@ deliberately staged behind the floor work below).
   that will share a `strftime` engine exists. ARXFS does not track atime
   (reports `accessed` = epoch). **Remaining:** `touch`, `cp -p`/`-u`,
   `mv -u`, `date -r`.
-- **Stage E — VFS links (planned; separate design).** Symbolic/hard-link
-  support in the VFS and ARXFS, then `ln`, `readlink`, `link`, `unlink`,
-  `ls -L/-H`, `cp -l/-s/-d/-a`, `stat`'s link fields.
+- **Stage E — VFS links (the platform half is done; the remaining commands
+  are planned).** Symbolic *and* hard links are real in the VFS and ARXFS,
+  and `ln` (both kinds, `-L`/`-P`/`-d`/`-F`), `ls -L`/`-H` and its link-count
+  column, and `readlink`'s syscall have landed — the design is
+  `plans/SYMLINKS.md`, not a separate one. **Remaining:** the `readlink`,
+  `link`, and `unlink` command apps; `cp -l/-s/-d/-a`; `stat`'s link fields;
+  and `du`'s deduplication of a multiply-named file, which needs a node
+  identity on the userland `fs_readdir` record to key a seen-set on
+  (`plans/SYMLINKS.md` "Open").
 
 ## 12.2 Terminal colour, the standard scheme, and box drawing
 

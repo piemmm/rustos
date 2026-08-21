@@ -14,6 +14,7 @@ use tairix_abi::Errno;
 use tairix_curses::downgrade;
 use tairix_fsmeta::calendar::CivilTime;
 use tairix_help::{own_short_help, HelpSource};
+use tairix_path::join;
 use tairix_termcap::{ColorChoice, ColorDepth};
 use tairix_vt::{encode_into, str_width, Op, Role, Sgr};
 
@@ -710,15 +711,6 @@ fn sort_rows(rows: &mut [Row], options: Options) {
     }
 }
 
-/// `name` under the directory `dir`, without doubling a trailing slash.
-fn join(dir: &str, name: &str) -> String {
-    if dir.ends_with('/') {
-        format!("{dir}{name}")
-    } else {
-        format!("{dir}/{name}")
-    }
-}
-
 /// Start one rendered block: a blank separator line after a previous block,
 /// then the optional `header:` line.
 fn open_block(buf: &mut String, first: &mut bool, header: Option<&str>) {
@@ -1162,19 +1154,19 @@ fn size_column_width(rows: &[Row], options: Options) -> usize {
 }
 
 /// Render the long format: the optional `-i` inode and `-s` blocks columns,
-/// then mode, numeric owner and group (unless hidden by `-g` / `-o`), size,
-/// the selected timestamp, and finally the decorated name — followed by
-/// ` -> target` for a row shown as a symbolic link — with each numeric column
-/// right-aligned and the date column padded so the names align.
+/// then mode, link count, numeric owner and group (unless hidden by `-g` /
+/// `-o`), size, the selected timestamp, and finally the decorated name —
+/// followed by ` -> target` for a row shown as a symbolic link — with each
+/// numeric column right-aligned and the date column padded so the names
+/// align.
 ///
 /// Owner and group are numeric ids: resolving names needs the
 /// capability-gated user database, which a listing must not demand — the
 /// GNU tool falls back to numbers for exactly this case (`-n` renders the
-/// same). There is **no link-count column**: the VFS has no hard links, so a
-/// fabricated count would be a lie — a documented divergence from GNU (see
-/// the Help document). The timestamp column shows the time selected by
-/// `-c` / `-u` / `--time` (modified by default), rendered in the style
-/// chosen by `--time-style` / `--full-time`.
+/// same). The link count is the filesystem's own record, reported by the
+/// driver and never derived here. The timestamp column shows the time
+/// selected by `-c` / `-u` / `--time` (modified by default), rendered in the
+/// style chosen by `--time-style` / `--full-time`.
 ///
 /// A row whose stat was refused renders every stat-derived cell as `?` and
 /// keeps the type letter the directory stream gave it, exactly as GNU does —
@@ -1199,6 +1191,10 @@ fn render_long(
         ),
         None => String::from(UNKNOWN_CELL),
     };
+    let links_cell = |row: &Row| match row.stat {
+        Some(meta) => format!("{}", meta.nlink),
+        None => String::from(UNKNOWN_CELL),
+    };
     let owner_cell = |row: &Row| match row.stat {
         Some(meta) => format!("{}", meta.uid),
         None => String::from(UNKNOWN_CELL),
@@ -1209,6 +1205,7 @@ fn render_long(
     };
     let width_of =
         |cell: &dyn Fn(&Row) -> String| rows.iter().map(|row| cell(row).len()).max().unwrap_or(1);
+    let links_width = width_of(&links_cell);
     let uid_width = width_of(&owner_cell);
     let gid_width = width_of(&group_cell);
     // The `--author` column repeats the owning user (TAIRiX has no separate
@@ -1235,6 +1232,7 @@ fn render_long(
             let _ = write!(buf, "{:>blocks_width$} ", blocks_cell(row, options));
         }
         let _ = write!(buf, "{}", mode_string(row));
+        let _ = write!(buf, " {:>links_width$}", links_cell(row));
         if !options.hide_owner {
             let _ = write!(buf, " {:>uid_width$}", owner_cell(row));
         }
@@ -2047,6 +2045,7 @@ mod tests {
                 Metadata {
                     // A link's mode is POSIX's `lrwxrwxrwx`.
                     kind: FileKind::Symlink,
+                    nlink: 1,
                     mode: 0o777,
                     size,
                     allocated: size,
@@ -2146,6 +2145,7 @@ mod tests {
                 path.to_string(),
                 Metadata {
                     kind: FileKind::Regular,
+                    nlink: 1,
                     mode,
                     size,
                     allocated: size,
@@ -2164,6 +2164,7 @@ mod tests {
                 path.to_string(),
                 Metadata {
                     kind: FileKind::Directory,
+                    nlink: 1,
                     mode: 0o755,
                     size: 0,
                     allocated: 0,
@@ -2183,6 +2184,29 @@ mod tests {
         /// divergent allocation.
         fn entry(self, dir: &str, name: &str, kind: FileKind, mode: u32, size: u64) -> Self {
             self.entry_alloc(dir, name, kind, mode, size, size)
+        }
+
+        /// [`entry`](Self::entry) whose stat reports `nlink` names, so the
+        /// long format's link-count column can be driven with a real value
+        /// rather than every row reading `1`.
+        fn entry_links(
+            mut self,
+            dir: &str,
+            name: &str,
+            kind: FileKind,
+            mode: u32,
+            size: u64,
+            nlink: u32,
+        ) -> Self {
+            self = self.entry(dir, name, kind, mode, size);
+            let path = super::join(dir, name);
+            let row = self
+                .stat
+                .iter_mut()
+                .find(|(p, _)| *p == path)
+                .expect("the entry just declared");
+            row.1.nlink = nlink;
+            self
         }
 
         /// [`entry`](Self::entry) with an allocation that differs from the
@@ -2212,6 +2236,7 @@ mod tests {
                 super::join(dir, name),
                 Metadata {
                     kind,
+                    nlink: 1,
                     mode,
                     size,
                     allocated,
@@ -2241,6 +2266,7 @@ mod tests {
                 super::join(dir, name),
                 Metadata {
                     kind: FileKind::Regular,
+                    nlink: 1,
                     mode: 0o644,
                     size: 0,
                     allocated: 0,
@@ -2289,6 +2315,7 @@ mod tests {
         fn stat(&self, _path: &str, _links: FinalLink) -> Result<Metadata, Errno> {
             Ok(Metadata {
                 kind: FileKind::Directory,
+                nlink: 1,
                 mode: 0o755,
                 size: 0,
                 allocated: 0,
@@ -2771,8 +2798,29 @@ mod tests {
         );
         assert_eq!(
             out.text(),
-            "total 5\ndrwxr-xr-x 1000 100 4096 Jan  1  1970 d\n\
-             -rw-r--r-- 1000 100    7 Jan  1  1970 f\n"
+            "total 5\ndrwxr-xr-x 1 1000 100 4096 Jan  1  1970 d\n\
+             -rw-r--r-- 1 1000 100    7 Jan  1  1970 f\n"
+        );
+    }
+
+    #[test]
+    fn the_long_format_reports_the_filesystems_own_link_count() {
+        // The second column is the count the filesystem records, not a
+        // constant: a twice-named file shows `2`, and the column is padded
+        // to its widest value so the owner column still aligns.
+        let fs = TreeFs::new()
+            .dir(".")
+            .entry_links(".", "many", FileKind::Regular, 0o644, 7, 12)
+            .entry_links(".", "one", FileKind::Regular, 0o644, 7, 1);
+        let out = Recorder::new();
+        assert_eq!(
+            run_ls(list(false, true, &["."]), &fs, &out),
+            Ok(Outcome::Complete)
+        );
+        assert_eq!(
+            out.text(),
+            "total 1\n-rw-r--r-- 12 1000 100 7 Jan  1  1970 many\n\
+             -rw-r--r--  1 1000 100 7 Jan  1  1970 one\n"
         );
     }
 
@@ -2789,7 +2837,7 @@ mod tests {
         );
         assert_eq!(
             out.text(),
-            "total 1\n-rw------- 1000 100 3 Jan  1  1970 f\n"
+            "total 1\n-rw------- 1 1000 100 3 Jan  1  1970 f\n"
         );
     }
 
@@ -3643,9 +3691,9 @@ mod tests {
         assert_eq!(
             out.text(),
             "total 11M\n\
-             -rw-r--r-- 1000 100  500 Jan  1  1970 a\n\
-             -rw-r--r-- 1000 100 1.1K Jan  1  1970 b\n\
-             -rw-r--r-- 1000 100  10M Jan  1  1970 c\n"
+             -rw-r--r-- 1 1000 100  500 Jan  1  1970 a\n\
+             -rw-r--r-- 1 1000 100 1.1K Jan  1  1970 b\n\
+             -rw-r--r-- 1 1000 100  10M Jan  1  1970 c\n"
         );
     }
 
@@ -3672,7 +3720,7 @@ mod tests {
         );
         assert_eq!(
             hidden_owner.text(),
-            "total 1\n-rw-r--r-- 100 7 Jan  1  1970 f\n"
+            "total 1\n-rw-r--r-- 1 100 7 Jan  1  1970 f\n"
         );
         let hidden_group = Recorder::new();
         assert_eq!(
@@ -3692,7 +3740,7 @@ mod tests {
         );
         assert_eq!(
             hidden_group.text(),
-            "total 1\n-rw-r--r-- 1000 7 Jan  1  1970 f\n"
+            "total 1\n-rw-r--r-- 1 1000 7 Jan  1  1970 f\n"
         );
     }
 
@@ -3776,8 +3824,8 @@ mod tests {
         );
         assert_eq!(
             out.text(),
-            "total 5\n4 drwxr-xr-x 1000 100 4096 Jan  1  1970 d\n\
-             1 -rw-r--r-- 1000 100    7 Jan  1  1970 f\n"
+            "total 5\n4 drwxr-xr-x 1 1000 100 4096 Jan  1  1970 d\n\
+             1 -rw-r--r-- 1 1000 100    7 Jan  1  1970 f\n"
         );
     }
 
@@ -3926,7 +3974,7 @@ mod tests {
         );
         assert_eq!(
             out.text(),
-            "total 0\n1234 -rw-r--r-- 1000 100 0 May  6 12:53 f\n"
+            "total 0\n1234 -rw-r--r-- 1 1000 100 0 May  6 12:53 f\n"
         );
     }
 
@@ -4015,15 +4063,15 @@ mod tests {
         // recent → a time-of-day.
         assert_eq!(
             long(TimeField::Modified),
-            "total 0\n-rw-r--r-- 1000 100 0 Nov 14  2023 f\n"
+            "total 0\n-rw-r--r-- 1 1000 100 0 Nov 14  2023 f\n"
         );
         assert_eq!(
             long(TimeField::Accessed),
-            "total 0\n-rw-r--r-- 1000 100 0 May  6 12:53 f\n"
+            "total 0\n-rw-r--r-- 1 1000 100 0 May  6 12:53 f\n"
         );
         assert_eq!(
             long(TimeField::Changed),
-            "total 0\n-rw-r--r-- 1000 100 0 Feb 29 13:46 f\n"
+            "total 0\n-rw-r--r-- 1 1000 100 0 Feb 29 13:46 f\n"
         );
     }
 
@@ -4053,19 +4101,19 @@ mod tests {
         };
         assert_eq!(
             styled(TimeStyle::Locale),
-            "total 0\n-rw-r--r-- 1000 100 0 May  6 12:53 f\n"
+            "total 0\n-rw-r--r-- 1 1000 100 0 May  6 12:53 f\n"
         );
         assert_eq!(
             styled(TimeStyle::LongIso),
-            "total 0\n-rw-r--r-- 1000 100 0 2024-05-06 12:53 f\n"
+            "total 0\n-rw-r--r-- 1 1000 100 0 2024-05-06 12:53 f\n"
         );
         assert_eq!(
             styled(TimeStyle::FullIso),
-            "total 0\n-rw-r--r-- 1000 100 0 2024-05-06 12:53:20.000000000 +0000 f\n"
+            "total 0\n-rw-r--r-- 1 1000 100 0 2024-05-06 12:53:20.000000000 +0000 f\n"
         );
         assert_eq!(
             styled(TimeStyle::Iso),
-            "total 0\n-rw-r--r-- 1000 100 0 05-06 12:53 f\n"
+            "total 0\n-rw-r--r-- 1 1000 100 0 05-06 12:53 f\n"
         );
     }
 
@@ -4088,7 +4136,10 @@ mod tests {
             ),
             Ok(Outcome::Complete)
         );
-        assert_eq!(out.text(), "total 0\n-rw-r--r-- 1000 100 0 2023-11-14 f\n");
+        assert_eq!(
+            out.text(),
+            "total 0\n-rw-r--r-- 1 1000 100 0 2023-11-14 f\n"
+        );
     }
 
     #[test]
@@ -4117,7 +4168,7 @@ mod tests {
         );
         assert_eq!(
             out.text(),
-            "total 5.0k\n-rw-r--r-- 1000 100 5.0k Jan  1  1970 f\n"
+            "total 5.0k\n-rw-r--r-- 1 1000 100 5.0k Jan  1  1970 f\n"
         );
     }
 
@@ -4202,7 +4253,7 @@ mod tests {
         );
         assert_eq!(
             out.text(),
-            "total 1\n-rw-r--r-- 1000 1000 100 7 Jan  1  1970 f\n"
+            "total 1\n-rw-r--r-- 1 1000 1000 100 7 Jan  1  1970 f\n"
         );
     }
 
@@ -4624,7 +4675,7 @@ mod tests {
             .iter()
             .find(|l| l.contains("dangling"))
             .expect("the row is still listed");
-        assert!(dangling.starts_with("l?????????"), "{dangling}");
+        assert!(dangling.starts_with("l????????? ?"), "{dangling}");
         assert!(dangling.contains(" ? "), "{dangling}");
         // The other entries listed normally.
         assert!(lines.iter().any(|l| l.ends_with("target.txt")), "{lines:?}");

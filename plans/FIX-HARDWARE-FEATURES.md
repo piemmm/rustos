@@ -804,7 +804,7 @@ when the capability is absent (never a broken channel). The split:
 the charter-correct home for this capability (§2.2/§2.20 forbid an ad-hoc
 one-off probe). Either P1 lands first, or a minimal P1 subset sufficient to
 host a probed platform capability lands with it; the full staged watchdog plan
-(B0–B4, with B0 = this P1 dependency) is in `.junie/fix-details.md`.
+(B0–B4, with B0 = this P1 dependency) is in `plans/OPEN-DEFECTS.md`.
 
 ## Explicit non-goals / guardrails
 

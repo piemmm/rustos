@@ -17,6 +17,7 @@ use alloc::vec::Vec;
 
 use tairix_abi::FileKind;
 use tairix_glob::Pattern;
+use tairix_path::join;
 
 use crate::fs::{Fs, FsEntry, VolumeInfo, VolumeSpace};
 use crate::ops::FileOp;
@@ -745,16 +746,6 @@ pub(crate) fn child_dirs_of(parent: &str, entries: &[FsEntry]) -> Vec<DirNode> {
         .collect();
     dirs.sort_by(|a, b| a.name.cmp(&b.name));
     dirs
-}
-
-/// Join a directory path and a child name without doubling separators.
-#[must_use]
-pub fn join(parent: &str, name: &str) -> String {
-    if parent.ends_with('/') {
-        format!("{parent}{name}")
-    } else {
-        format!("{parent}/{name}")
-    }
 }
 
 /// The filename extension: the text after the last dot, empty when none.

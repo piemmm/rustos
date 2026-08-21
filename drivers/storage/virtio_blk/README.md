@@ -87,7 +87,7 @@ zeroed; that scrubbing remains the caller's responsibility.
   different virtio device / a non-virtio node (`AGENTS.md` §18.3).
 
 All host-side tests pass; per-arch QEMU integration is tracked under
-item 4 of `.junie/next-session-prompt.md` (it depends on the kernel
+item 4 of `plans/WIRING.md` (it depends on the kernel
 DMA + IRQ work in items 1–2).
 
 ## Public surface

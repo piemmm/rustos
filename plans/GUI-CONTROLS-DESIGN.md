@@ -41,8 +41,9 @@ Every control and every piece of window furniture named in this specification �
 buttons (Button, IconButton, SplitButton), boolean selectors (Toggle, Checkbox,
 Radio), value controls (Slider, Progress, Chart), text entry (TextField, SearchField),
 choice entry (ComboBox), navigation and command surfaces (Menu, MenuItem,
-Toolbar, Tabs), collection controls (ListRow, TableRow, TableCell, Card, Panel,
-MetricTile, StatusPill), record lists (FactList, Timeline), decision surfaces
+Toolbar, Tabs, Breadcrumb, ActionRail), collection controls (ListRow, TableRow,
+TableCell, TableHeader, Card, Panel, MetricTile, StatusPill), record lists
+(FactList, Timeline), decision surfaces
 (Dialog, Tooltip, HelpTip), shell surfaces
 (Notification, TaskbarItem, TraySignal), and the window-manager furniture (WindowFrame,
 TitleBar, the WindowControl set — Close, Minimize, PutToBack, SizeToggle — the
@@ -67,7 +68,7 @@ None of these controls is optional, deferrable, or reducible to a placeholder.
 A control that is missing a specified state, a theme variant, an accessibility
 fallback, or a keyboard path is incomplete and is a defect, regardless of
 whether it compiles or its current call site exercises the missing part
-(`AGENTS.md` §27, §23). The staged build order in `.junie/gui-controls-work.md`
+(`AGENTS.md` §27, §23). The staged build order in this plan
 sequences *when* each family lands; it never licenses shipping any of them in a
 thinned-down form.
 
@@ -1429,6 +1430,121 @@ body of the icon bar's manifest-attested **About** panel — which is why it
 must not tone a value into meaning the words do not carry, since the panel is
 system-drawn chrome stating a signed identity (§13). `Timeline` is the
 Switchboard's recovery and background-activity record.
+
+### 11.37 Breadcrumb
+
+The **location trail**: a path of crumbs naming where the reader is, so a deep
+surface can say so and let them step back to any ancestor. A `Crumb` carries a
+label and a composed state; the trail owns the geometry, the pointer, the
+focus, and the elision.
+
+- **The trailing crumb is the current location and never activates**, however
+  it is addressed — pointer, `Enter`, `Home`/`End`. A reader can never
+  "navigate" to where they already are, so the trail refuses it rather than
+  emitting an action the owner would have to filter. Focus cannot land on it
+  either: `set_focus` clears instead (fail closed).
+- **Position decides whether a crumb activates, not the crumb.** `Crumb`
+  carries no "is current" flag, because being current is a fact about a
+  crumb's place in the trail and a duplicated flag could contradict it.
+- **A disabled or denied crumb keeps its slot.** It reads as refused and shows
+  its Authority Mark, exactly as a Menu row does (§11.11) — a path that
+  collapsed around an inaccessible ancestor would misstate the hierarchy, not
+  just hide a command.
+- **Overflow elides whole crumbs from the front, never mid-label.** The oldest
+  ancestors go first, behind a single leading ellipsis that itself activates
+  the newest ancestor it stands for — so an elided ancestor is still reachable
+  rather than merely hidden. Only when even the ellipsis plus the current
+  crumb will not fit is the ellipsis dropped too, leaving the current crumb
+  alone with its own label shrunk. The current location is the last thing
+  surrendered because it is the one fact the trail exists to state.
+- **The ellipsis is three periods, not `…`.** The mark has to render under
+  whatever coverage the console atlas or a proportional family ships; a glyph
+  that might come back as a missing-character box is not a mark.
+- **The ellipsis paints as an idle, enabled crumb** whatever the crumbs behind
+  it are. It is not disabled or denied on its own account, and toning it from
+  a hidden crumb's state would attribute one ancestor's condition to a mark
+  standing for several.
+- **A focused crumb elided out of individual view keeps its ring on the
+  ellipsis.** Focus is never invisible: the ring shows on the cell that
+  actually represents the focused crumb.
+- **One layout walk serves render and hit-test.** `plan` decides the elided
+  cells and places them, and both painting and `crumb_at` read it, so a press
+  can never land on a crumb that was not drawn or resolve to a different one
+  than the reader clicked. `crumb_rect` is its forward mirror, so a caller —
+  including a pointer-driven test — can aim at exactly the drawn cell.
+- **A press latches its crumb until release.** A click that slides onto
+  another crumb activates nothing, so a mis-aimed drag never navigates.
+- The chevron separator and the focus ring come from the shared `paint` core,
+  and the chevron slot doubles under heavier contrast exactly as
+  `plate_border`/`rail_thickness` already do — there is no second separator
+  or ring recipe in the language.
+
+### 11.38 ActionRail
+
+The **vertical command column** a detail surface offers about the thing it is
+showing: the counterpart to the horizontal Toolbar (§11.9), stacked so its
+labels align.
+
+- **Each item *is* a Button (§11.1).** The rail restates none of a button's
+  plate, press feedback, role emphasis, disabled look, or Authority Mark for a
+  denied action. It owns only the stacking geometry, which item the pointer is
+  over, which holds focus, routing input, and translating a completed
+  `ButtonAction` into a typed `RailAction`. A second plate recipe here would
+  be the duplication the language forbids.
+- **An item's height is the button family's own standard control height**, and
+  items are separated by the theme's control gap — never a number the rail
+  invents, so a rail beside a toolbar cannot disagree with it about how tall a
+  command is.
+- **Every item spans the rail's full width.** A column of commands is read
+  down its labels, so ragged widths would make the column a list of shapes
+  rather than a list of verbs.
+- **Too short a rail draws as many whole items as fit from the top and omits
+  the rest.** Half an item is a command a reader might aim at and miss; an
+  absent one is an absence the owner's own bounds explain (fail closed).
+  Hit-testing, rendering, and measurement all walk the one shared layout, so a
+  press can never land on an item that was not drawn.
+- **A rail anchored beside moving content can light an Edge Wake down its
+  leading edge** (§12.1). The rail itself does not move — that is the point —
+  so the wake is how the reader learns the list beside it did.
+
+### 11.39 TableHeader
+
+The **column names above a TableRow's cells** (§11.14), and for a sortable
+column the surface that reports a sort request.
+
+- **The header and the rows share exactly one column-width model.** Both
+  resolve their spans through the same helper over the same leading-gutter and
+  trailing-bead reservations, so a header can never drift out of alignment
+  with the rows it names. Two independently-derived widths that happen to
+  agree today are the drift this forecloses.
+- **The header reports a sort; it never performs one, and never assumes its
+  request was honoured.** `HeaderAction::Sort` is a request. The owner applies
+  whatever sort it actually applied and commits it with `set_sort`, and *that*
+  is what the header draws. A header that drew its own request would claim an
+  order the data may not be in — including when the sort was refused.
+- **Pressing an already-sorted column flips its order**, through the one
+  `SortOrder::other` definition, so no caller re-derives what the opposite of
+  ascending is.
+- **Sortable is the default; a column opts out.** Most columns of a table are
+  meaningful to order by, so `HeaderColumn::fixed` is the exception that says
+  otherwise — and a fixed column emits no sort request however it is
+  addressed.
+- **A denied column keeps its title and shows its Authority Mark** rather than
+  vanishing or collapsing the layout (§13). A column that disappeared would
+  misalign every row beneath it.
+- The sort indicator, the focus ring, and the plate rounding all come from the
+  shared `paint` core.
+
+#### Present-day consumers
+
+All three exist because surfaces already need them, not ahead of one.
+`Breadcrumb` names the location in the file manager's and the file picker's
+chrome; `ActionRail` is the command column of a detail surface beside a
+listing; `TableHeader` names and sorts the columns of every table the shell
+draws. §5 already binds `Breadcrumb::set_focus` and
+`TableHeader::set_focus`/`set_sort` as the interactive entry points, each
+reporting the cells its ring or indicator moves between so a host repaints
+exactly those.
 ---
 
 ## 12. Reactive State Patterns
@@ -1754,6 +1870,9 @@ A control or control family is ready when the following are true:
 - Scrollbar tests cover zero overflow, proportional thumb math, minimum thumb size, line and page steps, range changes during drag, both orientations, and keyboard access.
 - Restore-rectangle tests cover work-area, display, and logical-scale changes while keeping the title bar reachable.
 - Hit-map tests prove that client content cannot receive outer-furniture input and that the resize corner does not overlap either scrollbar.
+- Breadcrumb tests cover the trailing crumb refusing activation from every route and refusing focus, elision from the front with the ellipsis activating the newest hidden ancestor, the ellipsis being dropped last so the current crumb survives alone, a focused elided crumb keeping its ring on the ellipsis, a press that slides onto another crumb activating nothing, and `crumb_at`/`crumb_rect` agreeing with the painted layout.
+- ActionRail tests cover the shared button height and control gap, full-width items, a rail too short drawing only whole items with hit-testing agreeing, keyboard focus movement reporting the two item rectangles, a denied item keeping its Authority Mark, and the Edge Wake lighting only when asked.
+- TableHeader tests cover a header and its rows resolving identical column spans across a row-state change, a reported sort never reordering or redrawing until `set_sort` commits one, a committed sort that differs from the request being what is drawn, an already-sorted column flipping order, a fixed column emitting nothing, and a denied column keeping its title and its layout.
 
 ---
 

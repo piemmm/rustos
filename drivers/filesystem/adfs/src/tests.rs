@@ -824,3 +824,28 @@ fn directories_nest_and_list_sorted() {
         );
     }
 }
+
+#[test]
+fn adfs_has_no_link_of_either_kind_and_reports_one_name() {
+    // FileCore has no link object type at all: a directory entry carries the
+    // object's own load/exec/length, so a second name would be a second
+    // object. Both link calls refuse rather than approximating one.
+    for (variant, bytes) in VARIANTS {
+        let mut fs = fresh(variant, bytes);
+        let root = FilesystemRead::root(&fs);
+        let file = make(&mut fs, root, b"File", b"body");
+        assert_eq!(
+            fs.link(root, b"Alias", file),
+            Err(DriverError::Unsupported),
+            "{variant:?}"
+        );
+        assert_eq!(
+            fs.create_link(root, b"Alias", b"$.File"),
+            Err(DriverError::Unsupported),
+            "{variant:?}"
+        );
+        assert_eq!(fs.lookup(root, b"Alias"), Err(DriverError::NotFound));
+        assert_eq!(fs.node_info(file).expect("stat").nlink, 1);
+        assert_eq!(fs.node_info(root).expect("stat").nlink, 1);
+    }
+}

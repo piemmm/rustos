@@ -7,7 +7,7 @@ requested by a flag in the spawn attach block and enforced entirely
 kernel-side. The user-space seam that hands bytes to a sandboxed parser
 and receives the typed result (with crash containment and worker
 replacement) builds on this primitive and is staged in
-`.junie/fstree-next-plan.md` S8b.
+`plans/APPS.md` S8b.
 
 ## Requesting a sandbox
 

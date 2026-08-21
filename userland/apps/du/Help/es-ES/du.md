@@ -27,9 +27,9 @@ Una ruta ilegible se informa en la salida de error estándar y el
 recorrido continúa con lo que queda; un directorio ilegible no aporta
 nada en lugar de una suma parcial adivinada.
 
-TAIRiX aún no tiene enlaces duros, así que ninguna entrada puede
-contarse dos veces y los conmutadores GNU de deduplicación de enlaces
-no existen; `-x` (un solo sistema de archivos) aún no está
+`du` aún no deduplica un archivo con varios nombres: uno alcanzado por
+dos nombres se cuenta una vez por nombre, y los conmutadores GNU de
+deduplicación de enlaces no existen; `-x` (un solo sistema de archivos) aún no está
 disponible; las variables de entorno de la familia `DU_BLOCK_SIZE` no
 se leen — la escala se elige solo mediante opciones.
 

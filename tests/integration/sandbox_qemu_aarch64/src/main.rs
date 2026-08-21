@@ -1,6 +1,6 @@
 //! S8b QEMU integration test: prove the `lib/sandbox` parser-sandbox seam
 //! end to end on the aarch64 `virt` board
-//! (`docs/src/security/sandbox.md`; `.junie/fstree-next-plan.md` S8b).
+//! (`docs/src/security/sandbox.md`; `plans/APPS.md` S8b).
 //!
 //! On boot the test reads the GICv2 base + generic-timer rate from the
 //! embedded `virt` device tree, brings up the EL1 vectors + GICv2, and

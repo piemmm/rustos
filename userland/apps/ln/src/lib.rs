@@ -1,18 +1,20 @@
-//! TAIRiX `ln` — create symbolic links (`plans/SYMLINKS.md` S4).
+//! TAIRiX `ln` — create links between files (`plans/SYMLINKS.md` S4, S6).
 //!
-//! The GNU coreutils `ln`, with one deliberate and permanent divergence:
-//! **this ABI has no hard links.** There is no `fs_link` syscall and no
-//! driver call behind one, so `ln` without `-s` has nothing to create and
-//! says so, rather than quietly making a symbolic link — a link and a second
-//! name for one inode are different objects, and silently substituting one
-//! for the other would be a different operation wearing the user's spelling.
-//! Every hard-link-only switch (`-L`, `-P`, `-d`, `-F`) is refused for the
-//! same reason, as are the backup switches (`-b`, `-S`) this workspace has no
-//! backup machinery for, and `-r`/`--relative`, which would need a
-//! canonicalising path resolution the ABI does not offer (a *lexical*
-//! approximation would name a different node the moment a link were involved,
-//! which is exactly the lexical-`..` collapse the resolver forbids). All are
-//! documented in the tool's `Help/` documents.
+//! The GNU coreutils `ln`, making both kinds of link. Without `-s` the link
+//! is a **hard** one — a second directory entry for the target's own inode,
+//! through `fs_link` — and `-L`/`-P` select whether a target that is itself
+//! a symbolic link is resolved first. `-d`/`-F` accept a directory operand,
+//! but the link is still refused: no principal may give a directory a second
+//! name, because the tree staying a tree is what makes the resolver's
+//! physical `..` well-defined.
+//!
+//! Two switch groups stay refused, neither for a reason about hard links:
+//! the backup switches (`-b`, `-S`), which this workspace has no backup
+//! machinery for, and `-r`/`--relative`, which would need a canonicalising
+//! path resolution the ABI does not offer (a *lexical* approximation would
+//! name a different node the moment a link were involved, which is exactly
+//! the lexical-`..` collapse the resolver forbids). Both are documented in
+//! the tool's `Help/` documents.
 //!
 //! # What this crate is
 //!

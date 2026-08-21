@@ -1,5 +1,5 @@
 //! Generic blocking wait-queue with true park + timed wake (Design D P-2,
-//! `.junie/next-pi-prompt.md`).
+//! `plans/PI.md`).
 //!
 //! A reusable kernel wait primitive: a task registers on a [`WaitQueue`]
 //! and *parks* (`RescheduleAction::Park`, off the run queue — no busy

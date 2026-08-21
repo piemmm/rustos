@@ -300,6 +300,19 @@ impl FilesystemService for FixtureFs {
         Err(Errno::NotImplemented)
     }
 
+    fn link(
+        &self,
+        _uid: u32,
+        _caps: &dyn CapabilityQuery,
+        _existing: &str,
+        _link: &str,
+        _existing_link: FinalLink,
+    ) -> Result<(), Errno> {
+        // The fixture's flat map holds one name per entry; a second name for
+        // one node is not something it can represent.
+        Err(Errno::NotImplemented)
+    }
+
     fn readlink(
         &self,
         _uid: u32,
@@ -322,6 +335,7 @@ impl FilesystemService for FixtureFs {
         let len = FIXTURE_CONTENT.len() as u64;
         Ok(FileStat {
             kind: FileKind::Regular,
+            nlink: 1,
             size: len,
             allocated: len,
             mode: 0o444,

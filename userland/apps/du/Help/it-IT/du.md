@@ -27,9 +27,9 @@ Un percorso illeggibile viene segnalato sull'errore standard e
 l'attraversamento continua con il resto; una directory illeggibile
 non contribuisce nulla anziché una somma parziale indovinata.
 
-TAIRiX non ha ancora collegamenti fisici, quindi nessuna voce può
-essere contata due volte e le opzioni GNU di deduplicazione dei
-collegamenti non esistono; `-x` (un solo filesystem) non è ancora
+`du` non deduplica ancora un file con più nomi: uno raggiunto da due
+nomi è contato una volta per nome, e le opzioni GNU di deduplicazione
+dei collegamenti non esistono; `-x` (un solo filesystem) non è ancora
 disponibile; le variabili d'ambiente della famiglia `DU_BLOCK_SIZE`
 non vengono lette — la scala si sceglie solo con le opzioni.
 

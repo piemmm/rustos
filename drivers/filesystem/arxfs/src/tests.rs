@@ -6846,3 +6846,303 @@ fn an_unreadable_primary_metadata_block_reads_from_its_companion() {
     re.lookup(re.root(), b"witness")
         .expect("the inode tree reads from its mirror");
 }
+
+#[test]
+fn a_hard_link_is_a_second_name_for_one_inode() {
+    // Two names, one node id: the whole point of the operation. A write
+    // through either name is visible through the other because there is only
+    // one set of blocks behind them.
+    let mut fs = fmt(512, 256, 32);
+    let root = fs.root();
+    let node = fs
+        .create(root, b"first", NodeKind::RegularFile)
+        .expect("create the file");
+    fs.write_at(root, b"first", 0, b"shared bytes")
+        .expect("write through the first name");
+
+    fs.link(root, b"second", node).expect("add a second name");
+    assert_eq!(fs.lookup(root, b"second"), Ok(node));
+    assert_eq!(fs.lookup(root, b"first"), Ok(node));
+    assert_eq!(fs.node_info(node).expect("stat").nlink, 2);
+
+    let mut out = [0u8; 32];
+    let read = fs
+        .read_at(node, 0, &mut out[..12])
+        .expect("read through the node");
+    assert_eq!(&out[..read], b"shared bytes");
+
+    // A write through the *second* name reaches the same bytes.
+    fs.write_at(root, b"second", 0, b"rewritten   ")
+        .expect("write through the second name");
+    let read = fs.read_at(node, 0, &mut out[..12]).expect("read back");
+    assert_eq!(&out[..read], b"rewritten   ");
+}
+
+#[test]
+fn unlinking_one_name_keeps_the_other_readable_and_its_blocks_allocated() {
+    // The lifecycle this stage exists for: an unlink that is not the last
+    // must free nothing, or it destroys data the remaining name reaches.
+    let mut fs = fmt(512, 256, 32);
+    let root = fs.root();
+    let node = fs
+        .create(root, b"first", NodeKind::RegularFile)
+        .expect("create the file");
+    fs.write_at(root, b"first", 0, b"payload").expect("write");
+    fs.link(root, b"second", node).expect("add a second name");
+    let with_both = fs.stats().expect("stats").free_blocks;
+
+    fs.remove(root, b"first").expect("drop the first name");
+    assert_eq!(fs.lookup(root, b"first"), Err(DriverError::NotFound));
+    assert_eq!(fs.lookup(root, b"second"), Ok(node));
+    assert_eq!(fs.node_info(node).expect("stat").nlink, 1);
+    assert_eq!(
+        fs.stats().expect("stats").free_blocks,
+        with_both,
+        "a name went, no storage did"
+    );
+    let mut out = [0u8; 16];
+    let read = fs.read_at(node, 0, &mut out[..7]).expect("still readable");
+    assert_eq!(&out[..read], b"payload");
+
+    // Only the last name frees the inode and its blocks.
+    fs.remove(root, b"second").expect("drop the last name");
+    assert_eq!(fs.lookup(root, b"second"), Err(DriverError::NotFound));
+    assert_eq!(fs.node_info(node), Err(DriverError::NotFound));
+    assert!(
+        fs.stats().expect("stats").free_blocks > with_both,
+        "the last name returns the blocks"
+    );
+}
+
+#[test]
+fn the_link_count_survives_a_remount_and_the_rebuilt_free_map_agrees() {
+    // The count is on-disk state, and the allocation-map rebuild walks the
+    // inode tree, so a twice-named inode's blocks are accounted exactly once.
+    let mut fs = fmt(512, 256, 32);
+    let root = fs.root();
+    let node = fs
+        .create(root, b"first", NodeKind::RegularFile)
+        .expect("create the file");
+    fs.write_at(root, b"first", 0, b"payload").expect("write");
+    fs.link(root, b"second", node).expect("add a second name");
+
+    let live = fs.stats().expect("stats").free_blocks;
+    let bytes = fs.into_block().bytes();
+    let mut re = ARXFS::open(MemBlock::from_bytes(bytes, 512, 256), &TEST_KEY).expect("reopen");
+    assert_eq!(
+        re.stats().expect("stats").free_blocks,
+        live,
+        "the rebuilt map counts a twice-named inode's blocks once"
+    );
+    let root = re.root();
+    let node = re.lookup(root, b"second").expect("the second name");
+    assert_eq!(re.node_info(node).expect("stat").nlink, 2);
+}
+
+#[test]
+fn a_hard_link_to_a_directory_is_refused_and_creates_nothing() {
+    // A second name for a directory would let the tree hold a cycle, which
+    // the VFS's physical `..` walk depends on being impossible.
+    let mut fs = fmt(512, 256, 32);
+    let root = fs.root();
+    let dir = fs
+        .create(root, b"dir", NodeKind::Directory)
+        .expect("create a directory");
+    assert_eq!(fs.link(root, b"alias", dir), Err(DriverError::Unsupported));
+    assert_eq!(fs.lookup(root, b"alias"), Err(DriverError::NotFound));
+    assert_eq!(fs.incompat, 0, "a refused link declares nothing");
+}
+
+#[test]
+fn a_hard_link_over_a_taken_name_is_refused_and_changes_nothing() {
+    let mut fs = fmt(512, 256, 32);
+    let root = fs.root();
+    let node = fs
+        .create(root, b"first", NodeKind::RegularFile)
+        .expect("create the file");
+    fs.create(root, b"taken", NodeKind::RegularFile)
+        .expect("create the occupant");
+    assert_eq!(fs.link(root, b"taken", node), Err(DriverError::Busy));
+    assert_eq!(fs.node_info(node).expect("stat").nlink, 1);
+    assert_eq!(fs.incompat, 0, "a refused link declares nothing");
+}
+
+#[test]
+fn a_hard_link_to_a_symbolic_link_names_the_link_itself() {
+    // The driver is handed a node, not a path, so what gains a name is
+    // exactly what the caller resolved — the link, not its target.
+    let mut fs = fmt(512, 256, 32);
+    let root = fs.root();
+    let link = fs
+        .create_link(root, b"alias", b"/target")
+        .expect("create the symbolic link");
+    fs.link(root, b"alias2", link).expect("a second name");
+    let second = fs.lookup(root, b"alias2").expect("the second name");
+    assert_eq!(second, link);
+    let info = fs.node_info(second).expect("stat");
+    assert_eq!(info.kind, NodeKind::Symlink);
+    assert_eq!(info.nlink, 2);
+    let mut out = [0u8; 16];
+    assert_eq!(fs.read_link(second, &mut out), Ok(7));
+}
+
+#[test]
+fn a_volume_declares_the_hardlink_feature_only_once_it_holds_one() {
+    // Stronger than the symbolic-link case: an unaware reader would not
+    // misread a second name, it would free an inode the other name reaches.
+    let mut fs = fmt(512, 256, 32);
+    let root = fs.root();
+    let node = fs
+        .create(root, b"first", NodeKind::RegularFile)
+        .expect("create the file");
+    assert_eq!(fs.incompat, 0, "an ordinary file declares nothing");
+
+    fs.link(root, b"second", node).expect("add a second name");
+    assert_eq!(fs.incompat, superblock::INCOMPAT_HARDLINKS);
+
+    let bytes = fs.into_block().bytes();
+    let re = ARXFS::open(MemBlock::from_bytes(bytes, 512, 256), &TEST_KEY).expect("reopen");
+    assert_eq!(re.incompat, superblock::INCOMPAT_HARDLINKS);
+}
+
+#[test]
+fn a_volume_holding_both_link_kinds_declares_both() {
+    let mut fs = fmt(512, 256, 32);
+    let root = fs.root();
+    let node = fs
+        .create(root, b"first", NodeKind::RegularFile)
+        .expect("create the file");
+    fs.create_link(root, b"sym", b"/target")
+        .expect("create the symbolic link");
+    fs.link(root, b"second", node).expect("add a second name");
+    assert_eq!(
+        fs.incompat,
+        superblock::INCOMPAT_SYMLINKS | superblock::INCOMPAT_HARDLINKS
+    );
+}
+
+#[test]
+fn a_refused_hard_link_leaves_the_feature_undeclared() {
+    // The bit is set before the entry is written, so a rolled-back
+    // transaction must take it back with the rest of the state.
+    let mut fs = fmt(512, 256, 32);
+    let root = fs.root();
+    let node = fs
+        .create(root, b"first", NodeKind::RegularFile)
+        .expect("create the file");
+    assert_eq!(
+        fs.link(root, b"first", node),
+        Err(DriverError::Busy),
+        "the name is taken"
+    );
+    assert_eq!(fs.incompat, 0);
+    // And the count did not move either.
+    assert_eq!(fs.node_info(node).expect("stat").nlink, 1);
+}
+
+#[test]
+fn check_corrects_a_link_count_that_disagrees_with_the_names_on_disk() {
+    // The count decides when an unlink frees blocks, so a drifted value is
+    // either a storage leak or a live-data free. `check` counts the truth.
+    let mut fs = fmt(512, 256, 32);
+    let root = fs.root();
+    let node = fs
+        .create(root, b"first", NodeKind::RegularFile)
+        .expect("create the file");
+    fs.link(root, b"second", node).expect("add a second name");
+
+    // Understate the node, exactly as a driver defect would: one more unlink
+    // than names would then free blocks the surviving name still reaches.
+    let ino = u32::try_from(node.raw()).expect("inode number");
+    let mut inode = fs.read_inode(ino).expect("read the inode");
+    inode.nlink = 1;
+    fs.write_inode(ino, &inode).expect("write the inode");
+    fs.commit().expect("commit the understated count");
+
+    let report = fs.check(&GrantAll, &NullSink).expect("check");
+    assert_eq!(report.link_counts_corrected, 1);
+    assert!(report.made_repairs());
+    assert_eq!(fs.node_info(node).expect("stat").nlink, 2);
+
+    // Idempotent: a volume whose counts already match needs no correction.
+    let again = fs.check(&GrantAll, &NullSink).expect("check again");
+    assert_eq!(again.link_counts_corrected, 0);
+}
+
+#[test]
+fn check_leaves_correct_link_counts_alone_for_every_kind() {
+    // Directories are counted by the same rule — `.` and `..` are real
+    // entries — so a sound volume must need no correction at all.
+    let mut fs = fmt(512, 256, 32);
+    let root = fs.root();
+    fs.create(root, b"dir", NodeKind::Directory)
+        .expect("create a directory");
+    let nested = fs.lookup(root, b"dir").expect("the directory");
+    fs.create(nested, b"inner", NodeKind::Directory)
+        .expect("create a nested directory");
+    let file = fs
+        .create(root, b"file", NodeKind::RegularFile)
+        .expect("create a file");
+    fs.link(root, b"file2", file).expect("a second name");
+    fs.create_link(root, b"sym", b"/target")
+        .expect("create a symbolic link");
+
+    let report = fs.check(&GrantAll, &NullSink).expect("check");
+    assert_eq!(report.link_counts_corrected, 0);
+    assert!(report.structure_sound);
+}
+
+#[test]
+fn scrub_verifies_a_twice_named_inode_once() {
+    // Scrub walks the inode tree, not the name space, so a second name adds
+    // no second verification of the same blocks.
+    let mut fs = fmt(512, 256, 32);
+    let root = fs.root();
+    let node = fs
+        .create(root, b"first", NodeKind::RegularFile)
+        .expect("create the file");
+    fs.write_at(root, b"first", 0, b"payload").expect("write");
+    let before = fs
+        .scrub(&GrantAll, &NullSink, ScrubBudget::Unlimited)
+        .expect("scrub");
+
+    fs.link(root, b"second", node).expect("add a second name");
+    let after = fs
+        .scrub(&GrantAll, &NullSink, ScrubBudget::Unlimited)
+        .expect("scrub again");
+    assert_eq!(
+        after.data_blocks_checked, before.data_blocks_checked,
+        "a second name is not a second copy of the data"
+    );
+}
+
+#[test]
+fn rescue_extracts_a_twice_named_inode_once() {
+    // The sink is keyed by inode, so a multiply-named file is recovered once
+    // rather than emitted (and counted) again under its other name.
+    let mut fs = fmt(512, 256, 32);
+    let root = fs.root();
+    let node = fs
+        .create(root, b"first", NodeKind::RegularFile)
+        .expect("create the file");
+    fs.write_at(root, b"first", 0, b"payload").expect("write");
+    fs.link(root, b"second", node).expect("add a second name");
+    let ino = u32::try_from(node.raw()).expect("inode number");
+
+    let bytes = fs.into_block().bytes();
+    let mut sink = CollectSink::new();
+    let report = ARXFS::rescue(
+        MemBlock::from_bytes(bytes, 512, 256),
+        &TEST_KEY,
+        &GrantAll,
+        &NullSink,
+        &mut sink,
+    )
+    .expect("rescue");
+    assert_eq!(report.files_mapped, 1);
+    assert_eq!(
+        sink.blocks.keys().filter(|(i, _)| *i == ino).count(),
+        1,
+        "one inode, one emitted block, however many names reach it"
+    );
+}

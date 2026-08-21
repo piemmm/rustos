@@ -1,5 +1,5 @@
 //! EL0 fixture program for the `lib/sandbox` parser-sandbox seam (the
-//! fstree S8b increment — `.junie/fstree-next-plan.md`).
+//! fstree S8b increment — `plans/APPS.md`).
 //!
 //! One binary, four roles, selected by the **registry path** it is spawned
 //! under (`arg(0)`) plus the seam's worker marker (`arg(1)`), because the

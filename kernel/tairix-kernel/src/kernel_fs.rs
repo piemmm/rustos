@@ -48,6 +48,10 @@ impl<T> KernelFs for T where
 }
 
 impl FilesystemRead for Box<dyn KernelFs> {
+    fn read_link(&mut self, node: NodeId, out: &mut [u8]) -> Result<usize, DriverError> {
+        (**self).read_link(node, out)
+    }
+
     fn root(&self) -> NodeId {
         (**self).root()
     }
@@ -77,6 +81,19 @@ impl FilesystemRead for Box<dyn KernelFs> {
 impl FilesystemWrite for Box<dyn KernelFs> {
     fn create(&mut self, dir: NodeId, name: &[u8], kind: NodeKind) -> Result<NodeId, DriverError> {
         (**self).create(dir, name, kind)
+    }
+
+    fn create_link(
+        &mut self,
+        dir: NodeId,
+        name: &[u8],
+        target: &[u8],
+    ) -> Result<NodeId, DriverError> {
+        (**self).create_link(dir, name, target)
+    }
+
+    fn link(&mut self, dir: NodeId, name: &[u8], node: NodeId) -> Result<(), DriverError> {
+        (**self).link(dir, name, node)
     }
 
     fn write_at(

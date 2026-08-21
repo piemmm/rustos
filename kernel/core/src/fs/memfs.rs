@@ -43,6 +43,13 @@ enum RwNode {
 pub(crate) struct RwMockFs {
     nodes: Vec<RwNode>,
     sec: Vec<NodeSecurity>,
+    /// How many directory entries name each node, parallel to `nodes`.
+    ///
+    /// This tree holds no `.`/`..` entries, so the count is exactly the
+    /// names that reach the node and a directory is not given POSIX's
+    /// extra two. The root, which no directory holds, counts as the one
+    /// name its mount point provides.
+    nlink: Vec<u32>,
     /// Per-node extended-attribute set, parallel to `nodes`/`sec`,
     /// validated through the one `lib/fsmeta` definition.
     attrs: Vec<AttrSet>,
@@ -60,6 +67,7 @@ impl RwMockFs {
             // Root is admin-owned and world-traversable by default, so a test
             // can vary just the node it cares about.
             sec: alloc::vec![NodeSecurity::new(0o755, ADMIN_UID, ADMIN_GID)],
+            nlink: alloc::vec![1],
             attrs: alloc::vec![AttrSet::new()],
             create_uid: ADMIN_UID,
             create_gid: ADMIN_GID,
@@ -79,6 +87,16 @@ impl RwMockFs {
     /// Overwrite the root directory's security record.
     pub(crate) fn set_root_security(&mut self, sec: NodeSecurity) {
         self.sec[0] = sec;
+    }
+
+    /// Set `node`'s recorded name count, so a test can stand a node at the
+    /// format's fixed ceiling without adding four billion names to reach it.
+    pub(crate) fn set_link_count(&mut self, node: NodeId, count: u32) {
+        if let Ok(idx) = Self::index(node) {
+            if let Some(slot) = self.nlink.get_mut(idx) {
+                *slot = count;
+            }
+        }
     }
 
     fn index(node: NodeId) -> Result<usize, DriverError> {
@@ -103,17 +121,27 @@ impl RwMockFs {
         Ok(None)
     }
 
-    /// Remove whatever entry in directory `dir_idx` maps to `child_idx`.
-    fn unlink_index(&mut self, dir_idx: usize, child_idx: usize) {
-        if let RwNode::Dir(children) = &mut self.nodes[dir_idx] {
-            let key = children
-                .iter()
-                .find(|(_, &v)| v == child_idx)
-                .map(|(k, _)| k.clone());
-            if let Some(key) = key {
-                children.remove(&key);
-            }
+    /// Remove the entry named `name` from directory `dir_idx`, returning the
+    /// node it named.
+    ///
+    /// Keyed by name, not by node: one directory may hold two names for one
+    /// node, and finding the entry by node index would drop whichever the
+    /// map happened to yield first.
+    fn unlink_name(&mut self, dir_idx: usize, name: &str) -> Option<usize> {
+        let RwNode::Dir(children) = &mut self.nodes[dir_idx] else {
+            return None;
+        };
+        let key = children
+            .keys()
+            .find(|k| k.eq_ignore_ascii_case(name))
+            .cloned()?;
+        let child = children.remove(&key)?;
+        // A detached name is one fewer name; the node itself lives on for as
+        // long as another entry reaches it.
+        if let Some(count) = self.nlink.get_mut(child) {
+            *count = count.saturating_sub(1);
         }
+        Some(child)
     }
 
     /// Whether `target_idx` is `root_idx` or anywhere within its subtree,
@@ -140,17 +168,20 @@ impl FilesystemRead for RwMockFs {
 
     fn node_info(&mut self, node: NodeId) -> Result<NodeInfo, DriverError> {
         let idx = Self::index(node)?;
+        let names = self.nlink.get(idx).copied().ok_or(DriverError::NotFound)?;
         match self.nodes.get(idx).ok_or(DriverError::NotFound)? {
             // The in-RAM tree keeps no per-node stamps; the epoch is the
             // documented "no stamp" value, never a fabricated wall time.
             RwNode::Dir(_) => Ok(NodeInfo {
                 kind: NodeKind::Directory,
+                nlink: names,
                 size: 0,
                 allocated: 0,
                 times: NodeTimes::default(),
             }),
             RwNode::File(data) => Ok(NodeInfo {
                 kind: NodeKind::RegularFile,
+                nlink: names,
                 size: data.len() as u64,
                 // Heap-backed: the bytes held are the storage occupied.
                 allocated: data.len() as u64,
@@ -158,6 +189,7 @@ impl FilesystemRead for RwMockFs {
             }),
             RwNode::Link(target) => Ok(NodeInfo {
                 kind: NodeKind::Symlink,
+                nlink: names,
                 size: target.len() as u64,
                 allocated: target.len() as u64,
                 times: NodeTimes::default(),
@@ -258,6 +290,7 @@ impl FilesystemWrite for RwMockFs {
             self.create_gid,
         ));
         self.attrs.push(AttrSet::new());
+        self.nlink.push(1);
         let dir_idx = Self::index(dir)?;
         if let RwNode::Dir(children) = &mut self.nodes[dir_idx] {
             children.insert(name, new_index);
@@ -288,11 +321,37 @@ impl FilesystemWrite for RwMockFs {
             self.create_gid,
         ));
         self.attrs.push(AttrSet::new());
+        self.nlink.push(1);
         let dir_idx = Self::index(dir)?;
         if let RwNode::Dir(children) = &mut self.nodes[dir_idx] {
             children.insert(name, new_index);
         }
         Ok(NodeId::from_raw(new_index as u64 + 1))
+    }
+
+    fn link(&mut self, dir: NodeId, name: &[u8], node: NodeId) -> Result<(), DriverError> {
+        if self.child_index(dir, name)?.is_some() {
+            return Err(DriverError::Busy);
+        }
+        let target = Self::index(node)?;
+        // A second name for a directory would let the tree hold a cycle,
+        // which the physical `..` walk depends on being impossible.
+        match self.nodes.get(target).ok_or(DriverError::NotFound)? {
+            RwNode::Dir(_) => return Err(DriverError::Unsupported),
+            RwNode::File(_) | RwNode::Link(_) => {}
+        }
+        let count = self.nlink.get_mut(target).ok_or(DriverError::NotFound)?;
+        // The stored count is a fixed-width field, so an overflow fails
+        // closed rather than wrapping into a count that frees live data.
+        *count = count.checked_add(1).ok_or(DriverError::TooManyLinks)?;
+        let name = core::str::from_utf8(name)
+            .map_err(|_| DriverError::LengthOutOfRange)?
+            .to_string();
+        let dir_idx = Self::index(dir)?;
+        if let RwNode::Dir(children) = &mut self.nodes[dir_idx] {
+            children.insert(name, target);
+        }
+        Ok(())
     }
 
     fn write_at(
@@ -334,8 +393,9 @@ impl FilesystemWrite for RwMockFs {
                 return Err(DriverError::Busy);
             }
         }
+        let key = core::str::from_utf8(name).map_err(|_| DriverError::NotFound)?;
         let dir_idx = Self::index(dir)?;
-        self.unlink_index(dir_idx, child);
+        self.unlink_name(dir_idx, key);
         Ok(())
     }
 
@@ -377,14 +437,19 @@ impl FilesystemWrite for RwMockFs {
                     return Err(DriverError::Busy);
                 }
             }
-            self.unlink_index(dst_dir_idx, dst_idx);
+            self.unlink_name(dst_dir_idx, &dst_key);
         }
 
-        // Detach the source name and attach the node under the new name.
+        // Detach the source name and attach the node under the new name; the
+        // node keeps the name it had, moved rather than added.
+        let src_key = core::str::from_utf8(src_name).map_err(|_| DriverError::NotFound)?;
         let src_dir_idx = Self::index(src_dir)?;
-        self.unlink_index(src_dir_idx, src_idx);
+        self.unlink_name(src_dir_idx, src_key);
         if let RwNode::Dir(children) = &mut self.nodes[dst_dir_idx] {
             children.insert(dst_key, src_idx);
+        }
+        if let Some(count) = self.nlink.get_mut(src_idx) {
+            *count = count.saturating_add(1);
         }
         Ok(())
     }

@@ -8,7 +8,7 @@ and `PLAN.md` first. Every rule in both applies here without exception.
 The work runs as a repeating loop across many fresh AI contexts. A single
 context does a bounded amount of work: it finds (or picks up) **one** issue,
 understands it fully, fixes it properly with tests, runs the whole-project gate
-green, and records the remaining backlog in `.junie/next-ai-codereview.md` so
+green, and records the remaining backlog in this plan so
 the next context can continue. The loop ends when no violations remain.
 
 ## 0. Scope and decisions (binding for this plan)
@@ -28,10 +28,11 @@ the next context can continue. The loop ends when no violations remain.
 - **No behaviour change without its test.** Every fix that changes behaviour
   lands with a regression test that fails before and passes after (§7, §2.18,
   §23.4); a fuzzer/proptest find also enters the corpus (§19.6).
-- **The backlog lives in `.junie/next-ai-codereview.md`.** That file is both
-  the re-runnable prompt for the next context and the running issue queue. It
-  is the only handoff artefact; this plan (`CODEVERIFY.md`) is the stable
-  methodology and does not accrue per-issue history (§13).
+- **The backlog lives in this plan**, beside the methodology: it is both the
+  re-runnable prompt for the next context and the running issue queue, and it
+  is the only handoff artefact. A fixed issue's entry is deleted rather than
+  annotated, so the plan states the remaining work and never accrues per-issue
+  history (§13).
 - **This is not a comment refactor.** Comment "waffle" reduction is owned by
   `plans/WAFFLE.md`; do not conflate the two. CODEVERIFY targets *defects and
   bad code*, not comment style.
@@ -123,7 +124,7 @@ it is not enumerated here.
 
 ## 2. Method for one issue (binding per context)
 
-1. **Pick the issue.** If `.junie/next-ai-codereview.md` lists an unfixed,
+1. **Pick the issue.** If this plan lists an unfixed,
    ready issue, take the top one. Otherwise scan an unfinished area (§3) with
    `search_project` for the patterns in §1 and stop at the **first** genuine
    violation, then record it.
@@ -146,7 +147,7 @@ it is not enumerated here.
    For a fuzzer/proptest find, add the input to the corpus (§19.6).
 6. **Run the whole-project gate green** (§4 below) and quote the output.
 7. **Self-review under §23** adversarially; state the verdict.
-8. **Update `.junie/next-ai-codereview.md`**: mark the fixed issue done (delete
+8. **Update this plan**: mark the fixed issue done (delete
    its entry — git is the history, §13), and append any *new* violations
    noticed in passing as backlog entries (§2.18: notice it → record it, never
    stay silent). Leave the file ready for the next context.
@@ -182,8 +183,8 @@ behind the Arch HAL (§17.2).
 ### Stage V4 — `userland/*` — Status: planned
 
 All userland crates (`system`, `session`, `shell`, `gui`, `apps`, `net`). The
-known seed issue (the shell parser `unreachable!`) lives here; see
-`.junie/next-ai-codereview.md`.
+known seed issue (the shell parser `unreachable!`) lives here; see the
+backlog above.
 
 ### Stage V5 — `tools/*` and `tests/*` — Status: planned
 
@@ -208,11 +209,11 @@ workspace (§7, §2.15, §15.6, never a `-p` subset):
   the CI/soak host's job),
 
 all pass; the §23 self-review confirms the fix is correct, understood, tested,
-and leaves no dead code or compat shim; and `.junie/next-ai-codereview.md` has
+and leaves no dead code or compat shim; and this plan has
 been updated. The actual gate output is quoted in the completion report.
 
 The overall task is done when V1–V5 are all `done` — a clean §1 scan of the
-whole workspace surfaces no violation — and `.junie/next-ai-codereview.md`
+whole workspace surfaces no violation — and this plan
 records an empty backlog.
 
 

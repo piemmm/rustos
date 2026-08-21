@@ -235,7 +235,7 @@ line under edit, clamped so a widened terminal shows its head rather than
 the narrow window's offset — the text is never lost, duplicated, or
 submitted, and a live reverse search stays live. Delivering
 `Ctrl-C`/`Ctrl-Z` to a *running foreground job*
-is the staged kernel work in `.junie/plan-session-shell.md` (part 3).
+is the staged kernel work in `plans/SHELL.md` (part 3).
 
 Tab completion (`src/complete.rs`) locates the word under the cursor with
 the shell's own span-carrying lexer (`lexer::tokenize_with_spans`) and is

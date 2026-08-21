@@ -1,5 +1,5 @@
 //! The kernel block-device sharing layer (Design D, D2a —
-//! `.junie/next-pi-prompt.md`): one whole-disk [`Block`] device driven
+//! `plans/PI.md`): one whole-disk [`Block`] device driven
 //! concurrently through serialised handles.
 //!
 //! The boot path brings up exactly **one** bootstrap-floor block device
@@ -287,7 +287,7 @@ impl<B: Block, R: Deref<Target = SharedBlock<B>>> Block for SharedBlockHandle<R>
 
 /// The long-lived kernel service that owns the boot disk's [`SharedBlock`]
 /// and keeps the read-only `/System` driver store mounted for the life of
-/// the system (Design D, D2a-2 — `.junie/next-pi-prompt.md`).
+/// the system (Design D, D2a-2 — `plans/PI.md`).
 ///
 /// The bootstrap floor brings up exactly **one** block device, which the
 /// boot path uses for two things at once — autoloading the signed `/System`

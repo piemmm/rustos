@@ -401,6 +401,66 @@ impl UnlinkFlags {
     }
 }
 
+/// Flags selecting how [`SyscallNumber::FS_LINK`](crate::SyscallNumber::FS_LINK)
+/// treats a final symbolic link on the name it is giving a second name to.
+///
+/// [`LinkFlags::from_bits`] rejects any reserved bit, so a future flag is
+/// never silently ignored by an older kernel (validate every input, fail
+/// closed).
+///
+/// An empty flag set is POSIX `link()`: **neither** operand's final
+/// component is followed, so the inode that gains a name is the one the
+/// caller spelled — a symbolic link planted on the way cannot redirect the
+/// new name onto an object the caller never asked for.
+/// [`FOLLOW`](Self::FOLLOW) is the `linkat(AT_SYMLINK_FOLLOW)` posture,
+/// which `ln -L` asks for: the existing name resolves through its final link
+/// and the new name is given to what that link names. The *new* name is
+/// never followed under either flag — it is a name being created, and a
+/// create never replaces an existing name.
+#[repr(transparent)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Hash, Default)]
+pub struct LinkFlags(u32);
+
+impl LinkFlags {
+    /// Resolve the existing name's final symbolic link and give the second
+    /// name to what it names, rather than to the link itself.
+    pub const FOLLOW: Self = Self(1 << 0);
+
+    /// The set of all defined flag bits.
+    const DEFINED_BITS: u32 = Self::FOLLOW.0;
+
+    /// An empty flag set: POSIX `link()`, following neither final component.
+    #[must_use]
+    pub const fn empty() -> Self {
+        Self(0)
+    }
+
+    /// Raw flag bits, as carried on the ABI.
+    #[must_use]
+    pub const fn bits(self) -> u32 {
+        self.0
+    }
+
+    /// Build a flag set from raw bits, rejecting any reserved bit.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::OutOfRange`] if `bits` sets a reserved bit (an unknown
+    /// request is rejected at the boundary, never silently ignored).
+    pub const fn from_bits(bits: u32) -> Result<Self, Errno> {
+        if bits & !Self::DEFINED_BITS != 0 {
+            return Err(Errno::OutOfRange);
+        }
+        Ok(Self(bits))
+    }
+
+    /// Whether the existing name's final symbolic link is resolved.
+    #[must_use]
+    pub const fn follows(self) -> bool {
+        self.0 & Self::FOLLOW.0 != 0
+    }
+}
+
 /// The stable, system-wide identity of a filesystem node.
 ///
 /// A node is identified by the pair `(volume, node)`: `volume` is the
@@ -471,6 +531,16 @@ impl FileId {
 pub struct FileStat {
     /// Whether the node is a regular file or a directory.
     pub kind: FileKind,
+    /// How many directory entries name this node — POSIX `st_nlink`, what
+    /// `ls -l`'s second column prints.
+    ///
+    /// Reported by the filesystem driver from the format's own record and
+    /// carried through unchanged; a format that keeps no count answers `1`,
+    /// the one name the caller's own path just walked. A directory's count
+    /// includes its `.` and each child's `..`, so an empty directory is `2`.
+    /// Never derived from anything else — a fabricated count would be a lie
+    /// a caller cannot tell from a read one.
+    pub nlink: u32,
     /// File length in bytes; `0` for a directory.
     pub size: u64,
     /// Bytes of on-disk storage the node's data occupies — the real
@@ -497,10 +567,13 @@ pub struct FileStat {
 impl FileStat {
     /// Encoded size of a [`FileStat`] on the wire.
     ///
-    /// `kind(1)` + `pad(7)` + `size(8)` + `allocated(8)` + `mode(4)` +
-    /// `uid(4)` + `gid(4)` + `id.volume(16)` + `id.node(8)` +
+    /// `kind(1)` + `pad(3)` + `nlink(4)` + `size(8)` + `allocated(8)` +
+    /// `mode(4)` + `uid(4)` + `gid(4)` + `id.volume(16)` + `id.node(8)` +
     /// `created(12)` + `modified(12)` + `accessed(12)` + `changed(12)`,
     /// padded to a multiple of 8 for natural alignment of the `u64` fields.
+    ///
+    /// `nlink` fills the alignment padding the `kind` byte already carried,
+    /// so the record's length is unchanged.
     pub const WIRE_LEN: usize = 112;
 
     /// Encode `self` into the first [`FileStat::WIRE_LEN`] bytes of `out`.
@@ -515,6 +588,7 @@ impl FileStat {
         }
         out[..Self::WIRE_LEN].fill(0);
         out[0] = self.kind.as_u8();
+        put_u32(out, 4, self.nlink);
         put_u64(out, 8, self.size);
         put_u64(out, 16, self.allocated);
         put_u32(out, 24, self.mode);
@@ -548,6 +622,7 @@ impl FileStat {
         volume.copy_from_slice(&bytes[40..56]);
         Ok(Self {
             kind: FileKind::from_u8(bytes[0])?,
+            nlink: read_u32(bytes, 4),
             size: read_u64(bytes, 8),
             allocated: read_u64(bytes, 16),
             mode: read_u32(bytes, 24),
@@ -879,6 +954,7 @@ mod tests {
     fn file_stat_round_trips() {
         let stat = FileStat {
             kind: FileKind::Regular,
+            nlink: 3,
             size: 0x0123_4567_89AB_CDEF,
             allocated: 0x0FED_CBA9_8765_4321,
             mode: 0o644,
@@ -906,6 +982,7 @@ mod tests {
     fn file_stat_rejects_short_buffers() {
         let stat = FileStat {
             kind: FileKind::Directory,
+            nlink: 2,
             size: 0,
             allocated: 0,
             mode: 0o755,

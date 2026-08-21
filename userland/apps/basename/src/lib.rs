@@ -12,9 +12,10 @@
 //! `plans/DRIVES.md`) as well as to the view root `/`. An alias root is
 //! treated the way POSIX treats `/`: it is never stripped into, so
 //! `basename Home:/` is `Home:/`, exactly as `basename /` is `/`. Where
-//! the root prefix ends is decided by the shared path grammar's own rule
-//! (`tairix_path::alias_root_len`) — this tool carries no second path
-//! parser. Documented in the tool's `Help/` documents.
+//! The base name itself is the shared path grammar's own
+//! `tairix_path::leaf_name`, so this tool carries no second path parser and
+//! adds only coreutils' `-s` suffix removal on top. Documented in the tool's
+//! `Help/` documents.
 //!
 //! # What this crate is
 //!
@@ -43,7 +44,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use core::fmt;
 
-use tairix_path::alias_root_len;
+use tairix_path::leaf_name;
 
 /// The usage banner a usage error is reported with, and the fallback the
 /// short-help switches print when `basename`'s own Help tree is
@@ -207,32 +208,16 @@ pub fn parse(args: &[&str]) -> Result<Command, BasenameError> {
 /// The POSIX base name of one path spelling, with an optional trailing
 /// `suffix` removed.
 ///
-/// The classic algorithm — strip trailing slashes, take the text after the
-/// last remaining `/`, then strip a trailing `suffix` that is neither the
-/// whole result nor empty — with one TAIRiX extension: a `Name:/` alias
-/// root (decided by the shared grammar's [`alias_root_len`]) plays the
-/// role POSIX gives `/`, so `basename_of("Home:/", None)` is `Home:/`
-/// exactly as `basename_of("/", None)` is `/`. The surgery is purely
-/// lexical; nothing is resolved or normalised.
+/// The base name itself is the shared grammar's [`leaf_name`] — trailing
+/// slashes ignored, the text after the last remaining `/`, and a `Name:/`
+/// alias root playing the role POSIX gives `/`, so `basename_of("Home:/",
+/// None)` is `Home:/` exactly as `basename_of("/", None)` is `/`. This
+/// function's own contribution is coreutils' `-s`: strip a trailing
+/// `suffix` that is neither the whole result nor empty. Purely lexical;
+/// nothing is resolved or normalised.
 #[must_use]
 pub fn basename_of<'a>(name: &'a str, suffix: Option<&str>) -> &'a str {
-    if name.is_empty() {
-        return "";
-    }
-    let root_len = alias_root_len(name).unwrap_or(0);
-    let rest = &name[root_len..];
-
-    let trimmed = rest.trim_end_matches('/');
-    if trimmed.is_empty() {
-        // Nothing but the root: the alias root itself, `/` for an
-        // all-slash spelling, or the empty remainder of a bare root.
-        return if root_len > 0 { &name[..root_len] } else { "/" };
-    }
-
-    let base = match trimmed.rfind('/') {
-        Some(slash) => &trimmed[slash + 1..],
-        None => trimmed,
-    };
+    let base = leaf_name(name);
     match suffix {
         Some(suffix) if !suffix.is_empty() && base.len() > suffix.len() => {
             base.strip_suffix(suffix).unwrap_or(base)

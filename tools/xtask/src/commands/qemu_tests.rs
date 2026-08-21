@@ -855,7 +855,7 @@ static TESTS: &[QemuTest] = &[
         pointer_script: None,
         serial: &[],
     },
-    // ramzip b3 (`plans/SWAPSWAPSWAP.md`, `.junie/swapswap-progress.md`):
+    // ramzip b3 (`plans/SWAPSWAPSWAP.md`, `plans/SWAPSWAPSWAP.md`):
     // the x86_64 hardware referenced (Accessed) bit read and cleared
     // through the Arch HAL, driving the cold-page clock scan
     // (`kernel/mem::coldscan`). Single CPU suffices (the test builds and
@@ -878,7 +878,7 @@ static TESTS: &[QemuTest] = &[
         serial: &[],
     },
     // ramzip b3 aarch64 (`plans/SWAPSWAPSWAP.md`,
-    // `.junie/swapswap-progress.md`): the software-managed Access Flag
+    // `plans/SWAPSWAPSWAP.md`): the software-managed Access Flag
     // (the cold-page referenced bit) read and cleared through the Arch
     // HAL, and an access to a cleared-AF leaf resolved by the
     // synchronous-exception Access-Flag-fault path (setting AF + retry),
@@ -904,7 +904,7 @@ static TESTS: &[QemuTest] = &[
         serial: &[],
     },
     // ramzip b3 riscv64 (`plans/SWAPSWAPSWAP.md`,
-    // `.junie/swapswap-progress.md`): the software-managed Accessed bit
+    // `plans/SWAPSWAPSWAP.md`): the software-managed Accessed bit
     // (the cold-page referenced bit) read and cleared through the Arch
     // HAL, and an access to a cleared-A leaf resolved by the trap path's
     // A/D-setting page-fault handler (setting A + retry), driving the
@@ -2441,7 +2441,7 @@ static TESTS: &[QemuTest] = &[
             ("1 failed attempt", Duration::ZERO, OVERLONG_USERNAME),
         ],
     },
-    // PI Design D P-3 (`.junie/next-pi-prompt.md`):
+    // PI Design D P-3 (`plans/PI.md`):
     // `tairix-test-devmgr-hwtree-qemu-aarch64` boots the *production* aarch64
     // `tairix-kernel` pipeline (`boot_aarch64::boot`) verbatim on the `virt`
     // board and proves the **device-manager service's reactive observe loop**
@@ -3226,7 +3226,7 @@ static TESTS: &[QemuTest] = &[
         serial: &[],
     },
     // The S8b parser-sandbox vertical (`docs/src/security/sandbox.md`;
-    // `.junie/fstree-next-plan.md` S8b): prove the `lib/sandbox` seam end
+    // `plans/APPS.md` S8b): prove the `lib/sandbox` seam end
     // to end over the S8a kernel sandbox spawn mode on the aarch64 `virt`
     // board. The chassis installs the production `KernelDispatchHook`
     // (LiveMemMap for the `tairix-rt` heaps, a real `KernelProcessWait`, a

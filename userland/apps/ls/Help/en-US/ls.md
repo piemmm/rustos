@@ -39,8 +39,9 @@ the output matches the GNU tool's numeric fallback (`-n` renders
 identically). The timestamp is the modified time by default; `-c`,
 `-u`, and `--time` select which of the four timestamps is shown (and
 sorted by), and `--time-style` — or `--full-time` — sets its format.
-There is no link-count column: this filesystem contract carries no hard
-links, so a count would be fabricated.
+The link-count column reports how many directory entries name the file,
+as the filesystem itself records it; a format that keeps no count
+answers `1`.
 
 A symbolic link renders with the type letter `l` and, in the long format,
 as `name -> target` — the target exactly as it is stored, unresolved, which

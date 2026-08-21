@@ -198,6 +198,34 @@ pub trait FilesystemService: Send + Sync {
     /// links, or [`Errno::NotImplemented`] when no filesystem is mounted.
     fn readlink(&self, uid: u32, caps: &dyn CapabilityQuery, path: &str) -> Result<String, Errno>;
 
+    /// Add the absolute `link` as a second name for the node the absolute
+    /// `existing` already names — a hard link.
+    ///
+    /// `existing_link` selects whether the existing name's final symbolic
+    /// link is resolved ([`FinalLink::Follow`], `ln -L`) or the link itself
+    /// gains the second name ([`FinalLink::Keep`], POSIX `link()`); the new
+    /// name is never followed. Both paths must lie under one mounted volume,
+    /// and the new name is authorised as a create in its own parent,
+    /// conferring no authority the caller did not already hold.
+    ///
+    /// # Errors
+    ///
+    /// The stable [`Errno`] for the VFS refusal (an existing name, a
+    /// read-only mount, a permission denial), [`Errno::IsADirectory`] for a
+    /// directory, [`Errno::CrossVolume`] for two different volumes,
+    /// [`Errno::TooManyLinks`] when the format's name count would overflow,
+    /// [`Errno::NotSupported`] when the covering mount's format holds one
+    /// name per node, or [`Errno::NotImplemented`] when no filesystem is
+    /// mounted.
+    fn link(
+        &self,
+        uid: u32,
+        caps: &dyn CapabilityQuery,
+        existing: &str,
+        link: &str,
+        existing_link: FinalLink,
+    ) -> Result<(), Errno>;
+
     /// Set the length of the regular file at `path` to `size` bytes.
     ///
     /// # Errors
@@ -551,6 +579,17 @@ impl FilesystemService for NullFilesystemService {
         _caps: &dyn CapabilityQuery,
         _path: &str,
     ) -> Result<String, Errno> {
+        Err(Errno::NotImplemented)
+    }
+
+    fn link(
+        &self,
+        _uid: u32,
+        _caps: &dyn CapabilityQuery,
+        _existing: &str,
+        _link: &str,
+        _existing_link: FinalLink,
+    ) -> Result<(), Errno> {
         Err(Errno::NotImplemented)
     }
 

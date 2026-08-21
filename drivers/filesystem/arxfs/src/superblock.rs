@@ -80,12 +80,26 @@ const PAYLOAD_LEN: u32 = 40 + CRYPTO_HEADER_LEN as u32 + 8;
 /// never held a link stays mountable by a link-unaware reader.
 pub const INCOMPAT_SYMLINKS: u64 = 1 << 0;
 
+/// The volume stores **hard links**: an inode more than one directory entry
+/// names, whose storage is freed only when the last of them goes
+/// (`docs/src/filesystem/arxfs-spec.md` §20.5).
+///
+/// The safety argument is stronger here than it is for symbolic links. A
+/// reader that does not know kind `3` merely *misreads* a link inode; a
+/// reader that does not know about a second name would run an unlink that
+/// frees the inode and every block outright, destroying data the other name
+/// still reaches. That is silent corruption, not a misread, so a volume
+/// holding one keeps such a reader out. The bit is set by the **first** hard
+/// link, in the transaction that adds it, and a rolled back creation takes
+/// it back with the rest of that transaction's state.
+pub const INCOMPAT_HARDLINKS: u64 = 1 << 1;
+
 /// Every incompatible on-disk feature this build understands.
 ///
 /// A volume declaring a bit outside this set is refused at mount rather than
 /// misread: the whole point of the word is that an unrecognised structure is
 /// a definite "no", never a guess.
-pub const INCOMPAT_SUPPORTED: u64 = INCOMPAT_SYMLINKS;
+pub const INCOMPAT_SUPPORTED: u64 = INCOMPAT_SYMLINKS | INCOMPAT_HARDLINKS;
 
 fn rd_u32(buf: &[u8], off: usize) -> u32 {
     u32::from_le_bytes([buf[off], buf[off + 1], buf[off + 2], buf[off + 3]])

@@ -84,18 +84,21 @@ impl FilesystemRead for MockFs {
         match node.raw() {
             ROOT | DOCS => Ok(NodeInfo {
                 kind: NodeKind::Directory,
+                nlink: 2,
                 size: 0,
                 allocated: 0,
                 times: MOCK_TIMES,
             }),
             KERNEL => Ok(NodeInfo {
                 kind: NodeKind::RegularFile,
+                nlink: 1,
                 size: KERNEL_BODY.len() as u64,
                 allocated: KERNEL_BODY.len() as u64,
                 times: MOCK_TIMES,
             }),
             README => Ok(NodeInfo {
                 kind: NodeKind::RegularFile,
+                nlink: 1,
                 size: README_BODY.len() as u64,
                 allocated: README_BODY.len() as u64,
                 times: MOCK_TIMES,
@@ -184,12 +187,14 @@ impl FilesystemRead for BadFs {
         match node.raw() {
             ROOT => Ok(NodeInfo {
                 kind: NodeKind::Directory,
+                nlink: 2,
                 size: 0,
                 allocated: 0,
                 times: NodeTimes::default(),
             }),
             DOCS => Ok(NodeInfo {
                 kind: NodeKind::RegularFile,
+                nlink: 1,
                 size: 3,
                 allocated: 3,
                 times: NodeTimes::default(),
@@ -231,6 +236,7 @@ impl FilesystemRead for BadFs {
             node: NodeId::from_raw(DOCS),
             info: NodeInfo {
                 kind: NodeKind::RegularFile,
+                nlink: 1,
                 size: 0,
                 allocated: 0,
                 times: NodeTimes::default(),
@@ -753,6 +759,203 @@ fn delegated_rename_across_two_backed_mounts_is_cross_volume() {
     );
 }
 
+#[test]
+fn delegated_link_gives_one_node_a_second_name() {
+    // The defining property at the VFS seam: both names resolve to one node,
+    // the count rises, and nothing was copied.
+    let vfs = root_backed_rw_vfs();
+    let caps = CapabilitySet::empty();
+    let admin = cred(ADMIN_UID, ADMIN_GID, &caps);
+    let mut fs = RwMockFs::new();
+    vfs.create_via(&admin, &p("/file"), &mut fs)
+        .expect("create the node");
+    vfs.write_via(&admin, &p("/file"), &mut fs, 0, b"body")
+        .expect("write it");
+
+    vfs.link_via(&admin, &p("/file"), &p("/alias"), &mut fs, FinalLink::Keep)
+        .expect("add a second name");
+    let first = vfs
+        .stat_via(&admin, &p("/file"), &mut fs, FinalLink::Keep)
+        .expect("stat the first name");
+    let second = vfs
+        .stat_via(&admin, &p("/alias"), &mut fs, FinalLink::Keep)
+        .expect("stat the second name");
+    assert_eq!(first.node, second.node);
+    assert_eq!(second.nlink, 2);
+
+    // One node, so a write through either name is one file's bytes.
+    let mut buf = [0u8; 4];
+    let read = vfs
+        .read_via(&admin, &p("/alias"), &mut fs, 0, &mut buf)
+        .expect("read through the second name");
+    assert_eq!(&buf[..read], b"body");
+}
+
+#[test]
+fn delegated_link_refuses_a_directory_before_touching_the_new_parent() {
+    // The refusal is the VFS's, not each driver's: the tree staying a tree is
+    // what makes the resolver's physical `..` well-defined.
+    let vfs = root_backed_rw_vfs();
+    let caps = CapabilitySet::empty();
+    let admin = cred(ADMIN_UID, ADMIN_GID, &caps);
+    let mut fs = RwMockFs::new();
+    vfs.mkdir_via(&admin, &p("/dir"), &mut fs)
+        .expect("create a directory");
+    assert_eq!(
+        vfs.link_via(&admin, &p("/dir"), &p("/alias"), &mut fs, FinalLink::Keep),
+        Err(VfsError::IsADirectory)
+    );
+    assert_eq!(
+        vfs.stat_via(&admin, &p("/alias"), &mut fs, FinalLink::Keep)
+            .map(|i| i.size),
+        Err(VfsError::NotFound)
+    );
+}
+
+#[test]
+fn delegated_link_takes_its_posture_from_the_caller_for_the_existing_name() {
+    // `Keep` is POSIX `link()` (the link itself gains the name) and `Follow`
+    // is `linkat(AT_SYMLINK_FOLLOW)` (its target does). The *new* name is
+    // never followed under either.
+    let vfs = root_backed_rw_vfs();
+    let caps = CapabilitySet::empty();
+    let admin = cred(ADMIN_UID, ADMIN_GID, &caps);
+    let mut fs = RwMockFs::new();
+    vfs.create_via(&admin, &p("/target"), &mut fs)
+        .expect("create the target");
+    vfs.symlink_via(&admin, &p("/sym"), &mut fs, "/target")
+        .expect("create the symbolic link");
+
+    vfs.link_via(&admin, &p("/sym"), &p("/kept"), &mut fs, FinalLink::Keep)
+        .expect("name the link itself");
+    assert_eq!(
+        vfs.stat_via(&admin, &p("/kept"), &mut fs, FinalLink::Keep)
+            .expect("stat")
+            .kind,
+        NodeKind::Symlink
+    );
+
+    vfs.link_via(
+        &admin,
+        &p("/sym"),
+        &p("/followed"),
+        &mut fs,
+        FinalLink::Follow,
+    )
+    .expect("name what the link names");
+    assert_eq!(
+        vfs.stat_via(&admin, &p("/followed"), &mut fs, FinalLink::Keep)
+            .expect("stat")
+            .kind,
+        NodeKind::RegularFile
+    );
+}
+
+#[test]
+fn delegated_link_refuses_a_taken_name_and_a_missing_source() {
+    let vfs = root_backed_rw_vfs();
+    let caps = CapabilitySet::empty();
+    let admin = cred(ADMIN_UID, ADMIN_GID, &caps);
+    let mut fs = RwMockFs::new();
+    vfs.create_via(&admin, &p("/file"), &mut fs)
+        .expect("create the node");
+    vfs.create_via(&admin, &p("/taken"), &mut fs)
+        .expect("create the occupant");
+    assert_eq!(
+        vfs.link_via(&admin, &p("/file"), &p("/taken"), &mut fs, FinalLink::Keep),
+        Err(VfsError::AlreadyExists)
+    );
+    assert_eq!(
+        vfs.link_via(
+            &admin,
+            &p("/absent"),
+            &p("/alias"),
+            &mut fs,
+            FinalLink::Keep
+        ),
+        Err(VfsError::NotFound)
+    );
+    // Neither refusal raised the count or left a name behind.
+    assert_eq!(
+        vfs.stat_via(&admin, &p("/file"), &mut fs, FinalLink::Keep)
+            .expect("stat")
+            .nlink,
+        1
+    );
+}
+
+#[test]
+fn delegated_link_reports_a_format_that_holds_one_name_per_node() {
+    // The permanent format limit a caller can tell apart from a structural
+    // refusal, exactly as `symlink` reports one.
+    let vfs = root_backed_rw_vfs();
+    let caps = CapabilitySet::empty();
+    let admin = cred(ADMIN_UID, ADMIN_GID, &caps);
+    let mut fs = NoLinksFs::new();
+    // The fixture's one creatable child, so the existing name resolves and
+    // the refusal is the driver's own rather than a missing source.
+    vfs.create_via(&admin, &p("/file"), &mut fs)
+        .expect("the format creates ordinary files perfectly well");
+    assert_eq!(
+        vfs.link_via(&admin, &p("/file"), &p("/alias"), &mut fs, FinalLink::Keep),
+        Err(VfsError::NotSupported)
+    );
+}
+
+#[test]
+fn delegated_link_at_the_formats_name_ceiling_fails_closed() {
+    // The per-node count is a fixed on-disk bound, not a capacity to grow:
+    // one more name fails closed with its own errno rather than wrapping a
+    // count whose zero would free storage a live name still reaches.
+    let vfs = root_backed_rw_vfs();
+    let caps = CapabilitySet::empty();
+    let admin = cred(ADMIN_UID, ADMIN_GID, &caps);
+    let mut fs = RwMockFs::new();
+    vfs.create_via(&admin, &p("/file"), &mut fs)
+        .expect("create the node");
+    let node = fs.lookup(NodeId::from_raw(1), b"file").expect("the node");
+    fs.set_link_count(node, u32::MAX);
+
+    assert_eq!(
+        vfs.link_via(&admin, &p("/file"), &p("/alias"), &mut fs, FinalLink::Keep),
+        Err(VfsError::TooManyLinks)
+    );
+    assert_eq!(
+        vfs.stat_via(&admin, &p("/alias"), &mut fs, FinalLink::Keep)
+            .map(|i| i.size),
+        Err(VfsError::NotFound),
+        "nothing was created"
+    );
+}
+
+#[test]
+fn delegated_link_across_two_backed_mounts_is_cross_volume() {
+    // A hard link is a second directory entry for one inode, and a directory
+    // entry addresses an inode in its own backing — so the pair cannot span
+    // two volumes, and the refusal is the same dedicated `CrossVolume` a
+    // rename gives rather than a generic path error.
+    let vfs = root_backed_rw_vfs();
+    let caps = CapabilitySet::empty();
+    let admin = cred(ADMIN_UID, ADMIN_GID, &caps);
+    let flags = MountFlags::from_bits(0).expect("empty flags");
+    vfs.mounts_write()
+        .mount(p("/Storage/usb0"), flags, Some(backing_of(11)))
+        .expect("mount a second backed volume");
+    let mut fs = RwMockFs::new();
+    vfs.create_via(&admin, &p("/file"), &mut fs)
+        .expect("create a linkable node on the root volume");
+    assert_eq!(
+        vfs.link_via(
+            &admin,
+            &p("/file"),
+            &p("/Storage/usb0/alias"),
+            &mut fs,
+            FinalLink::Keep,
+        ),
+        Err(VfsError::CrossVolume)
+    );
+}
+
 // ---------------------------------------------------------------------
 // Per-inode (`FilesystemSecurity`) delegation tests.
 //
@@ -779,12 +982,14 @@ impl FilesystemRead for SecMockFs {
         match node.raw() {
             ROOT => Ok(NodeInfo {
                 kind: NodeKind::Directory,
+                nlink: 2,
                 size: 0,
                 allocated: 0,
                 times: NodeTimes::default(),
             }),
             SECRET_FILE => Ok(NodeInfo {
                 kind: NodeKind::RegularFile,
+                nlink: 1,
                 size: SECRET_BODY.len() as u64,
                 allocated: SECRET_BODY.len() as u64,
                 times: NodeTimes::default(),
@@ -834,6 +1039,7 @@ impl FilesystemRead for SecMockFs {
             node: NodeId::from_raw(SECRET_FILE),
             info: NodeInfo {
                 kind: NodeKind::RegularFile,
+                nlink: 1,
                 size: SECRET_BODY.len() as u64,
                 allocated: SECRET_BODY.len() as u64,
                 times: NodeTimes::default(),
@@ -1136,6 +1342,7 @@ impl FilesystemRead for StuckCursorFs {
         if node.raw() == ROOT {
             Ok(NodeInfo {
                 kind: NodeKind::Directory,
+                nlink: 2,
                 size: 0,
                 allocated: 0,
                 times: NodeTimes::default(),
@@ -1172,6 +1379,7 @@ impl FilesystemRead for StuckCursorFs {
             node: NodeId::from_raw(DOCS),
             info: NodeInfo {
                 kind: NodeKind::RegularFile,
+                nlink: 1,
                 size: 0,
                 allocated: 0,
                 times: NodeTimes::default(),
@@ -1463,12 +1671,14 @@ impl FilesystemRead for NoLinksFs {
         match node.raw() {
             ROOT => Ok(NodeInfo {
                 kind: NodeKind::Directory,
+                nlink: 2,
                 size: 0,
                 allocated: 0,
                 times: NodeTimes::default(),
             }),
             DOCS => Ok(NodeInfo {
                 kind: NodeKind::RegularFile,
+                nlink: 1,
                 size: 0,
                 allocated: 0,
                 times: NodeTimes::default(),

@@ -22,7 +22,7 @@ address, encoding bytes, length, mnemonic, operands, branch target).
   families. An encoding outside the tables renders honestly as
   `.inst 0x…` — never skipped, never guessed; SIMD/FP data processing is
   summarised that way with full operand decode staged
-  (`.junie/fstree-next-plan.md`).
+  (`plans/APPS.md`).
 - **wasm** — the structured opcode stream of a code-section body (the
   bytes `lib/binfmt`'s `code_bodies` walk frames): block nesting rendered
   by indentation, strict LEB128 immediates (overlong encodings fail

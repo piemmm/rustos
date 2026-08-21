@@ -101,13 +101,11 @@ work is shared and done once.
 
 ## 3. Work breakdown (stages)
 
-Each stage is a reviewable chunk. **At the end of each stage, write the
-continuation prompt for the next stage to `.junie/next-tpm-prompt.md`**
-(overwrite each time — git is the history, §13), recording what landed and the
-exact next work, in the style of the other `.junie/next-*-prompt.md` files. Do
-**not** create that file until the first stage actually lands; this plan only
-references it. Do not start a stage before its predecessor is green on the
-whole-project gate (§7).
+Each stage is a reviewable chunk. **At the end of each stage, replace this
+plan's status with what landed and the exact next work** (overwrite it each
+time — git is the history, §13), in the style of the sibling `plans/*.md`. Do
+not start a stage before its predecessor is green on the whole-project gate
+(§7).
 
 ### Stage T0 — RNG-entropy slice (smallest, highest value, no service yet)
 
@@ -349,7 +347,7 @@ output:
 
 Any failure found — new or pre-existing — is fixed or reverted before the stage
 is done (§2.5, §7). Update `PLAN.md` and this file's stage statuses as stages
-advance, and refresh `.junie/next-tpm-prompt.md` for the next chunk (overwrite;
+advance, and refresh this plan's status for the next chunk (overwrite;
 state only the current plan/state, not history, §13).
 
 ## 7. Charter cross-references

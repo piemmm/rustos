@@ -316,6 +316,56 @@ impl Vfs {
         DelegatedFs::new(fs, template).create_link(cred, &remainder, target)
     }
 
+    /// Add `link` as a second name for the node `existing` already names
+    /// under a driver-backed mount — a hard link — delegating to `fs`.
+    ///
+    /// Both paths must resolve under the **same** writable driver-backed
+    /// mount: a directory entry addresses an inode in its own backing, so a
+    /// pair that crosses mounts is [`VfsError::CrossVolume`]. `existing_link`
+    /// selects whether the existing name's final symbolic link is resolved
+    /// ([`FinalLink::Follow`], the `ln -L` posture) or the link itself gains
+    /// the second name ([`FinalLink::Keep`], POSIX `link()`); the new name is
+    /// never followed, and a directory is refused.
+    ///
+    /// # Errors
+    ///
+    /// * [`VfsError::CrossVolume`] if the two paths are on different mounts.
+    /// * [`VfsError::IsADirectory`] if `existing` names a directory.
+    /// * [`VfsError::TooManyLinks`] if the format's name count would
+    ///   overflow.
+    /// * [`VfsError::NotSupported`] if the format holds one name per node.
+    /// * Otherwise as for [`Vfs::create_via`].
+    pub fn link_via<F: FilesystemRead + FilesystemWrite + ?Sized>(
+        &self,
+        cred: &Credentials<'_>,
+        existing: &Path,
+        link: &Path,
+        fs: &mut F,
+        existing_link: FinalLink,
+    ) -> Result<(), VfsError> {
+        let (template, existing_rem, link_rem) =
+            self.delegate_pair_context(cred, existing, link)?;
+        DelegatedFs::new(fs, template).link(cred, &existing_rem, &link_rem, existing_link)
+    }
+
+    /// Per-inode counterpart of [`Vfs::link_via`].
+    ///
+    /// # Errors
+    ///
+    /// As [`Vfs::link_via`].
+    pub fn link_via_secured<F: FilesystemRead + FilesystemSecurity + FilesystemWrite + ?Sized>(
+        &self,
+        cred: &Credentials<'_>,
+        existing: &Path,
+        link: &Path,
+        fs: &mut F,
+        existing_link: FinalLink,
+    ) -> Result<(), VfsError> {
+        let (template, existing_rem, link_rem) =
+            self.delegate_pair_context(cred, existing, link)?;
+        DelegatedFs::new_secured(fs, template).link(cred, &existing_rem, &link_rem, existing_link)
+    }
+
     /// Create a directory under a driver-backed mount, delegating to `fs`.
     ///
     /// See [`Vfs::create_via`] for the resolution and permission model,
@@ -770,7 +820,7 @@ impl Vfs {
         dst: &Path,
         fs: &mut F,
     ) -> Result<(), VfsError> {
-        let (template, src_rem, dst_rem) = self.delegate_rename_context(cred, src, dst)?;
+        let (template, src_rem, dst_rem) = self.delegate_pair_context(cred, src, dst)?;
         DelegatedFs::new(fs, template).rename(cred, &src_rem, &dst_rem)
     }
 
@@ -786,49 +836,50 @@ impl Vfs {
         dst: &Path,
         fs: &mut F,
     ) -> Result<(), VfsError> {
-        let (template, src_rem, dst_rem) = self.delegate_rename_context(cred, src, dst)?;
+        let (template, src_rem, dst_rem) = self.delegate_pair_context(cred, src, dst)?;
         DelegatedFs::new_secured(fs, template).rename(cred, &src_rem, &dst_rem)
     }
 
-    /// Resolve the driver-backed mount covering *both* `src` and `dst` for a
-    /// rename, returning the permission template and the components of each
-    /// path below the shared mount point.
+    /// Resolve the driver-backed mount covering *both* `first` and `second`
+    /// for a two-path mutation, returning the permission template and the
+    /// components of each path below the shared mount point.
     ///
-    /// Both paths must be covered by the same writable driver-backed mount;
-    /// a rename that would cross mounts is refused with
-    /// [`VfsError::CrossVolume`] (it cannot preserve the node's identity
-    /// across two independent backings), the dedicated refusal a mover
-    /// falls back to copy-then-remove on.
-    fn delegate_rename_context(
+    /// Both paths must be covered by the same writable driver-backed mount.
+    /// The two callers need that for the same reason — a rename preserves
+    /// the node's identity and a hard link is a second directory entry for
+    /// one inode, and neither can span two independent backings — so a pair
+    /// that crosses mounts is refused with [`VfsError::CrossVolume`], the
+    /// dedicated refusal a mover falls back to copy-then-remove on.
+    fn delegate_pair_context(
         &self,
         cred: &Credentials<'_>,
-        src: &Path,
-        dst: &Path,
+        first: &Path,
+        second: &Path,
     ) -> Result<(Metadata, Vec<String>, Vec<String>), VfsError> {
         // Copy the mount facts out under a short read lock; nothing below
         // holds the guard.
         let (mount_depth, mount_path, subtree, mount_template) = {
             let mounts = self.mounts.read();
-            let src_mount = mounts.resolve(src);
-            let dst_mount = mounts.resolve(dst);
-            if src_mount.backing().is_none() || dst_mount.backing().is_none() {
+            let first_mount = mounts.resolve(first);
+            let second_mount = mounts.resolve(second);
+            if first_mount.backing().is_none() || second_mount.backing().is_none() {
                 return Err(VfsError::NotFound);
             }
-            if src_mount.is_read_only() || dst_mount.is_read_only() {
+            if first_mount.is_read_only() || second_mount.is_read_only() {
                 return Err(VfsError::ReadOnly);
             }
-            if src_mount.path() != dst_mount.path() {
+            if first_mount.path() != second_mount.path() {
                 return Err(VfsError::CrossVolume);
             }
             // A sub-mount roots its content at `backing_subtree` on the
-            // backing volume; both rename paths share the one covering
-            // mount (checked above), so both remainders are re-based by
-            // the same prefix so the driver resolves from its own root.
+            // backing volume; both paths share the one covering mount
+            // (checked above), so both remainders are re-based by the same
+            // prefix so the driver resolves from its own root.
             (
-                src_mount.path().depth(),
-                src_mount.path().clone(),
-                src_mount.backing_subtree().to_vec(),
-                src_mount.template().cloned(),
+                first_mount.path().depth(),
+                first_mount.path().clone(),
+                first_mount.backing_subtree().to_vec(),
+                first_mount.template().cloned(),
             )
         };
         let template = self.mount_point_template(cred, &mount_path, mount_template)?;
@@ -837,9 +888,7 @@ impl Vfs {
             rem.extend_from_slice(&path.components()[mount_depth..]);
             rem
         };
-        let src_rem = rebase(src);
-        let dst_rem = rebase(dst);
-        Ok((template, src_rem, dst_rem))
+        Ok((template, rebase(first), rebase(second)))
     }
 
     /// Resolve the driver-backed mount covering `path`, returning the

@@ -10,10 +10,10 @@
 
 use tairix_abi::seat::ReleaseSurface;
 use tairix_abi::{
-    spec_for, AbiType, CallRecvFlags, CapabilityId, Errno, IrqHandle, MapFlags, OpenFlags,
-    PowerAction, RandomFlags, SchedPriority, Signal, SignalIntakeOp, SyscallNumber, SyscallSpec,
-    UnlinkFlags, WaitFlags, ENCODED_TABLE, FS_ATTR_KEY_MAX, FS_ATTR_VALUE_MAX, FS_MODE_MASK,
-    PROC_ID_HEX_LEN, SYSCALL_MAX_ARGS,
+    spec_for, AbiType, CallRecvFlags, CapabilityId, Errno, IrqHandle, LinkFlags, MapFlags,
+    OpenFlags, PowerAction, RandomFlags, SchedPriority, Signal, SignalIntakeOp, SyscallNumber,
+    SyscallSpec, UnlinkFlags, WaitFlags, ENCODED_TABLE, FS_ATTR_KEY_MAX, FS_ATTR_VALUE_MAX,
+    FS_MODE_MASK, PROC_ID_HEX_LEN, SYSCALL_MAX_ARGS,
 };
 use tairix_crypto::{sha256, Sha256Digest};
 use tairix_kernel_sec::{ProcessId, TaskCapabilities, TaskId};
@@ -545,7 +545,7 @@ pub trait SyscallHandlers {
     }
 
     /// Change the calling process's working directory to the path at
-    /// `(path, path_len)` (`.junie/PREREQUISITES2.md` P2).
+    /// `(path, path_len)` (`plans/SHELL.md` P2).
     ///
     /// The dispatcher has already checked [`CapabilityId::FS_ACCESS`] and that
     /// `path` is a non-null `UserPtr`. The implementation copies the path in
@@ -565,7 +565,7 @@ pub trait SyscallHandlers {
     }
 
     /// Write the calling process's working directory — a normalised absolute
-    /// path — to the user buffer at `buf` (`.junie/PREREQUISITES2.md` P2).
+    /// path — to the user buffer at `buf` (`plans/SHELL.md` P2).
     ///
     /// The dispatcher has already validated that `buf` is a non-null
     /// `UserPtr`. The implementation copies the working directory out through
@@ -582,7 +582,7 @@ pub trait SyscallHandlers {
     }
 
     /// Resolve the resource reference at `(reference, reference_len)` and open
-    /// it to a new descriptor with `flags` (`.junie/PREREQUISITES2.md` P5).
+    /// it to a new descriptor with `flags` (`plans/SHELL.md` P5).
     ///
     /// The dispatcher has already validated that `reference` is a non-null
     /// `UserPtr` and rejected any illegal [`OpenFlags`]. The implementation
@@ -2298,6 +2298,32 @@ pub trait SyscallHandlers {
         Err(Errno::NotImplemented)
     }
 
+    /// Add the absolute path `link` (`link_len` bytes) as a second name for
+    /// the node the absolute path `existing` (`existing_len` bytes) already
+    /// names — a hard link.
+    ///
+    /// The dispatcher has already checked the caller holds
+    /// [`CapabilityId::FS_ACCESS`], that both pointers are non-null
+    /// `UserPtr`s, and rejected any reserved `flags` bit. An empty `flags`
+    /// follows neither final component, so the node that gains a name is the
+    /// one the caller spelled; [`LinkFlags::FOLLOW`] resolves the existing
+    /// name's final link instead. The new name is authorised as a create in
+    /// its own parent and confers no authority the caller did not already
+    /// hold.
+    ///
+    /// The default implementation fails closed with [`Errno::NotImplemented`].
+    fn fs_link(
+        &self,
+        _caller: &CallerContext<'_>,
+        _existing: u64,
+        _existing_len: usize,
+        _link: u64,
+        _link_len: usize,
+        _flags: LinkFlags,
+    ) -> SyscallResult {
+        Err(Errno::NotImplemented)
+    }
+
     /// Set the permission bits of the file or directory at the absolute
     /// path `path` (`path_len` bytes) to `mode` (the `chmod(2)` shape).
     ///
@@ -3361,6 +3387,16 @@ impl<'a, H: SyscallHandlers + ?Sized, S: Sink + ?Sized> Dispatcher<'a, H, S> {
                 let out_len = decode_len(args.0[3])?;
                 self.handlers
                     .fs_readlink(caller, args.0[0], path_len, args.0[2], out_len)
+            }
+            SyscallNumber::FS_LINK => {
+                // args[0]/args[2] are the non-null path `UserPtr`s
+                // (dispatcher-checked); args[4] is the `LinkFlags` bits,
+                // rejected here for any reserved bit.
+                let existing_len = decode_len(args.0[1])?;
+                let link_len = decode_len(args.0[3])?;
+                let flags = LinkFlags::from_bits(decode_u32(args.0[4]))?;
+                self.handlers
+                    .fs_link(caller, args.0[0], existing_len, args.0[2], link_len, flags)
             }
             SyscallNumber::FS_SET_MODE => {
                 // args[0] is the non-null path `UserPtr` (dispatcher-checked);
@@ -4780,6 +4816,19 @@ mod tests {
             _out_len: usize,
         ) -> SyscallResult {
             self.record("fs_readlink");
+            Ok(0)
+        }
+
+        fn fs_link(
+            &self,
+            _c: &CallerContext<'_>,
+            _existing: u64,
+            _existing_len: usize,
+            _link: u64,
+            _link_len: usize,
+            _flags: LinkFlags,
+        ) -> SyscallResult {
+            self.record("fs_link");
             Ok(0)
         }
 

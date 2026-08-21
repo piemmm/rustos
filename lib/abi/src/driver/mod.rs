@@ -388,6 +388,17 @@ pub enum DriverError {
     /// the filesystem layer fails this device's callers closed while every
     /// other device keeps running. Maps to [`Errno::DeviceOffline`].
     DeviceOffline = 17,
+    /// A node already carries as many names as the on-disk format can
+    /// record, so it cannot be given another.
+    ///
+    /// The per-inode name count is a bound the format fixes, never a
+    /// capacity to grow, so a
+    /// [`FilesystemWrite::link`](filesystem::FilesystemWrite::link) that
+    /// would overflow it fails closed here rather than wrapping or
+    /// saturating the stored count. Distinct from
+    /// [`NoSpace`](Self::NoSpace): the volume may be almost empty and
+    /// freeing blocks cannot help. Maps to [`Errno::TooManyLinks`].
+    TooManyLinks = 18,
 }
 
 impl DriverError {
@@ -426,6 +437,7 @@ impl DriverError {
             15 => Ok(Self::EndpointStalled),
             16 => Ok(Self::MediumError),
             17 => Ok(Self::DeviceOffline),
+            18 => Ok(Self::TooManyLinks),
             _ => Err(Self::OutOfRange),
         }
     }
@@ -451,6 +463,7 @@ impl DriverError {
             Self::EndpointStalled => Errno::EndpointStalled,
             Self::MediumError => Errno::MediumError,
             Self::DeviceOffline => Errno::DeviceOffline,
+            Self::TooManyLinks => Errno::TooManyLinks,
             // A faulted device is its own client-visible condition; a busy
             // one is retryable (`WouldBlock`); an unsupported operation
             // reads as not implemented.
@@ -1227,12 +1240,13 @@ mod tests {
             DriverError::EndpointStalled,
             DriverError::MediumError,
             DriverError::DeviceOffline,
+            DriverError::TooManyLinks,
         ];
         for err in all {
             assert_eq!(DriverError::from_i32(err.as_i32()), Ok(err));
         }
         assert_eq!(DriverError::from_i32(0), Err(DriverError::OutOfRange));
-        assert_eq!(DriverError::from_i32(18), Err(DriverError::OutOfRange));
+        assert_eq!(DriverError::from_i32(19), Err(DriverError::OutOfRange));
         assert_eq!(DriverError::from_i32(-1), Err(DriverError::OutOfRange));
     }
 

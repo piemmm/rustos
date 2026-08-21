@@ -1,10 +1,10 @@
 ## NAME
 
-ln — symbolische Verknüpfungen erstellen
+ln — Verknüpfungen zwischen Dateien erstellen
 
 ## SYNOPSIS
 
-`ln -s [-finvT] [-t dir] [--] target... [link_name]`
+`ln [-sLPdFfinvT] [-t dir] [--] target... [link_name]`
 
 ## DESCRIPTION
 
@@ -32,12 +32,15 @@ Der erste Fehlschlag beendet den Lauf vor jedem weiteren Ziel; bereits
 erstellte Verknüpfungen bleiben. `--` beendet die Optionsauswertung:
 jedes weitere Argument ist ein Operand.
 
-`-s` ist auf diesem System zwingend, das keine harten Verknüpfungen
-kennt: ohne `-s` gibt es nichts zu erstellen, und `ln` sagt das, statt
-eine symbolische Verknüpfung anzulegen, die ein anderes Objekt ist. Die
-nur für harte Verknüpfungen gedachten Optionen `-L`, `-P`, `-d` und
-`-F` werden aus demselben Grund abgewiesen. `-b`/`-S` werden
-abgewiesen, weil es keine Sicherungsmechanik gibt, und `-r`, weil ein
+Ohne `-s` ist die Verknüpfung **hart**: ein zweiter Verzeichniseintrag
+für die Inode des Ziels selbst. Beide Namen erreichen eine Datei, ein
+Schreibvorgang über den einen ist über den anderen sichtbar, und der
+Speicher der Datei bleibt bestehen, bis der letzte Name entfernt wird.
+Beide Namen müssen auf einem Datenträger liegen, und ein Verzeichnis
+erhält niemals einen zweiten Namen — dass der Dateibaum ein Baum
+bleibt, gibt `..` erst seine Bedeutung.
+
+`-b`/`-S` werden abgewiesen, weil es keine Sicherungsmechanik gibt, und `-r`, weil ein
 zum Verzeichnis der Verknüpfung relatives Ziel eine kanonisierende
 Auflösung braucht, die dieses System nicht bietet — eine lexikalische
 würde ein anderes Objekt benennen, sobald eine Verknüpfung im Spiel
@@ -45,8 +48,15 @@ ist.
 
 ## OPTIONS
 
-- `-s, --symbolic` — symbolische Verknüpfungen erstellen. Zwingend:
-  siehe oben.
+- `-s, --symbolic` — symbolische statt harte Verknüpfungen erstellen.
+- `-L, --logical` — das benennen, worauf ein symbolisches Ziel zeigt,
+  statt die Verknüpfung selbst hart zu verknüpfen.
+- `-P, --physical` — das Ziel genau wie geschrieben hart verknüpfen,
+  ohne einer abschließenden symbolischen Verknüpfung zu folgen.
+  Voreinstellung.
+- `-d, -F, --directory` — einen Verzeichnis-Operanden annehmen. Die
+  Verknüpfung wird dennoch abgewiesen: kein Benutzer darf einem
+  Verzeichnis einen zweiten Namen geben.
 - `-f, --force` — einen vorhandenen Verknüpfungsnamen entfernen und
   die Verknüpfung dann erstellen.
 - `-i, --interactive` — vor dem Entfernen eines vorhandenen

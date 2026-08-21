@@ -1,10 +1,10 @@
 ## NAME
 
-ln — criar ligações simbólicas
+ln — criar ligações entre ficheiros
 
 ## SYNOPSIS
 
-`ln -s [-finvT] [-t dir] [--] target... [link_name]`
+`ln [-sLPdFfinvT] [-t dir] [--] target... [link_name]`
 
 ## DESCRIPTION
 
@@ -31,10 +31,15 @@ A primeira falha pára a execução antes de qualquer alvo seguinte; as
 ligações já criadas mantêm-se. `--` termina a análise de opções: todo o
 argumento posterior é um operando.
 
-`-s` é obrigatório neste sistema, que não tem ligações fixas: sem ele
-`ln` não tem nada para criar, e di-lo em vez de criar uma ligação
-simbólica, que é um objecto diferente. As opções exclusivas das ligações
-fixas `-L`, `-P`, `-d` e `-F` são recusadas pela mesma razão. `-b`/`-S`
+Sem `-s` a ligação é **fixa**: uma segunda entrada de directório para o
+próprio inode do alvo. Ambos os nomes alcançam um só ficheiro, uma
+escrita por um é visível pelo outro, e o armazenamento do ficheiro
+subsiste até se remover o último nome. Ambos os nomes têm de estar num
+só volume, e a um directório nunca se dá um segundo nome — é por a
+árvore de ficheiros continuar a ser uma árvore que `..` designa o
+directório por onde realmente se passou.
+
+`-b`/`-S`
 são recusadas porque não existe maquinaria de cópias de segurança, e
 `-r` porque calcular um alvo relativo ao directório da ligação exige uma
 resolução canonizante que este sistema não oferece — uma lexical
@@ -42,7 +47,14 @@ nomearia outro objecto assim que houvesse uma ligação envolvida.
 
 ## OPTIONS
 
-- `-s, --symbolic` — criar ligações simbólicas. Obrigatório: ver acima.
+- `-s, --symbolic` — criar ligações simbólicas em vez de fixas.
+- `-L, --logical` — ligar fixamente aquilo que um alvo simbólico
+  nomeia, em vez da própria ligação.
+- `-P, --physical` — ligar fixamente o alvo tal como escrito, sem
+  seguir uma ligação simbólica final. Predefinição.
+- `-d, -F, --directory` — aceitar um operando directório. A ligação é
+  recusada na mesma: nenhum utilizador pode dar a um directório um
+  segundo nome.
 - `-f, --force` — remover um nome de ligação existente e criar então a
   ligação.
 - `-i, --interactive` — perguntar antes de remover um nome de ligação

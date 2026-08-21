@@ -1738,7 +1738,7 @@ fn an_open_that_follows_a_link_to_a_directory_still_refuses_byte_access() {
     // directory" rule applies to what the link names.
     assert_eq!(
         svc.open(TEST_UID, &caps, &link, OpenFlags::READ),
-        Err(Errno::OutOfRange)
+        Err(Errno::IsADirectory)
     );
     // And a directory open through the link succeeds, because it is one.
     svc.open(TEST_UID, &caps, &link, OpenFlags::DIRECTORY)

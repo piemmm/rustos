@@ -627,10 +627,10 @@ round-trips, each a fresh full path resolution on an uncached,
 authenticated volume; only operands are stat'ed individually. An
 unreachable operand is diagnosed on standard error and the walk
 continues (exit `1`), an unreadable directory contributing nothing
-rather than a guessed partial sum. TAIRiX has no hard links yet, so
-nothing can be counted twice and the GNU link-deduplication switches do
-not exist; `-x` awaits device identity (documented in the bundle's
-`Help/`). Manifest: `CAP_CONSOLE_WRITE` + `CAP_FS_ACCESS`. `cargo test
+rather than a guessed partial sum. `du` does not yet deduplicate a
+multiply-named file, so the GNU link-deduplication switches do not exist
+and a hard-linked file counts once per name it is reached through; `-x`
+awaits device identity (both documented in the bundle's `Help/`). Manifest: `CAP_CONSOLE_WRITE` + `CAP_FS_ACCESS`. `cargo test
 -p tairix-du` drives the parser (clusters, values, conflicts), the
 post-order accumulation, every option's rendering, the diagnosed-path
 paths, and the thirteen-locale `OPTIONS` pinning against an in-memory
@@ -1031,15 +1031,16 @@ second a directory to fill when it is one (or a link to one, unless `-n`)
 and the link's name otherwise; three or more require the last to be a
 directory; and `-t dir` makes every operand a target.
 
-**`-s` is required, because this ABI has no hard links.** There is no
-`fs_link` syscall and no driver call behind one, so `ln` without `-s` has
-nothing to create: it reports that permanent limit and creates nothing,
-rather than quietly making a symbolic link — a link and a second name for
-one inode are different objects, and substituting one for the other would
-be a different operation wearing the user's spelling. The hard-link-only
-switches (`-L`, `-P`, `-d`, `-F`) are refused for the same reason;
+**Both kinds of link are real.** Without `-s` the link is a hard one
+(`fs_link`): a second directory entry for the target's own inode, so both
+names reach one file and its storage survives until the last name goes.
+`-L` gives the second name to what a symbolic target *names*, `-P` — the
+default — links the target as spelled and follows no final link, and
+`-d`/`-F` accept a directory operand whose link is still refused
+`IsADirectory` (no principal may give a directory a second name). Two
+switches stay refused for reasons that are not about hard links:
 `-b`/`-S` because this workspace has no backup machinery (`cp`/`mv` omit
-them too); and `-r` because computing a target relative to the link's own
+them too), and `-r` because computing a target relative to the link's own
 directory needs a canonicalising resolution the ABI does not offer, and a
 *lexical* one would name a different node the moment a link were involved —
 the very collapse the resolver forbids. Every refusal is a usage error
@@ -1259,9 +1260,10 @@ The crate is `no_std` (with `alloc`), has no `unsafe`, and no
 `unwrap`/`expect`/`panic!` in production paths (`AGENTS.md` §2.9). Its
 dependencies are the audited `tairix-abi` vocabulary and the shared
 `tairix-help`/`tairix-vt` engines, so it never links a kernel or driver
-crate (`AGENTS.md` §17.4). The long format carries **no link-count
-column**: this filesystem contract has no hard links, so a count would be
-fabricated. Its manifest requests `CAP_CONSOLE_WRITE`
+crate (`AGENTS.md` §17.4). The long format's **link-count column** is the
+count the filesystem itself records, carried up from the driver and never
+derived; a format that keeps none answers `1`. Its manifest requests
+`CAP_CONSOLE_WRITE`
 plus `CAP_FS_ACCESS` — within the session baseline — and the secured VFS
 still authorises every path per-inode under the caller's attested
 identity.
@@ -1503,10 +1505,11 @@ from the SGR escape sequences, never shifting a column, the ordering, or
 the exit status. When colour is active every entry is stat'd (the kind
 and execute bit decide its colour), exactly as the GNU tool does.
 
-There is still **no link-count column** — the VFS has no hard links yet,
-so a fabricated count would be a lie; it will appear when links land
-(Stage E). `-i` prefixes each entry (short and long) with its stable
-node number, right-aligned.
+The **link-count column** sits between the mode string and the owner, as
+in the GNU tool, and reports the count the filesystem records — never one
+derived here. A row whose stat was refused renders it `?` like every
+other stat-derived cell. `-i` prefixes each entry (short and long) with
+its stable node number, right-aligned.
 
 Entries can be filtered out by name, following GNU's `file_ignored`
 order. `-B` / `--ignore-backups` drops names ending in `~` in every

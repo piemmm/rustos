@@ -304,7 +304,7 @@ at most one each). Wrappers: `tairix_rt::pointer_inject` /
 `tairix_sys_pointer_read`.
 
 `resource_open` (no. 67) is the resource-reference analogue of `fs_open`
-(`plans/ALIAS.md`, `.junie/PREREQUISITES2.md` P5). A resource reference
+(`plans/ALIAS.md`, `plans/SHELL.md` P5). A resource reference
 (`sys:random`, `sys:null`, …) names a typed *non-filesystem* resource — there
 is no `/dev`, `/proc`, or `/sys` — so the call copies the reference in, parses
 it with the single shared reference parser (`lib/resref`, never a second

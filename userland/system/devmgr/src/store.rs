@@ -1,5 +1,5 @@
 //! The reactive device manager's read-only `/System` driver-store client
-//! (Design D D2b-2c — `.junie/next-pi-prompt.md`).
+//! (Design D D2b-2c — `plans/PI.md`).
 //!
 //! Under Design D the one bootstrap-floor disk is owned for the life of the
 //! system by the never-returning kernel driver-store service, which keeps

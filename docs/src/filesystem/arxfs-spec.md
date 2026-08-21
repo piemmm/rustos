@@ -15,9 +15,11 @@ This spec is subordinate to `AGENTS.md`; conflicts are resolved in favour of
 This is the authoritative ARXFS implementation specification, delivered
 **in stages** (see §18 — Staged delivery & status). It lives in the book so it
 ships with the rest of the documentation; the companion user-facing page is
-`docs/src/filesystem/arxfs.md` and the live prompt for the next staged
-session is `.junie/next-arxfs-prompt.md`. All three are kept in step in the
-same change. There is exactly one `arxfs` driver and one on-disk version.
+`docs/src/filesystem/arxfs.md`, and the staged plans this spec is delivered
+against are `plans/ARXFS-METADATA.md`, `plans/ARXFS-SNAPSHOT.md`,
+`plans/ARXFS-FEC.md`, and `plans/SPARSE.md`. All of them are kept in step in
+the same change. There is exactly one `arxfs` driver and one on-disk
+version.
 
 ---
 
@@ -79,6 +81,7 @@ configuration.
 | Security | POSIX bits + ACLs + capability gates on every inode. |
 | Extended metadata | Every inode has a namespaced extended-attribute store (encrypted, mirrored, COW); foreign per-file metadata (Acorn/Amiga/Atari/Mac) is preserved across copies (§21). |
 | Symbolic links | A first-class inode kind whose target is stored as node data; a volume holding one declares the `symlinks` incompatible feature so a reader without it refuses the volume rather than misreading it (§20). |
+| Hard links | An inode may be named by several directory entries; `nlink` counts them and its storage is freed only at zero. A volume holding one declares the `hardlinks` incompatible feature, because a reader without it would free an inode a surviving name still reaches (§20.5). |
 | Feature declaration | The superblock carries an incompatible-feature word; a volume declaring a bit the reader does not implement is refused at mount, never mounted and misread (§4). |
 
 ---
@@ -831,8 +834,8 @@ in the §15 order. Each session:
    never broken (`AGENTS.md` §2.4 / §2.5);
 2. runs the **whole-project** definition of done (`AGENTS.md` §7) and fixes
    every failure before reporting complete;
-3. rewrites `.junie/next-arxfs-prompt.md` for the following stage and ticks
-   the status legend below.
+3. records what the following stage is in the owning `plans/ARXFS-*.md` and
+   ticks the status legend below.
 
 There is exactly one `arxfs` driver and one on-disk version: the
 copy-on-write driver in `drivers/filesystem/arxfs/` fully replaced the
@@ -1304,7 +1307,13 @@ zero range; only the surrounding metadata is protected, as for any inode.
 
 ---
 
-## 20. Symbolic links
+## 20. Links
+
+ARXFS carries both kinds of link: a **symbolic** one is its own object kind
+(§20.1–§20.4), and a **hard** one is a second directory entry for an inode
+that already has a name (§20.5). They are unrelated mechanisms — one stores a
+path, the other stores nothing at all — and each declares its own
+incompatible feature bit.
 
 Symbolic links are a first-class ARXFS object kind. A link is an inode of
 on-disk kind `3` (beside `1` for a directory and `2` for a regular file)
@@ -1401,6 +1410,49 @@ ARXFS stores the bytes; it never resolves them. The hop bound, the physical
 checks, and the `NO_FOLLOW` posture are all VFS policy and live in
 `plans/SYMLINKS.md`. The driver's whole contribution is a durable, integrity-
 checked place to keep a path.
+
+### 20.5 Hard links: the `nlink` lifecycle
+
+An inode may be named by more than one directory entry. `Inode::nlink` counts
+them, and the rule is uniform across kinds because `.` and `..` are real
+entries here: **an inode's count is how many directory entries name it**. A
+file or link with two names counts two; an empty directory counts two (its
+parent's entry and its own `.`) and gains one per child directory (each
+child's `..`).
+
+The count is the whole lifecycle. `link` raises it and writes the new entry
+in one transaction; `unlink` — and a rename that replaces a destination —
+lowers it and frees the inode's blocks and its inode slot **only at zero**.
+Freeing because *a* name went would destroy data the remaining names still
+reach, which is why the operation is one shared `drop_name` rather than a
+free open-coded at each site. A node's own contents do not change when a name
+is added or dropped, so only `changed` (ctime) moves, never `modified`.
+
+`u32` names per inode is a bound the format fixes, not a capacity to grow: a
+create that would overflow it fails closed with `TooManyLinks` rather than
+wrapping a count whose zero would free a live inode.
+
+A **directory** never gets a second name. The VFS refuses one before
+delegating, and the driver refuses one too, because it owns the invariant
+that its own tree stays a tree — which is what makes the VFS's physical `..`
+resolution well-defined.
+
+Because the count is per *inode*, everything that walks the inode tree rather
+than the name space is already correct for a multiply-named node and visits
+it once: the allocation-map rebuild marks its blocks once (so a remount's
+rebuilt free count matches the live one), `scrub` verifies them once, and
+`rescue` extracts them once. Only `check`, which walks names, has extra work:
+it counts the entries that name each inode and rewrites any stored count that
+disagrees — the hard-link analogue of widening an understated feature word,
+and the repair for a drift that would otherwise leak storage or free live
+data.
+
+A volume holding one declares `INCOMPAT_HARDLINKS` (§4), set by the first
+hard link in the transaction that adds it and rolled back with it. The safety
+argument is **stronger** than §20.3's: a reader that does not know kind `3`
+merely misreads a link inode, but a reader that does not know about a second
+name would run an unlink that frees the inode outright and destroy data the
+other name still reaches — silent corruption rather than a misread.
 
 ---
 

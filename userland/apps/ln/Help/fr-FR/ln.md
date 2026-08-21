@@ -1,10 +1,10 @@
 ## NAME
 
-ln — créer des liens symboliques
+ln — créer des liens entre fichiers
 
 ## SYNOPSIS
 
-`ln -s [-finvT] [-t dir] [--] target... [link_name]`
+`ln [-sLPdFfinvT] [-t dir] [--] target... [link_name]`
 
 ## DESCRIPTION
 
@@ -31,11 +31,15 @@ Le premier échec arrête l'exécution avant toute cible suivante ; les
 liens déjà créés subsistent. `--` termine l'analyse des options : tout
 argument ultérieur est un opérande.
 
-`-s` est obligatoire sur ce système, qui n'a pas de liens physiques :
-sans lui `ln` n'a rien à créer, et il le dit plutôt que de créer un
-lien symbolique, qui est un objet différent. Les options réservées aux
-liens physiques `-L`, `-P`, `-d` et `-F` sont refusées pour la même
-raison. `-b`/`-S` sont refusées car il n'existe aucun mécanisme de
+Sans `-s` le lien est **physique** : une seconde entrée de répertoire
+pour l'inode de la cible elle-même. Les deux noms atteignent un seul
+fichier, une écriture par l'un est visible par l'autre, et le stockage
+du fichier subsiste jusqu'au retrait du dernier nom. Les deux noms
+doivent être sur un même volume, et un répertoire ne reçoit jamais de
+second nom — c'est parce que l'arborescence reste un arbre que `..`
+désigne le répertoire par lequel on est réellement passé.
+
+`-b`/`-S` sont refusées car il n'existe aucun mécanisme de
 sauvegarde à invoquer, et `-r` car calculer une cible relative au
 répertoire du lien exige une résolution canonisante que ce système
 n'offre pas — une résolution lexicale nommerait un autre objet dès
@@ -43,8 +47,14 @@ qu'un lien serait impliqué.
 
 ## OPTIONS
 
-- `-s, --symbolic` — créer des liens symboliques. Obligatoire : voir
-  ci-dessus.
+- `-s, --symbolic` — créer des liens symboliques plutôt que physiques.
+- `-L, --logical` — lier physiquement ce que désigne la cible quand
+  celle-ci est un lien symbolique, plutôt que le lien lui-même.
+- `-P, --physical` — lier physiquement la cible telle qu'écrite, sans
+  suivre de lien symbolique final. Valeur par défaut.
+- `-d, -F, --directory` — accepter un opérande répertoire. Le lien
+  reste refusé : aucun utilisateur ne peut donner un second nom à un
+  répertoire.
 - `-f, --force` — retirer un nom de lien existant, puis créer le lien.
 - `-i, --interactive` — demander avant de retirer un nom de lien
   existant ; seule une réponse commençant par `y`/`Y` consent. La

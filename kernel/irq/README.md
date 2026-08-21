@@ -74,4 +74,4 @@ Host-side `cargo test -p tairix-kernel-irq` covers:
 The QEMU integration test that arms a real IRQ at the controller
 level lands in a follow-up session together with the x86_64 IDT
 external-vector / IO-APIC routing work (the per-arch trap glue is
-the prerequisite — see `.junie/next-session-prompt.md`).
+the prerequisite — see `plans/WIRING.md`).

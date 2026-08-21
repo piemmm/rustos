@@ -29,7 +29,7 @@
 //! log their outcome through `lib/log` with stable event IDs in the reserved
 //! `arxfs` `12000..13000` range (`crate::scrub`).
 
-use alloc::collections::BTreeSet;
+use alloc::collections::{BTreeMap, BTreeSet};
 use alloc::vec::Vec;
 
 use tairix_abi::driver::block::Block;
@@ -111,6 +111,14 @@ pub struct CheckReport {
     /// Widening the declared set is always safe: it can only make a reader
     /// that lacks the feature refuse the volume, never misread it.
     pub features_declared: u32,
+    /// Inodes whose stored name count disagreed with the number of directory
+    /// entries that actually name them, and which `check` rewrote to the
+    /// counted truth.
+    ///
+    /// The count decides when an unlink frees an inode's blocks, so a stored
+    /// value above the truth leaks storage no name reaches and one below it
+    /// frees storage a live name still does. Both are repaired by counting.
+    pub link_counts_corrected: u64,
 }
 
 impl CheckReport {
@@ -122,6 +130,7 @@ impl CheckReport {
             || self.verification.divergences_corrected != 0
             || self.orphans_reclaimed != 0
             || self.features_declared != 0
+            || self.link_counts_corrected != 0
     }
 
     /// Emit the closing check event to `sink` (log
@@ -317,6 +326,10 @@ impl<B: Block> ARXFS<B> {
         // refusing.
         report.features_declared = self.check_declared_features()?;
 
+        // The stored name counts must match the names that exist, or an
+        // unlink frees storage too early or never at all.
+        report.link_counts_corrected = self.check_link_counts()?;
+
         let v = &report.verification;
         let divergences = v.refcount_divergences + v.reverse_ref_divergences;
         report.unrecoverable_findings = v.metadata_unrepairable
@@ -330,7 +343,10 @@ impl<B: Block> ARXFS<B> {
 
         Ok((
             report,
-            refcounts_corrected || reclaimed || report.features_declared != 0,
+            refcounts_corrected
+                || reclaimed
+                || report.features_declared != 0
+                || report.link_counts_corrected != 0,
         ))
     }
 
@@ -360,6 +376,57 @@ impl<B: Block> ARXFS<B> {
             }
         }
         Ok(0)
+    }
+
+    /// Reconcile every inode's stored name count against the directory
+    /// entries that really name it, rewriting the ones that disagree and
+    /// returning how many were corrected.
+    ///
+    /// The invariant is uniform across kinds, because `.` and `..` are real
+    /// entries here: an inode's count is simply **how many directory entries
+    /// name it**. A file or symbolic link with two names counts two; an empty
+    /// directory counts two (its parent's entry and its own `.`) and gains
+    /// one per child directory (each child's `..`); the root counts its own
+    /// `.` and `..` plus one per child directory.
+    ///
+    /// This is the hard-link analogue of the feature-word widening above.
+    /// The count decides when an unlink frees an inode's blocks, so a stored
+    /// value that has drifted either leaks storage nothing reaches or frees
+    /// storage a live name still does — the second being the corruption the
+    /// feature bit exists to keep an unaware reader from causing.
+    fn check_link_counts(&mut self) -> Result<u64, DriverError> {
+        let mut counted: BTreeMap<u32, u32> = BTreeMap::new();
+        for (_, value) in self.btree_collect_entries(self.inode_tree_root, inode_spec())? {
+            let Some(inode) = Inode::decode(&value)? else {
+                continue;
+            };
+            if !inode.is_dir() {
+                continue;
+            }
+            for (child, _) in self.dir_entries(&inode)? {
+                let slot = counted.entry(child).or_insert(0);
+                *slot = slot.saturating_add(1);
+            }
+        }
+        let mut corrected = 0;
+        for (ino_key, value) in self.btree_collect_entries(self.inode_tree_root, inode_spec())? {
+            let Some(mut inode) = Inode::decode(&value)? else {
+                continue;
+            };
+            let ino = u32::try_from(ino_key).map_err(|_| DriverError::DeviceFault)?;
+            // An inode no entry names is an orphan, already reclaimed above;
+            // rewriting its count here would only fight that repair.
+            let Some(&names) = counted.get(&ino) else {
+                continue;
+            };
+            if inode.nlink == names {
+                continue;
+            }
+            inode.nlink = names;
+            self.write_inode(ino, &inode)?;
+            corrected += 1;
+        }
+        Ok(corrected)
     }
 
     /// Collect a directory's `(child inode, is "." or "..")` entries, reusing

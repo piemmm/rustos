@@ -206,7 +206,7 @@ seat manager both build on it, never re-deriving the state machine.
 Each stage is a reviewable chunk that ships code + tests + docs and is not
 started before its predecessor is green on the whole-project gate (§7). At the
 end of each stage, write the continuation prompt for the next to
-`.junie/next-display-prompt.md` (overwrite each time), recording what landed
+this plan (overwrite each time), recording what landed
 and the exact next work, in the style of the other plans' continuation
 prompts. Plan files state current state, not history (`AGENTS.md` §13).
 
@@ -494,7 +494,7 @@ ring is still *client-allocated* (`shm_create` + `shm_grant` up to the
 service). The approved next tranche inverts this so the **display driver**
 allocates/owns/exports the ring (VRAM when the card has its own memory, else a
 system chunked region) and the compositor imports it — the DRM/dma-buf shape.
-Design + slices are staged in `.junie/next-desktop-prompt.md` (a new IPC
+Design + slices are staged in `plans/FIX-DISPLAY-ACCELERATION.md` (a new IPC
 "peer-grant" primitive, VRAM sub-window export, and the `display_ipc` protocol
 inversion).
 

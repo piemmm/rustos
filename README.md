@@ -111,6 +111,7 @@ Legend: `✓` provided (optional features count) · `◐` partial ·
 | Snapshots | — | — | ✓ | — | ✓ |
 | Sparse files (holes) | ✓ | ✓ | ✓ | ✓ | ✓ |
 | Symbolic links | ✓ target as node data | ✓ fast + slow | ✓ | ✓ | ✓ |
+| Hard links | ✓ `nlink`, freed at zero | ✓ count honoured, authors none | ✓ | ✓ | ✓ |
 | Crash consistency | ✓ COW | ✓ journal | ✓ COW | ✓ journal | ✓ COW |
 | Multi-device / RAID | — | — | ✓ | — | ✓ |
 | Online scrub | ✓ verify + metadata repair | — | ✓ | ✓ | ✓ |

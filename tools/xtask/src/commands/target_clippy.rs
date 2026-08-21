@@ -47,7 +47,7 @@
 //!
 //! The enrolled QEMU guests under `tests/integration/` are test support, not
 //! product, and they are **not** linted by this stage. That is a known gap,
-//! staged in `.junie/next-ai-codereview.md` with the commands and counts: the
+//! staged in `plans/CODEVERIFY.md` with the commands and counts: the
 //! guests are near-identical triplicates per architecture, so cleaning them
 //! means first hoisting their shared logic into `tests/integration/harness`.
 //!

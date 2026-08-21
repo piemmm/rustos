@@ -726,6 +726,35 @@ where
         op(vfs, &mut fs, &cred, &path).map_err(VfsError::to_errno)
     }
 
+    /// As [`Self::with_secured`], for an operation naming **two** paths.
+    ///
+    /// Both are resolved under one driver lock rather than two: a two-path
+    /// mutation requires both to lie under the same mount (the delegating
+    /// VFS call refuses a pair that crosses one), so the first path's
+    /// covering-mount driver serves the whole operation.
+    fn with_secured_pair<R>(
+        &self,
+        uid: u32,
+        caps: &dyn CapabilityQuery,
+        first: &str,
+        second: &str,
+        op: impl FnOnce(&Vfs, &mut F, &Credentials<'_>, &Path, &Path) -> Result<R, VfsError>,
+    ) -> Result<R, Errno> {
+        let vfs = self.mount.vfs()?;
+        let (gid, supplementary_gids) = self.identity.resolve_groups(uid)?;
+        let first = Path::parse(first).map_err(VfsError::to_errno)?;
+        let second = Path::parse(second).map_err(VfsError::to_errno)?;
+        let driver = self.resolve_driver(vfs, &first)?;
+        let cred = Credentials {
+            uid: UserId(uid),
+            gid,
+            supplementary_gids: &supplementary_gids,
+            caps,
+        };
+        let mut fs = driver.lock();
+        op(vfs, &mut fs, &cred, &first, &second).map_err(VfsError::to_errno)
+    }
+
     /// The driver backing the mount covering `path`, locked by the caller.
     ///
     /// Resolves the covering mount in the shared VFS, reads its
@@ -1013,6 +1042,7 @@ where
                 .map_or([0u8; 16], |handle| self.mount.volume_id(handle));
             Ok(FileStat {
                 kind: file_kind(info.kind),
+                nlink: info.nlink,
                 size: info.size,
                 allocated: info.allocated,
                 mode: u32::from(info.meta.mode.bits()),
@@ -1111,38 +1141,36 @@ where
         src: &str,
         dst: &str,
     ) -> Result<(), Errno> {
-        // Rename names two paths, so it resolves both under one lock rather
-        // than through the single-path `with_secured`. Identity is attested
-        // exactly as elsewhere; both paths must lie under the same mount
-        // (`rename_via_secured` refuses a cross-mount move), so the source
-        // path's covering-mount driver serves the whole operation.
-        let vfs = self.mount.vfs()?;
-        // Keep the caller's original path strings for the post-op notify
-        // (the parsed `Path`s below shadow the `&str` parameters).
-        let (src_str, dst_str) = (src, dst);
-        // The same owned-snapshot resolution as `with_secured`: no table
-        // borrow is held across the operation.
-        let (gid, supplementary_gids) = self.identity.resolve_groups(uid)?;
-        let src = Path::parse(src).map_err(VfsError::to_errno)?;
-        let dst = Path::parse(dst).map_err(VfsError::to_errno)?;
-        let driver = self.resolve_driver(vfs, &src)?;
-        let cred = Credentials {
-            uid: UserId(uid),
-            gid,
-            supplementary_gids: &supplementary_gids,
-            caps,
-        };
-        {
-            let mut fs = driver.lock();
-            vfs.rename_via_secured(&cred, &src, &dst, &mut *fs)
-                .map_err(VfsError::to_errno)?;
-        }
+        self.with_secured_pair(uid, caps, src, dst, |vfs, fs, cred, src, dst| {
+            vfs.rename_via_secured(cred, src, dst, fs)
+        })?;
         // A rename removes a name from the source directory and adds one to
-        // the destination directory; both entry sets changed. (`src`/`dst`
-        // are the caller's original path strings, which is what the notify
-        // helpers re-resolve.)
-        self.note_parent(uid, caps, src_str);
-        self.note_parent(uid, caps, dst_str);
+        // the destination directory; both entry sets changed.
+        self.note_parent(uid, caps, src);
+        self.note_parent(uid, caps, dst);
+        Ok(())
+    }
+
+    fn link(
+        &self,
+        uid: u32,
+        caps: &dyn CapabilityQuery,
+        existing: &str,
+        link: &str,
+        existing_link: FinalLink,
+    ) -> Result<(), Errno> {
+        self.with_secured_pair(
+            uid,
+            caps,
+            existing,
+            link,
+            |vfs, fs, cred, existing, link| {
+                vfs.link_via_secured(cred, existing, link, fs, existing_link)
+            },
+        )?;
+        // Only the new name's directory gained an entry; the existing name
+        // is untouched, so its parent's entry set did not change.
+        self.note_parent(uid, caps, link);
         Ok(())
     }
 

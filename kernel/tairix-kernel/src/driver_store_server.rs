@@ -1,5 +1,5 @@
 //! The kernel-resident `/System` driver-store IPC **server**
-//! (Design D D2b-2c — `.junie/next-pi-prompt.md`).
+//! (Design D D2b-2c — `plans/PI.md`).
 //!
 //! The disk-owning driver-store kthread (`crate::shared_block::DriverStoreService`)
 //! keeps the read-only signed-bundle `/System` volume mounted for the life

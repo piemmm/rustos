@@ -970,7 +970,7 @@ frames and pure noise to `tairix_compress::decompress`, asserting it never
 panics and fails closed.
 
 The `pjdfstest`-equivalent POSIX suite remains tracked in
-`.junie/next-session-prompt.md`.
+`plans/WIRING.md`.
 
 ## Extended file metadata
 

@@ -28,9 +28,9 @@ Un chemin illisible est signalé sur la sortie d'erreur standard et le
 parcours continue avec le reste ; un répertoire illisible ne
 contribue rien plutôt qu'une somme partielle devinée.
 
-TAIRiX n'a pas encore de liens physiques, donc aucune entrée ne peut
-être comptée deux fois et les options GNU de déduplication de liens
-n'existent pas ; `-x` (un seul système de fichiers) n'est pas encore
+`du` ne déduplique pas encore un fichier portant plusieurs noms : celui
+atteint par deux noms est compté une fois par nom, et les options GNU de
+déduplication de liens n'existent pas ; `-x` (un seul système de fichiers) n'est pas encore
 disponible ; les variables d'environnement de la famille
 `DU_BLOCK_SIZE` ne sont pas lues — l'échelle est choisie par les
 options seules.

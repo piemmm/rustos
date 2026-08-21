@@ -68,6 +68,7 @@ mod program {
             let stat = file.stat().map_err(Errno::from_syscall)?;
             Ok(Metadata {
                 kind: stat.kind,
+                nlink: stat.nlink,
                 mode: stat.mode,
                 size: stat.size,
                 allocated: stat.allocated,

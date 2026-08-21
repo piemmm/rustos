@@ -6,6 +6,7 @@ use alloc::vec::Vec;
 
 use tairix_abi::{Errno, FileKind};
 use tairix_help::{own_short_help, HelpSource};
+use tairix_path::join;
 use tairix_util::size::{blocks_ceil, format_human, format_u128, SizeScale, SIZE_TEXT_MAX};
 
 use crate::command::{Command, Options};
@@ -244,15 +245,6 @@ impl Reporter<'_> {
         self.clean = false;
         let line = format!("du: cannot access '{path}': {errno}\n");
         self.err.write_all(line.as_bytes()).map_err(DuError::Output)
-    }
-}
-
-/// Join a directory path and an entry name without doubling separators.
-fn join(dir: &str, name: &str) -> String {
-    if dir.ends_with('/') {
-        format!("{dir}{name}")
-    } else {
-        format!("{dir}/{name}")
     }
 }
 

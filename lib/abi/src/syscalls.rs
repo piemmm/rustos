@@ -2808,6 +2808,29 @@ pub const SYSCALLS: &[SyscallSpec] = &[
         // A pure read, high-volume like fs_stat; not audited per call.
         audit: false,
     },
+    SyscallSpec {
+        number: SyscallNumber::FS_LINK,
+        name: "fs_link",
+        arg_count: 5,
+        args: [
+            // the existing name ptr/len, then the new name's own path.
+            AbiType::UserPtr,
+            AbiType::Len,
+            AbiType::UserPtr,
+            AbiType::Len,
+            // The validated `LinkFlags` word: empty is POSIX `link()`,
+            // following neither final component; `FOLLOW` is
+            // `linkat(AT_SYMLINK_FOLLOW)`, resolving the existing name's
+            // final link. A reserved bit fails closed at dispatch.
+            AbiType::U32,
+            AbiType::Unit,
+        ],
+        ret: AbiType::Errno,
+        required_capability: Some(CapabilityId::FS_ACCESS),
+        // Adds a name that changes what a later resolution reaches, and
+        // changes when the node's storage is freed; audited like fs_symlink.
+        audit: true,
+    },
 ];
 
 /// Length, in bytes, of the canonical encoding stored in

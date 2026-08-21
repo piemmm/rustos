@@ -19,7 +19,7 @@ userspace resolver is landed for the selectors the shipped queries back
 `stats:mem/{used,available,total}`); the kernel resolver fails `info:`/`stats:`
 closed. The remaining breadth (more sysinfo-backed selectors; the device
 namespaces via the device manager) and the richer resolver error model (§19)
-are added in place as their consumers appear. See `.junie/PREREQUISITES2.md`
+are added in place as their consumers appear. See `plans/SHELL.md`
 P5.
 
 This document specifies TAIRiX resource aliases and selector namespaces. It is

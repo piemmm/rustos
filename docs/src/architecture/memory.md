@@ -1828,7 +1828,7 @@ way to tell a page the task still uses from one it has abandoned, so
 compression relieves pressure instead of evicting a hot page straight
 back into a fault. That is a page-replacement referenced-bit facility,
 and its architecture-neutral core lands here (staged in
-`.junie/swapswap-progress.md`).
+`plans/SWAPSWAPSWAP.md`).
 
 - **The HAL primitive.** `tairix_arch_api::mmu::AddressSpace` gains
   `test_and_clear_accessed(vaddr)` — read *and clear* the leaf's

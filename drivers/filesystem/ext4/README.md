@@ -244,7 +244,7 @@ the reference crc matches `mke2fs`) and after a
 `create`/`write`/`truncate`/`mkdir`/`remove` cycle (proving the driver
 wrote correct checksums). The mutated images also pass `e2fsck -f`
 cleanly. A `pjdfstest`-equivalent POSIX suite is tracked in
-`.junie/next-session-prompt.md`.
+`plans/WIRING.md`.
 
 ## Public surface
 

@@ -51,9 +51,9 @@ use tairix_abi::{
     AbiType, AppInfoHeader, BufferClass, BundleEntry, CallRecvFlags, CapabilityId, DriverBindKey,
     DriverError, DriverHandle, DriverKind, DriverManifest, DriverRegisterReply, Duration64, Errno,
     HwDeviceClass, HwMatchKey, HwMatchKind, HwNode, HwResource, HwResourceKind, IpcMessageHeader,
-    KernelMemoryStats, KeyInput, LibraryCategory, LibraryScope, LimitKind, LoadAverage, LoadHeader,
-    ManifestHeader, MapFlags, MountAvailability, MountListRequest, MountRecord, NamedKeyCode,
-    NeededLibrary, OpenFlags, PointerButtonCode, PointerInput, PortName, PowerAction,
+    KernelMemoryStats, KeyInput, LibraryCategory, LibraryScope, LimitKind, LinkFlags, LoadAverage,
+    LoadHeader, ManifestHeader, MapFlags, MountAvailability, MountListRequest, MountRecord,
+    NamedKeyCode, NeededLibrary, OpenFlags, PointerButtonCode, PointerInput, PortName, PowerAction,
     ProcessListRequest, ProcessRecord, ProcessStartHeader, ProcessState, RandomFlags,
     ResourceLimit, ResourceLimitRecord, RxePermission, SchedPriority, Segment, Severity, Signal,
     SignalIntakeOp, StdInfoKind, StringSlot, SysinfoQueryId, SysinfoRequestHeader, SystemIdentity,
@@ -141,6 +141,8 @@ const ERRNO_NAMES: &[(&str, Errno)] = &[
     ("DEVICE_OFFLINE", Errno::DeviceOffline),
     ("BUSY", Errno::Busy),
     ("LINK_LOOP", Errno::LinkLoop),
+    ("IS_A_DIRECTORY", Errno::IsADirectory),
+    ("TOO_MANY_LINKS", Errno::TooManyLinks),
 ];
 
 /// One generated C header: its file name (relative to the include directory)
@@ -2542,6 +2544,21 @@ fn emit_fs_contract(out: &mut String) {
     out.push('\n');
 
     out.push_str(
+        "/* fs_link() flag bits (uint32_t). Every undefined bit is reserved and rejected\n\
+         * with TAIRIX_E_OUT_OF_RANGE. 0 is POSIX link(): neither operand's final\n\
+         * component is followed, so the node that gains a name is the one spelled. With\n\
+         * the FOLLOW bit the existing name's final symbolic link is resolved and the new\n\
+         * name is given to what it names (the linkat(AT_SYMLINK_FOLLOW) posture). The new\n\
+         * name is never followed under either. */\n",
+    );
+    let _ = writeln!(
+        out,
+        "#define TAIRIX_LINK_FLAG_FOLLOW {:#x}u",
+        LinkFlags::FOLLOW.bits()
+    );
+    out.push('\n');
+
+    out.push_str(
         "/* fs_set_mode() permission-bit mask (the `mode` argument, uint32_t): the\n\
          * owner/group/other rwx triads plus the setuid/setgid/sticky bits. A mode\n\
          * carrying any higher bit (a file-type bit, say) is rejected with\n\
@@ -2990,6 +3007,46 @@ mod tests {
         );
     }
 
+    /// Every filesystem flag word the header publishes is read from
+    /// `lib/abi` rather than re-typed, and each call's prototype carries its
+    /// `uint32_t` flags slot — so a widened flag set cannot reach C as a
+    /// stale constant or a dropped argument.
+    #[test]
+    fn syscall_header_pins_every_filesystem_flag_word() {
+        let h = body("tairix_syscall.h");
+        assert!(
+            h.contains(&format!(
+                "#define TAIRIX_OPEN_FLAG_EXCLUSIVE {:#x}u",
+                OpenFlags::EXCLUSIVE.bits()
+            )),
+            "fs_open flag bits: {h}"
+        );
+        assert!(
+            h.contains(&format!(
+                "#define TAIRIX_UNLINK_FLAG_DIRECTORY {:#x}u",
+                UnlinkFlags::DIRECTORY.bits()
+            )),
+            "fs_unlink directory flag bit: {h}"
+        );
+        assert!(
+            h.contains("int32_t tairix_sys_fs_unlink(void * a0, uintptr_t a1, uint32_t a2);"),
+            "fs_unlink prototype carries the flags argument: {h}"
+        );
+        assert!(
+            h.contains(&format!(
+                "#define TAIRIX_LINK_FLAG_FOLLOW {:#x}u",
+                LinkFlags::FOLLOW.bits()
+            )),
+            "fs_link follow flag bit: {h}"
+        );
+        assert!(
+            h.contains(
+                "int32_t tairix_sys_fs_link(void * a0, uintptr_t a1, void * a2, uintptr_t a3, uint32_t a4);"
+            ),
+            "fs_link prototype carries the flags argument: {h}"
+        );
+    }
+
     #[test]
     fn syscall_header_has_numbers_and_prototypes() {
         let h = body("tairix_syscall.h");
@@ -3017,27 +3074,6 @@ mod tests {
         assert!(
             h.contains("uint64_t tairix_sys_wait(int32_t a0, void * a1, uint32_t a2);"),
             "wait prototype carries the flags argument: {h}"
-        );
-        // The fs_open()/fs_unlink() flag bits are read from lib/abi, never
-        // re-typed, and the fs_unlink prototype carries its uint32_t flags
-        // argument.
-        assert!(
-            h.contains(&format!(
-                "#define TAIRIX_OPEN_FLAG_EXCLUSIVE {:#x}u",
-                OpenFlags::EXCLUSIVE.bits()
-            )),
-            "fs_open flag bits: {h}"
-        );
-        assert!(
-            h.contains(&format!(
-                "#define TAIRIX_UNLINK_FLAG_DIRECTORY {:#x}u",
-                UnlinkFlags::DIRECTORY.bits()
-            )),
-            "fs_unlink directory flag bit: {h}"
-        );
-        assert!(
-            h.contains("int32_t tairix_sys_fs_unlink(void * a0, uintptr_t a1, uint32_t a2);"),
-            "fs_unlink prototype carries the flags argument: {h}"
         );
         // The fs_set_mode() permission mask is read from lib/abi, never
         // re-typed, and the prototype carries its uint32_t mode argument.

@@ -6,6 +6,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use tairix_help::{own_short_help, HelpSource};
+use tairix_path::join;
 
 use crate::command::{Command, Mode, Options, Verbosity};
 use crate::error::ChmodError;
@@ -192,18 +193,6 @@ fn read_children(path: &str, fs: &dyn FileSystem) -> Result<Vec<Entry>, ChmodErr
         entries.push(entry);
     }
     Ok(entries)
-}
-
-/// Join a directory `parent` and a child `name` into a path, inserting a
-/// single `/` unless `parent` already ends with one.
-fn join(parent: &str, name: &str) -> String {
-    let mut path = String::with_capacity(parent.len() + 1 + name.len());
-    path.push_str(parent);
-    if !parent.ends_with('/') {
-        path.push('/');
-    }
-    path.push_str(name);
-    path
 }
 
 #[cfg(test)]

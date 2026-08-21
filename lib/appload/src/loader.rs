@@ -15,6 +15,7 @@ use tairix_abi::{
 };
 use tairix_caps::CapabilitySet;
 use tairix_log::{log, Event, EventId, Field, Level, Sink};
+use tairix_path::join;
 
 use crate::bundle::{BundleStore, Clock, LoadedApp, ResolvedLibrary, Verifier};
 use crate::error::AppError;
@@ -412,17 +413,6 @@ fn ct_ne(a: &[u8; 32], b: &[u8; 32]) -> bool {
         .zip(b.iter())
         .fold(0u8, |acc, (x, y)| acc | (x ^ y))
         != 0
-}
-
-/// Join a bundle root and a child entry into an absolute path, tolerating a
-/// trailing `/` on the root.
-fn join(bundle: &str, child: &str) -> String {
-    let base = bundle.strip_suffix('/').unwrap_or(bundle);
-    let mut out = String::with_capacity(base.len() + 1 + child.len());
-    out.push_str(base);
-    out.push('/');
-    out.push_str(child);
-    out
 }
 
 fn event_message(id: EventId) -> &'static str {

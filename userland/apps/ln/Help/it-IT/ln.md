@@ -1,10 +1,10 @@
 ## NAME
 
-ln — creare collegamenti simbolici
+ln — creare collegamenti fra file
 
 ## SYNOPSIS
 
-`ln -s [-finvT] [-t dir] [--] target... [link_name]`
+`ln [-sLPdFfinvT] [-t dir] [--] target... [link_name]`
 
 ## DESCRIPTION
 
@@ -32,11 +32,15 @@ Il primo errore ferma l'esecuzione prima di ogni destinazione
 successiva; i collegamenti già creati restano. `--` termina l'analisi
 delle opzioni: ogni argomento successivo è un operando.
 
-`-s` è obbligatorio su questo sistema, che non ha collegamenti fisici:
-senza di esso `ln` non ha nulla da creare, e lo dichiara invece di
-creare un collegamento simbolico, che è un oggetto diverso. Le opzioni
-riservate ai collegamenti fisici `-L`, `-P`, `-d` e `-F` sono rifiutate
-per la stessa ragione. `-b`/`-S` sono rifiutate perché non esiste alcun
+Senza `-s` il collegamento è **fisico**: una seconda voce di directory
+per l'inode della destinazione stessa. Entrambi i nomi raggiungono un
+solo file, una scrittura tramite l'uno è visibile tramite l'altro, e lo
+spazio del file resta finché non si rimuove l'ultimo nome. Entrambi i
+nomi devono stare su un solo volume, e a una directory non si dà mai un
+secondo nome: è perché l'albero dei file resta un albero che `..`
+indica la directory da cui si è realmente passati.
+
+`-b`/`-S` sono rifiutate perché non esiste alcun
 meccanismo di copia di sicurezza, e `-r` perché calcolare una
 destinazione relativa alla directory del collegamento richiede una
 risoluzione canonizzante che questo sistema non offre — una lessicale
@@ -44,8 +48,15 @@ nominerebbe un altro oggetto appena vi fosse un collegamento.
 
 ## OPTIONS
 
-- `-s, --symbolic` — creare collegamenti simbolici. Obbligatorio: vedi
-  sopra.
+- `-s, --symbolic` — creare collegamenti simbolici anziché fisici.
+- `-L, --logical` — collegare fisicamente ciò che una destinazione
+  simbolica nomina, anziché il collegamento stesso.
+- `-P, --physical` — collegare fisicamente la destinazione così come
+  è scritta, senza seguire un collegamento simbolico finale.
+  Predefinito.
+- `-d, -F, --directory` — accettare un operando directory. Il
+  collegamento resta rifiutato: nessun utente può dare a una directory
+  un secondo nome.
 - `-f, --force` — rimuovere un nome di collegamento esistente e creare
   poi il collegamento.
 - `-i, --interactive` — chiedere prima di rimuovere un nome di

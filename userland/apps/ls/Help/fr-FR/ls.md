@@ -33,9 +33,10 @@ numérique de l'outil GNU (`-n` produit la même chose). Il n'y a pas de
 colonne d'horodatage affiche l'heure de modification par défaut ;
 `-c`, `-u` et `--time` choisissent laquelle des quatre marques est
 affichée (et sert au tri), et `--time-style` — ou `--full-time` —
-fixe son format. Il n'y a pas encore de colonne de nombre de liens
-car le contrat du système de fichiers ne porte pas encore de liens
-physiques ; elle apparaîtra quand ce sera le cas.
+fixe son format. La colonne du nombre de liens indique combien
+d'entrées de répertoire nomment le fichier, telle que le système de
+fichiers lui-même l'enregistre ; un format qui n'en tient pas le compte
+répond `1`.
 
 Quand plusieurs opérandes sont donnés — et toujours sous `-R` — la
 liste de chaque répertoire est précédée d'un en-tête `chemin:`, et les

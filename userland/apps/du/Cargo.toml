@@ -32,6 +32,9 @@ path = "src/run.rs"
 [dependencies]
 # The audited ABI vocabulary: `Errno` and `FileKind` for the seam data.
 tairix-abi = { path = "../../../lib/abi", version = "=0.0.0" }
+# The one path-spelling grammar: `join` places a child inside a directory,
+# so this tool carries no second path parser.
+tairix-path = { path = "../../../lib/path", version = "=0.0.0" }
 # The one help engine: locale fallback, the bounded structured-Markdown
 # parser, and the shared own-bundle short-help render the `-?`/`--help`
 # switches use (plans/APPS.md).

@@ -533,7 +533,7 @@ driving the device from an arbitrary caller's context.
 | USB mass storage (BOT / CBI / UAS)        | `tairix-drv-storage-usb-msd`         | any USB host via the URB transport | shared SCSI layer + three wire transports (incl. UFI floppies) host-tested over scripted doubles; metal acceptance pending (Pi 4) |
 
 QEMU integration on real PCI / MMIO virtio devices depends on the
-prerequisites enumerated in `.junie/next-session-prompt.md` (kernel
+prerequisites enumerated in `plans/WIRING.md` (kernel
 DMA, IRQ routing, bus-handle hand-off).
 
 ### Discovery and the bootstrap floor

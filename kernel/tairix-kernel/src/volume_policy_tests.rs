@@ -26,12 +26,14 @@ impl FilesystemRead for TwoNodeFs {
         match node {
             ROOT => Ok(NodeInfo {
                 kind: NodeKind::Directory,
+                nlink: 2,
                 size: 0,
                 allocated: 0,
                 times: NodeTimes::default(),
             }),
             FILE => Ok(NodeInfo {
                 kind: NodeKind::RegularFile,
+                nlink: 1,
                 size: 7,
                 allocated: 512,
                 times: NodeTimes::default(),

@@ -189,7 +189,7 @@ pub mod hwtree_node_ids;
 pub mod boot_display;
 
 // The runtime hardware-inventory store (Design D, D1 —
-// `.junie/next-pi-prompt.md`): the single source of truth for the
+// `plans/PI.md`): the single source of truth for the
 // discovered hardware tree, seeded by the boot
 // path, appended to by the floor bus bring-up, and snapshotted by the
 // autoload reader. It also backs the `hw_tree_read` / `hw_tree_wait`
@@ -227,7 +227,7 @@ pub mod boot_hwtree;
 pub mod virtual_bus;
 
 // The kernel block-device sharing layer (Design D, D2a —
-// `.junie/next-pi-prompt.md`): wraps the one brought-up bootstrap-floor
+// `plans/PI.md`): wraps the one brought-up bootstrap-floor
 // block device behind a `lib/sync` lock so it can back two concurrent
 // partition windows — the read-only `/System` driver-store mount and the
 // encrypted-root unlock window — over a single disk (SMP
@@ -265,7 +265,7 @@ pub mod unlock_service;
 #[cfg(any(kernel_isa = "x86_64", kernel_isa = "aarch64", kernel_isa = "riscv64"))]
 pub mod driver_spawn_loader;
 
-// The read-only `/System` file service (`.junie/next-pi-prompt.md` Design D
+// The read-only `/System` file service (`plans/PI.md` Design D
 // D2b-1): one object over the mounted `/System` volume that both lists the
 // signed `/System/Drivers/` store and reads a bundle's bytes (a
 // `drvhost::ImageSource`) through the kernel-core `DriverImageReader`. It

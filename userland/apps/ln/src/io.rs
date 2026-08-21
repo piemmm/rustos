@@ -96,6 +96,25 @@ pub trait FileSystem {
     /// transient failure), or a permission or grammar refusal.
     fn symlink(&self, target: &str, link: &str) -> Result<(), Errno>;
 
+    /// Add `link` as a second directory entry for the node `target` already
+    /// names — a hard link.
+    ///
+    /// `dereference` is `-L`: with it the *target's* own final symbolic link
+    /// is resolved and the second name is given to what it names; without it
+    /// (`-P`, the default) the node the caller spelled gains the name, which
+    /// is POSIX `link()`. The new name is never followed either way.
+    ///
+    /// # Errors
+    ///
+    /// Any [`Errno`] the filesystem raises — [`Errno::AlreadyExists`] for a
+    /// taken name, [`Errno::IsADirectory`] for a directory operand (no
+    /// principal may give a directory a second name),
+    /// [`Errno::CrossVolume`] when the two paths are on different volumes,
+    /// [`Errno::TooManyLinks`] when the format's per-node name count would
+    /// overflow, [`Errno::NotSupported`] on a format that holds one name per
+    /// node (a permanent limit), or a permission refusal.
+    fn link(&self, target: &str, link: &str, dereference: bool) -> Result<(), Errno>;
+
     /// Remove the non-directory entry `path` names — the name as typed,
     /// never what a link names.
     ///

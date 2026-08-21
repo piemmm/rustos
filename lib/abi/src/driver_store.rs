@@ -1,5 +1,5 @@
 //! The read-only `/System` driver-store IPC protocol (Design D D2b-2c —
-//! `.junie/next-pi-prompt.md`).
+//! `plans/PI.md`).
 //!
 //! Under Design D the one bootstrap-floor disk is owned for the life of the
 //! system by the never-returning kernel driver-store service, which keeps

@@ -22,3 +22,6 @@ tairix-caps = { path = "../caps", version = "=0.0.0" }
 # §19.4 structured audit log: every load, refusal, and library decision is
 # recorded through a `tairix_log::Sink`.
 tairix-log = { path = "../log", version = "=0.0.0" }
+# The one path-spelling grammar: `join` places a bundle's own entries (`Run`,
+# `Libraries/`) inside it, so the gate carries no second path parser.
+tairix-path = { path = "../path", version = "=0.0.0" }

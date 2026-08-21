@@ -2079,6 +2079,7 @@ impl<B: Block> FilesystemRead for Fat32<B> {
         if node_is_dir(node) {
             Ok(NodeInfo {
                 kind: NodeKind::Directory,
+                nlink: NodeInfo::SINGLE_NAME,
                 size: 0,
                 allocated,
                 times: NodeTimes::default(),
@@ -2086,6 +2087,7 @@ impl<B: Block> FilesystemRead for Fat32<B> {
         } else {
             Ok(NodeInfo {
                 kind: NodeKind::RegularFile,
+                nlink: NodeInfo::SINGLE_NAME,
                 size: u64::from(node_size(node)),
                 allocated,
                 times: NodeTimes::default(),
@@ -2215,6 +2217,7 @@ impl<B: Block> FilesystemRead for Fat32<B> {
             let info = if entry.is_dir {
                 NodeInfo {
                     kind: NodeKind::Directory,
+                    nlink: NodeInfo::SINGLE_NAME,
                     size: 0,
                     allocated,
                     times: entry.times,
@@ -2222,6 +2225,7 @@ impl<B: Block> FilesystemRead for Fat32<B> {
             } else {
                 NodeInfo {
                     kind: NodeKind::RegularFile,
+                    nlink: NodeInfo::SINGLE_NAME,
                     size: u64::from(entry.size),
                     allocated,
                     times: entry.times,

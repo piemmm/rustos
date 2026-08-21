@@ -32,9 +32,10 @@ saída corresponde ao recurso numérico da ferramenta GNU (`-n` produz o
 mesmo). A coluna de data mostra a hora de modificação por omissão;
 `-c`, `-u` e `--time` escolhem qual das quatro datas é mostrada (e por
 qual se ordena), e `--time-style` — ou `--full-time` — define o seu
-formato. Ainda não há coluna de contagem de ligações porque o contrato
-do sistema de ficheiros ainda não transporta ligações rígidas;
-aparecerá quando o fizer.
+formato. A coluna de contagem de ligações indica quantas
+entradas de directório nomeiam o ficheiro, tal como o próprio sistema de
+ficheiros o regista; um formato que não guarda essa contagem responde
+`1`.
 
 Quando é dado mais de um operando — e sempre com `-R` — a listagem de
 cada diretório é precedida por um cabeçalho `path:` e os blocos são

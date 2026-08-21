@@ -54,8 +54,8 @@ impl EntropySource for SuiteEntropy {
 }
 
 pub use tairix_abi::driver::filesystem::{
-    FilesystemRead, FilesystemSecurity, FilesystemWrite, NodeId, NodeKind, NodeSecurity,
-    SecurityAcl, SecuritySubject,
+    FilesystemRead, FilesystemSecurity, FilesystemStats, FilesystemWrite, NodeId, NodeKind,
+    NodeSecurity, SecurityAcl, SecuritySubject,
 };
 pub use tairix_abi::CapabilityId;
 pub use tairix_abi::Errno;
@@ -247,6 +247,22 @@ pub fn arxfs_backed_vfs(read_only: bool) -> (Vfs, LiveFs) {
         .expect("mount the arxfs volume");
 
     (vfs, fs)
+}
+
+/// Close `fs` and re-open the same bytes, so a test can prove a property is
+/// **on-disk** state rather than a mount-time derivation.
+///
+/// The [`Vfs`] the volume was mounted into stays valid: only the driver
+/// behind the mount is replaced, which is what the kernel host does when a
+/// volume is re-attached.
+///
+/// # Panics
+///
+/// Panics if the volume the suite just wrote does not re-open — a driver
+/// defect the vertical is there to catch, not a runtime condition.
+#[must_use]
+pub fn remount(fs: LiveFs) -> LiveFs {
+    ARXFS::open(fs.into_block(), &SUITE_KEY).expect("re-open the volume just written")
 }
 
 /// A default-layout [`Vfs`] (owner `(ROOT_UID, ROOT_GID)`) with no driver

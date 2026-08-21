@@ -289,7 +289,7 @@ fn render_panes(model: &Model, window: &mut Window, body: u16, cols: u16) {
     for (line, (index, entry)) in (0..file_inner).zip(visible_files) {
         let tagged = model
             .tags
-            .contains(&crate::model::join(&model.files_dir, &entry.name));
+            .contains(&tairix_path::join(&model.files_dir, &entry.name));
         let text = file_row(
             tagged,
             entry.kind,

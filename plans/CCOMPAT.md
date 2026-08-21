@@ -96,11 +96,11 @@ header means the same thing on every native Tier-1 target.
 
 ## 3. Work breakdown (stages)
 
-Each stage is a reviewable chunk. **At the end of each stage, write the
-continuation prompt for the next stage to `.junie/next-ccompat-prompt.md`**
-(overwrite each time), recording what landed and the exact next work, in the
-style of the other `.junie/next-*-prompt.md` files. Do not start a stage
-before its predecessor is green on the whole-project gate (§7).
+Each stage is a reviewable chunk. **At the end of each stage, replace this
+plan's status with what landed and the exact next work** (overwrite it each
+time — git is the history, §13), in the style of the sibling `plans/*.md`. Do
+not start a stage before its predecessor is green on the whole-project gate
+(§7).
 
 ### Stage CC1 — Full `lib/abi` C header surface
 
@@ -837,7 +837,7 @@ output:
 
 Any failure found — new or pre-existing — is fixed or reverted before the stage
 is done (§2.5, §7). Update `PLAN.md` and this file's stage statuses as stages
-advance, and refresh `.junie/next-ccompat-prompt.md` for the next chunk.
+advance, and refresh this plan's status for the next chunk.
 
 ## 7. Charter cross-references
 

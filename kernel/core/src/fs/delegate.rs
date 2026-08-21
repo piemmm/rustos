@@ -98,6 +98,11 @@ impl FinalLink {
 pub struct DelegatedInfo {
     /// Whether the node is a directory or a regular file.
     pub kind: NodeKind,
+    /// How many directory entries name this node, as the driver read it
+    /// from the format. Carried through unchanged: the VFS could not count
+    /// names without walking every directory on the volume, so the format's
+    /// own record is the only honest source.
+    pub nlink: u32,
     /// File length in bytes; `0` for a directory.
     pub size: u64,
     /// Bytes of on-disk storage the node's data occupies, as the driver
@@ -206,6 +211,12 @@ const fn map_rename_error(error: DriverError) -> VfsError {
 const fn map_link_error(error: DriverError) -> VfsError {
     match error {
         DriverError::Unsupported => VfsError::NotSupported,
+        // The driver owns the name space it is being asked to add to, so a
+        // name it reports as taken is a taken name, not a device fault.
+        DriverError::Busy => VfsError::AlreadyExists,
+        // A fixed on-disk count, exhausted: reported as itself so a caller
+        // is not told to free space that would not help.
+        DriverError::TooManyLinks => VfsError::TooManyLinks,
         other => map_driver_error(other),
     }
 }
@@ -865,6 +876,7 @@ impl<R: FilesystemRead + ?Sized, P: MetaPolicy<R>> DelegatedFs<'_, R, P> {
         let (node, info, meta) = self.resolve_final(cred, components, final_link)?;
         Ok(DelegatedInfo {
             kind: info.kind,
+            nlink: info.nlink,
             size: info.size,
             allocated: info.allocated,
             meta,
@@ -1094,6 +1106,65 @@ impl<F: FilesystemRead + FilesystemWrite + ?Sized, P: MetaPolicy<F>> DelegatedFs
         // observable, so a caller is never locked out of one it just made.
         P::stamp_creation(self.fs, node, cred)?;
         Ok(())
+    }
+
+    /// Add `link` as a second directory entry for the node `existing`
+    /// already names — a hard link.
+    ///
+    /// `existing_link` is the posture for the **existing** name's final
+    /// component: [`FinalLink::Keep`] is POSIX `link()` — the node that
+    /// gains a name is the one the caller spelled, so a symbolic link
+    /// planted on the way cannot name an object the caller never asked for —
+    /// and [`FinalLink::Follow`] is `linkat(AT_SYMLINK_FOLLOW)`, which
+    /// `ln -L` asks for. The **new** name is always kept: it is a name being
+    /// created, and a create never replaces an existing one.
+    ///
+    /// A **directory** is refused here rather than only in each driver: the
+    /// tree staying a tree is what makes the physical `..` walk well-defined,
+    /// so it is a VFS invariant, not a per-format one.
+    ///
+    /// The new name is authorised exactly as a create in its own parent
+    /// (search plus write), and the existing name is resolved under the
+    /// caller's own identity like any other path. Nothing further is
+    /// required of the caller against the node itself, and nothing further
+    /// is granted: a second name confers no authority the first did not.
+    ///
+    /// # Errors
+    ///
+    /// * [`VfsError::InvalidPath`] if either component list is empty.
+    /// * [`VfsError::NotFound`] if `existing` resolves to nothing.
+    /// * [`VfsError::IsADirectory`] if `existing` names a directory.
+    /// * [`VfsError::AlreadyExists`] if `link` already names something.
+    /// * [`VfsError::TooManyLinks`] if the format's per-node name count
+    ///   would overflow.
+    /// * [`VfsError::NotSupported`] if the format holds one name per node.
+    /// * [`VfsError::PermissionDenied`], [`VfsError::NotADirectory`],
+    ///   [`VfsError::LinkLoop`], or [`VfsError::Io`].
+    pub fn link(
+        &mut self,
+        cred: &Credentials<'_>,
+        existing: &[String],
+        link: &[String],
+        existing_link: FinalLink,
+    ) -> Result<(), VfsError> {
+        // Resolve the node that gains a name first: a refusal here must
+        // leave the new name's directory untouched.
+        let source = match self.walk(cred, existing, existing_link)? {
+            Walk::Root { .. } => return Err(VfsError::InvalidPath),
+            Walk::Leaf(place) => place,
+        };
+        let (node, info, _) = source.found.ok_or(VfsError::NotFound)?;
+        match info.kind {
+            NodeKind::RegularFile | NodeKind::Symlink => {}
+            NodeKind::Directory => return Err(VfsError::IsADirectory),
+        }
+        let place = self.place_for_write(cred, link, FinalLink::Keep)?;
+        if place.found.is_some() {
+            return Err(VfsError::AlreadyExists);
+        }
+        self.fs
+            .link(place.parent, place.name.as_bytes(), node)
+            .map_err(map_link_error)
     }
 
     /// Write `data` into the file at `components` starting at `offset`,

@@ -254,7 +254,7 @@ sub-stages).
 `wasm32` up to (at least) `x86_64` level — finishing the §17.2 Arch HAL
 migration, aarch64 SMP/FDT, live-scheduler wiring, and the QEMU vertical
 parity sweep — is staged in `plans/WIRING.md` (continuation prompt
-`.junie/next-wiring-prompt.md`).
+`plans/WIRING.md`).
 
 The §17.2 Arch HAL migration and cross-arch parity sweep (WIRING W0–W17)
 are **complete** — every enumerated arch primitive lives behind the HAL and
@@ -471,7 +471,7 @@ deferred to later stages (not stubbed, §15.1).
 - DMA goes through `kernel/sec::dma` (`CAP_MMIO_MAP`/`MEM_DMA` checked, audited);
   MMIO is reached only through the capability-gated `KernelMmioMapper`.
 
-**Remaining (tracked in `.junie/next-session-prompt.md`):** interrupt-driven
+**Remaining (tracked in `plans/WIRING.md`):** interrupt-driven
 ps2/virtio wake-ups (polled cooperative shim today), packed virtqueues
 (virtio 1.1 §2.7 — Stage 5 follow-up), the riscv64 virtio QEMU verticals not
 runnable in this environment, and the Stage 4.D acceptance gate.
@@ -554,7 +554,7 @@ device list.
 **Status: in progress — reprioritised as the next stage of work**, ahead of
 the remaining `plans/PI.md` Arc-C metal items (P8 binds the EMMC2 driver
 through `devmgr`, so it depends on this stage; current direction lives in
-`.junie/next-pi-prompt.md`). The prerequisites the drvhost resolver
+`plans/PI.md`). The prerequisites the drvhost resolver
 deferral was waiting on have landed: the `rxe` loader
 (`lib/abi/src/rxe.rs`), `kernel/mem::map_image`/`build_process_image`, the
 `EnterUser` HAL primitive on all three native ports, live syscall/IPC
@@ -1331,7 +1331,7 @@ order (one fully-gated increment each):
              passphrase from the profile (`passphrase_for`), never a caller
              argument;
            - **B5 (= 5e)** — re-scoped under **DESIGN D** (reactive top-down
-             discovery); see item 5e below and `.junie/next-pi-prompt.md`.
+             discovery); see item 5e below and `plans/PI.md`.
      - **Increment C (B5 prerequisite) — DONE (metal-confirmed) — ported the
        autonomous floor bring-up off the in-kernel scaffold onto the
        `lib/abi::DriverHost` contract.** A blind B5 flip would have bricked the
@@ -1440,7 +1440,7 @@ order (one fully-gated increment each):
        (attach/detach). The VL805 firmware-reload mailbox is served by an IPC
        `vcmailbox` driver (capability-gated endpoint, no cross-device ambient
        grant, §4/§2.20). Full architecture + the staged increments **D1–D5** live
-       in `.junie/next-pi-prompt.md` ("DESIGN D"). The in-kernel scaffold stays
+       in `plans/PI.md` ("DESIGN D"). The in-kernel scaffold stays
        the live metal keyboard and stays wired until the **D5** atomic flip, so
        the working keyboard never regresses (§2.17); D5 is metal-only-verifiable.
        - **U-MSI — interrupt-driven USB keyboard over BCM2711 PCIe MSI — DONE
@@ -3736,7 +3736,7 @@ transfer, landed in increments:
   delegation is redeemed so no earlier removal can satisfy it (fail closed);
   non-flaky across repeated runs.
 - The platform-RNG `EntropySource` that seeds the reserve — **DONE**
-  (`.junie/PREREQUISITES.md` P-0): the Arch-HAL `tairix_arch_api::entropy`
+  (`plans/WIRING.md` P-0): the Arch-HAL `tairix_arch_api::entropy`
   slice (x86_64 `RDSEED`/`RDRAND`, aarch64 `RNDR` `Supported`; riscv64 `Zkr` /
   wasm32 host-import honest `Pending`) seeds the kernel reserve at boot via
   `KernelArch::platform_entropy`.
@@ -4098,7 +4098,7 @@ Load-bearing decisions a future contributor needs:
     harness (`tests/fuzz_swap.rs`); `lib/crypto` gains 7 AEAD tests incl.
     the RFC 8439 vector. **Still pending:** the pager that calls
     `store`/`load`, wiring the now-landed platform-RNG `EntropySource`
-    (`.junie/PREREQUISITES.md` P-0) to the ephemeral swap key, the swap-device
+    (`plans/WIRING.md` P-0) to the ephemeral swap key, the swap-device
     backend driver, and the `CAP`-gated activation syscall — all Stage 8.
 - `tools/mkimage` producing:
   - `images/tairix-x86_64.iso` (hybrid BIOS/UEFI). Booting this on real
@@ -4431,7 +4431,7 @@ Landed (done):
   exist yet; per-CPU gap detection lands with that producer, since `journald`
   assigns `cpu_seq` contiguously and cannot gap in steady state), retention,
   the QEMU vertical (launch journald under `init`), the kernel
-  `SystemIdentity`↔machine-id unification, and anchors (see `.junie/SYSLOG.md`).
+  `SystemIdentity`↔machine-id unification, and anchors (see `plans/SYSLOG.md`).
 - §19.6 fuzzing — `cargo xtask fuzz` over all in-tree harnesses (`--quick`/
   `--soak`), fail-closed.
 - §19.7 verified core — Bronze proptest models for `lib/caps`/`kernel/sec`/
@@ -4439,7 +4439,7 @@ Landed (done):
 - §19.10 memory tagging — `MemoryTagging` HAL + the `kernel/mem` slab software
   UAF tag-check (on-by-default floor everywhere).
 
-Unblocked — in progress (`.junie/fstree-next-plan.md` S8):
+Unblocked — in progress (`plans/APPS.md` S8):
 - Item 9 — §19.5 parser sandboxing (minimum-capability sandbox process
   model). Its prerequisite (Stage 6) is complete. The **kernel sandbox-spawn
   primitive is landed** (S8a): `SpawnAttach` carries a `flags` word whose
@@ -4502,7 +4502,7 @@ Unblocked — in progress (`.junie/fstree-next-plan.md` S8):
     `lib/cmdres`) parse the caller's own keystrokes, not foreign data,
     and stay fail-closed and bounded.
   Its first consumers exist: `lib/binfmt` (`tairix-binfmt`, done —
-  `.junie/fstree-next-plan.md` S6) is the read-only executable-container
+  `plans/APPS.md` S6) is the read-only executable-container
   decoder: typed, borrowed, fail-closed views of the `rxe` load image +
   manifest summary (decoded through the `lib/abi` types —
   `LoadImage::parse_for_inspection`, `decode_capability_ids` — so
@@ -4513,7 +4513,7 @@ Unblocked — in progress (`.junie/fstree-next-plan.md` S8):
   `no_std`+`alloc`, `#![forbid(unsafe_code)]`, capped per §24.4, unit-
   tested with truncation/mutation matrices, and fuzzed (`fuzz_rxe`/
   `fuzz_elf`/`fuzz_wasm` in `cargo xtask fuzz`). `lib/disasm`
-  (`tairix-disasm`, done — `.junie/fstree-next-plan.md` S7) is the sibling
+  (`tairix-disasm`, done — `plans/APPS.md` S7) is the sibling
   instruction-decoder crate: pure slice+address decoders for the four
   Tier-1 ISAs (riscv64 RV64GC incl. C, aarch64 A64, wasm code bodies,
   x86_64 one-/two-byte maps with the 15-byte cap) over one shared `Insn`
@@ -4965,7 +4965,7 @@ and fail-closed (§24.4) — this work must not loosen them.
   `docs/src/architecture/resource-limits.md`, `docs/src/abi/sysinfo.md`,
   `docs/src/userland/{sysinfod,utilities}.md` + the two READMEs.
 - L5 — **done on the MMU ports** (staged as `plans/SPAWN.md` **SP11**;
-  notes in `.junie/fix-fixed-stack-size.md`). The user stack is a
+  notes in `plans/SPAWN.md`). The user stack is a
   **demand-grown** stack inside an 8 MiB reserved virtual span (guard page
   below the span preserved) with a 128 KiB eager commit: growth is
   fault-driven and **contiguous** (every page from the committed base down
@@ -5124,11 +5124,11 @@ escape-sequence definition end to end (§2.2).
     desktop and terminal images are unaffected (the terminal's grid and font
     sizing did not change).
 
-## SHELL prerequisites (`.junie/PREREQUISITES2.md`)
+## SHELL prerequisites (`plans/SHELL.md`)
 
 Staged prerequisites the shell (`plans/SHELL.md`) depends on so it stays a pure
 interpreter reaching effects through injected seams, with no second parser or
-I/O vocabulary. See `.junie/PREREQUISITES2.md` for the full P0–P6 status.
+I/O vocabulary. See `plans/SHELL.md` for the full P0–P6 status.
 
 - P6 — glob/pattern matching as a shared library: **done.** `lib/glob`
   (`tairix-glob`) is the one first-party filename-glob matcher (`*`, `?`,
@@ -5147,7 +5147,7 @@ I/O vocabulary. See `.junie/PREREQUISITES2.md` for the full P0–P6 status.
   applies — the directory-part/leaf split, the dotfile rule, the leaf-prefix
   filter, and the longest-common-prefix Tab discipline — imported by the
   shell's Tab completion and `fstree`'s destination prompts (§2.2, extracted
-  when the second consumer arrived with `.junie/fstree-next-plan.md` S10).
+  when the second consumer arrived with `plans/APPS.md` S10).
   Presentation stays per consumer (the shell escapes inserts and merges its
   command/resource candidate classes; `fstree` inserts verbatim). It is
   `no_std`+`alloc`, `#![forbid(unsafe_code)]`, read-only by construction
@@ -5199,7 +5199,7 @@ I/O vocabulary. See `.junie/PREREQUISITES2.md` for the full P0–P6 status.
   stubbed — not a shell blocker): alias policy for runtime volumes and the
   `fs::` resolver `Root` variant, at which point machine aliases rebind to
   independent `id::` roots without changing the resolver contract.
-  Remaining prerequisites (P5) are tracked in `.junie/PREREQUISITES2.md`.
+  Remaining prerequisites (P5) are tracked in `plans/SHELL.md`.
 - P5 (reference parser) — shared resource-reference parser as a `lib/*` crate:
   **done.** `lib/resref` (`tairix-resref`) is the one definition of how a TAIRiX
   resource reference is lexed and validated into a typed `ResourceRef`, so the
@@ -6610,7 +6610,7 @@ VM mechanism, `kernel/mem::ramzip`;
   (registered in `cargo xtask fuzz`) driving random
   compress→tamper/truncate→fault cycles.
 
-**Live-task enablement (staged in `.junie/swapswap-progress.md`):**
+**Live-task enablement (staged in `plans/SWAPSWAPSWAP.md`):**
 - **Restartable user page faults — present.** `kernel/core::resolve_user_fault`
   makes a not-present user page resident (stack growth, demand-paged
   anonymous `mem_map`, read-only file mappings) and retries the faulting

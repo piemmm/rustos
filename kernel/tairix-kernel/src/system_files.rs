@@ -1,5 +1,5 @@
 //! The read-only `/System` file service (Design D, D2b-1 —
-//! `.junie/next-pi-prompt.md`).
+//! `plans/PI.md`).
 //!
 //! Under Design D the one disk the bootstrap floor brought up is owned for
 //! the life of the system by the never-returning driver-store kthread

@@ -28,7 +28,7 @@
 use core::cell::RefCell;
 use tairix_abi::seat::ReleaseSurface;
 use tairix_abi::{
-    spec_for, AbiType, CapabilityId, Errno, IrqHandle, MapFlags, OpenFlags, PowerAction,
+    spec_for, AbiType, CapabilityId, Errno, IrqHandle, LinkFlags, MapFlags, OpenFlags, PowerAction,
     RandomFlags, SyscallNumber, UnlinkFlags, WaitFlags, ENCODED_TABLE_LEN, FS_ATTR_KEY_MAX,
     FS_ATTR_VALUE_MAX, FS_MODE_MASK, SYSCALLS, SYSCALL_MAX_ARGS,
 };
@@ -750,6 +750,18 @@ impl SyscallHandlers for AcceptingHandlers {
         *self.invocations.borrow_mut() += 1;
         Ok(0)
     }
+    fn fs_link(
+        &self,
+        _c: &CallerContext<'_>,
+        _existing: u64,
+        _existing_len: usize,
+        _link: u64,
+        _link_len: usize,
+        _flags: LinkFlags,
+    ) -> SyscallResult {
+        *self.invocations.borrow_mut() += 1;
+        Ok(0)
+    }
     fn fs_set_mode(
         &self,
         _c: &CallerContext<'_>,
@@ -893,6 +905,10 @@ impl Sink for NullSink {
     fn write_event(&self, _event: &Event<'_>) {}
 }
 
+/// Which argument slot carries a flags word, and the predicate that accepts
+/// it: the same `from_bits` the dispatcher runs, never a re-listed bit set.
+type FlagsArg = (usize, fn(u32) -> bool);
+
 /// Mirror of the dispatcher's argument-acceptance predicate. Kept here
 /// so the fuzz harness cross-checks the public API against an
 /// independent implementation; if the two diverge, the test fails.
@@ -1007,13 +1023,17 @@ fn would_accept(spec_idx: usize, raw_number: u16, args: &[u64; SYSCALL_MAX_ARGS]
             return false;
         }
     }
-    // `fs_unlink`'s flags argument (arg 2) runs through
-    // `UnlinkFlags::from_bits`, which rejects any reserved bit (the only
-    // defined bit today is `DIRECTORY`). Mirror it through the same
-    // predicate the dispatcher uses.
-    if spec.number == SyscallNumber::FS_UNLINK {
-        let raw = u32::try_from(args[2] & 0xFFFF_FFFF).unwrap_or(u32::MAX);
-        if UnlinkFlags::from_bits(raw).is_err() {
+    // A filesystem flags word runs through its own type's `from_bits`, which
+    // rejects any reserved bit. Mirror the dispatcher through those same
+    // predicates rather than re-listing each bit set here.
+    let flags_arg: Option<FlagsArg> = match spec.number {
+        SyscallNumber::FS_UNLINK => Some((2, |b| UnlinkFlags::from_bits(b).is_ok())),
+        SyscallNumber::FS_LINK => Some((4, |b| LinkFlags::from_bits(b).is_ok())),
+        _ => None,
+    };
+    if let Some((slot, accepts)) = flags_arg {
+        let raw = u32::try_from(args[slot] & 0xFFFF_FFFF).unwrap_or(u32::MAX);
+        if !accepts(raw) {
             return false;
         }
     }

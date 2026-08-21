@@ -45,6 +45,11 @@ impl<F: FilesystemRead> FilesystemRead for Counting<F> {
         self.inner.node_info(node)
     }
 
+    fn read_link(&mut self, node: NodeId, out: &mut [u8]) -> Result<usize, DriverError> {
+        self.calls += 1;
+        self.inner.read_link(node, out)
+    }
+
     fn lookup(&mut self, dir: NodeId, name: &[u8]) -> Result<NodeId, DriverError> {
         self.calls += 1;
         self.inner.lookup(dir, name)
@@ -70,6 +75,21 @@ impl<F: FilesystemWrite> FilesystemWrite for Counting<F> {
     fn create(&mut self, dir: NodeId, name: &[u8], kind: NodeKind) -> Result<NodeId, DriverError> {
         self.calls += 1;
         self.inner.create(dir, name, kind)
+    }
+
+    fn create_link(
+        &mut self,
+        dir: NodeId,
+        name: &[u8],
+        target: &[u8],
+    ) -> Result<NodeId, DriverError> {
+        self.calls += 1;
+        self.inner.create_link(dir, name, target)
+    }
+
+    fn link(&mut self, dir: NodeId, name: &[u8], node: NodeId) -> Result<(), DriverError> {
+        self.calls += 1;
+        self.inner.link(dir, name, node)
     }
 
     fn write_at(
@@ -352,6 +372,48 @@ fn rename_invalidates_both_names_and_keeps_contents() {
     let mut fresh = [0u8; 8];
     let n = cache.read_at(moved, 0, &mut fresh).expect("reads");
     assert_eq!(&fresh[..n], b"movable");
+}
+
+#[test]
+fn the_link_surface_reaches_the_driver_through_the_cache() {
+    // The cache is a wrapper, and a wrapper that quietly left these at their
+    // trait defaults would report `Unsupported` for a driver that supports
+    // them perfectly well — a refusal invented by the cache, not the format.
+    let mut cache = fixture(b"body");
+    let dir = dir_of(&mut cache);
+
+    cache
+        .create_link(dir, b"alias", b"file.txt")
+        .expect("the driver behind the cache creates symbolic links");
+    let link = cache.lookup(dir, b"alias").expect("the link resolves");
+    let mut target = [0u8; 16];
+    let n = cache
+        .read_link(link, &mut target)
+        .expect("reads the target");
+    assert_eq!(&target[..n], b"file.txt");
+
+    let file = file_of(&mut cache);
+    cache
+        .link(dir, b"second", file)
+        .expect("the driver behind the cache adds a second name");
+    assert_eq!(cache.lookup(dir, b"second"), Ok(file));
+}
+
+#[test]
+fn a_second_name_invalidates_the_nodes_cached_stat() {
+    // The count rose, so a stat warmed before the link must not be served
+    // from the cache afterwards — that would report the old count.
+    let mut cache = fixture(b"body");
+    let dir = dir_of(&mut cache);
+    let file = file_of(&mut cache);
+    assert_eq!(cache.node_info(file).expect("warm the stat").nlink, 1);
+
+    cache.link(dir, b"second", file).expect("a second name");
+    assert_eq!(
+        cache.node_info(file).expect("re-read the stat").nlink,
+        2,
+        "the cached stat was invalidated, not served stale"
+    );
 }
 
 #[test]

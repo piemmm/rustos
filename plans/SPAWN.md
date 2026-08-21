@@ -727,7 +727,7 @@ delivers it by driving the live scheduler. The x86_64 + riscv64 sibling
 verticals follow when convenient (the producer is arch-neutral; only the
 `-M virt` proof is per-arch).
 
-Backs `ProcessHost::signal` (`.junie/PREREQUISITES2.md` P2), the seam the
+Backs `ProcessHost::signal` (`plans/SHELL.md` P2), the seam the
 shell's `fg`/`bg`/kill job control drives. A parent delivers one of a small,
 closed set of control signals to a child it spawned; a process may signal
 only its **own** children, so — like `wait` — the authority is inherent in
@@ -857,7 +857,7 @@ argv-taking command app):
 
 ## SP9 — foreground job control: `^C`/`^Z`, `Signal::{Interrupt,Stop}`, stopped wait reports `[x]`
 
-The elsh interactive work (`.junie/plan-session-shell.md` Part 3,
+The elsh interactive work (`plans/SHELL.md` Part 3,
 `plans/SHELL.md` "Job control"): while the shell is blocked in `wait()` on a
 foreground child, `^C` must interrupt and `^Z` must stop that child — the
 kernel console line discipline delivers the signal; the shell only marks and
@@ -959,7 +959,7 @@ to `$?` = 148 (SIGTSTP's POSIX number).**
 
 ## SP10 — spawn-time descriptor wiring + pipes (`cmd > file`, `cmd | cmd`)
 
-The elsh Part 4 work (`.junie/plan-session-shell.md`): redirections and
+The elsh Part 4 work (`plans/SHELL.md`): redirections and
 pipelines need the host/kernel half the shell's final
 `RedirAction::{Open,Dup,Close,HereString,Multi}` lowering already targets.
 The parent pre-opens every target in its **own** descriptor table and hands
@@ -1157,7 +1157,7 @@ refusal are correct and stay; the target is a demand-grown stack inside a
 reserved virtual span, bounded by the settable §24.3 `StackBytes` limit
 (the `LimitKind` exists, inherits, and is settable via `ulimit`, but is
 enforced nowhere yet). Session-to-session working notes:
-`.junie/fix-fixed-stack-size.md`.
+this plan.
 
 **Binding decisions:**
 
@@ -1344,4 +1344,4 @@ cargo xtask test --qemu
 found — new or pre-existing — is fixed or reverted before the increment is
 done (§2.5 / §7). One increment per landing: finish the `SP`-stage, update
 `PLAN.md` + `plans/PI.md` + this file, refresh
-`.junie/next-pi-prompt.md`, then start the next.
+`plans/PI.md`, then start the next.

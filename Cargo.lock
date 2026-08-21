@@ -558,6 +558,7 @@ dependencies = [
  "tairix-abi",
  "tairix-caps",
  "tairix-log",
+ "tairix-path",
 ]
 
 [[package]]
@@ -715,6 +716,7 @@ version = "0.0.0"
 dependencies = [
  "tairix-abi",
  "tairix-help",
+ "tairix-path",
  "tairix-rt",
 ]
 
@@ -723,6 +725,7 @@ name = "tairix-chown"
 version = "0.0.0"
 dependencies = [
  "tairix-abi",
+ "tairix-path",
 ]
 
 [[package]]
@@ -798,6 +801,7 @@ version = "0.0.0"
 dependencies = [
  "tairix-abi",
  "tairix-help",
+ "tairix-path",
  "tairix-rt",
 ]
 
@@ -1276,6 +1280,7 @@ version = "0.0.0"
 dependencies = [
  "tairix-abi",
  "tairix-help",
+ "tairix-path",
  "tairix-rt",
  "tairix-util",
 ]
@@ -1451,6 +1456,7 @@ name = "tairix-getcap"
 version = "0.0.0"
 dependencies = [
  "tairix-abi",
+ "tairix-path",
 ]
 
 [[package]]
@@ -1908,6 +1914,7 @@ dependencies = [
  "tairix-fsmeta",
  "tairix-glob",
  "tairix-help",
+ "tairix-path",
  "tairix-rt",
  "tairix-termcap",
  "tairix-vt",
@@ -2007,6 +2014,7 @@ version = "0.0.0"
 dependencies = [
  "tairix-abi",
  "tairix-help",
+ "tairix-path",
  "tairix-rt",
 ]
 
@@ -2205,6 +2213,7 @@ version = "0.0.0"
 dependencies = [
  "tairix-abi",
  "tairix-help",
+ "tairix-path",
  "tairix-rt",
 ]
 
@@ -2288,6 +2297,7 @@ name = "tairix-setcap"
 version = "0.0.0"
 dependencies = [
  "tairix-abi",
+ "tairix-path",
 ]
 
 [[package]]

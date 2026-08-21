@@ -7,6 +7,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use tairix_help::{own_short_help, HelpSource};
+use tairix_path::{join, leaf_name};
 
 use crate::command::{Clobber, Command, Options, TargetMode};
 use crate::error::CpError;
@@ -139,7 +140,7 @@ fn copy_all(
     }
     for source in sources {
         let target = if dest_is_dir {
-            join(dest, basename(source))
+            join(dest, leaf_name(source))
         } else {
             String::from(dest)
         };
@@ -279,32 +280,6 @@ fn stat(path: &str, fs: &dyn FileSystem) -> Result<Option<EntryKind>, CpError> {
         Err(errno) => Err(CpError::Stat(errno)),
     }
 }
-
-/// The final path component of `path`, ignoring any trailing slashes. The base
-/// name of `/a/b/` is `b`; of `/` (or the empty string) it is `/`.
-fn basename(path: &str) -> &str {
-    let trimmed = path.trim_end_matches('/');
-    if trimmed.is_empty() {
-        return "/";
-    }
-    match trimmed.rfind('/') {
-        Some(slash) => &trimmed[slash + 1..],
-        None => trimmed,
-    }
-}
-
-/// Join a directory `parent` and a child `name` into a path, inserting a
-/// single `/` unless `parent` already ends with one.
-fn join(parent: &str, name: &str) -> String {
-    let mut path = String::with_capacity(parent.len() + 1 + name.len());
-    path.push_str(parent);
-    if !parent.ends_with('/') {
-        path.push('/');
-    }
-    path.push_str(name);
-    path
-}
-
 #[cfg(test)]
 mod tests {
     use super::{run as engine_run, USAGE};
@@ -925,6 +900,29 @@ mod tests {
         assert_eq!(run(copy(true, false, &["/d/"], "/dst"), &fs, &out), Ok(()));
         assert!(fs.has_dir("/dst/d"));
         assert_eq!(fs.contents("/dst/d/f").as_deref(), Some(&b"x"[..]));
+    }
+
+    #[test]
+    fn an_alias_root_source_lands_under_its_own_root_spelling() {
+        // Behaviour moved with the sweep onto the shared `leaf_name`: the
+        // private base name this tool carried was not alias-aware and named
+        // `Home:/` as `Home:`, dropping the separator that makes it a root.
+        assert_eq!(tairix_path::leaf_name("Home:/"), "Home:/");
+        // And an ordinary path is unchanged by the move.
+        assert_eq!(tairix_path::leaf_name("/a/b/"), "b");
+    }
+
+    #[test]
+    fn an_empty_source_operand_names_nothing_and_fails_closed() {
+        // The other moved answer: the private base name reported `/` for the
+        // empty spelling, fabricating a root component the caller never
+        // typed. `leaf_name` names nothing, and the copy still fails on the
+        // unreadable source rather than acting on a guessed path.
+        assert_eq!(tairix_path::leaf_name(""), "");
+        let fs = MemFs::new().dir("/dst");
+        let out = Recorder::new();
+        assert!(run(copy(false, false, &[""], "/dst"), &fs, &out).is_err());
+        assert!(!fs.has_dir("/dst/"));
     }
 
     #[test]

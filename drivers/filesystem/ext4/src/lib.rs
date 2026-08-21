@@ -501,6 +501,11 @@ struct Inode {
     size: u64,
     /// `i_flags`.
     flags: u32,
+    /// `i_links_count`: how many directory entries name this inode. ext4
+    /// maintains a real count, so it is reported as read; this driver
+    /// authors no links of its own, but it never understates what a foreign
+    /// writer recorded.
+    links: u16,
     /// `i_blocks` (low half combined with the osd2 high half): allocated
     /// storage in 512-byte sectors, or in filesystem blocks when the
     /// huge-file inode flag is set.
@@ -936,6 +941,7 @@ impl<B: Block> Ext4<B> {
         let size_lo = u64::from(le32(raw, 0x04));
         let size_hi = u64::from(le32(raw, 0x6C));
         let flags = le32(raw, 0x20);
+        let links = le16(raw, INODE_LINKS);
         let blocks =
             u64::from(le32(raw, INODE_BLOCKS_LO)) | (u64::from(le16(raw, INODE_BLOCKS_HI)) << 32);
         let file_acl = u64::from(le32(raw, 0x68)) | (u64::from(le16(raw, INODE_FILE_ACL_HI)) << 32);
@@ -978,6 +984,7 @@ impl<B: Block> Ext4<B> {
             gid,
             size: (size_hi << 32) | size_lo,
             flags,
+            links,
             blocks,
             file_acl,
             block,
@@ -2399,6 +2406,36 @@ impl<B: Block> Ext4<B> {
         self.write_inode_raw(ino, &mut raw)
     }
 
+    /// Drop one name from inode `ino`, whose raw record is `raw`, freeing
+    /// its blocks and its inode slot only when the name that just went was
+    /// the last one.
+    ///
+    /// This driver authors no hard links, but it *reads and writes volumes
+    /// that hold them* — Linux makes them freely — so an unlink that always
+    /// freed would destroy data another name on that volume still reaches.
+    /// A directory cannot carry a second name in ext4 either, so it is
+    /// cleared outright (its own `.` goes with its name), matching what
+    /// Linux's `ext4_rmdir` does.
+    fn drop_one_name(&mut self, ino: u32, raw: &mut [u8], is_dir: bool) -> Result<(), DriverError> {
+        let links = le16(raw, INODE_LINKS);
+        let remaining = if is_dir { 0 } else { links.saturating_sub(1) };
+        if remaining > 0 {
+            put_le16(raw, INODE_LINKS, remaining);
+            return self.write_inode_raw(ino, raw);
+        }
+        self.truncate_blocks(ino, raw, 0)?;
+        // Mark the inode deleted: drop every link, zero the size and block
+        // count, and stamp `i_dtime` so a checker treats it as a freed inode
+        // rather than a live but unreferenced one.
+        put_le16(raw, INODE_LINKS, 0);
+        put_le32(raw, 0x04, 0);
+        put_le32(raw, 0x6C, 0);
+        put_le32(raw, INODE_BLOCKS_LO, 0);
+        put_le32(raw, INODE_DTIME, DELETED_DTIME);
+        self.write_inode_raw(ino, raw)?;
+        self.free_inode(ino, is_dir)
+    }
+
     /// Repoint the directory entry named `name` in directory `dir_ino` at
     /// `new_ino`, leaving its name and record length untouched. Used to
     /// rewrite a moved directory's `..` link to its new parent.
@@ -2540,15 +2577,8 @@ impl<B: Block> Ext4<B> {
             if dst_is_dir && !self.dir_is_empty(dst_ino)? {
                 return Err(DriverError::Busy);
             }
-            self.truncate_blocks(dst_ino, &mut dst_raw, 0)?;
-            put_le16(&mut dst_raw, INODE_LINKS, 0);
-            put_le32(&mut dst_raw, 0x04, 0);
-            put_le32(&mut dst_raw, 0x6C, 0);
-            put_le32(&mut dst_raw, INODE_BLOCKS_LO, 0);
-            put_le32(&mut dst_raw, INODE_DTIME, DELETED_DTIME);
-            self.write_inode_raw(dst_ino, &mut dst_raw)?;
+            self.drop_one_name(dst_ino, &mut dst_raw, dst_is_dir)?;
             self.remove_dirent(dst_dir_ino, dst_name)?;
-            self.free_inode(dst_ino, dst_is_dir)?;
             if dst_is_dir {
                 self.adjust_links(dst_dir_ino, -1)?;
             }
@@ -2619,6 +2649,7 @@ impl<B: Block> Ext4<B> {
         let allocated = inode.blocks.saturating_mul(unit);
         Ok(NodeInfo {
             kind,
+            nlink: u32::from(inode.links),
             size,
             allocated,
             times: inode.times,
@@ -3261,18 +3292,8 @@ impl<B: Block> FilesystemWrite for Ext4<B> {
         if is_dir && !self.dir_is_empty(child)? {
             return Err(DriverError::Busy);
         }
-        self.truncate_blocks(child, &mut raw, 0)?;
-        // Mark the inode deleted: drop every link, zero the size and
-        // block count, and stamp `i_dtime` so a checker treats it as a
-        // freed inode rather than a live but unreferenced one.
-        put_le16(&mut raw, INODE_LINKS, 0);
-        put_le32(&mut raw, 0x04, 0);
-        put_le32(&mut raw, 0x6C, 0);
-        put_le32(&mut raw, INODE_BLOCKS_LO, 0);
-        put_le32(&mut raw, INODE_DTIME, DELETED_DTIME);
-        self.write_inode_raw(child, &mut raw)?;
+        self.drop_one_name(child, &mut raw, is_dir)?;
         self.remove_dirent(dir_ino, name)?;
-        self.free_inode(child, is_dir)?;
         if is_dir {
             let mut draw = [0u8; MAX_BLOCK_SIZE as usize];
             self.read_inode_raw(dir_ino, &mut draw)?;

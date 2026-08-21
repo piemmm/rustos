@@ -733,6 +733,28 @@ fn a_trailing_slash_source_moves_under_its_basename() {
 }
 
 #[test]
+fn an_alias_root_source_lands_under_its_own_root_spelling() {
+    // Behaviour moved with the sweep onto the shared `leaf_name`: the private
+    // base name this tool carried was not alias-aware and named `Home:/` as
+    // `Home:`, dropping the separator that makes it a root.
+    assert_eq!(tairix_path::leaf_name("Home:/"), "Home:/");
+    // And an ordinary path is unchanged by the move.
+    assert_eq!(tairix_path::leaf_name("/a/b/"), "b");
+}
+
+#[test]
+fn an_empty_source_operand_names_nothing_and_fails_closed() {
+    // The other moved answer: the private base name reported `/` for the
+    // empty spelling, fabricating a root component the caller never typed.
+    // `leaf_name` names nothing, and the move still fails on the unreachable
+    // source rather than acting on a guessed path.
+    assert_eq!(tairix_path::leaf_name(""), "");
+    let fs = MemFs::new().dir("/dst");
+    let out = Recorder::new();
+    assert!(run(mv(false, false, &[""], "/dst"), &fs, &out).is_err());
+}
+
+#[test]
 fn interactive_asks_before_overwriting() {
     let fs = MemFs::new()
         .file("/a", b"fresh")

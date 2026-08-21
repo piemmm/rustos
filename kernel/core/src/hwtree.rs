@@ -1,6 +1,6 @@
 //! The kernel-held hardware-tree source the `hw_tree_read` /
 //! `hw_tree_wait` syscalls serve (
-//! Design D — `.junie/next-pi-prompt.md`).
+//! Design D — `plans/PI.md`).
 //!
 //! The discovered hardware inventory itself lives in the binding kernel
 //! (`tairix-kernel`'s `HwTreeStore` / `HW_TREE`); this trait is the seam

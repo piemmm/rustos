@@ -1200,7 +1200,7 @@ IRQ-masked section no maskable sample can see.
 
 **Decision (build the masked-section sampler):** the non-maskable **FIQ
 self-sample** is the tool this evidence calls for, staged B1–B4 (full design +
-the decisive `DAIF.F` constraint in `.junie/fix-details.md`). The blocking
+the decisive `DAIF.F` constraint in this plan). The blocking
 constraint was that aarch64 already masks `DAIF.F` in *every* section the wedge
 lives in (exception entry masks F in hardware; `enable_irq` clears I-only;
 `IrqSafeSpinLock`'s `DaifIrqControl` masks I+F), so an effective FIQ sample

@@ -1,16 +1,18 @@
-# SYMLINKS — first-class symbolic links
+# SYMLINKS — first-class links
 
 Binding under `AGENTS.md` (§3, §15.18). This plan owns everything about
-symbolic links: the ABI kind and flag, the two syscalls, the driver
-contract, VFS resolution, the on-disk spellings per format, and the userland
-surface. It exists because nothing in the tree had links — no `FileKind`, no
-syscall, no `NodeKind`, no on-disk kind — and a desktop shortcut is a symlink
-to an app bundle (`plans/PINBOARD.md`, `plans/NEW-TASKBAR.md` T16).
+links, symbolic and hard: the ABI kind and flag, the syscalls, the driver
+contract, VFS resolution, the on-disk spellings per format, the link-count
+lifecycle, and the userland surface. It exists because nothing in the tree
+had links at all — no `FileKind`, no syscall, no `NodeKind`, no on-disk kind
+— and a desktop shortcut is a symlink to an app bundle
+(`plans/PINBOARD.md`, `plans/NEW-TASKBAR.md` T16).
 
-`done` — **S1–S5 complete.** The settled decisions and bounds below are
+`done` — **S1–S6 complete.** The settled decisions and bounds below are
 binding on anything that touches a link; each stage's section records what
-that part now guarantees. The one thing this plan deliberately does *not*
-answer is hard links (see "Open").
+that part now guarantees. Hard links were an open User decision, were
+approved, and have landed, so this plan's subject is links generally rather
+than only the symbolic kind.
 
 ## Read first (§15.18)
 
@@ -73,10 +75,11 @@ answer is hard links (see "Open").
    `create_link`.
 
 8. **A format without links refuses, never approximates.**
-   `FilesystemRead::read_link` and `FilesystemWrite::create_link` default to
-   `Unsupported`, so a driver that stores no links fails closed rather than
-   substituting a copy, an empty file, or a file whose contents merely look
-   like a path.
+   `FilesystemRead::read_link`, `FilesystemWrite::create_link`, and
+   `FilesystemWrite::link` all default to `Unsupported`, so a driver that
+   stores no link of the asked-for kind fails closed rather than substituting
+   a copy, an empty file, a file whose contents merely look like a path, or —
+   for a second name — a second file that diverges on the next write.
 
 9. **Links are refused where following one would defeat a security
    boundary**: inside an app bundle (§16.5 — the bundle is self-contained and
@@ -278,17 +281,13 @@ it decodes.
 planner over three seams (`FileSystem`/`Prompt`/`Output`), so every operand
 and replacement decision is host-provable.
 
-**Hard links do not exist in this ABI, so `-s` is required.** There is no
-`fs_link` syscall and no driver call behind one, so `ln` without `-s` has
-nothing to create: it reports that permanent limit before touching anything
-rather than quietly making a symbolic link, which is a different object. The
-hard-link-only switches (`-L`, `-P`, `-d`, `-F`) are refused for the same
-reason; `-b`/`-S` because no backup machinery exists anywhere in the tree
-(`cp`/`mv` omit them too); and `-r` because a target relative to the link's
+**`-s` chooses the kind; the switches that do not depend on a kind stay
+refused.** `-b`/`-S` because no backup machinery exists anywhere in the tree
+(`cp`/`mv` omit them too), and `-r` because a target relative to the link's
 own directory needs a canonicalising resolution the ABI does not offer, and a
 *lexical* one would name a different node the moment a link were involved —
-decision 4's own trap. Whether hard links should exist at all is an open
-question for the User (see "Open" below).
+decision 4's own trap. (S6 made `-L`/`-P`/`-d`/`-F` real; this stage shipped
+`-s` alone.)
 
 **A replacement removes the name first.** `-f`, and an approved `-i`, unlink
 the existing name *before* creating the link — a create or truncate follows a
@@ -352,7 +351,8 @@ stat. One directory read serves both walks, each taking the reading it needs.
 
 `lib/path` grew the two spellings this stage needed in more than one place —
 `leaf_name` and `join` — rather than a fifth private `basename` and a twelfth
-private `join` (§2.2). The remaining private copies are noted under "Open".
+private `join` (§2.2). The private copies elsewhere in the tree have since
+been swept onto those two.
 
 A **`posix_fs_suite` symlink vertical** (`tests/symlink.rs`, 21 cases) drives
 the matrix against a real ARXFS volume: create/readlink round trip (a
@@ -434,29 +434,95 @@ opened.
 
 ---
 
+## Stage S6 — hard links — **landed**
+
+A second name for one inode: `fs_link` (**115**), `FilesystemWrite::link`
+defaulting to `Unsupported`, the `link_via`/`link_via_secured` VFS pair with
+an audited `FsAuditDetail::Link` handler, and a count carried up from the
+driver (`NodeInfo::nlink` → `FileStat::nlink` → `ls -l`'s second column)
+rather than invented in the VFS, which could not count names without walking
+every directory on the volume.
+
+**The follow posture is an operand, because the tool needs both readings.**
+`LinkFlags::FOLLOW` selects between POSIX `link()` (empty: neither final
+component followed, so the inode that gains a name is the one the caller
+spelled and a planted link cannot redirect it) and
+`linkat(AT_SYMLINK_FOLLOW)` (`ln -L`). The *new* name is never followed under
+either: it is a name being created, and a create never replaces one. A link
+with only one of those postures would have been the incomplete core §27
+forbids, and the flag has its caller in the same change, so it is not
+speculative surface.
+
+**The load-bearing work is the lifecycle, not the create.** `arxfs::unlink`
+freed the inode and every block unconditionally; it now decrements `nlink`
+and frees only at zero, through the one `drop_name` a rename's replacement
+path shares. The rule is uniform across kinds because `.`/`..` are real
+entries: an inode's count is how many directory entries name it. Everything
+that walks the *inode* tree was already correct for a multiply-named node —
+the allocation-map rebuild, `scrub`, and `rescue` each visit it once — so
+only `check`, which walks names, gained work: it counts the entries naming
+each inode and rewrites a stored count that disagrees, the analogue of
+widening an understated feature word.
+
+That lifecycle is exactly why a link-unaware reader must be kept out, so a
+volume holding a hard link declares `INCOMPAT_HARDLINKS` (`1 << 1`), set by
+the first one in that transaction and rolled back with it. The argument is
+**stronger** than S3's: such a reader would not misread a second name, it
+would free an inode the other name still reaches.
+
+**Refusals, each with its own answer.** A directory is refused in the VFS
+rather than per format (`Errno::IsADirectory`) because the tree staying a
+tree is what makes decision 4's physical `..` well-defined; a pair crossing a
+mount is `Errno::CrossVolume`, through the *same* `delegate_pair_context` a
+rename uses, for the same reason; and an overflow of the format's fixed
+per-inode count is `Errno::TooManyLinks` rather than a wrap whose zero would
+free live data. `IsADirectory` (43) and `TooManyLinks` (44) are new; the
+first also retires the documented collapse of `VfsError::IsADirectory` onto
+`Errno::OutOfRange`, which existed only because no dedicated code did.
+
+Per format: ARXFS creates them; FAT32 and ADFS have no such object and
+refuse, reporting `NodeInfo::SINGLE_NAME`. **ext4 reports the
+`i_links_count` it reads and authors none** — and its unlink now honours that
+count, which closed a real defect in passing: it zeroed the count and freed
+the inode outright, so unlinking one name of a hard-linked file on a *foreign*
+ext4 volume destroyed data the other name still reached.
+
+`ln` makes both kinds and gained real `-L`/`-P`/`-d`/`-F`; `ls -l` gained the
+link-count column and both tools lost their divergence notes. `-b`/`-S` and
+`-r`/`--relative` stay refused for their own reasons, which are not about
+hard links.
+
+Tests: two names reach one inode and one `FileId`; a write through one is
+visible through the other; unlinking one leaves the other readable with its
+blocks allocated and unlinking the last frees both; the count is reported and
+moves with each name; a directory, a cross-volume pair, a taken name, a
+missing source and an over-`u32` count are each refused with nothing created;
+both postures over a symbolic link (the link itself versus its target), and a
+dangling one with nothing to follow to; the feature bit declared on first use,
+absent after a rollback, and refusing an unsupported mount; `check` correcting
+a drifted count and leaving a sound volume alone; `scrub` and `rescue`
+visiting a twice-named inode once; ext4's foreign-volume unlink keeping the
+survivor readable across a remount; FAT32 and ADFS refusing both link calls;
+the handler's audit record on success and refusal; and a **`posix_fs_suite`
+hard-link vertical** (`tests/link.rs`, 14 cases) driving the matrix against a
+real ARXFS volume.
+
+---
+
 ## Open — raised, not buried
 
-1. **Hard links do not exist, and nothing decides whether they should.**
-   There is no `fs_link` syscall, no driver `create_hard_link`, and no VFS
-   path, so `ln` refuses the operation as a permanent limit (above) — the
-   honest declared answer, and complete for `ln -s`. But `plans/APPS.md`
-   §12.1 Stage E envisages "symbolic/hard-link support", and ARXFS inodes
-   already carry an `nlink` field. Whether to add them is a **User
-   decision**, not an implementation detail: it is a new syscall, a new
-   driver-trait method, a per-format spelling (with FAT32/ADFS/ext4
-   refusals), the `.` / `..` accounting interaction, and the whole
-   "unlinking one name of many" lifecycle — a stage on the scale of S1–S3,
-   not a corner of S4. Until it is decided, `ln`'s refusal and the absent
-   `ls -l` link-count column are the documented state.
-
-2. **`basename`/`join` are still duplicated outside this change's blast
-   radius.** `lib/path` now owns `leaf_name` and `join`, and the crates this
-   stage touched use them, but nine private `join(parent, name)` copies
-   remain (`chmod`, `chown`, `rm`, `du`, `setcap`, `cp`, `getcap`, `mv`,
-   `lib/appload`) along with three private `basename`s (`cp`, `mv`, and the
-   `basename` app's own `basename_of`). Converting them is a mechanical §2.2
-   sweep across nine unrelated crates; it is deliberately **not** smuggled
-   into a symlink change.
+1. **`du` does not deduplicate a multiply-named file.** S6 made hard links
+   real, so a file reached through two names is now counted twice by `du` —
+   GNU `du` counts each inode once and `-l` opts out of that. The fix needs a
+   node identity on the **userland** `fs_readdir` record to key a seen-set on:
+   `tairix_abi::DirEntry` (the wire record `ls`/`du` decode) carries kind,
+   size, allocation, and mtime but no `FileId`, so `du` cannot tell two names
+   for one inode from two files. Widening that record is an ABI change with
+   its own encode/decode, fuzz, driver, and C-header work, and the seen-set
+   must be bounded rather than one entry per inode on a 100 TB volume (§24.1,
+   §26.6) — a stage of its own, not a corner of S6. Until it lands, `du`'s
+   `Help/` and README document the divergence and the GNU link-deduplication
+   switches stay absent rather than stubbed.
 
 ---
 
@@ -476,9 +542,21 @@ covered by the tests its stage lists.
   stores it, cannot bypass a permission check on any directory the walk
   traverses, and a cycle or an over-budget chain is `LinkLoop` rather than
   walked. `..` after a link resolves physically.
-- **A format without links refuses rather than approximates**, and the
-  per-format support table in `docs/src/filesystem/overview.md` is the one
-  statement of which does what.
+- **A format without links refuses rather than approximates**, for either
+  kind, and the per-format support table in
+  `docs/src/filesystem/overview.md` is the one statement of which does what.
+- **A node's storage outlives every name but the last.** The count is the
+  format's own, read and never derived, and the free happens at zero through
+  one shared path — so no unlink can destroy data another name still reaches,
+  and a reader that does not understand that is kept out by a feature bit.
+- **A directory has exactly one name, everywhere.** The refusal is the VFS's
+  rather than each driver's, which is what keeps decision 4's physical `..`
+  well-defined; each driver refuses too, because it owns the same invariant
+  for its own tree.
+- **Neither link kind can span two volumes.** A symbolic link's resolution
+  cannot escape the volume that stores it (decision 5), and a hard link's two
+  names must resolve under one mounted volume — the same `CrossVolume` a
+  rename gives, through the same check.
 - **Docs land with the code:** this plan, the §15.18 jump-sheet row,
   `docs/src/filesystem/{overview,arxfs-spec}.md` for the VFS and ARXFS
   spellings, `docs/src/desktop/{apps,taskbar,session}.md` for the userland

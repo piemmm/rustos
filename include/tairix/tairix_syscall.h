@@ -138,6 +138,7 @@ extern "C" {
 #define TAIRIX_SYS_FUTEX_WAKE 112u
 #define TAIRIX_SYS_FS_SYMLINK 113u
 #define TAIRIX_SYS_FS_READLINK 114u
+#define TAIRIX_SYS_FS_LINK 115u
 
 /* wait() flag bits (uint32_t). Every undefined bit is reserved and must be zero;
 * with the NONBLOCK bit set, wait() polls and returns TAIRIX_E_WOULD_BLOCK when a
@@ -216,6 +217,14 @@ typedef struct tairix_spawn_attach {
 * directory (the atomic rmdir posture) and a non-directory is refused with
 * TAIRIX_E_NOT_A_DIRECTORY. */
 #define TAIRIX_UNLINK_FLAG_DIRECTORY 0x1u
+
+/* fs_link() flag bits (uint32_t). Every undefined bit is reserved and rejected
+* with TAIRIX_E_OUT_OF_RANGE. 0 is POSIX link(): neither operand's final
+* component is followed, so the node that gains a name is the one spelled. With
+* the FOLLOW bit the existing name's final symbolic link is resolved and the new
+* name is given to what it names (the linkat(AT_SYMLINK_FOLLOW) posture). The new
+* name is never followed under either. */
+#define TAIRIX_LINK_FLAG_FOLLOW 0x1u
 
 /* fs_set_mode() permission-bit mask (the `mode` argument, uint32_t): the
 * owner/group/other rwx triads plus the setuid/setgid/sticky bits. A mode
@@ -405,6 +414,7 @@ int32_t tairix_sys_futex_wait(void * a0, uint32_t a1, uint64_t a2);
 uint64_t tairix_sys_futex_wake(void * a0, uint32_t a1);
 int32_t tairix_sys_fs_symlink(void * a0, uintptr_t a1, void * a2, uintptr_t a3);
 uint64_t tairix_sys_fs_readlink(void * a0, uintptr_t a1, void * a2, uintptr_t a3);
+int32_t tairix_sys_fs_link(void * a0, uintptr_t a1, void * a2, uintptr_t a3, uint32_t a4);
 
 #ifdef __cplusplus
 } /* extern "C" */

@@ -1,6 +1,6 @@
 //! The freestanding aarch64 test kernel: prove the `lib/sandbox`
 //! parser-sandbox seam end to end over the S8a kernel sandbox spawn mode
-//! (`docs/src/security/sandbox.md`; `.junie/fstree-next-plan.md` S8b).
+//! (`docs/src/security/sandbox.md`; `plans/APPS.md` S8b).
 //!
 //! Unlike the bespoke micro-kernel harnesses, every syscall here runs the
 //! production `KernelDispatchHook` / `KernelSyscallHandlers` path: the

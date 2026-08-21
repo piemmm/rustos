@@ -5,7 +5,7 @@ capabilities are **granted, delegated, exercised, and revoked** across a real
 session: logging in, navigating the filesystem, running programs, reading and
 writing files, administering the system, and (later) using the desktop.
 `AGENTS.md` is binding — read it, `PLAN.md`, `plans/SPAWN.md`,
-`plans/SHELL.md`, and `.junie/PREREQUISITES2.md` first. Every rule in this
+`plans/SHELL.md`, and `plans/SHELL.md` first. Every rule in this
 file is binding too. One fully-gated increment (one `CU`-stage) per landing.
 
 **Note:** `abi-v1` is *not* frozen — the standing task direction supersedes

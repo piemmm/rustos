@@ -19,11 +19,12 @@ The default measure is each node's **allocated** on-disk bytes (the
 compressed files report what they really occupy; block counts round up
 through the shared GNU size vocabulary in `lib/util`
 (`tairix_util::size`), the same definition `df` renders with. Documented
-divergences from GNU `du`: TAIRiX has no hard links yet
-(`plans/APPS.md` Stage E), so there is nothing for `-l`/hard-link
-deduplication to do and the switches do not exist; there are no device
-ids, so `-x`/`--one-file-system` is staged behind that kernel work
-rather than stubbed; and the `DU_BLOCK_SIZE`-family environment
+divergences from GNU `du`: a multiply-named file is not yet deduplicated
+(the userland `fs_readdir` record carries no node identity to key a
+seen-set on, `plans/SYMLINKS.md` "Open"), so one reached through two
+names counts once per name and the GNU link-deduplication switches do
+not exist; there are no device ids, so `-x`/`--one-file-system` is
+staged behind that kernel work rather than stubbed; and the `DU_BLOCK_SIZE`-family environment
 variables are not read — the scale is selected by options alone.
 
 The crate is `no_std` (with `alloc`), has no `unsafe`, and no

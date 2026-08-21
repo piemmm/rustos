@@ -1030,6 +1030,7 @@ impl<B: Block> Adfs<B> {
         if node_is_dir(node) {
             Ok(NodeInfo {
                 kind: NodeKind::Directory,
+                nlink: NodeInfo::SINGLE_NAME,
                 size: 0,
                 allocated,
                 times,
@@ -1037,6 +1038,7 @@ impl<B: Block> Adfs<B> {
         } else {
             Ok(NodeInfo {
                 kind: NodeKind::RegularFile,
+                nlink: NodeInfo::SINGLE_NAME,
                 size: u64::from(size),
                 allocated,
                 times,

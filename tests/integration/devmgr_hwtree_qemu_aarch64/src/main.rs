@@ -1,4 +1,4 @@
-//! Design D P-3 QEMU integration test (`.junie/next-pi-prompt.md`): boot the
+//! Design D P-3 QEMU integration test (`plans/PI.md`): boot the
 //! production aarch64 (Raspberry Pi 4) `tairix-kernel` pipeline on the `virt`
 //! board, have PID 1 (`init`) launch the **perpetual device-manager service**
 //! (`/System/Services/devmgr.app/Run`), and prove the service's

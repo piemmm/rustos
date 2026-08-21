@@ -270,6 +270,11 @@ pub enum VfsError {
     /// Resolution stops and nothing is opened, read, or written, so a link
     /// cycle can never be walked until the kernel runs out of stack.
     LinkLoop,
+    /// A node already carries as many names as its format can record, so it
+    /// cannot be given another. A fixed on-disk bound, not a capacity: the
+    /// create fails closed rather than wrapping a count whose zero would
+    /// free storage another name still reaches.
+    TooManyLinks,
 }
 
 impl VfsError {
@@ -281,9 +286,11 @@ impl VfsError {
     /// existing directory), a non-directory where a directory is required is
     /// [`Errno::NotADirectory`] (`ENOTDIR`), and a populated directory is
     /// [`Errno::NotEmpty`] (`ENOTEMPTY` — `rmdir --ignore-fail-on-non-empty`
-    /// tolerates exactly this). `abi-v1` has no dedicated `EISDIR`/`EINVAL`,
-    /// so those collapse onto [`Errno::OutOfRange`]; the read-only refusal
-    /// is reported as [`Errno::PermissionDenied`]. An unrecoverable backing
+    /// tolerates exactly this), and a directory where one is forbidden is
+    /// [`Errno::IsADirectory`] (`EISDIR`). `abi-v1` has no dedicated
+    /// `EINVAL`, so a malformed path or attribute key collapses onto
+    /// [`Errno::OutOfRange`]; the read-only refusal is reported as
+    /// [`Errno::PermissionDenied`]. An unrecoverable backing
     /// fault ([`Self::Io`]) is [`Errno::DeviceFault`] — the `EIO` analogue,
     /// and what a surprise-removed volume's operations report — mirroring
     /// how [`DriverError::DeviceFault`](tairix_abi::driver::DriverError)
@@ -293,7 +300,8 @@ impl VfsError {
         match self {
             Self::NotFound => Errno::NotFound,
             Self::PermissionDenied | Self::ReadOnly => Errno::PermissionDenied,
-            Self::InvalidPath | Self::IsADirectory | Self::InvalidKey => Errno::OutOfRange,
+            Self::InvalidPath | Self::InvalidKey => Errno::OutOfRange,
+            Self::IsADirectory => Errno::IsADirectory,
             Self::NotADirectory => Errno::NotADirectory,
             Self::AlreadyExists => Errno::AlreadyExists,
             Self::NotEmpty => Errno::NotEmpty,
@@ -306,6 +314,7 @@ impl VfsError {
             Self::NoSpace => Errno::NoSpace,
             Self::NotSupported => Errno::NotSupported,
             Self::LinkLoop => Errno::LinkLoop,
+            Self::TooManyLinks => Errno::TooManyLinks,
         }
     }
 }
@@ -322,6 +331,7 @@ impl fmt::Display for VfsError {
             Self::PermissionDenied => "permission denied",
             Self::ReadOnly => "read-only mount",
             Self::LinkLoop => "too many symbolic links in path resolution",
+            Self::TooManyLinks => "too many links",
             Self::CrossVolume => "paths on different volumes",
             Self::Io => "filesystem driver i/o error",
             Self::InvalidKey => "invalid attribute key",
@@ -347,7 +357,7 @@ mod tests {
             Errno::PermissionDenied
         );
         assert_eq!(VfsError::InvalidPath.to_errno(), Errno::OutOfRange);
-        assert_eq!(VfsError::IsADirectory.to_errno(), Errno::OutOfRange);
+        assert_eq!(VfsError::IsADirectory.to_errno(), Errno::IsADirectory);
         assert_eq!(VfsError::AlreadyExists.to_errno(), Errno::AlreadyExists);
         assert_eq!(VfsError::NotADirectory.to_errno(), Errno::NotADirectory);
         assert_eq!(VfsError::NotEmpty.to_errno(), Errno::NotEmpty);
@@ -357,6 +367,7 @@ mod tests {
         assert_eq!(VfsError::BufferTooSmall.to_errno(), Errno::BufferTooSmall);
         assert_eq!(VfsError::NoSpace.to_errno(), Errno::NoSpace);
         assert_eq!(VfsError::NotSupported.to_errno(), Errno::NotSupported);
+        assert_eq!(VfsError::TooManyLinks.to_errno(), Errno::TooManyLinks);
         assert_eq!(VfsError::Io.to_errno(), Errno::DeviceFault);
     }
 

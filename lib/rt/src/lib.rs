@@ -358,6 +358,7 @@ const NUM_FS_SYMLINK: u64 = SyscallNumber::FS_SYMLINK.as_u16() as u64;
 
 /// `fs_readlink` syscall number (as above).
 const NUM_FS_READLINK: u64 = SyscallNumber::FS_READLINK.as_u16() as u64;
+const NUM_FS_LINK: u64 = SyscallNumber::FS_LINK.as_u16() as u64;
 
 /// `fs_set_mode` syscall number (as above).
 const NUM_FS_SET_MODE: u64 = SyscallNumber::FS_SET_MODE.as_u16() as u64;
@@ -4244,6 +4245,48 @@ pub fn fs_symlink(target: &[u8], link: &[u8]) -> i64 {
     ret as i64
 }
 
+/// Add the absolute `link` as a second name for the node the absolute
+/// `existing` already names (`SyscallNumber::FS_LINK`, the `link(2)` shape).
+///
+/// A hard link, not a symbolic one: both names reach the same node, so a
+/// write through either is visible through the other and the node's storage
+/// survives until the last name is unlinked. With an empty `flags` **neither
+/// final component is followed** — the node that gains a name is the one
+/// spelled, never one a symbolic link redirects to (POSIX `link()`).
+/// [`LinkFlags::FOLLOW`](tairix_abi::LinkFlags::FOLLOW) is the
+/// `linkat(AT_SYMLINK_FOLLOW)` posture, resolving the existing name's final
+/// link; the new name is never followed under either.
+///
+/// Both paths must lie on one mounted volume (`Errno::CrossVolume`
+/// otherwise), a directory is refused (`Errno::IsADirectory`), a node whose
+/// format-recorded name count would overflow is refused
+/// (`Errno::TooManyLinks`), and a format holding one name per node refuses
+/// with `Errno::NotSupported`. The new name confers no authority the caller
+/// did not already hold over the node. Returns `0` on success or `-errno`.
+#[must_use]
+#[allow(clippy::cast_possible_wrap)] // The kernel guarantees the i64 errno-result encoding (0, else -errno).
+pub fn fs_link(existing: &[u8], link: &[u8], flags: tairix_abi::LinkFlags) -> i64 {
+    let existing_ptr = existing.as_ptr() as usize as u64;
+    let link_ptr = link.as_ptr() as usize as u64;
+    // SAFETY: `raw_syscall` is always safe to invoke; the kernel validates
+    // both `(ptr, len)` pairs against the caller's address space before
+    // reading them. `existing`/`link` are live shared slices for the call.
+    let ret = unsafe {
+        raw_syscall(
+            NUM_FS_LINK,
+            [
+                existing_ptr,
+                existing.len() as u64,
+                link_ptr,
+                link.len() as u64,
+                u64::from(flags.bits()),
+                0,
+            ],
+        )
+    };
+    ret as i64
+}
+
 /// Read the stored target of the symbolic link at the absolute `path` into
 /// `out` (`SyscallNumber::FS_READLINK`, the `readlink(2)` shape).
 ///
@@ -6901,6 +6944,7 @@ mod tests {
     fn file_stat_decodes_the_record() {
         let stat = FileStat {
             kind: tairix_abi::FileKind::Regular,
+            nlink: 1,
             size: 1234,
             allocated: 4096,
             mode: 0o644,

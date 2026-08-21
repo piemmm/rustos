@@ -151,6 +151,7 @@ const NUM_FS_UNLINK: u64 = SyscallNumber::FS_UNLINK.as_u16() as u64;
 const NUM_FS_RENAME: u64 = SyscallNumber::FS_RENAME.as_u16() as u64;
 const NUM_FS_SYMLINK: u64 = SyscallNumber::FS_SYMLINK.as_u16() as u64;
 const NUM_FS_READLINK: u64 = SyscallNumber::FS_READLINK.as_u16() as u64;
+const NUM_FS_LINK: u64 = SyscallNumber::FS_LINK.as_u16() as u64;
 const NUM_FS_SET_MODE: u64 = SyscallNumber::FS_SET_MODE.as_u16() as u64;
 const NUM_FS_SET_OWNER: u64 = SyscallNumber::FS_SET_OWNER.as_u16() as u64;
 const NUM_FS_ATTR_GET: u64 = SyscallNumber::FS_ATTR_GET.as_u16() as u64;
@@ -2417,6 +2418,44 @@ pub extern "C" fn sys_fs_symlink(
     }
 }
 
+/// `fs_link`: add the absolute path `(link, link_len)` as a second name for
+/// the node the absolute path `(existing, existing_len)` already names — a
+/// hard link (`SyscallNumber::FS_LINK`). Returns a `TAIRIX_E_*` code.
+///
+/// Requires `TAIRIX_CAP_FS_ACCESS`. With `flags` zero neither path's final
+/// component is followed, so the node that gains a name is the one spelled
+/// rather than one a symbolic link redirects to (POSIX `link()`);
+/// `TAIRIX_LINK_FOLLOW` is the `linkat(AT_SYMLINK_FOLLOW)` posture and
+/// resolves the existing name's final link. Both names must resolve under
+/// one mounted volume, a directory is refused, and the new name confers no
+/// authority the caller did not already hold over the node. The kernel
+/// validates both `(ptr, len)` pairs against the caller's address space
+/// before reading them, and rejects any reserved `flags` bit.
+#[must_use]
+#[export_name = "tairix_sys_fs_link"]
+pub extern "C" fn sys_fs_link(
+    existing: *mut c_void,
+    existing_len: usize,
+    link: *mut c_void,
+    link_len: usize,
+    flags: u32,
+) -> i32 {
+    // SAFETY: see `sys_ipc_send`; the kernel validates both `(ptr, len)`.
+    unsafe {
+        ret_i32(raw_syscall(
+            NUM_FS_LINK,
+            [
+                ptr_arg(existing),
+                existing_len as u64,
+                ptr_arg(link),
+                link_len as u64,
+                u64::from(flags),
+                0,
+            ],
+        ))
+    }
+}
+
 /// `fs_readlink`: read the target of the symbolic link at the absolute path
 /// `(path, path_len)` into `(out, out_len)` (`SyscallNumber::FS_READLINK`).
 /// Returns the target's length in bytes, or a negated `TAIRIX_E_*` code.
@@ -2929,6 +2968,7 @@ mod tests {
         (NUM_FS_RENAME, "fs_rename", 4),
         (NUM_FS_SYMLINK, "fs_symlink", 4),
         (NUM_FS_READLINK, "fs_readlink", 4),
+        (NUM_FS_LINK, "fs_link", 5),
         (NUM_CALL_PEER_ORIGIN, "call_peer_origin", 4),
         (NUM_WALL_TIME_GET, "wall_time_get", 2),
         (NUM_WALL_TIME_SET, "wall_time_set", 3),
@@ -4203,6 +4243,35 @@ mod tests {
         assert_eq!(args[2], link_ptr as usize as u64);
         assert_eq!(args[3], link.len() as u64);
         assert_eq!(&args[4..], &[0, 0]);
+    }
+
+    #[test]
+    fn fs_link_marshals_the_existing_name_then_the_new_one() {
+        // Existing-name-first, matching the syscall spec: a transposition
+        // here would try to give the node that does not exist yet a name.
+        let mut existing = *b"/Users/me/notes";
+        let mut link = *b"/Users/me/notes.alias";
+        let existing_ptr = existing.as_mut_ptr().cast::<c_void>();
+        let link_ptr = link.as_mut_ptr().cast::<c_void>();
+        let (number, args) = capture(0, || {
+            assert_eq!(
+                sys_fs_link(
+                    existing_ptr,
+                    existing.len(),
+                    link_ptr,
+                    link.len(),
+                    tairix_abi::LinkFlags::FOLLOW.bits()
+                ),
+                0
+            );
+        });
+        assert_eq!(number, NUM_FS_LINK);
+        assert_eq!(args[0], existing_ptr as usize as u64);
+        assert_eq!(args[1], existing.len() as u64);
+        assert_eq!(args[2], link_ptr as usize as u64);
+        assert_eq!(args[3], link.len() as u64);
+        assert_eq!(args[4], u64::from(tairix_abi::LinkFlags::FOLLOW.bits()));
+        assert_eq!(args[5], 0);
     }
 
     #[test]

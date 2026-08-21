@@ -89,7 +89,7 @@ those.
 
 The enrolled **QEMU guests** under `tests/integration/` are test support rather
 than product and are deliberately *not* in this gate; that gap is staged in
-`.junie/next-ai-codereview.md`.
+`plans/CODEVERIFY.md`.
 
 The stratum split is load-bearing, not cosmetic. Cargo unifies features across
 every package named in one invocation, so naming the kernel binary alongside

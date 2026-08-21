@@ -16,12 +16,13 @@ use core::time::Duration;
 use tairix_abi::{Errno, FileKind};
 use tairix_curses::{Event, InputMode, Pos, Screen, Tty, Window};
 use tairix_glob::Pattern;
+use tairix_path::join;
 use tairix_sandbox::decode::{Isa, RegionKind, MAX_INPUT};
 
 use crate::fs::Fs;
 use crate::info::{note_hidden_entries, Info};
 use crate::model::{
-    child_dirs_of, join, merge_child_dirs, AttrEditPrompt, AttrEntries, AttrsView, BatchPrompt,
+    child_dirs_of, merge_child_dirs, AttrEditPrompt, AttrEntries, AttrsView, BatchPrompt,
     ConfirmPrompt, DirNode, InputOp, InputPrompt, IsaPrompt, IsaPurpose, ModePrompt, Model,
     NameFilter, OpenAsPrompt, Overlay, OverwritePrompt, Pane, Prompt, RepeatOp, SortKey, View,
     Viewer, ViewerKind,

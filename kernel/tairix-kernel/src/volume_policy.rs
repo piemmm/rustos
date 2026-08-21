@@ -110,6 +110,10 @@ impl<F> GroupMappedFs<F> {
 }
 
 impl<F: FilesystemRead> FilesystemRead for GroupMappedFs<F> {
+    fn read_link(&mut self, node: NodeId, out: &mut [u8]) -> Result<usize, DriverError> {
+        self.inner.read_link(node, out)
+    }
+
     fn root(&self) -> NodeId {
         self.inner.root()
     }
@@ -139,6 +143,19 @@ impl<F: FilesystemRead> FilesystemRead for GroupMappedFs<F> {
 impl<F: FilesystemRead + FilesystemWrite> FilesystemWrite for GroupMappedFs<F> {
     fn create(&mut self, dir: NodeId, name: &[u8], kind: NodeKind) -> Result<NodeId, DriverError> {
         self.inner.create(dir, name, kind)
+    }
+
+    fn create_link(
+        &mut self,
+        dir: NodeId,
+        name: &[u8],
+        target: &[u8],
+    ) -> Result<NodeId, DriverError> {
+        self.inner.create_link(dir, name, target)
+    }
+
+    fn link(&mut self, dir: NodeId, name: &[u8], node: NodeId) -> Result<(), DriverError> {
+        self.inner.link(dir, name, node)
     }
 
     fn write_at(

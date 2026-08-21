@@ -3887,6 +3887,10 @@ enum FsAuditDetail<'a> {
     Rename { to: &'a str },
     /// A `symlink`: `target` is the path the new link stores.
     Symlink { target: &'a str },
+    /// A `link`: `existing` is the name whose node gains a second one. The
+    /// record's own `path` is the new name, so the pair reads as
+    /// "`existing` also became `path`".
+    Link { existing: &'a str },
     /// A `set_mode` (chmod): `mode` is the new permission word.
     Mode { mode: u32 },
     /// A `set_owner` (chown): the new owner and owning group ids.
@@ -3978,6 +3982,20 @@ fn emit_fs_mutation(
         key: "errno",
         value: tairix_log::FieldValue::Str(errno),
     };
+    // Three mutations name a second path and differ only in the field key
+    // that says what that path is to them, so the record is built once.
+    let emit_second_path = |key: &'static str, value: &str| {
+        let second_f = Field {
+            key,
+            value: tairix_log::FieldValue::Str(audit_path_field(value)),
+        };
+        crate::audit::emit(
+            sink,
+            level,
+            event,
+            &[op_f, uid_f, path_f, second_f, errno_f],
+        );
+    };
     let mut mode_buf = [0u8; 12];
     let mut owner_buf = [0u8; 12];
     let mut group_buf = [0u8; 12];
@@ -3985,25 +4003,9 @@ fn emit_fs_mutation(
         FsAuditDetail::None => {
             crate::audit::emit(sink, level, event, &[op_f, uid_f, path_f, errno_f]);
         }
-        FsAuditDetail::Rename { to } => {
-            let to_f = Field {
-                key: "to",
-                value: tairix_log::FieldValue::Str(audit_path_field(to)),
-            };
-            crate::audit::emit(sink, level, event, &[op_f, uid_f, path_f, to_f, errno_f]);
-        }
-        FsAuditDetail::Symlink { target } => {
-            let target_f = Field {
-                key: "target",
-                value: tairix_log::FieldValue::Str(audit_path_field(target)),
-            };
-            crate::audit::emit(
-                sink,
-                level,
-                event,
-                &[op_f, uid_f, path_f, target_f, errno_f],
-            );
-        }
+        FsAuditDetail::Rename { to } => emit_second_path("to", to),
+        FsAuditDetail::Symlink { target } => emit_second_path("target", target),
+        FsAuditDetail::Link { existing } => emit_second_path("existing", existing),
         FsAuditDetail::Mode { mode } => {
             let mode_f = Field {
                 key: "mode",
@@ -9535,6 +9537,50 @@ where
             uid,
             &link,
             &FsAuditDetail::Symlink { target: &target },
+            outcome,
+        );
+        outcome?;
+        Ok(0)
+    }
+
+    fn fs_link(
+        &self,
+        caller: &CallerContext<'_>,
+        existing: u64,
+        existing_len: usize,
+        link: u64,
+        link_len: usize,
+        flags: tairix_abi::LinkFlags,
+    ) -> SyscallResult {
+        // The dispatcher already checked `CAP_FS_ACCESS`, that both pointers
+        // are non-null `UserPtr`s, and rejected any reserved flag bit. Both
+        // operands are ordinary absolute paths; the directory and
+        // cross-volume refusals are the secured VFS's, and the new name is
+        // authorised as a create in its own parent under the caller's
+        // attested identity.
+        let existing = self.copy_path_in(caller, existing, existing_len)?;
+        let link = self.copy_path_in(caller, link, link_len)?;
+        let existing_link = if flags.follows() {
+            crate::fs::FinalLink::Follow
+        } else {
+            crate::fs::FinalLink::Keep
+        };
+        let uid = caller.caps.owner().0;
+        let outcome = self.filesystem.link(
+            uid,
+            caller.caps.effective(),
+            &existing,
+            &link,
+            existing_link,
+        );
+        emit_fs_mutation(
+            self.audit,
+            "link",
+            uid,
+            &link,
+            &FsAuditDetail::Link {
+                existing: &existing,
+            },
             outcome,
         );
         outcome?;
@@ -16671,6 +16717,17 @@ mod tests {
             path: &str,
         ) -> Result<alloc::string::String, Errno> {
             self.inner.readlink(uid, caps, path)
+        }
+
+        fn link(
+            &self,
+            uid: u32,
+            caps: &dyn tairix_abi::CapabilityQuery,
+            existing: &str,
+            link: &str,
+            existing_link: crate::fs::FinalLink,
+        ) -> Result<(), Errno> {
+            self.inner.link(uid, caps, existing, link, existing_link)
         }
 
         fn truncate(
@@ -33381,6 +33438,7 @@ mod tests {
         sync_err: Option<Errno>,
         /// Refusal a `symlink` reports, or [`None`] to accept the creation.
         symlink_err: Option<Errno>,
+        link_err: Option<Errno>,
         /// Target a `readlink` answers with, or [`None`] to refuse as "not a
         /// symbolic link" (the shape a non-link path produces).
         readlink_target: Option<String>,
@@ -33401,6 +33459,7 @@ mod tests {
                 entries: Vec::new(),
                 stat: FileStat {
                     kind: FileKind::Regular,
+                    nlink: 1,
                     size: 0,
                     allocated: 0,
                     mode: 0o644,
@@ -33413,6 +33472,7 @@ mod tests {
                 write_accept: None,
                 sync_err: None,
                 symlink_err: None,
+                link_err: None,
                 readlink_target: None,
                 sync_stamp: core::sync::atomic::AtomicU64::new(0),
                 busy_endpoints: Vec::new(),
@@ -33551,6 +33611,23 @@ mod tests {
             match self.readlink_target.clone() {
                 Some(target) => Ok(target),
                 None => Err(Errno::OutOfRange),
+            }
+        }
+
+        fn link(
+            &self,
+            uid: u32,
+            _caps: &dyn tairix_abi::CapabilityQuery,
+            existing: &str,
+            link: &str,
+            existing_link: crate::fs::FinalLink,
+        ) -> Result<(), Errno> {
+            self.record(alloc::format!(
+                "link uid={uid} existing={existing} link={link} follow={existing_link:?}"
+            ));
+            match self.link_err {
+                Some(err) => Err(err),
+                None => Ok(()),
             }
         }
 
@@ -34307,6 +34384,7 @@ mod tests {
         let mut mock = RecordingFs::new();
         mock.stat = FileStat {
             kind: FileKind::Regular,
+            nlink: 1,
             size: 0x1234,
             allocated: 0x2000,
             mode: 0o640,
@@ -34487,6 +34565,157 @@ mod tests {
         assert_eq!(field_of(&event, "uid"), "1000");
         assert_eq!(field_of(&event, "path"), link);
         assert_eq!(field_of(&event, "target"), target);
+    }
+
+    /// `fs_link` reaches the service with both paths and the flag-derived
+    /// posture, and audits the mutation with the existing name beside the
+    /// new one.
+    #[test]
+    fn fs_link_reaches_the_service_and_audits_the_mutation() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        // One page holding the existing name then the new one, back to back.
+        let existing = "/Users/me/notes";
+        let link = "/Users/me/alias";
+        let mut staged = alloc::string::String::from(existing);
+        staged.push_str(link);
+        let (space, physmap) = send_aspace(
+            MapFlags::READ | MapFlags::WRITE | MapFlags::USER,
+            staged.as_bytes(),
+        );
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        aspaces
+            .write()
+            .register(ProcessId(2), space, physmap)
+            .expect("registration succeeds");
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let caps = make_caps_record(2, &[CapabilityId::FS_ACCESS], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(2),
+            caps: &caps,
+        };
+        let fs: &'static RecordingFs = Box::leak(Box::new(RecordingFs::new()));
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        )
+        .with_filesystem(fs);
+
+        let link_ptr = 0x1000 + existing.len() as u64;
+        // An empty flag word is POSIX `link()`: neither name is followed.
+        assert_eq!(
+            h.fs_link(
+                &ctx,
+                0x1000,
+                existing.len(),
+                link_ptr,
+                link.len(),
+                tairix_abi::LinkFlags::empty()
+            ),
+            Ok(0)
+        );
+        // `FOLLOW` is the `ln -L` posture and reaches the service as one.
+        assert_eq!(
+            h.fs_link(
+                &ctx,
+                0x1000,
+                existing.len(),
+                link_ptr,
+                link.len(),
+                tairix_abi::LinkFlags::FOLLOW
+            ),
+            Ok(0)
+        );
+        assert_eq!(
+            fs.calls(),
+            alloc::vec![
+                alloc::format!("link uid=1000 existing={existing} link={link} follow=Keep"),
+                alloc::format!("link uid=1000 existing={existing} link={link} follow=Follow"),
+            ],
+            "both paths and the flag-derived posture reached the service"
+        );
+
+        let event = sink
+            .snapshot()
+            .into_iter()
+            .find(|e| e.id == AuditEvent::FsNodeMutated.id())
+            .expect("the mutation is audited");
+        assert_eq!(field_of(&event, "op"), "link");
+        assert_eq!(field_of(&event, "uid"), "1000");
+        // The record's own path is the *new* name; the existing one rides
+        // beside it, so the pair reads as "existing also became path".
+        assert_eq!(field_of(&event, "path"), link);
+        assert_eq!(field_of(&event, "existing"), existing);
+    }
+
+    /// A refused `fs_link` is audited too: no attempt to add a name to a
+    /// node, allowed or denied, escapes the trail.
+    #[test]
+    fn a_refused_fs_link_is_audited_with_its_errno() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let existing = "/Users/me/dir";
+        let link = "/Users/me/alias";
+        let mut staged = alloc::string::String::from(existing);
+        staged.push_str(link);
+        let (space, physmap) = send_aspace(
+            MapFlags::READ | MapFlags::WRITE | MapFlags::USER,
+            staged.as_bytes(),
+        );
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        aspaces
+            .write()
+            .register(ProcessId(2), space, physmap)
+            .expect("registration succeeds");
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let caps = make_caps_record(2, &[CapabilityId::FS_ACCESS], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(2),
+            caps: &caps,
+        };
+        let mut mock = RecordingFs::new();
+        mock.link_err = Some(Errno::IsADirectory);
+        let fs: &'static RecordingFs = Box::leak(Box::new(mock));
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        )
+        .with_filesystem(fs);
+
+        let link_ptr = 0x1000 + existing.len() as u64;
+        assert_eq!(
+            h.fs_link(
+                &ctx,
+                0x1000,
+                existing.len(),
+                link_ptr,
+                link.len(),
+                tairix_abi::LinkFlags::empty()
+            ),
+            Err(Errno::IsADirectory)
+        );
+        let event = sink
+            .snapshot()
+            .into_iter()
+            .find(|e| e.id == AuditEvent::FsMutationDenied.id())
+            .expect("the refusal is audited");
+        assert_eq!(field_of(&event, "op"), "link");
+        assert_eq!(field_of(&event, "path"), link);
+        assert_eq!(field_of(&event, "existing"), existing);
+        assert_eq!(
+            field_of(&event, "errno"),
+            alloc::format!("{}", Errno::IsADirectory as usize)
+        );
     }
 
     /// A refused `fs_symlink` is audited too, carrying the refusal's errno —
@@ -34696,6 +34925,7 @@ mod tests {
         let mut mock = RecordingFs::new();
         mock.stat = FileStat {
             kind: FileKind::Regular,
+            nlink: 1,
             size: 0,
             allocated: 0,
             mode: 0o644,

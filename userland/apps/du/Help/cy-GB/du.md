@@ -28,9 +28,9 @@ Adroddir llwybr na ellir ei ddarllen ar y gwall safonol ac mae'r
 daith yn parhau gyda'r gweddill; nid yw cyfeiriadur annarllenadwy yn
 cyfrannu dim yn hytrach na swm rhannol wedi'i ddyfalu.
 
-Nid oes gan TAIRiX gysylltiadau caled eto, felly ni ellir cyfrif
-unrhyw gofnod ddwywaith ac nid yw switshis dad-ddyblygu cysylltiadau
-GNU yn bodoli; nid yw `-x` (un system ffeiliau) ar gael eto; ni
+Nid yw `du` eto'n dad-ddyblygu ffeil ag iddi fwy nag un enw: cyfrifir un
+y cyrhaeddir ati trwy ddau enw unwaith fesul enw, ac nid yw switshis
+dad-ddyblygu cysylltiadau GNU yn bodoli; nid yw `-x` (un system ffeiliau) ar gael eto; ni
 ddarllenir newidynnau amgylchedd teulu `DU_BLOCK_SIZE` — dewisir y
 raddfa gan opsiynau'n unig.
 

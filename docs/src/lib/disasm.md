@@ -43,7 +43,7 @@ named, not paraphrased.
   loads/stores (register, pair, literal, exclusive/acquire-release), and
   the data-processing register families. SIMD/FP data processing is
   summarised as `.inst` with full operand decode staged
-  (`.junie/fstree-next-plan.md`).
+  (`plans/APPS.md`).
 - **`wasm`** — the structured opcode stream of one code-section body.
   Nesting is a property of the surrounding stream, so `decode` takes the
   current block depth and returns the next one, rendering nesting as

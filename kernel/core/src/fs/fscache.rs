@@ -865,6 +865,14 @@ impl Drop for ReadStage {
 }
 
 impl<F: FilesystemRead> FilesystemRead for CachedFs<F> {
+    /// Passed straight through: a link's target is read once per resolution
+    /// hop and is at most one block, so caching it would spend the metadata
+    /// budget that stat/lookup/dirent entries earn back.
+    fn read_link(&mut self, node: NodeId, out: &mut [u8]) -> Result<usize, DriverError> {
+        self.enforce_pressure();
+        self.inner.read_link(node, out)
+    }
+
     fn root(&self) -> NodeId {
         self.inner.root()
     }
@@ -1059,6 +1067,39 @@ impl<F: FilesystemRead> FilesystemRead for CachedFs<F> {
 }
 
 impl<F: FilesystemRead + FilesystemWrite> FilesystemWrite for CachedFs<F> {
+    /// A new name in `dir`, so the directory's whole lookup set, its entry
+    /// list, and its own stat go — exactly as [`create`](Self::create)
+    /// invalidates them, and for the same reason.
+    fn create_link(
+        &mut self,
+        dir: NodeId,
+        name: &[u8],
+        target: &[u8],
+    ) -> Result<NodeId, DriverError> {
+        self.enforce_pressure();
+        let result = self.inner.create_link(dir, name, target);
+        let dir_raw = dir.raw();
+        self.invalidate_lookups(dir_raw);
+        self.invalidate_dirents(dir_raw);
+        self.invalidate_stat(dir_raw);
+        result
+    }
+
+    /// A second name for `node`: the new name's directory changes as it does
+    /// for any create, **and** the node's own stat changes because its link
+    /// count rose — so both are invalidated or a later stat would report the
+    /// old count.
+    fn link(&mut self, dir: NodeId, name: &[u8], node: NodeId) -> Result<(), DriverError> {
+        self.enforce_pressure();
+        let result = self.inner.link(dir, name, node);
+        let dir_raw = dir.raw();
+        self.invalidate_lookups(dir_raw);
+        self.invalidate_dirents(dir_raw);
+        self.invalidate_stat(dir_raw);
+        self.invalidate_stat(node.raw());
+        result
+    }
+
     fn create(&mut self, dir: NodeId, name: &[u8], kind: NodeKind) -> Result<NodeId, DriverError> {
         self.enforce_pressure();
         let result = self.inner.create(dir, name, kind);

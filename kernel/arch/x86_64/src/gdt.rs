@@ -13,7 +13,7 @@
 //!
 //! What this module does *not* do, and is deliberately split out into
 //! the remaining Stage 3a (c) follow-ups in
-//! `.junie/next-session-prompt.md`:
+//! `plans/WIRING.md`:
 //!
 //!   * Drive AP bring-up: that lives in `kernel/arch/x86_64/src/smp.rs`.
 //!   * Define the ISR prologue / epilogue: the IST slots here are

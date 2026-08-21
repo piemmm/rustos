@@ -34,7 +34,7 @@ mod program {
     use alloc::format;
 
     use tairix_abi::fs::OpenFlags;
-    use tairix_abi::{Errno, FileKind, UnlinkFlags};
+    use tairix_abi::{Errno, FileKind, LinkFlags, UnlinkFlags};
     use tairix_help::BundleHelp;
     use tairix_ln::{parse, run, FileSystem, Occupant, Output, Prompt, USAGE};
     use tairix_rt::io::{self, write_stderr_line, Read, Stderr, Stdin, Stdout, Write};
@@ -93,6 +93,23 @@ mod program {
             // to create a name in the link's own parent; the target itself
             // is stored verbatim and never resolved.
             let ret = tairix_rt::fs_symlink(target.as_bytes(), link.as_bytes());
+            if ret != 0 {
+                return Err(Errno::from_syscall(ret));
+            }
+            Ok(())
+        }
+
+        fn link(&self, target: &str, link: &str, dereference: bool) -> Result<(), Errno> {
+            // Existing name first, then the new one — the `link(2)` argument
+            // order. `-L` selects the `linkat(AT_SYMLINK_FOLLOW)` posture;
+            // without it neither final component is followed, so the inode
+            // that gains a name is the one the operand spelled.
+            let flags = if dereference {
+                LinkFlags::FOLLOW
+            } else {
+                LinkFlags::empty()
+            };
+            let ret = tairix_rt::fs_link(target.as_bytes(), link.as_bytes(), flags);
             if ret != 0 {
                 return Err(Errno::from_syscall(ret));
             }

@@ -19,6 +19,7 @@ use tairix_abi::{
 use tairix_curses::{Event, Pos, Size, Window};
 
 use tairix_log::{Event as LogEvent, Sink};
+use tairix_path::{join, leaf_name};
 use tairix_sandbox::decode::{DecodeService, SymbolRecord, MAX_INPUT};
 use tairix_sandbox::loopback::LoopbackLauncher;
 use tairix_sandbox::ParserSandbox;
@@ -26,10 +27,8 @@ use tairix_sandbox::ParserSandbox;
 use crate::app::{handle_event, refresh_viewer, viewer_tick, walk_tick};
 use crate::fs::{Fs, FsEntry, RenameOutcome, VolumeInfo, VolumeSpace};
 use crate::info::{note_hidden_entries, Info};
-use crate::model::{
-    join, ModePrompt, Model, Overlay, Pane, Prompt, RepeatOp, SortKey, View, Viewer,
-};
-use crate::ops::{basename, is_inside, parent_of};
+use crate::model::{ModePrompt, Model, Overlay, Pane, Prompt, RepeatOp, SortKey, View, Viewer};
+use crate::ops::{is_inside, parent_of};
 use crate::render::render;
 use crate::search::{ContentScan, Needle};
 use crate::settings::{config_path, Settings};
@@ -188,7 +187,7 @@ impl FakeFs {
 
     /// Remove the entry named by `path` from its parent's listing.
     fn drop_entry(&mut self, path: &str) {
-        let (parent, name) = (parent_of(path).to_owned(), basename(path).to_owned());
+        let (parent, name) = (parent_of(path).to_owned(), leaf_name(path).to_owned());
         if let Some(list) = self.dirs.get_mut(&parent) {
             list.retain(|e| e.name != name);
         }
@@ -339,7 +338,7 @@ impl Fs for FakeFs {
         self.upsert_entry(
             parent_of(path),
             FsEntry {
-                name: basename(path).to_owned(),
+                name: leaf_name(path).to_owned(),
                 kind: FileKind::Symlink,
                 size: target.len() as u64,
                 modified: Time64::UNIX_EPOCH,
@@ -372,7 +371,7 @@ impl Fs for FakeFs {
         self.upsert_entry(
             parent_of(path),
             FsEntry {
-                name: basename(path).to_owned(),
+                name: leaf_name(path).to_owned(),
                 kind: FileKind::Regular,
                 size: 0,
                 modified: Time64::UNIX_EPOCH,
@@ -398,7 +397,7 @@ impl Fs for FakeFs {
         self.upsert_entry(
             parent_of(path),
             FsEntry {
-                name: basename(path).to_owned(),
+                name: leaf_name(path).to_owned(),
                 kind: FileKind::Regular,
                 size,
                 modified: Time64::UNIX_EPOCH,
@@ -418,7 +417,7 @@ impl Fs for FakeFs {
         self.upsert_entry(
             parent_of(path),
             FsEntry {
-                name: basename(path).to_owned(),
+                name: leaf_name(path).to_owned(),
                 kind: FileKind::Directory,
                 size: 0,
                 modified: Time64::UNIX_EPOCH,
@@ -468,7 +467,7 @@ impl Fs for FakeFs {
             self.upsert_entry(
                 parent_of(dst),
                 FsEntry {
-                    name: basename(dst).to_owned(),
+                    name: leaf_name(dst).to_owned(),
                     kind: FileKind::Symlink,
                     size: target.len() as u64,
                     modified: Time64::UNIX_EPOCH,
@@ -483,7 +482,7 @@ impl Fs for FakeFs {
             self.upsert_entry(
                 parent_of(dst),
                 FsEntry {
-                    name: basename(dst).to_owned(),
+                    name: leaf_name(dst).to_owned(),
                     kind: FileKind::Regular,
                     size: bytes.len() as u64,
                     modified: Time64::UNIX_EPOCH,
@@ -516,7 +515,7 @@ impl Fs for FakeFs {
             self.upsert_entry(
                 parent_of(dst),
                 FsEntry {
-                    name: basename(dst).to_owned(),
+                    name: leaf_name(dst).to_owned(),
                     kind: FileKind::Directory,
                     size: 0,
                     modified: Time64::UNIX_EPOCH,
@@ -2434,7 +2433,7 @@ impl FakeFs {
         self.upsert_entry(
             parent_of(path),
             FsEntry {
-                name: basename(path).to_owned(),
+                name: leaf_name(path).to_owned(),
                 kind: FileKind::Regular,
                 size,
                 modified: Time64::UNIX_EPOCH,

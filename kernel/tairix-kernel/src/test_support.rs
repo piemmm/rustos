@@ -136,6 +136,7 @@ impl FilesystemRead for MockRootFs {
         let n = self.nodes.get(&node.raw()).ok_or(DriverError::NotFound)?;
         Ok(NodeInfo {
             kind: n.kind,
+            nlink: 1,
             size: n.content.len() as u64,
             allocated: n.content.len() as u64,
             times: NodeTimes::default(),

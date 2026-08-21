@@ -196,6 +196,19 @@ pub enum NodeKind {
 pub struct NodeInfo {
     /// Whether the node is a directory or a regular file.
     pub kind: NodeKind,
+    /// How many directory entries name this node — POSIX `st_nlink`, read
+    /// from the format and never derived.
+    ///
+    /// A format that records no count reports `1`: a node reached through a
+    /// directory entry has at least the one name the caller just walked, and
+    /// that is a fact rather than a guess. A directory's count includes its
+    /// own `.` and each child's `..`, so an empty directory is `2`.
+    ///
+    /// This is the driver's answer because only the format knows it. The VFS
+    /// carries it up to [`FileStat`](crate::fs::FileStat) unchanged rather
+    /// than counting names itself, which it could not do without walking
+    /// every directory on the volume.
+    pub nlink: u32,
     /// File length in bytes. Always `0` for a directory.
     pub size: u64,
     /// Bytes of on-disk storage the node's data occupies — the real
@@ -211,6 +224,18 @@ pub struct NodeInfo {
     /// stamp the format does not keep is [`Time64::UNIX_EPOCH`] (ARXFS, for
     /// instance, tracks no access time), never a fabricated wall time.
     pub times: NodeTimes,
+}
+
+impl NodeInfo {
+    /// The [`nlink`](Self::nlink) a format that records no per-node name
+    /// count reports.
+    ///
+    /// Such a format also has no second-name object, so one name is not a
+    /// floor it might exceed — it is the whole truth: the caller reached the
+    /// node through exactly one directory entry and no other can exist. The
+    /// one definition every such driver reads, so two of them cannot drift
+    /// into disagreeing about what "no count" means.
+    pub const SINGLE_NAME: u32 = 1;
 }
 
 /// A single entry yielded by [`FilesystemRead::read_dir`].
@@ -446,6 +471,45 @@ pub trait FilesystemWrite {
         target: &[u8],
     ) -> Result<NodeId, DriverError> {
         let _ = (dir, name, target);
+        Err(DriverError::Unsupported)
+    }
+
+    /// Add `name` in directory `dir` as a second directory entry for the
+    /// existing node `node` — a hard link — raising the node's
+    /// [`NodeInfo::nlink`] count by one.
+    ///
+    /// The node gains a name, not a copy: both entries reach one inode, so a
+    /// write through either is visible through the other, and the node's
+    /// storage survives until the *last* name is unlinked. A driver that
+    /// implements this must therefore make [`remove`](Self::remove) decrement
+    /// the count and free only at zero — implementing one without the other
+    /// leaks storage or frees data another name still reaches.
+    ///
+    /// `dir` and `node` are on the same mounted volume: a directory entry
+    /// cannot address an inode in another backing, and the VFS refuses a
+    /// cross-volume pair before delegating. The VFS likewise refuses a
+    /// directory before the call; a driver still checks, because it owns the
+    /// invariant that its own tree stays a tree.
+    ///
+    /// A format with no second-name concept leaves this defaulted and
+    /// refuses, rather than substituting a copy that would silently diverge
+    /// from the original on the next write.
+    ///
+    /// # Errors
+    ///
+    /// * [`DriverError::Unsupported`] if the format stores only one name per
+    ///   node, if `dir` is not a directory, or if `node` is a directory.
+    /// * [`DriverError::Busy`] if a child named `name` already exists.
+    /// * [`DriverError::NotFound`] if `node` does not name a live node.
+    /// * [`DriverError::LengthOutOfRange`] if `name` is empty or longer than
+    ///   the filesystem's maximum component length.
+    /// * [`DriverError::TooManyLinks`] if the node already carries as many
+    ///   names as the format can record — a fixed on-disk bound, so the
+    ///   create fails closed rather than wrapping the count.
+    /// * [`DriverError::NoSpace`] if the volume cannot grow the directory.
+    /// * [`DriverError::DeviceFault`] if a block write fails.
+    fn link(&mut self, dir: NodeId, name: &[u8], node: NodeId) -> Result<(), DriverError> {
+        let _ = (dir, name, node);
         Err(DriverError::Unsupported)
     }
 
@@ -1045,6 +1109,7 @@ mod tests {
             if node == ROOT {
                 Ok(NodeInfo {
                     kind: NodeKind::Directory,
+                    nlink: 2,
                     size: 0,
                     allocated: 0,
                     times: NodeTimes::default(),
@@ -1052,6 +1117,7 @@ mod tests {
             } else if node == FILE {
                 Ok(NodeInfo {
                     kind: NodeKind::RegularFile,
+                    nlink: 1,
                     size: FILE_BODY.len() as u64,
                     allocated: FILE_BODY.len() as u64,
                     times: NodeTimes::default(),
@@ -1112,6 +1178,7 @@ mod tests {
                 node: FILE,
                 info: NodeInfo {
                     kind: NodeKind::RegularFile,
+                    nlink: 1,
                     size: FILE_BODY.len() as u64,
                     allocated: FILE_BODY.len() as u64,
                     times: NodeTimes::default(),

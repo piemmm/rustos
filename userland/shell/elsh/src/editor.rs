@@ -354,7 +354,7 @@ impl<'a> Session<'a> {
             }
             // `Ctrl-Z` suspends the *foreground job*, and at the prompt
             // there is none; job-stop delivery to a running child is the
-            // staged kernel work (`.junie/plan-session-shell.md`, part 3).
+            // staged kernel work (`plans/SHELL.md`, part 3).
             // The remaining chords have no line-editor meaning.
             _ => {}
         }

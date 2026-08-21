@@ -1,6 +1,6 @@
 [package]
 name = "tairix-test-devmgr-hwtree-qemu-aarch64"
-description = "QEMU integration test (.junie Design D P-3): boot the production aarch64 tairix-kernel pipeline on the virt board, have PID 1 (init) launch the perpetual device-manager service (/System/Services/devmgr.app/Run), prove it reads the discovered hardware tree and truly parks in hw_tree_wait, then deliver a real generation bump (a simulated hotplug append to the kernel HwTreeStore) and prove devmgr wakes, re-reads, and re-parks — the reactive observe loop end to end with no starvation."
+description = "QEMU integration test (plans/PI.md Design D P-3): boot the production aarch64 tairix-kernel pipeline on the virt board, have PID 1 (init) launch the perpetual device-manager service (/System/Services/devmgr.app/Run), prove it reads the discovered hardware tree and truly parks in hw_tree_wait, then deliver a real generation bump (a simulated hotplug append to the kernel HwTreeStore) and prove devmgr wakes, re-reads, and re-parks — the reactive observe loop end to end with no starvation."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -13,7 +13,7 @@ workspace = true
 
 # Freestanding "boot the production aarch64 kernel pipeline, launch the
 # perpetual devmgr service, and prove it reacts to a hardware-tree generation
-# bump" integration test (Design D P-3, `.junie/next-pi-prompt.md`). It reuses
+# bump" integration test (Design D P-3, `plans/PI.md`). It reuses
 # the production aarch64 boot pipeline through `tairix-kernel`'s library half
 # (`boot_aarch64::boot`) verbatim — including the `InitSpawn` seam, the runtime
 # `ProcessSpawn` producer + embedded-program registry (which now carries the

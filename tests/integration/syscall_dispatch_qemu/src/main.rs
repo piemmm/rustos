@@ -10,7 +10,7 @@
 //! (`EventId(4004)`) fires. The audit Sink that observes that event
 //! then **synthesises** a Scheduler/CapTable/KernelSyscallHandlers/
 //! Dispatcher quartet — independent of the production `KernelState`,
-//! per `.junie/next-session-prompt.md`'s design hint — and drives the
+//! per `plans/WIRING.md`'s design hint — and drives the
 //! dispatcher twice:
 //!
 //! 1. `(cap_query, CAP_TIME_SET)` — the synthesised calling task is

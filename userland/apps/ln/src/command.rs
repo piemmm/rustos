@@ -42,9 +42,19 @@ pub enum TargetMode {
 #[allow(clippy::struct_excessive_bools)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Options {
-    /// Create symbolic links (`-s`). Without it a hard link was asked for,
-    /// which this ABI has no call to make.
+    /// Create symbolic links (`-s`). Without it a hard link is made: a
+    /// second directory entry for the target's own inode.
     pub symbolic: bool,
+    /// Hard-link what a symbolic-link target *names* rather than the link
+    /// itself (`-L`; `-P` is the default and clears it). Meaningless for
+    /// `-s`, which stores the target verbatim and resolves nothing.
+    pub dereference_target: bool,
+    /// Permit a directory operand (`-d` / `-F`). The attempt still fails:
+    /// no principal may give a directory a second name, because the tree
+    /// staying a tree is what makes physical `..` resolution well-defined.
+    /// The switch only stops `ln` refusing the *command line*, matching what
+    /// the GNU tool does on a system whose kernel refuses the operation.
+    pub allow_directory: bool,
     /// What to do with a link name that is already taken (`-f` / `-i`).
     pub clobber: Clobber,
     /// Treat a destination that is a symbolic link to a directory as the
@@ -61,6 +71,8 @@ impl Options {
     /// The defaults of a bare `ln`.
     pub const DEFAULT: Self = Self {
         symbolic: false,
+        dereference_target: false,
+        allow_directory: false,
         clobber: Clobber::Refuse,
         no_dereference: false,
         verbose: false,
@@ -92,11 +104,16 @@ pub enum Command {
 /// [`Command`].
 ///
 /// The grammar is the GNU `ln` surface,
-/// `ln [-sfinvT] [-t dir] [--] target... [link_name]`:
+/// `ln [-sLPdFfinvT] [-t dir] [--] target... [link_name]`:
 ///
-/// * `-s` / `--symbolic` — make symbolic links. **Required here**: this ABI
-///   has no hard links, so `ln` without `-s` states that limit rather than
-///   quietly making a symbolic link, which is a different object.
+/// * `-s` / `--symbolic` — make symbolic links. Without it `ln` makes a
+///   hard link: a second directory entry for the target's own inode.
+/// * `-L` / `--logical` — hard-link what a symbolic-link target *names*.
+/// * `-P` / `--physical` — hard-link the target as spelled, following no
+///   final link. The default, and what POSIX `link()` does.
+/// * `-d` / `-F` / `--directory` — accept a directory operand. The link
+///   itself is still refused: no principal may give a directory a second
+///   name.
 /// * `-f` / `--force` — remove an existing link name and retry.
 /// * `-i` / `--interactive` — ask before removing an existing link name.
 ///   The later of `-f` / `-i` wins.
@@ -223,6 +240,9 @@ fn apply_long<'a, I: Iterator<Item = &'a &'a str>>(
     };
     match key {
         "symbolic" => flag(options, |o| o.symbolic = true),
+        "logical" => flag(options, |o| o.dereference_target = true),
+        "physical" => flag(options, |o| o.dereference_target = false),
+        "directory" => flag(options, |o| o.allow_directory = true),
         "force" => flag(options, |o| o.clobber = Clobber::Replace),
         "interactive" => flag(options, |o| o.clobber = Clobber::Ask),
         "no-dereference" => flag(options, |o| o.no_dereference = true),
@@ -253,6 +273,9 @@ fn apply_short<'a, I: Iterator<Item = &'a &'a str>>(
     for (index, flag) in cluster.char_indices() {
         match flag {
             's' => options.symbolic = true,
+            'L' => options.dereference_target = true,
+            'P' => options.dereference_target = false,
+            'd' | 'F' => options.allow_directory = true,
             'f' => options.clobber = Clobber::Replace,
             'i' => options.clobber = Clobber::Ask,
             'n' => options.no_dereference = true,
@@ -394,7 +417,7 @@ mod tests {
             clobber: Clobber::Replace,
             no_dereference: true,
             verbose: true,
-            target_mode: TargetMode::Inferred,
+            ..Options::DEFAULT
         };
         assert_eq!(
             parse(&["-sfnv", "a", "b"]),

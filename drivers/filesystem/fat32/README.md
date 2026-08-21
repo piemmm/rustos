@@ -111,7 +111,7 @@ reads back a fresh file. The image is built by the shared
 --qemu`; the guest tail names the same files through that fixture, so
 both sides share one source of truth (`AGENTS.md` §2.2). A
 `pjdfstest`-equivalent POSIX suite is still tracked in
-`.junie/next-session-prompt.md`.
+`plans/WIRING.md`.
 
 ## Public surface
 

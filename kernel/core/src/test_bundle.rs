@@ -220,6 +220,7 @@ impl FilesystemService for MemFs {
                 } else {
                     FileKind::Regular
                 },
+                nlink: 1,
                 size: body.len() as u64,
                 allocated: body.len() as u64,
                 mode: 0o644,
@@ -232,6 +233,7 @@ impl FilesystemService for MemFs {
         if is_dir {
             return Ok(FileStat {
                 kind: FileKind::Directory,
+                nlink: 2,
                 size: 0,
                 allocated: 0,
                 mode: 0o755,
@@ -262,6 +264,19 @@ impl FilesystemService for MemFs {
         _caps: &dyn CapabilityQuery,
         _path: &str,
     ) -> Result<String, Errno> {
+        Err(Errno::NotSupported)
+    }
+
+    fn link(
+        &self,
+        _uid: u32,
+        _caps: &dyn CapabilityQuery,
+        _existing: &str,
+        _link: &str,
+        _existing_link: FinalLink,
+    ) -> Result<(), Errno> {
+        // The fixture's file map holds one name per entry; a second name
+        // for one node is not something it can represent.
         Err(Errno::NotSupported)
     }
 

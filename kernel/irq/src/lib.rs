@@ -50,7 +50,7 @@
 //!   MADT-driven IO-APIC redirection-entry programming are
 //!   prerequisites for [`IrqTable::fire`] being called from a real
 //!   hardware interrupt path; that work is the next session's lead
-//!   per `.junie/next-session-prompt.md`. Until it lands, `fire`
+//!   per `plans/WIRING.md`. Until it lands, `fire`
 //!   is exercised by host-side unit tests and (in production) by
 //!   any synthetic test source the kernel binary chooses to wire.
 //! * **Power-efficient blocking.** The `irq_wait` handler yields

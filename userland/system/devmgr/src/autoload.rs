@@ -1,5 +1,5 @@
 //! Reactive match-and-load over the read-only `/System` driver store
-//! (Design D D2b-2c — `.junie/next-pi-prompt.md`).
+//! (Design D D2b-2c — `plans/PI.md`).
 //!
 //! The device manager owns *policy*: it resolves each
 //! discovered hardware-tree node against the kernel-decoded driver

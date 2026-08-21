@@ -227,6 +227,7 @@ mod tests {
     fn stat(kind: FileKind, mode: u32) -> FileStat {
         FileStat {
             kind,
+            nlink: 1,
             size: 1536,
             allocated: 4096,
             mode,

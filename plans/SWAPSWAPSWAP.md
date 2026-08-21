@@ -9,7 +9,7 @@ decompression-floor preservation, move-only fault-in, bounded
 clustering and warm-up, deterministic thrash detection and escalation;
 see `PLAN.md` §SWAPSWAPSWAP and `docs/src/architecture/memory.md` §7n
 for the done-state summaries). Switching it on for arbitrary *running*
-tasks needs two things, staged in `.junie/swapswap-progress.md`: the
+tasks needs two things, staged in this plan: the
 restartable user page-fault path (which **already exists** — the arch
 ports resolve a not-present user fault through
 `kernel/core::resolve_user_fault` and resume the faulting instruction;
@@ -36,7 +36,7 @@ cortex-a72 without HAFDBS and the riscv64 run pins `svade=true,svadu=false`
 so the software fault paths are genuinely exercised), so ramzip reclaims
 cold anonymous pages end to end on all three. wasm32 keeps the fail-closed
 `Unsupported` default (no per-page referenced bit).
-See `.junie/swapswap-progress.md` b1–b5.
+See this plan b1–b5.
 The section 19 performance evidence is now in place: host benchmark tests
 (`kernel/mem::ramzip::tier::tests::bench_evidence_*`) prove the work
 avoided — a compressible cold page shrinks far below its logical size
@@ -50,7 +50,7 @@ future design (section 15)
 Target: TAIRiX  
 Primary code area: `kernel/mem`  
 Secondary code areas: `kernel/sched`, `kernel/sec`, `kernel/core`, `lib/crypto`, `lib/log`, and existing `lib/abi` diagnostics only if a current caller requires them  
-Repository placement: `plans/SWAPSWAPSWAP.md`, unless `AGENTS.md` section 3 is updated to permit another location
+Repository placement: this plan, unless `AGENTS.md` section 3 is updated to permit another location
 
 This document captures the TAIRiX design direction for a near-zero-idle-cost,
 encrypted, compressed anonymous-memory tier. It is written so an implementing
@@ -623,7 +623,7 @@ before a current in-tree caller consumes them.
 
 Deliverables:
 
-- Place this document under `plans/SWAPSWAPSWAP.md`, or another approved
+- Place this document under this plan, or another approved
   location after `AGENTS.md` section 3 is updated.
 - Add a concise reference from `PLAN.md` only if this work is accepted into the
   staged roadmap.
@@ -927,10 +927,10 @@ This work is complete only when all applicable items are true:
 Use this prompt when TAIRiX is ready to implement the first stage:
 
 ```text
-You are implementing the next approved stage of `plans/SWAPSWAPSWAP.md` for
+You are implementing the next approved stage of this plan for
 TAIRiX.
 
-Before coding, read `AGENTS.md`, `PLAN.md`, `plans/SWAPSWAPSWAP.md`,
+Before coding, read `AGENTS.md`, `PLAN.md`, this plan,
 `plans/ALIAS.md`, `plans/DRIVES.md`, `docs/src/architecture/memory.md`,
 `docs/src/architecture/security.md`, `kernel/mem`, `kernel/sched`,
 `kernel/sec`, `kernel/core`, `lib/crypto`, `lib/log`, and any existing VM

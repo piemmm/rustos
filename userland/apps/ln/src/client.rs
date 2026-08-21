@@ -14,9 +14,12 @@ use crate::io::{FileSystem, Occupant, Output, Prompt};
 /// The usage banner a usage error is reported with, and the fallback the
 /// short-help switches print when `ln`'s own Help tree is unavailable.
 pub const USAGE: &str = "\
-usage: ln -s [-finvT] [-t dir] [--] target... [link_name]
+usage: ln [-sLPdFfinvT] [-t dir] [--] target... [link_name]
 
-  -s, --symbolic             make symbolic links (required: see below)
+  -s, --symbolic             make symbolic links
+  -L, --logical              hard-link what a link target names
+  -P, --physical             hard-link the target as spelled (default)
+  -d, -F, --directory        accept a directory operand (still refused)
   -f, --force                remove an existing link name and retry
   -i, --interactive          ask before removing an existing link name
   -n, --no-dereference       treat a link-to-directory destination as a name
@@ -26,15 +29,16 @@ usage: ln -s [-finvT] [-t dir] [--] target... [link_name]
   -T, --no-target-directory  treat the destination as a link name
   -h, -?, --help             show this message
 
+Without -s a hard link is made: a second directory entry for the target's
+own inode, so both names reach one file and its storage survives until the
+last name goes. Both names must be on one volume, and a directory is never
+given a second name.
+
 With one operand the link is made in the working directory under the
 target's own name. With two, the second is a directory to fill when it is
 one and the link's name otherwise. With three or more, the last must
 already be a directory. `--` ends option parsing: every later argument is
 an operand.
-
-This system has no hard links, so -s is required: without it there is no
-link for `ln` to create and it says so rather than making a symbolic link,
-which is a different object.
 ";
 
 /// `ln`'s own command word: the short-help switches render its own Help
@@ -57,8 +61,6 @@ const OWN_WORD: &str = "ln";
 ///
 /// # Errors
 ///
-/// * [`LnError::HardLink`] — `-s` was absent. This ABI has no hard links, so
-///   the refusal states a permanent limit; nothing is created.
 /// * [`LnError::Usage`] — more than one target aimed at a single link name.
 /// * [`LnError::NotADirectory`] — a destination that must be a directory is
 ///   not one.
@@ -67,13 +69,17 @@ const OWN_WORD: &str = "ln";
 ///   removed.
 /// * [`LnError::Create`] — the link could not be created (a taken name
 ///   without `-f`/`-i` is [`Errno::AlreadyExists`]; a format that stores no
-///   links is [`Errno::NotSupported`]).
+///   link of the asked-for kind is [`Errno::NotSupported`]; a hard link to a
+///   directory is [`Errno::IsADirectory`] and one across volumes is
+///   [`Errno::CrossVolume`]).
 /// * [`LnError::Prompt`] — a confirmation could not be read (never treated
 ///   as consent).
 /// * [`LnError::Output`] — writing the banner or a `-v` report failed.
 ///
 /// [`Errno::AlreadyExists`]: tairix_abi::Errno::AlreadyExists
 /// [`Errno::NotSupported`]: tairix_abi::Errno::NotSupported
+/// [`Errno::IsADirectory`]: tairix_abi::Errno::IsADirectory
+/// [`Errno::CrossVolume`]: tairix_abi::Errno::CrossVolume
 pub fn run(
     command: Command,
     locale: Option<&str>,
@@ -117,14 +123,6 @@ fn link_all(
     prompt: &dyn Prompt,
     out: &dyn Output,
 ) -> Result<(), LnError> {
-    // A hard link is asked for whenever `-s` is absent. There is no
-    // `fs_link` syscall and no driver call behind one, so the limit is
-    // permanent and is reported before anything is inspected or created —
-    // never approximated with a symbolic link, which is a different object.
-    if !options.symbolic {
-        return Err(LnError::HardLink);
-    }
-
     let into_directory = match (destination, options.target_mode) {
         // Neither form fills a directory: the single-operand form links
         // under the target's own leaf name here, and `-T` links at the
@@ -220,8 +218,15 @@ fn link_one(
         fs.remove(link)
             .map_err(|errno| LnError::Remove(String::from(link), errno))?;
     }
-    fs.symlink(target, link)
-        .map_err(|errno| LnError::Create(String::from(link), errno))?;
+    // `-s` stores the target verbatim; without it the target's own inode
+    // gains a second name, and `-L` decides whether a target that is itself
+    // a symbolic link is resolved first.
+    let created = if options.symbolic {
+        fs.symlink(target, link)
+    } else {
+        fs.link(target, link, options.dereference_target)
+    };
+    created.map_err(|errno| LnError::Create(String::from(link), errno))?;
     Ok(true)
 }
 
@@ -254,8 +259,11 @@ mod tests {
     struct TreeFs {
         nodes: RefCell<Vec<(String, Occupant)>>,
         created: RefCell<Vec<(String, String)>>,
+        /// `(link, target, -L asked for)` per hard link made.
+        hard_linked: RefCell<Vec<(String, String, bool)>>,
         removed: RefCell<Vec<String>>,
         symlink_errno: Option<Errno>,
+        link_errno: Option<Errno>,
     }
 
     impl TreeFs {
@@ -274,12 +282,17 @@ mod tests {
         fn refusing(errno: Errno) -> Self {
             Self {
                 symlink_errno: Some(errno),
+                link_errno: Some(errno),
                 ..Self::default()
             }
         }
 
         fn created(&self) -> Vec<(String, String)> {
             self.created.borrow().clone()
+        }
+
+        fn hard_linked(&self) -> Vec<(String, String, bool)> {
+            self.hard_linked.borrow().clone()
         }
     }
 
@@ -306,6 +319,30 @@ mod tests {
             self.created
                 .borrow_mut()
                 .push((String::from(link), String::from(target)));
+            Ok(())
+        }
+
+        fn link(&self, target: &str, link: &str, dereference: bool) -> Result<(), Errno> {
+            if let Some(errno) = self.link_errno {
+                return Err(errno);
+            }
+            // A second name for a directory is refused whatever `-d` said.
+            if self.occupant(target)? == Occupant::Directory {
+                return Err(Errno::IsADirectory);
+            }
+            if self.occupant(link)? != Occupant::Vacant {
+                return Err(Errno::AlreadyExists);
+            }
+            // The fixture records the posture so a test can prove `-L`/`-P`
+            // reach the seam rather than being parsed and dropped.
+            self.nodes
+                .borrow_mut()
+                .push((String::from(link), Occupant::File));
+            self.hard_linked.borrow_mut().push((
+                String::from(link),
+                String::from(target),
+                dereference,
+            ));
             Ok(())
         }
 
@@ -567,17 +604,80 @@ mod tests {
     }
 
     #[test]
-    fn without_s_the_hard_link_limit_is_stated_and_nothing_is_created() {
-        let fs = TreeFs::default();
+    fn without_s_a_hard_link_is_made_and_no_symbolic_one() {
+        // The default kind: a second directory entry for the target's own
+        // inode, made through the hard-link call and never through the
+        // symbolic one — they are different objects.
+        let fs = TreeFs::with(&[("/a/target", Occupant::File)]);
+        let out = Recorder::default();
+        assert_eq!(go(&["/a/target", "/link"], &fs, &out), Ok(()));
+        assert_eq!(
+            fs.hard_linked(),
+            [(String::from("/link"), String::from("/a/target"), false)]
+        );
+        assert!(fs.created().is_empty(), "no symbolic link was made");
+    }
+
+    #[test]
+    fn the_physical_posture_is_the_default_and_l_asks_to_follow() {
+        // `-P` is what POSIX `link()` does and is the default; `-L` is
+        // `linkat(AT_SYMLINK_FOLLOW)`, and the later switch wins.
+        for (args, expected) in [
+            (["-L", "/a/target", "/link"], true),
+            (["-P", "/a/target", "/link"], false),
+        ] {
+            let fs = TreeFs::with(&[("/a/target", Occupant::Link)]);
+            let out = Recorder::default();
+            assert_eq!(go(&args, &fs, &out), Ok(()));
+            assert_eq!(fs.hard_linked()[0].2, expected, "{args:?}");
+        }
+        let fs = TreeFs::with(&[("/a/target", Occupant::Link)]);
+        let out = Recorder::default();
+        assert_eq!(go(&["-LP", "/a/target", "/link"], &fs, &out), Ok(()));
+        assert!(!fs.hard_linked()[0].2, "the later switch wins");
+    }
+
+    #[test]
+    fn d_and_f_accept_a_directory_operand_that_the_filesystem_still_refuses() {
+        // GNU's `-d`/`-F` only stop `ln` refusing the command line; giving a
+        // directory a second name is refused by the system, and here no
+        // principal can hold authority for it at all.
+        for flag in ["-d", "-F"] {
+            let fs = TreeFs::with(&[("/a/dir", Occupant::Directory)]);
+            let out = Recorder::default();
+            assert_eq!(
+                go(&[flag, "/a/dir", "/link"], &fs, &out),
+                Err(LnError::Create(String::from("/link"), Errno::IsADirectory)),
+                "{flag}"
+            );
+            assert!(fs.hard_linked().is_empty());
+        }
+    }
+
+    #[test]
+    fn a_format_with_one_name_per_node_reports_the_permanent_limit() {
+        let fs = TreeFs::refusing(Errno::NotSupported);
         let out = Recorder::default();
         assert_eq!(
             go(&["/a/target", "/link"], &fs, &out),
-            Err(LnError::HardLink)
+            Err(LnError::Create(String::from("/link"), Errno::NotSupported))
         );
-        assert!(fs.created().is_empty());
-        // Nothing was even inspected: the limit is permanent, not a probe
-        // result.
-        assert!(fs.removed.borrow().is_empty());
+        assert!(fs.hard_linked().is_empty());
+    }
+
+    #[test]
+    fn a_cross_volume_hard_link_reports_that_refusal() {
+        // The mover's own signal: a second directory entry cannot address an
+        // inode in another backing, so `ln` reports it rather than copying.
+        let fs = TreeFs::refusing(Errno::CrossVolume);
+        let out = Recorder::default();
+        assert_eq!(
+            go(&["/a/target", "/other/link"], &fs, &out),
+            Err(LnError::Create(
+                String::from("/other/link"),
+                Errno::CrossVolume
+            ))
+        );
     }
 
     #[test]
@@ -624,6 +724,9 @@ mod tests {
                 Err(Errno::PermissionDenied)
             }
             fn symlink(&self, _target: &str, _link: &str) -> Result<(), Errno> {
+                Err(Errno::PermissionDenied)
+            }
+            fn link(&self, _target: &str, _link: &str, _deref: bool) -> Result<(), Errno> {
                 Err(Errno::PermissionDenied)
             }
             fn remove(&self, _path: &str) -> Result<(), Errno> {

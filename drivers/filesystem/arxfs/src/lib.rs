@@ -2546,6 +2546,9 @@ impl<B: Block> ARXFS<B> {
         let allocated = self.allocated_bytes(inode, ino)?;
         Ok(NodeInfo {
             kind: inode.kind.node_kind(),
+            // Read from the inode, never counted: ARXFS maintains the field
+            // for every kind, so a stat and a listing report the same names.
+            nlink: inode.nlink,
             size: match inode.kind {
                 // A directory's entries are not a byte length.
                 InodeKind::Dir => 0,
@@ -3163,6 +3166,81 @@ impl<B: Block> ARXFS<B> {
         Ok(NodeId::from_raw(u64::from(child_ino)))
     }
 
+    /// Add `name` in `dir` as a second directory entry for the existing node
+    /// `node` — a hard link.
+    ///
+    /// The node gains a name, not a copy: one inode, one extent map, one set
+    /// of blocks, reached through two entries. The count that decides when
+    /// those blocks are freed is [`Inode::nlink`], which this raises and
+    /// [`Self::remove_inner`] lowers, freeing only at zero.
+    ///
+    /// The volume declares
+    /// [`INCOMPAT_HARDLINKS`](superblock::INCOMPAT_HARDLINKS) in the same
+    /// transaction, because a reader that did not know about the second name
+    /// would free the inode on the first unlink and destroy data the other
+    /// name still reaches.
+    fn link_inner(&mut self, dir: NodeId, name: &[u8], node: NodeId) -> Result<(), DriverError> {
+        Self::check_name(name)?;
+        let target_ino = self.ino_of(node)?;
+        let mut target = self.read_inode(target_ino)?;
+        // A second name for a directory would let the tree hold a cycle, and
+        // the VFS's physical `..` walk depends on it being a tree.
+        match target.kind {
+            InodeKind::File | InodeKind::Link => {}
+            InodeKind::Dir => return Err(DriverError::Unsupported),
+        }
+        let now = (self.clock)();
+        let dir_ino = self.ino_of(dir)?;
+        let mut dir_inode = self.read_inode(dir_ino)?;
+        if !dir_inode.is_dir() {
+            return Err(DriverError::Unsupported);
+        }
+        if self.dir_lookup(&dir_inode, name)?.is_some() {
+            return Err(DriverError::Busy);
+        }
+        // A fixed on-disk field, so an overflow fails closed here: wrapping
+        // it would put a live inode one unlink away from being freed.
+        target.nlink = target
+            .nlink
+            .checked_add(1)
+            .ok_or(DriverError::TooManyLinks)?;
+        // Declared before the entry is written, so nothing this transaction
+        // publishes can be reached from a volume that has not admitted to
+        // holding more than one name per inode; `rollback` restores it.
+        self.incompat |= superblock::INCOMPAT_HARDLINKS;
+        self.add_entry(&mut dir_inode, dir_ino, target_ino, name)?;
+        // The node's own contents did not change, only the set of names that
+        // reach it: POSIX moves `ctime`, never `mtime`.
+        target.times.changed = now;
+        self.write_inode(target_ino, &target)?;
+        dir_inode.times.modified = now;
+        dir_inode.times.changed = now;
+        self.write_inode(dir_ino, &dir_inode)?;
+        self.commit()
+    }
+
+    /// Drop one name from `child` (inode `child_ino`), freeing its blocks and
+    /// its inode slot only when the name that just went was the last.
+    ///
+    /// This is the whole hard-link lifecycle. A node with names left keeps
+    /// every block it maps — freeing them because *a* name went would destroy
+    /// data the remaining names still reach — and records the drop as a
+    /// metadata change.
+    fn drop_name(
+        &mut self,
+        child: &mut Inode,
+        child_ino: u32,
+        now: Time64,
+    ) -> Result<(), DriverError> {
+        child.nlink = child.nlink.saturating_sub(1);
+        if child.nlink > 0 {
+            child.times.changed = now;
+            return self.write_inode(child_ino, child);
+        }
+        self.free_all_blocks(child, child_ino)?;
+        self.free_inode(child_ino)
+    }
+
     /// Create `dst_name` in `dir` as a reflink of the existing regular file
     /// `src_name`: a copy-on-write clone that **shares** every data block with
     /// the source until one side is written
@@ -3315,13 +3393,15 @@ impl<B: Block> ARXFS<B> {
         if child.is_dir() && !self.dir_is_empty(&child)? {
             return Err(DriverError::Busy);
         }
-        self.free_all_blocks(&mut child, child_ino)?;
-        self.free_inode(child_ino)?;
+        let now = (self.clock)();
+        // An empty directory loses both its name and its own `.`; every other
+        // kind loses the one name being removed.
         if child.is_dir() {
+            child.nlink = child.nlink.saturating_sub(1);
             dir_inode.nlink = dir_inode.nlink.saturating_sub(1);
         }
+        self.drop_name(&mut child, child_ino, now)?;
         self.remove_entry(&mut dir_inode, dir_ino, name)?;
-        let now = (self.clock)();
         dir_inode.times.modified = now;
         dir_inode.times.changed = now;
         self.write_inode(dir_ino, &dir_inode)?;
@@ -3414,8 +3494,12 @@ impl<B: Block> ARXFS<B> {
             if dst_child.is_dir() && !self.dir_is_empty(&dst_child)? {
                 return Err(DriverError::Busy);
             }
-            self.free_all_blocks(&mut dst_child, dst_ino)?;
-            self.free_inode(dst_ino)?;
+            // The replaced node loses this name like any other unlink: its
+            // blocks go only if no other name still reaches them.
+            if dst_child.is_dir() {
+                dst_child.nlink = dst_child.nlink.saturating_sub(1);
+            }
+            self.drop_name(&mut dst_child, dst_ino, now)?;
             match &mut dst_dir_inode {
                 Some(d) => self.remove_entry(d, dst_dir_ino, dst_name)?,
                 None => self.remove_entry(&mut src_dir_inode, dst_dir_ino, dst_name)?,
@@ -3729,6 +3813,16 @@ impl<B: Block> FilesystemWrite for ARXFS<B> {
         self.deny_if_read_only()?;
         self.begin();
         let result = self.create_link_inner(dir, name, target);
+        if result.is_err() {
+            self.rollback();
+        }
+        result
+    }
+
+    fn link(&mut self, dir: NodeId, name: &[u8], node: NodeId) -> Result<(), DriverError> {
+        self.deny_if_read_only()?;
+        self.begin();
+        let result = self.link_inner(dir, name, node);
         if result.is_err() {
             self.rollback();
         }

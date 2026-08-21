@@ -27,9 +27,9 @@ use alloc::vec::Vec;
 use core::fmt::Write as _;
 
 use tairix_abi::{Errno, FileKind};
+use tairix_path::{join, leaf_name};
 
 use crate::fs::{Fs, RenameOutcome};
-use crate::model::join;
 
 /// The fixed-size chunk used to stream a regular file, matching the
 /// granularity the other userland tools share.
@@ -97,20 +97,6 @@ pub fn is_inside(ancestor: &str, path: &str) -> bool {
     }
 }
 
-/// The final component of `path` (`/a/b` names `b`; a bare root names
-/// itself).
-#[must_use]
-pub fn basename(path: &str) -> &str {
-    let trimmed = path.trim_end_matches('/');
-    if trimmed.is_empty() {
-        return path;
-    }
-    match trimmed.rfind('/') {
-        Some(slash) => &trimmed[slash + 1..],
-        None => trimmed,
-    }
-}
-
 /// The directory `path`'s final component lives in (`/a/b` maps to `/a`;
 /// a top-level entry maps to `/`).
 #[must_use]
@@ -153,7 +139,7 @@ pub fn plan_target(
     dst: &str,
 ) -> Result<String, OpError> {
     let target = match probe(fs, dst)? {
-        Some(FileKind::Directory) => join(dst, basename(src)),
+        Some(FileKind::Directory) => join(dst, leaf_name(src)),
         _ => String::from(dst),
     };
     if target.trim_end_matches('/') == src.trim_end_matches('/') {

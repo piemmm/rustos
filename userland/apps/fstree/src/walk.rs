@@ -19,9 +19,9 @@ use alloc::vec::Vec;
 use tairix_abi::time::Time64;
 use tairix_abi::FileKind;
 use tairix_glob::Pattern;
+use tairix_path::join;
 
 use crate::fs::Fs;
-use crate::model::join;
 use crate::search::ContentScan;
 
 /// One file a walk found, listed by the flattened branch view.

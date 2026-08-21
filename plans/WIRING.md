@@ -7,7 +7,7 @@ least** the same level, target by target, in manageable increments.
 
 `AGENTS.md` is binding — read it and `PLAN.md` first. Every rule in this
 file is binding too. The continuation prompt for fresh contexts is
-`.junie/next-wiring-prompt.md`.
+this plan.
 
 **Note:** `abi-v1` is *not* frozen, despite what `AGENTS.md` / `PLAN.md`
 say — the standing task direction supersedes that language. Changing a
@@ -51,7 +51,7 @@ say — the standing task direction supersedes that language. Changing a
    `docs/src/architecture/*.md` page and `PLAN.md`, and lands its tests
    in the same change. Tests are never deferred.
 7. **One increment per landing.** Land one complete, fully-gated stage,
-   update `PLAN.md` + this file, refresh `.junie/next-wiring-prompt.md`,
+   update `PLAN.md` + this file, refresh this plan,
    then start the next.
 
 ---

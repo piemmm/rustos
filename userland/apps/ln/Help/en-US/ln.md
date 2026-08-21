@@ -1,25 +1,33 @@
 ## NAME
 
-ln — create symbolic links
+ln — create links between files
 
 ## SYNOPSIS
 
-`ln -s [-finvT] [-t dir] [--] target... [link_name]`
+`ln [-sLPdFfinvT] [-t dir] [--] target... [link_name]`
 
 ## DESCRIPTION
 
-Creates a symbolic link naming each target. With one operand the link
-is made in the working directory under the target's own name. With two,
-the second operand is a directory to fill when it is one — or a link to
-one, unless `-n` — and the link's name otherwise. With three or more,
-the last must already be a directory.
+Creates a link naming each target. With one operand the link is made in
+the working directory under the target's own name. With two, the second
+operand is a directory to fill when it is one — or a link to one,
+unless `-n` — and the link's name otherwise. With three or more, the
+last must already be a directory.
 
-The target is stored **verbatim** and is never resolved: it may be
-relative, may contain `..`, and may name nothing at all, so a link may
-legitimately dangle. Its grammar is still checked before it is stored,
-so a target no resolver could ever walk is refused. Creating a link
-grants no authority over what it names — every later use is authorised
-component by component under your own identity.
+Without `-s` the link is a **hard** one: a second directory entry for
+the target's own inode. Both names reach one file, a write through
+either is visible through the other, and the file's storage survives
+until the last name is removed. Both names must be on one volume, and a
+directory is never given a second name — the file tree staying a tree
+is what makes `..` mean the directory you actually came through.
+
+With `-s` the link is a **symbolic** one, and its target is stored
+**verbatim** and never resolved: it may be relative, may contain `..`,
+and may name nothing at all, so such a link may legitimately dangle.
+Its grammar is still checked before it is stored, so a target no
+resolver could ever walk is refused. Creating either kind grants no
+authority over what it names — every later use is authorised component
+by component under your own identity.
 
 A link name that is already taken is refused unless `-f` or `-i` says
 to replace it, and replacing it **removes** that name first, so nothing
@@ -30,10 +38,6 @@ The first failure stops the run before any later target; links already
 made stay made. `--` ends option parsing: every later argument is an
 operand.
 
-`-s` is required on this system, which has no hard links: without it
-there is nothing for `ln` to create, and it says so rather than making
-a symbolic link, which is a different object. The hard-link-only
-switches `-L`, `-P`, `-d`, and `-F` are refused for the same reason.
 `-b`/`-S` are refused because there is no backup machinery to invoke,
 and `-r` because computing a target relative to the link's own
 directory needs a canonicalising resolution this system does not offer
@@ -42,7 +46,13 @@ involved.
 
 ## OPTIONS
 
-- `-s, --symbolic` — make symbolic links. Required: see above.
+- `-s, --symbolic` — make symbolic links rather than hard ones.
+- `-L, --logical` — hard-link what a symbolic-link target names,
+  rather than the link itself.
+- `-P, --physical` — hard-link the target exactly as spelled,
+  following no final symbolic link. The default.
+- `-d, -F, --directory` — accept a directory operand. The link is
+  still refused: no user may give a directory a second name.
 - `-f, --force` — remove an existing link name, then create the link.
 - `-i, --interactive` — ask before removing an existing link name;
   only a reply beginning `y`/`Y` consents. The later of `-f` and `-i`
@@ -61,8 +71,10 @@ involved.
 
 ## EXAMPLES
 
-- `ln -s /System/Commands/ls.app tools/ls` — link one name to a
-  bundle.
+- `ln notes.txt notes.bak` — give one file a second name; removing
+  either leaves the other, and its contents, intact.
+- `ln -s /System/Commands/ls.app tools/ls` — symbolically link one
+  name to a bundle.
 - `ln -s ../shared/notes.txt` — link `notes.txt` here to a relative
   target.
 - `ln -sv -t Links a.txt b.txt` — link both files into `Links`,

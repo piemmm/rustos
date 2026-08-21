@@ -100,7 +100,7 @@ and `plans/IO.md`.
 thin `fs_open`/`fs_close`/`fs_read`/`fs_write`/`fs_readdir`/`fs_stat_raw`/
 `fs_truncate`/`fs_sync`/`fs_mkdir`/`fs_unlink`/`fs_rename`/`fs_symlink`/
 `fs_readlink` wrappers over the `abi-v1` syscalls, the working-directory pair (`fs_chdir`/`fs_getcwd`, against
-which relative paths resolve, `.junie/PREREQUISITES2.md` P2), plus the
+which relative paths resolve, `plans/SHELL.md` P2), plus the
 ergonomic `File` and `Dir` handles a program normally uses.
 `File` is the one **owning** descriptor handle, whatever its backing (a path, a
 resource reference, a pipe end, a pty end — the close trap releases any of

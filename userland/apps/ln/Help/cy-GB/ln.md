@@ -1,10 +1,10 @@
 ## NAME
 
-ln — creu cysylltiadau symbolaidd
+ln — creu cysylltiadau rhwng ffeiliau
 
 ## SYNOPSIS
 
-`ln -s [-finvT] [-t dir] [--] target... [link_name]`
+`ln [-sLPdFfinvT] [-t dir] [--] target... [link_name]`
 
 ## DESCRIPTION
 
@@ -31,10 +31,13 @@ Mae'r methiant cyntaf yn atal y rhediad cyn unrhyw darged diweddarach;
 erys y cysylltiadau a wnaed eisoes. Mae `--` yn terfynu dadansoddi
 dewisiadau: mae pob dadl ddiweddarach yn operand.
 
-Mae `-s` yn ofynnol ar y system hon, sydd heb gysylltiadau caled: heb
-hynny nid oes dim i `ln` ei greu, ac fe ddywed hynny yn lle creu
-cysylltiad symbolaidd, sy'n wrthrych gwahanol. Gwrthodir y dewisiadau
-cysylltiad-caled yn unig `-L`, `-P`, `-d` ac `-F` am yr un rheswm.
+Heb `-s` mae'r cysylltiad yn un **caled**: ail gofnod cyfeiriadur ar
+gyfer inode y targed ei hun. Mae'r ddau enw'n cyrraedd un ffeil, mae
+ysgrifen trwy'r naill i'w gweld trwy'r llall, ac erys storfa'r ffeil
+nes tynnu'r enw olaf. Rhaid i'r ddau enw fod ar un gyfrol, ac ni roddir
+ail enw i gyfeiriadur byth — am fod y goeden ffeiliau'n aros yn goeden
+y mae `..` yn golygu'r cyfeiriadur y daethpwyd trwyddo mewn gwirionedd.
+
 Gwrthodir `-b`/`-S` am nad oes peiriannwaith wrth gefn i'w alw, a `-r`
 am fod cyfrifo targed cymharol i gyfeiriadur y cysylltiad yn galw am
 ddatrysiad canoneiddio nad yw'r system hon yn ei gynnig — byddai un
@@ -43,8 +46,14 @@ cysylltiad yn y cwestiwn.
 
 ## OPTIONS
 
-- `-s, --symbolic` — creu cysylltiadau symbolaidd. Gofynnol: gweler
-  uchod.
+- `-s, --symbolic` — creu cysylltiadau symbolaidd yn lle rhai caled.
+- `-L, --logical` — cysylltu'n galed yr hyn y mae targed symbolaidd
+  yn ei enwi, yn hytrach na'r cysylltiad ei hun.
+- `-P, --physical` — cysylltu'n galed y targed fel y'i sillafwyd, heb
+  ddilyn cysylltiad symbolaidd terfynol. Rhagosodiad.
+- `-d, -F, --directory` — derbyn operand cyfeiriadur. Gwrthodir y
+  cysylltiad serch hynny: ni chaiff unrhyw ddefnyddiwr roi ail enw i
+  gyfeiriadur.
 - `-f, --force` — tynnu enw cysylltiad presennol, ac wedyn creu'r
   cysylltiad.
 - `-i, --interactive` — gofyn cyn tynnu enw cysylltiad presennol; dim

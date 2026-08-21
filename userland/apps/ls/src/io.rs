@@ -42,6 +42,10 @@ pub enum FinalLink {
 pub struct Metadata {
     /// What kind of object the path is.
     pub kind: FileKind,
+    /// How many directory entries name the object — the long format's second
+    /// column, as the filesystem itself records it. A format that keeps no
+    /// count reports `1`.
+    pub nlink: u32,
     /// The POSIX mode bits. Only the low permission bits (`& 0o777`) are
     /// rendered by the long format; higher bits are ignored.
     pub mode: u32,

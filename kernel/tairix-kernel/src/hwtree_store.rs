@@ -1,4 +1,4 @@
-//! Runtime hardware-inventory store (Design D, D1 — `.junie/next-pi-prompt.md`).
+//! Runtime hardware-inventory store (Design D, D1 — `plans/PI.md`).
 //!
 //! The single, authoritative record of the discovered hardware tree: one growable node list the boot path seeds, the
 //! floor bus bring-up appends discovered children to, and the autoload

@@ -1,25 +1,33 @@
-# `tairix-ln` — create symbolic links
+# `tairix-ln` — create links between files
 
-A `plans/SYMLINKS.md` S4 command app, shipped as the self-contained store
+A `plans/SYMLINKS.md` S4/S6 command app, shipped as the self-contained store
 bundle `/System/Commands/ln.app/` so the shell resolves the bare word `ln` to
-it. `ln` is the GNU coreutils tool: it creates a symbolic link naming a
-target, in every operand shape the GNU tool accepts —
-`ln -s target`, `ln -s target link_name`, `ln -s target... directory`, and
-`-t`/`-T` — with `-f`, `-i`, `-n`, `-v`, and `--`. `-h`/`-?`/`--help` render
-the tool's own short help from its bundled `Help/` tree through the shared
-`lib/help` engine, in the locale the inherited `LANG` variable names.
+it. `ln` is the GNU coreutils tool: it creates a link naming a target, in
+every operand shape the GNU tool accepts — `ln target`,
+`ln target link_name`, `ln target... directory`, and `-t`/`-T` — with `-s`,
+`-L`, `-P`, `-d`/`-F`, `-f`, `-i`, `-n`, `-v`, and `--`. `-h`/`-?`/`--help`
+render the tool's own short help from its bundled `Help/` tree through the
+shared `lib/help` engine, in the locale the inherited `LANG` variable names.
 
-## `-s` is required: this system has no hard links
+## Both kinds of link
 
-There is no `fs_link` syscall and no driver call behind one, so `ln` without
-`-s` has **nothing to create**. It says so and creates nothing, rather than
-quietly making a symbolic link: a link and a second name for one inode are
-different objects, and substituting one for the other would be a different
-operation wearing the user's spelling. The same reasoning refuses the
-hard-link-only switches `-L`, `-P`, `-d`, and `-F` — they select between
-readings of a hard link's target, of which there are none here.
+Without `-s` the link is a **hard** one (`fs_link`): a second directory entry
+for the target's own inode, so both names reach one file and its storage
+survives until the last name goes. `-L` gives the second name to what a
+symbolic target *names*; `-P`, the default, links the target as spelled and
+follows no final link — POSIX `link()` against `linkat(AT_SYMLINK_FOLLOW)`.
+With `-s` the link is a **symbolic** one (`fs_symlink`), whose target is
+stored verbatim and never resolved.
 
-Two further GNU switches are deliberately refused rather than approximated:
+`-d`/`-F` accept a directory operand, matching the GNU tool, but the link is
+still refused with `IsADirectory`: no principal may give a directory a second
+name, because the tree staying a tree is what makes the resolver's physical
+`..` well-defined. Both names must also lie on one volume — a directory entry
+addresses an inode in its own backing — so a pair that crosses one is
+`CrossVolume`.
+
+Two GNU switches are deliberately refused rather than approximated, neither
+for a reason about hard links:
 
 - `-b`/`--backup` and `-S`/`--suffix` — this workspace has no backup
   machinery at all (`cp` and `mv` omit them for the same reason), so a

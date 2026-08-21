@@ -64,9 +64,9 @@ rather than guessing.
 
 With no path operand `ls` lists the current directory. Short options may
 be combined (e.g. `-la`). `--` ends option parsing: every later argument
-is a path. The long format has no link-count column (this filesystem
-contract carries no hard links, so a count would be fabricated) and
-renders owner/group as numeric ids — the GNU numeric fallback — because
+is a path. The long format's link-count column is the count the
+filesystem itself records (a format that keeps none answers `1`), and
+owner/group render as numeric ids — the GNU numeric fallback — because
 name resolution needs the capability-gated user database.
 
 ## Symbolic links

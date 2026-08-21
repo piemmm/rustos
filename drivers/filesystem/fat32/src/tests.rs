@@ -1361,3 +1361,25 @@ fn dos_datetime_undecodable_fields_report_no_stamp() {
         Time64::UNIX_EPOCH
     );
 }
+
+#[test]
+fn fat_has_no_second_name_for_a_file_and_reports_the_one_it_has() {
+    // FAT has no link object of either kind: a directory entry *is* the
+    // file's identity, so a second name would be a second file. Both link
+    // calls refuse rather than approximating one, and every node reports the
+    // single name the walk used.
+    let mut fs = mount();
+    let root = fs.root();
+    let file = fs.lookup(root, b"HELLO.TXT").expect("found");
+    assert_eq!(
+        fs.link(root, b"ALIAS.TXT", file),
+        Err(DriverError::Unsupported)
+    );
+    assert_eq!(
+        fs.create_link(root, b"ALIAS.TXT", b"/HELLO.TXT"),
+        Err(DriverError::Unsupported)
+    );
+    assert_eq!(fs.lookup(root, b"ALIAS.TXT"), Err(DriverError::NotFound));
+    assert_eq!(fs.node_info(file).expect("stat").nlink, 1);
+    assert_eq!(fs.node_info(root).expect("stat").nlink, 1);
+}

@@ -167,6 +167,7 @@ impl FilesystemRead for MockStore {
         let n = self.nodes.get(&node.raw()).ok_or(DriverError::NotFound)?;
         Ok(NodeInfo {
             kind: n.kind,
+            nlink: 1,
             size: n.reported_size.unwrap_or(n.content.len() as u64),
             allocated: n.content.len() as u64,
             times: NodeTimes::default(),

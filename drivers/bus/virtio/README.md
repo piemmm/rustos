@@ -27,7 +27,7 @@ only the device-specific wire format.
 - **Real DMA from a per-process heap with a separate physical mapping.**
   The `MockHost` allocator returns `phys == virt` because the kernel
   per-process-heap-with-`phys_of()` API does not exist yet
-  (`.junie/next-session-prompt.md`, item 1).
+  (`plans/WIRING.md`, item 1).
 - **IRQ delivery into userland.** The current `notify_wait` is a
   polled cooperative hook; real interrupt routing is item 2 of the
   next-session prompt.

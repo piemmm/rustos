@@ -3,12 +3,12 @@
 //! owner.
 
 use alloc::format;
-use alloc::string::String;
 use alloc::vec::Vec;
 
 use crate::command::{Command, Options, Owner, Verbosity};
 use crate::error::ChownError;
 use crate::io::{Entry, EntryKind, FileSystem, Output};
+use tairix_path::join;
 
 /// The usage banner printed by [`Command::Help`].
 pub const USAGE: &str = "\
@@ -171,18 +171,6 @@ fn read_children(path: &str, fs: &dyn FileSystem) -> Result<Vec<Entry>, ChownErr
         entries.push(entry);
     }
     Ok(entries)
-}
-
-/// Join a directory `parent` and a child `name` into a path, inserting a
-/// single `/` unless `parent` already ends with one.
-fn join(parent: &str, name: &str) -> String {
-    let mut path = String::with_capacity(parent.len() + 1 + name.len());
-    path.push_str(parent);
-    if !parent.ends_with('/') {
-        path.push('/');
-    }
-    path.push_str(name);
-    path
 }
 
 #[cfg(test)]

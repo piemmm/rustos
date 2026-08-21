@@ -1,5 +1,5 @@
 //! TAIRiX `fstree` — the full-screen tree file manager
-//! (`.junie/fstree-next-plan.md`).
+//! (`plans/APPS.md`).
 //!
 //! A persistent directory-tree pane plus a file pane over the storage
 //! forest, drawn with the OS curses library. This crate delivers the S1
@@ -24,7 +24,7 @@
 //! per-region paged disassembly, every decode running behind the parser
 //! sandbox through the [`view_disasm::Decode`] seam; `o` force-picks a
 //! viewer, and an unrecognised file falls back to hex with a notice.
-//! The remaining stages are staged in `.junie/fstree-next-plan.md`.
+//! The remaining stages are staged in `plans/APPS.md`.
 //!
 //! # What this crate is
 //!

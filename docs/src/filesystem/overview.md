@@ -80,6 +80,7 @@ mutating ones a driver implementing both `FilesystemRead` and
 | `remove_via`   | Unlink a child under a driver-backed mount.          |
 | `readlink_via` | Read a symbolic link's stored target.                |
 | `symlink_via`  | Create a symbolic link with a stored target.         |
+| `link_via`     | Add a second name for an existing node (hard link).  |
 
 Each walks the in-RAM tree to the mount point — authorising **search
 permission on every ancestor** — then hands the remaining path components
@@ -100,8 +101,8 @@ Where that `Metadata` comes from is the one place the two policies differ:
 - The `*_via_secured` counterparts (`read_via_secured`,
   `list_via_secured`, `stat_via_secured`, `create_via_secured`,
   `mkdir_via_secured`, `write_via_secured`, `truncate_via_secured`,
-  `remove_via_secured`, `readlink_via_secured`, `symlink_via_secured`)
-  instead read **each node's own stored §5.3
+  `remove_via_secured`, `readlink_via_secured`, `symlink_via_secured`,
+  `link_via_secured`) instead read **each node's own stored §5.3
   record** through the driver's `FilesystemSecurity` surface and translate
   it (`Metadata::from_node_security`). The kernel host calls these for a
   driver such as [arxfs](./arxfs.md) that stores full per-inode owner,
@@ -213,19 +214,47 @@ place, which is what makes a write reach the target rather than the link.
 | `symlink` | kept | A new link never replaces an existing name. |
 | `unlink`, `rmdir`, `rename` (both ends) | kept | The call is about the name as typed; removing or moving a link never touches what it names. |
 | `readlink` | kept | The call is about the link. |
+| `link` (existing name) | per the call | An empty `LinkFlags` keeps it, so the *link* gains the second name and one planted on the way cannot redirect it onto an object the caller never spelled (POSIX `link()`); `LinkFlags::FOLLOW` follows it, so its target does instead (`linkat(AT_SYMLINK_FOLLOW)`, what `ln -L` asks for). |
+| `link` (new name) | kept | A name being created; a create never replaces an existing name. |
 | `chmod`, `chown`, extended attributes | followed | POSIX applies these to the target. |
 
 ## Per-format link support
 
-| Format | Reads a link | Creates a link |
-|---|---|---|
-| ARXFS  | yes — inode kind `3`, target stored as node data (`arxfs-spec.md` §20) | yes |
-| ext4   | yes — both the fast (inline `i_block`) and slow (block-backed) spellings | no; this driver reads foreign links but does not author them |
-| FAT32  | no — the format has no link object type | no |
-| ADFS   | no — the format has no link object type | no |
+| Format | Reads a symbolic link | Creates a symbolic link | Hard links |
+|---|---|---|---|
+| ARXFS  | yes — inode kind `3`, target stored as node data (`arxfs-spec.md` §20) | yes | creates them; `nlink` maintained per inode and storage freed only at zero (`arxfs-spec.md` §20.5) |
+| ext4   | yes — both the fast (inline `i_block`) and slow (block-backed) spellings | no; this driver reads foreign links but does not author them | reports `i_links_count` and honours it on unlink; authors none |
+| FAT32  | no — the format has no link object type | no | no — a directory entry *is* the file's identity |
+| ADFS   | no — the format has no link object type | no | no — the format has no such object |
 
 A "no" is `VfsError::NotSupported`: the permanent format (or driver) limit a
 caller can tell apart from a structural refusal, never a substituted file.
+
+## Hard links
+
+A node may carry more than one name. Each is an ordinary directory entry
+reaching one inode, so a write through either is visible through the other,
+and the node's storage is released only when the **last** name is unlinked —
+the count that decides it is the format's own (`NodeInfo::nlink`), carried up
+to `FileStat` and printed by `ls -l`, never derived by the VFS, which could
+not count names without walking every directory on the volume.
+
+- **A directory is refused, in the VFS rather than per format.** The tree
+  staying a tree is what makes physical `..` resolution well-defined, so
+  `VfsError::IsADirectory` answers a directory operand on every backing.
+- **A pair that crosses a mount is refused.** A directory entry addresses an
+  inode in its own backing, so both paths must resolve under one mounted
+  volume; `VfsError::CrossVolume` is the same refusal a rename gives, for the
+  same reason, through the same check.
+- **The count is a fixed format bound, not a capacity.** A create that would
+  overflow it fails closed with `VfsError::TooManyLinks` rather than wrapping
+  a count whose zero would free storage a live name still reaches.
+- **A second name confers no authority.** It is authorised exactly as a
+  create in its own parent (search plus write); nothing further is required
+  of the caller against the node, and nothing further is granted.
+- **A format that keeps no count answers `1`.** Such a format also has no
+  second-name object, so one name is the whole truth rather than a floor
+  (`NodeInfo::SINGLE_NAME`, the one definition every such driver reads).
 
 [`Filesystem`]: ../abi/driver_traits.md
 [`Metadata`]: ./permissions.md

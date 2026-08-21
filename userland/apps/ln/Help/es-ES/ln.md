@@ -1,10 +1,10 @@
 ## NAME
 
-ln — crear enlaces simbólicos
+ln — crear enlaces entre archivos
 
 ## SYNOPSIS
 
-`ln -s [-finvT] [-t dir] [--] target... [link_name]`
+`ln [-sLPdFfinvT] [-t dir] [--] target... [link_name]`
 
 ## DESCRIPTION
 
@@ -31,10 +31,14 @@ El primer fallo detiene la ejecución antes de cualquier destino
 posterior; los enlaces ya creados permanecen. `--` termina el análisis
 de opciones: todo argumento posterior es un operando.
 
-`-s` es obligatorio en este sistema, que no tiene enlaces duros: sin él
-`ln` no tiene nada que crear, y lo dice en lugar de crear un enlace
-simbólico, que es un objeto distinto. Las opciones exclusivas de los
-enlaces duros `-L`, `-P`, `-d` y `-F` se rechazan por la misma razón.
+Sin `-s` el enlace es **duro**: una segunda entrada de directorio para
+el propio inodo del destino. Ambos nombres alcanzan un solo archivo,
+una escritura por cualquiera de ellos se ve por el otro, y el
+almacenamiento del archivo subsiste hasta que se retira el último
+nombre. Ambos nombres deben estar en un mismo volumen, y un directorio
+nunca recibe un segundo nombre — que el árbol de archivos siga siendo
+un árbol es lo que da sentido a `..`.
+
 `-b`/`-S` se rechazan porque no existe maquinaria de copias de
 seguridad, y `-r` porque calcular un destino relativo al directorio del
 enlace exige una resolución canonizadora que este sistema no ofrece —
@@ -42,8 +46,14 @@ una léxica nombraría otro objeto en cuanto hubiera un enlace por medio.
 
 ## OPTIONS
 
-- `-s, --symbolic` — crear enlaces simbólicos. Obligatorio: véase
-  arriba.
+- `-s, --symbolic` — crear enlaces simbólicos en lugar de duros.
+- `-L, --logical` — enlazar de forma dura lo que nombra un destino
+  simbólico, en lugar del propio enlace.
+- `-P, --physical` — enlazar de forma dura el destino tal como se
+  escribe, sin seguir un enlace simbólico final. Valor por defecto.
+- `-d, -F, --directory` — aceptar un operando de directorio. El enlace
+  se rechaza igualmente: ningún usuario puede dar un segundo nombre a
+  un directorio.
 - `-f, --force` — eliminar un nombre de enlace existente y crear
   entonces el enlace.
 - `-i, --interactive` — preguntar antes de eliminar un nombre de enlace

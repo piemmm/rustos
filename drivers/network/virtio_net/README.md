@@ -34,7 +34,7 @@ in user space and are out of scope for `abi-v1`.
 
 Same caveat as `virtio_blk`: real hardware drive requires the
 kernel-side DMA mapping, IRQ routing, and bus-handle hand-off
-described in `.junie/next-session-prompt.md` items 1–3.
+described in `plans/WIRING.md` items 1–3.
 
 ## Required capabilities
 

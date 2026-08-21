@@ -356,6 +356,29 @@ pub enum Errno {
     /// is opened, read, or written (fail closed) — a cycle is never walked
     /// until the kernel runs out of stack.
     LinkLoop = 42,
+    /// A path names a directory where the operation forbids one.
+    ///
+    /// The TAIRiX equivalent of POSIX `EISDIR`, and the mirror of
+    /// [`NotADirectory`](Self::NotADirectory). Emitted when a write, truncate,
+    /// or byte-read reaches a directory, and by `fs_link`, which refuses a
+    /// second name for a directory outright so the tree stays a tree — the
+    /// property that makes physical `..` resolution well-defined.
+    ///
+    /// Linux answers a directory `link()` with `EPERM` for historical
+    /// reasons (a sufficiently privileged caller once could). TAIRiX has no
+    /// ambient root and no capability grants it, so reporting a *permission*
+    /// refusal would imply a principal who could succeed; the honest answer
+    /// is that the object's kind forecloses the operation.
+    IsADirectory = 43,
+    /// A node already carries as many names as the format can record.
+    ///
+    /// The TAIRiX equivalent of POSIX `EMLINK`. The per-inode name count is
+    /// a fixed on-disk format bound, never a capacity to grow, so a create
+    /// that would overflow it fails closed here rather than wrapping or
+    /// saturating. Distinct from [`NoSpace`](Self::NoSpace): the volume may
+    /// be nearly empty, and freeing blocks cannot help — only removing one
+    /// of the node's existing names can.
+    TooManyLinks = 44,
 }
 
 impl Errno {
@@ -433,6 +456,8 @@ impl Errno {
             40 => Some(Self::DeviceOffline),
             41 => Some(Self::Busy),
             42 => Some(Self::LinkLoop),
+            43 => Some(Self::IsADirectory),
+            44 => Some(Self::TooManyLinks),
             _ => None,
         }
     }
@@ -483,6 +508,8 @@ impl fmt::Display for Errno {
             Self::DeviceOffline => "device offline or removed",
             Self::Busy => "device or resource busy",
             Self::LinkLoop => "too many symbolic links in path resolution",
+            Self::IsADirectory => "is a directory",
+            Self::TooManyLinks => "too many links",
         };
         f.write_str(message)
     }
@@ -537,6 +564,8 @@ mod tests {
         assert_eq!(Errno::DeviceOffline.as_i32(), 40);
         assert_eq!(Errno::Busy.as_i32(), 41);
         assert_eq!(Errno::LinkLoop.as_i32(), 42);
+        assert_eq!(Errno::IsADirectory.as_i32(), 43);
+        assert_eq!(Errno::TooManyLinks.as_i32(), 44);
     }
 
     #[test]
@@ -586,11 +615,13 @@ mod tests {
             Errno::DeviceOffline,
             Errno::Busy,
             Errno::LinkLoop,
+            Errno::IsADirectory,
+            Errno::TooManyLinks,
         ] {
             assert_eq!(Errno::from_i32(errno.as_i32()), Some(errno));
         }
         assert_eq!(Errno::from_i32(0), None);
-        assert_eq!(Errno::from_i32(43), None);
+        assert_eq!(Errno::from_i32(45), None);
         assert_eq!(Errno::from_i32(-1), None);
     }
 

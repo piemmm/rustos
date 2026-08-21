@@ -57,10 +57,10 @@ and the device drivers carry only the device-specific wire format.
 
 | Feature                                    | Why deferred                                                                       | Tracked in                                  |
 |--------------------------------------------|------------------------------------------------------------------------------------|---------------------------------------------|
-| Driver-host `DmaPool` wiring               | The driver host does not yet thread a per-process `DmaPool` through to its modules | `.junie/next-session-prompt.md` item 0      |
-| IRQ routing into user-space drivers        | The kernel does not yet expose an IRQ capability                                   | `.junie/next-session-prompt.md` item 2      |
-| Boot-time PCI/MMIO walk → live driver host | The kernel binary does not yet enumerate the bus and construct a live `drvhost::Host` | `.junie/next-session-prompt.md` item 4   |
-| QEMU integration tests (PCI + MMIO)        | Depend on the boot-time bring-up above plus the userland net stack from `.junie/next-session-prompt.md` item 5 | `.junie/next-session-prompt.md` item 4      |
+| Driver-host `DmaPool` wiring               | The driver host does not yet thread a per-process `DmaPool` through to its modules | `plans/WIRING.md` item 0      |
+| IRQ routing into user-space drivers        | The kernel does not yet expose an IRQ capability                                   | `plans/WIRING.md` item 2      |
+| Boot-time PCI/MMIO walk → live driver host | The kernel binary does not yet enumerate the bus and construct a live `drvhost::Host` | `plans/WIRING.md` item 4   |
+| QEMU integration tests (PCI + MMIO)        | Depend on the boot-time bring-up above plus the userland net stack from `plans/WIRING.md` item 5 | `plans/WIRING.md` item 4      |
 
 ## Layering picture
 

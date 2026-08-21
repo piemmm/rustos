@@ -70,6 +70,7 @@ impl FilesystemRead for MockRoot {
         match node.raw() {
             ROOT | SYSTEM | SECURITY => Ok(NodeInfo {
                 kind: NodeKind::Directory,
+                nlink: 2,
                 size: 0,
                 allocated: 0,
                 times: NodeTimes::default(),
@@ -80,6 +81,7 @@ impl FilesystemRead for MockRoot {
                 } else {
                     NodeKind::RegularFile
                 },
+                nlink: 1,
                 size: self.reported_size,
                 allocated: self.reported_size,
                 times: NodeTimes::default(),

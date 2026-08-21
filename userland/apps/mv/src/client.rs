@@ -7,6 +7,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use tairix_help::{own_short_help, HelpSource};
+use tairix_path::{join, leaf_name};
 
 use crate::command::{Clobber, Command, Options, TargetMode};
 use crate::error::MvError;
@@ -138,7 +139,7 @@ fn move_all(
     }
     for source in sources {
         let target = if dest_is_dir {
-            join(dest, basename(source))
+            join(dest, leaf_name(source))
         } else {
             String::from(dest)
         };
@@ -295,31 +296,5 @@ fn stat(path: &str, fs: &dyn FileSystem) -> Result<Option<EntryKind>, MvError> {
         Err(errno) => Err(MvError::Stat(errno)),
     }
 }
-
-/// The final path component of `path`, ignoring any trailing slashes. The base
-/// name of `/a/b/` is `b`; of `/` (or the empty string) it is `/`.
-fn basename(path: &str) -> &str {
-    let trimmed = path.trim_end_matches('/');
-    if trimmed.is_empty() {
-        return "/";
-    }
-    match trimmed.rfind('/') {
-        Some(slash) => &trimmed[slash + 1..],
-        None => trimmed,
-    }
-}
-
-/// Join a directory `parent` and a child `name` into a path, inserting a
-/// single `/` unless `parent` already ends with one.
-fn join(parent: &str, name: &str) -> String {
-    let mut path = String::with_capacity(parent.len() + 1 + name.len());
-    path.push_str(parent);
-    if !parent.ends_with('/') {
-        path.push('/');
-    }
-    path.push_str(name);
-    path
-}
-
 #[cfg(test)]
 mod tests;

@@ -266,9 +266,6 @@ The drawn window chrome — the `lib/controls` toolbar
   selected entry, so they need a selection (an empty directory offers none).
   **Open With…** is offered only for a regular file — a directory descends and
   a bundle launches itself, so neither has an application to choose.
-  **Pin to taskbar** is offered only for a bundle — pinning names an installed
-  application, which no plain file or directory is (the model reads the
-  selection through the one shared `EntryKind` classifier).
   **Paste** targets the current directory and needs only a held clipboard,
   not a selection; because the clipboard lives in the app rather than the
   browser (`Browser::clipboard` *captures* a fresh one from the selection),
@@ -282,10 +279,9 @@ The model decides *what is offered*; it performs
 no navigation or I/O itself, so composing it grants nothing (the read-only
 picker builds the same model). Only commands the file manager can actually
 carry out today are modelled, so none is speculative surface (`AGENTS.md`
-§2.4): **Open With…** joined the set with its FM6b chooser verb (below),
+§2.4): **Open With…** joined the set with its FM6b chooser verb (below), and
 **Delete** joined it with FM9-c's confirm-and-remove verb (its `begin_delete`
-action, below), and **Pin to taskbar** joined it with the taskbar-pin stage's
-window-channel verb (`plans/NEW-TASKBAR.md` T7, below). **New Folder** is a
+action, below). **New Folder** is a
 *write* tool that lives on the manager-only toolbar (below), not on this menu
 shared with the read-only picker.
 
@@ -305,8 +301,7 @@ enabled command** (a press on a disabled row or off the menu resolves to
 nothing, failing closed). The `files.app` `Run` binary routes a chosen
 command through `dispatch_context_command` to the **exact same** app verbs
 the toolbar and keyboard already drive — Open (`activate`), Open With… (the
-chooser below), Pin to taskbar (the window channel's pin request, below),
-Rename, Cut, Copy, Paste, Properties, and Delete (the same
+chooser below), Rename, Cut, Copy, Paste, Properties, and Delete (the same
 modal-confirmed `begin_delete` the `Delete` key opens, below) — so the menu can
 never diverge from them (`AGENTS.md` §2.2) and adds no authority (every verb is
 the user's own §5.3-checked action). `Escape` or a press off the menu dismisses
@@ -315,24 +310,13 @@ flow is reachable by pointer alone (`render::context_menu_command_rect` is the
 shared forward mirror of the hit-test, so a caller — including the desktop
 integration harness — can aim at exactly the drawn Delete row, §2.2).
 
-**Pinning an application to the taskbar** (`plans/NEW-TASKBAR.md` T7) has two
-pointer spellings, both incidental to browsing and both resolved by the
-desktop session under its own authority. Choosing **Pin to taskbar** from the
-right-click menu on a bundle runs `pin_selected_bundle`: it re-checks the
-selection is a bundle (fail closed), names it through the same validated
-`selected_target_path` spelling every open/stat uses, and sends the window
-channel's `WindowClient::pin_bundle`; a refusal — already pinned, a full bar,
-or a session that does not pin — is stated in one terse `stderr` line and the
-app simply carries on (`AGENTS.md` §2.24). Dragging a bundle out of the
-browser is the other spelling: a primary press on a bundle row arms the pure
-`drag::BundleDrag` detector (a press on anything else arms nothing), and the
-first motion beyond its `DRAG_THRESHOLD_PX` (6 physical pixels, Euclidean)
-sends **one** `WindowClient::drag_offer` per gesture with the same validated
-path. What a drop means is the session's decision: a primary release ends the
-gesture locally whatever mode the window is in, `Escape` sends
-`WindowClient::drag_withdraw` exactly when an offer is outstanding, and a
-refused offer — or a listing that changed under the held press — dies
-silently, so the gesture never disturbs browsing.
+**A desktop shortcut, not a taskbar pin, is how an application gets a second
+place to launch from.** Taskbar pinning was removed from the design
+(`plans/NEW-TASKBAR.md`), so the file manager offers no pin command and the
+window channel carries no pin or drag-offer request. The program library's own
+row menu creates a desktop shortcut instead — a symbolic link to the bundle,
+resolved by the desktop session under its own authority
+(`plans/SYMLINKS.md` S5).
 
 The **toolbar is now drawn and clickable**. `render` paints the
 `TOOLBAR_COMMANDS` as a `lib/controls` `Toolbar` of themed `IconButton`s in

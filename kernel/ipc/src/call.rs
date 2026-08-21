@@ -2,7 +2,7 @@
 //!
 //! A [`Port`](crate::port::Port) is fire-and-forget: a sender enqueues a
 //! message and never hears back. The reactive driver-store file service
-//! (Design D, D2b — `.junie/next-pi-prompt.md`) and any future request/reply
+//! (Design D, D2b — `plans/PI.md`) and any future request/reply
 //! system service instead need **synchronous** semantics: a caller posts a
 //! request, blocks until exactly one matching reply arrives, and reads it.
 //! [`CallEndpoint`] is that primitive.

@@ -89,6 +89,18 @@ fn set_le32(img: &mut [u8], off: usize, value: u32) {
     img[off..off + 4].copy_from_slice(&value.to_le_bytes());
 }
 
+/// The `i_links_count` a freshly written fixture inode carries: a directory
+/// has its own `.` beside its name in the parent, everything else has the one
+/// name. A real volume always records this, and the unlink path reads it to
+/// decide when to free, so the fixture records it too.
+fn default_links(mode: u16) -> u16 {
+    if mode & S_IFMT == S_IFDIR {
+        2
+    } else {
+        1
+    }
+}
+
 fn inode_offset(ino: u32) -> usize {
     INODE_TABLE_BLOCK * FS_BLOCK + (ino as usize - 1) * INODE_SIZE
 }
@@ -135,6 +147,7 @@ fn write_extent_inode(img: &mut [u8], ino: u32, mode: u16, size: u32, extents: &
     set_le16(img, base, mode);
     set_le32(img, base + 0x04, size);
     set_le32(img, base + 0x20, INODE_FLAG_EXTENTS);
+    set_le16(img, base + 0x1A, default_links(mode));
 
     let ib = base + I_BLOCK_OFFSET;
     set_le16(img, ib, EXTENT_MAGIC);
@@ -165,6 +178,7 @@ fn write_classic_inode(
     set_le16(img, base, mode);
     set_le32(img, base + 0x04, size);
     set_le32(img, base + 0x20, 0);
+    set_le16(img, base + 0x1A, default_links(mode));
 
     let ib = base + I_BLOCK_OFFSET;
     for (i, &ptr) in direct.iter().enumerate() {
@@ -1964,4 +1978,97 @@ fn a_link_with_no_target_is_refused_as_corrupt() {
         fs.read_link(NodeId::from_raw(u64::from(FAST_LINK_INO)), &mut out),
         Err(DriverError::DeviceFault)
     );
+}
+
+/// Plant a second directory entry in the root naming inode `ino`, and record
+/// the higher `i_links_count` a real writer would have left behind — the
+/// shape of any ext4 volume Linux has made a hard link on.
+fn plant_second_name(img: &mut [u8], name: &[u8], ino: u32) {
+    let base = inode_offset(ino);
+    let links = u16::from_le_bytes([img[base + 0x1A], img[base + 0x1A + 1]]);
+    set_le16(img, base + 0x1A, links + 1);
+
+    // Re-lay the root block with the extra entry; the last one's `rec_len`
+    // covers the rest of the block, as on disk.
+    let off = block_offset(ROOT_DATA_BLOCK);
+    let block = &mut img[off..off + FS_BLOCK];
+    block.fill(0);
+    let mut pos = put_dirent(block, 0, ROOT_INODE, b".", FT_DIR, false);
+    pos = put_dirent(block, pos, ROOT_INODE, b"..", FT_DIR, false);
+    pos = put_dirent(block, pos, 11, b"hello.txt", FT_REG, false);
+    pos = put_dirent(block, pos, 12, b"classic.bin", FT_REG, false);
+    pos = put_dirent(block, pos, 13, b"sub", FT_DIR, false);
+    let _ = put_dirent(block, pos, ino, name, FT_REG, true);
+}
+
+#[test]
+fn unlinking_one_name_of_a_foreign_hard_link_keeps_the_other_readable() {
+    // This driver authors no hard links, but it writes volumes that hold
+    // them. Freeing the inode on the first unlink would destroy data the
+    // other name still reaches — silent corruption of a foreign volume.
+    let mut img = build_image();
+    plant_second_name(&mut img, b"hello.alias", 11);
+    let mut fs = Ext4::open(MockBlock { data: img }).expect("valid volume");
+    let root = fs.root();
+    let file = fs.lookup(root, b"hello.txt").expect("the file");
+    assert_eq!(fs.node_info(file).expect("stat").nlink, 2);
+
+    fs.remove(root, b"hello.txt").expect("drop one name");
+    assert_eq!(fs.lookup(root, b"hello.txt"), Err(DriverError::NotFound));
+
+    let alias = fs.lookup(root, b"hello.alias").expect("the other name");
+    assert_eq!(fs.node_info(alias).expect("stat").nlink, 1);
+    let mut buf = [0u8; 64];
+    let n = fs.read_at(alias, 0, &mut buf).expect("still readable");
+    assert_eq!(&buf[..n], HELLO_BODY);
+
+    // And the data survives a remount: the inode was never freed.
+    let mut fs = remount(fs);
+    let alias = fs.lookup(fs.root(), b"hello.alias").expect("still there");
+    let n = fs.read_at(alias, 0, &mut buf).expect("read");
+    assert_eq!(&buf[..n], HELLO_BODY);
+}
+
+#[test]
+fn unlinking_the_last_name_of_a_foreign_hard_link_frees_the_inode() {
+    let mut img = build_image();
+    plant_second_name(&mut img, b"hello.alias", 11);
+    let mut fs = Ext4::open(MockBlock { data: img }).expect("valid volume");
+    let root = fs.root();
+    fs.remove(root, b"hello.txt").expect("drop one name");
+    fs.remove(root, b"hello.alias").expect("drop the last name");
+
+    // The inode is free again: a fresh create reuses it and round-trips.
+    fs.create(root, b"again.txt", NodeKind::RegularFile)
+        .expect("create reuses the freed inode");
+    fs.write_at(root, b"again.txt", 0, b"reused")
+        .expect("write");
+    let mut fs = remount(fs);
+    let file = fs.lookup(fs.root(), b"again.txt").expect("found");
+    let mut buf = [0u8; 16];
+    let n = fs.read_at(file, 0, &mut buf).expect("read");
+    assert_eq!(&buf[..n], b"reused");
+}
+
+#[test]
+fn the_link_count_is_reported_from_the_volumes_own_record() {
+    // Read, never derived: a directory carries its `.` and its name, a file
+    // carries the one name, and a planted second name shows as two.
+    let mut fs = mount();
+    let root = fs.root();
+    assert_eq!(fs.node_info(root).expect("stat").nlink, 2);
+    let file = fs.lookup(root, b"hello.txt").expect("the file");
+    assert_eq!(fs.node_info(file).expect("stat").nlink, 1);
+}
+
+#[test]
+fn ext4_reads_link_counts_but_authors_no_second_name() {
+    // The same posture the driver already takes for `create_link`: it reports
+    // what a foreign writer recorded and refuses to author one itself.
+    let mut fs = mount();
+    let root = fs.root();
+    let file = fs.lookup(root, b"hello.txt").expect("the file");
+    assert_eq!(fs.link(root, b"alias", file), Err(DriverError::Unsupported));
+    assert_eq!(fs.lookup(root, b"alias"), Err(DriverError::NotFound));
+    assert_eq!(fs.node_info(file).expect("stat").nlink, 1);
 }

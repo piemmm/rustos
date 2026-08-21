@@ -957,6 +957,7 @@ fn structured_fs_inputs_with_corrupted_fields_never_panic() {
     let mut stat = [0u8; FileStat::WIRE_LEN];
     FileStat {
         kind: FileKind::Regular,
+        nlink: 2,
         size: 0xDEAD_BEEF,
         allocated: 0xF00D_0000,
         mode: 0o644,

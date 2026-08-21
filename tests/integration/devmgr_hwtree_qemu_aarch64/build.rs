@@ -1,5 +1,5 @@
 //! Build script for the aarch64 devmgr-hwtree QEMU vertical
-//! (Design D P-3, `.junie/next-pi-prompt.md`).
+//! (Design D P-3, `plans/PI.md`).
 //!
 //! Two jobs on the freestanding `aarch64-unknown-none` target, identical to
 //! the spawn-the-session vertical:

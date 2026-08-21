@@ -21,10 +21,6 @@ pub enum LnError {
     MissingDestination(String),
     /// More operands than the form accepts (`-T` takes exactly two).
     ExtraOperand(String),
-    /// A hard link was asked for. This ABI has no hard links — there is no
-    /// call to make — so the refusal states the permanent limit rather than
-    /// silently creating a symbolic link, which is a different object.
-    HardLink,
     /// The destination that must be an existing directory (`-t`, or the last
     /// of three or more operands) is not one.
     NotADirectory(String),
@@ -52,9 +48,6 @@ impl fmt::Display for LnError {
                 write!(f, "missing destination file operand after '{target}'")
             }
             Self::ExtraOperand(operand) => write!(f, "extra operand '{operand}'"),
-            Self::HardLink => f.write_str(
-                "hard links are not supported on this system; use -s to create a symbolic link",
-            ),
             Self::NotADirectory(path) => write!(f, "target '{path}' is not a directory"),
             Self::Stat(path, errno) => write!(f, "cannot access '{path}': {errno}"),
             Self::Remove(path, errno) => write!(f, "cannot remove '{path}': {errno}"),

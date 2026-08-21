@@ -548,7 +548,7 @@ impl SyscallNumber {
     /// Make a **synchronous** capability-checked call to a kernel-owned IPC
     /// call endpoint: post a request, block until exactly one matching reply
     /// arrives, and copy it out (Design D D2b —
-    /// `.junie/next-pi-prompt.md`).
+    /// `plans/PI.md`).
     ///
     /// Unlike [`SyscallNumber::IPC_SEND`] (fire-and-forget over a
     /// [`crate::ipc`] port), this is request/reply: the kernel correlates the
@@ -582,7 +582,7 @@ impl SyscallNumber {
     /// Create and register a kernel-owned synchronous **call endpoint** the
     /// calling task then *serves*, so a user-space system service can answer
     /// [`SyscallNumber::IPC_CALL`] requests (Design D D3 — the server half of
-    /// the synchronous IPC primitive; `.junie/next-pi-prompt.md`).
+    /// the synchronous IPC primitive; `plans/PI.md`).
     ///
     /// [`SyscallNumber::IPC_CALL`] is the caller half and was, until now,
     /// answerable only by a kernel-resident service (the disk-owning
@@ -614,7 +614,7 @@ impl SyscallNumber {
 
     /// Receive the next request posted to a call endpoint the calling task
     /// owns, blocking until one arrives (Design D D3 — the server-side
-    /// receive half; `.junie/next-pi-prompt.md`).
+    /// receive half; `plans/PI.md`).
     ///
     /// Arguments: `endpoint: u64` — the bound call-endpoint id; `buf: *mut u8`
     /// and `buf_cap: usize` — the buffer the request payload is copied into;
@@ -635,7 +635,7 @@ impl SyscallNumber {
 
     /// Answer one received call on an endpoint the calling task owns,
     /// releasing the blocked caller (Design D D3 — the server-side reply
-    /// half; `.junie/next-pi-prompt.md`).
+    /// half; `plans/PI.md`).
     ///
     /// Arguments: `endpoint: u64` — the bound call-endpoint id; `ticket: u64`
     /// — the ticket from [`SyscallNumber::CALL_RECV`]; `reply: *const u8` and
@@ -1199,7 +1199,7 @@ impl SyscallNumber {
     /// target, the signal, and which rule decided it.
     pub const SIGNAL: Self = Self(64);
     /// Change the calling process's working directory to `path`
-    /// (`.junie/PREREQUISITES2.md` P2).
+    /// (`plans/SHELL.md` P2).
     ///
     /// Arguments: `path: *const u8` (user pointer) and `path_len: usize` (at
     /// most [`crate::FS_PATH_MAX`]). Returns `0`, or `-errno`. The kernel
@@ -1218,7 +1218,7 @@ impl SyscallNumber {
     /// [`crate::CapabilityId::FS_ACCESS`].
     pub const FS_CHDIR: Self = Self(65);
     /// Report the calling process's working directory into a caller buffer
-    /// (`.junie/PREREQUISITES2.md` P2).
+    /// (`plans/SHELL.md` P2).
     ///
     /// Arguments: `buf: *mut u8` (user pointer) and `buf_cap: usize` (its
     /// capacity). Returns the number of bytes written — the working
@@ -1231,7 +1231,7 @@ impl SyscallNumber {
     /// not audited.
     pub const FS_GETCWD: Self = Self(66);
     /// Resolve a typed resource reference (`plans/ALIAS.md`) and open it to a
-    /// new descriptor (`.junie/PREREQUISITES2.md` P5).
+    /// new descriptor (`plans/SHELL.md` P5).
     ///
     /// Arguments: `reference: *const u8` (user pointer to the textual
     /// resource reference, e.g. `sys:random`), `reference_len: usize` (at most
@@ -2271,6 +2271,39 @@ impl SyscallNumber {
     /// Requires `CAP_FS_ACCESS`. A pure read, unaudited like
     /// [`Self::FS_STAT`].
     pub const FS_READLINK: Self = Self(114);
+
+    /// Add a second directory entry naming an existing node — a hard link.
+    ///
+    /// Arguments: `existing: *const u8`, `existing_len: usize` — the node
+    /// that gains a name; `link: *mut u8`, `link_len: usize` — the new name;
+    /// `flags: u32` — a [`crate::LinkFlags`] word. Returns `0`, or `-errno`.
+    ///
+    /// Both operands are absolute paths. With an empty `flags` **neither
+    /// final component is followed** — POSIX `link()`: the inode that gains
+    /// a name is the one the caller spelled, so a symbolic link planted on
+    /// the way cannot redirect the new name onto an object the caller never
+    /// asked for. [`LinkFlags::FOLLOW`](crate::LinkFlags::FOLLOW) is the
+    /// `linkat(AT_SYMLINK_FOLLOW)` posture `ln -L` asks for, resolving the
+    /// existing name's final link. The **new** name is never followed under
+    /// either: it is a name being created, and a create never replaces an
+    /// existing name.
+    ///
+    /// The new name is authorised as an ordinary create in **its own**
+    /// parent, and grants no authority the caller did not already hold over
+    /// the node — the existing name is resolved under the caller's attested
+    /// identity like any other path.
+    ///
+    /// Refusals that are about the operation rather than the caller:
+    /// [`crate::Errno::IsADirectory`] for a directory (the tree must stay a
+    /// tree), [`crate::Errno::CrossVolume`] when the two paths do not resolve
+    /// under one mounted volume (a second directory entry for one inode
+    /// cannot span two backings), [`crate::Errno::TooManyLinks`] when the
+    /// format's per-inode name count would overflow, and
+    /// [`crate::Errno::NotSupported`] on a format with no such object.
+    ///
+    /// Requires `CAP_FS_ACCESS`. Audited like [`Self::FS_SYMLINK`]: it
+    /// changes what a later resolution reaches.
+    pub const FS_LINK: Self = Self(115);
 
     /// Inclusive upper bound on the syscall identifier space in `abi-v1`.
     pub const MAX: u16 = 1023;

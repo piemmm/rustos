@@ -25,8 +25,9 @@ A path that cannot be read is reported on standard error and the walk
 continues with what remains; an unreadable directory contributes
 nothing rather than a guessed partial sum.
 
-TAIRiX has no hard links yet, so no entry can be counted twice and the
-GNU link-deduplication switches do not exist; `-x` (one file system) is
+`du` does not yet deduplicate a multiply-named file: one reached through
+two names is counted once per name, and the GNU link-deduplication
+switches do not exist; `-x` (one file system) is
 not yet available; the `DU_BLOCK_SIZE`-family environment variables are
 not read — the scale is selected by options alone.
 
