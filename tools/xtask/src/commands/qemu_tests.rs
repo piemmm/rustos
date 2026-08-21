@@ -5476,9 +5476,9 @@ static TESTS: &[QemuTest] = &[
     // AW3 (`plans/APPWIN.md`) grows the presented desktop into the full
     // click-through: the session's one-shot `DESKTOP_REVEALED` witness
     // keys the first screendump (the dark composited desktop) and
-    // the click on the taskbar's permanent Files button (the guest applies
-    // injected events strictly in device order, so the button click needs
-    // no extra gate); the spawned files bundle creates its window over the
+    // the click on the autostarted file manager's own icon-bar slot (the
+    // guest applies injected events strictly in device order, so the click
+    // needs no extra gate); that click opens its window over the
     // reserved window rendezvous, and the endpoint's first *reply* on
     // serial gates the in-window click. From there every stage is keyed on
     // the kernel/ipc `MessageDelivered` records the desktop's app-ward
@@ -7595,6 +7595,20 @@ const MIN_APP_GLYPH_SHARE: f64 = 0.05;
 /// slot the bar drew.
 const MAX_BARE_APP_SLOT_SHARE: f64 = 0.0;
 
+/// The strip index the icon-bar vertical's launched application occupies.
+///
+/// One, not zero: the file manager is a core desktop component the session
+/// autostarts at bring-up, and it holds the leading slot for the life of the
+/// session, so anything launched afterwards lands beside it. Reading slot
+/// zero would drive and measure the file manager instead of the application
+/// under test.
+const APPBAR_LAUNCHED_SLOT: usize = 1;
+
+/// The strip index that must stay empty: the one beyond the launched
+/// application's. A regression that gave every *window* its own slot would
+/// draw here.
+const APPBAR_EMPTY_SLOT: usize = APPBAR_LAUNCHED_SLOT + 1;
+
 /// The icon-bar vertical's screendump names. The frames carrying the running
 /// application are read against the bare one, so the set is named here rather
 /// than only in the plan that schedules them.
@@ -7760,7 +7774,7 @@ fn assert_one_window_dark_screendump(t: &QemuTest, path: &Path) -> Result<(), St
     let image = read_screendump(t, path)?;
     let bare = read_screendump(t, &bare_bar_dump_path(t, path)?)?;
     assert_app_slot_drawn(t, path, (&image, &bare), &theme)?;
-    assert_no_second_app_slot(t, path, (&image, &bare), &theme)?;
+    assert_no_slot_beyond_the_launched_app(t, path, (&image, &bare), &theme)?;
     assert_cascade_slot_covered(t, path, &image, &theme, 0)
 }
 
@@ -7776,7 +7790,7 @@ fn assert_two_windows_dark_screendump(t: &QemuTest, path: &Path) -> Result<(), S
     let image = read_screendump(t, path)?;
     let bare = read_screendump(t, &bare_bar_dump_path(t, path)?)?;
     assert_app_slot_drawn(t, path, (&image, &bare), &theme)?;
-    assert_no_second_app_slot(t, path, (&image, &bare), &theme)?;
+    assert_no_slot_beyond_the_launched_app(t, path, (&image, &bare), &theme)?;
     for slot in 0..2 {
         assert_cascade_slot_covered(t, path, &image, &theme, slot)?;
     }
@@ -7842,8 +7856,13 @@ fn assert_cascade_slot_covered(
     Ok(())
 }
 
-/// Assert the bar's first application slot carries a drawn glyph, measured
-/// against the same slot in the bare frame.
+/// Assert the launched application's strip slot carries a drawn glyph,
+/// measured against the same slot in the bare frame.
+///
+/// The slot read is the launched application's own
+/// ([`APPBAR_LAUNCHED_SLOT`]), not the strip's first: the autostarted file
+/// manager already holds that one in the bare frame, so reading it would
+/// compare a glyph against itself and prove nothing.
 fn assert_app_slot_drawn(
     t: &QemuTest,
     path: &Path,
@@ -7853,12 +7872,12 @@ fn assert_app_slot_drawn(
     ),
     theme: &tairix_theme::Theme,
 ) -> Result<(), String> {
-    let share = app_slot_glyph_share(t, path, frames, theme, 0)?;
+    let share = app_slot_glyph_share(t, path, frames, theme, APPBAR_LAUNCHED_SLOT)?;
     if share < MIN_APP_GLYPH_SHARE {
         return Err(format!(
-            "test --qemu ({}): screendump {} shows no application in the bar's first slot: \
-             only {share:.3} of the slot differs from the same slot before anything was \
-             running (expected >= {MIN_APP_GLYPH_SHARE})",
+            "test --qemu ({}): screendump {} shows no application in the bar's slot \
+             {APPBAR_LAUNCHED_SLOT}: only {share:.3} of the slot differs from the same slot \
+             before anything was launched (expected >= {MIN_APP_GLYPH_SHARE})",
             t.package,
             path.display(),
         ));
@@ -7866,15 +7885,16 @@ fn assert_app_slot_drawn(
     Ok(())
 }
 
-/// Assert the bar has drawn **no** second application slot: the strip's next
-/// slot along is exactly as it was before anything was running.
+/// Assert the bar has drawn **no** slot beyond the launched application's:
+/// the strip's next slot along is exactly as it was before anything was
+/// launched.
 ///
 /// This is what "the bar shows applications, not windows" means as a claim
 /// about pixels, and it is the reason the two-window frame is taken at all.
 /// Without it a regression that gave every window its own slot would still
 /// satisfy every other assertion in this vertical, because they all read the
-/// *first* slot.
-fn assert_no_second_app_slot(
+/// launched application's own slot.
+fn assert_no_slot_beyond_the_launched_app(
     t: &QemuTest,
     path: &Path,
     frames: (
@@ -7883,12 +7903,12 @@ fn assert_no_second_app_slot(
     ),
     theme: &tairix_theme::Theme,
 ) -> Result<(), String> {
-    let share = app_slot_glyph_share(t, path, frames, theme, 1)?;
+    let share = app_slot_glyph_share(t, path, frames, theme, APPBAR_EMPTY_SLOT)?;
     if share > MAX_BARE_APP_SLOT_SHARE {
         return Err(format!(
-            "test --qemu ({}): screendump {} shows a second application slot on the bar: \
-             {share:.3} of the slot beside the running application differs from the same \
-             slot before anything was running (expected <= {MAX_BARE_APP_SLOT_SHARE}). One \
+            "test --qemu ({}): screendump {} shows an application slot beyond the launched \
+             one: {share:.3} of slot {APPBAR_EMPTY_SLOT} differs from the same slot before \
+             anything was launched (expected <= {MAX_BARE_APP_SLOT_SHARE}). One \
              application's windows must share one slot",
             t.package,
             path.display(),
@@ -7933,7 +7953,7 @@ fn assert_no_second_app_slot(
 #[allow(clippy::too_many_lines)] // One linear, ordered click-through script; splitting it would obscure the staging.
 fn appbar_pointer_script() -> Result<Vec<tairix_qemu::PointerStep>, String> {
     use tairix_abi::seat::SEAT_PRIMARY;
-    use tairix_desktop_session::DesktopShell;
+    use tairix_desktop_session::{DesktopShell, FILES_LABEL};
     use tairix_geometry::{Point, Scale};
     use tairix_input::{InputEvent, PointerButton};
     use tairix_log::DiscardSink;
@@ -8032,24 +8052,25 @@ fn appbar_pointer_script() -> Result<Vec<tairix_qemu::PointerStep>, String> {
     )?;
 
     // Launching from a row closes the popup and puts the application on the
-    // bar, so the model is advanced to the state the guest will be in: one
-    // slot, carrying the declaration the terminal makes.
+    // bar, so the model is advanced to the state the guest will be in: the
+    // autostarted file manager already in the leading slot, and the launched
+    // application beside it carrying the declaration it makes.
     press_at(&mut shell, entry_row, PointerButton::Primary);
     let declared = tairix_terminal::appbar::declaration(0)
         .map_err(|err| format!("icon-bar script: the terminal's declaration is invalid: {err}"))?;
-    shell
-        .session_mut()
-        .taskbar_mut()
-        .set_apps(vec![AppSlot::new(
-            BAR_APP_NAME,
-            tairix_icon::IconKind::AppBundle,
-        )
-        .with_declaration(declared.menu, declared.default_action)]);
+    let mut seated = (0..APPBAR_LAUNCHED_SLOT)
+        .map(|_| AppSlot::new(FILES_LABEL, tairix_icon::IconKind::AppBundle))
+        .collect::<Vec<_>>();
+    seated.push(
+        AppSlot::new(BAR_APP_NAME, tairix_icon::IconKind::AppBundle)
+            .with_declaration(declared.menu, declared.default_action),
+    );
+    shell.session_mut().taskbar_mut().set_apps(seated);
 
-    // The slot the session gives the running application, and the menu a
+    // The slot the session gives the launched application, and the menu a
     // secondary press there opens.
     let slot = rect_centre(
-        appbar_slot_rect(shell.session().taskbar().theme(), 0)?,
+        appbar_slot_rect(shell.session().taskbar().theme(), APPBAR_LAUNCHED_SLOT)?,
         "slot",
     )?;
     press_at(&mut shell, slot, PointerButton::Secondary);

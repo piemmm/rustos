@@ -74,7 +74,7 @@ owns:
   nothing at all when it is empty; only the compositor-supplied `Scale` stays
   the embedder's own.
 - **Hit-testing** — `BarLayout::hit_test` maps a pointer to the `Hit` element
-  under it (the Library button, the Files button, an application, a
+  under it (the Library button, an application slot, a
   notification icon, the clock, or the Switchboard capsule) for input
   routing. A region slot that does not fit is `Rect::EMPTY` and is never hit,
   and the separator is not a region at all: a press on the rule lands on the
@@ -82,13 +82,13 @@ owns:
 - **Input routing** — `TaskbarInput` consumes the shared `tairix-input`
   `InputEvent` stream (the same one the window manager routes) and turns a
   primary press into a typed `TaskbarResponse`: `OpenLibrary` (the Library
-  button opened the popup), `OpenFiles`, an application's declared default
+  button opened the popup), an application's declared default
   action (`AppDefault`) or the raise the session performs in its place
   (`AppRaise`), a chosen row of the menu an application declared
   (`AppMenuChosen`), a hover asking for the window picker
   (`ShowWindowPicker`) and a cell chosen in it (`WindowChosen`), or a
-  notification-icon / clock
-  press. While the context menu OR the program-library popup is open it is
+  notification-icon press, or the clock's own menu opening. While the context
+  menu OR the program-library popup is open it is
   modal and consumes the whole stream — presses, releases, scroll, and keys
   all route into the modal surface; a press on the Library button toggles the
   popup shut and a press anywhere else dismisses it without acting on what it
@@ -174,6 +174,19 @@ owns:
   explain the absence of (`set_switch_user_available`, `plans/NEW-DESKTOP-LOGIN.md`
   G5). Both the rendered rows and the row → command mapping read the same
   filter, so a hidden row can never stay clickable at its old index.
+  *Lock Screen* reads one attestation, `set_elevation_available`: whether this
+  session's console has a re-authentication broker. The clock menu's set-time
+  row needs the same broker and reads the same attestation — one fact, not two
+  booleans that would always be equal (`AGENTS.md` §2.2). Both default to
+  refusing.
+- **The clock's menu** — the same one modal menu surface, opened by a press on
+  the clock with either button, whose shape is the one ordered
+  `clock_menu::ROWS` table: the reading the bar is drawing (a statement, not a
+  command) and *Set Date & Time…* (`plans/NEW-TASKBAR.md` T17). The heading
+  repeats the bar's own label rather than deriving a second time, so the two
+  cannot disagree, and an unset clock says so instead of showing a fabricated
+  one. Setting a clock is authority the bar does not hold, so the row reports
+  a typed `SetDateTime` and the session asks for an account that may.
 - **Notification area** — `NotificationArea`, an ordered set of status icons.
 - **Clock** — `Clock` holds the display label the caller sets (formatting a
   `Time64` value is an upstream concern, `AGENTS.md` §21).

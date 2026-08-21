@@ -1,0 +1,33 @@
+# Signed-AppInfo manifest source for the `datetime` Date & Time app
+# (plans/NEW-TASKBAR.md T17). Discovered by the build's app-bundle composer,
+# which cross-compiles Run, signs the manifest, and plants the bundle on the
+# read-only /System/Applications store; the desktop clock's "Set Date &
+# Time..." menu row starts it through the console's elevation broker.
+# The capability list is the bundle's request:
+#   - CAP_CONSOLE_WRITE for its fail-loud stderr diagnostics.
+#   - CAP_SHM to create and grant the zero-copy window frame region the
+#     desktop session maps.
+#   - CAP_TIME_SET to step the machine's wall clock, which is the whole
+#     point of the app and the reason it is launched through a
+#     re-authentication rather than by the session directly.
+# The launched process receives this set intersected with the launching
+# user's grants, never more — so an account whose ceiling withholds
+# CAP_TIME_SET runs this app with the set refused, and the app states the
+# refusal rather than pretending to have changed the clock.
+id = "os.tairix.datetime"
+name = "datetime"
+version = "0.1.0"
+kind = "application"
+# The identity the desktop's icon-bar information panel states, drawn from
+# this *signed* manifest rather than from anything the running process says
+# about itself (plans/NEW-TASKBAR.md).
+purpose = "Set the machine's date and time"
+author = "The TAIRiX Project"
+capabilities = ["CAP_CONSOLE_WRITE", "CAP_SHM", "CAP_TIME_SET"]
+# Deliberately no `library` key: this app is reached from the desktop clock's
+# own menu, not from the program launcher, because it is useful only to
+# somebody who can authenticate an account that may set the clock. The icon
+# below is independent of that — it is the bundle's own identity, drawn
+# wherever the bundle appears.
+# This bundle's own icon master in its Resources/, authored as SVG.
+library-icon = "datetime.svg"

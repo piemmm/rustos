@@ -287,6 +287,10 @@ mod program {
     /// The waitset token naming the `session-v1` endpoint the graphical
     /// login screen calls.
     const TOKEN_SESSION: u64 = 3;
+    /// The waitset token naming every child a non-blocking elevated launch
+    /// started. Shared by all of them: the wake says only "one of mine
+    /// exited", and the sweep that follows finds which.
+    const TOKEN_LAUNCHED: u64 = 4;
 
     /// Consecutive greeters a graphical round starts before it gives up and
     /// runs the text login instead.
@@ -349,6 +353,14 @@ mod program {
         elevate: Option<u64>,
         /// The reserved `session-v1` endpoint, when it could be bound.
         session: Option<u64>,
+        /// Children started by a non-blocking elevated launch and not yet
+        /// reaped.
+        ///
+        /// Their requester cannot wait on them (they are login's children,
+        /// not its), so login owns collecting them. Each is joined to the
+        /// wait-set under [`TOKEN_LAUNCHED`], so an exit wakes whichever
+        /// supervision is parked and the sweep reaps it.
+        launched: RefCell<Vec<i32>>,
     }
 
     impl ConsoleServer {
@@ -377,6 +389,7 @@ mod program {
                 own_console,
                 elevate: None,
                 session: None,
+                launched: RefCell::new(Vec::new()),
             };
             // Unrestricted senders on both: any process may post —
             // placement and identity are enforced per request by the
@@ -452,7 +465,7 @@ mod program {
                 peer_uid,
                 self.own_console,
                 authenticator,
-                &RtElevateLauncher,
+                &RtElevateLauncher { server: self },
                 &sink,
             );
             wipe(&mut request);
@@ -538,6 +551,48 @@ mod program {
             }
         }
 
+        /// Record a child a non-blocking elevated launch just started, so
+        /// login collects it when it exits.
+        ///
+        /// Joining it to the wait-set makes its exit a wake source of the
+        /// same supervision that is already parked, so the sweep costs a
+        /// wake rather than a poll. A child the kernel refuses to add is
+        /// still tracked: the sweep also runs whenever supervision starts,
+        /// so it is collected then instead of never.
+        fn track_launched(&self, pid: i32) {
+            let _ = tairix_rt::waitset_ctl(
+                self.waitset,
+                WaitSetOp::Add,
+                WaitSourceKind::Child,
+                u64::from(pid.unsigned_abs()),
+                TOKEN_LAUNCHED,
+            );
+            self.launched.borrow_mut().push(pid);
+        }
+
+        /// Reap every tracked launch that has already exited, dropping its
+        /// wait-set member with it so the reusable set never carries a
+        /// stale PID.
+        ///
+        /// Non-blocking throughout: one that is still running keeps its
+        /// place and is collected on a later wake.
+        fn reap_launched(&self) {
+            let mut launched = self.launched.borrow_mut();
+            launched.retain(|pid| {
+                if !launch_collected(*pid) {
+                    return true;
+                }
+                let _ = tairix_rt::waitset_ctl(
+                    self.waitset,
+                    WaitSetOp::Del,
+                    WaitSourceKind::Child,
+                    u64::from(pid.unsigned_abs()),
+                    TOKEN_LAUNCHED,
+                );
+                false
+            });
+        }
+
         /// Park on the wait-set until `pid` exits, handing every other wake
         /// to `serve`, and report how the watch ended.
         ///
@@ -551,10 +606,17 @@ mod program {
         /// A `serve` that answers [`Watch::Release`] ends the watch with the
         /// child still running — a desktop session that stepped aside — so
         /// the caller must neither reap it nor forget it.
+        ///
+        /// A wake naming a child an elevated launch started is collected
+        /// here rather than handed to `serve`: reaping login's own children
+        /// is login's business on every watch, not each caller's.
         fn supervise_child<F>(&self, pid: i32, mut serve: F) -> Result<Watched, Errno>
         where
             F: FnMut(u64) -> Watch,
         {
+            // A launch whose exit landed between watches has no pending
+            // wake left to deliver it, so start by collecting.
+            self.reap_launched();
             let child_id = u64::from(pid.unsigned_abs());
             let observed = tairix_rt::waitset_ctl(
                 self.waitset,
@@ -575,7 +637,9 @@ mod program {
                     if token == TOKEN_CHILD {
                         break plain_wait(pid).map(Watched::Exited);
                     }
-                    if matches!(serve(token), Watch::Release) {
+                    if token == TOKEN_LAUNCHED {
+                        self.reap_launched();
+                    } else if matches!(serve(token), Watch::Release) {
                         break Ok(Watched::Released);
                     }
                 } else if errno_from(ret) != Errno::TimedOut {
@@ -658,18 +722,53 @@ mod program {
         Ok(status)
     }
 
+    /// What one non-blocking reap of a child found.
+    enum Reaped {
+        /// It had exited and was collected, with this code.
+        Exited(i32),
+        /// It is still running; a later reap will collect it.
+        Running,
+        /// It is not login's child to reap: never was, or already gone.
+        Gone,
+    }
+
+    /// Reap `pid` without blocking and report what became of it.
+    ///
+    /// The one non-blocking reap login performs, so no caller re-derives
+    /// what the kernel's answers mean. [`Errno::WouldBlock`] is the only
+    /// "still running" answer; every other refusal leaves nothing to
+    /// collect. A stop is not an exit and is unreachable without the
+    /// stopped-report flag, so it counts as still running rather than
+    /// inventing an exit code.
+    fn try_reap(pid: i32) -> Reaped {
+        let mut status = WaitStatus::Exited(0);
+        let ret = tairix_rt::try_wait(pid, &mut status);
+        if ret < 0 {
+            return if errno_from(ret) == Errno::WouldBlock {
+                Reaped::Running
+            } else {
+                Reaped::Gone
+            };
+        }
+        match status {
+            WaitStatus::Exited(code) => Reaped::Exited(code),
+            WaitStatus::Stopped(_) => Reaped::Running,
+        }
+    }
+
+    /// Whether `pid` needs tracking no longer: it was reaped, or it is no
+    /// longer login's child to reap at all. Keeping an untrackable entry
+    /// would re-wake supervision for ever.
+    fn launch_collected(pid: i32) -> bool {
+        !matches!(try_reap(pid), Reaped::Running)
+    }
+
     /// Reap `pid` and report its exit code if it has already exited, without
     /// blocking. `None` means it is still running (or is not ours to reap).
     fn reap_if_exited(pid: i32) -> Option<i32> {
-        let mut status = WaitStatus::Exited(0);
-        if tairix_rt::try_wait(pid, &mut status) < 0 {
-            return None;
-        }
-        match status {
-            WaitStatus::Exited(code) => Some(code),
-            // Unreachable without the stopped-report flag, and a stop is not
-            // an exit: keep waiting rather than invent an exit code.
-            WaitStatus::Stopped(_) => None,
+        match try_reap(pid) {
+            Reaped::Exited(code) => Some(code),
+            Reaped::Running | Reaped::Gone => None,
         }
     }
 
@@ -711,24 +810,47 @@ mod program {
     /// child. The session's shell is blocked in its `ipc_call` for the
     /// duration (a foreground elevated command, serialised per console), so
     /// the only child that can exit here is the elevated one.
-    struct RtElevateLauncher;
+    ///
+    /// A non-blocking launch instead hands the started child to the
+    /// server's tracking table, which reaps it on a later wake — the
+    /// requester keeps running and can never wait on a child that is not
+    /// its own.
+    struct RtElevateLauncher<'a> {
+        server: &'a ConsoleServer,
+    }
 
-    impl ElevateLauncher for RtElevateLauncher {
+    impl ElevateLauncher for RtElevateLauncher<'_> {
         fn run_as(&self, program: &str, uid: u32) -> Result<i32, Errno> {
-            let ret = tairix_rt::spawn_as(program.as_bytes(), CONSOLE_INHERIT, uid);
-            if ret < 0 {
-                return Err(errno_from(ret));
-            }
+            let pid = spawn_elevated(program, uid)?;
             let mut status = 0i32;
-            // `ret >= 0` here, so the cast preserves the PID value; PIDs
-            // fit an `i32` on this ABI.
-            #[allow(clippy::cast_possible_truncation)]
-            let wret = tairix_rt::wait_exit(ret as i32, &mut status);
+            let wret = tairix_rt::wait_exit(pid, &mut status);
             if wret < 0 {
                 return Err(errno_from(wret));
             }
             Ok(status)
         }
+
+        fn launch_as(&self, program: &str, uid: u32) -> Result<i32, Errno> {
+            let pid = spawn_elevated(program, uid)?;
+            self.server.track_launched(pid);
+            Ok(pid)
+        }
+    }
+
+    /// Spawn one elevated `program` as `uid` on login's own console,
+    /// returning its PID.
+    ///
+    /// The single spawn both elevation forms take, so a blocking run and a
+    /// non-blocking launch can never start a program under different terms.
+    fn spawn_elevated(program: &str, uid: u32) -> Result<i32, Errno> {
+        let ret = tairix_rt::spawn_as(program.as_bytes(), CONSOLE_INHERIT, uid);
+        if ret < 0 {
+            return Err(errno_from(ret));
+        }
+        // `ret >= 0` here, so the cast preserves the PID value; PIDs fit an
+        // `i32` on this ABI.
+        #[allow(clippy::cast_possible_truncation)]
+        Ok(ret as i32)
     }
 
     /// Launches the authenticated record's shell of choice **as the

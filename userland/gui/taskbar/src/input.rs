@@ -65,6 +65,7 @@ use tairix_input::{InputEvent, PointerButton};
 use tairix_proglib::EntryId;
 use tairix_theme::Appearance;
 
+use crate::clock_menu::ClockAction;
 use crate::layout::Hit;
 use crate::library::{LibraryRow, PopupOutcome};
 use crate::menu::{MenuChoice, MenuOutcome};
@@ -164,8 +165,11 @@ pub enum TaskbarResponse {
         /// The producer-chosen key naming the dismissed notification.
         key: u32,
     },
-    /// The clock was pressed.
-    ClockPressed,
+    /// The clock menu's *Set Date & Time…* row was chosen. The embedder
+    /// authenticates an account that holds `CAP_TIME_SET` through its
+    /// console's broker and starts the Date & Time application as that
+    /// account; the bar holds no such authority and sets no clock itself.
+    SetDateTime,
 
     /// A gesture on the Switchboard capsule (or the readout's "Open
     /// Switchboard" safe action) asked to open the Switchboard window at a
@@ -420,7 +424,12 @@ impl TaskbarInput {
             // press is claimed so it never falls through to the window
             // beneath, but it does nothing.
             Hit::Notification(_) => TaskbarResponse::Ignored,
-            Hit::Clock => TaskbarResponse::ClockPressed,
+            // The clock's only behaviour is its menu, so either button
+            // opens it rather than a press doing nothing.
+            Hit::Clock => {
+                taskbar.open_clock_menu(taskbar.layout(scale).clock);
+                TaskbarResponse::Ignored
+            }
             Hit::Switchboard => {
                 self.capsule_press = Some(CapsulePress {
                     started_ns: now_ns,
@@ -577,6 +586,7 @@ impl TaskbarInput {
                 taskbar.open_app_menu(index, anchor);
             }
             Some(Hit::Switchboard) => taskbar.open_system_menu(layout.switchboard),
+            Some(Hit::Clock) => taskbar.open_clock_menu(layout.clock),
             _ => {}
         }
         TaskbarResponse::Ignored
@@ -730,6 +740,9 @@ impl TaskbarInput {
                 TaskbarResponse::CreateDesktopShortcut { entry }
             }
             MenuChoice::System(action) => Self::apply_system_action(action),
+            MenuChoice::Clock(action) => match action {
+                ClockAction::SetDateTime => TaskbarResponse::SetDateTime,
+            },
         }
     }
 

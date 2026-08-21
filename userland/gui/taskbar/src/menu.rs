@@ -32,6 +32,7 @@ use tairix_proglib::EntryId;
 use tairix_theme::Theme;
 
 use crate::apps::AppIdentity;
+use crate::clock_menu::{self, ClockAction, ClockPermits};
 use crate::edge::Edge;
 use crate::system::{self, SystemAction, SystemPermits};
 
@@ -68,6 +69,13 @@ pub enum MenuSubject {
         /// it.
         permits: SystemPermits,
     },
+    /// The bar's clock: the reading it is drawing, and setting the machine's
+    /// time.
+    Clock {
+        /// What the rows may offer, and the reading they state. The bar
+        /// renders this; setting a clock is authority it does not hold.
+        permits: ClockPermits,
+    },
 }
 
 /// What choosing a menu row asks for; the input router translates this into
@@ -88,6 +96,8 @@ pub(crate) enum MenuChoice {
     ShortcutEntry(EntryId),
     /// Perform this system quick action.
     System(SystemAction),
+    /// Perform this clock command.
+    Clock(ClockAction),
 }
 
 /// The outcome of routing one input event into the open menu.
@@ -611,6 +621,13 @@ impl BarMenu {
                     None => MenuOutcome::Dismissed,
                 }
             }
+            (MenuSubject::Clock { .. }, row) => {
+                self.close();
+                match clock_menu::action_at(row) {
+                    Some(action) => MenuOutcome::Choose(MenuChoice::Clock(action)),
+                    None => MenuOutcome::Dismissed,
+                }
+            }
         }
     }
 }
@@ -653,6 +670,7 @@ fn rows_for(subject: &MenuSubject) -> (Vec<MenuItem>, Vec<usize>) {
             Vec::new(),
         ),
         MenuSubject::System { permits } => (system::rows(*permits), Vec::new()),
+        MenuSubject::Clock { permits } => (clock_menu::rows(permits), Vec::new()),
     }
 }
 

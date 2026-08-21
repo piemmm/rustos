@@ -194,6 +194,22 @@ caller can only ever re-verify itself. It is strictly weaker than a `Run`
 request — it never spawns a program — and grants no authority a `Run`
 request did not already carry.
 
+A third form, `ElevateRequest::Launch`, is the run request with the reply
+timing changed: the identical re-authentication, but it answers the started
+program's **pid** and the broker never waits for it. A graphical caller
+cannot use the blocking form — its reply arrives only once the elevated
+program has exited, so a desktop session posting it would stop serving
+windows to the very program it is waiting for, and the two would deadlock.
+It grants nothing extra: same account, same re-authentication, same
+`manifest ∩ ceiling` for the child, and its own audit pair
+(`LAUNCH_GRANTED` / `LAUNCH_REFUSED`). Because the started program is
+login's child rather than the requester's, login tracks it in its own
+launched-pid table — joined to the wait-set it already parks in — and reaps
+it on the wake its exit produces; the requester never can, so no launch
+leaves a zombie. The desktop's use of it is the clock menu's *Set Date &
+Time…* row, which needs an account holding `CAP_TIME_SET` that a session
+itself must never hold.
+
 The two sets are policy with one definition: `lib/users` (the `grants`
 module) defines `SESSION_BASELINE`, `ADMINISTRATIVE_SET`, and the
 `administrator_ceiling()` union beside the account record that stores a

@@ -11,6 +11,14 @@
 //! code once it finishes. The requesting shell's own identity and capability
 //! set are never touched.
 //!
+//! A graphical caller cannot use that exchange: its reply arrives only
+//! once the elevated program has exited, so a desktop session posting it
+//! would stop serving windows to the very program it is waiting for. Such
+//! a caller posts [`ElevateRequest::Launch`] instead — the identical
+//! re-authentication, but the reply carries the started program's pid and
+//! the broker never waits for it. The elevated program is interactive and
+//! collects its own input, which is why the launch carries no argv.
+//!
 //! The same broker also answers a narrower [`ElevateRequest::Verify`]
 //! request that re-authenticates the **caller's own** kernel-attested
 //! account and runs nothing — the primitive a graphical session's screen
@@ -90,6 +98,8 @@ pub const fn elevate_endpoint(console: u64) -> Result<u64, Errno> {
 const OPCODE_RUN: u8 = 0;
 /// Wire opcode naming an [`ElevateRequest::Verify`] request.
 const OPCODE_VERIFY: u8 = 1;
+/// Wire opcode naming an [`ElevateRequest::Launch`] request.
+const OPCODE_LAUNCH: u8 = 2;
 
 /// One elevation request, posted to the console's supervisor.
 ///
@@ -123,6 +133,24 @@ pub enum ElevateRequest<'a> {
         /// The offered password for the caller's own account.
         password: &'a str,
     },
+    /// Re-authenticate `username` and, on success, start `program` as that
+    /// account **without waiting for it**, answering its pid.
+    ///
+    /// The same authority and the same re-authentication as [`Self::Run`];
+    /// only the reply timing differs. It exists for a caller that must keep
+    /// serving the elevated program while it runs — a graphical session,
+    /// which owns the compositor the program draws through — and would
+    /// otherwise deadlock against a reply that waits for that program's
+    /// exit. The program is interactive: it takes no argv and collects
+    /// whatever it needs itself.
+    Launch {
+        /// The target account to re-authenticate and run as.
+        username: &'a str,
+        /// The offered password for that account.
+        password: &'a str,
+        /// Absolute path of the program to start on success.
+        program: &'a str,
+    },
 }
 
 impl<'a> ElevateRequest<'a> {
@@ -139,6 +167,11 @@ impl<'a> ElevateRequest<'a> {
             + 1
             + match *self {
                 Self::Run {
+                    username,
+                    password,
+                    program,
+                }
+                | Self::Launch {
                     username,
                     password,
                     program,
@@ -160,23 +193,34 @@ impl<'a> ElevateRequest<'a> {
         }
         let mut w = Writer::new(out);
         w.u16(ELEVATE_VERSION)?;
+        w.u8(self.opcode())?;
         match *self {
             Self::Run {
                 username,
                 password,
                 program,
+            }
+            | Self::Launch {
+                username,
+                password,
+                program,
             } => {
-                w.u8(OPCODE_RUN)?;
                 w.str(username)?;
                 w.str(password)?;
                 w.str(program)?;
             }
-            Self::Verify { password } => {
-                w.u8(OPCODE_VERIFY)?;
-                w.str(password)?;
-            }
+            Self::Verify { password } => w.str(password)?,
         }
         Ok(w.at)
+    }
+
+    /// The wire opcode naming this request.
+    const fn opcode(&self) -> u8 {
+        match *self {
+            Self::Run { .. } => OPCODE_RUN,
+            Self::Verify { .. } => OPCODE_VERIFY,
+            Self::Launch { .. } => OPCODE_LAUNCH,
+        }
     }
 
     /// Decode a request from `bytes`, failing closed on any malformation:
@@ -196,17 +240,25 @@ impl<'a> ElevateRequest<'a> {
             return Err(Errno::OutOfRange);
         }
         let request = match cur.u8()? {
-            OPCODE_RUN => {
+            opcode @ (OPCODE_RUN | OPCODE_LAUNCH) => {
                 let username = cur.str()?;
                 let password = cur.str()?;
                 let program = cur.str()?;
                 if username.is_empty() || password.is_empty() || program.is_empty() {
                     return Err(Errno::LengthOutOfRange);
                 }
-                Self::Run {
-                    username,
-                    password,
-                    program,
+                if opcode == OPCODE_RUN {
+                    Self::Run {
+                        username,
+                        password,
+                        program,
+                    }
+                } else {
+                    Self::Launch {
+                        username,
+                        password,
+                        program,
+                    }
                 }
             }
             OPCODE_VERIFY => {
@@ -237,6 +289,17 @@ pub enum ElevateReply {
     /// A [`ElevateRequest::Verify`] re-authenticated the caller's own
     /// account; nothing was run.
     Verified,
+    /// A [`ElevateRequest::Launch`] re-authenticated and the program was
+    /// started as that account; it is still running.
+    ///
+    /// The pid lets the caller recognise the elevated program among its
+    /// peers (a graphical session matches it to the window client that
+    /// connects). It is the broker's child, not the caller's, so the caller
+    /// cannot wait on it — the broker reaps it.
+    Launched {
+        /// Process id of the started program, always non-negative.
+        pid: i32,
+    },
     /// The request was refused. Authentication failures (wrong password,
     /// unknown account, locked account) are all
     /// [`Errno::PermissionDenied`], indistinguishably; other codes report
@@ -246,16 +309,19 @@ pub enum ElevateReply {
 
 /// Wire status word naming a completed [`ElevateReply::Verified`] reply.
 const STATUS_VERIFIED: i32 = 1;
+/// Wire status word naming an [`ElevateReply::Launched`] reply.
+const STATUS_LAUNCHED: i32 = 2;
 
 impl ElevateReply {
     /// Encode the reply into `out`, returning the encoded length
     /// ([`ELEVATE_REPLY_LEN`]).
     ///
     /// The first word is a result discriminant: `0` for a completed run,
-    /// `1` for a verified re-authentication, else the negated [`Errno`]
-    /// discriminant (the [`crate::driver_store`] status-word convention);
-    /// the second is the exit code (`0` for [`Self::Verified`] and
-    /// [`Self::Refused`]).
+    /// `1` for a verified re-authentication, `2` for a started program,
+    /// else the negated [`Errno`] discriminant (the
+    /// [`crate::driver_store`] status-word convention); the second word is
+    /// the exit code of a completed run, the pid of a started program, and
+    /// `0` for [`Self::Verified`] and [`Self::Refused`].
     ///
     /// # Errors
     ///
@@ -265,33 +331,41 @@ impl ElevateReply {
         if out.len() < ELEVATE_REPLY_LEN {
             return Err(Errno::BufferTooSmall);
         }
-        let (status, exit_code) = match *self {
+        let (status, word) = match *self {
             Self::Completed { exit_code } => (0, exit_code),
             Self::Verified => (STATUS_VERIFIED, 0),
+            Self::Launched { pid } => {
+                if pid < 0 {
+                    return Err(Errno::OutOfRange);
+                }
+                (STATUS_LAUNCHED, pid)
+            }
             Self::Refused(err) => (-err.as_i32(), 0),
         };
         put_i32(out, 0, status);
-        put_i32(out, 4, exit_code);
+        put_i32(out, 4, word);
         Ok(ELEVATE_REPLY_LEN)
     }
 
     /// Decode a reply from `bytes`, failing closed on a wrong length, an
-    /// unknown errno, or a status word that is neither `0`, `1`, nor a
-    /// negated known errno.
+    /// unknown errno, a status word that is neither `0`, `1`, `2`, nor a
+    /// negated known errno, or a launched pid that is negative.
     ///
     /// # Errors
     ///
     /// [`Errno::LengthOutOfRange`] on a wrong length;
-    /// [`Errno::OutOfRange`] on an unrecognised status word.
+    /// [`Errno::OutOfRange`] on an unrecognised status word or an
+    /// unrepresentable pid.
     pub fn decode(bytes: &[u8]) -> Result<Self, Errno> {
         if bytes.len() != ELEVATE_REPLY_LEN {
             return Err(Errno::LengthOutOfRange);
         }
         let status = read_i32(bytes, 0);
-        let exit_code = read_i32(bytes, 4);
+        let word = read_i32(bytes, 4);
         match status {
-            0 => Ok(Self::Completed { exit_code }),
+            0 => Ok(Self::Completed { exit_code: word }),
             STATUS_VERIFIED => Ok(Self::Verified),
+            STATUS_LAUNCHED if word >= 0 => Ok(Self::Launched { pid: word }),
             s if s < 0 => {
                 let errno = s
                     .checked_neg()
@@ -425,6 +499,75 @@ mod tests {
     }
 
     #[test]
+    fn launch_request_round_trips() {
+        let req = ElevateRequest::Launch {
+            username: "root",
+            password: "hunter2",
+            program: "/System/Applications/datetime.app/Run",
+        };
+        let mut buf = [0u8; ELEVATE_MAX_REQUEST];
+        let len = req.encode(&mut buf).expect("encodes");
+        assert_eq!(ElevateRequest::decode(&buf[..len]), Ok(req));
+    }
+
+    #[test]
+    fn launch_and_run_are_distinct_on_the_wire() {
+        let mut run_buf = [0u8; ELEVATE_MAX_REQUEST];
+        let mut launch_buf = [0u8; ELEVATE_MAX_REQUEST];
+        let run_len = ElevateRequest::Run {
+            username: "root",
+            password: "hunter2",
+            program: "/x",
+        }
+        .encode(&mut run_buf)
+        .expect("encodes");
+        let launch_len = ElevateRequest::Launch {
+            username: "root",
+            password: "hunter2",
+            program: "/x",
+        }
+        .encode(&mut launch_buf)
+        .expect("encodes");
+        assert_eq!(run_len, launch_len);
+        assert_ne!(run_buf[..run_len], launch_buf[..launch_len]);
+    }
+
+    #[test]
+    fn launch_request_rejects_empty_fields_both_ways() {
+        let mut buf = [0u8; ELEVATE_MAX_REQUEST];
+        for req in [
+            ElevateRequest::Launch {
+                username: "",
+                password: "p",
+                program: "/x",
+            },
+            ElevateRequest::Launch {
+                username: "u",
+                password: "",
+                program: "/x",
+            },
+            ElevateRequest::Launch {
+                username: "u",
+                password: "p",
+                program: "",
+            },
+        ] {
+            assert_eq!(req.encode(&mut buf), Err(Errno::LengthOutOfRange));
+        }
+        // A hand-built launch record with an empty program is refused at
+        // decode too (the wire is not trusted to mirror the encoder).
+        let mut bytes = [0u8; 11];
+        bytes[..2].copy_from_slice(&ELEVATE_VERSION.to_le_bytes());
+        bytes[2] = 2; // OPCODE_LAUNCH
+        bytes[3..5].copy_from_slice(&1u16.to_le_bytes());
+        bytes[5] = b'u';
+        bytes[6..8].copy_from_slice(&1u16.to_le_bytes());
+        bytes[8] = b'p';
+        bytes[9..11].copy_from_slice(&0u16.to_le_bytes());
+        assert_eq!(ElevateRequest::decode(&bytes), Err(Errno::LengthOutOfRange));
+    }
+
+    #[test]
     fn verify_request_round_trips() {
         let req = ElevateRequest::Verify {
             password: "hunter2",
@@ -507,7 +650,7 @@ mod tests {
         );
         // Unknown opcode.
         let mut unknown_opcode = buf;
-        unknown_opcode[2] = 2;
+        unknown_opcode[2] = 3;
         assert_eq!(
             ElevateRequest::decode(&unknown_opcode[..len]),
             Err(Errno::OutOfRange)
@@ -554,6 +697,8 @@ mod tests {
             ElevateReply::Completed { exit_code: 0 },
             ElevateReply::Completed { exit_code: 130 },
             ElevateReply::Verified,
+            ElevateReply::Launched { pid: 0 },
+            ElevateReply::Launched { pid: 4210 },
             ElevateReply::Refused(Errno::PermissionDenied),
             ElevateReply::Refused(Errno::NotFound),
         ] {
@@ -575,10 +720,19 @@ mod tests {
             Err(Errno::LengthOutOfRange)
         );
         // A status word past the known discriminants (`0` completed, `1`
-        // verified) is neither success nor a negated errno.
+        // verified, `2` launched) is neither success nor a negated errno.
         let mut buf = [0u8; ELEVATE_REPLY_LEN];
-        buf[..4].copy_from_slice(&2i32.to_le_bytes());
+        buf[..4].copy_from_slice(&3i32.to_le_bytes());
         assert_eq!(ElevateReply::decode(&buf), Err(Errno::OutOfRange));
+        // A launched reply whose pid word is negative names no process.
+        buf[..4].copy_from_slice(&2i32.to_le_bytes());
+        buf[4..].copy_from_slice(&(-1i32).to_le_bytes());
+        assert_eq!(ElevateReply::decode(&buf), Err(Errno::OutOfRange));
+        assert_eq!(
+            ElevateReply::Launched { pid: -1 }.encode(&mut buf),
+            Err(Errno::OutOfRange)
+        );
+        buf[4..].copy_from_slice(&0i32.to_le_bytes());
         // An unknown negated errno is refused, never guessed.
         buf[..4].copy_from_slice(&(-9999i32).to_le_bytes());
         assert_eq!(ElevateReply::decode(&buf), Err(Errno::OutOfRange));

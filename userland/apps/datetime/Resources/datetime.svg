@@ -1,0 +1,11 @@
+<svg viewBox="0 0 64 64">
+  <circle cx="32" cy="32" r="28" fill="#14202b"/>
+  <circle cx="32" cy="32" r="24" fill="#e8eef4"/>
+  <circle cx="32" cy="8" r="2" fill="#14202b"/>
+  <circle cx="56" cy="32" r="2" fill="#14202b"/>
+  <circle cx="32" cy="56" r="2" fill="#14202b"/>
+  <circle cx="8" cy="32" r="2" fill="#14202b"/>
+  <polygon points="30,32 34,32 33,16 31,16" fill="#14202b"/>
+  <polygon points="32,30 32,34 47,33 47,31" fill="#2f6d9a"/>
+  <circle cx="32" cy="32" r="3" fill="#14202b"/>
+</svg>

@@ -458,9 +458,9 @@ popup-internal changes just re-present — and the embedder (the `Run` binary)
 performs what needs capabilities the shell does not hold
 (`AGENTS.md` §10, §16.5):
 
-- `OpenFiles` — the permanent Files button. The embedder opens the file
-  manager **idempotently**: if a desktop-launched file manager is already
-  running and serving a window, that window is raised and focused
+- a press on the leading strip slot (the autostarted **file manager**) raises
+  its served window idempotently: if a desktop-launched file manager is
+  already running and serving a window, that window is raised and focused
   (`DesktopShell::raise_window`); if its launch is still in flight, the
   press is already satisfied; only otherwise is the bundle spawned.
 - `AppDefault { app }` and `AppMenuChosen { app, item }` — relayed to the
@@ -476,8 +476,11 @@ performs what needs capabilities the shell does not hold
   user's own `Desktop` folder (see *Desktop shortcuts*).
 - `OpenLibrary` — the popup opened; the embedder re-reads the stores so the
   listing is current.
-- `LibraryDismissed`, `NotificationActivated`, `ClockPressed` — surfaced for
-  the embedder; the bar's own state is already up to date.
+- `LibraryDismissed`, `NotificationActivated` — surfaced for the embedder;
+  the bar's own state is already up to date.
+- `SetDateTime` — the clock menu's set-time row was chosen; the session asks
+  for an account that may set the clock (see *Asking for an account that
+  may*), because it holds no such capability itself.
 
 The bar's **context menu** is presented by the presenter as its own small
 rounded window (a third window beside the bar and popup).
@@ -590,7 +593,7 @@ remembers every child still running — its PID, the display label
 diagnostics report it by, and the `Run` path it was spawned from (its
 **attested bundle identity**: the desktop spawned the child itself, so no
 window title or other app-controlled data is ever trusted for it,
-`AGENTS.md` §23.1). `running_from` resolves the Files button's idempotent
+`AGENTS.md` §23.1). `running_from` resolves the file manager's idempotent
 open; `window_of_pid` (in the `Run` binary) finds the running app's served
 window through the window engine's kernel-attested ownership records.
 Asynchronous launch admits a child and returns its PID before the image
@@ -599,6 +602,17 @@ status: the shared `reap_launched` drains every exited child in one wake,
 reports each refusal on `stderr` named by its label (`launch_failure_report`
 — fail loud, never fatal, `AGENTS.md` §2.24), tears down the child's
 windows, and forgets the table entry.
+
+### The launch argument vector
+
+Every desktop launch is spelled through `launch_argv`, which names the
+program's own path first and the caller's arguments after it. A program
+reads its arguments from index 1 — index 0 is the program name its spawner
+chose — so a launch that passed only its arguments would have its *leading*
+one read as the program's name and never seen: the file manager's
+`--desktop` role switch, the folder a desktop icon opens, the document an
+icon launch names. One rule, in one place, for every launch site
+(`AGENTS.md` §2.2).
 
 ## The Switchboard tray feed and hang detection
 
@@ -997,10 +1011,61 @@ the question as it does at login. An idle lock screen asks for nothing and
 arms no timer.
 
 Whether the row is offered at all is the session's attestation: it tells the
-bar through `DesktopShell::set_lock_available` whether it runs on a console
-that has an elevation endpoint to unlock with. The bar refuses the row until
-told otherwise, because a lock that could never be undone would strand the
-user rather than protect them.
+bar through `DesktopShell::set_elevation_available` whether it runs on a
+console that has an elevation endpoint to unlock with. The bar refuses the
+row until told otherwise, because a lock that could never be undone would
+strand the user rather than protect them. The same one attestation governs
+the clock menu's set-time row below, which needs the same broker.
+
+## Asking for an account that may
+
+Some commands a desktop offers are ones the session itself may not perform.
+Setting the machine's date and time needs `CAP_TIME_SET`, which is not in a
+session's manifest and must never be. So the session does not perform it: it
+asks for an account that may, and the per-console elevation broker does the
+rest (`elevate::ElevatePrompt`, `plans/NEW-TASKBAR.md` T17).
+
+Choosing *Set Date & Time…* in the [clock's
+menu](taskbar.md#the-clocks-menu) opens the session's own credential prompt —
+a session-owned compositor window, drawn with the shared dialog and two
+shared text fields, so a password is typed into desktop chrome and never into
+an application. One prompt shows at a time; a second request while one is up
+is refused rather than stacking a question over the one already asked. While
+it is showing, the prompt consumes its own window's keys and clicks, so no
+keystroke of a password reaches whatever held focus behind it.
+
+What the prompt does with an offer is post it, and nothing more. It sends
+`ElevateRequest::Launch` through the one shared client, `tairix_rt::elevate`;
+the broker re-authenticates the named account exactly as a fresh login would,
+audits the attempt, and starts `datetime.app` **as that account**. The
+session learns the started pid or the refusal, and never the reason behind a
+refusal — the broker answers a wrong password, an unknown account, and a
+locked account indistinguishably. The blocking `Run` exchange would not do
+here: its reply arrives only once the elevated program has exited, so a
+desktop posting it would stop serving windows to the very program it is
+waiting for. The started program is *login's* child, so login reaps it; the
+desktop could not wait on it in any case.
+
+Every path out of the prompt fails closed or states itself:
+
+- An **empty field is never offered**. There is nothing to check, and asking
+  would spend an audited attempt against the account; the keyboard moves to
+  whichever field is still empty.
+- A **refusal keeps the prompt up** with the reason stated and the password
+  cleared — the masked field zeroises what it discards — so a retry starts
+  from empty with the account name kept, which is not a secret.
+- A **refused authentication and a program that would not start read
+  differently**, so a user whose account *was* accepted is never sent back to
+  re-check a password that worked.
+- A **cancellation says so** on `stderr`: a user who asked to set the clock
+  and saw nothing happen is told that nothing was set.
+- The prompt is **abandoned unanswered** when the screen locks, the session
+  steps aside for another user, or it ends — and the secret goes with it,
+  since the field zeroises its buffer as it is dropped.
+
+The password is held in exactly the same one place, and by the same shared
+masked field, as the screen lock's (above): there is no second credential
+buffer and no second text entry anywhere in the session.
 
 ## Routing one input stream to both routers
 

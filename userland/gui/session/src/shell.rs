@@ -1128,16 +1128,20 @@ impl DesktopShell {
         self.present(compositor);
     }
 
-    /// Attest to the taskbar whether this session can put a password prompt
-    /// in front of the screen, so the system menu's *Lock Screen* row is
-    /// offered only where locking could really be undone.
+    /// Attest to the taskbar whether this session's console has a
+    /// re-authentication broker, so every menu row that needs one is
+    /// offered only where choosing it could really act: the system menu's
+    /// *Lock Screen* row, and the clock menu's set-time row.
     ///
     /// Only the embedder knows: the answer turns on the console the session
-    /// runs on, which it reads from the kernel. The bar refuses the row
-    /// until told otherwise, so a session that never calls this offers no
-    /// lock rather than one with no way back.
-    pub fn set_lock_available(&mut self, compositor: &mut Compositor, available: bool) {
-        self.session.taskbar_mut().set_lock_available(available);
+    /// runs on, which it reads from the kernel. The bar refuses those rows
+    /// until told otherwise, so a session that never calls this offers
+    /// neither a lock with no way back nor a clock command that could only
+    /// fail.
+    pub fn set_elevation_available(&mut self, compositor: &mut Compositor, available: bool) {
+        self.session
+            .taskbar_mut()
+            .set_elevation_available(available);
         self.present(compositor);
     }
 
@@ -1184,7 +1188,7 @@ impl DesktopShell {
 
     /// Show, raise, and focus the running task shown as `window`, restoring
     /// it if it was minimised — how the embedder brings an already-open
-    /// window forward instead of launching a second copy (the Files button's
+    /// window forward instead of launching a second copy (the file manager's
     /// idempotent open). Returns `false`, changing nothing, when `window` is
     /// not a tracked task.
     pub fn raise_window(&mut self, compositor: &mut Compositor, window: WindowId) -> bool {

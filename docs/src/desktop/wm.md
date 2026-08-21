@@ -1257,8 +1257,8 @@ recvs), bridges served windows into the shell (composited window +
 taskbar task per client window), and routes input app-ward over the
 event sink — a dead client's kernel-reclaimed port tears its windows
 down. The first windowed app is the files browser
-(`userland/apps/files`), spawned from the taskbar's permanent Files
-button and proven end to end by the autoload QEMU vertical's
+(`userland/apps/files`), autostarted by the session and
+proven end to end by the autoload QEMU vertical's
 click-through (two verified screendumps: desktop, served window); the
 terminal landed with AW4, spawned through the program-library popup's
 catalog entry (`plans/NEW-TASKBAR.md` T5).

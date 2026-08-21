@@ -92,8 +92,7 @@
 //!    command, attributed by the loaded bundle's own name rather than a
 //!    fragile delivery count: the
 //!    desktop session — logged in at the seat keyboard and driven by
-//!    injected pointer clicks — spawned the files bundle from the on-disk
-//!    system application store via the taskbar's permanent Files button, served
+//!    injected pointer clicks — autostarted the file manager, served
 //!    its window over the reserved window rendezvous, routed the scripted
 //!    in-window clicks app-ward (`plans/APPWIN.md` AW3), then opened the
 //!    program-library popup from the Library button and spawned the

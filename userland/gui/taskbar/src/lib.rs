@@ -76,6 +76,7 @@ extern crate alloc;
 
 pub mod apps;
 pub mod clock;
+pub mod clock_menu;
 pub mod edge;
 pub mod input;
 pub mod layout;
@@ -95,6 +96,7 @@ mod tests;
 
 pub use apps::{AppIdentity, AppSlot, AppStrip};
 pub use clock::Clock;
+pub use clock_menu::{ClockAction, ClockPermits, ClockRow};
 pub use edge::{Edge, Orientation};
 pub use input::{TaskbarInput, TaskbarResponse};
 pub use layout::{BarLayout, Hit, NotificationCard, NotificationsLayout, TrayReadoutLayout};

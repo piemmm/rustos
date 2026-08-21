@@ -3601,9 +3601,9 @@ transfer, landed in increments:
   loopback. **AW3 is done:** the session serves `WINDOW_ENDPOINT` (bind
   authorised by its live seat lease) from its token-dispatched wait-set
   loop into `DesktopShell`; the files bundle (`CAP_FS_ACCESS` only) lives
-  in the system application store and is spawned from the taskbar's
-  permanent Files button; the autoload
-  QEMU vertical click-drives the whole chain (Files button → launch →
+  in the system application store and is an autostarted core desktop
+  component (spawning at bring-up via `spawn_files`); the autoload
+  QEMU vertical click-drives the whole chain (reveal → launch →
   served-window clicks) with two verified screendumps, gated on
   kernel-attested serial records and the interaction contract in the test
   crate's lib target. **AW4 is done:** `WaitSourceKind::Stream` (the

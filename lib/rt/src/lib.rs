@@ -3386,8 +3386,9 @@ pub fn self_origin() -> Result<Origin, i64> {
 ///
 /// # Security
 ///
-/// An [`ElevateRequest`] carries a plaintext password — both
-/// [`Run`](ElevateRequest::Run) and [`Verify`](ElevateRequest::Verify) do.
+/// An [`ElevateRequest`] carries a plaintext password —
+/// [`Run`](ElevateRequest::Run), [`Verify`](ElevateRequest::Verify), and
+/// [`Launch`](ElevateRequest::Launch) all do.
 /// The encoded request therefore lives in a [`Wiped`] buffer, which erases
 /// itself when the scope ends: the value returned, the `?` that returned
 /// early, and an unwind all erase it alike, so no future edit can grow an

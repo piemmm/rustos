@@ -865,6 +865,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "tairix-datetime"
+version = "0.0.0"
+dependencies = [
+ "tairix-abi",
+ "tairix-controls",
+ "tairix-display",
+ "tairix-font",
+ "tairix-fsmeta",
+ "tairix-geometry",
+ "tairix-input",
+ "tairix-procinfo",
+ "tairix-raster",
+ "tairix-rt",
+ "tairix-theme",
+ "tairix-window",
+]
+
+[[package]]
 name = "tairix-desktop-session"
 version = "0.0.0"
 dependencies = [

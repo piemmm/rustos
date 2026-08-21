@@ -140,13 +140,20 @@ kernel reports *changes*.
 The `launch` module tracks the desktop's launched children. `LaunchTable`
 remembers each running child's PID, display label, and spawn path (its
 **attested bundle identity** — the desktop spawned it, so no app-controlled
-data is trusted); `running_from` resolves the Files button's idempotent open
-(raise the running file manager instead of spawning a second copy).
+data is trusted); `running_from` resolves the file manager's idempotent open
+(raising its served window instead of spawning a second copy).
 Asynchronous launch surfaces a load refusal as the child's reserved `LOAD_*`
 exit status, so the shared `reap_launched` drains every exited child in one
 wake, reports each refusal loudly on `stderr` named by its label
 (`launch_failure_report` — never fatal, `AGENTS.md` §2.24), tears the
 child's windows down, and forgets the entry.
+
+Every launch is spelled through `launch_argv`: the program's own path is
+argv[0] and the caller's arguments follow it. A program reads its arguments
+from index 1, so a launch that passed them alone would have its leading
+argument read as the program's name and lost — which is how the file
+manager's `--desktop` role switch, the folder a desktop icon opens, and the
+document an icon launch names all reach their program.
 
 ## Loading the on-disk graphics assets
 
@@ -430,7 +437,7 @@ live device events" thread:
   all.
 - `set_library` hands the popup the merged catalog (refreshing an open popup
   in place) and `raise_window` shows, raises, and focuses a tracked task's
-  window — the Files button's idempotent open.
+  window — the file manager's idempotent open.
 - A faulting `InputSource` ends the `pump` with its `Errno`; the events drained
   before the fault stay applied and the embedder replaces or re-polls the
   source (`AGENTS.md` §2.9 / §19.5).

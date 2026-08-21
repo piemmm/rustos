@@ -550,13 +550,33 @@ exist from CU3).
   account checked is always the caller's own kernel-attested uid, never a
   name the request supplies), so it grants no authority the run request
   did not already carry.
+- The same rendezvous also serves a **non-blocking launch** request:
+  the identical re-authentication as the run request, but the reply
+  carries the started program's pid and the broker never waits for its
+  exit. It exists because a *graphical* caller cannot use the run form —
+  its reply arrives only once the elevated program has exited, so a
+  desktop session posting it would stop serving windows to the very
+  program it is waiting for, and the two would deadlock. The elevated
+  program is therefore interactive and collects its own input (the launch
+  carries no argv, so nothing about it depends on the argv gap
+  `plans/NEW-TASKBAR.md` T13 records). It grants no authority the run
+  request did not already carry: same account, same re-authentication,
+  same kernel-derived `manifest ∩ ceiling` for the child. The started
+  process is *login's* child, so login tracks it in its own launched-pid
+  table — joined to the wait-set it already parks in, under its own
+  token — and reaps it non-blockingly on the wake its exit produces; the
+  requester never can, and no launch leaves a zombie.
 - Wire contract: `lib/abi/src/elevate.rs` — `ElevateRequest` is a
-  two-variant enum (`Run { username, password, program }` /
-  `Verify { password }`, an opcode byte after the version word) and
-  `ElevateReply` is a three-variant enum (`Completed { exit_code }` /
-  `Verified` / `Refused(Errno)`, encoded as a result-discriminant word — `0`
-  completed, `1` verified, negative `-errno` refused — plus the exit-code
-  word); both decode fail-closed (wrong version, unknown opcode/status,
+  three-variant enum (`Run { username, password, program }` /
+  `Verify { password }` / `Launch { username, password, program }`, an
+  opcode byte after the version word; `Run` and `Launch` share one
+  encode/decode arm so their shape cannot drift) and `ElevateReply` is a
+  four-variant enum (`Completed { exit_code }` / `Verified` /
+  `Launched { pid }` / `Refused(Errno)`, encoded as a result-discriminant
+  word — `0` completed, `1` verified, `2` launched, negative `-errno`
+  refused — plus a second word carrying the exit code, the pid, or zero,
+  so the reply length is unchanged); both decode fail-closed (wrong
+  version, unknown opcode/status, a negative pid,
   over-long buffer, a field past the end, non-UTF-8, an empty field,
   trailing bytes). The per-console rendezvous
   `elevate_endpoint(console) = ELEVATE_ENDPOINT_BASE + console` refuses the
@@ -594,18 +614,24 @@ exist from CU3).
   `DenyAll` both implement it; no second credential-verification path
   exists.
 - Audit: `ELEVATE_GRANTED` / `ELEVATE_REFUSED` / `ELEVATE_UNAVAILABLE` /
-  `VERIFY_GRANTED` / `VERIFY_REFUSED` (login's 10_007–10_009, 10_012–10_013);
-  refusal causes (wrong password, unknown or locked account, no attested
-  uid) are audited but never disclosed — the requester sees one
+  `VERIFY_GRANTED` / `VERIFY_REFUSED` / `LAUNCH_GRANTED` /
+  `LAUNCH_REFUSED` (login's 10_007–10_009, 10_012–10_013,
+  10_024–10_025); the launch pair is separate from the run pair because
+  no exit code exists at that point and the record names the pid login
+  now owns. Refusal causes (wrong password, unknown or locked account, no
+  attested uid) are audited but never disclosed — the requester sees one
   indistinguishable `PermissionDenied`.
-- Tests: abi encode/decode round-trip and fail-closed rejects for both
-  request variants and all three reply variants; the login broker decision
+- Tests: abi encode/decode round-trip and fail-closed rejects for all
+  three request variants and all four reply variants (including a
+  launch and a run being distinct on the wire, and a negative pid
+  refused at both encode and decode); the login broker decision
   table host-tested (grant + audit, foreign console refused before
   parsing, malformed refused without authentication, indistinguishable
   auth refusals, spawn refusal reported verbatim, a verify-only request
   answered without ever invoking the launcher, an attested uid owning no
   account refused indistinguishably from a wrong password, an unattested
-  caller refused before authenticating); `lib/users` and the login
+  caller refused before authenticating, a launch taking the launch seam
+  and never the blocking one); `lib/users` and the login
   `Authenticator` implementations tested for `authenticate_uid` parity
   with the username path; the shell builtin host-tested over the shared
   fixture (prompt + post + exit-code, refusal reporting, no post after a

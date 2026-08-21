@@ -179,6 +179,7 @@ members = [
     "userland/apps/clear",
     "userland/apps/configure",
     "userland/apps/cp",
+    "userland/apps/datetime",
     "userland/apps/df",
     "userland/apps/dirname",
     "userland/apps/du",

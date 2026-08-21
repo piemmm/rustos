@@ -200,12 +200,14 @@ Done. What now holds:
   `tairix_rt::read_dir_all`, rendering through the shared theme, window
   create/present over the AW2 client, parked event wait, redraw on
   focus/theme-relevant events, clean exit on `CloseRequested`. The
-  taskbar's permanent Files button spawns it
+  file manager is an autostarted core desktop component (spawning at
+  bring-up via `spawn_files`); its first window is opened by the session
+  at desktop reveal
   (`tairix_desktop_session::config` — the one production configuration
   the QEMU harness also imports for its click coordinates).
 - The autoload QEMU vertical drives the full click-through with injected
   pointer buttons (`tools/qemu` ordered `PointerStep` script + ordered
-  marker-gated screendumps): the Files button → served-window clicks →
+  marker-gated screendumps): the reveal → served-window clicks →
   the Library popup's terminal launch (`plans/NEW-TASKBAR.md` T5), with
   two host-verified screendumps (dark desktop;
   the served window at the cascade origin). All

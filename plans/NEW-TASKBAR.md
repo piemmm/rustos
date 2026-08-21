@@ -228,7 +228,8 @@ wallpaper gap  ┌────────────────────�
   a slot opens, never through a slot of its own (T6/T7).
 - **Notification area:** status icons + transient notifications, left of the
   clock; the clock sits between it and the Switchboard icon (desktop1
-  panel 1).
+  panel 1). A press on the clock, with either button, opens the clock's own
+  menu (T17).
 - **Switchboard icon:** always the trailing-most element, reserved, immovable;
   no application or tray icon may occupy or displace its slot.
 - Vertical / top / right edges reflow along the cross axis by the existing
@@ -262,7 +263,7 @@ New / changed homes, all obeying the one-way `userland/gui/* → lib/*` edge:
   refinements) so both the taskbar icon and the Switchboard window compose
   them (T9, T11–T14). The Switchboard app's own screen composition is
   extended (Pressure + Activities sections) in place (§2.13).
-- `userland/gui/taskbar` — the leading library+files buttons, the application
+- `userland/gui/taskbar` — the leading library button, the application
   strip with its declared menu and hover picker, the reserved Switchboard
   slot, and the richer notification area (T4, T6, T7, T8, T9).
 - `userland/gui/session` — the glue: launch library/files bundles, hold every
@@ -548,29 +549,33 @@ Tested in `lib/proglib` (reconcile semantics), `userland/apps/applib`
 and the shipped-store read-back off a built image), and the composer
 (manifest acceptance/refusal, wire round-trip, signing).
 
-## T4 — Taskbar permanent leading icons: Library + File Manager — **done**
+## T4 — Taskbar leading icon: Program Library — **done**
 
-The bar's leading region is the two permanent, fixed-order launchers.
+The bar's leading region is the permanent Program Library launcher.
 
 What now stands:
 
-- `userland/gui/taskbar`: `TaskbarConfig.launcher_extent` sizes the two
-  leading slots; `BarLayout.library`/`.files` place them (clipped
+- `userland/gui/taskbar`: `TaskbarConfig.launcher_extent` sizes the
+  leading slot; `BarLayout.library` places it (clipped
   fail-closed to `Rect::EMPTY` on a degenerate screen — never hit);
-  `Hit::Library`/`Hit::Files` and the typed
-  `TaskbarResponse::OpenLibrary`/`OpenFiles` route a primary press. The
-  buttons are `lib/controls` `IconButton`s, both `Neutral` and both
-  `PlateSeating::Bar` — quiet peers seated *in* the bar, because on an icon
-  strip no single icon is the primary action of the surface. Library carries
-  the `lib/icon` `Library` glyph (a three-by-three tile grid) and compresses
-  its plate while its popup is open; Files carries the folder glyph. Neither
-  wears a role fill or a perimeter: they rest as bare glyphs on the bar and
-  wash to `surface_hover` under the pointer, with that hover feedback driven
-  through the bar's per-surface repaint latch (`Taskbar::take_repaint` →
-  `TaskbarRepaint`), so a hover repaints only the surface it changed and
-  never a per-frame present. The bar owns a copy of the active `Theme`
-  (layout/hit/paint read one definition) and the renderer signature dropped
-  its separate theme parameter.
+  `Hit::Library` and the typed `TaskbarResponse::OpenLibrary` route a
+  primary press. The button is a `lib/controls` `IconButton`, `Neutral`
+  and `PlateSeating::Bar` — quiet peers seated *in* the bar, because on an
+  icon strip no single icon is the primary action of the surface. Library
+  carries the `lib/icon` `Library` glyph (a three-by-three tile grid) and
+  compresses its plate while its popup is open. It wears no role fill or a
+  perimeter: it rests as a bare glyph on the bar and washes to `surface_hover`
+  under the pointer, with that hover feedback driven through the bar's
+  per-surface repaint latch (`Taskbar::take_repaint` → `TaskbarRepaint`).
+  The bar owns a copy of the active `Theme` (layout/hit/paint read one
+  definition) and the renderer signature dropped its separate theme parameter.
+- The file manager is an **autostarted core desktop component**: the session
+  spawns it first at bring-up (`spawn_files`) so it takes the **leading
+  application-strip slot** (`bar.apps[0]`); it runs windowless at start
+  and opens a window on demand; its icon-bar slot menu is built from
+  `lib/browse`'s `Places` and has **no Info and no Quit** because it is a
+  core desktop app that must not be quit. The bar's **separator** now
+  divides the Program Library launcher from the application strip.
 - The generic start menu is **gone** (`StartMenu`/`MenuLayout`/`MenuAction`/
   `SessionControl` deleted, §2.14): the session-control rows were wired to
   nothing in the production session (only the taskbar model and tests
@@ -578,18 +583,18 @@ What now stands:
   Switchboard's System menu (T13). The appearance toggle left the UI with
   the menu — the decision (owner-confirmed) is **no interim seam**: theme
   switching stays programmatic (`DesktopSession::set_theme`) until T13.
-- `userland/gui/session`: `OpenFiles` is resolved **idempotently** — the
+- `userland/gui/session`: The file manager is resolved **idempotently** — the
   `LaunchTable` records every desktop-launched child's PID + label + spawn
   path (its attested bundle identity; no app-controlled data), so a press
-  raises the running file manager's served window (`window_of_pid` via the
+  on its strip slot raises its served window (`window_of_pid` via the
   window engine's kernel-attested ownership + `DesktopShell::raise_window`),
   lets an in-flight launch finish undisturbed, and spawns only when no copy
   is alive. `OpenLibrary` presents the T5 popup and re-reads the stores.
 
-Tested in the taskbar suite (layout/hit/scale/edges/degenerate + both
-buttons' pixels), the session suite (routing, raise-vs-launch, launch
+Tested in the taskbar suite (layout/hit/scale/edges/degenerate +
+Library button's pixels), the session suite (routing, raise-vs-launch, launch
 table), and the AW3/AW4 QEMU vertical, whose pointer script now clicks the
-Files button directly and reconstructs the same production layout code.
+reveal and then the first app slot.
 
 ## T5 — Program Library popup (folder-organised launcher) — **done**
 
@@ -1291,11 +1296,15 @@ authority: each row reports a typed outcome and the session resolves it.
 - **Lock heads the last group.** It is the one way out of the session that
   *keeps* the session; everything below it ends work in progress.
 - **A lock that could not be undone is never offered.** `SystemPermits`
-  carries `lock_available`, attested by the session from
-  `elevate_endpoint(self_origin().console())`. It defaults to refusing, so a
-  bar that was never told renders the row non-actionable with the Authority
-  Mark and a stated reason rather than stranding the user behind a prompt
-  nothing can answer.
+  carries `lock_available`, which the bar fills from the one console
+  attestation `set_elevation_available` — the session's single
+  `elevate_endpoint(self_origin().console())` read, since "can this session
+  re-authenticate somebody" is also exactly what the clock menu's set-time
+  row needs (T17); two booleans holding the same value by definition would be
+  the duplication §2.2 forbids. It defaults to refusing, so a bar that was
+  never told renders the row non-actionable with the Authority Mark and a
+  stated reason rather than stranding the user behind a prompt nothing can
+  answer.
 
 **Rows deliberately not shipped, and what each waits on.** A row that cannot
 act must not exist, so these are absent rather than present-but-dead:
@@ -1303,7 +1312,9 @@ act must not exist, so these are absent rather than present-but-dead:
 - **New command** — the session's spawn path passes no argv and the terminal
   bundle accepts no command to run, so there is nothing for the row to
   invoke. It needs an argv-carrying launch path (`plans/APPS.md`,
-  `plans/PTY.md`), not a menu entry.
+  `plans/PTY.md`), not a menu entry. The clock's set-time row (T17) is
+  unaffected: the program it starts is interactive and collects its own
+  input, so the elevated launch carries no argv either.
 - **Services** — the System Information API has no service-enumeration query,
   so the Switchboard's `services` list is honestly empty. It lands with the
   service manager (`plans/NEW-SERVICEMANAGER.md`), which owns that query.
@@ -1362,9 +1373,9 @@ and a press elsewhere does not; the menu is modal and a click away dismisses
 without acting; keyboard navigation reaches every row; an unpermitted power
 row is non-actionable, carries the Authority Mark and states its reason;
 power rows are denied when no authority has been published; the lock row is
-denied until the session attests it can prompt, and emits nothing while
-denied; a launch row with no catalog entry is disabled and emits nothing;
-each row maps to exactly the expected typed outcome; the confirmation dialog
+denied until the session attests its console has a broker, and emits nothing
+while denied; a launch row with no catalog entry is disabled and emits
+nothing; each row maps to exactly the expected typed outcome; the confirmation dialog
 relays exactly once on confirm and nothing on cancel or Escape; the power
 relay round-trips and rejects malformed input; the Switchboard acts only when
 it holds the capability. For the lock: engaging covers the screen and is
@@ -1629,6 +1640,90 @@ transparent).
 Docs: `userland/gui/wm/README.md`, `userland/gui/session/README.md`,
 `docs/src/desktop/wm.md`, `docs/src/desktop/session.md`,
 `docs/src/desktop/apps.md`.
+
+## T17 — The clock's menu: setting the machine's date and time — **done**
+
+The clock was inert: pressing it reported a typed `ClockPressed` outcome the
+session listed among the responses it deliberately did nothing with. It now
+carries a menu, and that outcome is gone (§2.14) — the press opens the menu
+instead, on **either** button, since a menu is the clock's only behaviour and
+being particular about which button asks for it would only surprise.
+
+**Rows, in order** (`ClockRow`, one table both the render and the row →
+command mapping derive from, so a row cannot exist without a command behind
+it or the reverse):
+
+| Row | Resolved by | Backing |
+|---|---|---|
+| the reading the bar is drawing | nothing — a statement | the bar's own clock label |
+| Set Date & Time… | session → `ElevateRequest::Launch` | the per-console elevation broker, then `datetime.app` under `CAP_TIME_SET` |
+
+**Design decisions**
+
+- **The heading states the bar's own label, never a second reading.** The
+  session owns the wall clock and hands the bar the spelled text; the menu
+  repeats that string. A menu that re-derived the time could disagree with
+  the bar beside it. An unset clock (nothing has established a wall time this
+  boot, so the label is empty) says *Time not set* rather than showing a
+  fabricated `00:00`.
+- **One console attestation serves two rows.** Whether the *Lock Screen* row
+  (T13) can act and whether the set-time row can act are the **same** fact —
+  does this session's console have a re-authentication broker — so the
+  taskbar carries one `set_elevation_available` attestation, set from the one
+  `elevate_endpoint(console)` read the session already made. A second boolean
+  holding the same value by definition would be the duplication §2.2 forbids.
+  It defaults to refusing: a bar that was never told offers neither.
+- **A missing broker is rendered refused, not hidden.** The row draws with
+  the Authority Mark and its reason stated, and emits nothing while denied —
+  the same shape as an unpermitted power row, so the user learns *why*
+  instead of hunting for a row that is not there.
+- **The desktop never sets the clock, and never gains the capability.**
+  `CAP_TIME_SET` is not in a session's manifest and must not be. The session
+  asks for an account that holds it through its own trusted credential prompt
+  (`userland/gui/session/src/elevate.rs` — a session-owned window, so a
+  password is typed into desktop chrome and never into an application), and
+  the console's broker re-authenticates that account, audits the attempt, and
+  starts the application as it. The session learns only the pid, or the
+  refusal.
+- **The launch cannot block the compositor.** A graphical caller cannot use
+  the broker's blocking `Run` exchange: its reply arrives only once the
+  elevated program has *exited*, so a desktop posting it would stop serving
+  windows to the very program it is waiting for — a deadlock. Hence
+  `ElevateRequest::Launch`, which is the identical re-authentication with the
+  started program's pid as its reply (`plans/CAPABILITY_USE.md` CU5). The
+  started program is *login's* child, so login tracks and reaps it; the
+  desktop cannot wait on a child that is not its own, and no launch leaves a
+  zombie.
+- **The prompt fails closed and states its outcome.** An empty field is never
+  offered (there is nothing to check, and asking would spend an audited
+  attempt against the account). A refusal keeps the prompt up with the reason
+  stated and the password cleared — the masked field zeroises what it
+  discards — so a retry starts from empty with the account name kept. A
+  refused authentication and a program that would not start read
+  *differently*, so an accepted account is never blamed on its password. A
+  cancellation says on `stderr` that the clock was not changed rather than
+  leaving silence.
+
+Tested in the taskbar suite (the reading leads and is non-actionable and
+repeats the bar's label; an unset clock states so; the set-time row is denied
+with its reason and emits nothing until the session attests, then emits the
+typed request; every row in the table renders and maps back consistently; a
+press on the clock with either button opens the menu; attesting the broker
+latches only the menu surface) and in the session suite (the prompt opens
+once and refuses a second; Escape cancels and offers nothing; Enter offers
+exactly what was typed, once, for the program the prompt named, and reports
+the started pid; an incomplete prompt is never offered and moves the keyboard
+to the empty field; a refusal keeps the prompt up, states it, clears the
+password and keeps the account name, and the retry offers the new password; a
+launch failure reads differently from a refused password; abandoning offers
+nothing; an idle prompt ignores every event; a press on the clock reaches the
+bar and opens its menu). The wire form and the broker's decision table are
+covered in `lib/abi` and `userland/session/login` respectively
+(`plans/CAPABILITY_USE.md` CU5).
+
+Docs: `userland/gui/taskbar/README.md`, `userland/gui/session/README.md`,
+`docs/src/desktop/taskbar.md`, `docs/src/desktop/session.md`,
+`docs/src/desktop/apps.md`, `docs/src/security/capabilities.md`.
 
 ---
 

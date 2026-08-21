@@ -847,8 +847,8 @@ directory named as its first argument — the operand validated fail-closed
 before any syscall, a refusal stated on `stderr` and degraded to the launching
 user's home directory and then the root view, so a bad argument never leaves
 the user without a window — or at that home directory when no argument is
-given. The taskbar's permanent Files button spawns the bundle — or raises its
-window when one is already open (`plans/NEW-TASKBAR.md` T4).
+given. The autostarted file manager takes the first slot on the taskbar's
+application strip and opens a window on demand (`plans/NEW-TASKBAR.md` T4).
 
 ### In-place rename
 
@@ -1829,3 +1829,59 @@ arrow/page/home/end keys still step the view. A cancelled pick leaves the
 viewer open with a notice; a `CloseRequested` ends it cleanly. The program
 library's catalog carries the viewer's entry, so the desktop's popup
 spawns the bundle.
+
+## Date & Time (`tairix-datetime`)
+
+The `datetime.app` bundle sets the machine's wall clock
+(`plans/NEW-TASKBAR.md` T17). It is reached from the [taskbar clock's own
+menu](taskbar.md#the-clocks-menu) rather than from the program library —
+its manifest deliberately carries no `library` key, because the app is
+useful only to somebody who can authenticate an account that may set the
+clock.
+
+**It is *given* the authority; it never assumes it.** Stepping the clock
+needs `CAP_TIME_SET`, which the manifest requests and the kernel grants
+as `manifest ∩ the launching account's ceiling`. A desktop session holds
+no such capability and must never hold one, so it re-authenticates an
+account that does through its console's elevation broker (see [the
+desktop session](session.md#asking-for-an-account-that-may)) and the
+broker starts this program *as that account*. The app performs no
+authentication itself and asks for no elevation.
+
+A refused set is therefore an ordinary outcome, not a defect: the app
+states it in its window **and** on `stderr`, leaves the clock untouched,
+and keeps running. It never reports a clock it did not change as changed,
+and a refused authentication reads differently from a program that would
+not start.
+
+**One calendar, shared.** Seeding decomposes the reading with
+`CivilTime::from_time64`; committing composes the instant with
+`days_from_civil` — the exact inverse, from the same `lib/fsmeta`
+calendar the desktop clock and `ls`'s date column read, so the app and
+the bar can never disagree about what time it is. There is no second
+day-counting rule and no leap-year table of the app's own.
+
+**An unset clock shows nothing.** A machine whose wall time has never
+been established reports `WallTimeState::Unset`, whose instant is the
+epoch placeholder and means nothing; the fields open empty and the window
+says so, rather than presenting `1970-01-01` as a reading the user is
+invited to correct. Empty fields compose nothing, so an unset clock
+cannot be committed by accident.
+
+**Validation refuses, never corrects.** All six fields — year, month and
+day on the first row, hour, minute and second on the second — are checked
+before anything is set, and the first fault is named in the window: a
+month outside 1–12, an hour outside 0–23, a minute or second outside
+0–59, or a day that does not exist in the month and year entered (31
+April, 29 February outside a leap year). Nothing is clamped, wrapped, or
+saturated into range, because that would set a time the user did not ask
+for. Dates before 1970 and beyond 2038 are ordinary input: the instant is
+a 64-bit `Time64`, and the reading is UTC because the system keeps no
+timezone offset.
+
+The host-tested engine holds the fields, the faults, the composition, and
+the one status line; `view` holds the window's geometry (a three-column
+grid, the date above the time) and its paint through the shared
+`lib/controls` dialog and text field. The `Run` binary is the usual
+windowed-app composition: one granted frame region, one event mailbox
+parked on a wait-set, and the `WindowClient` calls.

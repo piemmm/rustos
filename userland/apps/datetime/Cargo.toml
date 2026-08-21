@@ -1,0 +1,81 @@
+[package]
+name = "tairix-datetime"
+description = "TAIRiX Date & Time app (datetime.app): the windowed application that shows the kernel's wall-clock reading in editable civil fields and, on commit, steps the clock through wall_time_set. The host-tested field/validation/composition model is the crate's [lib]; the freestanding `Run` binary is the on-disk bundle's entry point composing it over lib/window."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+# The host-testable model: the six civil fields, their validation, the
+# composition of a `Time64` instant, and the one status line every surface
+# states a result through. It is `no_std` + `alloc` so it links unchanged
+# into the freestanding `Run` binary and runs under the host test harness.
+[lib]
+name = "tairix_datetime"
+path = "src/lib.rs"
+
+# The `Run` entry-point binary of the on-disk `datetime.app` bundle: a
+# freestanding pure-Rust program on the native Tier-1 targets and an inert
+# host stub elsewhere (see `src/run.rs` / `build.rs`).
+[[bin]]
+name = "tairix-datetime-run"
+path = "src/run.rs"
+
+[dependencies]
+# The frozen `Time64`/`WallTimeState`/`Errno` vocabulary the clock reading and
+# the set request are expressed in.
+tairix-abi = { path = "../../../lib/abi", version = "=0.0.0" }
+# The one proleptic-Gregorian calendar: `CivilTime::from_time64` seeds the
+# fields and `days_from_civil` composes the instant back, so the app can never
+# disagree with the desktop clock's own decomposition.
+tairix-fsmeta = { path = "../../../lib/fsmeta", version = "=0.0.0" }
+# The Reactive Alloy control family the window is built from: `TextField` for
+# the six civil fields and `Button` for Set/Close — no new control here.
+tairix-controls = { path = "../../../lib/controls", version = "=0.0.0" }
+# Integer screen geometry (`Rect`, `Region`, `Scale`): every length is authored
+# logical and converted through the one shared scale.
+tairix-geometry = { path = "../../../lib/geometry", version = "=0.0.0" }
+# The single shared theme definition, so the window matches the desktop.
+tairix-theme = { path = "../../../lib/theme", version = "=0.0.0" }
+# Shared text rasterisation: the face and glyph blitter every label is drawn
+# with.
+tairix-font = { path = "../../../lib/font", version = "=0.0.0" }
+# The shared pointer/key input vocabulary every control consumes.
+tairix-input = { path = "../../../lib/input", version = "=0.0.0" }
+# Shared software rasteriser (`Surface`): the same premultiplied-alpha
+# primitives the window manager paints with.
+tairix-raster = { path = "../../../lib/raster", version = "=0.0.0" }
+
+# Everything only the freestanding `Run` binary links is pulled in for the
+# bare-metal targets it is actually built for; on the host the binary is an
+# inert stub with no extra dependencies.
+[target.'cfg(target_os = "none")'.dependencies]
+# The window-frame pixel codec (`tairix_display::winframe`): the one
+# definition of the straight-alpha conversion between this program's own
+# surface and the shared frame the desktop session reads.
+tairix-display = { path = "../../../lib/display", version = "=0.0.0" }
+# The app half of the window channel: `WindowClient` (create / present /
+# close) and `WindowEvents` (the typed, parked event wait).
+tairix-window = { path = "../../../lib/window", version = "=0.0.0" }
+# The pure-Rust userland runtime: `_start`, the panic handler, the allocator,
+# and the syscall wrappers (`shm_create`/`shm_grant`, `port_bind`/`ipc_recv`,
+# `ipc_call`, `waitset_*`, `wall_time`/`wall_time_set`).
+tairix-rt = { path = "../../../lib/rt", version = "=0.0.0" }
+# On the real target the `Run` binary composites glyphs through the sandboxed
+# font service over the runtime `ipc_call` transport; the base dependency
+# stays host-neutral so host tests inject the mock transport instead.
+tairix-font = { path = "../../../lib/font", version = "=0.0.0", features = ["rt"] }
+# The System Information client the memory-pressure band is read through, so
+# the font client's glyph cache obeys the same band every other cache on the
+# machine does.
+tairix-procinfo = { path = "../../../lib/procinfo", version = "=0.0.0", features = ["program"] }
+
+# The model's host tests draw text, so they inject the shared solid test
+# transport via the `test-util` feature (never a running `fontd`).
+[dev-dependencies]
+tairix-font = { path = "../../../lib/font", version = "=0.0.0", features = ["test-util"] }
+
+[lints]
+workspace = true

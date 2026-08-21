@@ -966,6 +966,21 @@ mod tests {
     // embedded spawn-floor program, so the list lives only in this pin.
     const VIEWER_REQUEST: &[CapabilityId] = &[CapabilityId::CONSOLE_WRITE, CapabilityId::SHM];
 
+    // The windowed Date & Time app `datetime` (plans/NEW-TASKBAR.md T17):
+    // console write for its fail-loud diagnostics, `CAP_SHM` to create and
+    // grant the zero-copy window frame region the desktop session maps, and
+    // `CAP_TIME_SET`, which *is* its job — the kernel's `wall_time_set` path
+    // re-checks it, and an account whose ceiling strips it runs the app with
+    // the set refused, which the app states rather than pretending to have
+    // changed the clock. No filesystem reach: it reads and writes the clock
+    // only, never a file. Not an embedded spawn-floor program, so the list
+    // lives only in this pin.
+    const DATETIME_REQUEST: &[CapabilityId] = &[
+        CapabilityId::CONSOLE_WRITE,
+        CapabilityId::SHM,
+        CapabilityId::TIME_SET,
+    ];
+
     // The windowed desktop-backdrop chooser `wallpaper` (plans/PINBOARD.md
     // P9): console write for its fail-loud diagnostics, filesystem reach to
     // list the read-only shipped wallpaper store and read the launching
@@ -1124,6 +1139,7 @@ mod tests {
             ("clear", ProgramKind::Command, CLEAR_MANIFEST),
             ("configure", ProgramKind::Command, PURE_TOOL_REQUEST),
             ("cp", ProgramKind::Command, FILE_TOOL_REQUEST),
+            ("datetime", ProgramKind::Application, DATETIME_REQUEST),
             ("desktop", ProgramKind::Application, DESKTOP_SESSION_REQUEST),
             ("devmgr", ProgramKind::Service, DEVMGR_MANIFEST),
             ("df", ProgramKind::Command, PURE_TOOL_REQUEST),

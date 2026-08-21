@@ -13,11 +13,12 @@
 //! [`LaunchTable`] remembers every launched child still running: its PID, the
 //! display name the desktop reports it by, and the `Run` path it was spawned
 //! from. The name feeds the fail-loud load-refusal diagnosis below; the path
-//! is the child's *bundle identity*, which the Files button's idempotent open
-//! resolves against — a press raises the running file manager's window
-//! instead of spawning a second copy. Identity by recorded spawn path is
-//! attested by construction: the desktop spawned the child itself, so no
-//! window title or other app-controlled data is ever trusted for it.
+//! is the child's *bundle identity*, which the file manager's idempotent open
+//! resolves against — a press on its strip slot raises the running file
+//! manager's window instead of spawning a second copy. Identity by recorded
+//! spawn path is attested by construction: the desktop spawned the child
+//! itself, so no window title or other app-controlled data is ever trusted
+//! for it.
 //!
 //! The desktop reaps every exited child on its `CHILD_TOKEN` wait-set member.
 //! [`launch_failure_report`] turns a reaped status into the terse line the
@@ -28,6 +29,7 @@
 
 use alloc::collections::BTreeMap;
 use alloc::string::String;
+use alloc::vec::Vec;
 
 use tairix_abi::{load_failure_reason, WaitStatus};
 
@@ -83,7 +85,7 @@ impl LaunchTable {
     }
 
     /// The lowest-numbered running child spawned from `run_path`, if any —
-    /// how the Files button finds its already-running file manager.
+    /// how the file manager's strip slot finds its already-running instance.
     #[must_use]
     pub fn running_from(&self, run_path: &str) -> Option<u64> {
         self.children
@@ -154,6 +156,22 @@ pub fn admitted_pid(ret: i64) -> Option<u64> {
     u64::try_from(ret).ok().filter(|pid| *pid != 0)
 }
 
+/// The argument vector a desktop launch is spawned with: the program's own
+/// path first, then `args`.
+///
+/// A program reads its arguments from index 1, because index 0 is the
+/// program name its spawner chose (`tairix_rt::args`). An argument passed
+/// first is read as that name and never seen at all, so a launch that omits
+/// the program silently loses its leading operand — the file manager's
+/// component-role switch, the folder a desktop icon opens, the document an
+/// icon's launch names.
+#[must_use]
+pub fn launch_argv<'a>(program: &'a [u8], args: &[&'a [u8]]) -> Vec<&'a [u8]> {
+    core::iter::once(program)
+        .chain(args.iter().copied())
+        .collect()
+}
+
 /// Drain every currently-exited child, reporting each load refusal and
 /// handing every reaped PID back to the caller for its own teardown.
 ///
@@ -208,7 +226,9 @@ pub fn reap_launched<R, P, T>(
 
 #[cfg(test)]
 mod tests {
-    use super::{admitted_pid, launch_failure_report, reap_launched, LaunchTable, UNKNOWN_LABEL};
+    use super::{
+        admitted_pid, launch_argv, launch_failure_report, reap_launched, LaunchTable, UNKNOWN_LABEL,
+    };
     use alloc::string::String;
     use alloc::vec::Vec;
     use tairix_abi::{
@@ -253,6 +273,22 @@ mod tests {
             launch_failure_report("Viewer", WaitStatus::Stopped(Signal::Stop)),
             None
         );
+    }
+
+    /// The program is named first and every argument follows it, so nothing
+    /// a launch passes is read as the program's own name and dropped.
+    #[test]
+    fn a_launch_names_the_program_before_its_arguments() {
+        let files = &b"/System/Applications/files.app/Run"[..];
+        assert_eq!(
+            launch_argv(files, &[&b"--desktop"[..]]),
+            alloc::vec![files, &b"--desktop"[..]],
+        );
+        assert_eq!(
+            launch_argv(files, &[&b"/Users/ada/Documents"[..]]),
+            alloc::vec![files, &b"/Users/ada/Documents"[..]],
+        );
+        assert_eq!(launch_argv(files, &[]), alloc::vec![files]);
     }
 
     #[test]
@@ -439,7 +475,8 @@ mod tests {
     #[test]
     fn reap_with_no_zombies_does_nothing() {
         let mut launched = LaunchTable::new();
-        launched.record(3, "Files", "/System/Applications/files.app/Run");
+        let path = "/System/Applications/files.app/Run";
+        launched.record(3, "Files", path);
         let mut reported: Vec<String> = Vec::new();
         let mut torn_down: Vec<u64> = Vec::new();
 

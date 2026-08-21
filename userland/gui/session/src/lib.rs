@@ -180,6 +180,7 @@ pub mod config;
 pub mod confirm;
 pub mod desktop;
 pub mod device;
+pub mod elevate;
 pub mod fade;
 pub mod holdback;
 pub mod input;
@@ -221,8 +222,8 @@ pub use assets::{load_cursor_theme, load_icon_set, SessionFileReader, SessionFil
 pub use cli::{parse, CliError, Command, USAGE};
 pub use clock::{spell as spell_clock, SessionClock};
 pub use config::{
-    FILES_LABEL, FILES_RUN_PATH, SWITCHBOARD_LABEL, SWITCHBOARD_RUN_PATH, WALLPAPER_LABEL,
-    WALLPAPER_RUN_PATH,
+    DATETIME_LABEL, DATETIME_RUN_PATH, FILES_LABEL, FILES_RUN_PATH, SWITCHBOARD_LABEL,
+    SWITCHBOARD_RUN_PATH, WALLPAPER_LABEL, WALLPAPER_RUN_PATH,
 };
 pub use confirm::{Answer, ConfirmPrompt, CONFIRM_ORIGIN};
 pub use desktop::{
@@ -230,6 +231,9 @@ pub use desktop::{
     RELIST_MIN_INTERVAL_NS,
 };
 pub use device::{DeviceInputSource, PointerInputChannel};
+pub use elevate::{
+    ElevatePrompt, Elevator, PromptOutcome, ELEVATE_ORIGIN, NOT_STARTED_REASON, REFUSED_REASON,
+};
 pub use fade::{
     ScreenFade, DESKTOP_REVEALED, DESKTOP_REVEALED_MESSAGE, DESKTOP_SESSION_RANGE_END,
     DESKTOP_SESSION_RANGE_START,
@@ -237,7 +241,9 @@ pub use fade::{
 pub use holdback::{Delivery, Flushed, HoldBack, HOLD_BACK_CAPACITY};
 pub use input::{SessionInputResponse, SessionInputRouter};
 pub use keyboard::{KeyInputChannel, KeyboardInputSource};
-pub use launch::{admitted_pid, launch_failure_report, reap_launched, LaunchTable, LaunchedApp};
+pub use launch::{
+    admitted_pid, launch_argv, launch_failure_report, reap_launched, LaunchTable, LaunchedApp,
+};
 pub use library::{catalogued, load_library, LoadedLibrary};
 pub use listing::{ListingClient, ListingDesk};
 pub use lock::{LockOutcome, LockedDrain, ScreenLock};

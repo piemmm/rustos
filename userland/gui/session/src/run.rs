@@ -111,19 +111,20 @@ mod program {
     };
     use tairix_desktop_session::{
         admitted_pid, catalogued, deliver_pending_open, desktop_info, drop_is_noteworthy,
-        ensure_switchboard, load_library, maybe_send_frame_report, maybe_send_seat_report,
-        open_tray, parse, picker_cells, reap_launched, relay_power, resolve_window_identities,
-        serve_pinboard_apply, serve_switchboard_request, window_control_alternate_event,
-        window_control_event, Answer, AppBarBridge, AppBarService, ArtworkDesk, ArtworkFileReader,
-        ArtworkSandbox, CliError, Command, ConcludedPick, ConfirmPrompt, Delivery, Desktop,
-        DesktopAction, DesktopActivation, DesktopOutcome, DesktopShell, DeviceInputSource,
-        FrameContent, HangTracker, HoldBack, IconRasteriser, InputSource, KeyboardInputSource,
-        LaunchTable, ListingClient, ListingDesk, LockedDrain, OwnerWindow, PickConclusion,
-        PinboardMenu, PinboardMenuOutcome, PinboardStore, PinboardStoreError, Prepared,
-        PresentedOwners, ScreenFade, ScreenLock, SeatEventReader, SeatInputChannel, SessionClock,
-        SessionFileReader, SessionFileWriter, SessionPicker, SessionWindows, ShellWindowHost,
-        SwitchboardMailbox, SwitchboardOutcome, SwitchboardServe, WallpaperDesk, WallpaperSource,
-        BUNDLE_RUN_SUFFIX, FILES_LABEL, FILES_RUN_PATH, SWITCHBOARD_CALL_REFUSED,
+        ensure_switchboard, launch_argv, load_library, maybe_send_frame_report,
+        maybe_send_seat_report, open_tray, parse, picker_cells, reap_launched, relay_power,
+        resolve_window_identities, serve_pinboard_apply, serve_switchboard_request,
+        window_control_alternate_event, window_control_event, Answer, AppBarBridge, AppBarService,
+        ArtworkDesk, ArtworkFileReader, ArtworkSandbox, CliError, Command, ConcludedPick,
+        ConfirmPrompt, Delivery, Desktop, DesktopAction, DesktopActivation, DesktopOutcome,
+        DesktopShell, DeviceInputSource, ElevatePrompt, Elevator, FrameContent, HangTracker,
+        HoldBack, IconRasteriser, InputSource, KeyboardInputSource, LaunchTable, ListingClient,
+        ListingDesk, LockedDrain, OwnerWindow, PickConclusion, PinboardMenu, PinboardMenuOutcome,
+        PinboardStore, PinboardStoreError, Prepared, PresentedOwners, PromptOutcome, ScreenFade,
+        ScreenLock, SeatEventReader, SeatInputChannel, SessionClock, SessionFileReader,
+        SessionFileWriter, SessionPicker, SessionWindows, ShellWindowHost, SwitchboardMailbox,
+        SwitchboardOutcome, SwitchboardServe, WallpaperDesk, WallpaperSource, BUNDLE_RUN_SUFFIX,
+        DATETIME_RUN_PATH, FILES_LABEL, FILES_RUN_PATH, SWITCHBOARD_CALL_REFUSED,
         SWITCHBOARD_LABEL, SWITCHBOARD_RUN_PATH, USAGE, WALLPAPER_LABEL, WALLPAPER_RUN_PATH,
         WINDOW_SHOWN, WINDOW_SHOWN_MESSAGE,
     };
@@ -639,10 +640,13 @@ mod program {
             match tairix_rt::elevate(&ElevateRequest::Verify { password }) {
                 Ok(ElevateReply::Verified) => Verdict::Verified,
                 Ok(ElevateReply::Refused(_)) => Verdict::Refused,
-                // `Completed` answers a `Run` request, never a `Verify`. A
-                // broker that sent it is not speaking this protocol, and a
-                // lock does not open on a reply it did not understand.
-                Ok(ElevateReply::Completed { .. }) | Err(_) => Verdict::Unreachable,
+                // `Completed` answers a `Run` request and `Launched` a
+                // `Launch` one, never a `Verify`. A broker that sent either
+                // is not speaking this protocol, and a lock does not open
+                // on a reply it did not understand.
+                Ok(ElevateReply::Completed { .. } | ElevateReply::Launched { .. }) | Err(_) => {
+                    Verdict::Unreachable
+                }
             }
         }
     }
@@ -1891,6 +1895,12 @@ mod program {
         // the desktop itself rather than by the bar, which holds no
         // authority; an unanswered prompt relays nothing.
         let mut confirm = ConfirmPrompt::new();
+        // The trusted credential prompt for a command this session may not
+        // perform — setting the clock. It too is the session's own window, so
+        // a password is typed into desktop chrome and offered to the
+        // console's broker, never to an application; an unanswered prompt
+        // offers nothing.
+        let mut elevate = ElevatePrompt::new();
         // The screen lock, and the account it re-verifies. `USER` is what
         // login exported for this session; it names whose password the
         // prompt is asking for and nothing more — the broker reads the
@@ -1906,10 +1916,12 @@ mod program {
         let account = tairix_rt::env_var(b"USER")
             .and_then(|raw| core::str::from_utf8(raw).ok())
             .unwrap_or_default();
-        // Offer the Lock row only where this session really has a password
-        // prompt to unlock with: a console the login supervisor brokers
-        // re-verification on. Without one, locking would strand the user.
-        shell.set_lock_available(
+        // Offer the rows that need re-authentication only where this session
+        // really has a broker for it: the Lock row (which would otherwise
+        // strand the user behind a screen with no way back) and the clock's
+        // set-time row (which needs an account holding CAP_TIME_SET
+        // authenticated). One console fact, read once.
+        shell.set_elevation_available(
             &mut compositor,
             elevate_endpoint(self_origin.console()).is_ok(),
         );
@@ -2514,6 +2526,7 @@ mod program {
                         &identity,
                         &mut picker,
                         &mut confirm,
+                        &mut elevate,
                         &mut lock,
                         account,
                         &mut launched,
@@ -2583,6 +2596,7 @@ mod program {
                                 &identity,
                                 &mut picker,
                                 &mut confirm,
+                                &mut elevate,
                                 &mut lock,
                                 account,
                                 &mut launched,
@@ -3708,6 +3722,7 @@ mod program {
         identity: &RtWindowIdentity,
         picker: &mut SessionPicker<S, F>,
         confirm: &mut ConfirmPrompt,
+        elevate: &mut ElevatePrompt,
         lock: &mut ScreenLock,
         account: &str,
         launched: &mut LaunchTable,
@@ -3800,6 +3815,14 @@ mod program {
                         if let Some(answer) = confirm.handle_click(local, shell, compositor) {
                             report_power_relay(answer, *switchboard);
                         }
+                    }
+                    // A press on the showing credential prompt answers it the
+                    // same way: only the continuing button offers what was
+                    // typed, and the broker decides.
+                    if elevate.wm_id() == Some(window) {
+                        let outcome =
+                            elevate.handle_click(local, &mut RtElevator, shell, compositor);
+                        report_elevation(outcome);
                     }
                 }
                 InputResponse::SecondaryActivated { window, local } => {
@@ -3908,6 +3931,15 @@ mod program {
                             if let Some(answer) = confirm.handle_key(&record, shell, compositor) {
                                 report_power_relay(answer, *switchboard);
                             }
+                        }
+                    } else if elevate.wm_id() == Some(window) {
+                        // The credential prompt consumes its own keys, so a
+                        // password is typed into it and never into whatever
+                        // held focus behind it.
+                        if let Some(record) = key {
+                            let outcome =
+                                elevate.handle_key(&record, &mut RtElevator, shell, compositor);
+                            report_elevation(outcome);
                         }
                     } else if let (Some(id), Some(record)) = (windows.ipc_id(window), key) {
                         deliver(
@@ -4181,6 +4213,7 @@ mod program {
                 shell.sync_background(compositor);
                 shell.present(compositor);
                 confirm.repaint(shell, compositor);
+                elevate.repaint(shell, compositor);
                 // Served application windows are the apps' own pixels, so
                 // the session cannot re-colour them: it tells every app
                 // instead, and each repaints itself. Without this the
@@ -4203,6 +4236,7 @@ mod program {
                 // could not be put up says so rather than leaving the user
                 // believing the screen is secured.
                 confirm.abandon(shell, compositor);
+                elevate.abandon(shell, compositor);
                 if !lock.engage(account, shell, compositor) {
                     io::write_stderr_line("desktop: could not lock the screen; it is still open");
                 }
@@ -4214,6 +4248,7 @@ mod program {
                 // itself is the loop's, which owns the frame region the
                 // session gives back.
                 confirm.abandon(shell, compositor);
+                elevate.abandon(shell, compositor);
                 return Routed::SwitchUser;
             }
             ShellOutcome::Taskbar(TaskbarResponse::LogOut) => {
@@ -4221,6 +4256,7 @@ mod program {
                 // unanswered (so nothing irreversible follows a log-out) and
                 // unwind through the one owner-checked release.
                 confirm.abandon(shell, compositor);
+                elevate.abandon(shell, compositor);
                 lock.abandon(compositor);
                 return Routed::EndSession;
             }
@@ -4231,6 +4267,18 @@ mod program {
                 if !confirm.ask(action, shell, compositor) {
                     io::write_stderr_line(
                         "desktop: could not ask for confirmation; nothing was done",
+                    );
+                }
+            }
+            ShellOutcome::Taskbar(TaskbarResponse::SetDateTime) => {
+                // The session holds no authority to set a clock and never
+                // will: it asks for an account that does, and the console's
+                // broker re-authenticates it and starts the application
+                // itself. A prompt that cannot be shown asks nothing and
+                // sets nothing.
+                if !elevate.ask(DATETIME_RUN_PATH, SET_TIME_PURPOSE, shell, compositor) {
+                    io::write_stderr_line(
+                        "desktop: could not ask for an account; the clock was not changed",
                     );
                 }
             }
@@ -4250,11 +4298,63 @@ mod program {
                 | TaskbarResponse::LibraryDismissed
                 | TaskbarResponse::WindowChosen { .. }
                 | TaskbarResponse::DismissNotification { .. }
-                | TaskbarResponse::ClockPressed
                 | TaskbarResponse::CreateDesktopShortcut { .. },
             ) => {}
         }
         Routed::Continue
+    }
+
+    /// What the credential prompt says the account is wanted for.
+    const SET_TIME_PURPOSE: &str = "Setting the date and time needs an account that may.";
+
+    /// The production elevation seam: post the offered credentials to this
+    /// console's broker and let it re-authenticate and start the program.
+    ///
+    /// The desktop never authenticates anybody and never spawns the elevated
+    /// program itself; it carries the offer and reads the verdict.
+    struct RtElevator;
+
+    impl Elevator for RtElevator {
+        fn launch(&mut self, username: &str, password: &str, program: &str) -> Result<i32, Errno> {
+            match tairix_rt::elevate(&ElevateRequest::Launch {
+                username,
+                password,
+                program,
+            })? {
+                ElevateReply::Launched { pid } => Ok(pid),
+                ElevateReply::Refused(err) => Err(err),
+                // `Completed` answers a `Run` request and `Verified` a
+                // `Verify` one, never a `Launch`. A broker that sent either
+                // is not speaking this protocol, and nothing was started on
+                // a reply the session did not understand.
+                ElevateReply::Completed { .. } | ElevateReply::Verified => Err(Errno::OutOfRange),
+            }
+        }
+    }
+
+    /// State a concluded elevation on `stderr`.
+    ///
+    /// The started program is deliberately **not** entered in the launch
+    /// table. That table maps a child the session started to the bundle it
+    /// came from, and an entry leaves it only when the session *reaps* that
+    /// child — but an elevated program is login's child, so the reap never
+    /// comes and the entry would outlive the program for the life of the
+    /// session, claiming a bundle still runs. Its window therefore resolves
+    /// its identity exactly as any other window the session did not launch
+    /// does (a program started from a shell, say): one uniform behaviour,
+    /// rather than a special case that leaks.
+    ///
+    /// A refusal is already stated in the prompt, which stays up for another
+    /// attempt, so nothing is reported for one here. A cancellation is
+    /// reported, since a user who asked to set the clock and saw nothing
+    /// happen deserves to be told nothing was set.
+    fn report_elevation(outcome: PromptOutcome) {
+        match outcome {
+            PromptOutcome::Started { .. } | PromptOutcome::Pending => {}
+            PromptOutcome::Cancelled => {
+                io::write_stderr_line("desktop: the clock was not changed");
+            }
+        }
     }
 
     /// Relay a confirmed power transition over the production mailbox and
@@ -4785,7 +4885,11 @@ mod program {
     /// session from having to know which variables an app cares about. The
     /// child still runs under the session's attested credential and console
     /// ([`CONSOLE_INHERIT`]/[`SPAWN_UID_INHERIT`]) — the environment is data and
-    /// carries no authority (§4, §5.4).
+    /// carries no authority.
+    ///
+    /// `args` are the app's arguments alone; the program itself is named by
+    /// [`launch_argv`], which every launch goes through so no argument is
+    /// read as the program's own name and lost.
     fn spawn_app(path: &[u8], args: &[&[u8]]) -> i64 {
         let count = tairix_rt::env_count();
         let mut env: alloc::vec::Vec<&[u8]> = alloc::vec::Vec::with_capacity(count as usize);
@@ -4794,7 +4898,13 @@ mod program {
                 env.push(entry);
             }
         }
-        tairix_rt::spawn_with(path, CONSOLE_INHERIT, SPAWN_UID_INHERIT, args, &env)
+        tairix_rt::spawn_with(
+            path,
+            CONSOLE_INHERIT,
+            SPAWN_UID_INHERIT,
+            &launch_argv(path, args),
+            &env,
+        )
     }
 
     /// Record a just-issued launch, answering with the pid recorded.

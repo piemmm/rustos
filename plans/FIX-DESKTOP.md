@@ -54,7 +54,7 @@ event loop** inherits the freeze:
 
 | Site | File | What blocks |
 |---|---|---|
-| Desktop launcher | `userland/gui/session/src/run.rs` (the taskbar-launch arms — today the Files button and the program-library popup — `tairix_rt::spawn(...)`) | Compositor loop frozen for the whole launch. **The reported bug.** |
+| Desktop launcher | `userland/gui/session/src/run.rs` (the taskbar-launch arms — today the program-library popup and its row activations — `tairix_rt::spawn(...)`) | Compositor loop frozen for the whole launch. **The reported bug.** |
 | Desktop file picker | `userland/gui/session/src/run.rs` (the `SessionPicker`'s `VfsDirectorySource` calling `tairix_rt::read_dir_all` inside `picker.handle_click` / `handle_key`, on the `SEAT_TOKEN` path) | Compositor loop frozen while a directory is read from disk on every open/navigate. Same class of defect (synchronous I/O on the compositor thread), smaller blast radius. |
 | Desktop icon artwork | `userland/gui/session/src/run.rs` (every icon surface resolving through `tairix_icon::ArtworkCache` *inside* its paint) | Compositor loop frozen for a bounded read plus a sandbox round trip, per icon, the first time each is drawn at a given pixel side. Worst on bring-up and on opening the launcher. Fixed in DESK-8. |
 | Desktop program catalog | `userland/gui/session/src/run.rs` (`refresh_library` + `desktop_associations`, on the `OpenLibrary` arm and after a re-list) | Compositor loop frozen while the two catalog documents and then **one `AppInfo` per catalogued application** are read — on the very click that opens the launcher. Same class as the two above; **not yet fixed** (see §5). |

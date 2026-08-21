@@ -140,7 +140,12 @@ const fn key(value: KeyValue) -> Key {
 }
 
 /// Translate a decoded ABI [`KeyInput`] into the desktop [`InputEvent`].
-fn to_input_event(record: KeyInput) -> InputEvent {
+///
+/// The one translation from the wire vocabulary to the routing one, so a
+/// surface the serve loop hands a raw record (the credential prompt, which
+/// the router reaches by window id rather than through this source) reads it
+/// exactly as every other event was read.
+pub(crate) fn to_input_event(record: KeyInput) -> InputEvent {
     let key = key(record.key());
     let modifiers = modifiers(record.modifiers());
     match record {

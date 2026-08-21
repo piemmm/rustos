@@ -17,10 +17,11 @@
 //! # An unset clock draws nothing
 //!
 //! A machine whose wall time has never been established this boot reports
-//! [`WallTimeState::Unset`] — the Unix-epoch placeholder, which carries no
-//! real-world meaning. The label is then left **empty**, and an empty label
-//! draws nothing: `00:00` would be a fabricated time, and a bar that states
-//! one is worse than a bar with no clock on it.
+//! [`WallTimeState::Unset`](tairix_abi::time::WallTimeState::Unset) — the
+//! Unix-epoch placeholder, which carries no real-world meaning. The label is
+//! then left **empty**, and an empty label draws nothing: `00:00` would be a
+//! fabricated time, and a bar that states one is worse than a bar with no
+//! clock on it.
 //!
 //! # One wake a minute, and none when nothing can be seen
 //!

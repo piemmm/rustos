@@ -16,6 +16,7 @@
 //! with [`take_repaint`](Taskbar::take_repaint) to re-present exactly the
 //! surfaces that changed.
 
+use alloc::string::String;
 use alloc::vec::Vec;
 
 use tairix_abi::switchboard_ipc::TraySummary;
@@ -31,6 +32,7 @@ use tairix_theme::Theme;
 
 use crate::apps::{AppSlot, AppStrip};
 use crate::clock::Clock;
+use crate::clock_menu::ClockPermits;
 use crate::edge::Edge;
 use crate::layout::{BarLayout, Hit, NotificationsLayout, TrayReadoutLayout};
 use crate::library::{LibraryIconRequest, LibraryLayout, LibraryPopup};
@@ -139,7 +141,7 @@ pub struct Taskbar {
     notifications: NotificationArea,
     clock: Clock,
     tray: SwitchboardTray,
-    lock_available: bool,
+    elevation_available: bool,
     switch_user_available: bool,
     repaint: TaskbarRepaint,
 }
@@ -170,7 +172,7 @@ impl Taskbar {
             notifications: NotificationArea::new(),
             clock: Clock::new(),
             tray: SwitchboardTray::new(),
-            lock_available: false,
+            elevation_available: false,
             switch_user_available: false,
             repaint: TaskbarRepaint::NONE,
         }
@@ -427,19 +429,22 @@ impl Taskbar {
         }
     }
 
-    /// Adopt the session's attestation that it can put a password prompt in
-    /// front of the screen, so the *Lock Screen* row is offered only when
-    /// choosing it could really lock — and really unlock again.
+    /// Adopt the session's attestation that its console has a
+    /// re-authentication broker, so every row that needs one is offered
+    /// only where choosing it could really act.
     ///
-    /// The bar cannot know this: whether a re-verification prompt exists is
-    /// a property of the session's console, which the session reads from
-    /// the kernel. It defaults to refusing, so a bar that was never told
-    /// offers no lock rather than a lock with no way back. Only the system
-    /// menu renders it, and only while open, so a change latches that
-    /// surface alone.
-    pub fn set_lock_available(&mut self, available: bool) {
-        if self.lock_available != available {
-            self.lock_available = available;
+    /// One fact, two rows: the system menu's *Lock Screen* row needs the
+    /// broker to re-verify the signed-in user before the screen unlocks
+    /// again, and the clock menu's set-time row needs it to authenticate an
+    /// account holding `CAP_TIME_SET`. The bar cannot know it — whether the
+    /// broker exists is a property of the session's console, which the
+    /// session reads from the kernel — so it defaults to refusing: a bar
+    /// that was never told offers neither a lock with no way back nor a
+    /// clock command that could only fail. Only the menus render it, and
+    /// only while open, so a change latches that surface alone.
+    pub fn set_elevation_available(&mut self, available: bool) {
+        if self.elevation_available != available {
+            self.elevation_available = available;
             self.repaint |= TaskbarRepaint::MENU;
         }
     }
@@ -849,10 +854,27 @@ impl Taskbar {
             power: self.tray.power_capable(),
             task_shell_installed: EntryId::new(system::TASK_SHELL_BUNDLE)
                 .is_ok_and(|id| self.library.catalog().entry(&id).is_some()),
-            lock_available: self.lock_available,
+            lock_available: self.elevation_available,
             switch_user_available: self.switch_user_available,
         };
         self.menu.open(MenuSubject::System { permits }, anchor);
+        self.repaint |= TaskbarRepaint::MENU;
+    }
+
+    /// Open the clock's menu, anchored at the clock. Latches only
+    /// [`menu`](TaskbarRepaint::menu).
+    ///
+    /// The reading it states is the label the bar is already drawing, so the
+    /// menu and the bar can never disagree about the time, and an unset
+    /// clock says so rather than showing a fabricated one. Setting a clock
+    /// needs a capability the bar does not hold, so the command is offered
+    /// only where the session attested a broker to authenticate against.
+    pub(crate) fn open_clock_menu(&mut self, anchor: Rect) {
+        let permits = ClockPermits {
+            reading: String::from(self.clock.label()),
+            set_available: self.elevation_available,
+        };
+        self.menu.open(MenuSubject::Clock { permits }, anchor);
         self.repaint |= TaskbarRepaint::MENU;
     }
 

@@ -973,10 +973,23 @@ fn primary_press_over_the_bar_routes_to_the_taskbar() {
     let mut comp = compositor();
     let mut router = SessionInputRouter::new();
 
-    // The clock, at the trailing end, taken from the bar's own layout rather
-    // than a hand-copied coordinate. Pressed first: a press on the library
-    // button opens the modal popup, after which any bar press is the popup's
-    // to dismiss.
+    // The library button centre.
+    let response = press_at(&mut router, &mut comp, session.taskbar_mut(), 24, 1060);
+    assert_eq!(
+        response,
+        SessionInputResponse::Taskbar(TaskbarResponse::OpenLibrary)
+    );
+}
+
+#[test]
+fn primary_press_on_the_clock_reaches_the_bar_and_opens_its_menu() {
+    // Its own bar: the library popup is modal, so a press after that one is
+    // the popup's to dismiss rather than the clock's.
+    let mut session = session();
+    let mut comp = compositor();
+    let mut router = SessionInputRouter::new();
+
+    // The clock's own layout rectangle, rather than a hand-copied coordinate.
     let clock = session.taskbar().layout(Scale::ONE).clock;
     let response = press_at(
         &mut router,
@@ -987,14 +1000,12 @@ fn primary_press_over_the_bar_routes_to_the_taskbar() {
     );
     assert_eq!(
         response,
-        SessionInputResponse::Taskbar(TaskbarResponse::ClockPressed)
+        SessionInputResponse::Ignored,
+        "opening a menu asks the session for nothing by itself"
     );
-
-    // The library button centre.
-    let response = press_at(&mut router, &mut comp, session.taskbar_mut(), 24, 1060);
-    assert_eq!(
-        response,
-        SessionInputResponse::Taskbar(TaskbarResponse::OpenLibrary)
+    assert!(
+        session.taskbar().menu().is_open(),
+        "the press reached the bar and opened the clock's menu"
     );
 }
 
@@ -9066,4 +9077,350 @@ fn a_popup_over_a_frosted_window_never_reblurs_it() {
         retained,
         "a backdrop was thrown away"
     );
+}
+
+// --- The credential prompt for a command the session may not perform ----
+
+use crate::config::DATETIME_RUN_PATH;
+use crate::elevate::{
+    ElevatePrompt, Elevator, PromptOutcome, ELEVATE_ORIGIN, NOT_STARTED_REASON, REFUSED_REASON,
+};
+use alloc::string::ToString;
+
+/// One sentence explaining the command, as the session words it.
+const ELEVATE_PURPOSE: &str = "Setting the clock needs an account that may.";
+
+/// A broker stand-in recording every offer and answering a scripted verdict.
+///
+/// It records the plaintext deliberately: a test has to be able to prove the
+/// prompt offered exactly what was typed, once.
+#[derive(Default)]
+struct ScriptedElevator {
+    outcome: Option<Result<i32, Errno>>,
+    offers: Vec<(String, String, String)>,
+}
+
+impl ScriptedElevator {
+    fn accepting(pid: i32) -> Self {
+        Self {
+            outcome: Some(Ok(pid)),
+            offers: Vec::new(),
+        }
+    }
+
+    fn refusing(err: Errno) -> Self {
+        Self {
+            outcome: Some(Err(err)),
+            offers: Vec::new(),
+        }
+    }
+}
+
+impl Elevator for ScriptedElevator {
+    fn launch(&mut self, username: &str, password: &str, program: &str) -> Result<i32, Errno> {
+        self.offers.push((
+            username.to_string(),
+            password.to_string(),
+            program.to_string(),
+        ));
+        self.outcome.unwrap_or(Err(Errno::PermissionDenied))
+    }
+}
+
+/// Type `text` into whichever field holds the keyboard.
+fn type_text(
+    prompt: &mut ElevatePrompt,
+    text: &str,
+    elevator: &mut dyn Elevator,
+    shell: &mut DesktopShell,
+    comp: &mut Compositor,
+) {
+    for ch in text.chars() {
+        prompt.handle(&key_press(Key::Char(ch)), elevator, shell, comp);
+    }
+}
+
+/// Fill both fields: the account name, `Tab`, then the password.
+fn fill_credentials(
+    prompt: &mut ElevatePrompt,
+    account: &str,
+    password: &str,
+    elevator: &mut dyn Elevator,
+    shell: &mut DesktopShell,
+    comp: &mut Compositor,
+) {
+    type_text(prompt, account, elevator, shell, comp);
+    prompt.handle(&key_press(Key::Named(NamedKey::Tab)), elevator, shell, comp);
+    type_text(prompt, password, elevator, shell, comp);
+}
+
+#[test]
+fn the_credential_prompt_opens_once_and_refuses_a_second() {
+    let (mut shell, mut comp) = headless_desktop();
+    let mut prompt = ElevatePrompt::new();
+
+    assert!(prompt.ask(DATETIME_RUN_PATH, ELEVATE_PURPOSE, &mut shell, &mut comp));
+    let wm = prompt.wm_id().expect("a prompt window is showing");
+    assert_eq!(comp.window(wm).expect("live").origin(), ELEVATE_ORIGIN);
+    assert_eq!(prompt.pending(), Some(DATETIME_RUN_PATH));
+
+    assert!(
+        !prompt.ask(
+            "/System/Applications/other.app/Run",
+            ELEVATE_PURPOSE,
+            &mut shell,
+            &mut comp
+        ),
+        "one prompt at a time"
+    );
+    assert_eq!(
+        prompt.pending(),
+        Some(DATETIME_RUN_PATH),
+        "the question already asked stands"
+    );
+}
+
+#[test]
+fn escape_cancels_the_prompt_and_offers_nothing() {
+    let (mut shell, mut comp) = headless_desktop();
+    let mut prompt = ElevatePrompt::new();
+    let mut elevator = ScriptedElevator::accepting(4210);
+    assert!(prompt.ask(DATETIME_RUN_PATH, ELEVATE_PURPOSE, &mut shell, &mut comp));
+    let wm = prompt.wm_id().expect("showing");
+    fill_credentials(
+        &mut prompt,
+        "root",
+        "hunter2",
+        &mut elevator,
+        &mut shell,
+        &mut comp,
+    );
+
+    assert_eq!(
+        prompt.handle(
+            &key_press(Key::Named(NamedKey::Escape)),
+            &mut elevator,
+            &mut shell,
+            &mut comp
+        ),
+        PromptOutcome::Cancelled
+    );
+    assert_eq!(prompt.wm_id(), None, "the prompt window is closed");
+    assert!(comp.window(wm).is_none(), "and gone from the compositor");
+    assert!(
+        elevator.offers.is_empty(),
+        "a cancelled prompt never spends an attempt against the account"
+    );
+}
+
+#[test]
+fn enter_offers_exactly_what_was_typed_and_reports_the_started_pid() {
+    let (mut shell, mut comp) = headless_desktop();
+    let mut prompt = ElevatePrompt::new();
+    let mut elevator = ScriptedElevator::accepting(4210);
+    assert!(prompt.ask(DATETIME_RUN_PATH, ELEVATE_PURPOSE, &mut shell, &mut comp));
+    fill_credentials(
+        &mut prompt,
+        "root",
+        "hunter2",
+        &mut elevator,
+        &mut shell,
+        &mut comp,
+    );
+
+    assert_eq!(
+        prompt.handle(
+            &key_press(Key::Named(NamedKey::Enter)),
+            &mut elevator,
+            &mut shell,
+            &mut comp
+        ),
+        PromptOutcome::Started { pid: 4210 }
+    );
+    assert_eq!(
+        elevator.offers.as_slice(),
+        &[(
+            "root".to_string(),
+            "hunter2".to_string(),
+            DATETIME_RUN_PATH.to_string()
+        )],
+        "offered once, verbatim, for the program the prompt named"
+    );
+    assert_eq!(prompt.wm_id(), None, "an accepted prompt is already down");
+}
+
+#[test]
+fn an_incomplete_prompt_is_never_offered() {
+    let (mut shell, mut comp) = headless_desktop();
+    let mut prompt = ElevatePrompt::new();
+    let mut elevator = ScriptedElevator::accepting(4210);
+    assert!(prompt.ask(DATETIME_RUN_PATH, ELEVATE_PURPOSE, &mut shell, &mut comp));
+
+    // An account with no password: there is nothing to check, and asking
+    // would spend an audited attempt against the account.
+    type_text(&mut prompt, "root", &mut elevator, &mut shell, &mut comp);
+    assert_eq!(
+        prompt.handle(
+            &key_press(Key::Named(NamedKey::Enter)),
+            &mut elevator,
+            &mut shell,
+            &mut comp
+        ),
+        PromptOutcome::Pending
+    );
+    assert!(elevator.offers.is_empty());
+    assert!(
+        prompt.wm_id().is_some(),
+        "the prompt stays up to be finished"
+    );
+
+    // The keyboard moved to the empty field, so typing continues there.
+    type_text(&mut prompt, "hunter2", &mut elevator, &mut shell, &mut comp);
+    assert_eq!(
+        prompt.handle(
+            &key_press(Key::Named(NamedKey::Enter)),
+            &mut elevator,
+            &mut shell,
+            &mut comp
+        ),
+        PromptOutcome::Started { pid: 4210 }
+    );
+    assert_eq!(elevator.offers.len(), 1);
+}
+
+#[test]
+fn a_refusal_keeps_the_prompt_up_states_it_and_clears_the_password() {
+    let (mut shell, mut comp) = headless_desktop();
+    let mut prompt = ElevatePrompt::new();
+    let mut elevator = ScriptedElevator::refusing(Errno::PermissionDenied);
+    assert!(prompt.ask(DATETIME_RUN_PATH, ELEVATE_PURPOSE, &mut shell, &mut comp));
+    fill_credentials(
+        &mut prompt,
+        "root",
+        "wrong",
+        &mut elevator,
+        &mut shell,
+        &mut comp,
+    );
+
+    assert_eq!(
+        prompt.handle(
+            &key_press(Key::Named(NamedKey::Enter)),
+            &mut elevator,
+            &mut shell,
+            &mut comp
+        ),
+        PromptOutcome::Pending,
+        "a refusal is not a conclusion"
+    );
+    assert!(prompt.wm_id().is_some(), "the prompt is still up to retry");
+    assert_eq!(prompt.stated_reason(), Some(REFUSED_REASON));
+    assert_eq!(
+        prompt.secret_len(),
+        0,
+        "the refused password was cleared for another attempt"
+    );
+    assert_eq!(
+        prompt.account_text(),
+        Some("root"),
+        "the account name is not the secret and is kept"
+    );
+
+    // The retry types only a password, into the field the refusal focused.
+    type_text(&mut prompt, "hunter2", &mut elevator, &mut shell, &mut comp);
+    prompt.handle(
+        &key_press(Key::Named(NamedKey::Enter)),
+        &mut elevator,
+        &mut shell,
+        &mut comp,
+    );
+    assert_eq!(
+        elevator.offers,
+        vec![
+            (
+                "root".to_string(),
+                "wrong".to_string(),
+                DATETIME_RUN_PATH.to_string()
+            ),
+            (
+                "root".to_string(),
+                "hunter2".to_string(),
+                DATETIME_RUN_PATH.to_string()
+            ),
+        ],
+        "the retry offers the new password under the same account"
+    );
+}
+
+#[test]
+fn a_launch_failure_reads_differently_from_a_refused_password() {
+    let (mut shell, mut comp) = headless_desktop();
+    let mut prompt = ElevatePrompt::new();
+    let mut elevator = ScriptedElevator::refusing(Errno::NotFound);
+    assert!(prompt.ask(DATETIME_RUN_PATH, ELEVATE_PURPOSE, &mut shell, &mut comp));
+    fill_credentials(
+        &mut prompt,
+        "root",
+        "hunter2",
+        &mut elevator,
+        &mut shell,
+        &mut comp,
+    );
+
+    assert_eq!(
+        prompt.handle(
+            &key_press(Key::Named(NamedKey::Enter)),
+            &mut elevator,
+            &mut shell,
+            &mut comp
+        ),
+        PromptOutcome::Pending
+    );
+    assert_eq!(
+        prompt.stated_reason(),
+        Some(NOT_STARTED_REASON),
+        "an accepted account is never blamed on the password"
+    );
+}
+
+#[test]
+fn abandoning_the_prompt_offers_nothing_and_closes_it() {
+    let (mut shell, mut comp) = headless_desktop();
+    let mut prompt = ElevatePrompt::new();
+    let mut elevator = ScriptedElevator::accepting(4210);
+    assert!(prompt.ask(DATETIME_RUN_PATH, ELEVATE_PURPOSE, &mut shell, &mut comp));
+    let wm = prompt.wm_id().expect("showing");
+    fill_credentials(
+        &mut prompt,
+        "root",
+        "hunter2",
+        &mut elevator,
+        &mut shell,
+        &mut comp,
+    );
+
+    prompt.abandon(&mut shell, &mut comp);
+    assert_eq!(prompt.wm_id(), None);
+    assert!(comp.window(wm).is_none());
+    assert!(elevator.offers.is_empty());
+}
+
+#[test]
+fn an_idle_prompt_ignores_every_event() {
+    let (mut shell, mut comp) = headless_desktop();
+    let mut prompt = ElevatePrompt::new();
+    let mut elevator = ScriptedElevator::accepting(4210);
+
+    for event in [
+        key_press(Key::Named(NamedKey::Enter)),
+        key_press(Key::Named(NamedKey::Escape)),
+        key_press(Key::Char('a')),
+        PRIMARY_PRESS,
+    ] {
+        assert_eq!(
+            prompt.handle(&event, &mut elevator, &mut shell, &mut comp),
+            PromptOutcome::Pending
+        );
+    }
+    assert!(elevator.offers.is_empty());
 }

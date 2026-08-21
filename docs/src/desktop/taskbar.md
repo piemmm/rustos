@@ -65,19 +65,15 @@ A bar too thin to spare two rims keeps its content rather than the inset.
 
 From the leading end to the trailing end:
 
-- **Library button** — the first of the two permanent leading launchers: the
-  nine-tile-glyph invoker that opens the program-library popup.
+- **Library button** — the permanent leading launcher: the nine-tile-glyph
+  invoker that opens the program-library popup.
 - **Separator** — a one-pixel rule immediately after the Library button,
-  grouping everything that follows it (see *The separator rule*).
-- **Files button** — the second permanent launcher: a folder-glyph button that
-  opens the file manager. The two leading buttons are fixed — never reordered,
-  never removable (`plans/NEW-TASKBAR.md` T4) — and they are quiet peers: on an
-  icon strip no single icon is the primary action of the surface, so neither
-  carries a role fill.
-- **Application strip** — the flexible middle region, between the launchers
-  and the notification area, holding one fixed-width icon-only slot per
-  *running application* in the order the session first saw each of them (see
-  *The application strip*).
+  dividing it from the application strip (see *The separator rule*).
+- **Application strip** — the flexible region holding one fixed-width
+  icon-only slot per *running application* in the order the session first saw
+  each of them. The **leading slot** (`bar.apps[0]`) is the autostarted
+  **file manager**, which runs windowless at start and opens a window on demand
+  (see *The application strip*).
 - **Notification area** — status/notification icons, packed immediately
   before the clock.
 - **Clock** — immediately before the Switchboard capsule. Its display text is
@@ -269,9 +265,7 @@ colour role from the `Palette`. Its last argument is the caller's
   quiet `Neutral` role, carrying the shipped `Library` artwork over its
   nine-tile glyph — compressed while its popup is open, washed under the
   pointer;
-- the **Files button** is the same quiet (`Neutral`) `IconButton` carrying the
-  shipped `Folder` artwork over its folder glyph;
-- the **separator** between them is filled in the palette's `border` colour,
+- the **separator** is filled in the palette's `border` colour,
   through a plain `Surface` fill — the renderer draws the laid-out
   `BarLayout::separator` rectangle and knows nothing of the gutter
   arithmetic behind it (`AGENTS.md` §2.2);
@@ -640,19 +634,20 @@ it acts only on a primary or secondary press, hit-tested against the current
 
 - a primary press on the **Library button** opens the program-library popup
   (`OpenLibrary`);
-- a primary press on the **Files button** reports `OpenFiles` — the session
-  opens the file manager, raising an already-open files window rather than
-  launching a second copy;
 - a primary press on an **application slot** performs that application's
   default action, or raises its most recently used window (see *The
-  application strip*), and a **secondary** press on one opens the menu that
+  application strip*). The leading slot — the autostarted **file manager** —
+  resolves idempotently: a press raises its window forward rather than
+  launching a second copy;
+- a **secondary** press on an application slot opens the menu that
   application declared;
 - a primary press on an open **picker cell** chooses that window
   (`WindowChosen { id }`); one on the picker's own plate is claimed and
   closes it;
 - a primary press on a **notification icon** reports its `IconId`
   (`NotificationActivated`);
-- a primary press on the **clock** reports `ClockPressed`;
+- a press on the **clock**, with either button, opens the clock's own menu
+  (see *The clock's menu*) — opening asks for nothing by itself;
 - a primary press on the **Switchboard capsule** resolves as a tap or a
   hold (see *The Switchboard capsule's tap-or-hold gesture*), a press
   inside the open readout drives its one safe action or is claimed inert
@@ -755,10 +750,38 @@ that was never told offers nothing it cannot deliver (`AGENTS.md` §5.4).
 Locking heads the last group because it is the one way out of the session
 that *keeps* the session; everything below it ends work in progress. The row
 is offered only where the session runs on a console whose login supervisor
-can re-verify the signed-in user (`DesktopShell::set_lock_available`) — a
+can re-verify the signed-in user (`DesktopShell::set_elevation_available`) — a
 lock that could never be undone is a trap, not a security measure. What the
 lock then guarantees is described in [the desktop
 session](session.md#the-screen-lock).
+
+## The clock's menu
+
+A press on the clock, with **either** button, opens the clock's menu through
+the same one modal menu surface (`plans/NEW-TASKBAR.md` T17). A menu is the
+clock's only behaviour, so it is not particular about which button asks for
+it. Its rows are one table, `clock_menu::ROWS`, from which both the rendered
+menu and the row → command mapping are derived:
+
+| Row | What it is |
+|---|---|
+| the reading the bar is drawing | a statement, not a command: it cannot be chosen |
+| Set Date & Time… | asks the session for an account that may set the clock |
+
+The heading repeats the label the bar is *already* drawing rather than
+re-deriving a time of its own, so the menu and the bar beside it can never
+disagree. When no wall-clock time has been established this boot the bar's
+label is empty, and the row says so (*Time not set*) instead of showing a
+fabricated `00:00`.
+
+Setting a clock needs `CAP_TIME_SET`, which the bar does not hold and a
+desktop session must never hold. The row therefore reports a typed response
+and the session asks for an account that does hold it (see [the desktop
+session](session.md#asking-for-an-account-that-may)). Whether the row can act
+at all is the same attestation the *Lock Screen* row reads — one console
+fact, `set_elevation_available`, since both need a re-authentication broker —
+and while it is absent the row renders non-actionable with its reason stated
+and emits nothing.
 
 ## Theming
 
@@ -846,9 +869,9 @@ ink anywhere beside it; and
 the popup's panel, rows, hover/selection states, placeholder ink, scrollbar,
 and dark / light /
 high-contrast rendering.
-The icon-artwork tests drive `render` with a recording lookup: the two
-launcher buttons ask for the `Library` and `Folder` kinds at their drawn side
-and blit what comes back, an application slot with no artwork of its own
+The icon-artwork tests drive `render` with a recording lookup: the
+Library launcher button asks for its kind at its drawn side
+and blits what comes back, an application slot with no artwork of its own
 falls back to its kind's artwork before the glyph, two running applications
 each draw their own picture and only their own (one the session could not
 attribute keeping the shared glyph), the popup asks only for

@@ -56,7 +56,11 @@ design:
   authority itself exits.
 - `ElevateLauncher` (`elevate.rs`) — runs one re-authenticated
   `elevate <user> <program>` command as the target account and returns its
-  exit code (`plans/CAPABILITY_USE.md` CU5). The decision logic
+  exit code, **or** starts it and returns its pid without waiting
+  (`launch_as`), which is what a graphical caller needs: a desktop cannot
+  wait for a program it must keep serving windows to
+  (`plans/CAPABILITY_USE.md` CU5). Both forms take one spawn, so they can
+  never start a program under different terms. The decision logic
   (`handle_elevate_request`) placement-checks the caller's attested
   console, decodes fail-closed, re-authenticates through the same
   `Authenticator` as the prompt, and audits every grant and refusal; the
@@ -132,9 +136,17 @@ one; an undeliverable wake is recorded and skipped, never retried, so a
 wedged session cannot hold the exit open.
 
 The `Run` binary multiplexes the elevation endpoint, the `session-v1`
-endpoint, and the running child on **one** reusable wait-set, so every
-wait parks on an event and nothing polls. A login screen that exits
-without an accepted verdict is restarted; three consecutive failures
+endpoint, the running child, and every child a non-blocking elevated launch
+started on **one** reusable wait-set, so every wait parks on an event and
+nothing polls. A launched child is *login's*, not the requester's, so login
+owns collecting it: each is joined to that wait-set under its own token, and
+its exit wakes whichever supervision is parked, which then reaps
+non-blockingly. The sweep also runs whenever supervision begins, so an exit
+that landed between watches is not missed, and it drops any entry that is no
+longer login's to reap — keeping one would wake supervision for ever.
+
+A login screen that exits without an accepted verdict is restarted; three
+consecutive failures
 degrade the round to the text login, with the reason on `stderr` and in
 the audit trail, so a broken login screen can never leave the machine
 impossible to log in to.
@@ -182,7 +194,9 @@ zero-budget paths, a dead console, and a refused session launch — plus
 the `EventId` invariants, the numeric audit-field formatter, and
 the elevation broker's decision table (grant + audit, foreign console
 refused before parsing, malformed refused without authentication,
-indistinguishable refusals, spawn refusal reported verbatim).
+indistinguishable refusals, spawn refusal reported verbatim, and the
+non-blocking launch taking the launch seam rather than the blocking one,
+refused indistinguishably on a wrong password and audited apart).
 
 The `session-v1` surface is covered the same way: the broker refusing a
 caller whose attested uid is not the greeter and one on another console

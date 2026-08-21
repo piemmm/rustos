@@ -731,12 +731,12 @@ mod program {
             match tairix_rt::elevate(&request)? {
                 ElevateReply::Completed { exit_code } => Ok(exit_code),
                 ElevateReply::Refused(err) => Err(err),
-                // The builtin only ever posts a `Run` request, which the
-                // broker never answers with `Verified` — that reply is
-                // reserved for a `Verify` request this call site never
-                // sends. Reachable only through a protocol mismatch, so it
-                // fails closed rather than being treated as success.
-                ElevateReply::Verified => Err(Errno::OutOfRange),
+                // The builtin only ever posts a `Run` request, so the
+                // broker answers neither `Verified` (a `Verify` request's
+                // reply) nor `Launched` (a `Launch` request's). Reachable
+                // only through a protocol mismatch, so both fail closed
+                // rather than being treated as success.
+                ElevateReply::Verified | ElevateReply::Launched { .. } => Err(Errno::OutOfRange),
             }
         }
     }

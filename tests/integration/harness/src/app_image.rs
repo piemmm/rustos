@@ -755,6 +755,7 @@ mod tests {
                 "clear",
                 "configure",
                 "cp",
+                "datetime",
                 "desktop",
                 "devmgr",
                 "df",

@@ -1448,11 +1448,16 @@ fn status_icon_press_is_inert_and_clock_reports() {
         press_at(&mut input, &mut bar, icon.x, icon.y),
         TaskbarResponse::Ignored
     );
+    // The clock opens its own menu; opening acts on nothing by itself.
     let clock = centre_of(layout.clock);
     assert_eq!(
         press_at(&mut input, &mut bar, clock.x, clock.y),
-        TaskbarResponse::ClockPressed
+        TaskbarResponse::Ignored
     );
+    assert!(matches!(
+        bar.menu().subject(),
+        Some(MenuSubject::Clock { .. })
+    ));
 }
 
 /// Seat one application on the bar and open the menu it declared with a
@@ -5744,7 +5749,7 @@ fn a_press_elsewhere_on_the_bar_arms_no_capsule_gesture() {
     let clock = centre_of(bar.layout(Scale::ONE).clock);
     assert_eq!(
         press_at(&mut input, &mut bar, clock.x, clock.y),
-        TaskbarResponse::ClockPressed
+        TaskbarResponse::Ignored
     );
     // Only the capsule arms the tap-or-hold gesture: this click's release
     // opens nothing, however long it was held.
@@ -6469,10 +6474,11 @@ fn the_active_appearance_row_carries_the_check_and_is_not_actionable() {
 fn a_secondary_press_elsewhere_on_the_bar_opens_no_system_menu() {
     let mut bar = bar_with_task_shell();
     let mut input = TaskbarInput::new();
-    let clock = centre_of(bar.layout(Scale::ONE).clock);
+    // The Library button is a live control that carries no menu of its own.
+    let library = centre_of(bar.layout(Scale::ONE).library);
 
     assert_eq!(
-        secondary_press_at(&mut input, &mut bar, clock),
+        secondary_press_at(&mut input, &mut bar, library),
         TaskbarResponse::Ignored
     );
     assert!(
@@ -6574,7 +6580,7 @@ fn every_row_maps_to_exactly_its_expected_response() {
     for (index, want) in expected.into_iter().enumerate() {
         let mut bar = bar_with_task_shell();
         bar.set_tray_summary(Some(power_capable_summary()));
-        bar.set_lock_available(true);
+        bar.set_elevation_available(true);
         bar.set_switch_user_available(true);
         let mut input = TaskbarInput::new();
         open_system_menu(&mut input, &mut bar);
@@ -6681,7 +6687,7 @@ fn the_lock_row_is_denied_until_the_session_attests_it_can_prompt() {
 
     // The session attests, and the row becomes the real command.
     bar.close_menu();
-    bar.set_lock_available(true);
+    bar.set_elevation_available(true);
     open_system_menu(&mut input, &mut bar);
     let item = &bar.menu().control().items()[5];
     assert!(item.state().is_actionable());
@@ -6738,16 +6744,126 @@ fn attesting_the_wake_mailbox_latches_only_the_menu_surface() {
 }
 
 #[test]
-fn attesting_the_lock_prompt_latches_only_the_menu_surface() {
+fn attesting_the_broker_latches_only_the_menu_surface() {
     let mut bar = bar_with_task_shell();
     let _ = bar.take_repaint();
 
-    bar.set_lock_available(true);
+    bar.set_elevation_available(true);
     assert_eq!(bar.take_repaint(), TaskbarRepaint::MENU);
 
     // Re-attesting the same answer changes no pixel anywhere.
-    bar.set_lock_available(true);
+    bar.set_elevation_available(true);
     assert_eq!(bar.take_repaint(), TaskbarRepaint::NONE);
+}
+
+// ---- the clock's menu --------------------------------------------------
+
+/// Open the clock's menu with a secondary press on the clock.
+fn open_clock_menu(input: &mut TaskbarInput, bar: &mut Taskbar) {
+    let clock = centre_of(bar.layout(Scale::ONE).clock);
+    input.handle(
+        InputEvent::PointerMoved { to: clock },
+        bar,
+        Scale::ONE,
+        NOW_NS,
+    );
+    assert_eq!(
+        input.handle(
+            InputEvent::PointerPressed {
+                button: tairix_input::PointerButton::Secondary,
+            },
+            bar,
+            Scale::ONE,
+            NOW_NS,
+        ),
+        TaskbarResponse::Ignored,
+        "opening a menu acts on nothing by itself"
+    );
+}
+
+#[test]
+fn the_clock_menu_states_the_reading_the_bar_is_drawing() {
+    let mut bar = bottom_bar();
+    bar.clock_mut().set_label("09:41");
+    let mut input = TaskbarInput::new();
+    open_clock_menu(&mut input, &mut bar);
+
+    let items = bar.menu().control().items();
+    assert_eq!(items.len(), crate::clock_menu::ROWS.len());
+    assert_eq!(items[0].label(), "09:41");
+    // A statement, not a command: choosing it asks for nothing.
+    assert_eq!(
+        choose_row(&mut input, &mut bar, 0),
+        TaskbarResponse::Ignored
+    );
+}
+
+#[test]
+fn an_unset_clock_menu_says_so_rather_than_showing_a_fabricated_time() {
+    // Nothing has set the wall clock this boot, so the bar's label is empty.
+    let mut bar = bottom_bar();
+    let mut input = TaskbarInput::new();
+    open_clock_menu(&mut input, &mut bar);
+
+    assert_eq!(
+        bar.menu().control().items()[0].label(),
+        crate::clock_menu::READING_UNSET_LABEL
+    );
+}
+
+#[test]
+fn the_set_time_row_is_denied_until_the_session_attests_a_broker() {
+    // Nothing attested yet: setting the clock needs an account that may,
+    // and this session has nothing to authenticate one against.
+    let mut bar = bottom_bar();
+    bar.clock_mut().set_label("09:41");
+    let mut input = TaskbarInput::new();
+    open_clock_menu(&mut input, &mut bar);
+
+    let item = &bar.menu().control().items()[1];
+    assert_eq!(item.label(), crate::clock_menu::SET_ROW_LABEL);
+    assert_eq!(
+        item.state().authority,
+        tairix_controls::AuthorityState::NeedsCapability,
+        "the set-time row fails closed before the session attests"
+    );
+    assert!(!item.state().is_actionable());
+    assert_eq!(item.reason(), Some(crate::clock_menu::REASON_NO_BROKER));
+    assert_eq!(
+        choose_row(&mut input, &mut bar, 1),
+        TaskbarResponse::Ignored,
+        "a command that could only fail is never emitted"
+    );
+
+    // The session attests, and the row becomes the real command.
+    bar.close_menu();
+    bar.set_elevation_available(true);
+    open_clock_menu(&mut input, &mut bar);
+    let item = &bar.menu().control().items()[1];
+    assert!(item.state().is_actionable());
+    assert_eq!(item.reason(), None);
+    assert_eq!(
+        choose_row(&mut input, &mut bar, 1),
+        TaskbarResponse::SetDateTime
+    );
+}
+
+#[test]
+fn a_primary_press_on_the_clock_opens_the_same_menu() {
+    // The clock's only behaviour is its menu, so it is not particular about
+    // which button asks for it.
+    let mut bar = bottom_bar();
+    bar.set_elevation_available(true);
+    let mut input = TaskbarInput::new();
+    let clock = centre_of(bar.layout(Scale::ONE).clock);
+    assert_eq!(
+        press_at(&mut input, &mut bar, clock.x, clock.y),
+        TaskbarResponse::Ignored
+    );
+    assert_eq!(
+        choose_row(&mut input, &mut bar, 1),
+        TaskbarResponse::SetDateTime
+    );
 }
 
 #[test]

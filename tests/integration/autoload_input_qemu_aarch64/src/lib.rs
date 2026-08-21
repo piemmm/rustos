@@ -29,8 +29,8 @@
 //! to — which is what makes a per-window delivery ordinal attributable
 //! where a system-wide total is not:
 //!
-//! 1. Clicking the served files window (spawned by the taskbar's permanent
-//!    Files button) delivers `Focus { focused: true }` (the window was
+//! 1. Clicking the served files window (opened by the session at desktop
+//!    reveal) delivers `Focus { focused: true }` (the window was
 //!    unfocused) …
 //! 2. … then the activating `Pressed`. Both landed on the files window's
 //!    own port, so the guest emits [`FILES_WINDOW_ACTIVATED_MARKER`]: the

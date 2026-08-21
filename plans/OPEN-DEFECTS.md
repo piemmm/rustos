@@ -507,6 +507,16 @@ The open items, in priority order:
   Witness: `tests/integration/tp_isolation_qemu_riscv64` (a hostile-`tp`
   U-mode fixture on a two-CPU guest), plus the `trap_layout_tests.rs`
   ordering/layout pinning against `trap.s`.
+- **D47 — every desktop launch lost its first argument, so the autostarted
+  file manager ran as an ordinary window — DONE.** `appbar-qemu-aarch64` ran
+  to its 600s ceiling. `spawn_app` passed the caller's arguments as the whole
+  argv, so the program name a program's own arguments begin *after* was its
+  first real argument: the file-manager autostart never saw `--desktop` and
+  took `Role::Window` — an unasked-for home window at every login and a
+  *Quit* row on a core component. The rule is now the one host-tested
+  `launch_argv`. The harness half compounded it: the autostarted file manager
+  holds strip slot 0, so measuring "the launched application" there compared
+  it with itself; the script now drives `APPBAR_LAUNCHED_SLOT`.
 
 These are **distinct in kind**: D1 finishes an interrupt-model fix, D2
 and D4 are §27 foundational-completeness defects, D3 is an Arch-HAL
@@ -530,8 +540,10 @@ write path (open, needs a lock-abandon primitive), D37 is a suspected
 per-port context-switch gap found by reading, not by a failure (open, confirm
 before fixing), and D43 was a privilege-boundary defect of the same
 found-by-reading kind as D42 — a user-writable register the kernel trusted for
-its own per-CPU identity (fixed). Do not collapse the open items into one change; land each
-on its own whole-project-green gate (§7).
+its own per-CPU identity (fixed), and D47 was a dropped argv[0] in the desktop's
+launch path that started a core component in the wrong role, behind a harness
+that measured the wrong slot (fixed). Do not collapse the open items into one
+change; land each on its own whole-project-green gate (§7).
 
 ## Coupling to be aware of
 
@@ -2779,6 +2791,50 @@ with a test per level over a member that records the ranges it is asked to
 discard; the wire carries a discard opcode and the buffer class, with
 `RemoteBlock`/`BlkClient` forwarding both; and no layer answers either
 discard method from a trait default.
+
+## D47 — every desktop launch lost its first argument, so the autostarted file manager ran as an ordinary window (DONE)
+
+`tairix-test-appbar-qemu-aarch64` ran to its 600s ceiling. One defect in
+the desktop and one in the harness, both closed.
+
+**The desktop — the argument vector had no argv[0].** `spawn_app` passed
+the caller's arguments as the *whole* argv, but a program's own arguments
+begin after index 0 (the program name its spawner chose), so every desktop
+launch silently lost its leading argument. The file manager's autostart
+therefore never saw `--desktop` and took `Role::Window` instead of
+`Role::Desktop`: a home-folder window nobody asked for at every login, the
+ordinary Info/*Quit* slot convention on a core component the user must not
+be able to quit, and a process that ends when that window closes. The same
+loss dropped the folder a desktop icon opens and the document an icon
+launch names.
+
+The rule is now one host-testable function, `launch_argv` in
+`userland/gui/session/src/launch.rs` — the program first, then the
+caller's arguments — and `spawn_app` is the only launch path, so every
+launch site is correct by construction. The freestanding `Run` loop cannot
+be host-tested, which is why the rule lives beside the launch table rather
+than in it. Every other spawner in the tree (`files`, `terminal`,
+`stress`, `elsh`, `lib/sandbox`) already named its program.
+
+**The harness — it measured the wrong slot.** The click script and both
+pixel assertions were written when the strip's leading slot belonged to
+the launched application. The autostarted file manager holds slot 0 for
+the life of the session, so reading slot 0 for "the launched application"
+compared the file manager against itself in the bare frame and could never
+witness anything. The script now seats it ahead of the launched
+application and drives `APPBAR_LAUNCHED_SLOT`; `assert_app_slot_drawn`
+reads that slot and `assert_no_slot_beyond_the_launched_app` reads
+`APPBAR_EMPTY_SLOT` beyond it.
+
+The terminal's ~0.5s exit without a window was downstream of the
+mis-launch and does not recur: with the component autostart correct the
+launched terminal serves its launch window, its *New window* row, and its
+slot's default action — the three creates the PASS needs — in 5/5
+consecutive runs at ~20s each.
+
+**Regression cover.** `tairix_desktop_session::launch::tests::
+a_launch_names_the_program_before_its_arguments` fails on the pre-fix
+shape; the vertical itself covers the wiring end to end.
 
 ## Non-goals / do not do
 

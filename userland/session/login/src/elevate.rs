@@ -11,6 +11,15 @@
 //! child's set is derived kernel-side as
 //! `its manifest ∩ the target account's ceiling`, exactly as at login.
 //!
+//! A graphical caller cannot use that exchange — its reply arrives only
+//! once the elevated program has exited, so a desktop session posting it
+//! would stop serving windows to the very program it is waiting for, and
+//! the two would deadlock. Such a caller posts
+//! [`ElevateRequest::Launch`], which takes the identical
+//! re-authentication path and answers the started program's pid instead.
+//! The program is *login's* child either way, so the `Run` binary reaps a
+//! launched one on its own loop rather than leaving it a zombie.
+//!
 //! The same endpoint also answers a narrower [`ElevateRequest::Verify`]
 //! request: re-authenticate the **caller's own** kernel-attested account and
 //! run nothing. This is the primitive a graphical session's screen lock
@@ -54,6 +63,21 @@ pub trait ElevateLauncher {
     /// cannot be spawned or reaped (unknown path, spawn refused, …); the
     /// broker reports it to the requester and audits it.
     fn run_as(&self, program: &str, uid: u32) -> Result<i32, Errno>;
+
+    /// Spawn `program` as `uid` and return its pid **without waiting for
+    /// it**.
+    ///
+    /// Serves a caller that must keep running while the elevated program
+    /// does — a graphical session, which owns the compositor that program
+    /// draws through, and would deadlock on a reply that waits for its
+    /// exit. The started process is the implementation's own child, so the
+    /// implementation owns reaping it; the requester never can.
+    ///
+    /// # Errors
+    ///
+    /// Returns the implementation's [`Errno`] verbatim when the program
+    /// cannot be spawned.
+    fn launch_as(&self, program: &str, uid: u32) -> Result<i32, Errno>;
 }
 
 /// Decide one elevation request, returning the reply to post.
@@ -74,16 +98,18 @@ pub trait ElevateLauncher {
 ///    account, and a locked account are refused indistinguishably
 ///    ([`Errno::PermissionDenied`] — the cause is audited, never
 ///    disclosed).
-/// 4. **Run** — for [`ElevateRequest::Run`] only, the program is spawned as
-///    the target account and waited for; a spawn refusal is reported
-///    verbatim. A [`ElevateRequest::Verify`] request never reaches the
-///    launcher: a successful re-authentication answers
+/// 4. **Run** — for [`ElevateRequest::Run`] the program is spawned as the
+///    target account and waited for; for [`ElevateRequest::Launch`] it is
+///    spawned and its pid answered at once. Either way a spawn refusal is
+///    reported verbatim. A [`ElevateRequest::Verify`] request never reaches
+///    the launcher: a successful re-authentication answers
 ///    [`ElevateReply::Verified`] directly.
 ///
 /// Every grant and every refusal emits its audit event
 /// ([`events::ELEVATE_GRANTED`] / [`events::ELEVATE_REFUSED`] for a `Run`
-/// request, [`events::VERIFY_GRANTED`] / [`events::VERIFY_REFUSED`] for a
-/// `Verify` request). The caller owns the request buffer and zeroises it
+/// request, [`events::LAUNCH_GRANTED`] / [`events::LAUNCH_REFUSED`] for a
+/// `Launch` request, [`events::VERIFY_GRANTED`] / [`events::VERIFY_REFUSED`]
+/// for a `Verify` request). The caller owns the request buffer and zeroises it
 /// (it carries the offered password) as soon as this returns.
 pub fn handle_elevate_request(
     bytes: &[u8],
@@ -114,6 +140,11 @@ pub fn handle_elevate_request(
         ElevateRequest::Verify { password } => {
             handle_verify(peer_uid, password, authenticator, sink)
         }
+        ElevateRequest::Launch {
+            username,
+            password,
+            program,
+        } => handle_launch(username, password, program, authenticator, launcher, sink),
     }
 }
 
@@ -147,6 +178,42 @@ fn handle_run(
         }
         Err(err) => {
             audit_refused(sink, "launch failed", Some(username), err);
+            ElevateReply::Refused(err)
+        }
+    }
+}
+
+/// Decide a [`ElevateRequest::Launch`] request: re-authenticate `username`
+/// and, on success, start `program` as that account without waiting for it.
+///
+/// The identical trust order and the identical indistinguishable refusal as
+/// [`handle_run`]; only the reply differs, carrying the started pid instead
+/// of an exit code the broker would have had to block for.
+fn handle_launch(
+    username: &str,
+    password: &str,
+    program: &str,
+    authenticator: &dyn Authenticator,
+    launcher: &dyn ElevateLauncher,
+    sink: &dyn Sink,
+) -> ElevateReply {
+    let credentials = Credentials { username, password };
+    let Ok(user) = authenticator.authenticate(&credentials) else {
+        audit_launch_refused(
+            sink,
+            "authentication failed",
+            username,
+            Errno::PermissionDenied,
+        );
+        return ElevateReply::Refused(Errno::PermissionDenied);
+    };
+    match launcher.launch_as(program, user.uid.0) {
+        Ok(pid) => {
+            audit_launch_granted(sink, username, program, user.uid.0, pid);
+            ElevateReply::Launched { pid }
+        }
+        Err(err) => {
+            audit_launch_refused(sink, "launch failed", username, err);
             ElevateReply::Refused(err)
         }
     }
@@ -249,6 +316,59 @@ fn audit_refused(sink: &dyn Sink, cause: &str, username: Option<&str>, err: Errn
     );
 }
 
+fn audit_launch_granted(sink: &dyn Sink, username: &str, program: &str, uid: u32, pid: i32) {
+    let mut uid_buf = DecBuf::new();
+    let mut pid_buf = DecBuf::new();
+    emit(
+        sink,
+        Level::Info,
+        events::LAUNCH_GRANTED,
+        "elevated program started",
+        &[
+            Field {
+                key: "user",
+                value: tairix_log::FieldValue::Str(username),
+            },
+            Field {
+                key: "uid",
+                value: tairix_log::FieldValue::Str(uid_buf.format(i128::from(uid))),
+            },
+            Field {
+                key: "program",
+                value: tairix_log::FieldValue::Str(program),
+            },
+            Field {
+                key: "pid",
+                value: tairix_log::FieldValue::Str(pid_buf.format(i128::from(pid))),
+            },
+        ],
+    );
+}
+
+fn audit_launch_refused(sink: &dyn Sink, cause: &str, username: &str, err: Errno) {
+    let mut errno_buf = DecBuf::new();
+    emit(
+        sink,
+        Level::Warn,
+        events::LAUNCH_REFUSED,
+        "elevated launch refused",
+        &[
+            Field {
+                key: "cause",
+                value: tairix_log::FieldValue::Str(cause),
+            },
+            Field {
+                key: "user",
+                value: tairix_log::FieldValue::Str(username),
+            },
+            Field {
+                key: "errno",
+                value: tairix_log::FieldValue::Str(errno_buf.format(i128::from(err.as_i32()))),
+            },
+        ],
+    );
+}
+
 fn audit_verify_granted(sink: &dyn Sink, uid: u32) {
     let mut uid_buf = DecBuf::new();
     emit(
@@ -339,10 +459,12 @@ mod tests {
         }
     }
 
-    /// Launcher recording each run and returning a scripted outcome.
+    /// Launcher recording each run and each launch, and returning a
+    /// scripted outcome for both.
     struct MockLauncher {
         outcome: Result<i32, Errno>,
         runs: RefCell<Vec<(alloc::string::String, u32)>>,
+        launches: RefCell<Vec<(alloc::string::String, u32)>>,
     }
 
     impl MockLauncher {
@@ -350,6 +472,7 @@ mod tests {
             Self {
                 outcome,
                 runs: RefCell::new(Vec::new()),
+                launches: RefCell::new(Vec::new()),
             }
         }
     }
@@ -357,6 +480,11 @@ mod tests {
     impl ElevateLauncher for MockLauncher {
         fn run_as(&self, program: &str, uid: u32) -> Result<i32, Errno> {
             self.runs.borrow_mut().push((program.to_string(), uid));
+            self.outcome
+        }
+
+        fn launch_as(&self, program: &str, uid: u32) -> Result<i32, Errno> {
+            self.launches.borrow_mut().push((program.to_string(), uid));
             self.outcome
         }
     }
@@ -386,6 +514,22 @@ mod tests {
     ) -> ([u8; ELEVATE_MAX_REQUEST], usize) {
         let mut buf = [0u8; ELEVATE_MAX_REQUEST];
         let len = ElevateRequest::Run {
+            username,
+            password,
+            program,
+        }
+        .encode(&mut buf)
+        .expect("encodes");
+        (buf, len)
+    }
+
+    fn encoded_launch(
+        username: &str,
+        password: &str,
+        program: &str,
+    ) -> ([u8; ELEVATE_MAX_REQUEST], usize) {
+        let mut buf = [0u8; ELEVATE_MAX_REQUEST];
+        let len = ElevateRequest::Launch {
             username,
             password,
             program,
@@ -489,6 +633,64 @@ mod tests {
         assert_eq!(reply, ElevateReply::Refused(Errno::NotFound));
         assert_eq!(sink.count(events::ELEVATE_REFUSED), 1);
         assert_eq!(sink.count(events::ELEVATE_GRANTED), 0);
+    }
+
+    #[test]
+    fn correct_password_launches_the_program_without_waiting_and_audits() {
+        let (buf, len) = encoded_launch("root", "correct", "/System/Applications/datetime.app/Run");
+        let launcher = MockLauncher::new(Ok(4210));
+        let sink = CountSink::default();
+        let reply =
+            handle_elevate_request(&buf[..len], 1, Some(0), 1, &FixedAuth, &launcher, &sink);
+        assert_eq!(reply, ElevateReply::Launched { pid: 4210 });
+        assert_eq!(
+            launcher.launches.borrow().as_slice(),
+            &[("/System/Applications/datetime.app/Run".to_string(), 0)]
+        );
+        assert!(
+            launcher.runs.borrow().is_empty(),
+            "a Launch request must never take the blocking run path"
+        );
+        assert_eq!(sink.count(events::LAUNCH_GRANTED), 1);
+        assert_eq!(sink.count(events::ELEVATE_GRANTED), 0);
+    }
+
+    #[test]
+    fn a_launch_with_the_wrong_password_is_refused_and_starts_nothing() {
+        let (buf, len) = encoded_launch("root", "wrong", "/System/Applications/datetime.app/Run");
+        let launcher = MockLauncher::new(Ok(4210));
+        let sink = CountSink::default();
+        let reply =
+            handle_elevate_request(&buf[..len], 1, Some(0), 1, &FixedAuth, &launcher, &sink);
+        assert_eq!(reply, ElevateReply::Refused(Errno::PermissionDenied));
+        assert!(launcher.launches.borrow().is_empty());
+        assert_eq!(sink.count(events::LAUNCH_REFUSED), 1);
+        assert_eq!(sink.count(events::LAUNCH_GRANTED), 0);
+    }
+
+    #[test]
+    fn a_launch_spawn_refusal_is_reported_verbatim_and_audited() {
+        let (buf, len) = encoded_launch("root", "correct", "/missing");
+        let launcher = MockLauncher::new(Err(Errno::NotFound));
+        let sink = CountSink::default();
+        let reply =
+            handle_elevate_request(&buf[..len], 1, Some(0), 1, &FixedAuth, &launcher, &sink);
+        assert_eq!(reply, ElevateReply::Refused(Errno::NotFound));
+        assert_eq!(sink.count(events::LAUNCH_REFUSED), 1);
+        assert_eq!(sink.count(events::LAUNCH_GRANTED), 0);
+    }
+
+    #[test]
+    fn a_launch_caller_on_another_console_is_refused_before_parsing() {
+        let (buf, len) = encoded_launch("root", "correct", "/System/Applications/datetime.app/Run");
+        let launcher = MockLauncher::new(Ok(4210));
+        let sink = CountSink::default();
+        let reply =
+            handle_elevate_request(&buf[..len], 2, Some(0), 1, &FixedAuth, &launcher, &sink);
+        assert_eq!(reply, ElevateReply::Refused(Errno::PermissionDenied));
+        assert!(launcher.launches.borrow().is_empty());
+        assert_eq!(sink.count(events::ELEVATE_REFUSED), 1);
+        assert_eq!(sink.count(events::LAUNCH_REFUSED), 0);
     }
 
     #[test]
