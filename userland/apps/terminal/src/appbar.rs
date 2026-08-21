@@ -2,11 +2,11 @@
 //! offers.
 //!
 //! The desktop draws the slot and owns the menu's pixels; the terminal only
-//! declares what is on it. Two rows are its own — *New window*, which opens
-//! another terminal in the same process, and *Quit*, which ends every one of
-//! them — plus the session-drawn *About* row, whose panel states the
-//! bundle's **signed** manifest rather than anything this program says about
-//! itself.
+//! declares what is on it. One row is its own — *New window*, which opens
+//! another terminal in the same process — and the shared convention
+//! ([`tairix_window::declaration`]) places the session-drawn information row
+//! above it and *Quit* below, so this menu reads in the same order as every
+//! other application's.
 //!
 //! A primary click on the slot is the terminal's to handle
 //! ([`DEFAULT_ACTION`]), and means the same as *New window*: the readiest
@@ -18,14 +18,16 @@
 //! reconstructs the menu to know where to click. Naming them once is what
 //! stops the two from drifting.
 
-use tairix_abi::window_ipc::{AppBar, AppMenu, AppMenuItemId, AppMenuLabel, AppMenuRow};
+use tairix_abi::window_ipc::{AppBar, AppMenuItemId, AppMenuLabel, AppMenuRow};
 use tairix_abi::Errno;
+use tairix_window::QUIT_ROW;
 
 /// The *New window* row's id: open another terminal window in this process.
-pub const ROW_NEW_WINDOW: u16 = 1;
-
-/// The *Quit* row's id: close every window and end the process.
-pub const ROW_QUIT: u16 = 2;
+///
+/// Derived from the convention's own [`QUIT_ROW`] rather than written as a
+/// literal, so this terminal's row and the shared *Quit* row can never end up
+/// naming the same id.
+pub const ROW_NEW_WINDOW: u16 = QUIT_ROW + 1;
 
 /// Whether a primary click on the terminal's icon-bar slot is delivered to
 /// the terminal rather than raising a window.
@@ -49,9 +51,11 @@ impl BarCommand {
     /// never declared (fail closed — a menu outcome is never guessed at).
     #[must_use]
     pub fn from_item(item: AppMenuItemId) -> Option<Self> {
+        if tairix_window::is_quit(item) {
+            return Some(Self::Quit);
+        }
         match item.get() {
             ROW_NEW_WINDOW => Some(Self::NewWindow),
-            ROW_QUIT => Some(Self::Quit),
             _ => None,
         }
     }
@@ -61,31 +65,18 @@ impl BarCommand {
 ///
 /// # Errors
 ///
-/// Any [`Errno`] the bounded menu builder refuses. The rows are fixed, so a
+/// Any [`Errno`] the shared convention refuses. The rows are fixed, so a
 /// refusal can only mean the shared bounds changed under this declaration;
 /// the caller reports it and runs without a bar rather than showing one it
 /// could not describe.
 pub fn declaration(endpoint: u64) -> Result<AppBar, Errno> {
-    let mut menu = AppMenu::EMPTY;
-    menu.push(row(ROW_NEW_WINDOW, "New window")?)?;
-    menu.push(AppMenuRow::Separator)?;
-    menu.push(row(ROW_QUIT, "Quit")?)?;
-    menu.push(AppMenuRow::About)?;
-    Ok(AppBar {
-        event_endpoint: endpoint,
-        default_action: DEFAULT_ACTION,
-        menu,
-    })
-}
-
-/// An enabled, unmarked row.
-fn row(id: u16, label: &str) -> Result<AppMenuRow, Errno> {
-    Ok(AppMenuRow::Item {
-        id: AppMenuItemId::new(id)?,
-        label: AppMenuLabel::new(label)?,
+    let new_window = AppMenuRow::Item {
+        id: AppMenuItemId::new(ROW_NEW_WINDOW)?,
+        label: AppMenuLabel::new("New window")?,
         enabled: true,
         mark: tairix_abi::window_ipc::AppMenuMark::None,
-    })
+    };
+    tairix_window::declaration(endpoint, DEFAULT_ACTION, &[new_window])
 }
 
 #[cfg(test)]
@@ -93,22 +84,22 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_declaration_offers_a_new_window_a_quit_and_the_about_row() {
+    fn the_declaration_reads_information_new_window_then_quit() {
         let bar = declaration(42).expect("the fixed rows fit");
         assert_eq!(bar.event_endpoint, 42);
         assert!(bar.default_action);
         let rows: alloc::vec::Vec<AppMenuRow> = bar.menu.rows().map(|(row, _)| row).collect();
         assert_eq!(rows.len(), 4);
+        assert_eq!(rows[0], AppMenuRow::About);
         assert!(matches!(
-            rows[0],
+            rows[1],
             AppMenuRow::Item { id, .. } if id.get() == ROW_NEW_WINDOW
         ));
-        assert_eq!(rows[1], AppMenuRow::Separator);
+        assert_eq!(rows[2], AppMenuRow::Separator);
         assert!(matches!(
-            rows[2],
-            AppMenuRow::Item { id, .. } if id.get() == ROW_QUIT
+            rows[3],
+            AppMenuRow::Item { id, .. } if id.get() == QUIT_ROW
         ));
-        assert_eq!(rows[3], AppMenuRow::About);
         assert!(
             bar.menu.rows().all(|(_, parent)| parent.is_none()),
             "the terminal declares no submenu of its own"
@@ -122,7 +113,7 @@ mod tests {
             Some(BarCommand::NewWindow)
         );
         assert_eq!(
-            BarCommand::from_item(AppMenuItemId::new(ROW_QUIT).expect("non-zero")),
+            BarCommand::from_item(AppMenuItemId::new(QUIT_ROW).expect("non-zero")),
             Some(BarCommand::Quit)
         );
         assert_eq!(

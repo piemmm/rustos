@@ -68,7 +68,7 @@ use crate::edge::{Edge, Orientation};
 use crate::input::{TaskbarInput, TaskbarResponse, LONG_PRESS_AFTER_NS};
 use crate::layout::Hit;
 use crate::library::{folder_label, LibraryFocus, LibraryRow};
-use crate::menu::{EntryRow, MenuSubject};
+use crate::menu::{EntryRow, MenuSubject, INFO_ROW_LABEL};
 use crate::notifications::{
     IconId, NotifySeverity, StatusKind, StatusSignal, TransientNotification,
 };
@@ -602,7 +602,7 @@ fn clear_producer_drops_only_that_producers_notifications() {
 // ---- bar layout -----------------------------------------------------
 
 #[test]
-fn leading_launchers_partition_the_leading_end() {
+fn the_leading_launcher_partitions_the_leading_end() {
     let bar = bottom_bar();
     let layout = bar.layout(Scale::ONE);
     // The bar stands off the screen by the 5 px taskbar margin it floats in
@@ -612,10 +612,9 @@ fn leading_launchers_partition_the_leading_end() {
     assert_eq!(layout.library, Rect::new(6, 756, 48, 38));
     // The rule sits a control gap (8) past the Library button, one border
     // thick, inset a control padding (10) from both long edges of the 38 px
-    // content strip; Files follows the whole 17 px gutter.
+    // content strip; the application strip follows the whole 17 px gutter.
     assert_eq!(layout.separator, Rect::new(62, 766, 1, 18));
-    assert_eq!(layout.files, Rect::new(71, 756, 48, 38));
-    assert_eq!(layout.app_strip.left(), 119);
+    assert_eq!(layout.app_strip.left(), 71);
     // The Switchboard capsule owns the trailing end of that strip; the clock
     // ends where it starts.
     assert_eq!(layout.switchboard, Rect::new(950, 756, 44, 38));
@@ -635,10 +634,6 @@ fn hit_testing_resolves_every_region() {
     assert_eq!(
         bar.hit_test(Point::new(10, 780), Scale::ONE),
         Some(Hit::Library)
-    );
-    assert_eq!(
-        bar.hit_test(Point::new(71, 780), Scale::ONE),
-        Some(Hit::Files)
     );
     assert_eq!(
         bar.hit_test(centre_of(layout.apps[0]), Scale::ONE),
@@ -663,7 +658,7 @@ fn hit_testing_resolves_every_region() {
 }
 
 #[test]
-fn both_launchers_hit_on_every_edge() {
+fn the_launcher_hits_on_every_edge() {
     for edge in [Edge::Top, Edge::Bottom, Edge::Left, Edge::Right] {
         let config = TaskbarConfig {
             edge,
@@ -676,11 +671,6 @@ fn both_launchers_hit_on_every_edge() {
             Some(Hit::Library),
             "{edge:?}"
         );
-        assert_eq!(
-            layout.hit_test(centre_of(layout.files)),
-            Some(Hit::Files),
-            "{edge:?}"
-        );
         assert!(
             layout.bar.contains(centre_of(layout.library)),
             "{edge:?}: launcher lies on the bar"
@@ -689,7 +679,7 @@ fn both_launchers_hit_on_every_edge() {
 }
 
 #[test]
-fn vertical_bar_stacks_launchers_downward() {
+fn vertical_bar_places_the_launcher_at_the_top() {
     let config = TaskbarConfig {
         edge: Edge::Left,
         ..TaskbarConfig::bottom_bar(1000, 800)
@@ -697,11 +687,12 @@ fn vertical_bar_stacks_launchers_downward() {
     let bar = Taskbar::new(config, &Theme::dark());
     let layout = bar.layout(Scale::ONE);
     // A left bar floats off the top, bottom, and left screen edges by the
-    // 5 px margin; its 40 px thickness is untouched. The launchers stack
-    // inside its 1 px rim, so they start at 6 and are 38 px broad.
+    // 5 px margin; its 40 px thickness is untouched. The launcher sits inside
+    // its 1 px rim, so it starts at 6 and is 38 px broad, and the application
+    // strip begins one whole gutter below it.
     assert_eq!(layout.bar, Rect::new(5, 5, 40, 790));
     assert_eq!(layout.library, Rect::new(6, 6, 38, 48));
-    assert_eq!(layout.files, Rect::new(6, 71, 38, 48));
+    assert_eq!(layout.app_strip.top(), 71);
 }
 
 /// `rect`'s `(main start, main end, cross start, cross end)` on a bar
@@ -728,7 +719,7 @@ fn the_separator_divides_the_library_from_everything_after_it() {
         let orientation = edge.orientation();
         let (rule_start, rule_end, rule_near, rule_far) = axes(layout.separator, orientation);
         let (_, library_end, ..) = axes(layout.library, orientation);
-        let (files_start, ..) = axes(layout.files, orientation);
+        let (strip_start, ..) = axes(layout.app_strip, orientation);
         let (.., bar_near, bar_far) = axes(layout.bar, orientation);
 
         assert_eq!(
@@ -737,8 +728,8 @@ fn the_separator_divides_the_library_from_everything_after_it() {
             "{edge:?}: one border thick along the bar"
         );
         assert!(
-            library_end <= rule_start && rule_end <= files_start,
-            "{edge:?}: the rule lies between the launchers and overlaps neither"
+            library_end <= rule_start && rule_end <= strip_start,
+            "{edge:?}: the rule lies between the launcher and the strip and overlaps neither"
         );
         assert!(
             bar_near < rule_near && rule_far < bar_far,
@@ -748,7 +739,7 @@ fn the_separator_divides_the_library_from_everything_after_it() {
 }
 
 #[test]
-fn the_separator_gutter_shifts_the_files_launcher_and_everything_after_it() {
+fn the_separator_gutter_shifts_everything_after_the_launcher() {
     let theme = Theme::dark();
     let metrics = theme.metrics();
     let gutter =
@@ -768,8 +759,7 @@ fn the_separator_gutter_shifts_the_files_launcher_and_everything_after_it() {
         leading,
         "the library keeps the leading end"
     );
-    assert_eq!(layout.files.left(), leading + launcher + gutter);
-    assert_eq!(layout.app_strip.left(), layout.files.right());
+    assert_eq!(layout.app_strip.left(), leading + launcher + gutter);
     assert_eq!(layout.apps[0].left(), layout.app_strip.left());
 }
 
@@ -805,7 +795,7 @@ fn the_separator_keeps_its_place_at_every_scale() {
         let rule = layout.separator;
         assert!(rule.width >= 1, "{percent}%: the rule never scales away");
         assert!(rule.left() >= layout.library.right(), "{percent}%");
-        assert!(rule.right() <= layout.files.left(), "{percent}%");
+        assert!(rule.right() <= layout.app_strip.left(), "{percent}%");
         assert!(
             layout.bar.top() < rule.top() && rule.bottom() < layout.bar.bottom(),
             "{percent}%: inset from both long edges"
@@ -831,9 +821,9 @@ fn a_bar_too_thin_to_inset_the_rule_drops_it_and_keeps_the_flow() {
     let layout = bar.layout(Scale::ONE);
     assert!(layout.separator.is_empty());
     assert_eq!(
-        layout.files.left(),
+        layout.app_strip.left(),
         71,
-        "the launchers keep their places whether or not the rule is drawn"
+        "the flow keeps its places whether or not the rule is drawn"
     );
     assert_eq!(layout.hit_test(Point::new(61, 790)), None);
     assert!(
@@ -845,23 +835,29 @@ fn a_bar_too_thin_to_inset_the_rule_drops_it_and_keeps_the_flow() {
 }
 
 #[test]
-fn launchers_clip_fail_closed_on_a_tiny_screen() {
+fn the_launcher_outranks_everything_after_it_on_a_tiny_screen() {
     // 79 px, less the two 5 px margins and the bar's two 1 px rims, leaves a
-    // 67 px content strip: room for the Library button, the 17 px separator
-    // gutter, and only part of Files.
+    // 67 px content strip: room for the whole Library button and the 17 px
+    // separator gutter, and 2 px for everything after them. The launcher
+    // clips last, so it is whole and the strip is what collapses; of the
+    // trailing regions the Switchboard capsule outranks the clock and the
+    // icons, so the 2 px that remain are its.
     let bar = Taskbar::new(TaskbarConfig::bottom_bar(79, 50), &Theme::dark());
     let layout = bar.layout(Scale::ONE);
     assert_eq!(layout.library.width, 48);
     assert_eq!(layout.separator, Rect::new(62, 16, 1, 18));
-    assert_eq!(layout.files.width, 2, "Files clips to what fits");
+    assert!(layout.app_strip.is_empty());
+    assert!(layout.clock.is_empty());
+    assert_eq!(layout.switchboard.width, 2);
 
-    // No room for the rule or Files at all: both are empty and neither can
-    // ever be hit.
+    // No room for the rule or anything after it: every region past the
+    // launcher is empty and none can ever be hit.
     let bar = Taskbar::new(TaskbarConfig::bottom_bar(30, 50), &Theme::dark());
     let layout = bar.layout(Scale::ONE);
     assert_eq!(layout.library.width, 18);
     assert!(layout.separator.is_empty());
-    assert!(layout.files.is_empty());
+    assert!(layout.app_strip.is_empty());
+    assert!(layout.switchboard.is_empty());
     assert_eq!(layout.hit_test(Point::new(20, 30)), Some(Hit::Library));
 
     // A zero-sized screen yields empty regions and no hits anywhere.
@@ -869,7 +865,7 @@ fn launchers_clip_fail_closed_on_a_tiny_screen() {
     let layout = bar.layout(Scale::ONE);
     assert!(layout.library.is_empty());
     assert!(layout.separator.is_empty());
-    assert!(layout.files.is_empty());
+    assert!(layout.app_strip.is_empty());
     assert_eq!(layout.hit_test(Point::new(0, 0)), None);
 }
 
@@ -902,7 +898,6 @@ fn a_bar_too_small_for_its_rim_keeps_its_content_inside_itself() {
                 for (label, region) in [
                     ("library", layout.library),
                     ("separator", layout.separator),
-                    ("files", layout.files),
                     ("application strip", layout.app_strip),
                     ("application slot", layout.apps[0]),
                     ("notification area", layout.notification_area),
@@ -968,19 +963,20 @@ fn an_app_slot_is_a_square_the_launchers_share() {
 }
 
 #[test]
-fn the_app_strip_spans_the_launchers_to_the_trailing_end() {
+fn the_app_strip_spans_the_launcher_to_the_trailing_end() {
     let mut bar = bottom_bar();
-    // Empty: the strip is still the whole region between the launchers and
-    // the trailing group, so a first application has somewhere to land.
+    // Empty: the strip is still the whole region between the launcher's
+    // gutter and the trailing group, so a first application has somewhere to
+    // land.
     let layout = bar.layout(Scale::ONE);
     assert!(layout.apps.is_empty());
-    assert_eq!(layout.app_strip.left(), layout.files.right());
+    assert!(layout.app_strip.left() > layout.separator.right());
     assert_eq!(layout.app_strip.right(), layout.notification_area.left());
 
     bar.set_apps(alloc::vec![app("One"), app("Two")]);
     let layout = bar.layout(Scale::ONE);
     assert_eq!(layout.apps.len(), 2);
-    assert_eq!(layout.app_strip.left(), layout.files.right());
+    assert!(layout.app_strip.left() > layout.separator.right());
     assert_eq!(layout.apps[0].left(), layout.app_strip.left());
     assert_eq!(layout.apps[1].left(), layout.apps[0].right());
     assert_eq!(layout.apps[0].width, 48);
@@ -988,19 +984,18 @@ fn the_app_strip_spans_the_launchers_to_the_trailing_end() {
 
 #[test]
 fn app_slots_clip_fail_closed_on_a_tiny_screen() {
-    let mut bar = Taskbar::new(TaskbarConfig::bottom_bar(261, 40), &Theme::dark());
-    // Launchers (48+48) plus the separator gutter (17) take 113. Switchboard
-    // (44) plus clock (80) take 124. Screen 261, less the two 5 px margins
-    // the bar floats in and the two 1 px rims its content sits inside, leaves
-    // 249. Remaining for the application strip: 249 - 237 = 12.
+    let mut bar = Taskbar::new(TaskbarConfig::bottom_bar(213, 40), &Theme::dark());
+    // The Library launcher (48) plus the separator gutter (17) takes 65.
+    // Switchboard (44) plus clock (80) take 124. Screen 213, less the two
+    // 5 px margins the bar floats in and the two 1 px rims its content sits
+    // inside, leaves 201. Remaining for the application strip: 201 - 189 = 12.
     bar.set_apps(alloc::vec![app("App")]);
     let layout = bar.layout(Scale::ONE);
     assert_eq!(layout.library.width, 48);
-    assert_eq!(layout.files.width, 48);
     assert_eq!(layout.apps[0].width, 12, "the slot clips to fit");
 
     // Even smaller: the slot is empty and can never be hit.
-    let mut bar = Taskbar::new(TaskbarConfig::bottom_bar(217, 40), &Theme::dark());
+    let mut bar = Taskbar::new(TaskbarConfig::bottom_bar(201, 40), &Theme::dark());
     bar.set_apps(alloc::vec![app("App")]);
     let layout = bar.layout(Scale::ONE);
     assert!(layout.apps[0].is_empty());
@@ -1228,7 +1223,7 @@ fn doubling_the_scale_doubles_logical_lengths() {
     let one = bar.layout(Scale::ONE);
     let two = bar.layout(Scale::from_percent(200).expect("a valid scale"));
     assert_eq!(two.library.width, one.library.width * 2);
-    assert_eq!(two.files.width, one.files.width * 2);
+    assert_eq!(two.clock.width, one.clock.width * 2);
     assert_eq!(two.bar.height, one.bar.height * 2);
     assert_eq!(two.corner_radius, one.corner_radius * 2);
     // The physical screen is unchanged, so the doubled bar still spans it —
@@ -1240,15 +1235,16 @@ fn doubling_the_scale_doubles_logical_lengths() {
 
 #[test]
 fn hit_testing_follows_the_scale() {
-    let bar = bottom_bar();
+    let mut bar = bottom_bar();
+    bar.set_apps(alloc::vec![app("Editor")]);
     let scale = Scale::from_percent(200).expect("a valid scale");
     // At 2x the bar starts 10 physical pixels in (the doubled margin) and its
     // content 2 further (the doubled rim), the Library button spans 96
-    // physical pixels and the separator gutter 34, so Files starts at 142 and
-    // the gutter between them is bare.
+    // physical pixels and the separator gutter 34, so the application strip
+    // starts at 142 and the gutter before it is bare.
     assert_eq!(bar.hit_test(Point::new(90, 780), scale), Some(Hit::Library));
     assert_eq!(bar.hit_test(Point::new(120, 780), scale), None);
-    assert_eq!(bar.hit_test(Point::new(142, 780), scale), Some(Hit::Files));
+    assert_eq!(bar.hit_test(Point::new(142, 780), scale), Some(Hit::App(0)));
 }
 
 // ---- theming --------------------------------------------------------
@@ -1364,16 +1360,6 @@ fn library_press_toggles_the_popup_shut() {
         TaskbarResponse::LibraryDismissed
     );
     assert!(!bar.library().is_open());
-}
-
-#[test]
-fn files_press_reports_open_files() {
-    let mut bar = bottom_bar();
-    let mut input = TaskbarInput::new();
-    assert_eq!(
-        press_at(&mut input, &mut bar, 71, 780),
-        TaskbarResponse::OpenFiles
-    );
 }
 
 #[test]
@@ -1600,7 +1586,7 @@ fn the_menu_draws_exactly_the_rows_the_application_declared() {
             MenuItem::new("Profile")
                 .with_submenu(true)
                 .with_group_break(true),
-            MenuItem::new("About").with_submenu(true),
+            MenuItem::new(INFO_ROW_LABEL).with_submenu(true),
         ]
     );
 }
@@ -3723,8 +3709,9 @@ fn a_hovered_or_pressed_slot_never_washes_over_the_bar_rim() {
 }
 
 #[test]
-fn both_leading_launchers_rest_bare_on_the_bar() {
-    let bar = bottom_bar();
+fn every_icon_on_the_strip_rests_bare_on_the_bar() {
+    let mut bar = bottom_bar();
+    bar.set_apps(alloc::vec![app("Editor")]);
     let theme = Theme::dark();
     let palette = theme.palette();
     let surface = TaskbarRenderer::new(test_icon_cache())
@@ -3733,11 +3720,12 @@ fn both_leading_launchers_rest_bare_on_the_bar() {
     let layout = bar.layout(Scale::ONE);
     let frame = layout.bar;
 
-    // Neither launcher is "the" primary action of an icon strip: both are
-    // quiet peers seated in the bar. Each inks its glyph straight onto the
-    // bar's own fill, with no role colour and no perimeter of its own — so the
-    // strip reads as one bar rather than a row of boxes.
-    for (label, slot) in [("library", layout.library), ("files", layout.files)] {
+    // No icon on the strip is "the" primary action of it: the launcher and
+    // every application slot are quiet peers seated in the bar. Each inks its
+    // glyph straight onto the bar's own fill, with no role colour and no
+    // perimeter of its own — so the strip reads as one bar rather than a row
+    // of boxes.
+    for (label, slot) in [("library", layout.library), ("app slot", layout.apps[0])] {
         assert!(
             region_has_role_ink(
                 &surface,
@@ -3765,7 +3753,8 @@ fn both_leading_launchers_rest_bare_on_the_bar() {
 
 #[test]
 fn the_separator_rule_is_painted_in_the_border_colour() {
-    let bar = bottom_bar();
+    let mut bar = bottom_bar();
+    bar.set_apps(alloc::vec![app("Editor")]);
     let theme = Theme::dark();
     let palette = theme.palette();
     let surface = TaskbarRenderer::new(test_icon_cache())
@@ -3794,17 +3783,18 @@ fn the_separator_rule_is_painted_in_the_border_colour() {
         !region_has_pixel(&surface, frame, over, role(palette.border)),
         "the rule stops short of the bar's edge"
     );
-    for (label, slot) in [("library", layout.library), ("files", layout.files)] {
+    for (label, slot) in [("library", layout.library), ("app slot", layout.apps[0])] {
         assert!(
             !region_has_pixel(&surface, frame, slot, role(palette.border)),
-            "the rule sits between the launchers, marking neither: {label}"
+            "the rule sits between the launcher and the strip, marking neither: {label}"
         );
     }
 }
 
 #[test]
-fn hovering_a_launcher_washes_only_that_slot_and_draws_no_edge() {
+fn hovering_the_launcher_washes_only_that_slot_and_draws_no_edge() {
     let mut bar = bottom_bar();
+    bar.set_apps(alloc::vec![app("Editor")]);
     let theme = Theme::dark();
     let palette = theme.palette();
     let layout = bar.layout(Scale::ONE);
@@ -3834,12 +3824,18 @@ fn hovering_a_launcher_washes_only_that_slot_and_draws_no_edge() {
         "a hovered bar icon never grows an edge"
     );
     // Its neighbour is untouched: the wash belongs to one slot, not the strip.
-    assert!(!region_has_pixel(&surface, layout.bar, layout.files, wash));
+    assert!(!region_has_pixel(
+        &surface,
+        layout.bar,
+        layout.apps[0],
+        wash
+    ));
 }
 
 #[test]
 fn the_library_button_reads_as_held_down_while_its_popup_is_open() {
     let mut bar = bottom_bar();
+    bar.set_apps(alloc::vec![app("Editor")]);
     let theme = Theme::dark();
     let palette = theme.palette();
     let layout = bar.layout(Scale::ONE);
@@ -3852,7 +3848,12 @@ fn the_library_button_reads_as_held_down_while_its_popup_is_open() {
     // legible on a bar where nothing wears an edge.
     let held = floating_plate(&theme, palette.surface_pressed);
     assert!(region_has_pixel(&surface, layout.bar, layout.library, held));
-    assert!(!region_has_pixel(&surface, layout.bar, layout.files, held));
+    assert!(!region_has_pixel(
+        &surface,
+        layout.bar,
+        layout.apps[0],
+        held
+    ));
 }
 
 #[test]
@@ -4310,14 +4311,10 @@ impl IconArtwork for FakeArtwork {
 }
 
 #[test]
-fn the_launcher_buttons_draw_their_shipped_artwork() {
+fn the_launcher_button_draws_its_shipped_artwork() {
     let bar = bottom_bar();
     let library_colour = Color::rgb(255, 0, 255);
-    let files_colour = Color::rgb(0, 255, 255);
-    let mut artwork = FakeArtwork::new(&[
-        (IconKind::Library, library_colour),
-        (IconKind::Folder, files_colour),
-    ]);
+    let mut artwork = FakeArtwork::new(&[(IconKind::Library, library_colour)]);
 
     let layout = bar.layout(Scale::ONE);
     let surface = TaskbarRenderer::new(test_icon_cache())
@@ -4328,21 +4325,11 @@ fn the_launcher_buttons_draw_their_shipped_artwork() {
         artwork.asked_for(IconKind::Library),
         "the Library button resolves the library artwork"
     );
-    assert!(
-        artwork.asked_for(IconKind::Folder),
-        "the Files button resolves the folder artwork"
-    );
     assert!(region_has_pixel(
         &surface,
         layout.bar,
         layout.library,
         library_colour.premultiply()
-    ));
-    assert!(region_has_pixel(
-        &surface,
-        layout.bar,
-        layout.files,
-        files_colour.premultiply()
     ));
 }
 
@@ -4421,7 +4408,6 @@ fn a_bar_with_no_artwork_at_all_still_draws_every_element() {
     // the built-in glyphs keep a freshly installed system usable.
     for (label, rect) in [
         ("library", layout.library),
-        ("files", layout.files),
         ("application", layout.apps[0]),
         ("status signal", layout.notifications[0]),
         ("clock", layout.clock),
@@ -5235,19 +5221,19 @@ fn switchboard_is_trailing_most_on_every_edge() {
 
 #[test]
 fn narrow_screen_collapses_clock_and_icons_before_the_switchboard() {
-    // 157 px, less the two 5 px margins the bar floats in and the two 1 px
-    // rims its content sits inside, leaves 145: the leading end (96 of
-    // launchers plus the 17 px separator gutter) and what remains of the
+    // 109 px, less the two 5 px margins the bar floats in and the two 1 px
+    // rims its content sits inside, leaves 97: the leading end (48 of
+    // launcher plus the 17 px separator gutter) and what remains for the
     // capsule. The clock and the notification area collapse to nothing
     // first, and the capsule clips into the leftover 32 px rather than
-    // overlaying a launcher.
-    let mut bar = Taskbar::new(TaskbarConfig::bottom_bar(157, 800), &Theme::dark());
+    // overlaying the launcher.
+    let mut bar = Taskbar::new(TaskbarConfig::bottom_bar(109, 800), &Theme::dark());
     bar.set_status_signals(alloc::vec![StatusSignal::new(
         IconId(1),
         StatusKind::Network
     )]);
     let layout = bar.layout(Scale::ONE);
-    assert_eq!(layout.switchboard, Rect::new(119, 756, 32, 38));
+    assert_eq!(layout.switchboard, Rect::new(71, 756, 32, 38));
     assert!(layout.clock.is_empty());
     assert!(layout.notification_area.is_empty());
     assert!(layout.notifications[0].is_empty());
@@ -5258,23 +5244,24 @@ fn narrow_screen_collapses_clock_and_icons_before_the_switchboard() {
 }
 
 #[test]
-fn tiny_screen_clips_the_switchboard_against_the_launchers() {
-    // 113 px is exactly the two permanent launchers and the separator gutter
-    // between them: every trailing region, the capsule included, fails closed
-    // to empty rather than overlaying them.
-    let bar = Taskbar::new(TaskbarConfig::bottom_bar(113, 800), &Theme::dark());
+fn tiny_screen_clips_the_switchboard_against_the_launcher() {
+    // 77 px is exactly the permanent launcher and the separator gutter after
+    // it: every region beyond, the capsule included, fails closed to empty
+    // rather than overlaying it.
+    let bar = Taskbar::new(TaskbarConfig::bottom_bar(77, 800), &Theme::dark());
     let layout = bar.layout(Scale::ONE);
     assert!(layout.switchboard.is_empty());
     assert!(layout.clock.is_empty());
-    assert_eq!(layout.hit_test(Point::new(71, 780)), Some(Hit::Files));
+    assert!(layout.app_strip.is_empty());
+    assert_eq!(layout.hit_test(Point::new(20, 780)), Some(Hit::Library));
 
-    // An absurd sliver clips into the launchers themselves; nothing panics
-    // and neither the empty capsule slot nor the empty rule can be hit.
+    // An absurd sliver clips into the launcher itself; nothing panics and
+    // neither the empty capsule slot nor the empty rule can be hit.
     let sliver = Taskbar::new(TaskbarConfig::bottom_bar(10, 800), &Theme::dark());
     let slim = sliver.layout(Scale::ONE);
     assert!(slim.switchboard.is_empty());
     assert!(slim.separator.is_empty());
-    assert!(slim.files.is_empty());
+    assert!(slim.app_strip.is_empty());
     assert!(!slim.library.is_empty());
 }
 

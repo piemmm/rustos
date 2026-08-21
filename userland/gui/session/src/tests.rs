@@ -973,13 +973,21 @@ fn primary_press_over_the_bar_routes_to_the_taskbar() {
     let mut comp = compositor();
     let mut router = SessionInputRouter::new();
 
-    // The files button centre (pressed first: a press on the library
-    // button opens the modal popup, after which any bar press is the
-    // popup's to dismiss).
-    let response = press_at(&mut router, &mut comp, session.taskbar_mut(), 72, 1060);
+    // The clock, at the trailing end, taken from the bar's own layout rather
+    // than a hand-copied coordinate. Pressed first: a press on the library
+    // button opens the modal popup, after which any bar press is the popup's
+    // to dismiss.
+    let clock = session.taskbar().layout(Scale::ONE).clock;
+    let response = press_at(
+        &mut router,
+        &mut comp,
+        session.taskbar_mut(),
+        clock.left() + i32::try_from(clock.width / 2).expect("a screen-sized width"),
+        clock.top() + i32::try_from(clock.height / 2).expect("a bar-sized height"),
+    );
     assert_eq!(
         response,
-        SessionInputResponse::Taskbar(TaskbarResponse::OpenFiles)
+        SessionInputResponse::Taskbar(TaskbarResponse::ClockPressed)
     );
 
     // The library button centre.

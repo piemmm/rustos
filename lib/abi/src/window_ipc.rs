@@ -665,6 +665,11 @@ pub enum WindowRequest {
     /// [`WindowEvent::DesktopChanged`] to each of the app's windows when
     /// any of it changes.
     ///
+    /// The reply also carries the serving session's own [`ProcId`], so an
+    /// app that declares an icon-bar presence before it owns a window —
+    /// or that never opens one — can still authenticate the bar events it
+    /// receives (see [`encode_desktop_reply`]).
+    ///
     /// It carries no capability: the reply describes the seat's own screen
     /// and theme — no other principal's data, and no authority to act — so
     /// gating it would only force every application to guess at facts the
@@ -1407,38 +1412,64 @@ pub fn encode_create_reply(
 }
 
 /// Reply length, in bytes, of a [`WindowRequest::QueryDesktop`]: the
-/// shared status word followed by the [`DesktopInfo`] record.
-pub const WINDOW_DESKTOP_REPLY_LEN: usize = 4 + DesktopInfo::WIRE_LEN;
+/// shared status word, the [`DesktopInfo`] record, and the serving
+/// session's [`ProcId`].
+pub const WINDOW_DESKTOP_REPLY_LEN: usize = 4 + DesktopInfo::WIRE_LEN + crate::PROC_ID_LEN;
+
+/// Byte offset of the serving session's [`ProcId`] in a desktop reply.
+const DESKTOP_REPLY_SERVER_OFFSET: usize = 4 + DesktopInfo::WIRE_LEN;
 
 /// Encode a `QueryDesktop` outcome: on success the desktop record after a
-/// zero status word; on refusal the shared status frame (a negative
-/// [`Errno`] discriminant) zero-padded to the same length, so a client
-/// always issues one fixed-size receive.
+/// zero status word, followed by the serving session's own [`ProcId`]; on
+/// refusal the shared status frame (a negative [`Errno`] discriminant)
+/// zero-padded to the same length, so a client always issues one fixed-size
+/// receive.
+///
+/// The identity is the same one [`encode_create_reply`] stamps, and it is
+/// here for the same reason — an app requires it of every event's
+/// kernel-attested sender, closing its event channel against forged input.
+/// It is carried on *this* reply as well because an application may declare
+/// an icon-bar presence, and so start receiving bar events, before it owns
+/// any window ([`WindowRequest::SetAppBar`]); the desktop query is the one
+/// call every windowed app makes first, so it is where an app that has no
+/// window yet learns whom to trust.
 #[must_use]
-pub fn encode_desktop_reply(result: Result<DesktopInfo, Errno>) -> [u8; WINDOW_DESKTOP_REPLY_LEN] {
+pub fn encode_desktop_reply(
+    result: Result<DesktopInfo, Errno>,
+    server: ProcId,
+) -> [u8; WINDOW_DESKTOP_REPLY_LEN] {
     let mut out = [0u8; WINDOW_DESKTOP_REPLY_LEN];
     match result {
-        Ok(desktop) => desktop.write_to_at(&mut out, 4),
+        Ok(desktop) => {
+            desktop.write_to_at(&mut out, 4);
+            out[DESKTOP_REPLY_SERVER_OFFSET..].copy_from_slice(server.as_bytes());
+        }
         Err(err) => out[..4].copy_from_slice(&crate::reply::encode_status_reply(Err(err))),
     }
     out
 }
 
-/// Decode a `QueryDesktop` reply frame.
+/// Decode a `QueryDesktop` reply frame into the desktop record and the
+/// serving session's [`ProcId`].
 ///
 /// # Errors
 ///
 /// * [`Errno::BufferTooSmall`] — `bytes` cannot hold a whole reply.
-/// * [`Errno::OutOfRange`] — a corrupt status word, or a successful reply
-///   carrying a desktop no screen or scale could describe.
+/// * [`Errno::OutOfRange`] — a corrupt status word, a successful reply
+///   carrying a desktop no screen or scale could describe, or a malformed
+///   server identity.
 /// * [`Errno::BadMagic`] — a dirty reserved byte in the record.
 /// * The decoded [`Errno`] itself, when the session refused the query.
-pub fn decode_desktop_reply(bytes: &[u8]) -> Result<DesktopInfo, Errno> {
+pub fn decode_desktop_reply(bytes: &[u8]) -> Result<(DesktopInfo, ProcId), Errno> {
     if bytes.len() < WINDOW_DESKTOP_REPLY_LEN {
         return Err(Errno::BufferTooSmall);
     }
     crate::reply::decode_status_reply(&bytes[..4])?;
-    DesktopInfo::from_bytes_at(bytes, 4)
+    let desktop = DesktopInfo::from_bytes_at(bytes, 4)?;
+    let server = ProcId::from_bytes(
+        &bytes[DESKTOP_REPLY_SERVER_OFFSET..DESKTOP_REPLY_SERVER_OFFSET + crate::PROC_ID_LEN],
+    )?;
+    Ok((desktop, server))
 }
 
 /// Decode a `Create` reply frame into the assigned window id and the
@@ -1982,10 +2013,11 @@ mod tests {
         WindowEvent, WindowRequest, WindowTitle, APP_BAR_FLAGS_OFFSET, APP_BAR_RESERVED_FROM,
         APP_BAR_ROWS_OFFSET, APP_BAR_ROW_COUNT_OFFSET, APP_MENU_LABEL_MAX, APP_MENU_MAX_ROWS,
         APP_MENU_ROW_WIRE_LEN, CREATE_MIN_HEIGHT_OFFSET, CREATE_MIN_WIDTH_OFFSET,
-        CREATE_RESERVED_FROM, CREATE_RESIZABLE_OFFSET, SET_TITLE_LEN_OFFSET,
-        SET_TITLE_RESERVED_FROM, SET_TITLE_TEXT_OFFSET, WINDOW_BACKDROP_BLUR_MAX_PX,
-        WINDOW_CREATE_REPLY_LEN, WINDOW_DESKTOP_REPLY_LEN, WINDOW_ENDPOINT, WINDOW_EVENT_MAGIC,
-        WINDOW_MAX_FRAMES, WINDOW_REQUEST_MAGIC, WINDOW_TITLE_MAX,
+        CREATE_RESERVED_FROM, CREATE_RESIZABLE_OFFSET, DESKTOP_REPLY_SERVER_OFFSET,
+        SET_TITLE_LEN_OFFSET, SET_TITLE_RESERVED_FROM, SET_TITLE_TEXT_OFFSET,
+        WINDOW_BACKDROP_BLUR_MAX_PX, WINDOW_CREATE_REPLY_LEN, WINDOW_DESKTOP_REPLY_LEN,
+        WINDOW_ENDPOINT, WINDOW_EVENT_MAGIC, WINDOW_MAX_FRAMES, WINDOW_REQUEST_MAGIC,
+        WINDOW_TITLE_MAX,
     };
     use crate::desktop::{Appearance, DesktopInfo};
     use crate::driver::display::{DamageRect, DisplayFormat};
@@ -2748,16 +2780,17 @@ mod tests {
     #[test]
     fn the_desktop_reply_round_trips_and_fails_closed() {
         let desktop = sample_desktop();
+        let session = ProcId::KERNEL;
         assert_eq!(
-            decode_desktop_reply(&encode_desktop_reply(Ok(desktop))),
-            Ok(desktop)
+            decode_desktop_reply(&encode_desktop_reply(Ok(desktop), session)),
+            Ok((desktop, session))
         );
         assert_eq!(
-            decode_desktop_reply(&encode_desktop_reply(Err(Errno::PermissionDenied))),
+            decode_desktop_reply(&encode_desktop_reply(Err(Errno::PermissionDenied), session)),
             Err(Errno::PermissionDenied)
         );
 
-        let good = encode_desktop_reply(Ok(desktop));
+        let good = encode_desktop_reply(Ok(desktop), session);
         assert_eq!(
             decode_desktop_reply(&good[..WINDOW_DESKTOP_REPLY_LEN - 1]),
             Err(Errno::BufferTooSmall)
@@ -2765,8 +2798,10 @@ mod tests {
         // A refusal reply carries no record, and a success reply whose
         // record is blank is not a desktop: neither can be read as one.
         assert!(decode_desktop_reply(&[0u8; WINDOW_DESKTOP_REPLY_LEN]).is_err());
+        // The record's own reserved bytes still fail closed; the identity
+        // now sits after it, so the dirty byte is taken inside the record.
         let mut dirty = good;
-        dirty[WINDOW_DESKTOP_REPLY_LEN - 1] = 1;
+        dirty[DESKTOP_REPLY_SERVER_OFFSET - 1] = 1;
         assert_eq!(decode_desktop_reply(&dirty), Err(Errno::BadMagic));
     }
 

@@ -4,7 +4,7 @@ files — browser grafico del filesystem
 
 ## SYNOPSIS
 
-`files [directory] [-h | -?]`
+`files [--desktop] [directory] [-h | -?]`
 
 ## DESCRIPTION
 
@@ -41,6 +41,12 @@ Un secondo operando viene rifiutato del tutto anziché ignorato.
 
 ## OPTIONS
 
+- `--desktop` — eseguire come componente gestore di file del desktop stesso:
+  una posizione permanente sulla barra delle icone che offre i propri luoghi
+  e i volumi montati, nessuna finestra finché non ne viene chiesta una, e
+  nessun modo di uscire. La sessione desktop passa questa opzione all'avvio;
+  indicare una `directory` accanto ad essa è rifiutato, perché un componente non
+  apre alcuna finestra in cui metterla.
 - `-h, -?` — mostrare la breve guida di questo comando e uscire.
 
 ## EXIT STATUS

@@ -10,7 +10,7 @@ publish.workspace = true
 
 # The package is only the `Run` entry-point binary of the on-disk
 # `files.app` bundle (plans/APPWIN.md AW3): the windowed file browser the
-# taskbar's permanent Files button spawns. Its engine — the navigation model,
+# desktop session autostarts as a core component. Its engine — the navigation model,
 # the themed renderer, and the validated path spelling — is the shared
 # `lib/browse` crate (the same engine the desktop session's trusted file
 # picker composes, §2.2/§6), so this package carries no library of its
@@ -48,6 +48,13 @@ tairix-font = { path = "../../../lib/font", version = "=0.0.0" }
 # against the same filename rule the browser spells every component with, so
 # this app carries no second path parser.
 tairix-path = { path = "../../../lib/path", version = "=0.0.0" }
+# The app half of the window channel: `WindowClient` (create / present / close
+# over the `WindowTransport` seam) and `WindowEvents` (the typed, parked event
+# wait over the `EventSource` seam) for the `Run` binary — and, on the host
+# too, the session↔component launch contract (`DESKTOP_ROLE_SWITCH`) and the
+# icon-bar menu convention `src/command.rs` and `src/appbar.rs` are written
+# against. Those two are host-tested, so this is a plain dependency.
+tairix-window = { path = "../../../lib/window", version = "=0.0.0" }
 
 # Everything else the freestanding `Run` binary links is pulled in for the
 # bare-metal targets it is actually built for; on the host those parts of the
@@ -92,10 +99,6 @@ tairix-font = { path = "../../../lib/font", version = "=0.0.0", features = ["rt"
 # this bundle's own `Help/` tree through the same engine as every other
 # command's short help, never a second copy of the text.
 tairix-help = { path = "../../../lib/help", version = "=0.0.0", features = ["rt"] }
-# The app half of the window channel: `WindowClient` (create / present /
-# close over the `WindowTransport` seam) and `WindowEvents` (the typed,
-# parked event wait over the `EventSource` seam).
-tairix-window = { path = "../../../lib/window", version = "=0.0.0" }
 # The pure-Rust userland runtime: `_start`, the stack canary, the panic
 # handler, the allocator, and the syscall wrappers (`shm_create` /
 # `shm_grant`, `port_bind` / `ipc_recv`, `ipc_call`, `waitset_*`,

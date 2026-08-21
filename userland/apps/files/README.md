@@ -2,8 +2,9 @@
 
 Stage 7 deliverable (`AGENTS.md` §10, `PLAN.md` Stage 7,
 `plans/APPWIN.md` AW3). The default graphical file manager: the `Run`
-entry-point binary of the on-disk `files.app` bundle the taskbar's
-permanent Files button spawns. Installed as a `.app` bundle in the system
+entry-point binary of the on-disk `files.app` bundle the desktop session
+autostarts at bring-up as a core component, and launches again to open a
+folder the user activated. Installed as a `.app` bundle in the system
 app store (`AGENTS.md` §16.2/§16.5).
 
 Stability tier: **experimental**.

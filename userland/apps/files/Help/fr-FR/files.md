@@ -4,7 +4,7 @@ files — navigateur de fichiers graphique
 
 ## SYNOPSIS
 
-`files [répertoire] [-h | -?]`
+`files [--desktop] [répertoire] [-h | -?]`
 
 ## DESCRIPTION
 
@@ -42,6 +42,12 @@ opérande est refusé d'emblée plutôt qu'ignoré.
 
 ## OPTIONS
 
+- `--desktop` — s'exécuter comme le composant gestionnaire de fichiers du
+  bureau lui-même : un emplacement permanent sur la barre d'icônes offrant
+  vos lieux et les volumes montés, aucune fenêtre jusqu'à ce qu'on en demande
+  une, et aucun moyen de quitter. La session de bureau passe cette option au
+  démarrage ; nommer un `répertoire` avec elle est refusé, car un composant
+  n'ouvre aucune fenêtre où le mettre.
 - `-h, -?` — afficher la courte aide de cette commande et quitter.
 
 ## EXIT STATUS

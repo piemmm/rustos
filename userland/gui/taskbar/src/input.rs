@@ -3,9 +3,9 @@
 //! The [`TaskbarInput`] router turns a stream of device-level
 //! [`InputEvent`]s into actions against a [`Taskbar`]: a primary-button press
 //! is hit-tested against the bar's computed [`BarLayout`](crate::BarLayout)
-//! and drives the model — opening the program-library popup, reporting the
-//! Files button, performing a running application's default action, or
-//! reporting a press on the clock. A press on a status signal is claimed
+//! and drives the model — opening the program-library popup, performing a
+//! running application's default action, or reporting a press on the clock.
+//! A press on a status signal is claimed
 //! but inert (it is a live readout, not an action target), and a press on an
 //! open notification popover dismisses the card it lands on.
 //!
@@ -116,9 +116,6 @@ pub enum TaskbarResponse {
         /// The catalog identifier of the entry to link to.
         entry: EntryId,
     },
-    /// The Files button was pressed. The embedder opens the file manager —
-    /// raising an already-open files window rather than launching a second.
-    OpenFiles,
     /// A primary click landed on a running application's slot, and that
     /// application declared that it handles the click itself. The embedder
     /// relays it to the application as an icon-bar default action.
@@ -418,7 +415,6 @@ impl TaskbarInput {
                 taskbar.open_library();
                 TaskbarResponse::OpenLibrary
             }
-            Hit::Files => TaskbarResponse::OpenFiles,
             Hit::App(index) => Self::activate_app(taskbar, index),
             // A status signal is a live readout, not an action target: the
             // press is claimed so it never falls through to the window

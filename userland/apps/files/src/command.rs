@@ -13,9 +13,22 @@
 //!
 //! # The grammar
 //!
-//! `files [directory]`, with the argument conventions every other command app
-//! follows: `-h`/`-?`/`--help` win immediately, `--` ends option parsing, and
-//! at most one operand is accepted.
+//! `files [--desktop] [directory]`, with the argument conventions every other
+//! command app follows: `-h`/`-?`/`--help` win immediately, `--` ends option
+//! parsing, and at most one operand is accepted.
+//!
+//! # The two roles
+//!
+//! The switch selects which of two things this program is ([`Role`]). Without
+//! it — from a shell, or when the desktop opens a folder — it is the ordinary
+//! file manager: one window, the shared icon-bar menu convention, and the
+//! process ends when that window closes. With it, the desktop session is
+//! starting the program as a **component of itself**: a permanent icon-bar
+//! slot offering the user's places and whatever is mounted, no window until
+//! one is asked for, and no way to quit. Only the session passes the switch,
+//! so a second component can never appear; and because a component opens no
+//! window at start, naming a starting location alongside it is a command line
+//! this program cannot act on rather than an argument silently ignored.
 //!
 //! # Untrusted input, and the two different refusals
 //!
@@ -48,12 +61,27 @@ use tairix_browse::vfs::{absolute_path, components_from_absolute_path};
 
 /// The usage banner a usage error is reported with, and the fallback the
 /// short-help switches print when `files`'s own Help tree is unavailable.
-pub const USAGE: &str = "usage: files [directory] [-h | -?]";
+pub const USAGE: &str = "usage: files [--desktop] [directory] [-h | -?]";
+
+/// Which of the two things a `files` process is.
+#[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
+pub enum Role {
+    /// The ordinary file manager: one window at the starting location, the
+    /// shared icon-bar menu convention on its slot, and the process ends when
+    /// the window closes.
+    #[default]
+    Window,
+    /// A component of the desktop, as the session's own bring-up asks for
+    /// with [`tairix_window::DESKTOP_ROLE_SWITCH`]: a permanent icon-bar slot
+    /// whose menu is the user's places and the mounted volumes, no window
+    /// until one is asked for, and no *Quit*.
+    Desktop,
+}
 
 /// What a `files` command line asks the program to do.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Command {
-    /// Open the browser window, as [`Start`] describes.
+    /// Run the file manager, as [`Start`] describes.
     Open(Start),
     /// Render `files`'s own short help (`-h`/`-?`/`--help`): the `NAME`,
     /// `SYNOPSIS`, and compact `OPTIONS` of its Help document, through the
@@ -61,14 +89,17 @@ pub enum Command {
     Help,
 }
 
-/// Where the window opens, and what the command line asked for that could not
-/// be honoured.
+/// What the program is, where its window opens, and what the command line
+/// asked for that could not be honoured.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct Start {
+    /// Which of the two things this process is.
+    pub role: Role,
     /// The accepted starting location as root-first path components, or
     /// `None` to open at the launching user's home — either because the
     /// command line named no location, or because the one it named was
-    /// refused.
+    /// refused. Always `None` in the [`Role::Desktop`] role, which opens no
+    /// window until one is asked for.
     pub location: Option<Vec<String>>,
     /// The reason a named location was turned down, ready to be stated on the
     /// error stream, or `None` when nothing was refused.
@@ -87,6 +118,10 @@ pub enum UsageError {
     /// A second operand; carries it. The window shows one directory, so two
     /// locations have no meaning and the second is never silently dropped.
     ExtraOperand(String),
+    /// A starting location alongside the desktop-role switch; carries it. A
+    /// component opens no window until one is asked for, so there is nothing
+    /// for the location to name — refused rather than quietly dropped.
+    LocationInDesktopRole(String),
     /// The argument vector was not valid UTF-8 and so could not be read at
     /// all.
     NotUtf8,
@@ -97,6 +132,11 @@ impl fmt::Display for UsageError {
         match self {
             UsageError::UnknownOption(arg) => write!(f, "unrecognized option {arg:?}"),
             UsageError::ExtraOperand(arg) => write!(f, "extra operand {arg:?}"),
+            UsageError::LocationInDesktopRole(arg) => write!(
+                f,
+                "starting location {arg:?} has no meaning with {}",
+                tairix_window::DESKTOP_ROLE_SWITCH
+            ),
             UsageError::NotUtf8 => f.write_str("argument vector is not valid UTF-8"),
         }
     }
@@ -105,10 +145,11 @@ impl fmt::Display for UsageError {
 /// Parse `args` (the program's arguments, excluding the program name) into a
 /// [`Command`].
 ///
-/// The grammar is `files [directory]`:
+/// The grammar is `files [--desktop] [directory]`:
 ///
 /// * `-h` / `-?` / `--help` — the reserved short-help switches; they win
 ///   immediately, wherever they appear.
+/// * `--desktop` — the desktop session asking for [`Role::Desktop`].
 /// * `--` — end of options: the next argument is the directory operand even
 ///   when it starts with a dash.
 /// * one optional operand — the directory to open at. It is validated here
@@ -117,11 +158,14 @@ impl fmt::Display for UsageError {
 ///
 /// # Errors
 ///
-/// [`UsageError::UnknownOption`] for an option this program does not know, and
-/// [`UsageError::ExtraOperand`] for a second operand.
+/// [`UsageError::UnknownOption`] for an option this program does not know,
+/// [`UsageError::ExtraOperand`] for a second operand, and
+/// [`UsageError::LocationInDesktopRole`] for a location named alongside the
+/// desktop-role switch.
 pub fn parse(args: &[&str]) -> Result<Command, UsageError> {
     let mut operand: Option<&str> = None;
     let mut options_done = false;
+    let mut role = Role::Window;
     for &arg in args {
         if !options_done {
             match arg {
@@ -130,6 +174,10 @@ pub fn parse(args: &[&str]) -> Result<Command, UsageError> {
                     continue;
                 }
                 "-h" | "-?" | "--help" => return Ok(Command::Help),
+                _ if arg == tairix_window::DESKTOP_ROLE_SWITCH => {
+                    role = Role::Desktop;
+                    continue;
+                }
                 _ if arg.starts_with('-') && arg.len() > 1 => {
                     return Err(UsageError::UnknownOption(String::from(arg)));
                 }
@@ -140,6 +188,15 @@ pub fn parse(args: &[&str]) -> Result<Command, UsageError> {
             return Err(UsageError::ExtraOperand(String::from(arg)));
         }
         operand = Some(arg);
+    }
+    if role == Role::Desktop {
+        if let Some(spelling) = operand {
+            return Err(UsageError::LocationInDesktopRole(String::from(spelling)));
+        }
+        return Ok(Command::Open(Start {
+            role,
+            ..Start::default()
+        }));
     }
     Ok(Command::Open(start_at(operand)))
 }
@@ -155,10 +212,12 @@ fn start_at(operand: Option<&str>) -> Start {
     };
     match location_components(spelling) {
         Ok(location) => Start {
+            role: Role::Window,
             location: Some(location),
             refused: None,
         },
         Err(refused) => Start {
+            role: Role::Window,
             location: None,
             refused: Some(refused),
         },

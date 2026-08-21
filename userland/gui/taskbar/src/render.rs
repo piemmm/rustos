@@ -295,16 +295,11 @@ impl TaskbarRenderer {
             theme,
             (theme.palette().surface_raised, ChromeLayer::Ground),
         );
-        for (button, rect, kind) in [
-            (taskbar.library_button(), layout.library, IconKind::Library),
-            (taskbar.files_button(), layout.files, IconKind::Folder),
-        ] {
-            if rect.is_empty() {
-                continue;
-            }
-            let bounds = local_rect(rect, origin);
+        if !layout.library.is_empty() {
+            let button = taskbar.library_button();
+            let bounds = local_rect(layout.library, origin);
             let side = button.icon_side(bounds, scale, theme);
-            let art = artwork.artwork(IconRequest::kind(kind), side);
+            let art = artwork.artwork(IconRequest::kind(IconKind::Library), side);
             button.render(&mut surface, bounds, scale, theme, art);
         }
 

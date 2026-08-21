@@ -875,6 +875,7 @@ dependencies = [
  "tairix-cursor",
  "tairix-display",
  "tairix-font",
+ "tairix-fsmeta",
  "tairix-geometry",
  "tairix-greeter",
  "tairix-help",

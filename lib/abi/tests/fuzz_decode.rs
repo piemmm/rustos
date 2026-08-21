@@ -71,8 +71,8 @@ use tairix_abi::users_admin::{
     decode_group_list, decode_user_list, UsersAdminRequest, USERS_ADMIN_MAX_REQUEST,
 };
 use tairix_abi::window_ipc::{
-    decode_create_reply, AppBar, AppMenu, AppMenuItemId, AppMenuLabel, AppMenuMark, AppMenuRow,
-    WindowEvent, WindowRequest,
+    decode_create_reply, decode_desktop_reply, AppBar, AppMenu, AppMenuItemId, AppMenuLabel,
+    AppMenuMark, AppMenuRow, WindowEvent, WindowRequest,
 };
 use tairix_abi::{
     AppInfoHeader, IpcMessageHeader, LoadImage, ManifestHeader, NeededLibrary, PortName,
@@ -468,9 +468,8 @@ fn exercise_font_ipc(bytes: &[u8]) {
 
 /// Drive the window-channel protocol decoders on `bytes` (one arm of
 /// [`exercise`]): an accepted window request or event must round-trip
-/// through its encoder, and the create-reply decoder — untrusted session
-/// output an app parses — must refuse a corrupt frame cleanly, never
-/// panic.
+/// through its encoder, and the reply decoders — untrusted session output
+/// an app parses — must refuse a corrupt frame cleanly, never panic.
 fn exercise_window_ipc(bytes: &[u8]) {
     if let Ok(request) = WindowRequest::from_bytes(bytes) {
         let redecoded = WindowRequest::from_bytes(&request.to_le_bytes())
@@ -483,6 +482,7 @@ fn exercise_window_ipc(bytes: &[u8]) {
         assert_eq!(event, redecoded);
     }
     let _ = decode_create_reply(bytes);
+    let _ = decode_desktop_reply(bytes);
 }
 
 /// Drive the notification-channel decoder on `bytes` (one arm of

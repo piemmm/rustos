@@ -73,6 +73,15 @@
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
 
+/// The label the file manager's icon-bar slot carries: the name its own
+/// signed `AppInfo` states, which is what the session resolves the slot's
+/// identity from.
+///
+/// The host-side script reconstructs the bar with this slot to compute where
+/// to click, so naming it once here is what stops the script and the guest
+/// from drifting.
+pub const FILES_BAR_APP_NAME: &str = "files";
+
 /// Guest marker: the files window received the `Focus` + `Pressed` pair of
 /// the first in-window click — it exists, is active, and the compositor has
 /// the frame the second screendump reads.

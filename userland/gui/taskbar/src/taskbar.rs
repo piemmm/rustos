@@ -1,7 +1,7 @@
 //! The taskbar itself: its placement configuration and live state.
 //!
-//! [`Taskbar`] ties the two permanent leading launcher buttons (Library and
-//! Files), the [`LibraryPopup`], the [`TaskList`], the [`NotificationArea`],
+//! [`Taskbar`] ties the permanent leading launcher button (Library), the
+//! [`LibraryPopup`], the [`TaskList`], the [`NotificationArea`],
 //! and the [`SwitchboardTray`] capsule to a [`TaskbarConfig`] (which screen
 //! edge, how thick, and the per-region extents) and the active [`Theme`]. It
 //! produces a [`BarLayout`] on demand from the current state and answers
@@ -62,7 +62,7 @@ pub struct TaskbarConfig {
     pub screen_height: u32,
     /// Bar thickness (height for a horizontal bar, width for a vertical one).
     pub thickness: u32,
-    /// Main-axis length of each leading launcher button (Library, Files).
+    /// Main-axis length of the leading launcher button (Library).
     pub launcher_extent: u32,
     /// Main-axis length of each running-application slot. An icon-only
     /// slot, so a run of applications reads as one strip of equal icons
@@ -117,7 +117,7 @@ impl TaskbarConfig {
     }
 }
 
-/// The taskbar: placement configuration plus the leading launcher buttons,
+/// The taskbar: placement configuration plus the leading launcher button,
 /// the program-library popup, the task list, the notification area, and the
 /// Switchboard tray capsule, themed by the active [`Theme`].
 ///
@@ -131,7 +131,6 @@ pub struct Taskbar {
     config: TaskbarConfig,
     theme: Theme,
     library_button: IconButton,
-    files_button: IconButton,
     library: LibraryPopup,
     apps: AppStrip,
     picker: WindowPicker,
@@ -148,24 +147,20 @@ pub struct Taskbar {
 impl Taskbar {
     /// Build a taskbar for `config`, adopting `theme` as its active theme.
     ///
-    /// The two permanent leading buttons are seeded here: the Library button
-    /// and the Files button. They are fixed: nothing can reorder or remove
-    /// them.
+    /// The permanent leading button is seeded here: the Library button. It is
+    /// fixed — nothing can move or remove it.
     ///
-    /// Both are ordinary quiet peers seated *in* the bar
+    /// It is an ordinary quiet peer seated *in* the bar
     /// ([`PlateSeating::Bar`]): on an icon strip no single icon is the primary
-    /// action of the surface, so neither wears a role fill or a perimeter of
-    /// its own. They rest as bare glyphs on the bar, wash lighter under the
-    /// pointer, and — for the Library button — read as held down while its
-    /// popup is open.
+    /// action of the surface, so it wears no role fill and no perimeter of its
+    /// own. It rests as a bare glyph on the bar, washes lighter under the
+    /// pointer, and reads as held down while its popup is open.
     #[must_use]
     pub fn new(config: TaskbarConfig, theme: &Theme) -> Self {
         Self {
             config,
             theme: theme.clone().floating(),
             library_button: IconButton::new(IconKind::Library, ControlRole::Neutral)
-                .seated(PlateSeating::Bar),
-            files_button: IconButton::new(IconKind::Folder, ControlRole::Neutral)
                 .seated(PlateSeating::Bar),
             library: LibraryPopup::new(),
             apps: AppStrip::new(),
@@ -209,12 +204,6 @@ impl Taskbar {
     #[must_use]
     pub const fn library_button(&self) -> &IconButton {
         &self.library_button
-    }
-
-    /// The Files launcher button, for painting.
-    #[must_use]
-    pub const fn files_button(&self) -> &IconButton {
-        &self.files_button
     }
 
     /// The program-library popup.
@@ -899,15 +888,15 @@ impl Taskbar {
     }
 
     /// Track the pointer for the bar's hover feedback — the leading
-    /// buttons, the application slots, and the Switchboard capsule
+    /// launcher, the application slots, and the Switchboard capsule
     /// (whose readout expands on hover) — latching a repaint when any visual
     /// state changes.
     ///
-    /// While the popup is open the Library button stays visually pressed
-    /// (it is "held open"); the Files button hovers as normal. Every hover
-    /// target tracked here paints on the bar itself, so a change latches
-    /// only [`bar`](TaskbarRepaint::bar) — except the Switchboard capsule,
-    /// whose hover can also expand or collapse its readout.
+    /// While the popup is open the Library button stays visually pressed (it
+    /// is "held open"). Every hover target tracked here paints on the bar
+    /// itself, so a change latches only [`bar`](TaskbarRepaint::bar) — except
+    /// the Switchboard capsule, whose hover can also expand or collapse its
+    /// readout.
     pub(crate) fn track_hover(&mut self, point: Point, scale: Scale, damage: &mut Region) {
         let layout = self.layout(scale);
         let library_pointer = if self.library.is_open() {
@@ -917,13 +906,7 @@ impl Taskbar {
         } else {
             PointerState::None
         };
-        let files_pointer = if layout.files.contains(point) {
-            PointerState::Hover
-        } else {
-            PointerState::None
-        };
         let mut bar_changed = set_pointer(&mut self.library_button, library_pointer);
-        bar_changed |= set_pointer(&mut self.files_button, files_pointer);
         let app_hover = layout.apps.iter().position(|slot| slot.contains(point));
         bar_changed |= self.apps.set_hover(app_hover);
         if bar_changed {

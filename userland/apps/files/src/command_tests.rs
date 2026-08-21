@@ -9,7 +9,7 @@ use alloc::string::{String, ToString};
 use alloc::vec;
 use alloc::vec::Vec;
 
-use super::{parse, unlistable_reason, Command, Start, UsageError, USAGE};
+use super::{parse, unlistable_reason, Command, Role, Start, UsageError, USAGE};
 
 /// The [`Start`] a command line produced, or the test's own failure text when
 /// it was a usage error or the short help.
@@ -194,7 +194,46 @@ fn the_reserved_short_help_switches_win_wherever_they_appear() {
     // The banner names the operand and the switches, so a usage refusal tells
     // the caller the whole grammar.
     assert!(USAGE.contains("[directory]"));
+    assert!(USAGE.contains(tairix_window::DESKTOP_ROLE_SWITCH));
     assert!(USAGE.contains("-h"));
+}
+
+#[test]
+fn the_ordinary_role_is_the_default_and_the_switch_is_the_only_way_into_the_other() {
+    // Nothing a caller can spell reaches the component role except the one
+    // shared switch, which is what keeps the desktop's own instance unique.
+    assert_eq!(start_of(&[]).role, Role::Window);
+    assert_eq!(start_of(&["/Users/ada"]).role, Role::Window);
+    assert_eq!(
+        start_of(&[tairix_window::DESKTOP_ROLE_SWITCH]).role,
+        Role::Desktop
+    );
+    // The switch is an option, so `--` puts it out of reach: past the end of
+    // options it is an operand, and one that is not a path at that.
+    let after_end = start_of(&["--", tairix_window::DESKTOP_ROLE_SWITCH]);
+    assert_eq!(after_end.role, Role::Window);
+    assert!(after_end.refused.is_some());
+}
+
+#[test]
+fn a_component_takes_no_starting_location() {
+    // It opens no window until one is asked for, so a location names nothing.
+    // Refused outright rather than dropped, in either order.
+    assert_eq!(
+        parse(&[tairix_window::DESKTOP_ROLE_SWITCH, "/Users/ada"]),
+        Err(UsageError::LocationInDesktopRole("/Users/ada".to_string()))
+    );
+    assert_eq!(
+        parse(&["/Users/ada", tairix_window::DESKTOP_ROLE_SWITCH]),
+        Err(UsageError::LocationInDesktopRole("/Users/ada".to_string()))
+    );
+    let refusal = UsageError::LocationInDesktopRole("/Users/ada".to_string()).to_string();
+    assert!(refusal.contains("/Users/ada"));
+    assert!(refusal.contains(tairix_window::DESKTOP_ROLE_SWITCH));
+    // And it starts nowhere: no location, and nothing refused to report.
+    let component = start_of(&[tairix_window::DESKTOP_ROLE_SWITCH]);
+    assert_eq!(component.location, None);
+    assert_eq!(component.refused, None);
 }
 
 #[test]

@@ -4,12 +4,13 @@
 //! edge (`PLAN.md` Stage 7, `plans/NEW-TASKBAR.md`). Along its main axis it
 //! is laid out as:
 //!
-//! - **Leading end** — two permanent launcher buttons, never reordered and
-//!   never removable: **Library**, which opens the program-library popup
+//! - **Leading end** — one permanent launcher button, never moved and never
+//!   removable: **Library**, which opens the program-library popup
 //!   ([`LibraryPopup`] — the folder-organised application launcher fed from
-//!   the merged `lib/proglib` catalog), and **Files**, which opens the file
-//!   manager. Both are shared `lib/controls` icon buttons drawn with
-//!   `lib/icon` glyphs.
+//!   the merged `lib/proglib` catalog). It is a shared `lib/controls` icon
+//!   button drawn with a `lib/icon` glyph. The file manager is *not* a
+//!   launcher: it is a core desktop component the session autostarts, so it
+//!   holds an ordinary application slot in the strip below.
 //! - **Middle** — the [`AppStrip`]: one icon-only slot per *running
 //!   application*, resolved by the session from the bundle the kernel
 //!   attested owns each process. A primary click performs the application's
@@ -17,25 +18,28 @@
 //!   its most recently used window); hovering a slot whose application owns
 //!   more than one window opens the [`WindowPicker`] to choose between them;
 //!   and a secondary press opens the [`BarMenu`] over the menu the
-//!   *application itself* declared — minimally a *Quit* row and an *About*
-//!   row whose submenu is the application's information panel, drawn from
-//!   its signed manifest. An application that declared no menu opens
-//!   nothing. The windows themselves stay in the [`TaskList`], the one
-//!   window registry the picker and the Switchboard capsule both read.
+//!   *application itself* declared. Every such menu reads in one order — the
+//!   bar-drawn *Info* row first, whose submenu is the application's
+//!   information panel drawn from its signed manifest; the application's own
+//!   rows next; and *Quit* last. That convention is the applications' to
+//!   follow and is written once, in `tairix_window::declaration`, not
+//!   restated here: the bar draws exactly what it was declared. An
+//!   application that declared no menu opens nothing. The windows themselves
+//!   stay in the [`TaskList`], the one window registry the picker and the
+//!   Switchboard capsule both read.
 //! - **Trailing end** — the [`NotificationArea`]: the persistent status
 //!   signals (network, volume, battery) drawn as calm glyphs, plus a card
 //!   popover for the transient notifications a producer service raises over
 //!   the notification IPC; then the clock; and anchored at the very end —
-//!   immovable, outranked only by the leading launchers — the Switchboard
+//!   immovable, outranked only by the leading launcher — the Switchboard
 //!   tray capsule ([`SwitchboardTray`]): the desktop's live system readout,
 //!   with an instrument readout that opens on hover or keyboard focus,
 //!   scroll-to-cycle-tasks, and a
 //!   middle-click switch to the previous task.
 //!
-//! The taskbar holds no authority and performs no I/O: pressing Files or
-//! choosing a library entry only *reports* a typed [`TaskbarResponse`]
-//! ([`OpenFiles`](TaskbarResponse::OpenFiles) /
-//! [`LibraryLaunch`](TaskbarResponse::LibraryLaunch)); the session glue —
+//! The taskbar holds no authority and performs no I/O: choosing a library
+//! entry only *reports* a typed [`TaskbarResponse`]
+//! ([`LibraryLaunch`](TaskbarResponse::LibraryLaunch)); the session glue —
 //! which reads the catalog stores and holds the spawn capability — resolves
 //! and performs the action. The popup never touches the VFS: the session
 //! hands it the already-merged [`Catalog`](tairix_proglib::Catalog) as a
@@ -97,7 +101,7 @@ pub use layout::{BarLayout, Hit, NotificationCard, NotificationsLayout, TrayRead
 pub use library::{
     folder_label, LibraryFocus, LibraryIconRequest, LibraryLayout, LibraryPopup, LibraryRow,
 };
-pub use menu::{BarMenu, EntryRow, MenuLayout, MenuSubject};
+pub use menu::{BarMenu, EntryRow, MenuLayout, MenuSubject, INFO_ROW_LABEL};
 pub use notifications::{
     IconId, NotificationArea, NotifySeverity, StatusKind, StatusSignal, TransientNotification,
 };

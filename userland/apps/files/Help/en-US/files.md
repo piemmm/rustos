@@ -4,7 +4,7 @@ files — graphical filesystem browser
 
 ## SYNOPSIS
 
-`files [directory] [-h | -?]`
+`files [--desktop] [directory] [-h | -?]`
 
 ## DESCRIPTION
 
@@ -17,15 +17,22 @@ active theme's accent colour. Every directory read is an ordinary
 permission-checked listing under the launching user's identity: an
 unreadable directory is refused, never guessed at.
 
-The browser is launched from the taskbar's permanent Files button or by
-name from a shell. It requires a running graphical
-session: without one, the window channel is unreachable and the browser
-reports the refusal on the standard error stream and exits.
+The desktop starts the browser for you and keeps it on the icon bar: its
+slot's menu lists your own places and whatever is mounted, and choosing one
+opens a window there. A click on the slot opens one at your home directory.
+That copy has no *Quit* row — it is part of the desktop, and closing its
+windows simply puts it away.
+
+Run by name from a shell (or opened on a folder from the desktop) it is an
+ordinary application instead: one window, and it ends when you close it.
+Either way it requires a running graphical session: without one, the window
+channel is unreachable and the browser reports the refusal on the standard
+error stream and exits.
 
 The window is driven with the keyboard: `Down` and `Up` move the
 selection, `Enter` opens the selected directory, and `Backspace` goes
-up to the parent directory. Closing the window from the desktop ends
-the browser.
+up to the parent directory. `F5` re-reads both the listing and the places
+rail, which is how a newly attached volume appears.
 
 The `directory` operand is treated as untrusted input: it must be an
 absolute path within the system's path length limit, and each of its
@@ -39,6 +46,11 @@ ignored.
 
 ## OPTIONS
 
+- `--desktop` — run as the desktop's own file-manager component: a
+  permanent icon-bar slot offering your places and the mounted volumes,
+  no window until one is asked for, and no way to quit. The desktop
+  session passes this at bring-up; naming a `directory` alongside it is
+  refused, because a component opens no window to put one in.
 - `-h, -?` — show this command's own short help and exit.
 
 ## EXIT STATUS

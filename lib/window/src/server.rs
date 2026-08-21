@@ -610,7 +610,7 @@ impl<M: ShmMapper> WindowServer<M> {
             // Read-only and ungated: the reply describes the caller's own
             // seat, holding nothing another principal owns and granting
             // no authority, so every client on the desktop may ask.
-            WindowRequest::QueryDesktop => desktop_reply(reply, host.desktop()),
+            WindowRequest::QueryDesktop => desktop_reply(reply, host.desktop(), self.server),
             // A create mints a window id and is answered by the caller with
             // the create-reply frame; refusing it here keeps this total
             // without a second copy of that path, and refuses rather than
@@ -1072,7 +1072,16 @@ fn create_reply(
 }
 
 /// Write a desktop reply into `reply`, returning its length.
-fn desktop_reply(reply: &mut [u8; WINDOW_REPLY_MAX], result: Result<DesktopInfo, Errno>) -> usize {
-    reply[..WINDOW_DESKTOP_REPLY_LEN].copy_from_slice(&encode_desktop_reply(result));
+///
+/// It carries this session's own attested identity for the same reason the
+/// create reply does — it is what an app requires of every event's sender —
+/// and on this reply too, because an app may declare an icon-bar presence
+/// before it owns any window.
+fn desktop_reply(
+    reply: &mut [u8; WINDOW_REPLY_MAX],
+    result: Result<DesktopInfo, Errno>,
+    server: ProcId,
+) -> usize {
+    reply[..WINDOW_DESKTOP_REPLY_LEN].copy_from_slice(&encode_desktop_reply(result, server));
     WINDOW_DESKTOP_REPLY_LEN
 }

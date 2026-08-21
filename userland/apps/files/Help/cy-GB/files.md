@@ -4,7 +4,7 @@ files — porwr graffigol y system ffeiliau
 
 ## SYNOPSIS
 
-`files [directory] [-h | -?]`
+`files [--desktop] [directory] [-h | -?]`
 
 ## DESCRIPTION
 
@@ -41,6 +41,12 @@ hytrach na'i anwybyddu.
 
 ## OPTIONS
 
+- `--desktop` — rhedeg fel cydran rheolwr ffeiliau'r bwrdd gwaith ei hun:
+  slot parhaol ar y bar eiconau sy'n cynnig eich lleoedd a'r cyfrolau sydd
+  wedi'u mowntio, dim ffenestr hyd nes y gofynnir am un, a dim ffordd i
+  adael. Mae sesiwn y bwrdd gwaith yn pasio hyn wrth gychwyn; mae enwi
+  `directory` gydag ef yn cael ei wrthod, am nad yw cydran yn agor ffenestr
+  i'w roi ynddi.
 - `-h, -?` — dangos cymorth byr y gorchymyn hwn ei hun a gadael.
 
 ## EXIT STATUS

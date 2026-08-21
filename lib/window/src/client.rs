@@ -284,6 +284,9 @@ struct LastPresent {
 pub struct WindowClient<T: WindowTransport> {
     transport: T,
     presented: Vec<LastPresent>,
+    /// The serving session's attested identity, as the last reply that
+    /// carried it stated. `None` until one has.
+    session: Option<ProcId>,
 }
 
 impl<T: WindowTransport> WindowClient<T> {
@@ -292,6 +295,7 @@ impl<T: WindowTransport> WindowClient<T> {
         Self {
             transport,
             presented: Vec::new(),
+            session: None,
         }
     }
 
@@ -359,6 +363,7 @@ impl<T: WindowTransport> WindowClient<T> {
         let mut reply = [0u8; WINDOW_CREATE_REPLY_LEN];
         let len = self.transport.call(&request, &mut reply)?;
         let (window_id, server) = decode_create_reply(&reply[..len])?;
+        self.session = Some(server);
         self.note_extent(window_id, surface.width_px, surface.height_px);
         Ok((window_id, server))
     }
@@ -428,12 +433,32 @@ impl<T: WindowTransport> WindowClient<T> {
     /// longer has a screen to describe), a transport failure, or a corrupt
     /// reply — never a guessed extent.
     ///
+    /// The reply also carries the serving session's [`ProcId`], which this
+    /// records so [`session`](Self::session) can hand it back: an app that
+    /// declares an icon-bar presence before it owns a window — or that never
+    /// opens one — needs it to authenticate the bar events it receives, and
+    /// this is the only call it makes before then.
+    ///
     /// [`WindowEvent::DesktopChanged`]: tairix_abi::window_ipc::WindowEvent::DesktopChanged
     pub fn desktop(&mut self) -> Result<DesktopInfo, Errno> {
         let request = WindowRequest::QueryDesktop.to_le_bytes();
         let mut reply = [0u8; WINDOW_DESKTOP_REPLY_LEN];
         let len = self.transport.call(&request, &mut reply)?;
-        decode_desktop_reply(&reply[..len])
+        let (desktop, server) = decode_desktop_reply(&reply[..len])?;
+        self.session = Some(server);
+        Ok(desktop)
+    }
+
+    /// The serving session's kernel-attested [`ProcId`], once a call has
+    /// learned it — the identity an app requires of every event's sender.
+    ///
+    /// `None` before the first [`desktop`](Self::desktop) or
+    /// [`create`](Self::create) succeeds: until the session has said who it
+    /// is, an app has nothing to authenticate against and must accept
+    /// nothing (fail closed).
+    #[must_use]
+    pub const fn session(&self) -> Option<ProcId> {
+        self.session
     }
 
     /// Present frame `frame_index` of window `window_id`, of which

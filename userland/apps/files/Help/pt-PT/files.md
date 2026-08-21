@@ -4,7 +4,7 @@ files — navegador gráfico do sistema de ficheiros
 
 ## SYNOPSIS
 
-`files [directory] [-h | -?]`
+`files [--desktop] [directory] [-h | -?]`
 
 ## DESCRIPTION
 
@@ -41,6 +41,12 @@ em vez de ignorado.
 
 ## OPTIONS
 
+- `--desktop` — executar como o componente de gestor de ficheiros do próprio
+  ambiente de trabalho: um lugar permanente na barra de ícones que oferece os
+  seus locais e os volumes montados, nenhuma janela até que uma seja pedida,
+  e nenhuma forma de sair. A sessão do ambiente de trabalho passa esta opção
+  no arranque; nomear um `directory` junto dela é recusado, porque um componente
+  não abre nenhuma janela onde o pôr.
 - `-h, -?` — mostrar a ajuda curta deste próprio comando e sair.
 
 ## EXIT STATUS

@@ -2,6 +2,23 @@
 //! the windowed file browser, the first app served over the desktop
 //! session's window channel.
 //!
+//! # One binary, two roles
+//!
+//! Launched plainly — from a shell, or by the desktop opening a folder — this
+//! is an ordinary application: one window at the location it was given, the
+//! shared icon-bar menu convention on its slot, and the process ends when that
+//! window closes.
+//!
+//! Launched by the desktop session with `tairix_window::DESKTOP_ROLE_SWITCH`
+//! it is instead a **component of the desktop**
+//! ([`Role::Desktop`](command::Role::Desktop)): it comes up with the session,
+//! holds a permanent icon-bar slot offering the user's places and whatever is
+//! mounted, opens a window per place the user chooses (up to a bounded
+//! `MAX_WINDOWS`), and cannot be quit — closing every
+//! window puts it away rather than ending it, and its menu carries neither an
+//! information row nor *Quit*. Only the session passes the switch, so a second
+//! component can never appear.
+//!
 //! # What the program wires (and what stays in the libraries)
 //!
 //! Everything with behaviour worth testing lives in host-tested crates —
@@ -11,13 +28,16 @@
 //! channel's client half (`tairix_window`). This binary only composes
 //! them over the live syscalls:
 //!
-//! * One `shm_create`d frame region, granted to the reserved window
-//!   endpoint (the zero-copy surface the session maps once at create).
+//! * One `shm_create`d frame region **per window**, granted to the reserved
+//!   window endpoint (the zero-copy surface the session maps once at create).
 //! * One `port_bind`-bound event mailbox the app **parks** on through
-//!   its wait-set — never a poll loop. Every received event carries its
-//!   sender's kernel-attested origin, and the app accepts only events
-//!   from the session identity the (squat-protected) create reply
-//!   named: no other process can feed it forged input (fail closed).
+//!   its wait-set — never a poll loop, and one mailbox for every window and
+//!   the icon-bar slot alike. Every received event carries its sender's
+//!   kernel-attested origin, and the app accepts only events from the session
+//!   identity the (squat-protected) desktop-query reply named: no other
+//!   process can feed it forged input (fail closed). Learning that identity
+//!   from the *query* rather than from a create reply is what lets a
+//!   component answer its slot before it owns any window.
 //! * The `WindowClient` calls (create / present / close) over `ipc_call`
 //!   and the `WindowEvents` typed wait over the parked source.
 //! * The grid's icon artwork: the shared reclaim-governed decode cache
@@ -48,8 +68,9 @@
 //! `Dialog` and, on confirm, removes the selection (recursively for a folder)
 //! over the user's own `fs_unlink`s, stopping and stating the reason on
 //! `stderr` on the first refusal; a `CloseRequested` from the desktop closes
-//! the window and ends the program cleanly. Every bring-up refusal exits
-//! fail-loud with a reserved code and a stated reason on `stderr`.
+//! that window, which ends an ordinary file manager cleanly once it was its
+//! last. Every bring-up refusal exits fail-loud with a reserved code and a
+//! stated reason on `stderr`.
 //!
 //! On the host it is an inert stub so `cargo build --workspace`, clippy,
 //! and fmt still cover the file.
@@ -60,6 +81,7 @@
 
 extern crate alloc;
 
+pub mod appbar;
 pub mod command;
 pub mod location;
 pub mod operation;
@@ -130,7 +152,8 @@ mod program {
         WindowTransport,
     };
 
-    use crate::command::{self, unlistable_reason, Command, UsageError, USAGE};
+    use crate::appbar;
+    use crate::command::{self, unlistable_reason, Command, Role, UsageError, USAGE};
     use crate::location::{leave_directory, location_title, retitle, Leave};
     use crate::operation::{operation_control, OperationControl};
     use crate::sidebar::{self, press_point};
@@ -280,16 +303,36 @@ mod program {
         code
     }
 
-    /// Declare this application's presence on the desktop's icon bar: a
-    /// *Quit* row and the session-drawn *About* row, with the primary click
-    /// left to the session so it raises the window.
+    /// Declare (or re-declare) this process's presence on the desktop's icon
+    /// bar, as its `role` decides.
+    ///
+    /// An ordinary file manager makes the shared declaration — the
+    /// session-drawn information row and *Quit*, the primary click left to the
+    /// session so it raises the window. A component offers its places instead
+    /// and neither of those rows ([`appbar`]).
     ///
     /// A refused declaration is an answer, not a death: the application says
-    /// so and carries on with no slot of its own — its window is still
-    /// reachable through the one the session derives from it.
-    fn declare_app_bar(client: &mut WindowClient<RtWindowTransport>, endpoint: u64) {
-        match tairix_window::quit_and_about(endpoint) {
-            Ok(bar) => {
+    /// so and carries on with no slot of its own — a window it owns is still
+    /// reachable through the slot the session derives from it. A component so
+    /// refused has no slot and no window, which is a desktop without its file
+    /// manager: stated loudly, and still not fatal.
+    fn declare_app_bar(
+        client: &mut WindowClient<RtWindowTransport>,
+        endpoint: u64,
+        role: Role,
+        places: &Places,
+    ) {
+        let declared = match role {
+            Role::Window => tairix_window::info_and_quit(endpoint).map(|bar| (bar, 0)),
+            Role::Desktop => appbar::component_declaration(endpoint, places),
+        };
+        match declared {
+            Ok((bar, skipped)) => {
+                if skipped > 0 {
+                    report_error(&alloc::format!(
+                        "{skipped} place(s) do not fit the icon-bar menu and are not shown"
+                    ));
+                }
                 if let Err(err) = client.set_app_bar(&bar) {
                     report_error(&alloc::format!(
                         "the desktop refused this application's icon-bar presence ({err}); \
@@ -333,6 +376,431 @@ mod program {
         /// The title the window currently carries, owned by the run so it
         /// outlives one frame: the location is only sent again when it moves.
         title: &'a mut String,
+    }
+
+    /// Most windows one file-manager process holds open at once.
+    ///
+    /// A bound on this process's *own* resources — each window carries a
+    /// mapped frame region and a listing of its own — not a policy about how
+    /// many folders a user may look at: a further window is refused with a
+    /// stated reason rather than mapping memory without limit (§24).
+    const MAX_WINDOWS: usize = 8;
+
+    /// One open browser window: everything a frame is drawn from, and nothing
+    /// shared with another window.
+    ///
+    /// The process holds a list of these rather than one window's worth of
+    /// locals, because a component's slot opens a window per place the user
+    /// chooses and an empty list is a perfectly good state for it to be in
+    /// (see [`Role`](command::Role)). What *is* shared sits outside: the
+    /// artwork cache (one decode serves every window), the launched-bundle
+    /// bookkeeping, and the desktop's own theme and density.
+    struct OpenWindow {
+        /// The session's id for this window.
+        window: u64,
+        /// The listing this window shows.
+        browser: Browser<LiveSource>,
+        /// The overlays open over it.
+        overlays: Overlays,
+        /// This window's own copy of the places rail: the same shortcuts and
+        /// volumes, but its own focus, cursor, and hover — one window's
+        /// pointer must not highlight a row in another.
+        places: Places,
+        /// The pixel layout its frame region is shaped as.
+        mode: DisplayMode,
+        /// Base of the live frame region, tracked alongside its length so a
+        /// resize can unmap the old region and adopt a fresh one.
+        region_base: usize,
+        /// Length of the live frame region, in bytes.
+        region_len: usize,
+        /// The title the session was last told. Kept so a frame retitles only
+        /// when the location actually moves.
+        title: String,
+    }
+
+    /// Paint `win`'s current state and present it.
+    ///
+    /// The one place the window's mapped frame region becomes a slice, so the
+    /// `unsafe` that reconstructs it is written once rather than at every
+    /// present in the loop.
+    ///
+    /// # Errors
+    ///
+    /// Whatever the present refuses; the caller treats a refused present as a
+    /// lost channel and exits fail-loud.
+    fn present_window(
+        win: &mut OpenWindow,
+        client: &mut WindowClient<RtWindowTransport>,
+        theme: &Theme,
+        icons: &RefCell<IconPipeline>,
+        scale: Scale,
+    ) -> Result<(), Errno> {
+        let (base, len) = (win.region_base, win.region_len);
+        // SAFETY: `base`/`len` name the region this window was created over —
+        // `region_len` zeroed read/write bytes the kernel mapped into this
+        // process at `region_base`, adopted by the session. The resize path is
+        // the only thing that changes them, and it unmaps the old region only
+        // after the session has adopted a freshly-mapped replacement, so this
+        // is never read against an unmapped or aliased address. The session
+        // maps the same frames read-only for its blit and the protocol
+        // serialises access: this app is parked in its present call while the
+        // session reads.
+        let frame = unsafe { core::slice::from_raw_parts_mut(base as *mut u8, len) };
+        present_frame(
+            &mut win.browser,
+            &win.overlays,
+            &win.places,
+            theme,
+            &mut FrameTarget {
+                client,
+                window: win.window,
+                frame,
+                mode: &win.mode,
+                title: &mut win.title,
+            },
+            icons,
+            scale,
+        )
+    }
+
+    /// Open one browser window at `location`, mapping its own frame region and
+    /// telling the session about it.
+    ///
+    /// The reason for a refusal is stated here, on the one fail-loud path, and
+    /// the exit code it *would* warrant is handed back rather than taken: an
+    /// ordinary file manager that cannot open its first window has nothing to
+    /// be and exits with it, while a component simply has one fewer window and
+    /// carries on. The codes stay distinct — a refused listing, a refused
+    /// frame region, and a refused window are three different diagnoses and a
+    /// supervisor reads them apart.
+    ///
+    /// `places` is the process's rail; the window takes its own copy so its
+    /// focus and hover are its own.
+    ///
+    /// # Errors
+    ///
+    /// The exit code naming what refused.
+    fn open_window(
+        client: &mut WindowClient<RtWindowTransport>,
+        event_endpoint: u64,
+        desktop: &Desktop,
+        places: &Places,
+        location: Option<alloc::vec::Vec<String>>,
+    ) -> Result<OpenWindow, i32> {
+        let Some(browser) = open_browser(location) else {
+            report_error("root directory listing refused; no window opened");
+            return Err(EXIT_NO_LISTING);
+        };
+        let (w, h) = desktop.window_size(WIN_WIDTH, WIN_HEIGHT);
+        let mode = mode_for(w, h);
+        let total = (mode.stride_bytes as usize) * (mode.height_px as usize) * FRAME_COUNT as usize;
+        let mut region_id: u64 = 0;
+        let base = tairix_rt::shm_create(total, &mut region_id);
+        if base < 0 {
+            report_error("shared frame region refused; no window opened");
+            return Err(EXIT_NO_FRAMES);
+        }
+        let grant = tairix_rt::shm_grant(region_id, WINDOW_ENDPOINT);
+        if grant < 1 {
+            report_error("frame region grant refused; no window opened");
+            return Err(EXIT_NO_FRAMES);
+        }
+        let Ok(region_base) = usize::try_from(base) else {
+            report_error("frame region base outside the address width; no window opened");
+            return Err(EXIT_NO_FRAMES);
+        };
+        // The window opens carrying the location it shows, rather than a name
+        // the first frame would have to replace.
+        let title = location_title(&browser);
+        #[allow(clippy::cast_sign_loss)] // `grant >= 1` checked above; it is a kernel handle.
+        let Ok((window, _)) = client.create(
+            grant as u64,
+            event_endpoint,
+            FRAME_COUNT,
+            &mode,
+            &title,
+            WindowSizing {
+                resizable: WIN_RESIZABLE,
+                min_width_px: MIN_WIN_WIDTH,
+                min_height_px: MIN_WIN_HEIGHT,
+            },
+        ) else {
+            report_error("the desktop session refused the window");
+            return Err(EXIT_NO_WINDOW);
+        };
+        Ok(OpenWindow {
+            window,
+            browser,
+            overlays: initial_overlays(),
+            places: places.clone(),
+            mode,
+            region_base,
+            region_len: total,
+            title,
+        })
+    }
+
+    /// Close the window at `index` and answer the exit code the process owes,
+    /// or `None` to carry on.
+    ///
+    /// An ordinary file manager *is* its window, so closing the last one ends
+    /// it cleanly. A component is not: it keeps its slot, and an empty window
+    /// list is simply the state it started in — closing every window is the
+    /// user putting it away, not quitting it, and there is no row on its menu
+    /// that would.
+    fn close_window(
+        windows: &mut alloc::vec::Vec<OpenWindow>,
+        index: usize,
+        client: &mut WindowClient<RtWindowTransport>,
+        role: Role,
+    ) -> Option<i32> {
+        if index >= windows.len() {
+            return None;
+        }
+        let closed = windows.remove(index);
+        let _ = client.close(closed.window);
+        (windows.is_empty() && role == Role::Window).then_some(0)
+    }
+
+    /// What routing an icon-bar event did.
+    enum BarRouted {
+        /// Not the icon bar's event at all; the caller resolves it against a
+        /// window instead.
+        NotMine,
+        /// Handled; the process carries on.
+        Handled,
+        /// Handled, and the process owes this exit code.
+        Ends(i32),
+    }
+
+    /// Route one icon-bar event — an event that names the *application* rather
+    /// than a window.
+    ///
+    /// The slot outlives every window, and a component's slot is often all
+    /// there is, so these are resolved before anything asks which window an
+    /// event belongs to.
+    #[allow(clippy::too_many_arguments)] // The run's whole mutable state, threaded explicitly.
+    fn route_app_bar_event(
+        windows: &mut alloc::vec::Vec<OpenWindow>,
+        client: &mut WindowClient<RtWindowTransport>,
+        desktop: &Desktop,
+        places: &Places,
+        theme: &Theme,
+        icons: &RefCell<IconPipeline>,
+        event_endpoint: u64,
+        role: Role,
+        event: &WindowEvent,
+    ) -> BarRouted {
+        match *event {
+            WindowEvent::AppBarDefault => {
+                // The component handles its own click, and what it opens is a
+                // window at the user's home — the readiest thing a file
+                // manager can offer. An ordinary window declares no default
+                // action, so this cannot reach one.
+                open_more(
+                    windows,
+                    client,
+                    desktop,
+                    places,
+                    theme,
+                    icons,
+                    event_endpoint,
+                    None,
+                );
+                BarRouted::Handled
+            }
+            // A component's rows are its places: open a window at the one
+            // chosen. A stale row — the rail was re-read since the menu was
+            // declared — names nothing and does nothing, rather than opening
+            // somewhere the user did not point at.
+            WindowEvent::AppBarMenu { item } if role == Role::Desktop => {
+                let location = appbar::place_of(item)
+                    .and_then(|index| places.rows().get(index))
+                    .map(|place| place.components().to_vec());
+                if location.is_some() {
+                    open_more(
+                        windows,
+                        client,
+                        desktop,
+                        places,
+                        theme,
+                        icons,
+                        event_endpoint,
+                        location,
+                    );
+                }
+                BarRouted::Handled
+            }
+            // An ordinary file manager declares the shared convention, whose
+            // one command closes every window and ends the process. A row it
+            // never declared names nothing.
+            WindowEvent::AppBarMenu { item } => {
+                if !tairix_window::is_quit(item) {
+                    return BarRouted::Handled;
+                }
+                for win in windows.drain(..) {
+                    let _ = client.close(win.window);
+                }
+                BarRouted::Ends(0)
+            }
+            _ => BarRouted::NotMine,
+        }
+    }
+
+    /// Route one event to whatever it names, answering the exit code the
+    /// process owes or `None` to carry on.
+    ///
+    /// The icon bar's own outcomes are resolved first
+    /// ([`route_app_bar_event`]). Everything else is window-scoped: an id no
+    /// live window carries is a window that has just closed, and the event has
+    /// nowhere to land.
+    #[allow(clippy::too_many_arguments)] // The run's whole mutable state, threaded explicitly.
+    fn route_event(
+        windows: &mut alloc::vec::Vec<OpenWindow>,
+        client: &mut WindowClient<RtWindowTransport>,
+        desktop: &mut Desktop,
+        places: &mut Places,
+        theme: &Theme,
+        icons: &RefCell<IconPipeline>,
+        launcher: &RefCell<Launcher>,
+        event_endpoint: u64,
+        role: Role,
+        event: &WindowEvent,
+    ) -> Option<i32> {
+        match route_app_bar_event(
+            windows,
+            client,
+            desktop,
+            places,
+            theme,
+            icons,
+            event_endpoint,
+            role,
+            event,
+        ) {
+            BarRouted::Handled => return None,
+            BarRouted::Ends(code) => return Some(code),
+            BarRouted::NotMine => {}
+        }
+        let index = event
+            .window_id()
+            .and_then(|id| windows.iter().position(|win| win.window == id))?;
+
+        // The window manager resized (or maximized/restored) this window.
+        // Re-map its frame region at the new client size and repaint so the
+        // listing fills it; the browser lays out to the new viewport
+        // automatically. A refused or unallocatable resize keeps the current
+        // window rather than failing the app (fail closed).
+        //
+        // The reported size is adopted exactly: the declared minimum is the
+        // window manager's to hold, and an app that pushed back here would
+        // fight the drag frame by frame.
+        if let WindowEvent::Resized {
+            width_px,
+            height_px,
+            ..
+        } = *event
+        {
+            let win = &mut windows[index];
+            let new_mode = mode_for(width_px, height_px);
+            if let Some((new_base, new_len)) = resize_frames(
+                client,
+                win.window,
+                win.region_base,
+                win.region_len,
+                &new_mode,
+            ) {
+                win.region_base = new_base;
+                win.region_len = new_len;
+                win.mode = new_mode;
+                if present_window(win, client, theme, icons, desktop.scale()).is_err() {
+                    return Some(fail(EXIT_CHANNEL_LOST, "present refused"));
+                }
+            }
+            return None;
+        }
+
+        let win = &mut windows[index];
+        let canvas = Canvas {
+            theme,
+            mode: &win.mode,
+            scale: desktop.scale(),
+        };
+        // The user asked this window to re-read what is there, so the rail
+        // re-reads the mount table in the same gesture — and a component's
+        // slot menu, which *is* that rail, is re-declared with it. The kernel
+        // publishes no mount-change notification, so this gesture — not a poll
+        // — is how a newly attached volume appears; nothing here spins waiting
+        // for one. Read once and shared out, so the process's rail and the
+        // window's can never disagree about what is mounted.
+        if sidebar::is_refresh_request(
+            &win.browser,
+            canvas.scale,
+            canvas.theme(),
+            canvas.window(),
+            event,
+        ) {
+            let (home, volumes) = places_source();
+            *places = Places::new(&home, &volumes);
+            sidebar::refresh_places(&mut win.places, &home, &volumes);
+            if role == Role::Desktop {
+                declare_app_bar(client, event_endpoint, role, places);
+            }
+        }
+        let (changed, close) = apply_event(
+            &mut win.browser,
+            &mut win.overlays,
+            &mut win.places,
+            launcher,
+            canvas,
+            event,
+        );
+        if close {
+            return close_window(windows, index, client, role);
+        }
+        if changed && present_window(win, client, theme, icons, desktop.scale()).is_err() {
+            return Some(fail(EXIT_CHANNEL_LOST, "present refused"));
+        }
+        None
+    }
+
+    /// Open one more window at `location` (the user's home when `None`),
+    /// stating why when it cannot be opened.
+    ///
+    /// The window cap is this process's own resource bound, not a policy about
+    /// how many folders a user may look at, so reaching it is stated rather
+    /// than silently ignored.
+    #[allow(clippy::too_many_arguments)] // The run's whole mutable state, threaded explicitly.
+    fn open_more(
+        windows: &mut alloc::vec::Vec<OpenWindow>,
+        client: &mut WindowClient<RtWindowTransport>,
+        desktop: &Desktop,
+        places: &Places,
+        theme: &Theme,
+        icons: &RefCell<IconPipeline>,
+        event_endpoint: u64,
+        location: Option<alloc::vec::Vec<String>>,
+    ) {
+        if windows.len() >= MAX_WINDOWS {
+            report_error(&alloc::format!(
+                "already showing {MAX_WINDOWS} windows; close one before opening another"
+            ));
+            return;
+        }
+        let Ok(mut win) = open_window(client, event_endpoint, desktop, places, location) else {
+            // Already stated by `open_window`; a component simply has one
+            // fewer window and the desktop carries on.
+            return;
+        };
+        // A window nobody can see is worse than none: a refused first present
+        // takes it back down and says so, rather than leaving an empty frame
+        // on the desktop.
+        if present_window(&mut win, client, theme, icons, desktop.scale()).is_err() {
+            let _ = client.close(win.window);
+            report_error("the new window could not be painted; it was closed again");
+            return;
+        }
+        windows.push(win);
     }
 
     /// The file manager's launched children: the application bundles it
@@ -1226,16 +1694,16 @@ mod program {
         // lands on exactly the control the user saw.
         let viewport = tairix_browse::render::content_area(window, scale, theme, Some(places));
 
-        // A close request — the desktop's, or *Quit* chosen on the file
-        // manager's own icon-bar slot — ends the app whatever mode it is in;
-        // an open rename edit or properties overlay is simply abandoned
-        // (nothing was written). A menu row the declaration never carried
-        // names no command and is ignored (fail closed).
+        // A close request closes *this* window whatever mode it is in; an open
+        // rename edit or properties overlay is simply abandoned (nothing was
+        // written). Whether the process then ends is the caller's to decide —
+        // an ordinary file manager is its window, a component is not.
+        //
+        // The icon bar's own outcomes never reach here: they name the
+        // application rather than a window, so the run resolves them before it
+        // resolves which window an event belongs to.
         if let WindowEvent::CloseRequested { .. } = event {
             return (false, true);
-        }
-        if let WindowEvent::AppBarMenu { item } = event {
-            return (false, tairix_window::is_quit(*item));
         }
 
         // The right-click context menu owns input while it is open (it opens
@@ -1277,15 +1745,6 @@ mod program {
                 ),
                 _ => (false, false),
             };
-        }
-
-        // The user asked the window to re-read what is there, so the rail
-        // re-reads the mount table in the same gesture. The kernel publishes no
-        // mount-change notification today, so this — not a poll — is how a
-        // newly attached volume appears; nothing here spins waiting for one.
-        if sidebar::is_refresh_request(browser, scale, theme, window, event) {
-            let (home, volumes) = places_source();
-            sidebar::refresh_places(places, &home, &volumes);
         }
 
         // The rail owns the window's leading edge: its hover highlight tracks
@@ -4006,27 +4465,29 @@ mod program {
             Err(err) => return usage_error(&alloc::format!("{err}")),
         };
 
-        // --- The browser over the live, capability-checked listing call,
-        // opened where the command line asked (or at the home directory when
-        // it asked for nowhere reachable).
         if let Some(reason) = &start.refused {
             report_error(reason);
         }
-        let Some(mut browser) = open_browser(start.location) else {
-            return fail(EXIT_NO_LISTING, "root directory listing refused");
-        };
 
-        // --- Open the window and paint the first listing.
+        // --- What the desktop is, before anything is sized or painted, so the
+        // first frame is right rather than a guess corrected once the user has
+        // seen it. The reply also tells this process who the session is, which
+        // is the identity it requires of every event's attested sender — and
+        // it does so without a window, which is what lets a component declare
+        // its slot and start answering it before it opens one.
         let mut client = WindowClient::new(RtWindowTransport);
-        // The screen, the density, and the appearance, before anything is
-        // sized or painted, so the first frame is right rather than a guess
-        // corrected once the user has seen it.
         let info = match client.desktop() {
             Ok(info) => info,
             Err(err) => {
                 let _ = writeln!(Stderr, "files: desktop query refused: {err}");
                 return EXIT_NO_WINDOW;
             }
+        };
+        let Some(server) = client.session() else {
+            return fail(
+                EXIT_NO_WINDOW,
+                "the desktop session did not identify itself",
+            );
         };
         let mut desktop = match Desktop::new(info) {
             Ok(desktop) => desktop,
@@ -4036,42 +4497,6 @@ mod program {
             }
         };
 
-        let (w, h) = desktop.window_size(WIN_WIDTH, WIN_HEIGHT);
-        let mut mode = mode_for(w, h);
-        let frame_len = (mode.stride_bytes as usize) * (mode.height_px as usize);
-        let total = frame_len * FRAME_COUNT as usize;
-        let mut region_id: u64 = 0;
-        let base = tairix_rt::shm_create(total, &mut region_id);
-        if base < 0 {
-            return fail(EXIT_NO_FRAMES, "shared frame region refused");
-        }
-        let grant = tairix_rt::shm_grant(region_id, WINDOW_ENDPOINT);
-        if grant < 1 {
-            return fail(EXIT_NO_FRAMES, "frame region grant refused");
-        }
-        let Ok(base) = usize::try_from(base) else {
-            return fail(
-                EXIT_NO_FRAMES,
-                "frame region base outside the address width",
-            );
-        };
-        // SAFETY: the kernel mapped at least `total` zeroed bytes
-        // read/write into this process at `base` (`shm_create` maps the
-        // exact length it was asked for). The mapping stays live until the
-        // resize path (below) unmaps it, and it does so only *after* the
-        // session has adopted a freshly-mapped replacement region and only
-        // after re-pointing `frames` at that new region — so `frames` is never
-        // read against an unmapped or aliased address. The session maps the
-        // same frames read-only for its blit, and the protocol serialises
-        // access: this app is parked in its present call while the session
-        // reads.
-        let mut frames = unsafe { core::slice::from_raw_parts_mut(base as *mut u8, total) };
-        // The live frame region the window is mapped onto: tracked as base +
-        // length (not just the slice) so a resize can unmap the old region and
-        // adopt a fresh one, re-pointing `frames` at it.
-        let mut region_base = base;
-        let mut region_len = total;
-
         // --- The event mailbox the app parks on, bound and added to a
         // fresh wait-set (a bring-up refusal exits fail-loud with its code).
         let (event_endpoint, set) = match bind_event_mailbox() {
@@ -4079,71 +4504,69 @@ mod program {
             Err(code) => return code,
         };
 
-        // The window's title is the location it shows, so it opens carrying it
-        // rather than a name the first frame would have to replace. The run
-        // keeps what was last sent, so a later frame retitles only on a move.
-        // The icon-bar presence first: a declared presence belongs to the
-        // process, so declaring it before this process owns a window is what
-        // makes its slot carry this menu from the moment it appears rather
-        // than being a slot the session derived from a window, which opens
-        // nothing.
-        declare_app_bar(&mut client, event_endpoint);
-        let mut title = location_title(&browser);
-        #[allow(clippy::cast_sign_loss)] // `grant >= 1` checked above; it is a kernel handle.
-        let Ok((window, server)) = client.create(
-            grant as u64,
-            event_endpoint,
-            FRAME_COUNT,
-            &mode,
-            &title,
-            WindowSizing {
-                resizable: WIN_RESIZABLE,
-                min_width_px: MIN_WIN_WIDTH,
-                min_height_px: MIN_WIN_HEIGHT,
-            },
-        ) else {
-            return fail(EXIT_NO_WINDOW, "desktop session refused the window");
-        };
         let mut themes = ThemeRegistry::with_builtins();
         themes.set_appearance(desktop.appearance());
         let mut theme = themes.active();
-        let mut overlays = initial_overlays();
         // The places rail: the user's own shortcuts plus whatever is mounted
         // right now, read once here and re-read whenever the user refreshes.
+        // This is the process's copy — the one a component's slot menu is
+        // declared from; each window takes its own so its focus and hover are
+        // its own.
         let mut places = {
             let (home, volumes) = places_source();
             Places::new(&home, &volumes)
         };
 
+        // --- The icon-bar presence, before this process owns any window. A
+        // declared presence belongs to the *process*, so declaring it first is
+        // what makes the slot carry this menu and this click from the moment
+        // it appears; declare it after a window and the session derives a slot
+        // from that window meanwhile — one that opens no menu and does nothing
+        // when clicked. For a component that is the whole point: its slot is
+        // all it has until the user asks for a window.
+        declare_app_bar(&mut client, event_endpoint, start.role, &places);
+
         // --- The grid's icon artwork: the reclaim-governed decode cache and
-        // the read/rasterise seams it resolves through, budgeted from this
-        // window's frame size. Shared between the present path (which draws
-        // through it) and the parked event source (which trims it when the
-        // machine reports a deeper memory-pressure band); dropping it releases
-        // the retained pixels.
+        // the read/rasterise seams it resolves through, budgeted from one
+        // window's frame size and shared by every window this process opens —
+        // one decode serves them all. Shared, too, between the present path
+        // (which draws through it) and the parked event source (which trims it
+        // when the machine reports a deeper memory-pressure band); dropping it
+        // releases the retained pixels.
         // `bind_event_mailbox` already primed the gauge with the band in
         // force now (`tairix_procinfo::pressure::watch`), so the cache never
         // runs on the fail-closed unknown state before the first draw.
-        let icons = RefCell::new(IconPipeline::new(frame_len));
+        let icons = {
+            let (w, h) = desktop.window_size(WIN_WIDTH, WIN_HEIGHT);
+            let nominal = mode_for(w, h);
+            RefCell::new(IconPipeline::new(
+                (nominal.stride_bytes as usize) * (nominal.height_px as usize),
+            ))
+        };
 
-        if present_frame(
-            &mut browser,
-            &overlays,
-            &places,
-            theme,
-            &mut FrameTarget {
-                client: &mut client,
-                window,
-                frame: &mut *frames,
-                mode: &mode,
-                title: &mut title,
-            },
-            &icons,
-            desktop.scale(),
-        )
-        .is_err()
-        {
-            return fail(EXIT_CHANNEL_LOST, "first present refused");
+        // --- The windows. An ordinary file manager *is* its window, so a
+        // first one that will not open leaves it nothing to be; a component
+        // opens none until the user asks, and an empty list is a perfectly
+        // good state for it to sit in.
+        let mut windows: alloc::vec::Vec<OpenWindow> = alloc::vec::Vec::new();
+        if start.role == Role::Window {
+            let mut win = match open_window(
+                &mut client,
+                event_endpoint,
+                &desktop,
+                &places,
+                start.location,
+            ) {
+                Ok(win) => win,
+                // Already stated, with the code naming what refused: an
+                // ordinary file manager is its window, so there is nothing
+                // left to be.
+                Err(code) => return code,
+            };
+            if present_window(&mut win, &mut client, theme, &icons, desktop.scale()).is_err() {
+                return fail(EXIT_CHANNEL_LOST, "first present refused");
+            }
+            windows.push(win);
         }
 
         // --- The launched-bundle bookkeeping: shared between the event
@@ -4171,25 +4594,26 @@ mod program {
             // figure actually moved.
             tairix_rt::cachereport::publish_if_due();
             // A running long operation (a recursive delete, or a copy/move
-            // paste) owns the window: drive it a bounded slice at a time,
+            // paste) owns its own window: drive it a bounded slice at a time,
             // repaint the progress, and poll (non-blocking) for a mid-run
             // cancel or a close — never parking while there is genuine work to
             // do, and returning to the parked wait the instant the operation
-            // finishes (§2.23).
-            if overlays.operation.is_some() {
-                let finished = overlays.operation.as_mut().is_some_and(advance_operation);
-                if present_frame(
-                    &mut browser,
-                    &overlays,
-                    &places,
+            // finishes (§2.23). Another window carries on: the polled event is
+            // routed to whichever window it names, so only the operating
+            // window is modal.
+            if let Some(busy) = windows
+                .iter()
+                .position(|win| win.overlays.operation.is_some())
+            {
+                let finished = windows[busy]
+                    .overlays
+                    .operation
+                    .as_mut()
+                    .is_some_and(advance_operation);
+                if present_window(
+                    &mut windows[busy],
+                    &mut client,
                     theme,
-                    &mut FrameTarget {
-                        client: &mut client,
-                        window,
-                        frame: &mut *frames,
-                        mode: &mode,
-                        title: &mut title,
-                    },
                     &icons,
                     desktop.scale(),
                 )
@@ -4202,23 +4626,15 @@ mod program {
                     // partial removal (a refusal or a cancel) is shown honestly
                     // (§2.24); a failed re-list leaves the browser put (fail
                     // closed).
-                    overlays.operation = None;
-                    let _ = browser.refresh();
+                    windows[busy].overlays.operation = None;
+                    let _ = windows[busy].browser.refresh();
                     // Reap any launched bundle that exited while the operation
                     // ran (the wait-set was not parked on during it).
                     launcher.borrow_mut().reap();
-                    if present_frame(
-                        &mut browser,
-                        &overlays,
-                        &places,
+                    if present_window(
+                        &mut windows[busy],
+                        &mut client,
                         theme,
-                        &mut FrameTarget {
-                            client: &mut client,
-                            window,
-                            frame: &mut *frames,
-                            mode: &mode,
-                            title: &mut title,
-                        },
                         &icons,
                         desktop.scale(),
                     )
@@ -4229,8 +4645,10 @@ mod program {
                     continue;
                 }
                 // Poll (non-blocking) for a cancel or a close while the walk
-                // runs; anything else is ignored so nothing navigates behind
-                // the modal progress panel.
+                // runs. An event naming the operating window is the
+                // operation's; one naming another window is that window's and
+                // is applied as usual, so a long walk in one window never
+                // freezes the rest.
                 match poll_operation_event(event_endpoint, server) {
                     Ok(Some(event)) => {
                         // A desktop change during a long operation is
@@ -4250,28 +4668,47 @@ mod program {
                                 );
                             }
                         }
-                        let canvas = Canvas {
+                        if event.window_id() == Some(windows[busy].window) {
+                            let win = &mut windows[busy];
+                            let canvas = Canvas {
+                                theme,
+                                mode: &win.mode,
+                                scale: desktop.scale(),
+                            };
+                            match operation_control(
+                                &win.places,
+                                canvas.scale,
+                                canvas.theme(),
+                                canvas.window(),
+                                &event,
+                            ) {
+                                OperationControl::Cancel => {
+                                    if let Some(operation) = win.overlays.operation.as_mut() {
+                                        operation.progress.request_cancel();
+                                    }
+                                }
+                                OperationControl::Close => {
+                                    if let Some(code) =
+                                        close_window(&mut windows, busy, &mut client, start.role)
+                                    {
+                                        return code;
+                                    }
+                                }
+                                OperationControl::Ignore => {}
+                            }
+                        } else if let Some(code) = route_event(
+                            &mut windows,
+                            &mut client,
+                            &mut desktop,
+                            &mut places,
                             theme,
-                            mode: &mode,
-                            scale: desktop.scale(),
-                        };
-                        match operation_control(
-                            &places,
-                            canvas.scale,
-                            canvas.theme(),
-                            canvas.window(),
+                            &icons,
+                            &launcher,
+                            event_endpoint,
+                            start.role,
                             &event,
                         ) {
-                            OperationControl::Cancel => {
-                                if let Some(operation) = overlays.operation.as_mut() {
-                                    operation.progress.request_cancel();
-                                }
-                            }
-                            OperationControl::Close => {
-                                let _ = client.close(window);
-                                return 0;
-                            }
-                            OperationControl::Ignore => {}
+                            return code;
                         }
                     }
                     Ok(None) => {}
@@ -4288,28 +4725,17 @@ mod program {
                 Err(_) => return fail(EXIT_CHANNEL_LOST, "event channel lost"),
             };
 
+            // The desktop belongs to the seat, not to one window, so a change
+            // is adopted once and every window is repainted in it.
             match desktop.apply(&event) {
                 Ok(true) => {
                     themes.set_appearance(desktop.appearance());
                     theme = themes.active();
-                    if present_frame(
-                        &mut browser,
-                        &overlays,
-                        &places,
-                        theme,
-                        &mut FrameTarget {
-                            client: &mut client,
-                            window,
-                            frame: &mut *frames,
-                            mode: &mode,
-                            title: &mut title,
-                        },
-                        &icons,
-                        desktop.scale(),
-                    )
-                    .is_err()
-                    {
-                        return fail(EXIT_CHANNEL_LOST, "present refused");
+                    for win in &mut windows {
+                        if present_window(win, &mut client, theme, &icons, desktop.scale()).is_err()
+                        {
+                            return fail(EXIT_CHANNEL_LOST, "present refused");
+                        }
                     }
                 }
                 Ok(false) => {}
@@ -4317,94 +4743,20 @@ mod program {
                     let _ = writeln!(Stderr, "files: could not apply desktop change: {err}");
                 }
             }
-            // The window manager resized (or maximized/restored) the window.
-            // Re-map the frame region at the new client size and repaint so the
-            // listing fills the new window; the browser lays out to the new
-            // viewport automatically. A refused or unallocatable resize keeps
-            // the current window rather than failing the app (fail closed).
-            //
-            // The reported size is adopted exactly: the declared minimum is
-            // the window manager's to hold, and an app that pushed back here
-            // would fight the drag frame by frame.
-            if let WindowEvent::Resized {
-                width_px,
-                height_px,
-                ..
-            } = event
-            {
-                let new_mode = mode_for(width_px, height_px);
-                if let Some((new_base, new_len)) =
-                    resize_frames(&mut client, window, region_base, region_len, &new_mode)
-                {
-                    region_base = new_base;
-                    region_len = new_len;
-                    mode = new_mode;
-                    // SAFETY: `resize_frames` mapped `region_len` zeroed R/W
-                    // bytes at `region_base` and the session adopted them; the
-                    // old region is now unmapped. Same invariants as the
-                    // initial mapping — nothing else aliases it, and the
-                    // present call below serialises access with the session.
-                    frames = unsafe {
-                        core::slice::from_raw_parts_mut(region_base as *mut u8, region_len)
-                    };
-                    if present_frame(
-                        &mut browser,
-                        &overlays,
-                        &places,
-                        theme,
-                        &mut FrameTarget {
-                            client: &mut client,
-                            window,
-                            frame: &mut *frames,
-                            mode: &mode,
-                            title: &mut title,
-                        },
-                        &icons,
-                        desktop.scale(),
-                    )
-                    .is_err()
-                    {
-                        return fail(EXIT_CHANNEL_LOST, "present refused");
-                    }
-                }
-                continue;
-            }
-            let (changed, close) = apply_event(
-                &mut browser,
-                &mut overlays,
+
+            if let Some(code) = route_event(
+                &mut windows,
+                &mut client,
+                &mut desktop,
                 &mut places,
+                theme,
+                &icons,
                 &launcher,
-                Canvas {
-                    theme,
-                    mode: &mode,
-                    scale: desktop.scale(),
-                },
+                event_endpoint,
+                start.role,
                 &event,
-            );
-            if close {
-                // The desktop asked; close the window and end cleanly.
-                let _ = client.close(window);
-                return 0;
-            }
-            if changed
-                && present_frame(
-                    &mut browser,
-                    &overlays,
-                    &places,
-                    theme,
-                    &mut FrameTarget {
-                        client: &mut client,
-                        window,
-                        frame: &mut *frames,
-                        mode: &mode,
-                        title: &mut title,
-                    },
-                    &icons,
-                    desktop.scale(),
-                )
-                .is_err()
-            {
-                return fail(EXIT_CHANNEL_LOST, "present refused");
+            ) {
+                return code;
             }
         }
     }

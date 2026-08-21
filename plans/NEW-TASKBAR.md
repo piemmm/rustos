@@ -769,18 +769,27 @@ What now stands:
   `deliver_app_event` addresses a bar event through *that* recorded route
   rather than anything the event carries. Each delivery path refuses the
   other's events. `WindowClient::set_app_bar` is the client half, and
-  `lib/window`'s `appbar::quit_and_about` is the one definition of the
-  commonest declaration (a *Quit* row plus `About`, no default action) that
-  `files`, `viewer`, `wallpaper`, and `widgets` all share.
+  `lib/window`'s `appbar::declaration` is the one definition of the desktop's
+  **menu convention**: the `About` row first, the application's own rows next,
+  then a rule and *Quit* last. An application supplies only the middle, so it
+  cannot place the two ends and cannot get them wrong; `appbar::info_and_quit`
+  names the commonest case (the convention's two rows, no default action)
+  that `viewer`, `wallpaper`, and `widgets` share, and `terminal` composes its
+  *New window* row through the same builder. A submenu row is refused there
+  rather than drawn childless — a flat list cannot express parented children,
+  so an application needing one builds its own `AppMenu`.
 - **The bar draws exactly what was declared.** `MenuSubject::App` renders
   every top-level declared row in declaration order with its enablement and
   mark; a declared separator opens the group its next row begins rather than
   becoming a choosable row; a declared submenu's children open beside the
   plate (one level, flipped when the trailing side would leave the screen);
-  and the *About* row's child is the information panel. Choosing a row
-  reports `AppMenuChosen { app, item }` and the session relays the id
-  straight back — the bar never interprets one. An application that declared
-  no menu opens **nothing**.
+  and the `About` row's child is the information panel. That row is the one
+  whose *label* is the bar's rather than the application's: it draws as
+  `INFO_ROW_LABEL` ("Info", with the submenu arrow), so every application
+  reaches its panel by the same name. Choosing a row reports
+  `AppMenuChosen { app, item }` and the session relays the id straight back —
+  the bar never interprets one. An application that declared no menu opens
+  **nothing**.
 - **The hover window picker** (`WindowPicker`) opens at
   `PICKER_MIN_WINDOWS` (two) windows and no fewer, which is why no dwell
   timer is needed: the picker appears exactly where there is a choice to
@@ -795,10 +804,11 @@ What now stands:
   carries its own pty, shell child, screen model, retained picture, look, and
   overlay, over one wait-set with one event mailbox for the process plus a
   shell-output and child member per window. It declares `default_action: true`
-  with rows *New window*, a separator, *Quit*, and `About`
-  (`tairix_terminal::appbar`), so its slot opens a fresh window on a click
-  and its menu can close them all. `MAX_WINDOWS` bounds the process's own
-  resources; the last window closing ends it.
+  and its own *New window* row through the shared convention
+  (`tairix_terminal::appbar` over `appbar::declaration`), so the menu reads
+  `About`, *New window*, a rule, *Quit* — its slot opens a fresh window on a
+  click and its menu can close them all. `MAX_WINDOWS` bounds the process's
+  own resources; the last window closing ends it.
 
 Tested in the `lib/abi` window-IPC suites (the builder's and the decoder's
 shared shape rule, every refusal, the reserved tail, fuzz), the `lib/window`

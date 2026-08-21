@@ -120,7 +120,7 @@ mod program {
         FrameContent, HangTracker, HoldBack, IconRasteriser, InputSource, KeyboardInputSource,
         LaunchTable, ListingClient, ListingDesk, LockedDrain, OwnerWindow, PickConclusion,
         PinboardMenu, PinboardMenuOutcome, PinboardStore, PinboardStoreError, Prepared,
-        PresentedOwners, ScreenFade, ScreenLock, SeatEventReader, SeatInputChannel,
+        PresentedOwners, ScreenFade, ScreenLock, SeatEventReader, SeatInputChannel, SessionClock,
         SessionFileReader, SessionFileWriter, SessionPicker, SessionWindows, ShellWindowHost,
         SwitchboardMailbox, SwitchboardOutcome, SwitchboardServe, WallpaperDesk, WallpaperSource,
         BUNDLE_RUN_SUFFIX, FILES_LABEL, FILES_RUN_PATH, SWITCHBOARD_CALL_REFUSED,
@@ -718,12 +718,37 @@ mod program {
     fn animate(
         fade: &mut ScreenFade,
         lock: &mut ScreenLock,
-        shell: &DesktopShell,
+        clock: &mut SessionClock,
+        shell: &mut DesktopShell,
         compositor: &mut Compositor,
         now_ns: u64,
     ) {
         fade.advance(now_ns, compositor);
         lock.advance(now_ns, shell, compositor);
+        tick_clock(clock, shell, compositor, now_ns);
+    }
+
+    /// Read the wall clock and, when the minute has turned, put the new label
+    /// on the bar.
+    ///
+    /// The read is one `wall_time` per tick — a minute apart, and only on the
+    /// paths this loop already passes through — so an idle desktop reads the
+    /// clock once a minute and does nothing else. A refused read (a machine
+    /// with no wall clock wired at all) leaves the bar exactly as it was
+    /// rather than blanking it: the label already shown is the last thing that
+    /// was true.
+    fn tick_clock(
+        clock: &mut SessionClock,
+        shell: &mut DesktopShell,
+        compositor: &mut Compositor,
+        now_ns: u64,
+    ) {
+        let Ok(reading) = tairix_rt::wall_time() else {
+            return;
+        };
+        if clock.adopt(reading, now_ns) {
+            shell.set_clock_label(compositor, clock.label());
+        }
     }
 
     /// Dissolve the session's screen to black, presenting every frame, and
@@ -949,6 +974,36 @@ mod program {
                 SWITCHBOARD_RUN_PATH,
             )
         })
+    }
+
+    /// Start the desktop's file manager in its **core** role as this
+    /// logged-in user and record it in the launch table like any other
+    /// desktop child.
+    ///
+    /// The file manager is a component of the desktop rather than an
+    /// application the user starts: it holds a permanent icon-bar slot from
+    /// bring-up, offers the user's places and the mounted volumes on that
+    /// slot's menu, and cannot be quit. The shared
+    /// [`DESKTOP_ROLE_SWITCH`](tairix_window::DESKTOP_ROLE_SWITCH) is what
+    /// says so — the same binary launched without it (from a shell, or by
+    /// opening a folder on the desktop) is the ordinary, quittable file
+    /// manager, so a second component can never appear.
+    ///
+    /// It is spawned before anything else so it takes the leading application
+    /// slot: the strip keeps the order the session first saw each process in,
+    /// which puts the desktop's own component ahead of whatever the user
+    /// starts. A refused spawn is reported by the reap like any other and
+    /// leaves the desktop running without it.
+    fn spawn_files(launched: &mut LaunchTable) {
+        let _ = record_launch(
+            launched,
+            spawn_app(
+                FILES_RUN_PATH.as_bytes(),
+                &[tairix_window::DESKTOP_ROLE_SWITCH.as_bytes()],
+            ),
+            FILES_LABEL,
+            FILES_RUN_PATH,
+        );
     }
 
     /// Classify the served presents drained since the last report decision:
@@ -1789,9 +1844,9 @@ mod program {
         // `spawn` return. This table remembers each running child's label
         // (so the `CHILD_TOKEN` reap below can name the app in the
         // fail-loud diagnosis) and its spawn path (the attested bundle
-        // identity the Files button's idempotent open resolves against). An
-        // entry is removed when its child is reaped, so it never grows
-        // beyond the apps currently alive.
+        // identity a single-instance rule resolves against). An entry is
+        // removed when its child is reaped, so it never grows beyond the
+        // apps currently alive.
         let mut launched = LaunchTable::new();
         // Start the desktop's Switchboard monitor. It is recorded in the
         // launch table like any desktop child — the reap arm names a load
@@ -1799,6 +1854,10 @@ mod program {
         // — and the very same bring-up serves a later tray press that
         // finds no instance live.
         let mut switchboard_pid = spawn_switchboard(&mut launched);
+        // Start the desktop's file manager in its core role. It is a
+        // component of the desktop, not an application the user starts, so it
+        // comes up with the session and holds its icon-bar slot from here on.
+        spawn_files(&mut launched);
         // A tray press with no live monitor to receive it: the section the
         // bar asked to open on, held until that instance's first publish
         // proves it is up. One pending open, replaced by a later press
@@ -1839,6 +1898,11 @@ mod program {
         // or missing name here cannot unlock anybody's session. An unset or
         // malformed value simply leaves the prompt unnamed.
         let mut lock = ScreenLock::new();
+        // The taskbar clock. It is read here so the bar carries the time from
+        // the first frame rather than blank until the minute turns, and its
+        // tick is folded into the park below — one wake a minute, the fewest a
+        // minute-granular clock can be right with.
+        let mut clock = SessionClock::new();
         let account = tairix_rt::env_var(b"USER")
             .and_then(|raw| core::str::from_utf8(raw).ok())
             .unwrap_or_default();
@@ -1853,6 +1917,14 @@ mod program {
         // resumed: the wake mailbox bound. Without it the row is absent
         // rather than refused — there is no authority to explain.
         shell.set_switch_user_available(&mut compositor, switch.is_available());
+        // The clock's first reading, so the bar carries the time from the
+        // frame the user first sees rather than from the next minute.
+        tick_clock(
+            &mut clock,
+            &mut shell,
+            &mut compositor,
+            tairix_rt::clock_get(),
+        );
 
         let mut token = 0u64;
         loop {
@@ -1870,9 +1942,12 @@ mod program {
                 let now_ns = tairix_rt::clock_get();
                 switch.park_deadline_ns(lock.park_deadline_ns(
                     now_ns,
-                    fade.park_deadline_ns(
+                    clock.park_deadline_ns(
                         now_ns,
-                        tairix_rt::cachereport::fold_wait_deadline_ns(u64::MAX),
+                        fade.park_deadline_ns(
+                            now_ns,
+                            tairix_rt::cachereport::fold_wait_deadline_ns(u64::MAX),
+                        ),
                     ),
                 ))
             };
@@ -1891,7 +1966,8 @@ mod program {
                 animate(
                     &mut fade,
                     &mut lock,
-                    &shell,
+                    &mut clock,
+                    &mut shell,
                     &mut compositor,
                     tairix_rt::clock_get(),
                 );
@@ -2619,7 +2695,8 @@ mod program {
             animate(
                 &mut fade,
                 &mut lock,
-                &shell,
+                &mut clock,
+                &mut shell,
                 &mut compositor,
                 tairix_rt::clock_get(),
             );
@@ -4011,22 +4088,6 @@ mod program {
                 | InputResponse::DesktopKey { .. }
                 | InputResponse::Ignored => {}
             },
-            ShellOutcome::Taskbar(TaskbarResponse::OpenFiles) => {
-                // The permanent Files button is idempotent: raise the
-                // desktop-launched file manager's window when one is up,
-                // let an in-flight launch finish undisturbed, and only
-                // spawn when no desktop-launched copy is running.
-                activate_bundle(
-                    shell,
-                    compositor,
-                    server,
-                    windows,
-                    identity,
-                    launched,
-                    FILES_RUN_PATH,
-                    FILES_LABEL,
-                );
-            }
             ShellOutcome::Taskbar(TaskbarResponse::LibraryLaunch { entry }) => {
                 // Resolve the chosen entry's bundle through the catalog the
                 // popup was handed and spawn its `Run` binary: admitted
@@ -4584,36 +4645,6 @@ mod program {
             return desktop.pointer_left(layout, damage);
         }
         DesktopOutcome::ignored()
-    }
-
-    /// An idempotent bundle activation: raise the running copy's window
-    /// when the desktop launched one and it has a window up; do nothing
-    /// while its launch is still in flight (no window yet — the press is
-    /// already satisfied); spawn only when no desktop-launched copy is
-    /// alive. The one rule behind the Files button.
-    #[allow(clippy::too_many_arguments)] // The serve loop's whole mutable state, threaded explicitly.
-    fn activate_bundle(
-        shell: &mut DesktopShell,
-        compositor: &mut Compositor,
-        server: &WindowServer<RtShmMapper>,
-        windows: &SessionWindows,
-        identity: &RtWindowIdentity,
-        launched: &mut LaunchTable,
-        run_path: &str,
-        label: &str,
-    ) {
-        if let Some(pid) = launched.running_from(run_path) {
-            if let Some(wm) = window_of_pid(pid, server, windows, identity) {
-                let _ = shell.raise_window(compositor, wm);
-            }
-            return;
-        }
-        let _ = record_launch(
-            launched,
-            spawn_app(run_path.as_bytes(), &[]),
-            label,
-            run_path,
-        );
     }
 
     /// The compositor window of the first served window owned by `pid`,

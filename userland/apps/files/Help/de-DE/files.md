@@ -4,7 +4,7 @@ files — grafischer Dateisystem-Browser
 
 ## SYNOPSIS
 
-`files [verzeichnis] [-h | -?]`
+`files [--desktop] [verzeichnis] [-h | -?]`
 
 ## DESCRIPTION
 
@@ -43,6 +43,12 @@ ignoriert.
 
 ## OPTIONS
 
+- `--desktop` — als eigene Dateimanager-Komponente des Desktops laufen: ein
+  dauerhafter Platz auf der Symbolleiste, der Ihre Orte und die eingebundenen
+  Datenträger anbietet, kein Fenster, bis eines verlangt wird, und keine
+  Möglichkeit zu beenden. Die Desktop-Sitzung übergibt dies beim Start; ein
+  zusätzlich genanntes `verzeichnis` wird abgewiesen, denn eine Komponente öffnet
+  kein Fenster, in das es gehören könnte.
 - `-h, -?` — die kurze Hilfe dieses Befehls anzeigen und beenden.
 
 ## EXIT STATUS

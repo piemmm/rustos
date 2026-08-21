@@ -46,6 +46,15 @@ tairix-input = { path = "../../../lib/input", version = "=0.0.0" }
 # shares, so the profile document's comments are recognised exactly as the
 # desktop's own settings documents are.
 tairix-util = { path = "../../../lib/util", version = "=0.0.0" }
+# The app half of the window channel: `WindowClient` (create / present /
+# close over the `WindowTransport` seam), the shared app event-mailbox naming
+# rule (`event_endpoint_for`), and the desktop's one icon-bar menu convention
+# (`tairix_window::declaration` — the information row first, the app's own
+# rows next, then a rule and *Quit*). `src/appbar.rs` composes its *New
+# window* row through that convention and is host-tested, so this is a plain
+# dependency rather than a `Run`-only one: the terminal states its own row and
+# never restates the order around it (§2.2).
+tairix-window = { path = "../../../lib/window", version = "=0.0.0" }
 
 # The package is both the terminal-emulator engine library (above) and the
 # `Run` entry-point binary of the on-disk `terminal.app` bundle
@@ -66,10 +75,6 @@ path = "src/run.rs"
 # surface and the shared frame the desktop session reads, so no app carries a
 # private copy of the channel-order decision.
 tairix-display = { path = "../../../lib/display", version = "=0.0.0" }
-# The app half of the window channel: `WindowClient` (create / present /
-# close over the `WindowTransport` seam) and the shared app event-mailbox
-# naming rule (`event_endpoint_for`).
-tairix-window = { path = "../../../lib/window", version = "=0.0.0" }
 # The pure-Rust userland runtime: `_start`, the stack canary, the panic
 # handler, the allocator, and the syscall wrappers (`pipe_create` /
 # `spawn_attached`, `fs_read` / `fs_write` / `fs_close`, `shm_create` /

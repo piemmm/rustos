@@ -128,15 +128,16 @@ mod program {
         let _ = writeln!(Stderr, "wallpaper: {reason}");
     }
 
-    /// Declare this application's presence on the desktop's icon bar: a
-    /// *Quit* row and the session-drawn *About* row, with the primary click
-    /// left to the session so it raises the window.
+    /// Declare this application's presence on the desktop's icon bar: the
+    /// shared convention's two rows — the session-drawn information row and
+    /// *Quit* — with the primary click left to the session so it raises the
+    /// window.
     ///
     /// A refused declaration is an answer, not a death: the application says
     /// so and carries on with no slot of its own — its window is still
     /// reachable through the one the session derives from it.
     fn declare_app_bar(client: &mut WindowClient<RtWindowTransport>, endpoint: u64) {
-        match tairix_window::quit_and_about(endpoint) {
+        match tairix_window::info_and_quit(endpoint) {
             Ok(bar) => {
                 if let Err(err) = client.set_app_bar(&bar) {
                     report(&alloc::format!(

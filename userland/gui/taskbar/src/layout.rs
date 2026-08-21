@@ -2,9 +2,9 @@
 //!
 //! [`BarLayout::compute`] turns a [`TaskbarConfig`] plus the current
 //! application and icon counts into the screen [`Rect`] of every region: the
-//! bar itself, the two permanent leading launcher buttons (Library, then
-//! Files — never reordered, never removed), the separator rule that divides
-//! the Library launcher from everything after it, the application strip (and
+//! bar itself, the permanent leading launcher button (Library — never
+//! reordered, never removed), the separator rule that divides it from
+//! everything after it, the application strip (and
 //! a slot per running application), the notification area (and a slot per
 //! icon), the clock, and the Switchboard tray capsule anchored at the very
 //! trailing end. All arithmetic saturates, so a
@@ -44,8 +44,6 @@ use crate::taskbar::TaskbarConfig;
 pub enum Hit {
     /// The Library launcher button (the program-library popup's invoker).
     Library,
-    /// The Files launcher button (opens the file manager).
-    Files,
     /// The running application at this index into [`BarLayout::apps`].
     App(usize),
     /// The notification icon at this index into [`BarLayout::notifications`].
@@ -74,14 +72,8 @@ pub struct BarLayout {
     /// never reports it, so a press here lands on the bare bar. [`Rect::EMPTY`]
     /// when the bar is too short to reach it or too thin to inset it.
     pub separator: Rect,
-    /// The Files launcher button, after the Library button and the separator
-    /// — the first of everything the rule groups together, so the file
-    /// manager reads as a peer of the application slots rather than of the
-    /// library.
-    /// [`Rect::EMPTY`] when the bar is too short to hold it.
-    pub files: Rect,
     /// The region the running applications occupy, between the leading
-    /// launchers and the notification area.
+    /// launcher and the notification area.
     pub app_strip: Rect,
     /// One slot per running application, in strip order. An application that
     /// does not fit in the strip is [`Rect::EMPTY`].
@@ -188,16 +180,9 @@ impl BarLayout {
             .map_or(Rect::EMPTY, |(off, len)| {
                 placer.place_inset(off, len, inset)
             });
-        let files_start = config.launcher_extent.saturating_add(gutter);
-        let files = slot(
-            &placer,
-            files_start,
-            config.launcher_extent,
-            0,
-            content_total,
-        );
-        let leading_len = files_start
-            .saturating_add(config.launcher_extent)
+        let leading_len = config
+            .launcher_extent
+            .saturating_add(gutter)
             .min(content_total);
 
         let trailing = trailing_end(&placer, config, (leading_len, content_total), icon_count);
@@ -218,7 +203,6 @@ impl BarLayout {
             corner_radius,
             library,
             separator,
-            files,
             app_strip,
             apps,
             notification_area: trailing.notification_area,
@@ -241,9 +225,6 @@ impl BarLayout {
         }
         if self.library.contains(point) {
             return Some(Hit::Library);
-        }
-        if self.files.contains(point) {
-            return Some(Hit::Files);
         }
         if self.switchboard.contains(point) {
             return Some(Hit::Switchboard);
@@ -272,13 +253,13 @@ struct TrailingEnd {
 }
 
 /// Place the trailing regions within `span` — `(the offset the leading
-/// launchers end at, the content region's main-axis length)`.
+/// launcher and its rule end at, the content region's main-axis length)`.
 ///
-/// They clip against the permanent leading launchers and never the reverse,
-/// so a degenerate screen shrinks the clock and icons to nothing rather than
-/// overlaying them on a launcher. The Switchboard capsule is placed first
-/// among them: the system readout survives preferentially, so the clock and
-/// icons collapse before it does — only the leading launchers outrank it.
+/// They clip against the permanent leading launcher and never the reverse, so
+/// a degenerate screen shrinks the clock and icons to nothing rather than
+/// overlaying them on it. The Switchboard capsule is placed first among them:
+/// the system readout survives preferentially, so the clock and icons
+/// collapse before it does — only the leading launcher outranks it.
 fn trailing_end(
     placer: &Placer,
     config: &TaskbarConfig,

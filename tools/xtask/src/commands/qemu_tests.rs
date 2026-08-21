@@ -542,6 +542,10 @@ const KEYBOARD_ONLY_ARMED_OCCURRENCES: u32 = 1;
 const AUTOLOAD_FILES_ACTIVATED_MARKER: &str =
     tairix_test_autoload_input_qemu_aarch64::FILES_WINDOW_ACTIVATED_MARKER;
 
+/// The label the autostarted file manager's icon-bar slot carries, so the
+/// reconstructed bar the script clicks against matches the guest's.
+const FILES_BAR_APP_NAME: &str = tairix_test_autoload_input_qemu_aarch64::FILES_BAR_APP_NAME;
+
 /// Guest marker gating the terminal stage's library-popup clicks: the
 /// handshake click's `Pressed` reached the still-focused files window — a
 /// wake boundary strictly past the verified second dump.
@@ -8196,8 +8200,8 @@ fn pointer_button_script() -> Result<Vec<tairix_qemu::PointerStep>, String> {
 }
 
 /// Build the AW3+AW4 desktop click script: pin the pointer to the
-/// top-left corner, click the taskbar's permanent Files button (spawning
-/// the file manager), click the served window's body (delivering `Focus`
+/// top-left corner, click the autostarted file manager's icon-bar slot
+/// (opening a window), click the served window's body (delivering `Focus`
 /// and `Pressed` app-ward — the kernel-attested `MessageDelivered`
 /// witnesses the second screendump keys on), and land a handshake click
 /// on the still-focused window; then the AW4 terminal stage: click the
@@ -8215,7 +8219,7 @@ fn pointer_button_script() -> Result<Vec<tairix_qemu::PointerStep>, String> {
 ///
 /// Step gating: the guest processes injected events strictly in device
 /// order and the bar model updates synchronously on the press, so the
-/// Files-button click keys on the session's `DESKTOP_REVEALED`
+/// Files-slot click keys on the session's `DESKTOP_REVEALED`
 /// witness alone (the runner already held it back until the first dump
 /// verified). The in-window click waits for the reserved window
 /// endpoint's first *reply* (the create round-trip completed, so the
@@ -8264,10 +8268,29 @@ fn autoload_desktop_pointer_script() -> Result<Vec<tairix_qemu::PointerStep>, St
         .taskbar_mut()
         .library_mut()
         .set_catalog(reconstructed_library()?);
+    // The file manager is a core desktop component the session autostarts at
+    // bring-up, so by the time the script runs the bar already carries its
+    // application slot — the leading one, because Files is the first process
+    // the session sees. The strip is reconstructed with that one slot so the
+    // click lands where the guest draws it. A slot is icon-only at a fixed
+    // extent, so only its presence moves the geometry; the label is the one
+    // the session resolves from the bundle's own signed manifest.
+    shell
+        .session_mut()
+        .taskbar_mut()
+        .set_apps(vec![tairix_taskbar::AppSlot::new(
+            FILES_BAR_APP_NAME,
+            tairix_icon::IconKind::AppBundle,
+        )]);
 
     let taskbar = shell.session().taskbar();
     let bar = taskbar.layout(Scale::ONE);
-    let files_button = rect_centre(bar.files, "Files button")?;
+    let files_slot = rect_centre(
+        *bar.apps
+            .first()
+            .ok_or_else(|| "desktop pointer script: the bar carries no Files slot".to_string())?,
+        "Files slot",
+    )?;
     let library_button = rect_centre(bar.library, "Library button")?;
     // The popup's terminal entry — keyed by the bundle it launches (the
     // same on-disk identity the guest PASS witnesses attribute by), never
@@ -8355,16 +8378,19 @@ fn autoload_desktop_pointer_script() -> Result<Vec<tairix_qemu::PointerStep>, St
         action,
     };
     Ok(vec![
-        // Pin, then click the taskbar's permanent Files button (spawning
-        // the file manager). This first motion is also the run's
-        // `kind=pointer` delivery witness; the button click needs no
-        // extra gate — the guest applies the injected events strictly in
-        // order and the bar model updates synchronously on the press.
+        // Pin, then click the autostarted file manager's own icon-bar slot.
+        // Files declares that it handles the primary click itself, so the
+        // session relays it and the app opens a window at the user's home.
+        // This first motion is also the run's `kind=pointer` delivery
+        // witness; the slot click needs no extra gate — the guest applies
+        // the injected events strictly in order, and the desktop-revealed
+        // witness it keys on is raised after bring-up, by which point the
+        // autostarted app has declared its presence and holds the slot.
         step(AUTOLOAD_DESKTOP_REVEALED_MARKER, 1, pin),
         step(
             AUTOLOAD_DESKTOP_REVEALED_MARKER,
             1,
-            move_by(Point::ORIGIN, files_button),
+            move_by(Point::ORIGIN, files_slot),
         ),
         step(AUTOLOAD_DESKTOP_REVEALED_MARKER, 1, press),
         step(AUTOLOAD_DESKTOP_REVEALED_MARKER, 1, release),
@@ -8379,7 +8405,7 @@ fn autoload_desktop_pointer_script() -> Result<Vec<tairix_qemu::PointerStep>, St
         step(
             AUTOLOAD_WINDOW_MAP_MARKER,
             AUTOLOAD_FILES_WINDOW_MAP_OCCURRENCES,
-            move_by(files_button, window),
+            move_by(files_slot, window),
         ),
         step(
             AUTOLOAD_WINDOW_MAP_MARKER,

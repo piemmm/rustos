@@ -1141,6 +1141,17 @@ impl DesktopShell {
         self.present(compositor);
     }
 
+    /// Put `label` on the taskbar clock and re-present the bar.
+    ///
+    /// The embedder owns the wall clock — the bar carries no time ABI of its
+    /// own — so it spells the reading and hands over the text. An empty label
+    /// draws nothing, which is what a machine whose wall time has never been
+    /// set shows rather than a fabricated one.
+    pub fn set_clock_label(&mut self, compositor: &mut Compositor, label: &str) {
+        self.session.taskbar_mut().clock_mut().set_label(label);
+        self.present(compositor);
+    }
+
     /// Attest to the taskbar whether this session can step aside for another
     /// user, so the system menu's *Switch User…* row exists only where the
     /// session could really be resumed afterwards.

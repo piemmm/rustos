@@ -175,6 +175,7 @@ pub mod apps;
 pub mod artwork;
 pub mod assets;
 pub mod cli;
+pub mod clock;
 pub mod config;
 pub mod confirm;
 pub mod desktop;
@@ -218,6 +219,7 @@ pub use apps::{
 pub use artwork::{ArtworkDesk, ArtworkJob};
 pub use assets::{load_cursor_theme, load_icon_set, SessionFileReader, SessionFileWriter};
 pub use cli::{parse, CliError, Command, USAGE};
+pub use clock::{spell as spell_clock, SessionClock};
 pub use config::{
     FILES_LABEL, FILES_RUN_PATH, SWITCHBOARD_LABEL, SWITCHBOARD_RUN_PATH, WALLPAPER_LABEL,
     WALLPAPER_RUN_PATH,

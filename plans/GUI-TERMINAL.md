@@ -424,11 +424,15 @@ the emulator, not for any one window:
   window alone — one that opens no menu and does nothing when clicked — so
   for as long as the gap lasts the bar shows a slot that answers nothing.
   Every application that declares a presence does it in this order.
-- **The menu** is *New window*, a separator, *Quit*, and the session-drawn
-  *About* row. The row ids live in the `appbar` module rather than in the
-  program body, because two independent readers need them: the running
-  program, which matches a chosen row back to a command, and the desktop QEMU
-  vertical, which reconstructs the menu to know where to click.
+- **The menu** follows the desktop's one icon-bar convention
+  (`tairix_window::declaration`): the session-drawn *Info* row, then the
+  terminal's own *New window* row, then a separator and *Quit*. The terminal
+  states only its own row — it cannot place the two ends, so it cannot get the
+  order wrong. Its row id lives in the `appbar` module rather than in the
+  program body, because two independent readers need it: the running program,
+  which matches a chosen row back to a command, and the desktop QEMU vertical,
+  which reconstructs the menu to know where to click. It is derived from the
+  convention's own `QUIT_ROW` so the two ids can never collide.
 - **A refused declaration is an answer, not a death.** A terminal whose
   declaration the desktop refuses says so on `stderr` and carries on with no
   slot of its own; its windows are still reachable through the slot the

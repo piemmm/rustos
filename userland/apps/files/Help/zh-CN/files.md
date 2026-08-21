@@ -4,7 +4,7 @@ files — 图形文件系统浏览器
 
 ## SYNOPSIS
 
-`files [directory] [-h | -?]`
+`files [--desktop] [directory] [-h | -?]`
 
 ## DESCRIPTION
 
@@ -30,6 +30,10 @@ files — 图形文件系统浏览器
 
 ## OPTIONS
 
+- `--desktop` — 作为桌面自身的文件管理器组件运行：图标栏上的一个固定位置，
+  提供你的位置和已挂载的卷；在被请求之前不打开窗口，也没有退出的办法。桌面
+  会话在启动时传入此选项；与它一同指定 `directory` 会被拒绝，因为组件不会打开
+  可以放置它的窗口。
 - `-h, -?` — 显示本命令自身的简短帮助并退出。
 
 ## EXIT STATUS

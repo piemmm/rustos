@@ -80,6 +80,11 @@ tairix-window = { path = "../../../lib/window", version = "=0.0.0" }
 # files app drives, so the picker and the file manager can never diverge in
 # navigation semantics, listing policy, or look (§2.2, §6).
 tairix-browse = { path = "../../../lib/browse", version = "=0.0.0" }
+# The one civil-date calendar (`CivilTime`): the taskbar clock breaks a
+# wall-clock instant into UTC calendar fields through the same decomposition
+# `ls`'s date column and the login clock read, never a second copy of the
+# day/minute arithmetic (§2.2).
+tairix-fsmeta = { path = "../../../lib/fsmeta", version = "=0.0.0" }
 # The one shared filesystem name rule (plans/SYMLINKS.md S5): the desktop
 # validates a shortcut's name through `validate_file_name`, the same rule a
 # typed folder or rename name obeys, rather than carrying a second opinion

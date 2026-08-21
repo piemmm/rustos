@@ -658,9 +658,9 @@ fn rows_for(subject: &MenuSubject) -> (Vec<MenuItem>, Vec<usize>) {
 
 /// The shared control row one declared application row draws as.
 ///
-/// The *About* row's label is the bar's, not the application's: the panel it
-/// opens is system chrome stating an attested identity, so every application
-/// reaches it by the same name.
+/// The information row's label is the bar's, not the application's: the panel
+/// it opens is system chrome stating an attested identity, so every
+/// application reaches it by the same name ([`INFO_ROW_LABEL`]).
 fn declared_item(row: AppMenuRow) -> MenuItem {
     match row {
         AppMenuRow::Item {
@@ -688,7 +688,7 @@ fn declared_item(row: AppMenuRow) -> MenuItem {
                 item.with_state(ControlState::disabled())
             }
         }
-        AppMenuRow::About => MenuItem::new(ABOUT_ROW_LABEL).with_submenu(true),
+        AppMenuRow::About => MenuItem::new(INFO_ROW_LABEL).with_submenu(true),
         // A separator never becomes a row (`rows_for` folds it into the next
         // row's group break); an unreachable one draws as a spacer rather
         // than as something choosable.
@@ -697,7 +697,12 @@ fn declared_item(row: AppMenuRow) -> MenuItem {
 }
 
 /// The label the bar gives every application's information row.
-const ABOUT_ROW_LABEL: &str = "About";
+///
+/// Public because aiming *at* the row is the same fact as reading one back:
+/// the desktop's QEMU vertical, or an embedder's own test, finds it by this
+/// name rather than by restating its position — the same reason
+/// [`EntryRow::label`] is public.
+pub const INFO_ROW_LABEL: &str = "Info";
 
 /// Logical width of the application information panel at the reference
 /// density: wide enough for a one-line purpose beside its label.
