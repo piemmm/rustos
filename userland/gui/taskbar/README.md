@@ -87,7 +87,8 @@ owns:
   (`AppRaise`), a chosen row of the menu an application declared
   (`AppMenuChosen`), a hover asking for the window picker
   (`ShowWindowPicker`) and a cell chosen in it (`WindowChosen`), or a
-  notification-icon press, or the clock's own menu opening. While the context
+  notification-icon press. A primary press on the clock is claimed and inert;
+  its menu answers a secondary press. While the context
   menu OR the program-library popup is open it is
   modal and consumes the whole stream — presses, releases, scroll, and keys
   all route into the modal surface; a press on the Library button toggles the
@@ -179,8 +180,9 @@ owns:
   row needs the same broker and reads the same attestation — one fact, not two
   booleans that would always be equal (`AGENTS.md` §2.2). Both default to
   refusing.
-- **The clock's menu** — the same one modal menu surface, opened by a press on
-  the clock with either button, whose shape is the one ordered
+- **The clock's menu** — the same one modal menu surface, opened by a
+  **secondary** press on the clock (a primary press on a reading is claimed
+  and inert, like a status signal's), whose shape is the one ordered
   `clock_menu::ROWS` table: the reading the bar is drawing (a statement, not a
   command) and *Set Date & Time…* (`plans/NEW-TASKBAR.md` T17). The heading
   repeats the bar's own label rather than deriving a second time, so the two
@@ -191,8 +193,8 @@ owns:
 - **Notification area** — `NotificationArea`, an ordered set of status icons.
 - **Clock** — `Clock` holds the display label the caller sets (formatting a
   `Time64` value is an upstream concern, `AGENTS.md` §21). `clock::UNSET_LABEL`
-  is the one spelling of "no wall time yet" (`--:--`): a pressable clock whose
-  menu is where a time gets set must stay visible, so a caller draws that
+  is the one spelling of "no wall time yet" (`--:--`): a clock whose menu is
+  where a time gets set must stay visible, so a caller draws that
   rather than nothing.
 - **Switchboard capsule** — `SwitchboardTray`, the immovable trailing-most
   slot (`plans/NEW-TASKBAR.md` T9/T11). One pure derive turns the summary

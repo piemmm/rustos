@@ -113,6 +113,32 @@ impl TaskbarPresenter {
         self.readout
     }
 
+    /// Whether `window` is one of the surfaces this presenter placed: the bar
+    /// itself, or any of the popups and popovers it opens.
+    ///
+    /// Only the presenter knows which compositor window each taskbar surface
+    /// *is* — the taskbar model knows their geometry and nothing more — so
+    /// this is the one place that answer is given. The session's input router
+    /// asks it of whatever the compositor finds on top at the pointer: `false`
+    /// means something else is drawn over the bar there, and the press belongs
+    /// to that instead ([`SessionInputRouter::handle`]).
+    ///
+    /// [`SessionInputRouter::handle`]: crate::SessionInputRouter::handle
+    #[must_use]
+    pub fn owns_window(&self, window: WindowId) -> bool {
+        [
+            self.bar,
+            self.popup,
+            self.menu,
+            self.picker,
+            self.notifications,
+            self.readout,
+        ]
+        .into_iter()
+        .flatten()
+        .any(|placed| placed == window)
+    }
+
     /// Bring the compositor up to date with the taskbar's current model and
     /// its owned theme, repainting only the surfaces `parts` names.
     ///

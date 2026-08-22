@@ -7,10 +7,10 @@
 //! (keeps absolute time in `lib/abi`). An empty label draws
 //! nothing.
 //!
-//! A clock the user can press is how a time gets *set*, so a machine with no
-//! wall time must still show one: [`UNSET_LABEL`] is what a caller draws
-//! then, and the menu's heading reads the same constant to say the time is
-//! unset.
+//! The clock's own menu is how a time gets *set*, so a machine with no
+//! wall time must still show a clock to reach it by: [`UNSET_LABEL`] is what
+//! a caller draws then, and the menu's heading reads the same constant to say
+//! the time is unset.
 
 use alloc::string::String;
 

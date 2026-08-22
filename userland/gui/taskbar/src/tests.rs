@@ -1434,7 +1434,7 @@ fn a_second_click_on_the_focused_application_never_minimises_it() {
 }
 
 #[test]
-fn status_icon_press_is_inert_and_clock_reports() {
+fn status_icon_and_clock_presses_are_claimed_and_inert() {
     let mut bar = bottom_bar();
     bar.set_status_signals(alloc::vec![StatusSignal::new(
         IconId(3),
@@ -1448,16 +1448,17 @@ fn status_icon_press_is_inert_and_clock_reports() {
         press_at(&mut input, &mut bar, icon.x, icon.y),
         TaskbarResponse::Ignored
     );
-    // The clock opens its own menu; opening acts on nothing by itself.
+    // The clock is the other one: a left click on it acts on nothing and
+    // opens nothing. Its menu answers a secondary press.
     let clock = centre_of(layout.clock);
     assert_eq!(
         press_at(&mut input, &mut bar, clock.x, clock.y),
         TaskbarResponse::Ignored
     );
-    assert!(matches!(
-        bar.menu().subject(),
-        Some(MenuSubject::Clock { .. })
-    ));
+    assert!(
+        !bar.menu().is_open(),
+        "a left click on the clock opened a menu"
+    );
 }
 
 /// Seat one application on the bar and open the menu it declared with a
@@ -6868,9 +6869,10 @@ fn the_set_time_row_is_denied_until_the_session_attests_a_broker() {
 }
 
 #[test]
-fn a_primary_press_on_the_clock_opens_the_same_menu() {
-    // The clock's only behaviour is its menu, so it is not particular about
-    // which button asks for it.
+fn a_primary_press_on_the_clock_opens_no_menu() {
+    // The reported defect: a left click on the clock popped its menu up.
+    // A menu is what a secondary press asks for, here as everywhere else on
+    // the desktop; a primary press on a reading is claimed and inert.
     let mut bar = bottom_bar();
     bar.set_elevation_available(true);
     let mut input = TaskbarInput::new();
@@ -6879,6 +6881,13 @@ fn a_primary_press_on_the_clock_opens_the_same_menu() {
         press_at(&mut input, &mut bar, clock.x, clock.y),
         TaskbarResponse::Ignored
     );
+    assert!(
+        !bar.menu().is_open(),
+        "a left click on the clock opened its menu"
+    );
+    // The clock still has its menu, and it is still the same one: the
+    // secondary press that asks for it reaches the set-time command.
+    open_clock_menu(&mut input, &mut bar);
     assert_eq!(
         choose_row(&mut input, &mut bar, 1),
         TaskbarResponse::SetDateTime

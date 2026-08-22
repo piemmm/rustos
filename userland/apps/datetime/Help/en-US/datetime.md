@@ -16,8 +16,9 @@ second — and sets the clock to what they say. Nothing changes until
 The reading is UTC. TAIRiX keeps no timezone offset, so there is no local
 time to show and none to enter.
 
-The window is normally reached from the desktop clock's own menu: click
-the clock in the icon bar and choose **Set Date & Time…**. Setting the
+The window is normally reached from the desktop clock's own menu:
+right-click the clock in the icon bar and choose **Set Date & Time…**.
+Setting the
 clock needs an authority a desktop session does not have, so the desktop
 asks for an account that does, and this app is started as that account
 once the password is accepted.

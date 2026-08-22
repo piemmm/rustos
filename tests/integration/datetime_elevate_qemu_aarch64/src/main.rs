@@ -15,9 +15,9 @@
 //! So the guest boots the **production** aarch64 pipeline
 //! (`boot_aarch64::boot`) against a planted encrypted root, and the host
 //! drives the desktop blind through the QEMU monitor: unlock, log in, start
-//! the desktop, click the clock, choose *Set Date & Time…*, type the fixture
-//! account into the prompt. Only the audit sink is swapped, for the PASS
-//! witnesses below.
+//! the desktop, right-click the clock, choose *Set Date & Time…*, type the
+//! fixture account into the prompt. Only the audit sink is swapped, for the
+//! PASS witnesses below.
 //!
 //! # The PASS gate
 //!

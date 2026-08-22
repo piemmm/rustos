@@ -372,7 +372,10 @@ The desktop has two input routers — the window manager's `InputRouter` and the
 taskbar's `TaskbarInput` — and both consume the **same** shared `tairix_input`
 event vocabulary (`AGENTS.md` §17.4, §2.2). A real input source produces one
 stream, so `SessionInputRouter` fans it to the right router through
-`handle(event, &mut Compositor, &mut Taskbar, now_ns)`. The monotonic `now_ns`
+`handle(event, &mut Compositor, &mut Taskbar, &TaskbarPresenter, now_ns)`. The
+presenter is read, never driven: only it knows which compositor window each
+taskbar surface *is*, which is what tells "the bar is under the pointer" from
+"a window covering the bar is" (below). The monotonic `now_ns`
 is threaded down because one taskbar gesture is decided by *time*: the
 Switchboard capsule tells a tap from a hold by how long its press has been
 down when the next event arrives, so the bar is handed the embedder's clock
@@ -386,8 +389,14 @@ sees, and the one an in-memory test controls:
   secondary press there opens the menu that application declared; a middle press over the
   Switchboard capsule switches to the previous task) or over one of its open
   non-modal popovers, and to the window manager elsewhere — never both;
+- **a window over the bar owns the presses on it**: nothing pins the bar
+  topmost, so the claim above holds only where a taskbar surface is the window
+  `Compositor::window_at` finds under the pointer
+  (`TaskbarPresenter::owns_window`). A window dragged over the clock takes the
+  clicks aimed at it, and the buttons it does not cover stay the bar's;
 - a **scroll** over the Switchboard capsule or its open readout routes to the
-  taskbar (it cycles the running tasks); every other scroll goes to the window
+  taskbar (it cycles the running tasks), under that same is-it-covered test;
+  every other scroll goes to the window
   manager;
 - **pointer motion** is fanned to both so their pointers stay in step; the
   window manager acts on it (dragging a grabbed window) and the taskbar

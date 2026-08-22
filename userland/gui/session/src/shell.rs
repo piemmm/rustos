@@ -1303,10 +1303,13 @@ impl DesktopShell {
         compositor: &mut Compositor,
         now_ns: u64,
     ) -> ShellOutcome {
-        match self
-            .router
-            .handle(event, compositor, self.session.taskbar_mut(), now_ns)
-        {
+        match self.router.handle(
+            event,
+            compositor,
+            self.session.taskbar_mut(),
+            &self.presenter,
+            now_ns,
+        ) {
             SessionInputResponse::Ignored => ShellOutcome::Ignored,
             SessionInputResponse::WindowManager(response) => {
                 self.mirror_focus(&response);

@@ -1114,7 +1114,10 @@ popup, task activate/minimise, notification/clock presses) — and both consume
 the **same** shared `tairix_input` event vocabulary (`AGENTS.md` §17.4, §2.2).
 A real input source produces one event stream, so `SessionInputRouter` is the
 glue that fans it to the right router, driven through
-`handle(event, &mut Compositor, &mut Taskbar, now_ns)`. The monotonic
+`handle(event, &mut Compositor, &mut Taskbar, &TaskbarPresenter, now_ns)`.
+The presenter is read, never driven: it is the only thing that knows which
+compositor window each taskbar surface *is*, which is what tells "the bar is
+under the pointer" from "a window covering the bar is" (below). The monotonic
 `now_ns` is threaded down because one taskbar gesture is decided by *time*:
 the Switchboard capsule distinguishes a tap from a hold by how long its
 press has been down when the next event arrives, so the bar is given the
@@ -1130,10 +1133,21 @@ instant every router sees, and the one an in-memory test controls:
   (a secondary press there opens the menu that application declared; a middle press over
   the Switchboard capsule switches to the previous task) or over one of its
   open non-modal popovers — the notification popover and the capsule's
-  instrument readout — and a remaining primary or secondary press goes to
+  instrument readout — **and that surface is the window drawn there**, and a
+  remaining primary or secondary press goes to
   the window manager: the two never both act on one press;
+- **a window over the bar owns the presses on it.** Nothing pins the bar
+  topmost — it is an ordinary compositor window, and a window dragged over it
+  is genuinely in front of it — so containing the pointer is not enough to
+  make a press the bar's. The claim above is gated on
+  `Compositor::window_at` returning a window the presenter placed
+  (`TaskbarPresenter::owns_window`), which is what stops a covered clock or
+  launcher from swallowing a click aimed at the window above it. The test is
+  per press position: a window covering the trailing end leaves every button
+  it does not cover still the bar's;
 - a **scroll** over the Switchboard capsule or its open readout routes to
-  the taskbar (it cycles the running tasks); every other scroll goes to the
+  the taskbar (it cycles the running tasks), under that same is-it-covered
+  test; every other scroll goes to the
   window manager's viewport under the pointer;
 - **pointer motion** is fanned to both so their tracked pointer positions stay
   in step; the window manager acts on it (dragging a grabbed window) and the
@@ -1447,11 +1461,14 @@ window across presents, showing the popup and menu while they are open,
 re-creating a window an embedder removed, and `teardown` clearing every window.
 It also covers `SessionInputRouter`: presses on the bar's buttons and slots
 routing to the taskbar while a press over a window or the empty desktop routes
-to the window manager; modal surface modality (claiming off-panel presses and
-keys); motion keeping the pointer in step; a window drag continuing while the
-pointer is over the bar; a capsule tap and hold each asking the session to
-open the Switchboard at their own section; and a release the bar does not
-claim ending the grab.
+to the window manager; a press (either button) where a window covers the bar
+reaching that window rather than the control beneath it, with the buttons that
+window does not cover still claimed by the bar, and the bar still winning over
+a window stacked beneath it; modal surface modality (claiming off-panel
+presses and keys); motion keeping the pointer in step; a window drag
+continuing while the pointer is over the bar; a capsule tap and hold each
+asking the session to open the Switchboard at their own section; and a release
+the bar does not claim ending the grab.
 
 It covers the desktop's reveal from black: the fade walking the theme's own
 session-fade span frame by frame to a fully revealed screen and then asking

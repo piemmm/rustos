@@ -5669,7 +5669,7 @@ static TESTS: &[QemuTest] = &[
         pointer_script: Some(appbar_pointer_script),
         serial: &[],
     },
-    // Elevated Date & Time launch: click the taskbar clock, choose
+    // Elevated Date & Time launch: right-click the taskbar clock, choose
     // *Set Date & Time…*, authenticate as the fixture root account through
     // the session's credential prompt, and witness the Date & Time window.
     // The guest latches APP_LOADED for datetime.app plus one window create
@@ -7958,7 +7958,7 @@ fn assert_no_slot_beyond_the_launched_app(
 }
 
 /// Where the desktop draws the taskbar clock and, once that clock is
-/// pressed, the *Set Date & Time…* row of the menu it opens.
+/// right-clicked, the *Set Date & Time…* row of the menu it opens.
 ///
 /// Both points come from driving the **production** taskbar model at run
 /// time — the same layout, hit-testing, and menu-building code the guest
@@ -8016,10 +8016,14 @@ fn datetime_elevate_aim_points() -> Result<(tairix_geometry::Point, tairix_geome
     let bar = shell.session().taskbar().layout(scale);
     let clock = rect_centre(bar.clock, "clock")?;
 
-    // Open the clock menu exactly as the first click will.
-    press_at(&mut shell, clock, PointerButton::Primary);
+    // Open the clock menu exactly as the first click will. A menu is what a
+    // secondary press asks for: the clock is a reading, and a primary press
+    // on it is claimed and inert.
+    press_at(&mut shell, clock, PointerButton::Secondary);
     if !shell.session().taskbar().menu().is_open() {
-        return Err("datetime-elevate script: a press on the clock opened no menu".to_string());
+        return Err(
+            "datetime-elevate script: a secondary press on the clock opened no menu".to_string(),
+        );
     }
     let menu_layout = shell
         .session()
@@ -8049,8 +8053,8 @@ fn datetime_elevate_aim_points() -> Result<(tairix_geometry::Point, tairix_geome
     Ok((clock, set_row))
 }
 
-/// Click the taskbar clock, then the *Set Date & Time…* row, so the session
-/// opens its credential prompt.
+/// Right-click the taskbar clock, then click the *Set Date & Time…* row of the
+/// menu that opens, so the session opens its credential prompt.
 fn datetime_elevate_pointer_script() -> Result<Vec<tairix_qemu::PointerStep>, String> {
     use tairix_geometry::Point;
     use tairix_qemu::{MouseButton, PointerAction, PointerStep};
@@ -8084,7 +8088,7 @@ fn datetime_elevate_pointer_script() -> Result<Vec<tairix_qemu::PointerStep>, St
     let mut steps = vec![step(ready, pin_cursor)];
     steps.extend(aim_and_press(
         ready,
-        MouseButton::Primary,
+        MouseButton::Secondary,
         Point::ORIGIN,
         clock,
     ));

@@ -433,6 +433,16 @@ fn office_and_games() -> Catalog {
     ])
 }
 
+/// A taskbar presenter that has placed nothing.
+///
+/// The router-level tests drive the fan-out policy against a bare
+/// compositor: with no bar on screen there is no bar window for anything to
+/// be stacked over, so geometry alone decides who claims a press — which is
+/// exactly the policy those tests are about. A press that must reckon with
+/// what is *drawn* over the bar is a shell-level test, because only a real
+/// present puts the bar in the stack.
+const NOTHING_PRESENTED: &TaskbarPresenter = &TaskbarPresenter::new();
+
 /// Move the pointer to `(x, y)` and press the primary button there.
 fn press_at(
     router: &mut SessionInputRouter,
@@ -447,6 +457,7 @@ fn press_at(
         },
         comp,
         taskbar,
+        NOTHING_PRESENTED,
         0,
     );
     router.handle(
@@ -455,6 +466,7 @@ fn press_at(
         },
         comp,
         taskbar,
+        NOTHING_PRESENTED,
         0,
     )
 }
@@ -471,6 +483,21 @@ fn open_library(
         SessionInputResponse::Taskbar(TaskbarResponse::OpenLibrary)
     );
     assert!(taskbar.library().is_open());
+}
+
+/// Open the popup by pressing the Library button on a shell that has
+/// presented its bar, asserting it opened.
+///
+/// The shell routes the press against its own presenter, so this is the bar
+/// as the user finds it: on screen, in the window stack, and claiming a press
+/// nothing covers.
+fn open_library_on(shell: &mut DesktopShell, comp: &mut Compositor) {
+    shell.handle(moved(24, 1060), comp, 0);
+    assert_eq!(
+        shell.handle(PRIMARY_PRESS, comp, 0),
+        ShellOutcome::Taskbar(TaskbarResponse::OpenLibrary)
+    );
+    assert!(shell.session().taskbar().library().is_open());
 }
 
 /// A headless 1920×1080 RGBA compositor over an opaque black background.
@@ -653,6 +680,39 @@ fn a_surface_with_no_window_is_presented_however_empty_the_latch() {
     assert!(
         presenter.bar_window().is_some(),
         "the first paint cannot wait for a latch that only reports changes"
+    );
+}
+
+#[test]
+fn the_presenter_owns_only_the_surfaces_it_placed() {
+    // What the input router asks of whatever the compositor finds on top: a
+    // window that is not one of these is something drawn *over* the bar, and
+    // the press there is its own.
+    let mut session = session();
+    let mut comp = compositor();
+    let mut router = SessionInputRouter::new();
+    open_library(&mut router, &mut comp, session.taskbar_mut());
+    let mut renderer = TaskbarRenderer::new(test_icon_cache());
+    let mut presenter = TaskbarPresenter::new();
+    let intruder = opaque_window(&mut comp, Point::new(0, 0), 40, 40);
+
+    presenter.present(
+        &mut comp,
+        &mut renderer,
+        session.taskbar(),
+        TaskbarRepaint::ALL,
+        &mut NoArtwork,
+    );
+
+    let bar = presenter.bar_window().expect("the bar is presented");
+    let popup = presenter
+        .popup_window()
+        .expect("the open popup is presented");
+    assert!(presenter.owns_window(bar));
+    assert!(presenter.owns_window(popup));
+    assert!(
+        !presenter.owns_window(intruder),
+        "a window the presenter never placed is not the bar's"
     );
 }
 
@@ -982,7 +1042,7 @@ fn primary_press_over_the_bar_routes_to_the_taskbar() {
 }
 
 #[test]
-fn primary_press_on_the_clock_reaches_the_bar_and_opens_its_menu() {
+fn primary_press_on_the_clock_is_claimed_by_the_bar_and_opens_no_menu() {
     // Its own bar: the library popup is modal, so a press after that one is
     // the popup's to dismiss rather than the clock's.
     let mut session = session();
@@ -998,30 +1058,36 @@ fn primary_press_on_the_clock_reaches_the_bar_and_opens_its_menu() {
         clock.left() + i32::try_from(clock.width / 2).expect("a screen-sized width"),
         clock.top() + i32::try_from(clock.height / 2).expect("a bar-sized height"),
     );
+    // The bar claimed it — a press it let through would have reached the
+    // desktop behind and reported it — and the clock, being a reading rather
+    // than a control, did nothing with it.
     assert_eq!(
         response,
         SessionInputResponse::Ignored,
-        "opening a menu asks the session for nothing by itself"
+        "a press on the bar is the bar's, even where it acts on nothing"
     );
     assert!(
-        session.taskbar().menu().is_open(),
-        "the press reached the bar and opened the clock's menu"
+        !session.taskbar().menu().is_open(),
+        "a left click on the clock opened its menu"
     );
 }
 
 #[test]
 fn the_bar_wins_over_a_window_beneath_it() {
-    let mut session = session();
+    let mut shell = shell();
     let mut comp = compositor();
-    let mut router = SessionInputRouter::new();
     // A window placed under the bottom bar must not steal a press on the bar.
+    // It is added before the bar is presented, so the bar is stacked above it
+    // — which is what makes the press the bar's, and what a window dragged
+    // over the bar afterwards undoes.
     opaque_window(&mut comp, Point::new(0, 1000), 400, 80);
+    shell.present(&mut comp);
 
-    let response = press_at(&mut router, &mut comp, session.taskbar_mut(), 24, 1060);
+    shell.handle(moved(24, 1060), &mut comp, 0);
 
     assert_eq!(
-        response,
-        SessionInputResponse::Taskbar(TaskbarResponse::OpenLibrary)
+        shell.handle(PRIMARY_PRESS, &mut comp, 0),
+        ShellOutcome::Taskbar(TaskbarResponse::OpenLibrary)
     );
 }
 
@@ -1060,6 +1126,7 @@ fn secondary_press_over_a_window_routes_to_the_window_manager() {
         },
         &mut comp,
         session.taskbar_mut(),
+        NOTHING_PRESENTED,
         0,
     );
     let response = router.handle(
@@ -1068,6 +1135,7 @@ fn secondary_press_over_a_window_routes_to_the_window_manager() {
         },
         &mut comp,
         session.taskbar_mut(),
+        NOTHING_PRESENTED,
         0,
     );
 
@@ -1133,6 +1201,7 @@ fn the_open_popup_is_modal_and_a_press_off_it_dismisses_it() {
         },
         &mut comp,
         session.taskbar_mut(),
+        NOTHING_PRESENTED,
         0,
     );
     assert_eq!(response, SessionInputResponse::Ignored);
@@ -1146,6 +1215,7 @@ fn the_open_popup_is_modal_and_a_press_off_it_dismisses_it() {
         },
         &mut comp,
         session.taskbar_mut(),
+        NOTHING_PRESENTED,
         0,
     );
     assert_eq!(
@@ -1160,6 +1230,7 @@ fn the_open_popup_is_modal_and_a_press_off_it_dismisses_it() {
         InputEvent::PointerScrolled { dx: 0, dy: 10 },
         &mut comp,
         session.taskbar_mut(),
+        NOTHING_PRESENTED,
         0,
     );
     assert_eq!(response, SessionInputResponse::Ignored);
@@ -1177,6 +1248,7 @@ fn motion_updates_the_pointer_and_reaches_the_desktop_when_it_hits_no_window() {
         },
         &mut comp,
         session.taskbar_mut(),
+        NOTHING_PRESENTED,
         0,
     );
 
@@ -1203,6 +1275,7 @@ fn a_window_drag_continues_while_the_pointer_is_over_the_bar() {
         },
         &mut comp,
         session.taskbar_mut(),
+        NOTHING_PRESENTED,
         0,
     );
     router.handle(
@@ -1211,6 +1284,7 @@ fn a_window_drag_continues_while_the_pointer_is_over_the_bar() {
         },
         &mut comp,
         session.taskbar_mut(),
+        NOTHING_PRESENTED,
         0,
     );
     assert!(
@@ -1226,6 +1300,7 @@ fn a_window_drag_continues_while_the_pointer_is_over_the_bar() {
         },
         &mut comp,
         session.taskbar_mut(),
+        NOTHING_PRESENTED,
         0,
     );
 
@@ -1252,6 +1327,7 @@ fn a_primary_release_ends_a_move_grab() {
         },
         &mut comp,
         session.taskbar_mut(),
+        NOTHING_PRESENTED,
         0,
     );
     router.handle(
@@ -1260,6 +1336,7 @@ fn a_primary_release_ends_a_move_grab() {
         },
         &mut comp,
         session.taskbar_mut(),
+        NOTHING_PRESENTED,
         0,
     );
     assert!(router.begin_move(&comp));
@@ -1270,6 +1347,7 @@ fn a_primary_release_ends_a_move_grab() {
         },
         &mut comp,
         session.taskbar_mut(),
+        NOTHING_PRESENTED,
         0,
     );
 
@@ -1292,6 +1370,7 @@ fn a_non_primary_press_is_ignored() {
         },
         &mut comp,
         session.taskbar_mut(),
+        NOTHING_PRESENTED,
         0,
     );
     let response = router.handle(
@@ -1300,6 +1379,7 @@ fn a_non_primary_press_is_ignored() {
         },
         &mut comp,
         session.taskbar_mut(),
+        NOTHING_PRESENTED,
         0,
     );
 
@@ -1334,6 +1414,7 @@ fn a_press_on_an_app_slot_reaches_the_taskbar_through_the_session_router() {
         InputEvent::PointerMoved { to: at },
         &mut comp,
         session.taskbar_mut(),
+        NOTHING_PRESENTED,
         0,
     );
     let response = router.handle(
@@ -1342,6 +1423,7 @@ fn a_press_on_an_app_slot_reaches_the_taskbar_through_the_session_router() {
         },
         &mut comp,
         session.taskbar_mut(),
+        NOTHING_PRESENTED,
         0,
     );
     assert_eq!(
@@ -1487,6 +1569,93 @@ fn handle_routes_a_window_press_to_the_window_manager() {
         comp.composite().bounds().intersection(&bar_rect).is_empty(),
         "activating a window repaints that window's furniture, never the bar"
     );
+}
+
+/// The centre of `rect`, where a test aims a click at a laid-out region.
+fn rect_centre(rect: Rect) -> Point {
+    Point::new(
+        rect.left() + i32::try_from(rect.width / 2).unwrap_or(0),
+        rect.top() + i32::try_from(rect.height / 2).unwrap_or(0),
+    )
+}
+
+/// The reported defect: a window dragged over the bar covers the clock, and a
+/// click where the clock is drawn was claimed by the bar — the clock popped
+/// its menu instead of the click reaching the window that owns those pixels.
+/// Nothing pins the bar topmost, so a window over it really is what the user
+/// clicked.
+#[test]
+fn a_press_on_a_window_covering_the_bar_reaches_that_window() {
+    let mut shell = shell();
+    let mut comp = compositor();
+    shell.present(&mut comp);
+    let clock = rect_centre(shell.session().taskbar().layout(comp.scale()).clock);
+
+    // A window dragged over the trailing end of the bar. It is added last, so
+    // it sits above the bar exactly as raising it leaves it.
+    let window = opaque_window(&mut comp, Point::new(clock.x - 40, clock.y - 40), 200, 200);
+    assert_eq!(
+        comp.window_at(clock),
+        Some(window),
+        "the window is what is drawn where the clock is"
+    );
+
+    shell.handle(moved(clock.x, clock.y), &mut comp, 0);
+    let outcome = shell.handle(PRIMARY_PRESS, &mut comp, 0);
+
+    assert_eq!(
+        outcome,
+        ShellOutcome::WindowManager(InputResponse::Activated {
+            window,
+            local: Point::new(40, 40),
+        })
+    );
+    assert!(
+        !shell.session().taskbar().menu().is_open(),
+        "the covered bar opened the clock's menu on a click that was not its own"
+    );
+}
+
+/// A window covers part of the bar, not all of it: the covered pixels are the
+/// window's and the pixels still on show are the bar's. The claim is decided
+/// per press position, never by "a window overlaps the bar somewhere".
+#[test]
+fn the_bar_still_claims_a_press_where_no_window_covers_it() {
+    let mut shell = shell();
+    let mut comp = compositor();
+    shell.present(&mut comp);
+    let clock = rect_centre(shell.session().taskbar().layout(comp.scale()).clock);
+    let _covering = opaque_window(&mut comp, Point::new(clock.x - 40, clock.y - 40), 200, 200);
+
+    // The Library button, at the leading end and clear of that window.
+    shell.handle(moved(24, 1060), &mut comp, 0);
+    assert_eq!(
+        shell.handle(PRIMARY_PRESS, &mut comp, 0),
+        ShellOutcome::Taskbar(TaskbarResponse::OpenLibrary)
+    );
+}
+
+/// The same rule for the other button: a secondary press where a window
+/// covers the bar opens that window's own context path, not the bar's menu.
+#[test]
+fn a_secondary_press_on_a_window_covering_the_bar_reaches_that_window() {
+    let mut shell = shell();
+    let mut comp = compositor();
+    shell.present(&mut comp);
+    let clock = rect_centre(shell.session().taskbar().layout(comp.scale()).clock);
+    let window = opaque_window(&mut comp, Point::new(clock.x - 40, clock.y - 40), 200, 200);
+
+    shell.handle(moved(clock.x, clock.y), &mut comp, 0);
+    let outcome = shell.handle(SECONDARY_PRESS, &mut comp, 0);
+
+    assert_eq!(
+        outcome,
+        ShellOutcome::WindowManager(InputResponse::SecondaryActivated {
+            window,
+            local: Point::new(40, 40),
+        })
+    );
+    assert!(!shell.session().taskbar().menu().is_open());
 }
 
 #[test]
@@ -4246,6 +4415,34 @@ fn capsule_gestures_ask_the_session_to_open_switchboard() {
     );
 }
 
+/// A wheel where a window covers the capsule is that window's, not the task
+/// list's: the same "whatever is drawn there owns the gesture" rule as a
+/// press, applied to the one scroll the bar claims.
+#[test]
+fn a_scroll_where_a_window_covers_the_capsule_reaches_that_window() {
+    let mut shell = shell();
+    let mut comp = compositor();
+    shell.present(&mut comp);
+    let capsule = capsule_point(&shell);
+    let window = opaque_window(
+        &mut comp,
+        Point::new(capsule.x - 40, capsule.y - 40),
+        200,
+        200,
+    );
+
+    let _ = shell.handle(moved(capsule.x, capsule.y), &mut comp, 0);
+
+    assert_eq!(
+        shell.handle(InputEvent::PointerScrolled { dx: 0, dy: 1 }, &mut comp, 0),
+        ShellOutcome::WindowManager(InputResponse::AppScroll {
+            window,
+            dx: 0,
+            dy: 1,
+        })
+    );
+}
+
 /// A primary release the taskbar does not claim still ends the window
 /// manager's in-flight move-grab: offering releases to the bar first must
 /// not swallow them.
@@ -6691,8 +6888,7 @@ fn the_launcher_has_its_icons_before_it_is_first_drawn() {
 
     // Now the user opens the launcher. Its very first paint draws the
     // application's own icon, not a glyph it would replace a frame later.
-    let mut router = SessionInputRouter::new();
-    open_library(&mut router, &mut comp, shell.session_mut().taskbar_mut());
+    open_library_on(&mut shell, &mut comp);
     shell.present(&mut comp);
 
     let rows = shown_entry_rows(shell.session());

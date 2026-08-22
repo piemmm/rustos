@@ -21,16 +21,27 @@
 //! * **Otherwise the taskbar claims a press** when the pointer lands on the
 //!   bar *or* on one of its open, non-modal surfaces (the hover window
 //!   picker, the notification popover, and the Switchboard capsule's
-//!   instrument readout); every other press goes to the window manager. The
+//!   instrument readout) **and that surface is what is drawn there**; every
+//!   other press goes to the window manager. The
 //!   two never both act on one press, so a click on a picker cell or a
 //!   notification card never also activates a window behind it. Each of
 //!   those surfaces opens outward from the bar and never overlaps it, so the
 //!   taskbar surfaces never contend for a press.
+//! * **A window over the bar owns the presses on it.** Nothing pins the bar
+//!   topmost — it is an ordinary compositor window, and a window dragged over
+//!   it is genuinely in front of it — so the bar's geometry containing the
+//!   pointer is not enough. The claim is gated on the window the compositor
+//!   finds on top there being one the taskbar presenter placed
+//!   ([`TaskbarPresenter::owns_window`]), which is what stops a covered clock
+//!   or launcher from swallowing a click meant for the window above it.
+//!   The test is per press position, not per bar: a window covering the
+//!   trailing end leaves every button it does not cover still the bar's.
 //! * **A middle press routes to the taskbar over the bar or a popover**
 //!   (over the Switchboard capsule it switches to the previous task) and is
 //!   ignored elsewhere — the window manager has no middle-button action.
 //! * **A scroll over the Switchboard capsule or its open readout routes to
-//!   the taskbar** (it cycles the running tasks); every other scroll goes
+//!   the taskbar** (it cycles the running tasks), under the same
+//!   is-it-covered test as a press; every other scroll goes
 //!   to the window manager's viewport under the pointer.
 //! * **Pointer motion is fanned to both routers** so their tracked pointer
 //!   positions stay in step (a press is hit-tested at the last motion's
@@ -60,6 +71,8 @@ use tairix_taskbar::{Hit, Taskbar, TaskbarInput, TaskbarResponse};
 use tairix_wm::{
     Compositor, InputEvent, InputResponse, InputRouter, Point, PointerButton, WindowId,
 };
+
+use crate::presenter::TaskbarPresenter;
 
 /// What the [`SessionInputRouter`] did with one [`InputEvent`].
 ///
@@ -166,18 +179,25 @@ impl SessionInputRouter {
     /// While the taskbar's context menu or the program-library popup is open
     /// every event routes to the taskbar (both surfaces are modal).
     /// Otherwise a press goes to whichever router claims the pointer (the
-    /// taskbar when the pointer is over the bar or one of its open popovers,
-    /// the window manager otherwise); a scroll over the Switchboard capsule
+    /// taskbar when the pointer is over the bar or one of its open popovers
+    /// *and* that surface is the one drawn there, the window manager
+    /// otherwise); a scroll over the Switchboard capsule
     /// or its readout cycles tasks in the taskbar while any other scroll
     /// goes to the window manager; motion is fanned to both so their
     /// pointers stay in step and the window manager can drag a grabbed
     /// window; a primary release is the taskbar's to claim before it ends a
     /// window-manager grab. See the [module docs](self) for the full policy.
+    ///
+    /// `presenter` is the taskbar presenter that placed the bar's compositor
+    /// windows: it is what tells "the bar is under the pointer" from "a
+    /// window covering the bar is". It is read, never driven — routing an
+    /// event presents nothing.
     pub fn handle(
         &mut self,
         event: InputEvent,
         compositor: &mut Compositor,
         taskbar: &mut Taskbar,
+        presenter: &TaskbarPresenter,
         now_ns: u64,
     ) -> SessionInputResponse {
         // The taskbar hit-tests at the output's density, which the compositor
@@ -223,8 +243,13 @@ impl SessionInputRouter {
                 // takes every remaining primary or secondary press. Each of
                 // those surfaces opens outward and never overlaps the bar, so
                 // the taskbar surfaces never contend.
+                //
+                // "Owns the pixel" is the whole rule, so a window stacked
+                // over the bar takes the press back: the bar is no more
+                // topmost than any other window, and a click lands on what
+                // the user can see.
                 let pointer = self.taskbar.pointer();
-                let on_taskbar = taskbar.hit_test(pointer, scale).is_some()
+                let over_taskbar = taskbar.hit_test(pointer, scale).is_some()
                     || taskbar
                         .picker_layout(scale)
                         .is_some_and(|picker| picker.panel.contains(pointer))
@@ -234,6 +259,7 @@ impl SessionInputRouter {
                     || taskbar
                         .tray_readout_layout(scale)
                         .is_some_and(|readout| readout.contains(pointer));
+                let on_taskbar = over_taskbar && !self.covered(compositor, presenter);
                 if on_taskbar {
                     return taskbar_response(self.taskbar.handle(event, taskbar, scale, now_ns));
                 }
@@ -247,12 +273,15 @@ impl SessionInputRouter {
                 // A scroll over the Switchboard capsule (or its open
                 // readout) cycles the running tasks; everywhere else the
                 // wheel belongs to the window manager's viewport under the
-                // pointer.
+                // pointer — including a capsule with a window over it, which
+                // is that window's viewport and not the bar's.
                 let pointer = self.taskbar.pointer();
-                let on_capsule = matches!(taskbar.hit_test(pointer, scale), Some(Hit::Switchboard))
-                    || taskbar
-                        .tray_readout_layout(scale)
-                        .is_some_and(|readout| readout.contains(pointer));
+                let over_capsule =
+                    matches!(taskbar.hit_test(pointer, scale), Some(Hit::Switchboard))
+                        || taskbar
+                            .tray_readout_layout(scale)
+                            .is_some_and(|readout| readout.contains(pointer));
+                let on_capsule = over_capsule && !self.covered(compositor, presenter);
                 if on_capsule {
                     taskbar_response(self.taskbar.handle(event, taskbar, scale, now_ns))
                 } else {
@@ -276,6 +305,32 @@ impl SessionInputRouter {
             }
             InputEvent::PointerReleased { .. } => SessionInputResponse::Ignored,
         }
+    }
+
+    /// Whether the pixel under the pointer belongs to a window the taskbar
+    /// does not own — that is, whether something is drawn *over* the bar (or
+    /// over one of its popovers) exactly where the pointer is.
+    ///
+    /// Nothing pins the bar topmost. It is an ordinary compositor window, and
+    /// a window raised above it — dragged over it by its title bar, say —
+    /// really does own the pixels the pointer is on, so the bar's own
+    /// geometry containing the pointer is not enough to make a press the
+    /// bar's. Without this, a window covering the clock, the launcher, or the
+    /// capsule would keep taking clicks aimed at itself, and the covered
+    /// control would act on a gesture the user made at something else
+    /// entirely.
+    ///
+    /// The answer is the compositor's own top-down hit test against the
+    /// window ids the [`TaskbarPresenter`] minted, so it is per pointer
+    /// position rather than per bar, and it needs no second copy of either
+    /// the stack or those ids. Nothing on top at all — the pointer is over
+    /// the desktop layer, or the bar has never been presented, so there is no
+    /// window there to be covered by — is not "covered": the taskbar's
+    /// geometry alone then decides, as it always did.
+    fn covered(&self, compositor: &Compositor, presenter: &TaskbarPresenter) -> bool {
+        compositor
+            .window_at(self.taskbar.pointer())
+            .is_some_and(|top| !presenter.owns_window(top))
     }
 }
 

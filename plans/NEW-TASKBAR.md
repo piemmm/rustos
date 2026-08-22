@@ -228,8 +228,8 @@ wallpaper gap  ┌────────────────────�
   a slot opens, never through a slot of its own (T6/T7).
 - **Notification area:** status icons + transient notifications, left of the
   clock; the clock sits between it and the Switchboard icon (desktop1
-  panel 1). A press on the clock, with either button, opens the clock's own
-  menu (T17).
+  panel 1). A secondary press on the clock opens the clock's own menu (T17);
+  a primary press on it is claimed and inert, as on a status signal.
 - **Switchboard icon:** always the trailing-most element, reserved, immovable;
   no application or tray icon may occupy or displace its slot.
 - Vertical / top / right edges reflow along the cross axis by the existing
@@ -1709,7 +1709,8 @@ Tested in the taskbar suite (the reading leads and is non-actionable and
 repeats the bar's label; an unset clock states so; the set-time row is denied
 with its reason and emits nothing until the session attests, then emits the
 typed request; every row in the table renders and maps back consistently; a
-press on the clock with either button opens the menu; attesting the broker
+secondary press on the clock opens the menu and a primary press opens
+nothing; attesting the broker
 latches only the menu surface) and in the session suite (the prompt opens
 once and refuses a second; Escape cancels and offers nothing; Enter offers
 exactly what was typed, once, for the program the prompt named, and reports
@@ -1717,8 +1718,9 @@ the started pid; an incomplete prompt is never offered and moves the keyboard
 to the empty field; a refusal keeps the prompt up, states it, clears the
 password and keeps the account name, and the retry offers the new password; a
 launch failure reads differently from a refused password; abandoning offers
-nothing; an idle prompt ignores every event; a press on the clock reaches the
-bar and opens its menu). The wire form and the broker's decision table are
+nothing; an idle prompt ignores every event; a primary press on the clock is
+claimed by the bar and opens no menu). The wire form and the broker's
+decision table are
 covered in `lib/abi` and `userland/session/login` respectively
 (`plans/CAPABILITY_USE.md` CU5).
 

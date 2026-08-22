@@ -3,10 +3,10 @@
 //! The [`TaskbarInput`] router turns a stream of device-level
 //! [`InputEvent`]s into actions against a [`Taskbar`]: a primary-button press
 //! is hit-tested against the bar's computed [`BarLayout`](crate::BarLayout)
-//! and drives the model — opening the program-library popup, performing a
-//! running application's default action, or reporting a press on the clock.
-//! A press on a status signal is claimed
-//! but inert (it is a live readout, not an action target), and a press on an
+//! and drives the model — opening the program-library popup, or performing
+//! a running application's default action.
+//! A press on a status signal or on the clock is claimed
+//! but inert (both are live readouts, not action targets), and a press on an
 //! open notification popover dismisses the card it lands on.
 //!
 //! It is the taskbar counterpart of the window manager's input router, and it
@@ -29,7 +29,8 @@
 //! A secondary press opens the bar's one context surface
 //! ([`BarMenu`](crate::BarMenu)): on a running application's slot with the
 //! popup closed — showing the menu that *application* declared, or nothing
-//! at all when it declared none — or on a program-library entry row inside
+//! at all when it declared none — on the clock, showing the clock's own
+//! menu, or on a program-library entry row inside
 //! the open popup. While
 //! the menu is open it is the top modal layer — the whole stream routes
 //! into it first, and a press outside its plate dismisses only the menu
@@ -420,16 +421,12 @@ impl TaskbarInput {
                 TaskbarResponse::OpenLibrary
             }
             Hit::App(index) => Self::activate_app(taskbar, index),
-            // A status signal is a live readout, not an action target: the
-            // press is claimed so it never falls through to the window
-            // beneath, but it does nothing.
-            Hit::Notification(_) => TaskbarResponse::Ignored,
-            // The clock's only behaviour is its menu, so either button
-            // opens it rather than a press doing nothing.
-            Hit::Clock => {
-                taskbar.open_clock_menu(taskbar.layout(scale).clock);
-                TaskbarResponse::Ignored
-            }
+            // A status signal and the clock are live readouts, not action
+            // targets: the press is claimed so it never falls through to
+            // the window beneath, but it does nothing. The clock's menu is
+            // a secondary press's to ask for (`press_secondary`) — a left
+            // click that pops a menu up is a menu nobody asked for.
+            Hit::Notification(_) | Hit::Clock => TaskbarResponse::Ignored,
             Hit::Switchboard => {
                 self.capsule_press = Some(CapsulePress {
                     started_ns: now_ns,

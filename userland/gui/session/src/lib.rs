@@ -75,8 +75,10 @@
 //! [`input`] module) is the glue that fans that one stream to the right one:
 //! while the program-library popup is open it is modal and the whole stream
 //! (presses, releases, scroll, keys) routes to the taskbar; otherwise the
-//! taskbar claims a primary press over the bar, the window manager handles
-//! everything else, motion is fanned to both so their pointers stay in step,
+//! taskbar claims a primary press over the bar — unless a window is stacked
+//! over the bar there, which makes the press that window's — the window
+//! manager handles everything else, motion is fanned to both so their
+//! pointers stay in step,
 //! and a release ends a window move-grab. Composing the
 //! two GUI crates this way is the permitted `userland/gui/*` edge.
 //!

@@ -21,7 +21,7 @@
 //! Unix-epoch placeholder, which carries no real-world meaning. The label is
 //! then the bar's own [`UNSET_LABEL`]: the shape of a time with no time in
 //! it. `00:00` would be a fabricated reading, and an empty label would leave
-//! the bar's clock — which is clickable, and whose menu is where a time is
+//! the bar's clock — whose menu is where a time is
 //! set — invisible at exactly the moment the user most needs to reach it.
 //!
 //! # One wake a minute, and none when nothing can be seen

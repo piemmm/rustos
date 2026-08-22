@@ -646,8 +646,9 @@ it acts only on a primary or secondary press, hit-tested against the current
   closes it;
 - a primary press on a **notification icon** reports its `IconId`
   (`NotificationActivated`);
-- a press on the **clock**, with either button, opens the clock's own menu
-  (see *The clock's menu*) — opening asks for nothing by itself;
+- a primary press on the **clock** is claimed and inert — the clock is a
+  reading, not a control — while a **secondary** press opens the clock's own
+  menu (see *The clock's menu*), which asks for nothing by itself;
 - a primary press on the **Switchboard capsule** resolves as a tap or a
   hold (see *The Switchboard capsule's tap-or-hold gesture*), a press
   inside the open readout drives its one safe action or is claimed inert
@@ -757,11 +758,13 @@ session](session.md#the-screen-lock).
 
 ## The clock's menu
 
-A press on the clock, with **either** button, opens the clock's menu through
-the same one modal menu surface (`plans/NEW-TASKBAR.md` T17). A menu is the
-clock's only behaviour, so it is not particular about which button asks for
-it. Its rows are one table, `clock_menu::ROWS`, from which both the rendered
-menu and the row → command mapping are derived:
+A **secondary** press on the clock opens the clock's menu through
+the same one modal menu surface (`plans/NEW-TASKBAR.md` T17) — the button
+that asks for a context menu everywhere else on the desktop, here too. A
+primary press is claimed and inert, like a status signal's: the clock is a
+live reading rather than a control, and a left click that pops a menu up is a
+menu nobody asked for. Its rows are one table, `clock_menu::ROWS`, from which
+both the rendered menu and the row → command mapping are derived:
 
 | Row | What it is |
 |---|---|
@@ -771,8 +774,8 @@ menu and the row → command mapping are derived:
 The heading repeats the label the bar is *already* drawing rather than
 re-deriving a time of its own, so the menu and the bar beside it can never
 disagree. When no wall-clock time has been established this boot the bar draws
-`clock::UNSET_LABEL` (`--:--`) — the clock is pressable, and its menu is where
-a time is set, so it must stay visible and keep its width — and the heading
+`clock::UNSET_LABEL` (`--:--`) — the clock's menu is where a time is set, so
+it must stay visible and keep its width — and the heading
 states *Time not set* rather than repeating dashes or a fabricated `00:00`.
 
 Setting a clock needs `CAP_TIME_SET`, which the bar does not hold and a
