@@ -1393,7 +1393,7 @@ You are not exempt from any rule above. In addition:
     | Process spawn, userland multitasking | `plans/SPAWN.md` |
     | Lightweight threads: threads within a process, the thread-group model, the futex, per-thread thread pointers | `plans/THREADS.md` |
     | App bundles, command apps, help, command resolution | `plans/APPS.md`; `plans/UNIVERSAL.md` (multi-arch/Wasm distribution) |
-    | App settings, secrets, blobs and temporary files: the per-app store keyed on bundle id, the publisher pin, the `key = value` format engine, the sealed scope, descriptor-backed blobs | `plans/APPDATA.md` |
+    | App settings, secrets, blobs and temporary files: the per-app store keyed on bundle id, the publisher pin, the `key = value` format engine, the published scope one app reads another's values through, the sealed scope, descriptor-backed blobs | `plans/APPDATA.md` |
     | Default desktop apps going live: app windows, live app data channels, the file picker | `plans/APPWIN.md` |
     | The graphical file manager (`files.app`): clickable icons, open/launch, rename, move/copy/delete, properties | `plans/NEW-FILEMANAGER.md` |
     | Desktop responsiveness: non-blocking app launch (no UI freeze while an app loads), asynchronous process launch | `plans/FIX-DESKTOP.md` |
@@ -1618,7 +1618,13 @@ defect.
   through that service, which gates every request on the caller's
   kernel-attested app identity. A per-app directory could not be the gate
   itself — every app of a user may write `Settings/`, so any of them could
-  pre-create a sibling named after another app's identifier. See
+  pre-create a sibling named after another app's identifier.
+  A configuration store holds two scopes: a **private** document no other
+  principal may read, and a **published** one any application may read
+  through a request shape that cannot name the private scope at all. The
+  published scope is what keeps app-from-app isolation complete rather than
+  merely strict — two applications that must share a value have exactly one
+  sanctioned channel, so none has to invent a path under `CAP_FS_ACCESS`. See
   `plans/APPDATA.md`. `/Users` is mounted `nosuid,nodev`.
   A store carries the same directory name at every scope, so the user's
   own stores are exactly the system stores' names under their home; both

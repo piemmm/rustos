@@ -13,25 +13,36 @@
 //! their per-inode gate and the service is its only holder, so there is no
 //! second path to the bytes.
 //!
-//! # No request names its own scope
+//! # Two scopes, and the one request shape that names another app
 //!
-//! A request carries a key and a value. **It never carries a bundle
-//! identifier**: the daemon derives which store to open from the
-//! [`Origin`](crate::Origin) the kernel attests for the calling task, so
-//! there is no request shape by which an app can claim to be another app. A
-//! caller with no attested app identity — a kernel principal, a boot-floor
-//! program with no signed manifest, a parser-sandbox child — has no store and
-//! is refused.
+//! An application's store holds a [`ConfigScope::Private`] document — the
+//! user's settings for that app, which nothing else may read — and a
+//! [`ConfigScope::Public`] one, which the app publishes for other
+//! applications to read. Every own-store operation carries the scope; none of
+//! them carries a bundle identifier, because the daemon derives which store to
+//! open from the [`Origin`](crate::Origin) the kernel attests for the calling
+//! task. So there is no request shape by which an app can claim to be another
+//! app.
+//!
+//! The single exception is [`AppDataRequest::PublicRead`], which names a
+//! *foreign* application's identifier — and it is a distinct operation
+//! precisely so that it cannot carry a scope at all: a request that names
+//! another app is public by construction, and the private scope is
+//! unreachable across applications because no frame can ask for it. A caller
+//! with no attested app identity — a kernel principal, a boot-floor program
+//! with no signed manifest, a parser-sandbox child — has no store and is
+//! refused whichever operation it sends.
 //!
 //! # One read for the whole document, not one per key
 //!
 //! [`AppDataRequest::ConfigRead`] answers with the caller's **whole** merged
-//! configuration document — the machine-wide policy layer with the user's own
-//! overrides applied — as canonical `key = value` text the client parses with
-//! the one format engine. So an application's start-up costs one call, one
-//! store read, and one parse however many settings it goes on to consult; a
-//! per-key read would have cost the daemon a file read and a parse *per key*,
-//! and a client that reads one setting pays no more than one that reads forty.
+//! document for one scope — for the private scope, the machine-wide policy
+//! layer with the user's own overrides applied — as canonical `key = value`
+//! text the client parses with the one format engine. So an application's
+//! start-up costs one call, one store read, and one parse however many
+//! settings it goes on to consult; a per-key read would have cost the daemon a
+//! file read and a parse *per key*, and a client that reads one setting pays
+//! no more than one that reads forty.
 //!
 //! The reply is a whole document or nothing: the request declares the reply
 //! buffer the caller has, and a document that does not fit comes back as the
@@ -40,7 +51,7 @@
 //! document assembled out of two different snapshots — every answer is one
 //! point-in-time view.
 //!
-//! # Staged writes, one atomic publish
+//! # Staged writes, one atomic publish per scope
 //!
 //! [`AppDataRequest::ConfigSet`] and [`AppDataRequest::ConfigUnset`] *stage* a
 //! change against the caller's own session with the daemon;
@@ -49,6 +60,11 @@
 //! leaves either the old document or the new one — never a torn one. A staged
 //! change is visible to the staging caller's own [`AppDataRequest::ConfigRead`]
 //! and to no other principal, so a settings sheet reads back what it just set.
+//!
+//! Staging and committing are **per scope**: a commit publishes one document,
+//! because one document is what a rename can replace atomically. Naming a
+//! scope on the commit is what keeps that honest rather than implying an
+//! atomicity across two files that no filesystem offers.
 //!
 //! # Wire shape
 //!
@@ -60,28 +76,35 @@
 //! 6   u16  op
 //! 8   u16  key_len
 //! 10  u16  value_len
-//! 12  u32  capacity    ConfigRead only: the caller's reply buffer
-//! 16  key   bytes      key_len   bytes of UTF-8
-//! ..  value bytes      value_len bytes of UTF-8
+//! 12  u32  capacity    reads only: the caller's reply buffer
+//! 16  u8   scope       own-store operations only
+//! 17  u8   bundle_len  PublicRead only
+//! 18  bundle bytes     bundle_len bytes of UTF-8
+//! ..  key    bytes     key_len    bytes of UTF-8
+//! ..  value  bytes     value_len  bytes of UTF-8
 //! ```
 //!
 //! The record is variable-width rather than padded to its widest form: a
-//! `ConfigRead` is sixteen bytes and a `ConfigCommit` is sixteen, so padding
+//! `ConfigRead` is eighteen bytes and a `ConfigCommit` is eighteen, so padding
 //! every request to the width of the longest value would put a kilobyte of
 //! zeroes on the hot settings path for nothing.
 //!
-//! Every decode fails closed. An unknown magic, version, or operation, a
-//! declared length that does not match the record, a field an operation does
-//! not use left non-zero, non-UTF-8 text, or a trailing byte past the payload
-//! all refuse rather than guess.
+//! Every decode fails closed. An unknown magic, version, operation, or scope,
+//! a declared length that does not match the record, a field an operation does
+//! not use left non-zero, non-UTF-8 text, an identifier outside the bundle-id
+//! grammar, or a trailing byte past the payload all refuse rather than guess.
 //!
 //! The **grammar** of a key and a value is not judged here: it has one home,
 //! the `key = value` engine in `lib/appconf`, and the daemon applies it
 //! through that engine's own validators. This module bounds the transport —
 //! the record's shape, its lengths, and its text encoding — exactly as the
 //! `users_admin` request codec bounds a record whose field rules live in
-//! `lib/users`.
+//! `lib/users`. The one grammar it *does* apply is
+//! [`validate_bundle_id`](crate::validate_bundle_id), because an identifier
+//! naming a directory in a store is a path component crossing a trust
+//! boundary, and that grammar lives in this crate.
 
+use crate::appinfo::BUNDLE_ID_MAX;
 use crate::le::{put_u16, put_u32, read_u16, read_u32};
 use crate::Errno;
 
@@ -149,12 +172,25 @@ pub const APPDATA_DOCUMENT_MAX: usize = 64 * 1024;
 /// than spelled in each of them.
 pub const APPDATA_SETTINGS_FILE: &str = "settings.conf";
 
-/// Byte length of the fixed request header preceding the key and value.
-pub const APPDATA_HEADER_LEN: usize = 16;
+/// Byte length of the fixed request header preceding the bundle identifier,
+/// the key, and the value.
+pub const APPDATA_HEADER_LEN: usize = 18;
+
+/// The widest payload any one operation may carry past the header.
+///
+/// No operation carries a bundle identifier *and* a key: an own-store request
+/// names no app, and a foreign read names no setting. So the widest record is
+/// whichever of the two shapes is longer, stated as such rather than as a sum
+/// that would silently over-allocate every buffer in the system.
+const APPDATA_WIDEST_PAYLOAD: usize = if BUNDLE_ID_MAX > APPDATA_KEY_MAX + APPDATA_VALUE_MAX {
+    BUNDLE_ID_MAX
+} else {
+    APPDATA_KEY_MAX + APPDATA_VALUE_MAX
+};
 
 /// Maximum request, in bytes, the [`APPDATA_ENDPOINT`] accepts: the header
-/// plus the widest key and value a record may carry.
-pub const APPDATA_MAX_REQUEST: usize = APPDATA_HEADER_LEN + APPDATA_KEY_MAX + APPDATA_VALUE_MAX;
+/// plus the widest payload a record may carry.
+pub const APPDATA_MAX_REQUEST: usize = APPDATA_HEADER_LEN + APPDATA_WIDEST_PAYLOAD;
 
 /// Byte offset of the operation discriminant.
 const OP_OFFSET: usize = 6;
@@ -164,6 +200,10 @@ const KEY_LEN_OFFSET: usize = 8;
 const VALUE_LEN_OFFSET: usize = 10;
 /// Byte offset of the reply-buffer capacity.
 const CAPACITY_OFFSET: usize = 12;
+/// Byte offset of the scope discriminant.
+const SCOPE_OFFSET: usize = 16;
+/// Byte offset of the bundle-identifier length prefix.
+const BUNDLE_LEN_OFFSET: usize = 17;
 
 /// Wire discriminant of [`AppDataRequest::ConfigRead`].
 const OP_CONFIG_READ: u16 = 1;
@@ -173,16 +213,72 @@ const OP_CONFIG_SET: u16 = 2;
 const OP_CONFIG_UNSET: u16 = 3;
 /// Wire discriminant of [`AppDataRequest::ConfigCommit`].
 const OP_CONFIG_COMMIT: u16 = 4;
+/// Wire discriminant of [`AppDataRequest::PublicRead`].
+const OP_PUBLIC_READ: u16 = 5;
 
-/// One app-data operation on the caller's **own** configuration store.
+/// Wire discriminant of [`ConfigScope::Private`].
+const SCOPE_PRIVATE: u8 = 1;
+/// Wire discriminant of [`ConfigScope::Public`].
+const SCOPE_PUBLIC: u8 = 2;
+
+/// Which of an application's own configuration documents an operation acts on.
 ///
-/// Every variant acts on the store the daemon derived from the caller's
-/// kernel-attested app identity. None of them names a store, so none of them
-/// can reach another application's data.
+/// The two differ in *who may read them*, which is the whole of the
+/// distinction: nothing but the app itself ever reads its private scope, and
+/// any application may read its public one.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum ConfigScope {
+    /// The user's own settings for this application. Readable and writable by
+    /// the application alone; no request shape lets any other application
+    /// name it.
+    Private,
+    /// What this application publishes about itself for others to read.
+    /// Writable by the application alone, readable by any application through
+    /// [`AppDataRequest::PublicRead`].
+    Public,
+}
+
+impl ConfigScope {
+    /// The wire discriminant of this scope.
+    ///
+    /// Neither is zero, so an all-zero frame cannot decode as a scoped
+    /// operation: a request that forgot to name a scope is refused rather than
+    /// silently served the private one.
+    #[must_use]
+    pub const fn as_wire(self) -> u8 {
+        match self {
+            Self::Private => SCOPE_PRIVATE,
+            Self::Public => SCOPE_PUBLIC,
+        }
+    }
+
+    /// The scope `wire` names.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::OutOfRange`] for anything outside the closed set, zero
+    /// included.
+    pub const fn from_wire(wire: u8) -> Result<Self, Errno> {
+        match wire {
+            SCOPE_PRIVATE => Ok(Self::Private),
+            SCOPE_PUBLIC => Ok(Self::Public),
+            _ => Err(Errno::OutOfRange),
+        }
+    }
+}
+
+/// One app-data operation.
+///
+/// Every variant but [`Self::PublicRead`] acts on the store the daemon derived
+/// from the caller's kernel-attested app identity, and names no store at all.
+/// `PublicRead` is the one shape that names another application — and it can
+/// reach nothing but that application's published document.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum AppDataRequest<'a> {
-    /// Read the caller's whole merged configuration document.
+    /// Read the caller's whole merged document for one of its own scopes.
     ConfigRead {
+        /// Which of the caller's own documents to read.
+        scope: ConfigScope,
         /// How many document bytes the caller's reply buffer can hold, past
         /// the frame's own header. A document longer than this comes back as
         /// [`ConfigDocument::NeedsCapacity`] and no body, so the caller can
@@ -190,39 +286,66 @@ pub enum AppDataRequest<'a> {
         /// Zero is legal and asks only for the length.
         capacity: u32,
     },
-    /// Stage `key = value`, to be published by [`Self::ConfigCommit`].
+    /// Stage `key = value` in one of the caller's own scopes, to be published
+    /// by [`Self::ConfigCommit`] for that scope.
     ConfigSet {
+        /// Which of the caller's own documents to stage against.
+        scope: ConfigScope,
         /// The key to write.
         key: &'a str,
         /// Its new value. May be empty: a key set to nothing is a key that
         /// is set, and is distinct from one that is absent.
         value: &'a str,
     },
-    /// Stage the removal of `key`, to be published by [`Self::ConfigCommit`].
+    /// Stage the removal of `key` from one of the caller's own scopes.
     ConfigUnset {
+        /// Which of the caller's own documents to stage against.
+        scope: ConfigScope,
         /// The key to remove. Removing a key the store does not carry stages
         /// nothing and is not an error.
         key: &'a str,
     },
-    /// Publish every staged change as one atomic document replacement.
-    ConfigCommit,
+    /// Publish every change staged against one scope as one atomic document
+    /// replacement. Edits staged against the caller's other scopes are
+    /// untouched.
+    ConfigCommit {
+        /// Which of the caller's own documents to publish.
+        scope: ConfigScope,
+    },
+    /// Read another application's published document.
+    ///
+    /// The only operation that names an application, and it can name nothing
+    /// but the public scope: there is no scope field to set, so the private
+    /// scope is unreachable across applications by construction. An
+    /// application that has published nothing — or whose store cannot be
+    /// attested — answers the empty document, so this is not an oracle for
+    /// anything but what an app chose to publish.
+    PublicRead {
+        /// The signed bundle identifier of the application to read. Validated
+        /// against [`validate_bundle_id`](crate::validate_bundle_id) on
+        /// decode, because it becomes a path component in the store tree.
+        bundle_id: &'a str,
+        /// As [`Self::ConfigRead`]'s capacity.
+        capacity: u32,
+    },
 }
 
 impl<'a> AppDataRequest<'a> {
     /// Encoded length, in bytes, of this request.
     #[must_use]
     pub const fn wire_len(&self) -> usize {
-        let (key, value) = self.payload();
-        APPDATA_HEADER_LEN + key.len() + value.len()
+        let (bundle, key, value) = self.payload();
+        APPDATA_HEADER_LEN + bundle.len() + key.len() + value.len()
     }
 
-    /// The key and value this request carries, each empty when the operation
-    /// has none.
-    const fn payload(&self) -> (&'a str, &'a str) {
+    /// The bundle identifier, key, and value this request carries, each empty
+    /// when the operation has none.
+    const fn payload(&self) -> (&'a str, &'a str, &'a str) {
         match *self {
-            Self::ConfigUnset { key } => (key, ""),
-            Self::ConfigSet { key, value } => (key, value),
-            Self::ConfigRead { .. } | Self::ConfigCommit => ("", ""),
+            Self::ConfigUnset { key, .. } => ("", key, ""),
+            Self::ConfigSet { key, value, .. } => ("", key, value),
+            Self::PublicRead { bundle_id, .. } => (bundle_id, "", ""),
+            Self::ConfigRead { .. } | Self::ConfigCommit { .. } => ("", "", ""),
         }
     }
 
@@ -232,7 +355,28 @@ impl<'a> AppDataRequest<'a> {
             Self::ConfigRead { .. } => OP_CONFIG_READ,
             Self::ConfigSet { .. } => OP_CONFIG_SET,
             Self::ConfigUnset { .. } => OP_CONFIG_UNSET,
-            Self::ConfigCommit => OP_CONFIG_COMMIT,
+            Self::ConfigCommit { .. } => OP_CONFIG_COMMIT,
+            Self::PublicRead { .. } => OP_PUBLIC_READ,
+        }
+    }
+
+    /// The scope byte this operation carries, zero for the one that names none.
+    const fn scope_wire(&self) -> u8 {
+        match *self {
+            Self::ConfigRead { scope, .. }
+            | Self::ConfigSet { scope, .. }
+            | Self::ConfigUnset { scope, .. }
+            | Self::ConfigCommit { scope } => scope.as_wire(),
+            Self::PublicRead { .. } => 0,
+        }
+    }
+
+    /// The reply-buffer capacity this operation declares, zero for the ones
+    /// that read nothing.
+    const fn capacity(&self) -> u32 {
+        match *self {
+            Self::ConfigRead { capacity, .. } | Self::PublicRead { capacity, .. } => capacity,
+            Self::ConfigSet { .. } | Self::ConfigUnset { .. } | Self::ConfigCommit { .. } => 0,
         }
     }
 
@@ -241,18 +385,21 @@ impl<'a> AppDataRequest<'a> {
     /// # Errors
     ///
     /// * [`Errno::LengthOutOfRange`] — a key longer than
-    ///   [`APPDATA_KEY_MAX`], a value longer than [`APPDATA_VALUE_MAX`], or a
-    ///   capacity beyond [`APPDATA_DOCUMENT_MAX`].
+    ///   [`APPDATA_KEY_MAX`], a value longer than [`APPDATA_VALUE_MAX`], a
+    ///   bundle identifier longer than
+    ///   [`BUNDLE_ID_MAX`], or a capacity
+    ///   beyond [`APPDATA_DOCUMENT_MAX`].
     /// * [`Errno::BufferTooSmall`] — `out` cannot hold the record.
     pub fn encode(&self, out: &mut [u8]) -> Result<usize, Errno> {
-        let (key, value) = self.payload();
-        if key.len() > APPDATA_KEY_MAX || value.len() > APPDATA_VALUE_MAX {
+        let (bundle, key, value) = self.payload();
+        if key.len() > APPDATA_KEY_MAX
+            || value.len() > APPDATA_VALUE_MAX
+            || bundle.len() > BUNDLE_ID_MAX
+        {
             return Err(Errno::LengthOutOfRange);
         }
-        if let Self::ConfigRead { capacity } = *self {
-            if capacity as usize > APPDATA_DOCUMENT_MAX {
-                return Err(Errno::LengthOutOfRange);
-            }
+        if self.capacity() as usize > APPDATA_DOCUMENT_MAX {
+            return Err(Errno::LengthOutOfRange);
         }
         let total = self.wire_len();
         if out.len() < total {
@@ -262,7 +409,7 @@ impl<'a> AppDataRequest<'a> {
         put_u32(out, 0, APPDATA_REQUEST_MAGIC);
         put_u16(out, 4, APPDATA_VERSION_V1);
         put_u16(out, OP_OFFSET, self.op());
-        // Both lengths are bounded above, so neither truncates.
+        // Every length is bounded above, so none of these truncates.
         put_u16(
             out,
             KEY_LEN_OFFSET,
@@ -273,19 +420,21 @@ impl<'a> AppDataRequest<'a> {
             VALUE_LEN_OFFSET,
             u16::try_from(value.len()).map_err(|_| Errno::LengthOutOfRange)?,
         );
-        if let Self::ConfigRead { capacity } = *self {
-            put_u32(out, CAPACITY_OFFSET, capacity);
-        }
-        let key_end = APPDATA_HEADER_LEN + key.len();
-        out[APPDATA_HEADER_LEN..key_end].copy_from_slice(key.as_bytes());
+        put_u32(out, CAPACITY_OFFSET, self.capacity());
+        out[SCOPE_OFFSET] = self.scope_wire();
+        out[BUNDLE_LEN_OFFSET] = u8::try_from(bundle.len()).map_err(|_| Errno::LengthOutOfRange)?;
+        let bundle_end = APPDATA_HEADER_LEN + bundle.len();
+        let key_end = bundle_end + key.len();
+        out[APPDATA_HEADER_LEN..bundle_end].copy_from_slice(bundle.as_bytes());
+        out[bundle_end..key_end].copy_from_slice(key.as_bytes());
         out[key_end..total].copy_from_slice(value.as_bytes());
         Ok(total)
     }
 
     /// Decode a request from `bytes`, failing closed on anything malformed.
     ///
-    /// The borrowed key and value point into `bytes`, so a decode copies
-    /// nothing.
+    /// The borrowed identifier, key, and value point into `bytes`, so a decode
+    /// copies nothing.
     ///
     /// # Errors
     ///
@@ -295,12 +444,85 @@ impl<'a> AppDataRequest<'a> {
     ///   declared payload, or a field the operation does not use left
     ///   non-zero.
     /// * [`Errno::AbiVersionUnsupported`] — not `appdata-v1`.
-    /// * [`Errno::OutOfRange`] — an operation outside the closed set, or a
-    ///   key or value that is not valid UTF-8.
-    /// * [`Errno::LengthOutOfRange`] — a declared key or value length beyond
-    ///   its bound, a required key that is empty, or a capacity beyond
+    /// * [`Errno::OutOfRange`] — an operation or scope outside its closed
+    ///   set, text that is not valid UTF-8, or an identifier outside the
+    ///   bundle-id grammar.
+    /// * [`Errno::LengthOutOfRange`] — a declared length beyond its bound, a
+    ///   required key or identifier that is empty, or a capacity beyond
     ///   [`APPDATA_DOCUMENT_MAX`].
     pub fn decode(bytes: &'a [u8]) -> Result<Self, Errno> {
+        let record = Record::split(bytes)?;
+        match record.op {
+            OP_CONFIG_READ => {
+                record.without_bundle()?;
+                record.without_key()?;
+                record.without_value()?;
+                Ok(Self::ConfigRead {
+                    scope: record.scope()?,
+                    capacity: record.capacity()?,
+                })
+            }
+            OP_CONFIG_SET => {
+                record.without_bundle()?;
+                record.without_capacity()?;
+                Ok(Self::ConfigSet {
+                    scope: record.scope()?,
+                    key: record.key()?,
+                    value: record.value,
+                })
+            }
+            OP_CONFIG_UNSET => {
+                record.without_bundle()?;
+                record.without_capacity()?;
+                record.without_value()?;
+                Ok(Self::ConfigUnset {
+                    scope: record.scope()?,
+                    key: record.key()?,
+                })
+            }
+            OP_CONFIG_COMMIT => {
+                record.without_bundle()?;
+                record.without_capacity()?;
+                record.without_key()?;
+                record.without_value()?;
+                Ok(Self::ConfigCommit {
+                    scope: record.scope()?,
+                })
+            }
+            OP_PUBLIC_READ => {
+                record.without_scope()?;
+                record.without_key()?;
+                record.without_value()?;
+                Ok(Self::PublicRead {
+                    bundle_id: record.bundle_id()?,
+                    capacity: record.capacity()?,
+                })
+            }
+            _ => Err(Errno::OutOfRange),
+        }
+    }
+}
+
+/// One request frame split into its fields, before any operation has claimed
+/// them.
+///
+/// Splitting and *judging* are separate steps on purpose: the split bounds
+/// every length against the frame, and each operation then states exactly
+/// which fields it uses — so a field an operation does not use is checked
+/// empty by the same rule everywhere, and a new operation cannot silently
+/// tolerate a field it ignores.
+struct Record<'a> {
+    op: u16,
+    scope: u8,
+    capacity: u32,
+    bundle: &'a str,
+    key: &'a str,
+    value: &'a str,
+}
+
+impl<'a> Record<'a> {
+    /// Split `bytes` into its fields, bounding every declared length.
+    fn split(bytes: &'a [u8]) -> Result<Self, Errno> {
         if bytes.len() < APPDATA_HEADER_LEN {
             return Err(Errno::BufferTooSmall);
         }
@@ -310,12 +532,15 @@ impl<'a> AppDataRequest<'a> {
         if read_u16(bytes, 4) != APPDATA_VERSION_V1 {
             return Err(Errno::AbiVersionUnsupported);
         }
+        let bundle_len = usize::from(bytes[BUNDLE_LEN_OFFSET]);
         let key_len = usize::from(read_u16(bytes, KEY_LEN_OFFSET));
         let value_len = usize::from(read_u16(bytes, VALUE_LEN_OFFSET));
-        if key_len > APPDATA_KEY_MAX || value_len > APPDATA_VALUE_MAX {
+        if bundle_len > BUNDLE_ID_MAX || key_len > APPDATA_KEY_MAX || value_len > APPDATA_VALUE_MAX
+        {
             return Err(Errno::LengthOutOfRange);
         }
-        let key_end = APPDATA_HEADER_LEN + key_len;
+        let bundle_end = APPDATA_HEADER_LEN + bundle_len;
+        let key_end = bundle_end + key_len;
         let total = key_end + value_len;
         if bytes.len() < total {
             return Err(Errno::BufferTooSmall);
@@ -325,54 +550,84 @@ impl<'a> AppDataRequest<'a> {
         if bytes.len() > total {
             return Err(Errno::BadMagic);
         }
-        let key = core::str::from_utf8(&bytes[APPDATA_HEADER_LEN..key_end])
-            .map_err(|_| Errno::OutOfRange)?;
-        let value = core::str::from_utf8(&bytes[key_end..total]).map_err(|_| Errno::OutOfRange)?;
-        let capacity = read_u32(bytes, CAPACITY_OFFSET);
-
-        match read_u16(bytes, OP_OFFSET) {
-            OP_CONFIG_READ => {
-                if !key.is_empty() || value_len != 0 {
-                    return Err(Errno::BadMagic);
-                }
-                if capacity as usize > APPDATA_DOCUMENT_MAX {
-                    return Err(Errno::LengthOutOfRange);
-                }
-                Ok(Self::ConfigRead { capacity })
-            }
-            OP_CONFIG_SET => {
-                if capacity != 0 {
-                    return Err(Errno::BadMagic);
-                }
-                if key.is_empty() {
-                    return Err(Errno::LengthOutOfRange);
-                }
-                Ok(Self::ConfigSet { key, value })
-            }
-            OP_CONFIG_UNSET => {
-                Self::keyed(key, value_len, capacity).map(|key| Self::ConfigUnset { key })
-            }
-            OP_CONFIG_COMMIT => {
-                if !key.is_empty() || value_len != 0 || capacity != 0 {
-                    return Err(Errno::BadMagic);
-                }
-                Ok(Self::ConfigCommit)
-            }
-            _ => Err(Errno::OutOfRange),
-        }
+        Ok(Self {
+            op: read_u16(bytes, OP_OFFSET),
+            scope: bytes[SCOPE_OFFSET],
+            capacity: read_u32(bytes, CAPACITY_OFFSET),
+            bundle: text(&bytes[APPDATA_HEADER_LEN..bundle_end])?,
+            key: text(&bytes[bundle_end..key_end])?,
+            value: text(&bytes[key_end..total])?,
+        })
     }
 
-    /// Check the shape of an operation that carries a key and nothing else: a
-    /// non-empty key, no value, no capacity.
-    fn keyed(key: &'a str, value_len: usize, capacity: u32) -> Result<&'a str, Errno> {
-        if value_len != 0 || capacity != 0 {
-            return Err(Errno::BadMagic);
-        }
-        if key.is_empty() {
+    /// The scope this record names.
+    fn scope(&self) -> Result<ConfigScope, Errno> {
+        ConfigScope::from_wire(self.scope)
+    }
+
+    /// The reply capacity this record declares, bounded by the widest document
+    /// that can answer it.
+    fn capacity(&self) -> Result<u32, Errno> {
+        if self.capacity as usize > APPDATA_DOCUMENT_MAX {
             return Err(Errno::LengthOutOfRange);
         }
-        Ok(key)
+        Ok(self.capacity)
     }
+
+    /// The non-empty key this record carries.
+    fn key(&self) -> Result<&'a str, Errno> {
+        if self.key.is_empty() {
+            return Err(Errno::LengthOutOfRange);
+        }
+        Ok(self.key)
+    }
+
+    /// The bundle identifier this record carries, inside the one grammar every
+    /// consumer applies to an identifier that becomes a path component.
+    fn bundle_id(&self) -> Result<&'a str, Errno> {
+        crate::validate_bundle_id(self.bundle)?;
+        Ok(self.bundle)
+    }
+
+    /// Refuse a record whose operation names no application.
+    fn without_bundle(&self) -> Result<(), Errno> {
+        Self::absent(self.bundle.is_empty())
+    }
+
+    /// Refuse a record whose operation names no key.
+    fn without_key(&self) -> Result<(), Errno> {
+        Self::absent(self.key.is_empty())
+    }
+
+    /// Refuse a record whose operation carries no value.
+    fn without_value(&self) -> Result<(), Errno> {
+        Self::absent(self.value.is_empty())
+    }
+
+    /// Refuse a record whose operation reads nothing.
+    fn without_capacity(&self) -> Result<(), Errno> {
+        Self::absent(self.capacity == 0)
+    }
+
+    /// Refuse a record whose operation names no scope.
+    fn without_scope(&self) -> Result<(), Errno> {
+        Self::absent(self.scope == 0)
+    }
+
+    /// A field an operation does not use must be empty; anything else is a
+    /// frame that does not mean what its operation says.
+    const fn absent(empty: bool) -> Result<(), Errno> {
+        if empty {
+            Ok(())
+        } else {
+            Err(Errno::BadMagic)
+        }
+    }
+}
+
+/// `bytes` as UTF-8 text, refused rather than replaced when it is not.
+fn text(bytes: &[u8]) -> Result<&str, Errno> {
+    core::str::from_utf8(bytes).map_err(|_| Errno::OutOfRange)
 }
 
 /// Byte length of the document-reply header following the shared status word:
@@ -385,7 +640,7 @@ pub const APPDATA_DOCUMENT_HEADER_LEN: usize = 4;
 pub const APPDATA_MAX_REPLY: usize =
     crate::reply::STATUS_REPLY_LEN + APPDATA_DOCUMENT_HEADER_LEN + APPDATA_DOCUMENT_MAX;
 
-/// What an [`AppDataRequest::ConfigRead`] answered.
+/// What a document read answered.
 ///
 /// Two states, and no third: a caller either holds the whole document or
 /// knows exactly how big a buffer to ask again with. A partly-transferred
@@ -400,8 +655,8 @@ pub enum ConfigDocument<'a> {
     NeedsCapacity(usize),
 }
 
-/// Encode an [`AppDataRequest::ConfigRead`] reply carrying `document`, whose
-/// bytes are sent only if they fit the `capacity` the request declared.
+/// Encode a document reply carrying `document`, whose bytes are sent only if
+/// they fit the `capacity` the request declared.
 ///
 /// # Errors
 ///
@@ -438,7 +693,7 @@ pub fn encode_document_reply(
     Ok(total)
 }
 
-/// Decode an [`AppDataRequest::ConfigRead`] reply.
+/// Decode a document reply.
 ///
 /// # Errors
 ///
@@ -469,9 +724,7 @@ pub fn decode_document_reply(bytes: &[u8]) -> Result<ConfigDocument<'_>, Errno> 
     if body.len() != declared {
         return Err(Errno::BadMagic);
     }
-    core::str::from_utf8(body)
-        .map(ConfigDocument::Whole)
-        .map_err(|_| Errno::OutOfRange)
+    text(body).map(ConfigDocument::Whole)
 }
 
 #[cfg(test)]

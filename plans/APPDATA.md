@@ -29,7 +29,7 @@ home, under its own authority, with `CAP_FS_ACCESS`:
 |---|---|
 | `userland/apps/terminal` | `<home>/Settings/Terminal/terminal.conf` — **migrated** (AD5) |
 | `userland/apps/fstree` | `<home>/Settings/fstree/config` (`settings.rs`) |
-| `lib/wallpaper` / `userland/gui/session` | `<home>/Settings/Pinboard/pinboard.conf` |
+| `userland/gui/session` (writes) / `userland/apps/wallpaper` (reads) | `<home>/Settings/Pinboard/pinboard.conf` — **two programs, one hand-rolled path** (§1.5) |
 | `userland/apps/applib` | `<home>/Settings/ProgramLibrary/library.conf` |
 | `userland/system/init` | `<home>/Settings/Services/` |
 
@@ -83,7 +83,27 @@ process's capability record (`spawn_path`, `credential`, `name` —
 `kernel/core/src/syscalls.rs:10202`). The verified bundle identity is simply
 dropped on the floor instead of being retained beside them.
 
-### 1.5 There is nowhere to put secrets, bulk data, or temporary files
+### 1.5 Isolation with no sanctioned sharing channel re-creates §1.1
+
+Two of a user's applications sometimes have to agree on a value — a terminal's
+font and an app that embeds one, a chooser and the surface it configures. The
+tree already has one: the desktop session owns and writes
+`~/Settings/Pinboard/pinboard.conf`, and the wallpaper chooser — a separate
+bundle — opens that path directly under `CAP_FS_ACCESS` to show the user what is
+currently applied. (Its *write* already goes through the session's own endpoint,
+so only the read is unmediated — which is exactly the half a published scope
+replaces.)
+
+A store that *only* isolates therefore does not remove §1.1; it relocates it.
+An application that must publish a value to another would be left with the one
+route it already has — an invented path written under `CAP_FS_ACCESS`, readable
+and writable by every other app of that user — which is precisely the
+arrangement this plan exists to delete. Isolation is only complete when the
+store also provides the sanctioned channel, so that "reach another app's data"
+has exactly one shape, that shape is opt-in by the *publishing* app, and it
+cannot be widened into the private scope.
+
+### 1.6 There is nowhere to put secrets, bulk data, or temporary files
 
 - **Secrets.** An email client has nowhere to keep a password. `lib/crypto`
   has the primitives (ChaCha20-Poly1305 `seal`/`open`, PBKDF2, and
@@ -113,10 +133,26 @@ dropped on the floor instead of being retained beside them.
   `os.tairix.terminal`, `org.pty.widgets`. The id comes from the
   kernel-attested manifest, so it is unforgeable and unique; the display name
   is neither.
-- **An app never names its own scope.** The daemon derives the caller's scope
-  from the attested `Origin`. A request carries a bundle id **only** to name a
-  *foreign* app's public scope. There is no request shape by which an app can
-  claim to be another app.
+- **An app never names its own store.** The daemon derives it from the attested
+  `Origin`. A request carries a bundle id **only** to name a *foreign* app's
+  published scope, and that request is a **distinct operation with no scope
+  field** — so a frame that names another app cannot ask for its private
+  document at all. There is no request shape by which an app can claim to be
+  another app.
+- **The published scope is one document, with no layer beneath it.** Not a
+  simplification: `confd` cannot name a bundle's own directory (§3.4), so a
+  bundle-shipped published document could never be read on the foreign path, and
+  a layer that worked only for the publishing app would mean two apps
+  disagreeing about what a third publishes. A machine-wide layer is excluded for
+  a second reason — a reader must be able to attribute a published value to the
+  *application*, and an administrator must not be able to make an app appear to
+  say something it never said. Layering is the private scope's alone.
+- **A foreign read is never an oracle.** An app that publishes nothing, one that
+  has never run for the account, and one whose store cannot be attested all
+  answer the same empty document, audited. Only the caller's *own* refusals — no
+  home, a root the service does not own, an unreachable volume — are reported as
+  themselves, because only those are worth a retry. So a reader learns what an
+  app chose to publish and nothing else.
 - **Ownership is pinned to the developer, not to the build key.** The stable
   developer identity is a **publisher key** declared in the signed manifest; a
   per-build **signing key** is certified by it. An app update signed with a new
@@ -448,7 +484,8 @@ invalidate a resolution, and it needs `CAP_FS_CHOWN`) cannot make a stale entry
 serve the wrong account's store. Only successful resolutions are remembered, so
 an account created while the service is running still resolves.
 
-**Read layering**, lowest to highest precedence:
+**Read layering** is the *private* scope's (§2: the published scope is one
+document), lowest to highest precedence:
 
 1. `<Bundle>.app/DefaultSettings/` — the defaults the bundle ships (§16.5).
 2. `/System/Settings/<bundle-id>/` — optional machine-wide administrator
@@ -528,11 +565,11 @@ field the operation does not use left non-zero refuses rather than guessing.
 
 | Request | Stage | Effect |
 |---|---|---|
-| `ConfigRead { capacity }` | AD4 | the caller's **whole** merged document, or the length it needs |
-| `ConfigSet { key, value }` | AD4 | stage a write |
-| `ConfigUnset { key }` | AD4 | stage a removal |
-| `ConfigCommit` | AD4 | publish staged writes atomically |
-| `PublicRead { bundle_id }` / `PublicSet` | AD6 | a **foreign** app's public scope, and one's own |
+| `ConfigRead { scope, capacity }` | AD4, scoped AD6 | the caller's **whole** merged document for one own scope, or the length it needs |
+| `ConfigSet { scope, key, value }` | AD4, scoped AD6 | stage a write |
+| `ConfigUnset { scope, key }` | AD4, scoped AD6 | stage a removal |
+| `ConfigCommit { scope }` | AD4, scoped AD6 | publish that scope's staged writes atomically |
+| `PublicRead { bundle_id, capacity }` | AD6 | a **foreign** app's published document |
 | `VaultRead` / `VaultSet` / `VaultUnset` | AD7 | the sealed scope |
 | `BlobOpen { name, mode }` | AD8 | descriptor grant handle for a blob |
 | `BlobDelete { name }` / `BlobList { cursor }` | AD8 | manage own blobs |
@@ -570,11 +607,37 @@ hot settings path for a request that is sixteen bytes. It is length-prefixed
 instead, bounded by `APPDATA_MAX_REQUEST`, exactly as the `users_admin` codec
 is.
 
-**No `scope` field.** AD4 has exactly one scope, so a `ConfigScope` enum with a
-single variant would be interface built for a stage that has not landed —
-§2.3/§2.4 forbid it, and §2.13 blesses changing the wire in place when the
-second scope arrives. The same rule holds inside the daemon: its store surface
-names the private document plainly rather than carrying a one-value selector.
+**The `scope` field arrived with the second scope, not before.** AD4 had exactly
+one scope, so a `ConfigScope` enum with a single variant would have been
+interface built for a stage that had not landed — §2.3/§2.4 forbid it, and
+§2.13 blesses changing the wire in place when the second scope arrives. AD6 is
+that arrival: `ConfigScope { Private, Public }` is on every own-store request,
+neither variant is zero (so an all-zero frame cannot decode as a scoped
+operation), and the daemon's store surface takes the scope through one
+scope→file-name mapping rather than composing a name per call site.
+
+**A foreign read is a distinct operation, not a scope.** An earlier draft of
+this plan listed `PublicSet` beside `PublicRead` as though both were opcodes.
+They are not, and neither half of that was right:
+
+- Setting one's own published scope is `ConfigSet { scope: Public }`. A second
+  opcode would duplicate `ConfigSet` byte for byte to select a file — the scope
+  selector *is* the mechanism, and the draft's `PublicSet` named the capability
+  rather than a frame.
+- Reading a *foreign* one is its own opcode precisely so that it carries **no
+  scope field**. A shared `ConfigRead { scope, bundle_id }` would have made
+  "another app's private document" a representable request refused by a check;
+  as two operations it is not representable at all. The private scope is
+  unreachable across applications by construction, which is the stronger
+  property and costs one discriminant.
+
+**Both bounds on a foreign read are the ones already there.** The identifier is
+bounded and validated by `validate_bundle_id` at decode — the same grammar the
+manifest and the attested identity use, applied because the value becomes a path
+component — and the document is bounded by `APPDATA_DOCUMENT_MAX` and answered
+under the same whole-or-nothing capacity negotiation as an own read. No
+operation carries an identifier *and* a setting, so `APPDATA_MAX_REQUEST` is the
+wider of the two shapes rather than their sum.
 
 The ABI is structural only. It bounds the record's shape, its lengths, and its
 text encoding; the **grammar** of a key and a value has one home,
@@ -586,11 +649,15 @@ key, the value, and a whole document all cross the wire as fields, so they are
 dependencies, so the single definition lives in `appdata_ipc` and `lib/appconf`
 imports it.
 
-**Writes are staged per calling process instance, not per app.** Keyed on the
+**Writes are staged per calling process instance and per scope.** Keyed on the
 attested `ProcId` — unforgeable and never reused — so two processes of one app
-cannot publish each other's half-finished edits. A session holds only its
-*pending edits*, not a whole document, so it is small; the document is loaded at
-commit. `ConfigRead` applies the caller's own pending edits over the merged
+cannot publish each other's half-finished edits, and on the scope, so a commit
+publishes the one document a rename can replace. A commit that claimed to
+publish both scopes at once would be claiming an atomicity no filesystem offers;
+an app with a settings sheet open while it publishes about itself therefore has
+two independent pieces of unpublished work, and the pending-edit bound is per
+scope so one cannot deny the other. A session holds only its *pending edits*,
+not a whole document, so it is small; the document is loaded at commit. `ConfigRead` applies the caller's own pending edits over the merged
 view, so a settings sheet reads back what it just set while every other
 principal still sees the committed value. A commit renders, writes a sibling
 temporary, flushes, and renames over the live document, so a crash leaves either
@@ -606,7 +673,8 @@ touching state, validate every input, log the security-relevant decisions, fail
 closed.
 
 Secrets are never enumerable or readable across apps — there is no foreign
-equivalent of `PublicRead` for the sealed scope.
+equivalent of `PublicRead` for the sealed scope, and because `PublicRead` is a
+separate opcode with no scope field, none can be reached by mis-setting one.
 
 ### 3.7 Secrets (`secret.vault`)
 
@@ -671,13 +739,26 @@ let size = s.u32("font.size")?.unwrap_or(14);     // local, no call
 s.set_u32("font.size", 16)?;                      // stages, locally
 s.commit()?;                                      // publishes, atomically
 
-let peer = Settings::open_public("os.tairix.terminal")?;   // foreign, read-only
+let mut mine = Settings::open_published(&mut host);   // own published scope
+mine.set("font.family", "berkeley")?; mine.commit()?;
+let theirs = read_published(&mut host, "os.tairix.terminal")?;  // foreign snapshot
+
 let mut v = Vault::open()?;                 // sealed scope
 v.set("imap.password", secret)?; v.commit()?;
 
 let blob = Blobs::open()?.open("index", BlobMode::ReadWrite)?;  // real fd
 let tmp  = Temp::create()?;                                     // real fd
 ```
+
+**A foreign read hands back a `Document`, not a handle.** An earlier sketch in
+this plan wrote it as `Settings::open_public(id)`, which implied a handle over
+another app's store — and a handle is a thing a later call site can commit
+through. A foreign read is one read with nothing to hold open, so it answers the
+format engine's own document value: read-only in the only sense that matters
+(nothing can publish through it), and carrying the engine's typed accessors, so
+the published scope needs no accessor of its own. `open_published` takes no
+command word, because that scope has no bundle-shipped layer to resolve one for
+(§3.4).
 
 `open` costs one `ConfigRead`; every `get` after it is a lookup in the document
 the client already holds and parsed, so an app's start-up cost does not grow
@@ -742,6 +823,45 @@ but deliberately unused by this consumer: it exists for a bundle whose defaults
 is what §16.5 declares the entry for. Stating that here is what stops a later
 migration adding a defaults file "for symmetry".
 
+### 3.11 What the second scope settled
+
+**One pin, two scopes.** The `.owner` record attests who owns the *data*, and
+both documents are the same app's, so there is one pin and not one per scope. A
+squatting publisher is therefore refused before it can put anything in front of
+readers of the real app's published document — the pin does double duty as an
+integrity guarantee for the sharing channel, not only for the private one.
+
+**A publish is per document, and the temporary name is derived from it.** The
+sibling a publish writes before renaming is the live name plus `.new`, computed
+rather than declared per scope: it is then always a sibling in the app's own
+store directory, two scopes can never contend for it, and the rename can never
+cross a volume. Two constants would have been two things to keep in step.
+
+**A foreign read sees committed data only.** A published value is what every
+*other* app sees, so it is the committed document; a publisher's staging is its
+own business, and a reader must not act on a value that may never be published.
+The publisher's own `ConfigRead { Public }` still shows what it staged, so a
+"publish this" surface reads back what it just set.
+
+**No value stands for "another app's store".** The foreign path is a free
+function returning a document, not a type holding a directory: a value standing
+for someone else's store is a value a later call site could publish through.
+There is nothing to hold, so there is nothing to misuse.
+
+**The scope is not yet consumed by a first-party app, and that is stated rather
+than papered over.** AD6 lands a platform facility: `abi-v1` surface an
+application — including one not in this tree — integrates through, exactly as
+AD4 landed `confd` before AD5's first client existed. What holds it honest in
+the meantime is that every property above is tested through the *real* codec, on
+both sides (the daemon's dispatcher over an in-memory volume, and the client
+over the shared fake), rather than through a mock. The first in-tree consumer is AD10's
+`pinboard` document, which the wallpaper chooser reads today by opening the
+session's file directly (§1.5) — the concrete instance of the defect this scope
+closes. It is left to that stage rather than pulled in here because it also has
+to replace `lib/wallpaper`'s own `key = value` engine (§1.3) and settle whether
+the desktop session runs under an attested app identity at all; a migration with
+those two questions open is not a smaller change than the mechanism.
+
 ---
 
 ## 4. Stages
@@ -756,7 +876,7 @@ gate green (§7), and contains no stubs (§15.1).
 | **AD3** ✅ | `lib/appconf` | The format engine: parse, typed accessors, comment/unparsed-line-preserving rewrite, fixed fail-closed bounds, fuzz harness (§19.6) holding the parse/render fixed point and the one-key-per-write property. No I/O; entirely host-testable. |
 | **AD4** ✅ | `confd` + private scope | The service bundle and its `confd` account/ceiling, `APPDATA_ENDPOINT` + `lib/abi/src/appdata_ipc.rs`, `CAP_APPDATA_ADMIN`, the gated `Settings/Apps` + `Library/Apps` roots with their `required_cap` inodes and search-only transit grants across all three home provisioners, the `.owner` pin, the whole-document merged read, per-process staging and atomic commit, and the §3.5 name-gate fix the gate turned out to need. |
 | **AD5** ✅ | `lib/appdata` + first migration | The client: one call to open, local reads, staged writes published as one commit, the **bundle-defaults fallback layer** (§3.4), the degrade path with a typed reason, and the shared fake service every consumer's own tests drive it over. `terminal` migrated: its hand-rolled `key value` parser, renderer, document bound, error types, and `~/Settings/Terminal/terminal.conf` path **deleted**, its registry re-keyed on dotted keys, and its *Restore defaults* turned from "write today's values" into an `unset` the store answers (§3.10). |
-| **AD6** | Public scope | `public.conf`, `PublicRead`, the scope selector the second scope makes real, bounded foreign reads. |
+| **AD6** ✅ | Public scope | `public.conf`; `ConfigScope { Private, Public }` on every own-store request and the reshaped `appdata-v1` header that carries it; `PublicRead` as a **separate opcode with no scope field**, so another app's private document is not a representable request; per-scope staging, per-scope commit and per-scope pending-edit bound; the one scope→file-name mapping and the derived `.new` sibling; the published scope's deliberate absence of any layer beneath it; the foreign read's audited empty answer for a target-side defect and its typed refusal for the caller's own; `Settings::open_published` and `read_published` in the client, and the fake service extended to both scopes and to foreign apps. |
 | **AD7** | Secrets | `secret.vault`, the AEAD hierarchy, the key-protector seam with the volume-backed stage-1 protector. |
 | **AD8** | Blobs | `BlobOpen`/`BlobList`/`BlobDelete`, `fd_grant` handoff, quotas, `file_map` random access. |
 | **AD9** | Temp | `TempCreate`, session-end and boot reaping, quota accounting. |
@@ -777,6 +897,10 @@ Landed as the stages that need them land, never pre-written (§3, §15.2). A
   `Library/Apps/<bundle-id>/` as the app-data roots, keyed on the signed bundle
   id, reachable only through the app-data service, and say why the per-app
   directory cannot itself be the gate.
+- **§16.3** ✅ (AD6) — record the two configuration scopes: a private document
+  no other principal may read, and a published one any app may read through a
+  request shape that cannot name the private scope, with the reason the second
+  exists (§1.5).
 - **§16.5** ✅ (AD4) — three changes to the bundle contract:
   `DefaultSettings/` becomes a read-only **fallback layer** rather than a
   first-launch copy (its *implementation* is AD5's); the "apps may write
@@ -789,12 +913,16 @@ Landed as the stages that need them land, never pre-written (§3, §15.2). A
 - **§5.2** ✅ (AD4) — add `CAP_APPDATA_ADMIN` to the capability list.
 - **§3** ✅ (AD5) — the repository map gains `lib/appdata/`, the app-data
   client.
-- **§15.18** ✅ (AD3) — a jump-sheet row: *"App settings, secrets, blobs and
-  temporary files: the per-app store keyed on bundle id, the publisher pin, the
-  `key = value` format engine, the sealed scope, descriptor-backed blobs" →
+- **§15.18** ✅ (AD3, AD6) — a jump-sheet row: *"App settings, secrets, blobs
+  and temporary files: the per-app store keyed on bundle id, the publisher pin,
+  the `key = value` format engine, the published scope one app reads another's
+  values through, the sealed scope, descriptor-backed blobs" →
   `plans/APPDATA.md`*.
-- **`README.md`** ✅ (AD4) — the security/attack-vector matrix gains the
-  app-from-app isolation row and the name-gate row (§13).
+- **`README.md`** ✅ (AD4, AD6) — the security/attack-vector matrix gains the
+  app-from-app isolation row and the name-gate row (§13), and (AD6) the row for
+  cross-app sharing confined to the published scope: an app reaching another
+  app's *private* settings through the sharing channel, or using it to probe
+  which applications an account has run.
 
 ---
 

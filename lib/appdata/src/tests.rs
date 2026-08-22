@@ -9,12 +9,12 @@
 
 use alloc::string::String;
 
-use tairix_abi::appdata_ipc::{APPDATA_DOCUMENT_MAX, APPDATA_MAX_REPLY};
+use tairix_abi::appdata_ipc::{ConfigScope, APPDATA_DOCUMENT_MAX, APPDATA_MAX_REPLY};
 use tairix_abi::Errno;
 use tairix_appconf::ConfError;
 
 use super::fake::FakeService;
-use super::{Settings, READ_ATTEMPTS};
+use super::{read_published, Settings, READ_ATTEMPTS};
 
 /// The word the fake bundle is installed under.
 const OWN_WORD: &str = "notes";
@@ -328,4 +328,153 @@ fn the_reply_bound_covers_the_widest_document_the_client_can_ask_for() {
     // the wire's own bound: a document the format accepts must always fit.
     const { assert!(APPDATA_MAX_REPLY > APPDATA_DOCUMENT_MAX) };
     assert_eq!(APPDATA_DOCUMENT_MAX, tairix_appconf::MAX_DOCUMENT_LEN);
+}
+
+#[test]
+fn the_published_scope_is_a_document_of_its_own() {
+    // What an application says about itself and what the user has set for it
+    // are separate documents, and a handle on one cannot see the other.
+    let mut host = service()
+        .with_store("imap.user = ada\n")
+        .with_published("font.family = berkeley\n");
+
+    let private = Settings::open(&mut host, OWN_WORD);
+    assert_eq!(private.scope(), ConfigScope::Private);
+    assert_eq!(private.get("imap.user"), Some("ada"));
+    assert_eq!(private.get("font.family"), None);
+    drop(private);
+
+    let mine = Settings::open_published(&mut host);
+    assert_eq!(mine.scope(), ConfigScope::Public);
+    assert_eq!(mine.get("font.family"), Some("berkeley"));
+    assert_eq!(mine.get("imap.user"), None);
+}
+
+#[test]
+fn publishing_lands_in_the_published_scope_and_nowhere_else() {
+    let mut host = service().with_store("imap.user = ada\n");
+    let mut mine = Settings::open_published(&mut host);
+    mine.set("font.family", "berkeley").expect("legal");
+    mine.commit().expect("publishes");
+    drop(mine);
+    assert_eq!(host.published().render(), "font.family = berkeley\n");
+    assert_eq!(
+        host.committed().render(),
+        "imap.user = ada\n",
+        "the private document is untouched"
+    );
+}
+
+#[test]
+fn the_published_scope_has_no_bundle_shipped_layer() {
+    // A bundle's shipped defaults are the *private* scope's fallback. The
+    // published scope has no layer beneath it — the service cannot name a
+    // bundle, so a shipped published document could never be read by anyone
+    // else, and what an app publishes is exactly what it wrote.
+    let mut host = service_with_defaults("font.family = shipped\n");
+    let mine = Settings::open_published(&mut host);
+    assert_eq!(mine.get("font.family"), None);
+    assert_eq!(mine.defaults_refusal(), None);
+    drop(host);
+
+    let mut host = service_with_defaults("font.family = shipped\n");
+    let private = Settings::open(&mut host, OWN_WORD);
+    assert_eq!(
+        private.get("font.family"),
+        Some("shipped"),
+        "the private scope still reads the shipped layer"
+    );
+}
+
+#[test]
+fn opening_the_published_scope_names_no_bundle_and_costs_one_call() {
+    // No command word, because there is no layer to resolve one for — and no
+    // bundle read either.
+    let mut host = service_with_defaults("font.family = shipped\n").with_published("a = 1\n");
+    let mine = Settings::open_published(&mut host);
+    for key in ["a", "b", "c"] {
+        let _ = mine.get(key);
+    }
+    drop(mine);
+    assert_eq!(host.calls(), 1);
+}
+
+#[test]
+fn an_unpublishable_store_leaves_the_scope_empty_and_says_why() {
+    let mut host = service();
+    host.refusal().set(Some(Errno::NotFound));
+    let mut mine = Settings::open_published(&mut host);
+    assert_eq!(mine.store_refusal(), Some(Errno::NotFound));
+    assert_eq!(mine.get("font.family"), None);
+    mine.set("font.family", "berkeley").expect("staged locally");
+    assert_eq!(mine.commit(), Err(Errno::NotFound));
+    assert!(mine.is_dirty(), "so a retry can publish it");
+}
+
+#[test]
+fn a_foreign_read_answers_what_that_application_publishes() {
+    let mut host = service().with_foreign("os.tairix.terminal", "font.family = berkeley\n");
+    let theirs = read_published(&mut host, "os.tairix.terminal").expect("reads");
+    assert_eq!(theirs.get("font.family"), Some("berkeley"));
+    // The typed accessors are the format engine's own, so a foreign read needs
+    // no accessor of its own to be useful.
+    let mut host = service().with_foreign("os.tairix.terminal", "font.size = 14\n");
+    assert_eq!(
+        read_published(&mut host, "os.tairix.terminal")
+            .expect("reads")
+            .u32("font.size"),
+        Ok(Some(14))
+    );
+}
+
+#[test]
+fn a_foreign_read_of_an_application_that_publishes_nothing_is_an_empty_document() {
+    let mut host = service().with_foreign("os.tairix.terminal", "font.family = berkeley\n");
+    let theirs = read_published(&mut host, "com.example.never-run").expect("reads");
+    assert!(theirs.settings().next().is_none());
+    assert_eq!(theirs.get("font.family"), None);
+}
+
+#[test]
+fn a_foreign_read_reports_an_unreachable_service_rather_than_answering_empty() {
+    // A caller must be able to tell "that app publishes nothing" from "no
+    // store can be read at all", because only the second is worth retrying.
+    let mut host = service().with_foreign("os.tairix.terminal", "font.family = berkeley\n");
+    host.refusal().set(Some(Errno::DeviceOffline));
+    assert_eq!(
+        read_published(&mut host, "os.tairix.terminal").err(),
+        Some(Errno::DeviceOffline)
+    );
+}
+
+#[test]
+fn a_foreign_read_refuses_an_identifier_outside_the_grammar_before_the_call() {
+    // The identifier becomes a path component in the store tree, so the wire
+    // codec applies the one grammar and the frame never reaches the service.
+    let mut host = service();
+    for hostile in ["..", "a/b", "OS.tairix", "", ".hidden"] {
+        assert!(
+            read_published(&mut host, hostile).is_err(),
+            "`{hostile}` must never be asked for"
+        );
+    }
+}
+
+#[test]
+fn a_published_document_larger_than_the_probe_is_read_whole() {
+    // The capacity negotiation is the same one the private scope uses, so a
+    // foreign read never parses a prefix either.
+    let mut text = String::new();
+    let mut count = 0usize;
+    while text.len() <= super::READ_PROBE {
+        let _ = core::fmt::Write::write_fmt(
+            &mut text,
+            format_args!("mime.{count} = application/a-reasonably-long-media-type\n"),
+        );
+        count += 1;
+    }
+    let mut host = service().with_foreign("os.tairix.terminal", &text);
+    let theirs = read_published(&mut host, "os.tairix.terminal").expect("reads");
+    assert_eq!(theirs.settings().count(), count);
+    assert_eq!(host.calls(), 2, "one probe, one exact-size read");
 }

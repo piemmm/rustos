@@ -6,8 +6,8 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use tairix_abi::appdata_ipc::{
-    decode_document_reply, AppDataRequest, ConfigDocument, APPDATA_DOCUMENT_MAX, APPDATA_MAX_REPLY,
-    APPDATA_MAX_REQUEST, APPDATA_VALUE_MAX,
+    decode_document_reply, AppDataRequest, ConfigDocument, ConfigScope, APPDATA_DOCUMENT_MAX,
+    APPDATA_MAX_REPLY, APPDATA_MAX_REQUEST, APPDATA_VALUE_MAX,
 };
 use tairix_abi::origin::{CapabilitySummary, TrustDomain, ORIGIN_CONSOLE_NONE, PROC_ID_LEN};
 use tairix_abi::reply::decode_status_reply;
@@ -74,11 +74,12 @@ fn call_at(
     reply
 }
 
-/// Serve a `ConfigSet` and assert it was accepted.
-fn set(
+/// Serve a `ConfigSet` in `scope` and assert it was accepted.
+fn set_in(
     service: &mut AppData<DiscardSink>,
     fs: &mut TestFs,
     origin: &Origin,
+    scope: ConfigScope,
     key: &str,
     value: &str,
 ) {
@@ -86,36 +87,101 @@ fn set(
         service,
         fs,
         origin,
-        &AppDataRequest::ConfigSet { key, value },
+        &AppDataRequest::ConfigSet { scope, key, value },
     );
-    assert_eq!(decode_status_reply(&reply), Ok(()), "set {key}");
+    assert_eq!(
+        decode_status_reply(&reply),
+        Ok(()),
+        "set {key} in {scope:?}"
+    );
 }
 
-/// Serve a `ConfigCommit` and assert it was accepted.
-fn commit(service: &mut AppData<DiscardSink>, fs: &mut TestFs, origin: &Origin) {
-    let reply = call(service, fs, origin, &AppDataRequest::ConfigCommit);
-    assert_eq!(decode_status_reply(&reply), Ok(()), "commit");
-}
-
-/// Serve a `ConfigRead` and parse the document it answered with.
-fn read(
+/// Serve a `ConfigCommit` for `scope` and assert it was accepted.
+fn commit_in(
     service: &mut AppData<DiscardSink>,
     fs: &mut TestFs,
     origin: &Origin,
+    scope: ConfigScope,
+) {
+    let reply = call(service, fs, origin, &AppDataRequest::ConfigCommit { scope });
+    assert_eq!(decode_status_reply(&reply), Ok(()), "commit {scope:?}");
+}
+
+/// Serve a `ConfigRead` of `scope` and parse the document it answered with.
+fn read_in(
+    service: &mut AppData<DiscardSink>,
+    fs: &mut TestFs,
+    origin: &Origin,
+    scope: ConfigScope,
 ) -> Result<Document, Errno> {
     let capacity = u32::try_from(APPDATA_DOCUMENT_MAX).expect("fits a u32");
     let reply = call(
         service,
         fs,
         origin,
-        &AppDataRequest::ConfigRead { capacity },
+        &AppDataRequest::ConfigRead { scope, capacity },
     );
-    match decode_document_reply(&reply)? {
+    whole(&reply)
+}
+
+/// Serve a `PublicRead` of `bundle_id` and parse the document it answered
+/// with.
+fn read_published(
+    service: &mut AppData<DiscardSink>,
+    fs: &mut TestFs,
+    origin: &Origin,
+    bundle_id: &str,
+) -> Result<Document, Errno> {
+    let capacity = u32::try_from(APPDATA_DOCUMENT_MAX).expect("fits a u32");
+    let reply = call(
+        service,
+        fs,
+        origin,
+        &AppDataRequest::PublicRead {
+            bundle_id,
+            capacity,
+        },
+    );
+    whole(&reply)
+}
+
+/// Decode a document reply that must have fitted.
+fn whole(reply: &[u8]) -> Result<Document, Errno> {
+    match decode_document_reply(reply)? {
         ConfigDocument::Whole(text) => Ok(Document::parse(text).expect("the daemon renders it")),
         ConfigDocument::NeedsCapacity(len) => {
             panic!("the widest capacity still needed {len} bytes")
         }
     }
+}
+
+// The private scope is what nearly every test below is about, so it has
+// unsuffixed helpers: naming it at sixty call sites would bury the handful of
+// tests that are *about* which scope is reached.
+
+/// [`set_in`] on the caller's private scope.
+fn set(
+    service: &mut AppData<DiscardSink>,
+    fs: &mut TestFs,
+    origin: &Origin,
+    key: &str,
+    value: &str,
+) {
+    set_in(service, fs, origin, ConfigScope::Private, key, value);
+}
+
+/// [`commit_in`] on the caller's private scope.
+fn commit(service: &mut AppData<DiscardSink>, fs: &mut TestFs, origin: &Origin) {
+    commit_in(service, fs, origin, ConfigScope::Private);
+}
+
+/// [`read_in`] on the caller's private scope.
+fn read(
+    service: &mut AppData<DiscardSink>,
+    fs: &mut TestFs,
+    origin: &Origin,
+) -> Result<Document, Errno> {
+    read_in(service, fs, origin, ConfigScope::Private)
 }
 
 /// Read `key` out of the caller's own merged document.
@@ -234,13 +300,26 @@ fn a_caller_with_no_attested_app_identity_is_refused_every_operation() {
     let (mut svc, mut fs) = service();
     let anon = origin(ACCOUNT_UID, 1, None);
     for request in [
-        AppDataRequest::ConfigRead { capacity: 4096 },
+        AppDataRequest::ConfigRead {
+            scope: ConfigScope::Private,
+            capacity: 4096,
+        },
         AppDataRequest::ConfigSet {
+            scope: ConfigScope::Private,
             key: "scheme",
             value: "dark",
         },
-        AppDataRequest::ConfigUnset { key: "scheme" },
-        AppDataRequest::ConfigCommit,
+        AppDataRequest::ConfigUnset {
+            scope: ConfigScope::Private,
+            key: "scheme",
+        },
+        AppDataRequest::ConfigCommit {
+            scope: ConfigScope::Private,
+        },
+        AppDataRequest::PublicRead {
+            bundle_id: "org.pty.notes",
+            capacity: 4096,
+        },
     ] {
         let reply = call(&mut svc, &mut fs, &anon, &request);
         assert_eq!(
@@ -270,12 +349,20 @@ fn a_publisher_claiming_another_developers_identifier_is_refused() {
         &mut fs,
         &squatter,
         &AppDataRequest::ConfigSet {
+            scope: ConfigScope::Private,
             key: "scheme",
             value: "hostile",
         },
     );
     assert_eq!(decode_status_reply(&reply), Ok(()), "the set only stages");
-    let reply = call(&mut svc, &mut fs, &squatter, &AppDataRequest::ConfigCommit);
+    let reply = call(
+        &mut svc,
+        &mut fs,
+        &squatter,
+        &AppDataRequest::ConfigCommit {
+            scope: ConfigScope::Private,
+        },
+    );
     assert_eq!(
         decode_status_reply(&reply),
         Err(Errno::PermissionDenied),
@@ -337,7 +424,10 @@ fn a_staged_removal_reads_as_absent_and_publishes_as_removed() {
         &mut svc,
         &mut fs,
         &ada,
-        &AppDataRequest::ConfigUnset { key: "scheme" },
+        &AppDataRequest::ConfigUnset {
+            scope: ConfigScope::Private,
+            key: "scheme",
+        },
     );
     assert_eq!(decode_status_reply(&reply), Ok(()));
     assert_eq!(get(&mut svc, &mut fs, &ada, "scheme"), Err(Errno::NotFound));
@@ -449,7 +539,10 @@ fn the_policy_layer_sets_a_default_the_user_can_override() {
         &mut svc,
         &mut fs,
         &ada,
-        &AppDataRequest::ConfigUnset { key: "scheme" },
+        &AppDataRequest::ConfigUnset {
+            scope: ConfigScope::Private,
+            key: "scheme",
+        },
     );
     assert_eq!(decode_status_reply(&reply), Ok(()));
     commit(&mut svc, &mut fs, &ada);
@@ -490,7 +583,10 @@ fn a_read_covers_both_layers_and_the_callers_own_staging() {
         &mut svc,
         &mut fs,
         &ada,
-        &AppDataRequest::ConfigUnset { key: "font.size" },
+        &AppDataRequest::ConfigUnset {
+            scope: ConfigScope::Private,
+            key: "font.size",
+        },
     );
     assert_eq!(decode_status_reply(&reply), Ok(()));
     let mut named = keys(&mut svc, &mut fs, &ada);
@@ -520,7 +616,10 @@ fn a_document_past_the_callers_capacity_is_answered_with_its_length() {
         &mut svc,
         &mut fs,
         &ada,
-        &AppDataRequest::ConfigRead { capacity: 16 },
+        &AppDataRequest::ConfigRead {
+            scope: ConfigScope::Private,
+            capacity: 16,
+        },
     );
     let needed = match decode_document_reply(&reply) {
         Ok(ConfigDocument::NeedsCapacity(len)) => len,
@@ -534,6 +633,7 @@ fn a_document_past_the_callers_capacity_is_answered_with_its_length() {
         &mut fs,
         &ada,
         &AppDataRequest::ConfigRead {
+            scope: ConfigScope::Private,
             capacity: u32::try_from(needed).expect("fits a u32"),
         },
     );
@@ -555,7 +655,11 @@ fn a_malformed_key_or_value_is_refused_before_anything_is_staged() {
             &mut svc,
             &mut fs,
             &ada,
-            &AppDataRequest::ConfigSet { key, value: "x" },
+            &AppDataRequest::ConfigSet {
+                scope: ConfigScope::Private,
+                key,
+                value: "x",
+            },
         );
         assert_eq!(
             decode_status_reply(&reply),
@@ -569,6 +673,7 @@ fn a_malformed_key_or_value_is_refused_before_anything_is_staged() {
         &mut fs,
         &ada,
         &AppDataRequest::ConfigSet {
+            scope: ConfigScope::Private,
             key: "scheme",
             value: "da\u{7}rk",
         },
@@ -624,6 +729,7 @@ fn a_runaway_writer_is_bounded_rather_than_growing_without_limit() {
         &mut fs,
         &ada,
         &AppDataRequest::ConfigSet {
+            scope: ConfigScope::Private,
             key: "one.too.many",
             value: "v",
         },
@@ -650,7 +756,10 @@ fn an_abandoned_staging_session_is_reclaimed() {
         &mut fs,
         &other,
         STAGING_IDLE_NS,
-        &AppDataRequest::ConfigRead { capacity: 4096 },
+        &AppDataRequest::ConfigRead {
+            scope: ConfigScope::Private,
+            capacity: 4096,
+        },
     );
     assert_eq!(svc.staging_sessions(), 0);
     assert_eq!(get(&mut svc, &mut fs, &ada, "scheme"), Err(Errno::NotFound));
@@ -669,6 +778,7 @@ fn a_session_touched_within_the_idle_window_survives() {
             &ada,
             now,
             &AppDataRequest::ConfigSet {
+                scope: ConfigScope::Private,
                 key: "scheme",
                 value: "dark",
             },
@@ -676,7 +786,15 @@ fn a_session_touched_within_the_idle_window_survives() {
         assert_eq!(decode_status_reply(&reply), Ok(()), "step {step}");
         assert_eq!(svc.staging_sessions(), 1);
     }
-    let reply = call_at(&mut svc, &mut fs, &ada, now, &AppDataRequest::ConfigCommit);
+    let reply = call_at(
+        &mut svc,
+        &mut fs,
+        &ada,
+        now,
+        &AppDataRequest::ConfigCommit {
+            scope: ConfigScope::Private,
+        },
+    );
     assert_eq!(decode_status_reply(&reply), Ok(()));
     assert_eq!(
         get(&mut svc, &mut fs, &ada, "scheme").as_deref(),
@@ -690,7 +808,14 @@ fn a_failed_commit_leaves_the_edits_staged_for_a_retry() {
     let ada = origin(ACCOUNT_UID, 1, Some(identity(1)));
     set(&mut svc, &mut fs, &ada, "scheme", "dark");
     fs.fail_all(Errno::DeviceOffline);
-    let reply = call(&mut svc, &mut fs, &ada, &AppDataRequest::ConfigCommit);
+    let reply = call(
+        &mut svc,
+        &mut fs,
+        &ada,
+        &AppDataRequest::ConfigCommit {
+            scope: ConfigScope::Private,
+        },
+    );
     assert_eq!(decode_status_reply(&reply), Err(Errno::DeviceOffline));
     assert_eq!(svc.staging_sessions(), 1, "the edits survive the failure");
 }
@@ -783,5 +908,432 @@ fn a_home_created_after_startup_still_resolves() {
     assert_eq!(
         get(&mut svc, &mut fs, &bob, "scheme").as_deref(),
         Ok("light")
+    );
+}
+
+#[test]
+fn the_two_scopes_are_separate_stores_to_a_caller() {
+    // A write to what an app publishes must not appear in its private
+    // settings, nor the reverse: the scope selector is the whole of what
+    // separates them, and it is on every own-store request.
+    let (mut svc, mut fs) = service();
+    let ada = origin(ACCOUNT_UID, 1, Some(identity(1)));
+    set_in(
+        &mut svc,
+        &mut fs,
+        &ada,
+        ConfigScope::Private,
+        "imap.user",
+        "ada",
+    );
+    commit_in(&mut svc, &mut fs, &ada, ConfigScope::Private);
+    set_in(
+        &mut svc,
+        &mut fs,
+        &ada,
+        ConfigScope::Public,
+        "font.family",
+        "berkeley",
+    );
+    commit_in(&mut svc, &mut fs, &ada, ConfigScope::Public);
+
+    let private = read_in(&mut svc, &mut fs, &ada, ConfigScope::Private).expect("reads");
+    assert_eq!(private.get("imap.user"), Some("ada"));
+    assert_eq!(private.get("font.family"), None);
+
+    let public = read_in(&mut svc, &mut fs, &ada, ConfigScope::Public).expect("reads");
+    assert_eq!(public.get("font.family"), Some("berkeley"));
+    assert_eq!(public.get("imap.user"), None);
+}
+
+#[test]
+fn a_commit_publishes_one_scope_and_leaves_the_others_edits_staged() {
+    // One rename replaces one name, so a commit names the scope it publishes.
+    // A settings sheet's unsaved work must survive the app publishing about
+    // itself, and vice versa.
+    let (mut svc, mut fs) = service();
+    let ada = origin(ACCOUNT_UID, 1, Some(identity(1)));
+    set_in(
+        &mut svc,
+        &mut fs,
+        &ada,
+        ConfigScope::Private,
+        "scheme",
+        "dark",
+    );
+    set_in(
+        &mut svc,
+        &mut fs,
+        &ada,
+        ConfigScope::Public,
+        "font.family",
+        "berkeley",
+    );
+    assert_eq!(svc.staging_sessions(), 1, "one session, two scopes' edits");
+
+    commit_in(&mut svc, &mut fs, &ada, ConfigScope::Public);
+    assert_eq!(
+        svc.staging_sessions(),
+        1,
+        "the private edit is still staged"
+    );
+
+    // A fresh instance sees the published value and not the private one.
+    let other = origin(ACCOUNT_UID, 2, Some(identity(1)));
+    assert_eq!(
+        read_in(&mut svc, &mut fs, &other, ConfigScope::Public)
+            .expect("reads")
+            .get("font.family"),
+        Some("berkeley")
+    );
+    assert_eq!(
+        read_in(&mut svc, &mut fs, &other, ConfigScope::Private)
+            .expect("reads")
+            .get("scheme"),
+        None
+    );
+
+    commit_in(&mut svc, &mut fs, &ada, ConfigScope::Private);
+    assert_eq!(svc.staging_sessions(), 0, "and now the session is spent");
+    assert_eq!(
+        read_in(&mut svc, &mut fs, &other, ConfigScope::Private)
+            .expect("reads")
+            .get("scheme"),
+        Some("dark")
+    );
+}
+
+#[test]
+fn each_scope_gets_its_own_pending_edit_budget() {
+    // The bound is per scope because each scope is a document of its own: one
+    // of them filling up must not deny the other.
+    let (mut svc, mut fs) = service();
+    let ada = origin(ACCOUNT_UID, 1, Some(identity(1)));
+    for index in 0..MAX_PENDING_EDITS {
+        set_in(
+            &mut svc,
+            &mut fs,
+            &ada,
+            ConfigScope::Private,
+            &alloc::format!("k{index}"),
+            "v",
+        );
+    }
+    let reply = call(
+        &mut svc,
+        &mut fs,
+        &ada,
+        &AppDataRequest::ConfigSet {
+            scope: ConfigScope::Private,
+            key: "one.too.many",
+            value: "v",
+        },
+    );
+    assert_eq!(decode_status_reply(&reply), Err(Errno::LimitExceeded));
+    // The published scope is untouched by the private scope's runaway writer.
+    set_in(
+        &mut svc,
+        &mut fs,
+        &ada,
+        ConfigScope::Public,
+        "font.family",
+        "berkeley",
+    );
+}
+
+#[test]
+fn an_app_reads_what_another_app_publishes() {
+    // The opt-in the published scope exists for: one app writes it, another
+    // app of the same account reads it — and neither names a path.
+    let (mut svc, mut fs) = service();
+    let terminal = origin(ACCOUNT_UID, 1, Some(identity(1)));
+    let notes = origin(
+        ACCOUNT_UID,
+        2,
+        Some(AppIdentity::new("org.pty.notes", publisher(2)).expect("well formed")),
+    );
+    set_in(
+        &mut svc,
+        &mut fs,
+        &terminal,
+        ConfigScope::Public,
+        "font.family",
+        "berkeley",
+    );
+    commit_in(&mut svc, &mut fs, &terminal, ConfigScope::Public);
+
+    let published = read_published(&mut svc, &mut fs, &notes, "os.tairix.terminal").expect("reads");
+    assert_eq!(published.get("font.family"), Some("berkeley"));
+}
+
+#[test]
+fn a_foreign_read_cannot_reach_the_private_scope() {
+    // The property AD6 must not weaken: opening a published scope must not
+    // open a door onto the private one. There is no scope field on a foreign
+    // read, so there is nothing to try.
+    let (mut svc, mut fs) = service();
+    let terminal = origin(ACCOUNT_UID, 1, Some(identity(1)));
+    let notes = origin(
+        ACCOUNT_UID,
+        2,
+        Some(AppIdentity::new("org.pty.notes", publisher(2)).expect("well formed")),
+    );
+    set_in(
+        &mut svc,
+        &mut fs,
+        &terminal,
+        ConfigScope::Private,
+        "imap.password",
+        "hunter2",
+    );
+    commit_in(&mut svc, &mut fs, &terminal, ConfigScope::Private);
+    set_in(
+        &mut svc,
+        &mut fs,
+        &terminal,
+        ConfigScope::Public,
+        "font.family",
+        "berkeley",
+    );
+    commit_in(&mut svc, &mut fs, &terminal, ConfigScope::Public);
+
+    let published = read_published(&mut svc, &mut fs, &notes, "os.tairix.terminal").expect("reads");
+    assert_eq!(published.get("font.family"), Some("berkeley"));
+    assert_eq!(
+        published.get("imap.password"),
+        None,
+        "publishing one scope must not expose the other"
+    );
+    assert_eq!(published.settings().count(), 1);
+}
+
+#[test]
+fn a_foreign_read_answers_committed_data_not_a_publishers_staging() {
+    // A published value is what every other app sees, so it is the committed
+    // document — a publisher's unsaved work is nobody else's business, and a
+    // reader must not act on a value that may never be published.
+    let (mut svc, mut fs) = service();
+    let terminal = origin(ACCOUNT_UID, 1, Some(identity(1)));
+    let notes = origin(
+        ACCOUNT_UID,
+        2,
+        Some(AppIdentity::new("org.pty.notes", publisher(2)).expect("well formed")),
+    );
+    set_in(
+        &mut svc,
+        &mut fs,
+        &terminal,
+        ConfigScope::Public,
+        "font.family",
+        "berkeley",
+    );
+    commit_in(&mut svc, &mut fs, &terminal, ConfigScope::Public);
+    set_in(
+        &mut svc,
+        &mut fs,
+        &terminal,
+        ConfigScope::Public,
+        "font.family",
+        "not-yet-published",
+    );
+
+    assert_eq!(
+        read_published(&mut svc, &mut fs, &notes, "os.tairix.terminal")
+            .expect("reads")
+            .get("font.family"),
+        Some("berkeley")
+    );
+    // The publisher's own read still shows its staged value.
+    assert_eq!(
+        read_in(&mut svc, &mut fs, &terminal, ConfigScope::Public)
+            .expect("reads")
+            .get("font.family"),
+        Some("not-yet-published")
+    );
+}
+
+#[test]
+fn a_foreign_read_of_an_app_that_publishes_nothing_answers_the_empty_document() {
+    // An app with no store, an app that has published nothing, and an app
+    // whose store cannot be attested answer identically — so a caller cannot
+    // use the endpoint to discover which applications an account has run.
+    let (mut svc, mut fs) = service();
+    let notes = origin(
+        ACCOUNT_UID,
+        2,
+        Some(AppIdentity::new("org.pty.notes", publisher(2)).expect("well formed")),
+    );
+    let terminal = origin(ACCOUNT_UID, 1, Some(identity(1)));
+    // A store that exists but publishes nothing.
+    set(&mut svc, &mut fs, &terminal, "scheme", "dark");
+    commit(&mut svc, &mut fs, &terminal);
+
+    for target in ["os.tairix.terminal", "com.example.never-run"] {
+        let published = read_published(&mut svc, &mut fs, &notes, target).expect("reads");
+        assert!(
+            published.settings().next().is_none(),
+            "`{target}` publishes nothing"
+        );
+    }
+
+    // A store whose pin attests nothing reads the same way.
+    fs.put(
+        &alloc::format!("{HOME}/Settings/Apps/os.tairix.terminal/.owner"),
+        b"junk",
+    );
+    assert!(
+        read_published(&mut svc, &mut fs, &notes, "os.tairix.terminal")
+            .expect("reads")
+            .settings()
+            .next()
+            .is_none(),
+        "a broken target publishes nothing, and says no more than that"
+    );
+}
+
+#[test]
+fn a_foreign_read_reports_the_callers_own_unreachable_volume() {
+    // A target's defect is answered empty; the caller's own environment is
+    // reported as itself, so an early caller is not told an app publishes
+    // nothing when the truth is that no store can be read at all.
+    let (mut svc, mut fs) = service();
+    let notes = origin(
+        ACCOUNT_UID,
+        2,
+        Some(AppIdentity::new("org.pty.notes", publisher(2)).expect("well formed")),
+    );
+    fs.fail_all(Errno::DeviceOffline);
+    assert_eq!(
+        read_published(&mut svc, &mut fs, &notes, "os.tairix.terminal").err(),
+        Some(Errno::DeviceOffline)
+    );
+}
+
+#[test]
+fn a_foreign_read_never_crosses_an_account() {
+    let (mut svc, mut fs) = service();
+    fs.add_home("/Users/bob", ACCOUNT_UID + 1);
+    let notes = AppIdentity::new("org.pty.notes", publisher(2)).expect("well formed");
+    let ada_terminal = origin(ACCOUNT_UID, 1, Some(identity(1)));
+    let bob_terminal = origin(ACCOUNT_UID + 1, 2, Some(identity(1)));
+    set_in(
+        &mut svc,
+        &mut fs,
+        &ada_terminal,
+        ConfigScope::Public,
+        "owner",
+        "ada",
+    );
+    commit_in(&mut svc, &mut fs, &ada_terminal, ConfigScope::Public);
+    set_in(
+        &mut svc,
+        &mut fs,
+        &bob_terminal,
+        ConfigScope::Public,
+        "owner",
+        "bob",
+    );
+    commit_in(&mut svc, &mut fs, &bob_terminal, ConfigScope::Public);
+
+    let ada_notes = origin(ACCOUNT_UID, 3, Some(notes));
+    let bob_notes = origin(ACCOUNT_UID + 1, 4, Some(notes));
+    assert_eq!(
+        read_published(&mut svc, &mut fs, &ada_notes, "os.tairix.terminal")
+            .expect("reads")
+            .get("owner"),
+        Some("ada")
+    );
+    assert_eq!(
+        read_published(&mut svc, &mut fs, &bob_notes, "os.tairix.terminal")
+            .expect("reads")
+            .get("owner"),
+        Some("bob")
+    );
+}
+
+#[test]
+fn a_squatting_publisher_cannot_publish_over_the_owners_document() {
+    // The pin governs both scopes: a different developer claiming a bundle
+    // identifier is refused before it can put anything in front of readers of
+    // the real app's published document.
+    let (mut svc, mut fs) = service();
+    let honest = origin(ACCOUNT_UID, 1, Some(identity(1)));
+    set_in(
+        &mut svc,
+        &mut fs,
+        &honest,
+        ConfigScope::Public,
+        "font.family",
+        "berkeley",
+    );
+    commit_in(&mut svc, &mut fs, &honest, ConfigScope::Public);
+
+    let squatter = origin(ACCOUNT_UID, 2, Some(identity(2)));
+    set_in(
+        &mut svc,
+        &mut fs,
+        &squatter,
+        ConfigScope::Public,
+        "font.family",
+        "hostile",
+    );
+    let reply = call(
+        &mut svc,
+        &mut fs,
+        &squatter,
+        &AppDataRequest::ConfigCommit {
+            scope: ConfigScope::Public,
+        },
+    );
+    assert_eq!(decode_status_reply(&reply), Err(Errno::PermissionDenied));
+
+    let notes = origin(
+        ACCOUNT_UID,
+        3,
+        Some(AppIdentity::new("org.pty.notes", publisher(3)).expect("well formed")),
+    );
+    assert_eq!(
+        read_published(&mut svc, &mut fs, &notes, "os.tairix.terminal")
+            .expect("reads")
+            .get("font.family"),
+        Some("berkeley"),
+        "readers still see the real publisher's document"
+    );
+}
+
+#[test]
+fn a_foreign_read_naming_a_traversal_is_refused_before_a_store_is_touched() {
+    // The bundle identifier is the only caller-supplied component of any store
+    // path, and it arrives already inside the one identifier grammar. This is
+    // that guarantee at the service's own door: the frame encodes (the codec
+    // bounds lengths, not grammars) and the *decode* refuses it, so no path is
+    // ever composed from it.
+    let (mut svc, mut fs) = service();
+    let ada = origin(ACCOUNT_UID, 1, Some(identity(1)));
+    set(&mut svc, &mut fs, &ada, "scheme", "dark");
+    commit(&mut svc, &mut fs, &ada);
+
+    for hostile in ["..", ".", "../../etc", "a/b", "OS.tairix", ".hidden", "a b"] {
+        let reply = call(
+            &mut svc,
+            &mut fs,
+            &ada,
+            &AppDataRequest::PublicRead {
+                bundle_id: hostile,
+                capacity: 4096,
+            },
+        );
+        assert!(
+            matches!(
+                decode_status_reply(&reply),
+                Err(Errno::OutOfRange | Errno::LengthOutOfRange)
+            ),
+            "`{hostile}` must be refused, not resolved"
+        );
+    }
+    // And the store the caller does own is untouched by any of it.
+    assert_eq!(
+        get(&mut svc, &mut fs, &ada, "scheme").as_deref(),
+        Ok("dark")
     );
 }

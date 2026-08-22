@@ -13,21 +13,52 @@ settings.set_u32("font.size", 16)?;
 settings.commit()?;
 ```
 
+## Two scopes
+
+`Settings::open` is the application's **private** scope: the user's settings for
+it, which no other principal can read. `Settings::open_published` is its
+**published** scope — what it says about itself for other applications to read —
+and `read_published` reads another application's:
+
+```rust
+let mut mine = Settings::open_published(&mut host);
+mine.set("font.family", "berkeley")?;
+mine.commit()?;                                     // now readable by others
+
+let theirs = read_published(&mut host, "os.tairix.terminal")?;
+let family = theirs.get("font.family");
+```
+
+The two are separate documents with separate commits, because one atomic publish
+replaces one document. A foreign read answers a plain `tairix-appconf`
+`Document` — a snapshot, with the format engine's own typed accessors, and no
+handle that could publish through it.
+
 ## No app spells a path, and none names itself
 
-Nothing here takes a store path, a user, or a bundle **identifier**: the
-[app-data service](../userland/confd.md) derives all three from the identity the
-kernel attests for the calling task. So an application cannot reach outside its
-own scope by construction rather than by a check some caller might forget, and
-this library has no privileged surface to misuse.
+Nothing here takes a store path or a user, and nothing but `read_published`
+takes a bundle **identifier**: the [app-data service](../userland/confd.md)
+derives all of those from the identity the kernel attests for the calling task.
+So an application cannot reach outside its own scope by construction rather than
+by a check some caller might forget, and this library has no privileged surface
+to misuse. The one identifier a caller does name selects a *published* document
+and nothing else — there is no request shape that reaches another application's
+private settings.
 
 The one argument `open` does take is the program's own command **word**, and it
 selects nothing but layer 1 below — the app's own shipped defaults. A wrong
 value there can only mislead an application about itself.
+`open_published` takes none, because the published scope has no layer beneath
+it.
 
 ## Three layers, and which of them this library owns
 
-A read answers from the highest layer that sets the key:
+Layering is the **private** scope's. The published scope is exactly one
+document: the service cannot name a bundle's own directory, so a shipped
+published document could never be read by anyone else, and what an application
+publishes is therefore exactly what it wrote.
+
+A private read answers from the highest layer that sets the key:
 
 1. `<Bundle>.app/DefaultSettings/settings.conf` — the defaults the bundle ships.
    **This library's layer.** It needs the *bundle's* path, and nothing attested
@@ -64,12 +95,27 @@ value comes back from a layer below rather than from the value removed. A
 standalone `reload` is a fresh view, not a merge: it discards unpublished edits,
 which is the contract a handle that is simply never committed already has.
 
+## Reading what another application publishes
+
+`read_published` is the one call that names another application. It answers the
+publisher's **committed** document — never its unsaved edits — and answers the
+**empty document** for an application that publishes nothing, has never run for
+this account, or whose store the service cannot attest. Those cases are
+deliberately indistinguishable, so a caller learns what an application chose to
+publish and nothing more.
+
+An unreachable service or volume is reported as itself rather than as an empty
+document, because only that is worth a retry. An identifier outside the
+bundle-identifier grammar is refused by the wire codec, so a frame naming one
+never reaches the service.
+
 ## No service, or no store: read the defaults, refuse the writes
 
-`open` never fails. A store the service cannot serve — early boot before the
-encrypted root is unlocked, a crashed service, a caller the kernel admitted from
-no signed bundle — leaves the bundle's shipped defaults standing and records the
-reason in `store_refusal`. The application therefore starts and behaves, can say
+`open` never fails, and neither does `open_published`. A store the service
+cannot serve — early boot before the encrypted root is unlocked, a crashed
+service, a caller the kernel admitted from no signed bundle — leaves the
+bundle's shipped defaults standing (the published scope simply empty) and
+records the reason in `store_refusal`. The application therefore starts and behaves, can say
 why its settings are the shipped ones, and is never told a change was saved that
 was not: the commit reports the same typed error, and the edits stay staged for a
 retry.

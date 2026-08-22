@@ -7,19 +7,40 @@
 //! let size = settings.u32("font.size")?.unwrap_or(14);
 //! settings.set_u32("font.size", 16)?;
 //! settings.commit()?;                       // one atomic publish
+//!
+//! let mut mine = Settings::open_published(&mut host);   // what others may read
+//! mine.set("font.family", "berkeley")?;
+//! mine.commit()?;
+//!
+//! let theirs = read_published(&mut host, "os.tairix.terminal")?;
+//! let family = theirs.get("font.family");
 //! ```
 //!
 //! # No app spells a path, and none names itself
 //!
-//! Nothing here takes a store path, a user, or a bundle identifier: the
-//! app-data service derives every one of those from the identity the kernel
-//! attests for the calling task. So an application cannot reach outside its
-//! own scope by construction rather than by a check some caller might forget,
-//! and this library has no privileged surface to misuse.
+//! Nothing here takes a store path or a user, and nothing but
+//! [`read_published`] takes a bundle identifier: the app-data service derives
+//! every one of those from the identity the kernel attests for the calling
+//! task. So an application cannot reach outside its own scope by construction
+//! rather than by a check some caller might forget, and this library has no
+//! privileged surface to misuse. The one identifier a caller does name selects
+//! a *published* document and nothing else — there is no request shape that
+//! reaches another application's private settings.
+//!
+//! # Two scopes
+//!
+//! [`Settings::open`] is the application's **private** scope: the user's
+//! settings for it, which nothing else can read. [`Settings::open_published`]
+//! is its **published** scope: what the application says about itself for
+//! other applications to read, through [`read_published`]. The two are
+//! separate documents with separate commits, because one atomic publish
+//! replaces one document.
 //!
 //! # Three layers, and which of them this library owns
 //!
-//! A read answers from the highest layer that sets the key:
+//! Layering is the **private** scope's; the published scope is one document
+//! (see [`Settings::open_published`]). A private read answers from the highest
+//! layer that sets the key:
 //!
 //! 1. `<Bundle>.app/DefaultSettings/settings.conf` — the defaults the bundle
 //!    ships. **This library's layer**: it needs the *bundle's* path, and
@@ -39,7 +60,7 @@
 //!
 //! # Reads are local; writes are staged and published once
 //!
-//! [`Settings::open`] does the one round trip. Every read after it is a lookup
+//! Opening does the one round trip. Every read after it is a lookup
 //! in memory, so an application that consults forty settings issues no further
 //! calls — and every [`Settings::set`] is memory too, until
 //! [`Settings::commit`] stages the keys that changed and publishes them as one
@@ -69,10 +90,11 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use tairix_abi::appdata_ipc::{
-    decode_document_reply, AppDataRequest, ConfigDocument, APPDATA_DOCUMENT_HEADER_LEN,
-    APPDATA_DOCUMENT_MAX, APPDATA_HEADER_LEN, APPDATA_MAX_REQUEST, APPDATA_SETTINGS_FILE,
+    decode_document_reply, AppDataRequest, ConfigDocument, ConfigScope,
+    APPDATA_DOCUMENT_HEADER_LEN, APPDATA_DOCUMENT_MAX, APPDATA_HEADER_LEN, APPDATA_MAX_REQUEST,
+    APPDATA_SETTINGS_FILE,
 };
-use tairix_abi::appinfo::BundleEntry;
+use tairix_abi::appinfo::{BundleEntry, BUNDLE_ID_MAX};
 use tairix_abi::reply::{decode_status_reply, STATUS_REPLY_LEN};
 use tairix_abi::Errno;
 use tairix_appconf::{as_bool, as_i64, as_permille, as_u32, bool_text, ConfError, Document};
@@ -140,11 +162,16 @@ pub trait AppDataHost {
     fn bundle_candidates(&mut self, word: &str) -> Vec<String>;
 }
 
-/// One application's own settings: the layers it reads through, and the edits
-/// it has not published yet.
+/// One scope of the calling application's own store: the layers it reads
+/// through, and the edits it has not published yet.
 pub struct Settings<'h> {
     host: &'h mut dyn AppDataHost,
-    /// Layer 1 — the defaults the bundle ships. Read once and never written.
+    /// Which of the application's own documents this handle acts on. Every
+    /// request it sends carries it, so a handle on one scope can neither read
+    /// nor write the other.
+    scope: ConfigScope,
+    /// Layer 1 — the defaults the bundle ships. Read once and never written,
+    /// and empty for the published scope, which has no layer beneath it.
     defaults: Document,
     /// Layers 2 and 3 as the service last served them, with this handle's own
     /// unpublished edits applied over them.
@@ -176,18 +203,53 @@ impl<'h> Settings<'h> {
     /// kernel-attested app identity and names nothing the caller supplies.
     pub fn open(host: &'h mut dyn AppDataHost, own_word: &str) -> Self {
         let (defaults, defaults_refusal) = read_defaults(host, own_word);
-        let (store, store_refusal) = match read_store(host) {
+        Self::opened(host, ConfigScope::Private, defaults, defaults_refusal)
+    }
+
+    /// Open the calling application's own **published** scope — what it says
+    /// about itself for other applications to read through [`read_published`].
+    ///
+    /// As [`Self::open`], this never fails: a store the service cannot serve
+    /// leaves the handle empty and records the reason in
+    /// [`Self::store_refusal`], so an application always runs.
+    ///
+    /// It takes no command word, because the published scope has **no
+    /// bundle-shipped layer**. That is structural rather than a simplification:
+    /// the service cannot name a bundle's directory, so a shipped published
+    /// document could never be read on the foreign path — and a layer that
+    /// only worked for the publishing application itself would mean two
+    /// applications disagreeing about what a third publishes. What an
+    /// application publishes is therefore exactly what it wrote.
+    pub fn open_published(host: &'h mut dyn AppDataHost) -> Self {
+        Self::opened(host, ConfigScope::Public, Document::new(), None)
+    }
+
+    /// Read `scope` and build the handle over it.
+    fn opened(
+        host: &'h mut dyn AppDataHost,
+        scope: ConfigScope,
+        defaults: Document,
+        defaults_refusal: Option<Errno>,
+    ) -> Self {
+        let (store, store_refusal) = match read_store(host, scope) {
             Ok(document) => (document, None),
             Err(err) => (Document::new(), Some(err)),
         };
         Self {
             host,
+            scope,
             defaults,
             store,
             dirty: Vec::new(),
             store_refusal,
             defaults_refusal,
         }
+    }
+
+    /// Which of the application's own documents this handle acts on.
+    #[must_use]
+    pub const fn scope(&self) -> ConfigScope {
+        self.scope
     }
 
     /// Why the store layers are absent, or [`None`] when the service served
@@ -325,11 +387,12 @@ impl<'h> Settings<'h> {
     /// Remove `key` from the store's layers, to be published by
     /// [`Self::commit`].
     ///
-    /// The effective value then comes from the bundle's shipped defaults —
-    /// or, once the commit has re-read the store, from the machine's policy
-    /// layer if that sets it, because that layer is the service's to answer
-    /// for. A key no store layer carries is already absent, so removing it
-    /// stages nothing.
+    /// For the private scope the effective value then comes from the bundle's
+    /// shipped defaults — or, once the commit has re-read the store, from the
+    /// machine's policy layer if that sets it, because that layer is the
+    /// service's to answer for. The published scope has no layer beneath it,
+    /// so an unset there simply stops publishing the key. A key no store layer
+    /// carries is already absent, so removing it stages nothing.
     pub fn unset(&mut self, key: &str) {
         if self.store.get(key).is_none() {
             return;
@@ -388,7 +451,7 @@ impl<'h> Settings<'h> {
     /// and its edits standing, and records the reason in
     /// [`Self::store_refusal`].
     pub fn reload(&mut self) -> Result<(), Errno> {
-        match read_store(self.host) {
+        match read_store(self.host, self.scope) {
             Ok(document) => {
                 self.store = document;
                 self.dirty.clear();
@@ -412,12 +475,23 @@ impl<'h> Settings<'h> {
             // spanning the request.
             let staged = self.store.get(key).map(String::from);
             let request = match &staged {
-                Some(value) => AppDataRequest::ConfigSet { key, value },
-                None => AppDataRequest::ConfigUnset { key },
+                Some(value) => AppDataRequest::ConfigSet {
+                    scope: self.scope,
+                    key,
+                    value,
+                },
+                None => AppDataRequest::ConfigUnset {
+                    scope: self.scope,
+                    key,
+                },
             };
             self.status(&request, &mut frame, &mut reply)?;
         }
-        self.status(&AppDataRequest::ConfigCommit, &mut frame, &mut reply)
+        self.status(
+            &AppDataRequest::ConfigCommit { scope: self.scope },
+            &mut frame,
+            &mut reply,
+        )
     }
 
     /// Issue one request whose reply is the shared status frame.
@@ -479,21 +553,62 @@ fn read_defaults(host: &mut dyn AppDataHost, own_word: &str) -> (Document, Optio
     (Document::new(), None)
 }
 
-/// Read the store layers the service serves, negotiating a buffer big enough
-/// for the whole document.
+/// Read the caller's own `scope`, negotiating a buffer big enough for the whole
+/// document.
+fn read_store(host: &mut dyn AppDataHost, scope: ConfigScope) -> Result<Document, Errno> {
+    negotiate(host, |capacity| AppDataRequest::ConfigRead {
+        scope,
+        capacity,
+    })
+}
+
+/// Read the document the application `bundle_id` names **publishes**.
+///
+/// This is the one call in the library that names another application, and it
+/// can reach nothing but that application's published document: the request
+/// carries no scope, so there is no shape by which a caller could ask for
+/// another application's private settings.
+///
+/// An application that publishes nothing, has never run for this account, or
+/// whose store the service cannot attest all answer the **empty document** —
+/// deliberately indistinguishable, so a caller learns nothing but what an
+/// application chose to publish. The answer is the publisher's *committed*
+/// document, never its unsaved edits.
+///
+/// # Errors
+///
+/// The service's own typed refusal, or the transport's: [`Errno::NotFound`]
+/// when nothing has bound the endpoint, [`Errno::PermissionDenied`] for a
+/// caller with no attested app identity, [`Errno::DeviceOffline`] for a volume
+/// that cannot be reached, [`Errno::OutOfRange`] for an identifier outside the
+/// bundle-identifier grammar.
+pub fn read_published(host: &mut dyn AppDataHost, bundle_id: &str) -> Result<Document, Errno> {
+    negotiate(host, |capacity| AppDataRequest::PublicRead {
+        bundle_id,
+        capacity,
+    })
+}
+
+/// Issue the read `request` builds, negotiating a buffer big enough for the
+/// whole document.
 ///
 /// The first call asks for [`READ_PROBE`] bytes, which covers a realistic
 /// store; a larger one comes back as the length it needs and is asked for
 /// again at exactly that size. Every answer is a whole document, so no
 /// document is ever assembled out of two snapshots.
-fn read_store(host: &mut dyn AppDataHost) -> Result<Document, Errno> {
+fn negotiate<'a>(
+    host: &mut dyn AppDataHost,
+    request: impl Fn(u32) -> AppDataRequest<'a>,
+) -> Result<Document, Errno> {
     let mut capacity = READ_PROBE;
     for _ in 0..READ_ATTEMPTS {
-        let mut frame = [0u8; APPDATA_HEADER_LEN];
-        let request = AppDataRequest::ConfigRead {
-            capacity: u32::try_from(capacity).map_err(|_| Errno::LengthOutOfRange)?,
-        };
-        let len = request.encode(&mut frame)?;
+        // A read carries a scope or an application identifier, never a
+        // setting, so the frame is bounded by the widest of those rather than
+        // by the widest request in the protocol — a `ConfigSet`'s kilobyte of
+        // value has no business on a start-up read's stack.
+        let mut frame = [0u8; APPDATA_HEADER_LEN + BUNDLE_ID_MAX];
+        let asked = request(u32::try_from(capacity).map_err(|_| Errno::LengthOutOfRange)?);
+        let len = asked.encode(&mut frame)?;
         let frame_len = STATUS_REPLY_LEN + APPDATA_DOCUMENT_HEADER_LEN + capacity;
         let mut reply = Vec::new();
         reply

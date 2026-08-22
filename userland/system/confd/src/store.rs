@@ -3,14 +3,34 @@
 //!
 //! Every path this module composes is derived from the caller's
 //! kernel-attested identity and from the shared home-shape definition
-//! ([`tairix_users`]) — never from anything a caller put on the wire. There is
-//! no request shape that names a store, so there is no request shape that
-//! reaches another application's data.
+//! ([`tairix_users`]) — never from anything a caller put on the wire, with the
+//! single exception of the bundle identifier a foreign published read
+//! ([`published_document`]) names, which crossed the wire only after the one
+//! identifier grammar accepted it.
+//!
+//! # Two scopes, and why only one of them is layered
+//!
+//! [`ConfigScope::Private`] is the user's settings for an application, so it
+//! reads through the machine-wide policy layer an administrator may ship
+//! beneath it: an unset key falls back to the machine's answer rather than to
+//! nothing.
+//!
+//! [`ConfigScope::Public`] is what the application *publishes about itself*
+//! for other applications to read, and it is deliberately **one document with
+//! no layer beneath it**. Two reasons, and the first is structural: a bundle's
+//! own directory is not something this service can name — nothing attested
+//! gives it a bundle path — so a bundle-shipped published document could never
+//! be read on the foreign path at all, and a layer that only worked for the
+//! publishing app itself would mean two applications disagreeing about what a
+//! third publishes. The second is the scope's contract: a reader must be able
+//! to attribute a published value to the application, and a machine-wide layer
+//! beneath it would let an administrator make an application appear to say
+//! something it never said.
 
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use tairix_abi::appdata_ipc::APPDATA_SETTINGS_FILE;
+use tairix_abi::appdata_ipc::{ConfigScope, APPDATA_SETTINGS_FILE};
 use tairix_abi::appinfo::PublisherId;
 use tairix_abi::{AppIdentity, Errno};
 use tairix_appconf::{Document, MAX_DOCUMENT_LEN};
@@ -26,14 +46,24 @@ use crate::Storage;
 /// about which file the private scope is.
 pub const SETTINGS_FILE: &str = APPDATA_SETTINGS_FILE;
 
-/// Name the publish step writes a new document to before renaming it over
-/// [`SETTINGS_FILE`].
+/// Name of an app's published configuration document inside its store — the
+/// scope any application may read.
+///
+/// Unlike [`SETTINGS_FILE`] this name is the service's alone: the published
+/// scope has no bundle-shipped layer (see the module documentation), so no
+/// client ever composes a path to it.
+pub const PUBLIC_FILE: &str = "public.conf";
+
+/// Suffix of the sibling name a publish writes a new document to before
+/// renaming it over the live one.
 ///
 /// A crash between the write and the rename therefore leaves either the old
-/// document or the new one, never a torn one. The name is inside the app's own
-/// store directory, so two apps can never contend for it, and the rename is
-/// within one directory so it can never cross a volume.
-const SETTINGS_TEMP_FILE: &str = "settings.conf.new";
+/// document or the new one, never a torn one. Deriving the temporary from the
+/// live name rather than declaring one per scope is what makes it always a
+/// sibling in the app's own store directory: two applications can never
+/// contend for it, two scopes can never collide on it, and the rename can
+/// never cross a volume.
+const TEMP_SUFFIX: &str = ".new";
 
 /// Name of the ownership-pin record inside an app's store.
 ///
@@ -43,12 +73,14 @@ pub const OWNER_FILE: &str = ".owner";
 
 /// Root of the machine-wide administrator policy layer: the optional,
 /// read-only document an image or an installer may ship under
-/// `/System/Settings/<bundle-id>/` to change an application's defaults without
-/// touching any user's own file.
+/// `/System/Settings/<bundle-id>/` to change an application's private defaults
+/// without touching any user's own file.
 ///
 /// It sits *below* the user's own document in precedence, so it sets defaults
 /// rather than overriding a choice the user made. `/System` is mounted
-/// read-only at runtime, so nothing the service does can write here.
+/// read-only at runtime, so nothing the service does can write here. It layers
+/// the private scope alone — see the module documentation for why the
+/// published scope has no layer beneath it.
 const POLICY_ROOT: &str = "/System/Settings";
 
 /// The directory `/Users` projects, under which every account's home lives.
@@ -115,6 +147,27 @@ impl StoreError {
         }
     }
 
+    /// Whether this refusal is a defect of the *store being read* rather than
+    /// of the caller, its account, or the volume.
+    ///
+    /// A foreign published read answers the empty document for these, audited:
+    /// another application's broken pin or over-long document is nothing the
+    /// reader can act on, and reporting it would make the read an oracle for
+    /// the state of a store the caller has no business knowing about. The
+    /// caller-side and volume refusals are reported as themselves, because
+    /// those the caller *can* act on.
+    #[must_use]
+    pub const fn is_target_defect(self) -> bool {
+        match self {
+            Self::PinMalformed | Self::DocumentRefused => true,
+            Self::NoAppIdentity
+            | Self::NoHome
+            | Self::RootNotOwned
+            | Self::PublisherMismatch
+            | Self::Unavailable => false,
+        }
+    }
+
     /// A stable one-line reason for the audit record.
     #[must_use]
     pub const fn reason(self) -> &'static str {
@@ -130,8 +183,8 @@ impl StoreError {
     }
 }
 
-/// One app's store, resolved and authorised: the directory its documents live
-/// in, ready for a read or a publish.
+/// One app's own store, resolved and authorised: the directory its documents
+/// live in, ready for a read or a publish in either scope.
 ///
 /// Holding one is proof that the caller's app identity was attested, that the
 /// gated root belongs to the app-data service, and that the ownership pin
@@ -140,7 +193,8 @@ pub struct AppStore {
     /// Absolute path of `<home>/Settings/Apps/<bundle-id>`, with no trailing
     /// separator.
     dir: String,
-    /// Absolute path of `/System/Settings/<bundle-id>`, the policy layer.
+    /// Absolute path of `/System/Settings/<bundle-id>`, the private scope's
+    /// policy layer.
     policy_dir: String,
     /// Whether an ownership pin was found — i.e. whether this app has ever
     /// written anything.
@@ -288,13 +342,16 @@ impl AppStore {
 
     /// Whether this app has ever written to its store — i.e. whether an
     /// ownership pin attests who owns it.
+    ///
+    /// One pin governs the whole store rather than one per scope: the pin
+    /// records who owns the *data*, and both scopes are the same app's.
     #[must_use]
     pub const fn is_pinned(&self) -> bool {
         self.pinned
     }
 
-    /// Read the app's own committed configuration document, or an empty one
-    /// when it has never been written.
+    /// Read the app's own committed document for `scope`, or an empty one when
+    /// it has never been written.
     ///
     /// An unpinned store answers empty without reading anything: with no pin
     /// there is no attested owner, so there is no document this store may be
@@ -304,15 +361,19 @@ impl AppStore {
     ///
     /// [`StoreError::DocumentRefused`] for a document outside the format's
     /// bounds, [`StoreError::Unavailable`] for an unreachable volume.
-    pub fn document<S: Storage + ?Sized>(&self, fs: &mut S) -> Result<Document, StoreError> {
+    pub fn document<S: Storage + ?Sized>(
+        &self,
+        fs: &mut S,
+        scope: ConfigScope,
+    ) -> Result<Document, StoreError> {
         if !self.pinned {
             return Ok(Document::new());
         }
-        read_document(fs, &join(&self.dir, SETTINGS_FILE))
+        read_document(fs, &join(&self.dir, scope_file(scope)))
     }
 
     /// Read the machine-wide policy document — the layer beneath the app's own
-    /// — or an empty one when the machine ships none.
+    /// private scope — or an empty one when the machine ships none.
     ///
     /// # Errors
     ///
@@ -321,21 +382,32 @@ impl AppStore {
         read_document(fs, &join(&self.policy_dir, SETTINGS_FILE))
     }
 
-    /// The document a caller is served: the machine-wide policy layer with the
-    /// app's own settings applied over it.
+    /// The document a caller is served for `scope`.
+    ///
+    /// For [`ConfigScope::Private`] that is the machine-wide policy layer with
+    /// the app's own settings applied over it; for [`ConfigScope::Public`] it
+    /// is the app's own published document alone, because that scope has no
+    /// layer beneath it (see the module documentation).
     ///
     /// The result is *canonical* — one line per setting, no comments, no
-    /// duplicates — because it is two documents made one, and because the
+    /// duplicates — because a merge of two documents is one, and because the
     /// caller parses it rather than editing it. The app's own file keeps its
     /// comments and its ordering; only this view of it is normalised.
     ///
     /// # Errors
     ///
-    /// [`StoreError::DocumentRefused`] when the two layers together exceed the
+    /// [`StoreError::DocumentRefused`] when the layers together exceed the
     /// format's setting or line bound, else as [`Self::document`].
-    pub fn merged_document<S: Storage + ?Sized>(&self, fs: &mut S) -> Result<Document, StoreError> {
+    pub fn merged_document<S: Storage + ?Sized>(
+        &self,
+        fs: &mut S,
+        scope: ConfigScope,
+    ) -> Result<Document, StoreError> {
+        let own = self.document(fs, scope)?;
+        let ConfigScope::Private = scope else {
+            return Ok(own);
+        };
         let policy = self.policy_document(fs)?;
-        let own = self.document(fs)?;
         let mut merged = Document::new();
         // Policy first, the app's own second: a key in both ends up with the
         // user's value, which is what makes an override an override.
@@ -347,12 +419,16 @@ impl AppStore {
         Ok(merged)
     }
 
-    /// Publish `document` as the app's own configuration, atomically.
+    /// Publish `document` as the app's own `scope` document, atomically.
     ///
     /// The rendered text is written whole to a sibling temporary name and then
     /// renamed over the live document, so a crash mid-publish leaves either
     /// the old document or the new one. A rendered document that would exceed
     /// the format's own byte bound is refused rather than written.
+    ///
+    /// One scope at a time, because one rename replaces one name: a publish
+    /// that claimed to replace both documents at once would be claiming an
+    /// atomicity no filesystem offers.
     ///
     /// # Errors
     ///
@@ -362,20 +438,94 @@ impl AppStore {
     pub fn publish<S: Storage + ?Sized>(
         &self,
         fs: &mut S,
+        scope: ConfigScope,
         document: &Document,
     ) -> Result<(), StoreError> {
         let text = document.render();
         if text.len() > MAX_DOCUMENT_LEN {
             return Err(StoreError::DocumentRefused);
         }
-        let temp = join(&self.dir, SETTINGS_TEMP_FILE);
-        let live = join(&self.dir, SETTINGS_FILE);
+        let file = scope_file(scope);
+        let mut temp_name = String::from(file);
+        temp_name.push_str(TEMP_SUFFIX);
+        let temp = join(&self.dir, &temp_name);
+        let live = join(&self.dir, file);
         fs.write(&temp, text.as_bytes())
             .map_err(|_| StoreError::Unavailable)?;
         // A failed rename leaves the old document live and the temporary
         // behind; the next publish overwrites the temporary, so a retry
         // converges without a repair pass.
         fs.rename(&temp, &live).map_err(|_| StoreError::Unavailable)
+    }
+}
+
+/// The document the application `bundle_id` names publishes, inside the store
+/// of the account `uid` owns, or an empty document when it publishes nothing.
+///
+/// A foreign read is **one read and no handle**. There is deliberately no value
+/// standing for "another application's store": a type with a directory in it
+/// would be one a later call site could publish through, and the cheapest way
+/// to guarantee that a foreign store is read-only and public-only is for no
+/// such value to exist. Stores are per-user, so this never crosses an account
+/// either — it reads what the *calling* account's copy of that application
+/// publishes.
+///
+/// `bundle_id` is the one value here that came off the wire, and it arrives
+/// having already passed the single identifier grammar
+/// ([`tairix_abi::validate_bundle_id`], applied by the request decoder) — so it
+/// is a single path component that cannot traverse, hide, or case-fold into
+/// another application's name.
+///
+/// No pin *comparison* happens: a foreign reader is not the owner, so there is
+/// nothing to compare against. The pin is still required to be **present and
+/// well formed**, which is what attests that the directory is a store this
+/// service created: the gated root is owned by the service and mode `0700`, so
+/// nothing else can create a child in it, and a decodable pin inside such a
+/// child can only have been written here.
+///
+/// The answer is the *committed* document — what every other application sees,
+/// never a staged edit of the publisher's. A publisher that wants to know what
+/// it has staged reads its own [`ConfigScope::Public`] scope.
+///
+/// # Errors
+///
+/// [`StoreError::NoHome`], [`StoreError::RootNotOwned`], or
+/// [`StoreError::Unavailable`] for the caller's own account and volume;
+/// [`StoreError::PinMalformed`] for a target whose ownership record attests
+/// nothing, and [`StoreError::DocumentRefused`] for one whose published
+/// document is outside the format's bounds. The last two are the target's
+/// defects rather than the reader's, and the dispatcher answers them as an
+/// empty document ([`StoreError::is_target_defect`]).
+pub fn published_document<S: Storage + ?Sized>(
+    fs: &mut S,
+    roots: &mut RootCache,
+    uid: u32,
+    bundle_id: &str,
+) -> Result<Document, StoreError> {
+    let dir = join(&roots.resolve(fs, uid)?, bundle_id);
+    match fs.read(&join(&dir, OWNER_FILE)) {
+        Ok(bytes) => {
+            OwnerPin::decode(&bytes).ok_or(StoreError::PinMalformed)?;
+        }
+        // The named application has no store in this account: it has never run
+        // here, or has never written. Either way it publishes nothing, which is
+        // the same answer as a store with an empty published document — so a
+        // read is never an oracle for anything but what an application chose to
+        // publish.
+        Err(Errno::NotFound) => return Ok(Document::new()),
+        Err(_) => return Err(StoreError::Unavailable),
+    }
+    read_document(fs, &join(&dir, PUBLIC_FILE))
+}
+
+/// The document file name `scope` lives in.
+///
+/// The one mapping from a scope to a name, so no call site can compose a path
+/// to the wrong document.
+const fn scope_file(scope: ConfigScope) -> &'static str {
+    match scope {
+        ConfigScope::Private => SETTINGS_FILE,
+        ConfigScope::Public => PUBLIC_FILE,
     }
 }
 

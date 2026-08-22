@@ -18,29 +18,40 @@
 //!
 //! # What a caller can and cannot ask for
 //!
-//! A request carries a key and a value. It never carries a bundle identifier,
-//! a user, or a path: the service resolves all three from the attested
-//! [`Origin`], so no request shape can name another application's store. A
-//! caller running no verified bundle — a kernel principal, a boot-floor
-//! program with no signed manifest, a parser-sandbox child — has no store and
-//! is refused.
+//! An own-store request carries a scope, a key, and a value. It never carries
+//! a bundle identifier, a user, or a path: the service resolves all three from
+//! the attested [`Origin`], so no request shape can name another
+//! application's store. A caller running no verified bundle — a kernel
+//! principal, a boot-floor program with no signed manifest, a parser-sandbox
+//! child — has no store and is refused, whichever operation it sent.
+//!
+//! The one request that *does* name an application is `PublicRead`, and it can
+//! reach nothing but that application's **published** document: it carries no
+//! scope field, so no frame can ask for another app's private settings. An
+//! application that publishes nothing, has never run for this account, or
+//! whose store cannot be attested all answer the same empty document, so a
+//! foreign read is never an oracle for more than what an app chose to publish.
 //!
 //! # One read for the whole document
 //!
-//! A `ConfigRead` answers with the caller's whole merged document — the
-//! machine-wide policy layer, the app's own settings over it, the caller's own
-//! staged edits over those — as canonical `key = value` text. An application's
-//! start-up therefore costs one call, one store read, and one parse however
-//! many settings it goes on to consult; answering per key would have cost a
-//! file read and a parse each.
+//! A `ConfigRead` answers with the caller's whole merged document for one
+//! scope — for the private scope, the machine-wide policy layer, the app's own
+//! settings over it, and the caller's own staged edits over those — as
+//! canonical `key = value` text. An application's start-up therefore costs one
+//! call, one store read, and one parse however many settings it goes on to
+//! consult; answering per key would have cost a file read and a parse each.
 //!
 //! # Staged writes
 //!
 //! A `ConfigSet` or `ConfigUnset` records a *pending edit* against the calling
-//! process instance; `ConfigCommit` loads the committed document, applies the
-//! pending edits, and publishes the result as one atomic replacement. A caller
-//! that never commits changes nothing on the volume, and its own reads see its
-//! own pending edits so a settings sheet reads back what it just set.
+//! process instance, in the scope it named; `ConfigCommit` loads that scope's
+//! committed document, applies the pending edits for it, and publishes the
+//! result as one atomic replacement. Edits staged against the caller's other
+//! scope are untouched, because one rename replaces one name and a commit that
+//! claimed to publish two documents at once would be claiming an atomicity no
+//! filesystem offers. A caller that never commits changes nothing on the
+//! volume, and its own reads see its own pending edits so a settings sheet
+//! reads back what it just set.
 //!
 //! # Layering
 //!
@@ -59,7 +70,7 @@ extern crate alloc;
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use tairix_abi::appdata_ipc::{encode_document_reply, AppDataRequest};
+use tairix_abi::appdata_ipc::{encode_document_reply, AppDataRequest, ConfigScope};
 use tairix_abi::reply::encode_status_reply;
 use tairix_abi::{AppIdentity, Errno, Origin, ProcId};
 use tairix_appconf::{validate_key, ConfError, Document, MAX_SETTINGS};
@@ -72,7 +83,7 @@ pub mod store;
 mod testfs;
 
 pub use owner::OwnerPin;
-pub use store::{AppStore, RootCache, StoreError};
+pub use store::{published_document, AppStore, RootCache, StoreError};
 
 /// The home subdirectory the private configuration scope lives under.
 ///
@@ -93,12 +104,14 @@ pub const APPDATA_PARENT: &str = "Settings";
 /// commits changes nothing").
 pub const STAGING_IDLE_NS: u64 = 60_000_000_000;
 
-/// Maximum pending edits one staging session may hold.
+/// Maximum pending edits one staging session may hold **per scope**.
 ///
 /// A fixed bound on untrusted input, not a capacity: a document may carry at
 /// most [`MAX_SETTINGS`] settings, so a session that has staged that many
-/// distinct keys has already described a whole document and anything further
-/// is a runaway writer rather than a workload.
+/// distinct keys in one scope has already described a whole document and
+/// anything further is a runaway writer rather than a workload. It is per
+/// scope because each scope is a document of its own, and one of them filling
+/// up must not deny the other.
 pub const MAX_PENDING_EDITS: usize = MAX_SETTINGS;
 
 /// The filesystem the store lives on, as the dispatcher needs it.
@@ -159,6 +172,11 @@ pub trait Storage {
 
 /// One staged, uncommitted change to a document.
 struct PendingEdit {
+    /// Which of the caller's own documents the change belongs to. Held per
+    /// edit rather than per session because one process instance may have a
+    /// settings sheet open and be publishing about itself at the same time,
+    /// and neither commit may carry the other's work.
+    scope: ConfigScope,
     key: String,
     /// The new value, or [`None`] for a staged removal.
     value: Option<String>,
@@ -176,30 +194,60 @@ struct Session {
 }
 
 impl Session {
-    /// Stage `key = value`, or a removal when `value` is [`None`], replacing
-    /// any edit already staged for that key.
+    /// Stage `key = value` in `scope`, or a removal when `value` is [`None`],
+    /// replacing any edit already staged for that key in that scope.
     ///
     /// # Errors
     ///
     /// [`Errno::LimitExceeded`] when the session already holds
-    /// [`MAX_PENDING_EDITS`] distinct keys.
-    fn stage(&mut self, key: &str, value: Option<&str>) -> Result<(), Errno> {
+    /// [`MAX_PENDING_EDITS`] distinct keys in `scope`.
+    fn stage(&mut self, scope: ConfigScope, key: &str, value: Option<&str>) -> Result<(), Errno> {
         let staged = value.map(String::from);
-        if let Some(edit) = self.edits.iter_mut().find(|edit| edit.key == key) {
+        if let Some(edit) = self
+            .edits
+            .iter_mut()
+            .find(|edit| edit.scope == scope && edit.key == key)
+        {
             edit.value = staged;
             return Ok(());
         }
-        if self.edits.len() >= MAX_PENDING_EDITS {
+        if self.staged_in(scope) >= MAX_PENDING_EDITS {
             return Err(Errno::LimitExceeded);
         }
         self.edits.push(PendingEdit {
+            scope,
             key: String::from(key),
             value: staged,
         });
         Ok(())
     }
 
-    /// Apply every staged edit to `document`, in the order they were staged.
+    /// How many distinct keys are staged in `scope`.
+    fn staged_in(&self, scope: ConfigScope) -> usize {
+        self.edits.iter().filter(|edit| edit.scope == scope).count()
+    }
+
+    /// Whether anything at all is staged in `scope`. Answered by a search
+    /// rather than by [`Self::staged_in`], so it stops at the first match
+    /// instead of counting a whole document's worth of edits to say "yes".
+    fn has(&self, scope: ConfigScope) -> bool {
+        self.edits.iter().any(|edit| edit.scope == scope)
+    }
+
+    /// Whether this session holds no edits in any scope, and so is nothing but
+    /// a table entry waiting to be reclaimed.
+    fn is_empty(&self) -> bool {
+        self.edits.is_empty()
+    }
+
+    /// Drop every edit staged in `scope`, leaving the other scope's alone.
+    fn clear(&mut self, scope: ConfigScope) {
+        self.edits.retain(|edit| edit.scope != scope);
+    }
+
+    /// Apply every edit staged in `scope` to `document`, in the order they
+    /// were staged. Edits in the other scope belong to another document and
+    /// are not applied here.
     ///
     /// # Errors
     ///
@@ -208,8 +256,8 @@ impl Session {
     /// for a key or value the format refuses. The two are distinguished
     /// because a caller can act on the first — drop a setting — and on the
     /// second only by fixing what it sent.
-    fn apply(&self, document: &mut Document) -> Result<(), Errno> {
-        for edit in &self.edits {
+    fn apply(&self, scope: ConfigScope, document: &mut Document) -> Result<(), Errno> {
+        for edit in self.edits.iter().filter(|edit| edit.scope == scope) {
             match &edit.value {
                 Some(value) => document.set(&edit.key, value).map_err(|err| match err {
                     ConfError::TooManySettings | ConfError::TooManyLines => Errno::LimitExceeded,
@@ -220,6 +268,24 @@ impl Session {
         }
         Ok(())
     }
+}
+
+/// One refused request, as the audit stream records it.
+///
+/// Carried as a value rather than as three parameters so that a new audited
+/// dimension is added in one place, and so that the *caller's* app and the
+/// *target* store — which are the same thing for every operation but a foreign
+/// published read — can never be transposed at a call site.
+#[derive(Copy, Clone)]
+struct Refusal<'a> {
+    /// Why the request was refused.
+    err: StoreError,
+    /// The calling application, or [`None`] for a principal running no
+    /// verified bundle.
+    app: Option<&'a AppIdentity>,
+    /// The application whose store was being read, when that is not the
+    /// caller's own.
+    target: Option<&'a str>,
 }
 
 /// The app-data dispatcher: the staging table, and the one entry point that
@@ -280,27 +346,32 @@ impl<S: Sink> AppData<S> {
         // has no store, whatever it asked for.
         let identity = self.attested_app(origin)?;
         match decoded {
-            AppDataRequest::ConfigRead { capacity } => {
-                self.config_read(fs, origin, &identity, capacity, out)
+            AppDataRequest::ConfigRead { scope, capacity } => {
+                self.config_read(fs, origin, &identity, scope, capacity, out)
             }
-            AppDataRequest::ConfigSet { key, value } => {
+            AppDataRequest::ConfigSet { scope, key, value } => {
                 validate_key(key).map_err(|_| Errno::OutOfRange)?;
                 // Reject a value the format could not store *before* it is
                 // staged, so a commit cannot fail on an edit accepted earlier.
                 let mut probe = Document::new();
                 probe.set(key, value).map_err(|_| Errno::OutOfRange)?;
-                self.session(origin, now_ns).stage(key, Some(value))?;
+                self.session(origin, now_ns)
+                    .stage(scope, key, Some(value))?;
                 Ok(ok(out))
             }
-            AppDataRequest::ConfigUnset { key } => {
+            AppDataRequest::ConfigUnset { scope, key } => {
                 validate_key(key).map_err(|_| Errno::OutOfRange)?;
-                self.session(origin, now_ns).stage(key, None)?;
+                self.session(origin, now_ns).stage(scope, key, None)?;
                 Ok(ok(out))
             }
-            AppDataRequest::ConfigCommit => {
-                self.config_commit(fs, origin, &identity)?;
+            AppDataRequest::ConfigCommit { scope } => {
+                self.config_commit(fs, origin, &identity, scope)?;
                 Ok(ok(out))
             }
+            AppDataRequest::PublicRead {
+                bundle_id,
+                capacity,
+            } => self.public_read(fs, origin, bundle_id, capacity, out),
         }
     }
 
@@ -313,7 +384,15 @@ impl<S: Sink> AppData<S> {
         if let Some(identity) = origin.app() {
             return Ok(*identity);
         }
-        self.refuse(origin, StoreError::NoAppIdentity, None);
+        Self::record(
+            &self.sink,
+            origin,
+            Refusal {
+                err: StoreError::NoAppIdentity,
+                app: None,
+                target: None,
+            },
+        );
         Err(StoreError::NoAppIdentity.errno())
     }
 
@@ -329,17 +408,41 @@ impl<S: Sink> AppData<S> {
         fs: &mut F,
         origin: &Origin,
         identity: &AppIdentity,
+        scope: ConfigScope,
         capacity: u32,
         out: &mut [u8],
     ) -> Result<usize, Errno> {
         let store = self.open(fs, origin, identity, false)?;
-        let outcome = store.merged_document(fs);
+        let outcome = store.merged_document(fs, scope);
         let mut document = self.resolve(origin, outcome)?;
         // A caller sees its own uncommitted work and no other principal's, so
         // a settings sheet reads back what it just set.
         if let Some(session) = self.session_for(origin) {
-            session.apply(&mut document)?;
+            session.apply(scope, &mut document)?;
         }
+        encode_document_reply(&document.render(), capacity, out)
+    }
+
+    /// Answer a foreign read with what the named application publishes.
+    ///
+    /// Nothing about the *target* is reported to the caller: an application
+    /// with no store here, one that publishes nothing, and one whose store
+    /// cannot be attested all answer the same empty document, audited. So the
+    /// only thing a reader learns is what an application chose to publish,
+    /// which is the whole purpose of the scope, and a caller cannot use the
+    /// endpoint to probe the state of stores it has no business knowing about.
+    fn public_read<F: Storage + ?Sized>(
+        &mut self,
+        fs: &mut F,
+        origin: &Origin,
+        bundle_id: &str,
+        capacity: u32,
+        out: &mut [u8],
+    ) -> Result<usize, Errno> {
+        let outcome = published_document(fs, &mut self.roots, origin.uid(), bundle_id);
+        // Borrowed immutably for the audit record only once the mutable borrow
+        // of the cache has ended.
+        let document = Self::sift(&self.sink, origin, bundle_id, outcome)?.unwrap_or_default();
         encode_document_reply(&document.render(), capacity, out)
     }
 
@@ -353,28 +456,41 @@ impl<S: Sink> AppData<S> {
         fs: &mut F,
         origin: &Origin,
         identity: &AppIdentity,
+        scope: ConfigScope,
     ) -> Result<(), Errno> {
-        let Some(staged) = self.session_index(origin) else {
-            return Ok(());
-        };
-        if self.sessions[staged].edits.is_empty() {
-            self.sessions.remove(staged);
+        // A caller with nothing staged in this scope changed no setting, so
+        // nothing is written: rewriting the document would cost its timestamp
+        // for no change. Its edits in the *other* scope are left where they
+        // are, for that scope's own commit.
+        if !self
+            .session_index(origin)
+            .is_some_and(|at| self.sessions[at].has(scope))
+        {
             return Ok(());
         }
         // A commit is the first act that may create the store, so this is the
         // one call that passes `create`.
         let store = self.open(fs, origin, identity, true)?;
-        let mut document = self.read_document(fs, origin, &store)?;
-        // Re-resolved rather than carried across the borrow above: an index
-        // into a table this call may have touched is a trap, and the lookup is
-        // over a handful of entries.
+        let mut document = self.read_document(fs, origin, &store, scope)?;
+        // Re-resolved rather than carried across the mutable borrow above: an
+        // index into a table this call may have touched is a trap, and the
+        // lookup is over a handful of entries. Nothing below touches the table
+        // until the publish has landed, so this one index serves both uses —
+        // and a second lookup could otherwise report a failure for a commit
+        // that had already succeeded.
         let index = self.session_index(origin).ok_or(Errno::NotFound)?;
-        self.sessions[index].apply(&mut document)?;
-        let outcome = store.publish(fs, &document);
+        self.sessions[index].apply(scope, &mut document)?;
+        let outcome = store.publish(fs, scope, &document);
         self.resolve(origin, outcome)?;
-        // The session is dropped only once the publish landed, so a failed
-        // commit leaves the edits staged for a retry.
-        self.sessions.remove(index);
+        // The staged edits are dropped only once the publish landed, so a
+        // failed commit leaves them for a retry — and only this scope's, so a
+        // settings sheet's unsaved work survives a publish about itself. A
+        // session with nothing left in either scope is a table entry with no
+        // purpose, so it goes with them.
+        self.sessions[index].clear(scope);
+        if self.sessions[index].is_empty() {
+            self.sessions.remove(index);
+        }
         Ok(())
     }
 
@@ -404,8 +520,9 @@ impl<S: Sink> AppData<S> {
         fs: &mut F,
         origin: &Origin,
         store: &AppStore,
+        scope: ConfigScope,
     ) -> Result<Document, Errno> {
-        let outcome = store.document(fs);
+        let outcome = store.document(fs, scope);
         self.resolve(origin, outcome)
     }
 
@@ -418,35 +535,84 @@ impl<S: Sink> AppData<S> {
     /// mutable borrow of the dispatcher's own state.
     fn judge<T>(sink: &S, origin: &Origin, outcome: Result<T, StoreError>) -> Result<T, Errno> {
         outcome.map_err(|err| {
-            Self::record(sink, origin, err, origin.app());
+            Self::record(
+                sink,
+                origin,
+                Refusal {
+                    err,
+                    app: origin.app(),
+                    target: None,
+                },
+            );
             err.errno()
         })
     }
 
-    /// Record a refused request.
-    fn refuse(&self, origin: &Origin, err: StoreError, identity: Option<&AppIdentity>) {
-        Self::record(&self.sink, origin, err, identity);
+    /// Resolve an outcome on the **foreign** published path.
+    ///
+    /// A defect of the store being read is audited — naming the target, not the
+    /// caller — and answered as an absence; every other refusal is the
+    /// caller's own and is reported as itself. That split is what keeps a
+    /// foreign read from becoming an oracle while still telling an operator
+    /// which application's store is broken.
+    fn sift<T>(
+        sink: &S,
+        origin: &Origin,
+        target: &str,
+        outcome: Result<T, StoreError>,
+    ) -> Result<Option<T>, Errno> {
+        match outcome {
+            Ok(value) => Ok(Some(value)),
+            Err(err) => {
+                Self::record(
+                    sink,
+                    origin,
+                    Refusal {
+                        err,
+                        app: origin.app(),
+                        target: Some(target),
+                    },
+                );
+                if err.is_target_defect() {
+                    Ok(None)
+                } else {
+                    Err(err.errno())
+                }
+            }
+        }
     }
 
     /// Write one refusal to `sink`.
-    fn record(sink: &S, origin: &Origin, err: StoreError, identity: Option<&AppIdentity>) {
-        let bundle = identity.map_or("<none>", AppIdentity::bundle_id);
+    fn record(sink: &S, origin: &Origin, refusal: Refusal<'_>) {
+        let fields = [
+            Field {
+                key: "bundle",
+                value: FieldValue::Str(refusal.app.map_or("<none>", AppIdentity::bundle_id)),
+            },
+            Field {
+                key: "uid",
+                value: FieldValue::UnsignedInt(u64::from(origin.uid())),
+            },
+            // Named only when the store in question is not the caller's own,
+            // so a foreign read's audit record says whose store was broken
+            // rather than pinning another app's defect on the reader.
+            Field {
+                key: "target",
+                value: FieldValue::Str(refusal.target.unwrap_or("")),
+            },
+        ];
+        let named = if refusal.target.is_some() {
+            fields.len()
+        } else {
+            fields.len() - 1
+        };
         let _ = tairix_log::log(
             sink,
             &Event {
-                level: level_of(err),
-                id: events::id_of(err),
-                message: err.reason(),
-                fields: &[
-                    Field {
-                        key: "bundle",
-                        value: FieldValue::Str(bundle),
-                    },
-                    Field {
-                        key: "uid",
-                        value: FieldValue::UnsignedInt(u64::from(origin.uid())),
-                    },
-                ],
+                level: level_of(refusal.err),
+                id: events::id_of(refusal.err),
+                message: refusal.err.reason(),
+                fields: &fields[..named],
             },
         );
     }

@@ -28,28 +28,30 @@ every other app's settings.
 
 ## What a caller can ask for, and what it cannot
 
-An `appdata-v1` request (`lib/abi/src/appdata_ipc.rs`) carries a key and a
-value. It **never** carries a bundle identifier, a user, or a path: the service
-resolves all three from the attested
+An own-store `appdata-v1` request (`lib/abi/src/appdata_ipc.rs`) carries a
+scope, a key, and a value. It **never** carries a bundle identifier, a user, or
+a path: the service resolves all three from the attested
 [`Origin`](../architecture/multitasking.md), so no request shape names a store
-and therefore none can reach another application's data. A caller running no
-verified bundle — a kernel principal, a boot-floor program with no signed
-manifest, a parser-sandbox child — has no store, and is refused and audited.
+and therefore none can reach another application's private data. A caller
+running no verified bundle — a kernel principal, a boot-floor program with no
+signed manifest, a parser-sandbox child — has no store, and is refused and
+audited whichever operation it sent.
 
 | Request | Effect |
 |---|---|
-| `ConfigRead { capacity }` | the caller's whole merged document, or the length it needs |
-| `ConfigSet { key, value }` | stage a write |
-| `ConfigUnset { key }` | stage a removal |
-| `ConfigCommit` | publish every staged change atomically |
+| `ConfigRead { scope, capacity }` | the caller's whole merged document for one of its own scopes, or the length it needs |
+| `ConfigSet { scope, key, value }` | stage a write |
+| `ConfigUnset { scope, key }` | stage a removal |
+| `ConfigCommit { scope }` | publish that scope's staged changes atomically |
+| `PublicRead { bundle_id, capacity }` | another application's **published** document |
 
-A read answers with the **whole** document, not one key: the policy layer, the
-app's own settings over it, and the caller's own staged edits over those,
-rendered as canonical `key = value` text the client parses with the one format
-engine (`lib/appconf`). An application's start-up therefore costs one call, one
-store read, and one parse however many settings it goes on to consult — where a
-per-key read would have cost the service a file read and a parse *each*, so a
-thirteen-setting profile cost thirteen of both.
+A read answers with the **whole** document, not one key: for the private scope,
+the policy layer, the app's own settings over it, and the caller's own staged
+edits over those, rendered as canonical `key = value` text the client parses
+with the one format engine (`lib/appconf`). An application's start-up therefore
+costs one call, one store read, and one parse however many settings it goes on
+to consult — where a per-key read would have cost the service a file read and a
+parse *each*, so a thirteen-setting profile cost thirteen of both.
 
 The request declares the reply buffer the caller has. A document that does not
 fit comes back as the byte count it needs and **no body at all**, so a caller
@@ -60,20 +62,58 @@ larger than that.
 
 A set or an unset *stages* a pending edit against the calling **process
 instance** (keyed on the unforgeable `ProcId`, so one instance can never publish
-another's half-finished edits). The commit loads the committed document, applies
-the edits, and publishes the result as one document replacement. A caller that
-never commits changes nothing on the volume, and its own reads see its own
-pending edits, so a settings sheet reads back what it just set.
+another's half-finished edits) in the scope it named. The commit loads that
+scope's committed document, applies the pending edits for it, and publishes the
+result as one document replacement. A caller that never commits changes nothing
+on the volume, and its own reads see its own pending edits, so a settings sheet
+reads back what it just set.
+
+Staging and committing are **per scope**, and the pending-edit bound is too:
+one rename replaces one name, so a commit that claimed to publish two documents
+at once would be claiming an atomicity no filesystem offers. An application
+editing its settings and publishing about itself at the same time therefore has
+two independent pieces of unpublished work, and neither commit carries the
+other's.
 
 An abandoned session — a caller that stages and exits — is reclaimed by age.
 No primitive tells a server that a peer died, and losing an abandoned session's
 edits is exactly the contract already stated.
 
+## Two scopes: the app's own settings, and what it publishes
+
+`settings.conf` is the **private** scope — the user's settings for that
+application, which no other principal can read. `public.conf` is the
+**published** scope: what the application says about itself for other
+applications to read.
+
+The published scope is what keeps the isolation complete rather than merely
+strict. Two applications that must share a value have exactly one sanctioned
+way to do it; without one, the only remaining route would be an invented path
+under `CAP_FS_ACCESS`, which is precisely the un-isolated arrangement this
+service exists to remove.
+
+Reading it is the one request that names an application, and it is a **distinct
+operation** rather than a scope on a shared one, so a request that names another
+app cannot ask for the private scope — there is no field to set. Three things
+answer identically, with the empty document: an application that publishes
+nothing, one that has never run for this account, and one whose store the
+service cannot attest (a malformed ownership pin, an out-of-bounds document —
+both audited, naming the *target*). So a reader learns what an application chose
+to publish and nothing else, and cannot use the endpoint to probe which
+applications an account has ever run. The caller's own refusals — no home, a
+root the service does not own, an unreachable volume — are reported as
+themselves, because only those are worth a retry.
+
+A foreign read answers the **committed** document, never the publisher's staged
+edits: a published value is what every other application sees, and a reader
+must not act on one that may never be published.
+
 ## The tree it serves from
 
 ```text
 /Users/<u>/Settings/Apps/<bundle-id>/     ← gated: required_cap = CAP_APPDATA_ADMIN
-    settings.conf                           the app's own document
+    settings.conf                           the app's own private document
+    public.conf                             what the app publishes; any app may read
     .owner                                  the publisher ownership pin
 /System/Settings/<bundle-id>/settings.conf  optional machine-wide policy layer
 ```
@@ -89,6 +129,11 @@ this service's own account and gated on `CAP_APPDATA_ADMIN`.
 Its ancestors carry a **search-only** ACL grant for the service's uid: the least
 authority that lets a walk reach the root, and not enough to list a home or open
 anything else in it.
+
+One ownership pin governs both scopes: it records who owns the *data*, and both
+documents are the same application's. A different developer claiming the bundle
+identifier is therefore refused before it can put anything in front of readers
+of the real application's published document.
 
 Two checks authorise every open, and both are necessary:
 
@@ -119,7 +164,17 @@ publisher.
 
 ## Read layering
 
-Lowest precedence first:
+Layering is the **private** scope's alone. The published scope is exactly one
+document, and that is structural rather than a simplification: the service
+cannot name a bundle's own directory — nothing attested gives it one — so a
+bundle-shipped published document could never be read on the foreign path, and a
+layer that worked only for the publishing application would mean two
+applications disagreeing about what a third publishes. A machine-wide layer is
+excluded for a second reason: a reader must be able to attribute a published
+value to the application, and an administrator must not be able to make an
+application appear to say something it never said.
+
+For the private scope, lowest precedence first:
 
 1. `/System/Settings/<bundle-id>/settings.conf` — the optional machine-wide
    administrator policy. Read-only at runtime, and readable from an app's very
@@ -140,11 +195,12 @@ normalised.
 
 ## Atomic publish, and what a crash leaves
 
-A publish renders the document, writes it whole to `settings.conf.new`, flushes
-it, and renames it over the live document. A crash therefore leaves either the
-old document or the new one — never a torn one. A failed rename leaves the old
-document live and the temporary behind; the next publish overwrites the
-temporary, so a retry converges with no repair pass.
+A publish renders the document, writes it whole to a sibling temporary — the
+live name plus `.new`, so each scope has its own and the two can never contend —
+flushes it, and renames it over the live document. A crash therefore leaves
+either the old document or the new one — never a torn one. A failed rename
+leaves the old document live and the temporary behind; the next publish
+overwrites the temporary, so a retry converges with no repair pass.
 
 A save never destroys what a human wrote: the document engine
 ([`tairix-appconf`](../lib/appconf.md)) rewrites the one line it must and leaves
