@@ -7823,7 +7823,7 @@ future contributor needs from this file:
 
 ---
 
-## APPDATA — per-app settings, secrets, blobs and temporary files (`plans/APPDATA.md`)  **[AD1–AD3 DONE; AD4–AD10 REMAINING]**
+## APPDATA — per-app settings, secrets, blobs and temporary files (`plans/APPDATA.md`)  **[AD1–AD4 DONE; AD5–AD10 REMAINING]**
 
 `plans/APPDATA.md` is the binding design and carries the settled decisions,
 the fixed bounds, and the per-stage state; it is not repeated here. What a
@@ -7855,11 +7855,35 @@ future contributor needs from this file:
   record and on `Origin`, and `lib/appconf` — the `key = value` document
   engine whose rewrite preserves comments, blank lines, key order, and lines
   it did not understand.
-- **Remaining:** `confd` and the gated store tree with its ownership pin
-  (AD4), the `lib/appdata` client and the first migration (AD5), the public
-  scope (AD6), the sealed scope and its key-protector seam (AD7),
-  descriptor-backed blobs (AD8), temporary files and their reaping (AD9), and
-  the remaining migrations plus the charter amendments (AD10).
+- **Landed (AD4):** `userland/system/confd` — the app-data service and its own
+  service account/ceiling, the `appdata-v1` wire surface,
+  `CAP_APPDATA_ADMIN`, and the gated `Settings/Apps` / `Library/Apps` roots
+  provisioned with every account by all three home provisioners from one
+  shared definition.
+- **The gate needed a §5.3 fix first.** A `required_cap` governed *access to*
+  an inode but not removal of the name holding it: `unlink`/`rmdir`/`rename`
+  authorise the holding *directory*, and a same-parent rename never authorises
+  the moved node. Any principal that could write the parent could therefore
+  rename a gated directory aside and plant an ungated replacement. Every
+  `required_cap` inode in the system was exposed to that, so the rule now
+  holds in both policy paths: a mutation that removes, replaces, or re-points
+  a gated name demands that name's capability.
+- **The gate cannot sit on the per-app directory.** Every app of a user may
+  write `Settings/`, so any of them could pre-create a sibling named after
+  another app's identifier and have the service walk into it. The gate sits on
+  a fixed `Apps` parent no app can create, owned by the service — and the
+  service verifies that ownership on every open, because it holds the
+  capability either way and a planted decoy would otherwise be believed.
+- **Why the service holds no `CAP_USERS_READ`.** It resolves a uid to its home
+  by matching the owning uid of a directory under `/Users`, not by reading the
+  credential database — `users_db_read` hands over the whole `users-v1` text
+  including PBKDF2 records, and a compromised settings store must not be able
+  to exfiltrate password material.
+- **Remaining:** the `lib/appdata` client, its bundle-defaults fallback layer,
+  and the first migration (AD5), the public scope (AD6), the sealed scope and
+  its key-protector seam (AD7), descriptor-backed blobs (AD8), temporary files
+  and their reaping (AD9), and the remaining migrations plus the charter
+  amendments (AD10).
 - **A boot-floor program has no app identity.** The embedded program registry
   carries an `rxe` and a capability request, not a signed manifest, so a
   program launched from it cannot be attributed to a publisher and gets no

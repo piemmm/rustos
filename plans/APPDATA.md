@@ -137,7 +137,11 @@ dropped on the floor instead of being retained beside them.
   the kernel VFS at full speed. Proxying bytes through IPC is excluded by the
   1 MiB message ceiling and would be slow besides.
 - **Exactly one new capability.** `CAP_APPDATA_ADMIN`, held only by `confd`.
-  It is tested against §5.2's three conditions in §3.5.
+  It is tested against §5.2's three conditions in §3.5.1. `confd`'s whole
+  ceiling is that plus `CAP_IPC_BIND_PRIVILEGED`, `CAP_FS_ACCESS`, and
+  `CAP_LOG_EMIT`: no spawn, no network, no `CAP_FS_CHOWN`, and — deliberately —
+  no `CAP_USERS_READ`, so a compromised store service cannot reach the
+  credential database (§3.4).
 - **Fail closed, degrade to defaults.** No `confd` (early boot, crashed
   service, a port with no storage) means reads answer from the bundle's
   shipped defaults and writes fail with a typed error — never a guess, never a
@@ -293,6 +297,14 @@ storage floor has not landed yet (`plans/ARCHSUPPORT.md`); it is not worked
 around here, because the fix is those ports' storage floors, not a fabricated
 identity.
 
+`confd` itself is on the embedded floor of those ports (a registry row beside
+`fontd`'s), so the *service* runs identically everywhere and one boot sequence
+covers every target. Its callers there are embedded programs with no signed
+manifest, so it correctly serves them nothing — the consequence above, observed
+rather than papered over. Leaving `confd` off that floor would instead have
+made PID 1's startup config fail a spawn on those ports, which is a worse
+answer: a service that is absent for a reason no log explains.
+
 **Known consequence, stated plainly.** A shell script has no identity of its
 own; it runs under the identity of the shell that interprets it, and shares
 the shell's store. Scripts are not a security boundary here and this plan does
@@ -368,22 +380,73 @@ with two.
 Within the fixed home shape (§16.3 — apps may not invent siblings):
 
 ```
-/Users/<u>/Settings/<bundle-id>/     ← configuration (gated tree)
-    settings.conf                      private scope
-    public.conf                        public scope (foreign apps may read)
-    secret.vault                       sealed scope (AEAD)
-    .owner                             publisher pin
-/Users/<u>/Library/<bundle-id>/      ← bulk + volatile (gated tree)
-    Blobs/<name>                       app blob store
-    Cache/                             evictable
-    Temp/                              reaped at session end and at boot
+/Users/<u>/Settings/Apps/<bundle-id>/   ← configuration (gated tree)
+    settings.conf                         private scope
+    public.conf                           public scope (foreign apps may read)
+    secret.vault                          sealed scope (AEAD)
+    .owner                                publisher pin
+/Users/<u>/Library/Apps/<bundle-id>/    ← bulk + volatile (gated tree)
+    Blobs/<name>                          app blob store
+    Cache/                                evictable
+    Temp/                                 reaped at session end and at boot
 ```
 
-Both roots carry a per-inode `required_cap = CAP_APPDATA_ADMIN` (§5.3's
-existing mechanism), so even the owning user cannot open them without that
-capability. The data stays in the user's home — so per-user backup, quota, and
-the volume's at-rest encryption all still apply — while `confd` is the only
-reachable path to it.
+**The gate sits on the fixed `Apps` parent, not on the per-app directory.**
+This corrects an earlier draft of this plan, which put the store directly under
+`Settings/<bundle-id>` and gated "both roots". Two things were wrong with it.
+
+- A per-app directory *cannot* be the gate. Every app of a user may write
+  `Settings/`, so any of them could pre-create a sibling named after another
+  app's identifier — with whatever mode it liked — and have `confd` walk into
+  it and serve forged settings. The gate must sit on a parent no app can
+  create.
+- Gating `Settings/` and `Library/` themselves is not available: `Library/`
+  already holds the user's own `Trash/` (`lib/browse`), which the file manager
+  must reach under the user's own identity.
+
+So one fixed name, `Apps`, in each of the two trees. It is provisioned **with
+the account** by all three home provisioners (`tools/mkimage`,
+`kernel/tairix-kernel::user_admin_backing`, and the integration fixture) from
+one shared definition in `lib/users/src/policy.rs`, and carries:
+
+- owner = the `confd` service account, mode `0700`, and
+- `required_cap = CAP_APPDATA_ADMIN` (§5.3's existing mechanism).
+
+Both halves do work. The capability refuses every principal but `confd` —
+including the owning user, whose shell is one more unattested principal. The
+*ownership* is what makes a planted decoy harmless: `confd` verifies the root's
+owner on every open, and a directory an app created is unreadable to `confd`
+rather than trusted, because an app cannot chown to a service uid without
+`CAP_FS_CHOWN`. A capability check alone would not catch that — `confd` holds
+the capability either way.
+
+The data stays in the user's home, so per-user backup and the volume's at-rest
+encryption still apply, while `confd` is the only reachable path to it.
+
+**Reaching the root needs a transit grant.** `confd` runs as its own service
+uid, and `/Users/<u>` and `/Users/<u>/Settings` are mode `0700` owned by the
+user, so `confd` cannot traverse them at all. Each carries one ACL entry
+granting **search only** (`0b001`) to `confd`'s uid — the least authority that
+lets a walk reach the root. It cannot list a home and cannot open any child
+whose own record refuses it, so `confd` still reaches nothing but the root it
+owns.
+
+**Resolving which home.** `confd` maps the attested uid to a home by listing
+`/Users` and matching the owning uid, **not** by reading the credential
+database. That keeps `CAP_USERS_READ` out of its ceiling — `users_db_read`
+hands over the whole `users-v1` text including PBKDF2 records, so a compromised
+`confd` could otherwise exfiltrate password material for offline cracking. It
+is also the more honest answer: the store must be beside the account's actual
+files, and §16.3 fixes `/Users` as the only place user-owned files live. A uid
+with no owned directory there gets no store, audited.
+
+The scan is paid **once per account**, not once per read: a settings read must
+not carry a directory listing that grows with the number of accounts. What is
+remembered is only the resolved *path* — the ownership that authorises it is
+re-checked on every use, so reassigning a home (the one act that could
+invalidate a resolution, and it needs `CAP_FS_CHOWN`) cannot make a stale entry
+serve the wrong account's store. Only successful resolutions are remembered, so
+an account created while the service is running still resolves.
 
 **Read layering**, lowest to highest precedence:
 
@@ -392,12 +455,57 @@ reachable path to it.
    policy.
 3. The user's own file — overrides only.
 
-Writes always land in layer 3. Defaults are read as a **fallback layer**, not
-copied on first launch as §16.5 currently says: an app update then ships new
-defaults that take effect immediately, and the user's file holds only what the
-user actually changed. This is a charter amendment (§4).
+Writes always land in layer 3, so a user's file never absorbs a policy value it
+did not set and an unset falls back to layer 2 rather than to nothing. Defaults
+are read as a **fallback layer**, not copied on first launch as §16.5 said: an
+app update then ships new defaults that take effect immediately, and the user's
+file holds only what the user actually changed. This is a charter amendment
+(§4).
 
-### 3.5 `CAP_APPDATA_ADMIN` against §5.2's three tests
+**Layers 2–3 are the daemon's; layer 1 is the client's.** The daemon reads
+layer 2 and 3 from fixed paths it composes itself. Layer 1 needs the *bundle's*
+path, and nothing attested gives `confd` one: `argv[0]` is caller data, and
+scanning the program stores for an identifier would be a lookup that can
+disagree with what is actually running. The client, by contrast, is the app —
+it can read its own bundle with no lookup at all, and a wrong layer-1 value
+could only ever mislead the app about itself, so no boundary is crossed. Layer 1
+therefore lands in `lib/appdata` (AD5) rather than in `confd` (AD4), which is
+also what makes the "no `confd`, degrade to shipped defaults" path (§2) one code
+path instead of two.
+
+### 3.5 A prerequisite the gate did not have: the capability guards the *name*
+
+A `required_cap` on an inode governed *access to* the inode but not removal of
+the name that holds it. `unlink`, `rmdir`, and `rename` authorise the **holding
+directory's** write permission, and a same-parent rename never authorises the
+moved node at all (POSIX only requires that when the parents differ). So any
+principal that could write the parent could rename a gated directory aside and
+create an ungated one of the same name — defeating the gate without ever
+opening it, and leaving the gate's own service walking into the replacement.
+
+That is a defect in the §5.3 model itself, not something this plan introduced:
+it applies to every `required_cap` inode in the system. It is fixed here rather
+than worked around, because a gate this plan depends on being unbypassable must
+actually be unbypassable (§2.17).
+
+The rule added: **a mutation that removes, replaces, or re-points a name whose
+occupant carries a `required_cap` requires that capability** — `unlink`,
+`rmdir`, and `rename` at either end, since replacing a name destroys its
+occupant. It lands in both policy paths (`kernel/core/src/fs/delegate.rs` for
+driver-backed mounts, `kernel/core/src/fs/vfs.rs` for the in-RAM tree) and is a
+§5.3 charter amendment (§4). A hard link needs no rule of its own: a second
+name shares the one inode and therefore the one security record.
+
+**What this still does not isolate, stated plainly.** An app running as the user
+can rename `~/Settings` itself aside and create a fresh one — `Settings` is the
+user's own directory and carries no gate. `confd`'s ownership check then refuses
+the decoy, so the outcome is that app data becomes *unavailable* and audited,
+never readable or forgeable. Availability of a user's own home against their own
+apps is not a boundary any service can create (the same app could delete
+`~/Documents`); confidentiality and integrity of one app's data against
+another's is, and that holds.
+
+### 3.5.1 `CAP_APPDATA_ADMIN` against §5.2's three tests
 
 1. **Guards a class, not one object.** It gates the entire app-data tree of
    every user — every app's configuration, secrets, blobs, and temporary
@@ -411,28 +519,70 @@ user actually changed. This is a charter amendment (§4).
 
 ### 3.6 The ABI (`lib/abi/src/appdata_ipc.rs`, `APPDATA_ENDPOINT`)
 
-A reserved well-known endpoint (added to `is_reserved_endpoint`), bound by
-`confd` under `CAP_IPC_BIND_PRIVILEGED` so a squatter cannot impersonate the
-store. Fixed-width, fail-closed requests in the house style: unknown magic,
-version, opcode, scope, or a dirty reserved field refuses rather than guessing.
+A reserved well-known endpoint (added to `is_reserved_endpoint`, and
+deliberately **not** seat-scoped — app data is not a property of a seat and a
+headless machine serves it identically), bound by `confd` under
+`CAP_IPC_BIND_PRIVILEGED` so a squatter cannot impersonate the store.
+Fail-closed requests in the house style: unknown magic, version, opcode, or a
+field the operation does not use left non-zero refuses rather than guessing.
 
-| Request | Effect |
-|---|---|
-| `ConfigGet { scope, key }` | own private/public/secret value, or `NotFound` |
-| `ConfigSet { scope, key, value }` | stage a write to own scope |
-| `ConfigUnset { scope, key }` | stage a removal |
-| `ConfigCommit {}` | publish staged writes atomically |
-| `ConfigList { scope, prefix, cursor }` | bounded, paged key listing |
-| `PublicGet { bundle_id, key }` | read a **foreign** app's public scope |
-| `BlobOpen { name, mode }` | descriptor grant handle for a blob |
-| `BlobDelete { name }` / `BlobList { cursor }` | manage own blobs |
-| `TempCreate {}` | descriptor grant handle for a fresh temp file |
-| `QuotaGet {}` | own usage and ceiling |
+| Request | Stage | Effect |
+|---|---|---|
+| `ConfigGet { key }` | AD4 | own value, or `NotFound` |
+| `ConfigSet { key, value }` | AD4 | stage a write |
+| `ConfigUnset { key }` | AD4 | stage a removal |
+| `ConfigCommit` | AD4 | publish staged writes atomically |
+| `ConfigList { prefix, cursor }` | AD4 | bounded, paged key listing |
+| `PublicGet { bundle_id, key }` / `PublicSet` | AD6 | a **foreign** app's public scope, and one's own |
+| `VaultGet` / `VaultSet` / `VaultUnset` | AD7 | the sealed scope |
+| `BlobOpen { name, mode }` | AD8 | descriptor grant handle for a blob |
+| `BlobDelete { name }` / `BlobList { cursor }` | AD8 | manage own blobs |
+| `TempCreate {}` | AD9 | descriptor grant handle for a fresh temp file |
+| `QuotaGet {}` | AD8 | own usage and ceiling |
 
-Writes are staged and published by `ConfigCommit` as write-temp-then-rename,
-so a crash mid-write can never leave a half-written document. Every listing is
-paged and bounded. Every entry point follows §5.4: attest the caller, check
-authority before touching state, validate every input, log the
+**No `scope` field, and the record is variable-width.** Two corrections to an
+earlier draft of this plan, both of which it got wrong.
+
+- The draft put a `scope` selector on every config request. AD4 has exactly one
+  scope, so a `ConfigScope` enum with a single variant would be interface built
+  for a stage that has not landed — §2.3/§2.4 forbid it, and §2.13 explicitly
+  blesses changing the wire in place when the second scope arrives. The scope
+  therefore enters with AD6, in the same change that gives it a second legal
+  value; the same rule is applied inside the daemon, so its store surface names
+  the private document plainly rather than carrying a one-value selector of its
+  own.
+- The draft specified fixed-width records. A padded frame would put a kilobyte
+  of zeroes on the hot settings-read path: a `ConfigGet` is a couple of dozen
+  bytes and a `ConfigCommit` is sixteen. The record is length-prefixed instead,
+  bounded by `APPDATA_MAX_REQUEST`, exactly as the `users_admin` codec is; the
+  *reply* frames stay fixed-width where they carry a full-width buffer.
+
+The ABI is structural only. It bounds the record's shape, its lengths, and its
+text encoding; the **grammar** of a key and a value has one home,
+`lib/appconf`, and the daemon applies it through that engine's own validators —
+the `users_admin` precedent, where the semantic field rules live in `lib/users`.
+The two key/value byte bounds are the one exception, and they are not
+duplicated: they are `abi-v1` wire field widths *and* the grammar's own bounds,
+`lib/abi` may have no dependencies, so the single definition lives in
+`appdata_ipc` and `lib/appconf` imports it.
+
+**Writes are staged per calling process instance, not per app.** Keyed on the
+attested `ProcId` — unforgeable and never reused — so two processes of one app
+cannot publish each other's half-finished edits. A session holds only its
+*pending edits*, not a whole document, so it is small; the document is loaded at
+commit. `ConfigGet` sees the caller's own pending edits first, so a settings
+sheet reads back what it just set, while every other principal still sees the
+committed value. A commit renders, writes a sibling temporary, flushes, and
+renames over the live document, so a crash leaves either the old document or the
+new one.
+
+No primitive tells a server that a peer died, so an abandoned session is
+reclaimed by **age** (`STAGING_IDLE_NS`). Losing an abandoned session's edits is
+exactly the contract already stated: a caller that never commits changes
+nothing.
+
+Every listing is paged and bounded. Every entry point follows §5.4: attest the
+caller, check authority before touching state, validate every input, log the
 security-relevant decisions, fail closed.
 
 Secrets are never enumerable or readable across apps — there is no foreign
@@ -525,13 +675,13 @@ gate green (§7), and contains no stubs (§15.1).
 | **AD1** ✅ | Manifest publisher identity | `publisher_pubkey`/`publisher_cert` in `AppInfoHeader`; `PublisherBinding`, the two labelled preimages, and `PublisherId`; the fourth authenticity check and `PublisherId` derivation in `lib/appload`; `LoadedApp::publisher`; `APP_PUBLISHER_INVALID`; the pinned `SYSTEM_APP_PUBLISHER_SEED` and the composer's `PublisherSource`. Regenerate the C view (`cargo xtask c-header --write`). |
 | **AD2** ✅ | Attested app identity | `validate_bundle_id` + `BundleId`; `AppIdentity` (whole-or-absent); `TaskCapabilities::with_app_identity`/`app_identity`; `VerifiedProgram` threading it beside the manifest request; `Origin::with_app`/`app` and its wire tail; `self_origin`/`call_peer_origin` expose it. Tests prove a caller cannot forge or inflate it, that an identity-less principal reads absent, and that a malformed or half-filled wire tail is refused. |
 | **AD3** ✅ | `lib/appconf` | The format engine: parse, typed accessors, comment/unparsed-line-preserving rewrite, fixed fail-closed bounds, fuzz harness (§19.6) holding the parse/render fixed point and the one-key-per-write property. No I/O; entirely host-testable. |
-| **AD4** | `confd` + private scope | The service bundle, `APPDATA_ENDPOINT` + `lib/abi/src/appdata_ipc.rs`, `CAP_APPDATA_ADMIN`, the gated tree with its `required_cap` inodes, the `.owner` pin, the three-layer read merge, atomic commit. First end-to-end path. |
-| **AD5** | `lib/appdata` + first migration | The client API; migrate `terminal` and **delete** `profile.rs`'s hand-rolled path. Proves the API on a real consumer with a settings sheet behind it. |
+| **AD4** ✅ | `confd` + private scope | The service bundle and its `confd` account/ceiling, `APPDATA_ENDPOINT` + `lib/abi/src/appdata_ipc.rs`, `CAP_APPDATA_ADMIN`, the gated `Settings/Apps` + `Library/Apps` roots with their `required_cap` inodes and search-only transit grants across all three home provisioners, the `.owner` pin, the policy/user read merge, per-process staging and atomic commit, and the §3.5 name-gate fix the gate turned out to need. |
+| **AD5** | `lib/appdata` + first migration | The client API **including the bundle-defaults fallback layer** (§3.4); migrate `terminal` and **delete** `profile.rs`'s hand-rolled path. Proves the API on a real consumer with a settings sheet behind it. |
 | **AD6** | Public scope | `public.conf`, `PublicGet`, bounded foreign reads. |
 | **AD7** | Secrets | `secret.vault`, the AEAD hierarchy, the key-protector seam with the volume-backed stage-1 protector. |
 | **AD8** | Blobs | `BlobOpen`/`BlobList`/`BlobDelete`, `fd_grant` handoff, quotas, `file_map` random access. |
 | **AD9** | Temp | `TempCreate`, session-end and boot reaping, quota accounting. |
-| **AD10** | Remaining migrations + charter | Migrate `fstree`, `lib/wallpaper`/session pinboard, `applib` program library; delete every hand-rolled path. Land the §4 charter amendments and the `docs/src/` page. |
+| **AD10** | Remaining migrations | Migrate `fstree`, `lib/wallpaper`/session pinboard, `applib` program library; delete every hand-rolled path. The `docs/src/` page and every §5 amendment but the manifest-field record land with the stage that needs them, and AD4 landed most of them; AD10 lands only what its own migrations drive. |
 
 AD1 and AD2 are the foundation — nothing else can be built first, and they are
 split because AD1 is tooling-and-format while AD2 is kernel-and-ABI, with
@@ -541,21 +691,29 @@ different review surfaces.
 
 ## 5. Charter amendments this plan drives
 
-Landed as the stages that need them land, never pre-written (§3, §15.2):
+Landed as the stages that need them land, never pre-written (§3, §15.2). A
+✅ names the stage that landed it.
 
-- **§16.3** — name `Settings/<bundle-id>/` and `Library/<bundle-id>/` as the
-  app-data roots, keyed on the signed bundle id, reachable only through the
-  app-data service.
-- **§16.5** — `DefaultSettings/` becomes a read-only **fallback layer** rather
-  than a first-launch copy (§3.4).
-- **§5.2** — add `CAP_APPDATA_ADMIN` to the capability list.
-- **§9** — record the two new signed-manifest fields.
-- **§15.18** — a jump-sheet row: *"App settings, secrets, blobs and temporary
-  files: the per-app store keyed on bundle id, the publisher pin, the
+- **§16.3** ✅ (AD4) — name `Settings/Apps/<bundle-id>/` and
+  `Library/Apps/<bundle-id>/` as the app-data roots, keyed on the signed bundle
+  id, reachable only through the app-data service, and say why the per-app
+  directory cannot itself be the gate.
+- **§16.5** ✅ (AD4) — three changes to the bundle contract:
+  `DefaultSettings/` becomes a read-only **fallback layer** rather than a
+  first-launch copy (its *implementation* is AD5's); the "apps may write
+  `Settings/<Name>/`" sentence becomes "apps never write their store directly"
+  (§3.4); and the `AppInfo` declaration list records the two publisher fields.
+  AD1 shipped those fields and this list is where §9 defers the per-field record
+  to, so the charter was inaccurate until it landed.
+- **§5.3** ✅ (AD4) — a capability gate guards an inode's *name* as well as its
+  content (§3.5).
+- **§5.2** ✅ (AD4) — add `CAP_APPDATA_ADMIN` to the capability list.
+- **§15.18** ✅ (AD3) — a jump-sheet row: *"App settings, secrets, blobs and
+  temporary files: the per-app store keyed on bundle id, the publisher pin, the
   `key = value` format engine, the sealed scope, descriptor-backed blobs" →
   `plans/APPDATA.md`*.
-- **`README.md`** — the security/attack-vector matrix gains the app-from-app
-  isolation row (§13).
+- **`README.md`** ✅ (AD4) — the security/attack-vector matrix gains the
+  app-from-app isolation row and the name-gate row (§13).
 
 ---
 

@@ -126,6 +126,7 @@
 - [PID 1 service manager](./userland/init.md)
 - [System Information service](./userland/sysinfod.md)
 - [Font service](./userland/fontd.md)
+- [App-data service (`confd`)](./userland/confd.md)
 - [Seat-manager service](./userland/seatmgr.md)
 - [Network-stack service](./userland/netstack.md)
 - [Networking tools (`ss`)](./userland/networking.md)

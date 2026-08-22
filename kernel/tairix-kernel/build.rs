@@ -161,6 +161,12 @@ const PROGRAMS: &[Program] = &[
         prefix: "FONTD",
     },
     Program {
+        pkg: "tairix-confd",
+        bin: "tairix-confd-run",
+        fixture: "confd_rxe.rs",
+        prefix: "CONFD",
+    },
+    Program {
         pkg: "tairix-ps",
         bin: "tairix-ps-run",
         fixture: "ps_rxe.rs",

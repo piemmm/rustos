@@ -1,0 +1,60 @@
+[package]
+name = "tairix-confd"
+description = "TAIRiX app-data service: the sole holder of CAP_APPDATA_ADMIN, serving each application its own per-app configuration store over APPDATA_ENDPOINT and keying every answer on the caller's kernel-attested app identity (plans/APPDATA.md, AGENTS.md §16.2)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+# The `Run` binary's freestanding userland runtime (`tairix-rt`) is an
+# optional, on-by-default build feature, mirroring `tairix-fontd`. `cargo build
+# -p tairix-confd` builds the service program with it; host tooling builds only
+# the dispatcher *library*, so the host test build never pulls the userland
+# runtime's `_start` / `#[global_allocator]` / `panic_impl`.
+[features]
+default = ["program"]
+program = ["dep:tairix-rt"]
+
+# The package is both the `tairix-confd` dispatcher library (the host-testable
+# store engine over an injected filesystem seam) and the `Run` entry-point
+# binary of the app-data service installed at `/System/Services/confd.app/Run`
+# (`AGENTS.md` §16.2). The binary is a freestanding pure-Rust program on the
+# native Tier-1 targets and an inert host stub elsewhere (see `src/run.rs`).
+[[bin]]
+name = "tairix-confd-run"
+path = "src/run.rs"
+
+[dependencies]
+# The `appdata-v1` wire surface (`APPDATA_ENDPOINT`, `AppDataRequest`, the
+# reply encoders), the attested `Origin`/`AppIdentity`/`PublisherId`, and the
+# `Errno` table every refusal fails closed with.
+tairix-abi = { path = "../../../lib/abi", version = "=0.0.0" }
+# The one `key = value` document engine: parsing, typed reads, and the rewrite
+# that preserves comments, blank lines, key order, and lines it did not
+# understand. The service never tokenises a settings line itself.
+tairix-appconf = { path = "../../../lib/appconf", version = "=0.0.0" }
+# The structured audit records every security-relevant decision is written
+# through — a refused principal, a publisher-pin mismatch, a store root that
+# is not the service's own.
+tairix-log = { path = "../../../lib/log", version = "=0.0.0" }
+# The one definition of the gated store root's name, the home shape it hangs
+# off, and the app-data service account's own uid — shared with the three
+# provisioners that create the tree, so the service and the provisioners can
+# never disagree about where the store is or who owns it.
+tairix-users = { path = "../../../lib/users", version = "=0.0.0" }
+
+# The `Run` binary's freestanding userland runtime (`AGENTS.md` §1):
+# `tairix-rt` provides `_start`, the stack canary, the panic handler, the
+# `#[global_allocator]`, the `fs_*` file API the store reads and writes
+# through, and the endpoint syscall wrappers (`call_create` / `call_recv` /
+# `call_reply` / `call_peer_origin` / `clock_get`). Pulled in only for the
+# bare-metal targets the program is built for; on the host the binary is an
+# inert stub and it is not linked.
+[target.'cfg(target_os = "none")'.dependencies]
+tairix-rt = { path = "../../../lib/rt", version = "=0.0.0", optional = true }
+tairix-caps = { path = "../../../lib/caps", version = "=0.0.0" }

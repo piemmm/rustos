@@ -255,6 +255,26 @@ pub const FONTD_CEILING: &[CapabilityId] = &[
     CapabilityId::LOG_EMIT,
 ];
 
+/// The `confd` app-data service account's grant ceiling: bind the reserved
+/// `APPDATA_ENDPOINT`, reach the gated per-app store trees, and emit its
+/// audit records — nothing more.
+///
+/// `CAP_APPDATA_ADMIN` is what the store trees' per-inode gate demands, and
+/// this is its only holder in the system: every other principal, the owning
+/// user included, is refused the trees outright. `CAP_FS_ACCESS` is the
+/// coarse admission to the filesystem syscalls the service reads and writes
+/// the documents through, still authorised per-inode under its own attested
+/// identity — which is precisely why it holds no `CAP_FS_CHOWN`: it can
+/// neither seize a user's file nor hand one away. It holds no spawn, no
+/// network, and no users-database authority, so compromising it yields
+/// applications' settings and nothing else.
+pub const CONFD_CEILING: &[CapabilityId] = &[
+    CapabilityId::IPC_BIND_PRIVILEGED,
+    CapabilityId::APPDATA_ADMIN,
+    CapabilityId::FS_ACCESS,
+    CapabilityId::LOG_EMIT,
+];
+
 /// The `greeter` service account's grant ceiling: draw the graphical login
 /// screen on one seat and read that seat's input — nothing that could reach
 /// an account.

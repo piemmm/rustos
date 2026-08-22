@@ -29,7 +29,10 @@ use tairix_abi::driver::filesystem::{FilesystemRead, FilesystemWrite, NodeId, No
 use tairix_drv_fs_arxfs::{
     plant_nested_file, EntropySource, Security, VolumeKey, ARXFS, SYSTEM_VOLUME_KEY,
 };
-use tairix_users::{HOME_MODE, HOME_SUBDIRS};
+use tairix_users::{
+    appdata_root_security, appdata_transit_security, APPDATA_ROOT, APPDATA_ROOT_PARENTS, HOME_MODE,
+    HOME_SUBDIRS,
+};
 
 use crate::device::MemBlock;
 use crate::MkimageError;
@@ -192,6 +195,11 @@ pub fn build_root_partition(
 /// the very layout `users_admin` provisions a new account's home with, read
 /// from the one shared definition so a seeded account and a created one can
 /// never get different homes.
+///
+/// The two [`APPDATA_ROOT_PARENTS`] additionally carry the gated per-app data
+/// root, created here rather than on first use: it is owned by the app-data
+/// service, so nothing that runs as the user could ever create it, and an
+/// account whose home lacked it would have no store at all.
 fn create_home_dir(
     fs: &mut ARXFS<MemBlock>,
     users: NodeId,
@@ -199,17 +207,28 @@ fn create_home_dir(
     uid: u32,
     gid: u32,
 ) -> Result<(), MkimageError> {
+    let transit = appdata_transit_security(uid, gid).map_err(MkimageError::RootPartition)?;
     let home = fs
         .create(users, username.as_bytes(), NodeKind::Directory)
         .map_err(MkimageError::RootPartition)?;
-    fs.set_security(home, Security::new(HOME_MODE, uid, gid))
+    fs.set_security(home, transit)
         .map_err(MkimageError::RootPartition)?;
     for name in HOME_SUBDIRS {
         let node = fs
             .create(home, name.as_bytes(), NodeKind::Directory)
             .map_err(MkimageError::RootPartition)?;
-        fs.set_security(node, Security::new(HOME_MODE, uid, gid))
-            .map_err(MkimageError::RootPartition)?;
+        if APPDATA_ROOT_PARENTS.contains(&name) {
+            fs.set_security(node, transit)
+                .map_err(MkimageError::RootPartition)?;
+            let root = fs
+                .create(node, APPDATA_ROOT.as_bytes(), NodeKind::Directory)
+                .map_err(MkimageError::RootPartition)?;
+            fs.set_security(root, appdata_root_security())
+                .map_err(MkimageError::RootPartition)?;
+        } else {
+            fs.set_security(node, Security::new(HOME_MODE, uid, gid))
+                .map_err(MkimageError::RootPartition)?;
+        }
     }
     Ok(())
 }
@@ -767,6 +786,51 @@ mod tests {
             assert_eq!(sec.mode, HOME_MODE, "{name} is owner-only");
             assert_eq!(sec.uid, TEST_HOMES[0].1, "{name} belongs to the account");
             assert_eq!(sec.gid, TEST_HOMES[0].2, "{name} carries its group");
+        }
+    }
+
+    /// The gated per-app data roots ship with the home, owned by the app-data
+    /// service and capability-gated, with the search-only transit grant on
+    /// every directory the service must descend through to reach them.
+    ///
+    /// A seeded image is the shape every other provisioner is compared
+    /// against, so this is where a drift would first show.
+    #[test]
+    fn a_seeded_home_carries_the_gated_per_app_data_roots() {
+        use tairix_abi::driver::filesystem::FilesystemSecurity;
+
+        let bytes = build();
+        let dev = MemBlock::from_bytes(bytes).expect("whole sectors");
+        let mut fs = ARXFS::open(dev, &TEST_KEY).expect("mounts");
+        let root = fs.root();
+        let users = fs.lookup(root, b"Users").expect("/Users exists");
+        let home = fs.lookup(users, b"root").expect("/Users/root exists");
+        let expected_root = appdata_root_security();
+        let expected_transit =
+            appdata_transit_security(TEST_HOMES[0].1, TEST_HOMES[0].2).expect("one entry fits");
+
+        // The service can descend into the home itself.
+        assert_eq!(
+            fs.security(home).expect("security present"),
+            expected_transit
+        );
+        for parent in APPDATA_ROOT_PARENTS {
+            let node = fs
+                .lookup(home, parent.as_bytes())
+                .unwrap_or_else(|_| panic!("{parent} exists"));
+            assert_eq!(
+                fs.security(node).expect("security present"),
+                expected_transit,
+                "{parent} lets the app-data service through and no further"
+            );
+            let gated = fs
+                .lookup(node, APPDATA_ROOT.as_bytes())
+                .unwrap_or_else(|_| panic!("{parent}/{APPDATA_ROOT} exists"));
+            assert_eq!(
+                fs.security(gated).expect("security present"),
+                expected_root,
+                "{parent}/{APPDATA_ROOT} is the gate"
+            );
         }
     }
 

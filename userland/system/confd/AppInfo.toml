@@ -1,0 +1,21 @@
+# Signed-AppInfo manifest source for the `confd` app-data service (a service
+# is an app; plans/APPDATA.md AD4). Discovered by the build's app-bundle
+# composer and planted under /System/Services/.
+#
+# The capability list is the bundle's request and is deliberately minimal:
+# CAP_IPC_BIND_PRIVILEGED (to bind the reserved well-known APPDATA_ENDPOINT,
+# so a squatter cannot serve forged settings to every application on the
+# machine), CAP_APPDATA_ADMIN (the per-inode gate the store trees carry — this
+# service is its only holder in the system), CAP_FS_ACCESS (the store reads and
+# writes, still authorised per-inode under the service's own attested
+# identity), and CAP_LOG_EMIT (its audit records).
+#
+# It requests no spawn, no network, no chown, and no users-database authority:
+# it cannot start a process, reach the credential store, seize a user's file,
+# or hand one away. Compromising it yields applications' settings and nothing
+# else.
+id = "os.tairix.confd"
+name = "confd"
+version = "0.1.0"
+kind = "service"
+capabilities = ["CAP_IPC_BIND_PRIVILEGED", "CAP_APPDATA_ADMIN", "CAP_FS_ACCESS", "CAP_LOG_EMIT"]

@@ -1172,7 +1172,10 @@ impl Vfs {
     /// * [`VfsError::NotADirectory`] if `dir_only` and `path` is not a
     ///   directory.
     /// * [`VfsError::PermissionDenied`] if the caller lacks write
-    ///   permission on the parent directory.
+    ///   permission on the parent directory, or the name's occupant carries
+    ///   a capability gate the caller does not hold — the gate guards the
+    ///   *name* as well as the node, so a principal who may write the parent
+    ///   cannot unlink a gated node aside and plant an ungated replacement.
     /// * [`VfsError::NotFound`], [`VfsError::NotADirectory`], or
     ///   [`VfsError::InvalidPath`].
     pub fn remove(
@@ -1195,18 +1198,18 @@ impl Vfs {
             return Err(VfsError::NotADirectory);
         };
 
-        match entries.get(&name) {
-            None => return Err(VfsError::NotFound),
-            Some(Node {
-                kind: NodeKind::Directory(children),
-                ..
-            }) if !children.is_empty() => return Err(VfsError::NotEmpty),
-            Some(Node {
-                kind: NodeKind::Directory(_),
-                ..
-            }) => {}
-            Some(_) if dir_only => return Err(VfsError::NotADirectory),
-            Some(_) => {}
+        let occupant = entries.get(&name).ok_or(VfsError::NotFound)?;
+        if let Some(cap) = occupant.meta.required_cap {
+            if !cred.caps.holds(cap) {
+                return Err(VfsError::PermissionDenied);
+            }
+        }
+        match &occupant.kind {
+            NodeKind::Directory(children) if !children.is_empty() => {
+                return Err(VfsError::NotEmpty)
+            }
+            NodeKind::File(_) if dir_only => return Err(VfsError::NotADirectory),
+            NodeKind::Directory(_) | NodeKind::File(_) => {}
         }
         entries.remove(&name);
         Ok(())

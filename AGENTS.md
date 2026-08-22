@@ -632,6 +632,7 @@ tairix/
 │   │   ├── init/        # PID 1.
 │   │   ├── devmgr/      # Device manager: hardware-tree match + driver autoload.
 │   │   ├── appmgr/      # Application bundle loader.
+│   │   ├── confd/       # App-data service: the per-app settings store.
 │   │   └── installer/   # Image installer (partitioning, user creation, naming).
 │   ├── session/         # Authentication and session bring-up.
 │   │   ├── login/       # Session authority: text login + the graphical round.
@@ -743,7 +744,8 @@ an update to this section.
 
 - Capabilities are unforgeable kernel-issued tokens. Examples:
   `CAP_FS_MOUNT`, `CAP_NET_RAW`, `CAP_DRV_LOAD`, `CAP_USER_ADMIN`,
-  `CAP_TIME_SET`, `CAP_IPC_BIND_PRIVILEGED`.
+  `CAP_TIME_SET`, `CAP_IPC_BIND_PRIVILEGED`, `CAP_APPDATA_ADMIN`. The
+  authoritative set is `lib/abi/src/capability.rs`, not this list.
 - A process's capability set is the intersection of its user's grants and its
   executable's manifest request. Manifests are signed.
 - Capabilities can be **delegated** (a subset, never a superset) and **revoked**.
@@ -779,6 +781,14 @@ an update to this section.
 - POSIX mode bits **plus** ACLs **plus** capability gates.
 - Every inode stores: owner uid, owning gid, mode, ACL, and an optional
   capability requirement (e.g. "reading this file requires `CAP_AUDIT_READ`").
+- **A capability gate guards the inode's *name* as well as its content.**
+  Adding, removing, and renaming a directory's entries is authorised against
+  the holding *directory*, so without this a principal who may write that
+  directory could unlink or rename a gated node aside and plant an ungated
+  replacement — defeating the gate without ever opening it. `unlink`,
+  `rmdir`, and `rename` (at either end, since replacing a name destroys its
+  occupant) therefore demand the gate's capability, exactly as a mode or
+  ownership change on the node already does.
 - Mounts have their own permission policy (`nosuid`, `nodev`, `noexec`,
   `ro`, etc.) and the installer's default layout uses them aggressively.
   The concrete defaults for `/System`, `/Users`, `/Apps`, and `/Storage`
@@ -1598,7 +1608,17 @@ defect.
   `Applications/` (the user's own two program stores, mirroring the
   system pair and organisable in nested plain subdirectories), and
   `Desktop/`. The shape is fixed; applications may not invent sibling
-  directories at this level. `/Users` is mounted `nosuid,nodev`.
+  directories at this level.
+  `Settings/Apps/<bundle-id>/` and `Library/Apps/<bundle-id>/` are the
+  **per-app data roots**, keyed on the app's *signed bundle identifier* and
+  never on its display name. An application never reaches them itself: the
+  `Apps` parent is owned by the app-data service and carries
+  `required_cap = CAP_APPDATA_ADMIN`, so the whole tree is reachable only
+  through that service, which gates every request on the caller's
+  kernel-attested app identity. A per-app directory could not be the gate
+  itself — every app of a user may write `Settings/`, so any of them could
+  pre-create a sibling named after another app's identifier. See
+  `plans/APPDATA.md`. `/Users` is mounted `nosuid,nodev`.
   A store carries the same directory name at every scope, so the user's
   own stores are exactly the system stores' names under their home; both
   are on the fixed lookup order (§16.8) after the system pair, which is
@@ -1674,8 +1694,10 @@ directly under `/Apps/`. The bundle layout is fixed:
 ├── Code/              # Additional rxe binaries / plugins.
 ├── Libraries/         # Private shared libraries used only by this app.
 ├── Resources/         # Images, locales, UI definitions, etc.
-├── DefaultSettings/   # Read-only defaults; copied into the user's
-│                      # /Users/<u>/Settings/<Name>/ on first launch.
+├── DefaultSettings/   # Read-only defaults. A fallback *layer* beneath the
+│                      # app's own store, never copied anywhere: an update
+│                      # ships new defaults that take effect at once, and
+│                      # the user's own file holds only what they changed.
 └── Help/              # Internationalised structured-Markdown help: one
                        # document per command/topic, one directory per
                        # BCP-47 locale; the mandatory canonical one is en-US/.
@@ -1745,11 +1767,20 @@ and declares at minimum:
   grants; ambient authority is forbidden (§4).
 - Declared MIME / file-type associations.
 - The signer's identity and signature over the bundle contents.
+- The **publisher** identity: the developer's stable public key, plus a
+  certificate delegating this build's signing key to it when the two differ.
+  The signing key may rotate every release; the publisher is what per-app
+  stored state is owned by, so a re-signed release keeps its data and a
+  different developer claiming the same identifier is refused
+  (`plans/APPDATA.md`).
 
-Apps may not write outside their own per-user state
-(`/Users/<u>/Settings/<Name>/` and an app-scoped `Library/<Name>/`
-cache directory). All other writes require a user-mediated capability
-(e.g. a file picker handing the app a one-shot file capability).
+Apps may not write outside their own per-user state, and they never write it
+directly: it lives under `Settings/Apps/<bundle-id>/` and
+`Library/Apps/<bundle-id>/` (§16.3), keyed on the *signed bundle identifier*
+rather than the display name, and is reachable only through the app-data
+service, which derives the store from the caller's kernel-attested app
+identity. All other writes require a user-mediated capability (e.g. a file
+picker handing the app a one-shot file capability).
 
 **Command help is authored in the bundle, never hardcoded into the program
 or the image builder.** A command's help — the structured-Markdown documents

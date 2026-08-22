@@ -2339,3 +2339,88 @@ fn unlink_and_rename_still_act_on_the_link_itself() {
         "payload"
     );
 }
+
+/// Install a `CAP_AUDIT_READ` gate on the driver node reached by `name`
+/// under the mock's root, and return the credentials that hold it.
+fn gate_child(fs: &mut RwMockFs, name: &[u8]) {
+    let node = fs.lookup(fs.root(), name).expect("node resolves");
+    let mut sec = fs.security(node).expect("record exists");
+    sec.required_cap = Some(CapabilityId::AUDIT_READ);
+    fs.set_security(node, sec).expect("gate installed");
+}
+
+#[test]
+fn secured_remove_of_a_gated_node_needs_the_capability() {
+    // Write permission on the parent is what authorises removing an entry,
+    // so without this the owner of a gated node's *parent* could unlink the
+    // gate away and create an ungated node of the same name — and the
+    // service that reaches the tree only by holding the capability would
+    // then walk into the replacement.
+    let vfs = backed_vfs_rw(0o755);
+    let caps = CapabilitySet::empty();
+    let admin = cred(ADMIN_UID, ADMIN_GID, &caps);
+    let mut fs = RwMockFs::new();
+    let path = p("/Storage/usb0/gated.txt");
+    vfs.create_via_secured(&admin, &path, &mut fs)
+        .expect("create");
+    gate_child(&mut fs, b"gated.txt");
+
+    assert_eq!(
+        vfs.remove_via_secured(&admin, &path, &mut fs, false),
+        Err(VfsError::PermissionDenied)
+    );
+
+    let mut holding = CapabilitySet::empty();
+    holding.insert(CapabilityId::AUDIT_READ);
+    let admin_holding = cred(ADMIN_UID, ADMIN_GID, &holding);
+    vfs.remove_via_secured(&admin_holding, &path, &mut fs, false)
+        .expect("the capability holder may remove it");
+}
+
+#[test]
+fn secured_rename_of_a_gated_node_needs_the_capability() {
+    // The same-parent rename is the sharpest case: `rename` only authorises
+    // the moved node itself when the parents differ, so a gated directory
+    // could otherwise be moved aside within its own parent.
+    let vfs = backed_vfs_rw(0o755);
+    let caps = CapabilitySet::empty();
+    let admin = cred(ADMIN_UID, ADMIN_GID, &caps);
+    let mut fs = RwMockFs::new();
+    let src = p("/Storage/usb0/gated");
+    vfs.mkdir_via_secured(&admin, &src, &mut fs).expect("mkdir");
+    gate_child(&mut fs, b"gated");
+
+    let aside = p("/Storage/usb0/stolen");
+    assert_eq!(
+        vfs.rename_via_secured(&admin, &src, &aside, &mut fs),
+        Err(VfsError::PermissionDenied)
+    );
+
+    let mut holding = CapabilitySet::empty();
+    holding.insert(CapabilityId::AUDIT_READ);
+    let admin_holding = cred(ADMIN_UID, ADMIN_GID, &holding);
+    vfs.rename_via_secured(&admin_holding, &src, &aside, &mut fs)
+        .expect("the capability holder may move it");
+}
+
+#[test]
+fn secured_rename_over_a_gated_destination_needs_the_capability() {
+    // Replacing a name destroys its occupant, so a gated destination is
+    // guarded exactly as a gated source is.
+    let vfs = backed_vfs_rw(0o755);
+    let caps = CapabilitySet::empty();
+    let admin = cred(ADMIN_UID, ADMIN_GID, &caps);
+    let mut fs = RwMockFs::new();
+    let src = p("/Storage/usb0/plain.txt");
+    let dst = p("/Storage/usb0/gated.txt");
+    vfs.create_via_secured(&admin, &src, &mut fs)
+        .expect("create source");
+    vfs.create_via_secured(&admin, &dst, &mut fs)
+        .expect("create destination");
+    gate_child(&mut fs, b"gated.txt");
+
+    assert_eq!(
+        vfs.rename_via_secured(&admin, &src, &dst, &mut fs),
+        Err(VfsError::PermissionDenied)
+    );
+}

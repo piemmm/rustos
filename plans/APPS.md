@@ -334,7 +334,7 @@ entry, `Help/` (the former `Documentation/`, merged into it):
 ├── Code/              # Additional rxe binaries / plugins.
 ├── Libraries/         # Private shared libraries used only by this app.
 ├── Resources/         # Images, locales, UI definitions, etc.
-├── DefaultSettings/   # Read-only defaults copied to the user on first launch.
+├── DefaultSettings/   # Read-only defaults: a fallback layer, never copied.
 └── Help/              # Internationalised Markdown help (this doc).
 ```
 

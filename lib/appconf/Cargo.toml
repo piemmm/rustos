@@ -12,6 +12,12 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
+# The two bounds a key and a value cross the app-data channel under
+# (`APPDATA_KEY_MAX`, `APPDATA_VALUE_MAX`). They are `abi-v1` wire field
+# widths *and* this grammar's own bounds; `lib/abi` may have no dependencies,
+# so the one definition lives there and this engine reads it rather than
+# keeping a second opinion about how long a key or value may be.
+tairix-abi = { path = "../abi", version = "=0.0.0" }
 
 [dev-dependencies]
 # The in-tree fuzz harness draws its inputs through the shared seed/budget

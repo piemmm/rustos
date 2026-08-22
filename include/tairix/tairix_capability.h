@@ -63,5 +63,6 @@
 #define TAIRIX_CAP_SYSTEM_POWER ((uint16_t)41u)
 #define TAIRIX_CAP_STORAGE_ADMIN ((uint16_t)42u)
 #define TAIRIX_CAP_SANDBOX_SPAWN ((uint16_t)43u)
+#define TAIRIX_CAP_APPDATA_ADMIN ((uint16_t)44u)
 
 #endif /* TAIRIX_CAPABILITY_H */

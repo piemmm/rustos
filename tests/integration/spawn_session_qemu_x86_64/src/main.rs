@@ -53,18 +53,18 @@
 //!    the cross-port sibling of the aarch64 `spawn_session_qemu_aarch64`,
 //!    which drives login to the same over-long-username exit).
 //!
-//! ## Why the PASS keys on seven spawns and eight audited syscalls
+//! ## Why the PASS keys on eight spawns and nine audited syscalls
 //!
-//! The second through fifth `ProcessSpawned` are the boot services `init`
-//! launches first (`sysinfod`, `netstack`, `devmgr`, `seatmgr`); the
-//! **sixth** proves the runtime producer authorised the login `spawn`, built
+//! The second through sixth `ProcessSpawned` are the boot services `init`
+//! launches first (`sysinfod`, `netstack`, `devmgr`, `seatmgr`, `confd`); the
+//! **seventh** proves the runtime producer authorised the login `spawn`, built
 //! an isolated address space, and admitted it (the X3b deliverable). The
-//! **seventh** `ProcessSpawned` is the supervision-cycle
+//! **eighth** `ProcessSpawned` is the supervision-cycle
 //! witness: it can only be emitted if `init`'s `wait` reaped the first login,
 //! returned to ring 3, and issued its relaunch `spawn` — so it proves the whole
-//! cycle, not just a single concurrent spawn. The eight certain audited
+//! cycle, not just a single concurrent spawn. The nine certain audited
 //! `SyscallInvoked`
-//! records are `init`'s four service `spawn`s, the login `spawn`, login's
+//! records are `init`'s five service `spawn`s, the login `spawn`, login's
 //! `exit`, `init`'s
 //! `wait`, and `init`'s relaunch `spawn`
 //! (`init`'s `wait` only completes after login exits and is reaped, so login's
@@ -127,9 +127,10 @@ mod kernel {
 
     /// `EventId` the spawn caller emits once a ring-3 image is built. Pinned
     /// by the `event_ids_are_unique` test in `kernel/core/src/audit.rs`. PASS
-    /// requires seven: PID 1 `init`, the `sysinfod`, `netstack`, `devmgr`,
-    /// and `seatmgr` services it launches first, the login it then launches,
-    /// and the login it **relaunches** after reaping the first — the seventh
+    /// requires eight: PID 1 `init`, the `sysinfod`, `netstack`, `devmgr`,
+    /// `seatmgr`, and `confd` services it launches first, the login it then
+    /// launches, and the login it **relaunches** after reaping the first — the
+    /// eighth
     /// is the witness that the `wait`→reap→relaunch supervision cycle
     /// completed (`plans/PI.md` X4 follow-on).
     const PROCESS_SPAWNED_EVENT_ID: EventId = EventId(4030);
@@ -146,7 +147,7 @@ mod kernel {
 
     /// Sink that replays every event through [`SERIAL_SINK`] (so the QEMU
     /// transcript captures the full boot + spawn timeline) and reports PASS to
-    /// QEMU once **seven** processes were built and **eight** audited syscalls
+    /// QEMU once **eight** processes were built and **nine** audited syscalls
     /// have run — proving PID 1 launched the boot services, launched the
     /// session into its own isolated ring-3 space, the session executed
     /// there, and `init` reaped it and relaunched a fresh session (the full
@@ -161,7 +162,7 @@ mod kernel {
             } else if event.id == SYSCALL_INVOKED_EVENT_ID {
                 SYSCALLS.fetch_add(1, Ordering::AcqRel);
             }
-            if SPAWNED.load(Ordering::Acquire) >= 7 && SYSCALLS.load(Ordering::Acquire) >= 8 {
+            if SPAWNED.load(Ordering::Acquire) >= 8 && SYSCALLS.load(Ordering::Acquire) >= 9 {
                 qemu_exit::exit_success();
             }
         }

@@ -2,6 +2,8 @@
 
 use alloc::string::String;
 
+use tairix_abi::appdata_ipc::APPDATA_VALUE_MAX;
+
 use crate::ConfError;
 
 /// Maximum length, in bytes, of a decoded value.
@@ -10,7 +12,10 @@ use crate::ConfError;
 /// scalar or a path, so this bounds the work one line can demand and the
 /// memory one key can pin. A longer value makes its line unparsed — retained
 /// verbatim, never truncated into a setting that means something else.
-pub const MAX_VALUE_LEN: usize = 1024;
+///
+/// The number is the app-data channel's own value field width, imported for
+/// the reason [`MAX_KEY_LEN`](crate::MAX_KEY_LEN) is.
+pub const MAX_VALUE_LEN: usize = APPDATA_VALUE_MAX;
 
 /// The permille value denoting "fully applied" — the upper bound of a
 /// [`Document::permille`](crate::Document::permille) reading.

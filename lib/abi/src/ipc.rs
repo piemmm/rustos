@@ -53,7 +53,8 @@ pub const IPC_MESSAGE_MAX_PAYLOAD_LEN: u32 = 1 << 20;
 /// predicate here is the single shared definition of the reserved set.
 #[must_use]
 pub const fn is_reserved_endpoint(id: u64) -> bool {
-    if id == crate::driver_store::DRIVER_STORE_ENDPOINT
+    if id == crate::appdata_ipc::APPDATA_ENDPOINT
+        || id == crate::driver_store::DRIVER_STORE_ENDPOINT
         || id == crate::log_ingress::LOG_INGRESS_ENDPOINT
         || id == crate::mailbox_ipc::MAILBOX_ENDPOINT
         || id == crate::sysinfo::SYSINFO_ENDPOINT
@@ -463,6 +464,7 @@ mod tests {
 
     #[test]
     fn reserved_endpoints_cover_every_well_known_id() {
+        assert!(is_reserved_endpoint(crate::appdata_ipc::APPDATA_ENDPOINT));
         assert!(is_reserved_endpoint(
             crate::driver_store::DRIVER_STORE_ENDPOINT
         ));

@@ -1280,6 +1280,27 @@ impl<F: FilesystemRead + FilesystemWrite + ?Sized, P: MetaPolicy<F>> DelegatedFs
         }
     }
 
+    /// Refuse a name-mutation whose occupant carries a capability gate the
+    /// caller does not hold.
+    ///
+    /// Write permission on the holding directory is what authorises adding,
+    /// removing, and renaming its entries — but a `required_cap` node is
+    /// reachable only by a capability holder, and a principal who could
+    /// unlink or rename it aside would defeat that gate without ever opening
+    /// it: it could plant an ungated directory of the same name and have the
+    /// gate's own service walk into it. The gate therefore guards the *name*
+    /// as well as the node, exactly as it already guards a mode or ownership
+    /// change.
+    fn authorize_name_mutation(
+        cred: &Credentials<'_>,
+        occupant: Option<&Metadata>,
+    ) -> Result<(), VfsError> {
+        match occupant.and_then(|meta| meta.required_cap) {
+            Some(cap) if !cred.caps.holds(cap) => Err(VfsError::PermissionDenied),
+            _ => Ok(()),
+        }
+    }
+
     /// Create an empty child of `kind` at `components`.
     ///
     /// `final_link` is the posture the *caller's own* operation has for a
@@ -1501,8 +1522,11 @@ impl<F: FilesystemRead + FilesystemWrite + ?Sized, P: MetaPolicy<F>> DelegatedFs
     /// * [`VfsError::NotEmpty`] if it is a non-empty directory.
     /// * [`VfsError::NotADirectory`] if `dir_only` and the child is not a
     ///   directory.
-    /// * [`VfsError::PermissionDenied`], [`VfsError::NotADirectory`], or
-    ///   [`VfsError::Io`].
+    /// * [`VfsError::PermissionDenied`] — including when the child carries a
+    ///   capability gate the caller does not hold: the gate guards the *name*
+    ///   as well as the node, so write permission on the parent alone cannot
+    ///   unlink a gated node aside.
+    /// * [`VfsError::NotADirectory`] or [`VfsError::Io`].
     pub fn remove(
         &mut self,
         cred: &Credentials<'_>,
@@ -1512,7 +1536,8 @@ impl<F: FilesystemRead + FilesystemWrite + ?Sized, P: MetaPolicy<F>> DelegatedFs
         let place = self.place_for_write(cred, components, FinalLink::Keep)?;
         // The walk distinguishes NotFound, and an empty-directory check here
         // reports NotEmpty rather than the driver's generic Busy.
-        let (node, info, _) = place.found.ok_or(VfsError::NotFound)?;
+        let (node, info, meta) = place.found.ok_or(VfsError::NotFound)?;
+        Self::authorize_name_mutation(cred, Some(&meta))?;
         if info.kind == NodeKind::Directory {
             let mut name_buf = [0u8; MAX_COMPONENT_LEN];
             if self
@@ -1541,8 +1566,10 @@ impl<F: FilesystemRead + FilesystemWrite + ?Sized, P: MetaPolicy<F>> DelegatedFs
     /// Authorises search + write on both the source and destination parent
     /// directories; when a directory is moved to a *different* parent its
     /// `..` link is rewritten, so write permission on the moved directory
-    /// itself is additionally required (POSIX). The structural move — the
-    /// existence, kind-compatibility, empty-target, and
+    /// itself is additionally required (POSIX). A capability gate on either
+    /// end is honoured too, so a gated name cannot be moved aside or replaced
+    /// by a caller that does not hold it — not even within one parent, where
+    /// POSIX authorises nothing against the moved node. The structural move — the existence, kind-compatibility, empty-target, and
     /// directory-into-its-own-subtree checks — is performed by the driver.
     ///
     /// # Errors
@@ -1553,7 +1580,9 @@ impl<F: FilesystemRead + FilesystemWrite + ?Sized, P: MetaPolicy<F>> DelegatedFs
     /// * [`VfsError::NotEmpty`] if the destination is a non-empty directory,
     ///   or the move would place a directory inside its own subtree.
     /// * [`VfsError::NotADirectory`] on a kind-incompatible replacement.
-    /// * [`VfsError::PermissionDenied`], or [`VfsError::Io`].
+    /// * [`VfsError::PermissionDenied`] — including when either end carries a
+    ///   capability gate the caller does not hold.
+    /// * [`VfsError::Io`].
     pub fn rename(
         &mut self,
         cred: &Credentials<'_>,
@@ -1563,6 +1592,10 @@ impl<F: FilesystemRead + FilesystemWrite + ?Sized, P: MetaPolicy<F>> DelegatedFs
         let src = self.place_for_write(cred, src_components, FinalLink::Keep)?;
         let dst = self.place_for_write(cred, dst_components, FinalLink::Keep)?;
         let (_, src_info, src_meta) = src.found.ok_or(VfsError::NotFound)?;
+        // Both ends move a gated name: the source loses it and a replaced
+        // destination is destroyed by it.
+        Self::authorize_name_mutation(cred, Some(&src_meta))?;
+        Self::authorize_name_mutation(cred, dst.found.as_ref().map(|(_, _, meta)| meta))?;
 
         // A directory moved to a different parent has its `..` rewritten, so
         // write permission on the directory itself is required as well.

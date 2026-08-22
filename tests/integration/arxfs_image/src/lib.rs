@@ -344,31 +344,41 @@ pub fn build_users_root_image_with_key(
             // account and owner-only exactly as `tools/mkimage` provisions
             // it, so a logged-in session's `cd /Users/root` (and a write
             // into it) resolves against a real inode the account owns.
-            let home = fs.create(node, b"root", NodeKind::Directory)?;
-            fs.set_security(
-                home,
-                Security::new(
-                    tairix_users::HOME_MODE,
-                    tairix_users::FIRST_USER_UID,
-                    tairix_users::FIRST_USER_GID,
-                ),
+            let transit = tairix_users::appdata_transit_security(
+                tairix_users::FIRST_USER_UID,
+                tairix_users::FIRST_USER_GID,
             )?;
+            let home = fs.create(node, b"root", NodeKind::Directory)?;
+            fs.set_security(home, transit)?;
             // …and the fixed home shape inside it, from the same shared
             // definition the real provisioning path reads, so a fixture
             // home is not a shape no installed system would ever have:
             // the per-user stores a session writes (its settings, an app
             // cache, the user's own bundles) live a level below these, and
-            // a writer creates only its immediate parent.
+            // a writer creates only its immediate parent. The two that hold
+            // an app-data root also carry the gated root itself, owned by
+            // the app-data service — nothing running as the account could
+            // create it, so a fixture without it would have no store.
             for subdir in tairix_users::HOME_SUBDIRS {
                 let node = fs.create(home, subdir.as_bytes(), NodeKind::Directory)?;
-                fs.set_security(
-                    node,
-                    Security::new(
-                        tairix_users::HOME_MODE,
-                        tairix_users::FIRST_USER_UID,
-                        tairix_users::FIRST_USER_GID,
-                    ),
-                )?;
+                if tairix_users::APPDATA_ROOT_PARENTS.contains(&subdir) {
+                    fs.set_security(node, transit)?;
+                    let gated = fs.create(
+                        node,
+                        tairix_users::APPDATA_ROOT.as_bytes(),
+                        NodeKind::Directory,
+                    )?;
+                    fs.set_security(gated, tairix_users::appdata_root_security())?;
+                } else {
+                    fs.set_security(
+                        node,
+                        Security::new(
+                            tairix_users::HOME_MODE,
+                            tairix_users::FIRST_USER_UID,
+                            tairix_users::FIRST_USER_GID,
+                        ),
+                    )?;
+                }
             }
             // A readable document in the account's home so the desktop
             // session's trusted file picker — which opens at the user's

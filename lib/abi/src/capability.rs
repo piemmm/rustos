@@ -611,6 +611,31 @@ impl CapabilityId {
     /// neither capability is refused before the block is even staged.
     pub const SANDBOX_SPAWN: Self = Self(43);
 
+    /// Reach the per-app data store — every user's per-application
+    /// configuration, secrets, bulk data, and temporary files.
+    ///
+    /// A user's applications all run as that one user, so per-inode
+    /// owner/mode/ACL cannot separate them: uid is the only principal the
+    /// model keys on, and app-from-app isolation inside a single account is
+    /// not expressible in it at all. The store trees therefore carry this
+    /// capability as their per-inode gate, and the only principal granted it
+    /// is the app-data service that owns them — so an app reaches its own
+    /// data only by asking a service that keys the answer on the caller's
+    /// kernel-attested app identity, and reaches no other app's data at all.
+    /// The owning user is gated too: the trees hold every app's private
+    /// state, and a user's own shell is one more unattested principal.
+    ///
+    /// It guards a whole class — the entire app-data tree of every user, not
+    /// one file or one method — and no existing capability expresses it:
+    /// `CAP_FS_ACCESS` is the coarse "may use the filesystem at all" gate
+    /// nearly every app in the system already holds, so gating on it would
+    /// grant every app exactly the reach this store exists to remove.
+    /// Holding it confers no authority over anything else: it is a
+    /// filesystem gate, checked by the VFS against the caller's attested
+    /// credential before any state is touched, and it neither implies nor is
+    /// implied by any other grant.
+    pub const APPDATA_ADMIN: Self = Self(44);
+
     /// Every capability assigned a canonical name in `abi-v1`, paired with
     /// that name.
     ///
@@ -664,6 +689,7 @@ impl CapabilityId {
         (Self::SYSTEM_POWER, "CAP_SYSTEM_POWER"),
         (Self::STORAGE_ADMIN, "CAP_STORAGE_ADMIN"),
         (Self::SANDBOX_SPAWN, "CAP_SANDBOX_SPAWN"),
+        (Self::APPDATA_ADMIN, "CAP_APPDATA_ADMIN"),
     ];
 
     /// The canonical `CAP_*` name of this capability, or [`None`] for an
@@ -801,6 +827,7 @@ mod tests {
         assert_eq!(CapabilityId::SYSTEM_POWER.as_u16(), 41);
         assert_eq!(CapabilityId::STORAGE_ADMIN.as_u16(), 42);
         assert_eq!(CapabilityId::SANDBOX_SPAWN.as_u16(), 43);
+        assert_eq!(CapabilityId::APPDATA_ADMIN.as_u16(), 44);
     }
 
     #[test]
@@ -830,6 +857,10 @@ mod tests {
             CapabilityId::SANDBOX_SPAWN.name(),
             Some("CAP_SANDBOX_SPAWN")
         );
+        assert_eq!(
+            CapabilityId::APPDATA_ADMIN.name(),
+            Some("CAP_APPDATA_ADMIN")
+        );
 
         // Every named id round-trips name -> id -> name.
         for &(cap, name) in CapabilityId::NAMED {
@@ -840,15 +871,15 @@ mod tests {
 
     #[test]
     fn every_assigned_id_has_a_name() {
-        // Capabilities 1..=43 are assigned in abi-v1; each must carry a
+        // Capabilities 1..=44 are assigned in abi-v1; each must carry a
         // canonical name so `getcap`/`setcap` can render and accept it.
-        for raw in 1..=43 {
+        for raw in 1..=44 {
             let cap = CapabilityId::from_raw(raw).expect("in range");
             assert!(cap.name().is_some(), "capability {raw} has no name");
         }
         // …and the assigned range stops there: the next id is free, so a new
         // capability cannot silently reuse one.
-        assert_eq!(CapabilityId::from_raw(44).expect("in range").name(), None);
+        assert_eq!(CapabilityId::from_raw(45).expect("in range").name(), None);
     }
 
     #[test]

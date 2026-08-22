@@ -19,7 +19,10 @@
 //! and creates the directory path, stamps the leaf owner-only under the
 //! new account's identity, and fills in the fixed home shape
 //! ([`tairix_users::HOME_SUBDIRS`]) inside it; an already-present
-//! directory is left exactly as it is (idempotent).
+//! directory is left exactly as it is (idempotent) — except for the gated
+//! per-app data roots and the search-only transit grants that reach them,
+//! which are OS shape rather than the account's data and are re-asserted every
+//! run so a store is never unreachable.
 
 use alloc::sync::Arc;
 
@@ -28,7 +31,10 @@ use tairix_abi::driver::filesystem::{
 };
 use tairix_abi::{DriverError, Errno};
 use tairix_kernel_core::{SleepLock, UserAdminBacking, VfsError};
-use tairix_users::{HOME_MODE, HOME_SUBDIRS};
+use tairix_users::{
+    appdata_root_security, appdata_transit_security, APPDATA_ROOT, APPDATA_ROOT_PARENTS, HOME_MODE,
+    HOME_SUBDIRS,
+};
 
 /// The production [`UserAdminBacking`]: commits the engine's edits to the
 /// mounted encrypted root volume.
@@ -139,29 +145,69 @@ where
 /// Create the fixed home shape inside `home`, each directory owned by
 /// `(uid, gid)` and owner-only.
 ///
-/// Idempotent: a name already present is left exactly as it is, whatever
-/// it is — the account's own data is never rewritten — and only a missing
-/// one is created. Creating them with the account is what lets the first
-/// per-user write land: those paths are a level below the home, and the
-/// writers create only their immediate parent.
+/// A name already present keeps whatever it holds — the account's own data is
+/// never rewritten — and only a missing one is created. Creating them with the
+/// account is what lets the first per-user write land: those paths are a level
+/// below the home, and the writers create only their immediate parent.
+///
+/// The [`APPDATA_ROOT_PARENTS`] are the exception the app-data store needs.
+/// Their gated root is owned by the app-data service, so nothing running as
+/// the account could create it, and the service reaches it only if every
+/// directory on the way carries the search-only transit grant. Those records
+/// are OS shape rather than the account's data, so they are re-asserted on
+/// every provisioning run: a home that merely *exists* is otherwise a home
+/// whose store can never be reached.
 fn ensure_home_shape<F>(fs: &mut F, home: NodeId, uid: u32, gid: u32) -> Result<(), Errno>
 where
     F: FilesystemRead + FilesystemWrite + FilesystemSecurity + ?Sized,
 {
+    let transit = appdata_transit_security(uid, gid).map_err(driver_errno)?;
+    fs.set_security(home, transit).map_err(driver_errno)?;
     for name in HOME_SUBDIRS {
-        match fs.lookup(home, name.as_bytes()) {
-            Ok(_) => {}
+        let node = match fs.lookup(home, name.as_bytes()) {
+            Ok(node) => node,
             Err(DriverError::NotFound) => {
                 let node = fs
                     .create(home, name.as_bytes(), NodeKind::Directory)
                     .map_err(driver_errno)?;
                 fs.set_security(node, NodeSecurity::new(HOME_MODE, uid, gid))
                     .map_err(driver_errno)?;
+                node
             }
             Err(err) => return Err(driver_errno(err)),
+        };
+        if APPDATA_ROOT_PARENTS.contains(&name) {
+            fs.set_security(node, transit).map_err(driver_errno)?;
+            ensure_appdata_root(fs, node)?;
         }
     }
     Ok(())
+}
+
+/// Ensure `parent` holds the gated per-app data root, with the record only the
+/// app-data service can reach through.
+///
+/// A root that is already there is re-stamped rather than trusted: a
+/// pre-existing directory of that name could only have come from a principal
+/// that is not the service, and the store must not be served out of one.
+fn ensure_appdata_root<F>(fs: &mut F, parent: NodeId) -> Result<(), Errno>
+where
+    F: FilesystemRead + FilesystemWrite + FilesystemSecurity + ?Sized,
+{
+    let root = match fs.lookup(parent, APPDATA_ROOT.as_bytes()) {
+        Ok(node) => {
+            if fs.node_info(node).map_err(driver_errno)?.kind != NodeKind::Directory {
+                return Err(Errno::AlreadyExists);
+            }
+            node
+        }
+        Err(DriverError::NotFound) => fs
+            .create(parent, APPDATA_ROOT.as_bytes(), NodeKind::Directory)
+            .map_err(driver_errno)?,
+        Err(err) => return Err(driver_errno(err)),
+    };
+    fs.set_security(root, appdata_root_security())
+        .map_err(driver_errno)
 }
 
 /// Resolve `/System/Security` on the root volume's own tree.
@@ -433,6 +479,80 @@ mod tests {
         }
     }
 
+    /// The gated per-app data roots are provisioned with the account, owned by
+    /// the app-data service, and reachable by it through the search-only
+    /// transit grant — and by nothing else.
+    #[test]
+    fn provision_home_lays_down_the_gated_per_app_data_roots() {
+        let backing = backing();
+        backing
+            .provision_home("/Users/grace", 1001, 100)
+            .expect("provisions");
+
+        let mut fs = backing.fs.lock();
+        let fs = &mut *fs;
+        let users = fs.lookup(fs.root(), b"Users").expect("Users exists");
+        let home = fs.lookup(users, b"grace").expect("home exists");
+        let transit = appdata_transit_security(1001, 100).expect("one entry fits");
+        assert_eq!(fs.security(home).expect("security"), transit);
+        for parent in APPDATA_ROOT_PARENTS {
+            let node = fs
+                .lookup(home, parent.as_bytes())
+                .unwrap_or_else(|_| panic!("{parent} exists"));
+            assert_eq!(fs.security(node).expect("security"), transit);
+            let gated = fs
+                .lookup(node, APPDATA_ROOT.as_bytes())
+                .unwrap_or_else(|_| panic!("{parent}/{APPDATA_ROOT} exists"));
+            assert_eq!(
+                fs.security(gated).expect("security"),
+                appdata_root_security()
+            );
+        }
+    }
+
+    /// A directory an application planted at the gated root's name is
+    /// re-stamped with the service's own record rather than served out of:
+    /// only the service could legitimately have created it, so a pre-existing
+    /// one is never trusted.
+    #[test]
+    fn provision_home_reclaims_a_planted_app_data_root() {
+        let backing = backing();
+        backing
+            .provision_home("/Users/grace", 1001, 100)
+            .expect("provisions");
+        {
+            let mut fs = backing.fs.lock();
+            let fs = &mut *fs;
+            let users = fs.lookup(fs.root(), b"Users").expect("Users exists");
+            let home = fs.lookup(users, b"grace").expect("home exists");
+            let settings = fs.lookup(home, b"Settings").expect("Settings exists");
+            let gated = fs
+                .lookup(settings, APPDATA_ROOT.as_bytes())
+                .expect("gated root exists");
+            // An account-owned, world-writable, ungated decoy.
+            fs.set_security(gated, NodeSecurity::new(0o777, 1001, 100))
+                .expect("the decoy is planted");
+        }
+
+        backing
+            .provision_home("/Users/grace", 1001, 100)
+            .expect("re-provisions");
+
+        let mut fs = backing.fs.lock();
+        let fs = &mut *fs;
+        let users = fs.lookup(fs.root(), b"Users").expect("Users exists");
+        let home = fs.lookup(users, b"grace").expect("home exists");
+        let settings = fs.lookup(home, b"Settings").expect("Settings exists");
+        let gated = fs
+            .lookup(settings, APPDATA_ROOT.as_bytes())
+            .expect("gated root exists");
+        assert_eq!(
+            fs.security(gated).expect("security"),
+            appdata_root_security(),
+            "the gate is re-asserted, not inherited"
+        );
+    }
+
     /// Re-provisioning fills in a missing directory and leaves an existing
     /// one exactly as it is, including one the account replaced with a file
     /// of its own: provisioning never rewrites a user's own data.
@@ -447,6 +567,9 @@ mod tests {
             let fs = &mut *fs;
             let users = fs.lookup(fs.root(), b"Users").expect("Users exists");
             let home = fs.lookup(users, b"grace").expect("home exists");
+            let settings = fs.lookup(home, b"Settings").expect("Settings exists");
+            fs.remove(settings, APPDATA_ROOT.as_bytes())
+                .expect("removes the gated root");
             fs.remove(home, b"Settings").expect("removes Settings");
             fs.remove(home, b"Desktop").expect("removes Desktop");
             fs.create(home, b"Desktop", NodeKind::RegularFile)
@@ -488,6 +611,9 @@ mod tests {
             let fs = &mut *fs;
             let users = fs.lookup(fs.root(), b"Users").expect("Users exists");
             let home = fs.lookup(users, b"grace").expect("home exists");
+            let settings = fs.lookup(home, b"Settings").expect("Settings exists");
+            fs.remove(settings, APPDATA_ROOT.as_bytes())
+                .expect("removes the gated root");
             fs.remove(home, b"Settings").expect("removes Settings");
         }
 

@@ -42,6 +42,15 @@
 //! [`MAX_LINES`], [`MAX_SETTINGS`]) are fixed security bounds on untrusted
 //! input and fail closed with a typed [`ConfError`], never by truncating.
 //!
+//! # Where the bounds live
+//!
+//! The two bounds a key and a value also cross the app-data channel under —
+//! [`MAX_KEY_LEN`] and [`MAX_VALUE_LEN`] — are `abi-v1` wire field widths as
+//! well as this grammar's bounds, so their one definition lives in `lib/abi`
+//! (`appdata_ipc`) and this engine imports it. The remaining bounds
+//! ([`MAX_KEY_DEPTH`], [`MAX_DOCUMENT_LEN`], [`MAX_LINES`], [`MAX_SETTINGS`])
+//! bound a *document*, which never crosses the wire, and are this crate's own.
+//!
 //! # Relationship to the other line-oriented stores
 //!
 //! `lib/sysconfig`, `lib/netconfig`, and the service registry read a
@@ -67,7 +76,7 @@ mod key;
 mod value;
 
 pub use document::{Document, Setting, Unparsed};
-pub use key::{validate_key, MAX_KEY_DEPTH, MAX_KEY_LEN};
+pub use key::{validate_key, validate_key_prefix, MAX_KEY_DEPTH, MAX_KEY_LEN};
 pub use value::{MAX_VALUE_LEN, PERMILLE_FULL};
 
 /// Maximum length, in bytes, of a whole configuration document.

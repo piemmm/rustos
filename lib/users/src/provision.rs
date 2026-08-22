@@ -21,7 +21,7 @@
 //!   audit output. Its ceiling is empty — powers come from capabilities,
 //!   and the boot floor holds none.
 //! * One account per system service (`devmgr`, `sysinfod`, `seatmgr`,
-//!   `login`, `netstack`, `fontd`, `greeter`), each with its own uid in the system range and primary
+//!   `login`, `netstack`, `fontd`, `greeter`, `confd`), each with its own uid in the system range and primary
 //!   group [`SERVICES_GROUP`] — never a shared service user, so §19.4
 //!   per-service log partitioning, IPC peer attestation, and blast-radius
 //!   containment all key off a real per-service principal. Each carries
@@ -33,7 +33,7 @@
 //!   admin-managed data about human accounts, so that group lives in the
 //!   on-disk registry beside them (`plans/DEVICES.md` D3d).
 //!
-//! All five accounts are [`AccountState::NoLogin`]: no home, no shell,
+//! Every service account is [`AccountState::NoLogin`]: no home, no shell,
 //! and the typed never-authenticates password marker — structurally
 //! incapable of a session. PID 1 resolves a startup-config account name
 //! onto its uid through [`system_account_uid`] (pure, allocation-free)
@@ -45,7 +45,7 @@ use tairix_abi::CapabilityId;
 use tairix_caps::CapabilitySet;
 
 use crate::grants::{
-    capability_set, DEVMGR_CEILING, FONTD_CEILING, GREETER_CEILING, LOGIN_CEILING,
+    capability_set, CONFD_CEILING, DEVMGR_CEILING, FONTD_CEILING, GREETER_CEILING, LOGIN_CEILING,
     NETSTACK_CEILING, SEATMGR_CEILING, SYSINFOD_CEILING,
 };
 use crate::groups::GroupRecord;
@@ -117,6 +117,13 @@ pub const GREETER_USERNAME: &str = "greeter";
 /// The [`Uid`] of [`GREETER_USERNAME`].
 pub const GREETER_UID: Uid = Uid(16);
 
+/// Name of the app-data service account — the only holder of
+/// `CAP_APPDATA_ADMIN`, and the owner of every user's gated per-app store.
+pub const CONFD_USERNAME: &str = "confd";
+
+/// The [`Uid`] of [`CONFD_USERNAME`].
+pub const CONFD_UID: Uid = Uid(17);
+
 /// One compiled-in account's specification: the single row both
 /// [`system_accounts`] and [`system_account_uid`] read, so the record
 /// set and the name→uid lookup can never diverge.
@@ -186,6 +193,13 @@ const SYSTEM_ACCOUNTS: &[SystemAccountSpec] = &[
         primary_gid: SERVICES_GID,
         display_name: "Login Screen",
         ceiling: GREETER_CEILING,
+    },
+    SystemAccountSpec {
+        username: CONFD_USERNAME,
+        uid: CONFD_UID,
+        primary_gid: SERVICES_GID,
+        display_name: "App Data Service",
+        ceiling: CONFD_CEILING,
     },
 ];
 
@@ -330,6 +344,7 @@ mod tests {
                 ("netstack", 14, 101),
                 ("fontd", 15, 101),
                 ("greeter", 16, 101),
+                ("confd", 17, 101),
             ]
         );
         for record in &records {
@@ -375,6 +390,10 @@ mod tests {
         assert_eq!(
             by_name("greeter").capabilities(),
             capability_set(GREETER_CEILING)
+        );
+        assert_eq!(
+            by_name("confd").capabilities(),
+            capability_set(CONFD_CEILING)
         );
     }
 

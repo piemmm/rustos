@@ -36,6 +36,24 @@ A request for `Read`, `Write`, or `Execute` access is decided as follows:
 Only the inode's **owner** may change its capability gate
 (`Vfs::set_required_cap`).
 
+## The gate guards the name, not only the node
+
+Adding, removing, and renaming a directory's entries is authorised against
+that **directory's** write permission, not against each entry. On its own
+that would make a capability gate bypassable by anyone who can write the
+holding directory: unlink or rename the gated node aside, create an ungated
+one of the same name, and the service that reaches the tree only by holding
+the capability walks into the replacement instead. A same-parent rename is
+the sharpest case, because POSIX authorises the moved node itself only when
+the two parents differ.
+
+So a `required_cap` node's *name* carries the gate too. `unlink`, `rmdir`,
+and `rename` — at either end, since replacing a name destroys its occupant —
+demand the capability, exactly as a mode or ownership change on the node
+already does. A hard link needs no separate rule: a second name shares the
+one inode and therefore the one security record, so it confers no reach the
+first name did not.
+
 ## Where the metadata comes from
 
 For the in-RAM tree the `Metadata` above is held directly on the inode.

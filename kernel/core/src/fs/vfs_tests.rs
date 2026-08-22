@@ -273,3 +273,47 @@ fn search_permission_is_required_to_traverse() {
         Err(VfsError::PermissionDenied)
     );
 }
+
+#[test]
+fn capability_gated_node_cannot_be_unlinked_without_the_capability() {
+    // The gate guards the name as well as the node. Without this, a
+    // principal who may write the parent could unlink the gated node and
+    // create an ungated one of the same name, and the service that keys on
+    // the gate would walk into the replacement.
+    let mut vfs = default_vfs();
+    let caps = CapabilitySet::empty();
+    let admin = cred(ADMIN_UID, ADMIN_GID, &caps);
+    let file = p("/Users/auditlog");
+    vfs.create_file(&admin, &file, Mode::from_bits(0o644), b"secret".to_vec())
+        .expect("create");
+    vfs.set_required_cap(&admin, &file, Some(CapabilityId::AUDIT_READ))
+        .expect("set cap gate");
+
+    // The owner has write permission on `/Users` and still cannot remove it.
+    assert_eq!(
+        vfs.remove(&admin, &file, false),
+        Err(VfsError::PermissionDenied)
+    );
+
+    let mut with = CapabilitySet::empty();
+    with.insert(CapabilityId::AUDIT_READ);
+    let auditor = cred(ADMIN_UID, ADMIN_GID, &with);
+    assert_eq!(vfs.remove(&auditor, &file, false), Ok(()));
+}
+
+#[test]
+fn capability_gated_empty_directory_cannot_be_removed_without_the_capability() {
+    let mut vfs = default_vfs();
+    let caps = CapabilitySet::empty();
+    let admin = cred(ADMIN_UID, ADMIN_GID, &caps);
+    let dir = p("/Users/gated");
+    vfs.mkdir(&admin, &dir, Mode::from_bits(0o700))
+        .expect("mkdir");
+    vfs.set_required_cap(&admin, &dir, Some(CapabilityId::AUDIT_READ))
+        .expect("set cap gate");
+
+    assert_eq!(
+        vfs.remove(&admin, &dir, true),
+        Err(VfsError::PermissionDenied)
+    );
+}

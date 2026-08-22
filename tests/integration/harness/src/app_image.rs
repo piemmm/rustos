@@ -822,6 +822,7 @@ mod tests {
                 "cat",
                 "chmod",
                 "clear",
+                "confd",
                 "configure",
                 "cp",
                 "datetime",
@@ -898,6 +899,7 @@ mod tests {
         assert_eq!(
             services,
             [
+                "confd",
                 "devmgr",
                 "fontd",
                 "greeter",

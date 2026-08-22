@@ -24,6 +24,10 @@
 //! reproducible. The bit-flip harness is an exhaustive boundary sweep, not a
 //! random one, so it does not draw a seed.
 
+use tairix_abi::appdata_ipc::{
+    decode_value_reply, encode_value_reply, AppDataKeyRecord, AppDataRequest, APPDATA_MAX_REPLY,
+    APPDATA_MAX_REQUEST,
+};
 use tairix_abi::display_ipc::{decode_mode_reply, DisplayRequest};
 use tairix_abi::driver::net_channel::{
     decode_facts_reply, decode_service_reply, NetChannelNotify, NetChannelRequest,
@@ -531,6 +535,39 @@ fn exercise_switchboard_ipc(bytes: &[u8]) {
     let _ = decode_publish_reply(bytes);
 }
 
+/// Drive the app-data channel on `bytes` (one arm of [`exercise`]).
+///
+/// Every application on the machine may post to this endpoint, so the request
+/// decoder is reachable by any process; and a caller decodes the daemon's own
+/// replies, so both directions are attacker-reachable from one side or the
+/// other. An accepted frame must round-trip; a corrupt one must refuse
+/// cleanly, never panic.
+fn exercise_appdata_ipc(bytes: &[u8]) {
+    if let Ok(request) = AppDataRequest::decode(bytes) {
+        let mut buf = [0u8; APPDATA_MAX_REQUEST];
+        let len = request
+            .encode(&mut buf)
+            .expect("an accepted request must re-encode");
+        let redecoded = AppDataRequest::decode(&buf[..len])
+            .expect("round-trip of an accepted app-data request must succeed");
+        assert_eq!(request, redecoded);
+    }
+    if let Ok(value) = decode_value_reply(bytes) {
+        let mut buf = [0u8; APPDATA_MAX_REPLY];
+        let len = encode_value_reply(value, &mut buf).expect("an accepted value must re-encode");
+        assert_eq!(
+            decode_value_reply(&buf[..len]),
+            Ok(value),
+            "round-trip of an accepted value reply must succeed"
+        );
+    }
+    if let Ok(record) = AppDataKeyRecord::from_bytes(bytes) {
+        let redecoded = AppDataKeyRecord::from_bytes(&record.to_le_bytes())
+            .expect("round-trip of an accepted key record must succeed");
+        assert_eq!(record, redecoded);
+    }
+}
+
 /// Drive every ABI decoder on `bytes`.
 ///
 /// Returns silently. The contract is "must not panic for any input"; a
@@ -592,6 +629,7 @@ fn exercise(bytes: &[u8]) {
     exercise_window_ipc(bytes);
     exercise_notify_ipc(bytes);
     exercise_pinboard_ipc(bytes);
+    exercise_appdata_ipc(bytes);
     exercise_switchboard_ipc(bytes);
     exercise_net_socket(bytes);
     exercise_net_channel(bytes);

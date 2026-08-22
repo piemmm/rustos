@@ -16,6 +16,7 @@
 #![forbid(unsafe_op_in_unsafe_fn)]
 #![deny(missing_docs)]
 
+pub mod appdata_ipc;
 pub mod appinfo;
 pub mod blkio;
 pub mod boot;

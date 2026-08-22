@@ -63,6 +63,13 @@ pub const NETSTACK_PATH: &[u8] = b"/System/Services/netstack.app/Run";
 /// path contract, identical on every target.
 pub const FONTD_PATH: &[u8] = b"/System/Services/fontd.app/Run";
 
+/// Absolute path the app-data service program is registered under
+/// (`plans/APPDATA.md`): the service store's `<name>.app` bundle. It must
+/// match exactly the `confd` path PID 1 `init` hands to the `spawn` syscall at
+/// startup (`userland/system/init/src/startup.rs`). One OS-wide path contract,
+/// identical on every target.
+pub const CONFD_PATH: &[u8] = b"/System/Services/confd.app/Run";
+
 /// Absolute path the `ps` tool program is registered under: the system
 /// command store's command-named bundle, so the shell resolves the bare word `ps`
 /// to it (`plans/APPS.md` §8). One OS-wide path contract, identical on
@@ -133,7 +140,7 @@ pub const USERS_CLI_PATH: &[u8] = b"/System/Commands/users.app/Run";
 #[cfg(test)]
 mod tests {
     use super::{
-        CAT_PATH, CLEAR_PATH, DEVMGR_PATH, FONTD_PATH, LOGIN_PATH, LS_PATH, MAN_PATH,
+        CAT_PATH, CLEAR_PATH, CONFD_PATH, DEVMGR_PATH, FONTD_PATH, LOGIN_PATH, LS_PATH, MAN_PATH,
         NETSTACK_PATH, PS_PATH, RESET_PATH, SEATMGR_PATH, SHELL_PATH, STRESS_PATH, SYSINFOD_PATH,
         SYSINFO_PATH, SYSMON_PATH, TOP_PATH, USERS_CLI_PATH,
     };
@@ -154,6 +161,7 @@ mod tests {
             (SEATMGR_PATH, "seatmgr"),
             (NETSTACK_PATH, "netstack"),
             (FONTD_PATH, "fontd"),
+            (CONFD_PATH, "confd"),
         ] {
             let expected = alloc::format!(
                 "{SYSTEM_SERVICE_STORE}/{service}{BUNDLE_SUFFIX}/{}",

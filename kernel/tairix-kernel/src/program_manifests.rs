@@ -180,6 +180,29 @@ pub const FONTD_MANIFEST: &[CapabilityId] = &[
     CapabilityId::LOG_EMIT,
 ];
 
+/// The app-data service's manifest: `CAP_IPC_BIND_PRIVILEGED` to bind the
+/// reserved `APPDATA_ENDPOINT` (a squatter that claimed the rendezvous could
+/// otherwise serve forged settings to every application on the machine),
+/// `CAP_APPDATA_ADMIN` — the per-inode gate the per-app store trees carry, of
+/// which this service is the system's only holder — `CAP_FS_ACCESS` for the
+/// document reads and writes through the secured VFS (which still authorises
+/// every path per-inode under the service's own attested identity), and
+/// `CAP_LOG_EMIT` for its audit records.
+///
+/// It stops there deliberately: no `CAP_FS_CHOWN`, so it can neither seize a
+/// user's file nor hand one away; no `CAP_USERS_READ`, because it resolves a
+/// home by the owning uid recorded on the volume rather than by reading the
+/// credential database, and `users_db_read` would hand it every account's
+/// password record; and no spawn or network authority at all. Compromising it
+/// yields applications' settings and nothing else.
+#[cfg(any(test, not(all(freestanding, kernel_isa = "aarch64"))))]
+pub const CONFD_MANIFEST: &[CapabilityId] = &[
+    CapabilityId::IPC_BIND_PRIVILEGED,
+    CapabilityId::APPDATA_ADMIN,
+    CapabilityId::FS_ACCESS,
+    CapabilityId::LOG_EMIT,
+];
+
 /// The `ps` tool's manifest: `CAP_CONSOLE_WRITE` for its listing on fd 1
 /// and diagnostics on fd 2, `CAP_FS_ACCESS` because its short-help
 /// switches read the bundle's own `Help/` tree through the secured VFS
@@ -514,6 +537,35 @@ mod tests {
                 CapabilityId::LOG_EMIT,
             ])
         );
+    }
+
+    #[test]
+    fn confd_manifest_is_pinned() {
+        assert_eq!(
+            set(CONFD_MANIFEST),
+            set(&[
+                CapabilityId::IPC_BIND_PRIVILEGED,
+                CapabilityId::APPDATA_ADMIN,
+                CapabilityId::FS_ACCESS,
+                CapabilityId::LOG_EMIT,
+            ]),
+        );
+        // The service account's ceiling and the bundle's request are separate
+        // by design — the intersection is the security boundary — but for a
+        // service whose account exists only to run it they must coincide, or
+        // the intersection would silently strip an authority the code needs.
+        assert_eq!(set(CONFD_MANIFEST), set(tairix_users::CONFD_CEILING));
+        // It must hold none of the authority that would make a compromise
+        // reach past applications' settings.
+        for denied in [
+            CapabilityId::USERS_READ,
+            CapabilityId::FS_CHOWN,
+            CapabilityId::PROC_SPAWN,
+            CapabilityId::SPAWN_AS_USER,
+            CapabilityId::NET,
+        ] {
+            assert!(!CONFD_MANIFEST.contains(&denied), "{denied:?}");
+        }
     }
 
     #[test]
@@ -1137,6 +1189,7 @@ mod tests {
             ("cat", ProgramKind::Command, CAT_MANIFEST),
             ("chmod", ProgramKind::Command, PURE_TOOL_REQUEST),
             ("clear", ProgramKind::Command, CLEAR_MANIFEST),
+            ("confd", ProgramKind::Service, CONFD_MANIFEST),
             ("configure", ProgramKind::Command, PURE_TOOL_REQUEST),
             ("cp", ProgramKind::Command, FILE_TOOL_REQUEST),
             ("datetime", ProgramKind::Application, DATETIME_REQUEST),

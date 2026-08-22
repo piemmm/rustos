@@ -545,6 +545,7 @@ dependencies = [
 name = "tairix-appconf"
 version = "0.0.0"
 dependencies = [
+ "tairix-abi",
  "tairix-fuzzseed",
 ]
 
@@ -769,6 +770,18 @@ name = "tairix-compress"
 version = "0.0.0"
 dependencies = [
  "tairix-fuzzseed",
+]
+
+[[package]]
+name = "tairix-confd"
+version = "0.0.0"
+dependencies = [
+ "tairix-abi",
+ "tairix-appconf",
+ "tairix-caps",
+ "tairix-log",
+ "tairix-rt",
+ "tairix-users",
 ]
 
 [[package]]
