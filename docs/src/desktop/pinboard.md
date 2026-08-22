@@ -121,6 +121,13 @@ A wallpaper that will not decode is not fatal: the desktop falls back to
 the backdrop colour, reports why on `stderr`, and remembers the refusal, so
 a bad file costs one attempt rather than one per frame.
 
+The prepared picture is never cut to. Because it arrives whenever the worker
+finishes — a second or so into the session at login, or mid-session when the
+choice changes — it dissolves into whatever ground is on screen over the
+theme's own `BackdropChange` span: over the backdrop colour at login, and over
+the picture it replaces when the user picks another. See
+[the session's backdrop crossfade](session.md#the-backdrop-dissolves-it-is-never-cut-to).
+
 ### Fits
 
 | fit | what it does |

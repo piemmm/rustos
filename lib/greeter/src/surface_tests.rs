@@ -6,7 +6,7 @@
 //! stops the surface answering at all, the one geometry definition that paint
 //! and hit test share, and the render's degraded paths. The veil's own
 //! arithmetic has its file, as do the chooser, the cooldown and chrome
-//! updates, the scrim, and the damage report.
+//! updates, the backdrop, and the damage report.
 
 use alloc::string::String;
 use alloc::vec;

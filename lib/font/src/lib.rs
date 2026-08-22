@@ -113,7 +113,7 @@ pub use client::{
 #[cfg(feature = "test-util")]
 pub use client::{install_test_transport, SolidTestTransport};
 #[cfg(feature = "render")]
-pub use font::{BitmapFont, TextLine, TextWrap, ELLIPSIS};
+pub use font::{BitmapFont, TextLine, TextShadow, TextWrap, ELLIPSIS};
 pub use glyph::{lookup, lookup_or_fallback, Glyph};
 #[cfg(feature = "glyph-cache")]
 pub use glyph_cache::{

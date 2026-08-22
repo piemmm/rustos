@@ -14,9 +14,7 @@ use tairix_abi::time::{Duration64, Time64};
 use tairix_abi::window_ipc::PointerAction;
 use tairix_cursor::{CursorImage, PlacedCursor};
 use tairix_geometry::{Rect, Scale};
-use tairix_greeter::{
-    panel_rect, scrim_alpha, AccountTile, AuthSurface, Backdrop, EventContext, Outcome,
-};
+use tairix_greeter::{AccountTile, AuthSurface, Backdrop, EventContext, Outcome};
 use tairix_input::InputEvent;
 use tairix_raster::Surface;
 use tairix_theme::{MotionInteraction, Theme};
@@ -68,7 +66,9 @@ pub struct LoginScreen<T: SessionTransport> {
     theme: Theme,
     scale: Scale,
     host: String,
-    wallpaper: Option<Wallpaper>,
+    /// The decoded, screen-fitted picture drawn behind the panel, once one
+    /// has arrived.
+    wallpaper: Option<Surface>,
     cursor: Cursor,
     /// The pointer artwork, once one has been installed. A screen whose
     /// cursor would not rasterise keeps hit-testing and typing with nothing
@@ -83,12 +83,6 @@ pub struct LoginScreen<T: SessionTransport> {
     /// cursor-sized patch of pixels that already exist, instead of building
     /// a whole screen for every motion report the seat delivers.
     painted: Option<Surface>,
-}
-
-/// A decoded, screen-fitted wallpaper and the scrim sized for it.
-struct Wallpaper {
-    image: Surface,
-    scrim: u8,
 }
 
 /// A repaint request: what changed, and which pixels it changed.
@@ -168,14 +162,13 @@ impl<T: SessionTransport> LoginScreen<T> {
         }
     }
 
-    /// Draw `image` behind the panel under a scrim sized for it.
+    /// Draw `image` behind the panel, exactly as it was authored.
     ///
     /// The picture is already decoded and already fitted by the caller — in
-    /// its own sandbox, never in the address space that owns the seat.
+    /// its own sandbox, never in the address space that owns the seat — and
+    /// nothing here shades it: the text over it carries its own shadow.
     pub fn set_wallpaper(&mut self, image: Surface) {
-        let panel = panel_rect(self.screen(), self.scale);
-        let scrim = scrim_alpha(&image, panel, &self.theme);
-        self.wallpaper = Some(Wallpaper { image, scrim });
+        self.wallpaper = Some(image);
         self.painted = None;
     }
 
@@ -466,10 +459,7 @@ impl<T: SessionTransport> LoginScreen<T> {
     /// when it will not render at all.
     fn render(&self) -> Option<Surface> {
         let backdrop = match self.wallpaper.as_ref() {
-            Some(paper) => Backdrop::Wallpaper {
-                image: &paper.image,
-                scrim: paper.scrim,
-            },
+            Some(image) => Backdrop::Wallpaper { image },
             None => Backdrop::Desktop,
         };
         self.surface

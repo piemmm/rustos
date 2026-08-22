@@ -206,6 +206,8 @@ pub mod windows;
 #[cfg(test)]
 mod desktop_tests;
 #[cfg(test)]
+mod fade_tests;
+#[cfg(test)]
 mod holdback_tests;
 #[cfg(test)]
 mod switchuser_tests;
@@ -237,8 +239,8 @@ pub use elevate::{
     WIN_HEIGHT as ELEVATE_WIN_HEIGHT, WIN_WIDTH as ELEVATE_WIN_WIDTH,
 };
 pub use fade::{
-    ScreenFade, DESKTOP_REVEALED, DESKTOP_REVEALED_MESSAGE, DESKTOP_SESSION_RANGE_END,
-    DESKTOP_SESSION_RANGE_START,
+    BackdropFade, ScreenFade, DESKTOP_REVEALED, DESKTOP_REVEALED_MESSAGE,
+    DESKTOP_SESSION_RANGE_END, DESKTOP_SESSION_RANGE_START,
 };
 pub use holdback::{Delivery, Flushed, HoldBack, HOLD_BACK_CAPACITY};
 pub use input::{SessionInputResponse, SessionInputRouter};

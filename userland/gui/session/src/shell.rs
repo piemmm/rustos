@@ -55,6 +55,7 @@ use tairix_taskbar::{
     icon_cache, AppSlot, Edge, PickerEntry, TaskbarConfig, TaskbarRenderer, TaskbarResponse,
     TransientNotification,
 };
+use tairix_theme::MotionInteraction;
 use tairix_wallpaper::Backdrop;
 use tairix_wm::{
     cursor_cache, Color, Compositor, Corners, CursorController, InputEvent, InputResponse, Point,
@@ -64,6 +65,7 @@ use tairix_wm::{
 
 use crate::apps::{prefetch_bar_icons, resolve_library_icons};
 use crate::desktop::Desktop;
+use crate::fade::BackdropFade;
 use crate::input::{SessionInputResponse, SessionInputRouter};
 use crate::pinboard::PinboardMenu;
 use crate::presenter::{place, TaskbarPresenter};
@@ -154,6 +156,9 @@ pub struct DesktopShell {
     /// embedder prepares it (it holds the read capability and the decode
     /// sandbox); the shell only blits it.
     wallpaper: Option<Surface>,
+    /// The ground [`wallpaper`](Self::wallpaper) is dissolving out of, while
+    /// it is: the whole screen changing at once is never cut to.
+    backdrop_fade: BackdropFade,
     /// The compositor window the pinboard's open context menu is shown in, if
     /// one is placed.
     pinboard_window: Option<WindowId>,
@@ -283,6 +288,7 @@ impl DesktopShell {
             artwork_resolver: Box::new(InlineArtwork::new(NoArtworkSeam, NoArtworkSeam)),
             active_frame: None,
             wallpaper: None,
+            backdrop_fade: BackdropFade::default(),
             pinboard_window: None,
             #[cfg(test)]
             settled: SettleWork::default(),
@@ -831,8 +837,51 @@ impl DesktopShell {
     /// user's chosen image and the sandbox that decodes it, and it fits them
     /// to the screen through the one shared placement. The shell blits what it
     /// is handed and parses nothing.
-    pub fn set_wallpaper(&mut self, wallpaper: Option<Surface>) {
+    ///
+    /// The new ground dissolves into place rather than replacing the old one
+    /// between two frames — see [`BackdropFade`] — so this needs the clock and
+    /// the `backdrop` the settings name, which is both the colour under a
+    /// picture's margins and the whole ground when there is no picture. The
+    /// desktop layer then owes a repaint per frame until
+    /// [`backdrop_settled`](Self::backdrop_settled).
+    pub fn set_wallpaper(&mut self, wallpaper: Option<Surface>, backdrop: Backdrop, now_ns: u64) {
+        let leaving = self
+            .wallpaper
+            .take()
+            .and_then(|picture| flatten_ground(&picture, self.backdrop_colour(backdrop)));
         self.wallpaper = wallpaper;
+        // Neither ground has a picture in it, so there is nothing to dissolve
+        // between: a desktop with no wallpaper, told again that it has none,
+        // arms no timer and repaints nothing.
+        if leaving.is_none() && self.wallpaper.is_none() {
+            return;
+        }
+        let span = self
+            .session
+            .active_theme()
+            .motion()
+            .duration(MotionInteraction::BackdropChange);
+        self.backdrop_fade.begin(now_ns, span, leaving);
+    }
+
+    /// Whether the backdrop has finished arriving, so the desktop layer owes
+    /// no further repaint of its own.
+    #[must_use]
+    pub const fn backdrop_settled(&self) -> bool {
+        self.backdrop_fade.settled()
+    }
+
+    /// Step the backdrop's crossfade to `now_ns`, answering whether the ground
+    /// changed and the desktop layer owes a repaint.
+    pub fn advance_backdrop(&mut self, now_ns: u64) -> bool {
+        self.backdrop_fade.advance(now_ns)
+    }
+
+    /// `park_ns` shortened to the backdrop crossfade's next frame, or left as
+    /// it is when nothing is dissolving.
+    #[must_use]
+    pub fn backdrop_park_deadline_ns(&self, now_ns: u64, park_ns: u64) -> u64 {
+        self.backdrop_fade.park_deadline_ns(now_ns, park_ns)
     }
 
     /// Repaint the whole desktop layer — the wallpaper (or the backdrop colour
@@ -875,11 +924,14 @@ impl DesktopShell {
     ///
     /// Every rectangle is painted the same way, so a partial repaint and a
     /// whole one cannot disagree about a pixel: the backdrop colour goes down
-    /// first, the wallpaper composites over it, and the icons that reach the
+    /// first, the ground composites over it, and the icons that reach the
     /// rectangle draw over that. Laying the colour down under the wallpaper is
     /// what makes a letterboxed or centred picture show the user's chosen
     /// backdrop in the margins it does not cover, rather than whatever the
-    /// previous frame happened to leave there.
+    /// previous frame happened to leave there. Mid-crossfade the ground is the
+    /// mix of the two grounds, laid down by the one ground routine every
+    /// rectangle paints through, so a rectangle repainted for a hover during a
+    /// fade still comes out the same as its neighbours.
     pub fn present_desktop_area<S: DirectorySource>(
         &mut self,
         compositor: &mut Compositor,
@@ -892,6 +944,7 @@ impl DesktopShell {
         let backdrop = self.backdrop_colour(desktop.settings().backdrop);
         let theme = self.session.active_theme();
         let wallpaper = self.wallpaper.as_ref();
+        let fade = &self.backdrop_fade;
         let cache = &mut self.artwork;
         let resolver = self.artwork_resolver.as_mut();
         compositor.repaint_desktop(area, |surface, rects| {
@@ -906,9 +959,7 @@ impl DesktopShell {
                 };
                 surface.with_clip(x, y, rect.width, rect.height, |surface| {
                     surface.fill_rect(0, 0, screen.width, screen.height, backdrop);
-                    if let Some(paper) = wallpaper {
-                        surface.blit(0, 0, paper);
-                    }
+                    paint_ground(surface, wallpaper, fade);
                     desktop.render(surface, &layout, scale, theme, &mut artwork, *rect);
                 });
             }
@@ -1467,6 +1518,56 @@ impl DesktopShell {
         compositor.teardown_frost();
         compositor.teardown_content();
     }
+}
+
+/// Lay the desktop layer's ground over the backdrop colour already filled:
+/// the `wallpaper`, and — while one ground is dissolving into another — the
+/// ground being left, over it.
+///
+/// Both mid-fade cases come out as the straight mix of the two grounds. The
+/// arriving picture lands at the fade's strength when the ground being left is
+/// the plain colour the layer is already filled with; otherwise the arriving
+/// ground is painted whole and the ground being left goes back over it at the
+/// inverse strength. Either way an arrived fade costs one blit, exactly as it
+/// did before there was a fade at all.
+fn paint_ground(surface: &mut Surface, wallpaper: Option<&Surface>, fade: &BackdropFade) {
+    let Some(strength) = fade.arriving() else {
+        if let Some(paper) = wallpaper {
+            surface.blit(0, 0, paper);
+        }
+        return;
+    };
+    match fade.leaving() {
+        None => {
+            if let Some(paper) = wallpaper {
+                surface.blit_faded(0, 0, paper, strength);
+            }
+        }
+        Some(previous) => {
+            if let Some(paper) = wallpaper {
+                surface.blit(0, 0, paper);
+            }
+            surface.blit_faded(0, 0, previous, u8::MAX - strength);
+        }
+    }
+}
+
+/// The ground a `picture` makes over `colour`: the two flattened into one
+/// opaque surface, or `None` when the heap will not give one back.
+///
+/// A crossfade lays the ground it is leaving back over the ground it is
+/// arriving at, and that only mixes to the right colour if what it lays is
+/// opaque — a picture that letterboxes, or one with alpha of its own, would
+/// otherwise let the arriving ground through at full strength in exactly the
+/// places the outgoing one showed the backdrop colour.
+///
+/// Fails closed: a desktop that cannot afford the copy fades the arriving
+/// ground in over the colour instead of holding a wrong one.
+fn flatten_ground(picture: &Surface, colour: Color) -> Option<Surface> {
+    let mut ground = Surface::new(picture.width(), picture.height())?;
+    ground.fill(colour);
+    ground.blit(0, 0, picture);
+    Some(ground)
 }
 
 /// Fold `next` into `last` when the two are one continuing gesture over the

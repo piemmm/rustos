@@ -9,7 +9,7 @@ use alloc::vec::Vec;
 
 use tairix_geometry::{Point, Rect, Scale};
 use tairix_input::{InputEvent, Key, Modifiers, NamedKey, PointerButton};
-use tairix_raster::Surface;
+use tairix_raster::{Color, Surface};
 use tairix_theme::{Rgba, Theme};
 
 use crate::surface::{AuthSurface, Backdrop, EventContext, Outcome, Verdict, Verifier};
@@ -176,6 +176,21 @@ pub(crate) fn render_in(surface: &AuthSurface, theme: &Theme) -> Surface {
         .expect("a 1000x600 frame")
 }
 
+/// Paint `surface` on [`SCREEN`] at the unscaled density with `image` behind
+/// it instead of the theme's flat colour.
+pub(crate) fn render_over(surface: &AuthSurface, image: &Surface) -> Surface {
+    surface
+        .render(SCREEN, Scale::ONE, &theme(), Backdrop::Wallpaper { image })
+        .expect("a wallpapered 1000x600 frame")
+}
+
+/// A [`SCREEN`]-sized picture in one flat colour.
+pub(crate) fn picture(color: Color) -> Surface {
+    let mut image = Surface::new(SCREEN.width, SCREEN.height).expect("a 1000x600 picture");
+    image.fill(color);
+    image
+}
+
 /// The strongest difference from the frame's own backdrop colour anywhere in
 /// `rect`, summed over the three colour channels.
 ///
@@ -204,6 +219,23 @@ pub(crate) fn contrast_in(frame: &Surface, rect: Rect) -> u32 {
 /// Whether anything at all was drawn inside `rect`.
 pub(crate) fn painted(frame: &Surface, rect: Rect) -> bool {
     contrast_in(frame, rect) > 0
+}
+
+/// The darkest tone anywhere in `rect`, as a green channel.
+///
+/// The palette's inks and grounds are far further apart in lightness than in
+/// hue, so one channel answers "how dark did anything here get" without
+/// weighing three.
+pub(crate) fn darkest_in(frame: &Surface, rect: Rect) -> u8 {
+    let mut darkest = u8::MAX;
+    for y in rows(rect, frame.height()) {
+        for x in columns(rect, frame.width()) {
+            if let Some(pixel) = frame.get(x, y) {
+                darkest = darkest.min(pixel.g);
+            }
+        }
+    }
+    darkest
 }
 
 /// How far apart two theme colours are, summed over the three channels.

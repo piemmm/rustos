@@ -850,7 +850,7 @@ fn sample_theme(id: ThemeId) -> Theme {
             busy: String::from("c.busy"),
         },
         MotionTheme::new([
-            90, 80, 60, 90, 180, 120, 120, 180, 90, 160, 70, 90, 200, 380, 900,
+            90, 80, 60, 90, 180, 120, 120, 180, 90, 160, 70, 90, 200, 380, 900, 500,
         ]),
         Density::Normal,
         Contrast::Normal,

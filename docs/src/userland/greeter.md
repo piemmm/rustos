@@ -206,9 +206,9 @@ The shipped wallpaper is attacker-shaped data like any other image, so it is
 never decoded in the address space that owns the seat. The greeter
 re-enters its own binary as a capability-empty sandbox worker and decodes
 and screen-fits the image there, under a fixed input-byte bound; the worker
-role is checked before anything else in `main`, ahead of any seat work. The
-contrast scrim the panel's text needs is then derived once per wallpaper,
-screen size, and theme — never per frame.
+role is checked before anything else in `main`, ahead of any seat work. What
+comes back is drawn as authored: the screen shades nothing, because every line
+of text over a picture carries its own shadow.
 
 ## Degradation
 

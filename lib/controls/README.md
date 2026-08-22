@@ -279,6 +279,12 @@ than clipping a glyph. `IconTile::label_lines` reports that budget from the same
 geometry the render lays out to, so an owner sizing its tiles asks the tile
 instead of re-deriving its label layout — the pair to `icon_side` above.
 
+`with_label_shadow` draws that name — the eliding ellipsis included — through
+`lib/font`'s one shadowed draw, for a tile whose ground is a picture rather
+than a colour the theme knows: a resting tile paints no plate, so the login
+chooser's account names sit straight on the wallpaper. A tile that sets none
+draws exactly the pixels it always did.
+
 ## Masked text entry
 
 `TextField::secret(max_len)` turns a field into a password/passphrase/PIN

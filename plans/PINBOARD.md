@@ -164,6 +164,14 @@ One document, one engine, one writer.
 - **Memory.** The prepared surface is held in the shared reclaimable-memory
   model (`lib/reclaim`), so a machine under pressure drops it and re-prepares
   on demand rather than holding a screenful of pixels the user cannot see.
+- **The picture is never cut to.** It arrives whenever the worker finishes, so
+  installing it begins a crossfade over the theme's own `BackdropChange` span:
+  the arriving picture rises over the backdrop colour at login, and over the
+  picture it replaces when the choice changes — margins and all, since the
+  ground being left is flattened over the backdrop colour for the duration and
+  released the moment the fade arrives. One `Fade` and the session's own park
+  deadline, so an arrived backdrop arms no timer
+  (`docs/src/desktop/session.md`).
 - **Fit geometry** is one pure function in `lib/wallpaper`, shared by the
   renderer and the chooser's preview, so a preview can never disagree with
   the desktop about what a fit does.
@@ -410,7 +418,11 @@ nothing in the settings model needs to change.
 - **`userland/gui/session`** — the pinboard's gestures against the existing
   fakes: menu open/close/act, each item's action, flow and sort changes
   re-laying the grid, an apply from a foreign uid refused, a wallpaper that
-  will not decode degrading to the backdrop.
+  will not decode degrading to the backdrop. The crossfade: a picture is
+  invisible at the instant it is installed and stands alone once arrived, a
+  frame part-way through is the mix of the two grounds (including in the
+  outgoing picture's margins), the copy of the ground being left is released on
+  arrival, and reduced motion arrives before it draws.
 - **`userland/apps/wallpaper`** — the chooser engine on the host: the
   candidate model (the "no wallpaper" entry, a current wallpaper from
   outside the catalog, a refused thumbnail), every key's movement and the

@@ -76,7 +76,9 @@ This crate is pure theme *data*. A `Theme` is a table of:
   `SessionFade` (`1000` ms) a whole session's screen appearing or leaving —
   the login screen appearing out of black and fading back to it once a secret
   is accepted, the desktop revealing from that black and dissolving back into
-  it when the session ends.
+  it when the session ends. `BackdropChange` (`600` ms) is the desktop's
+  backdrop giving way to another: the wallpaper arriving over the plain
+  backdrop colour, and one wallpaper dissolving into the next.
   `SelectionChange` (`100` ms in both themes) is the
   cross-fade as a selection mark moves between items. Reduced motion reports
   every duration as `0`, which a consumer reads as "change it now", so no

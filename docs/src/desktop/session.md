@@ -375,6 +375,43 @@ drawn over that base, in the work area, so nothing is ever drawn under the
 taskbar. A layer the heap will not give back leaves the desktop exactly as it
 was rather than blanking it.
 
+#### The backdrop dissolves; it is never cut to
+
+The whole screen changing between two frames is the one change on a desktop
+nobody can miss, so every ground change crossfades over the theme's own
+`MotionInteraction::BackdropChange` span (`600` ms): the wallpaper appearing at
+login once the worker has read and fitted it, one wallpaper giving way to
+another when the choice changes, and a wallpaper giving way back to the plain
+colour. `BackdropFade` (the `fade` module, beside the session's screen fade)
+holds it, `set_wallpaper` begins it, and the loop steps it in `animate` — so it
+shares the screen fade's timing, its park deadline, and its reduced-motion
+answer, where a zero duration means the ground is simply there.
+
+Which ground is being *left* is the whole of the arithmetic, and both cases come
+out as the straight mix of the two grounds, so no frame part-way through shows a
+colour neither ground has:
+
+- Leaving the plain colour, the layer's own base fill **is** that ground, so the
+  arriving picture landing at the fade's strength (`Surface::blit_faded`) is
+  already the mix. Nothing is allocated to fade a picture in over a colour,
+  which is the login case.
+- Leaving a picture, the layer is painted whole and the ground being left is laid
+  back over it at the inverse strength. That ground is *flattened* — the outgoing
+  picture composited over the backdrop colour — when the fade begins, so a
+  picture that did not cover the screen crossfades in its margins too instead of
+  snapping there. It is released the moment the fade arrives; a desktop never
+  holds a screen-sized copy of a picture nobody can see.
+
+Every rectangle of the layer paints through the same ground routine, so a cell
+repainted for a hover mid-dissolve matches its neighbours exactly. An arrived
+fade costs one blit, exactly as it did before there was a fade at all, and arms
+no timer.
+
+While it *is* dissolving, the whole layer is repainted each frame — the ground
+genuinely changed everywhere, so this is what any whole-screen transition costs,
+and it ends when the fade does. At login it overlaps the screen fade, which is
+already recompositing the screen, so the marginal cost is the ground blit.
+
 #### Only what changed is repainted
 
 The desktop is the **bottom** layer, so marking all of it is never just a screen
@@ -909,8 +946,9 @@ It also waits for the desktop's **first backdrop**. The wallpaper is read and
 decoded on a worker thread, so the frames before it lands carry the fallback
 colour where the user's picture belongs — which is no more "the desktop" than a
 half-faded frame is. `ScreenFade::set_awaiting_backdrop` holds the witness until
-that first preparation resolves (installed, refused, or never wanted), and the
-frame that carries it is the one the witness follows.
+that first preparation resolves (installed, refused, or never wanted) **and**
+until the picture it installed has finished dissolving in, and the frame that
+carries that is the one the witness follows.
 
 Its id and message are defined once beside the reveal and imported by the
 desktop QEMU verticals, which gate their screendump on the rendered text,

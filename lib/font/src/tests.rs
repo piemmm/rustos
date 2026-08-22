@@ -211,6 +211,7 @@ mod render {
     use alloc::boxed::Box;
 
     use tairix_abi::font_ipc::FamilyKey;
+    use tairix_geometry::Scale;
     use tairix_log::DiscardSink;
     use tairix_raster::{Color, Surface};
     use tairix_reclaim::{PressureBand, ReclaimCache, ReclaimOwner, ReportedPressure};
@@ -219,7 +220,7 @@ mod render {
 
     use crate::atlas;
     use crate::client::{install_test_transport, set_glyph_cache};
-    use crate::font::{BitmapFont, TextLine, ELLIPSIS};
+    use crate::font::{BitmapFont, TextLine, TextShadow, ELLIPSIS};
     use crate::glyph_cache::{glyph_cache_budget, glyph_cache_candidate};
 
     const WHITE: Color = Color::rgb(255, 255, 255);
@@ -304,6 +305,85 @@ mod render {
                 "{language} glyph has no ink in its continuation cell"
             );
         }
+    }
+
+    #[test]
+    fn a_shadow_inks_ground_the_plain_draw_left_alone() {
+        install();
+        let font = BitmapFont::console();
+        let (mut plain, mut shadowed) = (surface(), surface());
+
+        font.draw_text(&mut plain, 0, 0, "Hi", WHITE);
+        font.draw_text_shadowed(
+            &mut shadowed,
+            0,
+            0,
+            "Hi",
+            WHITE,
+            TextShadow::new(WHITE, Scale::ONE),
+        );
+
+        let gained = (0..plain.height()).any(|y| {
+            (0..plain.width()).any(|x| {
+                plain.get(x, y).is_some_and(|pixel| pixel.a == 0)
+                    && shadowed.get(x, y).is_some_and(|pixel| pixel.a > 0)
+            })
+        });
+        assert!(gained, "the shadow reached no ground the ink had not");
+    }
+
+    #[test]
+    fn a_shadowed_run_returns_the_plain_runs_pen() {
+        install();
+        for font in [
+            BitmapFont::console(),
+            BitmapFont::new(proportional_family(), 20),
+        ] {
+            let (mut plain, mut shadowed) = (surface(), surface());
+
+            assert_eq!(
+                font.draw_text_shadowed(
+                    &mut shadowed,
+                    3,
+                    4,
+                    "Hi",
+                    WHITE,
+                    TextShadow::new(WHITE, Scale::ONE)
+                ),
+                font.draw_text(&mut plain, 3, 4, "Hi", WHITE),
+                "the shadow moved the pen"
+            );
+        }
+    }
+
+    #[test]
+    fn a_transparent_shadow_leaves_the_plain_frame() {
+        install();
+        let font = BitmapFont::console();
+        let (mut plain, mut shadowed) = (surface(), surface());
+
+        font.draw_text(&mut plain, 2, 2, "Hi", WHITE);
+        font.draw_text_shadowed(
+            &mut shadowed,
+            2,
+            2,
+            "Hi",
+            WHITE,
+            TextShadow::new(Color::rgba(255, 255, 255, 0), Scale::ONE),
+        );
+
+        assert_eq!(plain.pixels(), shadowed.pixels());
+    }
+
+    #[test]
+    fn the_shadow_offset_is_a_logical_pixel_and_never_none() {
+        let offset = |percent| {
+            TextShadow::new(WHITE, Scale::from_percent(percent).expect("a valid scale")).offset()
+        };
+
+        assert_eq!(offset(100), 1);
+        assert_eq!(offset(200), 2);
+        assert_eq!(offset(Scale::MIN_PERCENT), 1, "the shadow vanished");
     }
 
     #[test]

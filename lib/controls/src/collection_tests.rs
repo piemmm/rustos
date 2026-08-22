@@ -22,7 +22,7 @@ use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
 
-use tairix_font::{BitmapFont, ELLIPSIS};
+use tairix_font::{BitmapFont, TextShadow, ELLIPSIS};
 use tairix_geometry::{to_i32, Point, Rect, Scale};
 use tairix_icon::IconKind;
 use tairix_input::{InputEvent, Key, NamedKey, PointerButton};
@@ -1584,6 +1584,47 @@ fn a_resting_tile_paints_no_plate_over_what_lies_behind_it() {
         // It did draw its content, tinted with the shared surface foreground.
         assert!(has_pixel(&s, premul(palette.on_surface)));
     }
+}
+
+/// A tile whose owner draws it over ground it does not control can put a
+/// shadow behind its name: the shadow reaches pixels the bare name left
+/// showing, in the colour the owner asked for.
+#[test]
+fn a_label_shadow_inks_ground_the_bare_name_left_showing() {
+    let theme = Theme::dark();
+    let bare = tile_with(&IconTile::new("Report.txt", IconKind::Text), &theme);
+    let shadowed = tile_with(
+        &IconTile::new("Report.txt", IconKind::Text).with_label_shadow(TextShadow::new(
+            Color::from(theme.palette().desktop),
+            Scale::ONE,
+        )),
+        &theme,
+    );
+
+    assert!(
+        behind_pixels(&shadowed) < behind_pixels(&bare),
+        "the shadow covered no ground the name had left showing"
+    );
+    assert!(
+        has_pixel(&shadowed, premul(theme.palette().desktop)),
+        "the shadow was not drawn in the colour the owner asked for"
+    );
+}
+
+/// A tile that sets no shadow draws the name it always did: the opt-in only
+/// ever adds a pass behind the ink, so a shadow that composites to nothing
+/// leaves the identical frame.
+#[test]
+fn a_tile_that_sets_no_label_shadow_draws_the_bare_name() {
+    let theme = Theme::dark();
+    let bare = tile_with(&IconTile::new("Report.txt", IconKind::Text), &theme);
+    let clear = tile_with(
+        &IconTile::new("Report.txt", IconKind::Text)
+            .with_label_shadow(TextShadow::new(Color::rgba(0, 0, 0, 0), Scale::ONE)),
+        &theme,
+    );
+
+    assert_eq!(bare.pixels(), clear.pixels());
 }
 
 /// Hover, selection, and press are three different marks: the pointer washes

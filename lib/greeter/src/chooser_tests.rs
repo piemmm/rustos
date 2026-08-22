@@ -9,14 +9,15 @@ use alloc::vec::Vec;
 use tairix_controls::IconTile;
 use tairix_geometry::{Point, Rect, Scale};
 use tairix_input::{InputEvent, Key, Modifiers, NamedKey};
+use tairix_raster::Color;
 
 use crate::chooser::{AccountTile, Chooser, Step, FALLBACK_MONOGRAM, OTHER_LABEL};
 use crate::surface::{
     AuthSurface, Backdrop, EventContext, Verdict, CHOOSE_HINT, HINT, NAME_HINT, NAME_REQUIRED,
 };
 use crate::testkit::{
-    centre, feed, key, key_with, named, painted, render, submit, theme, Scripted, PRESS, RELEASE,
-    SCREEN,
+    centre, darkest_in, feed, key, key_with, named, painted, picture, render, render_over, submit,
+    theme, Scripted, PRESS, RELEASE, SCREEN,
 };
 
 fn accounts(names: &[&str]) -> Vec<AccountTile> {
@@ -363,6 +364,37 @@ fn no_chooser_event_concludes_the_surface() {
     }
 }
 
+/// A resting tile paints no plate, so over a picture its name takes the same
+/// shadow every other line does.
+///
+/// Measured under the disc, on the whitest picture there is: the band there
+/// holds nothing but the label, so a pixel darker than the label's own ink is
+/// the theme's dark desktop colour behind it.
+#[test]
+fn a_tile_label_over_a_picture_takes_the_shadow() {
+    let theme = theme();
+    let surface = AuthSurface::with_accounts(accounts(&["Ann Example"]));
+    let chooser = grid(&["Ann Example"]);
+    let tile = chooser.tile_rect(0, SCREEN, Scale::ONE).expect("a tile");
+    let disc = chooser
+        .tile_disc_rect(0, SCREEN, Scale::ONE, &theme)
+        .expect("a disc");
+    let label = Rect::new(
+        tile.origin.x,
+        disc.bottom(),
+        tile.width,
+        u32::try_from(tile.bottom() - disc.bottom()).expect("a tile on screen"),
+    );
+
+    let frame = render_over(&surface, &picture(Color::rgb(255, 255, 255)));
+
+    let darkest = darkest_in(&frame, label);
+    assert!(
+        darkest < theme.palette().on_surface.g,
+        "the label's band reached {darkest}, no darker than its own ink"
+    );
+}
+
 /// A live session is visible on the tile, so the switch-user affordance can
 /// be seen rather than guessed at.
 #[test]
@@ -624,7 +656,7 @@ fn the_fade_only_affects_the_transition_pixels() {
     direct.focus_on(1, 0, 0);
     let mut direct_frame = Surface::new(SCREEN.width, SCREEN.height).expect("surface");
     direct_frame.fill(Color::from(theme.palette().desktop));
-    direct.render(&mut direct_frame, SCREEN, Scale::ONE, &theme, u8::MAX);
+    direct.render(&mut direct_frame, SCREEN, Scale::ONE, &theme, u8::MAX, None);
 
     // Animate to the same slot and settle.
     let mut faded = Chooser::new(accounts(&names));
@@ -636,12 +668,12 @@ fn the_fade_only_affects_the_transition_pixels() {
 
     let mut start_frame = Surface::new(SCREEN.width, SCREEN.height).expect("surface");
     start_frame.fill(Color::from(theme.palette().desktop));
-    faded.render(&mut start_frame, SCREEN, Scale::ONE, &theme, u8::MAX);
+    faded.render(&mut start_frame, SCREEN, Scale::ONE, &theme, u8::MAX, None);
 
     faded.advance(span_ns / 2);
     let mut mid_frame = Surface::new(SCREEN.width, SCREEN.height).expect("surface");
     mid_frame.fill(Color::from(theme.palette().desktop));
-    faded.render(&mut mid_frame, SCREEN, Scale::ONE, &theme, u8::MAX);
+    faded.render(&mut mid_frame, SCREEN, Scale::ONE, &theme, u8::MAX, None);
 
     assert!(
         !changed_pixels(&start_frame, &mid_frame).is_empty(),
@@ -651,7 +683,7 @@ fn the_fade_only_affects_the_transition_pixels() {
     faded.advance(span_ns);
     let mut end_frame = Surface::new(SCREEN.width, SCREEN.height).expect("surface");
     end_frame.fill(Color::from(theme.palette().desktop));
-    faded.render(&mut end_frame, SCREEN, Scale::ONE, &theme, u8::MAX);
+    faded.render(&mut end_frame, SCREEN, Scale::ONE, &theme, u8::MAX, None);
 
     assert_eq!(
         end_frame, direct_frame,

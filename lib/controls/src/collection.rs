@@ -28,7 +28,7 @@
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use tairix_font::{BitmapFont, ELLIPSIS};
+use tairix_font::{BitmapFont, TextShadow, ELLIPSIS};
 use tairix_geometry::{Point, Rect, Region, Scale};
 use tairix_icon::IconKind;
 use tairix_input::{InputEvent, Key, NamedKey, PointerButton};
@@ -463,6 +463,7 @@ impl ListRow {
                     run,
                     (to_i32(right) - to_i32(tw), text_y),
                     muted,
+                    None,
                 );
                 right = right.saturating_sub(tw).saturating_sub(pad);
             }
@@ -471,7 +472,7 @@ impl ListRow {
         // The label, left-aligned in the remaining space.
         if right > left {
             let run = font.elide_to_width(&self.label, right - left);
-            paint_run(surface, font, run, (to_i32(left), text_y), fg);
+            paint_run(surface, font, run, (to_i32(left), text_y), fg, None);
         }
     }
 
@@ -2055,6 +2056,7 @@ pub struct IconTile {
     icon: IconKind,
     state: ControlState,
     selection_fade: Option<u8>,
+    label_shadow: Option<TextShadow>,
 }
 
 impl IconTile {
@@ -2066,6 +2068,7 @@ impl IconTile {
             icon,
             state: ControlState::idle(),
             selection_fade: None,
+            label_shadow: None,
         }
     }
 
@@ -2092,6 +2095,23 @@ impl IconTile {
     #[must_use]
     pub fn with_selection_fade(mut self, fade: u8) -> Self {
         self.selection_fade = Some(fade);
+        self
+    }
+
+    /// This tile with its name drawn over `shadow`.
+    ///
+    /// For an owner whose tiles rest on ground it does not control — a login
+    /// chooser's accounts over a wallpaper, a picture browser's thumbnails
+    /// over a photograph — where a resting tile wears no plate and the name
+    /// therefore sits straight on that ground. The shadow is the owner's to
+    /// state because only the owner knows what is behind its tiles; a tile
+    /// that sets none draws its name exactly as before.
+    ///
+    /// Set independently of [`with_state`](Self::with_state), so the two may
+    /// be applied in either order.
+    #[must_use]
+    pub fn with_label_shadow(mut self, shadow: TextShadow) -> Self {
+        self.label_shadow = Some(shadow);
         self
     }
 
@@ -2262,7 +2282,14 @@ impl IconTile {
         for line in font.wrap_to_width(&self.label, band.right - band.left, band.lines) {
             let run = (line.text, line.elided);
             let x = to_i32(centre_x(run_width(font, run), band.left, band.right));
-            paint_run(surface, font, run, (x, to_i32(top)), color);
+            paint_run(
+                surface,
+                font,
+                run,
+                (x, to_i32(top)),
+                color,
+                self.label_shadow,
+            );
             top = top.saturating_add(font.line_height());
         }
     }
@@ -2418,24 +2445,32 @@ fn run_width(font: BitmapFont, run: (&str, bool)) -> u32 {
     width
 }
 
-/// Draw a fitted run at `at`, its mark included.
+/// Draw a fitted run at `at`, its mark included, over `shadow` when the
+/// caller draws on ground it does not control.
 ///
 /// The one "text, then the mark" recipe every collection control paints cut
 /// text through, so a hidden tail always says so rather than stopping
 /// mid-word as if the text ended there. A run the fitter marked unelided —
 /// including a box too narrow for the mark itself — draws its text alone.
+/// The mark takes the shadow with the text, so a shadowed label reads as one
+/// run rather than a shadowed name and a bare ellipsis.
 fn paint_run(
     surface: &mut Surface,
     font: BitmapFont,
     run: (&str, bool),
     at: (i32, i32),
     color: Color,
+    shadow: Option<TextShadow>,
 ) {
     let (text, elided) = run;
     let (x, y) = at;
-    let pen = font.draw_text(surface, x, y, text, color);
+    let draw = |surface: &mut Surface, x: i32, text: &str| match shadow {
+        Some(shadow) => font.draw_text_shadowed(surface, x, y, text, color, shadow),
+        None => font.draw_text(surface, x, y, text, color),
+    };
+    let pen = draw(surface, x, text);
     if elided {
-        font.draw_text(surface, pen, y, ELLIPSIS, color);
+        draw(surface, pen, ELLIPSIS);
     }
 }
 

@@ -61,12 +61,11 @@ charter forbids.
   input, and drawing a pointer over the frame — cannot disagree, and neither
   of them stops for a screen that is merely arriving.
 - `Backdrop` — what is painted behind the column: the theme's flat desktop
-  colour, or a wallpaper the embedder has already decoded and fitted, under a
-  scrim and a soft vertical wash of the desktop colour at each end, where the
-  chrome and the prompt sit. This crate never learns to decode or fit an image.
-- `scrim_alpha` — how much of the theme's desktop colour that wallpaper needs
-  behind the prompt block for its text to stay legible. Pure, sample-bounded,
-  and computed once per (wallpaper, screen size, theme) by the embedder.
+  colour, or a wallpaper the embedder has already decoded and fitted, drawn
+  exactly as authored. Nothing shades the picture; what keeps the text legible
+  over it is a shadow behind each line, in the theme's own desktop colour,
+  through `lib/font`'s one shadowed draw. This crate never learns to decode or
+  fit an image.
 - `panel_rect`, `MAX_PASSWORD`, `MAX_LOGIN_NAME`, `MAX_CHROME`,
   `UNNAMED_ACCOUNT` — the prompt block's placement, the bounds the fields and
   the backdrop text reserve their buffers at, and the name shown when the

@@ -1,5 +1,6 @@
-//! The session's screen fade: up from black when it starts, back down to
-//! black when it hands the screen on.
+//! The session's fades: the whole screen up from black when it starts and
+//! back down to black when it hands the screen on ([`ScreenFade`]), and the
+//! desktop's backdrop dissolving into the next one ([`BackdropFade`]).
 //!
 //! The login screen fades to black and exits, so the screen a session
 //! inherits is already dark. [`ScreenFade`] drives the compositor's screen
@@ -28,7 +29,7 @@
 
 use tairix_log::{log, Event, EventId, Level, Sink};
 use tairix_theme::{Fade, MotionInteraction};
-use tairix_wm::Compositor;
+use tairix_wm::{Compositor, Surface};
 
 use crate::switchuser::park_within;
 
@@ -203,5 +204,134 @@ impl ScreenFade {
             self.fade.settle();
         }
         compositor.set_reveal(strength)
+    }
+}
+
+/// The desktop backdrop's crossfade: the ground the desktop layer is painted
+/// over dissolving into the ground it is becoming.
+///
+/// A backdrop arriving between one frame and the next is the one change on a
+/// desktop nobody can miss — it is the whole screen. So every ground change
+/// dissolves over the theme's own [`MotionInteraction::BackdropChange`] span:
+/// the wallpaper appearing at login once it has been read and fitted, one
+/// wallpaper giving way to another when the choice changes, and a wallpaper
+/// giving way back to the plain backdrop colour.
+///
+/// It holds one [`Fade`], the strength that fade has reached, and the ground
+/// being left — nothing else. Which ground is being left is the whole of the
+/// arithmetic, and both cases come out as the straight mix of the two grounds,
+/// so no frame part-way through shows a colour neither ground has:
+///
+/// * leaving the plain colour, the desktop layer's own base fill *is* that
+///   ground, so the arriving wallpaper landing at [`arriving`] strength is
+///   already the mix — and nothing is allocated to fade in from a colour;
+/// * leaving a wallpaper, the layer is painted whole and [`leaving`] is laid
+///   back over it at the inverse strength.
+///
+/// The ground being left is flattened over the backdrop colour when the fade
+/// begins, so a picture that did not cover the screen crossfades in its
+/// margins too rather than snapping there. A change arriving while a fade is
+/// still running takes the picture that was installed as the ground it leaves,
+/// which is what the screen predominantly shows.
+///
+/// [`arriving`]: Self::arriving
+/// [`leaving`]: Self::leaving
+pub struct BackdropFade {
+    fade: Fade,
+    /// The arriving ground's strength on screen now, so a paint reads what
+    /// the last [`advance`](Self::advance) drew rather than the clock: the
+    /// desktop layer is repainted from gestures that carry no time.
+    strength: u8,
+    leaving: Option<Surface>,
+}
+
+impl Default for BackdropFade {
+    fn default() -> Self {
+        Self {
+            // Settled on nothing: a desktop that has not changed its
+            // backdrop yet paints the plain ground and arms no timer.
+            fade: Fade::start(0, 0, u8::MAX, u8::MAX),
+            strength: u8::MAX,
+            leaving: None,
+        }
+    }
+}
+
+impl BackdropFade {
+    /// Begin dissolving into the ground that has just been installed, over
+    /// `span_ms`, leaving the ground in `leaving` behind.
+    ///
+    /// A zero span — what a reduced-motion theme answers with — arrives
+    /// immediately, and the ground being left is dropped here rather than
+    /// held for a fade that will never draw it.
+    pub fn begin(&mut self, now_ns: u64, span_ms: u16, leaving: Option<Surface>) {
+        self.fade = Fade::start(now_ns, span_ms, 0, u8::MAX);
+        self.strength = self.fade.strength(now_ns);
+        self.leaving = leaving;
+        if !self.fade.running() {
+            self.arrive();
+        }
+    }
+
+    /// Whether this fade has arrived, so the desktop layer paints its ground
+    /// plainly and no timer is armed for it.
+    #[must_use]
+    pub const fn settled(&self) -> bool {
+        !self.fade.running()
+    }
+
+    /// The arriving ground's strength, or `None` once the fade has arrived
+    /// and the ground is simply painted.
+    #[must_use]
+    pub const fn arriving(&self) -> Option<u8> {
+        if self.fade.running() {
+            Some(self.strength)
+        } else {
+            None
+        }
+    }
+
+    /// The ground being left, already flattened over the backdrop colour, or
+    /// `None` when that ground was the colour itself.
+    #[must_use]
+    pub fn leaving(&self) -> Option<&Surface> {
+        self.leaving.as_ref()
+    }
+
+    /// Step the fade to `now_ns`, returning whether the ground on screen
+    /// changed (and so owes a repaint of the desktop layer). An arrived fade
+    /// is no work at all.
+    ///
+    /// Time drives this alone: reaching the end of the span arrives, whatever
+    /// became of any frame drawn on the way, so a repaint that could not be
+    /// made cannot leave the desktop stuck between two grounds. A clock that
+    /// jumped backwards arrives too, rather than stalling.
+    pub fn advance(&mut self, now_ns: u64) -> bool {
+        if !self.fade.running() {
+            return false;
+        }
+        let strength = self.fade.strength(now_ns);
+        let changed = strength != self.strength;
+        self.strength = strength;
+        if strength == self.fade.target() {
+            self.arrive();
+        }
+        changed
+    }
+
+    /// `park_ns` shortened to this fade's next frame, or left exactly as it
+    /// is when nothing is dissolving — an idle desktop arms no timer.
+    #[must_use]
+    pub fn park_deadline_ns(&self, now_ns: u64, park_ns: u64) -> u64 {
+        park_within(park_ns, self.fade.next_frame_in(now_ns))
+    }
+
+    /// Settle on the arriving ground, releasing the screen-sized surface the
+    /// ground being left was held in: it can no longer be seen, and a desktop
+    /// must not carry a copy of a picture it has finished with.
+    fn arrive(&mut self) {
+        self.fade.settle();
+        self.strength = u8::MAX;
+        self.leaving = None;
     }
 }

@@ -376,6 +376,12 @@ render lays out to, so an owner sizing its tiles — the login chooser sizing an
 account tile so a two-word display name is not elided — asks the tile instead of
 re-deriving its label layout.
 
+`IconTile::with_label_shadow` draws that name, the eliding ellipsis included,
+through `lib/font`'s one shadowed draw. It is for a tile whose ground is a
+picture rather than a colour the theme knows: a resting tile paints no plate, so
+the login chooser's account names sit straight on the wallpaper. A tile that
+sets none draws exactly the pixels it always did.
+
 A tile renders state and never dispatches. The view owns the grid geometry and
 hit-tests pointer input against that same geometry, so a tile carries no pointer
 position or press latch of its own, unlike a `ListRow` or a `Card` — controls

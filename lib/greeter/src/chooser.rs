@@ -6,7 +6,7 @@ use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
 use tairix_controls::{ControlState, FocusState, IconTile, PointerState, SelectionState};
-use tairix_font::BitmapFont;
+use tairix_font::{BitmapFont, TextShadow};
 use tairix_geometry::{Point, Rect, Scale};
 use tairix_icon::IconKind;
 use tairix_input::{InputEvent, PointerButton};
@@ -582,7 +582,8 @@ impl Chooser {
         ))
     }
 
-    /// Paint every tile on `screen` at `strength` of its own opacity.
+    /// Paint every tile on `screen` at `strength` of its own opacity, each
+    /// label over `shadow`.
     ///
     /// At full strength each tile is drawn straight into `surface`. A stage
     /// transition giving the chooser up draws each tile once into a
@@ -595,6 +596,7 @@ impl Chooser {
         scale: Scale,
         theme: &Theme,
         strength: u8,
+        shadow: Option<TextShadow>,
     ) {
         if strength == 0 {
             return;
@@ -604,20 +606,23 @@ impl Chooser {
                 continue;
             };
             if strength == u8::MAX {
-                self.render_tile(surface, slot, bounds, scale, theme);
+                self.render_tile(surface, slot, bounds, scale, theme, shadow);
                 continue;
             }
             let Some(mut scratch) = Surface::new(bounds.width, bounds.height) else {
                 continue;
             };
             let placed = Rect::new(0, 0, bounds.width, bounds.height);
-            self.render_tile(&mut scratch, slot, placed, scale, theme);
+            self.render_tile(&mut scratch, slot, placed, scale, theme, shadow);
             fade(&mut scratch, strength);
             surface.blit(bounds.origin.x, bounds.origin.y, &scratch);
         }
     }
 
     /// Paint tile `slot` at `bounds`.
+    ///
+    /// A resting tile paints no plate, so its name sits straight on whatever
+    /// is behind the chooser: over a picture that is `shadow`'s job.
     fn render_tile(
         &self,
         surface: &mut Surface,
@@ -625,14 +630,18 @@ impl Chooser {
         bounds: Rect,
         scale: Scale,
         theme: &Theme,
+        shadow: Option<TextShadow>,
     ) {
         let account = self.account(slot);
-        let tile = IconTile::new(
+        let mut tile = IconTile::new(
             account.map_or(OTHER_LABEL, AccountTile::display_name),
             IconKind::Generic,
         )
         .with_state(self.tile_state(slot))
         .with_selection_fade(self.selection_fade(slot));
+        if let Some(shadow) = shadow {
+            tile = tile.with_label_shadow(shadow);
+        }
         let (monogram, disc, ink) = self.slot_disc(slot, theme);
         let artwork = monogram_disc(
             monogram,

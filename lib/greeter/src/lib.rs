@@ -49,7 +49,8 @@
 //!
 //! Nor does it decode an image. [`Backdrop::Wallpaper`] takes a picture the
 //! embedder has already decoded — in its own sandbox — and already fitted to
-//! the screen, plus the scrim [`scrim_alpha`] sized for it.
+//! the screen, and paints it as authored: what keeps the text legible over it
+//! is a shadow behind each line, not a wash over the picture.
 //!
 //! # Using it
 //!
@@ -103,16 +104,16 @@ extern crate alloc;
 mod chooser;
 mod layout;
 mod motion;
-mod scrim;
 mod surface;
 
 pub use chooser::AccountTile;
-pub use scrim::scrim_alpha;
 pub use surface::{
     panel_rect, AuthSurface, Backdrop, Chrome, EventContext, Outcome, Verdict, Verifier,
     MAX_CHROME, MAX_LOGIN_NAME, MAX_PASSWORD, UNNAMED_ACCOUNT,
 };
 
+#[cfg(test)]
+mod backdrop_tests;
 #[cfg(test)]
 mod chooser_tests;
 #[cfg(test)]
@@ -121,8 +122,6 @@ mod cooldown_tests;
 mod damage_tests;
 #[cfg(test)]
 mod motion_tests;
-#[cfg(test)]
-mod scrim_tests;
 #[cfg(test)]
 mod surface_tests;
 #[cfg(test)]

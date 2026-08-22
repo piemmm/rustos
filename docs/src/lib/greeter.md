@@ -247,9 +247,9 @@ short.
 Every length above is authored in *logical* pixels at the reference density and
 converted through the one shared `Scale::scale_length`, so there is no second
 conversion and the composition is the same at any DPI. `panel_rect` returns the
-block — the region whose legibility the scrim is chosen for — and `field_rect`
-is the one definition of where the pill sits, read by both the paint and the
-pointer hit test, so the two can never resolve different rectangles.
+block and `field_rect` is the one definition of where the pill sits, read by
+both the paint and the pointer hit test, so the two can never resolve different
+rectangles.
 
 The field is drawn as a **pill**: the shared `lib/controls` field is rendered
 into a scratch row, confined to a stadium, and laid over a stadium in the edge
@@ -263,35 +263,28 @@ secret's beads scroll to that edge.
 
 `Backdrop` is what is painted behind the column, chosen by the caller: either
 the active theme's flat desktop colour, or an already-decoded, already-fitted
-wallpaper under a scrim. This crate never learns to decode an image — decoding
-untrusted bytes is the caller's sandboxed business.
+wallpaper. This crate never learns to decode an image — decoding untrusted
+bytes is the caller's sandboxed business.
 
-No blur is reachable from here (that lives in the compositor), so a soft
-vertical wash of the desktop colour is laid over the top and bottom thirds,
-where the chrome and the prompt sit. Because the wash *is* the desktop colour,
-it composites to exactly what is already there over the flat backdrop, and only
-a picture ever sees it.
+A picture is painted **exactly as authored**. Nothing darkens, washes, or blurs
+it, and no blur is reachable from here in any case (that lives in the
+compositor). What keeps the text readable over an unknown photograph is a
+shadow behind each line rather than a curtain over the picture: the clock, the
+date, the host name, the account name, the notice, the step-back hint, and each
+account tile's own label are all drawn through `lib/font`'s one shadowed draw,
+in the theme's own desktop colour — the contrast-opposite of the on-surface ink
+in both built-in themes — at one logical pixel's offset, never less than one
+physical pixel.
 
-The scrim and that wash are laid as **one** pass per pixel, not a scrim with
-washes over it: two composites of the same colour are one composite of the
-alpha they compose to, so the ends simply carry the composed alpha. That is a
-rendering guarantee, not a saving. A picture darkened by a heavy scrim has far
-fewer output levels than it had input levels, so rounding it into the surface
-*twice* — and rounding every pixel the same way — flattens a smooth sky into
-wide horizontal plateaus with a hard step between them. One pass through the
-shared dithered wash (`lib/raster`'s `fill_vertical_gradient`) spends the
-missing resolution across the area instead, and the picture stays a picture.
-The entry and exit veil is the same shape — a flat field over a picture — and
-goes through the same wash for the same reason.
+The decision is made once, in `render`, from the `Backdrop` it was handed, and
+carried down with the rest of the frame's state: a picture asks for a shadow,
+the flat desktop colour does not. Over that flat colour the shadow *is* the
+ground, so it would compose to exactly what is already there — two glyph passes
+to draw nothing — which is why the screen lock's known ground pays for one.
 
-`scrim_alpha(image, panel, theme)` derives how much scrim that wallpaper needs
-for the block's text to stay legible. It sizes for the *brightest* patch under
-the block rather than the average, because text sits over the worst pixel and
-not over the mean; it samples on a bounded grid, so the cost is the same for a
-thumbnail and for a 4K master; and it is bounded well short of both extremes,
-so the prompt is never bare and the wallpaper is never blacked out. It is pure,
-so an embedder computes it once per wallpaper, screen size, and theme rather
-than per frame.
+The entry and exit veil is still laid through the shared dithered wash
+(`lib/raster`'s `fill_vertical_gradient`) rather than a rectangle fill: it is a
+flat field over a picture, the shape that bands when every pixel rounds alike.
 
 ## Damage
 

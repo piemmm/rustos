@@ -243,9 +243,8 @@ pub struct Outcome;          // redraw(), verified(), damage()
 pub struct EventContext<'a>; // screen, scale, theme, verifier
 pub trait  Verifier { fn verify(&mut self, account: &str, secret: &str) -> Verdict; }
 pub enum   Verdict { Verified, Refused, Unreachable }
-pub enum   Backdrop<'a> { Desktop, Wallpaper { image: &'a Surface, scrim: u8 } }
+pub enum   Backdrop<'a> { Desktop, Wallpaper { image: &'a Surface } }
 pub fn panel_rect(screen: Rect, scale: Scale) -> Rect;
-pub fn scrim_alpha(image: &Surface, panel: Rect, theme: &Theme) -> u8;
 pub const MAX_PASSWORD: usize = 256;
 pub const MAX_LOGIN_NAME: usize = 64;
 pub const MAX_CHROME: usize = 64;
@@ -401,31 +400,29 @@ login screen's — it opens on the chooser.
   duration as zero, which the timeline reads as *settled*: each change lands
   at once, with no second code path and no frame asked for.
 - **The wallpaper backdrop.** A second `Backdrop` case carrying an
-  already-decoded, already-fitted image plus the alpha of its contrast
-  scrim — the engine gains no decoder; decoding untrusted bytes is the
-  embedder's sandboxed business. `scrim_alpha` derives that alpha from the
-  image's **brightest** patch under the panel, not its mean, because text
-  sits over the worst pixel; it samples on a bounded grid, so a 4K master
-  costs the same as a thumbnail, and it is bounded well short of both
-  extremes so the panel is never bare and the wallpaper never blacked out.
-  Pure, so the embedder computes it **once** per (wallpaper, screen size,
-  theme) and re-derives it only when the scale, theme or wallpaper changes —
-  never per frame. Over the picture the surface also lays a two-ended
-  vertical wash in the theme's own desktop colour, so the chrome at the top
-  and the field in the middle stay legible over a bright photograph; because
-  the wash *is* the desktop colour it composites to nothing over a plain
-  backdrop. Scrim and wash are **one** pass per pixel — the ends carry the
-  alpha the two compose to — because a darkened picture holds fewer output
-  levels than input levels, and rounding it twice, every pixel alike, banded
-  a smooth sky into plateaus tens of rows deep on a 1080-row screen. The one
-  dithered wash in `lib/raster` spends that missing resolution across the
-  area; the entry/exit veil is the same shape and goes through it too. The
-  picture is never blurred *wholesale*: frosting a whole
-  wallpaper to make text sit on it hides the picture the user chose, so the
-  scrim and the wash do the legibility work honestly. The shared frost stays
-  where it belongs — the compositor's window backdrops, and the wallpaper
-  behind one selected tile, which is a mark on that tile rather than a
-  treatment of the picture.
+  already-decoded, already-fitted image — the engine gains no decoder;
+  decoding untrusted bytes is the embedder's sandboxed business. The picture
+  is painted **exactly as authored**: nothing darkens, washes, or blurs it.
+  Legibility comes from the other side instead — every line of text over a
+  picture is drawn with a shadow behind it, through `lib/font`'s one shadowed
+  draw (`TextShadow` + `BitmapFont::draw_text_shadowed`), in the theme's own
+  desktop colour, which is the contrast-opposite of the on-surface ink in both
+  built-in themes, at one logical pixel's offset and never less than one
+  physical pixel. That covers the chrome, the account name, the notice and
+  step-back lines, and each account tile's own label (`IconTile`'s opt-in
+  `with_label_shadow`, since a resting tile paints no plate). The decision is
+  made **once**, in `render`, from the `Backdrop` it was handed and carried
+  down with the rest of the frame's state: a picture asks for a shadow, the
+  flat desktop colour does not — over that ground the shadow *is* the ground,
+  so it would compose to exactly what is already there, and the screen lock
+  pays for one glyph pass rather than two. The entry/exit veil is still laid
+  through the one dithered wash in `lib/raster`, a flat field over a picture
+  being the shape that bands when every pixel rounds alike. The picture is
+  never blurred *wholesale*: frosting a whole wallpaper to make text sit on it
+  hides the picture the user chose, so the shadow does the legibility work
+  honestly. The shared frost stays where it belongs — the compositor's window
+  backdrops, and the wallpaper behind one selected tile, which is a mark on
+  that tile rather than a treatment of the picture.
 - **A per-account attempt budget** displayed as a cooldown. Per account, so
   a wrong password for one cannot lock another out, and monotonic-clock
   driven with `Duration64` — never wall clock, which the user may be able to
@@ -951,8 +948,10 @@ Covered in host unit tests:
 - the cooldown: a submit refused without the verifier being called, the
   secret still erased, clearing, and being dropped when stepping between
   accounts;
-- `scrim_alpha`: different bounded alphas for a black and a white
-  wallpaper, sizing on the brightest patch, and size-independent sampling;
+- the backdrop: a picture reaching the frame verbatim in the top band, the
+  middle, and the bottom band; a line of text over a bright picture inking
+  ground the plain draw leaves showing, tile labels included; and only a
+  picture asking for a shadow at all;
 - damage: every pixel a keystroke, a verdict, a focus move, and a clock
   tick change lying inside the reported rectangle;
 - `session-v1` encode/decode round-trips and a fail-closed refusal for

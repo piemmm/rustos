@@ -41,7 +41,7 @@
 use core::ops::Range;
 
 use tairix_abi::font_ipc::{FamilyKey, FontMetrics, FontWeight};
-use tairix_geometry::Scale;
+use tairix_geometry::{to_i32, Scale};
 use tairix_raster::{Color, Pixel, Surface};
 use tairix_theme::{Fonts, TextRole};
 use tairix_vt::char_width;
@@ -58,6 +58,47 @@ use crate::measure::MeasuredText;
 /// drawn can never disagree. It is a `&str` for exactly that reason: a
 /// `char` would have to be encoded at every call site.
 pub const ELLIPSIS: &str = "\u{2026}";
+
+/// A shadow drawn behind a text run, for text that sits on ground the drawer
+/// does not control — a label over a wallpaper, a caption over a photograph.
+///
+/// One definition of "the run once in the shadow colour, then once in the
+/// ink", so every surface that needs legible text over a picture gets the
+/// same offset and the same order rather than deriving either for itself.
+/// The offset is [`Self::new`]'s alone.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct TextShadow {
+    color: Color,
+    offset: u32,
+}
+
+impl TextShadow {
+    /// A shadow in `color`, offset down and right by one logical pixel at
+    /// `scale`.
+    ///
+    /// Never less than one physical pixel: a fraction of a pixel rounds to
+    /// nothing, and a shadow that vanishes at some densities is worse than
+    /// none at all.
+    #[must_use]
+    pub fn new(color: Color, scale: Scale) -> Self {
+        Self {
+            color,
+            offset: scale.scale_length(1).max(1),
+        }
+    }
+
+    /// The colour the run is drawn in behind the ink.
+    #[must_use]
+    pub const fn color(self) -> Color {
+        self.color
+    }
+
+    /// How far down and right of the ink the shadow sits, in physical pixels.
+    #[must_use]
+    pub const fn offset(self) -> u32 {
+        self.offset
+    }
+}
 
 /// A family, pixel height, and weight to draw with: the reference a client
 /// needs to fetch a family's line metrics and any glyph's coverage bitmap
@@ -475,6 +516,40 @@ impl BitmapFont {
     /// a 74-character row, sharing it costs either face around 7%.
     pub fn draw_text(self, surface: &mut Surface, x: i32, y: i32, text: &str, color: Color) -> i32 {
         client::with_client(|client| self.draw_on(client, surface, x, y, text, color))
+    }
+
+    /// Draw `text` as [`draw_text`](Self::draw_text) does, `shadow` behind
+    /// it, returning the very same pen.
+    ///
+    /// The run is drawn twice — once displaced by the shadow's offset in its
+    /// colour, then in `color` — so text keeps its separation over ground the
+    /// drawer does not control: an account name over a photograph, a caption
+    /// over a wallpaper. Only the ink decides the pen, so a caller advancing
+    /// a run lays it out identically with the shadow on or off.
+    ///
+    /// Both passes share one client, so the second costs no lock of its own
+    /// and every glyph it composites is already cached by the first.
+    pub fn draw_text_shadowed(
+        self,
+        surface: &mut Surface,
+        x: i32,
+        y: i32,
+        text: &str,
+        color: Color,
+        shadow: TextShadow,
+    ) -> i32 {
+        let offset = to_i32(shadow.offset());
+        client::with_client(|client| {
+            self.draw_on(
+                client,
+                surface,
+                x.saturating_add(offset),
+                y.saturating_add(offset),
+                text,
+                shadow.color(),
+            );
+            self.draw_on(client, surface, x, y, text, color)
+        })
     }
 
     /// [`draw_text`](Self::draw_text) against a client the caller already

@@ -794,6 +794,66 @@ fn a_desaturated_blit_clips_exactly_as_a_plain_one_does() {
 }
 
 #[test]
+fn a_faded_blit_mixes_the_destination_toward_an_opaque_source() {
+    // What a crossfade rests on: half strength must land halfway between the
+    // two pictures, not somewhere darker or lighter than either.
+    let mut src = Surface::new(2, 2).expect("allocates");
+    src.fill(RED);
+    let mut dst = Surface::new(2, 2).expect("allocates");
+    dst.fill(BLUE);
+    dst.blit_faded(0, 0, &src, 128);
+    let landed = dst.get(1, 1).expect("in bounds");
+    let (red, blue) = (RED.premultiply(), BLUE.premultiply());
+    for (got, want) in [
+        (landed.r, red.r / 2),
+        (landed.b, blue.b / 2),
+        (landed.a, 255),
+    ] {
+        assert!(
+            got.abs_diff(want) <= 1,
+            "{got} is not within a level of {want}"
+        );
+    }
+    // The picture itself is untouched, so neither end of a fade is copied.
+    assert_eq!(src.get(0, 0), Some(red));
+}
+
+#[test]
+fn a_full_strength_fade_is_the_plain_blit_and_a_zero_one_draws_nothing() {
+    let mut src = Surface::new(3, 3).expect("allocates");
+    src.fill(RED);
+    src.set(1, 1, Color::rgba(0, 200, 40, 128).premultiply());
+    let mut plain = Surface::new(3, 3).expect("allocates");
+    plain.fill(BLUE);
+    let mut faded = Surface::new(3, 3).expect("allocates");
+    faded.fill(BLUE);
+    plain.blit(0, 0, &src);
+    faded.blit_faded(0, 0, &src, 255);
+    assert_eq!(plain.pixels(), faded.pixels());
+
+    let mut untouched = Surface::new(3, 3).expect("allocates");
+    untouched.fill(BLUE);
+    let before = untouched.to_rgba8();
+    untouched.blit_faded(0, 0, &src, 0);
+    assert_eq!(untouched.to_rgba8(), before);
+}
+
+#[test]
+fn a_faded_blit_clips_exactly_as_a_plain_one_does() {
+    let mut src = Surface::new(4, 4).expect("allocates");
+    src.fill(RED);
+    for at in [(-1i32, -1i32), (1, 2), (-5, 0)] {
+        let mut faded = Surface::new(2, 2).expect("allocates");
+        faded.fill(BLUE);
+        let mut plain = Surface::new(2, 2).expect("allocates");
+        plain.fill(BLUE);
+        faded.blit_faded(at.0, at.1, &src, 255);
+        plain.blit(at.0, at.1, &src);
+        assert_eq!(faded.pixels(), plain.pixels(), "a source at {at:?}");
+    }
+}
+
+#[test]
 fn set_round_rect_lays_a_translucent_ground_a_fill_could_not() {
     // The point of the primitive: a half-opaque colour composited over an
     // opaque plate comes back opaque, so a surface that must be see-through

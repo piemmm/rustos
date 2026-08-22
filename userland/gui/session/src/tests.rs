@@ -6987,6 +6987,36 @@ fn with_backdrop(desktop: &mut Desktop<TreeSource>, rgb: Rgb) {
     });
 }
 
+/// The instant every test that is not about the crossfade itself installs a
+/// wallpaper at.
+const WALLPAPER_AT_NS: u64 = 4_000_000_000;
+
+/// How long the desktop's own theme gives a backdrop change, in nanoseconds:
+/// read from the theme so a retimed dissolve cannot leave a test measuring a
+/// frame part-way through one.
+fn backdrop_span_ns(shell: &DesktopShell) -> u64 {
+    u64::from(
+        shell
+            .session()
+            .active_theme()
+            .motion()
+            .duration(tairix_theme::MotionInteraction::BackdropChange),
+    ) * 1_000_000
+}
+
+/// Install `paper` as the desktop's ground over `backdrop` and let the
+/// crossfade arrive, so what follows measures the ground itself rather than a
+/// frame part-way through the dissolve.
+fn install_wallpaper(
+    shell: &mut DesktopShell,
+    backdrop: Backdrop,
+    paper: Option<tairix_wm::Surface>,
+) {
+    shell.set_wallpaper(paper, backdrop, WALLPAPER_AT_NS);
+    let span = backdrop_span_ns(shell);
+    shell.advance_backdrop(WALLPAPER_AT_NS + span);
+}
+
 /// The composited pixel at (`x`, `y`) as its four raw frame bytes.
 fn frame_pixel(comp: &Compositor, x: usize, y: usize) -> [u8; 4] {
     let start = y * FRAME_STRIDE + x * 4;
@@ -7050,7 +7080,7 @@ fn the_desktop_layer_paints_the_wallpaper_when_one_is_set() {
 
     let mut paper = Surface::new(640, 480).expect("a screen-sized wallpaper");
     paper.fill_rect(0, 0, 640, 480, Color::rgb(200, 100, 50));
-    shell.set_wallpaper(Some(paper));
+    install_wallpaper(&mut shell, desktop.settings().backdrop, Some(paper));
     shell.present_desktop(&mut comp, &desktop);
     comp.composite();
 
@@ -7070,13 +7100,127 @@ fn the_desktop_layer_paints_the_wallpaper_when_one_is_set() {
         "the icons are drawn over the wallpaper"
     );
 
-    shell.set_wallpaper(None);
+    install_wallpaper(&mut shell, desktop.settings().backdrop, None);
     shell.present_desktop(&mut comp, &desktop);
     comp.composite();
     assert_eq!(
         frame_pixel(&comp, x, y),
         without,
         "taking the wallpaper away brings the backdrop colour back"
+    );
+}
+
+/// A wallpaper arriving over the plain backdrop colour dissolves into it: the
+/// frame at the instant it is installed still shows the colour, a frame
+/// part-way through is the mix of the two, and the picture only stands alone
+/// once the fade has arrived.
+///
+/// The whole screen changing between two frames is the one change on a desktop
+/// nobody can miss, which is why the login wallpaper fades up rather than
+/// appearing the moment the worker hands it over.
+#[test]
+fn a_wallpaper_arriving_over_the_backdrop_colour_fades_up_into_it() {
+    let (mut shell, mut comp) = headless_desktop();
+    let mut desktop = pinboard_desktop();
+    with_backdrop(&mut desktop, Rgb::new(10, 20, 30));
+    shell.present_desktop(&mut comp, &desktop);
+    comp.composite();
+    let (x, y) = CLEAR_OF_EVERYTHING;
+    let colour_alone = frame_pixel(&comp, x, y);
+
+    let mut paper = Surface::new(640, 480).expect("a screen-sized wallpaper");
+    paper.fill_rect(0, 0, 640, 480, Color::rgb(200, 100, 50));
+    shell.set_wallpaper(Some(paper), desktop.settings().backdrop, WALLPAPER_AT_NS);
+    shell.present_desktop(&mut comp, &desktop);
+    comp.composite();
+    assert_eq!(
+        frame_pixel(&comp, x, y),
+        colour_alone,
+        "the picture is invisible at the instant it is installed, so nothing jumps"
+    );
+
+    let span = backdrop_span_ns(&shell);
+    assert!(shell.advance_backdrop(WALLPAPER_AT_NS + span / 2));
+    shell.present_desktop(&mut comp, &desktop);
+    comp.composite();
+    let midway = frame_pixel(&comp, x, y);
+    for channel in 0..3 {
+        let (from, to) = (colour_alone[channel], [200, 100, 50][channel]);
+        let between = midway[channel] > from.min(to) && midway[channel] < from.max(to);
+        assert!(
+            between,
+            "channel {channel} reads {} part-way from {from} to {to}",
+            midway[channel]
+        );
+    }
+
+    assert!(shell.advance_backdrop(WALLPAPER_AT_NS + span));
+    shell.present_desktop(&mut comp, &desktop);
+    comp.composite();
+    let arrived = frame_pixel(&comp, x, y);
+    assert!(
+        arrived.contains(&200) && arrived.contains(&100) && arrived.contains(&50),
+        "the picture stands alone once the fade has arrived, got {arrived:?}"
+    );
+    assert!(shell.backdrop_settled(), "and nothing more is owed");
+}
+
+/// One wallpaper replacing another crossfades: a frame part-way through is the
+/// mix of the two pictures, and neither is what is on screen on its own.
+///
+/// Including in the margins of the outgoing picture, where the ground being
+/// left was the backdrop colour — that is what the flattened copy of the
+/// outgoing ground is for, and a fade that skipped it would snap those margins
+/// to the arriving picture while the rest dissolved.
+#[test]
+fn one_wallpaper_replacing_another_crossfades_margins_and_all() {
+    let (mut shell, mut comp) = headless_desktop();
+    let mut desktop = pinboard_desktop();
+    with_backdrop(&mut desktop, Rgb::new(10, 20, 30));
+
+    // The outgoing picture is pillarboxed: it covers the screen as far as the
+    // column below and leaves the backdrop colour showing beyond it, which is
+    // where the margin is sampled.
+    let mut leaving = Surface::new(640, 480).expect("a screen-sized wallpaper");
+    leaving.fill_rect(0, 0, 500, 480, Color::rgb(200, 0, 0));
+    install_wallpaper(&mut shell, desktop.settings().backdrop, Some(leaving));
+    shell.present_desktop(&mut comp, &desktop);
+    comp.composite();
+    let (x, y) = CLEAR_OF_EVERYTHING;
+    let margin_before = frame_pixel(&comp, x, y);
+    assert!(
+        margin_before.contains(&10) && margin_before.contains(&20) && margin_before.contains(&30),
+        "the margin starts on the backdrop colour, got {margin_before:?}"
+    );
+
+    // The arriving one covers the whole screen, so both the picture and its
+    // margins have somewhere to dissolve to.
+    let mut arriving = Surface::new(640, 480).expect("a screen-sized wallpaper");
+    arriving.fill_rect(0, 0, 640, 480, Color::rgb(0, 0, 200));
+    shell.set_wallpaper(Some(arriving), desktop.settings().backdrop, WALLPAPER_AT_NS);
+    let span = backdrop_span_ns(&shell);
+    shell.advance_backdrop(WALLPAPER_AT_NS + span / 2);
+    shell.present_desktop(&mut comp, &desktop);
+    comp.composite();
+
+    let covered = frame_pixel(&comp, 300, 200);
+    assert!(
+        covered[0] > 0 && covered[2] > 0,
+        "where both pictures reach is the mix of the two, got {covered:?}"
+    );
+    let margin = frame_pixel(&comp, x, y);
+    assert!(
+        margin[2] > margin_before[2] && margin[2] < 200,
+        "the margin dissolves from the colour to the arriving picture, got {margin:?}"
+    );
+
+    shell.advance_backdrop(WALLPAPER_AT_NS + span);
+    shell.present_desktop(&mut comp, &desktop);
+    comp.composite();
+    let arrived = frame_pixel(&comp, x, y);
+    assert!(
+        arrived[2] > 190 && arrived[0] < 10,
+        "the arriving picture stands alone everywhere, got {arrived:?}"
     );
 }
 
@@ -7097,7 +7241,7 @@ fn a_wallpaper_that_does_not_cover_the_screen_shows_the_backdrop_in_its_margins(
     // and leaves every pixel outside it fully transparent.
     let mut paper = Surface::new(640, 480).expect("a screen-sized wallpaper");
     paper.fill_rect(220, 140, 200, 200, Color::rgb(200, 100, 50));
-    shell.set_wallpaper(Some(paper));
+    install_wallpaper(&mut shell, desktop.settings().backdrop, Some(paper));
     shell.present_desktop(&mut comp, &desktop);
     comp.composite();
 
@@ -7222,7 +7366,11 @@ fn a_partial_desktop_repaint_draws_what_a_whole_one_would() {
         paper.fill_rect(column * 16, 0, 8, 480, Color::rgb(40, shade, 120));
     }
     for (shell, comp) in [&mut cheap, &mut whole] {
-        shell.set_wallpaper(Some(paper.clone()));
+        install_wallpaper(
+            shell,
+            Backdrop::Colour(Rgb::new(10, 20, 30)),
+            Some(paper.clone()),
+        );
         frosted_window(shell, comp);
     }
     let mut desktops = [pinboard_desktop(), pinboard_desktop()];

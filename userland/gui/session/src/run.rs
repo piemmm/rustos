@@ -716,20 +716,33 @@ mod program {
     }
 
     /// Step everything the session animates to `now_ns`, so the frame
-    /// presented next carries it: the desktop's screen fade, and the locked
-    /// screen's own surface. Both are idle once nothing is in flight, which
-    /// is what leaves an idle desktop's park indefinite.
-    fn animate(
+    /// presented next carries it: the desktop's screen fade, the locked
+    /// screen's own surface, and the backdrop dissolving into another. All of
+    /// them are idle once nothing is in flight, which is what leaves an idle
+    /// desktop's park indefinite.
+    fn animate<S: DirectorySource>(
         fade: &mut ScreenFade,
         lock: &mut ScreenLock,
         clock: &mut SessionClock,
         shell: &mut DesktopShell,
+        desktop: &Desktop<S>,
         compositor: &mut Compositor,
         now_ns: u64,
     ) {
         fade.advance(now_ns, compositor);
         lock.advance(now_ns, shell, compositor);
         tick_clock(clock, shell, compositor, now_ns);
+        // A backdrop dissolving into another is a repaint of the desktop
+        // layer rather than a compositor state change, so each frame of it is
+        // the layer drawn again. Only a frame that changed the ground costs
+        // one, and only a running fade can have changed it — which is why the
+        // reveal witness may be answered from in here: the wallpaper is on
+        // screen but still arriving, and a user cannot yet see the desktop
+        // they configured.
+        if shell.advance_backdrop(now_ns) {
+            shell.present_desktop(compositor, desktop);
+            fade.set_awaiting_backdrop(!shell.backdrop_settled());
+        }
     }
 
     /// Read the wall clock and, when the minute has turned, put the new label
@@ -1330,6 +1343,7 @@ mod program {
                 self.shell,
                 self.desktop,
                 self.compositor,
+                tairix_rt::clock_get(),
             );
             self.shell.present_desktop(self.compositor, self.desktop);
             Ok(())
@@ -1608,6 +1622,7 @@ mod program {
             &mut shell,
             &desktop,
             &compositor,
+            tairix_rt::clock_get(),
         );
 
         // The session-side served-window table. Declared before the first
@@ -1631,8 +1646,9 @@ mod program {
         let mut fade = ScreenFade::begin(tairix_rt::clock_get(), &mut compositor);
         // The reveal witness says a user can see the desktop, so it waits for the
         // backdrop they chose rather than announcing a frame that carries the
-        // fallback colour in its place.
-        fade.set_awaiting_backdrop(!backdrop_ready);
+        // fallback colour in its place — and, once that backdrop lands, for it to
+        // finish dissolving in over that colour.
+        fade.set_awaiting_backdrop(!backdrop_ready || !shell.backdrop_settled());
         if let Err(code) = present(
             &mut shell,
             &mut compositor,
@@ -1958,7 +1974,10 @@ mod program {
                         now_ns,
                         fade.park_deadline_ns(
                             now_ns,
-                            tairix_rt::cachereport::fold_wait_deadline_ns(u64::MAX),
+                            shell.backdrop_park_deadline_ns(
+                                now_ns,
+                                tairix_rt::cachereport::fold_wait_deadline_ns(u64::MAX),
+                            ),
                         ),
                     ),
                 ))
@@ -1980,6 +1999,7 @@ mod program {
                     &mut lock,
                     &mut clock,
                     &mut shell,
+                    &desktop,
                     &mut compositor,
                     tairix_rt::clock_get(),
                 );
@@ -2212,9 +2232,10 @@ mod program {
                     &mut shell,
                     &desktop,
                     &compositor,
+                    tairix_rt::clock_get(),
                 );
                 if papered {
-                    fade.set_awaiting_backdrop(false);
+                    fade.set_awaiting_backdrop(!shell.backdrop_settled());
                 }
                 // Icon artwork that landed is drawn by asking for it again:
                 // every icon surface resolves through the one cache the
@@ -2711,6 +2732,7 @@ mod program {
                 &mut lock,
                 &mut clock,
                 &mut shell,
+                &desktop,
                 &mut compositor,
                 tairix_rt::clock_get(),
             );
@@ -3350,6 +3372,7 @@ mod program {
         shell: &mut DesktopShell,
         desktop: &Desktop<S>,
         compositor: &Compositor,
+        now_ns: u64,
     ) -> bool {
         let wanted = WallpaperSource::wanted(desktop.settings(), compositor.screen_rect());
         if pinboard.prepared.as_ref() == Some(&wanted) {
@@ -3365,7 +3388,7 @@ mod program {
                     let _ = writeln!(Stderr, "{reason}");
                 }
                 pinboard.prepared = Some(wanted);
-                shell.set_wallpaper(surface);
+                shell.set_wallpaper(surface, desktop.settings().backdrop, now_ns);
                 true
             }
         }
@@ -4732,7 +4755,7 @@ mod program {
             desktop.relist(now_ns);
         }
         if change.wallpaper {
-            prepare_wallpaper(pinboard, wallpapers, shell, desktop, compositor);
+            prepare_wallpaper(pinboard, wallpapers, shell, desktop, compositor, now_ns);
         }
         // A re-layout, a re-list, and a new wallpaper all show as the same
         // repaint of the desktop layer, so one present covers whichever of

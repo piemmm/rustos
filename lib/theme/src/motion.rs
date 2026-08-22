@@ -53,13 +53,20 @@ pub enum MotionInteraction {
     /// accepted, and the desktop revealing from that black and dissolving
     /// back into it when the session ends.
     SessionFade,
+    /// The desktop's backdrop giving way to another: the wallpaper arriving
+    /// over the plain backdrop colour once it has been read and fitted, and
+    /// one wallpaper dissolving into the next when the choice changes.
+    ///
+    /// Longer than the interactions above because it is the whole screen
+    /// changing under everything else, not one control answering a gesture.
+    BackdropChange,
 }
 
 impl MotionInteraction {
     /// Every interaction, in the order a [`MotionTheme`]'s duration table
     /// holds them: the table is indexed by the variant, so this order is the
     /// meaning of [`MotionTheme::new`]'s argument.
-    pub const ALL: [Self; 15] = [
+    pub const ALL: [Self; 16] = [
         Self::HoverEnter,
         Self::HoverExit,
         Self::PressCompress,
@@ -75,6 +82,7 @@ impl MotionInteraction {
         Self::StageTransition,
         Self::AttemptRejected,
         Self::SessionFade,
+        Self::BackdropChange,
     ];
 
     /// How many durations a [`MotionTheme`] carries.

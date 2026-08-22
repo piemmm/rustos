@@ -9,11 +9,11 @@ use core::cell::Cell;
 
 use tairix_abi::Duration64;
 use tairix_controls::{damage, TextAction, TextField, ValidationState};
-use tairix_font::BitmapFont;
+use tairix_font::{BitmapFont, TextShadow};
 use tairix_geometry::{Rect, Scale};
 use tairix_icon::{builtin_icon, IconKind};
 use tairix_input::{InputEvent, Key, NamedKey};
-use tairix_raster::{div255, Color, Surface};
+use tairix_raster::{Color, Surface};
 use tairix_theme::{Contrast, MotionInteraction, TextRole, Theme};
 
 use crate::chooser::{monogram_disc, monogram_of, AccountTile, Chooser, Step, OTHER_MONOGRAM};
@@ -80,12 +80,14 @@ pub(crate) const NAME_REQUIRED: &str = "Type a login name";
 /// is never a thing the person has to guess at.
 pub(crate) const BACK_HINT: &str = "Press Escape to choose another account";
 
-/// How much of the theme's desktop colour the legibility wash lays over the
-/// very top and bottom of the backdrop.
-const WASH_ALPHA: u8 = 140;
-
-/// The share of the screen's height each end of that wash covers.
-const WASH_BANDS: u32 = 3;
+/// How much of the theme's desktop colour sits behind each line of text
+/// drawn over a picture.
+///
+/// The desktop colour is the contrast-opposite of the on-surface ink in both
+/// built-in themes — near-black behind near-white text, near-white behind
+/// near-black — so one alpha serves either. Strong enough to hold a line
+/// against a bright photograph, and short of reading as a plate.
+const SHADOW_ALPHA: u8 = 200;
 
 /// The pill's edge, as a multiple of the theme's rim thickness: enough to
 /// stand in for the shared field's own rim, the gap inside it, and its focus
@@ -174,15 +176,13 @@ fn cut(text: String) -> String {
 pub enum Backdrop<'a> {
     /// The active theme's flat desktop colour, fully opaque.
     Desktop,
-    /// An already-decoded, already-fitted wallpaper under the theme's scrim.
+    /// An already-decoded, already-fitted wallpaper, painted as authored.
+    ///
+    /// Nothing darkens or blurs it: the text over it carries its own shadow
+    /// instead, so legibility costs the picture nothing.
     Wallpaper {
         /// The picture, in the same coordinates the frame is painted in.
         image: &'a Surface,
-        /// How much of the theme's desktop colour is laid over the picture,
-        /// from [`scrim_alpha`](crate::scrim_alpha). At full opacity this is
-        /// exactly [`Backdrop::Desktop`], so the wallpaper can never be the
-        /// reason text stops being legible.
-        scrim: u8,
     },
 }
 
@@ -338,7 +338,9 @@ pub struct AuthSurface {
 /// A settled stage is drawn at full strength with its own disc and no
 /// displacement, which is exactly what the fields below say; a stage giving
 /// way says so once here rather than threading four arguments through every
-/// part of the paint.
+/// part of the paint. The facts the whole frame shares — the shake's
+/// displacement and the text shadow — travel here too, so both stages of a
+/// transition cannot disagree about them.
 #[derive(Copy, Clone)]
 struct Draw<'a> {
     /// How much of its own opacity every element takes.
@@ -351,6 +353,9 @@ struct Draw<'a> {
     disc: bool,
     /// How far the disc, the name, and the pill are displaced sideways.
     offset: i32,
+    /// What every line of text is drawn over, or `None` where the ground is
+    /// the theme's own colour and the ink already contrasts with it.
+    shadow: Option<TextShadow>,
 }
 
 /// `rect` moved `by` pixels sideways.
@@ -499,6 +504,9 @@ impl AuthSurface {
     /// with no pixels, or a surface that could never be allocated — so a
     /// caller that must cover the screen fails closed instead of presenting
     /// something that covers nothing.
+    ///
+    /// Whether text carries a shadow behind it is decided here, once, from
+    /// `backdrop`: a picture gets one, the theme's own flat colour does not.
     #[must_use]
     pub fn render(
         &self,
@@ -512,12 +520,19 @@ impl AuthSurface {
         }
         let mut surface = Surface::new(screen.width, screen.height)?;
         paint_backdrop(&mut surface, theme, backdrop);
-        self.paint_chrome(&mut surface, screen, scale, theme);
+        let draw = Draw {
+            strength: u8::MAX,
+            heading: self.shown_heading(),
+            notice: &self.notice,
+            disc: true,
+            offset: self.shake_offset(screen, scale, theme),
+            shadow: text_shadow(theme, scale, backdrop),
+        };
+        self.paint_chrome(&mut surface, screen, scale, theme, draw.shadow);
 
-        let offset = self.shake_offset(screen, scale, theme);
         match self.stage {
-            Some(stage) => self.paint_stages(&mut surface, stage, screen, scale, theme, offset),
-            None => self.paint_settled(&mut surface, screen, scale, theme, offset),
+            Some(stage) => self.paint_stages(&mut surface, stage, screen, scale, theme, draw),
+            None => self.paint_settled(&mut surface, screen, scale, theme, draw),
         }
         if let Some(veil) = self.veil {
             // Through the wash, not a rectangle fill: this is a flat field over
@@ -1050,19 +1065,10 @@ impl AuthSurface {
         screen: Rect,
         scale: Scale,
         theme: &Theme,
-        offset: i32,
+        draw: Draw<'_>,
     ) {
-        let draw = Draw {
-            strength: u8::MAX,
-            heading: self.shown_heading(),
-            notice: &self.notice,
-            disc: true,
-            offset,
-        };
         match &self.mode {
-            Mode::Chooser => {
-                self.paint_chooser(surface, screen, scale, theme, draw.strength, draw.notice);
-            }
+            Mode::Chooser => self.paint_chooser(surface, screen, scale, theme, draw),
             Mode::Name(name) => self.paint_prompt(surface, name, screen, scale, theme, draw),
             Mode::Secret => self.paint_prompt(surface, &self.field, screen, scale, theme, draw),
         }
@@ -1088,7 +1094,7 @@ impl AuthSurface {
         screen: Rect,
         scale: Scale,
         theme: &Theme,
-        offset: i32,
+        draw: Draw<'_>,
     ) {
         let prompt_strength = stage.prompt_strength();
         let field = match &self.mode {
@@ -1100,8 +1106,11 @@ impl AuthSurface {
             screen,
             scale,
             theme,
-            u8::MAX - prompt_strength,
-            self.stage_notice(stage, Toward::Chooser),
+            Draw {
+                strength: u8::MAX - prompt_strength,
+                notice: self.stage_notice(stage, Toward::Chooser),
+                ..draw
+            },
         );
         self.paint_prompt(
             surface,
@@ -1114,35 +1123,35 @@ impl AuthSurface {
                 heading: self.stage_heading(stage.slot()),
                 notice: self.stage_notice(stage, Toward::Prompt),
                 disc: false,
-                offset,
+                ..draw
             },
         );
-        self.paint_travelling_disc(surface, stage, screen, scale, theme, offset);
+        self.paint_travelling_disc(surface, stage, screen, scale, theme, draw.offset);
     }
 
-    /// Paint the tile grid and its one hint line at `strength`.
+    /// Paint the tile grid and its one hint line at `draw`'s strength.
     fn paint_chooser(
         &self,
         surface: &mut Surface,
         screen: Rect,
         scale: Scale,
         theme: &Theme,
-        strength: u8,
-        notice: &str,
+        draw: Draw<'_>,
     ) {
         let Some(chooser) = self.chooser.as_ref() else {
             return;
         };
-        if strength == 0 {
+        if draw.strength == 0 {
             return;
         }
-        chooser.render(surface, screen, scale, theme, strength);
+        chooser.render(surface, screen, scale, theme, draw.strength, draw.shadow);
         draw_centred(
             surface,
             chooser.hint_rect(screen, scale),
-            notice,
+            draw.notice,
             BitmapFont::for_role(theme.fonts(), TextRole::Body, scale),
-            at_strength(theme.palette().on_surface_muted, strength),
+            at_strength(theme.palette().on_surface_muted, draw.strength),
+            draw.shadow,
         );
     }
 
@@ -1238,6 +1247,7 @@ impl AuthSurface {
             draw.heading,
             BitmapFont::for_role(theme.fonts(), TextRole::Heading, scale),
             at_strength(palette.on_surface, draw.strength),
+            draw.shadow,
         );
 
         let pill = self.field_rect(screen, scale, theme);
@@ -1265,6 +1275,7 @@ impl AuthSurface {
             draw.notice,
             caption,
             at_strength(ink, draw.strength),
+            draw.shadow,
         );
 
         if self.chooser.is_none() {
@@ -1277,6 +1288,7 @@ impl AuthSurface {
                 BACK_HINT,
                 caption,
                 at_strength(palette.on_surface_muted, draw.strength),
+                draw.shadow,
             );
         }
     }
@@ -1326,7 +1338,14 @@ impl AuthSurface {
     }
 
     /// Paint the clock, the date, and the host name at the top of the column.
-    fn paint_chrome(&self, surface: &mut Surface, screen: Rect, scale: Scale, theme: &Theme) {
+    fn paint_chrome(
+        &self,
+        surface: &mut Surface,
+        screen: Rect,
+        scale: Scale,
+        theme: &Theme,
+        shadow: Option<TextShadow>,
+    ) {
         let band = chrome_band(screen, scale);
         if self.chrome.is_empty() || band.height == 0 {
             return;
@@ -1349,7 +1368,7 @@ impl AuthSurface {
             ),
         ] {
             let font = BitmapFont::for_role(theme.fonts(), role, scale);
-            draw_centred(surface, band, text, font, ink);
+            draw_centred(surface, band, text, font, ink, shadow);
         }
     }
 }
@@ -1357,8 +1376,7 @@ impl AuthSurface {
 /// The block the secret field and the lines under it occupy on `screen`:
 /// centred horizontally, under the account's disc and name.
 ///
-/// This is the region whose legibility the scrim is chosen for, so it is
-/// wider than the field itself — the notice under the pill is prose, and a
+/// Wider than the field itself — the notice under the pill is prose, and a
 /// block only as wide as the pill would cut it short. A screen smaller than
 /// the block gets the whole screen: the prompt is still usable, and a surface
 /// that refused to draw on a small display would be one that did not ask.
@@ -1409,46 +1427,41 @@ fn cooldown_notice(remaining: Duration64) -> String {
     format!("Too many attempts — try again in {seconds}s")
 }
 
-/// Fill `surface` with what lies behind the column.
+/// Fill `surface` with what lies behind the column: the theme's desktop
+/// colour, and over it the picture exactly as authored.
 ///
-/// The picture is darkened by one wash whose strength varies down the screen:
-/// the scrim the panel's legibility asks for everywhere, deepened at the ends
-/// by [`WASH_ALPHA`]. No blur is reachable from here — that lives in the
-/// compositor — so the ends carry more of the desktop colour instead, where
-/// the chrome and the prompt sit. The wash *is* the desktop colour, so over
-/// the flat backdrop it composites to exactly what is already there and only
-/// a picture ever sees it.
-///
-/// Laid as one pass per pixel rather than a scrim with washes over it: two
-/// composites of the same colour are one composite of the alpha they compose
-/// to, and a picture that reaches the surface's 8 bits once instead of twice
-/// keeps tonal steps a second rounding would flatten into bands.
+/// Nothing darkens, washes, or blurs a wallpaper here. What the text needs to
+/// stay legible it carries itself, in the shadow behind each line, so the
+/// picture the person chose reaches the screen whole.
 fn paint_backdrop(surface: &mut Surface, theme: &Theme, backdrop: Backdrop<'_>) {
-    let desktop = Color::from(theme.palette().desktop);
-    surface.fill(desktop);
-    let (w, h) = (surface.width(), surface.height());
-    let scrim = match backdrop {
-        Backdrop::Wallpaper { image, scrim } => {
-            surface.blit(0, 0, image);
-            scrim
-        }
-        Backdrop::Desktop => 0,
-    };
-    let band = (h / WASH_BANDS).max(1);
-    let wash = |alpha| Color::rgba(desktop.r, desktop.g, desktop.b, alpha);
-    let ends = wash(washes_composed(WASH_ALPHA, scrim));
-    let middle = wash(scrim);
-    surface.fill_vertical_gradient(0, 0, w, band, ends, middle);
-    surface.fill_vertical_gradient(0, band, w, h.saturating_sub(2 * band), middle, middle);
-    surface.fill_vertical_gradient(0, h.saturating_sub(band), w, band, middle, ends);
+    surface.fill(Color::from(theme.palette().desktop));
+    if let Backdrop::Wallpaper { image } = backdrop {
+        surface.blit(0, 0, image);
+    }
 }
 
-/// The single alpha two washes of the *same* colour compose to.
+/// The shadow every line of text takes over `backdrop`.
 ///
-/// Each keeps `1 - a` of what it covers, so what survives both is the product
-/// of what each leaves.
-fn washes_composed(first: u8, second: u8) -> u8 {
-    255 - div255(u32::from(255 - first) * u32::from(255 - second))
+/// A picture is unknown ground, so each line carries the theme's own desktop
+/// colour behind it — the contrast-opposite of the ink in both built-in
+/// themes. Over the flat backdrop that same colour *is* the ground, so a
+/// shadow would compose to exactly what is already there: two glyph passes
+/// to draw nothing.
+pub(crate) fn text_shadow(
+    theme: &Theme,
+    scale: Scale,
+    backdrop: Backdrop<'_>,
+) -> Option<TextShadow> {
+    match backdrop {
+        Backdrop::Desktop => None,
+        Backdrop::Wallpaper { .. } => {
+            let behind = Color::from(theme.palette().desktop);
+            Some(TextShadow::new(
+                Color::rgba(behind.r, behind.g, behind.b, SHADOW_ALPHA),
+                scale,
+            ))
+        }
+    }
 }
 
 /// Paint one field as the prompt's pill.

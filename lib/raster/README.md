@@ -176,6 +176,13 @@ This crate owns:
   identity, `0` pure grey). One definition of saturation reduction, applied on
   the way in, so a caller that draws the same sprite hot and greyed — a window
   title bar's identity icon, focused and not — keeps one cached copy of it.
+- `Surface::blit_faded` — the same walk with each source pixel weakened to a
+  strength as it lands, so an opaque source mixes the destination toward it in
+  exactly that proportion. One picture dissolving into another is this: the
+  desktop paints the arriving wallpaper and lays the ground that was on screen
+  over it at the inverse strength. Weakening on the way in leaves the source
+  untouched, so neither end of a crossfade is copied to be faded, and the two
+  ends (`0` and `255`) cost nothing.
 - `Surface::fill_vertical_gradient` — a top-to-bottom colour ramp, one span
   fill per row. Interpolation is in *straight* alpha, so a ramp that fades out
   keeps its hue instead of being dragged toward black. The ramp is evaluated in

@@ -110,6 +110,19 @@ double-width scalar), fitted to it, with no bearing to apply — so a column of
 text lines up on the pixel grid instead of each glyph rounding into place
 alone.
 
+## Text over unknown ground takes a shadow
+
+`TextShadow` and `BitmapFont::draw_text_shadowed` are the one definition of
+"draw the run offset in a shadow colour, then draw it in the ink", for text
+laid over ground the caller does not control — a wallpaper behind the login
+screen's chrome, an icon label on a picture. The offset is one *logical* pixel
+through the shared `Scale`, floored at one physical pixel so the shadow cannot
+vanish at a high UI scale, and `TextShadow::new` is the only place that
+derivation lives. The shadowed draw returns the same pen `draw_text` does, so a
+caller advancing a run cannot get a different layout with the shadow on, and
+both passes run under one client borrow — the ink pass reuses the glyphs the
+shadow pass just cached.
+
 ## Fitting a label to its box
 
 Two shared fitters sit on top of that measurement, so no text region writes

@@ -860,6 +860,32 @@ impl Surface {
         });
     }
 
+    /// [`blit`](Self::blit), with every source pixel weakened to `strength`
+    /// of itself as it lands — `0` draws nothing at all, `255` is a plain
+    /// blit, and an opaque source at `s` mixes the destination toward it in
+    /// exactly that proportion.
+    ///
+    /// This is how one picture dissolves into another: the desktop paints the
+    /// arriving wallpaper, then lays the ground that was on screen over it at
+    /// the inverse strength, so a frame part-way through a crossfade is the
+    /// straight mix of the two. Weakening on the way in leaves the source
+    /// untouched, so neither picture is copied to be faded.
+    pub fn blit_faded(&mut self, x: i32, y: i32, src: &Surface, strength: u8) {
+        // A full-strength fade is the plain blit, and a zero-strength one
+        // changes nothing: both are taken here rather than per pixel so the
+        // ends of every fade cost nothing.
+        if strength == 255 {
+            self.blit(x, y, src);
+            return;
+        }
+        if strength == 0 {
+            return;
+        }
+        self.blit_with(x, y, src, |dst, source| {
+            blend_span(dst, source, strength, DitherRow::NEAREST, 0);
+        });
+    }
+
     /// The one blit walk: resolve which rows and columns of `src` land inside
     /// the clip, then hand each destination row and the source row it covers
     /// to `lay`.

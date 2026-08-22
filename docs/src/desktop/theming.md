@@ -194,6 +194,11 @@ bundles, under a stable `ThemeId`:
     from that black and dissolving back into it when the session ends. One
     span for all four, so the two halves of a hand-over meet on the same
     colour at the same rate.
+  - `BackdropChange` (`600` ms) is the desktop's backdrop giving way to
+    another: the wallpaper arriving over the plain backdrop colour once it has
+    been read and fitted, and one wallpaper dissolving into the next when the
+    choice changes. Longer than a control's own motion because it is the whole
+    screen changing under everything else.
   - A theme in reduced motion reports **every** duration as `0`, which a
     consumer reads as "change it now". That is the whole reduced-motion path:
     the state still changes visibly, through contrast and shape, and no

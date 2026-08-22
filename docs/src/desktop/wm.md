@@ -136,7 +136,7 @@ fraction. The row is resolved once per **screen** row and indexed by the
 screen column, and `WindowRow::sample` scales window opacity and
 rounded-corner coverage at the same bias, so a translucent window's own
 gradients survive too. This is one shared definition with the rest of the
-rasteriser — the login screen's scrim, a translucent plate, and
+rasteriser — the login screen's entry veil, a translucent plate, and
 `frost_region`'s mix-back all round the same way — not a compositor-local
 trick.
 

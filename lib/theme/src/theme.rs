@@ -395,6 +395,7 @@ fn common_motion() -> MotionTheme {
         240,  // stage transition
         420,  // attempt rejected
         1000, // session fade
+        600,  // backdrop change
     ])
 }
 

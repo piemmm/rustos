@@ -13,7 +13,7 @@
 //! inside it, which is what lets [`crate::panel_rect`] answer where the
 //! prompt is without measuring a font.
 
-use tairix_font::BitmapFont;
+use tairix_font::{BitmapFont, TextShadow};
 use tairix_geometry::{Rect, Scale};
 use tairix_raster::{Color, Surface};
 use tairix_theme::Rgba;
@@ -99,9 +99,8 @@ pub(crate) const SIDE_MARGIN: u32 = 32;
 /// Where the prompt's three parts sit on the screen.
 ///
 /// One definition, so the disc, the name, and the block cannot drift apart —
-/// and so [`crate::panel_rect`], which the embedder asks for the region whose
-/// legibility the scrim must protect, is the very block the field is drawn
-/// in rather than a second guess at it.
+/// and so [`crate::panel_rect`], which an embedder asks where the prompt is,
+/// is the very block the field is drawn in rather than a second guess at it.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub(crate) struct Prompt {
     /// The chosen account's disc, centred at the top of the body.
@@ -282,18 +281,21 @@ fn confine(band: Rect, bounds: Rect) -> Option<Rect> {
     Some(band)
 }
 
-/// Draw `text` centred in `band`, in `ink`, truncated to the band's width.
+/// Draw `text` centred in `band`, in `ink`, truncated to the band's width,
+/// over `shadow` where the ground is a picture rather than a known colour.
 ///
 /// The one line-drawing definition the column shares, so the clock, the
-/// account name, the notice, and the step-back line all centre and clip
-/// alike. A band shorter than the font's line box draws nothing rather than
-/// letting text spill past the rectangle the surface reports as damaged.
+/// account name, the notice, and the step-back line all centre, clip, and
+/// take their shadow alike. A band shorter than the font's line box draws
+/// nothing rather than letting text spill past the rectangle the surface
+/// reports as damaged.
 pub(crate) fn draw_centred(
     surface: &mut Surface,
     band: Rect,
     text: &str,
     font: BitmapFont,
     ink: Rgba,
+    shadow: Option<TextShadow>,
 ) {
     let line = font.line_height();
     if text.is_empty() || band.width == 0 || line > band.height {
@@ -301,11 +303,11 @@ pub(crate) fn draw_centred(
     }
     let shown = font.truncate_to_width(text, band.width);
     let width = font.text_width(shown);
-    font.draw_text(
-        surface,
-        centre_on(band.origin.x, band.width, width),
-        down(band.origin.y, (band.height - line) / 2),
-        shown,
-        Color::from(ink),
-    );
+    let x = centre_on(band.origin.x, band.width, width);
+    let y = down(band.origin.y, (band.height - line) / 2);
+    let ink = Color::from(ink);
+    match shadow {
+        Some(shadow) => font.draw_text_shadowed(surface, x, y, shown, ink, shadow),
+        None => font.draw_text(surface, x, y, shown, ink),
+    };
 }

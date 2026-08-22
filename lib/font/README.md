@@ -83,6 +83,15 @@ the payload exceeds the pre-Korean size ceiling.
   check and a row address are paid per row rather than per pixel and a glyph
   off the edge clips instead of being tested pixel by pixel. `text_width` and
   `truncate_to_width` give the shared layout arithmetic.
+- `font::TextShadow` / `font::BitmapFont::draw_text_shadowed` — the one
+  definition of drawing a run offset in a shadow colour and then in the ink,
+  for text over ground the caller cannot know: a wallpaper behind the login
+  screen's chrome, an icon label on a picture. The offset is one *logical*
+  pixel through the shared `Scale`, floored at one physical pixel so the shadow
+  cannot vanish at a high UI scale, and it is derived in exactly one place.
+  The shadowed draw returns the same pen `draw_text` does, so a run's layout is
+  identical with the shadow on, and both passes run under one client borrow —
+  the ink pass reuses the glyphs the shadow pass just cached.
 - `font::BitmapFont::elide_to_width` / `font::BitmapFont::wrap_to_width` —
   the two shared fitters over that arithmetic, so no text region writes its
   own break loop (`AGENTS.md` §2.2). The first returns the longest prefix
