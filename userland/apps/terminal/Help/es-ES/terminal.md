@@ -70,15 +70,17 @@ azul para el que esté seleccionado.
 | Bamboleo | Un ligero vaivén horizontal errante, como el de un tubo fuera de tiempo. |
 
 Cada cambio surte efecto inmediatamente y se guarda en el perfil propio
-del usuario, en `~/Settings/Terminal/terminal.conf`, de modo que un
-terminal posterior se abra de la misma forma. El perfil es un archivo de
-texto simple con líneas `clave valor` donde `#` comienza un comentario,
-y se puede editar a mano; los colores se escriben como seis dígitos
-hexadecimales puros (`1b242e`), nunca con un `#` inicial, que comenzaría
-un comentario. Un perfil ausente significa los valores predeterminados;
-un perfil que el terminal no puede leer o analizar también significa los
-valores predeterminados, y la razón se indica en el flujo de error
-estándar.
+del usuario, de modo que un terminal posterior se abra de la misma forma.
+El sistema operativo custodia el perfil a través de su servicio de
+configuración, y es privado del terminal: ninguna otra aplicación puede
+leerlo ni modificarlo. Solo se almacena lo que el usuario cambió
+realmente, así que *Restaurar valores predeterminados* elimina esas
+elecciones en lugar de congelar los valores de hoy: entonces se aplica lo
+que cambie el administrador o una versión posterior del terminal. Un ajuste
+que el terminal no puede interpretar se queda en su valor predeterminado y
+se indica en el flujo de error estándar, y un servicio de configuración
+inalcanzable deja al terminal funcionando con los valores con los que se
+distribuye, lo que también se indica.
 
 ## EXIT STATUS
 

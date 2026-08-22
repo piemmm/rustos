@@ -35,6 +35,7 @@ members = [
     "lib/abi-sys",
     "lib/abi-trap",
     "lib/appconf",
+    "lib/appdata",
     "lib/appload",
     "lib/binfmt",
     "lib/blkclient",

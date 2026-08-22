@@ -1,0 +1,41 @@
+[package]
+name = "tairix-appdata"
+description = "TAIRiX app-data client: the one way an application reaches its own settings — the bundle-defaults fallback layer, the whole-document read over APPDATA_ENDPOINT, local staging, and one atomic commit. No app spells a path or names its own bundle identifier (plans/APPDATA.md, §3 lib/)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+# The `appdata-v1` wire surface (`APPDATA_ENDPOINT`, `AppDataRequest`, the
+# document reply codec) and the `Errno` table every refusal is reported with.
+tairix-abi = { path = "../abi", version = "=0.0.0" }
+# The one `key = value` document engine: the same parser, typed accessors, and
+# grammar validators the daemon applies, so a client and the service can never
+# disagree about what a document means or which keys are legal.
+tairix-appconf = { path = "../appconf", version = "=0.0.0" }
+
+# The syscall-backed host (`rt` module): the `ipc_call` transport to the
+# app-data service and the `fs_*` read of the calling bundle's own shipped
+# defaults. Pulled in only by consumers that run on the TAIRiX runtime, so a
+# host test injects its own host instead of linking the userland runtime.
+tairix-rt = { path = "../rt", version = "=0.0.0", optional = true }
+
+# The one shared bundle-resolution order — the same one the shell launches
+# through and `man` reads a bundle's help from — so an application's shipped
+# defaults and its help can never come from different bundles.
+tairix-cmdres = { path = "../cmdres", version = "=0.0.0", optional = true }
+
+[features]
+rt = ["dep:tairix-rt", "dep:tairix-cmdres"]
+# The fake service and volume an application's own tests drive this client
+# over (`fake` module). Test scaffolding, enabled from a `[dev-dependencies]`
+# entry and never by a program: it exists in `lib/*` because every application
+# migrating onto the store needs the same fake, and two copies of it would be
+# two different ideas of what the service does.
+test-util = []

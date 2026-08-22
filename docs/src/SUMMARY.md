@@ -46,6 +46,7 @@
 - [Overview](./lib/overview.md)
   - [`tairix-abi`](./lib/abi.md)
   - [`tairix-appconf`](./lib/appconf.md)
+  - [`tairix-appdata`](./lib/appdata.md)
   - [`tairix-appload`](./lib/appload.md)
   - [`tairix-binfmt`](./lib/binfmt.md)
   - [`tairix-blkclient`](./lib/blkclient.md)

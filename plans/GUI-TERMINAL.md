@@ -57,19 +57,24 @@ them — reads `chrome_insets` rather than predicting an extent.
 
 One [`Profile`](../userland/apps/terminal/src/profile.rs) holds everything a
 user can change: the colour scheme, their own custom scheme's colours, the
-text size, and the strength of every screen effect. It is stored per user at
-`/Users/<u>/Settings/Terminal/terminal.conf` in the same `key value` / `#`
-comment grammar every line-oriented TAIRiX configuration store shares, so it
-can be read and edited with any text editor.
+text size, and the strength of every screen effect. It lives in the OS
+app-data store, reached through `lib/appdata`, so it is **private to this
+application**: the store is gated on the bundle identity the kernel attests
+and no other app the user launches can read or rewrite it
+(`plans/APPDATA.md`). It was a file this app wrote under the user's home until
+AD5 migrated it.
 
-- Closed key registry (`ProfileKey`), whole-document fail-closed parse,
-  `render`/`parse` exact inverses, every key always emitted.
-- An **absent** document is the ordinary state of a fresh account and means
-  the defaults, silently. Anything else unusable — no home, a refused read,
-  non-UTF-8, a document the parser refuses — also means the defaults, but says
-  so on `stderr`.
-- Written by the app under the launching user's own identity; no new
-  capability, and no other process writes it.
+- Closed key registry (`ProfileKey`) of dotted keys in the store's shared
+  `key = value` format. A save writes only what the store's layers do not
+  already imply, and *Restore defaults* removes the user's opinions rather
+  than freezing today's values.
+- A key no layer sets means its documented default, silently. A stored value
+  the registry refuses costs only itself — that one field stays at its default
+  and the key is named on `stderr` — and a store the service cannot serve
+  leaves the bundle's shipped defaults standing, also said on `stderr`.
+- Reached through the app-data service under this bundle's kernel-attested
+  identity. The app writes no file of its own and holds no new capability;
+  `CAP_APPDATA_ADMIN` is the service's, never an app's.
 - Colours are bare `rrggbb`, never `#rrggbb`: the grammar's comment marker
   would cut the line at the `#`.
 

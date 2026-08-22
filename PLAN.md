@@ -3370,7 +3370,8 @@ Shipped (headless-testable, model + renderer over injected seams):
   sizes its window from the face it actually draws with (80×25 plus the shared
   `WindowFrame` furniture, stepping the *text size* down rather than the grid
   on a display too small — no compile-time window size), carries a per-user
-  profile at `~/Settings/Terminal/terminal.conf`, eight colour schemes
+  profile in the OS app-data store (private to the app, `plans/APPDATA.md`),
+  eight colour schemes
   including a user-authored one, a right-click menu whose every advertised
   shortcut is really honoured, an in-window settings sheet built from the
   shared Reactive Alloy controls, and a typed screen-effect pipeline
@@ -7823,7 +7824,7 @@ future contributor needs from this file:
 
 ---
 
-## APPDATA — per-app settings, secrets, blobs and temporary files (`plans/APPDATA.md`)  **[AD1–AD4 DONE; AD5–AD10 REMAINING]**
+## APPDATA — per-app settings, secrets, blobs and temporary files (`plans/APPDATA.md`)  **[AD1–AD5 DONE; AD6–AD10 REMAINING]**
 
 `plans/APPDATA.md` is the binding design and carries the settled decisions,
 the fixed bounds, and the per-stage state; it is not repeated here. What a
@@ -7860,6 +7861,14 @@ future contributor needs from this file:
   `CAP_APPDATA_ADMIN`, and the gated `Settings/Apps` / `Library/Apps` roots
   provisioned with every account by all three home provisioners from one
   shared definition.
+- **A read is one whole document, not one key.** A per-key read cost the daemon
+  a file read and a parse *per key*, so an app with a dozen settings paid a
+  dozen of each at start-up. `ConfigRead` answers with the merged document —
+  policy layer, the app's own settings over it, the caller's own staged edits
+  over those — as canonical text the client parses once with the same format
+  engine. The reply is whole or absent: a document that exceeds the capacity the
+  request declared comes back as the length to retry with and no body, so no
+  caller can parse a fragment as a store.
 - **The gate needed a §5.3 fix first.** A `required_cap` governed *access to*
   an inode but not removal of the name holding it: `unlink`/`rmdir`/`rename`
   authorise the holding *directory*, and a same-parent rename never authorises
@@ -7879,11 +7888,33 @@ future contributor needs from this file:
   credential database — `users_db_read` hands over the whole `users-v1` text
   including PBKDF2 records, and a compromised settings store must not be able
   to exfiltrate password material.
-- **Remaining:** the `lib/appdata` client, its bundle-defaults fallback layer,
-  and the first migration (AD5), the public scope (AD6), the sealed scope and
-  its key-protector seam (AD7), descriptor-backed blobs (AD8), temporary files
-  and their reaping (AD9), and the remaining migrations plus the charter
-  amendments (AD10).
+- **Landed (AD5):** `lib/appdata` — the client — and the first migration. One
+  call opens the store; every read after it is local; every write is staged
+  locally and published as one atomic commit. It owns the bundle-defaults layer,
+  because it is the only principal that can name its own bundle without a
+  lookup, and it degrades to that layer with a typed reason when the service
+  cannot be reached — so an app always starts, and is never told a change was
+  saved that was not. A `set` deliberately stages nothing when the effective
+  value is unchanged, which is what keeps a user's own file holding only what
+  the user chose. `terminal` is migrated and its hand-rolled `key value`
+  parser, renderer, bound, error types, and `~/Settings/Terminal/terminal.conf`
+  path are deleted.
+- **A read answers with the whole document, not one key.** AD4's first wire
+  shape was a per-key `ConfigGet` plus a paged `ConfigList`, and the first real
+  client showed why that was wrong: a per-key read cost the service a file read
+  and a parse *each*, so a thirteen-setting profile cost thirteen of both at
+  start-up, and a client holding the document needs no listing call at all. Both
+  operations, the page codec, the key record, and the prefix grammar they needed
+  are gone; a read declares the caller's buffer and gets the whole merged
+  document or the length it needs, never a fragment.
+- **"Restore defaults" is an unset, not a write.** The migrated settings sheet
+  used to reset to the app's compiled defaults and save them, freezing today's
+  values into the user's document so no policy or later default could ever
+  apply. The sheet now states the intent and the store answers it: the user's
+  opinions are removed and the profile the remaining layers imply is read back.
+- **Remaining:** the public scope (AD6), the sealed scope and its
+  key-protector seam (AD7), descriptor-backed blobs (AD8), temporary files and
+  their reaping (AD9), and the remaining migrations (AD10).
 - **A boot-floor program has no app identity.** The embedded program registry
   carries an `rxe` and a capability request, not a signed manifest, so a
   program launched from it cannot be attributed to a publisher and gets no

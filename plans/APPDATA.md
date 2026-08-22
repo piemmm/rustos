@@ -27,7 +27,7 @@ home, under its own authority, with `CAP_FS_ACCESS`:
 
 | Consumer | Path it invents |
 |---|---|
-| `userland/apps/terminal` | `<home>/Settings/Terminal/terminal.conf` (`profile.rs:69`) |
+| `userland/apps/terminal` | `<home>/Settings/Terminal/terminal.conf` — **migrated** (AD5) |
 | `userland/apps/fstree` | `<home>/Settings/fstree/config` (`settings.rs`) |
 | `lib/wallpaper` / `userland/gui/session` | `<home>/Settings/Pinboard/pinboard.conf` |
 | `userland/apps/applib` | `<home>/Settings/ProgramLibrary/library.conf` |
@@ -528,65 +528,85 @@ field the operation does not use left non-zero refuses rather than guessing.
 
 | Request | Stage | Effect |
 |---|---|---|
-| `ConfigGet { key }` | AD4 | own value, or `NotFound` |
+| `ConfigRead { capacity }` | AD4 | the caller's **whole** merged document, or the length it needs |
 | `ConfigSet { key, value }` | AD4 | stage a write |
 | `ConfigUnset { key }` | AD4 | stage a removal |
 | `ConfigCommit` | AD4 | publish staged writes atomically |
-| `ConfigList { prefix, cursor }` | AD4 | bounded, paged key listing |
-| `PublicGet { bundle_id, key }` / `PublicSet` | AD6 | a **foreign** app's public scope, and one's own |
-| `VaultGet` / `VaultSet` / `VaultUnset` | AD7 | the sealed scope |
+| `PublicRead { bundle_id }` / `PublicSet` | AD6 | a **foreign** app's public scope, and one's own |
+| `VaultRead` / `VaultSet` / `VaultUnset` | AD7 | the sealed scope |
 | `BlobOpen { name, mode }` | AD8 | descriptor grant handle for a blob |
 | `BlobDelete { name }` / `BlobList { cursor }` | AD8 | manage own blobs |
 | `TempCreate {}` | AD9 | descriptor grant handle for a fresh temp file |
 | `QuotaGet {}` | AD8 | own usage and ceiling |
 
-**No `scope` field, and the record is variable-width.** Two corrections to an
-earlier draft of this plan, both of which it got wrong.
+**A read answers with the whole document, not one key.** This corrects an
+earlier draft of this plan, which specified `ConfigGet { key }` and a paged
+`ConfigList`. Both were the wrong shape:
 
-- The draft put a `scope` selector on every config request. AD4 has exactly one
-  scope, so a `ConfigScope` enum with a single variant would be interface built
-  for a stage that has not landed — §2.3/§2.4 forbid it, and §2.13 explicitly
-  blesses changing the wire in place when the second scope arrives. The scope
-  therefore enters with AD6, in the same change that gives it a second legal
-  value; the same rule is applied inside the daemon, so its store surface names
-  the private document plainly rather than carrying a one-value selector of its
-  own.
-- The draft specified fixed-width records. A padded frame would put a kilobyte
-  of zeroes on the hot settings-read path: a `ConfigGet` is a couple of dozen
-  bytes and a `ConfigCommit` is sixteen. The record is length-prefixed instead,
-  bounded by `APPDATA_MAX_REQUEST`, exactly as the `users_admin` codec is; the
-  *reply* frames stay fixed-width where they carry a full-width buffer.
+- A per-key read costs the daemon a **file read and a parse per key**. An app
+  with a dozen settings paid a dozen of each at start-up, which is exactly the
+  premature pessimisation §2.16 forbids — and the client already links the
+  format engine, so it can parse once and answer every `get` locally.
+- `ConfigList` then has nothing to do: a client holding the document can
+  enumerate it without a call, so the paged listing, its cursor, its
+  fixed-width key record, and the `validate_key_prefix` grammar it needed were
+  all surface with no consumer. All four are gone.
+
+The reply is a whole document **or nothing**: the request declares the caller's
+reply-buffer capacity, and a document that does not fit comes back as the byte
+count it needs (`ConfigDocument::NeedsCapacity`) with no body. A partly
+transferred document is therefore not representable, so no caller can parse a
+fragment as a store or splice two snapshots together.
+
+What the served document is: the policy layer, the app's own settings over it,
+and the caller's own staged edits over those, rendered *canonically* — one line
+per setting, no comments, no duplicates. That normalisation applies only to the
+view; the app's own file keeps its comments, its ordering, and the lines the
+grammar refused, because a save must never destroy what a human wrote.
+
+**The record is variable-width.** Also a correction: the draft specified
+fixed-width requests, and a padded frame would put a kilobyte of zeroes on the
+hot settings path for a request that is sixteen bytes. It is length-prefixed
+instead, bounded by `APPDATA_MAX_REQUEST`, exactly as the `users_admin` codec
+is.
+
+**No `scope` field.** AD4 has exactly one scope, so a `ConfigScope` enum with a
+single variant would be interface built for a stage that has not landed —
+§2.3/§2.4 forbid it, and §2.13 blesses changing the wire in place when the
+second scope arrives. The same rule holds inside the daemon: its store surface
+names the private document plainly rather than carrying a one-value selector.
 
 The ABI is structural only. It bounds the record's shape, its lengths, and its
 text encoding; the **grammar** of a key and a value has one home,
 `lib/appconf`, and the daemon applies it through that engine's own validators —
 the `users_admin` precedent, where the semantic field rules live in `lib/users`.
-The two key/value byte bounds are the one exception, and they are not
-duplicated: they are `abi-v1` wire field widths *and* the grammar's own bounds,
-`lib/abi` may have no dependencies, so the single definition lives in
-`appdata_ipc` and `lib/appconf` imports it.
+The three byte bounds are the one exception, and they are not duplicated: the
+key, the value, and a whole document all cross the wire as fields, so they are
+`abi-v1` widths *and* the grammar's own bounds; `lib/abi` may have no
+dependencies, so the single definition lives in `appdata_ipc` and `lib/appconf`
+imports it.
 
 **Writes are staged per calling process instance, not per app.** Keyed on the
 attested `ProcId` — unforgeable and never reused — so two processes of one app
 cannot publish each other's half-finished edits. A session holds only its
 *pending edits*, not a whole document, so it is small; the document is loaded at
-commit. `ConfigGet` sees the caller's own pending edits first, so a settings
-sheet reads back what it just set, while every other principal still sees the
-committed value. A commit renders, writes a sibling temporary, flushes, and
-renames over the live document, so a crash leaves either the old document or the
-new one.
+commit. `ConfigRead` applies the caller's own pending edits over the merged
+view, so a settings sheet reads back what it just set while every other
+principal still sees the committed value. A commit renders, writes a sibling
+temporary, flushes, and renames over the live document, so a crash leaves either
+the old document or the new one.
 
 No primitive tells a server that a peer died, so an abandoned session is
 reclaimed by **age** (`STAGING_IDLE_NS`). Losing an abandoned session's edits is
 exactly the contract already stated: a caller that never commits changes
 nothing.
 
-Every listing is paged and bounded. Every entry point follows §5.4: attest the
-caller, check authority before touching state, validate every input, log the
-security-relevant decisions, fail closed.
+Every entry point follows §5.4: attest the caller, check authority before
+touching state, validate every input, log the security-relevant decisions, fail
+closed.
 
 Secrets are never enumerable or readable across apps — there is no foreign
-equivalent of `PublicGet` for the sealed scope.
+equivalent of `PublicRead` for the sealed scope.
 
 ### 3.7 Secrets (`secret.vault`)
 
@@ -646,10 +666,10 @@ scope for this plan and is recorded here rather than papered over.
 ### 3.9 The client API (`lib/appdata`)
 
 ```rust
-let mut s = Settings::open()?;              // own private scope
-let size: u32 = s.get_u32("font.size")?.unwrap_or(14);
-s.set_u32("font.size", 16)?;
-s.commit()?;                                // atomic
+let mut s = Settings::open(&mut host, OWN_WORD);   // one call: the whole document
+let size = s.u32("font.size")?.unwrap_or(14);     // local, no call
+s.set_u32("font.size", 16)?;                      // stages, locally
+s.commit()?;                                      // publishes, atomically
 
 let peer = Settings::open_public("os.tairix.terminal")?;   // foreign, read-only
 let mut v = Vault::open()?;                 // sealed scope
@@ -659,9 +679,68 @@ let blob = Blobs::open()?.open("index", BlobMode::ReadWrite)?;  // real fd
 let tmp  = Temp::create()?;                                     // real fd
 ```
 
-No app ever spells a path, and no app names its own bundle id. Both come from
-the attested identity, so an app cannot reach outside its own scope by
-construction rather than by check.
+`open` costs one `ConfigRead`; every `get` after it is a lookup in the document
+the client already holds and parsed, so an app's start-up cost does not grow
+with the number of settings it consults. The client also owns the
+bundle-defaults layer (§3.4), so a `get` that the store does not answer falls
+back to the app's own shipped default without a call either.
+
+No app ever spells a store path, and no app names its own bundle id. Both come
+from the attested identity, so an app cannot reach outside its own scope by
+construction rather than by check. The one argument `open` takes is the
+program's own **command word**, which selects nothing but layer 1 — resolved
+through the shared `lib/cmdres` order, the same one the shell launches through
+and `man` reads a bundle's help from, so an app's shipped defaults and its help
+can never come from different bundles.
+
+**A `set` whose value the layers already answer with stages nothing.** That one
+rule is what makes "the user's file holds only what the user actually changed"
+structural rather than each app's discipline: a value already coming from the
+policy or defaults layer is never copied up, and an app that saves a setting it
+did not change does not rewrite the user's document at all. Its converse is
+that *removing* an opinion is an explicit `unset`, and that the effective value
+it uncovers is the **service's** answer to give — so a commit ends by re-reading
+the store rather than letting the client guess what a lower layer says.
+
+**Writes are staged locally and pushed at commit.** A `set` is memory; the
+`ConfigSet` frames go over the wire only when `commit` is called, so a caller
+that stages ten keys and never commits costs the service nothing and holds no
+staging session open. That also shrinks the abandoned-session window §3.6
+reclaims by age to the span of one save.
+
+### 3.10 What the first migration settled
+
+Migrating a real consumer with a settings sheet behind it (`terminal`) decided
+three things the API sketch had left open, and each is now the rule for every
+migration after it.
+
+**"Restore defaults" is an `unset`, not a write.** The sheet used to reset its
+in-memory profile to the app's compiled defaults and save that, which froze
+today's values into the user's document: a machine-wide policy, or a later
+version's better default, would then never apply again. It cannot be fixed
+inside the sheet either — "the defaults" means the layers *beneath* the user's
+own document, and only the store knows what they say. So the sheet reports the
+request, the program removes the user's opinions, re-reads the profile that then
+applies, and hands it back for the sheet to show. The widget states the intent;
+the store answers it.
+
+**An app keeps its own closed registry over the store's open namespace.** The
+store's keys are an open namespace the app owns, but an app reads a *fixed* set
+of them, so the migrated profile keeps its enumerated key type and its typed
+field bridges: a value the registry refuses leaves that one field at its
+documented default and is *named* to the caller, which reports it. One broken
+setting costs only itself, and a key the registry does not know is one the app
+leaves alone rather than destroying on the next save.
+
+**A bundle ships no defaults document unless its defaults are genuinely data.**
+`terminal`'s defaults are its code's — `Profile::default` is the last-resort
+answer when nothing else applies — so shipping a `DefaultSettings/settings.conf`
+that restated them would be exactly the duplication §2.2 forbids, with the
+divergence risk that goes with it. Layer 1 is therefore implemented and tested
+but deliberately unused by this consumer: it exists for a bundle whose defaults
+*are* data (an integrator's themed build, a keymap, a shipped catalogue), which
+is what §16.5 declares the entry for. Stating that here is what stops a later
+migration adding a defaults file "for symmetry".
 
 ---
 
@@ -675,9 +754,9 @@ gate green (§7), and contains no stubs (§15.1).
 | **AD1** ✅ | Manifest publisher identity | `publisher_pubkey`/`publisher_cert` in `AppInfoHeader`; `PublisherBinding`, the two labelled preimages, and `PublisherId`; the fourth authenticity check and `PublisherId` derivation in `lib/appload`; `LoadedApp::publisher`; `APP_PUBLISHER_INVALID`; the pinned `SYSTEM_APP_PUBLISHER_SEED` and the composer's `PublisherSource`. Regenerate the C view (`cargo xtask c-header --write`). |
 | **AD2** ✅ | Attested app identity | `validate_bundle_id` + `BundleId`; `AppIdentity` (whole-or-absent); `TaskCapabilities::with_app_identity`/`app_identity`; `VerifiedProgram` threading it beside the manifest request; `Origin::with_app`/`app` and its wire tail; `self_origin`/`call_peer_origin` expose it. Tests prove a caller cannot forge or inflate it, that an identity-less principal reads absent, and that a malformed or half-filled wire tail is refused. |
 | **AD3** ✅ | `lib/appconf` | The format engine: parse, typed accessors, comment/unparsed-line-preserving rewrite, fixed fail-closed bounds, fuzz harness (§19.6) holding the parse/render fixed point and the one-key-per-write property. No I/O; entirely host-testable. |
-| **AD4** ✅ | `confd` + private scope | The service bundle and its `confd` account/ceiling, `APPDATA_ENDPOINT` + `lib/abi/src/appdata_ipc.rs`, `CAP_APPDATA_ADMIN`, the gated `Settings/Apps` + `Library/Apps` roots with their `required_cap` inodes and search-only transit grants across all three home provisioners, the `.owner` pin, the policy/user read merge, per-process staging and atomic commit, and the §3.5 name-gate fix the gate turned out to need. |
-| **AD5** | `lib/appdata` + first migration | The client API **including the bundle-defaults fallback layer** (§3.4); migrate `terminal` and **delete** `profile.rs`'s hand-rolled path. Proves the API on a real consumer with a settings sheet behind it. |
-| **AD6** | Public scope | `public.conf`, `PublicGet`, bounded foreign reads. |
+| **AD4** ✅ | `confd` + private scope | The service bundle and its `confd` account/ceiling, `APPDATA_ENDPOINT` + `lib/abi/src/appdata_ipc.rs`, `CAP_APPDATA_ADMIN`, the gated `Settings/Apps` + `Library/Apps` roots with their `required_cap` inodes and search-only transit grants across all three home provisioners, the `.owner` pin, the whole-document merged read, per-process staging and atomic commit, and the §3.5 name-gate fix the gate turned out to need. |
+| **AD5** ✅ | `lib/appdata` + first migration | The client: one call to open, local reads, staged writes published as one commit, the **bundle-defaults fallback layer** (§3.4), the degrade path with a typed reason, and the shared fake service every consumer's own tests drive it over. `terminal` migrated: its hand-rolled `key value` parser, renderer, document bound, error types, and `~/Settings/Terminal/terminal.conf` path **deleted**, its registry re-keyed on dotted keys, and its *Restore defaults* turned from "write today's values" into an `unset` the store answers (§3.10). |
+| **AD6** | Public scope | `public.conf`, `PublicRead`, the scope selector the second scope makes real, bounded foreign reads. |
 | **AD7** | Secrets | `secret.vault`, the AEAD hierarchy, the key-protector seam with the volume-backed stage-1 protector. |
 | **AD8** | Blobs | `BlobOpen`/`BlobList`/`BlobDelete`, `fd_grant` handoff, quotas, `file_map` random access. |
 | **AD9** | Temp | `TempCreate`, session-end and boot reaping, quota accounting. |
@@ -708,6 +787,8 @@ Landed as the stages that need them land, never pre-written (§3, §15.2). A
 - **§5.3** ✅ (AD4) — a capability gate guards an inode's *name* as well as its
   content (§3.5).
 - **§5.2** ✅ (AD4) — add `CAP_APPDATA_ADMIN` to the capability list.
+- **§3** ✅ (AD5) — the repository map gains `lib/appdata/`, the app-data
+  client.
 - **§15.18** ✅ (AD3) — a jump-sheet row: *"App settings, secrets, blobs and
   temporary files: the per-app store keyed on bundle id, the publisher pin, the
   `key = value` format engine, the sealed scope, descriptor-backed blobs" →

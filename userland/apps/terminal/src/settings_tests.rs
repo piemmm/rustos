@@ -452,27 +452,46 @@ fn the_profile_stays_clamped_after_extreme_values() {
 // --- The footer ------------------------------------------------------------
 
 #[test]
-fn restore_defaults_returns_the_default_profile() {
+fn restore_defaults_asks_the_caller_rather_than_resetting_the_sheet() {
+    // "Defaults" means the layers beneath the user's own document — the
+    // machine's policy, the bundle's shipped defaults — and only the store
+    // knows what those say. The sheet therefore reports the request and keeps
+    // showing what it has until the caller hands back the profile that
+    // actually applies.
     let mut sheet = sheet();
     let row = visible_row(&sheet, CLIENT, Focus::Scheme(1));
     click_at(&mut sheet, CLIENT, centre(row));
     focus_on(&mut sheet, CLIENT, Focus::Channel(0));
     key(&mut sheet, CLIENT, Key::Named(NamedKey::End));
-    assert_ne!(
-        *sheet.profile(),
-        Profile::default(),
-        "the profile really was edited"
-    );
+    let edited = *sheet.profile();
+    assert_ne!(edited, Profile::default(), "the profile really was edited");
 
     let (restore, _) = footer_buttons(&sheet, CLIENT);
     assert_eq!(
         click_at(&mut sheet, CLIENT, centre(restore)),
-        SheetOutcome::Edited
+        SheetOutcome::Restore
     );
+    assert_eq!(
+        *sheet.profile(),
+        edited,
+        "the sheet does not guess at what the defaults are"
+    );
+}
+
+#[test]
+fn adopting_a_profile_rebuilds_every_control_to_match() {
+    // What the caller does once the store has answered: the sheet is told the
+    // profile that now applies, and its controls follow.
+    let mut sheet = sheet();
+    let row = visible_row(&sheet, CLIENT, Focus::Scheme(1));
+    click_at(&mut sheet, CLIENT, centre(row));
+    assert_ne!(*sheet.profile(), Profile::default());
+
+    sheet.adopt(Profile::default());
     assert_eq!(*sheet.profile(), Profile::default());
     assert!(
         sheet.scheme_radios[0].is_selected(),
-        "the controls follow the reset"
+        "the controls follow the adopted profile"
     );
 }
 

@@ -32,13 +32,24 @@ another application's data. A caller running no verified bundle — a kernel
 principal, a boot-floor program with no signed manifest, a parser-sandbox child
 — has no store and is refused, audited.
 
-The five operations are `ConfigGet`, `ConfigSet`, `ConfigUnset`,
-`ConfigCommit`, and the paged `ConfigList`. A set or an unset *stages* a pending
-edit against the calling process instance; the commit loads the committed
-document, applies the edits, and publishes the result as one atomic
-replacement. A caller that never commits changes nothing on the volume, and its
-own reads see its own pending edits, so a settings sheet reads back what it just
-set.
+The four operations are `ConfigRead`, `ConfigSet`, `ConfigUnset`, and
+`ConfigCommit`.
+
+`ConfigRead` answers with the caller's **whole** merged document — the
+machine-wide policy layer, the app's own settings over it, the caller's own
+staged edits over those — as canonical `key = value` text the client parses with
+the one format engine. So an application's start-up costs one call, one store
+read, and one parse however many settings it goes on to consult; a per-key read
+would have cost a file read and a parse *each*. The request declares the reply
+buffer the caller has, and a document that does not fit comes back as the byte
+count it needs with no body at all — so a caller never parses a prefix, and
+never assembles a store out of two different snapshots.
+
+A set or an unset *stages* a pending edit against the calling process instance;
+the commit loads the committed document, applies the edits, and publishes the
+result as one atomic replacement. A caller that never commits changes nothing on
+the volume, and its own reads see its own pending edits, so a settings sheet
+reads back what it just set.
 
 ## The tree it serves from
 

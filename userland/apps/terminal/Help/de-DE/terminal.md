@@ -73,16 +73,17 @@ Schiebereglern für Rot, Grün und Blau für die jeweils ausgewählte Farbe.
 | Wackeln | Ein langsames, wanderndes horizontales Zittern, wie es eine Röhre außerhalb der Zeit hat. |
 
 Jede Änderung wird sofort wirksam und im eigenen Profil des Benutzers
-unter `~/Settings/Terminal/terminal.conf` gespeichert, sodass sich ein
-späteres Terminal auf dieselbe Weise öffnet. Das Profil ist eine
-einfache Textdatei mit `Schlüssel Wert`-Zeilen, wobei `#` einen
-Kommentar einleitet, und kann von Hand bearbeitet werden; Farben werden
-als sechs bloße Hexadezimalziffern (`1b242e`) geschrieben, niemals mit
-einem führenden `#`, das einen Kommentar einleiten würde. Ein fehlendes
-Profil bedeutet die Standardeinstellungen; ein Profil, das das Terminal
-nicht lesen oder analysieren kann, bedeutet ebenfalls die
-Standardeinstellungen, und der Grund wird auf dem Standardfehlerstrom
-gemeldet.
+gespeichert, sodass sich ein späteres Terminal auf dieselbe Weise öffnet.
+Das Betriebssystem verwahrt das Profil über seinen Einstellungsdienst, und
+es ist privat für das Terminal: keine andere Anwendung kann es lesen oder
+ändern. Gespeichert wird nur, was der Benutzer tatsächlich geändert hat;
+*Standardwerte wiederherstellen* entfernt daher diese Entscheidungen,
+anstatt die heutigen Werte einzufrieren — es gilt dann, was der
+Administrator oder eine spätere Terminalversion ändert. Eine Einstellung,
+die das Terminal nicht deuten kann, bleibt auf ihrem Standardwert und wird
+auf dem Standardfehlerstrom gemeldet; ein nicht erreichbarer
+Einstellungsdienst lässt das Terminal mit den ausgelieferten Werten
+laufen, was ebenfalls gemeldet wird.
 
 ## EXIT STATUS
 

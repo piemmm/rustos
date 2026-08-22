@@ -8,7 +8,7 @@ use tairix_abi::{AppIdentity, Errno};
 use tairix_appconf::MAX_DOCUMENT_LEN;
 use tairix_users::CONFD_UID;
 
-use super::{keys_with_prefix, AppStore, RootCache, StoreError, OWNER_FILE, SETTINGS_FILE};
+use super::{AppStore, RootCache, StoreError, OWNER_FILE, SETTINGS_FILE};
 use crate::owner::OwnerPin;
 use crate::testfs::{TestFs, ACCOUNT_UID, HOME};
 use crate::Storage as _;
@@ -279,18 +279,39 @@ fn the_policy_layer_is_read_from_the_read_only_system_tree() {
 }
 
 #[test]
-fn a_listing_names_each_key_once_in_document_order() {
-    // A hand-edit appends a line rather than rewriting one, and a reader takes
-    // the last — so a duplicated key must be listed once, not twice.
-    let document = tairix_appconf::Document::parse(
-        "recent.1 = b\n# a comment\nrecent.0 = a\nscheme = dark\nrecent.0 = a2\n",
-    )
-    .expect("parses");
-    let keys: Vec<String> = keys_with_prefix(&document, "recent.");
-    assert_eq!(keys, ["recent.1", "recent.0"]);
-    let all: Vec<String> = keys_with_prefix(&document, "");
-    assert_eq!(all, ["recent.1", "recent.0", "scheme"]);
-    assert!(keys_with_prefix(&document, "nothing.").is_empty());
+fn the_merged_document_is_canonical_and_the_user_layer_wins() {
+    // Two layers become one document, so the result must name each key once —
+    // a hand-edit that appends a line, and a policy default the user has
+    // overridden, both collapse to the value a reader would have taken.
+    let mut fs = TestFs::provisioned();
+    fs.put(
+        "/System/Settings/os.tairix.terminal/settings.conf",
+        b"font.size = 18\nscheme = corporate\npolicy.only = 1\n",
+    );
+    let store = open(&mut fs, ACCOUNT_UID, &identity(1), true).expect("created");
+    fs.put(
+        &alloc::format!("{HOME}/Settings/Apps/os.tairix.terminal/{SETTINGS_FILE}"),
+        b"# ada's note\nscheme = dark\nscheme = darker\n",
+    );
+
+    let merged = store.merged_document(&mut fs).expect("merges");
+    let keys: Vec<&str> = merged.settings().map(|setting| setting.key).collect();
+    assert_eq!(keys, ["font.size", "scheme", "policy.only"]);
+    assert_eq!(merged.get("scheme"), Some("darker"), "the user layer wins");
+    assert_eq!(merged.get("font.size"), Some("18"));
+    assert_eq!(
+        merged.render(),
+        "font.size = 18\nscheme = darker\npolicy.only = 1\n",
+        "the served view is canonical; the user's own file keeps its comments"
+    );
+    assert_eq!(
+        fs.read_text(&alloc::format!(
+            "{HOME}/Settings/Apps/os.tairix.terminal/{SETTINGS_FILE}"
+        ))
+        .as_deref(),
+        Some("# ada's note\nscheme = dark\nscheme = darker\n"),
+        "reading must not rewrite the stored document"
+    );
 }
 
 #[test]

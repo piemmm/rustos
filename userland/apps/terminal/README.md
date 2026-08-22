@@ -107,14 +107,22 @@ palette, and the compiler then forces every consumer to state what it means.
 ## The profile (`profile`)
 
 Everything a user can change — the scheme, their custom colours, the text
-size, and every effect strength — is one `Profile`, stored per user at
-`~/Settings/Terminal/terminal.conf` in the same `key value` / `#` comment
-grammar every line-oriented TAIRiX configuration store shares. Closed key
-registry (`ProfileKey`), whole-document fail-closed parse, `render`/`parse`
-exact inverses, every key always emitted. An absent document means the
-documented defaults; an unusable one also means the defaults and says why on
-`stderr`. Colours are bare `rrggbb`, never `#rrggbb`, because the grammar's
-comment marker would cut the line at the `#`.
+size, and every effect strength — is one `Profile`, held in the OS app-data
+store and reached through `tairix_appdata`. It is therefore **private to this
+application**: the store is gated on the bundle identity the kernel attests,
+so no other app the user launches can read or rewrite it
+(`plans/APPDATA.md`).
+
+The profile is a closed key registry (`ProfileKey`) of dotted keys in the
+store's shared `key = value` format. A `save` writes only the keys whose value
+differs from what the store's layers already imply, so a user's own document
+holds what they changed and not a copy of every default; *Restore defaults*
+removes those opinions rather than writing today's values, so a machine-wide
+policy or a later shipped default applies instead of a frozen snapshot. A key
+no layer sets reads as its documented default, and a stored value the registry
+refuses costs only itself and is named to the caller, which reports it.
+Colours are bare `rrggbb`, never `#rrggbb`, because the format's comment marker
+would cut the line at the `#`.
 
 ## Screen effects (`effects`)
 

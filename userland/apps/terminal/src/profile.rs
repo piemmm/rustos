@@ -1,43 +1,40 @@
-//! The terminal profile: the settings a user keeps between sessions, and the
-//! document they are stored in.
+//! The terminal profile: the settings a user keeps between sessions, and how
+//! they reach the app-data store.
 //!
 //! One profile is one [`Profile`]: the colour scheme in force, the sixteen
 //! ANSI colours and three screen roles of the user's own custom scheme, the
-//! text size, and the strength of every screen effect. It is stored per user
-//! at [`user_profile_path`] in the same `key value` / `#` comment grammar
-//! every line-oriented TAIRiX configuration store shares, so a user can read
-//! and edit it with any text editor.
+//! text size, and the strength of every screen effect. It is a closed registry
+//! of dotted keys ([`ProfileKey`]) in the OS app-data store, reached through
+//! [`tairix_appdata`] — so it is private to this application, gated on the
+//! kernel-attested bundle identity, and readable or writable by no other app
+//! the user launches.
 //!
-//! Because `#` begins a comment, no value may contain one: a colour is
-//! spelled as bare `rrggbb` digits ([`Rgb::from_hex`]) rather than `#rrggbb`.
+//! Because `#` begins a comment in the store's format, no value carries one: a
+//! colour is spelled as bare `rrggbb` digits ([`Rgb::from_hex`]) rather than
+//! `#rrggbb`.
 //!
-//! [`parse`] and [`render`] are inverses for every canonical document:
-//! parsing a rendered document yields the same profile, and rendering a
-//! parsed profile yields byte-identical text. [`render`] always emits every
-//! key, including one still at its default, so a document a user opens shows
-//! the whole registry.
+//! # What a save writes, and what it does not
 //!
-//! An **absent** document is the ordinary state of a fresh account and means
-//! [`Profile::default`]; a document the parser refuses is refused whole,
-//! never half-applied, and the caller runs on the defaults rather than
-//! guessing at a partial intent.
+//! [`Profile::save`] writes only the keys whose value differs from what the
+//! store's layers already imply, so a user's own document holds what the user
+//! actually changed and nothing else — not a copy of every default. A key no
+//! layer sets reads as its documented default, and [`Profile::clear`] removes
+//! the user's opinions so the layers beneath (the machine's policy, the
+//! bundle's shipped defaults) apply again.
+//!
+//! A value the registry refuses — a size outside its bounds, a malformed
+//! colour — leaves that one field at its default and is *named* to the caller,
+//! which reports it. One broken setting therefore costs only itself, and never
+//! silently becomes something else.
 
-use alloc::format;
 use alloc::string::{String, ToString};
-use core::fmt;
+use alloc::vec::Vec;
 
-use tairix_util::conf::strip_comment;
+use tairix_abi::Errno;
+use tairix_appdata::Settings;
 
 use crate::effects::{Effects, FULL, MIN_OPACITY};
 use crate::scheme::{ColorScheme, Rgb, Scheme, ANSI_COLORS};
-
-/// Maximum length, in bytes, of a whole profile document.
-///
-/// A fixed security and format bound, not a growable capacity: the document
-/// holds a fixed registry of short settings, so this is sized to the longest
-/// canonical document with slack for comments a user may have added, never to
-/// admit an unboundedly large store.
-pub const MAX_PROFILE_LEN: usize = 8192;
 
 /// The smallest text size the profile may name, in logical pixels.
 ///
@@ -64,64 +61,41 @@ pub const DEFAULT_FONT_SIZE_PX: u16 = 14;
 /// in logical pixels.
 pub const FONT_SIZE_STEP_PX: u16 = 1;
 
-/// The profile store's directory name inside a `Settings/` tree — the one
-/// component a settings browser creates.
-pub const PROFILE_SETTINGS_SUBDIR: &str = "Terminal";
-
-/// The profile document's file name.
-pub const PROFILE_FILE: &str = "terminal.conf";
-
-/// The per-user profile path inside `home`, the account's home directory
-/// exactly as the session inherited it (`HOME`).
-///
-/// A trailing `/` is normalised away; an empty or root home yields `None`
-/// rather than a guessed rootward path, so a caller with no home fails
-/// closed.
-#[must_use]
-pub fn user_profile_path(home: &str) -> Option<String> {
-    let home = home.strip_suffix('/').unwrap_or(home);
-    if home.is_empty() || home == "/" {
-        return None;
-    }
-    Some(format!(
-        "{home}/Settings/{PROFILE_SETTINGS_SUBDIR}/{PROFILE_FILE}"
-    ))
-}
-
 /// One key of the closed profile registry.
 ///
 /// Adding a key means adding a variant here, its row in [`ProfileKey::ALL`],
 /// and its arms in this module's private `set_field` and `field_value`
 /// bridges — the compiler then forces every consumer to state what the new
-/// key means. There is no free-form key namespace: an unknown key fails
-/// closed at parse.
+/// key means. The store's key namespace is open, but this application's is
+/// closed: a key outside the registry is one this profile does not read.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum ProfileKey {
     /// `scheme` — which colour scheme is in force.
     Scheme,
-    /// `font-size` — the text size in logical pixels.
+    /// `font.size` — the text size in logical pixels.
     FontSize,
-    /// `opacity` — how opaque the background is, in permille.
+    /// `effects.opacity` — how opaque the background is, in permille.
     Opacity,
-    /// `blur` — how strongly the compositor blurs the backdrop, in permille.
+    /// `effects.blur` — how strongly the compositor blurs the backdrop, in
+    /// permille.
     Blur,
-    /// `scanlines` — how deeply alternate rows are dimmed, in permille.
+    /// `effects.scanlines` — how deeply alternate rows are dimmed, in permille.
     ScanLines,
-    /// `fuzz` — how much per-pixel jitter is added, in permille.
+    /// `effects.fuzz` — how much per-pixel jitter is added, in permille.
     Fuzz,
-    /// `phosphor` — how long a lit pixel persists, in permille.
+    /// `effects.phosphor` — how long a lit pixel persists, in permille.
     Phosphor,
-    /// `wobble` — how far rows are displaced, in permille.
+    /// `effects.wobble` — how far rows are displaced, in permille.
     Wobble,
-    /// `custom-background` — the custom scheme's default background.
+    /// `custom.background` — the custom scheme's default background.
     CustomBackground,
-    /// `custom-foreground` — the custom scheme's default foreground.
+    /// `custom.foreground` — the custom scheme's default foreground.
     CustomForeground,
-    /// `custom-cursor` — the custom scheme's cursor block.
+    /// `custom.cursor` — the custom scheme's cursor block.
     CustomCursor,
-    /// `custom-cursor-text` — the glyph colour inside the cursor block.
+    /// `custom.cursor-text` — the glyph colour inside the cursor block.
     CustomCursorText,
-    /// `custom-ansi` — the custom scheme's sixteen ANSI colours, in order.
+    /// `custom.ansi` — the custom scheme's sixteen ANSI colours, in order.
     CustomAnsi,
 }
 
@@ -148,89 +122,18 @@ impl ProfileKey {
     pub const fn name(self) -> &'static str {
         match self {
             Self::Scheme => "scheme",
-            Self::FontSize => "font-size",
-            Self::Opacity => "opacity",
-            Self::Blur => "blur",
-            Self::ScanLines => "scanlines",
-            Self::Fuzz => "fuzz",
-            Self::Phosphor => "phosphor",
-            Self::Wobble => "wobble",
-            Self::CustomBackground => "custom-background",
-            Self::CustomForeground => "custom-foreground",
-            Self::CustomCursor => "custom-cursor",
-            Self::CustomCursorText => "custom-cursor-text",
-            Self::CustomAnsi => "custom-ansi",
-        }
-    }
-
-    /// Decode a key spelling; `None` for anything outside the registry (keys
-    /// are case-sensitive — one canonical spelling).
-    #[must_use]
-    pub fn from_name(name: &str) -> Option<Self> {
-        Self::ALL.into_iter().find(|key| key.name() == name)
-    }
-}
-
-impl fmt::Display for ProfileKey {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(self.name())
-    }
-}
-
-/// Why a profile document was refused.
-#[derive(Copy, Clone, Debug, Eq, PartialEq)]
-pub enum ParseError {
-    /// The document exceeded [`MAX_PROFILE_LEN`].
-    DocumentTooLong,
-    /// A line names a key outside the closed [`ProfileKey`] registry.
-    UnknownKey,
-    /// A line names a key but carries no value.
-    MissingValue,
-    /// A registry key appeared more than once.
-    DuplicateKey,
-    /// A value was outside its key's closed set, or malformed.
-    InvalidValue,
-}
-
-impl fmt::Display for ParseError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::DocumentTooLong => f.write_str("terminal profile document is too long"),
-            Self::UnknownKey => f.write_str("unknown terminal profile key"),
-            Self::MissingValue => f.write_str("setting has no value"),
-            Self::DuplicateKey => f.write_str("setting is repeated"),
-            Self::InvalidValue => f.write_str("setting value is invalid"),
-        }
-    }
-}
-
-/// A refused profile document, and where in it the refusal was raised.
-#[derive(Copy, Clone, Debug, Eq, PartialEq)]
-pub struct ProfileError {
-    line: Option<usize>,
-    kind: ParseError,
-}
-
-impl ProfileError {
-    /// The 1-based line the refusal was raised at, or `None` for a
-    /// whole-document refusal that belongs to no single line.
-    #[must_use]
-    pub const fn line(&self) -> Option<usize> {
-        self.line
-    }
-
-    /// What was wrong.
-    #[must_use]
-    pub const fn kind(&self) -> ParseError {
-        self.kind
-    }
-}
-
-impl fmt::Display for ProfileError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self.line {
-            Some(line) => write!(f, "line {line}: {}", self.kind),
-            None => write!(f, "{}", self.kind),
+            Self::FontSize => "font.size",
+            Self::Opacity => "effects.opacity",
+            Self::Blur => "effects.blur",
+            Self::ScanLines => "effects.scanlines",
+            Self::Fuzz => "effects.fuzz",
+            Self::Phosphor => "effects.phosphor",
+            Self::Wobble => "effects.wobble",
+            Self::CustomBackground => "custom.background",
+            Self::CustomForeground => "custom.foreground",
+            Self::CustomCursor => "custom.cursor",
+            Self::CustomCursorText => "custom.cursor-text",
+            Self::CustomAnsi => "custom.ansi",
         }
     }
 }
@@ -294,6 +197,80 @@ impl Profile {
             .font_size_px
             .saturating_sub(FONT_SIZE_STEP_PX)
             .max(MIN_FONT_SIZE_PX);
+    }
+
+    /// The profile the store's layers imply, and the keys whose stored value
+    /// the registry refused.
+    ///
+    /// Every key the layers do not set reads as its documented default, so a
+    /// fresh account and a hand-cleared store both yield
+    /// [`Profile::default`]. A refused value leaves that one field at its
+    /// default and is named in the returned list, so a caller reports the
+    /// broken setting instead of running on a value the user cannot account
+    /// for.
+    #[must_use]
+    pub fn load(settings: &Settings<'_>) -> (Self, Vec<ProfileKey>) {
+        let mut profile = Self::default();
+        let mut refused = Vec::new();
+        for key in ProfileKey::ALL {
+            let Some(value) = settings.get(key.name()) else {
+                continue;
+            };
+            if !set_field(&mut profile, key, value) {
+                refused.push(key);
+            }
+        }
+        profile.clamp();
+        (profile, refused)
+    }
+
+    /// Publish this profile, writing only what the store's layers do not
+    /// already imply.
+    ///
+    /// A key whose effective value already matches is left alone, so saving a
+    /// profile the user did not change rewrites nothing, and a value that
+    /// comes from the machine's policy or the bundle's defaults is never
+    /// copied up into the user's own document. The whole profile lands as one
+    /// atomic commit.
+    ///
+    /// # Errors
+    ///
+    /// The app-data service's own typed refusal — no service bound, no store
+    /// for a caller running no signed bundle, or an unreachable volume. The
+    /// edits stay staged, so a caller may retry.
+    pub fn save(&self, settings: &mut Settings<'_>) -> Result<(), Errno> {
+        let (stored, _) = Self::load(settings);
+        for key in ProfileKey::ALL {
+            let value = field_value(self, key);
+            if field_value(&stored, key) == value {
+                continue;
+            }
+            // The registry's own spellings are inside the format's grammar, so
+            // a refusal here would be a defect in this module rather than a
+            // user's mistake; it is reported as a refused write either way.
+            settings
+                .set(key.name(), &value)
+                .map_err(|_| Errno::OutOfRange)?;
+        }
+        settings.commit()
+    }
+
+    /// Remove every profile key from the store, so the layers beneath the
+    /// user's own document apply again.
+    ///
+    /// This is what *Restore defaults* means: not "write the shipped values
+    /// into my document" but "stop having an opinion". The profile that then
+    /// applies is [`Profile::load`]'s answer, which may be the machine's
+    /// policy rather than this application's own default.
+    ///
+    /// # Errors
+    ///
+    /// As [`Profile::save`].
+    pub fn clear(settings: &mut Settings<'_>) -> Result<(), Errno> {
+        for key in ProfileKey::ALL {
+            settings.unset(key.name());
+        }
+        settings.commit()
     }
 }
 
@@ -435,83 +412,6 @@ fn render_ansi(ansi: &[Rgb; ANSI_COLORS]) -> String {
             text.push(' ');
         }
         color.write_hex(&mut text);
-    }
-    text
-}
-
-/// Parse a terminal profile document.
-///
-/// Parsing starts from [`Profile::default`] and applies each setting line in
-/// turn, so a document naming only a subset of keys leaves the rest at their
-/// documented default.
-///
-/// # Errors
-///
-/// [`ProfileError`] — the document is refused whole, never half-applied. An
-/// absent or unusable document is not this function's concern: a caller that
-/// cannot read a store, or whose read yields a document this refuses, falls
-/// back to [`Profile::default`] rather than guessing at a partial intent.
-pub fn parse(text: &str) -> Result<Profile, ProfileError> {
-    if text.len() > MAX_PROFILE_LEN {
-        return Err(ProfileError {
-            line: None,
-            kind: ParseError::DocumentTooLong,
-        });
-    }
-
-    let mut profile = Profile::default();
-    let mut seen = [false; ProfileKey::ALL.len()];
-
-    for (index, raw) in text.lines().enumerate() {
-        let number = index + 1;
-        let at = |kind: ParseError| ProfileError {
-            line: Some(number),
-            kind,
-        };
-
-        let line = strip_comment(raw).trim();
-        if line.is_empty() {
-            continue;
-        }
-
-        let mut fields = line.splitn(2, char::is_whitespace);
-        let name = fields.next().unwrap_or_default();
-        let value = fields.next().map(str::trim).filter(|v| !v.is_empty());
-
-        let key = ProfileKey::from_name(name).ok_or_else(|| at(ParseError::UnknownKey))?;
-        let value = value.ok_or_else(|| at(ParseError::MissingValue))?;
-
-        let position = ProfileKey::ALL
-            .iter()
-            .position(|candidate| *candidate == key)
-            .unwrap_or_default();
-        if seen.get(position).copied().unwrap_or(false) {
-            return Err(at(ParseError::DuplicateKey));
-        }
-        if let Some(slot) = seen.get_mut(position) {
-            *slot = true;
-        }
-
-        if !set_field(&mut profile, key, value) {
-            return Err(at(ParseError::InvalidValue));
-        }
-    }
-
-    Ok(profile)
-}
-
-/// Render `profile` as the canonical document text.
-///
-/// Every key is written in [`ProfileKey::ALL`] order — including a key still
-/// at its default — so the document a user opens always shows the whole
-/// registry, and a render/parse round trip is exact.
-#[must_use]
-pub fn render(profile: &Profile) -> String {
-    use core::fmt::Write as _;
-
-    let mut text = String::new();
-    for key in ProfileKey::ALL {
-        let _ = writeln!(text, "{key} {}", field_value(profile, key));
     }
     text
 }

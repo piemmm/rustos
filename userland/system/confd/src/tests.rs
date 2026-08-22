@@ -6,12 +6,13 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use tairix_abi::appdata_ipc::{
-    decode_value_reply, AppDataKeyRecord, AppDataRequest, APPDATA_LIST_PAGE_MAX, APPDATA_MAX_REPLY,
+    decode_document_reply, AppDataRequest, ConfigDocument, APPDATA_DOCUMENT_MAX, APPDATA_MAX_REPLY,
     APPDATA_MAX_REQUEST, APPDATA_VALUE_MAX,
 };
 use tairix_abi::origin::{CapabilitySummary, TrustDomain, ORIGIN_CONSOLE_NONE, PROC_ID_LEN};
-use tairix_abi::reply::{decode_page_reply, decode_status_reply};
+use tairix_abi::reply::decode_status_reply;
 use tairix_abi::{AppIdentity, Errno, Origin, ProcId};
+use tairix_appconf::Document;
 use tairix_log::DiscardSink;
 
 use super::{AppData, MAX_PENDING_EDITS, STAGING_IDLE_NS};
@@ -96,42 +97,52 @@ fn commit(service: &mut AppData<DiscardSink>, fs: &mut TestFs, origin: &Origin) 
     assert_eq!(decode_status_reply(&reply), Ok(()), "commit");
 }
 
-/// Serve a `ConfigGet` and decode its outcome.
+/// Serve a `ConfigRead` and parse the document it answered with.
+fn read(
+    service: &mut AppData<DiscardSink>,
+    fs: &mut TestFs,
+    origin: &Origin,
+) -> Result<Document, Errno> {
+    let capacity = u32::try_from(APPDATA_DOCUMENT_MAX).expect("fits a u32");
+    let reply = call(
+        service,
+        fs,
+        origin,
+        &AppDataRequest::ConfigRead { capacity },
+    );
+    match decode_document_reply(&reply)? {
+        ConfigDocument::Whole(text) => Ok(Document::parse(text).expect("the daemon renders it")),
+        ConfigDocument::NeedsCapacity(len) => {
+            panic!("the widest capacity still needed {len} bytes")
+        }
+    }
+}
+
+/// Read `key` out of the caller's own merged document.
+///
+/// The document is the unit the wire carries, so "not set" is the *client's*
+/// answer about a document it holds, not a second round trip.
 fn get(
     service: &mut AppData<DiscardSink>,
     fs: &mut TestFs,
     origin: &Origin,
     key: &str,
 ) -> Result<String, Errno> {
-    let reply = call(service, fs, origin, &AppDataRequest::ConfigGet { key });
-    decode_value_reply(&reply).map(String::from)
+    read(service, fs, origin)?
+        .get(key)
+        .map(String::from)
+        .ok_or(Errno::NotFound)
 }
 
-/// Serve a `ConfigList` page and decode the keys it names.
-fn list(
-    service: &mut AppData<DiscardSink>,
-    fs: &mut TestFs,
-    origin: &Origin,
-    prefix: &str,
-    cursor: u32,
-) -> Vec<String> {
-    let reply = call(
-        service,
-        fs,
-        origin,
-        &AppDataRequest::ConfigList { prefix, cursor },
-    );
-    let (_, body) = decode_page_reply(&reply, AppDataKeyRecord::WIRE_LEN, APPDATA_LIST_PAGE_MAX)
-        .expect("a well-formed page");
-    body.chunks(AppDataKeyRecord::WIRE_LEN)
-        .map(|chunk| {
-            String::from(
-                AppDataKeyRecord::from_bytes(chunk)
-                    .expect("a well-formed record")
-                    .as_str(),
-            )
-        })
-        .collect()
+/// The keys the caller's own merged document carries, in document order.
+fn keys(service: &mut AppData<DiscardSink>, fs: &mut TestFs, origin: &Origin) -> Vec<String> {
+    match read(service, fs, origin) {
+        Ok(document) => document
+            .settings()
+            .map(|setting| String::from(setting.key))
+            .collect(),
+        Err(_) => Vec::new(),
+    }
 }
 
 #[test]
@@ -174,7 +185,7 @@ fn an_app_cannot_reach_another_apps_settings() {
         "the other app of the same user sees nothing"
     );
     assert!(
-        list(&mut svc, &mut fs, &two, "", 0).is_empty(),
+        keys(&mut svc, &mut fs, &two).is_empty(),
         "and cannot even enumerate it"
     );
 
@@ -223,17 +234,13 @@ fn a_caller_with_no_attested_app_identity_is_refused_every_operation() {
     let (mut svc, mut fs) = service();
     let anon = origin(ACCOUNT_UID, 1, None);
     for request in [
-        AppDataRequest::ConfigGet { key: "scheme" },
+        AppDataRequest::ConfigRead { capacity: 4096 },
         AppDataRequest::ConfigSet {
             key: "scheme",
             value: "dark",
         },
         AppDataRequest::ConfigUnset { key: "scheme" },
         AppDataRequest::ConfigCommit,
-        AppDataRequest::ConfigList {
-            prefix: "",
-            cursor: 0,
-        },
     ] {
         let reply = call(&mut svc, &mut fs, &anon, &request);
         assert_eq!(
@@ -410,9 +417,9 @@ fn the_policy_layer_sets_a_default_the_user_can_override() {
         "the machine-wide default is visible with no user file at all"
     );
     assert_eq!(
-        list(&mut svc, &mut fs, &ada, "", 0),
+        keys(&mut svc, &mut fs, &ada),
         ["font.size", "scheme"],
-        "and is listed"
+        "and is in the document it is served"
     );
     assert!(
         !fs.exists(&alloc::format!("{HOME}/Settings/Apps/os.tairix.terminal")),
@@ -453,7 +460,7 @@ fn the_policy_layer_sets_a_default_the_user_can_override() {
 }
 
 #[test]
-fn a_listing_covers_both_layers_and_the_callers_own_staging() {
+fn a_read_covers_both_layers_and_the_callers_own_staging() {
     let (mut svc, mut fs) = service();
     fs.put(
         "/System/Settings/os.tairix.terminal/settings.conf",
@@ -464,9 +471,18 @@ fn a_listing_covers_both_layers_and_the_callers_own_staging() {
     set(&mut svc, &mut fs, &ada, "font.size", "14");
     commit(&mut svc, &mut fs, &ada);
 
-    let mut keys = list(&mut svc, &mut fs, &ada, "", 0);
-    keys.sort_unstable();
-    assert_eq!(keys, ["font.size", "policy.only", "scheme"]);
+    let mut named = keys(&mut svc, &mut fs, &ada);
+    named.sort_unstable();
+    assert_eq!(named, ["font.size", "policy.only", "scheme"]);
+    // The policy layer sets the default and the user's own value wins, in one
+    // document rather than two round trips.
+    let document = read(&mut svc, &mut fs, &ada).expect("reads");
+    assert_eq!(document.get("scheme"), Some("dark"));
+    assert_eq!(document.get("policy.only"), Some("1"));
+    assert!(
+        document.settings().count() == 3,
+        "each key appears once, however many layers set it"
+    );
 
     // A staged write appears; a staged removal disappears.
     set(&mut svc, &mut fs, &ada, "recent.0", "/notes.txt");
@@ -477,49 +493,57 @@ fn a_listing_covers_both_layers_and_the_callers_own_staging() {
         &AppDataRequest::ConfigUnset { key: "font.size" },
     );
     assert_eq!(decode_status_reply(&reply), Ok(()));
-    let mut keys = list(&mut svc, &mut fs, &ada, "", 0);
-    keys.sort_unstable();
-    assert_eq!(keys, ["policy.only", "recent.0", "scheme"]);
-
-    // A prefix selects a family, and an unmatched prefix selects nothing.
-    assert_eq!(list(&mut svc, &mut fs, &ada, "recent.", 0), ["recent.0"]);
-    assert!(list(&mut svc, &mut fs, &ada, "nothing.", 0).is_empty());
+    let mut named = keys(&mut svc, &mut fs, &ada);
+    named.sort_unstable();
+    assert_eq!(named, ["policy.only", "recent.0", "scheme"]);
 }
 
 #[test]
-fn a_listing_pages_and_a_short_page_is_the_last() {
+fn a_document_past_the_callers_capacity_is_answered_with_its_length() {
+    // A caller sizes a small buffer for the store it expects and is told
+    // exactly what to ask again with — never handed a truncated prefix it
+    // could parse as if it were the whole store.
     let (mut svc, mut fs) = service();
     let ada = origin(ACCOUNT_UID, 1, Some(identity(1)));
-    let total = usize::from(APPDATA_LIST_PAGE_MAX) + 5;
-    for index in 0..total {
+    for index in 0..40 {
         set(
             &mut svc,
             &mut fs,
             &ada,
             &alloc::format!("recent.{index}"),
-            "x",
+            "/Users/ada/Documents/notes.txt",
         );
     }
     commit(&mut svc, &mut fs, &ada);
 
-    let first = list(&mut svc, &mut fs, &ada, "", 0);
-    assert_eq!(first.len(), usize::from(APPDATA_LIST_PAGE_MAX));
-    let second = list(
+    let reply = call(
         &mut svc,
         &mut fs,
         &ada,
-        "",
-        u32::from(APPDATA_LIST_PAGE_MAX),
+        &AppDataRequest::ConfigRead { capacity: 16 },
     );
-    assert_eq!(second.len(), 5, "the short page is the last");
-    // Every key appears exactly once across the two pages.
-    let mut all: Vec<String> = first;
-    all.extend(second);
-    all.sort_unstable();
-    all.dedup();
-    assert_eq!(all.len(), total);
-    // A cursor past the end is an empty page, not an error.
-    assert!(list(&mut svc, &mut fs, &ada, "", u32::MAX).is_empty());
+    let needed = match decode_document_reply(&reply) {
+        Ok(ConfigDocument::NeedsCapacity(len)) => len,
+        other => panic!("a 16-byte buffer cannot hold 40 settings: {other:?}"),
+    };
+    assert!(needed > 16);
+
+    // Asking again with exactly that much yields the whole document.
+    let reply = call(
+        &mut svc,
+        &mut fs,
+        &ada,
+        &AppDataRequest::ConfigRead {
+            capacity: u32::try_from(needed).expect("fits a u32"),
+        },
+    );
+    let text = match decode_document_reply(&reply) {
+        Ok(ConfigDocument::Whole(text)) => text,
+        other => panic!("the declared length must suffice: {other:?}"),
+    };
+    assert_eq!(text.len(), needed);
+    let document = Document::parse(text).expect("parses");
+    assert_eq!(document.settings().count(), 40);
 }
 
 #[test]
@@ -626,7 +650,7 @@ fn an_abandoned_staging_session_is_reclaimed() {
         &mut fs,
         &other,
         STAGING_IDLE_NS,
-        &AppDataRequest::ConfigGet { key: "scheme" },
+        &AppDataRequest::ConfigRead { capacity: 4096 },
     );
     assert_eq!(svc.staging_sessions(), 0);
     assert_eq!(get(&mut svc, &mut fs, &ada, "scheme"), Err(Errno::NotFound));

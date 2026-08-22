@@ -268,12 +268,7 @@ impl Document {
     /// [`ConfError::ValueMalformed`] if the setting is present but is not one
     /// of those spellings.
     pub fn bool(&self, key: &str) -> Result<Option<bool>, ConfError> {
-        match self.get(key) {
-            None => Ok(None),
-            Some("true" | "on") => Ok(Some(true)),
-            Some("false" | "off") => Ok(Some(false)),
-            Some(_) => Err(ConfError::ValueMalformed),
-        }
+        self.get(key).map(value::as_bool).transpose()
     }
 
     /// The unsigned value of `key`.
@@ -284,13 +279,7 @@ impl Document {
     /// decimal `u32` (a sign, a suffix, or an overflow are all refusals, not
     /// a saturation).
     pub fn u32(&self, key: &str) -> Result<Option<u32>, ConfError> {
-        match self.get(key) {
-            None => Ok(None),
-            Some(text) => text
-                .parse::<u32>()
-                .map(Some)
-                .map_err(|_| ConfError::ValueMalformed),
-        }
+        self.get(key).map(value::as_u32).transpose()
     }
 
     /// The signed value of `key`.
@@ -300,13 +289,7 @@ impl Document {
     /// [`ConfError::ValueMalformed`] if the setting is present but is not a
     /// decimal `i64`.
     pub fn i64(&self, key: &str) -> Result<Option<i64>, ConfError> {
-        match self.get(key) {
-            None => Ok(None),
-            Some(text) => text
-                .parse::<i64>()
-                .map(Some)
-                .map_err(|_| ConfError::ValueMalformed),
-        }
+        self.get(key).map(value::as_i64).transpose()
     }
 
     /// The fraction `key` names, in permille (`0..=`[`PERMILLE_FULL`]).
@@ -318,11 +301,7 @@ impl Document {
     ///
     /// [`PERMILLE_FULL`]: crate::PERMILLE_FULL
     pub fn permille(&self, key: &str) -> Result<Option<u32>, ConfError> {
-        match self.u32(key)? {
-            None => Ok(None),
-            Some(value) if value <= value::PERMILLE_FULL => Ok(Some(value)),
-            Some(_) => Err(ConfError::ValueMalformed),
-        }
+        self.get(key).map(value::as_permille).transpose()
     }
 
     /// Set `key` to a boolean, rendered `true`/`false`.
@@ -331,7 +310,7 @@ impl Document {
     ///
     /// As [`set`](Self::set).
     pub fn set_bool(&mut self, key: &str, value: bool) -> Result<(), ConfError> {
-        self.set(key, if value { "true" } else { "false" })
+        self.set(key, value::bool_text(value))
     }
 
     /// Set `key` to an unsigned decimal.

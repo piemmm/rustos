@@ -69,14 +69,17 @@ selecionada.
 | Oscilação | Uma lenta ondulação horizontal móvel, como a de um tubo fora de tempo. |
 
 Cada alteração surte efeito imediatamente e é guardada no perfil próprio
-do utilizador, em `~/Settings/Terminal/terminal.conf`, de modo que um
-terminal posterior se abra da mesma forma. O perfil é um ficheiro de
-texto simples com linhas `chave valor` onde `#` começa um comentário, e
-pode ser editado à mão; as cores são escritas como seis dígitos
-hexadecimais puros (`1b242e`), nunca com um `#` inicial, que começaria
-um comentário. Um perfil ausente significa as predefinições; um perfil
-que o terminal não consegue ler ou analisar também significa as
-predefinições, e a razão é comunicada no fluxo de erro padrão.
+do utilizador, de modo que um terminal posterior se abra da mesma forma.
+O sistema operativo guarda o perfil através do seu serviço de
+configurações, e ele é privado do terminal: nenhuma outra aplicação o
+pode ler ou alterar. Apenas o que o utilizador realmente mudou é
+armazenado, pelo que *Restaurar predefinições* remove essas escolhas em
+vez de congelar os valores de hoje — aplica-se então o que o
+administrador ou uma versão posterior do terminal alterar. Uma
+configuração que o terminal não consegue interpretar fica na sua
+predefinição e é comunicada no fluxo de erro padrão, e um serviço de
+configurações inacessível deixa o terminal a funcionar com os valores com
+que é distribuído, o que também é comunicado.
 
 ## EXIT STATUS
 

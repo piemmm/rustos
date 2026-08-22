@@ -68,11 +68,9 @@ mod program {
     extern crate alloc;
 
     use alloc::boxed::Box;
-    use alloc::string::String;
     use alloc::vec::Vec;
 
     use tairix_abi::driver::display::{DamageRect, DisplayFormat, DisplayMode};
-    use tairix_abi::fs::OpenFlags;
     use tairix_abi::window_ipc::{AppMenuItemId, PointerAction, WindowEvent, WINDOW_ENDPOINT};
     use tairix_abi::{
         Errno, Origin, ProcId, WaitSetOp, WaitSourceKind, WaitStatus, ORIGIN_WIRE_LEN,
@@ -91,10 +89,9 @@ mod program {
         fit_font_size, grid_dims, grid_size, snap_to_cells, window_size,
     };
     use tairix_terminal::menu::{Command, ContextMenu, MenuOutcome};
-    use tairix_terminal::profile::{
-        parse as parse_profile, render as render_profile, user_profile_path, Profile,
-        MAX_PROFILE_LEN,
-    };
+    // `Settings` here is the sheet UI; the app-data handle is `SettingsStore`.
+    use tairix_appdata::{RtHost, Settings as SettingsStore};
+    use tairix_terminal::profile::Profile;
     use tairix_terminal::render::Screen;
     use tairix_terminal::scheme::Painted;
     use tairix_terminal::settings::{preferred_extent, Settings, SheetOutcome};
@@ -288,134 +285,65 @@ mod program {
         }
     }
 
-    /// Read the whole file at `path` under this process's own identity,
-    /// stopping one chunk past `cap` so no document can make the terminal
-    /// slurp an arbitrary number of bytes.
-    fn read_file(path: &str, cap: usize) -> Result<Vec<u8>, Errno> {
-        let ret = tairix_rt::fs_open(path.as_bytes(), OpenFlags::READ);
-        if ret < 0 {
-            return Err(Errno::from_syscall(ret));
-        }
-        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-        // `ret >= 0` checked above; it is a descriptor number.
-        let fd = ret as u32;
-        let mut bytes = Vec::new();
-        let mut chunk = [0u8; 1024];
-        let outcome = loop {
-            if bytes.len() > cap {
-                break Ok(bytes);
-            }
-            match tairix_rt::fs_read(fd, bytes.len() as u64, &mut chunk) {
-                Ok(0) => break Ok(bytes),
-                Ok(read) => match chunk.get(..read) {
-                    Some(slice) => bytes.extend_from_slice(slice),
-                    None => break Err(Errno::OutOfRange),
-                },
-                Err(err) => break Err(Errno::from_syscall(err)),
-            }
-        };
-        let _ = tairix_rt::fs_close(fd);
-        outcome
-    }
+    /// The command word this application's bundle is installed under, which
+    /// selects nothing but its own shipped defaults: the store itself is keyed
+    /// on the bundle identity the kernel attests.
+    const OWN_WORD: &str = "terminal";
 
-    /// The user's own profile document path, or `None` when the session
-    /// inherited no home (in which case nothing is read and nothing is
-    /// stored: a terminal with no home runs on the defaults).
-    fn profile_path() -> Option<String> {
-        let home = tairix_rt::env_var(b"HOME")?;
-        let home = core::str::from_utf8(home).ok()?;
-        user_profile_path(home)
-    }
-
-    /// The profile in force for this user.
+    /// The profile in force for this user, and a note for every stored
+    /// setting the registry refused.
     ///
-    /// An **absent** document is the ordinary state of a fresh account and
-    /// silently yields [`Profile::default`]. Anything else that stops the
-    /// document being used — no home, a refused read, bytes that are not
-    /// UTF-8, a document the shared parser refuses — also yields the
-    /// defaults, but says so on `stderr` rather than running on settings the
-    /// user cannot see the reason for.
-    fn load_profile(path: Option<&str>) -> Profile {
-        let Some(path) = path else {
-            return Profile::default();
-        };
-        let bytes = match read_file(path, MAX_PROFILE_LEN) {
-            Ok(bytes) => bytes,
-            Err(Errno::NotFound) => return Profile::default(),
-            Err(err) => {
-                report(&alloc::format!(
-                    "{path}: read refused ({err:?}); using the default profile"
-                ));
-                return Profile::default();
-            }
-        };
-        if bytes.len() > MAX_PROFILE_LEN {
+    /// A store the app-data service cannot serve — no service bound, a volume
+    /// still to be unlocked — leaves the bundle's shipped defaults standing
+    /// and is reported once, rather than running on settings whose provenance
+    /// the user cannot see. A key the registry refuses costs only itself and
+    /// is named.
+    fn load_profile(settings: &SettingsStore<'_>) -> Profile {
+        if let Some(err) = settings.store_refusal() {
             report(&alloc::format!(
-                "{path}: longer than any valid profile document; using the default profile"
+                "settings unavailable ({err:?}); running on this build's defaults"
             ));
-            return Profile::default();
         }
-        let Ok(text) = core::str::from_utf8(&bytes) else {
+        if let Some(err) = settings.defaults_refusal() {
             report(&alloc::format!(
-                "{path}: not valid UTF-8; using the default profile"
+                "this bundle's shipped defaults could not be read ({err:?})"
             ));
-            return Profile::default();
-        };
-        match parse_profile(text) {
-            Ok(mut profile) => {
-                profile.clamp();
-                profile
-            }
-            Err(err) => {
-                report(&alloc::format!("{path}: {err}; using the default profile"));
-                Profile::default()
-            }
+        }
+        let (profile, refused) = Profile::load(settings);
+        for key in refused {
+            report(&alloc::format!(
+                "{}: not a value this setting accepts; using its default",
+                key.name()
+            ));
+        }
+        profile
+    }
+
+    /// Publish `profile` to the app-data store.
+    ///
+    /// A refused publish is reported and otherwise harmless: the terminal
+    /// keeps showing what the user just chose, and the next session opens on
+    /// whatever the store still holds.
+    fn persist_profile(settings: &mut SettingsStore<'_>, profile: &Profile) {
+        if let Err(err) = profile.save(settings) {
+            report(&alloc::format!("the profile was not saved ({err:?})"));
         }
     }
 
-    /// Replace the user's profile document with `profile`.
+    /// Forget the user's own settings and adopt what the store's lower layers
+    /// then imply.
     ///
-    /// A refused write is reported and otherwise harmless: the terminal
-    /// keeps showing what the user just chose, and the next session simply
-    /// opens on what is still on disk. The parent directory is created
-    /// first — `~/Settings/Terminal` does not exist until the first change.
-    fn persist_profile(path: Option<&str>, profile: &Profile) {
-        let Some(path) = path else {
+    /// *Restore defaults* deliberately does **not** write this build's default
+    /// values into the user's document: it removes their opinions, so a
+    /// machine-wide policy or a later shipped default applies rather than a
+    /// frozen copy of today's. A refused clear is reported and leaves the
+    /// profile the user is looking at untouched.
+    fn restore_profile(settings: &mut SettingsStore<'_>, profile: &mut Profile) {
+        if let Err(err) = Profile::clear(settings) {
+            report(&alloc::format!("the defaults were not restored ({err:?})"));
             return;
-        };
-        if let Some((parent, _)) = path.rsplit_once('/') {
-            if !parent.is_empty() {
-                let ret = tairix_rt::fs_mkdir(parent.as_bytes());
-                if ret < 0 && Errno::from_syscall(ret) != Errno::AlreadyExists {
-                    report(&alloc::format!(
-                        "{parent}: settings directory refused ({:?}); the profile was not saved",
-                        Errno::from_syscall(ret)
-                    ));
-                    return;
-                }
-            }
         }
-        let document = render_profile(profile);
-        let file = match tairix_rt::create(path.as_bytes()) {
-            Ok(file) => file,
-            Err(err) => {
-                report(&alloc::format!(
-                    "{path}: refused ({:?}); the profile was not saved",
-                    Errno::from_syscall(err)
-                ));
-                return;
-            }
-        };
-        match file.write_at(0, document.as_bytes()) {
-            Ok(written) if written == document.len() => {}
-            Ok(_) => report(&alloc::format!(
-                "{path}: the volume stopped accepting bytes; the profile was not saved"
-            )),
-            Err(err) => report(&alloc::format!(
-                "{path}: write refused ({:?}); the profile was not saved",
-                Errno::from_syscall(err)
-            )),
-        }
+        *profile = load_profile(settings);
     }
 
     /// Which overlay is open.
@@ -456,6 +384,15 @@ mod program {
     }
 
     impl Overlay {
+        /// Hand a settings sheet a profile that came from somewhere other than
+        /// its own widgets — the store's lower layers, after a restore — so the
+        /// controls show what actually applies. Any other overlay ignores it.
+        fn adopt_profile(&mut self, profile: &Profile) {
+            if let Content::Sheet(sheet) = &mut self.content {
+                sheet.adopt(*profile);
+            }
+        }
+
         /// The popup-local viewport the overlay occupies.
         fn viewport(&self) -> Rect {
             Rect::new(0, 0, self.mode.width_px, self.mode.height_px)
@@ -1156,8 +1093,9 @@ mod program {
         // the first frame is what they chose rather than a default corrected
         // once they have seen it. It is the user's, so every window shares
         // it.
-        let store = profile_path();
-        let mut profile = load_profile(store.as_deref());
+        let mut host = RtHost;
+        let mut store = SettingsStore::open(&mut host, OWN_WORD);
+        let mut profile = load_profile(&store);
 
         // --- The desktop these windows will be shown on: the screen, the
         // density, and the appearance.
@@ -1331,7 +1269,7 @@ mod program {
                             profile: &mut profile,
                             themes: &mut themes,
                             desktop: &mut desktop,
-                            store: store.as_deref(),
+                            store: &mut store,
                             env: &env,
                         },
                     ) {
@@ -1437,7 +1375,7 @@ mod program {
     }
 
     /// The process-wide state applying one drained outcome may reach.
-    struct AppContext<'a> {
+    struct AppContext<'a, 'store> {
         /// The wait-set every window's members live on.
         set: u64,
         /// The one event mailbox.
@@ -1453,8 +1391,12 @@ mod program {
         themes: &'a mut ThemeRegistry,
         /// The desktop the windows are shown on.
         desktop: &'a mut Desktop,
-        /// Where the profile is stored, when the user has a home.
-        store: Option<&'a str>,
+        /// The app-data store handle every save publishes through.
+        ///
+        /// Its own lifetime is separate from the context's: the handle borrows
+        /// the syscall host for the whole process, while a context is built
+        /// afresh for each drained outcome.
+        store: &'a mut SettingsStore<'store>,
         /// This terminal's inherited environment.
         env: &'a [Vec<u8>],
     }
@@ -1476,7 +1418,7 @@ mod program {
         outcome: EventOutcome,
         windows: &mut Vec<TerminalWindow>,
         client: &mut WindowClient<RtWindowTransport>,
-        ctx: AppContext<'_>,
+        ctx: AppContext<'_, '_>,
     ) -> Applied {
         // A window-scoped outcome names its window; one the list no longer
         // holds is an outcome for a window that has just closed, and there is
@@ -1586,12 +1528,24 @@ mod program {
                 }
                 Applied::Running
             }
-            EventOutcome::ProfileChanged { window } => {
-                // The user changed a setting. The profile is the *user's*, so
-                // every window re-derives its look, re-applies its blur,
-                // reshapes its grid (its pty follows), and repaints; only the
-                // sheet that made the change re-presents its own popup.
-                persist_profile(ctx.store, ctx.profile);
+            EventOutcome::ProfileChanged { window } | EventOutcome::ProfileRestored { window } => {
+                // The user changed a setting, or asked for the defaults back.
+                // The profile is the *user's*, so every window re-derives its
+                // look, re-applies its blur, reshapes its grid (its pty
+                // follows), and repaints; only the sheet that made the change
+                // re-presents its own popup.
+                if matches!(outcome, EventOutcome::ProfileRestored { .. }) {
+                    restore_profile(ctx.store, ctx.profile);
+                    // The sheet's own copy is stale now: what applies came
+                    // back from the store's lower layers, not from the widget.
+                    if let Some(index) = index(windows, window) {
+                        if let Some(held) = windows[index].overlay.as_mut() {
+                            held.adopt_profile(ctx.profile);
+                        }
+                    }
+                } else {
+                    persist_profile(ctx.store, ctx.profile);
+                }
                 for open in windows.iter_mut() {
                     open.look
                         .refresh(ctx.profile, ctx.themes.active(), ctx.desktop);
@@ -1743,6 +1697,13 @@ mod program {
             /// The window whose sheet made the change.
             window: u64,
         },
+        /// The user asked this window's sheet for *Restore defaults*: remove
+        /// the user's own opinions from the store, adopt the profile the
+        /// layers beneath imply, and tell the sheet what it is.
+        ProfileRestored {
+            /// The window whose sheet asked.
+            window: u64,
+        },
         /// The window manager resized this window to a new client size (a
         /// drag-resize that settled, or a maximize/restore); the caller
         /// re-maps its frame region, reshapes its grid, and updates its pty
@@ -1831,6 +1792,7 @@ mod program {
                             *profile = *sheet.profile();
                             routing = OverlayRouting::Edited;
                         }
+                        SheetOutcome::Restore => return OverlayRouting::Restore,
                         SheetOutcome::Dismissed => {
                             *profile = *sheet.profile();
                             return OverlayRouting::Closed;
@@ -1878,6 +1840,7 @@ mod program {
                     SheetOutcome::Ignored => OverlayRouting::Nothing,
                     SheetOutcome::Changed => OverlayRouting::Redraw,
                     SheetOutcome::Edited => OverlayRouting::Edited,
+                    SheetOutcome::Restore => OverlayRouting::Restore,
                     SheetOutcome::Dismissed => OverlayRouting::Closed,
                 }
             }
@@ -1892,6 +1855,10 @@ mod program {
         Redraw,
         /// The settings sheet edited the profile.
         Edited,
+        /// The settings sheet asked for *Restore defaults*: the user's own
+        /// opinions are to be removed and the profile the remaining store
+        /// layers imply read back.
+        Restore,
         /// A menu row or accelerator named this command; the overlay is done.
         Chose(Command),
         /// The overlay asked to go.
@@ -2001,6 +1968,9 @@ mod program {
                                 OverlayRouting::Edited => {
                                     return EventOutcome::ProfileChanged { window }
                                 }
+                                OverlayRouting::Restore => {
+                                    return EventOutcome::ProfileRestored { window }
+                                }
                                 OverlayRouting::Chose(command) => {
                                     held.dismissed = true;
                                     return finish(
@@ -2038,6 +2008,9 @@ mod program {
                                 OverlayRouting::Redraw => redrawn = Some(window),
                                 OverlayRouting::Edited => {
                                     return EventOutcome::ProfileChanged { window }
+                                }
+                                OverlayRouting::Restore => {
+                                    return EventOutcome::ProfileRestored { window }
                                 }
                                 OverlayRouting::Chose(command) => {
                                     held.dismissed = true;

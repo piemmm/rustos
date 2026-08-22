@@ -70,15 +70,17 @@ sélectionnée.
 | Ondulation | Un lent vacillement horizontal mouvant, comme celui d'un tube déréglé. |
 
 Chaque modification prend effet immédiatement et est enregistrée dans le
-profil propre de l'utilisateur, `~/Settings/Terminal/terminal.conf`, de
-sorte qu'un terminal ultérieur s'ouvre de la même manière. Le profil est
-un simple fichier texte de lignes `clé valeur` avec `#` commençant un
-commentaire, et peut être modifié à la main ; les couleurs y sont
-écrites sous forme de six chiffres hexadécimaux bruts (`1b242e`), jamais
-avec un `#` en tête, qui commencerait un commentaire. Un profil absent
-signifie les valeurs par défaut ; un profil que le terminal ne peut pas
-lire ou analyser signifie également les valeurs par défaut, et la raison
-est indiquée sur le flux d'erreur standard.
+profil propre de l'utilisateur, de sorte qu'un terminal ultérieur s'ouvre
+de la même manière. Le système d'exploitation conserve le profil via son
+service de réglages, et celui-ci est privé au terminal : aucune autre
+application ne peut le lire ni le modifier. Seul ce que l'utilisateur a
+réellement changé est enregistré ; *Restaurer les valeurs par défaut*
+supprime donc ces choix au lieu de figer les valeurs du jour — ce que
+l'administrateur ou une version ultérieure du terminal modifie s'applique
+alors. Un réglage que le terminal ne sait pas interpréter reste à sa valeur
+par défaut et est signalé sur le flux d'erreur standard, et un service de
+réglages inaccessible laisse le terminal fonctionner avec les valeurs
+livrées, ce qui est également signalé.
 
 ## EXIT STATUS
 

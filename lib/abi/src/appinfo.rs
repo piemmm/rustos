@@ -534,7 +534,10 @@ pub enum BundleEntry {
     Libraries,
     /// Images, locales, UI definitions, and other read-only assets.
     Resources,
-    /// Read-only defaults copied into the user's settings on first launch.
+    /// The defaults the bundle ships: a read-only fallback *layer* beneath the
+    /// app's own store, never copied anywhere. An update therefore ships new
+    /// defaults that take effect at once, and the user's own file holds only
+    /// what the user actually changed.
     DefaultSettings,
     /// The internationalised help tree: one structured-Markdown document per
     /// command/topic under one directory per BCP-47 locale, plus the

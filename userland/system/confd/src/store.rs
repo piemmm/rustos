@@ -10,6 +10,7 @@
 use alloc::string::String;
 use alloc::vec::Vec;
 
+use tairix_abi::appdata_ipc::APPDATA_SETTINGS_FILE;
 use tairix_abi::appinfo::PublisherId;
 use tairix_abi::{AppIdentity, Errno};
 use tairix_appconf::{Document, MAX_DOCUMENT_LEN};
@@ -19,7 +20,11 @@ use crate::owner::OwnerPin;
 use crate::Storage;
 
 /// Name of an app's private configuration document inside its store.
-pub const SETTINGS_FILE: &str = "settings.conf";
+///
+/// The one definition lives in the app-data contract: the same name serves the
+/// bundle's shipped defaults, so the service and the client cannot disagree
+/// about which file the private scope is.
+pub const SETTINGS_FILE: &str = APPDATA_SETTINGS_FILE;
 
 /// Name the publish step writes a new document to before renaming it over
 /// [`SETTINGS_FILE`].
@@ -316,6 +321,32 @@ impl AppStore {
         read_document(fs, &join(&self.policy_dir, SETTINGS_FILE))
     }
 
+    /// The document a caller is served: the machine-wide policy layer with the
+    /// app's own settings applied over it.
+    ///
+    /// The result is *canonical* — one line per setting, no comments, no
+    /// duplicates — because it is two documents made one, and because the
+    /// caller parses it rather than editing it. The app's own file keeps its
+    /// comments and its ordering; only this view of it is normalised.
+    ///
+    /// # Errors
+    ///
+    /// [`StoreError::DocumentRefused`] when the two layers together exceed the
+    /// format's setting or line bound, else as [`Self::document`].
+    pub fn merged_document<S: Storage + ?Sized>(&self, fs: &mut S) -> Result<Document, StoreError> {
+        let policy = self.policy_document(fs)?;
+        let own = self.document(fs)?;
+        let mut merged = Document::new();
+        // Policy first, the app's own second: a key in both ends up with the
+        // user's value, which is what makes an override an override.
+        for setting in policy.settings().chain(own.settings()) {
+            merged
+                .set(setting.key, setting.value)
+                .map_err(|_| StoreError::DocumentRefused)?;
+        }
+        Ok(merged)
+    }
+
     /// Publish `document` as the app's own configuration, atomically.
     ///
     /// The rendered text is written whole to a sibling temporary name and then
@@ -439,28 +470,6 @@ fn join(parent: &str, child: &str) -> String {
     path.push('/');
     path.push_str(child);
     path
-}
-
-/// The keys `document` carries whose text begins with `prefix`, deduplicated
-/// and in document order.
-///
-/// A document may legitimately set a key more than once — a hand-edit appends
-/// a line rather than rewriting one — and a reader takes the last, so a
-/// listing must name each key once. The order is the document's own, so paging
-/// through a listing walks a stable sequence.
-#[must_use]
-pub fn keys_with_prefix(document: &Document, prefix: &str) -> Vec<String> {
-    let mut keys: Vec<String> = Vec::new();
-    for setting in document.settings() {
-        if !setting.key.starts_with(prefix) {
-            continue;
-        }
-        if keys.iter().any(|seen| seen == setting.key) {
-            continue;
-        }
-        keys.push(String::from(setting.key));
-    }
-    keys
 }
 
 #[cfg(test)]

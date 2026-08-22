@@ -38,11 +38,25 @@ manifest, a parser-sandbox child — has no store, and is refused and audited.
 
 | Request | Effect |
 |---|---|
-| `ConfigGet { key }` | the caller's own value, or `NotFound` |
+| `ConfigRead { capacity }` | the caller's whole merged document, or the length it needs |
 | `ConfigSet { key, value }` | stage a write |
 | `ConfigUnset { key }` | stage a removal |
 | `ConfigCommit` | publish every staged change atomically |
-| `ConfigList { prefix, cursor }` | one bounded page of keys |
+
+A read answers with the **whole** document, not one key: the policy layer, the
+app's own settings over it, and the caller's own staged edits over those,
+rendered as canonical `key = value` text the client parses with the one format
+engine (`lib/appconf`). An application's start-up therefore costs one call, one
+store read, and one parse however many settings it goes on to consult — where a
+per-key read would have cost the service a file read and a parse *each*, so a
+thirteen-setting profile cost thirteen of both.
+
+The request declares the reply buffer the caller has. A document that does not
+fit comes back as the byte count it needs and **no body at all**, so a caller
+never parses a truncated prefix, and never assembles a store out of two
+different snapshots: every answer is one point-in-time view. A client sizes a
+small buffer for the store it expects and pays a second call only for a store
+larger than that.
 
 A set or an unset *stages* a pending edit against the calling **process
 instance** (keyed on the unforgeable `ProcId`, so one instance can never publish
@@ -117,6 +131,12 @@ it did not set, and unsetting an override falls back to the policy layer rather
 than to nothing. The bundle's own `DefaultSettings/` is a third layer below
 both; it is applied by the client library, which is the only principal that can
 name its own bundle without a lookup.
+
+The document a read is *served* is canonical — one line per setting, no
+comments, no duplicates — because it is two layers made one and the caller
+parses it rather than editing it. The app's own file on the volume keeps its
+comments, its ordering, and its hand-edits untouched; only this view of it is
+normalised.
 
 ## Atomic publish, and what a crash leaves
 

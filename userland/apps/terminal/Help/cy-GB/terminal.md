@@ -68,14 +68,17 @@ coch, gwyrdd a glas ar gyfer pa un bynnag sydd wedi'i ddewis.
 | Siglo | Siglo llorweddol araf sy'n teithio, fel y mae gan diwb sydd allan o amser. |
 
 Mae pob newid yn dod i rym ar unwaith ac yn cael ei gadw i broffil y
-defnyddiwr ei hun yn `~/Settings/Terminal/terminal.conf`, fel bod
-terfynell ddiweddarach yn agor yr un ffordd. Ffeil destun plaen o
-linellau `allwedd gwerth` yw'r proffil, gyda `#` yn dechrau sylw, a
-gellir ei golygu â llaw; ysgrifennir lliwiau fel chwe digid hecsadegol
-noeth (`1b242e`), byth gyda `#` ar y dechrau, a fyddai'n dechrau sylw.
-Mae proffil absennol yn golygu'r rhagosodiadau; mae proffil na all y
-derfynell ei ddarllen neu ei ddosrannu hefyd yn golygu'r rhagosodiadau,
-ac adroddir y rheswm ar y ffrwd gwall safonol.
+defnyddiwr ei hun, fel bod terfynell ddiweddarach yn agor yr un ffordd.
+Mae'r system weithredu'n cadw'r proffil trwy ei gwasanaeth gosodiadau, ac
+mae'n breifat i'r derfynell: ni all unrhyw raglen arall ei ddarllen na'i
+newid. Dim ond yr hyn a newidiodd y defnyddiwr mewn gwirionedd a gedwir,
+felly mae *Adfer rhagosodiadau* yn tynnu'r dewisiadau hynny yn lle rhewi
+gwerthoedd heddiw — yna mae gosodiad y mae'r gweinyddwr neu fersiwn
+ddiweddarach o'r derfynell yn ei newid yn berthnasol. Gedwir gosodiad na
+all y derfynell wneud synnwyr ohono ar ei ragosodiad ac adroddir amdano ar
+y ffrwd gwall safonol, ac mae gwasanaeth gosodiadau na ellir ei gyrraedd yn
+gadael y derfynell yn rhedeg ar y gwerthoedd y daw gyda hi, ac adroddir am
+hynny hefyd.
 
 ## EXIT STATUS
 

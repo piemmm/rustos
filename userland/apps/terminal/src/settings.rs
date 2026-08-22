@@ -143,6 +143,14 @@ pub enum SheetOutcome {
     /// Claimed; the profile was edited (the caller re-resolves colours,
     /// re-derives the font, repaints, and persists).
     Edited,
+    /// Claimed; the user asked for *Restore defaults*.
+    ///
+    /// The sheet cannot answer this itself: "defaults" means the layers
+    /// beneath the user's own document — the machine's policy and the bundle's
+    /// shipped defaults — and only the store knows what those say. The caller
+    /// removes the user's opinions, re-reads the profile that then applies,
+    /// and hands it back through [`Settings::adopt`].
+    Restore,
     /// The sheet asked to close.
     Dismissed,
 }
@@ -982,8 +990,7 @@ impl Settings {
         if let Some(rect) = restore {
             if let Some(ButtonAction::Activated) = self.restore.on_pointer(event, rect, damage) {
                 self.focus = Focus::Restore;
-                self.restore_defaults();
-                return Some(SheetOutcome::Edited);
+                return Some(SheetOutcome::Restore);
             }
         }
         if let Some(rect) = done {
@@ -1087,10 +1094,7 @@ impl Settings {
                 SheetOutcome::Changed
             }
             Focus::Restore => match self.restore.on_key(key) {
-                Some(ButtonAction::Activated) => {
-                    self.restore_defaults();
-                    SheetOutcome::Edited
-                }
+                Some(ButtonAction::Activated) => SheetOutcome::Restore,
                 None => SheetOutcome::Changed,
             },
             Focus::Done => match self.done.on_key(key) {
@@ -1190,10 +1194,15 @@ impl Settings {
         }
     }
 
-    /// Reset the whole profile to [`Profile::default`] and rebuild every
+    /// Show `profile` instead of the one being edited, rebuilding every
     /// control to reflect it.
-    fn restore_defaults(&mut self) {
-        self.profile = Profile::default();
+    ///
+    /// The caller uses this after acting on [`SheetOutcome::Restore`]: the
+    /// profile the store's remaining layers imply is the store's answer to
+    /// give, not the sheet's to guess, so the sheet is told what it is rather
+    /// than assuming this application's own compiled defaults.
+    pub fn adopt(&mut self, profile: Profile) {
+        self.profile = profile;
         self.sync_scheme_radios();
         self.text_size.set_value(permille_from_bounded(
             self.profile.font_size_px,

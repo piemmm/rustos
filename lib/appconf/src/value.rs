@@ -26,6 +26,72 @@ pub const MAX_VALUE_LEN: usize = APPDATA_VALUE_MAX;
 /// expressed.
 pub const PERMILLE_FULL: u32 = 1000;
 
+/// Decode a value's text as a boolean.
+///
+/// Accepts `true`/`false` and `on`/`off` — two spellings because both read
+/// naturally to a hand-editor, and neither is ambiguous. A write always
+/// renders `true`/`false`.
+///
+/// This is the one definition every layered reader shares: a document's own
+/// accessor and a client that falls back across layers must never disagree
+/// about what a value means.
+///
+/// # Errors
+///
+/// [`ConfError::ValueMalformed`] for anything outside those spellings.
+pub fn as_bool(text: &str) -> Result<bool, ConfError> {
+    match text {
+        "true" | "on" => Ok(true),
+        "false" | "off" => Ok(false),
+        _ => Err(ConfError::ValueMalformed),
+    }
+}
+
+/// Decode a value's text as an unsigned decimal.
+///
+/// # Errors
+///
+/// [`ConfError::ValueMalformed`] for a sign, a suffix, or an overflow — all
+/// refusals, never a saturation.
+pub fn as_u32(text: &str) -> Result<u32, ConfError> {
+    text.parse::<u32>().map_err(|_| ConfError::ValueMalformed)
+}
+
+/// Decode a value's text as a signed decimal.
+///
+/// # Errors
+///
+/// [`ConfError::ValueMalformed`] for anything that is not a decimal `i64`.
+pub fn as_i64(text: &str) -> Result<i64, ConfError> {
+    text.parse::<i64>().map_err(|_| ConfError::ValueMalformed)
+}
+
+/// Decode a value's text as a permille fraction (`0..=`[`PERMILLE_FULL`]).
+///
+/// # Errors
+///
+/// [`ConfError::ValueMalformed`] for a non-decimal, or a value naming more
+/// than [`PERMILLE_FULL`].
+pub fn as_permille(text: &str) -> Result<u32, ConfError> {
+    match as_u32(text)? {
+        value if value <= PERMILLE_FULL => Ok(value),
+        _ => Err(ConfError::ValueMalformed),
+    }
+}
+
+/// The canonical text a boolean setting is written as.
+///
+/// One spelling for a write, two accepted for a read: a document the engine
+/// wrote is always canonical, and one a human wrote is still understood.
+#[must_use]
+pub const fn bool_text(value: bool) -> &'static str {
+    if value {
+        "true"
+    } else {
+        "false"
+    }
+}
+
 /// The two shapes a value can take on a line.
 pub(crate) enum Form {
     /// Whitespace-trimmed text, ending at an unquoted `#`.

@@ -550,6 +550,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "tairix-appdata"
+version = "0.0.0"
+dependencies = [
+ "tairix-abi",
+ "tairix-appconf",
+ "tairix-cmdres",
+ "tairix-rt",
+]
+
+[[package]]
 name = "tairix-applib"
 version = "0.0.0"
 dependencies = [
@@ -2543,6 +2553,8 @@ name = "tairix-terminal"
 version = "0.0.0"
 dependencies = [
  "tairix-abi",
+ "tairix-appconf",
+ "tairix-appdata",
  "tairix-controls",
  "tairix-display",
  "tairix-font",
@@ -2554,7 +2566,6 @@ dependencies = [
  "tairix-rt",
  "tairix-theme",
  "tairix-users",
- "tairix-util",
  "tairix-vt",
  "tairix-window",
 ]

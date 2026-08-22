@@ -123,7 +123,7 @@ pub use grid::Grid;
 pub use layout::{COLS, ROWS};
 pub use menu::{Command, ContextMenu};
 pub use parser::Parser;
-pub use profile::{user_profile_path, Profile};
+pub use profile::Profile;
 pub use render::Screen;
 pub use scheme::{ColorScheme, Painted, Scheme};
 pub use settings::{Settings, SheetOutcome};

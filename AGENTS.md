@@ -543,6 +543,7 @@ tairix/
 │   ├── abi-sys/         # C-callable abi-v1 syscall stub runtime (non-Rust progs).
 │   ├── abi-trap/        # The single per-arch user->kernel syscall trap carve-out.
 │   ├── appconf/         # Per-app `key = value` configuration document engine.
+│   ├── appdata/         # App-data client: an app's own settings, layered and staged.
 │   ├── appload/         # Application-bundle load gate.
 │   ├── binfmt/          # Read-only executable-container decoder (rxe/ELF64/wasm).
 │   ├── blkclient/       # Block-service client (RemoteBlock + its RtBlkCall transport).

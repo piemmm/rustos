@@ -42,10 +42,14 @@ tairix-controls = { path = "../../../lib/controls", version = "=0.0.0" }
 # The shared pointer and keyboard vocabulary the control family is driven with,
 # so the app routes input through one definition rather than its own.
 tairix-input = { path = "../../../lib/input", version = "=0.0.0" }
-# The one `#`-comment configuration grammar every line-oriented TAIRiX store
-# shares, so the profile document's comments are recognised exactly as the
-# desktop's own settings documents are.
-tairix-util = { path = "../../../lib/util", version = "=0.0.0" }
+# The app-data client: the one way this application reaches its own settings.
+# The store is gated on the kernel-attested bundle identity, so the profile is
+# private to the terminal and no other app the user launches can read or
+# rewrite it — and no path, user, or bundle identifier is spelled here.
+tairix-appdata = { path = "../../../lib/appdata", version = "=0.0.0" }
+# The one `key = value` document engine, for the key-grammar assertion the
+# profile registry's own test makes against every key it publishes.
+tairix-appconf = { path = "../../../lib/appconf", version = "=0.0.0" }
 # The app half of the window channel: `WindowClient` (create / present /
 # close over the `WindowTransport` seam), the shared app event-mailbox naming
 # rule (`event_endpoint_for`), and the desktop's one icon-bar menu convention
@@ -97,11 +101,25 @@ tairix-font = { path = "../../../lib/font", version = "=0.0.0", features = ["rt"
 # the font client's glyph cache obeys the same band every other cache on the
 # machine does.
 tairix-procinfo = { path = "../../../lib/procinfo", version = "=0.0.0", features = ["program"] }
+# On the real target the `Run` binary reaches the app-data service and its own
+# bundle's shipped defaults over the runtime syscalls; this augments the
+# host-neutral base dependency with that host for the bare-metal build only, so
+# host tests still drive the client over their own fake.
+tairix-appdata = { path = "../../../lib/appdata", version = "=0.0.0", features = ["rt"] }
 
 # The engine library's host tests draw text, so they inject the shared solid
 # test transport (never a running `fontd`) via the `test-util` feature.
 [dev-dependencies]
 tairix-font = { path = "../../../lib/font", version = "=0.0.0", features = ["test-util"] }
+# The shared fake app-data service the profile's host tests drive the client
+# over: it speaks the real `appdata-v1` codec, so a test exercises the wire the
+# service actually answers rather than a mock of it.
+tairix-appdata = { path = "../../../lib/appdata", version = "=0.0.0", features = [
+    "test-util",
+] }
+# The store's own key grammar, so the profile's registry is checked against the
+# one definition rather than a restatement of it.
+tairix-appconf = { path = "../../../lib/appconf", version = "=0.0.0" }
 # The control family's own theme fixtures, so a test that varies the desktop's
 # typography uses the one shared fixture rather than a private copy.
 tairix-controls = { path = "../../../lib/controls", version = "=0.0.0", features = [

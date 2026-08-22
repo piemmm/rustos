@@ -25,6 +25,15 @@
 //! program with no signed manifest, a parser-sandbox child — has no store and
 //! is refused.
 //!
+//! # One read for the whole document
+//!
+//! A `ConfigRead` answers with the caller's whole merged document — the
+//! machine-wide policy layer, the app's own settings over it, the caller's own
+//! staged edits over those — as canonical `key = value` text. An application's
+//! start-up therefore costs one call, one store read, and one parse however
+//! many settings it goes on to consult; answering per key would have cost a
+//! file read and a parse each.
+//!
 //! # Staged writes
 //!
 //! A `ConfigSet` or `ConfigUnset` records a *pending edit* against the calling
@@ -50,12 +59,10 @@ extern crate alloc;
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use tairix_abi::appdata_ipc::{
-    encode_value_reply, AppDataKeyRecord, AppDataRequest, APPDATA_LIST_PAGE_MAX,
-};
-use tairix_abi::reply::{encode_page_reply, encode_status_reply};
+use tairix_abi::appdata_ipc::{encode_document_reply, AppDataRequest};
+use tairix_abi::reply::encode_status_reply;
 use tairix_abi::{AppIdentity, Errno, Origin, ProcId};
-use tairix_appconf::{validate_key, validate_key_prefix, ConfError, Document, MAX_SETTINGS};
+use tairix_appconf::{validate_key, ConfError, Document, MAX_SETTINGS};
 use tairix_log::{Event, EventId, Field, FieldValue, Level, Sink};
 
 pub mod events;
@@ -157,21 +164,6 @@ struct PendingEdit {
     value: Option<String>,
 }
 
-/// What a staging session has pending for one key.
-///
-/// Three distinct answers, because a read must tell them apart: a staged value
-/// reads back as itself, a staged removal reads as absent even though the
-/// volume still carries the key, and nothing staged falls through to the
-/// committed document.
-enum Staged<'a> {
-    /// A pending write of this value.
-    Value(&'a str),
-    /// A pending removal.
-    Removed,
-    /// Nothing is staged for the key.
-    Nothing,
-}
-
 /// The uncommitted edits of one calling process instance.
 struct Session {
     /// The process instance that staged them. Unforgeable and never reused, so
@@ -205,17 +197,6 @@ impl Session {
             value: staged,
         });
         Ok(())
-    }
-
-    /// What this session has staged for `key`.
-    fn staged(&self, key: &str) -> Staged<'_> {
-        match self.edits.iter().find(|edit| edit.key == key) {
-            Some(PendingEdit {
-                value: Some(value), ..
-            }) => Staged::Value(value),
-            Some(PendingEdit { value: None, .. }) => Staged::Removed,
-            None => Staged::Nothing,
-        }
     }
 
     /// Apply every staged edit to `document`, in the order they were staged.
@@ -299,9 +280,8 @@ impl<S: Sink> AppData<S> {
         // has no store, whatever it asked for.
         let identity = self.attested_app(origin)?;
         match decoded {
-            AppDataRequest::ConfigGet { key } => {
-                validate_key(key).map_err(|_| Errno::OutOfRange)?;
-                self.config_get(fs, origin, &identity, key, out)
+            AppDataRequest::ConfigRead { capacity } => {
+                self.config_read(fs, origin, &identity, capacity, out)
             }
             AppDataRequest::ConfigSet { key, value } => {
                 validate_key(key).map_err(|_| Errno::OutOfRange)?;
@@ -321,10 +301,6 @@ impl<S: Sink> AppData<S> {
                 self.config_commit(fs, origin, &identity)?;
                 Ok(ok(out))
             }
-            AppDataRequest::ConfigList { prefix, cursor } => {
-                validate_key_prefix(prefix).map_err(|_| Errno::OutOfRange)?;
-                self.config_list(fs, origin, &identity, prefix, cursor, out)
-            }
         }
     }
 
@@ -341,31 +317,30 @@ impl<S: Sink> AppData<S> {
         Err(StoreError::NoAppIdentity.errno())
     }
 
-    /// Answer a read: the caller's own pending edit if it has one, else the
-    /// committed document, else the machine-wide policy layer, else not found.
-    fn config_get<F: Storage + ?Sized>(
+    /// Answer a read with the caller's whole merged document: the machine-wide
+    /// policy layer, the app's own settings over it, and the caller's own
+    /// staged edits over those.
+    ///
+    /// One call, one store read, one parse — however many settings the caller
+    /// goes on to consult. A per-key read would have cost a file read and a
+    /// parse *each*, which is the pessimisation this shape exists to avoid.
+    fn config_read<F: Storage + ?Sized>(
         &mut self,
         fs: &mut F,
         origin: &Origin,
         identity: &AppIdentity,
-        key: &str,
+        capacity: u32,
         out: &mut [u8],
     ) -> Result<usize, Errno> {
-        match self.session_for(origin).map(|session| session.staged(key)) {
-            Some(Staged::Value(value)) => return encode_value_reply(value, out),
-            Some(Staged::Removed) => return Err(Errno::NotFound),
-            Some(Staged::Nothing) | None => {}
-        }
         let store = self.open(fs, origin, identity, false)?;
-        let document = self.read_document(fs, origin, &store)?;
-        if let Some(value) = document.get(key) {
-            return encode_value_reply(value, out);
+        let outcome = store.merged_document(fs);
+        let mut document = self.resolve(origin, outcome)?;
+        // A caller sees its own uncommitted work and no other principal's, so
+        // a settings sheet reads back what it just set.
+        if let Some(session) = self.session_for(origin) {
+            session.apply(&mut document)?;
         }
-        let policy = self.read_policy(fs, origin, &store)?;
-        match policy.get(key) {
-            Some(value) => encode_value_reply(value, out),
-            None => Err(Errno::NotFound),
-        }
+        encode_document_reply(&document.render(), capacity, out)
     }
 
     /// Publish the caller's staged edits as one atomic document replacement.
@@ -403,57 +378,6 @@ impl<S: Sink> AppData<S> {
         Ok(())
     }
 
-    /// Answer a listing: one bounded page of the keys the app's own document
-    /// and the policy layer carry, filtered by `prefix`, starting at `cursor`.
-    fn config_list<F: Storage + ?Sized>(
-        &mut self,
-        fs: &mut F,
-        origin: &Origin,
-        identity: &AppIdentity,
-        prefix: &str,
-        cursor: u32,
-        out: &mut [u8],
-    ) -> Result<usize, Errno> {
-        let store = self.open(fs, origin, identity, false)?;
-        let document = self.read_document(fs, origin, &store)?;
-        let mut keys = store::keys_with_prefix(&document, prefix);
-        let policy = self.read_policy(fs, origin, &store)?;
-        for key in store::keys_with_prefix(&policy, prefix) {
-            if !keys.contains(&key) {
-                keys.push(key);
-            }
-        }
-        // A staged edit is part of what the caller sees: a key it just set is
-        // listed, and one it just unset is not.
-        if let Some(session) = self.session_for(origin) {
-            for edit in session.edits.iter().filter(|e| e.key.starts_with(prefix)) {
-                let known = keys.iter().position(|seen| *seen == edit.key);
-                match (known, edit.value.is_some()) {
-                    (None, true) => keys.push(edit.key.clone()),
-                    (Some(index), false) => {
-                        keys.remove(index);
-                    }
-                    _ => {}
-                }
-            }
-        }
-
-        // A cursor past the end is the empty terminator, not an error.
-        let start = usize::try_from(cursor).map_err(|_| Errno::OutOfRange)?;
-        // Collected fallibly: a key the record cannot hold is unreachable (the
-        // format's key bound *is* the record's width), but dropping one would
-        // shorten the page, and a short page is how a caller knows it reached
-        // the end — so it would silently lose the rest of the listing.
-        let page = keys
-            .get(start..)
-            .unwrap_or(&[])
-            .iter()
-            .take(APPDATA_LIST_PAGE_MAX as usize)
-            .map(|key| AppDataKeyRecord::new(key).map(|record| record.to_le_bytes()))
-            .collect::<Result<Vec<_>, Errno>>()?;
-        encode_page_reply(&page, APPDATA_LIST_PAGE_MAX, out)
-    }
-
     /// Open the caller's store, auditing and translating any refusal.
     fn open<F: Storage + ?Sized>(
         &mut self,
@@ -482,17 +406,6 @@ impl<S: Sink> AppData<S> {
         store: &AppStore,
     ) -> Result<Document, Errno> {
         let outcome = store.document(fs);
-        self.resolve(origin, outcome)
-    }
-
-    /// Read the machine-wide policy layer, auditing any refusal.
-    fn read_policy<F: Storage + ?Sized>(
-        &self,
-        fs: &mut F,
-        origin: &Origin,
-        store: &AppStore,
-    ) -> Result<Document, Errno> {
-        let outcome = store.policy_document(fs);
         self.resolve(origin, outcome)
     }
 

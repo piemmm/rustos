@@ -67,13 +67,15 @@ selected.
 | Wobble | A slow travelling horizontal waver, as an out-of-time tube has. |
 
 Every change takes effect immediately and is saved to the user's own
-profile at `~/Settings/Terminal/terminal.conf`, so a later terminal opens
-the same way. The profile is a plain text file of `key value` lines with
-`#` beginning a comment, and may be edited by hand; colours are written
-as six bare hexadecimal digits (`1b242e`), never with a leading `#`,
-which would begin a comment. An absent profile means the defaults; a
-profile the terminal cannot read or parse also means the defaults, and
-the reason is reported on the standard error stream.
+profile, so a later terminal opens the same way. The profile is kept by
+the operating system's settings service and is private to the terminal:
+no other application can read or change it. Only what the user actually
+changed is stored, so *Restore defaults* removes those choices rather
+than freezing today's values — a setting the administrator or a later
+version of the terminal changes then applies. A setting the terminal
+cannot make sense of is left at its default and reported on the standard
+error stream, and a settings service that cannot be reached leaves the
+terminal running on the values it ships with, again reported.
 
 ## EXIT STATUS
 

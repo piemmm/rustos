@@ -70,15 +70,17 @@ con cursori rosso, verde e blu per quello selezionato.
 | Oscillazione | Una lenta ondulazione orizzontale mobile, come quella di un tubo fuori tempo. |
 
 Ogni modifica ha effetto immediato e viene salvata nel profilo
-dell'utente, in `~/Settings/Terminal/terminal.conf`, in modo che un
-terminale successivo si apra allo stesso modo. Il profilo è un semplice
-file di testo con righe `chiave valore` dove `#` inizia un commento, e
-può essere modificato a mano; i colori sono scritti come sei cifre
-esadecimali nude (`1b242e`), mai con un `#` iniziale, che inizierebbe un
-commento. Un profilo assente indica le impostazioni predefinite; un
-profilo che il terminale non può leggere o analizzare indica anch'esso
-le impostazioni predefinite, e il motivo viene segnalato sul flusso di
-errore standard.
+dell'utente, in modo che un terminale successivo si apra allo stesso modo.
+Il sistema operativo custodisce il profilo tramite il proprio servizio
+impostazioni, ed è privato del terminale: nessun'altra applicazione può
+leggerlo o modificarlo. Viene memorizzato solo ciò che l'utente ha
+davvero cambiato, quindi *Ripristina impostazioni predefinite* rimuove
+quelle scelte invece di congelare i valori di oggi — si applica allora ciò
+che cambia l'amministratore o una versione successiva del terminale. Una
+impostazione che il terminale non riesce a interpretare resta al suo valore
+predefinito e viene segnalata sul flusso di errore standard, e un servizio
+impostazioni non raggiungibile lascia il terminale in funzione con i valori
+con cui è distribuito, anch'esso segnalato.
 
 ## EXIT STATUS
 

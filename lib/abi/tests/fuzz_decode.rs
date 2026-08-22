@@ -25,8 +25,8 @@
 //! random one, so it does not draw a seed.
 
 use tairix_abi::appdata_ipc::{
-    decode_value_reply, encode_value_reply, AppDataKeyRecord, AppDataRequest, APPDATA_MAX_REPLY,
-    APPDATA_MAX_REQUEST,
+    decode_document_reply, encode_document_reply, AppDataRequest, ConfigDocument,
+    APPDATA_DOCUMENT_MAX, APPDATA_MAX_REPLY, APPDATA_MAX_REQUEST,
 };
 use tairix_abi::display_ipc::{decode_mode_reply, DisplayRequest};
 use tairix_abi::driver::net_channel::{
@@ -552,19 +552,38 @@ fn exercise_appdata_ipc(bytes: &[u8]) {
             .expect("round-trip of an accepted app-data request must succeed");
         assert_eq!(request, redecoded);
     }
-    if let Ok(value) = decode_value_reply(bytes) {
-        let mut buf = [0u8; APPDATA_MAX_REPLY];
-        let len = encode_value_reply(value, &mut buf).expect("an accepted value must re-encode");
-        assert_eq!(
-            decode_value_reply(&buf[..len]),
-            Ok(value),
-            "round-trip of an accepted value reply must succeed"
-        );
-    }
-    if let Ok(record) = AppDataKeyRecord::from_bytes(bytes) {
-        let redecoded = AppDataKeyRecord::from_bytes(&record.to_le_bytes())
-            .expect("round-trip of an accepted key record must succeed");
-        assert_eq!(record, redecoded);
+    // The document reply is the other attacker-reachable direction: a client
+    // decodes whatever the endpoint answered before it can trust any of it.
+    // A whole document must round-trip; a capacity refusal must stay one.
+    match decode_document_reply(bytes) {
+        Ok(ConfigDocument::Whole(document)) => {
+            // A buffer of exactly the document's own length is the smallest
+            // capacity that must still deliver it whole.
+            let capacity = u32::try_from(document.len()).expect("bounded by the document max");
+            // Heap, not stack: a whole-document reply is 64 KiB wide.
+            let mut buf = vec![0u8; APPDATA_MAX_REPLY];
+            let len = encode_document_reply(document, capacity, &mut buf)
+                .expect("an accepted document must re-encode");
+            assert_eq!(
+                decode_document_reply(&buf[..len]),
+                Ok(ConfigDocument::Whole(document)),
+                "round-trip of an accepted document reply must succeed"
+            );
+            // …and one byte short of it must refuse with the length to retry
+            // at, never a truncated body.
+            if !document.is_empty() {
+                let len = encode_document_reply(document, capacity - 1, &mut buf)
+                    .expect("a capacity refusal must encode");
+                assert_eq!(
+                    decode_document_reply(&buf[..len]),
+                    Ok(ConfigDocument::NeedsCapacity(document.len()))
+                );
+            }
+        }
+        Ok(ConfigDocument::NeedsCapacity(needed)) => {
+            assert!(needed > 0 && needed <= APPDATA_DOCUMENT_MAX);
+        }
+        Err(_) => {}
     }
 }
 

@@ -2,13 +2,17 @@
 //! every malformed frame is refused rather than guessed at.
 
 use super::{
-    decode_value_reply, encode_value_reply, AppDataKeyRecord, AppDataRequest, APPDATA_HEADER_LEN,
-    APPDATA_KEY_MAX, APPDATA_LIST_PAGE_MAX, APPDATA_MAX_LIST_REPLY, APPDATA_MAX_REPLY,
-    APPDATA_MAX_REQUEST, APPDATA_MAX_VALUE_REPLY, APPDATA_VALUE_MAX,
+    decode_document_reply, encode_document_reply, AppDataRequest, ConfigDocument,
+    APPDATA_DOCUMENT_HEADER_LEN, APPDATA_DOCUMENT_MAX, APPDATA_HEADER_LEN, APPDATA_KEY_MAX,
+    APPDATA_MAX_REPLY, APPDATA_MAX_REQUEST, APPDATA_VALUE_MAX,
 };
 use crate::le::{put_u16, put_u32};
-use crate::reply::{decode_page_reply, encode_page_reply, encode_status_reply, STATUS_REPLY_LEN};
+use crate::reply::{encode_status_reply, STATUS_REPLY_LEN};
 use crate::Errno;
+
+extern crate alloc;
+use alloc::string::String;
+use alloc::vec;
 
 /// A request buffer wide enough for any legal record, plus the encoded length.
 struct Frame {
@@ -29,35 +33,17 @@ fn frame(request: &AppDataRequest<'_>) -> Frame {
     Frame { bytes, len }
 }
 
-/// The five operations, one representative each.
-fn every_operation() -> [AppDataRequest<'static>; 5] {
+/// The four operations, one representative each.
+fn every_operation() -> [AppDataRequest<'static>; 4] {
     [
-        AppDataRequest::ConfigGet { key: "font.size" },
+        AppDataRequest::ConfigRead { capacity: 4096 },
         AppDataRequest::ConfigSet {
             key: "font.size",
             value: "14",
         },
         AppDataRequest::ConfigUnset { key: "recent.0" },
         AppDataRequest::ConfigCommit,
-        AppDataRequest::ConfigList {
-            prefix: "recent.",
-            cursor: 7,
-        },
     ]
-}
-
-/// `recent.<index>` rendered into `buf`, for the listing-page test.
-fn recent_key(index: u16, buf: &mut [u8; 16]) -> &str {
-    const STEM: &[u8] = b"recent.";
-    buf[..STEM.len()].copy_from_slice(STEM);
-    let mut len = STEM.len();
-    if index >= 10 {
-        buf[len] = b'0' + u8::try_from(index / 10).expect("the page bound is under 100");
-        len += 1;
-    }
-    buf[len] = b'0' + u8::try_from(index % 10).expect("a single digit");
-    len += 1;
-    core::str::from_utf8(&buf[..len]).expect("ascii")
 }
 
 #[test]
@@ -75,10 +61,10 @@ fn every_operation_round_trips() {
 
 #[test]
 fn a_request_is_only_as_long_as_its_payload() {
-    // The frame is not padded to its widest form: the settings-read path
-    // must not copy a kilobyte of zeroes per call.
-    let get = frame(&AppDataRequest::ConfigGet { key: "scheme" });
-    assert_eq!(get.len, APPDATA_HEADER_LEN + "scheme".len());
+    // The frame is not padded to its widest form: the settings path must not
+    // copy a kilobyte of zeroes per call.
+    let unset = frame(&AppDataRequest::ConfigUnset { key: "scheme" });
+    assert_eq!(unset.len, APPDATA_HEADER_LEN + "scheme".len());
     let commit = frame(&AppDataRequest::ConfigCommit);
     assert_eq!(commit.len, APPDATA_HEADER_LEN);
     assert!(commit.len < APPDATA_MAX_REQUEST);
@@ -98,14 +84,33 @@ fn an_empty_value_is_a_value() {
 }
 
 #[test]
-fn an_empty_listing_prefix_lists_everything() {
-    let request = AppDataRequest::ConfigList {
-        prefix: "",
-        cursor: 0,
-    };
+fn a_read_may_ask_for_the_length_alone_or_for_the_widest_document() {
+    let widest = u32::try_from(APPDATA_DOCUMENT_MAX).expect("the document bound fits a u32");
+    for capacity in [0, 1, 4096, widest] {
+        let request = AppDataRequest::ConfigRead { capacity };
+        assert_eq!(
+            AppDataRequest::decode(frame(&request).as_slice()),
+            Ok(request)
+        );
+    }
+}
+
+#[test]
+fn a_capacity_beyond_the_document_bound_is_refused() {
+    // No document can be larger, so a larger buffer claim is a malformed
+    // request rather than a generous one.
+    let mut out = [0u8; APPDATA_MAX_REQUEST];
+    let over = u32::try_from(APPDATA_DOCUMENT_MAX + 1).expect("fits a u32");
     assert_eq!(
-        AppDataRequest::decode(frame(&request).as_slice()),
-        Ok(request)
+        AppDataRequest::ConfigRead { capacity: over }.encode(&mut out),
+        Err(Errno::LengthOutOfRange)
+    );
+
+    let mut encoded = frame(&AppDataRequest::ConfigRead { capacity: 0 });
+    put_u32(&mut encoded.bytes, super::CAPACITY_OFFSET, over);
+    assert_eq!(
+        AppDataRequest::decode(encoded.as_slice()),
+        Err(Errno::LengthOutOfRange)
     );
 }
 
@@ -127,7 +132,7 @@ fn an_over_long_key_or_value_is_refused_at_encode() {
     let key = "a".repeat(APPDATA_KEY_MAX + 1);
     let mut out = [0u8; APPDATA_MAX_REQUEST];
     assert_eq!(
-        AppDataRequest::ConfigGet { key: &key }.encode(&mut out),
+        AppDataRequest::ConfigUnset { key: &key }.encode(&mut out),
         Err(Errno::LengthOutOfRange)
     );
     let value = "v".repeat(APPDATA_VALUE_MAX + 1);
@@ -143,7 +148,7 @@ fn an_over_long_key_or_value_is_refused_at_encode() {
 
 #[test]
 fn a_short_buffer_refuses_the_encode_rather_than_truncating() {
-    let request = AppDataRequest::ConfigGet { key: "scheme" };
+    let request = AppDataRequest::ConfigUnset { key: "scheme" };
     let mut out = [0u8; APPDATA_HEADER_LEN + 5];
     assert_eq!(out.len(), request.wire_len() - 1);
     assert_eq!(request.encode(&mut out), Err(Errno::BufferTooSmall));
@@ -165,7 +170,7 @@ fn a_truncated_frame_is_refused() {
 fn a_trailing_byte_past_the_payload_is_refused() {
     // A request is exactly one record; a longer frame is not the one the
     // sender described.
-    let encoded = frame(&AppDataRequest::ConfigGet { key: "scheme" });
+    let encoded = frame(&AppDataRequest::ConfigUnset { key: "scheme" });
     assert_eq!(
         AppDataRequest::decode(&encoded.bytes[..=encoded.len]),
         Err(Errno::BadMagic)
@@ -188,7 +193,7 @@ fn bad_magic_version_and_operation_are_refused() {
         Err(Errno::AbiVersionUnsupported)
     );
 
-    for op in [0u16, 6, 0xFFFF] {
+    for op in [0u16, 5, 0xFFFF] {
         let mut encoded = frame(&AppDataRequest::ConfigCommit);
         put_u16(&mut encoded.bytes, super::OP_OFFSET, op);
         assert_eq!(
@@ -200,9 +205,8 @@ fn bad_magic_version_and_operation_are_refused() {
 }
 
 #[test]
-fn a_cursor_on_anything_but_a_listing_is_refused() {
+fn a_capacity_on_anything_but_a_read_is_refused() {
     for request in [
-        AppDataRequest::ConfigGet { key: "k" },
         AppDataRequest::ConfigUnset { key: "k" },
         AppDataRequest::ConfigCommit,
         AppDataRequest::ConfigSet {
@@ -211,11 +215,11 @@ fn a_cursor_on_anything_but_a_listing_is_refused() {
         },
     ] {
         let mut encoded = frame(&request);
-        put_u32(&mut encoded.bytes, super::CURSOR_OFFSET, 1);
+        put_u32(&mut encoded.bytes, super::CAPACITY_OFFSET, 1);
         assert_eq!(
             AppDataRequest::decode(encoded.as_slice()),
             Err(Errno::BadMagic),
-            "{request:?} must not carry a cursor"
+            "{request:?} must not carry a capacity"
         );
     }
 }
@@ -223,10 +227,9 @@ fn a_cursor_on_anything_but_a_listing_is_refused() {
 #[test]
 fn a_value_on_anything_but_a_set_is_refused() {
     for op in [
-        super::OP_CONFIG_GET,
+        super::OP_CONFIG_READ,
         super::OP_CONFIG_UNSET,
         super::OP_CONFIG_COMMIT,
-        super::OP_CONFIG_LIST,
     ] {
         let mut encoded = frame(&AppDataRequest::ConfigSet {
             key: "k",
@@ -242,26 +245,21 @@ fn a_value_on_anything_but_a_set_is_refused() {
 }
 
 #[test]
-fn a_commit_names_nothing_at_all() {
-    let mut encoded = frame(&AppDataRequest::ConfigGet { key: "k" });
-    put_u16(
-        &mut encoded.bytes,
-        super::OP_OFFSET,
-        super::OP_CONFIG_COMMIT,
-    );
-    assert_eq!(
-        AppDataRequest::decode(encoded.as_slice()),
-        Err(Errno::BadMagic)
-    );
+fn a_read_and_a_commit_name_nothing_at_all() {
+    for op in [super::OP_CONFIG_READ, super::OP_CONFIG_COMMIT] {
+        let mut encoded = frame(&AppDataRequest::ConfigUnset { key: "k" });
+        put_u16(&mut encoded.bytes, super::OP_OFFSET, op);
+        assert_eq!(
+            AppDataRequest::decode(encoded.as_slice()),
+            Err(Errno::BadMagic),
+            "operation {op} must name no key"
+        );
+    }
 }
 
 #[test]
 fn an_operation_that_needs_a_key_refuses_an_empty_one() {
-    for op in [
-        super::OP_CONFIG_GET,
-        super::OP_CONFIG_SET,
-        super::OP_CONFIG_UNSET,
-    ] {
+    for op in [super::OP_CONFIG_SET, super::OP_CONFIG_UNSET] {
         let mut encoded = frame(&AppDataRequest::ConfigCommit);
         put_u16(&mut encoded.bytes, super::OP_OFFSET, op);
         assert_eq!(
@@ -274,7 +272,7 @@ fn an_operation_that_needs_a_key_refuses_an_empty_one() {
 
 #[test]
 fn a_declared_length_beyond_its_bound_is_refused_before_the_read() {
-    let mut encoded = frame(&AppDataRequest::ConfigGet { key: "k" });
+    let mut encoded = frame(&AppDataRequest::ConfigUnset { key: "k" });
     put_u16(
         &mut encoded.bytes,
         super::KEY_LEN_OFFSET,
@@ -302,7 +300,7 @@ fn a_declared_length_beyond_its_bound_is_refused_before_the_read() {
 
 #[test]
 fn a_declared_length_beyond_the_frame_is_refused() {
-    let encoded = frame(&AppDataRequest::ConfigGet { key: "k" });
+    let encoded = frame(&AppDataRequest::ConfigUnset { key: "k" });
     let mut bytes = encoded.bytes;
     put_u16(&mut bytes, super::KEY_LEN_OFFSET, 64);
     assert_eq!(
@@ -323,7 +321,7 @@ fn non_utf8_text_is_refused() {
         Err(Errno::OutOfRange)
     );
 
-    let mut encoded = frame(&AppDataRequest::ConfigGet { key: "k" });
+    let mut encoded = frame(&AppDataRequest::ConfigUnset { key: "k" });
     encoded.bytes[APPDATA_HEADER_LEN] = 0x80;
     assert_eq!(
         AppDataRequest::decode(encoded.as_slice()),
@@ -332,154 +330,145 @@ fn non_utf8_text_is_refused() {
 }
 
 #[test]
-fn a_value_reply_round_trips_including_the_empty_value() {
-    let mut out = [0u8; APPDATA_MAX_VALUE_REPLY];
-    for value in ["", "14", "/Users/ada/Documents/notes.txt"] {
-        let len = encode_value_reply(value, &mut out).expect("encodes");
-        assert_eq!(decode_value_reply(&out[..len]), Ok(value));
+fn a_document_reply_round_trips_including_the_empty_document() {
+    let mut out = vec![0u8; APPDATA_MAX_REPLY];
+    for document in ["", "scheme = dark\n", "a = 1\nb = 2\n"] {
+        let capacity = u32::try_from(document.len()).expect("fits a u32");
+        let len = encode_document_reply(document, capacity, &mut out).expect("encodes");
+        assert_eq!(
+            decode_document_reply(&out[..len]),
+            Ok(ConfigDocument::Whole(document))
+        );
     }
-    let widest = "v".repeat(APPDATA_VALUE_MAX);
-    let len = encode_value_reply(&widest, &mut out).expect("encodes");
-    assert_eq!(len, APPDATA_MAX_VALUE_REPLY);
-    assert_eq!(decode_value_reply(&out[..len]), Ok(widest.as_str()));
+}
 
-    let over = "v".repeat(APPDATA_VALUE_MAX + 1);
+#[test]
+fn the_widest_document_fits_the_endpoints_reply_bound() {
+    let widest: String = core::iter::repeat_n('x', APPDATA_DOCUMENT_MAX).collect();
+    let mut out = vec![0u8; APPDATA_MAX_REPLY];
+    let len = encode_document_reply(
+        &widest,
+        u32::try_from(APPDATA_DOCUMENT_MAX).expect("fits a u32"),
+        &mut out,
+    )
+    .expect("encodes");
+    assert_eq!(len, APPDATA_MAX_REPLY);
     assert_eq!(
-        encode_value_reply(&over, &mut out),
+        decode_document_reply(&out[..len]),
+        Ok(ConfigDocument::Whole(widest.as_str()))
+    );
+
+    let over: String = core::iter::repeat_n('x', APPDATA_DOCUMENT_MAX + 1).collect();
+    assert_eq!(
+        encode_document_reply(&over, u32::MAX, &mut out),
         Err(Errno::LengthOutOfRange)
     );
-    let mut tight = [0u8; STATUS_REPLY_LEN];
+}
+
+#[test]
+fn a_document_past_the_declared_capacity_comes_back_as_its_length() {
+    // A caller never parses a prefix: an oversize document is answered with
+    // the byte count to ask again with, and no body at all.
+    let document = "scheme = dark\nfont.size = 14\n";
+    let mut out = vec![0u8; APPDATA_MAX_REPLY];
+    let capacity = u32::try_from(document.len() - 1).expect("fits a u32");
+    let len = encode_document_reply(document, capacity, &mut out).expect("encodes");
+    assert_eq!(len, STATUS_REPLY_LEN + APPDATA_DOCUMENT_HEADER_LEN);
     assert_eq!(
-        encode_value_reply("x", &mut tight),
-        Err(Errno::BufferTooSmall)
+        decode_document_reply(&out[..len]),
+        Ok(ConfigDocument::NeedsCapacity(document.len()))
+    );
+
+    // Exactly enough is enough.
+    let len = encode_document_reply(
+        document,
+        u32::try_from(document.len()).expect("fits a u32"),
+        &mut out,
+    )
+    .expect("encodes");
+    assert_eq!(
+        decode_document_reply(&out[..len]),
+        Ok(ConfigDocument::Whole(document))
     );
 }
 
 #[test]
-fn an_absent_key_is_not_an_empty_value() {
-    // The daemon answers a missing key with the shared status frame, so a
-    // caller never has to guess which of the two it got.
-    let refusal = encode_status_reply(Err(Errno::NotFound));
-    assert_eq!(decode_value_reply(&refusal), Err(Errno::NotFound));
-
-    let mut out = [0u8; APPDATA_MAX_VALUE_REPLY];
-    let len = encode_value_reply("", &mut out).expect("encodes");
-    assert_eq!(decode_value_reply(&out[..len]), Ok(""));
+fn a_zero_capacity_read_asks_only_for_the_length() {
+    let document = "scheme = dark\n";
+    let mut out = vec![0u8; APPDATA_MAX_REPLY];
+    let len = encode_document_reply(document, 0, &mut out).expect("encodes");
+    assert_eq!(
+        decode_document_reply(&out[..len]),
+        Ok(ConfigDocument::NeedsCapacity(document.len()))
+    );
+    // An empty document needs no capacity at all, so it is whole either way.
+    let len = encode_document_reply("", 0, &mut out).expect("encodes");
+    assert_eq!(
+        decode_document_reply(&out[..len]),
+        Ok(ConfigDocument::Whole(""))
+    );
 }
 
 #[test]
-fn a_malformed_value_reply_is_refused() {
-    let mut out = [0u8; APPDATA_MAX_VALUE_REPLY];
-    let len = encode_value_reply("dark", &mut out).expect("encodes");
+fn a_malformed_document_reply_is_refused() {
+    let document = "scheme = dark\n";
+    let mut out = vec![0u8; APPDATA_MAX_REPLY];
+    let len = encode_document_reply(
+        document,
+        u32::try_from(document.len()).expect("fits a u32"),
+        &mut out,
+    )
+    .expect("encodes");
 
-    // A dirty reserved pair.
-    let mut dirty = out;
-    put_u16(&mut dirty, STATUS_REPLY_LEN + 2, 1);
-    assert_eq!(decode_value_reply(&dirty[..len]), Err(Errno::BadMagic));
+    // A body shorter or longer than the declared document.
+    assert_eq!(
+        decode_document_reply(&out[..len - 1]),
+        Err(Errno::BadMagic),
+        "a short body is not the document the header declared"
+    );
+    assert_eq!(
+        decode_document_reply(&out[..=len]),
+        Err(Errno::BadMagic),
+        "a trailing byte is not the document the header declared"
+    );
 
-    // A trailing byte past the declared value.
-    assert_eq!(decode_value_reply(&out[..=len]), Err(Errno::BadMagic));
-
-    // A declared length beyond the bound, and one beyond the frame.
-    let mut over = out;
-    put_u16(
+    // A declared length beyond the bound.
+    let mut over = out.clone();
+    put_u32(
         &mut over,
         STATUS_REPLY_LEN,
-        u16::try_from(APPDATA_VALUE_MAX + 1).expect("fits a u16"),
+        u32::try_from(APPDATA_DOCUMENT_MAX + 1).expect("fits a u32"),
     );
     assert_eq!(
-        decode_value_reply(&over[..len]),
+        decode_document_reply(&over[..len]),
         Err(Errno::LengthOutOfRange)
-    );
-
-    let mut short = out;
-    put_u16(&mut short, STATUS_REPLY_LEN, 64);
-    assert_eq!(
-        decode_value_reply(&short[..len]),
-        Err(Errno::BufferTooSmall)
     );
 
     // A header-less frame that still carries a success status.
     assert_eq!(
-        decode_value_reply(&encode_status_reply(Ok(()))),
+        decode_document_reply(&encode_status_reply(Ok(()))),
         Err(Errno::BufferTooSmall)
+    );
+
+    // Non-UTF-8 document bytes.
+    let mut dirty = out.clone();
+    dirty[STATUS_REPLY_LEN + APPDATA_DOCUMENT_HEADER_LEN] = 0xFF;
+    assert_eq!(decode_document_reply(&dirty[..len]), Err(Errno::OutOfRange));
+
+    // The daemon's own refusal reaches the caller as itself.
+    assert_eq!(
+        decode_document_reply(&encode_status_reply(Err(Errno::PermissionDenied))),
+        Err(Errno::PermissionDenied)
     );
 }
 
 #[test]
-fn a_key_record_round_trips_and_refuses_a_malformed_one() {
-    let record = AppDataKeyRecord::new("effects.blur").expect("a legal key");
-    let bytes = record.to_le_bytes();
-    let decoded = AppDataKeyRecord::from_bytes(&bytes).expect("decodes");
-    assert_eq!(decoded.as_str(), "effects.blur");
-    assert_eq!(decoded, record);
-
-    let mut dirty = bytes;
-    dirty[2 + "effects.blur".len()] = 0xAA;
-    assert_eq!(AppDataKeyRecord::from_bytes(&dirty), Err(Errno::BadMagic));
-
-    let mut empty = bytes;
-    put_u16(&mut empty, 0, 0);
+fn a_short_reply_buffer_refuses_the_encode() {
+    let mut tight = [0u8; STATUS_REPLY_LEN];
     assert_eq!(
-        AppDataKeyRecord::from_bytes(&empty),
-        Err(Errno::LengthOutOfRange)
-    );
-
-    let mut over = bytes;
-    put_u16(
-        &mut over,
-        0,
-        u16::try_from(APPDATA_KEY_MAX + 1).expect("fits a u16"),
-    );
-    assert_eq!(
-        AppDataKeyRecord::from_bytes(&over),
-        Err(Errno::LengthOutOfRange)
-    );
-
-    assert_eq!(
-        AppDataKeyRecord::from_bytes(&bytes[..bytes.len() - 1]),
+        encode_document_reply("scheme = dark\n", 64, &mut tight),
         Err(Errno::BufferTooSmall)
     );
-    assert_eq!(AppDataKeyRecord::new(""), Err(Errno::LengthOutOfRange));
-    let long = "a".repeat(APPDATA_KEY_MAX + 1);
-    assert_eq!(AppDataKeyRecord::new(&long), Err(Errno::LengthOutOfRange));
-}
-
-#[test]
-fn a_full_listing_page_fits_the_endpoints_reply_bound() {
-    let mut records = [[0u8; AppDataKeyRecord::WIRE_LEN]; APPDATA_LIST_PAGE_MAX as usize];
-    for (index, slot) in records.iter_mut().enumerate() {
-        let mut buf = [0u8; 16];
-        let key = recent_key(
-            u16::try_from(index).expect("under the page bound"),
-            &mut buf,
-        );
-        *slot = AppDataKeyRecord::new(key)
-            .expect("a legal key")
-            .to_le_bytes();
-    }
-    let mut out = [0u8; APPDATA_MAX_LIST_REPLY];
-    let len = encode_page_reply(&records, APPDATA_LIST_PAGE_MAX, &mut out).expect("encodes");
-    assert_eq!(len, APPDATA_MAX_LIST_REPLY);
-    const { assert!(APPDATA_MAX_REPLY >= APPDATA_MAX_LIST_REPLY) };
-    const { assert!(APPDATA_MAX_REPLY >= APPDATA_MAX_VALUE_REPLY) };
-
-    let (count, body) = decode_page_reply(
-        &out[..len],
-        AppDataKeyRecord::WIRE_LEN,
-        APPDATA_LIST_PAGE_MAX,
-    )
-    .expect("decodes");
-    assert_eq!(count, APPDATA_LIST_PAGE_MAX);
-    for (index, chunk) in body.chunks(AppDataKeyRecord::WIRE_LEN).enumerate() {
-        let mut buf = [0u8; 16];
-        let expected = recent_key(
-            u16::try_from(index).expect("under the page bound"),
-            &mut buf,
-        );
-        let record = AppDataKeyRecord::from_bytes(chunk).expect("decodes");
-        assert_eq!(record.as_str(), expected);
-    }
 }
 
 #[test]

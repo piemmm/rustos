@@ -68,7 +68,7 @@ that means something else:
 
 | Bound | What it guards |
 |---|---|
-| `MAX_DOCUMENT_LEN` | the parse work a store can demand before a byte is believed |
+| `MAX_DOCUMENT_LEN` | the parse work a store can demand before a byte is believed — and the app-data reply body's own width, so it is imported from `lib/abi` rather than restated |
 | `MAX_LINES` | the parser's allocation — a document of newlines is small in bytes and large in lines |
 | `MAX_SETTINGS` | the key space one app can create |
 | `MAX_KEY_LEN`, `MAX_KEY_DEPTH`, `MAX_VALUE_LEN` | one line's work; exceeding them makes the line unparsed, not a setting |
@@ -91,6 +91,7 @@ cuts at the first `#` unconditionally), because here a `#` inside a quoted
 value is a literal character; the tokenisation has to know about quoting, so it
 lives with the grammar that has quotes.
 
-The crate is `no_std` (with `alloc`), has no dependencies, forbids `unsafe`,
-and has no `unwrap`/`expect`/`panic!` in production paths. Stability tier:
-`experimental`.
+The crate is `no_std` (with `alloc`), depends only on `lib/abi` — for the three
+bounds a key, a value, and a document cross the app-data channel under — forbids
+`unsafe`, and has no `unwrap`/`expect`/`panic!` in production paths. Stability
+tier: `experimental`.

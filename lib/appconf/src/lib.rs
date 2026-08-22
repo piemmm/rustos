@@ -44,12 +44,14 @@
 //!
 //! # Where the bounds live
 //!
-//! The two bounds a key and a value also cross the app-data channel under —
-//! [`MAX_KEY_LEN`] and [`MAX_VALUE_LEN`] — are `abi-v1` wire field widths as
-//! well as this grammar's bounds, so their one definition lives in `lib/abi`
+//! The three bounds a key, a value, and a whole document also cross the
+//! app-data channel under — [`MAX_KEY_LEN`], [`MAX_VALUE_LEN`], and
+//! [`MAX_DOCUMENT_LEN`] — are `abi-v1` wire field widths as well as this
+//! grammar's bounds, so their one definition lives in `lib/abi`
 //! (`appdata_ipc`) and this engine imports it. The remaining bounds
-//! ([`MAX_KEY_DEPTH`], [`MAX_DOCUMENT_LEN`], [`MAX_LINES`], [`MAX_SETTINGS`])
-//! bound a *document*, which never crosses the wire, and are this crate's own.
+//! ([`MAX_KEY_DEPTH`], [`MAX_LINES`], [`MAX_SETTINGS`]) bound a document's
+//! *shape* rather than its width, never cross the wire, and are this crate's
+//! own.
 //!
 //! # Relationship to the other line-oriented stores
 //!
@@ -71,13 +73,15 @@
 
 extern crate alloc;
 
+use tairix_abi::appdata_ipc::APPDATA_DOCUMENT_MAX;
+
 mod document;
 mod key;
 mod value;
 
 pub use document::{Document, Setting, Unparsed};
-pub use key::{validate_key, validate_key_prefix, MAX_KEY_DEPTH, MAX_KEY_LEN};
-pub use value::{MAX_VALUE_LEN, PERMILLE_FULL};
+pub use key::{validate_key, MAX_KEY_DEPTH, MAX_KEY_LEN};
+pub use value::{as_bool, as_i64, as_permille, as_u32, bool_text, MAX_VALUE_LEN, PERMILLE_FULL};
 
 /// Maximum length, in bytes, of a whole configuration document.
 ///
@@ -86,7 +90,12 @@ pub use value::{MAX_VALUE_LEN, PERMILLE_FULL};
 /// the work a hostile store can demand of the parser before a byte of it is
 /// believed. A larger document is refused whole
 /// ([`ConfError::DocumentTooLarge`]) rather than read in part.
-pub const MAX_DOCUMENT_LEN: usize = 64 * 1024;
+///
+/// The number is the app-data channel's own document field width, imported
+/// for the reason [`MAX_KEY_LEN`] is: a whole document crosses the wire as one
+/// reply body, so the bound is part of the `abi-v1` contract and the format
+/// may not hold a second opinion about it.
+pub const MAX_DOCUMENT_LEN: usize = APPDATA_DOCUMENT_MAX;
 
 /// Maximum number of lines a document may hold.
 ///

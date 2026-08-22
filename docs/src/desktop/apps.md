@@ -1693,13 +1693,21 @@ the default; **Midnight**, **Phosphor**, **Amber**, **Ember**, **Contrast**,
 and **Paper** carry fixed palettes; **Custom** is the user's own, editable in
 the settings sheet.
 
-Everything a user can change is one `Profile`, stored per user at
-`/Users/<u>/Settings/Terminal/terminal.conf` in the same `key value` / `#`
-comment grammar every line-oriented TAIRiX configuration store shares. An
-absent document means the documented defaults (a fresh account has never saved
-one); an unreadable or malformed one also means the defaults, and says why on
-`stderr`. Colours are written as bare `rrggbb` because the grammar's comment
-marker would cut a `#`-prefixed value away.
+Everything a user can change is one `Profile`, held in the OS app-data store
+and reached through [`tairix-appdata`](../lib/appdata.md). It is private to
+this application: the store is gated on the bundle identity the kernel attests,
+so no other app the user launches can read or rewrite it — see
+[the app-data service](../userland/confd.md).
+
+A save writes only the keys whose value differs from what the store's layers
+already imply, so the user's own document holds what they changed rather than a
+copy of every default; *Restore defaults* removes those opinions instead of
+freezing today's values, so a machine-wide policy or a later shipped default
+then applies. A key no layer sets means its documented default; a stored value
+the registry refuses leaves that one field at its default and names the key on
+`stderr`; and a store the service cannot serve leaves the bundle's shipped
+defaults standing, also said on `stderr`. Colours are written as bare `rrggbb`
+because the format's comment marker would cut a `#`-prefixed value away.
 
 The screen effects are an ordered, typed pipeline (`effects::Pass`) rather
 than code inlined into the renderer, so a display that can composite hardware
