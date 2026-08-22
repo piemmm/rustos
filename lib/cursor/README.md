@@ -27,8 +27,10 @@ so the same definition is
   screen that shows a pointer places it through this, so "the hotspot lands
   on the pointer" has one definition (`AGENTS.md` §2.2).
 - `theme` — `CursorTheme`: one `VectorCursor` per `tairix_theme::CursorKind`,
-  plus the built-in default set (light body over dark outline, two-tone busy
-  disc).
+  built by kind (`from_cursors`) so a set can neither omit a cursor nor
+  mis-order two, plus the built-in default set (light body over dark outline,
+  two-tone busy disc, and one double arrow at four angles for the window resize
+  edges).
 - `registry` — `CursorRegistry`: the available cursor sets and the active one,
   with fail-closed `register` / `set_active` (`AGENTS.md` §5.4 / §2.9).
 - `svg` — `VectorCursor::from_svg` and `decode_svg(bytes)`: build a cursor
@@ -43,8 +45,8 @@ so the same definition is
   built-in cursor, so an empty source yields the built-in set and a partial
   set mixes loaded cursors with built-in fallbacks (`AGENTS.md` §2.9). The
   result is a `CursorTheme` registered through `CursorRegistry`, so the
-  compositor is unchanged. `CURSOR_KINDS` is the closed kind list a loader
-  iterates.
+  compositor is unchanged. The closed kind list a loader iterates is
+  `tairix_theme::CURSOR_KINDS`, beside the enum it enumerates.
 
 ## Where it sits
 

@@ -19,18 +19,15 @@ use tairix_input::{InputEvent, Key, NamedKey, PointerButton};
 use tairix_raster::{round_rect_coverage, Color, Pixel, Surface};
 use tairix_theme::{Rgba, TextRole, Theme};
 
-use alloc::string::String;
-
-use crate::button::{Button, ButtonContent};
 use crate::damage::sink;
 use crate::state::{
-    AuthorityState, ControlRole, ControlState, PointerState, SizeAction, WindowActivationState,
+    AuthorityState, ControlState, PointerState, SizeAction, WindowActivationState,
     WindowControlKind, WindowFurnitureState, WindowSizeState,
 };
 use crate::testkit::high_contrast;
 use crate::window::{
     FrameInsets, FurniturePart, ResizeEdge, ResizeEvent, ResizeGrabber, ScrollCorner, TitleBar,
-    TitleBarEvent, TitleHit, WindowControl, WindowControlAction, WindowFrame,
+    TitleBarEvent, TitleHit, WindowControl, WindowControlAction, WindowFrame, CONTROL_ORDER,
     IDENTITY_SATURATION_ACTIVE, IDENTITY_SATURATION_INACTIVE,
 };
 
@@ -164,13 +161,7 @@ fn a_glyph_stroke_is_always_at_least_one_whole_pixel() {
 #[test]
 fn command_glyphs_are_distinct() {
     let theme = Theme::dark();
-    let kinds = [
-        WindowControlKind::Close,
-        WindowControlKind::Minimize,
-        WindowControlKind::PutToBack,
-        WindowControlKind::SizeToggle,
-    ];
-    let surfaces: alloc::vec::Vec<_> = kinds
+    let surfaces: alloc::vec::Vec<_> = CONTROL_ORDER
         .iter()
         .map(|k| {
             let control = WindowControl::new(*k);
@@ -762,41 +753,121 @@ fn nothing_the_frame_draws_squares_off_its_rounded_corner() {
     }
 }
 
+/// The wash each command lights up with on `theme`: its authored hue resolved
+/// against the window body its title bar is painted on.
+///
+/// The kind-to-role mapping is restated here on purpose rather than borrowed
+/// from the renderer. Asking the renderer which hue it uses would agree with
+/// itself even if close had been wired to the green role; stating the intended
+/// pairing independently is what makes the assertion mean anything.
+fn command_wash(theme: &Theme, kind: WindowControlKind) -> Pixel {
+    let palette = theme.palette();
+    let hue = match kind {
+        WindowControlKind::Close => palette.window_close,
+        WindowControlKind::Minimize => palette.window_minimize,
+        WindowControlKind::SizeToggle => palette.window_maximize,
+        WindowControlKind::PutToBack => palette.window_put_to_back,
+    };
+    premul(hue.over(palette.surface))
+}
+
+/// `kind`'s plate rendered in the state `prepare` leaves it in.
+fn command_surface(
+    theme: &Theme,
+    kind: WindowControlKind,
+    prepare: impl FnOnce(&mut WindowControl, Rect),
+) -> Surface {
+    let bounds = Rect::new(0, 0, 24, 24);
+    let mut control = WindowControl::new(kind);
+    prepare(&mut control, bounds);
+    let mut surface = Surface::new(24, 24).expect("surface");
+    control.render(&mut surface, bounds, Scale::ONE, theme);
+    surface
+}
+
 #[test]
-fn a_hovered_command_wears_the_same_plate_an_ordinary_button_does() {
-    // Lighter under the pointer on a dark theme, darker on a light one, by
-    // the amount every other control moves: one shared plate definition, so a
-    // decoration can never drift into a hover of its own.
+fn a_hovered_command_lights_up_in_its_own_colour() {
+    // Each command carries its own hue, so the pointer landing on one says
+    // which of the four it is about to fire. The wash is authored translucent
+    // and resolved against the window body, so the title bar reads through it
+    // rather than being covered by a block of colour.
     for theme in [Theme::dark(), Theme::light()] {
-        let palette = theme.palette();
-        let bounds = Rect::new(0, 0, 24, 24);
-        let mut control = WindowControl::new(WindowControlKind::Close);
+        for kind in CONTROL_ORDER {
+            let resting = command_surface(&theme, kind, |_, _| {});
+            assert!(
+                !has_pixel(&resting, command_wash(&theme, kind)),
+                "{}: a resting {kind:?} shows only its glyph on the bar's own surface",
+                theme.name()
+            );
 
-        let mut resting = Surface::new(24, 24).expect("surface");
-        control.render(&mut resting, bounds, Scale::ONE, &theme);
-        assert!(
-            !has_pixel(&resting, premul(palette.surface_hover)),
-            "a resting command shows only its glyph on the bar's own surface"
-        );
+            let hovered = command_surface(&theme, kind, |control, bounds| {
+                control.on_pointer(&moved(12, 12), bounds, &mut sink());
+            });
+            assert!(
+                has_pixel(&hovered, command_wash(&theme, kind)),
+                "{}: the pointer lights {kind:?} in its own hue",
+                theme.name()
+            );
 
-        control.on_pointer(&moved(12, 12), bounds, &mut sink());
-        let mut hovered = Surface::new(24, 24).expect("surface");
-        control.render(&mut hovered, bounds, Scale::ONE, &theme);
+            // No other command's hue can be mistaken for this one's.
+            for other in CONTROL_ORDER {
+                if other != kind {
+                    assert!(
+                        !has_pixel(&hovered, command_wash(&theme, other)),
+                        "{}: a hovered {kind:?} also wears {other:?}'s colour",
+                        theme.name()
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn a_pressed_command_deepens_the_hue_it_hovered_to() {
+    // Once the colour is on, the only step left is to deepen it — the same
+    // press darkening every filled control takes.
+    for theme in [Theme::dark(), Theme::light()] {
+        let hovered = command_surface(&theme, WindowControlKind::Close, |control, bounds| {
+            control.on_pointer(&moved(12, 12), bounds, &mut sink());
+        });
+        let pressed = command_surface(&theme, WindowControlKind::Close, |control, bounds| {
+            control.on_pointer(&moved(12, 12), bounds, &mut sink());
+            control.on_pointer(&PRESS, bounds, &mut sink());
+        });
+        let wash = command_wash(&theme, WindowControlKind::Close);
+        assert!(has_pixel(&hovered, wash), "{}: hover", theme.name());
         assert!(
-            has_pixel(&hovered, premul(palette.surface_hover)),
-            "the pointer lifts the plate to the shared hover wash"
+            !has_pixel(&pressed, wash),
+            "{}: a press must not draw the hover wash unchanged",
+            theme.name()
         );
-        let plate = Rect::new(0, 0, 60, 24);
-        let mut button = Button::new(
-            ButtonContent::Label(String::from("Open")),
-            ControlRole::Neutral,
-        );
-        button.on_pointer(&moved(30, 12), plate, &mut sink());
-        let mut widget = Surface::new(60, 24).expect("surface");
-        button.render(&mut widget, plate, Scale::ONE, &theme);
         assert!(
-            has_pixel(&widget, premul(palette.surface_hover)),
-            "which is the very wash an ordinary button hovers to"
+            pressed.pixels().iter().any(|p| p.a > 0),
+            "{}: a pressed command still draws a plate",
+            theme.name()
+        );
+    }
+}
+
+#[test]
+fn a_command_the_keyboard_merely_rests_on_stays_unwashed() {
+    // The hue is the pointer's highlight; focus states itself on the ring
+    // inside the plate, so a keyboard-focused command is not mistaken for the
+    // one under the cursor.
+    for theme in [Theme::dark(), Theme::light()] {
+        let focused = command_surface(&theme, WindowControlKind::Close, |control, _| {
+            control.set_focused(true);
+        });
+        assert!(
+            !has_pixel(&focused, command_wash(&theme, WindowControlKind::Close)),
+            "{}: keyboard focus lit the command's hue",
+            theme.name()
+        );
+        assert!(
+            has_pixel(&focused, premul(theme.palette().rim_active)),
+            "{}: and the focus ring is what it draws instead",
+            theme.name()
         );
     }
 }

@@ -42,11 +42,25 @@ Degenerate cursors and scales fail closed with `None` rather than panicking
 ## Cursor sets
 
 A `CursorTheme` binds one `VectorCursor` to each `tairix_theme::CursorKind`
-(`Arrow`, `Text`, `Pointer`, `Move`, `Busy`). The fields are fixed, so a
-lookup can never miss (`AGENTS.md` §2.11). The built-in set
+(`Arrow`, `Text`, `Pointer`, `Move`, `Busy`, and the four resize double arrows
+`ResizeHorizontal`, `ResizeVertical`, `ResizeDiagonalRising`,
+`ResizeDiagonalFalling`). `tairix_theme::CURSOR_KINDS` is that closed
+vocabulary as a table, so a loader, a cache, or a test iterates every kind
+without restating the list. The fields are fixed and `CursorTheme::from_cursors`
+asks for the artwork *by kind* rather than by argument position, so a set can
+neither omit a cursor nor mis-order two (`AGENTS.md` §2.11). The built-in set
 (`CursorTheme::builtin`) draws each cursor as a light body over a darker
 outline so it stays legible on any background, and the busy cursor is a
 genuine two-tone disc.
+
+The four resize cursors are one arrow at four angles — a barbed head at either
+end joined by a shaft, centred on the design grid with the hotspot at its
+middle. Each is unchanged by a half turn about that hotspot, because a resize
+edge can be dragged either way and a one-headed arrow would say otherwise; the
+vertical arrow is the horizontal one transposed and the two diagonals are
+mirror images, so a window's two corners get opposite slopes. The unit tests
+assert all three relations on the rasterised coverage rather than trusting the
+authored coordinate tables.
 
 Because a `CursorTheme` is plain data, an entirely different look is just a
 different theme. The `CursorRegistry` holds the available sets and the active
@@ -118,9 +132,19 @@ coded per window action. The window manager's `select` module
 (`userland/gui/wm`) holds that policy:
 
 - `desired_cursor(router, compositor)` is a pure function of state. An
-  in-flight window move-grab outranks everything and yields `Move`; otherwise
-  the pointer takes the **cursor hint** of the top-most window under it; over
-  the desktop background it is the plain `Arrow`.
+  in-flight grab outranks everything: a window move-grab yields `Move`, and a
+  resize-grab keeps the double arrow of the edge it is dragging for the whole
+  gesture — the pointer routinely runs past that edge, and re-deriving the
+  shape from where it now is would flicker mid-drag. Otherwise a point on a
+  decorated window's resize edge yields the double arrow of the axis that edge
+  moves along (the two sides share the horizontal arrow, the two corners take
+  opposite diagonals), so a grabbable edge announces itself before it is
+  pressed. Otherwise the pointer takes the **cursor hint** of the top-most
+  window under it; over the desktop background it is the plain `Arrow`.
+  The resize zone is the frame's own hit map, so it reaches into the client's
+  outermost pixels exactly as far as a press on them does — the pointer never
+  changes shape somewhere a press would not start a resize, and an undecorated
+  window has no resize edges to point at.
 - Each window carries a `cursor_hint` (default `Arrow`) that its owner sets
   through `Compositor::set_window_cursor` — a text view advertises `Text`, a
   control `Pointer`, a working view `Busy`. Changing a hint is window state,

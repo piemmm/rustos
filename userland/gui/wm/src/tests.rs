@@ -2051,6 +2051,97 @@ fn move_grab_outranks_the_window_hint() {
 }
 
 #[test]
+fn the_pointer_takes_the_double_arrow_of_the_resize_edge_it_is_over() {
+    let (mut c, id) = decorated_compositor();
+    assert!(c.set_window_cursor(id, CursorKind::Text));
+    let client = c.window_client_rect(id).expect("decorated");
+    let mut router = InputRouter::new();
+    let middle = centre(client);
+
+    // Each edge names the axis it moves the window along; the two corners take
+    // opposite diagonals so a user can tell them apart.
+    for (point, expected) in [
+        (
+            Point::new(client.left(), middle.y),
+            CursorKind::ResizeHorizontal,
+        ),
+        (
+            Point::new(client.right() - 1, middle.y),
+            CursorKind::ResizeHorizontal,
+        ),
+        (
+            Point::new(middle.x, client.bottom() - 1),
+            CursorKind::ResizeVertical,
+        ),
+        (
+            Point::new(client.left(), client.bottom() - 1),
+            CursorKind::ResizeDiagonalRising,
+        ),
+        (
+            Point::new(client.right() - 1, client.bottom() - 1),
+            CursorKind::ResizeDiagonalFalling,
+        ),
+        // Clear of every edge the window's own hint is back in charge.
+        (middle, CursorKind::Text),
+    ] {
+        router.handle(moved(point.x, point.y), &mut c);
+        assert_eq!(
+            desired_cursor(&router, &c),
+            expected,
+            "at {point:?}, classified {:?}",
+            c.frame_hit(id, point)
+        );
+    }
+}
+
+#[test]
+fn an_undecorated_window_has_no_resize_edges_to_point_at() {
+    // The edges belong to the frame, so a window without one keeps its hint
+    // right up to its own border rather than inventing a grabbable rim.
+    let mut c = new_compositor(mode(120, 120), BLUE).expect("compositor");
+    let win = c.add_window(Point::new(10, 10), opaque(40, 40, RED));
+    assert!(c.set_window_cursor(win, CursorKind::Text));
+    let bounds = c.window(win).unwrap().bounds();
+    let mut router = InputRouter::new();
+
+    router.handle(moved(bounds.right() - 1, bounds.bottom() - 1), &mut c);
+    assert_eq!(desired_cursor(&router, &c), CursorKind::Text);
+}
+
+#[test]
+fn a_resize_grab_keeps_its_edge_s_arrow_wherever_the_pointer_goes() {
+    let (mut c, id) = decorated_compositor();
+    assert!(c.set_window_cursor(id, CursorKind::Text));
+    let mut router = InputRouter::new();
+    let bounds = c.window(id).unwrap().bounds();
+    let corner = Point::new(bounds.right() - 1, bounds.bottom() - 1);
+
+    router.handle(moved(corner.x, corner.y), &mut c);
+    router.handle(press_primary(), &mut c);
+    assert_eq!(
+        router.resizing_edge(),
+        Some(ResizeEdge::BottomRight),
+        "the corner press grabs the bottom-right"
+    );
+    assert_eq!(
+        desired_cursor(&router, &c),
+        CursorKind::ResizeDiagonalFalling
+    );
+
+    // Mid-drag the pointer is deep inside the window it is stretching, but the
+    // gesture — not what lies under the pointer — owns the shape.
+    router.handle(moved(bounds.left() + 5, bounds.top() + 5), &mut c);
+    assert_eq!(
+        desired_cursor(&router, &c),
+        CursorKind::ResizeDiagonalFalling
+    );
+
+    router.handle(release_primary(), &mut c);
+    assert!(router.resizing_edge().is_none());
+    assert_eq!(desired_cursor(&router, &c), CursorKind::Text);
+}
+
+#[test]
 fn controller_installs_and_switches_the_cursor_shape() {
     let mut c = new_compositor(mode(80, 80), BLUE).expect("compositor");
     let win = c.add_window(Point::new(10, 10), opaque(30, 30, RED));
@@ -3687,7 +3778,10 @@ fn a_resize_grab_resizes_the_window_from_the_corner() {
         router.handle(press_primary(), &mut c),
         InputResponse::FurniturePressed { window: id }
     );
-    assert!(router.is_resizing(), "a corner press begins a resize-grab");
+    assert!(
+        router.resizing_edge().is_some(),
+        "a corner press begins a resize-grab"
+    );
 
     // Dragging out grows the window's outer bounds by the pointer delta.
     let response = router.handle(moved(corner.x + 40, corner.y + 30), &mut c);
@@ -3700,7 +3794,7 @@ fn a_resize_grab_resizes_the_window_from_the_corner() {
         router.handle(release_primary(), &mut c),
         InputResponse::ResizeEnded { window: id }
     );
-    assert!(!router.is_resizing());
+    assert!(router.resizing_edge().is_none());
 }
 
 #[test]
@@ -3742,7 +3836,7 @@ fn a_resize_grab_clamps_where_the_title_bar_still_works_and_escape_restores() {
         InputResponse::ResizeEnded { window: id }
     );
     assert_eq!(c.window(id).unwrap().bounds(), before);
-    assert!(!router.is_resizing());
+    assert!(router.resizing_edge().is_none());
 }
 
 #[test]

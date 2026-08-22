@@ -565,6 +565,14 @@ enum Emphasis {
     /// The role colour across the plate, with the rim the same colour and a
     /// contrasting label.
     Filled(Rgba),
+    /// The given colour washing the plate *only while the pointer is on it*:
+    /// the control has no colour of its own at rest, so a bar-seated one still
+    /// wears nothing there.
+    ///
+    /// This is how a control whose colour is its *identity* rather than its
+    /// role is drawn — the window-command highlights, whose hue says which
+    /// command the pointer has landed on.
+    Tinted(Rgba),
 }
 
 /// The emphasis a role carries on an interactive control.
@@ -638,12 +646,39 @@ fn field_rim(theme: &Theme, plate: Rgba, rim: Rgba) -> Rgba {
     }
 }
 
-/// Resolve the shared plate/rim/label colours for one theme, role, and state.
+/// Resolve the shared plate/rim/label colours for one theme, role, and state:
+/// an interactive control takes its [`role_emphasis`].
+///
+/// This is what every family but the window commands draws with; those take
+/// [`resolve_tinted_frame`] instead. Both run the one
+/// [`resolve_emphasis`] recipe.
+#[must_use]
+pub(crate) fn resolve_frame(theme: &Theme, role: ControlRole, state: ControlState) -> FrameColors {
+    resolve_emphasis(theme, role_emphasis(theme.palette(), role), state)
+}
+
+/// The same colours for a control whose colour is its *identity* rather than
+/// its role: `tint` washes the plate while the pointer is on it, and nothing at
+/// all at rest, exactly as a quiet control does.
+///
+/// `tint` is the colour as it should appear on the plate — **opaque**. A plate
+/// is laid down rather than composited, so a caller whose role is authored
+/// translucent resolves it against the ground it sits on first
+/// ([`Rgba::over`]); passing the raw value would cut a hole in the surface
+/// instead of tinting it.
+#[must_use]
+pub(crate) fn resolve_tinted_frame(theme: &Theme, tint: Rgba, state: ControlState) -> FrameColors {
+    resolve_emphasis(theme, Emphasis::Tinted(tint), state)
+}
+
+/// The one plate/rim/label recipe, given the emphasis an *interactive* control
+/// of this kind carries.
 ///
 /// The rim carries the spec §13 disposition: a disabled control shows a quiet
 /// border, a denial the denied role, a failed-closed attempt the recovery
-/// role, a pending check the active rim; only an interactive control takes its
-/// role's emphasis.
+/// role, a pending check the active rim. A disposition therefore outranks
+/// `interactive` entirely — a denied window command reads as denied, not as
+/// its own hue.
 ///
 /// Two invariants come from the design boards and hold for every family. A
 /// coloured plate always has its rim in the *same* colour, so a filled control
@@ -659,7 +694,7 @@ fn field_rim(theme: &Theme, plate: Rgba, rim: Rgba) -> Rgba {
 /// property of the one control the keyboard is actually on. A disposition
 /// that owns the rim outranks membership entirely — see below.
 #[must_use]
-pub(crate) fn resolve_frame(theme: &Theme, role: ControlRole, state: ControlState) -> FrameColors {
+fn resolve_emphasis(theme: &Theme, interactive: Emphasis, state: ControlState) -> FrameColors {
     let palette = theme.palette();
     let disposition = state.disposition();
     let pointer = state.pointer;
@@ -669,9 +704,20 @@ pub(crate) fn resolve_frame(theme: &Theme, role: ControlRole, state: ControlStat
         ControlDisposition::DeniedByAuthority => Emphasis::Outlined(palette.denied),
         ControlDisposition::FailedClosed => Emphasis::Outlined(palette.recovery),
         ControlDisposition::PendingCheck => Emphasis::Outlined(palette.rim_active),
-        ControlDisposition::Interactive | ControlDisposition::NeedsConfirmation => {
-            role_emphasis(palette, role)
+        ControlDisposition::Interactive | ControlDisposition::NeedsConfirmation => interactive,
+    };
+
+    // A tint is the pointer's highlight, not the control's own colour: with
+    // the pointer elsewhere there is nothing to wash, so it resolves exactly
+    // as a quiet control and a bar-seated one keeps its bare rest. Keyboard
+    // focus deliberately does not light it — the wash belongs to the pointer,
+    // so a control the keyboard merely rests on is not mistaken for one under
+    // the cursor.
+    let emphasis = match emphasis {
+        Emphasis::Tinted(_) if !matches!(pointer, PointerState::Hover | PointerState::Pressed) => {
+            Emphasis::Quiet
         }
+        settled => settled,
     };
 
     // What a quiet control lifts its edge to while the pointer or the keyboard
@@ -707,6 +753,16 @@ pub(crate) fn resolve_frame(theme: &Theme, role: ControlRole, state: ControlStat
             (fill, fill, palette.on_accent, false)
         }
         Emphasis::Outlined(color) => (raised(palette.surface_raised), color, color, false),
+        // The rest state is bare, so the authored wash is what a hover shows;
+        // a press deepens it, the only step left once the colour is already on.
+        Emphasis::Tinted(tint) => {
+            let fill = raised(if pointer == PointerState::Pressed {
+                tint.mix(BLACK, PRESS_DARKEN)
+            } else {
+                tint
+            });
+            (fill, fill, palette.on_surface, false)
+        }
         Emphasis::Quiet if disposition == ControlDisposition::DisabledByState => (
             raised(palette.surface),
             palette.border,

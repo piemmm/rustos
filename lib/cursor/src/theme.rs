@@ -45,24 +45,34 @@ pub struct CursorTheme {
     pointer: VectorCursor,
     move_: VectorCursor,
     busy: VectorCursor,
+    resize_horizontal: VectorCursor,
+    resize_vertical: VectorCursor,
+    resize_diagonal_rising: VectorCursor,
+    resize_diagonal_falling: VectorCursor,
 }
 
 impl CursorTheme {
-    /// Construct a cursor theme from one cursor per kind.
+    /// Construct a cursor theme by asking `cursor` for the artwork of every
+    /// [`CursorKind`] in turn.
+    ///
+    /// The set is built from the kind rather than from an argument list so a
+    /// caller cannot silently mis-order two cursors, and so adding a kind is a
+    /// compile error here rather than a shape shown for the wrong pointer.
     #[must_use]
-    pub fn new(
-        arrow: VectorCursor,
-        text: VectorCursor,
-        pointer: VectorCursor,
-        move_: VectorCursor,
-        busy: VectorCursor,
-    ) -> Self {
+    pub fn from_cursors<F>(mut cursor: F) -> Self
+    where
+        F: FnMut(CursorKind) -> VectorCursor,
+    {
         Self {
-            arrow,
-            text,
-            pointer,
-            move_,
-            busy,
+            arrow: cursor(CursorKind::Arrow),
+            text: cursor(CursorKind::Text),
+            pointer: cursor(CursorKind::Pointer),
+            move_: cursor(CursorKind::Move),
+            busy: cursor(CursorKind::Busy),
+            resize_horizontal: cursor(CursorKind::ResizeHorizontal),
+            resize_vertical: cursor(CursorKind::ResizeVertical),
+            resize_diagonal_rising: cursor(CursorKind::ResizeDiagonalRising),
+            resize_diagonal_falling: cursor(CursorKind::ResizeDiagonalFalling),
         }
     }
 
@@ -75,6 +85,10 @@ impl CursorTheme {
             CursorKind::Pointer => &self.pointer,
             CursorKind::Move => &self.move_,
             CursorKind::Busy => &self.busy,
+            CursorKind::ResizeHorizontal => &self.resize_horizontal,
+            CursorKind::ResizeVertical => &self.resize_vertical,
+            CursorKind::ResizeDiagonalRising => &self.resize_diagonal_rising,
+            CursorKind::ResizeDiagonalFalling => &self.resize_diagonal_falling,
         }
     }
 
@@ -82,13 +96,22 @@ impl CursorTheme {
     /// every kind, with a two-tone busy spinner.
     #[must_use]
     pub fn builtin() -> Self {
-        Self {
-            arrow: builtin_arrow(),
-            text: builtin_text(),
-            pointer: builtin_pointer(),
-            move_: builtin_move(),
-            busy: builtin_busy(),
-        }
+        Self::from_cursors(builtin_cursor)
+    }
+}
+
+/// The built-in artwork for `kind`.
+fn builtin_cursor(kind: CursorKind) -> VectorCursor {
+    match kind {
+        CursorKind::Arrow => builtin_arrow(),
+        CursorKind::Text => builtin_text(),
+        CursorKind::Pointer => builtin_pointer(),
+        CursorKind::Move => builtin_move(),
+        CursorKind::Busy => builtin_busy(),
+        CursorKind::ResizeHorizontal => outlined(16, 16, RESIZE_HORIZONTAL),
+        CursorKind::ResizeVertical => outlined(16, 16, RESIZE_VERTICAL),
+        CursorKind::ResizeDiagonalRising => outlined(16, 16, RESIZE_DIAGONAL_RISING),
+        CursorKind::ResizeDiagonalFalling => outlined(16, 16, RESIZE_DIAGONAL_FALLING),
     }
 }
 
@@ -172,6 +195,73 @@ fn builtin_move() -> VectorCursor {
     ];
     outlined(16, 16, SILHOUETTE)
 }
+
+/// The resize double arrows, one per axis a window edge can be dragged along.
+///
+/// Each is one closed ring — a barbed head at either end joined by a shaft —
+/// centred on the design grid so the hotspot sits at its middle and the
+/// [`outlined`] layer still fits inside the box. All four are the same arrow at
+/// four angles: the vertical one is this one transposed, and the falling
+/// diagonal is the rising one mirrored about the grid's centre column, so a
+/// reader can check them against each other. The unit tests assert exactly
+/// those relations on the rasterised coverage, and that a half turn about the
+/// hotspot leaves each unchanged — a resize edge drags either way, so a
+/// one-headed arrow would say the wrong thing.
+const RESIZE_HORIZONTAL: &[(i32, i32)] = &[
+    (3, 16),
+    (10, 9),
+    (10, 13),
+    (22, 13),
+    (22, 9),
+    (29, 16),
+    (22, 23),
+    (22, 19),
+    (10, 19),
+    (10, 23),
+];
+
+/// The up-down double arrow: [`RESIZE_HORIZONTAL`] transposed.
+const RESIZE_VERTICAL: &[(i32, i32)] = &[
+    (16, 3),
+    (9, 10),
+    (13, 10),
+    (13, 22),
+    (9, 22),
+    (16, 29),
+    (23, 22),
+    (19, 22),
+    (19, 10),
+    (23, 10),
+];
+
+/// The bottom-left/top-right double arrow.
+const RESIZE_DIAGONAL_RISING: &[(i32, i32)] = &[
+    (7, 25),
+    (7, 15),
+    (10, 18),
+    (18, 10),
+    (15, 7),
+    (25, 7),
+    (25, 17),
+    (22, 14),
+    (14, 22),
+    (17, 25),
+];
+
+/// The top-left/bottom-right double arrow: [`RESIZE_DIAGONAL_RISING`]
+/// mirrored.
+const RESIZE_DIAGONAL_FALLING: &[(i32, i32)] = &[
+    (25, 25),
+    (25, 15),
+    (22, 18),
+    (14, 10),
+    (17, 7),
+    (7, 7),
+    (7, 17),
+    (10, 14),
+    (18, 22),
+    (15, 25),
+];
 
 /// The busy/wait cursor: a two-tone disc. Hotspot at the centre.
 fn builtin_busy() -> VectorCursor {

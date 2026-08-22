@@ -81,6 +81,26 @@ impl Rgba {
             a: mix_channel(self.a, other.a, permille),
         }
     }
+
+    /// This colour as it reads over the opaque `ground` it is drawn on,
+    /// keeping `ground`'s own opacity.
+    ///
+    /// A theme authors a translucent role — a selection wash, a window-command
+    /// highlight — as the colour *and* the weight it should read at. A surface
+    /// that lays its backgrounds down rather than compositing them needs the
+    /// resulting single colour instead, or the authored alpha would punch a
+    /// hole through the surface. Over an opaque destination source-over is a
+    /// straight per-channel interpolation by the source's alpha, so this is
+    /// [`mix`](Self::mix) at that weight.
+    ///
+    /// This is theme-level role arithmetic, not per-pixel compositing: it
+    /// resolves *one* authored colour once, where `lib/raster` blends whole
+    /// premultiplied surfaces.
+    #[must_use]
+    pub fn over(self, ground: Self) -> Self {
+        let permille = u16::try_from(u32::from(self.a) * 1000 / 255).unwrap_or(1000);
+        ground.mix(self, permille).with_alpha(ground.a)
+    }
 }
 
 /// Interpolate one channel toward `to` by `permille`, clamped so an
@@ -102,6 +122,23 @@ mod tests {
     fn mix_endpoints_are_exact() {
         assert_eq!(BLACK.mix(WHITE, 0), BLACK);
         assert_eq!(BLACK.mix(WHITE, 1000), WHITE);
+    }
+
+    #[test]
+    fn over_resolves_a_translucent_role_against_its_ground() {
+        // The whole point: a wash authored at half opacity lands halfway to
+        // the ground and comes back *opaque*, so laying it down tints the
+        // surface instead of cutting a hole in it.
+        let ground = Rgba::rgb(0, 0, 0);
+        let half = WHITE.with_alpha(128);
+        let resolved = half.over(ground);
+        assert_eq!(resolved.a, ground.a, "the ground keeps its own opacity");
+        assert_eq!(resolved, Rgba::rgb(128, 128, 128));
+
+        // The two ends are exact: transparent leaves the ground, opaque
+        // replaces it.
+        assert_eq!(WHITE.with_alpha(0).over(ground), ground);
+        assert_eq!(WHITE.over(ground), WHITE);
     }
 
     #[test]

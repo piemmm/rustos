@@ -231,10 +231,16 @@ router**:
   nothing.
 - Cursor selection (`select`): `desired_cursor` chooses the
   `tairix_theme::CursorKind` from live interaction state — a window
-  move-grab shows the move cursor, otherwise the pointer takes the
+  move-grab shows the move cursor and a resize-grab keeps the double arrow of
+  the edge it is dragging for the whole gesture; otherwise a point on a
+  decorated window's resize edge shows the double arrow of the axis that edge
+  moves along (the two sides share the horizontal arrow, the two corners take
+  opposite diagonals), so a grabbable edge announces itself before it is
+  pressed; otherwise the pointer takes the
   per-window `cursor_hint` of the window under it (set with
   `Compositor::set_window_cursor`), and the desktop background shows the
-  plain arrow. `CursorController` owns the active `CursorRegistry`, applies
+  plain arrow. The resize zone is the frame's own hit map, so the pointer never
+  changes shape somewhere a press would not start a resize. `CursorController` owns the active `CursorRegistry`, applies
   that policy, and rasterises the chosen artwork through
   `Compositor::set_cursor`, failing closed if a cursor cannot be rasterised.
   It does **not** own the scale: the desktop density belongs to the output, so

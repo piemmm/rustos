@@ -57,7 +57,7 @@ pub mod vector;
 #[cfg(test)]
 mod tests;
 
-pub use load::{CursorAssetSource, CURSOR_KINDS};
+pub use load::CursorAssetSource;
 pub use placed::PlacedCursor;
 pub use raster::CursorImage;
 pub use registry::{CursorRegistry, CursorRegistryError, CursorSetId};

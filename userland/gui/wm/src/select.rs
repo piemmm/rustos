@@ -12,8 +12,12 @@
 //! [`desired_cursor`] reads the interaction state held by the
 //! [`InputRouter`] and the [`Compositor`] and returns a [`CursorKind`]:
 //!
-//! - an in-flight window move-grab outranks everything and shows
-//!   [`CursorKind::Move`];
+//! - an in-flight grab outranks everything: a window move-grab shows
+//!   [`CursorKind::Move`] and a resize-grab keeps the double arrow of the edge
+//!   it is dragging, even once the pointer has run past that edge;
+//! - otherwise, over a decorated window's resize edge the pointer takes the
+//!   double arrow of the axis that edge moves along, so a grabbable edge
+//!   announces itself before it is pressed;
 //! - otherwise the pointer takes the [`cursor_hint`](crate::Window::cursor_hint)
 //!   of the top-most window under it (a text editor's
 //!   [`Text`](CursorKind::Text), a control's [`Pointer`](CursorKind::Pointer),
@@ -60,6 +64,7 @@
 //! which is a defect that looks exactly like working software; requiring the
 //! real inputs up front is what rules that out.
 
+use tairix_controls::{FurniturePart, ResizeEdge};
 use tairix_cursor::{CursorImage, CursorRegistry, CursorSetId};
 use tairix_log::Sink;
 use tairix_reclaim::{disposable_ui_cache, CacheAccounting, PressureGauge, ReclaimCache};
@@ -81,18 +86,42 @@ const ENTRY_METADATA_BYTES: usize = 64;
 /// interaction state (see the [module docs](self)).
 ///
 /// A pure function of `router` and `compositor`: it reads the pointer
-/// position, the move-grab flag, and the window under the pointer, and
-/// never mutates either argument.
+/// position, the in-flight grab, the furniture under the pointer, and the
+/// window under it, and never mutates either argument.
 #[must_use]
 pub fn desired_cursor(router: &InputRouter, compositor: &Compositor) -> CursorKind {
+    // A grab holds the shape for its whole gesture: the pointer routinely
+    // leaves the edge or the title bar it started on, and re-deriving the
+    // shape from where it now is would flicker mid-drag.
+    if let Some(edge) = router.resizing_edge() {
+        return resize_cursor(edge);
+    }
     if router.is_moving() {
         return CursorKind::Move;
     }
-    match compositor.window_at(router.pointer()) {
-        Some(id) => compositor
-            .window(id)
-            .map_or(CursorKind::Arrow, Window::cursor_hint),
-        None => CursorKind::Arrow,
+    let Some(id) = compositor.window_at(router.pointer()) else {
+        return CursorKind::Arrow;
+    };
+    if let Some(FurniturePart::ResizeEdge(edge)) = compositor.frame_hit(id, router.pointer()) {
+        return resize_cursor(edge);
+    }
+    compositor
+        .window(id)
+        .map_or(CursorKind::Arrow, Window::cursor_hint)
+}
+
+/// The double arrow for the axis `edge` moves the window along.
+///
+/// The two side edges share the horizontal arrow and the two corners take
+/// opposite diagonals, so the shape names the axis rather than the edge: this
+/// is the one place the frame's hit map is turned into a pointer shape.
+#[must_use]
+const fn resize_cursor(edge: ResizeEdge) -> CursorKind {
+    match edge {
+        ResizeEdge::Left | ResizeEdge::Right => CursorKind::ResizeHorizontal,
+        ResizeEdge::Bottom => CursorKind::ResizeVertical,
+        ResizeEdge::BottomLeft => CursorKind::ResizeDiagonalRising,
+        ResizeEdge::BottomRight => CursorKind::ResizeDiagonalFalling,
     }
 }
 

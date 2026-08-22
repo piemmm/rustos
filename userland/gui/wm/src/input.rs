@@ -372,10 +372,18 @@ impl InputRouter {
         self.scroll_grab.is_some()
     }
 
-    /// `true` while an interactive window resize-grab is in progress.
+    /// The frame edge an interactive window resize-grab is dragging, or `None`
+    /// when no resize is in progress.
+    ///
+    /// The edge is what the pointer shape is chosen from, so the cursor states
+    /// which way the window is being dragged for as long as the grab lasts —
+    /// including while the pointer has run past the edge it started on.
     #[must_use]
-    pub const fn is_resizing(&self) -> bool {
-        self.resize_grab.is_some()
+    pub const fn resizing_edge(&self) -> Option<ResizeEdge> {
+        match &self.resize_grab {
+            Some(grab) => Some(grab.edge),
+            None => None,
+        }
     }
 
     /// Give keyboard focus to `window`, validated against `compositor`.

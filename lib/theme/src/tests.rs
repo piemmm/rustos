@@ -7,7 +7,7 @@ use crate::theme::{CHROME_ALPHA, CHROME_PLATE_ALPHA, SELECTION_ALPHA};
 use crate::{
     Appearance, Contrast, CursorKind, CursorSet, Density, Fade, FamilyKey, FontWeight, Fonts,
     Metrics, MotionTheme, Palette, Rgba, SignalRole, SurfaceGround, TextRole, Theme, ThemeError,
-    ThemeId, ThemeRegistry, Timeline,
+    ThemeId, ThemeRegistry, Timeline, CURSOR_KINDS,
 };
 
 #[test]
@@ -644,20 +644,69 @@ fn the_tallest_rung_survives_the_largest_base_at_a_high_dpi_scale() {
 }
 
 #[test]
+fn every_window_command_highlights_in_its_own_translucent_hue() {
+    // A traffic-light vocabulary: red to close, yellow to minimize, green to
+    // the size toggle, blue to put-to-back, so the lit command says which one
+    // it is before its glyph is read. Each wash is translucent so it tints the
+    // title bar rather than covering it.
+    for theme in [Theme::dark(), Theme::light()] {
+        let palette = theme.palette();
+        let name = theme.name();
+        let washes = [
+            palette.window_close,
+            palette.window_minimize,
+            palette.window_maximize,
+            palette.window_put_to_back,
+        ];
+        for wash in washes {
+            assert!(wash.a > 0, "{name}: an invisible highlight is no highlight");
+            assert!(
+                !wash.is_opaque(),
+                "{name}: a solid highlight would cover the title bar"
+            );
+        }
+        for (i, wash) in washes.iter().enumerate() {
+            for other in &washes[i + 1..] {
+                assert_ne!(wash, other, "{name}: two commands share a hue");
+            }
+        }
+
+        let close = palette.window_close;
+        assert!(
+            close.r > close.g && close.r > close.b,
+            "{name}: close is red"
+        );
+        let minimize = palette.window_minimize;
+        assert!(
+            minimize.r > minimize.b && minimize.g > minimize.b,
+            "{name}: minimize is yellow"
+        );
+        let maximize = palette.window_maximize;
+        assert!(
+            maximize.g > maximize.r && maximize.g > maximize.b,
+            "{name}: the size toggle is green"
+        );
+        let back = palette.window_put_to_back;
+        assert!(
+            back.b > back.r && back.b > back.g,
+            "{name}: put-to-back is blue"
+        );
+    }
+}
+
+#[test]
 fn cursor_set_resolves_every_kind() {
     let dark = Theme::dark();
     let cursors = dark.cursors();
-    for kind in [
-        CursorKind::Arrow,
-        CursorKind::Text,
-        CursorKind::Pointer,
-        CursorKind::Move,
-        CursorKind::Busy,
-    ] {
+    for kind in CURSOR_KINDS {
         assert!(!cursors.asset(kind).is_empty());
     }
     assert_eq!(cursors.asset(CursorKind::Arrow), "cursor.arrow");
     assert_eq!(cursors.asset(CursorKind::Move), "cursor.move");
+    assert_eq!(
+        cursors.asset(CursorKind::ResizeDiagonalRising),
+        "cursor.resize-diagonal-rising"
+    );
 }
 
 #[test]
@@ -812,6 +861,10 @@ fn sample_theme(id: ThemeId) -> Theme {
             scroll_track: Rgba::rgb(35, 40, 48),
             scroll_thumb: Rgba::rgb(74, 81, 92),
             frame: Rgba::rgb(60, 60, 60),
+            window_close: Rgba::new(255, 64, 64, 128),
+            window_minimize: Rgba::new(255, 200, 32, 128),
+            window_maximize: Rgba::new(64, 200, 96, 128),
+            window_put_to_back: Rgba::new(32, 150, 230, 128),
         },
         Metrics {
             window_corner_radius: 4,
@@ -848,6 +901,10 @@ fn sample_theme(id: ThemeId) -> Theme {
             pointer: String::from("c.pointer"),
             move_: String::from("c.move"),
             busy: String::from("c.busy"),
+            resize_horizontal: String::from("c.resize-h"),
+            resize_vertical: String::from("c.resize-v"),
+            resize_diagonal_rising: String::from("c.resize-rising"),
+            resize_diagonal_falling: String::from("c.resize-falling"),
         },
         MotionTheme::new([
             90, 80, 60, 90, 180, 120, 120, 180, 90, 160, 70, 90, 200, 380, 900, 500,

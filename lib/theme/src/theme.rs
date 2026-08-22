@@ -238,6 +238,10 @@ impl Theme {
                 scroll_track: Rgba::rgb(0x13, 0x1a, 0x1d),
                 scroll_thumb: Rgba::rgb(0x2f, 0x3a, 0x3f),
                 frame: Rgba::rgb(0x4b, 0x52, 0x57),
+                window_close: Rgba::rgb(0xff, 0x3b, 0x30).with_alpha(COMMAND_ALPHA),
+                window_minimize: Rgba::rgb(0xff, 0xc1, 0x0a).with_alpha(COMMAND_ALPHA),
+                window_maximize: Rgba::rgb(0x34, 0xc7, 0x59).with_alpha(COMMAND_ALPHA),
+                window_put_to_back: Rgba::rgb(0x0a, 0x93, 0xe6).with_alpha(COMMAND_ALPHA),
             },
             common_metrics(),
             common_fonts(),
@@ -292,6 +296,10 @@ impl Theme {
                 scroll_track: Rgba::rgb(0xec, 0xe7, 0xe1),
                 scroll_thumb: Rgba::rgb(0xbd, 0xb5, 0xac),
                 frame: Rgba::rgb(0xc2, 0xbb, 0xb4),
+                window_close: Rgba::rgb(0xd7, 0x1f, 0x18).with_alpha(COMMAND_ALPHA),
+                window_minimize: Rgba::rgb(0xc9, 0x8a, 0x00).with_alpha(COMMAND_ALPHA),
+                window_maximize: Rgba::rgb(0x1d, 0x8c, 0x3c).with_alpha(COMMAND_ALPHA),
+                window_put_to_back: Rgba::rgb(0x0b, 0x6f, 0xb0).with_alpha(COMMAND_ALPHA),
             },
             common_metrics(),
             common_fonts(),
@@ -321,6 +329,17 @@ const ON_ACCENT: Rgba = Rgba::rgb(0xff, 0xf5, 0xee);
 /// than to cover. Each theme still authors its own fill colour and may tune
 /// this.
 pub(crate) const SELECTION_ALPHA: u8 = 77;
+
+/// The opacity both built-in themes give their window-command highlights:
+/// half.
+///
+/// A command's hue says which of the four the pointer is on; it is not trying
+/// to replace the title bar it sits in. Half opacity is enough for the colour
+/// to be unmistakable while the bar still reads through it, so a lit command
+/// looks like part of the window rather than a sticker on it. The two
+/// appearances share the weight and author the hues themselves, deeper on
+/// paper-white and brighter on near-black, so each carries on its own bar.
+pub(crate) const COMMAND_ALPHA: u8 = 128;
 
 /// The opacity both built-in themes give their floating chrome: seven tenths.
 ///
@@ -436,5 +455,9 @@ fn common_cursors() -> CursorSet {
         pointer: String::from("cursor.pointer"),
         move_: String::from("cursor.move"),
         busy: String::from("cursor.busy"),
+        resize_horizontal: String::from("cursor.resize-horizontal"),
+        resize_vertical: String::from("cursor.resize-vertical"),
+        resize_diagonal_rising: String::from("cursor.resize-diagonal-rising"),
+        resize_diagonal_falling: String::from("cursor.resize-diagonal-falling"),
     }
 }

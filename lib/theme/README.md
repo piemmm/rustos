@@ -95,7 +95,8 @@ This crate is pure theme *data*. A `Theme` is a table of:
   a screen of its own, such as the login and lock screens' clock — and is the
   one deliberate break from the tight ladder the other roles keep.
 - `CursorSet` — one cursor asset id per `CursorKind`, referencing assets
-  under `/System/Graphics`.
+  under `/System/Graphics`. `CURSOR_KINDS` is the closed kind list, beside the
+  enum, so a loader or a cache never restates it.
 
 A theme also carries the **ground** its surfaces are drawn on (`SurfaceGround`,
 reported by `Theme::ground`): `Opaque` by default, and `Floating` on the copy

@@ -30,17 +30,17 @@ use tairix_geometry::{Point, Rect, Region, Scale};
 use tairix_icon::IconKind;
 use tairix_input::{InputEvent, Key, NamedKey, PointerButton};
 use tairix_raster::{Color, Surface, SUBPIXEL};
-use tairix_theme::{TextRole, Theme};
+use tairix_theme::{Palette, Rgba, TextRole, Theme};
 
 use crate::damage;
 use crate::paint::{
     draw_outline, heavy_contrast, icon_slot_side, inset, key_activation, paint_bead,
-    paint_icon_slot, paint_plate, plate_border, pointer_activation, resolve_bead, resolve_frame,
-    role_font, surface_rect, to_i32, PlateStyle,
+    paint_icon_slot, paint_plate, plate_border, pointer_activation, resolve_bead,
+    resolve_tinted_frame, role_font, surface_rect, to_i32, PlateStyle,
 };
 use crate::state::{
-    ControlDisposition, ControlRole, ControlState, PlateSeating, PointerState, RenderInvariant,
-    SizeAction, WindowActivationState, WindowControlKind, WindowFurnitureState,
+    ControlDisposition, ControlState, PlateSeating, PointerState, RenderInvariant, SizeAction,
+    WindowActivationState, WindowControlKind, WindowFurnitureState,
 };
 
 // --- command glyphs -------------------------------------------------------
@@ -269,6 +269,21 @@ pub enum WindowControlAction {
     AlternateInvoked(WindowControlKind),
 }
 
+/// The identity hue `kind` highlights with.
+///
+/// The four commands are a closed vocabulary and the palette names one wash
+/// each, so the mapping lives here alone. A size toggle keeps its hue in both
+/// directions: maximizing and restoring are the same command, and swapping its
+/// colour with its glyph would read as a different button appearing.
+fn command_tint(palette: &Palette, kind: WindowControlKind) -> Rgba {
+    match kind {
+        WindowControlKind::Close => palette.window_close,
+        WindowControlKind::Minimize => palette.window_minimize,
+        WindowControlKind::SizeToggle => palette.window_maximize,
+        WindowControlKind::PutToBack => palette.window_put_to_back,
+    }
+}
+
 /// One compact window-command furniture button (spec §11.19–§11.22).
 ///
 /// Built from the shared button behaviour (the `crate::paint` plate,
@@ -382,7 +397,13 @@ impl WindowControl {
         let pressed = self.state.pointer == PointerState::Pressed;
         let focused = self.state.focus.focused;
         let awake = hovered || pressed || focused;
-        let frame = resolve_frame(theme, ControlRole::Neutral, self.state);
+        // The command's own hue, composed over the window body the title bar
+        // is painted on. A plate is laid down rather than blended, so the
+        // authored translucency has to be resolved against that ground here:
+        // laying it down as-is would leave a hole in the window's furniture
+        // strip and show the desktop through the button.
+        let tint = command_tint(palette, self.kind).over(palette.surface);
+        let frame = resolve_tinted_frame(theme, tint, self.state);
 
         let radius = scale.scale_length(theme.metrics().control_corner_radius);
         let border = plate_border(theme, scale);
@@ -536,7 +557,7 @@ impl WindowControl {
 /// the leading cluster in the bar's left corner, then the trailing cluster in
 /// its right. It is also the keyboard traversal order, so an arrow key moves
 /// the focus ring the way the eye reads.
-const CONTROL_ORDER: [WindowControlKind; 4] = [
+pub(crate) const CONTROL_ORDER: [WindowControlKind; 4] = [
     WindowControlKind::PutToBack,
     WindowControlKind::Close,
     WindowControlKind::Minimize,

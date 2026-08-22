@@ -197,6 +197,19 @@ panel-seated. That is why a window command shows a hover as a plate wash and
 never as an edge: an edge on a command would read as a line drawn round the
 window's corner.
 
+A window command's wash is its **own** colour rather than the shared
+`surface_hover`: red for close, yellow for minimize, green for the size toggle,
+blue for put-to-back, each a `Palette` role authored at half opacity so the
+title bar reads through it. That is a fourth emphasis in the shared plate
+recipe (`paint::resolve_tinted_frame`) — a colour that appears only under the
+pointer, so the control still wears nothing at rest the way every other
+bar-seated one does, and keyboard focus still states itself on the ring alone.
+A disposition outranks it: a denied or disabled command reads as denied or
+disabled, never as its own colour. Because a plate is *laid down* rather than
+composited, the renderer resolves the authored translucency against the window
+body first (`Rgba::over`); laying the raw value down would cut a hole through
+the window's furniture strip instead of tinting it.
+
 ## Surface ground: opaque or floating chrome
 
 Seating says what a control sitting *on* a surface wears. The **ground** is its

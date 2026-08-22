@@ -4,7 +4,7 @@
 use alloc::vec;
 
 use tairix_raster::{Color, Paint};
-use tairix_theme::CursorKind;
+use tairix_theme::{CursorKind, CURSOR_KINDS};
 
 use crate::registry::{CursorRegistry, CursorRegistryError, CursorSetId};
 use crate::theme::CursorTheme;
@@ -38,14 +38,6 @@ fn solid_square(size: u32, fill: Color) -> VectorCursor {
     );
     VectorCursor::new(size, 0, 0, vec![shape])
 }
-
-const EVERY_KIND: [CursorKind; 5] = [
-    CursorKind::Arrow,
-    CursorKind::Text,
-    CursorKind::Pointer,
-    CursorKind::Move,
-    CursorKind::Busy,
-];
 
 #[test]
 fn footprint_scales_with_percent() {
@@ -132,11 +124,94 @@ fn translucent_fill_blends_rather_than_overwrites() {
 #[test]
 fn builtin_set_defines_every_kind_renderable() {
     let theme = CursorTheme::builtin();
-    for kind in EVERY_KIND {
+    for kind in CURSOR_KINDS {
         let cursor = theme.cursor(kind);
         let image = cursor.rasterise(100).expect("every built-in renders");
         let any_drawn = image.surface().pixels().iter().any(|pixel| pixel.a > 0);
         assert!(any_drawn, "{kind:?} should draw at least one pixel");
+    }
+}
+
+/// The four resize kinds, in the order the axes read: the two straight
+/// arrows then the two diagonals.
+const RESIZE_KINDS: [CursorKind; 4] = [
+    CursorKind::ResizeHorizontal,
+    CursorKind::ResizeVertical,
+    CursorKind::ResizeDiagonalRising,
+    CursorKind::ResizeDiagonalFalling,
+];
+
+/// The alpha channel of a built-in cursor rasterised at its authored size, as
+/// a `side`×`side` grid.
+fn builtin_coverage(kind: CursorKind) -> (usize, alloc::vec::Vec<u8>) {
+    let image = CursorTheme::builtin()
+        .cursor(kind)
+        .rasterise(100)
+        .expect("renderable");
+    let side = usize::try_from(image.width()).unwrap_or(0);
+    let alpha = image.surface().pixels().iter().map(|p| p.a).collect();
+    (side, alpha)
+}
+
+#[test]
+fn every_resize_cursor_points_both_ways() {
+    // A resize cursor states that an edge can be dragged either way, so its
+    // artwork must be unchanged by a half turn about its hotspot. An arrow
+    // with one head would pass every other test here and still tell the user
+    // the wrong thing.
+    for kind in RESIZE_KINDS {
+        let (side, alpha) = builtin_coverage(kind);
+        assert!(side > 0, "{kind:?} rasterises");
+        for y in 0..side {
+            for x in 0..side {
+                assert_eq!(
+                    alpha[y * side + x],
+                    alpha[(side - 1 - y) * side + (side - 1 - x)],
+                    "{kind:?} is lopsided at ({x}, {y})"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn the_resize_cursors_are_one_arrow_at_four_angles() {
+    let (side, horizontal) = builtin_coverage(CursorKind::ResizeHorizontal);
+    let (_, vertical) = builtin_coverage(CursorKind::ResizeVertical);
+    let (_, rising) = builtin_coverage(CursorKind::ResizeDiagonalRising);
+    let (_, falling) = builtin_coverage(CursorKind::ResizeDiagonalFalling);
+    for y in 0..side {
+        for x in 0..side {
+            assert_eq!(
+                horizontal[y * side + x],
+                vertical[x * side + y],
+                "the vertical arrow is the horizontal one transposed"
+            );
+            assert_eq!(
+                rising[y * side + x],
+                falling[y * side + (side - 1 - x)],
+                "the two diagonals are mirror images"
+            );
+        }
+    }
+    assert_ne!(
+        rising, falling,
+        "a window's two corners need opposite diagonals"
+    );
+}
+
+#[test]
+fn every_resize_cursor_pivots_on_its_centre() {
+    // The hotspot is the point the edge is dragged from, so it sits at the
+    // arrow's middle and scales with the artwork.
+    for kind in RESIZE_KINDS {
+        let cursor = CursorTheme::builtin().cursor(kind).clone();
+        let native = cursor.rasterise(100).expect("renderable");
+        let scaled = cursor.rasterise(200).expect("renderable");
+        let centre = i32::try_from(native.width() / 2).unwrap_or(0);
+        assert_eq!(native.hotspot().x, centre, "{kind:?} x");
+        assert_eq!(native.hotspot().y, centre, "{kind:?} y");
+        assert_eq!(scaled.hotspot().x, centre * 2, "{kind:?} scaled x");
     }
 }
 
@@ -221,7 +296,7 @@ fn registry_holds_builtin_and_is_never_empty() {
     assert_eq!(registry.len(), 1);
     assert!(!registry.is_empty());
     assert_eq!(registry.active_id(), CursorSetId::BUILTIN);
-    for kind in EVERY_KIND {
+    for kind in CURSOR_KINDS {
         // Resolving the active cursor never panics.
         let _ = registry.active_cursor(kind);
     }
@@ -243,13 +318,7 @@ fn registry_register_then_switch_replaces_the_cursor_set() {
     let mut registry = CursorRegistry::with_builtin();
     // A high-visibility set whose arrow is a solid red square.
     let red = Color::rgb(255, 0, 0);
-    let custom = CursorTheme::new(
-        solid_square(16, red),
-        solid_square(16, red),
-        solid_square(16, red),
-        solid_square(16, red),
-        solid_square(16, red),
-    );
+    let custom = CursorTheme::from_cursors(|_| solid_square(16, red));
     let id = CursorSetId::new("high-contrast");
     registry.register(id, custom).expect("fresh id");
     assert_eq!(registry.len(), 2);
@@ -362,9 +431,9 @@ fn is_loaded(cursor: &VectorCursor) -> bool {
 
 #[test]
 fn from_assets_loads_every_kind_when_all_present() {
-    let source = TestSource::for_kinds(&EVERY_KIND);
+    let source = TestSource::for_kinds(&CURSOR_KINDS);
     let theme = CursorTheme::from_assets(&source);
-    for kind in EVERY_KIND {
+    for kind in CURSOR_KINDS {
         assert!(is_loaded(theme.cursor(kind)), "{kind:?} should be loaded");
     }
 }
@@ -374,7 +443,7 @@ fn from_assets_empty_source_yields_builtin_set() {
     let source = TestSource::for_kinds(&[]);
     let theme = CursorTheme::from_assets(&source);
     assert_eq!(theme, CursorTheme::builtin());
-    for kind in EVERY_KIND {
+    for kind in CURSOR_KINDS {
         assert!(!is_loaded(theme.cursor(kind)), "{kind:?} should fall back");
     }
 }
@@ -423,7 +492,7 @@ fn from_assets_malformed_asset_falls_back_per_kind() {
 
 #[test]
 fn from_assets_set_registers_and_activates() {
-    let source = TestSource::for_kinds(&EVERY_KIND);
+    let source = TestSource::for_kinds(&CURSOR_KINDS);
     let mut registry = CursorRegistry::with_builtin();
     let id = CursorSetId::new("on-disk");
     registry

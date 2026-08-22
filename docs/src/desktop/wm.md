@@ -781,9 +781,16 @@ from the chrome. The furniture family itself lives once in
 `lib/controls::window` (`WindowFrame`, `TitleBar`, `WindowControl`,
 `ResizeGrabber`) and is composed here, so there is no second visual recipe
 (`AGENTS.md` §2.2). A command is *bar-seated*: it wears no perimeter of its own
-in any state and no plate at all while it rests, so it states hover and press by
-the same plate wash every other control uses and the row reads as part of the
-bar (`plans/GUI-CONTROLS-DESIGN.md` §6).
+in any state and no plate at all while it rests, so it states hover and press on
+its plate alone and the row reads as part of the bar
+(`plans/GUI-CONTROLS-DESIGN.md` §6). Each of the four lights up in its **own**
+hue — red to close, yellow to minimize, green to the size toggle, blue to
+put-to-back — so the pointer landing on one says which command it is about to
+fire before the glyph is read. The wash is authored at half opacity and resolved
+against the window body, so the title bar tints rather than being covered; a
+press deepens it, keyboard focus still states itself on the ring inside the
+plate, and a denied or disabled command reads as denied or disabled rather than
+as its colour. See [theming](./theming.md) for the four roles.
 
 - **Reserved band (geometry).** `Compositor::set_window_frame` attaches a
   `WindowFrame` and reserves a furniture band *around* the client from the
@@ -888,7 +895,11 @@ bar (`plans/GUI-CONTROLS-DESIGN.md` §6).
   accepted trade for a border that costs no visible space. Since the router
   consults the frame first, that outer strip also wins over a window's
   root-viewport scrollbar furniture. Drawing stays strictly separated even
-  so — the frame paints no furniture mark inside the client.
+  so — the frame paints no furniture mark inside the client. What makes the
+  invisible border discoverable is the **pointer**: the same hit map drives
+  cursor selection, so crossing into the zone swaps the arrow for the double
+  arrow of the axis that edge moves along, and a grab keeps that shape for the
+  whole gesture (see [Pointer cursors](./cursors.md)).
 - **Pointer and keyboard routing.** A title-bar press begins the cooperative
   move-grab; a command-control press captures the frame, feeds the click to
   `TitleBar::on_pointer`, and emits `WindowControl { window, control }` on the

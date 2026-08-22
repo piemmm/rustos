@@ -25,7 +25,34 @@ pub enum CursorKind {
     Move,
     /// The busy/wait cursor.
     Busy,
+    /// The left-right double arrow shown on a window's left or right resize
+    /// edge.
+    ResizeHorizontal,
+    /// The up-down double arrow shown on a window's top or bottom resize edge.
+    ResizeVertical,
+    /// The double arrow along the rising diagonal, shown on a bottom-left or
+    /// top-right resize corner.
+    ResizeDiagonalRising,
+    /// The double arrow along the falling diagonal, shown on a top-left or
+    /// bottom-right resize corner.
+    ResizeDiagonalFalling,
 }
+
+/// Every cursor kind the desktop defines.
+///
+/// The closed [`CursorKind`] vocabulary as a table, so a loader, a cache, or a
+/// test iterates every kind without restating the list.
+pub const CURSOR_KINDS: [CursorKind; 9] = [
+    CursorKind::Arrow,
+    CursorKind::Text,
+    CursorKind::Pointer,
+    CursorKind::Move,
+    CursorKind::Busy,
+    CursorKind::ResizeHorizontal,
+    CursorKind::ResizeVertical,
+    CursorKind::ResizeDiagonalRising,
+    CursorKind::ResizeDiagonalFalling,
+];
 
 /// One cursor asset identifier per [`CursorKind`].
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -40,6 +67,14 @@ pub struct CursorSet {
     pub move_: String,
     /// Asset for [`CursorKind::Busy`].
     pub busy: String,
+    /// Asset for [`CursorKind::ResizeHorizontal`].
+    pub resize_horizontal: String,
+    /// Asset for [`CursorKind::ResizeVertical`].
+    pub resize_vertical: String,
+    /// Asset for [`CursorKind::ResizeDiagonalRising`].
+    pub resize_diagonal_rising: String,
+    /// Asset for [`CursorKind::ResizeDiagonalFalling`].
+    pub resize_diagonal_falling: String,
 }
 
 impl CursorSet {
@@ -52,6 +87,10 @@ impl CursorSet {
             CursorKind::Pointer => &self.pointer,
             CursorKind::Move => &self.move_,
             CursorKind::Busy => &self.busy,
+            CursorKind::ResizeHorizontal => &self.resize_horizontal,
+            CursorKind::ResizeVertical => &self.resize_vertical,
+            CursorKind::ResizeDiagonalRising => &self.resize_diagonal_rising,
+            CursorKind::ResizeDiagonalFalling => &self.resize_diagonal_falling,
         }
     }
 }

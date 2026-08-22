@@ -21,9 +21,9 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use tairix_abi::Errno;
-use tairix_cursor::{CursorAssetSource, CursorTheme, CURSOR_KINDS};
+use tairix_cursor::{CursorAssetSource, CursorTheme};
 use tairix_icon::{icon_vector_path, IconAssetSource, IconKind, IconSet, GRAPHICS_DIR, ICON_KINDS};
-use tairix_theme::{CursorKind, CursorSet};
+use tairix_theme::{CursorKind, CursorSet, CURSOR_KINDS};
 
 /// The desktop session's file-reading seam.
 ///

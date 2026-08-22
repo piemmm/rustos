@@ -400,7 +400,9 @@ impl DesktopShell {
     /// Runs the window manager's cursor-shape policy against the current
     /// interaction state (the plain arrow over the desktop background, a
     /// window's own [`cursor_hint`](tairix_wm::Window::cursor_hint) under the
-    /// pointer, the move cursor during an interactive grab), re-rasterising at
+    /// pointer, the double arrow of a resize edge the pointer is on or a
+    /// resize-grab is dragging, the move cursor during an interactive
+    /// move-grab), re-rasterising at
     /// the output density only when the chosen shape, the active cursor set,
     /// or the [`scale`](Compositor::scale) actually changed, and repositions
     /// the overlay so its hotspot tracks the pointer. It is called for you

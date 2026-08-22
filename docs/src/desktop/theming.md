@@ -27,9 +27,11 @@ bundles, under a stable `ThemeId`:
   control roles
   (`surface_hover`, `surface_pressed`, `rim`, `rim_active`, `danger`), the
   signal roles the boards' legend fixes (the `*_pressure` set,
-  `network_activity`, `recovery`, `success`, `warning`, `denied`), and the
+  `network_activity`, `recovery`, `success`, `warning`, `denied`), the
   scroll and window-frame roles
-  (`scroll_track`, `scroll_thumb`, `frame`). The
+  (`scroll_track`, `scroll_thumb`, `frame`), and the window-command highlight
+  roles (`window_close`, `window_minimize`, `window_maximize`,
+  `window_put_to_back`). The
   roles are named fields, not a free-form map, so a theme can never omit a
   role and a consumer can never request one that does not exist.
   `Palette::signal(SignalRole)` is the one place a
@@ -85,6 +87,22 @@ bundles, under a stable `ThemeId`:
     contrast the active frame adds a second inner rim line
     (`plans/GUI-CONTROLS-DESIGN.md` §15) so the distinction is a difference in
     shape as well as tone.
+  - `window_close`, `window_minimize`, `window_maximize`, and
+    `window_put_to_back` are the four hues a title-bar command lights up in
+    under the pointer: red to close, yellow to minimize, green to the size
+    toggle (maximizing and restoring alike — one command, one identity), blue
+    to put-to-back. Each is authored at half opacity (`128`), so the wash tints
+    the title bar rather than covering it and a lit command still reads as part
+    of the window. They are four separate roles rather than a reuse of
+    `danger` / `warning` / `success`: retuning a signal hue for legibility must
+    not silently repaint a window button, and a command's hue is its identity,
+    not a statement about severity. A command wears nothing at rest, so the
+    colour *is* the highlight; keyboard focus still states itself on the ring
+    inside the plate, because the wash belongs to the pointer. Because a
+    control plate is laid down rather than composited, the renderer resolves
+    the authored translucency against the window body first
+    (`Rgba::over`) — laying the raw value down would cut a hole through the
+    window's furniture strip instead of tinting it.
 - `Metrics` — every logical length the desktop is laid out from, so no
   renderer carries a private constant: the corner radii and
   `border_thickness`; the scrollbar's `scrollbar_breadth` and

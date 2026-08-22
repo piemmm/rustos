@@ -127,6 +127,25 @@ pub struct Palette {
     /// heavy contrast the active frame gains a second, inner rim line so the
     /// distinction is a difference in shape and not only in tone.
     pub frame: Rgba,
+
+    // --- Window-command highlight roles ---------------------------------
+    //
+    // A hue per title-bar command, so a lit one says *which* command it is
+    // before its glyph is read. Kept separate from `danger` / `warning` /
+    // `success`: retuning a signal hue for legibility must not repaint a
+    // window button, and a command's hue is its identity, not a severity.
+    /// The wash the close command highlights with, red.
+    ///
+    /// Authored translucent, like [`selection_fill`](Self::selection_fill), so
+    /// the highlight tints the title bar rather than covering it.
+    pub window_close: Rgba,
+    /// The wash the minimize command highlights with, yellow.
+    pub window_minimize: Rgba,
+    /// The wash the size toggle highlights with, green — maximizing and
+    /// restoring alike, because they are one command.
+    pub window_maximize: Rgba,
+    /// The wash the put-to-back command highlights with, blue.
+    pub window_put_to_back: Rgba,
 }
 
 impl Palette {

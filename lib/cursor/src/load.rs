@@ -21,18 +21,6 @@ use tairix_theme::CursorKind;
 use crate::theme::CursorTheme;
 use crate::vector::VectorCursor;
 
-/// Every cursor kind a set provides an asset for.
-///
-/// A fixed table so a loader iterates the closed [`CursorKind`] vocabulary
-/// without inventing a second list of kinds.
-pub const CURSOR_KINDS: [CursorKind; 5] = [
-    CursorKind::Arrow,
-    CursorKind::Text,
-    CursorKind::Pointer,
-    CursorKind::Move,
-    CursorKind::Busy,
-];
-
 /// A source of on-disk SVG cursor assets, one per [`CursorKind`].
 ///
 /// The desktop implements this over the filesystem (reading
@@ -55,13 +43,7 @@ impl CursorTheme {
     #[must_use]
     pub fn from_assets<S: CursorAssetSource + ?Sized>(source: &S) -> Self {
         let builtin = Self::builtin();
-        Self::new(
-            resolve(source, CursorKind::Arrow, &builtin),
-            resolve(source, CursorKind::Text, &builtin),
-            resolve(source, CursorKind::Pointer, &builtin),
-            resolve(source, CursorKind::Move, &builtin),
-            resolve(source, CursorKind::Busy, &builtin),
-        )
+        Self::from_cursors(|kind| resolve(source, kind, &builtin))
     }
 }
 
