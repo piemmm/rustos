@@ -3439,6 +3439,38 @@ fn the_owning_applications_icon_is_drawn_in_the_title_bar() {
 }
 
 #[test]
+fn installing_identity_artwork_hands_the_bar_its_hue() {
+    // The band's wash is the application's own colour, so it is resolved from
+    // the artwork once here — where the pixels change — rather than re-read on
+    // every repaint.
+    let (mut c, id) = decorated_compositor();
+    let side = c.window_title_icon_side(id).expect("decorated");
+    let bar = |c: &Compositor| {
+        c.window(id)
+            .and_then(crate::window::Window::frame)
+            .map(WindowFrame::title_bar)
+            .and_then(tairix_controls::TitleBar::identity_hue)
+    };
+
+    assert_eq!(bar(&c), None, "a bar starts with no hue");
+    assert!(c.set_window_identity(id, IconKind::AppBundle, None));
+    assert_eq!(bar(&c), None, "and a built-in glyph lends none");
+
+    assert!(c.set_window_identity(id, IconKind::AppBundle, Some(opaque(side, side, GREEN))));
+    let hue = bar(&c).expect("coloured artwork lends its hue");
+    assert!(
+        hue.g > hue.r && hue.g > hue.b,
+        "the green artwork's own colour, not an average: {hue:?}"
+    );
+
+    // Greyscale artwork has no colour to lend, so the bar goes back to plain
+    // rather than keeping the last window's hue.
+    let grey = opaque(side, side, Color::rgb(120, 120, 120));
+    assert!(c.set_window_identity(id, IconKind::AppBundle, Some(grey)));
+    assert_eq!(bar(&c), None);
+}
+
+#[test]
 fn setting_an_identity_evicts_only_that_windows_chrome() {
     let (mut c, first) = decorated_compositor();
     let second = c.add_window(Point::new(120, 120), opaque(60, 40, RED));

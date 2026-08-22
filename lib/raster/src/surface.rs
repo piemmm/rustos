@@ -24,7 +24,7 @@ use alloc::vec::Vec;
 
 use tairix_reclaim::CachedBytes;
 
-use crate::color::{blend_span, blend_span_mapped, mix, Color, Pixel};
+use crate::color::{blend_span, blend_span_mapped, div255, mix, Color, Pixel};
 use crate::dither::DitherRow;
 use crate::paint::Paint;
 use crate::round::round_rect_coverage;
@@ -517,6 +517,141 @@ impl Surface {
                 wash_span(span, first, row, source);
             }
         }
+    }
+
+    /// Composite `color` over `[x, x+w) × [y, y+h)`, scaling its alpha by the
+    /// coverage `mask` reports for each pixel at that pixel's own coordinates
+    /// within the rectangle.
+    ///
+    /// The masked sibling of
+    /// [`fill_vertical_gradient`](Self::fill_vertical_gradient), for a field
+    /// whose strength varies in two dimensions rather than only down the rows:
+    /// a hue that fades along a title bar *and* is confined to the window's
+    /// rounded corner at the same time. The caller composes the mask, so one
+    /// primitive serves a ramp, a silhouette, or the two multiplied together,
+    /// and no consumer grows coverage arithmetic of its own —
+    /// [`round_rect_coverage`] is the one place an arc's comes from.
+    ///
+    /// A fully uncovered pixel is left bit-identical rather than blended with a
+    /// transparent source, so a mask that answers `0` over most of its
+    /// rectangle costs only the pixels it actually paints. Like every
+    /// translucent composite here the rounding is the surface row's own
+    /// ordered-dither bias, so a smooth ramp cannot contour into flat bands.
+    pub fn wash_region(
+        &mut self,
+        x: u32,
+        y: u32,
+        w: u32,
+        h: u32,
+        color: Color,
+        mask: impl Fn(u32, u32) -> u8,
+    ) {
+        if w == 0 || h == 0 || color.a == 0 {
+            return;
+        }
+        for row in self.clip.rows(y, h) {
+            let local_y = row - y;
+            let dither = DitherRow::at(row);
+            let Some((first, span)) = self.row_span_mut(row, x, w) else {
+                continue;
+            };
+            // A clipped span never starts left of the rectangle, so the local
+            // column cannot wrap.
+            for (column, dst) in (first..).zip(span.iter_mut()) {
+                let coverage = mask(column - x, local_y);
+                if coverage == 0 {
+                    continue;
+                }
+                let source = Color::rgba(
+                    color.r,
+                    color.g,
+                    color.b,
+                    div255(u32::from(color.a) * u32::from(coverage)),
+                );
+                *dst = source.over_biased(*dst, dither.bias(column));
+            }
+        }
+    }
+
+    /// The one hue most of this surface's visible, coloured pixels carry, as an
+    /// opaque colour — or `None` when it carries none.
+    ///
+    /// What a title bar takes its wash from: an application's identity icon
+    /// lends the chrome its colour, so the bar has to be told which of the
+    /// icon's colours *is* the icon. A plain mean cannot answer that — two
+    /// complementary halves average to grey — so this is the mode of a coarse
+    /// hue histogram: every visible pixel votes for its hue sextant twelfth,
+    /// weighted by its own alpha and chroma, and the winner's weighted mean is
+    /// returned. That keeps the real lightness and saturation of the colour
+    /// that won rather than a normalised stand-in.
+    ///
+    /// Chroma is the vote's weight because it is also the test for having a hue
+    /// at all: a greyscale or fully transparent icon accumulates none, and a
+    /// near-grey one stays under the mean-chroma floor below, so both answer
+    /// `None` and the caller draws no wash rather than a grey one nobody asked
+    /// for.
+    ///
+    /// Integer arithmetic throughout, over a fixed twelve-bucket table, so this
+    /// allocates nothing and cannot panic. It is meant for icon-sized input and
+    /// is a single pass over the pixels.
+    #[must_use]
+    pub fn dominant_color(&self) -> Option<Color> {
+        /// Degrees of hue one bucket spans.
+        const BUCKET_DEGREES: u32 = 30;
+        /// Twelve of those cover the wheel.
+        const BUCKETS: usize = 12;
+        /// Below this mean chroma over the visible pixels there is no hue to
+        /// lend, only a grey the caller is better off not washing with.
+        const MIN_MEAN_CHROMA: u64 = 16;
+        /// Alpha below which a pixel is too faint to vote: an icon's
+        /// anti-aliased fringe is not its colour.
+        const MIN_ALPHA: u8 = 8;
+
+        let mut weight = [0u64; BUCKETS];
+        let mut sums = [[0u64; 3]; BUCKETS];
+        let mut alpha_total = 0u64;
+        let mut chroma_total = 0u64;
+
+        for pixel in self.pixels() {
+            let color = pixel.unpremultiply();
+            if color.a < MIN_ALPHA {
+                continue;
+            }
+            alpha_total += u64::from(color.a);
+            let (max, min) = (
+                color.r.max(color.g).max(color.b),
+                color.r.min(color.g).min(color.b),
+            );
+            let chroma = u32::from(max.saturating_sub(min));
+            let vote = u64::from(color.a) * u64::from(chroma);
+            chroma_total += vote;
+            if chroma == 0 {
+                continue;
+            }
+            // Clamped rather than trusted: the index is then in range by
+            // construction, whatever rounding the sextant arithmetic lands on.
+            let bucket = usize::try_from(hue_degrees(color, max, chroma) / BUCKET_DEGREES)
+                .unwrap_or(0)
+                .min(BUCKETS - 1);
+            weight[bucket] += vote;
+            sums[bucket][0] += vote * u64::from(color.r);
+            sums[bucket][1] += vote * u64::from(color.g);
+            sums[bucket][2] += vote * u64::from(color.b);
+        }
+
+        if alpha_total == 0 || chroma_total / alpha_total < MIN_MEAN_CHROMA {
+            return None;
+        }
+        let (bucket, total) = weight
+            .iter()
+            .enumerate()
+            .max_by_key(|(_, w)| **w)
+            .map(|(i, w)| (i, *w))?;
+        if total == 0 {
+            return None;
+        }
+        let mean = |channel: usize| u8::try_from(sums[bucket][channel] / total).unwrap_or(u8::MAX);
+        Some(Color::rgb(mean(0), mean(1), mean(2)))
     }
 
     /// Confine the surface to the rounded rectangle `[x, x+w) × [y, y+h)`
@@ -1323,6 +1458,37 @@ fn wash_span(span: &mut [Pixel], first: u32, row: u32, source: Color) {
     for (column, dst) in (first..).zip(span.iter_mut()) {
         *dst = source.over_biased(*dst, dither.bias(column));
     }
+}
+
+/// The hue of `color` in degrees `0..360`, given its already-computed channel
+/// `max` and non-zero `chroma`.
+///
+/// The standard sextant formula, kept unsigned: which channel is the maximum
+/// picks the pair of primaries the hue lies between, and their difference
+/// places it within that sixty-degree run. A zero `chroma` has no hue and is
+/// the caller's to reject before asking.
+fn hue_degrees(color: Color, max: u8, chroma: u32) -> u32 {
+    let (r, g, b) = (u32::from(color.r), u32::from(color.g), u32::from(color.b));
+    // How far into a sextant the larger of two primaries carries the hue.
+    let run = |from: u32, to: u32| from.saturating_sub(to) * 60 / chroma;
+    let hue = if max == color.r {
+        if g >= b {
+            run(g, b)
+        } else {
+            360 - run(b, g)
+        }
+    } else if max == color.g {
+        if b >= r {
+            120 + run(b, r)
+        } else {
+            120 - run(r, b)
+        }
+    } else if r >= g {
+        240 + run(r, g)
+    } else {
+        240 - run(g, r)
+    };
+    hue % 360
 }
 
 /// `from` at `step` zero and `to` at `step` `last`, interpolated per channel

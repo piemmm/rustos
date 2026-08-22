@@ -854,6 +854,140 @@ fn a_faded_blit_clips_exactly_as_a_plain_one_does() {
 }
 
 #[test]
+fn wash_region_scales_the_source_by_the_mask_and_spares_bare_pixels() {
+    let mut surface = Surface::new(8, 4).expect("allocates");
+    surface.fill(BLUE);
+    let before = surface.pixels().to_vec();
+    let wash = Color::rgba(255, 0, 0, 255);
+
+    // Column 0 uncovered, column 1 half covered, column 2 fully covered.
+    surface.wash_region(0, 0, 3, 4, wash, |lx, _| match lx {
+        0 => 0,
+        1 => 128,
+        _ => 255,
+    });
+
+    assert_eq!(
+        surface.get(0, 0),
+        Some(before[0]),
+        "an uncovered pixel is left bit-identical, not blended with nothing"
+    );
+    assert_eq!(
+        surface.get(2, 0),
+        Some(wash.premultiply()),
+        "full coverage composites the source outright"
+    );
+    let half = surface.get(1, 0).expect("in bounds");
+    assert!(
+        half.r > 0 && half.b > 0,
+        "half coverage leaves both the wash and the ground: {half:?}"
+    );
+    assert_eq!(surface.get(7, 0), Some(before[7]), "and nothing outside it");
+}
+
+#[test]
+fn wash_region_takes_the_mask_at_the_rectangles_own_coordinates() {
+    // The mask is asked about the pixel's place in the *rectangle*, not in the
+    // surface, so a caller composing a ramp with an arc writes one expression
+    // whatever the rectangle's origin is.
+    let mut offset = Surface::new(8, 8).expect("allocates");
+    offset.fill(BLUE);
+    offset.wash_region(3, 2, 4, 4, RED, |lx, ly| {
+        u8::try_from((lx + ly) * 32).unwrap_or(255)
+    });
+
+    let mut origin = Surface::new(8, 8).expect("allocates");
+    origin.fill(BLUE);
+    origin.wash_region(0, 0, 4, 4, RED, |lx, ly| {
+        u8::try_from((lx + ly) * 32).unwrap_or(255)
+    });
+
+    // Same mask answers, so the rectangle's own pixels match wherever it sits
+    // (bar the dither, which tiles the surface and so differs by origin).
+    for ly in 0..4 {
+        for lx in 0..4 {
+            let there = offset.get(3 + lx, 2 + ly).expect("in bounds");
+            let here = origin.get(lx, ly).expect("in bounds");
+            let close = |a: u8, b: u8| a.abs_diff(b) <= 1;
+            assert!(
+                close(there.r, here.r) && close(there.b, here.b),
+                "({lx}, {ly}): {there:?} vs {here:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn wash_region_is_a_no_op_for_a_transparent_or_empty_wash() {
+    let mut surface = Surface::new(4, 4).expect("allocates");
+    surface.fill(BLUE);
+    let before = surface.pixels().to_vec();
+    surface.wash_region(0, 0, 4, 4, Color::rgba(255, 0, 0, 0), |_, _| 255);
+    assert_eq!(surface.pixels(), &before[..], "a transparent wash");
+    surface.wash_region(0, 0, 0, 4, RED, |_, _| 255);
+    surface.wash_region(0, 0, 4, 0, RED, |_, _| 255);
+    assert_eq!(surface.pixels(), &before[..], "an empty rectangle");
+}
+
+/// A `side`×`side` surface filled with `ground`, with a `patch`×`patch` block
+/// of `accent` in its corner — a stand-in for an icon whose colour is a mark
+/// on a neutral field.
+fn icon(side: u32, ground: Color, patch: u32, accent: Color) -> Surface {
+    let mut surface = Surface::new(side, side).expect("allocates");
+    surface.fill(ground);
+    surface.fill_rect(0, 0, patch, patch, accent);
+    surface
+}
+
+#[test]
+fn dominant_color_finds_the_accent_in_a_mostly_grey_icon() {
+    // The colour a title bar takes its wash from is the icon's *hue*, not its
+    // average: a grey glyph with a coloured mark reads as that colour.
+    let accent = Color::rgb(0x0a, 0x93, 0xe6);
+    let found = icon(16, Color::rgb(128, 128, 128), 8, accent)
+        .dominant_color()
+        .expect("the mark carries a hue");
+    assert!(
+        found.b > found.r && found.b > found.g,
+        "the blue mark won, not the grey field: {found:?}"
+    );
+    assert_eq!(found.a, 255, "the hue is returned opaque");
+}
+
+#[test]
+fn dominant_color_picks_a_hue_rather_than_averaging_two() {
+    // Half red, half cyan averages to grey; the mode does not. Whichever side
+    // carries more weight must come back as a real hue.
+    let mut surface = Surface::new(16, 16).expect("allocates");
+    surface.fill(Color::rgb(0, 255, 255));
+    surface.fill_rect(0, 0, 16, 12, Color::rgb(255, 0, 0));
+    let found = surface.dominant_color().expect("both halves have a hue");
+    assert!(
+        found.r > found.g && found.r > found.b,
+        "the larger red field won instead of the two cancelling: {found:?}"
+    );
+}
+
+#[test]
+fn dominant_color_declines_when_there_is_no_hue_to_lend() {
+    assert_eq!(
+        icon(16, Color::rgb(60, 60, 60), 8, Color::rgb(200, 200, 200)).dominant_color(),
+        None,
+        "a greyscale icon lends no colour"
+    );
+    assert_eq!(
+        Surface::new(16, 16).expect("allocates").dominant_color(),
+        None,
+        "and neither does a transparent one"
+    );
+    assert_eq!(
+        icon(16, Color::rgb(128, 128, 128), 1, Color::rgb(255, 0, 0)).dominant_color(),
+        None,
+        "nor one whose only colour is a single stray pixel"
+    );
+}
+
+#[test]
 fn set_round_rect_lays_a_translucent_ground_a_fill_could_not() {
     // The point of the primitive: a half-opaque colour composited over an
     // opaque plate comes back opaque, so a surface that must be see-through

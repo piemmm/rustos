@@ -26,9 +26,9 @@ use crate::state::{
 };
 use crate::testkit::high_contrast;
 use crate::window::{
-    FrameInsets, FurniturePart, ResizeEdge, ResizeEvent, ResizeGrabber, ScrollCorner, TitleBar,
-    TitleBarEvent, TitleHit, WindowControl, WindowControlAction, WindowFrame, CONTROL_ORDER,
-    IDENTITY_SATURATION_ACTIVE, IDENTITY_SATURATION_INACTIVE,
+    BandCorner, FrameInsets, FrameRim, FurniturePart, ResizeEdge, ResizeEvent, ResizeGrabber,
+    ScrollCorner, TitleBar, TitleBarEvent, TitleHit, WindowControl, WindowControlAction,
+    WindowFrame, CONTROL_ORDER, IDENTITY_SATURATION_ACTIVE, IDENTITY_SATURATION_INACTIVE,
 };
 
 fn premul(rgba: Rgba) -> Pixel {
@@ -90,7 +90,13 @@ fn fixed_size_furniture() -> WindowFurnitureState {
 
 fn render_control(control: &WindowControl, theme: &Theme, side: u32) -> Surface {
     let mut surface = Surface::new(side, side).expect("surface");
-    control.render(&mut surface, Rect::new(0, 0, side, side), Scale::ONE, theme);
+    control.render(
+        &mut surface,
+        Rect::new(0, 0, side, side),
+        Scale::ONE,
+        theme,
+        BandCorner::Square,
+    );
     surface
 }
 
@@ -405,7 +411,13 @@ fn control_renders_at_scale() {
     let control = WindowControl::new(WindowControlKind::Minimize);
     let scale = Scale::from_percent(200).expect("scale");
     let mut surface = Surface::new(80, 80).expect("surface");
-    control.render(&mut surface, Rect::new(0, 0, 80, 80), scale, &theme);
+    control.render(
+        &mut surface,
+        Rect::new(0, 0, 80, 80),
+        scale,
+        &theme,
+        BandCorner::Square,
+    );
     assert!(opaque_count(&surface) > 0);
 }
 
@@ -449,7 +461,6 @@ fn the_commands_seat_two_in_each_corner_in_reading_order() {
     let bounds = title_bounds();
     let bar = TitleBar::new(furniture());
     let layout = bar.layout(bounds, Scale::ONE, &theme);
-    let ins = metric(theme.metrics().control_inset);
     let gap = metric(theme.metrics().control_gap);
 
     assert_eq!(
@@ -470,25 +481,82 @@ fn the_commands_seat_two_in_each_corner_in_reading_order() {
     }
     assert_eq!(
         layout.controls[0].1.left(),
-        bounds.left() + ins,
-        "the leading cluster is inset into the left corner"
+        bounds.left(),
+        "the leading cluster is hard against the band's leading end"
     );
     assert_eq!(
         layout.controls[3].1.right(),
-        bounds.right() - ins,
-        "and the trailing cluster into the right"
-    );
-    assert_eq!(
-        layout.controls[1].1.left(),
-        layout.controls[0].1.right() + gap
-    );
-    assert_eq!(
-        layout.controls[3].1.left(),
-        layout.controls[2].1.right() + gap
+        bounds.right(),
+        "and the trailing cluster against its trailing one"
     );
     assert!(
         layout.controls[2].1.left() > layout.controls[1].1.right() + gap,
         "the identity span lies between the two clusters"
+    );
+}
+
+#[test]
+fn a_command_cell_carries_no_margin_of_its_own() {
+    // The cell *is* the button: a hover has to light every pixel between one
+    // command and the next, and a press has to land anywhere in it, so a cell
+    // fills the band's height and touches the cell beside it. The gaps and
+    // insets that used to sit around it left dead strips where feedback
+    // dropped out and a click did nothing.
+    let theme = Theme::dark();
+    let bar = TitleBar::new(furniture());
+    for scale in [Scale::ONE, Scale::from_percent(200).expect("scale")] {
+        for width in [TitleBar::min_band_width(scale, &theme), 200, 640, 1920] {
+            let bounds = Rect::new(0, 0, width, 28);
+            let layout = bar.layout(bounds, scale, &theme);
+            for (kind, rect) in layout.controls {
+                assert_eq!(
+                    (rect.top(), rect.height),
+                    (bounds.top(), bounds.height),
+                    "{kind:?} leaves a strip of band above or below it at {width}px"
+                );
+            }
+            // Within a cluster the cells butt together; the pair that faces the
+            // identity span is the only place a gap belongs.
+            assert_eq!(
+                layout.controls[1].1.left(),
+                layout.controls[0].1.right(),
+                "the leading cluster has a seam in it at {width}px"
+            );
+            assert_eq!(
+                layout.controls[3].1.left(),
+                layout.controls[2].1.right(),
+                "the trailing cluster has a seam in it at {width}px"
+            );
+        }
+    }
+}
+
+#[test]
+fn a_cell_hard_against_the_band_end_curves_with_the_window() {
+    // The window's rim curves through the band's ends, so the cell seated
+    // there curves with it — the other three corners stay square, or the row
+    // would read as a floating tab rather than part of the bar.
+    let radius = FrameRim::of(Scale::ONE, &Theme::dark()).plate().1;
+    assert!(radius > 0, "the house window shape is rounded");
+    assert_eq!(BandCorner::Leading(radius).plate().0, radius);
+    assert_eq!(BandCorner::Trailing(radius).plate().0, radius);
+    assert_eq!(
+        BandCorner::Square.plate(),
+        (0, crate::paint::PlateBleed::NONE),
+        "a cell between two others rounds nothing and bleeds nowhere"
+    );
+
+    // The bleed puts the three corners that must stay square outside the cell,
+    // so only the one facing the band's end is left to round.
+    let (_, leading) = BandCorner::Leading(radius).plate();
+    assert_eq!(
+        (leading.left, leading.right, leading.bottom),
+        (0, radius, radius)
+    );
+    let (_, trailing) = BandCorner::Trailing(radius).plate();
+    assert_eq!(
+        (trailing.left, trailing.right, trailing.bottom),
+        (radius, 0, radius)
     );
 }
 
@@ -604,10 +672,7 @@ fn a_band_too_narrow_for_both_clusters_abuts_them_rather_than_stacking_them() {
     let bounds = Rect::new(0, 0, 60, 28);
     let layout = bar.layout(bounds, Scale::ONE, &theme);
 
-    assert_eq!(
-        layout.controls[0].1.left(),
-        bounds.left() + metric(theme.metrics().control_inset)
-    );
+    assert_eq!(layout.controls[0].1.left(), bounds.left());
     for (i, (kind, rect)) in layout.controls.iter().enumerate() {
         for (other_kind, other) in &layout.controls[i + 1..] {
             assert!(
@@ -709,6 +774,172 @@ fn the_minimum_outer_size_leaves_a_usable_band_and_a_real_client() {
     }
 }
 
+/// A bar carrying `hue`, rendered into a `width`-wide band over the theme's
+/// plain band colour, plus the laid-out icon slot the wash runs out from.
+fn washed_bar(theme: &Theme, width: u32, hue: Option<Color>, active: bool) -> (Surface, Rect) {
+    let mut state = furniture();
+    if !active {
+        state.activation = WindowActivationState::Inactive;
+    }
+    let mut bar = TitleBar::new(state);
+    bar.set_identity(Some(IconKind::AppBundle));
+    bar.set_identity_hue(hue);
+    bar.set_title("Report");
+    let bounds = Rect::new(0, 0, width, BAND_H);
+    let layout = bar.layout(bounds, Scale::ONE, theme);
+    let mut surface = Surface::new(width, BAND_H).expect("surface");
+    surface.fill(Color::from(theme.palette().surface));
+    bar.render(&mut surface, bounds, Scale::ONE, theme, None);
+    (surface, layout.icon)
+}
+
+/// The band height every wash probe uses.
+const BAND_H: u32 = 28;
+
+/// A row clear of every mark the bar draws — the identity glyph, the title, and
+/// the command glyphs are all inset from the band's bottom edge — so a probe
+/// there reads the wash and nothing else.
+const WASH_ROW: u32 = BAND_H - 2;
+
+/// The two renders a wash probe compares: the same bar with and without `hue`.
+///
+/// Differencing is what makes a probe trustworthy anywhere in the band. Reading
+/// one render against the theme's plain colour would measure whatever glyph
+/// happens to be at that pixel as if it were the wash — which is exactly the
+/// mistake that made an earlier version of these tests pass for the wrong
+/// reason.
+fn wash_pair(theme: &Theme, width: u32, hue: Color, active: bool) -> (Surface, Surface, Rect) {
+    let (washed, icon) = washed_bar(theme, width, Some(hue), active);
+    let (plain, _) = washed_bar(theme, width, None, active);
+    (washed, plain, icon)
+}
+
+/// The wash's own contribution at `(x, y)`, per channel.
+fn wash_channels(washed: &Surface, plain: &Surface, x: u32, y: u32) -> (u32, u32, u32) {
+    let (a, b) = (
+        washed.get(x, y).expect("in bounds"),
+        plain.get(x, y).expect("in bounds"),
+    );
+    (
+        u32::from(a.r.abs_diff(b.r)),
+        u32::from(a.g.abs_diff(b.g)),
+        u32::from(a.b.abs_diff(b.b)),
+    )
+}
+
+/// How far the wash moves the pixel at `(x, y)` in total.
+fn wash_strength(washed: &Surface, plain: &Surface, x: u32, y: u32) -> u32 {
+    let (red, green, blue) = wash_channels(washed, plain, x, y);
+    red + green + blue
+}
+
+/// The column the wash runs out from: the middle of the laid-out icon slot.
+fn hue_origin(icon: Rect) -> u32 {
+    u32::try_from(i32::midpoint(icon.left(), icon.right())).expect("inside the band")
+}
+
+#[test]
+fn the_band_wash_is_strongest_at_the_icon_and_fades_outward() {
+    // The bar carries its application's colour, and it carries it *from* the
+    // icon: the eye should trace the tint back to the thing it identifies.
+    let theme = Theme::dark();
+    let (washed, plain, icon) = wash_pair(&theme, 300, Color::rgb(0x0a, 0x93, 0xe6), true);
+    let origin = hue_origin(icon);
+
+    let at_icon = wash_strength(&washed, &plain, origin, WASH_ROW);
+    assert!(at_icon > 0, "the icon's own column is washed");
+    let mut previous = at_icon;
+    for step in 1..6 {
+        let out = wash_strength(&washed, &plain, origin + step * 20, WASH_ROW);
+        assert!(
+            out <= previous,
+            "the wash grew again {} px out from the icon ({out} after {previous})",
+            step * 20
+        );
+        previous = out;
+    }
+    assert!(
+        wash_strength(&washed, &plain, origin - 40, WASH_ROW) > 0,
+        "and it runs to the left of the icon as well as the right"
+    );
+}
+
+#[test]
+fn a_short_band_is_washed_end_to_end_behind_its_commands() {
+    // On a narrow window the commands sit where the hue is still strong, so the
+    // wash has to run under them rather than stopping at the identity span.
+    let theme = Theme::dark();
+    let width = 140;
+    let (washed, plain, _) = wash_pair(&theme, width, Color::rgb(0xe4, 0x1d, 0x21), true);
+    for x in [1, 8, width - 10, width - 2] {
+        assert!(
+            wash_strength(&washed, &plain, x, WASH_ROW) > 0,
+            "column {x} of a short band is plain"
+        );
+    }
+}
+
+#[test]
+fn the_wash_stops_at_its_reach_rather_than_stretching() {
+    // A reach, not a width: a wide bar keeps its far corners plain instead of
+    // spreading one ramp ever thinner the larger the window gets.
+    let theme = Theme::dark();
+    let reach = Scale::ONE.scale_length(theme.metrics().title_hue_reach);
+    let width = reach * 2 + 200;
+    let (washed, plain, icon) = wash_pair(&theme, width, Color::rgb(0x34, 0xc7, 0x59), true);
+    let origin = hue_origin(icon);
+    assert_eq!(
+        wash_strength(&washed, &plain, origin + reach + 40, WASH_ROW),
+        0,
+        "past the reach the band is its plain self"
+    );
+    assert_eq!(
+        wash_strength(&washed, &plain, width - 1, WASH_ROW),
+        0,
+        "and so is the far end of a wide bar"
+    );
+}
+
+#[test]
+fn an_unfocused_band_keeps_some_of_its_colour() {
+    // The icon goes grey when focus leaves, but the hue does not follow it all
+    // the way: it is the only thing left saying which application owns an
+    // unfocused window, and a desktop of identical grey bars reads worse.
+    let theme = Theme::dark();
+    let hue = Color::rgb(0x0a, 0x93, 0xe6);
+    let (lit, lit_plain, icon) = wash_pair(&theme, 300, hue, true);
+    let (dim, dim_plain, _) = wash_pair(&theme, 300, hue, false);
+    let origin = hue_origin(icon);
+
+    let (lit_red, _, lit_blue) = wash_channels(&lit, &lit_plain, origin, WASH_ROW);
+    let (dim_red, _, dim_blue) = wash_channels(&dim, &dim_plain, origin, WASH_ROW);
+    assert!(dim_blue > 0, "an unfocused band is still washed at all");
+    assert!(
+        dim_blue > dim_red,
+        "and the wash still leans blue rather than grey ({dim_blue} vs {dim_red})"
+    );
+    assert!(
+        lit_blue - lit_red > dim_blue - dim_red,
+        "while focus keeps more of the colour ({} vs {})",
+        lit_blue - lit_red,
+        dim_blue - dim_red
+    );
+}
+
+#[test]
+fn a_band_with_no_hue_to_wash_with_stays_plain() {
+    // Greyscale artwork has no colour to lend, so the band is left alone rather
+    // than washed with a grey nobody asked for.
+    let theme = Theme::dark();
+    let (plain, icon) = washed_bar(&theme, 300, None, true);
+    let ground = Color::from(theme.palette().surface).premultiply();
+    assert_eq!(
+        plain.get(hue_origin(icon), WASH_ROW),
+        Some(ground),
+        "no artwork hue means no wash"
+    );
+}
+
 #[test]
 fn nothing_the_frame_draws_squares_off_its_rounded_corner() {
     // The title bar used to fill its whole band — in the very colour the
@@ -781,7 +1012,7 @@ fn command_surface(
     let mut control = WindowControl::new(kind);
     prepare(&mut control, bounds);
     let mut surface = Surface::new(24, 24).expect("surface");
-    control.render(&mut surface, bounds, Scale::ONE, theme);
+    control.render(&mut surface, bounds, Scale::ONE, theme, BandCorner::Square);
     surface
 }
 
@@ -819,6 +1050,58 @@ fn a_hovered_command_lights_up_in_its_own_colour() {
                     );
                 }
             }
+        }
+    }
+}
+
+#[test]
+fn a_hovered_command_lights_its_cell_corner_to_corner() {
+    // The whole point of dropping the margins: the wash reaches the band's
+    // edges. Sampling the four corners of an inner cell is the strongest
+    // statement of that — an inset plate leaves every one of them bare.
+    let theme = Theme::dark();
+    let bar = TitleBar::new(furniture());
+    let bounds = Rect::new(0, 0, 240, 28);
+    let layout = bar.layout(bounds, Scale::ONE, &theme);
+    // Close is an inner cell, so every corner of it is square and lit.
+    let cell = layout.controls[1].1;
+    let mut control = WindowControl::new(WindowControlKind::Close);
+    control.on_pointer(&moved(cell.left() + 1, cell.top() + 1), cell, &mut sink());
+
+    let mut surface = Surface::new(bounds.width, bounds.height).expect("surface");
+    control.render(&mut surface, cell, Scale::ONE, &theme, BandCorner::Square);
+    let wash = command_wash(&theme, WindowControlKind::Close);
+    for (x, y) in [
+        (cell.left(), cell.top()),
+        (cell.right() - 1, cell.top()),
+        (cell.left(), cell.bottom() - 1),
+        (cell.right() - 1, cell.bottom() - 1),
+    ] {
+        let at = surface.get(u32::try_from(x).unwrap(), u32::try_from(y).unwrap());
+        assert_eq!(at, Some(wash), "({x}, {y}) is a corner the hover left bare");
+    }
+}
+
+#[test]
+fn the_hit_map_answers_for_every_pixel_of_a_cell() {
+    // A cell that lights corner to corner has to be pressable corner to
+    // corner, or the highlight promises a target the bar will not take.
+    let theme = Theme::dark();
+    let bar = TitleBar::new(furniture());
+    let bounds = Rect::new(0, 0, 240, 28);
+    let layout = bar.layout(bounds, Scale::ONE, &theme);
+    for (kind, cell) in layout.controls {
+        for (x, y) in [
+            (cell.left(), cell.top()),
+            (cell.right() - 1, cell.top()),
+            (cell.left(), cell.bottom() - 1),
+            (cell.right() - 1, cell.bottom() - 1),
+        ] {
+            assert_eq!(
+                bar.hit(bounds, Scale::ONE, &theme, Point::new(x, y)),
+                TitleHit::Control(kind),
+                "({x}, {y}) draws {kind:?} but does not hit it"
+            );
         }
     }
 }
@@ -883,7 +1166,7 @@ fn a_command_states_itself_on_its_plate_and_never_on_an_edge() {
         let bounds = Rect::new(0, 0, 24, 24);
         let edges = |control: &WindowControl, state: &str| {
             let mut surface = Surface::new(24, 24).expect("surface");
-            control.render(&mut surface, bounds, Scale::ONE, &theme);
+            control.render(&mut surface, bounds, Scale::ONE, &theme, BandCorner::Square);
             assert!(
                 !has_pixel(&surface, premul(palette.rim_active)),
                 "a {state} command draws the reactive rim"
@@ -904,7 +1187,7 @@ fn a_command_states_itself_on_its_plate_and_never_on_an_edge() {
         let mut focused = WindowControl::new(WindowControlKind::Close);
         focused.set_focused(true);
         let mut surface = Surface::new(24, 24).expect("surface");
-        focused.render(&mut surface, bounds, Scale::ONE, &theme);
+        focused.render(&mut surface, bounds, Scale::ONE, &theme, BandCorner::Square);
         assert!(
             has_pixel(&surface, premul(palette.rim_active)),
             "the keyboard ring is the one accent mark a command wears"

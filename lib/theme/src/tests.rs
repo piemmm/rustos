@@ -865,6 +865,7 @@ fn sample_theme(id: ThemeId) -> Theme {
             window_minimize: Rgba::new(255, 200, 32, 128),
             window_maximize: Rgba::new(64, 200, 96, 128),
             window_put_to_back: Rgba::new(32, 150, 230, 128),
+            title_hue_alpha: 48,
         },
         Metrics {
             window_corner_radius: 4,
@@ -893,6 +894,7 @@ fn sample_theme(id: ThemeId) -> Theme {
             window_control_extent: 18,
             resize_grabber_extent: 14,
             hit_slop: 3,
+            title_hue_reach: 400,
         },
         Fonts::ladder(key("test-sans"), key("test-mono"), 15),
         CursorSet {

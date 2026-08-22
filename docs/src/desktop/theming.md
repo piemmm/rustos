@@ -29,9 +29,9 @@ bundles, under a stable `ThemeId`:
   signal roles the boards' legend fixes (the `*_pressure` set,
   `network_activity`, `recovery`, `success`, `warning`, `denied`), the
   scroll and window-frame roles
-  (`scroll_track`, `scroll_thumb`, `frame`), and the window-command highlight
+  (`scroll_track`, `scroll_thumb`, `frame`), the window-command highlight
   roles (`window_close`, `window_minimize`, `window_maximize`,
-  `window_put_to_back`). The
+  `window_put_to_back`), and `title_hue_alpha`. The
   roles are named fields, not a free-form map, so a theme can never omit a
   role and a consumer can never request one that does not exist.
   `Palette::signal(SignalRole)` is the one place a
@@ -103,6 +103,14 @@ bundles, under a stable `ThemeId`:
     the authored translucency against the window body first
     (`Rgba::over`) — laying the raw value down would cut a hole through the
     window's furniture strip instead of tinting it.
+  - `title_hue_alpha` (`46`, a little under a fifth) is an opacity, not a
+    colour, and the colour it governs is not the theme's at all: a title bar
+    washes its band with the **dominant hue of its window's identity icon**, so
+    a glance at a bar says which application owns the window before its title is
+    read. The theme sets only how far through that hue reads, and
+    `Metrics::title_hue_reach` (`500` logical pixels) how far it travels from
+    the icon before it is gone. `0` turns the wash off for a theme that wants
+    plain chrome. See [the window manager](./wm.md) for how the wash is drawn.
 - `Metrics` — every logical length the desktop is laid out from, so no
   renderer carries a private constant: the corner radii and
   `border_thickness`; the scrollbar's `scrollbar_breadth` and
@@ -113,7 +121,7 @@ bundles, under a stable `ThemeId`:
   `chart_height`, `selector_extent`, `toggle_track_length`); the desktop's
   floating chrome (`taskbar_margin`, `chrome_backdrop_blur`); and the window
   furniture
-  (`title_bar_height`, `frame_inset`, `window_control_extent`,
+  (`title_bar_height`, `frame_inset`, `window_control_extent`, `title_hue_reach`,
   `resize_grabber_extent`, `hit_slop`).
   - `taskbar_margin` is how far the taskbar stands off the screen edges it
     faces, `5` logical pixels in both themes. The bar floats: the margin

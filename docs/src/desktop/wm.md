@@ -792,6 +792,38 @@ press deepens it, keyboard focus still states itself on the ring inside the
 plate, and a denied or disabled command reads as denied or disabled rather than
 as its colour. See [theming](./theming.md) for the four roles.
 
+- **A command cell carries no margin.** The cell *is* the button: it fills the
+  band's height, it touches the cell beside it, and the outermost one in each
+  cluster is hard against the band's end. So a hover lights every pixel between
+  one command and the next and a press lands anywhere in the cell — where the
+  older layout centred an 18-pixel square in a 24-pixel band with gaps around
+  it, leaving strips where the highlight dropped out and a click did nothing.
+  The two spacings that remain are not button margins: one holds the identity
+  group off the commands, the other its title off its icon. Where a cell meets
+  the band's end the window's rim curves through it, so that one corner curves
+  with it (`BandCorner`) while the other three stay square — a cell rounded on
+  every corner would read as a floating tab rather than part of the bar. The
+  plate is drawn larger than its cell in the directions whose corners must stay
+  square and clipped back to the cell, so one rounded-rectangle fill yields
+  exactly one rounded corner and the window's silhouette is never squared off.
+
+- **The band carries its application's hue.** A decorated window whose identity
+  icon has a discernible colour washes its title band with it: strongest at the
+  icon and fading out in both directions over `Metrics::title_hue_reach` (500
+  logical pixels), across the full band so it runs *behind* the commands on a
+  short bar, at `Palette::title_hue_alpha` (a little under a fifth) so it reads
+  as a tint on the chrome rather than a second, blurrier copy of the icon. A
+  reach rather than a width: a wide bar keeps its far reaches plain instead of
+  stretching one ramp ever thinner, and a narrow one is tinted end to end. An
+  unfocused window's icon greys out but its hue only *partly* desaturates — it
+  is the last thing still saying which application owns that window, and a
+  desktop of identically grey bars reads worse, not calmer. Greyscale or absent
+  artwork lends no hue and the band stays plain. The dominant colour is resolved
+  once, by `Surface::dominant_color` where the artwork is installed, never
+  re-read per repaint; the wash itself is `Surface::wash_region` under a mask
+  that multiplies the fade by the rim's own arc, so a band drawn corner to
+  corner cannot square off the window either.
+
 - **Reserved band (geometry).** `Compositor::set_window_frame` attaches a
   `WindowFrame` and reserves a furniture band *around* the client from the
   frame's `FrameInsets` at the active `Scale` and `Theme`: the window's

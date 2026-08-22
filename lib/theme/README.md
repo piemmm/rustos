@@ -9,9 +9,15 @@ This crate is pure theme *data*. A `Theme` is a table of:
 
 - `Palette` — semantic `Rgba` colour roles (`desktop`, `surface`,
   `surface_raised`, `on_surface`, `on_surface_muted`, `accent`,
-  `on_accent`, `selection_fill`, `border`), plus the two floating-chrome
-  opacities. Roles are fixed fields, so a theme can never omit one and a
+  `on_accent`, `selection_fill`, `border`), the four window-command highlight
+  hues (`window_close`, `window_minimize`, `window_maximize`,
+  `window_put_to_back`), plus the two floating-chrome opacities and
+  `title_hue_alpha`. Roles are fixed fields, so a theme can never omit one and a
   consumer can never ask for one that does not exist.
+  `title_hue_alpha` (`46`) governs a colour the palette does not name: a title
+  bar washes its band with the dominant hue of its *window's identity icon*, so
+  the theme sets only how far through it reads, and `title_hue_reach` (`500`
+  logical pixels) how far it travels from the icon before it is gone.
   `chrome_alpha` (`179`) is how opaque a floating desktop-chrome surface is —
   the taskbar and the popups it opens, laid over a backdrop the compositor
   blurs by `chrome_backdrop_blur`. Such a surface keeps whichever colour role

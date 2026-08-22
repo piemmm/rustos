@@ -146,6 +146,16 @@ pub struct Palette {
     pub window_maximize: Rgba,
     /// The wash the put-to-back command highlights with, blue.
     pub window_put_to_back: Rgba,
+
+    /// How opaque the hue a title bar takes from its window's identity icon is
+    /// where it is strongest, at the icon itself.
+    ///
+    /// An opacity rather than a colour, because the colour is the icon's: the
+    /// bar carries its application's own hue, so the theme sets only how far
+    /// through it reads. Low, and deliberately so — the wash has to stay a tint
+    /// on the chrome rather than a second, blurrier copy of the icon beside the
+    /// real one. `0` turns the wash off for a theme that wants plain chrome.
+    pub title_hue_alpha: u8,
 }
 
 impl Palette {

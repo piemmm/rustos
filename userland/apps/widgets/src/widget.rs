@@ -14,9 +14,10 @@
 use alloc::vec::Vec;
 
 use tairix_controls::{
-    Button, Card, Checkbox, ComboBox, Dialog, HelpTip, IconButton, ListRow, Menu, Panel, Progress,
-    Radio, ScrollAction, ScrollBar, SearchField, SelectionState, SelectorAction, Slider,
-    SliderAction, SplitButton, TableRow, TextField, Toggle, Toolbar, Tooltip, WindowControl,
+    BandCorner, Button, Card, Checkbox, ComboBox, Dialog, HelpTip, IconButton, ListRow, Menu,
+    Panel, Progress, Radio, ScrollAction, ScrollBar, SearchField, SelectionState, SelectorAction,
+    Slider, SliderAction, SplitButton, TableRow, TextField, Toggle, Toolbar, Tooltip,
+    WindowControl,
 };
 use tairix_geometry::{Rect, Region, Scale};
 use tairix_input::{InputEvent, Key, Modifiers};
@@ -181,7 +182,11 @@ impl DemoWidget {
             DemoWidget::HelpTip(w) => w.render(surface, rect, scale, theme),
             DemoWidget::Toolbar(w) => w.render(surface, rect, scale, theme),
             DemoWidget::ScrollBar(w) => w.render(surface, rect, scale, theme),
-            DemoWidget::WindowControl(w) => w.render(surface, rect, scale, theme),
+            // Shown in the gallery rather than seated in a real title bar, so
+            // it has no band end to curve against.
+            DemoWidget::WindowControl(w) => {
+                w.render(surface, rect, scale, theme, BandCorner::Square);
+            }
         }
     }
 

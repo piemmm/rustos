@@ -156,4 +156,13 @@ pub struct Metrics {
     /// reaches into the client's own outer pixels, trading a few unclickable
     /// app pixels for a border that costs no visible space.
     pub hit_slop: u32,
+    /// How far the hue a title bar takes from its window's identity icon
+    /// travels from that icon before it has faded out, in logical pixels.
+    ///
+    /// A reach, not a width: the wash runs both ways from the icon and is cut
+    /// by the band's ends, so a short bar is tinted from end to end and a wide
+    /// one keeps its far reaches plain rather than stretching the same ramp
+    /// thinner the wider the window gets. Logical pixels like every other
+    /// metric, so the fade covers the same apparent distance at any density.
+    pub title_hue_reach: u32,
 }

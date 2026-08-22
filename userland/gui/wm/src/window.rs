@@ -838,6 +838,13 @@ impl Window {
     /// The identity is the embedder's attestation of who owns the window,
     /// never anything the application claimed. Returns `false` for an
     /// undecorated window (there is no title bar to identify).
+    ///
+    /// The artwork's dominant colour is resolved here, once, and handed to the
+    /// title bar as the hue it washes its band with. This is the only place an
+    /// icon's pixels change, so it is the only place that question has a new
+    /// answer — re-reading them on a repaint (a hover over a command
+    /// re-renders the chrome) would be work whose result cannot have moved.
+    /// Greyscale artwork has no hue to lend and leaves the band plain.
     pub(crate) fn set_frame_identity(
         &mut self,
         identity: IconKind,
@@ -846,7 +853,9 @@ impl Window {
         let Some(frame) = self.frame.as_mut() else {
             return false;
         };
-        frame.title_bar_mut().set_identity(Some(identity));
+        let bar = frame.title_bar_mut();
+        bar.set_identity(Some(identity));
+        bar.set_identity_hue(artwork.as_ref().and_then(Surface::dominant_color));
         self.identity_artwork = artwork;
         true
     }

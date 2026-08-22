@@ -190,6 +190,23 @@ This crate owns:
   whole rectangle would have had rather than a re-scaled one. This is the
   crate's one *wash*, and washes round differently from every other paint — see
   below.
+- `Surface::wash_region` — the masked sibling of the ramp above, for a wash
+  whose strength varies in *two* dimensions rather than only down the rows: the
+  caller supplies a `Fn(u32, u32) -> u8` coverage over the rectangle's own
+  coordinates (the same shape `frost_region` takes) and the colour's alpha is
+  scaled by it per pixel. One primitive therefore serves a ramp, a rounded
+  silhouette, or the two multiplied together — a title bar's hue fading along
+  the band *and* confined to the window's corner arc — and no consumer grows
+  coverage arithmetic of its own. Fully uncovered pixels are left bit-identical,
+  so a mask that answers `0` over most of its rectangle costs only what it
+  paints.
+- `Surface::dominant_color` — the one hue most of a surface's visible, coloured
+  pixels carry, or `None` when it carries none. The mode of a coarse hue
+  histogram, each pixel voting for its sextant twelfth weighted by its own alpha
+  and chroma, rather than a mean — two complementary halves average to grey and
+  an icon's colour is not grey. Chroma is also the test for having a hue at all,
+  so greyscale and transparent input answer `None`. What a title bar takes its
+  wash from; integer arithmetic over a fixed table, so it allocates nothing.
 - `Surface::mask_to_round_rect` — confine content already painted on a surface
   to a rounded shape: everything outside is cleared and corner pixels are
   scaled by the shared coverage. This is what a *fill* cannot do — a rounded

@@ -962,23 +962,79 @@ pub(crate) struct PlateStyle {
 /// pixel it rounds the blend once instead of twice, which lands no further
 /// from the exact value (`lib/raster`).
 pub(crate) fn paint_plate(surface: &mut Surface, rect: (u32, u32, u32, u32), style: &PlateStyle) {
-    let (x, y, w, h) = rect;
+    paint_flush_plate(surface, rect, PlateBleed::NONE, style);
+}
+
+/// How far a flush-seated plate runs past the cell it is drawn in, per edge.
+///
+/// A plate is one rounded rectangle, which rounds all four of its corners. A
+/// command seated hard against the end of a title bar needs exactly one of them
+/// — the corner the window's own rim curves through — and the other three
+/// square, or the cell would read as a floating tab rather than part of the
+/// bar. Drawing the plate *larger* than its cell in the directions whose
+/// corners must stay square puts those arcs outside the cell, and
+/// [`paint_flush_plate`] clips to the cell, so only the wanted one lands.
+#[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
+pub(crate) struct PlateBleed {
+    /// Past the cell's leading edge.
+    pub left: u32,
+    /// Past its trailing edge.
+    pub right: u32,
+    /// Past its bottom edge.
+    pub bottom: u32,
+}
+
+impl PlateBleed {
+    /// An ordinary plate, drawn exactly in its own rectangle.
+    pub const NONE: Self = Self {
+        left: 0,
+        right: 0,
+        bottom: 0,
+    };
+}
+
+/// [`paint_plate`], with the plate drawn `bleed` past `cell` and every write
+/// confined to `cell` (see [`PlateBleed`]).
+///
+/// The focus ring insets from `cell`, never from the bled rectangle: a ring
+/// measured off a rectangle that runs past the band would sit off-centre and
+/// lose the edges the clip withholds. Confining the whole paint to the cell is
+/// also what makes the invariant structural — a plate cannot mark the cell
+/// beside it whatever bleed it was given.
+pub(crate) fn paint_flush_plate(
+    surface: &mut Surface,
+    cell: (u32, u32, u32, u32),
+    bleed: PlateBleed,
+    style: &PlateStyle,
+) {
+    let (x, y, w, h) = cell;
     if w == 0 || h == 0 {
         return;
     }
-    surface.set_round_rect(x, y, w, h, style.radius, style.rim);
-    let Some((ix, iy, iw, ih)) = inset(x, y, w, h, style.border) else {
-        return;
-    };
-    let inner_radius = style.radius.saturating_sub(style.border);
-    // A rimless plate — one seated in a bar, whose rim is its own fill — is a
-    // single fill: the perimeter pass has already painted every pixel the
-    // inner pass would, so repeating it is pure waste on a repaint path.
-    if style.plate != style.rim {
-        surface.set_round_rect(ix, iy, iw, ih, inner_radius, style.plate);
-    }
+    let (bx, by, bw, bh) = (
+        x.saturating_sub(bleed.left),
+        y,
+        w.saturating_add(bleed.left).saturating_add(bleed.right),
+        h.saturating_add(bleed.bottom),
+    );
+    surface.with_clip(x, y, w, h, |surface| {
+        surface.set_round_rect(bx, by, bw, bh, style.radius, style.rim);
+        let inner_radius = style.radius.saturating_sub(style.border);
+        // A rimless plate — one seated in a bar, whose rim is its own fill — is
+        // a single fill: the perimeter pass has already painted every pixel the
+        // inner pass would, so repeating it is pure waste on a repaint path.
+        if style.plate != style.rim {
+            if let Some((ix, iy, iw, ih)) = inset(bx, by, bw, bh, style.border) {
+                surface.set_round_rect(ix, iy, iw, ih, inner_radius, style.plate);
+            }
+        }
 
-    if style.focused {
+        if !style.focused {
+            return;
+        }
+        let Some((ix, iy, iw, ih)) = inset(x, y, w, h, style.border) else {
+            return;
+        };
         let gap = style.border;
         if let Some((fx, fy, fw, fh)) = inset(ix, iy, iw, ih, gap) {
             surface.set_round_rect(fx, fy, fw, fh, inner_radius.saturating_sub(gap), style.ring);
@@ -993,7 +1049,7 @@ pub(crate) fn paint_plate(surface: &mut Surface, rect: (u32, u32, u32, u32), sty
                 );
             }
         }
-    }
+    });
 }
 
 /// A directional disclosure/anchor/step chevron.

@@ -210,6 +210,15 @@ composited, the renderer resolves the authored translucency against the window
 body first (`Rgba::over`); laying the raw value down would cut a hole through
 the window's furniture strip instead of tinting it.
 
+A window command is also seated **flush**: its cell fills the band's height and
+touches its neighbour, so the wash covers every pixel a press can land on. The
+outermost cell in each cluster sits where the window's rim curves, and rounds
+that one corner to match it (`BandCorner`). A plate is a single rounded
+rectangle, which rounds all four corners, so `paint_flush_plate` draws it
+*larger* than the cell in the directions whose corners must stay square and
+clips back to the cell — one fill, exactly one rounded corner, and the focus
+ring still measured from the cell so it cannot end up shifted off an edge.
+
 ## Surface ground: opaque or floating chrome
 
 Seating says what a control sitting *on* a surface wears. The **ground** is its

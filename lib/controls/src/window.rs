@@ -29,14 +29,14 @@ use tairix_font::ELLIPSIS;
 use tairix_geometry::{Point, Rect, Region, Scale};
 use tairix_icon::IconKind;
 use tairix_input::{InputEvent, Key, NamedKey, PointerButton};
-use tairix_raster::{Color, Surface, SUBPIXEL};
+use tairix_raster::{div255, round_rect_coverage, Color, Surface, SUBPIXEL};
 use tairix_theme::{Palette, Rgba, TextRole, Theme};
 
 use crate::damage;
 use crate::paint::{
     draw_outline, heavy_contrast, icon_slot_side, inset, key_activation, paint_bead,
-    paint_icon_slot, paint_plate, plate_border, pointer_activation, resolve_bead,
-    resolve_tinted_frame, role_font, surface_rect, to_i32, PlateStyle,
+    paint_flush_plate, paint_icon_slot, plate_border, pointer_activation, resolve_bead,
+    resolve_tinted_frame, role_font, surface_rect, to_i32, PlateBleed, PlateStyle,
 };
 use crate::state::{
     ControlDisposition, ControlState, PlateSeating, PointerState, RenderInvariant, SizeAction,
@@ -269,6 +269,52 @@ pub enum WindowControlAction {
     AlternateInvoked(WindowControlKind),
 }
 
+/// Which corner of a command cell follows the window's rim, and by how far.
+///
+/// A cell is seated flush: it fills the band's height and touches its
+/// neighbour, and the outermost one in each cluster is hard against the band's
+/// end — where the window's rim curves through. That corner has to curve with
+/// it or the cell would square off the shape the rim traces; the other three
+/// stay square so the row still reads as part of the bar.
+#[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
+pub enum BandCorner {
+    /// Seated between other commands: every corner square.
+    #[default]
+    Square,
+    /// Hard against the band's leading end, the top-leading corner curving by
+    /// this radius.
+    Leading(u32),
+    /// Hard against its trailing end, the top-trailing corner curving by this
+    /// radius.
+    Trailing(u32),
+}
+
+impl BandCorner {
+    /// The radius this corner draws with, and how far the plate bleeds past its
+    /// cell to leave the other three square.
+    pub(crate) fn plate(self) -> (u32, PlateBleed) {
+        match self {
+            Self::Square => (0, PlateBleed::NONE),
+            Self::Leading(radius) => (
+                radius,
+                PlateBleed {
+                    right: radius,
+                    bottom: radius,
+                    ..PlateBleed::NONE
+                },
+            ),
+            Self::Trailing(radius) => (
+                radius,
+                PlateBleed {
+                    left: radius,
+                    bottom: radius,
+                    ..PlateBleed::NONE
+                },
+            ),
+        }
+    }
+}
+
 /// The identity hue `kind` highlights with.
 ///
 /// The four commands are a closed vocabulary and the palette names one wash
@@ -379,8 +425,19 @@ impl WindowControl {
         }
     }
 
-    /// Paint the control into `surface` at `bounds` for the active theme.
-    pub fn render(&self, surface: &mut Surface, bounds: Rect, scale: Scale, theme: &Theme) {
+    /// Paint the control into `surface` at `bounds` for the active theme,
+    /// rounding `corner` where the cell meets the end of its band.
+    ///
+    /// `bounds` is the whole cell, margins and all — a command carries none, so
+    /// a hover lights every pixel of it and a press lands anywhere in it.
+    pub fn render(
+        &self,
+        surface: &mut Surface,
+        bounds: Rect,
+        scale: Scale,
+        theme: &Theme,
+        corner: BandCorner,
+    ) {
         let Some((x, y, w, h)) = surface_rect(bounds) else {
             return;
         };
@@ -405,16 +462,21 @@ impl WindowControl {
         let tint = command_tint(palette, self.kind).over(palette.surface);
         let frame = resolve_tinted_frame(theme, tint, self.state);
 
-        let radius = scale.scale_length(theme.metrics().control_corner_radius);
+        // A flush cell is square except where the window's rim curves through
+        // it, so the radius is the band's, not the control family's: a cell
+        // rounded on its own terms inside a rounder window shows a sliver of
+        // the bar at the corner.
+        let (radius, bleed) = corner.plate();
         let border = plate_border(theme, scale);
         // A command is seated in the title bar, so it states hover, press, and
         // focus on its plate alone and wears nothing at all while it rests: an
         // edge of its own would read as a line drawn round the window's corner
         // rather than as feedback on a button.
         if let Some((plate, rim)) = frame.face(PlateSeating::Bar) {
-            paint_plate(
+            paint_flush_plate(
                 surface,
                 (x, y, w, h),
+                bleed,
                 &PlateStyle {
                     radius,
                     border,
@@ -573,16 +635,22 @@ const CLUSTER_COUNT: u32 = 2;
 /// The scaled lengths a title bar's command clusters are built from, so
 /// laying a bar out and asking for the narrowest band it fits in read the
 /// same arithmetic.
+///
+/// A command *cell* carries no margin of its own: it is as tall as the band,
+/// it touches the cell beside it, and the outermost one is hard against the
+/// band's end. A hover therefore lights every pixel between one command and
+/// the next, and a press lands wherever the pointer is over the cell rather
+/// than only over the glyph's own square. The two spacings that remain are not
+/// button margins — they hold the identity group off the commands and its
+/// title off its icon — so they keep their own names here.
 struct ClusterMetrics {
-    /// One control's square extent.
+    /// One command cell's width. Its height is the band's, not this.
     extent: u32,
-    /// The gap between adjacent controls, and between a cluster and the
-    /// identity span beside it.
-    gap: u32,
-    /// The inset from the band edge to the outermost control.
-    inset: u32,
-    /// One cluster's total width: [`CLUSTER_COUNT`] controls and the gaps
-    /// between them.
+    /// The clear space between a cluster and the identity span beside it.
+    span_gap: u32,
+    /// The gap inside the identity group, between the icon slot and the title.
+    identity_gap: u32,
+    /// One cluster's total width: [`CLUSTER_COUNT`] cells, butted together.
     cluster_w: u32,
 }
 
@@ -590,15 +658,23 @@ impl ClusterMetrics {
     fn of(scale: Scale, theme: &Theme) -> Self {
         let metrics = theme.metrics();
         let extent = scale.scale_length(metrics.window_control_extent).max(1);
-        let gap = scale.scale_length(metrics.control_gap);
         Self {
             extent,
-            gap,
-            inset: scale.scale_length(metrics.control_inset),
-            cluster_w: extent
-                .saturating_mul(CLUSTER_COUNT)
-                .saturating_add(gap.saturating_mul(CLUSTER_COUNT.saturating_sub(1))),
+            span_gap: scale.scale_length(metrics.control_gap),
+            identity_gap: scale.scale_length(metrics.control_inset),
+            cluster_w: extent.saturating_mul(CLUSTER_COUNT),
         }
+    }
+}
+
+/// The corner the command in layout `slot` rounds: the first cell is hard
+/// against the band's leading end and the last against its trailing one, both
+/// following the window's own `radius`; the two between them are square.
+fn band_corner(slot: usize, radius: u32) -> BandCorner {
+    match slot {
+        0 => BandCorner::Leading(radius),
+        s if s == CONTROL_ORDER.len() - 1 => BandCorner::Trailing(radius),
+        _ => BandCorner::Square,
     }
 }
 
@@ -657,6 +733,17 @@ pub(crate) const IDENTITY_SATURATION_ACTIVE: u8 = 230;
 /// its muted title, so a glance across the desktop finds the window in hand by
 /// looking for the one coloured icon.
 pub(crate) const IDENTITY_SATURATION_INACTIVE: u8 = 0;
+
+/// How much of its colour the title-bar *hue* keeps while its window is active:
+/// the icon's own, since the two are the same colour seen at two strengths.
+pub(crate) const HUE_SATURATION_ACTIVE: u8 = IDENTITY_SATURATION_ACTIVE;
+
+/// And while it is not: better than half. The hue does not follow the icon all
+/// the way to grey. It is already faint enough not to compete for attention,
+/// and it is the only thing on an unfocused window still saying which
+/// application owns it — a whole desktop of identically grey bars is harder to
+/// read at a glance, not calmer.
+pub(crate) const HUE_SATURATION_INACTIVE: u8 = 150;
 
 /// The laid-out rectangles of a title bar's parts, for painting and hit
 /// testing over one shared geometry (so they cannot diverge).
@@ -735,6 +822,9 @@ pub struct TitleBar {
     furniture: WindowFurnitureState,
     controls: [WindowControl; 4],
     identity: Option<IconKind>,
+    /// The hue the band washes with, taken from the identity artwork's dominant
+    /// colour by whoever installed it. `None` leaves the band plain.
+    identity_hue: Option<Color>,
     app_name: String,
     title: String,
     /// The last pointer position — hit-testing input, never drawn.
@@ -763,6 +853,7 @@ impl TitleBar {
             furniture,
             controls,
             identity: None,
+            identity_hue: None,
             app_name: String::new(),
             title: String::new(),
             pointer: RenderInvariant::new(Point::ORIGIN),
@@ -824,6 +915,26 @@ impl TitleBar {
         self.identity = identity;
     }
 
+    /// Set the hue the band washes with, taken from the identity artwork's
+    /// dominant colour ([`Surface::dominant_color`]), or `None` for a plain
+    /// band.
+    ///
+    /// The caller resolves it once when it installs the artwork rather than the
+    /// bar deriving it per repaint: a hover over a command re-renders the
+    /// chrome, and re-reading an icon's pixels to answer a question whose
+    /// answer cannot have changed is work for nothing. Artwork with no
+    /// discernible hue — a greyscale glyph — yields `None` there, so the band
+    /// stays plain rather than washing with a grey nobody asked for.
+    pub fn set_identity_hue(&mut self, hue: Option<Color>) {
+        self.identity_hue = hue;
+    }
+
+    /// The hue the band washes with, if any.
+    #[must_use]
+    pub fn identity_hue(&self) -> Option<Color> {
+        self.identity_hue
+    }
+
     /// The owning application's identity icon class, if it has one.
     #[must_use]
     pub fn identity(&self) -> Option<IconKind> {
@@ -881,10 +992,9 @@ impl TitleBar {
     #[must_use]
     pub fn min_band_width(scale: Scale, theme: &Theme) -> u32 {
         let m = ClusterMetrics::of(scale, theme);
-        m.inset
+        m.cluster_w
             .saturating_mul(2)
-            .saturating_add(m.cluster_w.saturating_mul(2))
-            .saturating_add(m.gap.saturating_mul(2))
+            .saturating_add(m.span_gap.saturating_mul(2))
             .saturating_add(m.extent)
     }
 
@@ -907,24 +1017,24 @@ impl TitleBar {
     pub fn layout(&self, bounds: Rect, scale: Scale, theme: &Theme) -> TitleBarLayout {
         let ClusterMetrics {
             extent: e,
-            gap: g,
-            inset: ins,
+            span_gap: g,
+            identity_gap,
             cluster_w,
         } = ClusterMetrics::of(scale, theme);
-        let cy = bounds.top() + (to_i32(bounds.height) - to_i32(e)).max(0) / 2;
 
-        let leading_left = bounds.left() + to_i32(ins);
+        let leading_left = bounds.left();
         // A band too narrow for both clusters abuts them instead of stacking
         // one over the other: a control drawn under another cannot be hit
         // where it is seen.
-        let trailing_left = (bounds.right() - to_i32(ins) - to_i32(cluster_w))
-            .max(leading_left + to_i32(cluster_w));
+        let trailing_left =
+            (bounds.right() - to_i32(cluster_w)).max(leading_left + to_i32(cluster_w));
 
+        let cell = Rect::new(0, 0, e, bounds.height);
         let mut controls = [
-            (CONTROL_ORDER[0], Rect::new(0, 0, e, e)),
-            (CONTROL_ORDER[1], Rect::new(0, 0, e, e)),
-            (CONTROL_ORDER[2], Rect::new(0, 0, e, e)),
-            (CONTROL_ORDER[3], Rect::new(0, 0, e, e)),
+            (CONTROL_ORDER[0], cell),
+            (CONTROL_ORDER[1], cell),
+            (CONTROL_ORDER[2], cell),
+            (CONTROL_ORDER[3], cell),
         ];
         for (i, slot) in controls.iter_mut().enumerate() {
             let i = u32::try_from(i).unwrap_or(0);
@@ -933,8 +1043,8 @@ impl TitleBar {
             } else {
                 (trailing_left, i - CLUSTER_COUNT)
             };
-            let x = cluster_left + to_i32(within.saturating_mul(e.saturating_add(g)));
-            slot.1 = Rect::new(x, cy, e, e);
+            let x = cluster_left + to_i32(within.saturating_mul(e));
+            slot.1 = Rect::new(x, bounds.top(), e, bounds.height);
         }
 
         let span_left = leading_left + to_i32(cluster_w) + to_i32(g);
@@ -944,7 +1054,7 @@ impl TitleBar {
             to_u32(trailing_left - to_i32(g) - span_left),
             bounds.height,
         );
-        let (icon, title) = self.seat_identity(span, scale, theme, ins);
+        let (icon, title) = self.seat_identity(span, scale, theme, identity_gap);
 
         TitleBarLayout {
             controls,
@@ -1034,6 +1144,11 @@ impl TitleBar {
         } else {
             IDENTITY_SATURATION_INACTIVE
         };
+
+        // The band's own wash goes down first, so everything else — the icon,
+        // the title, a lit command — reads on top of it rather than through it.
+        self.wash_band(surface, bounds, scale, theme, &layout, active);
+
         if let Some(kind) = self.identity {
             if let Some((ix, iy, side, _)) = surface_rect(layout.icon) {
                 paint_icon_slot(
@@ -1063,9 +1178,98 @@ impl TitleBar {
             }
         }
 
-        for (kind, rect) in layout.controls {
-            self.control(kind).render(surface, rect, scale, theme);
+        let plate_radius = FrameRim::of(scale, theme).plate().1;
+        for (slot, (kind, rect)) in layout.controls.into_iter().enumerate() {
+            self.control(kind)
+                .render(surface, rect, scale, theme, band_corner(slot, plate_radius));
         }
+    }
+
+    /// Wash the band with the window's identity hue, fading out from the icon
+    /// in both directions.
+    ///
+    /// The colour is the application's, not the theme's: an icon lends the
+    /// chrome the hue that identifies it, so a glance at a bar says which
+    /// program owns the window before its title is read. The theme sets only
+    /// how strong it is where it starts
+    /// ([`title_hue_alpha`](tairix_theme::Palette::title_hue_alpha)) and how
+    /// far it travels before it is gone
+    /// ([`title_hue_reach`](tairix_theme::Metrics::title_hue_reach)).
+    ///
+    /// A *reach* rather than a width: the ramp runs out from the icon at the
+    /// same rate whatever the window's size, and the band's ends cut it. A wide
+    /// bar therefore keeps its far reaches plain instead of stretching one ramp
+    /// ever thinner, and a short bar is washed end to end — including behind
+    /// the commands, which is where a narrow window needs it most.
+    ///
+    /// The wash is confined to the shape the frame's rim curves through, so a
+    /// band drawn corner to corner cannot square off the window's silhouette.
+    /// The mask is the ramp multiplied by that arc, both handed to `lib/raster`
+    /// rather than derived here — the arc from the one shared
+    /// [`round_rect_coverage`], the band's radius from the one shared
+    /// [`FrameRim`].
+    fn wash_band(
+        &self,
+        surface: &mut Surface,
+        bounds: Rect,
+        scale: Scale,
+        theme: &Theme,
+        layout: &TitleBarLayout,
+        active: bool,
+    ) {
+        let palette = theme.palette();
+        let Some(hue) = self.identity_hue else {
+            return;
+        };
+        let alpha = palette.title_hue_alpha;
+        if alpha == 0 {
+            return;
+        }
+        let Some((x, y, w, h)) = surface_rect(bounds) else {
+            return;
+        };
+        let reach = scale.scale_length(theme.metrics().title_hue_reach);
+        if reach == 0 || w == 0 || h == 0 {
+            return;
+        }
+        // A bar with no icon slot still has an identity group; the hue starts
+        // where that group does, so the colour and the thing it came from sit
+        // together.
+        let source = if layout.icon.width > 0 {
+            i32::midpoint(layout.icon.left(), layout.icon.right())
+        } else {
+            layout.title.left()
+        };
+        let origin = u32::try_from(source.saturating_sub(bounds.left())).unwrap_or(0);
+
+        let saturation = if active {
+            HUE_SATURATION_ACTIVE
+        } else {
+            HUE_SATURATION_INACTIVE
+        };
+        // Desaturating is a pixel operation and a hue is a colour, so it is
+        // toned while opaque — where premultiplying is exactly the identity —
+        // and given its opacity afterwards.
+        let toned = Color::rgb(hue.r, hue.g, hue.b)
+            .premultiply()
+            .desaturate(saturation)
+            .unpremultiply();
+        let wash = Color::rgba(toned.r, toned.g, toned.b, alpha);
+
+        // The band's top corners are the frame plate's; its bottom edge is
+        // interior to the window and square. Rounding a rectangle `radius`
+        // taller than the band puts the bottom arcs below it, so only the top
+        // two land — concentric with the arc the rim already drew.
+        let radius = FrameRim::of(scale, theme).plate().1;
+        let shape_h = h.saturating_add(radius);
+        surface.wash_region(x, y, w, h, wash, |lx, ly| {
+            let distance = lx.abs_diff(origin);
+            if distance >= reach {
+                return 0;
+            }
+            let ramp = u8::try_from(255 - (255 * distance / reach)).unwrap_or(255);
+            div255(u32::from(ramp) * u32::from(round_rect_coverage(lx, ly, w, shape_h, radius)))
+        });
     }
 
     /// The identity+title string drawn in the identity group.
@@ -1359,6 +1563,22 @@ pub struct FrameRim {
 }
 
 impl FrameRim {
+    /// The rim a frame draws its shape with at `scale` under `theme`.
+    ///
+    /// An associated function rather than a method because nothing about it
+    /// depends on a particular frame: it is the house window shape. That is
+    /// what lets the [`TitleBar`] seat a command hard against the band's end
+    /// and round it by the very arc [`WindowFrame::render`] laid, instead of
+    /// re-deriving the radius from the metrics and drifting from it.
+    #[must_use]
+    pub fn of(scale: Scale, theme: &Theme) -> Self {
+        let (thickness, _, _) = WindowFrame::edges(scale, theme);
+        Self {
+            radius: scale.scale_length(theme.metrics().window_corner_radius),
+            thickness,
+        }
+    }
+
     /// The plate the frame fills inside the rim, as `(inset, radius)`: inset
     /// from the window's outer rectangle by the rim's thickness, with a
     /// concentric radius, so the rim keeps its weight around the whole arc.
@@ -1481,11 +1701,7 @@ impl WindowFrame {
     /// content can never square off the corners the rim curves around.
     #[must_use]
     pub fn rim(&self, scale: Scale, theme: &Theme) -> FrameRim {
-        let (thickness, _, _) = Self::edges(scale, theme);
-        FrameRim {
-            radius: scale.scale_length(theme.metrics().window_corner_radius),
-            thickness,
-        }
+        FrameRim::of(scale, theme)
     }
 
     /// The per-edge furniture-band thickness around the client, at the active

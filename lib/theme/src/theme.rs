@@ -242,6 +242,7 @@ impl Theme {
                 window_minimize: Rgba::rgb(0xff, 0xc1, 0x0a).with_alpha(COMMAND_ALPHA),
                 window_maximize: Rgba::rgb(0x34, 0xc7, 0x59).with_alpha(COMMAND_ALPHA),
                 window_put_to_back: Rgba::rgb(0x0a, 0x93, 0xe6).with_alpha(COMMAND_ALPHA),
+                title_hue_alpha: TITLE_HUE_ALPHA,
             },
             common_metrics(),
             common_fonts(),
@@ -300,6 +301,7 @@ impl Theme {
                 window_minimize: Rgba::rgb(0xc9, 0x8a, 0x00).with_alpha(COMMAND_ALPHA),
                 window_maximize: Rgba::rgb(0x1d, 0x8c, 0x3c).with_alpha(COMMAND_ALPHA),
                 window_put_to_back: Rgba::rgb(0x0b, 0x6f, 0xb0).with_alpha(COMMAND_ALPHA),
+                title_hue_alpha: TITLE_HUE_ALPHA,
             },
             common_metrics(),
             common_fonts(),
@@ -340,6 +342,16 @@ pub(crate) const SELECTION_ALPHA: u8 = 77;
 /// appearances share the weight and author the hues themselves, deeper on
 /// paper-white and brighter on near-black, so each carries on its own bar.
 pub(crate) const COMMAND_ALPHA: u8 = 128;
+
+/// The opacity both built-in themes give the hue a title bar takes from its
+/// window's identity icon: a little under a fifth.
+///
+/// The bar is not trying to show the icon twice. At this weight the colour is
+/// unmistakable as *that application's* while the chrome underneath still reads
+/// as chrome, and the icon a few pixels away stays the saturated thing the eye
+/// goes to. Both appearances share it because the wash is not a palette colour
+/// of theirs at all — it is whatever the application's artwork happens to be.
+pub(crate) const TITLE_HUE_ALPHA: u8 = 46;
 
 /// The opacity both built-in themes give their floating chrome: seven tenths.
 ///
@@ -391,6 +403,7 @@ fn common_metrics() -> Metrics {
         window_control_extent: 20,
         resize_grabber_extent: 16,
         hit_slop: 4,
+        title_hue_reach: 500,
     }
 }
 
