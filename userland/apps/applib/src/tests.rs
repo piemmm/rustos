@@ -194,6 +194,8 @@ fn manifest_bytes(name: &str, listing: Option<LibraryCategory>, icon: Option<&st
         syscall_table_hash: [0xAB; SYSCALL_TABLE_HASH_LEN],
         content_hash: [0xCD; 32],
         signer_pubkey: [0xEF; 32],
+        publisher_pubkey: [0xEF; 32],
+        publisher_cert: [0; 64],
         signature: [0x99; 64],
     }
     .to_le_bytes()

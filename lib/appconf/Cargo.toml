@@ -1,0 +1,20 @@
+[package]
+name = "tairix-appconf"
+description = "TAIRiX per-app configuration document engine: the one definition of the `key = value` settings format the app-data store serves — its key grammar, quoted/escaped values, typed accessors, fixed fail-closed bounds, and a rewrite that preserves comments, blank lines, key order, and lines it did not understand (`plans/APPDATA.md`, §3 `lib/`)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+
+[dev-dependencies]
+# The in-tree fuzz harness draws its inputs through the shared seed/budget
+# seam: one place picks the per-run seed, logs it, and bounds the smoke/soak
+# loop. Test scaffolding only; never in a TAIRiX build.
+tairix-fuzzseed = { path = "../../tests/fuzzseed", version = "=0.0.0" }

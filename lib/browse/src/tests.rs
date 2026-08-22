@@ -3683,6 +3683,8 @@ fn build_appinfo(name: &str, icon: Option<&str>, mimes: &[&str]) -> Vec<u8> {
         syscall_table_hash: [0; 32],
         content_hash: [0; 32],
         signer_pubkey: [0; 32],
+        publisher_pubkey: [0; 32],
+        publisher_cert: [0; 64],
         signature: [0; 64],
     };
     let mut bytes = header.to_le_bytes().to_vec();

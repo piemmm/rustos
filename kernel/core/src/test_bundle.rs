@@ -17,7 +17,7 @@ use tairix_abi::{
 };
 use tairix_appload::{AppError, AppLoader, AppLoaderConfig, Clock, LoadedApp};
 use tairix_caps::CapabilitySet;
-use tairix_itest_harness::app_image::{compose_signed_appinfo, AppManifestSource};
+use tairix_itest_harness::app_image::{compose_signed_appinfo, AppManifestSource, PublisherSource};
 use tairix_kernel_syscall::SYSCALL_TABLE_HASH;
 
 use crate::appspawn::{AnchorVerifier, FsBundleStore};
@@ -30,6 +30,11 @@ use std::collections::{BTreeMap, BTreeSet};
 /// The deterministic test signing seed; its derived public key is the trust
 /// anchor the tests pin.
 pub(crate) const SEED: [u8; 32] = [7u8; 32];
+
+/// The deterministic test publisher seed. Distinct from [`SEED`] so the
+/// fixture bundle is *delegated*, exercising the certificate the production
+/// composer emits rather than the degenerate self-published shape.
+pub(crate) const PUBLISHER_SEED: [u8; 32] = [9u8; 32];
 
 /// An in-memory [`FilesystemService`] over a fixed file map. Read-only:
 /// every mutating operation fails closed, mirroring the read paths the
@@ -422,8 +427,31 @@ pub(crate) fn tiny_run() -> Vec<u8> {
 ///
 /// The `AppInfo` is composed and signed by the **same** host composer the
 /// image build uses, so the kernel store/verifier and the composer can
-/// never drift.
+/// never drift. Like every bundle that build plants, it is *delegated*: the
+/// publisher certifies [`SEED`]'s key, so the load gate's certificate check
+/// is on the path these tests take.
 pub(crate) fn composed_bundle(caps: Vec<CapabilityId>) -> (MemFs, [u8; 32], Vec<u8>) {
+    composed_bundle_signed_by(&SEED, caps)
+}
+
+/// The same bundle composed with an arbitrary build signing `seed` under the
+/// one [`PUBLISHER_SEED`] publisher, so a test can model the same app
+/// re-signed for a later release.
+pub(crate) fn composed_bundle_signed_by(
+    seed: &[u8; 32],
+    caps: Vec<CapabilityId>,
+) -> (MemFs, [u8; 32], Vec<u8>) {
+    composed_bundle_published_by(seed, PublisherSource::Delegating(&PUBLISHER_SEED), caps)
+}
+
+/// The same bundle again, with the publisher story stated verbatim, so a test
+/// can compose a validly-signed manifest that makes a publisher claim the
+/// load gate has to refuse on the certificate alone.
+pub(crate) fn composed_bundle_published_by(
+    seed: &[u8; 32],
+    publisher: PublisherSource<'_>,
+    caps: Vec<CapabilityId>,
+) -> (MemFs, [u8; 32], Vec<u8>) {
     let run = tiny_run();
     let help = b"# ps\n";
     let manifest = AppManifestSource {
@@ -439,7 +467,8 @@ pub(crate) fn composed_bundle(caps: Vec<CapabilityId>) -> (MemFs, [u8; 32], Vec<
         author: None,
     };
     let composed = compose_signed_appinfo(
-        &SEED,
+        seed,
+        publisher,
         &manifest,
         SYSCALL_TABLE_HASH,
         &[

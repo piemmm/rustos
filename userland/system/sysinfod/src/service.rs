@@ -1588,7 +1588,7 @@ mod tests {
         let expected = *who.origin();
         let sink = RecordingSink::new();
         let req = request_bytes(SysinfoQueryId::PROCESS_IDENTITY, &[]);
-        let mut resp = [0u8; 128];
+        let mut resp = [0u8; ORIGIN_WIRE_LEN];
         let n = serve_once(&source, &who, &sink, &req, &mut resp).expect("served");
         assert_eq!(n, ORIGIN_WIRE_LEN);
         let decoded = Origin::from_bytes(&resp[..n]).expect("valid origin");

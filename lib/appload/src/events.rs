@@ -47,16 +47,22 @@ pub const LIBRARY_REFUSED: EventId = EventId(11_009);
 /// `rxe` load image, or its CFI tag does not match the kernel's syscall
 /// interface hash.
 pub const APP_RUN_IMAGE_INVALID: EventId = EventId(11_010);
+/// A bundle was refused because its manifest's publisher fields are
+/// malformed, or its publisher delegation certificate did not verify — the
+/// bundle cannot be attributed to a developer, so it gets no identity and no
+/// per-app store.
+pub const APP_PUBLISHER_INVALID: EventId = EventId(11_011);
 
 #[cfg(test)]
 mod tests {
     use super::{
         APPMGR_RANGE_END, APPMGR_RANGE_START, APP_CONTENT_MISMATCH, APP_INTERFACE_MISMATCH,
-        APP_LAYOUT_REJECTED, APP_LOADED, APP_MANIFEST_INVALID, APP_RUN_IMAGE_INVALID,
-        APP_SIGNATURE_INVALID, APP_STORE_ERROR, LIBRARY_REFUSED, LIBRARY_RESOLVED,
+        APP_LAYOUT_REJECTED, APP_LOADED, APP_MANIFEST_INVALID, APP_PUBLISHER_INVALID,
+        APP_RUN_IMAGE_INVALID, APP_SIGNATURE_INVALID, APP_STORE_ERROR, LIBRARY_REFUSED,
+        LIBRARY_RESOLVED,
     };
 
-    const ALL: [u32; 10] = [
+    const ALL: [u32; 11] = [
         APP_LOADED.0,
         APP_LAYOUT_REJECTED.0,
         APP_MANIFEST_INVALID.0,
@@ -67,6 +73,7 @@ mod tests {
         LIBRARY_RESOLVED.0,
         LIBRARY_REFUSED.0,
         APP_RUN_IMAGE_INVALID.0,
+        APP_PUBLISHER_INVALID.0,
     ];
 
     #[test]

@@ -19,6 +19,15 @@ tairix-abi = { path = "../abi", version = "=0.0.0" }
 # `CapabilitySet` and its intersection algebra — the one place the §5.2
 # grant rule lives, so the loader never re-implements it (§2.2).
 tairix-caps = { path = "../caps", version = "=0.0.0" }
+# The audited primitives the load gate calls directly, because they carry no
+# host policy: the Ed25519 verification of a manifest's publisher delegation
+# certificate (the certificate is inside the signed manifest, so what it must
+# say is fixed by the format) and the SHA-256 that derives the publisher
+# identity. Deriving that identity in one place is what stops two hosts
+# keying the same developer's per-app state differently. Trust-rooting the
+# manifest *signer* stays behind the `Verifier` seam, because that policy
+# genuinely differs between the kernel's embedded anchor and `appmgr`.
+tairix-crypto = { path = "../crypto", version = "=0.0.0" }
 # §19.4 structured audit log: every load, refusal, and library decision is
 # recorded through a `tairix_log::Sink`.
 tairix-log = { path = "../log", version = "=0.0.0" }

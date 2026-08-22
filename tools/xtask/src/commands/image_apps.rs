@@ -35,7 +35,7 @@ use tairix_fontface::FAMILY_MANIFEST;
 use tairix_image::{DecodeLimits, ImageFormat};
 use tairix_itest_harness::app_image::{
     compose_signed_appinfo, discover_app_manifests, discover_crate_manifest, DiscoveredApp,
-    APP_MANIFEST_SOURCE,
+    PublisherSource, APP_MANIFEST_SOURCE,
 };
 use tairix_itest_harness::elf2rxe::elf_to_rxe;
 use tairix_itest_harness::pie::PieArch;
@@ -646,6 +646,7 @@ fn build_bundle(
 
     let composed = compose_signed_appinfo(
         &build_support::SYSTEM_APP_SIGNING_SEED,
+        PublisherSource::Delegating(&build_support::SYSTEM_APP_PUBLISHER_SEED),
         &app.manifest,
         tairix_kernel_syscall::SYSCALL_TABLE_HASH,
         &digests,

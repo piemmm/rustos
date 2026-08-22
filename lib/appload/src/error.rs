@@ -23,6 +23,10 @@ pub enum AppError {
     InterfaceHashMismatch,
     /// The manifest's Ed25519 signature did not verify.
     Signature,
+    /// The manifest delegates its build signing key to a publisher, but the
+    /// publisher's delegation certificate did not verify — so the bundle
+    /// cannot be attributed to the developer it names.
+    PublisherCert,
     /// The bundle's contents do not match the content hash the signature
     /// covers.
     ContentHashMismatch,
@@ -41,6 +45,7 @@ impl core::fmt::Display for AppError {
             Self::Manifest(_) => f.write_str("invalid AppInfo manifest"),
             Self::InterfaceHashMismatch => f.write_str("syscall interface hash mismatch"),
             Self::Signature => f.write_str("manifest signature did not verify"),
+            Self::PublisherCert => f.write_str("publisher delegation certificate did not verify"),
             Self::ContentHashMismatch => f.write_str("bundle contents do not match signed hash"),
             Self::Library(e) => write!(f, "shared-library reference refused: {e}"),
             Self::RunImage(e) => write!(f, "entry-point binary refused: {e}"),

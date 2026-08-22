@@ -15,8 +15,11 @@
 //!   types, the bundle's program-library listing ([`LibraryCategory`] +
 //!   optional icon asset — how the desktop's launcher discovers which
 //!   folder a graphical application files under), a hash binding the
-//!   signature to the bundle's contents, and the Ed25519 signer key +
-//!   signature. The variable body that follows is a capability-id list
+//!   signature to the bundle's contents, the Ed25519 signer key +
+//!   signature, and the publisher key + delegation certificate that give
+//!   the bundle a developer identity ([`PublisherId`]) its per-build
+//!   signing key may rotate under. The variable body that follows is a
+//!   capability-id list
 //!   (decoded by [`crate::decode_capability_ids`]) followed by the
 //!   MIME-type table ([`mime_type_at`]).
 //! * [`resolve_library`] — the dynamic-loader policy: a shared-library
@@ -85,6 +88,147 @@ pub const APPINFO_WIRE_MAX: usize = AppInfoHeader::WIRE_LEN
 /// declare — a plain file name inside the bundle's own `Resources/`
 /// directory, so a short bound is ample and keeps the fixed header small.
 pub const LIBRARY_ICON_MAX: usize = 64;
+
+/// A bundle identifier as a validated, inline, fixed-width field.
+///
+/// The identifier is the *name of a directory* in every user's per-app store,
+/// so what may appear in one is a security question, not a formatting
+/// preference: [`validate_bundle_id`] is the one grammar, applied when a
+/// manifest is decoded and again wherever an identifier crosses a trust
+/// boundary.
+pub type BundleId = crate::bounded_text::BoundedText<1, BUNDLE_ID_MAX>;
+
+/// Validate a bundle identifier against the one grammar every consumer
+/// applies.
+///
+/// The grammar is reverse-DNS: dot-separated segments of ASCII lowercase
+/// letters, digits, `-` and `_`, each segment non-empty. It is deliberately
+/// narrow, because an identifier names a directory in each user's per-app
+/// store: nothing that could be a path traversal (`.`, `..`, `/`), a hidden
+/// entry, a case-folding collision on a case-insensitive volume, or a
+/// control character can be spelled at all. An app therefore cannot reach
+/// outside its own scope by construction, rather than by a check some caller
+/// might forget.
+///
+/// # Errors
+///
+/// [`Errno::LengthOutOfRange`] if `id` is empty or longer than
+/// [`BUNDLE_ID_MAX`]; [`Errno::OutOfRange`] if any character is outside the
+/// grammar or a segment is empty.
+pub fn validate_bundle_id(id: &str) -> Result<(), Errno> {
+    if id.is_empty() || id.len() > BUNDLE_ID_MAX {
+        return Err(Errno::LengthOutOfRange);
+    }
+    for segment in id.split('.') {
+        if segment.is_empty() {
+            return Err(Errno::OutOfRange);
+        }
+        if !segment
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-' || b == b'_')
+        {
+            return Err(Errno::OutOfRange);
+        }
+    }
+    Ok(())
+}
+
+/// Length, in bytes, of a [`PublisherId`].
+pub const PUBLISHER_ID_LEN: usize = 32;
+
+/// Domain-separation label of the [`PublisherId`] derivation.
+///
+/// Hashing the publisher key under a label of its own means the identity can
+/// never coincide with a digest some other part of the system computes over
+/// the same 32 bytes.
+pub const PUBLISHER_ID_CONTEXT: &[u8] = b"tairix-publisher-id/v1";
+
+/// Length, in bytes, of the [`AppInfoHeader::publisher_id_preimage`] message.
+pub const PUBLISHER_ID_PREIMAGE_LEN: usize = PUBLISHER_ID_CONTEXT.len() + 1 + 32;
+
+/// Domain-separation label of the publisher delegation certificate.
+///
+/// A publisher key signs nothing else today, and the label makes sure it
+/// never can be made to: a signature produced for another protocol under the
+/// same key can never be replayed as a delegation, and vice versa.
+pub const PUBLISHER_CERT_CONTEXT: &[u8] = b"tairix-publisher-cert/v1";
+
+/// Length, in bytes, of the [`AppInfoHeader::publisher_cert_message`] a
+/// delegated manifest's certificate signs.
+pub const PUBLISHER_CERT_MESSAGE_LEN: usize =
+    PUBLISHER_CERT_CONTEXT.len() + 1 + 1 + BUNDLE_ID_MAX + 32;
+
+/// A developer's stable identity: the opaque 32-byte digest of the publisher
+/// key an [`AppInfoHeader`] declares.
+///
+/// This — not the per-build signing key — is what per-app state is owned by.
+/// A release may be signed with a fresh signing key and still reach the same
+/// store, because the manifest carries a certificate binding that key to the
+/// publisher; a different developer claiming the same bundle identifier
+/// derives a different `PublisherId` and is refused.
+///
+/// It is an *identity*, deliberately not a key: it is one fixed width
+/// whatever the publisher key's algorithm, and no consumer can mistake it
+/// for something it may verify a signature with. The kernel attests it on a
+/// process's [`crate::Origin`] and the per-app store pins it on disk.
+#[repr(transparent)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Hash, Ord, PartialOrd)]
+pub struct PublisherId([u8; PUBLISHER_ID_LEN]);
+
+impl PublisherId {
+    /// The reserved all-zero identity: this principal has no attested
+    /// publisher.
+    ///
+    /// A kernel thread, a boot principal, and a parser-sandbox child all
+    /// carry it, and it is what a store refuses to serve. No real identity
+    /// can collide with it: the derivation is a SHA-256 digest, and finding
+    /// a key that hashes to zero is infeasible.
+    pub const NONE: Self = Self([0u8; PUBLISHER_ID_LEN]);
+
+    /// Wrap the raw digest bytes.
+    ///
+    /// The one producer is the load gate, which hashes
+    /// [`AppInfoHeader::publisher_id_preimage`] after the manifest's
+    /// authenticity checks pass. `lib/abi` carries no hash implementation,
+    /// which is why the derivation itself is not here.
+    #[must_use]
+    pub const fn from_raw(bytes: [u8; PUBLISHER_ID_LEN]) -> Self {
+        Self(bytes)
+    }
+
+    /// Borrow the raw digest bytes.
+    #[must_use]
+    pub const fn as_bytes(&self) -> &[u8; PUBLISHER_ID_LEN] {
+        &self.0
+    }
+
+    /// `true` if this is the [`NONE`](Self::NONE) sentinel.
+    #[must_use]
+    pub fn is_none(&self) -> bool {
+        *self == Self::NONE
+    }
+}
+
+/// How an [`AppInfoHeader`] binds its build signing key to the developer's
+/// stable publisher identity.
+///
+/// The two forms are exhaustive and mutually exclusive; every other
+/// combination of the `publisher_pubkey` and `publisher_cert` fields is a
+/// malformed manifest that [`AppInfoHeader::publisher_binding`] refuses.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum PublisherBinding {
+    /// The publisher signs its own builds: `publisher_pubkey` equals
+    /// `signer_pubkey` and `publisher_cert` is all zero. The trust root that
+    /// admitted the signer therefore covers the publisher too, and no
+    /// further signature is checked.
+    SelfPublished,
+    /// The publisher delegated to a separate build signing key:
+    /// `publisher_cert` must verify as the publisher's Ed25519 signature
+    /// over [`AppInfoHeader::publisher_cert_message`]. This is what lets a
+    /// signing key rotate between releases without the app losing its
+    /// stored state.
+    Delegated,
+}
 
 /// One of the fixed folders the desktop's program library organises
 /// launchable applications into.
@@ -603,7 +747,12 @@ fn is_within(path: &str, dir: &str) -> bool {
 /// Fixed-size, signed prefix of an application bundle's `AppInfo` manifest.
 ///
 /// Field order and offsets are part of the frozen `abi-v1` surface;
-/// reserved fields must be zero. The variable body that follows the header
+/// reserved fields must be zero. The declaration order **is** the wire
+/// order, so the `#[repr(C)]` in-memory image and the little-endian wire
+/// image are the same bytes — which is what makes the generated C mirror an
+/// honest view of the format rather than a second, differently-ordered
+/// spelling of it. `appinfo_header_repr_c_layout_is_the_wire_layout` pins
+/// that field by field. The variable body that follows the header
 /// is the requested capability-id list (`capability_count` little-endian
 /// `u16`s, decoded by [`crate::decode_capability_ids`]) immediately followed
 /// by the MIME-type table (`mime_count` entries of [`MIME_ENTRY_LEN`] bytes,
@@ -635,12 +784,6 @@ pub struct AppInfoHeader {
     /// Valid byte count of the inline `version` buffer
     /// (`<= BUNDLE_VERSION_MAX`).
     pub version_len: u8,
-    /// Valid byte count of the inline `purpose` buffer
-    /// (`<= BUNDLE_PURPOSE_MAX`); zero when the bundle states none.
-    pub purpose_len: u8,
-    /// Valid byte count of the inline `author` buffer
-    /// (`<= BUNDLE_AUTHOR_MAX`); zero when the bundle names none.
-    pub author_len: u8,
     /// Valid byte count of the inline `library_icon` buffer
     /// (`<= LIBRARY_ICON_MAX`); zero when the bundle declares no icon.
     /// Independent of `library`: the icon is the bundle's own identity,
@@ -652,6 +795,12 @@ pub struct AppInfoHeader {
     /// `0` for a bundle the desktop's program library never lists (every
     /// plain command app and service), else the folder it is filed under.
     pub library: u8,
+    /// Valid byte count of the inline `purpose` buffer
+    /// (`<= BUNDLE_PURPOSE_MAX`); zero when the bundle states none.
+    pub purpose_len: u8,
+    /// Valid byte count of the inline `author` buffer
+    /// (`<= BUNDLE_AUTHOR_MAX`); zero when the bundle names none.
+    pub author_len: u8,
     /// Reserved; must be zero in `abi-v1`.
     pub reserved0: [u8; 1],
     /// Bundle identifier bytes; the valid prefix is `id_len` long.
@@ -678,8 +827,18 @@ pub struct AppInfoHeader {
     /// Digest binding the signature to the bundle's contents
     /// ("signature over the bundle contents").
     pub content_hash: [u8; 32],
-    /// Ed25519 public key of the signer.
+    /// Ed25519 public key of the signer: the key this **build** was signed
+    /// with, which a release is free to rotate.
     pub signer_pubkey: [u8; 32],
+    /// Ed25519 public key of the **publisher**: the developer's stable
+    /// identity, which does not rotate between releases and which
+    /// [`PublisherId`] is derived from.
+    pub publisher_pubkey: [u8; 32],
+    /// The publisher's delegation of this build's signing key: its Ed25519
+    /// signature over [`Self::publisher_cert_message`], or all zero when the
+    /// publisher signed the build itself
+    /// ([`PublisherBinding::SelfPublished`]).
+    pub publisher_cert: [u8; 64],
     /// Ed25519 signature over the whole manifest except this field:
     /// `bytes[signed_range()] ‖ bytes[WIRE_LEN..]` (header prefix ‖ body).
     pub signature: [u8; 64],
@@ -706,7 +865,9 @@ impl AppInfoHeader {
     const OFF_SYSCALL_HASH: usize = Self::OFF_AUTHOR + BUNDLE_AUTHOR_MAX;
     const OFF_CONTENT_HASH: usize = Self::OFF_SYSCALL_HASH + SYSCALL_TABLE_HASH_LEN;
     const OFF_SIGNER: usize = Self::OFF_CONTENT_HASH + 32;
-    const OFF_SIGNATURE: usize = Self::OFF_SIGNER + 32;
+    const OFF_PUBLISHER: usize = Self::OFF_SIGNER + 32;
+    const OFF_PUBLISHER_CERT: usize = Self::OFF_PUBLISHER + 32;
+    const OFF_SIGNATURE: usize = Self::OFF_PUBLISHER_CERT + 64;
 
     /// Encoded size of an [`AppInfoHeader`] on the wire.
     pub const WIRE_LEN: usize = Self::OFF_SIGNATURE + 64;
@@ -757,6 +918,9 @@ impl AppInfoHeader {
         out[Self::OFF_CONTENT_HASH..Self::OFF_CONTENT_HASH + 32]
             .copy_from_slice(&self.content_hash);
         out[Self::OFF_SIGNER..Self::OFF_SIGNER + 32].copy_from_slice(&self.signer_pubkey);
+        out[Self::OFF_PUBLISHER..Self::OFF_PUBLISHER + 32].copy_from_slice(&self.publisher_pubkey);
+        out[Self::OFF_PUBLISHER_CERT..Self::OFF_PUBLISHER_CERT + 64]
+            .copy_from_slice(&self.publisher_cert);
         out[Self::OFF_SIGNATURE..Self::OFF_SIGNATURE + 64].copy_from_slice(&self.signature);
         out
     }
@@ -773,9 +937,15 @@ impl AppInfoHeader {
     /// * [`Errno::LengthOutOfRange`] if `capability_count`, `mime_count`, or
     ///   any inline string length exceeds its cap.
     /// * [`Errno::OutOfRange`] if a mandatory identity string (`id`, `name`,
-    ///   `version`) is empty or is not valid UTF-8, if the `library` byte is
-    ///   outside the [`LibraryCategory::from_wire`] encoding, or if the icon
-    ///   bytes are not valid UTF-8.
+    ///   `version`) is empty or is not valid UTF-8, if `id` is outside the
+    ///   [`validate_bundle_id`] grammar, if the `library` byte is outside the
+    ///   [`LibraryCategory::from_wire`] encoding, or if the icon bytes are
+    ///   not valid UTF-8.
+    ///
+    /// Authenticity is **not** judged here. Neither signature is verified and
+    /// the publisher binding is not classified: that is the load gate's job,
+    /// so a surface that only wants to *display* a bundle's name and icon
+    /// need not hold a trust anchor to read the manifest.
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, Errno> {
         if bytes.len() < Self::WIRE_LEN {
             return Err(Errno::BufferTooSmall);
@@ -804,39 +974,11 @@ impl AppInfoHeader {
         let library = bytes[Self::OFF_LIBRARY];
         let purpose_len = bytes[Self::OFF_PURPOSE_LEN];
         let author_len = bytes[Self::OFF_AUTHOR_LEN];
-        let mut reserved0 = [0u8; Self::RESERVED0_LEN];
-        reserved0.copy_from_slice(
-            &bytes[Self::OFF_RESERVED0..Self::OFF_RESERVED0 + Self::RESERVED0_LEN],
-        );
+        let reserved0: [u8; Self::RESERVED0_LEN] = inline_field(bytes, Self::OFF_RESERVED0);
         if reserved0 != [0; Self::RESERVED0_LEN] {
             return Err(Errno::BadMagic);
         }
         LibraryCategory::from_wire(library)?;
-
-        let mut id = [0u8; BUNDLE_ID_MAX];
-        id.copy_from_slice(&bytes[Self::OFF_ID..Self::OFF_ID + BUNDLE_ID_MAX]);
-        let mut name = [0u8; BUNDLE_NAME_MAX];
-        name.copy_from_slice(&bytes[Self::OFF_NAME..Self::OFF_NAME + BUNDLE_NAME_MAX]);
-        let mut version = [0u8; BUNDLE_VERSION_MAX];
-        version.copy_from_slice(&bytes[Self::OFF_VERSION..Self::OFF_VERSION + BUNDLE_VERSION_MAX]);
-        let mut library_icon = [0u8; LIBRARY_ICON_MAX];
-        library_icon.copy_from_slice(
-            &bytes[Self::OFF_LIBRARY_ICON..Self::OFF_LIBRARY_ICON + LIBRARY_ICON_MAX],
-        );
-        let mut purpose = [0u8; BUNDLE_PURPOSE_MAX];
-        purpose.copy_from_slice(&bytes[Self::OFF_PURPOSE..Self::OFF_PURPOSE + BUNDLE_PURPOSE_MAX]);
-        let mut author = [0u8; BUNDLE_AUTHOR_MAX];
-        author.copy_from_slice(&bytes[Self::OFF_AUTHOR..Self::OFF_AUTHOR + BUNDLE_AUTHOR_MAX]);
-        let mut syscall_table_hash = [0u8; SYSCALL_TABLE_HASH_LEN];
-        syscall_table_hash.copy_from_slice(
-            &bytes[Self::OFF_SYSCALL_HASH..Self::OFF_SYSCALL_HASH + SYSCALL_TABLE_HASH_LEN],
-        );
-        let mut content_hash = [0u8; 32];
-        content_hash.copy_from_slice(&bytes[Self::OFF_CONTENT_HASH..Self::OFF_CONTENT_HASH + 32]);
-        let mut signer_pubkey = [0u8; 32];
-        signer_pubkey.copy_from_slice(&bytes[Self::OFF_SIGNER..Self::OFF_SIGNER + 32]);
-        let mut signature = [0u8; 64];
-        signature.copy_from_slice(&bytes[Self::OFF_SIGNATURE..Self::OFF_SIGNATURE + 64]);
 
         let header = Self {
             magic,
@@ -847,23 +989,26 @@ impl AppInfoHeader {
             id_len,
             name_len,
             version_len,
-            purpose_len,
-            author_len,
             library_icon_len,
             library,
+            purpose_len,
+            author_len,
             reserved0,
-            id,
-            name,
-            version,
-            library_icon,
-            purpose,
-            author,
-            syscall_table_hash,
-            content_hash,
-            signer_pubkey,
-            signature,
+            id: inline_field(bytes, Self::OFF_ID),
+            name: inline_field(bytes, Self::OFF_NAME),
+            version: inline_field(bytes, Self::OFF_VERSION),
+            library_icon: inline_field(bytes, Self::OFF_LIBRARY_ICON),
+            purpose: inline_field(bytes, Self::OFF_PURPOSE),
+            author: inline_field(bytes, Self::OFF_AUTHOR),
+            syscall_table_hash: inline_field(bytes, Self::OFF_SYSCALL_HASH),
+            content_hash: inline_field(bytes, Self::OFF_CONTENT_HASH),
+            signer_pubkey: inline_field(bytes, Self::OFF_SIGNER),
+            publisher_pubkey: inline_field(bytes, Self::OFF_PUBLISHER),
+            publisher_cert: inline_field(bytes, Self::OFF_PUBLISHER_CERT),
+            signature: inline_field(bytes, Self::OFF_SIGNATURE),
         };
         validate_identity(header.id_len, BUNDLE_ID_MAX, &header.id)?;
+        validate_bundle_id(header.bundle_id())?;
         validate_identity(header.name_len, BUNDLE_NAME_MAX, &header.name)?;
         validate_identity(header.version_len, BUNDLE_VERSION_MAX, &header.version)?;
         validate_optional_text(
@@ -940,6 +1085,71 @@ impl AppInfoHeader {
         Some(inline_str(&self.author, self.author_len))
     }
 
+    /// Classify how this manifest binds its build signing key to its
+    /// publisher identity.
+    ///
+    /// This is the single definition of the rule; the load gate applies it
+    /// before it checks the certificate, and nothing else needs to.
+    ///
+    /// It classifies *shape* only — which of the two forms the manifest
+    /// claims. Whether the declared keys are usable cryptographic keys, and
+    /// whether the certificate actually verifies, is the gate's judgement.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::SignatureInvalid`] for either combination that is neither
+    /// form: a `publisher_pubkey` that differs from the signer with no
+    /// certificate to justify the delegation, and a certificate present on a
+    /// manifest that delegates nothing.
+    pub fn publisher_binding(&self) -> Result<PublisherBinding, Errno> {
+        let delegated = self.publisher_pubkey != self.signer_pubkey;
+        let certified = self.publisher_cert != [0u8; 64];
+        match (delegated, certified) {
+            (false, false) => Ok(PublisherBinding::SelfPublished),
+            (true, true) => Ok(PublisherBinding::Delegated),
+            _ => Err(Errno::SignatureInvalid),
+        }
+    }
+
+    /// The fixed-size message a [`PublisherBinding::Delegated`] manifest's
+    /// `publisher_cert` signs: the domain label, the bundle identifier, and
+    /// the build signing key the publisher is delegating to.
+    ///
+    /// Binding the identifier as well as the key is what stops a
+    /// certificate issued for one of a publisher's bundles being lifted into
+    /// another; binding it at full inline width, length byte first, keeps
+    /// the message unambiguous without a length-prefix parser. The one
+    /// definition is shared by the signing tool and the load gate, so the
+    /// two can never sign and verify different messages.
+    #[must_use]
+    pub fn publisher_cert_message(&self) -> [u8; PUBLISHER_CERT_MESSAGE_LEN] {
+        let mut out = [0u8; PUBLISHER_CERT_MESSAGE_LEN];
+        let mut at = PUBLISHER_CERT_CONTEXT.len() + 1;
+        out[..PUBLISHER_CERT_CONTEXT.len()].copy_from_slice(PUBLISHER_CERT_CONTEXT);
+        out[at] = self.id_len;
+        at += 1;
+        out[at..at + BUNDLE_ID_MAX].copy_from_slice(&self.id);
+        at += BUNDLE_ID_MAX;
+        out[at..at + 32].copy_from_slice(&self.signer_pubkey);
+        out
+    }
+
+    /// The fixed-size message whose SHA-256 digest is this bundle's
+    /// [`PublisherId`].
+    ///
+    /// `lib/abi` carries no hash implementation, so the derivation is
+    /// completed by the load gate; defining the preimage here keeps the one
+    /// authoritative spelling of what a publisher identity is a digest of
+    /// beside the field it reads.
+    #[must_use]
+    pub fn publisher_id_preimage(&self) -> [u8; PUBLISHER_ID_PREIMAGE_LEN] {
+        let mut out = [0u8; PUBLISHER_ID_PREIMAGE_LEN];
+        let at = PUBLISHER_ID_CONTEXT.len() + 1;
+        out[..PUBLISHER_ID_CONTEXT.len()].copy_from_slice(PUBLISHER_ID_CONTEXT);
+        out[at..].copy_from_slice(&self.publisher_pubkey);
+        out
+    }
+
     /// Number of body bytes a manifest with these counts must carry: the
     /// capability list followed by the MIME-type table.
     ///
@@ -1005,6 +1215,17 @@ pub fn mime_type_at(body: &[u8], capability_count: usize, index: usize) -> Resul
 
 /// Validate one inline identity field: length within bound, non-empty, and
 /// a valid UTF-8 prefix.
+/// Copy one fixed-width inline field out of a wire image at `offset`.
+///
+/// The caller has already bounds-checked the image against the header's wire
+/// length, so every offset a decoder passes is in range; the width comes from
+/// the destination type, so a field and its extent cannot disagree.
+fn inline_field<const N: usize>(bytes: &[u8], offset: usize) -> [u8; N] {
+    let mut buf = [0u8; N];
+    buf.copy_from_slice(&bytes[offset..offset + N]);
+    buf
+}
+
 fn validate_identity(len: u8, max: usize, buf: &[u8]) -> Result<(), Errno> {
     let len = usize::from(len);
     if len == 0 {
@@ -1124,10 +1345,12 @@ mod tests {
     use super::{
         body_len, digest_bundle_contents, mime_type_at, resolve_library, validate_bundle_layout,
         AppInfoHeader, BundleEntry, BundleFileDigest, BundleLayoutError, LibraryCategory,
-        LibraryError, LibraryScope, ProgramKind, APPINFO_MAGIC, APPINFO_MAX_CAPABILITIES,
-        APPINFO_MAX_MIME, BUNDLE_CONTENT_DIGEST_MAGIC, BUNDLE_ID_MAX, HOME_APPLICATION_STORE_DIR,
-        HOME_COMMAND_STORE_DIR, MIME_ENTRY_LEN, MIME_TYPE_MAX, SYSTEM_APPLICATION_STORE,
-        SYSTEM_COMMAND_STORE, SYSTEM_LIBRARIES_DIR, SYSTEM_SERVICE_STORE,
+        LibraryError, LibraryScope, ProgramKind, PublisherBinding, PublisherId, APPINFO_MAGIC,
+        APPINFO_MAX_CAPABILITIES, APPINFO_MAX_MIME, BUNDLE_CONTENT_DIGEST_MAGIC, BUNDLE_ID_MAX,
+        HOME_APPLICATION_STORE_DIR, HOME_COMMAND_STORE_DIR, MIME_ENTRY_LEN, MIME_TYPE_MAX,
+        PUBLISHER_CERT_CONTEXT, PUBLISHER_CERT_MESSAGE_LEN, PUBLISHER_ID_CONTEXT, PUBLISHER_ID_LEN,
+        PUBLISHER_ID_PREIMAGE_LEN, SYSTEM_APPLICATION_STORE, SYSTEM_COMMAND_STORE,
+        SYSTEM_LIBRARIES_DIR, SYSTEM_SERVICE_STORE,
     };
     use crate::syscall::SYSCALL_TABLE_HASH_LEN;
     use crate::{Errno, ABI_VERSION_CURRENT};
@@ -1169,6 +1392,8 @@ mod tests {
             syscall_table_hash: [0xAB; SYSCALL_TABLE_HASH_LEN],
             content_hash: [0xCD; 32],
             signer_pubkey: [0xEF; 32],
+            publisher_pubkey: [0xEF; 32],
+            publisher_cert: [0; 64],
             signature: [0x12; 64],
         }
     }
@@ -1338,7 +1563,7 @@ mod tests {
 
     #[test]
     fn header_wire_size_is_frozen() {
-        assert_eq!(AppInfoHeader::WIRE_LEN, 568);
+        assert_eq!(AppInfoHeader::WIRE_LEN, 664);
         assert_eq!(
             AppInfoHeader::WIRE_LEN,
             core::mem::size_of::<AppInfoHeader>()
@@ -1689,5 +1914,180 @@ mod tests {
         let mut expected = [0u8; 8];
         expected[..4].copy_from_slice(&BUNDLE_CONTENT_DIGEST_MAGIC);
         assert_eq!(framed, &expected[..8]);
+    }
+
+    /// The `#[repr(C)]` memory layout and the little-endian wire layout are
+    /// the same bytes. A field declared out of wire order, or inserted
+    /// without its offset constant moving, breaks here — which is what keeps
+    /// the generated C mirror an honest view of the manifest rather than a
+    /// third, differently-ordered spelling of it.
+    #[test]
+    fn appinfo_header_repr_c_layout_is_the_wire_layout() {
+        /// Pair each field's `#[repr(C)]` memory offset with the wire offset
+        /// the codec writes it at.
+        macro_rules! pin {
+            ($($field:ident => $wire:expr),+ $(,)?) => {
+                [$((
+                    stringify!($field),
+                    core::mem::offset_of!(AppInfoHeader, $field),
+                    $wire,
+                )),+]
+            };
+        }
+        let pinned = pin! {
+            magic => 0,
+            abi_version => 4,
+            flags => 8,
+            capability_count => AppInfoHeader::OFF_CAP_COUNT,
+            mime_count => AppInfoHeader::OFF_MIME_COUNT,
+            id_len => AppInfoHeader::OFF_ID_LEN,
+            name_len => AppInfoHeader::OFF_NAME_LEN,
+            version_len => AppInfoHeader::OFF_VERSION_LEN,
+            library_icon_len => AppInfoHeader::OFF_LIBRARY_ICON_LEN,
+            library => AppInfoHeader::OFF_LIBRARY,
+            purpose_len => AppInfoHeader::OFF_PURPOSE_LEN,
+            author_len => AppInfoHeader::OFF_AUTHOR_LEN,
+            reserved0 => AppInfoHeader::OFF_RESERVED0,
+            id => AppInfoHeader::OFF_ID,
+            name => AppInfoHeader::OFF_NAME,
+            version => AppInfoHeader::OFF_VERSION,
+            library_icon => AppInfoHeader::OFF_LIBRARY_ICON,
+            purpose => AppInfoHeader::OFF_PURPOSE,
+            author => AppInfoHeader::OFF_AUTHOR,
+            syscall_table_hash => AppInfoHeader::OFF_SYSCALL_HASH,
+            content_hash => AppInfoHeader::OFF_CONTENT_HASH,
+            signer_pubkey => AppInfoHeader::OFF_SIGNER,
+            publisher_pubkey => AppInfoHeader::OFF_PUBLISHER,
+            publisher_cert => AppInfoHeader::OFF_PUBLISHER_CERT,
+            signature => AppInfoHeader::OFF_SIGNATURE,
+        };
+        for (field, memory, wire) in pinned {
+            assert_eq!(memory, wire, "`{field}` memory offset is its wire offset");
+        }
+        assert_eq!(
+            core::mem::size_of::<AppInfoHeader>(),
+            AppInfoHeader::WIRE_LEN
+        );
+        // No field escaped the pin: the last one ends the header.
+        let (_, last, _) = pinned[pinned.len() - 1];
+        assert_eq!(last + 64, AppInfoHeader::WIRE_LEN);
+    }
+
+    #[test]
+    fn a_manifest_signed_by_its_own_publisher_is_self_published() {
+        let header = sample();
+        assert_eq!(header.publisher_pubkey, header.signer_pubkey);
+        assert_eq!(header.publisher_cert, [0u8; 64]);
+        assert_eq!(
+            header.publisher_binding(),
+            Ok(PublisherBinding::SelfPublished)
+        );
+    }
+
+    #[test]
+    fn a_manifest_delegating_to_a_build_key_is_delegated() {
+        let header = AppInfoHeader {
+            publisher_pubkey: [0x5A; 32],
+            publisher_cert: [0x77; 64],
+            ..sample()
+        };
+        assert_eq!(header.publisher_binding(), Ok(PublisherBinding::Delegated));
+    }
+
+    /// Only the two forms exist: a delegation with no certificate to justify
+    /// it, and a certificate that delegates nothing, are both refused, so no
+    /// consumer can read an ambiguous developer identity off a manifest.
+    #[test]
+    fn a_malformed_publisher_binding_is_refused() {
+        let uncertified = AppInfoHeader {
+            publisher_pubkey: [0x5A; 32],
+            ..sample()
+        };
+        assert_eq!(
+            uncertified.publisher_binding(),
+            Err(Errno::SignatureInvalid)
+        );
+
+        let stray_cert = AppInfoHeader {
+            publisher_cert: [0x77; 64],
+            ..sample()
+        };
+        assert_eq!(stray_cert.publisher_binding(), Err(Errno::SignatureInvalid));
+    }
+
+    /// A manifest whose publisher story is malformed still *decodes*: a
+    /// surface that only draws a bundle's name and icon holds no trust anchor
+    /// and must not need one, while the bundle can still never launch,
+    /// because the load gate judges the binding before it admits anything.
+    #[test]
+    fn decoding_a_manifest_does_not_judge_its_publisher_binding() {
+        let uncertified = AppInfoHeader {
+            publisher_pubkey: [0x5A; 32],
+            ..sample()
+        };
+        assert_eq!(
+            AppInfoHeader::from_bytes(&uncertified.to_le_bytes()),
+            Ok(uncertified)
+        );
+    }
+
+    /// The certificate message names the bundle *and* the key, so neither a
+    /// sibling bundle of the same publisher nor a substituted signing key can
+    /// reuse a certificate issued elsewhere.
+    #[test]
+    fn the_publisher_cert_message_binds_the_bundle_and_the_signing_key() {
+        let header = AppInfoHeader {
+            publisher_pubkey: [0x5A; 32],
+            publisher_cert: [0x77; 64],
+            ..sample()
+        };
+        let message = header.publisher_cert_message();
+        assert_eq!(message.len(), PUBLISHER_CERT_MESSAGE_LEN);
+        assert!(message.starts_with(PUBLISHER_CERT_CONTEXT));
+        assert_eq!(
+            message[PUBLISHER_CERT_CONTEXT.len()],
+            0,
+            "the label is terminated, so it cannot run into the body"
+        );
+
+        let (other_id, other_id_len) = inline::<BUNDLE_ID_MAX>("com.example.other");
+        let other_bundle = AppInfoHeader {
+            id: other_id,
+            id_len: other_id_len,
+            ..header
+        };
+        assert_ne!(other_bundle.publisher_cert_message(), message);
+
+        let other_signer = AppInfoHeader {
+            signer_pubkey: [0x11; 32],
+            ..header
+        };
+        assert_ne!(other_signer.publisher_cert_message(), message);
+    }
+
+    #[test]
+    fn the_publisher_id_preimage_is_labelled_and_covers_the_key() {
+        let header = sample();
+        let preimage = header.publisher_id_preimage();
+        assert_eq!(preimage.len(), PUBLISHER_ID_PREIMAGE_LEN);
+        assert!(preimage.starts_with(PUBLISHER_ID_CONTEXT));
+        assert_eq!(preimage[PUBLISHER_ID_CONTEXT.len()], 0);
+        assert_eq!(&preimage[PUBLISHER_ID_CONTEXT.len() + 1..], &[0xEFu8; 32]);
+
+        let other = AppInfoHeader {
+            publisher_pubkey: [0x5A; 32],
+            publisher_cert: [0x77; 64],
+            ..header
+        };
+        assert_ne!(other.publisher_id_preimage(), preimage);
+    }
+
+    #[test]
+    fn the_absent_publisher_identity_is_the_zero_sentinel() {
+        assert!(PublisherId::NONE.is_none());
+        assert_eq!(PublisherId::NONE.as_bytes(), &[0u8; PUBLISHER_ID_LEN]);
+        let real = PublisherId::from_raw([1u8; PUBLISHER_ID_LEN]);
+        assert!(!real.is_none());
+        assert_ne!(real, PublisherId::NONE);
     }
 }

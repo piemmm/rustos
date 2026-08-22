@@ -13,7 +13,10 @@
 //!    bundle is refused.
 //! 2. **Authenticity** — the signed [`tairix_abi::AppInfoHeader`] manifest is
 //!    decoded, its target ABI version and syscall-table hash are matched
-//!    against the kernel's, its Ed25519 signature is verified, and the
+//!    against the kernel's, its Ed25519 signature is verified, the publisher
+//!    the manifest names is bound to that signing key (so the bundle carries
+//!    a developer identity a per-app store can own its state by, and a
+//!    release may re-sign with a fresh key without losing it), and the
 //!    content hash it carries is checked against the bundle's actual
 //!    contents ("signature over the bundle contents").
 //! 3. **Authority** — the granted capability set is the manifest's request
@@ -31,12 +34,12 @@
 //!
 //! # Seams
 //!
-//! The two operations that touch the outside world — reading the bundle off
-//! the filesystem and verifying a signature — are injected as the
-//! [`BundleStore`] and [`Verifier`] seams. A consumer wires the real
-//! kernel-/`lib/crypto`-backed implementations; tests wire in-memory
-//! fixtures. This keeps the security-relevant layout, capability, and policy
-//! code independent of kernel plumbing and exhaustively testable.
+//! The two operations that need the outside world — reading the bundle off
+//! the filesystem, and deciding whether a manifest signer is trusted here —
+//! are injected as the [`BundleStore`] and [`Verifier`] seams. A consumer
+//! wires the real kernel-/anchor-backed implementations; tests wire
+//! in-memory fixtures. This keeps the security-relevant layout, capability,
+//! and policy code independent of kernel plumbing and exhaustively testable.
 //!
 //! The loader never *executes* anything: it computes the capability ceiling
 //! and the validated entry-point path and returns them in a [`LoadedApp`].
@@ -46,10 +49,11 @@
 //! # Layering
 //!
 //! This is a `lib/*` crate (`no_std`, with `alloc`) depending only on the
-//! audited `lib/*` crates `tairix-abi`, `tairix-caps`, and `tairix-log`, so
-//! it links no kernel or driver crate and both the kernel boot-floor spawn
-//! path and the user-space application-manager service (`userland/system/
-//! appmgr`) can share this one gate rather than each re-implementing it.
+//! audited `lib/*` crates `tairix-abi`, `tairix-caps`, `tairix-crypto`, and
+//! `tairix-log`, so it links no kernel or driver crate and both the kernel
+//! boot-floor spawn path and the user-space application-manager service
+//! (`userland/system/appmgr`) can share this one gate rather than each
+//! re-implementing it.
 
 #![no_std]
 #![forbid(unsafe_op_in_unsafe_fn)]
@@ -62,6 +66,8 @@ pub mod error;
 pub mod events;
 pub mod loader;
 
-pub use bundle::{BundleContents, BundleStore, Clock, LoadedApp, ResolvedLibrary, Verifier};
+pub use bundle::{
+    BundleContents, BundleIdentity, BundleStore, Clock, LoadedApp, ResolvedLibrary, Verifier,
+};
 pub use error::AppError;
 pub use loader::{AppLoader, AppLoaderConfig};

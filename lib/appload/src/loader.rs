@@ -10,14 +10,15 @@ use alloc::string::String;
 
 use tairix_abi::{
     decode_capability_ids, resolve_library as resolve_library_policy, validate_bundle_layout,
-    AppInfoHeader, CapabilityId, Duration64, Errno, LibraryScope, LoadImage,
-    APPINFO_MAX_CAPABILITIES, SYSCALL_TABLE_HASH_LEN,
+    AppInfoHeader, CapabilityId, Duration64, Errno, LibraryScope, LoadImage, PublisherBinding,
+    PublisherId, APPINFO_MAX_CAPABILITIES, SYSCALL_TABLE_HASH_LEN,
 };
 use tairix_caps::CapabilitySet;
+use tairix_crypto::{sha256, Ed25519PublicKey, Ed25519Signature};
 use tairix_log::{log, Event, EventId, Field, Level, Sink};
 use tairix_path::join;
 
-use crate::bundle::{BundleStore, Clock, LoadedApp, ResolvedLibrary, Verifier};
+use crate::bundle::{BundleIdentity, BundleStore, Clock, LoadedApp, ResolvedLibrary, Verifier};
 use crate::error::AppError;
 use crate::events;
 
@@ -68,7 +69,9 @@ impl<'a> AppLoader<'a> {
     /// unreadable bundle, [`AppError::Layout`] for a layout deviation,
     /// [`AppError::Manifest`] for a bad manifest, [`AppError::InterfaceHashMismatch`]
     /// for a syscall-hash mismatch, [`AppError::Signature`] for a failed
-    /// signature, or [`AppError::ContentHashMismatch`] for tampered contents.
+    /// signature, [`AppError::PublisherCert`] for a publisher the bundle
+    /// cannot prove it belongs to, or [`AppError::ContentHashMismatch`] for
+    /// tampered contents.
     pub fn load(&self, bundle: &str, user_grants: &CapabilitySet) -> Result<LoadedApp, AppError> {
         let start_ns = self.cfg.clock.now_ns();
         let mut load_ns = 0u64;
@@ -122,6 +125,7 @@ impl<'a> AppLoader<'a> {
         }
 
         self.verify_manifest_signature(bundle, &bytes, &header)?;
+        let publisher = self.verify_publisher(bundle, &header)?;
 
         // One pass reads and hashes the bundle contents and hands back the
         // entry-point `Run` image read during that same walk, so `Run` is
@@ -155,9 +159,12 @@ impl<'a> AppLoader<'a> {
         let verify_ns = total_ns.saturating_sub(load_ns);
         self.audit_loaded(bundle, header.bundle_name(), load_ns, verify_ns);
         Ok(LoadedApp::new(
-            header.bundle_id().into(),
-            header.bundle_name().into(),
-            header.bundle_version().into(),
+            BundleIdentity {
+                id: header.bundle_id().into(),
+                name: header.bundle_name().into(),
+                version: header.bundle_version().into(),
+                publisher,
+            },
             run_path,
             run_image,
             granted,
@@ -334,6 +341,59 @@ impl<'a> AppLoader<'a> {
         Ok(())
     }
 
+    /// Resolve the bundle's stable developer identity, verifying the
+    /// publisher's delegation of the build signing key first.
+    ///
+    /// The fourth authenticity check, beside the manifest signature, the
+    /// content hash, and the syscall-interface hash. A self-published
+    /// manifest needs no further signature — the trust root that admitted
+    /// the signer admitted the publisher, because they are one key. A
+    /// delegated manifest must carry the publisher's signature over
+    /// [`AppInfoHeader::publisher_cert_message`], which names both the
+    /// bundle identifier and the signing key, so a certificate cannot be
+    /// lifted onto another bundle or another key.
+    ///
+    /// The publisher key is deliberately **not** trust-rooted: it is a claim
+    /// the certificate makes unforgeable, not an authority. What makes it
+    /// meaningful is the per-app store pinning the identity it first saw, so
+    /// a later build must present a chain back to the same publisher.
+    fn verify_publisher(
+        &self,
+        bundle: &str,
+        header: &AppInfoHeader,
+    ) -> Result<PublisherId, AppError> {
+        let binding = header.publisher_binding().map_err(|e| {
+            self.audit(
+                events::APP_PUBLISHER_INVALID,
+                Level::Warn,
+                bundle,
+                "publisher binding malformed",
+            );
+            AppError::Manifest(e)
+        })?;
+        if binding == PublisherBinding::Delegated {
+            let refuse = || {
+                self.audit(
+                    events::APP_PUBLISHER_INVALID,
+                    Level::Warn,
+                    bundle,
+                    "publisher certificate did not verify",
+                );
+                AppError::PublisherCert
+            };
+            let key =
+                Ed25519PublicKey::from_bytes(&header.publisher_pubkey).map_err(|_| refuse())?;
+            key.verify(
+                &header.publisher_cert_message(),
+                &Ed25519Signature(header.publisher_cert),
+            )
+            .map_err(|_| refuse())?;
+        }
+        Ok(PublisherId::from_raw(sha256(
+            &header.publisher_id_preimage(),
+        )))
+    }
+
     fn store_error(&self, bundle: &str, err: Errno) -> AppError {
         self.audit(events::APP_STORE_ERROR, Level::Warn, bundle, "store error");
         AppError::Store(err)
@@ -427,6 +487,7 @@ fn event_message(id: EventId) -> &'static str {
         events::LIBRARY_RESOLVED => "shared library resolved",
         events::LIBRARY_REFUSED => "shared library refused",
         events::APP_RUN_IMAGE_INVALID => "application run image invalid",
+        events::APP_PUBLISHER_INVALID => "application publisher unattributable",
         _ => "appmgr event",
     }
 }
@@ -441,6 +502,7 @@ mod tests {
     use alloc::vec;
     use alloc::vec::Vec;
     use core::cell::RefCell;
+    use tairix_abi::PublisherId;
     use tairix_abi::{
         AppInfoHeader, BundleLayoutError, CapabilityId, Errno, LibraryError, LibraryScope,
         LoadHeader, NeededLibrary, RxeError, RxePermission, Segment, ABI_VERSION_CURRENT,
@@ -448,10 +510,14 @@ mod tests {
         LOAD_MAGIC, MIME_TYPE_MAX, SYSCALL_TABLE_HASH_LEN,
     };
     use tairix_caps::CapabilitySet;
+    use tairix_crypto::sha256;
     use tairix_log::{Event, EventId, Sink};
 
     const KERNEL_HASH: [u8; SYSCALL_TABLE_HASH_LEN] = [0x11; SYSCALL_TABLE_HASH_LEN];
     const CONTENT_HASH: [u8; 32] = [0x22; 32];
+    /// The build signing key the fixture manifests declare. The `Verifier`
+    /// seam is mocked, so it needs no real key material.
+    const SIGNER: [u8; 32] = [0xEF; 32];
     /// The curated System runtime / C ABI shared library a hosted C program
     /// dynamically links; it lives under
     /// `/System/Libraries/`.
@@ -464,11 +530,25 @@ mod tests {
     }
 
     /// Build an `AppInfo` manifest (header + capability list + one MIME
-    /// entry) requesting `caps`, declaring `syscall_hash` and `content_hash`.
+    /// entry) requesting `caps`, declaring `syscall_hash` and `content_hash`,
+    /// self-published by [`SIGNER`].
     fn build_manifest(
         caps: &[CapabilityId],
         syscall_hash: [u8; SYSCALL_TABLE_HASH_LEN],
         content_hash: [u8; 32],
+    ) -> Vec<u8> {
+        build_manifest_published_by(caps, syscall_hash, content_hash, SIGNER, [0; 64])
+    }
+
+    /// The same manifest, but claiming `publisher` with `cert`, so a test can
+    /// present the load gate with any publisher story — including the ones it
+    /// must refuse.
+    fn build_manifest_published_by(
+        caps: &[CapabilityId],
+        syscall_hash: [u8; SYSCALL_TABLE_HASH_LEN],
+        content_hash: [u8; 32],
+        publisher: [u8; 32],
+        cert: [u8; 64],
     ) -> Vec<u8> {
         let header = AppInfoHeader {
             magic: APPINFO_MAGIC,
@@ -492,7 +572,9 @@ mod tests {
             author: [0; tairix_abi::BUNDLE_AUTHOR_MAX],
             syscall_table_hash: syscall_hash,
             content_hash,
-            signer_pubkey: [0xEF; 32],
+            signer_pubkey: SIGNER,
+            publisher_pubkey: publisher,
+            publisher_cert: cert,
             signature: [0x12; 64],
         };
         let mut out = header.to_le_bytes().to_vec();
@@ -685,6 +767,74 @@ mod tests {
             verifier,
             clock,
             sink,
+        }
+    }
+
+    /// A self-published bundle needs no certificate — its publisher key *is*
+    /// the signing key the trust root admitted — and its developer identity is
+    /// the labelled digest of that key.
+    #[test]
+    fn a_self_published_bundle_is_attributed_to_the_digest_of_its_publisher_key() {
+        let store = MockStore::good(&[]);
+        let verifier = AcceptVerifier;
+        let sink = RecordingSink::new();
+        let clock = StepClock::new();
+        let loader = AppLoader::new(cfg(&store, &verifier, &clock, &sink));
+
+        let app = loader
+            .load("/Apps/Example.app", &CapabilitySet::empty())
+            .expect("loads");
+
+        let header = AppInfoHeader::from_bytes(&store.appinfo).expect("decodes");
+        assert_eq!(
+            app.publisher(),
+            PublisherId::from_raw(sha256(&header.publisher_id_preimage()))
+        );
+        assert!(!app.publisher().is_none());
+        assert_eq!(sink.count(events::APP_PUBLISHER_INVALID), 0);
+    }
+
+    /// A manifest may claim any publisher it likes; claiming one it cannot
+    /// produce a certificate for is refused, so a hostile bundle cannot
+    /// impersonate a developer to reach that developer's per-app store.
+    #[test]
+    fn a_forged_publisher_delegation_is_refused() {
+        let mut store = MockStore::good(&[]);
+        store.appinfo =
+            build_manifest_published_by(&[], KERNEL_HASH, CONTENT_HASH, [0x5A; 32], [0x77; 64]);
+        let verifier = AcceptVerifier;
+        let sink = RecordingSink::new();
+        let clock = StepClock::new();
+        let loader = AppLoader::new(cfg(&store, &verifier, &clock, &sink));
+
+        assert_eq!(
+            loader.load("/Apps/Example.app", &CapabilitySet::empty()),
+            Err(AppError::PublisherCert)
+        );
+        assert_eq!(sink.count(events::APP_PUBLISHER_INVALID), 1);
+        assert_eq!(sink.count(events::APP_LOADED), 0);
+    }
+
+    /// Neither half-form is admitted: a claim with no certificate to justify
+    /// it, and a certificate with nothing to delegate, are both refused
+    /// before any capability is granted.
+    #[test]
+    fn a_malformed_publisher_binding_is_refused() {
+        for (publisher, cert) in [([0x5A; 32], [0u8; 64]), (SIGNER, [0x77; 64])] {
+            let mut store = MockStore::good(&[]);
+            store.appinfo =
+                build_manifest_published_by(&[], KERNEL_HASH, CONTENT_HASH, publisher, cert);
+            let verifier = AcceptVerifier;
+            let sink = RecordingSink::new();
+            let clock = StepClock::new();
+            let loader = AppLoader::new(cfg(&store, &verifier, &clock, &sink));
+
+            assert_eq!(
+                loader.load("/Apps/Example.app", &CapabilitySet::empty()),
+                Err(AppError::Manifest(Errno::SignatureInvalid))
+            );
+            assert_eq!(sink.count(events::APP_PUBLISHER_INVALID), 1);
+            assert_eq!(sink.count(events::APP_LOADED), 0);
         }
     }
 

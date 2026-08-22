@@ -473,6 +473,37 @@ fn read_package_name(crate_dir: &Path) -> Result<String, AppImageError> {
     ))
 }
 
+/// How a composed manifest names the publisher its per-app state is owned by.
+///
+/// Naming the form explicitly, rather than inferring it from two seeds that
+/// happen to be equal, keeps each call site's intent readable — the two forms
+/// produce structurally different manifests and are judged by different
+/// checks.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum PublisherSource<'a> {
+    /// The publisher signs its own builds: the publisher key *is* the signing
+    /// key and the manifest carries no delegation certificate.
+    SelfPublished,
+    /// The publisher key derived from this seed certifies the build signing
+    /// key. This is the form the image build uses, so the certificate path is
+    /// the one every boot exercises.
+    Delegating(&'a [u8; 32]),
+    /// A publisher key and certificate supplied verbatim, with the manifest
+    /// signature still computed over the result.
+    ///
+    /// This composes the adversarial bundles the load gate must refuse — a
+    /// certificate lifted from another bundle or another signing key — as
+    /// *validly signed* manifests, so the refusal has to come from the
+    /// publisher check rather than from the signature that would otherwise
+    /// catch a crude byte-splice first.
+    Certificate {
+        /// The publisher key the manifest claims.
+        pubkey: [u8; 32],
+        /// The delegation certificate offered for that claim.
+        cert: [u8; 64],
+    },
+}
+
 /// A composed, signed wire `AppInfo` plus the public key it was signed
 /// with — the trust anchor a verifier must hold to admit the bundle.
 pub struct ComposedAppInfo {
@@ -480,6 +511,10 @@ pub struct ComposedAppInfo {
     pub bytes: Vec<u8>,
     /// The Ed25519 public key derived from the signing seed.
     pub signer_pubkey: [u8; 32],
+    /// The Ed25519 public key derived from the publisher seed — the
+    /// developer identity the bundle's per-app state is owned by, which the
+    /// composed delegation certificate binds the signing key to.
+    pub publisher_pubkey: [u8; 32],
 }
 
 /// Compose and Ed25519-sign a bundle's wire `AppInfo` from its manifest
@@ -492,12 +527,21 @@ pub struct ComposedAppInfo {
 /// exactly the message the verifier reconstructs, so a tampered file *or*
 /// a swapped capability id breaks the bundle.
 ///
+/// `publisher` is the developer identity the bundle's per-app state is owned
+/// by. A [`PublisherSource::Delegating`] publisher signs a certificate over
+/// [`AppInfoHeader::publisher_cert_message`], so the build signing key is
+/// provably the publisher's choice for *this* bundle and may be rotated on a
+/// later release without the app losing its stored state. Both publisher
+/// fields sit inside the region the manifest signature covers, so neither can
+/// be swapped behind a valid signature.
+///
 /// # Errors
 ///
 /// Fails closed on an invalid contents list (unsorted, duplicate, or
 /// escaping path) or a manifest that violates the wire bounds.
 pub fn compose_signed_appinfo(
     seed: &[u8; 32],
+    publisher: PublisherSource<'_>,
     manifest: &AppManifestSource,
     syscall_table_hash: [u8; 32],
     contents: &[BundleFileDigest<'_>],
@@ -510,6 +554,15 @@ pub fn compose_signed_appinfo(
 
     let signing_key = SigningKey::from_bytes(seed);
     let signer_pubkey: [u8; 32] = signing_key.verifying_key().to_bytes();
+    let publisher_key = match publisher {
+        PublisherSource::SelfPublished | PublisherSource::Certificate { .. } => None,
+        PublisherSource::Delegating(publisher_seed) => Some(SigningKey::from_bytes(publisher_seed)),
+    };
+    let publisher_pubkey: [u8; 32] = match (&publisher_key, publisher) {
+        (Some(key), _) => key.verifying_key().to_bytes(),
+        (None, PublisherSource::Certificate { pubkey, .. }) => pubkey,
+        (None, _) => signer_pubkey,
+    };
 
     let capability_count = u16::try_from(manifest.capabilities.len())
         .map_err(|_| AppImageError::new(ctx, "too many capabilities"))?;
@@ -547,7 +600,22 @@ pub fn compose_signed_appinfo(
         syscall_table_hash,
         content_hash,
         signer_pubkey,
+        publisher_pubkey,
+        publisher_cert: match publisher {
+            PublisherSource::Certificate { cert, .. } => cert,
+            _ => [0; 64],
+        },
         signature: [0; 64],
+    };
+    // The certificate signs a message naming both this bundle and the key it
+    // delegates to, so it cannot be lifted onto another bundle or key. A
+    // self-published bundle has nothing to delegate and leaves it zero.
+    let header = match publisher_key {
+        None => header,
+        Some(key) => AppInfoHeader {
+            publisher_cert: key.sign(&header.publisher_cert_message()).to_bytes(),
+            ..header
+        },
     };
 
     let mut bytes = Vec::with_capacity(
@@ -582,6 +650,7 @@ pub fn compose_signed_appinfo(
     Ok(ComposedAppInfo {
         bytes,
         signer_pubkey,
+        publisher_pubkey,
     })
 }
 
@@ -601,7 +670,7 @@ fn inline_buf<const N: usize>(value: &str) -> [u8; N] {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tairix_abi::{decode_capability_ids, mime_type_at};
+    use tairix_abi::{decode_capability_ids, mime_type_at, PublisherBinding};
     use tairix_crypto::{Ed25519PublicKey, Ed25519Signature};
 
     const GOOD: &str = "# a comment\n\
@@ -872,8 +941,15 @@ mod tests {
             path: "Run",
             bytes: b"program bytes",
         };
-        let composed =
-            compose_signed_appinfo(&seed, &manifest, syscall_hash, &[run]).expect("composes");
+        let publisher_seed = [11u8; 32];
+        let composed = compose_signed_appinfo(
+            &seed,
+            PublisherSource::Delegating(&publisher_seed),
+            &manifest,
+            syscall_hash,
+            &[run],
+        )
+        .expect("composes");
 
         // The wire manifest decodes and carries the source's identity.
         let header = AppInfoHeader::from_bytes(&composed.bytes).expect("decodes");
@@ -884,6 +960,8 @@ mod tests {
         assert_eq!(header.library_icon(), None);
         assert_eq!(header.syscall_table_hash, syscall_hash);
         assert_eq!(header.signer_pubkey, composed.signer_pubkey);
+        assert_eq!(header.publisher_pubkey, composed.publisher_pubkey);
+        assert_eq!(header.publisher_binding(), Ok(PublisherBinding::Delegated));
 
         // The capability body decodes to the requested set.
         let body = &composed.bytes[AppInfoHeader::WIRE_LEN..];
@@ -925,11 +1003,79 @@ mod tests {
         assert_ne!(header.content_hash, sha256(&other_framing));
     }
 
+    /// The composed certificate is the publisher's real signature over the
+    /// message the load gate reconstructs — so what the build signs and what
+    /// the gate verifies are the same bytes, and a rotated signing key still
+    /// carries the same publisher.
+    #[test]
+    fn the_composed_certificate_delegates_this_bundle_to_this_signing_key() {
+        let manifest = AppManifestSource::parse(GOOD).expect("valid");
+        let publisher_seed = [11u8; 32];
+        let compose = |seed: &[u8; 32]| {
+            compose_signed_appinfo(
+                seed,
+                PublisherSource::Delegating(&publisher_seed),
+                &manifest,
+                [0xAB; 32],
+                &[BundleFileDigest {
+                    path: "Run",
+                    bytes: b"program bytes",
+                }],
+            )
+            .expect("composes")
+        };
+
+        let first = compose(&[7u8; 32]);
+        let header = AppInfoHeader::from_bytes(&first.bytes).expect("decodes");
+        let key = Ed25519PublicKey::from_bytes(&header.publisher_pubkey).expect("publisher key");
+        assert!(key
+            .verify(
+                &header.publisher_cert_message(),
+                &Ed25519Signature(header.publisher_cert)
+            )
+            .is_ok());
+
+        // A different build key, the same developer: a new certificate, the
+        // same publisher identity.
+        let next = compose(&[21u8; 32]);
+        let next_header = AppInfoHeader::from_bytes(&next.bytes).expect("decodes");
+        assert_ne!(next.signer_pubkey, first.signer_pubkey);
+        assert_ne!(next_header.publisher_cert, header.publisher_cert);
+        assert_eq!(next.publisher_pubkey, first.publisher_pubkey);
+    }
+
+    /// A self-published bundle has nothing to delegate: the publisher key is
+    /// the signing key and the certificate stays zero, so the gate checks no
+    /// second signature.
+    #[test]
+    fn a_self_published_composition_carries_no_certificate() {
+        let manifest = AppManifestSource::parse(GOOD).expect("valid");
+        let composed = compose_signed_appinfo(
+            &[7u8; 32],
+            PublisherSource::SelfPublished,
+            &manifest,
+            [0xAB; 32],
+            &[BundleFileDigest {
+                path: "Run",
+                bytes: b"program bytes",
+            }],
+        )
+        .expect("composes");
+        let header = AppInfoHeader::from_bytes(&composed.bytes).expect("decodes");
+        assert_eq!(composed.publisher_pubkey, composed.signer_pubkey);
+        assert_eq!(header.publisher_cert, [0u8; 64]);
+        assert_eq!(
+            header.publisher_binding(),
+            Ok(PublisherBinding::SelfPublished)
+        );
+    }
+
     #[test]
     fn a_listed_applications_folder_and_icon_survive_composition() {
         let manifest = AppManifestSource::parse(&listed()).expect("valid");
         let composed = compose_signed_appinfo(
             &[3u8; 32],
+            PublisherSource::Delegating(&[4u8; 32]),
             &manifest,
             [0xCD; 32],
             &[BundleFileDigest {
@@ -965,6 +1111,7 @@ mod tests {
         let manifest = AppManifestSource::parse(&text).expect("valid");
         let composed = compose_signed_appinfo(
             &[9u8; 32],
+            PublisherSource::Delegating(&[10u8; 32]),
             &manifest,
             [0x11; 32],
             &[BundleFileDigest {
@@ -1013,6 +1160,13 @@ mod tests {
                 bytes: b"",
             },
         ];
-        assert!(compose_signed_appinfo(&[7u8; 32], &manifest, [0; 32], &unsorted).is_err());
+        assert!(compose_signed_appinfo(
+            &[7u8; 32],
+            PublisherSource::Delegating(&[8u8; 32]),
+            &manifest,
+            [0; 32],
+            &unsorted
+        )
+        .is_err());
     }
 }

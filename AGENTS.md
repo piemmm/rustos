@@ -542,6 +542,7 @@ tairix/
 │   ├── abi/             # Stable user/kernel ABI types.
 │   ├── abi-sys/         # C-callable abi-v1 syscall stub runtime (non-Rust progs).
 │   ├── abi-trap/        # The single per-arch user->kernel syscall trap carve-out.
+│   ├── appconf/         # Per-app `key = value` configuration document engine.
 │   ├── appload/         # Application-bundle load gate.
 │   ├── binfmt/          # Read-only executable-container decoder (rxe/ELF64/wasm).
 │   ├── blkclient/       # Block-service client (RemoteBlock + its RtBlkCall transport).
@@ -1381,6 +1382,7 @@ You are not exempt from any rule above. In addition:
     | Process spawn, userland multitasking | `plans/SPAWN.md` |
     | Lightweight threads: threads within a process, the thread-group model, the futex, per-thread thread pointers | `plans/THREADS.md` |
     | App bundles, command apps, help, command resolution | `plans/APPS.md`; `plans/UNIVERSAL.md` (multi-arch/Wasm distribution) |
+    | App settings, secrets, blobs and temporary files: the per-app store keyed on bundle id, the publisher pin, the `key = value` format engine, the sealed scope, descriptor-backed blobs | `plans/APPDATA.md` |
     | Default desktop apps going live: app windows, live app data channels, the file picker | `plans/APPWIN.md` |
     | The graphical file manager (`files.app`): clickable icons, open/launch, rename, move/copy/delete, properties | `plans/NEW-FILEMANAGER.md` |
     | Desktop responsiveness: non-blocking app launch (no UI freeze while an app loads), asynchronous process launch | `plans/FIX-DESKTOP.md` |

@@ -75,8 +75,9 @@ use tairix_abi::window_ipc::{
     AppMenuMark, AppMenuRow, WindowEvent, WindowRequest,
 };
 use tairix_abi::{
-    AppInfoHeader, IpcMessageHeader, LoadImage, ManifestHeader, NeededLibrary, PortName,
-    ReadyCondition, ServiceLimit, ServiceManifest, ServiceUnit, SYSCALL_TABLE_HASH_LEN,
+    AppInfoHeader, IpcMessageHeader, LoadImage, ManifestHeader, NeededLibrary, Origin, PortName,
+    ReadyCondition, ServiceLimit, ServiceManifest, ServiceUnit, PUBLISHER_CERT_CONTEXT,
+    PUBLISHER_ID_CONTEXT, SYSCALL_TABLE_HASH_LEN,
 };
 
 /// Fixed CFI tag fed to [`LoadImage::parse`] in the harness. A random input
@@ -552,6 +553,29 @@ fn exercise(bytes: &[u8]) {
         let redecoded = AppInfoHeader::from_bytes(&header.to_le_bytes())
             .expect("round-trip of an accepted header must succeed");
         assert_eq!(header, redecoded);
+        // The publisher classification is total over every decodable
+        // manifest, and both derived messages are fixed-size and labelled,
+        // so a hostile header can neither panic nor produce an unlabelled
+        // message some other signature could be replayed into.
+        let _ = header.publisher_binding();
+        assert!(header
+            .publisher_cert_message()
+            .starts_with(PUBLISHER_CERT_CONTEXT));
+        assert!(header
+            .publisher_id_preimage()
+            .starts_with(PUBLISHER_ID_CONTEXT));
+    }
+    if let Ok(origin) = Origin::from_bytes(bytes) {
+        let redecoded = Origin::from_bytes(&origin.to_le_bytes())
+            .expect("round-trip of an accepted origin must succeed");
+        assert_eq!(origin, redecoded);
+        // An accepted origin's app identity is whole or absent, never half:
+        // the identifier is inside the grammar that keeps it a legal store
+        // name, and it never appears without a publisher to own it.
+        if let Some(app) = origin.app() {
+            assert!(tairix_abi::validate_bundle_id(app.bundle_id()).is_ok());
+            assert!(!app.publisher().is_none());
+        }
     }
     if let Ok(header) = SysinfoRequestHeader::from_bytes(bytes) {
         let redecoded = SysinfoRequestHeader::from_bytes(&header.to_le_bytes())

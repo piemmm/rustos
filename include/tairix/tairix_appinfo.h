@@ -16,6 +16,7 @@
 #define TAIRIX_APPINFO_H
 
 #include <stdint.h>
+#include "tairix_manifest.h"
 
 /* Magic word identifying an abi-v1 AppInfo manifest ("RAI1" little-endian). */
 #define TAIRIX_APPINFO_MAGIC 0x31494152u
@@ -35,8 +36,12 @@
 #define TAIRIX_MIME_ENTRY_LEN 65u
 /* Maximum length, in bytes, of a bundle's library icon asset name. */
 #define TAIRIX_LIBRARY_ICON_MAX 64u
+/* Maximum length, in bytes, of a bundle's one-line purpose. */
+#define TAIRIX_BUNDLE_PURPOSE_MAX 96u
+/* Maximum length, in bytes, of a bundle's author attribution. */
+#define TAIRIX_BUNDLE_AUTHOR_MAX 64u
 /* Packed little-endian wire size of an AppInfo header, in bytes. */
-#define TAIRIX_APPINFO_HEADER_WIRE_LEN 568u
+#define TAIRIX_APPINFO_HEADER_WIRE_LEN 664u
 
 /* Curated, OS-provided shared-library directory (AGENTS.md sec.16.4). */
 #define TAIRIX_SYSTEM_LIBRARIES_DIR "/System/Libraries"
@@ -80,15 +85,20 @@ typedef struct tairix_appinfo_header {
     uint8_t version_len;
     uint8_t library_icon_len;
     uint8_t library;
-    uint8_t reserved0[3];
+    uint8_t purpose_len;
+    uint8_t author_len;
+    uint8_t reserved0[1];
     uint8_t id[TAIRIX_BUNDLE_ID_MAX];
     uint8_t name[TAIRIX_BUNDLE_NAME_MAX];
     uint8_t version[TAIRIX_BUNDLE_VERSION_MAX];
     uint8_t library_icon[TAIRIX_LIBRARY_ICON_MAX];
-    uint8_t syscall_table_hash[32];
+    uint8_t purpose[TAIRIX_BUNDLE_PURPOSE_MAX];
+    uint8_t author[TAIRIX_BUNDLE_AUTHOR_MAX];
+    uint8_t syscall_table_hash[TAIRIX_SYSCALL_TABLE_HASH_LEN];
     uint8_t content_hash[32];
     uint8_t signer_pubkey[32];
+    uint8_t publisher_pubkey[32];
+    uint8_t publisher_cert[64];
     uint8_t signature[64];
 } tairix_appinfo_header_t;
-
 #endif /* TAIRIX_APPINFO_H */

@@ -7820,3 +7820,49 @@ future contributor needs from this file:
 - **Remaining:** the userland surface (`ln`, `ls -l`, `lib/browse`, `fstree`,
   a `posix_fs_suite` vertical) and the desktop shortcut. Each carries its own
   gate.
+
+---
+
+## APPDATA — per-app settings, secrets, blobs and temporary files (`plans/APPDATA.md`)  **[AD1–AD3 DONE; AD4–AD10 REMAINING]**
+
+`plans/APPDATA.md` is the binding design and carries the settled decisions,
+the fixed bounds, and the per-stage state; it is not repeated here. What a
+future contributor needs from this file:
+
+- **Why it exists.** Every app writes a settings file of its own choosing
+  under the launching user's home with `CAP_FS_ACCESS`, so any app a user
+  launches can read and rewrite every other app's settings. The filesystem
+  permission model cannot fix this: it keys on uid, and all of a user's apps
+  share one uid. **App-from-app isolation within a single user is not
+  expressible with per-inode owner/mode/ACL at all**, which is why a gating
+  service is required rather than a tighter mode bit.
+- **The foundation is attested app identity.** A service can only enforce
+  "only this app may touch this app's data" if the kernel tells it which app
+  is calling. `Origin` now carries an `AppIdentity` — the signed bundle
+  identifier and the publisher the load gate verified — for every principal
+  the kernel admitted from a signed bundle, and nothing for one it did not.
+- **Ownership is pinned to the developer, not the build key.** The manifest
+  names a stable `publisher_pubkey` and, when the two differ, a
+  `publisher_cert` delegating the per-build signing key. A release re-signed
+  with a fresh key keeps its data; a different developer claiming the same
+  identifier is refused. The first-party build itself delegates, so the
+  certificate path is on the path every boot takes.
+- **Landed (AD1–AD3):** the two manifest fields with their labelled
+  certificate and identity preimages, the fourth authenticity check in
+  `lib/appload`, `AppInfoHeader`'s `#[repr(C)]` layout pinned to its wire
+  layout field by field (it had silently diverged, and the generated C mirror
+  with it), `validate_bundle_id`, `AppIdentity` on the kernel capability
+  record and on `Origin`, and `lib/appconf` — the `key = value` document
+  engine whose rewrite preserves comments, blank lines, key order, and lines
+  it did not understand.
+- **Remaining:** `confd` and the gated store tree with its ownership pin
+  (AD4), the `lib/appdata` client and the first migration (AD5), the public
+  scope (AD6), the sealed scope and its key-protector seam (AD7),
+  descriptor-backed blobs (AD8), temporary files and their reaping (AD9), and
+  the remaining migrations plus the charter amendments (AD10).
+- **A boot-floor program has no app identity.** The embedded program registry
+  carries an `rxe` and a capability request, not a signed manifest, so a
+  program launched from it cannot be attributed to a publisher and gets no
+  store. On aarch64 only PID 1 is embedded; on the ports whose storage floor
+  has not landed the consequence is wider, and the fix is those floors
+  (`plans/ARCHSUPPORT.md`), not a fabricated identity.

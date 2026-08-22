@@ -23,6 +23,7 @@
 //! with its [`TrustDomain`] classification and the non-secret
 //! [`CapabilitySummary`] it carries.
 
+use crate::appinfo::{BundleId, PublisherId, BUNDLE_ID_MAX, PUBLISHER_ID_LEN};
 use crate::capability::{CapabilityId, CapabilityQuery};
 use crate::le::{put_u32, put_u64, read_u32, read_u64};
 
@@ -219,8 +220,67 @@ impl CapabilityQuery for CapabilitySummary {
     }
 }
 
+/// The kernel-attested identity of the *application* a principal is running.
+///
+/// A process instance answers "which user, which process"; this answers
+/// "which app". The pair is what per-app state is addressed by: the
+/// [`bundle_id`](Self::bundle_id) names the store and the
+/// [`publisher`](Self::publisher) owns it, so a release re-signed with a
+/// fresh build key reaches the same data and a different developer claiming
+/// the same identifier does not.
+///
+/// Both halves come from the manifest the load gate verified, so the kernel
+/// attests them from its own state and a caller can neither forge another
+/// app's identity nor mint one. Holding an `AppIdentity` is proof that the
+/// identifier is inside the [`crate::validate_bundle_id`] grammar — it names
+/// a directory in every user's store, so a value that could traverse out of
+/// one cannot be constructed — and that the publisher is a real identity
+/// rather than the [`PublisherId::NONE`] sentinel. A principal that is not
+/// running a verified bundle has **no** `AppIdentity` at all
+/// ([`Origin::app`] answers [`None`]), never a half-filled one.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct AppIdentity {
+    bundle_id: BundleId,
+    publisher: PublisherId,
+}
+
+impl AppIdentity {
+    /// Build an app identity from a verified manifest's identifier and
+    /// publisher.
+    ///
+    /// # Errors
+    ///
+    /// Whatever [`crate::validate_bundle_id`] refuses, plus
+    /// [`Errno::OutOfRange`](crate::Errno::OutOfRange) for the
+    /// [`PublisherId::NONE`] sentinel — an identity with no publisher is the
+    /// absence of an identity, which is spelled [`None`], not constructed.
+    pub fn new(bundle_id: &str, publisher: PublisherId) -> crate::Result<Self> {
+        crate::validate_bundle_id(bundle_id)?;
+        if publisher.is_none() {
+            return Err(crate::Errno::OutOfRange);
+        }
+        Ok(Self {
+            bundle_id: BundleId::new(bundle_id)?,
+            publisher,
+        })
+    }
+
+    /// The signed bundle identifier — the name of this app's store.
+    #[must_use]
+    pub fn bundle_id(&self) -> &str {
+        self.bundle_id.as_str()
+    }
+
+    /// The developer identity that owns this app's stored state.
+    #[must_use]
+    pub const fn publisher(&self) -> PublisherId {
+        self.publisher
+    }
+}
+
 /// Length, in bytes, of the [`Origin`] wire encoding.
-pub const ORIGIN_WIRE_LEN: usize = 1 + 4 + 4 + 8 + PROC_ID_LEN + CAPABILITY_SUMMARY_LEN + 8;
+pub const ORIGIN_WIRE_LEN: usize =
+    1 + 4 + 4 + 8 + PROC_ID_LEN + CAPABILITY_SUMMARY_LEN + 8 + 1 + BUNDLE_ID_MAX + PUBLISHER_ID_LEN;
 
 /// Sentinel [`Origin::console`] value for a principal whose standard
 /// streams are not backed by an installed console (a driver process, a
@@ -267,6 +327,7 @@ pub struct Origin {
     proc_id: ProcId,
     capabilities: CapabilitySummary,
     console: u64,
+    app: Option<AppIdentity>,
 }
 
 impl Origin {
@@ -293,7 +354,33 @@ impl Origin {
             proc_id,
             capabilities,
             console,
+            app: None,
         }
+    }
+
+    /// Attach the attested identity of the application this principal is
+    /// running, consumed and returned so the kernel's attestation can set it
+    /// inline.
+    ///
+    /// Absent by default, which is the honest answer for every principal that
+    /// is not a verified bundle — a kernel thread, a boot-floor program with
+    /// no signed manifest, a parser-sandbox child — and the one that fails
+    /// closed: no identity means no per-app store.
+    #[must_use]
+    pub const fn with_app(mut self, app: AppIdentity) -> Self {
+        self.app = Some(app);
+        self
+    }
+
+    /// The attested identity of the application this principal is running, or
+    /// [`None`] when it is not running a verified bundle.
+    ///
+    /// A service that serves per-app state keys on this and refuses a caller
+    /// that has none: there is no request shape by which a principal can name
+    /// an app it is not.
+    #[must_use]
+    pub const fn app(&self) -> Option<&AppIdentity> {
+        self.app.as_ref()
     }
 
     /// The principal's attested trust domain.
@@ -347,6 +434,10 @@ impl Origin {
     }
 
     /// Encode the `Origin` little-endian into a fixed-size buffer.
+    ///
+    /// An absent [`app`](Self::app) encodes as a zero identifier length with
+    /// a zeroed buffer and the [`PublisherId::NONE`] sentinel, so "no app" is
+    /// one canonical image rather than any of several.
     #[must_use]
     pub fn to_le_bytes(&self) -> [u8; ORIGIN_WIRE_LEN] {
         let mut out = [0u8; ORIGIN_WIRE_LEN];
@@ -357,6 +448,13 @@ impl Origin {
         out[17..33].copy_from_slice(self.proc_id.as_bytes());
         out[33..65].copy_from_slice(self.capabilities.as_bytes());
         put_u64(&mut out, 65, self.console);
+        if let Some(app) = &self.app {
+            out[OFF_BUNDLE_ID_LEN] = app.bundle_id.len_byte();
+            out[OFF_BUNDLE_ID..OFF_BUNDLE_ID + BUNDLE_ID_MAX]
+                .copy_from_slice(app.bundle_id.raw_bytes());
+            out[OFF_PUBLISHER..OFF_PUBLISHER + PUBLISHER_ID_LEN]
+                .copy_from_slice(app.publisher.as_bytes());
+        }
         out
     }
 
@@ -366,7 +464,10 @@ impl Origin {
     /// if `bytes` is not exactly [`ORIGIN_WIRE_LEN`] long, and
     /// [`Errno::OutOfRange`](crate::Errno::OutOfRange) if the trust-domain
     /// discriminant is not a defined variant — never guessing at a malformed
-    /// record.
+    /// record. The app-identity tail is re-validated through
+    /// [`AppIdentity::new`], so a decoded `Origin` can only ever carry a
+    /// well-formed identity or none; a half-filled one (an identifier with no
+    /// publisher, or the reverse) is a refusal, not a guess.
     pub fn from_bytes(bytes: &[u8]) -> crate::Result<Self> {
         if bytes.len() != ORIGIN_WIRE_LEN {
             return Err(crate::Errno::LengthOutOfRange);
@@ -379,6 +480,7 @@ impl Origin {
         let mut caps = [0u8; CAPABILITY_SUMMARY_LEN];
         caps.copy_from_slice(&bytes[33..65]);
         let console = read_u64(bytes, 65);
+        let app = decode_app_identity(bytes)?;
         Ok(Self {
             trust_domain,
             uid,
@@ -387,15 +489,48 @@ impl Origin {
             proc_id,
             capabilities: CapabilitySummary::from_raw(caps),
             console,
+            app,
         })
     }
+}
+
+/// Wire offset of the app-identity tail's identifier length byte.
+const OFF_BUNDLE_ID_LEN: usize = 73;
+/// Wire offset of the app-identity tail's fixed-width identifier buffer.
+const OFF_BUNDLE_ID: usize = OFF_BUNDLE_ID_LEN + 1;
+/// Wire offset of the app-identity tail's publisher identity.
+const OFF_PUBLISHER: usize = OFF_BUNDLE_ID + BUNDLE_ID_MAX;
+
+/// Decode the app-identity tail of an [`Origin`] wire image.
+///
+/// The absent form is the one canonical image: a zero length, a zeroed
+/// identifier buffer, and [`PublisherId::NONE`]. Every other combination is
+/// either a well-formed identity or a refusal — there is no reading under
+/// which a decoded `Origin` carries half an identity.
+fn decode_app_identity(bytes: &[u8]) -> crate::Result<Option<AppIdentity>> {
+    let len = usize::from(bytes[OFF_BUNDLE_ID_LEN]);
+    let mut publisher = [0u8; PUBLISHER_ID_LEN];
+    publisher.copy_from_slice(&bytes[OFF_PUBLISHER..OFF_PUBLISHER + PUBLISHER_ID_LEN]);
+    let publisher = PublisherId::from_raw(publisher);
+    let id = &bytes[OFF_BUNDLE_ID..OFF_BUNDLE_ID + BUNDLE_ID_MAX];
+    if len == 0 && publisher.is_none() {
+        if id.iter().any(|&b| b != 0) {
+            return Err(crate::Errno::BadMagic);
+        }
+        return Ok(None);
+    }
+    if len > BUNDLE_ID_MAX || id[len..].iter().any(|&b| b != 0) {
+        return Err(crate::Errno::BadMagic);
+    }
+    let text = core::str::from_utf8(&id[..len]).map_err(|_| crate::Errno::OutOfRange)?;
+    AppIdentity::new(text, publisher).map(Some)
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        CapabilitySummary, Origin, ProcId, TrustDomain, ORIGIN_WIRE_LEN, PROC_ID_HEX_LEN,
-        PROC_ID_LEN,
+        AppIdentity, CapabilitySummary, Origin, ProcId, PublisherId, TrustDomain, ORIGIN_WIRE_LEN,
+        PROC_ID_HEX_LEN, PROC_ID_LEN,
     };
     use crate::capability::CapabilityQuery;
     use crate::{CapabilityId, Errno};
@@ -545,6 +680,94 @@ mod tests {
         let mut bytes = sample_origin().to_le_bytes();
         bytes[0] = 7; // not a defined TrustDomain variant
         assert_eq!(Origin::from_bytes(&bytes), Err(Errno::OutOfRange));
+    }
+
+    /// An app identity is either whole or absent. A caller cannot construct
+    /// one that names a directory it has no right to, nor one with no owner.
+    #[test]
+    fn an_app_identity_is_whole_or_absent() {
+        let publisher = PublisherId::from_raw([0x5A; 32]);
+        let identity = AppIdentity::new("os.tairix.terminal", publisher).expect("well formed");
+        assert_eq!(identity.bundle_id(), "os.tairix.terminal");
+        assert_eq!(identity.publisher(), publisher);
+
+        assert_eq!(
+            AppIdentity::new("os.tairix.terminal", PublisherId::NONE),
+            Err(Errno::OutOfRange),
+            "an identity with no owner is the absence of an identity"
+        );
+        for hostile in [
+            "",
+            "..",
+            "../../etc",
+            "os/tairix",
+            "OS.Tairix",
+            "os..tairix",
+        ] {
+            assert!(
+                AppIdentity::new(hostile, publisher).is_err(),
+                "`{hostile}` must never name a store"
+            );
+        }
+    }
+
+    #[test]
+    fn origin_round_trips_an_app_identity() {
+        let publisher = PublisherId::from_raw([0x5A; 32]);
+        let identity = AppIdentity::new("os.tairix.terminal", publisher).expect("well formed");
+        let origin = sample_origin().with_app(identity);
+        let decoded = Origin::from_bytes(&origin.to_le_bytes()).expect("decodes");
+        assert_eq!(decoded, origin);
+        assert_eq!(decoded.app(), Some(&identity));
+    }
+
+    #[test]
+    fn an_origin_with_no_app_reads_absent() {
+        let origin = sample_origin();
+        assert_eq!(origin.app(), None);
+        let decoded = Origin::from_bytes(&origin.to_le_bytes()).expect("decodes");
+        assert_eq!(decoded.app(), None);
+    }
+
+    /// A half-filled or dirty app tail is refused rather than read as an
+    /// identity: a store that keyed on one of these would serve the wrong
+    /// app's data.
+    #[test]
+    fn a_malformed_app_tail_is_refused() {
+        let publisher = PublisherId::from_raw([0x5A; 32]);
+        let identity = AppIdentity::new("os.tairix.terminal", publisher).expect("well formed");
+        let whole = sample_origin().with_app(identity).to_le_bytes();
+
+        // An identifier with no publisher, and a publisher with no identifier.
+        let mut orphan_id = whole;
+        orphan_id[super::OFF_PUBLISHER..].fill(0);
+        assert_eq!(Origin::from_bytes(&orphan_id), Err(Errno::OutOfRange));
+
+        let mut orphan_publisher = whole;
+        orphan_publisher[super::OFF_BUNDLE_ID_LEN] = 0;
+        orphan_publisher[super::OFF_BUNDLE_ID..super::OFF_PUBLISHER].fill(0);
+        assert_eq!(
+            Origin::from_bytes(&orphan_publisher),
+            Err(Errno::LengthOutOfRange)
+        );
+
+        // A non-zero tail beyond the stated length, in both forms.
+        let mut dirty = whole;
+        dirty[super::OFF_PUBLISHER - 1] = 0xAA;
+        assert_eq!(Origin::from_bytes(&dirty), Err(Errno::BadMagic));
+
+        let mut dirty_absent = sample_origin().to_le_bytes();
+        dirty_absent[super::OFF_BUNDLE_ID] = 0xAA;
+        assert_eq!(Origin::from_bytes(&dirty_absent), Err(Errno::BadMagic));
+
+        // An identifier that decodes but is outside the grammar.
+        let mut traversal = whole;
+        let escape = b"..";
+        traversal[super::OFF_BUNDLE_ID_LEN] = u8::try_from(escape.len()).expect("short");
+        traversal[super::OFF_BUNDLE_ID..super::OFF_PUBLISHER].fill(0);
+        traversal[super::OFF_BUNDLE_ID..super::OFF_BUNDLE_ID + escape.len()]
+            .copy_from_slice(escape);
+        assert_eq!(Origin::from_bytes(&traversal), Err(Errno::OutOfRange));
     }
 
     #[test]

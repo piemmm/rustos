@@ -128,6 +128,8 @@ pub(crate) fn test_manifest(
         syscall_table_hash: [0xAB; 32],
         content_hash: [0xCD; 32],
         signer_pubkey: [0xEF; 32],
+        publisher_pubkey: [0xEF; 32],
+        publisher_cert: [0; 64],
         signature: [0x99; 64],
     }
     .to_le_bytes()

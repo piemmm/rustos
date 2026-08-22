@@ -25,7 +25,9 @@ use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
 
-use tairix_abi::{CapabilitySummary, Errno, Origin, ProcId, TrustDomain, ORIGIN_CONSOLE_NONE};
+use tairix_abi::{
+    AppIdentity, CapabilitySummary, Errno, Origin, ProcId, TrustDomain, ORIGIN_CONSOLE_NONE,
+};
 use tairix_caps::{CapabilitySet, CapabilityToken, RevocationEpoch};
 use tairix_crypto::Ed25519PublicKey;
 use tairix_log::{Field, Sink};
@@ -322,6 +324,16 @@ pub struct TaskCapabilities {
     /// that reused a numeric id even within one monotonic epoch. It confers no
     /// capability.
     start_time: u64,
+    /// Kernel-attested identity of the *application* this task is running:
+    /// the signed bundle identifier and the publisher the load gate verified
+    /// it belongs to. [`None`] — no per-app store at all — for every
+    /// principal that is not a verified bundle: a kernel thread, a boot-floor
+    /// program with no signed manifest, a parser-sandbox child. The
+    /// deferred-load path sets it through [`Self::with_app_identity`] from
+    /// the `LoadedApp` the gate produced, so it is kernel-verified state and
+    /// never a caller's claim about which app it is. It confers no
+    /// capability; it is the identity a per-app store keys and owns data by.
+    app: Option<AppIdentity>,
     /// Kernel-attested installed-console index backing the task's standard
     /// streams. Defaults to [`ORIGIN_CONSOLE_NONE`], the sentinel for a task
     /// whose streams are not console-backed (a driver process, a kernel
@@ -423,6 +435,7 @@ impl TaskCapabilities {
             parent_proc_id: ProcId::KERNEL,
             name: ProcName::EMPTY,
             spawn_path: Vec::new(),
+            app: None,
             start_time: 0,
             console: ORIGIN_CONSOLE_NONE,
             io_bytes_read: Arc::new(AtomicU64::new(0)),
@@ -598,6 +611,28 @@ impl TaskCapabilities {
         &self.spawn_path
     }
 
+    /// Attach the kernel-verified identity of the application this task is
+    /// running, consumed and returned like [`Self::with_proc_id`].
+    ///
+    /// Only the deferred-load path calls it, passing the identity the shared
+    /// load gate attested from the signed manifest it verified — never a
+    /// caller-supplied value, and never before the manifest verified. A
+    /// record never given one carries no app identity, which is what a
+    /// per-app store refuses; that is the correct answer for every principal
+    /// the kernel did not admit from a signed bundle.
+    #[must_use]
+    pub fn with_app_identity(mut self, app: AppIdentity) -> Self {
+        self.app = Some(app);
+        self
+    }
+
+    /// The kernel-verified identity of the application this task is running,
+    /// or [`None`] when it was not admitted from a signed bundle.
+    #[must_use]
+    pub fn app_identity(&self) -> Option<&AppIdentity> {
+        self.app.as_ref()
+    }
+
     /// Attach the kernel-attested monotonic admission timestamp to this
     /// record.
     ///
@@ -727,6 +762,9 @@ impl TaskCapabilities {
     /// device-host records) and [`TrustDomain::User`] for a minted process
     /// instance. The capability summary is the effective set's wire image —
     /// the non-secret membership bitmap, carrying no capability *tokens*.
+    /// The app identity is present only for a task the kernel admitted from a
+    /// signed bundle, so a service that serves per-app state learns the truth
+    /// about its caller rather than a claim.
     #[must_use]
     pub fn attest_origin(&self) -> Origin {
         let trust_domain = if self.proc_id.is_kernel() {
@@ -735,7 +773,7 @@ impl TaskCapabilities {
             TrustDomain::User
         };
         let capabilities = CapabilitySummary::from_raw(self.effective.to_le_bytes());
-        Origin::new(
+        let origin = Origin::new(
             trust_domain,
             self.owner.0,
             self.primary_gid.0,
@@ -743,7 +781,11 @@ impl TaskCapabilities {
             self.proc_id,
             capabilities,
             self.console,
-        )
+        );
+        match self.app {
+            Some(app) => origin.with_app(app),
+            None => origin,
+        }
     }
 
     /// Currently effective capability set.
@@ -1515,6 +1557,49 @@ mod tests {
             .with_proc_id(ProcId::from_raw([0x5A; 16]))
             .with_credential(GroupId(77), alloc::vec![]);
         assert_eq!(proc.attest_origin().gid(), 77);
+    }
+
+    /// The app identity a record carries is the one the load gate attested,
+    /// and a record no gate gave one carries none — which is what a per-app
+    /// store refuses. There is no setter a task can reach and no default that
+    /// invents an identity.
+    #[test]
+    fn attest_origin_carries_the_verified_app_identity_or_none() {
+        use tairix_abi::{AppIdentity, ProcId, PublisherId};
+        let grant = caps_of(&[CapabilityId::FS_MOUNT]);
+        let sink = RecordingSink::new();
+        let base = TaskCapabilities::derive(ProcessId(51), UserId(1000), grant, grant, &sink)
+            .with_proc_id(ProcId::from_raw([0x5A; 16]));
+        assert_eq!(base.app_identity(), None);
+        assert_eq!(base.attest_origin().app(), None);
+
+        let identity = AppIdentity::new("os.tairix.terminal", PublisherId::from_raw([0x11; 32]))
+            .expect("well formed");
+        let admitted = base.clone().with_app_identity(identity);
+        assert_eq!(admitted.app_identity(), Some(&identity));
+        assert_eq!(admitted.attest_origin().app(), Some(&identity));
+        // The identity is attribution, never authority: attaching it grants
+        // nothing.
+        assert_eq!(admitted.effective(), base.effective());
+    }
+
+    /// A sandbox child is stripped of every capability, and an audit consumer
+    /// must still be able to attribute what it did. The identity therefore
+    /// survives the strip while the authority does not.
+    #[test]
+    fn sandboxing_strips_authority_and_keeps_attribution() {
+        use tairix_abi::{AppIdentity, ProcId, PublisherId};
+        let grant = caps_of(&[CapabilityId::FS_MOUNT]);
+        let sink = RecordingSink::new();
+        let identity = AppIdentity::new("os.tairix.fstree", PublisherId::from_raw([0x22; 32]))
+            .expect("well formed");
+        let sandboxed = TaskCapabilities::derive(ProcessId(52), UserId(1000), grant, grant, &sink)
+            .with_proc_id(ProcId::from_raw([0x6B; 16]))
+            .with_app_identity(identity)
+            .as_sandboxed();
+        assert!(sandboxed.is_sandboxed());
+        assert_eq!(sandboxed.effective(), &CapabilitySet::EMPTY);
+        assert_eq!(sandboxed.attest_origin().app(), Some(&identity));
     }
 
     #[test]

@@ -10287,6 +10287,25 @@ where
     }
 }
 
+/// What a child's verified program contributes to its kernel-attested
+/// capability record: the manifest's capability request, and the app identity
+/// the load gate attested from that same manifest.
+///
+/// The two travel together because they come from one source — the signed
+/// manifest the gate verified — so there is no path that installs a request
+/// without the identity that request belongs to. A boot-floor program has no
+/// signed manifest and so no identity: it carries [`None`], and a per-app
+/// store refuses it.
+#[derive(Clone, Debug, Default)]
+pub struct VerifiedProgram {
+    /// The manifest capability request the child's effective set is derived
+    /// from (`ceiling ∩ request`).
+    pub requested: CapabilitySet,
+    /// The app identity the load gate attested, or [`None`] for a program the
+    /// kernel did not admit from a signed bundle.
+    pub app: Option<tairix_abi::AppIdentity>,
+}
+
 /// Build a freshly spawned child's kernel-attested [`TaskCapabilities`]
 /// record from wholly kernel-resolved inputs.
 ///
@@ -10309,7 +10328,7 @@ where
 #[allow(clippy::too_many_arguments)]
 fn derive_task_record(
     sec_id: ProcessId,
-    manifest_request: CapabilitySet,
+    program: &VerifiedProgram,
     credential: &SpawnCredential,
     proc_id: ProcId,
     parent_proc_id: ProcId,
@@ -10320,6 +10339,7 @@ fn derive_task_record(
     sandbox: bool,
     audit: &dyn Sink,
 ) -> TaskCapabilities {
+    let manifest_request = program.requested;
     let record = match credential.ceiling {
         Some(ceiling) => {
             TaskCapabilities::derive(sec_id, credential.uid, ceiling, manifest_request, audit)
@@ -10343,6 +10363,10 @@ fn derive_task_record(
     )
     .with_start_time(start_time)
     .with_console(console);
+    let record = match program.app {
+        Some(app) => record.with_app_identity(app),
+        None => record,
+    };
     if sandbox {
         record.as_sandboxed()
     } else {
@@ -10447,12 +10471,12 @@ impl ChildRecordSeed {
     fn record(
         &self,
         sec_id: ProcessId,
-        manifest_request: CapabilitySet,
+        program: &VerifiedProgram,
         audit: &dyn Sink,
     ) -> TaskCapabilities {
         derive_task_record(
             sec_id,
-            manifest_request,
+            program,
             &self.credential,
             self.proc_id,
             self.parent_proc_id,
@@ -10636,14 +10660,14 @@ fn build_from_bytes(
     seed: &ChildRecordSeed,
     guard: Option<u64>,
     rxe: &[u8],
-    requested: CapabilitySet,
+    program: &VerifiedProgram,
     args: &[&[u8]],
     env: &[&[u8]],
 ) -> Result<ReadyToEnter, Errno> {
     // Install the effective capability record (replacing the admit-time
     // placeholder), so the running child is bounded by `ceiling ∩ manifest`
     // from the moment it can act, not the empty placeholder set.
-    let record = seed.record(sec_id, requested, services.audit());
+    let record = seed.record(sec_id, program, services.audit());
     services.caps().write().insert(record);
 
     let ctx = ServicesBuildCtx { services, guard };
@@ -10700,7 +10724,12 @@ fn build_child_image(
             seed,
             guard,
             rxe.as_ref(),
-            *requested,
+            // A boot-floor program carries no signed manifest, so there is no
+            // app identity to attest and it gets no per-app store.
+            &VerifiedProgram {
+                requested: *requested,
+                app: None,
+            },
             args,
             env,
         ),
@@ -10715,13 +10744,21 @@ fn build_child_image(
             let app = body_load_bundle(services, uid, &effective, bundle)?;
             // The build copies the image bytes before `app` is dropped at the
             // end of this arm, so the borrow of the retained image is sound.
+            let program = VerifiedProgram {
+                requested: *app.granted(),
+                // The identity the gate attested from the manifest it just
+                // verified. An identifier the `AppIdentity` grammar refuses
+                // yields no identity — so no per-app store — rather than a
+                // store named by something that could traverse out of one.
+                app: tairix_abi::AppIdentity::new(app.id(), app.publisher()).ok(),
+            };
             build_from_bytes(
                 services,
                 sec_id,
                 seed,
                 guard,
                 app.run_image(),
-                *app.granted(),
+                &program,
                 args,
                 env,
             )
@@ -10921,7 +10958,9 @@ where
         // Install the placeholder empty-capability record so the child's
         // first (loading) slice resolves a caller context yet can exercise no
         // authority before its effective set is derived and installed.
-        let placeholder = seed.record(sec_id, CapabilitySet::empty(), self.audit);
+        // Nothing is verified yet, so the placeholder carries neither a
+        // manifest request nor an app identity.
+        let placeholder = seed.record(sec_id, &VerifiedProgram::default(), self.audit);
         self.caps.write().insert(placeholder);
 
         // Establish the child's standard streams: the
@@ -16546,6 +16585,98 @@ mod tests {
             aspaces.read().contains(ProcessId(7)),
             "the built address space is registered before entry"
         );
+    }
+
+    /// The child of a verified store bundle carries the app identity the load
+    /// gate attested, so a per-app store learns *which app* is calling from
+    /// the kernel rather than from the caller. The identifier is the signed
+    /// one and the publisher is the verified developer, not the build key.
+    #[test]
+    fn a_store_bundle_child_is_attested_with_its_app_identity() {
+        install_trace_filter();
+        let (memfs, anchor, _run) = crate::test_bundle::composed_bundle(alloc::vec![]);
+        let memfs: &'static crate::test_bundle::MemFs = Box::leak(Box::new(memfs));
+        let store: &'static crate::appspawn::AppStore =
+            Box::leak(Box::new(crate::appspawn::AppStore::pending(anchor)));
+        store.note_available();
+        let frames: &'static FrameAllocator = Box::leak(Box::new(spawn_test_frames()));
+        let audit: &'static TestSink = Box::leak(Box::new(TestSink::new()));
+        let aspaces: &'static RwLock<AddressSpaceRegistry> =
+            Box::leak(Box::new(RwLock::new(AddressSpaceRegistry::new())));
+        let caps: &'static RwLock<CapTable> = Box::leak(Box::new(RwLock::new(CapTable::new())));
+        let builder: &'static RecordingImageBuilder =
+            Box::leak(Box::new(RecordingImageBuilder::new()));
+        let services =
+            leak_body_services(frames, audit, memfs, Some(store), aspaces, caps, builder);
+        let args: [&[u8]; 1] = [BUNDLE_COMMAND.as_bytes()];
+        build_child_image(
+            services,
+            ProcessId(9),
+            9,
+            &bundle_plan(),
+            &body_seed(),
+            None,
+            &args,
+            &[],
+        )
+        .expect("a verified store bundle loads");
+
+        let guard = caps.read();
+        let record = guard
+            .caps_for(SecTaskId(9))
+            .expect("effective record installed under the child id");
+        let identity = record
+            .app_identity()
+            .expect("a verified bundle child is attested with its app identity");
+        assert_eq!(identity.bundle_id(), "os.tairix.ps");
+        assert!(!identity.publisher().is_none());
+        // The same identity reaches a service through the attested origin.
+        assert_eq!(record.attest_origin().app(), Some(identity));
+    }
+
+    /// A boot-floor program has no signed manifest, so there is nothing to
+    /// attest and it carries no app identity — a per-app store refuses it
+    /// rather than serving a scope nothing owns.
+    #[test]
+    fn a_prebuilt_child_carries_no_app_identity() {
+        install_trace_filter();
+        let frames: &'static FrameAllocator = Box::leak(Box::new(spawn_test_frames()));
+        let audit: &'static TestSink = Box::leak(Box::new(TestSink::new()));
+        let aspaces: &'static RwLock<AddressSpaceRegistry> =
+            Box::leak(Box::new(RwLock::new(AddressSpaceRegistry::new())));
+        let caps: &'static RwLock<CapTable> = Box::leak(Box::new(RwLock::new(CapTable::new())));
+        let builder: &'static RecordingImageBuilder =
+            Box::leak(Box::new(RecordingImageBuilder::new()));
+        let services = leak_body_services(
+            frames,
+            audit,
+            &crate::fs::NULL_FILESYSTEM,
+            None,
+            aspaces,
+            caps,
+            builder,
+        );
+        let plan = LoadPlan::Prebuilt {
+            rxe: alloc::borrow::Cow::Borrowed(b"image".as_slice()),
+            requested: CapabilitySet::EMPTY,
+        };
+        build_child_image(
+            services,
+            ProcessId(11),
+            11,
+            &plan,
+            &body_seed(),
+            None,
+            &[],
+            &[],
+        )
+        .expect("a prebuilt image builds");
+        let guard = caps.read();
+        let record = guard
+            .caps_for(SecTaskId(11))
+            .expect("effective record installed under the child id");
+        assert_eq!(record.app_identity(), None);
+        assert_eq!(record.attest_origin().app(), None);
     }
 
     /// A prebuilt child whose architecture image build itself fails — a

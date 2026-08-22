@@ -5,7 +5,7 @@
 //! `#[repr(transparent)]` over a `#[repr(C)]` type) with an explicit primitive
 //! representation, and the wire layout shipped under [`ABI_VERSION_V1`] is
 //! frozen for the lifetime of `abi-v1`: new behaviour ships in `abi-v2`
-//! instead of mutating these types in place ().
+//! instead of mutating these types in place.
 //!
 //! The crate is `no_std`, has no transitive dependencies, and performs no
 //! allocation. Encoding and decoding helpers operate exclusively on borrowed
@@ -73,12 +73,14 @@ pub mod window_ipc;
 
 pub use appinfo::{
     body_len as appinfo_body_len, digest_bundle_contents, mime_type_at, resolve_library,
-    validate_bundle_layout, AppInfoHeader, BundleEntry, BundleFileDigest, BundleLayoutError,
-    LibraryCategory, LibraryError, LibraryScope, ProgramKind, APPINFO_MAGIC,
-    APPINFO_MAX_CAPABILITIES, APPINFO_MAX_MIME, APPINFO_WIRE_MAX, BUNDLE_AUTHOR_MAX,
-    BUNDLE_CONTENT_DIGEST_MAGIC, BUNDLE_ID_MAX, BUNDLE_NAME_MAX, BUNDLE_PURPOSE_MAX, BUNDLE_SUFFIX,
-    BUNDLE_VERSION_MAX, HOME_APPLICATION_STORE_DIR, HOME_COMMAND_STORE_DIR, INSTALLED_APP_STORE,
-    LIBRARY_ICON_MAX, MIME_ENTRY_LEN, MIME_TYPE_MAX, SYSTEM_APPLICATION_STORE,
+    validate_bundle_id, validate_bundle_layout, AppInfoHeader, BundleEntry, BundleFileDigest,
+    BundleId, BundleLayoutError, LibraryCategory, LibraryError, LibraryScope, ProgramKind,
+    PublisherBinding, PublisherId, APPINFO_MAGIC, APPINFO_MAX_CAPABILITIES, APPINFO_MAX_MIME,
+    APPINFO_WIRE_MAX, BUNDLE_AUTHOR_MAX, BUNDLE_CONTENT_DIGEST_MAGIC, BUNDLE_ID_MAX,
+    BUNDLE_NAME_MAX, BUNDLE_PURPOSE_MAX, BUNDLE_SUFFIX, BUNDLE_VERSION_MAX,
+    HOME_APPLICATION_STORE_DIR, HOME_COMMAND_STORE_DIR, INSTALLED_APP_STORE, LIBRARY_ICON_MAX,
+    MIME_ENTRY_LEN, MIME_TYPE_MAX, PUBLISHER_CERT_CONTEXT, PUBLISHER_CERT_MESSAGE_LEN,
+    PUBLISHER_ID_CONTEXT, PUBLISHER_ID_LEN, PUBLISHER_ID_PREIMAGE_LEN, SYSTEM_APPLICATION_STORE,
     SYSTEM_COMMAND_STORE, SYSTEM_LIBRARIES_DIR, SYSTEM_SERVICE_STORE,
 };
 pub use boot::{
@@ -147,8 +149,8 @@ pub use net::{
     SOCKET_OPEN_REPLY_LEN, SOCKET_REQUEST_MAGIC, SOCKET_VERSION_V1,
 };
 pub use origin::{
-    CapabilitySummary, Origin, ProcId, TrustDomain, CAPABILITY_SUMMARY_LEN, ORIGIN_CONSOLE_NONE,
-    ORIGIN_WIRE_LEN, PROC_ID_HEX_LEN, PROC_ID_LEN,
+    AppIdentity, CapabilitySummary, Origin, ProcId, TrustDomain, CAPABILITY_SUMMARY_LEN,
+    ORIGIN_CONSOLE_NONE, ORIGIN_WIRE_LEN, PROC_ID_HEX_LEN, PROC_ID_LEN,
 };
 pub use power::PowerAction;
 pub use process::{

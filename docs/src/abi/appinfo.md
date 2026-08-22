@@ -34,13 +34,26 @@ documentation entry.
 
 ## `AppInfo` manifest
 
-`AppInfoHeader` is the fixed-size (`WIRE_LEN` = 340), signed prefix of the
+`AppInfoHeader` is the fixed-size (`WIRE_LEN` = 664), signed prefix of the
 manifest. It is `#[repr(C)]`, allocation-free, little-endian, with
-`to_le_bytes`/`from_bytes` and a fail-closed decoder. It carries:
+`to_le_bytes`/`from_bytes` and a fail-closed decoder. Its declaration order
+**is** its wire order, so the in-memory image and the wire image are the same
+bytes and the generated C mirror (`include/tairix/tairix_appinfo.h`) is an
+honest view of the format rather than a second, differently-ordered spelling
+of it; `appinfo_header_repr_c_layout_is_the_wire_layout` pins that field by
+field. It carries:
 
 - `magic` (`"RAI1"`), `abi_version`, `flags`.
 - The bundle identity: inline `id` / `name` / `version` (length byte plus a
-  fixed buffer, validated as non-empty UTF-8 on decode).
+  fixed buffer, validated as non-empty UTF-8 on decode). `id` is additionally
+  held to `validate_bundle_id`: dot-separated segments of ASCII lowercase
+  letters, digits, `-` and `_`, each non-empty. The grammar is narrow because
+  the identifier names a directory in every user's per-app store
+  (`plans/APPDATA.md`), so nothing that could be a path traversal (`.`, `..`,
+  `/`), a hidden entry, a case-folding collision, or a control character can
+  be spelled at all — an app cannot reach outside its own scope by
+  construction rather than by a check a caller might forget. `BundleId` is the
+  validated inline form the kernel attests on an `Origin`.
 - `capability_count` and `mime_count` describing the body.
 - `syscall_table_hash` — the syscall interface the bundle was linked against
   (§9 / §19.2).
@@ -51,6 +64,50 @@ manifest. It is `#[repr(C)]`, allocation-free, little-endian, with
   prefix concatenated with the capability/MIME body, so a tampered
   capability request breaks the signature rather than hiding behind a
   header-only signature.
+- `publisher_pubkey` and `publisher_cert` — the developer identity, described
+  below.
+
+Decoding judges **no** authenticity: neither signature is verified and the
+publisher binding is not classified, so a surface that only wants to draw a
+bundle's name and icon need not hold a trust anchor to read its manifest.
+Authenticity is the [load gate](../lib/appload.md)'s job.
+
+## Publisher identity
+
+The `signer_pubkey` is the key a *build* was signed with, and a release is
+free to rotate it. That makes it the wrong thing to own per-app state by: a
+re-signed update would orphan the user's settings, secrets, and blobs. So the
+manifest also names a **publisher** — the developer's stable identity — and
+proves the two belong together:
+
+- `PublisherBinding::SelfPublished` — `publisher_pubkey == signer_pubkey` and
+  `publisher_cert` is all zero. Nothing further is checked: the trust root
+  that admitted the signer admitted the publisher, because they are one key.
+- `PublisherBinding::Delegated` — `publisher_cert` must verify, against
+  `publisher_pubkey`, as the publisher's Ed25519 signature over
+  `publisher_cert_message()`.
+
+Those two forms are exhaustive; `publisher_binding()` refuses every other
+combination (a claim with no certificate to justify it, a certificate with
+nothing to delegate). Both fields sit inside the region the manifest
+signature covers, so neither can be swapped behind a valid signature.
+
+`publisher_cert_message()` is the fixed-size, domain-labelled message a
+delegation signs: the `PUBLISHER_CERT_CONTEXT` label, the bundle identifier at
+full inline width with its length byte, and the signing key. Naming the
+identifier as well as the key is what stops a certificate issued for one of a
+publisher's bundles being lifted into another; the label stops a signature the
+publisher key made for anything else being replayed as a delegation.
+
+`PublisherId` is the opaque 32-byte identity per-app state is owned by:
+`SHA-256(publisher_id_preimage())`, the `PUBLISHER_ID_CONTEXT` label followed
+by the publisher key. It is an *identity*, deliberately not a key — one fixed
+width whatever the publisher key's algorithm, and nothing a consumer could
+mistake for something it may verify a signature with. `lib/abi` carries no
+hash implementation, so it defines the preimage and the load gate completes
+the derivation; `PublisherId::NONE` (all zero) is the sentinel for a principal
+with no attested publisher. `plans/APPDATA.md` describes the per-app store
+that pins it.
 
 The variable body that follows the header is the requested capability-id
 list (`capability_count` little-endian `u16`s, decoded by the shared

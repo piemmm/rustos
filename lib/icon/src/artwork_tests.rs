@@ -369,6 +369,8 @@ fn manifest(icon: &str) -> Vec<u8> {
         syscall_table_hash: [0; SYSCALL_TABLE_HASH_LEN],
         content_hash: [0; 32],
         signer_pubkey: [0; 32],
+        publisher_pubkey: [0; 32],
+        publisher_cert: [0; 64],
         signature: [0; 64],
     }
     .to_le_bytes()

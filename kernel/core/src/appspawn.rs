@@ -572,9 +572,10 @@ pub fn app_error_errno(err: AppError) -> Errno {
     match err {
         AppError::Store(e) | AppError::Manifest(e) => e,
         AppError::InterfaceHashMismatch => Errno::AbiVersionUnsupported,
-        AppError::Signature | AppError::ContentHashMismatch | AppError::RunImage(_) => {
-            Errno::SignatureInvalid
-        }
+        AppError::Signature
+        | AppError::PublisherCert
+        | AppError::ContentHashMismatch
+        | AppError::RunImage(_) => Errno::SignatureInvalid,
         _ => Errno::PermissionDenied,
     }
 }
@@ -582,12 +583,15 @@ pub fn app_error_errno(err: AppError) -> Errno {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_bundle::{composed_bundle, MemFs};
+    use crate::test_bundle::{
+        composed_bundle, composed_bundle_published_by, composed_bundle_signed_by, MemFs,
+    };
     use crate::test_sink::TestSink;
     use tairix_abi::rxe::{LoadHeader, Segment};
     use tairix_abi::{BundleLayoutError, CapabilityId, RxeError, ABI_VERSION_CURRENT};
     use tairix_appload::{AppLoader, AppLoaderConfig};
     use tairix_caps::CapabilitySet;
+    use tairix_itest_harness::app_image::PublisherSource;
     use tairix_kernel_syscall::SYSCALL_TABLE_HASH;
 
     extern crate std;
@@ -648,6 +652,56 @@ mod tests {
         assert_eq!(app.granted().len(), 2);
         // The spawnable image is byte-for-byte the on-disk `Run`.
         assert_eq!(app.run_image(), run.as_slice());
+        // Every bundle the build plants delegates, so the gate's certificate
+        // check ran and attributed the bundle to a developer.
+        assert!(!app.publisher().is_none());
+    }
+
+    /// The store keys per-app state on the publisher, not on the build key,
+    /// so re-signing a release must leave the identity untouched — otherwise
+    /// an update would silently orphan the user's settings, secrets and
+    /// blobs. This is the property the whole publisher/signer split exists
+    /// for, so it is proved end-to-end through the real composer and gate.
+    #[test]
+    fn re_signing_a_release_keeps_the_publisher_identity() {
+        let (first_fs, first_anchor, _) = composed_bundle_signed_by(&[7u8; 32], vec![]);
+        let (next_fs, next_anchor, _) = composed_bundle_signed_by(&[21u8; 32], vec![]);
+        assert_ne!(first_anchor, next_anchor, "the build key really rotated");
+
+        let first = load(&first_fs, first_anchor).expect("loads");
+        let next = load(&next_fs, next_anchor).expect("loads");
+        assert_eq!(first.publisher(), next.publisher());
+        assert!(!first.publisher().is_none());
+    }
+
+    /// A certificate delegates one signing key, and only that one. An
+    /// attacker holding a signing key the trust root admits must not be able
+    /// to reuse a publisher's genuine certificate — a real signature, just
+    /// over a different message — to claim that publisher's per-app store.
+    ///
+    /// The forged bundle is composed *properly signed*, so the manifest
+    /// signature passes and the refusal can only come from the certificate no
+    /// longer covering this signer.
+    #[test]
+    fn a_genuine_certificate_does_not_transfer_to_another_signing_key() {
+        let (donor_fs, _, _) = composed_bundle_signed_by(&[7u8; 32], vec![]);
+        let donor = AppInfoHeader::from_bytes(
+            donor_fs
+                .files
+                .get("/System/Commands/ps.app/AppInfo")
+                .expect("donor manifest"),
+        )
+        .expect("donor decodes");
+
+        let (fs, anchor, _) = composed_bundle_published_by(
+            &[21u8; 32],
+            PublisherSource::Certificate {
+                pubkey: donor.publisher_pubkey,
+                cert: donor.publisher_cert,
+            },
+            vec![],
+        );
+        assert_eq!(load(&fs, anchor), Err(AppError::PublisherCert));
     }
 
     #[test]
@@ -833,6 +887,10 @@ mod tests {
         );
         assert_eq!(
             app_error_errno(AppError::Signature),
+            Errno::SignatureInvalid
+        );
+        assert_eq!(
+            app_error_errno(AppError::PublisherCert),
             Errno::SignatureInvalid
         );
         assert_eq!(

@@ -713,9 +713,11 @@ identity** of the caller whose in-service call it is handling (P-C). After a
 `call_recv` hands the server a ticket, `call_peer_origin` returns the
 `tairix_abi::Origin` the kernel captured from the *posting* task's own state
 at `ipc_call` time — its trust domain, uid, reusable pid, the unforgeable
-`ProcId` that distinguishes process instances across PID reuse, and a
-non-secret capability *summary* (a membership bitmap, never any capability
-token). The origin is filled entirely kernel-side, so a caller can neither
+`ProcId` that distinguishes process instances across PID reuse, a non-secret
+capability *summary* (a membership bitmap, never any capability token), and
+the `AppIdentity` of the application it is running (the signed bundle
+identifier and the verified publisher) when the kernel admitted it from a
+signed bundle. The origin is filled entirely kernel-side, so a caller can neither
 forge another principal's identity nor inflate its own, and it is read from
 the call's own snapshot rather than re-resolving the task — immune to later
 capability changes or PID reuse. Like `call_recv`/`call_reply` it is
@@ -726,7 +728,22 @@ endpoint, an unknown or not-in-service ticket, or a buffer shorter than
 high-volume serve path; refusals are audited by the dispatcher regardless).
 It is the foundation a capability-gated user-space service builds on to learn
 who called it — its first consumer is `sysinfod`'s self-scoped
-`PROCESS_IDENTITY` query (`AGENTS.md` §16.6). The first-party Rust wrapper is
+`PROCESS_IDENTITY` query (`AGENTS.md` §16.6).
+
+The **app identity** is what makes per-app state expressible at all. The
+filesystem permission model keys on uid, and every app a user launches runs as
+that user, so no mode bit can separate two apps of one user; a service that
+serves per-app data has to know *which app* is calling, and it has to learn it
+from the kernel rather than from the request. `AppIdentity` is that answer: a
+signed bundle identifier inside the `validate_bundle_id` grammar (so it can
+name a directory in a user's store and can never traverse out of one), paired
+with the `PublisherId` the load gate verified the bundle belongs to (so state
+survives a release re-signed with a fresh build key). It is present only for a
+principal the kernel admitted from a signed bundle: a kernel thread, a
+boot-floor program with no manifest, and a parser-sandbox child carry none,
+and a store refuses them. It is whole or absent, never half — a decoded
+`Origin` with an identifier but no publisher, or the reverse, is a refusal.
+See `plans/APPDATA.md`. The first-party Rust wrapper is
 `tairix_rt::call_peer_origin`; the C stub is `tairix_sys_call_peer_origin`.
 
 `wall_time_get` (no. 59) and `wall_time_set` (no. 60) are the wall-clock
@@ -985,11 +1002,11 @@ drains, instead of dropping it or polling for capacity.
 58): where that lets a server read the kernel-attested identity of the *peer*
 it is servicing, `self_origin` lets a task read its *own*. The kernel builds
 the caller's `Origin` — trust domain, owning uid/gid, task id,
-process-instance `ProcId`, and the non-secret effective-capability summary
-(the membership bitmap, no capability tokens) — entirely from the caller's own
-kernel-held task record (`TaskCapabilities::attest_origin`), never a
-caller-supplied value, so a task can neither forge another principal's
-identity nor inflate its own. It is unprivileged (a task may always learn its
+process-instance `ProcId`, the non-secret effective-capability summary (the
+membership bitmap, no capability tokens), and the app identity, if any —
+entirely from the caller's own kernel-held task record
+(`TaskCapabilities::attest_origin`), never a caller-supplied value, so a task
+can neither forge another principal's identity nor inflate its own. It is unprivileged (a task may always learn its
 own identity, like `boot_id_get`) and not audited, and fails closed
 (`BufferTooSmall`) on a buffer shorter than `ORIGIN_WIRE_LEN`. The journal
 service (`journald`) uses it to stamp the trusted records it authors itself

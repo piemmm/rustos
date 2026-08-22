@@ -162,6 +162,25 @@ pub const KERNEL_DRIVER_SIGNING_SEED: [u8; 32] = *b"tairix-kernel-driver-signing
 /// signs from this definition.
 pub const SYSTEM_APP_SIGNING_SEED: [u8; 32] = *b"tairix-system-app-signing/v1!\0\0\0";
 
+/// Deterministic Ed25519 seed of the first-party **publisher** identity every
+/// system app bundle's `AppInfo` names.
+///
+/// Distinct from [`SYSTEM_APP_SIGNING_SEED`] because the two answer different
+/// questions. The signing key answers "may this bundle run here?" and is
+/// pinned by the kernel's embedded anchor, so rotating it means shipping a
+/// new kernel. The publisher key answers "whose app is this?" and is what a
+/// user's per-app settings, secrets, and blobs are owned by, so it must
+/// *not* change when a release is re-signed. Keeping them separate is what
+/// makes that rotation survivable, and it means the delegated
+/// ([`tairix_abi::PublisherBinding::Delegated`]) path — the one a
+/// third-party developer's release uses — is the path the first-party build
+/// itself exercises on every boot, rather than a form only tests reach.
+///
+/// This is the single source of the publisher seed: the build's bundle
+/// composer derives the publisher key from it and signs each bundle's
+/// delegation certificate with it.
+pub const SYSTEM_APP_PUBLISHER_SEED: [u8; 32] = *b"tairix-system-app-publisher/v1!\0";
+
 /// Parse a `SOURCE_DATE_EPOCH` value into whole seconds, or `None` when it is
 /// absent/malformed so the build script falls back to the current wall-clock
 /// second.
@@ -496,5 +515,19 @@ mod tests {
         );
         assert_eq!(SYSTEM_APP_SIGNING_SEED.len(), 32);
         assert_ne!(SYSTEM_APP_SIGNING_SEED, KERNEL_DRIVER_SIGNING_SEED);
+    }
+
+    #[test]
+    fn the_publisher_seed_is_pinned_and_distinct_from_every_signing_seed() {
+        // The publisher identity outlives the build signing key, which is the
+        // whole point of it: were they the same value, re-signing a release
+        // would silently re-key every user's per-app store.
+        assert_eq!(
+            SYSTEM_APP_PUBLISHER_SEED,
+            *b"tairix-system-app-publisher/v1!\0"
+        );
+        assert_eq!(SYSTEM_APP_PUBLISHER_SEED.len(), 32);
+        assert_ne!(SYSTEM_APP_PUBLISHER_SEED, SYSTEM_APP_SIGNING_SEED);
+        assert_ne!(SYSTEM_APP_PUBLISHER_SEED, KERNEL_DRIVER_SIGNING_SEED);
     }
 }

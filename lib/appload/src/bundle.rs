@@ -1,18 +1,18 @@
 //! The seams the loader reaches the outside world through, and the
 //! description of a successfully loaded bundle.
 //!
-//! [`BundleStore`] reads a bundle off the filesystem and [`Verifier`] checks
-//! a signature; on a running system they are backed by the VFS and
-//! `lib/crypto`, while tests wire in-memory fixtures. Keeping them as traits
-//! is what makes the otherwise-pure [`AppLoader`](crate::AppLoader) testable
-//! without a kernel.
+//! [`BundleStore`] reads a bundle off the filesystem and [`Verifier`] decides
+//! whether a manifest signer is trusted here; on a running system they are
+//! backed by the VFS and the host's trust anchor, while tests wire in-memory
+//! fixtures. Keeping them as traits is what makes the otherwise-pure
+//! [`AppLoader`](crate::AppLoader) testable without a kernel.
 
 use alloc::string::String;
 use alloc::vec::Vec;
 
 use tairix_caps::CapabilitySet;
 
-use tairix_abi::{Errno, LibraryScope};
+use tairix_abi::{Errno, LibraryScope, PublisherId};
 
 /// Reads an application bundle from storage.
 ///
@@ -104,13 +104,20 @@ pub struct ResolvedLibrary {
     pub scope: LibraryScope,
 }
 
-/// Verifies a detached Ed25519 signature over a byte range.
+/// Decides whether a bundle's manifest signature admits it here.
 ///
-/// The real implementation calls into `lib/crypto` (the
-/// one place cryptographic primitives live). The loader passes the manifest
-/// bytes the signature covers, the signature, and the signer's public key;
-/// trust-rooting that key against the local capability authority is the
-/// implementation's concern, not the loader's.
+/// The seam exists for the *trust root*, which genuinely differs per host:
+/// the kernel's store path pins the build's embedded app-signing anchor,
+/// while a user-space installer roots against whatever authority it was
+/// configured with. The loader passes the manifest bytes the signature
+/// covers, the signature, and the signer's public key; deciding that the key
+/// may sign a bundle at all is the implementation's concern.
+///
+/// It is deliberately **not** the loader's general cryptography provider.
+/// The publisher delegation certificate carries no host policy — the
+/// certificate sits inside the signed manifest and the format fixes exactly
+/// what it must say — so the loader verifies it directly against `lib/crypto`
+/// rather than letting each host re-implement it.
 pub trait Verifier {
     /// Verify `signature` over `signed` under `signer_pubkey`.
     ///
@@ -127,19 +134,36 @@ pub trait Verifier {
     ) -> Result<(), Errno>;
 }
 
+/// A bundle's verified identity: what it calls itself, and who published it.
+///
+/// The four values always travel together — a spawner attests the identifier
+/// and the publisher onward, and a desktop surface draws the name and version
+/// — so they are one value rather than four parallel parameters.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BundleIdentity {
+    /// The globally unique, developer-namespaced bundle identifier
+    /// (`os.tairix.terminal`). Per-app state is keyed on it.
+    pub id: String,
+    /// The human-readable bundle name.
+    pub name: String,
+    /// The bundle version string.
+    pub version: String,
+    /// The developer identity the bundle proved it belongs to. Per-app state
+    /// is *owned* by it, so a re-signed release keeps what it stored.
+    pub publisher: PublisherId,
+}
+
 /// A bundle the loader has accepted: its identity, the validated entry-point
 /// path and image, and the capability ceiling it may run with.
 ///
-/// Holding a `LoadedApp` is proof that the layout, the manifest
-/// signature, the content hash, and the syscall-interface hash all checked
-/// out, and that `granted` is the manifest request intersected with the
-/// launching user's grants. The caller spawns
+/// Holding a `LoadedApp` is proof that the layout, the manifest signature,
+/// the publisher delegation, the content hash, and the syscall-interface
+/// hash all checked out, and that `granted` is the manifest request
+/// intersected with the launching user's grants. The caller spawns
 /// [`run_image`](Self::run_image) with **at most** [`granted`](Self::granted).
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct LoadedApp {
-    id: String,
-    name: String,
-    version: String,
+    identity: BundleIdentity,
     run_path: String,
     run_image: Vec<u8>,
     granted: CapabilitySet,
@@ -148,18 +172,14 @@ pub struct LoadedApp {
 
 impl LoadedApp {
     pub(crate) fn new(
-        id: String,
-        name: String,
-        version: String,
+        identity: BundleIdentity,
         run_path: String,
         run_image: Vec<u8>,
         granted: CapabilitySet,
         libraries: Vec<ResolvedLibrary>,
     ) -> Self {
         Self {
-            id,
-            name,
-            version,
+            identity,
             run_path,
             run_image,
             granted,
@@ -167,22 +187,41 @@ impl LoadedApp {
         }
     }
 
+    /// The bundle's verified identity, as the manifest declares it.
+    #[must_use]
+    pub fn identity(&self) -> &BundleIdentity {
+        &self.identity
+    }
+
     /// The bundle identifier from the manifest.
     #[must_use]
     pub fn id(&self) -> &str {
-        &self.id
+        &self.identity.id
     }
 
     /// The human-readable bundle name from the manifest.
     #[must_use]
     pub fn name(&self) -> &str {
-        &self.name
+        &self.identity.name
     }
 
     /// The bundle version string from the manifest.
     #[must_use]
     pub fn version(&self) -> &str {
-        &self.version
+        &self.identity.version
+    }
+
+    /// The bundle's verified developer identity — the digest of the publisher
+    /// key the manifest declares, after the publisher's delegation of the
+    /// build signing key was checked.
+    ///
+    /// Paired with [`id`](Self::id) this is what per-app state is keyed and
+    /// owned by: the identifier names the store, the publisher owns it. Both
+    /// come from the manifest the load gate verified, so a spawner may
+    /// attest them to the rest of the system.
+    #[must_use]
+    pub fn publisher(&self) -> PublisherId {
+        self.identity.publisher
     }
 
     /// The absolute path of the entry-point `Run` binary.
