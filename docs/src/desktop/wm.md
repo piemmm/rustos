@@ -792,12 +792,16 @@ press deepens it, keyboard focus still states itself on the ring inside the
 plate, and a denied or disabled command reads as denied or disabled rather than
 as its colour. See [theming](./theming.md) for the four roles.
 
-- **A command cell carries no margin.** The cell *is* the button: it fills the
-  band's height, it touches the cell beside it, and the outermost one in each
-  cluster is hard against the band's end. So a hover lights every pixel between
-  one command and the next and a press lands anywhere in the cell — where the
-  older layout centred an 18-pixel square in a 24-pixel band with gaps around
-  it, leaving strips where the highlight dropped out and a click did nothing.
+- **A command cell is a square that carries no margin.** The cell *is* the
+  button: it fills the band's height, it is as wide as it is tall, it touches
+  the cell beside it, and the outermost one in each cluster is hard against the
+  band's end. So a hover lights every pixel between one command and the next
+  and a press lands anywhere in the cell — where the older layout centred a
+  narrow upright slot in the band with gaps around it, leaving strips where the
+  highlight dropped out and a click did nothing. A cell's width is the band's
+  own height rather than a metric of its own: two numbers that have to be equal
+  for the cell to be square are one number too many, so `title_bar_height` is
+  the only thing that sets it.
   The two spacings that remain are not button margins: one holds the identity
   group off the commands, the other its title off its icon. Where a cell meets
   the band's end the window's rim curves through it, so that one corner curves
@@ -811,7 +815,7 @@ as its colour. See [theming](./theming.md) for the four roles.
   icon has a discernible colour washes its title band with it: strongest at the
   icon and fading out in both directions over `Metrics::title_hue_reach` (500
   logical pixels), across the full band so it runs *behind* the commands on a
-  short bar, at `Palette::title_hue_alpha` (a little under a fifth) so it reads
+  short bar, at `Palette::title_hue_alpha` (a little under a third) so it reads
   as a tint on the chrome rather than a second, blurrier copy of the icon. A
   reach rather than a width: a wide bar keeps its far reaches plain instead of
   stretching one ramp ever thinner, and a narrow one is tinted end to end. An

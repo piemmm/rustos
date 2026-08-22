@@ -14,7 +14,7 @@ This crate is pure theme *data*. A `Theme` is a table of:
   `window_put_to_back`), plus the two floating-chrome opacities and
   `title_hue_alpha`. Roles are fixed fields, so a theme can never omit one and a
   consumer can never ask for one that does not exist.
-  `title_hue_alpha` (`46`) governs a colour the palette does not name: a title
+  `title_hue_alpha` (`82`) governs a colour the palette does not name: a title
   bar washes its band with the dominant hue of its *window's identity icon*, so
   the theme sets only how far through it reads, and `title_hue_reach` (`500`
   logical pixels) how far it travels from the icon before it is gone.

@@ -644,7 +644,9 @@ const CLUSTER_COUNT: u32 = 2;
 /// button margins — they hold the identity group off the commands and its
 /// title off its icon — so they keep their own names here.
 struct ClusterMetrics {
-    /// One command cell's width. Its height is the band's, not this.
+    /// One command cell's side. A cell fills the band's height and is square,
+    /// so the band's height is the only thing that sets it — a second metric
+    /// for the width could only ever disagree with it.
     extent: u32,
     /// The clear space between a cluster and the identity span beside it.
     span_gap: u32,
@@ -655,9 +657,10 @@ struct ClusterMetrics {
 }
 
 impl ClusterMetrics {
-    fn of(scale: Scale, theme: &Theme) -> Self {
+    /// The cluster lengths for a band `side` pixels tall.
+    fn of(scale: Scale, theme: &Theme, side: u32) -> Self {
         let metrics = theme.metrics();
-        let extent = scale.scale_length(metrics.window_control_extent).max(1);
+        let extent = side.max(1);
         Self {
             extent,
             span_gap: scale.scale_length(metrics.control_gap),
@@ -985,13 +988,17 @@ impl TitleBar {
     /// Below it [`layout`](Self::layout) abuts the clusters and the window
     /// has nothing left to be dragged by, so a window manager sizes a
     /// decorated window against this rather than a constant of its own. The
-    /// span it reserves between the clusters is one control extent wide:
-    /// that is the theme's own statement of a comfortable furniture target,
-    /// and a drag surface thinner than the buttons beside it would be one
-    /// the pointer keeps missing.
+    /// span it reserves between the clusters is one whole cell wide: a drag
+    /// surface thinner than the square buttons beside it would be one the
+    /// pointer keeps missing.
+    ///
+    /// The cell side is the band height [`WindowFrame::layout`] will hand
+    /// [`layout`](Self::layout), taken from the same frame metrics rather than
+    /// re-scaled here, so the floor and the layout at it cannot disagree.
     #[must_use]
     pub fn min_band_width(scale: Scale, theme: &Theme) -> u32 {
-        let m = ClusterMetrics::of(scale, theme);
+        let (_, band_h, _) = WindowFrame::edges(scale, theme);
+        let m = ClusterMetrics::of(scale, theme, band_h);
         m.cluster_w
             .saturating_mul(2)
             .saturating_add(m.span_gap.saturating_mul(2))
@@ -1020,7 +1027,7 @@ impl TitleBar {
             span_gap: g,
             identity_gap,
             cluster_w,
-        } = ClusterMetrics::of(scale, theme);
+        } = ClusterMetrics::of(scale, theme, bounds.height);
 
         let leading_left = bounds.left();
         // A band too narrow for both clusters abuts them instead of stacking

@@ -532,6 +532,32 @@ fn a_command_cell_carries_no_margin_of_its_own() {
 }
 
 #[test]
+fn a_command_cell_is_square() {
+    // A cell that fills the band's height and is narrower than it reads as an
+    // upright slot rather than a button. Its width is therefore the band's own
+    // height — there is no second metric that could disagree with it.
+    let bar = TitleBar::new(furniture());
+    for theme in [Theme::dark(), Theme::light(), high_contrast()] {
+        for scale in [
+            Scale::ONE,
+            Scale::from_percent(50).expect("scale"),
+            Scale::from_percent(200).expect("scale"),
+        ] {
+            for height in [16, 24, 28, 40] {
+                let bounds = Rect::new(0, 0, 640, height);
+                for (kind, cell) in bar.layout(bounds, scale, &theme).controls {
+                    assert_eq!(
+                        (cell.width, cell.height),
+                        (height, height),
+                        "{kind:?} is not square in a {height}px band at {scale:?}"
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[test]
 fn a_cell_hard_against_the_band_end_curves_with_the_window() {
     // The window's rim curves through the band's ends, so the cell seated
     // there curves with it — the other three corners stay square, or the row
@@ -695,11 +721,12 @@ fn the_minimum_band_is_the_narrowest_that_still_leaves_a_drag_surface() {
     let double = Scale::from_percent(200).expect("scale");
     for theme in [Theme::dark(), Theme::light(), high_contrast()] {
         for scale in [Scale::ONE, half_scale, double] {
-            let extent = scale
-                .scale_length(theme.metrics().window_control_extent)
-                .max(1);
+            // A cell is square, so the band's height is also one command's
+            // width — the drag surface the floor reserves is one of them.
+            let band_h = scale.scale_length(theme.metrics().title_bar_height);
+            let extent = band_h.max(1);
             let min = TitleBar::min_band_width(scale, &theme);
-            let at = bar.layout(Rect::new(0, 0, min, 28), scale, &theme);
+            let at = bar.layout(Rect::new(0, 0, min, band_h), scale, &theme);
             assert_eq!(
                 at.drag.width, extent,
                 "the floor reserves exactly one command's worth of drag surface"
@@ -713,7 +740,11 @@ fn the_minimum_band_is_the_narrowest_that_still_leaves_a_drag_surface() {
                     );
                 }
             }
-            let under = bar.layout(Rect::new(0, 0, min.saturating_sub(1), 28), scale, &theme);
+            let under = bar.layout(
+                Rect::new(0, 0, min.saturating_sub(1), band_h),
+                scale,
+                &theme,
+            );
             assert!(
                 under.drag.width < extent,
                 "and one pixel under it the drag surface is under that target"
@@ -2027,8 +2058,17 @@ fn every_resize_edge_resolves_from_the_band_and_the_client_overlap() {
     )
     .expect("border");
     assert_eq!(hit(mid_x, bounds.top()), FurniturePart::Frame);
+    // Taken from the laid-out drag span rather than a guessed offset: the
+    // command cells are as wide as the band is tall, so a fixed column that
+    // once cleared them would now land inside one.
+    let band = frame.layout(bounds, Scale::ONE, &theme).title_bar;
+    let drag = frame.title_bar().layout(band, Scale::ONE, &theme).drag;
+    assert!(drag.width > 0, "the band is wide enough to drag by");
     assert_eq!(
-        hit(bounds.left() + 50, bounds.top() + border),
+        hit(
+            i32::midpoint(drag.left(), drag.right()),
+            bounds.top() + border
+        ),
         FurniturePart::TitleBar
     );
 }

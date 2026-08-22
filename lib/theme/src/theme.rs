@@ -344,14 +344,18 @@ pub(crate) const SELECTION_ALPHA: u8 = 77;
 pub(crate) const COMMAND_ALPHA: u8 = 128;
 
 /// The opacity both built-in themes give the hue a title bar takes from its
-/// window's identity icon: a little under a fifth.
+/// window's identity icon: a little under a third.
 ///
 /// The bar is not trying to show the icon twice. At this weight the colour is
 /// unmistakable as *that application's* while the chrome underneath still reads
 /// as chrome, and the icon a few pixels away stays the saturated thing the eye
 /// goes to. Both appearances share it because the wash is not a palette colour
 /// of theirs at all — it is whatever the application's artwork happens to be.
-pub(crate) const TITLE_HUE_ALPHA: u8 = 46;
+///
+/// A fifth was the first authored weight and read as almost nothing at the
+/// densities the desktop actually runs at, which is why the wash carries this
+/// much: a hue that has to be looked for is not identifying anything.
+pub(crate) const TITLE_HUE_ALPHA: u8 = 82;
 
 /// The opacity both built-in themes give their floating chrome: seven tenths.
 ///
@@ -400,7 +404,6 @@ fn common_metrics() -> Metrics {
         toggle_track_length: 28,
         title_bar_height: 28,
         frame_inset: 1,
-        window_control_extent: 20,
         resize_grabber_extent: 16,
         hit_slop: 4,
         title_hue_reach: 500,

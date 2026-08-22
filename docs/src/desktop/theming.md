@@ -103,7 +103,7 @@ bundles, under a stable `ThemeId`:
     the authored translucency against the window body first
     (`Rgba::over`) — laying the raw value down would cut a hole through the
     window's furniture strip instead of tinting it.
-  - `title_hue_alpha` (`46`, a little under a fifth) is an opacity, not a
+  - `title_hue_alpha` (`82`, a little under a third) is an opacity, not a
     colour, and the colour it governs is not the theme's at all: a title bar
     washes its band with the **dominant hue of its window's identity icon**, so
     a glance at a bar says which application owns the window before its title is
@@ -121,7 +121,7 @@ bundles, under a stable `ThemeId`:
   `chart_height`, `selector_extent`, `toggle_track_length`); the desktop's
   floating chrome (`taskbar_margin`, `chrome_backdrop_blur`); and the window
   furniture
-  (`title_bar_height`, `frame_inset`, `window_control_extent`, `title_hue_reach`,
+  (`title_bar_height`, `frame_inset`, `title_hue_reach`,
   `resize_grabber_extent`, `hit_slop`).
   - `taskbar_margin` is how far the taskbar stands off the screen edges it
     faces, `5` logical pixels in both themes. The bar floats: the margin

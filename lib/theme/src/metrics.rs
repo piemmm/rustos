@@ -144,9 +144,6 @@ pub struct Metrics {
     /// The inset of the client viewport from the outer frame edge, in logical
     /// pixels.
     pub frame_inset: u32,
-    /// The square extent of one window-control furniture button (close,
-    /// minimize, …), in logical pixels.
-    pub window_control_extent: u32,
     /// The square extent of the resize grabber's visible affordance, in
     /// logical pixels.
     pub resize_grabber_extent: u32,
