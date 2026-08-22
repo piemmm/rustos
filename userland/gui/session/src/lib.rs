@@ -265,10 +265,10 @@ pub use settings::{
 };
 pub use shell::{DesktopShell, InputSource, ShellOutcome};
 pub use switchboard::{
-    deliver_pending_open, drop_is_noteworthy, ensure_switchboard, maybe_send_frame_report,
-    maybe_send_seat_report, open_tray, relay_power, serve_switchboard_request, FrameContent,
-    OwnerWindow, PresentedOwners, SwitchboardMailbox, SwitchboardOutcome, SwitchboardRefusal,
-    SwitchboardServe, SWITCHBOARD_CALL_REFUSED,
+    deliver_pending_open, drop_is_noteworthy, ensure_switchboard, maybe_send_seat_report,
+    open_tray, relay_power, serve_switchboard_request, FrameContent, FrameReportGate, OwnerWindow,
+    PresentedOwners, SwitchboardMailbox, SwitchboardOutcome, SwitchboardRefusal, SwitchboardServe,
+    MIN_FRAME_REPORT_INTERVAL_NS, SWITCHBOARD_CALL_REFUSED,
 };
 pub use switchuser::{
     ResumeFailure, SeatPresentation, SessionAuthority, SwitchRefusal, SwitchUser, WakeRefusal,

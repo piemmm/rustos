@@ -370,8 +370,11 @@ impl Service {
     ///
     /// A fresh report from the session — which owners are unresponsive, or
     /// what its last frame cost — is rebuilt into the model from the sample
-    /// already in hand rather than leaving the panel stale until the next
-    /// cycle.
+    /// already in hand rather than leaving the *open* panel stale until the
+    /// next cycle. While the panel is closed the report is adopted and
+    /// nothing is rebuilt for it: with no window there is nothing a rebuild
+    /// could reach, and the `OpenPanel` arm below rebuilds before creating
+    /// one, so the same page is shown for a fraction of the work.
     pub fn command(
         &mut self,
         host: &mut dyn ServiceHost,
@@ -379,14 +382,21 @@ impl Service {
         authority: &dyn CapabilityQuery,
     ) {
         match command {
-            SwitchboardCommand::OpenPanel { section } => self.panel.open_section(host, section),
+            // Rebuilt *before* the window is created, because that creation
+            // reads the model: this is where every report adopted while the
+            // panel was closed is folded in, so a panel opening now shows
+            // them rather than waiting for the next cycle.
+            SwitchboardCommand::OpenPanel { section } => {
+                self.rebuild(authority);
+                self.panel.open_section(host, section);
+            }
             SwitchboardCommand::SeatReport { report } => {
                 self.panel.set_seat_report(report);
-                self.rebuild(authority);
+                self.rebuild_if_shown(authority);
             }
             SwitchboardCommand::FrameReport { report } => {
                 self.panel.set_frame_report(report);
-                self.rebuild(authority);
+                self.rebuild_if_shown(authority);
             }
             SwitchboardCommand::Power { action } => Self::power(host, action, authority),
         }
@@ -517,6 +527,30 @@ impl Service {
     /// position).
     fn group_index_of_id(&self, id: u64) -> Option<usize> {
         self.activities.iter().position(|group| group.id == id)
+    }
+
+    /// Rebuild the model only when a window is open to show it.
+    ///
+    /// The session's reports arrive whether or not anybody is looking: it
+    /// sends what its last frame cost from its own frame path, and that path
+    /// runs for every pointer motion across bare wallpaper. A rebuild is not
+    /// a cheap thing to do per report — [`build_model`] walks every sampled
+    /// process and allocates a row, a name, and a history for each — and with
+    /// the panel closed it buys nothing at all: [`Panel::refresh`] renders
+    /// nothing without a view, the model it stores is read only on paths that
+    /// require an open window, and [`Service::cycle`] rebuilds it from a
+    /// fresh sample within [`SAMPLE_PERIOD_NS`](crate::SAMPLE_PERIOD_NS)
+    /// regardless.
+    ///
+    /// So the report itself is always adopted — that is a field write — and
+    /// only the rebuild waits. Nothing is lost by waiting: the panel cannot
+    /// open without going through [`Service::command`]'s `OpenPanel` arm,
+    /// which rebuilds first, so the first frame a user sees already carries
+    /// every report that arrived while they were not looking.
+    fn rebuild_if_shown(&mut self, authority: &dyn CapabilityQuery) {
+        if self.panel.is_open() {
+            self.rebuild(authority);
+        }
     }
 
     /// Rebuild the live model from the sample and meter state in hand and

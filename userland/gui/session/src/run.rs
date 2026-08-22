@@ -93,8 +93,8 @@ mod program {
         SESSION_MAX_REQUEST, SESSION_VERDICT_LEN, SESSION_WAKE_LEN,
     };
     use tairix_abi::switchboard_ipc::{
-        command_endpoint_for, encode_publish_reply, CommandSection, FrameReport,
-        SwitchboardCommand, SEAT_REPORT_OWNERS_MAX, SWITCHBOARD_ENDPOINT, SWITCHBOARD_MAX_REQUEST,
+        command_endpoint_for, encode_publish_reply, CommandSection, SwitchboardCommand,
+        SEAT_REPORT_OWNERS_MAX, SWITCHBOARD_ENDPOINT, SWITCHBOARD_MAX_REQUEST,
         SWITCHBOARD_PUBLISH_REPLY_LEN,
     };
     use tairix_abi::window_ipc::{PointerAction, WindowEvent, WINDOW_ENDPOINT, WINDOW_MAX_REQUEST};
@@ -111,22 +111,22 @@ mod program {
     };
     use tairix_desktop_session::{
         admitted_pid, catalogued, deliver_pending_open, desktop_info, drop_is_noteworthy,
-        ensure_switchboard, launch_argv, load_library, maybe_send_frame_report,
-        maybe_send_seat_report, open_tray, parse, picker_cells, reap_launched, relay_power,
-        resolve_window_identities, serve_pinboard_apply, serve_switchboard_request,
-        window_control_alternate_event, window_control_event, Answer, AppBarBridge, AppBarService,
-        ArtworkDesk, ArtworkFileReader, ArtworkSandbox, CliError, Command, ConcludedPick,
-        ConfirmPrompt, Delivery, Desktop, DesktopAction, DesktopActivation, DesktopOutcome,
-        DesktopShell, DeviceInputSource, ElevatePrompt, Elevator, FrameContent, HangTracker,
-        HoldBack, IconRasteriser, InputSource, KeyboardInputSource, LaunchTable, ListingClient,
-        ListingDesk, LockedDrain, OwnerWindow, PickConclusion, PinboardMenu, PinboardMenuOutcome,
-        PinboardStore, PinboardStoreError, Prepared, PresentedOwners, PromptOutcome, ScreenFade,
-        ScreenLock, SeatEventReader, SeatInputChannel, SessionClock, SessionFileReader,
-        SessionFileWriter, SessionPicker, SessionWindows, ShellWindowHost, SwitchboardMailbox,
-        SwitchboardOutcome, SwitchboardServe, WallpaperDesk, WallpaperSource, BUNDLE_RUN_SUFFIX,
-        DATETIME_RUN_PATH, ELEVATE_PROMPT_SHOWN, ELEVATE_PROMPT_SHOWN_MESSAGE, FILES_LABEL,
-        FILES_RUN_PATH, SWITCHBOARD_CALL_REFUSED, SWITCHBOARD_LABEL, SWITCHBOARD_RUN_PATH, USAGE,
-        WALLPAPER_LABEL, WALLPAPER_RUN_PATH, WINDOW_SHOWN, WINDOW_SHOWN_MESSAGE,
+        ensure_switchboard, launch_argv, load_library, maybe_send_seat_report, open_tray, parse,
+        picker_cells, reap_launched, relay_power, resolve_window_identities, serve_pinboard_apply,
+        serve_switchboard_request, window_control_alternate_event, window_control_event, Answer,
+        AppBarBridge, AppBarService, ArtworkDesk, ArtworkFileReader, ArtworkSandbox, CliError,
+        Command, ConcludedPick, ConfirmPrompt, Delivery, Desktop, DesktopAction, DesktopActivation,
+        DesktopOutcome, DesktopShell, DeviceInputSource, ElevatePrompt, Elevator, FrameContent,
+        FrameReportGate, HangTracker, HoldBack, IconRasteriser, InputSource, KeyboardInputSource,
+        LaunchTable, ListingClient, ListingDesk, LockedDrain, OwnerWindow, PickConclusion,
+        PinboardMenu, PinboardMenuOutcome, PinboardStore, PinboardStoreError, Prepared,
+        PresentedOwners, PromptOutcome, ScreenFade, ScreenLock, SeatEventReader, SeatInputChannel,
+        SessionClock, SessionFileReader, SessionFileWriter, SessionPicker, SessionWindows,
+        ShellWindowHost, SwitchboardMailbox, SwitchboardOutcome, SwitchboardServe, WallpaperDesk,
+        WallpaperSource, BUNDLE_RUN_SUFFIX, DATETIME_RUN_PATH, ELEVATE_PROMPT_SHOWN,
+        ELEVATE_PROMPT_SHOWN_MESSAGE, FILES_LABEL, FILES_RUN_PATH, SWITCHBOARD_CALL_REFUSED,
+        SWITCHBOARD_LABEL, SWITCHBOARD_RUN_PATH, USAGE, WALLPAPER_LABEL, WALLPAPER_RUN_PATH,
+        WINDOW_SHOWN, WINDOW_SHOWN_MESSAGE,
     };
     use tairix_display::{DisplayClient, DisplayTransport, RemoteDisplay, RtShmMapper};
     use tairix_greeter::{Verdict, Verifier};
@@ -1890,8 +1890,11 @@ mod program {
         // section they last asked for and no more.
         let mut pending_open: Option<CommandSection> = None;
         // What the monitor's Resources page already shows about the last
-        // frame, so a frame whose cost is unchanged sends nothing.
-        let mut last_frame: Option<FrameReport> = None;
+        // frame, so a frame whose cost is unchanged sends nothing — and, past
+        // that, so a desktop whose cost moves on *every* frame (a pointer
+        // crossing the wallpaper redamages the cursor) still reports at a
+        // rate a reader can follow rather than at frame rate.
+        let mut frames = FrameReportGate::new();
         // The trusted file picker (AW5/CU6): the one shared browser engine
         // over the session's own capability-checked listing call. Every
         // pick starts from a fresh listing under the session's authority;
@@ -1961,11 +1964,12 @@ mod program {
 
         let mut token = 0u64;
         loop {
-            // The park stays indefinite: a cache-report change the rate
-            // limiter is holding back, an animation frame the session owes,
-            // only ever *tighten* the wait to the moment the work is due, and
-            // fold back to indefinite once it is done. The desktop never
-            // polls for anything.
+            // The park stays indefinite: a cache-report change the runtime's
+            // rate limiter is holding back, a frame report this session's own
+            // one is holding back, an animation frame the session owes, only
+            // ever *tighten* the wait to the moment the work is due, and fold
+            // back to indefinite once it is done. The desktop never polls for
+            // anything.
             //
             // A background session has no deadline at all, not even those:
             // it draws nothing, so a held-back report has nothing to report,
@@ -1981,7 +1985,10 @@ mod program {
                             now_ns,
                             shell.backdrop_park_deadline_ns(
                                 now_ns,
-                                tairix_rt::cachereport::fold_wait_deadline_ns(u64::MAX),
+                                frames.park_deadline_ns(
+                                    now_ns,
+                                    tairix_rt::cachereport::fold_wait_deadline_ns(u64::MAX),
+                                ),
                             ),
                         ),
                     ),
@@ -1999,6 +2006,12 @@ mod program {
                 // `call_recv` with nothing to receive. Only what this loop
                 // armed the deadline for is owed: the next frame of whatever
                 // is animating, and the held-back report.
+                //
+                // One clock reading serves the whole frame: what the
+                // animation steps to and what the report's rate limit is
+                // timed against are the same instant, and the frame path
+                // takes one syscall for both rather than two.
+                let now_ns = tairix_rt::clock_get();
                 animate(
                     &mut fade,
                     &mut lock,
@@ -2006,7 +2019,7 @@ mod program {
                     &mut shell,
                     &desktop,
                     &mut compositor,
-                    tairix_rt::clock_get(),
+                    now_ns,
                 );
                 if let Err(code) = present(
                     &mut shell,
@@ -2017,11 +2030,11 @@ mod program {
                 ) {
                     return code;
                 }
-                maybe_send_frame_report(
-                    &mut last_frame,
+                frames.maybe_send(
                     &compositor,
                     switchboard_pid,
                     frame_content(&mut windows, &server, &identity, switchboard_pid),
+                    now_ns,
                     &mut RtSwitchboardMailbox,
                 );
                 tairix_rt::cachereport::publish_if_due();
@@ -2731,7 +2744,10 @@ mod program {
             lock.keep_topmost(&mut compositor);
             // Whatever is animating steps to the instant this frame is
             // actually shown at, not to when the wake arrived, so the work
-            // this wake did does not age the frame.
+            // this wake did does not age the frame. One clock reading serves
+            // the whole frame, as on the deadline path above: the animation
+            // and the frame report's rate limit share it.
+            let now_ns = tairix_rt::clock_get();
             animate(
                 &mut fade,
                 &mut lock,
@@ -2739,7 +2755,7 @@ mod program {
                 &mut shell,
                 &desktop,
                 &mut compositor,
-                tairix_rt::clock_get(),
+                now_ns,
             );
             // One present per wake: the compositor tracks the damage the
             // pumped events and served presents produced and the ring
@@ -2755,13 +2771,14 @@ mod program {
             }
             // What that frame cost, for the monitor's Resources page. After
             // the present, so the counts describe pixels already on screen,
-            // and silent unless they moved — or unless the only content was
+            // and silent unless they moved, unless the rate limiter is still
+            // holding the last change back, or unless the only content was
             // the Switchboard painting the number itself.
-            maybe_send_frame_report(
-                &mut last_frame,
+            frames.maybe_send(
                 &compositor,
                 switchboard_pid,
                 frame_content(&mut windows, &server, &identity, switchboard_pid),
+                now_ns,
                 &mut RtSwitchboardMailbox,
             );
             // The wake is fully handled and its frame is on screen: report

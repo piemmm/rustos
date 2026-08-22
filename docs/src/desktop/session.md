@@ -783,6 +783,23 @@ above:
   rather than owed, because the next frame carries a fresher one. Nothing
   about it blocks or retries on a frame path. See [the Desktop
   block](./switchboard.md#the-desktop-block).
+  - **Rate-limited, because this is the one report whose content churns at
+    frame rate.** A change gate alone cannot quieten it: a pointer crossing
+    bare wallpaper redamages the rectangle the cursor leaves and the one it
+    arrives in, and those overlap by a different amount each frame, so the
+    counts differ from the previous frame even though the desktop did nothing
+    new. `FrameReportGate` therefore holds the send to at most one per
+    `MIN_FRAME_REPORT_INTERVAL_NS` (250 ms) — the Resources page is read at
+    human speed, and without the limit simply moving the pointer cost the
+    monitor half a core rebuilding its model per frame.
+  - **Still not polled, and nothing is lost.** A change the limit holds back
+    tightens the session's own park to the moment it may go out
+    (`FrameReportGate::park_deadline_ns`, folded through the same
+    `park_within` as every animated surface), so a desktop that goes quiet
+    mid-motion still reports its idle frame once and then arms nothing. A
+    held-back report is always **re-read** rather than replayed: what goes out
+    is the frame on screen at that moment, never the stale one it was
+    holding.
 
 ## The app-ward hold-back
 

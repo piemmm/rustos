@@ -126,16 +126,20 @@ impl Panel {
 
     /// Adopt the seat's latest unresponsive-owner report.
     ///
-    /// The report changes which owners the recovery rows call out, so the
-    /// caller rebuilds the model from the sample already in hand rather than
-    /// leaving the panel stale until the next cycle.
+    /// The report changes which owners the recovery rows call out, so an
+    /// *open* panel is rebuilt from the sample already in hand rather than
+    /// left stale until the next cycle. Adopting it is all this does; the
+    /// caller decides whether anything is on screen to rebuild for
+    /// (`Service::rebuild_if_shown`).
     pub fn set_seat_report(&mut self, report: SeatReport) {
         self.session.seat = report;
     }
 
     /// Adopt what the session's last composited frame cost, on the same
     /// terms as the seat report: the Resources page reads it, so the caller
-    /// rebuilds from the sample in hand.
+    /// rebuilds an open panel from the sample in hand — and a closed one not
+    /// at all, since this is the one report the session's frame path can
+    /// produce several times a second.
     pub fn set_frame_report(&mut self, report: FrameReport) {
         self.session.frame = Some(report);
     }

@@ -51,15 +51,16 @@ use crate::artwork::ArtworkDesk;
 use crate::shell::SettleWork;
 use crate::{
     deliver_pending_open, desktop_info, drop_is_noteworthy, ensure_switchboard, load_icon_set,
-    load_library, maybe_send_frame_report, maybe_send_seat_report, open_tray, picker_cells,
-    resolve_library_icons, resolve_window_identities, serve_switchboard_request, thumbnail,
-    AppBarService, ArtworkFileReader, ArtworkSandbox, DesktopSession, DesktopShell, FrameContent,
+    load_library, maybe_send_seat_report, open_tray, picker_cells, resolve_library_icons,
+    resolve_window_identities, serve_switchboard_request, thumbnail, AppBarService,
+    ArtworkFileReader, ArtworkSandbox, DesktopSession, DesktopShell, FrameContent, FrameReportGate,
     IconRasteriser, InputSource, LaunchTable, LockOutcome, LockedDrain, OwnerWindow,
     PresentedOwners, ScreenFade, ScreenLock, SessionFileReader, SessionInputResponse,
     SessionInputRouter, SessionWindows, ShellOutcome, ShellWindowHost, SwitchboardMailbox,
     SwitchboardOutcome, SwitchboardRefusal, SwitchboardServe, TaskBridge, TaskbarPresenter,
     BUNDLE_RUN_SUFFIX, DESKTOP_REVEALED, DESKTOP_REVEALED_MESSAGE, DESKTOP_SESSION_RANGE_END,
-    DESKTOP_SESSION_RANGE_START, MAX_BAR_APPS, NO_DEADLINE_NS, SWITCHBOARD_RUN_PATH,
+    DESKTOP_SESSION_RANGE_START, MAX_BAR_APPS, MIN_FRAME_REPORT_INTERVAL_NS, NO_DEADLINE_NS,
+    SWITCHBOARD_RUN_PATH,
 };
 use tairix_window::WindowSizing;
 
@@ -5523,19 +5524,19 @@ fn the_frame_report_is_sent_only_on_change_and_only_to_a_live_instance() {
     let _ = open_app(&mut shell, &mut comp, Point::new(300, 200), "Editor");
     comp.composite();
     let mut mailbox = RecordingMailbox::default();
-    let mut last = None;
+    let mut gate = FrameReportGate::new();
 
-    maybe_send_frame_report(&mut last, &comp, None, FrameContent::Foreign, &mut mailbox);
+    gate.maybe_send(&comp, None, FrameContent::Foreign, 0, &mut mailbox);
     assert!(
-        mailbox.sent.is_empty() && last.is_none(),
+        mailbox.sent.is_empty(),
         "nothing is sent with no instance live"
     );
 
-    maybe_send_frame_report(
-        &mut last,
+    gate.maybe_send(
         &comp,
         Some(MONITOR_PID),
         FrameContent::Foreign,
+        0,
         &mut mailbox,
     );
     let (pid, command) = mailbox.sent.first().copied().expect("one report");
@@ -5548,17 +5549,15 @@ fn the_frame_report_is_sent_only_on_change_and_only_to_a_live_instance() {
     );
     assert_eq!(report.damaged_px, comp.frame_stats().damaged_px);
     assert!(report.damaged_px > 0, "the composed frame changed pixels");
-    assert_eq!(
-        last,
-        Some(report),
-        "an accepted report is what is remembered"
-    );
 
-    maybe_send_frame_report(
-        &mut last,
+    // Offered far enough past the first that the rate limit cannot be what
+    // silences it, so this tests the change gate alone — and proves the
+    // accepted report is what the gate remembers holding.
+    gate.maybe_send(
         &comp,
         Some(MONITOR_PID),
         FrameContent::Foreign,
+        10 * MIN_FRAME_REPORT_INTERVAL_NS,
         &mut mailbox,
     );
     assert_eq!(
@@ -5577,34 +5576,36 @@ fn every_reported_frame_survives_the_receivers_validation() {
     let mut comp = compositor();
     let window = open_app(&mut shell, &mut comp, Point::new(300, 200), "Editor");
     let mut mailbox = RecordingMailbox::default();
-    let mut last = None;
+    let mut gate = FrameReportGate::new();
 
     // A busy frame with a window and its furniture, an idle one that
     // recomposed nothing, and one over bare desktop with the window gone —
     // the frame that blends nothing at all.
+    // Each offered a full interval after the last, so the rate limit never
+    // hides a frame this test is about.
     comp.composite();
-    maybe_send_frame_report(
-        &mut last,
+    gate.maybe_send(
         &comp,
         Some(MONITOR_PID),
         FrameContent::Foreign,
+        0,
         &mut mailbox,
     );
     comp.composite();
-    maybe_send_frame_report(
-        &mut last,
+    gate.maybe_send(
         &comp,
         Some(MONITOR_PID),
         FrameContent::None,
+        MIN_FRAME_REPORT_INTERVAL_NS,
         &mut mailbox,
     );
     shell.close_window(&mut comp, window);
     comp.composite();
-    maybe_send_frame_report(
-        &mut last,
+    gate.maybe_send(
         &comp,
         Some(MONITOR_PID),
         FrameContent::None,
+        2 * MIN_FRAME_REPORT_INTERVAL_NS,
         &mut mailbox,
     );
 
@@ -5667,18 +5668,29 @@ fn a_refused_mailbox_send_is_attempted_once_rather_than_retried() {
     let mut comp = compositor();
     let _ = open_app(&mut shell, &mut comp, Point::new(300, 200), "Editor");
     comp.composite();
-    let mut last = None;
-    maybe_send_frame_report(
-        &mut last,
+    let mut gate = FrameReportGate::new();
+    gate.maybe_send(
         &comp,
         Some(MONITOR_PID),
         FrameContent::Foreign,
+        0,
         &mut mailbox,
     );
     assert_eq!(mailbox.attempts, 3, "one frame is one attempt");
-    assert!(
-        last.is_none(),
-        "a refused report is not what the panel holds"
+
+    // A refused report is not what the panel holds: the very same frame,
+    // offered again once the limit allows, is offered again rather than
+    // silenced as something the monitor already has.
+    gate.maybe_send(
+        &comp,
+        Some(MONITOR_PID),
+        FrameContent::Foreign,
+        MIN_FRAME_REPORT_INTERVAL_NS,
+        &mut mailbox,
+    );
+    assert_eq!(
+        mailbox.attempts, 4,
+        "a refused report is offered again, never recorded as sent"
     );
 }
 
@@ -5692,29 +5704,29 @@ fn a_switchboard_only_frame_is_not_reported() {
     let _ = open_app(&mut shell, &mut comp, Point::new(300, 200), "Editor");
     comp.composite();
     let mut mailbox = RecordingMailbox::default();
-    let mut last = None;
+    let mut gate = FrameReportGate::new();
 
     // A real desktop frame still reports.
-    maybe_send_frame_report(
-        &mut last,
+    gate.maybe_send(
         &comp,
         Some(MONITOR_PID),
         FrameContent::Foreign,
+        0,
         &mut mailbox,
     );
     assert_eq!(mailbox.sent.len(), 1, "real work is reported");
-    let first = last.expect("accepted");
 
     // The Switchboard rebuilds from that report and presents only itself.
     // Counters differ (its paint is real work for the compositor) but the
-    // content gate must drop the report so the loop cannot restart.
+    // content gate must drop the report so the loop cannot restart. Offered
+    // past the interval, so the content gate is what has to stop it.
     let _ = open_app(&mut shell, &mut comp, Point::new(100, 100), "Switchboard");
     comp.composite();
-    maybe_send_frame_report(
-        &mut last,
+    gate.maybe_send(
         &comp,
         Some(MONITOR_PID),
         FrameContent::SwitchboardOnly,
+        MIN_FRAME_REPORT_INTERVAL_NS,
         &mut mailbox,
     );
     assert_eq!(
@@ -5722,7 +5734,21 @@ fn a_switchboard_only_frame_is_not_reported() {
         1,
         "the monitor's own paint must not re-excite a report"
     );
-    assert_eq!(last, Some(first), "a suppressed report is not remembered");
+
+    // A suppressed report is not remembered either: that very frame, once
+    // some other window's content lands in it, is still news to the monitor.
+    gate.maybe_send(
+        &comp,
+        Some(MONITOR_PID),
+        FrameContent::Foreign,
+        2 * MIN_FRAME_REPORT_INTERVAL_NS,
+        &mut mailbox,
+    );
+    assert_eq!(
+        mailbox.sent.len(),
+        2,
+        "a report the content gate dropped was never recorded as sent"
+    );
 
     // Chrome-only or idle work with no served present still reports when
     // the counters move — the gate is content, not a blanket silence.
@@ -5732,16 +5758,191 @@ fn a_switchboard_only_frame_is_not_reported() {
         shell.close_window(&mut comp, other);
     }
     comp.composite();
-    maybe_send_frame_report(
-        &mut last,
+    gate.maybe_send(
         &comp,
         Some(MONITOR_PID),
         FrameContent::None,
+        3 * MIN_FRAME_REPORT_INTERVAL_NS,
         &mut mailbox,
     );
     assert!(
-        mailbox.sent.len() >= 2,
+        mailbox.sent.len() >= 3,
         "a non-Switchboard frame whose counts moved still reports"
+    );
+}
+
+/// A desktop whose frame counts move on *every* frame still reports at the
+/// limited rate, not at frame rate.
+///
+/// This is the regression for the pointer-over-wallpaper storm: a pointer
+/// crossing bare desktop redamages the rectangle the cursor leaves and the
+/// one it arrives in, and those two overlap by a different amount each
+/// frame, so `damaged_px` and `dirty_rects` differ from the previous frame
+/// even though the desktop did nothing new. Change detection alone cannot
+/// see that, so without the rate limit every frame became one command — and
+/// the monitor rebuilt its whole overview model for each one, burning half a
+/// core with its window closed.
+#[test]
+fn a_frame_report_storm_is_capped_at_one_report_per_interval() {
+    let mut shell = shell();
+    let mut comp = compositor();
+    let window = open_app(&mut shell, &mut comp, Point::new(300, 200), "Editor");
+    let mut mailbox = RecordingMailbox::default();
+    let mut gate = FrameReportGate::new();
+
+    // Twenty frames inside a single interval, each damaging a different pair
+    // of rectangles — the counters moving every frame, as motion moves them.
+    let mut counts = Vec::new();
+    for step in 0..20i32 {
+        assert!(
+            comp.move_window(window, Point::new(300 + step * step, 200 + step)),
+            "the window this test moves must exist"
+        );
+        comp.composite();
+        counts.push(comp.frame_stats().damaged_px);
+        gate.maybe_send(
+            &comp,
+            Some(MONITOR_PID),
+            FrameContent::Foreign,
+            u64::try_from(step).expect("a small step") * (MIN_FRAME_REPORT_INTERVAL_NS / 100),
+            &mut mailbox,
+        );
+    }
+
+    // The premise: these really are frames the change gate would have let
+    // through, so the limit is what this test measures.
+    assert!(
+        counts.windows(2).any(|pair| pair[0] != pair[1]),
+        "the frames this test composes must differ from one another"
+    );
+    assert_eq!(
+        mailbox.sent.len(),
+        1,
+        "counts that move every frame are still one report per interval"
+    );
+}
+
+/// A change the limit held back goes out once the interval has elapsed, and
+/// it carries the counts of the frame on screen *then* — not the stale ones
+/// it was holding.
+#[test]
+fn a_held_back_frame_report_goes_out_with_the_counts_it_has_when_it_can() {
+    let mut shell = shell();
+    let mut comp = compositor();
+    let window = open_app(&mut shell, &mut comp, Point::new(300, 200), "Editor");
+    let mut mailbox = RecordingMailbox::default();
+    let mut gate = FrameReportGate::new();
+
+    comp.composite();
+    gate.maybe_send(
+        &comp,
+        Some(MONITOR_PID),
+        FrameContent::Foreign,
+        0,
+        &mut mailbox,
+    );
+    assert_eq!(mailbox.sent.len(), 1, "the first frame reports at once");
+
+    // A different frame inside the interval is held back.
+    assert!(comp.move_window(window, Point::new(320, 220)));
+    comp.composite();
+    let held = comp.frame_stats().damaged_px;
+    gate.maybe_send(
+        &comp,
+        Some(MONITOR_PID),
+        FrameContent::Foreign,
+        MIN_FRAME_REPORT_INTERVAL_NS / 2,
+        &mut mailbox,
+    );
+    assert_eq!(mailbox.sent.len(), 1, "a change inside the interval waits");
+
+    // A different frame again, now that the interval has elapsed.
+    assert!(comp.move_window(window, Point::new(500, 400)));
+    comp.composite();
+    let fresh = comp.frame_stats().damaged_px;
+    assert_ne!(held, fresh, "the two frames this test compares must differ");
+    gate.maybe_send(
+        &comp,
+        Some(MONITOR_PID),
+        FrameContent::Foreign,
+        MIN_FRAME_REPORT_INTERVAL_NS,
+        &mut mailbox,
+    );
+
+    let (_, command) = mailbox.sent.get(1).copied().expect("the held-back report");
+    let report = frame_of(command).expect("a frame report");
+    assert_eq!(
+        report.damaged_px, fresh,
+        "a held-back report is re-read, never replayed: the page must show the frame on screen"
+    );
+}
+
+/// The rate limit costs the desktop no report and no poll: a held-back
+/// change tightens the session's park to the moment it may go out, and
+/// nothing else ever arms a timer.
+#[test]
+fn the_frame_report_park_deadline_arms_only_while_a_change_is_held_back() {
+    let mut shell = shell();
+    let mut comp = compositor();
+    let window = open_app(&mut shell, &mut comp, Point::new(300, 200), "Editor");
+    let mut mailbox = RecordingMailbox::default();
+    let mut gate = FrameReportGate::new();
+
+    assert_eq!(
+        gate.park_deadline_ns(0, NO_DEADLINE_NS),
+        NO_DEADLINE_NS,
+        "a session that has reported nothing arms no timer"
+    );
+
+    comp.composite();
+    gate.maybe_send(
+        &comp,
+        Some(MONITOR_PID),
+        FrameContent::Foreign,
+        0,
+        &mut mailbox,
+    );
+    assert_eq!(mailbox.sent.len(), 1);
+    assert_eq!(
+        gate.park_deadline_ns(0, NO_DEADLINE_NS),
+        NO_DEADLINE_NS,
+        "a report that went out holds nothing back"
+    );
+
+    assert!(comp.move_window(window, Point::new(340, 240)));
+    comp.composite();
+    let held_at = MIN_FRAME_REPORT_INTERVAL_NS / 4;
+    gate.maybe_send(
+        &comp,
+        Some(MONITOR_PID),
+        FrameContent::Foreign,
+        held_at,
+        &mut mailbox,
+    );
+    assert_eq!(mailbox.sent.len(), 1, "held back inside the interval");
+    assert_eq!(
+        gate.park_deadline_ns(held_at, NO_DEADLINE_NS),
+        MIN_FRAME_REPORT_INTERVAL_NS - held_at,
+        "the park tightens to exactly when the held-back report may go"
+    );
+    assert_eq!(
+        gate.park_deadline_ns(held_at, 5),
+        5,
+        "folding in only ever shortens a caller's own deadline"
+    );
+
+    gate.maybe_send(
+        &comp,
+        Some(MONITOR_PID),
+        FrameContent::Foreign,
+        MIN_FRAME_REPORT_INTERVAL_NS,
+        &mut mailbox,
+    );
+    assert_eq!(mailbox.sent.len(), 2, "the held-back change goes out");
+    assert_eq!(
+        gate.park_deadline_ns(MIN_FRAME_REPORT_INTERVAL_NS, NO_DEADLINE_NS),
+        NO_DEADLINE_NS,
+        "the flush must not re-arm: a desktop gone quiet stays quiet"
     );
 }
 

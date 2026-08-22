@@ -290,11 +290,9 @@ fn a_seat_report_is_folded_into_the_panel_at_once() {
     assert_eq!(service.panel().session_report().seat.owners(), &[11]);
 }
 
-#[test]
-fn a_frame_report_reaches_the_resources_page_at_once() {
-    let mut host = RecordingHost::new();
-    let mut service = service();
-    let report = FrameReport {
+/// A frame report the tests below feed the service.
+fn frame_report() -> FrameReport {
+    FrameReport {
         screen_px: 1920 * 1080,
         damaged_px: 3_200,
         blended_px: 42_000,
@@ -303,8 +301,26 @@ fn a_frame_report_reaches_the_resources_page_at_once() {
         present_calls: 1,
         chrome_hits: 12,
         chrome_misses: 1,
-    };
+    }
+}
 
+/// Open the panel on a named section, as the session's own `OpenPanel`
+/// command does.
+fn open(service: &mut Service, host: &mut RecordingHost, section: CommandSection) {
+    service.command(
+        host,
+        SwitchboardCommand::OpenPanel { section },
+        &NO_AUTHORITY,
+    );
+}
+
+#[test]
+fn a_frame_report_reaches_an_open_resources_page_at_once() {
+    let mut host = RecordingHost::new();
+    let mut service = service();
+    let report = frame_report();
+
+    open(&mut service, &mut host, CommandSection::System);
     service.command(
         &mut host,
         SwitchboardCommand::FrameReport { report },
@@ -318,6 +334,115 @@ fn a_frame_report_reaches_the_resources_page_at_once() {
         facts[0].value,
         Reading::measured("3.2k px of 2.0M px recomposed"),
         "the report must be rebuilt into the page, not held until the next sample"
+    );
+}
+
+/// A frame report is adopted while the panel is closed, but nothing is
+/// rebuilt for it.
+///
+/// This is the regression for the pointer-over-wallpaper storm's second
+/// half. The session's frame path can produce a report several times a
+/// second, and rebuilding walks every sampled process to allocate a row, a
+/// name, and a CPU history for each — work that with no window open reaches
+/// no screen at all, since `Panel::refresh` renders nothing without a view
+/// and the next `cycle` rebuilds from a fresh sample regardless. Together
+/// with the session's own rate limit this is what takes the monitor from
+/// half a core down to nothing while a user simply moves the pointer.
+#[test]
+fn a_frame_report_does_not_rebuild_the_model_while_the_panel_is_closed() {
+    let mut host = RecordingHost::new();
+    let mut service = service();
+    let before = service.panel().model().clone();
+
+    service.command(
+        &mut host,
+        SwitchboardCommand::FrameReport {
+            report: frame_report(),
+        },
+        &NO_AUTHORITY,
+    );
+
+    assert_eq!(
+        service.panel().session_report().frame,
+        Some(frame_report()),
+        "the report itself is still adopted: that is a field write, not a rebuild"
+    );
+    assert_eq!(
+        *service.panel().model(),
+        before,
+        "with no window open, nothing may be rebuilt for a report nothing can show"
+    );
+    assert_eq!(host.presents, 0, "and nothing may be presented");
+}
+
+/// A seat report is on the same terms: adopted always, rebuilt only for a
+/// panel that can show it.
+///
+/// Sampled against a real process list and naming one of its rows, so the
+/// report is one that genuinely *would* change the model — a closed panel
+/// whose model happens to be empty either way would prove nothing.
+#[test]
+fn a_seat_report_does_not_rebuild_the_model_while_the_panel_is_closed() {
+    let target_pid = 50;
+    let transport = ProcessListTransport::new(two_row_records(OWN_PID, target_pid));
+    let mut host = RecordingHost::new();
+    let mut service = Service::new(OWN_PID, GRANTED_SCOPES, &NO_AUTHORITY);
+    service.cycle(&mut host, &transport, 0, &NO_AUTHORITY);
+    let report = SeatReport::new(1, &[target_pid]).expect("valid report");
+    let before = service.panel().model().clone();
+
+    service.command(
+        &mut host,
+        SwitchboardCommand::SeatReport { report },
+        &NO_AUTHORITY,
+    );
+
+    assert_eq!(
+        service.panel().session_report().seat.owners(),
+        &[target_pid]
+    );
+    assert_eq!(
+        *service.panel().model(),
+        before,
+        "with no window open, nothing may be rebuilt for a report nothing can show"
+    );
+
+    // The premise, and the freshness guarantee: opening the panel is what
+    // folds it in, and it really does change what the page shows.
+    open(&mut service, &mut host, CommandSection::Recovery);
+    assert_ne!(
+        *service.panel().model(),
+        before,
+        "the report this test withholds must be one that changes the page"
+    );
+}
+
+/// Opening the panel is what folds in every report that arrived while it
+/// was closed, so a user never sees a page built from a report the service
+/// had already been told about.
+///
+/// This is the whole reason the rebuild can be skipped above: the window is
+/// created from the model, so the model is rebuilt first.
+#[test]
+fn opening_the_panel_shows_the_reports_that_arrived_while_it_was_closed() {
+    let mut host = RecordingHost::new();
+    let mut service = service();
+
+    service.command(
+        &mut host,
+        SwitchboardCommand::FrameReport {
+            report: frame_report(),
+        },
+        &NO_AUTHORITY,
+    );
+    open(&mut service, &mut host, CommandSection::System);
+
+    let facts = &service.panel().model().model.system.compositor;
+    assert_eq!(facts[0].label, "Last frame");
+    assert_eq!(
+        facts[0].value,
+        Reading::measured("3.2k px of 2.0M px recomposed"),
+        "a page opening now must carry the report the service already holds"
     );
 }
 
@@ -394,12 +519,14 @@ fn a_missing_self_row_denies_control_without_the_capability() {
         "an unknown self uid must never grant the same-uid rule"
     );
 
-    // The capability alone still grants it, even with no self row.
-    service.command(
+    // The capability alone still grants it, even with no self row. Re-derived
+    // through a cycle, which is what rebuilds the model under an authority in
+    // production; the assigned activity survives it because its member is
+    // still in the sampled process list.
+    service.cycle(
         &mut host,
-        SwitchboardCommand::SeatReport {
-            report: SeatReport::HEALTHY,
-        },
+        &transport,
+        crate::SAMPLE_PERIOD_NS,
         &PROC_CONTROL_AUTHORITY,
     );
     assert!(service.panel().model().model.activities[0].can_control);

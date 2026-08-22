@@ -25,6 +25,7 @@ use crate::config::SWITCHBOARD_RUN_PATH;
 use crate::confirm::Answer;
 use crate::launch::LaunchTable;
 use crate::shell::DesktopShell;
+use crate::switchuser::park_within;
 
 /// What a successfully served request answers with, beyond the shared
 /// status word: nothing (every operation but a publish), or — for a
@@ -460,52 +461,160 @@ impl PresentedOwners {
     }
 }
 
-/// Report what the frame `compositor` has just published cost, when a
-/// Switchboard instance is live, the counts differ from the one `last`
-/// records, and the frame's served content was not only the Switchboard's
-/// own paint.
+/// Minimum time between two frame-report send attempts.
 ///
-/// `last` is what makes this a change report rather than a per-frame send: a
-/// desktop redrawing the same rectangles sends nothing, and one that has
-/// gone quiet sends its idle frame once. `content` is what stops the monitor
-/// measuring itself: a frame whose only served present came from the live
-/// Switchboard is dropped even when the counters moved, so the panel's
-/// rebuild cannot re-excite another report. Nothing here waits on the panel,
-/// so a frame path pays one comparison and at most one non-blocking send.
+/// The counts a frame report carries move on every composited frame — a
+/// pointer crossing bare wallpaper redamages two cursor rectangles that
+/// overlap by a different amount each time, so `damaged_px` and
+/// `dirty_rects` differ from the previous frame even though nothing the
+/// desktop *did* changed. Change detection alone therefore cannot quieten a
+/// motion storm: without this limit the session sends one command per frame,
+/// and the monitor rebuilds its whole overview model for each one.
 ///
-/// A refused send is dropped, exactly as a refused seat report is: the count
-/// it carried describes a frame already on screen, and the next frame that
-/// differs from the panel's view re-sends a fresher one. `last` therefore
-/// records what was *accepted*, never what was merely attempted.
-pub fn maybe_send_frame_report(
-    last: &mut Option<FrameReport>,
-    compositor: &Compositor,
-    live: Option<u64>,
-    content: FrameContent,
-    mailbox: &mut dyn SwitchboardMailbox,
-) {
-    if matches!(content, FrameContent::SwitchboardOnly) {
-        return;
+/// 250 ms is chosen against the reader, not the writer: the Resources page
+/// is read at human speed, so four readings a second is already more than
+/// anyone can follow, while it caps a continuous redraw storm at a handful
+/// of sends. It is deliberately the same order as the runtime's cache-report
+/// limit (`tairix_rt::cachereport`, 250 ms) because both answer the same
+/// question — how often is it worth telling a live monitor something moved —
+/// but the two are separate policies over separate channels, each documented
+/// where its own gate lives.
+pub const MIN_FRAME_REPORT_INTERVAL_NS: u64 = 250_000_000;
+
+/// The session's frame-report gate: what it last told the monitor a frame
+/// cost, when it last tried, and whether a change is being held back.
+///
+/// One per session, driven from the run loop's frame path. It exists because
+/// the frame report is the one Switchboard command whose *content* churns at
+/// frame rate: [`maybe_send_seat_report`] needs no such state because the
+/// responsiveness tracker latches its own changes upstream, so a quiet seat
+/// produces no candidate send at all.
+///
+/// The gate is the whole rate-limit and change-detection design, and it
+/// holds no dirty flag: comparing a freshly read [`FrameReport`] against the
+/// one already accepted *is* the change detection, which costs one struct
+/// comparison on a frame path. [`FrameReportGate::park_deadline_ns`] is what
+/// keeps a held-back change from needing a poll to escape.
+#[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
+pub struct FrameReportGate {
+    /// The report the last *accepted* send carried, never one merely
+    /// attempted: a refused report is not what the monitor holds.
+    last_sent: Option<FrameReport>,
+    /// When the last send was attempted, successful or not. `None` before
+    /// the first attempt, so that attempt is never held back.
+    last_attempt_ns: Option<u64>,
+    /// Whether a change is currently held back — suppressed by the limit, or
+    /// attempted and refused. Drives [`FrameReportGate::park_deadline_ns`].
+    pending: bool,
+}
+
+impl FrameReportGate {
+    /// A session that has reported nothing yet.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self {
+            last_sent: None,
+            last_attempt_ns: None,
+            pending: false,
+        }
     }
-    let Some(pid) = live else {
-        return;
-    };
-    let mode = compositor.mode();
-    let stats = compositor.frame_stats();
-    let report = FrameReport {
-        screen_px: u64::from(mode.width_px).saturating_mul(u64::from(mode.height_px)),
-        damaged_px: stats.damaged_px,
-        blended_px: stats.blended_px,
-        opaque_px: stats.opaque_px,
-        dirty_rects: stats.dirty_rects,
-        present_calls: stats.present_calls,
-        chrome_hits: stats.chrome_hits,
-        chrome_misses: stats.chrome_misses,
-    };
-    if *last == Some(report) {
-        return;
+
+    /// Report what the frame `compositor` has just published cost, when a
+    /// Switchboard instance is live, the counts differ from the ones this
+    /// gate last had accepted, the frame's served content was not only the
+    /// Switchboard's own paint, and the minimum interval has elapsed since
+    /// the last attempt.
+    ///
+    /// Change detection is what makes this a change report rather than a
+    /// per-frame send: a desktop redrawing the same rectangles sends
+    /// nothing. The interval is what makes it a *report* rather than a
+    /// stream: a desktop whose counts move every frame still sends a handful
+    /// a second. `content` is what stops the monitor measuring itself: a
+    /// frame whose only served present came from the live Switchboard is
+    /// dropped even when the counters moved, so the panel's rebuild cannot
+    /// re-excite another report. Nothing here waits on the panel, so a frame
+    /// path pays one comparison and at most one non-blocking send.
+    ///
+    /// A refused send is dropped, exactly as a refused seat report is: the
+    /// count it carried describes a frame already on screen, and the next
+    /// frame that differs from the panel's view re-sends a fresher one. A
+    /// refusal is never retried in place — that would turn a busy or absent
+    /// monitor into the spin this design exists to avoid; it leaves the
+    /// change pending and advances the limiter exactly as a suppressed send
+    /// does, so the retry rides the loop's ordinary next pass.
+    pub fn maybe_send(
+        &mut self,
+        compositor: &Compositor,
+        live: Option<u64>,
+        content: FrameContent,
+        now_ns: u64,
+        mailbox: &mut dyn SwitchboardMailbox,
+    ) {
+        if matches!(content, FrameContent::SwitchboardOnly) {
+            return;
+        }
+        let Some(pid) = live else {
+            return;
+        };
+        let mode = compositor.mode();
+        let stats = compositor.frame_stats();
+        let report = FrameReport {
+            screen_px: u64::from(mode.width_px).saturating_mul(u64::from(mode.height_px)),
+            damaged_px: stats.damaged_px,
+            blended_px: stats.blended_px,
+            opaque_px: stats.opaque_px,
+            dirty_rects: stats.dirty_rects,
+            present_calls: stats.present_calls,
+            chrome_hits: stats.chrome_hits,
+            chrome_misses: stats.chrome_misses,
+        };
+        if self.last_sent == Some(report) {
+            self.pending = false;
+            return;
+        }
+        if self
+            .last_attempt_ns
+            .is_some_and(|last| now_ns.saturating_sub(last) < MIN_FRAME_REPORT_INTERVAL_NS)
+        {
+            self.pending = true;
+            return;
+        }
+        self.last_attempt_ns = Some(now_ns);
+        if mailbox.send(pid, SwitchboardCommand::FrameReport { report }) {
+            self.last_sent = Some(report);
+            self.pending = false;
+        } else {
+            self.pending = true;
+        }
     }
-    if mailbox.send(pid, SwitchboardCommand::FrameReport { report }) {
-        *last = Some(report);
+
+    /// `park_ns` shortened to the moment a held-back change may be sent, or
+    /// left exactly as it is when nothing is held back.
+    ///
+    /// This is what keeps the rate limit from costing the desktop its last
+    /// report: a pointer that stops mid-motion leaves one change suppressed,
+    /// and without a deadline it would sit unsent until some unrelated wake
+    /// — the Resources page reading a frame the user has moved on from. With
+    /// it the session wakes once, presents the (undamaged, hence idle)
+    /// frame, and sends that; the next pass compares equal, clears the flag,
+    /// and the park folds back to indefinite. An idle desktop therefore arms
+    /// no timer at all, and a busy one arms exactly one.
+    #[must_use]
+    pub fn park_deadline_ns(&self, now_ns: u64, park_ns: u64) -> u64 {
+        park_within(
+            park_ns,
+            self.pending.then(|| {
+                // `pending` is only ever set alongside a recorded attempt on
+                // the suppressed and refused paths above. Failing closed to
+                // "due now" if it somehow is not costs one extra pass of a
+                // loop that is already awake, never a missed report.
+                let elapsed = self
+                    .last_attempt_ns
+                    .map_or(MIN_FRAME_REPORT_INTERVAL_NS, |last| {
+                        now_ns.saturating_sub(last)
+                    });
+                MIN_FRAME_REPORT_INTERVAL_NS.saturating_sub(elapsed)
+            }),
+        )
     }
 }

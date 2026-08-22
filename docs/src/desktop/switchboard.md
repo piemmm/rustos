@@ -273,9 +273,10 @@ deliberately not given the same keys, which would give them two meanings.
 
 The Resources page's third block is the one reading this service does not
 sample. The session owns the compositor, so it sends what its last frame cost
-over the command channel above — only when the counts changed, and never when
-the only served content was this service's own paint (a monitor must not
-measure itself) — and this service validates and renders it:
+over the command channel above — only when the counts changed, never more than
+four times a second, and never when the only served content was this service's
+own paint (a monitor must not measure itself) — and this service validates and
+renders it:
 
 | Row | What it reads |
 |---|---|
@@ -292,6 +293,17 @@ frame* many times over is not an error — it is the reading: a frame that
 blends four million pixels to change three thousand is paying for depth
 nobody can see, and one that recomposes the whole screen to move a cursor is
 damaging too much.
+
+The block is refreshed as each report lands, but only while the window is
+open: a report that arrives with the panel closed is adopted and nothing is
+rebuilt for it, because rebuilding walks every sampled process to allocate a
+row, a name and a history for each, and no window means no reader. Opening the
+panel rebuilds first, so the first frame a user sees already carries every
+report that arrived while they were not looking — and the session's own rate
+limit ([the command
+channel](./session.md#the-command-mailbox-the-session-sends-on)) is what
+stops a pointer crossing the wallpaper producing those reports at frame rate
+in the first place.
 
 A report whose counts no compositor pass could have produced is refused where
 it is decoded, so the block never renders a sender's arithmetic. An idle frame
