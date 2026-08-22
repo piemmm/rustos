@@ -17,7 +17,7 @@ use tairix_controls::{
 };
 use tairix_geometry::{Point, Rect, Scale};
 use tairix_icon::{IconArtwork, IconKind, IconRequest, IconSet, NoArtwork};
-use tairix_input::{InputEvent, Key, Modifiers, NamedKey, PointerButton};
+use tairix_input::{InputEvent, Key, Modifiers, NamedKey, PointerButton, PointerFocus};
 use tairix_proglib::{BundlePath, Catalog, DisplayName, EntryId, LibraryCategory, LibraryEntry};
 use tairix_raster::{Color, Pixel, Surface};
 use tairix_theme::{Appearance, Contrast, Rgba, SignalRole, Theme, ThemeId};
@@ -1293,7 +1293,7 @@ fn set_apps_clamps_a_stale_hover() {
     bar.set_apps(alloc::vec![app("One"), app("Two")]);
     let layout = bar.layout(Scale::ONE);
     let second = centre_of(layout.apps[1]);
-    bar.track_hover(second, Scale::ONE, &mut damage::sink());
+    bar.track_hover(Some(second), Scale::ONE, &mut damage::sink());
     assert_eq!(bar.apps().hover(), Some(1));
 
     // Replace with one slot: the hover is clamped away rather than left
@@ -2091,6 +2091,108 @@ fn cells(bar: &Taskbar, app: usize) -> Vec<PickerEntry> {
             PickerEntry::new(id, title)
         })
         .collect()
+}
+
+/// The bar cannot see the window stack, so it cannot tell a clock the user is
+/// looking at from a clock a window is drawn over. The desktop's seat can, and
+/// says so: a [`PointerFocus::Left`] drops every hover the bar is drawing and
+/// closes the surfaces that hover opened.
+///
+/// The picker is the sharpest case. It exists *only* because the pointer is
+/// resting on a slot, so leaving it open once the pointer is elsewhere floats a
+/// panel of window thumbnails over whatever the user is now working in — and
+/// the pointer has not moved, so no position could have told the bar.
+#[test]
+fn a_pointer_that_left_the_bar_drops_its_hover_and_closes_its_picker() {
+    let mut bar = bottom_bar();
+    for id in 1..=2 {
+        bar.tasks_mut().add(TaskId(id), format!("Window {id}"));
+    }
+    bar.set_apps(alloc::vec![
+        app("Terminal").with_windows(alloc::vec![TaskId(1), TaskId(2)])
+    ]);
+    let mut input = TaskbarInput::new();
+    let slot = centre_of(bar.layout(Scale::ONE).apps[0]);
+    assert_eq!(
+        moved_at(&mut input, &mut bar, slot, NOW_NS),
+        TaskbarResponse::ShowWindowPicker { app: 0 }
+    );
+    bar.show_window_picker(0, cells(&bar, 0), Scale::ONE);
+    assert!(bar.picker().is_open());
+    assert_eq!(bar.apps().hover(), Some(0));
+    let _ = bar.take_repaint();
+
+    // Nothing has moved: the pointer is still at the slot's own centre.
+    input.set_pointer_focus(PointerFocus::Left, &mut bar, Scale::ONE);
+
+    assert_eq!(bar.apps().hover(), None, "the slot stayed lit");
+    assert!(!bar.picker().is_open(), "the picker was left open");
+    assert_eq!(
+        bar.take_repaint(),
+        TaskbarRepaint::BAR | TaskbarRepaint::PICKER,
+        "the slot that unlit and the picker that closed are what repaint"
+    );
+
+    // Saying it again changes nothing and repaints nothing.
+    input.set_pointer_focus(PointerFocus::Left, &mut bar, Scale::ONE);
+    assert_eq!(bar.take_repaint(), TaskbarRepaint::NONE);
+}
+
+/// The pointer can arrive without moving — the window above the bar closed —
+/// and the hover under it has to appear. What must *not* appear is the hover
+/// picker: a window closing is not a gesture, and a popover that opens because
+/// something else vanished is one nobody asked for. The next real motion opens
+/// it.
+#[test]
+fn a_pointer_that_entered_the_bar_hovers_without_opening_a_hover_surface() {
+    let mut bar = bottom_bar();
+    for id in 1..=2 {
+        bar.tasks_mut().add(TaskId(id), format!("Window {id}"));
+    }
+    bar.set_apps(alloc::vec![
+        app("Terminal").with_windows(alloc::vec![TaskId(1), TaskId(2)])
+    ]);
+    let mut input = TaskbarInput::new();
+    let slot = centre_of(bar.layout(Scale::ONE).apps[0]);
+    let _ = bar.take_repaint();
+
+    input.set_pointer_focus(PointerFocus::Entered { at: slot }, &mut bar, Scale::ONE);
+
+    assert_eq!(bar.apps().hover(), Some(0), "the slot under it is hovered");
+    assert_eq!(input.pointer(), slot, "and the position was adopted");
+    assert!(
+        !bar.picker().is_open(),
+        "an arrival is not a gesture: it opened a hover surface"
+    );
+    assert_eq!(bar.take_repaint(), TaskbarRepaint::BAR);
+
+    // A real motion over the same slot is a gesture, and does ask.
+    assert_eq!(
+        moved_at(&mut input, &mut bar, slot, NOW_NS),
+        TaskbarResponse::ShowWindowPicker { app: 0 }
+    );
+}
+
+/// The Switchboard capsule's readout opens *above* the bar, so a window that
+/// covers the bar need not cover the readout: it is the case where a stranded
+/// hover surface is plainly visible. It collapses with the pointer that opened
+/// it.
+#[test]
+fn a_pointer_that_left_the_bar_collapses_the_capsules_readout() {
+    let mut bar = bottom_bar();
+    let mut input = TaskbarInput::new();
+    hover_switchboard(&mut input, &mut bar);
+    assert!(bar.tray().is_expanded());
+    let _ = bar.take_repaint();
+
+    input.set_pointer_focus(PointerFocus::Left, &mut bar, Scale::ONE);
+
+    assert!(!bar.tray().is_expanded(), "the readout stayed expanded");
+    assert_eq!(
+        bar.take_repaint(),
+        TaskbarRepaint::BAR | TaskbarRepaint::READOUT
+    );
+    assert!(bar.tray_readout_layout(Scale::ONE).is_none());
 }
 
 #[test]
@@ -3662,7 +3764,7 @@ fn a_hovered_or_pressed_slot_never_washes_over_the_bar_rim() {
                 if state == "pressed" {
                     let _ = press_at(&mut TaskbarInput::new(), &mut bar, centre.x, centre.y);
                 } else {
-                    bar.track_hover(centre, Scale::ONE, &mut damage::sink());
+                    bar.track_hover(Some(centre), Scale::ONE, &mut damage::sink());
                 }
                 let surface = TaskbarRenderer::new(test_icon_cache())
                     .render(&bar, Scale::ONE, &mut NoArtwork)
@@ -3804,7 +3906,11 @@ fn hovering_the_launcher_washes_only_that_slot_and_draws_no_edge() {
     let theme = Theme::dark();
     let palette = theme.palette();
     let layout = bar.layout(Scale::ONE);
-    bar.track_hover(centre_of(layout.library), Scale::ONE, &mut damage::sink());
+    bar.track_hover(
+        Some(centre_of(layout.library)),
+        Scale::ONE,
+        &mut damage::sink(),
+    );
     let surface = TaskbarRenderer::new(test_icon_cache())
         .render(&bar, Scale::ONE, &mut NoArtwork)
         .expect("bar renders");
@@ -4085,7 +4191,7 @@ fn app_strip_and_menu_actions_latch_repaints() {
     // Motion over a slot changes the bar's own hover feedback: bar only.
     let layout = bar.layout(Scale::ONE);
     let slot = centre_of(layout.apps[0]);
-    bar.track_hover(slot, Scale::ONE, &mut damage::sink());
+    bar.track_hover(Some(slot), Scale::ONE, &mut damage::sink());
     assert_eq!(bar.take_repaint(), TaskbarRepaint::BAR);
 
     // Closing the menu: menu only.

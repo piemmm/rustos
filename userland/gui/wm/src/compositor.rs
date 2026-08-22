@@ -1762,6 +1762,23 @@ impl Compositor {
         .flatten()
     }
 
+    /// Tell the decoration furniture of the window named by `id` that the
+    /// pointer has left it, repainting only the control that was lit. Returns
+    /// `false` for an unknown window (an undecorated one has no furniture to
+    /// tell and reports `true`, having nothing to do).
+    ///
+    /// The counterpart of [`frame_pointer`](Self::frame_pointer) for the end of
+    /// a hover that no pointer sample marks: the pointer is still inside the
+    /// frame's own rectangle when a window is raised over it, so the hover has
+    /// to be ended by the party that can see the stack rather than by
+    /// re-testing a position that has not changed.
+    pub fn frame_pointer_left(&mut self, id: WindowId) -> bool {
+        self.mutate_frame(id, |window, scale, theme, damage| {
+            window.on_frame_pointer_left(scale, theme, damage);
+        })
+        .is_some()
+    }
+
     /// Feed a key `key` to the decoration furniture of the window named by
     /// `id` (the title bar's command controls), repainting only what the
     /// furniture reported changing, and return the typed [`TitleBarEvent`] it

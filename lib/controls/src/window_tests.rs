@@ -455,6 +455,57 @@ fn drag_point(bar: &TitleBar, theme: &Theme) -> Point {
     )
 }
 
+/// The hover a control is drawing must be droppable without the pointer
+/// having moved: a window raised over this one takes the pointer away while
+/// leaving it at the same coordinates, and a control that re-tested those
+/// would stay lit under the window now in front of it.
+#[test]
+fn pointer_left_drops_a_hover_the_pointer_never_moved_off() {
+    let mut control = WindowControl::new(WindowControlKind::Close);
+    let bounds = Rect::new(0, 0, 40, 40);
+    let _ = control.on_pointer(&moved(10, 10), bounds, &mut sink());
+    assert_eq!(control.state().pointer, PointerState::Hover);
+
+    let mut damage = sink();
+    control.pointer_left(bounds, &mut damage);
+    assert_eq!(control.state().pointer, PointerState::None);
+    assert!(
+        damage.bounds().contains(Point::new(1, 1)),
+        "the cell repaints"
+    );
+
+    // Told twice, it reports nothing: the guarded write is the whole rule.
+    let mut again = sink();
+    control.pointer_left(bounds, &mut again);
+    assert!(again.is_empty());
+}
+
+/// The title bar drops the hover of whichever command was lit, and of that
+/// one only.
+#[test]
+fn title_bar_pointer_left_unlights_the_command_under_the_pointer() {
+    let theme = Theme::dark();
+    let bounds = title_bounds();
+    let mut bar = TitleBar::new(furniture());
+    let layout = bar.layout(bounds, Scale::ONE, &theme);
+    let (hovered, rect) = layout.controls[0];
+    let at = Point::new(
+        rect.left() + half(rect.width),
+        rect.top() + half(rect.height),
+    );
+    let _ = bar.on_pointer(&moved(at.x, at.y), bounds, Scale::ONE, &theme, &mut sink());
+    assert_eq!(bar.control(hovered).state().pointer, PointerState::Hover);
+
+    bar.pointer_left(bounds, Scale::ONE, &theme, &mut sink());
+    for (kind, _) in bar.layout(bounds, Scale::ONE, &theme).controls {
+        assert_eq!(
+            bar.control(kind).state().pointer,
+            PointerState::None,
+            "{kind:?} kept a hover the pointer had left"
+        );
+    }
+}
+
 #[test]
 fn the_commands_seat_two_in_each_corner_in_reading_order() {
     let theme = Theme::dark();

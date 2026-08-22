@@ -366,50 +366,72 @@ is total and fails closed (`AGENTS.md` §2.9): a render that cannot allocate
 leaves the on-screen window untouched, a window the compositor no longer knows
 is re-created on the next present, and `teardown` removes both windows.
 
-## Routing one input stream to both routers
+## Routing one seat's input to the taskbar and the window manager
 
-The desktop has two input routers — the window manager's `InputRouter` and the
-taskbar's `TaskbarInput` — and both consume the **same** shared `tairix_input`
-event vocabulary (`AGENTS.md` §17.4, §2.2). A real input source produces one
-stream, so `SessionInputRouter` fans it to the right router through
-`handle(event, &mut Compositor, &mut Taskbar, &TaskbarPresenter, now_ns)`. The
-presenter is read, never driven: only it knows which compositor window each
-taskbar surface *is*, which is what tells "the bar is under the pointer" from
-"a window covering the bar is" (below). The monotonic `now_ns`
-is threaded down because one taskbar gesture is decided by *time*: the
-Switchboard capsule tells a tap from a hold by how long its press has been
-down when the next event arrives, so the bar is handed the embedder's clock
-reading rather than reading a clock of its own — the same instant every router
-sees, and the one an in-memory test controls:
+The desktop has two input routers — the window manager's `InputRouter` (every
+application window and the desktop layer behind them) and the taskbar's
+`TaskbarInput` (the bar and the popups and popovers it opens) — and both
+consume the **same** shared `tairix_input` event vocabulary (`AGENTS.md`
+§17.4, §2.2). A real input source produces one stream, so
+`SessionInputRouter` is the session's **input seat**: it owns the pointer
+position and the pointer's focus, and fans the stream to the right router
+through `handle(event, &mut Compositor, &mut Taskbar, &TaskbarPresenter,
+now_ns)`.
 
-- while the **bar's context menu** OR **program-library popup** is open it is
-  modal: every press, release, scroll, and key event routes to the taskbar;
-  motion is still tracked by the window manager but its outcome is discarded;
-- otherwise a **press** goes to the taskbar iff the pointer is over the bar (a
-  secondary press there opens the menu that application declared; a middle press over the
-  Switchboard capsule switches to the previous task) or over one of its open
-  non-modal popovers, and to the window manager elsewhere — never both;
-- **a window over the bar owns the presses on it**: nothing pins the bar
-  topmost, so the claim above holds only where a taskbar surface is the window
-  `Compositor::window_at` finds under the pointer
-  (`TaskbarPresenter::owns_window`). A window dragged over the clock takes the
-  clicks aimed at it, and the buttons it does not cover stay the bar's;
-- a **scroll** over the Switchboard capsule or its open readout routes to the
-  taskbar (it cycles the running tasks), under that same is-it-covered test;
-  every other scroll goes to the window
-  manager;
-- **pointer motion** is fanned to both so their pointers stay in step; the
-  window manager acts on it (dragging a grabbed window) and the taskbar
-  refreshes its launcher hover feedback. Motion is also where a capsule press
-  held past the bar's long-press threshold resolves, and that is a real
-  action: it takes the outcome while the drag still applied;
-- a **primary release** goes to the taskbar *first* — a quick press on the
-  Switchboard capsule resolves on its release — and one the bar does not claim
-  ends an in-flight window move-grab in the window manager instead;
-- a **key event** goes to the window manager — which delivers them to the focused
-  window — except while a modal surface is open (above);
-- anything else, including a non-primary release, is
-  `SessionInputResponse::Ignored`.
+Each router knows its own geometry; neither can see the *stack*, and without
+the stack geometry is not an answer. The bar's clock stays at the bar's
+coordinates when a window is dragged across it, and nothing pins the bar
+topmost — it is an ordinary compositor window, raised over by every window that
+is opened or clicked. So the seat resolves which surface the pointer rests on
+and hands the event to that one router, telling the other the pointer has left
+(`tairix_input::PointerFocus`). The presenter is read, never driven: only it
+knows which compositor window each taskbar surface *is*
+(`TaskbarPresenter::owns_window`). The monotonic `now_ns` is threaded down
+because one taskbar gesture is decided by *time*: the Switchboard capsule tells
+a tap from a hold by how long its press has been down when the next event
+arrives, so the bar is handed the embedder's clock reading rather than reading a
+clock of its own.
+
+Every pointer event resolves, retargets, then delivers — and there is no fourth
+step:
+
+- **a modal surface of the bar's holds the pointer**: while its context menu or
+  its program-library popup is open, every pointer event and every key routes
+  to the taskbar wherever the pointer is. That is an active grab, and it is
+  what makes a press anywhere a click-away dismissal without also acting on
+  what it landed on;
+- **a held button holds the pointer**: the first press takes an implicit grab
+  for the surface it landed on, and everything up to the release of the *last*
+  button goes there — a window drag that runs under the bar keeps dragging, and
+  a release can never be claimed by a surface that did not see the press;
+- **otherwise the stack decides**: the surface `Compositor::window_at` finds
+  drawn under the pointer, per event position. A window dragged over the clock
+  takes the clicks aimed at it, and the buttons it does not cover stay the
+  bar's;
+- **motion is delivered, not fanned**: only the holder is told the pointer
+  moved, and the other is told it *left* — the only way a hover can end, since
+  a window rising over a hovered control leaves the pointer exactly where it
+  was. The taskbar drops its hover and closes the window picker; the window
+  manager puts out the title-bar command the pointer was on;
+- **keys follow the keyboard, not the pointer**: they go to the window manager
+  unless a modal taskbar surface is open, so a pointer resting on the bar never
+  diverts a keystroke from the window being typed in;
+- anything the holder did not act on is `SessionInputResponse::Ignored`.
+
+`yield_pointer` is the seam to the two modal surfaces the seat does *not*
+route — the screen lock and the pinboard's backdrop menu, both of which drain
+the seat's channels straight into themselves. A gesture in flight when one opens
+ends with a release the seat is never given, so the drain says so: the gesture
+ends and both routers are told the pointer left. Without it the seat would hold
+a grab for a button that can never come up, and the bar would be unreachable for
+the rest of the session.
+
+`refresh_pointer_focus` re-resolves after the stack changes — a window opened,
+raised, closed, a popover placed or removed — and `DesktopShell::present` calls
+it, because every change to what is on screen ends in a present. An in-flight
+grab pins the answer, so it cannot interrupt a drag. An arrival refreshes the
+hover under the pointer but opens no hover surface: a window closing is not a
+gesture.
 
 The capsule's two gestures are the bar's own decision, not the session's: a
 quick press asks for the running-task list and a press held past the

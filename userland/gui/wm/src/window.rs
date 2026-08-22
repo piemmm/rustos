@@ -879,6 +879,31 @@ impl Window {
             .on_pointer(event, title_rect, scale, theme, damage)
     }
 
+    /// Tell this window's decoration furniture that the pointer has left it,
+    /// dropping the hover highlight its title bar was drawing. A no-op for an
+    /// undecorated window.
+    ///
+    /// See [`TitleBar::pointer_left`] for why a leave cannot be expressed as a
+    /// pointer sample somewhere else: the pointer is usually still inside the
+    /// frame when it stops resting on it, because something was drawn over it.
+    ///
+    /// [`TitleBar::pointer_left`]: tairix_controls::TitleBar::pointer_left
+    pub(crate) fn on_frame_pointer_left(
+        &mut self,
+        scale: Scale,
+        theme: &Theme,
+        damage: &mut Region,
+    ) {
+        let bounds = self.bounds();
+        let Some(frame) = self.frame.as_mut() else {
+            return;
+        };
+        let title_rect = frame.layout(bounds, scale, theme).title_bar;
+        frame
+            .title_bar_mut()
+            .pointer_left(title_rect, scale, theme, damage);
+    }
+
     /// Feed a key `key` to this window's decoration furniture (the title bar's
     /// command controls: Space/Enter activate the focused control, the arrows
     /// move focus between them) and return the typed [`TitleBarEvent`] it

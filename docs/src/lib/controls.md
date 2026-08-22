@@ -552,6 +552,29 @@ is better than two. A `TextField`'s `Debug` output redacts a masked buffer,
 printing its character count in place of its content, so a diagnostic dump
 cannot carry a password.
 
+## A hover has to be able to end without the pointer moving
+
+Every clickable family derives its hover from `inside` — the caller's hit test
+of the pointer against the control's bounds — so an ordinary hover ends when a
+motion lands outside. That is not the only way one ends. When something is drawn
+*over* a control the pointer stops resting on it without moving at all, and
+hit-testing its unchanged position answers "still inside": the control stays lit
+under whatever is now in front of it, advertising a press that would no longer
+land on it, and any surface the hover opened is stranded on screen.
+
+Occlusion is not a fact a control can see, so it is told. The composite
+controls whose hover a host cannot otherwise end carry a **`pointer_left`**:
+
+| Control | What ends |
+|---|---|
+| `WindowControl` | the command's hover wash (any press latch is left alone: a latch is only held while a button is down, and a held button holds the pointer) |
+| `TitleBar` | the hover of whichever command was lit, reported as that one cell |
+| `TraySignal` | the hover, which collapses the instrument readout unless the keyboard is holding it open |
+
+Each is the guarded write and nothing more, so being told twice reports
+nothing, and each damages exactly what it unlit. The desktop's input seat is
+what calls them — see [the session](../desktop/session.md#routing-one-seats-input-to-the-taskbar-and-the-window-manager).
+
 ## Where it sits
 
 `#![no_std]`, and `#![forbid(unsafe_code)]`. The crate depends only on other

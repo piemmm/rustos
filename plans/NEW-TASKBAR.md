@@ -623,11 +623,11 @@ What now stands:
   activates (folder toggles, entry launches); Left/Right fold/climb/descend;
   typing anywhere routes into the search (type-to-filter, case-insensitive);
   Enter in the search launches the first match; Escape clears then
-  dismisses. While open the popup is modal at both routing layers (the
-  taskbar router and the session router): presses, releases, scroll, and
-  keys all route in; click-away (any button) dismisses without acting on
-  what it hit; WM motion outcomes are discarded so nothing is delivered to
-  windows beneath.
+  dismisses. While open the popup holds an **active grab** on the pointer and
+  the keyboard at both routing layers (the taskbar router and the session's
+  input seat): presses, releases, scroll, and keys all route in wherever the
+  pointer is; click-away (any button) dismisses without acting on what it hit;
+  nothing at all is delivered to the windows beneath.
 - `userland/gui/session` — `library::load_library` reads the machine store +
   the user's overlay through the one `SessionFileReader` seam (the renamed
   graphics-asset seam — one file-read seam, one production impl), parses
@@ -1729,6 +1729,52 @@ Docs: `userland/gui/taskbar/README.md`, `userland/gui/session/README.md`,
 `docs/src/desktop/apps.md`, `docs/src/security/capabilities.md`.
 
 ---
+
+## T18 — The pointer's focus: the bar reacts only to input aimed at it — **done**
+
+The bar can see its own geometry and not the window stack, so on its own it
+cannot tell a clock the user is looking at from a clock a window is drawn over.
+Nothing pins the bar topmost — it is an ordinary compositor window, raised over
+by every application window that is opened or clicked — so the two are
+routinely different.
+
+What that guarantees now:
+
+- **`SessionInputRouter` is the session's input seat.** It owns the pointer
+  position (the desktop's one copy) and resolves, per pointer event, which
+  surface holds the pointer: a modal surface of the bar's (an *active grab*),
+  else the surface a held button grabbed (the *implicit grab*, ending at the
+  last button up), else the window `Compositor::window_at` draws under the
+  pointer — the bar's when the `TaskbarPresenter` placed it, the window
+  manager's otherwise. It delivers to that one router and to no other.
+- **`tairix_input::PointerFocus`** (`Entered { at }` / `Left`) is the derived
+  enter/leave pair the seat hands each router. It is not an `InputEvent`: no
+  device produces it. A `Left` is the only way a hover can end, because a
+  window rising over a hovered control leaves the pointer exactly where it was;
+  an `Entered` carries the position because the pointer can arrive without
+  moving. An arrival refreshes hover and opens no hover surface — a window
+  closing is not a gesture.
+- **Both routers implement it**: `TaskbarInput::set_pointer_focus` drops every
+  bar hover and closes the window picker; `InputRouter::set_pointer_focus` puts
+  out the title-bar command the pointer was on. `lib/controls` grew the
+  position-independent `pointer_left` each needs
+  (`WindowControl`, `TitleBar`, `TraySignal`).
+- **`DesktopShell::present` re-resolves the focus** before it paints, because
+  the answer depends on the stack and every change to the stack ends in a
+  present. An in-flight grab pins it, so it cannot interrupt a drag.
+- **`desired_cursor(at, …)` and `CursorController::refresh(at, …)`** take the
+  seat's pointer position rather than reading a router's cached one: the shape
+  must be right over the bar too, which the window manager's router never
+  holds.
+- **Why it is a security property, not only a correctness one**: the bar is
+  trusted chrome whose menus offer to lock the screen, log out, and
+  re-authenticate for a privileged application. An unprivileged window that
+  could provoke that chrome to open a surface over itself, or have a click it
+  received acted on by a control the user could not see, would hold a
+  user-interface redressing primitive. One stacking-aware decision point
+  denies it. The same rule is why the lock screen is safe: its window is not
+  one the presenter placed, so while it is up the pointer cannot reach the bar
+  at all.
 
 ## Open questions to resolve in review (stop and ask, §15.7)
 

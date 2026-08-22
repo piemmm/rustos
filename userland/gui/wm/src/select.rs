@@ -9,8 +9,9 @@
 //!
 //! # The policy
 //!
-//! [`desired_cursor`] reads the interaction state held by the
-//! [`InputRouter`] and the [`Compositor`] and returns a [`CursorKind`]:
+//! [`desired_cursor`] reads the pointer position the desktop's seat owns plus
+//! the interaction state held by the [`InputRouter`] and the [`Compositor`],
+//! and returns a [`CursorKind`]:
 //!
 //! - an in-flight grab outranks everything: a window move-grab shows
 //!   [`CursorKind::Move`] and a resize-grab keeps the double arrow of the edge
@@ -85,11 +86,18 @@ const ENTRY_METADATA_BYTES: usize = 64;
 /// The [`CursorKind`] the desktop should display for the current
 /// interaction state (see the [module docs](self)).
 ///
-/// A pure function of `router` and `compositor`: it reads the pointer
-/// position, the in-flight grab, the furniture under the pointer, and the
-/// window under it, and never mutates either argument.
+/// A pure function of `at`, `router`, and `compositor`: it reads the in-flight
+/// grab, the furniture under `at`, and the window under it, and never mutates
+/// any of them.
+///
+/// `at` is the pointer position, which the desktop's *seat* owns: the seat
+/// tracks the device and resolves which surface the pointer rests on, and a
+/// router holds a position only for as long as it holds the pointer. The
+/// shape has to be right wherever the pointer is — including over the
+/// desktop's own bar, which this router never holds — so the position is
+/// passed in rather than read out of `router`.
 #[must_use]
-pub fn desired_cursor(router: &InputRouter, compositor: &Compositor) -> CursorKind {
+pub fn desired_cursor(at: Point, router: &InputRouter, compositor: &Compositor) -> CursorKind {
     // A grab holds the shape for its whole gesture: the pointer routinely
     // leaves the edge or the title bar it started on, and re-deriving the
     // shape from where it now is would flicker mid-drag.
@@ -99,10 +107,10 @@ pub fn desired_cursor(router: &InputRouter, compositor: &Compositor) -> CursorKi
     if router.is_moving() {
         return CursorKind::Move;
     }
-    let Some(id) = compositor.window_at(router.pointer()) else {
+    let Some(id) = compositor.window_at(at) else {
         return CursorKind::Arrow;
     };
-    if let Some(FurniturePart::ResizeEdge(edge)) = compositor.frame_hit(id, router.pointer()) {
+    if let Some(FurniturePart::ResizeEdge(edge)) = compositor.frame_hit(id, at) {
         return resize_cursor(edge);
     }
     compositor
@@ -269,20 +277,20 @@ impl CursorController {
     }
 
     /// Replace the cursor sets and immediately re-render the current kind at
-    /// the router's pointer so a set swap is visible without waiting for the
-    /// next interaction. Returns whether a new image was installed (no-op,
+    /// the pointer position `at` so a set swap is visible without waiting for
+    /// the next interaction. Returns whether a new image was installed (no-op,
     /// returning `false`, when no cursor is currently shown).
     pub fn set_registry(
         &mut self,
         registry: CursorRegistry,
-        router: &InputRouter,
+        at: Point,
         compositor: &mut Compositor,
     ) -> bool {
         self.registry = registry;
         if compositor.cursor_bounds().is_none() {
             return false;
         }
-        self.install(self.kind, router.pointer(), compositor)
+        self.install(self.kind, at, compositor)
     }
 
     /// Apply the [`desired_cursor`] policy and bring the on-screen cursor up
@@ -296,13 +304,18 @@ impl CursorController {
     /// *position* is updated separately with [`Compositor::move_cursor`].
     /// Fails closed: if the chosen kind cannot be rasterised, the current
     /// cursor is left untouched.
-    pub fn refresh(&mut self, router: &InputRouter, compositor: &mut Compositor) -> bool {
-        let kind = desired_cursor(router, compositor);
+    pub fn refresh(
+        &mut self,
+        at: Point,
+        router: &InputRouter,
+        compositor: &mut Compositor,
+    ) -> bool {
+        let kind = desired_cursor(at, router, compositor);
         let epoch = self.epoch(compositor);
         if kind == self.kind && self.shown == Some(epoch) && compositor.cursor_bounds().is_some() {
             return false;
         }
-        self.install(kind, router.pointer(), compositor)
+        self.install(kind, at, compositor)
     }
 
     /// The cache epoch for the compositor's current output scale and the

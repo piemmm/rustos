@@ -27,6 +27,32 @@
 //! other window: it is reported as an [`InputResponse::DesktopKey`] for the
 //! desktop layer's owner to interpret.
 //!
+//! # The pointer is delivered, not assumed
+//!
+//! The router acts on the pointer only while it *holds* it. The desktop's seat
+//! owns the window stack and resolves, per event, which surface the pointer
+//! rests on — the window manager's windows and the desktop layer behind them,
+//! or the desktop's own chrome (its bar and the popovers that bar opens) — and
+//! delivers the event to that one router. [`set_pointer_focus`] is how the
+//! seat says so: an [`Entered`] carries the position the pointer arrived at,
+//! and a [`Left`] is what makes the hover this router is drawing go away —
+//! a title bar's command control unlights when the pointer crosses onto the
+//! bar, exactly as it unlights when the pointer crosses onto another window.
+//!
+//! A hover cannot be ended by inferring it from a position, because the
+//! position often does not change: a window raised over a hovered title bar
+//! leaves the pointer exactly where it was. Only the seat knows, so only the
+//! seat can say.
+//!
+//! An in-flight grab holds the pointer for its whole gesture, so a drag that
+//! runs off the window — or under the bar — keeps arriving here; that is the
+//! seat's rule, and it is why this router never has to re-derive who owns a
+//! drag.
+//!
+//! [`set_pointer_focus`]: InputRouter::set_pointer_focus
+//! [`Entered`]: tairix_input::PointerFocus::Entered
+//! [`Left`]: tairix_input::PointerFocus::Left
+//!
 //! Input that lands on nothing is likewise reported rather than swallowed.
 //! The desktop beneath the window stack is a real surface with a real owner
 //! ([`Compositor::set_desktop`](crate::Compositor::set_desktop)), so a
@@ -54,7 +80,7 @@ use crate::Compositor;
 // manager. It therefore lives in `lib/input`; the
 // compositor re-exports it so callers keep referring to
 // `tairix_wm::{InputEvent, PointerButton}` (one definition).
-pub use tairix_input::{InputEvent, Key, Modifiers, NamedKey, PointerButton};
+pub use tairix_input::{InputEvent, Key, Modifiers, NamedKey, PointerButton, PointerFocus};
 
 /// What the [`InputRouter`] did with an [`InputEvent`].
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -414,6 +440,57 @@ impl InputRouter {
         self.focused = None;
     }
 
+    /// Take the seat's answer to "does the pointer rest on one of the windows
+    /// this router routes?", applying what changes when it does.
+    ///
+    /// The seat resolves this from the window stack — which only it can see —
+    /// before it delivers any pointer event, so the two facts a router needs
+    /// arrive together: it is handed the events it owns, and it is told the
+    /// moment it stops owning them.
+    ///
+    /// * [`Entered`](PointerFocus::Entered) adopts the position the pointer
+    ///   arrived at and lights the decoration under it. The pointer can arrive
+    ///   without moving — a window above it closed, a grab ended, a modal
+    ///   surface shut — and no motion event exists for those, which is why the
+    ///   position travels with the answer.
+    /// * [`Left`](PointerFocus::Left) drops the hover the frame under the
+    ///   pointer was drawing. It cannot be inferred from a position: when a
+    ///   window is raised over a hovered title bar the pointer has not moved at
+    ///   all, and hit-testing it would answer "still on the control" and leave
+    ///   it lit under the window now in front of it.
+    ///
+    /// Nothing else is touched: no focus moves, no window raises, no grab
+    /// starts or ends. A grab holds the pointer for its whole gesture, so the
+    /// seat never reports a leave while one is in flight.
+    pub fn set_pointer_focus(&mut self, focus: PointerFocus, compositor: &mut Compositor) {
+        match focus {
+            PointerFocus::Entered { at } => {
+                self.pointer = at;
+                let over = Self::hover_target(at, compositor);
+                self.hover_furniture(over, compositor);
+            }
+            PointerFocus::Left => {
+                if let Some(left) = self.frame_hover.take() {
+                    compositor.frame_pointer_left(left);
+                }
+            }
+        }
+    }
+
+    /// The window whose *decorations* lie under `at`, or `None` when the
+    /// pointer is over a client area, over the desktop, or over a window with
+    /// no frame.
+    ///
+    /// The one definition of "which furniture is under the pointer", shared by
+    /// the motion path and by the seat's enter, so a decoration lights up the
+    /// same way whether the pointer moved onto it or the window above it went
+    /// away.
+    fn hover_target(at: Point, compositor: &Compositor) -> Option<WindowId> {
+        let over = compositor.window_at(at);
+        let on_client = over.is_some_and(|window| over_client(window, at, compositor));
+        over.filter(|_| !on_client)
+    }
+
     /// Process one input `event` against `compositor`, returning what
     /// changed.
     ///
@@ -643,12 +720,11 @@ impl InputRouter {
             };
         }
         let over = compositor.window_at(to);
-        let on_client = over.is_some_and(|window| over_client(window, to, compositor));
-        self.hover_furniture(over.filter(|_| !on_client), compositor);
+        self.hover_furniture(Self::hover_target(to, compositor), compositor);
         let Some(window) = over else {
             return InputResponse::DesktopPointerMoved;
         };
-        if !on_client {
+        if !over_client(window, to, compositor) {
             return InputResponse::Ignored;
         }
         let Some(client) = compositor.window_client_rect(window) else {

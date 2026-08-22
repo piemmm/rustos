@@ -44,7 +44,7 @@ use tairix_theme::{
 use tairix_wm::{
     chrome_cache, cursor_cache, frost_cache, ChromeEpoch, Color, Compositor, Corners, FrostEpoch,
     FrostedBackdrop, InputEvent, InputResponse, Key, NamedKey, Point, PointerButton, Rect, Scale,
-    Surface, WindowActivationState, WindowChrome, WindowId,
+    Surface, WindowActivationState, WindowChrome, WindowControlKind, WindowId,
 };
 
 use crate::artwork::ArtworkDesk;
@@ -433,54 +433,49 @@ fn office_and_games() -> Catalog {
     ])
 }
 
-/// A taskbar presenter that has placed nothing.
-///
-/// The router-level tests drive the fan-out policy against a bare
-/// compositor: with no bar on screen there is no bar window for anything to
-/// be stacked over, so geometry alone decides who claims a press — which is
-/// exactly the policy those tests are about. A press that must reckon with
-/// what is *drawn* over the bar is a shell-level test, because only a real
-/// present puts the bar in the stack.
-const NOTHING_PRESENTED: &TaskbarPresenter = &TaskbarPresenter::new();
-
-/// Move the pointer to `(x, y)` and press the primary button there.
-fn press_at(
-    router: &mut SessionInputRouter,
-    comp: &mut Compositor,
-    taskbar: &mut tairix_taskbar::Taskbar,
-    x: i32,
-    y: i32,
-) -> SessionInputResponse {
-    router.handle(
-        InputEvent::PointerMoved {
-            to: Point::new(x, y),
-        },
-        comp,
-        taskbar,
-        NOTHING_PRESENTED,
-        0,
+/// Toggle the open program-library popup shut with a press on the Library
+/// button, through the taskbar's own router. The counterpart of
+/// [`open_library`], and asserted the same way.
+fn close_library(taskbar: &mut tairix_taskbar::Taskbar) {
+    let mut input = tairix_taskbar::TaskbarInput::new();
+    let at = centre(taskbar.layout(Scale::ONE).library);
+    input.handle(InputEvent::PointerMoved { to: at }, taskbar, Scale::ONE, 0);
+    assert_eq!(
+        input.handle(
+            InputEvent::PointerPressed {
+                button: PointerButton::Primary,
+            },
+            taskbar,
+            Scale::ONE,
+            0,
+        ),
+        TaskbarResponse::LibraryDismissed
     );
-    router.handle(
-        InputEvent::PointerPressed {
-            button: PointerButton::Primary,
-        },
-        comp,
-        taskbar,
-        NOTHING_PRESENTED,
-        0,
-    )
+    assert!(!taskbar.library().is_open());
 }
 
-/// Open the popup by pressing the Library button, asserting it opened.
-fn open_library(
-    router: &mut SessionInputRouter,
-    comp: &mut Compositor,
-    taskbar: &mut tairix_taskbar::Taskbar,
-) {
-    let centre = Point::new(24, 1060); // library slot centre for 1920x1080 bottom bar
+/// Open the program-library popup through the taskbar's *own* router, which is
+/// the only thing that can open it.
+///
+/// The tests that use this are about what the presenter draws and what the
+/// artwork store resolves, not about which surface the desktop's seat hands a
+/// press to. Driving the bar directly is therefore the honest fixture: no
+/// window stack, no seat, nothing that could make the setup itself the thing
+/// under test. The seat's own routing is exercised by [`Seat`].
+fn open_library(taskbar: &mut tairix_taskbar::Taskbar) {
+    let mut input = tairix_taskbar::TaskbarInput::new();
+    let at = centre(taskbar.layout(Scale::ONE).library);
+    input.handle(InputEvent::PointerMoved { to: at }, taskbar, Scale::ONE, 0);
     assert_eq!(
-        press_at(router, comp, taskbar, centre.x, centre.y),
-        SessionInputResponse::Taskbar(TaskbarResponse::OpenLibrary)
+        input.handle(
+            InputEvent::PointerPressed {
+                button: PointerButton::Primary,
+            },
+            taskbar,
+            Scale::ONE,
+            0,
+        ),
+        TaskbarResponse::OpenLibrary
     );
     assert!(taskbar.library().is_open());
 }
@@ -628,8 +623,7 @@ fn presenting_one_latched_surface_leaves_the_others_alone() {
         .library_mut()
         .set_catalog(office_and_games());
     let mut comp = compositor();
-    let mut router = SessionInputRouter::new();
-    open_library(&mut router, &mut comp, session.taskbar_mut());
+    open_library(session.taskbar_mut());
 
     let mut renderer = TaskbarRenderer::new(test_icon_cache());
     let mut presenter = TaskbarPresenter::new();
@@ -690,8 +684,7 @@ fn the_presenter_owns_only_the_surfaces_it_placed() {
     // the press there is its own.
     let mut session = session();
     let mut comp = compositor();
-    let mut router = SessionInputRouter::new();
-    open_library(&mut router, &mut comp, session.taskbar_mut());
+    open_library(session.taskbar_mut());
     let mut renderer = TaskbarRenderer::new(test_icon_cache());
     let mut presenter = TaskbarPresenter::new();
     let intruder = opaque_window(&mut comp, Point::new(0, 0), 40, 40);
@@ -758,8 +751,7 @@ fn opening_the_popup_presents_a_popup_window() {
         .library_mut()
         .set_catalog(office_and_games());
     let mut comp = compositor();
-    let mut router = SessionInputRouter::new();
-    open_library(&mut router, &mut comp, session.taskbar_mut());
+    open_library(session.taskbar_mut());
 
     let mut renderer = TaskbarRenderer::new(test_icon_cache());
     let mut presenter = TaskbarPresenter::new();
@@ -789,8 +781,7 @@ fn closing_the_popup_removes_the_popup_window() {
         .library_mut()
         .set_catalog(office_and_games());
     let mut comp = compositor();
-    let mut router = SessionInputRouter::new();
-    open_library(&mut router, &mut comp, session.taskbar_mut());
+    open_library(session.taskbar_mut());
 
     let mut renderer = TaskbarRenderer::new(test_icon_cache());
     let mut presenter = TaskbarPresenter::new();
@@ -804,14 +795,9 @@ fn closing_the_popup_removes_the_popup_window() {
     );
     let popup = presenter.popup_window().expect("the popup is open");
 
-    let centre = Point::new(24, 1060); // library slot centre
-    press_at(
-        &mut router,
-        &mut comp,
-        session.taskbar_mut(),
-        centre.x,
-        centre.y,
-    );
+    // The Library button toggles the popup it opened shut, through the bar's
+    // own router — the same one that opened it.
+    close_library(session.taskbar_mut());
     assert!(!session.taskbar().library().is_open());
 
     presenter.present(
@@ -835,12 +821,11 @@ fn closing_the_popup_removes_the_popup_window() {
 fn teardown_removes_every_window() {
     let mut session = session();
     let mut comp = compositor();
-    let mut router = SessionInputRouter::new();
     session
         .taskbar_mut()
         .library_mut()
         .set_catalog(office_and_games());
-    open_library(&mut router, &mut comp, session.taskbar_mut());
+    open_library(session.taskbar_mut());
 
     let mut renderer = TaskbarRenderer::new(test_icon_cache());
     let mut presenter = TaskbarPresenter::new();
@@ -1027,47 +1012,124 @@ fn opaque_window(comp: &mut Compositor, origin: Point, width: u32, height: u32) 
     comp.add_window(origin, surface)
 }
 
+/// The desktop's seat over a **presented** bar.
+///
+/// The seat resolves every pointer event against the window stack, so a bar
+/// that was never presented is not a bar the pointer can rest on — it is
+/// nowhere. These tests therefore stand up what the desktop stands up: the
+/// session's taskbar model, a compositor, and the presenter that places the
+/// bar's windows in it, and they bring the screen back up to date after each
+/// event exactly as the shell's own settle does. Nothing here is a stand-in
+/// for the production path; it *is* the production path, minus the shell's
+/// window bookkeeping.
+struct Seat {
+    session: DesktopSession,
+    comp: Compositor,
+    presenter: TaskbarPresenter,
+    renderer: TaskbarRenderer,
+    router: SessionInputRouter,
+}
+
+impl Seat {
+    /// A seat with the bar placed and nothing else on screen.
+    fn new() -> Self {
+        let mut seat = Self {
+            session: session(),
+            comp: compositor(),
+            presenter: TaskbarPresenter::new(),
+            renderer: TaskbarRenderer::new(test_icon_cache()),
+            router: SessionInputRouter::new(),
+        };
+        seat.settle();
+        seat
+    }
+
+    /// Re-resolve the pointer's focus and bring the bar's windows up to date —
+    /// the two halves of the shell's own present, in the shell's own order.
+    fn settle(&mut self) {
+        self.router.refresh_pointer_focus(
+            &mut self.comp,
+            self.session.taskbar_mut(),
+            &self.presenter,
+        );
+        let parts = self.session.taskbar_mut().take_repaint();
+        self.presenter.present(
+            &mut self.comp,
+            &mut self.renderer,
+            self.session.taskbar(),
+            parts,
+            &mut NoArtwork,
+        );
+    }
+
+    /// Route one event at the monotonic time `now_ns`, then settle.
+    fn at(&mut self, event: InputEvent, now_ns: u64) -> SessionInputResponse {
+        let out = self.router.handle(
+            event,
+            &mut self.comp,
+            self.session.taskbar_mut(),
+            &self.presenter,
+            now_ns,
+        );
+        self.settle();
+        out
+    }
+
+    /// Route one event at time zero, then settle.
+    fn handle(&mut self, event: InputEvent) -> SessionInputResponse {
+        self.at(event, 0)
+    }
+
+    /// Move the pointer to `(x, y)`.
+    fn moved_to(&mut self, x: i32, y: i32) -> SessionInputResponse {
+        self.handle(moved(x, y))
+    }
+
+    /// Move the pointer to `(x, y)` and press the primary button there.
+    fn press_at(&mut self, x: i32, y: i32) -> SessionInputResponse {
+        self.moved_to(x, y);
+        self.handle(PRIMARY_PRESS)
+    }
+
+    /// The centre of one of the bar's own laid-out regions, so a test aims
+    /// where the bar actually draws rather than at a copied coordinate.
+    fn centre_of(&self, region: impl Fn(&tairix_taskbar::BarLayout) -> Rect) -> Point {
+        centre(region(&self.session.taskbar().layout(Scale::ONE)))
+    }
+
+    /// Add an opaque window to the stack, above everything already in it.
+    fn window(&mut self, origin: Point, width: u32, height: u32) -> WindowId {
+        opaque_window(&mut self.comp, origin, width, height)
+    }
+}
+
 #[test]
 fn primary_press_over_the_bar_routes_to_the_taskbar() {
-    let mut session = session();
-    let mut comp = compositor();
-    let mut router = SessionInputRouter::new();
+    let mut seat = Seat::new();
+    let library = seat.centre_of(|layout| layout.library);
 
-    // The library button centre.
-    let response = press_at(&mut router, &mut comp, session.taskbar_mut(), 24, 1060);
     assert_eq!(
-        response,
+        seat.press_at(library.x, library.y),
         SessionInputResponse::Taskbar(TaskbarResponse::OpenLibrary)
     );
 }
 
 #[test]
 fn primary_press_on_the_clock_is_claimed_by_the_bar_and_opens_no_menu() {
-    // Its own bar: the library popup is modal, so a press after that one is
-    // the popup's to dismiss rather than the clock's.
-    let mut session = session();
-    let mut comp = compositor();
-    let mut router = SessionInputRouter::new();
-
+    let mut seat = Seat::new();
     // The clock's own layout rectangle, rather than a hand-copied coordinate.
-    let clock = session.taskbar().layout(Scale::ONE).clock;
-    let response = press_at(
-        &mut router,
-        &mut comp,
-        session.taskbar_mut(),
-        clock.left() + i32::try_from(clock.width / 2).expect("a screen-sized width"),
-        clock.top() + i32::try_from(clock.height / 2).expect("a bar-sized height"),
-    );
+    let clock = seat.centre_of(|layout| layout.clock);
+
     // The bar claimed it — a press it let through would have reached the
     // desktop behind and reported it — and the clock, being a reading rather
     // than a control, did nothing with it.
     assert_eq!(
-        response,
+        seat.press_at(clock.x, clock.y),
         SessionInputResponse::Ignored,
         "a press on the bar is the bar's, even where it acts on nothing"
     );
     assert!(
-        !session.taskbar().menu().is_open(),
+        !seat.session.taskbar().menu().is_open(),
         "a left click on the clock opened its menu"
     );
 }
@@ -1093,341 +1155,430 @@ fn the_bar_wins_over_a_window_beneath_it() {
 
 #[test]
 fn primary_press_over_a_window_routes_to_the_window_manager() {
-    let mut session = session();
-    let mut comp = compositor();
-    let mut router = SessionInputRouter::new();
-    let window = opaque_window(&mut comp, Point::new(200, 200), 300, 300);
-
-    let response = press_at(&mut router, &mut comp, session.taskbar_mut(), 250, 250);
+    let mut seat = Seat::new();
+    let window = seat.window(Point::new(200, 200), 300, 300);
 
     assert_eq!(
-        response,
+        seat.press_at(250, 250),
         SessionInputResponse::WindowManager(InputResponse::Activated {
             window,
             local: Point::new(50, 50),
         })
     );
-    assert_eq!(router.focused(), Some(window));
+    assert_eq!(seat.router.focused(), Some(window));
 }
 
 #[test]
 fn secondary_press_over_a_window_routes_to_the_window_manager() {
     // A right-click over a window must reach the window manager (which
     // delivers it to the client so it can open its context menu) — the
-    // session router must not swallow it, as its catch-all once did.
-    let mut session = session();
-    let mut comp = compositor();
-    let mut router = SessionInputRouter::new();
-    let window = opaque_window(&mut comp, Point::new(200, 200), 300, 300);
+    // seat must not swallow it, as its catch-all once did.
+    let mut seat = Seat::new();
+    let window = seat.window(Point::new(200, 200), 300, 300);
 
-    router.handle(
-        InputEvent::PointerMoved {
-            to: Point::new(250, 250),
-        },
-        &mut comp,
-        session.taskbar_mut(),
-        NOTHING_PRESENTED,
-        0,
-    );
-    let response = router.handle(
-        InputEvent::PointerPressed {
-            button: PointerButton::Secondary,
-        },
-        &mut comp,
-        session.taskbar_mut(),
-        NOTHING_PRESENTED,
-        0,
-    );
+    seat.moved_to(250, 250);
 
     assert_eq!(
-        response,
+        seat.handle(SECONDARY_PRESS),
         SessionInputResponse::WindowManager(InputResponse::SecondaryActivated {
             window,
             local: Point::new(50, 50),
         })
     );
-    assert_eq!(router.focused(), Some(window));
+    assert_eq!(seat.router.focused(), Some(window));
 }
 
 #[test]
 fn primary_press_on_the_empty_desktop_routes_to_the_window_manager() {
-    let mut session = session();
-    let mut comp = compositor();
-    let mut router = SessionInputRouter::new();
-
-    let response = press_at(&mut router, &mut comp, session.taskbar_mut(), 900, 500);
+    let mut seat = Seat::new();
 
     assert_eq!(
-        response,
+        seat.press_at(900, 500),
         SessionInputResponse::WindowManager(InputResponse::DesktopPressed)
     );
 }
 
 #[test]
 fn the_open_popup_is_modal_and_a_press_off_it_dismisses_it() {
-    let mut session = session();
-    session
+    let mut seat = Seat::new();
+    seat.session
         .taskbar_mut()
         .library_mut()
         .set_catalog(office_and_games());
-    let mut comp = compositor();
-    let mut router = SessionInputRouter::new();
     // A window beneath the popup's click-away press; it must stay unfocused.
-    let _window = opaque_window(&mut comp, Point::new(200, 200), 300, 300);
+    let _window = seat.window(Point::new(200, 200), 300, 300);
+    let library = seat.centre_of(|layout| layout.library);
 
-    open_library(&mut router, &mut comp, session.taskbar_mut());
-    assert!(session.taskbar().library().is_open());
+    assert_eq!(
+        seat.press_at(library.x, library.y),
+        SessionInputResponse::Taskbar(TaskbarResponse::OpenLibrary)
+    );
 
     // A press over a window beneath is claimed by the modal popup and
-    // dismisses it, rather than reaching the window manager.
-    let response = press_at(&mut router, &mut comp, session.taskbar_mut(), 250, 250);
+    // dismisses it, rather than reaching the window manager. The popup holds
+    // an active grab on the pointer, so where the pointer is does not matter.
     assert_eq!(
-        response,
+        seat.press_at(250, 250),
         SessionInputResponse::Taskbar(TaskbarResponse::LibraryDismissed)
     );
-    assert!(!session.taskbar().library().is_open());
+    assert!(!seat.session.taskbar().library().is_open());
     assert_eq!(
-        router.focused(),
+        seat.router.focused(),
         None,
         "the window beneath was not activated"
     );
 
     // While open, a KeyPressed routes to the popup.
-    open_library(&mut router, &mut comp, session.taskbar_mut());
-    let response = router.handle(
-        InputEvent::KeyPressed {
-            key: tairix_wm::Key::Named(tairix_wm::NamedKey::Down),
-            modifiers: tairix_wm::Modifiers::default(),
-        },
-        &mut comp,
-        session.taskbar_mut(),
-        NOTHING_PRESENTED,
-        0,
-    );
-    assert_eq!(response, SessionInputResponse::Ignored);
-    assert_eq!(session.taskbar().library().current(), Some(0));
-
-    // Escape closes the popup.
-    let response = router.handle(
-        InputEvent::KeyPressed {
-            key: tairix_wm::Key::Named(tairix_wm::NamedKey::Escape),
-            modifiers: tairix_wm::Modifiers::default(),
-        },
-        &mut comp,
-        session.taskbar_mut(),
-        NOTHING_PRESENTED,
-        0,
+    assert_eq!(
+        seat.press_at(library.x, library.y),
+        SessionInputResponse::Taskbar(TaskbarResponse::OpenLibrary)
     );
     assert_eq!(
-        response,
+        seat.handle(InputEvent::KeyPressed {
+            key: tairix_wm::Key::Named(tairix_wm::NamedKey::Down),
+            modifiers: tairix_wm::Modifiers::default(),
+        }),
+        SessionInputResponse::Ignored
+    );
+    assert_eq!(seat.session.taskbar().library().current(), Some(0));
+
+    // Escape closes the popup.
+    assert_eq!(
+        seat.handle(InputEvent::KeyPressed {
+            key: tairix_wm::Key::Named(tairix_wm::NamedKey::Escape),
+            modifiers: tairix_wm::Modifiers::default(),
+        }),
         SessionInputResponse::Taskbar(TaskbarResponse::LibraryDismissed)
     );
-    assert!(!session.taskbar().library().is_open());
+    assert!(!seat.session.taskbar().library().is_open());
 
     // A PointerScrolled while open does NOT reach the window manager.
-    open_library(&mut router, &mut comp, session.taskbar_mut());
-    let response = router.handle(
-        InputEvent::PointerScrolled { dx: 0, dy: 10 },
-        &mut comp,
-        session.taskbar_mut(),
-        NOTHING_PRESENTED,
-        0,
+    assert_eq!(
+        seat.press_at(library.x, library.y),
+        SessionInputResponse::Taskbar(TaskbarResponse::OpenLibrary)
     );
-    assert_eq!(response, SessionInputResponse::Ignored);
+    assert_eq!(
+        seat.handle(InputEvent::PointerScrolled { dx: 0, dy: 10 }),
+        SessionInputResponse::Ignored
+    );
 }
 
 #[test]
 fn motion_updates_the_pointer_and_reaches_the_desktop_when_it_hits_no_window() {
-    let mut session = session();
-    let mut comp = compositor();
-    let mut router = SessionInputRouter::new();
-
-    let response = router.handle(
-        InputEvent::PointerMoved {
-            to: Point::new(640, 480),
-        },
-        &mut comp,
-        session.taskbar_mut(),
-        NOTHING_PRESENTED,
-        0,
-    );
+    let mut seat = Seat::new();
 
     // Motion that lands on no window is the desktop's: it reaches the
     // session rather than being swallowed, which is what lets the desktop's
     // icons take a hover.
     assert_eq!(
-        response,
+        seat.moved_to(640, 480),
         SessionInputResponse::WindowManager(InputResponse::DesktopPointerMoved)
     );
-    assert_eq!(router.pointer(), Point::new(640, 480));
+    assert_eq!(seat.router.pointer(), Point::new(640, 480));
 }
 
 #[test]
 fn a_window_drag_continues_while_the_pointer_is_over_the_bar() {
-    let mut session = session();
-    let mut comp = compositor();
-    let mut router = SessionInputRouter::new();
-    let window = opaque_window(&mut comp, Point::new(200, 200), 300, 300);
+    let mut seat = Seat::new();
+    let window = seat.window(Point::new(200, 200), 300, 300);
 
-    router.handle(
-        InputEvent::PointerMoved {
-            to: Point::new(250, 250),
-        },
-        &mut comp,
-        session.taskbar_mut(),
-        NOTHING_PRESENTED,
-        0,
-    );
-    router.handle(
-        InputEvent::PointerPressed {
-            button: PointerButton::Primary,
-        },
-        &mut comp,
-        session.taskbar_mut(),
-        NOTHING_PRESENTED,
-        0,
-    );
+    seat.press_at(250, 250);
     assert!(
-        router.begin_move(&comp),
+        seat.router.begin_move(&seat.comp),
         "a focused window starts a move-grab"
     );
 
     // Dragging the pointer down over the bar must keep moving the window, not
-    // hand the motion to the taskbar.
-    let response = router.handle(
-        InputEvent::PointerMoved {
-            to: Point::new(250, 1060),
-        },
-        &mut comp,
-        session.taskbar_mut(),
-        NOTHING_PRESENTED,
-        0,
-    );
-
+    // hand the motion to the taskbar: the held button holds the pointer.
     assert_eq!(
-        response,
+        seat.moved_to(250, 1060),
         SessionInputResponse::WindowManager(InputResponse::Moved {
             window,
             origin: Point::new(200, 1010),
         })
     );
-    assert!(router.is_moving());
+    assert!(seat.router.is_moving());
 }
 
 #[test]
 fn a_primary_release_ends_a_move_grab() {
-    let mut session = session();
-    let mut comp = compositor();
-    let mut router = SessionInputRouter::new();
-    let window = opaque_window(&mut comp, Point::new(200, 200), 300, 300);
+    let mut seat = Seat::new();
+    let window = seat.window(Point::new(200, 200), 300, 300);
 
-    router.handle(
-        InputEvent::PointerMoved {
-            to: Point::new(250, 250),
-        },
-        &mut comp,
-        session.taskbar_mut(),
-        NOTHING_PRESENTED,
-        0,
-    );
-    router.handle(
-        InputEvent::PointerPressed {
-            button: PointerButton::Primary,
-        },
-        &mut comp,
-        session.taskbar_mut(),
-        NOTHING_PRESENTED,
-        0,
-    );
-    assert!(router.begin_move(&comp));
-
-    let response = router.handle(
-        InputEvent::PointerReleased {
-            button: PointerButton::Primary,
-        },
-        &mut comp,
-        session.taskbar_mut(),
-        NOTHING_PRESENTED,
-        0,
-    );
+    seat.press_at(250, 250);
+    assert!(seat.router.begin_move(&seat.comp));
 
     assert_eq!(
-        response,
+        seat.handle(PRIMARY_RELEASE),
         SessionInputResponse::WindowManager(InputResponse::MoveEnded { window })
     );
-    assert!(!router.is_moving());
+    assert!(!seat.router.is_moving());
 }
 
 #[test]
-fn a_non_primary_press_is_ignored() {
-    let mut session = session();
-    let mut comp = compositor();
-    let mut router = SessionInputRouter::new();
+fn a_secondary_press_on_the_bar_that_offers_no_menu_does_nothing() {
+    let mut seat = Seat::new();
+    let library = seat.centre_of(|layout| layout.library);
 
-    router.handle(
-        InputEvent::PointerMoved {
-            to: Point::new(24, 1060),
-        },
-        &mut comp,
-        session.taskbar_mut(),
-        NOTHING_PRESENTED,
-        0,
-    );
-    let response = router.handle(
-        InputEvent::PointerPressed {
-            button: PointerButton::Secondary,
-        },
-        &mut comp,
-        session.taskbar_mut(),
-        NOTHING_PRESENTED,
-        0,
-    );
+    seat.moved_to(library.x, library.y);
 
-    assert_eq!(response, SessionInputResponse::Ignored);
+    assert_eq!(seat.handle(SECONDARY_PRESS), SessionInputResponse::Ignored);
     assert!(
-        !session.taskbar().library().is_open(),
+        !seat.session.taskbar().library().is_open(),
         "a secondary press did nothing"
     );
 }
 
+/// A held button holds the pointer, so a gesture completes where it started
+/// even once the pointer has left. A press inside a window's content, dragged
+/// onto the bar and released there, is delivered to that window from start to
+/// finish: the bar never sees any of it, and the window's own in-content drag
+/// completes.
 #[test]
-fn a_press_on_an_app_slot_reaches_the_taskbar_through_the_session_router() {
-    let mut session = session();
-    session.taskbar_mut().tasks_mut().add(TaskId(1), "Editor");
-    session
+fn a_held_button_keeps_the_gesture_where_it_started() {
+    let mut seat = Seat::new();
+    let window = seat.window(Point::new(200, 200), 300, 300);
+    let library = seat.centre_of(|layout| layout.library);
+
+    seat.press_at(250, 250);
+    // Dragged onto the bar. The window holds the pointer, so the bar is not
+    // offered the motion and the window is told the drag continues.
+    assert_eq!(
+        seat.moved_to(library.x, library.y),
+        SessionInputResponse::WindowManager(InputResponse::ClientPointerMoved {
+            window,
+            local: Point::new(0, 299),
+        })
+    );
+    assert_eq!(
+        seat.handle(PRIMARY_RELEASE),
+        SessionInputResponse::WindowManager(InputResponse::ClientPointerReleased {
+            window,
+            local: Point::new(0, 299),
+        }),
+        "the release was claimed by the bar the pointer had reached"
+    );
+
+    // The grab over, the pointer is the bar's — it is what is drawn there — so
+    // the next press opens the launcher rather than going back to the window.
+    assert_eq!(
+        seat.handle(PRIMARY_PRESS),
+        SessionInputResponse::Taskbar(TaskbarResponse::OpenLibrary)
+    );
+}
+
+/// The same, the other way round: a press on the bar keeps the pointer while
+/// it slides onto a window, so the window is never told the pointer is in its
+/// content and never activates behind the gesture.
+#[test]
+fn a_press_on_the_bar_keeps_the_pointer_while_it_slides_onto_a_window() {
+    let mut seat = Seat::new();
+    let _window = seat.window(Point::new(200, 200), 300, 300);
+    let capsule = seat.centre_of(|layout| layout.switchboard);
+
+    seat.press_at(capsule.x, capsule.y);
+    assert_eq!(
+        seat.moved_to(250, 250),
+        SessionInputResponse::Ignored,
+        "the window was told the pointer had entered its content mid-gesture"
+    );
+    // The capsule's own rule then applies: a press dragged off it fires
+    // nothing at all (fail closed), so the release opens no section.
+    assert_eq!(
+        seat.at(PRIMARY_RELEASE, QUICK_PRESS_NS),
+        SessionInputResponse::Ignored
+    );
+
+    // And with the grab over, the pointer is the window's again.
+    assert!(matches!(
+        seat.handle(PRIMARY_PRESS),
+        SessionInputResponse::WindowManager(InputResponse::Activated { .. })
+    ));
+}
+
+/// The grab ends when the *last* button comes up, not the first. Otherwise a
+/// chord — press primary, press secondary, release primary — would hand the
+/// rest of the gesture to whatever the pointer had wandered over.
+#[test]
+fn a_chord_keeps_the_grab_until_the_last_button_is_up() {
+    let mut seat = Seat::new();
+    let window = seat.window(Point::new(200, 200), 300, 300);
+    let library = seat.centre_of(|layout| layout.library);
+
+    seat.press_at(250, 250);
+    seat.handle(SECONDARY_PRESS);
+    seat.moved_to(library.x, library.y);
+    // Primary up, secondary still down: the window still owns the pointer.
+    assert_eq!(
+        seat.handle(PRIMARY_RELEASE),
+        SessionInputResponse::WindowManager(InputResponse::ClientPointerReleased {
+            window,
+            local: Point::new(0, 299),
+        })
+    );
+    // The last button is still down, so the pointer is still the window's: the
+    // bar does not take a hover while another surface holds it.
+    seat.moved_to(library.x, library.y + 1);
+    assert_eq!(
+        seat.session.taskbar().library_button().state().pointer,
+        PointerState::None,
+        "the bar lit up while another surface held the pointer"
+    );
+
+    // The last button up releases it, and the pointer goes to the bar it is
+    // actually over.
+    seat.handle(InputEvent::PointerReleased {
+        button: PointerButton::Secondary,
+    });
+    assert_eq!(
+        seat.handle(PRIMARY_PRESS),
+        SessionInputResponse::Taskbar(TaskbarResponse::OpenLibrary)
+    );
+}
+
+/// The seat's implicit grab is a function of the presses and releases it
+/// *sees*, and an embedder-owned modal surface — the screen lock, the
+/// pinboard's backdrop menu — takes the stream away mid-gesture: the release
+/// that would end the grab is drained straight into that surface and never
+/// reaches the seat.
+///
+/// `yield_pointer` is how the embedder says so. Without it the seat would hold
+/// a grab for a button that can never come up, and the pointer could never be
+/// resolved against the stack again — the bar would be unreachable for the rest
+/// of the session.
+#[test]
+fn yielding_the_pointer_ends_a_gesture_whose_release_the_seat_will_never_see() {
+    let mut seat = Seat::new();
+    let _window = seat.window(Point::new(200, 200), 300, 300);
+    let library = seat.centre_of(|layout| layout.library);
+
+    // A press on the window takes the grab, and its release is then taken away
+    // from the seat by a modal surface it does not route.
+    seat.press_at(250, 250);
+    seat.router
+        .yield_pointer(&mut seat.comp, seat.session.taskbar_mut());
+
+    // The pointer resolves against the stack again, so the bar can be reached.
+    assert_eq!(
+        seat.press_at(library.x, library.y),
+        SessionInputResponse::Taskbar(TaskbarResponse::OpenLibrary)
+    );
+}
+
+/// Yielding also drops the hover, so nothing is left showing a lit control
+/// behind a plate the user is looking at.
+#[test]
+fn yielding_the_pointer_drops_the_hover_it_was_showing() {
+    let mut seat = Seat::new();
+    let library = seat.centre_of(|layout| layout.library);
+    seat.moved_to(library.x, library.y);
+    assert_eq!(
+        seat.session.taskbar().library_button().state().pointer,
+        PointerState::Hover
+    );
+
+    seat.router
+        .yield_pointer(&mut seat.comp, seat.session.taskbar_mut());
+
+    assert_eq!(
+        seat.session.taskbar().library_button().state().pointer,
+        PointerState::None,
+        "the bar kept a hover behind a surface it cannot be reached through"
+    );
+    // Said twice it changes nothing.
+    seat.router
+        .yield_pointer(&mut seat.comp, seat.session.taskbar_mut());
+    assert_eq!(
+        seat.session.taskbar().library_button().state().pointer,
+        PointerState::None
+    );
+}
+
+/// Keys follow the keyboard's own focus. A pointer resting on the bar must
+/// never divert a keystroke from the window the user is typing in — the two
+/// focuses are separate facts, and only a modal surface of the bar's takes the
+/// keyboard.
+#[test]
+fn a_pointer_resting_on_the_bar_does_not_divert_the_keyboard() {
+    let mut seat = Seat::new();
+    let window = seat.window(Point::new(200, 200), 300, 300);
+    seat.press_at(250, 250);
+    seat.handle(PRIMARY_RELEASE);
+    assert_eq!(seat.router.focused(), Some(window));
+
+    // The pointer moves onto the bar, which now holds it.
+    let library = seat.centre_of(|layout| layout.library);
+    seat.moved_to(library.x, library.y);
+
+    let key = InputEvent::KeyPressed {
+        key: tairix_wm::Key::Char('x'),
+        modifiers: tairix_wm::Modifiers::default(),
+    };
+    assert_eq!(
+        seat.handle(key),
+        SessionInputResponse::WindowManager(InputResponse::Key {
+            window,
+            key: tairix_wm::Key::Char('x'),
+            modifiers: tairix_wm::Modifiers::default(),
+            pressed: true,
+        }),
+        "the typed key went to the bar the pointer happened to be over"
+    );
+}
+
+/// Re-resolving the focus must not take the pointer away from a gesture: a
+/// window being raised mid-drag (this very drag may have raised it) cannot be
+/// allowed to hand the rest of the drag to something else.
+#[test]
+fn refreshing_the_focus_never_interrupts_a_drag() {
+    let mut seat = Seat::new();
+    let window = seat.window(Point::new(200, 200), 300, 300);
+    seat.press_at(250, 250);
+    assert!(seat.router.begin_move(&seat.comp));
+
+    // The pointer is dragged over the bar and the screen is settled there,
+    // which is where a refresh would otherwise retarget.
+    seat.moved_to(250, 1060);
+    seat.settle();
+
+    assert!(seat.router.is_moving(), "the drag was interrupted");
+    assert_eq!(
+        seat.moved_to(250, 1050),
+        SessionInputResponse::WindowManager(InputResponse::Moved {
+            window,
+            origin: Point::new(200, 1000),
+        })
+    );
+}
+
+#[test]
+fn a_press_on_an_app_slot_reaches_the_taskbar_through_the_seat() {
+    let mut seat = Seat::new();
+    seat.session
+        .taskbar_mut()
+        .tasks_mut()
+        .add(TaskId(1), "Editor");
+    seat.session
         .taskbar_mut()
         .set_apps(vec![tairix_taskbar::AppSlot::new(
             "Editor",
             IconKind::AppBundle,
         )
         .with_windows(vec![TaskId(1)])]);
-    let mut comp = compositor();
-    let mut router = SessionInputRouter::new();
+    seat.settle();
 
-    let slot = session.taskbar().layout(Scale::ONE).apps.first().copied();
-    let Some(slot) = slot else {
-        panic!("the seated application has a slot");
-    };
+    let slot = seat
+        .session
+        .taskbar()
+        .layout(Scale::ONE)
+        .apps
+        .first()
+        .copied()
+        .expect("the seated application has a slot");
     let at = Point::new(slot.left() + 1, slot.top() + 1);
 
-    router.handle(
-        InputEvent::PointerMoved { to: at },
-        &mut comp,
-        session.taskbar_mut(),
-        NOTHING_PRESENTED,
-        0,
-    );
-    let response = router.handle(
-        InputEvent::PointerPressed {
-            button: PointerButton::Primary,
-        },
-        &mut comp,
-        session.taskbar_mut(),
-        NOTHING_PRESENTED,
-        0,
-    );
     assert_eq!(
-        response,
+        seat.press_at(at.x, at.y),
         SessionInputResponse::Taskbar(TaskbarResponse::AppRaise { app: 0 }),
         "the application declared no default action, so the session raises its window"
     );
@@ -1514,6 +1665,10 @@ fn pump_opens_the_popup_and_presents_it() {
         .library_mut()
         .set_catalog(office_and_games());
     let mut comp = compositor();
+    // The bar is placed before any input, exactly as the desktop places it:
+    // a press is the bar's because the bar is what is drawn under it, so a bar
+    // that is not on screen claims nothing (fail closed).
+    shell.present(&mut comp);
 
     let outcomes = shell
         .pump(
@@ -1526,7 +1681,9 @@ fn pump_opens_the_popup_and_presents_it() {
     assert_eq!(
         outcomes,
         [
-            ShellOutcome::WindowManager(InputResponse::DesktopPointerMoved),
+            // The motion lands on the bar, so it is the bar's: a hover is a
+            // pixel-only change, latched rather than reported.
+            ShellOutcome::Ignored,
             ShellOutcome::Taskbar(TaskbarResponse::OpenLibrary),
         ]
     );
@@ -1693,6 +1850,7 @@ fn sync_background_relays_a_programmatic_theme_switch() {
 fn pump_propagates_a_source_fault_after_applying_prior_events() {
     let mut shell = shell();
     let mut comp = compositor();
+    shell.present(&mut comp);
 
     let result = shell.pump(
         &mut MemoryInput::faulting(&[moved(24, 1060), PRIMARY_PRESS], Errno::NotFound),
@@ -2249,9 +2407,11 @@ fn motion_is_ignored_and_repaints_only_when_the_hover_changes() {
 
     // Motion onto the library button, asked of the layout rather than
     // spelled out: the bar floats clear of the screen edge, so its buttons
-    // are nowhere a screen coordinate can name. The bar is itself a
-    // compositor window, so the window manager reports the motion over it;
-    // nothing is forwarded, because no application owns the bar.
+    // are nowhere a screen coordinate can name. The pointer now rests on the
+    // bar, so the motion is the bar's alone — the window manager is told the
+    // pointer left and reports nothing, and nothing is forwarded to a client,
+    // because the bar has none. A hover is a pixel-only change, latched on the
+    // model rather than reported.
     let onto = centre(shell.session().taskbar().layout(Scale::ONE).library);
     let outcomes = shell
         .pump(
@@ -2260,15 +2420,7 @@ fn motion_is_ignored_and_repaints_only_when_the_hover_changes() {
             0,
         )
         .expect("source does not fault");
-    assert_eq!(
-        outcomes,
-        [ShellOutcome::WindowManager(
-            InputResponse::ClientPointerMoved {
-                window: bar,
-                local: Point::new(onto.x - bar_rect.left(), onto.y - bar_rect.top()),
-            }
-        )]
-    );
+    assert_eq!(outcomes, [ShellOutcome::Ignored]);
 
     // The hover changed, so the bar — and only the bar — was repainted.
     assert_eq!(
@@ -3901,6 +4053,213 @@ fn hovering_a_two_window_app_shows_the_picker_as_its_own_window() {
         shell.session().taskbar().tasks().focused(),
         Some(TaskId(2)),
         "the chosen window is the focused one"
+    );
+}
+
+// ---- the pointer's focus: what is drawn there is what gets the pointer ----
+
+/// Seat a two-window application on the bar and rest the pointer on its slot
+/// with the hover picker open, returning the slot's centre.
+///
+/// The picker is the strongest witness the bar has for "the pointer is on me":
+/// it is a whole surface that exists only for as long as that is true.
+fn hover_a_two_window_slot(shell: &mut DesktopShell, comp: &mut Compositor) -> Point {
+    shell
+        .session_mut()
+        .taskbar_mut()
+        .tasks_mut()
+        .add(TaskId(1), "Shell");
+    shell
+        .session_mut()
+        .taskbar_mut()
+        .tasks_mut()
+        .add(TaskId(2), "Logs");
+    shell.set_apps(
+        comp,
+        vec![
+            tairix_taskbar::AppSlot::new("Terminal", IconKind::AppBundle)
+                .with_windows(vec![TaskId(1), TaskId(2)]),
+        ],
+    );
+    let at = app_slot_point(shell, 0);
+    assert_eq!(
+        shell.handle(moved(at.x, at.y), comp, 0),
+        ShellOutcome::Taskbar(TaskbarResponse::ShowWindowPicker { app: 0 })
+    );
+    let cell = shell.session().taskbar().picker_thumbnail_size(Scale::ONE);
+    let entries = picker_cells(shell.session().taskbar(), 0, cell, |_| None);
+    shell.show_window_picker(comp, 0, entries);
+    assert!(shell.session().taskbar().picker().is_open());
+    assert_eq!(shell.session().taskbar().apps().hover(), Some(0));
+    at
+}
+
+/// The reported defect with no click in it at all: with the pointer resting on
+/// an application slot, a window raised over the bar takes the pointer with it.
+/// The slot must stop being hovered and the picker must go — a panel of window
+/// thumbnails left floating over the window the user just brought forward is a
+/// surface nobody asked for, and the next click on it would act on a gesture
+/// the user made at something else.
+///
+/// Nothing moved, so nothing can be inferred from a position: the pointer is
+/// still at the slot's own coordinates. Only the seat, which can see the stack,
+/// knows — so it tells the bar.
+#[test]
+fn a_window_raised_over_a_hovered_slot_takes_the_hover_with_it() {
+    let mut shell = shell();
+    let mut comp = compositor();
+    let at = hover_a_two_window_slot(&mut shell, &mut comp);
+
+    // A window is raised over the bar, exactly where the pointer is resting.
+    let covering = opaque_window(&mut comp, Point::new(at.x - 40, at.y - 40), 200, 200);
+    assert_eq!(comp.window_at(at), Some(covering));
+    shell.present(&mut comp);
+
+    assert_eq!(
+        shell.session().taskbar().apps().hover(),
+        None,
+        "the slot stayed lit under a window that took the pointer"
+    );
+    assert!(
+        !shell.session().taskbar().picker().is_open(),
+        "the hover picker was left open over the window in front of the bar"
+    );
+    assert!(
+        shell.presenter().picker_window().is_none(),
+        "and its window was left in the stack"
+    );
+}
+
+/// The same rule the ordinary way round: the pointer moves off the bar onto a
+/// window. The hover goes with it, and the window gets the motion.
+#[test]
+fn moving_the_pointer_onto_a_window_takes_the_bars_hover_with_it() {
+    let mut shell = shell();
+    let mut comp = compositor();
+    let window = opaque_window(&mut comp, Point::new(200, 200), 300, 300);
+    hover_a_two_window_slot(&mut shell, &mut comp);
+
+    assert_eq!(
+        shell.handle(moved(250, 250), &mut comp, 0),
+        ShellOutcome::WindowManager(InputResponse::ClientPointerMoved {
+            window,
+            local: Point::new(50, 50),
+        })
+    );
+    assert_eq!(shell.session().taskbar().apps().hover(), None);
+    assert!(!shell.session().taskbar().picker().is_open());
+}
+
+/// The pointer can *arrive* without moving too: the window covering the bar
+/// closes, and the slot under the pointer is hovered again — no jiggling the
+/// mouse to provoke it.
+///
+/// The hover picker deliberately does **not** come back. A window closing is
+/// not a gesture, and a popover that opens because something else vanished is
+/// one the user never asked for; the next real motion opens it.
+#[test]
+fn closing_a_covering_window_hands_the_hover_back_without_a_motion() {
+    let mut shell = shell();
+    let mut comp = compositor();
+    let at = hover_a_two_window_slot(&mut shell, &mut comp);
+    let covering = opaque_window(&mut comp, Point::new(at.x - 40, at.y - 40), 200, 200);
+    shell.present(&mut comp);
+    assert_eq!(shell.session().taskbar().apps().hover(), None);
+
+    comp.remove(covering);
+    shell.present(&mut comp);
+
+    assert_eq!(
+        shell.session().taskbar().apps().hover(),
+        Some(0),
+        "the pointer is on the slot again, so the slot is hovered again"
+    );
+    assert!(
+        !shell.session().taskbar().picker().is_open(),
+        "a window closing is not a gesture: it must not open a hover surface"
+    );
+}
+
+/// The Switchboard capsule's instrument readout is the case where a stranded
+/// hover surface is plainly visible: it opens *above* the bar, so a window
+/// raised over the bar alone does not cover it. It has to close with the
+/// pointer that opened it.
+#[test]
+fn a_window_raised_over_the_capsule_collapses_its_readout() {
+    let mut shell = shell();
+    let mut comp = compositor();
+    shell.present(&mut comp);
+    let capsule = capsule_point(&shell);
+    let _ = shell.handle(moved(capsule.x, capsule.y), &mut comp, 0);
+    assert!(shell.session().taskbar().tray().is_expanded());
+    assert!(shell.presenter().readout_window().is_some());
+
+    let covering = opaque_window(
+        &mut comp,
+        Point::new(capsule.x - 20, capsule.y - 20),
+        60,
+        60,
+    );
+    assert_eq!(comp.window_at(capsule), Some(covering));
+    shell.present(&mut comp);
+
+    assert!(
+        !shell.session().taskbar().tray().is_expanded(),
+        "the readout stayed expanded over the window that took the pointer"
+    );
+    assert!(shell.presenter().readout_window().is_none());
+}
+
+/// The pointer state of `window`'s Close command.
+fn close_command_pointer(comp: &Compositor, window: WindowId) -> PointerState {
+    comp.window_frame(window)
+        .expect("the window is decorated")
+        .title_bar()
+        .control(WindowControlKind::Close)
+        .state()
+        .pointer
+}
+
+/// The other side of the same contract: a *window's* own decoration hover is
+/// dropped when the pointer crosses onto the bar. The window manager is told
+/// the pointer left, exactly as the bar is — otherwise a title-bar command
+/// would stay lit while the user works the bar, advertising a press that would
+/// no longer land on it.
+#[test]
+fn moving_the_pointer_onto_the_bar_unlights_a_windows_title_bar() {
+    let mut shell = shell();
+    let mut comp = compositor();
+    let window = open_app(&mut shell, &mut comp, Point::new(300, 200), "Editor");
+    // The Close command's own cell, asked of the title bar that laid it out
+    // inside the band the frame reserved for it.
+    let outer = comp.window(window).expect("live").bounds();
+    let theme = shell.session().active_theme().clone();
+    let frame = comp.window_frame(window).expect("the window is decorated");
+    let band = frame.layout(outer, comp.scale(), &theme).title_bar;
+    let cell = frame
+        .title_bar()
+        .layout(band, comp.scale(), &theme)
+        .controls
+        .into_iter()
+        .find(|(kind, _)| *kind == WindowControlKind::Close)
+        .map(|(_, rect)| rect)
+        .expect("the frame seats a Close command");
+    let on_close = centre(cell);
+
+    shell.handle(moved(on_close.x, on_close.y), &mut comp, 0);
+    assert_eq!(
+        close_command_pointer(&comp, window),
+        PointerState::Hover,
+        "the pointer is on the Close command, so it is lit"
+    );
+
+    let onto = centre(shell.session().taskbar().layout(Scale::ONE).library);
+    shell.handle(moved(onto.x, onto.y), &mut comp, 0);
+
+    assert_eq!(
+        close_command_pointer(&comp, window),
+        PointerState::None,
+        "a command stayed lit after the pointer crossed onto the bar"
     );
 }
 
@@ -6695,9 +7054,8 @@ fn shipped_app_bundle_master(assets: MemoryAssets) -> MemoryAssets {
 fn open_library_over(catalog: Catalog) -> (DesktopSession, Compositor) {
     let mut session = session();
     session.taskbar_mut().library_mut().set_catalog(catalog);
-    let mut comp = compositor();
-    let mut router = SessionInputRouter::new();
-    open_library(&mut router, &mut comp, session.taskbar_mut());
+    let comp = compositor();
+    open_library(session.taskbar_mut());
     (session, comp)
 }
 

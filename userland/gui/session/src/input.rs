@@ -1,82 +1,111 @@
-//! Fanning one input-event stream to the taskbar and the window manager.
+//! The desktop's **input seat**: one pointer, one keyboard, and the decision
+//! about which surface each event belongs to.
+//!
+//! The session owns a seat — one display plus the keyboard and pointer
+//! attached to it (`lib/seat`, `docs/src/desktop/seat.md`) — and this is where
+//! that seat's input is routed once it has arrived inside the session.
 //!
 //! The desktop has two independent input routers — the window manager's
-//! [`InputRouter`] (focus, click-to-activate, interactive move-grabs) and the
-//! taskbar's [`TaskbarInput`] (the launcher buttons, the program-library
-//! popup, task activate/minimise, the notification popover, and the clock) —
-//! and both consume the **same** shared `tairix_input` (`lib/input`) event
-//! vocabulary.
-//! A real input source produces one stream of events, so something must
-//! decide which router each event belongs to. Neither GUI crate may depend
-//! on the other, so that decision is session glue, and
-//! [`SessionInputRouter`] is that glue.
+//! [`InputRouter`] (focus, click-to-activate, interactive move- and
+//! resize-grabs, every application window and the desktop layer behind them)
+//! and the taskbar's [`TaskbarInput`] (the bar, its program-library popup, its
+//! context menus, the hover window picker, the notification popover, and the
+//! Switchboard capsule's readout) — and both consume the **same** shared
+//! `tairix_input` (`lib/input`) event vocabulary. A real input source produces
+//! one stream, so something must decide which router each event belongs to.
+//! Neither GUI crate may depend on the other, so that decision is session
+//! glue, and [`SessionInputRouter`] is that glue.
 //!
-//! The policy is deliberately simple — one event does exactly one thing:
+//! # Why a seat, and not two routers guessing
 //!
-//! * **While the program-library popup is open it is modal**: every press
-//!   (any button), release, scroll, and key event routes to the taskbar,
-//!   which drives the popup — selecting rows, editing the search, working
-//!   the scrollbar, or dismissing on a click-away. Nothing leaks to the
-//!   windows beneath a modal popup.
-//! * **Otherwise the taskbar claims a press** when the pointer lands on the
-//!   bar *or* on one of its open, non-modal surfaces (the hover window
-//!   picker, the notification popover, and the Switchboard capsule's
-//!   instrument readout) **and that surface is what is drawn there**; every
-//!   other press goes to the window manager. The
-//!   two never both act on one press, so a click on a picker cell or a
-//!   notification card never also activates a window behind it. Each of
-//!   those surfaces opens outward from the bar and never overlaps it, so the
-//!   taskbar surfaces never contend for a press.
-//! * **A window over the bar owns the presses on it.** Nothing pins the bar
-//!   topmost — it is an ordinary compositor window, and a window dragged over
-//!   it is genuinely in front of it — so the bar's geometry containing the
-//!   pointer is not enough. The claim is gated on the window the compositor
-//!   finds on top there being one the taskbar presenter placed
-//!   ([`TaskbarPresenter::owns_window`]), which is what stops a covered clock
-//!   or launcher from swallowing a click meant for the window above it.
-//!   The test is per press position, not per bar: a window covering the
-//!   trailing end leaves every button it does not cover still the bar's.
-//! * **A middle press routes to the taskbar over the bar or a popover**
-//!   (over the Switchboard capsule it switches to the previous task) and is
-//!   ignored elsewhere — the window manager has no middle-button action.
-//! * **A scroll over the Switchboard capsule or its open readout routes to
-//!   the taskbar** (it cycles the running tasks), under the same
-//!   is-it-covered test as a press; every other scroll goes
-//!   to the window manager's viewport under the pointer.
-//! * **Pointer motion is fanned to both routers** so their tracked pointer
-//!   positions stay in step (a press is hit-tested at the last motion's
-//!   position). The window manager acts on motion to drag a grabbed window;
-//!   the taskbar refreshes its hover feedback and resolves a Switchboard
-//!   capsule press already held past its long-press threshold, which is a
-//!   real action and so outranks the drag when it fires.
-//! * **A primary release is offered to the taskbar first**, because a quick
-//!   press on the Switchboard capsule resolves on release; only a release
-//!   the taskbar does not claim goes to the window manager, which ends an
-//!   in-flight move-grab. The two can never contend: a grab exists only
-//!   when the press went to the window manager, and the taskbar has no
-//!   gesture in flight then.
-//! * **Key events go to the window manager**, which delivers them to the
-//!   focused window; the taskbar takes keyboard input only while its popup
-//!   is open.
+//! Each router knows its own geometry. Neither can see the *stack*, and
+//! without the stack geometry is not an answer: the bar's clock stays at the
+//! bar's coordinates when a window is dragged across it, so a router that
+//! hit-tested only its own rectangles would act on gestures the user aimed at
+//! the window in front of it — a click doing something on a control that is
+//! not even visible, hover feedback lighting up beneath someone else's window,
+//! a popover opening over it. Nothing pins the bar topmost; it is an ordinary
+//! compositor window, and every application window is raised above it the
+//! moment it is opened or clicked.
 //!
-//! The router holds no pixels and grants itself no authority: it owns the two
-//! inner routers and drives them against the embedder's [`Compositor`] and
-//! [`Taskbar`], passed in on each [`handle`](SessionInputRouter::handle).
-//! Composing the taskbar and window-manager crates is the permitted
-//! `userland/gui/*` edge; nothing outside `userland/gui/*` depends on
-//! this glue. It never panics: every routed sub-call is itself total
-//! and fails closed.
+//! So the seat owns the two facts neither router can: **where the pointer is**,
+//! and **which surface it rests on**. It resolves the second before it
+//! delivers anything, hands the event to that one router, and tells the other
+//! that the pointer has left — the enter/leave pair
+//! ([`PointerFocus`]) every window system needs,
+//! for exactly the reason every window system needs it.
+//!
+//! # The policy
+//!
+//! One event does exactly one thing, and it happens where the user was
+//! looking:
+//!
+//! * **A modal surface of the bar's holds the pointer.** While the bar's
+//!   context menu or its program-library popup is open, every pointer event
+//!   and every key routes to the taskbar, wherever the pointer is. That is an
+//!   *active grab* in the ordinary window-system sense, and it is what lets a
+//!   press anywhere dismiss the surface (the click-away) without also acting
+//!   on what it landed on. Nothing leaks to the windows beneath.
+//! * **A held button holds the pointer.** The first press takes an implicit
+//!   grab for whichever surface it landed on, and every event up to the
+//!   release of the *last* button goes there — so a window drag that runs
+//!   under the bar keeps dragging, a Switchboard capsule press that slides off
+//!   the capsule still resolves on the capsule's own terms, and a release can
+//!   never be claimed by a surface that did not see the press. There is no
+//!   "offer it to one and then the other": the surface that took the press
+//!   owns the gesture.
+//! * **Otherwise the stack decides.** The surface the compositor finds drawn
+//!   under the pointer ([`Compositor::window_at`]) gets the event: the
+//!   taskbar when that window is one the [`TaskbarPresenter`] placed, the
+//!   window manager for anything else — an application window, a session
+//!   dialog, the lock screen, or the desktop layer when there is no window at
+//!   all. The test is per event position, never per surface: a window covering
+//!   the bar's trailing end leaves every button it does not cover still the
+//!   bar's.
+//! * **Motion is delivered, not fanned.** Only the surface holding the pointer
+//!   is told the pointer moved, so only it updates hover feedback and resolves
+//!   pointer gestures. The other is told the pointer *left*, which is the only
+//!   way a hover can end: when a window rises over a hovered control the
+//!   pointer has not moved at all, and re-testing its unchanged position would
+//!   answer "still hovered" and strand the highlight — and any popover it
+//!   opened — over the window now in front of it.
+//! * **Keys follow the keyboard, not the pointer.** They go to the window
+//!   manager, which delivers them to the focused window; the taskbar takes
+//!   them only while one of its modal surfaces is open. A pointer resting on
+//!   the bar never diverts a keystroke from the window the user is typing in.
+//!
+//! # What this is worth beyond correctness
+//!
+//! The bar is *trusted* desktop chrome: its menus can offer to lock the
+//! screen, to log out, to re-authenticate for a privileged application. An
+//! unprivileged window that could drive that chrome's state — provoke a
+//! popover to appear over itself at a moment it chose, or have a click it
+//! received acted on by a control the user could not see — would have a
+//! user-interface redressing primitive. Resolving every pointer event against
+//! the stack, in one place, is what denies it: chrome reacts only to input the
+//! user actually directed at chrome. It is the same reason the lock screen is
+//! safe here — its window is not one the presenter placed, so while it is up
+//! the bar cannot be reached by the pointer at all.
+//!
+//! The seat holds no pixels and grants itself no authority: it owns the two
+//! inner routers and drives them against the embedder's [`Compositor`],
+//! [`Taskbar`], and [`TaskbarPresenter`], passed in on each
+//! [`handle`](SessionInputRouter::handle). Composing the taskbar and
+//! window-manager crates is the permitted `userland/gui/*` edge; nothing
+//! outside `userland/gui/*` depends on this glue. It never panics: every
+//! routed sub-call is itself total and fails closed.
 
-use tairix_taskbar::{Hit, Taskbar, TaskbarInput, TaskbarResponse};
+use tairix_taskbar::{Taskbar, TaskbarInput, TaskbarResponse};
 use tairix_wm::{
-    Compositor, InputEvent, InputResponse, InputRouter, Point, PointerButton, WindowId,
+    Compositor, InputEvent, InputResponse, InputRouter, Point, PointerButton, PointerFocus, Scale,
+    WindowId,
 };
 
 use crate::presenter::TaskbarPresenter;
 
 /// What the [`SessionInputRouter`] did with one [`InputEvent`].
 ///
-/// The session router routes each event to exactly one of the two desktop
+/// The seat routes each event to exactly one of the two desktop
 /// routers, so its outcome is either a taskbar action, a window-manager
 /// action, or nothing. A sub-router that consumed the event but changed no
 /// state collapses to [`Ignored`](Self::Ignored), exactly as the underlying
@@ -84,8 +113,8 @@ use crate::presenter::TaskbarPresenter;
 /// happened" outcome.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum SessionInputResponse {
-    /// The event changed no desktop state (a non-primary button, or a press
-    /// or motion that neither router acted on).
+    /// The event changed no desktop state (a press or motion that the surface
+    /// holding the pointer did not act on).
     Ignored,
     /// The event was routed to the taskbar, which acted on it.
     Taskbar(TaskbarResponse),
@@ -93,32 +122,90 @@ pub enum SessionInputResponse {
     WindowManager(InputResponse),
 }
 
-/// Routes one pointer-event stream to the taskbar and the window manager.
+/// Which of the desktop's two routers the pointer rests on.
+///
+/// Two variants, because that is exactly the fan-out decision: the window
+/// manager sorts application windows, session surfaces, and the desktop layer
+/// out among themselves by the same stacking hit test, and the taskbar sorts
+/// its own bar, menus, and popovers out by its own layout. The seat only has
+/// to say which of the two is looking at the pixel under the pointer.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+enum PointerOwner {
+    /// The desktop's own chrome: the bar, and every popup and popover it
+    /// opens — the windows the [`TaskbarPresenter`] placed.
+    Chrome,
+    /// The window manager's: an application window, a surface the session
+    /// placed itself (the lock screen, a dialog), or the desktop layer behind
+    /// them all when no window is under the pointer.
+    ///
+    Windows,
+}
+
+/// The bit each pointer button holds in the seat's held-button set.
+///
+/// A set rather than a flag because the implicit grab ends when the *last*
+/// button comes up: pressing primary, then secondary, then releasing primary
+/// must keep the gesture with the surface that took the first press, exactly
+/// as it does everywhere else.
+const fn button_bit(button: PointerButton) -> u8 {
+    match button {
+        PointerButton::Primary => 1 << 0,
+        PointerButton::Secondary => 1 << 1,
+        PointerButton::Middle => 1 << 2,
+    }
+}
+
+/// The desktop's seat: one pointer, one keyboard, routed to the taskbar and
+/// the window manager.
 ///
 /// It owns the window manager's [`InputRouter`] and the taskbar's
-/// [`TaskbarInput`] and decides, per event, which one applies it — see the
+/// [`TaskbarInput`], the pointer position, and the pointer's focus — see the
 /// [module docs](self) for the policy. Drive it through
-/// [`handle`](Self::handle); start a title-bar drag through
-/// [`begin_move`](Self::begin_move).
+/// [`handle`](Self::handle); re-resolve the focus after the window stack
+/// changes with
+/// [`refresh_pointer_focus`](Self::refresh_pointer_focus); start a title-bar
+/// drag through [`begin_move`](Self::begin_move).
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct SessionInputRouter {
     wm: InputRouter,
     taskbar: TaskbarInput,
+    /// Where the pointer is. The desktop's **one** copy of that fact: the
+    /// inner routers hold a position only for the span they hold the pointer,
+    /// and everything that needs the live position — the cursor overlay, the
+    /// cursor's shape, the desktop layer's own hit tests — reads it here.
+    pointer: Point,
+    /// Which router the pointer currently rests on, and therefore which one
+    /// has been told it holds the pointer. `None` when it is not the seat's to
+    /// route: before the first event, and while an embedder-owned modal
+    /// surface has taken the stream ([`yield_pointer`](Self::yield_pointer)).
+    /// Kept in step by [`focus_on`](Self::focus_on), the one place either
+    /// router is told.
+    focus: Option<PointerOwner>,
+    /// The surface holding the implicit grab a button press took, if any
+    /// button is down. It outranks the stack for as long as it lasts, so a
+    /// gesture completes where it started.
+    grab: Option<PointerOwner>,
+    /// The pointer buttons currently held, as [`button_bit`] flags. The grab
+    /// ends when this reaches zero, never on the first release.
+    buttons: u8,
 }
 
 impl SessionInputRouter {
-    /// A router with the pointer at the screen origin, no focus, and no
-    /// in-flight grab.
+    /// A seat with the pointer at the screen origin, on the desktop, with no
+    /// focus and no in-flight grab.
     #[must_use]
     pub fn new() -> Self {
         Self::default()
     }
 
-    /// The current pointer position in screen coordinates. Both inner routers
-    /// track the same position, because motion is fanned to both.
+    /// The current pointer position in screen coordinates.
+    ///
+    /// The seat tracks the device, so this is the desktop's one live answer.
+    /// The inner routers' own positions are where each was last handed the
+    /// pointer, which is what their hit tests need and is not the same fact.
     #[must_use]
-    pub fn pointer(&self) -> Point {
-        self.taskbar.pointer()
+    pub const fn pointer(&self) -> Point {
+        self.pointer
     }
 
     /// The window that owns the keyboard, or `None` when focus rests on the
@@ -131,12 +218,13 @@ impl SessionInputRouter {
     /// The window manager's input router.
     ///
     /// The desktop's pointer-cursor controller reads its interaction state —
-    /// the tracked pointer and the in-flight move-grab — to choose the
-    /// on-screen cursor shape ([`desired_cursor`](tairix_wm::desired_cursor)).
-    /// It is the window manager's router that owns that state (motion is
-    /// fanned to both inner routers, so its pointer is always in step), so the
-    /// controller reads it here rather than the session router keeping a
-    /// second copy.
+    /// the in-flight move- and resize-grabs — to choose the on-screen cursor
+    /// shape ([`desired_cursor`](tairix_wm::desired_cursor)). It is the window
+    /// manager's router that owns that state, so the controller reads it here
+    /// rather than the seat keeping a second copy. The *position* the shape is
+    /// chosen at is the seat's ([`pointer`](Self::pointer)) and is passed
+    /// alongside: the cursor has to be right over the bar too, which this
+    /// router never holds.
     #[must_use]
     pub const fn wm(&self) -> &InputRouter {
         &self.wm
@@ -172,21 +260,18 @@ impl SessionInputRouter {
         self.wm.begin_move(compositor)
     }
 
-    /// Route one input `event` to the taskbar or the window manager,
-    /// resolving any time-driven taskbar gesture against the monotonic
-    /// `now_ns`, and return what changed.
+    /// Route one input `event` to the surface holding the pointer, resolving
+    /// any time-driven taskbar gesture against the monotonic `now_ns`, and
+    /// return what changed.
     ///
-    /// While the taskbar's context menu or the program-library popup is open
-    /// every event routes to the taskbar (both surfaces are modal).
-    /// Otherwise a press goes to whichever router claims the pointer (the
-    /// taskbar when the pointer is over the bar or one of its open popovers
-    /// *and* that surface is the one drawn there, the window manager
-    /// otherwise); a scroll over the Switchboard capsule
-    /// or its readout cycles tasks in the taskbar while any other scroll
-    /// goes to the window manager; motion is fanned to both so their
-    /// pointers stay in step and the window manager can drag a grabbed
-    /// window; a primary release is the taskbar's to claim before it ends a
-    /// window-manager grab. See the [module docs](self) for the full policy.
+    /// Every pointer event takes the same three steps, in this order, and
+    /// there is no fourth: **resolve** who holds the pointer (a modal surface
+    /// of the bar's, an in-flight button grab, or whatever the compositor
+    /// draws under the pointer), **move the focus** there — leaving the
+    /// surface it left, entering the one it reached — and **deliver** the
+    /// event to that one router. Keys are the keyboard's, not the pointer's,
+    /// and go to the window manager unless a modal taskbar surface is open.
+    /// See the [module docs](self) for the reasoning behind each.
     ///
     /// `presenter` is the taskbar presenter that placed the bar's compositor
     /// windows: it is what tells "the bar is under the pointer" from "a
@@ -201,137 +286,189 @@ impl SessionInputRouter {
         now_ns: u64,
     ) -> SessionInputResponse {
         // The taskbar hit-tests at the output's density, which the compositor
-        // owns; the session reads it here rather than
-        // keeping its own copy.
+        // owns; the seat reads it here rather than keeping its own copy.
         let scale = compositor.scale();
-        // An open context menu or popup is modal: the whole stream is the
-        // taskbar's. Motion is still *tracked* by the window manager so its
-        // pointer stays in step for the moment the surface closes, but its
-        // outcome is discarded — nothing may be delivered to the windows
-        // beneath a modal surface, and no grab can be in flight (presses
-        // never reached the window manager while one was open).
-        if taskbar.menu().is_open() || taskbar.library().is_open() {
-            if matches!(event, InputEvent::PointerMoved { .. }) {
-                let _ = self.wm.handle(event, compositor);
+        // The keyboard has a focus of its own, and the pointer does not decide
+        // it: a pointer resting on the bar must never divert a keystroke from
+        // the window the user is typing in. A modal surface of the bar's takes
+        // the keys because it *is* what the keyboard is for while it is up.
+        if matches!(
+            event,
+            InputEvent::KeyPressed { .. } | InputEvent::KeyReleased { .. }
+        ) {
+            if modal(taskbar) {
+                return taskbar_response(self.taskbar.handle(event, taskbar, scale, now_ns));
             }
-            return taskbar_response(self.taskbar.handle(event, taskbar, scale, now_ns));
+            return wm_response(self.wm.handle(event, compositor));
         }
-        match event {
-            InputEvent::PointerMoved { .. } => {
-                // Keep both routers' tracked pointer in step; the window
-                // manager acts on motion (dragging a grabbed window) and the
-                // taskbar refreshes its hover feedback. Motion is also when
-                // a capsule press held past its threshold resolves, and that
-                // is a real action: it takes the outcome, while the drag
-                // still applied.
-                let acted = self.taskbar.handle(event, taskbar, scale, now_ns);
-                let dragged = self.wm.handle(event, compositor);
-                if matches!(acted, TaskbarResponse::Ignored) {
-                    wm_response(dragged)
-                } else {
-                    taskbar_response(acted)
-                }
+        // The device moved the pointer: the seat owns that position, and every
+        // resolution below is against the new one.
+        if let InputEvent::PointerMoved { to } = event {
+            self.pointer = to;
+        }
+        let owner = self.owner(compositor, taskbar, presenter);
+        // A press takes the implicit grab before it is delivered, so the
+        // release that ends the gesture cannot be resolved anywhere else even
+        // if the stack changes under it (this press may well have raised a
+        // window over the pointer).
+        if let InputEvent::PointerPressed { button } = event {
+            self.buttons |= button_bit(button);
+            self.grab = Some(owner);
+        }
+        self.focus_on(Some(owner), compositor, taskbar, scale);
+        let response = match owner {
+            PointerOwner::Chrome => {
+                taskbar_response(self.taskbar.handle(event, taskbar, scale, now_ns))
             }
-            InputEvent::PointerPressed { button } => {
-                // A press belongs to whichever surface owns the pixel under
-                // the pointer: the bar claims presses over itself (a
-                // secondary press there opens the menu the application under
-                // it declared; a middle press over the capsule switches to
-                // the previous task), an open non-modal surface — the hover
-                // window picker, the notification popover, or the capsule's
-                // readout — claims presses over it, and the window manager
-                // takes every remaining primary or secondary press. Each of
-                // those surfaces opens outward and never overlaps the bar, so
-                // the taskbar surfaces never contend.
-                //
-                // "Owns the pixel" is the whole rule, so a window stacked
-                // over the bar takes the press back: the bar is no more
-                // topmost than any other window, and a click lands on what
-                // the user can see.
-                let pointer = self.taskbar.pointer();
-                let over_taskbar = taskbar.hit_test(pointer, scale).is_some()
-                    || taskbar
-                        .picker_layout(scale)
-                        .is_some_and(|picker| picker.panel.contains(pointer))
-                    || taskbar
-                        .notifications_layout(scale)
-                        .is_some_and(|popover| popover.contains(pointer))
-                    || taskbar
-                        .tray_readout_layout(scale)
-                        .is_some_and(|readout| readout.contains(pointer));
-                let on_taskbar = over_taskbar && !self.covered(compositor, presenter);
-                if on_taskbar {
-                    return taskbar_response(self.taskbar.handle(event, taskbar, scale, now_ns));
-                }
-                if matches!(button, PointerButton::Primary | PointerButton::Secondary) {
-                    wm_response(self.wm.handle(event, compositor))
-                } else {
-                    SessionInputResponse::Ignored
-                }
+            PointerOwner::Windows => wm_response(self.wm.handle(event, compositor)),
+        };
+        // The last button coming up releases the pointer, which is very often
+        // not over the surface the gesture started on — a window dragged so
+        // its title bar ends under the bar, a capsule press slid onto a
+        // window. Re-resolving here is what hands it back, and what lets the
+        // hover under it appear without waiting for a motion.
+        if let InputEvent::PointerReleased { button } = event {
+            self.buttons &= !button_bit(button);
+            if self.buttons == 0 && self.grab.take().is_some() {
+                self.refresh_pointer_focus(compositor, taskbar, presenter);
             }
-            InputEvent::PointerScrolled { .. } => {
-                // A scroll over the Switchboard capsule (or its open
-                // readout) cycles the running tasks; everywhere else the
-                // wheel belongs to the window manager's viewport under the
-                // pointer — including a capsule with a window over it, which
-                // is that window's viewport and not the bar's.
-                let pointer = self.taskbar.pointer();
-                let over_capsule =
-                    matches!(taskbar.hit_test(pointer, scale), Some(Hit::Switchboard))
-                        || taskbar
-                            .tray_readout_layout(scale)
-                            .is_some_and(|readout| readout.contains(pointer));
-                let on_capsule = over_capsule && !self.covered(compositor, presenter);
-                if on_capsule {
-                    taskbar_response(self.taskbar.handle(event, taskbar, scale, now_ns))
-                } else {
-                    wm_response(self.wm.handle(event, compositor))
-                }
-            }
-            // A primary release is the taskbar's first: a quick press on the
-            // Switchboard capsule resolves here. One it does not claim ends
-            // an in-flight move-grab in the window manager instead.
-            InputEvent::PointerReleased {
-                button: PointerButton::Primary,
-            } => match self.taskbar.handle(event, taskbar, scale, now_ns) {
-                TaskbarResponse::Ignored => wm_response(self.wm.handle(event, compositor)),
-                acted => SessionInputResponse::Taskbar(acted),
-            },
-            // Keys go to the window manager, which delivers them to the
-            // focused window; the taskbar takes keyboard input only while one
-            // of its modal surfaces is open, handled above.
-            InputEvent::KeyPressed { .. } | InputEvent::KeyReleased { .. } => {
-                wm_response(self.wm.handle(event, compositor))
-            }
-            InputEvent::PointerReleased { .. } => SessionInputResponse::Ignored,
+        }
+        response
+    }
+
+    /// Re-resolve which surface the pointer rests on, moving the focus if the
+    /// answer changed.
+    ///
+    /// The answer depends on the window stack, so it goes stale whenever the
+    /// stack does — a window opened, closed, raised, moved, hidden, or a
+    /// popover of the bar's placed or removed — and none of those is a pointer
+    /// event. The desktop therefore calls this wherever it brings the screen
+    /// up to date, so a hover is never left showing on a surface something
+    /// else is now drawn over, and a surface the pointer has just been
+    /// *revealed* on shows its hover without the user having to jiggle the
+    /// pointer to provoke it.
+    ///
+    /// It resolves and nothing more: no event is delivered, no gesture
+    /// resolved, no window raised. An in-flight grab pins the answer, so this
+    /// cannot take the pointer away from a drag mid-gesture.
+    pub fn refresh_pointer_focus(
+        &mut self,
+        compositor: &mut Compositor,
+        taskbar: &mut Taskbar,
+        presenter: &TaskbarPresenter,
+    ) {
+        let scale = compositor.scale();
+        let owner = self.owner(compositor, taskbar, presenter);
+        self.focus_on(Some(owner), compositor, taskbar, scale);
+    }
+
+    /// Give up the pointer: end any in-flight button gesture and tell both
+    /// routers the pointer has left.
+    ///
+    /// The embedder calls this when it takes the input stream away from the
+    /// seat for a modal surface of its own — the screen lock, or the pinboard's
+    /// backdrop menu — both of which drain the seat's channels straight into
+    /// themselves so that nothing behind the plate can be reached.
+    ///
+    /// It is needed because the seat's implicit grab is a function of the
+    /// presses and releases it *sees*. A gesture in flight when the stream is
+    /// taken away ends with a release the seat will never be given, so without
+    /// this the grab would be held for a button that can never come up and the
+    /// pointer could never be resolved against the stack again. Dropping the
+    /// focus at the same time is what stops the bar sitting there with a lit
+    /// control under a lock screen.
+    ///
+    /// Idempotent, so the drain that takes the stream can simply say it on
+    /// every pass rather than reasoning about which pass was the first. The
+    /// stream coming back needs no announcement: the next event resolves the
+    /// pointer from the stack, and the next press starts a fresh gesture.
+    pub fn yield_pointer(&mut self, compositor: &mut Compositor, taskbar: &mut Taskbar) {
+        let scale = compositor.scale();
+        self.buttons = 0;
+        self.grab = None;
+        self.focus_on(None, compositor, taskbar, scale);
+    }
+
+    /// Which surface holds the pointer right now, in precedence order.
+    ///
+    /// 1. **A modal surface of the bar's** — its context menu or its
+    ///    program-library popup — holds an active grab: the whole stream is
+    ///    the bar's until it closes, which is what makes a press anywhere a
+    ///    dismissal and keeps the windows beneath a modal surface untouched.
+    /// 2. **An in-flight button grab** holds it for the rest of the gesture,
+    ///    so a drag that leaves the surface it started on still completes
+    ///    there and a release is never claimed by a surface that never saw the
+    ///    press.
+    /// 3. **Otherwise the stack**: the surface the compositor draws under the
+    ///    pointer. A window the [`TaskbarPresenter`] placed is the bar's;
+    ///    anything else — an application window, a surface the session placed
+    ///    itself, or no window at all — is the window manager's.
+    fn owner(
+        &self,
+        compositor: &Compositor,
+        taskbar: &Taskbar,
+        presenter: &TaskbarPresenter,
+    ) -> PointerOwner {
+        if modal(taskbar) {
+            return PointerOwner::Chrome;
+        }
+        if let Some(grab) = self.grab {
+            return grab;
+        }
+        match compositor.window_at(self.pointer) {
+            Some(top) if presenter.owns_window(top) => PointerOwner::Chrome,
+            _ => PointerOwner::Windows,
         }
     }
 
-    /// Whether the pixel under the pointer belongs to a window the taskbar
-    /// does not own — that is, whether something is drawn *over* the bar (or
-    /// over one of its popovers) exactly where the pointer is.
+    /// Move the pointer's focus to `owner`, telling the surface it left and
+    /// the surface it reached. A focus that has not moved tells nobody
+    /// anything.
     ///
-    /// Nothing pins the bar topmost. It is an ordinary compositor window, and
-    /// a window raised above it — dragged over it by its title bar, say —
-    /// really does own the pixels the pointer is on, so the bar's own
-    /// geometry containing the pointer is not enough to make a press the
-    /// bar's. Without this, a window covering the clock, the launcher, or the
-    /// capsule would keep taking clicks aimed at itself, and the covered
-    /// control would act on a gesture the user made at something else
-    /// entirely.
-    ///
-    /// The answer is the compositor's own top-down hit test against the
-    /// window ids the [`TaskbarPresenter`] minted, so it is per pointer
-    /// position rather than per bar, and it needs no second copy of either
-    /// the stack or those ids. Nothing on top at all — the pointer is over
-    /// the desktop layer, or the bar has never been presented, so there is no
-    /// window there to be covered by — is not "covered": the taskbar's
-    /// geometry alone then decides, as it always did.
-    fn covered(&self, compositor: &Compositor, presenter: &TaskbarPresenter) -> bool {
-        compositor
-            .window_at(self.taskbar.pointer())
-            .is_some_and(|top| !presenter.owns_window(top))
+    /// This is the **only** place either router is told about the pointer's
+    /// focus, so the two can never both believe they hold it, and neither can
+    /// be left believing it after the pointer has gone. The leave comes first:
+    /// the hover being dropped and the hover being taken up are one crossing,
+    /// and doing them in the other order would show both at once for the width
+    /// of a frame.
+    fn focus_on(
+        &mut self,
+        owner: Option<PointerOwner>,
+        compositor: &mut Compositor,
+        taskbar: &mut Taskbar,
+        scale: Scale,
+    ) {
+        if owner == self.focus {
+            return;
+        }
+        match self.focus {
+            Some(PointerOwner::Chrome) => {
+                self.taskbar
+                    .set_pointer_focus(PointerFocus::Left, taskbar, scale);
+            }
+            Some(PointerOwner::Windows) => {
+                self.wm.set_pointer_focus(PointerFocus::Left, compositor);
+            }
+            None => {}
+        }
+        self.focus = owner;
+        let entered = PointerFocus::Entered { at: self.pointer };
+        match owner {
+            Some(PointerOwner::Chrome) => self.taskbar.set_pointer_focus(entered, taskbar, scale),
+            Some(PointerOwner::Windows) => self.wm.set_pointer_focus(entered, compositor),
+            None => {}
+        }
     }
+}
+
+/// Whether one of the bar's modal surfaces is open, and therefore holds an
+/// active grab on both the pointer and the keyboard.
+///
+/// One definition, read by the pointer's resolution and the keyboard's alike:
+/// a menu that took the keys but not the clicks (or the reverse) would be a
+/// modal surface only some of the time.
+fn modal(taskbar: &Taskbar) -> bool {
+    taskbar.menu().is_open() || taskbar.library().is_open()
 }
 
 /// Wrap a taskbar router outcome, collapsing its no-op to

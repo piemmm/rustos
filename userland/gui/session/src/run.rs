@@ -681,6 +681,11 @@ mod program {
         shell: &mut DesktopShell,
         compositor: &mut Compositor,
     ) -> Drained {
+        // The lock is taking the stream, so the shell will not see the release
+        // that ends any gesture in flight: it gives the pointer up rather than
+        // holding a grab for a button it can never be told about, and drops the
+        // hover anything was drawing behind the plate.
+        shell.yield_pointer(compositor);
         let mut drain = LockedDrain::new();
         loop {
             match pointer.poll() {
@@ -3420,6 +3425,11 @@ mod program {
         // The cursor the motion below moves is settled once for the whole
         // batch, not per sample: only where the pointer ended up is on
         // screen, so a sweep across the plate costs one refresh.
+        // The menu is taking the stream, exactly as the lock's drain does, so
+        // the shell gives the pointer up for the same reason: no gesture of its
+        // own can be completed from here, and nothing behind the plate may be
+        // left showing a hover.
+        shell.yield_pointer(compositor);
         let mut moved = false;
         loop {
             match pointer.poll() {

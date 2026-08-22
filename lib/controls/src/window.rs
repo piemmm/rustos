@@ -572,6 +572,25 @@ impl WindowControl {
         }
     }
 
+    /// The pointer has left this control, with no position that would prove
+    /// it: drop the hover highlight, reporting `bounds` only if it was lit.
+    ///
+    /// [`on_pointer`](Self::on_pointer) ends a hover when a *motion* lands
+    /// outside the control, which is the ordinary way one ends — and not the
+    /// only way. A window raised over this one, a grab taking the pointer, or
+    /// the pointer crossing onto another surface each end the hover with the
+    /// pointer still at the very same coordinates, and re-testing those
+    /// coordinates would answer "still inside" and leave the control lit under
+    /// whatever is now in front of it. Occlusion is the seat's fact, so the
+    /// control is told rather than left to infer it.
+    ///
+    /// Any press latch is left alone: a latch is held only while a button is
+    /// down, and a button held down holds the pointer with it, so a control
+    /// cannot be both armed and left.
+    pub fn pointer_left(&mut self, bounds: Rect, damage: &mut Region) {
+        damage::set(&mut self.state.pointer, PointerState::None, bounds, damage);
+    }
+
     /// Feed a key event, given the control's current `bounds`, returning
     /// [`WindowControlAction::Invoked`] when a focused, actionable control is
     /// activated with Space or Enter.
@@ -1385,6 +1404,25 @@ impl TitleBar {
                 was_dragging.then_some(TitleBarEvent::DragEnd)
             }
             _ => None,
+        }
+    }
+
+    /// The pointer has left this title bar: drop every command control's
+    /// hover highlight, reporting only the controls that were lit.
+    ///
+    /// The bar lays itself out here for the same reason
+    /// [`on_pointer`](Self::on_pointer) does — a control's own rect is what it
+    /// reports repainting — so a leave costs the one control that was under the
+    /// pointer and nothing when none was. See
+    /// [`WindowControl::pointer_left`] for why a leave cannot be expressed as
+    /// a motion somewhere else.
+    ///
+    /// The title bar's own drag latch is untouched: a drag is a held button,
+    /// and a held button holds the pointer.
+    pub fn pointer_left(&mut self, bounds: Rect, scale: Scale, theme: &Theme, damage: &mut Region) {
+        let layout = self.layout(bounds, scale, theme);
+        for (kind, rect) in layout.controls {
+            self.control_mut(kind).pointer_left(rect, damage);
         }
     }
 

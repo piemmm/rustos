@@ -623,6 +623,38 @@ stacked against it. The menu itself performs nothing (`AGENTS.md` §5.4).
 
 ## Input routing
 
+### The bar acts on the pointer only while it holds it
+
+The bar knows where its own regions are. It cannot know whether anything is
+*drawn over* them: a window dragged across the bar leaves the clock at the
+clock's coordinates, and a router that hit-tested that position alone would
+light up, open popovers, and act under a window the user is working in.
+Stacking belongs to the desktop's input seat
+([the session](session.md#routing-one-seats-input-to-the-taskbar-and-the-window-manager)),
+which resolves which surface the pointer rests on and hands the pointer events
+to that one router. Every event this router is handed is therefore its own to
+act on.
+
+`TaskbarInput::set_pointer_focus` is the other half of the contract, and it
+takes a `tairix_input::PointerFocus`:
+
+- **`Left`** drops every hover the bar is drawing and closes the hover window
+  picker. It cannot be inferred from a position, because the pointer usually
+  has not moved — a window was raised over the bar, or a drag took the pointer
+  — and testing that unchanged position would answer "still on the clock",
+  leaving a highlighted slot and an open panel of window thumbnails stranded
+  over someone else's window.
+- **`Entered { at }`** adopts the position the pointer arrived at and refreshes
+  the hover there. The pointer can arrive without moving (the window above the
+  bar closed), and no motion event exists for that. An arrival deliberately
+  opens **no** hover surface: a window closing is not a gesture, and the next
+  real motion opens the picker if the pointer is still on the slot.
+
+A delivered `PointerMoved` says the same thing as an `Entered` and carries the
+same position, so a router handed one is already entered.
+
+### What each press does
+
 `TaskbarInput` is the taskbar's input router, the counterpart of the window
 manager's `InputRouter`. It consumes the **same** shared `tairix-input`
 `InputEvent` stream the compositor routes (`AGENTS.md` §17.4, §2.2), tracking

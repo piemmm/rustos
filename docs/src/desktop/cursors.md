@@ -131,7 +131,11 @@ Which `CursorKind` to show is decided from what the user is doing, not hard
 coded per window action. The window manager's `select` module
 (`userland/gui/wm`) holds that policy:
 
-- `desired_cursor(router, compositor)` is a pure function of state. An
+- `desired_cursor(at, router, compositor)` is a pure function of state. `at`
+  is the pointer position, which the desktop's input seat owns: a router holds
+  a position only for as long as it holds the pointer, and the shape has to be
+  right wherever the pointer is — including over the desktop's own bar, which
+  the window manager's router never holds. An
   in-flight grab outranks everything: a window move-grab yields `Move`, and a
   resize-grab keeps the double arrow of the edge it is dragging for the whole
   gesture — the pointer routinely runs past that edge, and re-deriving the
@@ -154,10 +158,13 @@ coded per window action. The window manager's `select` module
   `CursorRegistry` and remembers the kind on screen and the density it was
   rasterised at, but it does **not** own the scale: the desktop density belongs
   to the output, so the controller reads it from `Compositor::scale` when it
-  installs a cursor (`AGENTS.md` §10 / §2.2). `refresh` runs the policy and
+  installs a cursor (`AGENTS.md` §10 / §2.2). `refresh(at, router, compositor)`
+  runs the policy and
   re-renders only when the chosen kind, the active cursor set, **or** the output
-  scale changed, installing the result in place. A runtime cursor-set swap is
-  `set_registry`; a DPI change is `Compositor::set_scale` followed by one
+  scale changed, installing the result in place — at `at`, the seat's pointer
+  position, which is also where the hotspot is placed. A runtime cursor-set
+  swap is `set_registry(registry, at, compositor)`, which needs no router at
+  all; a DPI change is `Compositor::set_scale` followed by one
   `refresh`. Rasterisation can fail for a degenerate cursor or scale; the
   controller then fails closed, leaving the current pointer untouched rather
   than blanking it (`AGENTS.md` §2.9).

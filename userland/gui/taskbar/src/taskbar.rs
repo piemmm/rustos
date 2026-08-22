@@ -914,22 +914,33 @@ impl Taskbar {
     /// (whose readout expands on hover) — latching a repaint when any visual
     /// state changes.
     ///
+    /// `point` is `None` when the pointer does not rest on the bar **at all**,
+    /// which is a different fact from a position that misses every region: a
+    /// window drawn over the bar takes the pointer with it while leaving it at
+    /// the bar's own coordinates, so there is a position and it is not the
+    /// bar's. Only the desktop's seat can tell the two apart (it owns the
+    /// window stack), so it says which this is and the bar does not guess.
+    /// Either way every hover here ends the same way — nothing on the bar is
+    /// under the pointer — so one routine answers both and they cannot drift
+    /// apart.
+    ///
     /// While the popup is open the Library button stays visually pressed (it
     /// is "held open"). Every hover target tracked here paints on the bar
     /// itself, so a change latches only [`bar`](TaskbarRepaint::bar) — except
     /// the Switchboard capsule, whose hover can also expand or collapse its
     /// readout.
-    pub(crate) fn track_hover(&mut self, point: Point, scale: Scale, damage: &mut Region) {
+    pub(crate) fn track_hover(&mut self, point: Option<Point>, scale: Scale, damage: &mut Region) {
         let layout = self.layout(scale);
+        let over = |rect: Rect| point.is_some_and(|at| rect.contains(at));
         let library_pointer = if self.library.is_open() {
             PointerState::Pressed
-        } else if layout.library.contains(point) {
+        } else if over(layout.library) {
             PointerState::Hover
         } else {
             PointerState::None
         };
         let mut bar_changed = set_pointer(&mut self.library_button, library_pointer);
-        let app_hover = layout.apps.iter().position(|slot| slot.contains(point));
+        let app_hover = point.and_then(|at| layout.apps.iter().position(|slot| slot.contains(at)));
         bar_changed |= self.apps.set_hover(app_hover);
         if bar_changed {
             self.repaint |= TaskbarRepaint::BAR;
@@ -939,14 +950,15 @@ impl Taskbar {
         let readout = self
             .tray_readout_layout(scale)
             .map_or(Rect::EMPTY, |readout| readout.panel);
-        let tray_changed = self.tray.track(
-            point,
-            layout.switchboard,
-            readout,
-            scale,
-            &self.theme,
-            damage,
-        );
+        // The capsule's expansion rule is the shared control's, so both
+        // directions are asked of it rather than re-derived here.
+        let tray_changed = match point {
+            Some(at) => {
+                self.tray
+                    .track(at, layout.switchboard, readout, scale, &self.theme, damage)
+            }
+            None => self.tray.pointer_left(layout.switchboard, readout, damage),
+        };
         if tray_changed {
             self.repaint |= TaskbarRepaint::BAR;
             if was_expanded || self.tray.is_expanded() {

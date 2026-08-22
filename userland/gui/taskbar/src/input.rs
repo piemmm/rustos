@@ -16,6 +16,26 @@
 //! applies presses at that position, and never panics: a press that misses
 //! every region changes nothing.
 //!
+//! # The bar acts on the pointer only while it holds it
+//!
+//! The bar knows where its own regions are. It cannot know whether anything is
+//! *drawn over* them: a window dragged across the bar leaves the clock at the
+//! clock's coordinates, and a router that hit-tested that position alone would
+//! light up, open popovers, and act under a window the user is working in.
+//! Stacking belongs to the desktop's seat, so the seat resolves which surface
+//! the pointer rests on and hands the pointer events to that one router —
+//! this one receives an event only while the bar holds the pointer, and every
+//! event it is handed is therefore its own to act on.
+//!
+//! [`set_pointer_focus`](TaskbarInput::set_pointer_focus) is the other half of
+//! that contract: it is how the seat says the pointer has *left* the bar, which
+//! is the only way the hover the bar is drawing can be dropped. It cannot be
+//! inferred from a position, because the pointer usually has not moved — a
+//! window was raised over the bar, or a drag took the pointer — and testing
+//! that unchanged position would answer "still on the clock" and leave a
+//! highlighted slot and an open hover popover stranded over someone else's
+//! window.
+//!
 //! While the program-library popup is open the router treats it as modal and
 //! consumes the whole event stream — presses, releases, scroll, and keys all
 //! route into the popup ([`LibraryPopup`](crate::LibraryPopup)); a press on
@@ -62,7 +82,7 @@ use tairix_abi::window_ipc::AppMenuItemId;
 use tairix_abi::PowerAction;
 use tairix_controls::{damage, TraySignalAction};
 use tairix_geometry::{Point, Rect, Region, Scale};
-use tairix_input::{InputEvent, PointerButton};
+use tairix_input::{InputEvent, PointerButton, PointerFocus};
 use tairix_proglib::EntryId;
 use tairix_theme::Appearance;
 
@@ -243,10 +263,51 @@ impl TaskbarInput {
         Self::default()
     }
 
-    /// The current pointer position in screen coordinates.
+    /// The pointer position this router last held the pointer at, in screen
+    /// coordinates.
+    ///
+    /// The *live* pointer belongs to the desktop's seat, which tracks the
+    /// device and decides which surface it rests on; this is the position at
+    /// which the bar was last handed it, which is what its own hit tests are
+    /// applied at. While the pointer rests elsewhere the two differ, and it is
+    /// the seat's that is the pointer.
     #[must_use]
     pub const fn pointer(&self) -> Point {
         self.pointer
+    }
+
+    /// Take the seat's answer to "does the pointer rest on one of the bar's
+    /// surfaces?", applying what changes when it does.
+    ///
+    /// * [`Entered`](PointerFocus::Entered) adopts the position the pointer
+    ///   arrived at and refreshes the bar's hover feedback there. The pointer
+    ///   can arrive without moving — a window above the bar closed, a drag
+    ///   ended, a modal surface shut — and no motion event exists for those,
+    ///   which is why the position travels with the answer.
+    /// * [`Left`](PointerFocus::Left) drops every hover the bar is drawing and
+    ///   closes the hover window picker. The picker in particular *must* go:
+    ///   it is a surface that exists only because the pointer is resting on a
+    ///   slot, so leaving it open once the pointer is elsewhere would float a
+    ///   panel of window thumbnails over whatever the user is now working in.
+    ///
+    /// No gesture is resolved here and nothing is reported to the embedder:
+    /// this is the pointer arriving or leaving, not the user asking for
+    /// anything. In particular an enter never *opens* a hover surface — a
+    /// window closing is not a gesture, and a popover that appeared because
+    /// something else vanished is a popover nobody asked for. The next real
+    /// motion opens one if the pointer is still there.
+    pub fn set_pointer_focus(&mut self, focus: PointerFocus, taskbar: &mut Taskbar, scale: Scale) {
+        let mut damage = damage::sink();
+        match focus {
+            PointerFocus::Entered { at } => {
+                self.pointer = at;
+                taskbar.track_hover(Some(at), scale, &mut damage);
+            }
+            PointerFocus::Left => {
+                taskbar.track_hover(None, scale, &mut damage);
+                taskbar.close_picker();
+            }
+        }
     }
 
     /// Process one input `event` against `taskbar`, hit-testing at the
@@ -271,8 +332,11 @@ impl TaskbarInput {
         // reports its own repainted bounds into the same region.
         let mut damage = damage::sink();
         if let InputEvent::PointerMoved { to } = event {
+            // A delivered motion is an enter: the seat resolves which surface
+            // the pointer rests on before it delivers, so a motion arriving
+            // here says the bar holds the pointer and says where.
             self.pointer = to;
-            taskbar.track_hover(to, scale, &mut damage);
+            taskbar.track_hover(Some(to), scale, &mut damage);
             if let Some(response) = self.continue_capsule_press(taskbar, scale, now_ns) {
                 return response;
             }

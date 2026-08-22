@@ -14,6 +14,18 @@ This crate owns the device-level input types the desktop routes:
   `PointerPressed`, `PointerReleased` (button events act at the pointer's
   current position, which a router tracks from the motion events) and the
   keyboard's `KeyPressed` / `KeyReleased`, delivered to the focused surface.
+- `PointerFocus` — the *derived* half: `Entered { at }` / `Left`, the
+  enter/leave pair a seat hands to a surface's router. No device produces it;
+  the seat resolves it from the window stack, which is the one fact a surface
+  cannot see about itself. A surface acts on pointer input only while it holds
+  the pointer, and is told when it stops holding it so the hover it is drawing
+  goes away with the pointer rather than being stranded under whatever is now
+  drawn over it. It is deliberately *not* an `InputEvent` variant: mixing a
+  seat's conclusions into the device vocabulary would make every producer of
+  device events look like it could reach a conclusion. It is a *message*, not
+  state, and carries no `Default`: the seat is the one owner of which surface
+  holds the pointer, and a surface keeping its own copy would be a second
+  answer that could disagree.
 
 ## Where it sits
 

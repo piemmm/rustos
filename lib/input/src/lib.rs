@@ -17,6 +17,16 @@
 //! compositor's [`InputRouter`] and the taskbar's input router consume one
 //! definition.
 //!
+//! # Device events and the seat's own answers
+//!
+//! [`InputEvent`] is strictly what a *device* reported. Which surface a
+//! pointer event belongs to is a different kind of fact: it is derived from
+//! the window stack, which only the desktop's seat can see, and it is carried
+//! by [`PointerFocus`] rather than smuggled into the device vocabulary. The
+//! two together are the whole pointer contract every router here obeys —
+//! a router acts on the events it is handed, and is told when the pointer
+//! stops resting on it.
+//!
 //! Keyboard input is modelled alongside the pointer: a [`Key`] (a produced
 //! character or a [`NamedKey`]) and the [`Modifiers`] held with it travel as
 //! the [`InputEvent::KeyPressed`] / [`InputEvent::KeyReleased`] variants the
@@ -166,9 +176,74 @@ pub enum InputEvent {
     },
 }
 
+/// Whether the pointer rests on one surface, as the desktop's seat resolved
+/// it: the *enter* and *leave* pair every window system needs.
+///
+/// This is deliberately **not** an [`InputEvent`]: no device produces it. The
+/// seat derives it from the window stack and hands it to the router of each
+/// surface whose answer just changed.
+///
+/// # Why a surface cannot work this out for itself
+///
+/// A surface knows its own geometry, so it can say whether the pointer is at
+/// its coordinates. It cannot say whether anything is drawn *over* it there:
+/// the desktop bar's clock stays at the bar's coordinates when a window is
+/// dragged across it, and a surface that acted on that position alone would
+/// react to gestures the user aimed at the window in front of it — hover
+/// feedback lighting up under someone else's window, a hover popover opening
+/// over it, a click doing something the user never asked for on a control they
+/// could not even see. Stacking is the seat's fact, so the answer comes from
+/// the seat.
+///
+/// # The two rules it carries
+///
+/// * **A surface acts on pointer input only while it holds the pointer.** The
+///   seat delivers pointer events to that one surface's router and to no
+///   other, so one press does one thing and it happens where the user was
+///   looking.
+/// * **A surface is told when it stops holding the pointer.** Hover is state a
+///   surface *draws*, so it has to be dropped when the pointer goes — by
+///   motion, by a window rising over it, or by a grab taking the pointer
+///   elsewhere — or it is left stranded on screen with nothing under it.
+///
+/// It is a *message*, not state, and deliberately has no [`Default`]: the seat
+/// is the one owner of which surface holds the pointer, and a surface that kept
+/// its own copy would be a second answer that could disagree with the first.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum PointerFocus {
+    /// The pointer rests on this surface, at this screen position.
+    ///
+    /// The position is carried because the pointer can *arrive* without
+    /// moving — a window above closed, a grab ended, the surface was raised —
+    /// and there is no motion event for the surface to read it from. A
+    /// delivered [`InputEvent::PointerMoved`] says the same thing and carries
+    /// the same position, so a router that has just been handed one is
+    /// already entered.
+    Entered {
+        /// Where the pointer is, in screen coordinates.
+        at: Point,
+    },
+    /// The pointer rests somewhere else: on another surface, or on nothing.
+    Left,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_entered_focus_carries_the_position_the_pointer_arrived_at() {
+        // The position is the payload: it is what a surface entered without a
+        // motion event has to hit-test against.
+        let focus = PointerFocus::Entered {
+            at: Point::new(4, 9),
+        };
+        match focus {
+            PointerFocus::Entered { at } => assert_eq!(at, Point::new(4, 9)),
+            PointerFocus::Left => panic!("expected an enter"),
+        }
+        assert_ne!(focus, PointerFocus::Left);
+    }
 
     #[test]
     fn buttons_are_distinct() {

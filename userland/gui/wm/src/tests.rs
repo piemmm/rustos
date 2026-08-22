@@ -1348,7 +1348,7 @@ fn theme_corner_radius_shapes_windows() {
 // ---- input routing ---------------------------------------------------
 
 use crate::input::{
-    InputEvent, InputResponse, InputRouter, Key, Modifiers, NamedKey, PointerButton,
+    InputEvent, InputResponse, InputRouter, Key, Modifiers, NamedKey, PointerButton, PointerFocus,
 };
 
 fn press_primary() -> InputEvent {
@@ -2016,19 +2016,31 @@ fn desired_cursor_reflects_the_window_under_the_pointer() {
 
     // Over the desktop background: the plain arrow.
     router.handle(moved(50, 50), &mut c);
-    assert_eq!(desired_cursor(&router, &c), CursorKind::Arrow);
+    assert_eq!(
+        desired_cursor(router.pointer(), &router, &c),
+        CursorKind::Arrow
+    );
 
     // Over a default window: still the arrow.
     router.handle(moved(15, 15), &mut c);
-    assert_eq!(desired_cursor(&router, &c), CursorKind::Arrow);
+    assert_eq!(
+        desired_cursor(router.pointer(), &router, &c),
+        CursorKind::Arrow
+    );
 
     // The window advertises a text cursor over its content.
     assert!(c.set_window_cursor(win, CursorKind::Text));
-    assert_eq!(desired_cursor(&router, &c), CursorKind::Text);
+    assert_eq!(
+        desired_cursor(router.pointer(), &router, &c),
+        CursorKind::Text
+    );
 
     // Moving back to the background returns to the arrow.
     router.handle(moved(50, 50), &mut c);
-    assert_eq!(desired_cursor(&router, &c), CursorKind::Arrow);
+    assert_eq!(
+        desired_cursor(router.pointer(), &router, &c),
+        CursorKind::Arrow
+    );
 }
 
 #[test]
@@ -2044,10 +2056,16 @@ fn move_grab_outranks_the_window_hint() {
 
     // While dragging, the move cursor wins over the window's text hint.
     assert!(router.is_moving());
-    assert_eq!(desired_cursor(&router, &c), CursorKind::Move);
+    assert_eq!(
+        desired_cursor(router.pointer(), &router, &c),
+        CursorKind::Move
+    );
 
     router.handle(release_primary(), &mut c);
-    assert_eq!(desired_cursor(&router, &c), CursorKind::Text);
+    assert_eq!(
+        desired_cursor(router.pointer(), &router, &c),
+        CursorKind::Text
+    );
 }
 
 #[test]
@@ -2086,7 +2104,7 @@ fn the_pointer_takes_the_double_arrow_of_the_resize_edge_it_is_over() {
     ] {
         router.handle(moved(point.x, point.y), &mut c);
         assert_eq!(
-            desired_cursor(&router, &c),
+            desired_cursor(router.pointer(), &router, &c),
             expected,
             "at {point:?}, classified {:?}",
             c.frame_hit(id, point)
@@ -2105,7 +2123,10 @@ fn an_undecorated_window_has_no_resize_edges_to_point_at() {
     let mut router = InputRouter::new();
 
     router.handle(moved(bounds.right() - 1, bounds.bottom() - 1), &mut c);
-    assert_eq!(desired_cursor(&router, &c), CursorKind::Text);
+    assert_eq!(
+        desired_cursor(router.pointer(), &router, &c),
+        CursorKind::Text
+    );
 }
 
 #[test]
@@ -2124,7 +2145,7 @@ fn a_resize_grab_keeps_its_edge_s_arrow_wherever_the_pointer_goes() {
         "the corner press grabs the bottom-right"
     );
     assert_eq!(
-        desired_cursor(&router, &c),
+        desired_cursor(router.pointer(), &router, &c),
         CursorKind::ResizeDiagonalFalling
     );
 
@@ -2132,13 +2153,16 @@ fn a_resize_grab_keeps_its_edge_s_arrow_wherever_the_pointer_goes() {
     // gesture — not what lies under the pointer — owns the shape.
     router.handle(moved(bounds.left() + 5, bounds.top() + 5), &mut c);
     assert_eq!(
-        desired_cursor(&router, &c),
+        desired_cursor(router.pointer(), &router, &c),
         CursorKind::ResizeDiagonalFalling
     );
 
     router.handle(release_primary(), &mut c);
     assert!(router.resizing_edge().is_none());
-    assert_eq!(desired_cursor(&router, &c), CursorKind::Text);
+    assert_eq!(
+        desired_cursor(router.pointer(), &router, &c),
+        CursorKind::Text
+    );
 }
 
 #[test]
@@ -2151,16 +2175,16 @@ fn controller_installs_and_switches_the_cursor_shape() {
 
     // First refresh over the desktop installs the arrow.
     router.handle(moved(70, 70), &mut c);
-    assert!(ctrl.refresh(&router, &mut c));
+    assert!(ctrl.refresh(router.pointer(), &router, &mut c));
     assert_eq!(ctrl.kind(), CursorKind::Arrow);
     assert!(c.cursor_bounds().is_some());
 
     // A repeat refresh with the same kind does no work.
-    assert!(!ctrl.refresh(&router, &mut c));
+    assert!(!ctrl.refresh(router.pointer(), &router, &mut c));
 
     // Moving over the text window switches the shape.
     router.handle(moved(20, 20), &mut c);
-    assert!(ctrl.refresh(&router, &mut c));
+    assert!(ctrl.refresh(router.pointer(), &router, &mut c));
     assert_eq!(ctrl.kind(), CursorKind::Text);
 }
 
@@ -2174,15 +2198,15 @@ fn controller_reuses_a_cached_kind_when_it_recurs() {
 
     // Arrow over the background, then Text over the window.
     router.handle(moved(70, 70), &mut c);
-    assert!(ctrl.refresh(&router, &mut c));
+    assert!(ctrl.refresh(router.pointer(), &router, &mut c));
     let arrow_bounds = c.cursor_bounds().expect("arrow shown");
     router.handle(moved(20, 20), &mut c);
-    assert!(ctrl.refresh(&router, &mut c));
+    assert!(ctrl.refresh(router.pointer(), &router, &mut c));
 
     // Returning to the background re-shows the cached arrow unchanged: same
     // kind and same footprint as the first time it was rasterised.
     router.handle(moved(70, 70), &mut c);
-    assert!(ctrl.refresh(&router, &mut c));
+    assert!(ctrl.refresh(router.pointer(), &router, &mut c));
     assert_eq!(ctrl.kind(), CursorKind::Arrow);
     assert_eq!(
         c.cursor_bounds().map(|b| (b.width, b.height)),
@@ -2201,7 +2225,7 @@ fn refresh_without_a_cursor_after_a_scale_change_draws_nothing() {
     // refresh over the desktop installs the arrow at the new density.
     let bigger = Scale::from_percent(200).expect("valid scale");
     assert!(c.set_scale(bigger));
-    assert!(ctrl.refresh(&router, &mut c));
+    assert!(ctrl.refresh(router.pointer(), &router, &mut c));
     assert!(c.cursor_bounds().is_some());
 }
 
@@ -2215,11 +2239,11 @@ fn controller_re_renders_on_scale_change() {
     // new density and re-rasterises, so the footprint enlarges even though
     // the chosen kind is unchanged.
     router.handle(moved(10, 10), &mut c);
-    assert!(ctrl.refresh(&router, &mut c));
+    assert!(ctrl.refresh(router.pointer(), &router, &mut c));
     let small = c.cursor_bounds().expect("cursor shown");
     let bigger = Scale::from_percent(200).expect("valid scale");
     assert!(c.set_scale(bigger));
-    assert!(ctrl.refresh(&router, &mut c));
+    assert!(ctrl.refresh(router.pointer(), &router, &mut c));
     let large = c.cursor_bounds().expect("cursor shown");
     assert!(large.width > small.width);
     assert!(large.height > small.height);
@@ -2232,7 +2256,7 @@ fn controller_re_renders_on_registry_swap() {
     let mut ctrl = CursorController::new(test_cursor_cache());
 
     router.handle(moved(10, 10), &mut c);
-    assert!(ctrl.refresh(&router, &mut c));
+    assert!(ctrl.refresh(router.pointer(), &router, &mut c));
 
     // A registry that selects an alternative set re-renders the cursor.
     let mut registry = CursorRegistry::with_builtin();
@@ -2241,7 +2265,7 @@ fn controller_re_renders_on_registry_swap() {
         .register(custom, CursorTheme::builtin())
         .expect("register");
     registry.set_active(custom).expect("activate");
-    assert!(ctrl.set_registry(registry, &router, &mut c));
+    assert!(ctrl.set_registry(registry, router.pointer(), &mut c));
     assert_eq!(ctrl.registry().active_id(), custom);
     assert!(c.cursor_bounds().is_some());
 }
@@ -3736,6 +3760,57 @@ fn a_title_bar_drag_still_hangs_the_window_off_an_edge() {
     assert_eq!(bounds.left(), 20 - 60, "by exactly the pointer delta");
 }
 
+/// A hover has to be able to end without the pointer moving. When the desktop's
+/// seat hands the pointer to another surface — the bar the user just reached
+/// for, a window raised over this one — the pointer is still at the very same
+/// coordinates, so re-testing them would answer "still on the command" and
+/// leave it lit, advertising a press that would no longer land on it.
+#[test]
+fn a_pointer_that_left_puts_out_a_command_it_never_moved_off() {
+    let mut c = new_compositor(mode(320, 240), BLUE).expect("compositor");
+    let id = titled_window(&mut c, 10, 10, 180, "Documents");
+    composite_checked(&mut c);
+    let mut router = InputRouter::new();
+    let close = command_rect(&c, id, WindowControlKind::Close);
+    let over = inside(close);
+    router.handle(moved(over.x, over.y), &mut c);
+    assert_eq!(composite_checked(&mut c).rects(), [close]);
+
+    // The pointer has not moved: it is still inside the Close command.
+    router.set_pointer_focus(PointerFocus::Left, &mut c);
+
+    assert_eq!(
+        composite_checked(&mut c).rects(),
+        [close],
+        "the command the pointer left, and nothing else"
+    );
+    // Told twice, nothing changes and nothing repaints.
+    router.set_pointer_focus(PointerFocus::Left, &mut c);
+    assert!(!c.has_damage());
+}
+
+/// And the pointer can arrive without moving — the surface above went away —
+/// so an enter adopts the position it arrived at and lights the decoration
+/// under it, with no motion event to have carried either fact.
+#[test]
+fn a_pointer_that_entered_lights_the_command_it_arrived_on() {
+    let mut c = new_compositor(mode(320, 240), BLUE).expect("compositor");
+    let id = titled_window(&mut c, 10, 10, 180, "Documents");
+    composite_checked(&mut c);
+    let mut router = InputRouter::new();
+    let close = command_rect(&c, id, WindowControlKind::Close);
+    let over = inside(close);
+
+    router.set_pointer_focus(PointerFocus::Entered { at: over }, &mut c);
+
+    assert_eq!(router.pointer(), over, "the position was adopted");
+    assert_eq!(
+        composite_checked(&mut c).rects(),
+        [close],
+        "exactly the command it arrived on lit up"
+    );
+}
+
 #[test]
 fn hovering_a_window_command_lights_it_and_leaving_puts_it_out() {
     // Pointer motion over a decoration is the window manager's own: nothing
@@ -4462,15 +4537,15 @@ fn a_re_shown_cursor_kind_is_rasterised_once_per_epoch() {
     let mut ctrl = CursorController::new(test_cursor_cache());
 
     router.handle(moved(70, 70), &mut c);
-    assert!(ctrl.refresh(&router, &mut c));
+    assert!(ctrl.refresh(router.pointer(), &router, &mut c));
     let after_first = ctrl.cache_stats().misses();
 
     // Moving onto the window and back re-shows the arrow: the second
     // showing must come from the cache, not a fresh rasterisation.
     router.handle(moved(20, 20), &mut c);
-    assert!(ctrl.refresh(&router, &mut c));
+    assert!(ctrl.refresh(router.pointer(), &router, &mut c));
     router.handle(moved(70, 70), &mut c);
-    assert!(ctrl.refresh(&router, &mut c));
+    assert!(ctrl.refresh(router.pointer(), &router, &mut c));
     assert_eq!(
         ctrl.cache_stats().misses(),
         after_first + 1,
@@ -4486,11 +4561,11 @@ fn a_scale_change_invalidates_every_cached_cursor() {
     let mut ctrl = CursorController::new(test_cursor_cache());
 
     router.handle(moved(70, 70), &mut c);
-    assert!(ctrl.refresh(&router, &mut c));
+    assert!(ctrl.refresh(router.pointer(), &router, &mut c));
     assert_eq!(ctrl.cache_len(), 1);
 
     assert!(c.set_scale(Scale::from_percent(200).expect("scale")));
-    assert!(ctrl.refresh(&router, &mut c));
+    assert!(ctrl.refresh(router.pointer(), &router, &mut c));
     assert_eq!(
         ctrl.cache_len(),
         1,
@@ -4518,7 +4593,7 @@ fn mild_pressure_drops_the_cursor_cache_and_refuses_growth() {
     ));
 
     router.handle(moved(70, 70), &mut c);
-    assert!(ctrl.refresh(&router, &mut c));
+    assert!(ctrl.refresh(router.pointer(), &router, &mut c));
     assert_eq!(ctrl.cache_len(), 1);
     assert!(ctrl.cache_bytes() > 0);
 
@@ -4532,7 +4607,7 @@ fn mild_pressure_drops_the_cursor_cache_and_refuses_growth() {
     // A different shape is still drawn correctly; it is simply
     // rasterised on demand instead of retained.
     router.handle(moved(20, 20), &mut c);
-    assert!(ctrl.refresh(&router, &mut c));
+    assert!(ctrl.refresh(router.pointer(), &router, &mut c));
     assert_eq!(ctrl.kind(), CursorKind::Text);
     assert!(c.cursor_bounds().is_some());
     assert_eq!(ctrl.cache_len(), 0, "no growth while pressure holds");
@@ -4558,7 +4633,10 @@ fn the_cursor_cache_budget_follows_the_output_it_was_built_for() {
     NORMAL_PRESSURE.report(PressureBand::Normal);
 
     router.handle(moved(70, 70), &mut c);
-    assert!(ctrl.refresh(&router, &mut c), "the cursor is still drawn");
+    assert!(
+        ctrl.refresh(router.pointer(), &router, &mut c),
+        "the cursor is still drawn"
+    );
     assert!(c.cursor_bounds().is_some());
     assert_eq!(
         ctrl.cache_len(),
@@ -4574,7 +4652,7 @@ fn teardown_releases_every_cached_cursor() {
     let mut router = InputRouter::new();
     let mut ctrl = CursorController::new(test_cursor_cache());
     router.handle(moved(70, 70), &mut c);
-    assert!(ctrl.refresh(&router, &mut c));
+    assert!(ctrl.refresh(router.pointer(), &router, &mut c));
     assert_eq!(ctrl.cache_len(), 1);
 
     ctrl.teardown();

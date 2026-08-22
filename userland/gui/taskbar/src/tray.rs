@@ -168,6 +168,23 @@ impl SwitchboardTray {
         .0
     }
 
+    /// Tell the capsule the pointer has left it and its readout, reporting
+    /// whether its visual state changed.
+    ///
+    /// The counterpart of [`track`](Self::track) for the case a position
+    /// cannot state: the pointer no longer rests on the bar at all, though it
+    /// may still be at the capsule's own coordinates because a window was
+    /// drawn over it. The shared control owns the hover/expansion rule, so it
+    /// is told rather than re-derived here.
+    pub(crate) fn pointer_left(
+        &mut self,
+        capsule: Rect,
+        readout: Rect,
+        damage: &mut Region,
+    ) -> bool {
+        self.signal.pointer_left(capsule, readout, damage)
+    }
+
     /// Re-derive the capsule from the current facts, carrying over the
     /// pointer and focus interaction state so a live update never drops an
     /// open hover readout.

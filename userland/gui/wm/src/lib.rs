@@ -84,7 +84,9 @@ pub use compositor::Compositor;
 pub use corner::Corners;
 pub use frost::{frost_cache, FrostEpoch, FrostedBackdrop};
 pub use geometry::{Point, Rect, Region, Scale};
-pub use input::{InputEvent, InputResponse, InputRouter, Key, Modifiers, NamedKey, PointerButton};
+pub use input::{
+    InputEvent, InputResponse, InputRouter, Key, Modifiers, NamedKey, PointerButton, PointerFocus,
+};
 pub use select::{cursor_cache, desired_cursor, CursorController, CursorEpoch};
 pub use stats::FrameStats;
 pub use surface::Surface;

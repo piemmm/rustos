@@ -81,7 +81,15 @@ owns:
   bare bar.
 - **Input routing** — `TaskbarInput` consumes the shared `tairix-input`
   `InputEvent` stream (the same one the window manager routes) and turns a
-  primary press into a typed `TaskbarResponse`: `OpenLibrary` (the Library
+  primary press into a typed `TaskbarResponse`. It acts on the pointer only
+  while it *holds* it: the bar can see its own geometry but not the window
+  stack, so the desktop's input seat resolves which surface the pointer rests
+  on and delivers the pointer events to that one router. `set_pointer_focus`
+  is the other half — a `PointerFocus::Left` drops every hover and closes the
+  hover picker (a window raised over the bar leaves the pointer exactly where
+  it was, so no position could have told the bar), and an
+  `Entered { at }` adopts the position and refreshes the hover without opening
+  any hover surface. Responses: `OpenLibrary` (the Library
   button opened the popup), an application's declared default
   action (`AppDefault`) or the raise the session performs in its place
   (`AppRaise`), a chosen row of the menu an application declared

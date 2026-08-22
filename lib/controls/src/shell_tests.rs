@@ -877,6 +877,64 @@ fn tray_signal_expands_on_hover_and_focus() {
     assert!(sig.is_expanded());
 }
 
+/// A hover has to be able to end without the pointer moving: a window rising
+/// over the bar takes the pointer away while leaving it at the capsule's own
+/// coordinates, and re-testing those would answer "still hovered" — stranding
+/// an expanded instrument readout over that window.
+#[test]
+fn tray_signal_pointer_left_collapses_a_readout_the_pointer_never_moved_off() {
+    let theme = Theme::dark();
+    let mut sig = TraySignal::new(IconKind::Battery, "Battery").with_value("82%");
+    let capsule = Rect::new(0, 0, SS, SS);
+    let readout = Rect::new(0, iv(SS), 120, 60);
+    let _ = sig.on_pointer(
+        &moved(10, 10),
+        capsule,
+        readout,
+        Scale::ONE,
+        &theme,
+        &mut sink(),
+    );
+    assert!(sig.is_expanded());
+
+    // The pointer is still at (10, 10) — inside the capsule — and the readout
+    // collapses anyway, because it was told rather than asked.
+    let mut damage = sink();
+    assert!(sig.pointer_left(capsule, readout, &mut damage));
+    assert!(!sig.is_expanded());
+    // Both the capsule and the readout it was showing are repainted.
+    assert!(damage.bounds().contains(Point::new(2, 2)));
+    assert!(damage.bounds().contains(Point::new(2, iv(SS) + 2)));
+
+    // Saying it twice changes nothing and repaints nothing.
+    let mut again = sink();
+    assert!(!sig.pointer_left(capsule, readout, &mut again));
+    assert!(again.is_empty());
+}
+
+/// The keyboard can hold the readout open, and a pointer leaving is not the
+/// keyboard letting go: the capsule stays expanded for whoever is driving it
+/// with keys.
+#[test]
+fn tray_signal_pointer_left_leaves_a_keyboard_held_readout_open() {
+    let theme = Theme::dark();
+    let mut sig = TraySignal::new(IconKind::Battery, "Battery").with_value("82%");
+    let capsule = Rect::new(0, 0, SS, SS);
+    let readout = Rect::new(0, iv(SS), 120, 60);
+    let _ = sig.on_pointer(
+        &moved(10, 10),
+        capsule,
+        readout,
+        Scale::ONE,
+        &theme,
+        &mut sink(),
+    );
+    sig.set_focused(true);
+
+    assert!(sig.pointer_left(capsule, readout, &mut sink()));
+    assert!(sig.is_expanded(), "focus still holds the readout open");
+}
+
 #[test]
 fn tray_signal_readout_renders_name_value_and_action() {
     let theme = Theme::dark();

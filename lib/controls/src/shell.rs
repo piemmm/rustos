@@ -1291,6 +1291,40 @@ impl TraySignal {
         None
     }
 
+    /// The pointer has left the capsule and its readout: drop the hover, which
+    /// collapses the readout unless the keyboard is holding it open. Reports
+    /// whether anything changed, and damages what it changed.
+    ///
+    /// The expansion rule ([`is_expanded`](Self::is_expanded)) lives here, so
+    /// its ending lives here too rather than being re-derived by a caller. A
+    /// leave is not expressible as a motion elsewhere: the pointer is often
+    /// still at the capsule's own coordinates when it stops resting on it —
+    /// a window was raised over the bar — and hit-testing those coordinates
+    /// would answer "still hovered" and leave an instrument readout floating
+    /// over that window with nothing hovering it.
+    pub fn pointer_left(
+        &mut self,
+        capsule_bounds: Rect,
+        readout_bounds: Rect,
+        damage: &mut Region,
+    ) -> bool {
+        let expanded_before = self.is_expanded();
+        let mut state = self.state;
+        if !damage::set(
+            &mut state.pointer,
+            PointerState::None,
+            capsule_bounds,
+            damage,
+        ) {
+            return false;
+        }
+        self.state = state;
+        if self.is_expanded() != expanded_before {
+            damage.add(readout_bounds);
+        }
+        true
+    }
+
     /// Feed a key event; when focused (readout expanded) Space/Enter activates
     /// the primary action, reporting [`TraySignalAction::Activated`].
     pub fn on_key(&mut self, key: Key) -> Option<TraySignalAction> {

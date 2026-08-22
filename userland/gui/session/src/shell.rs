@@ -418,8 +418,9 @@ impl DesktopShell {
         {
             self.settled.cursor_refreshes += 1;
         }
-        self.cursor.refresh(self.router.wm(), compositor);
-        compositor.move_cursor(self.router.pointer());
+        let at = self.router.pointer();
+        self.cursor.refresh(at, self.router.wm(), compositor);
+        compositor.move_cursor(at);
     }
 
     /// Install a loaded cursor set as the active pointer artwork, replacing
@@ -439,7 +440,7 @@ impl DesktopShell {
             let _ = registry.set_active(id);
         }
         self.cursor
-            .set_registry(registry, self.router.wm(), compositor);
+            .set_registry(registry, self.router.pointer(), compositor);
     }
 
     /// Open `surface` as a top-level window at `origin`, list it on the taskbar
@@ -752,6 +753,19 @@ impl DesktopShell {
         {
             self.settled.presents += 1;
         }
+        // Which surface the pointer rests on is resolved against the window
+        // stack, so it goes stale whenever the stack does — a window opened,
+        // closed, raised or hidden, a popover of the bar's placed or removed —
+        // and none of those is a pointer event. Every such change ends here,
+        // because that is how the screen is brought up to date, so this is the
+        // one place the answer can be refreshed without a caller having to
+        // remember to. It runs *before* the paint for two reasons: the stack
+        // it resolves against is the one currently on screen, which is what
+        // the pointer is actually resting on; and a hover it drops or takes up
+        // latches a repaint that this very present then draws, rather than one
+        // waiting for a frame that may never come.
+        self.router
+            .refresh_pointer_focus(compositor, self.session.taskbar_mut(), &self.presenter);
         // An open popup's shown rows get their applications' own icons
         // resolved before the paint, so a row that has just scrolled into
         // view is drawn with its icon in the same frame.
@@ -1336,6 +1350,23 @@ impl DesktopShell {
                 ShellOutcome::Taskbar(response)
             }
         }
+    }
+
+    /// Give the pointer up, because the embedder is taking the input stream
+    /// away from the shell for a modal surface of its own — the screen lock, or
+    /// the pinboard's backdrop menu.
+    ///
+    /// Both of those drain the seat's channels straight into themselves so that
+    /// nothing behind the plate can be reached, which means the shell will not
+    /// see the release that ends a gesture already in flight. This says so: the
+    /// gesture ends, and both routers are told the pointer has left, so nothing
+    /// sits there with a control lit under a plate the user is looking at. It is
+    /// idempotent — the drain says it on every pass rather than working out
+    /// which pass was the first — and the stream coming back needs no
+    /// announcement, because the next event resolves the pointer afresh.
+    pub fn yield_pointer(&mut self, compositor: &mut Compositor) {
+        self.router
+            .yield_pointer(compositor, self.session.taskbar_mut());
     }
 
     /// Bring the screen up to date with everything the applied events left

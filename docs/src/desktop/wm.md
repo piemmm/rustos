@@ -413,9 +413,9 @@ actions, reporting each through `InputResponse`:
   as `DesktopPointerMoved`, and a key event while focus rests on the
   desktop (rather than a window) comes back as
   `DesktopKey { key, modifiers, pressed }`. `DesktopPointerMoved` carries
-  **no position of its own**: the motion has already updated the router's
-  own `pointer()`, which is where the desktop layer's owner reads the
-  position from, so the response need not duplicate it. The router takes
+  **no position of its own**: the seat owns the pointer position, which is
+  where the desktop layer's owner reads it from, so the response need not
+  duplicate it. The router takes
   no action of its own for either — it only names where the input landed,
   leaving the desktop layer's owner to interpret it (hover feedback,
   moving a selection, a drag it started itself).
@@ -444,7 +444,10 @@ actions, reporting each through `InputResponse`:
   never light up under the pointer. The response is still `Ignored` — no
   client owns the motion — and the frame reports its own repainted
   rectangles, so a sample crossing the drag region costs nothing and one
-  entering a command repaints that command alone.
+  entering a command repaints that command alone. A hover that ends because
+  the *seat* took the pointer away, rather than because it moved, ends through
+  `set_pointer_focus(Left)` → `Compositor::frame_pointer_left`, which is
+  position-independent for the reason above.
 
 The router models *which* window owns the keyboard (`focused`); the key
 encoding itself is a separate ABI concern and is not invented in the
