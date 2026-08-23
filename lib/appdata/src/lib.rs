@@ -119,6 +119,7 @@
 
 extern crate alloc;
 
+use alloc::collections::BTreeSet;
 use alloc::string::String;
 use alloc::vec::Vec;
 
@@ -130,7 +131,9 @@ use tairix_abi::appdata_ipc::{
 use tairix_abi::appinfo::{BundleEntry, BUNDLE_ID_MAX};
 use tairix_abi::reply::{decode_status_reply, STATUS_REPLY_LEN};
 use tairix_abi::Errno;
-use tairix_appconf::{as_bool, as_i64, as_permille, as_u32, bool_text, ConfError, Document};
+use tairix_appconf::{
+    as_bool, as_i64, as_permille, as_u32, bool_text, ConfError, Document, Lookup, Setting,
+};
 use zeroize::Zeroize;
 
 #[cfg(any(test, feature = "test-util"))]
@@ -194,6 +197,24 @@ pub trait AppDataHost {
     /// host's method because the order reads the session's `HOME` and `PATH`,
     /// which only the running process can see.
     fn bundle_candidates(&mut self, word: &str) -> Vec<String>;
+}
+
+/// A borrowed host is a host, so a caller that must keep its own can lend it
+/// to a value that would otherwise take ownership — a store adapter that
+/// holds the seam, say, whose owner still has to inspect the service
+/// afterwards.
+impl<H: AppDataHost + ?Sized> AppDataHost for &mut H {
+    fn call(&mut self, request: &[u8], reply: &mut [u8]) -> Result<usize, Errno> {
+        (**self).call(request, reply)
+    }
+
+    fn read_file(&mut self, path: &str, cap: usize) -> Result<Vec<u8>, Errno> {
+        (**self).read_file(path, cap)
+    }
+
+    fn bundle_candidates(&mut self, word: &str) -> Vec<String> {
+        (**self).bundle_candidates(word)
+    }
 }
 
 /// One scope of the calling application's own store: the layers it reads
@@ -313,6 +334,48 @@ impl<'h> Settings<'h> {
     #[must_use]
     pub fn get(&self, key: &str) -> Option<&str> {
         self.store.get(key).or_else(|| self.defaults.get(key))
+    }
+
+    /// Every setting the layers effectively carry, each key once, in the
+    /// order the layer that answers it writes it.
+    ///
+    /// A registry with a **closed** key set never needs this: it reads the
+    /// keys it knows and leaves the rest alone. One with an *open* namespace
+    /// — a catalog, a recent-file list, a per-host preference set — does, and
+    /// the client can answer it with no call at all, because it already holds
+    /// the document and parsed it. That is the same reason the wire carries
+    /// no listing operation (`plans/APPDATA.md` §3.6): a paged listing can be
+    /// spliced out of two snapshots and a whole one cannot.
+    ///
+    /// A key the store layer sets shadows the same key in the bundle's
+    /// shipped defaults, exactly as [`Self::get`] answers it, and a key the
+    /// document happens to repeat appears once with the value that wins. The
+    /// answer is a whole snapshot rather than an iterator borrowing the
+    /// handle, so a caller can act on it — publishing an edit, say — while
+    /// still holding it.
+    #[must_use]
+    pub fn settings(&self) -> Vec<Setting<'_>> {
+        // Ordered rather than scanned: a document may carry `MAX_SETTINGS`
+        // keys, and a linear membership test per key would make listing one
+        // quadratic in a bound a hostile store controls.
+        let mut seen: BTreeSet<&str> = BTreeSet::new();
+        let mut listed: Vec<Setting<'_>> = Vec::new();
+        for setting in self.store.settings().chain(self.defaults.settings()) {
+            if !seen.insert(setting.key) {
+                continue;
+            }
+            // The value comes from `get`, not from this line: `Document::get`
+            // answers with the *last* setting of a repeated key, so taking the
+            // first-seen line's value would answer with the wrong one.
+            let Some(value) = self.get(setting.key) else {
+                continue;
+            };
+            listed.push(Setting {
+                key: setting.key,
+                value,
+            });
+        }
+        listed
     }
 
     /// The boolean value of `key`.
@@ -545,6 +608,16 @@ impl<'h> Settings<'h> {
         if !self.dirty.iter().any(|seen| seen == key) {
             self.dirty.push(String::from(key));
         }
+    }
+}
+
+impl Lookup for Settings<'_> {
+    /// The layered read, offered as the one question a closed registry asks
+    /// of whatever document holds it — so an application writes its registry
+    /// once and reads it from its own store or from another application's
+    /// published document with the same loader.
+    fn get(&self, key: &str) -> Option<&str> {
+        Self::get(self, key)
     }
 }
 

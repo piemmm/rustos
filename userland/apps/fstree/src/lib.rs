@@ -35,6 +35,12 @@
 //!   tests over an in-memory tree.
 //! * `Tty` (from `tairix-curses`) — the terminal byte channel; an
 //!   in-memory channel makes the whole session drivable without a kernel.
+//! * `tairix_appdata::Settings` — this application's own app-data store,
+//!   where the confirmation preferences live. It is gated on the
+//!   kernel-attested bundle identity, so no other application the user
+//!   launches can read or rewrite them, and the manager spells no store
+//!   path of its own; the tests drive the shared fake service over the real
+//!   `appdata-v1` codec.
 //! * [`model::Model`] — the I/O-free state machine that [`render::render`]
 //!   draws and [`app::run`] drives.
 //!
@@ -47,6 +53,8 @@
 //! * [`walk`] — the bounded branch walker (flattened view, disk usage,
 //!   and the searches through its [`walk::Sieve`]).
 //! * [`search`] — the streaming file-content scanner behind `F`.
+//! * [`settings`] — the closed preference registry over the app-data
+//!   store's open key namespace.
 //! * [`view_text`] / [`view_hex`] — the Enter viewers: the streaming
 //!   text pager and the hex dump, paging and searching through the same
 //!   [`fs::Fs`] seam in bounded windows.
@@ -61,9 +69,9 @@
 //!
 //! `no_std` (with `alloc`). It links only `lib/*` crates — the audited
 //! `tairix-abi`, the OS-provided `tairix-curses`/`tairix-termcap`/
-//! `tairix-vt`/`tairix-help`, and the sandbox seam `tairix-sandbox` (with
-//! `tairix-binfmt` solely for magic-prefix routing) — never a kernel or
-//! driver crate. No `unsafe`, and no `unwrap`/`expect`/`panic!` in
+//! `tairix-vt`/`tairix-help`/`tairix-appdata`, and the sandbox seam
+//! `tairix-sandbox` (with `tairix-binfmt` solely for magic-prefix routing)
+//! — never a kernel or driver crate. No `unsafe`, and no `unwrap`/`expect`/`panic!` in
 //! production paths; a refused listing fails closed onto the message
 //! line. Nothing writes to fd 3 (`stdinfo`).
 
@@ -89,13 +97,13 @@ pub mod walk;
 #[cfg(test)]
 mod tests;
 
-pub use app::{handle_event, run, FstreeError};
+pub use app::{handle_event, publish_settings, run, FstreeError};
 pub use fs::{Fs, FsEntry, RenameOutcome, VolumeInfo, VolumeSpace};
 pub use info::{Info, NullInfo};
-pub use model::{Model, Pane, SortKey};
+pub use model::{Model, Pane, SettingsState, SortKey};
 pub use render::render;
 pub use search::{ContentScan, Needle};
-pub use settings::Settings;
+pub use settings::{SettingKey, Settings};
 pub use tag::{Batch, BatchProgress, TagEntry, TagRange, TagSet};
 pub use view_disasm::{Decode, DisasmView};
 pub use view_hex::{HexPattern, HexView};

@@ -85,11 +85,10 @@ perdu ; la raison est indiquée sur le flux d'erreur standard.
 
 ## ENVIRONMENT
 
-`HOME` nomme le propre répertoire personnel de l'utilisateur, sous
-lequel `Settings/Pinboard/pinboard.conf` est lu au démarrage afin que la
-fenêtre s'ouvre sur les paramètres en vigueur. Ce document est écrit
-par la session de bureau, jamais par ce programme. Sans `HOME`, la
-fenêtre s'ouvre sur les valeurs par défaut.
+Aucune. Les paramètres sur lesquels la fenêtre s'ouvre sont ceux que la
+session de bureau publie elle-même, lus via le service de données
+d'application plutôt que depuis un chemin nommé par ce programme ; c'est
+la session qui les écrit, jamais ce programme.
 
 ## SEE ALSO
 

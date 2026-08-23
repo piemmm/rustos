@@ -445,6 +445,24 @@ pub struct ModePrompt {
     pub input: String,
 }
 
+/// Whether the session's preferences have reached the app-data store.
+///
+/// The key grammar states the intent and the session loop, which holds the
+/// store handle, answers it — the same split [`Model::quit`] uses, and the
+/// one `plans/APPDATA.md` §3.10 settled: the widget states the intent, the
+/// store answers it. Naming the two states rather than implying them is what
+/// makes "published once per change, reported once per refusal" legible at
+/// both ends.
+#[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
+pub enum SettingsState {
+    /// The store holds what the session applies, or has already said why it
+    /// cannot.
+    #[default]
+    Published,
+    /// A key changed the preferences and the change is not published yet.
+    Pending,
+}
+
 /// The whole session state the renderer draws and the key handler mutates.
 pub struct Model {
     /// The tree of directories, populated lazily as nodes expand.
@@ -504,11 +522,17 @@ pub struct Model {
     pub attrs: Option<AttrsView>,
     /// The last completed file operation, for the repeat key (`.`).
     pub last_op: Option<RepeatOp>,
-    /// The persisted session preferences (the confirmation toggles).
+    /// The persisted session preferences (the confirmation toggles), as the
+    /// app-data store's layers imply them.
     pub settings: Settings,
-    /// The user's home directory the settings persist under, when known;
-    /// `None` keeps changes session-only (and the menu says so).
-    pub settings_home: Option<String>,
+    /// Why the app-data store is not persisting those preferences, when it is
+    /// not — no service bound, no store for a caller the kernel admitted from
+    /// no signed bundle, an unreachable volume. `None` means a toggle
+    /// outlives the session; anything else keeps changes session-only, and
+    /// the menu says which refusal it was.
+    pub settings_refusal: Option<tairix_abi::Errno>,
+    /// Whether [`Model::settings`] has reached the store yet.
+    pub settings_state: SettingsState,
     /// Set when the session should end.
     pub quit: bool,
     /// Content rows of the tree window at the last draw, so a page key
@@ -567,7 +591,8 @@ impl Model {
             attrs: None,
             last_op: None,
             settings: Settings::default(),
-            settings_home: None,
+            settings_refusal: None,
+            settings_state: SettingsState::Published,
             quit: false,
             tree_page: 0,
             file_page: 0,

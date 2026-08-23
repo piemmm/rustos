@@ -25,13 +25,17 @@ requires be proposed and approved in a plan file **before** any of it is built.
 Every app today writes a file of its own choosing under the launching user's
 home, under its own authority, with `CAP_FS_ACCESS`:
 
-| Consumer | Path it invents |
-|---|---|
-| `userland/apps/terminal` | `<home>/Settings/Terminal/terminal.conf` — **migrated** (AD5) |
-| `userland/apps/fstree` | `<home>/Settings/fstree/config` (`settings.rs`) |
-| `userland/gui/session` (writes) / `userland/apps/wallpaper` (reads) | `<home>/Settings/Pinboard/pinboard.conf` — **two programs, one hand-rolled path** (§1.5) |
-| `userland/apps/applib` | `<home>/Settings/ProgramLibrary/library.conf` |
-| `userland/system/init` | `<home>/Settings/Services/` |
+| Consumer | Path it invented | Now |
+|---|---|---|
+| `userland/apps/terminal` | `<home>/Settings/Terminal/terminal.conf` | **migrated** (AD5) — private scope |
+| `userland/apps/fstree` | `<home>/Settings/fstree/config` (`settings.rs`) | **migrated** (AD10) — private scope |
+| `userland/gui/session` (writes) / `userland/apps/wallpaper` (reads) | `<home>/Settings/Pinboard/pinboard.conf` — **two programs, one hand-rolled path** (§1.5) | **migrated** (AD10) — the session's published scope |
+| `userland/apps/applib` (writes) / `userland/gui/session` (reads) | `<home>/Settings/ProgramLibrary/library.conf` | **migrated** (AD10) — `applib`'s published scope |
+| `userland/system/init` | `<home>/Settings/Services/` | **out of scope, and structurally so.** It is the account's service *enrolment* (`plans/NEW-SERVICEMANAGER.md`), read by PID 1: a boot-floor program the kernel launches from the embedded registry, which carries no signed manifest and therefore has no attested app identity to key a store on (§3.2). It is also read before `confd` can be running. A store it could not reach with an identity it does not have would be a fabrication, so the path stays — under the user's own authority, as system configuration rather than app data. |
+
+Every path in that column is **deleted**, not dual-read (§2). What remains
+under a user's `Settings/` is the gated `Apps/` root and nothing an
+application wrote itself.
 
 Because the whole tree is owned by the user and every app runs as that user
 with `CAP_FS_ACCESS`, **any** app the user launches can read and rewrite
@@ -65,6 +69,14 @@ means. §2.2 (define shared data once) and §2.3 forbid the fourth copy.
 
 None of them preserves comments or unrecognised lines on rewrite, so an app
 that saves its settings silently destroys whatever the user hand-edited in.
+
+**Closed (AD3, AD10).** `lib/appconf` is the one engine. `fstree`'s and
+`lib/wallpaper`'s are **deleted**, and `lib/proglib`'s — a fourth the survey
+missed, because its document is a *catalog* rather than a settings sheet —
+went with them once its overlay had to live in the store (§3.17). Each of
+those crates now defines a closed **registry** over the one format and no
+grammar, comment rule, or length bound of its own. `lib/sysconfig` keeps its
+own, deliberately and for the reason §3.3 records.
 
 ### 1.4 There is no attested app identity to gate on
 
@@ -102,6 +114,13 @@ arrangement this plan exists to delete. Isolation is only complete when the
 store also provides the sanctioned channel, so that "reach another app's data"
 has exactly one shape, that shape is opt-in by the *publishing* app, and it
 cannot be widened into the private scope.
+
+**Closed (AD6 built it, AD10 consumed it.)** Both in-tree instances of the
+defect are gone: the wallpaper chooser reads the session's *published*
+pinboard document, and the desktop session reads `applib`'s *published*
+library overlay. Neither reader can write what it reads, and neither can name
+the publisher's private scope, because a foreign read is a request shape with
+no scope field.
 
 ### 1.6 There is nowhere to put secrets, bulk data, or temporary files
 
@@ -312,12 +331,17 @@ bloat.
 
 **The identifier is a name in a directory, so its grammar is a security
 rule.** `validate_bundle_id` is the one definition: dot-separated segments of
-ASCII lowercase letters, digits, `-` and `_`, each non-empty. It is applied
-when a manifest decodes and again wherever an identifier crosses a trust
-boundary. Nothing that could be a traversal (`.`, `..`, `/`), a hidden entry,
-a case-folding collision on a case-insensitive volume, or a control character
-can be spelled at all — so "an app cannot reach outside its own scope" holds
-by construction rather than by a check some caller might forget.
+ASCII lowercase letters, digits, `-` and `_`, each non-empty and beginning
+with a letter or a digit. It is applied when a manifest decodes and again
+wherever an identifier crosses a trust boundary. Nothing that could be a
+traversal (`.`, `..`, `/`), a hidden entry, a leading `-` an argument parser
+would read as an option, a case-folding collision on a case-insensitive
+volume, or a control character can be spelled at all — so "an app cannot reach
+outside its own scope" holds by construction rather than by a check some
+caller might forget. (The leading-character rule is AD10's: an identifier is
+also a configuration key's leading segments where a registry keys on one, and
+this is what makes the store-name grammar provably inside the key grammar
+rather than merely similar to it — §3.15.)
 
 **Retention.** `LoadedApp` carries a `BundleIdentity` (identifier, name,
 version, publisher). The deferred-load path turns the verified identifier and
@@ -1087,6 +1111,10 @@ to replace `lib/wallpaper`'s own `key = value` engine (§1.3) and settle whether
 the desktop session runs under an attested app identity at all; a migration with
 those two questions open is not a smaller change than the mechanism.
 
+AD10 landed both, and a second consumer with the ownership the other way round
+— the program library, where the *writer* owns the scope and the session takes
+the foreign path (§3.16, §3.17).
+
 ### 3.12 What the sealed scope settled
 
 **The wipe belongs to the format engine, not to its callers.** The sealed scope
@@ -1282,6 +1310,181 @@ own — who names a file, which names are live, and which ceiling admits one. A
 single type with a scope discriminant would have had methods that are meaningless
 for half its values, which is the shape that eventually gets called wrongly.
 
+### 3.15 What the remaining migrations settled
+
+Three consumers moved at once, and between them they exercised every scope the
+store has. Each settled a rule that is now the rule for anything migrating
+after them.
+
+**A registry reads from whichever surface holds its document, so the question
+is named once.** An application's closed registry is a fixed set of keys read
+out of *something*: its own layered handle for the private scope, the same for
+the published one it writes, and the format engine's own `Document` for one
+another application published or one that arrived over a channel. Those are
+different types with one question between them, so
+`tairix_appconf::Lookup` names it and every registry is written once against
+it. Before AD10 each registry took a concrete `Settings`, which was fine while
+only the private scope had consumers; the first *shared* document made a
+second loader the alternative, and a second loader is how two of them come to
+disagree about what a missing key means.
+
+**Two readings of one registry, and which is which is decided by who wrote
+the document.** A document held in a *store* is read tolerantly: a value the
+registry refuses leaves that one field at its documented default and is
+*named* to the caller. A document that arrived over a *channel* is read
+strictly: a line outside the grammar, a key outside the registry, or a value
+outside a key's closed set refuses the whole thing. The two rules look
+contradictory and are the same rule applied to two facts. A stored value may
+predate this build and a person may have to live with it, so blanking a
+desktop over one stale setting is the wrong answer; a value on the wire was
+rendered by a program from this same registry moments ago, so it is a defect
+in the *sender*, and adopting a desktop the sender did not describe is worse
+than refusing it. `lib/wallpaper` carries both and says which is which at each
+entry point.
+
+A useful consequence falls out of the pairing, and it falls out the right way
+round: the **store** is forward-compatible and the **wire** is not. A document
+a later build wrote with a sixth key is read by an earlier build's tolerant
+reading, which ignores what it does not know; the same key on the wire is
+refused. That is the correct asymmetry, because a stored document outlives the
+build that wrote it and a request does not.
+
+**A *catalog* is read strictly whichever surface holds it, and that is not an
+exception.** The tolerant rule is a rule about *fields*: one bad value costs
+its own field and every other field still stands. A catalog is a **list**, so
+there is no such thing as the field costing only itself — a record the reader
+skipped is an application that silently vanishes from a launcher, with nothing
+left standing to say anything is missing. `lib/proglib` therefore refuses the
+whole document, and its readers fall back to the empty catalog and *say so*.
+
+**A store name is a legal configuration key, and that is now enforced rather
+than assumed.** The program library keys on `<id>.<field>`, so a bundle
+identifier is a key's leading segments. `validate_store_name` admitted a
+segment beginning with `-` or `_` where `validate_key` did not, which would
+have made a legal identifier a key no document could hold — a record silently
+dropped at render. The store-name grammar is tightened to match (a segment
+begins with a lowercase letter or a digit), `lib/appconf` pins the containment
+in a test, and `EntryId` stops carrying a second character-class loop and
+defers to `validate_bundle_id`. A tightening, so it can only refuse more; the
+leading `-` it now refuses is also the shape an argument parser mistakes for
+an option.
+
+**The client can enumerate, because an open key namespace is a real kind of
+app data.** A closed registry never needs it — it reads the keys it knows and
+leaves the rest alone — but a catalog, a recent-file list, or a per-host
+preference set does, and so does anything that must *replace* a scope rather
+than edit fields of it. `Settings::settings` answers it from the document the
+client already holds, with no call: exactly the property §3.6 gave as the
+reason the wire carries no listing operation at all.
+
+**A publisher's identifier is spelled in two systems, so the bundle pins it.**
+A published scope's reader names the publisher, and §3.9's rule stands — no
+application names *its own* bundle id, so the writer names nothing. That
+leaves the identifier in two places by necessity: a signed `AppInfo` manifest
+on the writer's side and a Rust constant on the reader's, which no single
+definition can span. A rename would then silently turn a foreign read into an
+empty document — the one failure the published scope is designed to be
+indistinguishable from. So the *publishing bundle's own crate* asserts, in a
+unit test, that the constant names it: `include_str!("../AppInfo.toml")` is a
+sibling file, so the pin sits where the manifest is and cannot go looking for
+one across the tree.
+
+### 3.16 What the pinboard migration settled
+
+**The desktop session runs under an attested app identity, and that is what
+made the whole scope possible.** It is spawned from
+`/System/Applications/desktop.app/Run` through the same signed load gate every
+other bundle is, so it is `os.tairix.desktop` to the store exactly as the
+terminal is `os.tairix.terminal`. The question §3.11 left open therefore has
+an unremarkable answer, and no fallback for an identity-less session was built
+— there is no such session on a port whose storage floor has landed.
+
+**One document, in the published scope, with every key in it.** The pinboard
+settings could have been split — the chooser needs the wallpaper, the fit and
+the backdrop; the icon flow and sort order are the desktop's own business —
+and the split was rejected. Two scopes are two commits, and §3.11 already
+established that no commit spans two documents; an *apply* from the chooser
+carries all five keys, so the split would have turned one atomic replacement
+into two, with a crash between them leaving a desktop half of what the user
+asked for. What the extra three keys leak to a reader is an icon sort order.
+Atomicity is worth more.
+
+**The write asymmetry is forced, and it is the right shape.** The chooser
+reads the document directly and cannot write it at all, because an application
+publishes only its own scope. So it keeps asking over the pinboard channel and
+the session keeps deciding — which is what the channel was always for. The
+half that was unmediated is the half that moved.
+
+**A session that writes no file needs no file writer.** `SessionFileWriter`
+existed for exactly one document, and its own doc comment said so. With the
+pinboard settings in the store, the desktop session writes *nothing* through
+the VFS, so the seam and its `VfsFileWriter` are deleted rather than left as a
+capability-shaped hole for the next consumer to reach through.
+
+**A refusal the format no longer has is a rule to delete, not to re-justify.**
+`WallpaperPath` refused a `#` because the hand-rolled grammar cut a line at the
+first one. `lib/appconf` quotes such a value and round-trips it exactly, so the
+refusal's stated reason had become false — and a rule with a false reason is
+worse than no rule. It is removed, and the path grammar is the only thing
+judging a path. The *colour* keeps its one bare `rrggbb` spelling, which is now
+honestly labelled a registry rule rather than a grammar one.
+
+### 3.17 What the program library settled
+
+**Only the per-user layer is per-app data, and only it moved.** The
+machine-wide catalog at `/System/Settings/ProgramLibrary/library.conf` is
+administrator policy — every account reads it, only a principal that tree's
+policy admits rewrites it — and it is not any one application's data. Putting
+it in a command's store would have made a machine's library the property of
+that command. §1.1's defect names the *overlay*, and the overlay is what moved.
+
+**The overlay is `applib`'s published scope, because the editor must own what
+it edits.** `applib` is a shell command that has to work with no desktop
+running, so the session cannot own the document and hand out edits the way it
+does for the pinboard. Ownership therefore sits with the writer, and the
+reader — the session — takes the foreign path. That is the second in-tree
+instance of §1.5's channel, and it arrived at the opposite arrangement from the
+first for a reason that is visible in one sentence: *the principal that must be
+able to write when nothing else is running is the one that owns the store.*
+
+**One registry, two backings of one seam.** The tool's `Store` seam now trades
+`lib/appconf` documents; the machine layer's backing is the VFS and the
+overlay's is the app-data client. The editing engine never learns where a
+catalog lives, so `--user` is one branch in one function rather than a second
+code path — and the app-data backing is host-testable over the shared fake,
+which the old file-only seam's production half never was.
+
+**The record ceiling is derived from the format, and the *division* is the
+point.** `MAX_ENTRIES` was `4096`, chosen — its own comment said — to sit "far
+above any plausible number of installed applications" purely to bound
+allocation. The format engine now bounds allocation, so the number is derived:
+`MAX_SETTINGS / EntryKey::ALL.len()`.
+
+The first attempt was `MAX_SETTINGS` itself, on the reasoning that a record
+needs at least one setting so no document can hold more records than settings.
+That was wrong, and reviewing it caught a real data-loss path: a catalog
+bounded only by the *setting* count can be built in memory — `applib rescan`
+on a machine with two hundred listed bundles would build one — and then not
+fit the document it must be written to, and a render that does not fit would
+have to drop records. Dividing by what one record costs at its widest makes
+the render **total** instead, so the refusal lands at the `insert`, `patch`, or
+`reconcile` that would exceed the bound, where the tool can name it, rather
+than at save time where nothing would. A unit test builds a catalog at the
+bound with every field set and asserts every setting survives the round trip.
+
+The resulting ceiling — around a hundred fully-specified entries — is the
+honest consequence of a catalog being *one* document that must fit one
+whole-or-nothing read and one atomic publish, because a store no reader can
+snapshot whole is one no reader can trust. Stated here so that a library which
+ever genuinely outgrows it is answered with a scope shaped for a list, and not
+with a wider settings document.
+
+**Editing the overlay needs no home, and `rescan --user` still does.** The
+service resolves the account from the attested identity, so the tool's
+`NoHome` refusal narrowed to the one operation that genuinely names a home
+directory: the walk over `<home>/Commands` and `<home>/Applications`. A
+refusal that covers less than it did is a refusal that says something true.
+
 ---
 
 ## 4. Stages
@@ -1300,7 +1503,7 @@ gate green (§7), and contains no stubs (§15.1).
 | **AD7** ✅ | Secrets | `secret.vault` and the per-account `.vault-master` record; the AEAD hierarchy (`derive_key` under one labelled context, ChaCha20-Poly1305 per document, a fresh nonce per seal) and the injected `Entropy` seam; `VaultRead`/`VaultSet`/`VaultUnset` as opcodes with **no scope field and no foreign counterpart**, and writes applied before the reply rather than staged; a damaged record, a failed authentication, and absent key material as three distinct audited refusals that are never an empty vault; a malformed master record refused and **never replaced**; the wipe moved into `lib/appconf`'s own `Line::drop`; `Vault` in the client, the fake service extended to the scope, and a fuzz harness over both records. **No protector abstraction** — §3.7 records why. |
 | **AD8** ✅ | Blobs | The kernel prerequisite the descriptor hand-off turned out to need (§3.8): `fd_grant` delegating the grantor descriptor's own mode with a mandatory write-extent ceiling, one resolution of *whose* authority a path-backed descriptor operation runs under, and `fs_stat`/`fs_truncate`/`fs_sync`/`file_map` gating per backing so a recipient holding no filesystem capability can use what it was given; `File::from_delegation` as the one owned redemption, replacing `viewer`'s hand-rolled pair. Then the scope itself: `validate_blob_name` over the shared store-name grammar, `BlobOpen`/`BlobDelete`/`BlobList`/`QuotaGet` with the listing whole-or-nothing and no cursor, the `Library/Apps` root resolved beside the configuration one under the same single pin, admission against the count ceiling, the client's blob surface, the fake service extended to it, and the root-cache ownership re-check AD4 left incomplete (§3.4). |
 | **AD9** ✅ | Temp | `TempCreate`/`TempRelease` as opcodes carrying no scope, with the **service** naming the file so nothing can open one it did not just create; the `<boot-id>-<slot>` naming rule that makes staleness legible with no marker record, the lazy reap of an earlier boot's scratch paid by the create that needs the room, and a boot with no identity refusing the scope alone; `APPDATA_TEMP_MAX_COUNT` admission and the per-file extent ceiling shared with the blob scope; `QuotaGet` reshaped to report both bulk scopes in one answer (`BulkQuota`); `blob.rs` generalised into `bulk.rs` — one `Scope` for what the two share, `BlobStore` and `TempStore` for what they do not; `temp::create`/`temp::release`/`bulk_quota` in the client, and the fake service extended to the scope. **No session-end reap** and **no `Cache/` scope** — §3.14 records why each is a decision rather than an omission. |
-| **AD10** | Remaining migrations | Migrate `fstree`, `lib/wallpaper`/session pinboard, `applib` program library; delete every hand-rolled path. The `docs/src/` page and every §5 amendment but the manifest-field record land with the stage that needs them, and AD4 landed most of them; AD10 lands only what its own migrations drive. |
+| **AD10** ✅ | Remaining migrations | `fstree` on the private scope, its hand-rolled parser and `<home>/Settings/fstree/config` **deleted** and its toggles a closed registry the session loop publishes (§3.15). The pinboard on the desktop session's **published** scope: `lib/wallpaper`'s own `key = value` engine deleted, `user_settings_path` and `~/Settings/Pinboard/pinboard.conf` deleted, the chooser's unmediated read replaced by `read_published`, and `SessionFileWriter` deleted with the last file the session wrote (§3.16). The program library's per-user overlay on `applib`'s **published** scope, `lib/proglib` re-expressed as a registry over `lib/appconf` with its record ceiling derived from the format's, its `Store` seam given two backings of one shape, and the machine layer deliberately left where it is (§3.17). Plus what the three of them drove: `tairix_appconf::Lookup`, `Settings::settings`, `AppDataHost for &mut H`, and the `validate_store_name` tightening that makes every store name a legal configuration key (§3.15). |
 
 AD1 and AD2 are the foundation — nothing else can be built first, and they are
 split because AD1 is tooling-and-format while AD2 is kernel-and-ABI, with
@@ -1366,6 +1569,25 @@ Landed as the stages that need them land, never pre-written (§3, §15.2). A
   read-only because the picker opens a read-only descriptor, not because the
   mechanism can only be that; `fd_grant` now carries the grantor descriptor's
   own access with a mandatory extent ceiling on a writable one.
+- **§3** ✅ (AD10) — the repository map's one-line summaries for
+  `lib/proglib` and `lib/wallpaper` say *registry* rather than *store*: each
+  now defines a closed registry over `lib/appconf` and owns no grammar.
+- **§15.18** ✅ (AD10) — the pinboard jump-sheet row names the settings the
+  session *publishes* rather than a per-user settings store.
+- **`plans/PINBOARD.md` §2** ✅ (AD10) — the settings document's home is the
+  session's published app-data scope, its grammar is `lib/appconf`'s, and the
+  registry's two readings (tolerant for the store, strict for the channel) are
+  recorded; `<home>/Settings/Pinboard/pinboard.conf` and
+  `tairix_wallpaper::user_settings_path` are deleted.
+- **`plans/NEW-TASKBAR.md` §4, §5, T1, T2** ✅ (AD10) — the per-user overlay's
+  home is `applib`'s published app-data scope (so it needs no capability and no
+  `HOME`), the machine layer stays a `/System/Settings` administrator document
+  and why, and the store spellings the crate defines once are restated.
+
+No new charter *mechanism* is added: AD10 consumes what AD4–AD9 built. The
+`README.md` security matrix is unchanged for the same reason — its rows name
+the store's guarantees, and this stage put the system's own remaining per-app
+documents behind them rather than adding a guarantee.
 
 ---
 

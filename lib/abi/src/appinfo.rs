@@ -102,38 +102,42 @@ pub type BundleId = crate::bounded_text::BoundedText<1, BUNDLE_ID_MAX>;
 /// owns, against the one grammar every such name shares.
 ///
 /// The grammar is dot-separated segments of ASCII lowercase letters, digits,
-/// `-` and `_`, each segment non-empty, bounded by `max_len` bytes. It is
-/// deliberately narrow, because the name is composed into a path a service
-/// then opens: nothing that could be a path traversal (`.`, `..`, `/`), a
-/// hidden entry, a case-folding collision on a case-insensitive volume, or a
-/// control character can be spelled at all. The name therefore cannot reach
-/// outside its own scope by construction, rather than by a check some caller
-/// might forget.
+/// `-` and `_`, each segment non-empty and **beginning** with a letter or a
+/// digit, bounded by `max_len` bytes. It is deliberately narrow, because the
+/// name is composed into a path a service then opens: nothing that could be a
+/// path traversal (`.`, `..`, `/`), a hidden entry, a leading `-` an
+/// argument parser would read as an option, a case-folding collision on a
+/// case-insensitive volume, or a control character can be spelled at all. The
+/// name therefore cannot reach outside its own scope by construction, rather
+/// than by a check some caller might forget.
 ///
-/// Two kinds of name share it — a bundle identifier
-/// ([`validate_bundle_id`]) and the name of a file in an application's bulk
-/// store ([`crate::appdata_ipc::validate_bulk_name`]) — because they pose the
+/// Three kinds of name share it — a bundle identifier
+/// ([`validate_bundle_id`]), the name of a file in an application's bulk
+/// store ([`crate::appdata_ipc::validate_bulk_name`]), and an identifier used
+/// as a configuration key's leading segments (`tairix_appconf::validate_key`,
+/// which pins that this grammar is inside its own) — because they pose the
 /// same question and only their widths differ. A second character-class loop
-/// for the second kind would be one more chance to disagree about whether `..`
+/// for another kind would be one more chance to disagree about whether `..`
 /// is a name.
 ///
 /// # Errors
 ///
 /// [`Errno::LengthOutOfRange`] if `name` is empty or longer than `max_len`;
-/// [`Errno::OutOfRange`] if any character is outside the grammar or a segment
-/// is empty.
+/// [`Errno::OutOfRange`] if any character is outside the grammar, a segment
+/// is empty, or a segment begins with a separator.
 pub fn validate_store_name(name: &str, max_len: usize) -> Result<(), Errno> {
     if name.is_empty() || name.len() > max_len {
         return Err(Errno::LengthOutOfRange);
     }
     for segment in name.split('.') {
-        if segment.is_empty() {
+        let mut bytes = segment.bytes();
+        let Some(first) = bytes.next() else {
+            return Err(Errno::OutOfRange);
+        };
+        if !(first.is_ascii_lowercase() || first.is_ascii_digit()) {
             return Err(Errno::OutOfRange);
         }
-        if !segment
-            .bytes()
-            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-' || b == b'_')
-        {
+        if !bytes.all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-' || b == b'_') {
             return Err(Errno::OutOfRange);
         }
     }

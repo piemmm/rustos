@@ -14,6 +14,7 @@ use alloc::vec::Vec;
 use core::time::Duration;
 
 use tairix_abi::{Errno, FileKind};
+use tairix_appdata::Settings as SettingsStore;
 use tairix_curses::{Event, InputMode, Pos, Screen, Tty, Window};
 use tairix_glob::Pattern;
 use tairix_path::join;
@@ -24,12 +25,13 @@ use crate::info::{note_hidden_entries, Info};
 use crate::model::{
     child_dirs_of, merge_child_dirs, AttrEditPrompt, AttrEntries, AttrsView, BatchPrompt,
     ConfirmPrompt, DirNode, InputOp, InputPrompt, IsaPrompt, IsaPurpose, ModePrompt, Model,
-    NameFilter, OpenAsPrompt, Overlay, OverwritePrompt, Pane, Prompt, RepeatOp, SortKey, View,
-    Viewer, ViewerKind,
+    NameFilter, OpenAsPrompt, Overlay, OverwritePrompt, Pane, Prompt, RepeatOp, SettingsState,
+    SortKey, View, Viewer, ViewerKind,
 };
 use crate::ops::{parent_of, plan_target, resolve_destination, Decision, FileOp, OpProgress};
 use crate::render::{panes_layout, render};
 use crate::search::{ContentScan, Needle};
+use crate::settings::SettingKey;
 use crate::tag::{Batch, BatchProgress, TagEntry, TagRange};
 use crate::view_disasm::{describe, is_manifest_head, Decode, DisasmBody, DisasmPane, DisasmView};
 use crate::view_hex::{parse_offset, HexView};
@@ -98,6 +100,7 @@ pub fn run<T: Tty>(
     decode: &mut dyn Decode,
     screen: &mut Screen<T>,
     info: &mut dyn Info,
+    store: &mut SettingsStore<'_>,
 ) -> Result<i32, FstreeError> {
     let mut window = Window::new(Pos::new(0, 0), screen.size());
     // The omission state already reported on fd 3, so a record goes out
@@ -149,6 +152,7 @@ pub fn run<T: Tty>(
             continue;
         }
         handle_event(model, fs, decode, &event);
+        publish_settings(model, store);
         if model.quit {
             return Ok(0);
         }
@@ -189,7 +193,7 @@ pub fn handle_event(model: &mut Model, fs: &mut dyn Fs, decode: &mut dyn Decode,
             return;
         }
         Overlay::Settings => {
-            handle_settings_overlay(model, fs, event);
+            handle_settings_overlay(model, event);
             return;
         }
         Overlay::Attrs => {
@@ -802,39 +806,51 @@ fn open_volume_root(model: &mut Model, fs: &mut dyn Fs, target: &str) {
     }
 }
 
-/// Apply one key to the settings menu: `1`/`2` toggle a confirmation
-/// (persisted immediately), Esc/`q`/`S` closes.
-fn handle_settings_overlay(model: &mut Model, fs: &mut dyn Fs, event: &Event) {
+/// Apply one key to the settings menu: the digit that selects a
+/// confirmation toggles it, Esc/`q`/`S` closes.
+///
+/// A toggle changes the session's own state and records that the change is
+/// unpublished; it performs no I/O. The store handle lives in the session
+/// loop, which answers the intent through [`publish_settings`] — the same
+/// split [`Model::quit`] uses, and the one `plans/APPDATA.md` §3.10 settled:
+/// the widget states the intent, the store answers it.
+fn handle_settings_overlay(model: &mut Model, event: &Event) {
     match event {
         Event::Esc | Event::Char('q' | 'S') => model.overlay = Overlay::None,
-        Event::Char('1') => {
-            model.settings.confirm_delete = !model.settings.confirm_delete;
-            persist_settings(model, fs);
-        }
-        Event::Char('2') => {
-            model.settings.confirm_batch_delete = !model.settings.confirm_batch_delete;
-            persist_settings(model, fs);
+        Event::Char(ch) => {
+            // `1` selects the first registry row, `2` the second, and so on,
+            // so the key grammar and the menu's numbering come from the one
+            // registry order rather than two lists that could disagree.
+            let Some(index) = ch.to_digit(10).and_then(|d| d.checked_sub(1)) else {
+                return;
+            };
+            let Some(key) = SettingKey::ALL.get(index as usize).copied() else {
+                return;
+            };
+            model.settings.toggle(key);
+            model.settings_state = SettingsState::Pending;
         }
         _ => {}
     }
 }
 
-/// Write the settings to the user's `Settings/fstree/` through the seam.
-/// A failure (or an unknown home) keeps the change for this session and
-/// says so — the toggle the user made is never silently reverted.
-fn persist_settings(model: &mut Model, fs: &mut dyn Fs) {
-    match model.settings_home.clone() {
-        Some(home) => match model.settings.store(fs, &home) {
-            Ok(()) => model.message = Some(String::from("settings saved")),
-            Err(errno) => {
-                model.message = Some(format!(
-                    "settings not saved ({errno:?}) — in effect this session"
-                ));
-            }
-        },
-        None => {
-            model.message = Some(String::from(
-                "no home directory — settings apply to this session only",
+/// Publish the session's preferences when a key changed them.
+///
+/// Called by the session loop after every event, so a toggle is durable
+/// before the next frame is drawn. A refused publish keeps the change for
+/// this session and says so — the toggle the user made is never silently
+/// reverted — and the intent is cleared either way, so one refusal is
+/// reported once rather than retried on every keystroke.
+pub fn publish_settings(model: &mut Model, store: &mut SettingsStore<'_>) {
+    if model.settings_state == SettingsState::Published {
+        return;
+    }
+    model.settings_state = SettingsState::Published;
+    match model.settings.save(store) {
+        Ok(()) => model.message = Some(String::from("settings saved")),
+        Err(errno) => {
+            model.message = Some(format!(
+                "settings not saved ({errno:?}) — in effect this session"
             ));
         }
     }

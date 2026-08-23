@@ -58,6 +58,13 @@ path = "src/run.rs"
 # bare-metal targets it is actually built for; on the host the binary is an
 # inert stub with no extra dependencies.
 [target.'cfg(target_os = "none")'.dependencies]
+# The app-data client, over the runtime `ipc_call` transport: the chooser
+# opens on the desktop session's *published* settings, read by naming the
+# publisher on a request shape that carries no scope field, so it can never
+# ask for the session's private ones (plans/APPDATA.md §3.11). It is a
+# `Run`-only dependency because the chooser model itself holds settings it was
+# handed, and its host tests inject those directly.
+tairix-appdata = { path = "../../../lib/appdata", version = "=0.0.0", features = ["rt"] }
 # The browser engine's production symbolic-link reader (`RtLinkReader`): the
 # `fs_readlink` + resolving `fs_stat` pair a listed link needs, written once in
 # `lib/browse` so no surface carries its own copy of those two calls.

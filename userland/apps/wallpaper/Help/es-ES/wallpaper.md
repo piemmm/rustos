@@ -85,11 +85,10 @@ ventana; el motivo se indica en el flujo de error estándar.
 
 ## ENVIRONMENT
 
-`HOME` nombra el directorio de inicio del usuario, bajo el cual se lee
-`Settings/Pinboard/pinboard.conf` al inicio para que la ventana se abra
-con los ajustes que están en efecto. Ese documento es escrito por la
-sesión de escritorio, nunca por este programa. Sin `HOME`, la ventana se
-abre con los valores predeterminados.
+Ninguna. Los ajustes con los que se abre la ventana son los ajustes
+publicados por la propia sesión de escritorio, leídos a través del
+servicio de datos de aplicación en lugar de desde una ruta que nombre
+este programa; los escribe la sesión, nunca este programa.
 
 ## SEE ALSO
 

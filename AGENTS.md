@@ -597,7 +597,7 @@ tairix/
 │   ├── path/            # Shared filesystem path-spelling parser.
 │   ├── pci/             # PCI/PCIe configuration-access mechanism library.
 │   ├── procinfo/        # Sysinfo API client helpers + info:/stats: resolver.
-│   ├── proglib/         # Program-library catalog store engine (folders/entries).
+│   ├── proglib/         # Program-library catalog registry (folders/entries).
 │   ├── raid/            # RAID composition engines (levels, dispatch, maintenance).
 │   ├── raidmeta/        # RAID array-member superblock format + reassembly.
 │   ├── raster/          # Shared software rasterisation.
@@ -624,7 +624,7 @@ tairix/
 │   ├── virtio/          # Bus-agnostic virtio split-virtqueue protocol.
 │   ├── virtio_input/    # Arch-neutral virtio-input device logic.
 │   ├── vt/              # Shared ANSI/VT/xterm vocabulary.
-│   ├── wallpaper/       # Desktop pinboard: settings store, wallpaper catalog,
+│   ├── wallpaper/       # Desktop pinboard: settings registry, wallpaper catalog,
 │   │                    #   fit geometry, and the shipped masters in `assets/`.
 │   └── window/          # Window-channel protocol engine.
 │
@@ -1397,7 +1397,7 @@ You are not exempt from any rule above. In addition:
     | Default desktop apps going live: app windows, live app data channels, the file picker | `plans/APPWIN.md` |
     | The graphical file manager (`files.app`): clickable icons, open/launch, rename, move/copy/delete, properties | `plans/NEW-FILEMANAGER.md` |
     | Desktop responsiveness: non-blocking app launch (no UI freeze while an app loads), asynchronous process launch | `plans/FIX-DESKTOP.md` |
-    | The desktop pinboard: the wallpaper (default set, fit modes, sandboxed decode, per-user settings store), the `Desktop` folder's icon arrangement and sort order, the backdrop context menu, and the wallpaper chooser app | `plans/PINBOARD.md` |
+    | The desktop pinboard: the wallpaper (default set, fit modes, sandboxed decode, the per-user settings the session publishes), the `Desktop` folder's icon arrangement and sort order, the backdrop context menu, and the wallpaper chooser app | `plans/PINBOARD.md` |
     | The taskbar / icon bar: the program-library launcher + folder catalog, the file-manager icon, the per-application slot strip with its app-declared menu and hover window picker, the notification area, and the always-rightmost Switchboard system-overview icon | `plans/NEW-TASKBAR.md` |
     | The Switchboard window: its sections, chrome, the controls it composes, and which readings are real measurements versus awaiting an interface | `plans/NEW-SWITCHBOARD.md` |
     | Service manager: service lifecycle/readiness, discovery vs registration vs on-demand endpoint activation, system- vs user-scope managers, idle linger, stop/shutdown ordering, restart policy | `plans/NEW-SERVICEMANAGER.md` |

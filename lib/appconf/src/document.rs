@@ -107,6 +107,28 @@ impl Drop for Line {
     }
 }
 
+/// A surface a closed registry reads its settings out of.
+///
+/// An application's registry is a fixed set of keys, and the document that
+/// answers them is a different type depending on where it came from: this
+/// engine's own [`Document`] for one that arrived over a channel or from
+/// another application's published scope, and the app-data client's layered
+/// settings handle for the application's own store. One question, so it is
+/// named once here and every registry is written once against it — rather
+/// than a loader per surface, which is how two of them come to disagree
+/// about what a missing key means.
+pub trait Lookup {
+    /// The value of `key` from the highest layer that sets it, or [`None`]
+    /// when no layer does.
+    fn get(&self, key: &str) -> Option<&str>;
+}
+
+impl Lookup for Document {
+    fn get(&self, key: &str) -> Option<&str> {
+        Self::get(self, key)
+    }
+}
+
 /// A parsed configuration document.
 ///
 /// Reads are by key ([`get`](Self::get) and the typed accessors); writes are

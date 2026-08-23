@@ -18,13 +18,36 @@ use crate::entry::{DisplayName, EntryId, IconAsset, LibraryEntry};
 
 /// Maximum number of records one catalog document may hold.
 ///
-/// A catalog is untrusted input parsed into memory before any of it is
-/// used, so its record count is a fixed security bound rather than a
-/// growable capacity: it exists to stop a hostile or corrupted store from
-/// forcing unbounded allocation, not to cap a real workload. It is set far
-/// above any plausible number of installed applications, and a store that
-/// exceeds it is refused outright rather than truncated.
-pub const MAX_ENTRIES: usize = 4096;
+/// A catalog is untrusted input read into memory before any of it is used,
+/// so its record count is a fixed security bound rather than a growable
+/// capacity. It is **derived** rather than chosen independently: the most
+/// records a document can hold is its setting bound divided by the settings
+/// one record costs at its widest, so this is
+/// `MAX_SETTINGS / EntryKey::ALL.len()` and two numbers that must never
+/// disagree are one number.
+///
+/// The division matters, and it is the whole point of deriving it this way:
+/// a catalog bounded only by the *setting* count could be built in memory
+/// and then not fit the document it must be written to, and a render that
+/// does not fit would have to drop records — silently losing an application
+/// a user registered. Bounding the records at what a full render always fits
+/// makes [`crate::document`] total instead, so the refusal happens where a
+/// caller can act on it (`CatalogFull`, at the `insert`, `patch`, or
+/// `reconcile` that would exceed it) rather than at save time.
+/// `a_catalog_at_the_record_bound_renders_whole` pins it.
+///
+/// The resulting ceiling — around a hundred fully-specified entries — is the
+/// honest consequence of a catalog being *one* document: it must fit one
+/// whole-or-nothing read and one atomic publish, because a store no reader
+/// can take a whole snapshot of is one no reader can trust. If a library ever
+/// genuinely outgrows it, the answer is a scope shaped for a list, not a
+/// wider settings document.
+pub const MAX_ENTRIES: usize = tairix_appconf::MAX_SETTINGS / crate::store::EntryKey::ALL.len();
+
+const _: () = assert!(
+    MAX_ENTRIES * crate::store::EntryKey::ALL.len() <= tairix_appconf::MAX_SETTINGS,
+    "a catalog at the record bound must always fit one document"
+);
 
 /// A catalog already holds [`MAX_ENTRIES`] records, so the record offered
 /// was refused.
@@ -204,7 +227,7 @@ impl Catalog {
     /// A patch that changes nothing ([`EntryPatch::is_empty`]) is not a
     /// record a catalog holds — it has no rendering, so holding one would
     /// leave a document that no longer round-trips through
-    /// [`render`](crate::render). Recording an empty patch therefore clears
+    /// [`document`](crate::document). Recording an empty patch therefore clears
     /// the personalisation held under `id`, which is what "adjust this
     /// entry in no way" means.
     ///

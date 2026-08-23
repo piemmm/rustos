@@ -23,10 +23,12 @@ o raglenni y gellir eu lansio y mae lansydd y bwrdd gwaith yn ei
 gyflwyno. Data ar y cyfrol yw'r llyfrgell, nid rhestr wedi'i
 hymgorffori: stôr ar draws y peiriant yn
 `/System/Settings/ProgramLibrary/library.conf` y mae pob cyfrif yn ei
-darllen, ynghyd â throslun dewisol fesul defnyddiwr yn yr un llwybr y tu
-mewn i `Settings/` y defnyddiwr ei hun. Yr hyn y mae lansydd yn ei
-ddangos yw'r ddau wedi'u datrys gyda'i gilydd: mae cofnodion ac
-addasiadau'r defnyddiwr ei hun yn trechu'r rhai ar draws y peiriant.
+darllen, ynghyd â throslun dewisol fesul defnyddiwr y mae'r gorchymyn hwn
+yn ei gadw yn ei osodiadau ei hun, lle na chaiff neb arall ysgrifennu a
+lle caiff unrhyw raglen ddarllen yr hyn y mae'n ei gyhoeddi. Yr hyn y mae
+lansydd yn ei ddangos yw'r ddau wedi'u datrys gyda'i gilydd: mae
+cofnodion ac addasiadau'r defnyddiwr ei hun yn trechu'r rhai ar draws y
+peiriant.
 
 Heb is-orchymyn (neu gyda `list`), caiff y llyfrgell ddatrys ei hargraffu
 ffolder wrth ffolder, un cofnod fesul llinell: dynodwr, enw arddangos, a
@@ -112,9 +114,10 @@ popeth arall ei anwybyddu.
 ## ENVIRONMENT
 
 - `LANG` — y locale dewisol ar gyfer yr help byr (tag BCP-47 fel `fr-FR`).
-- `HOME` — cyfeiriadur cartref y defnyddiwr: yn enwi'r troslun fesul
-  defnyddiwr a gwreiddiau'r rescan `--user` `<home>/Commands` a
-  `<home>/Applications`.
+- `HOME` — cyfeiriadur cartref y defnyddiwr: gwreiddiau'r rescan
+  `--user`, `<home>/Commands` a `<home>/Applications`. Nid oes angen
+  cartref ar y troslun ei hun; mae'r gwasanaeth gosodiadau'n datrys y
+  cyfrif o'r hunaniaeth y mae'r cnewyllyn yn ei thystio.
 
 ## SEE ALSO
 

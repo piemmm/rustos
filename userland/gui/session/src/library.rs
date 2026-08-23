@@ -1,33 +1,46 @@
 //! Loading the program-library catalog the taskbar's popup lists
 //! (`plans/NEW-TASKBAR.md` T5).
 //!
-//! The catalog is two on-disk documents — the machine-wide store under
-//! `/System/Settings/ProgramLibrary/` and the logged-in user's overlay in
-//! their home — resolved into one view by `tairix_proglib::merge`. Reading
-//! them needs a filesystem capability, so it is the desktop session's job:
-//! the `no_std` popup model receives the already-merged
-//! [`Catalog`] as a typed view and never touches the VFS.
+//! The catalog is two layers resolved into one view by `tairix_proglib::merge`:
 //!
-//! Loading is **total and fail-closed per store**: an absent store is the
+//! - the **machine-wide** store under `/System/Settings/ProgramLibrary/`,
+//!   read as a file. It is machine policy rather than any one application's
+//!   data — every account reads it, and only a principal that tree's policy
+//!   admits may rewrite it — so it stays an ordinary administrator document
+//!   beside the machine's network and configuration stores. Reading it needs
+//!   a filesystem capability, which is why it is the desktop session's job:
+//!   the `no_std` popup model receives the already-merged [`Catalog`] as a
+//!   typed view and never touches the VFS.
+//! - the logged-in user's **overlay**, read from the library-admin command's
+//!   *published* app-data scope (`plans/APPDATA.md` §3.11). That layer is
+//!   per-user, per-application data, and every other application of the
+//!   account could previously read *and rewrite* it — a hostile program could
+//!   file a launcher row named "Terminal" against a bundle of its choosing.
+//!   The session now reads it by naming the publisher on a request shape that
+//!   carries no scope field, so it can obtain what `applib` publishes about
+//!   the account's library and nothing else `applib` keeps.
+//!
+//! Loading is **total and fail-closed per layer**: an absent layer is the
 //! ordinary fresh-installation state (an empty catalog, no complaint), while
-//! an unreadable, oversized, non-UTF-8, or malformed store contributes an
+//! one that is unreadable, oversized, non-UTF-8, or malformed contributes an
 //! empty catalog *and* a ready-to-print warning line — the desktop degrades
 //! to a calm empty library and says why on `stderr`, rather than guessing at
-//! a half-parsed store or dying over a settings file.
+//! a half-read store or dying over a settings file.
 
 use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
 
 use tairix_abi::Errno;
+use tairix_appconf::Document;
+use tairix_appdata::{read_published, AppDataHost};
 use tairix_proglib::{
-    merge, parse, user_library_path, Catalog, EntryId, LibraryEntry, MACHINE_LIBRARY_PATH,
-    MAX_CATALOG_LEN,
+    load, merge, Catalog, EntryId, LibraryEntry, LIBRARY_PATH, LIBRARY_PUBLISHER,
 };
 
 use crate::assets::SessionFileReader;
 
-/// The resolved program library plus any per-store warnings.
+/// The resolved program library plus any per-layer warnings.
 ///
 /// The warnings are complete `stderr` lines (newline-terminated, prefixed
 /// with the session's `desktop:` diagnosis convention) so the embedder only
@@ -36,68 +49,88 @@ use crate::assets::SessionFileReader;
 pub struct LoadedLibrary {
     /// The merged machine ∪ overlay catalog the popup lists.
     pub catalog: Catalog,
-    /// One line per store that could not be used, ready for `stderr`.
+    /// One line per layer that could not be used, ready for `stderr`.
     pub warnings: Vec<String>,
 }
 
-/// Load and merge the program-library stores under the session's own
-/// authority: the machine-wide store, then the overlay inside `home` (the
-/// logged-in user's home directory; `None` when the session has none, which
-/// simply means no overlay).
+/// Load and merge the program-library layers: the machine-wide store, read
+/// under the session's own authority, then the account's overlay, read from
+/// what the library-admin command publishes.
 ///
-/// Never fails: each store that cannot be used is replaced by the empty
+/// Never fails: each layer that cannot be used is replaced by the empty
 /// catalog and explained by a warning line, so the popup always receives a
 /// well-formed view.
-pub fn load_library<R>(reader: &mut R, home: Option<&str>) -> LoadedLibrary
+pub fn load_library<R>(reader: &mut R, host: &mut dyn AppDataHost) -> LoadedLibrary
 where
     R: SessionFileReader + ?Sized,
 {
     let mut warnings = Vec::new();
-    let machine = load_store(reader, MACHINE_LIBRARY_PATH, &mut warnings);
-    let overlay = match home.and_then(user_library_path) {
-        Some(path) => load_store(reader, &path, &mut warnings),
-        None => Catalog::default(),
-    };
+    let machine = load_machine_store(reader, &mut warnings);
+    let overlay = load_overlay(host, &mut warnings);
     LoadedLibrary {
         catalog: merge(&machine, &overlay),
         warnings,
     }
 }
 
-/// Read and parse one store, contributing the empty catalog (and a warning
-/// where the store exists but cannot be used) on any failure.
-fn load_store<R>(reader: &mut R, path: &str, warnings: &mut Vec<String>) -> Catalog
+/// Read and read-in the machine-wide store, contributing the empty catalog
+/// (and a warning where the store exists but cannot be used) on any failure.
+fn load_machine_store<R>(reader: &mut R, warnings: &mut Vec<String>) -> Catalog
 where
     R: SessionFileReader + ?Sized,
 {
-    let bytes = match reader.read(path) {
+    let bytes = match reader.read(LIBRARY_PATH) {
         Ok(bytes) => bytes,
-        // No store yet: the ordinary state of a fresh installation or an
-        // account that has never personalised its library.
+        // No store yet: the ordinary state of a fresh installation.
         Err(Errno::NotFound) => return Catalog::default(),
         Err(err) => {
-            warnings.push(warning(path, &format!("unreadable ({err:?})")));
+            warnings.push(machine_warning(&format!("unreadable ({err:?})")));
             return Catalog::default();
         }
     };
-    if bytes.len() > MAX_CATALOG_LEN {
-        warnings.push(warning(
-            path,
-            &format!(
-                "oversized ({} bytes exceeds the {MAX_CATALOG_LEN}-byte cap)",
-                bytes.len()
-            ),
-        ));
-        return Catalog::default();
-    }
     let Ok(text) = core::str::from_utf8(&bytes) else {
-        warnings.push(warning(path, "not valid UTF-8"));
+        warnings.push(machine_warning("not valid UTF-8"));
         return Catalog::default();
     };
-    match parse(text) {
+    // The document's length, line, key and value bounds are the format
+    // engine's, so an oversized store is refused there rather than by a
+    // second ceiling here that could disagree with it.
+    let document = match Document::parse(text) {
+        Ok(document) => document,
+        Err(err) => {
+            warnings.push(machine_warning(&format!("{err}")));
+            return Catalog::default();
+        }
+    };
+    match load(&document) {
         Ok(catalog) => catalog,
         Err(err) => {
-            warnings.push(warning(path, &format!("{err}")));
+            warnings.push(machine_warning(&format!("{err}")));
+            Catalog::default()
+        }
+    }
+}
+
+/// Read the account's overlay from what the library-admin command publishes.
+///
+/// An application that publishes nothing, one that has never run for the
+/// account, and one whose store cannot be attested all answer the same empty
+/// document — that indistinguishability is the published scope's own rule, so
+/// a reader learns what an application chose to publish and nothing else.
+/// Only the *caller's* own refusals come back as themselves, and those are
+/// worth a line.
+fn load_overlay(host: &mut dyn AppDataHost, warnings: &mut Vec<String>) -> Catalog {
+    let document = match read_published(host, LIBRARY_PUBLISHER) {
+        Ok(document) => document,
+        Err(err) => {
+            warnings.push(overlay_warning(&format!("unreadable ({err:?})")));
+            return Catalog::default();
+        }
+    };
+    match load(&document) {
+        Ok(catalog) => catalog,
+        Err(err) => {
+            warnings.push(overlay_warning(&format!("{err}")));
             Catalog::default()
         }
     }
@@ -124,7 +157,15 @@ pub fn catalogued<'a>(catalog: &'a Catalog, entry: &EntryId) -> Result<&'a Libra
         .ok_or_else(|| format!("desktop: library entry {entry} is no longer catalogued\n"))
 }
 
-/// One ready-to-print warning line for a store that cannot be used.
-fn warning(path: &str, detail: &str) -> String {
-    format!("desktop: program library {path}: {detail}; using an empty catalog\n")
+/// One ready-to-print warning line for a machine store that cannot be used.
+fn machine_warning(detail: &str) -> String {
+    format!("desktop: program library {LIBRARY_PATH}: {detail}; using an empty catalog\n")
+}
+
+/// One ready-to-print warning line for an overlay that cannot be used.
+fn overlay_warning(detail: &str) -> String {
+    format!(
+        "desktop: program library overlay published by {LIBRARY_PUBLISHER}: \
+         {detail}; using an empty catalog\n"
+    )
 }

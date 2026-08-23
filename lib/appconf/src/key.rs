@@ -69,6 +69,43 @@ mod tests {
     use alloc::string::String;
 
     #[test]
+    fn every_store_name_is_a_legal_key() {
+        // A bundle identifier and a bulk-store file name are validated by
+        // `lib/abi`'s one store-name grammar, and both are used as a key's
+        // leading segments by a registry that keys on an identifier (the
+        // program library's `<id>.<field>`). The two grammars must therefore
+        // agree, or a name the system admits would be a key no document could
+        // hold. This pins the direction that matters: everything the store
+        // grammar accepts, this one accepts.
+        for name in [
+            "os.tairix.terminal",
+            "a",
+            "a-b_c.d0",
+            "com.example.editor",
+            "0leading-digit",
+        ] {
+            assert_eq!(
+                tairix_abi::appinfo::validate_bundle_id(name),
+                Ok(()),
+                "`{name}` must be a legal store name"
+            );
+            assert_eq!(
+                validate_key(name),
+                Ok(()),
+                "`{name}` is a store name, so it must be a legal key"
+            );
+        }
+        // And the shapes both refuse, refused by both.
+        for name in ["-leading", "_leading", ".leading", "Upper", "two..dots", ""] {
+            assert!(
+                tairix_abi::appinfo::validate_bundle_id(name).is_err(),
+                "`{name}` must not be a store name"
+            );
+            assert_eq!(validate_key(name), Err(ConfError::KeyInvalid), "`{name}`");
+        }
+    }
+
+    #[test]
     fn accepts_the_shapes_a_settings_document_uses() {
         for key in [
             "scheme",

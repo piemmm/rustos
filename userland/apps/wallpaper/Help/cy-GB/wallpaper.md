@@ -81,11 +81,10 @@ gwallau safonol.
 
 ## ENVIRONMENT
 
-Mae `HOME` yn enwi cyfeiriadur cartref y defnyddiwr, y darperir
-`Settings/Pinboard/pinboard.conf` oddi tano wrth gychwyn fel bod y
-ffenestr yn agor ar y gosodiadau sydd mewn grym. Mae'r ddogfen honno
-wedi'i hysgrifennu gan y sesiwn bwrdd gwaith, byth gan y rhaglen hon. Heb
-`HOME`, mae'r ffenestr yn agor ar y rhagosodiadau.
+Dim. Y gosodiadau y mae'r ffenestr yn agor arnynt yw gosodiadau
+cyhoeddedig y sesiwn bwrdd gwaith ei hun, a ddarllenir drwy'r gwasanaeth
+data rhaglenni yn hytrach nag o lwybr y mae'r rhaglen hon yn ei sillafu;
+y sesiwn sy'n eu hysgrifennu, byth y rhaglen hon.
 
 ## SEE ALSO
 

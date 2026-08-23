@@ -135,9 +135,10 @@ Keys:
   `Esc` closes the list. When no volumes are reported the key says
   so.
 - `S` — the settings menu: `1` toggles the single-delete
-  confirmation, `2` the batch-delete confirmation. Changes persist in
-  your own `Settings/fstree/` and load at the next start; without a
-  home directory they last the session and the menu says so.
+  confirmation, `2` the batch-delete confirmation. Changes are saved in
+  this application's own settings, which only it can read, and load at
+  the next start; when the settings service cannot be reached they last
+  the session only and the menu says why.
 - `?` — show this help over the panes; any key dismisses it.
 - `q` — quit, restoring the terminal.
 

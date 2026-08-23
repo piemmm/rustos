@@ -82,11 +82,10 @@ regione del frame condiviso è stata rifiutata o il canale della finestra
 
 ## ENVIRONMENT
 
-`HOME` nomina la directory home dell'utente, sotto la quale viene letto
-`Settings/Pinboard/pinboard.conf` all'avvio in modo che la finestra si
-apra con le impostazioni in vigore. Tale documento è scritto dalla
-sessione desktop, mai da questo programma. Senza `HOME`, la finestra si
-apra con i valori predefiniti.
+Nessuna. Le impostazioni con cui si apre la finestra sono quelle
+pubblicate dalla sessione desktop stessa, lette tramite il servizio dei
+dati applicativi anziché da un percorso indicato da questo programma; è
+la sessione a scriverle, mai questo programma.
 
 ## SEE ALSO
 

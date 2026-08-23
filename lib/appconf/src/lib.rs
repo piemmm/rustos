@@ -89,7 +89,7 @@ mod document;
 mod key;
 mod value;
 
-pub use document::{Document, Setting, Unparsed};
+pub use document::{Document, Lookup, Setting, Unparsed};
 pub use key::{validate_key, MAX_KEY_DEPTH, MAX_KEY_LEN};
 pub use value::{as_bool, as_i64, as_permille, as_u32, bool_text, MAX_VALUE_LEN, PERMILLE_FULL};
 

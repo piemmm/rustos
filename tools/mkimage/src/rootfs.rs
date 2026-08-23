@@ -570,7 +570,7 @@ mod tests {
     /// text is written verbatim"); the real derivation is pinned by
     /// `crate::library`'s own tests.
     const TEST_LIBRARY: &str =
-        "editor.name Editor\neditor.bundle /Apps/Editor.app\neditor.category Office\n";
+        "editor.name = Editor\neditor.bundle = /Apps/Editor.app\neditor.category = Office\n";
 
     /// The debug-shaped seed most tests build with: databases + home, no
     /// baked key or machine-id.
@@ -683,7 +683,8 @@ mod tests {
         let read = fs.read_at(conf, 0, &mut buf).expect("library.conf reads");
         let text = core::str::from_utf8(&buf[..read]).expect("utf-8");
         assert_eq!(text, TEST_LIBRARY);
-        let parsed = tairix_proglib::parse(text).expect("parses");
+        let document = tairix_appconf::Document::parse(text).expect("a well-formed document");
+        let parsed = tairix_proglib::load(&document).expect("reads");
         assert_eq!(parsed.len(), 1);
     }
 

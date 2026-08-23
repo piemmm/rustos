@@ -7,7 +7,7 @@ extern crate std;
 use alloc::borrow::ToOwned;
 use alloc::collections::BTreeMap;
 use alloc::format;
-use alloc::string::{String, ToString};
+use alloc::string::String;
 use alloc::vec::Vec;
 use core::cell::RefCell;
 
@@ -50,19 +50,26 @@ impl MemStore {
 }
 
 impl Store for MemStore {
-    fn read(&self) -> Result<Option<String>, Errno> {
-        match self.read_err {
-            Some(err) => Err(err),
-            None => Ok(self.text.borrow().clone()),
+    fn read(&self) -> Result<Option<tairix_appconf::Document>, Errno> {
+        if let Some(err) = self.read_err {
+            return Err(err);
         }
+        // The fixture holds text, because that is what a test writes and
+        // reads; the engine turns it into the document the seam trades in,
+        // and a fixture the engine refuses is a defect in the test.
+        Ok(self
+            .text
+            .borrow()
+            .as_deref()
+            .map(|text| tairix_appconf::Document::parse(text).expect("a well-formed fixture")))
     }
 
-    fn write(&self, text: &str) -> Result<(), Errno> {
+    fn write(&self, document: &tairix_appconf::Document) -> Result<(), Errno> {
         if let Some(err) = self.write_err {
             return Err(err);
         }
         *self.writes.borrow_mut() += 1;
-        *self.text.borrow_mut() = Some(text.to_string());
+        *self.text.borrow_mut() = Some(document.render());
         Ok(())
     }
 }
@@ -206,16 +213,31 @@ fn manifest_bytes(name: &str, listing: Option<LibraryCategory>, icon: Option<&st
 fn stores<'a>(machine: &'a MemStore, user: &'a MemStore) -> Stores<'a> {
     Stores {
         machine,
-        user: Some(user),
+        user,
         home: Some("/Users/root"),
     }
 }
 
-/// A `Stores` view with no per-user overlay and no home.
-fn homeless(machine: &MemStore) -> Stores<'_> {
+/// An in-memory store tree holding one listable chess bundle.
+fn chess_bundle() -> MemBundles {
+    let mut bundles = MemBundles::default();
+    bundles.manifest(
+        "/Apps/chess.app",
+        &manifest_bytes("chess", Some(LibraryCategory::Games), Some("chess.svg")),
+    );
+    bundles
+}
+
+/// A `Stores` view whose environment names no home.
+///
+/// The *overlay* is still there: it is the app-data service's to resolve from
+/// the identity the kernel attests, so it needs no home. Only the
+/// `rescan --user` walk, which lists `<home>/Commands` and
+/// `<home>/Applications`, has anything left to fail closed on.
+fn homeless<'a>(machine: &'a MemStore, user: &'a MemStore) -> Stores<'a> {
     Stores {
         machine,
-        user: None,
+        user,
         home: None,
     }
 }
@@ -329,15 +351,15 @@ fn parse_refuses_what_the_grammar_does_not_define() {
 #[test]
 fn list_shows_the_resolved_library_folder_by_folder() {
     let machine = MemStore::new(Some(
-        "os.tairix.edit.name Edit\n\
-         os.tairix.edit.bundle /System/Commands/edit.app\n\
-         os.tairix.edit.category Accessories\n\
-         os.tairix.chess.name Chess\n\
-         os.tairix.chess.bundle /Apps/chess.app\n\
-         os.tairix.chess.category Games\n",
+        "os.tairix.edit.name = Edit\n\
+         os.tairix.edit.bundle = /System/Commands/edit.app\n\
+         os.tairix.edit.category = Accessories\n\
+         os.tairix.chess.name = Chess\n\
+         os.tairix.chess.bundle = /Apps/chess.app\n\
+         os.tairix.chess.category = Games\n",
     ));
     // The user's overlay renames Edit; the resolved view shows the rename.
-    let user = MemStore::new(Some("os.tairix.edit.name My Editor\n"));
+    let user = MemStore::new(Some("os.tairix.edit.name = My Editor\n"));
     let output = MemOutput::default();
     run(
         Command::List { category: None },
@@ -376,11 +398,12 @@ fn list_shows_the_resolved_library_folder_by_folder() {
 #[test]
 fn list_without_stores_prints_nothing() {
     let machine = MemStore::new(None);
+    let user = MemStore::new(None);
     let output = MemOutput::default();
     run(
         Command::List { category: None },
         None,
-        &homeless(&machine),
+        &homeless(&machine, &user),
         &MemBundles::default(),
         &NoHelp,
         &output,
@@ -417,10 +440,10 @@ fn add_derives_the_entry_from_the_bundles_manifest() {
     assert_eq!(
         machine.text().as_deref(),
         Some(
-            "os.tairix.chess.name chess\n\
-             os.tairix.chess.bundle /Apps/chess.app\n\
-             os.tairix.chess.category Games\n\
-             os.tairix.chess.icon chess.svg\n"
+            "os.tairix.chess.name = chess\n\
+             os.tairix.chess.bundle = /Apps/chess.app\n\
+             os.tairix.chess.category = Games\n\
+             os.tairix.chess.icon = chess.svg\n"
         )
     );
     // Quiet on stdout; the outcome is an fd-3 summary record.
@@ -461,14 +484,14 @@ fn add_overrides_win_over_the_manifest() {
     .expect("adds");
     let text = machine.text().expect("written");
     assert!(
-        text.contains("os.tairix.chess.name Grandmaster\n"),
+        text.contains("os.tairix.chess.name = Grandmaster\n"),
         "{text}"
     );
     assert!(
-        text.contains("os.tairix.chess.category Utilities\n"),
+        text.contains("os.tairix.chess.category = Utilities\n"),
         "{text}"
     );
-    assert!(text.contains("os.tairix.chess.icon gm.svg\n"), "{text}");
+    assert!(text.contains("os.tairix.chess.icon = gm.svg\n"), "{text}");
 }
 
 #[test]
@@ -504,7 +527,7 @@ fn add_refuses_what_it_cannot_derive_and_changes_nothing() {
     assert!(machine
         .text()
         .expect("written")
-        .contains("category Utilities"));
+        .contains("category = Utilities"));
 
     assert_eq!(add("/Apps/ghost.app", None), Err(AppLibError::NoManifest));
     assert_eq!(add("/Apps/bad.app", None), Err(AppLibError::BadManifest));
@@ -522,7 +545,7 @@ fn add_refuses_what_it_cannot_derive_and_changes_nothing() {
 #[test]
 fn a_refused_machine_write_surfaces_and_changes_nothing() {
     let mut machine = MemStore::new(Some(
-        "os.tairix.edit.name Edit\nos.tairix.edit.bundle /Apps/edit.app\n",
+        "os.tairix.edit.name = Edit\nos.tairix.edit.bundle = /Apps/edit.app\n",
     ));
     machine.write_err = Some(Errno::PermissionDenied);
     let user = MemStore::new(None);
@@ -560,41 +583,50 @@ fn a_refused_machine_write_surfaces_and_changes_nothing() {
 }
 
 #[test]
-fn user_operations_without_a_home_fail_closed() {
+fn a_user_rescan_without_a_home_fails_closed_and_the_rest_do_not_need_one() {
+    // Editing the overlay never needed a home once it moved into the store:
+    // the service resolves the account from the attested identity. Only the
+    // `rescan --user` walk still names `<home>/Commands`, so it is the one
+    // command a homeless environment refuses.
     let machine = MemStore::new(None);
+    let user = MemStore::new(None);
     let output = MemOutput::default();
-    for command in [
+    assert_eq!(
+        run(
+            Command::Rescan { user: true },
+            None,
+            &homeless(&machine, &user),
+            &MemBundles::default(),
+            &NoHelp,
+            &output
+        ),
+        Err(AppLibError::NoHome)
+    );
+    assert_eq!(user.writes(), 0);
+
+    // The overlay edits go through, home or no home.
+    run(
         Command::Add(AddRequest {
             bundle: "/Apps/chess.app",
-            category: None,
+            category: Some(LibraryCategory::Games),
             name: None,
             icon: None,
             user: true,
         }),
-        Command::Remove {
-            target: "os.tairix.chess",
-            user: true,
-        },
-        Command::Rescan { user: true },
-    ] {
-        assert_eq!(
-            run(
-                command,
-                None,
-                &homeless(&machine),
-                &MemBundles::default(),
-                &NoHelp,
-                &output
-            ),
-            Err(AppLibError::NoHome)
-        );
-    }
+        None,
+        &homeless(&machine, &user),
+        &chess_bundle(),
+        &NoHelp,
+        &output,
+    )
+    .expect("an overlay add needs no home");
+    assert_eq!(user.writes(), 1);
     assert_eq!(machine.writes(), 0);
 }
 
 #[test]
 fn remove_takes_an_identifier_or_a_bundle_path() {
-    let text = "os.tairix.chess.name Chess\nos.tairix.chess.bundle /Apps/chess.app\n";
+    let text = "os.tairix.chess.name = Chess\nos.tairix.chess.bundle = /Apps/chess.app\n";
     let machine = MemStore::new(Some(text));
     let user = MemStore::new(None);
     let output = MemOutput::default();
@@ -653,7 +685,7 @@ fn remove_takes_an_identifier_or_a_bundle_path() {
 #[test]
 fn hide_and_show_record_the_visibility_verdict() {
     let machine = MemStore::new(Some(
-        "os.tairix.chess.name Chess\nos.tairix.chess.bundle /Apps/chess.app\n",
+        "os.tairix.chess.name = Chess\nos.tairix.chess.bundle = /Apps/chess.app\n",
     ));
     let user = MemStore::new(None);
     let output = MemOutput::default();
@@ -675,7 +707,7 @@ fn hide_and_show_record_the_visibility_verdict() {
         machine
             .text()
             .expect("written")
-            .contains("os.tairix.chess.hidden true\n"),
+            .contains("os.tairix.chess.hidden = true\n"),
         "{:?}",
         machine.text()
     );
@@ -708,7 +740,7 @@ fn hide_and_show_record_the_visibility_verdict() {
     .expect("shows");
     assert_eq!(
         user.text().as_deref(),
-        Some("os.tairix.chess.hidden false\n"),
+        Some("os.tairix.chess.hidden = false\n"),
         "the overlay records a patch, not a copy of the entry"
     );
     let listing = MemOutput::default();
@@ -749,13 +781,13 @@ fn rescan_registers_only_listed_bundles_and_never_disturbs_curation() {
     // The machine store already curates chess (renamed) and suppresses
     // solitaire; a rescan must disturb neither.
     let machine = MemStore::new(Some(
-        "os.tairix.chess.name Grandmaster\n\
-         os.tairix.chess.bundle /Apps/chess.app\n\
-         os.tairix.chess.category Games\n\
-         os.tairix.solitaire.name Solitaire\n\
-         os.tairix.solitaire.bundle /Apps/solitaire.app\n\
-         os.tairix.solitaire.category Games\n\
-         os.tairix.solitaire.hidden true\n",
+        "os.tairix.chess.name = Grandmaster\n\
+         os.tairix.chess.bundle = /Apps/chess.app\n\
+         os.tairix.chess.category = Games\n\
+         os.tairix.solitaire.name = Solitaire\n\
+         os.tairix.solitaire.bundle = /Apps/solitaire.app\n\
+         os.tairix.solitaire.category = Games\n\
+         os.tairix.solitaire.hidden = true\n",
     ));
     let user = MemStore::new(None);
     let mut bundles = MemBundles::default();
@@ -813,25 +845,28 @@ fn rescan_registers_only_listed_bundles_and_never_disturbs_curation() {
     let text = machine.text().expect("written");
     // The new bundles are registered under their declared folders…
     assert!(
-        text.contains("os.tairix.edit.bundle /System/Commands/edit.app\n"),
+        text.contains("os.tairix.edit.bundle = /System/Commands/edit.app\n"),
         "{text}"
     );
     assert!(
-        text.contains("os.tairix.viewer.bundle /System/Applications/viewer.app\n"),
+        text.contains("os.tairix.viewer.bundle = /System/Applications/viewer.app\n"),
         "{text}"
     );
     assert!(
-        text.contains("os.tairix.mahjong.bundle /Apps/games/mahjong.app\n"),
+        text.contains("os.tairix.mahjong.bundle = /Apps/games/mahjong.app\n"),
         "{text}"
     );
     // …the unlisted tool is not…
     assert!(!text.contains("os.tairix.ls"), "{text}");
     // …and the curated rename and suppression stand untouched.
     assert!(
-        text.contains("os.tairix.chess.name Grandmaster\n"),
+        text.contains("os.tairix.chess.name = Grandmaster\n"),
         "{text}"
     );
-    assert!(text.contains("os.tairix.solitaire.hidden true\n"), "{text}");
+    assert!(
+        text.contains("os.tairix.solitaire.hidden = true\n"),
+        "{text}"
+    );
 
     let info = output.info_text();
     assert!(info.contains("\"code\":\"apps.library_rescan\""), "{info}");
@@ -839,23 +874,34 @@ fn rescan_registers_only_listed_bundles_and_never_disturbs_curation() {
         info.contains("Registered 3 new application(s); skipped 1."),
         "{info}"
     );
+}
 
-    // A second rescan finds nothing new and does not rewrite the store.
-    let writes = machine.writes();
-    run(
-        Command::Rescan { user: false },
-        None,
-        &stores(&machine, &user),
-        &bundles,
-        &NoHelp,
-        &MemOutput::default(),
-    )
-    .expect("rescans idempotently");
-    assert_eq!(
-        machine.writes(),
-        writes,
-        "an unchanged catalog is not rewritten"
+#[test]
+fn a_second_rescan_finds_nothing_new_and_rewrites_nothing() {
+    // Discovery is idempotent: a scan that changed no record does not
+    // disturb the store, so re-running it costs no write and no timestamp.
+    let machine = MemStore::new(None);
+    let user = MemStore::new(None);
+    let mut bundles = MemBundles::default();
+    bundles.dir("/System/Applications", &[("chess.app", true)]);
+    bundles.manifest(
+        "/System/Applications/chess.app",
+        &manifest_bytes("chess", Some(LibraryCategory::Games), None),
     );
+    let rescan = || {
+        run(
+            Command::Rescan { user: false },
+            None,
+            &stores(&machine, &user),
+            &bundles,
+            &NoHelp,
+            &MemOutput::default(),
+        )
+    };
+    rescan().expect("registers the discovered bundle");
+    assert_eq!(machine.writes(), 1);
+    rescan().expect("rescans idempotently");
+    assert_eq!(machine.writes(), 1, "an unchanged catalog is not rewritten");
 }
 
 #[test]
@@ -886,11 +932,11 @@ fn rescan_user_walks_both_home_stores_into_the_overlay() {
     assert_eq!(machine.writes(), 0, "the machine store is untouched");
     let text = user.text().expect("written");
     assert!(
-        text.contains("os.tairix.edit.bundle /Users/root/Commands/edit.app\n"),
+        text.contains("os.tairix.edit.bundle = /Users/root/Commands/edit.app\n"),
         "{text}"
     );
     assert!(
-        text.contains("os.tairix.paint.bundle /Users/root/Applications/paint.app\n"),
+        text.contains("os.tairix.paint.bundle = /Users/root/Applications/paint.app\n"),
         "{text}"
     );
 }

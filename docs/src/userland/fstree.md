@@ -411,13 +411,27 @@ host-tested end to end.
   focused selection through the ordinary planning path — same refusals,
   same overwrite questions. The hidden-entries toggle moved to `H`.
 - **Persisted confirmations (`S`).** `settings::Settings` carries the
-  single- and batch-delete confirmation toggles, stored as a two-line
-  `key=value` file under the user's own `Settings/fstree/` through the
-  `Fs` seam (`HOME` names the tree; without one, changes are
-  session-only and the menu says so). Parsing fails safe: garbage,
-  unknown keys, and bad values leave the confirmations **on**. A
-  disabled confirmation makes `d` act immediately; the per-file
-  overwrite questions are never configurable away.
+  single- and batch-delete confirmation toggles. They live in this
+  application's own app-data store (`plans/APPDATA.md`), reached through
+  `lib/appdata`: keyed on the kernel-attested bundle identity, so no
+  other application the user launches can read or rewrite them, and the
+  manager spells no store path, user, or bundle identifier of its own.
+  `settings::SettingKey` is the closed registry over that store's open
+  key namespace (`confirm.delete`, `confirm.batch-delete`), so a key
+  outside it is left alone rather than destroyed on the next save.
+  Reading fails safe: an unreachable store, an absent key, or a value
+  that is not a boolean leaves the confirmations **on**, and a refused
+  value is *named* so one broken setting costs only itself. A toggle
+  changes the model and records the intent
+  (`Model::settings_state` = `SettingsState::Pending`); the session loop,
+  which holds the store handle, publishes it
+  (`app::publish_settings`) as one atomic commit that writes only what
+  the store's layers do not already imply — the same
+  widget-states-the-intent split `Model::quit` uses. A refused publish
+  keeps the change for the session and says so; the menu's footer states
+  whether the store is keeping the settings at all. A disabled
+  confirmation makes `d` act immediately; the per-file overwrite
+  questions are never configurable away.
 - **The Standard Information Stream.** When the file pane omits hidden
   entries the session emits one `fs.hidden_entries_omitted` advisory
   record per omission-state change on fd 3 through the injected `Info`

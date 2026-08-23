@@ -22,9 +22,10 @@ Administers the program library — the folder-organised catalog of
 launchable applications the desktop's launcher presents. The library is
 data on the volume, never a compiled-in list: a machine-wide store at
 `/System/Settings/ProgramLibrary/library.conf` that every account reads,
-plus an optional per-user overlay at the same path inside the user's own
-`Settings/`. What a launcher shows is the two resolved together: the
-user's own entries and adjustments win over the machine-wide ones.
+plus an optional per-user overlay this command keeps in its own settings,
+where only it may write and any application may read what it publishes.
+What a launcher shows is the two resolved together: the user's own entries
+and adjustments win over the machine-wide ones.
 
 With no subcommand (or `list`) the resolved library is printed folder by
 folder, one entry per line: identifier, display name, and bundle path —
@@ -105,8 +106,10 @@ everything else may ignore.
 
 - `LANG` — the preferred locale for the short help (a BCP-47 tag such as
   `fr-FR`).
-- `HOME` — the caller's home directory: names the per-user overlay and
-  the `--user` rescan roots `<home>/Commands` and `<home>/Applications`.
+- `HOME` — the caller's home directory: the `--user` rescan roots
+  `<home>/Commands` and `<home>/Applications`. The overlay itself needs no
+  home; the settings service resolves the account from the identity the
+  kernel attests.
 
 ## SEE ALSO
 

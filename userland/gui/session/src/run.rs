@@ -102,6 +102,7 @@ mod program {
         DriverError, Errno, OpenFlags, Origin, ProcId, WaitFlags, WaitSetOp, WaitSourceKind,
         WaitStatus, CONSOLE_INHERIT, ORIGIN_WIRE_LEN, SPAWN_UID_INHERIT, WAIT_PID_ANY,
     };
+    use tairix_appdata::RtHost;
     use tairix_browse::{
         association_from_appinfo, AppAssociation, DirectorySource, Entry, GridView, Listing,
     };
@@ -111,19 +112,19 @@ mod program {
     };
     use tairix_desktop_session::{
         admitted_pid, catalogued, deliver_pending_open, desktop_info, drop_is_noteworthy,
-        ensure_switchboard, launch_argv, load_library, maybe_send_seat_report, open_tray, parse,
-        picker_cells, reap_launched, relay_power, resolve_window_identities, serve_pinboard_apply,
-        serve_switchboard_request, window_control_alternate_event, window_control_event, Answer,
-        AppBarBridge, AppBarService, ArtworkDesk, ArtworkFileReader, ArtworkSandbox, CliError,
-        Command, ConcludedPick, ConfirmPrompt, Delivery, Desktop, DesktopAction, DesktopActivation,
-        DesktopOutcome, DesktopShell, DeviceInputSource, ElevatePrompt, Elevator, FrameContent,
-        FrameReportGate, HangTracker, HoldBack, IconRasteriser, InputSource, KeyboardInputSource,
-        LaunchTable, ListingClient, ListingDesk, LockedDrain, OwnerWindow, PickConclusion,
-        PinboardMenu, PinboardMenuOutcome, PinboardStore, PinboardStoreError, Prepared,
-        PresentedOwners, PromptOutcome, ScreenFade, ScreenLock, SeatEventReader, SeatInputChannel,
-        SessionClock, SessionFileReader, SessionFileWriter, SessionPicker, SessionWindows,
-        ShellWindowHost, SwitchboardMailbox, SwitchboardOutcome, SwitchboardServe, WallpaperDesk,
-        WallpaperSource, BUNDLE_RUN_SUFFIX, DATETIME_RUN_PATH, ELEVATE_PROMPT_SHOWN,
+        ensure_switchboard, launch_argv, load_library, load_pinboard as read_pinboard_store,
+        maybe_send_seat_report, open_tray, parse, persist_pinboard, picker_cells, reap_launched,
+        relay_power, resolve_window_identities, serve_pinboard_apply, serve_switchboard_request,
+        window_control_alternate_event, window_control_event, Answer, AppBarBridge, AppBarService,
+        ArtworkDesk, ArtworkFileReader, ArtworkSandbox, CliError, Command, ConcludedPick,
+        ConfirmPrompt, Delivery, Desktop, DesktopAction, DesktopActivation, DesktopOutcome,
+        DesktopShell, DeviceInputSource, ElevatePrompt, Elevator, FrameContent, FrameReportGate,
+        HangTracker, HoldBack, IconRasteriser, InputSource, KeyboardInputSource, LaunchTable,
+        ListingClient, ListingDesk, LockedDrain, OwnerWindow, PickConclusion, PinboardMenu,
+        PinboardMenuOutcome, Prepared, PresentedOwners, PromptOutcome, ScreenFade, ScreenLock,
+        SeatEventReader, SeatInputChannel, SessionClock, SessionFileReader, SessionPicker,
+        SessionWindows, ShellWindowHost, SwitchboardMailbox, SwitchboardOutcome, SwitchboardServe,
+        WallpaperDesk, WallpaperSource, BUNDLE_RUN_SUFFIX, DATETIME_RUN_PATH, ELEVATE_PROMPT_SHOWN,
         ELEVATE_PROMPT_SHOWN_MESSAGE, FILES_LABEL, FILES_RUN_PATH, SWITCHBOARD_CALL_REFUSED,
         SWITCHBOARD_LABEL, SWITCHBOARD_RUN_PATH, USAGE, WALLPAPER_LABEL, WALLPAPER_RUN_PATH,
         WINDOW_SHOWN, WINDOW_SHOWN_MESSAGE,
@@ -3335,16 +3336,18 @@ mod program {
     }
 
     /// The session's pinboard state, kept beside the loop: the backdrop's
-    /// context menu, the per-user settings store changes are persisted
-    /// through, the loop's own sandbox worker (the wallpaper's fallback when no
-    /// thread was granted), and what the wallpaper surface now on screen was
-    /// prepared from.
+    /// context menu, the loop's own sandbox worker (the wallpaper's fallback
+    /// when no thread was granted), and what the wallpaper surface now on
+    /// screen was prepared from.
     ///
     /// The settings themselves are *not* here: the desktop model owns them,
-    /// so there is exactly one copy of what is in force.
+    /// so there is exactly one copy of what is in force. Nor is the store —
+    /// it is the application's own published app-data scope, opened for the
+    /// one round trip a read or a publish costs and never held between them,
+    /// so there is no handle here that could go stale against what the
+    /// service holds.
     struct PinboardPanel {
         menu: PinboardMenu,
-        store: PinboardStore,
         sandbox: SharedSandbox,
         prepared: Option<WallpaperSource>,
     }
@@ -3359,15 +3362,13 @@ mod program {
         desktop: &mut Desktop<S>,
         sandbox: SharedSandbox,
     ) -> PinboardPanel {
-        let home = tairix_rt::env_var(b"HOME").and_then(|raw| core::str::from_utf8(raw).ok());
-        let loaded = PinboardStore::load(&mut VfsFileReader, home);
-        if let Some(warning) = loaded.warning {
+        let loaded = read_pinboard_store(&mut RtHost);
+        for warning in &loaded.warnings {
             let _ = write!(Stderr, "{warning}");
         }
         desktop.apply_settings(loaded.settings);
         PinboardPanel {
             menu: PinboardMenu::new(),
-            store: loaded.store,
             sandbox,
             prepared: None,
         }
@@ -3626,8 +3627,7 @@ mod program {
             shell,
             compositor,
             tairix_rt::clock_get(),
-        )
-        .map_err(PinboardStoreError::errno)?;
+        )?;
         shell.present_desktop(compositor, desktop);
         Ok(())
     }
@@ -4759,8 +4759,8 @@ mod program {
     ///
     /// # Errors
     ///
-    /// The [`PinboardStoreError`] the store refused with; nothing was
-    /// adopted.
+    /// The [`Errno`] the app-data service refused the publish with; nothing
+    /// was adopted.
     #[allow(clippy::too_many_arguments)] // The desktop's whole settings state, threaded explicitly.
     fn adopt_pinboard_settings<S: DirectorySource>(
         settings: PinboardSettings,
@@ -4770,9 +4770,12 @@ mod program {
         shell: &mut DesktopShell,
         compositor: &mut Compositor,
         now_ns: u64,
-    ) -> Result<(), PinboardStoreError> {
-        if let Err(err) = pinboard.store.persist(&mut VfsFileWriter, &settings) {
-            let _ = writeln!(Stderr, "desktop: {err}");
+    ) -> Result<(), Errno> {
+        if let Err(err) = persist_pinboard(&mut RtHost, &settings) {
+            let _ = writeln!(
+                Stderr,
+                "desktop: the desktop settings could not be published ({err:?})"
+            );
             return Err(err);
         }
         let Some(change) = desktop.apply_settings(settings) else {
@@ -4851,12 +4854,12 @@ mod program {
         );
     }
 
-    /// (Re)load the program library from its on-disk stores and hand the
-    /// resolved catalog to the taskbar's popup, reporting each unusable
-    /// store loudly on `stderr`.
+    /// (Re)load the program library from its two layers — the machine-wide
+    /// store on the volume and the account's overlay as the library-admin
+    /// command publishes it — and hand the resolved catalog to the taskbar's
+    /// popup, reporting each unusable layer loudly on `stderr`.
     fn refresh_library(shell: &mut DesktopShell, compositor: &mut Compositor) {
-        let home = tairix_rt::env_var(b"HOME").and_then(|raw| core::str::from_utf8(raw).ok());
-        let loaded = load_library(&mut VfsFileReader, home);
+        let loaded = load_library(&mut VfsFileReader, &mut RtHost);
         for warning in &loaded.warnings {
             let _ = write!(Stderr, "{warning}");
         }
@@ -4866,57 +4869,25 @@ mod program {
 
     /// The session's live file-reading seam: whole-file reads through the
     /// kernel VFS under the session's own kernel-attested identity, bounded
-    /// just past the program-library document cap — the largest document the
-    /// session reads through this seam — so no store can make the desktop
-    /// slurp an arbitrarily large file (the loader then refuses the
-    /// oversize).
+    /// just past the configuration-document cap — the largest document the
+    /// session reads through this seam is the machine-wide program library,
+    /// which is one of those — so no store can make the desktop slurp an
+    /// arbitrarily large file (the loader then refuses the oversize).
     struct VfsFileReader;
 
     impl SessionFileReader for VfsFileReader {
         fn read(&mut self, path: &str) -> Result<alloc::vec::Vec<u8>, Errno> {
-            read_file(path, tairix_proglib::MAX_CATALOG_LEN)
+            read_file(path, tairix_appconf::MAX_DOCUMENT_LEN)
         }
     }
-
-    /// The session's live file-writing seam: whole-document replacement
-    /// through the kernel VFS under the session's own kernel-attested
-    /// identity — the write-side twin of [`VfsFileReader`], used for the
-    /// user's own desktop configuration (the pinboard settings store). The
-    /// parent directory is created first (the settings subtree does not exist
-    /// until the first write), an existing directory being the ordinary case;
-    /// every permission decision is the kernel's.
-    struct VfsFileWriter;
-
-    impl SessionFileWriter for VfsFileWriter {
-        fn write(&mut self, path: &str, bytes: &[u8]) -> Result<(), Errno> {
-            if let Some((parent, _)) = path.rsplit_once('/') {
-                if !parent.is_empty() {
-                    let ret = tairix_rt::fs_mkdir(parent.as_bytes());
-                    if ret < 0 && Errno::from_syscall(ret) != Errno::AlreadyExists {
-                        return Err(Errno::from_syscall(ret));
-                    }
-                }
-            }
-            let file = tairix_rt::create(path.as_bytes()).map_err(Errno::from_syscall)?;
-            let written = file.write_at(0, bytes).map_err(Errno::from_syscall)?;
-            if written != bytes.len() {
-                // The backing stopped accepting bytes: report the stall as
-                // the out-of-space refusal it is rather than leaving a
-                // silently truncated store.
-                return Err(Errno::NoSpace);
-            }
-            Ok(())
-        }
-    }
-
     /// Read the whole file at `path` through the kernel VFS under the
     /// session's own kernel-attested identity, stopping one chunk past `cap`
     /// so no file can make the desktop slurp an arbitrary number of bytes.
     ///
-    /// The one read path every document the session reads goes through — the
-    /// program-library and pinboard-settings stores at the catalog cap, the
-    /// user's wallpaper at the wallpaper cap — so a second, differently-bounded
-    /// reader cannot exist. An answer longer than `cap` is the caller's
+    /// The one read path every file the session reads goes through — the
+    /// machine-wide program-library store at the configuration-document cap,
+    /// the user's wallpaper at the wallpaper cap — so a second,
+    /// differently-bounded reader cannot exist. An answer longer than `cap` is the caller's
     /// whole-document refusal to state.
     ///
     /// The streaming is the runtime's one whole-file policy

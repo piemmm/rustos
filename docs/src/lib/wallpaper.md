@@ -5,22 +5,56 @@ per-user pinboard settings document, the shipped wallpaper set and the
 listing model a chooser draws its thumbnail grid from, and the one wallpaper
 placement geometry the desktop renderer and the chooser's preview both draw
 through. The settings are **data on the volume**, never a compiled-in table:
-a per-user store at `tairix_wallpaper::user_settings_path(home)`
-(`/Users/<u>/Settings/Pinboard/pinboard.conf`). Because there is exactly one
-definition of the document, of the catalog, and of the geometry, no two
-consumers can disagree about what the settings say, which wallpapers exist,
-or how a fit places one.
+one document per user, in the desktop session's **published** app-data scope
+([the app-data store](./appdata.md), `plans/APPDATA.md` §3.11).
+Because there is exactly one definition of the registry, of the catalog, and
+of the geometry, no two consumers can disagree about what the settings say,
+which wallpapers exist, or how a fit places one.
 
-## The store
+## The store, and who may touch it
 
-One text document per user: `key value` lines, one per setting; `#` begins a
-comment to end of line; blank and comment-only lines carry no setting. Key
-and value are split at the first whitespace run and the value is trimmed.
+The document is a plain `lib/appconf` `key = value` document — the one format
+engine the app-data store speaks — so this crate defines the closed
+*registry* over it and no grammar of its own. It is reached only through the
+app-data service; no program spells a path to it. Two properties follow from
+the store rather than from convention:
+
+- **The session is the only writer.** An application publishes only its own
+  scope, so no other program the user launches — including the chooser — can
+  write the desktop's document at all. The chooser asks over the pinboard
+  channel and the session decides.
+- **Any application may read it**, by naming `PINBOARD_PUBLISHER` on a
+  request shape that carries no scope field, so "read the desktop's private
+  settings" is not a request that exists. That is the sanctioned sharing
+  channel replacing `/Users/<u>/Settings/Pinboard/pinboard.conf`, which every
+  application of that user could also *rewrite*.
 
 An **absent** store is not an error: it means the documented defaults
-(`PinboardSettings::default`). A document naming only some keys leaves the
-rest at their default. Pinboard settings are per-user state only; there is no
-machine-wide store.
+(`PinboardSettings::default`), and so does an account whose session has never
+run. A document naming only some keys leaves the rest at their default.
+Pinboard settings are per-user state only; there is no machine-wide store,
+and the published scope has no layer beneath it, so nobody can make the
+desktop appear to say something it never said.
+
+## Two readings, deliberately different
+
+`PinboardSettings::load` is the **tolerant** one, for a document held in a
+store: a value the registry refuses leaves that one field at its documented
+default and is *named* to the caller, so one stale setting costs only itself
+and never blanks a user's desktop. It reads through `tairix_appconf::Lookup`,
+so the same loader serves the session's own published-scope handle and the
+`Document` a foreign read answers with.
+
+`decode` is the **strict** one, for a document that arrived over the pinboard
+channel: a line outside the grammar, a key outside the registry, or a value
+outside a key's closed set is a defect in the *sender* rather than something
+a person typed, and adopting a desktop the sender did not describe is worse
+than refusing it. `DocumentRefusal` names which.
+
+`PinboardSettings::document` renders the canonical form both readings accept:
+every registry key, in registry order, so a render/read round trip is exact.
+Publishing to the store instead goes key by key, so only what actually
+changed is written.
 
 ## The registry
 
@@ -53,33 +87,35 @@ store.
 
 ## Security
 
-A pinboard settings document is **untrusted input** to every consumer. The
-parser is bounded (`MAX_SETTINGS_LEN`, `MAX_WALLPAPER_PATH_LEN`) and refuses
-the **whole** document (`SettingsError`, carrying the offending 1-based line
-where one is meaningful) on anything it does not fully understand: an unknown
-key, a duplicate key, a missing value, a value outside its key's closed set,
-or an over-long document. A half-applied document would leave a desktop in a
-state no user asked for, so a reader that cannot fully parse a store runs on
-`PinboardSettings::default` rather than guessing at a partial intent, and a
-writer refuses the edit outright.
+A pinboard settings document is **untrusted input** to every consumer, and the
+two readings above bound it the same way: the format engine bounds the
+document, the line, the key and the value, and `MAX_WALLPAPER_PATH_LEN` bounds
+the one value that carries a path. Neither reading ever half-applies a
+document — `decode` refuses the whole thing, `load` leaves the refused field
+at its documented default and names it — so a desktop is never left in a state
+no user asked for.
 
 A `wallpaper` value is validated as a canonical absolute session-view path
-(`WallpaperPath`): an empty, relative, alias- or volume-id-rooted, embedded-
-control-character, `#`-bearing, or over-long path is refused, never "fixed
-up". Surviving validation still means the path names untrusted **content** —
-the session reads it under its own identity and the image decoder sniffs and
-bounds it in its own sandbox before a pixel is drawn. This crate decodes
-nothing.
+(`WallpaperPath`): an empty, relative, alias- or volume-id-rooted,
+embedded-control-character, or over-long path is refused, never "fixed up". A
+`#` is *not* refused: the format engine quotes such a value and round-trips it
+exactly, so a file the user really named `sunset#2.png` is choosable, and the
+path grammar is the only thing judging a path. (A backdrop *colour* still has
+exactly one bare `rrggbb` spelling — that is a registry rule, keeping one
+spelling per colour, not a grammar limitation.) Surviving validation still
+means the path names untrusted **content** — the session reads it under its
+own identity and the image decoder sniffs and bounds it in its own sandbox
+before a pixel is drawn. This crate decodes nothing.
 
-The bounds above are fixed validation limits on untrusted input, not growable
-capacities: `MAX_SETTINGS_LEN` (document bytes), `MAX_WALLPAPER_PATH_LEN`
-(1 KiB path), `MAX_WALLPAPER_BYTES` (8 MiB per wallpaper file), and
+The bounds are fixed validation limits on untrusted input, not growable
+capacities: the format engine's `MAX_DOCUMENT_LEN` / `MAX_VALUE_LEN`,
+`MAX_WALLPAPER_PATH_LEN` (1 KiB path, held inside `MAX_VALUE_LEN` by a
+compile-time assertion), `MAX_WALLPAPER_BYTES` (8 MiB per wallpaper file), and
 `MAX_WALLPAPER_CATALOG_ENTRIES` (256 offered wallpapers).
 
-The engine performs no I/O and holds no authority: reading and writing the
-document, and listing a wallpaper directory, go through the secured VFS under
-the caller's own kernel-attested identity — a per-user store is an ordinary
-write into the user's home.
+The engine performs no I/O and holds no authority: the document is read and
+written through the app-data service under the caller's own kernel-attested
+identity, and listing a wallpaper directory goes through the secured VFS.
 
 ## The shipped set and the catalog
 
@@ -157,15 +193,16 @@ every source pixel at 1:1 and so needs the native size.
   `Backdrop::{Theme, Colour}`, `Rgb::{new, from_hex, to_hex}`,
   `IconFlow::{Leading, Trailing}`, `IconSort::{Name, Kind, Size, Date}` — the
   closed value vocabularies.
-- `SettingsKey::{ALL, name, from_name}` — the closed key registry;
-  `SettingsError::{line, kind}` and `ParseError` — refusal reasons.
+- `SettingsKey::{ALL, name, from_name, value_of}` — the closed key registry;
+  `PinboardSettings::{load, document}` and `decode` — the two readings and
+  the canonical render; `DocumentRefusal` — the strict reading's reasons.
 - `catalog::{WALLPAPER_STORE, DEFAULT_WALLPAPER, default_wallpaper_path,
   is_wallpaper_file_name, catalog_entries, CatalogEntry}` — the shipped set
   and the listing model.
 - `fit::{place, decode_request, nominal_source_size, Placement}` — the
   placement geometry.
-- `PINBOARD_SETTINGS_SUBDIR` / `PINBOARD_FILE` / `user_settings_path` — the
-  path spellings, defined once here.
+- `PINBOARD_PUBLISHER` — the desktop session's signed bundle identifier, the
+  one spelling a reader hands to `tairix_appdata::read_published`.
 
 The crate is `no_std` + `alloc`, forbids `unsafe`, performs no I/O, holds no
 authority, is host-unit-tested beside the code, and is fuzzed by

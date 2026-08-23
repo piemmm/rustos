@@ -112,6 +112,18 @@ A commit ends by re-reading the store, so the handle goes on reflecting what the
 service actually holds — which matters after an `unset`, where the effective
 value comes back from a layer below rather than from the value removed.
 
+## Closed registries, and the open namespace that needs enumeration
+
+Most applications read a **closed** registry: a fixed set of keys they know.
+Such an application writes its loader once against `tairix_appconf::Lookup`,
+which `Settings` implements, so the same loader serves its own layered handle
+and the `Document` a foreign read answers with. Some app data is an **open**
+namespace, though — a catalog, a recent-file list, a set of per-host
+preferences — and `Settings::settings` lists every key the layers effectively
+carry, each once, with the value that wins. It costs no call: the client
+already holds the document and parsed it, which is why the wire carries no
+listing operation at all.
+
 ## No service, or no store: read the defaults, refuse the writes
 
 `open` never fails. A store the service cannot serve — early boot before the

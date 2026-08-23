@@ -23,10 +23,11 @@ de aplicações executáveis que o lançador do ambiente de trabalho
 apresenta. A biblioteca são dados no volume, nunca uma lista compilada:
 um armazenamento para toda a máquina em
 `/System/Settings/ProgramLibrary/library.conf` que cada conta lê, mais
-uma sobreposição opcional por utilizador no mesmo caminho dentro dos
-próprios `Settings/` do utilizador. O que um lançador mostra é o
-resultado da resolução de ambos em conjunto: as entradas e ajustes do
-próprio utilizador prevalecem sobre os de toda a máquina.
+uma sobreposição opcional por utilizador que este comando guarda nas
+suas próprias definições, onde só ele pode escrever e qualquer aplicação
+pode ler o que ele publica. O que um lançador mostra é o resultado da
+resolução de ambos em conjunto: as entradas e ajustes do próprio
+utilizador prevalecem sobre os de toda a máquina.
 
 Sem subcomando (ou com `list`), a biblioteca resolvida é impressa
 pasta a pasta, uma entrada por linha: identificador, nome de exibição
@@ -117,9 +118,10 @@ capturar com `3>records.jsonl` e tudo o resto pode ignorar.
 
 - `LANG` — o locale preferido para a ajuda curta (uma etiqueta BCP-47
   como `fr-FR`).
-- `HOME` — o diretório pessoal do utilizador: nomeia a sobreposição
-  por utilizador e as raízes de rescan com `--user` `<home>/Commands` e
-  `<home>/Applications`.
+- `HOME` — o diretório pessoal do utilizador: as raízes de rescan com
+  `--user` `<home>/Commands` e `<home>/Applications`. A sobreposição em si
+  não precisa de um diretório pessoal; o serviço de definições resolve a
+  conta a partir da identidade atestada pelo núcleo.
 
 ## SEE ALSO
 

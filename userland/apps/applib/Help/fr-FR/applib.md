@@ -23,10 +23,11 @@ dossiers d'applications lançables que le lanceur du bureau présente. La
 bibliothèque est une donnée sur le volume, jamais une liste intégrée :
 un magasin à l'échelle de la machine à
 `/System/Settings/ProgramLibrary/library.conf` que chaque compte lit,
-plus une superposition facultative par utilisateur au même chemin dans
-le `Settings/` propre à l'utilisateur. Ce qu'un lanceur affiche est la
-résolution des deux ensemble : les entrées et ajustements propres à
-l'utilisateur l'emportent sur ceux à l'échelle de la machine.
+plus une superposition facultative par utilisateur que cette commande
+conserve dans ses propres paramètres, où elle seule peut écrire et où
+toute application peut lire ce qu'elle publie. Ce qu'un lanceur affiche
+est la résolution des deux ensemble : les entrées et ajustements propres
+à l'utilisateur l'emportent sur ceux à l'échelle de la machine.
 
 Sans sous-commande (ou avec `list`), la bibliothèque résolue est
 affichée dossier par dossier, une entrée par ligne : identifiant, nom
@@ -123,9 +124,10 @@ reste peut ignorer.
 
 - `LANG` — la langue préférée pour l'aide courte (une balise BCP-47
   telle que `fr-FR`).
-- `HOME` — le répertoire personnel de l'appelant : nomme la
-  superposition par utilisateur et les racines de rescan `--user`
-  `<home>/Commands` et `<home>/Applications`.
+- `HOME` — le répertoire personnel de l'appelant : les racines de rescan
+  `--user` `<home>/Commands` et `<home>/Applications`. La superposition
+  elle-même n'a besoin d'aucun répertoire personnel ; le service de
+  paramètres résout le compte à partir de l'identité attestée par le noyau.
 
 ## SEE ALSO
 

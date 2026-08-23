@@ -16,6 +16,8 @@ use tairix_abi::{
     CapabilityId, Errno, FileKind, LoadHeader, ManifestHeader, RxePermission, Segment,
     LOAD_FLAG_PIE, LOAD_MAGIC, MANIFEST_MAGIC, RXE_PAGE_SIZE,
 };
+use tairix_appdata::fake::FakeService;
+use tairix_appdata::Settings as SettingsStore;
 use tairix_curses::{Event, Pos, Size, Window};
 
 use tairix_log::{Event as LogEvent, Sink};
@@ -27,11 +29,13 @@ use tairix_sandbox::ParserSandbox;
 use crate::app::{handle_event, refresh_viewer, viewer_tick, walk_tick};
 use crate::fs::{Fs, FsEntry, RenameOutcome, VolumeInfo, VolumeSpace};
 use crate::info::{note_hidden_entries, Info};
-use crate::model::{ModePrompt, Model, Overlay, Pane, Prompt, RepeatOp, SortKey, View, Viewer};
+use crate::model::{
+    ModePrompt, Model, Overlay, Pane, Prompt, RepeatOp, SettingsState, SortKey, View, Viewer,
+};
 use crate::ops::{is_inside, parent_of};
 use crate::render::render;
 use crate::search::{ContentScan, Needle};
-use crate::settings::{config_path, Settings};
+use crate::settings::{SettingKey, Settings};
 use crate::tag::{TagEntry, TagRange};
 use crate::view_disasm::{Decode, DisasmPane, DisasmView};
 use crate::walk::{FlatEntry, WalkPurpose, WalkState, Walker};
@@ -3286,56 +3290,154 @@ fn the_volume_list_renders_targets_types_and_space() {
 
 // --- Settings -------------------------------------------------------------
 
-/// A fixture with a user home whose fixed `Settings/` shape exists.
-fn homed_fixture() -> FakeFs {
-    fixture()
-        .dir("/Users", vec![dir("ada")])
-        .dir("/Users/ada", vec![dir("Settings")])
-        .dir("/Users/ada/Settings", vec![])
+/// The command word this application's bundle is installed under; it selects
+/// nothing but the bundle-defaults layer.
+const OWN_WORD: &str = "fstree";
+
+/// A fake app-data service with an empty store and a bundle shipping no
+/// defaults — a fresh account of the shipped file manager.
+///
+/// It speaks the real `appdata-v1` codec, so these tests exercise the wire
+/// the service actually answers rather than a private idea of it.
+fn service() -> FakeService {
+    FakeService::for_word(OWN_WORD).with_bundle("/System/Applications/fstree.app")
 }
 
 #[test]
-fn settings_parse_fails_safe_and_encodes_round_trip() {
-    // Defaults keep every confirmation on.
-    assert_eq!(Settings::parse(""), Settings::default());
-    // Garbage, unknown keys, and bad values leave the defaults standing.
-    let garbled = Settings::parse("nonsense\nconfirm-delete=maybe\nyes=off\n");
-    assert_eq!(garbled, Settings::default());
-    // An explicit off turns exactly that confirmation off, and the
-    // encoded form parses back to the same settings.
-    let settings = Settings::parse("confirm-delete=off\nconfirm-batch-delete=on\n");
-    assert!(!settings.confirm_delete && settings.confirm_batch_delete);
-    assert_eq!(Settings::parse(&settings.encode()), settings);
+fn every_registry_key_is_inside_the_stores_own_grammar() {
+    // The store validates a key at the point of the `set`, so a registry key
+    // outside the grammar would be a write this application could never make.
+    // The check is against the one definition, not a restatement of it.
+    for key in SettingKey::ALL {
+        assert_eq!(
+            tairix_appconf::validate_key(key.name()),
+            Ok(()),
+            "{} is a legal store key",
+            key.name()
+        );
+        assert!(!key.label().is_empty());
+    }
 }
 
 #[test]
-fn settings_toggle_persists_and_reloads() {
-    let mut fs = homed_fixture();
+fn an_empty_store_loads_the_documented_defaults() {
+    // A fresh account and a store the user cleared are the same thing: every
+    // confirmation stays on, and nothing is refused.
+    let mut host = service();
+    let store = SettingsStore::open(&mut host, OWN_WORD);
+    let (settings, refused) = Settings::load(&store);
+    assert_eq!(settings, Settings::default());
+    assert!(refused.is_empty());
+}
+
+#[test]
+fn a_value_that_is_not_a_boolean_is_named_and_costs_only_itself() {
+    let mut host = service().with_store("confirm.delete = maybe\nconfirm.batch-delete = false\n");
+    let store = SettingsStore::open(&mut host, OWN_WORD);
+    let (settings, refused) = Settings::load(&store);
+    assert_eq!(refused, alloc::vec![SettingKey::ConfirmDelete]);
+    assert!(
+        settings.confirm_delete,
+        "the broken setting keeps its safe default"
+    );
+    assert!(
+        !settings.confirm_batch_delete,
+        "the sound setting beside it still applies"
+    );
+}
+
+#[test]
+fn a_save_writes_only_what_the_layers_do_not_already_imply() {
+    let mut host = service();
+    {
+        let mut store = SettingsStore::open(&mut host, OWN_WORD);
+        // Both confirmations are already on by default, so publishing the
+        // defaults writes nothing at all.
+        Settings::default().save(&mut store).expect("publishes");
+    }
+    assert_eq!(host.committed().settings().count(), 0);
+    {
+        let mut store = SettingsStore::open(&mut host, OWN_WORD);
+        let settings = Settings {
+            confirm_delete: false,
+            ..Settings::default()
+        };
+        settings.save(&mut store).expect("publishes");
+    }
+    assert_eq!(
+        host.committed().get("confirm.delete"),
+        Some("false"),
+        "the changed setting is written"
+    );
+    assert_eq!(
+        host.committed().settings().count(),
+        1,
+        "the unchanged one is left to the layers beneath"
+    );
+}
+
+#[test]
+fn settings_toggle_publishes_and_reloads() {
+    let mut fs = fixture();
     let mut m = model(&mut fs);
-    m.settings_home = Some(String::from("/Users/ada"));
+    let mut host = service();
+    let mut store = SettingsStore::open(&mut host, OWN_WORD);
     handle_event(&mut m, &mut fs, &mut decode(), &Event::Char('S'));
     assert_eq!(m.overlay, Overlay::Settings);
     handle_event(&mut m, &mut fs, &mut decode(), &Event::Char('1'));
-    assert!(!m.settings.confirm_delete);
+    assert!(!m.settings.confirm_delete, "the change applies at once");
+    assert_eq!(
+        m.settings_state,
+        SettingsState::Pending,
+        "and is recorded as unpublished"
+    );
+    crate::app::publish_settings(&mut m, &mut store);
+    assert_eq!(
+        m.settings_state,
+        SettingsState::Published,
+        "the intent is answered exactly once"
+    );
     assert_eq!(m.message.as_deref(), Some("settings saved"));
-    let stored = fs
-        .contents(&config_path("/Users/ada"))
-        .expect("the config file was written");
-    let reloaded = Settings::parse(core::str::from_utf8(&stored).expect("utf-8"));
-    assert!(!reloaded.confirm_delete && reloaded.confirm_batch_delete);
-    assert_eq!(Settings::load(&mut fs, "/Users/ada"), reloaded);
     handle_event(&mut m, &mut fs, &mut decode(), &Event::Esc);
     assert_eq!(m.overlay, Overlay::None);
+
+    // A fresh session reads back what the last one published.
+    drop(store);
+    let store = SettingsStore::open(&mut host, OWN_WORD);
+    let (reloaded, refused) = Settings::load(&store);
+    assert!(!reloaded.confirm_delete && reloaded.confirm_batch_delete);
+    assert!(refused.is_empty());
 }
 
 #[test]
-fn a_toggle_without_a_home_stays_session_only_and_says_so() {
+fn a_refused_publish_keeps_the_change_for_the_session_and_says_so() {
     let mut fs = fixture();
     let mut m = model(&mut fs);
+    let mut host = service();
+    let refusal = host.refusal();
+    let mut store = SettingsStore::open(&mut host, OWN_WORD);
     handle_event(&mut m, &mut fs, &mut decode(), &Event::Char('S'));
+    refusal.set(Some(Errno::NoSpace));
     handle_event(&mut m, &mut fs, &mut decode(), &Event::Char('2'));
+    crate::app::publish_settings(&mut m, &mut store);
     assert!(!m.settings.confirm_batch_delete, "the change applies");
-    assert!(m.message.as_deref().unwrap_or("").contains("session only"));
+    let message = m.message.as_deref().unwrap_or_default();
+    assert!(message.contains("not saved") && message.contains("this session"));
+    // One refusal is reported once: the next keystroke does not retry it.
+    m.message = None;
+    crate::app::publish_settings(&mut m, &mut store);
+    assert_eq!(m.message, None);
+}
+
+#[test]
+fn an_unreachable_store_leaves_the_defaults_standing_and_names_the_refusal() {
+    let mut host = service();
+    host.refusal().set(Some(Errno::NotFound));
+    let store = SettingsStore::open(&mut host, OWN_WORD);
+    assert_eq!(store.store_refusal(), Some(Errno::NotFound));
+    let (settings, refused) = Settings::load(&store);
+    assert_eq!(settings, Settings::default());
+    assert!(refused.is_empty());
 }
 
 #[test]
@@ -3363,17 +3465,24 @@ fn confirm_batch_delete_off_runs_the_batch_without_a_question() {
 }
 
 #[test]
-fn the_settings_menu_renders_the_toggles() {
+fn the_settings_menu_renders_the_toggles_and_the_stores_state() {
     let mut fs = fixture();
     let mut m = model(&mut fs);
-    m.settings_home = Some(String::from("/Users/ada"));
     handle_event(&mut m, &mut fs, &mut decode(), &Event::Char('S'));
     let mut window = Window::new(Pos::new(0, 0), Size::new(12, 60));
     render(&m, &mut window);
     assert!(row_text(&window, 0).contains("Settings"));
     assert!(row_text(&window, 1).contains("confirm delete") && row_text(&window, 1).contains("on"));
     assert!(row_text(&window, 2).contains("confirm batch delete"));
-    assert!(row_text(&window, 4).contains("/Users/ada/Settings/fstree/"));
+    assert!(row_text(&window, 4).contains("saved in this app"));
+
+    // A store the service could not serve says which refusal it was, so the
+    // user reads why a toggle will not outlive the session.
+    m.settings_refusal = Some(Errno::PermissionDenied);
+    render(&m, &mut window);
+    let footer = row_text(&window, 4);
+    assert!(footer.contains("not saved") && footer.contains("PermissionDenied"));
+    assert!(footer.contains("this session only"));
 }
 
 // --- Range tagging ---------------------------------------------------------
@@ -3710,12 +3819,15 @@ fn the_session_resizes_its_window_and_repaints_at_the_new_size() {
     let tty = ResizingTty::new(small, &[(b"", large), (b"q", large)]);
     let mut screen =
         tairix_curses::Screen::new(tty, tairix_termcap::TermType::Xterm256Color, small);
+    let mut host = service();
+    let mut store = SettingsStore::open(&mut host, OWN_WORD);
     let code = crate::app::run(
         &mut m,
         &mut fs,
         &mut decode(),
         &mut screen,
         &mut crate::info::NullInfo,
+        &mut store,
     )
     .expect("session ends");
     assert_eq!(code, 0);

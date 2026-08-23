@@ -8,13 +8,21 @@ typeable by name.
 
 ## What it is, and what it is not
 
-The chooser **asks**; the desktop session **decides**. It never writes the
-settings store, never touches the framebuffer, and never applies a change
+The chooser **asks**; the desktop session **decides**. It cannot write the
+settings store — an application publishes only its *own* app-data scope, so
+the desktop's document is unreachable to this program by construction, not
+by convention — and it never touches the framebuffer or applies a change
 itself: Apply renders the settings document and posts it to the session's
 pinboard endpoint, which validates it, adopts it, redraws the pinboard, and
-persists it. The reply — adopted, refused with the session's reason, or no
+publishes it. The reply — adopted, refused with the session's reason, or no
 session listening — is reported on the status line; a refusal leaves the
 window open and never fabricates success.
+
+Reading is the other half, and it is the store's sanctioned channel: the
+window opens on what the session **publishes** about its own desktop, read
+by naming the publisher on a request shape that carries no scope field
+(`plans/APPDATA.md` §3.11). It used to open the session's own file
+directly — a file every application of that user could also rewrite.
 
 Wallpaper images are **never decoded in this program's address space**.
 The preview panel and every gallery thumbnail are rendered by
@@ -81,8 +89,11 @@ The host-tested engine plus the `Run` binary that composes it:
 `AppInfo.toml` requests four, each with a live use:
 
 - `CAP_CONSOLE_WRITE` — the fail-loud `stderr` diagnostics;
-- `CAP_FS_ACCESS` — reading the read-only shipped wallpaper store and the
-  user's own settings document, under the launching user's identity;
+- `CAP_FS_ACCESS` — reading the read-only shipped wallpaper store, under
+  the launching user's identity. It does **not** cover the settings the
+  window opens on: those come from the app-data service, gated on the
+  desktop session's attested bundle identity rather than on any capability
+  this bundle holds;
 - `CAP_SHM` — the window frame region granted to the session;
 - `CAP_PROC_SPAWN` — starting its own sandbox worker for the previews.
 

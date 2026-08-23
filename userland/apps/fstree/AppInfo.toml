@@ -6,8 +6,12 @@
 # keystrokes on fd 0 (it also authorises the tool's stream_echo
 # suppression). CAP_FS_ACCESS is the file manager's job — listing
 # directories and reading file metadata (and reading its own bundle's
-# Help/ documents) through the secured VFS, which still authorises every
-# path per-inode under the caller's attested identity. CAP_PROC_SPAWN
+# Help/ documents and shipped DefaultSettings/) through the secured VFS,
+# which still authorises every path per-inode under the caller's attested
+# identity. It does not cover the tool's own persisted preferences: those
+# live in the app-data store (plans/APPDATA.md), reached over
+# APPDATA_ENDPOINT and gated on the bundle identity the kernel attests,
+# not on any capability this bundle holds. CAP_PROC_SPAWN
 # re-spawns this same binary as the parser-sandbox decode worker
 # (docs/src/security/sandbox.md): the disassembly viewer's container and
 # instruction decoding runs there, never in this process.

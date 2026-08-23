@@ -36,6 +36,21 @@ Fractions are permille integers, not decimals: a permille round-trips through
 text exactly, needs no float parser in a `no_std` build, and is already how
 the shipped effect strengths are expressed.
 
+## One question, whichever document answers it
+
+An application's closed registry reads a fixed set of keys out of *something*:
+its own layered `tairix_appdata::Settings` handle, the `Document` another
+application's published scope answered with, or one that arrived over a
+channel. The `Lookup` trait names that one question — implemented here for
+`Document`, and in the app-data client for its handle — so a registry is
+written once rather than once per surface, which is how two loaders come to
+disagree about what a missing key means.
+
+The key grammar also *contains* `lib/abi`'s one store-name grammar: every
+bundle identifier and bulk-store name it admits is a legal key, which is what
+lets a registry key on an identifier (`<bundle-id>.<field>`) with no risk of
+rendering a key no document can hold. A unit test pins the containment.
+
 ## A document may hold secrets
 
 The app-data store's **sealed** scope is a document of this format, so the engine

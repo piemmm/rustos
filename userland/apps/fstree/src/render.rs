@@ -13,6 +13,7 @@
 
 use alloc::format;
 use alloc::string::String;
+use alloc::vec::Vec;
 
 use tairix_abi::time::Time64;
 use tairix_abi::FileKind;
@@ -22,6 +23,7 @@ use tairix_vt::{Attributes, BasicColor, Color};
 use crate::model::{
     InputOp, IsaPurpose, Model, Overlay, Pane, Prompt, SortKey, View, Viewer, ViewerKind,
 };
+use crate::settings::SettingKey;
 use crate::view_disasm::{isa_name, DisasmPane, DisasmView};
 use crate::view_hex::{dump_row, offset_digits, HexView};
 use crate::view_text::TextView;
@@ -580,27 +582,33 @@ fn display_value(value: &[u8]) -> String {
     }
 }
 
-/// The settings menu (`S`): the persisted confirmation toggles and where
-/// they persist to (or that they cannot).
+/// The settings menu (`S`): the persisted confirmation toggles and whether
+/// the app-data store is keeping them (or why it is not).
+///
+/// The rows come from the one preference registry, numbered by their place
+/// in it, so the key the menu shows and the key `app::handle_settings_overlay`
+/// acts on can never drift apart.
 fn render_settings(model: &Model, window: &mut Window, body: u16, cols: u16) {
     draw_box(window, 0, body, cols, " Settings ", true);
     let width = usize::from(cols - 2);
-    let on_off = |on: bool| if on { "on" } else { "off" };
-    let lines = [
-        format!(
-            "1  confirm delete            {}",
-            on_off(model.settings.confirm_delete)
-        ),
-        format!(
-            "2  confirm batch delete      {}",
-            on_off(model.settings.confirm_batch_delete)
-        ),
-        String::new(),
-        match &model.settings_home {
-            Some(home) => format!("saved in {home}/Settings/fstree/"),
-            None => String::from("no home directory — changes last this session only"),
-        },
-    ];
+    let mut lines = Vec::new();
+    for (index, key) in SettingKey::ALL.iter().enumerate() {
+        lines.push(format!(
+            "{}  {:<24}  {}",
+            index + 1,
+            key.label(),
+            if model.settings.is_on(*key) {
+                "on"
+            } else {
+                "off"
+            },
+        ));
+    }
+    lines.push(String::new());
+    lines.push(match model.settings_refusal {
+        None => String::from("saved in this app's own settings"),
+        Some(errno) => format!("not saved ({errno:?}) — this session only"),
+    });
     for (line, text) in (0..body - 2).zip(lines.iter()) {
         let _ = window.move_add_str(Pos::new(line + 1, 1), truncate_to_width(text, width));
     }

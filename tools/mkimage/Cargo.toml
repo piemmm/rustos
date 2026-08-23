@@ -53,3 +53,7 @@ tairix-netconfig = { path = "../../lib/netconfig", version = "=0.0.0" }
 # `tairix_proglib` engine, so the shipped store and the desktop's readers
 # cannot drift and no hand-maintained app list exists anywhere.
 tairix-proglib = { path = "../../lib/proglib", version = "=0.0.0" }
+# The one `key = value` document engine the catalog is rendered through:
+# `tairix_proglib` answers with a document, and this is what turns it into
+# the bytes the image plants.
+tairix-appconf = { path = "../../lib/appconf", version = "=0.0.0" }

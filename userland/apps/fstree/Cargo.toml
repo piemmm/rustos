@@ -71,6 +71,12 @@ tairix-log = { path = "../../../lib/log", version = "=0.0.0" }
 # Magic-prefix recognition only (`detect`): which files route to the
 # disassembly viewer. Every actual container decode runs in the sandbox.
 tairix-binfmt = { path = "../../../lib/binfmt", version = "=0.0.0" }
+# The app-data client: the one way this application reaches its own
+# preferences. The store is gated on the kernel-attested bundle identity, so
+# the confirmation settings are private to `fstree` and no other app the user
+# launches can read or rewrite them — and no path, user, or bundle identifier
+# is spelled here.
+tairix-appdata = { path = "../../../lib/appdata", version = "=0.0.0" }
 
 # For the freestanding `Run` binary only: the userland runtime `tairix-rt`
 # (`_start`, canary, panic handler, `mem_map` allocator, the syscall
@@ -93,3 +99,19 @@ tairix-help = { path = "../../../lib/help", version = "=0.0.0", features = ["rt"
 tairix-curses = { path = "../../../lib/curses", version = "=0.0.0", features = [
     "program",
 ] }
+# On the real target the `Run` binary reaches the app-data service and its own
+# bundle's shipped defaults over the runtime syscalls; this augments the
+# host-neutral base dependency with that host for the bare-metal build only, so
+# host tests still drive the client over their own fake.
+tairix-appdata = { path = "../../../lib/appdata", version = "=0.0.0", features = ["rt"] }
+
+# The shared fake app-data service the preference registry's host tests drive
+# the client over: it speaks the real `appdata-v1` codec, so a test exercises
+# the wire the service actually answers rather than a mock of it.
+[dev-dependencies]
+tairix-appdata = { path = "../../../lib/appdata", version = "=0.0.0", features = [
+    "test-util",
+] }
+# The store's own key grammar, so the preference registry is checked against
+# the one definition rather than a restatement of it.
+tairix-appconf = { path = "../../../lib/appconf", version = "=0.0.0" }

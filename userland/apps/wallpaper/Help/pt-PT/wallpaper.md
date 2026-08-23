@@ -83,11 +83,10 @@ perdido; o motivo é indicado no fluxo de erro padrão.
 
 ## ENVIRONMENT
 
-`HOME` indica o diretório pessoal do utilizador, sob o qual
-`Settings/Pinboard/pinboard.conf` é lido no arranque para que a janela
-se abra com as definições que estão em vigor. Esse documento é escrito
-pela sessão de ambiente de trabalho, nunca por este programa. Sem
-`HOME`, a janela abre-se com os valores predefinidos.
+Nenhuma. As definições com que a janela abre são as definições publicadas
+pela própria sessão de ambiente de trabalho, lidas através do serviço de
+dados de aplicações e não a partir de um caminho indicado por este
+programa; é a sessão que as escreve, nunca este programa.
 
 ## SEE ALSO
 

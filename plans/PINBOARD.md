@@ -84,30 +84,42 @@ Nothing about the pinboard lives in the kernel, in a driver, or in
 
 One document, one engine, one writer.
 
-- **Path** — `<home>/Settings/Pinboard/pinboard.conf`, spelled once by
-  `tairix_wallpaper::user_settings_path`.
-- **Grammar** — the shared per-user store grammar: one
-  `key value` setting per line, `#` comments, blank lines ignored. The key
-  registry is closed; an unknown key, a duplicate key, an over-long line, an
-  over-long document, or an unparsable value refuses the whole document.
+- **Where** — the desktop session's **published** app-data scope
+  (`plans/APPDATA.md` §3.11, landed by AD10). No program spells a path to it;
+  the service derives the store from the session's kernel-attested bundle
+  identity, so the session is the only principal that can write it and any
+  application may read what it says about its own desktop. The
+  `<home>/Settings/Pinboard/pinboard.conf` path this stage originally
+  specified is **deleted**, with `tairix_wallpaper::user_settings_path`.
+- **Grammar** — the one `lib/appconf` `key = value` document engine.
+  `lib/wallpaper` defines the closed *registry* over it and no grammar of its
+  own. The registry has two readings: a **tolerant** one for the stored
+  document (a value it refuses leaves that one setting at its default and is
+  named, so a stale value never blanks a desktop) and a **strict** one for a
+  document that arrived over the channel (a line outside the grammar, a key
+  outside the registry, or a value outside a key's closed set refuses the
+  whole document, because a *sender* emitting one is a defect).
 - **Keys**
 
   | key        | value                                             | default        |
   |------------|---------------------------------------------------|----------------|
   | `wallpaper`| absolute path of the image, or `none`             | the shipped default |
   | `fit`      | `fill` \| `fit` \| `stretch` \| `centre` \| `tile`| `fill`         |
-  | `backdrop` | `theme`, or `#rrggbb`                             | `theme`        |
+  | `backdrop` | `theme`, or bare `rrggbb`                         | `theme`        |
   | `icons`    | `leading` \| `trailing`                           | `leading`      |
   | `sort`     | `name` \| `kind` \| `size` \| `date`              | `name`         |
 
-- **Absent is not broken.** No document is the ordinary fresh-account state:
-  the defaults above apply, silently. An **unusable** document (unreadable,
-  oversized, non-UTF-8, malformed) yields the defaults *plus* a ready-to-print
-  warning line — the desktop comes up calm and says why, rather than guessing
-  at a half-parsed intent or dying over a settings file.
-- **The session is the document's only writer.** It loads at bring-up and
-  rewrites the document whole on every change; the in-memory settings adopt
-  an edit **only after the write succeeded**, so memory and disk never
+- **Absent is not broken.** Publishing nothing is the ordinary fresh-account
+  state: the defaults above apply, silently. A store the service could not
+  serve, or a value this build's registry does not accept, yields the default
+  for the affected setting *plus* a ready-to-print warning line — the desktop
+  comes up calm and says why, rather than guessing at a half-parsed intent or
+  dying over a settings document.
+- **The session is the document's only writer, by construction rather than by
+  convention.** An application publishes only its own scope, so no other
+  program the user launches can write this one at all. The session loads at
+  bring-up and publishes on every change; the in-memory settings adopt an
+  edit **only after the publish succeeded**, so memory and the store never
   diverge. The chooser and the context menu do not write it — they ask the
   session to (§6).
 

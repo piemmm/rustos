@@ -22,8 +22,12 @@ fn entry(leaf: &str, category: LibraryCategory) -> LibraryEntry {
 }
 
 /// The identifier [`entry`] keys `leaf` under.
+///
+/// The leaf is folded to lower case because an entry identifier *is* a bundle
+/// identifier, and that grammar admits no upper case — a display name still
+/// may, which is why the two are derived separately here.
 fn id(leaf: &str) -> EntryId {
-    EntryId::new(&format!("org.tairix.{leaf}")).expect("entry id")
+    EntryId::new(&format!("org.tairix.{}", leaf.to_ascii_lowercase())).expect("entry id")
 }
 
 fn name(text: &str) -> DisplayName {
@@ -332,10 +336,10 @@ fn records_entries_and_patches_are_iterated_in_identifier_order() {
     assert_eq!(
         ids,
         [
-            "org.tairix.Apple",
-            "org.tairix.Beetle",
-            "org.tairix.Mango",
-            "org.tairix.Zebra",
+            "org.tairix.apple",
+            "org.tairix.beetle",
+            "org.tairix.mango",
+            "org.tairix.zebra",
         ]
     );
     assert_eq!(
@@ -343,7 +347,7 @@ fn records_entries_and_patches_are_iterated_in_identifier_order() {
         ["Apple", "Mango", "Zebra"]
     );
     let patched: Vec<&str> = catalog.patches().map(|(id, _)| id.as_str()).collect();
-    assert_eq!(patched, ["org.tairix.Beetle"]);
+    assert_eq!(patched, ["org.tairix.beetle"]);
 }
 
 #[test]
@@ -374,7 +378,7 @@ fn two_identically_named_applications_keep_a_stable_order() {
     let listed = catalog.folder(LibraryCategory::Games);
     assert_eq!(listed_names(&listed), ["Chess", "Chess"]);
     let ids: Vec<&str> = listed.iter().map(|entry| entry.id().as_str()).collect();
-    assert_eq!(ids, ["org.tairix.Chess", "org.tairix.Zulu"]);
+    assert_eq!(ids, ["org.tairix.chess", "org.tairix.zulu"]);
 }
 
 #[test]

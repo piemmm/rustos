@@ -41,11 +41,21 @@ tairix-abi = { path = "../../../lib/abi", version = "=0.0.0" }
 # switches use (plans/APPS.md §4, §6).
 tairix-help = { path = "../../../lib/help", version = "=0.0.0" }
 # The one program-library catalog engine: the folder taxonomy, the entry
-# model, the store grammar, the fail-closed parse, the canonical render,
-# the machine ∪ overlay merge, and the discovery reconcile this tool
+# model, the `<id>.<field>` key registry, the fail-closed read, the canonical
+# render, the machine ∪ overlay merge, and the discovery reconcile this tool
 # administers — shared with the image builder and the desktop session so a
 # writer and its readers can never diverge (§2.2).
 tairix-proglib = { path = "../../../lib/proglib", version = "=0.0.0" }
+# The one `key = value` document engine a catalog is written in, and the one
+# both store backings trade in.
+tairix-appconf = { path = "../../../lib/appconf", version = "=0.0.0" }
+# The app-data client: the caller's own catalog overlay lives in this
+# application's *published* scope, so `applib` is the only principal that can
+# write it and the desktop session reads it through the one sanctioned
+# foreign-read shape (plans/APPDATA.md §1.1, AD10). No path, user, or bundle
+# identifier is spelled here — the service derives the store from the
+# identity the kernel attests.
+tairix-appdata = { path = "../../../lib/appdata", version = "=0.0.0" }
 
 # For the freestanding `Run` binary only: the userland runtime `tairix-rt`
 # (`_start`, canary, panic handler, `mem_map` allocator, the `fs_*` file
@@ -56,3 +66,16 @@ tairix-rt = { path = "../../../lib/rt", version = "=0.0.0", optional = true }
 # The freestanding `Run` binary also enables the help engine's syscall-backed
 # own-bundle `HelpSource` (`BundleHelp`), shared by every command app.
 tairix-help = { path = "../../../lib/help", version = "=0.0.0", features = ["rt"] }
+# On the real target the `Run` binary reaches the app-data service over the
+# runtime `ipc_call` transport; this augments the host-neutral base
+# dependency with that host for the bare-metal build only, so host tests
+# still drive the client over their own fake.
+tairix-appdata = { path = "../../../lib/appdata", version = "=0.0.0", features = ["rt"] }
+
+# The shared fake app-data service the overlay store's host tests drive the
+# client over: it speaks the real `appdata-v1` codec, so a test exercises the
+# wire the service actually answers rather than a mock of it.
+[dev-dependencies]
+tairix-appdata = { path = "../../../lib/appdata", version = "=0.0.0", features = [
+    "test-util",
+] }

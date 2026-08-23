@@ -21,15 +21,23 @@ tairix-abi = { path = "../abi", version = "=0.0.0" }
 # and canonicalised through it, so the store can never hold a spelling the
 # rest of the system would resolve differently.
 tairix-path = { path = "../path", version = "=0.0.0" }
-# The one definition of the `/Users/<name>` home layout the per-user
-# overlay path is built from (`tairix_users::policy::default_home`).
-tairix-users = { path = "../users", version = "=0.0.0" }
-# The one `#`-comment line grammar every line-oriented configuration store
-# in the tree shares, so a comment is recognised in a catalog exactly as it
-# is in the boot-time and network stores.
-tairix-util = { path = "../util", version = "=0.0.0" }
+# The one `key = value` document engine: a catalog is a plain `lib/appconf`
+# document — the format the app-data store speaks, where the per-user
+# overlay lives — so this crate defines the closed `<id>.<field>` registry
+# over it and no grammar, no comment rule, and no length bounds of its own
+# (plans/APPDATA.md §1.3, AD10).
+tairix-appconf = { path = "../appconf", version = "=0.0.0" }
 
 [dev-dependencies]
+# The one document engine the registry's tests and fuzz harness read and
+# render through, so both walk the same accept/reject boundary the store
+# does rather than a restatement of it.
+tairix-appconf = { path = "../appconf", version = "=0.0.0" }
+# The one definition of the `/Users/<name>` home layout, so the entry
+# model's own test that a home program store is an admitted bundle root
+# checks against the account-authoring policy rather than a restatement of
+# it. A test-only dependency: nothing this crate ships needs a home path.
+tairix-users = { path = "../users", version = "=0.0.0" }
 # The in-tree fuzz harness draws its inputs through the shared seed/budget
 # seam: one place picks the per-run seed, logs it, and bounds the smoke/soak
 # loop. Test scaffolding only; never in a TAIRiX build.

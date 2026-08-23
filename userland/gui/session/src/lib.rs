@@ -222,7 +222,7 @@ pub use apps::{
     BUNDLE_RUN_SUFFIX, MAX_BAR_APPS,
 };
 pub use artwork::{ArtworkDesk, ArtworkJob};
-pub use assets::{load_cursor_theme, load_icon_set, SessionFileReader, SessionFileWriter};
+pub use assets::{load_cursor_theme, load_icon_set, SessionFileReader};
 pub use cli::{parse, CliError, Command, USAGE};
 pub use clock::{spell as spell_clock, SessionClock};
 pub use config::{
@@ -261,7 +261,7 @@ pub use presenter::TaskbarPresenter;
 pub use seat::{SeatEventReader, SeatInputChannel};
 pub use session::DesktopSession;
 pub use settings::{
-    serve_pinboard_apply, LoadedPinboard, PinboardApplyRefusal, PinboardStore, PinboardStoreError,
+    load_pinboard, persist_pinboard, serve_pinboard_apply, LoadedPinboard, PinboardApplyRefusal,
 };
 pub use shell::{DesktopShell, InputSource, ShellOutcome};
 pub use switchboard::{

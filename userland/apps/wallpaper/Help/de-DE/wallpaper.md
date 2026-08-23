@@ -91,11 +91,10 @@ angegeben.
 
 ## ENVIRONMENT
 
-`HOME` benennt das eigene Heimatverzeichnis des Benutzers, unter dem
-`Settings/Pinboard/pinboard.conf` beim Start gelesen wird, damit sich
-das Fenster mit den aktuell gültigen Einstellungen öffnet. Dieses
-Dokument wird von der Desktop-Sitzung geschrieben, niemals von diesem
-Programm. Ohne `HOME` öffnet sich das Fenster mit den Standardwerten.
+Keine. Die Einstellungen, mit denen sich das Fenster öffnet, sind die von
+der Desktop-Sitzung selbst veröffentlichten Einstellungen, gelesen über
+den Anwendungsdatendienst statt über einen von diesem Programm benannten
+Pfad; geschrieben werden sie von der Sitzung, niemals von diesem Programm.
 
 ## SEE ALSO
 

@@ -1,23 +1,31 @@
-//! Deterministic fuzz harness for the pinboard settings document.
+//! Deterministic fuzz harness for the pinboard settings registry.
 //!
-//! Invariants, for any bytes a user's `pinboard.conf` may carry:
+//! The `key = value` *grammar* is `lib/appconf`'s and is fuzzed there; what
+//! this harness holds is the **registry** over it, for any bytes the desktop
+//! session's published document or a pinboard-channel payload may carry:
 //!
-//! 1. [`parse`] never panics on any input, and every accepted document
-//!    still leaves the settings a total, well-formed value.
-//! 2. [`render`] and [`parse`] are inverses: an accepted document
-//!    re-renders to text that parses back equal, and the rendered text is
-//!    itself within [`MAX_SETTINGS_LEN`], so a writer can never emit a
-//!    document the reader would refuse as too long.
+//! 1. [`decode`] — the strict reading — never panics on any input, and
+//!    every document it accepts yields a total, well-formed settings value.
+//! 2. [`PinboardSettings::document`] and [`decode`] are inverses: the
+//!    canonical document of accepted settings re-reads equal, and its
+//!    rendered text is itself within [`tairix_appconf::MAX_DOCUMENT_LEN`],
+//!    so a writer can never emit a document the reader would refuse as too
+//!    long.
+//! 3. [`PinboardSettings::load`] — the tolerant reading — never panics and
+//!    is *total*: whatever a stored document says, every field it does not
+//!    accept is left at its documented default and named in the refusal
+//!    list, so the two readings agree on every document the strict one
+//!    accepts.
 //!
 //! The generator emits whole setting lines and mutates them at a low rate,
-//! so most documents are accepted and the round-trip invariant is
-//! genuinely exercised. The second test hammers the parser with arbitrary
-//! ASCII.
+//! so most documents are accepted and the round-trip invariant is genuinely
+//! exercised. The second test hammers the reader with arbitrary ASCII.
 //!
 //! The fixed sweep runs under plain `cargo test`; under `cargo xtask fuzz`
 //! the same seeded stream keeps being drawn until the budget elapses.
 
-use tairix_wallpaper::{parse, render, MAX_SETTINGS_LEN};
+use tairix_appconf::{Document, MAX_DOCUMENT_LEN};
+use tairix_wallpaper::{decode, PinboardSettings};
 
 /// Fixed-iteration sweep run when no budget is set.
 const SMOKE_ITERATIONS: u64 = 5_000;
@@ -60,6 +68,9 @@ const WALLPAPER_VALUES: &[&str] = &[
     "none",
     "/System/Graphics/Wallpapers/tairix-dark.jpg",
     "/Users/ada/Documents/sunset.png",
+    // A `#` no longer ends a value: the format engine quotes one, so a file
+    // the user really named this way must survive the round trip.
+    "/Users/ada/Documents/sunset#2.png",
 ];
 const FIT_VALUES: &[&str] = &["fill", "fit", "stretch", "centre", "tile"];
 const BACKDROP_VALUES: &[&str] = &["theme", "112233", "ffffff", "000000"];
@@ -95,30 +106,55 @@ fn document(rng: &mut Lcg) -> String {
             out.push_str("# comment\n");
         }
         let value = value_for(rng, key);
-        let _ = writeln!(out, "{key} {value}");
+        let _ = writeln!(out, "{key} = {value}");
     }
     out
 }
 
+/// Read `doc` both ways and hold every invariant the two readings owe each
+/// other. Answers whether the strict reading accepted it.
 fn check_round_trip(doc: &str) -> bool {
-    let Ok(settings) = parse(doc) else {
+    // The tolerant reading is total for *every* document the engine can
+    // parse, accepted or not, so it is exercised on both branches.
+    if let Ok(parsed) = Document::parse(doc) {
+        let (lenient, refused) = PinboardSettings::load(&parsed);
+        assert!(
+            refused.len() <= KEYS.len(),
+            "a refusal list longer than the registry"
+        );
+        // A refused key left its field at the documented default.
+        let defaults = PinboardSettings::default();
+        for key in refused {
+            assert_eq!(
+                key.value_of(&lenient),
+                key.value_of(&defaults),
+                "a refused key did not keep its default"
+            );
+        }
+    }
+
+    let Ok(settings) = decode(doc) else {
         return false;
     };
 
-    let rendered = render(&settings);
+    let rendered = settings.document().render();
     assert!(
-        rendered.len() <= MAX_SETTINGS_LEN,
+        rendered.len() <= MAX_DOCUMENT_LEN,
         "a rendered document exceeded the document bound"
     );
-    let reparsed = parse(&rendered).expect("a rendered document re-parses");
-    assert_eq!(settings, reparsed, "render/parse is not a round trip");
+    let reread = decode(&rendered).expect("a rendered document re-reads");
+    assert_eq!(settings, reread, "render/decode is not a round trip");
+    // The two readings agree on every document the strict one accepts.
+    let (lenient, refused) = PinboardSettings::load(&settings.document());
+    assert!(refused.is_empty(), "a canonical document refused a key");
+    assert_eq!(settings, lenient, "the two readings disagree");
     true
 }
 
 #[test]
-fn generated_documents_round_trip_through_render() {
+fn generated_documents_round_trip_through_the_canonical_render() {
     let mut rng = Lcg::new(tairix_fuzzseed::start(
-        "generated_documents_round_trip_through_render",
+        "generated_documents_round_trip_through_the_canonical_render",
         tairix_fuzzseed::FUZZ_SEED_ENV,
     ));
     let deadline = tairix_fuzzseed::budget_deadline(tairix_fuzzseed::FUZZ_BUDGET_ENV);
@@ -147,7 +183,10 @@ fn arbitrary_ascii_never_panics() {
             for _ in 0..len {
                 buf.push(char::from(u8::try_from(rng.below(128)).expect("byte fits")));
             }
-            let _ = parse(&buf);
+            let _ = decode(&buf);
+            if let Ok(parsed) = Document::parse(&buf) {
+                let _ = PinboardSettings::load(&parsed);
+            }
         }
         if !tairix_fuzzseed::within_budget(deadline) {
             break;

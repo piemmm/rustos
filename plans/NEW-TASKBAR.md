@@ -324,8 +324,9 @@ the authority at the right granularity and, if so, uses it.
   policy the kernel VFS already applies under the caller's attested identity
   — the store is a system-owned file an ordinary account reads but cannot
   rewrite, and the kernel logs the denial. The **per-user** overlay likewise
-  needs no new capability: it is an ordinary §5.3 file-permission write under
-  the user's own `/Users/<u>/Settings/` identity.
+  needs no new capability: since `plans/APPDATA.md` AD10 it lives in
+  `applib`'s *published* app-data scope, gated on the bundle identity the
+  kernel attests for that program rather than on anything the caller holds.
 - `CAP_SYSINFO_GLOBAL` / `CAP_SYSINFO_KERNEL` / `CAP_SYSINFO_HW` — **existing**
   (§16.6); the Switchboard component requests them to read the live overview.
   No new capability is minted for reading.
@@ -388,16 +389,24 @@ the authority at the right granularity and, if so, uses it.
 ## 5. On-disk stores (data, never code)
 
 - **Machine-wide catalog:** `/System/Settings/ProgramLibrary/library.conf`
-  (writable `/System/Settings` subtree, `nosuid,nodev,noexec`, §16.2). One
-  line per entry, grammar owned by `lib/proglib`, structurally like
-  `lib/sysconfig`: `#` comments, blank lines ignored, each entry a
-  fail-closed record of `bundle-path`, `category`, `display-name`, optional
-  `icon` asset id, and a stable `id`. Written only by principals the
-  `/System/Settings` per-inode policy admits (the system identity).
-- **Per-user overlay:** `/Users/<u>/Settings/ProgramLibrary/library.conf` —
-  same grammar; lets a user hide, re-file, or rename an entry, and add
-  entries for their own `/Users/<u>/Applications` bundles, without touching the
-  system store. Merge policy: the user overlay is applied over the machine
+  (writable `/System/Settings` subtree, `nosuid,nodev,noexec`, §16.2). A
+  plain `lib/appconf` `key = value` document whose *registry* `lib/proglib`
+  owns: each entry a fail-closed record of `bundle-path`, `category`,
+  `display-name`, optional `icon` asset id, keyed by a stable `id`. Written
+  only by principals the `/System/Settings` per-inode policy admits (the
+  system identity). It stays a file because it is *machine* policy rather
+  than any one application's data.
+- **Per-user overlay:** `applib`'s **published** app-data scope
+  (`tairix_proglib::LIBRARY_PUBLISHER`, `plans/APPDATA.md` AD10) — same
+  registry; lets a user hide, re-file, or rename an entry, and add entries
+  for their own `/Users/<u>/Applications` bundles, without touching the
+  system store. It moved off `/Users/<u>/Settings/ProgramLibrary/library.conf`
+  because every application that account launched could read *and rewrite*
+  that file: a hostile program could file a launcher row named "Terminal"
+  against a bundle of its choosing. `applib` is now the only principal that
+  can write it, and the session reads it through the one foreign-read shape,
+  which carries no scope field. Merge policy: the user overlay is applied
+  over the machine
   catalog (user hide/rename/re-file wins; user-only entries append). The
   merge is one pure, exhaustively-tested function in `lib/proglib`.
   The application strip has no store at all: it is derived from live state —
@@ -455,10 +464,10 @@ engine every later stage builds on. What it now guarantees:
   (T3): declares every discovered entry whose identifier no existing record
   claims and never disturbs curation, refusing the whole fold at
   `MAX_ENTRIES`.
-- **The path spellings defined once** — `LIBRARY_DIR`, `LIBRARY_FILE`,
-  `LIBRARY_SETTINGS_SUBDIR`, `MACHINE_LIBRARY_PATH`, and `user_library_path`
-  (over the caller's inherited home, the runtime truth even for a moved
-  home). No I/O, no authority.
+- **The store spellings defined once** — `LIBRARY_DIR`, `LIBRARY_FILE`,
+  `LIBRARY_SETTINGS_SUBDIR` and `LIBRARY_PATH` for the machine layer, and
+  `LIBRARY_PUBLISHER` — the bundle identifier a reader hands to
+  `tairix_appdata::read_published` — for the overlay. No I/O, no authority.
 
 Docs: `lib/proglib/README.md`, `docs/src/lib/proglib.md`, `AGENTS.md` §3,
 `PLAN.md`. Tested host-side beside the code (round-trip, every fail-closed
@@ -480,12 +489,15 @@ conventions per §16.7) now guarantees:
   (overridable); an unlisted manifest without `--category` is refused, never
   guessed.
 - **One engine, no authority** — every document is read/written whole
-  through `lib/proglib` over the secured VFS under the caller's attested
-  identity. The machine store write is gated by its §5.3 per-inode system
-  ownership (no new capability — §4 above; the kernel logs the denial);
-  `--user` targets the caller's own overlay (`user_library_path` over the
-  inherited `HOME`), and `hide`/`show` record the visibility verdict on the
-  target store's own entry or as an overlay patch.
+  through `lib/proglib`, over two backings of one `Store` seam so the tool's
+  editing logic never learns where a catalog lives. The machine store goes
+  through the secured VFS under the caller's attested identity and is gated
+  by its §5.3 per-inode system ownership (no new capability — §4 above; the
+  kernel logs the denial); `--user` targets the caller's own overlay in
+  `applib`'s published app-data scope, which the service resolves from the
+  attested bundle identity, so no path names it and no `HOME` is needed to
+  reach it. `hide`/`show` record the visibility verdict on the target
+  store's own entry or as an overlay patch.
 - **Fail loud, fail closed** — refusals name their store side and reason on
   `stderr` (§2.24) with GNU-style exit codes (0/1/2); a malformed store
   refuses the whole operation; nothing partial is ever written.

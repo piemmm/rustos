@@ -65,10 +65,10 @@ pub const PINBOARD_MAX_REQUEST: usize = PinboardRequest::WIRE_LEN;
 /// document.
 ///
 /// A validation bound, not a capacity ([`crate::rlimit`] governs
-/// capacities): the document holds five short `key value` lines —
+/// capacities): the document holds five short `key = value` lines —
 /// `wallpaper`, `fit`, `backdrop`, `icons`, and `sort`
 /// (`plans/PINBOARD.md` §2). Four of those lines are a key name plus one
-/// closed-set word or a `#rrggbb` colour, a handful of bytes each; the
+/// closed-set word or a bare `rrggbb` colour, a handful of bytes each; the
 /// fifth, `wallpaper`, carries a path, and in practice that path never
 /// approaches the filesystem's own path bound — a shipped master under
 /// `/System/Graphics/Wallpapers/` or a user's own file a few path segments
@@ -82,9 +82,9 @@ pub const PINBOARD_DOCUMENT_MAX: usize = 512;
 ///
 /// Unlike [`crate::bounded_text::BoundedText`] — the shared bounded
 /// display-text validator every other short ABI text field builds on — a
-/// settings document is legitimately **multi-line**: the `key value`
-/// grammar `lib/wallpaper` owns (`plans/PINBOARD.md` §2) puts one setting
-/// per line. `BoundedText` forbids every control character including
+/// settings document is legitimately **multi-line**: the `key = value`
+/// grammar `lib/appconf` owns, over which `lib/wallpaper` defines the
+/// pinboard registry (`plans/PINBOARD.md` §2), puts one setting per line. `BoundedText` forbids every control character including
 /// `'\n'`, so it cannot represent this field; `PinboardDocument` is a
 /// sibling validator with the identical rule *except* that `'\n'` is
 /// privileged. No other control character is permitted — no `'\r'`, no

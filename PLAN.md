@@ -3182,9 +3182,12 @@ RISC OS iconbar idea was dropped; §3/§10 updated).
 Full **icon-bar** build-out (staged, `in progress` — T1–T12 done) —
 `plans/NEW-TASKBAR.md`: a first-class, folder-organised program library,
 landed **as data** (T1–T3): `lib/proglib` (closed folder taxonomy, validated
-entry model, `<id>.<field>` grammar, bounded fail-closed parser, canonical
-render, the machine ∪ user-overlay merge with the overlay's visibility
-verdict last, and the `reconcile` discovery fold), the
+entry model, the `<id>.<field>` registry over the one `lib/appconf` document
+engine, its fail-closed reading and canonical render, the machine ∪
+user-overlay merge with the overlay's visibility verdict last, and the
+`reconcile` discovery fold; the per-user overlay lives in `applib`'s published
+app-data scope since `plans/APPDATA.md` AD10, the machine layer stays a
+`/System/Settings` administrator document), the
 `userland/apps/applib` admin command (list/add/remove/hide/show/rescan, GNU
 conventions, fd-3 records), the signed `AppInfo` `library` listing (opt-in
 folder + icon; C header regenerated), and the image-build seeding
@@ -4045,9 +4048,11 @@ deliverable list (P1–P10) and its current state; it is not repeated here.
 Load-bearing decisions a future contributor needs:
 
 - **`lib/wallpaper`** (new `lib/*` crate, registered in `AGENTS.md` §3) owns
-  the settings document (`<home>/Settings/Pinboard/pinboard.conf`), the
-  wallpaper catalog, the fit geometry, and the five shipped masters in its
-  `assets/`, which `tools/syshelp` plants at `/System/Graphics/Wallpapers`.
+  the settings *registry* — the document itself lives in the desktop
+  session's published app-data scope (`plans/APPDATA.md` AD10), so no program
+  spells a path to it — the wallpaper catalog, the fit geometry, and the five
+  shipped masters in its `assets/`, which `tools/syshelp` plants at
+  `/System/Graphics/Wallpapers`.
   The default is `tairix-dark.jpg`.
 - **`lib/image` decodes JPEG** (baseline and progressive) as well as PNG,
   with a reduced-scale decode so an 8.3-megapixel master is never materialised
@@ -7824,7 +7829,7 @@ future contributor needs from this file:
 
 ---
 
-## APPDATA — per-app settings, secrets, blobs and temporary files (`plans/APPDATA.md`)  **[AD1–AD7 DONE; AD8–AD10 REMAINING]**
+## APPDATA — per-app settings, secrets, blobs and temporary files (`plans/APPDATA.md`)  **[AD1–AD10 DONE]**
 
 `plans/APPDATA.md` is the binding design and carries the settled decisions,
 the fixed bounds, and the per-stage state; it is not repeated here. What a
@@ -7952,8 +7957,64 @@ future contributor needs from this file:
   and every line of a document going out of scope. Putting it there rather than
   in each consumer is what makes it hold for every discard path, including ones a
   later change adds.
-- **Remaining:** descriptor-backed blobs (AD8), temporary files and their reaping
-  (AD9), and the remaining migrations (AD10).
+- **Landed (AD8):** the bulk scope. `Blobs/<name>` is handed over as a
+  **descriptor**, so the service makes the policy decision once at open and the
+  app then reads, writes, truncates, and `file_map`s directly against the kernel
+  VFS — the 1 MiB message ceiling makes proxying bytes impossible anyway. It
+  needed a kernel prerequisite first: `fd_grant` minted a hard-coded read-only
+  delegation and half the file API refused a delegated backing outright, so a
+  delegation now carries the **grantor descriptor's own** access, resolves whose
+  authority it runs under from one place for the whole path-backed file API, and
+  a writable one carries a **mandatory byte-extent ceiling** — an unbounded
+  writable delegation is not a representable request. The bulk ceilings are
+  fixed §24.4 containment bounds, not §24.1 capacities: they bound what one app
+  may hide in a store the *user* cannot list or delete, and because the gated
+  tree is owned by the service, no per-user filesystem quota would ever see
+  those bytes.
+- **Landed (AD9):** per-boot scratch. `TempCreate` carries no name and there is
+  no `TempOpen`, so the only way to hold a temporary file is to have just
+  created it — an app can never read scratch it did not write in this process,
+  not even its own from an earlier run. The name is `<boot-id>-<slot>`, so a
+  file says which boot it belongs to with no marker record to contradict, a
+  service restart reaps nothing, and the sweep is paid lazily by the create that
+  needs the room. A boot whose generator never seeded refuses *scratch* and
+  nothing else. No session-end reap and no `Cache/` scope were built, and
+  `plans/APPDATA.md` §3.14 records why each is a decision rather than an
+  omission.
+- **Landed (AD10):** the remaining migrations, which between them consumed every
+  scope. `fstree` on the private scope; the desktop pinboard on the *session's*
+  published scope, with the wallpaper chooser's unmediated read of
+  `~/Settings/Pinboard/pinboard.conf` replaced by a foreign read; the program
+  library's per-user overlay on *`applib`'s* published scope, with the desktop
+  session as the foreign reader. Every hand-rolled path is deleted, and with
+  them `lib/wallpaper`'s and `lib/proglib`'s own `key = value` engines — each is
+  now a closed registry over `lib/appconf` and owns no grammar of its own.
+- **A derived bound has to be derived from the right thing.** The catalog's
+  record ceiling is `MAX_SETTINGS / EntryKey::ALL.len()`, not `MAX_SETTINGS`:
+  a catalog bounded only by the *setting* count could be built in memory and
+  then not fit the document it must be written to, and a render that does not
+  fit would have to drop records — silently losing an application a user
+  registered. Dividing by what one record costs at its widest makes the render
+  total, so the refusal lands where a caller can act on it.
+- **A registry reads from whichever surface holds its document.** The first
+  *shared* document made "load my closed registry" a question asked of two
+  types — the client's layered handle and the engine's own `Document` — so
+  `tairix_appconf::Lookup` names it once and every registry is written once
+  against it. Two loaders would have been two ideas of what a missing key means.
+- **Tolerant for a store, strict for a channel, and a catalog strict
+  everywhere.** A stored value may predate the build, so one the registry
+  refuses costs only its own field and is *named*. A value that arrived over a
+  channel was rendered by a program from the same registry moments ago, so it is
+  a defect in the sender and the document is refused whole. A *catalog* is a
+  list rather than a set of fields, so there is no "costs only itself": a record
+  the reader skipped is an application that silently vanishes from a launcher.
+- **A store name is now provably a legal configuration key.** The program
+  library keys on `<id>.<field>`, and `validate_store_name` admitted a segment
+  beginning with `-`/`_` where the key grammar did not — a legal identifier that
+  would render to a key no document could hold. The store-name grammar is
+  tightened to match (it can only refuse more), `lib/appconf` pins the
+  containment, and `EntryId` defers to `validate_bundle_id` instead of carrying
+  a second character-class loop.
 - **A boot-floor program has no app identity.** The embedded program registry
   carries an `rxe` and a capability request, not a signed manifest, so a
   program launched from it cannot be attributed to a publisher and gets no

@@ -190,6 +190,21 @@ value comes back from a layer below rather than from the value removed. A
 standalone `reload` is a fresh view, not a merge: it discards unpublished edits,
 which is the contract a handle that is simply never committed already has.
 
+## Closed registries, and the open namespace that needs enumeration
+
+Most applications read a **closed** registry: a fixed set of keys they know, so
+they read those and leave everything else alone. Such an application writes its
+loader once against `tairix_appconf::Lookup`, which `Settings` implements — so
+the same loader serves its own layered handle and the `Document` a foreign read
+answers with.
+
+Some app data is an **open** namespace, though: a catalog, a recent-file list, a
+set of per-host preferences. `Settings::settings` answers those, listing every
+key the layers effectively carry, each once, with the value that wins. It costs
+no call: the client already holds the document and parsed it, which is exactly
+why the wire carries no listing operation at all — a paged listing can be
+spliced out of two snapshots and a whole one cannot.
+
 ## Reading what another application publishes
 
 `read_published` is the one call that names another application. It answers the

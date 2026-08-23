@@ -1,53 +1,37 @@
-//! The catalog document: its closed key registry, bounded fail-closed
-//! parser, and canonical render.
+//! The catalog document: its closed key registry, and the fail-closed
+//! reading and canonical render over the one `key = value` document engine.
 //!
-//! One line is one setting — a `<id>.<field>` key, whitespace, and the
-//! field's value — and the `#` comment grammar is the one every
-//! line-oriented TAIRiX configuration store shares
-//! ([`tairix_util::conf::strip_comment`]), so a comment is recognised here
-//! exactly as it is in the boot-time and network stores.
+//! One setting is one field of one record — a `<id>.<field>` dotted key —
+//! in a plain [`tairix_appconf`] document, which is the format the app-data
+//! store speaks. This module therefore defines the *registry* over that
+//! format and no grammar of its own: the document's length, line, key and
+//! value bounds, its comment rule, and its quoting are the engine's
+//! (`plans/APPDATA.md` §1.3).
 //!
-//! [`parse`] and [`render`] are inverses: parsing a rendered catalog yields
-//! the same catalog, and rendering a parsed one yields byte-identical text
-//! whatever order the records were built in. That is what lets an editor
-//! read a store, change one record, and write it back without disturbing
-//! anything else it holds.
+//! [`load`] and [`document`] are inverses: reading a rendered catalog yields
+//! the same catalog, and rendering a parsed one yields a byte-identical
+//! document whatever order the records were built in. That is what lets an
+//! editor read a store, change one record, and write it back without
+//! disturbing anything else it holds.
+//!
+//! # Fail closed, whole document
+//!
+//! A catalog is read **strictly**: a line the grammar did not read as a
+//! setting, a key outside the registry, or a value outside a field's
+//! validator refuses the whole document. That is the opposite of a
+//! *settings* registry, where one bad value costs only its own field, and
+//! deliberately so — a catalog is a list, and a half-read one silently drops
+//! or mis-files an application a user expects to find, with no field left
+//! standing to say that anything is missing.
 
 use alloc::collections::BTreeMap;
-use alloc::string::String;
 use core::fmt;
 
 use tairix_abi::LibraryCategory;
-use tairix_util::conf::strip_comment;
+use tairix_appconf::Document;
 
 use crate::catalog::{Catalog, EntryPatch, Record, MAX_ENTRIES};
-use crate::entry::{
-    DisplayName, EntryError, EntryId, IconAsset, LibraryEntry, MAX_BUNDLE_PATH_LEN,
-    MAX_DISPLAY_NAME_LEN, MAX_ENTRY_ID_LEN, MAX_ICON_ASSET_LEN,
-};
-
-/// Maximum length, in bytes, of a catalog line.
-///
-/// A line holds one key and one value, and the longest value any field
-/// admits is a bundle path, so this is that bound plus room for the key and
-/// its separating whitespace. It is a validation bound on untrusted input,
-/// not a capacity: a longer line is a malformed store.
-pub const MAX_LINE_LEN: usize = MAX_BUNDLE_PATH_LEN + MAX_ENTRY_ID_LEN + 32;
-
-/// Maximum length, in bytes, of a whole catalog document.
-///
-/// Sized to hold [`MAX_ENTRIES`] records at the width one full entry
-/// occupies, so the record bound is reachable while a hostile store cannot
-/// force the reader to hold an unbounded document in memory. Like
-/// [`MAX_LINE_LEN`] this is a security bound, so it is fixed rather than
-/// grown.
-pub const MAX_CATALOG_LEN: usize = MAX_ENTRIES
-    * (4 * MAX_ENTRY_ID_LEN
-        + MAX_DISPLAY_NAME_LEN
-        + MAX_BUNDLE_PATH_LEN
-        + MAX_ICON_ASSET_LEN
-        + LibraryCategory::MAX_ID_LEN
-        + 64);
+use crate::entry::{DisplayName, EntryError, EntryId, IconAsset, LibraryEntry};
 
 /// The closed set of fields a catalog line may set.
 ///
@@ -76,7 +60,7 @@ pub enum EntryKey {
 }
 
 impl EntryKey {
-    /// Every key, in the order [`render`] emits them.
+    /// Every key, in the order [`document`] emits them.
     pub const ALL: [Self; 5] = [
         Self::Name,
         Self::Bundle,
@@ -117,18 +101,12 @@ impl fmt::Display for EntryKey {
 /// silently drop or mis-file an application a user expects to find.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum ParseError {
-    /// The document exceeded [`MAX_CATALOG_LEN`].
-    DocumentTooLong,
-    /// A line exceeded [`MAX_LINE_LEN`].
-    LineTooLong,
-    /// A line held a key but no value.
-    MissingValue,
+    /// A line the `key = value` grammar did not read as a setting.
+    Unparsed,
     /// A key was not of the shape `<id>.<field>`.
     MalformedKey,
     /// The field named is outside the [`EntryKey`] registry.
     UnknownKey,
-    /// The same `(id, field)` pair was set twice.
-    DuplicateKey,
     /// The folder named is outside the [`LibraryCategory`] taxonomy.
     UnknownCategory,
     /// A `hidden` value was neither `true` nor `false`.
@@ -145,12 +123,9 @@ pub enum ParseError {
 impl fmt::Display for ParseError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::DocumentTooLong => f.write_str("catalog document is too long"),
-            Self::LineTooLong => f.write_str("line is too long"),
-            Self::MissingValue => f.write_str("setting has no value"),
+            Self::Unparsed => f.write_str("line is not a setting"),
             Self::MalformedKey => f.write_str("key is not of the form <id>.<field>"),
             Self::UnknownKey => f.write_str("unknown field"),
-            Self::DuplicateKey => f.write_str("field is set twice for one entry"),
             Self::UnknownCategory => f.write_str("unknown folder"),
             Self::MalformedFlag => f.write_str("flag is neither true nor false"),
             Self::Field(error) => write!(f, "{error}"),
@@ -200,12 +175,11 @@ impl From<EntryError> for ParseError {
 /// The fields gathered for one identifier before it is resolved into a
 /// [`Record`].
 ///
-/// Each field remembers nothing but its value; the line the identifier was
-/// first seen on is kept so a record-level refusal (an incomplete entry, a
-/// hidden declaration) points a reader at the block that caused it.
+/// Each field remembers nothing but its value. A field set twice simply
+/// takes the later setting, which is the format engine's own rule for a
+/// repeated key and not a second opinion about it.
 #[derive(Default)]
 struct Draft {
-    first_line: usize,
     name: Option<DisplayName>,
     bundle: Option<crate::entry::BundlePath>,
     category: Option<LibraryCategory>,
@@ -214,16 +188,6 @@ struct Draft {
 }
 
 impl Draft {
-    fn is_set(&self, key: EntryKey) -> bool {
-        match key {
-            EntryKey::Name => self.name.is_some(),
-            EntryKey::Bundle => self.bundle.is_some(),
-            EntryKey::Category => self.category.is_some(),
-            EntryKey::Icon => self.icon.is_some(),
-            EntryKey::Hidden => self.hidden.is_some(),
-        }
-    }
-
     fn set(&mut self, key: EntryKey, value: &str) -> Result<(), ParseError> {
         match key {
             EntryKey::Name => self.name = Some(DisplayName::new(value)?),
@@ -299,122 +263,112 @@ fn split_key(key: &str) -> Result<(&str, EntryKey), ParseError> {
     Ok((id, key))
 }
 
-/// Parse a catalog document.
+/// Read a catalog out of `document`.
+///
+/// A duplicate `(id, field)` is not a refusal: the format engine defines
+/// what a repeated key means — the last setting of it wins, so appending a
+/// line overrides — and this registry does not get a second opinion about
+/// it. Everything the registry itself judges is a whole-document refusal.
 ///
 /// # Errors
 ///
 /// [`CatalogError`] — the document is refused whole, never half-applied. A
 /// reader falls back to [`Catalog::default`] on refusal rather than guessing
 /// at a partial intent; a writer refuses the edit.
-pub fn parse(text: &str) -> Result<Catalog, CatalogError> {
-    if text.len() > MAX_CATALOG_LEN {
+pub fn load(document: &Document) -> Result<Catalog, CatalogError> {
+    if let Some(line) = document.unparsed().next() {
         return Err(CatalogError {
-            line: None,
-            kind: ParseError::DocumentTooLong,
+            line: Some(line.line),
+            kind: ParseError::Unparsed,
         });
     }
 
     let mut drafts: BTreeMap<EntryId, Draft> = BTreeMap::new();
-    for (index, raw) in text.lines().enumerate() {
-        let number = index + 1;
-        let at = |kind: ParseError| CatalogError {
-            line: Some(number),
-            kind,
-        };
-        if raw.len() > MAX_LINE_LEN {
-            return Err(at(ParseError::LineTooLong));
-        }
-        let line = strip_comment(raw).trim();
-        if line.is_empty() {
-            continue;
-        }
-        let (key, value) = line
-            .split_once(char::is_whitespace)
-            .ok_or_else(|| at(ParseError::MissingValue))?;
-        let value = value.trim();
-        if value.is_empty() {
-            return Err(at(ParseError::MissingValue));
-        }
-        let (id, field) = split_key(key).map_err(at)?;
-        let id = EntryId::new(id).map_err(|error| at(error.into()))?;
+    for setting in document.settings() {
+        // The engine reports a line per occurrence and answers `get` with the
+        // last, so a repeated key is applied in file order and the last one
+        // stands — exactly what the engine's own reader would answer.
+        let unplaced = |kind: ParseError| CatalogError { line: None, kind };
+        let (id, field) = split_key(setting.key).map_err(unplaced)?;
+        let id = EntryId::new(id).map_err(|error| unplaced(error.into()))?;
 
+        // The record bound, enforced here rather than inferred from the
+        // format's: a document of one-setting records reaches this long before
+        // the engine's setting bound, so the registry has to say no itself.
         if !drafts.contains_key(&id) && drafts.len() >= MAX_ENTRIES {
-            return Err(at(ParseError::TooManyEntries));
+            return Err(unplaced(ParseError::TooManyEntries));
         }
-        let draft = drafts.entry(id).or_insert(Draft {
-            first_line: number,
-            ..Draft::default()
-        });
-        if draft.is_set(field) {
-            return Err(at(ParseError::DuplicateKey));
-        }
-        draft.set(field, value).map_err(at)?;
+        let draft = drafts.entry(id).or_default();
+        draft.set(field, setting.value).map_err(unplaced)?;
     }
 
     let mut catalog = Catalog::new();
     for (id, draft) in drafts {
-        let line = Some(draft.first_line);
         let record = draft
             .into_record(id.clone())
-            .map_err(|kind| CatalogError { line, kind })?;
+            .map_err(|kind| CatalogError { line: None, kind })?;
         let held = match record {
             Record::Entry(entry) => catalog.insert(entry),
             Record::Patch(patch) => catalog.patch(id, patch),
         };
         held.map_err(|_| CatalogError {
-            line,
+            line: None,
             kind: ParseError::TooManyEntries,
         })?;
     }
     Ok(catalog)
 }
 
-/// Render `catalog` as the canonical document text.
+/// `catalog` as the canonical document.
 ///
 /// Records are emitted in identifier order, one block per record with its
 /// fields in [`EntryKey::ALL`] order, so a catalog has exactly one spelling:
-/// two writers holding the same records produce byte-identical text, and a
-/// diff of a store shows only what actually changed.
+/// two writers holding the same records produce byte-identical documents,
+/// and a diff of a store shows only what actually changed.
+///
+/// A field the format engine would refuse is dropped rather than written
+/// wrong. It cannot happen: every registry key is a dotted identifier inside
+/// the key grammar and every value is already bounded by the entry model's
+/// own validator, which `every_field_a_record_can_hold_is_a_legal_setting`
+/// pins against the engine's own definitions.
 #[must_use]
-pub fn render(catalog: &Catalog) -> String {
-    use core::fmt::Write as _;
-
-    let mut text = String::new();
+pub fn document(catalog: &Catalog) -> Document {
+    let mut document = Document::new();
     for (id, record) in catalog.records() {
-        let mut line = |key: EntryKey, value: &str| {
-            let _ = writeln!(text, "{id}.{key} {value}");
+        let mut set = |key: EntryKey, value: &str| {
+            let _ = document.set(&alloc::format!("{id}.{key}"), value);
         };
         match record {
             Record::Entry(entry) => {
-                line(EntryKey::Name, entry.name().as_str());
-                line(EntryKey::Bundle, entry.bundle().as_str());
-                line(EntryKey::Category, entry.category().as_str());
+                set(EntryKey::Name, entry.name().as_str());
+                set(EntryKey::Bundle, entry.bundle().as_str());
+                set(EntryKey::Category, entry.category().as_str());
                 if let Some(icon) = entry.icon() {
-                    line(EntryKey::Icon, icon.as_str());
+                    set(EntryKey::Icon, icon.as_str());
                 }
                 // Visible is the default, so only a suppression is worth a
-                // line; an explicit `hidden false` re-renders to nothing.
+                // setting; an explicit `hidden false` renders to nothing.
                 if entry.hidden() {
-                    line(EntryKey::Hidden, render_flag(true));
+                    set(EntryKey::Hidden, render_flag(true));
                 }
             }
             Record::Patch(patch) => {
                 if let Some(name) = patch.name() {
-                    line(EntryKey::Name, name.as_str());
+                    set(EntryKey::Name, name.as_str());
                 }
                 if let Some(category) = patch.category() {
-                    line(EntryKey::Category, category.as_str());
+                    set(EntryKey::Category, category.as_str());
                 }
                 if let Some(icon) = patch.icon() {
-                    line(EntryKey::Icon, icon.as_str());
+                    set(EntryKey::Icon, icon.as_str());
                 }
                 if let Some(hidden) = patch.hidden() {
-                    line(EntryKey::Hidden, render_flag(hidden));
+                    set(EntryKey::Hidden, render_flag(hidden));
                 }
             }
         }
     }
-    text
+    document
 }
 
 #[cfg(test)]

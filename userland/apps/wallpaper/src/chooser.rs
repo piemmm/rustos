@@ -292,9 +292,14 @@ impl Chooser {
 
     /// Render [`Self::to_settings`] as the canonical document text, ready to
     /// post to the desktop session (`plans/PINBOARD.md` §6).
+    ///
+    /// The chooser posts a document rather than writing one: an application
+    /// publishes only its *own* app-data scope, so this program cannot write
+    /// the desktop's settings at all — it asks, and the session decides
+    /// (`plans/APPDATA.md` §3.11).
     #[must_use]
     pub fn settings_document(&self) -> String {
-        tairix_wallpaper::settings::render(&self.to_settings())
+        self.to_settings().document().render()
     }
 
     /// The wallpaper the preview panel is showing, whether or not its pixels

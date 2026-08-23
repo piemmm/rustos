@@ -744,7 +744,9 @@ fn the_rendered_document_matches_the_state_the_controls_are_in() {
     let tile = tile_rect(&chooser, 2, style);
     let _ = click(&mut chooser, centre(tile), style);
     let document = chooser.settings_document();
-    let parsed = tairix_wallpaper::settings::parse(&document).expect("a valid document");
+    // The document goes on the wire to the session, which reads it with the
+    // registry's *strict* reading — so that is what this asserts against.
+    let parsed = tairix_wallpaper::decode(&document).expect("a valid document");
     assert_eq!(parsed, chooser.to_settings());
     assert_eq!(
         parsed.wallpaper,

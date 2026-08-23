@@ -112,17 +112,20 @@ pub(crate) fn value_is_renderable(value: &str) -> bool {
 /// identifier its signed `AppInfo` manifest declares.
 ///
 /// The identifier is what a user overlay patches against and what the
-/// store grammar keys a line on, so it is validated once here and never
-/// re-checked: it is non-empty, bounded by [`MAX_ENTRY_ID_LEN`], built
-/// only from ASCII alphanumerics and the `.`, `-`, `_` separators, and
-/// begins and ends with an alphanumeric. That charset makes an identifier
-/// a single grammar token — it cannot contain whitespace, a comment
-/// marker, or a line break — so a hostile bundle name can never inject a
-/// second setting into a rendered store.
+/// document keys a setting on, so it is validated once here and never
+/// re-checked, through the **one** grammar every consumer of a bundle
+/// identifier applies ([`tairix_abi::appinfo::validate_bundle_id`]): dotted
+/// segments of ASCII lowercase letters, digits, `-` and `_`, each segment
+/// non-empty and beginning with a letter or digit, bounded by
+/// [`MAX_ENTRY_ID_LEN`]. That grammar makes an identifier a single token —
+/// it cannot hold whitespace, a comment marker, a quote, or a line break —
+/// so a hostile bundle name can never inject a second setting into a
+/// rendered document, and it is inside the configuration key grammar, so
+/// `<id>.<field>` is always a key a document can hold.
 ///
 /// A reverse-DNS identifier (`com.example.editor`) is deliberately valid:
-/// the store splits a line's key at its **last** `.`, and the key registry
-/// holds no dotted key, so the split is unambiguous.
+/// the registry splits a key at its **last** `.`, and no field name holds
+/// one, so the split is unambiguous.
 #[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
 pub struct EntryId(String);
 
@@ -141,19 +144,11 @@ impl EntryId {
         if id.len() > MAX_ENTRY_ID_LEN {
             return Err(EntryError::IdTooLong);
         }
-        let bytes = id.as_bytes();
-        let is_separator = |b: u8| matches!(b, b'.' | b'-' | b'_');
-        if !bytes
-            .iter()
-            .all(|&b| b.is_ascii_alphanumeric() || is_separator(b))
-        {
-            return Err(EntryError::MalformedId);
-        }
-        let first = bytes[0];
-        let last = bytes[bytes.len() - 1];
-        if !first.is_ascii_alphanumeric() || !last.is_ascii_alphanumeric() {
-            return Err(EntryError::MalformedId);
-        }
+        // An entry identifier *is* a bundle identifier, so it is judged by
+        // the one grammar every consumer of one applies rather than by a
+        // second character-class loop here — which would be one more chance
+        // to disagree about whether `..` is a name.
+        tairix_abi::appinfo::validate_bundle_id(id).map_err(|_| EntryError::MalformedId)?;
         Ok(Self(id.to_string()))
     }
 

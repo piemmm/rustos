@@ -1,13 +1,15 @@
-//! Deterministic fuzz harness for the program-library catalog store.
+//! Deterministic fuzz harness for the program-library catalog registry.
 //!
-//! Invariants, for any bytes an untrusted `library.conf` may carry:
+//! The `key = value` grammar is `lib/appconf`'s and is fuzzed there; what
+//! this harness holds is the **registry** over it, for any bytes an
+//! untrusted catalog document may carry:
 //!
-//! 1. [`parse`] never panics on any UTF-8 input, and an accepted document
-//!    never yields more than [`MAX_ENTRIES`] records.
-//! 2. [`render`] and [`parse`] are inverses: an accepted catalog re-renders
-//!    to a document that parses back equal, and the rendered text is itself
-//!    within [`MAX_CATALOG_LEN`], so a writer can never emit a store the
-//!    reader would refuse as too long.
+//! 1. [`load`] never panics on any document, and an accepted one never
+//!    yields more than [`MAX_ENTRIES`] records.
+//! 2. [`document`] and [`load`] are inverses: an accepted catalog re-renders
+//!    to a document that reads back equal, and the rendered text is itself
+//!    one the engine will parse, so a writer can never emit a store the
+//!    reader would refuse.
 //! 3. [`merge`] never panics for any pair of accepted catalogs, resolves
 //!    every patch, stays within the record bound, and resolves visibility
 //!    with the overlay's verdict last: an identifier survives exactly when
@@ -23,7 +25,25 @@
 //! The fixed sweep runs under plain `cargo test`; under `cargo xtask fuzz`
 //! the same seeded stream keeps being drawn until the budget elapses.
 
-use tairix_proglib::{merge, parse, render, EntryPatch, Record, MAX_CATALOG_LEN, MAX_ENTRIES};
+use tairix_appconf::Document;
+use tairix_proglib::{
+    document as catalog_document, load, merge, Catalog, CatalogError, EntryPatch, Record,
+    MAX_ENTRIES,
+};
+
+/// Read `text` the way a store's reader does: through the format engine,
+/// then the registry. A document the engine itself refuses is reported as a
+/// refusal too, so the harness walks one accept/reject boundary rather than
+/// two.
+fn read(text: &str) -> Result<Catalog, Option<CatalogError>> {
+    let parsed = Document::parse(text).map_err(|_| None)?;
+    load(&parsed).map_err(Some)
+}
+
+/// The canonical rendered text of `catalog`.
+fn rendered(catalog: &Catalog) -> String {
+    catalog_document(catalog).render()
+}
 
 /// Fixed-iteration sweep run when no budget is set.
 const SMOKE_ITERATIONS: u64 = 5_000;
@@ -134,7 +154,7 @@ fn line(rng: &mut Lcg, id: &str, field: &str, value: &str) -> String {
     } else {
         value
     };
-    let _ = write!(out, "{id}.{field} {value}");
+    let _ = write!(out, "{id}.{field} = {value}");
     out
 }
 
@@ -209,23 +229,18 @@ fn document(rng: &mut Lcg) -> String {
 /// The round-trip invariant. Returns whether the document was accepted, so
 /// the corpus-quality test can measure the generator.
 fn check_round_trip(doc: &str) -> bool {
-    let Ok(catalog) = parse(doc) else {
+    let Ok(catalog) = read(doc) else {
         return false;
     };
     assert!(catalog.len() <= MAX_ENTRIES);
 
-    let rendered = render(&catalog);
-    assert!(
-        rendered.len() <= MAX_CATALOG_LEN,
-        "a rendered catalog exceeded the document bound"
-    );
-    let reparsed = parse(&rendered).expect("a rendered catalog re-parses");
-    assert_eq!(catalog, reparsed, "render/parse is not a round trip");
+    let reread = read(&rendered(&catalog)).expect("a rendered catalog re-reads");
+    assert_eq!(catalog, reread, "render/read is not a round trip");
     true
 }
 
 fn check_merge(machine: &str, overlay: &str) {
-    let (Ok(machine), Ok(overlay)) = (parse(machine), parse(overlay)) else {
+    let (Ok(machine), Ok(overlay)) = (read(machine), read(overlay)) else {
         return;
     };
 
@@ -258,13 +273,13 @@ fn check_merge(machine: &str, overlay: &str) {
         );
     }
 
-    let rendered = render(&resolved);
-    let reparsed = parse(&rendered).expect("a rendered resolved catalog re-parses");
+    let rendered = rendered(&resolved);
+    let reparsed = read(&rendered).expect("a rendered resolved catalog re-reads");
     assert_eq!(resolved, reparsed);
 }
 
 #[test]
-fn generated_documents_round_trip_through_render() {
+fn generated_documents_round_trip_through_the_canonical_render() {
     let mut rng = Lcg::new(tairix_fuzzseed::start(
         "generated_documents_round_trip_through_render",
         tairix_fuzzseed::FUZZ_SEED_ENV,
@@ -316,7 +331,7 @@ fn arbitrary_ascii_never_panics() {
                 // is always valid UTF-8, so `parse` sees a legal `&str`.
                 buf.push(char::from(u8::try_from(rng.below(128)).expect("byte fits")));
             }
-            let _ = parse(&buf);
+            let _ = read(&buf);
         }
         if !tairix_fuzzseed::within_budget(deadline) {
             break;

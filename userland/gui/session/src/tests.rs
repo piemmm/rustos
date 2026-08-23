@@ -30,8 +30,8 @@ use tairix_icon::{
 };
 use tairix_log::{Event, Sink};
 use tairix_proglib::{
-    user_library_path, BundlePath, Catalog, DisplayName, EntryId, IconAsset, LibraryCategory,
-    LibraryEntry, MACHINE_LIBRARY_PATH, MAX_CATALOG_LEN,
+    BundlePath, Catalog, DisplayName, EntryId, IconAsset, LibraryCategory, LibraryEntry,
+    LIBRARY_PATH, LIBRARY_PUBLISHER, MAX_ENTRIES,
 };
 use tairix_reclaim::{CacheLedger, PressureBand, ReclaimCache, ReportedPressure};
 use tairix_taskbar::{
@@ -3459,30 +3459,44 @@ fn picker_abort_is_scoped_to_the_requesting_window() {
     assert_eq!(picker.wm_id(), None);
 }
 
+/// A fake app-data service standing in for the library-admin command's
+/// published scope, holding `overlay` when the account has one.
+///
+/// It speaks the real `appdata-v1` codec, so the session's foreign read goes
+/// over the wire the service actually answers rather than a mock of it. The
+/// word it is built with selects nothing: a published scope has no
+/// bundle-shipped layer.
+fn library_host(overlay: Option<&str>) -> tairix_appdata::fake::FakeService {
+    let service = tairix_appdata::fake::FakeService::for_word("desktop");
+    match overlay {
+        Some(text) => service.with_foreign(LIBRARY_PUBLISHER, text),
+        None => service,
+    }
+}
+
 #[test]
-fn load_library_merges_machine_and_user_stores() {
-    let machine_conf = "os.tairix.editor.name Editor\nos.tairix.editor.bundle /Apps/editor.app\nos.tairix.editor.category Office\n";
-    let user_conf = "os.tairix.editor.name My Editor\nos.tairix.files.name Files\nos.tairix.files.bundle /Apps/files.app\nos.tairix.files.category Office\n";
+fn load_library_merges_the_machine_store_and_the_published_overlay() {
+    let machine_conf = "os.tairix.editor.name = Editor\nos.tairix.editor.bundle = /Apps/editor.app\nos.tairix.editor.category = Office\n";
+    let user_conf = "os.tairix.editor.name = My Editor\nos.tairix.files.name = Files\nos.tairix.files.bundle = /Apps/files.app\nos.tairix.files.category = Office\n";
 
-    let mut reader = MemoryAssets::default()
-        .with(MACHINE_LIBRARY_PATH, machine_conf.as_bytes())
-        .with(
-            &user_library_path("/Users/alice").unwrap(),
-            user_conf.as_bytes(),
-        );
-
-    // (a) absent stores -> empty catalog, no warnings
-    let loaded = load_library(&mut MemoryAssets::default(), None);
+    // (a) neither layer present -> empty catalog, no warnings. An
+    // application that publishes nothing is the ordinary fresh-account state
+    // and is deliberately indistinguishable from one that has never run.
+    let mut host = library_host(None);
+    let loaded = load_library(&mut MemoryAssets::default(), &mut host);
     assert!(loaded.catalog.is_empty());
     assert!(loaded.warnings.is_empty());
 
-    // (b) machine store parses -> entries listed
-    let loaded = load_library(&mut reader, None);
+    // (b) machine store reads -> entries listed
+    let mut reader = MemoryAssets::default().with(LIBRARY_PATH, machine_conf.as_bytes());
+    let mut host = library_host(None);
+    let loaded = load_library(&mut reader, &mut host);
     assert_eq!(loaded.catalog.len(), 1);
     assert!(loaded.warnings.is_empty());
 
-    // (c) user overlay merges (overlay name wins)
-    let loaded = load_library(&mut reader, Some("/Users/alice"));
+    // (c) the published overlay merges over it (the overlay's name wins)
+    let mut host = library_host(Some(user_conf));
+    let loaded = load_library(&mut reader, &mut host);
     assert_eq!(loaded.catalog.len(), 2);
     let record = loaded
         .catalog
@@ -3493,38 +3507,39 @@ fn load_library_merges_machine_and_user_stores() {
     };
     assert_eq!(entry.name().as_str(), "My Editor");
 
-    // (d) malformed machine store -> empty catalog + warning
-    let mut reader = MemoryAssets::default().with(MACHINE_LIBRARY_PATH, b"malformed");
-    let loaded = load_library(&mut reader, None);
+    // (d) a machine store the registry refuses -> empty catalog + warning
+    let mut reader = MemoryAssets::default().with(LIBRARY_PATH, b"malformed");
+    let mut host = library_host(None);
+    let loaded = load_library(&mut reader, &mut host);
     assert!(loaded.catalog.is_empty());
     assert_eq!(loaded.warnings.len(), 1);
-    assert!(loaded.warnings[0].contains(MACHINE_LIBRARY_PATH));
+    assert!(loaded.warnings[0].contains(LIBRARY_PATH));
     assert!(loaded.warnings[0].ends_with("; using an empty catalog\n"));
 
-    // (e) oversized store
-    let mut reader =
-        MemoryAssets::default().with(MACHINE_LIBRARY_PATH, &vec![b'a'; MAX_CATALOG_LEN + 1]);
-    let loaded = load_library(&mut reader, None);
+    // (e) a machine store past the format's own document bound
+    let mut reader = MemoryAssets::default().with(
+        LIBRARY_PATH,
+        &vec![b'a'; tairix_appconf::MAX_DOCUMENT_LEN + 1],
+    );
+    let mut host = library_host(None);
+    let loaded = load_library(&mut reader, &mut host);
     assert!(loaded.catalog.is_empty());
     assert_eq!(loaded.warnings.len(), 1);
-    assert!(loaded.warnings[0].contains("oversized"));
+    assert!(loaded.warnings[0].contains("too large"));
 
     // (f) non-UTF-8
-    let mut reader = MemoryAssets::default().with(MACHINE_LIBRARY_PATH, b"\xff\xfe");
-    let loaded = load_library(&mut reader, None);
+    let mut reader = MemoryAssets::default().with(LIBRARY_PATH, b"\xff\xfe");
+    let mut host = library_host(None);
+    let loaded = load_library(&mut reader, &mut host);
     assert!(loaded.catalog.is_empty());
     assert_eq!(loaded.warnings.len(), 1);
     assert!(loaded.warnings[0].contains("not valid UTF-8"));
 
-    // (g) home None -> overlay never read. With no machine store, the
-    // overlay's own declaration (files) survives alone: its editor line
-    // names no bundle, so it is a patch, and a patch whose identifier no
-    // document declares is discarded by the merge.
-    let mut reader = MemoryAssets::default().with(
-        &user_library_path("/Users/alice").unwrap(),
-        user_conf.as_bytes(),
-    );
-    let loaded = load_library(&mut reader, Some("/Users/alice"));
+    // (g) the overlay alone: its editor line names no bundle, so it is a
+    // patch, and a patch whose identifier no layer declares is discarded by
+    // the merge. Its own declaration (files) stands.
+    let mut host = library_host(Some(user_conf));
+    let loaded = load_library(&mut MemoryAssets::default(), &mut host);
     assert_eq!(loaded.catalog.len(), 1);
     assert!(
         loaded
@@ -3533,8 +3548,16 @@ fn load_library_merges_machine_and_user_stores() {
             .is_some(),
         "the overlay's own declaration stands without a machine store"
     );
-    let loaded = load_library(&mut reader, None);
+
+    // (h) an overlay the session could not reach at all is its own warning:
+    // that is the caller's refusal, not the publisher's silence.
+    let mut host = library_host(None);
+    host.refusal().set(Some(Errno::DeviceOffline));
+    let loaded = load_library(&mut MemoryAssets::default(), &mut host);
     assert!(loaded.catalog.is_empty());
+    assert_eq!(loaded.warnings.len(), 1);
+    assert!(loaded.warnings[0].contains(LIBRARY_PUBLISHER));
+    assert!(loaded.warnings[0].contains("DeviceOffline"));
 }
 
 #[test]
@@ -7540,7 +7563,7 @@ fn the_library_resolves_artwork_only_for_the_rows_it_shows() {
     let mut cache = test_artwork_cache(&NORMAL_PRESSURE, TEST_FRAME_BYTES);
     let mut cat = Catalog::new();
     let mut assets = MemoryAssets::default();
-    for index in 0..MAX_CATALOG_LEN.min(96) {
+    for index in 0..MAX_ENTRIES.min(96) {
         let stem = format!("app{index:02}");
         cat.insert(entry_with_icon(
             &stem,

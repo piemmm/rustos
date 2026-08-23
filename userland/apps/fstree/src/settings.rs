@@ -1,27 +1,67 @@
 //! Persisted session preferences: the configurable confirmation prompts.
 //!
-//! The settings live in the user's own settings tree —
-//! `<home>/Settings/fstree/config` — never beside the binary (an app writes
-//! only its per-user state). The file is a plain `key=value` line format
-//! read and written through the injected [`Fs`] seam, so the round-trip is
-//! host-testable and every permission check stays kernel-side.
+//! They live in this application's own app-data store, reached through
+//! [`tairix_appdata`] — so they are private to `fstree`, gated on the
+//! kernel-attested bundle identity, and readable or writable by no other
+//! application the user launches. Nothing here spells a path, a user, or a
+//! bundle identifier: the store derives all three from the identity the
+//! kernel attests for this task.
 //!
-//! Parsing fails **safe**: a missing file, a refused read, an unknown key,
-//! or a malformed value leaves the affected setting at its default — and
-//! every default keeps its confirmation *on*, so damage-limiting questions
-//! are never silently lost to a corrupt file.
+//! This module is the **closed registry** over the store's open key
+//! namespace: the fixed set of keys the file manager reads
+//! ([`SettingKey`]), their typed bridges, and nothing else. A key outside
+//! the registry is one this session leaves alone rather than destroying on
+//! the next save.
+//!
+//! Reading fails **safe**: a store the service cannot serve, an absent key,
+//! or a value that is not a boolean leaves the affected setting at its
+//! default — and every default keeps its confirmation *on*, so a
+//! damage-limiting question is never silently lost. A refused value is
+//! *named* to the caller rather than swallowed, so one broken setting costs
+//! only itself and the user can be told which.
 
-use alloc::format;
-use alloc::string::String;
+use alloc::vec::Vec;
 
 use tairix_abi::Errno;
+use tairix_appdata::Settings as SettingsStore;
 
-use crate::fs::Fs;
+/// One key of the closed preference registry.
+///
+/// Adding a key means adding a variant here, its row in [`SettingKey::ALL`],
+/// its field on [`Settings`], and its arms in this module's private
+/// `set_field` and `field_value` bridges — the compiler then forces every
+/// consumer to state what the new key means.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum SettingKey {
+    /// `confirm.delete` — whether a single delete (`d`) asks first.
+    ConfirmDelete,
+    /// `confirm.batch-delete` — whether a batch delete over the tagged set
+    /// asks first.
+    ConfirmBatchDelete,
+}
 
-/// Upper bound on the settings file read: the file carries two short
-/// lines, so one page is generous; a larger file is read only this far
-/// (later garbage cannot balloon the session).
-const CONFIG_MAX: usize = 4096;
+impl SettingKey {
+    /// Every registry key, in the order the settings menu lists them.
+    pub const ALL: [Self; 2] = [Self::ConfirmDelete, Self::ConfirmBatchDelete];
+
+    /// The canonical key spelling in the store.
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::ConfirmDelete => "confirm.delete",
+            Self::ConfirmBatchDelete => "confirm.batch-delete",
+        }
+    }
+
+    /// How the settings menu labels the key.
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::ConfirmDelete => "confirm delete",
+            Self::ConfirmBatchDelete => "confirm batch delete",
+        }
+    }
+}
 
 /// The persisted preferences. Every field defaults to the safe choice.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -42,92 +82,88 @@ impl Default for Settings {
 }
 
 impl Settings {
-    /// Parse the config file's text. Unknown keys and malformed lines are
-    /// ignored (the setting keeps its default); only an explicit
-    /// `key=off` disables a confirmation.
+    /// The preferences the store's layers imply, and every key whose stored
+    /// value the registry refused.
+    ///
+    /// A key no layer sets reads as its documented default, so a fresh
+    /// account and an unreachable store both yield [`Settings::default`]. A
+    /// value that is not a boolean leaves that one setting at its default and
+    /// is named in the returned list, so the caller reports the broken
+    /// setting instead of running on a value the user cannot account for.
     #[must_use]
-    pub fn parse(text: &str) -> Self {
+    pub fn load(store: &SettingsStore<'_>) -> (Self, Vec<SettingKey>) {
         let mut settings = Self::default();
-        for line in text.lines() {
-            let Some((key, value)) = line.split_once('=') else {
-                continue;
-            };
-            let on = match value.trim() {
-                "on" => true,
-                "off" => false,
-                _ => continue,
-            };
-            match key.trim() {
-                "confirm-delete" => settings.confirm_delete = on,
-                "confirm-batch-delete" => settings.confirm_batch_delete = on,
-                _ => {}
+        let mut refused = Vec::new();
+        for key in SettingKey::ALL {
+            match store.bool(key.name()) {
+                Ok(Some(value)) => set_field(&mut settings, key, value),
+                Ok(None) => {}
+                Err(_) => refused.push(key),
             }
         }
-        settings
+        (settings, refused)
     }
 
-    /// The config file's text for these settings.
-    #[must_use]
-    pub fn encode(&self) -> String {
-        format!(
-            "confirm-delete={}\nconfirm-batch-delete={}\n",
-            if self.confirm_delete { "on" } else { "off" },
-            if self.confirm_batch_delete {
-                "on"
-            } else {
-                "off"
-            },
-        )
-    }
-
-    /// Load the settings from `<home>/Settings/fstree/config` through the
-    /// seam. Any failure — no file, a refused read, undecodable bytes —
-    /// yields the defaults; a missing preference file is the ordinary
-    /// first-run state, not an error.
-    #[must_use]
-    pub fn load(fs: &mut dyn Fs, home: &str) -> Self {
-        let path = config_path(home);
-        let mut buf = alloc::vec![0u8; CONFIG_MAX];
-        let Ok(used) = fs.read(&path, 0, &mut buf) else {
-            return Self::default();
-        };
-        let Ok(text) = core::str::from_utf8(&buf[..used]) else {
-            return Self::default();
-        };
-        Self::parse(text)
-    }
-
-    /// Persist the settings to `<home>/Settings/fstree/config`, creating
-    /// the `fstree` settings directory when absent (`Settings/` itself is
-    /// part of every user's fixed home shape).
+    /// Publish these preferences, writing only what the store's layers do not
+    /// already imply.
+    ///
+    /// A key whose effective value already matches is left alone, so saving
+    /// preferences the user did not change rewrites nothing and a value that
+    /// comes from the machine's policy is never copied up into the user's own
+    /// document. Both settings land as one atomic commit.
     ///
     /// # Errors
     ///
-    /// Any [`Errno`] the filesystem raises; the caller reports it and the
-    /// in-memory settings stand for the session.
-    pub fn store(&self, fs: &mut dyn Fs, home: &str) -> Result<(), Errno> {
-        let dir = format!("{}/Settings/fstree", trimmed(home));
-        match fs.mkdir(&dir) {
-            Ok(()) | Err(Errno::AlreadyExists) => {}
-            Err(errno) => return Err(errno),
+    /// The app-data service's own typed refusal — no service bound, no store
+    /// for a caller running no signed bundle, or an unreachable volume. The
+    /// edits stay staged, so a caller may retry.
+    pub fn save(&self, store: &mut SettingsStore<'_>) -> Result<(), Errno> {
+        // The comparison is on the decoded *meaning*, not on the rendered
+        // text, which is what makes it more than the client's own no-op
+        // check: a layer beneath may spell the same boolean `off` where a
+        // write renders `false`, and shadowing a policy value with an
+        // equal one is exactly the copying-up the store exists to avoid.
+        let (stored, _) = Self::load(store);
+        for key in SettingKey::ALL {
+            let value = field_value(*self, key);
+            if field_value(stored, key) == value {
+                continue;
+            }
+            // The registry's own spellings are inside the format's grammar and
+            // a boolean renders as one of two fixed words, so a refusal here
+            // would be a defect in this module rather than a user's mistake;
+            // it is reported as a refused write either way.
+            store
+                .set_bool(key.name(), value)
+                .map_err(|_| Errno::OutOfRange)?;
         }
-        let path = config_path(home);
-        fs.create(&path)?;
-        fs.write(&path, 0, self.encode().as_bytes())
+        store.commit()
+    }
+
+    /// Whether `key` is currently on.
+    #[must_use]
+    pub const fn is_on(self, key: SettingKey) -> bool {
+        field_value(self, key)
+    }
+
+    /// Flip `key`.
+    pub fn toggle(&mut self, key: SettingKey) {
+        set_field(self, key, !field_value(*self, key));
     }
 }
 
-/// The config file's full path under `home`.
-#[must_use]
-pub fn config_path(home: &str) -> String {
-    format!("{}/Settings/fstree/config", trimmed(home))
+/// Set `key` on `settings`.
+fn set_field(settings: &mut Settings, key: SettingKey, value: bool) {
+    match key {
+        SettingKey::ConfirmDelete => settings.confirm_delete = value,
+        SettingKey::ConfirmBatchDelete => settings.confirm_batch_delete = value,
+    }
 }
 
-/// `home` without a trailing separator, so joins never double one.
-fn trimmed(home: &str) -> &str {
-    if home == "/" {
-        home
-    } else {
-        home.trim_end_matches('/')
+/// The current value of `key` on `settings`.
+const fn field_value(settings: Settings, key: SettingKey) -> bool {
+    match key {
+        SettingKey::ConfirmDelete => settings.confirm_delete,
+        SettingKey::ConfirmBatchDelete => settings.confirm_batch_delete,
     }
 }

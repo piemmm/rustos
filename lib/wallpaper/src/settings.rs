@@ -1,41 +1,50 @@
 //! The pinboard settings document: its validated model, closed key
-//! registry, bounded fail-closed parser, and canonical render.
+//! registry, and the two readings the registry has.
 //!
 //! One document is one [`PinboardSettings`]: the user's chosen wallpaper
 //! (or none), how it is fitted to the screen, the backdrop colour shown
 //! where the wallpaper does not reach, the desktop icon flow, and the sort
 //! order the `Desktop` folder is listed in. Every field is a closed value
-//! set — a line names a [`SettingsKey`] registry key, whitespace, and one
-//! value from that key's own vocabulary — the same `key value` / `#`
-//! comment grammar every line-oriented TAIRiX configuration store shares.
+//! set, and the document itself is a plain `lib/appconf` `key = value`
+//! document — the one format engine the app-data store speaks, so this
+//! crate defines the *registry* over it and no grammar of its own.
 //!
-//! Because `#` begins a comment, no value may contain one: a backdrop colour
-//! is spelled as bare `rrggbb` digits ([`Rgb::from_hex`]) rather than
-//! `#rrggbb`, and a wallpaper path carrying a `#` is refused outright rather
-//! than silently truncated at it.
+//! # Where the document lives
 //!
-//! [`parse`] and [`render`] are inverses for every canonical document:
-//! parsing a rendered document yields the same settings, and rendering
-//! parsed settings yields byte-identical text. [`render`] always emits
-//! every key, including one still at its default, so a document a user
-//! opens always shows the whole registry.
+//! In the desktop session's **published** app-data scope
+//! (`plans/APPDATA.md` §3.11): the session is the only principal that can
+//! write it, because an application publishes only its own scope, and any
+//! application of that user may read it through one request shape that
+//! cannot name a private one. That is what replaces the hand-rolled
+//! `~/Settings/Pinboard/pinboard.conf` path the chooser used to open
+//! directly — the concrete instance of the app-from-app defect the store
+//! exists to close.
+//!
+//! # Two readings, deliberately different
+//!
+//! [`PinboardSettings::load`] is the **tolerant** one, for a document held
+//! in a store: a value the registry refuses leaves that one field at its
+//! documented default and is *named* to the caller, so one stale setting
+//! costs only itself and never blanks a user's desktop.
+//!
+//! [`decode`] is the **strict** one, for a document that arrived over a
+//! channel: a line outside the grammar, a key outside the registry, or a
+//! value outside a key's closed set is a defect in the *sender* rather than
+//! something a person typed, and adopting a desktop the sender did not
+//! describe is worse than refusing it.
+//!
+//! [`PinboardSettings::document`] renders the canonical form both readings
+//! accept: every registry key, in registry order, so a render/read round
+//! trip is exact.
 
 use alloc::format;
 use alloc::string::{String, ToString};
+use alloc::vec::Vec;
 use core::fmt;
 
-use tairix_util::conf::strip_comment;
+use tairix_appconf::{ConfError, Document, Lookup};
 
 use crate::catalog;
-
-/// Maximum length, in bytes, of a whole pinboard settings document.
-///
-/// A fixed security and format bound, not a growable capacity: the
-/// document holds exactly five short settings, so this is sized to the
-/// longest possible rendered document (a [`MAX_WALLPAPER_PATH_LEN`] wallpaper
-/// path plus the four short fields and their keys) with slack for comments a
-/// user may have added, never to admit an unboundedly large store.
-pub const MAX_SETTINGS_LEN: usize = MAX_WALLPAPER_PATH_LEN + 1024;
 
 /// Maximum length, in bytes, of a wallpaper path named by the `wallpaper`
 /// key.
@@ -44,7 +53,16 @@ pub const MAX_SETTINGS_LEN: usize = MAX_WALLPAPER_PATH_LEN + 1024;
 /// file under the shipped store or somewhere in the user's own files, and a
 /// legitimate one is a handful of path components, so this bounds how much
 /// hostile work a single value can demand before the path parser even runs.
+/// It is the registry's own bound and must sit inside the format engine's
+/// [`tairix_appconf::MAX_VALUE_LEN`], or a path this crate accepts could
+/// never be written to the store; the assertion below holds that at compile
+/// time rather than leaving it to a test that could be deleted.
 pub const MAX_WALLPAPER_PATH_LEN: usize = 1024;
+
+const _: () = assert!(
+    MAX_WALLPAPER_PATH_LEN <= tairix_appconf::MAX_VALUE_LEN,
+    "a wallpaper path must fit one settings value"
+);
 
 /// Why a wallpaper path was refused.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -76,6 +94,13 @@ impl fmt::Display for WallpaperPathError {
 /// validation still names untrusted content — the session reads it under
 /// its own identity and the decoder sniffs and bounds it before drawing a
 /// pixel; this is only the earlier, cheaper spelling refusal.
+///
+/// The refusals are the *path grammar's* alone. Nothing here refuses a
+/// character on the document's account: `lib/appconf` quotes a value that
+/// carries a `#`, a quote, or surrounding space, so every path the path
+/// grammar admits round-trips through the store exactly as written. A file
+/// the user genuinely named `sunset#2.png` is therefore choosable, where the
+/// hand-rolled grammar this replaced had to refuse it to stay unambiguous.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct WallpaperPath(String);
 
@@ -93,15 +118,7 @@ impl WallpaperPath {
         if !matches!(parsed.root(), tairix_path::Root::View) || parsed.components().is_empty() {
             return Err(WallpaperPathError::Malformed);
         }
-        let canonical = parsed.to_string();
-        // A value stored in the document is the remainder of its line: it
-        // must hold no `#` (which would begin a comment) and no leading or
-        // trailing whitespace (which the parser trims), or a render/parse
-        // round trip would not reproduce it.
-        if canonical.contains('#') || canonical.trim() != canonical {
-            return Err(WallpaperPathError::Malformed);
-        }
-        Ok(Self(canonical))
+        Ok(Self(parsed.to_string()))
     }
 
     /// Build the path for the shipped default wallpaper.
@@ -234,12 +251,12 @@ impl Rgb {
     /// digits, no leading `#`); `None` for anything else.
     ///
     /// A colour has exactly one spelling in this crate, and it carries no
-    /// `#`: the settings document's own comment grammar cuts a line at the
-    /// first `#`, so a `#rrggbb` value would be truncated to nothing before
-    /// a colour parser ever saw it. Keeping the one spelling the document
-    /// can hold means a consumer cannot pick the wrong one — a `#`-prefixed
-    /// value is refused here, not silently accepted on one path and lost on
-    /// another.
+    /// `#`. That is a registry rule rather than a grammar one — the document
+    /// engine would quote a `#rrggbb` value and carry it perfectly well — and
+    /// it is kept because two spellings of one colour are two ways for
+    /// consumers to disagree about whether they mean the same backdrop. A
+    /// `#`-prefixed value is refused here, not accepted on one path and lost
+    /// on another.
     #[must_use]
     pub fn from_hex(text: &str) -> Option<Self> {
         if text.len() != 6 || !text.is_ascii() {
@@ -409,6 +426,15 @@ impl SettingsKey {
     pub fn from_name(name: &str) -> Option<Self> {
         Self::ALL.into_iter().find(|key| key.name() == name)
     }
+
+    /// The value of this key on `settings`, in its canonical spelling.
+    ///
+    /// The one place a setting becomes text, so a writer publishing to the
+    /// store and a sender rendering a document cannot spell one differently.
+    #[must_use]
+    pub fn value_of(self, settings: &PinboardSettings) -> String {
+        field_value(settings, self)
+    }
 }
 
 impl fmt::Display for SettingsKey {
@@ -417,61 +443,30 @@ impl fmt::Display for SettingsKey {
     }
 }
 
-/// Why a pinboard settings document was refused.
-#[derive(Copy, Clone, Debug, Eq, PartialEq)]
-pub enum ParseError {
-    /// The document exceeded [`MAX_SETTINGS_LEN`].
-    DocumentTooLong,
-    /// A line names a key outside the closed [`SettingsKey`] registry.
-    UnknownKey,
-    /// A line names a key but carries no value.
-    MissingValue,
-    /// A registry key appeared more than once.
-    DuplicateKey,
-    /// A value was outside its key's closed set, or malformed.
-    InvalidValue,
+/// Why a pinboard settings document that arrived over a channel was refused.
+///
+/// Only [`decode`] raises these: a document held in the store is read
+/// tolerantly, key by key, by [`PinboardSettings::load`].
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum DocumentRefusal {
+    /// The document is outside the format engine's own bounds or grammar.
+    Malformed(ConfError),
+    /// A line the `key = value` grammar did not read as a setting, by its
+    /// 1-based line number.
+    Unparsed(usize),
+    /// A key outside the closed [`SettingsKey`] registry.
+    UnknownKey(String),
+    /// A value outside its key's closed set, or malformed.
+    InvalidValue(SettingsKey),
 }
 
-impl fmt::Display for ParseError {
+impl fmt::Display for DocumentRefusal {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::DocumentTooLong => f.write_str("pinboard settings document is too long"),
-            Self::UnknownKey => f.write_str("unknown pinboard settings key"),
-            Self::MissingValue => f.write_str("setting has no value"),
-            Self::DuplicateKey => f.write_str("setting is repeated"),
-            Self::InvalidValue => f.write_str("setting value is invalid"),
-        }
-    }
-}
-
-/// A refused pinboard settings document, and where in it the refusal was
-/// raised.
-#[derive(Copy, Clone, Debug, Eq, PartialEq)]
-pub struct SettingsError {
-    line: Option<usize>,
-    kind: ParseError,
-}
-
-impl SettingsError {
-    /// The 1-based line the refusal was raised at, or `None` for a
-    /// whole-document refusal that belongs to no single line.
-    #[must_use]
-    pub fn line(&self) -> Option<usize> {
-        self.line
-    }
-
-    /// What was wrong.
-    #[must_use]
-    pub fn kind(&self) -> ParseError {
-        self.kind
-    }
-}
-
-impl fmt::Display for SettingsError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self.line {
-            Some(line) => write!(f, "line {line}: {}", self.kind),
-            None => write!(f, "{}", self.kind),
+            Self::Malformed(err) => write!(f, "not a settings document ({err})"),
+            Self::Unparsed(line) => write!(f, "line {line}: not a setting"),
+            Self::UnknownKey(key) => write!(f, "unknown pinboard settings key `{key}`"),
+            Self::InvalidValue(key) => write!(f, "`{key}` is not a value that setting accepts"),
         }
     }
 }
@@ -507,6 +502,60 @@ impl Default for PinboardSettings {
             icons: IconFlow::default(),
             sort: IconSort::default(),
         }
+    }
+}
+
+impl PinboardSettings {
+    /// The settings `source` holds, and every key whose stored value the
+    /// registry refused.
+    ///
+    /// This is the **tolerant** reading, for a document held in a store: a
+    /// key the source does not set keeps its documented default, so an
+    /// absent document and a fresh account are the same thing, and a value
+    /// outside a key's closed set leaves that one field at its default and
+    /// is named in the returned list. One stale setting therefore costs only
+    /// itself — a desktop is never blanked because a single value predates
+    /// this build — and the caller still reports what it could not use
+    /// rather than running on a value the user cannot account for.
+    ///
+    /// `source` is anything the format engine can be read through: the
+    /// desktop session's own published-scope handle, or the [`Document`]
+    /// another application's foreign read answered with.
+    #[must_use]
+    pub fn load<L: Lookup + ?Sized>(source: &L) -> (Self, Vec<SettingsKey>) {
+        let mut settings = Self::default();
+        let mut refused = Vec::new();
+        for key in SettingsKey::ALL {
+            let Some(value) = source.get(key.name()) else {
+                continue;
+            };
+            if !set_field(&mut settings, key, value) {
+                refused.push(key);
+            }
+        }
+        (settings, refused)
+    }
+
+    /// These settings as the canonical document: every registry key, in
+    /// registry order.
+    ///
+    /// Every key is written, including one still at its default, so the
+    /// document is self-describing and a render/[`decode`] round trip is
+    /// exact. It is what a program that must hand a whole desktop to another
+    /// sends; publishing to the store instead goes key by key, so that only
+    /// what actually changed is written.
+    #[must_use]
+    pub fn document(&self) -> Document {
+        let mut document = Document::new();
+        for key in SettingsKey::ALL {
+            // Every registry key is inside the format's key grammar and every
+            // rendered value inside its value grammar, which
+            // `the_canonical_document_holds_every_registry_key` pins; a
+            // refusal here would be a defect in this registry, and dropping
+            // the key is the only answer that cannot publish a wrong one.
+            let _ = document.set(key.name(), &key.value_of(self));
+        }
+        document
     }
 }
 
@@ -562,80 +611,36 @@ fn field_value(settings: &PinboardSettings, key: SettingsKey) -> String {
     }
 }
 
-/// Parse a pinboard settings document.
+/// Read a pinboard settings document that arrived over a channel, refusing
+/// anything the registry does not fully understand.
 ///
-/// Parsing starts from [`PinboardSettings::default`] and applies each
-/// setting line in turn, so a document naming only a subset of keys leaves
-/// the rest at their documented default.
+/// This is the **strict** reading. A document on the wire was rendered by a
+/// program from this same registry, so a line outside the grammar, a key
+/// outside the registry, or a value outside a key's closed set means the
+/// sender is not describing a desktop this build can show — and adopting
+/// half of what it asked for would put the user in front of a backdrop
+/// nobody chose. A document that names only some keys is *not* a refusal:
+/// the rest keep their documented defaults, exactly as an absent document
+/// does.
 ///
 /// # Errors
 ///
-/// [`SettingsError`] — the document is refused whole, never half-applied.
-/// An absent or unusable document is not this function's concern: a caller
-/// that cannot read a store, or whose read yields a document this refuses,
-/// falls back to [`PinboardSettings::default`] rather than guessing at a
-/// partial intent.
-pub fn parse(text: &str) -> Result<PinboardSettings, SettingsError> {
-    if text.len() > MAX_SETTINGS_LEN {
-        return Err(SettingsError {
-            line: None,
-            kind: ParseError::DocumentTooLong,
-        });
+/// The [`DocumentRefusal`] naming what was wrong; the document is refused
+/// whole, never half-applied.
+pub fn decode(text: &str) -> Result<PinboardSettings, DocumentRefusal> {
+    let document = Document::parse(text).map_err(DocumentRefusal::Malformed)?;
+    if let Some(line) = document.unparsed().next() {
+        return Err(DocumentRefusal::Unparsed(line.line));
     }
-
     let mut settings = PinboardSettings::default();
-    let mut seen = [false; SettingsKey::ALL.len()];
-
-    for (index, raw) in text.lines().enumerate() {
-        let number = index + 1;
-        let at = |kind: ParseError| SettingsError {
-            line: Some(number),
-            kind,
-        };
-
-        let line = strip_comment(raw).trim();
-        if line.is_empty() {
-            continue;
-        }
-
-        let mut fields = line.splitn(2, char::is_whitespace);
-        let name = fields.next().unwrap_or_default();
-        let value = fields.next().map(str::trim).filter(|v| !v.is_empty());
-
-        let key = SettingsKey::from_name(name).ok_or_else(|| at(ParseError::UnknownKey))?;
-        let value = value.ok_or_else(|| at(ParseError::MissingValue))?;
-
-        let position = SettingsKey::ALL
-            .iter()
-            .position(|k| *k == key)
-            .unwrap_or_default();
-        if seen[position] {
-            return Err(at(ParseError::DuplicateKey));
-        }
-        seen[position] = true;
-
-        if !set_field(&mut settings, key, value) {
-            return Err(at(ParseError::InvalidValue));
+    for setting in document.settings() {
+        let key = SettingsKey::from_name(setting.key)
+            .ok_or_else(|| DocumentRefusal::UnknownKey(setting.key.to_string()))?;
+        if !set_field(&mut settings, key, setting.value) {
+            return Err(DocumentRefusal::InvalidValue(key));
         }
     }
-
     Ok(settings)
-}
-
-/// Render `settings` as the canonical document text.
-///
-/// Every key is written in [`SettingsKey::ALL`] order — including a key
-/// still at its default — so the document a user opens always shows the
-/// whole registry, and a render/parse round trip is exact.
-#[must_use]
-pub fn render(settings: &PinboardSettings) -> String {
-    use core::fmt::Write as _;
-
-    let mut text = String::new();
-    for key in SettingsKey::ALL {
-        let _ = writeln!(text, "{key} {}", field_value(settings, key));
-    }
-    text
 }
 
 #[cfg(test)]

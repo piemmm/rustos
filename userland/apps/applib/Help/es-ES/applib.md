@@ -23,10 +23,11 @@ carpetas de aplicaciones ejecutables que presenta el lanzador del
 escritorio. La biblioteca son datos en el volumen, nunca una lista
 compilada: un almacén para toda la máquina en
 `/System/Settings/ProgramLibrary/library.conf` que cada cuenta lee,
-más una superposición opcional por usuario en la misma ruta dentro de
-los propios `Settings/` del usuario. Lo que muestra un lanzador es el
-resultado de resolver ambos juntos: las entradas y ajustes del propio
-usuario prevalecen sobre los de toda la máquina.
+más una superposición opcional por usuario que esta orden guarda en sus
+propios ajustes, donde solo ella puede escribir y cualquier aplicación
+puede leer lo que publica. Lo que muestra un lanzador es el resultado de
+resolver ambos juntos: las entradas y ajustes del propio usuario
+prevalecen sobre los de toda la máquina.
 
 Sin subcomando (o con `list`), la biblioteca resuelta se imprime
 carpeta por carpeta, una entrada por línea: identificador, nombre
@@ -119,9 +120,10 @@ puede ignorar.
 
 - `LANG` — el locale preferido para la ayuda corta (una etiqueta BCP-47
   como `fr-FR`).
-- `HOME` — el directorio personal del llamador: nombra la superposición
-  por usuario y las raíces de rescan con `--user` `<home>/Commands` y
-  `<home>/Applications`.
+- `HOME` — el directorio personal del llamador: las raíces de rescan con
+  `--user` `<home>/Commands` y `<home>/Applications`. La superposición en
+  sí no necesita un home; el servicio de ajustes resuelve la cuenta a
+  partir de la identidad que el núcleo atestigua.
 
 ## SEE ALSO
 

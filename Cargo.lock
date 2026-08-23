@@ -566,6 +566,8 @@ name = "tairix-applib"
 version = "0.0.0"
 dependencies = [
  "tairix-abi",
+ "tairix-appconf",
+ "tairix-appdata",
  "tairix-help",
  "tairix-proglib",
  "tairix-rt",
@@ -923,6 +925,8 @@ name = "tairix-desktop-session"
 version = "0.0.0"
 dependencies = [
  "tairix-abi",
+ "tairix-appconf",
+ "tairix-appdata",
  "tairix-browse",
  "tairix-caps",
  "tairix-controls",
@@ -1473,6 +1477,8 @@ name = "tairix-fstree"
 version = "0.0.0"
 dependencies = [
  "tairix-abi",
+ "tairix-appconf",
+ "tairix-appdata",
  "tairix-binfmt",
  "tairix-complete",
  "tairix-curses",
@@ -2045,6 +2051,7 @@ name = "tairix-mkimage"
 version = "0.0.0"
 dependencies = [
  "tairix-abi",
+ "tairix-appconf",
  "tairix-arch-aarch64",
  "tairix-crypto",
  "tairix-drv-fs-arxfs",
@@ -2187,10 +2194,10 @@ name = "tairix-proglib"
 version = "0.0.0"
 dependencies = [
  "tairix-abi",
+ "tairix-appconf",
  "tairix-fuzzseed",
  "tairix-path",
  "tairix-users",
- "tairix-util",
 ]
 
 [[package]]
@@ -5127,10 +5134,10 @@ dependencies = [
 name = "tairix-wallpaper"
 version = "0.0.0"
 dependencies = [
+ "tairix-appconf",
  "tairix-fuzzseed",
  "tairix-geometry",
  "tairix-path",
- "tairix-util",
 ]
 
 [[package]]
@@ -5138,6 +5145,7 @@ name = "tairix-wallpaper-chooser"
 version = "0.0.0"
 dependencies = [
  "tairix-abi",
+ "tairix-appdata",
  "tairix-browse",
  "tairix-controls",
  "tairix-display",

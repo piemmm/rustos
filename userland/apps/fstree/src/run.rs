@@ -44,6 +44,7 @@ mod program {
 
     use tairix_abi::fs::{DirEntry, OpenFlags, FS_IO_MAX, FS_MODE_MASK, FS_SYMLINK_MAX};
     use tairix_abi::{Errno, FileKind, InputMode, UnlinkFlags, STDOUT};
+    use tairix_appdata::{RtHost, Settings as SettingsStore};
     use tairix_curses::{InputMode as CursesInputMode, Screen, Size, StreamTty};
     use tairix_fstree::{
         run, Fs, FsEntry, Info, Model, RenameOutcome, Settings, VolumeInfo, VolumeSpace,
@@ -76,6 +77,15 @@ mod program {
 
     /// The usage banner printed when the arguments cannot be understood.
     const USAGE: &str = "usage: fstree [-h | -?] [directory]";
+
+    /// The command word this application's bundle is installed under.
+    ///
+    /// One spelling serves the help engine's own-bundle lookup and the
+    /// app-data client's bundle-defaults layer, so a program's shipped
+    /// defaults and its `man` page can never come from different bundles.
+    /// It selects nothing else: the store itself is keyed on the bundle
+    /// identity the kernel attests.
+    const OWN_WORD: &str = "fstree";
 
     /// The production [`Fs`]: directory listings and every file mutation
     /// through the kernel-authorised `fs_*` syscalls (each entry's kind,
@@ -570,7 +580,7 @@ mod program {
     /// engine; the usage banner is the fallback when no document serves.
     fn short_help() -> i32 {
         let locale = tairix_rt::env_var(b"LANG").and_then(|raw| core::str::from_utf8(raw).ok());
-        let Some(bytes) = own_short_help(&BundleHelp::new("fstree"), locale, "fstree") else {
+        let Some(bytes) = own_short_help(&BundleHelp::new(OWN_WORD), locale, OWN_WORD) else {
             write_stderr_line(USAGE);
             return 2;
         };
@@ -618,7 +628,7 @@ mod program {
         // by the shared engine, decoded to plain text. A bundle whose help
         // cannot be served shows the key line alone — never embedded text.
         let locale = tairix_rt::env_var(b"LANG").and_then(|raw| core::str::from_utf8(raw).ok());
-        let help_text = own_short_help(&BundleHelp::new("fstree"), locale, "fstree")
+        let help_text = own_short_help(&BundleHelp::new(OWN_WORD), locale, OWN_WORD)
             .map_or_else(|| String::from(USAGE), |bytes| plain_help_text(&bytes));
 
         // Size the screen from the console the kernel gave us, falling
@@ -646,15 +656,31 @@ mod program {
                 return 1;
             }
         };
-        // The persisted preferences live in the user's own settings tree;
-        // no home (or no file) is the ordinary default state.
-        let home = tairix_rt::env_var(b"HOME")
-            .and_then(|raw| core::str::from_utf8(raw).ok())
-            .map(String::from);
-        if let Some(home) = &home {
-            model.settings = Settings::load(&mut fs, home);
+        // The persisted preferences come from this application's own
+        // app-data store: one round trip, keyed on the bundle identity the
+        // kernel attested for this task, so no path or user is spelled here
+        // and no other application can reach them. A store the service
+        // cannot serve leaves the shipped defaults standing and is stated in
+        // the settings menu rather than silently swallowed.
+        let mut host = RtHost;
+        let mut store = SettingsStore::open(&mut host, OWN_WORD);
+        model.settings_refusal = store.store_refusal();
+        let (settings, refused) = Settings::load(&store);
+        model.settings = settings;
+        // A packaging defect and a broken stored value are each said out
+        // loud, before the terminal is switched, so neither is hidden behind
+        // the alternate screen.
+        if let Some(errno) = store.defaults_refusal() {
+            write_stderr_line(&alloc::format!(
+                "fstree: this bundle's shipped defaults could not be read ({errno:?})"
+            ));
         }
-        model.settings_home = home;
+        for key in refused {
+            write_stderr_line(&alloc::format!(
+                "fstree: {}: not a value this setting accepts; using its default",
+                key.name()
+            ));
+        }
 
         // The raw input discipline: keystrokes reach the session verbatim
         // with no local echo. Restored to the cooked default on exit so
@@ -674,7 +700,14 @@ mod program {
         // where the terminal has one (restoring the covered content on
         // exit), an in-place erase otherwise.
         let entered = screen.enter_full_screen();
-        let result = run(&mut model, &mut fs, &mut sandbox, &mut screen, &mut info);
+        let result = run(
+            &mut model,
+            &mut fs,
+            &mut sandbox,
+            &mut screen,
+            &mut info,
+            &mut store,
+        );
         let left = screen.leave_full_screen();
 
         let _ = tairix_rt::set_input_mode(InputMode::Cooked);

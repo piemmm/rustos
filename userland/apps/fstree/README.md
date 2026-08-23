@@ -57,9 +57,13 @@ Stability tier: **experimental**.
 - **Volumes**: `V` lists the mounted volumes (target, filesystem type,
   free/total when reported) over the System Information API's mount
   walk; Enter re-roots the session at the chosen root.
-- **Settings**: `S` toggles the delete confirmations, persisted in the
-  user's own `Settings/fstree/` through the `Fs` seam (fail-safe parse:
-  a corrupt file leaves every confirmation on).
+- **Settings**: `S` toggles the delete confirmations, persisted in this
+  application's own app-data store through `lib/appdata` — gated on the
+  kernel-attested bundle identity, so no other application the user
+  launches can read or rewrite them, and no store path is spelled here.
+  Reading fails safe: an unreachable store, an absent key, or a value
+  that is not a boolean leaves every confirmation **on**, and a refused
+  value is named rather than swallowed.
 - **Help**: `-h`/`-?` and the `?` overlay render the bundle's own `Help/`
   document through the shared `lib/help` engine — nothing embedded.
 

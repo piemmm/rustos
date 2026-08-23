@@ -54,6 +54,7 @@ mod program {
     use tairix_abi::reply::{decode_status_reply, STATUS_REPLY_LEN};
     use tairix_abi::window_ipc::{WindowEvent, WINDOW_ENDPOINT};
     use tairix_abi::{Errno, Origin, ProcId, WaitSetOp, WaitSourceKind, ORIGIN_WIRE_LEN};
+    use tairix_appdata::RtHost;
     use tairix_display::{winframe, SERIAL};
     use tairix_font::BitmapFont;
     use tairix_geometry::Point;
@@ -65,8 +66,8 @@ mod program {
     use tairix_sandbox::{ParserSandbox, ServeEnd};
     use tairix_theme::{TextRole, Theme, ThemeRegistry};
     use tairix_wallpaper::{
-        catalog_entries, user_settings_path, PinboardSettings, WallpaperFit, WallpaperPath,
-        MAX_SETTINGS_LEN, MAX_WALLPAPER_BYTES, WALLPAPER_STORE,
+        catalog_entries, PinboardSettings, WallpaperFit, WallpaperPath, MAX_WALLPAPER_BYTES,
+        PINBOARD_PUBLISHER, WALLPAPER_STORE,
     };
     use tairix_wallpaper_chooser::{
         candidates_from_catalog, ApplyOutcome, Chooser, ChooserAction, Style, MIN_WIN_HEIGHT,
@@ -255,59 +256,38 @@ mod program {
     /// The pinboard settings in effect for the launching user, so the
     /// chooser opens on what is actually on screen.
     ///
-    /// An **absent** document means the documented defaults and is not an
-    /// error — a fresh account has never applied one. Anything else that
-    /// stops the document being used (no `HOME`, a refused read, bytes
-    /// that are not UTF-8, a document the shared parser refuses) also
-    /// yields the defaults, but says so on `stderr` rather than opening on
+    /// Read from the desktop session's **published** app-data scope
+    /// (`plans/APPDATA.md` §3.11), which is the sanctioned channel one
+    /// application reaches another's values through: this program names the
+    /// publisher and nothing else, so the request shape it sends cannot ask
+    /// for the session's private settings — that is not a frame that exists.
+    /// It replaces opening the session's own file directly, which every
+    /// application of that user could also *rewrite*.
+    ///
+    /// A desktop that has published **nothing** means the documented defaults
+    /// and is not an error — a fresh account has never applied a setting, and
+    /// so does an account whose session has never run. Anything else that
+    /// stops the document being used (an unreachable store, a value this
+    /// build's registry does not accept) also yields the defaults for the
+    /// affected setting, but says so on `stderr` rather than opening on
     /// settings the user cannot see the reason for.
     fn settings_in_effect() -> PinboardSettings {
-        let Some(home) = tairix_rt::env_var(b"HOME").and_then(str_from) else {
-            report("no home directory in the environment; showing the default settings");
-            return PinboardSettings::default();
-        };
-        let Some(path) = user_settings_path(home) else {
-            report("home directory names no settings store; showing the default settings");
-            return PinboardSettings::default();
-        };
-        let fd = match open_read(&path) {
-            Ok(fd) => fd,
-            // Nothing applied yet: the defaults are the honest answer.
-            Err(Errno::NotFound) => return PinboardSettings::default(),
+        let document = match tairix_appdata::read_published(&mut RtHost, PINBOARD_PUBLISHER) {
+            Ok(document) => document,
             Err(err) => {
                 report(&alloc::format!(
-                    "{path}: {err:?}; showing the default settings"
+                    "the desktop's settings could not be read ({err:?}); showing the defaults"
                 ));
                 return PinboardSettings::default();
             }
         };
-        let Some(bytes) = read_bounded(fd, MAX_SETTINGS_LEN) else {
+        let (settings, refused) = PinboardSettings::load(&document);
+        for key in refused {
             report(&alloc::format!(
-                "{path}: read refused; showing the default settings"
+                "the desktop publishes a `{key}` this build does not accept; showing its default"
             ));
-            return PinboardSettings::default();
-        };
-        let Some(text) = str_from(&bytes) else {
-            report(&alloc::format!(
-                "{path}: not valid UTF-8; showing the default settings"
-            ));
-            return PinboardSettings::default();
-        };
-        match tairix_wallpaper::parse(text) {
-            Ok(settings) => settings,
-            Err(err) => {
-                report(&alloc::format!(
-                    "{path}: {err}; showing the default settings"
-                ));
-                PinboardSettings::default()
-            }
         }
-    }
-
-    /// `bytes` as UTF-8, or `None` — the one spelling of "these bytes are
-    /// text" this program uses.
-    fn str_from(bytes: &[u8]) -> Option<&str> {
-        core::str::from_utf8(bytes).ok()
+        settings
     }
 
     /// The wallpapers the shipped store offers, discovered by listing it

@@ -2,27 +2,47 @@
 
 `lib/proglib` is the single definition of the folder-organised catalog of
 launchable applications the desktop's Program Library presents. The catalog
-is **data on the volume**, never a compiled-in table: a machine-wide store
-at `tairix_proglib::MACHINE_LIBRARY_PATH`
+is **data on the volume**, never a compiled-in table, in two layers: a
+machine-wide store at `tairix_proglib::LIBRARY_PATH`
 (`/System/Settings/ProgramLibrary/library.conf`) plus an optional per-user
-overlay at `tairix_proglib::user_library_path(user)`
-(`/Users/<u>/Settings/ProgramLibrary/library.conf`). This crate owns the
-folder taxonomy, the validated entry model, the line grammar and its closed
-key registry, the bounded fail-closed parser, the canonical render, and the
-one machine ∪ overlay merge — so the command app that edits a catalog, the
-installer that registers a bundle, and the session that draws the library
-can never disagree about what a catalog says.
+overlay in the library-admin command's **published** app-data scope
+(`tairix_proglib::LIBRARY_PUBLISHER` — [the app-data client](./appdata.md)).
+This crate owns the folder taxonomy, the validated entry model, the closed
+`<id>.<field>` key registry, the fail-closed reading, the canonical render,
+and the one machine ∪ overlay merge — so the command app that edits a
+catalog, the installer that registers a bundle, and the session that draws
+the library can never disagree about what a catalog says.
 
-## The store
+## The two layers, and why only one of them is in the app-data store
 
-One text document per store: `<id>.<field> value` settings, one per line;
-`#` begins a comment to end of line; blank and comment-only lines carry no
-setting; every `(id, field)` pair appears at most once. The key is split at
-its **last** `.`, so a reverse-DNS bundle identifier
-(`org.tairix.files.name Files`) is deliberately valid — no field name
-contains a `.`.
+The **machine** store is an ordinary `/System/Settings` administrator
+document, beside the machine's network and configuration stores: it is
+machine policy rather than any one application's data, every account reads
+it, and only a principal that tree's policy admits may rewrite it.
 
-All the lines sharing an id form one `Record`:
+The **overlay** is per-user, per-application data, and every other
+application of that account could previously read *and rewrite* it — a
+hostile program could file a launcher row named "Terminal" against a bundle
+of its choosing. It therefore lives in the app-data store
+(`plans/APPDATA.md` §1.1, AD10): `applib` is the only principal that can
+write it, because an application publishes only its own scope, and the
+desktop session reads it by naming the publisher on a request shape that
+carries no scope field and so cannot name a private document at all.
+
+## The document
+
+A catalog is a plain [`lib/appconf`](./appconf.md) `key = value` document —
+the one format engine the app-data store speaks — so this crate defines the
+*registry* over it and no grammar, comment rule, or length bound of its own.
+Every setting is one field of one record: `<id>.<field> = value`. The key is
+split at its **last** `.`, so a reverse-DNS bundle identifier
+(`org.tairix.files.name = Files`) is deliberately valid — no field name
+contains a `.`. An identifier is judged by the one grammar every consumer of
+a bundle identifier applies (`tairix_abi::appinfo::validate_bundle_id`),
+which is inside the key grammar, so `<id>.<field>` is always a key a
+document can hold.
+
+All the settings sharing an id form one `Record`:
 
 - a **declared entry** (`Record::Entry`, a complete `LibraryEntry`) where
   the record names both a `bundle` and a `name`;
@@ -68,26 +88,33 @@ order — never a second directory tree on disk.
 ## Security
 
 A catalog is **untrusted input** to every consumer, including a store a
-hostile or corrupted installer wrote. The parser is bounded
-(`MAX_CATALOG_LEN`, `MAX_ENTRIES`, `MAX_LINE_LEN`, and the per-field length
-caps), validates every field through the model's own validators, and refuses
-the **whole** document (`CatalogError`, carrying the offending 1-based line
-where one is meaningful) on anything it does not fully understand: an
-unknown field, a folder outside the taxonomy, a duplicate key, a malformed
-flag, or a bundle path that is not an application bundle inside an
-application store. A half-read library would silently drop
-or mis-file an application a user expects to find, so a reader that cannot
-fully parse a store runs on the empty catalog rather than guessing at a
-partial intent, and a writer refuses the edit outright.
+hostile or corrupted installer wrote. The document's length, line, key and
+value bounds are the format engine's; on top of them `load` bounds the
+record count (`MAX_ENTRIES` — derived as the engine's setting bound divided
+by what one record costs at its widest, so a catalog at the bound always fits
+one document and the render never has to drop a record) and the per-field
+lengths, validates every
+field through the model's own validators, and refuses the **whole**
+document (`CatalogError`) on anything it does not fully understand: a line
+the grammar did not read as a setting, an unknown field, a folder outside
+the taxonomy, a malformed flag, or a bundle path that is not an application
+bundle inside an application store.
+
+That is the opposite of a *settings* registry, where one bad value costs
+only its own field, and deliberately so: a catalog is a list, and a
+half-read library would silently drop or mis-file an application a user
+expects to find, with no field left standing to say anything is missing. A
+reader that cannot fully read a store runs on the empty catalog rather than
+guessing at a partial intent, and a writer refuses the edit outright.
 
 The bundle-path confinement is the earlier, cheaper refusal — launching an
 entry remains subject to the loader's signature and capability gate. The
-engine performs no I/O and holds no authority: reading and writing the
-documents goes through the secured VFS under the caller's own
-kernel-attested identity: the machine store is a system-owned file whose
-per-inode owner/mode/ACL record admits or refuses the write (an ordinary
-account reads it but cannot rewrite it), and a per-user overlay is an
-ordinary write under that user's own identity.
+engine performs no I/O and holds no authority: the machine store is read and
+written through the secured VFS under the caller's own kernel-attested
+identity, so its per-inode owner/mode/ACL record admits or refuses the write
+(an ordinary account reads it but cannot rewrite it), and the overlay is
+reached only through the app-data service, gated on the writer's attested
+bundle identity.
 
 ## Merging machine and overlay
 
@@ -130,11 +157,10 @@ if it would exceed `MAX_ENTRIES`, leaving the catalog unchanged.
 
 ## API shape
 
-- `parse(&str) -> Result<Catalog, CatalogError>` — the bounded, fail-closed,
-  line-numbered parse.
-- `render(&Catalog) -> String` — the canonical document (one line per set
-  field, in identifier + registry order), so render→parse round-trips
-  exactly.
+- `load(&Document) -> Result<Catalog, CatalogError>` — the fail-closed
+  reading; `document(&Catalog) -> Document` — the canonical render (one
+  setting per set field, in identifier + registry order), so
+  render→read round-trips exactly.
 - `Catalog::{insert, patch, remove, get, entry, entry_patch, records,
   entries, patches, folder, folders, len, is_empty}` — the store operations;
   `insert`/`patch` fail closed with `CatalogFull` at `MAX_ENTRIES` rather
@@ -149,8 +175,9 @@ if it would exceed `MAX_ENTRIES`, leaving the catalog unchanged.
   `set_icon`/`set_hidden`).
 - `LibraryCategory::{ALL, as_str, from_id}` — the closed taxonomy.
 - `EntryKey::{ALL, as_str, from_id}` — the closed field registry.
-- `LIBRARY_DIR` / `LIBRARY_FILE` / `MACHINE_LIBRARY_PATH` /
-  `user_library_path` — the path spellings, defined once here.
+- `LIBRARY_DIR` / `LIBRARY_FILE` / `LIBRARY_PATH` — the machine layer's
+  path spellings, and `LIBRARY_PUBLISHER` the overlay's publisher
+  identifier, each defined once here.
 
 The crate is `no_std` + `alloc`, performs no I/O, holds no authority, is
 host-unit-tested beside the code, and is fuzzed by `tests/fuzz_proglib.rs`

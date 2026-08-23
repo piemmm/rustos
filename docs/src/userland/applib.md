@@ -39,23 +39,32 @@ disagree about what a store says.
 
 By default the tool edits the machine-wide store
 (`/System/Settings/ProgramLibrary/library.conf`); `--user` targets the
-caller's own overlay (`<home>/Settings/ProgramLibrary/library.conf`,
-derived from the inherited `HOME`). On success the tool is quiet on
+caller's own overlay, which lives in this application's **published**
+app-data scope. No path names it: the settings service derives the store
+from the identity the kernel attests, so the overlay needs no `HOME` and
+`applib` is the only principal that can write it. On success the tool is quiet on
 stdout; each completed change emits one `stdinfo` summary record on fd 3
 (`apps.library_entry_added` / `_removed` / `_hidden` / `_shown` /
 `apps.library_rescan`), best-effort and never load-bearing.
 
 ## Security
 
-The tool holds no authority of its own. Both stores are read and written
-whole through the secured VFS under the caller's kernel-attested identity:
-the machine store is a system-owned file whose per-inode owner/mode/ACL
-record admits or refuses the write kernel-side (an ordinary account reads
-it and personalises through its own overlay), and a refused write states
-its reason and changes nothing. Catalog documents and bundle manifests
-are untrusted input, parsed by the bounded, fail-closed `lib/proglib` and
-`lib/abi` decoders; a store the engine cannot fully parse refuses the
-whole operation rather than guessing at a merge. The `rescan` walk is
+The tool holds no authority of its own, and the two layers are gated by the
+principals that own them. The **machine** store is read and written whole
+through the secured VFS under the caller's kernel-attested identity: it is a
+system-owned file whose per-inode owner/mode/ACL record admits or refuses
+the write kernel-side, so an ordinary account reads it and personalises
+through its own overlay. The **overlay** is reached over the app-data
+service and gated on the bundle identity the kernel attests for this
+program, so no other application the user launches can rewrite their library
+behind their back — the defect that migration closed
+(`plans/APPDATA.md` §1.1). A refused write states its reason and changes
+nothing, and an unreachable overlay is a refusal rather than an empty
+library, so an edit is never published over settings the tool never saw.
+Catalog documents and bundle manifests are untrusted input, read by the
+bounded, fail-closed `lib/appconf` engine, `lib/proglib` registry, and
+`lib/abi` decoder; a store the registry cannot fully read refuses the whole
+operation rather than guessing at a merge. The `rescan` walk is
 bounded (`MAX_WALK_DEPTH`, `MAX_WALK_ENTRIES`) and fails closed on a tree
 it cannot believe. Cataloguing is presentation, never authority: launching
 a bundle stays behind the loader's signature and capability gate

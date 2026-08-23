@@ -7,23 +7,38 @@ document (wallpaper choice, fit, backdrop colour, icon flow, sort order),
 the shipped default wallpaper catalog and its bounded fail-closed listing
 model, and the one pure wallpaper-placement geometry the desktop renderer
 and the chooser's preview both draw through. It defines the validated
-settings model (`PinboardSettings`), the line grammar and its closed key
-registry (`SettingsKey`), the bounded fail-closed parser, and the canonical
-render — plus the shipped wallpaper identity (`WALLPAPER_STORE`,
-`DEFAULT_WALLPAPER`) and the placement geometry (`place`,
-`decode_request`).
+settings model (`PinboardSettings`) and the closed key registry over the
+store's document (`SettingsKey`) — plus the shipped wallpaper identity
+(`WALLPAPER_STORE`, `DEFAULT_WALLPAPER`) and the placement geometry
+(`place`, `decode_request`).
 
-The settings document is data on the volume, never a compiled-in table: a
-per-user store at `/Users/<u>/Settings/Pinboard/pinboard.conf`
-([`user_settings_path`]). The pinboard session that draws the desktop and
-the chooser (`wallpaper.app`) that edits the settings both go through this
-engine, so a writer and a reader can never disagree about what the pinboard
-says. An absent store means "the documented defaults", not an error.
-Pinboard settings are per-user state only; there is no machine-wide store.
+## Where the document lives, and who may touch it
 
-The grammar is one `key value` line per setting, `#` beginning a comment to
-end of line, blank and comment-only lines carrying no setting, and every
-value drawn from its key's own closed vocabulary:
+In the desktop session's **published** app-data scope
+(`plans/APPDATA.md` §3.11) — not at a path any program spells. Two
+properties follow from the store rather than from convention:
+
+- The session is the only **writer**. An application publishes only its
+  own scope, so no other program the user launches — including the chooser
+  (`wallpaper.app`) — can write the desktop's document at all. The chooser
+  *asks* over the pinboard channel and the session decides.
+- Any application may **read** it, by naming `PINBOARD_PUBLISHER` on a
+  request shape that carries no scope field, so "read the desktop's private
+  settings" is not a request that exists.
+
+That replaces `/Users/<u>/Settings/Pinboard/pinboard.conf`, which every
+application of that user could read *and rewrite*. An absent store means
+"the documented defaults", not an error. Pinboard settings are per-user
+state only; there is no machine-wide store, and the published scope has no
+layer beneath it, so nobody can make the desktop appear to say something it
+never said.
+
+## The registry
+
+The document is a plain `lib/appconf` `key = value` document — the one
+format engine the app-data store speaks — so this crate defines the
+registry over it and no grammar of its own. Every value is drawn from its
+key's own closed vocabulary:
 
 | Key         | Value                                              | Default                                       |
 |-------------|----------------------------------------------------|-----------------------------------------------|
@@ -33,22 +48,37 @@ value drawn from its key's own closed vocabulary:
 | `icons`     | `leading` \| `trailing`                            | `leading`                                     |
 | `sort`      | `name` \| `kind` \| `size` \| `date`               | `name`                                        |
 
-A colour is written **bare** — `112233`, never `#112233` — because the
-grammar's own comment marker cuts a line at the first `#`, which would
-truncate a `#`-prefixed colour away before any colour parser saw it. The
-crate therefore has exactly one spelling of a colour: [`Rgb::from_hex`]
-reads bare digits and [`Rgb::to_hex`] writes them, so a consumer cannot pick
-a spelling the document cannot hold. `render` emits every key, in registry
-order, including one still at its default, so a render/parse round trip is
-exact.
+A colour is written **bare** — `112233`, never `#112233`. That is now a
+*registry* rule rather than a grammar one: the format engine quotes a value
+carrying a `#` and round-trips it perfectly well, so the crate keeps one
+spelling of a colour because two would be two ways for consumers to
+disagree about whether they mean the same backdrop. [`Rgb::from_hex`] reads
+bare digits and [`Rgb::to_hex`] writes them. A wallpaper *path* carrying a
+`#` is accepted, because the path grammar is now the only thing judging it.
 
-A settings document is untrusted input: the parser is bounded
-(`MAX_SETTINGS_LEN`, `MAX_WALLPAPER_PATH_LEN`) and refuses the **whole**
-document ([`SettingsError`], with the offending line) on anything it does
-not fully understand — an unknown key, a duplicate key, a missing or
-malformed value, or an over-long document. A reader that cannot fully
-parse a store runs on [`PinboardSettings::default`] rather than guessing at
-a partial intent, and a writer refuses the edit outright.
+## Two readings, deliberately different
+
+`PinboardSettings::load` is the **tolerant** one, for a document held in a
+store: a value the registry refuses leaves that one field at its documented
+default and is *named* to the caller, so one stale setting costs only
+itself and never blanks a user's desktop. It reads through
+`tairix_appconf::Lookup`, so the same loader serves the session's own
+published-scope handle and the `Document` a foreign read answers with.
+
+`decode` is the **strict** one, for a document that arrived over the
+pinboard channel: a line outside the grammar, a key outside the registry,
+or a value outside a key's closed set is a defect in the *sender* rather
+than something a person typed, and adopting a desktop the sender did not
+describe is worse than refusing it (`DocumentRefusal` names which).
+
+`PinboardSettings::document` renders the canonical form both readings
+accept: every registry key, in registry order, including one still at its
+default, so a render/read round trip is exact. Publishing to the store
+instead goes key by key, so only what actually changed is written.
+
+A settings document is untrusted input either way: the format engine bounds
+the document, the line, the key and the value, and `MAX_WALLPAPER_PATH_LEN`
+bounds the one value that carries a path.
 
 The five shipped wallpaper masters ship read-only at `WALLPAPER_STORE`
 (`/System/Graphics/Wallpapers`), discovered at build time from

@@ -93,13 +93,25 @@ fn an_identifier_holding_a_grammar_byte_is_refused() {
 }
 
 #[test]
-fn an_identifier_cannot_begin_or_end_with_a_separator() {
-    for hostile in [".a", "a.", "-a", "a-", "_a", "a_", "."] {
+fn an_identifier_obeys_the_one_bundle_identifier_grammar() {
+    // The grammar is `lib/abi`'s, not this crate's: a segment is non-empty
+    // and begins with a lowercase letter or a digit. An empty segment and a
+    // leading separator are therefore refused, and so is any upper case —
+    // which is what stops two spellings of one identifier keying two stores.
+    for hostile in [".a", "a.", "-a", "_a", ".", "A", "a.B", "a b"] {
         assert_eq!(
             EntryId::new(hostile),
             Err(EntryError::MalformedId),
             "{hostile:?} must be refused"
         );
+    }
+    for legal in ["a", "a-", "a_", "os.tairix.terminal", "0a.b-c_d"] {
+        assert_eq!(
+            EntryId::new(legal).map(|id| id.as_str().len()),
+            Ok(legal.len()),
+            "{legal:?} must be admitted"
+        );
+        assert_eq!(tairix_abi::appinfo::validate_bundle_id(legal), Ok(()));
     }
 }
 

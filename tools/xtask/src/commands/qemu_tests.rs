@@ -6682,7 +6682,7 @@ fn encrypted_root_disk_bytes(
 /// The machine-wide program-library catalog to plant on a vertical's
 /// **encrypted root volume** (the home of `/System/Settings`, which the
 /// writable child mount rebases onto): the root-volume-relative path
-/// components of `tairix_proglib::MACHINE_LIBRARY_PATH` plus the document
+/// components of `tairix_proglib::LIBRARY_PATH` plus the document
 /// derived from the planted bundles' own manifests through the production
 /// `tools/mkimage` derivation — the same document a shipped image seeds —
 /// so the guest desktop's Program Library lists the planted graphical
@@ -6692,7 +6692,7 @@ fn library_plant(
     t: &QemuTest,
     apps: &[super::image_apps::AppStoreFile],
 ) -> Result<(Vec<String>, String), String> {
-    let components = root_volume_components(t, tairix_proglib::MACHINE_LIBRARY_PATH)?;
+    let components = root_volume_components(t, tairix_proglib::LIBRARY_PATH)?;
     let conf = super::image_apps::with_plant_refs(apps, |files| {
         tairix_mkimage::library::library_catalog(files).map_err(|e| {
             format!(

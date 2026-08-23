@@ -8,6 +8,7 @@
 //! mock of it.
 
 use alloc::string::String;
+use alloc::vec::Vec;
 
 use tairix_abi::appdata_ipc::{
     BlobMode, ConfigScope, APPDATA_BLOB_MAX_COUNT, APPDATA_BULK_FILE_MAX_BYTES,
@@ -49,6 +50,48 @@ fn a_read_answers_from_the_highest_layer_that_sets_the_key() {
     assert_eq!(settings.get("nothing"), None);
     assert_eq!(settings.store_refusal(), None);
     assert_eq!(settings.defaults_refusal(), None);
+}
+
+#[test]
+fn listing_answers_every_effective_key_once_with_the_value_that_wins() {
+    // The enumeration an *open* key namespace needs — a catalog, a recent-file
+    // list — answered from the document the client already holds, with no
+    // further call. A closed registry never needs it; that is why the wire
+    // carries no listing operation at all.
+    let mut host = service_with_defaults("scheme = light\nfont.size = 14\n")
+        .with_store("scheme = dark\nscheme = darker\nextra = yes\n");
+    let settings = Settings::open(&mut host, OWN_WORD);
+    let listed = settings.settings();
+    let mut pairs: Vec<(&str, &str)> = listed
+        .iter()
+        .map(|setting| (setting.key, setting.value))
+        .collect();
+    pairs.sort_unstable();
+    assert_eq!(
+        pairs,
+        [("extra", "yes"), ("font.size", "14"), ("scheme", "darker")],
+        "each key once: the store shadows the defaults, and a repeated key \
+         takes the last setting exactly as `get` answers it"
+    );
+    assert_eq!(host.calls(), 1, "listing costs no call of its own");
+}
+
+#[test]
+fn listing_a_published_scope_shows_the_edits_the_handle_has_staged() {
+    // A writer that must *replace* an open namespace reads what the scope
+    // holds, works out what to unset, and stages the rest — so what it lists
+    // has to include its own uncommitted work, as every other read does.
+    let mut host = service().with_published("one = 1\ntwo = 2\n");
+    let mut settings = Settings::open_published(&mut host);
+    settings.unset("one");
+    settings.set("three", "3").expect("a legal setting");
+    let mut keys: Vec<&str> = settings
+        .settings()
+        .iter()
+        .map(|setting| setting.key)
+        .collect();
+    keys.sort_unstable();
+    assert_eq!(keys, ["three", "two"]);
 }
 
 #[test]

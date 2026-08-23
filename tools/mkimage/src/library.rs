@@ -2,7 +2,7 @@
 //! application bundles.
 //!
 //! The machine-wide catalog the desktop's Program Library reads
-//! (`tairix_proglib::MACHINE_LIBRARY_PATH`) is **discovered** from the
+//! (`tairix_proglib::LIBRARY_PATH`) is **discovered** from the
 //! signed `AppInfo` manifests the image actually plants — never a
 //! hand-maintained list: a bundle whose manifest declares a library folder
 //! is catalogued under it, and every other bundle stays out. The document
@@ -12,7 +12,9 @@
 //! (`plans/NEW-TASKBAR.md` T3).
 
 use tairix_abi::{AppInfoHeader, BundleEntry, ProgramKind};
-use tairix_proglib::{render, BundlePath, Catalog, DisplayName, EntryId, IconAsset, LibraryEntry};
+use tairix_proglib::{
+    document, BundlePath, Catalog, DisplayName, EntryId, IconAsset, LibraryEntry,
+};
 
 use crate::MkimageError;
 
@@ -77,7 +79,7 @@ pub fn library_catalog(apps: &[(&[&[u8]], &[u8])]) -> Result<String, MkimageErro
             return Err(fail(&"duplicate library identifier"));
         }
     }
-    Ok(render(&catalog))
+    Ok(document(&catalog).render())
 }
 
 /// Test-only decodable wire manifest for `name`, listed under `listing`
@@ -172,16 +174,17 @@ mod tests {
         let text = library_catalog(&apps).expect("derives");
         assert_eq!(
             text,
-            "os.tairix.edit.name edit\n\
-             os.tairix.edit.bundle /System/Commands/edit.app\n\
-             os.tairix.edit.category Office\n\
-             os.tairix.files.name files\n\
-             os.tairix.files.bundle /System/Applications/files.app\n\
-             os.tairix.files.category Accessories\n\
-             os.tairix.files.icon files.svg\n"
+            "os.tairix.edit.name = edit\n\
+             os.tairix.edit.bundle = /System/Commands/edit.app\n\
+             os.tairix.edit.category = Office\n\
+             os.tairix.files.name = files\n\
+             os.tairix.files.bundle = /System/Applications/files.app\n\
+             os.tairix.files.category = Accessories\n\
+             os.tairix.files.icon = files.svg\n"
         );
         // The derived document is a valid store the runtime readers accept.
-        let catalog = tairix_proglib::parse(&text).expect("re-parses");
+        let parsed = tairix_appconf::Document::parse(&text).expect("a well-formed document");
+        let catalog = tairix_proglib::load(&parsed).expect("re-reads");
         assert_eq!(catalog.len(), 2);
     }
 

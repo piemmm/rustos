@@ -7,10 +7,12 @@
 //! `applib hide`/`show` set an entry's visibility verdict; `applib rescan`
 //! walks the application stores and registers every listed bundle the
 //! catalog does not know yet — discovery, never a compiled-in list. The
-//! machine-wide store lives at `tairix_proglib::MACHINE_LIBRARY_PATH` and a
-//! per-user overlay at `tairix_proglib::user_library_path`; every document
-//! is read and written through the one `lib/proglib` engine, so this writer
-//! and the desktop's readers can never diverge.
+//! machine-wide store lives at `tairix_proglib::LIBRARY_PATH` and the
+//! per-user overlay in this application's own *published* app-data scope
+//! (`store::AppDataStore`, `plans/APPDATA.md` §1.1) — two backings of one
+//! [`Store`] seam, so this tool's editing logic never learns where a catalog
+//! lives. Every document is read and written through the one `lib/proglib`
+//! registry, so this writer and the desktop's readers can never diverge.
 //!
 //! # What this crate is
 //!
@@ -55,6 +57,9 @@
 
 extern crate alloc;
 
+pub mod store;
+pub use store::AppDataStore;
+
 use alloc::collections::VecDeque;
 use alloc::format;
 use alloc::string::String;
@@ -66,9 +71,10 @@ use tairix_abi::{
     AppInfoHeader, Errno, LibraryCategory, BUNDLE_SUFFIX, HOME_APPLICATION_STORE_DIR,
     HOME_COMMAND_STORE_DIR, INSTALLED_APP_STORE, SYSTEM_APPLICATION_STORE, SYSTEM_COMMAND_STORE,
 };
+use tairix_appconf::Document;
 use tairix_help::{own_short_help, HelpSource};
 use tairix_proglib::{
-    merge, parse as parse_catalog, render as render_catalog, BundlePath, Catalog, CatalogError,
+    document as catalog_document, load as load_catalog, merge, BundlePath, Catalog, CatalogError,
     DisplayName, EntryError, EntryId, EntryPatch, IconAsset, LibraryEntry, Record,
 };
 
@@ -185,8 +191,10 @@ pub enum AppLibError {
     /// `add` without `--category` on a bundle whose manifest declares no
     /// library folder: the tool never guesses a folder.
     NotListed,
-    /// A `--user` operation with no usable home directory to derive the
-    /// overlay from.
+    /// A `rescan --user` with no usable home directory to walk. Editing the
+    /// overlay itself never needs one: the app-data service resolves the
+    /// account from the identity the kernel attests, so a caller whose
+    /// account has no home is refused by the *service*, in its own words.
     NoHome,
     /// The `add` operand has no readable `AppInfo` manifest, so it is not
     /// an application bundle.
@@ -232,7 +240,9 @@ impl fmt::Display for AppLibError {
             Self::NotListed => {
                 f.write_str("the bundle's manifest declares no library folder; give --category")
             }
-            Self::NoHome => f.write_str("no home directory in the environment; cannot use --user"),
+            Self::NoHome => {
+                f.write_str("no home directory in the environment; cannot rescan --user")
+            }
             Self::NoManifest => f.write_str("not an application bundle (no AppInfo manifest)"),
             Self::BadManifest => f.write_str("the bundle's AppInfo manifest does not decode"),
             Self::Entry(err) => write!(f, "{err}"),
@@ -249,31 +259,32 @@ impl fmt::Display for AppLibError {
     }
 }
 
-/// Reads and replaces one catalog document.
+/// Reads and replaces one catalog store.
 ///
-/// The `Run` binary wires the syscall-backed machine store at
-/// `tairix_proglib::MACHINE_LIBRARY_PATH` and the caller's overlay at
-/// `tairix_proglib::user_library_path`; tests wire in-memory fixtures. The
+/// The two layers are two backings of this one seam, which is what keeps the
+/// tool's editing logic ignorant of where a catalog lives: the `Run` binary
+/// wires the syscall-backed machine store at `tairix_proglib::LIBRARY_PATH`
+/// and, for `--user`, the caller's overlay in this application's *published*
+/// app-data scope ([`AppDataStore`]); tests wire in-memory fixtures. The
 /// document travels whole in both directions: the engine's canonical render
-/// replaces the file, never a partial patch.
+/// replaces the store, never a partial patch.
 pub trait Store {
-    /// Read the whole store document, or `None` when no store exists yet
-    /// (an empty library — the ordinary fresh state).
+    /// Read the whole store document, or `None` when the store holds nothing
+    /// yet (an empty library — the ordinary fresh state).
     ///
     /// # Errors
     ///
-    /// Any [`Errno`] the filesystem raises other than absence.
-    fn read(&self) -> Result<Option<String>, Errno>;
+    /// Any [`Errno`] the backing raises other than absence.
+    fn read(&self) -> Result<Option<Document>, Errno>;
 
-    /// Replace the store document with `text` (creating it, and its
-    /// directory, when absent).
+    /// Replace the store's contents with `document`.
     ///
     /// # Errors
     ///
-    /// Any [`Errno`] the filesystem raises — notably
+    /// Any [`Errno`] the backing raises — notably
     /// [`Errno::PermissionDenied`] when the caller may not change the
     /// machine-wide catalog.
-    fn write(&self, text: &str) -> Result<(), Errno>;
+    fn write(&self, document: &Document) -> Result<(), Errno>;
 }
 
 /// One directory entry the [`Bundles`] seam reports.
@@ -330,10 +341,10 @@ pub trait Output {
 pub struct Stores<'a> {
     /// The machine-wide store.
     pub machine: &'a dyn Store,
-    /// The caller's own overlay, or `None` when the environment names no
-    /// home directory (`--user` operations then fail closed, and `list`
-    /// resolves against an empty overlay).
-    pub user: Option<&'a dyn Store>,
+    /// The caller's own overlay: this application's published app-data
+    /// scope, which the service resolves from the identity the kernel
+    /// attests, so it needs no home and is always present.
+    pub user: &'a dyn Store,
     /// The caller's home directory (the inherited `HOME`), if any: the
     /// `rescan --user` walk roots `<home>/Commands` and `<home>/Applications`
     /// derive from it.
@@ -552,26 +563,25 @@ pub fn run(
 /// understand.
 fn load(store: &dyn Store, side: Side) -> Result<Catalog, AppLibError> {
     match store.read().map_err(|err| AppLibError::Read(side, err))? {
-        Some(text) => parse_catalog(&text).map_err(|err| AppLibError::Malformed(side, err)),
+        Some(document) => load_catalog(&document).map_err(|err| AppLibError::Malformed(side, err)),
         None => Ok(Catalog::default()),
     }
 }
 
 /// The store an editing operation targets: the caller's overlay under
 /// `--user`, else the machine-wide store.
-fn target<'a>(stores: &'a Stores<'a>, user: bool) -> Result<(&'a dyn Store, Side), AppLibError> {
+fn target<'a>(stores: &'a Stores<'a>, user: bool) -> (&'a dyn Store, Side) {
     if user {
-        let store = stores.user.ok_or(AppLibError::NoHome)?;
-        Ok((store, Side::User))
+        (stores.user, Side::User)
     } else {
-        Ok((stores.machine, Side::Machine))
+        (stores.machine, Side::Machine)
     }
 }
 
 /// Render and write `catalog` back to its store.
 fn save(store: &dyn Store, side: Side, catalog: &Catalog) -> Result<(), AppLibError> {
     store
-        .write(&render_catalog(catalog))
+        .write(&catalog_document(catalog))
         .map_err(|err| AppLibError::Write(side, err))
 }
 
@@ -583,10 +593,7 @@ fn list(
     category: Option<LibraryCategory>,
 ) -> Result<(), AppLibError> {
     let machine = load(stores.machine, Side::Machine)?;
-    let overlay = match stores.user {
-        Some(store) => load(store, Side::User)?,
-        None => Catalog::default(),
-    };
+    let overlay = load(stores.user, Side::User)?;
     let resolved = merge(&machine, &overlay);
 
     let mut text = String::new();
@@ -618,7 +625,7 @@ fn add(
     output: &dyn Output,
     request: &AddRequest<'_>,
 ) -> Result<(), AppLibError> {
-    let (store, side) = target(stores, request.user)?;
+    let (store, side) = target(stores, request.user);
     let mut catalog = load(store, side)?;
 
     let bundle = request.bundle.strip_suffix('/').unwrap_or(request.bundle);
@@ -658,7 +665,7 @@ fn remove(
     target_word: &str,
     user: bool,
 ) -> Result<(), AppLibError> {
-    let (store, side) = target(stores, user)?;
+    let (store, side) = target(stores, user);
     let mut catalog = load(store, side)?;
 
     let id = if target_word.starts_with('/') {
@@ -697,16 +704,13 @@ fn set_visibility(
     user: bool,
     hidden: bool,
 ) -> Result<(), AppLibError> {
-    let (store, side) = target(stores, user)?;
+    let (store, side) = target(stores, user);
     let id = EntryId::new(id).map_err(AppLibError::Entry)?;
 
     // The verdict must name a real record somewhere: a typo'd identifier is
     // refused, not silently written as a patch nothing will ever match.
     let machine = load(stores.machine, Side::Machine)?;
-    let overlay = match stores.user {
-        Some(user_store) => load(user_store, Side::User)?,
-        None => Catalog::default(),
-    };
+    let overlay = load(stores.user, Side::User)?;
     if machine.get(&id).is_none() && overlay.get(&id).is_none() {
         return Err(AppLibError::UnknownEntry);
     }
@@ -754,7 +758,7 @@ fn rescan(
     output: &dyn Output,
     user: bool,
 ) -> Result<(), AppLibError> {
-    let (store, side) = target(stores, user)?;
+    let (store, side) = target(stores, user);
     let roots: Vec<String> = if user {
         let home = stores
             .home

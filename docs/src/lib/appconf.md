@@ -79,6 +79,23 @@ setting), `Ok(Some(v))` (a value of the requested type), and
 An app can therefore report a broken value instead of silently substituting a
 default.
 
+## One question, whichever document answers it
+
+An application's registry is a fixed set of keys read out of *something*: its
+own layered `tairix_appdata::Settings` handle, the `Document` another
+application's published scope answered with, or one that arrived over a
+channel. Those are different types with one question between them, so the
+question is named once — the `Lookup` trait, implemented here for `Document`
+and in the app-data client for its handle — and every registry is written once
+against it. A loader per surface would be one more chance for two of them to
+disagree about what a missing key means.
+
+The grammar is also *inside* the one `lib/abi` store-name grammar's shape:
+every bundle identifier and bulk-store name `validate_store_name` admits is a
+legal key, which is what lets a registry key on an identifier
+(`<bundle-id>.<field>`) with no risk of rendering a key no document can hold.
+A unit test pins the containment in both directions.
+
 ## A document may hold secrets
 
 The app-data store's **sealed** scope is a document of this format, so the

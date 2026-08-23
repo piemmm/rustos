@@ -23,9 +23,10 @@ cartelle delle applicazioni avviabili presentato dal launcher del
 desktop. La libreria è costituita da dati sul volume, mai una lista
 compilata internamente: un archivio a livello di macchina in
 `/System/Settings/ProgramLibrary/library.conf` che ogni account legge,
-più un overlay opzionale per utente allo stesso percorso all'interno
-dei `Settings/` dell'utente stesso. Ciò che un launcher mostra è il
-risultato della risoluzione di entrambi: le voci e le regolazioni
+più un overlay opzionale per utente che questo comando tiene nelle
+proprie impostazioni, dove solo lui può scrivere e qualsiasi
+applicazione può leggere ciò che pubblica. Ciò che un launcher mostra è
+il risultato della risoluzione di entrambi: le voci e le regolazioni
 dell'utente prevalgono su quelle a livello di macchina.
 
 Senza sottocomandi (o con `list`), la libreria risolta viene stampata
@@ -123,9 +124,10 @@ può ignorare.
 
 - `LANG` — il locale preferito per l'aiuto breve (un tag BCP-47 come
   `fr-FR`).
-- `HOME` — la directory home del chiamante: identifica l'overlay per
-  utente e le radici del rescan `--user` `<home>/Commands` e
-  `<home>/Applications`.
+- `HOME` — la directory home del chiamante: le radici del rescan
+  `--user` `<home>/Commands` e `<home>/Applications`. L'overlay in sé non
+  ha bisogno di una home; il servizio delle impostazioni risolve
+  l'account dall'identità attestata dal kernel.
 
 ## SEE ALSO
 

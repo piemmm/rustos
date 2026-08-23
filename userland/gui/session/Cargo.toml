@@ -110,8 +110,24 @@ tairix-controls = { path = "../../../lib/controls", version = "=0.0.0" }
 # the icon arrangement/sort — so the session has one owner of them and the
 # shell reads them from the desktop rather than keeping a second copy.
 tairix-wallpaper = { path = "../../../lib/wallpaper", version = "=0.0.0" }
+# The app-data client: the desktop's pinboard settings live in this
+# application's own *published* scope, so the session is the only principal
+# that can write them and any application may read what it says about its own
+# desktop (plans/APPDATA.md §3.11). No path, user, or bundle identifier is
+# spelled here — the service derives the store from the attested identity.
+tairix-appdata = { path = "../../../lib/appdata", version = "=0.0.0" }
+# The one `key = value` document engine: the machine-wide program-library
+# store is one of its documents, so the session reads it through the engine
+# and `lib/proglib`'s registry rather than a second parser.
+tairix-appconf = { path = "../../../lib/appconf", version = "=0.0.0" }
 
 [dev-dependencies]
+# The shared fake app-data service the pinboard store's host tests drive the
+# client over: it speaks the real `appdata-v1` codec, so a test exercises the
+# wire the service actually answers rather than a mock of it.
+tairix-appdata = { path = "../../../lib/appdata", version = "=0.0.0", features = [
+    "test-util",
+] }
 # The shared help engine's required-locale registry: the `cli` module's
 # pin test verifies every locale's `OPTIONS` section documents exactly the
 # switches the parser accepts (plans/APPS.md).
@@ -137,6 +153,11 @@ path = "src/run.rs"
 # bare-metal targets it is actually built for; on the host the binary is an
 # inert stub with no extra dependencies.
 [target.'cfg(target_os = "none")'.dependencies]
+# On the real target the `Run` binary reaches the app-data service over the
+# runtime `ipc_call` transport; this augments the host-neutral base dependency
+# with that host for the bare-metal build only, so host tests still drive the
+# client over their own fake.
+tairix-appdata = { path = "../../../lib/appdata", version = "=0.0.0", features = ["rt"] }
 # The browser engine's production symbolic-link reader (`RtLinkReader`): the
 # `fs_readlink` + resolving `fs_stat` pair a listed link needs, written once in
 # `lib/browse` so no surface carries its own copy of those two calls.

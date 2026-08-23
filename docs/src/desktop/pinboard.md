@@ -39,24 +39,31 @@ Nothing about the pinboard lives in the kernel or in a driver.
 
 ## The settings document
 
-One small text document per user, at
-`<home>/Settings/Pinboard/pinboard.conf`, in the same bounded, fail-closed
-`key value` grammar the shared per-user settings stores use. It carries
-five keys: which wallpaper, how it is fitted, the backdrop colour behind it,
-which corner the icons arrange from, and how they are sorted.
+One small document per user, in the desktop session's **published** app-data
+scope ([the app-data client](../lib/appdata.md), `plans/APPDATA.md` §3.11).
+It carries five keys: which wallpaper, how it is fitted, the backdrop colour
+behind it, which corner the icons arrange from, and how they are sorted.
 [The `lib/wallpaper` page](../lib/wallpaper.md) is the reference for the
-grammar, the defaults, and the bounds.
+registry, the defaults, and the bounds.
 
-Two properties matter more than the format:
+Three properties matter more than the format:
 
-- **Absent is not broken.** A fresh account simply has no document, and the
-  defaults apply silently. An *unusable* one (unreadable, oversized,
-  non-UTF-8, malformed) yields the defaults **plus** a warning on `stderr`
-  — the desktop comes up and says why, rather than guessing at a
-  half-parsed intent or refusing to start.
-- **The session is the only writer.** Nothing else rewrites the document,
-  and the in-memory settings adopt an edit only *after* the write to disk
-  succeeded, so what is on screen and what is on disk cannot diverge.
+- **Absent is not broken.** A fresh account has published nothing, and the
+  defaults apply silently. A value this build's registry does not accept
+  leaves *that one setting* at its default **plus** a warning on `stderr` —
+  the desktop comes up and says why, rather than guessing at a half-parsed
+  intent or refusing to start.
+- **The session is the only writer, by construction.** An application
+  publishes only its *own* scope, so no other program the user launches —
+  including the chooser — can write the desktop's document at all. The
+  in-memory settings adopt an edit only *after* the publish succeeded, so
+  what is on screen and what is stored cannot diverge.
+- **Any application may read it**, by naming the session's bundle identifier
+  on a request shape that carries no scope field — so the chooser can show
+  what is in effect without being able to reach anything else the session
+  keeps. That replaces the hand-rolled `~/Settings/Pinboard/pinboard.conf`
+  the chooser used to open directly, a file every application of that user
+  could also rewrite.
 
 ## Changing the settings
 

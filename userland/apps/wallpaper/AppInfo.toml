@@ -6,11 +6,14 @@
 # program in either system store).
 # The capability list is the bundle's request:
 #   - CAP_CONSOLE_WRITE for its fail-loud stderr diagnostics.
-#   - CAP_FS_ACCESS to list the read-only shipped wallpaper store and to read
-#     the launching user's own pinboard settings file — every read is still
-#     permission-checked per inode under the launching user's identity, and
-#     the chooser never writes the settings file itself: it only asks the
-#     desktop session to adopt a change over the pinboard IPC channel.
+#   - CAP_FS_ACCESS to list the read-only shipped wallpaper store — every read
+#     is still permission-checked per inode under the launching user's
+#     identity. It does not cover the settings the chooser opens on: those are
+#     the desktop session's *published* app-data scope (plans/APPDATA.md
+#     §3.11), reached over APPDATA_ENDPOINT and gated on that session's
+#     attested bundle identity. The chooser cannot write them at all — an
+#     application publishes only its own scope — so it asks the session to
+#     adopt a change over the pinboard IPC channel.
 #   - CAP_SHM to create and grant the zero-copy window frame region the
 #     desktop session maps.
 #   - CAP_PROC_SPAWN to host its own thumbnail-rendering sandbox worker: a

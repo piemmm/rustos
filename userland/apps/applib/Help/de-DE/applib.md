@@ -23,11 +23,11 @@ startfähiger Anwendungen, den der Launcher des Desktops präsentiert.
 Die Bibliothek besteht aus Daten auf dem Datenträger, niemals aus einer
 fest eincompilierten Liste: ein systemweiter Speicher unter
 `/System/Settings/ProgramLibrary/library.conf`, den jedes Konto liest,
-plus ein optionales benutzerbezogenes Overlay unter demselben Pfad
-innerhalb der eigenen `Settings/` des Benutzers. Was ein Launcher
-anzeigt, ist das Ergebnis der Zusammenführung beider: Die eigenen
-Einträge und Anpassungen des Benutzers gewinnen gegenüber den
-systemweiten.
+plus ein optionales benutzerbezogenes Overlay, das dieser Befehl in
+seinen eigenen Einstellungen führt — nur er darf dort schreiben, und jede
+Anwendung darf lesen, was er veröffentlicht. Was ein Launcher anzeigt,
+ist das Ergebnis der Zusammenführung beider: Die eigenen Einträge und
+Anpassungen des Benutzers gewinnen gegenüber den systemweiten.
 
 Ohne Unterbefehl (oder mit `list`) wird die aufgelöste Bibliothek
 Ordner für Ordner ausgegeben, ein Eintrag pro Zeile: Kennung,
@@ -123,9 +123,10 @@ dem Standard-Informationsstrom (fd 3) ausgegeben, den Skripte mit
 
 - `LANG` — die bevorzugte Sprache für die Kurzhilfe (ein
   BCP-47-Kennzeichen wie `fr-FR`).
-- `HOME` — das Home-Verzeichnis des Aufrufers: benennt das
-  benutzerbezogene Overlay und die `--user`-Rescan-Wurzeln
-  `<home>/Commands` und `<home>/Applications`.
+- `HOME` — das Home-Verzeichnis des Aufrufers: die
+  `--user`-Rescan-Wurzeln `<home>/Commands` und `<home>/Applications`.
+  Das Overlay selbst braucht kein Home; der Einstellungsdienst ermittelt
+  das Konto aus der vom Kernel bezeugten Identität.
 
 ## SEE ALSO
 

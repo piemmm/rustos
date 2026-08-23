@@ -74,11 +74,9 @@ the standard error stream.
 
 ## ENVIRONMENT
 
-`HOME` names the user's own home directory, under which
-`Settings/Pinboard/pinboard.conf` is read at start-up so the window
-opens on the settings that are in effect. That document is written by
-the desktop session, never by this program. With no `HOME`, the window
-opens on the defaults.
+None. The settings the window opens on are the desktop session's own
+published settings, read through the app-data service rather than from a
+path this program spells; the session writes them, never this program.
 
 ## SEE ALSO
 
