@@ -14,7 +14,7 @@ use tairix_abi::Errno;
 use tairix_appconf::ConfError;
 
 use super::fake::FakeService;
-use super::{read_published, Settings, READ_ATTEMPTS};
+use super::{read_published, Settings, Vault, READ_ATTEMPTS};
 
 /// The word the fake bundle is installed under.
 const OWN_WORD: &str = "notes";
@@ -477,4 +477,202 @@ fn a_published_document_larger_than_the_probe_is_read_whole() {
     let theirs = read_published(&mut host, "os.tairix.terminal").expect("reads");
     assert_eq!(theirs.settings().count(), count);
     assert_eq!(host.calls(), 2, "one probe, one exact-size read");
+}
+
+// --- The sealed scope ----------------------------------------------------
+
+#[test]
+fn opening_the_sealed_scope_costs_one_call_and_every_read_after_it_costs_none() {
+    let mut host = service().with_sealed("imap.password = hunter2\ntoken = abc\n");
+    let vault = Vault::open(&mut host).expect("opens");
+    assert_eq!(vault.get("imap.password"), Some("hunter2"));
+    assert_eq!(vault.get("token"), Some("abc"));
+    assert!(vault.has("token"));
+    assert_eq!(vault.get("absent"), None);
+    assert!(!vault.has("absent"));
+    drop(vault);
+    assert_eq!(host.calls(), 1, "one round trip, however many secrets");
+}
+
+/// The sealed scope has no commit: a write is one call the service applies
+/// before it replies, so an application that seals a secret and exits has
+/// sealed it.
+#[test]
+fn a_sealed_write_lands_without_a_commit() {
+    let mut host = service();
+    let mut vault = Vault::open(&mut host).expect("opens");
+    vault.set("imap.password", "hunter2").expect("seals");
+    assert_eq!(vault.get("imap.password"), Some("hunter2"));
+    drop(vault);
+    assert_eq!(host.sealed().get("imap.password"), Some("hunter2"));
+}
+
+#[test]
+fn sealing_a_secret_the_vault_already_holds_costs_no_call() {
+    let mut host = service().with_sealed("imap.password = hunter2\n");
+    let mut vault = Vault::open(&mut host).expect("opens");
+    vault
+        .set("imap.password", "hunter2")
+        .expect("seals nothing");
+    drop(vault);
+    assert_eq!(host.calls(), 1, "only the open");
+}
+
+#[test]
+fn removing_a_secret_the_vault_does_not_hold_costs_no_call() {
+    let mut host = service().with_sealed("token = abc\n");
+    let mut vault = Vault::open(&mut host).expect("opens");
+    vault.unset("imap.password").expect("removes nothing");
+    drop(vault);
+    assert_eq!(host.calls(), 1, "only the open");
+}
+
+/// The sealed scope has no layer beneath it, so a removal leaves the key
+/// absent rather than uncovering a default or a policy value.
+#[test]
+fn removing_a_secret_uncovers_nothing() {
+    let mut host = service_with_defaults("imap.password = a shipped secret\n")
+        .with_sealed("imap.password = hunter2\n");
+    let mut vault = Vault::open(&mut host).expect("opens");
+    vault.unset("imap.password").expect("removes");
+    assert_eq!(vault.get("imap.password"), None);
+    drop(vault);
+    assert_eq!(host.sealed().get("imap.password"), None);
+}
+
+/// The one place the sealed scope deliberately differs from
+/// [`Settings::open`]: it fails rather than reading empty, because "I could not
+/// read your secrets" is not "you have none".
+#[test]
+fn an_unreadable_vault_is_reported_and_never_reads_as_empty() {
+    for err in [
+        Errno::SignatureInvalid,
+        Errno::BadMagic,
+        Errno::DeviceOffline,
+        Errno::PermissionDenied,
+        Errno::NotFound,
+    ] {
+        let mut host = service().with_sealed_refusal(err);
+        assert_eq!(
+            Vault::open(&mut host).err(),
+            Some(err),
+            "a vault that cannot be read must not open empty"
+        );
+    }
+}
+
+#[test]
+fn a_failed_sealed_write_leaves_the_handle_as_it_was() {
+    let mut host = service().with_sealed("token = abc\n");
+    // Taken before the handle borrows the host: the switch is what lets a call
+    // fail while a handle is live.
+    let refuse = host.refusal();
+    let mut vault = Vault::open(&mut host).expect("opens");
+    refuse.set(Some(Errno::DeviceOffline));
+    assert_eq!(
+        vault.set("imap.password", "hunter2"),
+        Err(Errno::DeviceOffline)
+    );
+    assert_eq!(
+        vault.get("imap.password"),
+        None,
+        "a write that did not land must not appear to have"
+    );
+    assert_eq!(vault.get("token"), Some("abc"), "and nothing else changed");
+}
+
+#[test]
+fn a_sealed_write_of_a_value_the_format_refuses_is_reported() {
+    let mut host = service();
+    let mut vault = Vault::open(&mut host).expect("opens");
+    assert_eq!(vault.set("Not.A.Key", "v"), Err(Errno::OutOfRange));
+    assert_eq!(vault.set("k", "a \u{7} bell"), Err(Errno::OutOfRange));
+    drop(vault);
+    assert_eq!(host.sealed().settings().count(), 0);
+}
+
+/// A sealed write ends by re-reading the store, so the handle reflects what the
+/// service holds rather than what this library guessed — including a secret
+/// another instance of the application sealed in the meantime.
+#[test]
+fn a_sealed_write_re_reads_what_the_service_then_holds() {
+    let mut host = service();
+    let mut vault = Vault::open(&mut host).expect("opens");
+    vault.set("token", "first").expect("seals");
+    assert_eq!(vault.get("token"), Some("first"));
+    drop(vault);
+    assert_eq!(host.calls(), 3, "the open, the write, and the re-read");
+}
+
+/// A write that lands and is then followed by a failed re-read reports the
+/// re-read's error rather than claiming the write did not happen: it did, and a
+/// caller that retries pays nothing because the value is already sealed.
+#[test]
+fn a_sealed_write_whose_re_read_fails_is_reported_but_still_landed() {
+    let mut host = service();
+    let refuse_reads = host.read_refusal();
+    let mut vault = Vault::open(&mut host).expect("opens");
+    refuse_reads.set(Some(Errno::DeviceOffline));
+    assert_eq!(
+        vault.set("token", "sealed"),
+        Err(Errno::DeviceOffline),
+        "the re-read failed, and that is what is reported"
+    );
+    assert_eq!(
+        vault.get("token"),
+        None,
+        "the handle keeps its previous view rather than a guess"
+    );
+    // The write itself landed, so a retry once the volume is back costs
+    // nothing and the handle catches up.
+    refuse_reads.set(None);
+    vault.set("token", "sealed").expect("already sealed");
+    assert_eq!(vault.get("token"), Some("sealed"));
+    drop(vault);
+    assert_eq!(host.sealed().get("token"), Some("sealed"));
+}
+
+#[test]
+fn a_sealed_read_negotiates_capacity_for_a_document_past_the_probe() {
+    // A vault of many long secrets — a certificate store, say. The first call
+    // asks for the probe size and is told the length; the second asks for
+    // exactly that and gets the whole document. A prefix is never parsed.
+    let mut text = String::new();
+    let mut expected = 0usize;
+    while text.len() <= super::READ_PROBE {
+        let _ = core::fmt::Write::write_fmt(
+            &mut text,
+            format_args!("token.{expected} = {}\n", "s".repeat(120)),
+        );
+        expected += 1;
+    }
+    let mut host = service().with_sealed(&text);
+    let vault = Vault::open(&mut host).expect("opens");
+    assert!(vault.has("token.0"));
+    assert!(
+        vault.has(&alloc::format!("token.{}", expected - 1)),
+        "the last secret of an oversize vault is present, so nothing was truncated"
+    );
+    drop(vault);
+    assert_eq!(
+        host.calls(),
+        2,
+        "one probe, one read at the declared length"
+    );
+}
+
+/// The sealed and configuration scopes are separate documents to the client
+/// too: neither handle can see the other's keys.
+#[test]
+fn the_sealed_scope_is_a_document_of_its_own() {
+    let mut host = service()
+        .with_store("font.size = 14\n")
+        .with_sealed("imap.password = hunter2\n");
+    let settings = Settings::open(&mut host, OWN_WORD);
+    assert_eq!(settings.get("imap.password"), None);
+    assert_eq!(settings.get("font.size"), Some("14"));
+    drop(settings);
+    let vault = Vault::open(&mut host).expect("opens");
+    assert_eq!(vault.get("font.size"), None);
+    assert_eq!(vault.get("imap.password"), Some("hunter2"));
 }

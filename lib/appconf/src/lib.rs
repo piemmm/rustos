@@ -42,6 +42,16 @@
 //! [`MAX_LINES`], [`MAX_SETTINGS`]) are fixed security bounds on untrusted
 //! input and fail closed with a typed [`ConfError`], never by truncating.
 //!
+//! # A document may hold secrets
+//!
+//! The app-data store's **sealed** scope is a document of this format, so the
+//! engine treats a line's bytes as secret unconditionally: every line it
+//! discards — an overwritten setting, a collapsed duplicate, an
+//! [`Document::unset`] removal — and every line of a document that goes out of
+//! scope is wiped before it is freed. That lives in the engine rather than in
+//! its callers so no discard path can forget it. The one copy the engine does
+//! not own is [`Document::render`]'s return value, and its rustdoc says so.
+//!
 //! # Where the bounds live
 //!
 //! The three bounds a key, a value, and a whole document also cross the

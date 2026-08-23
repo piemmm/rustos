@@ -2,11 +2,18 @@
 //!
 //! It answers the `appdata-v1` wire exactly as `confd` does — decoding real
 //! request frames, encoding real reply frames, holding a committed document
-//! per scope and a staging session — so a test drives the codec the client and
-//! the service actually share rather than a mock of it. That is also why it
-//! lives here rather than in each consumer: an application migrating onto the
-//! store needs the same fake, and two copies of it would be two different
-//! ideas of what the service does.
+//! per configuration scope, a staging session, and a sealed document written
+//! through immediately — so a test drives the codec the client and the service
+//! actually share rather than a mock of it. That is also why it lives here
+//! rather than in each consumer: an application migrating onto the store needs
+//! the same fake, and two copies of it would be two different ideas of what the
+//! service does.
+//!
+//! It does not *encrypt* the sealed scope: the sealing is the service's, behind
+//! its own tests, and a fake that reimplemented it would be a second opinion
+//! about a key hierarchy. What it does reproduce is everything the client can
+//! observe — one document, no layers, no staging, a write applied before the
+//! reply, and a refusal that is a refusal rather than an empty vault.
 //!
 //! Test scaffolding only. It is never part of a TAIRiX build: the feature is
 //! enabled by a `[dev-dependencies]` entry, never by a program.
@@ -41,6 +48,12 @@ pub struct FakeService {
     word: String,
     /// The committed document of each scope, as the service would hold it.
     committed: [Document; SCOPES],
+    /// The sealed document, as the service would hold it — with no staging
+    /// beside it, because a sealed write is applied before the reply.
+    sealed: Document,
+    /// When set, every sealed-scope call is refused with this: the damaged
+    /// vault, the unreadable key material, the volume that is not there.
+    sealed_refusal: Option<Errno>,
     /// The one caller's staged, uncommitted edits, per scope — because one
     /// commit publishes one document.
     staged: [Vec<(String, Option<String>)>; SCOPES],
@@ -55,6 +68,10 @@ pub struct FakeService {
     /// When set, every call is refused with this. Shared so a test can refuse
     /// mid-flight, while a handle holds the host.
     refuse: Rc<Cell<Option<Errno>>>,
+    /// When set, only a document *read* is refused — the volume that goes away
+    /// between a write that landed and the re-read that follows it. Shared for
+    /// the same reason [`FakeService::refuse`] is.
+    refuse_reads: Rc<Cell<Option<Errno>>>,
     /// Calls served, so a test can prove a read is one round trip.
     calls: usize,
     /// When set, the private document grows before every read — the concurrent
@@ -70,11 +87,14 @@ impl FakeService {
         Self {
             word: String::from(word),
             committed: [Document::new(), Document::new()],
+            sealed: Document::new(),
+            sealed_refusal: None,
             staged: [Vec::new(), Vec::new()],
             foreign: Vec::new(),
             files: Vec::new(),
             candidates: Vec::new(),
             refuse: Rc::new(Cell::new(None)),
+            refuse_reads: Rc::new(Cell::new(None)),
             calls: 0,
             growing_writer: false,
         }
@@ -126,6 +146,31 @@ impl FakeService {
         self
     }
 
+    /// Seed the sealed document with `text`.
+    ///
+    /// # Panics
+    ///
+    /// As [`Self::with_store`].
+    #[must_use]
+    pub fn with_sealed(mut self, text: &str) -> Self {
+        self.sealed = Document::parse(text).expect("a legal store fixture");
+        self
+    }
+
+    /// Refuse every sealed-scope call with `err` — the damaged vault an
+    /// application must report rather than treat as empty.
+    #[must_use]
+    pub fn with_sealed_refusal(mut self, err: Errno) -> Self {
+        self.sealed_refusal = Some(err);
+        self
+    }
+
+    /// The sealed document — what a sealed write actually landed.
+    #[must_use]
+    pub const fn sealed(&self) -> &Document {
+        &self.sealed
+    }
+
     /// Seed what the *other* application `bundle_id` publishes.
     ///
     /// # Panics
@@ -152,6 +197,13 @@ impl FakeService {
     #[must_use]
     pub fn refusal(&self) -> Rc<Cell<Option<Errno>>> {
         Rc::clone(&self.refuse)
+    }
+
+    /// The switch that refuses only a document *read*, so a test can land a
+    /// write and then fail the re-read that follows it.
+    #[must_use]
+    pub fn read_refusal(&self) -> Rc<Cell<Option<Errno>>> {
+        Rc::clone(&self.refuse_reads)
     }
 
     /// Calls served so far.
@@ -206,7 +258,31 @@ impl AppDataHost for FakeService {
         if let Some(err) = self.refuse.get() {
             return Err(err);
         }
-        match AppDataRequest::decode(request)? {
+        let request = AppDataRequest::decode(request)?;
+        if let Some(err) = self.refuse_reads.get() {
+            if matches!(
+                request,
+                AppDataRequest::ConfigRead { .. }
+                    | AppDataRequest::PublicRead { .. }
+                    | AppDataRequest::VaultRead { .. }
+            ) {
+                return Err(err);
+            }
+        }
+        // One gate for the whole sealed scope: a damaged vault, unreadable key
+        // material, or an unreachable volume refuses every sealed operation,
+        // and a refusal is never an empty vault.
+        if let Some(err) = self.sealed_refusal {
+            if matches!(
+                request,
+                AppDataRequest::VaultRead { .. }
+                    | AppDataRequest::VaultSet { .. }
+                    | AppDataRequest::VaultUnset { .. }
+            ) {
+                return Err(err);
+            }
+        }
+        match request {
             AppDataRequest::ConfigRead { scope, capacity } => {
                 if self.growing_writer && matches!(scope, ConfigScope::Private) {
                     let index = self.committed[slot(scope)].settings().count();
@@ -227,6 +303,19 @@ impl AppDataHost for FakeService {
             AppDataRequest::ConfigCommit { scope } => {
                 self.committed[slot(scope)] = self.served(scope);
                 self.staged[slot(scope)].clear();
+                Ok(status(Ok(()), reply))
+            }
+            AppDataRequest::VaultRead { capacity } => {
+                encode_document_reply(&self.sealed.render(), capacity, reply)
+            }
+            AppDataRequest::VaultSet { key, value } => {
+                // Applied before the reply, exactly as the service does: there
+                // is no commit for the sealed scope.
+                self.sealed.set(key, value).map_err(|_| Errno::OutOfRange)?;
+                Ok(status(Ok(()), reply))
+            }
+            AppDataRequest::VaultUnset { key } => {
+                self.sealed.unset(key);
                 Ok(status(Ok(()), reply))
             }
             AppDataRequest::PublicRead {

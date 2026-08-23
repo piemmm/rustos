@@ -47,6 +47,23 @@ tairix-log = { path = "../../../lib/log", version = "=0.0.0" }
 # provisioners that create the tree, so the service and the provisioners can
 # never disagree about where the store is or who owns it.
 tairix-users = { path = "../../../lib/users", version = "=0.0.0" }
+# The audited primitives the sealed scope is built from: the single-block
+# HKDF-Expand the ARXFS key hierarchy already derives its subkeys through, and
+# ChaCha20-Poly1305. The charter forbids hand-rolled cryptography, so every
+# primitive comes through this wrapper and the sealed scope adds only a
+# domain-separating context label.
+tairix-crypto = { path = "../../../lib/crypto", version = "=0.0.0" }
+# The audited optimisation-resistant wipe. Master secrets, derived keys, and
+# transient plaintext buffers are overwritten before they are freed, and a
+# hand-rolled wipe would be elided by the optimiser.
+zeroize = { version = "1.8.1", default-features = false, features = ["alloc"] }
+
+[dev-dependencies]
+# The in-tree fuzz harness for the sealed scope's on-disk records draws its
+# inputs through the shared seed/budget seam: one place picks the per-run seed,
+# logs it, and bounds the smoke/soak loop. Test scaffolding only; never in a
+# TAIRiX build.
+tairix-fuzzseed = { path = "../../../tests/fuzzseed", version = "=0.0.0" }
 
 # The `Run` binary's freestanding userland runtime (`AGENTS.md` §1):
 # `tairix-rt` provides `_start`, the stack canary, the panic handler, the

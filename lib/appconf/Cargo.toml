@@ -18,6 +18,11 @@ workspace = true
 # so the one definition lives there and this engine reads it rather than
 # keeping a second opinion about how long a key or value may be.
 tairix-abi = { path = "../abi", version = "=0.0.0" }
+# The audited optimisation-resistant wipe. The app-data store's sealed scope is
+# a document of this format, so a discarded line may hold a secret: `Line`'s
+# `Drop` zeroises the bytes it is about to free, and a hand-rolled wipe would
+# be elided by the optimiser.
+zeroize = { version = "1.8.1", default-features = false, features = ["alloc"] }
 
 [dev-dependencies]
 # The in-tree fuzz harness draws its inputs through the shared seed/budget

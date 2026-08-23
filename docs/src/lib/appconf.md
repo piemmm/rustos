@@ -79,6 +79,20 @@ setting), `Ok(Some(v))` (a value of the requested type), and
 An app can therefore report a broken value instead of silently substituting a
 default.
 
+## A document may hold secrets
+
+The app-data store's **sealed** scope is a document of this format, so the
+engine treats a line's bytes as secret unconditionally: every line it discards —
+an overwritten setting, a collapsed duplicate, an `unset` removal — and every
+line of a document that goes out of scope is wiped before it is freed, through
+the audited `zeroize` (volatile writes the optimiser may not elide). That lives
+in the engine rather than in its callers so no discard path can forget it, and
+`Document` deliberately implements no `Debug` or `Display`, so a document cannot
+reach a log or a panic message by construction.
+
+The one copy the engine does not own is `render`'s return value; its rustdoc
+says so, and the service wipes it once the document has been sealed or framed.
+
 ## Relationship to the other line-oriented stores
 
 `lib/sysconfig`, `lib/netconfig`, and init's service registry read a
@@ -91,7 +105,8 @@ cuts at the first `#` unconditionally), because here a `#` inside a quoted
 value is a literal character; the tokenisation has to know about quoting, so it
 lives with the grammar that has quotes.
 
-The crate is `no_std` (with `alloc`), depends only on `lib/abi` — for the three
-bounds a key, a value, and a document cross the app-data channel under — forbids
-`unsafe`, and has no `unwrap`/`expect`/`panic!` in production paths. Stability
-tier: `experimental`.
+The crate is `no_std` (with `alloc`) and depends on `lib/abi` — for the three
+bounds a key, a value, and a document cross the app-data channel under — and on
+the audited `zeroize`. It forbids `unsafe` and has no
+`unwrap`/`expect`/`panic!` in production paths. Stability tier:
+`experimental`.

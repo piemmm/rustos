@@ -4,6 +4,8 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use core::fmt::Write as _;
 
+use zeroize::Zeroize;
+
 use crate::key::validate_key;
 use crate::value;
 use crate::{ConfError, MAX_DOCUMENT_LEN, MAX_LINES, MAX_SETTINGS};
@@ -71,6 +73,38 @@ impl Line {
             _ => "",
         }
     }
+
+    /// Overwrite every byte the line holds, leaving it empty.
+    ///
+    /// `Zeroize` uses volatile writes the optimiser may not elide, so the
+    /// bytes are really gone rather than merely unreachable.
+    fn wipe(&mut self) {
+        self.text.zeroize();
+        if let Kind::Setting {
+            key,
+            value,
+            comment,
+        } = &mut self.kind
+        {
+            key.zeroize();
+            value.zeroize();
+            comment.zeroize();
+        }
+    }
+}
+
+impl Drop for Line {
+    /// Wipe the line's bytes before they are freed.
+    ///
+    /// The app-data store's sealed scope is a document of this format, so a
+    /// line the engine discards — an overwritten setting, a collapsed
+    /// duplicate, an [`Document::unset`] removal, or a whole document going
+    /// out of scope — may hold a secret. Wiping here rather than at each call
+    /// site is what makes it hold for *every* discard path, including ones
+    /// added later: a caller cannot forget.
+    fn drop(&mut self) {
+        self.wipe();
+    }
 }
 
 /// A parsed configuration document.
@@ -78,6 +112,12 @@ impl Line {
 /// Reads are by key ([`get`](Self::get) and the typed accessors); writes are
 /// by key too ([`set`](Self::set), [`unset`](Self::unset)) and touch only the
 /// lines they must. [`render`](Self::render) returns the document's text.
+///
+/// A document may hold secrets — the app-data store's sealed scope is one of
+/// these — so every line the document discards is wiped before it is freed,
+/// and so is every line of a document that goes out of scope. The one thing
+/// that escapes that is [`render`](Self::render)'s return value, which the
+/// caller owns.
 pub struct Document {
     lines: Vec<Line>,
     /// Whether the source text ended with a newline, so a render reproduces
@@ -142,6 +182,10 @@ impl Document {
     }
 
     /// The document's text: the bytes a caller writes back.
+    ///
+    /// The returned string is the caller's, and it is the one copy of the
+    /// document's bytes this engine does not own. A caller rendering a
+    /// document that holds secrets wipes it once it has been sealed or sent.
     #[must_use]
     pub fn render(&self) -> String {
         let mut out = String::new();

@@ -14,6 +14,10 @@
 //!
 //! let theirs = read_published(&mut host, "os.tairix.terminal")?;
 //! let family = theirs.get("font.family");
+//!
+//! let mut vault = Vault::open(&mut host)?;      // the sealed scope
+//! vault.set("imap.password", secret)?;          // sealed before it returns
+//! let saved = vault.get("imap.password");
 //! ```
 //!
 //! # No app spells a path, and none names itself
@@ -27,7 +31,7 @@
 //! a *published* document and nothing else — there is no request shape that
 //! reaches another application's private settings.
 //!
-//! # Two scopes
+//! # Three scopes
 //!
 //! [`Settings::open`] is the application's **private** scope: the user's
 //! settings for it, which nothing else can read. [`Settings::open_published`]
@@ -35,6 +39,14 @@
 //! other applications to read, through [`read_published`]. The two are
 //! separate documents with separate commits, because one atomic publish
 //! replaces one document.
+//!
+//! [`Vault`] is the **sealed** scope: the application's secrets, encrypted at
+//! rest under a key the service derives per (account, application). It differs
+//! from the other two in three ways, each of them the sealed scope's own: it has
+//! no layer beneath it, because a secret an application did not write is not one
+//! it may be made to believe; it has no staging and no commit, because the
+//! service seals each write before it replies; and opening it can *fail*,
+//! because "I could not read your secrets" is not "you have none".
 //!
 //! # Three layers, and which of them this library owns
 //!
@@ -76,9 +88,9 @@
 //!
 //! The crate is `no_std` (with `alloc`) and performs no I/O of its own: every
 //! syscall it needs sits behind the [`AppDataHost`] seam, so the whole client
-//! — the layered read, the capacity negotiation, staging, and the commit — is
-//! exercised on the host. The `rt` feature supplies the real seam over
-//! `ipc_call` and `fs_*`.
+//! — the layered read, the capacity negotiation, staging, the commit, and the
+//! sealed scope — is exercised on the host. The `rt` feature supplies the real
+//! seam over `ipc_call` and `fs_*`.
 
 #![no_std]
 #![forbid(unsafe_code)]
@@ -98,6 +110,7 @@ use tairix_abi::appinfo::{BundleEntry, BUNDLE_ID_MAX};
 use tairix_abi::reply::{decode_status_reply, STATUS_REPLY_LEN};
 use tairix_abi::Errno;
 use tairix_appconf::{as_bool, as_i64, as_permille, as_u32, bool_text, ConfError, Document};
+use zeroize::Zeroize;
 
 #[cfg(any(test, feature = "test-util"))]
 pub mod fake;
@@ -560,6 +573,144 @@ fn read_store(host: &mut dyn AppDataHost, scope: ConfigScope) -> Result<Document
         scope,
         capacity,
     })
+}
+
+/// The calling application's own **sealed** scope: its secrets, as the app-data
+/// service last sealed them.
+///
+/// # It is not layered, not staged, and not shared
+///
+/// The sealed scope has no bundle-shipped defaults and no machine-wide policy
+/// layer, because a secret an application did not write is not one it may be
+/// made to believe. It has no staging either: [`Self::set`] and [`Self::unset`]
+/// are each applied by the service before it replies, so there is no commit and
+/// nothing an application can leave unsaved. And it has no foreign counterpart
+/// at all — no request shape reaches another application's secrets.
+///
+/// # It fails rather than reading empty
+///
+/// Unlike [`Settings::open`] this can fail, and deliberately so: "I could not
+/// read your secrets" is not "you have none". An application that cannot open
+/// its vault must say so rather than behave as though the user had never saved
+/// a password.
+///
+/// The handle holds nothing but the opened document, and the format engine
+/// wipes a document's every line when it goes out of scope — so the plaintext
+/// is gone when the handle is, with no `Drop` of its own to get wrong.
+pub struct Vault<'h> {
+    host: &'h mut dyn AppDataHost,
+    document: Document,
+}
+
+impl<'h> Vault<'h> {
+    /// Read the calling application's sealed document.
+    ///
+    /// One call, whatever the vault holds. It takes no command word and no
+    /// identifier: the service derives the store, the account, and the key from
+    /// the identity the kernel attests for this task.
+    ///
+    /// # Errors
+    ///
+    /// The service's own typed refusal, or the transport's:
+    /// [`Errno::NotFound`] when nothing has bound the endpoint,
+    /// [`Errno::PermissionDenied`] for a caller running no signed bundle or a
+    /// store another publisher owns, [`Errno::DeviceOffline`] for a volume that
+    /// cannot be reached, [`Errno::SignatureInvalid`] for a sealed document
+    /// that fails authentication, and [`Errno::BadMagic`] for one — or for the
+    /// account's key material — that is damaged. The last two mean the secrets
+    /// are unreadable, which is never reported as an empty vault.
+    pub fn open(host: &'h mut dyn AppDataHost) -> Result<Self, Errno> {
+        let document = negotiate(host, |capacity| AppDataRequest::VaultRead { capacity })?;
+        Ok(Self { host, document })
+    }
+
+    /// The secret `key` names, or [`None`] if the vault does not hold one.
+    ///
+    /// A local lookup: opening did the one round trip, so an application that
+    /// reads three secrets issues no further calls.
+    #[must_use]
+    pub fn get(&self, key: &str) -> Option<&str> {
+        self.document.get(key)
+    }
+
+    /// Whether the vault holds a secret for `key`.
+    #[must_use]
+    pub fn has(&self, key: &str) -> bool {
+        self.document.get(key).is_some()
+    }
+
+    /// Seal `key = value`, immediately.
+    ///
+    /// This is one call the service applies before it replies — there is no
+    /// commit, and nothing is left unsaved. A value the vault already holds
+    /// costs no call at all.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::open`], plus [`Errno::OutOfRange`] for a key or value outside
+    /// the format's grammar. A refused write leaves the vault — and this
+    /// handle — as they were.
+    pub fn set(&mut self, key: &str, value: &str) -> Result<(), Errno> {
+        if self.document.get(key) == Some(value) {
+            return Ok(());
+        }
+        self.write(&AppDataRequest::VaultSet { key, value })
+    }
+
+    /// Remove the secret `key` names, immediately.
+    ///
+    /// The sealed scope has no layer beneath it, so a removal leaves the key
+    /// absent rather than uncovering something else. Removing a key the vault
+    /// does not hold costs no call.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::set`].
+    pub fn unset(&mut self, key: &str) -> Result<(), Errno> {
+        if self.document.get(key).is_none() {
+            return Ok(());
+        }
+        self.write(&AppDataRequest::VaultUnset { key })
+    }
+
+    /// Apply one sealed write and re-read what the service then holds.
+    ///
+    /// The re-read is not a courtesy: the service is the only thing that knows
+    /// what the sealed document says once the write has landed, and applying
+    /// the change to this handle's own copy instead would be this library
+    /// *guessing* — a guess that is wrong the moment another instance of the
+    /// application has sealed something of its own. The same rule
+    /// [`Settings::commit`] follows, for the same reason.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::set`]. A write that is refused leaves the handle untouched; a
+    /// write that lands and is then followed by a failed re-read reports the
+    /// re-read's error, and the handle keeps its previous view — a retry of the
+    /// same write is harmless, because sealing a value the vault already holds
+    /// costs nothing.
+    fn write(&mut self, request: &AppDataRequest<'_>) -> Result<(), Errno> {
+        let mut frame = [0u8; APPDATA_MAX_REQUEST];
+        let mut reply = [0u8; STATUS_REPLY_LEN];
+        let len = request.encode(&mut frame)?;
+        let got = self.host.call(&frame[..len], &mut reply);
+        // The request frame carried the secret; it is this library's buffer and
+        // it goes no further.
+        frame[..len].zeroize();
+        decode_status_reply(&reply[..got?])?;
+        self.reload()
+    }
+
+    /// Re-read the sealed document.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::open`]. A failed reload leaves this handle's previous view
+    /// standing.
+    pub fn reload(&mut self) -> Result<(), Errno> {
+        self.document = negotiate(self.host, |capacity| AppDataRequest::VaultRead { capacity })?;
+        Ok(())
+    }
 }
 
 /// Read the document the application `bundle_id` names **publishes**.

@@ -145,6 +145,7 @@ no ambient root, signed code) are designed in from the kernel up.
 | Window identity from the attested launch record (§4, §5.4) | An application dressing its window as another in the title bar or taskbar | ✓ | ✓ | ✓ | ✓ |
 | Per-app data store gated on attested app identity (§5.2, §16.3) | One app of a user reading or rewriting another app's settings — not expressible with per-inode uid/mode/ACL | ✓ | ✓ | ✓ | ✓ |
 | Cross-app config sharing confined to a published scope (§16.3) | An app reaching another app's *private* settings through the sharing channel, or using it to probe which applications an account has run | ✓ | ✓ | ✓ | ✓ |
+| Per-app sealed secret store, keyed per (account, app) (§16.3) | An app reading another app's saved passwords or tokens; a damaged or forged vault being read as "no secrets saved" | ✓ | ✓ | ✓ | ✓ |
 | Capability gate guards an inode's name, not only its content (§5.3) | Unlinking or renaming a gated directory aside and planting an ungated replacement | ✓ | ✓ | ✓ | ✓ |
 | Speculation barriers on syscall / context switch (§19.1) | Spectre / MDS / L1TF / MMIO stale data | ✓ | ✓ | ✓ | ✓ host |
 | Stack + slab guard pages, hardware fault (§4) | Stack/heap overrun into adjacent memory | ✓ | ✓ | ✓ | — |

@@ -107,10 +107,9 @@ cannot be widened into the private scope.
 
 - **Secrets.** An email client has nowhere to keep a password. `lib/crypto`
   has the primitives (ChaCha20-Poly1305 `seal`/`open`, PBKDF2, and
-  `derive_key` — single-block HKDF-Expand, RFC 5869) and
-  ARXFS has a per-volume key hierarchy, but there is no per-app, per-user
-  sealed store and no key-protector seam a login passphrase or TPM
-  (`plans/TPM.md`) could later plug into.
+  `derive_key` — single-block HKDF-Expand, RFC 5869) and ARXFS has a per-volume
+  key hierarchy, but there is no per-app, per-user sealed store — **closed
+  (AD7)**.
 - **Bulk data.** A config file is the wrong shape for a mail index or a
   thumbnail cache, and the IPC payload ceiling is 1 MiB
   (`IPC_MESSAGE_MAX_PAYLOAD_LEN`), so no store that proxies bytes through
@@ -139,6 +138,20 @@ cannot be widened into the private scope.
   field** — so a frame that names another app cannot ask for its private
   document at all. There is no request shape by which an app can claim to be
   another app.
+- **The sealed scope is not a configuration scope, and its writes are not
+  staged.** Secrets are reached by operations carrying no scope field and with
+  no foreign counterpart, so "a configuration frame naming a secret" and "any
+  frame naming another app's secrets" are unrepresentable rather than refused.
+  A sealed write is applied before the reply — no staging, no commit — which
+  keeps plaintext in the daemon for one request instead of a session's lifetime
+  *and* makes the read-modify-seal-publish atomic, because the daemon serves one
+  request at a time. A stage-then-commit pair would let two instances of one app
+  lose each other's secrets. See §3.6, §3.7.
+- **A vault that cannot be opened is never an empty vault.** A damaged record, a
+  failed authentication, and absent key material are each a distinct audited
+  refusal. An application deciding whether to prompt for a password must be able
+  to tell "damaged" from "none saved"; conflating them is how a store silently
+  loses a user's secrets.
 - **The published scope is one document, with no layer beneath it.** Not a
   simplification: `confd` cannot name a bundle's own directory (§3.4), so a
   bundle-shipped published document could never be read on the foreign path, and
@@ -190,7 +203,9 @@ cannot be widened into the private scope.
   signing-key rotation) is an audited administrative re-pin, not a manifest
   lineage format (§3.2). Cross-user sharing, sync/replication, and a settings
   GUI are not in this plan. A per-descriptor byte ceiling is not in this plan
-  and its absence is recorded as a known limit (§3.8).
+  and its absence is recorded as a known limit (§3.8). Sealed *bulk* data is not
+  in this plan either: a secret crosses the wire as a setting's value and is
+  bounded by it (§3.7).
 
 ---
 
@@ -204,6 +219,7 @@ cannot be widened into the private scope.
    │ lib/appdata (client) │──ipc_call──▶│ attest Origin  ──▶ app id     │
    │  Settings / Vault    │◀──reply────│ pin check      ──▶ publisher   │
    │  Blobs / Temp        │            │ lib/appconf    ──▶ merge/parse │
+   │                      │            │ lib/crypto     ──▶ seal/open  │
    └──────────┬───────────┘            └───────────┬───────────────────┘
               │                                    │ owns, exclusively
               │  fd_redeem (blobs, temp)           ▼
@@ -416,16 +432,25 @@ with two.
 Within the fixed home shape (§16.3 — apps may not invent siblings):
 
 ```
-/Users/<u>/Settings/Apps/<bundle-id>/   ← configuration (gated tree)
-    settings.conf                         private scope
-    public.conf                           public scope (foreign apps may read)
-    secret.vault                          sealed scope (AEAD)
-    .owner                                publisher pin
+/Users/<u>/Settings/Apps/               ← configuration (gated tree)
+    .vault-master                         the account's app-data master secret
+    <bundle-id>/
+        settings.conf                     private scope
+        public.conf                       public scope (foreign apps may read)
+        secret.vault                      sealed scope (AEAD)
+        .owner                            publisher pin
 /Users/<u>/Library/Apps/<bundle-id>/    ← bulk + volatile (gated tree)
     Blobs/<name>                          app blob store
     Cache/                                evictable
     Temp/                                 reaped at session end and at boot
 ```
+
+The master-secret record sits in the gated root beside the per-app directories,
+because it is the *account's* key material and every app's vault key derives from
+it (§3.7). Its leading dot cannot be a bundle id — the identifier grammar forbids
+one — so no app's store can be named that. It is under `Settings/` rather than
+`Library/` because `Library/` holds the evictable and boot-reaped scopes, and key
+material may be in neither.
 
 **The gate sits on the fixed `Apps` parent, not on the per-app directory.**
 This corrects an earlier draft of this plan, which put the store directly under
@@ -570,7 +595,8 @@ field the operation does not use left non-zero refuses rather than guessing.
 | `ConfigUnset { scope, key }` | AD4, scoped AD6 | stage a removal |
 | `ConfigCommit { scope }` | AD4, scoped AD6 | publish that scope's staged writes atomically |
 | `PublicRead { bundle_id, capacity }` | AD6 | a **foreign** app's published document |
-| `VaultRead` / `VaultSet` / `VaultUnset` | AD7 | the sealed scope |
+| `VaultRead { capacity }` | AD7 | the caller's whole **sealed** document |
+| `VaultSet { key, value }` / `VaultUnset { key }` | AD7 | seal or remove one secret, **immediately** |
 | `BlobOpen { name, mode }` | AD8 | descriptor grant handle for a blob |
 | `BlobDelete { name }` / `BlobList { cursor }` | AD8 | manage own blobs |
 | `TempCreate {}` | AD9 | descriptor grant handle for a fresh temp file |
@@ -672,40 +698,121 @@ Every entry point follows §5.4: attest the caller, check authority before
 touching state, validate every input, log the security-relevant decisions, fail
 closed.
 
+**The sealed scope is three opcodes, not a third `ConfigScope`.** It could have
+been a scope: the machinery would mostly have worked. It is not, for the same
+reason `PublicRead` is not a scope — the stronger property costs one discriminant
+each way. With no scope field on a vault frame and no scope value naming a vault,
+"a configuration request that reaches a secret" and "a vault request that reaches
+a configuration document" are both *unrepresentable*, in either direction, rather
+than refused by a check. And there is no foreign vault opcode at all, so "one app
+reads another's secrets" is not a frame that exists.
+
+It also keeps two vocabularies apart that will diverge. The sealed scope has
+refusals the configuration scopes cannot have (a record that is not a vault, an
+authentication that failed, key material that attests nothing) and, once a
+passphrase protector lands, a *locked* state the configuration scopes will not
+share. A shared `ConfigRead` would have had to answer for both.
+
+**A sealed write is immediate, and there is no `VaultCommit`.** This is the one
+place the sealed scope deliberately departs from the configuration scopes' shape.
+The daemon opens the sealed document, applies the one change, re-seals, and
+publishes before it replies. Two reasons, and the second is the decisive one:
+
+- Plaintext secret material then exists in the daemon for the span of one request
+  rather than for the life of a staging session that `STAGING_IDLE_NS` reclaims.
+- The daemon serves requests one at a time, so the whole read-modify-seal-publish
+  is **atomic**. A stage-then-commit pair is not: two processes of one app that
+  each stage a different secret and then commit would each publish a document
+  built from what *it* read, and the later commit would silently drop the
+  other's secret. Immediate writes make that race unrepresentable, which is
+  strictly *more* consistent than staging rather than a concession.
+
+A caller that seals three secrets pays three round trips, which is the right
+price for an operation an application performs when a human types a password.
+
 Secrets are never enumerable or readable across apps — there is no foreign
-equivalent of `PublicRead` for the sealed scope, and because `PublicRead` is a
-separate opcode with no scope field, none can be reached by mis-setting one.
+equivalent of `PublicRead` for the sealed scope, and no scope field to mis-set.
 
 ### 3.7 Secrets (`secret.vault`)
 
 ChaCha20-Poly1305 (`lib/crypto::seal`/`open`) over the same `lib/appconf`
-document, so a secret is a `key = value` pair like any other and the app-facing
-API differs only in the scope it names.
+document, so a secret is a `key = value` pair like any other.
 
 Key hierarchy, mirroring the shape ARXFS already uses for volume keys:
 
 ```
-per-user master secret            (wrapped by a key-protector seam)
-  └─ derive_key(master, "appdata-secret-v1" ‖ publisher_id ‖ bundle_id)
+per-account master secret         (32 random bytes, drawn once per account)
+  └─ derive_key(master, "tairix-appdata-secret/v1" ‖ 0x00 ‖ publisher_id ‖ bundle_id)
        └─ per-(user, app) AEAD key
 ```
 
 (`lib/crypto::derive_key` is the audited single-block HKDF-Expand the ARXFS key
 hierarchy already derives its subkeys through — the same primitive, a distinct
-context string, so no new cryptography is introduced (§2.12).)
+context string, so no new cryptography is introduced (§2.12). Every field before
+the identifier is fixed width and the label is fixed, so no two
+(publisher, identifier) pairs can produce one context.)
 
 Binding the derivation to the **publisher id** means a rotated signing key
 still opens the vault, while a different developer squatting the bundle id
 derives a different key and cannot read it even if the pin check were somehow
 bypassed. Defence in depth, not a substitute for §3.2's pin.
 
-The **key-protector seam** is caller-supplied, exactly like ARXFS's
-`VolumeKey`:
+**What the sealing buys, given that the gate already exists.** The key is bound
+to the *application*, so the compromise that matters — a defect that lets one
+app's request reach another's store directory — yields ciphertext it has no key
+for. And the AEAD authenticates the record, so a damaged or altered sealed
+document is *refused* rather than parsed: a vault that cannot be opened must
+never read as "this application has no secrets", because an application deciding
+whether to prompt for a password would take the wrong branch.
 
-- Stage 1 protector: the encrypted root volume itself. Secrets are as safe at
-  rest as the volume, and survive an administrative password reset.
-- Later protectors, same seam, no format change: the login passphrase
-  (secrets locked while logged out) and TPM sealing (`plans/TPM.md`).
+**What protects the master secret, and why there is no protector seam.** This
+corrects an earlier draft of this plan, which specified a caller-supplied
+"key-protector seam" with a volume-backed stage-1 protector. The seam was
+interface built for a stage that has not landed, by the same rule §3.6 applies
+to `ConfigScope`: AD7 has exactly one protector, so a protector enum with one
+variant — and a salt, nonce, and tag with nothing to put in them — is forbidden
+(§2.3/§2.4). Worse, it would have been dishonest: the stage-1 protector holds no
+secret of its own, so the "wrap" could only have used a key derivable by anyone
+who could read the record, which is theatre rather than defence.
+
+What actually protects it is stated plainly instead. The master secret is stored
+as drawn, in the gated store root (`.vault-master`): owned by `confd`, mode
+`0700`, gated on `CAP_APPDATA_ADMIN`, on a volume ARXFS has no plaintext mode
+for. So secrets are exactly as safe at rest as the volume, they survive an
+administrative password reset, and an application — including the account's own
+shell — cannot reach the record at all. The record carries a version and binds
+the account's uid; the stage that brings the first protector with a real second
+secret (a login passphrase, so secrets are locked while logged out; TPM sealing,
+`plans/TPM.md`) reshapes it in place to carry a keyslot, which is exactly the
+in-place evolution §2.13 blesses.
+
+**A record that attests nothing is never replaced.** The same master secret is
+every application's key material in that account, so drawing a fresh one to get
+past a damaged or absent record would strand every existing vault while looking
+like a clean start. It refuses, audited, and an operator restores it. For the
+same reason the record is written through the atomic replacement every other
+document uses: a torn write would produce exactly the record that can never be
+replaced.
+
+**No master secret is cached.** It is read afresh for each sealed operation,
+used, and wiped. A vault write is a rare, human-driven act, and holding an
+account's key material in the service's heap for the life of the machine would
+buy a file read it does not need.
+
+**Plaintext lifetime.** A sealed write is not staged (§3.6), so plaintext secret
+material exists in the daemon for the span of one request. The transient buffers
+that carry it are wiped: `lib/appconf` wipes every line a document discards and
+every line of a document that goes out of scope (which is what makes the format
+engine, not its callers, responsible for it), the rendered text is sealed in
+place so the plaintext allocation *becomes* the ciphertext, and the service
+binary wipes the request and reply frames it reuses across callers.
+
+**Known limit, stated honestly.** A secret crosses the wire as a setting's
+value, so it is bounded by `APPDATA_VALUE_MAX` (1 KiB). That covers a password,
+a token, or a symmetric key, and not a certificate chain or a large private key.
+Sealed *bulk* data is not in this plan: AD8's blobs are descriptor-backed and
+unsealed, and giving them a sealed mode is a separate decision with its own
+nonce discipline, not a widening of this bound.
 
 ### 3.8 Blobs and temporary files
 
@@ -743,8 +850,8 @@ let mut mine = Settings::open_published(&mut host);   // own published scope
 mine.set("font.family", "berkeley")?; mine.commit()?;
 let theirs = read_published(&mut host, "os.tairix.terminal")?;  // foreign snapshot
 
-let mut v = Vault::open()?;                 // sealed scope
-v.set("imap.password", secret)?; v.commit()?;
+let mut v = Vault::open(&mut host)?;         // sealed scope; may fail
+v.set("imap.password", secret)?;            // sealed before it returns
 
 let blob = Blobs::open()?.open("index", BlobMode::ReadWrite)?;  // real fd
 let tmp  = Temp::create()?;                                     // real fd
@@ -788,6 +895,24 @@ the store rather than letting the client guess what a lower layer says.
 that stages ten keys and never commits costs the service nothing and holds no
 staging session open. That also shrinks the abandoned-session window §3.6
 reclaims by age to the span of one save.
+
+**`Vault` is the one handle that can fail to open, and the one with no commit.**
+`Settings::open` degrades to the shipped defaults and records why, because an
+application must still run; `Vault::open` returns the refusal, because "I could
+not read your secrets" is not "you have none" and an application that concluded
+the second would prompt the user to re-enter a password it already holds. And
+there is nothing to commit: the service seals each `set`/`unset` before it
+replies, so a `Vault` holds no unsaved work at all. A value the vault already
+holds, and a removal of a key it does not, each cost no call.
+
+A sealed write **ends by re-reading**, exactly as a commit does, and for the
+same reason: once a write has landed the service is the only thing that knows
+what the sealed document says, and applying the change to the client's own copy
+instead would be a guess — one that is wrong the moment another instance of the
+application has sealed something of its own. A write that lands and is then
+followed by a failed re-read reports the re-read's error and keeps the handle's
+previous view; retrying the write is harmless, because sealing a value the vault
+already holds costs nothing.
 
 ### 3.10 What the first migration settled
 
@@ -862,6 +987,46 @@ to replace `lib/wallpaper`'s own `key = value` engine (§1.3) and settle whether
 the desktop session runs under an attested app identity at all; a migration with
 those two questions open is not a smaller change than the mechanism.
 
+### 3.12 What the sealed scope settled
+
+**The wipe belongs to the format engine, not to its callers.** The sealed scope
+is a `lib/appconf` document, so a line the engine discards — an overwritten
+setting, a collapsed duplicate, an `unset` removal, every line of a document
+going out of scope — may hold a secret. Wiping in `Line`'s `Drop` rather than at
+each call site is what makes it hold for *every* discard path, including ones a
+later change adds: a caller cannot forget. The cost is a memset of bytes that
+were about to be freed anyway, and it removes the alternative — a `wipe()` method
+every consumer must remember to call, which is the shape that eventually gets
+missed. `Document` also implements no `Debug`, so it cannot reach a log by
+construction.
+
+**No protector abstraction, and the reason is the same one AD6 gave for
+`ConfigScope`.** AD7 has exactly one protector, so a protector enum with one
+variant and a keyslot with nothing to put in it would be interface built for a
+stage that has not landed. The honest alternative is to say plainly what protects
+the master secret today (§3.7) and to leave the record versioned so the stage
+that brings a real second secret reshapes it in place.
+
+**A refusal is never an absence, and this is where that rule earns its keep.**
+The published scope deliberately answers an empty document for a target-side
+defect (§3.6) — there, indistinguishability is the *point*, because a reader must
+learn nothing but what an app published. The sealed scope is the caller's own
+data, so the opposite holds: every defect is reported as itself, precisely
+because the caller can act on it and because an application that reads a damaged
+vault as empty will overwrite or re-prompt. Two scopes, opposite rules, one
+reason: report what the caller can act on, and nothing else.
+
+**The service is now the principal that holds every account's secrets, and that
+is stated rather than glossed.** Compromising `confd` yields applications'
+settings *and* their secrets. No arrangement in which one service can both seal
+and open vaults avoids that, and the alternative — each app holding its own key —
+is exactly the "every app invents its own storage" arrangement this plan deletes,
+with no place to put the key. What the sealing does buy is stated in §3.7: the
+key is per-application, so a defect that lets one app's request reach another's
+store directory yields ciphertext, and a damaged record is refused rather than
+believed. What `confd` still cannot reach is unchanged: no credential record, no
+other user's files, no process.
+
 ---
 
 ## 4. Stages
@@ -877,7 +1042,7 @@ gate green (§7), and contains no stubs (§15.1).
 | **AD4** ✅ | `confd` + private scope | The service bundle and its `confd` account/ceiling, `APPDATA_ENDPOINT` + `lib/abi/src/appdata_ipc.rs`, `CAP_APPDATA_ADMIN`, the gated `Settings/Apps` + `Library/Apps` roots with their `required_cap` inodes and search-only transit grants across all three home provisioners, the `.owner` pin, the whole-document merged read, per-process staging and atomic commit, and the §3.5 name-gate fix the gate turned out to need. |
 | **AD5** ✅ | `lib/appdata` + first migration | The client: one call to open, local reads, staged writes published as one commit, the **bundle-defaults fallback layer** (§3.4), the degrade path with a typed reason, and the shared fake service every consumer's own tests drive it over. `terminal` migrated: its hand-rolled `key value` parser, renderer, document bound, error types, and `~/Settings/Terminal/terminal.conf` path **deleted**, its registry re-keyed on dotted keys, and its *Restore defaults* turned from "write today's values" into an `unset` the store answers (§3.10). |
 | **AD6** ✅ | Public scope | `public.conf`; `ConfigScope { Private, Public }` on every own-store request and the reshaped `appdata-v1` header that carries it; `PublicRead` as a **separate opcode with no scope field**, so another app's private document is not a representable request; per-scope staging, per-scope commit and per-scope pending-edit bound; the one scope→file-name mapping and the derived `.new` sibling; the published scope's deliberate absence of any layer beneath it; the foreign read's audited empty answer for a target-side defect and its typed refusal for the caller's own; `Settings::open_published` and `read_published` in the client, and the fake service extended to both scopes and to foreign apps. |
-| **AD7** | Secrets | `secret.vault`, the AEAD hierarchy, the key-protector seam with the volume-backed stage-1 protector. |
+| **AD7** ✅ | Secrets | `secret.vault` and the per-account `.vault-master` record; the AEAD hierarchy (`derive_key` under one labelled context, ChaCha20-Poly1305 per document, a fresh nonce per seal) and the injected `Entropy` seam; `VaultRead`/`VaultSet`/`VaultUnset` as opcodes with **no scope field and no foreign counterpart**, and writes applied before the reply rather than staged; a damaged record, a failed authentication, and absent key material as three distinct audited refusals that are never an empty vault; a malformed master record refused and **never replaced**; the wipe moved into `lib/appconf`'s own `Line::drop`; `Vault` in the client, the fake service extended to the scope, and a fuzz harness over both records. **No protector abstraction** — §3.7 records why. |
 | **AD8** | Blobs | `BlobOpen`/`BlobList`/`BlobDelete`, `fd_grant` handoff, quotas, `file_map` random access. |
 | **AD9** | Temp | `TempCreate`, session-end and boot reaping, quota accounting. |
 | **AD10** | Remaining migrations | Migrate `fstree`, `lib/wallpaper`/session pinboard, `applib` program library; delete every hand-rolled path. The `docs/src/` page and every §5 amendment but the manifest-field record land with the stage that needs them, and AD4 landed most of them; AD10 lands only what its own migrations drive. |
@@ -901,6 +1066,9 @@ Landed as the stages that need them land, never pre-written (§3, §15.2). A
   no other principal may read, and a published one any app may read through a
   request shape that cannot name the private scope, with the reason the second
   exists (§1.5).
+- **§16.3** ✅ (AD7) — record the sealed scope: the app's secrets, encrypted at
+  rest under a key derived per (account, app), reached by operations that carry
+  no scope field and have no foreign counterpart, and with no layer beneath it.
 - **§16.5** ✅ (AD4) — three changes to the bundle contract:
   `DefaultSettings/` becomes a read-only **fallback layer** rather than a
   first-launch copy (its *implementation* is AD5's); the "apps may write
@@ -918,11 +1086,13 @@ Landed as the stages that need them land, never pre-written (§3, §15.2). A
   the `key = value` format engine, the published scope one app reads another's
   values through, the sealed scope, descriptor-backed blobs" →
   `plans/APPDATA.md`*.
-- **`README.md`** ✅ (AD4, AD6) — the security/attack-vector matrix gains the
-  app-from-app isolation row and the name-gate row (§13), and (AD6) the row for
+- **`README.md`** ✅ (AD4, AD6, AD7) — the security/attack-vector matrix gains the
+  app-from-app isolation row and the name-gate row (§13), (AD6) the row for
   cross-app sharing confined to the published scope: an app reaching another
   app's *private* settings through the sharing channel, or using it to probe
-  which applications an account has run.
+  which applications an account has run, and (AD7) the row for the sealed store:
+  an app reading another app's saved passwords or tokens, and a damaged or forged
+  vault being read as "no secrets saved".
 
 ---
 

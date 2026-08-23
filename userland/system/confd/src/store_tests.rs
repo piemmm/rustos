@@ -10,10 +10,12 @@ use tairix_appconf::{Document, MAX_DOCUMENT_LEN};
 use tairix_users::CONFD_UID;
 
 use super::{
-    published_document, AppStore, RootCache, StoreError, OWNER_FILE, PUBLIC_FILE, SETTINGS_FILE,
+    published_document, AppStore, RootCache, StoreError, MASTER_FILE, OWNER_FILE, PUBLIC_FILE,
+    SETTINGS_FILE, VAULT_FILE,
 };
 use crate::owner::OwnerPin;
 use crate::testfs::{TestFs, ACCOUNT_UID, HOME};
+use crate::vault::VaultError;
 use crate::Storage as _;
 
 /// A publisher identity distinguishable from any other in these tests.
@@ -726,4 +728,361 @@ fn a_foreign_read_reports_the_callers_own_account_failures() {
         .err(),
         Some(StoreError::RootNotOwned)
     );
+}
+
+// --- The sealed scope ----------------------------------------------------
+
+/// The gated store root a well-provisioned home puts the account's key
+/// material in.
+fn gated_root() -> String {
+    alloc::format!("{HOME}/Settings/Apps")
+}
+
+/// A deterministic generator for the sealed scope.
+fn entropy(first: u8) -> crate::vault::tests::CountingEntropy {
+    crate::vault::tests::CountingEntropy::new(first)
+}
+
+#[test]
+fn a_sealed_read_of_an_app_with_no_store_creates_no_key_material() {
+    let mut fs = TestFs::provisioned();
+    let store = open(&mut fs, ACCOUNT_UID, &identity(1), false).expect("opens");
+    assert_eq!(
+        store.vault(&mut fs).expect("reads").settings().count(),
+        0,
+        "an app that has sealed nothing reads the empty vault"
+    );
+    assert!(
+        !fs.exists(&alloc::format!("{}/{MASTER_FILE}", gated_root())),
+        "and a read must not draw the account a master secret"
+    );
+}
+
+#[test]
+fn a_sealed_write_creates_the_key_material_and_reads_back() {
+    let mut fs = TestFs::provisioned();
+    let store = open(&mut fs, ACCOUNT_UID, &identity(1), true).expect("opens");
+    store
+        .seal_change(&mut fs, &mut entropy(1), "imap.password", Some("hunter2"))
+        .expect("seals");
+    assert!(
+        fs.exists(&alloc::format!("{}/{MASTER_FILE}", gated_root())),
+        "the first seal draws the account a master secret"
+    );
+    assert_eq!(
+        store.vault(&mut fs).expect("reads").get("imap.password"),
+        Some("hunter2")
+    );
+    // The sealed document is a sealed document: the secret is not in it.
+    let sealed = fs
+        .read(&alloc::format!("{}/{VAULT_FILE}", store_dir()))
+        .expect("the record is there");
+    assert!(
+        !sealed.windows(7).any(|window| window == b"hunter2"),
+        "the plaintext must not be on the volume"
+    );
+}
+
+#[test]
+fn a_sealed_write_leaves_no_temporary_behind() {
+    let mut fs = TestFs::provisioned();
+    let store = open(&mut fs, ACCOUNT_UID, &identity(1), true).expect("opens");
+    store
+        .seal_change(&mut fs, &mut entropy(1), "k", Some("v"))
+        .expect("seals");
+    assert!(!fs.exists(&alloc::format!("{}/{VAULT_FILE}.new", store_dir())));
+    assert!(!fs.exists(&alloc::format!("{}/{MASTER_FILE}.new", gated_root())));
+}
+
+#[test]
+fn removing_a_secret_the_vault_never_had_writes_nothing_at_all() {
+    let mut fs = TestFs::provisioned();
+    let store = open(&mut fs, ACCOUNT_UID, &identity(1), false).expect("opens");
+    store
+        .seal_change(&mut fs, &mut entropy(1), "imap.password", None)
+        .expect("removes nothing");
+    // Neither a store, nor a master secret, nor a sealed document: a probe
+    // cannot make the service create key material.
+    assert!(!fs.exists(&store_dir()));
+    assert!(!fs.exists(&alloc::format!("{}/{MASTER_FILE}", gated_root())));
+}
+
+#[test]
+fn sealing_a_value_the_vault_already_holds_rewrites_nothing() {
+    let mut fs = TestFs::provisioned();
+    let store = open(&mut fs, ACCOUNT_UID, &identity(1), true).expect("opens");
+    store
+        .seal_change(&mut fs, &mut entropy(1), "k", Some("v"))
+        .expect("seals");
+    let path = alloc::format!("{}/{VAULT_FILE}", store_dir());
+    let first = fs.read(&path).expect("sealed");
+    store
+        .seal_change(&mut fs, &mut entropy(50), "k", Some("v"))
+        .expect("seals nothing");
+    assert_eq!(
+        fs.read(&path).expect("sealed"),
+        first,
+        "an unchanged secret must not cost a re-seal"
+    );
+}
+
+#[test]
+fn removing_the_last_secret_leaves_an_empty_vault_not_a_missing_one() {
+    let mut fs = TestFs::provisioned();
+    let store = open(&mut fs, ACCOUNT_UID, &identity(1), true).expect("opens");
+    store
+        .seal_change(&mut fs, &mut entropy(1), "k", Some("v"))
+        .expect("seals");
+    store
+        .seal_change(&mut fs, &mut entropy(30), "k", None)
+        .expect("removes");
+    assert!(fs.exists(&alloc::format!("{}/{VAULT_FILE}", store_dir())));
+    assert_eq!(store.vault(&mut fs).expect("reads").settings().count(), 0);
+}
+
+#[test]
+fn an_account_master_secret_is_drawn_once_and_reused() {
+    let mut fs = TestFs::provisioned();
+    let store = open(&mut fs, ACCOUNT_UID, &identity(1), true).expect("opens");
+    let path = alloc::format!("{}/{MASTER_FILE}", gated_root());
+    store
+        .seal_change(&mut fs, &mut entropy(1), "a", Some("1"))
+        .expect("seals");
+    let first = fs.read(&path).expect("drawn");
+    store
+        .seal_change(&mut fs, &mut entropy(90), "b", Some("2"))
+        .expect("seals");
+    assert_eq!(fs.read(&path).expect("drawn"), first, "drawn once");
+    let vault = store.vault(&mut fs).expect("reads");
+    assert_eq!(vault.get("a"), Some("1"));
+    assert_eq!(vault.get("b"), Some("2"));
+}
+
+/// One account, two applications: the same master secret, two derived keys, and
+/// neither vault openable with the other's.
+#[test]
+fn two_applications_of_one_account_seal_under_different_keys() {
+    let mut fs = TestFs::provisioned();
+    let mail = AppIdentity::new("os.tairix.mail", publisher(1)).expect("legal");
+    let mine = open(&mut fs, ACCOUNT_UID, &identity(1), true).expect("opens");
+    let theirs = open(&mut fs, ACCOUNT_UID, &mail, true).expect("opens");
+    mine.seal_change(&mut fs, &mut entropy(1), "k", Some("mine"))
+        .expect("seals");
+    theirs
+        .seal_change(&mut fs, &mut entropy(40), "k", Some("theirs"))
+        .expect("seals");
+    assert_eq!(mine.vault(&mut fs).expect("reads").get("k"), Some("mine"));
+    assert_eq!(
+        theirs.vault(&mut fs).expect("reads").get("k"),
+        Some("theirs")
+    );
+    // Cross-copying one record into the other's store makes it unopenable
+    // rather than readable: the key is bound to the application.
+    let record = fs
+        .read(&alloc::format!("{}/{VAULT_FILE}", store_dir()))
+        .expect("sealed");
+    fs.put(
+        &alloc::format!("{HOME}/Settings/Apps/os.tairix.mail/{VAULT_FILE}"),
+        &record,
+    );
+    assert_eq!(
+        theirs.vault(&mut fs).err(),
+        Some(StoreError::Vault(VaultError::VaultUnsealFailed))
+    );
+}
+
+#[test]
+fn a_sealed_document_with_no_master_secret_is_refused_and_never_replaced() {
+    let mut fs = TestFs::provisioned();
+    let store = open(&mut fs, ACCOUNT_UID, &identity(1), true).expect("opens");
+    store
+        .seal_change(&mut fs, &mut entropy(1), "k", Some("v"))
+        .expect("seals");
+    let master = alloc::format!("{}/{MASTER_FILE}", gated_root());
+    let sealed = alloc::format!("{}/{VAULT_FILE}", store_dir());
+    let record = fs.read(&sealed).expect("sealed");
+    fs.remove(&master);
+
+    assert_eq!(
+        store.vault(&mut fs).err(),
+        Some(StoreError::Vault(VaultError::MasterSecretRefused)),
+        "a vault with no key to open it is a refusal, never an empty vault"
+    );
+    // And a write must not draw a fresh master: that would strand the existing
+    // vault for good while looking like a clean start.
+    assert_eq!(
+        store.seal_change(&mut fs, &mut entropy(70), "k", Some("w")),
+        Err(StoreError::Vault(VaultError::MasterSecretRefused))
+    );
+    assert!(!fs.exists(&master), "nothing was drawn");
+    assert_eq!(
+        fs.read(&sealed).expect("sealed"),
+        record,
+        "nothing was lost"
+    );
+}
+
+/// A record that attests nothing is never replaced, even when nothing has been
+/// sealed yet: the same record is every application's key material in this
+/// account, so drawing a fresh one to get past it would strand all of them.
+#[test]
+fn a_malformed_master_secret_record_is_never_replaced() {
+    let mut fs = TestFs::provisioned();
+    let store = open(&mut fs, ACCOUNT_UID, &identity(1), true).expect("opens");
+    let master = alloc::format!("{}/{MASTER_FILE}", gated_root());
+    fs.put(&master, b"not a master secret record");
+    assert_eq!(
+        store.seal_change(&mut fs, &mut entropy(1), "k", Some("v")),
+        Err(StoreError::Vault(VaultError::MasterSecretRefused))
+    );
+    assert_eq!(
+        fs.read(&master).expect("still there"),
+        b"not a master secret record",
+        "a record that attests nothing is refused, not overwritten"
+    );
+    assert!(!fs.exists(&alloc::format!("{}/{VAULT_FILE}", store_dir())));
+}
+
+/// An account whose master record is damaged *and* has sealed documents: the
+/// read is a refusal rather than an empty vault, so an application is told its
+/// secrets are unreadable instead of concluding it has none.
+#[test]
+fn a_malformed_master_secret_record_refuses_a_sealed_read() {
+    let mut fs = TestFs::provisioned();
+    let store = open(&mut fs, ACCOUNT_UID, &identity(1), true).expect("opens");
+    store
+        .seal_change(&mut fs, &mut entropy(1), "k", Some("v"))
+        .expect("seals");
+    fs.put(
+        &alloc::format!("{}/{MASTER_FILE}", gated_root()),
+        b"not a master secret record",
+    );
+    assert_eq!(
+        store.vault(&mut fs).err(),
+        Some(StoreError::Vault(VaultError::MasterSecretRefused))
+    );
+}
+
+/// With nothing sealed there is nothing to report, so a read answers the empty
+/// vault without needing the account's key material at all — and without
+/// telling a caller anything about the state of a record it cannot act on.
+#[test]
+fn a_sealed_read_with_nothing_sealed_needs_no_master_secret() {
+    let mut fs = TestFs::provisioned();
+    let store = open(&mut fs, ACCOUNT_UID, &identity(1), true).expect("opens");
+    fs.put(
+        &alloc::format!("{}/{MASTER_FILE}", gated_root()),
+        b"not a master secret record",
+    );
+    assert_eq!(store.vault(&mut fs).expect("reads").settings().count(), 0);
+}
+
+#[test]
+fn a_master_secret_record_of_another_account_is_refused() {
+    // Two provisioned homes, and the first account's record dropped into the
+    // second's root: the uid binding refuses it rather than giving two
+    // accounts one key hierarchy.
+    let mut fs = TestFs::provisioned();
+    fs.add_home("/Users/grace", ACCOUNT_UID + 1);
+    let mine = open(&mut fs, ACCOUNT_UID, &identity(1), true).expect("opens");
+    mine.seal_change(&mut fs, &mut entropy(1), "k", Some("v"))
+        .expect("seals");
+    let record = fs
+        .read(&alloc::format!("{}/{MASTER_FILE}", gated_root()))
+        .expect("drawn");
+    fs.put(
+        &alloc::format!("/Users/grace/Settings/Apps/{MASTER_FILE}"),
+        &record,
+    );
+    let theirs = open(&mut fs, ACCOUNT_UID + 1, &identity(1), true).expect("opens");
+    assert_eq!(
+        theirs.seal_change(&mut fs, &mut entropy(60), "k", Some("v")),
+        Err(StoreError::Vault(VaultError::MasterSecretRefused))
+    );
+}
+
+#[test]
+fn a_corrupt_sealed_document_is_refused_rather_than_read_as_empty() {
+    let mut fs = TestFs::provisioned();
+    let store = open(&mut fs, ACCOUNT_UID, &identity(1), true).expect("opens");
+    store
+        .seal_change(&mut fs, &mut entropy(1), "k", Some("v"))
+        .expect("seals");
+    let sealed = alloc::format!("{}/{VAULT_FILE}", store_dir());
+
+    fs.put(&sealed, b"garbage");
+    assert_eq!(
+        store.vault(&mut fs).err(),
+        Some(StoreError::Vault(VaultError::VaultMalformed))
+    );
+
+    let mut record = fs.read(&sealed).expect("there");
+    record.clear();
+    fs.put(&sealed, &record);
+    assert_eq!(
+        store.vault(&mut fs).err(),
+        Some(StoreError::Vault(VaultError::VaultMalformed))
+    );
+}
+
+#[test]
+fn a_sealed_write_with_no_entropy_changes_nothing() {
+    let mut fs = TestFs::provisioned();
+    let store = open(&mut fs, ACCOUNT_UID, &identity(1), true).expect("opens");
+    let mut dry = crate::vault::tests::CountingEntropy::refusing(Errno::EntropyNotReady);
+    assert_eq!(
+        store.seal_change(&mut fs, &mut dry, "k", Some("v")),
+        Err(StoreError::Vault(VaultError::EntropyUnavailable))
+    );
+    assert!(
+        !fs.exists(&alloc::format!("{}/{MASTER_FILE}", gated_root())),
+        "no key material is derived from a failed draw"
+    );
+    assert!(!fs.exists(&alloc::format!("{}/{VAULT_FILE}", store_dir())));
+}
+
+#[test]
+fn an_unreachable_volume_refuses_a_sealed_read_and_a_sealed_write() {
+    let mut fs = TestFs::provisioned();
+    let store = open(&mut fs, ACCOUNT_UID, &identity(1), true).expect("opens");
+    store
+        .seal_change(&mut fs, &mut entropy(1), "k", Some("v"))
+        .expect("seals");
+    fs.fail_all(Errno::DeviceOffline);
+    assert_eq!(store.vault(&mut fs).err(), Some(StoreError::Unavailable));
+    assert_eq!(
+        store.seal_change(&mut fs, &mut entropy(80), "k", Some("w")),
+        Err(StoreError::Unavailable)
+    );
+}
+
+/// A store another publisher owns is refused before the sealed scope is
+/// reached at all, so a squatter never gets as far as a key derivation.
+#[test]
+fn a_squatting_publisher_cannot_reach_the_sealed_scope() {
+    let mut fs = TestFs::provisioned();
+    let mine = open(&mut fs, ACCOUNT_UID, &identity(1), true).expect("opens");
+    mine.seal_change(&mut fs, &mut entropy(1), "k", Some("v"))
+        .expect("seals");
+    assert_eq!(
+        open(&mut fs, ACCOUNT_UID, &identity(2), false).err(),
+        Some(StoreError::PublisherMismatch)
+    );
+}
+
+/// The sealed scope is not one of the configuration scopes, and its file is not
+/// one of theirs: a configuration publish can never land on a vault, whichever
+/// scope it names.
+#[test]
+fn no_configuration_scope_maps_onto_the_sealed_document() {
+    for scope in [ConfigScope::Private, ConfigScope::Public] {
+        assert_ne!(super::scope_file(scope), VAULT_FILE);
+        assert_ne!(super::scope_file(scope), MASTER_FILE);
+    }
+    assert_ne!(VAULT_FILE, MASTER_FILE);
+    // The master record is the one name that sits in the gated root *beside*
+    // the per-app store directories, so it is the one that must be unreachable
+    // as a bundle identifier. The scope documents live inside an application's
+    // own directory, a level below any identifier, so they need no such rule.
+    assert!(tairix_abi::validate_bundle_id(MASTER_FILE).is_err());
 }

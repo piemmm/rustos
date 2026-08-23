@@ -36,6 +36,17 @@ Fractions are permille integers, not decimals: a permille round-trips through
 text exactly, needs no float parser in a `no_std` build, and is already how
 the shipped effect strengths are expressed.
 
+## A document may hold secrets
+
+The app-data store's **sealed** scope is a document of this format, so the engine
+treats a line's bytes as secret unconditionally: every line it discards — an
+overwritten setting, a collapsed duplicate, an `unset` removal — and every line of
+a document that goes out of scope is wiped before it is freed, through the
+audited `zeroize`. That lives here rather than in the callers so no discard path
+can forget it, and `Document` implements no `Debug`, so it cannot reach a log by
+construction. The one copy the engine does not own is `render`'s return value,
+and its rustdoc says so.
+
 ## Relationship to the other line-oriented stores
 
 `lib/sysconfig`, `lib/netconfig`, and init's service registry read a

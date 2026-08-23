@@ -25,15 +25,25 @@ service exists. It is not a convenience wrapper over the filesystem.
 
 ## What a caller can ask for, and what it cannot
 
-An `appdata-v1` request carries a key and a value. It never carries a bundle
-identifier, a user, or a path: the service resolves all three from the attested
-`Origin`, so **no request shape names a store**, and therefore none can reach
-another application's data. A caller running no verified bundle — a kernel
-principal, a boot-floor program with no signed manifest, a parser-sandbox child
-— has no store and is refused, audited.
+A configuration `appdata-v1` request carries a scope, a key, and a value. It
+never carries a bundle identifier, a user, or a path: the service resolves all
+three from the attested `Origin`, so **no configuration request shape names a
+store**, and therefore none can reach another application's data. A caller
+running no verified bundle — a kernel principal, a boot-floor program with no
+signed manifest, a parser-sandbox child — has no store and is refused, audited.
 
-The four operations are `ConfigRead`, `ConfigSet`, `ConfigUnset`, and
-`ConfigCommit`.
+The operations are `ConfigRead`, `ConfigSet`, `ConfigUnset`, and `ConfigCommit`
+on the caller's own configuration scopes; `PublicRead` on another application's
+**published** document; and `VaultRead`, `VaultSet`, and `VaultUnset` on the
+caller's **sealed** one.
+
+`PublicRead` is the one shape that names an application, and it is a distinct
+operation precisely so that it carries no scope field: a request that names
+another app is public by construction. The three vault operations carry no scope
+field either, and have no foreign counterpart at all — so a configuration frame
+cannot name a secret, a vault frame cannot name a configuration document, and no
+frame reaches another application's secrets. None of that is a check; there is no
+request shape to refuse.
 
 `ConfigRead` answers with the caller's **whole** merged document — the
 machine-wide policy layer, the app's own settings over it, the caller's own
@@ -45,18 +55,33 @@ buffer the caller has, and a document that does not fit comes back as the byte
 count it needs with no body at all — so a caller never parses a prefix, and
 never assembles a store out of two different snapshots.
 
-A set or an unset *stages* a pending edit against the calling process instance;
-the commit loads the committed document, applies the edits, and publishes the
-result as one atomic replacement. A caller that never commits changes nothing on
-the volume, and its own reads see its own pending edits, so a settings sheet
-reads back what it just set.
+A configuration set or unset *stages* a pending edit against the calling process
+instance, in the scope it named; the commit loads that scope's committed
+document, applies the edits for it, and publishes the result as one atomic
+replacement. A caller that never commits changes nothing on the volume, and its
+own reads see its own pending edits, so a settings sheet reads back what it just
+set.
+
+A **sealed** write is not staged and there is no `VaultCommit`: the service
+opens the sealed document, applies the one change, re-seals it, and publishes it
+before it replies. Plaintext secret material therefore exists here for the span
+of one request rather than for a staging session's lifetime, and because
+requests are served one at a time the whole read-modify-seal-publish is atomic —
+so two processes of one application sealing different secrets cannot lose each
+other's. A vault that cannot be opened is a typed, audited refusal rather than an
+empty document: "your secrets are damaged" and "you have no secrets" must not
+look alike.
 
 ## The tree it serves from
 
 ```
-/Users/<u>/Settings/Apps/<bundle-id>/     ← gated: required_cap = CAP_APPDATA_ADMIN
-    settings.conf                           the app's own document
-    .owner                                  the publisher ownership pin
+/Users/<u>/Settings/Apps/                 ← gated: required_cap = CAP_APPDATA_ADMIN
+    .vault-master                           the account's app-data master secret
+    <bundle-id>/
+        settings.conf                       the app's own private document
+        public.conf                         what the app publishes; any app may read
+        secret.vault                        the app's secrets, sealed
+        .owner                              the publisher ownership pin
 /System/Settings/<bundle-id>/settings.conf  optional machine-wide policy layer
 ```
 
@@ -79,6 +104,27 @@ Two checks authorise every open, and both are necessary:
   settings out of it. The capability gate does not catch that: this service
   holds the capability either way.
 
+## The sealed scope
+
+`secret.vault` holds the application's secrets, encrypted with
+ChaCha20-Poly1305 under a key derived per (account, application) from the
+account's `.vault-master` secret, the application's publisher, and its bundle
+identifier — every primitive through `lib/crypto`, and no cryptography of its
+own beyond one domain-separating context label. Binding the **publisher** means a
+release re-signed with a fresh build key still opens the vault it wrote, while a
+developer squatting the identifier derives a different key.
+
+The master secret is stored as drawn, in the gated root: this service owns it,
+mode `0700`, gated on the capability, on a volume ARXFS has no plaintext mode
+for. It is deliberately not wrapped under a second key, because at this stage
+there is no second secret to wrap it with and a publicly derivable wrapping key
+would be theatre. The record is versioned, so a login-passphrase or TPM
+protector reshapes it in place. A record that attests nothing is refused and
+**never replaced** — the same secret is every application's key material in that
+account, so drawing a fresh one would strand every existing vault while looking
+like a clean start. Nothing is cached: it is read afresh per operation, used, and
+wiped.
+
 ## Ownership is pinned to the publisher
 
 Each store carries an `.owner` record naming the **publisher** — the developer's
@@ -91,19 +137,15 @@ publisher.
 
 ## Layering and testability
 
-The crate is `no_std` (with `alloc`) and the dispatcher performs **no I/O**:
-every read and write goes through the injected `Storage` seam, so
-authorisation, the ownership pin, the layered read, staging, and the atomic
-publish are all exercised on the host with no filesystem at all. `src/run.rs`
-supplies the real seam over the `fs_*` syscalls and is the only part that is
-not host-testable.
+The crate is `no_std` (with `alloc`), performs **no I/O**, and draws no
+randomness of its own: every read and write goes through the injected `Storage`
+seam and every draw through the injected `Entropy` seam, so authorisation, the
+ownership pin, the layered read, staging, the atomic publish, and the sealed
+scope's whole key hierarchy are exercised on the host with no filesystem and no
+generator at all. `src/run.rs` supplies the real seams over the `fs_*` and
+`random_get` syscalls and is the only part that is not host-testable.
 
 The `key = value` document format itself is not defined here: it has one home,
-`lib/appconf`, and this service never tokenises a settings line of its own.
-
-There is deliberately **no scope selector** yet, on the wire or inside the
-store: the private scope is the only one AD4 serves, and a one-value selector
-would be interface built for a stage that has not landed. The public and sealed
-scopes introduce it in the same change that gives it a second legal value —
-each is a different file in the same directory, reached through the same
-ownership check and the same atomic publish.
+`lib/appconf`, and this service never tokenises a settings line of its own. Nor
+is the wipe: a sealed document is one of those documents, and the engine wipes
+every line it discards, so no discard path here has to remember to.

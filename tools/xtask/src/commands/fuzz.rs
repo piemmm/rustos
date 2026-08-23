@@ -144,6 +144,11 @@ pub const TARGETS: &[Target] = &[
         description: "netstack socket serve path (decode + CAP_NET gate + dispatch, accounting)",
     },
     Target {
+        package: "tairix-confd",
+        test: "fuzz_vault",
+        description: "app-data sealed-scope records (master secret + sealed document)",
+    },
+    Target {
         package: "tairix-appconf",
         test: "fuzz_appconf",
         description: "per-app configuration engine (grammar, parse/render fixed point, bounds)",

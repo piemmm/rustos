@@ -7824,7 +7824,7 @@ future contributor needs from this file:
 
 ---
 
-## APPDATA — per-app settings, secrets, blobs and temporary files (`plans/APPDATA.md`)  **[AD1–AD5 DONE; AD6–AD10 REMAINING]**
+## APPDATA — per-app settings, secrets, blobs and temporary files (`plans/APPDATA.md`)  **[AD1–AD7 DONE; AD8–AD10 REMAINING]**
 
 `plans/APPDATA.md` is the binding design and carries the settled decisions,
 the fixed bounds, and the per-stage state; it is not repeated here. What a
@@ -7912,9 +7912,48 @@ future contributor needs from this file:
   values into the user's document so no policy or later default could ever
   apply. The sheet now states the intent and the store answers it: the user's
   opinions are removed and the profile the remaining layers imply is read back.
-- **Remaining:** the public scope (AD6), the sealed scope and its
-  key-protector seam (AD7), descriptor-backed blobs (AD8), temporary files and
-  their reaping (AD9), and the remaining migrations (AD10).
+- **Landed (AD6):** the published scope. `public.conf`, a `ConfigScope` on every
+  configuration request, and `PublicRead` as a **separate opcode with no scope
+  field** — so another app's *private* document is not a representable request
+  rather than one refused by a check. Staging, commit, and the pending-edit bound
+  are per scope, because one rename replaces one name. A foreign read answers the
+  publisher's *committed* document, and answers the **empty** one identically for
+  an app that publishes nothing, has never run for the account, or whose store
+  cannot be attested — so it is never an oracle for more than what an app chose
+  to publish.
+- **Landed (AD7):** the sealed scope. `secret.vault` per app, sealed with
+  ChaCha20-Poly1305 under a key `derive_key`d from a per-account
+  `.vault-master` secret and the app's publisher and bundle id, so a rotated
+  build key still opens a vault and a squatting developer derives a different
+  key. It is deliberately **not** a `ConfigScope`: the three vault opcodes carry
+  no scope field and have no foreign counterpart, so a configuration frame
+  cannot name a secret, a vault frame cannot name a configuration document, and
+  no frame reaches another app's secrets. A sealed write is applied **before the
+  reply** rather than staged — plaintext lives in the daemon for one request, and
+  because the daemon serves one request at a time the read-modify-seal-publish is
+  atomic, where a stage-then-commit pair would let two instances of one app lose
+  each other's secrets.
+- **A vault that cannot be opened is never an empty vault.** A damaged record, a
+  failed authentication, and absent key material are three distinct audited
+  refusals, and a malformed master record is refused and **never replaced** —
+  drawing a fresh one would strand every existing vault in the account while
+  looking like a clean start. An application deciding whether to prompt for a
+  password can therefore tell "damaged" from "none saved".
+- **No key-protector abstraction, deliberately.** An earlier draft specified a
+  caller-supplied protector seam with a volume-backed stage-1 protector. There is
+  exactly one protector today, so the enum, the trait, and the keyslot would have
+  been interface built for a stage that has not landed — and the stage-1
+  protector holds no secret of its own, so its "wrap" could only have used a
+  publicly derivable key. What protects the master secret is stated plainly
+  instead: the gated root, and the encrypted volume it sits on. The record is
+  versioned, so a login-passphrase or TPM protector reshapes it in place.
+- **The secret wipe lives in the format engine.** A sealed document is a
+  `lib/appconf` document, so `Line::drop` wipes every line the engine discards
+  and every line of a document going out of scope. Putting it there rather than
+  in each consumer is what makes it hold for every discard path, including ones a
+  later change adds.
+- **Remaining:** descriptor-backed blobs (AD8), temporary files and their reaping
+  (AD9), and the remaining migrations (AD10).
 - **A boot-floor program has no app identity.** The embedded program registry
   carries an `rxe` and a capability request, not a signed manifest, so a
   program launched from it cannot be attributed to a publisher and gets no

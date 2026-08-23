@@ -18,9 +18,9 @@
 //!
 //! # What a caller can and cannot ask for
 //!
-//! An own-store request carries a scope, a key, and a value. It never carries
-//! a bundle identifier, a user, or a path: the service resolves all three from
-//! the attested [`Origin`], so no request shape can name another
+//! A configuration request carries a scope, a key, and a value. It never
+//! carries a bundle identifier, a user, or a path: the service resolves all
+//! three from the attested [`Origin`], so no request shape can name another
 //! application's store. A caller running no verified bundle — a kernel
 //! principal, a boot-floor program with no signed manifest, a parser-sandbox
 //! child — has no store and is refused, whichever operation it sent.
@@ -31,6 +31,24 @@
 //! application that publishes nothing, has never run for this account, or
 //! whose store cannot be attested all answer the same empty document, so a
 //! foreign read is never an oracle for more than what an app chose to publish.
+//!
+//! # The sealed scope
+//!
+//! `VaultRead`, `VaultSet`, and `VaultUnset` reach the caller's **secrets**,
+//! encrypted at rest under a key derived per (account, application) from the
+//! account's master secret ([`vault`]). They carry no scope field and have no
+//! foreign counterpart, so no configuration frame can name a secret, no vault
+//! frame can name a configuration document, and no frame at all reaches
+//! another application's secrets.
+//!
+//! A sealed write is **immediate**: the service opens the sealed document,
+//! applies the one change, re-seals it, and publishes it before it replies.
+//! Plaintext secret material therefore exists here for the span of one request
+//! rather than for the life of a staging session, and because requests are
+//! served one at a time the whole read-modify-seal-publish is atomic — so two
+//! processes of one application sealing different secrets cannot lose each
+//! other's, which a stage-then-commit pair would allow. A sealed document that
+//! cannot be opened is refused, never answered as an empty vault.
 //!
 //! # One read for the whole document
 //!
@@ -55,11 +73,13 @@
 //!
 //! # Layering
 //!
-//! This crate is `no_std` (with `alloc`) and performs **no I/O**: every read
-//! and write goes through the injected [`Storage`] seam, so the whole engine —
-//! authorisation, the ownership pin, the layered read, staging, and the atomic
-//! publish — is exercised on the host. The service *binary* (`src/run.rs`)
-//! supplies the real seam over the `fs_*` syscalls.
+//! This crate is `no_std` (with `alloc`) and performs **no I/O** and draws no
+//! randomness of its own: every read and write goes through the injected
+//! [`Storage`] seam and every draw through the injected [`Entropy`] seam, so
+//! the whole engine — authorisation, the ownership pin, the layered read,
+//! staging, the atomic publish, and the sealed scope's key hierarchy — is
+//! exercised on the host. The service *binary* (`src/run.rs`) supplies the real
+//! seams over the `fs_*` and `random_get` syscalls.
 
 #![no_std]
 #![forbid(unsafe_code)]
@@ -75,15 +95,18 @@ use tairix_abi::reply::encode_status_reply;
 use tairix_abi::{AppIdentity, Errno, Origin, ProcId};
 use tairix_appconf::{validate_key, ConfError, Document, MAX_SETTINGS};
 use tairix_log::{Event, EventId, Field, FieldValue, Level, Sink};
+use zeroize::Zeroize;
 
 pub mod events;
 mod owner;
 pub mod store;
 #[cfg(test)]
 mod testfs;
+pub mod vault;
 
 pub use owner::OwnerPin;
 pub use store::{published_document, AppStore, RootCache, StoreError};
+pub use vault::{Entropy, VaultError};
 
 /// The home subdirectory the private configuration scope lives under.
 ///
@@ -290,20 +313,30 @@ struct Refusal<'a> {
 
 /// The app-data dispatcher: the staging table, and the one entry point that
 /// turns a framed request plus an attested origin into a reply.
-pub struct AppData<S: Sink> {
+///
+/// It holds the service's two long-lived facilities — the audit sink and the
+/// generator the sealed scope draws from — and borrows the store volume per
+/// request. The generator is held rather than passed because it is *stateful*:
+/// a generator handed in fresh for each request could repeat a nonce, and
+/// reusing a `(key, nonce)` pair under the sealed scope's AEAD is
+/// catastrophic.
+pub struct AppData<S: Sink, R: Entropy> {
     sessions: Vec<Session>,
     roots: RootCache,
     sink: S,
+    entropy: R,
 }
 
-impl<S: Sink> AppData<S> {
-    /// Build a dispatcher that records its decisions through `sink`.
+impl<S: Sink, R: Entropy> AppData<S, R> {
+    /// Build a dispatcher that records its decisions through `sink` and draws
+    /// the sealed scope's key material and nonces from `entropy`.
     #[must_use]
-    pub const fn new(sink: S) -> Self {
+    pub const fn new(sink: S, entropy: R) -> Self {
         Self {
             sessions: Vec::new(),
             roots: RootCache::new(),
             sink,
+            entropy,
         }
     }
 
@@ -372,6 +405,23 @@ impl<S: Sink> AppData<S> {
                 bundle_id,
                 capacity,
             } => self.public_read(fs, origin, bundle_id, capacity, out),
+            AppDataRequest::VaultRead { capacity } => {
+                self.vault_read(fs, origin, &identity, capacity, out)
+            }
+            AppDataRequest::VaultSet { key, value } => {
+                validate_key(key).map_err(|_| Errno::OutOfRange)?;
+                // Refuse a value the format could not store before anything is
+                // sealed, so a write cannot fail with the vault half replaced.
+                let mut probe = Document::new();
+                probe.set(key, value).map_err(|_| Errno::OutOfRange)?;
+                self.vault_write(fs, origin, &identity, key, Some(value))?;
+                Ok(ok(out))
+            }
+            AppDataRequest::VaultUnset { key } => {
+                validate_key(key).map_err(|_| Errno::OutOfRange)?;
+                self.vault_write(fs, origin, &identity, key, None)?;
+                Ok(ok(out))
+            }
         }
     }
 
@@ -444,6 +494,58 @@ impl<S: Sink> AppData<S> {
         // of the cache has ended.
         let document = Self::sift(&self.sink, origin, bundle_id, outcome)?.unwrap_or_default();
         encode_document_reply(&document.render(), capacity, out)
+    }
+
+    /// Answer a read with the caller's whole sealed document.
+    ///
+    /// The sealed scope has no layer beneath it and no staging above it, so
+    /// this is exactly what the application last sealed. A vault that cannot be
+    /// opened is a refusal, never an empty answer: "your secrets are damaged"
+    /// and "you have no secrets" must not look alike.
+    ///
+    /// The rendered plaintext is wiped once it has been framed, so the only
+    /// copy that outlives the framing is the reply itself — which the serve loop
+    /// wipes as soon as it has been posted.
+    fn vault_read<F: Storage + ?Sized>(
+        &mut self,
+        fs: &mut F,
+        origin: &Origin,
+        identity: &AppIdentity,
+        capacity: u32,
+        out: &mut [u8],
+    ) -> Result<usize, Errno> {
+        let store = self.open(fs, origin, identity, false)?;
+        let outcome = store.vault(fs);
+        let document = self.resolve(origin, outcome)?;
+        let mut text = document.render();
+        let framed = encode_document_reply(&text, capacity, out);
+        text.zeroize();
+        framed
+    }
+
+    /// Apply one change to the caller's sealed document, immediately.
+    ///
+    /// There is no staging and no commit for the sealed scope: the store reads,
+    /// applies, re-seals, and publishes before this returns. Plaintext secret
+    /// material therefore exists in the service for the span of one request,
+    /// and — because the service serves requests one at a time — the whole
+    /// read-modify-seal-publish is atomic, so two processes of one application
+    /// sealing different secrets cannot lose each other's.
+    ///
+    /// A removal passes `create = false`, so it can bring neither a store nor
+    /// the account's key material into existence: a caller that removes a
+    /// secret it never had changes nothing at all.
+    fn vault_write<F: Storage + ?Sized>(
+        &mut self,
+        fs: &mut F,
+        origin: &Origin,
+        identity: &AppIdentity,
+        key: &str,
+        value: Option<&str>,
+    ) -> Result<(), Errno> {
+        let store = self.open(fs, origin, identity, value.is_some())?;
+        let outcome = store.seal_change(fs, &mut self.entropy, key, value);
+        self.resolve(origin, outcome)
     }
 
     /// Publish the caller's staged edits as one atomic document replacement.
@@ -670,7 +772,11 @@ fn level_of(err: StoreError) -> Level {
         StoreError::PublisherMismatch
         | StoreError::PinMalformed
         | StoreError::RootNotOwned
-        | StoreError::NoAppIdentity => Level::Warn,
+        | StoreError::NoAppIdentity
+        // Every sealed-scope refusal is either an attack indication or the loss
+        // of an account's key material, and none of them is a state the store
+        // reaches in normal operation.
+        | StoreError::Vault(_) => Level::Warn,
         StoreError::NoHome | StoreError::DocumentRefused | StoreError::Unavailable => Level::Info,
     }
 }

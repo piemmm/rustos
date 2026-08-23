@@ -8,7 +8,7 @@
 //! ([`published_document`]) names, which crossed the wire only after the one
 //! identifier grammar accepted it.
 //!
-//! # Two scopes, and why only one of them is layered
+//! # Three scopes, and why only one of them is layered
 //!
 //! [`ConfigScope::Private`] is the user's settings for an application, so it
 //! reads through the machine-wide policy layer an administrator may ship
@@ -26,6 +26,16 @@
 //! to attribute a published value to the application, and a machine-wide layer
 //! beneath it would let an administrator make an application appear to say
 //! something it never said.
+//!
+//! The **sealed** scope ([`VAULT_FILE`]) is the application's secrets,
+//! encrypted at rest under a key derived per (account, application)
+//! ([`crate::vault`]). It has no layer beneath it for a third reason of its
+//! own: a layer an administrator or a bundle could ship would be a secret an
+//! application had not written, and a secret an application did not put there
+//! is not one it may be made to believe. It is also not a [`ConfigScope`] — no
+//! configuration request can name it and no sealed request can name a
+//! configuration document, in either direction, because the two families of
+//! frame have no field in common that could select the other's file.
 
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -35,8 +45,10 @@ use tairix_abi::appinfo::PublisherId;
 use tairix_abi::{AppIdentity, Errno};
 use tairix_appconf::{Document, MAX_DOCUMENT_LEN};
 use tairix_users::{APPDATA_ROOT, CONFD_UID};
+use zeroize::Zeroize;
 
 use crate::owner::OwnerPin;
+use crate::vault::{self, Entropy, MasterSecret, VaultError};
 use crate::Storage;
 
 /// Name of an app's private configuration document inside its store.
@@ -53,6 +65,28 @@ pub const SETTINGS_FILE: &str = APPDATA_SETTINGS_FILE;
 /// scope has no bundle-shipped layer (see the module documentation), so no
 /// client ever composes a path to it.
 pub const PUBLIC_FILE: &str = "public.conf";
+
+/// Name of an app's sealed configuration document inside its store — the
+/// scope no other principal may read, and no request shape can name across
+/// applications.
+///
+/// Like [`PUBLIC_FILE`] this name is the service's alone: the sealed scope has
+/// no bundle-shipped layer and no machine-wide one, because an administrator
+/// must not be able to plant a secret an application would then read as its
+/// own.
+pub const VAULT_FILE: &str = "secret.vault";
+
+/// Name of the per-account app-data master-secret record, in the gated store
+/// root.
+///
+/// It lives beside the per-app store directories rather than inside one
+/// because it is the *account's* key material, from which every application's
+/// vault key is derived. A leading dot cannot collide with a bundle
+/// identifier — the identifier grammar forbids one — so the name is
+/// unreachable as a store directory. It sits under `Settings/` rather than
+/// `Library/` because `Library/` holds the evictable and boot-reaped scopes,
+/// and key material may be in neither.
+pub const MASTER_FILE: &str = ".vault-master";
 
 /// Suffix of the sibling name a publish writes a new document to before
 /// renaming it over the live one.
@@ -127,6 +161,10 @@ pub enum StoreError {
     /// The volume could not be reached — the encrypted root is not yet
     /// unlocked, or an I/O error.
     Unavailable,
+    /// A sealed-scope operation was refused. Carried as the sealed scope's own
+    /// vocabulary rather than flattened in here, so the key hierarchy's
+    /// failures stay defined beside the key hierarchy.
+    Vault(VaultError),
 }
 
 impl StoreError {
@@ -144,6 +182,15 @@ impl StoreError {
             Self::NoHome => Errno::NotFound,
             Self::DocumentRefused => Errno::OutOfRange,
             Self::Unavailable => Errno::DeviceOffline,
+            // A sealed-scope refusal is about the caller's *own* data, so it
+            // is reported precisely: an application can tell "your saved
+            // secrets are damaged" from "storage is unreachable" and say so,
+            // and no other principal learns anything either way.
+            Self::Vault(VaultError::MasterSecretRefused | VaultError::VaultMalformed) => {
+                Errno::BadMagic
+            }
+            Self::Vault(VaultError::VaultUnsealFailed) => Errno::SignatureInvalid,
+            Self::Vault(VaultError::EntropyUnavailable) => Errno::EntropyNotReady,
         }
     }
 
@@ -164,7 +211,10 @@ impl StoreError {
             | Self::NoHome
             | Self::RootNotOwned
             | Self::PublisherMismatch
-            | Self::Unavailable => false,
+            | Self::Unavailable
+            // The sealed scope has no foreign path at all, so a vault refusal
+            // is always the caller's own store's.
+            | Self::Vault(_) => false,
         }
     }
 
@@ -179,6 +229,7 @@ impl StoreError {
             Self::PinMalformed => "the store's ownership pin is malformed",
             Self::DocumentRefused => "the configuration document is outside the format's bounds",
             Self::Unavailable => "the store volume is not reachable",
+            Self::Vault(err) => err.reason(),
         }
     }
 }
@@ -190,6 +241,18 @@ impl StoreError {
 /// gated root belongs to the app-data service, and that the ownership pin
 /// either named this publisher or was created for it.
 pub struct AppStore {
+    /// The account this store belongs to, as the kernel attested it. Held
+    /// rather than passed per call so the master-secret record can only ever
+    /// be read for the account whose root was resolved.
+    uid: u32,
+    /// The application this store belongs to, as the kernel attested it. Held
+    /// for the same reason: the sealed scope's key is derived from it, and a
+    /// key derived from an identity a call site supplied separately could
+    /// disagree with the directory the store resolved to.
+    identity: AppIdentity,
+    /// Absolute path of `<home>/Settings/Apps`, the gated root the store was
+    /// resolved under — where the account's master-secret record lives.
+    root: String,
     /// Absolute path of `<home>/Settings/Apps/<bundle-id>`, with no trailing
     /// separator.
     dir: String,
@@ -334,7 +397,10 @@ impl AppStore {
             Err(_) => return Err(StoreError::Unavailable),
         };
         Ok(Self {
+            uid,
+            identity: *identity,
             policy_dir: join(POLICY_ROOT, identity.bundle_id()),
+            root,
             dir,
             pinned,
         })
@@ -445,18 +511,191 @@ impl AppStore {
         if text.len() > MAX_DOCUMENT_LEN {
             return Err(StoreError::DocumentRefused);
         }
-        let file = scope_file(scope);
-        let mut temp_name = String::from(file);
-        temp_name.push_str(TEMP_SUFFIX);
-        let temp = join(&self.dir, &temp_name);
-        let live = join(&self.dir, file);
-        fs.write(&temp, text.as_bytes())
-            .map_err(|_| StoreError::Unavailable)?;
-        // A failed rename leaves the old document live and the temporary
-        // behind; the next publish overwrites the temporary, so a retry
-        // converges without a repair pass.
-        fs.rename(&temp, &live).map_err(|_| StoreError::Unavailable)
+        replace_atomically(fs, &self.dir, scope_file(scope), text.as_bytes())
     }
+
+    /// Read the app's own sealed document, or an empty one when it has sealed
+    /// nothing.
+    ///
+    /// An unpinned store answers empty without reading anything, exactly as
+    /// [`Self::document`] does: with no ownership pin there is no attested
+    /// owner, so there is no document this store may be read out of. A sealed
+    /// document that *is* there and cannot be opened is a refusal, never an
+    /// empty answer.
+    ///
+    /// # Errors
+    ///
+    /// [`StoreError::Vault`] for a sealed document that is not a well-formed
+    /// record, one whose authentication fails, or an account whose master
+    /// secret is missing while a sealed document exists;
+    /// [`StoreError::Unavailable`] for an unreachable volume.
+    pub fn vault<S: Storage + ?Sized>(&self, fs: &mut S) -> Result<Document, StoreError> {
+        let Some(sealed) = self.sealed_bytes(fs)? else {
+            return Ok(Document::new());
+        };
+        let master = self
+            .master(fs)?
+            .ok_or(StoreError::Vault(VaultError::MasterSecretRefused))?;
+        vault::open_document(&master.app_key(&self.identity), &sealed).map_err(StoreError::Vault)
+    }
+
+    /// Apply one change to the app's sealed document and publish it, as a
+    /// single read-modify-seal-publish.
+    ///
+    /// `value` is the new value, or [`None`] for a removal. This is the whole
+    /// sealed write: there is no staging session, so plaintext secret material
+    /// exists here only for the span of one request — and because the service
+    /// serves requests one at a time, two processes of one application sealing
+    /// different secrets cannot lose each other's.
+    ///
+    /// Nothing is written when nothing changes: a value the sealed document
+    /// already carries, and a removal of a key it does not, both return
+    /// success having touched neither the document nor the account's key
+    /// material. That is what stops a removal from bringing a store, a master
+    /// secret, or a sealed document into existence.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::vault`], plus [`StoreError::Vault`] with
+    /// [`VaultError::EntropyUnavailable`] when the nonce or a first master
+    /// secret cannot be drawn, and [`StoreError::DocumentRefused`] for a change
+    /// the format will not hold — in practice a document already at its setting
+    /// or line bound, since the key and the value were validated against the
+    /// same engine before this was called.
+    pub fn seal_change<S: Storage + ?Sized, E: Entropy + ?Sized>(
+        &self,
+        fs: &mut S,
+        entropy: &mut E,
+        key: &str,
+        value: Option<&str>,
+    ) -> Result<(), StoreError> {
+        let sealed = self.sealed_bytes(fs)?;
+        // Removing a key from a vault that does not exist removes nothing, so
+        // it must not create one — nor an account master secret, which a probe
+        // could otherwise make the service draw.
+        if sealed.is_none() && value.is_none() {
+            return Ok(());
+        }
+        let master = match sealed {
+            // A sealed document with no key to open it is a refusal, never a
+            // fresh start: drawing a new master here would silently make the
+            // existing vault unreadable for ever.
+            Some(_) => self
+                .master(fs)?
+                .ok_or(StoreError::Vault(VaultError::MasterSecretRefused))?,
+            None => self.master_or_draw(fs, entropy)?,
+        };
+        let app_key = master.app_key(&self.identity);
+        let mut document = match &sealed {
+            Some(bytes) => vault::open_document(&app_key, bytes).map_err(StoreError::Vault)?,
+            None => Document::new(),
+        };
+        if let Some(value) = value {
+            if document.get(key) == Some(value) {
+                return Ok(());
+            }
+            document
+                .set(key, value)
+                .map_err(|_| StoreError::DocumentRefused)?;
+        } else {
+            if document.get(key).is_none() {
+                return Ok(());
+            }
+            document.unset(key);
+        }
+        let record =
+            vault::seal_document(&app_key, entropy, &document).map_err(StoreError::Vault)?;
+        replace_atomically(fs, &self.dir, VAULT_FILE, &record)
+    }
+
+    /// The app's sealed document as it sits on the volume, or [`None`] when it
+    /// has none.
+    fn sealed_bytes<S: Storage + ?Sized>(&self, fs: &mut S) -> Result<Option<Vec<u8>>, StoreError> {
+        if !self.pinned {
+            return Ok(None);
+        }
+        match fs.read(&join(&self.dir, VAULT_FILE)) {
+            Ok(bytes) => Ok(Some(bytes)),
+            Err(Errno::NotFound) => Ok(None),
+            Err(_) => Err(StoreError::Unavailable),
+        }
+    }
+
+    /// The account's app-data master secret, or [`None`] when the account has
+    /// none yet.
+    ///
+    /// Read afresh on every sealed operation and wiped when it goes out of
+    /// scope. The service deliberately caches no master secret: a vault write
+    /// is a rare, human-driven act, and holding an account's key material in
+    /// the service's heap for the life of the machine would buy a file read it
+    /// does not need.
+    ///
+    /// # Errors
+    ///
+    /// [`StoreError::Vault`] with [`VaultError::MasterSecretRefused`] for a
+    /// record that is present but attests nothing, and
+    /// [`StoreError::Unavailable`] for an unreachable volume.
+    fn master<S: Storage + ?Sized>(&self, fs: &mut S) -> Result<Option<MasterSecret>, StoreError> {
+        let mut bytes = match fs.read(&join(&self.root, MASTER_FILE)) {
+            Ok(bytes) => bytes,
+            Err(Errno::NotFound) => return Ok(None),
+            Err(_) => return Err(StoreError::Unavailable),
+        };
+        let master = MasterSecret::decode(&bytes, self.uid);
+        bytes.zeroize();
+        master
+            .map(Some)
+            .ok_or(StoreError::Vault(VaultError::MasterSecretRefused))
+    }
+
+    /// The account's master secret, drawing and recording one when the account
+    /// has none.
+    ///
+    /// The record is replaced atomically like any other: a torn write would
+    /// leave a record that attests nothing, and because a malformed record is
+    /// never replaced that would strand the account's vaults for good.
+    fn master_or_draw<S: Storage + ?Sized, E: Entropy + ?Sized>(
+        &self,
+        fs: &mut S,
+        entropy: &mut E,
+    ) -> Result<MasterSecret, StoreError> {
+        if let Some(master) = self.master(fs)? {
+            return Ok(master);
+        }
+        let master = MasterSecret::draw(entropy).map_err(StoreError::Vault)?;
+        let mut record = master.encode(self.uid);
+        let written = replace_atomically(fs, &self.root, MASTER_FILE, &record);
+        record.zeroize();
+        written?;
+        Ok(master)
+    }
+}
+
+/// Replace `dir/file` with `bytes`, atomically.
+///
+/// The bytes are written whole to a sibling temporary name and then renamed
+/// over the live name, so a crash mid-write leaves either the old contents or
+/// the new ones. A failed rename leaves the old contents live and the temporary
+/// behind; the next write overwrites the temporary, so a retry converges
+/// without a repair pass.
+///
+/// Deriving the temporary from the live name rather than declaring one per file
+/// is what keeps it always a sibling in the same directory: two applications
+/// can never contend for it, two scopes can never collide on it, and the rename
+/// can never cross a volume.
+fn replace_atomically<S: Storage + ?Sized>(
+    fs: &mut S,
+    dir: &str,
+    file: &str,
+    bytes: &[u8],
+) -> Result<(), StoreError> {
+    let mut temp_name = String::from(file);
+    temp_name.push_str(TEMP_SUFFIX);
+    let temp = join(dir, &temp_name);
+    let live = join(dir, file);
+    fs.write(&temp, bytes)
+        .map_err(|_| StoreError::Unavailable)?;
+    fs.rename(&temp, &live).map_err(|_| StoreError::Unavailable)
 }
 
 /// The document the application `bundle_id` names publishes, inside the store

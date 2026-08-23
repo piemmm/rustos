@@ -7,6 +7,7 @@
 
 use tairix_log::EventId;
 
+use crate::vault::VaultError;
 use crate::StoreError;
 
 /// Range start (inclusive) reserved for `confd` event identifiers.
@@ -57,6 +58,26 @@ pub const DOCUMENT_REFUSED: EventId = EventId(21_008);
 /// unlocked, or a read or write failed.
 pub const STORE_UNAVAILABLE: EventId = EventId(21_009);
 
+/// An account's app-data master secret is missing while a sealed document
+/// exists, or the record that should hold it attests nothing. The account's
+/// vaults cannot be opened, and the service replaces nothing — drawing a fresh
+/// master would strand every existing vault for good.
+pub const MASTER_SECRET_REFUSED: EventId = EventId(21_010);
+
+/// A sealed document on the volume is not a well-formed vault record: a
+/// truncated write or bit rot. Refused whole, never read as an empty vault.
+pub const VAULT_MALFORMED: EventId = EventId(21_011);
+
+/// A sealed document's authentication failed: it was altered on the volume, or
+/// the key that opens it is not the calling application's. An attack
+/// indication, and never answered as an empty vault.
+pub const VAULT_UNSEAL_FAILED: EventId = EventId(21_012);
+
+/// The random generator could not serve a draw, so no master secret was
+/// created and nothing was sealed. Fail closed: no key material is ever
+/// derived from a failed draw.
+pub const ENTROPY_UNAVAILABLE: EventId = EventId(21_013);
+
 /// The event identifier recording `err`.
 ///
 /// One mapping, so the audit stream and the caller's typed refusal can never
@@ -71,17 +92,22 @@ pub const fn id_of(err: StoreError) -> EventId {
         StoreError::PinMalformed => PIN_MALFORMED,
         StoreError::DocumentRefused => DOCUMENT_REFUSED,
         StoreError::Unavailable => STORE_UNAVAILABLE,
+        StoreError::Vault(VaultError::MasterSecretRefused) => MASTER_SECRET_REFUSED,
+        StoreError::Vault(VaultError::VaultMalformed) => VAULT_MALFORMED,
+        StoreError::Vault(VaultError::VaultUnsealFailed) => VAULT_UNSEAL_FAILED,
+        StoreError::Vault(VaultError::EntropyUnavailable) => ENTROPY_UNAVAILABLE,
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::{id_of, CONFD_RANGE_END, CONFD_RANGE_START, SERVICE_READY, SERVICE_UNAVAILABLE};
+    use crate::vault::VaultError;
     use crate::StoreError;
 
     /// Every [`StoreError`] variant, so a new one cannot be added without an
     /// identifier of its own.
-    const EVERY_ERROR: [StoreError; 7] = [
+    const EVERY_ERROR: [StoreError; 11] = [
         StoreError::NoAppIdentity,
         StoreError::NoHome,
         StoreError::RootNotOwned,
@@ -89,6 +115,10 @@ mod tests {
         StoreError::PinMalformed,
         StoreError::DocumentRefused,
         StoreError::Unavailable,
+        StoreError::Vault(VaultError::MasterSecretRefused),
+        StoreError::Vault(VaultError::VaultMalformed),
+        StoreError::Vault(VaultError::VaultUnsealFailed),
+        StoreError::Vault(VaultError::EntropyUnavailable),
     ];
 
     #[test]

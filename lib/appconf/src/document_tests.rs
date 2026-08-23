@@ -306,3 +306,40 @@ fn an_empty_and_a_newline_only_document_both_round_trip() {
         assert_eq!(doc.render(), text, "`{text:?}` must round-trip");
     }
 }
+
+/// A line the engine discards may be a sealed-scope secret, so its bytes are
+/// overwritten rather than merely dropped. `Drop` calls this, which is what
+/// makes every discard path — an overwrite, a collapsed duplicate, an `unset`,
+/// a whole document going out of scope — covered without a call site
+/// remembering to.
+#[test]
+fn wiping_a_line_overwrites_every_byte_it_holds() {
+    let mut line = super::render_setting("imap.password", "hunter2", " # work account");
+    assert!(line.text.contains("hunter2"));
+    line.wipe();
+    assert!(line.text.is_empty(), "the rendered text is gone");
+    match &line.kind {
+        super::Kind::Setting {
+            key,
+            value,
+            comment,
+        } => {
+            assert!(key.is_empty() && value.is_empty() && comment.is_empty());
+        }
+        _ => panic!("a rendered setting stays a setting"),
+    }
+}
+
+/// A wipe is idempotent and safe on a line carrying no setting, so `Drop`
+/// after an explicit wipe — and a wipe of an inert or unparsed line — cannot
+/// misbehave.
+#[test]
+fn wiping_is_idempotent_and_covers_every_line_kind() {
+    let mut doc = Document::parse("# a comment\nnot a setting\nscheme = dark\n").expect("parses");
+    doc.unset("scheme");
+    assert_eq!(doc.render(), "# a comment\nnot a setting\n");
+    let mut line = super::render_setting("k", "v", "");
+    line.wipe();
+    line.wipe();
+    assert!(line.text.is_empty());
+}

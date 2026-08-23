@@ -44,6 +44,9 @@ audited whichever operation it sent.
 | `ConfigUnset { scope, key }` | stage a removal |
 | `ConfigCommit { scope }` | publish that scope's staged changes atomically |
 | `PublicRead { bundle_id, capacity }` | another application's **published** document |
+| `VaultRead { capacity }` | the caller's whole **sealed** document |
+| `VaultSet { key, value }` | seal one secret, immediately |
+| `VaultUnset { key }` | remove one secret, immediately |
 
 A read answers with the **whole** document, not one key: for the private scope,
 the policy layer, the app's own settings over it, and the caller's own staged
@@ -79,7 +82,7 @@ An abandoned session — a caller that stages and exits — is reclaimed by age.
 No primitive tells a server that a peer died, and losing an abandoned session's
 edits is exactly the contract already stated.
 
-## Two scopes: the app's own settings, and what it publishes
+## Three scopes: the app's own settings, what it publishes, and its secrets
 
 `settings.conf` is the **private** scope — the user's settings for that
 application, which no other principal can read. `public.conf` is the
@@ -108,15 +111,101 @@ A foreign read answers the **committed** document, never the publisher's staged
 edits: a published value is what every other application sees, and a reader
 must not act on one that may never be published.
 
+## The sealed scope
+
+`secret.vault` is the application's **secrets** — a password, a token, a key —
+encrypted at rest with ChaCha20-Poly1305 under a key the service derives per
+(account, application):
+
+```text
+per-account master secret        (32 random bytes, drawn once per account)
+  └─ derive_key(master, "tairix-appdata-secret/v1" ‖ 0x00 ‖ publisher ‖ bundle-id)
+       └─ per-(account, application) AEAD key
+```
+
+Every primitive comes from [`lib/crypto`](../lib/crypto.md): the single-block
+HKDF-Expand the ARXFS key hierarchy already derives its own subkeys through, and
+the same AEAD encrypted swap uses. The sealed scope introduces no cryptography —
+only a domain-separating context label of its own.
+
+Binding the derivation to the **publisher** means a release re-signed with a
+fresh build key still opens the vault it wrote, while a different developer
+squatting the same bundle identifier derives a different key and cannot read it
+even if the ownership pin were somehow bypassed. That is defence in depth behind
+the pin, not a substitute for it.
+
+It is reached by three operations that carry **no scope field** and have **no
+foreign counterpart**, so a configuration frame cannot name a secret, a vault
+frame cannot name a configuration document, and no frame at all reaches another
+application's secrets. None of that is a check the service performs; there is no
+request shape to refuse.
+
+A sealed write is **immediate**. There is no `VaultCommit` and nothing is
+staged: the service opens the sealed document, applies the one change, re-seals
+it, and publishes it before it replies. Two reasons, both the sealed scope's
+own. Plaintext secret material exists in the service for the span of one request
+rather than for the life of a staging session; and because the service serves
+requests one at a time, the whole read-modify-seal-publish is atomic — so two
+processes of one application sealing different secrets cannot lose each other's,
+which a stage-then-commit pair would allow.
+
+A vault that cannot be opened is **refused**, never answered as an empty one: a
+damaged record, a failed authentication, or missing key material are each a
+distinct audited refusal, because "your secrets are damaged" and "you have no
+secrets" must not look alike to an application deciding whether to prompt.
+
+The scope has no layer beneath it — no bundle-shipped defaults, no machine-wide
+policy — for a reason of its own beyond the published scope's: a secret an
+application did not write is not one it may be made to believe, and a layer
+would let an administrator or a package plant one.
+
+### What protects the master secret
+
+The master secret is stored as drawn, in the gated store root: owned by this
+service, mode `0700`, gated on `CAP_APPDATA_ADMIN`. At rest it is protected by
+the encrypted root volume, which ARXFS has no plaintext mode for. So secrets are
+exactly as safe at rest as the volume, they survive an administrative password
+reset, and an application — including the account's own shell — cannot reach the
+record at all.
+
+It is deliberately **not** wrapped under a second key today, and there is
+deliberately no protector abstraction: at this stage there is no second secret
+to wrap it with, so a wrap would have to use a key derivable by anyone who could
+read the record, which is theatre rather than defence. A login-passphrase
+protector (secrets locked while logged out) and TPM sealing
+(`plans/TPM.md`) each bring a real second secret; the record carries a version,
+and the stage that brings the first of them reshapes it in place to carry a
+keyslot.
+
+A record that attests nothing is **never replaced**. The same master secret is
+every application's key material in that account, so drawing a fresh one to get
+past a damaged record would strand every existing vault while looking like a
+clean start. The refusal is audited and an operator restores the record.
+
+The service caches no master secret: it is read afresh for each sealed
+operation, used, and wiped. A vault write is a rare, human-driven act, and
+holding an account's key material in the service's heap for the life of the
+machine would buy a file read it does not need.
+
 ## The tree it serves from
 
 ```text
-/Users/<u>/Settings/Apps/<bundle-id>/     ← gated: required_cap = CAP_APPDATA_ADMIN
-    settings.conf                           the app's own private document
-    public.conf                             what the app publishes; any app may read
-    .owner                                  the publisher ownership pin
+/Users/<u>/Settings/Apps/                 ← gated: required_cap = CAP_APPDATA_ADMIN
+    .vault-master                           the account's app-data master secret
+    <bundle-id>/
+        settings.conf                       the app's own private document
+        public.conf                         what the app publishes; any app may read
+        secret.vault                        the app's secrets, sealed
+        .owner                              the publisher ownership pin
 /System/Settings/<bundle-id>/settings.conf  optional machine-wide policy layer
 ```
+
+The master-secret record sits in the gated root beside the per-app directories,
+because it is the *account's* key material and every application's vault key is
+derived from it. Its leading dot cannot be a bundle identifier — the identifier
+grammar forbids one — so no application's store can ever be named that. It is
+under `Settings/` rather than `Library/` because `Library/` holds the evictable
+and boot-reaped scopes, and key material may be in neither.
 
 A *per-app* directory cannot be the gate itself: all of a user's applications
 may write `Settings/`, so any of them could pre-create a sibling named after
@@ -130,10 +219,11 @@ Its ancestors carry a **search-only** ACL grant for the service's uid: the least
 authority that lets a walk reach the root, and not enough to list a home or open
 anything else in it.
 
-One ownership pin governs both scopes: it records who owns the *data*, and both
-documents are the same application's. A different developer claiming the bundle
-identifier is therefore refused before it can put anything in front of readers
-of the real application's published document.
+One ownership pin governs all three scopes: it records who owns the *data*, and
+every document is the same application's. A different developer claiming the
+bundle identifier is therefore refused before it can put anything in front of
+readers of the real application's published document — and before it reaches a
+key derivation at all.
 
 Two checks authorise every open, and both are necessary:
 
@@ -196,11 +286,16 @@ normalised.
 ## Atomic publish, and what a crash leaves
 
 A publish renders the document, writes it whole to a sibling temporary — the
-live name plus `.new`, so each scope has its own and the two can never contend —
+live name plus `.new`, so each scope has its own and no two can contend —
 flushes it, and renames it over the live document. A crash therefore leaves
 either the old document or the new one — never a torn one. A failed rename
 leaves the old document live and the temporary behind; the next publish
 overwrites the temporary, so a retry converges with no repair pass.
+
+The same replacement serves the sealed document and the account's master-secret
+record, which is what stops a torn write from producing a record that attests
+nothing — and because such a record is never replaced, a torn write would
+otherwise strand the account's vaults for good.
 
 A save never destroys what a human wrote: the document engine
 ([`tairix-appconf`](../lib/appconf.md)) rewrites the one line it must and leaves
@@ -223,7 +318,14 @@ The `confd` service account's ceiling is `CAP_IPC_BIND_PRIVILEGED`,
 `CAP_APPDATA_ADMIN`, `CAP_FS_ACCESS`, and `CAP_LOG_EMIT`. It holds no spawn, no
 network, no `CAP_FS_CHOWN`, and no users-database authority: it cannot start a
 process, reach the credential store, seize a user's file, or hand one away.
-Compromising it yields applications' settings and nothing else.
+Drawing randomness needs no capability at all, so the sealed scope adds nothing
+to the ceiling.
+
+Compromising it yields applications' settings **and their secrets** — it is the
+principal that holds every account's master secret, and no arrangement in which
+one service can seal and open vaults avoids that. What it does *not* yield is
+anything outside the app-data tree: not a credential record, not another user's
+files, not a process.
 
 ## What it does not isolate
 

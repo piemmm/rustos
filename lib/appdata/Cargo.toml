@@ -19,6 +19,10 @@ tairix-abi = { path = "../abi", version = "=0.0.0" }
 # grammar validators the daemon applies, so a client and the service can never
 # disagree about what a document means or which keys are legal.
 tairix-appconf = { path = "../appconf", version = "=0.0.0" }
+# The audited optimisation-resistant wipe. A sealed-scope write carries a secret
+# in this library's own request frame, and a hand-rolled wipe would be elided by
+# the optimiser.
+zeroize = { version = "1.8.1", default-features = false, features = ["alloc"] }
 
 # The syscall-backed host (`rt` module): the `ipc_call` transport to the
 # app-data service and the `fs_*` read of the calling bundle's own shipped

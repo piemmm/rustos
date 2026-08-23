@@ -13,7 +13,7 @@ settings.set_u32("font.size", 16)?;
 settings.commit()?;
 ```
 
-## Two scopes
+## Three scopes
 
 `Settings::open` is the application's **private** scope: the user's settings for
 it, which no other principal can read. `Settings::open_published` is its
@@ -34,6 +34,38 @@ replaces one document. A foreign read answers a plain `tairix-appconf`
 `Document` — a snapshot, with the format engine's own typed accessors, and no
 handle that could publish through it.
 
+`Vault` is the **sealed** scope: the application's secrets, encrypted at rest by
+the [service](../userland/confd.md) under a key derived per (account,
+application).
+
+```rust
+let mut vault = Vault::open(&mut host)?;      // one call, whatever it holds
+let saved = vault.get("imap.password");       // local
+vault.set("imap.password", typed)?;           // sealed before it returns
+vault.unset("smtp.password")?;
+```
+
+It differs from the other two scopes in three ways, and each is the sealed
+scope's own:
+
+- **No layer beneath it.** A secret an application did not write is not one it
+  may be made to believe, so there are no bundle-shipped defaults and no
+  machine-wide policy. An `unset` leaves the key absent rather than uncovering
+  something else.
+- **No staging and no commit.** The service seals and publishes each write
+  before it replies, so nothing is ever left unsaved — and because the service
+  serves requests one at a time, two instances of one application sealing
+  different secrets cannot lose each other's. A write ends by re-reading, so the
+  handle reflects what the service holds rather than what the client guessed;
+  that is the same rule `commit` follows.
+- **Opening can fail.** `Settings::open` degrades to the shipped defaults;
+  `Vault::open` returns the refusal, because "I could not read your secrets" is
+  not "you have none". An application must report a damaged vault rather than
+  behave as though the user had never saved a password.
+
+The handle holds the opened plaintext, so it wipes it when it goes out of scope
+— and so does the format engine, for every line a document discards.
+
 ## No app spells a path, and none names itself
 
 Nothing here takes a store path or a user, and nothing but `read_published`
@@ -48,8 +80,8 @@ private settings.
 The one argument `open` does take is the program's own command **word**, and it
 selects nothing but layer 1 below — the app's own shipped defaults. A wrong
 value there can only mislead an application about itself.
-`open_published` takes none, because the published scope has no layer beneath
-it.
+`open_published` and `Vault::open` take none, because neither of those scopes
+has a layer beneath it.
 
 ## Three layers, and which of them this library owns
 
@@ -137,9 +169,15 @@ given up on rather than chased.
 
 The crate is `no_std` (with `alloc`) and the engine performs no I/O: its three
 syscalls sit behind the `AppDataHost` seam, so the layered read, the capacity
-negotiation, staging, and the commit are all exercised on the host against a fake
-that speaks the *real* `appdata-v1` codec rather than a mock of it. `RtHost`
-(feature `rt`) is the syscall-backed one.
+negotiation, staging, the commit, and the sealed scope are all exercised on the
+host against a fake that speaks the *real* `appdata-v1` codec rather than a mock
+of it. `RtHost` (feature `rt`) is the syscall-backed one.
+
+The fake does not *encrypt* the sealed scope — the sealing is the service's,
+behind its own tests, and a fake that reimplemented it would be a second opinion
+about a key hierarchy. What it reproduces is everything a client can observe: one
+document, no layers, no staging, a write applied before the reply, and a refusal
+that is a refusal rather than an empty vault.
 
 The `key = value` format is not defined here: it has one home,
 [`tairix-appconf`](./appconf.md), and this client applies the same validators the

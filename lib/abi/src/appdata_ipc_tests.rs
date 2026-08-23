@@ -34,8 +34,9 @@ fn frame(request: &AppDataRequest<'_>) -> Frame {
     Frame { bytes, len }
 }
 
-/// The five operations, one representative each, on the private scope.
-fn every_operation() -> [AppDataRequest<'static>; 5] {
+/// Every operation, one representative each; the configuration ones on the
+/// private scope.
+fn every_operation() -> [AppDataRequest<'static>; 8] {
     [
         AppDataRequest::ConfigRead {
             scope: ConfigScope::Private,
@@ -57,6 +58,26 @@ fn every_operation() -> [AppDataRequest<'static>; 5] {
             bundle_id: "os.tairix.terminal",
             capacity: 4096,
         },
+        AppDataRequest::VaultRead { capacity: 4096 },
+        AppDataRequest::VaultSet {
+            key: "imap.password",
+            value: "hunter2",
+        },
+        AppDataRequest::VaultUnset {
+            key: "smtp.password",
+        },
+    ]
+}
+
+/// The three sealed-scope operations, which name no scope and no application.
+fn every_vault_operation() -> [AppDataRequest<'static>; 3] {
+    [
+        AppDataRequest::VaultRead { capacity: 64 },
+        AppDataRequest::VaultSet {
+            key: "k",
+            value: "v",
+        },
+        AppDataRequest::VaultUnset { key: "k" },
     ]
 }
 
@@ -169,7 +190,10 @@ fn a_foreign_read_cannot_name_a_scope() {
 fn only_a_foreign_read_may_name_an_application() {
     // An own-store operation names no store, so a bundle identifier on one is
     // a frame that does not mean what its operation says.
-    for request in every_scoped_operation(ConfigScope::Private) {
+    let own = every_scoped_operation(ConfigScope::Private)
+        .into_iter()
+        .chain(every_vault_operation());
+    for request in own {
         let mut bytes = [0u8; APPDATA_MAX_REQUEST];
         let len = request.encode(&mut bytes).expect("encodes");
         let id = b"os.tairix.terminal";
@@ -447,7 +471,7 @@ fn bad_magic_version_and_operation_are_refused() {
         Err(Errno::AbiVersionUnsupported)
     );
 
-    for op in [0u16, 6, 0xFFFF] {
+    for op in [0u16, 9, 0xFFFF] {
         let mut encoded = frame(&commit);
         put_u16(&mut encoded.bytes, super::OP_OFFSET, op);
         assert_eq!(
@@ -473,6 +497,11 @@ fn a_capacity_on_anything_but_a_read_is_refused() {
             key: "k",
             value: "v",
         },
+        AppDataRequest::VaultSet {
+            key: "k",
+            value: "v",
+        },
+        AppDataRequest::VaultUnset { key: "k" },
     ] {
         let mut encoded = frame(&request);
         put_u32(&mut encoded.bytes, super::CAPACITY_OFFSET, 1);
@@ -491,6 +520,8 @@ fn a_value_on_anything_but_a_set_is_refused() {
         super::OP_CONFIG_UNSET,
         super::OP_CONFIG_COMMIT,
         super::OP_PUBLIC_READ,
+        super::OP_VAULT_READ,
+        super::OP_VAULT_UNSET,
     ] {
         let mut encoded = frame(&AppDataRequest::ConfigSet {
             scope: ConfigScope::Private,
@@ -512,6 +543,7 @@ fn a_read_and_a_commit_name_nothing_at_all() {
         super::OP_CONFIG_READ,
         super::OP_CONFIG_COMMIT,
         super::OP_PUBLIC_READ,
+        super::OP_VAULT_READ,
     ] {
         let mut encoded = frame(&AppDataRequest::ConfigUnset {
             scope: ConfigScope::Private,
@@ -528,10 +560,20 @@ fn a_read_and_a_commit_name_nothing_at_all() {
 
 #[test]
 fn an_operation_that_needs_a_key_refuses_an_empty_one() {
-    for op in [super::OP_CONFIG_SET, super::OP_CONFIG_UNSET] {
-        let mut encoded = frame(&AppDataRequest::ConfigCommit {
-            scope: ConfigScope::Private,
-        });
+    // Each family is re-labelled from a keyless frame of its *own* family, so
+    // the empty key is what the decoder refuses rather than the scope byte a
+    // configuration frame carries and a sealed one does not.
+    let scoped = AppDataRequest::ConfigCommit {
+        scope: ConfigScope::Private,
+    };
+    let sealed = AppDataRequest::VaultRead { capacity: 0 };
+    for (base, op) in [
+        (&scoped, super::OP_CONFIG_SET),
+        (&scoped, super::OP_CONFIG_UNSET),
+        (&sealed, super::OP_VAULT_SET),
+        (&sealed, super::OP_VAULT_UNSET),
+    ] {
+        let mut encoded = frame(base);
         put_u16(&mut encoded.bytes, super::OP_OFFSET, op);
         assert_eq!(
             AppDataRequest::decode(encoded.as_slice()),
@@ -793,4 +835,75 @@ fn the_endpoint_is_reserved_but_not_seat_scoped() {
     assert!(!crate::ipc::is_seat_scoped_endpoint(
         super::APPDATA_ENDPOINT
     ));
+}
+
+#[test]
+fn every_sealed_operation_round_trips() {
+    for request in every_vault_operation() {
+        assert_eq!(
+            AppDataRequest::decode(frame(&request).as_slice()),
+            Ok(request),
+            "{request:?} must survive the wire"
+        );
+    }
+}
+
+#[test]
+fn a_sealed_operation_cannot_name_a_scope() {
+    // The sealed scope is not a `ConfigScope`, so no vault frame carries one:
+    // a configuration frame cannot name a secret and a vault frame cannot name
+    // a configuration document, in either direction, by construction.
+    for request in every_vault_operation() {
+        let mut encoded = frame(&request);
+        for wire in [
+            ConfigScope::Private.as_wire(),
+            ConfigScope::Public.as_wire(),
+            0xFF,
+        ] {
+            encoded.bytes[super::SCOPE_OFFSET] = wire;
+            assert_eq!(
+                AppDataRequest::decode(encoded.as_slice()),
+                Err(Errno::BadMagic),
+                "{request:?} must carry no scope byte"
+            );
+        }
+    }
+}
+
+#[test]
+fn a_configuration_operation_cannot_be_reinterpreted_as_a_sealed_one() {
+    // The other direction of the same property: a `ConfigSet`'s frame carries a
+    // scope byte, so re-labelling it as a `VaultSet` is refused rather than
+    // silently sealing what the caller meant to publish in the clear.
+    for op in [
+        super::OP_VAULT_READ,
+        super::OP_VAULT_SET,
+        super::OP_VAULT_UNSET,
+    ] {
+        let mut encoded = frame(&AppDataRequest::ConfigSet {
+            scope: ConfigScope::Private,
+            key: "k",
+            value: "v",
+        });
+        put_u16(&mut encoded.bytes, super::OP_OFFSET, op);
+        assert_eq!(
+            AppDataRequest::decode(encoded.as_slice()),
+            Err(Errno::BadMagic),
+            "operation {op} must carry no scope"
+        );
+    }
+}
+
+#[test]
+fn the_widest_secret_is_the_widest_value() {
+    // A secret crosses the wire as a setting's value, so the sealed scope adds
+    // no width of its own: the request bound is still the widest configuration
+    // write. A secret larger than a value is the blob scope's business.
+    let request = AppDataRequest::VaultSet {
+        key: &String::from_iter(core::iter::repeat_n('k', APPDATA_KEY_MAX)),
+        value: &String::from_iter(core::iter::repeat_n('v', APPDATA_VALUE_MAX)),
+    };
+    let encoded = frame(&request);
+    assert_eq!(encoded.len, APPDATA_MAX_REQUEST);
+    assert_eq!(AppDataRequest::decode(encoded.as_slice()), Ok(request));
 }

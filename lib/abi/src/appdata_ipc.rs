@@ -13,16 +13,18 @@
 //! their per-inode gate and the service is its only holder, so there is no
 //! second path to the bytes.
 //!
-//! # Two scopes, and the one request shape that names another app
+//! # Three scopes, and the one request shape that names another app
 //!
 //! An application's store holds a [`ConfigScope::Private`] document — the
-//! user's settings for that app, which nothing else may read — and a
+//! user's settings for that app, which nothing else may read — a
 //! [`ConfigScope::Public`] one, which the app publishes for other
-//! applications to read. Every own-store operation carries the scope; none of
-//! them carries a bundle identifier, because the daemon derives which store to
-//! open from the [`Origin`](crate::Origin) the kernel attests for the calling
-//! task. So there is no request shape by which an app can claim to be another
-//! app.
+//! applications to read, and a **sealed** one, encrypted at rest under a key
+//! derived per (account, application) and reached only through the
+//! `Vault` operations. Every *configuration* operation carries the scope; none
+//! of them carries a bundle identifier, because the daemon derives which store
+//! to open from the [`Origin`](crate::Origin) the kernel attests for the
+//! calling task. So there is no request shape by which an app can claim to be
+//! another app.
 //!
 //! The single exception is [`AppDataRequest::PublicRead`], which names a
 //! *foreign* application's identifier — and it is a distinct operation
@@ -32,6 +34,15 @@
 //! with no attested app identity — a kernel principal, a boot-floor program
 //! with no signed manifest, a parser-sandbox child — has no store and is
 //! refused whichever operation it sends.
+//!
+//! The sealed scope is deliberately **not** a [`ConfigScope`] variant. It is
+//! reached by [`AppDataRequest::VaultRead`], [`AppDataRequest::VaultSet`], and
+//! [`AppDataRequest::VaultUnset`], none of which carries a scope field — so no
+//! configuration frame can name a secret and no vault frame can name a
+//! configuration document, in either direction, by construction rather than by
+//! a check. It also has no foreign counterpart at all, which is what makes
+//! "one application reads another's secrets" unrepresentable rather than
+//! refused.
 //!
 //! # One read for the whole document, not one per key
 //!
@@ -66,6 +77,18 @@
 //! scope on the commit is what keeps that honest rather than implying an
 //! atomicity across two files that no filesystem offers.
 //!
+//! # A sealed write is immediate, and has no commit
+//!
+//! [`AppDataRequest::VaultSet`] and [`AppDataRequest::VaultUnset`] carry no
+//! staging and there is no `VaultCommit`: the daemon opens the sealed
+//! document, applies the one change, re-seals it, and publishes it before it
+//! replies. Plaintext secret material therefore exists in the daemon for the
+//! span of one request instead of for the life of a staging session, and
+//! because the daemon serves requests one at a time the whole
+//! read-modify-seal-publish is atomic — so two processes of one application
+//! sealing different secrets cannot lose each other's, which a
+//! stage-then-commit pair would allow.
+//!
 //! # Wire shape
 //!
 //! One length-prefixed little-endian record per call, header first:
@@ -77,7 +100,7 @@
 //! 8   u16  key_len
 //! 10  u16  value_len
 //! 12  u32  capacity    reads only: the caller's reply buffer
-//! 16  u8   scope       own-store operations only
+//! 16  u8   scope       configuration operations only
 //! 17  u8   bundle_len  PublicRead only
 //! 18  bundle bytes     bundle_len bytes of UTF-8
 //! ..  key    bytes     key_len    bytes of UTF-8
@@ -215,6 +238,12 @@ const OP_CONFIG_UNSET: u16 = 3;
 const OP_CONFIG_COMMIT: u16 = 4;
 /// Wire discriminant of [`AppDataRequest::PublicRead`].
 const OP_PUBLIC_READ: u16 = 5;
+/// Wire discriminant of [`AppDataRequest::VaultRead`].
+const OP_VAULT_READ: u16 = 6;
+/// Wire discriminant of [`AppDataRequest::VaultSet`].
+const OP_VAULT_SET: u16 = 7;
+/// Wire discriminant of [`AppDataRequest::VaultUnset`].
+const OP_VAULT_UNSET: u16 = 8;
 
 /// Wire discriminant of [`ConfigScope::Private`].
 const SCOPE_PRIVATE: u8 = 1;
@@ -273,6 +302,11 @@ impl ConfigScope {
 /// from the caller's kernel-attested app identity, and names no store at all.
 /// `PublicRead` is the one shape that names another application — and it can
 /// reach nothing but that application's published document.
+///
+/// The `Vault*` variants reach the sealed scope. They carry no scope field and
+/// have no foreign counterpart, so a configuration frame cannot name a secret,
+/// a vault frame cannot name a configuration document, and no frame at all
+/// reaches another application's secrets.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum AppDataRequest<'a> {
     /// Read the caller's whole merged document for one of its own scopes.
@@ -328,6 +362,45 @@ pub enum AppDataRequest<'a> {
         /// As [`Self::ConfigRead`]'s capacity.
         capacity: u32,
     },
+    /// Read the caller's whole **sealed** document.
+    ///
+    /// The sealed scope carries no scope field and has no foreign
+    /// counterpart: no frame names it but the caller's own, and no frame
+    /// reaches another application's. A caller that has sealed nothing reads
+    /// the empty document; a sealed document that fails authentication is
+    /// refused, never reported as empty, because "your secrets are damaged"
+    /// and "you have no secrets" must not look alike.
+    VaultRead {
+        /// As [`Self::ConfigRead`]'s capacity.
+        capacity: u32,
+    },
+    /// Seal `key = value` into the caller's sealed document, immediately.
+    ///
+    /// Unlike a configuration write this is **not** staged: the daemon opens
+    /// the sealed document, applies the one change, re-seals, and publishes it
+    /// before it replies. Two reasons, and both are the sealed scope's alone.
+    /// Plaintext secret material then exists in the daemon only for the span
+    /// of one request rather than for the life of a staging session; and
+    /// because the daemon serves requests one at a time, the whole
+    /// read-modify-seal-publish is atomic, so two processes of one application
+    /// writing different secrets cannot lose each other's — where a
+    /// stage-then-commit pair can.
+    VaultSet {
+        /// The key to seal.
+        key: &'a str,
+        /// Its new value. May be empty: a key sealed to nothing is a key that
+        /// is set, and is distinct from one that is absent.
+        value: &'a str,
+    },
+    /// Remove `key` from the caller's sealed document, immediately.
+    ///
+    /// A key the sealed document does not carry is removed by writing nothing
+    /// at all, so this cannot be used to bring a sealed document — or a
+    /// store — into existence.
+    VaultUnset {
+        /// The key to remove.
+        key: &'a str,
+    },
 }
 
 impl<'a> AppDataRequest<'a> {
@@ -342,10 +415,12 @@ impl<'a> AppDataRequest<'a> {
     /// when the operation has none.
     const fn payload(&self) -> (&'a str, &'a str, &'a str) {
         match *self {
-            Self::ConfigUnset { key, .. } => ("", key, ""),
-            Self::ConfigSet { key, value, .. } => ("", key, value),
+            Self::ConfigUnset { key, .. } | Self::VaultUnset { key } => ("", key, ""),
+            Self::ConfigSet { key, value, .. } | Self::VaultSet { key, value } => ("", key, value),
             Self::PublicRead { bundle_id, .. } => (bundle_id, "", ""),
-            Self::ConfigRead { .. } | Self::ConfigCommit { .. } => ("", "", ""),
+            Self::ConfigRead { .. } | Self::ConfigCommit { .. } | Self::VaultRead { .. } => {
+                ("", "", "")
+            }
         }
     }
 
@@ -357,6 +432,9 @@ impl<'a> AppDataRequest<'a> {
             Self::ConfigUnset { .. } => OP_CONFIG_UNSET,
             Self::ConfigCommit { .. } => OP_CONFIG_COMMIT,
             Self::PublicRead { .. } => OP_PUBLIC_READ,
+            Self::VaultRead { .. } => OP_VAULT_READ,
+            Self::VaultSet { .. } => OP_VAULT_SET,
+            Self::VaultUnset { .. } => OP_VAULT_UNSET,
         }
     }
 
@@ -367,7 +445,10 @@ impl<'a> AppDataRequest<'a> {
             | Self::ConfigSet { scope, .. }
             | Self::ConfigUnset { scope, .. }
             | Self::ConfigCommit { scope } => scope.as_wire(),
-            Self::PublicRead { .. } => 0,
+            Self::PublicRead { .. }
+            | Self::VaultRead { .. }
+            | Self::VaultSet { .. }
+            | Self::VaultUnset { .. } => 0,
         }
     }
 
@@ -375,8 +456,14 @@ impl<'a> AppDataRequest<'a> {
     /// that read nothing.
     const fn capacity(&self) -> u32 {
         match *self {
-            Self::ConfigRead { capacity, .. } | Self::PublicRead { capacity, .. } => capacity,
-            Self::ConfigSet { .. } | Self::ConfigUnset { .. } | Self::ConfigCommit { .. } => 0,
+            Self::ConfigRead { capacity, .. }
+            | Self::PublicRead { capacity, .. }
+            | Self::VaultRead { capacity } => capacity,
+            Self::ConfigSet { .. }
+            | Self::ConfigUnset { .. }
+            | Self::ConfigCommit { .. }
+            | Self::VaultSet { .. }
+            | Self::VaultUnset { .. } => 0,
         }
     }
 
@@ -497,6 +584,31 @@ impl<'a> AppDataRequest<'a> {
                     bundle_id: record.bundle_id()?,
                     capacity: record.capacity()?,
                 })
+            }
+            OP_VAULT_READ => {
+                record.without_scope()?;
+                record.without_bundle()?;
+                record.without_key()?;
+                record.without_value()?;
+                Ok(Self::VaultRead {
+                    capacity: record.capacity()?,
+                })
+            }
+            OP_VAULT_SET => {
+                record.without_scope()?;
+                record.without_bundle()?;
+                record.without_capacity()?;
+                Ok(Self::VaultSet {
+                    key: record.key()?,
+                    value: record.value,
+                })
+            }
+            OP_VAULT_UNSET => {
+                record.without_scope()?;
+                record.without_bundle()?;
+                record.without_capacity()?;
+                record.without_value()?;
+                Ok(Self::VaultUnset { key: record.key()? })
             }
             _ => Err(Errno::OutOfRange),
         }

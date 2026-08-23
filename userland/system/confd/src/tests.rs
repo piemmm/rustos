@@ -18,6 +18,8 @@ use tairix_log::DiscardSink;
 use super::{AppData, MAX_PENDING_EDITS, STAGING_IDLE_NS};
 use crate::store::tests::{identity, publisher};
 use crate::testfs::{TestFs, ACCOUNT_UID, HOME};
+use crate::vault::tests::CountingEntropy;
+use crate::Storage as _;
 
 /// A distinct process instance. Never reused, exactly as the kernel's own
 /// identifiers are not.
@@ -43,14 +45,18 @@ fn origin(uid: u32, tag: u8, identity: Option<AppIdentity>) -> Origin {
     }
 }
 
-/// A dispatcher over a freshly provisioned volume.
-fn service() -> (AppData<DiscardSink>, TestFs) {
-    (AppData::new(DiscardSink), TestFs::provisioned())
+/// A dispatcher over a freshly provisioned volume, drawing the sealed scope's
+/// key material from a deterministic generator.
+fn service() -> (AppData<DiscardSink, CountingEntropy>, TestFs) {
+    (
+        AppData::new(DiscardSink, CountingEntropy::new(1)),
+        TestFs::provisioned(),
+    )
 }
 
 /// Serve `request` and hand back the raw reply frame.
 fn call(
-    service: &mut AppData<DiscardSink>,
+    service: &mut AppData<DiscardSink, CountingEntropy>,
     fs: &mut TestFs,
     origin: &Origin,
     request: &AppDataRequest<'_>,
@@ -60,7 +66,7 @@ fn call(
 
 /// As [`call`], at monotonic instant `now_ns`.
 fn call_at(
-    service: &mut AppData<DiscardSink>,
+    service: &mut AppData<DiscardSink, CountingEntropy>,
     fs: &mut TestFs,
     origin: &Origin,
     now_ns: u64,
@@ -76,7 +82,7 @@ fn call_at(
 
 /// Serve a `ConfigSet` in `scope` and assert it was accepted.
 fn set_in(
-    service: &mut AppData<DiscardSink>,
+    service: &mut AppData<DiscardSink, CountingEntropy>,
     fs: &mut TestFs,
     origin: &Origin,
     scope: ConfigScope,
@@ -98,7 +104,7 @@ fn set_in(
 
 /// Serve a `ConfigCommit` for `scope` and assert it was accepted.
 fn commit_in(
-    service: &mut AppData<DiscardSink>,
+    service: &mut AppData<DiscardSink, CountingEntropy>,
     fs: &mut TestFs,
     origin: &Origin,
     scope: ConfigScope,
@@ -109,7 +115,7 @@ fn commit_in(
 
 /// Serve a `ConfigRead` of `scope` and parse the document it answered with.
 fn read_in(
-    service: &mut AppData<DiscardSink>,
+    service: &mut AppData<DiscardSink, CountingEntropy>,
     fs: &mut TestFs,
     origin: &Origin,
     scope: ConfigScope,
@@ -127,7 +133,7 @@ fn read_in(
 /// Serve a `PublicRead` of `bundle_id` and parse the document it answered
 /// with.
 fn read_published(
-    service: &mut AppData<DiscardSink>,
+    service: &mut AppData<DiscardSink, CountingEntropy>,
     fs: &mut TestFs,
     origin: &Origin,
     bundle_id: &str,
@@ -142,6 +148,34 @@ fn read_published(
             capacity,
         },
     );
+    whole(&reply)
+}
+
+/// Serve a `VaultSet` and assert it was accepted.
+fn seal(
+    service: &mut AppData<DiscardSink, CountingEntropy>,
+    fs: &mut TestFs,
+    origin: &Origin,
+    key: &str,
+    value: &str,
+) {
+    let reply = call(
+        service,
+        fs,
+        origin,
+        &AppDataRequest::VaultSet { key, value },
+    );
+    assert_eq!(decode_status_reply(&reply), Ok(()), "seal {key}");
+}
+
+/// Serve a `VaultRead` and parse the document it answered with.
+fn read_vault(
+    service: &mut AppData<DiscardSink, CountingEntropy>,
+    fs: &mut TestFs,
+    origin: &Origin,
+) -> Result<Document, Errno> {
+    let capacity = u32::try_from(APPDATA_DOCUMENT_MAX).expect("fits a u32");
+    let reply = call(service, fs, origin, &AppDataRequest::VaultRead { capacity });
     whole(&reply)
 }
 
@@ -161,7 +195,7 @@ fn whole(reply: &[u8]) -> Result<Document, Errno> {
 
 /// [`set_in`] on the caller's private scope.
 fn set(
-    service: &mut AppData<DiscardSink>,
+    service: &mut AppData<DiscardSink, CountingEntropy>,
     fs: &mut TestFs,
     origin: &Origin,
     key: &str,
@@ -171,13 +205,13 @@ fn set(
 }
 
 /// [`commit_in`] on the caller's private scope.
-fn commit(service: &mut AppData<DiscardSink>, fs: &mut TestFs, origin: &Origin) {
+fn commit(service: &mut AppData<DiscardSink, CountingEntropy>, fs: &mut TestFs, origin: &Origin) {
     commit_in(service, fs, origin, ConfigScope::Private);
 }
 
 /// [`read_in`] on the caller's private scope.
 fn read(
-    service: &mut AppData<DiscardSink>,
+    service: &mut AppData<DiscardSink, CountingEntropy>,
     fs: &mut TestFs,
     origin: &Origin,
 ) -> Result<Document, Errno> {
@@ -189,7 +223,7 @@ fn read(
 /// The document is the unit the wire carries, so "not set" is the *client's*
 /// answer about a document it holds, not a second round trip.
 fn get(
-    service: &mut AppData<DiscardSink>,
+    service: &mut AppData<DiscardSink, CountingEntropy>,
     fs: &mut TestFs,
     origin: &Origin,
     key: &str,
@@ -201,7 +235,11 @@ fn get(
 }
 
 /// The keys the caller's own merged document carries, in document order.
-fn keys(service: &mut AppData<DiscardSink>, fs: &mut TestFs, origin: &Origin) -> Vec<String> {
+fn keys(
+    service: &mut AppData<DiscardSink, CountingEntropy>,
+    fs: &mut TestFs,
+    origin: &Origin,
+) -> Vec<String> {
     match read(service, fs, origin) {
         Ok(document) => document
             .settings()
@@ -824,7 +862,7 @@ fn a_failed_commit_leaves_the_edits_staged_for_a_retry() {
 fn an_unreachable_volume_answers_a_typed_refusal_not_a_default() {
     // The service comes up before the encrypted root is unlocked. An early
     // caller must be told the store cannot be reached, never handed a value.
-    let mut svc = AppData::new(DiscardSink);
+    let mut svc = AppData::new(DiscardSink, CountingEntropy::new(1));
     let mut fs = TestFs::provisioned();
     fs.fail_all(Errno::DeviceOffline);
     let ada = origin(ACCOUNT_UID, 1, Some(identity(1)));
@@ -1336,4 +1374,275 @@ fn a_foreign_read_naming_a_traversal_is_refused_before_a_store_is_touched() {
         get(&mut svc, &mut fs, &ada, "scheme").as_deref(),
         Ok("dark")
     );
+}
+
+// --- The sealed scope ----------------------------------------------------
+
+#[test]
+fn a_secret_survives_the_round_trip_and_is_never_on_the_volume_in_the_clear() {
+    let (mut svc, mut fs) = service();
+    let ada = origin(ACCOUNT_UID, 1, Some(identity(1)));
+    seal(&mut svc, &mut fs, &ada, "imap.password", "hunter2");
+    assert_eq!(
+        read_vault(&mut svc, &mut fs, &ada)
+            .expect("reads")
+            .get("imap.password"),
+        Some("hunter2")
+    );
+    assert!(
+        !fs.read_text(&alloc::format!(
+            "{HOME}/Settings/Apps/os.tairix.terminal/secret.vault"
+        ))
+        .is_some_and(|text| text.contains("hunter2")),
+        "the sealed document must not carry the plaintext"
+    );
+}
+
+/// A sealed write is immediate: there is no commit, and nothing is staged — so
+/// a caller that seals a secret and exits has sealed it.
+#[test]
+fn a_sealed_write_needs_no_commit_and_stages_nothing() {
+    let (mut svc, mut fs) = service();
+    let ada = origin(ACCOUNT_UID, 1, Some(identity(1)));
+    seal(&mut svc, &mut fs, &ada, "k", "v");
+    assert_eq!(
+        svc.staging_sessions(),
+        0,
+        "the sealed scope holds no session"
+    );
+    // A second process instance of the same application reads it at once,
+    // where a staged configuration edit would still be invisible to it.
+    let other = origin(ACCOUNT_UID, 2, Some(identity(1)));
+    assert_eq!(
+        read_vault(&mut svc, &mut fs, &other)
+            .expect("reads")
+            .get("k"),
+        Some("v")
+    );
+}
+
+/// The whole point of the scope: one application's secrets are unreachable to
+/// another, in every request shape there is.
+#[test]
+fn an_app_cannot_reach_another_apps_secrets() {
+    let (mut svc, mut fs) = service();
+    let terminal = origin(ACCOUNT_UID, 1, Some(identity(1)));
+    seal(&mut svc, &mut fs, &terminal, "imap.password", "hunter2");
+
+    let mail = origin(
+        ACCOUNT_UID,
+        2,
+        Some(AppIdentity::new("os.tairix.mail", publisher(1)).expect("legal")),
+    );
+    // Its own sealed scope is empty...
+    assert_eq!(
+        read_vault(&mut svc, &mut fs, &mail)
+            .expect("reads")
+            .settings()
+            .count(),
+        0
+    );
+    // ...and the one request shape that names an application reaches only the
+    // published scope, which carries no secret.
+    assert_eq!(
+        read_published(&mut svc, &mut fs, &mail, "os.tairix.terminal")
+            .expect("reads")
+            .get("imap.password"),
+        None
+    );
+}
+
+#[test]
+fn one_users_secrets_are_invisible_to_another() {
+    let (mut svc, mut fs) = service();
+    fs.add_home("/Users/grace", ACCOUNT_UID + 1);
+    let ada = origin(ACCOUNT_UID, 1, Some(identity(1)));
+    let grace = origin(ACCOUNT_UID + 1, 2, Some(identity(1)));
+    seal(&mut svc, &mut fs, &ada, "imap.password", "ada's");
+    seal(&mut svc, &mut fs, &grace, "imap.password", "grace's");
+    assert_eq!(
+        read_vault(&mut svc, &mut fs, &ada)
+            .expect("reads")
+            .get("imap.password"),
+        Some("ada's")
+    );
+    assert_eq!(
+        read_vault(&mut svc, &mut fs, &grace)
+            .expect("reads")
+            .get("imap.password"),
+        Some("grace's")
+    );
+}
+
+#[test]
+fn a_caller_with_no_attested_app_identity_has_no_sealed_scope() {
+    let (mut svc, mut fs) = service();
+    let stranger = origin(ACCOUNT_UID, 1, None);
+    for request in [
+        AppDataRequest::VaultRead { capacity: 4096 },
+        AppDataRequest::VaultSet {
+            key: "k",
+            value: "v",
+        },
+        AppDataRequest::VaultUnset { key: "k" },
+    ] {
+        let reply = call(&mut svc, &mut fs, &stranger, &request);
+        assert_eq!(
+            decode_status_reply(&reply),
+            Err(Errno::PermissionDenied),
+            "{request:?} from a principal running no verified bundle"
+        );
+    }
+    assert!(!fs.exists(&alloc::format!("{HOME}/Settings/Apps/.vault-master")));
+}
+
+#[test]
+fn removing_a_secret_uncovers_nothing_beneath_it() {
+    // The sealed scope has no layer under it — no bundle defaults, no
+    // machine-wide policy — because a secret an application did not write is
+    // not one it may be made to believe. A removal therefore leaves the key
+    // absent, not falling back to something else.
+    let (mut svc, mut fs) = service();
+    let ada = origin(ACCOUNT_UID, 1, Some(identity(1)));
+    fs.put(
+        &alloc::format!("/System/Settings/os.tairix.terminal/{}", "settings.conf"),
+        b"imap.password = a policy secret\n",
+    );
+    seal(&mut svc, &mut fs, &ada, "imap.password", "hunter2");
+    let reply = call(
+        &mut svc,
+        &mut fs,
+        &ada,
+        &AppDataRequest::VaultUnset {
+            key: "imap.password",
+        },
+    );
+    assert_eq!(decode_status_reply(&reply), Ok(()));
+    assert_eq!(
+        read_vault(&mut svc, &mut fs, &ada)
+            .expect("reads")
+            .get("imap.password"),
+        None,
+        "no layer beneath the sealed scope may supply a secret"
+    );
+}
+
+/// The sealed and configuration scopes are separate documents: a secret never
+/// appears in a configuration read, and a setting never in a sealed one.
+#[test]
+fn the_sealed_scope_and_the_configuration_scopes_do_not_leak_into_each_other() {
+    let (mut svc, mut fs) = service();
+    let ada = origin(ACCOUNT_UID, 1, Some(identity(1)));
+    seal(&mut svc, &mut fs, &ada, "imap.password", "hunter2");
+    set_in(
+        &mut svc,
+        &mut fs,
+        &ada,
+        ConfigScope::Private,
+        "font.size",
+        "14",
+    );
+    commit_in(&mut svc, &mut fs, &ada, ConfigScope::Private);
+
+    for scope in [ConfigScope::Private, ConfigScope::Public] {
+        assert_eq!(
+            read_in(&mut svc, &mut fs, &ada, scope)
+                .expect("reads")
+                .get("imap.password"),
+            None,
+            "{scope:?} must not carry a secret"
+        );
+    }
+    assert_eq!(
+        read_vault(&mut svc, &mut fs, &ada)
+            .expect("reads")
+            .get("font.size"),
+        None,
+        "the sealed scope must not carry a setting"
+    );
+}
+
+#[test]
+fn a_sealed_key_or_value_outside_the_grammar_is_refused_before_anything_is_sealed() {
+    let (mut svc, mut fs) = service();
+    let ada = origin(ACCOUNT_UID, 1, Some(identity(1)));
+    for request in [
+        AppDataRequest::VaultSet {
+            key: "Not.A.Key",
+            value: "v",
+        },
+        AppDataRequest::VaultUnset { key: "Not.A.Key" },
+        // A value the wire carries but the format will not hold, so the
+        // refusal is the engine's rather than the codec's.
+        AppDataRequest::VaultSet {
+            key: "k",
+            value: "a \u{7} bell",
+        },
+    ] {
+        let reply = call(&mut svc, &mut fs, &ada, &request);
+        assert_eq!(
+            decode_status_reply(&reply),
+            Err(Errno::OutOfRange),
+            "{request:?}"
+        );
+    }
+    assert!(
+        !fs.exists(&alloc::format!("{HOME}/Settings/Apps/.vault-master")),
+        "a refused write draws the account no key material"
+    );
+}
+
+#[test]
+fn an_unreachable_volume_refuses_the_sealed_scope_rather_than_answering_empty() {
+    let (mut svc, mut fs) = service();
+    let ada = origin(ACCOUNT_UID, 1, Some(identity(1)));
+    seal(&mut svc, &mut fs, &ada, "k", "v");
+    fs.fail_all(Errno::DeviceOffline);
+    let capacity = u32::try_from(APPDATA_DOCUMENT_MAX).expect("fits a u32");
+    let reply = call(
+        &mut svc,
+        &mut fs,
+        &ada,
+        &AppDataRequest::VaultRead { capacity },
+    );
+    assert_eq!(decode_status_reply(&reply), Err(Errno::DeviceOffline));
+}
+
+/// A vault that cannot be opened is reported as damaged, not as empty: an
+/// application must never conclude "no password saved" from a tampered record.
+#[test]
+fn a_tampered_sealed_document_is_reported_and_not_answered_as_empty() {
+    let (mut svc, mut fs) = service();
+    let ada = origin(ACCOUNT_UID, 1, Some(identity(1)));
+    seal(&mut svc, &mut fs, &ada, "imap.password", "hunter2");
+    let path = alloc::format!("{HOME}/Settings/Apps/os.tairix.terminal/secret.vault");
+    let mut record = fs.read(&path).expect("sealed");
+    let last = record.len() - 1;
+    record[last] ^= 0x01;
+    fs.put(&path, &record);
+    let capacity = u32::try_from(APPDATA_DOCUMENT_MAX).expect("fits a u32");
+    let reply = call(
+        &mut svc,
+        &mut fs,
+        &ada,
+        &AppDataRequest::VaultRead { capacity },
+    );
+    assert_eq!(decode_status_reply(&reply), Err(Errno::SignatureInvalid));
+}
+
+#[test]
+fn a_sealed_read_negotiates_capacity_like_any_other_document() {
+    let (mut svc, mut fs) = service();
+    let ada = origin(ACCOUNT_UID, 1, Some(identity(1)));
+    seal(&mut svc, &mut fs, &ada, "imap.password", "hunter2");
+    let reply = call(
+        &mut svc,
+        &mut fs,
+        &ada,
+        &AppDataRequest::VaultRead { capacity: 1 },
+    );
+    match decode_document_reply(&reply).expect("a reply") {
+        ConfigDocument::NeedsCapacity(needed) => assert!(needed > 1),
+        ConfigDocument::Whole(text) => panic!("a one-byte buffer must not fit {text:?}"),
+    }
 }

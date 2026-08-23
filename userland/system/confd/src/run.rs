@@ -7,7 +7,8 @@
 //! userland runtime `tairix-rt`, never the C ABI. `tairix-rt` provides
 //! `_start`, the per-process stack canary, the panic handler, the
 //! `#[global_allocator]`, the `fs_*` file API the store reads and writes
-//! through, and the endpoint syscall wrappers; `tairix_rt::entry!` names this
+//! through, the `random_get` draw the sealed scope's key material and nonces
+//! come from, and the endpoint syscall wrappers; `tairix_rt::entry!` names this
 //! program's `main`.
 //!
 //! # What this service does
@@ -49,12 +50,14 @@ mod program {
 
     use tairix_abi::appdata_ipc::{APPDATA_ENDPOINT, APPDATA_MAX_REPLY, APPDATA_MAX_REQUEST};
     use tairix_abi::fs::{DirEntries, OpenFlags};
+    use tairix_abi::random::RandomFlags;
     use tairix_abi::{Errno, Origin, ORIGIN_WIRE_LEN};
     use tairix_caps::CapabilitySet;
     use tairix_confd::events::{SERVICE_READY, SERVICE_UNAVAILABLE};
-    use tairix_confd::{AppData, Storage};
+    use tairix_confd::{AppData, Entropy, Storage};
     use tairix_log::{Event, EventId, Level};
     use tairix_rt::{File, LogSink};
+    use zeroize::Zeroize;
 
     /// Outstanding-call capacity of the endpoint (a fail-closed memory bound).
     ///
@@ -88,6 +91,32 @@ mod program {
     /// Translate a raw negative kernel result into a typed [`Errno`].
     fn errno(raw: i64) -> Errno {
         Errno::from_syscall(raw)
+    }
+
+    /// The sealed scope's randomness, drawn from the one kernel random
+    /// subsystem.
+    ///
+    /// The draw **blocks** through a required reseed rather than passing
+    /// `NON_BLOCKING`: a master secret or a nonce is key material, and waiting
+    /// for the generator is right where answering "not ready" to a user saving
+    /// a password is not. An early-boot caller therefore waits for entropy
+    /// instead of being refused, and no key material is ever derived from an
+    /// unseeded generator.
+    struct RealEntropy;
+
+    impl Entropy for RealEntropy {
+        fn fill(&mut self, out: &mut [u8]) -> Result<(), Errno> {
+            let mut done = 0usize;
+            while done < out.len() {
+                let drawn =
+                    tairix_rt::random_get(&mut out[done..], RandomFlags::empty()).map_err(errno)?;
+                if drawn == 0 {
+                    return Err(Errno::EntropyNotReady);
+                }
+                done += drawn;
+            }
+            Ok(())
+        }
     }
 
     impl Storage for RealStorage {
@@ -213,7 +242,7 @@ mod program {
     }
 
     /// Serve requests for the life of the service, returning the exit code.
-    fn serve(service: &mut AppData<LogSink>) -> i32 {
+    fn serve(service: &mut AppData<LogSink, RealEntropy>) -> i32 {
         let mut fs = RealStorage;
         let mut request = [0u8; APPDATA_MAX_REQUEST];
         let mut reply = alloc::vec![0u8; APPDATA_MAX_REPLY];
@@ -247,6 +276,14 @@ mod program {
             if reply_len > 0 {
                 let _ = tairix_rt::call_reply(APPDATA_ENDPOINT, ticket, &reply[..reply_len]);
             }
+            // Both buffers are reused for the life of the service, and a
+            // sealed-scope request or reply carries plaintext secret material,
+            // so neither is left holding one for the next caller's request to
+            // sit beside. Only the bytes actually used are wiped, so the cost
+            // is proportional to the frame just served rather than to the
+            // buffers' full width.
+            request[..len].zeroize();
+            reply[..reply_len].zeroize();
         }
     }
 
@@ -261,7 +298,7 @@ mod program {
             Level::Info,
             "confd: serving APPDATA_ENDPOINT",
         );
-        let mut service = AppData::new(LOG_SINK);
+        let mut service = AppData::new(LOG_SINK, RealEntropy);
         serve(&mut service)
     }
 

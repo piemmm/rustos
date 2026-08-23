@@ -1619,13 +1619,19 @@ defect.
   kernel-attested app identity. A per-app directory could not be the gate
   itself — every app of a user may write `Settings/`, so any of them could
   pre-create a sibling named after another app's identifier.
-  A configuration store holds two scopes: a **private** document no other
-  principal may read, and a **published** one any application may read
-  through a request shape that cannot name the private scope at all. The
-  published scope is what keeps app-from-app isolation complete rather than
-  merely strict — two applications that must share a value have exactly one
-  sanctioned channel, so none has to invent a path under `CAP_FS_ACCESS`. See
-  `plans/APPDATA.md`. `/Users` is mounted `nosuid,nodev`.
+  A configuration store holds three scopes: a **private** document no other
+  principal may read, a **published** one any application may read through a
+  request shape that cannot name the private scope at all, and a **sealed** one
+  holding that application's secrets, encrypted at rest under a key the service
+  derives per (account, application). The published scope is what keeps
+  app-from-app isolation complete rather than merely strict — two applications
+  that must share a value have exactly one sanctioned channel, so none has to
+  invent a path under `CAP_FS_ACCESS`. The sealed scope is reached by operations
+  that carry no scope field and have no foreign counterpart, so no
+  configuration request can name a secret and none reaches another
+  application's; it has no layer beneath it, because a secret an application did
+  not write is not one it may be made to believe. See `plans/APPDATA.md`.
+  `/Users` is mounted `nosuid,nodev`.
   A store carries the same directory name at every scope, so the user's
   own stores are exactly the system stores' names under their home; both
   are on the fixed lookup order (§16.8) after the system pair, which is

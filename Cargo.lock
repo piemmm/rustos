@@ -547,6 +547,7 @@ version = "0.0.0"
 dependencies = [
  "tairix-abi",
  "tairix-fuzzseed",
+ "zeroize",
 ]
 
 [[package]]
@@ -557,6 +558,7 @@ dependencies = [
  "tairix-appconf",
  "tairix-cmdres",
  "tairix-rt",
+ "zeroize",
 ]
 
 [[package]]
@@ -789,9 +791,12 @@ dependencies = [
  "tairix-abi",
  "tairix-appconf",
  "tairix-caps",
+ "tairix-crypto",
+ "tairix-fuzzseed",
  "tairix-log",
  "tairix-rt",
  "tairix-users",
+ "zeroize",
 ]
 
 [[package]]
