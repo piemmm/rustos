@@ -82,7 +82,8 @@ blocked on their kernel syscalls — `cp`/`mv`/`rm`/`useradd`/`groupadd`
 are registered store bundles), the §12.1 Stage C remainder (the first
 batch's `true`/`false`/`yes`/`basename`/`dirname`/`mkdir`/`rmdir`/
 `head`/`wc`/`tee`/`seq`/`whoami` are registered store bundles; the rest
-land in further batches), the §12.2 colour-scheme and box-drawing work
+land in further batches; the networking tools `ping`, `host`, `ss` and
+`telnet` are registered store bundles under their own plans), the §12.2 colour-scheme and box-drawing work
 (deliverable 9), and
 deliverable 8 increment 5 (the x86_64/riscv64 storage floor, then
 deletion of the embedded registry those ports still carry as their

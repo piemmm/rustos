@@ -871,6 +871,7 @@ mod tests {
                 "sysmon",
                 "tail",
                 "tee",
+                "telnet",
                 "terminal",
                 "top",
                 "true",

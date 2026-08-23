@@ -1101,6 +1101,23 @@ mod tests {
         CapabilityId::NET,
     ];
 
+    // The `telnet` NVT client (plans/TELNET.md): console write for the remote
+    // host's output and its own diagnostics, console *read* for the raw-mode
+    // keystrokes it relays (which also authorises its input-mode switch),
+    // filesystem access for its own Help/ documents, and CAP_NET for the TCP
+    // stream socket the session runs over plus the UDP socket the stub
+    // resolver looks a host name up with (the stack re-checks it and audits
+    // the open). Reaching a remote host is ordinary transport use, so neither
+    // CAP_NET_RAW nor CAP_NET_BIND_PRIVILEGED: connecting *to* a well-known
+    // port is unprivileged, and `-b` binds an ephemeral local port. Not an
+    // embedded spawn-floor program, so the list lives only in this pin.
+    const TELNET_TOOL_REQUEST: &[CapabilityId] = &[
+        CapabilityId::CONSOLE_WRITE,
+        CapabilityId::CONSOLE_READ,
+        CapabilityId::FS_ACCESS,
+        CapabilityId::NET,
+    ];
+
     // The `widgets` gallery (plans/GUI-CONTROLS-DESIGN.md): console write for
     // its fail-loud stderr diagnostics, and `CAP_SHM` for the zero-copy window
     // frame region it creates and grants to the desktop session. It reads no
@@ -1242,6 +1259,7 @@ mod tests {
             ("sysmon", ProgramKind::Command, SYSMON_MANIFEST),
             ("tail", ProgramKind::Command, FILE_TOOL_REQUEST),
             ("tee", ProgramKind::Command, FILE_TOOL_REQUEST),
+            ("telnet", ProgramKind::Command, TELNET_TOOL_REQUEST),
             ("terminal", ProgramKind::Application, TERMINAL_REQUEST),
             ("top", ProgramKind::Command, TOP_MANIFEST),
             ("true", ProgramKind::Command, PURE_TOOL_REQUEST),

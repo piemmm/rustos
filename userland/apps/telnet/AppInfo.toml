@@ -1,0 +1,20 @@
+# Signed-AppInfo manifest source for the `telnet` command app
+# (plans/TELNET.md). Discovered by the build's app-bundle composer; the
+# capability list is the bundle's request, intersected with the launching
+# user's grants. CAP_CONSOLE_WRITE covers the inherited standard
+# output/error streams; CAP_CONSOLE_READ the raw-mode keystrokes on fd 0
+# (it also authorises the tool's input-mode switch); CAP_FS_ACCESS reads
+# the tool's own bundle payload (its Help/ documents) through the secured
+# VFS; CAP_NET opens the TCP stream socket the session runs over and the
+# UDP socket the stub resolver looks a host name up with (the stack
+# re-checks it and audits the open, fail-closed). Reaching a remote host is
+# ordinary transport use, so no CAP_NET_RAW and no
+# CAP_NET_BIND_PRIVILEGED: connecting *to* port 23 is unprivileged, and
+# `-b` binds an ephemeral local port.
+id = "os.tairix.telnet"
+name = "telnet"
+version = "0.1.0"
+kind = "command"
+capabilities = ["CAP_CONSOLE_WRITE", "CAP_CONSOLE_READ", "CAP_FS_ACCESS", "CAP_NET"]
+# This bundle's own icon master in its Resources/ (plans/ICONS.md).
+library-icon = "telnet.svg"

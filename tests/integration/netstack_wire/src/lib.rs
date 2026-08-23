@@ -102,6 +102,35 @@ const _: () = {
     );
 };
 
+// --- The telnet vertical (plans/TELNET.md) --------------------------------
+//
+// The guest runs the real `telnet` command bundle against a host-side peer
+// that speaks the *server* half of RFC 854. Every constant the two ends must
+// agree on lives here, so the peer, the serial script and the guest witness
+// cannot drift.
+
+/// TCP port the host peer's telnet server listens on, and so the port the
+/// guest `telnet` connects to. The **assigned** telnet port, deliberately,
+/// so the vertical exercises `telnet <host>` with no port operand — the
+/// default the tool applies — rather than a value only the test knows.
+pub const PEER_TELNET_PORT: u16 = 23;
+
+/// The greeting the peer sends **after** its negotiation has completed: the
+/// client answered `DO LINEMODE`, stated a `MODE` mask and exported its SLC
+/// table, reported its window over NAWS, and named its terminal type. It is
+/// therefore a transcript witness for the whole option exchange, not merely
+/// for a TCP connection.
+pub const TELNET_BANNER: &str = "TAIRIX TELNET PEER READY";
+
+/// The line the serial script types into the session. Lower case, so the
+/// client's own local echo of it cannot be mistaken for the peer's answer.
+pub const TELNET_PROBE: &str = "probe-telnet-1184";
+
+/// The peer's answer to [`TELNET_PROBE`]: the line upper-cased inside a
+/// distinct wrapper, so the transcript proves the bytes made a full round
+/// trip through the telnet data path rather than being echoed locally.
+pub const TELNET_ECHO: &str = "ECHO[PROBE-TELNET-1184]";
+
 /// Number of bytes the `tcpecho` client streams to the peer (and expects
 /// echoed back). Large enough to span many maximum-segment-sized segments
 /// — so windowing, cumulative/selective acknowledgement, and retransmission
@@ -1087,6 +1116,35 @@ mod tests {
         assert_eq!(iface.ipv6_method(), tairix_netconfig::Ipv6Method::Dhcp);
         assert_eq!(iface.ipv4_address, None, "IPv4 is disabled");
         assert_eq!(iface.ipv6_address, None, "DHCPv6 carries no static IPv6");
+    }
+
+    /// The telnet peer's answer is the probe line upper-cased in a wrapper.
+    /// Spelling both as literals keeps them greppable from the serial script
+    /// and the peer alike; this pins the relationship so an edit to one cannot
+    /// silently drift from the other. Core-only, as the crate is `no_std`
+    /// without an allocator.
+    #[test]
+    fn the_telnet_echo_is_the_probe_line_upper_cased() {
+        const OPEN: &[u8] = b"ECHO[";
+        let echo = TELNET_ECHO.as_bytes();
+        let probe = TELNET_PROBE.as_bytes();
+        assert_eq!(&echo[..OPEN.len()], OPEN);
+        assert_eq!(echo[echo.len() - 1], b']');
+        let body = &echo[OPEN.len()..echo.len() - 1];
+        assert_eq!(body.len(), probe.len());
+        let mut index = 0;
+        while index < body.len() {
+            assert_eq!(
+                body[index],
+                probe[index].to_ascii_uppercase(),
+                "byte {index} of the echoed probe"
+            );
+            index += 1;
+        }
+        assert!(
+            !TELNET_BANNER.is_empty() && TELNET_BANNER != TELNET_ECHO,
+            "the two transcript witnesses must be distinguishable"
+        );
     }
 
     /// The planted ECN `system.conf` and the setting it means are one source

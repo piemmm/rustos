@@ -1,0 +1,30 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256">
+  <title>telnet</title>
+  <!-- A terminal screen with a login prompt, joined to a second machine by a
+       wire: the remote session this tool opens. The desktop's SVG subset has
+       no curves, strokes or transforms, so every shape is a filled polygon or
+       circle on the integer grid. -->
+
+  <!-- Tile: rounded square, corners cut as integer line segments -->
+  <polygon fill="#1F3B52" points="20,60 22,44 30,31 43,22 60,20 196,20 213,22 226,31 234,44 236,60 236,196 234,213 226,226 213,234 196,236 60,236 43,234 30,226 22,213 20,196"/>
+  <polygon fill="#2B5273" points="20,60 22,44 30,31 43,22 60,20 196,20 213,22 226,31 234,44 236,60 236,92 20,92"/>
+
+  <!-- The near terminal: bezel, screen, and stand -->
+  <polygon fill="#0E1B26" points="36,104 172,104 172,190 36,190"/>
+  <polygon fill="#0B2E1E" points="46,114 162,114 162,180 46,180"/>
+  <polygon fill="#1F3B52" points="88,190 120,190 120,206 140,206 140,216 68,216 68,206 88,206"/>
+
+  <!-- The prompt: a chevron, a run of text, and the block cursor -->
+  <polygon fill="#4BE08A" points="58,126 58,136 66,141 58,146 58,156 76,141"/>
+  <polygon fill="#4BE08A" points="84,136 128,136 128,146 84,146"/>
+  <polygon fill="#4BE08A" points="58,160 96,160 96,170 58,170"/>
+  <polygon fill="#9CF7C4" points="104,158 120,158 120,172 104,172"/>
+
+  <!-- The far host, and the wire reaching it -->
+  <polygon fill="#0E1B26" points="188,60 228,60 228,132 188,132"/>
+  <polygon fill="#4BE08A" points="196,70 220,70 220,76 196,76"/>
+  <polygon fill="#2B5273" points="196,84 220,84 220,90 196,90"/>
+  <polygon fill="#2B5273" points="196,98 220,98 220,104 196,104"/>
+  <circle cx="208" cy="120" r="5" fill="#4BE08A"/>
+  <polygon fill="#9CF7C4" points="172,140 190,140 190,132 198,132 198,148 190,148 190,150 172,150"/>
+</svg>

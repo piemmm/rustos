@@ -163,6 +163,96 @@ over an ordinary `CAP_NET` UDP socket (with CSPRNG source-port
 randomisation and a random query id). There is no `/etc/resolv.conf` and no
 local host file.
 
+## `telnet` — the Network Virtual Terminal client
+
+`telnet` opens a TCP connection to a host and relays the terminal to it, in the
+familiar BSD/inetutils shape:
+
+```
+$ telnet example.test
+Trying example.test...
+Connected to example.test.
+Escape character is '^]'.
+login:
+```
+
+The host may be a name or a literal IPv4/IPv6 address; a name is resolved
+through the same `lib/resolver` stub resolver `host` uses. The port is a
+number — TAIRiX has no services database, so a service *name* is a usage error
+rather than a silent fall back to port 23. It is equally the way to poke a TCP
+service by hand: `telnet host 80` opens a connection you can type a request
+into. With no host at all, `telnet` starts at its own `telnet>` prompt and
+`open` connects.
+
+`-4`/`-6` restrict the address family, `-8`/`-L` request an 8-bit data path,
+`-e`/`-E` set or remove the escape character, `-a`/`-l` export a login name
+over NEW-ENVIRON, `-b` binds a local address, and `-d` traces the negotiation
+on standard error. The escape character (`^]` by default) drops into the
+`telnet>` interpreter: `open`, `close`, `quit`, `logout`, `display`, `mode`,
+`status`, `send`, `set`, `unset`, `toggle`, `environ`, `slc`, `z` and `?`, each
+accepting the unambiguous prefixes BSD telnet accepts.
+
+### Protocol scope
+
+Negotiation follows RFC 855 with the RFC 1143 loop-free Q Method, so a peer
+that repeats a request forever draws exactly one answer. The implemented
+options are BINARY (RFC 856), ECHO (RFC 857), SUPPRESS GO AHEAD (RFC 858),
+STATUS (RFC 859), TIMING MARK (RFC 860), TERMINAL TYPE (RFC 1091), NAWS
+(RFC 1073), TERMINAL SPEED (RFC 1079), TOGGLE FLOW CONTROL (RFC 1080),
+LINEMODE (RFC 1184) and NEW-ENVIRON (RFC 1572). **Every other option is
+refused** — which is what an unimplemented option means; a client that
+accepted one it could not honour would be lying to the server.
+
+A subnegotiation is honoured only for an option that is actually enabled, as
+RFC 855 requires: without that gate a server that never asked could make the
+client disclose the operator's exported `NEW-ENVIRON` variables, its terminal
+type and its window size purely on request.
+
+RFC 1184 LINEMODE is implemented in full: the `MODE` mask with its
+acknowledgement discipline, the Set Local Characters table with the RFC's
+level/ack rules, and `FORWARDMASK`. The local line editor those characters
+drive is assembled from `lib/vt`'s shared control vocabulary and Delete-key
+recogniser, so `telnet` agrees with the console and the shell about which
+keystroke rubs one character out.
+
+Everything the remote host sends is attacker-controlled, so the receive parser
+is total and bounded: an over-long or malformed subnegotiation is discarded
+whole and parsing resumes at `IAC SE`, and nothing partial is ever applied.
+The `fuzz_telnet` harness asserts, over arbitrary bytes, that the parser never
+panics, that its held subnegotiation stays inside its fixed bound, that a live
+session's reply is bounded by its input rather than amplifying it, and that
+every byte the client emits re-parses as well-formed telnet.
+
+### Deliberate divergences
+
+`telnet` tracks the historical tool closely, and where it differs it says so:
+
+| Difference | Why |
+|---|---|
+| No `!` shell escape | Giving a program that parses hostile network input the authority to spawn a shell inverts the minimum-capability posture the tool is built on. Use `z`, or another terminal. |
+| No `slc check` | RFC 1184 gives it no wire form distinct from `slc export`. |
+| No `-n tracefile`, `-r`, `-c` | There is no trace file, no rlogin, and no `/etc`. They are unknown options, not accepted-and-ignored ones. |
+| A Synch is the bare Data Mark | The socket ABI exposes no TCP urgent data, so there is nothing in flight to discard ahead of it. |
+| A resize reaches the host at the next keystroke | There is no window-change signal to park on, so the grid is re-read on each keyboard event. |
+| A server-sent `AYT` is answered on screen | Injecting bytes into the server's own input stream is not a client's place. |
+| End of standard input half-closes rather than exiting | The historical tool exits, which discards whatever the server was still sending — `telnet host 80 < request` loses the response. Closing only the write side is what a TCP client does, so the response arrives and the peer's own close ends the session. |
+
+`NEW-ENVIRON` discloses **only** variables the operator defines and exports
+with the `environ` command; the client never sends its own environment. `-a`
+and `-l` export a login name, and that is the one thing an invocation discloses
+by itself.
+
+### Where the authority comes from
+
+The session runs over an ordinary `SocketType::Stream` socket obtained through
+the `netsock-v1` ABI under `CAP_NET`, audited and fail-closed; a host name is
+resolved over an ordinary UDP socket by the same stub resolver `host` drives.
+`CAP_CONSOLE_READ` covers the raw-mode keystrokes it relays (and authorises the
+input-mode switch), `CAP_CONSOLE_WRITE` the output, and `CAP_FS_ACCESS` its own
+`Help/` tree. Connecting *to* a well-known port is unprivileged — only binding
+one needs `CAP_NET_BIND_PRIVILEGED` — so `telnet` requests neither that nor
+`CAP_NET_RAW`. The full design is `plans/TELNET.md` in the source tree.
+
 ## Configuring interfaces (`network.conf`)
 
 Per-interface addressing is declarative, not imperative: it lives in one

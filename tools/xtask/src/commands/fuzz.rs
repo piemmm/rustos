@@ -139,6 +139,11 @@ pub const TARGETS: &[Target] = &[
         description: "lib/net DNS stub resolver (RFC 1035 name/message decode, resolver state machine)",
     },
     Target {
+        package: "tairix-telnet",
+        test: "fuzz_telnet",
+        description: "telnet client receive path (RFC 854 parser bounds, negotiation, LINEMODE)",
+    },
+    Target {
         package: "tairix-netstack",
         test: "fuzz_net_sockabi",
         description: "netstack socket serve path (decode + CAP_NET gate + dispatch, accounting)",

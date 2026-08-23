@@ -2575,6 +2575,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "tairix-telnet"
+version = "0.0.0"
+dependencies = [
+ "tairix-abi",
+ "tairix-fuzzseed",
+ "tairix-help",
+ "tairix-net",
+ "tairix-resolver",
+ "tairix-rt",
+ "tairix-vt",
+]
+
+[[package]]
 name = "tairix-termcap"
 version = "0.0.0"
 dependencies = [
@@ -3800,6 +3813,17 @@ dependencies = [
  "tairix-kernel",
  "tairix-log",
  "tairix-test-tcpserve",
+]
+
+[[package]]
+name = "tairix-test-netstack-telnet-qemu-aarch64"
+version = "0.0.0"
+dependencies = [
+ "tairix-arch-aarch64",
+ "tairix-itest-harness",
+ "tairix-kalloc",
+ "tairix-kernel",
+ "tairix-log",
 ]
 
 [[package]]
@@ -5318,6 +5342,7 @@ dependencies = [
  "tairix-sysconfig",
  "tairix-syshelp",
  "tairix-taskbar",
+ "tairix-telnet",
  "tairix-terminal",
  "tairix-test-appbar-qemu-aarch64",
  "tairix-test-arxfs-image",

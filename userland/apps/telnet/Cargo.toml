@@ -1,0 +1,67 @@
+[package]
+name = "tairix-telnet"
+description = "TAIRiX `telnet` CLI: the RFC 854 NVT client with RFC 1184 LINEMODE (`plans/TELNET.md`)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+# The `Run` binary's freestanding userland runtime (`tairix-rt`) and the
+# socket-backed name resolver (`tairix-resolver`'s `program` feature) are an
+# optional, on-by-default build feature, mirroring the other command apps.
+# `cargo build -p tairix-telnet` builds the tool program with them; host tooling
+# builds only the pure *library* (the protocol engine), so the host test build
+# never pulls the userland runtime's `_start` / `#[global_allocator]` / panic
+# handler. The QEMU vertical's host-side telnet-server peer links the library
+# half for the one wire vocabulary, so it must build without the runtime.
+[features]
+default = ["program"]
+program = ["dep:tairix-rt", "tairix-resolver/program"]
+
+# The package is both the `tairix-telnet` library (the pure NVT engine below)
+# and the `Run` entry-point binary of the `telnet` tool. The binary is a
+# freestanding pure-Rust program on the native Tier-1 targets and an inert host
+# stub elsewhere (see `src/run.rs`).
+[[bin]]
+name = "tairix-telnet-run"
+path = "src/run.rs"
+
+[dependencies]
+# The audited ABI vocabulary: `Errno`, `NetAddrFamily`, `TerminalSize`, and
+# (via `lib/rt`) the socket wire contract the tool speaks.
+tairix-abi = { path = "../../../lib/abi", version = "=0.0.0" }
+# The one help engine: locale fallback, the bounded structured-Markdown
+# parser, and the shared own-bundle short-help render the `-?`/`--help`
+# switches use (plans/APPS.md).
+tairix-help = { path = "../../../lib/help", version = "=0.0.0" }
+# The pure DNS engine vocabulary the target resolution matches on
+# (`RecordType`, `Resolution`, `ResolveStatus`, `IpAddr`).
+tairix-net = { path = "../../../lib/net", version = "=0.0.0" }
+# The userland DNS stub-resolver client: the `Resolver` seam and its
+# `ResolveError`. The socket-backed transport is behind its `program` feature.
+tairix-resolver = { path = "../../../lib/resolver", version = "=0.0.0" }
+# The shared terminal control-byte vocabulary and the Delete-key sequence
+# recogniser the local line editor is assembled from — never a second copy of
+# "which byte rubs one out" (`lib/tty` does the same for the console).
+tairix-vt = { path = "../../../lib/vt", version = "=0.0.0" }
+
+[dev-dependencies]
+# The one seeded-fuzz budget/seed source the harnesses share, so a finding
+# reproduces the same way here as in every other harness.
+tairix-fuzzseed = { path = "../../../tests/fuzzseed", version = "=0.0.0" }
+
+# For the freestanding `Run` binary only: the userland runtime `tairix-rt`
+# (`_start`, canary, panic handler, `mem_map` allocator, the standard-stream
+# I/O, threads, futex-backed `Mutex`, and the `net` stream-socket wrappers).
+# Pulled in only for the bare-metal targets the program is actually built for;
+# on the host it is not linked.
+[target.'cfg(target_os = "none")'.dependencies]
+tairix-rt = { path = "../../../lib/rt", version = "=0.0.0", optional = true }
+# The freestanding `Run` binary also enables the help engine's syscall-backed
+# own-bundle `HelpSource` (`BundleHelp`).
+tairix-help = { path = "../../../lib/help", version = "=0.0.0", features = ["rt"] }

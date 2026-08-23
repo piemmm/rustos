@@ -121,6 +121,20 @@ impl NetPeer {
         Self::spawn_with(qemu_sock, peer_sock, run_tcp_echo_peer)
     }
 
+    /// Bind `peer_sock` and start the **telnet-server** peer thread (the
+    /// `plans/TELNET.md` vertical): it accepts the guest `telnet` client's
+    /// connection on [`wire::PEER_TELNET_PORT`] and speaks the *server* half
+    /// of RFC 854 — offering `SUPPRESS GO AHEAD` and asking for `TERMINAL
+    /// TYPE`, `NAWS` and `LINEMODE`, then driving the RFC 1184 `MODE` and
+    /// `SLC` exchange — before greeting the session with
+    /// [`wire::TELNET_BANNER`] and echoing the operator's probe line back
+    /// upper-cased. Its verdict ([`Self::stop_and_join`]) is `Ok` only once
+    /// **every** step was witnessed, so a client that ignored the negotiation,
+    /// declined LINEMODE, or never reported its window fails the run loud.
+    pub fn spawn_telnet(qemu_sock: &Path, peer_sock: &Path) -> Result<Self, String> {
+        Self::spawn_with(qemu_sock, peer_sock, run_telnet_peer)
+    }
+
     /// Bind `peer_sock` and start the **ECN-verifying passive TCP echo-server**
     /// peer thread (the N13 ECN vertical): like [`Self::spawn_tcp_echo`] it
     /// accepts the guest client's connection on [`wire::PEER_TCP_PORT`] and
@@ -2000,6 +2014,584 @@ fn run_tcp_echo_peer(
         Err(format!(
             "netstack peer: TCP echo incomplete: received {received_total}, echoed {echoed_total} of {target} bytes"
         ))
+    }
+}
+
+// --- Telnet server (the plans/TELNET.md vertical) ----------------------
+
+/// Run the telnet-server peer: accept the guest client's connection, speak the
+/// server half of RFC 854 through the *same* `nvt`/`option`/`linemode`
+/// vocabulary the client's own codec exposes, and verify the whole exchange.
+///
+/// The server logic is test-only (this plan ships no telnet *server*), so it
+/// lives beside its one consumer here rather than in a shipped crate — the
+/// DHCP-server precedent — and it encodes and decodes through the client's
+/// public wire vocabulary so the two sides cannot drift.
+fn run_telnet_peer(
+    socket: &UnixDatagram,
+    qemu_sock: &PathBuf,
+    stop: &AtomicBool,
+    succeeded: &AtomicBool,
+) -> Result<(), String> {
+    let start = Instant::now();
+    let now = |t0: Instant| {
+        Duration64::from_nanos(u64::try_from(t0.elapsed().as_nanos()).unwrap_or(u64::MAX))
+    };
+    let (mut stack, guest_v6) = peer_stack(start)?;
+    // A fixed initial sequence number: the vertical needs no unpredictability
+    // and a fixed ISN keeps runs replayable (the live stack draws a real
+    // CSPRNG one; this is only the far end of the wire).
+    let mut tcb = Tcb::listen(TcpConfig::default(), wire::PEER_TELNET_PORT, 0, 0x7E1E_7000);
+    let mut server = telnet_server::Server::new();
+    let mut buf = [0u8; MAX_FRAME];
+    let mut scratch = [0u8; MAX_FRAME];
+    let mut opened = false;
+
+    while !stop.load(Ordering::Acquire) {
+        flush_engine(&mut stack, socket, qemu_sock, now(start));
+        tcb.advance(now(start));
+        drive_tcp_egress(
+            &mut tcb,
+            &mut stack,
+            socket,
+            qemu_sock,
+            guest_v6,
+            now(start),
+        );
+
+        match socket.recv(&mut buf) {
+            Ok(len) => deliver_inbound_frame(
+                &mut stack,
+                Some(&mut tcb),
+                &buf[..len],
+                socket,
+                qemu_sock,
+                now(start),
+                |_, ecn| ecn,
+            ),
+            Err(e)
+                if e.kind() == std::io::ErrorKind::WouldBlock
+                    || e.kind() == std::io::ErrorKind::TimedOut => {}
+            Err(e) => return Err(format!("netstack peer: socket receive: {e}")),
+        }
+
+        // The connection is up: open the negotiation exactly once.
+        if !opened && tcb.is_established() {
+            opened = true;
+            server.open();
+        }
+        loop {
+            let n = tcb.recv(&mut scratch);
+            if n == 0 {
+                break;
+            }
+            server.feed(&scratch[..n]);
+        }
+        let outbound = server.take_wire();
+        if !outbound.is_empty() {
+            // The send buffer is generous relative to a telnet exchange, so a
+            // short accept means the guest stopped reading; the verdict below
+            // is what reports that, not a silent truncation here.
+            match tcb.send(&outbound) {
+                Ok(accepted) if accepted == outbound.len() => {}
+                Ok(accepted) => {
+                    return Err(format!(
+                        "netstack peer: telnet send truncated at {accepted} of {} bytes",
+                        outbound.len()
+                    ))
+                }
+                Err(_) => return Err(String::from("netstack peer: telnet send refused")),
+            }
+        }
+        if server.satisfied() {
+            succeeded.store(true, Ordering::Release);
+        }
+        drive_tcp_egress(
+            &mut tcb,
+            &mut stack,
+            socket,
+            qemu_sock,
+            guest_v6,
+            now(start),
+        );
+    }
+
+    server.verdict()
+}
+
+/// The server half of RFC 854, for the telnet vertical only.
+///
+/// It is deliberately a *checker* as much as a server: every step of the
+/// exchange it drives is recorded, and [`telnet_server::Server::verdict`]
+/// refuses the run unless the client completed all of them. Encoding and
+/// decoding go through
+/// `tairix_telnet`'s public wire vocabulary — the same `nvt`, `option`,
+/// `subneg` and `linemode` definitions the client itself uses — so a change to
+/// the protocol on one side cannot silently pass on the other.
+mod telnet_server {
+    use tairix_telnet::linemode::{mode, slc_flag, sub, SLC_MAX};
+    use tairix_telnet::nvt::{self, NvtEvent, Parser, DO, DONT, WILL, WONT};
+    use tairix_telnet::option;
+    use tairix_telnet::subneg::cmd;
+    use tairix_test_netstack_wire as wire;
+
+    /// What the client must have done for the run to pass.
+    // One bool per negotiation step, so a failed run names the step it missed.
+    // Folding them into a state machine would lose exactly that: the steps are
+    // independent and arrive in whatever order the client chooses.
+    #[allow(clippy::struct_excessive_bools)]
+    #[derive(Debug, Default)]
+    struct Witnessed {
+        /// It agreed to do LINEMODE (`WILL LINEMODE`).
+        linemode: bool,
+        /// It stated a `MODE` mask, which we acknowledged.
+        mode: bool,
+        /// It exported its SLC table.
+        slc: bool,
+        /// It reported its window over NAWS.
+        naws: bool,
+        /// It named its terminal type.
+        terminal_type: bool,
+        /// It accepted our `WILL SUPPRESS GO AHEAD`.
+        suppress_go_ahead: bool,
+        /// The probe line arrived, whole.
+        probe: bool,
+        /// We answered it.
+        echoed: bool,
+    }
+
+    /// The server's state for one connection.
+    pub struct Server {
+        parser: Parser,
+        seen: Witnessed,
+        /// The line being assembled from the client's data bytes.
+        line: Vec<u8>,
+        /// A `CR` held from the previous read, so the NVT line ending is
+        /// recognised across any chunking.
+        pending_cr: bool,
+        /// The banner is sent once, and only once the negotiation is done.
+        greeted: bool,
+        wire: Vec<u8>,
+    }
+
+    impl Server {
+        /// A server that has said nothing yet.
+        pub fn new() -> Self {
+            Self {
+                parser: Parser::new(),
+                seen: Witnessed::default(),
+                line: Vec::new(),
+                pending_cr: false,
+                greeted: false,
+                wire: Vec::new(),
+            }
+        }
+
+        /// Open the negotiation, as a server does the moment a client connects.
+        ///
+        /// It offers to suppress Go Ahead (so the session is full duplex) and
+        /// asks the client for its terminal type, its window size and
+        /// LINEMODE. It deliberately does **not** offer `WILL ECHO`: this
+        /// vertical exercises the client-side editing LINEMODE asks for, and a
+        /// server that echoed as well would take the echo back off it.
+        pub fn open(&mut self) {
+            nvt::push_negotiate(WILL, option::SUPPRESS_GO_AHEAD, &mut self.wire);
+            nvt::push_negotiate(DO, option::TERMINAL_TYPE, &mut self.wire);
+            nvt::push_negotiate(DO, option::NAWS, &mut self.wire);
+            nvt::push_negotiate(DO, option::LINEMODE, &mut self.wire);
+        }
+
+        /// Bytes to transmit, taken.
+        pub fn take_wire(&mut self) -> Vec<u8> {
+            core::mem::take(&mut self.wire)
+        }
+
+        /// Whether every step has been witnessed, so the run may end.
+        pub fn satisfied(&self) -> bool {
+            let s = &self.seen;
+            s.linemode
+                && s.mode
+                && s.slc
+                && s.naws
+                && s.terminal_type
+                && s.suppress_go_ahead
+                && s.probe
+                && s.echoed
+        }
+
+        /// The run's verdict: `Ok` only when the client completed the whole
+        /// exchange, and otherwise an error naming the first step it did not.
+        pub fn verdict(&self) -> Result<(), String> {
+            let s = &self.seen;
+            for (done, what) in [
+                (s.suppress_go_ahead, "accept DO SUPPRESS GO AHEAD"),
+                (s.terminal_type, "report its terminal type"),
+                (s.naws, "report its window size over NAWS"),
+                (s.linemode, "agree to WILL LINEMODE"),
+                (s.mode, "state a LINEMODE MODE mask"),
+                (s.slc, "export its LINEMODE SLC table"),
+                (s.probe, "send the probe line"),
+                (s.echoed, "receive the echoed probe line"),
+            ] {
+                if !done {
+                    return Err(format!("netstack peer: the telnet client did not {what}"));
+                }
+            }
+            Ok(())
+        }
+
+        /// Fold received bytes: answer the negotiation, assemble the data into
+        /// lines, and echo a completed line back upper-cased.
+        pub fn feed(&mut self, bytes: &[u8]) {
+            // The parser borrows its own subnegotiation buffer while reporting,
+            // so the events are collected before they are folded.
+            let mut events: Vec<Event> = Vec::new();
+            self.parser
+                .feed(bytes, |event| events.push(Event::from(event)));
+            for event in events {
+                match event {
+                    Event::Data(data) => self.on_data(&data),
+                    Event::Negotiate(verb, opt) => self.on_negotiate(verb, opt),
+                    Event::Subnegotiation(opt, params) => self.on_subnegotiation(opt, &params),
+                    // A command carries nothing this server acts on; the
+                    // client's own tests cover what it sends them for.
+                    Event::Other => {}
+                }
+            }
+            self.greet_when_ready();
+        }
+
+        /// Fold the client's answers to our requests.
+        fn on_negotiate(&mut self, verb: u8, opt: u8) {
+            match (verb, opt) {
+                (DO, option::SUPPRESS_GO_AHEAD) => self.seen.suppress_go_ahead = true,
+                (WILL, option::LINEMODE) => self.seen.linemode = true,
+                // A `WILL` for something we asked for needs no answer; anything
+                // else the client offers is refused, as a server that does not
+                // implement it must.
+                (WILL, option::TERMINAL_TYPE | option::NAWS) => {}
+                (WILL, other) => nvt::push_negotiate(DONT, other, &mut self.wire),
+                (DO, other) => nvt::push_negotiate(WONT, other, &mut self.wire),
+                _ => {}
+            }
+            // The client's terminal type only arrives if we ask for it, which
+            // we can do the moment it agrees.
+            if verb == WILL && opt == option::TERMINAL_TYPE {
+                nvt::push_subnegotiation(option::TERMINAL_TYPE, &[cmd::SEND], &mut self.wire);
+            }
+        }
+
+        /// Fold a subnegotiation.
+        fn on_subnegotiation(&mut self, opt: u8, params: &[u8]) {
+            match opt {
+                option::TERMINAL_TYPE => {
+                    // `IS <type>`, with a non-empty type.
+                    if params.first() == Some(&cmd::IS) && params.len() > 1 {
+                        self.seen.terminal_type = true;
+                    }
+                }
+                option::NAWS => {
+                    // Exactly four octets: width then height, big-endian, both
+                    // non-zero — a report, never a fabricated placeholder.
+                    if let [wh, wl, hh, hl] = *params {
+                        let width = u16::from_be_bytes([wh, wl]);
+                        let height = u16::from_be_bytes([hh, hl]);
+                        if width > 0 && height > 0 {
+                            self.seen.naws = true;
+                        }
+                    }
+                }
+                option::LINEMODE => self.on_linemode(params),
+                _ => {}
+            }
+        }
+
+        /// Fold a LINEMODE subnegotiation: acknowledge a `MODE` mask, and
+        /// acknowledge an exported SLC table function by function.
+        fn on_linemode(&mut self, params: &[u8]) {
+            match params.split_first() {
+                Some((&sub::MODE, [mask])) => {
+                    // An acknowledgement of our own statement is not a
+                    // statement; we make none, so any ack here is a protocol
+                    // error the verdict will catch through the missing step.
+                    if mask & mode::MODE_ACK == 0 {
+                        self.seen.mode = true;
+                        nvt::push_subnegotiation(
+                            option::LINEMODE,
+                            &[sub::MODE, mask | mode::MODE_ACK],
+                            &mut self.wire,
+                        );
+                    }
+                }
+                Some((&sub::SLC, triplets)) if triplets.len() >= 3 => {
+                    self.seen.slc = true;
+                    let mut reply = vec![sub::SLC];
+                    for triplet in triplets.as_chunks::<3>().0 {
+                        let (function, flags, value) = (triplet[0], triplet[1], triplet[2]);
+                        // Only acknowledge what the client stated; an already
+                        // acknowledged triplet is never answered again, which
+                        // is what ends the exchange.
+                        if function == 0 || function > SLC_MAX || flags & slc_flag::ACK != 0 {
+                            continue;
+                        }
+                        reply.extend_from_slice(&[function, flags | slc_flag::ACK, value]);
+                    }
+                    if reply.len() > 1 {
+                        nvt::push_subnegotiation(option::LINEMODE, &reply, &mut self.wire);
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        /// Assemble data bytes into NVT lines and answer a completed one.
+        fn on_data(&mut self, data: &[u8]) {
+            for &byte in data {
+                if self.pending_cr {
+                    self.pending_cr = false;
+                    // `CR LF` and `CR NUL` both end a line here: the client
+                    // sends whichever its `crlf` toggle selects.
+                    if byte == b'\n' || byte == 0 {
+                        self.finish_line();
+                        continue;
+                    }
+                    self.line.push(b'\r');
+                }
+                if byte == b'\r' {
+                    self.pending_cr = true;
+                    continue;
+                }
+                if byte == b'\n' {
+                    self.finish_line();
+                    continue;
+                }
+                // A hostile client is not this vertical's subject, but an
+                // unbounded buffer is still unbounded: a line longer than the
+                // probe cannot be the probe, so it is dropped.
+                if self.line.len() < 256 {
+                    self.line.push(byte);
+                }
+            }
+        }
+
+        /// Answer one completed line.
+        fn finish_line(&mut self) {
+            let line = core::mem::take(&mut self.line);
+            let text = String::from_utf8_lossy(&line).into_owned();
+            let trimmed = text.trim();
+            if trimmed.is_empty() {
+                return;
+            }
+            if trimmed == wire::TELNET_PROBE {
+                self.seen.probe = true;
+            }
+            let answer = format!("ECHO[{}]\r\n", trimmed.to_uppercase());
+            self.wire.extend_from_slice(answer.as_bytes());
+            if trimmed == wire::TELNET_PROBE {
+                self.seen.echoed = true;
+            }
+        }
+
+        /// Greet the session once the whole option exchange has completed, so
+        /// the banner on the transcript witnesses the negotiation and not
+        /// merely a TCP connection.
+        fn greet_when_ready(&mut self) {
+            if self.greeted {
+                return;
+            }
+            let s = &self.seen;
+            if !(s.suppress_go_ahead && s.terminal_type && s.naws && s.linemode && s.mode && s.slc)
+            {
+                return;
+            }
+            self.greeted = true;
+            self.wire.extend_from_slice(wire::TELNET_BANNER.as_bytes());
+            self.wire.extend_from_slice(b"\r\n");
+        }
+    }
+
+    /// An owned [`NvtEvent`], so the parser's borrow of its own buffer ends
+    /// before the server folds the event and mutates itself.
+    enum Event {
+        Data(Vec<u8>),
+        Negotiate(u8, u8),
+        Subnegotiation(u8, Vec<u8>),
+        Other,
+    }
+
+    impl From<NvtEvent<'_>> for Event {
+        fn from(event: NvtEvent<'_>) -> Self {
+            match event {
+                NvtEvent::Data(bytes) => Self::Data(bytes.to_vec()),
+                NvtEvent::Negotiate { verb, option } => Self::Negotiate(verb, option),
+                NvtEvent::Subnegotiation { option, params } => {
+                    Self::Subnegotiation(option, params.to_vec())
+                }
+                _ => Self::Other,
+            }
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::{Server, Witnessed};
+        use tairix_telnet::command::Config;
+        use tairix_telnet::linemode::{mode, sub};
+        use tairix_telnet::nvt::{Parser, DO, IAC, SB, SE, WILL};
+        use tairix_telnet::option;
+        use tairix_telnet::session::Session;
+        use tairix_test_netstack_wire as wire;
+
+        /// Every event in `bytes`, as the real client parser sees it.
+        fn events(bytes: &[u8]) -> Vec<String> {
+            let mut parser = Parser::new();
+            let mut out = Vec::new();
+            parser.feed(bytes, |event| out.push(format!("{event:?}")));
+            out
+        }
+
+        #[test]
+        fn every_frame_the_server_emits_reparses_through_the_client_codec() {
+            let mut server = Server::new();
+            server.open();
+            let opened = server.take_wire();
+            assert!(!opened.is_empty());
+            assert!(
+                events(&opened)
+                    .iter()
+                    .all(|event| !event.contains("Refused")),
+                "{:?}",
+                events(&opened)
+            );
+        }
+
+        /// The strongest check available on the host: run the *real* client
+        /// session against this server and confirm the exchange completes. If
+        /// either side drifts, the vertical would fail on a QEMU boot; this
+        /// fails here in milliseconds instead.
+        #[test]
+        fn the_real_client_completes_the_whole_exchange() {
+            let config = Config::default();
+            let mut client = Session::new(&config, "XTERM", 38_400);
+            client.begin(&config);
+            client.set_terminal_size(tairix_abi::TerminalSize::new(24, 80).ok());
+            let mut server = Server::new();
+            server.open();
+
+            // Ten rounds is ample for an exchange that settles in three; a
+            // bound, so a drifting negotiation ends the test rather than
+            // looping.
+            for _ in 0..10 {
+                let to_server = client.take_wire();
+                if !to_server.is_empty() {
+                    server.feed(&to_server);
+                }
+                let to_client = server.take_wire();
+                if !to_client.is_empty() {
+                    client.on_network(&to_client);
+                }
+                let _ = client.take_screen();
+                let _ = client.take_trace();
+            }
+            // Now the operator types the probe line, exactly as the vertical's
+            // serial script does.
+            let mut typed = wire::TELNET_PROBE.as_bytes().to_vec();
+            typed.push(b'\r');
+            client.on_keyboard(&typed);
+            server.feed(&client.take_wire());
+            let answer = server.take_wire();
+            client.on_network(&answer);
+            let screen = String::from_utf8_lossy(&client.take_screen()).into_owned();
+
+            assert!(
+                server.verdict().is_ok(),
+                "{:?}",
+                server.verdict().expect_err("checked")
+            );
+            assert!(server.satisfied());
+            assert!(
+                screen.contains(wire::TELNET_ECHO),
+                "the client displayed the peer's answer: {screen:?}"
+            );
+        }
+
+        #[test]
+        fn a_client_that_does_nothing_fails_the_verdict() {
+            let server = Server::new();
+            let err = server.verdict().expect_err("nothing was witnessed");
+            assert!(err.contains("SUPPRESS GO AHEAD"), "{err}");
+        }
+
+        #[test]
+        fn the_banner_waits_for_the_whole_negotiation() {
+            let mut server = Server::new();
+            server.open();
+            let _ = server.take_wire();
+            // A client that only accepts Go Ahead suppression is not yet
+            // negotiated, so the banner must not appear.
+            server.feed(&[IAC, DO, option::SUPPRESS_GO_AHEAD]);
+            let wire_bytes = server.take_wire();
+            assert!(
+                !String::from_utf8_lossy(&wire_bytes).contains(wire::TELNET_BANNER),
+                "the banner is a witness for the whole exchange"
+            );
+        }
+
+        #[test]
+        fn a_mode_statement_is_acknowledged_exactly_once() {
+            let mut server = Server::new();
+            server.feed(&[
+                IAC,
+                SB,
+                option::LINEMODE,
+                sub::MODE,
+                mode::EDIT | mode::TRAPSIG,
+                IAC,
+                SE,
+            ]);
+            let first = server.take_wire();
+            let acked = events(&first)
+                .iter()
+                .any(|event| event.contains("Subnegotiation"));
+            assert!(acked, "{:?}", events(&first));
+            // An acknowledgement from the client is never answered.
+            server.feed(&[
+                IAC,
+                SB,
+                option::LINEMODE,
+                sub::MODE,
+                mode::EDIT | mode::MODE_ACK,
+                IAC,
+                SE,
+            ]);
+            assert!(server.take_wire().is_empty());
+        }
+
+        #[test]
+        fn a_naws_report_of_zero_is_not_accepted() {
+            let mut server = Server::new();
+            server.feed(&[IAC, SB, option::NAWS, 0, 0, 0, 0, IAC, SE]);
+            let err = server.verdict().expect_err("a zero grid is not a report");
+            assert!(err.contains("NAWS") || err.contains("SUPPRESS"), "{err}");
+        }
+
+        #[test]
+        fn an_option_the_server_never_asked_for_is_refused() {
+            let mut server = Server::new();
+            // 37 is AUTHENTICATION, which this server does not implement.
+            server.feed(&[IAC, WILL, 37]);
+            let refusal = events(&server.take_wire());
+            assert!(
+                refusal.iter().any(|event| event.contains("254")),
+                "expected a DONT: {refusal:?}"
+            );
+        }
+
+        #[test]
+        fn the_witness_record_starts_empty() {
+            let seen = Witnessed::default();
+            assert!(!seen.linemode && !seen.probe && !seen.echoed);
+        }
     }
 }
 

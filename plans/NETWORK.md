@@ -2382,7 +2382,9 @@ changes (§17.4 — the seam is the contract).
 - No DNS resolver, DHCP client/server, NTP, or HTTP library — future
   consumers of the socket ABI, each its own plan. (DHCP is now
   `plans/DHCP.md`; the DNS stub resolver is now `plans/DNS.md`, whose DNS1
-  pure `lib/net::dns` engine has landed.)
+  pure `lib/net::dns` engine has landed; the RFC 854 `telnet` client, the
+  first *interactive* consumer of the stream-socket surface, is now
+  `plans/TELNET.md`.)
 - No firewall/NAT/forwarding policy engine (the routing table forwards
   nothing between interfaces in this plan; TAIRiX is a host, not a
   router, until a dedicated plan says otherwise).

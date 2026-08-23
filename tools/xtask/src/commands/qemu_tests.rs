@@ -194,6 +194,17 @@ enum NetPeerMode {
     /// requires at least one served request (so the guest must actually have
     /// reached it).
     V6PingResponder,
+    /// A **telnet server** peer (the `plans/TELNET.md` vertical): same
+    /// deterministic link-local addressing as [`Self::V6LinkLocal`], but the
+    /// peer accepts the guest `telnet` client's connection on
+    /// `tairix_test_netstack_wire::PEER_TELNET_PORT` and speaks the *server*
+    /// half of RFC 854 — offering `SUPPRESS GO AHEAD`, asking for `TERMINAL
+    /// TYPE`, `NAWS` and `LINEMODE`, and driving the RFC 1184 `MODE` and `SLC`
+    /// exchange — before greeting the session and echoing the operator's probe
+    /// line back upper-cased. Its verdict requires every step, so a client
+    /// that connected but ignored the negotiation, declined LINEMODE, or never
+    /// reported its window fails the run loud.
+    V6TelnetServer,
     /// A **static-addressing** ICMP-campaign peer (the N9b-3-2-β-2-ii-b
     /// `match.node` vertical): the peer takes its own static address in the
     /// shared on-link `/64` ([`tairix_test_netstack_wire::PEER_STATIC_V6`])
@@ -326,14 +337,18 @@ enum FsDisk {
     /// carries the fixtures; no production image ships them.
     ListenRootDisk,
     /// The net-only-driver encrypted-root layout carrying the **standard**
-    /// signed application store (so the real `ping` command bundle is
+    /// signed application store (so the real shipping command bundles are
     /// present — no test-only fixture) plus the signed virtio-net driver
-    /// bundle — the `ping` vertical's backing (`plans/NETWORK.md` N8b-2b-β).
-    /// `devmgr` autoloads the NIC driver into its own process and `netstack`
-    /// binds it, so the guest `ping` tool reaches the host ICMP echo
-    /// responder over the live two-process network. The console stays the
-    /// UART text console the serial script drives (no display/input driver).
-    PingRootDisk,
+    /// bundle. `devmgr` autoloads the NIC driver into its own process and
+    /// `netstack` binds it, so a guest *network tool* reaches its host peer
+    /// over the live two-process network. The console stays the UART text
+    /// console the serial script drives (no display/input driver).
+    ///
+    /// Shared by every vertical that exercises a shipped network command as a
+    /// user would run it: `ping` (`plans/NETWORK.md` N8b-2b-β) and `telnet`
+    /// (`plans/TELNET.md`). They differ only in the host peer and the serial
+    /// script, so they share the one disk rather than each planting its own.
+    NetToolRootDisk,
     /// The net-only-driver encrypted-root layout carrying the **standard**
     /// signed application store (the `netstack`/`devmgr` service bundles, no
     /// test-only fixture) **plus** a planted
@@ -795,6 +810,24 @@ const PING_COMMAND_LINE: &str = "ping -c 3 fe80::2\n";
 /// unanswered run never emits it, so the run times out fail-loud rather than
 /// falsely passing.
 const PING_REPLY_MARKER: &str = "icmp_seq=";
+
+/// The shell command line the `telnet` vertical types at the prompt: a session
+/// to the host peer's link-local address (`fe80::2`, formed from
+/// `tairix_test_netstack_wire::PEER_IID`) with **no port operand**, so the run
+/// exercises the tool's own default port. The address literal is pinned to the
+/// shared wire constant by a unit test below, so the typed target and the
+/// peer's own address cannot drift.
+const TELNET_COMMAND_LINE: &str = "telnet fe80::2\n";
+
+/// The line the `telnet` vertical types into the live session, once the peer's
+/// banner has proven the option exchange completed.
+const TELNET_PROBE_LINE: &str = "probe-telnet-1184\n";
+
+/// The keystrokes that leave the session: the default escape character `^]`
+/// (0x1D), which drops into the `telnet>` interpreter, then its `quit`
+/// command. Typing them exercises the escape recognition and the command
+/// interpreter on the live wire, not just in the host tests.
+const TELNET_QUIT_SEQUENCE: &str = "\u{1d}quit\n";
 
 /// `true` if the two byte strings are equal — the compile-time complement of
 /// [`is_line_of`] for asserting a typed line does **not** match the fixture.
@@ -4792,7 +4825,7 @@ static TESTS: &[QemuTest] = &[
     // `tairix-test-netstack-ping-qemu-aarch64` boots the *production* aarch64
     // pipeline with the encrypted-root disk that carries the **standard**
     // signed store bundles (so the real `ping` command bundle is present)
-    // **plus** the signed virtio-net driver bundle (`FsDisk::PingRootDisk`),
+    // **plus** the signed virtio-net driver bundle (`FsDisk::NetToolRootDisk`),
     // with a virtio-net device attached and the harness-side passive ICMP
     // echo responder on its `dgram` netdev (`NetPeerMode::V6PingResponder`).
     // It unlocks the root, authenticates `root`/`root` at the console login,
@@ -4825,7 +4858,7 @@ static TESTS: &[QemuTest] = &[
         disk_sectors: None,
         netstack_peer: NetPeerMode::V6PingResponder,
         ramfb: false,
-        fs_disk: FsDisk::PingRootDisk,
+        fs_disk: FsDisk::NetToolRootDisk,
         keyboard: None,
         typed_keys: &[],
         screendumps: &[],
@@ -4836,6 +4869,86 @@ static TESTS: &[QemuTest] = &[
             ("Password", Duration::ZERO, SESSION_PASSWORD_LINE),
             ("root@tairix ~% ", Duration::ZERO, PING_COMMAND_LINE),
             (PING_REPLY_MARKER, Duration::ZERO, "exit\n"),
+        ],
+    },
+    // `plans/TELNET.md`: the live telnet vertical.
+    // `tairix-test-netstack-telnet-qemu-aarch64` boots the *production*
+    // aarch64 pipeline against the shared net-tool disk — the standard signed
+    // store bundles (so the real `telnet` command bundle is present) plus the
+    // signed virtio-net driver (`FsDisk::NetToolRootDisk`) — with a
+    // virtio-net device attached and the harness-side **telnet server** peer
+    // on its `dgram` netdev (`NetPeerMode::V6TelnetServer`).
+    //
+    // It unlocks the root, authenticates `root`/`root` at the console login,
+    // and types `telnet fe80::2` at the shell — the peer's link-local formed
+    // from `tairix_test_netstack_wire::PEER_IID`, with **no** port operand, so
+    // the tool's own default port is what is exercised. The store-then-`PATH`
+    // resolution finds `/System/Commands/telnet.app/Run`, the disk-backed
+    // spawn path verifies the signed bundle, and the tool runs with
+    // `manifest ∩ administrator-ceiling` authority (`CAP_NET` for the stream
+    // socket, `CAP_CONSOLE_READ` for the raw-mode relay). It retries `connect`
+    // through the boot window while the NIC driver is still autoloading.
+    //
+    // The serial script's three gates are what make the run a proof rather
+    // than a reachability check:
+    //
+    // * `wire::TELNET_BANNER` — the peer sends it **only** after the client
+    //   accepted `DO SUPPRESS GO AHEAD`, named its terminal type, reported its
+    //   window over NAWS, agreed `WILL LINEMODE`, stated a `MODE` mask and
+    //   exported its SLC table. A client that connected but ignored the
+    //   negotiation never sees it, so the script never types the next line.
+    // * `wire::TELNET_ECHO` — the peer's upper-cased answer to the probe line
+    //   the script then types. It proves the bytes made a full round trip
+    //   through the telnet data path in both directions; the client's own
+    //   local echo of the probe is lower case, so it cannot be mistaken for
+    //   the answer.
+    // * `TELNET_QUIT_SEQUENCE` — the default escape character `^]` followed by
+    //   the interpreter's `quit`, so the escape recognition and the `telnet>`
+    //   command interpreter are exercised live and the tool exits cleanly of
+    //   its own accord rather than being killed.
+    //
+    // The guest audit sink arms on `telnet`'s own audited `exit`
+    // (`comm=telnet`) and reports PASS on the **next** audited `exit` — the
+    // shell's, typed only after the echo marker appeared — so the round trip
+    // provably reached the transcript before the run ended. The harness
+    // additionally requires the peer's own verdict, which names the first step
+    // the client failed to complete, so neither side can pass alone. A
+    // 300-second budget covers boot + bounded PBKDF2 + the two-process net
+    // bring-up on QEMU TCG; single CPU like the other full-boot verticals.
+    QemuTest {
+        package: "tairix-test-netstack-telnet-qemu-aarch64",
+        binary: "tairix-test-netstack-telnet-qemu-aarch64",
+        target: "aarch64-unknown-none",
+        cpus: 1,
+        timeout: Duration::from_secs(300),
+        disk_sectors: None,
+        netstack_peer: NetPeerMode::V6TelnetServer,
+        ramfb: false,
+        fs_disk: FsDisk::NetToolRootDisk,
+        keyboard: None,
+        typed_keys: &[],
+        screendumps: &[],
+        pointer_script: None,
+        serial: &[
+            ("ARXFS passphrase: ", Duration::ZERO, UNLOCK_PASSPHRASE_LINE),
+            ("Username:", Duration::ZERO, SESSION_USERNAME_LINE),
+            ("Password", Duration::ZERO, SESSION_PASSWORD_LINE),
+            ("root@tairix ~% ", Duration::ZERO, TELNET_COMMAND_LINE),
+            // Expect-only until the peer's banner proves the whole option
+            // exchange completed; then type the probe line.
+            (
+                tairix_test_netstack_wire::TELNET_BANNER,
+                Duration::ZERO,
+                TELNET_PROBE_LINE,
+            ),
+            // The peer's upper-cased answer proves the round trip; leave the
+            // session through the escape character and the interpreter.
+            (
+                tairix_test_netstack_wire::TELNET_ECHO,
+                Duration::ZERO,
+                TELNET_QUIT_SEQUENCE,
+            ),
+            ("root@tairix ~% ", Duration::ZERO, "exit\n"),
         ],
     },
     // `plans/NETWORK.md` N9b-3-2-β-2-ii-b: the static-addressing
@@ -6935,7 +7048,7 @@ fn stores_for(ctx: &Context, t: &QemuTest) -> Result<StoreSet, String> {
     let profile = tairix_mkimage::ImageProfile::Debug;
     let apps = match t.fs_disk {
         FsDisk::EncryptedRootDisk
-        | FsDisk::PingRootDisk
+        | FsDisk::NetToolRootDisk
         | FsDisk::AutoloadRootDisk
         | FsDisk::GreeterRootDisk => super::image_apps::app_store_files(ctx, arch, profile)?,
         _ => EMPTY,
@@ -6966,7 +7079,7 @@ fn stores_for(ctx: &Context, t: &QemuTest) -> Result<StoreSet, String> {
         FsDisk::StreamRootDisk
         | FsDisk::EcnRootDisk
         | FsDisk::ListenRootDisk
-        | FsDisk::PingRootDisk
+        | FsDisk::NetToolRootDisk
         | FsDisk::StaticNetRootDisk
         | FsDisk::BondNetRootDisk
         | FsDisk::DhcpNetRootDisk
@@ -8929,7 +9042,7 @@ fn fs_disk_image(t: &QemuTest, stores: StoreSet) -> Result<Option<FsImage>, Stri
         | FsDisk::StreamRootDisk
         | FsDisk::EcnRootDisk
         | FsDisk::ListenRootDisk
-        | FsDisk::PingRootDisk
+        | FsDisk::NetToolRootDisk
         | FsDisk::StaticNetRootDisk
         | FsDisk::BondNetRootDisk
         | FsDisk::DhcpNetRootDisk
@@ -8978,7 +9091,7 @@ fn net_root_fs_disk_image(t: &QemuTest, stores: StoreSet) -> Result<FsImage, Str
             "listen-root.img",
             "listen-root",
         ),
-        FsDisk::PingRootDisk => (net_only_drivers, apps, "ping-root.img", "ping-root"),
+        FsDisk::NetToolRootDisk => (net_only_drivers, apps, "net-tool-root.img", "net-tool-root"),
         FsDisk::StaticNetRootDisk => (
             net_only_drivers,
             static_net_apps,
@@ -9076,6 +9189,7 @@ fn spawn_net_peer(
         NetPeerMode::V6PingResponder => {
             super::netpeer::NetPeer::spawn_ping_responder(qemu_sock, peer_sock)
         }
+        NetPeerMode::V6TelnetServer => super::netpeer::NetPeer::spawn_telnet(qemu_sock, peer_sock),
         NetPeerMode::V6StaticEcho => super::netpeer::NetPeer::spawn_static(qemu_sock, peer_sock),
         NetPeerMode::V4DhcpEcho => super::netpeer::NetPeer::spawn_dhcp(qemu_sock, peer_sock),
         NetPeerMode::V6Dhcp6Echo => super::netpeer::NetPeer::spawn_dhcp6(qemu_sock, peer_sock),
@@ -9767,6 +9881,50 @@ mod tests {
             super::PING_COMMAND_LINE
         );
         assert!(super::PING_COMMAND_LINE.ends_with('\n'));
+    }
+
+    /// The telnet vertical types the peer's own link-local address as its
+    /// target, with no port operand so the tool's own default is exercised;
+    /// and the line it then types into the session is the shared probe. Pin
+    /// all three so a typed literal cannot drift from what the peer expects.
+    #[test]
+    fn telnet_command_targets_the_peer_link_local_on_the_default_port() {
+        let peer = tairix_test_netstack_wire::link_local(tairix_test_netstack_wire::PEER_IID);
+        let rendered = format!("{peer}");
+        assert!(
+            super::TELNET_COMMAND_LINE.contains(&rendered),
+            "telnet command {:?} must target the peer link-local {rendered}",
+            super::TELNET_COMMAND_LINE
+        );
+        assert_eq!(
+            super::TELNET_COMMAND_LINE,
+            format!("telnet {rendered}\n"),
+            "no port operand: the run exercises the tool's own default port",
+        );
+        assert_eq!(
+            tairix_test_netstack_wire::PEER_TELNET_PORT,
+            23,
+            "the peer listens on the port the tool defaults to",
+        );
+        assert_eq!(
+            super::TELNET_PROBE_LINE,
+            format!("{}\n", tairix_test_netstack_wire::TELNET_PROBE),
+            "the typed probe is the shared constant the peer matches on",
+        );
+    }
+
+    /// The quit sequence is the *default* escape character followed by the
+    /// interpreter's `quit`, so the vertical exercises the escape recognition
+    /// and the command interpreter rather than a value only the test knows.
+    #[test]
+    fn the_telnet_quit_sequence_uses_the_default_escape_character() {
+        let bytes = super::TELNET_QUIT_SEQUENCE.as_bytes();
+        assert_eq!(
+            bytes[0],
+            tairix_telnet::command::DEFAULT_ESCAPE,
+            "the sequence opens with the tool's own default escape character",
+        );
+        assert_eq!(&bytes[1..], b"quit\n");
     }
 
     #[test]
