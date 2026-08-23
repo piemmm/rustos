@@ -3,13 +3,14 @@
 
 use super::{
     decode_blob_list_reply, decode_document_reply, decode_grant_reply, decode_quota_reply,
-    encode_blob_entry, encode_blob_list_reply, encode_document_reply, encode_grant_reply,
-    encode_quota_reply, validate_blob_name, AppDataRequest, BlobEntry, BlobListing, BlobMode,
-    BlobQuota, ConfigDocument, ConfigScope, APPDATA_BLOB_ENTRY_LEN, APPDATA_BLOB_LIST_HEADER_LEN,
-    APPDATA_BLOB_LIST_MAX, APPDATA_BLOB_MAX_BYTES, APPDATA_BLOB_MAX_COUNT,
-    APPDATA_DOCUMENT_HEADER_LEN, APPDATA_DOCUMENT_MAX, APPDATA_GRANT_REPLY_LEN, APPDATA_HEADER_LEN,
-    APPDATA_KEY_MAX, APPDATA_MAX_REPLY, APPDATA_MAX_REQUEST, APPDATA_NAME_MAX,
-    APPDATA_QUOTA_REPLY_LEN, APPDATA_VALUE_MAX,
+    decode_temp_reply, encode_blob_entry, encode_blob_list_reply, encode_document_reply,
+    encode_grant_reply, encode_quota_reply, encode_temp_reply, validate_bulk_name, AppDataRequest,
+    BlobEntry, BlobListing, BlobMode, BulkQuota, ConfigDocument, ConfigScope,
+    APPDATA_BLOB_ENTRY_LEN, APPDATA_BLOB_LIST_HEADER_LEN, APPDATA_BLOB_LIST_MAX,
+    APPDATA_BLOB_MAX_COUNT, APPDATA_BULK_FILE_MAX_BYTES, APPDATA_DOCUMENT_HEADER_LEN,
+    APPDATA_DOCUMENT_MAX, APPDATA_GRANT_REPLY_LEN, APPDATA_HEADER_LEN, APPDATA_KEY_MAX,
+    APPDATA_MAX_REPLY, APPDATA_MAX_REQUEST, APPDATA_NAME_MAX, APPDATA_QUOTA_REPLY_LEN,
+    APPDATA_TEMP_MAX_COUNT, APPDATA_TEMP_REPLY_LEN, APPDATA_VALUE_MAX,
 };
 use crate::appinfo::BUNDLE_ID_MAX;
 use crate::le::{put_u16, put_u32};
@@ -41,7 +42,7 @@ fn frame(request: &AppDataRequest<'_>) -> Frame {
 
 /// Every operation, one representative each; the configuration ones on the
 /// private scope.
-fn every_operation() -> [AppDataRequest<'static>; 12] {
+fn every_operation() -> [AppDataRequest<'static>; 14] {
     [
         AppDataRequest::ConfigRead {
             scope: ConfigScope::Private,
@@ -78,11 +79,15 @@ fn every_operation() -> [AppDataRequest<'static>; 12] {
         AppDataRequest::BlobDelete { name: "thumbnails" },
         AppDataRequest::BlobList { capacity: 4096 },
         AppDataRequest::QuotaGet {},
+        AppDataRequest::TempCreate {},
+        AppDataRequest::TempRelease {
+            name: "0f1e2d3c-4b5a6978",
+        },
     ]
 }
 
-/// The four blob-scope operations, which name no scope and no setting.
-fn every_blob_operation() -> [AppDataRequest<'static>; 4] {
+/// The six bulk-tree operations, which name no scope and no setting.
+fn every_blob_operation() -> [AppDataRequest<'static>; 6] {
     [
         AppDataRequest::BlobOpen {
             name: "index",
@@ -91,6 +96,8 @@ fn every_blob_operation() -> [AppDataRequest<'static>; 4] {
         AppDataRequest::BlobDelete { name: "index" },
         AppDataRequest::BlobList { capacity: 64 },
         AppDataRequest::QuotaGet {},
+        AppDataRequest::TempCreate {},
+        AppDataRequest::TempRelease { name: "scratch" },
     ]
 }
 
@@ -499,7 +506,7 @@ fn bad_magic_version_and_operation_are_refused() {
     // Zero, one past the highest defined operation, and the far end of the
     // space. Derived rather than written out, so adding an operation cannot
     // quietly turn this case into a live one.
-    for op in [0u16, super::OP_QUOTA_GET + 1, 0xFFFF] {
+    for op in [0u16, super::OP_TEMP_RELEASE + 1, 0xFFFF] {
         let mut encoded = frame(&commit);
         put_u16(&mut encoded.bytes, super::OP_OFFSET, op);
         assert_eq!(
@@ -971,6 +978,8 @@ fn a_configuration_operation_cannot_be_reinterpreted_as_a_blob_one() {
         super::OP_BLOB_DELETE,
         super::OP_BLOB_LIST,
         super::OP_QUOTA_GET,
+        super::OP_TEMP_CREATE,
+        super::OP_TEMP_RELEASE,
     ] {
         let mut encoded = frame(&AppDataRequest::ConfigCommit {
             scope: ConfigScope::Public,
@@ -1045,7 +1054,7 @@ fn a_blob_name_applies_the_store_name_grammar() {
         "", "..", ".", "a/b", "/etc", "A", ".hidden", "a b", "a..b", "a.", ".a", "a\nb",
     ] {
         assert!(
-            validate_blob_name(hostile).is_err(),
+            validate_bulk_name(hostile).is_err(),
             "`{hostile}` must never be a blob name"
         );
         let mut bytes = [0u8; APPDATA_MAX_REQUEST];
@@ -1070,7 +1079,7 @@ fn a_blob_name_applies_the_store_name_grammar() {
         let _ = len;
     }
     for legal in ["index", "mail.index", "thumbnails-v2", "a", "a_b.c0"] {
-        assert_eq!(validate_blob_name(legal), Ok(()));
+        assert_eq!(validate_bulk_name(legal), Ok(()));
     }
 }
 
@@ -1150,7 +1159,7 @@ fn a_blob_listing_is_whole_or_nothing() {
         },
         BlobEntry {
             name: "thumbnails",
-            len: APPDATA_BLOB_MAX_BYTES,
+            len: APPDATA_BULK_FILE_MAX_BYTES,
         },
     ];
     let mut listing = vec![0u8; entries.len() * APPDATA_BLOB_ENTRY_LEN];
@@ -1295,11 +1304,14 @@ fn a_whole_listing_of_every_blob_fits_one_reply() {
 
 #[test]
 fn a_quota_reply_round_trips_and_refuses_a_usage_past_its_own_ceiling() {
-    let quota = BlobQuota {
+    let quota = BulkQuota {
         blobs: 3,
-        bytes: 8192,
+        blob_bytes: 8192,
+        temps: 2,
+        temp_bytes: 4096,
         blob_max: u64::try_from(APPDATA_BLOB_MAX_COUNT).expect("fits"),
-        blob_bytes_max: APPDATA_BLOB_MAX_BYTES,
+        temp_max: u64::try_from(APPDATA_TEMP_MAX_COUNT).expect("fits"),
+        file_bytes_max: APPDATA_BULK_FILE_MAX_BYTES,
     };
     let mut out = [0u8; APPDATA_QUOTA_REPLY_LEN];
     assert_eq!(
@@ -1310,14 +1322,23 @@ fn a_quota_reply_round_trips_and_refuses_a_usage_past_its_own_ceiling() {
 
     // A count or a byte total past its own ceiling is not a state the daemon
     // can be in, so it is refused rather than shown to a caller that would
-    // draw a bar past the end of its gauge.
+    // draw a bar past the end of its gauge. Each scope is checked against its
+    // own ceiling, so one scope's figures cannot excuse the other's.
     for broken in [
-        BlobQuota {
+        BulkQuota {
             blobs: quota.blob_max + 1,
             ..quota
         },
-        BlobQuota {
-            bytes: quota.blob_max * quota.blob_bytes_max + 1,
+        BulkQuota {
+            blob_bytes: quota.blob_max * quota.file_bytes_max + 1,
+            ..quota
+        },
+        BulkQuota {
+            temps: quota.temp_max + 1,
+            ..quota
+        },
+        BulkQuota {
+            temp_bytes: quota.temp_max * quota.file_bytes_max + 1,
             ..quota
         },
     ] {
@@ -1336,4 +1357,109 @@ fn a_quota_reply_round_trips_and_refuses_a_usage_past_its_own_ceiling() {
         encode_quota_reply(&quota, &mut out[..APPDATA_QUOTA_REPLY_LEN - 1]),
         Err(Errno::BufferTooSmall)
     );
+}
+
+#[test]
+fn a_temporary_create_names_nothing_and_a_release_names_one_file() {
+    // The asymmetry is the scope's whole point: the service picks the name, so
+    // a caller cannot ask for a file it did not just create — a create that
+    // carried a name would be an open by another spelling.
+    let mut encoded = frame(&AppDataRequest::TempCreate {});
+    assert_eq!(encoded.len, APPDATA_HEADER_LEN);
+    encoded.bytes[super::NAME_LEN_OFFSET] = 1;
+    encoded.bytes[APPDATA_HEADER_LEN] = b'a';
+    assert_eq!(
+        AppDataRequest::decode(&encoded.bytes[..=encoded.len]),
+        Err(Errno::BadMagic),
+        "a temporary create must name nothing"
+    );
+
+    // And a release must name exactly one, inside the store-name grammar the
+    // whole bulk tree shares.
+    for name in ["", "..", "/etc", "Scratch", "a b"] {
+        let mut encoded = frame(&AppDataRequest::TempRelease { name: "scratch" });
+        let len = name.len();
+        encoded.bytes[super::NAME_LEN_OFFSET] = u8::try_from(len).expect("short");
+        encoded.bytes[APPDATA_HEADER_LEN..APPDATA_HEADER_LEN + len]
+            .copy_from_slice(name.as_bytes());
+        assert!(
+            AppDataRequest::decode(&encoded.bytes[..APPDATA_HEADER_LEN + len]).is_err(),
+            "{name:?} is not a store name"
+        );
+    }
+}
+
+#[test]
+fn a_temporary_operation_declares_no_capacity() {
+    // Neither answers a document, so a capacity on one is a frame that does
+    // not mean what its operation says — and a caller that thought it was
+    // asking for bytes gets a refusal rather than a descriptor.
+    for request in [
+        AppDataRequest::TempCreate {},
+        AppDataRequest::TempRelease { name: "scratch" },
+    ] {
+        let mut encoded = frame(&request);
+        put_u32(&mut encoded.bytes, super::CAPACITY_OFFSET, 4096);
+        assert_eq!(
+            AppDataRequest::decode(encoded.as_slice()),
+            Err(Errno::BadMagic)
+        );
+    }
+}
+
+#[test]
+fn a_temporary_reply_round_trips_and_refuses_a_name_it_could_not_have_minted() {
+    let mut out = [0u8; APPDATA_TEMP_REPLY_LEN];
+    assert_eq!(
+        encode_temp_reply(0x1234_5678_9ABC_DEF0, "0f1e2d3c-4b5a6978", &mut out),
+        Ok(APPDATA_TEMP_REPLY_LEN)
+    );
+    assert_eq!(
+        decode_temp_reply(&out),
+        Ok((0x1234_5678_9ABC_DEF0, "0f1e2d3c-4b5a6978"))
+    );
+
+    // Zero is the reserved invalid handle, so a reply carrying one is refused
+    // rather than redeemed.
+    let mut out = [0u8; APPDATA_TEMP_REPLY_LEN];
+    assert_eq!(
+        encode_temp_reply(0, "scratch", &mut out),
+        Ok(APPDATA_TEMP_REPLY_LEN)
+    );
+    assert_eq!(decode_temp_reply(&out), Err(Errno::BadMagic));
+
+    // A name outside the grammar is not one this service minted, so it never
+    // reaches a caller that would compose a path from it.
+    let mut out = [0u8; APPDATA_TEMP_REPLY_LEN];
+    assert!(encode_temp_reply(7, "..", &mut out).is_err());
+    assert!(encode_temp_reply(7, "", &mut out).is_err());
+
+    // Nor does one with bytes hiding past its declared length.
+    let mut out = [0u8; APPDATA_TEMP_REPLY_LEN];
+    encode_temp_reply(7, "scratch", &mut out).expect("encodes");
+    let last = APPDATA_TEMP_REPLY_LEN - 1;
+    out[last] = b'x';
+    assert_eq!(decode_temp_reply(&out), Err(Errno::BadMagic));
+
+    let refusal = encode_status_reply(Err(Errno::LimitExceeded));
+    assert_eq!(decode_temp_reply(&refusal), Err(Errno::LimitExceeded));
+    assert_eq!(
+        decode_temp_reply(&out[..APPDATA_TEMP_REPLY_LEN - 1]),
+        Err(Errno::BufferTooSmall)
+    );
+    assert_eq!(
+        encode_temp_reply(7, "scratch", &mut out[..APPDATA_TEMP_REPLY_LEN - 1]),
+        Err(Errno::BufferTooSmall)
+    );
+}
+
+#[test]
+fn the_widest_temporary_reply_carries_the_widest_name() {
+    let widest = String::from_iter(core::iter::repeat_n('a', APPDATA_NAME_MAX));
+    let mut out = [0u8; APPDATA_TEMP_REPLY_LEN];
+    assert_eq!(
+        encode_temp_reply(1, &widest, &mut out),
+        Ok(APPDATA_TEMP_REPLY_LEN)
+    );
+    assert_eq!(decode_temp_reply(&out), Ok((1, widest.as_str())));
 }

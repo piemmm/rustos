@@ -1393,7 +1393,7 @@ You are not exempt from any rule above. In addition:
     | Process spawn, userland multitasking | `plans/SPAWN.md` |
     | Lightweight threads: threads within a process, the thread-group model, the futex, per-thread thread pointers | `plans/THREADS.md` |
     | App bundles, command apps, help, command resolution | `plans/APPS.md`; `plans/UNIVERSAL.md` (multi-arch/Wasm distribution) |
-    | App settings, secrets, blobs and temporary files: the per-app store keyed on bundle id, the publisher pin, the `key = value` format engine, the published scope one app reads another's values through, the sealed scope, descriptor-backed blobs | `plans/APPDATA.md` |
+    | App settings, secrets, blobs and temporary files: the per-app store keyed on bundle id, the publisher pin, the `key = value` format engine, the published scope one app reads another's values through, the sealed scope, descriptor-backed blobs and per-boot scratch | `plans/APPDATA.md` |
     | Default desktop apps going live: app windows, live app data channels, the file picker | `plans/APPWIN.md` |
     | The graphical file manager (`files.app`): clickable icons, open/launch, rename, move/copy/delete, properties | `plans/NEW-FILEMANAGER.md` |
     | Desktop responsiveness: non-blocking app launch (no UI freeze while an app loads), asynchronous process launch | `plans/FIX-DESKTOP.md` |
@@ -1631,19 +1631,27 @@ defect.
   configuration request can name a secret and none reaches another
   application's; it has no layer beneath it, because a secret an application did
   not write is not one it may be made to believe.
-  The bulk root holds a fourth scope, `Blobs/<name>`: an application's index,
-  cache, or queue, reached as a **descriptor** rather than as bytes, so the
-  service makes the policy decision once at open and the application then works
-  directly against the kernel VFS at full speed. What it is handed is bounded —
-  a one-shot delegation carrying only the access it asked for and, when it
-  writes, a byte-extent ceiling the kernel enforces — because the gated tree is
-  owned by the app-data service, so no per-user filesystem quota would ever see
-  a blob's bytes and the service is the only thing that can bound them. Those
-  ceilings are **fixed containment bounds** (§24.4), not capacities: they bound
-  what one application may hide in a store the user cannot list or delete, and
-  data that genuinely outgrows one is the user's and belongs in the user's own
-  files. One ownership pin governs every scope in both trees, because it attests
-  who owns the application's *data* and not who owns one file.
+  The bulk root holds two more scopes, both reached as a **descriptor** rather
+  than as bytes, so the service makes the policy decision once at open and the
+  application then works directly against the kernel VFS at full speed.
+  `Blobs/<name>` is durable and the application names it: its index, cache, or
+  queue. `Temp/` is the scratch of one run, and the **service** names each
+  file — freshness with no coordination is what a temporary file is for, and
+  nothing *opens* one, so an application can never read scratch it did not
+  write in this process. Their lifetime is the boot: a file an earlier boot
+  left is reachable by nothing and is reclaimed before the next is created.
+  There is still no `/tmp` and the OS still never creates one (§16.1).
+  What either scope hands over is bounded — a one-shot delegation carrying only
+  the access it asked for and, when it writes, a byte-extent ceiling the kernel
+  enforces — because the gated tree is owned by the app-data service, so no
+  per-user filesystem quota would ever see those bytes and the service is the
+  only thing that can bound them. A count ceiling per scope and one per-file
+  byte ceiling for the tree are **fixed containment bounds** (§24.4), not
+  capacities: they bound what one application may hide in a store the user
+  cannot list or delete, and data that genuinely outgrows one is the user's and
+  belongs in the user's own files. One ownership pin governs every scope in both
+  trees, because it attests who owns the application's *data* and not who owns
+  one file.
   See `plans/APPDATA.md`.
   `/Users` is mounted `nosuid,nodev`.
   A store carries the same directory name at every scope, so the user's

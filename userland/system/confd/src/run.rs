@@ -51,7 +51,7 @@ mod program {
     use tairix_abi::appdata_ipc::{APPDATA_ENDPOINT, APPDATA_MAX_REPLY, APPDATA_MAX_REQUEST};
     use tairix_abi::fs::{DirEntries, OpenFlags};
     use tairix_abi::random::RandomFlags;
-    use tairix_abi::{Errno, Origin, UnlinkFlags, ORIGIN_WIRE_LEN};
+    use tairix_abi::{BootId, Errno, Origin, UnlinkFlags, ORIGIN_WIRE_LEN};
     use tairix_caps::CapabilitySet;
     use tairix_confd::events::{SERVICE_READY, SERVICE_UNAVAILABLE};
     use tairix_confd::{AppData, DirEntry, Entropy, NodeInfo, Storage};
@@ -93,8 +93,8 @@ mod program {
         Errno::from_syscall(raw)
     }
 
-    /// The sealed scope's randomness, drawn from the one kernel random
-    /// subsystem.
+    /// The randomness the sealed scope's key material and the temporary
+    /// scope's names are drawn from, from the one kernel random subsystem.
     ///
     /// The draw **blocks** through a required reseed rather than passing
     /// `NON_BLOCKING`: a master secret or a nonce is key material, and waiting
@@ -331,6 +331,27 @@ mod program {
         }
     }
 
+    /// The per-boot identity the temporary scope tells one boot's scratch from
+    /// another's by.
+    ///
+    /// Read once: the kernel mints one identity per boot and never a second,
+    /// so a port whose random reserve was unseeded when it minted reports the
+    /// unset sentinel for the whole boot and re-reading it would buy a syscall
+    /// nothing. That port serves every other scope and refuses the temporary
+    /// one, which is recorded rather than passed over — an operator has to
+    /// know the machine came up without a seeded generator.
+    fn boot_identity() -> BootId {
+        let Ok(id) = tairix_rt::boot_id() else {
+            record(
+                SERVICE_UNAVAILABLE,
+                Level::Warn,
+                "confd: no boot identity; temporary files are unavailable this boot",
+            );
+            return BootId::UNSET;
+        };
+        id
+    }
+
     /// Bind the endpoint and serve for the life of the service. Returns a
     /// non-zero exit code on a fail-closed startup error.
     fn main() -> i32 {
@@ -342,7 +363,7 @@ mod program {
             Level::Info,
             "confd: serving APPDATA_ENDPOINT",
         );
-        let mut service = AppData::new(LOG_SINK, RealEntropy);
+        let mut service = AppData::new(LOG_SINK, RealEntropy, boot_identity());
         serve(&mut service)
     }
 

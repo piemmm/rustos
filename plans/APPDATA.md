@@ -113,10 +113,12 @@ cannot be widened into the private scope.
 - **Bulk data.** A config file is the wrong shape for a mail index or a
   thumbnail cache, and the IPC payload ceiling is 1 MiB
   (`IPC_MESSAGE_MAX_PAYLOAD_LEN`), so no store that proxies bytes through
-  messages can serve large data at all, let alone with random access.
+  messages can serve large data at all, let alone with random access —
+  **closed (AD8)**.
 - **Temporary files.** There is no `/tmp` and the OS never creates one (§16.1,
   correctly). Apps therefore have no sanctioned scratch space, so scratch
-  files land in the user's real directories with no isolation and no reaping.
+  files land in the user's real directories with no isolation and no reaping —
+  **closed (AD9)**, and still with no `/tmp`.
 
 ---
 
@@ -204,8 +206,12 @@ cannot be widened into the private scope.
   lineage format (§3.2). Cross-user sharing, sync/replication, and a settings
   GUI are not in this plan. Sealed *bulk* data is not in this plan either: a
   secret crosses the wire as a setting's value and is bounded by it (§3.7).
-  Evicting the `Cache/` scope is AD9's, beside the temp reaper it shares a
-  policy with.
+  The `Cache/` scope an earlier draft of this layout named is **deleted**
+  (§3.14): nothing in the system produces a storage-pressure signal, so a scope
+  whose only difference from `Blobs/` is "the OS may drop this" would be a
+  second name for one behaviour — interface built for a stage that has not
+  landed, by the same rule §3.6 applied to `ConfigScope` and §3.12 to the key
+  protector.
 
 ---
 
@@ -439,18 +445,17 @@ Within the fixed home shape (§16.3 — apps may not invent siblings):
         public.conf                       public scope (foreign apps may read)
         secret.vault                      sealed scope (AEAD)
         .owner                            publisher pin
-/Users/<u>/Library/Apps/<bundle-id>/    ← bulk + volatile (gated tree)
-    Blobs/<name>                          app blob store
-    Cache/                                evictable
-    Temp/                                 reaped at session end and at boot
+/Users/<u>/Library/Apps/<bundle-id>/    ← bulk (gated tree)
+    Blobs/<name>                          durable, app-named
+    Temp/<boot>-<slot>                    scratch of one boot, service-named
 ```
 
 The master-secret record sits in the gated root beside the per-app directories,
 because it is the *account's* key material and every app's vault key derives from
 it (§3.7). Its leading dot cannot be a bundle id — the identifier grammar forbids
 one — so no app's store can be named that. It is under `Settings/` rather than
-`Library/` because `Library/` holds the evictable and boot-reaped scopes, and key
-material may be in neither.
+`Library/` because `Library/` holds the boot-reaped scope, and key material may
+not be in that.
 
 **The gate sits on the fixed `Apps` parent, not on the per-app directory.**
 This corrects an earlier draft of this plan, which put the store directly under
@@ -599,8 +604,9 @@ field the operation does not use left non-zero refuses rather than guessing.
 | `VaultSet { key, value }` / `VaultUnset { key }` | AD7 | seal or remove one secret, **immediately** |
 | `BlobOpen { name, mode }` | AD8 | descriptor grant handle for a blob |
 | `BlobDelete { name }` / `BlobList { capacity }` | AD8 | manage own blobs |
-| `TempCreate {}` | AD9 | descriptor grant handle for a fresh temp file |
-| `QuotaGet {}` | AD8 | own blob usage and its ceilings |
+| `TempCreate {}` | AD9 | descriptor grant handle for a **fresh** temp file, and the name the service gave it |
+| `TempRelease { name }` | AD9 | delete one of the caller's own temp files |
+| `QuotaGet {}` | AD8, both scopes AD9 | own bulk usage and its ceilings |
 
 **A read answers with the whole document, not one key.** This corrects an
 earlier draft of this plan, which specified `ConfigGet { key }` and a paged
@@ -823,10 +829,18 @@ That gives streaming, random access, and memory mapping at kernel VFS speed,
 with `confd` making the policy decision once at open and never touching a byte
 of payload.
 
-Temp files live in `Library/<bundle-id>/Temp/`, are reaped at session end and
-at boot, and are gated identically — an app's scratch data is no more visible
-to another app than its settings are. There is still no `/tmp` and nothing here
-creates one (§16.1).
+Temp files live in `Library/<bundle-id>/Temp/` and are gated identically — an
+app's scratch data is no more visible to another app than its settings are.
+There is still no `/tmp` and nothing here creates one (§16.1).
+
+The **service names them**, and nothing opens one: `TempCreate` carries no name
+and there is no `TempOpen`, so the only way to hold a temp file is to have just
+created it. That is what a temp file is for — freshness with no coordination —
+and it also means an app can never *read* scratch it did not write in this
+process, not even its own from an earlier run. The name it is handed back is
+good for one thing, `TempRelease`. Their lifetime is the **boot**, and the name
+says which one; §3.14 records why that is the boundary, why the reap is lazy,
+and why a session-end reap is not built.
 
 **A delegation attenuates by mode *and* by extent, and that is a kernel
 change.** `fd_grant` existed for the file picker's read-only hand-off: it
@@ -876,13 +890,20 @@ resource *capacities*, and these are not capacities.
   data in a store the user cannot list or delete, which is a regression, not
   flexibility. There is no honest hardware quantity to derive from either: the
   boot facts carry CPU count and installed memory, and neither is a disk.
-- **Two ceilings, and the per-app worst case is their product, stated as
-  such.** A per-app blob *count* (`APPDATA_BLOB_MAX_COUNT`) and a per-blob
-  *byte* ceiling (`APPDATA_BLOB_MAX_BYTES`). The count is what makes a listing
-  one reply frame and bounds the directory scan a hostile app can demand; the
-  byte ceiling is the kernel-enforced extent above. Every open blob is bounded
-  by the same figure, so the app's whole blob store is bounded by
-  count × bytes — a *hard* bound, not an admission estimate.
+- **A count per scope and one byte ceiling for the tree, and the per-app worst
+  case is stated as such.** A per-app blob *count* (`APPDATA_BLOB_MAX_COUNT`),
+  a per-app live-temp-file *count* (`APPDATA_TEMP_MAX_COUNT`), and one
+  per-file *byte* ceiling (`APPDATA_BULK_FILE_MAX_BYTES`). The counts differ
+  because the questions do: how many durable objects an app's working set has,
+  and how many scratch files it holds *at once* — a slot a release frees
+  immediately, so the temp count is deliberately tighter. The byte ceiling is
+  one figure because it answers one question — how big may a file the user can
+  neither list nor delete become — and that does not turn on whether the file
+  outlives the boot; two constants that would always be set equal are the
+  duplication §2.2 forbids. The blob count additionally makes a listing one
+  reply frame. Every open file is bounded by the one ceiling, so the app's
+  whole bulk store is bounded by (blob count + temp count) × bytes — a *hard*
+  bound, not an admission estimate.
 - **An admission check alone would have been theatre.** Summing an app's blob
   sizes at open time and refusing the next open does nothing about the blob it
   already holds open, which it can grow without limit. A defence a hostile app
@@ -897,14 +918,16 @@ resource *capacities*, and these are not capacities.
   backup covers it, and the user can delete it. An application that would hide
   a hundred gigabytes in a store the user cannot reach is the thing this
   ceiling exists to prevent, not a workload it fails to serve. `QuotaGet`
-  reports both ceilings and the usage against them, so an application that
-  reaches one says so rather than failing obscurely.
+  reports every ceiling and the usage against it — both scopes in one answer,
+  because an app deciding whether to spill to scratch or evict a cached index
+  must not read two moments — so an application that reaches one says so
+  rather than failing obscurely.
 
 **What is still not bounded, stated honestly.** Nothing bounds the *number of
 applications* an account may run, so the sum over an account's apps is bounded
 only by the volume. A per-account or per-volume quota is the filesystem's to
 enforce and ARXFS has none yet; it is not faked here. What does hold is that no
-single application can exceed count × bytes, and that the store's bytes are
+single application can exceed its counts × bytes, and that the store's bytes are
 owned by the app-data service rather than by the user — because the user must
 not be able to reach them — so a future per-*user* filesystem quota would never
 have caught this path anyway. That is precisely why the bound has to live here.
@@ -924,8 +947,14 @@ let theirs = read_published(&mut host, "os.tairix.terminal")?;  // foreign snaps
 let mut v = Vault::open(&mut host)?;         // sealed scope; may fail
 v.set("imap.password", secret)?;            // sealed before it returns
 
-let blob = Blobs::open()?.open("index", BlobMode::ReadWrite)?;  // real fd
-let tmp  = Temp::create()?;                                     // real fd
+let grant = blobs::open(&mut host, "index", BlobMode::ReadWrite)?; // handle
+let index = File::from_delegation(grant)?;                        // real fd
+
+let scratch = temp::create(&mut host)?;      // a fresh file, service-named
+let spill = File::from_delegation(scratch.grant)?;
+temp::release(&mut host, &scratch.name)?;    // done with it
+
+let used = bulk_quota(&mut host)?;           // both bulk scopes, one moment
 ```
 
 **A foreign read hands back a `Document`, not a handle.** An earlier sketch in
@@ -1157,6 +1186,102 @@ a belt-and-braces addition to a filesystem quota — it is the only bound that
 will ever exist on that path, which is what makes it mandatory rather than
 optional (§3.8).
 
+### 3.14 What the temporary scope settled
+
+**A temporary file is one nothing can open.** `TempCreate` carries no name and
+there is no `TempOpen`, so the only way to hold one is to have just created it.
+That is not an omission: freshness without coordination is the whole of what a
+scratch file is for, and a scope where the app named its own files would let two
+instances that both chose `spill` corrupt each other — the very defect §1.1
+describes, reproduced inside one bundle. Because nothing opens one, an app can
+never *read* scratch it did not write in this process, not even its own from an
+earlier run. The name it is handed back is good for exactly one thing,
+`TempRelease`, and the service composes the path from the *caller's* attested
+store, so naming another app's file reaches nothing.
+
+**Unlinking at creation was the first thing tried, and the VFS is right to
+refuse it.** The POSIX trick — create, hand over the descriptor, unlink the name
+— would make a temp file's lifetime exactly its descriptor's and need no reaper
+at all. It is not available here, and not because of an oversight: a delegation
+record carries the **path** and the grantor's captured credential, not an inode,
+precisely so every operation on a delegated descriptor is re-authorised through
+the secured VFS with no cached authority (`kernel/core/src/aspace.rs`). Unlinking
+would break the descriptor. Keeping a name is also what lets the service *bound*
+the scope — an anonymous file it cannot enumerate is one it cannot count, and it
+has no primitive by which to learn that a peer closed a descriptor, so an
+in-memory count could only ever grow. The named form is what makes
+count × bytes a hard bound rather than an aspiration.
+
+**The boundary is the boot, and the name carries it.** A temp file is
+`<boot-id>-<slot>`, both lowercase hex, so a file's own name says which boot it
+belongs to. An earlier boot's is invisible to every answer the service gives and
+is reclaimed before the next file is created. Three things fall out of that, and
+each was a defect in the alternatives:
+
+- **No marker record to keep in step.** A `.boot` file beside the scratch would
+  be a second source of truth a torn write could contradict; the name cannot
+  disagree with itself.
+- **A service restart reaps nothing.** The boot id is the kernel's, minted once
+  per boot, so `confd` crashing and being relaunched leaves every running app's
+  scratch exactly where it was. Anything keyed on the *service's* own lifetime
+  would have deleted live files.
+- **No boot-time walk of every account's every store.** The sweep is paid by the
+  one operation that needs the room, and only for the app that asked, so an
+  early-boot service does not stat its way through `/Users` before it can answer
+  a settings read.
+
+**The slot is drawn, not counted, and that is a correctness argument rather than
+a security one.** A per-process counter would have to be remembered somewhere,
+and whatever remembers it must eventually forget — after which a name would be
+re-issued, and a caller that released the same name twice would delete a *later*
+file it had never seen. Drawing eight bytes makes that unrepresentable. A drawn
+name that turns out to be taken is therefore not a collision to retry past: it
+means the generator is not delivering the randomness it claimed, so the create
+refuses rather than handing over another instance's open scratch.
+
+**A boot with no identity is refused, and nothing else is.** A port whose random
+reserve never seeded reports `BootId::UNSET`, and with it the service cannot tell
+one boot's scratch from another's — so it serves the scope not at all rather than
+leaving files it could never reclaim. Every other scope answers normally: an
+unseeded generator is a reason to refuse *scratch*, never a reason to refuse a
+user their settings. A quota read still answers, reporting no temporary files,
+because an app asking about its blobs is not the caller to refuse for a scope it
+did not ask about.
+
+**There is no session-end reap, and that is a decision rather than an omission.**
+The plan's earlier wording promised one. Building it would have meant a
+privileged control operation on the one endpoint that holds every account's
+secrets, wired from whichever principal ends a session — new privileged surface
+on the highest-value service in the system. What it would buy is *earlier
+reclamation of bytes*, and nothing else: because nothing opens a temporary file,
+no application can observe another session's scratch even while it is still on
+the volume, and the count ceiling bounds how much of it there can be. The
+boundary that is attested, free, and correct after a crash is the boot, so that
+is the one the scope keeps. If a storage-pressure signal ever lands, reclaiming
+sooner becomes that signal's business, not a new capability's.
+
+**A release exists because an API that creates and cannot destroy forces a
+leak.** Without it a long-lived application — a spooler, a browser, an editor
+opening many buffers — would climb to the ceiling over one boot and then be
+refused with no recourse. With it, an application that finishes with its scratch
+holds one slot at a time. What an application that never releases costs is
+itself: its own ceiling, until the next boot.
+
+**The `Cache/` scope in the layout is deleted rather than built.** It would have
+differed from `Blobs/` in exactly one way — the OS may drop it under storage
+pressure — and there is no storage-pressure signal in the system to drop it on.
+A scope with no distinct behaviour is two names for one thing, which is what
+§2.3/§2.4 forbid and what §3.6 and §3.12 already refused for `ConfigScope` and
+the key protector. When an evictor lands it brings the scope it needs.
+
+**One `Scope` serves both, and the two faces are what differ.** Resolving the
+directory, proving the gated bulk root, enumerating it, unlinking from it, and
+minting its delegation are the same act for a blob and for scratch, so they have
+one implementation; `BlobStore` and `TempStore` add only the rule that is their
+own — who names a file, which names are live, and which ceiling admits one. A
+single type with a scope discriminant would have had methods that are meaningless
+for half its values, which is the shape that eventually gets called wrongly.
+
 ---
 
 ## 4. Stages
@@ -1174,7 +1299,7 @@ gate green (§7), and contains no stubs (§15.1).
 | **AD6** ✅ | Public scope | `public.conf`; `ConfigScope { Private, Public }` on every own-store request and the reshaped `appdata-v1` header that carries it; `PublicRead` as a **separate opcode with no scope field**, so another app's private document is not a representable request; per-scope staging, per-scope commit and per-scope pending-edit bound; the one scope→file-name mapping and the derived `.new` sibling; the published scope's deliberate absence of any layer beneath it; the foreign read's audited empty answer for a target-side defect and its typed refusal for the caller's own; `Settings::open_published` and `read_published` in the client, and the fake service extended to both scopes and to foreign apps. |
 | **AD7** ✅ | Secrets | `secret.vault` and the per-account `.vault-master` record; the AEAD hierarchy (`derive_key` under one labelled context, ChaCha20-Poly1305 per document, a fresh nonce per seal) and the injected `Entropy` seam; `VaultRead`/`VaultSet`/`VaultUnset` as opcodes with **no scope field and no foreign counterpart**, and writes applied before the reply rather than staged; a damaged record, a failed authentication, and absent key material as three distinct audited refusals that are never an empty vault; a malformed master record refused and **never replaced**; the wipe moved into `lib/appconf`'s own `Line::drop`; `Vault` in the client, the fake service extended to the scope, and a fuzz harness over both records. **No protector abstraction** — §3.7 records why. |
 | **AD8** ✅ | Blobs | The kernel prerequisite the descriptor hand-off turned out to need (§3.8): `fd_grant` delegating the grantor descriptor's own mode with a mandatory write-extent ceiling, one resolution of *whose* authority a path-backed descriptor operation runs under, and `fs_stat`/`fs_truncate`/`fs_sync`/`file_map` gating per backing so a recipient holding no filesystem capability can use what it was given; `File::from_delegation` as the one owned redemption, replacing `viewer`'s hand-rolled pair. Then the scope itself: `validate_blob_name` over the shared store-name grammar, `BlobOpen`/`BlobDelete`/`BlobList`/`QuotaGet` with the listing whole-or-nothing and no cursor, the `Library/Apps` root resolved beside the configuration one under the same single pin, admission against the count ceiling, the client's blob surface, the fake service extended to it, and the root-cache ownership re-check AD4 left incomplete (§3.4). |
-| **AD9** | Temp | `TempCreate`, session-end and boot reaping, quota accounting. |
+| **AD9** ✅ | Temp | `TempCreate`/`TempRelease` as opcodes carrying no scope, with the **service** naming the file so nothing can open one it did not just create; the `<boot-id>-<slot>` naming rule that makes staleness legible with no marker record, the lazy reap of an earlier boot's scratch paid by the create that needs the room, and a boot with no identity refusing the scope alone; `APPDATA_TEMP_MAX_COUNT` admission and the per-file extent ceiling shared with the blob scope; `QuotaGet` reshaped to report both bulk scopes in one answer (`BulkQuota`); `blob.rs` generalised into `bulk.rs` — one `Scope` for what the two share, `BlobStore` and `TempStore` for what they do not; `temp::create`/`temp::release`/`bulk_quota` in the client, and the fake service extended to the scope. **No session-end reap** and **no `Cache/` scope** — §3.14 records why each is a decision rather than an omission. |
 | **AD10** | Remaining migrations | Migrate `fstree`, `lib/wallpaper`/session pinboard, `applib` program library; delete every hand-rolled path. The `docs/src/` page and every §5 amendment but the manifest-field record land with the stage that needs them, and AD4 landed most of them; AD10 lands only what its own migrations drive. |
 
 AD1 and AD2 are the foundation — nothing else can be built first, and they are
@@ -1211,12 +1336,12 @@ Landed as the stages that need them land, never pre-written (§3, §15.2). A
 - **§5.2** ✅ (AD4) — add `CAP_APPDATA_ADMIN` to the capability list.
 - **§3** ✅ (AD5) — the repository map gains `lib/appdata/`, the app-data
   client.
-- **§15.18** ✅ (AD3, AD6) — a jump-sheet row: *"App settings, secrets, blobs
-  and temporary files: the per-app store keyed on bundle id, the publisher pin,
-  the `key = value` format engine, the published scope one app reads another's
-  values through, the sealed scope, descriptor-backed blobs" →
-  `plans/APPDATA.md`*.
-- **`README.md`** ✅ (AD4, AD6, AD7, AD8) — the security/attack-vector matrix gains the
+- **§15.18** ✅ (AD3, AD6, AD9) — a jump-sheet row: *"App settings, secrets,
+  blobs and temporary files: the per-app store keyed on bundle id, the
+  publisher pin, the `key = value` format engine, the published scope one app
+  reads another's values through, the sealed scope, descriptor-backed blobs and
+  per-boot scratch" → `plans/APPDATA.md`*.
+- **`README.md`** ✅ (AD4, AD6, AD7, AD8, AD9) — the security/attack-vector matrix gains the
   app-from-app isolation row and the name-gate row (§13), (AD6) the row for
   cross-app sharing confined to the published scope: an app reaching another
   app's *private* settings through the sharing channel, or using it to probe
@@ -1225,11 +1350,18 @@ Landed as the stages that need them land, never pre-written (§3, §15.2). A
   vault being read as "no secrets saved", and (AD8) two rows for the bulk scope:
   one app reading or overwriting another's blobs — or filling the volume through
   a store no per-user quota can see — and a delegated descriptor conveying more
-  than its grantor opened or growing a file without limit.
+  than its grantor opened or growing a file without limit, and (AD9) the row for
+  scratch: an app reading another's temporary files, or its own from an earlier
+  run, through a name it could ask for.
 - **§16.3** ✅ (AD8) — record the bulk scope: `Blobs/<name>` reached as a
   bounded descriptor rather than as bytes, why the service is the only thing
   that can bound its size, and that its ceilings are §24.4 containment bounds
   rather than §24.1 capacities.
+- **§16.3** ✅ (AD9) — record the temporary scope beside it: `Temp/`, named by
+  the service so nothing can open a file it did not just create, reaped per
+  boot, and bounded by a count of its own against the same per-file extent
+  ceiling. The `Cache/` scope named in the earlier layout is removed, with the
+  reason (§3.14).
 - **`plans/CAPABILITY_USE.md` CU6** ✅ (AD8) — record that the picker's grant is
   read-only because the picker opens a read-only descriptor, not because the
   mechanism can only be that; `fd_grant` now carries the grantor descriptor's

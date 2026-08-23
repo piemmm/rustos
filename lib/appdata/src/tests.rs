@@ -10,14 +10,14 @@
 use alloc::string::String;
 
 use tairix_abi::appdata_ipc::{
-    BlobMode, ConfigScope, APPDATA_BLOB_MAX_BYTES, APPDATA_BLOB_MAX_COUNT, APPDATA_DOCUMENT_MAX,
-    APPDATA_MAX_REPLY,
+    BlobMode, ConfigScope, APPDATA_BLOB_MAX_COUNT, APPDATA_BULK_FILE_MAX_BYTES,
+    APPDATA_DOCUMENT_MAX, APPDATA_MAX_REPLY, APPDATA_TEMP_MAX_COUNT,
 };
 use tairix_abi::Errno;
 use tairix_appconf::ConfError;
 
 use super::fake::FakeService;
-use super::{blobs, read_published, Settings, Vault, READ_ATTEMPTS};
+use super::{blobs, read_published, temp, Settings, Vault, READ_ATTEMPTS};
 
 /// The word the fake bundle is installed under.
 const OWN_WORD: &str = "notes";
@@ -726,12 +726,12 @@ fn a_full_blob_store_refuses_a_new_blob_and_says_so_in_the_quota() {
         blobs::open(&mut host, &alloc::format!("b{n}"), BlobMode::ReadWrite)
             .unwrap_or_else(|err| panic!("blob {n} must be admitted: {err:?}"));
     }
-    let quota = blobs::quota(&mut host).expect("a quota");
+    let quota = crate::bulk_quota(&mut host).expect("a quota");
     assert_eq!(
         quota.blobs, quota.blob_max,
         "the store reports itself full before the refusal explains why"
     );
-    assert_eq!(quota.blob_bytes_max, APPDATA_BLOB_MAX_BYTES);
+    assert_eq!(quota.file_bytes_max, APPDATA_BULK_FILE_MAX_BYTES);
     assert_eq!(
         blobs::open(&mut host, "one-too-many", BlobMode::ReadWrite),
         Err(Errno::LimitExceeded)
@@ -800,7 +800,10 @@ fn a_refused_blob_operation_is_reported_and_never_read_as_an_absence() {
     );
     assert_eq!(blobs::remove(&mut host, "index"), Err(Errno::DeviceOffline));
     assert_eq!(blobs::list(&mut host), Err(Errno::DeviceOffline));
-    assert_eq!(blobs::quota(&mut host).err(), Some(Errno::DeviceOffline));
+    assert_eq!(
+        crate::bulk_quota(&mut host).err(),
+        Some(Errno::DeviceOffline)
+    );
 }
 
 /// The blob scope holds no document, so neither settings handle can see it and
@@ -815,5 +818,96 @@ fn the_blob_scope_shares_no_state_with_any_document() {
     drop(settings);
     let listing = blobs::list(&mut host).expect("a listing");
     assert_eq!(listing, alloc::vec![(String::from("index"), 1)]);
-    assert_eq!(blobs::quota(&mut host).expect("a quota").blobs, 1);
+    assert_eq!(crate::bulk_quota(&mut host).expect("a quota").blobs, 1);
+}
+
+/// Every create answers a fresh file. That is the scope's whole reason to
+/// exist: two instances of one application get scratch of their own without
+/// having to agree on a name, which two that both picked `"spill"` would not.
+#[test]
+fn every_temporary_create_answers_a_file_of_its_own() {
+    let mut host = service();
+    let first = temp::create(&mut host).expect("a temporary file");
+    let second = temp::create(&mut host).expect("a temporary file");
+    assert_ne!(first.name, second.name);
+    assert_ne!(first.grant, 0, "a minted handle is never the invalid one");
+    assert_ne!(first.grant, second.grant);
+    assert_eq!(host.temps().len(), 2);
+}
+
+/// A release frees the file and is idempotent, so it is never an oracle for
+/// what the store holds — and freeing one makes room under the ceiling.
+#[test]
+fn a_release_frees_the_slot_and_a_second_one_changes_nothing() {
+    let mut host = service();
+    let scratch = temp::create(&mut host).expect("a temporary file");
+    temp::release(&mut host, &scratch.name).expect("releases");
+    assert!(host.temps().is_empty());
+    temp::release(&mut host, &scratch.name).expect("releasing an absent file is not an error");
+}
+
+/// The count ceiling is reported through the quota, so an application that
+/// reaches it says "my scratch space is full" rather than surfacing an errno.
+#[test]
+fn a_full_temporary_scope_refuses_a_create_and_says_so_in_the_quota() {
+    let mut host = service();
+    let mut held = alloc::vec::Vec::new();
+    for n in 0..APPDATA_TEMP_MAX_COUNT {
+        held.push(
+            temp::create(&mut host)
+                .unwrap_or_else(|err| panic!("temporary file {n} must be admitted: {err:?}")),
+        );
+    }
+    let quota = crate::bulk_quota(&mut host).expect("a quota");
+    assert_eq!(quota.temps, quota.temp_max);
+    assert_eq!(quota.file_bytes_max, APPDATA_BULK_FILE_MAX_BYTES);
+    assert_eq!(temp::create(&mut host).err(), Some(Errno::LimitExceeded));
+
+    temp::release(&mut host, &held[0].name).expect("releases");
+    assert!(temp::create(&mut host).is_ok());
+}
+
+/// One quota answers for both bulk scopes, so an application deciding whether
+/// to spill to scratch or evict a cached index reads one moment, not two.
+#[test]
+fn the_quota_reports_both_bulk_scopes_in_one_answer() {
+    let mut host = service().with_blob("index", 4096);
+    temp::create(&mut host).expect("a temporary file");
+    let quota = crate::bulk_quota(&mut host).expect("a quota");
+    assert_eq!((quota.blobs, quota.blob_bytes), (1, 4096));
+    assert_eq!(quota.temps, 1);
+    assert_eq!(
+        quota.blob_max,
+        u64::try_from(APPDATA_BLOB_MAX_COUNT).expect("fits")
+    );
+    assert_eq!(
+        quota.temp_max,
+        u64::try_from(APPDATA_TEMP_MAX_COUNT).expect("fits")
+    );
+}
+
+/// The scratch scope holds no document either, so no settings handle can see
+/// it and it cannot see one.
+#[test]
+fn the_temporary_scope_shares_no_state_with_any_document() {
+    let mut host = service().with_store("font.size = 14\n");
+    let scratch = temp::create(&mut host).expect("a temporary file");
+    let settings = Settings::open(&mut host, OWN_WORD);
+    assert_eq!(settings.get(&scratch.name), None);
+    assert_eq!(settings.u32("font.size"), Ok(Some(14)));
+}
+
+/// A store that cannot be reached refuses both temporary operations as
+/// themselves: an empty answer would read as "you have no scratch", which is
+/// not the same thing at all.
+#[test]
+fn an_unreachable_store_refuses_every_temporary_operation() {
+    let mut host = service();
+    let refusal = host.refusal();
+    refusal.set(Some(Errno::DeviceOffline));
+    assert_eq!(temp::create(&mut host).err(), Some(Errno::DeviceOffline));
+    assert_eq!(
+        temp::release(&mut host, "scratch-1"),
+        Err(Errno::DeviceOffline)
+    );
 }

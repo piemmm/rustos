@@ -34,8 +34,9 @@ signed manifest, a parser-sandbox child — has no store and is refused, audited
 
 The operations are `ConfigRead`, `ConfigSet`, `ConfigUnset`, and `ConfigCommit`
 on the caller's own configuration scopes; `PublicRead` on another application's
-**published** document; and `VaultRead`, `VaultSet`, and `VaultUnset` on the
-caller's **sealed** one.
+**published** document; `VaultRead`, `VaultSet`, and `VaultUnset` on the
+caller's **sealed** one; and `BlobOpen`, `BlobDelete`, `BlobList`,
+`TempCreate`, `TempRelease`, and `QuotaGet` on its **bulk** ones.
 
 `PublicRead` is the one shape that names an application, and it is a distinct
 operation precisely so that it carries no scope field: a request that names
@@ -82,6 +83,10 @@ look alike.
         public.conf                         what the app publishes; any app may read
         secret.vault                        the app's secrets, sealed
         .owner                              the publisher ownership pin
+/Users/<u>/Library/Apps/                  ← gated identically: the bulk tree
+    <bundle-id>/
+        Blobs/<name>                        durable bulk data, reached as a descriptor
+        Temp/<boot>-<slot>                  scratch of one boot, named by the service
 /System/Settings/<bundle-id>/settings.conf  optional machine-wide policy layer
 ```
 
@@ -125,11 +130,43 @@ account, so drawing a fresh one would strand every existing vault while looking
 like a clean start. Nothing is cached: it is read afresh per operation, used, and
 wiped.
 
+## The bulk scopes
+
+An index, a cache, a queue, or a staged download is the wrong shape for a
+message, so `BlobOpen` and `TempCreate` answer with a one-shot `fd_grant`
+handle rather than with bytes. The application redeems it and then reads,
+writes, truncates, and maps the file directly against the kernel VFS under this
+service's captured authority: the policy decision is made once at open and this
+service never touches a byte of payload.
+
+What it hands over is bounded. The delegation conveys only the access the
+operation asked for, and a writable one carries a byte-extent ceiling the kernel
+enforces on every write and truncate through it — one figure for both scopes,
+because "how big may a file the user can neither list nor delete become" does
+not turn on whether the file outlives the boot. Admission decides the file
+*count*, per scope, and nothing else: summing sizes at open would do nothing
+about the file a caller already holds open. The bytes are charged to this
+service's uid, so no per-user filesystem quota would ever see them — which is
+why the bound has to live here.
+
+The two scopes differ in who names the file. A **blob** is durable and the
+application names it. A **temporary file** is the scratch of one run and this
+service names it: `TempCreate` carries no name and nothing *opens* a temporary
+file, so the only way to hold one is to have just created it — an application
+can never read scratch it did not write in this process. Their lifetime is the
+boot, carried in the name (`<boot-id>-<slot>`), so an earlier boot's file is
+invisible to every answer and is reclaimed before the next is created; no marker
+record can fall out of step with the directory, a service restart reaps nothing,
+and no start-up walks every account's every store. A boot with no identity
+refuses that scope alone — an unseeded generator is a reason to refuse scratch,
+never a reason to refuse a user their settings.
+
 ## Ownership is pinned to the publisher
 
-Each store carries an `.owner` record naming the **publisher** — the developer's
-stable identity from the signed manifest — rather than the key that signed the
-running build. A release re-signed with a fresh build key therefore opens the
+One `.owner` record governs every scope in both trees — it attests who owns the
+application's *data*, not who owns one file — and it names the **publisher**,
+the developer's stable identity from the signed manifest, rather than the key
+that signed the running build. A release re-signed with a fresh build key therefore opens the
 same store, while a different developer claiming the same bundle identifier is
 refused and audited. The record is fixed-width and self-describing, so a
 truncated or zeroed file attests *nothing* rather than reading as some

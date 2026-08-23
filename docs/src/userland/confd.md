@@ -86,7 +86,7 @@ An abandoned session — a caller that stages and exits — is reclaimed by age.
 No primitive tells a server that a peer died, and losing an abandoned session's
 edits is exactly the contract already stated.
 
-## Four scopes: settings, what it publishes, its secrets, and its bulk data
+## Five scopes: settings, what it publishes, its secrets, its bulk data, and its scratch
 
 `settings.conf` is the **private** scope — the user's settings for that
 application, which no other principal can read. `public.conf` is the
@@ -115,8 +115,8 @@ A foreign read answers the **committed** document, never the publisher's staged
 edits: a published value is what every other application sees, and a reader
 must not act on one that may never be published.
 
-`Blobs/<name>` under `Library/` is the **bulk** scope — see
-[The blob scope](#the-blob-scope) below. It is not a document at all.
+`Blobs/<name>` and `Temp/` under `Library/` are the **bulk** scopes — see
+[The bulk scopes](#the-bulk-scopes) below. Neither is a document at all.
 
 ## The sealed scope
 
@@ -194,16 +194,21 @@ operation, used, and wiped. A vault write is a rare, human-driven act, and
 holding an account's key material in the service's heap for the life of the
 machine would buy a file read it does not need.
 
-## The blob scope
+## The bulk scopes
 
-An application's index, cache, or queue is the wrong shape for a message: the
-IPC payload ceiling is far below what one holds, so a store that proxied bytes
-could not serve them at all. `BlobOpen` therefore answers with a one-shot
-`fd_grant` handle rather than with bytes. The application redeems it
-(`File::from_delegation`) and then reads, writes, truncates, and `file_map`s the
-file **directly** against the kernel VFS, under the service's captured
-authority — so it needs no filesystem capability of its own, and the service
-makes the policy decision once at open and never touches a byte of payload.
+An application's index, cache, queue, or staged download is the wrong shape for
+a message: the IPC payload ceiling is far below what one holds, so a store that
+proxied bytes could not serve them at all. `BlobOpen` and `TempCreate` therefore
+answer with a one-shot `fd_grant` handle rather than with bytes. The application
+redeems it (`File::from_delegation`) and then reads, writes, truncates, and
+`file_map`s the file **directly** against the kernel VFS, under the service's
+captured authority — so it needs no filesystem capability of its own, and the
+service makes the policy decision once at open and never touches a byte of
+payload.
+
+The two scopes differ in exactly one thing: who names the file. `Blobs/<name>`
+is durable and the application names it. `Temp/` is the scratch of one run and
+the **service** names it — see [Scratch](#scratch) below.
 
 The mode decides both what the delegation conveys and whether an absent blob is
 created: `Read` refuses one the application does not hold, `ReadWrite` creates
@@ -214,12 +219,14 @@ separate flag, so "create but do not write" is not a request that exists.
 access the mode asked for, and a writable one carries a byte-extent ceiling the
 kernel enforces on every write and truncate through the descriptor
 ([`fd_grant`](../architecture/syscalls.md)), so an application cannot grow a
-blob past `APPDATA_BLOB_MAX_BYTES` however it uses what it was given.
-Admission enforces the other dimension — the blob *count* — and nothing else:
-summing sizes at open time and refusing the next open would do nothing about
-the blob a caller already holds open, and a defence a hostile application
-defeats in one line is worse than none because it reads as an assurance. So an
-application's whole blob store is bounded by `count × bytes`, hard.
+file past `APPDATA_BULK_FILE_MAX_BYTES` however it uses what it was given —
+one figure for both scopes, because it answers one question and that question
+does not turn on whether the file outlives the boot. Admission enforces the
+other dimension — the file *count*, per scope — and nothing else: summing sizes
+at open time and refusing the next open would do nothing about the file a caller
+already holds open, and a defence a hostile application defeats in one line is
+worse than none because it reads as an assurance. So an application's whole bulk
+store is bounded by `(blob count + temp count) × bytes`, hard.
 
 **Why the ceilings are fixed, and why the service must have them.** They are
 containment bounds, not capacities: they bound what one application may take
@@ -233,15 +240,17 @@ filesystem quota: the gated tree is owned by the service precisely so the
 account's own shell cannot reach it, so every byte written to a blob is charged
 to the *service's* uid and no per-user filesystem quota would ever see it.
 
-`QuotaGet` reports usage against both ceilings, so an application that reaches
-one says "this cache is full" in its own terms instead of surfacing an errno.
+`QuotaGet` reports usage against every ceiling, **both scopes in one answer**,
+so an application that reaches one says "this cache is full" in its own terms
+instead of surfacing an errno — and one deciding whether to spill to scratch or
+evict a cached index reads one moment rather than two that could disagree.
 
-**One pin, both trees.** Blobs live under `Library/`, configuration under
+**One pin, both trees.** Bulk data lives under `Library/`, configuration under
 `Settings/`, and the one `.owner` record in the configuration store governs
 both: it attests who owns the *application's data*, not who owns one file. A
-blob operation resolves and pins through the configuration store first and
+bulk operation resolves and pins through the configuration store first and
 reaches the bulk tree only behind that check, so a publisher squatting another
-developer's identifier is refused before a byte of its blobs is reachable. Each
+developer's identifier is refused before a byte of its data is reachable. Each
 gated root's ownership is proved separately, though — one being the service's
 says nothing about the other.
 
@@ -255,6 +264,57 @@ A blob name is validated by the same store-name grammar a bundle identifier is
 case-insensitive volume, or carry a control character is a name at all — because
 it is the same security question: a single path component the service composes.
 
+## Scratch
+
+`TempCreate` carries **no name**, and there is no operation that opens a
+temporary file. The service picks the name, so the only way to hold one is to
+have just created it: an application can never read scratch it did not write in
+this process, not even its own from an earlier run. Freshness without
+coordination is the whole point — two instances of one application that each
+chose `"spill"` would corrupt each other, which is the very defect this service
+exists to prevent, reproduced inside one bundle.
+
+The name it is handed back is good for exactly one thing, `TempRelease`, and the
+service composes the path from the *caller's* attested store, so naming another
+application's file reaches nothing. A release of a file the caller does not hold
+removes nothing and succeeds, so it is no oracle either.
+
+**Their lifetime is the boot, and the name carries it.** A temporary file is
+`<boot-id>-<slot>`, both lowercase hex. A file an earlier boot left is invisible
+to every answer the service gives and is reclaimed before the next file is
+created. Three things follow, and each is why there is no marker record and no
+boot-time sweep:
+
+* The name cannot disagree with itself, where a marker file beside the scratch
+  would be a second source of truth a torn write could contradict.
+* A `confd` restart reaps **nothing** — the boot identity is the kernel's, minted
+  once per boot, so a relaunched service leaves every running application's
+  scratch exactly where it was.
+* Nothing walks every account's every store at start-up. The sweep is paid by the
+  one operation that needs the room, for the one application that asked.
+
+The slot half is *drawn*, not counted. A counter would have to be remembered
+somewhere, and whatever remembers it must eventually forget — after which a name
+would be re-issued and a caller that released the same name twice would delete a
+later file it had never seen. A drawn name that turns out to be taken therefore
+refuses: it means the generator is not delivering what it claimed, and going on
+would hand the caller another instance's open scratch.
+
+**A boot with no identity refuses this scope and nothing else.** A port whose
+random reserve never seeded reports the unset sentinel, and with it the service
+cannot tell one boot's scratch from another's — so it serves the scope not at
+all rather than leaving files it could never reclaim. Settings, published
+documents, secrets and blobs answer normally: an unseeded generator is a reason
+to refuse scratch, never a reason to refuse a user their settings.
+
+There is **no session-end reap**. It would need a privileged control operation
+on the one endpoint that holds every account's secrets, and what it would buy is
+earlier reclamation of bytes and nothing else: because nothing opens a temporary
+file, no application can observe another session's scratch even while it is
+still on the volume, and the count ceiling bounds how much of it there can be.
+
+There is still no `/tmp`, and nothing here creates one.
+
 ## The tree it serves from
 
 ```text
@@ -267,7 +327,8 @@ it is the same security question: a single path component the service composes.
         .owner                              the publisher ownership pin
 /Users/<u>/Library/Apps/                  ← gated identically: the bulk tree
     <bundle-id>/
-        Blobs/<name>                        the app's bulk data, reached as a descriptor
+        Blobs/<name>                        durable bulk data, reached as a descriptor
+        Temp/<boot>-<slot>                  scratch of one boot, named by the service
 /System/Settings/<bundle-id>/settings.conf  optional machine-wide policy layer
 ```
 
@@ -275,8 +336,8 @@ The master-secret record sits in the gated root beside the per-app directories,
 because it is the *account's* key material and every application's vault key is
 derived from it. Its leading dot cannot be a bundle identifier — the identifier
 grammar forbids one — so no application's store can ever be named that. It is
-under `Settings/` rather than `Library/` because `Library/` holds the evictable
-and boot-reaped scopes, and key material may be in neither.
+under `Settings/` rather than `Library/` because `Library/` holds the boot-reaped
+scope, and key material may not be in that.
 
 A *per-app* directory cannot be the gate itself: all of a user's applications
 may write `Settings/` and `Library/`, so any of them could pre-create a sibling
@@ -402,14 +463,14 @@ process, reach the credential store, seize a user's file, or hand one away.
 Drawing randomness needs no capability at all, so the sealed scope adds nothing
 to the ceiling.
 
-Compromising it yields applications' settings, **their secrets**, and their
-blobs — it is the principal that holds every account's master secret, and no
+Compromising it yields applications' settings, **their secrets**, and their bulk
+data — it is the principal that holds every account's master secret, and no
 arrangement in which one service can seal and open vaults avoids that. What it
 does *not* yield is anything outside the app-data tree: not a credential record,
 not another user's files, not a process.
 
-`CAP_FS_ACCESS` is also what lets it delegate a blob descriptor: delegating
-filesystem authority is gated exactly as acquiring it, so the blob scope adds
+`CAP_FS_ACCESS` is also what lets it delegate a bulk descriptor: delegating
+filesystem authority is gated exactly as acquiring it, so the bulk scopes add
 nothing to the ceiling either.
 
 ## What it does not isolate

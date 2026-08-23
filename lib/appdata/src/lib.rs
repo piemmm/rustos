@@ -23,6 +23,10 @@
 //! let handle = blobs::open(&mut host, "mail.index", BlobMode::ReadWrite)?;
 //! let index = tairix_rt::File::from_delegation(handle)?;
 //! index.write_at(0, b"...")?;                   // straight to the VFS
+//!
+//! let scratch = temp::create(&mut host)?;       // a fresh file, service-named
+//! let spill = tairix_rt::File::from_delegation(scratch.grant)?;
+//! temp::release(&mut host, &scratch.name)?;     // done with it
 //! ```
 //!
 //! # No app spells a path, and none names itself
@@ -36,7 +40,7 @@
 //! a *published* document and nothing else — there is no request shape that
 //! reaches another application's private settings.
 //!
-//! # Four scopes
+//! # Five scopes
 //!
 //! [`Settings::open`] is the application's **private** scope: the user's
 //! settings for it, which nothing else can read. [`Settings::open_published`]
@@ -53,10 +57,17 @@
 //! service seals each write before it replies; and opening it can *fail*,
 //! because "I could not read your secrets" is not "you have none".
 //!
-//! [`blobs`] is the **bulk** scope, and it is not a document at all: an
-//! application's index, cache, or queue is reached as a *descriptor*, so the
-//! bytes never cross this channel and the application reads, writes,
+//! [`blobs`] is the durable **bulk** scope, and it is not a document at all:
+//! an application's index, cache, or queue is reached as a *descriptor*, so
+//! the bytes never cross this channel and the application reads, writes,
 //! truncates, and memory-maps directly against the kernel VFS at full speed.
+//!
+//! [`temp`] is the **scratch** of one run, reached the same way. It differs
+//! from [`blobs`] in who names the file: the service does, so a fresh file is
+//! fresh without two instances of one application having to agree on a name —
+//! and nothing *opens* a temporary file, so an application can never read
+//! scratch it did not write in this process. [`bulk_quota`] reports both
+//! scopes' usage in one answer.
 //!
 //! # Three layers, and which of them this library owns
 //!
@@ -112,9 +123,9 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use tairix_abi::appdata_ipc::{
-    decode_document_reply, AppDataRequest, ConfigDocument, ConfigScope,
-    APPDATA_DOCUMENT_HEADER_LEN, APPDATA_DOCUMENT_MAX, APPDATA_HEADER_LEN, APPDATA_MAX_REQUEST,
-    APPDATA_SETTINGS_FILE,
+    decode_document_reply, decode_quota_reply, AppDataRequest, BulkQuota, ConfigDocument,
+    ConfigScope, APPDATA_DOCUMENT_HEADER_LEN, APPDATA_DOCUMENT_MAX, APPDATA_HEADER_LEN,
+    APPDATA_MAX_REQUEST, APPDATA_QUOTA_REPLY_LEN, APPDATA_SETTINGS_FILE,
 };
 use tairix_abi::appinfo::{BundleEntry, BUNDLE_ID_MAX};
 use tairix_abi::reply::{decode_status_reply, STATUS_REPLY_LEN};
@@ -809,10 +820,10 @@ fn negotiate<'a>(
 /// and a writable one carries an extent ceiling the kernel enforces on every
 /// write and truncate through the descriptor. So an application cannot grow a
 /// blob past
-/// [`APPDATA_BLOB_MAX_BYTES`](tairix_abi::appdata_ipc::APPDATA_BLOB_MAX_BYTES)
+/// [`APPDATA_BULK_FILE_MAX_BYTES`](tairix_abi::appdata_ipc::APPDATA_BULK_FILE_MAX_BYTES)
 /// however it uses what it was given, and
 /// [`APPDATA_BLOB_MAX_COUNT`](tairix_abi::appdata_ipc::APPDATA_BLOB_MAX_COUNT)
-/// bounds how many blobs it may hold at all. [`blobs::quota`] reports usage
+/// bounds how many blobs it may hold at all. [`bulk_quota`] reports usage
 /// against both, so an application that reaches one says which rather than
 /// surfacing an errno.
 ///
@@ -827,9 +838,9 @@ pub mod blobs {
     use alloc::string::String;
     use alloc::vec::Vec;
     use tairix_abi::appdata_ipc::{
-        decode_blob_list_reply, decode_grant_reply, decode_quota_reply, AppDataRequest,
-        BlobListing, BlobMode, BlobQuota, APPDATA_BLOB_LIST_HEADER_LEN, APPDATA_BLOB_LIST_MAX,
-        APPDATA_GRANT_REPLY_LEN, APPDATA_HEADER_LEN, APPDATA_NAME_MAX, APPDATA_QUOTA_REPLY_LEN,
+        decode_blob_list_reply, decode_grant_reply, AppDataRequest, BlobListing, BlobMode,
+        APPDATA_BLOB_LIST_HEADER_LEN, APPDATA_BLOB_LIST_MAX, APPDATA_GRANT_REPLY_LEN,
+        APPDATA_HEADER_LEN, APPDATA_NAME_MAX,
     };
     use tairix_abi::reply::STATUS_REPLY_LEN;
     use tairix_abi::Errno;
@@ -922,25 +933,118 @@ pub mod blobs {
         }
     }
 
-    /// The calling application's blob usage, and the ceilings it is bounded
-    /// by.
-    ///
-    /// # Errors
-    ///
-    /// As [`list`].
-    pub fn quota(host: &mut dyn AppDataHost) -> Result<BlobQuota, Errno> {
-        let mut frame = [0u8; APPDATA_HEADER_LEN];
-        let len = AppDataRequest::QuotaGet {}.encode(&mut frame)?;
-        let mut reply = [0u8; APPDATA_QUOTA_REPLY_LEN];
-        let got = host.call(&frame[..len], &mut reply)?;
-        decode_quota_reply(&reply[..got])
-    }
-
     // The request buffers above are sized to the widest frame each operation
     // can produce, not to the widest in the protocol: a blob call carries a
     // name at most, so a `ConfigSet`'s kilobyte of value has no business on
     // its stack.
     const _: () = assert!(APPDATA_HEADER_LEN + APPDATA_NAME_MAX <= APPDATA_MAX_REQUEST);
+}
+
+/// The **scratch** scope: an application's temporary files, reached as
+/// descriptors exactly as [`blobs`] are.
+///
+/// # The service names the file, and nothing opens one
+///
+/// [`temp::create`] answers a fresh file every time, with a name the *service*
+/// chose. That is the whole point of the scope: freshness without
+/// coordination, so two instances of one application cannot land on each
+/// other's scratch the way two that both picked `"spill"` would. There is no
+/// operation that opens a temporary file by name, so an application can never
+/// read scratch it did not write in this process — not even its own from an
+/// earlier run.
+///
+/// The name it is handed back is good for exactly one thing, [`temp::release`].
+///
+/// # Their lifetime is the boot
+///
+/// A file left behind by an earlier boot is reclaimed before the next is
+/// created, and is reachable by nothing in the meantime. An application that
+/// releases what it finishes with therefore holds one slot at a time; one that
+/// never releases holds them until the next boot, which is what
+/// [`APPDATA_TEMP_MAX_COUNT`](tairix_abi::appdata_ipc::APPDATA_TEMP_MAX_COUNT)
+/// bounds — and it bounds nothing but that application.
+pub mod temp {
+    use super::AppDataHost;
+    use alloc::string::String;
+    use tairix_abi::appdata_ipc::{
+        decode_temp_reply, AppDataRequest, APPDATA_HEADER_LEN, APPDATA_NAME_MAX,
+        APPDATA_TEMP_REPLY_LEN,
+    };
+    use tairix_abi::reply::{decode_status_reply, STATUS_REPLY_LEN};
+    use tairix_abi::Errno;
+
+    /// A temporary file the service has just created.
+    #[derive(Clone, Debug, Eq, PartialEq)]
+    pub struct TempFile {
+        /// The one-shot delegation handle, redeemed with
+        /// `tairix_rt::File::from_delegation`. It conveys read and write
+        /// access bounded by an extent ceiling the kernel enforces.
+        pub grant: u64,
+        /// The name the service gave the file, to [`release`] it by.
+        pub name: String,
+    }
+
+    /// Create a fresh temporary file for the calling application.
+    ///
+    /// # Errors
+    ///
+    /// The service's own typed refusal, or the transport's:
+    /// [`Errno::NotFound`] when nothing has bound the endpoint,
+    /// [`Errno::PermissionDenied`] for a caller running no signed bundle or a
+    /// store another publisher owns, [`Errno::LimitExceeded`] when the
+    /// application already holds as many temporary files as it may,
+    /// [`Errno::EntropyNotReady`] on a machine whose boot carries no identity —
+    /// which stays true for that whole boot — and [`Errno::DeviceOffline`] for
+    /// a volume that cannot be reached.
+    pub fn create(host: &mut dyn AppDataHost) -> Result<TempFile, Errno> {
+        let mut frame = [0u8; APPDATA_HEADER_LEN];
+        let len = AppDataRequest::TempCreate {}.encode(&mut frame)?;
+        let mut reply = [0u8; APPDATA_TEMP_REPLY_LEN];
+        let got = host.call(&frame[..len], &mut reply)?;
+        let (grant, name) = decode_temp_reply(&reply[..got])?;
+        Ok(TempFile {
+            grant,
+            name: String::from(name),
+        })
+    }
+
+    /// Delete the temporary file `name`.
+    ///
+    /// Releasing one the application does not hold changes nothing and is not
+    /// an error, so this is never an oracle for what the store holds. An
+    /// application that never releases leaves its scratch until the next boot.
+    ///
+    /// # Errors
+    ///
+    /// As [`create`], without [`Errno::LimitExceeded`].
+    pub fn release(host: &mut dyn AppDataHost, name: &str) -> Result<(), Errno> {
+        let mut frame = [0u8; APPDATA_HEADER_LEN + APPDATA_NAME_MAX];
+        let len = AppDataRequest::TempRelease { name }.encode(&mut frame)?;
+        let mut reply = [0u8; STATUS_REPLY_LEN];
+        let got = host.call(&frame[..len], &mut reply)?;
+        decode_status_reply(&reply[..got])
+    }
+}
+
+/// The calling application's bulk-store usage — blobs and temporary files
+/// both — and the ceilings it is bounded by.
+///
+/// One answer for both scopes, because they are one store: an application
+/// deciding whether to spill to scratch or evict a cached index reads one
+/// moment rather than two that could disagree.
+///
+/// # Errors
+///
+/// The service's own typed refusal, or the transport's: [`Errno::NotFound`]
+/// when nothing has bound the endpoint, [`Errno::PermissionDenied`] for a
+/// caller running no signed bundle or a store another publisher owns,
+/// [`Errno::DeviceOffline`] for a volume that cannot be reached.
+pub fn bulk_quota(host: &mut dyn AppDataHost) -> Result<BulkQuota, Errno> {
+    let mut frame = [0u8; APPDATA_HEADER_LEN];
+    let len = AppDataRequest::QuotaGet {}.encode(&mut frame)?;
+    let mut reply = [0u8; APPDATA_QUOTA_REPLY_LEN];
+    let got = host.call(&frame[..len], &mut reply)?;
+    decode_quota_reply(&reply[..got])
 }
 
 #[cfg(test)]

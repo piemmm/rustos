@@ -170,9 +170,17 @@ pub enum StoreError {
     BlobNotFound,
     /// The application already holds as many blobs as it may.
     BlobLimit,
-    /// A blob name outside the store-name grammar reached the store, which the
+    /// The application already holds as many temporary files as it may.
+    TempLimit,
+    /// The temporary scope cannot be served for the running boot: the boot has
+    /// no identity, or the generator could not draw a name. Both are the same
+    /// root cause — the kernel's random reserve was not seeded — and both
+    /// refuse the same work, so they are one refusal rather than two spellings
+    /// of "no randomness".
+    TempUnavailable,
+    /// A name outside the store-name grammar reached the bulk store, which the
     /// wire's own decoder should already have refused.
-    BlobNameRefused,
+    StoreNameRefused,
 }
 
 impl StoreError {
@@ -194,14 +202,21 @@ impl StoreError {
             // principal learns anything either way, because no request shape
             // reaches another application's secrets or blobs at all.
             Self::NoHome | Self::BlobNotFound => Errno::NotFound,
-            Self::DocumentRefused | Self::BlobNameRefused => Errno::OutOfRange,
+            Self::DocumentRefused | Self::StoreNameRefused => Errno::OutOfRange,
             Self::Unavailable => Errno::DeviceOffline,
-            Self::BlobLimit => Errno::LimitExceeded,
+            Self::BlobLimit | Self::TempLimit => Errno::LimitExceeded,
             Self::Vault(VaultError::MasterSecretRefused | VaultError::VaultMalformed) => {
                 Errno::BadMagic
             }
             Self::Vault(VaultError::VaultUnsealFailed) => Errno::SignatureInvalid,
-            Self::Vault(VaultError::EntropyUnavailable) => Errno::EntropyNotReady,
+            // One root cause, one errno: the kernel's random reserve was not
+            // seeded, so no key material could be drawn and no boot identity
+            // was minted to name a temporary file by. The audit stream is where
+            // the two are told apart, because only an operator can act on the
+            // difference.
+            Self::Vault(VaultError::EntropyUnavailable) | Self::TempUnavailable => {
+                Errno::EntropyNotReady
+            }
         }
     }
 
@@ -228,7 +243,9 @@ impl StoreError {
             | Self::Vault(_)
             | Self::BlobNotFound
             | Self::BlobLimit
-            | Self::BlobNameRefused => false,
+            | Self::TempLimit
+            | Self::TempUnavailable
+            | Self::StoreNameRefused => false,
         }
     }
 
@@ -246,7 +263,9 @@ impl StoreError {
             Self::Vault(err) => err.reason(),
             Self::BlobNotFound => "the application holds no blob of that name",
             Self::BlobLimit => "the application already holds as many blobs as it may",
-            Self::BlobNameRefused => "the blob name is outside the store-name grammar",
+            Self::TempLimit => "the application already holds as many temporary files as it may",
+            Self::TempUnavailable => "the running boot has no identity to name temporary files by",
+            Self::StoreNameRefused => "the store name is outside the store-name grammar",
         }
     }
 }

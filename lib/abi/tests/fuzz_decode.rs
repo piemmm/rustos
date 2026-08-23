@@ -26,10 +26,10 @@
 
 use tairix_abi::appdata_ipc::{
     decode_blob_list_reply, decode_document_reply, decode_grant_reply, decode_quota_reply,
-    encode_blob_list_reply, encode_document_reply, encode_grant_reply, encode_quota_reply,
-    AppDataRequest, BlobListing, ConfigDocument, APPDATA_BLOB_ENTRY_LEN, APPDATA_BLOB_LIST_MAX,
-    APPDATA_DOCUMENT_MAX, APPDATA_GRANT_REPLY_LEN, APPDATA_MAX_REPLY, APPDATA_MAX_REQUEST,
-    APPDATA_QUOTA_REPLY_LEN,
+    decode_temp_reply, encode_blob_list_reply, encode_document_reply, encode_grant_reply,
+    encode_quota_reply, encode_temp_reply, AppDataRequest, BlobListing, ConfigDocument,
+    APPDATA_BLOB_ENTRY_LEN, APPDATA_BLOB_LIST_MAX, APPDATA_DOCUMENT_MAX, APPDATA_GRANT_REPLY_LEN,
+    APPDATA_MAX_REPLY, APPDATA_MAX_REQUEST, APPDATA_QUOTA_REPLY_LEN, APPDATA_TEMP_REPLY_LEN,
 };
 use tairix_abi::display_ipc::{decode_mode_reply, DisplayRequest};
 use tairix_abi::driver::net_channel::{
@@ -637,6 +637,17 @@ fn exercise_appdata_ipc(bytes: &[u8]) {
         let mut buf = [0u8; APPDATA_QUOTA_REPLY_LEN];
         let len = encode_quota_reply(&quota, &mut buf).expect("an accepted quota must re-encode");
         assert_eq!(decode_quota_reply(&buf[..len]), Ok(quota));
+    }
+    // A temporary-file reply carries a name the caller hands straight back to
+    // a release, so an accepted one must already be inside the store-name
+    // grammar — never a fragment a caller could compose a path from.
+    if let Ok((handle, name)) = decode_temp_reply(bytes) {
+        assert_ne!(handle, 0, "a decoded grant handle is never the invalid one");
+        assert!(tairix_abi::appdata_ipc::validate_bulk_name(name).is_ok());
+        let mut buf = [0u8; APPDATA_TEMP_REPLY_LEN];
+        let len =
+            encode_temp_reply(handle, name, &mut buf).expect("an accepted reply must re-encode");
+        assert_eq!(decode_temp_reply(&buf[..len]), Ok((handle, name)));
     }
 }
 

@@ -15,12 +15,18 @@
 //! observe — one document, no layers, no staging, a write applied before the
 //! reply, and a refusal that is a refusal rather than an empty vault.
 //!
-//! Nor does it delegate a real descriptor for the blob scope: minting one is
+//! Nor does it delegate a real descriptor for the bulk scopes: minting one is
 //! the kernel's, and a fake that faked a handle table would be a second
 //! opinion about a capability. What it reproduces is what a *client* can
 //! observe — a mode that decides whether an absent blob is created, a count
 //! ceiling, an idempotent delete, and a whole-or-nothing listing — plus the
 //! handle each open minted, so a test can assert one was.
+//!
+//! Its temporary scope names files the way the service does in the one respect
+//! a client can see: every create answers a name of its own that nothing can
+//! reopen. It does not reproduce the boot half of the naming rule, because a
+//! client never observes a reboot within one run — that reap is the service's,
+//! behind its own tests.
 //!
 //! Test scaffolding only. It is never part of a TAIRiX build: the feature is
 //! enabled by a `[dev-dependencies]` entry, never by a program.
@@ -32,8 +38,9 @@ use core::cell::Cell;
 
 use tairix_abi::appdata_ipc::{
     encode_blob_entry, encode_blob_list_reply, encode_document_reply, encode_grant_reply,
-    encode_quota_reply, AppDataRequest, BlobEntry, BlobQuota, ConfigScope, APPDATA_BLOB_ENTRY_LEN,
-    APPDATA_BLOB_MAX_BYTES, APPDATA_BLOB_MAX_COUNT,
+    encode_quota_reply, encode_temp_reply, AppDataRequest, BlobEntry, BulkQuota, ConfigScope,
+    APPDATA_BLOB_ENTRY_LEN, APPDATA_BLOB_MAX_COUNT, APPDATA_BULK_FILE_MAX_BYTES,
+    APPDATA_TEMP_MAX_COUNT,
 };
 use tairix_abi::reply::encode_status_reply;
 use tairix_abi::Errno;
@@ -90,6 +97,9 @@ pub struct FakeService {
     growing_writer: bool,
     /// The blobs the application holds, name and length, in insertion order.
     blobs: Vec<(String, u64)>,
+    /// The temporary files it holds, name and length, in creation order. The
+    /// service names them, so a test never spells one.
+    temps: Vec<(String, u64)>,
     /// Grant handles minted so far. A handle is the count at mint time, so it
     /// is never zero — the reserved invalid value the kernel's mint also never
     /// produces.
@@ -115,6 +125,7 @@ impl FakeService {
             calls: 0,
             growing_writer: false,
             blobs: Vec::new(),
+            temps: Vec::new(),
             grants: 0,
         }
     }
@@ -244,6 +255,13 @@ impl FakeService {
         &self.blobs
     }
 
+    /// The temporary files the application holds, name and length, in creation
+    /// order.
+    #[must_use]
+    pub fn temps(&self) -> &[(String, u64)] {
+        &self.temps
+    }
+
     /// Grant handles minted so far — how a test proves an open delegated
     /// something rather than answering out of the fake's own state.
     #[must_use]
@@ -286,12 +304,12 @@ impl FakeService {
 }
 
 impl FakeService {
-    /// Serve one blob-scope request.
+    /// Serve one bulk-scope request.
     ///
-    /// Split out of [`AppDataHost::call`] because the blob scope is a family of
-    /// its own: it holds no document, so it shares none of the configuration
-    /// arms' state.
-    fn blob(&mut self, request: &AppDataRequest<'_>, reply: &mut [u8]) -> Result<usize, Errno> {
+    /// Split out of [`AppDataHost::call`] because the bulk scopes are a family
+    /// of their own: they hold no document, so they share none of the
+    /// configuration arms' state.
+    fn bulk(&mut self, request: &AppDataRequest<'_>, reply: &mut [u8]) -> Result<usize, Errno> {
         match *request {
             AppDataRequest::BlobOpen { name, mode } => {
                 if !self.blobs.iter().any(|(known, _)| known == name) {
@@ -321,12 +339,32 @@ impl FakeService {
                 }
                 encode_blob_list_reply(&listing, capacity, reply)
             }
+            AppDataRequest::TempCreate {} => {
+                if self.temps.len() >= APPDATA_TEMP_MAX_COUNT {
+                    return Err(Errno::LimitExceeded);
+                }
+                self.grants += 1;
+                // A name of its own for every create, as the service's drawn
+                // slot gives: what a client can observe is that no two are
+                // alike and that nothing reopens one.
+                let mut name = String::from("scratch-");
+                let _ = core::fmt::Write::write_fmt(&mut name, format_args!("{}", self.grants));
+                self.temps.push((name.clone(), 0));
+                encode_temp_reply(self.grants, &name, reply)
+            }
+            AppDataRequest::TempRelease { name } => {
+                self.temps.retain(|(known, _)| known != name);
+                Ok(status(Ok(()), reply))
+            }
             _ => encode_quota_reply(
-                &BlobQuota {
+                &BulkQuota {
                     blobs: self.blobs.len() as u64,
-                    bytes: self.blobs.iter().map(|(_, len)| *len).sum(),
+                    blob_bytes: self.blobs.iter().map(|(_, len)| *len).sum(),
+                    temps: self.temps.len() as u64,
+                    temp_bytes: self.temps.iter().map(|(_, len)| *len).sum(),
                     blob_max: APPDATA_BLOB_MAX_COUNT as u64,
-                    blob_bytes_max: APPDATA_BLOB_MAX_BYTES,
+                    temp_max: APPDATA_TEMP_MAX_COUNT as u64,
+                    file_bytes_max: APPDATA_BULK_FILE_MAX_BYTES,
                 },
                 reply,
             ),
@@ -409,7 +447,9 @@ impl AppDataHost for FakeService {
             AppDataRequest::BlobOpen { .. }
             | AppDataRequest::BlobDelete { .. }
             | AppDataRequest::BlobList { .. }
-            | AppDataRequest::QuotaGet {} => self.blob(&request, reply),
+            | AppDataRequest::QuotaGet {}
+            | AppDataRequest::TempCreate {}
+            | AppDataRequest::TempRelease { .. } => self.bulk(&request, reply),
             AppDataRequest::PublicRead {
                 bundle_id,
                 capacity,

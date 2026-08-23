@@ -13,19 +13,20 @@
 //! their per-inode gate and the service is its only holder, so there is no
 //! second path to the bytes.
 //!
-//! # Four scopes, and the one request shape that names another app
+//! # Five scopes, and the one request shape that names another app
 //!
 //! An application's store holds a [`ConfigScope::Private`] document — the
 //! user's settings for that app, which nothing else may read — a
 //! [`ConfigScope::Public`] one, which the app publishes for other
 //! applications to read, a **sealed** one, encrypted at rest under a key
 //! derived per (account, application) and reached only through the `Vault`
-//! operations, and a **blob** store for bulk data reached as a descriptor
-//! rather than as bytes on this channel. Every *configuration* operation
-//! carries the scope; none of them carries a bundle identifier, because the
-//! daemon derives which store to open from the [`Origin`](crate::Origin) the
-//! kernel attests for the calling task. So there is no request shape by which
-//! an app can claim to be another app.
+//! operations, a **blob** store for durable bulk data reached as a descriptor
+//! rather than as bytes on this channel, and a **temporary** store for the
+//! scratch of one run. Every *configuration* operation carries the scope; none
+//! of them carries a bundle identifier, because the daemon derives which store
+//! to open from the [`Origin`](crate::Origin) the kernel attests for the
+//! calling task. So there is no request shape by which an app can claim to be
+//! another app.
 //!
 //! The single exception is [`AppDataRequest::PublicRead`], which names a
 //! *foreign* application's identifier — and it is a distinct operation
@@ -103,13 +104,29 @@
 //!
 //! The delegation is what bounds the authority handed over. It carries the
 //! access the mode asked for and, for a writable blob, a byte-extent ceiling
-//! the kernel enforces — so an application cannot grow its blob store past
-//! [`APPDATA_BLOB_MAX_BYTES`] however it uses the descriptor, and
+//! the kernel enforces — so an application cannot grow a bulk file past
+//! [`APPDATA_BULK_FILE_MAX_BYTES`] however it uses the descriptor, and
 //! [`APPDATA_BLOB_MAX_COUNT`] bounds how many blobs it may hold at all. Both
 //! are fixed containment bounds rather than capacities: they bound what one
 //! application may take from the *user's* volume, and a bigger machine must
 //! not let it hide a bigger unmanaged pile of data in a store the user cannot
 //! list or delete.
+//!
+//! # Scratch that no request can open
+//!
+//! [`AppDataRequest::TempCreate`] answers with a descriptor for a **fresh**
+//! temporary file and the name the daemon gave it. The caller names nothing on
+//! the way in, and there is no operation that opens a temporary file by name —
+//! so an application can never read scratch it did not just create, not even
+//! its own from an earlier run. The name it is handed back is good for exactly
+//! one thing, [`AppDataRequest::TempRelease`].
+//!
+//! Their lifetime is the boot: a file left behind by an earlier one is
+//! reclaimed before the next is created and is reachable by nothing in the
+//! meantime. [`APPDATA_TEMP_MAX_COUNT`] bounds how many an application may
+//! hold at once, and [`APPDATA_BULK_FILE_MAX_BYTES`] bounds each, by the same
+//! containment argument the blob scope makes: the bytes are charged to the
+//! daemon's own uid, so no per-user filesystem quota would ever see them.
 //!
 //! # Wire shape
 //!
@@ -133,11 +150,12 @@
 //!
 //! The **name** slot carries whichever single store name the operation names —
 //! a foreign application's bundle identifier for
-//! [`AppDataRequest::PublicRead`], a blob name for the blob operations — and
-//! each validates it under the grammar for its own kind. Both are one path
-//! component in a store the daemon composes, so they share one width and one
-//! character grammar; what they do not share is a request shape, so no frame
-//! can name an application where a blob belongs or the reverse.
+//! [`AppDataRequest::PublicRead`], a blob name for the blob operations, a
+//! temporary file's for [`AppDataRequest::TempRelease`] — and each validates it
+//! under the grammar for its own kind. All are one path component in a store
+//! the daemon composes, so they share one width and one character grammar;
+//! what they do not share is a request shape, so no frame can name an
+//! application where a file belongs or the reverse.
 //!
 //! The record is variable-width rather than padded to its widest form: a
 //! `ConfigRead` is twenty bytes and a `ConfigCommit` is twenty, so padding
@@ -156,7 +174,7 @@
 //! `users_admin` request codec bounds a record whose field rules live in
 //! `lib/users`. The grammars it *does* apply are the two store-name ones
 //! ([`validate_bundle_id`](crate::validate_bundle_id),
-//! [`validate_blob_name`]), because a name that becomes a path component in a
+//! [`validate_bulk_name`]), because a name that becomes a path component in a
 //! store is crossing a trust boundary and that grammar lives in this crate.
 
 use crate::appinfo::BUNDLE_ID_MAX;
@@ -246,28 +264,46 @@ pub const APPDATA_NAME_MAX: usize = BUNDLE_ID_MAX;
 /// spliced from two snapshots.
 pub const APPDATA_BLOB_MAX_COUNT: usize = 64;
 
-/// Maximum length, in bytes, of one blob — the extent ceiling the descriptor
+/// Maximum number of temporary files one application may hold in one account
+/// at once.
+///
+/// A fixed containment bound like [`APPDATA_BLOB_MAX_COUNT`], and deliberately
+/// tighter: a scratch file that still exists is either live or leaked, and the
+/// live set of an application is a handful per running instance across a
+/// handful of instances. [`AppDataRequest::TempRelease`] frees a slot at once
+/// and a boot frees them all, so an application that reaches this has kept
+/// scratch files it never finished with rather than met a workload the scope
+/// is too small for.
+pub const APPDATA_TEMP_MAX_COUNT: usize = 32;
+
+/// Maximum length, in bytes, of one file in an application's bulk store — a
+/// blob or a temporary file alike. It is the extent ceiling the descriptor
 /// grant carries, enforced by the kernel on every write and truncate through
 /// it.
+///
+/// One figure for both scopes because it answers one question — how big may a
+/// file the user can neither list nor delete become — and that question does
+/// not turn on whether the file outlives the boot.
 ///
 /// A fixed containment bound, not a capacity, and deliberately not derived
 /// from discovered hardware: it bounds what one application may take from the
 /// *user's* volume, and there is no honest hardware quantity to scale a disk
-/// bound by. Every open blob is bounded by this one figure, so an
-/// application's whole blob store is bounded by
-/// [`APPDATA_BLOB_MAX_COUNT`] × this — a hard bound rather than an
-/// admission estimate.
+/// bound by. Every open file is bounded by this one figure, so an
+/// application's bulk store is bounded by
+/// ([`APPDATA_BLOB_MAX_COUNT`] + [`APPDATA_TEMP_MAX_COUNT`]) × this — a hard
+/// bound rather than an admission estimate.
 ///
 /// What it is sized for is a working set: a mail or search index, a thumbnail
-/// cache, a queue. Data that genuinely outgrows it is the *user's* data and
-/// belongs in the user's own files, where the file manager lists it, backup
-/// covers it, and the user can delete it — not hidden in a store the user
-/// cannot reach.
-pub const APPDATA_BLOB_MAX_BYTES: u64 = 64 * 1024 * 1024;
+/// cache, a queue, a staged download. Data that genuinely outgrows it is the
+/// *user's* data and belongs in the user's own files, where the file manager
+/// lists it, backup covers it, and the user can delete it — not hidden in a
+/// store the user cannot reach.
+pub const APPDATA_BULK_FILE_MAX_BYTES: u64 = 64 * 1024 * 1024;
 
-/// Validate a blob name.
+/// Validate the name of one file in an application's bulk store: a blob name,
+/// or the name the service minted for a temporary file.
 ///
-/// The name becomes one path component inside the application's own blob
+/// The name becomes one path component inside the application's own store
 /// directory, so it shares the one store-name grammar
 /// ([`validate_store_name`](crate::appinfo::validate_store_name)) with a
 /// bundle identifier and is bounded by [`APPDATA_NAME_MAX`]: nothing that
@@ -277,7 +313,7 @@ pub const APPDATA_BLOB_MAX_BYTES: u64 = 64 * 1024 * 1024;
 /// # Errors
 ///
 /// As [`validate_store_name`](crate::appinfo::validate_store_name).
-pub fn validate_blob_name(name: &str) -> Result<(), Errno> {
+pub fn validate_bulk_name(name: &str) -> Result<(), Errno> {
     crate::appinfo::validate_store_name(name, APPDATA_NAME_MAX)
 }
 
@@ -343,6 +379,10 @@ const OP_BLOB_DELETE: u16 = 10;
 const OP_BLOB_LIST: u16 = 11;
 /// Wire discriminant of [`AppDataRequest::QuotaGet`].
 const OP_QUOTA_GET: u16 = 12;
+/// Wire discriminant of [`AppDataRequest::TempCreate`].
+const OP_TEMP_CREATE: u16 = 13;
+/// Wire discriminant of [`AppDataRequest::TempRelease`].
+const OP_TEMP_RELEASE: u16 = 14;
 
 /// Wire discriminant of [`ConfigScope::Private`].
 const SCOPE_PRIVATE: u8 = 1;
@@ -418,7 +458,7 @@ pub enum BlobMode {
     /// combination with no meaning — is not representable.
     ///
     /// The delegation carries an extent ceiling of
-    /// [`APPDATA_BLOB_MAX_BYTES`], which the kernel enforces on every write
+    /// [`APPDATA_BULK_FILE_MAX_BYTES`], which the kernel enforces on every write
     /// and truncate through the descriptor.
     ReadWrite,
 }
@@ -566,10 +606,10 @@ pub enum AppDataRequest<'a> {
     /// then reads, writes, truncates, and maps the file directly against the
     /// kernel VFS, so the daemon is on the control path and never on the data
     /// path. The delegation is bounded — the mode's access and, when it
-    /// writes, [`APPDATA_BLOB_MAX_BYTES`] of extent — so direct access is not
+    /// writes, [`APPDATA_BULK_FILE_MAX_BYTES`] of extent — so direct access is not
     /// unbounded access.
     BlobOpen {
-        /// The blob to open, validated against [`validate_blob_name`] on
+        /// The blob to open, validated against [`validate_bulk_name`] on
         /// decode because it becomes a path component in the caller's own
         /// blob directory.
         name: &'a str,
@@ -598,13 +638,41 @@ pub enum AppDataRequest<'a> {
         /// [`APPDATA_BLOB_LIST_MAX`].
         capacity: u32,
     },
-    /// Read the caller's own blob usage and the ceilings it is bounded by.
+    /// Read the caller's own bulk usage and the ceilings it is bounded by,
+    /// across both scopes of the bulk tree.
     ///
     /// What an application does with it is report a refusal in its own terms
     /// rather than failing obscurely when a write is refused: the ceilings are
     /// fixed, so a caller that knows them can say "this cache is full" instead
     /// of surfacing an errno.
     QuotaGet {},
+    /// Create a **fresh** temporary file for the caller and answer with a
+    /// one-shot descriptor grant for it and the name it was given.
+    ///
+    /// The caller names nothing: freshness without coordination is the whole
+    /// of what a temporary file is for, and two instances of one application
+    /// that both chose a name would overwrite each other's scratch. The
+    /// service picks the name, so no request can reach a temporary file the
+    /// caller did not just create — there is no operation that *opens* one.
+    ///
+    /// The delegation is read-write and carries an extent ceiling of
+    /// [`APPDATA_BULK_FILE_MAX_BYTES`], exactly as a writable blob's does.
+    TempCreate {},
+    /// Delete one of the caller's own temporary files.
+    ///
+    /// The name is one [`Self::TempCreate`] answered with. Releasing one the
+    /// caller does not hold changes nothing and is not an error, so this is
+    /// neither an oracle for what the store holds nor a way to create one.
+    ///
+    /// An application that never releases leaves its scratch behind until the
+    /// next boot, which is what [`APPDATA_TEMP_MAX_COUNT`] bounds; nothing but
+    /// that application is affected either way.
+    TempRelease {
+        /// The temporary file to delete, validated against
+        /// [`validate_bulk_name`] on decode because it becomes a path
+        /// component in the caller's own temporary directory.
+        name: &'a str,
+    },
 }
 
 impl<'a> AppDataRequest<'a> {
@@ -625,12 +693,14 @@ impl<'a> AppDataRequest<'a> {
                 bundle_id: name, ..
             }
             | Self::BlobOpen { name, .. }
-            | Self::BlobDelete { name } => (name, "", ""),
+            | Self::BlobDelete { name }
+            | Self::TempRelease { name } => (name, "", ""),
             Self::ConfigRead { .. }
             | Self::ConfigCommit { .. }
             | Self::VaultRead { .. }
             | Self::BlobList { .. }
-            | Self::QuotaGet {} => ("", "", ""),
+            | Self::QuotaGet {}
+            | Self::TempCreate {} => ("", "", ""),
         }
     }
 
@@ -649,6 +719,8 @@ impl<'a> AppDataRequest<'a> {
             Self::BlobDelete { .. } => OP_BLOB_DELETE,
             Self::BlobList { .. } => OP_BLOB_LIST,
             Self::QuotaGet {} => OP_QUOTA_GET,
+            Self::TempCreate {} => OP_TEMP_CREATE,
+            Self::TempRelease { .. } => OP_TEMP_RELEASE,
         }
     }
 
@@ -667,7 +739,9 @@ impl<'a> AppDataRequest<'a> {
             | Self::BlobOpen { .. }
             | Self::BlobDelete { .. }
             | Self::BlobList { .. }
-            | Self::QuotaGet {} => 0,
+            | Self::QuotaGet {}
+            | Self::TempCreate {}
+            | Self::TempRelease { .. } => 0,
         }
     }
 
@@ -686,7 +760,9 @@ impl<'a> AppDataRequest<'a> {
             | Self::VaultUnset { .. }
             | Self::BlobDelete { .. }
             | Self::BlobList { .. }
-            | Self::QuotaGet {} => 0,
+            | Self::QuotaGet {}
+            | Self::TempCreate {}
+            | Self::TempRelease { .. } => 0,
         }
     }
 
@@ -705,7 +781,9 @@ impl<'a> AppDataRequest<'a> {
             | Self::VaultUnset { .. }
             | Self::BlobOpen { .. }
             | Self::BlobDelete { .. }
-            | Self::QuotaGet {} => 0,
+            | Self::QuotaGet {}
+            | Self::TempCreate {}
+            | Self::TempRelease { .. } => 0,
         }
     }
 
@@ -810,6 +888,7 @@ impl<'a> AppDataRequest<'a> {
             }
             OP_VAULT_READ | OP_VAULT_SET | OP_VAULT_UNSET => Self::sealed(&record),
             OP_BLOB_OPEN | OP_BLOB_DELETE | OP_BLOB_LIST | OP_QUOTA_GET => Self::blob(&record),
+            OP_TEMP_CREATE | OP_TEMP_RELEASE => Self::temp(&record),
             _ => Err(Errno::OutOfRange),
         }
     }
@@ -896,7 +975,7 @@ impl<'a> AppDataRequest<'a> {
             OP_BLOB_OPEN => {
                 record.without_capacity()?;
                 Ok(Self::BlobOpen {
-                    name: record.blob_name()?,
+                    name: record.bulk_name()?,
                     mode: record.mode()?,
                 })
             }
@@ -904,7 +983,7 @@ impl<'a> AppDataRequest<'a> {
                 record.without_mode()?;
                 record.without_capacity()?;
                 Ok(Self::BlobDelete {
-                    name: record.blob_name()?,
+                    name: record.bulk_name()?,
                 })
             }
             OP_BLOB_LIST => {
@@ -921,6 +1000,25 @@ impl<'a> AppDataRequest<'a> {
                 Ok(Self::QuotaGet {})
             }
         }
+    }
+
+    /// Decode one of the two temporary-scope operations: the family that
+    /// carries no scope, no mode, no setting, and no capacity, because a
+    /// temporary file is reached as a descriptor and never as bytes on this
+    /// channel.
+    fn temp(record: &Record<'a>) -> Result<Self, Errno> {
+        record.without_scope()?;
+        record.without_mode()?;
+        record.without_key()?;
+        record.without_value()?;
+        record.without_capacity()?;
+        if record.op == OP_TEMP_CREATE {
+            record.without_name()?;
+            return Ok(Self::TempCreate {});
+        }
+        Ok(Self::TempRelease {
+            name: record.bulk_name()?,
+        })
     }
 }
 
@@ -1022,10 +1120,10 @@ impl<'a> Record<'a> {
         Ok(self.name)
     }
 
-    /// The blob name this record carries, inside the same store-name grammar
-    /// under the blob-name bound.
-    fn blob_name(&self) -> Result<&'a str, Errno> {
-        validate_blob_name(self.name)?;
+    /// The bulk-store file name this record carries — a blob's or a temporary
+    /// file's — inside the same store-name grammar under the store-name bound.
+    fn bulk_name(&self) -> Result<&'a str, Errno> {
+        validate_bulk_name(self.name)?;
         Ok(self.name)
     }
 
@@ -1212,13 +1310,67 @@ pub fn decode_grant_reply(bytes: &[u8]) -> Result<u64, Errno> {
     Ok(handle)
 }
 
-/// Encoded length of one blob-listing entry: a name-length byte, the name at
-/// its full width, and the blob's byte length.
+/// Byte width of a store-name field inside a fixed-width reply record: a
+/// length byte and the name at its full width, zero-padded.
+///
+/// One definition, because a blob-listing entry and a temporary file's reply
+/// both carry a store name and neither has any reason to spell the field
+/// differently — two encodings of one field would be two chances to disagree
+/// about what hides past a declared length.
+const NAME_FIELD_LEN: usize = 1 + APPDATA_NAME_MAX;
+
+/// Write `name` into the fixed-width store-name field at the head of `out`,
+/// zero-filling the rest of the field.
+///
+/// # Errors
+///
+/// [`Errno::BufferTooSmall`] when `out` cannot hold the field;
+/// [`Errno::LengthOutOfRange`] or [`Errno::OutOfRange`] when `name` is outside
+/// the store-name grammar, so no record can carry it.
+fn put_store_name(name: &str, out: &mut [u8]) -> Result<(), Errno> {
+    if out.len() < NAME_FIELD_LEN {
+        return Err(Errno::BufferTooSmall);
+    }
+    validate_bulk_name(name)?;
+    out[..NAME_FIELD_LEN].fill(0);
+    // Bounded by the grammar above, so the conversion is exact.
+    out[0] = u8::try_from(name.len()).map_err(|_| Errno::LengthOutOfRange)?;
+    out[1..=name.len()].copy_from_slice(name.as_bytes());
+    Ok(())
+}
+
+/// Read the fixed-width store-name field at the head of `bytes`.
+///
+/// # Errors
+///
+/// [`Errno::BufferTooSmall`] when `bytes` is shorter than the field;
+/// [`Errno::LengthOutOfRange`] or [`Errno::OutOfRange`] for a declared length
+/// past the field, text that is not UTF-8, or a name outside the grammar; and
+/// [`Errno::BadMagic`] when anything hides past the declared length, which is
+/// not the field the record described.
+fn take_store_name(bytes: &[u8]) -> Result<&str, Errno> {
+    if bytes.len() < NAME_FIELD_LEN {
+        return Err(Errno::BufferTooSmall);
+    }
+    let len = usize::from(bytes[0]);
+    if len > APPDATA_NAME_MAX {
+        return Err(Errno::LengthOutOfRange);
+    }
+    let name = text(&bytes[1..=len])?;
+    validate_bulk_name(name)?;
+    if bytes[(1 + len)..NAME_FIELD_LEN].iter().any(|b| *b != 0) {
+        return Err(Errno::BadMagic);
+    }
+    Ok(name)
+}
+
+/// Encoded length of one blob-listing entry: the fixed-width store-name field
+/// and the blob's byte length.
 ///
 /// Fixed-width, unlike the request record: a listing is a *sequence*, so a
 /// reader that walks it with a stride reads no length prefix it might
 /// mis-trust, and the whole answer's size is known before it is asked for.
-pub const APPDATA_BLOB_ENTRY_LEN: usize = 1 + APPDATA_NAME_MAX + 8;
+pub const APPDATA_BLOB_ENTRY_LEN: usize = NAME_FIELD_LEN + 8;
 
 /// Maximum blob-listing reply body, in bytes: every blob an application may
 /// hold, at the widest entry.
@@ -1276,20 +1428,9 @@ impl<'a> BlobListing<'a> {
 
 /// Decode one fixed-width listing entry.
 fn decode_blob_entry(entry: &[u8; APPDATA_BLOB_ENTRY_LEN]) -> Result<BlobEntry<'_>, Errno> {
-    let len = usize::from(entry[0]);
-    if len > APPDATA_NAME_MAX {
-        return Err(Errno::LengthOutOfRange);
-    }
-    let name = text(&entry[1..=len])?;
-    validate_blob_name(name)?;
-    // Every byte past the name must be zero: a name field with anything
-    // hiding past its declared length is not the entry it describes.
-    if entry[(1 + len)..=APPDATA_NAME_MAX].iter().any(|b| *b != 0) {
-        return Err(Errno::BadMagic);
-    }
     Ok(BlobEntry {
-        name,
-        len: crate::le::read_u64(entry, 1 + APPDATA_NAME_MAX),
+        name: take_store_name(entry)?,
+        len: crate::le::read_u64(entry, NAME_FIELD_LEN),
     })
 }
 
@@ -1305,12 +1446,8 @@ pub fn encode_blob_entry(entry: &BlobEntry<'_>, out: &mut [u8]) -> Result<(), Er
     if out.len() < APPDATA_BLOB_ENTRY_LEN {
         return Err(Errno::BufferTooSmall);
     }
-    validate_blob_name(entry.name)?;
-    out[..APPDATA_BLOB_ENTRY_LEN].fill(0);
-    // Bounded by the grammar above, so the conversion is exact.
-    out[0] = u8::try_from(entry.name.len()).map_err(|_| Errno::LengthOutOfRange)?;
-    out[1..=entry.name.len()].copy_from_slice(entry.name.as_bytes());
-    crate::le::put_u64(out, 1 + APPDATA_NAME_MAX, entry.len);
+    put_store_name(entry.name, out)?;
+    crate::le::put_u64(out, NAME_FIELD_LEN, entry.len);
     Ok(())
 }
 
@@ -1386,28 +1523,43 @@ pub fn decode_blob_list_reply(bytes: &[u8]) -> Result<BlobListing<'_>, Errno> {
     Ok(BlobListing::Whole(body))
 }
 
-/// Byte length of a [`AppDataRequest::QuotaGet`] reply past the status word.
-pub const APPDATA_QUOTA_REPLY_LEN: usize = crate::reply::STATUS_REPLY_LEN + 4 * 8;
+/// Byte length of a [`AppDataRequest::QuotaGet`] reply past the status word:
+/// the four usage figures and the three ceilings they are measured against.
+pub const APPDATA_QUOTA_REPLY_LEN: usize = crate::reply::STATUS_REPLY_LEN + 7 * 8;
 
-/// An application's blob usage in one account, and the ceilings it is bounded
-/// by.
+/// An application's bulk-store usage in one account, and the ceilings it is
+/// bounded by.
+///
+/// Both scopes of the bulk tree in one answer, because they are one store: an
+/// application that must decide whether to spill to scratch or to evict a
+/// cached index needs both figures, and two calls could report two moments.
 ///
 /// The ceilings are reported rather than assumed: they are fixed in this
 /// contract, but an application that reads them can say "this cache is full"
 /// in its own terms instead of surfacing an errno, and a diagnostic tool can
 /// show usage against the bound without compiling the bound in.
 #[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
-pub struct BlobQuota {
+pub struct BulkQuota {
     /// Blobs the application currently holds.
     pub blobs: u64,
     /// Their total length in bytes.
-    pub bytes: u64,
+    pub blob_bytes: u64,
+    /// Temporary files it currently holds — those of *this* boot, since an
+    /// earlier boot's are reclaimed before the next one is created and are
+    /// reachable by nothing in the meantime.
+    pub temps: u64,
+    /// Their total length in bytes.
+    pub temp_bytes: u64,
     /// Most blobs it may hold ([`APPDATA_BLOB_MAX_COUNT`]).
     pub blob_max: u64,
-    /// Longest any one of them may be ([`APPDATA_BLOB_MAX_BYTES`]) — the
-    /// extent ceiling the kernel enforces on a writable descriptor, so the
-    /// application's whole blob store is bounded by `blob_max × blob_bytes_max`.
-    pub blob_bytes_max: u64,
+    /// Most temporary files it may hold at once
+    /// ([`APPDATA_TEMP_MAX_COUNT`]).
+    pub temp_max: u64,
+    /// Longest any one file in either scope may be
+    /// ([`APPDATA_BULK_FILE_MAX_BYTES`]) — the extent ceiling the kernel
+    /// enforces on a writable descriptor, so the application's whole bulk
+    /// store is bounded by `(blob_max + temp_max) × file_bytes_max`.
+    pub file_bytes_max: u64,
 }
 
 /// Encode a quota reply.
@@ -1415,17 +1567,27 @@ pub struct BlobQuota {
 /// # Errors
 ///
 /// [`Errno::BufferTooSmall`] — `out` cannot hold the reply.
-pub fn encode_quota_reply(quota: &BlobQuota, out: &mut [u8]) -> Result<usize, Errno> {
+pub fn encode_quota_reply(quota: &BulkQuota, out: &mut [u8]) -> Result<usize, Errno> {
     if out.len() < APPDATA_QUOTA_REPLY_LEN {
         return Err(Errno::BufferTooSmall);
     }
     out[..crate::reply::STATUS_REPLY_LEN]
         .copy_from_slice(&crate::reply::encode_status_reply(Ok(())));
     let at = crate::reply::STATUS_REPLY_LEN;
-    crate::le::put_u64(out, at, quota.blobs);
-    crate::le::put_u64(out, at + 8, quota.bytes);
-    crate::le::put_u64(out, at + 16, quota.blob_max);
-    crate::le::put_u64(out, at + 24, quota.blob_bytes_max);
+    for (slot, figure) in [
+        quota.blobs,
+        quota.blob_bytes,
+        quota.temps,
+        quota.temp_bytes,
+        quota.blob_max,
+        quota.temp_max,
+        quota.file_bytes_max,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        crate::le::put_u64(out, at + slot * 8, figure);
+    }
     Ok(APPDATA_QUOTA_REPLY_LEN)
 }
 
@@ -1437,24 +1599,89 @@ pub fn encode_quota_reply(quota: &BlobQuota, out: &mut [u8]) -> Result<usize, Er
 /// * [`Errno::BufferTooSmall`] — the frame is shorter than the reply.
 /// * [`Errno::OutOfRange`] — a usage figure past its own ceiling, which is
 ///   not a state the daemon can be in and so is refused rather than shown.
-pub fn decode_quota_reply(bytes: &[u8]) -> Result<BlobQuota, Errno> {
+pub fn decode_quota_reply(bytes: &[u8]) -> Result<BulkQuota, Errno> {
     crate::reply::decode_status_reply(bytes)?;
     if bytes.len() < APPDATA_QUOTA_REPLY_LEN {
         return Err(Errno::BufferTooSmall);
     }
     let at = crate::reply::STATUS_REPLY_LEN;
-    let quota = BlobQuota {
-        blobs: crate::le::read_u64(bytes, at),
-        bytes: crate::le::read_u64(bytes, at + 8),
-        blob_max: crate::le::read_u64(bytes, at + 16),
-        blob_bytes_max: crate::le::read_u64(bytes, at + 24),
+    let figure = |slot: usize| crate::le::read_u64(bytes, at + slot * 8);
+    let quota = BulkQuota {
+        blobs: figure(0),
+        blob_bytes: figure(1),
+        temps: figure(2),
+        temp_bytes: figure(3),
+        blob_max: figure(4),
+        temp_max: figure(5),
+        file_bytes_max: figure(6),
     };
-    if quota.blobs > quota.blob_max
-        || quota.bytes > quota.blob_max.saturating_mul(quota.blob_bytes_max)
+    let within = |count: u64, bytes: u64, ceiling: u64| {
+        count <= ceiling && bytes <= ceiling.saturating_mul(quota.file_bytes_max)
+    };
+    if !within(quota.blobs, quota.blob_bytes, quota.blob_max)
+        || !within(quota.temps, quota.temp_bytes, quota.temp_max)
     {
         return Err(Errno::OutOfRange);
     }
     Ok(quota)
+}
+
+/// Byte length of a [`AppDataRequest::TempCreate`] reply past the status word:
+/// the one-shot grant handle the caller redeems, and the name the service gave
+/// the file.
+pub const APPDATA_TEMP_REPLY_LEN: usize = crate::reply::STATUS_REPLY_LEN + 8 + NAME_FIELD_LEN;
+
+// The widest name the service could mint must still frame, or a create could
+// land on the volume and fail to be answered.
+const _: () = assert!(APPDATA_TEMP_REPLY_LEN <= APPDATA_MAX_REPLY);
+
+/// Encode a temporary-file reply carrying `handle` and the `name` the service
+/// minted.
+///
+/// The name is answered because [`AppDataRequest::TempRelease`] is the only
+/// thing that can be done with it: there is no operation that *opens* a
+/// temporary file by name, so a caller holding one can free its own scratch
+/// and nothing else.
+///
+/// # Errors
+///
+/// * [`Errno::BufferTooSmall`] — `out` cannot hold the reply.
+/// * [`Errno::LengthOutOfRange`] or [`Errno::OutOfRange`] — `name` is outside
+///   the store-name grammar, so no reply can carry it.
+pub fn encode_temp_reply(handle: u64, name: &str, out: &mut [u8]) -> Result<usize, Errno> {
+    if out.len() < APPDATA_TEMP_REPLY_LEN {
+        return Err(Errno::BufferTooSmall);
+    }
+    out[..crate::reply::STATUS_REPLY_LEN]
+        .copy_from_slice(&crate::reply::encode_status_reply(Ok(())));
+    let at = crate::reply::STATUS_REPLY_LEN;
+    crate::le::put_u64(out, at, handle);
+    put_store_name(name, &mut out[at + 8..])?;
+    Ok(APPDATA_TEMP_REPLY_LEN)
+}
+
+/// Decode a temporary-file reply into the grant handle and the file's name.
+///
+/// # Errors
+///
+/// * The daemon's own refusal, decoded from the status word.
+/// * [`Errno::BufferTooSmall`] — the frame is shorter than the reply.
+/// * [`Errno::BadMagic`] — a zero handle, which is the reserved invalid value
+///   and never something a mint produced, or a name field with bytes hiding
+///   past its declared length.
+/// * [`Errno::LengthOutOfRange`] or [`Errno::OutOfRange`] — a name outside the
+///   store-name grammar, which is not a name this service could have minted.
+pub fn decode_temp_reply(bytes: &[u8]) -> Result<(u64, &str), Errno> {
+    crate::reply::decode_status_reply(bytes)?;
+    if bytes.len() < APPDATA_TEMP_REPLY_LEN {
+        return Err(Errno::BufferTooSmall);
+    }
+    let at = crate::reply::STATUS_REPLY_LEN;
+    let handle = crate::le::read_u64(bytes, at);
+    if handle == 0 {
+        return Err(Errno::BadMagic);
+    }
+    Ok((handle, take_store_name(&bytes[at + 8..])?))
 }
 
 #[cfg(test)]

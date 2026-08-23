@@ -14,7 +14,7 @@ settings.set_u32("font.size", 16)?;
 settings.commit()?;
 ```
 
-## Three scopes
+## Five scopes
 
 `Settings::open` is the application's **private** scope. `Settings::open_published`
 is its **published** one — what it says about itself for other applications to
@@ -39,6 +39,28 @@ rather than behave as though the user had never saved a password. A write ends b
 re-reading, so the handle reflects what the service holds rather than a guess.
 The plaintext is wiped when the handle goes out of scope, by the format engine
 that owns the document's storage.
+
+`blobs` and `temp` are the **bulk** scopes, and neither is a document: an index,
+a cache, a queue, or a staged download is reached as a *descriptor*, so its
+bytes never cross the app-data channel.
+
+```rust
+let handle = blobs::open(&mut host, "mail.index", BlobMode::ReadWrite)?;
+let index = File::from_delegation(handle)?;   // an owned descriptor
+
+let scratch = temp::create(&mut host)?;       // a fresh file, service-named
+temp::release(&mut host, &scratch.name)?;     // done with it
+
+let used = bulk_quota(&mut host)?;            // both scopes, one moment
+```
+
+They differ in who names the file. A blob is durable and the application names
+it. `temp::create` takes no name and nothing *opens* a temporary file, so the
+only way to hold one is to have just created it — freshness without coordination
+is what a scratch file is for, and an application can never read scratch it did
+not write in this process. Their lifetime is the boot. What a delegation conveys
+is bounded: only the access asked for, and a byte-extent ceiling the kernel
+enforces on a writable one, so direct access is not unbounded access.
 
 ## No app spells a path, and none names itself
 

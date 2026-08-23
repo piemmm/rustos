@@ -7,13 +7,13 @@ use alloc::vec::Vec;
 
 use tairix_abi::appdata_ipc::{
     decode_blob_list_reply, decode_document_reply, decode_grant_reply, decode_quota_reply,
-    AppDataRequest, BlobMode, ConfigDocument, ConfigScope, APPDATA_BLOB_MAX_BYTES,
-    APPDATA_BLOB_MAX_COUNT, APPDATA_DOCUMENT_MAX, APPDATA_MAX_REPLY, APPDATA_MAX_REQUEST,
-    APPDATA_VALUE_MAX,
+    decode_temp_reply, AppDataRequest, BlobMode, ConfigDocument, ConfigScope,
+    APPDATA_BLOB_MAX_COUNT, APPDATA_BULK_FILE_MAX_BYTES, APPDATA_DOCUMENT_MAX, APPDATA_MAX_REPLY,
+    APPDATA_MAX_REQUEST, APPDATA_TEMP_MAX_COUNT, APPDATA_VALUE_MAX,
 };
 use tairix_abi::origin::{CapabilitySummary, TrustDomain, ORIGIN_CONSOLE_NONE, PROC_ID_LEN};
 use tairix_abi::reply::decode_status_reply;
-use tairix_abi::{AppIdentity, Errno, Origin, ProcId};
+use tairix_abi::{AppIdentity, BootId, Errno, Origin, ProcId, BOOT_ID_LEN};
 use tairix_appconf::Document;
 use tairix_log::DiscardSink;
 
@@ -47,11 +47,18 @@ fn origin(uid: u32, tag: u8, identity: Option<AppIdentity>) -> Origin {
     }
 }
 
+/// A boot identity, distinct per `tag` — what tells one boot's scratch from
+/// another's.
+fn boot(tag: u8) -> BootId {
+    BootId::from_raw([tag; BOOT_ID_LEN])
+}
+
 /// A dispatcher over a freshly provisioned volume, drawing the sealed scope's
-/// key material from a deterministic generator.
+/// key material and the temporary scope's names from a deterministic
+/// generator, and serving the temporary scope for one boot.
 fn service() -> (AppData<DiscardSink, CountingEntropy>, TestFs) {
     (
-        AppData::new(DiscardSink, CountingEntropy::new(1)),
+        AppData::new(DiscardSink, CountingEntropy::new(1), boot(1)),
         TestFs::provisioned(),
     )
 }
@@ -873,8 +880,7 @@ fn a_failed_commit_leaves_the_edits_staged_for_a_retry() {
 fn an_unreachable_volume_answers_a_typed_refusal_not_a_default() {
     // The service comes up before the encrypted root is unlocked. An early
     // caller must be told the store cannot be reached, never handed a value.
-    let mut svc = AppData::new(DiscardSink, CountingEntropy::new(1));
-    let mut fs = TestFs::provisioned();
+    let (mut svc, mut fs) = service();
     fs.fail_all(Errno::DeviceOffline);
     let ada = origin(ACCOUNT_UID, 1, Some(identity(1)));
     assert_eq!(
@@ -1681,7 +1687,7 @@ fn a_blob_open_answers_a_bounded_grant_and_never_bytes() {
     assert_ne!(handle, 0);
     let minted = fs.grants().last().expect("one delegation");
     assert!(minted.write);
-    assert_eq!(minted.ceiling, APPDATA_BLOB_MAX_BYTES);
+    assert_eq!(minted.ceiling, APPDATA_BULK_FILE_MAX_BYTES);
     assert_eq!(
         minted.task,
         ada.pid(),
@@ -1772,12 +1778,18 @@ fn a_quota_read_reports_usage_against_the_ceilings_it_is_bounded_by() {
     let empty = decode_quota_reply(&call(&mut svc, &mut fs, &ada, &AppDataRequest::QuotaGet {}))
         .expect("a quota");
     assert_eq!(empty.blobs, 0);
-    assert_eq!(empty.bytes, 0);
+    assert_eq!(empty.blob_bytes, 0);
+    assert_eq!(empty.temps, 0);
+    assert_eq!(empty.temp_bytes, 0);
     assert_eq!(
         empty.blob_max,
         u64::try_from(APPDATA_BLOB_MAX_COUNT).expect("fits")
     );
-    assert_eq!(empty.blob_bytes_max, APPDATA_BLOB_MAX_BYTES);
+    assert_eq!(
+        empty.temp_max,
+        u64::try_from(APPDATA_TEMP_MAX_COUNT).expect("fits")
+    );
+    assert_eq!(empty.file_bytes_max, APPDATA_BULK_FILE_MAX_BYTES);
 
     call(
         &mut svc,
@@ -1790,10 +1802,17 @@ fn a_quota_read_reports_usage_against_the_ceilings_it_is_bounded_by() {
     );
     let path = &fs.grants().last().expect("one delegation").path.clone();
     fs.put(path, b"12345");
+    // One answer covers both scopes, so an application deciding whether to
+    // spill to scratch or evict an index reads one moment rather than two.
+    call(&mut svc, &mut fs, &ada, &AppDataRequest::TempCreate {});
+    let scratch = &fs.grants().last().expect("one delegation").path.clone();
+    fs.put(scratch, b"1234567");
     let used = decode_quota_reply(&call(&mut svc, &mut fs, &ada, &AppDataRequest::QuotaGet {}))
         .expect("a quota");
     assert_eq!(used.blobs, 1);
-    assert_eq!(used.bytes, 5);
+    assert_eq!(used.blob_bytes, 5);
+    assert_eq!(used.temps, 1);
+    assert_eq!(used.temp_bytes, 7);
 }
 
 #[test]
@@ -1899,4 +1918,171 @@ fn a_listing_past_the_callers_capacity_is_answered_with_its_length() {
             .count(),
         3
     );
+}
+
+#[test]
+fn a_temporary_file_is_reached_only_by_the_process_that_created_it() {
+    // Nothing opens a temporary file by name, so the only way to hold one is
+    // to have just created it: an application can never read scratch it did
+    // not write in this process, not even its own from an earlier run.
+    let (mut svc, mut fs) = service();
+    let ada = origin(ACCOUNT_UID, 1, Some(identity(1)));
+    let reply = call(&mut svc, &mut fs, &ada, &AppDataRequest::TempCreate {});
+    let (handle, name) = decode_temp_reply(&reply).expect("a grant and a name");
+    assert_ne!(handle, 0);
+    let grant = fs.grants().last().expect("one delegation").clone();
+    assert!(grant.path.ends_with(&alloc::format!("/Temp/{name}")));
+    assert!(grant.write, "scratch is written, so the grant conveys it");
+    assert_eq!(grant.ceiling, APPDATA_BULK_FILE_MAX_BYTES);
+    assert_eq!(grant.task, 1, "minted to the attested task and no other");
+
+    // A second create is a different file, so two instances of one application
+    // cannot land on each other's scratch.
+    let second = call(&mut svc, &mut fs, &ada, &AppDataRequest::TempCreate {});
+    let (_, other) = decode_temp_reply(&second).expect("a grant and a name");
+    assert_ne!(name, other);
+}
+
+#[test]
+fn a_temporary_release_frees_the_file_and_is_idempotent() {
+    let (mut svc, mut fs) = service();
+    let ada = origin(ACCOUNT_UID, 1, Some(identity(1)));
+    let reply = call(&mut svc, &mut fs, &ada, &AppDataRequest::TempCreate {});
+    let (_, name) = decode_temp_reply(&reply).expect("a grant and a name");
+    let name = String::from(name);
+    let path = fs.grants().last().expect("one delegation").path.clone();
+    assert!(fs.exists(&path));
+
+    let reply = call(
+        &mut svc,
+        &mut fs,
+        &ada,
+        &AppDataRequest::TempRelease { name: &name },
+    );
+    assert_eq!(decode_status_reply(&reply), Ok(()));
+    assert!(!fs.exists(&path));
+
+    // A second release is the same answer: a refusal would be an oracle for
+    // what the store holds.
+    let reply = call(
+        &mut svc,
+        &mut fs,
+        &ada,
+        &AppDataRequest::TempRelease { name: &name },
+    );
+    assert_eq!(decode_status_reply(&reply), Ok(()));
+}
+
+#[test]
+fn one_applications_scratch_is_unreachable_to_another() {
+    // The same isolation every other scope has, and by the same mechanism: the
+    // store is derived from the attested identity, so a second application's
+    // create lands in a directory of its own and its release cannot name the
+    // first's file.
+    let (mut svc, mut fs) = service();
+    let ada = origin(ACCOUNT_UID, 1, Some(identity(1)));
+    let other = origin(
+        ACCOUNT_UID,
+        2,
+        Some(AppIdentity::new("org.pty.notes", publisher(2)).expect("well formed")),
+    );
+    let reply = call(&mut svc, &mut fs, &ada, &AppDataRequest::TempCreate {});
+    let (_, name) = decode_temp_reply(&reply).expect("a grant and a name");
+    let name = String::from(name);
+    let mine = fs.grants().last().expect("one delegation").path.clone();
+
+    call(&mut svc, &mut fs, &other, &AppDataRequest::TempCreate {});
+    let theirs = fs.grants().last().expect("one delegation").path.clone();
+    assert_ne!(mine, theirs);
+
+    // Naming the first application's file from the second removes nothing:
+    // the path is composed from the *caller's* attested store.
+    let reply = call(
+        &mut svc,
+        &mut fs,
+        &other,
+        &AppDataRequest::TempRelease { name: &name },
+    );
+    assert_eq!(decode_status_reply(&reply), Ok(()));
+    assert!(
+        fs.exists(&mine),
+        "the other application's scratch is untouched"
+    );
+}
+
+#[test]
+fn a_boot_with_no_identity_refuses_the_temporary_scope_and_serves_the_rest() {
+    // A port whose random reserve never seeded has no boot identity, so this
+    // service cannot tell one boot's scratch from another's. It refuses the
+    // scope rather than leaving files it could never reclaim — and refuses
+    // nothing else, because settings are not scratch.
+    let mut svc = AppData::new(DiscardSink, CountingEntropy::new(1), BootId::UNSET);
+    let mut fs = TestFs::provisioned();
+    let ada = origin(ACCOUNT_UID, 1, Some(identity(1)));
+    for request in [
+        AppDataRequest::TempCreate {},
+        AppDataRequest::TempRelease { name: "scratch" },
+    ] {
+        let reply = call(&mut svc, &mut fs, &ada, &request);
+        assert_eq!(
+            decode_status_reply(&reply),
+            Err(Errno::EntropyNotReady),
+            "{request:?} cannot be served without a boot identity"
+        );
+    }
+    assert!(fs.grants().is_empty());
+    set_in(
+        &mut svc,
+        &mut fs,
+        &ada,
+        ConfigScope::Private,
+        "scheme",
+        "dark",
+    );
+    commit_in(&mut svc, &mut fs, &ada, ConfigScope::Private);
+    assert_eq!(
+        get(&mut svc, &mut fs, &ada, "scheme"),
+        Ok(String::from("dark"))
+    );
+
+    // A quota read still answers, with no temporary files: an application
+    // asking about its blobs is not the caller to refuse for a scope it did
+    // not ask about.
+    let quota = decode_quota_reply(&call(&mut svc, &mut fs, &ada, &AppDataRequest::QuotaGet {}))
+        .expect("a quota");
+    assert_eq!((quota.temps, quota.temp_bytes), (0, 0));
+}
+
+#[test]
+fn a_caller_with_no_attested_identity_gets_no_scratch() {
+    // The rule every scope keeps: a principal the kernel did not admit from a
+    // signed bundle has no store, whatever it asked for.
+    let (mut svc, mut fs) = service();
+    let anonymous = origin(ACCOUNT_UID, 1, None);
+    for request in [
+        AppDataRequest::TempCreate {},
+        AppDataRequest::TempRelease { name: "scratch" },
+    ] {
+        let reply = call(&mut svc, &mut fs, &anonymous, &request);
+        assert_eq!(decode_status_reply(&reply), Err(Errno::PermissionDenied));
+    }
+    assert!(fs.grants().is_empty());
+}
+
+#[test]
+fn a_temporary_operation_is_refused_when_the_volume_is_unreachable() {
+    let (mut svc, mut fs) = service();
+    let ada = origin(ACCOUNT_UID, 1, Some(identity(1)));
+    fs.fail_all(Errno::DeviceOffline);
+    for request in [
+        AppDataRequest::TempCreate {},
+        AppDataRequest::TempRelease { name: "scratch" },
+    ] {
+        let reply = call(&mut svc, &mut fs, &ada, &request);
+        assert_eq!(
+            decode_status_reply(&reply),
+            Err(Errno::DeviceOffline),
+            "{request:?} must report the volume rather than an absence"
+        );
+    }
 }

@@ -111,10 +111,10 @@ pub type BundleId = crate::bounded_text::BoundedText<1, BUNDLE_ID_MAX>;
 /// might forget.
 ///
 /// Two kinds of name share it — a bundle identifier
-/// ([`validate_bundle_id`]) and an application's blob name
-/// ([`crate::appdata_ipc::validate_blob_name`]) — because they pose the same
-/// question and only their widths differ. A second character-class loop for
-/// the second kind would be one more chance to disagree about whether `..`
+/// ([`validate_bundle_id`]) and the name of a file in an application's bulk
+/// store ([`crate::appdata_ipc::validate_bulk_name`]) — because they pose the
+/// same question and only their widths differ. A second character-class loop
+/// for the second kind would be one more chance to disagree about whether `..`
 /// is a name.
 ///
 /// # Errors

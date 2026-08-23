@@ -13,7 +13,7 @@ settings.set_u32("font.size", 16)?;
 settings.commit()?;
 ```
 
-## Four scopes
+## Five scopes
 
 `Settings::open` is the application's **private** scope: the user's settings for
 it, which no other principal can read. `Settings::open_published` is its
@@ -66,9 +66,9 @@ scope's own:
 The handle holds the opened plaintext, so it wipes it when it goes out of scope
 — and so does the format engine, for every line a document discards.
 
-`blobs` is the **bulk** scope, and it is not a document at all. An index, a
-cache, or a queue is reached as a *descriptor*, so its bytes never cross the
-app-data channel:
+`blobs` is the durable **bulk** scope, and it is not a document at all. An
+index, a cache, or a queue is reached as a *descriptor*, so its bytes never
+cross the app-data channel:
 
 ```rust
 let handle = blobs::open(&mut host, "mail.index", BlobMode::ReadWrite)?;
@@ -76,7 +76,7 @@ let index = File::from_delegation(handle)?;   // an owned descriptor
 index.write_at(0, record)?;                   // straight to the kernel VFS
 
 let held = blobs::list(&mut host)?;           // one call, whole listing
-let quota = blobs::quota(&mut host)?;         // usage against both ceilings
+let used = bulk_quota(&mut host)?;            // both bulk scopes, one moment
 blobs::remove(&mut host, "mail.index")?;
 ```
 
@@ -92,13 +92,42 @@ is created — `Read` refuses one the application does not hold, `ReadWrite`
 creates it — so "create but do not write" is not a request that exists. What the
 delegation conveys is *bounded*: a writable one carries a byte-extent ceiling
 the kernel enforces on every write and truncate through the descriptor, so
-direct access is not unbounded access. `quota` reports usage against that
-ceiling and against the blob-count one, so an application that reaches either
-can say "this cache is full" in its own terms rather than surfacing an errno.
+direct access is not unbounded access. `bulk_quota` reports usage against that
+ceiling and against both count ceilings, so an application that reaches any of
+them can say "this cache is full" in its own terms rather than surfacing an
+errno. It answers for both bulk scopes at once, because one deciding whether to
+spill to scratch or evict a cached index must not read two moments.
 
 `list` costs exactly one call, always: the widest listing that can exist is a
 few kilobytes, so it asks for that outright rather than negotiating a capacity
 the way a document read must.
+
+`temp` is the **scratch** of one run, reached the same way — and it differs from
+`blobs` in who names the file:
+
+```rust
+let scratch = temp::create(&mut host)?;       // a fresh file, service-named
+let spill = File::from_delegation(scratch.grant)?;
+spill.write_at(0, page)?;
+temp::release(&mut host, &scratch.name)?;     // done with it
+```
+
+`create` takes no name and there is no operation that *opens* a temporary file,
+so the only way to hold one is to have just created it: an application can never
+read scratch it did not write in this process, not even its own from an earlier
+run. That asymmetry is the point — freshness without coordination is what a
+scratch file is for, and two instances of one application that each chose
+`"spill"` would corrupt each other.
+
+The name it answers with is good for exactly one thing, `release`. Their
+lifetime is the boot: a file an earlier boot left is reachable by nothing and is
+reclaimed before the next is created. An application that releases what it
+finishes with holds one slot at a time; one that never releases holds them until
+the next boot, which is what the temp-count ceiling bounds — and it bounds
+nothing but that application. There is no `Drop` that releases for you: this
+crate is I/O-free by design, so a handle has no way to call the service when it
+goes out of scope, and a release that only *sometimes* happened would be worse
+than one an application states.
 
 ## No app spells a path, and none names itself
 

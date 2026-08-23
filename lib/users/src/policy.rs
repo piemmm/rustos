@@ -95,7 +95,7 @@ pub const APPDATA_ROOT: &str = "Apps";
 /// [`Self::parent`].
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum AppDataTree {
-    /// Bulk, cache, and temporary data: `<home>/Library/Apps/<bundle-id>/`.
+    /// Bulk and temporary data: `<home>/Library/Apps/<bundle-id>/`.
     Bulk,
     /// Configuration, published and sealed documents:
     /// `<home>/Settings/Apps/<bundle-id>/`.
@@ -108,9 +108,9 @@ impl AppDataTree {
 
     /// The home subdirectory this tree's gated root sits in.
     ///
-    /// Configuration lives under `Settings/` and bulk, cache, and temporary
-    /// data under `Library/`, matching the installed-system contract's own
-    /// split rather than inventing a third home directory for app data.
+    /// Configuration lives under `Settings/` and bulk and temporary data under
+    /// `Library/`, matching the installed-system contract's own split rather
+    /// than inventing a third home directory for app data.
     #[must_use]
     pub const fn parent(self) -> &'static str {
         match self {

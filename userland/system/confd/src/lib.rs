@@ -50,6 +50,23 @@
 //! other's, which a stage-then-commit pair would allow. A sealed document that
 //! cannot be opened is refused, never answered as an empty vault.
 //!
+//! # The bulk scopes
+//!
+//! `BlobOpen`, `BlobDelete`, `BlobList`, `TempCreate`, `TempRelease`, and
+//! `QuotaGet` reach the caller's **bulk** data ([`bulk`]) — durable blobs and
+//! the scratch of one run. Neither is a document: an open answers a one-shot
+//! descriptor delegation, so the service decides once and never touches a byte
+//! of payload, and what it hands over is bounded by the access asked for and,
+//! for a write, an extent ceiling the kernel enforces.
+//!
+//! The two differ in who names the file. A blob is durable and the application
+//! names it. A temporary file is the service's to name — `TempCreate` carries
+//! no name and nothing *opens* one, so the only way to hold one is to have just
+//! created it, and an application can never read scratch it did not write in
+//! this process. Their lifetime is the boot, carried in the name itself, so an
+//! earlier boot's file is invisible to every answer and is reclaimed before the
+//! next is created.
+//!
 //! # One read for the whole document
 //!
 //! A `ConfigRead` answers with the caller's whole merged document for one
@@ -92,15 +109,15 @@ use alloc::vec::Vec;
 
 use tairix_abi::appdata_ipc::{
     encode_blob_list_reply, encode_document_reply, encode_grant_reply, encode_quota_reply,
-    AppDataRequest, BlobMode, ConfigScope,
+    encode_temp_reply, AppDataRequest, BlobMode, ConfigScope,
 };
 use tairix_abi::reply::encode_status_reply;
-use tairix_abi::{AppIdentity, Errno, Origin, ProcId};
+use tairix_abi::{AppIdentity, BootId, Errno, Origin, ProcId};
 use tairix_appconf::{validate_key, ConfError, Document, MAX_SETTINGS};
 use tairix_log::{Event, EventId, Field, FieldValue, Level, Sink};
 use zeroize::Zeroize;
 
-pub mod blob;
+pub mod bulk;
 pub mod events;
 mod owner;
 pub mod store;
@@ -108,7 +125,7 @@ pub mod store;
 mod testfs;
 pub mod vault;
 
-pub use blob::BlobStore;
+pub use bulk::{BlobStore, TempNames, TempStore};
 pub use owner::OwnerPin;
 pub use store::{published_document, AppStore, RootCache, StoreError};
 pub use vault::{Entropy, VaultError};
@@ -138,8 +155,8 @@ pub const MAX_PENDING_EDITS: usize = MAX_SETTINGS;
 /// One node's metadata, as the store needs it.
 ///
 /// Two questions of one `stat`: who owns a directory the store is about to be
-/// served out of, and how long a blob is. Asking them separately would be two
-/// syscalls for one answer on the quota path, which walks every blob an
+/// served out of, and how long a bulk file is. Asking them separately would be
+/// two syscalls for one answer on the quota path, which walks every file an
 /// application holds.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub struct NodeInfo {
@@ -162,7 +179,7 @@ pub struct DirEntry {
 ///
 /// Deliberately narrow: whole-file reads and writes, a rename, an unlink, a
 /// directory create, a stat, a directory listing, and the descriptor
-/// delegation the blob scope hands out. Configuration documents have no
+/// delegation the bulk scopes hand out. Configuration documents have no
 /// partial write and no seek, because such a document is only ever replaced
 /// whole — which is what makes the publish atomic; a blob is the opposite
 /// shape, which is exactly why it is reached as a descriptor rather than
@@ -376,18 +393,29 @@ pub struct AppData<S: Sink, R: Entropy> {
     roots: RootCache,
     sink: S,
     entropy: R,
+    /// The naming rule the temporary scope serves under, or [`None`] when the
+    /// running boot has no identity and the scope is refused whole.
+    ///
+    /// Read once, at construction: the kernel mints one boot identity per boot
+    /// and never a second, so a value that is absent here stays absent for the
+    /// life of this boot and re-reading it per request would buy a syscall
+    /// nothing.
+    temp: Option<TempNames>,
 }
 
 impl<S: Sink, R: Entropy> AppData<S, R> {
-    /// Build a dispatcher that records its decisions through `sink` and draws
-    /// the sealed scope's key material and nonces from `entropy`.
+    /// Build a dispatcher that records its decisions through `sink`, draws the
+    /// sealed scope's key material and the temporary scope's names from
+    /// `entropy`, and tells this boot's scratch from an earlier boot's by
+    /// `boot`.
     #[must_use]
-    pub const fn new(sink: S, entropy: R) -> Self {
+    pub fn new(sink: S, entropy: R, boot: BootId) -> Self {
         Self {
             sessions: Vec::new(),
             roots: RootCache::new(),
             sink,
             entropy,
+            temp: TempNames::of(boot),
         }
     }
 
@@ -483,7 +511,12 @@ impl<S: Sink, R: Entropy> AppData<S, R> {
             AppDataRequest::BlobList { capacity } => {
                 self.blob_list(fs, origin, &identity, capacity, out)
             }
-            AppDataRequest::QuotaGet {} => self.blob_quota(fs, origin, &identity, out),
+            AppDataRequest::QuotaGet {} => self.bulk_quota(fs, origin, &identity, out),
+            AppDataRequest::TempCreate {} => self.temp_create(fs, origin, &identity, out),
+            AppDataRequest::TempRelease { name } => {
+                self.temp_release(fs, origin, &identity, name)?;
+                Ok(ok(out))
+            }
         }
     }
 
@@ -670,25 +703,78 @@ impl<S: Sink, R: Entropy> AppData<S, R> {
     ) -> Result<usize, Errno> {
         let blobs = self.blobs(fs, origin, identity, false)?;
         let outcome = blobs.listing(fs).and_then(|listing| {
-            let rendered = blob::render_listing(&listing)?;
+            let rendered = bulk::render_listing(&listing)?;
             Ok(rendered)
         });
         let rendered = self.resolve(origin, outcome)?;
         encode_blob_list_reply(&rendered, capacity, out)
     }
 
-    /// Answer a quota read with the caller's blob usage and its ceilings.
-    fn blob_quota<F: Storage + ?Sized>(
+    /// Answer a quota read with the caller's bulk usage and its ceilings.
+    ///
+    /// Both scopes in one answer, off one resolution of the configuration
+    /// store: an application deciding whether to spill to scratch or evict a
+    /// cached index needs both figures, and two calls could report two moments.
+    fn bulk_quota<F: Storage + ?Sized>(
         &mut self,
         fs: &mut F,
         origin: &Origin,
         identity: &AppIdentity,
         out: &mut [u8],
     ) -> Result<usize, Errno> {
-        let blobs = self.blobs(fs, origin, identity, false)?;
-        let outcome = blobs.quota(fs);
-        let quota = self.resolve(origin, outcome)?;
-        encode_quota_reply(&quota, out)
+        let store = self.open(fs, origin, identity, false)?;
+        let blobs = Self::judge(&self.sink, origin, BlobStore::open(fs, &store, false))?;
+        let blobs = self.resolve(origin, blobs.usage(fs))?;
+        // An application whose boot has no temporary scope holds no temporary
+        // files, which is exactly what the scope answers everywhere else — the
+        // usage read is not the place to refuse a caller asking about its
+        // blobs.
+        let temps = match self.temp {
+            Some(names) => {
+                let temp = TempStore::open(fs, &store, names, false);
+                let temp = Self::judge(&self.sink, origin, temp)?;
+                self.resolve(origin, temp.usage(fs))?
+            }
+            None => (0, 0),
+        };
+        encode_quota_reply(&bulk::quota(blobs, temps), out)
+    }
+
+    /// Answer a temporary-file create with a one-shot descriptor grant and the
+    /// name the service gave the file.
+    ///
+    /// The caller named nothing, so there is nothing to validate on the way in:
+    /// the name comes from this boot's naming rule and a drawn slot, which is
+    /// what makes a fresh file fresh without two instances of one application
+    /// having to agree on anything.
+    fn temp_create<F: Storage + ?Sized>(
+        &mut self,
+        fs: &mut F,
+        origin: &Origin,
+        identity: &AppIdentity,
+        out: &mut [u8],
+    ) -> Result<usize, Errno> {
+        let temp = self.temps(fs, origin, identity, true)?;
+        let outcome = temp.create(fs, &mut self.entropy, origin.pid());
+        let (handle, name) = self.resolve(origin, outcome)?;
+        encode_temp_reply(handle, &name, out)
+    }
+
+    /// Delete one of the caller's own temporary files.
+    ///
+    /// Nothing is created on this path: releasing a file — or a store — that
+    /// does not exist removes nothing and succeeds, so it is neither an oracle
+    /// for what exists nor a way to provision a store.
+    fn temp_release<F: Storage + ?Sized>(
+        &mut self,
+        fs: &mut F,
+        origin: &Origin,
+        identity: &AppIdentity,
+        name: &str,
+    ) -> Result<(), Errno> {
+        let temp = self.temps(fs, origin, identity, false)?;
+        let outcome = temp.release(fs, name);
+        self.resolve(origin, outcome)
     }
 
     /// Open the caller's blob store, auditing and translating any refusal.
@@ -710,6 +796,30 @@ impl<S: Sink, R: Entropy> AppData<S, R> {
     ) -> Result<BlobStore, Errno> {
         let store = self.open(fs, origin, identity, create)?;
         let outcome = BlobStore::open(fs, &store, create);
+        Self::judge(&self.sink, origin, outcome)
+    }
+
+    /// Open the caller's temporary files, auditing and translating any refusal.
+    ///
+    /// The same pin discipline [`Self::blobs`] follows, for the same reason:
+    /// one `.owner` record governs both trees, so a squatting publisher is
+    /// refused before a byte of another developer's scratch is reachable.
+    ///
+    /// A boot with no identity refuses here, before the store is opened: the
+    /// service could not tell this boot's scratch from an earlier boot's, so it
+    /// serves none rather than leaving files it could never reclaim.
+    fn temps<F: Storage + ?Sized>(
+        &mut self,
+        fs: &mut F,
+        origin: &Origin,
+        identity: &AppIdentity,
+        create: bool,
+    ) -> Result<TempStore, Errno> {
+        let names = self
+            .temp
+            .ok_or_else(|| Self::refuse(&self.sink, origin, StoreError::TempUnavailable))?;
+        let store = self.open(fs, origin, identity, create)?;
+        let outcome = TempStore::open(fs, &store, names, create);
         Self::judge(&self.sink, origin, outcome)
     }
 
@@ -801,18 +911,26 @@ impl<S: Sink, R: Entropy> AppData<S, R> {
     /// [`Self::resolve`] over a borrowed sink, for the paths that hold a
     /// mutable borrow of the dispatcher's own state.
     fn judge<T>(sink: &S, origin: &Origin, outcome: Result<T, StoreError>) -> Result<T, Errno> {
-        outcome.map_err(|err| {
-            Self::record(
-                sink,
-                origin,
-                Refusal {
-                    err,
-                    app: origin.app(),
-                    target: None,
-                },
-            );
-            err.errno()
-        })
+        outcome.map_err(|err| Self::refuse(sink, origin, err))
+    }
+
+    /// Audit `err` against the caller's own store and answer the typed refusal
+    /// it maps to.
+    ///
+    /// The one place a store refusal becomes an errno, so a path that refuses
+    /// before there is an outcome to judge cannot pick a different one — or
+    /// forget the audit record.
+    fn refuse(sink: &S, origin: &Origin, err: StoreError) -> Errno {
+        Self::record(
+            sink,
+            origin,
+            Refusal {
+                err,
+                app: origin.app(),
+                target: None,
+            },
+        );
+        err.errno()
     }
 
     /// Resolve an outcome on the **foreign** published path.
@@ -942,17 +1060,21 @@ fn level_of(err: StoreError) -> Level {
         // of an account's key material, and none of them is a state the store
         // reaches in normal operation.
         | StoreError::Vault(_)
-        // A blob name the wire decoder already refuses can only reach the
+        // A store name the wire decoder already refuses can only reach the
         // store if a check was bypassed, so it is an attack indication.
-        | StoreError::BlobNameRefused => Level::Warn,
+        | StoreError::StoreNameRefused
+        // A boot with no identity means the kernel's random reserve never
+        // seeded, which an operator has to know about.
+        | StoreError::TempUnavailable => Level::Warn,
         StoreError::NoHome
         | StoreError::DocumentRefused
         | StoreError::Unavailable
         // An application reading a blob it has not created yet is its first
-        // launch, and one that has filled its store has outgrown the working
-        // set the scope is for. Neither is an attack indication.
+        // launch, and one that has filled either scope has outgrown the working
+        // set that scope is for. Neither is an attack indication.
         | StoreError::BlobNotFound
-        | StoreError::BlobLimit => Level::Info,
+        | StoreError::BlobLimit
+        | StoreError::TempLimit => Level::Info,
     }
 }
 

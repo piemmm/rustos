@@ -87,11 +87,22 @@ pub const BLOB_NOT_FOUND: EventId = EventId(21_014);
 /// set the blob scope is for — or a runaway writer.
 pub const BLOB_LIMIT: EventId = EventId(21_015);
 
-/// A blob name outside the store-name grammar reached the store. The wire
+/// A name outside the store-name grammar reached the bulk store. The wire
 /// decoder refuses one, so this is a defect on the way in rather than a caller
 /// the endpoint can produce — recorded as a warning because it means a check
 /// was bypassed.
-pub const BLOB_NAME_REFUSED: EventId = EventId(21_016);
+pub const STORE_NAME_REFUSED: EventId = EventId(21_016);
+
+/// A caller asked for a temporary file while already holding as many as it may.
+/// A release frees a slot at once and a boot frees them all, so an application
+/// that reaches this has kept scratch it never finished with.
+pub const TEMP_LIMIT: EventId = EventId(21_017);
+
+/// The temporary scope cannot be served this boot: the kernel minted no boot
+/// identity, or the generator could not draw a name for a file. Either way the
+/// service cannot tell one boot's scratch from another's, so it serves none
+/// rather than leaving files it could never reclaim.
+pub const TEMP_UNAVAILABLE: EventId = EventId(21_018);
 
 /// The event identifier recording `err`.
 ///
@@ -113,7 +124,9 @@ pub const fn id_of(err: StoreError) -> EventId {
         StoreError::Vault(VaultError::EntropyUnavailable) => ENTROPY_UNAVAILABLE,
         StoreError::BlobNotFound => BLOB_NOT_FOUND,
         StoreError::BlobLimit => BLOB_LIMIT,
-        StoreError::BlobNameRefused => BLOB_NAME_REFUSED,
+        StoreError::TempLimit => TEMP_LIMIT,
+        StoreError::TempUnavailable => TEMP_UNAVAILABLE,
+        StoreError::StoreNameRefused => STORE_NAME_REFUSED,
     }
 }
 
@@ -125,7 +138,7 @@ mod tests {
 
     /// Every [`StoreError`] variant, so a new one cannot be added without an
     /// identifier of its own.
-    const EVERY_ERROR: [StoreError; 14] = [
+    const EVERY_ERROR: [StoreError; 16] = [
         StoreError::NoAppIdentity,
         StoreError::NoHome,
         StoreError::RootNotOwned,
@@ -139,7 +152,9 @@ mod tests {
         StoreError::Vault(VaultError::EntropyUnavailable),
         StoreError::BlobNotFound,
         StoreError::BlobLimit,
-        StoreError::BlobNameRefused,
+        StoreError::TempLimit,
+        StoreError::TempUnavailable,
+        StoreError::StoreNameRefused,
     ];
 
     #[test]
