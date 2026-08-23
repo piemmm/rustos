@@ -867,7 +867,7 @@ const _: () = {
 };
 
 // A `static` (not a `const`): several enrolments may share one built binary
-// and `backing_image_path` disambiguates their planted images by each entry's
+// and `sidecar_path` disambiguates their planted images by each entry's
 // stable index in this table, found via `std::ptr::eq`. A `const` is inlined
 // at every use and its promoted array need not have a single address, so
 // pointer identity against a re-materialised `TESTS.iter()` is unreliable; a
@@ -4303,7 +4303,7 @@ static TESTS: &[QemuTest] = &[
     // Supervisor ESC vertical above — the guest is byte-identical; only the
     // host-side serial script differs — so there is no duplicated bin
     // (`AGENTS.md` §2.2). The runner disambiguates the two enrolments' planted
-    // backing images by their `TESTS` index (`backing_image_path`), so the
+    // backing images by their `TESTS` index (`sidecar_path`), so the
     // shared binary is safe under the concurrent matrix. The
     // `SUPERVISOR_ESC_AT_PROMPT_SCRIPT` waits for the redrawn
     // `ARXFS passphrase: ` prompt to appear (which only happens after the 2 s
@@ -6669,8 +6669,10 @@ pub fn run_once(ctx: &Context, only: Option<&str>) -> Result<(), String> {
             let weight = qemu_job_weight(t.cpus, budget);
             let target_dir = target_dir.clone();
             let stores = stores_for(ctx, t)?;
+            // The pull-request matrix runs each enrolment exactly once, so
+            // every run is replica zero and keeps the plain sidecar names.
             Ok(Job::closure(label, weight, move || {
-                run_one(&target_dir, t, stores)
+                run_one(&target_dir, t, 0, stores)
             }))
         })
         .collect::<Result<Vec<Job>, String>>()?;
@@ -6701,8 +6703,18 @@ impl Enrolment {
     /// with no retry. `target_dir` is where the pre-built kernel binaries live
     /// (see [`build_all`]); `stores` is the enrolment's own per-arch
     /// `/System`-store bundle set (see [`Self::stores`] / [`stores_for`]).
-    pub(crate) fn run(&self, target_dir: &Path, stores: StoreSet) -> Result<(), String> {
-        run_one(target_dir, self.test, stores)
+    ///
+    /// `replica` is which concurrent run of this enrolment this is, so the
+    /// flake hunt's simultaneous replicas plant and report to their own
+    /// sidecar files instead of overwriting each other's
+    /// ([`sidecar_path`]).
+    pub(crate) fn run(
+        &self,
+        target_dir: &Path,
+        replica: usize,
+        stores: StoreSet,
+    ) -> Result<(), String> {
+        run_one(target_dir, self.test, replica, stores)
     }
 
     /// Resolve the `/System`-store bundle sets this enrolment plants,
@@ -6994,29 +7006,49 @@ fn stores_for(ctx: &Context, t: &QemuTest) -> Result<StoreSet, String> {
     })
 }
 
-/// Path of a planted backing image for enrolment `t`, built beside its
-/// kernel binary with extension `ext`.
+/// Path of a per-run sidecar file for `t` — a planted backing image, or the
+/// run's serial transcript — built beside its kernel binary with extension
+/// `ext`. `replica` distinguishes concurrent runs of the same enrolment.
 ///
-/// Several enrolments may share one built binary: they drive the *same*
-/// guest with different host-side serial scripts (the pre-boot Supervisor
-/// verticals, which enter the REPL through different trigger points, are the
-/// standing example). Those siblings must not plant to the same file, or the
-/// weighted-concurrency runner could let one run's plant clobber another's
-/// while its QEMU still has the image open. When a binary backs more than one
-/// enrolment the image name is disambiguated by the entry's stable index in
-/// [`TESTS`]; a binary used by a single enrolment keeps the plain
-/// `<binary>.<ext>` name, so no existing enrolment's image path changes.
-fn backing_image_path(kernel: &Path, t: &QemuTest, ext: &str) -> PathBuf {
+/// Two runs must never write to the same sidecar, or the weighted-concurrency
+/// runner could let one clobber another's image while its QEMU still has it
+/// open, or attribute one run's transcript to another. Two things collide:
+///
+/// * **Enrolments sharing one built binary** — they drive the *same* guest
+///   with different host-side serial scripts (the pre-boot Supervisor
+///   verticals, which enter the REPL through different trigger points, are the
+///   standing example). When a binary backs more than one enrolment the name
+///   carries the entry's stable index in [`TESTS`].
+/// * **Concurrent replicas of one enrolment** — the flake hunt
+///   ([`super::ci_long`]) runs each enrolment `REPS` times at once, and each
+///   replica re-plants its own image, so a shared name would rewrite a live
+///   guest's disk underneath it. Replicas past the first carry their index.
+///
+/// The first replica of a singly-enrolled binary keeps the plain
+/// `<binary>.<ext>` name, so the pull-request matrix's paths are unchanged.
+fn sidecar_path(kernel: &Path, t: &QemuTest, replica: usize, ext: &str) -> PathBuf {
+    use std::fmt::Write as _;
+
     let shared = TESTS.iter().filter(|e| e.binary == t.binary).count() > 1;
+    let mut name = String::new();
     if shared {
         let idx = TESTS.iter().position(|e| std::ptr::eq(e, t)).unwrap_or(0);
-        kernel.with_extension(format!("s{idx}.{ext}"))
-    } else {
-        kernel.with_extension(ext)
+        // Writing into a `String` is infallible.
+        let _ = write!(name, "s{idx}.");
     }
+    if replica > 0 {
+        let _ = write!(name, "r{replica}.");
+    }
+    name.push_str(ext);
+    kernel.with_extension(name)
 }
 
-fn run_one(target_dir: &Path, t: &QemuTest, stores: StoreSet) -> Result<(), String> {
+fn run_one(
+    target_dir: &Path,
+    t: &QemuTest,
+    replica: usize,
+    stores: StoreSet,
+) -> Result<(), String> {
     let kernel: PathBuf = target_dir.join(t.target).join("debug").join(t.binary);
     // Select the per-arch QEMU `Spec`: the riscv64 enrolments boot the
     // `virt` board through OpenSBI; everything else uses the x86_64
@@ -7046,7 +7078,7 @@ fn run_one(target_dir: &Path, t: &QemuTest, stores: StoreSet) -> Result<(), Stri
     // reads as zero, so the test's write+read-back of sector 1 cannot
     // pass on stale data.
     if let Some(sectors) = t.disk_sectors {
-        let image = backing_image_path(&kernel, t, "blk.img");
+        let image = sidecar_path(&kernel, t, replica, "blk.img");
         let sector0: Vec<u8> = (0..tairix_qemu::disk::SECTOR_BYTES)
             .map(|i| u8::try_from(i % 256).unwrap_or(0))
             .collect();
@@ -7059,7 +7091,7 @@ fn run_one(target_dir: &Path, t: &QemuTest, stores: StoreSet) -> Result<(), Stri
     // enrolment names one. Only the non-zero sectors are planted; the
     // planter zero-fills the rest, matching a freshly-formatted volume.
     if let Some(fs) = fs_disk_image(t, stores)? {
-        let image = backing_image_path(&kernel, t, fs.extension);
+        let image = sidecar_path(&kernel, t, replica, fs.extension);
         let sector_bytes = tairix_qemu::disk::SECTOR_BYTES;
         let planted: Vec<(u64, &[u8])> = fs
             .bytes
@@ -7073,7 +7105,7 @@ fn run_one(target_dir: &Path, t: &QemuTest, stores: StoreSet) -> Result<(), Stri
         spec = spec.with_virtio_blk(&image);
     }
 
-    finish_run(t, &kernel, spec)
+    finish_run(t, &kernel, replica, spec)
 }
 
 /// Decode a dumped scan-out and assert the desktop session composited its
@@ -9240,7 +9272,7 @@ fn memtest_takeover_gates(spec: Spec, binary: &str) -> Spec {
 /// scripted serial dialogue) to `spec` and drive the guest to its outcome.
 /// `kernel` is the enrolment's binary path, which names the sibling capture
 /// file.
-fn finish_run(t: &QemuTest, kernel: &Path, spec: Spec) -> Result<(), String> {
+fn finish_run(t: &QemuTest, kernel: &Path, replica: usize, spec: Spec) -> Result<(), String> {
     // `_wire_socks` is held for the whole run: dropping a reserved socket
     // removes its file, which would pull the wire out from under the guest.
     let (mut spec, peer, _wire_socks) = attach_net_peer(t, kernel, spec)?;
@@ -9305,7 +9337,7 @@ fn finish_run(t: &QemuTest, kernel: &Path, spec: Spec) -> Result<(), String> {
         spec = spec.with_serial_input(*marker, *delay_after_marker, *line);
     }
 
-    let serial_log = kernel.with_extension("serial.log");
+    let serial_log = sidecar_path(kernel, t, replica, "serial.log");
     std::fs::remove_file(&serial_log)
         .or_else(|e| match e.kind() {
             std::io::ErrorKind::NotFound => Ok(()),
@@ -9323,21 +9355,24 @@ fn finish_run(t: &QemuTest, kernel: &Path, spec: Spec) -> Result<(), String> {
     // so the thread never outlives the run unjoined.
     let run = Runner::run(&spec).map_err(|e| format!("test --qemu ({}): {e}", t.package));
     let peer_verdict = peer.map(super::netpeer::NetPeer::stop_and_join);
-    match run? {
-        Outcome::Pass { serial } => {
+    let outcome = run?;
+    // Persist the transcript before the outcome is judged, for every run
+    // including a pass. A pass is the verdict with the most riding on it and
+    // the least evidence behind it: the runner scores it from an exit status,
+    // and a run that ended sooner than its choreography needs looks exactly
+    // like one that completed. Keeping the transcript is what lets a reader
+    // check a suspicious pass instead of having to re-derive it.
+    persist_serial(t.package, &serial_log, outcome.serial())?;
+    match outcome {
+        Outcome::Pass { .. } => {
             // The guest passed, but the run is not verified until its dumps
-            // and its link peer agree. Either can still fail, so the
-            // transcript is persisted before they are consulted — a dump
-            // assertion that fires with no serial log to read is a diagnosis
-            // no one can start.
+            // and its link peer agree.
             for (path, assert) in &screendump_paths {
                 if let Err(e) = assert(t, path) {
-                    persist_failure_serial(t.package, &serial_log, &serial)?;
                     return Err(format!("{e} (full serial: {})", serial_log.display()));
                 }
             }
             if let Some(Err(e)) = peer_verdict {
-                persist_failure_serial(t.package, &serial_log, &serial)?;
                 return Err(format!(
                     "test --qemu ({}): {e} (full serial: {})",
                     t.package,
@@ -9347,7 +9382,6 @@ fn finish_run(t: &QemuTest, kernel: &Path, spec: Spec) -> Result<(), String> {
             Ok(())
         }
         Outcome::Fail { status, serial } => {
-            persist_failure_serial(t.package, &serial_log, &serial)?;
             Err(format!(
                 "test --qemu ({}) FAILED (qemu status {status}; full serial: {})\n--- serial ---\n{serial}\n--- end ---",
                 t.package,
@@ -9355,7 +9389,6 @@ fn finish_run(t: &QemuTest, kernel: &Path, spec: Spec) -> Result<(), String> {
             ))
         }
         Outcome::Timeout { budget, serial } => {
-            persist_failure_serial(t.package, &serial_log, &serial)?;
             Err(format!(
                 "test --qemu ({}) HUNG: the guest fell silent for its whole {budget:?} inactivity budget; the transcript's last line is the stall point (no retries per AGENTS.md §7; full serial: {})\n--- serial ---\n{serial}\n--- end ---",
                 t.package,
@@ -9367,7 +9400,6 @@ fn finish_run(t: &QemuTest, kernel: &Path, spec: Spec) -> Result<(), String> {
             silent_for,
             serial,
         } => {
-            persist_failure_serial(t.package, &serial_log, &serial)?;
             // The silence at the kill is the first thing a reader needs: near
             // zero means the guest was alive and working but never finished
             // (a choreography waiting on a witness that never arrives, or a
@@ -9383,16 +9415,19 @@ fn finish_run(t: &QemuTest, kernel: &Path, spec: Spec) -> Result<(), String> {
     }
 }
 
-/// Persist a failed guest's complete serial transcript beside its kernel.
+/// Persist a guest's complete serial transcript beside its kernel, whatever
+/// the run's outcome.
 ///
-/// The command-line report also includes the transcript, but build output can
-/// exceed a terminal or CI log's display limit. The sidecar keeps the original
-/// bytes available for diagnosis without changing the guest or rerunning a
-/// failed workload.
-fn persist_failure_serial(package: &str, path: &Path, serial: &str) -> Result<(), String> {
+/// A failure report also includes the transcript inline, but build output can
+/// exceed a terminal or CI log's display limit, and a *pass* prints none at
+/// all. The sidecar keeps the original bytes available for diagnosis without
+/// changing the guest or rerunning the workload — which is the only way to
+/// check after the fact that a vertical's pass came from the choreography it
+/// claims and not from an early exit that scored the same.
+fn persist_serial(package: &str, path: &Path, serial: &str) -> Result<(), String> {
     std::fs::write(path, serial).map_err(|e| {
         format!(
-            "test --qemu ({}): persist failure serial {}: {e}",
+            "test --qemu ({}): persist serial transcript {}: {e}",
             package,
             path.display()
         )
@@ -9402,8 +9437,8 @@ fn persist_failure_serial(package: &str, path: &Path, serial: &str) -> Result<()
 #[cfg(test)]
 mod tests {
     use super::{
-        backing_image_path, build_targets, login_type_plant, persist_failure_serial,
-        qemu_host_budget_for, qemu_job_weight, FsDisk, PrimePlan, QemuTest, MEMSOAK_PASS_PREFIX,
+        build_targets, login_type_plant, persist_serial, qemu_host_budget_for, qemu_job_weight,
+        sidecar_path, FsDisk, PrimePlan, QemuTest, MEMSOAK_PASS_PREFIX,
         SUPERVISOR_ESC_AT_PROMPT_SCRIPT, SUPERVISOR_ESC_SCRIPT, SUPERVISOR_MOUNT_SCRIPT,
         TCPECHO_PASS_PREFIX, TCPSERVE_PASS_PREFIX, TESTS, UNLOCK_PASSPHRASE_LINE,
     };
@@ -9671,38 +9706,50 @@ mod tests {
         assert_eq!(SUPERVISOR_MOUNT_SCRIPT[2].2, UNLOCK_PASSPHRASE_LINE);
     }
 
-    /// Enrolments that share one built binary (the pre-boot Supervisor
-    /// verticals drive the byte-identical guest through different serial
-    /// scripts) must never plant to the same backing-image path, or the
-    /// concurrent runner could let one run clobber another's image while its
-    /// QEMU still has it open. [`backing_image_path`] disambiguates them by
-    /// their stable [`TESTS`] index; a binary used by a single enrolment keeps
-    /// the plain `<binary>.<ext>` name so no existing enrolment's path changed.
+    /// No two runs of the matrix may write to the same sidecar path, or the
+    /// concurrent runner could let one clobber another's image while its QEMU
+    /// still has it open — rewriting a live guest's disk underneath it — or
+    /// attribute one run's transcript to another. Two things collide and
+    /// [`sidecar_path`] separates both: enrolments sharing one built binary
+    /// (the pre-boot Supervisor verticals drive the byte-identical guest
+    /// through different serial scripts), and the flake hunt's concurrent
+    /// replicas of a single enrolment. Both sidecar kinds are checked, because
+    /// both are per-run outputs. Replica zero of a singly-enrolled binary
+    /// keeps the plain `<binary>.<ext>` name, so the pull-request matrix's
+    /// paths are unchanged.
     #[test]
-    fn backing_image_paths_never_collide_within_a_shared_binary() {
+    fn sidecar_paths_never_collide_across_enrolments_or_replicas() {
         use std::collections::{HashMap, HashSet};
         use std::path::Path;
+
+        // More replicas than `ci_long::REPS` so the check outlives a change
+        // to the hunt's repetition count.
+        const REPLICAS: usize = 32;
 
         let mut by_binary: HashMap<&str, Vec<&QemuTest>> = HashMap::new();
         for t in TESTS {
             by_binary.entry(t.binary).or_default().push(t);
         }
-        for (binary, group) in by_binary {
-            let kernel = Path::new("target").join("dummy").join(binary);
-            let mut seen = HashSet::new();
-            for t in &group {
-                let path = backing_image_path(&kernel, t, "arxfs.img");
-                assert!(
-                    seen.insert(path.clone()),
-                    "backing image path {path:?} collides within binary {binary}"
-                );
-            }
-            if group.len() == 1 {
-                assert_eq!(
-                    backing_image_path(&kernel, group[0], "arxfs.img"),
-                    kernel.with_extension("arxfs.img"),
-                    "a single-enrolment binary must keep its plain image name",
-                );
+        for ext in ["arxfs.img", "serial.log"] {
+            for (binary, group) in &by_binary {
+                let kernel = Path::new("target").join("dummy").join(binary);
+                let mut seen = HashSet::new();
+                for t in group {
+                    for replica in 0..REPLICAS {
+                        let path = sidecar_path(&kernel, t, replica, ext);
+                        assert!(
+                            seen.insert(path.clone()),
+                            "{ext} sidecar path {path:?} collides within binary {binary}"
+                        );
+                    }
+                }
+                if group.len() == 1 {
+                    assert_eq!(
+                        sidecar_path(&kernel, group[0], 0, ext),
+                        kernel.with_extension(ext),
+                        "replica zero of a single-enrolment binary must keep its plain {ext} name",
+                    );
+                }
             }
         }
     }
@@ -9965,14 +10012,14 @@ mod tests {
     }
 
     #[test]
-    fn failed_guest_serial_is_persisted_verbatim() {
+    fn guest_serial_is_persisted_verbatim() {
         let path = std::env::temp_dir().join(format!(
             "tairix-xtask-serial-{}-{}.log",
             std::process::id(),
             line!()
         ));
         let transcript = "boot\0serial\nfinal marker\n";
-        persist_failure_serial("fixture", &path, transcript).expect("persist transcript");
+        persist_serial("fixture", &path, transcript).expect("persist transcript");
         let actual = std::fs::read_to_string(&path).expect("read transcript");
         std::fs::remove_file(&path).expect("remove transcript");
         assert_eq!(actual, transcript);

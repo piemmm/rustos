@@ -34,6 +34,15 @@ The open items, in priority order:
   `lib/collections`) were audited against §27. All are complete; `waitq`
   (D2) was the sole thin slice. One latent watch-item (the slab
   free-slot scan) is recorded and staged (not a live defect).
+- **D50 — the flake hunt's concurrent replicas re-planted one guest's backing
+  image underneath itself — DONE.** Up to four simultaneous runs of one
+  enrolment shared a planted-image path, so a replica rewrote a live sibling's
+  disk mid-run. Sidecar paths are now per-run, not per-binary.
+- **D49 — a QEMU vertical's success status is also what a machine reset
+  produces**, on aarch64 and riscv64 (both report success as plain `0`). The
+  harness's verdict is therefore fail-open: a guest that took the machine down
+  without reaching its assertions scores `Pass`. Latent today (no enrolment
+  resets its guest) and confirmed by measurement, not inference.
 - **D45 — the per-CPU live-space publication accepted a non-`Arc` pointer —
   DONE.** Its `Arc` refcount write therefore landed out of bounds, corrupting
   the host heap and failing the §7 gate's test phase. It was a real unsound
@@ -2900,6 +2909,120 @@ authenticated. There was never a capability or account defect here.
 latches: an `APP_LOADED` naming the bundle, and a window create served on the
 reserved endpoint *after* it. It ran to the 600 s ceiling before the fix and
 now passes in ~20 s, five consecutive runs.
+
+## D49 — on aarch64 and riscv64 a QEMU vertical's success status is also what a reset produces (OPEN)
+
+Found while closing `plans/NETWORK.md` N16b, whose predecessor suspected the
+runner was scoring short runs as passes. It was not — that vertical's runs are
+genuine (see N16b) — but the audit it prompted found a real fail-open one level
+down, in the harness's verdict itself.
+
+**The defect.** `tairix_qemu::Arch::outcome_from_status` scores a run `Pass` on
+the guest's success exit status alone. On x86_64 that status is
+`(SUCCESS_EXIT_CODE << 1) | 1` = 33, a value only an `isa-debug-exit` write can
+produce, so the status *is* evidence. On aarch64 (semihosting `SYS_EXIT`) and
+riscv64 (`SiFive` Test `FINISHER_PASS`) the success status is plain `0` — and
+so is the status QEMU exits with when the *machine* goes away under
+`-no-reboot`: a guest reset, a PSCI `SYSTEM_OFF`, an SBI SRST shutdown, or a
+monitor `quit`. A guest that never reached its assertions but took the machine
+down scores exactly like one that passed, on two of the three Tier-1 arches.
+
+Measured on QEMU 11.0.2, not inferred:
+
+```text
+$ printf 'system_reset\n' | qemu-system-aarch64 -M virt -display none \
+      -no-reboot -monitor stdio -serial null; echo $?
+0
+```
+
+The tree already knows this hazard: `outcome_from_done`'s `reset_success_marker`
+arm exists precisely because "a crash that merely triple-faults into a reset
+(also status `0`) still fails loud (it never reached the marker)". That defence
+is opt-in, and only the three `memtest`-takeover verticals opt in. Every other
+aarch64/riscv64 enrolment falls through to the bare status decode.
+
+A second, narrower instance of the same shape: the host process status is 8
+bits, so `qemu_exit::exit_failure(code)` with `code % 256 == 0` also lands on
+`0` and scores `Pass`. No enrolment uses such a code today (the failure
+constants run 1–19, plus `FAIL_EXIT_BASE = 100` and a small guest code), so
+this half is latent, not live.
+
+**Why it is latent rather than live today.** No enrolled vertical resets or
+powers off its guest: the panic bridges park the CPU, an unhandled exception
+reaches a panic, and no serial script types `reboot`/`shutdown`.
+`KernelArch::reboot`/`poweroff` are reachable from userland, so the reachability
+is one enrolment away; and the riscv64 path is the closest to live, because an
+unhandled M-mode trap can end in a firmware reset rather than a park.
+
+**Why the obvious host-side fixes do not work.** `-no-shutdown` keeps QEMU
+alive across a guest reset, which would make the reset fail loud — but on
+riscv64 it also blocks the success path, because QEMU 11 routes
+`FINISHER_PASS` through the same shutdown machinery a reset uses (measured:
+`tairix-test-kernel-arch-boot-riscv64` exits 0 in 0.11 s without it and has to
+be killed with it). `-action shutdown=` accepts only `poweroff`/`pause`, so
+there is no "exit with a distinguishable status" action either. The
+distinguishing evidence has to come from the guest.
+
+**The two candidate designs, and their costs.** Both make success provable
+rather than inferred; neither is a per-vertical opt-in.
+
+1. *A reserved success status.* `exit_success` reports a magic non-zero status
+   on all three arches (aarch64: the `SYS_EXIT` subcode; riscv64: the
+   `SiFive` coded-status word), so one shared decoder replaces the three
+   per-arch ones and a reset can never produce it. Atomic by construction —
+   one semihosting call or one MMIO store, nothing to interleave. The cost is
+   that the reserved value then may never be a failure code, which the
+   open-ended `FAIL_EXIT_BASE + code` space does not enforce; and it reads
+   oddly on riscv64, where the device names that word "fail".
+2. *A finisher witness on the console.* `exit_success` prints a fixed marker
+   before terminating and the host requires it for a success status — the
+   `reset_success_marker` mechanism, made universal instead of opt-in. No
+   reserved value, one rule for every arch. The cost is that the marker must
+   reach the transcript un-interleaved on an SMP guest, so it needs the
+   console gate's whole-line framing plus a flush rather than the direct
+   `beacon` path.
+
+**Done when:** a success verdict on every Tier-1 arch rests on evidence a
+reset cannot forge; the three `reset_success_marker` verticals keep working
+(their success *is* a reset); a host unit test pins that a status-`0` exit
+without the guest's evidence is `Fail` on aarch64 and riscv64; and the whole
+`test --qemu` matrix is green on all three arches afterwards, since the change
+alters the pass criterion for every enrolment and a vertical that was passing
+on a machine-death status would surface here.
+
+## D50 — the flake hunt's concurrent replicas re-planted one guest's disk underneath itself (DONE)
+
+Found while making `test --qemu` persist a transcript for every run
+(`plans/NETWORK.md` N16b), which added a second per-run output to a path set
+that was already colliding.
+
+**The defect.** `ci_long::flake_hunt` runs each unit `REPS` times
+*concurrently*, so up to `budget / weight` runs of one enrolment are in flight
+at once (four on a 24-CPU host; one on a small runner, where the weight
+saturates the budget and the batch serialises — which is why this never
+surfaced in CI). Each run re-plants its guest's backing image inside `run_one`,
+and the path was a pure function of the *binary*, so a replica's
+`plant_raw_disk` truncated and rewrote a 200 MiB image that a sibling replica's
+QEMU had open — corrupting a live guest's disk mid-run. The failure it produces
+is an arbitrary guest misbehaviour with no local cause, i.e. exactly what a
+flake hunt is supposed to distinguish *from* a real flake.
+
+The flake hunt already threaded a repetition index into its job factory; the
+QEMU unit was the one factory that discarded it (`move |_|`).
+
+**Fix.** The sidecar path is a function of the run, not the binary:
+`sidecar_path(kernel, t, replica, ext)` separates both colliding axes — the
+`TESTS` index for enrolments that share one built binary, and the replica index
+for concurrent runs of one enrolment. Replica zero of a singly-enrolled binary
+keeps the plain `<binary>.<ext>` name, so the pull-request matrix's paths are
+unchanged. `Enrolment::run` takes the replica; `ci_long`'s QEMU unit passes the
+hunt's own index.
+
+**Regression cover.** `sidecar_paths_never_collide_across_enrolments_or_replicas`
+enumerates every enrolment × 32 replicas × both sidecar kinds and asserts the
+paths are distinct — it fails on the first shared-binary enrolment when the
+replica index is dropped. The transcript is covered by the same test because it
+is now a per-run output too.
 
 ## Non-goals / do not do
 

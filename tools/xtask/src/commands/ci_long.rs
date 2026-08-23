@@ -171,7 +171,12 @@ fn qemu_units(ctx: &Context) -> Vec<FlakeUnit<'_>> {
             let label = format!("qemu {}", enrol.package);
             let job_label = label.clone();
             let weight = qemu_tests::qemu_job_weight(enrol.cpus, budget);
-            FlakeUnit::new(label, budget, move |_| {
+            // `replica` is the hunt's own repetition index. The concurrent
+            // batch runs these simultaneously and each re-plants its guest's
+            // backing image, so it has to reach the run: without it every
+            // replica would plant and report to one path and rewrite a live
+            // sibling's disk underneath it (`qemu_tests::sidecar_path`).
+            FlakeUnit::new(label, budget, move |replica| {
                 let target_dir = target_dir.clone();
                 let job_label = job_label.clone();
                 // Resolve this enrolment's memoised (`'static`) per-arch
@@ -181,7 +186,7 @@ fn qemu_units(ctx: &Context) -> Vec<FlakeUnit<'_>> {
                 // a memoised composition failure fails the job closed.
                 let stores = enrol.stores(ctx);
                 Job::closure(job_label, weight, move || {
-                    enrol.run(&target_dir, stores.clone()?)
+                    enrol.run(&target_dir, replica, stores.clone()?)
                 })
             })
         })

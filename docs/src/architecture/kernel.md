@@ -980,7 +980,9 @@ feature and never links into a production build.
 `tools/qemu` is the audited gateway between the host build and any
 QEMU integration test (PVH direct boot via `-kernel`,
 `isa-debug-exit` device, strict per-test timeouts, no retries —
-`AGENTS.md` §7).
+`AGENTS.md` §7). Each run's serial transcript is persisted beside its guest
+binary as `<kernel>.serial.log` whatever the verdict, so a pass can be checked
+against the witnesses it claims rather than taken on the exit status alone.
 
 ## Stage 3a (c7) — first production `KernelArch` impl
 

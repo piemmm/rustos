@@ -5828,7 +5828,7 @@ format-conformance defect the evidence window exposed). See
 
 ## NETWORK — full IPv4 + IPv6 networking (`plans/NETWORK.md`)
 
-**Status: N1–N3b done; N3c–N9 planned.** N1 (done) landed the `lib/net`
+**Status: N1–N16 done.** N1 (done) landed the `lib/net`
 protocol-engine foundation: the dual-stack address vocabulary
 (`core::net` types + RFC 4007 `Ipv6Scope`/`ScopedIpv6Addr` zone rules),
 the one RFC 1071 checksum (incremental accumulator + v4/v6
@@ -5879,9 +5879,8 @@ the netstack engine's ring pump drives a live virtio-net device against
 the harness-side `netpeer` link peer (the same `lib/net` `Stack` over a
 QEMU dgram unix-socket netdev): ping in/out over v4 and v6, neighbours
 resolved both ways, the peer's own verdict required — and **deleted**
-`userland/net/icmp` (§2.13/§2.14). The
-remaining increments
-deliver the complete dual-stack user-space network
+`userland/net/icmp` (§2.13/§2.14). N4–N16 (done) complete the dual-stack
+user-space network
 stack above the link-layer driver seam: one pure, host-testable,
 fuzzed protocol engine (`lib/net` — Ethernet, ARP/ND over one neighbour
 contract, IPv4 + IPv6 as peers, ICMP/ICMPv6, IGMP/MLD multicast

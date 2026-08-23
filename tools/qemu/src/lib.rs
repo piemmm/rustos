@@ -190,6 +190,22 @@ impl Outcome {
     pub fn is_pass(&self) -> bool {
         matches!(self, Outcome::Pass { .. })
     }
+
+    /// The run's captured transcript, whichever outcome it reached.
+    ///
+    /// Every variant carries one, so a caller that persists the transcript
+    /// as evidence does it once for the run rather than once per verdict —
+    /// including for a pass, which is the outcome whose evidence a reader is
+    /// most likely to want and least likely to have.
+    #[must_use]
+    pub fn serial(&self) -> &str {
+        match self {
+            Outcome::Pass { serial }
+            | Outcome::Fail { serial, .. }
+            | Outcome::Timeout { serial, .. }
+            | Outcome::RuntimeCeilingExceeded { serial, .. } => serial,
+        }
+    }
 }
 
 /// A backing block device attached to the guest.
@@ -2491,6 +2507,33 @@ mod tests {
         let mut serial = String::from("clean serial log\n");
         append_stderr(&mut serial, &Mutex::new(String::from("   \n")));
         assert_eq!(serial, "clean serial log\n");
+    }
+
+    #[test]
+    fn every_outcome_surfaces_its_transcript() {
+        // The runner persists the transcript once per run, off this accessor,
+        // so a variant that hid its own log would silently leave that run's
+        // evidence on the floor — a pass most of all.
+        for outcome in [
+            Outcome::Pass {
+                serial: "pass log".into(),
+            },
+            Outcome::Fail {
+                status: 1,
+                serial: "pass log".into(),
+            },
+            Outcome::Timeout {
+                budget: Duration::from_secs(1),
+                serial: "pass log".into(),
+            },
+            Outcome::RuntimeCeilingExceeded {
+                ceiling: Duration::from_secs(2),
+                silent_for: Duration::ZERO,
+                serial: "pass log".into(),
+            },
+        ] {
+            assert_eq!(outcome.serial(), "pass log");
+        }
     }
 
     #[test]

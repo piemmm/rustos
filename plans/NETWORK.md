@@ -2090,7 +2090,7 @@ end-of-request and still read the response. Key facts for the next worker:
   repeat, read-discard with a drained receive queue, `Both`, and the four
   refusal cases. Docs: `docs/src/abi/net-sockets.md`.
 
-#### N16 — connection-exhaustion defence: observability, then the live vertical `[~]`
+#### N16 — connection-exhaustion defence: observability, then the live vertical `[x]`
 
 N6b-2-β-2 deferred the standalone SYN-flood vertical "to N7+", and N7 is
 done. Auditing it first turned up a prerequisite: the defence counters the
@@ -2130,7 +2130,7 @@ a test asserting `stats:net/stack/syn-cookies` resolved to
 - Docs: `docs/src/userland/{networking,netstack}.md`, the `ss` help, and
   §5's counter list above.
 
-##### N16b — the live connection-exhaustion vertical `[~]`
+##### N16b — the live connection-exhaustion vertical `[x]`
 
 `tests/integration/netstack_synflood_qemu_aarch64` is the N6b-2-β-2 listener
 vertical run against a *hostile* peer. Key facts for the next worker:
@@ -2170,26 +2170,32 @@ vertical run against a *hostile* peer. Key facts for the next worker:
   covered by the `tcp::listen` unit tests and the `fuzz_net_tcp` listener
   driver; a second live vertical for it would be scope creep. No loss is
   injected here — retransmission has its own vertical (N6b-2-β-2).
-- **Why this is `[~]` and not `[x]`: the live run is unvalidated on this
-  development machine, and the cause is not in this increment.** The vertical
-  is written, registered, and host-green (the audit-once-per-listener
-  mechanism is covered by the `cookies_engaged_is_reported_once_per_listener`
-  netstack test), but `cargo xtask test --qemu` reports it *passing* in ~10 s
-  — far too fast for unlock + login + a 257-SYN flood + a 32 KiB transfer,
-  which the sibling verticals budget 300 s for. The **same** is true of the
-  pre-existing `netstack_listener_qemu_aarch64` on a **clean tree with this
-  increment stashed** (12.5 s, exit 0), so it is an environment or
-  harness-level condition that predates this work, not a regression from it:
-  a QEMU run that ends early is being scored `Outcome::Pass`, and on a pass
-  the runner persists no serial transcript to contradict it. Two *earlier*
-  iterations of this vertical did boot for real (604 s and 342 s, with full
-  transcripts) and each failed loud with a genuine diagnosis — a peer that
-  never serviced inbound frames so ND never completed, then a flood that ran
-  before the guest was listening, both fixed — so the choreography has been
-  exercised; what is missing is a trustworthy final green. **Next worker:
-  establish why a short QEMU exit scores as a pass (start at `Outcome`
-  classification in `tools/qemu`) before trusting any vertical's verdict on
-  this machine, then re-run this one and mark it `[x]`.**
+- **A ~10 s pass is the healthy shape; do not read the 300 s enrolment budget
+  as an expected runtime.** That budget is the longest the guest may fall
+  *silent* (`tairix_qemu`), and this guest is fast — `netstack` is ready
+  0.219 s into the boot and the whole run occupies 4.7 s of guest time. A run
+  long enough to look "plausible" is a run that hit its ceiling, which is how
+  the two failures this increment fixed presented (a peer that never serviced
+  inbound frames so ND never completed, then a flood that ran before the guest
+  was listening). Judge a run by its transcript, which the runner now persists
+  for every outcome including a pass (`<kernel>.serial.log`): the measured one
+  reads `socket listening` 4.396 s → `id=16024 SYN backlog full, answering
+  with stateless cookies` 4.443 s, **once** → `socket connection accepted`
+  4.452 s → `TCPSERVE PASS 32768 bytes` → `comm=tcpserve sc=exit` 4.590 s →
+  the scripted shell `exit` 4.711 s. The sibling pcap corroborates it: 306
+  distinct flood source ports (the pre-listener probes plus the 257 that
+  landed after it came up — `ListenConfig::default().max_half_open + 1`), then
+  one connection on port 49152 carrying 32 768 bytes each way and closing
+  cleanly.
+- **A separate fail-open the audit turned up is recorded, not fixed here:**
+  on aarch64 and riscv64 the guest's success exit status is plain `0`, which
+  is also what QEMU exits with when the machine resets or powers off, so the
+  harness cannot tell a deliberate success from a machine death on those two
+  arches (`plans/OPEN-DEFECTS.md` D49). It is latent — no enrolment resets its
+  guest — and the fix changes the pass criterion for every vertical on three
+  arches, so it is its own increment rather than a rider on this one. It does
+  not weaken this vertical: the run above is proven by its transcript, its
+  pcap, and the peer's verdict, none of which a status could forge.
 
 ## 5. Observability: `info:` / `state:` / `stats:` for every interface
 
