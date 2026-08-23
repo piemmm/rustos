@@ -2,7 +2,7 @@
 //! requests, decode the typed replies, and render human-readable lines.
 
 use alloc::format;
-use alloc::string::String;
+use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 use core::fmt::Write;
 
@@ -18,13 +18,16 @@ use tairix_abi::sysinfo::{
     SystemIdentity, Uptime, VolumeIoHealthRecord, VolumeIoHealthRequest, PRESSURE_BAND_NAMES,
     RECLAIM_CLASS_COUNT, RECLAIM_CLASS_NAMES,
 };
+use tairix_abi::time::{Duration64, Time64};
 use tairix_abi::{Errno, LimitKind};
 
 use tairix_help::{own_short_help, HelpSource};
 use tairix_procinfo::{
     call, emit_self_scope_omission, fetch_tree, for_each_irq, for_each_process,
-    for_each_raid_array, for_each_raid_member, render_limit_bound, render_process, Output,
-    Transport, WalkStep, PROCESS_HEADER,
+    for_each_raid_array, for_each_raid_member, render_limit_bound, render_process, resolve,
+    Authorization, InfoValue, Metric, MetricKind, Output, Producer, ResetBehavior,
+    ResourceResponse, ResponsePayload, Sensitivity, Transport, Unit, ValueKind, WalkStep,
+    PROCESS_HEADER,
 };
 
 use crate::command::Command;
@@ -51,6 +54,8 @@ queries:
   irq                 IRQ table: line, owner, count, quarantine (needs CAP_SYSINFO_HW)
   storage             per-volume I/O health and outcome counters (needs CAP_SYSINFO_KERNEL)
   raid                composed arrays and the devices they are made of (needs CAP_SYSINFO_HW)
+  show <ref>          read one info:/state:/stats: resource reference
+  describe <ref>      report a reference's producer, authorization, and metric metadata
   help, -h, -?        show this help";
 
 /// `sysinfo`'s own command word: the short-help switches render its own
@@ -60,7 +65,9 @@ const OWN_WORD: &str = "sysinfo";
 /// Run one [`Command`], issuing its query through `transport` and writing the
 /// rendered result to `out`. `locale` is the user's `LANG` preference, if
 /// set; `help` is the tool's own `Help/` tree, read by the short-help
-/// switches.
+/// switches; `now` is the wall-clock instant the caller read, which stamps a
+/// `show`/`describe` response envelope (the library reads no clock of its
+/// own, exactly as it opens no transport of its own).
 ///
 /// # Errors
 ///
@@ -69,15 +76,21 @@ const OWN_WORD: &str = "sysinfo";
 /// * [`SysinfoError::Service`] — the transport failed or the reply did not
 ///   decode against `sysinfo-v1`.
 /// * [`SysinfoError::Output`] — writing the terminal failed.
+/// * [`SysinfoError::BadReference`] / [`SysinfoError::Unresolvable`] — a
+///   `show`/`describe` operand that is not a well-formed reference, or names
+///   nothing this resolver serves.
 pub fn run(
-    command: Command,
+    command: Command<'_>,
     locale: Option<&str>,
+    now: Time64,
     transport: &dyn Transport,
     help: &dyn HelpSource,
     out: &dyn Output,
 ) -> Result<(), SysinfoError> {
     match command {
         Command::Help => short_help(locale, help, out),
+        Command::Show { reference } => run_show(reference, now, transport, out),
+        Command::Describe { reference } => run_describe(reference, now, transport, out),
         Command::Processes { all } => run_processes(all, transport, out),
         Command::Memory => run_memory(transport, out),
         Command::Hardware => run_hardware(transport, out),
@@ -113,6 +126,169 @@ fn short_help(
         .and_then(|bytes| core::str::from_utf8(bytes).ok())
         .unwrap_or(USAGE);
     emit(out, text.trim_end_matches('\n'))
+}
+
+/// Resolve one resource reference to its typed response.
+///
+/// Both steps are the shared ones: the spelling goes through the single
+/// resource-reference parser (`lib/resref`) and the resolution through the
+/// single userspace `info:`/`state:`/`stats:` resolver (`lib/procinfo`), which
+/// carries it to `sysinfod` over the same [`Transport`] every other
+/// subcommand uses. This tool therefore adds no second reference grammar, no
+/// second resolver, and no path around the broker's per-principal scoping.
+fn resolve_reference(
+    reference: &str,
+    now: Time64,
+    transport: &dyn Transport,
+) -> Result<ResourceResponse, SysinfoError> {
+    let parsed = tairix_resref::parse(reference).map_err(|_| SysinfoError::BadReference)?;
+    resolve(&parsed, now, transport).map_err(SysinfoError::from)
+}
+
+/// `show <resource-ref>`: print the value, and nothing else.
+///
+/// One bare value on one line, so a shell can capture it
+/// (`host=$(sysinfo show info:system/hostname)`) without stripping a label or
+/// a unit. What the figure *means* — its unit, kind, and sampling window — is
+/// [`run_describe`]'s job, one command away, rather than decoration this
+/// command's callers would have to parse back off.
+fn run_show(
+    reference: &str,
+    now: Time64,
+    transport: &dyn Transport,
+    out: &dyn Output,
+) -> Result<(), SysinfoError> {
+    let response = resolve_reference(reference, now, transport)?;
+    let value = match &response.payload {
+        // A `state:` reading renders like an `info:` fact; that it may change
+        // between reads is the envelope's business, not the value's.
+        ResponsePayload::Info(info) | ResponsePayload::State(info) => String::from(info.value()),
+        ResponsePayload::Metric(metric) => metric.value.to_string(),
+    };
+    emit(out, &value)
+}
+
+/// `describe <resource-ref>`: print the response envelope rather than the
+/// value (`plans/ALIAS.md` §14.5).
+///
+/// Every field comes from the typed [`ResourceResponse`] the resolver already
+/// builds — the producer, the authorization the value was served under, and
+/// the payload's own metadata — so this renders a record rather than
+/// re-deriving anything about the resource.
+fn run_describe(
+    reference: &str,
+    now: Time64,
+    transport: &dyn Transport,
+    out: &dyn Output,
+) -> Result<(), SysinfoError> {
+    let response = resolve_reference(reference, now, transport)?;
+    emit(out, &format!("reference     : {}", response.query()))?;
+    emit(out, &format!("envelope      : v{}", response.version))?;
+    emit(
+        out,
+        &format!("producer      : {}", producer_name(response.producer)),
+    )?;
+    emit(
+        out,
+        &format!(
+            "authorization : {}",
+            authorization_text(response.authorization)
+        ),
+    )?;
+    match &response.payload {
+        ResponsePayload::Info(info) => describe_value(out, "info", info),
+        ResponsePayload::State(info) => describe_value(out, "state", info),
+        ResponsePayload::Metric(metric) => describe_metric(out, metric),
+    }
+}
+
+/// The `describe` lines an `info:` fact or `state:` reading adds: its scalar
+/// type and how sensitive it is (`plans/ALIAS.md` §14.2).
+fn describe_value(out: &dyn Output, payload: &str, info: &InfoValue) -> Result<(), SysinfoError> {
+    emit(out, &format!("payload       : {payload}"))?;
+    let kind = match info.kind {
+        ValueKind::Str => "string",
+    };
+    emit(out, &format!("value kind    : {kind}"))?;
+    let sensitivity = match info.sensitivity {
+        Sensitivity::Public => "public",
+        Sensitivity::Sensitive => "sensitive",
+    };
+    emit(out, &format!("sensitivity   : {sensitivity}"))
+}
+
+/// The `describe` lines a `stats:` metric adds (`plans/ALIAS.md` §14.3,
+/// §14.5): its name, kind, unit, reset behaviour, and — for a rate, which is
+/// undefined without one — the window the service actually measured over.
+fn describe_metric(out: &dyn Output, metric: &Metric) -> Result<(), SysinfoError> {
+    emit(out, "payload       : metric")?;
+    emit(out, &format!("metric        : {}", metric.name()))?;
+    let kind = match metric.kind {
+        MetricKind::Gauge => "gauge",
+        MetricKind::Counter => "counter",
+        MetricKind::Rate => "rate",
+    };
+    emit(out, &format!("kind          : {kind}"))?;
+    emit(out, &format!("unit          : {}", unit_name(metric.unit)))?;
+    let reset = match metric.reset_behavior {
+        ResetBehavior::Never => "never",
+        ResetBehavior::Boot => "boot",
+    };
+    emit(out, &format!("reset         : {reset}"))?;
+    // A gauge and a counter have no window; saying "none" is the honest
+    // answer, not a missing line the reader has to notice.
+    let window = match metric.window {
+        Some(window) => format_window(window),
+        None => String::from("none"),
+    };
+    emit(out, &format!("window        : {window}"))
+}
+
+/// The service that produced a response.
+fn producer_name(producer: Producer) -> &'static str {
+    match producer {
+        Producer::Sysinfod => "sysinfod",
+    }
+}
+
+/// The authorization a response was served under: the capability that was
+/// spent, or that none was needed.
+fn authorization_text(authorization: Authorization) -> String {
+    match authorization {
+        Authorization::Unprivileged => String::from("unprivileged"),
+        // A capability the frozen registry does not name cannot be spelled;
+        // its number is reported rather than a guess at a name.
+        Authorization::Capability(cap) => cap
+            .name()
+            .map_or_else(|| format!("capability {}", cap.as_u16()), String::from),
+    }
+}
+
+/// The display spelling of a metric unit.
+fn unit_name(unit: Unit) -> &'static str {
+    match unit {
+        Unit::Bytes => "bytes",
+        Unit::Seconds => "seconds",
+        Unit::Count => "count",
+        Unit::Percent => "percent",
+        Unit::PacketsPerSecond => "packets/s",
+        Unit::BitsPerSecond => "bits/s",
+    }
+}
+
+/// Render a sampling window in the same `<n>ms`/`<n>s` spelling a `?window=`
+/// parameter is written in, so a described window can be typed straight back
+/// into a reference.
+fn format_window(window: Duration64) -> String {
+    let secs = window.secs();
+    let millis = u64::from(window.subsec_nanos()) / 1_000_000;
+    if millis == 0 {
+        return format!("{secs}s");
+    }
+    // A sub-second remainder is reported in milliseconds throughout, rather
+    // than as a mixed `1s500ms` no parameter spelling would accept.
+    let total_millis = (secs.unsigned_abs() * 1000).saturating_add(millis);
+    format!("{total_millis}ms")
 }
 
 /// Issue `query` with `payload` through the shared client helper and map a
@@ -890,15 +1066,19 @@ mod tests {
         }
     }
 
+    /// A fixed wall-clock instant for the response envelopes a
+    /// `show`/`describe` stamps, so a rendered envelope is deterministic.
+    const NOW: Time64 = Time64::from_secs(1_718_452_800);
+
     /// The engine under the fixtures' default seams: no locale preference
     /// and an empty Help tree, so every existing scenario exercises the
     /// query paths unchanged.
     fn run(
-        command: Command,
+        command: Command<'_>,
         transport: &dyn Transport,
         out: &dyn Output,
     ) -> Result<(), SysinfoError> {
-        engine_run(command, None, transport, &NoHelp, out)
+        engine_run(command, None, NOW, transport, &NoHelp, out)
     }
 
     /// Two arrays the composer would report: an idle mirror and a parity
@@ -1231,6 +1411,28 @@ mod tests {
                 page(payload, &fixture_members(), |record| {
                     record.to_le_bytes().to_vec()
                 })
+            } else if header.query == SysinfoQueryId::NET_INTERFACE_RATES {
+                // One interface's throughput rates, echoing the window the
+                // caller asked for so a described window can be checked
+                // against the request that produced it.
+                let req = tairix_abi::sysinfo::NetInterfaceRatesRequest::from_bytes(payload)?;
+                let mut name = [0u8; tairix_abi::net_ipc::IF_NAME_LEN];
+                name[..3].copy_from_slice(b"wan");
+                Ok(tairix_abi::net_ipc::NetInterfaceRatesRecord {
+                    name,
+                    window: req.window,
+                    rx_pps: 120,
+                    rx_bps: 960_000,
+                    tx_pps: 60,
+                    tx_bps: 480_000,
+                }
+                .to_le_bytes()
+                .to_vec())
+            } else if header.query == SysinfoQueryId::NET_RESOLVER_SERVERS {
+                // A host that has learned no recursive servers: a valid
+                // answer (`none`), not a failure, so the `state:` payload
+                // renders without a network fixture.
+                Ok(Vec::new())
             } else if header.query == SysinfoQueryId::RESOURCE_LIMITS {
                 let mut out = Vec::new();
                 for (index, kind) in LimitKind::ALL.iter().enumerate() {
@@ -1326,12 +1528,287 @@ mod tests {
         assert!(fixture.seen.borrow().is_empty());
     }
 
+    /// `show` prints the value and nothing else, for each payload the
+    /// resolver can produce: an `info:` fact, a `stats:` metric, and a
+    /// `state:` reading.
+    #[test]
+    fn show_prints_the_bare_value_of_every_payload() {
+        // `info:` — a fact, through SYSTEM_IDENTITY.
+        let fixture = Fixture::new(Vec::new());
+        let out = Recorder::new();
+        assert_eq!(
+            run(
+                Command::Show {
+                    reference: "info:system/hostname"
+                },
+                &fixture,
+                &out
+            ),
+            Ok(())
+        );
+        assert_eq!(out.lines(), alloc::vec!["rustbox".to_string()]);
+
+        // `stats:` — a metric, printed as the bare figure: its unit is
+        // `describe`'s business, so a shell can capture this verbatim.
+        let fixture = Fixture::new(Vec::new());
+        let out = Recorder::new();
+        assert_eq!(
+            run(
+                Command::Show {
+                    reference: "stats:mem/used"
+                },
+                &fixture,
+                &out
+            ),
+            Ok(())
+        );
+        assert_eq!(out.lines(), alloc::vec!["3072".to_string()]);
+
+        // `state:` — a mutable reading, rendered like a fact.
+        let fixture = Fixture::new(Vec::new());
+        let out = Recorder::new();
+        assert_eq!(
+            run(
+                Command::Show {
+                    reference: "state:net/resolver/servers"
+                },
+                &fixture,
+                &out
+            ),
+            Ok(())
+        );
+        assert_eq!(out.lines(), alloc::vec!["none".to_string()]);
+    }
+
+    /// `describe` reports the envelope rather than the value: the producer,
+    /// the authorization the read was served under, and the payload's own
+    /// metadata — a metric's kind/unit/reset/window, a fact's type and
+    /// sensitivity.
+    #[test]
+    fn describe_reports_the_envelope_for_every_payload() {
+        // A counter: kind, unit, and the reset behaviour a counter must
+        // declare; no window, stated as `none` rather than omitted.
+        let fixture = Fixture::new(Vec::new());
+        let out = Recorder::new();
+        assert_eq!(
+            run(
+                Command::Describe {
+                    reference: "stats:uptime"
+                },
+                &fixture,
+                &out
+            ),
+            Ok(())
+        );
+        let lines = out.lines();
+        assert!(lines.contains(&"reference     : stats:uptime".to_string()));
+        assert!(lines.contains(&"producer      : sysinfod".to_string()));
+        assert!(lines.contains(&"authorization : unprivileged".to_string()));
+        assert!(lines.contains(&"payload       : metric".to_string()));
+        assert!(lines.contains(&"kind          : counter".to_string()));
+        assert!(lines.contains(&"unit          : seconds".to_string()));
+        assert!(lines.contains(&"reset         : boot".to_string()));
+        assert!(lines.contains(&"window        : none".to_string()));
+
+        // A gated fact names the capability it was served under, so the
+        // provenance of a privileged read is visible.
+        let fixture = Fixture::new(Vec::new());
+        let out = Recorder::new();
+        assert_eq!(
+            run(
+                Command::Describe {
+                    reference: "info:mem/physical"
+                },
+                &fixture,
+                &out
+            ),
+            Ok(())
+        );
+        let lines = out.lines();
+        assert!(lines.contains(&"authorization : CAP_SYSINFO_KERNEL".to_string()));
+        assert!(lines.contains(&"payload       : info".to_string()));
+        assert!(lines.contains(&"value kind    : string".to_string()));
+        assert!(lines.contains(&"sensitivity   : public".to_string()));
+
+        // An identifying fact is marked sensitive, so a consumer can treat
+        // it with care.
+        let fixture = Fixture::new(Vec::new());
+        let out = Recorder::new();
+        assert_eq!(
+            run(
+                Command::Describe {
+                    reference: "info:system/machine-id"
+                },
+                &fixture,
+                &out
+            ),
+            Ok(())
+        );
+        assert!(out
+            .lines()
+            .contains(&"sensitivity   : sensitive".to_string()));
+
+        // A `state:` reading is labelled as such: it is not a stable fact.
+        let fixture = Fixture::new(Vec::new());
+        let out = Recorder::new();
+        assert_eq!(
+            run(
+                Command::Describe {
+                    reference: "state:net/resolver/servers"
+                },
+                &fixture,
+                &out
+            ),
+            Ok(())
+        );
+        assert!(out.lines().contains(&"payload       : state".to_string()));
+    }
+
+    /// A rate carries the window it was averaged over, spelled the way a
+    /// `?window=` parameter is written — so a described window can be typed
+    /// straight back into a reference.
+    #[test]
+    fn describe_reports_a_rate_window_in_parameter_spelling() {
+        for (window, spelling) in [("1s", "1s"), ("10s", "10s"), ("500ms", "500ms")] {
+            let fixture = Fixture::new(Vec::new());
+            let out = Recorder::new();
+            let reference = alloc::format!("stats:net/wan/rx.pps?window={window}");
+            assert_eq!(
+                run(
+                    Command::Describe {
+                        reference: &reference
+                    },
+                    &fixture,
+                    &out
+                ),
+                Ok(())
+            );
+            let lines = out.lines();
+            assert!(lines.contains(&"kind          : rate".to_string()));
+            assert!(lines.contains(&"unit          : packets/s".to_string()));
+            assert!(
+                lines.contains(&alloc::format!("window        : {spelling}")),
+                "window {window} rendered as {lines:?}"
+            );
+        }
+
+        // And `show` of the same rate is the bare figure.
+        let fixture = Fixture::new(Vec::new());
+        let out = Recorder::new();
+        assert_eq!(
+            run(
+                Command::Show {
+                    reference: "stats:net/wan/rx.pps?window=1s"
+                },
+                &fixture,
+                &out
+            ),
+            Ok(())
+        );
+        assert_eq!(out.lines(), alloc::vec!["120".to_string()]);
+    }
+
+    /// A capability denial names the capability the resource needs, so the
+    /// user learns which grant to ask for rather than that "something" was
+    /// refused. The name comes from the frozen query registry, never a table
+    /// in this tool.
+    #[test]
+    fn a_denied_read_names_the_capability_it_needs() {
+        let mut fixture = Fixture::new(Vec::new());
+        fixture.deny = Some(SysinfoQueryId::KERNEL_MEMORY_STATS);
+        let out = Recorder::new();
+        let err = run(
+            Command::Show {
+                reference: "info:mem/physical",
+            },
+            &fixture,
+            &out,
+        )
+        .expect_err("denied");
+        assert_eq!(
+            err,
+            SysinfoError::Unresolvable(tairix_procinfo::ResolveInfoError::CapabilityDenied(
+                SysinfoQueryId::KERNEL_MEMORY_STATS
+            ))
+        );
+        assert_eq!(
+            alloc::format!("{err}"),
+            "permission denied: this resource requires CAP_SYSINFO_KERNEL"
+        );
+        // Nothing was printed: a refused read writes no value.
+        assert!(out.lines().is_empty());
+    }
+
+    /// A rate is undefined without a sampling window, so a reference missing
+    /// its mandatory `?window=` fails closed — before any query is issued,
+    /// so a malformed request never reaches the service.
+    #[test]
+    fn a_rate_without_a_window_fails_closed() {
+        for command in [
+            Command::Show {
+                reference: "stats:net/wan/rx.pps",
+            },
+            Command::Describe {
+                reference: "stats:net/wan/rx.pps",
+            },
+        ] {
+            let fixture = Fixture::new(Vec::new());
+            let out = Recorder::new();
+            assert_eq!(
+                run(command, &fixture, &out),
+                Err(SysinfoError::Unresolvable(
+                    tairix_procinfo::ResolveInfoError::UnsupportedRequest
+                ))
+            );
+            assert!(out.lines().is_empty());
+            assert!(
+                fixture.seen.borrow().is_empty(),
+                "an undefined rate never reaches the service"
+            );
+        }
+    }
+
+    /// The other two ways a reference can fail: a spelling the shared parser
+    /// refuses, and a namespace whose values are not read here at all.
+    #[test]
+    fn a_malformed_or_unserved_reference_fails_closed() {
+        let fixture = Fixture::new(Vec::new());
+        let out = Recorder::new();
+        // Not a reference at all (a filesystem path has no namespace).
+        assert_eq!(
+            run(
+                Command::Show {
+                    reference: "/System/Kernel"
+                },
+                &fixture,
+                &out
+            ),
+            Err(SysinfoError::BadReference)
+        );
+        // A well-formed reference in a namespace this resolver does not
+        // serve: `sys:` is a kernel byte stream, not a value.
+        assert_eq!(
+            run(
+                Command::Show {
+                    reference: "sys:null"
+                },
+                &fixture,
+                &out
+            ),
+            Err(SysinfoError::Unresolvable(
+                tairix_procinfo::ResolveInfoError::NamespaceNotServed
+            ))
+        );
+        assert!(out.lines().is_empty());
+        assert!(fixture.seen.borrow().is_empty());
+    }
+
     #[test]
     fn help_renders_the_short_help_from_the_document() {
         let fixture = Fixture::new(Vec::new());
         let out = Recorder::new();
         assert_eq!(
-            engine_run(Command::Help, None, &fixture, &OneDoc, &out),
+            engine_run(Command::Help, None, NOW, &fixture, &OneDoc, &out),
             Ok(())
         );
         let lines = out.lines();

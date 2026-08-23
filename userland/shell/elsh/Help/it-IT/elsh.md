@@ -40,9 +40,12 @@ scorrono la cronologia dei comandi, `Ctrl-R` la cerca, `Ctrl-C` scarta
 la riga in corso, `Ctrl-D` su una riga vuota termina la sessione e Tab
 completa nomi di comandi, percorsi e riferimenti a risorse come
 `sys:random`. Uno spazio dei nomi completa i suoi selettori registrati un
-segmento alla volta (`state:` → `net/` → `wan/` → `link`); un segmento
-mostrato come `<iface>` è un nome che solo la macchina in esecuzione
-conosce, quindi viene elencato ma mai inserito.
+segmento alla volta (`state:` → `net/` → `wan/` → `link`). Dove il registro
+conosce solo la forma — un nome di interfaccia, una linea di interrupt — Tab
+offre i nomi reali della macchina, o nulla se questa sessione non può
+elencarli. Una destinazione di redirezione offre solo spazi dei nomi
+apribili: `info:`/`state:`/`stats:` compaiono come argomento (si leggono con
+`sysinfo show`), mai dopo `>`.
 
 ## OPTIONS
 

@@ -64,6 +64,14 @@ Las consultas:
   pertenece (un guion para un candidato no afiliado), su ranura, su papel
   (candidate/held/in-sync/resyncing/faulted), su tamaño y la generación
   de metadatos que porta (necesita `CAP_SYSINFO_HW`).
+- `show <resource-ref>` — lee una referencia de recurso
+  `info:`/`state:`/`stats:` e imprime su valor. Esos espacios de nombres
+  sirven valores con tipo a través de esta API, nunca flujos de bytes: `cat`
+  no puede abrirlos. Una negativa nombra la capacidad necesaria.
+- `describe <resource-ref>` — imprime el sobre de la respuesta en lugar del
+  valor: su productor, la autorización con la que se sirvió y los metadatos
+  de la carga — para una métrica su clase, unidad, comportamiento de
+  reinicio y ventana de muestreo; para un hecho su tipo y sensibilidad.
 - `help` — la ayuda corta de este comando.
 
 Sin consulta, se muestra la ayuda corta.

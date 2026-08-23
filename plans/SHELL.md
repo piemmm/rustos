@@ -1327,14 +1327,12 @@ confidence        exact, inferred, stale, unknown
 
 The display text may be rich; the inserted text MUST be minimal and valid.
 
-A result MAY additionally carry **display-only hints**: entries the menu lists
-but never inserts, for a position where the shell can name the *shape* of what
-comes next but not the text. The one hint today is a resource-selector
-placeholder (`<iface>`, `<line>`) — a per-machine name the registry cannot
-enumerate. Because inserting a lone real candidate would hide the alternative
-the hint names, a result carrying hints MUST be listed rather than inserted or
-extended, and hints MUST therefore be raised only at a word boundary so
-completing a partly typed name is never held up.
+Every candidate MUST be text the shell is willing to insert: there is no
+display-only class. Where the registry names only the *shape* of what comes
+next — a resource-selector placeholder such as `<iface>` — completion MUST
+either offer the real names behind it or offer nothing there; it MUST NOT show
+the placeholder spelling, which the shell could not insert and the user could
+not use.
 
 ### Required completion contexts
 
@@ -1493,6 +1491,15 @@ cmd 3> <TAB>
 
 Suggest paths, alias paths (`Home:/`, `System:/`, …), and — where a stream
 facet applies — registered resource namespaces (`sys:null`, `tty:debug`, …).
+A redirection target MUST offer only **stream-backed** namespaces: `info:`,
+`state:`, and `stats:` are typed values read through the System Information
+API broker, never byte streams, so no redirection could open one and offering
+their namespace prefixes or selectors there would lead the user into a dead
+end (`ALIAS.md` §15.3). The refusal is the kernel's too: a `resource_open` of
+a value-backed namespace fails with `Errno::NotSupported` ("this backing
+cannot represent the request"), distinct from the `Errno::NotImplemented` of a
+stream namespace whose resolver has not landed.
+
 For `3>`, the completion menu SHOULD annotate the target as a `stdinfo` JSONL
 capture and MAY prefer `.jsonl` names, but it MUST still allow any valid path.
 
@@ -1519,7 +1526,7 @@ path does, from the namespace registry's selector catalogue (`ALIAS.md` §15.1)
 
 ```text
 state:<TAB>            irq/  net/
-state:net/<TAB>        resolver/  <bond>  <iface>
+state:net/<TAB>        resolver/  wan  bond0
 state:net/wan/<TAB>    active-member  address  link  member-health
 ```
 
@@ -1529,9 +1536,40 @@ never denote a path, so path candidates for it would offer something the shell
 would not open. Conversely a word that is not yet reference-shaped is offered
 the registered namespace prefixes alongside its path candidates.
 
-A catalogued segment the registry cannot enumerate is a display-only hint (see
-"Completion result model"), and completion resumes past it once the name is
-typed. Where a selector's reference is invalid without a query parameter — a
+A catalogued segment the registry cannot enumerate — a placeholder such as
+`<iface>` — names a typed *selector domain* (an interface, a bond, an
+interrupt line, a CPU, a resource-limit kind, a reclaim class). Completion
+MUST expand it into that domain's real names and offer those as ordinary
+candidates, and completion resumes past the chosen name.
+
+Enumeration is **capability-adaptive**, and that is the required behaviour
+rather than a fallback. A domain drawn from a closed table another crate owns
+(a resource-limit kind, a reclaim class) or from an ungated query (a CPU
+index) MUST be offered to every session. A domain whose listing is gated —
+an interface or interrupt line needs `CAP_SYSINFO_HW`, a bond alias needs
+`CAP_SYSINFO_GLOBAL` — MUST be offered only to a session holding that
+capability, and a session without it MUST be offered nothing there. The shell
+MUST NOT be granted `CAP_SYSINFO_*` to make Tab richer: it is the most
+exposed program on the machine, and a session that cannot list interfaces
+could not read an interface's facts either, so it loses nothing. A gated
+domain the session does not hold MUST be skipped **without issuing the
+query**, so a Tab press never produces a denied request or an audit refusal
+record.
+
+The session's own capability set MUST be read through the ungated,
+self-scoped process-identity query and MAY be cached for the process's life
+(`elevate` spawns a program under another identity and never re-credentials
+the shell). The *names* MUST NOT be cached across Tab presses, so a
+hot-plugged interface appears immediately.
+
+The selector **catalogue** itself is never filtered by capability: discovery
+is not authorization and a spelling grants nothing (`ALIAS.md` §6.2), so
+`info:mem/physical` is still completed for a session without
+`CAP_SYSINFO_KERNEL` and the read then fails with an error naming the
+capability. Only placeholders adapt, because a placeholder the shell cannot
+expand is a lie.
+
+Where a selector's reference is invalid without a query parameter — a
 windowed rate — completion MUST insert that parameter rather than closing the
 word as finished:
 

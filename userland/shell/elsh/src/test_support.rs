@@ -304,3 +304,17 @@ impl crate::complete::DirLister for EmptyLister {
         Err(Errno::NotImplemented)
     }
 }
+
+/// A resource lister with nothing to offer in any domain.
+///
+/// The REPL and editor tests are about the loop, the key handling, and the
+/// candidate mechanics — not about which interfaces or interrupt lines a
+/// machine has — so they run with no live selector names, which is also the
+/// shape of a session holding no enumeration capability.
+pub(crate) struct EmptyResources;
+
+impl crate::complete::ResourceLister for EmptyResources {
+    fn list(&self, _domain: tairix_resref::SelectorDomain) -> Result<Vec<String>, Errno> {
+        Ok(Vec::new())
+    }
+}

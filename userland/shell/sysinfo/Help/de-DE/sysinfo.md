@@ -62,6 +62,14 @@ Die Abfragen:
   Bindestrich für einen ungebundenen Kandidaten), sein Steckplatz, seine
   Rolle (candidate/held/in-sync/resyncing/faulted), seine Größe und die
   Metadaten-Generation, die es trägt (benötigt `CAP_SYSINFO_HW`).
+- `show <resource-ref>` — liest eine `info:`/`state:`/`stats:`-Ressourcen­referenz
+  und gibt ihren Wert aus. Diese Namensräume liefern typisierte Werte über
+  diese API, niemals Byteströme — `cat` kann sie nicht öffnen. Eine
+  Ablehnung nennt die benötigte Capability.
+- `describe <resource-ref>` — gibt statt des Werts die Antwort-Hülle aus:
+  Produzent, Autorisierung und die Metadaten der Nutzlast — bei einer
+  Metrik Art, Einheit, Rücksetzverhalten und Messfenster; bei einer
+  Tatsache Typ und Vertraulichkeit.
 - `help` — die Kurzhilfe dieses Befehls.
 
 Ohne Abfrage wird die Kurzhilfe angezeigt.

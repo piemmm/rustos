@@ -77,7 +77,7 @@ pub mod wireplan;
 #[cfg(test)]
 pub(crate) mod test_support;
 
-pub use complete::{complete, Candidate, Completion, DirEntryInfo, DirLister};
+pub use complete::{complete, Candidate, Completion, DirEntryInfo, DirLister, ResourceLister};
 pub use env::Environment;
 pub use error::ParseError;
 pub use host::{

@@ -58,6 +58,14 @@ The queries:
   unaffiliated candidate), its slot, its disposition
   (candidate/held/in-sync/resyncing/faulted), its size, and the
   metadata generation it carries (needs `CAP_SYSINFO_HW`).
+- `show <resource-ref>` — read one `info:`/`state:`/`stats:` resource
+  reference and print its value. Those namespaces are typed values served
+  through this API, never byte streams, so this is how one is read — `cat`
+  cannot open it. A denial names the capability the resource needs.
+- `describe <resource-ref>` — print the response envelope instead of the
+  value: its producer, the authorization it was served under, and the
+  payload's own metadata — for a metric its kind, unit, reset behaviour, and
+  sampling window; for a fact its type and sensitivity.
 - `help` — this command's own short help.
 
 With no query, the short help is shown.

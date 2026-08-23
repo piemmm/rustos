@@ -65,6 +65,7 @@ use tairix_resref::{KnownNamespace, Op, ResourceRef};
 
 use crate::cputime::for_each_cpu_time;
 use crate::kstats;
+use crate::kstats::{for_each_net_bond_member, for_each_net_interface};
 use crate::list::{field_lossy, ListError, WalkStep};
 use crate::request::{call, CallError};
 use crate::resinfo::{
@@ -90,13 +91,46 @@ pub enum ResolveInfoError {
     /// The selector is understood but the request is not serviceable: a
     /// guard, facet, or query parameter on a resource that takes none.
     UnsupportedRequest,
-    /// The System Information API refused the query for want of the
-    /// capability it declares.
-    CapabilityDenied,
+    /// The System Information API refused a query for want of the capability
+    /// it declares, which the caller does not hold.
+    ///
+    /// Carries the [`SysinfoQueryId`] that was refused, so a caller can name
+    /// the missing authority in its diagnostic
+    /// ([`required_capability`](Self::required_capability)) instead of
+    /// reporting a bare "permission denied" the user cannot act on. The
+    /// capability itself is *not* stored: it is looked up from the frozen
+    /// `sysinfo-v1` registry the broker gates on, so the two can never
+    /// disagree.
+    CapabilityDenied(SysinfoQueryId),
     /// The System Information API call failed for another reason.
     Service(Errno),
     /// The service's reply did not decode as the expected record.
     Malformed,
+}
+
+impl ResolveInfoError {
+    /// The capability the refused query declares, for a
+    /// [`CapabilityDenied`](Self::CapabilityDenied) refusal.
+    ///
+    /// Read from the frozen `sysinfo-v1` query registry
+    /// ([`SysinfoQuerySpec::required_capability`](tairix_abi::sysinfo::SysinfoQuerySpec::required_capability))
+    /// — the same table `sysinfod` gates on — so a diagnostic names exactly
+    /// the authority that was missing and this crate keeps no second copy of
+    /// the mapping.
+    ///
+    /// [`None`] for any other error, and also for the pathological case of a
+    /// registry-ungated query being refused anyway: that is a service fault,
+    /// not a grant the user could be given, so no capability is invented for
+    /// it.
+    #[must_use]
+    pub fn required_capability(self) -> Option<CapabilityId> {
+        match self {
+            Self::CapabilityDenied(query) => {
+                tairix_abi::sysinfo::spec_for(query).and_then(|spec| spec.required_capability)
+            }
+            _ => None,
+        }
+    }
 }
 
 /// Resolve an `info:`/`stats:` `reference` to a [`ResourceResponse`], reading
@@ -813,7 +847,7 @@ fn busy_share_input(
         }
         Ok(WalkStep::Continue)
     })
-    .map_err(map_list_error)?;
+    .map_err(|err| map_list_error(SysinfoQueryId::CPU_TIME_STATS, err))?;
     if !found {
         return Err(ResolveInfoError::UnknownSelector);
     }
@@ -854,13 +888,15 @@ fn cpu_load_metric(
 fn query_memory_pressure(
     transport: &dyn Transport,
 ) -> Result<MemoryPressureStats, ResolveInfoError> {
-    kstats::memory_pressure(transport).map_err(map_kstat_error)
+    kstats::memory_pressure(transport)
+        .map_err(|err| map_kstat_error(SysinfoQueryId::MEMORY_PRESSURE, err))
 }
 
 /// Query the `ramzip` tier counters (gated on `CAP_SYSINFO_KERNEL`)
 /// through the shared fetch.
 fn query_ramzip(transport: &dyn Transport) -> Result<RamzipStats, ResolveInfoError> {
-    kstats::ramzip_stats(transport).map_err(map_kstat_error)
+    kstats::ramzip_stats(transport)
+        .map_err(|err| map_kstat_error(SysinfoQueryId::RAMZIP_STATS, err))
 }
 
 /// Query the whole reclaim ledger (gated on `CAP_SYSINFO_KERNEL`) through
@@ -873,7 +909,7 @@ fn query_reclaim_records(
         records.push(*record);
         Ok(WalkStep::Continue)
     })
-    .map_err(map_list_error)?;
+    .map_err(|err| map_list_error(SysinfoQueryId::RECLAIM_STATS, err))?;
     Ok(records)
 }
 
@@ -885,7 +921,7 @@ fn query_cpu_loads(transport: &dyn Transport) -> Result<Vec<CpuLoadRecord>, Reso
         records.push(*record);
         Ok(WalkStep::Continue)
     })
-    .map_err(map_list_error)?;
+    .map_err(|err| map_list_error(SysinfoQueryId::CPU_LOAD, err))?;
     Ok(records)
 }
 
@@ -941,7 +977,7 @@ pub fn cpu_info(transport: &dyn Transport) -> Result<Vec<CpuInfoRecord>, Resolve
             flags: 0,
         };
         let reply = call(transport, SysinfoQueryId::CPU_INFO, &request.to_le_bytes())
-            .map_err(map_call_error)?;
+            .map_err(|err| map_call_error(SysinfoQueryId::CPU_INFO, err))?;
         if reply.len() % CpuInfoRecord::WIRE_LEN != 0 {
             return Err(ResolveInfoError::Malformed);
         }
@@ -1006,7 +1042,7 @@ fn query_irqs(transport: &dyn Transport) -> Result<Vec<IrqRecord>, ResolveInfoEr
         records.push(*record);
         Ok(WalkStep::Continue)
     })
-    .map_err(map_list_error)?;
+    .map_err(|err| map_list_error(SysinfoQueryId::IRQ_LIST, err))?;
     Ok(records)
 }
 
@@ -1047,7 +1083,7 @@ fn irq_count_metric(
     )
 }
 
-/// Resolve `info:irq/<line>/owner` to the driver task that owns the line.
+/// Resolve `info:irq/<irq>/owner` to the driver task that owns the line.
 /// Split out of [`resolve_info_value`] so that arm stays a one-liner; a
 /// non-numeric or unbound line id fails closed.
 fn resolve_irq_owner(
@@ -1076,7 +1112,7 @@ fn irq_total_count_metric(
     irq_count_metric(reference, now, "irq/count", total)
 }
 
-/// Resolve `stats:irq/<line>/count` to one line's own interrupt total; a
+/// Resolve `stats:irq/<irq>/count` to one line's own interrupt total; a
 /// non-numeric or unbound line id fails closed.
 fn irq_line_count_metric(
     reference: &ResourceRef,
@@ -1097,17 +1133,21 @@ fn irq_line_count_metric(
 /// Map a shared kernel-stats fetch failure onto the resolver's error
 /// vocabulary: the walks' structurally-invalid-reply convention
 /// ([`Errno::BadMagic`]) is this resolver's [`ResolveInfoError::Malformed`].
-fn map_kstat_error(err: CallError) -> ResolveInfoError {
+fn map_kstat_error(query: SysinfoQueryId, err: CallError) -> ResolveInfoError {
     match err {
         CallError::Service(Errno::BadMagic) => ResolveInfoError::Malformed,
-        other => map_call_error(other),
+        other => map_call_error(query, other),
     }
 }
 
 /// Map a paged-walk failure onto the resolver's error vocabulary.
-fn map_list_error(err: ListError) -> ResolveInfoError {
+///
+/// `query` is the query the named walk pages; the per-selector denial tests
+/// pin each pairing, so a walk mapped under the wrong id is caught rather
+/// than mis-reported.
+fn map_list_error(query: SysinfoQueryId, err: ListError) -> ResolveInfoError {
     match err {
-        ListError::Call(call) => map_kstat_error(call),
+        ListError::Call(call) => map_kstat_error(query, call),
         ListError::Sink(errno) => ResolveInfoError::Service(errno),
     }
 }
@@ -1129,10 +1169,10 @@ fn envelope(
     .map_err(|_| ResolveInfoError::Malformed)
 }
 
-/// Records per page the interface walks request — small enough for one
-/// framed reply of the widest record, large enough that one page covers
-/// every realistic interface table.
-const NET_PAGE_LIMIT: u16 = 16;
+/// Records per page the interface-record lookups here request: the same
+/// page size as the shared interface walks in [`crate::kstats`], so the
+/// resolver and a consumer listing the whole table page identically.
+const NET_PAGE_LIMIT: u16 = kstats::NET_INTERFACE_PAGE;
 
 /// Whether a NUL-padded interface-name field spells `iface`.
 fn if_name_matches(name: &[u8; IF_NAME_LEN], iface: &str) -> bool {
@@ -1140,19 +1180,27 @@ fn if_name_matches(name: &[u8; IF_NAME_LEN], iface: &str) -> bool {
     &name[..len] == iface.as_bytes()
 }
 
-/// Page [`SysinfoQueryId::NET_INTERFACE_FACTS`] until the record whose
-/// alias is `iface` is found.
+/// The record for the interface whose alias is `iface`, found by walking the
+/// shared interface table ([`for_each_net_interface`]) and stopping there.
+///
+/// The paging itself is the crate's one interface walk, so this per-name
+/// lookup and a consumer listing every interface name run the same loop.
 fn net_facts_for(
     transport: &dyn Transport,
     iface: &str,
 ) -> Result<NetInterfaceFactsRecord, ResolveInfoError> {
-    find_net_record(
-        transport,
-        SysinfoQueryId::NET_INTERFACE_FACTS,
-        NetInterfaceFactsRecord::WIRE_LEN,
-        NetInterfaceFactsRecord::from_bytes,
-        |record| if_name_matches(&record.name, iface),
-    )
+    let mut found = None;
+    for_each_net_interface(transport, |record| {
+        if if_name_matches(&record.name, iface) {
+            found = Some(*record);
+            return Ok(WalkStep::Stop);
+        }
+        Ok(WalkStep::Continue)
+    })
+    .map_err(|err| map_list_error(SysinfoQueryId::NET_INTERFACE_FACTS, err))?;
+    // An exhausted table names no such interface: fail closed rather than
+    // report a default record.
+    found.ok_or(ResolveInfoError::UnknownSelector)
 }
 
 /// Page [`SysinfoQueryId::NET_INTERFACE_STATE`] until the record whose
@@ -1170,45 +1218,24 @@ fn net_state_for(
     )
 }
 
-/// Page [`SysinfoQueryId::NET_BOND_MEMBERS`] and collect every member
-/// record whose owning bond alias is `bond`, in the stack's configured
-/// order. An empty result — `bond` names no bond, or no interface — fails
-/// closed as an unknown selector rather than reporting an empty bond.
+/// Every member record whose owning bond alias is `bond`, in the stack's
+/// configured order, over the shared membership walk
+/// ([`for_each_net_bond_member`]).
+///
+/// An empty result — `bond` names no bond, or no interface — fails closed as
+/// an unknown selector rather than reporting an empty bond.
 fn net_bond_members_for(
     transport: &dyn Transport,
     bond: &str,
 ) -> Result<Vec<NetBondMemberRecord>, ResolveInfoError> {
-    let record_len = NetBondMemberRecord::WIRE_LEN;
     let mut members = Vec::new();
-    let mut offset: u32 = 0;
-    loop {
-        let request = NetInterfaceListRequest {
-            offset,
-            limit: NET_PAGE_LIMIT,
-            flags: 0,
-        };
-        let reply = call(
-            transport,
-            SysinfoQueryId::NET_BOND_MEMBERS,
-            &request.to_le_bytes(),
-        )
-        .map_err(map_call_error)?;
-        if reply.len() % record_len != 0 {
-            return Err(ResolveInfoError::Malformed);
+    for_each_net_bond_member(transport, |record| {
+        if if_name_matches(&record.bond, bond) {
+            members.push(*record);
         }
-        let count = reply.len() / record_len;
-        for chunk in reply.chunks_exact(record_len) {
-            let record =
-                NetBondMemberRecord::from_bytes(chunk).map_err(|_| ResolveInfoError::Malformed)?;
-            if if_name_matches(&record.bond, bond) {
-                members.push(record);
-            }
-        }
-        if count < NET_PAGE_LIMIT as usize {
-            break;
-        }
-        offset = offset.saturating_add(u32::from(NET_PAGE_LIMIT));
-    }
+        Ok(WalkStep::Continue)
+    })
+    .map_err(|err| map_list_error(SysinfoQueryId::NET_BOND_MEMBERS, err))?;
     if members.is_empty() {
         return Err(ResolveInfoError::UnknownSelector);
     }
@@ -1229,7 +1256,7 @@ fn net_resolver_servers_all(
         servers.push(*record);
         Ok(WalkStep::Continue)
     })
-    .map_err(map_list_error)?;
+    .map_err(|err| map_list_error(SysinfoQueryId::NET_RESOLVER_SERVERS, err))?;
     Ok(servers)
 }
 
@@ -1386,7 +1413,8 @@ fn net_stack_metric(
         | "accepts"
         | "accept-overflow"
         | "tcp-resets" => {
-            let defence = kstats::net_stack_defence(transport).map_err(map_kstat_error)?;
+            let defence = kstats::net_stack_defence(transport)
+                .map_err(|err| map_kstat_error(SysinfoQueryId::NET_STACK_DEFENCE, err))?;
             match leaf {
                 "syn-cookies" => defence.syn_cookies_sent,
                 "syn-cookies-accepted" => defence.syn_cookies_accepted,
@@ -1563,7 +1591,7 @@ fn net_rates_for(
             SysinfoQueryId::NET_INTERFACE_RATES,
             &request.to_le_bytes(),
         )
-        .map_err(map_call_error)?;
+        .map_err(|err| map_call_error(SysinfoQueryId::NET_INTERFACE_RATES, err))?;
         if reply.len() % record_len != 0 {
             return Err(ResolveInfoError::Malformed);
         }
@@ -1599,7 +1627,7 @@ fn all_net_counters(
             SysinfoQueryId::NET_INTERFACE_COUNTERS,
             &request.to_le_bytes(),
         )
-        .map_err(map_call_error)?;
+        .map_err(|err| map_call_error(SysinfoQueryId::NET_INTERFACE_COUNTERS, err))?;
         let record_len = NetInterfaceCountersRecord::WIRE_LEN;
         if reply.len() % record_len != 0 {
             return Err(ResolveInfoError::Malformed);
@@ -1634,7 +1662,8 @@ fn find_net_record<R>(
             limit: NET_PAGE_LIMIT,
             flags: 0,
         };
-        let reply = call(transport, query, &request.to_le_bytes()).map_err(map_call_error)?;
+        let reply = call(transport, query, &request.to_le_bytes())
+            .map_err(|err| map_call_error(query, err))?;
         if reply.len() % record_len != 0 {
             return Err(ResolveInfoError::Malformed);
         }
@@ -1759,27 +1788,30 @@ fn push_u16_hex(out: &mut String, value: u16) {
 
 /// Issue [`SysinfoQueryId::SYSTEM_IDENTITY`] and decode the reply.
 fn query_identity(transport: &dyn Transport) -> Result<SystemIdentity, ResolveInfoError> {
-    let reply = call(transport, SysinfoQueryId::SYSTEM_IDENTITY, &[]).map_err(map_call_error)?;
+    let reply = call(transport, SysinfoQueryId::SYSTEM_IDENTITY, &[])
+        .map_err(|err| map_call_error(SysinfoQueryId::SYSTEM_IDENTITY, err))?;
     SystemIdentity::from_bytes(&reply).map_err(|_| ResolveInfoError::Malformed)
 }
 
 /// Issue [`SysinfoQueryId::UPTIME`] and decode the reply.
 fn query_uptime(transport: &dyn Transport) -> Result<Uptime, ResolveInfoError> {
-    let reply = call(transport, SysinfoQueryId::UPTIME, &[]).map_err(map_call_error)?;
+    let reply = call(transport, SysinfoQueryId::UPTIME, &[])
+        .map_err(|err| map_call_error(SysinfoQueryId::UPTIME, err))?;
     Uptime::from_bytes(&reply).map_err(|_| ResolveInfoError::Malformed)
 }
 
 /// Issue [`SysinfoQueryId::KERNEL_MEMORY_STATS`] and decode the reply.
 fn query_kernel_memory(transport: &dyn Transport) -> Result<KernelMemoryStats, ResolveInfoError> {
-    let reply =
-        call(transport, SysinfoQueryId::KERNEL_MEMORY_STATS, &[]).map_err(map_call_error)?;
+    let reply = call(transport, SysinfoQueryId::KERNEL_MEMORY_STATS, &[])
+        .map_err(|err| map_call_error(SysinfoQueryId::KERNEL_MEMORY_STATS, err))?;
     KernelMemoryStats::from_bytes(&reply).map_err(|_| ResolveInfoError::Malformed)
 }
 
 /// Issue [`SysinfoQueryId::PROCESS_IDENTITY`] and decode the caller's own
 /// kernel-attested [`Origin`].
 fn query_process_identity(transport: &dyn Transport) -> Result<Origin, ResolveInfoError> {
-    let reply = call(transport, SysinfoQueryId::PROCESS_IDENTITY, &[]).map_err(map_call_error)?;
+    let reply = call(transport, SysinfoQueryId::PROCESS_IDENTITY, &[])
+        .map_err(|err| map_call_error(SysinfoQueryId::PROCESS_IDENTITY, err))?;
     Origin::from_bytes(&reply).map_err(|_| ResolveInfoError::Malformed)
 }
 
@@ -1794,7 +1826,8 @@ fn query_process_identity(transport: &dyn Transport) -> Result<Origin, ResolveIn
 fn query_resource_limits(
     transport: &dyn Transport,
 ) -> Result<[ResourceLimitRecord; LimitKind::COUNT], ResolveInfoError> {
-    let reply = call(transport, SysinfoQueryId::RESOURCE_LIMITS, &[]).map_err(map_call_error)?;
+    let reply = call(transport, SysinfoQueryId::RESOURCE_LIMITS, &[])
+        .map_err(|err| map_call_error(SysinfoQueryId::RESOURCE_LIMITS, err))?;
     if reply.len() != RESOURCE_LIMITS_REPORT_LEN {
         return Err(ResolveInfoError::Malformed);
     }
@@ -1843,10 +1876,12 @@ fn unit_for_limit(kind: LimitKind) -> Unit {
     }
 }
 
-/// Map a transport [`CallError`] onto the resolver's error vocabulary.
-fn map_call_error(err: CallError) -> ResolveInfoError {
+/// Map a transport [`CallError`] from `query` onto the resolver's error
+/// vocabulary, recording *which* query a capability refusal came from so the
+/// missing authority can be named.
+fn map_call_error(query: SysinfoQueryId, err: CallError) -> ResolveInfoError {
     match err {
-        CallError::PermissionDenied => ResolveInfoError::CapabilityDenied,
+        CallError::PermissionDenied => ResolveInfoError::CapabilityDenied(query),
         CallError::Service(errno) => ResolveInfoError::Service(errno),
     }
 }
@@ -1947,6 +1982,9 @@ mod tests {
     use tairix_abi::time::{Duration64, Time64};
     use tairix_abi::{CapabilityId, Errno, LimitKind, ResourceLimit};
     use tairix_resref::parse;
+
+    use super::{for_each_net_bond_member, for_each_net_interface};
+    use crate::list::{field_lossy, WalkStep};
 
     /// An in-memory `sysinfod` stand-in that answers the singleton queries
     /// this resolver uses, decoding the request exactly as the real service
@@ -2384,7 +2422,7 @@ mod tests {
                 // `fixture_bond_members`.
                 "<bond>" => "bond0",
                 // `fixture_irqs`' first line.
-                "<line>" => "27",
+                "<irq>" => "27",
                 // `fixture_cpu_times` carries CPUs 0 and 1.
                 "<cpu>" => "0",
                 "<kind>" => "open-streams",
@@ -2701,13 +2739,51 @@ mod tests {
         }
     }
 
+    /// A capability refusal names the authority that was missing, taken from
+    /// the frozen `sysinfo-v1` registry the broker gates on rather than a
+    /// second table here — so a caller can tell the user which grant to ask
+    /// for instead of a bare "permission denied".
+    #[test]
+    fn a_denial_names_the_capability_it_needs() {
+        let mut fixture = Fixture::new();
+        fixture.deny = Some(SysinfoQueryId::KERNEL_MEMORY_STATS);
+        let err = resolve_str("info:mem/physical", &fixture).expect_err("denied");
+        assert_eq!(
+            err,
+            ResolveInfoError::CapabilityDenied(SysinfoQueryId::KERNEL_MEMORY_STATS)
+        );
+        assert_eq!(
+            err.required_capability(),
+            Some(CapabilityId::SYSINFO_KERNEL)
+        );
+        // Every other error names no capability: there is nothing to grant.
+        for other in [
+            ResolveInfoError::UnknownSelector,
+            ResolveInfoError::NamespaceNotServed,
+            ResolveInfoError::UnsupportedRequest,
+            ResolveInfoError::Malformed,
+            ResolveInfoError::Service(Errno::NotFound),
+        ] {
+            assert_eq!(other.required_capability(), None);
+        }
+        // A query the registry declares ungated, refused anyway, is a service
+        // fault rather than a missing grant: no capability is invented.
+        assert_eq!(
+            ResolveInfoError::CapabilityDenied(SysinfoQueryId::PROCESS_IDENTITY)
+                .required_capability(),
+            None
+        );
+    }
+
     #[test]
     fn info_mem_physical_denial_maps_to_capability_denied() {
         let mut fixture = Fixture::new();
         fixture.deny = Some(SysinfoQueryId::KERNEL_MEMORY_STATS);
         assert_eq!(
             resolve_str("info:mem/physical", &fixture),
-            Err(ResolveInfoError::CapabilityDenied)
+            Err(ResolveInfoError::CapabilityDenied(
+                SysinfoQueryId::KERNEL_MEMORY_STATS
+            ))
         );
     }
 
@@ -2865,7 +2941,9 @@ mod tests {
         fixture.deny = Some(SysinfoQueryId::KERNEL_MEMORY_STATS);
         assert_eq!(
             resolve_str("stats:mem/used", &fixture),
-            Err(ResolveInfoError::CapabilityDenied)
+            Err(ResolveInfoError::CapabilityDenied(
+                SysinfoQueryId::KERNEL_MEMORY_STATS
+            ))
         );
     }
 
@@ -2946,7 +3024,7 @@ mod tests {
         denied.deny = Some(SysinfoQueryId::CPU_LOAD);
         assert_eq!(
             resolve_str("stats:cpu/switches", &denied),
-            Err(ResolveInfoError::CapabilityDenied)
+            Err(ResolveInfoError::CapabilityDenied(SysinfoQueryId::CPU_LOAD))
         );
     }
 
@@ -3012,7 +3090,7 @@ mod tests {
         denied.deny = Some(SysinfoQueryId::IRQ_LIST);
         assert_eq!(
             resolve_str("stats:irq/count", &denied),
-            Err(ResolveInfoError::CapabilityDenied)
+            Err(ResolveInfoError::CapabilityDenied(SysinfoQueryId::IRQ_LIST))
         );
     }
 
@@ -3066,7 +3144,9 @@ mod tests {
         denied.deny = Some(SysinfoQueryId::MEMORY_PRESSURE);
         assert_eq!(
             resolve_str("stats:mem/pressure", &denied),
-            Err(ResolveInfoError::CapabilityDenied)
+            Err(ResolveInfoError::CapabilityDenied(
+                SysinfoQueryId::MEMORY_PRESSURE
+            ))
         );
     }
 
@@ -3305,6 +3385,132 @@ mod tests {
         ]
     }
 
+    /// A stand-in serving a table larger than one page: `count` interface
+    /// records named `if0`, `if1`, … and `count` bond members of `bond0`,
+    /// paged exactly as the real service pages, counting the pages asked
+    /// for so a test can tell a stopping walk from a draining one.
+    struct NetTable {
+        count: usize,
+        pages: RefCell<usize>,
+    }
+
+    impl NetTable {
+        fn new(count: usize) -> Self {
+            Self {
+                count,
+                pages: RefCell::new(0),
+            }
+        }
+
+        /// The `index`-th interface alias, `if<index>`.
+        fn alias(index: usize) -> [u8; IF_NAME_LEN] {
+            let mut name = [0u8; IF_NAME_LEN];
+            let text = alloc::format!("if{index}");
+            let len = text.len().min(IF_NAME_LEN);
+            name[..len].copy_from_slice(&text.as_bytes()[..len]);
+            name
+        }
+    }
+
+    impl crate::transport::Transport for NetTable {
+        fn query(&self, request: &[u8]) -> Result<Vec<u8>, Errno> {
+            let header = SysinfoRequestHeader::from_bytes(request)?;
+            let payload = &request[SysinfoRequestHeader::WIRE_LEN..];
+            let req = NetInterfaceListRequest::from_bytes(payload)?;
+            *self.pages.borrow_mut() += 1;
+            let start = (req.offset as usize).min(self.count);
+            let end = start.saturating_add(usize::from(req.limit)).min(self.count);
+            let mut out = Vec::new();
+            match header.query {
+                SysinfoQueryId::NET_INTERFACE_FACTS => {
+                    for index in start..end {
+                        let mut record = fixture_net_facts();
+                        record.name = Self::alias(index);
+                        out.extend_from_slice(&record.to_le_bytes());
+                    }
+                }
+                SysinfoQueryId::NET_BOND_MEMBERS => {
+                    for index in start..end {
+                        let mut record = fixture_bond_members()[0];
+                        record.member = Self::alias(index);
+                        out.extend_from_slice(&record.to_le_bytes());
+                    }
+                }
+                _ => return Err(Errno::NotFound),
+            }
+            Ok(out)
+        }
+    }
+
+    /// A NUL-padded interface-name field as text.
+    fn alias_text(name: &[u8; IF_NAME_LEN]) -> String {
+        let len = name.iter().position(|&b| b == 0).unwrap_or(IF_NAME_LEN);
+        field_lossy(&name[..len])
+    }
+
+    /// The extracted walks page: a table one record longer than a page is
+    /// delivered whole, in order, across two requests.
+    #[test]
+    fn the_shared_net_walks_page_past_a_full_page() {
+        let count = usize::from(crate::kstats::NET_INTERFACE_PAGE) + 1;
+
+        let table = NetTable::new(count);
+        let mut names = Vec::new();
+        for_each_net_interface(&table, |record| {
+            names.push(alias_text(&record.name));
+            Ok(WalkStep::Continue)
+        })
+        .expect("interface walk");
+        assert_eq!(names.len(), count);
+        assert_eq!(names.first().map(String::as_str), Some("if0"));
+        assert_eq!(
+            names.last().map(String::as_str),
+            Some(alloc::format!("if{}", count - 1).as_str()),
+            "the record past the first page arrives too"
+        );
+        assert_eq!(
+            *table.pages.borrow(),
+            2,
+            "a full page is followed by another"
+        );
+
+        let table = NetTable::new(count);
+        let mut members = 0usize;
+        for_each_net_bond_member(&table, |_| {
+            members += 1;
+            Ok(WalkStep::Continue)
+        })
+        .expect("bond walk");
+        assert_eq!(members, count);
+        assert_eq!(*table.pages.borrow(), 2);
+    }
+
+    /// The resolver's per-interface lookup *is* the shared walk, stopped at
+    /// the record it wanted: finding a name inside the first page costs one
+    /// request, where draining the table would cost two.
+    #[test]
+    fn the_resolver_reads_interfaces_through_the_shared_walk() {
+        let count = usize::from(crate::kstats::NET_INTERFACE_PAGE) + 1;
+        let table = NetTable::new(count);
+        let reference = parse("info:net/if0/mtu").expect("parse");
+        assert!(resolve(&reference, now(), &table).is_ok());
+        assert_eq!(
+            *table.pages.borrow(),
+            1,
+            "the lookup stops at its match rather than draining the table"
+        );
+
+        // An interface that is not there exhausts the table — every page —
+        // and fails closed as an unknown selector, never a default record.
+        let table = NetTable::new(count);
+        let reference = parse("info:net/nonsuch/mtu").expect("parse");
+        assert_eq!(
+            resolve(&reference, now(), &table),
+            Err(ResolveInfoError::UnknownSelector)
+        );
+        assert_eq!(*table.pages.borrow(), 2);
+    }
+
     #[test]
     fn bond_members_info_and_state_render_and_are_global_gated() {
         let fixture = Fixture::new();
@@ -3360,11 +3566,15 @@ mod tests {
         fixture.deny = Some(SysinfoQueryId::NET_BOND_MEMBERS);
         assert_eq!(
             resolve_str("info:net/bond0/members", &fixture),
-            Err(ResolveInfoError::CapabilityDenied)
+            Err(ResolveInfoError::CapabilityDenied(
+                SysinfoQueryId::NET_BOND_MEMBERS
+            ))
         );
         assert_eq!(
             resolve_str("state:net/bond0/active-member", &fixture),
-            Err(ResolveInfoError::CapabilityDenied)
+            Err(ResolveInfoError::CapabilityDenied(
+                SysinfoQueryId::NET_BOND_MEMBERS
+            ))
         );
     }
 
@@ -3457,7 +3667,9 @@ mod tests {
         fixture.deny = Some(SysinfoQueryId::NET_INTERFACE_RATES);
         assert_eq!(
             resolve_str("stats:net/wan/rx.pps?window=1s", &fixture),
-            Err(ResolveInfoError::CapabilityDenied)
+            Err(ResolveInfoError::CapabilityDenied(
+                SysinfoQueryId::NET_INTERFACE_RATES
+            ))
         );
     }
 
@@ -3587,7 +3799,9 @@ mod tests {
         fixture.deny = Some(SysinfoQueryId::NET_STACK_DEFENCE);
         assert_eq!(
             resolve_str("stats:net/stack/syn-cookies", &fixture),
-            Err(ResolveInfoError::CapabilityDenied)
+            Err(ResolveInfoError::CapabilityDenied(
+                SysinfoQueryId::NET_STACK_DEFENCE
+            ))
         );
         // The packet-path aggregates read a different query and still work.
         assert!(resolve_str("stats:net/stack/icmp-errors", &fixture).is_ok());
@@ -3599,11 +3813,15 @@ mod tests {
         fixture.deny = Some(SysinfoQueryId::NET_INTERFACE_COUNTERS);
         assert_eq!(
             resolve_str("stats:net/wan/rx.packets", &fixture),
-            Err(ResolveInfoError::CapabilityDenied)
+            Err(ResolveInfoError::CapabilityDenied(
+                SysinfoQueryId::NET_INTERFACE_COUNTERS
+            ))
         );
         assert_eq!(
             resolve_str("stats:net/stack/icmp-errors", &fixture),
-            Err(ResolveInfoError::CapabilityDenied)
+            Err(ResolveInfoError::CapabilityDenied(
+                SysinfoQueryId::NET_INTERFACE_COUNTERS
+            ))
         );
     }
 
@@ -3718,13 +3936,17 @@ mod tests {
         fixture.deny = Some(SysinfoQueryId::NET_INTERFACE_FACTS);
         assert_eq!(
             resolve_str("info:net/wan/mac", &fixture),
-            Err(ResolveInfoError::CapabilityDenied)
+            Err(ResolveInfoError::CapabilityDenied(
+                SysinfoQueryId::NET_INTERFACE_FACTS
+            ))
         );
         let mut fixture = Fixture::new();
         fixture.deny = Some(SysinfoQueryId::NET_INTERFACE_STATE);
         assert_eq!(
             resolve_str("state:net/wan/link", &fixture),
-            Err(ResolveInfoError::CapabilityDenied)
+            Err(ResolveInfoError::CapabilityDenied(
+                SysinfoQueryId::NET_INTERFACE_STATE
+            ))
         );
     }
 

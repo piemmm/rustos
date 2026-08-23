@@ -42,9 +42,11 @@ durchsucht ihn, `Ctrl-C` verwirft die aktuelle Zeile, `Ctrl-D` auf
 leerer Zeile beendet die Sitzung, und Tab vervollständigt Befehlsnamen,
 Dateipfade und Ressourcenreferenzen wie `sys:random`. Ein Namensraum
 vervollständigt seine registrierten Selektoren segmentweise
-(`state:` → `net/` → `wan/` → `link`); ein als `<iface>` angezeigtes
-Segment ist ein Name, den nur das laufende System kennt — er wird also
-aufgelistet, aber nie eingefügt.
+(`state:` → `net/` → `wan/` → `link`). Wo die Registry nur die Form kennt —
+ein Schnittstellenname, eine Interruptleitung —, bietet Tab die echten Namen
+der Maschine an, oder gar nichts, wenn diese Sitzung sie nicht auflisten
+darf. Ein Umleitungsziel bietet nur öffenbare Namensräume: `info:`/`state:`/`stats:`
+erscheinen als Argument (lesbar mit `sysinfo show`), nie nach `>`.
 
 ## OPTIONS
 

@@ -7,8 +7,21 @@ use crate::error::SysinfoError;
 /// Each variant maps to exactly one `sysinfo-v1` query (or to printing the
 /// usage banner). There is intentionally no free-form "raw query id" escape
 /// hatch: the tool only ever issues queries the frozen registry defines.
+///
+/// [`Show`](Self::Show) and [`Describe`](Self::Describe) carry a *resource
+/// reference*, which is not an escape hatch from that rule: a reference is a
+/// name in the `info:`/`state:`/`stats:` namespaces, not a query id. It is
+/// mapped onto a query by `lib/procinfo`'s resolver, whose match arms are the
+/// closed set of selectors the registry catalogues, and which fails closed on
+/// anything outside it. No spelling of a reference can therefore reach a
+/// query this tool could not already issue — the invariant holds, by
+/// construction rather than by a length check on the string.
+///
+/// The lifetime is the argument vector's: the reference is borrowed from the
+/// `argv` slice [`parse`] is handed rather than copied, so the parsed command
+/// stays [`Copy`] and allocation-free.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum Command {
+pub enum Command<'a> {
     /// List processes. `all` selects the system-wide view
     /// (`SysinfoQueryId::GLOBAL_PROCESS_LIST`, which the service gates on
     /// `CAP_SYSINFO_GLOBAL`); otherwise the caller's own processes
@@ -67,6 +80,31 @@ pub enum Command {
     /// under the same authority as the hardware tree, not the kernel-state
     /// authority the per-volume `storage` counters need).
     Raid,
+    /// Read one `info:`/`state:`/`stats:` resource reference and print its
+    /// value (`plans/ALIAS.md` §15.4 `show`).
+    ///
+    /// The reference is resolved through `lib/procinfo`'s userspace resolver
+    /// over the System Information API — the one place those namespaces are
+    /// resolved — so this is not a second reader and cannot bypass the
+    /// broker's per-principal scoping. `info:`/`state:`/`stats:` are
+    /// value-backed and can never be opened as byte streams
+    /// (`plans/ALIAS.md` §6.2), which is why reading one needs a command at
+    /// all rather than `cat`.
+    Show {
+        /// The resource reference to read, as spelled on the command line.
+        reference: &'a str,
+    },
+    /// Print the response *envelope* for one resource reference — its
+    /// producer, the authorization it was served under, and the payload's own
+    /// metadata (`plans/ALIAS.md` §14.5 `describe`).
+    ///
+    /// The value itself is [`Show`](Self::Show)'s job; this answers "what is
+    /// this figure, and may I trust it": for a metric its kind, unit, reset
+    /// behaviour, and sampling window; for a fact its type and sensitivity.
+    Describe {
+        /// The resource reference to describe, as spelled on the command line.
+        reference: &'a str,
+    },
     /// Render `sysinfo`'s own short help (`help`/`-h`/`-?`/`--help`): the
     /// `NAME`, `SYNOPSIS`, and compact `OPTIONS` of its Help document,
     /// through the same engine as any other command's short help
@@ -103,11 +141,20 @@ pub enum Command {
 /// | `irq`, `irqs`         | [`Command::Irqs`]                |
 /// | `storage`, `io`       | [`Command::Storage`]             |
 /// | `raid`, `arrays`      | [`Command::Raid`]                |
+/// | `show <ref>`          | [`Command::Show`]                |
+/// | `describe <ref>`      | [`Command::Describe`]            |
+///
+/// `show` and `describe` take exactly one operand — a resource reference —
+/// and no switches. The operand is not validated here beyond being present:
+/// its grammar belongs to the shared reference parser, and its selector to
+/// the resolver, so this parser neither embeds a second reference grammar nor
+/// pre-judges what the resolver serves.
 ///
 /// # Errors
 ///
-/// [`SysinfoError::Usage`] for any input outside the grammar above.
-pub fn parse(args: &[&str]) -> Result<Command, SysinfoError> {
+/// [`SysinfoError::Usage`] for any input outside the grammar above, including
+/// `show`/`describe` with no operand or with more than one.
+pub fn parse<'a>(args: &[&'a str]) -> Result<Command<'a>, SysinfoError> {
     let Some((&subcommand, rest)) = args.split_first() else {
         return Ok(Command::Help);
     };
@@ -128,12 +175,28 @@ pub fn parse(args: &[&str]) -> Result<Command, SysinfoError> {
         "irq" | "irqs" => no_more(rest).map(|()| Command::Irqs),
         "storage" | "io" => no_more(rest).map(|()| Command::Storage),
         "raid" | "arrays" => no_more(rest).map(|()| Command::Raid),
+        "show" => one_operand(rest).map(|reference| Command::Show { reference }),
+        "describe" => one_operand(rest).map(|reference| Command::Describe { reference }),
+        _ => Err(SysinfoError::Usage),
+    }
+}
+
+/// Take the single operand a subcommand requires, borrowed from `argv`.
+///
+/// Fails closed on none and on more than one: a second word is never
+/// silently ignored, and an empty operand is not a reference.
+fn one_operand<'a>(args: &[&'a str]) -> Result<&'a str, SysinfoError> {
+    match args {
+        [only] if !only.is_empty() => Ok(only),
         _ => Err(SysinfoError::Usage),
     }
 }
 
 /// Parse the flags accepted by the `processes` subcommand.
-fn parse_processes(args: &[&str]) -> Result<Command, SysinfoError> {
+///
+/// The returned command borrows nothing, so its lifetime is free to be the
+/// caller's.
+fn parse_processes(args: &[&str]) -> Result<Command<'static>, SysinfoError> {
     let mut all = false;
     for &arg in args {
         match arg {
@@ -204,6 +267,37 @@ mod tests {
         assert_eq!(parse(&["io"]), Ok(Command::Storage));
         assert_eq!(parse(&["raid"]), Ok(Command::Raid));
         assert_eq!(parse(&["arrays"]), Ok(Command::Raid));
+    }
+
+    #[test]
+    fn show_and_describe_take_one_reference() {
+        assert_eq!(
+            parse(&["show", "info:system/hostname"]),
+            Ok(Command::Show {
+                reference: "info:system/hostname"
+            })
+        );
+        assert_eq!(
+            parse(&["describe", "stats:net/wan/rx.pps?window=1s"]),
+            Ok(Command::Describe {
+                reference: "stats:net/wan/rx.pps?window=1s"
+            })
+        );
+    }
+
+    /// The operand is required, singular, and non-empty: a missing, doubled,
+    /// or blank reference is a usage error rather than a guess.
+    #[test]
+    fn show_and_describe_fail_closed_without_exactly_one_reference() {
+        for args in [
+            alloc::vec!["show"],
+            alloc::vec!["describe"],
+            alloc::vec!["show", ""],
+            alloc::vec!["show", "sys:null", "sys:random"],
+            alloc::vec!["describe", "stats:uptime", "--verbose"],
+        ] {
+            assert_eq!(parse(&args), Err(SysinfoError::Usage), "{args:?}");
+        }
     }
 
     #[test]

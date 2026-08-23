@@ -66,6 +66,15 @@ Le interrogazioni:
   il suo ruolo (candidate/held/in-sync/resyncing/faulted), la sua
   dimensione e la generazione di metadati che porta (richiede
   `CAP_SYSINFO_HW`).
+- `show <resource-ref>` — legge un riferimento a risorsa
+  `info:`/`state:`/`stats:` e stampa il suo valore. Quegli spazi dei nomi
+  servono valori tipizzati tramite questa API, mai flussi di byte: `cat` non
+  può aprirli. Un rifiuto nomina la capability necessaria.
+- `describe <resource-ref>` — stampa la busta della risposta invece del
+  valore: il produttore, l'autorizzazione con cui è stata servita e i
+  metadati del payload — per una metrica il genere, l'unità, il
+  comportamento di azzeramento e la finestra di campionamento; per un fatto
+  il tipo e la riservatezza.
 - `help` — la guida breve di questo comando.
 
 Senza interrogazione viene mostrata la guida breve.

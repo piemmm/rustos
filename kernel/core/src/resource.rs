@@ -20,14 +20,30 @@
 //! closed like any other non-kernel namespace.
 //!
 //! Only the `sys:` namespace's unprivileged members (`sys:random`,
-//! `sys:null`) are served today; every other namespace (including `info:` and
-//! `stats:`) has no kernel resolver and fails closed with
-//! [`ResolveError::UnsupportedResolver`] rather than fabricating a resource.
-//! A kernel-owned namespace (a future device endpoint) gains its resolver in
-//! place as its consumer appears — the resolver contract here does not change.
+//! `sys:null`) are served today, and every other namespace fails closed
+//! rather than fabricating a resource — but the two reasons a namespace can
+//! fail are kept apart, because they mean different things to the caller:
+//!
+//! * A **stream-backed** namespace with no resolver wired yet (`disk:`,
+//!   `tty:`, …) is [`ResolveError::UnsupportedResolver`] →
+//!   [`Errno::NotImplemented`]. It could be served here later; a caller may
+//!   reasonably expect this reference to open on a future build.
+//! * A **value-backed** namespace ([`NamespaceBacking::Value`] — `info:`,
+//!   `state:`, `stats:`) is [`ResolveError::NotAStream`] →
+//!   [`Errno::NotSupported`]. It will *never* be served here: a typed value
+//!   read through a broker is not a byte stream, so `cat info:mem/physical`
+//!   cannot succeed on any build and the caller is told so rather than being
+//!   left to wait for a resolver that is never coming.
+//!
+//! Both are fail-closed refusals; the distinction is diagnostic, and it is
+//! made from the registry's own [`KnownNamespace::backing`] so the kernel and
+//! the shell can never disagree about which namespaces are streams. A
+//! kernel-owned namespace (a future device endpoint) gains its resolver in
+//! place as its consumer appears — the resolver contract here does not
+//! change.
 
 use tairix_abi::{Errno, OpenFlags};
-use tairix_resref::{parse, KnownNamespace, RefError, ResourceRef};
+use tairix_resref::{parse, KnownNamespace, NamespaceBacking, RefError, ResourceRef};
 
 /// The concrete kernel-side backing a resolved resource reference names.
 ///
@@ -82,8 +98,20 @@ pub enum ResolveError {
     /// The namespace is not one this specification defines.
     UnknownNamespace,
     /// The namespace is known but no resolver is wired for it yet (it has no
-    /// consumer): fail closed rather than fabricate a resource.
+    /// consumer): fail closed rather than fabricate a resource. The namespace
+    /// *is* a byte stream ([`NamespaceBacking::Stream`]), so a later build may
+    /// serve it.
     UnsupportedResolver,
+    /// The namespace is value-backed ([`NamespaceBacking::Value`]): its
+    /// members are typed values read through the System Information API
+    /// broker, not byte streams, so no descriptor can ever be opened on one.
+    ///
+    /// Distinct from [`UnsupportedResolver`](Self::UnsupportedResolver): that
+    /// says "not yet", this says "not ever". Retrying, or waiting for a
+    /// future build, can never turn this into a success — the caller must
+    /// read the value through a broker client instead
+    /// (`sysinfo show <reference>`).
+    NotAStream,
     /// The selector names no resource within its (served) namespace.
     UnknownSelector,
     /// The reference is understood but the request is not serviceable — an
@@ -99,8 +127,11 @@ impl ResolveError {
     /// A malformed or unserviceable request collapses onto
     /// [`Errno::OutOfRange`] (the closest `abi-v1` "invalid request" code); an
     /// unknown namespace or selector onto [`Errno::NotFound`] (the resource
-    /// does not exist); a known-but-unwired namespace onto
-    /// [`Errno::NotImplemented`] (no resolver serves it yet). The precise
+    /// does not exist); a known-but-unwired stream namespace onto
+    /// [`Errno::NotImplemented`] (no resolver serves it *yet*); and a
+    /// value-backed namespace onto [`Errno::NotSupported`], whose contract is
+    /// exactly this case — the subsystem is live, this backing cannot
+    /// represent the request, and retrying can never succeed. The precise
     /// [`ResolveError`] is retained in-kernel for the audit log.
     #[must_use]
     pub const fn to_errno(self) -> Errno {
@@ -108,6 +139,7 @@ impl ResolveError {
             Self::InvalidSyntax | Self::UnsupportedRequest => Errno::OutOfRange,
             Self::UnknownNamespace | Self::UnknownSelector => Errno::NotFound,
             Self::UnsupportedResolver => Errno::NotImplemented,
+            Self::NotAStream => Errno::NotSupported,
         }
     }
 
@@ -118,6 +150,7 @@ impl ResolveError {
             Self::InvalidSyntax => "invalid_syntax",
             Self::UnknownNamespace => "unknown_namespace",
             Self::UnsupportedResolver => "unsupported_resolver",
+            Self::NotAStream => "not_a_stream",
             Self::UnknownSelector => "unknown_selector",
             Self::UnsupportedRequest => "unsupported_request",
         }
@@ -127,11 +160,12 @@ impl ResolveError {
 /// Resolve `reference` to a [`ResourceBacking`], validating the requested
 /// `flags` against what the backing offers.
 ///
-/// Parses the reference with the single shared parser, dispatches on the
-/// namespace, and — on success — confirms the open direction is one the
-/// backing supports. Fails closed with a typed [`ResolveError`] on any
-/// malformed, unknown, unwired, or unserviceable reference; it never returns
-/// a backing the caller did not ask for or may not use.
+/// Parses the reference with the single shared parser, refuses a namespace
+/// the registry marks value-backed, dispatches on the namespace, and — on
+/// success — confirms the open direction is one the backing supports. Fails
+/// closed with a typed [`ResolveError`] on any malformed, unknown, unwired,
+/// non-stream, or unserviceable reference; it never returns a backing the
+/// caller did not ask for or may not use.
 ///
 /// # Errors
 ///
@@ -142,13 +176,20 @@ pub fn resolve(reference: &str, flags: OpenFlags) -> Result<ResourceBacking, Res
         .namespace()
         .known()
         .ok_or(ResolveError::UnknownNamespace)?;
+    // A value-backed namespace is refused on its shape, before any
+    // selector work: `info:`/`state:`/`stats:` are typed values read through
+    // the System Information API broker, so no selector within them could
+    // ever be a byte stream this resolver serves. Saying so — rather than
+    // "no resolver yet" — is the difference between a refusal the caller can
+    // act on and one that invites a pointless retry.
+    if namespace.backing() == NamespaceBacking::Value {
+        return Err(ResolveError::NotAStream);
+    }
     let backing = match namespace {
         KnownNamespace::Sys => resolve_sys(&parsed)?,
-        // Every other namespace is not a kernel-owned backing: fail closed
-        // rather than pretend the resource exists. `info:`/`stats:` in
-        // particular are resolved in userspace over the System Information
-        // API, never here. A kernel-owned namespace gains its resolver in
-        // place when its consumer lands.
+        // Every other stream namespace has no kernel resolver wired yet: fail
+        // closed rather than pretend the resource exists. A kernel-owned
+        // namespace gains its resolver in place when its consumer lands.
         _ => return Err(ResolveError::UnsupportedResolver),
     };
     validate_access(backing, flags)?;
@@ -299,10 +340,12 @@ mod tests {
     ///
     /// A catalogued namespace resolved in userspace instead (`info:`,
     /// `state:`, `stats:` — served by `lib/procinfo` over the System
-    /// Information API) is expected to land on
-    /// [`ResolveError::UnsupportedResolver`] here; its own cross-check lives
-    /// with that resolver. Entries carrying a placeholder name a shape rather
-    /// than one resource, so there is nothing concrete to open.
+    /// Information API) is value-backed, so it is expected to land on
+    /// [`ResolveError::NotAStream`] here; its own cross-check lives with that
+    /// resolver. A stream namespace awaiting a resolver lands on
+    /// [`ResolveError::UnsupportedResolver`]. Entries carrying a placeholder
+    /// name a shape rather than one resource, so there is nothing concrete to
+    /// open.
     #[test]
     fn catalogued_selectors_resolve() {
         use alloc::format;
@@ -313,13 +356,17 @@ mod tests {
                     continue;
                 }
                 let reference = format!("{}:{}", ns.as_str(), entry.selector);
-                // A catalogued reference this resolver does not own lands on
-                // `UnsupportedResolver`; anything else is a registry error.
+                // A catalogued reference this resolver does not own is
+                // refused for exactly the reason its backing implies;
+                // anything else is a registry error.
+                let expected = match ns.backing() {
+                    NamespaceBacking::Value => ResolveError::NotAStream,
+                    NamespaceBacking::Stream => ResolveError::UnsupportedResolver,
+                };
                 if let Err(err) = resolve(&reference, OpenFlags::READ) {
                     assert_eq!(
-                        err,
-                        ResolveError::UnsupportedResolver,
-                        "{reference} is catalogued but this resolver refuses it",
+                        err, expected,
+                        "{reference} is catalogued but this resolver refuses it differently",
                     );
                 }
             }
@@ -350,19 +397,60 @@ mod tests {
         );
     }
 
+    /// A stream namespace with no resolver wired yet fails closed as
+    /// "not implemented": it could be served on a later build.
     #[test]
-    fn unwired_namespace_fails_closed() {
-        // `stats:` is resolved in userspace over the System Information API,
-        // never by this kernel resolver: it fails closed here.
+    fn unwired_stream_namespace_fails_closed() {
+        for reference in ["disk:backup", "tty:debug", "gpu:0"] {
+            assert_eq!(
+                resolve(reference, OpenFlags::READ),
+                Err(ResolveError::UnsupportedResolver),
+                "{reference} is a stream awaiting its resolver"
+            );
+            assert_eq!(
+                ResolveError::UnsupportedResolver.to_errno(),
+                Errno::NotImplemented
+            );
+        }
+    }
+
+    /// A value-backed namespace is refused as "not a stream", not as "not
+    /// implemented": `info:`/`state:`/`stats:` are typed values read through
+    /// the System Information API broker, so `cat info:mem/physical` can
+    /// never succeed and says so (`Errno::NotSupported`, 32) rather than
+    /// implying a resolver is merely missing (`NotImplemented`, 12).
+    #[test]
+    fn a_value_backed_namespace_is_not_a_stream() {
+        for reference in [
+            "info:mem/physical",
+            "info:system/hostname",
+            "state:net/resolver/servers",
+            "stats:cpu/load",
+        ] {
+            let err = resolve(reference, OpenFlags::READ);
+            assert_eq!(
+                err,
+                Err(ResolveError::NotAStream),
+                "{reference} is value-backed"
+            );
+            assert_eq!(
+                err.unwrap_err().to_errno(),
+                Errno::NotSupported,
+                "{reference} reports the honest errno"
+            );
+        }
+        // The refusal is on the namespace's shape, so it does not depend on
+        // the selector naming anything real, nor on the open direction.
         assert_eq!(
-            resolve("stats:cpu/load", OpenFlags::READ),
-            Err(ResolveError::UnsupportedResolver)
+            resolve("info:nonsuch/leaf", OpenFlags::READ),
+            Err(ResolveError::NotAStream)
         );
-        // `info:` likewise is never a kernel-owned backing.
         assert_eq!(
-            resolve("info:system/hostname", OpenFlags::READ),
-            Err(ResolveError::UnsupportedResolver)
+            resolve("info:mem/physical", OpenFlags::WRITE),
+            Err(ResolveError::NotAStream)
         );
+        // And the audit record carries the precise reason, not the errno.
+        assert_eq!(ResolveError::NotAStream.as_str(), "not_a_stream");
     }
 
     #[test]
@@ -393,6 +481,14 @@ mod tests {
         assert_eq!(
             ResolveError::UnsupportedResolver.to_errno(),
             Errno::NotImplemented
+        );
+        // "not ever" is a different errno from "not yet": a caller can tell a
+        // backing that cannot represent the request from one whose resolver
+        // has not landed.
+        assert_eq!(ResolveError::NotAStream.to_errno(), Errno::NotSupported);
+        assert_ne!(
+            ResolveError::NotAStream.to_errno(),
+            ResolveError::UnsupportedResolver.to_errno()
         );
     }
 

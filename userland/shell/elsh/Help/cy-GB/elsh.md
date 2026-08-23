@@ -42,9 +42,12 @@ mae `Ctrl-C` yn gollwng y llinell gyfredol, mae `Ctrl-D` ar linell wag
 yn gorffen y sesiwn, ac mae Tab yn cwblhau enwau gorchmynion, llwybrau a
 chyfeiriadau adnoddau fel `sys:random`. Mae gofod enwau yn cwblhau ei
 ddetholyddion cofrestredig fesul segment
-(`state:` → `net/` → `wan/` → `link`); mae segment a ddangosir fel
-`<iface>` yn enw nad yw'n hysbys ond i'r peiriant sy'n rhedeg, felly caiff
-ei restru ond nid ei fewnosod.
+(`state:` → `net/` → `wan/` → `link`). Lle mae'r gofrestr yn gwybod y siâp
+yn unig — enw rhyngwyneb, llinell ymyriad — mae Tab yn cynnig enwau
+gwirioneddol y peiriant, neu ddim o gwbl os nad yw'r sesiwn hon yn cael eu
+rhestru. Nid yw targed ailgyfeirio ond yn cynnig gofodau enwau y gellir eu
+hagor: mae `info:`/`state:`/`stats:` yn ymddangos fel ymresymiad (darllenwch
+hwy â `sysinfo show`), byth ar ôl `>`.
 
 ## OPTIONS
 

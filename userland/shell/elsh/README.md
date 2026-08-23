@@ -20,7 +20,14 @@ chords, `Ctrl-C` line cancel, `Ctrl-D` end-of-input, and Tab completion
 (`src/complete.rs`) over command names, paths, and resource references —
 namespaces and their catalogued selectors, drilled down a segment at a
 time (`state:` → `net/` → `wan/` → `link`) — see
-`docs/src/userland/shell.md`. A terminal resize adopts the new width
+`docs/src/userland/shell.md`. A catalogue segment the registry cannot
+enumerate (`<iface>`) is expanded into that domain's real names through the
+injected `ResourceLister` seam, never shown as placeholder text; the
+domains whose listing costs a capability the shell deliberately does not
+hold simply offer nothing, which is what a session that could not read
+those resources anyway should see. A redirection target offers only
+stream-backed namespaces, since `info:`/`state:`/`stats:` are values read
+through a broker and no descriptor can be opened on one. A terminal resize adopts the new width
 and repaints the line under edit — never losing, duplicating, or
 submitting it, and never cancelling a live reverse search. A backing that
 refuses raw mode (a pipe, a script) keeps the plain line reader,
@@ -38,7 +45,12 @@ escaping and candidate classes), [`tairix-curses`](../../../lib/curses)
 (the one resource-reference spelling parser and registry), and
 [`tairix-vt`](../../../lib/vt) (the shared terminal vocabulary the editor
 renders through and the plain reader's line discipline), so the shell
-never links a kernel or driver crate (`AGENTS.md` §17.4).
+never links a kernel or driver crate (`AGENTS.md` §17.4). The freestanding
+`Run` binary additionally links [`tairix-procinfo`](../../../lib/procinfo)
+to back the completion engine's resource-name seam over the System
+Information API; the interpreter library does not, because the seam is
+injected — so host tests need no service, and linking it grants no
+authority (every query is capability-checked at the broker).
 
 ## A pure interpreter
 

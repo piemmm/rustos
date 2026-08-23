@@ -5934,8 +5934,8 @@ kernel IRQ table is exported the same way: `IRQ_LIST` (id 19,
 topology like the hardware tree/seat inventory) returns one `IrqRecord`
 per bound line (id, owning driver task, monotonic since-boot fire count,
 quarantine flag), read through the shared `tairix_procinfo::for_each_irq`
-walk by the `sysinfo irq` CLI subcommand, the `info:irq/<line>/owner` /
-`state:irq/<line>/quarantined` / `stats:irq[/<line>]/count` resolver
+walk by the `sysinfo irq` CLI subcommand, the `info:irq/<irq>/owner` /
+`state:irq/<irq>/quarantined` / `stats:irq[/<irq>]/count` resolver
 selectors, and `sysmon`'s interrupt-lines panel — one definition, no
 divergence; the count already exists (the runaway-quarantine
 accounting), so serving it costs nothing steady-state. ST2 (done)

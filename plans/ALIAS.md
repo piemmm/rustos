@@ -357,6 +357,19 @@ info:tty/debug/driver
 `info:` must be backed by the System Information API. It must not be served by a
 virtual file or by text scraping.
 
+`info:` is therefore **value-backed**, not a byte stream: it is read as a typed
+value through the broker, so it can never be opened, redirected to, or
+`cat`-ed. That is a structural property, not a resolver that has yet to land,
+and every layer states it the same way. The registry classifies the namespace
+(`tairix_resref::NamespaceBacking::Value`); the kernel resource resolver
+refuses such a reference with `ResolveError::NotAStream` →
+`Errno::NotSupported` ("the subsystem is live, this backing cannot represent
+the request, and retrying can never succeed"), deliberately distinct from the
+`Errno::NotImplemented` a *stream* namespace with no resolver wired yet
+returns; and shell completion offers no value-backed namespace as a
+redirection target (§15.3). The shell-facing way to read one is `show`
+(§15.4).
+
 `info:` values may be sensitive. The resolver must not assume that information
 is public. Examples requiring policy review include hardware serial numbers,
 MAC addresses, machine identity, full hardware topology, and system-wide process
@@ -391,7 +404,8 @@ stats:disk/backup/queue.depth
 ```
 
 `stats:` must be backed by the System Information API. It must not be served by
-a virtual file or by text scraping.
+a virtual file or by text scraping. Like `info:` it is value-backed and can
+never be opened as a stream (§6.2).
 
 Metric values must carry metadata:
 
@@ -432,7 +446,10 @@ facts belong under `info:cpu/vulnerabilities`; active mitigation policy belongs
 under `state:security/mitigations`.
 
 `state:` reads must be capability-checked. State changes must be performed by
-typed service commands, not by writing text into a pseudo-file.
+typed service commands, not by writing text into a pseudo-file. `state:` is
+value-backed on the read side too and can never be opened as a stream (§6.2) —
+which is the same reason a *write* is a typed command rather than a
+redirection.
 
 ### 6.5 `disk:`
 
@@ -1116,10 +1133,22 @@ resolver wired offers nothing rather than a plausible-looking set.
 
 A catalogue entry may spell a segment `<name>`: a placeholder for a name
 discovered per machine (an interface, an interrupt line) or defined by a closed
-table elsewhere (a resource-limit kind, a reclaim class). A placeholder is
-shown, never inserted — completion has no authority to invent a resource name —
-and resumes past it once the name is typed (`plans/SHELL.md`, "Tab expansion
-and completion").
+table elsewhere (a resource-limit kind, a reclaim class). Each spelling names a
+typed *selector domain*. Completion must expand a placeholder into that
+domain's real names and offer those; it must never display the placeholder
+spelling, which no shell could insert.
+
+Expansion is capability-adaptive, and that is the requirement rather than a
+fallback: a domain from a closed table or an ungated query lists for every
+session, while a gated one (an interface list costs `CAP_SYSINFO_HW`, a bond
+alias `CAP_SYSINFO_GLOBAL`) lists only for a session holding that capability
+and offers nothing otherwise — a session that cannot list interfaces could not
+read an interface's facts either. A gated domain the session lacks must be
+skipped without issuing the query, so completion never produces a denied
+request or an audit refusal record. The *catalogue* is never filtered this way:
+discovery is not authorization and a spelling grants nothing (§6.2), so a
+selector the session cannot read is still offered and the read then fails
+naming the capability (`plans/SHELL.md`, "Tab expansion and completion").
 
 For safe commands, completion may insert short aliases:
 
@@ -1185,6 +1214,10 @@ Rules:
 - A text program must not bind itself directly to a discovered device.
 - Resource references used in redirection resolve to stream backings through the
   stream layer.
+- A **value-backed** namespace (`info:`, `state:`, `stats:` — §6.2) has no
+  stream facet and can never be a redirection target. Completion must not
+  offer one there, as a namespace prefix or as a selector, and the kernel
+  resolver refuses the open with `Errno::NotSupported`.
 
 ### 15.4 Standard commands
 
@@ -1198,6 +1231,31 @@ resolve <resource-ref>
 pin <resource-ref> as <alias>
 unpin <namespace:alias>
 ```
+
+Realised today, for the value-backed namespaces (`info:`, `state:`, `stats:`):
+
+```text
+sysinfo show <resource-ref>        # the value
+sysinfo describe <resource-ref>    # the envelope: producer, authorization,
+                                   # sensitivity, and a metric's
+                                   # kind/unit/reset-behaviour/window (§14.5)
+```
+
+Both resolve through the one userspace resolver (`lib/procinfo::resolve`) over
+the System Information API, so neither is a second reader and neither can
+bypass the broker's per-principal scoping. A denial names the capability the
+query declares, read from the frozen `sysinfo-v1` registry, so the user learns
+which grant to ask for. They live in the existing `sysinfo` tool rather than a
+new bundle: it already holds exactly `CAP_SYSINFO_GLOBAL|KERNEL|HW` and
+already links the resolver, so minting a second bundle with identical
+privilege would add attack surface and buy nothing.
+
+`watch <stats-ref>`, `pin`, and `unpin` are not yet built: `watch` needs a
+sampling cadence and a display loop, and `pin`/`unpin` need the alias-record
+subsystem of §7–§9, which does not exist yet. `resolve <resource-ref>` reports
+a canonical identity and short fingerprint (§10), which only the
+device namespaces carry — a value-backed reference has neither — so it lands
+with the first device-namespace resolver.
 
 Namespace-specific commands may wrap these:
 

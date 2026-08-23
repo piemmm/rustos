@@ -61,6 +61,14 @@ Yr ymholiadau:
   iddi (cysylltnod ar gyfer ymgeisydd heb gysylltiad), ei slot, ei rôl
   (candidate/held/in-sync/resyncing/faulted), ei maint, a'r cenhedliad
   metadata y mae'n ei gario (angen `CAP_SYSINFO_HW`).
+- `show <resource-ref>` — darllen un cyfeiriad adnodd
+  `info:`/`state:`/`stats:` ac argraffu ei werth. Mae'r gofodau enwau hynny
+  yn gweini gwerthoedd teipiedig drwy'r API hwn, byth ffrydiau beit: ni all
+  `cat` eu hagor. Mae gwrthodiad yn enwi'r gallu sydd ei angen.
+- `describe <resource-ref>` — argraffu amlen yr ymateb yn lle'r gwerth: ei
+  gynhyrchydd, yr awdurdodiad y'i gweinwyd dano, a metadata'r llwyth — ar
+  gyfer metrig ei fath, ei uned, ei ymddygiad ailosod a'i ffenestr
+  samplu; ar gyfer ffaith ei fath a'i sensitifrwydd.
 - `help` — cymorth byr y gorchymyn hwn ei hun.
 
 Heb ymholiad, dangosir y cymorth byr.

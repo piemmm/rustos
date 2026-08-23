@@ -265,16 +265,46 @@ own tests (the kernel's for `sys:`, `lib/procinfo`'s for
 `info:`/`state:`/`stats:`), so completion cannot advertise a selector nothing
 serves, and a namespace with no resolver wired offers nothing.
 
-A catalogue segment spelled `<iface>` is a placeholder: a per-machine name the
-registry cannot enumerate. It becomes a display-only `Completion::hints` entry
-rather than a candidate — listed so the shape is discoverable, never inserted —
-and completion resumes past it once the name is typed. A result carrying hints
-is always listed rather than inserted, so a lone real candidate cannot silently
-hide the alternative; hints are raised only at a segment boundary, so
-completing a partly typed name is unaffected. A selector whose reference needs
-a query parameter to be valid (a windowed rate) completes with that parameter
-in place of the closing space: `stats:net/wan/rx.pp<Tab>` →
-`stats:net/wan/rx.pps?window=`.
+A catalogue segment spelled `<iface>` is a placeholder: it names a typed
+`tairix_resref::SelectorDomain` (an interface, a bond, an interrupt line, a
+CPU, a resource-limit kind, a reclaim class) rather than one resource. At such
+a position the engine asks the injected `ResourceLister` seam for that
+domain's live names and offers *those* as ordinary candidates, so
+`info:net/<Tab>` yields `wan lan0` and never the text `<iface>`, which the
+shell could not insert and the user could not use.
+
+Enumeration is capability-adaptive. The domains drawn from a closed table in
+`lib/abi` (a limit kind, a reclaim class) or from an ungated query (a CPU
+index) list for every session, with no IPC in the first two cases at all. The
+gated ones do not: an interface or interrupt line needs `CAP_SYSINFO_HW` and a
+bond alias needs `CAP_SYSINFO_GLOBAL`, which the shell's manifest deliberately
+does not hold — those are administrative grants, and the shell is the most
+exposed program on the machine. A session without the capability is offered
+nothing for that domain, which is exactly right rather than a degradation: it
+could not read `info:net/<iface>/mac` either. The session's own capabilities
+are read once through the ungated, self-scoped `PROCESS_IDENTITY` query and
+cached for the process's life, and a domain we do not hold is skipped without
+issuing the query, so Tab never produces a denied request or an audit refusal
+record. The names themselves are not cached, so a hot-plugged interface shows
+up on the next Tab.
+
+The *catalogue* is never filtered by capability — discovery is not
+authorization, and a spelling grants nothing (`plans/ALIAS.md` §6.2), so
+`info:mem/physical` is still offered without `CAP_SYSINFO_KERNEL` and the read
+then fails naming that capability. Only placeholders adapt.
+
+A redirection target offers only *stream-backed* namespaces
+(`tairix_resref::NamespaceBacking`): `echo hi > info:` names typed values read
+through a broker, which no descriptor can be opened on, so neither the
+namespace prefix nor its selectors are offered there. `sys:` is unaffected.
+Reading such a value is `sysinfo show <reference>`'s job, and the kernel
+resolver refuses the open with `Errno::NotSupported` — "this backing cannot
+represent the request" — rather than the `Errno::NotImplemented` of a stream
+namespace still awaiting its resolver.
+
+A selector whose reference needs a query parameter to be valid (a windowed
+rate) completes with that parameter in place of the closing space:
+`stats:net/wan/rx.pp<Tab>` → `stats:net/wan/rx.pps?window=`.
 
 The `RtProcessHost` launches external commands through the `spawn` syscall
 and reaps them through `wait`. The command's words travel to the child as

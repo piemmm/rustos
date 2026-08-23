@@ -42,6 +42,11 @@ tairix-procinfo = { path = "../../../lib/procinfo", version = "=0.0.0" }
 # parser, and the shared own-bundle short-help render the `-h`/`-?`
 # switches use (plans/APPS.md §4, §6).
 tairix-help = { path = "../../../lib/help", version = "=0.0.0" }
+# The single shared resource-reference spelling parser: `show`/`describe`
+# turn their operand into a typed reference through this one parser before
+# handing it to `lib/procinfo`'s resolver, so the tool embeds no second
+# reference grammar. Parsing only — it resolves nothing and grants nothing.
+tairix-resref = { path = "../../../lib/resref", version = "=0.0.0" }
 
 # For the freestanding `Run` binary only: the userland runtime `tairix-rt`
 # (`_start`, canary, panic handler, `mem_map` allocator, syscall/`ipc_call`

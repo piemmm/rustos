@@ -41,9 +41,12 @@ Haut/Bas parcourent l'historique des commandes, `Ctrl-R` le recherche,
 termine la session, et Tab complète les noms de commandes, les chemins
 et les références de ressources comme `sys:random`. Un espace de noms
 complète ses sélecteurs enregistrés segment par segment
-(`state:` → `net/` → `wan/` → `link`) ; un segment affiché `<iface>` est un
-nom que seule la machine en cours d'exécution connaît : il est listé mais
-jamais inséré.
+(`state:` → `net/` → `wan/` → `link`). Là où le registre ne connaît que la
+forme — un nom d'interface, une ligne d'interruption —, Tab propose les vrais
+noms de la machine, ou rien du tout si cette session n'a pas le droit de les
+lister. Une cible de redirection ne propose que les espaces de noms ouvrables :
+`info:`/`state:`/`stats:` apparaissent comme argument (à lire avec
+`sysinfo show`), jamais après `>`.
 
 ## OPTIONS
 

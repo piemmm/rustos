@@ -23,7 +23,22 @@
 //!
 //! The capability gate lives in `sysinfod`, not here: a denied query comes
 //! back as [`Errno::PermissionDenied`](tairix_abi::Errno::PermissionDenied),
-//! which the CLI renders honestly without inventing a parallel policy.
+//! which the CLI renders honestly without inventing a parallel policy —
+//! naming the capability the frozen query registry declares, so the user
+//! learns which grant to ask for.
+//!
+//! # Reading a resource reference
+//!
+//! [`Command::Show`] and [`Command::Describe`] read one `info:`/`state:`/`stats:`
+//! *resource reference* (`plans/ALIAS.md` §15.4). Those namespaces are
+//! value-backed: they are typed values served through this API, never byte
+//! streams, so `cat info:mem/physical` cannot work by construction
+//! (`plans/ALIAS.md` §6.2 — the kernel resolver refuses a value-backed
+//! namespace with `Errno::NotSupported`) and a command is how one is read.
+//! Both subcommands spell the reference with the one shared parser
+//! (`lib/resref`) and resolve it with the one userspace resolver
+//! (`lib/procinfo::resolve`), so this tool adds no second reference grammar,
+//! no second resolver, and no path around the broker.
 //!
 //! The two operations that touch the outside world — issuing the request and
 //! writing the terminal — are the injected [`Transport`] and [`Output`]
@@ -37,7 +52,8 @@
 //!
 //! * [`error`] — [`SysinfoError`], the outcomes of [`run`].
 //! * [`command`] — the [`Command`] enum and its argument [`parse`]r.
-//! * [`client`] — the [`run`] entry point and the response renderers.
+//! * [`client`] — the [`run`] entry point and the response renderers,
+//!   including the `show`/`describe` resource-reference readers.
 //!
 //! The [`Transport`] and [`Output`] seams, the request framing, and the
 //! process-list paging and rendering are shared with the `ps` tool through

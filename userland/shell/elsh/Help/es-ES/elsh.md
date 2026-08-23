@@ -42,9 +42,12 @@ Arriba/Abajo recorren el historial de órdenes, `Ctrl-R` lo busca,
 termina la sesión, y Tab completa nombres de órdenes, rutas y
 referencias de recursos como `sys:random`. Un espacio de nombres completa
 sus selectores registrados segmento a segmento
-(`state:` → `net/` → `wan/` → `link`); un segmento mostrado como `<iface>`
-es un nombre que solo conoce la máquina en ejecución, así que se lista pero
-nunca se inserta.
+(`state:` → `net/` → `wan/` → `link`). Donde el registro solo conoce la
+forma —un nombre de interfaz, una línea de interrupción—, Tab ofrece los
+nombres reales de la máquina, o nada si esta sesión no puede enumerarlos. Un
+destino de redirección solo ofrece espacios de nombres que puedan abrirse:
+`info:`/`state:`/`stats:` aparecen como argumento (se leen con
+`sysinfo show`), nunca tras `>`.
 
 ## OPTIONS
 

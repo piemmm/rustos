@@ -239,6 +239,45 @@ impl KnownNamespace {
         }
     }
 
+    /// How this namespace's members are reached: a byte stream through the
+    /// kernel resource resolver, or a typed value through a broker.
+    ///
+    /// The distinction is structural, not a matter of which resolvers happen
+    /// to be wired today. `info:`, `state:`, and `stats:` are the System
+    /// Information API's facts, state, and measurements: they are read as
+    /// typed values through the `sysinfod` broker so its per-principal
+    /// scoping applies, and making one openable as a byte stream is exactly
+    /// the "virtual file" `plans/ALIAS.md` §6.2 forbids. A caller that opens
+    /// resources can therefore refuse a [`NamespaceBacking::Value`]
+    /// reference outright — a refusal that can never become a success —
+    /// rather than reporting a resolver that is merely missing.
+    #[must_use]
+    pub const fn backing(self) -> NamespaceBacking {
+        match self {
+            // Served by the System Information API as typed values; never a
+            // byte stream (`plans/ALIAS.md` §6.2–§6.4).
+            KnownNamespace::Info | KnownNamespace::State | KnownNamespace::Stats => {
+                NamespaceBacking::Value
+            }
+            // Byte streams. `sys:` is resolved by the kernel today; the
+            // device namespaces are streams whose resolvers land in place as
+            // their consumers appear.
+            KnownNamespace::Sys
+            | KnownNamespace::Disk
+            | KnownNamespace::Part
+            | KnownNamespace::Vol
+            | KnownNamespace::Tty
+            | KnownNamespace::Net
+            | KnownNamespace::Input
+            | KnownNamespace::Audio
+            | KnownNamespace::Gpu
+            | KnownNamespace::Bus
+            | KnownNamespace::Svc
+            | KnownNamespace::Proc
+            | KnownNamespace::Cap => NamespaceBacking::Stream,
+        }
+    }
+
     /// Classify a spelling against the registry, if it is a registered name.
     #[must_use]
     pub fn from_name(name: &str) -> Option<KnownNamespace> {
@@ -264,6 +303,54 @@ impl KnownNamespace {
     }
 }
 
+/// How a namespace's members are reached — the answer to "can this reference
+/// be opened as a stream at all?".
+///
+/// Registry data, like the rest of this crate: it states the *shape* of a
+/// namespace, never who may read it. Authorization stays with the
+/// capability-checked resolver.
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
+pub enum NamespaceBacking {
+    /// A byte stream, opened through the kernel resource resolver: it can be
+    /// read, written, redirected to, and `cat`-ed like a file.
+    Stream,
+    /// A typed value read through the System Information API; never a byte
+    /// stream, so it can never be opened, redirected to, or `cat`-ed. A
+    /// consumer reads it through a broker client (`lib/procinfo`'s resolver)
+    /// instead.
+    Value,
+}
+
+/// The typed set a [`SelectorEntry`] placeholder segment draws its names
+/// from.
+///
+/// A placeholder stands for a name this dependency-free registry cannot
+/// enumerate: one discovered per machine (an interface, an interrupt line),
+/// or one defined by another crate's closed table. Naming the *domain* lets a
+/// consumer that can reach the right source — the shell, which can ask the
+/// System Information API — expand the placeholder into real names, while the
+/// registry itself stays free of both the data and the dependency.
+///
+/// Which domains a given session can enumerate is not decided here: reading
+/// an interface list costs a capability, and a consumer that does not hold it
+/// simply lists nothing for that domain.
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
+pub enum SelectorDomain {
+    /// A network interface alias (`<iface>`), discovered per machine.
+    Interface,
+    /// A link-aggregation (bond) alias (`<bond>`), discovered per machine.
+    Bond,
+    /// A bound interrupt line id (`<irq>`), discovered per machine.
+    IrqLine,
+    /// A CPU index (`<cpu>`), bounded by the machine's online core count.
+    Cpu,
+    /// A resource-limit kind (`<kind>`) — `tairix_abi::LimitKind`'s closed
+    /// name table.
+    LimitKind,
+    /// A reclaim class (`<class>`) — `tairix_abi::sysinfo::RECLAIM_CLASS_NAMES`.
+    ReclaimClass,
+}
+
 /// One entry in a namespace's *selector catalogue*: a selector spelling the
 /// platform serves, without its `namespace:` prefix.
 ///
@@ -278,8 +365,10 @@ pub struct SelectorEntry {
     /// machine (an interface, an interrupt line), or one defined by another
     /// crate's closed table (a resource-limit kind, a reclaim class), which
     /// this dependency-free registry cannot enumerate without copying a
-    /// source of truth that already exists elsewhere. A consumer completes
-    /// the literal segments and leaves a placeholder to the user.
+    /// source of truth that already exists elsewhere. Each spelling names a
+    /// typed [`SelectorDomain`] ([`placeholder_domain`]), so a consumer that
+    /// *can* reach the right source expands it into real names; one that
+    /// cannot offers nothing there rather than the placeholder text.
     pub selector: &'static str,
     /// The query parameter a complete reference must carry, or [`None`] when
     /// the selector takes none.
@@ -319,12 +408,32 @@ impl SelectorEntry {
     }
 }
 
-/// `true` if `segment` is a [`SelectorEntry`] placeholder — the `<name>`
-/// spelling. Neither `<` nor `>` is a selector character, so a placeholder
-/// can never collide with a real segment.
+/// The [`SelectorDomain`] a placeholder segment names, or [`None`] when
+/// `segment` is a literal.
+///
+/// Neither `<` nor `>` is a selector character, so a placeholder can never
+/// collide with a real segment. The mapping is closed and total over the
+/// spellings the catalogues use: a placeholder without an entry here is an
+/// *inert* one — a shape no consumer could expand — which the
+/// `every_catalogue_placeholder_has_a_domain` test refuses.
+#[must_use]
+pub fn placeholder_domain(segment: &str) -> Option<SelectorDomain> {
+    Some(match segment {
+        "<iface>" => SelectorDomain::Interface,
+        "<bond>" => SelectorDomain::Bond,
+        "<irq>" => SelectorDomain::IrqLine,
+        "<cpu>" => SelectorDomain::Cpu,
+        "<kind>" => SelectorDomain::LimitKind,
+        "<class>" => SelectorDomain::ReclaimClass,
+        _ => return None,
+    })
+}
+
+/// `true` if `segment` is a [`SelectorEntry`] placeholder, i.e. it names a
+/// [`SelectorDomain`] rather than one concrete resource.
 #[must_use]
 pub fn is_placeholder(segment: &str) -> bool {
-    segment.len() > 2 && segment.starts_with('<') && segment.ends_with('>')
+    placeholder_domain(segment).is_some()
 }
 
 /// The `sys:` catalogue: the kernel-resolved unprivileged members
@@ -336,15 +445,16 @@ const SYS_SELECTORS: &[SelectorEntry] =
 /// resolver serves through the System Information API.
 ///
 /// `<iface>` is a network interface name, `<bond>` a link-aggregation alias,
-/// `<line>` an interrupt line id, and `<kind>` a resource-limit kind
-/// (`tairix_abi::LimitKind`'s closed name table).
+/// `<irq>` an interrupt line id, and `<kind>` a resource-limit kind
+/// (`tairix_abi::LimitKind`'s closed name table). Each spelling names a
+/// [`SelectorDomain`].
 const INFO_SELECTORS: &[SelectorEntry] = &[
     SelectorEntry::bare("cpu/count"),
     SelectorEntry::bare("cpu/features"),
     SelectorEntry::bare("cpu/model"),
     SelectorEntry::bare("cpu/topology"),
     SelectorEntry::bare("cpu/vendor"),
-    SelectorEntry::bare("irq/<line>/owner"),
+    SelectorEntry::bare("irq/<irq>/owner"),
     SelectorEntry::bare("limits/<kind>/hard"),
     SelectorEntry::bare("limits/<kind>/soft"),
     SelectorEntry::bare("mem/page-size"),
@@ -369,7 +479,7 @@ const INFO_SELECTORS: &[SelectorEntry] = &[
 /// resolver serves. `net/resolver` is a reserved first segment, so no
 /// interface may take that name here.
 const STATE_SELECTORS: &[SelectorEntry] = &[
-    SelectorEntry::bare("irq/<line>/quarantined"),
+    SelectorEntry::bare("irq/<irq>/quarantined"),
     SelectorEntry::bare("net/<bond>/active-member"),
     SelectorEntry::bare("net/<bond>/member-health"),
     SelectorEntry::bare("net/<iface>/address"),
@@ -386,7 +496,7 @@ const STATS_SELECTORS: &[SelectorEntry] = &[
     SelectorEntry::bare("cpu/<cpu>/load"),
     SelectorEntry::bare("cpu/load"),
     SelectorEntry::bare("cpu/switches"),
-    SelectorEntry::bare("irq/<line>/count"),
+    SelectorEntry::bare("irq/<irq>/count"),
     SelectorEntry::bare("irq/count"),
     SelectorEntry::bare("limits/<kind>"),
     SelectorEntry::bare("mem/available"),
@@ -1395,18 +1505,96 @@ mod tests {
         }
     }
 
-    /// The placeholder spelling is the `<name>` form and nothing else: a bare
-    /// angle bracket, an empty pair, and an ordinary segment are all literal.
+    /// The placeholder set is the closed registered one: each spelling maps
+    /// to its domain, and every other segment — a bare angle bracket, an
+    /// unregistered `<name>`, an ordinary word — is literal.
     #[test]
     fn placeholder_spelling_is_closed() {
-        for placeholder in ["<iface>", "<a>", "<reclaim-class>"] {
+        for (placeholder, domain) in [
+            ("<iface>", SelectorDomain::Interface),
+            ("<bond>", SelectorDomain::Bond),
+            ("<irq>", SelectorDomain::IrqLine),
+            ("<cpu>", SelectorDomain::Cpu),
+            ("<kind>", SelectorDomain::LimitKind),
+            ("<class>", SelectorDomain::ReclaimClass),
+        ] {
+            assert_eq!(placeholder_domain(placeholder), Some(domain));
             assert!(
                 is_placeholder(placeholder),
                 "{placeholder} is a placeholder"
             );
         }
-        for literal in ["", "<", ">", "<>", "iface", "<iface", "iface>", "a<b>c"] {
+        // An angle-bracket spelling outside the registered set is *not* a
+        // placeholder: it names no domain, so no consumer could expand it.
+        // The catalogue check below is what keeps one from being introduced.
+        for literal in [
+            "",
+            "<",
+            ">",
+            "<>",
+            "iface",
+            "<iface",
+            "iface>",
+            "a<b>c",
+            "<a>",
+            "<reclaim-class>",
+        ] {
+            assert_eq!(placeholder_domain(literal), None, "{literal:?} is literal");
             assert!(!is_placeholder(literal), "{literal:?} is literal");
+        }
+    }
+
+    /// Every namespace is classified, and the value-backed set is exactly the
+    /// three the System Information API serves — the namespaces a stream open
+    /// can therefore never satisfy, however many resolvers land later.
+    #[test]
+    fn backing_classifies_every_namespace() {
+        let value: Vec<KnownNamespace> = KnownNamespace::ALL
+            .into_iter()
+            .filter(|ns| ns.backing() == NamespaceBacking::Value)
+            .collect();
+        assert_eq!(
+            value,
+            vec![
+                KnownNamespace::Info,
+                KnownNamespace::Stats,
+                KnownNamespace::State
+            ],
+        );
+        // `sys:` — the one namespace with a wired resolver today — is a
+        // stream, and so is every namespace still awaiting one.
+        for ns in KnownNamespace::ALL {
+            let expected = if value.contains(&ns) {
+                NamespaceBacking::Value
+            } else {
+                NamespaceBacking::Stream
+            };
+            assert_eq!(ns.backing(), expected, "{} backing", ns.as_str());
+        }
+        assert_eq!(KnownNamespace::Sys.backing(), NamespaceBacking::Stream);
+    }
+
+    /// No catalogue carries an *inert* placeholder: a segment wearing the
+    /// reserved angle brackets must name a [`SelectorDomain`], or a consumer
+    /// would be left with a shape it can never expand — and, because
+    /// [`is_placeholder`] is the domain lookup, would silently treat it as a
+    /// literal segment nothing serves.
+    #[test]
+    fn every_catalogue_placeholder_has_a_domain() {
+        for ns in KnownNamespace::ALL {
+            for entry in ns.selector_catalogue() {
+                for segment in entry.segments() {
+                    if !segment.starts_with('<') && !segment.ends_with('>') {
+                        continue;
+                    }
+                    assert!(
+                        placeholder_domain(segment).is_some(),
+                        "{}:{} carries the inert placeholder {segment:?}",
+                        ns.as_str(),
+                        entry.selector,
+                    );
+                }
+            }
         }
     }
 

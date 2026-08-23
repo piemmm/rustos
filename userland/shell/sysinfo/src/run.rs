@@ -32,6 +32,7 @@ mod program {
 
     use alloc::format;
 
+    use tairix_abi::time::Time64;
     use tairix_help::BundleHelp;
     use tairix_procinfo::{IpcTransport, RtOutput};
     use tairix_rt::args;
@@ -55,6 +56,12 @@ mod program {
             return 2;
         };
         let locale = tairix_rt::env_var(b"LANG").and_then(|raw| core::str::from_utf8(raw).ok());
+        // The wall clock is read here, at the edge, and passed in: the
+        // request/render library takes no clock of its own, exactly as it
+        // opens no transport of its own. An untrusted or unset clock falls
+        // back to the epoch rather than failing the read — the stamp is
+        // provenance on the response, never the value itself.
+        let now = tairix_rt::wall_time().map_or(Time64::UNIX_EPOCH, |reading| reading.time());
         let transport = IpcTransport;
         let out = RtOutput;
         // The tool's own bundle's `Help/` tree, read through the shared
@@ -62,6 +69,7 @@ mod program {
         match run(
             command,
             locale,
+            now,
             &transport,
             &BundleHelp::new("sysinfo"),
             &out,

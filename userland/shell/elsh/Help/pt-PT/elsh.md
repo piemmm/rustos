@@ -40,9 +40,12 @@ percorrem o histórico de comandos, `Ctrl-R` pesquisa-o, `Ctrl-C`
 descarta a linha em edição, `Ctrl-D` numa linha vazia termina a sessão,
 e Tab completa nomes de comandos, caminhos e referências de recursos
 como `sys:random`. Um espaço de nomes completa os seus seletores
-registados segmento a segmento (`state:` → `net/` → `wan/` → `link`); um
-segmento mostrado como `<iface>` é um nome que só a máquina em execução
-conhece, pelo que é listado mas nunca inserido.
+registados segmento a segmento (`state:` → `net/` → `wan/` → `link`). Onde o
+registo conhece apenas a forma — um nome de interface, uma linha de
+interrupção —, o Tab oferece os nomes reais da máquina, ou nada se esta sessão
+não os puder listar. Um destino de redireccionamento só oferece espaços de
+nomes que possam ser abertos: `info:`/`state:`/`stats:` aparecem como
+argumento (leem-se com `sysinfo show`), nunca depois de `>`.
 
 ## OPTIONS
 

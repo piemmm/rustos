@@ -64,6 +64,15 @@ Les requêtes :
   appartient (un tiret pour un candidat non affilié), son emplacement,
   son rôle (candidate/held/in-sync/resyncing/faulted), sa taille et la
   génération de métadonnées qu'il porte (nécessite `CAP_SYSINFO_HW`).
+- `show <resource-ref>` — lit une référence de ressource
+  `info:`/`state:`/`stats:` et affiche sa valeur. Ces espaces de noms
+  fournissent des valeurs typées via cette API, jamais des flux d'octets :
+  `cat` ne peut pas les ouvrir. Un refus nomme la capacité requise.
+- `describe <resource-ref>` — affiche l'enveloppe de la réponse au lieu de
+  la valeur : son producteur, l'autorisation sous laquelle elle a été
+  servie, et les métadonnées de la charge utile — pour une métrique son
+  genre, son unité, son comportement de remise à zéro et sa fenêtre
+  d'échantillonnage ; pour un fait son type et sa sensibilité.
 - `help` — l'aide courte de cette commande.
 
 Sans requête, l'aide courte est affichée.

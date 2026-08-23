@@ -1376,6 +1376,7 @@ dependencies = [
  "tairix-complete",
  "tairix-curses",
  "tairix-help",
+ "tairix-procinfo",
  "tairix-resref",
  "tairix-rt",
  "tairix-util",
@@ -2511,6 +2512,7 @@ dependencies = [
  "tairix-abi",
  "tairix-help",
  "tairix-procinfo",
+ "tairix-resref",
  "tairix-rt",
 ]
 

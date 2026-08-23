@@ -2,12 +2,21 @@
 //!
 //! The kernel-wide observability queries — the memory-pressure gauge, the
 //! reclaim ledger and its per-cache breakdown, the `ramzip` tier counters,
-//! and the per-CPU scheduler load — are consumed by both the `info:`/`stats:`
-//! resolver ([`mod@crate::resolve`]) and the `sysmon` monitor, so the fetch +
-//! fail-closed decode lives here once. The paged walks are the generic
-//! [`walk_pages`](crate::list) the process and mount lists use; the scalar
-//! queries share its convention that a structurally invalid reply is
-//! [`Errno::BadMagic`], never a partial decode.
+//! the per-CPU scheduler load, the bound-interrupt table, and the network
+//! stack's interface and bond tables — are consumed by both the
+//! `info:`/`stats:` resolver ([`mod@crate::resolve`]) and its terminal
+//! clients (the `sysmon` monitor, the shell's resource-selector
+//! enumeration), so the fetch + fail-closed decode lives here once. The
+//! paged walks are the generic [`walk_pages`](crate::list) the process and
+//! mount lists use; the scalar queries share its convention that a
+//! structurally invalid reply is [`Errno::BadMagic`], never a partial
+//! decode.
+//!
+//! A walk here is the *only* paging of its query in this crate: the
+//! resolver's own per-name lookups are built on these walks (stopping at the
+//! record they want) rather than re-deriving the loop, so a consumer that
+//! needs the whole table — completion listing every interface — adds no
+//! second walk of the same query.
 //!
 //! Most queries here are gated on `CAP_SYSINFO_KERNEL` by `sysinfod`; a
 //! denial surfaces as [`CallError::PermissionDenied`] so a consumer can
@@ -17,11 +26,11 @@
 //! [`memory_pressure_band`] and [`memory_total_bytes`] — which each
 //! document why they need no capability.
 
-use tairix_abi::net_ipc::NetStackDefenceCounters;
+use tairix_abi::net_ipc::{NetBondMemberRecord, NetInterfaceFactsRecord, NetStackDefenceCounters};
 use tairix_abi::sysinfo::{
     CacheLedgerListRequest, CacheLedgerRecord, CpuLoadRecord, CpuLoadRequest, IrqListRequest,
-    IrqRecord, MemoryPressureBand, MemoryPressureStats, MemoryTotal, RamzipStats,
-    ReclaimClassRecord, ReclaimListRequest, SysinfoQueryId, RECLAIM_CLASS_COUNT,
+    IrqRecord, MemoryPressureBand, MemoryPressureStats, MemoryTotal, NetInterfaceListRequest,
+    RamzipStats, ReclaimClassRecord, ReclaimListRequest, SysinfoQueryId, RECLAIM_CLASS_COUNT,
 };
 use tairix_abi::Errno;
 
@@ -280,6 +289,16 @@ pub fn for_each_cpu_load(
 /// ends the list.
 pub const IRQ_PAGE: u16 = 64;
 
+/// Records per page the network interface-table walks request
+/// ([`for_each_net_interface`], [`for_each_net_bond_member`], and the
+/// resolver's sibling per-interface lookups).
+///
+/// Small enough that one page of the widest interface record fits a single
+/// framed reply, large enough that one page covers every realistic interface
+/// table — so the common case is one round trip and a larger machine simply
+/// pages.
+pub const NET_INTERFACE_PAGE: u16 = 16;
+
 /// Page through the kernel IRQ table ([`SysinfoQueryId::IRQ_LIST`]) and hand
 /// each decoded [`IrqRecord`] to `sink`, in ascending line order — one
 /// record per bound line (line id, owning driver task, monotonic fire count
@@ -320,6 +339,97 @@ pub fn for_each_irq(
             sink(&record).map_err(ListError::Sink)
         },
     )
+}
+
+/// Page through the network stack's interface table
+/// ([`SysinfoQueryId::NET_INTERFACE_FACTS`]) and hand each decoded
+/// [`NetInterfaceFactsRecord`] to `sink`, in the stack's own interface order.
+///
+/// This is the one paging of the interface table in this crate. The
+/// resolver's per-name lookup (`info:net/<iface>/…`) is this walk stopped at
+/// the matching record, and a consumer that wants every *name* — the shell
+/// expanding the `<iface>` placeholder in a resource reference — is the same
+/// walk run to the end, so neither re-derives the loop.
+///
+/// `sink` answers [`WalkStep::Continue`] to be given the next record or
+/// [`WalkStep::Stop`] to end the walk there; stopping is an ordinary success,
+/// so a caller that found what it wanted stays distinguishable from a
+/// failure. The walk **fails closed**: a reply that is not a whole number of
+/// records, or a record that does not decode, is rejected rather than
+/// partially delivered.
+///
+/// `sysinfod` gates this query on `CAP_SYSINFO_HW` (the interface inventory
+/// is hardware topology), so a caller without it sees
+/// [`CallError::PermissionDenied`].
+///
+/// # Errors
+///
+/// * [`ListError::Call`] — the transport failed, the service denied the
+///   query, or the reply was structurally invalid.
+/// * [`ListError::Sink`] — `sink` returned an error; the walk stops there.
+pub fn for_each_net_interface(
+    transport: &dyn Transport,
+    mut sink: impl FnMut(&NetInterfaceFactsRecord) -> Result<WalkStep, Errno>,
+) -> Result<(), ListError> {
+    walk_pages(
+        transport,
+        SysinfoQueryId::NET_INTERFACE_FACTS,
+        NetInterfaceFactsRecord::WIRE_LEN,
+        NET_INTERFACE_PAGE,
+        net_list_request,
+        |chunk| {
+            let record = NetInterfaceFactsRecord::from_bytes(chunk)
+                .map_err(|errno| ListError::Call(CallError::Service(errno)))?;
+            sink(&record).map_err(ListError::Sink)
+        },
+    )
+}
+
+/// Page through the network stack's bond-membership table
+/// ([`SysinfoQueryId::NET_BOND_MEMBERS`]) and hand each decoded
+/// [`NetBondMemberRecord`] to `sink`, in the stack's configured member order.
+///
+/// One record per *member*, each naming the bond that owns it, so a caller
+/// after one bond's members filters on
+/// [`NetBondMemberRecord::bond`](tairix_abi::net_ipc::NetBondMemberRecord::bond)
+/// and a caller after the set of bond *names* collects that field instead.
+/// Both are this one walk; see [`for_each_net_interface`] for why.
+///
+/// `sysinfod` gates this query on `CAP_SYSINFO_GLOBAL` (interface aliases are
+/// surface topology), so a caller without it sees
+/// [`CallError::PermissionDenied`].
+///
+/// # Errors
+///
+/// As [`for_each_net_interface`].
+pub fn for_each_net_bond_member(
+    transport: &dyn Transport,
+    mut sink: impl FnMut(&NetBondMemberRecord) -> Result<WalkStep, Errno>,
+) -> Result<(), ListError> {
+    walk_pages(
+        transport,
+        SysinfoQueryId::NET_BOND_MEMBERS,
+        NetBondMemberRecord::WIRE_LEN,
+        NET_INTERFACE_PAGE,
+        net_list_request,
+        |chunk| {
+            let record = NetBondMemberRecord::from_bytes(chunk)
+                .map_err(|errno| ListError::Call(CallError::Service(errno)))?;
+            sink(&record).map_err(ListError::Sink)
+        },
+    )
+}
+
+/// Encode one page request of the interface-table query family, whose
+/// `offset`/`limit` envelope is shared by every `NET_*` list query.
+fn net_list_request(offset: u32, limit: u16) -> alloc::vec::Vec<u8> {
+    NetInterfaceListRequest {
+        offset,
+        limit,
+        flags: 0,
+    }
+    .to_le_bytes()
+    .to_vec()
 }
 
 #[cfg(test)]

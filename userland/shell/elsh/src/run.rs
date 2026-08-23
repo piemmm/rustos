@@ -18,9 +18,12 @@
 //! backed the streams with.
 //!
 //! The interpreter is pure: it decides *what* to run but reaches the outside
-//! world only through two injected seams. `RtConsole` carries its output to
-//! fd 1 / fd 2, and `RtProcessHost` launches external commands through the
-//! `spawn` syscall and reaps them through `wait`. A command word is resolved
+//! world only through injected seams. `RtConsole` carries its output to
+//! fd 1 / fd 2, `RtProcessHost` launches external commands through the
+//! `spawn` syscall and reaps them through `wait`, `RtDirLister` reads
+//! directories for filename completion, and `RtResourceLister` reads the live
+//! names behind a resource-selector placeholder from the System Information
+//! API. A command word is resolved
 //! to a runnable bundle through the shared candidate policy
 //! ([`tairix_cmdres::resolution_candidates`]): the two system stores, the
 //! user's own two stores, then their `PATH`, attempted in order. The
@@ -46,19 +49,26 @@ extern crate alloc;
 
 #[cfg(freestanding)]
 mod program {
-    use alloc::string::String;
+    use alloc::string::{String, ToString};
     use alloc::vec::Vec;
     use core::cell::RefCell;
 
     use tairix_abi::elevate::{ElevateReply, ElevateRequest};
     use tairix_abi::fs::{DirEntry, FS_IO_MAX};
-    use tairix_abi::{Errno, FileKind, InputMode, LimitKind, ResourceLimit};
+    use tairix_abi::origin::{CapabilitySummary, Origin};
+    use tairix_abi::sysinfo::RECLAIM_CLASS_NAMES;
+    use tairix_abi::{CapabilityId, Errno, FileKind, InputMode, LimitKind, ResourceLimit};
     use tairix_elsh::{
         parse_invocation, Console, DirEntryInfo, DirLister, Elevator, Environment, Invocation,
         LaunchSpec, LimitStore, Pid, PlannedOpen, PlannedWire, ProcessHost, PumpTask, ReplInput,
-        ResolvedCommand, Shell, Signal, WaitOutcome, USAGE,
+        ResolvedCommand, ResourceLister, Shell, Signal, WaitOutcome, USAGE,
     };
     use tairix_help::{own_short_help, BundleHelp};
+    use tairix_procinfo::{
+        cpu_info, for_each_irq, for_each_net_bond_member, for_each_net_interface, CallError,
+        IpcTransport, ListError, ResolveInfoError, Transport, WalkStep,
+    };
+    use tairix_resref::SelectorDomain;
     use tairix_rt::io::{write_stderr_line, Read, StdInfo, Stderr, Stdin, Stdout, Write};
 
     /// The shell's output sink, backed by the inherited standard output (fd 1)
@@ -159,6 +169,199 @@ mod program {
             }
             Ok(entries)
         }
+    }
+
+    /// The completion engine's resource-name seam, backed by the System
+    /// Information API — the one broker those names come from, reached
+    /// through the shared `lib/procinfo` client, never a shell-private query.
+    ///
+    /// # Capability-adaptive by design
+    ///
+    /// The shell's manifest holds `FS_ACCESS`/`PROC_SPAWN`/`CONSOLE_*` and
+    /// **no** `CAP_SYSINFO_*`: those are administrative grants
+    /// (`lib/users/src/grants.rs` — not in the session baseline) and the
+    /// shell is the most exposed program on the machine, so widening it to
+    /// make Tab prettier would be a poor trade. A session that *does* hold
+    /// one (an administrator's) enumerates the domains it gates; one that
+    /// does not gets no candidates there — which is the right answer, not a
+    /// compromise: without `CAP_SYSINFO_HW` the session could not read
+    /// `info:net/<iface>/mac` either, so there was nothing behind those names
+    /// for it.
+    ///
+    /// A gated domain we do not hold is skipped **without issuing the
+    /// query**, so a Tab press never produces a denied request or an audit
+    /// refusal record. The session's own capability set is read once, from
+    /// the ungated, self-scoped `PROCESS_IDENTITY` query, and cached for the
+    /// process's life: `elevate` spawns a program under another identity and
+    /// never re-credentials the shell, so the set cannot change under us.
+    /// The *names* are never cached — each Tab press re-reads them, so a
+    /// hot-plugged interface appears immediately.
+    struct RtResourceLister {
+        capabilities: RefCell<CapabilityCache>,
+    }
+
+    /// The session's own capability set, read at most once.
+    ///
+    /// A failed read is remembered as [`Unreadable`](CapabilityCache::Unreadable)
+    /// rather than retried, so a broker that is refusing or absent costs one
+    /// query for the life of the session instead of one per keystroke — and
+    /// an unreadable identity holds nothing, so every gated domain is skipped
+    /// (fail closed).
+    enum CapabilityCache {
+        /// Not read yet.
+        Unread,
+        /// Read: the caller's kernel-attested capability summary.
+        Known(CapabilitySummary),
+        /// Read and failed; treated as holding nothing.
+        Unreadable,
+    }
+
+    impl RtResourceLister {
+        const fn new() -> Self {
+            Self {
+                capabilities: RefCell::new(CapabilityCache::Unread),
+            }
+        }
+
+        /// Whether this session holds `cap`, from the cached self-scoped
+        /// identity.
+        fn holds(&self, transport: &dyn Transport, cap: CapabilityId) -> bool {
+            let mut cached = self.capabilities.borrow_mut();
+            if matches!(*cached, CapabilityCache::Unread) {
+                // The `PROCESS_IDENTITY` query is ungated and self-scoped: it
+                // answers only for the asking principal, so reading our own
+                // capability set costs no authority and discloses nothing.
+                *cached = tairix_procinfo::call(
+                    transport,
+                    tairix_abi::sysinfo::SysinfoQueryId::PROCESS_IDENTITY,
+                    &[],
+                )
+                .ok()
+                .and_then(|reply| Origin::from_bytes(&reply).ok())
+                .map_or(CapabilityCache::Unreadable, |origin| {
+                    CapabilityCache::Known(*origin.capabilities())
+                });
+            }
+            match &*cached {
+                CapabilityCache::Known(summary) => summary.holds_cap(cap),
+                CapabilityCache::Unread | CapabilityCache::Unreadable => false,
+            }
+        }
+    }
+
+    impl ResourceLister for RtResourceLister {
+        fn list(&self, domain: SelectorDomain) -> Result<Vec<String>, Errno> {
+            let transport = IpcTransport;
+            match domain {
+                // Two closed tables another crate already owns: the single
+                // source of truth is `lib/abi`, so they are read from there
+                // rather than copied into the registry — and they need no
+                // capability and no IPC at all.
+                SelectorDomain::LimitKind => Ok(LimitKind::ALL
+                    .iter()
+                    .map(|kind| String::from(kind.name()))
+                    .collect()),
+                SelectorDomain::ReclaimClass => Ok(RECLAIM_CLASS_NAMES
+                    .iter()
+                    .map(|name| String::from(*name))
+                    .collect()),
+                // The processor-info query is ungated (a machine fact that
+                // names no principal), so every session enumerates its CPUs.
+                // The records' own indices are used rather than a `0..count`
+                // range, so a sparse set is reported as it is.
+                SelectorDomain::Cpu => Ok(cpu_info(&transport)
+                    .map_err(query_errno)?
+                    .iter()
+                    .map(|record| record.cpu.to_string())
+                    .collect()),
+                // The interface inventory is hardware topology
+                // (`CAP_SYSINFO_HW`); the bond aliases are surface topology
+                // (`CAP_SYSINFO_GLOBAL`). Without the grant the domain is
+                // skipped silently and no query is sent.
+                SelectorDomain::Interface => {
+                    if !self.holds(&transport, CapabilityId::SYSINFO_HW) {
+                        return Ok(Vec::new());
+                    }
+                    let mut names = Vec::new();
+                    for_each_net_interface(&transport, |record| {
+                        names.push(if_name_string(&record.name));
+                        Ok(WalkStep::Continue)
+                    })
+                    .map_err(walk_errno)?;
+                    Ok(names)
+                }
+                SelectorDomain::Bond => {
+                    if !self.holds(&transport, CapabilityId::SYSINFO_GLOBAL) {
+                        return Ok(Vec::new());
+                    }
+                    // One record per member, each naming its bond, so the
+                    // bond names are the distinct owners.
+                    let mut names: Vec<String> = Vec::new();
+                    for_each_net_bond_member(&transport, |record| {
+                        let name = if_name_string(&record.bond);
+                        if !name.is_empty() && !names.contains(&name) {
+                            names.push(name);
+                        }
+                        Ok(WalkStep::Continue)
+                    })
+                    .map_err(walk_errno)?;
+                    Ok(names)
+                }
+                SelectorDomain::IrqLine => {
+                    if !self.holds(&transport, CapabilityId::SYSINFO_HW) {
+                        return Ok(Vec::new());
+                    }
+                    let mut lines = Vec::new();
+                    for_each_irq(&transport, |record| {
+                        lines.push(record.line.to_string());
+                        Ok(WalkStep::Continue)
+                    })
+                    .map_err(walk_errno)?;
+                    Ok(lines)
+                }
+            }
+        }
+    }
+
+    /// Map a paged-walk failure onto the seam's [`Errno`], keeping the
+    /// service's own reason rather than flattening every cause into one code.
+    ///
+    /// The completion engine treats any error as "no candidates", so nothing
+    /// depends on which code this is today — which is exactly why it should be
+    /// the true one: a refusal reported as "not supported" would mislead the
+    /// next reader of this seam.
+    fn walk_errno(err: ListError) -> Errno {
+        match err {
+            ListError::Call(CallError::PermissionDenied) => Errno::PermissionDenied,
+            ListError::Call(CallError::Service(errno)) | ListError::Sink(errno) => errno,
+        }
+    }
+
+    /// The same, for the resolver-shaped error the `CPU_INFO` walk returns.
+    fn query_errno(err: ResolveInfoError) -> Errno {
+        match err {
+            ResolveInfoError::CapabilityDenied(_) => Errno::PermissionDenied,
+            ResolveInfoError::Service(errno) => errno,
+            // The remaining variants are selector-level refusals a whole-table
+            // walk cannot raise; reported as an unserviceable request rather
+            // than guessed at.
+            ResolveInfoError::NamespaceNotServed
+            | ResolveInfoError::UnknownSelector
+            | ResolveInfoError::UnsupportedRequest
+            | ResolveInfoError::Malformed => Errno::NotSupported,
+        }
+    }
+
+    /// A NUL-padded interface-name field as text, lossily decoded: a name the
+    /// stack reports with a non-UTF-8 byte becomes a replacement character
+    /// rather than dropping the interface — and the completion engine drops
+    /// any name it could not spell back as a selector segment anyway.
+    fn if_name_string(name: &[u8; tairix_abi::net_ipc::IF_NAME_LEN]) -> String {
+        let len = name
+            .iter()
+            .position(|&byte| byte == 0)
+            .unwrap_or(name.len());
+        String::from_utf8_lossy(&name[..len]).into_owned()
     }
 
     /// Recover the [`Errno`] a syscall encoded as a negative register
@@ -798,7 +1001,13 @@ mod program {
         let mut shell = Shell::with_environment(&host, &console, env)
             .with_limits(&limits)
             .with_elevator(&elevator);
-        tairix_elsh::run_repl(&mut shell, &console, &mut input, &RtDirLister)
+        tairix_elsh::run_repl(
+            &mut shell,
+            &console,
+            &mut input,
+            &RtDirLister,
+            &RtResourceLister::new(),
+        )
     }
 
     tairix_rt::entry!(main);

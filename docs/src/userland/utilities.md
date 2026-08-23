@@ -20,9 +20,9 @@ privileged path that bypasses the capability check.
 
 The crate is `no_std` (with `alloc`), has no `unsafe`, and no
 `unwrap`/`expect`/`panic!` in production paths (`AGENTS.md` §2.9). It
-depends only on the audited `tairix-abi` crate and the shared
-`tairix-procinfo` client helpers, so it never links a kernel or driver
-crate (`AGENTS.md` §17.4).
+depends only on the audited `tairix-abi` crate, the shared `tairix-resref`
+reference parser, and the shared `tairix-procinfo` client helpers, so it
+never links a kernel or driver crate (`AGENTS.md` §17.4).
 
 ### Commands
 
@@ -40,6 +40,8 @@ crate (`AGENTS.md` §17.4).
 | `reclaim`            | `RECLAIM_STATS`       | `CAP_SYSINFO_KERNEL` |
 | `ramzip`             | `RAMZIP_STATS`        | `CAP_SYSINFO_KERNEL` |
 | `cpu`                | `CPU_LOAD`            | `CAP_SYSINFO_KERNEL` |
+| `show <ref>`         | per the reference     | per the reference    |
+| `describe <ref>`     | per the reference     | per the reference    |
 | `help` (the default) | —                     | none                 |
 
 `processes` accepts the `-a`/`--all` flag; the other subcommands take no
@@ -58,6 +60,23 @@ the `ulimit` shell builtin that *changes* them. The
 capability gate lives in `sysinfod`, not in this tool — `sysinfo` only
 ever issues the queries the frozen registry defines, never a free-form
 "raw query id".
+
+`show` and `describe` read one *resource reference* (`plans/ALIAS.md` §15.4)
+rather than naming a query: `sysinfo show info:system/hostname` prints the
+value, and `sysinfo describe stats:uptime` prints the response envelope — the
+producer, the authorization the value was served under, and the payload's own
+metadata (a metric's kind, unit, reset behaviour, and sampling window; a
+fact's type and sensitivity, `plans/ALIAS.md` §14.5). Neither is an escape
+hatch from the "no raw query id" rule: a reference is a *name*, which the
+shared `lib/procinfo` resolver maps onto a registry-defined query and fails
+closed on anything outside its served set, so no new query surface is
+reachable. They exist because `info:`, `state:`, and `stats:` are
+*value-backed* — typed values read through the broker, never byte streams —
+so `cat info:mem/physical` cannot work by construction (the kernel resolver
+refuses it with `Errno::NotSupported`), and a command is how such a value is
+read. A denial names the capability the query declares, taken from the frozen
+registry, so the user learns which grant to ask for; a rate missing its
+mandatory `?window=` fails closed before any query is issued.
 
 ### A request/render machine, not a data source
 
