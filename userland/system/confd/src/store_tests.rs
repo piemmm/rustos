@@ -7,7 +7,7 @@ use tairix_abi::appdata_ipc::ConfigScope;
 use tairix_abi::appinfo::{PublisherId, PUBLISHER_ID_LEN};
 use tairix_abi::{AppIdentity, Errno};
 use tairix_appconf::{Document, MAX_DOCUMENT_LEN};
-use tairix_users::CONFD_UID;
+use tairix_users::{AppDataTree, CONFD_UID};
 
 use super::{
     published_document, AppStore, RootCache, StoreError, MASTER_FILE, OWNER_FILE, PUBLIC_FILE,
@@ -345,19 +345,63 @@ fn the_service_uid_is_the_one_the_provisioners_stamp() {
 }
 
 #[test]
-fn the_home_is_recovered_exactly_from_a_resolved_root() {
-    // The cache remembers the root and re-checks the *home*'s owner, so the
-    // decomposition must be the exact inverse of the composition — one place
-    // where a path is taken apart rather than built up.
+fn a_remembered_root_is_re_proved_the_services_own_on_every_use() {
+    // The regression this pins: caching the resolution and re-checking only
+    // the *home*'s owner left the root itself believed on trust. `Settings/`
+    // is the user's own directory and carries no gate, so an application
+    // running as the user can rename it aside and create a replacement
+    // holding a directory named `Apps` — and a cached resolution would then
+    // have served forged settings out of it. The store must become
+    // unavailable, never forged.
     let mut fs = TestFs::provisioned();
     let mut roots = RootCache::new();
-    let root = roots.resolve(&mut fs, ACCOUNT_UID).expect("resolves");
+    let root = roots
+        .root(&mut fs, ACCOUNT_UID, AppDataTree::Config)
+        .expect("resolves");
     assert_eq!(root, alloc::format!("{HOME}/Settings/Apps"));
-    assert_eq!(super::home_of_root(&root), HOME);
-    // And a path with nothing to strip degrades to itself rather than
-    // indexing past the front.
-    assert_eq!(super::home_of_root("Apps"), "Apps");
-    assert_eq!(super::home_of_root(""), "");
+
+    // The decoy: the real tree gone, an application-owned one of the same
+    // name in its place.
+    fs.remove(&alloc::format!("{HOME}/Settings"));
+    fs.add_dir(&alloc::format!("{HOME}/Settings"), ACCOUNT_UID);
+    fs.add_dir(&root, ACCOUNT_UID);
+    assert_eq!(
+        roots.root(&mut fs, ACCOUNT_UID, AppDataTree::Config),
+        Err(StoreError::RootNotOwned)
+    );
+
+    // Each tree is proved separately: the bulk root going missing must not
+    // make the configuration root unreachable, or vice versa.
+    let mut fs = TestFs::provisioned();
+    let mut roots = RootCache::new();
+    fs.remove(&alloc::format!("{HOME}/Library/Apps"));
+    assert_eq!(
+        roots.root(&mut fs, ACCOUNT_UID, AppDataTree::Bulk),
+        Err(StoreError::RootNotOwned)
+    );
+    assert!(roots
+        .root(&mut fs, ACCOUNT_UID, AppDataTree::Config)
+        .is_ok());
+}
+
+#[test]
+fn a_reassigned_home_is_never_served_out_of_a_remembered_path() {
+    // The other half of the same rule: the cached path is only this account's
+    // while the account still owns it. Reassigning a home needs
+    // `CAP_FS_CHOWN`, but when it happens the remembered entry must be
+    // dropped rather than serve one account the other's store.
+    let mut fs = TestFs::provisioned();
+    let mut roots = RootCache::new();
+    assert!(roots
+        .root(&mut fs, ACCOUNT_UID, AppDataTree::Config)
+        .is_ok());
+    assert_eq!(roots.len(), 1);
+    fs.set_owner(HOME, ACCOUNT_UID + 1);
+    assert_eq!(
+        roots.root(&mut fs, ACCOUNT_UID, AppDataTree::Config),
+        Err(StoreError::NoHome)
+    );
+    assert!(roots.is_empty(), "the stale entry was forgotten");
 }
 
 #[test]

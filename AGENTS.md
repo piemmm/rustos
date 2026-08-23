@@ -1630,7 +1630,21 @@ defect.
   that carry no scope field and have no foreign counterpart, so no
   configuration request can name a secret and none reaches another
   application's; it has no layer beneath it, because a secret an application did
-  not write is not one it may be made to believe. See `plans/APPDATA.md`.
+  not write is not one it may be made to believe.
+  The bulk root holds a fourth scope, `Blobs/<name>`: an application's index,
+  cache, or queue, reached as a **descriptor** rather than as bytes, so the
+  service makes the policy decision once at open and the application then works
+  directly against the kernel VFS at full speed. What it is handed is bounded —
+  a one-shot delegation carrying only the access it asked for and, when it
+  writes, a byte-extent ceiling the kernel enforces — because the gated tree is
+  owned by the app-data service, so no per-user filesystem quota would ever see
+  a blob's bytes and the service is the only thing that can bound them. Those
+  ceilings are **fixed containment bounds** (§24.4), not capacities: they bound
+  what one application may hide in a store the user cannot list or delete, and
+  data that genuinely outgrows one is the user's and belongs in the user's own
+  files. One ownership pin governs every scope in both trees, because it attests
+  who owns the application's *data* and not who owns one file.
+  See `plans/APPDATA.md`.
   `/Users` is mounted `nosuid,nodev`.
   A store carries the same directory name at every scope, so the user's
   own stores are exactly the system stores' names under their home; both

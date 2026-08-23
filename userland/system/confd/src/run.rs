@@ -51,10 +51,10 @@ mod program {
     use tairix_abi::appdata_ipc::{APPDATA_ENDPOINT, APPDATA_MAX_REPLY, APPDATA_MAX_REQUEST};
     use tairix_abi::fs::{DirEntries, OpenFlags};
     use tairix_abi::random::RandomFlags;
-    use tairix_abi::{Errno, Origin, ORIGIN_WIRE_LEN};
+    use tairix_abi::{Errno, Origin, UnlinkFlags, ORIGIN_WIRE_LEN};
     use tairix_caps::CapabilitySet;
     use tairix_confd::events::{SERVICE_READY, SERVICE_UNAVAILABLE};
-    use tairix_confd::{AppData, Entropy, Storage};
+    use tairix_confd::{AppData, DirEntry, Entropy, NodeInfo, Storage};
     use tairix_log::{Event, EventId, Level};
     use tairix_rt::{File, LogSink};
     use zeroize::Zeroize;
@@ -185,32 +185,76 @@ mod program {
             }
         }
 
-        fn owner_of(&mut self, path: &str) -> Result<u32, Errno> {
+        fn unlink(&mut self, path: &str) -> Result<(), Errno> {
+            // The plain-file posture: a blob is never a directory, so the
+            // `rmdir` flag would only widen what this can remove.
+            let ret = tairix_rt::fs_unlink(path.as_bytes(), UnlinkFlags::empty());
+            if ret == 0 {
+                Ok(())
+            } else {
+                Err(errno(ret))
+            }
+        }
+
+        fn stat(&mut self, path: &str) -> Result<NodeInfo, Errno> {
             // The **resolve-only** posture (no read, no write, no directory
             // flag): the store roots and the homes above them are directories
             // this service may traverse but not read, so asking for byte
             // access would be refused — and a directory open with read access
             // is refused outright anyway. A resolve-only handle needs nothing
             // but search permission on the path's own ancestors, which is
-            // exactly what the transit grant confers, and its stat reports the
-            // owning uid this check turns on.
+            // exactly what the transit grant confers, and its stat reports
+            // both figures the store turns on.
             let node = File::open(path.as_bytes(), OpenFlags::empty()).map_err(errno)?;
-            Ok(node.stat().map_err(errno)?.uid)
+            let stat = node.stat().map_err(errno)?;
+            Ok(NodeInfo {
+                uid: stat.uid,
+                len: stat.size,
+            })
         }
 
-        fn list_dir(&mut self, path: &str) -> Result<Vec<String>, Errno> {
+        fn list_dir(&mut self, path: &str) -> Result<Vec<DirEntry>, Errno> {
             let stream = tairix_rt::read_dir_all(path.as_bytes()).map_err(errno)?;
-            let mut names = Vec::new();
+            let mut entries = Vec::new();
             for entry in DirEntries::new(&stream) {
                 let entry = entry?;
-                if !entry.kind.is_dir() {
-                    continue;
-                }
+                // A name that is not UTF-8 is not one this service composed —
+                // every path it creates comes from a validated store name — so
+                // it is skipped rather than lossily rendered into one a caller
+                // might then be handed.
                 if let Ok(name) = core::str::from_utf8(entry.name) {
-                    names.push(String::from(name));
+                    entries.push(DirEntry {
+                        name: String::from(name),
+                        dir: entry.kind.is_dir(),
+                    });
                 }
             }
-            Ok(names)
+            Ok(entries)
+        }
+
+        fn grant(
+            &mut self,
+            path: &str,
+            write: bool,
+            ceiling: u64,
+            task: u64,
+        ) -> Result<u64, Errno> {
+            // The service's own descriptor lives for the length of this
+            // function and no longer: a delegation record carries the path and
+            // the captured credential, not the grantor's descriptor, and no
+            // primitive would tell this service when the holder closed its
+            // copy. `TRUNCATE` is deliberately absent — an open must not
+            // discard a blob the application meant to append to.
+            let flags = if write {
+                OpenFlags::READ
+                    .union(OpenFlags::WRITE)
+                    .union(OpenFlags::CREATE)
+            } else {
+                OpenFlags::READ
+            };
+            let file = File::open(path.as_bytes(), flags).map_err(errno)?;
+            let handle = tairix_rt::fd_grant(file.fd(), task, ceiling);
+            u64::try_from(handle).map_err(|_| errno(handle))
         }
     }
 

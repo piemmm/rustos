@@ -891,7 +891,13 @@ impl SyscallHandlers for AcceptingHandlers {
         *self.invocations.borrow_mut() += 1;
         Ok(0)
     }
-    fn fd_grant(&self, _c: &CallerContext<'_>, _fd: u32, _pid: u64) -> SyscallResult {
+    fn fd_grant(
+        &self,
+        _c: &CallerContext<'_>,
+        _fd: u32,
+        _pid: u64,
+        _write_ceiling: u64,
+    ) -> SyscallResult {
         *self.invocations.borrow_mut() += 1;
         Ok(0)
     }

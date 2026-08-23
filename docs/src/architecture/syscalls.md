@@ -97,9 +97,9 @@ release onward the table is frozen and new behaviour ships as `abi-v2`.
 |  48 | `fs_read`      | `u32 fd`, `u64 offset`, `user_ptr`, `len` | `u64` (bytes) | — (backing)     | no  |
 |  49 | `fs_write`     | `u32 fd`, `u64 offset`, `user_ptr`, `len` | `u64` (bytes) | — (backing)     | yes |
 |  50 | `fs_readdir`   | `u32 fd`, `user_ptr` (buf), `len`       | `u64` (bytes) | `CAP_FS_ACCESS` | no    |
-|  51 | `fs_stat`      | `u32 fd`, `user_ptr` (out), `len`       | `u64` (bytes) | `CAP_FS_ACCESS` | no    |
-|  52 | `fs_truncate`  | `u32 fd`, `u64 size`                    | `errno`       | `CAP_FS_ACCESS` | yes   |
-|  53 | `fs_sync`      | `u32 fd`                                | `errno`       | `CAP_FS_ACCESS` | no    |
+|  51 | `fs_stat`      | `u32 fd`, `user_ptr` (out), `len`       | `u64` (bytes) | —             | no    |
+|  52 | `fs_truncate`  | `u32 fd`, `u64 size`                    | `errno`       | —             | yes   |
+|  53 | `fs_sync`      | `u32 fd`                                | `errno`       | —             | no    |
 |  54 | `fs_mkdir`     | `user_ptr` (path), `len`                | `errno`       | `CAP_FS_ACCESS` | yes   |
 |  55 | `fs_unlink`    | `user_ptr` (path), `len`, `u32 flags`   | `errno`       | `CAP_FS_ACCESS` | yes   |
 |  56 | `dma_free`     | `Handle handle`, `u64 cpu_va`           | `errno`       | `CAP_MEM_DMA`   | yes   |
@@ -133,7 +133,7 @@ release onward the table is frozen and new behaviour ships as `abi-v2`.
 |  86 | `fs_attr_list` | `user_ptr` (path), `len`, `u64 index`, `user_ptr` (out), `len` | `u64` (bytes) | `CAP_FS_ACCESS` | no |
 |  87 | `fs_attr_remove` | `user_ptr` (path), `len`, `user_ptr` (key), `len` | `errno` | `CAP_FS_ACCESS` | yes |
 |  89 | `boot_facts_get` | `user_ptr` (out), `len`                | `u64` (bytes) | —             | no    |
-|  90 | `fd_grant`     | `u32 fd`, `u64 pid`                     | `u64` (handle) | `CAP_FS_ACCESS` | yes  |
+|  90 | `fd_grant`     | `u32 fd`, `u64 pid`, `u64 write_ceiling` | `u64` (handle) | `CAP_FS_ACCESS` | yes  |
 |  91 | `fd_redeem`    | `Handle` (grant)                        | `u64` (fd)    | —             | yes   |
 |  92 | `mem_pin`      | —                                       | `errno`       | `CAP_MEM_PIN` | yes   |
 |  93 | `mem_unpin`    | —                                       | `errno`       | —             | yes   |
@@ -363,10 +363,18 @@ resource routes to its subsystem — `sys:random` streams the CSPRNG reserve
 `random_get` draws from, `sys:null` reads as end of stream and discards
 writes). `fs_readdir` / `fs_stat` / `fs_truncate` / `fs_sync` on a
 resource-backed descriptor fail closed (`OutOfRange`) — those are filesystem
-operations with no meaning for a resource. Because `fs_read` / `fs_write` /
-`fs_close` must serve either backing, their capability check moved out of the
-dispatcher into the handler (a path-backed descriptor still requires
-`CAP_FS_ACCESS`), so reading `sys:random` never demands filesystem access.
+operations with no meaning for a resource.
+
+**The descriptor's backing decides the authority**, so every
+descriptor-operating call is ungated at the dispatcher and applies the
+backing's own check in the handler: `fs_read`, `fs_write`, `fs_close`,
+`fs_stat`, `fs_truncate`, `fs_sync`, and `file_map`. A path-backed descriptor
+still requires `CAP_FS_ACCESS` there, so nothing widens; what it buys is that
+reading `sys:random` never demands filesystem access, and that the holder of a
+one-shot delegation — which is exercised under the *grantor's* captured set
+and may legitimately hold no filesystem capability at all — can use the whole
+descriptor rather than only read it. `fs_readdir` keeps its blanket gate,
+because `fd_grant` refuses a directory and so no delegated listing exists.
 
 `fs_sync` (no. 53) is the **durability barrier** a program calls before it
 treats its data as safe against power loss. It is a real guarantee, not a
@@ -413,7 +421,7 @@ state. The matrix is exhaustive — anything not listed below is ungated:
 | `CAP_SYSINFO_INTROSPECT` | `sysinfo_introspect` |
 | `CAP_LOG_EMIT`     | `log_emit`                 |
 | `CAP_HW_EMIT`      | `hw_emit_node`, `hw_remove_node` |
-| `CAP_FS_ACCESS`    | `fs_open`, `fs_readdir`, `fs_stat`, `fs_truncate`, `fs_sync`, `fs_mkdir`, `fs_unlink`, `fs_rename`, `fs_symlink`, `fs_readlink`, `fs_link`, `fs_realpath`, `fs_set_mode`, `fs_set_owner`, `fs_attr_get`, `fs_attr_set`, `fs_attr_list`, `fs_attr_remove`, `fs_chdir` (the path-taking calls), and — enforced *in the handler* on a path-backed descriptor — `fs_read`, `fs_write`, `fs_close` |
+| `CAP_FS_ACCESS`    | `fs_open`, `fs_readdir`, `fs_mkdir`, `fs_unlink`, `fs_rename`, `fs_symlink`, `fs_readlink`, `fs_link`, `fs_realpath`, `fs_set_mode`, `fs_set_owner`, `fs_attr_get`, `fs_attr_set`, `fs_attr_list`, `fs_attr_remove`, `fs_chdir` (the path-taking calls), `fd_grant`, and — enforced *in the handler* on a path-backed descriptor, or against the grantor's captured set on a delegated one — `fs_read`, `fs_write`, `fs_close`, `fs_stat`, `fs_truncate`, `fs_sync`, `file_map` |
 | `CAP_FS_CHOWN`     | `fs_set_owner` (the privileged per-inode rule inside the VFS: reassigning the uid or setting a non-member gid; the coarse dispatch gate stays `CAP_FS_ACCESS`) |
 | `CAP_TIME_SET`     | `wall_time_set`            |
 | `CAP_SCHED_REALTIME` | `sched_set_realtime`     |
@@ -887,24 +895,43 @@ repeating a delegation cannot grow a recipient's kernel-side grant table.
 `fd_grant` (no. 90) and `fd_redeem` (no. 91) are the one-shot,
 user-mediated **file** delegation (`plans/CAPABILITY_USE.md` CU6,
 `plans/APPWIN.md` AW5 — the desktop's trusted-picker hand-off).
-`fd_grant(fd, pid)` requires `CAP_FS_ACCESS` and delegates the caller's
-**own** plain read-only, non-directory filesystem descriptor to the live
+`fd_grant(fd, pid, write_ceiling)` requires `CAP_FS_ACCESS` and delegates
+the caller's **own** plain non-directory filesystem descriptor to the live
 task `pid` (taken from a kernel-attested source such as
 `call_peer_origin`; task ids are never reused, so the grant lands on
 exactly the intended process or fails closed `NotFound`). A pipe,
-resource, writable, directory, or already-delegated descriptor is
-refused — delegation is read-only by construction, never widens, and
-never chains. The kernel captures the *grantor's* uid and effective
+resource, pty, directory, or already-delegated descriptor is refused —
+delegation never chains.
+
+**A delegation attenuates by mode and by extent, and never widens.** It
+carries the grantor descriptor's *own* read/write access and nothing more;
+the open-time flags (`CREATE`, `TRUNCATE`, `EXCLUSIVE`, `APPEND`,
+`DIRECTORY`, `NO_FOLLOW`) are dropped, because the file is already open and
+an `APPEND` delegation would silently move every write to a position the
+recipient never named. `write_ceiling` is the highest file length the holder
+may write or truncate to, and it is **mandatory**: zero for a read-only
+descriptor, which has no extent to bound, and non-zero for a writable one —
+so an unbounded writable delegation is not a representable request. A write
+whose `offset + len`, or a truncation whose new size, would pass the ceiling
+fails closed with `LimitExceeded`; bounding the *extent* rather than the
+bytes moved is what stops a sparse write stepping over it. That is what lets
+a service hand a caller direct, full-speed access to a file it owns without
+also handing it the volume (`plans/APPDATA.md` §3.8 — the app-data blob
+store).
+
+The kernel captures the *grantor's* uid and effective
 capability set beside the resolved path and mints a recipient-owner-bound
 handle the grantor forwards in-band (a window-channel `FilePicked`
-event); the number is useless to a bystander, and every mint is audited.
+event, or an app-data reply); the number is useless to a bystander, and
+every mint is audited.
 `fd_redeem(handle)` is **ungated** — receiving user-mediated,
 already-checked authority is the point — and consumes the grant exactly
 once, atomically (a descriptor-table-full refusal leaves it intact),
-installing a delegated descriptor whose every read is re-authorised
+installing a delegated descriptor whose every operation is re-authorised
 through the secured VFS under the **grantor's** captured identity, so a
 permission change against the grantor revokes the delegation's reach
-too; every other operation on the descriptor refuses, and an exited
+too. `File::from_delegation` is the owned redemption, so the descriptor is
+closed on every path out. An exited
 recipient's unredeemed grants are reclaimed with its records. Minting is
 idempotent for the same reason the resource grants are: re-granting a
 delegation that is **still pending** returns the pending handle rather than

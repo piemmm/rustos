@@ -15,6 +15,13 @@
 //! observe — one document, no layers, no staging, a write applied before the
 //! reply, and a refusal that is a refusal rather than an empty vault.
 //!
+//! Nor does it delegate a real descriptor for the blob scope: minting one is
+//! the kernel's, and a fake that faked a handle table would be a second
+//! opinion about a capability. What it reproduces is what a *client* can
+//! observe — a mode that decides whether an absent blob is created, a count
+//! ceiling, an idempotent delete, and a whole-or-nothing listing — plus the
+//! handle each open minted, so a test can assert one was.
+//!
 //! Test scaffolding only. It is never part of a TAIRiX build: the feature is
 //! enabled by a `[dev-dependencies]` entry, never by a program.
 
@@ -23,7 +30,11 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use core::cell::Cell;
 
-use tairix_abi::appdata_ipc::{encode_document_reply, AppDataRequest, ConfigScope};
+use tairix_abi::appdata_ipc::{
+    encode_blob_entry, encode_blob_list_reply, encode_document_reply, encode_grant_reply,
+    encode_quota_reply, AppDataRequest, BlobEntry, BlobQuota, ConfigScope, APPDATA_BLOB_ENTRY_LEN,
+    APPDATA_BLOB_MAX_BYTES, APPDATA_BLOB_MAX_COUNT,
+};
 use tairix_abi::reply::encode_status_reply;
 use tairix_abi::Errno;
 use tairix_appconf::Document;
@@ -77,6 +88,12 @@ pub struct FakeService {
     /// When set, the private document grows before every read — the concurrent
     /// writer the client's bounded read must not chase for ever.
     growing_writer: bool,
+    /// The blobs the application holds, name and length, in insertion order.
+    blobs: Vec<(String, u64)>,
+    /// Grant handles minted so far. A handle is the count at mint time, so it
+    /// is never zero — the reserved invalid value the kernel's mint also never
+    /// produces.
+    grants: u64,
 }
 
 impl FakeService {
@@ -97,7 +114,16 @@ impl FakeService {
             refuse_reads: Rc::new(Cell::new(None)),
             calls: 0,
             growing_writer: false,
+            blobs: Vec::new(),
+            grants: 0,
         }
+    }
+
+    /// Seed a blob of `name` and `len` bytes, as the service would hold one.
+    #[must_use]
+    pub fn with_blob(mut self, name: &str, len: u64) -> Self {
+        self.blobs.push((String::from(name), len));
+        self
     }
 
     /// Add `dir` as a candidate bundle that ships no defaults.
@@ -212,6 +238,19 @@ impl FakeService {
         self.calls
     }
 
+    /// The blobs the application holds, name and length, in insertion order.
+    #[must_use]
+    pub fn blobs(&self) -> &[(String, u64)] {
+        &self.blobs
+    }
+
+    /// Grant handles minted so far — how a test proves an open delegated
+    /// something rather than answering out of the fake's own state.
+    #[must_use]
+    pub const fn grants(&self) -> u64 {
+        self.grants
+    }
+
     /// The committed private document — what a publish actually landed.
     #[must_use]
     pub fn committed(&self) -> &Document {
@@ -243,6 +282,55 @@ impl FakeService {
             }
         }
         document
+    }
+}
+
+impl FakeService {
+    /// Serve one blob-scope request.
+    ///
+    /// Split out of [`AppDataHost::call`] because the blob scope is a family of
+    /// its own: it holds no document, so it shares none of the configuration
+    /// arms' state.
+    fn blob(&mut self, request: &AppDataRequest<'_>, reply: &mut [u8]) -> Result<usize, Errno> {
+        match *request {
+            AppDataRequest::BlobOpen { name, mode } => {
+                if !self.blobs.iter().any(|(known, _)| known == name) {
+                    if !mode.is_write() {
+                        return Err(Errno::NotFound);
+                    }
+                    if self.blobs.len() >= APPDATA_BLOB_MAX_COUNT {
+                        return Err(Errno::LimitExceeded);
+                    }
+                    self.blobs.push((String::from(name), 0));
+                }
+                self.grants += 1;
+                encode_grant_reply(self.grants, reply)
+            }
+            AppDataRequest::BlobDelete { name } => {
+                self.blobs.retain(|(known, _)| known != name);
+                Ok(status(Ok(()), reply))
+            }
+            AppDataRequest::BlobList { capacity } => {
+                // Sorted, as the service answers: a listing is a stable answer
+                // rather than whatever order a volume enumerates in.
+                let mut sorted = self.blobs.clone();
+                sorted.sort_unstable();
+                let mut listing = alloc::vec![0u8; sorted.len() * APPDATA_BLOB_ENTRY_LEN];
+                for (slot, (name, len)) in listing.chunks_mut(APPDATA_BLOB_ENTRY_LEN).zip(&sorted) {
+                    encode_blob_entry(&BlobEntry { name, len: *len }, slot)?;
+                }
+                encode_blob_list_reply(&listing, capacity, reply)
+            }
+            _ => encode_quota_reply(
+                &BlobQuota {
+                    blobs: self.blobs.len() as u64,
+                    bytes: self.blobs.iter().map(|(_, len)| *len).sum(),
+                    blob_max: APPDATA_BLOB_MAX_COUNT as u64,
+                    blob_bytes_max: APPDATA_BLOB_MAX_BYTES,
+                },
+                reply,
+            ),
+        }
     }
 }
 
@@ -318,6 +406,10 @@ impl AppDataHost for FakeService {
                 self.sealed.unset(key);
                 Ok(status(Ok(()), reply))
             }
+            AppDataRequest::BlobOpen { .. }
+            | AppDataRequest::BlobDelete { .. }
+            | AppDataRequest::BlobList { .. }
+            | AppDataRequest::QuotaGet {} => self.blob(&request, reply),
             AppDataRequest::PublicRead {
                 bundle_id,
                 capacity,

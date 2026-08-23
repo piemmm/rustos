@@ -65,8 +65,9 @@ pub use password::{
     MIN_ITERATIONS, NO_PASSWORD_MARKER, PASSWORD_SCHEME, SALT_LEN,
 };
 pub use policy::{
-    appdata_root_security, appdata_transit_security, default_home, next_id, IdRange, APPDATA_ROOT,
-    APPDATA_ROOT_PARENTS, DEFAULT_SHELL, FIRST_USER_GID, FIRST_USER_UID, HOME_MODE, HOME_SUBDIRS,
+    appdata_root_security, appdata_transit_security, default_home, next_id, AppDataTree, IdRange,
+    APPDATA_ROOT, APPDATA_ROOT_PARENTS, DEFAULT_SHELL, FIRST_USER_GID, FIRST_USER_UID, HOME_MODE,
+    HOME_SUBDIRS,
 };
 pub use provision::{
     is_system_account_name, is_system_group_name, system_account_directory, system_account_uid,

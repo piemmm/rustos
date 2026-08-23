@@ -891,7 +891,13 @@ impl SyscallHandlers for CountingHandlers {
         self.bump();
         Ok(0)
     }
-    fn fd_grant(&self, _c: &CallerContext<'_>, _fd: u32, _pid: u64) -> SyscallResult {
+    fn fd_grant(
+        &self,
+        _c: &CallerContext<'_>,
+        _fd: u32,
+        _pid: u64,
+        _write_ceiling: u64,
+    ) -> SyscallResult {
         self.bump();
         Ok(0)
     }

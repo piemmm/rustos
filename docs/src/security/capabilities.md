@@ -89,20 +89,26 @@ general process — the graphical login screen holds it and nothing else
 does, because `CAP_PROC_SPAWN` already subsumes it
 ([The parser sandbox](./sandbox.md)).
 
-The one **object-grained** delegation beside spawn is the user-mediated
-file hand-off (`fd_grant`/`fd_redeem`, `plans/CAPABILITY_USE.md` CU6,
-`plans/APPWIN.md` AW5): a holder of `CAP_FS_ACCESS` — in practice the
-desktop session's trusted picker — delegates one of its **own** plain
-read-only file descriptors, one-shot, to a kernel-attested recipient
-task. The kernel captures the grantor's uid and effective set with the
-path and re-authorises every delegated read under *that* identity, the
-recipient-owner-bound handle redeems exactly once through the
-unprivileged `fd_redeem`, the delegation can never chain or widen (a
-writable, directory, pipe, resource, or already-delegated descriptor is
-refused at mint), and the audited grant dies unredeemed with its
-recipient. This is how an app with **no** filesystem capability (the
-`viewer.app` consumer) reads exactly the one file the user chose — and
-nothing else — without any new capability entering the vocabulary.
+The one **object-grained** delegation beside spawn is the file hand-off
+(`fd_grant`/`fd_redeem`, `plans/CAPABILITY_USE.md` CU6, `plans/APPWIN.md`
+AW5, `plans/APPDATA.md` §3.8): a holder of `CAP_FS_ACCESS` — the desktop
+session's trusted picker, or the app-data service handing over a blob —
+delegates one of its **own** plain file descriptors, one-shot, to a
+kernel-attested recipient task. The kernel captures the grantor's uid and
+effective set with the path and re-authorises every operation on the
+delegated descriptor under *that* identity, and the recipient-owner-bound
+handle redeems exactly once through the unprivileged `fd_redeem`.
+
+The delegation **attenuates and never widens**. It carries the grantor
+descriptor's own read/write access and nothing more, with the open-time flags
+dropped; it can never chain (a pipe, resource, pty, directory, or
+already-delegated descriptor is refused at mint); a writable delegation must
+name a byte-extent ceiling, so an unbounded one cannot be minted at all; and
+the audited grant dies unredeemed with its recipient. This is how an app with
+**no** filesystem capability reads exactly the one file the user chose (the
+`viewer.app` consumer), and how one reaches its own bulk data at full VFS
+speed inside a store bounded by what the service granted — in both cases
+without any new capability entering the vocabulary.
 
 ## Exercise, release, revoke
 

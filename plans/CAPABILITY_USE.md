@@ -670,8 +670,8 @@ there).**
   asks over the window channel (`PickFile`), the session browses and
   opens the chosen file under **its own** identity (its manifest gained
   `CAP_FS_ACCESS` for exactly this), and the kernel's `fd_grant` mints a
-  one-shot, recipient-owner-bound, **read-only** delegation the app
-  redeems with the unprivileged `fd_redeem` — every later read is
+  one-shot, recipient-owner-bound **read-only** delegation the app
+  redeems with the unprivileged `fd_redeem` — every later operation is
   re-authorised under the *grantor's* captured uid + effective set, the
   grant is audited, delegation never chains, and an exited recipient's
   pending grants are reclaimed. The `viewer.app` consumer holds no
@@ -679,6 +679,14 @@ there).**
   file: spawn-time narrowing plus user-mediated widening, with no new
   capability added (the §5.2 minimalism rule — `CAP_FS_ACCESS` already
   gates delegating filesystem authority).
+
+  The delegation is read-only *because the picker opens its descriptor
+  read-only*, not because the mechanism can only be that: `plans/APPDATA.md`
+  §3.8 generalised `fd_grant` to carry the grantor descriptor's own access
+  with a mandatory byte-extent ceiling on a writable one, so the app-data
+  service can hand an application its own bulk data at full VFS speed
+  without handing it the volume. The picker's grant is unchanged — a
+  read-only descriptor takes no extent, and naming one is refused.
 
 ### CU7 — manifest entitlement audit (the §4.5 sizing rule)
 

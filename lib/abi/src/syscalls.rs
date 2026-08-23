@@ -1349,7 +1349,13 @@ pub const SYSCALLS: &[SyscallSpec] = &[
             AbiType::Unit,
         ],
         ret: AbiType::U64,
-        required_capability: Some(CapabilityId::FS_ACCESS),
+        // Ungated at the dispatcher, like `fs_read`: the descriptor's backing
+        // decides the authority. A descriptor the caller opened itself still
+        // requires `CAP_FS_ACCESS`, applied in the handler; a delegated one
+        // runs under the grantor's captured set, which is what lets a
+        // recipient holding no filesystem capability describe the file it was
+        // handed. Not audited — a pure observer.
+        required_capability: None,
         audit: false,
     },
     SyscallSpec {
@@ -1365,8 +1371,11 @@ pub const SYSCALLS: &[SyscallSpec] = &[
             AbiType::Unit,
         ],
         ret: AbiType::Errno,
-        required_capability: Some(CapabilityId::FS_ACCESS),
-        // Mutates persistent state; audited.
+        // Ungated at the dispatcher, like `fs_write`: the descriptor's
+        // backing decides the authority, and the handler additionally refuses
+        // a handle not opened for writing and a delegated extent ceiling the
+        // new length would exceed. Mutates persistent state; audited.
+        required_capability: None,
         audit: true,
     },
     SyscallSpec {
@@ -1382,7 +1391,11 @@ pub const SYSCALLS: &[SyscallSpec] = &[
             AbiType::Unit,
         ],
         ret: AbiType::Errno,
-        required_capability: Some(CapabilityId::FS_ACCESS),
+        // Ungated at the dispatcher for the same reason as `fs_stat`: the
+        // holder of a delegated descriptor must be able to force its own
+        // writes to the medium, and the handler applies the backing's own
+        // capability check.
+        required_capability: None,
         audit: false,
     },
     SyscallSpec {
@@ -1920,13 +1933,14 @@ pub const SYSCALLS: &[SyscallSpec] = &[
             AbiType::Unit,
         ],
         ret: AbiType::U64,
-        // The mapping is a read view of a filesystem object, so the same
-        // coarse gate as the other filesystem calls applies at dispatch;
-        // per-inode owner/mode/ACL enforcement is the secured VFS's, and
-        // is re-applied by the fault path on every demand-paged read
-        // under the mapping-time identity. Like `fs_read` it is not
-        // audited per call.
-        required_capability: Some(CapabilityId::FS_ACCESS),
+        // Ungated at the dispatcher, like `fs_read`: the descriptor's
+        // backing decides the authority, and the region records the
+        // identity the fault path re-checks every demand-paged read
+        // under — the caller's own for a descriptor it opened, the
+        // grantor's captured pair for a delegation. Per-inode
+        // owner/mode/ACL enforcement is the secured VFS's throughout.
+        // Like `fs_read` it is not audited per call.
+        required_capability: None,
         audit: false,
     },
     SyscallSpec {
@@ -2227,14 +2241,18 @@ pub const SYSCALLS: &[SyscallSpec] = &[
     SyscallSpec {
         number: SyscallNumber::FD_GRANT,
         name: "fd_grant",
-        arg_count: 2,
+        arg_count: 3,
         args: [
             // The caller's own path-backed descriptor, then the recipient's
             // kernel task id (from a kernel-attested source; task ids are
-            // never reused).
+            // never reused), then the write-extent ceiling.
             AbiType::U32,
             AbiType::U64,
-            AbiType::Unit,
+            // The highest file length the recipient may write or truncate
+            // the delegation to. Zero for a read-only delegation, which has
+            // no extent to bound, and non-zero for a writable one — so an
+            // unbounded writable delegation is not a representable request.
+            AbiType::U64,
             AbiType::Unit,
             AbiType::Unit,
             AbiType::Unit,
@@ -2246,9 +2264,9 @@ pub const SYSCALLS: &[SyscallSpec] = &[
         ret: AbiType::U64,
         // Delegating filesystem authority is gated exactly as acquiring it:
         // the same `CAP_FS_ACCESS` the descriptor's `fs_open` required. The
-        // mint is audited — a user-mediated, security-relevant grant of
-        // authority to another process, and low-volume (once per picker
-        // choice), so the record cannot drown the log.
+        // mint is audited — a security-relevant grant of authority to another
+        // process, and low-volume (once per picker choice or per blob open),
+        // so the record cannot drown the log.
         required_capability: Some(CapabilityId::FS_ACCESS),
         audit: true,
     },
@@ -3055,11 +3073,14 @@ mod tests {
         assert_eq!(mem_unmap.required_capability, None);
         assert!(!mem_unmap.audit, "mem_unmap must not audit per call");
         // file_map reads a filesystem object into the caller's OWN address
-        // space, so it carries the coarse filesystem gate at dispatch (the
-        // fs_set_mode precedent) but is not audited per call; file_unmap
+        // space through a descriptor, so — like fs_read — it is ungated at
+        // the dispatcher and the handler applies the backing's own authority:
+        // a descriptor the caller opened still requires CAP_FS_ACCESS, and a
+        // delegated one maps under the grantor's captured set so its holder
+        // needs no filesystem capability. Not audited per call; file_unmap
         // only shrinks the caller's own space (the mem_unmap posture).
         let file_map = spec_for(SyscallNumber::FILE_MAP).unwrap();
-        assert_eq!(file_map.required_capability, Some(CapabilityId::FS_ACCESS));
+        assert_eq!(file_map.required_capability, None);
         assert!(!file_map.audit, "file_map must not audit per call");
         let file_unmap = spec_for(SyscallNumber::FILE_UNMAP).unwrap();
         assert_eq!(file_unmap.required_capability, None);
@@ -3190,23 +3211,23 @@ mod tests {
         // The *path-taking* filesystem syscalls share the single coarse
         // CAP_FS_ACCESS entry gate (the per-path authority is the VFS inode
         // model under the caller's real credentials, not this capability).
-        // The *descriptor-operating* calls (close, read, write) are ungated
-        // at the dispatcher: a descriptor may be backed by a filesystem path
-        // (opened under CAP_FS_ACCESS) or a resource reference (opened under
-        // its namespace's own authority), so the handler applies the
-        // backing-specific check rather than a blanket filesystem gate — a
-        // path-backed descriptor still requires CAP_FS_ACCESS there. State-
-        // mutating calls (open — which may create — write, truncate, mkdir,
-        // unlink, rename) are audited; the pure reads (read, readdir, stat)
-        // and the own-handle lifecycle calls (close, sync) are high-volume
-        // and not audited per call. Lock this down so a refactor cannot
-        // loosen a path gate or drop the audit on a mutator.
+        // The *descriptor-operating* calls are ungated at the dispatcher: a
+        // descriptor may be backed by a filesystem path (opened under
+        // CAP_FS_ACCESS), a resource reference (opened under its namespace's
+        // own authority), or a one-shot delegation (exercised under the
+        // grantor's captured set, so its holder may hold no filesystem
+        // capability at all), so the handler applies the backing-specific
+        // check rather than a blanket gate — a path-backed descriptor still
+        // requires CAP_FS_ACCESS there. fs_readdir keeps the blanket gate
+        // because fd_grant refuses a directory, so it has no delegated form.
+        // State-mutating calls (open — which may create — write, truncate,
+        // mkdir, unlink, rename) are audited; the pure reads (read, readdir,
+        // stat) and the own-handle lifecycle calls (close, sync) are
+        // high-volume and not audited per call. Lock this down so a refactor
+        // cannot loosen a path gate or drop the audit on a mutator.
         for n in [
             SyscallNumber::FS_OPEN,
             SyscallNumber::FS_READDIR,
-            SyscallNumber::FS_STAT,
-            SyscallNumber::FS_TRUNCATE,
-            SyscallNumber::FS_SYNC,
             SyscallNumber::FS_MKDIR,
             SyscallNumber::FS_UNLINK,
             SyscallNumber::FS_RENAME,
@@ -3231,6 +3252,10 @@ mod tests {
             SyscallNumber::FS_CLOSE,
             SyscallNumber::FS_READ,
             SyscallNumber::FS_WRITE,
+            SyscallNumber::FS_STAT,
+            SyscallNumber::FS_TRUNCATE,
+            SyscallNumber::FS_SYNC,
+            SyscallNumber::FILE_MAP,
         ] {
             assert_eq!(
                 spec_for(n).unwrap().required_capability,

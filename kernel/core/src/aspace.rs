@@ -517,6 +517,15 @@ pub struct DelegatedFile {
     pub uid: u32,
     /// The grantor's effective capability set at grant time.
     pub caps: CapabilitySet,
+    /// The highest file length the holder may write or truncate this
+    /// delegation to, and zero for a read-only one.
+    ///
+    /// A delegation attenuates by extent as well as by mode: `fd_grant`
+    /// refuses a writable delegation with no ceiling, so an unbounded writable
+    /// delegation is not representable. That is what lets a service hand a
+    /// caller direct, full-speed access to a file it owns without also handing
+    /// it the ability to fill the volume.
+    pub write_ceiling: u64,
 }
 
 /// What a descriptor resolves to: a filesystem path or a typed resource.
@@ -669,15 +678,16 @@ impl OpenFile {
         self.cursor.fetch_add(n, Ordering::AcqRel);
     }
 
-    /// The absolute filesystem path this descriptor resolves to, or `None`
-    /// when it is backed by a resource or pipe rather than a path.
+    /// The absolute filesystem path this descriptor resolves to **under the
+    /// holder's own credentials**, or `None` when it has none.
     ///
-    /// A delegated backing deliberately answers `None` here: its path is
-    /// operated on under the grantor's captured identity, never under the
-    /// holder's own credentials, so a caller resolving "the caller's own
-    /// path" must not see it.
+    /// A delegated backing answers `None`: it names a path, but that path is
+    /// operated on under the grantor's captured identity, so an operation
+    /// that would run it under the holder's own must not see it. An
+    /// operation that handles both reaches for the authority rather than the
+    /// path, and the name says which of the two this is.
     #[must_use]
-    pub fn path(&self) -> Option<&str> {
+    pub fn own_path(&self) -> Option<&str> {
         match &self.backing {
             OpenBacking::Path(path) => Some(path),
             OpenBacking::Resource(_)
@@ -2841,6 +2851,7 @@ mod tests {
             path: String::from("/Users/ada/Documents/report.txt"),
             uid: 1000,
             caps: CapabilitySet::empty(),
+            write_ceiling: 0,
         };
         let first = reg.mint_fd_delegation(ProcessId(2), file.clone(), OpenFlags::READ);
         for _ in 0..1_000 {
@@ -2855,6 +2866,7 @@ mod tests {
             path: String::from("/Users/ada/Documents/other.txt"),
             uid: 1000,
             caps: CapabilitySet::empty(),
+            write_ceiling: 0,
         };
         assert_ne!(
             reg.mint_fd_delegation(ProcessId(2), other, OpenFlags::READ),
@@ -2937,7 +2949,7 @@ mod tests {
         );
         assert_eq!(
             reg.open_file_entry(ProcessId(2), res)
-                .and_then(|f| f.path().map(String::from)),
+                .and_then(|f| f.own_path().map(String::from)),
             None
         );
     }
@@ -2961,7 +2973,7 @@ mod tests {
         assert_eq!(reg.open_file_entry(ProcessId(3), fd), None);
         assert_eq!(
             reg.open_file_entry(ProcessId(2), fd)
-                .and_then(|f| f.path().map(String::from)),
+                .and_then(|f| f.own_path().map(String::from)),
             Some(String::from("/Storage/x"))
         );
     }

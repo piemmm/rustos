@@ -399,7 +399,7 @@ uint64_t tairix_sys_fs_attr_list(void * a0, uintptr_t a1, uint64_t a2, void * a3
 int32_t tairix_sys_fs_attr_remove(void * a0, uintptr_t a1, void * a2, uintptr_t a3);
 int32_t tairix_sys_port_bind(uint64_t a0, uintptr_t a1, uintptr_t a2);
 uint64_t tairix_sys_boot_facts_get(void * a0, uintptr_t a1);
-uint64_t tairix_sys_fd_grant(uint32_t a0, uint64_t a1);
+uint64_t tairix_sys_fd_grant(uint32_t a0, uint64_t a1, uint64_t a2);
 uint64_t tairix_sys_fd_redeem(uint64_t a0);
 int32_t tairix_sys_mem_pin(void);
 int32_t tairix_sys_mem_unpin(void);

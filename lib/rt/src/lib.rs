@@ -3677,29 +3677,40 @@ pub fn call_grant(endpoint: u64, recipient: u64) -> i64 {
     ret as i64
 }
 
-/// Delegate the caller's own read-only filesystem descriptor `fd` to the
-/// live task `pid` as a one-shot grant, returning the minted handle (≥ 1)
-/// or `-errno` (`SyscallNumber::FD_GRANT`, `plans/CAPABILITY_USE.md` CU6 —
-/// the file picker's user-mediated hand-off).
+/// Delegate the caller's own filesystem descriptor `fd` to the live task
+/// `pid` as a one-shot grant bounded above by `write_ceiling` bytes,
+/// returning the minted handle (≥ 1) or `-errno`
+/// (`SyscallNumber::FD_GRANT`, `plans/CAPABILITY_USE.md` CU6 — the file
+/// picker's user-mediated hand-off; `plans/APPDATA.md` §3.8 — the app-data
+/// service's blob descriptor).
 ///
 /// Requires `CAP_FS_ACCESS`; the mint is audited. `pid` must come from a
 /// kernel-attested source (`call_peer_origin`) — task ids are never
 /// reused, so the grant lands on the intended process or fails closed
 /// (`NotFound`). The kernel captures the *caller's* identity and effective
 /// capability set with the descriptor's path, so every operation on the
-/// redeemed descriptor is re-authorised under the grantor's authority. The
-/// caller forwards the returned handle in-band (e.g. a window-channel
-/// event field); it resolves only when presented by the recipient's own
-/// [`fd_redeem`], so the number is useless to a bystander. A descriptor
-/// that is not a plain read-only file backing fails closed with `-errno`
-/// (`OutOfRange`).
+/// redeemed descriptor is re-authorised under the grantor's authority.
+///
+/// The delegation carries the descriptor's **own** read/write access and no
+/// more, so it never widens what the grantor opened. `write_ceiling` is the
+/// highest file length the recipient may write or truncate to; it must be
+/// zero for a read-only descriptor and non-zero for a writable one, so an
+/// unbounded writable delegation cannot be minted at all. A descriptor that
+/// names a directory, or that is not a plain file backing, fails closed
+/// with `-errno` (`OutOfRange`).
+///
+/// The caller forwards the returned handle in-band (e.g. a window-channel
+/// event field, or an app-data reply); it resolves only when presented by
+/// the recipient's own [`fd_redeem`], so the number is useless to a
+/// bystander. [`File::from_delegation`] is the owned redemption.
 #[must_use]
 #[allow(clippy::cast_possible_wrap)] // The kernel guarantees the i64 handle-or-errno encoding (handle ≥ 1, else -errno).
-pub fn fd_grant(fd: u32, pid: u64) -> i64 {
+pub fn fd_grant(fd: u32, pid: u64, write_ceiling: u64) -> i64 {
     // SAFETY: `raw_syscall` is always safe to invoke — the call carries no
     // pointers, and the kernel validates `CAP_FS_ACCESS`, the caller's own
-    // descriptor, and the recipient's liveness before minting anything.
-    let ret = unsafe { raw_syscall(NUM_FD_GRANT, [u64::from(fd), pid, 0, 0, 0, 0]) };
+    // descriptor, the ceiling against that descriptor's access, and the
+    // recipient's liveness before minting anything.
+    let ret = unsafe { raw_syscall(NUM_FD_GRANT, [u64::from(fd), pid, write_ceiling, 0, 0, 0]) };
     ret as i64
 }
 
@@ -4648,6 +4659,28 @@ impl File {
     /// reference, or one requesting access the resource does not offer).
     pub fn open_resource(reference: &[u8], flags: OpenFlags) -> Result<Self, i64> {
         Self::from_open_result(resource_open(reference, flags))
+    }
+
+    /// Redeem the one-shot delegation `handle` minted to this task and take
+    /// ownership of the descriptor it installs ([`fd_redeem`]).
+    ///
+    /// The one owned redemption: a caller that redeemed by hand would have to
+    /// remember its own [`fs_close`] on every path out, and the descriptor a
+    /// delegation installs is exactly as leakable as one [`File::open`]
+    /// returns. What the handle conveys was fixed when it was minted — the
+    /// grantor's captured identity, the access it had opened, and, for a
+    /// writable delegation, its extent ceiling — so this adds no authority and
+    /// takes no flags.
+    ///
+    /// # Errors
+    ///
+    /// The raw negative kernel result (`-errno`) of the redemption:
+    /// `NotFound` for a handle that was never minted to this task, was
+    /// already redeemed, or was minted to another (forgery is
+    /// indistinguishable from absence), and `OutOfRange` on descriptor-space
+    /// exhaustion, which leaves the grant pending for a retry.
+    pub fn from_delegation(handle: u64) -> Result<Self, i64> {
+        Self::from_open_result(fd_redeem(handle))
     }
 
     /// Wrap an open-family syscall result (`fs_open` / `resource_open`) as an

@@ -47,6 +47,10 @@ audited whichever operation it sent.
 | `VaultRead { capacity }` | the caller's whole **sealed** document |
 | `VaultSet { key, value }` | seal one secret, immediately |
 | `VaultUnset { key }` | remove one secret, immediately |
+| `BlobOpen { name, mode }` | a bounded one-shot descriptor grant for one of the caller's **blobs** |
+| `BlobDelete { name }` | delete one of the caller's own blobs |
+| `BlobList { capacity }` | every blob the caller holds, with its length |
+| `QuotaGet {}` | the caller's blob usage and the ceilings it is bounded by |
 
 A read answers with the **whole** document, not one key: for the private scope,
 the policy layer, the app's own settings over it, and the caller's own staged
@@ -82,7 +86,7 @@ An abandoned session — a caller that stages and exits — is reclaimed by age.
 No primitive tells a server that a peer died, and losing an abandoned session's
 edits is exactly the contract already stated.
 
-## Three scopes: the app's own settings, what it publishes, and its secrets
+## Four scopes: settings, what it publishes, its secrets, and its bulk data
 
 `settings.conf` is the **private** scope — the user's settings for that
 application, which no other principal can read. `public.conf` is the
@@ -110,6 +114,9 @@ themselves, because only those are worth a retry.
 A foreign read answers the **committed** document, never the publisher's staged
 edits: a published value is what every other application sees, and a reader
 must not act on one that may never be published.
+
+`Blobs/<name>` under `Library/` is the **bulk** scope — see
+[The blob scope](#the-blob-scope) below. It is not a document at all.
 
 ## The sealed scope
 
@@ -187,6 +194,67 @@ operation, used, and wiped. A vault write is a rare, human-driven act, and
 holding an account's key material in the service's heap for the life of the
 machine would buy a file read it does not need.
 
+## The blob scope
+
+An application's index, cache, or queue is the wrong shape for a message: the
+IPC payload ceiling is far below what one holds, so a store that proxied bytes
+could not serve them at all. `BlobOpen` therefore answers with a one-shot
+`fd_grant` handle rather than with bytes. The application redeems it
+(`File::from_delegation`) and then reads, writes, truncates, and `file_map`s the
+file **directly** against the kernel VFS, under the service's captured
+authority — so it needs no filesystem capability of its own, and the service
+makes the policy decision once at open and never touches a byte of payload.
+
+The mode decides both what the delegation conveys and whether an absent blob is
+created: `Read` refuses one the application does not hold, `ReadWrite` creates
+it. Creation is carried by the mode the caller already sends rather than by a
+separate flag, so "create but do not write" is not a request that exists.
+
+**What bounds direct access.** The delegation is the bound. It conveys only the
+access the mode asked for, and a writable one carries a byte-extent ceiling the
+kernel enforces on every write and truncate through the descriptor
+([`fd_grant`](../architecture/syscalls.md)), so an application cannot grow a
+blob past `APPDATA_BLOB_MAX_BYTES` however it uses what it was given.
+Admission enforces the other dimension — the blob *count* — and nothing else:
+summing sizes at open time and refusing the next open would do nothing about
+the blob a caller already holds open, and a defence a hostile application
+defeats in one line is worse than none because it reads as an assurance. So an
+application's whole blob store is bounded by `count × bytes`, hard.
+
+**Why the ceilings are fixed, and why the service must have them.** They are
+containment bounds, not capacities: they bound what one application may take
+from the *user's* volume, and there is no honest hardware quantity to scale a
+disk bound by. What they are sized for is a working set — a mail or search
+index, a thumbnail cache, a queue. Data that genuinely outgrows one is the
+*user's* data and belongs in the user's own files, where the file manager lists
+it, backup covers it, and the user can delete it, not hidden in a store the user
+cannot reach. And the service must bound this itself rather than lean on a
+filesystem quota: the gated tree is owned by the service precisely so the
+account's own shell cannot reach it, so every byte written to a blob is charged
+to the *service's* uid and no per-user filesystem quota would ever see it.
+
+`QuotaGet` reports usage against both ceilings, so an application that reaches
+one says "this cache is full" in its own terms instead of surfacing an errno.
+
+**One pin, both trees.** Blobs live under `Library/`, configuration under
+`Settings/`, and the one `.owner` record in the configuration store governs
+both: it attests who owns the *application's data*, not who owns one file. A
+blob operation resolves and pins through the configuration store first and
+reaches the bulk tree only behind that check, so a publisher squatting another
+developer's identifier is refused before a byte of its blobs is reachable. Each
+gated root's ownership is proved separately, though — one being the service's
+says nothing about the other.
+
+**A listing is whole or nothing, and has no cursor.** The blob count is bounded
+and the entry width is fixed, so the widest possible listing is a few kilobytes
+and fits one reply. A paged listing could be spliced out of two snapshots and
+name a blob a later page had already deleted; a whole one cannot.
+
+A blob name is validated by the same store-name grammar a bundle identifier is
+(`validate_store_name`) — nothing that could traverse, hide, case-fold on a
+case-insensitive volume, or carry a control character is a name at all — because
+it is the same security question: a single path component the service composes.
+
 ## The tree it serves from
 
 ```text
@@ -197,6 +265,9 @@ machine would buy a file read it does not need.
         public.conf                         what the app publishes; any app may read
         secret.vault                        the app's secrets, sealed
         .owner                              the publisher ownership pin
+/Users/<u>/Library/Apps/                  ← gated identically: the bulk tree
+    <bundle-id>/
+        Blobs/<name>                        the app's bulk data, reached as a descriptor
 /System/Settings/<bundle-id>/settings.conf  optional machine-wide policy layer
 ```
 
@@ -208,22 +279,23 @@ under `Settings/` rather than `Library/` because `Library/` holds the evictable
 and boot-reaped scopes, and key material may be in neither.
 
 A *per-app* directory cannot be the gate itself: all of a user's applications
-may write `Settings/`, so any of them could pre-create a sibling named after
-another app's bundle id and have the service walk into it. The gate therefore
-sits on the one fixed `Apps` parent, created **with the account** by every home
-provisioner from the one shared definition in `tairix_users` — the image
-builder, the account-administration path, and the integration fixture — owned by
-this service's own account and gated on `CAP_APPDATA_ADMIN`.
+may write `Settings/` and `Library/`, so any of them could pre-create a sibling
+named after another app's bundle id and have the service walk into it. The gate
+therefore sits on the one fixed `Apps` parent in **each** of the two trees,
+created **with the account** by every home provisioner from the one shared
+definition in `tairix_users` — the image builder, the
+account-administration path, and the integration fixture — owned by this
+service's own account and gated on `CAP_APPDATA_ADMIN`.
 
 Its ancestors carry a **search-only** ACL grant for the service's uid: the least
 authority that lets a walk reach the root, and not enough to list a home or open
 anything else in it.
 
-One ownership pin governs all three scopes: it records who owns the *data*, and
-every document is the same application's. A different developer claiming the
+One ownership pin governs every scope in both trees: it records who owns the
+*application's data*, not who owns one file. A different developer claiming the
 bundle identifier is therefore refused before it can put anything in front of
-readers of the real application's published document — and before it reaches a
-key derivation at all.
+readers of the real application's published document, before it reaches a key
+derivation, and before a byte of another developer's blobs is reachable.
 
 Two checks authorise every open, and both are necessary:
 
@@ -231,11 +303,20 @@ Two checks authorise every open, and both are necessary:
   real uid→home answer rather than a guess, and it needs no reach into the
   credential database — so this service holds none, and compromising it cannot
   exfiltrate a password record.
-- The **gated root** must be owned by the service. The root's parent is writable
-  by the account, so an application could otherwise plant a world-traversable
-  directory of that name and have the service serve forged settings out of it.
-  The capability gate does not catch that: the service holds the capability
-  either way.
+- The **gated root** must be owned by the service, and this is re-proved on
+  **every** use rather than remembered. The root's parent is the user's own
+  directory and carries no gate, so an application could otherwise rename it
+  aside and plant a world-traversable replacement holding a directory of that
+  name, and have the service serve forged settings out of it. The capability
+  gate does not catch that: the service holds the capability either way. Each
+  tree's root is proved separately, because one being the service's says
+  nothing about the other.
+
+What the service *caches* is only the resolved home path, and even that is
+re-stated by the volume on each use: the two acts that could invalidate it —
+reassigning a home, removing one — both change what `/Users` says, so a stale
+entry is dropped and the scan runs again rather than serving one account another
+account's store.
 
 The gate also guards the root's *name*, not only its content — see
 [filesystem permissions](../filesystem/permissions.md) — so no principal that
@@ -321,11 +402,15 @@ process, reach the credential store, seize a user's file, or hand one away.
 Drawing randomness needs no capability at all, so the sealed scope adds nothing
 to the ceiling.
 
-Compromising it yields applications' settings **and their secrets** — it is the
-principal that holds every account's master secret, and no arrangement in which
-one service can seal and open vaults avoids that. What it does *not* yield is
-anything outside the app-data tree: not a credential record, not another user's
-files, not a process.
+Compromising it yields applications' settings, **their secrets**, and their
+blobs — it is the principal that holds every account's master secret, and no
+arrangement in which one service can seal and open vaults avoids that. What it
+does *not* yield is anything outside the app-data tree: not a credential record,
+not another user's files, not a process.
+
+`CAP_FS_ACCESS` is also what lets it delegate a blob descriptor: delegating
+filesystem authority is gated exactly as acquiring it, so the blob scope adds
+nothing to the ceiling either.
 
 ## What it does not isolate
 

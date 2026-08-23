@@ -341,6 +341,25 @@ impl OpenFlags {
     pub const fn is_no_follow(self) -> bool {
         self.contains(Self::NO_FOLLOW)
     }
+
+    /// Whether no flag at all is set — the resolve-only posture, which
+    /// conveys neither reading nor writing.
+    #[must_use]
+    pub const fn is_empty(self) -> bool {
+        self.0 == 0
+    }
+
+    /// The read/write access alone, with every open-time flag dropped.
+    ///
+    /// The access is the lasting property of an open description; `CREATE`,
+    /// `TRUNCATE`, `EXCLUSIVE`, `APPEND`, `DIRECTORY`, and `NO_FOLLOW` all
+    /// describe how the *open* resolved and mean nothing to an already-open
+    /// file. Delegating a descriptor (`fd_grant`) carries exactly this, so a
+    /// delegation conveys what the grantor opened and no more.
+    #[must_use]
+    pub const fn access(self) -> Self {
+        Self(self.0 & (Self::READ.0 | Self::WRITE.0))
+    }
 }
 
 /// Flags accepted by [`fs_unlink`](crate::SyscallNumber::FS_UNLINK).

@@ -87,13 +87,43 @@ pub const HOME_SUBDIRS: [&str; 6] = [
 /// rename, or remove ([`appdata_root_security`]).
 pub const APPDATA_ROOT: &str = "Apps";
 
+/// Which of the two gated per-app data trees a store path belongs to.
+///
+/// The app-data service composes a path into one or the other and its callers
+/// select between them, so the choice is a value rather than a directory name
+/// spelled at each call site — the name itself has exactly one definition,
+/// [`Self::parent`].
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum AppDataTree {
+    /// Bulk, cache, and temporary data: `<home>/Library/Apps/<bundle-id>/`.
+    Bulk,
+    /// Configuration, published and sealed documents:
+    /// `<home>/Settings/Apps/<bundle-id>/`.
+    Config,
+}
+
+impl AppDataTree {
+    /// Both trees, in [`HOME_SUBDIRS`] order — what a provisioner iterates.
+    pub const ALL: [Self; 2] = [Self::Bulk, Self::Config];
+
+    /// The home subdirectory this tree's gated root sits in.
+    ///
+    /// Configuration lives under `Settings/` and bulk, cache, and temporary
+    /// data under `Library/`, matching the installed-system contract's own
+    /// split rather than inventing a third home directory for app data.
+    #[must_use]
+    pub const fn parent(self) -> &'static str {
+        match self {
+            Self::Bulk => "Library",
+            Self::Config => "Settings",
+        }
+    }
+}
+
 /// The home subdirectories that hold a gated per-app data root, in
 /// [`HOME_SUBDIRS`] order.
-///
-/// Configuration lives under `Settings/` and bulk, cache, and temporary data
-/// under `Library/`, matching the installed-system contract's own split
-/// rather than inventing a third home directory for app data.
-pub const APPDATA_ROOT_PARENTS: [&str; 2] = ["Library", "Settings"];
+pub const APPDATA_ROOT_PARENTS: [&str; 2] =
+    [AppDataTree::Bulk.parent(), AppDataTree::Config.parent()];
 
 /// The security record a gated per-app data root
 /// (`<home>/{Library,Settings}/Apps`) carries.

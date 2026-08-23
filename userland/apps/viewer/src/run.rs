@@ -214,13 +214,12 @@ mod program {
 
     /// Redeem the picked file's one-shot delegation and read its (bounded)
     /// content through the delegated descriptor — the only filesystem
-    /// reach this program has. Every step fails closed to `None`: nothing
-    /// is fabricated, and the descriptor is closed either way.
+    /// reach this program has. Fails closed to `None`: nothing is
+    /// fabricated, and the owned handle closes the descriptor on every path
+    /// out.
     fn read_picked(handle: u64) -> Option<Vec<u8>> {
-        let fd = u32::try_from(tairix_rt::fd_redeem(handle)).ok()?;
-        let content = read_open_fd(fd);
-        let _ = tairix_rt::fs_close(fd);
-        content
+        let file = tairix_rt::File::from_delegation(handle).ok()?;
+        read_open_fd(file.fd())
     }
 
     /// Read the document this viewer was handed on [`STDIN`] by its launcher

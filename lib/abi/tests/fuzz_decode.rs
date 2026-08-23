@@ -25,8 +25,11 @@
 //! random one, so it does not draw a seed.
 
 use tairix_abi::appdata_ipc::{
-    decode_document_reply, encode_document_reply, AppDataRequest, ConfigDocument,
-    APPDATA_DOCUMENT_MAX, APPDATA_MAX_REPLY, APPDATA_MAX_REQUEST,
+    decode_blob_list_reply, decode_document_reply, decode_grant_reply, decode_quota_reply,
+    encode_blob_list_reply, encode_document_reply, encode_grant_reply, encode_quota_reply,
+    AppDataRequest, BlobListing, ConfigDocument, APPDATA_BLOB_ENTRY_LEN, APPDATA_BLOB_LIST_MAX,
+    APPDATA_DOCUMENT_MAX, APPDATA_GRANT_REPLY_LEN, APPDATA_MAX_REPLY, APPDATA_MAX_REQUEST,
+    APPDATA_QUOTA_REPLY_LEN,
 };
 use tairix_abi::display_ipc::{decode_mode_reply, DisplayRequest};
 use tairix_abi::driver::net_channel::{
@@ -584,6 +587,56 @@ fn exercise_appdata_ipc(bytes: &[u8]) {
             assert!(needed > 0 && needed <= APPDATA_DOCUMENT_MAX);
         }
         Err(_) => {}
+    }
+    // The blob replies are the same two directions again: a caller decodes a
+    // grant handle, a listing, and a quota before it can act on any of them,
+    // and every one of the three is a frame a hostile or damaged service could
+    // have produced.
+    if let Ok(handle) = decode_grant_reply(bytes) {
+        assert_ne!(handle, 0, "a decoded grant handle is never the invalid one");
+        let mut buf = [0u8; APPDATA_GRANT_REPLY_LEN];
+        let len = encode_grant_reply(handle, &mut buf).expect("an accepted handle must re-encode");
+        assert_eq!(decode_grant_reply(&buf[..len]), Ok(handle));
+    }
+    match decode_blob_list_reply(bytes) {
+        Ok(BlobListing::Whole(listing)) => {
+            assert!(listing.len().is_multiple_of(APPDATA_BLOB_ENTRY_LEN));
+            // Walking a whole listing must terminate and yield no more entries
+            // than the body can hold, whatever the entries themselves say.
+            assert!(
+                decode_blob_list_reply(bytes)
+                    .expect("just decoded")
+                    .entries()
+                    .count()
+                    <= listing.len() / APPDATA_BLOB_ENTRY_LEN
+            );
+            let capacity = u32::try_from(listing.len()).expect("bounded by the listing max");
+            let mut buf = vec![0u8; APPDATA_MAX_REPLY];
+            let len = encode_blob_list_reply(listing, capacity, &mut buf)
+                .expect("an accepted listing must re-encode");
+            assert_eq!(
+                decode_blob_list_reply(&buf[..len]),
+                Ok(BlobListing::Whole(listing))
+            );
+            if !listing.is_empty() {
+                let len = encode_blob_list_reply(listing, capacity - 1, &mut buf)
+                    .expect("a capacity refusal must encode");
+                assert_eq!(
+                    decode_blob_list_reply(&buf[..len]),
+                    Ok(BlobListing::NeedsCapacity(listing.len()))
+                );
+            }
+        }
+        Ok(BlobListing::NeedsCapacity(needed)) => {
+            assert!(needed > 0 && needed <= APPDATA_BLOB_LIST_MAX);
+            assert!(needed.is_multiple_of(APPDATA_BLOB_ENTRY_LEN));
+        }
+        Err(_) => {}
+    }
+    if let Ok(quota) = decode_quota_reply(bytes) {
+        let mut buf = [0u8; APPDATA_QUOTA_REPLY_LEN];
+        let len = encode_quota_reply(&quota, &mut buf).expect("an accepted quota must re-encode");
+        assert_eq!(decode_quota_reply(&buf[..len]), Ok(quota));
     }
 }
 

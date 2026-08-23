@@ -6,8 +6,10 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use tairix_abi::appdata_ipc::{
-    decode_document_reply, AppDataRequest, ConfigDocument, ConfigScope, APPDATA_DOCUMENT_MAX,
-    APPDATA_MAX_REPLY, APPDATA_MAX_REQUEST, APPDATA_VALUE_MAX,
+    decode_blob_list_reply, decode_document_reply, decode_grant_reply, decode_quota_reply,
+    AppDataRequest, BlobMode, ConfigDocument, ConfigScope, APPDATA_BLOB_MAX_BYTES,
+    APPDATA_BLOB_MAX_COUNT, APPDATA_DOCUMENT_MAX, APPDATA_MAX_REPLY, APPDATA_MAX_REQUEST,
+    APPDATA_VALUE_MAX,
 };
 use tairix_abi::origin::{CapabilitySummary, TrustDomain, ORIGIN_CONSOLE_NONE, PROC_ID_LEN};
 use tairix_abi::reply::decode_status_reply;
@@ -358,6 +360,14 @@ fn a_caller_with_no_attested_app_identity_is_refused_every_operation() {
             bundle_id: "org.pty.notes",
             capacity: 4096,
         },
+        AppDataRequest::VaultRead { capacity: 4096 },
+        AppDataRequest::BlobOpen {
+            name: "index",
+            mode: BlobMode::ReadWrite,
+        },
+        AppDataRequest::BlobDelete { name: "index" },
+        AppDataRequest::BlobList { capacity: 4096 },
+        AppDataRequest::QuotaGet {},
     ] {
         let reply = call(&mut svc, &mut fs, &anon, &request);
         assert_eq!(
@@ -367,6 +377,7 @@ fn a_caller_with_no_attested_app_identity_is_refused_every_operation() {
         );
     }
     assert_eq!(svc.staging_sessions(), 0, "and nothing was staged");
+    assert!(fs.grants().is_empty(), "and nothing was delegated");
 }
 
 #[test]
@@ -873,15 +884,17 @@ fn an_unreachable_volume_answers_a_typed_refusal_not_a_default() {
 }
 
 #[test]
-fn the_scope_parent_is_one_the_home_shape_provisions() {
-    // The service composes `<home>/<parent>/Apps/<bundle-id>`; a parent the
-    // provisioners never gate would leave every store unreachable, so the name
-    // is pinned to the one shared definition rather than spelled twice.
-    assert!(
-        tairix_users::APPDATA_ROOT_PARENTS.contains(&super::APPDATA_PARENT),
-        "{} is not a provisioned app-data parent",
-        super::APPDATA_PARENT
-    );
+fn every_store_tree_is_one_the_home_shape_provisions() {
+    // The service composes `<home>/<parent>/Apps/<bundle-id>` for each tree; a
+    // parent the provisioners never gate would leave that whole scope
+    // unreachable, so the names come from the one shared definition.
+    for tree in tairix_users::AppDataTree::ALL {
+        assert!(
+            tairix_users::APPDATA_ROOT_PARENTS.contains(&tree.parent()),
+            "{} is not a provisioned app-data parent",
+            tree.parent()
+        );
+    }
 }
 
 #[test]
@@ -1645,4 +1658,245 @@ fn a_sealed_read_negotiates_capacity_like_any_other_document() {
         ConfigDocument::NeedsCapacity(needed) => assert!(needed > 1),
         ConfigDocument::Whole(text) => panic!("a one-byte buffer must not fit {text:?}"),
     }
+}
+
+#[test]
+fn a_blob_open_answers_a_bounded_grant_and_never_bytes() {
+    // The whole point of the scope: the service decides once, hands over a
+    // descriptor, and is off the data path. The reply carries a handle the
+    // caller redeems — and the delegation behind it is bounded by the extent
+    // ceiling, so direct access is not unbounded access.
+    let (mut svc, mut fs) = service();
+    let ada = origin(ACCOUNT_UID, 1, Some(identity(1)));
+    let reply = call(
+        &mut svc,
+        &mut fs,
+        &ada,
+        &AppDataRequest::BlobOpen {
+            name: "mail.index",
+            mode: BlobMode::ReadWrite,
+        },
+    );
+    let handle = decode_grant_reply(&reply).expect("a grant handle");
+    assert_ne!(handle, 0);
+    let minted = fs.grants().last().expect("one delegation");
+    assert!(minted.write);
+    assert_eq!(minted.ceiling, APPDATA_BLOB_MAX_BYTES);
+    assert_eq!(
+        minted.task,
+        ada.pid(),
+        "the grant is minted to the caller's attested task, never a wire value"
+    );
+    assert!(
+        minted.path.starts_with(&alloc::format!(
+            "{HOME}/Library/Apps/os.tairix.terminal/Blobs/"
+        )),
+        "a blob lives in the caller's own gated bulk store: {}",
+        minted.path
+    );
+}
+
+#[test]
+fn one_apps_blobs_are_unreachable_from_another() {
+    // The isolation the scope exists for: two applications of one account ask
+    // for the same blob name and reach two different files, and neither can
+    // name the other's at all — there is no request shape that carries an
+    // application identifier into the blob scope.
+    let (mut svc, mut fs) = service();
+    let terminal = origin(ACCOUNT_UID, 1, Some(identity(1)));
+    let notes = origin(
+        ACCOUNT_UID,
+        2,
+        Some(AppIdentity::new("org.pty.notes", publisher(2)).expect("valid identity")),
+    );
+    for who in [&terminal, &notes] {
+        let reply = call(
+            &mut svc,
+            &mut fs,
+            who,
+            &AppDataRequest::BlobOpen {
+                name: "index",
+                mode: BlobMode::ReadWrite,
+            },
+        );
+        decode_grant_reply(&reply).expect("each app opens its own");
+    }
+    let paths: Vec<&str> = fs.grants().iter().map(|g| g.path.as_str()).collect();
+    assert_eq!(paths.len(), 2);
+    assert_ne!(paths[0], paths[1], "one name, two applications, two files");
+
+    // And each sees only its own in a listing.
+    for who in [&terminal, &notes] {
+        let reply = call(
+            &mut svc,
+            &mut fs,
+            who,
+            &AppDataRequest::BlobList { capacity: 4096 },
+        );
+        let listing = decode_blob_list_reply(&reply).expect("a listing");
+        assert_eq!(
+            listing
+                .entries()
+                .map(|entry| String::from(entry.name))
+                .collect::<Vec<_>>(),
+            [String::from("index")]
+        );
+    }
+}
+
+#[test]
+fn a_blob_read_of_a_blob_that_does_not_exist_creates_nothing() {
+    let (mut svc, mut fs) = service();
+    let ada = origin(ACCOUNT_UID, 1, Some(identity(1)));
+    let reply = call(
+        &mut svc,
+        &mut fs,
+        &ada,
+        &AppDataRequest::BlobOpen {
+            name: "index",
+            mode: BlobMode::Read,
+        },
+    );
+    assert_eq!(decode_grant_reply(&reply), Err(Errno::NotFound));
+    assert!(fs.grants().is_empty(), "nothing was delegated");
+    assert!(
+        !fs.exists(&alloc::format!("{HOME}/Library/Apps/os.tairix.terminal")),
+        "and no store was provisioned by a read"
+    );
+}
+
+#[test]
+fn a_quota_read_reports_usage_against_the_ceilings_it_is_bounded_by() {
+    let (mut svc, mut fs) = service();
+    let ada = origin(ACCOUNT_UID, 1, Some(identity(1)));
+    let empty = decode_quota_reply(&call(&mut svc, &mut fs, &ada, &AppDataRequest::QuotaGet {}))
+        .expect("a quota");
+    assert_eq!(empty.blobs, 0);
+    assert_eq!(empty.bytes, 0);
+    assert_eq!(
+        empty.blob_max,
+        u64::try_from(APPDATA_BLOB_MAX_COUNT).expect("fits")
+    );
+    assert_eq!(empty.blob_bytes_max, APPDATA_BLOB_MAX_BYTES);
+
+    call(
+        &mut svc,
+        &mut fs,
+        &ada,
+        &AppDataRequest::BlobOpen {
+            name: "index",
+            mode: BlobMode::ReadWrite,
+        },
+    );
+    let path = &fs.grants().last().expect("one delegation").path.clone();
+    fs.put(path, b"12345");
+    let used = decode_quota_reply(&call(&mut svc, &mut fs, &ada, &AppDataRequest::QuotaGet {}))
+        .expect("a quota");
+    assert_eq!(used.blobs, 1);
+    assert_eq!(used.bytes, 5);
+}
+
+#[test]
+fn a_blob_delete_removes_the_file_and_frees_its_slot() {
+    let (mut svc, mut fs) = service();
+    let ada = origin(ACCOUNT_UID, 1, Some(identity(1)));
+    call(
+        &mut svc,
+        &mut fs,
+        &ada,
+        &AppDataRequest::BlobOpen {
+            name: "index",
+            mode: BlobMode::ReadWrite,
+        },
+    );
+    let path = fs.grants().last().expect("one delegation").path.clone();
+    assert!(fs.exists(&path));
+    let reply = call(
+        &mut svc,
+        &mut fs,
+        &ada,
+        &AppDataRequest::BlobDelete { name: "index" },
+    );
+    assert_eq!(decode_status_reply(&reply), Ok(()));
+    assert!(!fs.exists(&path));
+    // A second delete is the same answer: a refusal here would be an oracle
+    // for what the store holds.
+    let reply = call(
+        &mut svc,
+        &mut fs,
+        &ada,
+        &AppDataRequest::BlobDelete { name: "index" },
+    );
+    assert_eq!(decode_status_reply(&reply), Ok(()));
+}
+
+#[test]
+fn a_blob_operation_is_refused_when_the_volume_is_unreachable() {
+    // Early boot, before any volume is unlocked: a typed refusal, never a
+    // guess and never an empty listing that would read as "you have no blobs".
+    let (mut svc, mut fs) = service();
+    let ada = origin(ACCOUNT_UID, 1, Some(identity(1)));
+    fs.fail_all(Errno::DeviceOffline);
+    for request in [
+        AppDataRequest::BlobOpen {
+            name: "index",
+            mode: BlobMode::ReadWrite,
+        },
+        AppDataRequest::BlobDelete { name: "index" },
+        AppDataRequest::BlobList { capacity: 4096 },
+        AppDataRequest::QuotaGet {},
+    ] {
+        let reply = call(&mut svc, &mut fs, &ada, &request);
+        assert_eq!(
+            decode_status_reply(&reply),
+            Err(Errno::DeviceOffline),
+            "{request:?} must report the volume rather than an absence"
+        );
+    }
+}
+
+#[test]
+fn a_listing_past_the_callers_capacity_is_answered_with_its_length() {
+    // The same whole-or-nothing contract a document read has: a caller either
+    // holds the whole listing or knows exactly how big a buffer to ask again
+    // with, so nothing acts on a listing missing entries it would have read.
+    use tairix_abi::appdata_ipc::BlobListing;
+    let (mut svc, mut fs) = service();
+    let ada = origin(ACCOUNT_UID, 1, Some(identity(1)));
+    for name in ["a", "b", "c"] {
+        call(
+            &mut svc,
+            &mut fs,
+            &ada,
+            &AppDataRequest::BlobOpen {
+                name,
+                mode: BlobMode::ReadWrite,
+            },
+        );
+    }
+    let reply = call(
+        &mut svc,
+        &mut fs,
+        &ada,
+        &AppDataRequest::BlobList { capacity: 1 },
+    );
+    let needed = match decode_blob_list_reply(&reply) {
+        Ok(BlobListing::NeedsCapacity(needed)) => needed,
+        other => panic!("expected a capacity refusal, got {other:?}"),
+    };
+    let reply = call(
+        &mut svc,
+        &mut fs,
+        &ada,
+        &AppDataRequest::BlobList {
+            capacity: u32::try_from(needed).expect("fits"),
+        },
+    );
+    assert_eq!(
+        decode_blob_list_reply(&reply)
+            .expect("a listing")
+            .entries()
+            .count(),
+        3
+    );
 }

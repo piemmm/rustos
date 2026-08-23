@@ -202,10 +202,10 @@ cannot be widened into the private scope.
 - **Out of scope, deliberately.** Publisher-key *rotation* (as opposed to
   signing-key rotation) is an audited administrative re-pin, not a manifest
   lineage format (§3.2). Cross-user sharing, sync/replication, and a settings
-  GUI are not in this plan. A per-descriptor byte ceiling is not in this plan
-  and its absence is recorded as a known limit (§3.8). Sealed *bulk* data is not
-  in this plan either: a secret crosses the wire as a setting's value and is
-  bounded by it (§3.7).
+  GUI are not in this plan. Sealed *bulk* data is not in this plan either: a
+  secret crosses the wire as a setting's value and is bounded by it (§3.7).
+  Evicting the `Cache/` scope is AD9's, beside the temp reaper it shares a
+  policy with.
 
 ---
 
@@ -598,9 +598,9 @@ field the operation does not use left non-zero refuses rather than guessing.
 | `VaultRead { capacity }` | AD7 | the caller's whole **sealed** document |
 | `VaultSet { key, value }` / `VaultUnset { key }` | AD7 | seal or remove one secret, **immediately** |
 | `BlobOpen { name, mode }` | AD8 | descriptor grant handle for a blob |
-| `BlobDelete { name }` / `BlobList { cursor }` | AD8 | manage own blobs |
+| `BlobDelete { name }` / `BlobList { capacity }` | AD8 | manage own blobs |
 | `TempCreate {}` | AD9 | descriptor grant handle for a fresh temp file |
-| `QuotaGet {}` | AD8 | own usage and ceiling |
+| `QuotaGet {}` | AD8 | own blob usage and its ceilings |
 
 **A read answers with the whole document, not one key.** This corrects an
 earlier draft of this plan, which specified `ConfigGet { key }` and a paged
@@ -828,15 +828,86 @@ at boot, and are gated identically — an app's scratch data is no more visible
 to another app than its settings are. There is still no `/tmp` and nothing here
 creates one (§16.1).
 
-**Quotas.** Per-app blob count and byte ceilings, and a per-user total, all
-derived from the resource profile rather than fixed constants (§24.1), checked
-at open-time admission.
+**A delegation attenuates by mode *and* by extent, and that is a kernel
+change.** `fd_grant` existed for the file picker's read-only hand-off: it
+refuses a descriptor that is not read-only and mints `OpenFlags::READ`, and only
+`fs_read` accepts the result at all — `fs_write` refuses a delegated backing
+outright, and `fs_stat`, `fs_truncate`, `fs_sync`, and `file_map` all resolve a
+descriptor's *path* through a method that answers `None` for one. So a blob
+descriptor as this plan promised it did not exist, and half a file API on a
+delegated descriptor would be a defect in its own right. AD8 therefore makes a
+delegation a whole descriptor:
 
-**Known limit, stated honestly.** Once an app holds a writable descriptor it
-can grow that file until the *user's* filesystem quota stops it; the per-app
-byte ceiling is therefore an admission check, not a hard per-descriptor cap. A
-true per-descriptor byte ceiling would need a VFS change, which is out of
-scope for this plan and is recorded here rather than papered over.
+- `fd_grant` mints the **grantor descriptor's own** access mode rather than a
+  hard-coded read, so a delegation never conveys more than the grantor opened.
+  A directory and a non-path backing stay refused, and the open-time flags
+  (`CREATE`, `TRUNCATE`, `APPEND`, `NO_FOLLOW`) are not carried: the file is
+  already open, and an `APPEND` delegation would silently move every write to
+  a position the recipient did not name.
+- Every path-backed descriptor operation resolves *whose* authority it runs
+  under from **one** place, so "a delegation runs under the grantor's captured
+  identity, never the holder's" holds for the whole file API instead of for
+  reads alone.
+- `fs_stat`, `fs_truncate`, `fs_sync`, and `file_map` stop carrying a blanket
+  `CAP_FS_ACCESS` gate at dispatch and apply it per backing, exactly as
+  `fs_read` and `fs_write` already do. Nothing widens — a caller's own
+  path-backed descriptor faces the same requirement one line later — but a
+  recipient that holds no filesystem capability can now use the descriptor it
+  was given, which is the whole point of a delegation. `fs_readdir` keeps its
+  blanket gate, because `fd_grant` refuses a directory and so no delegated form
+  of it exists.
+- A writable delegation carries a **write-extent ceiling** and there is no way
+  to mint one without it: the ceiling must be zero for a read-only grant and
+  non-zero for a writable one, so "an unbounded writable delegation" is not a
+  representable request. `fs_write` past the ceiling and `fs_truncate` above it
+  are refused with `LimitExceeded`; the check is on `offset + len`, so a sparse
+  write cannot step over it either.
+
+**Quotas, and a correction.** An earlier draft of this plan said the ceilings
+were "derived from the resource profile rather than fixed constants (§24.1)"
+and recorded a per-descriptor cap as out of scope. Both were wrong, and for
+the same reason the format bounds were corrected in §3.3: §24.1 governs
+resource *capacities*, and these are not capacities.
+
+- **They are containment bounds, so they are fixed (§24.4).** They bound what
+  one application may take from *the user's volume* — a resource it does not
+  own and cannot be trusted to size. Deriving them from discovered RAM would
+  mean a bigger machine lets one application hide a bigger unmanaged pile of
+  data in a store the user cannot list or delete, which is a regression, not
+  flexibility. There is no honest hardware quantity to derive from either: the
+  boot facts carry CPU count and installed memory, and neither is a disk.
+- **Two ceilings, and the per-app worst case is their product, stated as
+  such.** A per-app blob *count* (`APPDATA_BLOB_MAX_COUNT`) and a per-blob
+  *byte* ceiling (`APPDATA_BLOB_MAX_BYTES`). The count is what makes a listing
+  one reply frame and bounds the directory scan a hostile app can demand; the
+  byte ceiling is the kernel-enforced extent above. Every open blob is bounded
+  by the same figure, so the app's whole blob store is bounded by
+  count × bytes — a *hard* bound, not an admission estimate.
+- **An admission check alone would have been theatre.** Summing an app's blob
+  sizes at open time and refusing the next open does nothing about the blob it
+  already holds open, which it can grow without limit. A defence a hostile app
+  defeats in one line is worse than none, because it reads as an assurance. So
+  the bound is the delegation's extent, and the count ceiling is the only thing
+  admission decides.
+- **Why a fixed byte ceiling is the right answer and not a compromise.** The
+  blob store is an application's private *working set* — an index, a cache, a
+  queue: exactly the data that must not be in the user's Documents. Data that
+  genuinely outgrows it is the *user's* data, and it belongs in the user's own
+  files, under the user's own authority, where the file manager lists it,
+  backup covers it, and the user can delete it. An application that would hide
+  a hundred gigabytes in a store the user cannot reach is the thing this
+  ceiling exists to prevent, not a workload it fails to serve. `QuotaGet`
+  reports both ceilings and the usage against them, so an application that
+  reaches one says so rather than failing obscurely.
+
+**What is still not bounded, stated honestly.** Nothing bounds the *number of
+applications* an account may run, so the sum over an account's apps is bounded
+only by the volume. A per-account or per-volume quota is the filesystem's to
+enforce and ARXFS has none yet; it is not faked here. What does hold is that no
+single application can exceed count × bytes, and that the store's bytes are
+owned by the app-data service rather than by the user — because the user must
+not be able to reach them — so a future per-*user* filesystem quota would never
+have caught this path anyway. That is precisely why the bound has to live here.
 
 ### 3.9 The client API (`lib/appdata`)
 
@@ -1027,6 +1098,65 @@ store directory yields ciphertext, and a damaged record is refused rather than
 believed. What `confd` still cannot reach is unchanged: no credential record, no
 other user's files, no process.
 
+### 3.13 What the blob scope settled
+
+**A name in the store has one grammar, whatever names it.** A blob name and a
+bundle identifier are both a single component in a tree this service composes
+paths into, so they are the same security question and get the same answer: one
+validator, one width, two entry points named for what they validate. Writing a
+second character-class loop for blob names would have been the duplication the
+charter forbids *and* two chances to disagree about whether `..` is a name.
+
+**A listing is whole or nothing, and needs no cursor.** An earlier draft of this
+plan specified `BlobList { cursor }`. It does not need one: the blob count is
+bounded, so a whole listing fits one reply under the same capacity negotiation a
+document read uses. That is the argument §3.6 already made for deleting
+`ConfigList` — a paged listing can be assembled out of two snapshots and a
+whole one cannot — and it applies with more force here, because a listing spliced
+across a delete would name a blob that no longer exists.
+
+**One pin, every tree — and creating a blob creates the pin.** The `.owner`
+record lives in the configuration store and governs the bulk store too, because
+it attests who owns the *application's data* and not who owns one file. A blob
+open therefore resolves and pins through the configuration root first and
+reaches `Library/` only behind that check, so a squatting publisher is refused
+before a byte of another developer's blob is reachable. Two pins would have been
+two records to keep in step and a state where they disagree.
+
+That is only a guarantee if the pin cannot be *skipped*, which a first draft of
+this stage got wrong: opening the configuration store without `create` on the
+blob path left an application that had written no setting unpinned, so a blob it
+created had no recorded owner — and a later publisher claiming the identifier
+passed the pin check vacuously and read it. Two rules close it, and the second
+is what makes the first structural: creating a blob passes `create` to the
+*configuration* store too, so the pin exists before the blob does; and an
+unpinned store holds **no** blobs whatever is on the volume, exactly as an
+unpinned configuration store reads as an empty document. With no attested owner
+there is nothing to serve, so "a store with data nobody owns" is not a state the
+service can be in rather than one it checks for.
+
+**A blob is created by opening it for writing, not by a third mode.** A
+read-only open of an absent blob is `NotFound`; a read-write open creates it.
+That is one bit of information carried by the mode the caller already sends,
+rather than a create flag that could be set with `Read` and mean nothing.
+
+**The service closes its own descriptor before it replies.** A delegation
+record is self-contained — it carries the path and the grantor's captured
+credential, not the grantor's descriptor — so `confd` opens, mints, and closes
+within one request and holds no per-caller descriptor state at all. There is no
+primitive by which a server learns that a peer closed a descriptor, so a service
+that kept one open per outstanding grant could never reclaim it; the design
+avoids needing to.
+
+**Blob bytes are the service's, and that is why the service must bound them.**
+The gated tree is owned by `confd` precisely so the account's own shell cannot
+reach it, which means every byte an application writes to a blob is charged to
+the service's uid and not the user's. No per-user filesystem quota, present or
+future, will ever see it. The extent ceiling in the delegation is therefore not
+a belt-and-braces addition to a filesystem quota — it is the only bound that
+will ever exist on that path, which is what makes it mandatory rather than
+optional (§3.8).
+
 ---
 
 ## 4. Stages
@@ -1043,7 +1173,7 @@ gate green (§7), and contains no stubs (§15.1).
 | **AD5** ✅ | `lib/appdata` + first migration | The client: one call to open, local reads, staged writes published as one commit, the **bundle-defaults fallback layer** (§3.4), the degrade path with a typed reason, and the shared fake service every consumer's own tests drive it over. `terminal` migrated: its hand-rolled `key value` parser, renderer, document bound, error types, and `~/Settings/Terminal/terminal.conf` path **deleted**, its registry re-keyed on dotted keys, and its *Restore defaults* turned from "write today's values" into an `unset` the store answers (§3.10). |
 | **AD6** ✅ | Public scope | `public.conf`; `ConfigScope { Private, Public }` on every own-store request and the reshaped `appdata-v1` header that carries it; `PublicRead` as a **separate opcode with no scope field**, so another app's private document is not a representable request; per-scope staging, per-scope commit and per-scope pending-edit bound; the one scope→file-name mapping and the derived `.new` sibling; the published scope's deliberate absence of any layer beneath it; the foreign read's audited empty answer for a target-side defect and its typed refusal for the caller's own; `Settings::open_published` and `read_published` in the client, and the fake service extended to both scopes and to foreign apps. |
 | **AD7** ✅ | Secrets | `secret.vault` and the per-account `.vault-master` record; the AEAD hierarchy (`derive_key` under one labelled context, ChaCha20-Poly1305 per document, a fresh nonce per seal) and the injected `Entropy` seam; `VaultRead`/`VaultSet`/`VaultUnset` as opcodes with **no scope field and no foreign counterpart**, and writes applied before the reply rather than staged; a damaged record, a failed authentication, and absent key material as three distinct audited refusals that are never an empty vault; a malformed master record refused and **never replaced**; the wipe moved into `lib/appconf`'s own `Line::drop`; `Vault` in the client, the fake service extended to the scope, and a fuzz harness over both records. **No protector abstraction** — §3.7 records why. |
-| **AD8** | Blobs | `BlobOpen`/`BlobList`/`BlobDelete`, `fd_grant` handoff, quotas, `file_map` random access. |
+| **AD8** ✅ | Blobs | The kernel prerequisite the descriptor hand-off turned out to need (§3.8): `fd_grant` delegating the grantor descriptor's own mode with a mandatory write-extent ceiling, one resolution of *whose* authority a path-backed descriptor operation runs under, and `fs_stat`/`fs_truncate`/`fs_sync`/`file_map` gating per backing so a recipient holding no filesystem capability can use what it was given; `File::from_delegation` as the one owned redemption, replacing `viewer`'s hand-rolled pair. Then the scope itself: `validate_blob_name` over the shared store-name grammar, `BlobOpen`/`BlobDelete`/`BlobList`/`QuotaGet` with the listing whole-or-nothing and no cursor, the `Library/Apps` root resolved beside the configuration one under the same single pin, admission against the count ceiling, the client's blob surface, the fake service extended to it, and the root-cache ownership re-check AD4 left incomplete (§3.4). |
 | **AD9** | Temp | `TempCreate`, session-end and boot reaping, quota accounting. |
 | **AD10** | Remaining migrations | Migrate `fstree`, `lib/wallpaper`/session pinboard, `applib` program library; delete every hand-rolled path. The `docs/src/` page and every §5 amendment but the manifest-field record land with the stage that needs them, and AD4 landed most of them; AD10 lands only what its own migrations drive. |
 
@@ -1086,13 +1216,24 @@ Landed as the stages that need them land, never pre-written (§3, §15.2). A
   the `key = value` format engine, the published scope one app reads another's
   values through, the sealed scope, descriptor-backed blobs" →
   `plans/APPDATA.md`*.
-- **`README.md`** ✅ (AD4, AD6, AD7) — the security/attack-vector matrix gains the
+- **`README.md`** ✅ (AD4, AD6, AD7, AD8) — the security/attack-vector matrix gains the
   app-from-app isolation row and the name-gate row (§13), (AD6) the row for
   cross-app sharing confined to the published scope: an app reaching another
   app's *private* settings through the sharing channel, or using it to probe
-  which applications an account has run, and (AD7) the row for the sealed store:
+  which applications an account has run, (AD7) the row for the sealed store:
   an app reading another app's saved passwords or tokens, and a damaged or forged
-  vault being read as "no secrets saved".
+  vault being read as "no secrets saved", and (AD8) two rows for the bulk scope:
+  one app reading or overwriting another's blobs — or filling the volume through
+  a store no per-user quota can see — and a delegated descriptor conveying more
+  than its grantor opened or growing a file without limit.
+- **§16.3** ✅ (AD8) — record the bulk scope: `Blobs/<name>` reached as a
+  bounded descriptor rather than as bytes, why the service is the only thing
+  that can bound its size, and that its ceilings are §24.4 containment bounds
+  rather than §24.1 capacities.
+- **`plans/CAPABILITY_USE.md` CU6** ✅ (AD8) — record that the picker's grant is
+  read-only because the picker opens a read-only descriptor, not because the
+  mechanism can only be that; `fd_grant` now carries the grantor descriptor's
+  own access with a mandatory extent ceiling on a writable one.
 
 ---
 

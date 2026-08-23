@@ -14,7 +14,7 @@ use alloc::vec::Vec;
 use tairix_abi::Errno;
 use tairix_users::CONFD_UID;
 
-use crate::Storage;
+use crate::{DirEntry, NodeInfo, Storage};
 
 /// The uid of the account whose home the fixtures provision.
 pub const ACCOUNT_UID: u32 = 1000;
@@ -32,6 +32,22 @@ pub struct TestFs {
     offline: Option<Errno>,
     /// Paths whose owner this service may not read.
     hidden: Vec<String>,
+    /// Every descriptor delegation minted, in mint order — what a test
+    /// inspects instead of a kernel handle table.
+    grants: Vec<Grant>,
+}
+
+/// One minted descriptor delegation, as the fake records it.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Grant {
+    /// The file the delegation names.
+    pub path: String,
+    /// Whether it conveys write access.
+    pub write: bool,
+    /// The extent ceiling it carries.
+    pub ceiling: u64,
+    /// The task it was minted to.
+    pub task: u64,
 }
 
 impl TestFs {
@@ -44,6 +60,7 @@ impl TestFs {
             owners: BTreeMap::new(),
             offline: None,
             hidden: Vec::new(),
+            grants: Vec::new(),
         };
         fs.add_dir("/Users", 0);
         fs.add_dir("/System", 0);
@@ -73,8 +90,9 @@ impl TestFs {
         }
     }
 
-    /// Record a directory owned by `uid`.
-    fn add_dir(&mut self, path: &str, uid: u32) {
+    /// Record a directory owned by `uid` — also how a test plants an
+    /// application-owned decoy where a provisioned root should be.
+    pub fn add_dir(&mut self, path: &str, uid: u32) {
         self.dirs.insert(path.to_string());
         self.owners.insert(path.to_string(), uid);
     }
@@ -130,6 +148,11 @@ impl TestFs {
         self.offline = Some(err);
     }
 
+    /// Every delegation minted so far, in mint order.
+    pub fn grants(&self) -> &[Grant] {
+        &self.grants
+    }
+
     /// The unreachable-volume error, if one is armed.
     fn offline(&self) -> Result<(), Errno> {
         match self.offline {
@@ -179,26 +202,69 @@ impl Storage for TestFs {
         Ok(())
     }
 
-    fn owner_of(&mut self, path: &str) -> Result<u32, Errno> {
+    fn unlink(&mut self, path: &str) -> Result<(), Errno> {
+        self.offline()?;
+        self.files.remove(path).ok_or(Errno::NotFound)?;
+        self.owners.remove(path);
+        Ok(())
+    }
+
+    fn stat(&mut self, path: &str) -> Result<NodeInfo, Errno> {
         self.offline()?;
         if self.hidden.iter().any(|hidden| hidden == path) {
             return Err(Errno::PermissionDenied);
         }
-        self.owners.get(path).copied().ok_or(Errno::NotFound)
+        let uid = self.owners.get(path).copied().ok_or(Errno::NotFound)?;
+        Ok(NodeInfo {
+            uid,
+            len: self
+                .files
+                .get(path)
+                .map_or(0, |bytes| bytes.len().try_into().unwrap_or(u64::MAX)),
+        })
     }
 
-    fn list_dir(&mut self, path: &str) -> Result<Vec<String>, Errno> {
+    fn list_dir(&mut self, path: &str) -> Result<Vec<DirEntry>, Errno> {
         self.offline()?;
         if !self.dirs.contains(path) {
             return Err(Errno::NotFound);
         }
         let prefix = alloc::format!("{path}/");
-        Ok(self
-            .dirs
-            .iter()
-            .filter_map(|dir| dir.strip_prefix(&prefix))
-            .filter(|rest| !rest.contains('/'))
-            .map(String::from)
-            .collect())
+        let names = |keys: &mut dyn Iterator<Item = &String>, dir: bool| -> Vec<DirEntry> {
+            keys.filter_map(|key| key.strip_prefix(&prefix))
+                .filter(|rest| !rest.contains('/'))
+                .map(|rest| DirEntry {
+                    name: String::from(rest),
+                    dir,
+                })
+                .collect()
+        };
+        let mut entries = names(&mut self.dirs.iter(), true);
+        entries.extend(names(&mut self.files.keys(), false));
+        Ok(entries)
+    }
+
+    fn grant(&mut self, path: &str, write: bool, ceiling: u64, task: u64) -> Result<u64, Errno> {
+        self.offline()?;
+        if !self.files.contains_key(path) {
+            if !write {
+                return Err(Errno::NotFound);
+            }
+            let cut = path.rfind('/').ok_or(Errno::NotFound)?;
+            if !self.dirs.contains(&path[..cut]) {
+                return Err(Errno::NotFound);
+            }
+            self.files.insert(path.to_string(), Vec::new());
+            self.owners.insert(path.to_string(), CONFD_UID.0);
+        }
+        self.grants.push(Grant {
+            path: path.to_string(),
+            write,
+            ceiling,
+            task,
+        });
+        // Handle 0 is the reserved invalid value, exactly as the kernel's mint
+        // treats it, so a test that reads a handle back proves it was minted.
+        Ok(self.grants.len().try_into().unwrap_or(u64::MAX))
     }
 }

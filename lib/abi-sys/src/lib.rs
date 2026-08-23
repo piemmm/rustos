@@ -2869,28 +2869,34 @@ pub extern "C" fn sys_resource_open(
     }
 }
 
-/// `fd_grant`: delegate the caller's own read-only filesystem descriptor
-/// `fd` to the live task `pid` as a one-shot grant
-/// (`SyscallNumber::FD_GRANT`). Returns the minted, unforgeable grant
+/// `fd_grant`: delegate the caller's own filesystem descriptor `fd` to the
+/// live task `pid` as a one-shot grant, bounded above by `write_ceiling`
+/// bytes (`SyscallNumber::FD_GRANT`). Returns the minted, unforgeable grant
 /// handle (>= 1), or a `TAIRIX_E_*` code reinterpreted into the result.
 ///
 /// The kernel requires `TAIRIX_CAP_FS_ACCESS`, confirms the caller itself
-/// holds `fd` as a plain read-only, non-directory filesystem descriptor
-/// (a pipe, resource, writable, or already-delegated descriptor is
-/// refused — delegation never widens and never chains), captures the
-/// caller's identity and effective capability set with the descriptor's
-/// path, and confirms the recipient task is live (task ids are never
-/// reused, so a pid from a kernel-attested source lands on exactly the
-/// intended process). The caller forwards the handle in-band; it
+/// holds `fd` as a plain non-directory filesystem descriptor (a pipe,
+/// resource, or already-delegated descriptor is refused — delegation never
+/// chains), and mints the descriptor's *own* read/write access and nothing
+/// more, so a delegation never widens. `write_ceiling` is the highest file
+/// length the recipient may write or truncate to: it must be zero for a
+/// read-only descriptor, which has no extent to bound, and non-zero for a
+/// writable one, so an unbounded writable delegation cannot be minted.
+///
+/// The caller's identity and effective capability set are captured with the
+/// descriptor's path, and the recipient task must be live (task ids are
+/// never reused, so a pid from a kernel-attested source lands on exactly
+/// the intended process). The caller forwards the handle in-band; it
 /// resolves only through the recipient's own [`sys_fd_redeem`], so the
 /// number is useless to a bystander. Audited.
 #[must_use]
 #[export_name = "tairix_sys_fd_grant"]
-pub extern "C" fn sys_fd_grant(fd: u32, pid: u64) -> u64 {
+pub extern "C" fn sys_fd_grant(fd: u32, pid: u64, write_ceiling: u64) -> u64 {
     // SAFETY: see `sys_yield`. No user pointer is dereferenced; the kernel
-    // validates the capability, the caller's own descriptor, and the
-    // recipient's liveness before minting anything.
-    unsafe { raw_syscall(NUM_FD_GRANT, [u64::from(fd), pid, 0, 0, 0, 0]) }
+    // validates the capability, the caller's own descriptor, the extent
+    // ceiling against that descriptor's access, and the recipient's
+    // liveness before minting anything.
+    unsafe { raw_syscall(NUM_FD_GRANT, [u64::from(fd), pid, write_ceiling, 0, 0, 0]) }
 }
 
 /// `fd_redeem`: redeem an `fd_grant` handle minted to the calling task,
@@ -3034,7 +3040,7 @@ mod tests {
         (NUM_PORT_RESOLVE, "port_resolve", 2),
         (NUM_POINTER_INJECT, "pointer_inject", 3),
         (NUM_POINTER_READ, "pointer_read", 3),
-        (NUM_FD_GRANT, "fd_grant", 2),
+        (NUM_FD_GRANT, "fd_grant", 3),
         (NUM_FD_REDEEM, "fd_redeem", 1),
         (NUM_MEM_PIN, "mem_pin", 0),
         (NUM_MEM_UNPIN, "mem_unpin", 0),
@@ -3814,14 +3820,15 @@ mod tests {
     }
 
     #[test]
-    fn fd_grant_marshals_descriptor_and_recipient() {
+    fn fd_grant_marshals_descriptor_recipient_and_ceiling() {
         let (number, args) = capture(7, || {
-            assert_eq!(sys_fd_grant(4, 0x2A), 7);
+            assert_eq!(sys_fd_grant(4, 0x2A, 4096), 7);
         });
         assert_eq!(number, NUM_FD_GRANT);
         assert_eq!(args[0], 4);
         assert_eq!(args[1], 0x2A);
-        assert_eq!(&args[2..], &[0, 0, 0, 0]);
+        assert_eq!(args[2], 4096);
+        assert_eq!(&args[3..], &[0, 0, 0]);
     }
 
     #[test]

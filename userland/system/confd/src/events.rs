@@ -78,6 +78,21 @@ pub const VAULT_UNSEAL_FAILED: EventId = EventId(21_012);
 /// derived from a failed draw.
 pub const ENTROPY_UNAVAILABLE: EventId = EventId(21_013);
 
+/// A caller asked to read a blob it does not hold. Ordinary for an application
+/// starting with an empty cache, so it is informational rather than a warning.
+pub const BLOB_NOT_FOUND: EventId = EventId(21_014);
+
+/// A caller asked to create a blob while already holding as many as it may.
+/// The store is bounded, so this is a workload that has outgrown the working
+/// set the blob scope is for — or a runaway writer.
+pub const BLOB_LIMIT: EventId = EventId(21_015);
+
+/// A blob name outside the store-name grammar reached the store. The wire
+/// decoder refuses one, so this is a defect on the way in rather than a caller
+/// the endpoint can produce — recorded as a warning because it means a check
+/// was bypassed.
+pub const BLOB_NAME_REFUSED: EventId = EventId(21_016);
+
 /// The event identifier recording `err`.
 ///
 /// One mapping, so the audit stream and the caller's typed refusal can never
@@ -96,6 +111,9 @@ pub const fn id_of(err: StoreError) -> EventId {
         StoreError::Vault(VaultError::VaultMalformed) => VAULT_MALFORMED,
         StoreError::Vault(VaultError::VaultUnsealFailed) => VAULT_UNSEAL_FAILED,
         StoreError::Vault(VaultError::EntropyUnavailable) => ENTROPY_UNAVAILABLE,
+        StoreError::BlobNotFound => BLOB_NOT_FOUND,
+        StoreError::BlobLimit => BLOB_LIMIT,
+        StoreError::BlobNameRefused => BLOB_NAME_REFUSED,
     }
 }
 
@@ -107,7 +125,7 @@ mod tests {
 
     /// Every [`StoreError`] variant, so a new one cannot be added without an
     /// identifier of its own.
-    const EVERY_ERROR: [StoreError; 11] = [
+    const EVERY_ERROR: [StoreError; 14] = [
         StoreError::NoAppIdentity,
         StoreError::NoHome,
         StoreError::RootNotOwned,
@@ -119,6 +137,9 @@ mod tests {
         StoreError::Vault(VaultError::VaultMalformed),
         StoreError::Vault(VaultError::VaultUnsealFailed),
         StoreError::Vault(VaultError::EntropyUnavailable),
+        StoreError::BlobNotFound,
+        StoreError::BlobLimit,
+        StoreError::BlobNameRefused,
     ];
 
     #[test]

@@ -5045,6 +5045,9 @@ mod program {
     /// returning the `fd_redeem` handle. The session's descriptor is
     /// closed either way — the delegation record is self-contained — and
     /// every refusal answers `None` (fail closed, nothing delegated).
+    ///
+    /// The delegation carries no write extent: what the user chose is a
+    /// document to read, and a read-only grant has no length to bound.
     fn delegate(
         path: &str,
         window_id: u64,
@@ -5055,7 +5058,7 @@ mod program {
         let pid = identity.pid_of(owner)?;
         let fd = tairix_rt::fs_open(path.as_bytes(), OpenFlags::READ);
         let fd = u32::try_from(fd).ok()?;
-        let handle = tairix_rt::fd_grant(fd, pid);
+        let handle = tairix_rt::fd_grant(fd, pid, 0);
         let _ = tairix_rt::fs_close(fd);
         u64::try_from(handle).ok().filter(|&handle| handle != 0)
     }

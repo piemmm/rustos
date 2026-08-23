@@ -90,13 +90,17 @@ extern crate alloc;
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use tairix_abi::appdata_ipc::{encode_document_reply, AppDataRequest, ConfigScope};
+use tairix_abi::appdata_ipc::{
+    encode_blob_list_reply, encode_document_reply, encode_grant_reply, encode_quota_reply,
+    AppDataRequest, BlobMode, ConfigScope,
+};
 use tairix_abi::reply::encode_status_reply;
 use tairix_abi::{AppIdentity, Errno, Origin, ProcId};
 use tairix_appconf::{validate_key, ConfError, Document, MAX_SETTINGS};
 use tairix_log::{Event, EventId, Field, FieldValue, Level, Sink};
 use zeroize::Zeroize;
 
+pub mod blob;
 pub mod events;
 mod owner;
 pub mod store;
@@ -104,16 +108,10 @@ pub mod store;
 mod testfs;
 pub mod vault;
 
+pub use blob::BlobStore;
 pub use owner::OwnerPin;
 pub use store::{published_document, AppStore, RootCache, StoreError};
 pub use vault::{Entropy, VaultError};
-
-/// The home subdirectory the private configuration scope lives under.
-///
-/// `Settings/` is where the installed-system contract puts user-scoped
-/// configuration; `Library/` holds the bulk and volatile scopes the later
-/// stages serve. Both are named once, in the shared home-shape definition.
-pub const APPDATA_PARENT: &str = "Settings";
 
 /// How long a staging session may sit untouched before it is reclaimed.
 ///
@@ -137,14 +135,40 @@ pub const STAGING_IDLE_NS: u64 = 60_000_000_000;
 /// up must not deny the other.
 pub const MAX_PENDING_EDITS: usize = MAX_SETTINGS;
 
+/// One node's metadata, as the store needs it.
+///
+/// Two questions of one `stat`: who owns a directory the store is about to be
+/// served out of, and how long a blob is. Asking them separately would be two
+/// syscalls for one answer on the quota path, which walks every blob an
+/// application holds.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct NodeInfo {
+    /// The uid owning the node.
+    pub uid: u32,
+    /// Its length in bytes; meaningless for a directory.
+    pub len: u64,
+}
+
+/// One entry of a directory listing.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DirEntry {
+    /// The entry's name, with no path component before it.
+    pub name: String,
+    /// Whether it is itself a directory.
+    pub dir: bool,
+}
+
 /// The filesystem the store lives on, as the dispatcher needs it.
 ///
-/// Deliberately narrow: whole-file reads and writes, a rename, a directory
-/// create, an owner query, and a directory listing. There is no partial write
-/// and no seek, because a configuration document is only ever replaced whole —
-/// which is what makes the publish atomic. Every method reports
-/// [`Errno::NotFound`] for an absent path so the engine can tell "not there"
-/// from "cannot be reached" and fail closed on the second.
+/// Deliberately narrow: whole-file reads and writes, a rename, an unlink, a
+/// directory create, a stat, a directory listing, and the descriptor
+/// delegation the blob scope hands out. Configuration documents have no
+/// partial write and no seek, because such a document is only ever replaced
+/// whole — which is what makes the publish atomic; a blob is the opposite
+/// shape, which is exactly why it is reached as a descriptor rather than
+/// through this trait. Every method reports [`Errno::NotFound`] for an absent
+/// path so the engine can tell "not there" from "cannot be reached" and fail
+/// closed on the second.
 pub trait Storage {
     /// Read the whole file at `path`.
     ///
@@ -176,21 +200,48 @@ pub trait Storage {
     /// for a failed create.
     fn mkdir(&mut self, path: &str, mode: u32) -> Result<(), Errno>;
 
-    /// The uid owning the node at `path`.
+    /// Remove the file at `path`.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::NotFound`] when the path does not exist; any other [`Errno`]
+    /// for a failed unlink.
+    fn unlink(&mut self, path: &str) -> Result<(), Errno>;
+
+    /// The metadata of the node at `path`.
     ///
     /// # Errors
     ///
     /// [`Errno::NotFound`] when the path does not exist; any other [`Errno`]
     /// for a failed stat.
-    fn owner_of(&mut self, path: &str) -> Result<u32, Errno>;
+    fn stat(&mut self, path: &str) -> Result<NodeInfo, Errno>;
 
-    /// The entry names of the directory `path`, excluding `.` and `..`.
+    /// The entries of the directory `path`, excluding `.` and `..`.
     ///
     /// # Errors
     ///
     /// [`Errno::NotFound`] when the path does not exist; any other [`Errno`]
     /// for a failed listing.
-    fn list_dir(&mut self, path: &str) -> Result<Vec<String>, Errno>;
+    fn list_dir(&mut self, path: &str) -> Result<Vec<DirEntry>, Errno>;
+
+    /// Open the file at `path` and delegate it to the live task `task` as a
+    /// one-shot grant, returning the handle the task redeems.
+    ///
+    /// `write` decides both what the delegation conveys and whether an absent
+    /// file is created; `ceiling` is the highest length the holder may write
+    /// or truncate it to, and is meaningful only for a writable delegation.
+    ///
+    /// The service's own descriptor does not outlive the call: a delegation
+    /// record is self-contained, and there is no primitive by which a server
+    /// learns that a peer closed a descriptor, so one kept open per
+    /// outstanding grant could never be reclaimed.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::NotFound`] when a read-only open names a file that does not
+    /// exist, or when `task` is not live; any other [`Errno`] the open or the
+    /// delegation reports.
+    fn grant(&mut self, path: &str, write: bool, ceiling: u64, task: u64) -> Result<u64, Errno>;
 }
 
 /// One staged, uncommitted change to a document.
@@ -422,6 +473,17 @@ impl<S: Sink, R: Entropy> AppData<S, R> {
                 self.vault_write(fs, origin, &identity, key, None)?;
                 Ok(ok(out))
             }
+            AppDataRequest::BlobOpen { name, mode } => {
+                self.blob_open(fs, origin, &identity, name, mode, out)
+            }
+            AppDataRequest::BlobDelete { name } => {
+                self.blob_delete(fs, origin, &identity, name)?;
+                Ok(ok(out))
+            }
+            AppDataRequest::BlobList { capacity } => {
+                self.blob_list(fs, origin, &identity, capacity, out)
+            }
+            AppDataRequest::QuotaGet {} => self.blob_quota(fs, origin, &identity, out),
         }
     }
 
@@ -546,6 +608,109 @@ impl<S: Sink, R: Entropy> AppData<S, R> {
         let store = self.open(fs, origin, identity, value.is_some())?;
         let outcome = store.seal_change(fs, &mut self.entropy, key, value);
         self.resolve(origin, outcome)
+    }
+
+    /// Answer a blob open with a one-shot descriptor grant for it.
+    ///
+    /// The grant is minted to the caller's **attested** task id, so it can be
+    /// redeemed by nothing else — the handle in the reply is useless to a
+    /// bystander that intercepted it. The service never touches a byte of the
+    /// blob: it decides here, once, and the application then reads and writes
+    /// directly against the kernel VFS, bounded by the extent the delegation
+    /// carries.
+    ///
+    /// A write creates the blob and so may create the store; a read passes
+    /// `create = false` throughout, so a caller cannot bring a store into
+    /// existence by asking to read from one.
+    fn blob_open<F: Storage + ?Sized>(
+        &mut self,
+        fs: &mut F,
+        origin: &Origin,
+        identity: &AppIdentity,
+        name: &str,
+        mode: BlobMode,
+        out: &mut [u8],
+    ) -> Result<usize, Errno> {
+        let create = mode.is_write();
+        let blobs = self.blobs(fs, origin, identity, create)?;
+        let outcome = blobs.grant(fs, name, mode, origin.pid());
+        let handle = self.resolve(origin, outcome)?;
+        encode_grant_reply(handle, out)
+    }
+
+    /// Delete one of the caller's own blobs.
+    ///
+    /// Nothing is created on this path: a delete of a blob — or of a store —
+    /// that does not exist removes nothing and succeeds, so it is neither an
+    /// oracle for what exists nor a way to provision a store.
+    fn blob_delete<F: Storage + ?Sized>(
+        &mut self,
+        fs: &mut F,
+        origin: &Origin,
+        identity: &AppIdentity,
+        name: &str,
+    ) -> Result<(), Errno> {
+        let blobs = self.blobs(fs, origin, identity, false)?;
+        let outcome = blobs.delete(fs, name);
+        self.resolve(origin, outcome)
+    }
+
+    /// Answer a listing with every blob the caller holds and its length.
+    ///
+    /// Whole or nothing, under the same capacity negotiation a document read
+    /// uses: the blob count is bounded, so a whole listing fits one reply and
+    /// no caller acts on one spliced out of two snapshots.
+    fn blob_list<F: Storage + ?Sized>(
+        &mut self,
+        fs: &mut F,
+        origin: &Origin,
+        identity: &AppIdentity,
+        capacity: u32,
+        out: &mut [u8],
+    ) -> Result<usize, Errno> {
+        let blobs = self.blobs(fs, origin, identity, false)?;
+        let outcome = blobs.listing(fs).and_then(|listing| {
+            let rendered = blob::render_listing(&listing)?;
+            Ok(rendered)
+        });
+        let rendered = self.resolve(origin, outcome)?;
+        encode_blob_list_reply(&rendered, capacity, out)
+    }
+
+    /// Answer a quota read with the caller's blob usage and its ceilings.
+    fn blob_quota<F: Storage + ?Sized>(
+        &mut self,
+        fs: &mut F,
+        origin: &Origin,
+        identity: &AppIdentity,
+        out: &mut [u8],
+    ) -> Result<usize, Errno> {
+        let blobs = self.blobs(fs, origin, identity, false)?;
+        let outcome = blobs.quota(fs);
+        let quota = self.resolve(origin, outcome)?;
+        encode_quota_reply(&quota, out)
+    }
+
+    /// Open the caller's blob store, auditing and translating any refusal.
+    ///
+    /// The configuration store is opened first, because the ownership pin lives
+    /// there and governs both trees: a squatting publisher is refused before a
+    /// byte of another developer's blobs is reachable. `create` is threaded
+    /// into *both* opens, which is what makes that guarantee hold rather than
+    /// merely apply to applications that also wrote a setting — creating a
+    /// blob creates the pin first, so a store can never hold data whose owner
+    /// was never recorded, and a later publisher claiming the identifier
+    /// cannot inherit an unattested one. A read creates neither.
+    fn blobs<F: Storage + ?Sized>(
+        &mut self,
+        fs: &mut F,
+        origin: &Origin,
+        identity: &AppIdentity,
+        create: bool,
+    ) -> Result<BlobStore, Errno> {
+        let store = self.open(fs, origin, identity, create)?;
+        let outcome = BlobStore::open(fs, &store, create);
+        Self::judge(&self.sink, origin, outcome)
     }
 
     /// Publish the caller's staged edits as one atomic document replacement.
@@ -776,8 +941,18 @@ fn level_of(err: StoreError) -> Level {
         // Every sealed-scope refusal is either an attack indication or the loss
         // of an account's key material, and none of them is a state the store
         // reaches in normal operation.
-        | StoreError::Vault(_) => Level::Warn,
-        StoreError::NoHome | StoreError::DocumentRefused | StoreError::Unavailable => Level::Info,
+        | StoreError::Vault(_)
+        // A blob name the wire decoder already refuses can only reach the
+        // store if a check was bypassed, so it is an attack indication.
+        | StoreError::BlobNameRefused => Level::Warn,
+        StoreError::NoHome
+        | StoreError::DocumentRefused
+        | StoreError::Unavailable
+        // An application reading a blob it has not created yet is its first
+        // launch, and one that has filled its store has outgrown the working
+        // set the scope is for. Neither is an attack indication.
+        | StoreError::BlobNotFound
+        | StoreError::BlobLimit => Level::Info,
     }
 }
 

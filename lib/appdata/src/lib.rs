@@ -18,6 +18,11 @@
 //! let mut vault = Vault::open(&mut host)?;      // the sealed scope
 //! vault.set("imap.password", secret)?;          // sealed before it returns
 //! let saved = vault.get("imap.password");
+//!
+//! // The bulk scope: a grant handle, redeemed into an owned descriptor.
+//! let handle = blobs::open(&mut host, "mail.index", BlobMode::ReadWrite)?;
+//! let index = tairix_rt::File::from_delegation(handle)?;
+//! index.write_at(0, b"...")?;                   // straight to the VFS
 //! ```
 //!
 //! # No app spells a path, and none names itself
@@ -31,7 +36,7 @@
 //! a *published* document and nothing else — there is no request shape that
 //! reaches another application's private settings.
 //!
-//! # Three scopes
+//! # Four scopes
 //!
 //! [`Settings::open`] is the application's **private** scope: the user's
 //! settings for it, which nothing else can read. [`Settings::open_published`]
@@ -47,6 +52,11 @@
 //! it may be made to believe; it has no staging and no commit, because the
 //! service seals each write before it replies; and opening it can *fail*,
 //! because "I could not read your secrets" is not "you have none".
+//!
+//! [`blobs`] is the **bulk** scope, and it is not a document at all: an
+//! application's index, cache, or queue is reached as a *descriptor*, so the
+//! bytes never cross this channel and the application reads, writes,
+//! truncates, and memory-maps directly against the kernel VFS at full speed.
 //!
 //! # Three layers, and which of them this library owns
 //!
@@ -777,6 +787,160 @@ fn negotiate<'a>(
     // A writer that grew the document under every attempt: say so rather than
     // chase it, and never answer with a document that is not whole.
     Err(Errno::Busy)
+}
+
+/// The **bulk** scope: an application's blobs, reached as descriptors rather
+/// than as bytes on the app-data channel.
+///
+/// # Why a descriptor
+///
+/// A mail index, a search index, or a thumbnail cache is the wrong shape for a
+/// message, and the IPC payload ceiling is far below what one holds — so the
+/// service makes the policy decision once at open and hands back a one-shot
+/// `fd_grant` handle. Redeeming it (`File::from_delegation`) installs a real
+/// descriptor whose reads, writes, truncations, and mappings go straight to
+/// the kernel VFS under the service's captured authority, so the application
+/// needs no filesystem capability of its own and the service never touches a
+/// byte of payload.
+///
+/// # What bounds it
+///
+/// The delegation is the bound: it conveys only the access the mode asked for,
+/// and a writable one carries an extent ceiling the kernel enforces on every
+/// write and truncate through the descriptor. So an application cannot grow a
+/// blob past
+/// [`APPDATA_BLOB_MAX_BYTES`](tairix_abi::appdata_ipc::APPDATA_BLOB_MAX_BYTES)
+/// however it uses what it was given, and
+/// [`APPDATA_BLOB_MAX_COUNT`](tairix_abi::appdata_ipc::APPDATA_BLOB_MAX_COUNT)
+/// bounds how many blobs it may hold at all. [`blobs::quota`] reports usage
+/// against both, so an application that reaches one says which rather than
+/// surfacing an errno.
+///
+/// # No application names another
+///
+/// As with every other scope, nothing here takes a bundle identifier: the
+/// service derives whose blobs these are from the identity the kernel attests
+/// for the calling task. There is no foreign counterpart at all — no request
+/// shape reaches another application's blobs.
+pub mod blobs {
+    use super::{AppDataHost, APPDATA_MAX_REQUEST};
+    use alloc::string::String;
+    use alloc::vec::Vec;
+    use tairix_abi::appdata_ipc::{
+        decode_blob_list_reply, decode_grant_reply, decode_quota_reply, AppDataRequest,
+        BlobListing, BlobMode, BlobQuota, APPDATA_BLOB_LIST_HEADER_LEN, APPDATA_BLOB_LIST_MAX,
+        APPDATA_GRANT_REPLY_LEN, APPDATA_HEADER_LEN, APPDATA_NAME_MAX, APPDATA_QUOTA_REPLY_LEN,
+    };
+    use tairix_abi::reply::STATUS_REPLY_LEN;
+    use tairix_abi::Errno;
+
+    /// Open the calling application's blob `name`, returning the one-shot
+    /// grant handle to redeem it with.
+    ///
+    /// A handle rather than an owned descriptor, because installing one is a
+    /// syscall and this crate is I/O-free by design so the whole client stays
+    /// host-testable. `tairix_rt::File::from_delegation` is the owned
+    /// redemption, and it closes the descriptor on every path out.
+    ///
+    /// [`BlobMode::Read`] refuses a blob the application does not hold;
+    /// [`BlobMode::ReadWrite`] creates it. Creation is the mode's business
+    /// rather than a separate flag, so "create but do not write" is not a
+    /// request that exists.
+    ///
+    /// # Errors
+    ///
+    /// The service's own typed refusal, or the transport's:
+    /// [`Errno::NotFound`] when nothing has bound the endpoint or the blob
+    /// does not exist, [`Errno::PermissionDenied`] for a caller running no
+    /// signed bundle or a store another publisher owns,
+    /// [`Errno::LimitExceeded`] when the application already holds as many
+    /// blobs as it may, [`Errno::OutOfRange`] for a name outside the
+    /// store-name grammar, [`Errno::DeviceOffline`] for a volume that cannot
+    /// be reached.
+    pub fn open(host: &mut dyn AppDataHost, name: &str, mode: BlobMode) -> Result<u64, Errno> {
+        let mut frame = [0u8; APPDATA_HEADER_LEN + APPDATA_NAME_MAX];
+        let len = AppDataRequest::BlobOpen { name, mode }.encode(&mut frame)?;
+        let mut reply = [0u8; APPDATA_GRANT_REPLY_LEN];
+        let got = host.call(&frame[..len], &mut reply)?;
+        decode_grant_reply(&reply[..got])
+    }
+
+    /// Delete the calling application's blob `name`.
+    ///
+    /// Deleting one it does not hold changes nothing and is not an error, so
+    /// this is never an oracle for what the store holds.
+    ///
+    /// # Errors
+    ///
+    /// As [`open`], without [`Errno::NotFound`] for an absent blob.
+    pub fn remove(host: &mut dyn AppDataHost, name: &str) -> Result<(), Errno> {
+        let mut frame = [0u8; APPDATA_HEADER_LEN + APPDATA_NAME_MAX];
+        let len = AppDataRequest::BlobDelete { name }.encode(&mut frame)?;
+        let mut reply = [0u8; STATUS_REPLY_LEN];
+        let got = host.call(&frame[..len], &mut reply)?;
+        tairix_abi::reply::decode_status_reply(&reply[..got])
+    }
+
+    /// Every blob the calling application holds, with its length in bytes.
+    ///
+    /// **One call, always.** The widest listing that can exist is bounded by
+    /// the blob count and the fixed entry width, and that bound is a few
+    /// kilobytes — so this asks for it outright rather than negotiating a
+    /// capacity. A document read has to negotiate because a document's ceiling
+    /// is 64 KiB and sizing every start-up buffer to it would cost every
+    /// application the allocation; a listing has no such spread. The wire
+    /// still answers a capacity refusal honestly, for a caller with a tighter
+    /// buffer than this one.
+    ///
+    /// The answer is whole or nothing, so no caller acts on a listing spliced
+    /// out of two snapshots of a changing store.
+    ///
+    /// # Errors
+    ///
+    /// As [`open`], without [`Errno::NotFound`] for an absent blob.
+    pub fn list(host: &mut dyn AppDataHost) -> Result<Vec<(String, u64)>, Errno> {
+        let mut frame = [0u8; APPDATA_HEADER_LEN];
+        let len = AppDataRequest::BlobList {
+            capacity: u32::try_from(APPDATA_BLOB_LIST_MAX).map_err(|_| Errno::LengthOutOfRange)?,
+        }
+        .encode(&mut frame)?;
+        let mut reply = Vec::new();
+        let frame_len = STATUS_REPLY_LEN + APPDATA_BLOB_LIST_HEADER_LEN + APPDATA_BLOB_LIST_MAX;
+        reply
+            .try_reserve_exact(frame_len)
+            .map_err(|_| Errno::OutOfMemory)?;
+        reply.resize(frame_len, 0);
+        let got = host.call(&frame[..len], &mut reply)?;
+        match decode_blob_list_reply(&reply[..got])? {
+            BlobListing::Whole(listing) => Ok(BlobListing::Whole(listing)
+                .entries()
+                .map(|entry| (String::from(entry.name), entry.len))
+                .collect()),
+            // Unreachable: the capacity asked for is the widest listing the
+            // contract allows. Fail closed rather than trust the arithmetic.
+            BlobListing::NeedsCapacity(_) => Err(Errno::OutOfRange),
+        }
+    }
+
+    /// The calling application's blob usage, and the ceilings it is bounded
+    /// by.
+    ///
+    /// # Errors
+    ///
+    /// As [`list`].
+    pub fn quota(host: &mut dyn AppDataHost) -> Result<BlobQuota, Errno> {
+        let mut frame = [0u8; APPDATA_HEADER_LEN];
+        let len = AppDataRequest::QuotaGet {}.encode(&mut frame)?;
+        let mut reply = [0u8; APPDATA_QUOTA_REPLY_LEN];
+        let got = host.call(&frame[..len], &mut reply)?;
+        decode_quota_reply(&reply[..got])
+    }
+
+    // The request buffers above are sized to the widest frame each operation
+    // can produce, not to the widest in the protocol: a blob call carries a
+    // name at most, so a `ConfigSet`'s kilobyte of value has no business on
+    // its stack.
+    const _: () = assert!(APPDATA_HEADER_LEN + APPDATA_NAME_MAX <= APPDATA_MAX_REQUEST);
 }
 
 #[cfg(test)]

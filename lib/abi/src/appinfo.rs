@@ -98,28 +98,35 @@ pub const LIBRARY_ICON_MAX: usize = 64;
 /// boundary.
 pub type BundleId = crate::bounded_text::BoundedText<1, BUNDLE_ID_MAX>;
 
-/// Validate a bundle identifier against the one grammar every consumer
-/// applies.
+/// Validate a name that becomes **one path component** in a store the system
+/// owns, against the one grammar every such name shares.
 ///
-/// The grammar is reverse-DNS: dot-separated segments of ASCII lowercase
-/// letters, digits, `-` and `_`, each segment non-empty. It is deliberately
-/// narrow, because an identifier names a directory in each user's per-app
-/// store: nothing that could be a path traversal (`.`, `..`, `/`), a hidden
-/// entry, a case-folding collision on a case-insensitive volume, or a
-/// control character can be spelled at all. An app therefore cannot reach
+/// The grammar is dot-separated segments of ASCII lowercase letters, digits,
+/// `-` and `_`, each segment non-empty, bounded by `max_len` bytes. It is
+/// deliberately narrow, because the name is composed into a path a service
+/// then opens: nothing that could be a path traversal (`.`, `..`, `/`), a
+/// hidden entry, a case-folding collision on a case-insensitive volume, or a
+/// control character can be spelled at all. The name therefore cannot reach
 /// outside its own scope by construction, rather than by a check some caller
 /// might forget.
 ///
+/// Two kinds of name share it — a bundle identifier
+/// ([`validate_bundle_id`]) and an application's blob name
+/// ([`crate::appdata_ipc::validate_blob_name`]) — because they pose the same
+/// question and only their widths differ. A second character-class loop for
+/// the second kind would be one more chance to disagree about whether `..`
+/// is a name.
+///
 /// # Errors
 ///
-/// [`Errno::LengthOutOfRange`] if `id` is empty or longer than
-/// [`BUNDLE_ID_MAX`]; [`Errno::OutOfRange`] if any character is outside the
-/// grammar or a segment is empty.
-pub fn validate_bundle_id(id: &str) -> Result<(), Errno> {
-    if id.is_empty() || id.len() > BUNDLE_ID_MAX {
+/// [`Errno::LengthOutOfRange`] if `name` is empty or longer than `max_len`;
+/// [`Errno::OutOfRange`] if any character is outside the grammar or a segment
+/// is empty.
+pub fn validate_store_name(name: &str, max_len: usize) -> Result<(), Errno> {
+    if name.is_empty() || name.len() > max_len {
         return Err(Errno::LengthOutOfRange);
     }
-    for segment in id.split('.') {
+    for segment in name.split('.') {
         if segment.is_empty() {
             return Err(Errno::OutOfRange);
         }
@@ -131,6 +138,20 @@ pub fn validate_bundle_id(id: &str) -> Result<(), Errno> {
         }
     }
     Ok(())
+}
+
+/// Validate a bundle identifier against the one grammar every consumer
+/// applies: [`validate_store_name`] bounded by [`BUNDLE_ID_MAX`].
+///
+/// The identifier is reverse-DNS by convention (`os.tairix.terminal`) and is
+/// the *name of a directory* in every user's per-app store, which is why the
+/// grammar is a security rule rather than a formatting preference.
+///
+/// # Errors
+///
+/// As [`validate_store_name`].
+pub fn validate_bundle_id(id: &str) -> Result<(), Errno> {
+    validate_store_name(id, BUNDLE_ID_MAX)
 }
 
 /// Length, in bytes, of a [`PublisherId`].

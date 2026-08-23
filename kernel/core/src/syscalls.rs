@@ -561,6 +561,109 @@ impl StreamPos {
     }
 }
 
+/// The path a filesystem-backed descriptor names and the authority every
+/// operation on it runs under.
+///
+/// A descriptor is either one the caller opened itself — exercised under the
+/// caller's own attested identity — or a one-shot delegation exercised under
+/// the identity `fd_grant` captured from the grantor. Both are filesystem
+/// paths re-resolved and re-authorised through the secured VFS on every
+/// operation; they differ only in the credential, and in the extent ceiling a
+/// writable delegation carries.
+struct PathAuthority<'a> {
+    /// The absolute path the descriptor resolves to.
+    path: &'a str,
+    /// The uid every VFS re-check runs under.
+    uid: u32,
+    /// The capability set every VFS re-check runs under.
+    caps: &'a CapabilitySet,
+    /// The highest file length a write or truncate may produce, or [`None`]
+    /// for a descriptor the caller opened itself.
+    write_ceiling: Option<u64>,
+}
+
+impl<'a> PathAuthority<'a> {
+    /// Resolve the path a filesystem-backed descriptor names together with
+    /// the authority every operation on it runs under, or [`None`] for a
+    /// backing that is not a filesystem object.
+    ///
+    /// This is the **one** place that decision is made. A descriptor the
+    /// caller opened runs under the caller's own attested identity; a
+    /// delegation runs under the identity captured from the grantor at
+    /// `fd_grant` time, because the delegation *is* the authority and the
+    /// holder may legitimately hold no filesystem capability at all.
+    /// Resolving that per operation would be one chance per operation to
+    /// read the wrong one.
+    fn of(entry: &'a crate::aspace::OpenFile, caller: &'a CallerContext<'_>) -> Option<Self> {
+        match &entry.backing {
+            OpenBacking::Path(path) => Some(Self {
+                path,
+                uid: caller.caps.owner().0,
+                caps: caller.caps.effective(),
+                // A descriptor the caller opened is bounded by the volume and
+                // by the caller's own limits, not by a delegated extent.
+                write_ceiling: None,
+            }),
+            OpenBacking::Delegated(file) => Some(Self {
+                path: &file.path,
+                uid: file.uid,
+                caps: &file.caps,
+                write_ceiling: Some(file.write_ceiling),
+            }),
+            OpenBacking::Resource(_)
+            | OpenBacking::Pipe(_)
+            | OpenBacking::PtyMaster(_)
+            | OpenBacking::PtySlave(_) => None,
+        }
+    }
+
+    /// Refuse a principal whose resolved authority carries no filesystem
+    /// capability.
+    ///
+    /// The same coarse gate a caller's own `fs_open` faced, applied against
+    /// whichever set the backing resolved to — so a delegation whose grantor
+    /// has since been refused the capability loses its reach too.
+    fn admit(&self) -> Result<(), Errno> {
+        if self.caps.holds(CapabilityId::FS_ACCESS) {
+            Ok(())
+        } else {
+            Err(Errno::PermissionDenied)
+        }
+    }
+
+    /// Refuse a write of `len` bytes at `offset` that would leave the file
+    /// longer than a delegation's extent ceiling allows.
+    ///
+    /// The bound is on the extent the write *produces*, not on the bytes it
+    /// moves, so a sparse write far past the ceiling is refused rather than
+    /// accepted for its small length.
+    fn admit_extent(
+        &self,
+        entry: &crate::aspace::OpenFile,
+        offset: u64,
+        len: usize,
+    ) -> Result<(), Errno> {
+        if self.write_ceiling.is_none() {
+            return Ok(());
+        }
+        // An append handle writes at the end of file, so `offset` would not
+        // bound the extent at all. `fd_grant` never mints one, so this fails
+        // closed rather than trusting that construction.
+        if entry.flags.contains(OpenFlags::APPEND) {
+            return Err(Errno::PermissionDenied);
+        }
+        self.admit_length(offset.checked_add(len as u64).ok_or(Errno::OutOfRange)?)
+    }
+
+    /// Refuse a new file length beyond a delegation's extent ceiling.
+    fn admit_length(&self, length: u64) -> Result<(), Errno> {
+        match self.write_ceiling {
+            Some(ceiling) if length > ceiling => Err(Errno::LimitExceeded),
+            _ => Ok(()),
+        }
+    }
+}
+
 impl<'a, A> KernelSyscallHandlers<'a, A>
 where
     A: KernelArch + 'static,
@@ -3221,28 +3324,15 @@ where
         if len == 0 {
             return Ok(0);
         }
+        // A filesystem-backed descriptor — the caller's own or a delegation —
+        // reads through the secured VFS under the authority the backing
+        // decides. The coarse `CAP_FS_ACCESS` gate is applied there rather
+        // than at dispatch, so a resource or pipe read is not forced to hold
+        // it and a delegation's holder is not forced to hold it either.
+        if let Some(authority) = PathAuthority::of(entry, caller) {
+            return self.read_path_backing(caller, entry, pos, &authority, buf, len);
+        }
         match &entry.backing {
-            // A filesystem-backed descriptor: the coarse `CAP_FS_ACCESS`
-            // gate is applied here (it is not a blanket dispatcher check, so
-            // a resource or pipe read is not forced to hold it), then the
-            // read routes through the secured VFS under the caller's own
-            // real credentials.
-            OpenBacking::Path(path) => {
-                if !caller.caps.has(CapabilityId::FS_ACCESS) {
-                    return Err(Errno::PermissionDenied);
-                }
-                let uid = caller.caps.owner().0;
-                self.read_path_backing(
-                    caller,
-                    entry,
-                    pos,
-                    uid,
-                    caller.caps.effective(),
-                    path,
-                    buf,
-                    len,
-                )
-            }
             // A resource-backed descriptor was authorised at open; its read
             // routes to the named subsystem. A resource is a sequential byte
             // source with no position, so it ignores `pos` entirely.
@@ -3252,52 +3342,37 @@ where
             OpenBacking::Pipe(end) => self.pipe_read(caller, end, buf, len, timeout_ns),
             OpenBacking::PtyMaster(end) => self.pty_master_read(caller, end, buf, len, timeout_ns),
             OpenBacking::PtySlave(end) => self.pty_slave_read(caller, end, buf, len, timeout_ns),
-            // A delegated descriptor reads under the *grantor's* captured
-            // identity — the delegation is the authority, established by the
-            // grantor's user-mediated choice — so the holder needs no
-            // filesystem capability of its own. The same coarse gate the
-            // grantor's own read would face is applied against the captured
-            // set, and the secured VFS re-authorises the path under the
-            // captured uid on every read, so a permission change for the
-            // grantor revokes the delegation's reach too.
-            OpenBacking::Delegated(file) => {
-                if !file.caps.contains(CapabilityId::FS_ACCESS) {
-                    return Err(Errno::PermissionDenied);
-                }
-                self.read_path_backing(
-                    caller, entry, pos, file.uid, &file.caps, &file.path, buf, len,
-                )
-            }
+            // Served above; fail closed rather than trust the construction.
+            OpenBacking::Path(_) | OpenBacking::Delegated(_) => Err(Errno::OutOfRange),
         }
     }
 
-    /// Read a path-backed descriptor under the supplied identity and copy
-    /// the bytes out — the arm the caller-owned and delegated backings
-    /// share, so their authority differs in the credential passed in and in
+    /// Read a path-backed descriptor under the authority its backing decides
+    /// and copy the bytes out — the arm the caller-owned and delegated
+    /// backings share, so they differ in the resolved credential and in
     /// nothing else.
     ///
     /// The description cursor advances only once the bytes have reached the
     /// caller, so a faulting destination buffer re-reads rather than
     /// silently skipping the data it never received.
-    // Mirrors the descriptor read path's own shape: the credential is two
-    // values (uid + capability set) precisely because the delegated arm
-    // supplies the grantor's, not the caller's.
-    #[allow(clippy::too_many_arguments)]
     fn read_path_backing(
         &self,
         caller: &CallerContext<'_>,
         entry: &crate::aspace::OpenFile,
         pos: StreamPos,
-        uid: u32,
-        caps: &dyn CapabilityQuery,
-        path: &str,
+        authority: &PathAuthority<'_>,
         buf: u64,
         len: usize,
     ) -> SyscallResult {
+        authority.admit()?;
         let mut data = vec![0u8; len];
-        let n = self
-            .filesystem
-            .read(uid, caps, path, pos.offset(entry), &mut data)?;
+        let n = self.filesystem.read(
+            authority.uid,
+            authority.caps,
+            authority.path,
+            pos.offset(entry),
+            &mut data,
+        )?;
         // `n <= len` by the service contract; copy exactly what was read out
         // through the validated boundary.
         match self.with_caller_aspace(caller, |space, physmap| {
@@ -3346,46 +3421,49 @@ where
         if len == 0 {
             return Ok(0);
         }
+        // As on the read path, a filesystem-backed descriptor — the caller's
+        // own or a delegation — writes under the authority the backing
+        // decides, and a delegation is additionally bounded by the extent its
+        // grant fixed.
+        if let Some(authority) = PathAuthority::of(entry, caller) {
+            authority.admit()?;
+            let offset = pos.offset(entry);
+            authority.admit_extent(entry, offset, len)?;
+            // Stage the caller's bytes in through the validated boundary
+            // *before* touching the filesystem (a faulting buffer writes
+            // nothing).
+            let mut data = vec![0u8; len];
+            self.copy_in_user(caller, buf, &mut data)?;
+            // An append handle writes at the current end of file, ignoring
+            // the position entirely (the journal-append posture). A
+            // delegation never carries the flag, which is what makes the
+            // extent check above exact.
+            let append = entry.flags.contains(OpenFlags::APPEND);
+            let n = self.filesystem.write(
+                authority.uid,
+                authority.caps,
+                authority.path,
+                offset,
+                append,
+                &data,
+            )?;
+            pos.advance(entry, n as u64);
+            // Credit the calling task with the bytes the VFS actually
+            // accepted, never the length it staged in — a short write must
+            // not overstate this process's disk activity, and a delegation
+            // never attributes its bytes to the grantor.
+            caller.caps.record_bytes_written(n as u64);
+            return Ok(n as u64);
+        }
         match &entry.backing {
-            OpenBacking::Path(path) => {
-                if !caller.caps.has(CapabilityId::FS_ACCESS) {
-                    return Err(Errno::PermissionDenied);
-                }
-                // Stage the caller's bytes in through the validated boundary
-                // *before* touching the filesystem (a faulting buffer writes
-                // nothing).
-                let mut data = vec![0u8; len];
-                self.copy_in_user(caller, buf, &mut data)?;
-                let uid = caller.caps.owner().0;
-                // An append handle writes at the current end of file,
-                // ignoring the position entirely (the journal-append
-                // posture).
-                let append = entry.flags.contains(OpenFlags::APPEND);
-                let n = self.filesystem.write(
-                    uid,
-                    caller.caps.effective(),
-                    path,
-                    pos.offset(entry),
-                    append,
-                    &data,
-                )?;
-                pos.advance(entry, n as u64);
-                // Credit the calling task with the bytes the VFS actually
-                // accepted, never the length it staged in — a short write
-                // must not overstate this process's disk activity.
-                caller.caps.record_bytes_written(n as u64);
-                Ok(n as u64)
-            }
             // A resource-, pipe-, or pty-backed descriptor has no position;
             // the write routes to its backing and ignores `pos`.
             OpenBacking::Resource(backing) => Self::resource_write(*backing, len),
             OpenBacking::Pipe(end) => self.pipe_write(caller, end, buf, len),
             OpenBacking::PtyMaster(end) => self.pty_master_write(caller, end, buf, len),
             OpenBacking::PtySlave(end) => self.pty_slave_write(caller, end, buf, len),
-            // Unreachable by construction — a delegation is minted
-            // read-only, so the `is_write` gate above already refused —
-            // but fail closed rather than trust the construction.
-            OpenBacking::Delegated(_) => Err(Errno::PermissionDenied),
+            // Served above; fail closed rather than trust the construction.
+            OpenBacking::Path(_) | OpenBacking::Delegated(_) => Err(Errno::OutOfRange),
         }
     }
 
@@ -6367,7 +6445,9 @@ where
         // Resolve the caller's own descriptor (owner-checked against the
         // kernel-trusted caller id). It must be open for reading, and only a
         // filesystem-backed descriptor can page: a resource or pipe is a
-        // sequential stream with no positional bytes to map.
+        // sequential stream with no positional bytes to map. A delegation
+        // maps under the grantor's captured identity, so the holder maps the
+        // file it was handed without holding a filesystem capability itself.
         let handle = self
             .aspaces
             .read()
@@ -6376,9 +6456,8 @@ where
         if !handle.flags.is_read() {
             return Err(Errno::PermissionDenied);
         }
-        let OpenBacking::Path(path) = &handle.backing else {
-            return Err(Errno::PermissionDenied);
-        };
+        let authority = PathAuthority::of(&handle, caller).ok_or(Errno::PermissionDenied)?;
+        authority.admit()?;
         // Enforce the caller's growth bounds *before* reserving — the same
         // projection `mem_map` applies, over the same shared accounting, so
         // the `ulimit -v`-style ceiling and the pinned-memory budget cover
@@ -6398,10 +6477,10 @@ where
         let region = FileRegion {
             base,
             len: charged,
-            path: path.clone(),
+            path: String::from(authority.path),
             offset,
-            uid: caller.caps.owner().0,
-            caps: *caller.caps.effective(),
+            uid: authority.uid,
+            caps: *authority.caps,
         };
         {
             let mut aspaces = self.aspaces.write();
@@ -8680,7 +8759,7 @@ where
                                 return Err(Errno::NotFound);
                             };
                             let link = crate::fs::FinalLink::for_open(handle.flags);
-                            match handle.path() {
+                            match handle.own_path() {
                                 Some(path) => (String::from(path), link),
                                 None => return Err(Errno::NotFound),
                             }
@@ -9145,7 +9224,13 @@ where
         }
     }
 
-    fn fd_grant(&self, caller: &CallerContext<'_>, fd: u32, pid: u64) -> SyscallResult {
+    fn fd_grant(
+        &self,
+        caller: &CallerContext<'_>,
+        fd: u32,
+        pid: u64,
+        write_ceiling: u64,
+    ) -> SyscallResult {
         // Step 2 (capability) was enforced by the dispatcher: the
         // `fd_grant` spec carries `CAP_FS_ACCESS`, and the mint is
         // dispatcher-audited. Step 3 (validate every input): resolve `fd`
@@ -9157,22 +9242,32 @@ where
             .read()
             .open_file_entry(caller.process(), fd)
             .ok_or(Errno::NotFound)?;
-        // Only a plain filesystem descriptor is delegatable: a pipe or
+        // Only a plain filesystem descriptor is delegatable: a pipe, pty, or
         // resource has its own authority model, and a delegated backing
         // never re-delegates (a chain would obscure whose captured
         // authority is exercised — delegation must never widen).
         let OpenBacking::Path(path) = &handle.backing else {
             return Err(Errno::OutOfRange);
         };
-        // The delegation conveys exactly "read this file's content": a
-        // descriptor that is not read-only, or that names a directory, is
-        // outside the designed delegation surface and is refused — the
-        // minted capability can never carry more than the picker's
-        // user-mediated choice meant to hand over.
-        if !handle.flags.is_read()
-            || handle.flags.is_write()
-            || handle.flags.contains(OpenFlags::DIRECTORY)
-        {
+        // A directory's authority is a listing and a namespace to open
+        // through, neither of which a delegated byte descriptor expresses.
+        if handle.flags.contains(OpenFlags::DIRECTORY) {
+            return Err(Errno::OutOfRange);
+        }
+        // The delegation carries the descriptor's *own* read/write access and
+        // nothing more, so it can never widen what the grantor opened. The
+        // open-time flags are dropped because the file is already open, and
+        // an `APPEND` delegation would silently move every write to a
+        // position the recipient never named.
+        let access = handle.flags.access();
+        if access.is_empty() {
+            return Err(Errno::OutOfRange);
+        }
+        // A writable delegation is bounded or it is not minted, and a
+        // read-only one has no extent to bound. Both halves fail closed, so
+        // neither an unbounded writable delegation nor a ceiling that would
+        // be silently ignored is a representable request.
+        if access.is_write() != (write_ceiling > 0) {
             return Err(Errno::OutOfRange);
         }
         // Capture the *grantor's* kernel-attested identity beside the
@@ -9183,6 +9278,7 @@ where
             path: path.clone(),
             uid: caller.caps.owner().0,
             caps: *caller.caps.effective(),
+            write_ceiling,
         };
         // Confirm the recipient is a live task and mint under the same
         // write lock, so the grant cannot land on a task that exited
@@ -9197,7 +9293,7 @@ where
         if !registry.contains(recipient) {
             return Err(Errno::NotFound);
         }
-        Ok(registry.mint_fd_delegation(recipient, file, OpenFlags::READ))
+        Ok(registry.mint_fd_delegation(recipient, file, access))
     }
 
     fn fd_redeem(&self, caller: &CallerContext<'_>, handle: u64) -> SyscallResult {
@@ -9275,8 +9371,10 @@ where
             .open_file_entry(caller.process(), fd)
             .ok_or(Errno::NotFound)?;
         // A resource-backed descriptor is not a directory (it has no path to
-        // list); fail closed as an invalid operation for its kind.
-        let path = handle.path().ok_or(Errno::OutOfRange)?;
+        // list), and neither is a delegation — `fd_grant` refuses one, so no
+        // delegated listing exists to authorise. Fail closed as an invalid
+        // operation for the descriptor's kind.
+        let path = handle.own_path().ok_or(Errno::OutOfRange)?;
         let uid = caller.caps.owner().0;
         // The secured VFS enforces that the path is a directory the caller
         // may list; a non-directory fails closed there. A `NO_FOLLOW`
@@ -9335,10 +9433,13 @@ where
             .read()
             .open_file_entry(caller.process(), fd)
             .ok_or(Errno::NotFound)?;
-        // A resource-backed descriptor has no filesystem metadata to report;
-        // fail closed as an invalid operation for its kind.
-        let path = handle.path().ok_or(Errno::OutOfRange)?;
-        let uid = caller.caps.owner().0;
+        // A resource-, pipe-, or pty-backed descriptor has no filesystem
+        // metadata to report; fail closed as an invalid operation for its
+        // kind. A delegation resolves to the grantor's captured identity, so
+        // the holder describes the file it was handed without holding a
+        // filesystem capability of its own.
+        let authority = PathAuthority::of(&handle, caller).ok_or(Errno::OutOfRange)?;
+        authority.admit()?;
         // The descriptor's own follow posture decides what is described: a
         // handle opened `NO_FOLLOW` names the link, so this is `lstat` and
         // reports the link itself — including a dangling one. Re-derived from
@@ -9350,9 +9451,9 @@ where
         // name a different node. That holds for every path-backed handle and
         // is not something links introduce.
         let stat = self.filesystem.stat(
-            uid,
-            caller.caps.effective(),
-            path,
+            authority.uid,
+            authority.caps,
+            authority.path,
             crate::fs::FinalLink::for_open(handle.flags),
         )?;
         // The whole record or nothing: an undersized buffer fails closed.
@@ -9382,12 +9483,16 @@ where
         if !handle.flags.is_write() {
             return Err(Errno::PermissionDenied);
         }
-        // A resource-backed descriptor cannot be truncated; fail closed as an
-        // invalid operation for its kind.
-        let path = handle.path().ok_or(Errno::OutOfRange)?;
-        let uid = caller.caps.owner().0;
+        // A resource-, pipe-, or pty-backed descriptor cannot be truncated;
+        // fail closed as an invalid operation for its kind.
+        let authority = PathAuthority::of(&handle, caller).ok_or(Errno::OutOfRange)?;
+        authority.admit()?;
+        // Growing a file by truncation is a write of the same extent, so a
+        // delegation's ceiling bounds it exactly as it bounds `fs_write`;
+        // shrinking is always within it.
+        authority.admit_length(size)?;
         self.filesystem
-            .truncate(uid, caller.caps.effective(), path, size)?;
+            .truncate(authority.uid, authority.caps, authority.path, size)?;
         Ok(0)
     }
 
@@ -9411,14 +9516,14 @@ where
             .read()
             .open_file_entry(caller.process(), fd)
             .ok_or(Errno::NotFound)?;
-        // Syncing is a filesystem operation; a resource-backed descriptor has
-        // nothing to flush and fails closed as an invalid operation for its
-        // kind.
-        if handle.path().is_none() {
-            return Err(Errno::OutOfRange);
-        }
-        let uid = caller.caps.owner().0;
-        self.filesystem.sync(uid, caller.caps.effective())?;
+        // Syncing is a filesystem operation; a resource-, pipe-, or pty-backed
+        // descriptor has nothing to flush and fails closed as an invalid
+        // operation for its kind. The holder of a delegation must be able to
+        // force its own writes to the medium, so the flush runs under the
+        // authority the backing resolved to.
+        let authority = PathAuthority::of(&handle, caller).ok_or(Errno::OutOfRange)?;
+        authority.admit()?;
+        self.filesystem.sync(authority.uid, authority.caps)?;
         Ok(0)
     }
 
@@ -30664,10 +30769,11 @@ mod tests {
     }
 
     /// `fd_grant` delegates only a descriptor the caller itself holds, only
-    /// a plain read-only, non-directory filesystem backing, and only to a
-    /// live recipient task (`plans/CAPABILITY_USE.md` CU6).
+    /// a plain non-directory filesystem backing, only to a live recipient
+    /// task, and only with an extent ceiling that matches the descriptor's
+    /// own access (`plans/CAPABILITY_USE.md` CU6, `plans/APPDATA.md` §3.8).
     #[test]
-    fn fd_grant_delegates_only_a_held_readonly_path_descriptor() {
+    fn fd_grant_delegates_only_a_held_bounded_path_descriptor() {
         install_trace_filter();
         let sink = make_sink();
         let arch = Arc::new(TestArch::with_cpus(1));
@@ -30695,16 +30801,10 @@ mod tests {
         .with_filesystem(fs);
 
         // An unopened descriptor is refused before any state is read.
-        assert_eq!(h.fd_grant(&ctx, 99, 3), Err(Errno::NotFound));
+        assert_eq!(h.fd_grant(&ctx, 99, 3, 0), Err(Errno::NotFound));
 
-        // A writable descriptor is outside the read-only delegation
-        // surface, as is a directory handle and a pipe end.
-        let wo = u32::try_from(
-            h.fs_open(&ctx, 0x1000, "/f".len(), OpenFlags::WRITE)
-                .expect("open write-only"),
-        )
-        .unwrap();
-        assert_eq!(h.fd_grant(&ctx, wo, 3), Err(Errno::OutOfRange));
+        // A directory handle and a pipe end are outside the delegation
+        // surface: neither is a delegatable byte descriptor.
         let dir = u32::try_from(
             h.fs_open(
                 &ctx,
@@ -30715,12 +30815,21 @@ mod tests {
             .expect("open directory"),
         )
         .unwrap();
-        assert_eq!(h.fd_grant(&ctx, dir, 3), Err(Errno::OutOfRange));
+        assert_eq!(h.fd_grant(&ctx, dir, 3, 0), Err(Errno::OutOfRange));
         let (pipe_read, _pipe_write) = aspaces
             .write()
             .open_pipe(ProcessId(2))
             .expect("pipe allocates");
-        assert_eq!(h.fd_grant(&ctx, pipe_read, 3), Err(Errno::OutOfRange));
+        assert_eq!(h.fd_grant(&ctx, pipe_read, 3, 0), Err(Errno::OutOfRange));
+
+        // A resolve-only handle conveys neither reading nor writing, so
+        // there is nothing to delegate.
+        let bare = u32::try_from(
+            h.fs_open(&ctx, 0x1000, "/f".len(), OpenFlags::empty())
+                .expect("open resolve-only"),
+        )
+        .unwrap();
+        assert_eq!(h.fd_grant(&ctx, bare, 3, 0), Err(Errno::OutOfRange));
 
         // A read-only file descriptor delegates — but only to a live
         // recipient task; an unknown pid is the same `NotFound` as an
@@ -30730,14 +30839,37 @@ mod tests {
                 .expect("open read-only"),
         )
         .unwrap();
-        assert_eq!(h.fd_grant(&ctx, fd, 99), Err(Errno::NotFound));
+        assert_eq!(h.fd_grant(&ctx, fd, 99, 0), Err(Errno::NotFound));
         let (rspace, rphysmap) = send_aspace(MapFlags::READ | MapFlags::USER, b"");
         aspaces
             .write()
             .register(ProcessId(3), rspace, rphysmap)
             .expect("recipient registers");
-        let handle = h.fd_grant(&ctx, fd, 3).expect("grant mints a handle");
+        // A read-only delegation has no extent to bound, so naming one is a
+        // frame that does not mean what it says.
+        assert_eq!(h.fd_grant(&ctx, fd, 3, 4096), Err(Errno::OutOfRange));
+        let handle = h.fd_grant(&ctx, fd, 3, 0).expect("grant mints a handle");
         assert!(handle >= 1, "handle 0 is the reserved invalid value");
+
+        // A writable descriptor delegates too — but never unbounded: the
+        // ceiling is what makes the extent an attenuation rather than the
+        // grantor's whole reach.
+        let rw = u32::try_from(
+            h.fs_open(
+                &ctx,
+                0x1000,
+                "/f".len(),
+                OpenFlags::READ.union(OpenFlags::WRITE),
+            )
+            .expect("open read-write"),
+        )
+        .unwrap();
+        assert_eq!(h.fd_grant(&ctx, rw, 3, 0), Err(Errno::OutOfRange));
+        assert!(
+            h.fd_grant(&ctx, rw, 3, 4096)
+                .expect("bounded writable grant mints")
+                >= 1
+        );
     }
 
     /// An `fd_grant` handle redeems only for the recipient it was minted
@@ -30780,7 +30912,7 @@ mod tests {
                 .expect("open read-only"),
         )
         .unwrap();
-        let handle = h.fd_grant(&ctx, fd, 3).expect("grant mints a handle");
+        let handle = h.fd_grant(&ctx, fd, 3, 0).expect("grant mints a handle");
 
         // The grantor itself cannot redeem the handle it minted for the
         // recipient — a foreign handle answers exactly like one that never
@@ -30877,7 +31009,7 @@ mod tests {
                 .expect("grantor opens"),
         )
         .unwrap();
-        let handle = h.fd_grant(&gctx, fd, 3).expect("grant mints a handle");
+        let handle = h.fd_grant(&gctx, fd, 3, 0).expect("grant mints a handle");
         let rfd = u32::try_from(h.fd_redeem(&rctx, handle).expect("redeem installs")).unwrap();
 
         // The delegated read succeeds for the capability-less holder and
@@ -30914,13 +31046,233 @@ mod tests {
         // An exited recipient's pending delegations are reclaimed with the
         // rest of its records: a second grant minted to the recipient dies
         // with it and can never be redeemed by a later task.
-        let second = h.fd_grant(&gctx, fd, 3).expect("second grant mints");
+        let second = h.fd_grant(&gctx, fd, 3, 0).expect("second grant mints");
         aspaces.write().withdraw(ProcessId(3));
         assert_eq!(
             aspaces.write().redeem_fd_delegation(ProcessId(3), second),
             Err(Errno::NotFound),
             "withdraw reclaimed the pending delegation"
         );
+    }
+
+    /// The extent ceiling a writable delegation carries is a hard bound on
+    /// the file length its holder can produce, whether by writing or by
+    /// truncating (`plans/APPDATA.md` §3.8).
+    #[test]
+    fn delegated_write_is_bounded_by_the_grants_extent() {
+        const CEILING: u64 = 64;
+
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let (space, physmap) = send_aspace(MapFlags::READ | MapFlags::USER, b"/blob");
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        aspaces
+            .write()
+            .register(ProcessId(2), space, physmap)
+            .expect("registration succeeds");
+        let (rspace, rphysmap) =
+            send_aspace(MapFlags::READ | MapFlags::WRITE | MapFlags::USER, b"/blob");
+        aspaces
+            .write()
+            .register(ProcessId(3), rspace, rphysmap)
+            .expect("recipient registers");
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let grantor_caps = make_caps_record(2, &[CapabilityId::FS_ACCESS], sink);
+        let gctx = CallerContext {
+            task_id: SecTaskId(2),
+            caps: &grantor_caps,
+        };
+        // The holder runs as a different user and holds no capability at
+        // all: the delegation is its whole filesystem authority.
+        let recipient_caps = TaskCapabilities::derive(
+            ProcessId(3),
+            UserId(2000),
+            caps_with(&[]),
+            caps_with(&[]),
+            sink,
+        );
+        let rctx = CallerContext {
+            task_id: SecTaskId(3),
+            caps: &recipient_caps,
+        };
+        let fs: &'static RecordingFs = Box::leak(Box::new(RecordingFs::new()));
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        )
+        .with_filesystem(fs);
+
+        let fd = u32::try_from(
+            h.fs_open(
+                &gctx,
+                0x1000,
+                "/blob".len(),
+                OpenFlags::READ.union(OpenFlags::WRITE),
+            )
+            .expect("grantor opens read-write"),
+        )
+        .unwrap();
+        let handle = h
+            .fd_grant(&gctx, fd, 3, CEILING)
+            .expect("bounded writable grant mints");
+        let rfd = u32::try_from(h.fd_redeem(&rctx, handle).expect("redeem installs")).unwrap();
+
+        // A write inside the extent lands, under the grantor's uid.
+        assert_eq!(
+            h.fs_write(&rctx, rfd, 0, 0x1000, 8),
+            Ok(8),
+            "a write inside the extent is served for a capability-less holder"
+        );
+        assert!(
+            fs.calls()
+                .iter()
+                .any(|c| c.contains("write uid=1000 path=/blob")),
+            "the write was authorised under the grantor's captured identity: {:?}",
+            fs.calls()
+        );
+        // Accounting follows the process that issued the syscall, not the
+        // authority it borrowed.
+        assert_eq!(recipient_caps.io_bytes_written(), 8);
+        assert_eq!(grantor_caps.io_bytes_written(), 0);
+
+        // A write that would carry the file past the ceiling is refused —
+        // and so is a *sparse* one whose length is tiny but whose offset is
+        // not, which is why the bound is on the extent and not on the bytes.
+        assert_eq!(
+            h.fs_write(&rctx, rfd, CEILING - 4, 0x1000, 8),
+            Err(Errno::LimitExceeded)
+        );
+        assert_eq!(
+            h.fs_write(&rctx, rfd, u64::from(u32::MAX), 0x1000, 1),
+            Err(Errno::LimitExceeded)
+        );
+        // Exactly at the ceiling is inside it.
+        assert_eq!(h.fs_write(&rctx, rfd, CEILING - 8, 0x1000, 8), Ok(8));
+
+        // Truncation is a write of the same extent: growing past the ceiling
+        // is refused, shrinking is always within it.
+        assert_eq!(
+            h.fs_truncate(&rctx, rfd, CEILING + 1),
+            Err(Errno::LimitExceeded)
+        );
+        assert_eq!(h.fs_truncate(&rctx, rfd, CEILING), Ok(0));
+        assert_eq!(h.fs_truncate(&rctx, rfd, 0), Ok(0));
+    }
+
+    /// A delegation is a **whole** descriptor: its holder describes, flushes,
+    /// and maps it under the grantor's captured identity while holding no
+    /// filesystem capability, and gains no reach beyond that one file.
+    #[test]
+    fn delegated_descriptor_serves_stat_sync_and_map_under_the_grantor() {
+        const CEILING: u64 = 64;
+
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let (space, physmap) = send_aspace(MapFlags::READ | MapFlags::USER, b"/blob");
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        aspaces
+            .write()
+            .register(ProcessId(2), space, physmap)
+            .expect("registration succeeds");
+        let (rspace, rphysmap) =
+            send_aspace(MapFlags::READ | MapFlags::WRITE | MapFlags::USER, b"/blob");
+        aspaces
+            .write()
+            .register(ProcessId(3), rspace, rphysmap)
+            .expect("recipient registers");
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let grantor_caps = make_caps_record(2, &[CapabilityId::FS_ACCESS], sink);
+        let gctx = CallerContext {
+            task_id: SecTaskId(2),
+            caps: &grantor_caps,
+        };
+        // The holder runs as a different user and holds no capability at
+        // all: the delegation is its whole filesystem authority.
+        let recipient_caps = TaskCapabilities::derive(
+            ProcessId(3),
+            UserId(2000),
+            caps_with(&[]),
+            caps_with(&[]),
+            sink,
+        );
+        let rctx = CallerContext {
+            task_id: SecTaskId(3),
+            caps: &recipient_caps,
+        };
+        let fs: &'static RecordingFs = Box::leak(Box::new(RecordingFs::new()));
+        let fm: &'static RecordingFileMap = Box::leak(Box::new(RecordingFileMap::new()));
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        )
+        .with_filesystem(fs)
+        .with_file_map(fm);
+
+        let fd = u32::try_from(
+            h.fs_open(
+                &gctx,
+                0x1000,
+                "/blob".len(),
+                OpenFlags::READ.union(OpenFlags::WRITE),
+            )
+            .expect("grantor opens read-write"),
+        )
+        .unwrap();
+        let handle = h
+            .fd_grant(&gctx, fd, 3, CEILING)
+            .expect("bounded writable grant mints");
+        let rfd = u32::try_from(h.fd_redeem(&rctx, handle).expect("redeem installs")).unwrap();
+
+        assert_eq!(
+            aspaces
+                .read()
+                .open_file_entry(ProcessId(3), rfd)
+                .expect("descriptor recorded")
+                .flags,
+            OpenFlags::READ.union(OpenFlags::WRITE),
+            "the delegation carries the grantor descriptor's own access"
+        );
+
+        // Stat and sync are the delegation's too: a descriptor a holder can
+        // read and write but not describe or flush is half a descriptor.
+        assert!(h.fs_stat(&rctx, rfd, 0x1000, FileStat::WIRE_LEN).is_ok());
+        assert!(
+            fs.calls()
+                .iter()
+                .any(|c| c.contains("stat uid=1000 path=/blob")),
+            "the stat ran under the grantor's identity: {:?}",
+            fs.calls()
+        );
+        assert_eq!(h.fs_sync(&rctx, rfd), Ok(0));
+
+        // A mapping records the *grantor's* credential, so every
+        // demand-paged read the fault path later authorises uses the
+        // authority the delegation conveyed rather than the holder's.
+        let base = h
+            .file_map(&rctx, rfd, 0, u64::try_from(PAGE_SIZE).unwrap())
+            .expect("delegated mapping reserves");
+        let region = aspaces
+            .read()
+            .file_region_covering(ProcessId(3), base)
+            .expect("region recorded");
+        assert_eq!(region.path, "/blob");
+        assert_eq!(region.uid, 1000);
+        assert!(region.caps.contains(CapabilityId::FS_ACCESS));
+
+        // Delegation never chains: the holder cannot pass its delegation on,
+        // so the captured authority a descriptor exercises always names one
+        // grantor rather than a chain no audit record could attribute.
+        assert_eq!(h.fd_grant(&rctx, rfd, 2, CEILING), Err(Errno::OutOfRange));
     }
 
     /// `call_peer_seat` answers only while the ticket is in service, only

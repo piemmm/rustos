@@ -9,12 +9,15 @@
 
 use alloc::string::String;
 
-use tairix_abi::appdata_ipc::{ConfigScope, APPDATA_DOCUMENT_MAX, APPDATA_MAX_REPLY};
+use tairix_abi::appdata_ipc::{
+    BlobMode, ConfigScope, APPDATA_BLOB_MAX_BYTES, APPDATA_BLOB_MAX_COUNT, APPDATA_DOCUMENT_MAX,
+    APPDATA_MAX_REPLY,
+};
 use tairix_abi::Errno;
 use tairix_appconf::ConfError;
 
 use super::fake::FakeService;
-use super::{read_published, Settings, Vault, READ_ATTEMPTS};
+use super::{blobs, read_published, Settings, Vault, READ_ATTEMPTS};
 
 /// The word the fake bundle is installed under.
 const OWN_WORD: &str = "notes";
@@ -675,4 +678,142 @@ fn the_sealed_scope_is_a_document_of_its_own() {
     let vault = Vault::open(&mut host).expect("opens");
     assert_eq!(vault.get("font.size"), None);
     assert_eq!(vault.get("imap.password"), Some("hunter2"));
+}
+
+/// A blob open answers a handle to redeem, never bytes: the whole point of the
+/// scope is that the service is off the data path.
+#[test]
+fn a_blob_open_answers_a_handle_and_creates_only_when_it_writes() {
+    let mut host = service();
+    // A read of a blob the application does not hold is a refusal, and creates
+    // nothing — so a read is never the act that provisions a store.
+    assert_eq!(
+        blobs::open(&mut host, "index", BlobMode::Read),
+        Err(Errno::NotFound)
+    );
+    assert!(host.blobs().is_empty());
+    assert_eq!(host.grants(), 0, "and nothing was delegated");
+
+    let handle = blobs::open(&mut host, "index", BlobMode::ReadWrite).expect("creates and opens");
+    assert_ne!(handle, 0, "handle 0 is the reserved invalid value");
+    assert_eq!(host.blobs().len(), 1);
+    // Once it exists, a read opens it too.
+    assert!(blobs::open(&mut host, "index", BlobMode::Read).is_ok());
+}
+
+/// An application names its own blobs and nothing else: the request carries no
+/// bundle identifier, so a name is a name inside the caller's own store.
+#[test]
+fn a_blob_name_outside_the_grammar_never_reaches_the_wire() {
+    let mut host = service();
+    for hostile in ["..", ".", "a/b", "/etc", "A", ".hidden", "", "a b"] {
+        assert!(
+            blobs::open(&mut host, hostile, BlobMode::ReadWrite).is_err(),
+            "`{hostile}` must never name a blob"
+        );
+        assert!(blobs::remove(&mut host, hostile).is_err());
+    }
+    assert!(host.blobs().is_empty());
+    assert_eq!(host.grants(), 0);
+}
+
+/// The count ceiling is reported through the quota, so an application that
+/// reaches it can say so in its own terms rather than surfacing an errno.
+#[test]
+fn a_full_blob_store_refuses_a_new_blob_and_says_so_in_the_quota() {
+    let mut host = service();
+    for n in 0..APPDATA_BLOB_MAX_COUNT {
+        blobs::open(&mut host, &alloc::format!("b{n}"), BlobMode::ReadWrite)
+            .unwrap_or_else(|err| panic!("blob {n} must be admitted: {err:?}"));
+    }
+    let quota = blobs::quota(&mut host).expect("a quota");
+    assert_eq!(
+        quota.blobs, quota.blob_max,
+        "the store reports itself full before the refusal explains why"
+    );
+    assert_eq!(quota.blob_bytes_max, APPDATA_BLOB_MAX_BYTES);
+    assert_eq!(
+        blobs::open(&mut host, "one-too-many", BlobMode::ReadWrite),
+        Err(Errno::LimitExceeded)
+    );
+    // Freeing one makes room: the ceiling is on what exists, not on how many
+    // opens have ever happened.
+    blobs::remove(&mut host, "b0").expect("removes");
+    assert!(blobs::open(&mut host, "one-too-many", BlobMode::ReadWrite).is_ok());
+}
+
+/// A listing arrives whole in one call, sorted, with every blob's length.
+#[test]
+fn a_listing_is_one_call_and_carries_every_length() {
+    let mut host = service()
+        .with_blob("thumbnails", 4096)
+        .with_blob("index", 10)
+        .with_blob("mail.index", 0);
+    let listing = blobs::list(&mut host).expect("a listing");
+    assert_eq!(
+        listing,
+        alloc::vec![
+            (String::from("index"), 10),
+            (String::from("mail.index"), 0),
+            (String::from("thumbnails"), 4096),
+        ]
+    );
+    assert_eq!(host.calls(), 1, "the probe capacity covers a real store");
+}
+
+/// Even the widest store a listing can describe arrives in one call: the ask is
+/// the contract's own bound, so there is nothing to negotiate.
+#[test]
+fn the_widest_possible_listing_still_costs_one_call() {
+    let mut host = service();
+    for n in 0..APPDATA_BLOB_MAX_COUNT {
+        blobs::open(&mut host, &alloc::format!("b{n:02}"), BlobMode::ReadWrite).expect("admits");
+    }
+    let before = host.calls();
+    let listing = blobs::list(&mut host).expect("a listing");
+    assert_eq!(listing.len(), APPDATA_BLOB_MAX_COUNT);
+    assert_eq!(host.calls() - before, 1);
+}
+
+/// Removing a blob the application does not hold changes nothing, so a client
+/// need not check first and a refusal is never an oracle.
+#[test]
+fn removing_a_blob_that_is_not_there_is_not_an_error() {
+    let mut host = service();
+    assert_eq!(blobs::remove(&mut host, "index"), Ok(()));
+    blobs::open(&mut host, "index", BlobMode::ReadWrite).expect("creates");
+    assert_eq!(blobs::remove(&mut host, "index"), Ok(()));
+    assert!(host.blobs().is_empty());
+    assert_eq!(blobs::remove(&mut host, "index"), Ok(()));
+}
+
+/// Every blob operation reports the service's refusal as itself — an
+/// unreachable volume is never an empty store.
+#[test]
+fn a_refused_blob_operation_is_reported_and_never_read_as_an_absence() {
+    let mut host = service().with_blob("index", 1);
+    let refusal = host.refusal();
+    refusal.set(Some(Errno::DeviceOffline));
+    assert_eq!(
+        blobs::open(&mut host, "index", BlobMode::Read),
+        Err(Errno::DeviceOffline)
+    );
+    assert_eq!(blobs::remove(&mut host, "index"), Err(Errno::DeviceOffline));
+    assert_eq!(blobs::list(&mut host), Err(Errno::DeviceOffline));
+    assert_eq!(blobs::quota(&mut host).err(), Some(Errno::DeviceOffline));
+}
+
+/// The blob scope holds no document, so neither settings handle can see it and
+/// it cannot see them.
+#[test]
+fn the_blob_scope_shares_no_state_with_any_document() {
+    let mut host = service()
+        .with_store("font.size = 14\n")
+        .with_blob("index", 1);
+    let settings = Settings::open(&mut host, OWN_WORD);
+    assert_eq!(settings.get("index"), None);
+    drop(settings);
+    let listing = blobs::list(&mut host).expect("a listing");
+    assert_eq!(listing, alloc::vec![(String::from("index"), 1)]);
+    assert_eq!(blobs::quota(&mut host).expect("a quota").blobs, 1);
 }

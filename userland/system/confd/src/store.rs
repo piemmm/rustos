@@ -44,12 +44,12 @@ use tairix_abi::appdata_ipc::{ConfigScope, APPDATA_SETTINGS_FILE};
 use tairix_abi::appinfo::PublisherId;
 use tairix_abi::{AppIdentity, Errno};
 use tairix_appconf::{Document, MAX_DOCUMENT_LEN};
-use tairix_users::{APPDATA_ROOT, CONFD_UID};
+use tairix_users::{AppDataTree, APPDATA_ROOT, CONFD_UID};
 use zeroize::Zeroize;
 
 use crate::owner::OwnerPin;
 use crate::vault::{self, Entropy, MasterSecret, VaultError};
-use crate::Storage;
+use crate::{NodeInfo, Storage};
 
 /// Name of an app's private configuration document inside its store.
 ///
@@ -130,7 +130,7 @@ const USERS_ROOT: &str = "/Users";
 ///
 /// The gated root above it already refuses every other principal, so this is
 /// defence in depth rather than the boundary itself.
-const STORE_DIR_MODE: u32 = 0o700;
+pub(crate) const STORE_DIR_MODE: u32 = 0o700;
 
 /// Why a store could not be opened or a change could not be published.
 ///
@@ -165,6 +165,14 @@ pub enum StoreError {
     /// vocabulary rather than flattened in here, so the key hierarchy's
     /// failures stay defined beside the key hierarchy.
     Vault(VaultError),
+    /// The named blob does not exist, and the operation was not one that
+    /// creates it.
+    BlobNotFound,
+    /// The application already holds as many blobs as it may.
+    BlobLimit,
+    /// A blob name outside the store-name grammar reached the store, which the
+    /// wire's own decoder should already have refused.
+    BlobNameRefused,
 }
 
 impl StoreError {
@@ -179,13 +187,16 @@ impl StoreError {
             | Self::RootNotOwned
             | Self::PublisherMismatch
             | Self::PinMalformed => Errno::PermissionDenied,
-            Self::NoHome => Errno::NotFound,
-            Self::DocumentRefused => Errno::OutOfRange,
+            // A sealed-scope or blob refusal is about the caller's *own* data,
+            // so it is reported precisely: an application can tell "your saved
+            // secrets are damaged" from "storage is unreachable", and "you have
+            // no such blob" from "your store is full", and say which. No other
+            // principal learns anything either way, because no request shape
+            // reaches another application's secrets or blobs at all.
+            Self::NoHome | Self::BlobNotFound => Errno::NotFound,
+            Self::DocumentRefused | Self::BlobNameRefused => Errno::OutOfRange,
             Self::Unavailable => Errno::DeviceOffline,
-            // A sealed-scope refusal is about the caller's *own* data, so it
-            // is reported precisely: an application can tell "your saved
-            // secrets are damaged" from "storage is unreachable" and say so,
-            // and no other principal learns anything either way.
+            Self::BlobLimit => Errno::LimitExceeded,
             Self::Vault(VaultError::MasterSecretRefused | VaultError::VaultMalformed) => {
                 Errno::BadMagic
             }
@@ -213,8 +224,11 @@ impl StoreError {
             | Self::PublisherMismatch
             | Self::Unavailable
             // The sealed scope has no foreign path at all, so a vault refusal
-            // is always the caller's own store's.
-            | Self::Vault(_) => false,
+            // is always the caller's own store's; nor does the blob scope.
+            | Self::Vault(_)
+            | Self::BlobNotFound
+            | Self::BlobLimit
+            | Self::BlobNameRefused => false,
         }
     }
 
@@ -230,6 +244,9 @@ impl StoreError {
             Self::DocumentRefused => "the configuration document is outside the format's bounds",
             Self::Unavailable => "the store volume is not reachable",
             Self::Vault(err) => err.reason(),
+            Self::BlobNotFound => "the application holds no blob of that name",
+            Self::BlobLimit => "the application already holds as many blobs as it may",
+            Self::BlobNameRefused => "the blob name is outside the store-name grammar",
         }
     }
 }
@@ -250,8 +267,13 @@ pub struct AppStore {
     /// key derived from an identity a call site supplied separately could
     /// disagree with the directory the store resolved to.
     identity: AppIdentity,
-    /// Absolute path of `<home>/Settings/Apps`, the gated root the store was
-    /// resolved under — where the account's master-secret record lives.
+    /// Absolute path of the account's home, the one place both gated roots
+    /// hang off. Held so a bulk-scope operation proves its own root's
+    /// ownership without re-scanning `/Users` for a home already resolved.
+    home: String,
+    /// Absolute path of `<home>/Settings/Apps`, the gated configuration root
+    /// the store was resolved under — where the account's master-secret
+    /// record lives.
     root: String,
     /// Absolute path of `<home>/Settings/Apps/<bundle-id>`, with no trailing
     /// separator.
@@ -269,67 +291,113 @@ pub struct AppStore {
     pinned: bool,
 }
 
-/// The gated store roots resolved so far, one per account.
+/// The account homes resolved so far, one entry per account.
 ///
 /// Without it every settings read would re-list `/Users` and stat each entry to
 /// find the caller's home — a directory scan on the hot path, growing with the
-/// number of accounts. The cache holds only the resolved **path**: the
-/// ownership that authorises it is re-checked on every use ([`Self::resolve`]),
-/// so an administrator who reassigns a home (the one act that could invalidate
-/// a resolution, and it needs `CAP_FS_CHOWN`) cannot make a stale entry serve
-/// the wrong account's store. Only successful resolutions are remembered, so an
-/// account created after the service started still resolves.
+/// number of accounts. What is cached is only the resolved **path**, and every
+/// authority it stands for is re-proved on each use: the home must still be
+/// owned by the account ([`Self::home`]) and the gated root inside it must
+/// still be owned by the app-data service ([`Self::root`]). Only successful
+/// resolutions are remembered, so an account created after the service started
+/// still resolves.
 pub struct RootCache {
-    roots: Vec<(u32, String)>,
+    homes: Vec<(u32, String)>,
 }
 
 impl RootCache {
     /// An empty cache.
     #[must_use]
     pub const fn new() -> Self {
-        Self { roots: Vec::new() }
+        Self { homes: Vec::new() }
     }
 
-    /// The gated store root of the account `uid` owns.
+    /// The home directory of the account `uid` owns, proved to still be its.
+    ///
+    /// A remembered path is re-stated by the volume rather than trusted: the
+    /// two acts that could invalidate it — reassigning a home, removing one —
+    /// both change what `/Users` says, so a stale entry is dropped and the
+    /// scan runs again instead of serving the wrong account's store.
     ///
     /// # Errors
     ///
     /// [`StoreError::NoHome`] when no directory under `/Users` is owned by
-    /// `uid`, [`StoreError::RootNotOwned`] when the root is absent or is not
-    /// the app-data service's own, [`StoreError::Unavailable`] when the volume
-    /// cannot be reached.
-    pub fn resolve<S: Storage + ?Sized>(
+    /// `uid`, [`StoreError::Unavailable`] when the volume cannot be reached.
+    pub fn home<S: Storage + ?Sized>(
         &mut self,
         fs: &mut S,
         uid: u32,
     ) -> Result<String, StoreError> {
-        if let Some(index) = self.roots.iter().position(|(known, _)| *known == uid) {
-            let home = home_of_root(&self.roots[index].1);
-            match fs.owner_of(home) {
-                Ok(owner) if owner == uid => return Ok(self.roots[index].1.clone()),
+        if let Some(index) = self.homes.iter().position(|(known, _)| *known == uid) {
+            match fs.stat(&self.homes[index].1) {
+                Ok(node) if node.uid == uid => return Ok(self.homes[index].1.clone()),
                 Ok(_) | Err(Errno::NotFound) => {
-                    // The home was reassigned or removed; the remembered path
-                    // is no longer this account's, so forget it and look again.
-                    self.roots.remove(index);
+                    self.homes.remove(index);
                 }
                 Err(_) => return Err(StoreError::Unavailable),
             }
         }
-        let root = gated_root(fs, uid)?;
-        self.roots.push((uid, root.clone()));
-        Ok(root)
+        let home = home_of(fs, uid)?;
+        self.homes.push((uid, home.clone()));
+        Ok(home)
     }
 
-    /// Number of remembered roots. Test and diagnostic surface.
+    /// The gated store root of `tree` for the account `uid` owns.
+    ///
+    /// The root's **ownership is re-proved on every call**, cached home or not.
+    /// That is not belt and braces: `Settings/` and `Library/` are the user's
+    /// own directories and carry no gate, so an application running as the user
+    /// can rename one aside and create a replacement holding a directory named
+    /// `Apps`. Serving out of a remembered path without re-stating who owns it
+    /// would let exactly that decoy be believed once the real root had been
+    /// resolved. An application cannot chown to a service uid without
+    /// `CAP_FS_CHOWN`, so the check turns the substitution into an audited
+    /// refusal — app data becomes unavailable, never forged.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::home`], plus [`StoreError::RootNotOwned`] when the root is
+    /// absent or is not the app-data service's own.
+    pub fn root<S: Storage + ?Sized>(
+        &mut self,
+        fs: &mut S,
+        uid: u32,
+        tree: AppDataTree,
+    ) -> Result<String, StoreError> {
+        let home = self.home(fs, uid)?;
+        Self::root_of(fs, &home, tree)
+    }
+
+    /// The gated store root of `tree` inside the already-resolved `home`.
+    ///
+    /// Split out so a caller that needs both trees proves each root's
+    /// ownership without re-proving the home's — the home is one account fact,
+    /// the roots are two.
+    pub fn root_of<S: Storage + ?Sized>(
+        fs: &mut S,
+        home: &str,
+        tree: AppDataTree,
+    ) -> Result<String, StoreError> {
+        let root = join(&join(home, tree.parent()), APPDATA_ROOT);
+        match fs.stat(&root) {
+            Ok(NodeInfo {
+                uid: CONFD_UID_RAW, ..
+            }) => Ok(root),
+            Ok(_) | Err(Errno::NotFound) => Err(StoreError::RootNotOwned),
+            Err(_) => Err(StoreError::Unavailable),
+        }
+    }
+
+    /// Number of remembered homes. Test and diagnostic surface.
     #[must_use]
     pub fn len(&self) -> usize {
-        self.roots.len()
+        self.homes.len()
     }
 
     /// Whether nothing has been resolved yet.
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.roots.is_empty()
+        self.homes.is_empty()
     }
 }
 
@@ -337,23 +405,6 @@ impl Default for RootCache {
     fn default() -> Self {
         Self::new()
     }
-}
-
-/// The home directory of a gated store root — the root path with its fixed
-/// `<parent>/Apps` tail removed.
-///
-/// The tail is composed by [`gated_root`] from the shared home-shape
-/// definition, so trimming exactly two components is the inverse of that
-/// composition and cannot be steered by anything a caller supplies.
-fn home_of_root(root: &str) -> &str {
-    let mut cut = root;
-    for _ in 0..2 {
-        cut = match cut.rfind('/') {
-            Some(index) => &cut[..index],
-            None => return cut,
-        };
-    }
-    cut
 }
 
 impl AppStore {
@@ -378,7 +429,8 @@ impl AppStore {
         identity: &AppIdentity,
         create: bool,
     ) -> Result<Self, StoreError> {
-        let root = roots.resolve(fs, uid)?;
+        let home = roots.home(fs, uid)?;
+        let root = RootCache::root_of(fs, &home, AppDataTree::Config)?;
         let dir = join(&root, identity.bundle_id());
         let pin_path = join(&dir, OWNER_FILE);
         let pinned = match fs.read(&pin_path) {
@@ -400,10 +452,27 @@ impl AppStore {
             uid,
             identity: *identity,
             policy_dir: join(POLICY_ROOT, identity.bundle_id()),
+            home,
             root,
             dir,
             pinned,
         })
+    }
+
+    /// The account home both this store's gated roots hang off.
+    ///
+    /// Held so the bulk tree can prove its own root's ownership without
+    /// re-scanning `/Users` for a home this open already resolved.
+    #[must_use]
+    pub fn home(&self) -> &str {
+        &self.home
+    }
+
+    /// The identifier of the application this store belongs to, as the kernel
+    /// attested it.
+    #[must_use]
+    pub fn bundle_id(&self) -> &str {
+        self.identity.bundle_id()
     }
 
     /// Whether this app has ever written to its store — i.e. whether an
@@ -741,7 +810,7 @@ pub fn published_document<S: Storage + ?Sized>(
     uid: u32,
     bundle_id: &str,
 ) -> Result<Document, StoreError> {
-    let dir = join(&roots.resolve(fs, uid)?, bundle_id);
+    let dir = join(&roots.root(fs, uid, AppDataTree::Config)?, bundle_id);
     match fs.read(&join(&dir, OWNER_FILE)) {
         Ok(bytes) => {
             OwnerPin::decode(&bytes).ok_or(StoreError::PinMalformed)?;
@@ -801,27 +870,6 @@ fn create_store<S: Storage + ?Sized>(
         .map_err(|_| StoreError::Unavailable)
 }
 
-/// Resolve the gated per-app store root of the account `uid` owns, proving on
-/// the way that it is the root the provisioners created.
-///
-/// Two checks, both necessary. The home must be **owned by the caller's uid**,
-/// which is what makes the resolution a uid→home answer rather than a guess —
-/// and it needs no reach into the credential database, so this service holds
-/// none. The gated root must be **owned by the app-data service**, because the
-/// store's parent directory is writable by the account: an application could
-/// otherwise plant a world-traversable directory of that name and have this
-/// service serve forged settings out of it. A capability gate alone would not
-/// catch that — this service holds the capability either way.
-fn gated_root<S: Storage + ?Sized>(fs: &mut S, uid: u32) -> Result<String, StoreError> {
-    let home = home_of(fs, uid)?;
-    let root = join(&join(&home, crate::APPDATA_PARENT), APPDATA_ROOT);
-    match fs.owner_of(&root) {
-        Ok(CONFD_UID_RAW) => Ok(root),
-        Ok(_) | Err(Errno::NotFound) => Err(StoreError::RootNotOwned),
-        Err(_) => Err(StoreError::Unavailable),
-    }
-}
-
 /// The app-data service's own uid, as a pattern-matchable constant.
 const CONFD_UID_RAW: u32 = CONFD_UID.0;
 
@@ -831,14 +879,14 @@ const CONFD_UID_RAW: u32 = CONFD_UID.0;
 /// matching the owning uid is a complete answer — and one that reads the truth
 /// on the volume rather than a record that could disagree with it.
 fn home_of<S: Storage + ?Sized>(fs: &mut S, uid: u32) -> Result<String, StoreError> {
-    let names = fs.list_dir(USERS_ROOT).map_err(|err| match err {
+    let entries = fs.list_dir(USERS_ROOT).map_err(|err| match err {
         Errno::NotFound => StoreError::NoHome,
         _ => StoreError::Unavailable,
     })?;
-    for name in names {
-        let candidate = join(USERS_ROOT, &name);
-        match fs.owner_of(&candidate) {
-            Ok(owner) if owner == uid => return Ok(candidate),
+    for entry in entries.iter().filter(|entry| entry.dir) {
+        let candidate = join(USERS_ROOT, &entry.name);
+        match fs.stat(&candidate) {
+            Ok(node) if node.uid == uid => return Ok(candidate),
             // Someone else's home, a name that vanished between the listing
             // and the check, or one this service may not stat: none of them is
             // this uid's home, and one broken home must not deny every
@@ -853,7 +901,7 @@ fn home_of<S: Storage + ?Sized>(fs: &mut S, uid: u32) -> Result<String, StoreErr
 }
 
 /// `parent/child`, with exactly one separator.
-fn join(parent: &str, child: &str) -> String {
+pub(crate) fn join(parent: &str, child: &str) -> String {
     let mut path = String::with_capacity(parent.len() + 1 + child.len());
     path.push_str(parent.trim_end_matches('/'));
     path.push('/');

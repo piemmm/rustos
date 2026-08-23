@@ -1972,27 +1972,42 @@ pub trait SyscallHandlers {
     }
 
     /// Delegate one of the caller's own open filesystem descriptors to
-    /// another live task as a one-shot grant, returning the minted grant
-    /// handle (`plans/CAPABILITY_USE.md` CU6 — the file picker's
-    /// user-mediated hand-off).
+    /// another live task as a one-shot grant bounded above by
+    /// `write_ceiling` bytes, returning the minted grant handle
+    /// (`plans/CAPABILITY_USE.md` CU6 — the file picker's user-mediated
+    /// hand-off; `plans/APPDATA.md` §3.8 — the app-data service's blob
+    /// descriptor).
     ///
     /// The dispatcher has already checked the caller holds
     /// [`CapabilityId::FS_ACCESS`] and audited the call. The implementation
     /// resolves `fd` against the **caller's own** open table (a foreign or
     /// unopened descriptor fails closed with [`Errno::NotFound`]), refuses
-    /// any backing that is not a plain filesystem path (a pipe, resource,
-    /// or already-delegated descriptor answers [`Errno::OutOfRange`], so
-    /// delegation never chains), confirms the recipient task `pid` is live
-    /// (task ids are never reused, so the grant can never land on a
-    /// recycled identity), captures the caller's uid and effective
-    /// capability set beside the descriptor's path and open flags, and
-    /// mints the recipient an unforgeable handle that resolves only when
-    /// the recipient itself presents it to [`Self::fd_redeem`].
+    /// any backing that is not a plain filesystem path (a pipe, pty,
+    /// resource, or already-delegated descriptor answers
+    /// [`Errno::OutOfRange`], so delegation never chains) and any directory,
+    /// confirms the recipient task `pid` is live (task ids are never reused,
+    /// so the grant can never land on a recycled identity), captures the
+    /// caller's uid and effective capability set beside the descriptor's
+    /// path, and mints the recipient an unforgeable handle that resolves
+    /// only when the recipient itself presents it to [`Self::fd_redeem`].
+    ///
+    /// The delegation carries the descriptor's **own** read/write access and
+    /// nothing more, so it never widens what the grantor opened.
+    /// `write_ceiling` is the highest file length the holder may write or
+    /// truncate to; it must be zero for a read-only descriptor and non-zero
+    /// for a writable one, so an unbounded writable delegation is not a
+    /// representable request.
     ///
     /// The default implementation fails closed with
     /// [`Errno::NotImplemented`]; the real handler is installed in
     /// `kernel/core`.
-    fn fd_grant(&self, _caller: &CallerContext<'_>, _fd: u32, _pid: u64) -> SyscallResult {
+    fn fd_grant(
+        &self,
+        _caller: &CallerContext<'_>,
+        _fd: u32,
+        _pid: u64,
+        _write_ceiling: u64,
+    ) -> SyscallResult {
         Err(Errno::NotImplemented)
     }
 
@@ -3602,9 +3617,11 @@ impl<'a, H: SyscallHandlers + ?Sized, S: Sink + ?Sized> Dispatcher<'a, H, S> {
             SyscallNumber::FD_GRANT => {
                 // args[0] is the caller's own path-backed descriptor;
                 // args[1] is the recipient's kernel task id (both resolved
-                // and owner-/liveness-checked by the handler).
+                // and owner-/liveness-checked by the handler); args[2] is
+                // the write-extent ceiling, which the handler checks against
+                // the descriptor's own access.
                 let fd = decode_u32(args.0[0]);
-                self.handlers.fd_grant(caller, fd, args.0[1])
+                self.handlers.fd_grant(caller, fd, args.0[1], args.0[2])
             }
             SyscallNumber::FD_REDEEM => {
                 // args[0] is the grant handle minted to the calling task
@@ -5050,7 +5067,13 @@ mod tests {
             Ok(0)
         }
 
-        fn fd_grant(&self, _c: &CallerContext<'_>, fd: u32, _pid: u64) -> SyscallResult {
+        fn fd_grant(
+            &self,
+            _c: &CallerContext<'_>,
+            fd: u32,
+            _pid: u64,
+            _write_ceiling: u64,
+        ) -> SyscallResult {
             self.record("fd_grant");
             // Echo the descriptor so the reachability test can assert the
             // dispatcher decoded both arguments without a real grant table.
