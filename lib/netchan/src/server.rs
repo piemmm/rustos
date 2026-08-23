@@ -1,16 +1,16 @@
 //! The driver-side per-request handler of the `netchan-v1` device-channel
 //! contract (`plans/NETWORK.md` §2.3, N4d).
 //!
-//! [`NetChannelServer`] is the pure, host-testable engine the user-space
-//! virtio-net driver *process* drives: the process owns the device
-//! (MMIO/DMA/IRQ) and the call endpoint, and hands each decoded
+//! [`NetChannelServer`] is the pure, host-testable engine a link-layer
+//! driver *process* drives: the process owns the device (MMIO/DMA/IRQ) and
+//! the call endpoint, and hands each decoded
 //! [`NetChannelRequest`](tairix_abi::driver::net_channel::NetChannelRequest)
 //! to this server, which turns it into the right
 //! device action and the matching reply. The I/O — receiving the request,
 //! mapping the granted frame region, sending the reply and the
-//! receive-frames notify — stays in the process binary (`main.rs`); the
-//! server holds only the attach state and the ring/service logic, so the
-//! whole control plane is exercised on the host against a mock [`Net`].
+//! receive-frames notify — stays in the crate's `serve` loop; the server
+//! holds only the attach state and the ring/service logic, so the whole
+//! control plane is exercised on the host against a mock [`Net`].
 //!
 //! # State machine
 //!

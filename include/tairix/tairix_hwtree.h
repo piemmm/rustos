@@ -26,10 +26,13 @@
 #define TAIRIX_HW_COMPATIBLE_MAX ((uintptr_t)64u)
 #define TAIRIX_HW_NODE_MAX_MATCH_KEYS ((uintptr_t)4u)
 #define TAIRIX_HW_NODE_MAX_RESOURCES ((uintptr_t)8u)
+/* Length, in bytes, of an Ethernet MAC address. */
+#define TAIRIX_MAC_ADDRESS_LEN 6u
 
 /* Packed little-endian wire sizes, in bytes. */
 #define TAIRIX_HW_MATCH_KEY_WIRE_LEN 76u
 #define TAIRIX_HW_RESOURCE_WIRE_LEN 32u
+#define TAIRIX_HW_NODE_HEADER_LEN 17u
 #define TAIRIX_HW_NODE_WIRE_LEN 577u
 
 /* Device classes (uint16_t). */
@@ -88,9 +91,11 @@ typedef struct tairix_hw_resource {
 typedef struct tairix_hw_node {
     uint32_t id;
     uint32_t parent;
+    uint32_t address;
     uint16_t device_class;
     uint8_t match_key_count;
     uint8_t resource_count;
+    uint8_t fault_health;
     tairix_hw_match_key_t match_keys[TAIRIX_HW_NODE_MAX_MATCH_KEYS];
     tairix_hw_resource_t resources[TAIRIX_HW_NODE_MAX_RESOURCES];
 } tairix_hw_node_t;

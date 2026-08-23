@@ -1215,6 +1215,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "tairix-drv-network-genet"
+version = "0.0.0"
+dependencies = [
+ "tairix-abi",
+ "tairix-caps",
+ "tairix-drvrt",
+ "tairix-netchan",
+ "tairix-rt",
+]
+
+[[package]]
 name = "tairix-drv-network-virtio-net"
 version = "0.0.0"
 dependencies = [
@@ -1229,7 +1240,7 @@ dependencies = [
  "tairix-abi",
  "tairix-caps",
  "tairix-drvrt",
- "tairix-log",
+ "tairix-netchan",
  "tairix-rt",
  "tairix-virtio",
  "tairix-virtio-net",
@@ -2098,6 +2109,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "tairix-netchan"
+version = "0.0.0"
+dependencies = [
+ "tairix-abi",
+ "tairix-caps",
+ "tairix-log",
+ "tairix-rt",
+]
+
+[[package]]
 name = "tairix-netconfig"
 version = "0.0.0"
 dependencies = [
@@ -2116,8 +2137,8 @@ dependencies = [
  "tairix-fuzzseed",
  "tairix-log",
  "tairix-net",
+ "tairix-netchan",
  "tairix-rt",
- "tairix-virtio-net",
 ]
 
 [[package]]
@@ -5251,6 +5272,7 @@ dependencies = [
  "tairix-drv-input-usb-kbd",
  "tairix-drv-input-usb-mouse",
  "tairix-drv-input-virtio-input",
+ "tairix-drv-network-genet",
  "tairix-drv-network-virtio-net",
  "tairix-drv-storage-raid",
  "tairix-drv-storage-raid-member",
@@ -5273,6 +5295,7 @@ dependencies = [
  "tairix-log",
  "tairix-mkimage",
  "tairix-net",
+ "tairix-netconfig",
  "tairix-parallel",
  "tairix-proglib",
  "tairix-qemu",

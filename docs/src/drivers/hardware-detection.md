@@ -234,6 +234,22 @@ device-tree node is emitted with its compatible strings as match keys
 exists to grow (see [aarch64 platform
 discovery](../platform/aarch64.md#platform-discovery-hardware-tree)).
 
+An `interrupts` specifier is emitted as the **global GICv2 INTID** a driver
+binds, not the type-relative device-tree cell: an SPI is offset by 32 and a
+PPI by 16 through the one shared decoder the boot path itself uses, so a
+driver that parks on its granted line waits on the interrupt its device
+actually raises. A specifier this GICv2 port cannot represent (a GICv3-only
+extended-SPI binding) is dropped rather than guessed at.
+
+Two further facts ride on a node when its tree declares them, so a
+user-space driver learns them from discovery rather than a board constant.
+A **DMA constraint** is read from the node's *parent bus* `dma-ranges` —
+Devicetree Spec v0.4 §2.3.9 puts the property on the bus, not on the
+mastering device — and a network node's **link-layer address** from the
+standard `mac-address` / `local-mac-address` ethernet-controller binding, the
+only place a SoC MAC like the BCM2711's GENET publishes its factory
+address.
+
 ## Remaining Stage 4.HW work
 
 The Pi-4 USB-keyboard chain is now **entirely user space** (`plans/PI.md`

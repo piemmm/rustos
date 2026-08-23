@@ -80,6 +80,7 @@ members = [
     "lib/log",
     "lib/multiboot2",
     "lib/net",
+    "lib/netchan",
     "lib/netconfig",
     "lib/pagezero",
     "lib/parallel",
@@ -152,6 +153,7 @@ members = [
     "drivers/storage/raid_member",
 
     # Drivers — network
+    "drivers/network/genet",
     "drivers/network/virtio_net",
     "drivers/network/virtio_net_driver",
 

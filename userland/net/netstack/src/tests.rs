@@ -1829,7 +1829,7 @@ fn accept_without_a_ready_connection_would_block() {
 use crate::channel::NetChannelClient;
 use alloc::rc::Rc;
 use tairix_abi::driver::net_channel::NetChannelRequest;
-use tairix_virtio_net::NetChannelServer;
+use tairix_netchan::NetChannelServer;
 
 /// A representative notify endpoint id the stack would `port_bind`.
 const NOTIFY_ENDPOINT: u64 = 0x4E45_5453_5430_3030;

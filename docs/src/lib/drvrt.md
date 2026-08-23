@@ -55,6 +55,14 @@ bus driver's `register()` consumes:
   supplied by the architecture-aware driver process, never synthesised here, so
   the crate stays platform-neutral (§2.20). It deliberately provides no virtio
   queue-completion wait: the host serves a polling / `irq_wait`-driven driver.
+Beyond the three traits it also surfaces the facts a node carried alongside
+its handles. `irq_line()` reports the granted interrupt line the driver binds
+and parks on, and `link_address()` the firmware-published link-layer address a
+network node carried (`HwResourceKind::LinkAddress`) — a NIC whose factory MAC
+is not readable from its own registers, such as the BCM2711's GENET, learns it
+here rather than inventing one. Both report `None` when the node granted none,
+so a driver refuses rather than guessing.
+
 - **`DriverHost`** — reports the load-time capability set
   (`has_capability`), `DriverKind::UserSpace`, and hands its own `MmioMapper` /
   `VirtioHost` back through `mmio_mapper()` / `virtio_host()`. Its `emit_node`

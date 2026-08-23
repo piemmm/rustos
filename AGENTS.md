@@ -590,6 +590,7 @@ tairix/
 │   ├── log/             # Structured logging.
 │   ├── multiboot2/      # Shared Multiboot2 information-structure wire layout.
 │   ├── net/             # Network protocol engine (wire protocols).
+│   ├── netchan/         # NIC device-channel driver side (netchan-v1 server).
 │   ├── netconfig/       # network.conf per-interface configuration store engine.
 │   ├── pagezero/        # Page/region zeroing.
 │   ├── parallel/        # Bounded data-parallel work engine (JobRunner + pool).
@@ -646,7 +647,7 @@ tairix/
 │   │   ├── session/     # Desktop session glue (theme + taskbar model).
 │   │   └── switchboard/ # System-overview monitor service (tray feed).
 │   ├── net/             # Userland networking services.
-│   │   └── icmp/        # ARP + IPv4 + ICMP-echo responder.
+│   │   └── netstack/    # The dual-stack network service (IPv4/IPv6/TCP/UDP).
 │   └── apps/            # Default apps. Each app is its own crate.
 │
 ├── docs/                # Long-form documentation (mdBook).

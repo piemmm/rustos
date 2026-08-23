@@ -5,6 +5,7 @@ use core::ptr::NonNull;
 
 use tairix_abi::driver::dma::{DmaHost, DmaSlab, PoolId, SlabCoherencyFn};
 use tairix_abi::driver::mailbox::{MailboxChannel, MAILBOX_PROPERTY_WORDS};
+use tairix_abi::driver::net::MAC_ADDRESS_LEN;
 use tairix_abi::driver::virtio::VirtioHost;
 use tairix_abi::driver::CompletionSignal;
 use tairix_abi::hwtree::{HwResource, HwResourceKind};
@@ -295,6 +296,21 @@ impl<S: GrantSyscalls> RtDriverHost<S> {
             .flatten()
             .find(|slot| slot.resource.kind() == Some(HwResourceKind::Irq))?;
         u32::try_from(slot.resource.base()).ok()
+    }
+
+    /// The firmware-published link-layer address the driver's matched node
+    /// carried, or [`None`] when it carried none.
+    ///
+    /// A NIC whose factory MAC is not readable from its own registers learns
+    /// it here rather than inventing one; a node that published none yields
+    /// [`None`] so the driver can refuse rather than come up on a made-up
+    /// address (fail closed).
+    #[must_use]
+    pub fn link_address(&self) -> Option<[u8; MAC_ADDRESS_LEN]> {
+        self.grants
+            .iter()
+            .flatten()
+            .find_map(|slot| slot.resource.link_address_octets())
     }
 
     /// Bind the driver's granted device interrupt line, caching the

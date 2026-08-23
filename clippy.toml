@@ -76,4 +76,8 @@ doc-valid-idents = [
     "SLAAC",
     "SACKed",
     "unSACKed",
+    "UniMAC",
+    "GENET",
+    "MDIO",
+    "RGMII",
 ]

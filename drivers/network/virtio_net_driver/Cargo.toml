@@ -26,10 +26,9 @@ workspace = true
 # targets the binary is actually built for; on the host the binary is an inert
 # stub with no dependencies.
 [target.'cfg(target_os = "none")'.dependencies]
-# The `abi-v1` surface: the `netchan-v1` device-channel contract
-# (`NetChannelServer` handling lives in `lib/virtio_net`), the hardware-tree
-# node/resource types, capability ids, the reserved device-channel endpoint
-# block, and the wait-set vocabulary.
+# The `abi-v1` surface: the role-tagged virtio-PCI / single-aperture MMIO
+# grant helpers the transport is shape-keyed from, the `Net` device trait,
+# and the capability ids the host is built over.
 tairix-abi = { path = "../../../lib/abi", version = "=0.0.0" }
 # The capability-set type the rt-backed `DriverHost` is built over (§5.2).
 tairix-caps = { path = "../../../lib/caps", version = "=0.0.0" }
@@ -39,17 +38,19 @@ tairix-caps = { path = "../../../lib/caps", version = "=0.0.0" }
 # precedent).
 tairix-virtio = { path = "../../../lib/virtio", version = "=0.0.0" }
 # The bus-agnostic virtio-net device engine (bring-up + frame-ring `Net`
-# service) *and* the driver-side `NetChannelServer` per-request handler — the
-# same engine the host tests and QEMU verticals exercise (§2.2 / §17.4).
+# service) — the same engine the host tests and QEMU verticals exercise
+# (§2.2 / §17.4).
 tairix-virtio-net = { path = "../../../lib/virtio_net", version = "=0.0.0" }
+# The device-agnostic driver side of the `netchan-v1` device channel: the
+# pure `NetChannelServer` handler plus the serve loop (claim the reserved
+# endpoint, publish the `netchan` node, park on {call endpoint, device IRQ})
+# every NIC driver process shares — one definition (§2.2).
+tairix-netchan = { path = "../../../lib/netchan", version = "=0.0.0" }
 # The user-space driver runtime: turns the kernel-issued device-resource grants
 # into the `MmioMapper` + `VirtioHost` the bring-up consumes (`mmio_map` /
 # `dma_alloc` / `resource_grants` over the syscall surface, §5.4).
 tairix-drvrt = { path = "../../../lib/drvrt", version = "=0.0.0" }
 # The pure-Rust userland runtime (`AGENTS.md` §1 / §16.4): `_start`, the stack
-# canary, the panic handler, the allocator, and the syscall wrappers
-# (`call_create`/`call_recv`/`call_reply`/`shm_map`/`ipc_send`/`irq_bind`/
-# `waitset_*`/`hw_emit_node`).
+# canary, the panic handler, the allocator, and the `irq_bind` /
+# `entry!` surface this binary uses directly.
 tairix-rt = { path = "../../../lib/rt", version = "=0.0.0" }
-# Structured audit logging over the `log_emit` syscall (§19.4).
-tairix-log = { path = "../../../lib/log", version = "=0.0.0" }

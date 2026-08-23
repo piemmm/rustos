@@ -80,9 +80,6 @@
 #define TAIRIX_VIRTIO_PCI_CFG_DEVICE ((uint8_t)4u)
 #define TAIRIX_VIRTIO_PCI_CFG_PCI ((uint8_t)5u)
 
-/* Length, in bytes, of an Ethernet MAC address. */
-#define TAIRIX_MAC_ADDRESS_LEN 6u
-
 /* Mount-flag bitmap (uint32_t); any bit outside KNOWN_MASK is reserved and rejected. */
 #define TAIRIX_MOUNT_FLAG_READ_ONLY ((uint32_t)0x1u)
 #define TAIRIX_MOUNT_FLAG_NOSUID ((uint32_t)0x2u)

@@ -75,7 +75,10 @@ fn run(argv: &[OsString]) -> Result<(), String> {
     // (it needs to drive `cargo` for the freestanding builds), so the
     // canonical `cargo xtask image` path supplies them. A directly-scripted
     // CLI image therefore ships empty stores (the kernel leaves every node
-    // unbound, fail-closed), exactly as before.
+    // unbound, fail-closed), exactly as before — and, planting no NIC driver,
+    // the canonical empty `network.conf` ("no managed interfaces beyond
+    // loopback") with them.
+    let network_conf = tairix_netconfig::NetworkConfig::default().render();
     let built = build_rpi_image(
         &kernel_elf,
         &firmware,
@@ -83,6 +86,7 @@ fn run(argv: &[OsString]) -> Result<(), String> {
         rpi.profile,
         &[],
         &[],
+        &network_conf,
     )
     .map_err(|e| e.to_string())?;
 

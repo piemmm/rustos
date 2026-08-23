@@ -135,6 +135,10 @@ pub enum MkimageError {
     /// Deriving the shipped program-library catalog from the planted
     /// bundles failed.
     LibraryCatalog(String),
+    /// The image's `network.conf` addressing default does not parse through
+    /// the `tairix_netconfig` engine `netstack` reads it with, so shipping it
+    /// would give the booted system a store its own stack rejects.
+    NetworkConfig,
 }
 
 impl fmt::Display for MkimageError {
@@ -149,6 +153,9 @@ impl fmt::Display for MkimageError {
             Self::RootPartition(err) => write!(f, "root partition: driver error {err:?}"),
             Self::Entropy(msg) => write!(f, "host entropy: {msg}"),
             Self::Unlock(err) => write!(f, "unlock descriptor: driver error {err:?}"),
+            Self::NetworkConfig => {
+                f.write_str("network configuration: the image's network.conf does not parse")
+            }
             Self::UsersDb(msg) => write!(f, "users database: {msg}"),
             Self::GroupsDb(msg) => write!(f, "group registry: {msg}"),
             Self::LibraryCatalog(msg) => write!(f, "program-library catalog: {msg}"),
@@ -483,9 +490,18 @@ pub struct RpiImage {
 ///
 /// # Errors
 ///
+/// `network_conf` is the `/System/Settings/Network/network.conf` the image
+/// ships. The caller composes it (so *which* interfaces an image manages is a
+/// property of the image, not of this writer) and this crate validates it
+/// through the one `tairix_netconfig` engine before planting it, so an image
+/// can never ship an addressing default its own stack would reject.
+///
+/// # Errors
+///
 /// Any [`MkimageError`] from the kernel conversion, descriptor
 /// provisioning, partition authoring, or assembly; the build fails closed
-/// rather than emitting a partial image.
+/// rather than emitting a partial image. [`MkimageError::NetworkConfig`] if
+/// `network_conf` does not parse.
 pub fn build_rpi_image(
     kernel_elf: &[u8],
     firmware: &[FirmwareFile],
@@ -493,6 +509,7 @@ pub fn build_rpi_image(
     profile: ImageProfile,
     drivers: &[(&[&[u8]], &[u8])],
     apps: &[(&[&[u8]], &[u8])],
+    network_conf: &str,
 ) -> Result<RpiImage, MkimageError> {
     let users_db = users_db(profile, entropy)?;
     let groups_db = groups_db(profile)?;
@@ -558,6 +575,7 @@ pub fn build_rpi_image(
             log_attestation_key: log_key_file.as_deref(),
             machine_id: machine_id.as_ref().map(<[u8; MACHINE_ID_LEN]>::as_slice),
             library_conf: &library_conf,
+            network_conf,
         },
     )?;
 
@@ -683,6 +701,12 @@ mod tests {
         elfflat::tests_support::sample_kernel(&[0xde, 0xad, 0xbe, 0xef])
     }
 
+    /// The canonical empty `network.conf` these image tests ship: they plant
+    /// no NIC driver, so the image manages no interface beyond loopback.
+    fn test_network_conf() -> String {
+        tairix_netconfig::NetworkConfig::default().render()
+    }
+
     fn test_firmware() -> Vec<FirmwareFile> {
         vec![
             FirmwareFile {
@@ -727,6 +751,7 @@ mod tests {
             ImageProfile::Installer,
             &[],
             &[],
+            &test_network_conf(),
         )
         .expect("image builds");
         assert_eq!(built.image.len(), IMAGE_SECTORS as usize * SECTOR_BYTES);
@@ -800,6 +825,7 @@ mod tests {
             ImageProfile::Installer,
             &[],
             &[],
+            &test_network_conf(),
         )
         .expect("image builds");
 
@@ -855,6 +881,7 @@ mod tests {
             ImageProfile::Installer,
             &[(store_path, BUNDLE)],
             &[],
+            &test_network_conf(),
         )
         .expect("image builds");
 
@@ -912,6 +939,7 @@ mod tests {
             ImageProfile::Installer,
             &[],
             &app_files,
+            &test_network_conf(),
         )
         .expect("image builds");
 
@@ -962,6 +990,7 @@ mod tests {
             ImageProfile::Installer,
             &[],
             &[],
+            &test_network_conf(),
         )
         .expect("image builds");
 
@@ -1006,6 +1035,7 @@ mod tests {
             ImageProfile::Installer,
             &[],
             &[],
+            &test_network_conf(),
         )
         .expect("image builds");
         let descriptor = read_unlock_descriptor(&built.image);
@@ -1033,6 +1063,7 @@ mod tests {
             ImageProfile::Debug,
             &[],
             &[],
+            &test_network_conf(),
         )
         .expect("image builds");
 
@@ -1099,6 +1130,7 @@ mod tests {
             ImageProfile::Installer,
             &[],
             &[],
+            &test_network_conf(),
         )
         .expect("image builds");
 
@@ -1165,6 +1197,7 @@ mod tests {
             ImageProfile::Debug,
             &[],
             &[],
+            &test_network_conf(),
         )
         .expect("image builds");
 
@@ -1218,6 +1251,7 @@ mod tests {
             ImageProfile::Installer,
             &[],
             &[],
+            &test_network_conf(),
         )
         .is_err());
     }

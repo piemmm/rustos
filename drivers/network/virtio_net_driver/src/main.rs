@@ -26,29 +26,19 @@
 //!    for this driver's matched node (a register window, a DMA constraint, and
 //!    the device interrupt line — and no more), and maps the single register
 //!    window the node named (never a build-time board constant).
-//! 2. Brings the virtio-net device online over the bus-agnostic virtio-MMIO
+//! 2. Brings the virtio-net device online over the bus-agnostic virtio
 //!    transport (`VirtioNet::open`) and binds the granted interrupt line.
-//! 3. Claims the first free id in the reserved device-channel endpoint block
-//!    and binds it **restricted-sender requiring `CAP_NET_RAW`**, so the
-//!    kernel refuses every caller but the stack at dispatch (defence in depth
-//!    atop the reserved-bind `CAP_IPC_BIND_PRIVILEGED` gate).
-//! 4. Publishes a `netchan` hardware-tree node carrying the claimed endpoint
-//!    as an `HwResource::endpoint` grant request, so `devmgr` observes it
-//!    and hands the stack the endpoint over the admin surface.
-//! 5. Parks on a wait set over **two** sources — the device-channel call
-//!    endpoint (the stack's `Facts`/`Attach`/`Service`/`Detach` doorbells) and
-//!    the device interrupt — and never busy-polls (`AGENTS.md` §2.23):
-//!    * a call wake decodes one `NetChannelRequest` and drives the pure
-//!      `NetChannelServer`; `Attach` maps the granted frame region, `Service`
-//!      drives one device doorbell over that region, `Detach` unmaps it;
-//!    * an interrupt wake acknowledges the device (deasserting the line so it
-//!      never storms) and, when a region is attached, wakes the stack with a
-//!      single `NetChannelNotify` `ipc_send` so it issues the next `Service`.
+//! 3. Hands the opened device to `tairix_netchan::serve`, the shared
+//!    device-channel serve loop every NIC driver process runs: it claims a
+//!    reserved endpoint bound restricted-sender, publishes the `netchan`
+//!    node `devmgr` hands to the stack, and parks on {call endpoint, device
+//!    IRQ} for the life of the driver (never busy-polls, `AGENTS.md` §2.23).
 //!
-//! A bring-up failure exits with a reserved fail-closed code, leaving the
-//! system without this NIC rather than wedged; the spawning supervisor decides
-//! whether to relaunch. On the host it is an inert stub so `cargo build
-//! --workspace`, clippy, and fmt still cover the file.
+//! A bring-up failure exits with a reserved fail-closed code
+//! (`tairix_netchan::exit`), leaving the system without this NIC rather than
+//! wedged; the spawning supervisor decides whether to relaunch. On the host it
+//! is an inert stub so `cargo build --workspace`, clippy, and fmt still cover
+//! the file.
 
 #![cfg_attr(freestanding, no_std)]
 #![cfg_attr(freestanding, no_main)]
@@ -57,73 +47,15 @@
 // --- Pure-Rust program --------------------------------------------------
 #[cfg(freestanding)]
 mod program {
-    use tairix_abi::driver::net::Net;
-    use tairix_abi::driver::net_channel::{
-        is_net_channel_endpoint, NetChannelNotify, NetChannelRequest, NET_CHANNEL_ENDPOINT_BASE,
-        NET_CHANNEL_MAX_REPLY, NET_CHANNEL_MAX_REQUEST,
-    };
     use tairix_abi::driver::sole_register_window;
     use tairix_abi::driver::virtio::VirtioHost;
     use tairix_abi::driver::virtio_pci::{virtio_pci_windows, VirtioPciWindows};
-    use tairix_abi::hwtree::HW_NODE_ROOT;
-    use tairix_abi::reply::{encode_status_reply, STATUS_REPLY_LEN};
-    use tairix_abi::waitset::{WaitSetOp, WaitSourceKind};
-    use tairix_abi::{
-        CapabilityId, DriverError, Errno, HwDeviceClass, HwMatchKey, HwNode, HwResource, MmioMapper,
-    };
+    use tairix_abi::{CapabilityId, DriverError, MmioMapper};
     use tairix_caps::CapabilitySet;
     use tairix_drvrt::{RtDriverHost, RtGrantSyscalls};
-    use tairix_log::{log, Event, EventId, Level};
-    use tairix_rt::LogSink;
+    use tairix_netchan::exit;
     use tairix_virtio::{MmioTransport, PciTransport, PciTransportWindows};
-    use tairix_virtio_net::{NetChannelServer, VirtioNet};
-
-    /// Exit code when the rt-backed driver host could not be built from the
-    /// kernel-delivered grants (the `resource_grants` query was refused or the
-    /// delivery did not fit). A reserved, fail-closed value.
-    const EXIT_NO_HOST: i32 = 80;
-
-    /// Exit code when the delivered grants do not name a usable register
-    /// window (a single MMIO aperture or the full set of four role-tagged
-    /// virtio-PCI config windows) and interrupt line this driver needs — an
-    /// unbound, mis-provisioned, or malformed node. A reserved, fail-closed
-    /// value.
-    const EXIT_NO_RESOURCES: i32 = 81;
-
-    /// Exit code when the device bring-up failed (the register window could
-    /// not be mapped, the window is not a virtio-MMIO device, the device
-    /// rejected the virtio init sequence, or the granted interrupt line could
-    /// not be bound — the serve loop parks on it, so a driver that cannot bind
-    /// it would degrade into the busy re-poll the charter forbids). A
-    /// reserved, fail-closed value.
-    const EXIT_BRINGUP_FAILED: i32 = 82;
-
-    /// Exit code when the device channel could not be stood up (no free
-    /// reserved endpoint id, the bind was refused, the `netchan` node could
-    /// not be published, or the wait-set could not be built). A reserved
-    /// value.
-    const EXIT_NO_SERVICE: i32 = 83;
-
-    /// Diagnostic event id: the one-shot "device channel published, serving"
-    /// beacon.
-    const NET_DRV_READY: EventId = EventId(4180);
-
-    /// Wait-set token for a device-channel call doorbell on the claimed
-    /// endpoint.
-    const CALL_TOKEN: u64 = 1;
-
-    /// Wait-set token for "the device interrupt fired".
-    const IRQ_TOKEN: u64 = 2;
-
-    /// Outstanding-call capacity of the device-channel endpoint. The stack
-    /// issues one control request at a time (it blocks on the reply); a small
-    /// queue absorbs a doorbell racing the previous reply — a fail-closed
-    /// memory bound.
-    const ENDPOINT_CAPACITY: usize = 4;
-
-    /// Wait forever on the serve wait-set (a doorbell or an interrupt arrives
-    /// whenever there is work).
-    const WAIT_FOREVER_NS: u64 = u64::MAX;
+    use tairix_virtio_net::VirtioNet;
 
     /// MSI-X table entry the kernel PCI probe routes this device's single
     /// interrupt to, and the entry the driver selects for the config change
@@ -158,79 +90,6 @@ mod program {
         caps
     }
 
-    /// Recover the [`Errno`] a syscall encoded as a negative register
-    /// (`-errno`); an unrecognised code fails closed as [`Errno::DeviceFault`]
-    /// rather than being guessed.
-    fn errno_from(ret: i64) -> Errno {
-        i32::try_from(-ret)
-            .ok()
-            .and_then(Errno::from_i32)
-            .unwrap_or(Errno::DeviceFault)
-    }
-
-    /// Claim the first free id in the reserved device-channel endpoint block
-    /// and bind it **restricted-sender requiring `CAP_NET_RAW`**: the kernel
-    /// admits a caller only if it holds that capability, so only the network
-    /// stack can post to this driver (defence in depth atop the
-    /// `CAP_IPC_BIND_PRIVILEGED` gate the reserved-id bind already demands).
-    /// `recv_caps` is empty — endpoint ownership already restricts receive to
-    /// this task. Returns the claimed id, or [`None`] if the whole block was
-    /// already taken (every id squatted on — fail closed).
-    fn claim_channel_endpoint() -> Option<u64> {
-        let mut send_caps = CapabilitySet::empty();
-        send_caps.insert(CapabilityId::NET_RAW);
-        let recv_caps = CapabilitySet::empty();
-        let mut id = NET_CHANNEL_ENDPOINT_BASE;
-        while is_net_channel_endpoint(id) {
-            let bound = tairix_rt::call_create(
-                id,
-                &send_caps,
-                &recv_caps,
-                NET_CHANNEL_MAX_REQUEST,
-                NET_CHANNEL_MAX_REPLY,
-                ENDPOINT_CAPACITY,
-            );
-            if bound == 0 {
-                return Some(id);
-            }
-            id += 1;
-        }
-        None
-    }
-
-    /// Publish the `netchan` hardware-tree node carrying the claimed
-    /// device-channel endpoint as a grant request, so `devmgr` observes it
-    /// (a hardware-tree generation bump) and hands the endpoint to the network
-    /// stack over the capability-gated admin surface. Returns the
-    /// kernel-assigned node id, or [`None`] on any refusal.
-    fn emit_netchan_node(endpoint: u64) -> Option<u32> {
-        let mut node = HwNode::new(0, HW_NODE_ROOT, HwDeviceClass::Network);
-        let key = HwMatchKey::compatible(b"tairix,netchan").ok()?;
-        node.push_match_key(key).ok()?;
-        node.push_resource(HwResource::endpoint(endpoint)).ok()?;
-        let emit = tairix_rt::hw_emit_node(&node);
-        if emit < 0 {
-            return None;
-        }
-        // `emit >= 0` is the kernel-assigned node id.
-        u32::try_from(emit).ok()
-    }
-
-    /// This driver's mapping of one shared frame region granted by the stack
-    /// in `Attach`.
-    struct Region {
-        /// Base virtual address of the [`shm_map`](tairix_rt::shm_map)ping.
-        base: u64,
-        /// Full mapped byte length — page-rounded by the kernel, so possibly
-        /// larger than the ring geometry — released verbatim by the matching
-        /// `shm_unmap`.
-        len: usize,
-        /// The exclusive ring view: the first `geometry.region_len()` bytes of
-        /// the mapping (a subset of `len`), which the `Service` doorbell binds
-        /// the frame rings across.
-        bytes: &'static mut [u8],
-    }
-
     /// Program entry point. `tairix-rt`'s `_start` calls it once the runtime
     /// is set up and routes its return value through the `exit` syscall.
     ///
@@ -241,10 +100,10 @@ mod program {
         // DMA carve is coherent kernel-side and no cache-maintenance shim is
         // supplied here (`coherency = None`, keeping the program neutral).
         let Ok(host) = RtDriverHost::from_grants_query(driver_caps(), RtGrantSyscalls, None) else {
-            return EXIT_NO_HOST;
+            return exit::NO_HOST;
         };
         let Some(irq_line) = host.irq_line() else {
-            return EXIT_NO_RESOURCES;
+            return exit::NO_RESOURCES;
         };
 
         // Bind the device interrupt line the serve loop parks on. This is the
@@ -255,7 +114,7 @@ mod program {
         // bound handle).
         let irq_ret = tairix_rt::irq_bind(irq_line);
         if irq_ret <= 0 {
-            return EXIT_BRINGUP_FAILED;
+            return exit::BRINGUP_FAILED;
         }
         #[allow(clippy::cast_sign_loss)] // `irq_ret > 0` is the minted IrqHandle.
         let irq_handle = irq_ret as u64;
@@ -269,34 +128,34 @@ mod program {
         match virtio_pci_windows(host.resources()) {
             Ok(windows) => {
                 let Some(transport) = build_pci_transport(&host, &windows) else {
-                    return EXIT_BRINGUP_FAILED;
+                    return exit::BRINGUP_FAILED;
                 };
                 let vhost: &dyn VirtioHost = &host;
                 let Ok(net) = VirtioNet::open(transport, vhost) else {
-                    return EXIT_BRINGUP_FAILED;
+                    return exit::BRINGUP_FAILED;
                 };
-                serve(net, irq_handle)
+                tairix_netchan::serve(net, irq_handle)
             }
             // No role-tagged window at all: a single-aperture MMIO delivery.
             Err(DriverError::NotFound) => {
                 let Ok((base, len)) = sole_register_window(host.resources()) else {
-                    return EXIT_NO_RESOURCES;
+                    return exit::NO_RESOURCES;
                 };
                 let Ok(window) = host.map_window(base, len) else {
-                    return EXIT_BRINGUP_FAILED;
+                    return exit::BRINGUP_FAILED;
                 };
                 let Ok(transport) = MmioTransport::new(window) else {
-                    return EXIT_BRINGUP_FAILED;
+                    return exit::BRINGUP_FAILED;
                 };
                 let vhost: &dyn VirtioHost = &host;
                 let Ok(net) = VirtioNet::open(transport, vhost) else {
-                    return EXIT_BRINGUP_FAILED;
+                    return exit::BRINGUP_FAILED;
                 };
-                serve(net, irq_handle)
+                tairix_netchan::serve(net, irq_handle)
             }
             // Some virtio-PCI windows but not the full four — a malformed,
             // mis-provisioned node. Fail closed rather than half-bind.
-            Err(_) => EXIT_NO_RESOURCES,
+            Err(_) => exit::NO_RESOURCES,
         }
     }
 
@@ -329,204 +188,6 @@ mod program {
         // it back. Writes only the driver's own mapped common window.
         transport.enable_msix(MSIX_ENTRY);
         Some(transport)
-    }
-
-    /// Stand up the device-channel service over an opened virtio-net device,
-    /// whatever transport backs it: claim the reserved endpoint, publish the
-    /// `netchan` node, build the wait set over the call endpoint and the bound
-    /// interrupt, and run the serve loop for the life of the driver.
-    ///
-    /// Generic over the [`Net`] device so the MMIO and PCI transports share
-    /// exactly one service path (no per-bus duplication). Never returns on the
-    /// success path; any set-up refusal exits fail-closed.
-    fn serve<N: Net>(net: N, irq_handle: u64) -> i32 {
-        let Some(endpoint) = claim_channel_endpoint() else {
-            return EXIT_NO_SERVICE;
-        };
-        if emit_netchan_node(endpoint).is_none() {
-            return EXIT_NO_SERVICE;
-        }
-
-        let set = tairix_rt::waitset_create();
-        if set < 0 {
-            return EXIT_NO_SERVICE;
-        }
-        #[allow(clippy::cast_sign_loss)] // `set >= 0` is the wait-set handle.
-        let set = set as u64;
-        if tairix_rt::waitset_ctl(
-            set,
-            WaitSetOp::Add,
-            WaitSourceKind::Endpoint,
-            endpoint,
-            CALL_TOKEN,
-        ) != 0
-            || tairix_rt::waitset_ctl(
-                set,
-                WaitSetOp::Add,
-                WaitSourceKind::Irq,
-                irq_handle,
-                IRQ_TOKEN,
-            ) != 0
-        {
-            return EXIT_NO_SERVICE;
-        }
-
-        log(
-            &LogSink,
-            &Event {
-                level: Level::Info,
-                id: NET_DRV_READY,
-                message: "virtio-net: device channel published, serving",
-                fields: &[],
-            },
-        );
-
-        serve_loop(NetChannelServer::new(net), set, endpoint)
-    }
-
-    /// Park on the wait set and serve device-channel doorbells and device
-    /// interrupts for the life of the driver. Never returns on the success
-    /// path; a wait-set fault exits fail-closed.
-    fn serve_loop<N: Net>(mut server: NetChannelServer<N>, set: u64, endpoint: u64) -> i32 {
-        let mut region: Option<Region> = None;
-        let mut request = [0u8; NET_CHANNEL_MAX_REQUEST];
-        loop {
-            let mut token = 0u64;
-            let woke = tairix_rt::waitset_wait(set, WAIT_FOREVER_NS, &mut token);
-            if woke < 0 {
-                return EXIT_NO_SERVICE;
-            }
-            if woke != 0 {
-                // A spurious/lapsed wake with no ready source; re-park.
-                continue;
-            }
-            match token {
-                IRQ_TOKEN => on_interrupt(&mut server),
-                CALL_TOKEN => serve_call(&mut server, endpoint, &mut request, &mut region),
-                _ => {}
-            }
-        }
-    }
-
-    /// Acknowledge the device interrupt (deasserting the line so it never
-    /// storms while the stack has not yet serviced) and, when a frame region
-    /// is attached, wake the stack with a single receive-frames notify. The
-    /// driver never services the rings here — it only rings the stack's
-    /// doorbell; the stack owns the region and issues the next `Service`.
-    fn on_interrupt<N: Net>(server: &mut NetChannelServer<N>) {
-        server.net_mut().ack_interrupt();
-        if let Some(notify_endpoint) = server.notify_endpoint() {
-            let _ = tairix_rt::ipc_send(notify_endpoint, &NetChannelNotify::encode());
-        }
-    }
-
-    /// Serve one device-channel doorbell on the claimed endpoint: receive the
-    /// request, drive the pure [`NetChannelServer`], and reply. A transient
-    /// recv error simply drops the doorbell (the stack retries); a decode
-    /// failure is answered with the typed error so the stack sees the exact
-    /// refusal.
-    fn serve_call<N: Net>(
-        server: &mut NetChannelServer<N>,
-        endpoint: u64,
-        request: &mut [u8; NET_CHANNEL_MAX_REQUEST],
-        region: &mut Option<Region>,
-    ) {
-        let mut ticket = 0u64;
-        let Ok(request_len) = tairix_rt::call_recv(endpoint, request, &mut ticket) else {
-            return;
-        };
-        match NetChannelRequest::decode(&request[..request_len]) {
-            Ok(NetChannelRequest::Facts) => {
-                let reply = server.facts_reply();
-                let _ = tairix_rt::call_reply(endpoint, ticket, &reply);
-            }
-            Ok(NetChannelRequest::Attach(params)) => {
-                let status = attach(server, params, region);
-                let _ = tairix_rt::call_reply(endpoint, ticket, &status);
-            }
-            Ok(NetChannelRequest::Service) => {
-                let reply = match region.as_mut() {
-                    Some(region) => server.service_reply(region.bytes),
-                    // Detached (or region lost): the server answers
-                    // `NotConnected` before it ever touches the slice.
-                    None => server.service_reply(&mut []),
-                };
-                let _ = tairix_rt::call_reply(endpoint, ticket, &reply);
-            }
-            Ok(NetChannelRequest::Detach) => {
-                let reply = server.detach();
-                if let Some(region) = region.take() {
-                    let _ = tairix_rt::shm_unmap(region.base, region.len);
-                }
-                let _ = tairix_rt::call_reply(endpoint, ticket, &reply);
-            }
-            Err(err) => {
-                let _ = tairix_rt::call_reply(endpoint, ticket, &encode_status_reply(Err(err)));
-            }
-        }
-    }
-
-    /// Map the frame region the stack granted, validate its length against the
-    /// agreed geometry, and attach the pure server. On any refusal the region
-    /// is unmapped and no attach state is kept (fail closed — a rejected
-    /// attach never half-binds).
-    fn attach<N: Net>(
-        server: &mut NetChannelServer<N>,
-        params: tairix_abi::driver::net_channel::AttachParams,
-        region: &mut Option<Region>,
-    ) -> [u8; STATUS_REPLY_LEN] {
-        // A re-attach without a prior detach releases the old mapping first.
-        if let Some(previous) = region.take() {
-            let _ = tairix_rt::shm_unmap(previous.base, previous.len);
-        }
-        let mut len_out = 0u64;
-        let mapped = tairix_rt::shm_map(params.region_grant, &mut len_out);
-        if mapped < 0 {
-            return encode_status_reply(Err(errno_from(mapped)));
-        }
-        // A non-negative result is the base virtual address of the mapping;
-        // `len_out` is the kernel's own record of the mapped byte length.
-        // The kernel maps whole pages, so a region whose agreed geometry is
-        // not a page multiple is mapped rounded *up* — `map_len` is that
-        // actual mapped length (used for the exact `shm_unmap`), which must
-        // be at least the geometry needs.
-        let (Ok(base), Ok(addr), Ok(map_len)) = (
-            u64::try_from(mapped),
-            usize::try_from(mapped),
-            usize::try_from(len_out),
-        ) else {
-            return encode_status_reply(Err(Errno::DeviceFault));
-        };
-        let expected = params.geometry.region_len();
-        if map_len < expected {
-            let _ = tairix_rt::shm_unmap(base, map_len);
-            return encode_status_reply(Err(Errno::BufferTooSmall));
-        }
-        // SAFETY: `shm_map` mapped `map_len` bytes (>= `expected`, verified
-        // above) of zeroed, cacheable, RW (non-executable) memory into this
-        // process at `addr`. The ring view binds only the first `expected`
-        // bytes — exactly the agreed geometry — so the exclusive `&mut [u8]`
-        // over `expected` bytes is a sound subset of the mapping (any
-        // page-rounding tail beyond it is left untouched). The region is
-        // owned by this process until the matching `shm_unmap` (on detach, a
-        // re-attach, or a rejected attach below) releases the full `map_len`,
-        // and nothing else in this address space aliases it. The stack maps
-        // the same frames through its own grant and never touches ring bytes
-        // across a `Service` doorbell.
-        let bytes = unsafe { core::slice::from_raw_parts_mut(addr as *mut u8, expected) };
-        let status = server.attach(params);
-        if server.is_attached() {
-            *region = Some(Region {
-                base,
-                len: map_len,
-                bytes,
-            });
-        } else {
-            // The server refused (geometry too small for the device); drop the
-            // mapping it will never use.
-            let _ = tairix_rt::shm_unmap(base, map_len);
-        }
-        status
     }
 
     tairix_rt::entry!(main);

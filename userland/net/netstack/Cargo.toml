@@ -65,4 +65,4 @@ tairix-fuzzseed = { path = "../../../tests/fuzzseed", version = "=0.0.0" }
 # The driver-side `NetChannelServer` the host round-trip test drives the
 # `NetChannelClient` against, so the two halves of `netchan-v1` are proven
 # against the one shared server (§2.2). Test scaffolding only.
-tairix-virtio-net = { path = "../../../lib/virtio_net", version = "=0.0.0" }
+tairix-netchan = { path = "../../../lib/netchan", version = "=0.0.0" }

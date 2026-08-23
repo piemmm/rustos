@@ -115,15 +115,60 @@ region itself; that remains the stack's responsibility.
 | Driver                    | Crate                           | Supported buses     | Status                                             |
 |---------------------------|---------------------------------|---------------------|----------------------------------------------------|
 | [virtio-net](./virtio.md) | `tairix-drv-network-virtio-net` | virtio (PCI / MMIO) | ring transport + facts; receive-checksum offload (`VIRTIO_NET_F_GUEST_CSUM` → `RX_CSUM_VALIDATED`); TCP transmit-checksum offload (`VIRTIO_NET_F_CSUM` → `TX_CSUM_TCP`); TCP segmentation offload (`VIRTIO_NET_F_HOST_TSO4`+`TSO6` → `TX_SEGMENT_TCP`); mergeable receive buffers (`VIRTIO_NET_F_MRG_RXBUF`); multiqueue receive (`VIRTIO_NET_F_MQ` + `VIRTIO_NET_F_CTRL_VQ`) |
+| GENET v5                  | `tairix-drv-network-genet`       | platform MMIO (aarch64) | ring transport + facts; MDIO/PHY autonegotiation at 10/100/1000; no offloads advertised (see below) |
 
-The virtio-net device engine (`VirtioNet`) lives in `lib/virtio_net`
-so a user-space **driver process** can link it without depending on a
-`drivers/*` crate: `drivers/network/virtio_net_driver` is that process
-— it brings the device up, claims a reserved device-channel endpoint,
-emits the `netchan` hardware-tree node the device manager binds to the
-stack, and serves the `netchan-v1` contract over a wait-set loop on
-`{call endpoint, device IRQ}`. The device manager autobinds a
-discovered `netchan` node to `netstack` (`plans/NETWORK.md` N4d).
+Both driver *processes* share one control plane: `lib/netchan` carries the
+`netchan-v1` server (`NetChannelServer`) and the process loop that claims a
+reserved device-channel endpoint, emits the `netchan` hardware-tree node the
+device manager binds to the stack, and parks on `{call endpoint, device IRQ}`.
+The device manager autobinds a discovered `netchan` node to `netstack`
+(`plans/NETWORK.md` N4d). Each driver is therefore device bring-up plus one
+`netchan::serve` call.
+
+The virtio-net device engine (`VirtioNet`) lives in `lib/virtio_net` so the
+kernel's bootstrap-floor discovery can share its device id;
+`drivers/network/virtio_net_driver` is the process that links it.
+
+### GENET v5 (Raspberry Pi 4B on-board gigabit Ethernet)
+
+`drivers/network/genet` drives the BCM2711's `brcm,bcm2711-genet-v5` UniMAC
+and the external BCM54213PE RGMII PHY behind its embedded MDIO master. Unlike
+virtio-net it is one crate with both targets — a host-testable `lib` and the
+`Run` binary — because a NIC sits above the bootstrap floor and so has no
+charter-legal non-driver consumer for a `lib/*` device-support crate
+(`AGENTS.md` §2.22).
+
+Its descriptor rings live in the controller's **own on-chip RAM** inside the
+register aperture, so the only DMA is frame buffers: one 256 KiB carve holding
+64 receive and 64 transmit buffers of 2 KiB, taken once at bring-up and reused
+for every frame. Receive descriptors are armed once and never rewritten — the
+consumer index alone hands a slot back — so the hot path writes one register
+per frame.
+
+Bring-up refuses any core that does not report the GENET v5 revision, masks
+the level-2 interrupt controller wholesale *before* programming anything, and
+afterwards unmasks exactly `{RXDMA done, TXDMA done, link up, link down}`. A
+link event re-resolves and re-programs the negotiated link on the next service
+doorbell, so a cable change needs no driver restart.
+
+It advertises **no offloads**. The GENET has checksum and segmentation
+engines, but a driver may advertise only what it has *verified* it can do
+(`plans/NETWORK.md` §0) and QEMU models no GENET, so claiming them would be a
+claim about untested silicon. The stack's software path is the canonical
+implementation, so the NIC is complete without them.
+
+#### The link-layer address comes from discovery
+
+The Pi's factory MAC is not readable from the GENET's registers: the platform
+firmware publishes it through the device tree's
+`mac-address` / `local-mac-address` ethernet-controller binding. The hardware
+tree carries it to the driver as a `HwResourceKind::LinkAddress` resource on
+the matched node — the one carrier that reaches a driver *process*, since
+`resource_grants` delivers resources rather than node snapshots. It is a
+discovered *fact*, not a handle: `HwResourceKind::required_capability` reports
+`None` for it, so holding it authorises nothing. A node that publishes no
+address fails the bring-up closed; a NIC on an invented address would answer
+to the wrong DHCP reservation and form the wrong IPv6 link-local.
 
 ### Receive-checksum offload
 

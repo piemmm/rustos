@@ -52,6 +52,12 @@ pub struct BusLevel<'a> {
     /// This node's raw `ranges` value, mapping its children's address
     /// space into its parent's (`None` when absent — untranslatable).
     pub ranges: Option<&'a [u8]>,
+    /// This node's raw `dma-ranges` value: the window a device *on this bus*
+    /// may reach by DMA (`None` when absent — the bus declares no reach).
+    /// Devicetree Spec v0.4 §2.3.9 puts the property on the bus, not on the
+    /// mastering device, so a node's DMA constraint is read from its parent
+    /// level rather than from itself.
+    pub dma_ranges: Option<&'a [u8]>,
 }
 
 impl BusLevel<'_> {
@@ -61,6 +67,7 @@ impl BusLevel<'_> {
         addr_cells: 2,
         size_cells: 1,
         ranges: None,
+        dma_ranges: None,
     };
 }
 
@@ -73,6 +80,7 @@ pub fn bus_level<'a>(node: &Node<'a>) -> BusLevel<'a> {
         addr_cells: cells_property(node, "#address-cells").unwrap_or(2),
         size_cells: cells_property(node, "#size-cells").unwrap_or(1),
         ranges: node.property("ranges").map(|p| p.value()),
+        dma_ranges: node.property("dma-ranges").map(|p| p.value()),
     }
 }
 
@@ -196,6 +204,23 @@ pub fn dma_ranges_aperture(
     parent_address: u32,
     child_size: u32,
 ) -> Option<(u64, u64, u64)> {
+    dma_ranges_aperture_of(
+        node.property("dma-ranges")?.value(),
+        child_address,
+        parent_address,
+        child_size,
+    )
+}
+
+/// [`dma_ranges_aperture`] over an already-read `dma-ranges` `value`, so a
+/// node's own property and an ancestor [`BusLevel`]'s share one decode.
+#[must_use]
+pub fn dma_ranges_aperture_of(
+    value: &[u8],
+    child_address: u32,
+    parent_address: u32,
+    child_size: u32,
+) -> Option<(u64, u64, u64)> {
     if child_address == 0
         || child_address > 3
         || parent_address == 0
@@ -205,9 +230,8 @@ pub fn dma_ranges_aperture(
     {
         return None;
     }
-    let value = node.property("dma-ranges")?.value();
     let entry = ((child_address + parent_address + child_size) * 4) as usize;
-    if value.is_empty() || value.len() % entry != 0 {
+    if value.is_empty() || !value.len().is_multiple_of(entry) {
         return None;
     }
     let mut min_base: Option<u64> = None;

@@ -33,6 +33,7 @@
 
 use crate::blkio::{BlkStatus, FaultDomainState};
 use crate::driver::display::{DisplayFormat, DisplayMode};
+use crate::driver::net::MAC_ADDRESS_LEN;
 use crate::le::{put_u16, put_u32, put_u64, read_u16, read_u32, read_u64};
 use crate::{CapabilityId, Errno};
 
@@ -93,6 +94,11 @@ pub const HW_NODE_MAX_MATCH_KEYS: usize = 4;
 
 /// Maximum number of [`HwResource`]s a single node carries.
 pub const HW_NODE_MAX_RESOURCES: usize = 8;
+
+/// Bytes the fixed [`HwNode`] header occupies on the wire, before the
+/// match-key and resource arrays: `id`, `parent`, `address`, `class`, the two
+/// array counts, and the fault-domain health byte.
+pub const HW_NODE_HEADER_LEN: usize = 4 + 4 + 4 + 2 + 1 + 1 + 1;
 
 /// Device class of a hardware-tree node.
 ///
@@ -461,6 +467,24 @@ pub enum HwResourceKind {
     /// accelerated engine publishes its own register/DMA resources
     /// alongside — this kind describes only the dumb linear surface.
     Framebuffer = 7,
+    /// The device's **firmware-published link-layer address**: `base` carries
+    /// the 48-bit IEEE 802 address in its low six octets (octet 0 least
+    /// significant) and `len` is `1`.
+    ///
+    /// A network device's factory MAC is not readable from its own registers
+    /// on every part: on the BCM2711's GENET the platform firmware publishes
+    /// it (the device-tree `mac-address` / `local-mac-address`
+    /// ethernet-controller binding) and the driver programs it in. Carrying
+    /// it here is how a NIC driver autoloaded into user space learns the
+    /// address printed on the board rather than inventing one — the
+    /// [`Framebuffer`](Self::Framebuffer) precedent for a display's
+    /// platform-programmed mode, applied to a link identity.
+    ///
+    /// Unlike every other kind this is a *fact*, not a handle: there is no
+    /// syscall to resolve it against and it confers no authority, so
+    /// [`required_capability`](Self::required_capability) reports [`None`].
+    /// Recovered through [`HwResource::link_address`].
+    LinkAddress = 8,
 }
 
 /// CPU mapping policy for a linear framebuffer resource.
@@ -513,16 +537,18 @@ impl HwResourceKind {
             5 => Some(Self::Endpoint),
             6 => Some(Self::Shared),
             7 => Some(Self::Framebuffer),
+            8 => Some(Self::LinkAddress),
             _ => None,
         }
     }
 
-    /// The capability a driver must hold to be granted this resource
-    /// (resources are capability-grant requests, never
-    /// ambient handles;).
+    /// The capability a driver must hold to use this resource (resources are
+    /// capability-grant requests, never ambient handles), or [`None`] for a
+    /// kind that names a discovered *fact* rather than a handle and so
+    /// confers no authority at all.
     #[must_use]
-    pub const fn required_capability(self) -> CapabilityId {
-        match self {
+    pub const fn required_capability(self) -> Option<CapabilityId> {
+        Some(match self {
             // A register/framebuffer window (plain or geometry-carrying),
             // an x86 I/O port range, and an outbound bus window are all
             // mapped through the kernel's MMIO-map facility.
@@ -537,7 +563,10 @@ impl HwResourceKind {
             // shared-memory capability; the per-region grant (this resource)
             // scopes it to one region id.
             Self::Shared => CapabilityId::SHM,
-        }
+            // A link-layer address is read straight out of the grant record:
+            // no syscall resolves it and holding it authorises nothing.
+            Self::LinkAddress => return None,
+        })
     }
 }
 
@@ -693,6 +722,41 @@ impl HwResource {
         Self::new(HwResourceKind::Shared, id, 1, 0)
     }
 
+    /// The device's firmware-published link-layer address, packed into
+    /// `base` with octet 0 in the least-significant byte — the fact a
+    /// network-class node carries so its autoloaded driver programs the
+    /// address printed on the board rather than inventing one
+    /// ([`HwResourceKind::LinkAddress`]).
+    #[must_use]
+    pub fn link_address(octets: [u8; MAC_ADDRESS_LEN]) -> Self {
+        let mut packed = 0u64;
+        let mut i = MAC_ADDRESS_LEN;
+        while i > 0 {
+            i -= 1;
+            packed = (packed << 8) | u64::from(octets[i]);
+        }
+        Self::new(HwResourceKind::LinkAddress, packed, 1, 0)
+    }
+
+    /// The link-layer address a [`HwResourceKind::LinkAddress`] resource
+    /// carries, or [`None`] for any other kind or an all-zero address.
+    ///
+    /// An all-zero address is neither a valid unicast nor the broadcast
+    /// address, so it is the encoding of "the emitter reported none" and is
+    /// refused rather than handed to a driver that would program it into a
+    /// MAC (fail closed).
+    #[must_use]
+    pub fn link_address_octets(&self) -> Option<[u8; MAC_ADDRESS_LEN]> {
+        if self.kind() != Some(HwResourceKind::LinkAddress) {
+            return None;
+        }
+        let mut octets = [0u8; MAC_ADDRESS_LEN];
+        for (i, slot) in octets.iter_mut().enumerate() {
+            *slot = u8::try_from((self.base >> (8 * i)) & 0xFF).unwrap_or(0);
+        }
+        (octets != [0u8; MAC_ADDRESS_LEN]).then_some(octets)
+    }
+
     /// A linear scan-out surface at CPU-physical `base`, programmed with
     /// `mode` — the geometry-carrying window a display-class node
     /// publishes so its autoloaded driver can map and drive the surface
@@ -803,7 +867,12 @@ impl HwResource {
     fn new_xlate(kind: HwResourceKind, base: u64, len: u64, flags: u32, xlate: u64) -> Self {
         Self {
             kind: kind.as_u16(),
-            capability: kind.required_capability().as_u16(),
+            // Capability ids are assigned from `1`, so `0` names none: the
+            // encoding for a resource that confers no authority.
+            capability: match kind.required_capability() {
+                Some(id) => id.as_u16(),
+                None => 0,
+            },
             flags,
             base,
             len,
@@ -818,13 +887,18 @@ impl HwResource {
         HwResourceKind::from_u16(self.kind)
     }
 
-    /// The capability a driver must hold to be granted this resource.
+    /// The capability a driver must hold to use this resource, or [`None`]
+    /// when it names a discovered fact that confers no authority (capability
+    /// ids are assigned from `1`, so the stored `0` names none).
     ///
     /// # Errors
     ///
     /// [`Errno::OutOfRange`] if the stored capability id is out of range.
-    pub fn required_capability(&self) -> Result<CapabilityId, Errno> {
-        CapabilityId::from_raw(self.capability)
+    pub fn required_capability(&self) -> Result<Option<CapabilityId>, Errno> {
+        if self.capability == 0 {
+            return Ok(None);
+        }
+        CapabilityId::from_raw(self.capability).map(Some)
     }
 
     /// Resource base: the MMIO/port base address, or the first IRQ line.
@@ -1302,10 +1376,9 @@ pub struct HwNode {
 }
 
 impl HwNode {
-    /// Encoded size on the wire: a 17-byte header (16 fixed fields plus the
-    /// fault-domain health byte) followed by the full fixed-size match-key
-    /// and resource arrays.
-    pub const WIRE_LEN: usize = 17
+    /// Encoded size on the wire: a [`HW_NODE_HEADER_LEN`]-byte header
+    /// followed by the full fixed-size match-key and resource arrays.
+    pub const WIRE_LEN: usize = HW_NODE_HEADER_LEN
         + HW_NODE_MAX_MATCH_KEYS * HwMatchKey::WIRE_LEN
         + HW_NODE_MAX_RESOURCES * HwResource::WIRE_LEN;
 
@@ -1467,7 +1540,7 @@ impl HwNode {
         out[14] = self.match_key_count;
         out[15] = self.resource_count;
         out[16] = self.fault_health;
-        let mut off = 17;
+        let mut off = HW_NODE_HEADER_LEN;
         for key in &self.match_keys {
             out[off..off + HwMatchKey::WIRE_LEN].copy_from_slice(&key.to_le_bytes());
             off += HwMatchKey::WIRE_LEN;
@@ -1507,7 +1580,7 @@ impl HwNode {
         // unknown discriminant is stored as Offline.
         let fault_health = FaultDomainState::from_u8_fail_closed(bytes[16]).as_u8();
         let mut match_keys = [HwMatchKey::EMPTY; HW_NODE_MAX_MATCH_KEYS];
-        let mut off = 17;
+        let mut off = HW_NODE_HEADER_LEN;
         for slot in &mut match_keys {
             *slot = HwMatchKey::from_bytes(&bytes[off..off + HwMatchKey::WIRE_LEN])?;
             off += HwMatchKey::WIRE_LEN;
@@ -2132,38 +2205,20 @@ mod tests {
 
     #[test]
     fn resource_capability_mapping_is_correct() {
-        assert_eq!(
-            HwResourceKind::Mmio.required_capability(),
-            CapabilityId::MMIO_MAP
-        );
-        assert_eq!(
-            HwResourceKind::Port.required_capability(),
-            CapabilityId::MMIO_MAP
-        );
-        assert_eq!(
-            HwResourceKind::Irq.required_capability(),
-            CapabilityId::IRQ_BIND
-        );
-        assert_eq!(
-            HwResourceKind::Dma.required_capability(),
-            CapabilityId::MEM_DMA
-        );
-        assert_eq!(
-            HwResourceKind::BusWindow.required_capability(),
-            CapabilityId::MMIO_MAP
-        );
-        assert_eq!(
-            HwResourceKind::Endpoint.required_capability(),
-            CapabilityId::IPC_ENDPOINT
-        );
-        assert_eq!(
-            HwResourceKind::Shared.required_capability(),
-            CapabilityId::SHM
-        );
-        assert_eq!(
-            HwResourceKind::Framebuffer.required_capability(),
-            CapabilityId::MMIO_MAP
-        );
+        for (kind, expected) in [
+            (HwResourceKind::Mmio, Some(CapabilityId::MMIO_MAP)),
+            (HwResourceKind::Port, Some(CapabilityId::MMIO_MAP)),
+            (HwResourceKind::Irq, Some(CapabilityId::IRQ_BIND)),
+            (HwResourceKind::Dma, Some(CapabilityId::MEM_DMA)),
+            (HwResourceKind::BusWindow, Some(CapabilityId::MMIO_MAP)),
+            (HwResourceKind::Endpoint, Some(CapabilityId::IPC_ENDPOINT)),
+            (HwResourceKind::Shared, Some(CapabilityId::SHM)),
+            (HwResourceKind::Framebuffer, Some(CapabilityId::MMIO_MAP)),
+            // A discovered fact, not a handle: nothing gates observing it.
+            (HwResourceKind::LinkAddress, None),
+        ] {
+            assert_eq!(kind.required_capability(), expected, "{kind:?}");
+        }
     }
 
     #[test]
@@ -2179,7 +2234,7 @@ mod tests {
         assert_eq!(fb.kind(), Some(HwResourceKind::Framebuffer));
         assert_eq!(fb.base(), 0x4000_0000);
         assert_eq!(fb.length(), 5120 * 720);
-        assert_eq!(fb.required_capability(), Ok(CapabilityId::MMIO_MAP));
+        assert_eq!(fb.required_capability(), Ok(Some(CapabilityId::MMIO_MAP)));
         assert_eq!(fb.register_window_base(), Some(0x4000_0000));
         assert_eq!(fb.framebuffer_mode(), Ok(mode));
         assert_eq!(HwResource::from_bytes(&fb.to_le_bytes()).unwrap(), fb);
@@ -2335,7 +2390,10 @@ mod tests {
         assert_eq!(ep.kind(), Some(HwResourceKind::Endpoint));
         assert_eq!(ep.base(), 0xC0FF_EE01);
         assert_eq!(ep.length(), 1);
-        assert_eq!(ep.required_capability(), Ok(CapabilityId::IPC_ENDPOINT));
+        assert_eq!(
+            ep.required_capability(),
+            Ok(Some(CapabilityId::IPC_ENDPOINT))
+        );
         assert_eq!(HwResource::from_bytes(&ep.to_le_bytes()).unwrap(), ep);
         // An endpoint grant covers exactly its own id and no neighbour, and
         // never a different resource kind.
@@ -2353,7 +2411,7 @@ mod tests {
         assert_eq!(region.kind(), Some(HwResourceKind::Shared));
         assert_eq!(region.base(), 0x5EED_0001);
         assert_eq!(region.length(), 1);
-        assert_eq!(region.required_capability(), Ok(CapabilityId::SHM));
+        assert_eq!(region.required_capability(), Ok(Some(CapabilityId::SHM)));
         assert_eq!(
             HwResource::from_bytes(&region.to_le_bytes()).unwrap(),
             region
@@ -2380,7 +2438,7 @@ mod tests {
         assert_eq!(win.base(), 0x6_0000_0000);
         assert_eq!(win.length(), 0x4000_0000);
         assert_eq!(win.translated_base(), 0xc000_0000);
-        assert_eq!(win.required_capability(), Ok(CapabilityId::MMIO_MAP));
+        assert_eq!(win.required_capability(), Ok(Some(CapabilityId::MMIO_MAP)));
         let back = HwResource::from_bytes(&win.to_le_bytes()).expect("decode");
         assert_eq!(back, win);
         assert_eq!(back.translated_base(), 0xc000_0000);
@@ -2400,7 +2458,7 @@ mod tests {
         assert_eq!(dma.base(), 0xc000_0000);
         assert_eq!(dma.length(), 0xc000_0000);
         assert_eq!(dma.translated_base(), 0);
-        assert_eq!(dma.required_capability(), Ok(CapabilityId::MEM_DMA));
+        assert_eq!(dma.required_capability(), Ok(Some(CapabilityId::MEM_DMA)));
         let back = HwResource::from_bytes(&dma.to_le_bytes()).expect("decode");
         assert_eq!(back, dma);
 
@@ -2422,17 +2480,17 @@ mod tests {
         assert_eq!(mmio.kind(), Some(HwResourceKind::Mmio));
         assert_eq!(mmio.base(), 0x1000_0000);
         assert_eq!(mmio.length(), 0x1000);
-        assert_eq!(mmio.required_capability(), Ok(CapabilityId::MMIO_MAP));
+        assert_eq!(mmio.required_capability(), Ok(Some(CapabilityId::MMIO_MAP)));
         let back = HwResource::from_bytes(&mmio.to_le_bytes()).expect("decode");
         assert_eq!(back, mmio);
-        assert_eq!(back.required_capability(), Ok(CapabilityId::MMIO_MAP));
+        assert_eq!(back.required_capability(), Ok(Some(CapabilityId::MMIO_MAP)));
 
         let irq = HwResource::irq(33, 1);
-        assert_eq!(irq.required_capability(), Ok(CapabilityId::IRQ_BIND));
+        assert_eq!(irq.required_capability(), Ok(Some(CapabilityId::IRQ_BIND)));
         assert_eq!(HwResource::from_bytes(&irq.to_le_bytes()).unwrap(), irq);
 
         let dma = HwResource::dma(0, 0);
-        assert_eq!(dma.required_capability(), Ok(CapabilityId::MEM_DMA));
+        assert_eq!(dma.required_capability(), Ok(Some(CapabilityId::MEM_DMA)));
         assert_eq!(HwResource::from_bytes(&dma.to_le_bytes()).unwrap(), dma);
     }
 
@@ -2538,7 +2596,7 @@ mod tests {
         assert_eq!(back.handle, 7);
         assert_eq!(
             back.resource.required_capability(),
-            Ok(CapabilityId::MMIO_MAP)
+            Ok(Some(CapabilityId::MMIO_MAP))
         );
 
         // A translating outbound bus-window grant preserves its far-side base.
@@ -2596,7 +2654,7 @@ mod tests {
         assert_eq!(back.match_keys()[0].vendor(), 0x1af4);
         assert_eq!(
             back.resources()[1].required_capability(),
-            Ok(CapabilityId::IRQ_BIND)
+            Ok(Some(CapabilityId::IRQ_BIND))
         );
     }
 
@@ -2653,10 +2711,32 @@ mod tests {
         assert_eq!(HwMatchKey::WIRE_LEN, 76);
         assert_eq!(HwResource::WIRE_LEN, 32);
         assert_eq!(GrantedResource::WIRE_LEN, 40);
-        // 17-byte header (the 16 fixed fields plus the fault-domain health
-        // byte) followed by the fixed match-key and resource arrays.
+        // The fixed node header followed by the fixed match-key and resource
+        // arrays.
+        assert_eq!(HW_NODE_HEADER_LEN, 17);
         assert_eq!(HwNode::WIRE_LEN, 577);
         assert_eq!(HwTreeHeader::WIRE_LEN, 16);
+    }
+
+    #[test]
+    fn link_address_resource_round_trips_and_confers_no_authority() {
+        let mac = [0xDC, 0xA6, 0x32, 0x11, 0x22, 0x33];
+        let resource = HwResource::link_address(mac);
+        assert_eq!(resource.kind(), Some(HwResourceKind::LinkAddress));
+        assert_eq!(resource.link_address_octets(), Some(mac));
+        // A fact, not a handle: nothing must be held to observe it.
+        assert_eq!(resource.required_capability(), Ok(None));
+        let decoded = HwResource::from_bytes(&resource.to_le_bytes()).expect("decodes");
+        assert_eq!(decoded.link_address_octets(), Some(mac));
+
+        // An all-zero address is the "none reported" encoding, refused
+        // rather than handed to a driver that would program it into a MAC.
+        assert_eq!(
+            HwResource::link_address([0; MAC_ADDRESS_LEN]).link_address_octets(),
+            None
+        );
+        // Every other kind reports no address at all.
+        assert_eq!(HwResource::irq(7, 1).link_address_octets(), None);
     }
 
     #[test]

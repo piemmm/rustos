@@ -64,23 +64,23 @@ use tairix_abi::{
     DRIVER_MANIFEST_MAGIC, DRIVER_MANIFEST_MAX_BIND_KEYS, DRIVER_MANIFEST_MAX_CAPABILITIES,
     DRIVER_REGISTER_REPLY_MAGIC, DRIVER_REGISTER_STATUS_OK, DRIVER_SIGNATURE_LEN,
     DRIVER_SIGNER_PUBKEY_LEN, ENCODED_QUERY_TABLE_LEN, FS_ATTR_KEY_MAX, FS_ATTR_VALUE_MAX,
-    FS_MODE_MASK, HOSTNAME_MAX, HWTREE_VERSION_V1, HW_COMPATIBLE_MAX, HW_NODE_MAX_MATCH_KEYS,
-    HW_NODE_MAX_RESOURCES, HW_NODE_ROOT, IPC_MESSAGE_HEADER_MAGIC, KEY_CLASS_CHAR, KEY_CLASS_NAMED,
-    KEY_INPUT_MAGIC, KIND_KEY_PRESSED, KIND_KEY_RELEASED, KIND_MOVED_BY, KIND_PRESSED,
-    KIND_RELEASED, KIND_SCROLLED, LIBRARY_ICON_MAX, LIBREF_MAX, LOAD_FLAG_PIE, LOAD_MAGIC,
-    LOAD_MAX_NEEDED, LOAD_MAX_SEGMENTS, LOG_FIELDS_MAX, LOG_FIELD_KEY_MAX, LOG_FIELD_VALUE_MAX,
-    LOG_LEVEL_MAX, LOG_MESSAGE_MAX, LOG_RECORD_HEADER_LEN, LOG_RECORD_MAX, MACHINE_ID_LEN,
-    MANIFEST_MAGIC, MANIFEST_MAX_CAPABILITIES, MIME_ENTRY_LEN, MIME_TYPE_MAX, MOD_ALT, MOD_CTRL,
-    MOD_MASK, MOD_META, MOD_SHIFT, MOUNT_FSTYPE_MAX, MOUNT_SOURCE_MAX, MOUNT_TARGET_MAX,
-    MOUNT_VOLUME_ID_LEN, NANOS_PER_SEC, POINTER_INPUT_MAGIC, PORT_NAME_MAX_LEN, PROCESS_CPU_NONE,
-    PROCESS_NAME_MAX, PROCESS_START_MAGIC, PROCESS_START_MAX_STRINGS, PROCESS_START_MAX_STRING_LEN,
-    PROCESS_START_MAX_TOTAL_LEN, RANDOM_REQUEST_MAX_BYTES, RANDOM_RESERVE_DEFAULT_BYTES,
-    RESOURCE_LIMITS_REPORT_LEN, RLIMIT_INFINITY, RXE_PAGE_SIZE, SEG_FLAG_EXEC, SEG_FLAG_READ,
-    SEG_FLAG_WRITE, SPAWN_UID_INHERIT, STDINFO_FD, STDINFO_VERSION_CURRENT, STDINFO_VERSION_V1,
-    SYSCALLS, SYSCALL_MAX_ARGS, SYSCALL_TABLE_HASH_LEN, SYSINFO_MAX_PAYLOAD_LEN,
-    SYSINFO_QUERY_NAME_MAX, SYSINFO_QUERY_RECORD_LEN, SYSINFO_REQUEST_MAGIC,
-    SYSINFO_VERSION_CURRENT, SYSINFO_VERSION_V1, SYSTEM_LIBRARIES_DIR, THREAD_STACK_DEFAULT,
-    USER_DIRECTORY_NAME_MAX,
+    FS_MODE_MASK, HOSTNAME_MAX, HWTREE_VERSION_V1, HW_COMPATIBLE_MAX, HW_NODE_HEADER_LEN,
+    HW_NODE_MAX_MATCH_KEYS, HW_NODE_MAX_RESOURCES, HW_NODE_ROOT, IPC_MESSAGE_HEADER_MAGIC,
+    KEY_CLASS_CHAR, KEY_CLASS_NAMED, KEY_INPUT_MAGIC, KIND_KEY_PRESSED, KIND_KEY_RELEASED,
+    KIND_MOVED_BY, KIND_PRESSED, KIND_RELEASED, KIND_SCROLLED, LIBRARY_ICON_MAX, LIBREF_MAX,
+    LOAD_FLAG_PIE, LOAD_MAGIC, LOAD_MAX_NEEDED, LOAD_MAX_SEGMENTS, LOG_FIELDS_MAX,
+    LOG_FIELD_KEY_MAX, LOG_FIELD_VALUE_MAX, LOG_LEVEL_MAX, LOG_MESSAGE_MAX, LOG_RECORD_HEADER_LEN,
+    LOG_RECORD_MAX, MACHINE_ID_LEN, MANIFEST_MAGIC, MANIFEST_MAX_CAPABILITIES, MIME_ENTRY_LEN,
+    MIME_TYPE_MAX, MOD_ALT, MOD_CTRL, MOD_MASK, MOD_META, MOD_SHIFT, MOUNT_FSTYPE_MAX,
+    MOUNT_SOURCE_MAX, MOUNT_TARGET_MAX, MOUNT_VOLUME_ID_LEN, NANOS_PER_SEC, POINTER_INPUT_MAGIC,
+    PORT_NAME_MAX_LEN, PROCESS_CPU_NONE, PROCESS_NAME_MAX, PROCESS_START_MAGIC,
+    PROCESS_START_MAX_STRINGS, PROCESS_START_MAX_STRING_LEN, PROCESS_START_MAX_TOTAL_LEN,
+    RANDOM_REQUEST_MAX_BYTES, RANDOM_RESERVE_DEFAULT_BYTES, RESOURCE_LIMITS_REPORT_LEN,
+    RLIMIT_INFINITY, RXE_PAGE_SIZE, SEG_FLAG_EXEC, SEG_FLAG_READ, SEG_FLAG_WRITE,
+    SPAWN_UID_INHERIT, STDINFO_FD, STDINFO_VERSION_CURRENT, STDINFO_VERSION_V1, SYSCALLS,
+    SYSCALL_MAX_ARGS, SYSCALL_TABLE_HASH_LEN, SYSINFO_MAX_PAYLOAD_LEN, SYSINFO_QUERY_NAME_MAX,
+    SYSINFO_QUERY_RECORD_LEN, SYSINFO_REQUEST_MAGIC, SYSINFO_VERSION_CURRENT, SYSINFO_VERSION_V1,
+    SYSTEM_LIBRARIES_DIR, THREAD_STACK_DEFAULT, USER_DIRECTORY_NAME_MAX,
 };
 
 /// Default on-disk location of the generated C ABI header set, relative to
@@ -533,6 +533,7 @@ fn generate_memory() -> String {
 /// here.
 fn generate_hwtree() -> String {
     use std::fmt::Write as _;
+    use tairix_abi::driver::net::MAC_ADDRESS_LEN;
     let mut out = banner("Architecture-neutral hardware tree (AGENTS.md sec.18.1).");
     out.push_str("#ifndef TAIRIX_HWTREE_H\n#define TAIRIX_HWTREE_H\n\n");
     out.push_str("#include <stdint.h>\n\n");
@@ -556,6 +557,8 @@ fn generate_hwtree() -> String {
         out,
         "#define TAIRIX_HW_NODE_MAX_RESOURCES ((uintptr_t){HW_NODE_MAX_RESOURCES}u)"
     );
+    out.push_str("/* Length, in bytes, of an Ethernet MAC address. */\n");
+    let _ = writeln!(out, "#define TAIRIX_MAC_ADDRESS_LEN {MAC_ADDRESS_LEN}u");
     out.push('\n');
 
     out.push_str("/* Packed little-endian wire sizes, in bytes. */\n");
@@ -568,6 +571,10 @@ fn generate_hwtree() -> String {
         out,
         "#define TAIRIX_HW_RESOURCE_WIRE_LEN {}u",
         HwResource::WIRE_LEN
+    );
+    let _ = writeln!(
+        out,
+        "#define TAIRIX_HW_NODE_HEADER_LEN {HW_NODE_HEADER_LEN}u"
     );
     let _ = writeln!(out, "#define TAIRIX_HW_NODE_WIRE_LEN {}u", HwNode::WIRE_LEN);
     out.push('\n');
@@ -672,9 +679,11 @@ fn hwtree_structs(out: &mut String) {
          typedef struct tairix_hw_node {\n\
          \x20   uint32_t id;\n\
          \x20   uint32_t parent;\n\
+         \x20   uint32_t address;\n\
          \x20   uint16_t device_class;\n\
          \x20   uint8_t match_key_count;\n\
          \x20   uint8_t resource_count;\n\
+         \x20   uint8_t fault_health;\n\
          \x20   tairix_hw_match_key_t match_keys[TAIRIX_HW_NODE_MAX_MATCH_KEYS];\n\
          \x20   tairix_hw_resource_t resources[TAIRIX_HW_NODE_MAX_RESOURCES];\n\
          } tairix_hw_node_t;\n\n",
@@ -1960,8 +1969,9 @@ fn driver_emit_discriminants(out: &mut String) {
 }
 
 /// Emit the driver-submodule POD constants: the `VIRTIO_PCI_*` ids, the
-/// Ethernet `MAC_ADDRESS_LEN`, the [`MountFlags`] bit set, and the
-/// [`NodeId`] sentinel (every value read from `lib/abi`).
+/// [`MountFlags`] bit set, and the [`NodeId`] sentinel (every value read
+/// from `lib/abi`). The Ethernet address length is `tairix_hwtree.h`'s, which
+/// this header includes — one definition.
 ///
 /// The [`MountFlags`] bits live here — not in `tairix_sysinfo.h` where the
 /// `MountRecord.flags` field is a bare `uint32_t` — because the flag
@@ -1972,7 +1982,6 @@ fn driver_emit_discriminants(out: &mut String) {
 fn driver_emit_submodule_constants(out: &mut String) {
     use std::fmt::Write as _;
     use tairix_abi::driver::filesystem::{MountFlags, NodeId};
-    use tairix_abi::driver::net::MAC_ADDRESS_LEN;
     use tairix_abi::{
         VIRTIO_PCI_CFG_COMMON, VIRTIO_PCI_CFG_DEVICE, VIRTIO_PCI_CFG_ISR, VIRTIO_PCI_CFG_NOTIFY,
         VIRTIO_PCI_CFG_PCI, VIRTIO_PCI_VENDOR_ID,
@@ -2000,10 +2009,6 @@ fn driver_emit_submodule_constants(out: &mut String) {
             "#define TAIRIX_VIRTIO_PCI_CFG_{name} ((uint8_t){value}u)"
         );
     }
-    out.push('\n');
-
-    out.push_str("/* Length, in bytes, of an Ethernet MAC address. */\n");
-    let _ = writeln!(out, "#define TAIRIX_MAC_ADDRESS_LEN {MAC_ADDRESS_LEN}u");
     out.push('\n');
 
     out.push_str(
@@ -2123,7 +2128,7 @@ fn driver_emit_submodule_discriminants(out: &mut String) {
 /// `tairix_manifest.h` rather than re-declaring it.
 ///
 /// The header also carries the driver-class **submodule** POD surface: the
-/// `VIRTIO_PCI_*` / `MAC_ADDRESS_LEN` / [`MountFlags`] / [`NodeId`] constants
+/// `VIRTIO_PCI_*` / [`MountFlags`] / [`NodeId`] constants
 /// (see [`driver_emit_submodule_constants`]), the [`DisplayFormat`] /
 /// [`NodeKind`] / [`InputEventKind`] discriminants (see
 /// [`driver_emit_submodule_discriminants`]), and the struct mirrors in
@@ -4288,7 +4293,6 @@ mod tests {
         use tairix_abi::driver::display::DisplayFormat;
         use tairix_abi::driver::filesystem::{MountFlags, NodeId, NodeKind};
         use tairix_abi::driver::input::InputEventKind;
-        use tairix_abi::driver::net::MAC_ADDRESS_LEN;
         use tairix_abi::{VIRTIO_PCI_CFG_COMMON, VIRTIO_PCI_CFG_PCI, VIRTIO_PCI_VENDOR_ID};
 
         let h = body("tairix_driver.h");
@@ -4302,7 +4306,6 @@ mod tests {
             format!("#define TAIRIX_VIRTIO_PCI_VENDOR_ID ((uint16_t){VIRTIO_PCI_VENDOR_ID:#x}u)"),
             format!("#define TAIRIX_VIRTIO_PCI_CFG_COMMON ((uint8_t){VIRTIO_PCI_CFG_COMMON}u)"),
             format!("#define TAIRIX_VIRTIO_PCI_CFG_PCI ((uint8_t){VIRTIO_PCI_CFG_PCI}u)"),
-            format!("#define TAIRIX_MAC_ADDRESS_LEN {MAC_ADDRESS_LEN}u"),
             format!(
                 "#define TAIRIX_MOUNT_FLAG_READ_ONLY ((uint32_t){:#x}u)",
                 MountFlags::READ_ONLY.bits()

@@ -273,6 +273,43 @@ Key facts for the next worker:
   `tests/integration/netstack_wire`, cross-checked against the real
   `lib/netconfig` parser.
 
+### D5 — DHCPv4 reaches real hardware: the shipped image default `[x]`
+
+D1–D4c proved the engines and the three QEMU verticals, but every shipped
+image still shipped the canonical **empty** `network.conf` ("no managed
+interfaces beyond loopback"), so a booted machine ran the DHCP client on
+nothing. With the Pi 4B's on-board NIC now driven (`plans/NETWORK.md` N14),
+the flashable Raspberry Pi image ships an addressing default that actually
+exercises it.
+
+Key facts for the next worker:
+- **The document** is composed by `tools/xtask`
+  (`image_drivers::genet_network_conf`) and binds one `ethernet` interface by
+  `match.node` — the GENET register aperture taken from the driver's own
+  `tairix_drv_network_genet::GENET_REGS_CPU_BASE`, so the planted default and
+  the location `devmgr` resolves from the discovered node cannot drift. It
+  selects `ipv4.method dhcp` plus `ipv6.method slaac`.
+- **Binding by alias is not an option**, by design: `devmgr`'s
+  `interface_configs_from_config` refuses an `ethernet` interface carrying
+  neither `match.mac` nor `match.node` rather than guessing, and
+  `plans/NETWORK.md` §6.1 binds an alias to hardware "by stable identity,
+  never discovery order". A board-neutral default is therefore impossible; the
+  default is a property of the *image*, which is why `mkimage`'s
+  `RootSeed::network_conf` now carries it instead of hard-coding the empty
+  document. The low-level `tools/mkimage` CLI, which plants no NIC driver,
+  still ships the empty one.
+- **It is validated at build time through the one engine that reads it**:
+  `mkimage` parses the document with `tairix_netconfig` and re-renders it, so
+  an image can never ship an addressing default its own stack would reject
+  (`MkimageError::NetworkConfig`); `tools/xtask` additionally asserts the
+  parsed result is exactly one DHCPv4+SLAAC interface bound to the GENET
+  aperture with no static address.
+- **Acceptance is on metal** (`plans/PI.md`): a flashed Pi 4B must log
+  `devmgr` `NETSTACK_BOUND`, `netstack` `DRIVER_BOUND` and
+  `DHCP_LEASE_ACQUIRED`, and answer a ping at its leased address. QEMU models
+  no GENET, so there is no emulated form of this vertical; the lease machinery
+  itself stays covered by D3's three virtio verticals.
+
 ## 4. Tests, docs, and gate (binding)
 
 Every increment lands its unit/fuzz/QEMU tests, updates its rustdoc +

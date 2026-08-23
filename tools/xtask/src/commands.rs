@@ -1443,7 +1443,9 @@ type DriverBundles = Vec<(&'static [&'static [u8]], Vec<u8>)>;
 /// (`plans/USB.md` U3b/U4); the mass-storage **class** driver binds a
 /// mass-storage interface node the same way and serves each logical unit
 /// as a block-service endpoint behind a per-LUN storage node
-/// (`plans/DEVICES.md` D2).
+/// (`plans/DEVICES.md` D2). The GENET NIC needs no bus chain: it hangs
+/// straight off the platform bus, so its driver binds the discovered
+/// `brcm,bcm2711-genet-v5` node and hands `netstack` its frame channel.
 fn build_image_driver_bundles(
     ctx: &Context,
     profile: tairix_mkimage::ImageProfile,
@@ -1479,6 +1481,10 @@ fn build_image_driver_bundles(
         (
             image_drivers::VIRTIO_KBD_STORE_PATH,
             image_drivers::build_virtio_kbd_bundle(ctx, arch, profile)?,
+        ),
+        (
+            image_drivers::GENET_STORE_PATH,
+            image_drivers::build_genet_bundle(ctx, arch, profile)?,
         ),
         (
             image_drivers::FRAMEBUFFER_STORE_PATH,
@@ -1602,6 +1608,7 @@ fn build_platform_image(ctx: &Context, args: ImageArgs) -> Result<PathBuf, Strin
             profile,
             &drivers,
             app_files,
+            &image_drivers::genet_network_conf(),
         )
     })
     .map_err(|e| format!("image: {e}"))?;

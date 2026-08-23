@@ -23,6 +23,7 @@
 
 use alloc::collections::BTreeSet;
 
+use tairix_abi::driver::net_channel::NETCHAN_NODE_COMPATIBLE;
 use tairix_abi::hwtree::{HwMatchKind, HwResourceKind};
 use tairix_abi::net_ipc::{
     validate_if_name, NetBondConfigMsg, NetInterfaceConfigMsg, NetworkSettings, IF_NAME_LEN,
@@ -31,11 +32,6 @@ use tairix_abi::{Errno, HwNode};
 use tairix_log::{log as log_event, Event, EventId, Field, FieldValue, Level, Sink};
 
 use crate::events;
-
-/// The `compatible` match key a NIC driver process stamps on the `netchan`
-/// device-channel node it emits, so the device manager recognises it as a
-/// bound NIC's frame channel rather than a device awaiting a driver.
-pub const NETCHAN_COMPATIBLE: &[u8] = b"tairix,netchan";
 
 /// The device manager's call into the network stack to bind one NIC
 /// driver's device channel to a new managed interface.
@@ -140,7 +136,7 @@ impl NetBindState {
 }
 
 /// If `node` is a NIC device-channel node — its match keys carry the
-/// [`NETCHAN_COMPATIBLE`] `compatible` string — return the call-endpoint id
+/// [`NETCHAN_NODE_COMPATIBLE`] `compatible` string — return the call-endpoint id
 /// it published as an [`HwResourceKind::Endpoint`] grant request.
 ///
 /// Returns [`None`] for any other node, and for a `netchan` node that
@@ -148,7 +144,8 @@ impl NetBindState {
 #[must_use]
 pub fn netchan_endpoint(node: &HwNode) -> Option<u64> {
     let is_netchan = node.match_keys().iter().any(|key| {
-        key.kind() == Some(HwMatchKind::Compatible) && key.compatible_bytes() == NETCHAN_COMPATIBLE
+        key.kind() == Some(HwMatchKind::Compatible)
+            && key.compatible_bytes() == NETCHAN_NODE_COMPATIBLE
     });
     if !is_netchan {
         return None;
@@ -368,7 +365,7 @@ mod tests {
 
     fn netchan_node(id: u32, endpoint: u64) -> HwNode {
         let mut node = HwNode::new(id, HW_NODE_ROOT, HwDeviceClass::Network);
-        node.push_match_key(HwMatchKey::compatible(NETCHAN_COMPATIBLE).expect("key"))
+        node.push_match_key(HwMatchKey::compatible(NETCHAN_NODE_COMPATIBLE).expect("key"))
             .expect("push key");
         node.push_resource(HwResource::endpoint(endpoint))
             .expect("push resource");
@@ -406,7 +403,7 @@ mod tests {
         // A netchan node with no endpoint resource is malformed → None.
         let mut no_ep = HwNode::new(4, HW_NODE_ROOT, HwDeviceClass::Network);
         no_ep
-            .push_match_key(HwMatchKey::compatible(NETCHAN_COMPATIBLE).expect("key"))
+            .push_match_key(HwMatchKey::compatible(NETCHAN_NODE_COMPATIBLE).expect("key"))
             .expect("push");
         assert_eq!(netchan_endpoint(&no_ep), None);
     }

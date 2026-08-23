@@ -95,6 +95,10 @@ pub const FRAMEBUFFER_STORE_PATH: &[&[u8]] = &[b"Drivers", b"display", b"framebu
 /// `-M virt` two-process netstack autoload vertical's disk plants it at.
 pub const VIRTIO_NET_STORE_PATH: &[&[u8]] = &[b"Drivers", b"network", b"virtio_net", b"Run"];
 
+/// `/System`-volume-relative store path of the GENET link-layer driver
+/// bundle (the Raspberry Pi 4B's on-board gigabit Ethernet).
+pub const GENET_STORE_PATH: &[&[u8]] = &[b"Drivers", b"network", b"genet", b"Run"];
+
 /// Store path of the USB mass-storage class-driver bundle: class `storage`,
 /// the `usb_msd` leaf naming the (vendor-neutral) driver.
 pub const USB_MSD_STORE_PATH: &[&[u8]] = &[b"Drivers", b"storage", b"usb_msd", b"Run"];
@@ -635,6 +639,46 @@ pub fn build_virtio_net_bundle(
     )
 }
 
+/// Build and sign the GENET link-layer driver bundle.
+///
+/// The Raspberry Pi 4B's on-board gigabit NIC: it maps its granted register
+/// window (`CAP_MMIO_MAP`), carves its frame buffers (`CAP_MEM_DMA`), parks
+/// on the device interrupt its serve loop waits on (`CAP_IRQ_BIND`), maps the
+/// shared frame region (`CAP_SHM`), claims and binds the reserved
+/// device-channel endpoint (`CAP_IPC_ENDPOINT`, `CAP_IPC_BIND_PRIVILEGED`),
+/// publishes its `netchan` node (`CAP_HW_EMIT`), and emits its readiness
+/// beacon (`CAP_LOG_EMIT`) — the same set the virtio-net bundle carries, and
+/// nothing more. Carries `tairix_drv_network_genet::BIND_KEYS`, so it
+/// autoloads against a discovered `brcm,bcm2711-genet-v5` node (and stays
+/// unbound on a machine whose tree carries none — §18.4).
+///
+/// # Errors
+///
+/// As [`build_vcmailbox_bundle`].
+pub fn build_genet_bundle(
+    ctx: &Context,
+    arch: PieArch,
+    profile: ImageProfile,
+) -> Result<Vec<u8>, String> {
+    build_bundle(
+        ctx,
+        arch,
+        "tairix-drv-network-genet",
+        &[
+            CapabilityId::MMIO_MAP,
+            CapabilityId::MEM_DMA,
+            CapabilityId::IRQ_BIND,
+            CapabilityId::SHM,
+            CapabilityId::IPC_ENDPOINT,
+            CapabilityId::IPC_BIND_PRIVILEGED,
+            CapabilityId::HW_EMIT,
+            CapabilityId::LOG_EMIT,
+        ],
+        tairix_drv_network_genet::BIND_KEYS,
+        profile,
+    )
+}
+
 /// The composed, signed driver bundles the `-M virt` autoload verticals
 /// plant into their whole-disk fixture's `/System/Drivers/` store, each
 /// paired with its store path as an [`AppStoreFile`] the planter lays down:
@@ -712,6 +756,39 @@ pub fn net_driver_store_files(
         .map_err(Clone::clone)
 }
 
+/// The `/System/Settings/Network/network.conf` the flashable Raspberry Pi
+/// image ships: DHCPv4 plus IPv6 SLAAC on the board's on-board gigabit NIC.
+///
+/// The interface is bound by its **stable hardware location** — the GENET
+/// register aperture the discovered node names, taken from the driver's own
+/// [`tairix_drv_network_genet::GENET_REGS_CPU_BASE`], so the planted default
+/// and the location the device manager resolves cannot drift. Binding by
+/// location rather than by discovery order is `plans/NETWORK.md` §6.1's rule,
+/// and it is what `devmgr` requires: an `ethernet` interface carrying neither
+/// `match.mac` nor `match.node` is refused rather than guessed at.
+///
+/// DHCPv4 + SLAAC is the addressing every desktop system defaults to, and it
+/// is what makes the DHCP client (`plans/DHCP.md`) reachable on real
+/// hardware: a booted Pi 4 acquires its address without an operator editing
+/// anything. `mkimage` re-parses the document through the same
+/// `tairix_netconfig` engine `netstack` reads it with, so a malformed default
+/// fails the image build rather than the boot.
+#[must_use]
+pub fn genet_network_conf() -> String {
+    format!(
+        "# TAIRiX Raspberry Pi network configuration.\n\
+         # The board's on-board gigabit NIC, bound by the stable bus location\n\
+         # of its GENET register aperture, addressed by DHCPv4 with IPv6\n\
+         # stateless autoconfiguration -- the default every desktop system\n\
+         # ships. Edit here (or with `configure`) to pin a static address.\n\
+         wan.kind ethernet\n\
+         wan.match.node {:#x}\n\
+         wan.ipv4.method dhcp\n\
+         wan.ipv6.method slaac\n",
+        tairix_drv_network_genet::GENET_REGS_CPU_BASE
+    )
+}
+
 /// Pair a `/System`-volume-relative store path with a built bundle's bytes
 /// as the [`AppStoreFile`] the planter accepts.
 fn store_file(path: &[&[u8]], bytes: Vec<u8>) -> AppStoreFile {
@@ -757,11 +834,12 @@ fn verify_signed_bundle(image: &[u8]) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
-    //! The autoload-decision coverage for the `-M virt` driver store: that
-    //! each driver crate's own `BIND_KEYS` (the same table
-    //! [`autoload_driver_store_files`] signs into its bundle) is discovered
-    //! by the production store scan and resolved by the shared match policy
-    //! to the intended node — and to no other. The bundles are signed here
+    //! The autoload-decision coverage for the shipped driver store: that
+    //! each driver crate's own `BIND_KEYS` (the same table the autoload
+    //! builders sign into its bundle) is discovered by the production store
+    //! scan and resolved by the shared match policy to the intended node —
+    //! and to no other. It also pins the shipped Raspberry Pi addressing
+    //! default against the one `network.conf` engine that parses it. The bundles are signed here
     //! from a stub payload rather than a cross-compiled `rxe`: the scan and
     //! the match decode only the manifest and its bind table, never the
     //! program image, so a real payload adds nothing to what is exercised.
@@ -808,12 +886,13 @@ mod tests {
         .image
     }
 
-    /// The three signed bundles keyed by their store path, serving the
-    /// production store scanner's [`ImageSource`] reads.
+    /// The signed bundles keyed by their store path, serving the production
+    /// store scanner's [`ImageSource`] reads.
     struct BundleSource {
         kbd: (String, Vec<u8>),
         framebuffer: (String, Vec<u8>),
         network: (String, Vec<u8>),
+        genet: (String, Vec<u8>),
     }
 
     impl BundleSource {
@@ -831,13 +910,23 @@ mod tests {
                     path_str(VIRTIO_NET_STORE_PATH),
                     sign(tairix_drv_network_virtio_net::BIND_KEYS),
                 ),
+                genet: (
+                    path_str(GENET_STORE_PATH),
+                    sign(tairix_drv_network_genet::BIND_KEYS),
+                ),
             }
+        }
+
+        /// The bundles in scan order, so a test's candidate indices and the
+        /// scanner's agree by construction.
+        fn all(&self) -> [&(String, Vec<u8>); 4] {
+            [&self.kbd, &self.framebuffer, &self.network, &self.genet]
         }
     }
 
     impl ImageSource for BundleSource {
         fn read(&self, path: &str, buf: &mut Vec<u8>) -> Result<(), Errno> {
-            for (store_path, bytes) in [&self.kbd, &self.framebuffer, &self.network] {
+            for (store_path, bytes) in self.all() {
                 if store_path == path {
                     buf.extend_from_slice(bytes);
                     return Ok(());
@@ -847,18 +936,45 @@ mod tests {
         }
     }
 
-    /// Scan the three-bundle store, candidate indices pinned by scan order
-    /// (input 0, display 1, network 2).
+    /// Scan the whole store, candidate indices pinned by scan order (input 0,
+    /// display 1, virtio-net 2, GENET 3).
     fn scanned_store(source: &BundleSource) -> DriverStore {
-        scan_store(
-            source,
-            &[
-                source.kbd.0.as_str(),
-                source.framebuffer.0.as_str(),
-                source.network.0.as_str(),
-            ],
-            &DiscardSink,
-        )
+        let paths: Vec<&str> = source.all().iter().map(|(p, _)| p.as_str()).collect();
+        scan_store(source, &paths, &DiscardSink)
+    }
+
+    #[test]
+    fn the_shipped_pi_network_default_parses_and_binds_the_genet_nic() {
+        // The document the image plants is validated through the very engine
+        // `netstack` reads it with, so a shipped default can never fail the
+        // parser at boot.
+        let config = tairix_netconfig::NetworkConfig::parse(&genet_network_conf())
+            .expect("the shipped default parses");
+        let ifaces = config.interfaces();
+        assert_eq!(ifaces.len(), 1, "one managed interface");
+        let wan = &ifaces[0];
+        assert_eq!(wan.kind(), tairix_netconfig::IfaceKind::Ethernet);
+        // Bound by the GENET aperture the driver itself declares, so the
+        // planted default and the discovered location cannot drift.
+        assert_eq!(
+            wan.match_node,
+            Some(tairix_drv_network_genet::GENET_REGS_CPU_BASE)
+        );
+        assert_eq!(wan.match_mac, None);
+        assert_eq!(wan.ipv4_method(), tairix_netconfig::Ipv4Method::Dhcp);
+        assert_eq!(wan.ipv6_method(), tairix_netconfig::Ipv6Method::Slaac);
+        // DHCP leases the address, so no static one is pinned.
+        assert_eq!(wan.ipv4_address, None);
+        assert_eq!(wan.ipv6_address, None);
+
+        // `devmgr` maps it to a deliverable interface configuration rather
+        // than refusing it for want of a hardware identity.
+        assert_eq!(
+            config
+                .interface("wan")
+                .map(|i| i.match_node.is_some() || i.match_mac.is_some()),
+            Some(true)
+        );
     }
 
     #[test]
@@ -867,6 +983,7 @@ mod tests {
             sign(tairix_drv_input_virtio_input::BIND_KEYS),
             sign(tairix_drv_display_framebuffer::BIND_KEYS),
             sign(tairix_drv_network_virtio_net::BIND_KEYS),
+            sign(tairix_drv_network_genet::BIND_KEYS),
         ] {
             // The same fail-closed structural check the image build applies
             // to every planted bundle accepts each one.
@@ -880,17 +997,14 @@ mod tests {
         // fail-closed, and the shared match policy resolves a discovered
         // virtio-input node to the keyboard driver, a boot display node (the
         // kernel's `simple-framebuffer` publication) to the display service,
-        // and a virtio-net node to the network driver — the exact autoload
-        // decisions the booted kernel makes off the mounted root, with no
+        // a virtio-net node to the virtio NIC driver, and a BCM2711 GENET
+        // node to the Pi's on-board NIC driver — the exact autoload decisions
+        // the booted kernel makes off the mounted root, with no
         // cross-binding.
         let source = BundleSource::new();
         let store = scanned_store(&source);
         let candidates = store.candidates();
-        assert_eq!(
-            candidates.len(),
-            3,
-            "all three signed bundles are candidates"
-        );
+        assert_eq!(candidates.len(), 4, "every signed bundle is a candidate");
 
         let input_keys = [HwMatchKey::virtio(VIRTIO_INPUT_DEVICE_ID)];
         match resolve(&input_keys, &candidates) {
@@ -908,6 +1022,13 @@ mod tests {
         match resolve(&network_keys, &candidates) {
             MatchResolution::Winner { candidate, .. } => assert_eq!(candidate, 2),
             other => panic!("the virtio-net node must bind the network bundle, got {other:?}"),
+        }
+
+        let genet_keys =
+            [HwMatchKey::compatible(tairix_drv_network_genet::GENET_COMPATIBLE).expect("fits")];
+        match resolve(&genet_keys, &candidates) {
+            MatchResolution::Winner { candidate, .. } => assert_eq!(candidate, 3),
+            other => panic!("a GENET node must bind the GENET bundle, got {other:?}"),
         }
     }
 

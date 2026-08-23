@@ -94,10 +94,9 @@ pub const GROUPS_DB_NAME: &str = "Groups";
 pub const NETWORK_SETTINGS_DIR: &str = "Network";
 
 /// Name of the per-interface network-configuration document under
-/// `/System/Settings/Network` (`network.conf`). The image ships the
-/// canonical **empty** document ("no managed interfaces beyond loopback");
-/// the first-boot installer, or `configure`, later writes the operator's
-/// interfaces through the one `tairix_netconfig` engine.
+/// `/System/Settings/Network` (`network.conf`). Its content is the image
+/// builder's ([`RootSeed::network_conf`]); the first-boot installer, or
+/// `configure`, later rewrites it through the one `tairix_netconfig` engine.
 pub const NETWORK_CONF_NAME: &str = "network.conf";
 
 /// Name of the per-installation machine-id file under `/System/Security`
@@ -150,6 +149,18 @@ pub struct RootSeed<'a> {
     /// — the canonical empty document when no planted application lists
     /// itself.
     pub library_conf: &'a str,
+    /// The per-interface network-configuration document
+    /// (`/System/Settings/Network/network.conf`).
+    ///
+    /// The image builder supplies it, so *which* interfaces an image manages
+    /// stays a property of the image being built rather than of this
+    /// board-neutral writer: a platform image whose NIC sits at a known bus
+    /// location ships an addressing default keyed to it, while an image with
+    /// no such NIC ships the canonical empty document ("no managed
+    /// interfaces beyond loopback"). Either way it is authored and validated
+    /// through the one `tairix_netconfig` engine `netstack` reads it with, so
+    /// a shipped default can never fail the parser.
+    pub network_conf: &'a str,
 }
 
 /// Author the `ARXFS` root partition: format `sectors` sectors under
@@ -330,7 +341,7 @@ fn populate_system_subtree(
         .map_err(MkimageError::RootPartition)?;
     write_security_file(fs, security, USERS_DB_NAME, seed.users_db)?;
     write_security_file(fs, security, GROUPS_DB_NAME, seed.groups_db)?;
-    write_network_config(fs, system)?;
+    write_network_config(fs, system, seed.network_conf)?;
     write_library_config(fs, system, seed.library_conf)?;
     if let Some(key_bytes) = seed.log_attestation_key {
         let keys = fs
@@ -431,16 +442,20 @@ fn write_security_file(
     Ok(())
 }
 
-/// Lay out the network-configuration store skeleton on the writable root:
-/// create `/System/Settings/Network` and write the canonical **empty**
-/// `network.conf` through the one `tairix_netconfig` engine.
+/// Lay out the network-configuration store on the writable root: create
+/// `/System/Settings/Network` and write `document` through the one
+/// `tairix_netconfig` engine.
 ///
-/// The empty document means "no managed interfaces beyond loopback"
-/// ([`tairix_netconfig::NetworkConfig::default`]); the first-boot installer,
-/// or `configure`, later writes the operator's interfaces through the same
-/// engine, so the image skeleton and its readers cannot drift. A short write
-/// is a build failure, never a truncated store.
-fn write_network_config(fs: &mut ARXFS<MemBlock>, system: NodeId) -> Result<(), MkimageError> {
+/// The document is **parsed and re-rendered** rather than copied: the engine
+/// that validates it here is the same one `netstack` reads it with, so an
+/// image can never ship an addressing default its own stack would reject
+/// (fail closed at build time, not at first boot). An unparseable document is
+/// a build failure, as is a short write — never a truncated store.
+fn write_network_config(
+    fs: &mut ARXFS<MemBlock>,
+    system: NodeId,
+    document: &str,
+) -> Result<(), MkimageError> {
     let settings = fs
         .lookup(system, b"Settings")
         .map_err(MkimageError::RootPartition)?;
@@ -451,7 +466,9 @@ fn write_network_config(fs: &mut ARXFS<MemBlock>, system: NodeId) -> Result<(), 
             NodeKind::Directory,
         )
         .map_err(MkimageError::RootPartition)?;
-    let text = tairix_netconfig::NetworkConfig::default().render();
+    let text = tairix_netconfig::NetworkConfig::parse(document)
+        .map_err(|_| MkimageError::NetworkConfig)?
+        .render();
     fs.create(network, NETWORK_CONF_NAME.as_bytes(), NodeKind::RegularFile)
         .map_err(MkimageError::RootPartition)?;
     let written = fs
@@ -572,6 +589,12 @@ mod tests {
     const TEST_LIBRARY: &str =
         "editor.name = Editor\neditor.bundle = /Apps/Editor.app\neditor.category = Office\n";
 
+    /// A recognisable managed-interface document for the seeding contract:
+    /// the writer must parse and re-render it rather than copy it blindly, so
+    /// a malformed default fails the build.
+    const TEST_NETWORK: &str =
+        "wan.kind ethernet\nwan.match.node 0xfd580000\nwan.ipv4.method dhcp\n";
+
     /// The debug-shaped seed most tests build with: databases + home, no
     /// baked key or machine-id.
     const TEST_SEED: RootSeed<'static> = RootSeed {
@@ -581,6 +604,7 @@ mod tests {
         log_attestation_key: None,
         machine_id: None,
         library_conf: TEST_LIBRARY,
+        network_conf: TEST_NETWORK,
     };
 
     /// Deterministic test entropy; production uses the host RNG.
@@ -641,7 +665,7 @@ mod tests {
     }
 
     #[test]
-    fn the_writable_root_ships_an_empty_network_config() {
+    fn the_writable_root_ships_the_seeded_network_config() {
         let bytes = build();
         let dev = MemBlock::from_bytes(bytes).expect("whole sectors");
         let mut fs = ARXFS::open(dev, &TEST_KEY).expect("mounts");
@@ -654,13 +678,39 @@ mod tests {
         let conf = fs
             .lookup(network, NETWORK_CONF_NAME.as_bytes())
             .expect("network.conf exists");
-        // The shipped document is the canonical empty store, and it parses
-        // back to "no managed interfaces beyond loopback".
-        let mut buf = [0u8; 64];
+        // The seeded document lands, canonically rendered, and parses back to
+        // exactly the interface the image builder asked for. The buffer is
+        // sized well past the document so a truncated read can never make
+        // this assertion pass vacuously.
+        let mut buf = [0u8; tairix_netconfig::MAX_CONFIG_LEN];
         let read = fs.read_at(conf, 0, &mut buf).expect("network.conf reads");
         let text = core::str::from_utf8(&buf[..read]).expect("utf-8");
         let parsed = tairix_netconfig::NetworkConfig::parse(text).expect("parses");
-        assert!(parsed.interfaces().is_empty(), "the default store is empty");
+        let expected =
+            tairix_netconfig::NetworkConfig::parse(TEST_NETWORK).expect("the seed parses");
+        assert_eq!(
+            text,
+            expected.render(),
+            "the seeded document lands verbatim"
+        );
+        let wan = parsed.interface("wan").expect("the seeded interface");
+        assert_eq!(wan.match_node, Some(0xfd58_0000));
+        assert_eq!(wan.ipv4_method(), tairix_netconfig::Ipv4Method::Dhcp);
+    }
+
+    #[test]
+    fn an_unparseable_network_config_fails_the_build() {
+        // A malformed addressing default must fail the *image build*, not the
+        // boot: the writer validates through the same engine `netstack` reads
+        // the store with, so a document the stack would reject never ships.
+        let seed = RootSeed {
+            network_conf: "wan.kind ethernet\nwan.ipv4.method wireless\n",
+            ..TEST_SEED
+        };
+        assert!(matches!(
+            build_root_partition(TEST_SECTORS, &TEST_KEY, &mut TestEntropy(7), &seed),
+            Err(MkimageError::NetworkConfig)
+        ));
     }
 
     #[test]

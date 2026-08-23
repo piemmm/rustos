@@ -4997,6 +4997,43 @@ record's shell, a second login on the other console works concurrently,
 an installer image refuses every login until the installer has authored
 users, and no beacon/debug output remains in production boots.
 
+### P12 — On-board gigabit Ethernet (GENET) `[~]`
+
+**Landed — the host-provable driver and the shipped bundle**
+(`plans/NETWORK.md` N14): `drivers/network/genet` drives the BCM2711's
+`brcm,bcm2711-genet-v5` UniMAC and its external BCM54213PE RGMII PHY,
+serving the `netchan-v1` device-channel contract to `netstack` like any
+other NIC. It is planted as a signed `/System/Drivers/network/genet/Run`
+bundle by `build_image_driver_bundles`, so `devmgr` autoloads it against the
+discovered node; the flashable image also ships a `network.conf` selecting
+DHCPv4 + IPv6 SLAAC on it (`plans/DHCP.md` D5), so a booted board
+self-configures with nothing for the operator to edit.
+
+Every base, IRQ, DMA aperture, and even the MAC address is a discovered
+value: the register window and both INTIDs come from the node's `reg` and
+`interrupts`, the DMA reach from the parent `/scb` bus's `dma-ranges`, and
+the link-layer address from the firmware-published
+`mac-address` / `local-mac-address` binding — no `const PI_*` anywhere. Two
+discovery defects were fixed on the way: the hardware tree emitted the raw
+device-tree `interrupts` cell rather than the GICv2 INTID, and a
+DMA-mastering node on a `dma-ranges` bus requested no DMA constraint.
+
+**No QEMU form exists.** QEMU models no GENET (`-device help` carries no
+such device) and its `raspi*` machines hand the kernel no device tree, so
+this stage has no emulated vertical by construction (§0.4 — never fake a
+passing vertical). The driver's coverage is its register-level model suite.
+
+**Remaining — the on-metal acceptance item.** Flash the emitted image to a
+Pi 4B with a cable in the RJ45 socket and confirm, from the operator's UART
+log: `devmgr` autoloads the bundle against the GENET node, `netstack` logs
+`DRIVER_BOUND` then `DHCP_LEASE_ACQUIRED`, the board answers a ping at its
+leased address from another host on the LAN, and the address matches the MAC
+printed on the board (so the firmware-published address was used, not an
+invented one). Then unplug and re-plug the cable and confirm the link event
+re-resolves without a driver restart.
+
+**Done when:** the checklist above is recorded against a real Pi 4B.
+
 ---
 
 ## 4. Cross-cutting requirements (apply to every stage)
@@ -5009,8 +5046,9 @@ users, and no beacon/debug output remains in production boots.
   `hwtree` node requested; every match/load/skip is logged with a stable
   event id (§5.4 / §18.3).
 - **Honest emulation gaps.** Where `raspi4b` cannot model a peripheral
-  (HVS, real HDMI, real USB timing), say so in the stage and carry the
-  metal checklist; never fake a passing vertical (§2.1 / `WIRING.md` §0.4).
+  (HVS, real HDMI, real USB timing, the GENET MAC), say so in the stage and
+  carry the metal checklist; never fake a passing vertical (§2.1 /
+  `WIRING.md` §0.4).
 - **`virt` stays green.** None of this regresses the QEMU `virt` board:
   the board difference is discovered data, so the same code serves both.
 

@@ -360,6 +360,18 @@ fn render_resources(
             Some(HwResourceKind::Shared) => {
                 let _ = write!(line, "Shared-memory region {base}");
             }
+            Some(HwResourceKind::LinkAddress) => match resource.link_address_octets() {
+                Some(mac) => {
+                    let _ = write!(
+                        line,
+                        "Link address {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
+                        mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]
+                    );
+                }
+                // An all-zero address carries no identity; list the resource
+                // without inventing one.
+                None => line.push_str("Link address (none published)"),
+            },
             Some(HwResourceKind::Framebuffer) => {
                 match resource.framebuffer_mode() {
                     Ok(mode) => {

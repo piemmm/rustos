@@ -86,6 +86,17 @@ pub const NET_CHANNEL_ENDPOINT_BASE: u64 = u64::from_le_bytes(*b"NCHAN\0\0\0");
 /// on the reserved block, not an interface-count capacity.
 pub const NET_CHANNEL_ENDPOINT_COUNT: u64 = 16;
 
+/// Device-tree-style `compatible` model name of the hardware-tree node a NIC
+/// driver publishes to advertise the device-channel endpoint it claimed.
+///
+/// The discovery half of this contract, and its single definition: a driver
+/// process stamps this key on the child node it emits, and the device manager
+/// recognises a node carrying it as a bound NIC's frame channel (rather than
+/// a device still awaiting a driver) and hands its endpoint to the network
+/// stack. Defined beside the endpoint block so the key emitted and the key
+/// looked for can never drift.
+pub const NETCHAN_NODE_COMPATIBLE: &[u8] = b"tairix,netchan";
+
 /// Whether `id` is one of the reserved device-channel endpoint ids.
 #[must_use]
 pub const fn is_net_channel_endpoint(id: u64) -> bool {

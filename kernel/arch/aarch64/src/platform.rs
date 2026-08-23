@@ -36,9 +36,11 @@
 //! through the reader, not as a tree node.
 
 use crate::fdt::{
-    bus_level, dma_ranges_aperture, outbound_mmio_window, reg_entry_count, scan_translated,
-    translated_reg, BusLevel, Fdt, MAX_WALK_DEPTH,
+    bus_level, dma_ranges_aperture, dma_ranges_aperture_of, gic_intid_from_cells,
+    outbound_mmio_window, reg_entry_count, scan_translated, translated_reg, BusLevel, Fdt,
+    MAX_WALK_DEPTH,
 };
+use tairix_abi::driver::net::MAC_ADDRESS_LEN;
 use tairix_abi::{HwDeviceClass, HwMatchKey, HwNode, HwResource, HW_NODE_ROOT, HW_NODE_ROOT_ID};
 use tairix_arch_api::{DiscoveryError, HwNodeSink, PlatformDiscovery};
 use tairix_fdt::{name_stem, read_cells, Node};
@@ -78,6 +80,16 @@ const MAILBOX_DMA_BUFFER_LEN: u64 = 4096;
 /// verified — so the USB bring-up is gated by a match against the discovered
 /// identity, never a fabricated key.
 pub const PCIE_COMPATIBLE: &[u8] = b"brcm,bcm2711-pcie";
+
+/// `compatible` string of the BCM2711's GENET v5 Ethernet MAC — the Pi 4's
+/// on-board gigabit NIC.
+///
+/// Its emission is augmented with the **DMA aperture** its parent bus grants
+/// (a capability-grant request, never an ambient handle), because only the
+/// platform's tree knows that window and the MAC's own node declares none.
+/// The autoloaded `drivers/network/genet` driver states the same identity in
+/// its bind table; this is the discovery side of that contract.
+pub const GENET_COMPATIBLE: &[u8] = b"brcm,bcm2711-genet-v5";
 
 /// Builds the hardware tree from a borrowed flattened device tree.
 pub struct FdtDiscovery<'a> {
@@ -278,6 +290,28 @@ fn build_node(
         let _ = hw.push_resource(dma);
     }
 
+    // A BCM2711 GENET MAC masters DMA to ordinary system memory but its own
+    // node declares no reach: Devicetree Spec v0.4 §2.3.9 puts `dma-ranges`
+    // on the *bus*, so the constraint is read from the parent bus level (the
+    // Pi 4's `/scb`) — a discovered value, never a board constant. Declared
+    // here because only the platform's tree knows the aperture.
+    if compatible.is_some_and(|c| c.iter_strings().any(|s| s == GENET_COMPATIBLE)) {
+        if let Some((aperture_top, aperture_len)) = parent_dma_aperture(depth, levels) {
+            // No room left simply carries no carve request; the capacity
+            // bound is the ABI's, never a panic.
+            let _ = hw.push_resource(HwResource::dma(aperture_top, aperture_len));
+        }
+    }
+
+    // A network device's factory link-layer address is not readable from
+    // every MAC's own registers (the BCM2711's GENET holds none), so the
+    // platform firmware publishes it on the node and the driver programs it
+    // in. Read from the standard ethernet-controller binding for *any*
+    // network node, never a board special case.
+    if let Some(mac) = local_mac_address(node) {
+        let _ = hw.push_resource(HwResource::link_address(mac));
+    }
+
     // The BCM2711 PCIe host bridge additionally *requests* the
     // inbound-DMA aperture it grants devices behind it (`plans/PI.md`
     // P10): the CPU-physical window read from its `dma-ranges`, with the
@@ -347,13 +381,19 @@ fn push_mmio_resources(node: &Node<'_>, depth: usize, levels: &[BusLevel<'_>], h
     }
 }
 
-/// Push one IRQ resource per `interrupts` specifier.
+/// Push one IRQ resource per `interrupts` specifier, carrying the **global
+/// GICv2 INTID** the granted line is bound by.
 ///
-/// Both supported boards (QEMU `virt`, the Pi 4) describe interrupts
-/// with the three-cell GIC specifier `<type, number, flags>`; the second
-/// cell is the interrupt number the kernel and drivers bind. A value
-/// that is not a whole number of specifiers is dropped — never a guessed
-/// line.
+/// Both supported boards (QEMU `virt`, the Pi 4) describe interrupts with
+/// the three-cell GIC specifier `<type, number, flags>`, whose `number` is
+/// *relative to its type*: an SPI is offset by 32 and a PPI by 16 to reach
+/// the INTID `irq_bind` and the GIC routing use. Emitting the raw cell would
+/// hand an autoloaded driver a line 32 below the one its device raises, so
+/// the specifier is mapped through the one shared decoder
+/// ([`crate::fdt::gic_intid_from_cells`]) — the same value the boot path's
+/// own `gic_device_intid` reads. A specifier that is not a whole number of
+/// cells, or whose type this GICv2 port cannot represent (a GICv3-only
+/// extended-SPI binding), is dropped — never a guessed line.
 fn push_irq_resources(node: &Node<'_>, hw: &mut HwNode) {
     /// Byte length of one three-cell GIC interrupt specifier.
     const GIC_SPECIFIER_LEN: usize = 12;
@@ -366,14 +406,76 @@ fn push_irq_resources(node: &Node<'_>, hw: &mut HwNode) {
     }
     let mut off = 0;
     while off + GIC_SPECIFIER_LEN <= value.len() {
-        let Some(number) = read_cells(value, off + 4, 1) else {
+        let (Some(kind), Some(number)) = (read_cells(value, off, 1), read_cells(value, off + 4, 1))
+        else {
             return;
         };
-        if hw.push_resource(HwResource::irq(number, 1)).is_err() {
+        let (Ok(kind), Ok(number)) = (u32::try_from(kind), u32::try_from(number)) else {
             return;
+        };
+        // A specifier this port cannot map is skipped, not guessed at; the
+        // rest of the list is still emitted.
+        if let Some(intid) = gic_intid_from_cells(kind, number) {
+            if hw
+                .push_resource(HwResource::irq(u64::from(intid), 1))
+                .is_err()
+            {
+                return;
+            }
         }
         off += GIC_SPECIFIER_LEN;
     }
+}
+
+/// The DMA aperture a node's **parent bus** grants the devices on it, as
+/// `(exclusive top, extent)`, or [`None`] when no ancestor level declares
+/// one.
+///
+/// A mastering device's reach is a property of the bus it sits on
+/// (Devicetree Spec v0.4 §2.3.9), so the window is decoded from the parent
+/// [`BusLevel`]'s `dma-ranges` against that bus's own cell counts and its
+/// parent's address width — exactly as [`dma_ranges_aperture`] decodes a
+/// bridge's own property.
+fn parent_dma_aperture(depth: usize, levels: &[BusLevel<'_>]) -> Option<(u64, u64)> {
+    let parent = levels.get(depth.checked_sub(1)?)?;
+    let grandparent_addr_cells = depth
+        .checked_sub(2)
+        .and_then(|i| levels.get(i))
+        .map_or(2, |l| l.addr_cells);
+    let (top, len, _) = dma_ranges_aperture_of(
+        parent.dma_ranges?,
+        parent.addr_cells,
+        grandparent_addr_cells,
+        parent.size_cells,
+    )?;
+    Some((top, len))
+}
+
+/// The firmware-published link-layer address on `node`, from the standard
+/// ethernet-controller binding.
+///
+/// `mac-address` (the current address) takes precedence over
+/// `local-mac-address` (the address programmed at manufacture), matching the
+/// binding's own precedence. A property that is not exactly one address is
+/// ignored rather than truncated or padded, and an all-zero address is
+/// refused (it is neither a valid unicast nor the broadcast address, so it
+/// carries no identity) — fail closed, never a guessed MAC.
+fn local_mac_address(node: &Node<'_>) -> Option<[u8; MAC_ADDRESS_LEN]> {
+    for name in ["mac-address", "local-mac-address"] {
+        let Some(property) = node.property(name) else {
+            continue;
+        };
+        let value = property.value();
+        if value.len() != MAC_ADDRESS_LEN {
+            continue;
+        }
+        let mut octets = [0u8; MAC_ADDRESS_LEN];
+        octets.copy_from_slice(value);
+        if octets != [0u8; MAC_ADDRESS_LEN] {
+            return Some(octets);
+        }
+    }
+    None
 }
 
 /// Derive the device class from the node's own data, most authoritative
@@ -411,10 +513,12 @@ fn classify(node: &Node<'_>) -> HwDeviceClass {
 #[cfg(test)]
 mod tests {
     use super::{pcie_bringup, FdtDiscovery};
-    use crate::fdt::Fdt;
+    use crate::fdt::{Fdt, GIC_PPI_INTID_BASE};
+    use crate::gic::MIN_SPI_INTID;
     use std::vec::Vec;
-    use tairix_abi::{HwDeviceClass, HwNode, HwResourceKind};
+    use tairix_abi::{HwDeviceClass, HwNode, HwResource, HwResourceKind};
     use tairix_arch_api::platform::{conformance, DiscoveryError, HwNodeSink, PlatformDiscovery};
+    use tairix_fdt::fixture;
     use tairix_fdt::fixture::{arm_with_cpus, raspi_like_arm, virt_like_arm, DtbBuilder};
 
     #[test]
@@ -495,7 +599,11 @@ mod tests {
         assert_eq!(timer.class(), Some(HwDeviceClass::Timer));
         let irq = timer.resources().first().expect("timer irq resource");
         assert_eq!(irq.kind(), Some(HwResourceKind::Irq));
-        assert_eq!(irq.base(), 30, "timer node carries the PPI as an IRQ");
+        assert_eq!(
+            irq.base(),
+            u64::from(GIC_PPI_INTID_BASE + 30),
+            "the timer's PPI is emitted as its global GICv2 INTID"
+        );
 
         // `/memory` has no `compatible`; `device_type` classifies it.
         let memory = nodes
@@ -513,12 +621,13 @@ mod tests {
     fn emits_every_described_device_from_a_raspi_tree() {
         let nodes = discover_all(&raspi_like_arm(0x7e20_1000, 0x7e21_5040));
         // root + psci + soc + gic + mailbox + gpio + pl011 + mini-uart +
-        // memory: the generic walk emits *both* UARTs — preferring one is
-        // console policy (`crate::console`), not tree shape — and the
-        // `/soc` simple-bus is itself a bindable bus node.
-        assert_eq!(nodes.len(), 9);
+        // scb + ethernet + mdio + memory: the generic walk emits *both*
+        // UARTs — preferring one is console policy (`crate::console`), not
+        // tree shape — and each simple-bus is itself a bindable bus node.
+        assert_eq!(nodes.len(), 12);
 
-        // Every `/soc` child names the emitted bus node as its parent.
+        // Every `/soc` child names the emitted bus node as its parent. Both
+        // `/soc` and `/scb` are `simple-bus`; the walk emits `/soc` first.
         let soc = by_key(&nodes, b"simple-bus");
         assert_eq!(soc.class(), Some(HwDeviceClass::Bus));
 
@@ -570,6 +679,100 @@ mod tests {
             .find(|n| n.class() == Some(HwDeviceClass::Memory))
             .expect("memory node emitted");
         assert_eq!(mmio_windows(memory), [(0, 0x4000_0000)]);
+    }
+
+    #[test]
+    fn the_genet_node_carries_its_window_intids_dma_reach_and_board_mac() {
+        let nodes = discover_all(&raspi_like_arm(0x7e20_1000, 0x7e21_5040));
+        let genet = by_key(&nodes, b"brcm,bcm2711-genet-v5");
+        // A network device, at the CPU-physical base its `/scb` bus `ranges`
+        // translates its `reg` to.
+        assert_eq!(genet.class(), Some(HwDeviceClass::Network));
+        assert_eq!(
+            mmio_windows(genet),
+            [(0xfd58_0000, u64::from(fixture::GENET_REGS_LEN))]
+        );
+
+        // Both `interrupts` entries are emitted as the *global* GICv2 INTIDs
+        // a driver binds, not the type-relative device-tree cells.
+        let irqs: Vec<u64> = genet
+            .resources()
+            .iter()
+            .filter(|r| r.kind() == Some(HwResourceKind::Irq))
+            .map(HwResource::base)
+            .collect();
+        assert_eq!(
+            irqs,
+            [
+                u64::from(MIN_SPI_INTID + fixture::GENET_SPI_A),
+                u64::from(MIN_SPI_INTID + fixture::GENET_SPI_B)
+            ]
+        );
+
+        // The MAC masters DMA but declares no reach of its own: the window
+        // comes from its `/scb` bus's `dma-ranges`, a discovered value.
+        let dma = genet
+            .resources()
+            .iter()
+            .find(|r| r.kind() == Some(HwResourceKind::Dma))
+            .expect("dma constraint request");
+        assert_eq!(dma.base(), u64::from(fixture::SCB_DMA_APERTURE_TOP));
+        assert_eq!(dma.length(), u64::from(fixture::SCB_DMA_APERTURE_TOP));
+        // Untranslated: a GENET buffer is reached at its CPU-physical base.
+        assert_eq!(dma.translated_base(), 0);
+
+        // The firmware-published board MAC rides on the node as a fact that
+        // confers no authority, so the driver programs the address printed
+        // on the board rather than inventing one.
+        let mac = genet
+            .resources()
+            .iter()
+            .find_map(HwResource::link_address_octets)
+            .expect("link address");
+        assert_eq!(mac, fixture::GENET_BOARD_MAC);
+
+        // Its MDIO child is emitted too, and left unbound: the GENET driver
+        // reaches the PHY through its own register window.
+        let mdio = by_key(&nodes, b"brcm,genet-mdio-v5");
+        assert_eq!(mdio.parent(), genet.id());
+    }
+
+    #[test]
+    fn a_node_on_a_bus_without_dma_ranges_requests_no_dma() {
+        // The QEMU `virt` tree declares no `dma-ranges` anywhere, so nothing
+        // discovered from it carries a DMA constraint: a driver receives no
+        // reach it was not granted.
+        let nodes = discover_all(&virt_like_arm(0x4000_0000, 0x2000_0000, "hvc", 30));
+        assert!(nodes
+            .iter()
+            .flat_map(HwNode::resources)
+            .all(|r| r.kind() != Some(HwResourceKind::Dma)));
+    }
+
+    #[test]
+    fn an_unrepresentable_interrupt_specifier_is_dropped_not_guessed() {
+        // A GICv3-only extended-SPI binding (type 2) is not a line this
+        // GICv2 port can raise: the node is still emitted, carrying no IRQ
+        // resource, rather than a line 32 below something real.
+        let mut b = DtbBuilder::new();
+        b.begin_node("");
+        b.prop_u32("#address-cells", 2);
+        b.prop_u32("#size-cells", 2);
+        b.begin_node("widget");
+        b.prop_str("compatible", "vendor,widget");
+        let mut interrupts = Vec::new();
+        for cell in [2u32, 7, 0x04] {
+            interrupts.extend_from_slice(&cell.to_be_bytes());
+        }
+        b.prop("interrupts", &interrupts);
+        b.end_node();
+        b.end_node();
+        let nodes = discover_all(&b.build());
+        let widget = by_key(&nodes, b"vendor,widget");
+        assert!(widget
+            .resources()
+            .iter()
+            .all(|r| r.kind() != Some(HwResourceKind::Irq)));
     }
 
     /// A Pi-4-shaped nested tree: devices under a `simple-bus` `/soc`
@@ -735,7 +938,7 @@ mod tests {
             .expect("outbound window request");
         assert_eq!(
             win.required_capability(),
-            Ok(tairix_abi::CapabilityId::MMIO_MAP)
+            Ok(Some(tairix_abi::CapabilityId::MMIO_MAP))
         );
     }
 
@@ -785,7 +988,7 @@ mod tests {
             .expect("aperture request");
         assert_eq!(
             dma.required_capability(),
-            Ok(tairix_abi::CapabilityId::MEM_DMA)
+            Ok(Some(tairix_abi::CapabilityId::MEM_DMA))
         );
     }
 

@@ -1937,6 +1937,122 @@ asserting the ECN handshake on the wire** are all landed and gate-green.
   (`ecn_system_conf_enables_only_ecn`), and the ECN store/disk/peer reuse
   the stream vertical's one builder and delivery path (no duplication).
 
+#### N14 — the Broadcom GENET v5 link driver (Raspberry Pi 4B) `[x]`
+
+The first NIC driver that is not virtio: the Pi 4B's on-board gigabit
+Ethernet (`brcm,bcm2711-genet-v5`, a UniMAC with an embedded MDIO master
+driving an external BCM54213PE RGMII PHY). It serves the same N4c
+device-channel seam, so the whole stack — sockets, TCP, DNS, DHCP — reaches
+real hardware with no change above the driver boundary. Before this the
+flashable Pi image shipped no NIC at all.
+
+##### N14a — the `netchan-v1` driver side hoisted to `lib/netchan` `[x]`
+`NetChannelServer` lived in `lib/virtio_net` and the ~250 lines of
+device-agnostic process glue around it in `virtio_net_driver/src/main.rs`; a
+Broadcom MAC driver can link neither. Both moved verbatim into the new
+`lib/netchan` crate, which every NIC driver process now shares (§2.2):
+- `NetChannelServer<N: Net>` — the pure, host-tested per-request handler.
+- `serve(net, irq_handle)` — the freestanding loop: claim a reserved endpoint
+  bound restricted-sender `{CAP_NET_RAW}`, publish the `netchan` node, park on
+  `{call endpoint, device IRQ}`, `shm_map` on attach. Gated
+  `cfg(target_os = "none")`, so the host build carries only the pure half and
+  nothing pulls `tairix-rt` into a kernel graph.
+- `netchan::exit` — the reserved fail-closed exit codes (80–83) both NIC
+  driver binaries report, one definition.
+- `NETCHAN_NODE_COMPATIBLE` moved into `lib/abi::driver::net_channel` beside
+  the endpoint block, replacing a `devmgr` `const` plus a bare literal in the
+  driver; `devmgr` and both drivers now name the one definition.
+`virtio_net_driver` is now bring-up plus one `netchan::serve` call, and its
+behaviour is unchanged — proven by the existing `netstack_autoload_qemu_*`,
+`netstack_dhcp_qemu_*` and `netstack_dhcp6_qemu_*` verticals staying green.
+
+##### N14b — the `drivers/network/genet` device engine `[x]`
+One crate, `drivers/bus/pcie_brcm`-shaped: a host-testable `lib` target plus
+the `Run` binary, co-located because a NIC sits above the §18.6 bootstrap
+floor and so has no charter-legal non-driver consumer for a `lib/*`
+device-support crate (§2.22). Key facts for the next worker:
+- **Register map** (`regs.rs`): `SYS` / `EXT` / `INTRL2_0` / `RBUF` / `UMAC`
+  blocks, the receive descriptor RAM at `0x2000` and transmit at `0x4000`,
+  and the per-ring / per-block register offsets derived from them
+  (`base + 256·12 + ring·0x40`; ring 16 is the default queue). Descriptors are
+  **on-chip**, inside the register aperture, so the only DMA is frame buffers.
+- **Bring-up** refuses anything but the GENET v5 core revision
+  (`SYS_REV_CTRL`), masks all of `INTRL2_0` *before* programming, resets the
+  RBUF and UniMAC under local loopback, programs the MAC and frame limit,
+  builds both rings over one 256 KiB carve (64 × 2 KiB per direction),
+  negotiates the PHY, then enables TX/RX and unmasks exactly
+  `{RXDMA done, TXDMA done, link up, link down}`.
+- **PHY** (`mdio.rs`): the UniMAC MDIO master plus generic clause-22
+  autonegotiation (BMCR/BMSR/ANAR/ANLPAR + the 1000BASE-T pair) — no vendor
+  register. Every handshake is bounded by wall clock and fails closed. A link
+  event re-resolves and re-programs the link on the next service doorbell, so
+  a cable change needs no driver restart.
+- **`Net::service` is non-blocking**: reclaim completed transmits, drain the
+  ring into free slots, harvest deliveries. `rx_ring_full` back-pressures with
+  the frame left in its descriptor; error/fragmented/malformed descriptors are
+  dropped but still freed, and a queued frame wider than a device buffer is
+  released explicitly, so nothing can wedge either ring. Receive descriptors
+  are armed once and never rewritten — the consumer index alone hands a slot
+  back.
+- **The controller's own reports are validated**, not trusted: a transmit
+  consumer index past what was queued, or a receive producer index past the
+  ring's capacity, is refused with `DeviceFault` rather than acted on.
+- **Offloads: none advertised.** The GENET has checksum and segmentation
+  engines, but §0 binds a driver to advertise only what it *verified*, and
+  QEMU models no GENET. The software path stays canonical, so the NIC is
+  complete without them; advertising them is a later increment gated on metal.
+- **The MAC address is not in the controller.** The Pi's factory address is
+  published by firmware through the device tree's
+  `mac-address` / `local-mac-address` binding, so a new
+  `HwResourceKind::LinkAddress` (`lib/abi`) carries it in the node's grant set
+  — the one carrier that reaches a driver *process* (`resource_grants`
+  delivers resources, not node snapshots). It is a discovered *fact*, not a
+  handle: `HwResourceKind::required_capability` is now `Option<CapabilityId>`
+  and reports `None` for it (capability ids start at 1, so the stored `0`
+  names none). A node publishing no address fails bring-up closed rather than
+  inventing one. `RtDriverHost::link_address` surfaces it; `lspci` renders it.
+- **Coverage**: 26 host tests over a register-level controller model — the
+  revision gate, the bring-up write sequence *and its ordering*, MDIO framing
+  and its fail-closed timeout, link resolution at every rate plus link-down
+  and re-plug, transmit encoding with producer/consumer accounting and ring
+  wrap, receive delivery past the 2-byte pad, every drop class, back-pressure
+  without loss, and sensitive-class scrubbing in both directions.
+
+##### N14c — discovery, the signed bundle, and the shipped image `[x]`
+- **A latent defect fixed**: `push_irq_resources`
+  (`kernel/arch/aarch64/src/platform.rs`) emitted the *raw* device-tree
+  `interrupts` cell as the IRQ resource instead of the GICv2 INTID
+  (`gic_intid_from_cells`: SPI + 32, PPI + 16). No driver read it before — the
+  virtio-MMIO nodes get their line from `hwdiscovery`'s `slot_irq`, EMMC2 from
+  `root_unlock::emmc2_spi`, the VL805 from a driver-minted resource — but
+  GENET parks on it, so it would have bound INTID 157 instead of 189 and never
+  woken. Now mapped through the one shared decoder; an unrepresentable
+  specifier is dropped, never guessed.
+- **The DMA constraint** is read from the GENET's **parent bus** `dma-ranges`
+  (`/scb`, `0..0xfc00_0000` on the Pi 4), because Devicetree Spec v0.4 §2.3.9
+  puts the property on the bus, not on the mastering device — a discovered
+  value, never a board constant. `BusLevel` gained `dma_ranges` and
+  `dma_ranges_aperture` was split into a byte-slice decoder plus its node
+  wrapper (one decode, no behaviour change for the PCIe caller).
+- **The link address** is read from the standard ethernet-controller binding
+  for *any* node that carries it (`mac-address` first, then
+  `local-mac-address`), never a board special case; an all-zero or
+  wrong-length property is ignored.
+- **Fixture**: `raspi_like_arm` grew the `/scb` bus and the
+  `ethernet@7d580000` node (both SPIs, the board MAC, the `mdio@e14` child),
+  so discovery is proven to emit a Network node at CPU-physical `0xfd58_0000`
+  with INTIDs 189/190, the SCB aperture, and the MAC.
+- **Bundle**: `GENET_STORE_PATH` (`Drivers/network/genet/Run`) and
+  `build_genet_bundle`, requesting exactly the virtio-net set
+  `{MMIO_MAP, MEM_DMA, IRQ_BIND, SHM, IPC_ENDPOINT, IPC_BIND_PRIVILEGED,
+  HW_EMIT, LOG_EMIT}`; planted by `build_image_driver_bundles`, so the
+  flashable Pi image autoloads the NIC. The store-scan test proves a GENET
+  node resolves to it and to nothing else.
+- **No QEMU vertical is possible**: QEMU models no GENET and its `raspi*`
+  machines hand the kernel no device tree. The register-level suite is the
+  coverage; the live path is an on-metal acceptance item (`plans/PI.md`), as
+  for the Pi's EMMC2, PCIe and HVS drivers.
+
 ## 5. Observability: `info:` / `state:` / `stats:` for every interface
 
 Every network interface `netstack` manages is a first-class resource,
@@ -2125,6 +2241,6 @@ changes (§17.4 — the seam is the contract).
 - No TLS (already curated under `lib/crypto`/§16.4; it fronts sockets,
   it is not part of the stack).
 - No Wi-Fi/802.11, no non-Ethernet link layers — new drivers serve the
-  same seam later.
+  same seam later, as the Pi 4B's GENET MAC already does (N14).
 - No kernel-resident fast path: if profiling ever motivates one, that
   is a design conflict to raise (§15.7), not a quiet migration.
