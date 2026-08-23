@@ -50,6 +50,8 @@ ignorierten Arguments.
 - `-4, --ipv4` — die Liste auf IPv4-Sockets beschränken.
 - `-6, --ipv6` — die Liste auf IPv6-Sockets beschränken.
 - `-H, --no-header` — die Kopfzeile unterdrücken.
+- `-s, --summary` — die stackweiten TCP-Verbindungsabwehr-Summen
+  anstelle der Socket-Tabelle ausgeben.
 - `-?, --help` — die eigene Kurzhilfe dieses Befehls zeigen.
 
 ## EXAMPLES

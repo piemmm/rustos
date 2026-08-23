@@ -176,6 +176,16 @@ enum NetPeerMode {
     /// back, and injects bounded frame loss so the stream survives
     /// retransmission (the role-swapped mirror of [`Self::V6TcpEcho`]).
     V6TcpConnect,
+    /// A v6-link-local-only *SYN-flood client* (the N16b
+    /// connection-exhaustion vertical): same deterministic link-local
+    /// addressing as [`Self::V6LinkLocal`], but the peer first fills the
+    /// guest listener's half-open backlog with SYNs it never answers, then
+    /// opens one real connection to `tairix_test_netstack_wire::GUEST_TCP_PORT`
+    /// that the listener can only admit through a stateless RFC 4987 SYN
+    /// cookie, and verifies the guest echoes the whole transfer back over it.
+    /// Its verdict requires both the filled backlog and the verified echo, so
+    /// a run that never engaged the cookie brake fails loud.
+    V6TcpFlood,
     /// A v6-link-local-only *passive ICMP echo responder* (the N8b-2b-β
     /// `ping` vertical): same deterministic link-local addressing as
     /// [`Self::V6LinkLocal`], but the peer runs no campaign — it answers the
@@ -757,6 +767,20 @@ const TCPECHO_PASS_PREFIX: &str = "TCPECHO PASS";
 /// report marker. Pinned to the fixture's own `tairix_test_tcpserve::PASS_MARKER`
 /// by a unit test below, so the script and the program cannot drift.
 const TCPSERVE_PASS_PREFIX: &str = "TCPSERVE PASS";
+
+/// Serial marker gating the connection-exhaustion vertical: the `netstack`
+/// `SYN_COOKIES_ENGAGED` audit message. Its appearance means the listener's
+/// bounded half-open backlog overflowed and the stack fell back to stateless
+/// RFC 4987 cookies — the one witness that distinguishes a cookie-admitted
+/// connection from an ordinary one, so the vertical requires it *before* it
+/// will await the fixture's PASS marker. It is the literal `netstack` audit
+/// message (`userland/net/netstack/src/run.rs`), matching the established
+/// pattern of gating on an audit message substring. It is the text of
+/// `tairix_netstack::events::SYN_COOKIES_ENGAGED_MESSAGE`, named at the
+/// emitter so the wording is deliberate on both sides; xtask keeps a literal
+/// rather than depending on a userland service crate for one string, as the
+/// sibling [`BOND_FAILOVER_TRIGGER_MARKER`] already does.
+const SYN_COOKIES_MARKER: &str = "netstack: SYN backlog full, answering with stateless cookies";
 
 /// The shell command line the `ping` vertical types at the prompt: three
 /// `ICMPv6` echo requests to the host peer's link-local address (`fe80::2`,
@@ -4706,6 +4730,61 @@ static TESTS: &[QemuTest] = &[
             ("Username:", Duration::ZERO, SESSION_USERNAME_LINE),
             ("Password", Duration::ZERO, SESSION_PASSWORD_LINE),
             ("root@tairix ~% ", Duration::ZERO, "tcpserve\n"),
+            (TCPSERVE_PASS_PREFIX, Duration::ZERO, "exit\n"),
+        ],
+    },
+    // `plans/NETWORK.md` N16b: the connection-exhaustion vertical — the
+    // listener vertical above, run against a *hostile* peer.
+    // `tairix-test-netstack-synflood-qemu-aarch64` reuses that vertical's disk
+    // and guest fixture unchanged (`FsDisk::ListenRootDisk`, the `tcpserve`
+    // server): what is under test is the stack's behaviour under connection
+    // exhaustion, not a new guest program. The peer
+    // (`NetPeerMode::V6TcpFlood`) first fills the listener's bounded half-open
+    // backlog with SYNs from distinct source ports that it never answers —
+    // exactly a SYN flood — and only then opens one real connection, whose SYN
+    // therefore meets a full backlog and can be admitted only by falling back
+    // to a stateless RFC 4987 cookie (the server ISN a keyed MAC over the
+    // 4-tuple, the connection reconstructed from the returning ACK with no
+    // per-connection state held meanwhile). It then streams the whole
+    // deterministic transfer over that cookie-admitted connection and verifies
+    // the guest echoes every byte back. A stack whose backlog grew without
+    // bound, or which refused the connection once the backlog filled, cannot
+    // complete the transfer.
+    // Three independent witnesses gate the PASS. The serial script requires
+    // `SYN_COOKIES_MARKER` — the `netstack` `SYN_COOKIES_ENGAGED` audit
+    // message — *before* it will await the fixture's PASS marker, which is what
+    // distinguishes a cookie-admitted connection from an ordinary one (a run
+    // where the flood never landed would otherwise look identical to a pass);
+    // that step types nothing, it only orders the run. The guest fixture's
+    // audited `exit` then witnesses a verified exchange (a shortfall parks
+    // forever), and the shell's scripted `exit`, typed only after the
+    // `TCPSERVE PASS` marker appeared, completes the arm-then-exit chain. The
+    // harness additionally requires the flood peer to report *both* the whole
+    // flood sent and the whole transfer echoed back verified. No side passes
+    // alone. A 300-second budget matches the listener vertical it mirrors;
+    // single CPU like the other full-boot verticals.
+    QemuTest {
+        package: "tairix-test-netstack-synflood-qemu-aarch64",
+        binary: "tairix-test-netstack-synflood-qemu-aarch64",
+        target: "aarch64-unknown-none",
+        cpus: 1,
+        timeout: Duration::from_secs(300),
+        disk_sectors: None,
+        netstack_peer: NetPeerMode::V6TcpFlood,
+        ramfb: false,
+        fs_disk: FsDisk::ListenRootDisk,
+        keyboard: None,
+        typed_keys: &[],
+        screendumps: &[],
+        pointer_script: None,
+        serial: &[
+            ("ARXFS passphrase: ", Duration::ZERO, UNLOCK_PASSPHRASE_LINE),
+            ("Username:", Duration::ZERO, SESSION_USERNAME_LINE),
+            ("Password", Duration::ZERO, SESSION_PASSWORD_LINE),
+            ("root@tairix ~% ", Duration::ZERO, "tcpserve\n"),
+            // Expect-only: require the cookie brake to have engaged before
+            // the transfer's PASS marker is awaited. Types nothing.
+            (SYN_COOKIES_MARKER, Duration::ZERO, ""),
             (TCPSERVE_PASS_PREFIX, Duration::ZERO, "exit\n"),
         ],
     },
@@ -8961,6 +9040,7 @@ fn spawn_net_peer(
         NetPeerMode::V6TcpConnect => {
             super::netpeer::NetPeer::spawn_tcp_connect(qemu_sock, peer_sock)
         }
+        NetPeerMode::V6TcpFlood => super::netpeer::NetPeer::spawn_tcp_flood(qemu_sock, peer_sock),
         NetPeerMode::V6PingResponder => {
             super::netpeer::NetPeer::spawn_ping_responder(qemu_sock, peer_sock)
         }

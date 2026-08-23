@@ -455,6 +455,22 @@ impl SysinfoQueryId {
     /// kernel decision, because they never enter the kernel.
     pub const CACHE_REPORT: Self = Self(33);
 
+    /// Read the network stack's **stack-wide** TCP connection-defence
+    /// counters: one
+    /// [`NetStackDefenceCounters`](crate::net_ipc::NetStackDefenceCounters)
+    /// carrying the SYN-backlog, stateless-SYN-cookie, accept-queue, and
+    /// reset totals summed over every listener the stack has ever held.
+    ///
+    /// A single record, not a page: the counters belong to the stack's
+    /// socket table as a whole, not to any one interface, so they have no
+    /// per-interface home the way [`Self::NET_INTERFACE_COUNTERS`] does.
+    ///
+    /// Requires `CAP_SYSINFO_GLOBAL` and is audited: these are system-wide,
+    /// cross-principal figures, and they are the surface a SYN flood in
+    /// progress becomes visible on (`plans/NETWORK.md` §5:
+    /// `stats:net/stack/syn-cookies`).
+    pub const NET_STACK_DEFENCE: Self = Self(34);
+
     /// Inclusive upper bound on the query identifier space in `sysinfo-v1`.
     ///
     /// Sized identically to the syscall table so a future query explosion
@@ -862,6 +878,12 @@ pub const SYSINFO_QUERIES: &[SysinfoQuerySpec] = &[
         name: "cache_report",
         required_capability: None,
         audit: false,
+    },
+    SysinfoQuerySpec {
+        id: SysinfoQueryId::NET_STACK_DEFENCE,
+        name: "net_stack_defence",
+        required_capability: Some(CapabilityId::SYSINFO_GLOBAL),
+        audit: true,
     },
 ];
 
@@ -5601,6 +5623,16 @@ mod tests {
             Some(CapabilityId::SYSINFO_KERNEL)
         );
         assert!(spec_for(SysinfoQueryId::VOLUME_IO_HEALTH).unwrap().audit);
+        assert_eq!(SysinfoQueryId::NET_STACK_DEFENCE.as_u16(), 34);
+        // Stack-wide, cross-principal TCP defence totals: gated on
+        // `CAP_SYSINFO_GLOBAL` and audited, like the interface counters.
+        assert_eq!(
+            spec_for(SysinfoQueryId::NET_STACK_DEFENCE)
+                .unwrap()
+                .required_capability,
+            Some(CapabilityId::SYSINFO_GLOBAL)
+        );
+        assert!(spec_for(SysinfoQueryId::NET_STACK_DEFENCE).unwrap().audit);
         assert_eq!(SYSINFO_VERSION_CURRENT, SYSINFO_VERSION_V1);
     }
 

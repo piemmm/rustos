@@ -25,8 +25,13 @@
 //! `state:net/<iface>/{link,address}`, and
 //! `stats:net/<iface>/{rx,tx}.{packets,bytes,dropped}`, the windowed
 //! throughput rates `stats:net/<iface>/{rx,tx}.{pps,bps}?window=…`, plus
-//! the stack-wide `stats:net/stack/{icmp-errors,icmp-suppressed,reassembly-evicted}`
-//! defence aggregates, `plans/NETWORK.md` §5).
+//! the stack-wide `stats:net/stack/…` defence counters — the packet-path
+//! aggregates `{icmp-errors,icmp-suppressed,reassembly-evicted}` summed
+//! across interfaces, and the TCP connection-defence totals
+//! `{syn-cookies,syn-cookies-accepted,syn-cookies-rejected,
+//! syn-backlog-started,syn-backlog-expired,accepts,accept-overflow,
+//! tcp-resets}` read from the stack's one socket table,
+//! `plans/NETWORK.md` §5).
 
 use alloc::format;
 use alloc::string::{String, ToString};
@@ -1336,10 +1341,16 @@ fn net_iface_metric(
     net_counter_metric(reference, now, &name, unit, value)
 }
 
-/// Resolve a `stats:net/stack/<leaf>` defence aggregate: the sum of a
-/// stack-wide counter across every managed interface. These are the
+/// Resolve a `stats:net/stack/<leaf>` defence counter. These are the
 /// counters a denial-of-service in progress (an ICMP-error storm, a
-/// reassembly-eviction flood) becomes visible on.
+/// reassembly-eviction flood, a SYN flood) becomes visible on.
+///
+/// Two sources answer the closed leaf set, because the counters live in two
+/// places. The packet-path leaves belong to each interface's engine and are
+/// summed across every managed interface; the TCP connection-defence leaves
+/// belong to the stack's socket table as a whole and are read as one
+/// record — summing *those* per interface would multiply one figure by the
+/// interface count.
 fn net_stack_metric(
     reference: &ResourceRef,
     now: Time64,
@@ -1347,21 +1358,40 @@ fn net_stack_metric(
     leaf: &str,
 ) -> Result<ResourceResponse, ResolveInfoError> {
     // Validate the leaf before the privileged query (fail closed).
-    if !matches!(
-        leaf,
-        "icmp-errors" | "icmp-suppressed" | "reassembly-evicted"
-    ) {
-        return Err(ResolveInfoError::UnknownSelector);
-    }
-    let records = all_net_counters(transport)?;
-    let value = records.iter().fold(0u64, |acc, record| {
-        let add = match leaf {
-            "icmp-errors" => record.counters.icmp_errors_sent,
-            "icmp-suppressed" => record.counters.icmp_errors_suppressed,
-            _ => record.counters.reassembly_expired,
-        };
-        acc.saturating_add(add)
-    });
+    let value = match leaf {
+        "icmp-errors" | "icmp-suppressed" | "reassembly-evicted" => {
+            let records = all_net_counters(transport)?;
+            records.iter().fold(0u64, |acc, record| {
+                let add = match leaf {
+                    "icmp-errors" => record.counters.icmp_errors_sent,
+                    "icmp-suppressed" => record.counters.icmp_errors_suppressed,
+                    _ => record.counters.reassembly_expired,
+                };
+                acc.saturating_add(add)
+            })
+        }
+        "syn-cookies"
+        | "syn-cookies-accepted"
+        | "syn-cookies-rejected"
+        | "syn-backlog-started"
+        | "syn-backlog-expired"
+        | "accepts"
+        | "accept-overflow"
+        | "tcp-resets" => {
+            let defence = kstats::net_stack_defence(transport).map_err(map_kstat_error)?;
+            match leaf {
+                "syn-cookies" => defence.syn_cookies_sent,
+                "syn-cookies-accepted" => defence.syn_cookies_accepted,
+                "syn-cookies-rejected" => defence.syn_cookies_rejected,
+                "syn-backlog-started" => defence.half_open_started,
+                "syn-backlog-expired" => defence.half_open_expired,
+                "accepts" => defence.accepted,
+                "accept-overflow" => defence.accept_overflow,
+                _ => defence.resets_sent,
+            }
+        }
+        _ => return Err(ResolveInfoError::UnknownSelector),
+    };
     let mut name = String::from("net/stack/");
     name.push_str(leaf);
     net_counter_metric(reference, now, &name, Unit::Count, value)
@@ -2194,6 +2224,9 @@ mod tests {
                 SysinfoQueryId::RESOURCE_LIMITS => Ok(self.limits_report()),
                 SysinfoQueryId::MEMORY_PRESSURE => Ok(self.pressure.to_le_bytes().to_vec()),
                 SysinfoQueryId::RAMZIP_STATS => Ok(self.ramzip.to_le_bytes().to_vec()),
+                SysinfoQueryId::NET_STACK_DEFENCE => {
+                    Ok(fixture_net_defence().to_le_bytes().to_vec())
+                }
                 SysinfoQueryId::RECLAIM_STATS => {
                     let req = ReclaimListRequest::from_bytes(payload)?;
                     let encoders: Vec<_> = self
@@ -3097,6 +3130,20 @@ mod tests {
     }
 
     /// The interface-counters record the fixture serves for `wan`.
+    /// The stack-wide TCP connection-defence totals the fixture serves.
+    fn fixture_net_defence() -> tairix_abi::net_ipc::NetStackDefenceCounters {
+        tairix_abi::net_ipc::NetStackDefenceCounters {
+            half_open_started: 256,
+            syn_cookies_sent: 4_096,
+            syn_cookies_accepted: 4_000,
+            syn_cookies_rejected: 96,
+            accepted: 4_200,
+            accept_overflow: 6,
+            half_open_expired: 31,
+            resets_sent: 102,
+        }
+    }
+
     fn fixture_net_counters() -> NetInterfaceCountersRecord {
         let mut name = [0u8; IF_NAME_LEN];
         name[..3].copy_from_slice(b"wan");
@@ -3375,14 +3422,75 @@ mod tests {
             Err(ResolveInfoError::UnknownSelector)
         );
         assert_eq!(
-            resolve_str("stats:net/stack/syn-cookies", &fixture),
-            Err(ResolveInfoError::UnknownSelector)
+            resolve_str("stats:net/stack/syn-cookie", &fixture),
+            Err(ResolveInfoError::UnknownSelector),
+            "a near-miss on a real leaf name is still refused"
         );
         // A valid leaf on an absent interface exhausts the table.
         assert_eq!(
             resolve_str("stats:net/lan9/rx.packets", &fixture),
             Err(ResolveInfoError::UnknownSelector)
         );
+    }
+
+    /// The stack-wide TCP connection-defence counters `plans/NETWORK.md` §5
+    /// promises: read from the one stack-wide record, not summed per
+    /// interface, and gated like every other `stats:net` counter.
+    #[test]
+    fn stats_net_stack_reports_connection_defence_counters() {
+        let fixture = Fixture::new();
+        let expected = fixture_net_defence();
+        for (selector, want) in [
+            ("stats:net/stack/syn-cookies", expected.syn_cookies_sent),
+            (
+                "stats:net/stack/syn-cookies-accepted",
+                expected.syn_cookies_accepted,
+            ),
+            (
+                "stats:net/stack/syn-cookies-rejected",
+                expected.syn_cookies_rejected,
+            ),
+            (
+                "stats:net/stack/syn-backlog-started",
+                expected.half_open_started,
+            ),
+            (
+                "stats:net/stack/syn-backlog-expired",
+                expected.half_open_expired,
+            ),
+            ("stats:net/stack/accepts", expected.accepted),
+            ("stats:net/stack/accept-overflow", expected.accept_overflow),
+            ("stats:net/stack/tcp-resets", expected.resets_sent),
+        ] {
+            let r = resolve_str(selector, &fixture).expect("ok");
+            assert_eq!(
+                r.authorization,
+                Authorization::Capability(CapabilityId::SYSINFO_GLOBAL),
+                "{selector} is a privileged system-wide counter"
+            );
+            match r.payload {
+                ResponsePayload::Metric(m) => {
+                    assert_eq!(m.value, want, "{selector}");
+                    assert_eq!(m.kind, MetricKind::Counter);
+                }
+                _ => panic!("expected metric for {selector}"),
+            }
+        }
+    }
+
+    /// The connection-defence leaves come from the stack-wide record, so a
+    /// denial of *that* query is what refuses them — never the per-interface
+    /// counters query.
+    #[test]
+    fn stats_net_stack_defence_denial_maps_to_capability_denied() {
+        let mut fixture = Fixture::new();
+        fixture.deny = Some(SysinfoQueryId::NET_STACK_DEFENCE);
+        assert_eq!(
+            resolve_str("stats:net/stack/syn-cookies", &fixture),
+            Err(ResolveInfoError::CapabilityDenied)
+        );
+        // The packet-path aggregates read a different query and still work.
+        assert!(resolve_str("stats:net/stack/icmp-errors", &fixture).is_ok());
     }
 
     #[test]

@@ -99,12 +99,14 @@ fields.
 | `Connect` | socket, peer `SocketAddr` | status |
 | `Send` | socket, optional dest (`None` ⇒ connected peer), payload | status |
 | `Close` | socket | status |
+| `Shutdown` | socket (a connected stream socket), `ShutdownHow` | status |
 | `JoinMulticast` / `LeaveMulticast` | socket, group `SocketAddr` (port must be `0`) | status |
 | `Listen` | socket (a bound stream socket) | status |
 | `Accept` | listening socket, child delivery-port endpoint id | child `SocketId` (`encode_socket_reply`), or `WouldBlock` |
 | `SendEcho` | socket, optional dest (`None` ⇒ connected peer; port must be `0`), sequence, payload | status |
 
-`SocketType` serves `Datagram` (`2`), `Stream` (`1`), and `IcmpEcho` (`3`);
+`SocketType` serves `Datagram` (`2`), `Stream` (`1`), and `IcmpEcho` (`3`),
+and `ShutdownHow` serves `Read` (`1`), `Write` (`2`), and `Both` (`3`);
 any other value fails closed at decode. A `SocketAddr` is a family, a 16-byte
 address (IPv4 uses the first four; the tail must be zero), and a host-order
 port. For a stream socket `Send` carries no destination (`dest` must be
@@ -123,6 +125,27 @@ CSPRNG initial sequence number and its egress interface are chosen by the
 stack at `Connect`. `Send` enqueues bytes onto the connection's bounded send
 buffer; `Close` begins an orderly teardown (FIN) and the connection is reaped
 in the background once fully closed.
+
+### Half-close — `Shutdown` (N15)
+
+`Shutdown` ends one direction of a connection while keeping the handle, the
+POSIX `shutdown` contract. `ShutdownHow::Write` is the RFC 9293 §3.10.4
+CLOSE: a FIN is queued behind the buffered data and flushed at once, no
+further `Send` is accepted (`NotConnected`), and the socket stays **readable**
+— `Data` keeps arriving and `Closed` still comes only when the peer closes
+too. That is what `Close` cannot express: it releases the socket, so a client
+that closes to signal end-of-request has nowhere left to read the response.
+
+`ShutdownHow::Read` stops delivering received bytes. They are still drained
+from the connection and discarded, so the advertised receive window stays open
+and a peer that keeps sending is never stalled; TCP has no wire signal for a
+half-closed receive direction, so the peer is not told. `Both` applies each.
+
+Repeating a direction already shut down succeeds. Only a *connected stream*
+socket has a half-close: an unconnected or listening socket is refused
+`NotConnected`, and a datagram or echo socket `OutOfRange` (only TCP has a
+FIN). The client calls `tairix_rt::net::shutdown`. A half-closed connection is
+observable as usual — `ss` shows it in `FIN-WAIT-1`/`FIN-WAIT-2`.
 
 ### Passive open — `Listen` / `Accept` (N6b-2)
 
@@ -171,7 +194,7 @@ of `SocketDatagram` — carrying no per-message peer (the peer is fixed):
   listener until it replies `WouldBlock`.
 
 The client links `tairix_rt::net::stream_socket` / `connect` / `stream_send`
-/ `listen` / `accept` / `close` and drains events with `stream_recv` (which,
+/ `listen` / `accept` / `shutdown` / `close` and drains events with `stream_recv` (which,
 like `recv`, returns the kernel-attested sender `Origin` for fail-closed
 authentication).
 

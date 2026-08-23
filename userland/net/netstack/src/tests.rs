@@ -9,8 +9,8 @@ use tairix_abi::driver::net::{DeviceFacts, LinkState, MacAddress, Net, NetOffloa
 use tairix_abi::driver::net_ring::{FrameRings, RingGeometry, ServiceReport};
 use tairix_abi::driver::BufferClass;
 use tairix_abi::net::{
-    decode_bind_reply, decode_send_reply, decode_socket_reply, SocketAddr, SocketRequest,
-    SocketStreamEvent, SocketType,
+    decode_bind_reply, decode_send_reply, decode_socket_reply, ShutdownHow, SocketAddr,
+    SocketRequest, SocketStreamEvent, SocketType,
 };
 use tairix_abi::net_ipc::{
     NetAddrFamily, NetBondConfigMsg, NetBondMemberRecord, NetBondMode, NetDnsServers, NetIfKind,
@@ -1704,6 +1704,190 @@ fn binding_a_privileged_port_requires_the_capability() {
     .expect("privileged bind allowed with the capability");
 }
 
+/// The stack-wide defence counters must be monotonic: closing a listener
+/// folds its totals into the stack's, so a flood that ended with its
+/// target socket closing stays visible instead of vanishing from the count.
+#[test]
+fn defence_counters_survive_a_listener_close() {
+    let mut svc = SocketService::new();
+    let mut stack = routed_stack();
+    let who = net_caller(1);
+
+    // No listeners yet: every counter reads zero, not an error.
+    assert_eq!(
+        svc.defence_counters(),
+        tairix_abi::net_ipc::NetStackDefenceCounters::default()
+    );
+
+    let st = open_socket(&mut svc, &mut stack, &who, SocketType::Stream).expect("open st");
+    serve_req(
+        &mut svc,
+        &mut stack,
+        &who,
+        &SocketRequest::Bind {
+            socket: st,
+            local: v4_addr(0, 0, 0, 0, 8090),
+        },
+    )
+    .expect("bind");
+    serve_req(
+        &mut svc,
+        &mut stack,
+        &who,
+        &SocketRequest::Listen { socket: st },
+    )
+    .expect("listen");
+
+    // Drive one handshake so the listener has a non-zero total to keep.
+    let secret = crate::CryptoCookieSecret::new([0x5A; 32]);
+    let mut client = Tcb::connect(TcpConfig::default(), 51000, 8090, 0x1234, t(2));
+    let mut seen = 0u64;
+    for _ in 0..8 {
+        let mut segments = Vec::new();
+        client.poll_transmit(t(2), |seg| {
+            let mut buf = vec![0u8; 128 + seg.payload.len()];
+            let pseudo = Pseudo::V4 {
+                source: V4_B,
+                destination: V4_A,
+            };
+            let n = tairix_net::tcp::write(pseudo, &seg.meta, seg.payload, &mut buf)
+                .expect("serialise");
+            buf.truncate(n);
+            segments.push(buf);
+            true
+        });
+        if segments.is_empty() {
+            break;
+        }
+        for frame in &segments {
+            let io = svc.on_tcp_segment(
+                &mut stack,
+                IpAddr::V4(V4_B),
+                IpAddr::V4(V4_A),
+                tairix_net::addr::Ecn::NotEct,
+                frame,
+                t(2),
+                &secret,
+            );
+            let _ = io;
+        }
+        seen = svc.defence_counters().half_open_started;
+        // Feed whatever the listener answered back to the client.
+        for (_iface, frames) in &svc.advance_streams(&mut stack, t(2)).tx {
+            let _ = frames;
+        }
+    }
+    assert!(
+        seen > 0,
+        "the listener recorded the inbound SYN it opened state for"
+    );
+    let before = svc.defence_counters();
+
+    // Closing the listener must not lose its totals.
+    serve_req(
+        &mut svc,
+        &mut stack,
+        &who,
+        &SocketRequest::Close { socket: st },
+    )
+    .expect("close listener");
+    assert_eq!(
+        svc.defence_counters(),
+        before,
+        "a closed listener's defence totals are retained by the stack"
+    );
+}
+
+/// The SYN-flood brake is audited **once per listener**, on the transition:
+/// a flood must not turn the audit log into its own amplifier.
+#[test]
+fn cookies_engaged_is_reported_once_per_listener() {
+    let mut svc = SocketService::new();
+    let mut stack = routed_stack();
+    let who = net_caller(1);
+    let secret = crate::CryptoCookieSecret::new([0x5A; 32]);
+
+    let st = open_socket(&mut svc, &mut stack, &who, SocketType::Stream).expect("open st");
+    serve_req(
+        &mut svc,
+        &mut stack,
+        &who,
+        &SocketRequest::Bind {
+            socket: st,
+            local: v4_addr(0, 0, 0, 0, 8100),
+        },
+    )
+    .expect("bind");
+    serve_req(
+        &mut svc,
+        &mut stack,
+        &who,
+        &SocketRequest::Listen { socket: st },
+    )
+    .expect("listen");
+
+    // Feed bare SYNs from distinct source ports until the bounded backlog
+    // overflows and the listener falls back to cookies.
+    let mut engaged_reports = 0usize;
+    let mut cookies_seen = false;
+    // Take the bound from the engine's own default so the two cannot drift.
+    let backlog = tairix_net::tcp::listen::ListenConfig::default().max_half_open;
+    for port in 0..(backlog + 8) {
+        let source_port = 40_000u16.wrapping_add(u16::try_from(port).unwrap_or(0));
+        let io = feed_bare_syn(&mut svc, &mut stack, source_port, 8100, &secret);
+        if io {
+            engaged_reports += 1;
+        }
+        if svc.defence_counters().syn_cookies_sent > 0 {
+            cookies_seen = true;
+        }
+    }
+
+    assert!(cookies_seen, "the backlog overflowed into the cookie path");
+    assert_eq!(
+        engaged_reports, 1,
+        "the brake is audited once, not once per flooded SYN"
+    );
+}
+
+/// Deliver one bare SYN to the listener on `dst_port`, returning whether the
+/// service reported the cookie brake engaging on this pass.
+fn feed_bare_syn(
+    svc: &mut SocketService,
+    stack: &mut Netstack,
+    source_port: u16,
+    dst_port: u16,
+    secret: &crate::CryptoCookieSecret,
+) -> bool {
+    let meta = tairix_net::tcp::TcpSegmentMeta {
+        source_port,
+        destination_port: dst_port,
+        seq: tairix_net::tcp::SeqNumber::new(0x1000 + u32::from(source_port)),
+        ack: tairix_net::tcp::SeqNumber::new(0),
+        flags: tairix_net::tcp::TcpFlags::SYN,
+        window: 1024,
+        urgent: 0,
+        options: tairix_net::tcp::TcpOptions::default(),
+    };
+    let pseudo = Pseudo::V4 {
+        source: V4_B,
+        destination: V4_A,
+    };
+    let mut buf = vec![0u8; 128];
+    let n = tairix_net::tcp::write(pseudo, &meta, &[], &mut buf).expect("serialise SYN");
+    buf.truncate(n);
+    svc.on_tcp_segment(
+        stack,
+        IpAddr::V4(V4_B),
+        IpAddr::V4(V4_A),
+        tairix_net::addr::Ecn::NotEct,
+        &buf,
+        t(2),
+        secret,
+    )
+    .cookies_engaged
+}
+
 #[test]
 fn listen_requires_a_bound_stream_socket() {
     let mut svc = SocketService::new();
@@ -1760,6 +1944,81 @@ fn listen_requires_a_bound_stream_socket() {
             &SocketRequest::Listen { socket: st }
         ),
         Err(Errno::OutOfRange),
+    );
+}
+
+/// A half-close is a FIN, so only a *connected stream* socket has one to
+/// send. Every other socket kind is refused with the typed error its role
+/// implies, never silently accepted.
+#[test]
+fn shutdown_requires_a_connected_stream_socket() {
+    let mut svc = SocketService::new();
+    let mut stack = routed_stack();
+    let who = raw_caller(1);
+
+    // A datagram socket has no half-close: wrong kind of socket.
+    let dg = open_socket(&mut svc, &mut stack, &who, SocketType::Datagram).expect("open dg");
+    // An echo socket likewise.
+    let echo = open_socket(&mut svc, &mut stack, &who, SocketType::IcmpEcho).expect("open echo");
+    for socket in [dg, echo] {
+        assert_eq!(
+            serve_req(
+                &mut svc,
+                &mut stack,
+                &who,
+                &SocketRequest::Shutdown {
+                    socket,
+                    how: ShutdownHow::Write,
+                }
+            ),
+            Err(Errno::OutOfRange),
+        );
+    }
+
+    // A stream socket that has never connected has no connection yet.
+    let st = open_socket(&mut svc, &mut stack, &who, SocketType::Stream).expect("open st");
+    assert_eq!(
+        serve_req(
+            &mut svc,
+            &mut stack,
+            &who,
+            &SocketRequest::Shutdown {
+                socket: st,
+                how: ShutdownHow::Write,
+            }
+        ),
+        Err(Errno::NotConnected),
+    );
+
+    // Nor does a listener: it demultiplexes connections, it is not one.
+    serve_req(
+        &mut svc,
+        &mut stack,
+        &who,
+        &SocketRequest::Bind {
+            socket: st,
+            local: v4_addr(0, 0, 0, 0, 8081),
+        },
+    )
+    .expect("bind");
+    serve_req(
+        &mut svc,
+        &mut stack,
+        &who,
+        &SocketRequest::Listen { socket: st },
+    )
+    .expect("listen");
+    assert_eq!(
+        serve_req(
+            &mut svc,
+            &mut stack,
+            &who,
+            &SocketRequest::Shutdown {
+                socket: st,
+                how: ShutdownHow::Read,
+            }
+        ),
+        Err(Errno::NotConnected),
     );
 }
 
@@ -2215,95 +2474,285 @@ fn pump_client(
     deliveries
 }
 
-#[test]
-fn stream_connect_and_echo_over_the_pump() {
-    let mut ns = managed_stack();
-    ns.addr_add(name("wan"), NetAddrFamily::V4, 24, v4_bytes(V4_A), t(1))
-        .expect("addr add");
-    let mut region = rings_region();
-    let mut fs = local_service_tcp(PeerTcpNet::new(t(2)), &mut region);
-    let mut svc = SocketService::new();
-    let who = caller(&[CapabilityId::NET]);
-    let now = t(2);
-    let mut entropy = || 0x1357_9BDFu32;
-    let mut response = [0u8; 64];
-
-    // Open a stream socket.
-    let reply = svc_serve(
-        &mut svc,
-        &mut ns,
-        &who,
-        &mut entropy,
-        SocketRequest::Socket {
-            family: NetAddrFamily::V4,
-            sock_type: SocketType::Stream,
-            deliver_port: DELIVER_PORT,
-        },
-        &mut response,
-        now,
-    )
-    .expect("open");
-    let sid = decode_socket_reply(&response[..reply.len]).expect("socket id");
-
-    // Connect: the SYN is emitted (parking on ARP); pump to established.
-    let reply = svc_serve(
-        &mut svc,
-        &mut ns,
-        &who,
-        &mut entropy,
-        SocketRequest::Connect {
-            socket: sid,
-            peer: sockaddr_v4(V4_B, PEER_PORT),
-        },
-        &mut response,
-        now,
-    )
-    .expect("connect");
-    decode_status_reply(&response[..reply.len]).expect("connect ok");
-    stage_batch(&mut fs, &reply.tx);
-    let deliveries = pump_client(&mut ns, &mut svc, &mut fs, now);
-    assert!(
-        deliveries.iter().any(|d| matches!(
-            SocketStreamEvent::parse(&d.datagram),
-            Ok(SocketStreamEvent::Connected { socket }) if socket == sid
-        )),
-        "client observed the connection establish"
-    );
-
-    // Send a payload; the echo server returns it.
-    let reply = svc_serve(
-        &mut svc,
-        &mut ns,
-        &who,
-        &mut entropy,
-        SocketRequest::Send {
-            socket: sid,
-            dest: None,
-            payload: b"hello over tcp",
-        },
-        &mut response,
-        now,
-    )
-    .expect("send");
-    let accepted = decode_send_reply(&response[..reply.len]).expect("send accepted");
-    assert_eq!(accepted, 14, "the whole payload was accepted");
-    stage_batch(&mut fs, &reply.tx);
-    let deliveries = pump_client(&mut ns, &mut svc, &mut fs, now);
-
-    let mut echoed: Vec<u8> = Vec::new();
-    for d in &deliveries {
-        if let Ok(SocketStreamEvent::Data { socket, payload }) =
+/// Every `Data` payload delivered for `socket`, concatenated in order.
+fn stream_data(deliveries: &[Delivery], socket: u32) -> Vec<u8> {
+    let mut out = Vec::new();
+    for d in deliveries {
+        if let Ok(SocketStreamEvent::Data { socket: s, payload }) =
             SocketStreamEvent::parse(&d.datagram)
         {
-            if socket == sid {
-                echoed.extend_from_slice(payload);
+            if s == socket {
+                out.extend_from_slice(payload);
             }
         }
     }
+    out
+}
+
+/// Whether a one-shot `Closed` was delivered for `socket`.
+fn stream_closed(deliveries: &[Delivery], socket: u32) -> bool {
+    deliveries.iter().any(|d| {
+        matches!(
+            SocketStreamEvent::parse(&d.datagram),
+            Ok(SocketStreamEvent::Closed { socket: s, .. }) if s == socket
+        )
+    })
+}
+
+/// The client stack, socket service, and peer TCP echo server wired
+/// together over a loopback frame service — the fixture every stream test
+/// drives, so none of them re-assembles it by hand.
+struct StreamFixture<'r> {
+    ns: Netstack,
+    svc: SocketService,
+    fs: LocalFrameService<'r, PeerTcpNet>,
+    who: Caller,
+    now: Duration64,
+}
+
+impl<'r> StreamFixture<'r> {
+    fn new(region: &'r mut [u8]) -> Self {
+        let now = t(2);
+        Self {
+            ns: routed_stack(),
+            svc: SocketService::new(),
+            fs: local_service_tcp(PeerTcpNet::new(now), region),
+            who: caller(&[CapabilityId::NET]),
+            now,
+        }
+    }
+
+    /// Serve one request, writing its reply frame into `response`.
+    fn serve(
+        &mut self,
+        request: SocketRequest<'_>,
+        response: &mut [u8],
+    ) -> Result<crate::SocketReply, Errno> {
+        let mut entropy = || 0x1357_9BDFu32;
+        svc_serve(
+            &mut self.svc,
+            &mut self.ns,
+            &self.who,
+            &mut entropy,
+            request,
+            response,
+            self.now,
+        )
+    }
+
+    /// Run the link to quiescence, returning the client deliveries.
+    fn pump(&mut self) -> Vec<Delivery> {
+        pump_client(&mut self.ns, &mut self.svc, &mut self.fs, self.now)
+    }
+
+    /// Open a stream socket and drive it to ESTABLISHED against the peer
+    /// echo server, returning its handle.
+    fn established_stream(&mut self) -> u32 {
+        let mut response = [0u8; 64];
+        let reply = self
+            .serve(
+                SocketRequest::Socket {
+                    family: NetAddrFamily::V4,
+                    sock_type: SocketType::Stream,
+                    deliver_port: DELIVER_PORT,
+                },
+                &mut response,
+            )
+            .expect("open");
+        let sid = decode_socket_reply(&response[..reply.len]).expect("socket id");
+
+        // Connect: the SYN is emitted (parking on ARP); pump to established.
+        let reply = self
+            .serve(
+                SocketRequest::Connect {
+                    socket: sid,
+                    peer: sockaddr_v4(V4_B, PEER_PORT),
+                },
+                &mut response,
+            )
+            .expect("connect");
+        decode_status_reply(&response[..reply.len]).expect("connect ok");
+        stage_batch(&mut self.fs, &reply.tx);
+        let deliveries = self.pump();
+        assert!(
+            deliveries.iter().any(|d| matches!(
+                SocketStreamEvent::parse(&d.datagram),
+                Ok(SocketStreamEvent::Connected { socket }) if socket == sid
+            )),
+            "client observed the connection establish"
+        );
+        sid
+    }
+
+    /// Send `payload` on `socket`, asserting the whole of it was accepted,
+    /// and pump the link.
+    fn send_and_pump(&mut self, socket: u32, payload: &[u8]) -> Vec<Delivery> {
+        let mut response = [0u8; 64];
+        let reply = self
+            .serve(
+                SocketRequest::Send {
+                    socket,
+                    dest: None,
+                    payload,
+                },
+                &mut response,
+            )
+            .expect("send");
+        let accepted = decode_send_reply(&response[..reply.len]).expect("send accepted");
+        assert_eq!(
+            usize::try_from(accepted).expect("accepted fits"),
+            payload.len(),
+            "the whole payload was accepted"
+        );
+        stage_batch(&mut self.fs, &reply.tx);
+        self.pump()
+    }
+
+    /// Half-close `socket`, staging whatever the shutdown flushed and
+    /// reporting whether that included any egress (the FIN, on the first
+    /// write-direction shutdown).
+    fn shutdown(&mut self, socket: u32, how: ShutdownHow) -> Result<bool, Errno> {
+        let mut response = [0u8; 64];
+        let reply = self.serve(SocketRequest::Shutdown { socket, how }, &mut response)?;
+        decode_status_reply(&response[..reply.len]).expect("shutdown status");
+        let flushed = !reply.tx.is_empty();
+        stage_batch(&mut self.fs, &reply.tx);
+        Ok(flushed)
+    }
+
+    /// Attempt a send, returning the error the service refused it with.
+    fn send_err(&mut self, socket: u32, payload: &[u8]) -> Option<Errno> {
+        let mut response = [0u8; 64];
+        self.serve(
+            SocketRequest::Send {
+                socket,
+                dest: None,
+                payload,
+            },
+            &mut response,
+        )
+        .err()
+    }
+}
+
+#[test]
+fn stream_connect_and_echo_over_the_pump() {
+    let mut region = rings_region();
+    let mut fx = StreamFixture::new(&mut region);
+
+    let sid = fx.established_stream();
+    let deliveries = fx.send_and_pump(sid, b"hello over tcp");
     assert_eq!(
-        echoed, b"hello over tcp",
+        stream_data(&deliveries, sid),
+        b"hello over tcp",
         "the peer echoed the stream bytes"
     );
+}
+
+/// POSIX `shutdown(SHUT_WR)`: the FIN goes out, the socket survives, and the
+/// peer's reply still reaches the client. This is the request/response shape
+/// `Close` cannot express — it would drop the socket before the answer.
+#[test]
+fn shutdown_write_half_closes_and_keeps_reading() {
+    let mut region = rings_region();
+    let mut fx = StreamFixture::new(&mut region);
+    let mut response = [0u8; 64];
+
+    let sid = fx.established_stream();
+    let before = fx.svc.len();
+
+    // The request goes out, then the client says "that is all I will send".
+    let reply = fx
+        .serve(
+            SocketRequest::Send {
+                socket: sid,
+                dest: None,
+                payload: b"request",
+            },
+            &mut response,
+        )
+        .expect("send");
+    stage_batch(&mut fx.fs, &reply.tx);
+    assert!(
+        fx.shutdown(sid, ShutdownHow::Write)
+            .expect("shutdown write"),
+        "the FIN is flushed by the shutdown itself, not left queued"
+    );
+
+    // The socket is still the client's: half-closed, not reaped.
+    assert_eq!(fx.svc.len(), before, "a half-closed socket is not released");
+
+    // The peer answers after our FIN, and the client still receives it.
+    let deliveries = fx.pump();
+    assert_eq!(
+        stream_data(&deliveries, sid),
+        b"request",
+        "the peer's reply arrives after the client's FIN"
+    );
+    assert!(
+        !stream_closed(&deliveries, sid),
+        "the peer has not closed, so no end-of-stream is reported"
+    );
+
+    // No further send is accepted once the FIN is queued.
+    assert_eq!(
+        fx.send_err(sid, b"after the fin"),
+        Some(Errno::NotConnected)
+    );
+
+    // Repeating the direction succeeds, as POSIX requires.
+    fx.shutdown(sid, ShutdownHow::Write)
+        .expect("a repeated shutdown is not an error");
+}
+
+/// POSIX `shutdown(SHUT_RD)`: received bytes stop being delivered but are
+/// still drained, so the advertised window stays open and a peer that keeps
+/// sending is never stalled.
+#[test]
+fn shutdown_read_discards_inbound_data_without_stalling_the_peer() {
+    let mut region = rings_region();
+    let mut fx = StreamFixture::new(&mut region);
+
+    let sid = fx.established_stream();
+    fx.shutdown(sid, ShutdownHow::Read).expect("shutdown read");
+
+    // The peer echoes, twice, and none of it is delivered.
+    for _ in 0..2 {
+        let deliveries = fx.send_and_pump(sid, b"discarded");
+        assert!(
+            stream_data(&deliveries, sid).is_empty(),
+            "a read-shutdown socket delivers no data"
+        );
+    }
+
+    // Drained rather than buffered: the receive queue is empty, so the
+    // window never shrank and the second send was not stalled.
+    let records = fx.svc.socket_records(0, 8);
+    let record = records
+        .iter()
+        .find(|r| r.state == NetSockState::Established || r.state == NetSockState::CloseWait)
+        .expect("the half-closed stream is still listed");
+    assert_eq!(record.recv_q, 0, "received bytes were drained, not held");
+}
+
+/// `ShutdownHow::Both` is the two directions at once: the FIN goes out and
+/// inbound data stops being delivered.
+#[test]
+fn shutdown_both_closes_write_and_discards_reads() {
+    let mut region = rings_region();
+    let mut fx = StreamFixture::new(&mut region);
+
+    let sid = fx.established_stream();
+    let deliveries = fx.send_and_pump(sid, b"last request");
+    assert_eq!(stream_data(&deliveries, sid), b"last request");
+
+    fx.shutdown(sid, ShutdownHow::Both).expect("shutdown both");
+    let deliveries = fx.pump();
+    assert!(
+        stream_data(&deliveries, sid).is_empty(),
+        "nothing more is delivered after a both-direction shutdown"
+    );
+    assert_eq!(fx.send_err(sid, b"refused"), Some(Errno::NotConnected));
 }
 
 #[test]

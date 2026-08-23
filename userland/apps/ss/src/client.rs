@@ -7,10 +7,12 @@ use alloc::vec::Vec;
 use core::fmt::Write as _;
 use core::net::{Ipv4Addr, Ipv6Addr};
 
-use tairix_abi::net_ipc::{NetAddrFamily, NetSockProto, NetSockState, NetSocketRecord};
+use tairix_abi::net_ipc::{
+    NetAddrFamily, NetSockProto, NetSockState, NetSocketRecord, NetStackDefenceCounters,
+};
 use tairix_abi::stdinfo::{Human, Severity, StdInfoKind, StdInfoRecord};
 use tairix_help::{own_short_help, HelpSource};
-use tairix_procinfo::{for_each_net_socket, Transport, WalkStep};
+use tairix_procinfo::{for_each_net_socket, net_stack_defence, Transport, WalkStep};
 
 use crate::command::{Command, Options};
 use crate::error::SsError;
@@ -18,7 +20,7 @@ use crate::io::Output;
 
 /// The one-line usage banner, printed on a usage error and as the fallback
 /// when the bundled help document is unavailable.
-pub const USAGE: &str = "usage: ss [-tualnpH46] [--]";
+pub const USAGE: &str = "usage: ss [-tualnpH46] [-s] [--]";
 
 /// The command word this bundle is named by, for the own-help lookup.
 const OWN_WORD: &str = "ss";
@@ -32,7 +34,8 @@ const OWN_WORD: &str = "ss";
 /// # Errors
 ///
 /// * [`SsError::Denied`] — the caller lacks `CAP_SYSINFO_GLOBAL`.
-/// * [`SsError::Service`] — the `NET_SOCKETS` query otherwise failed.
+/// * [`SsError::Service`] — the `NET_SOCKETS` (or, for `-s`,
+///   `NET_STACK_DEFENCE`) query otherwise failed.
 /// * [`SsError::Output`] — a row (or the short help) could not be written.
 pub fn run(
     command: Command,
@@ -48,6 +51,12 @@ pub fn run(
             let bytes = own_short_help(help, locale, OWN_WORD)
                 .unwrap_or_else(|| format!("{USAGE}\n").into_bytes());
             out.write_all(&bytes).map_err(SsError::Output)?;
+            return Ok(true);
+        }
+        Command::Summary => {
+            let defence = net_stack_defence(transport).map_err(SsError::from)?;
+            out.write_all(render_summary(&defence).as_bytes())
+                .map_err(SsError::Output)?;
             return Ok(true);
         }
         Command::Report(options) => options,
@@ -91,6 +100,26 @@ pub fn run(
         emit_omission_record(out, hidden);
     }
     Ok(true)
+}
+
+/// Render the `-s` stack-wide TCP connection-defence summary: the counters
+/// a SYN flood or accept-queue exhaustion in progress shows up in, one
+/// `name value` pair per line so the output stays greppable.
+fn render_summary(defence: &NetStackDefenceCounters) -> String {
+    let mut text = String::new();
+    for (name, value) in [
+        ("syn-backlog-started", defence.half_open_started),
+        ("syn-backlog-expired", defence.half_open_expired),
+        ("syn-cookies-sent", defence.syn_cookies_sent),
+        ("syn-cookies-accepted", defence.syn_cookies_accepted),
+        ("syn-cookies-rejected", defence.syn_cookies_rejected),
+        ("accepts", defence.accepted),
+        ("accept-overflow", defence.accept_overflow),
+        ("tcp-resets-sent", defence.resets_sent),
+    ] {
+        let _ = writeln!(text, "{name} {value}");
+    }
+    text
 }
 
 /// Whether `record`'s protocol is one the filters want. With neither
@@ -274,7 +303,9 @@ mod tests {
     use alloc::string::String;
     use alloc::vec::Vec;
     use core::cell::RefCell;
-    use tairix_abi::net_ipc::{NetAddrFamily, NetSockProto, NetSockState, NetSocketRecord};
+    use tairix_abi::net_ipc::{
+        NetAddrFamily, NetSockProto, NetSockState, NetSocketRecord, NetStackDefenceCounters,
+    };
     use tairix_abi::sysinfo::{SysinfoQueryId, SysinfoRequestHeader};
     use tairix_abi::Errno;
     use tairix_help::HelpSource;
@@ -290,15 +321,32 @@ mod tests {
     impl tairix_procinfo::Transport for Fixture {
         fn query(&self, request: &[u8]) -> Result<Vec<u8>, Errno> {
             let header = SysinfoRequestHeader::from_bytes(request)?;
-            assert_eq!(header.query, SysinfoQueryId::NET_SOCKETS);
             if self.deny {
                 return Err(Errno::PermissionDenied);
             }
+            if header.query == SysinfoQueryId::NET_STACK_DEFENCE {
+                return Ok(fixture_defence().to_le_bytes().to_vec());
+            }
+            assert_eq!(header.query, SysinfoQueryId::NET_SOCKETS);
             let mut out = Vec::new();
             for record in &self.records {
                 out.extend_from_slice(&record.to_le_bytes());
             }
             Ok(out)
+        }
+    }
+
+    /// The stack-wide defence totals the fixture serves for `-s`.
+    fn fixture_defence() -> NetStackDefenceCounters {
+        NetStackDefenceCounters {
+            half_open_started: 256,
+            syn_cookies_sent: 4_096,
+            syn_cookies_accepted: 4_000,
+            syn_cookies_rejected: 96,
+            accepted: 4_200,
+            accept_overflow: 6,
+            half_open_expired: 31,
+            resets_sent: 102,
         }
     }
 
@@ -489,6 +537,46 @@ mod tests {
         let result = run(command, None, &fixture, &NoHelp, &capture, &errs);
         assert_eq!(result, Err(SsError::Denied));
         assert!(capture.text.into_inner().is_empty(), "no partial table");
+    }
+
+    /// `-s` prints the stack-wide defence summary instead of the table, so
+    /// a SYN flood is visible without reading the whole socket list.
+    #[test]
+    fn summary_reports_the_connection_defence_counters() {
+        for args in [alloc::vec!["-s"], alloc::vec!["--summary"]] {
+            let (text, _info) = report(Vec::new(), &args);
+            assert!(
+                text.contains("syn-cookies-sent 4096"),
+                "the cookie brake total shows: {text}"
+            );
+            assert!(text.contains("syn-cookies-accepted 4000"), "{text}");
+            assert!(text.contains("syn-cookies-rejected 96"), "{text}");
+            assert!(text.contains("accept-overflow 6"), "{text}");
+            assert!(text.contains("tcp-resets-sent 102"), "{text}");
+            assert!(
+                !text.contains("State"),
+                "the socket table header is not printed for -s: {text}"
+            );
+        }
+    }
+
+    /// The summary is the tool's whole output under `-s`, so a refused
+    /// query is fatal there too rather than printing an empty summary a
+    /// reader would mistake for a quiet stack.
+    #[test]
+    fn a_denied_summary_query_is_fatal() {
+        let command = parse(&["-s"]).expect("parse");
+        let capture = Capture::default();
+        let errs = Capture::default();
+        let fixture = Fixture {
+            records: Vec::new(),
+            deny: true,
+        };
+        assert_eq!(
+            run(command, None, &fixture, &NoHelp, &capture, &errs),
+            Err(SsError::Denied)
+        );
+        assert!(capture.text.into_inner().is_empty());
     }
 
     #[test]

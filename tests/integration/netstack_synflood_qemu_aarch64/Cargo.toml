@@ -1,0 +1,41 @@
+[package]
+name = "tairix-test-netstack-synflood-qemu-aarch64"
+description = "plans/NETWORK.md N16b connection-exhaustion QEMU vertical: boot the production aarch64 tairix-kernel pipeline (boot_aarch64::boot) on the virt board with the encrypted-root disk carrying the standard signed store bundles plus the signed virtio-net driver bundle and the test-only tcpserve fixture bundle, with a virtio-net device attached and the harness-side SYN-flood client peer on its dgram netdev. The peer fills the guest listener's bounded half-open backlog with SYNs it never answers, then opens one real connection the listener can only admit through a stateless RFC 4987 SYN cookie, and verifies the guest echoes the whole transfer back over it. PASS once the netstack has audited the cookie brake engaging (SYN_COOKIES_ENGAGED), the tcpserve fixture's audited exit (a verified transfer — a failed one parks forever) has been observed, and the shell's scripted exit follows; the harness additionally requires the flood peer to report both the filled backlog and the verified echo, so no side can pass alone and an ordinary accept cannot pass for a cookie."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "tairix-test-netstack-synflood-qemu-aarch64"
+path = "src/main.rs"
+
+# Freestanding "boot the production aarch64 pipeline with the planted
+# encrypted-root disk carrying the virtio-net driver + tcpserve fixture and
+# prove the server-side stream-socket path end to end over the live
+# two-process network" integration test. It reuses the entire production boot
+# pipeline through `tairix-kernel`'s library half — discovery, the unlock
+# kthread, PID 1 supervision, netstack, devmgr's driver autoload, login's
+# spawn-as-user, the shell, and the disk-backed bundle spawn path — and only
+# swaps the audit sink (no duplication). Keeping the QEMU-exit shortcut in a
+# dedicated bin (not a Cargo feature on a production crate) prevents feature
+# unification from leaking it into any production build (fail closed).
+[target.'cfg(all(target_arch = "aarch64", target_os = "none"))'.dependencies]
+tairix-arch-aarch64 = { path = "../../../kernel/arch/aarch64", version = "=0.0.0" }
+tairix-kernel = { path = "../../../kernel/tairix-kernel", version = "=0.0.0" }
+tairix-kalloc = { path = "../../../lib/kalloc", version = "=0.0.0" }
+tairix-log = { path = "../../../lib/log", version = "=0.0.0" }
+# The fixture's pure library, for the one `COMMAND` definition the PASS keying
+# matches `comm` against. `default-features = false`: the fixture's `program`
+# feature (its own `Run` binary's userland runtime) must never link into this
+# kernel bin — the runtime's `_start`/panic handler belong to the fixture's
+# standalone cross-compile only.
+tairix-test-tcpserve = { path = "../tcpserve_program", version = "=0.0.0", default-features = false }
+
+[build-dependencies]
+tairix-itest-harness = { path = "../harness", version = "=0.0.0" }

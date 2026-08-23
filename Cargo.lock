@@ -3791,6 +3791,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "tairix-test-netstack-synflood-qemu-aarch64"
+version = "0.0.0"
+dependencies = [
+ "tairix-arch-aarch64",
+ "tairix-itest-harness",
+ "tairix-kalloc",
+ "tairix-kernel",
+ "tairix-log",
+ "tairix-test-tcpserve",
+]
+
+[[package]]
 name = "tairix-test-netstack-wire"
 version = "0.0.0"
 dependencies = [

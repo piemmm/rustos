@@ -51,6 +51,8 @@ ignoré.
 - `-4, --ipv4` — restreindre la liste aux sockets IPv4.
 - `-6, --ipv6` — restreindre la liste aux sockets IPv6.
 - `-H, --no-header` — supprimer la ligne d'en-tête.
+- `-s, --summary` — afficher les totaux de défense des connexions TCP
+  de la pile au lieu de la table des sockets.
 - `-?, --help` — afficher l'aide courte de cette commande.
 
 ## EXAMPLES

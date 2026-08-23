@@ -600,6 +600,13 @@ no randomness itself, so it is deterministic and replayable — the
 property tests and the `fuzz_net_tcp` state-machine driver exercise the
 exact code the live service runs.
 
+`close` is the RFC 9293 §3.10.4 CLOSE, so it is a *half*-close: the FIN is
+queued behind the buffered data and the connection keeps receiving through
+FIN-WAIT-2 until the peer closes too, with `send_closed` reporting that the
+send direction has ended. That is the guarantee the socket-level
+`SocketRequest::Shutdown` (`plans/NETWORK.md` N15) is built on; `abort` is
+the RFC 9293 ABORT that resets both directions at once.
+
 It implements the full state machine — active, passive, and simultaneous
 open; the complete teardown lattice through TIME-WAIT (2·MSL) — plus the
 send and receive windows over `SeqNumber`, RFC 7323 window scaling and

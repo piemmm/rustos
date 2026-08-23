@@ -29,6 +29,14 @@ addresses are always numeric (TAIRiX has no service-name database), so
 `*` and an unbound port as `*`; an IPv6 address is bracketed so the
 `:port` separator is unambiguous.
 
+`-s` reports something different from the table: the network stack's
+stack-wide TCP connection-defence totals — the SYN backlog, the stateless
+SYN-cookie brake, the accept queue, and the resets sent. Each is monotonic
+over the boot (a listening socket that closes folds its totals into the
+stack's), so a SYN flood stays visible after the socket it targeted has
+gone. The same figures resolve individually as
+`stats:net/stack/syn-cookies` and its siblings.
+
 `ss` takes options only. The iproute2 filter-expression grammar (state
 and address filters) is not implemented, so a bare operand is a usage
 error rather than a silently ignored argument.
@@ -46,6 +54,8 @@ error rather than a silently ignored argument.
 - `-4, --ipv4` — restrict the listing to IPv4 sockets.
 - `-6, --ipv6` — restrict the listing to IPv6 sockets.
 - `-H, --no-header` — suppress the header line.
+- `-s, --summary` — print the stack-wide TCP connection-defence
+  totals instead of the socket table.
 - `-?, --help` — show this command's own short help.
 
 ## EXAMPLES
@@ -55,12 +65,14 @@ error rather than a silently ignored argument.
 - `ss -l` — only the listening sockets.
 - `ss -tlp` — listening TCP sockets, with the owning process.
 - `ss -u4` — the UDP sockets over IPv4.
+- `ss -s` — the stack-wide connection-defence totals.
 
 ## EXIT STATUS
 
-- `0` — the listing was produced (or the short help was written).
-- `1` — the socket query was refused or failed, or the output could not
-  be written.
+- `0` — the listing or summary was produced (or the short help was
+  written).
+- `1` — the socket or defence query was refused or failed, or the output
+  could not be written.
 - `2` — the command line was not understood.
 
 ## ENVIRONMENT

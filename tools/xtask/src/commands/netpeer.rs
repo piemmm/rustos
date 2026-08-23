@@ -40,7 +40,8 @@ use tairix_net::ipv6::{Ipv6Header, IPV6_HEADER_LEN, NEXT_HEADER_ICMPV6};
 use tairix_net::nd::{ND_HOP_LIMIT, TYPE_ROUTER_ADVERTISEMENT};
 use tairix_net::stack::{Stack, StackConfig, StackEvent, StackOutput, TxFrame};
 use tairix_net::tcp::conn::{Tcb, TcpConfig};
-use tairix_net::tcp::TcpSegment;
+use tairix_net::tcp::listen::ListenConfig;
+use tairix_net::tcp::{SeqNumber, TcpFlags, TcpOptions, TcpSegment, TcpSegmentMeta};
 use tairix_net::udp::{self, PROTOCOL_UDP};
 use tairix_test_netstack_wire as wire;
 
@@ -147,6 +148,20 @@ impl NetPeer {
     /// received and verified the whole echoed transfer and closed cleanly.
     pub fn spawn_tcp_connect(qemu_sock: &Path, peer_sock: &Path) -> Result<Self, String> {
         Self::spawn_with(qemu_sock, peer_sock, run_tcp_connect_peer)
+    }
+
+    /// Bind `peer_sock` and start the **SYN-flood** client peer thread (the
+    /// N16b connection-exhaustion vertical): the peer fills the guest
+    /// listener's half-open backlog with SYNs it never answers, then opens
+    /// one real connection — which the listener can therefore admit only
+    /// through a stateless RFC 4987 SYN cookie — streams the whole
+    /// [`wire::STREAM_TRANSFER_BYTES`] run, and verifies the guest echoes
+    /// every byte back. Its verdict ([`Self::stop_and_join`]) is `Ok` only
+    /// once the backlog was provably filled *and* the whole transfer came
+    /// back verified, so a run that never engaged the cookie brake cannot
+    /// pass on the ordinary accept path.
+    pub fn spawn_tcp_flood(qemu_sock: &Path, peer_sock: &Path) -> Result<Self, String> {
+        Self::spawn_with(qemu_sock, peer_sock, run_tcp_flood_peer)
     }
 
     /// Bind `peer_sock` and start the **static-addressing** ICMP-campaign
@@ -1929,7 +1944,7 @@ fn run_tcp_echo_peer(
                 } else {
                     deliver_inbound_frame(
                         &mut stack,
-                        &mut tcb,
+                        Some(&mut tcb),
                         &buf[..len],
                         socket,
                         qemu_sock,
@@ -2118,7 +2133,7 @@ fn run_tcp_echo_ecn_peer(
             Ok(len) => {
                 deliver_inbound_frame(
                     &mut stack,
-                    &mut tcb,
+                    Some(&mut tcb),
                     &buf[..len],
                     socket,
                     qemu_sock,
@@ -2173,6 +2188,328 @@ fn run_tcp_echo_ecn_peer(
             ecn.syn_ecn_setup, ecn.ect0_data_seen, ecn.cwr_after_ce, ecn.ce_injected
         ))
     }
+}
+
+// --- SYN-flood client (N16b connection-exhaustion vertical) ------------
+
+/// First source port the flood opens from. The flood walks upward from
+/// here, so every SYN presents a distinct 4-tuple and occupies its own
+/// half-open backlog slot; the range stays clear of
+/// [`CLIENT_LOCAL_PORT`] and of the guest's well-known
+/// [`wire::GUEST_TCP_PORT`].
+const FLOOD_FIRST_PORT: u16 = 0xD000;
+
+/// How many SYNs the flood sends, once the guest's listener is confirmed
+/// up, before it opens its real connection.
+///
+/// One more than the listener's half-open backlog, so the backlog is
+/// provably full and the *next* SYN — the real one — can only be answered
+/// with a stateless cookie. Read from the engine's own default rather than
+/// restated, so the two cannot drift.
+fn flood_syns() -> u32 {
+    u32::try_from(ListenConfig::default().max_half_open).unwrap_or(u32::MAX) + 1
+}
+
+/// SYNs emitted per loop pass once the listener is confirmed up.
+///
+/// The backlog must be filled well inside the listener's half-open timeout,
+/// or early entries expire as later ones arrive and it never actually fills.
+/// The peer's receive timeout paces the loop at roughly 20 passes a second,
+/// so a one-SYN-per-pass flood would take longer than that timeout; a burst
+/// fills it in well under a second.
+const FLOOD_BURST: u32 = 64;
+
+/// Sequence number the flood's Nth spoofed SYN carries. Distinct per port
+/// so a reply is attributable in a transcript; the flood never completes
+/// these handshakes, so the value is otherwise immaterial.
+fn flood_iss(index: u32) -> u32 {
+    0x5A5A_0000u32.wrapping_add(index)
+}
+
+/// The flood peer's loop: fill the guest listener's half-open backlog with
+/// SYNs it never answers, then open one *real* connection — which the
+/// listener can therefore only admit through a stateless RFC 4987 SYN
+/// cookie — stream the deterministic transfer, and verify the guest echoes
+/// every byte back.
+///
+/// The spoofed SYNs are hand-built rather than driven by [`Tcb`]s: the point
+/// is precisely that they are never completed, so there is no connection
+/// state to keep. Their SYN-ACKs arrive and are simply not delivered to any
+/// TCB — the peer stack is stateless for TCP and answers nothing itself — so
+/// each occupies a backlog slot until the guest expires it, exactly as a real
+/// flood does.
+///
+/// The verdict requires both halves: the backlog must have been filled *and*
+/// the whole transfer echoed back over the cookie-admitted connection. A run
+/// where the flood never landed, or where the real connection failed, fails
+/// loud rather than passing on the ordinary accept path.
+fn run_tcp_flood_peer(
+    socket: &UnixDatagram,
+    qemu_sock: &PathBuf,
+    stop: &AtomicBool,
+    _succeeded: &AtomicBool,
+) -> Result<(), String> {
+    let start = Instant::now();
+    let now = |t0: Instant| {
+        Duration64::from_nanos(u64::try_from(t0.elapsed().as_nanos()).unwrap_or(u64::MAX))
+    };
+    let (mut stack, guest_v6) = peer_stack(start)?;
+    let dest = IpAddr::V6(guest_v6);
+
+    let local_mss = stack.tcp_local_mss(dest, now(start)).unwrap_or(V6_SAFE_MSS);
+    let config = TcpConfig {
+        local_mss,
+        ..TcpConfig::default()
+    };
+
+    let target = wire::STREAM_TRANSFER_BYTES;
+    let mut flood = FloodProgress::new(flood_syns());
+    let mut tcb: Option<Tcb> = None;
+    let mut sent: usize = 0;
+    let mut verified: usize = 0;
+    let mut mismatch = false;
+    let mut closed = false;
+    let mut buf = [0u8; MAX_FRAME];
+    let mut scratch = [0u8; MAX_FRAME];
+    let mut chunk = [0u8; CLIENT_SEND_CHUNK];
+
+    while !stop.load(Ordering::Acquire) {
+        flush_engine(&mut stack, socket, qemu_sock, now(start));
+
+        // Phase 1: fill the half-open backlog (see `emit_flood_pass`).
+        emit_flood_pass(&mut stack, socket, qemu_sock, dest, &mut flood, now(start));
+
+        // Phase 2: the real connection, opened only once the backlog is
+        // provably full. Its SYN therefore meets a full backlog and can be
+        // admitted only by a cookie.
+        if flood.is_full() && tcb.is_none() {
+            tcb = Some(Tcb::connect(
+                config,
+                CLIENT_LOCAL_PORT,
+                wire::GUEST_TCP_PORT,
+                CLIENT_ISS,
+                now(start),
+            ));
+        }
+
+        if let Some(tcb) = tcb.as_mut() {
+            tcb.advance(now(start));
+            offer_transfer(tcb, target, &mut sent, &mut chunk);
+            drive_tcp_egress(tcb, &mut stack, socket, qemu_sock, guest_v6, now(start));
+        }
+
+        match socket.recv(&mut buf) {
+            Ok(len) => {
+                // No loss injection here: this vertical proves the cookie
+                // path, and the flood already stresses the listener. The
+                // retransmission path has its own vertical (N6b-2-β-2).
+                // During phase 1 there is no connection: the guest's
+                // unanswered SYN-ACKs are dropped, which is precisely what
+                // keeps each backlog slot occupied.
+                deliver_inbound_frame(
+                    &mut stack,
+                    tcb.as_mut(),
+                    &buf[..len],
+                    socket,
+                    qemu_sock,
+                    now(start),
+                    |seg, ecn| {
+                        flood.note_segment(seg);
+                        ecn
+                    },
+                );
+            }
+            Err(e)
+                if e.kind() == std::io::ErrorKind::WouldBlock
+                    || e.kind() == std::io::ErrorKind::TimedOut => {}
+            Err(e) => return Err(format!("netstack peer: socket receive: {e}")),
+        }
+
+        if let Some(tcb) = tcb.as_mut() {
+            let (new_verified, any_mismatch) = drain_and_verify(tcb, &mut scratch, verified);
+            verified = new_verified;
+            mismatch |= any_mismatch;
+            if !closed && sent >= target && verified >= target {
+                let _ = tcb.close(now(start));
+                closed = true;
+            }
+            drive_tcp_egress(tcb, &mut stack, socket, qemu_sock, guest_v6, now(start));
+        }
+    }
+
+    flood.verdict()?;
+    if mismatch {
+        return Err(
+            "netstack peer: cookie-admitted echo verification failed (a byte did not match)"
+                .to_string(),
+        );
+    }
+    if verified >= target {
+        Ok(())
+    } else {
+        Err(format!(
+            "netstack peer: cookie-admitted connection incomplete: sent {sent}, verified \
+             {verified} of {target} echoed bytes"
+        ))
+    }
+}
+
+/// Offer the next slice of the deterministic transfer to an established
+/// connection's send buffer, advancing `sent` by whatever it accepted. A
+/// connection still handshaking, or one whose buffer is full, accepts
+/// nothing and is retried next pass.
+fn offer_transfer(tcb: &mut Tcb, target: usize, sent: &mut usize, chunk: &mut [u8]) {
+    if !tcb.is_established() || *sent >= target {
+        return;
+    }
+    let len = (target - *sent).min(chunk.len());
+    wire::fill_chunk(*sent, &mut chunk[..len]);
+    if let Ok(accepted) = tcb.send(&chunk[..len]) {
+        *sent += accepted;
+    }
+}
+
+/// The flood's progress: how many SYNs have gone out, how many of those met
+/// a live listener, and whether the listener has been seen answering at all.
+struct FloodProgress {
+    /// SYNs that must land *after* the listener is up for the backlog to be
+    /// provably full.
+    quota: u32,
+    /// SYNs emitted in total. The source port is derived from this, so every
+    /// SYN presents a distinct 4-tuple whether it was a pre-listener probe
+    /// or part of the confirmed flood.
+    emitted: u32,
+    /// SYNs emitted since the listener came up. Only these are known to have
+    /// met a live socket, so only these count toward [`Self::quota`].
+    flooded: u32,
+    /// Whether a SYN-ACK has come back for any flood port. Before that the
+    /// guest is still booting, unlocking, and logging in, so SYNs land on no
+    /// socket and are silently dropped — flooding then would fill nothing.
+    listener_up: bool,
+}
+
+impl FloodProgress {
+    /// A flood that has sent nothing and seen no listener.
+    fn new(quota: u32) -> Self {
+        Self {
+            quota,
+            emitted: 0,
+            flooded: 0,
+            listener_up: false,
+        }
+    }
+
+    /// Whether enough SYNs have landed on the live listener to have filled
+    /// its bounded half-open backlog.
+    fn is_full(&self) -> bool {
+        self.flooded >= self.quota
+    }
+
+    /// Fold one segment addressed to the peer: a SYN-ACK to a flood port is
+    /// the guest's listener answering, so from here the flood lands on a
+    /// live socket and can actually fill the backlog.
+    fn note_segment(&mut self, seg: &TcpSegment<'_>) {
+        if seg.destination_port >= FLOOD_FIRST_PORT
+            && seg.flags.contains(TcpFlags::SYN)
+            && seg.flags.contains(TcpFlags::ACK)
+        {
+            self.listener_up = true;
+        }
+    }
+
+    /// Fail closed unless the flood provably filled a live listener's
+    /// backlog, naming which half fell short.
+    fn verdict(&self) -> Result<(), String> {
+        if !self.listener_up {
+            return Err(format!(
+                "netstack peer: the guest listener never answered any of {} probe SYNs, so the \
+                 flood never met a live socket",
+                self.emitted
+            ));
+        }
+        if !self.is_full() {
+            return Err(format!(
+                "netstack peer: SYN flood incomplete: {} of {} SYNs landed after the listener \
+                 came up, so the backlog was never provably full",
+                self.flooded, self.quota
+            ));
+        }
+        Ok(())
+    }
+}
+
+/// Emit this pass's share of the flood.
+///
+/// Until a SYN-ACK proves the listener is up this probes at one SYN per
+/// pass: the guest is still booting, unlocking, and logging in, so anything
+/// sent now lands on no socket and is silently dropped — flooding then would
+/// fill nothing. Once it answers, the flood bursts, because the backlog has
+/// to fill inside the listener's half-open timeout or early entries expire
+/// as later ones arrive and it never actually fills.
+///
+/// A refused fold (the first SYNs park on neighbour resolution) ends the
+/// pass with the counters untouched; the caller retries next pass, having
+/// serviced inbound frames in between — the peer cannot fold a single SYN
+/// until it has answered the neighbour exchange.
+fn emit_flood_pass(
+    stack: &mut Stack,
+    socket: &UnixDatagram,
+    qemu_sock: &PathBuf,
+    dest: IpAddr,
+    progress: &mut FloodProgress,
+    now: Duration64,
+) {
+    let burst = if progress.listener_up { FLOOD_BURST } else { 1 };
+    for _ in 0..burst {
+        if progress.is_full()
+            || !emit_bare_syn(stack, socket, qemu_sock, dest, progress.emitted, now)
+        {
+            return;
+        }
+        progress.emitted += 1;
+        if progress.listener_up {
+            progress.flooded += 1;
+        }
+    }
+}
+
+/// Emit one bare SYN toward the guest listener from the `index`th flood
+/// source port, returning whether it went on the wire.
+///
+/// `false` means the stack refused the fold — normally because the first
+/// segment is parked on neighbour resolution — and the caller retries; the
+/// SYN is deliberately option-free, since a cookie carries only an MSS
+/// index and the flood's SYNs are never completed anyway.
+fn emit_bare_syn(
+    stack: &mut Stack,
+    socket: &UnixDatagram,
+    qemu_sock: &PathBuf,
+    dest: IpAddr,
+    index: u32,
+    now: Duration64,
+) -> bool {
+    let meta = TcpSegmentMeta {
+        source_port: FLOOD_FIRST_PORT.wrapping_add(
+            u16::try_from(index % u32::from(u16::MAX - FLOOD_FIRST_PORT)).unwrap_or(0),
+        ),
+        destination_port: wire::GUEST_TCP_PORT,
+        seq: SeqNumber::new(flood_iss(index)),
+        ack: SeqNumber::new(0),
+        flags: TcpFlags::SYN,
+        window: 1024,
+        urgent: 0,
+        options: TcpOptions::default(),
+    };
+    let mut out = StackOutput::default();
+    if stack
+        .send_tcp(dest, &meta, &[], None, Ecn::NotEct, now, &mut out)
+        .is_err()
+    {
+        return false;
+    }
+    let sent = !out.frames.is_empty();
+    send_frames(socket, qemu_sock, &out.frames);
+    sent
 }
 
 // --- Active TCP client (N6b-2-β-2 listener vertical) -------------------
@@ -2299,7 +2636,7 @@ fn run_tcp_connect_peer(
                 } else {
                     deliver_inbound_frame(
                         &mut stack,
-                        &mut tcb,
+                        Some(&mut tcb),
                         &buf[..len],
                         socket,
                         qemu_sock,
@@ -2357,6 +2694,14 @@ fn run_tcp_connect_peer(
 /// Feed one received frame into the peer stack: answer the guest's neighbour
 /// queries and hand any TCP segment addressed to us to the echo connection.
 ///
+/// `tcb` is [`None`] for a peer phase that holds no connection yet — the
+/// SYN-flood peer's backlog-filling phase, which must still service inbound
+/// frames so neighbour resolution completes and its hand-built SYNs can be
+/// folded at all. `on_seg` still sees every segment addressed to the peer in
+/// that phase (the flood watches for SYN-ACKs, its proof the guest's listener
+/// is up), but nothing acknowledges them — which is precisely what keeps each
+/// half-open backlog slot occupied.
+///
 /// `on_seg` is called for every TCP segment addressed to the peer, with the
 /// parsed segment and the on-wire IP ECN codepoint it arrived carrying; it
 /// returns the ECN codepoint to deliver to the connection. The plain echo/
@@ -2366,7 +2711,7 @@ fn run_tcp_connect_peer(
 /// sender-side response is exercised — one delivery path, no second copy.
 fn deliver_inbound_frame(
     stack: &mut Stack,
-    tcb: &mut Tcb,
+    tcb: Option<&mut Tcb>,
     frame: &[u8],
     socket: &UnixDatagram,
     qemu_sock: &PathBuf,
@@ -2380,6 +2725,7 @@ fn deliver_inbound_frame(
     let mut out = StackOutput::default();
     stack.on_frame(frame, now, &mut out);
     send_frames(socket, qemu_sock, &out.frames);
+    let mut tcb = tcb;
     for event in &out.events {
         if let StackEvent::TcpSegment {
             source,
@@ -2396,7 +2742,9 @@ fn deliver_inbound_frame(
                     };
                     if let Some(seg) = TcpSegment::parse(pseudo, segment) {
                         let delivered_ecn = on_seg(&seg, *ecn);
-                        tcb.on_segment(&seg, delivered_ecn, now);
+                        if let Some(tcb) = tcb.as_deref_mut() {
+                            tcb.on_segment(&seg, delivered_ecn, now);
+                        }
                     }
                 }
             }

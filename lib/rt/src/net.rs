@@ -22,9 +22,9 @@
 //! unauthenticated inbox).
 
 use tairix_abi::net::{
-    decode_bind_reply, decode_send_reply, decode_socket_reply, SocketAddr, SocketDatagram,
-    SocketEcho, SocketId, SocketRequest, SocketStreamEvent, SocketType, NETSTACK_SOCKET_ENDPOINT,
-    SOCKET_MAX_REPLY,
+    decode_bind_reply, decode_send_reply, decode_socket_reply, ShutdownHow, SocketAddr,
+    SocketDatagram, SocketEcho, SocketId, SocketRequest, SocketStreamEvent, SocketType,
+    NETSTACK_SOCKET_ENDPOINT, SOCKET_MAX_REPLY,
 };
 use tairix_abi::net_ipc::NetAddrFamily;
 use tairix_abi::reply::decode_status_reply;
@@ -228,6 +228,23 @@ pub fn send(socket: SocketId, dest: Option<SocketAddr>, payload: &[u8]) -> Resul
 /// The typed [`Errno`] the stack returned.
 pub fn close(socket: SocketId) -> Result<(), Errno> {
     status_call(&SocketRequest::Close { socket })
+}
+
+/// Half-close one or both directions of a connected stream socket, keeping
+/// the handle open (POSIX `shutdown`).
+///
+/// [`ShutdownHow::Write`] sends a FIN after the buffered data and leaves the
+/// socket readable, so a client signals end-of-request and still reads the
+/// response; [`close`] is what releases the handle. Repeating a direction
+/// already shut down succeeds.
+///
+/// # Errors
+///
+/// The typed [`Errno`] the stack returned — [`Errno::NotConnected`] for an
+/// unconnected or listening socket, [`Errno::OutOfRange`] for a datagram or
+/// echo socket (only TCP has a FIN).
+pub fn shutdown(socket: SocketId, how: ShutdownHow) -> Result<(), Errno> {
+    status_call(&SocketRequest::Shutdown { socket, how })
 }
 
 /// Open an ICMP/`ICMPv6` echo socket of `family` (the `ping` path),

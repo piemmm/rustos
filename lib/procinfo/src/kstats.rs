@@ -17,6 +17,7 @@
 //! [`memory_pressure_band`] and [`memory_total_bytes`] — which each
 //! document why they need no capability.
 
+use tairix_abi::net_ipc::NetStackDefenceCounters;
 use tairix_abi::sysinfo::{
     CacheLedgerListRequest, CacheLedgerRecord, CpuLoadRecord, CpuLoadRequest, IrqListRequest,
     IrqRecord, MemoryPressureBand, MemoryPressureStats, MemoryTotal, RamzipStats,
@@ -134,6 +135,21 @@ pub fn memory_total_bytes(transport: &dyn Transport) -> Result<u64, CallError> {
 pub fn ramzip_stats(transport: &dyn Transport) -> Result<RamzipStats, CallError> {
     let reply = call(transport, SysinfoQueryId::RAMZIP_STATS, &[])?;
     RamzipStats::from_bytes(&reply).map_err(|_| CallError::Service(Errno::BadMagic))
+}
+
+/// Query the network stack's stack-wide TCP connection-defence counters
+/// ([`SysinfoQueryId::NET_STACK_DEFENCE`]).
+///
+/// One record, not a page: the counters belong to the stack's socket table
+/// as a whole and name no interface. Each is monotonic over the boot, so a
+/// flood stays visible after the listening socket it targeted has closed.
+///
+/// # Errors
+///
+/// As [`memory_pressure`].
+pub fn net_stack_defence(transport: &dyn Transport) -> Result<NetStackDefenceCounters, CallError> {
+    let reply = call(transport, SysinfoQueryId::NET_STACK_DEFENCE, &[])?;
+    NetStackDefenceCounters::from_bytes(&reply).map_err(|_| CallError::Service(Errno::BadMagic))
 }
 
 /// Page through the reclaim ledger ([`SysinfoQueryId::RECLAIM_STATS`]) and

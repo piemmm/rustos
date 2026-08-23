@@ -15,6 +15,7 @@ use alloc::vec::Vec;
 use tairix_abi::net_ipc::{
     NetBondMemberRecord, NetInterfaceCountersRecord, NetInterfaceFactsRecord,
     NetInterfaceRatesRecord, NetInterfaceStateRecord, NetResolverServer, NetSocketRecord,
+    NetStackDefenceCounters,
 };
 use tairix_abi::raid_admin::{RaidArrayRecord, RaidMemberRecord};
 use tairix_abi::sysinfo::{
@@ -312,6 +313,17 @@ pub trait SysinfoSource {
         &self,
         caller: &Caller,
     ) -> Result<Vec<NetInterfaceCountersRecord>, Errno>;
+
+    /// Return the network stack's stack-wide TCP connection-defence
+    /// counters (`plans/NETWORK.md` §5: `stats:net/stack/…`).
+    ///
+    /// Reached only after the `CAP_SYSINFO_GLOBAL` gate has passed: these
+    /// are system-wide, cross-principal figures — the same boundary as
+    /// [`net_interface_counters`](Self::net_interface_counters), and the
+    /// surface a SYN flood in progress becomes visible on. One record, not
+    /// a list: the counters belong to the stack's socket table as a whole
+    /// and name no interface, so there is nothing to page.
+    fn net_stack_defence(&self, caller: &Caller) -> Result<NetStackDefenceCounters, Errno>;
 
     /// Return every managed network interface's live throughput rates over
     /// `window`, in the stack's stable table order (`plans/NETWORK.md` §5:

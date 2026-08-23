@@ -80,12 +80,22 @@ same System Information API (`plans/ALIAS.md` §6, `plans/NETWORK.md` §5):
   `?window=<duration>` decoration (`500ms`, `1s`, `2m`) — the average
   rate over the window that actually elapsed.
 - `stats:net/stack/icmp-errors`, `.../icmp-suppressed`,
-  `.../reassembly-evicted` — the stack-wide defence counters, summed
+  `.../reassembly-evicted` — the packet-path defence counters, summed
   across interfaces, so a denial-of-service in progress is visible.
+- `stats:net/stack/syn-cookies`, `.../syn-cookies-accepted`,
+  `.../syn-cookies-rejected`, `.../syn-backlog-started`,
+  `.../syn-backlog-expired`, `.../accepts`, `.../accept-overflow`,
+  `.../tcp-resets` — the TCP connection-defence totals, so a SYN flood is
+  visible as the cookie brake engaging. These come from the stack's one
+  socket table rather than being summed per interface, and each is
+  monotonic over the boot: a listener that closes folds its totals into the
+  stack's, so a flood that ended with its target socket closing does not
+  vanish from the count.
 
-These resolve through `tairix_procinfo`'s `info:`/`stats:` resolver onto
-the `NET_INTERFACE_COUNTERS` and `NET_INTERFACE_RATES` queries; like the
-socket table they require `CAP_SYSINFO_GLOBAL` and are audited.
+These resolve through `tairix_procinfo`'s `info:`/`stats:` resolver onto the
+`NET_INTERFACE_COUNTERS`, `NET_INTERFACE_RATES`, and `NET_STACK_DEFENCE`
+queries; like the socket table they require `CAP_SYSINFO_GLOBAL` and are
+audited.
 
 ## Observing bonds (link aggregation)
 

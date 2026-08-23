@@ -13,7 +13,7 @@ model, the defences, and the audit event-id registry for network events.
 |---|---|
 | Hostile frame parsing (malformed Ethernet/IP/ICMP/TCP/UDP, truncation, option abuse) | `lib/net` decoders are total and bounded; `netstack` is the §19.5 minimum-capability parser sandbox — it holds no filesystem or spawn authority. Every decoder has a fuzz harness (`fuzz_net_*`). |
 | Fragment/reassembly resource exhaustion | Reassembly sets are capacity-bounded; the oldest incomplete reassembly is evicted (fail closed), and the eviction is counted (`stats:net/stack/reassembly-evicted`). |
-| SYN flood (half-open exhaustion) | The listener keeps a bounded half-open backlog; on overflow it answers with stateless RFC 4987 SYN cookies (a keyed MAC over the 4-tuple), holding no per-connection state. |
+| SYN flood (half-open exhaustion) | The listener keeps a bounded half-open backlog; on overflow it answers with stateless RFC 4987 SYN cookies (a keyed MAC over the 4-tuple), holding no per-connection state. The brake engaging is audited once per listener (`SYN_COOKIES_ENGAGED`) and counted (`stats:net/stack/syn-cookies`, and the accepted/rejected split), so a flood in progress is visible rather than merely survived; the whole path is proven live by the `netstack_synflood_qemu_aarch64` vertical. |
 | ICMP error storms / amplification | ICMP/ICMPv6 error emission is rate-limited; suppressed errors are counted (`stats:net/stack/icmp-suppressed`) so the throttling is visible. |
 | Unprivileged origination of raw/spoofed traffic | Sockets are capabilities, not ambient authority: a socket is a kernel-brokered IPC channel obtained through the versioned socket ABI and gated per operation — outbound transport under `CAP_NET`, binding a privileged (well-known) port under `CAP_NET_BIND_PRIVILEGED`, raw access under `CAP_NET_RAW`. |
 | Forged caller identity | `netstack` derives every caller's identity from the kernel-attested `Origin` (`call_peer_origin`), never from a claimed field; the capability is checked before any state is touched, and the receiver does not re-check. |
@@ -64,6 +64,11 @@ one range test. The assigned identifiers:
 | `16_017` | `BOND_CONFIG_APPLIED` | Info | A bond (link-aggregation) interface was composed or reconfigured over the `NetBondConfigMsg` admin message (members, mode, primary, monitor interval). |
 | `16_018` | `BOND_CONFIG_REFUSED` | Warn | A bond-configuration request passed the capability check but was refused (a member not present yet, an alias clash, or validation) — the bond is left untouched (fail closed). |
 | `16_019` | `BOND_FAILOVER` | Info | A bond's transmit path changed member (failover or deliberate failback); the bond re-announced its presence so peers relearn the path — a dead member is a visible, audited fact. |
+| `16_020` | `DHCP_LEASE_ACQUIRED` | Info | An interface's DHCPv4 client committed a lease (RFC 2131): the leased address, mask, and default route were applied. |
+| `16_021` | `DHCP_LEASE_LOST` | Info | A DHCPv4 lease was lost (server NAK or expiry): the address and its routes were withdrawn and the client re-acquires. |
+| `16_022` | `DHCP6_LEASE_ACQUIRED` | Info | An interface's DHCPv6 client committed a lease (RFC 8415): the leased IA_NA address was applied as a host `/128`. |
+| `16_023` | `DHCP6_LEASE_LOST` | Info | A DHCPv6 lease was lost (expiry, `NoBinding`, or a changed address on renewal): the address was withdrawn. |
+| `16_024` | `SYN_COOKIES_ENGAGED` | Warn | A listener's bounded half-open backlog overflowed and the stack fell back to stateless SYN cookies — the SYN-flood brake engaging. Emitted **once per listener**, on the transition, so a flood cannot amplify itself through the log. |
 
 The stack-wide `net.*` policy (`net.ipv4.enabled`, `net.ipv6.enabled`,
 `net.ipv6.privacy`, `net.tcp.syncookies`, `net.tcp.keepalive`,

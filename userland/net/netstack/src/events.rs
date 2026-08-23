@@ -121,8 +121,25 @@ pub const DHCP6_LEASE_ACQUIRED: EventId = EventId(16_022);
 /// re-acquires. Recorded at `Info` — losing an address is an audited fact.
 pub const DHCP6_LEASE_LOST: EventId = EventId(16_023);
 
+/// A listening socket's bounded half-open backlog overflowed and the
+/// listener fell back to stateless RFC 4987 SYN cookies — the SYN-flood
+/// brake engaging. Recorded at `Warn`: the defence working is not an error,
+/// but a flood in progress is an operator-relevant fact, and it is the log
+/// half of what `stats:net/stack/syn-cookies` counts. Emitted **once per
+/// listener**, on the transition, so a flood cannot turn the audit log into
+/// its own amplifier.
+pub const SYN_COOKIES_ENGAGED: EventId = EventId(16_024);
+
+/// The message [`SYN_COOKIES_ENGAGED`] carries. Named here because the
+/// connection-exhaustion QEMU vertical (`plans/NETWORK.md` N16b) gates its
+/// run on this text appearing in the serial transcript, so the wording is
+/// load-bearing rather than incidental prose.
+pub const SYN_COOKIES_ENGAGED_MESSAGE: &str =
+    "netstack: SYN backlog full, answering with stateless cookies";
+
 #[cfg(test)]
 mod tests {
+    use super::SYN_COOKIES_ENGAGED;
     use super::{
         ADMIN_APPLIED, ADMIN_REFUSED, DRIVER_BIND_DENIED, DRIVER_BIND_FAILED, DRIVER_BOUND,
         INBOUND_ECHO_SERVED, INTERFACE_CONFIG_APPLIED, NETSTACK_RANGE_END, NETSTACK_RANGE_START,
@@ -158,6 +175,7 @@ mod tests {
             DHCP_LEASE_LOST,
             DHCP6_LEASE_ACQUIRED,
             DHCP6_LEASE_LOST,
+            SYN_COOKIES_ENGAGED,
         ] {
             assert!(id.0 >= NETSTACK_RANGE_START && id.0 < NETSTACK_RANGE_END);
         }
@@ -189,6 +207,7 @@ mod tests {
             DHCP_LEASE_LOST.0,
             DHCP6_LEASE_ACQUIRED.0,
             DHCP6_LEASE_LOST.0,
+            SYN_COOKIES_ENGAGED.0,
         ];
         ids.sort_unstable();
         for w in ids.windows(2) {

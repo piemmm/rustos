@@ -133,6 +133,65 @@ impl SocketType {
     }
 }
 
+/// Which direction of a stream connection a
+/// [`Shutdown`](SocketRequest::Shutdown) closes (POSIX `SHUT_RD`/`SHUT_WR`/
+/// `SHUT_RDWR`).
+///
+/// Shutting down the write direction is the RFC 9293 §3.10.4 CLOSE: the FIN
+/// is queued behind the buffered data and the connection stays *readable*,
+/// so a client can signal end-of-request and still read the response. This
+/// is what distinguishes it from [`Close`](SocketRequest::Close), which
+/// releases the socket outright.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+#[repr(u8)]
+pub enum ShutdownHow {
+    /// Stop delivering received data. Bytes already buffered and any that
+    /// arrive later are discarded; the peer is not told, since TCP has no
+    /// wire signal for a half-closed receive direction.
+    Read = 1,
+    /// Send a FIN after the buffered data: no further
+    /// [`Send`](SocketRequest::Send) is accepted, while received data keeps
+    /// flowing until the peer closes too.
+    Write = 2,
+    /// Both directions at once.
+    Both = 3,
+}
+
+impl ShutdownHow {
+    /// The wire value for this direction.
+    #[must_use]
+    pub const fn as_u8(self) -> u8 {
+        self as u8
+    }
+
+    /// Whether this direction closes the receive side.
+    #[must_use]
+    pub const fn closes_read(self) -> bool {
+        matches!(self, Self::Read | Self::Both)
+    }
+
+    /// Whether this direction closes the send side.
+    #[must_use]
+    pub const fn closes_write(self) -> bool {
+        matches!(self, Self::Write | Self::Both)
+    }
+
+    /// Recover a direction from its wire value.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::OutOfRange`] for any other value, so an unknown direction is
+    /// refused rather than guessed at.
+    pub const fn from_u8(value: u8) -> Result<Self, Errno> {
+        match value {
+            1 => Ok(Self::Read),
+            2 => Ok(Self::Write),
+            3 => Ok(Self::Both),
+            _ => Err(Errno::OutOfRange),
+        }
+    }
+}
+
 /// A socket address: an IP address and a transport port.
 ///
 /// The address occupies sixteen bytes regardless of family; an IPv4 address
@@ -179,6 +238,10 @@ const ADDR_OFFSET: usize = 16;
 const SOCKET_OFFSET: usize = 8;
 /// Byte offset of the socket-type field (`Socket` only).
 const TYPE_OFFSET: usize = 12;
+/// Byte offset of the shutdown-direction field (`Shutdown` only). It shares
+/// the byte `Socket` spends on its type: the two operations are disjoint, so
+/// each owns it alone and every other operation requires it zeroed.
+const SHUTDOWN_HOW_OFFSET: usize = 12;
 /// Byte offset of the family field (`Socket` only).
 const FAMILY_OFFSET: usize = 13;
 /// Byte offset of the ICMP echo sequence field (`SendEcho` only).
@@ -206,6 +269,8 @@ const OP_LISTEN: u16 = 8;
 const OP_ACCEPT: u16 = 9;
 /// Wire operation discriminant of [`SocketRequest::SendEcho`].
 const OP_SEND_ECHO: u16 = 10;
+/// Wire operation discriminant of [`SocketRequest::Shutdown`].
+const OP_SHUTDOWN: u16 = 11;
 
 /// A server-assigned socket handle, scoped to the creating principal.
 ///
@@ -262,6 +327,23 @@ pub enum SocketRequest<'a> {
     Close {
         /// The socket handle.
         socket: SocketId,
+    },
+    /// Half-close one or both directions of a connected stream socket
+    /// without releasing the handle (POSIX `shutdown`). Shutting down the
+    /// write direction sends a FIN after the buffered data and leaves the
+    /// socket readable, so a client can signal end-of-request and still read
+    /// the response; the handle is released by [`Close`](Self::Close) as
+    /// usual. Repeating a direction already shut down succeeds.
+    ///
+    /// Only a connected stream socket can be half-closed: an unconnected or
+    /// listening socket is refused [`Errno::NotConnected`], and a datagram
+    /// or echo socket [`Errno::OutOfRange`] (a half-close is a FIN, which
+    /// only TCP has).
+    Shutdown {
+        /// The connected stream socket handle.
+        socket: SocketId,
+        /// Which direction(s) to close.
+        how: ShutdownHow,
     },
     /// Join a multicast group on the socket. The group `port` field must be
     /// zero (a group is an address, not an address/port pair).
@@ -387,6 +469,11 @@ impl<'a> SocketRequest<'a> {
             Self::Close { socket } => {
                 put_u16(out, 6, OP_CLOSE);
                 put_u32(out, SOCKET_OFFSET, socket);
+            }
+            Self::Shutdown { socket, how } => {
+                put_u16(out, 6, OP_SHUTDOWN);
+                put_u32(out, SOCKET_OFFSET, socket);
+                out[SHUTDOWN_HOW_OFFSET] = how.as_u8();
             }
             Self::JoinMulticast { socket, group } => {
                 put_u16(out, 6, OP_JOIN);
@@ -535,6 +622,22 @@ impl<'a> SocketRequest<'a> {
                 } else {
                     Ok(Self::Listen { socket })
                 }
+            }
+            OP_SHUTDOWN => {
+                // Shutdown carries the handle and the direction; the family,
+                // sequence, address, and delivery-port fields are reserved.
+                if bytes[13] != 0
+                    || bytes[14] != 0
+                    || bytes[15] != 0
+                    || addr_block.iter().any(|&b| b != 0)
+                    || read_u64(bytes, DELIVER_OFFSET) != 0
+                {
+                    return Err(Errno::BadMagic);
+                }
+                Ok(Self::Shutdown {
+                    socket,
+                    how: ShutdownHow::from_u8(bytes[SHUTDOWN_HOW_OFFSET])?,
+                })
             }
             OP_ACCEPT => {
                 // Accept carries the listener handle and the child's
@@ -1402,6 +1505,18 @@ mod tests {
             socket: 4,
             group: v6(0),
         });
+        round_trip(SocketRequest::Shutdown {
+            socket: 5,
+            how: ShutdownHow::Read,
+        });
+        round_trip(SocketRequest::Shutdown {
+            socket: 5,
+            how: ShutdownHow::Write,
+        });
+        round_trip(SocketRequest::Shutdown {
+            socket: 5,
+            how: ShutdownHow::Both,
+        });
         round_trip(SocketRequest::Listen { socket: 8 });
         round_trip(SocketRequest::Accept {
             socket: 8,
@@ -1501,6 +1616,62 @@ mod tests {
         let mut dirty = buf;
         dirty[ADDR_OFFSET] = 1;
         assert_eq!(SocketRequest::from_bytes(&dirty[..n]), Err(Errno::BadMagic));
+    }
+
+    #[test]
+    fn shutdown_how_rejects_an_unknown_direction() {
+        for value in [0u8, 4, 5, 0xFF] {
+            assert_eq!(ShutdownHow::from_u8(value), Err(Errno::OutOfRange));
+        }
+        for how in [ShutdownHow::Read, ShutdownHow::Write, ShutdownHow::Both] {
+            assert_eq!(ShutdownHow::from_u8(how.as_u8()), Ok(how));
+        }
+        assert!(ShutdownHow::Read.closes_read() && !ShutdownHow::Read.closes_write());
+        assert!(ShutdownHow::Write.closes_write() && !ShutdownHow::Write.closes_read());
+        assert!(ShutdownHow::Both.closes_read() && ShutdownHow::Both.closes_write());
+    }
+
+    #[test]
+    fn shutdown_rejects_an_unknown_direction_on_the_wire() {
+        let mut buf = [0u8; SocketRequest::HEADER_LEN];
+        let n = SocketRequest::Shutdown {
+            socket: 5,
+            how: ShutdownHow::Write,
+        }
+        .encode(&mut buf)
+        .expect("encode");
+        for value in [0u8, 4, 0xFF] {
+            let mut bad = buf;
+            bad[SHUTDOWN_HOW_OFFSET] = value;
+            assert_eq!(
+                SocketRequest::from_bytes(&bad[..n]),
+                Err(Errno::OutOfRange),
+                "direction {value} must be refused"
+            );
+        }
+    }
+
+    #[test]
+    fn shutdown_rejects_a_dirty_reserved_field() {
+        let mut buf = [0u8; SocketRequest::HEADER_LEN];
+        let n = SocketRequest::Shutdown {
+            socket: 5,
+            how: ShutdownHow::Both,
+        }
+        .encode(&mut buf)
+        .expect("encode");
+        // Shutdown carries only the handle and the direction: the family,
+        // sequence, address, and delivery-port fields must all be zero, so
+        // the op cannot smuggle authority through another's fields.
+        for offset in [13, 14, 15, ADDR_OFFSET, ADDR_OFFSET + 19, DELIVER_OFFSET] {
+            let mut dirty = buf;
+            dirty[offset] = 1;
+            assert_eq!(
+                SocketRequest::from_bytes(&dirty[..n]),
+                Err(Errno::BadMagic),
+                "byte {offset} must be reserved"
+            );
+        }
     }
 
     #[test]

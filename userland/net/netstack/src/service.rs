@@ -102,7 +102,8 @@ pub fn serve(
         | NetstackRequest::InterfaceRates { .. }
         | NetstackRequest::Sockets { .. }
         | NetstackRequest::BondMembers { .. }
-        | NetstackRequest::ResolverServers => CapabilityId::SYSINFO_INTROSPECT,
+        | NetstackRequest::ResolverServers
+        | NetstackRequest::StackDefence => CapabilityId::SYSINFO_INTROSPECT,
         _ => CapabilityId::NET_ADMIN,
     };
     if !caller.capabilities().holds(required) {
@@ -148,7 +149,8 @@ pub fn serve(
         | NetstackRequest::InterfaceRates { .. }
         | NetstackRequest::Sockets { .. }
         | NetstackRequest::BondMembers { .. }
-        | NetstackRequest::ResolverServers => serve_read(stack, sockets, decoded, response, now),
+        | NetstackRequest::ResolverServers
+        | NetstackRequest::StackDefence => serve_read(stack, sockets, decoded, response, now),
         NetstackRequest::ApplyNetworkSettings(settings) => {
             // Pure state mutation (no I/O), so unlike `BindDriver` it is
             // served here: store the policy and re-apply the family
@@ -255,6 +257,16 @@ fn serve_read(
                 .collect();
             encode_page_reply(&records, NETSTACK_LIST_LIMIT_MAX, response)
         }
+        NetstackRequest::StackDefence => {
+            // One record, not a page: the defence totals belong to the
+            // socket table as a whole and name no interface.
+            let payload = sockets.defence_counters().to_le_bytes();
+            if response.len() < payload.len() {
+                return Err(Errno::BufferTooSmall);
+            }
+            response[..payload.len()].copy_from_slice(&payload);
+            Ok(payload.len())
+        }
         // The dispatcher only routes the paged read ops here.
         _ => Err(Errno::NotSupported),
     }
@@ -325,6 +337,7 @@ fn op_field(request: &NetstackRequest) -> Field<'static> {
         NetstackRequest::ApplyNetworkSettings(_) => "apply network settings",
         NetstackRequest::BindDriver { .. } => "bind driver",
         NetstackRequest::ResolverServers => "resolver servers",
+        NetstackRequest::StackDefence => "stack defence",
     };
     Field {
         key: "op",

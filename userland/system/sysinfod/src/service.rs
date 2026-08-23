@@ -216,6 +216,8 @@ fn dispatch(
         net_counters_list(source, caller, payload, response)
     } else if query == SysinfoQueryId::NET_INTERFACE_RATES {
         net_rates_list(source, caller, payload, response)
+    } else if query == SysinfoQueryId::NET_STACK_DEFENCE {
+        write_bytes(&source.net_stack_defence(caller)?.to_le_bytes(), response)
     } else if query == SysinfoQueryId::NET_SOCKETS {
         net_sockets_list(source, caller, payload, response)
     } else if query == SysinfoQueryId::NET_BOND_MEMBERS {
@@ -1379,6 +1381,12 @@ mod tests {
         ) -> Result<alloc::vec::Vec<NetInterfaceRatesRecord>, Errno> {
             Ok(alloc::vec![fixture_net_rates(window)])
         }
+        fn net_stack_defence(
+            &self,
+            _caller: &Caller,
+        ) -> Result<tairix_abi::net_ipc::NetStackDefenceCounters, Errno> {
+            Ok(fixture_net_defence())
+        }
         fn net_sockets(&self, _caller: &Caller) -> Result<alloc::vec::Vec<NetSocketRecord>, Errno> {
             Ok(alloc::vec![fixture_net_socket()])
         }
@@ -2083,6 +2091,19 @@ mod tests {
     }
 
     /// The interface-counters record the fixture serves.
+    fn fixture_net_defence() -> tairix_abi::net_ipc::NetStackDefenceCounters {
+        tairix_abi::net_ipc::NetStackDefenceCounters {
+            half_open_started: 40,
+            syn_cookies_sent: 900,
+            syn_cookies_accepted: 850,
+            syn_cookies_rejected: 7,
+            accepted: 880,
+            accept_overflow: 3,
+            half_open_expired: 11,
+            resets_sent: 19,
+        }
+    }
+
     fn fixture_net_counters() -> NetInterfaceCountersRecord {
         let mut name = [0u8; tairix_abi::net_ipc::IF_NAME_LEN];
         name[..3].copy_from_slice(b"wan");
@@ -2346,6 +2367,41 @@ mod tests {
         assert_eq!(n, NetInterfaceCountersRecord::WIRE_LEN);
         let record = NetInterfaceCountersRecord::from_bytes(&resp[..n]).unwrap();
         assert_eq!(record, fixture_net_counters());
+        assert_eq!(
+            sink.events.borrow().as_slice(),
+            &[(Level::Debug, events::QUERY_SERVED)]
+        );
+    }
+
+    #[test]
+    fn net_stack_defence_is_gated_audited_and_round_trips() {
+        tairix_log::set_max_level(Level::Trace);
+        let source = FixtureSource::new();
+        let sink = RecordingSink::new();
+        // The query names nothing: the stack answers with its own totals.
+        let req = request_bytes(SysinfoQueryId::NET_STACK_DEFENCE, &[]);
+        let mut resp = [0u8; 512];
+
+        // Denied without `CAP_SYSINFO_GLOBAL`; the refusal is logged.
+        let denied = Caps(&[CapabilityId::SYSINFO_HW]);
+        assert_eq!(
+            serve_once(&source, &caller(&denied), &sink, &req, &mut resp),
+            Err(Errno::PermissionDenied)
+        );
+        assert_eq!(
+            sink.events.borrow().as_slice(),
+            &[(Level::Warn, events::QUERY_DENIED)]
+        );
+
+        // Served (and audited) for a `CAP_SYSINFO_GLOBAL` holder.
+        let granted = Caps(&[CapabilityId::SYSINFO_GLOBAL]);
+        let sink = RecordingSink::new();
+        let n = serve_once(&source, &caller(&granted), &sink, &req, &mut resp).unwrap();
+        assert_eq!(n, tairix_abi::net_ipc::NetStackDefenceCounters::WIRE_LEN);
+        assert_eq!(
+            tairix_abi::net_ipc::NetStackDefenceCounters::from_bytes(&resp[..n]),
+            Ok(fixture_net_defence())
+        );
         assert_eq!(
             sink.events.borrow().as_slice(),
             &[(Level::Debug, events::QUERY_SERVED)]

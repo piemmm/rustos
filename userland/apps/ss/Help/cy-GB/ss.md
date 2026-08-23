@@ -48,6 +48,8 @@ dawel.
 - `-4, --ipv4` — cyfyngu'r rhestr i socedau IPv4.
 - `-6, --ipv6` — cyfyngu'r rhestr i socedau IPv6.
 - `-H, --no-header` — atal y rhes bennawd.
+- `-s, --summary` — argraffu cyfansymiau amddiffyn cysylltiadau TCP
+  y pentwr yn lle'r tabl socedi.
 - `-?, --help` — dangos cymorth byr y gorchymyn hwn.
 
 ## EXAMPLES

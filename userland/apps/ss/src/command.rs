@@ -7,7 +7,9 @@
 //! (TAIRiX has no service-name database, so this is always in force and
 //! the switch is accepted for familiarity), `-p` adds the owning-process
 //! column, `-4`/`-6` restrict the family, and `-H` suppresses the header
-//! line. Short help is the reserved `-?`/`--help` pair (plans/APPS.md §4).
+//! line, and `-s` prints the stack-wide connection-defence summary instead
+//! of the socket table. Short help is the reserved `-?`/`--help` pair
+//! (plans/APPS.md §4).
 
 use alloc::format;
 use alloc::string::{String, ToString};
@@ -20,6 +22,10 @@ pub enum Command {
     Help,
     /// List the open sockets the filters select.
     Report(Options),
+    /// Print the stack-wide TCP connection-defence summary (`-s`): the
+    /// SYN-backlog, SYN-cookie, accept-queue, and reset totals a flood in
+    /// progress shows up in.
+    Summary,
 }
 
 /// Everything an `ss` run needs, straight from the option grammar.
@@ -103,6 +109,7 @@ pub fn parse(args: &[&str]) -> Result<Command, ParseError> {
                 "ipv4" => options.ipv4 = true,
                 "ipv6" => options.ipv6 = true,
                 "no-header" => options.no_header = true,
+                "summary" => return Ok(Command::Summary),
                 _ => return Err(ParseError::UnknownOption(arg.to_string())),
             }
             continue;
@@ -119,6 +126,7 @@ pub fn parse(args: &[&str]) -> Result<Command, ParseError> {
                 '4' => options.ipv4 = true,
                 '6' => options.ipv6 = true,
                 'H' => options.no_header = true,
+                's' => return Ok(Command::Summary),
                 other => return Err(ParseError::UnknownOption(format!("-{other}"))),
             }
         }
@@ -203,6 +211,11 @@ mod tests {
             "--no-header",
         ] {
             assert!(matches!(parse(&[arg]), Ok(Command::Report(_))), "{arg}");
+        }
+        // `-s` selects a different report, not a filter, so it parses to
+        // its own command rather than to `Report`.
+        for arg in ["-s", "--summary"] {
+            assert_eq!(parse(&[arg]), Ok(Command::Summary), "{arg}");
         }
     }
 }

@@ -410,7 +410,7 @@ docs, and the full gate) because the whole was too large for one change:
   SUMMARY entry); the `lib/net` `fuzz_net_*` harnesses carry its parser
   coverage. Nothing links it.
 
-### N4 — UDP + the socket ABI + multicast membership `[~]`
+### N4 — UDP + the socket ABI + multicast membership `[x]`
 - **Engine UDP layer landed:** `lib/net::udp` is the dual-stack UDP
   codec (RFC 768) — one `write`/`UdpDatagram::parse` core folding the
   family-appropriate pseudo-header checksum, IPv4-optional /
@@ -835,7 +835,7 @@ improvement, not test scaffolding):
   stays: it still spawns the in-kernel-floor block driver and the input driver
   for their live single-process verticals — it was never net-only.)
 
-### N5 — TCP core: the RFC 9293 state machine, retransmission, flow control `[~]`
+### N5 — TCP core: the RFC 9293 state machine, retransmission, flow control `[x]`
 
 Split into three tree-green sub-increments (the N3 precedent), because
 the whole is too large for one change and each leaves the tree working.
@@ -926,7 +926,7 @@ the whole is too large for one change and each leaves the tree working.
     test exercises the real pump against a passive-peer echo server.
   - `lib/rt::net`: `stream_socket`/`stream_send`/`stream_recv` client
     wrappers (`connect`/`close` shared with datagrams).
-  `listen`/`accept`/`shutdown` remain N6.
+  `listen`/`accept` remain N6; `shutdown` is N15.
 - **The live two-process QEMU vertical passes a real guest boot.**
   `tests/integration/netstack_stream_qemu_aarch64` boots the production
   aarch64 pipeline with the encrypted-root disk carrying the standard store
@@ -968,7 +968,7 @@ the whole is too large for one change and each leaves the tree working.
   `tcp_bulk_transfer_over_ipv6_respects_the_link_mtu` drives a multi-segment
   transfer over a real v6 link and asserts every byte arrives in order.
 
-### N6 — TCP listeners, SYN-flood defence, congestion control, SACK `[~]`
+### N6 — TCP listeners, SYN-flood defence, congestion control, SACK `[x]`
 
 #### N6a — pluggable congestion control `[x]`
 - `lib/net::tcp::cc` is the pluggable congestion-control policy layer, the
@@ -1026,7 +1026,7 @@ the whole is too large for one change and each leaves the tree working.
   injection at the sender. Docs: `lib/net` lib.rs, `README.md`,
   `docs/src/lib/net.md`.
 
-#### N6b-2 — listeners, SYN-flood defence `[~]`
+#### N6b-2 — listeners, SYN-flood defence `[x]`
 
 ##### N6b-2-α — the pure `lib/net` listener + SYN-cookie engine `[x]`
 - `lib/net::tcp::listen` is the demultiplexing server-side `Listener`
@@ -1108,12 +1108,10 @@ the whole is too large for one change and each leaves the tree working.
   (§2.2); the three fixture-store helpers in `image_apps` were collapsed onto
   one `fixture_store_files` (§2.2). Wire const `GUEST_TCP_PORT` (privileged,
   distinct from `PEER_TCP_PORT`) added.
-- Deferred to N7+: the standalone connection-exhaustion/SYN-flood *vertical* —
-  that path is proven by the `tcp::listen` cookie/flood unit tests and the
-  `fuzz_net_tcp` listener driver; this vertical proves the ordinary
-  accept-and-serve path live.
+- The standalone connection-exhaustion/SYN-flood *vertical* is N16b; this
+  vertical proves the ordinary accept-and-serve path live.
 
-### N7 — hardware offloads + performance hardening
+### N7 — hardware offloads + performance hardening `[x]`
 
 #### N7a — receive-checksum offload, negotiated end to end `[x]`
 - The frame-ring transport carries a per-slot offload descriptor
@@ -1452,7 +1450,7 @@ the whole is too large for one change and each leaves the tree working.
   the `CAP_NET_BIND_PRIVILEGED` precedent. The pinned administrator-ceiling
   count is 21→22. Ordinary transport use stays baseline `CAP_NET`.
 
-### N9 — interface configuration, bonding, failover
+### N9 — interface configuration, bonding, failover `[x]`
 
 #### N9a — the `lib/netconfig` store engine `[x]`
 - `lib/netconfig` is the one definition of the
@@ -2053,6 +2051,146 @@ device-support crate (§2.22). Key facts for the next worker:
   coverage; the live path is an on-metal acceptance item (`plans/PI.md`), as
   for the Pi's EMMC2, PCIe and HVS drivers.
 
+#### N15 — the socket half-close (`shutdown`) `[x]`
+
+The POSIX `shutdown` surface N5c named and N6 did not land: a client could
+only `Close` a stream, which releases the socket, so it had no way to signal
+end-of-request and still read the response. Key facts for the next worker:
+- **The engine already had it.** `Tcb::close` *is* the RFC 9293 §3.10.4
+  CLOSE — it queues a FIN and the TCB keeps receiving through FIN-WAIT-2 —
+  and `Tcb::send` already fails closed once a FIN is queued. So this is a
+  socket-surface increment with no protocol change. What was missing was a
+  test of the guarantee it rests on: `tcp::conn::tests`
+  `half_close_keeps_receiving` now drives a FIN-WAIT-2 peer receiving data.
+- **ABI:** `ShutdownHow` (`Read`=1/`Write`=2/`Both`=3, fail-closed
+  `from_u8`) and `SocketRequest::Shutdown { socket, how }` (op 11). `how`
+  occupies header byte 12 as `SHUTDOWN_HOW_OFFSET` — the byte `Socket`
+  spends on its type, since the two ops are disjoint and each requires it
+  zeroed in the other. Reserved-field rejection matches `Close`/`Listen`.
+  Covered by the existing round-trip fuzz arm and `fuzz_net_sockabi`; no new
+  harness. The complete POSIX direction set is deliberate (§27): a
+  write-only half-close is not `shutdown`.
+- **Service:** `StreamConn.read_shutdown` plus a `shutdown` handler.
+  `Write` calls `tcb.close` and pumps so the FIN leaves at once, but does
+  **not** set `client_closed`, so the socket keeps delivering and is not
+  reaped — the client still owns the handle and must `close` it.
+  `peer_closed` already excludes FIN-WAIT-1/2, so `Closed` still arrives
+  only on the peer's FIN. `Read` makes `collect_stream_events` keep draining
+  the receive buffer but discard it, so the advertised window stays open and
+  a still-sending peer is never stalled. Idempotence comes from the new
+  `Tcb::send_closed` accessor rather than a second socket-level flag that
+  could drift from the engine.
+- **Errors:** `NotConnected` for an unconnected or listening socket,
+  `OutOfRange` for a datagram or echo socket (only TCP has a FIN). No new
+  capability or audit event — `shutdown` is not a privilege operation — and
+  no `ss` change, since `map_tcp_state` already reports FIN-WAIT-1/2.
+- **Tests:** `lib/rt::net::shutdown` is the client wrapper; the netstack
+  suite covers the FIN flush with the socket still alive, the peer's reply
+  arriving after the client's FIN, send-after-shutdown, the idempotent
+  repeat, read-discard with a drained receive queue, `Both`, and the four
+  refusal cases. Docs: `docs/src/abi/net-sockets.md`.
+
+#### N16 — connection-exhaustion defence: observability, then the live vertical `[~]`
+
+N6b-2-β-2 deferred the standalone SYN-flood vertical "to N7+", and N7 is
+done. Auditing it first turned up a prerequisite: the defence counters the
+vertical needs as its witness were tracked but unreadable.
+
+##### N16a — the stack-wide TCP defence counters `[x]`
+
+`tcp::listen::ListenerStats` had **no consumer anywhere in the tree**, so
+§5's promise that SYN-cookie activations are visible under
+`stats:net/stack/…` was unmet — `lib/procinfo` even pinned the absence with
+a test asserting `stats:net/stack/syn-cookies` resolved to
+`UnknownSelector`. Key facts for the next worker:
+- **A single record, not a page.** The counters belong to the socket table
+  as a whole, so they have no per-interface home: `NetstackRequest::StackDefence`
+  (op 13, no argument) answers one `NetStackDefenceCounters` (8 × `u64`),
+  reached through `SysinfoQueryId::NET_STACK_DEFENCE` (**id 34**,
+  `CAP_SYSINFO_GLOBAL`, audited). Note `SYSINFO_QUERIES` is indexed *by id* —
+  a spec appended in the wrong position makes `spec_for` return `None` and
+  every call fail `NotImplemented`; the entry must sit at index == id.
+- **Monotonic across a listener close.** `SocketService.retired_defence`
+  folds a listener's totals in as it is dropped, so `defence_counters()` is
+  live-plus-retired. Summing only live listeners would let a flood that
+  ended with its target socket closing vanish from the count — the
+  regression test is `defence_counters_survive_a_listener_close`.
+- **Two sources behind one selector prefix.** `net_stack_metric` routes the
+  packet-path leaves (`icmp-errors`, `icmp-suppressed`,
+  `reassembly-evicted`) to the summed per-interface counters as before, and
+  the eight connection-defence leaves (`syn-cookies`,
+  `syn-cookies-{accepted,rejected}`, `syn-backlog-{started,expired}`,
+  `accepts`, `accept-overflow`, `tcp-resets`) to the new single-record
+  query. Summing *those* per interface would multiply one figure by the
+  interface count.
+- **`ss -s`/`--summary`** prints the totals instead of the socket table
+  (the iproute2 switch), a refused query being fatal there as for the
+  listing. Its `OPTIONS` row landed in all thirteen help locales, which
+  `help-lint` enforces for cross-locale switch-key parity.
+- Docs: `docs/src/userland/{networking,netstack}.md`, the `ss` help, and
+  §5's counter list above.
+
+##### N16b — the live connection-exhaustion vertical `[~]`
+
+`tests/integration/netstack_synflood_qemu_aarch64` is the N6b-2-β-2 listener
+vertical run against a *hostile* peer. Key facts for the next worker:
+- **No new guest fixture.** It reuses that vertical's disk and `tcpserve`
+  server unchanged (`FsDisk::ListenRootDisk`): what is under test is the
+  stack's behaviour under connection exhaustion, not a new guest program.
+  The peer is the whole difference (`NetPeerMode::V6TcpFlood`,
+  `netpeer::run_tcp_flood_peer`): it sends `max_half_open + 1` SYNs from
+  distinct source ports and **never answers** the SYN-ACKs, so each occupies
+  a backlog slot until the guest expires it; then it opens one real
+  connection, whose SYN meets a full backlog and can be admitted only
+  through a stateless cookie, and verifies the guest echoes the whole
+  transfer over it. The flood's SYNs are hand-built through
+  `Stack::send_tcp` rather than driven by `Tcb`s — the point is precisely
+  that they are never completed, so there is no connection state to keep.
+  The count comes from `ListenConfig::default().max_half_open`, not a
+  restated literal.
+- **The cookie path had to become observable to be provable.** A run where
+  the flood never landed would otherwise look identical to a pass, since a
+  cookie SYN-ACK is indistinguishable on the wire from a backlog one. So
+  `netstack` now audits the transition — `SYN_COOKIES_ENGAGED` (=16024),
+  emitted **once per listener** so a flood cannot amplify itself through the
+  log — reported out of `StreamIo::cookies_engaged` rather than logged in the
+  engine, keeping the service returning facts and the caller holding the
+  sink. The vertical's serial script requires that message *before* it will
+  await the fixture's PASS marker (an expect-only step that types nothing).
+  Note a userland service's `log_emit` reaches the **diagnostic** sink, never
+  the kernel audit sink an in-kernel witness bin watches — which is why this
+  is a serial-transcript gate and not a sink counter, as for the DHCP
+  verticals' netstack witnesses.
+- **Three witnesses, none sufficient alone:** the cookie-brake message, the
+  fixture's audited `exit` (a verified exchange — a shortfall parks forever),
+  and the peer's verdict, which requires *both* the whole flood sent and the
+  whole transfer echoed back verified.
+- **Scope.** This proves backlog overflow → cookies engaged → a
+  cookie-reconstructed connection serving data. Accept-queue exhaustion stays
+  covered by the `tcp::listen` unit tests and the `fuzz_net_tcp` listener
+  driver; a second live vertical for it would be scope creep. No loss is
+  injected here — retransmission has its own vertical (N6b-2-β-2).
+- **Why this is `[~]` and not `[x]`: the live run is unvalidated on this
+  development machine, and the cause is not in this increment.** The vertical
+  is written, registered, and host-green (the audit-once-per-listener
+  mechanism is covered by the `cookies_engaged_is_reported_once_per_listener`
+  netstack test), but `cargo xtask test --qemu` reports it *passing* in ~10 s
+  — far too fast for unlock + login + a 257-SYN flood + a 32 KiB transfer,
+  which the sibling verticals budget 300 s for. The **same** is true of the
+  pre-existing `netstack_listener_qemu_aarch64` on a **clean tree with this
+  increment stashed** (12.5 s, exit 0), so it is an environment or
+  harness-level condition that predates this work, not a regression from it:
+  a QEMU run that ends early is being scored `Outcome::Pass`, and on a pass
+  the runner persists no serial transcript to contradict it. Two *earlier*
+  iterations of this vertical did boot for real (604 s and 342 s, with full
+  transcripts) and each failed loud with a genuine diagnosis — a peer that
+  never serviced inbound frames so ND never completed, then a flood that ran
+  before the guest was listening, both fixed — so the choreography has been
+  exercised; what is missing is a trustworthy final green. **Next worker:
+  establish why a short QEMU exit scores as a pass (start at `Outcome`
+  classification in `tools/qemu`) before trusting any vertical's verdict on
+  this machine, then re-run this one and mark it `[x]`.**
+
 ## 5. Observability: `info:` / `state:` / `stats:` for every interface
 
 Every network interface `netstack` manages is a first-class resource,
@@ -2079,9 +2217,12 @@ never a `/proc` shape, never text scraping. The selector vocabulary follows
   (kind/unit/source/time/window/reset_behavior): `rx.bytes`, `rx.packets`,
   `tx.bytes`, `tx.packets`, `rx.errors`, `tx.errors`, `rx.dropped`,
   `tx.dropped`, and windowed rates (`rx.pps?window=1s`, `tx.bps?…`);
-  plus the stack-wide defence counters (SYN-cookie activations,
-  reassembly evictions, rate-limited ICMP suppressions) under
-  `stats:net/stack/…` so a DoS in progress is *visible*.
+  plus the stack-wide defence counters under `stats:net/stack/…` so a DoS
+  in progress is *visible* — the packet-path aggregates (reassembly
+  evictions, rate-limited ICMP suppressions), summed across interfaces,
+  and the TCP connection-defence totals (SYN-cookie activations, backlog
+  starts/expiries, accepts, accept-queue overflow, resets), read from the
+  stack's one socket table. Landed as N8a and N16a respectively.
 
 Mechanically: `netstack` answers typed `sysinfo` queries (new
 `SysinfoQueryId` members added under the §16.6 ABI discipline, versioned +
@@ -2091,10 +2232,11 @@ existing namespaces (§2.2 — one resolver, no second path). Unprivileged
 callers may read their own sockets' counters; interface-wide and
 stack-wide queries declare `CAP_SYSINFO_GLOBAL` (and `CAP_SYSINFO_HW`
 where hardware identity is exposed). Landed in N3 (interface facts/state,
-with the admin surface) and N8a (per-interface + stack-wide counters via
+with the admin surface) and N8a (per-interface + packet-path counters via
 `NET_INTERFACE_COUNTERS` → `stats:net/…`); the windowed rates and the
-`ss`-class tooling that reads the same queries are N8b, and N9 extends it
-for bond members (§6.3).
+`ss`-class tooling that reads the same queries are N8b, N9 extends it for
+bond members (§6.3), and the TCP connection-defence totals are N16a via
+`NET_STACK_DEFENCE`.
 
 ## 6. Configuration: `/System/Settings/Network`, `configure net.*`, bonding and failover
 

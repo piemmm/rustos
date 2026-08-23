@@ -30,12 +30,13 @@ use alloc::boxed::Box;
 use alloc::vec::Vec;
 
 use tairix_abi::net::{
-    encode_bind_reply, encode_send_reply, encode_socket_reply, SocketAddr, SocketDatagram,
-    SocketEcho, SocketId, SocketRequest, SocketStreamEvent, SocketType, StreamCloseReason,
-    SOCKET_MAX_DATAGRAM, SOCKET_PRIVILEGED_PORT_MAX,
+    encode_bind_reply, encode_send_reply, encode_socket_reply, ShutdownHow, SocketAddr,
+    SocketDatagram, SocketEcho, SocketId, SocketRequest, SocketStreamEvent, SocketType,
+    StreamCloseReason, SOCKET_MAX_DATAGRAM, SOCKET_PRIVILEGED_PORT_MAX,
 };
 use tairix_abi::net_ipc::{
-    NetAddrFamily, NetSockProto, NetSockState, NetSocketRecord, NetworkSettings, IF_NAME_LEN,
+    NetAddrFamily, NetSockProto, NetSockState, NetSocketRecord, NetStackDefenceCounters,
+    NetworkSettings, IF_NAME_LEN,
 };
 use tairix_abi::origin::ProcId;
 use tairix_abi::reply::{encode_status_reply, STATUS_REPLY_LEN};
@@ -45,7 +46,7 @@ use tairix_net::addr::{Ecn, IpAddr, Ipv4Addr, Ipv6Addr};
 use tairix_net::checksum::Pseudo;
 use tairix_net::stack::StackEvent;
 use tairix_net::tcp::conn::{ResetReason, State, Tcb, TcpConfig};
-use tairix_net::tcp::listen::{CookieSecret, ListenConfig, Listener, Peer};
+use tairix_net::tcp::listen::{CookieSecret, ListenConfig, Listener, ListenerStats, Peer};
 use tairix_net::tcp::{TcpSegment, TcpSegmentMeta};
 
 use crate::events;
@@ -127,6 +128,12 @@ struct StreamConn {
     /// torn down in the background and is reaped once fully closed. No
     /// further events are delivered (the client is gone).
     client_closed: bool,
+    /// Whether the client has shut the *receive* direction down. Received
+    /// bytes are still drained from the connection — so the advertised
+    /// window stays open and a still-sending peer is never stalled — but
+    /// they are discarded instead of delivered. TCP has no wire signal for
+    /// this, so the peer is not told.
+    read_shutdown: bool,
     /// Whether this connection has been claimed by the client. A connection
     /// opened actively (via [`SocketRequest::Connect`]) is accepted at
     /// birth; a connection produced passively by a [`Listener`] starts
@@ -307,6 +314,14 @@ pub struct StreamIo {
     pub tx: FrameBatch,
     /// Stream events to deliver to clients' async ports.
     pub deliveries: Vec<Delivery>,
+    /// Set on the pass where a listener's half-open backlog first
+    /// overflowed and it fell back to stateless SYN cookies — the
+    /// SYN-flood brake engaging, which the service audits once per
+    /// listener. Reported rather than logged here so the engine keeps
+    /// returning facts and the caller that holds the audit sink decides,
+    /// and set only on the transition so an actual flood cannot turn the
+    /// audit log into its own amplifier.
+    pub cookies_engaged: bool,
 }
 
 /// The socket table and its dispatcher.
@@ -316,6 +331,12 @@ pub struct SocketService {
     /// Rolling handle allocator; the next candidate id, advanced past any
     /// live collision so a delivered message can never alias a reused id.
     next_id: SocketId,
+    /// Connection-defence totals of listeners that have since closed,
+    /// folded in as each one is dropped. Without this the stack-wide
+    /// counters would fall when a listener closes, so a flood that ended
+    /// with the listening socket closing would vanish from the count
+    /// instead of staying visible.
+    retired_defence: ListenerStats,
 }
 
 impl SocketService {
@@ -329,6 +350,32 @@ impl SocketService {
     #[must_use]
     pub fn len(&self) -> usize {
         self.sockets.len()
+    }
+
+    /// The stack-wide TCP connection-defence totals (`stats:net/stack/…`):
+    /// every live listener's counters plus those of the listeners that have
+    /// closed, so each figure is monotonic over the life of the boot and a
+    /// flood stays visible after its target socket goes away.
+    #[must_use]
+    pub fn defence_counters(&self) -> NetStackDefenceCounters {
+        let total = self
+            .sockets
+            .iter()
+            .filter_map(|entry| match &entry.proto {
+                Proto::Listen(listener) => Some(listener.stats()),
+                _ => None,
+            })
+            .fold(self.retired_defence, fold_defence);
+        NetStackDefenceCounters {
+            half_open_started: total.half_open_started,
+            syn_cookies_sent: total.cookies_sent,
+            syn_cookies_accepted: total.cookies_accepted,
+            syn_cookies_rejected: total.cookies_rejected,
+            accepted: total.accepted,
+            accept_overflow: total.accept_overflow,
+            half_open_expired: total.half_open_expired,
+            resets_sent: total.resets_sent,
+        }
     }
 
     /// Whether the table is empty.
@@ -449,6 +496,9 @@ impl SocketService {
                 interfaces, entropy, audit, owner, socket, dest, payload, now, response,
             ),
             SocketRequest::Close { socket } => self.close(interfaces, owner, socket, now, response),
+            SocketRequest::Shutdown { socket, how } => {
+                self.shutdown(interfaces, owner, socket, how, now, response)
+            }
             SocketRequest::JoinMulticast { socket, group } => {
                 self.join(interfaces, owner, socket, group, now, response)
             }
@@ -725,6 +775,11 @@ impl SocketService {
             let family = self.sockets[index].family;
             let port = self.sockets[index].local_port;
             let listener_owner = self.sockets[index].owner;
+            // Keep its defence totals: the stack-wide counters must not
+            // fall when a listener goes away.
+            if let Proto::Listen(listener) = &self.sockets[index].proto {
+                self.retired_defence = fold_defence(self.retired_defence, listener.stats());
+            }
             self.sockets.swap_remove(index);
             self.sockets.retain(|e| {
                 !(e.owner == listener_owner
@@ -744,6 +799,54 @@ impl SocketService {
             }
             self.sockets.swap_remove(index);
         }
+        let len = status_reply(response)?.len;
+        Ok(SocketReply {
+            len,
+            tx,
+            deliveries: Vec::new(),
+        })
+    }
+
+    /// Half-close one or both directions of a connected stream socket,
+    /// keeping the handle (POSIX `shutdown`).
+    ///
+    /// Shutting the write direction down queues a FIN behind the buffered
+    /// data and flushes it, but — unlike [`close`](Self::close) — leaves the
+    /// socket alive and delivering, so the client reads the peer's response
+    /// and its eventual end-of-stream. Repeating a direction already shut
+    /// down succeeds, as POSIX requires.
+    fn shutdown(
+        &mut self,
+        interfaces: &mut Netstack,
+        owner: ProcId,
+        socket: SocketId,
+        how: ShutdownHow,
+        now: Duration64,
+        response: &mut [u8],
+    ) -> Result<SocketReply, Errno> {
+        let index = self.owned_index(owner, socket)?;
+        match &mut self.sockets[index].proto {
+            Proto::Stream(Some(conn)) => {
+                if how.closes_read() {
+                    conn.read_shutdown = true;
+                }
+                // A FIN already queued means the write side is closed: say so
+                // rather than letting the engine refuse a repeat.
+                if how.closes_write() && !conn.tcb.send_closed() {
+                    conn.tcb.close(now).map_err(|_| Errno::NotConnected)?;
+                }
+            }
+            // A listener has no connection to half-close, and an unconnected
+            // stream socket has none yet.
+            Proto::Stream(None) | Proto::Listen(_) => return Err(Errno::NotConnected),
+            // A half-close is a FIN, which only TCP has.
+            Proto::Datagram(_) | Proto::Echo(_) => return Err(Errno::OutOfRange),
+        }
+        let tx = if how.closes_write() {
+            self.pump_stream(interfaces, index, now)
+        } else {
+            FrameBatch::new()
+        };
         let len = status_reply(response)?.len;
         Ok(SocketReply {
             len,
@@ -1033,6 +1136,7 @@ impl SocketService {
             iface,
             notified: Notified::Nothing,
             client_closed: false,
+            read_shutdown: false,
             // An actively-opened connection is the client's from birth.
             accepted: true,
         })));
@@ -1150,7 +1254,11 @@ impl SocketService {
             let tx = self.pump_stream(interfaces, index, now);
             let deliveries = self.collect_stream_events(index);
             self.reap_if_done(index);
-            return StreamIo { tx, deliveries };
+            return StreamIo {
+                tx,
+                deliveries,
+                cookies_engaged: false,
+            };
         }
         // 2. A passive listener on the destination port demultiplexes it.
         if let Some(lindex) = self.sockets.iter().position(|e| {
@@ -1181,13 +1289,19 @@ impl SocketService {
             port: seg.source_port,
         };
         let mut emitted: Vec<OutSeg> = Vec::new();
+        let mut cookies_engaged = false;
         if let Proto::Listen(listener) = &mut self.sockets[lindex].proto {
+            let before = listener.stats().cookies_sent;
             listener.on_segment(destination, peer, seg, now, secret, |_peer, out| {
                 emitted.push((out.meta, out.payload.to_vec(), out.gso_size, out.ecn));
                 true
             });
+            cookies_engaged = before == 0 && listener.stats().cookies_sent > 0;
         }
-        let mut io = StreamIo::default();
+        let mut io = StreamIo {
+            cookies_engaged,
+            ..StreamIo::default()
+        };
         io.tx
             .extend(route_segments_to(interfaces, source, &emitted, now));
         io.deliveries
@@ -1302,6 +1416,7 @@ impl SocketService {
                     iface,
                     notified: Notified::Nothing,
                     client_closed: false,
+                    read_shutdown: false,
                     // Passive: the client must claim it with `Accept`.
                     accepted: false,
                 }))),
@@ -1396,12 +1511,17 @@ impl SocketService {
         }
         // Deliver every in-order received byte before any close, in
         // bounded chunks. Draining the receive buffer keeps the advertised
-        // window open (§2.16 — the client's port queue is the app buffer).
+        // window open (the client's port queue is the app buffer) — so a
+        // read-shutdown socket keeps draining too, discarding what it reads
+        // instead of stalling a peer that is still sending.
         loop {
             let mut buf = [0u8; SOCKET_MAX_DATAGRAM];
             let n = conn.tcb.recv(&mut buf);
             if n == 0 {
                 break;
+            }
+            if conn.read_shutdown {
+                continue;
             }
             push_stream_event(
                 &mut out,
@@ -1880,6 +2000,21 @@ fn is_multicast_ip(ip: IpAddr) -> bool {
     }
 }
 
+/// Add every counter of `b` into `a`, saturating rather than wrapping so a
+/// long-lived stack cannot roll a defence total back to zero.
+fn fold_defence(a: ListenerStats, b: ListenerStats) -> ListenerStats {
+    ListenerStats {
+        half_open_started: a.half_open_started.saturating_add(b.half_open_started),
+        cookies_sent: a.cookies_sent.saturating_add(b.cookies_sent),
+        cookies_accepted: a.cookies_accepted.saturating_add(b.cookies_accepted),
+        cookies_rejected: a.cookies_rejected.saturating_add(b.cookies_rejected),
+        accepted: a.accepted.saturating_add(b.accepted),
+        accept_overflow: a.accept_overflow.saturating_add(b.accept_overflow),
+        half_open_expired: a.half_open_expired.saturating_add(b.half_open_expired),
+        resets_sent: a.resets_sent.saturating_add(b.resets_sent),
+    }
+}
+
 /// The operation name an audit record carries.
 fn op_field(request: &SocketRequest<'_>) -> Field<'static> {
     let op = match request {
@@ -1888,6 +2023,7 @@ fn op_field(request: &SocketRequest<'_>) -> Field<'static> {
         SocketRequest::Connect { .. } => "connect",
         SocketRequest::Send { .. } => "send",
         SocketRequest::Close { .. } => "close",
+        SocketRequest::Shutdown { .. } => "shutdown",
         SocketRequest::JoinMulticast { .. } => "join",
         SocketRequest::LeaveMulticast { .. } => "leave",
         SocketRequest::Listen { .. } => "listen",

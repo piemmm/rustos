@@ -50,6 +50,8 @@ operando nudo è un errore d'uso e non un argomento ignorato in silenzio.
 - `-4, --ipv4` — restringere l'elenco ai socket IPv4.
 - `-6, --ipv6` — restringere l'elenco ai socket IPv6.
 - `-H, --no-header` — sopprimere la riga di intestazione.
+- `-s, --summary` — stampare i totali di difesa delle connessioni TCP
+  dello stack invece della tabella dei socket.
 - `-?, --help` — mostrare l'aiuto breve di questo comando.
 
 ## EXAMPLES

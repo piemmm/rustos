@@ -978,6 +978,14 @@ impl Tcb {
         self.rx.len()
     }
 
+    /// Whether the send direction has been closed by [`close`](Self::close):
+    /// a FIN is queued or already sent, so no further [`send`](Self::send)
+    /// is accepted while received data may still arrive.
+    #[must_use]
+    pub fn send_closed(&self) -> bool {
+        self.fin_queued
+    }
+
     /// Bytes buffered for transmission not yet acknowledged (queued by the
     /// application, whether or not yet sent). The `Send-Q` a socket-listing
     /// diagnostic reports.

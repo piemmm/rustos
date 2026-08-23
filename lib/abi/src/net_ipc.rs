@@ -364,6 +364,15 @@ pub enum NetstackRequest {
     /// DNS2). It carries no argument: the caller names no interface, the
     /// stack answers with the whole host's active set.
     ResolverServers,
+    /// Read the stack-wide TCP connection-defence counters (sysinfo
+    /// broker; `stats:net/stack/…`, `plans/NETWORK.md` §5).
+    ///
+    /// The reply is a single [`NetStackDefenceCounters`] payload, not a
+    /// page: the counters are the socket table's as a whole and have no
+    /// per-interface home. Like [`Self::ResolverServers`] it carries no
+    /// argument — the caller names nothing, the stack answers with its own
+    /// totals.
+    StackDefence,
 }
 
 /// Wire operation discriminant of [`NetstackRequest::InterfaceList`].
@@ -390,6 +399,8 @@ const OP_APPLY_NET_SETTINGS: u16 = 10;
 const OP_BOND_MEMBERS: u16 = 11;
 /// Wire operation discriminant of [`NetstackRequest::ResolverServers`].
 const OP_RESOLVER_SERVERS: u16 = 12;
+/// Wire operation discriminant of [`NetstackRequest::StackDefence`].
+const OP_STACK_DEFENCE: u16 = 13;
 
 impl NetstackRequest {
     /// Encoded size on the wire: magic (4), version (2), op (2), and a
@@ -491,6 +502,9 @@ impl NetstackRequest {
             }
             Self::ResolverServers => {
                 put_u16(&mut out, 6, OP_RESOLVER_SERVERS);
+            }
+            Self::StackDefence => {
+                put_u16(&mut out, 6, OP_STACK_DEFENCE);
             }
         }
         out
@@ -602,6 +616,10 @@ impl NetstackRequest {
             OP_RESOLVER_SERVERS => {
                 reserved_zero(bytes, 8)?;
                 Ok(Self::ResolverServers)
+            }
+            OP_STACK_DEFENCE => {
+                reserved_zero(bytes, 8)?;
+                Ok(Self::StackDefence)
             }
             _ => Err(Errno::OutOfRange),
         }
@@ -1780,6 +1798,89 @@ impl NetCounters {
     }
 }
 
+/// The network stack's **stack-wide** TCP connection-defence counters
+/// (`stats:net/stack/…`, plan §5): the response record of
+/// [`SysinfoQueryId::NET_STACK_DEFENCE`](crate::sysinfo::SysinfoQueryId::NET_STACK_DEFENCE).
+///
+/// These belong to the socket table as a whole, not to any interface, so
+/// they are one record rather than a page. Each is monotonic over the life
+/// of the boot: a listener that closes folds its totals into the stack's,
+/// so a flood that ended with the listening socket closing stays visible
+/// instead of vanishing from the count.
+#[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
+pub struct NetStackDefenceCounters {
+    /// SYNs that opened a full-state half-open (SYN-RECEIVED) connection.
+    pub half_open_started: u64,
+    /// SYNs answered with a stateless RFC 4987 cookie because the
+    /// half-open backlog was full — the SYN-flood brake engaging.
+    pub syn_cookies_sent: u64,
+    /// Returning ACKs whose cookie validated, reconstructing a connection
+    /// the stack held no state for.
+    pub syn_cookies_accepted: u64,
+    /// Returning ACKs whose cookie failed validation (a RST was sent):
+    /// forged, tampered, or stale.
+    pub syn_cookies_rejected: u64,
+    /// Handshakes completed and queued for `accept`.
+    pub accepted: u64,
+    /// Completed handshakes refused because the accept queue was full.
+    pub accept_overflow: u64,
+    /// Half-open connections expired before the client's ACK arrived.
+    pub half_open_expired: u64,
+    /// RST segments emitted (illegal ACKs, refused connections).
+    pub resets_sent: u64,
+}
+
+/// Number of `u64` counters in a [`NetStackDefenceCounters`].
+const DEFENCE_FIELDS: usize = 8;
+
+impl NetStackDefenceCounters {
+    /// Encoded payload size: eight little-endian `u64` counters.
+    pub const WIRE_LEN: usize = DEFENCE_FIELDS * 8;
+
+    /// Encode `self` little-endian.
+    #[must_use]
+    pub fn to_le_bytes(&self) -> [u8; Self::WIRE_LEN] {
+        let mut out = [0u8; Self::WIRE_LEN];
+        for (index, value) in [
+            self.half_open_started,
+            self.syn_cookies_sent,
+            self.syn_cookies_accepted,
+            self.syn_cookies_rejected,
+            self.accepted,
+            self.accept_overflow,
+            self.half_open_expired,
+            self.resets_sent,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            put_u64(&mut out, index * 8, value);
+        }
+        out
+    }
+
+    /// Decode from `bytes`.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::BufferTooSmall`] — `bytes` cannot hold the payload.
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, Errno> {
+        if bytes.len() < Self::WIRE_LEN {
+            return Err(Errno::BufferTooSmall);
+        }
+        Ok(Self {
+            half_open_started: read_u64(bytes, 0),
+            syn_cookies_sent: read_u64(bytes, 8),
+            syn_cookies_accepted: read_u64(bytes, 16),
+            syn_cookies_rejected: read_u64(bytes, 24),
+            accepted: read_u64(bytes, 32),
+            accept_overflow: read_u64(bytes, 40),
+            half_open_expired: read_u64(bytes, 48),
+            resets_sent: read_u64(bytes, 56),
+        })
+    }
+}
+
 /// One interface's stack counters keyed by its name
 /// (`stats:net/<iface>/…`, plan §5): the response record of the
 /// interface-counters page.
@@ -2502,10 +2603,46 @@ mod tests {
                 node_location: 0x1_0a00_0000,
             },
             NetstackRequest::ResolverServers,
+            NetstackRequest::StackDefence,
         ] {
             let bytes = request.to_le_bytes();
             assert_eq!(NetstackRequest::from_bytes(&bytes), Ok(request));
         }
+    }
+
+    #[test]
+    fn stack_defence_fails_closed_on_a_dirty_reserved_tail() {
+        let mut bytes = NetstackRequest::StackDefence.to_le_bytes();
+        // The request carries no operation block: a non-zero byte past the
+        // op word is a smuggled payload and must be refused.
+        bytes[8] = 1;
+        assert_eq!(NetstackRequest::from_bytes(&bytes), Err(Errno::BadMagic));
+    }
+
+    #[test]
+    fn stack_defence_counters_round_trip_and_fail_closed() {
+        let counters = NetStackDefenceCounters {
+            half_open_started: 1_024,
+            syn_cookies_sent: 4_096,
+            syn_cookies_accepted: 3_000,
+            syn_cookies_rejected: 96,
+            accepted: 2_048,
+            accept_overflow: 12,
+            half_open_expired: 512,
+            resets_sent: 108,
+        };
+        let bytes = counters.to_le_bytes();
+        assert_eq!(bytes.len(), NetStackDefenceCounters::WIRE_LEN);
+        assert_eq!(
+            NetStackDefenceCounters::from_bytes(&bytes),
+            Ok(counters),
+            "every counter survives the wire in its own slot"
+        );
+        // A short payload is refused rather than zero-filled.
+        assert_eq!(
+            NetStackDefenceCounters::from_bytes(&bytes[..NetStackDefenceCounters::WIRE_LEN - 1]),
+            Err(Errno::BufferTooSmall)
+        );
     }
 
     #[test]

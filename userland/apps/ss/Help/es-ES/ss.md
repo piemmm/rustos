@@ -50,6 +50,8 @@ silencio.
 - `-4, --ipv4` — restringir el listado a sockets IPv4.
 - `-6, --ipv6` — restringir el listado a sockets IPv6.
 - `-H, --no-header` — suprimir la línea de cabecera.
+- `-s, --summary` — mostrar los totales de defensa de conexiones TCP
+  de la pila en lugar de la tabla de sockets.
 - `-?, --help` — mostrar la ayuda breve de esta orden.
 
 ## EXAMPLES

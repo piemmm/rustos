@@ -253,9 +253,14 @@ is tickless — it snapshots counters opportunistically as the service
 wakes, never on a periodic timer. Addresses
 render canonically (dotted-quad v4; RFC 5952 v6) with their SLAAC/DAD
 state annotated. The per-interface counters are monotonic since boot; a
-denial-of-service in progress is visible through the stack-wide
-aggregates `stats:net/stack/{icmp-errors,icmp-suppressed,reassembly-evicted}`,
-summed across every managed interface. The counter reads are gated on
+denial-of-service in progress is visible through the stack-wide counters:
+the packet-path aggregates
+`stats:net/stack/{icmp-errors,icmp-suppressed,reassembly-evicted}`, summed
+across every managed interface, and the TCP connection-defence totals
+`stats:net/stack/{syn-cookies,syn-cookies-accepted,syn-cookies-rejected,
+syn-backlog-started,syn-backlog-expired,accepts,accept-overflow,tcp-resets}`,
+read from the stack's one socket table and monotonic over the boot (a
+closing listener folds its totals in, so a finished flood stays counted). The counter reads are gated on
 `CAP_SYSINFO_GLOBAL` (system-wide network metrics), like the address
 state; the engine keeps one honest `dropped` bucket per direction rather
 than a fabricated errors/dropped split.

@@ -137,6 +137,39 @@ fn orderly_close_reaches_time_wait_and_closed() {
     assert_eq!(client.state(), State::Closed);
 }
 
+/// RFC 9293 §3.10.4: closing the send direction ends *that* direction only.
+/// A FIN-WAIT-2 peer must keep accepting data until it sends its own FIN —
+/// the guarantee the socket-level half-close (`SocketRequest::Shutdown`)
+/// rests on.
+#[test]
+fn half_close_keeps_receiving() {
+    let now = ms(0);
+    let (mut client, mut server) = handshake(now);
+
+    assert!(!client.send_closed());
+    client.close(now).unwrap();
+    assert!(client.send_closed());
+    settle(&mut client, &mut server, now);
+    assert_eq!(client.state(), State::FinWait2);
+    assert_eq!(server.state(), State::CloseWait);
+
+    // The client sent a FIN, so it may send no more...
+    assert_eq!(client.send(b"too late"), Err(TcpError::InvalidState));
+    // ...but the server may still send, and the client still receives.
+    assert_eq!(server.send(b"response body").unwrap(), 13);
+    settle(&mut server, &mut client, now);
+    let mut buf = [0u8; 32];
+    let n = client.recv(&mut buf);
+    assert_eq!(&buf[..n], b"response body");
+    assert_eq!(client.state(), State::FinWait2);
+    assert_eq!(client.reset_reason(), None);
+
+    // Only the server's own FIN ends the connection.
+    server.close(now).unwrap();
+    settle(&mut server, &mut client, now);
+    assert_eq!(client.state(), State::TimeWait);
+}
+
 #[test]
 fn simultaneous_open_establishes() {
     let now = ms(0);

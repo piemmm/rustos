@@ -1065,6 +1065,13 @@ mod program {
                             now,
                             secret,
                         );
+                        if io.cookies_engaged {
+                            audit(
+                                events::SYN_COOKIES_ENGAGED,
+                                Level::Warn,
+                                events::SYN_COOKIES_ENGAGED_MESSAGE,
+                            );
+                        }
                         emit_deliveries(&io.deliveries);
                         for (name, frames) in &io.tx {
                             // A connection's frames are tagged by its logical

@@ -51,7 +51,8 @@ mod program {
     use tairix_abi::net_ipc::{
         NetBondMemberRecord, NetInterfaceCountersRecord, NetInterfaceFactsRecord,
         NetInterfaceRatesRecord, NetInterfaceStateRecord, NetResolverServer, NetSocketRecord,
-        NetstackRequest, NETSTACK_ENDPOINT, NETSTACK_LIST_LIMIT_MAX, NETSTACK_MAX_REPLY,
+        NetStackDefenceCounters, NetstackRequest, NETSTACK_ENDPOINT, NETSTACK_LIST_LIMIT_MAX,
+        NETSTACK_MAX_REPLY,
     };
     use tairix_abi::raid_admin::{
         RaidArrayRecord, RaidControlOp, RaidMemberRecord, RAID_CONTROL_ENDPOINT,
@@ -313,6 +314,10 @@ mod program {
             page_netstack(&NetstackRatesPage { window })
         }
 
+        fn net_stack_defence(&self, _caller: &Caller) -> Result<NetStackDefenceCounters, Errno> {
+            read_netstack_defence()
+        }
+
         fn net_sockets(&self, _caller: &Caller) -> Result<Vec<NetSocketRecord>, Errno> {
             page_netstack(&NetstackSocketsPage)
         }
@@ -535,6 +540,24 @@ mod program {
             }
             offset = offset.saturating_add(u32::from(count));
         }
+    }
+
+    /// Read the stack-wide connection-defence counters from `netstack`.
+    ///
+    /// A sibling of [`page_netstack`] rather than a use of it: the reply is
+    /// one fixed record, not the count-plus-records page every listing read
+    /// returns, so there is no paging loop and nothing to abstract over. A
+    /// short or oversized reply is refused rather than zero-filled, and a
+    /// system without a running `netstack` fails closed with the
+    /// transport's typed error.
+    fn read_netstack_defence() -> Result<NetStackDefenceCounters, Errno> {
+        let mut reply = [0u8; NETSTACK_MAX_REPLY];
+        let request = NetstackRequest::StackDefence.to_le_bytes();
+        let n = tairix_rt::ipc_call(NETSTACK_ENDPOINT, &request, &mut reply).map_err(errno_from)?;
+        if n != NetStackDefenceCounters::WIRE_LEN {
+            return Err(Errno::BadMagic);
+        }
+        NetStackDefenceCounters::from_bytes(&reply[..n])
     }
 
     /// One paged RAID composer control read: which operation a page issues

@@ -160,7 +160,7 @@ Key facts for the next worker:
   RISCV64}`) live in `tests/integration/netstack_wire`, cross-checked against
   the real `lib/netconfig` parser.
 
-### D4 — DHCPv6 (RFC 8415), stateful IA_NA address configuration
+### D4 — DHCPv6 (RFC 8415), stateful IA_NA address configuration `[x]`
 Stateful DHCPv6 as an IPv6 peer of D1–D3, reusing the interface-engine
 integration shape. DHCPv6 is a distinct protocol (UDP 546↔547, all-DHCP-
 relay-agents-and-servers multicast `ff02::1:2`, DUID-keyed leases, IA_NA/
