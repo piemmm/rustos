@@ -11,10 +11,11 @@
 //! |  |                           |  Sort     [ Name          v ] |
 //! |  +---------------------------+  tairix-dark.jpg              |
 //! |  Wallpapers                                                  |
-//! |  +---------------------------------------------------+ +--+  |
-//! |  |  [tile]  [tile]  [tile]  [tile]  [tile]           | |##|  |
-//! |  |  [tile]  [tile]                                   | |  |  |
-//! |  +---------------------------------------------------+ +--+  |
+//! |  +--------+ +--------------------------------------+ +--+    |
+//! |  | All    | |  [tile]  [tile]  [tile]  [tile]      | |##|    |
+//! |  |Abstract| |  [tile]  [tile]                      | |  |    |
+//! |  | Space  | |                                      | |  |    |
+//! |  +--------+ +--------------------------------------+ +--+    |
 //! |  Applied.                                  [Close] [Apply]   |
 //! +--------------------------------------------------------------+
 //! ```
@@ -65,6 +66,11 @@ const OPTION_COLUMN_SHARE: u32 = 10;
 /// between.
 const PREVIEW_BAND_SHARE: u32 = 10;
 
+/// The share of the content width the category rail may take, in
+/// twenty-fourths, so the tiles keep the larger part of a narrow window and
+/// a long category name is truncated rather than squeezing the gallery out.
+const RAIL_COLUMN_SHARE: u32 = 6;
+
 /// One gallery tile's width in logical pixels.
 const TILE_WIDTH: u32 = 132;
 
@@ -88,6 +94,7 @@ pub struct Layout {
     option_fields: [Rect; OPTION_GROUP_COUNT],
     caption: Rect,
     heading: Rect,
+    categories: Rect,
     tiles: Rect,
     scrollbar: Rect,
     status: Rect,
@@ -99,7 +106,15 @@ pub struct Layout {
 impl Layout {
     /// Resolve the geometry of a `width` x `height` client area for the
     /// active theme, UI scale, and text face, with the preview shaped to
-    /// `screen` — the desktop's own screen extent, in physical pixels.
+    /// `screen` — the desktop's own screen extent, in physical pixels — and
+    /// the category rail claiming `rail` pixels of width.
+    ///
+    /// The rail's *wanted* width is the strip's own measurement over its own
+    /// labels, which only its owner can take, so it is passed in rather than
+    /// invented here; this caps it to the rail's share of the window and
+    /// drops it entirely when there is no room, exactly as the option column
+    /// is treated. A `rail` of zero is a window with no categories to offer,
+    /// and the tiles simply take the whole band.
     #[must_use]
     pub fn compute(
         width: u32,
@@ -108,6 +123,7 @@ impl Layout {
         theme: &Theme,
         font: BitmapFont,
         screen: (u32, u32),
+        rail: u32,
     ) -> Self {
         let metrics = theme.metrics();
         let gap = scale.scale_length(metrics.control_gap).max(1);
@@ -156,9 +172,14 @@ impl Layout {
         let heading_h = line.min(body_bottom.saturating_sub(heading_y.min(body_bottom)));
         let tiles_y = heading_y.saturating_add(heading_h).saturating_add(gap);
         let tiles_h = body_bottom.saturating_sub(tiles_y.min(body_bottom));
+        let rail_w = Self::rail_width(rail, content_w, gutter, gap, scale);
+        let tiles_x = left
+            .saturating_add(rail_w)
+            .saturating_add(if rail_w == 0 { 0 } else { gap });
         let tiles_w = content_w
             .saturating_sub(gutter)
-            .saturating_sub(if gutter == 0 { 0 } else { gap });
+            .saturating_sub(if gutter == 0 { 0 } else { gap })
+            .saturating_sub(tiles_x.saturating_sub(left));
 
         let (apply, close, status) =
             Self::footer(left, footer_y, content_w, footer_h, gap, scale, font);
@@ -171,7 +192,8 @@ impl Layout {
             option_fields,
             caption,
             heading: Rect::new(to_i32(left), to_i32(heading_y), content_w, heading_h),
-            tiles: Rect::new(to_i32(left), to_i32(tiles_y), tiles_w, tiles_h),
+            categories: Rect::new(to_i32(left), to_i32(tiles_y), rail_w, tiles_h),
+            tiles: Rect::new(to_i32(tiles_x), to_i32(tiles_y), tiles_w, tiles_h),
             scrollbar: Rect::new(
                 to_i32(left.saturating_add(content_w).saturating_sub(gutter)),
                 to_i32(tiles_y),
@@ -210,6 +232,29 @@ impl Layout {
             return 0;
         }
         ideal.min(ceiling)
+    }
+
+    /// The width the category rail is actually given: what its own strip
+    /// measured, capped at the rail's share of the content and dropped
+    /// altogether when what is left would not hold a tile, so a squeezed
+    /// window loses the rail rather than the wallpapers it exists to reach.
+    fn rail_width(wanted: u32, content_w: u32, gutter: u32, gap: u32, scale: Scale) -> u32 {
+        if wanted == 0 {
+            return 0;
+        }
+        let ceiling = content_w
+            .saturating_mul(RAIL_COLUMN_SHARE)
+            .checked_div(24)
+            .unwrap_or(0);
+        let claimed = wanted.min(ceiling);
+        let tiles_floor = scale
+            .scale_length(TILE_WIDTH)
+            .saturating_add(gutter)
+            .saturating_add(gap.saturating_mul(2));
+        if claimed == 0 || content_w.saturating_sub(claimed) < tiles_floor {
+            return 0;
+        }
+        claimed
     }
 
     /// The preview band's height: the screen's own shape scaled to the
@@ -397,7 +442,15 @@ impl Layout {
         self.heading
     }
 
-    /// The gallery's tile area, excluding the scrollbar's reserved gutter.
+    /// The category rail beside the tiles, empty when the window has no room
+    /// for it or there are no categories to offer.
+    #[must_use]
+    pub fn categories(&self) -> Rect {
+        self.categories
+    }
+
+    /// The gallery's tile area, excluding the category rail and the
+    /// scrollbar's reserved gutter.
     #[must_use]
     pub fn tiles(&self) -> Rect {
         self.tiles

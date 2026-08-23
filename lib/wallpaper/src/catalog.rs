@@ -1,27 +1,53 @@
 //! The shipped default wallpaper set, and the bounded, fail-closed listing
-//! model a chooser draws its thumbnail grid from.
+//! model a chooser draws its category rail and thumbnail grid from.
 //!
-//! The desktop ships five read-only wallpaper masters under
-//! [`WALLPAPER_STORE`], discovered at build time from `lib/wallpaper/assets/`
-//! by `tools/syshelp` — never a hand-maintained list. [`catalog_entries`] is
-//! the one definition of which files in a directory listing a chooser may
-//! offer: it performs no I/O of its own — the caller lists the directory —
-//! and only filters, validates, and orders what it is given.
+//! The desktop ships its read-only wallpaper masters under
+//! [`WALLPAPER_STORE`], filed one directory level deep in **categories**
+//! (`Space`, `Nature`, `City`, `Abstract`, `TAIRiX`), all discovered at build
+//! time from `lib/wallpaper/assets/` by `tools/syshelp` — never a
+//! hand-maintained list. [`catalog_categories`] and [`catalog_entries`] are
+//! the one definition of which directories and which files in a listing a
+//! chooser may offer: neither performs I/O of its own — the caller lists the
+//! directory — and both only filter, validate, and order what they are
+//! given.
+//!
+//! **A category's directory name is its display label, verbatim.** There is
+//! no title-casing rule and no name → label table, so adding a category is
+//! authoring a directory whose name is exactly what the user reads, and no
+//! second spelling of it can drift out of step.
 
 use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
-/// Where the OS ships its desktop wallpaper masters.
+/// Where the OS ships its desktop wallpaper masters. Its immediate children
+/// are the category directories; the masters themselves are one level below.
 pub const WALLPAPER_STORE: &str = "/System/Graphics/Wallpapers";
 
-/// The default wallpaper's file name inside [`WALLPAPER_STORE`].
+/// The category directory the default wallpaper is filed under.
+pub const DEFAULT_WALLPAPER_CATEGORY: &str = "TAIRiX";
+
+/// The default wallpaper's file name inside [`DEFAULT_WALLPAPER_CATEGORY`].
 pub const DEFAULT_WALLPAPER: &str = "tairix-dark.jpg";
 
-/// The default wallpaper's absolute path (`<WALLPAPER_STORE>/<DEFAULT_WALLPAPER>`).
+/// One category directory's absolute path
+/// (`<WALLPAPER_STORE>/<category>`).
+#[must_use]
+pub fn category_path(category: &str) -> String {
+    format!("{WALLPAPER_STORE}/{category}")
+}
+
+/// One shipped master's absolute path
+/// (`<WALLPAPER_STORE>/<category>/<file>`).
+#[must_use]
+pub fn wallpaper_path(category: &str, file: &str) -> String {
+    format!("{WALLPAPER_STORE}/{category}/{file}")
+}
+
+/// The default wallpaper's absolute path.
 #[must_use]
 pub fn default_wallpaper_path() -> String {
-    format!("{WALLPAPER_STORE}/{DEFAULT_WALLPAPER}")
+    wallpaper_path(DEFAULT_WALLPAPER_CATEGORY, DEFAULT_WALLPAPER)
 }
 
 /// Largest wallpaper file any consumer will read, in bytes.
@@ -44,6 +70,13 @@ pub const MAX_WALLPAPER_BYTES: usize = 8 * 1024 * 1024;
 /// more candidates than this yields only the first [`MAX_WALLPAPER_CATALOG_ENTRIES`]
 /// in name order, rather than growing the listing without bound.
 pub const MAX_WALLPAPER_CATALOG_ENTRIES: usize = 256;
+
+/// Largest number of categories a catalog listing may return.
+///
+/// A chooser's category rail is a bounded surface exactly as its grid is, so
+/// this is a fixed bound too: a store holding more category directories than
+/// this yields only the first [`MAX_WALLPAPER_CATEGORIES`] in name order.
+pub const MAX_WALLPAPER_CATEGORIES: usize = 64;
 
 /// The file-name extensions [`catalog_entries`] accepts, checked
 /// case-insensitively against the whole name's suffix.
@@ -69,6 +102,19 @@ fn has_wallpaper_extension(name: &str) -> bool {
 #[must_use]
 pub fn is_wallpaper_file_name(name: &str) -> bool {
     tairix_path::validate_file_name(name).is_ok() && has_wallpaper_extension(name)
+}
+
+/// Whether `name` is a legal wallpaper category directory name: a plain leaf
+/// name (no control character, no path separator, non-empty, not `.`/`..`).
+///
+/// The name carries no extension and no case convention, because it is the
+/// label the chooser draws: `TAIRiX` reads as `TAIRiX`. [`catalog_categories`]
+/// applies this at runtime to silently drop anything that fails it;
+/// `tools/syshelp`'s build-time discovery applies the same definition to fail
+/// the image build closed on a category directory no chooser could offer.
+#[must_use]
+pub fn is_wallpaper_category_name(name: &str) -> bool {
+    tairix_path::validate_file_name(name).is_ok()
 }
 
 /// One wallpaper a consumer may offer, discovered from a directory listing.
@@ -113,6 +159,34 @@ where
         .collect();
     out.sort_by(|a, b| a.name.cmp(&b.name));
     out.truncate(MAX_WALLPAPER_CATALOG_ENTRIES);
+    out
+}
+
+/// Build the category list a chooser may offer, from the directory names
+/// found directly inside [`WALLPAPER_STORE`].
+///
+/// `entries` is the caller's own listing of that store's *subdirectories* —
+/// deciding which listed entries are directories is the caller's I/O, not
+/// this function's. A name that is not a legal plain leaf name is silently
+/// dropped, so a store holding a stray file alongside its categories yields
+/// only the categories rather than a refusal of the whole listing. The
+/// result is sorted deterministically by name, exactly as
+/// [`catalog_entries`] is, and capped at [`MAX_WALLPAPER_CATEGORIES`].
+///
+/// Each returned name is both the directory to list and the label to draw,
+/// so a chooser needs no second vocabulary for the categories it offers.
+#[must_use]
+pub fn catalog_categories<'a, I>(entries: I) -> Vec<String>
+where
+    I: IntoIterator<Item = &'a str>,
+{
+    let mut out: Vec<String> = entries
+        .into_iter()
+        .filter(|name| is_wallpaper_category_name(name))
+        .map(ToString::to_string)
+        .collect();
+    out.sort();
+    out.truncate(MAX_WALLPAPER_CATEGORIES);
     out
 }
 

@@ -12,55 +12,128 @@ use super::*;
 fn default_wallpaper_path_is_inside_the_store() {
     assert_eq!(
         default_wallpaper_path(),
-        "/System/Graphics/Wallpapers/tairix-dark.jpg"
+        "/System/Graphics/Wallpapers/TAIRiX/tairix-dark.jpg"
     );
     assert!(default_wallpaper_path().starts_with(WALLPAPER_STORE));
+    assert_eq!(category_path("Space"), "/System/Graphics/Wallpapers/Space");
+    assert_eq!(
+        wallpaper_path("Space", "low-orbit.jpg"),
+        "/System/Graphics/Wallpapers/Space/low-orbit.jpg"
+    );
+}
+
+/// The shipped categories, read from the crate's own `assets/` directory:
+/// every subdirectory name, in name order.
+fn shipped_categories() -> alloc::vec::Vec<String> {
+    let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/assets");
+    let mut categories: alloc::vec::Vec<String> = std::fs::read_dir(dir)
+        .expect("the shipped assets directory")
+        .map(|entry| entry.expect("directory entry"))
+        .filter(|entry| entry.path().is_dir())
+        .map(|entry| {
+            entry
+                .file_name()
+                .into_string()
+                .expect("utf-8 category name")
+        })
+        .collect();
+    categories.sort();
+    categories
 }
 
 /// The shipped masters, measured from the crate's own `assets/` directory:
-/// `(name, byte length)` for each file, in name order.
-fn shipped_masters() -> alloc::vec::Vec<(String, usize)> {
+/// `(category, name, byte length)` for each file, in category-then-name
+/// order.
+fn shipped_masters() -> alloc::vec::Vec<(String, String, usize)> {
     let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/assets");
-    let mut masters: alloc::vec::Vec<(String, usize)> = std::fs::read_dir(dir)
-        .expect("the shipped assets directory")
-        .map(|entry| {
+    let mut masters: alloc::vec::Vec<(String, String, usize)> = alloc::vec::Vec::new();
+    for category in shipped_categories() {
+        let entries = std::fs::read_dir(std::path::Path::new(dir).join(&category))
+            .expect("a shipped category directory");
+        for entry in entries {
             let entry = entry.expect("directory entry");
             let name = entry.file_name().into_string().expect("utf-8 asset name");
             let bytes = usize::try_from(entry.metadata().expect("asset metadata").len())
                 .expect("asset size fits usize");
-            (name, bytes)
-        })
-        .collect();
+            masters.push((category.clone(), name, bytes));
+        }
+    }
     masters.sort();
     masters
+}
+
+#[test]
+fn every_shipped_master_is_filed_under_an_offerable_category() {
+    let categories = shipped_categories();
+    assert!(
+        !categories.is_empty(),
+        "the crate ships wallpaper categories"
+    );
+    for category in &categories {
+        assert!(
+            is_wallpaper_category_name(category),
+            "shipped category {category} is not an offerable category name"
+        );
+    }
+    // Every shipped category must survive the rail it will be listed
+    // through: one the chooser would silently drop is a whole shipped
+    // folder no user could ever reach.
+    let listing = catalog_categories(categories.iter().map(String::as_str));
+    assert_eq!(listing, categories);
+    // A master directly in the store's root would never be planted, and so
+    // never offered: the store's own children are categories alone.
+    let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/assets");
+    for entry in std::fs::read_dir(dir).expect("the shipped assets directory") {
+        let path = entry.expect("directory entry").path();
+        assert!(
+            path.is_dir(),
+            "{} sits outside a category directory",
+            path.display()
+        );
+    }
 }
 
 #[test]
 fn every_shipped_master_is_offerable_and_fits_within_the_byte_bound() {
     let masters = shipped_masters();
     assert!(!masters.is_empty(), "the crate ships wallpaper masters");
-    for (name, bytes) in &masters {
+    for (category, name, bytes) in &masters {
         assert!(
             is_wallpaper_file_name(name),
-            "shipped master {name} is not an offerable wallpaper file name"
+            "shipped master {category}/{name} is not an offerable wallpaper file name"
         );
         assert!(
             *bytes <= MAX_WALLPAPER_BYTES,
-            "shipped master {name} is {bytes} bytes, over the {MAX_WALLPAPER_BYTES}-byte bound"
+            "shipped master {category}/{name} is {bytes} bytes, over the \
+             {MAX_WALLPAPER_BYTES}-byte bound"
         );
     }
-    // Every shipped master must survive the catalog it will be listed
-    // through: a master the desktop would silently drop is a shipped asset
-    // no user could ever choose.
-    let listing = catalog_entries(masters.iter().map(|(name, bytes)| (name.as_str(), *bytes)));
-    assert_eq!(listing.len(), masters.len());
+    // Every shipped master must survive the catalog its own category will be
+    // listed through: a master the desktop would silently drop is a shipped
+    // asset no user could ever choose.
+    for category in shipped_categories() {
+        let in_category: alloc::vec::Vec<(&str, usize)> = masters
+            .iter()
+            .filter(|(owner, _, _)| *owner == category)
+            .map(|(_, name, bytes)| (name.as_str(), *bytes))
+            .collect();
+        assert!(
+            !in_category.is_empty(),
+            "shipped category {category} holds no master, so its rail entry \
+             would open an empty gallery"
+        );
+        assert_eq!(
+            catalog_entries(in_category.iter().copied()).len(),
+            in_category.len()
+        );
+    }
 }
 
 #[test]
 fn the_byte_bound_admits_the_largest_shipped_master_with_headroom() {
     let largest = shipped_masters()
         .into_iter()
-        .map(|(_, bytes)| bytes)
+        .map(|(_, _, bytes)| bytes)
         .max()
         .expect("the crate ships wallpaper masters");
     // Headroom, not a bare fit: the bound must have room for a future
@@ -78,10 +151,34 @@ fn the_byte_bound_admits_the_largest_shipped_master_with_headroom() {
 fn the_default_wallpaper_is_one_of_the_shipped_masters() {
     let masters = shipped_masters();
     assert!(
-        masters.iter().any(|(name, _)| name == DEFAULT_WALLPAPER),
-        "the default wallpaper {DEFAULT_WALLPAPER} is not among the shipped \
-         masters {masters:?}"
+        masters
+            .iter()
+            .any(|(category, name, _)| category == DEFAULT_WALLPAPER_CATEGORY
+                && name == DEFAULT_WALLPAPER),
+        "the default wallpaper {DEFAULT_WALLPAPER_CATEGORY}/{DEFAULT_WALLPAPER} is \
+         not among the shipped masters {masters:?}"
     );
+}
+
+#[test]
+fn categories_are_sorted_and_illegal_names_are_dropped() {
+    let listing = catalog_categories(["Space", "has/slash", "Abstract", "..", ".", "", "TAIRiX"]);
+    assert_eq!(listing, ["Abstract", "Space", "TAIRiX"]);
+}
+
+#[test]
+fn the_category_list_is_capped_at_the_category_bound() {
+    let names: alloc::vec::Vec<String> = (0..MAX_WALLPAPER_CATEGORIES + 20)
+        .map(|i| alloc::format!("Category-{i:04}"))
+        .collect();
+    let listing = catalog_categories(names.iter().map(String::as_str));
+    assert_eq!(listing.len(), MAX_WALLPAPER_CATEGORIES);
+    assert_eq!(listing[0], "Category-0000");
+}
+
+#[test]
+fn an_empty_store_yields_no_categories() {
+    assert!(catalog_categories(core::iter::empty::<&str>()).is_empty());
 }
 
 #[test]

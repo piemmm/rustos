@@ -7263,7 +7263,7 @@ fn expected_wallpaper() -> Result<&'static ExpectedWallpaper, String> {
 ///
 /// A message naming the drift: the default pinboard no longer draws a
 /// wallpaper image at all, or the shipped graphics assets carry no master
-/// under the default's name.
+/// under the default's category and name.
 fn default_wallpaper_master() -> Result<
     (
         &'static tairix_syshelp::GraphicsFile,
@@ -7282,19 +7282,34 @@ fn default_wallpaper_master() -> Result<
             settings.wallpaper,
         ));
     }
+    // A master is identified by its category as well as its name: the
+    // masters are filed one directory level deep and a name is unique only
+    // within its own category.
     let master = tairix_syshelp::GRAPHICS_FILES
         .iter()
         .find(|asset| {
             asset.family == tairix_syshelp::GraphicsFamilyKind::Wallpaper
+                && asset.category == Some(tairix_wallpaper::DEFAULT_WALLPAPER_CATEGORY)
                 && asset.file == tairix_wallpaper::DEFAULT_WALLPAPER
         })
         .ok_or_else(|| {
             format!(
-                "desktop wallpaper: the shipped graphics assets carry no wallpaper master {}",
+                "desktop wallpaper: the shipped graphics assets carry no wallpaper master {}/{}",
+                tairix_wallpaper::DEFAULT_WALLPAPER_CATEGORY,
                 tairix_wallpaper::DEFAULT_WALLPAPER,
             )
         })?;
     Ok((master, settings.fit))
+}
+
+/// How a diagnostic names a shipped graphics master: its
+/// `<category>/<file>` path where its family files assets in categories,
+/// its bare name where the family is flat.
+fn master_name(master: &tairix_syshelp::GraphicsFile) -> String {
+    match master.category {
+        Some(category) => format!("{category}/{}", master.file),
+        None => master.file.to_string(),
+    }
 }
 
 /// Decode `master` at the emulated screen's extent, exactly as the guest's
@@ -7327,7 +7342,12 @@ fn decode_wallpaper_master(
         &limits,
         tairix_image::FitBox::new(width, height),
     )
-    .map_err(|e| format!("desktop wallpaper: {} does not decode: {e:?}", master.file))
+    .map_err(|e| {
+        format!(
+            "desktop wallpaper: {} does not decode: {e:?}",
+            master_name(master)
+        )
+    })
 }
 
 /// Recompute the wallpaper the desktop session paints across the emulated
@@ -7354,7 +7374,7 @@ fn compute_expected_wallpaper() -> Result<ExpectedWallpaper, String> {
             .ok_or_else(|| {
                 format!(
                     "desktop wallpaper: {} has no placement on a {width}x{height} screen",
-                    master.file,
+                    master_name(master),
                 )
             })?;
     let screen = tairix_geometry::Rect::new(0, 0, width, height);
@@ -7373,13 +7393,13 @@ fn compute_expected_wallpaper() -> Result<ExpectedWallpaper, String> {
             .map_err(|e| {
                 format!(
                     "desktop wallpaper: {} decoded to pixels the resampler refuses: {e:?}",
-                    master.file,
+                    master_name(master),
                 )
             })?;
     let off_master = || {
         format!(
             "desktop wallpaper: the placement of {} begins outside the master",
-            master.file,
+            master_name(master),
         )
     };
     let region = tairix_raster::Region {
@@ -7391,7 +7411,7 @@ fn compute_expected_wallpaper() -> Result<ExpectedWallpaper, String> {
     let pixels = tairix_raster::resample(&master_pixels, region, width, height).map_err(|e| {
         format!(
             "desktop wallpaper: {} does not resample onto the screen: {e:?}",
-            master.file,
+            master_name(master),
         )
     })?;
     if pixels
@@ -7403,7 +7423,7 @@ fn compute_expected_wallpaper() -> Result<ExpectedWallpaper, String> {
         return Err(format!(
             "desktop wallpaper: {} does not cover the screen opaquely, so what the compositor \
              blends behind it would decide the dumped pixels",
-            master.file,
+            master_name(master),
         ));
     }
     Ok(ExpectedWallpaper {
@@ -9761,6 +9781,25 @@ mod tests {
                 .expect("the enrolment table is not empty"),
             std::path::Path::new("fixture.screendump.ppm"),
         )
+    }
+
+    /// The reconstruction resolves the default master by its category as
+    /// well as its name, and names it as the image plants it. A master
+    /// refiled under another category leaves `default_wallpaper_path()`
+    /// spelling a path no image carries, which this catches on the host
+    /// rather than as an unexplained pixel mismatch in a guest run.
+    #[test]
+    fn the_default_wallpaper_master_is_found_under_its_own_category() {
+        let (master, _) = super::default_wallpaper_master().expect("the default master ships");
+        assert_eq!(
+            master.category,
+            Some(tairix_wallpaper::DEFAULT_WALLPAPER_CATEGORY)
+        );
+        assert_eq!(master.file, tairix_wallpaper::DEFAULT_WALLPAPER);
+        assert!(
+            tairix_wallpaper::default_wallpaper_path().ends_with(&super::master_name(master)),
+            "a master is named as the image plants it"
+        );
     }
 
     /// The desktop assertion accepts exactly the frame the desktop's own

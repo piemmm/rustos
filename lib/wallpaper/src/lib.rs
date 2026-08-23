@@ -60,8 +60,10 @@ pub mod fit;
 pub mod settings;
 
 pub use catalog::{
-    catalog_entries, default_wallpaper_path, is_wallpaper_file_name, CatalogEntry,
-    DEFAULT_WALLPAPER, MAX_WALLPAPER_BYTES, MAX_WALLPAPER_CATALOG_ENTRIES, WALLPAPER_STORE,
+    catalog_categories, catalog_entries, category_path, default_wallpaper_path,
+    is_wallpaper_category_name, is_wallpaper_file_name, wallpaper_path, CatalogEntry,
+    DEFAULT_WALLPAPER, DEFAULT_WALLPAPER_CATEGORY, MAX_WALLPAPER_BYTES,
+    MAX_WALLPAPER_CATALOG_ENTRIES, MAX_WALLPAPER_CATEGORIES, WALLPAPER_STORE,
 };
 pub use fit::{decode_request, nominal_source_size, place, Placement};
 pub use settings::{

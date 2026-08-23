@@ -42,7 +42,7 @@ key's own closed vocabulary:
 
 | Key         | Value                                              | Default                                       |
 |-------------|----------------------------------------------------|-----------------------------------------------|
-| `wallpaper` | `none`, or an absolute path to an image            | `/System/Graphics/Wallpapers/tairix-dark.jpg` |
+| `wallpaper` | `none`, or an absolute path to an image            | `/System/Graphics/Wallpapers/TAIRiX/tairix-dark.jpg` |
 | `fit`       | `fill` \| `fit` \| `stretch` \| `centre` \| `tile` | `fill`                                        |
 | `backdrop`  | `theme`, or six bare hex digits `rrggbb`           | `theme`                                       |
 | `icons`     | `leading` \| `trailing`                            | `leading`                                     |
@@ -80,9 +80,15 @@ A settings document is untrusted input either way: the format engine bounds
 the document, the line, the key and the value, and `MAX_WALLPAPER_PATH_LEN`
 bounds the one value that carries a path.
 
-The five shipped wallpaper masters ship read-only at `WALLPAPER_STORE`
-(`/System/Graphics/Wallpapers`), discovered at build time from
-`lib/wallpaper/assets/` by `tools/syshelp` — never a hand-maintained list.
+The shipped wallpaper masters ship read-only at `WALLPAPER_STORE`
+(`/System/Graphics/Wallpapers`), filed one directory level deep in
+**categories** (`Space`, `Nature`, `City`, `Abstract`, `TAIRiX`) and
+discovered at build time from `lib/wallpaper/assets/` by `tools/syshelp` —
+never a hand-maintained list. A category's directory name *is* the label a
+chooser draws, so adding a category is authoring a directory and there is no
+name → label table to drift. `catalog_categories` filters and orders a
+listing of the store's own subdirectories exactly as `catalog_entries` does a
+listing of one category's files.
 Each master is authored no larger than `lib/sandbox`'s
 `MAX_WALLPAPER_WIDTH`×`MAX_WALLPAPER_HEIGHT` (3840×2160): JPEG entropy
 decoding cannot skip blocks, so a source pixel beyond what the renderer

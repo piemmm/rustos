@@ -55,7 +55,7 @@ fn a_colour_only_choice_never_reaches_a_preparer() {
 #[test]
 fn a_first_ask_records_the_request_and_answers_pending() {
     let mut desk = WallpaperDesk::new();
-    let wanted = image("/System/Graphics/Wallpapers/default.png");
+    let wanted = image("/System/Graphics/Wallpapers/Space/low-orbit.jpg");
     assert!(matches!(desk.take(&wanted), Prepared::Pending));
     assert!(desk.has_work());
     assert_eq!(desk.next_job(), Some(wanted));

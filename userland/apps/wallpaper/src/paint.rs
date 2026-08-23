@@ -134,8 +134,12 @@ fn paint_options(surface: &mut Surface, chooser: &Chooser, layout: &Layout, styl
     );
 }
 
-/// Paint the gallery: its heading, the tiles the viewport holds, and the
-/// scrollbar in its reserved gutter.
+/// Paint the gallery: its heading, the category rail, the tiles the viewport
+/// holds, and the scrollbar in its reserved gutter.
+///
+/// The tiles are the gallery's *visible* window over the candidates, walked
+/// at the very grid positions the hit-test resolves against, so a tile the
+/// active category is not showing is neither drawn nor clickable.
 fn paint_gallery(surface: &mut Surface, chooser: &Chooser, layout: &Layout, style: Style<'_>) {
     let heading = layout.heading();
     if !heading.is_empty() {
@@ -149,8 +153,16 @@ fn paint_gallery(surface: &mut Surface, chooser: &Chooser, layout: &Layout, styl
         );
     }
 
+    let rail = layout.categories();
+    if !rail.is_empty() {
+        chooser
+            .rail()
+            .render(surface, rail, style.scale(), style.theme());
+    }
+
     let tiles = layout.tiles();
-    let grid = layout.grid(chooser.candidates().len());
+    let visible = chooser.visible();
+    let grid = layout.grid(visible.len());
     let offset = chooser.scroll_offset();
     if !tiles.is_empty() {
         let swatch = backdrop_swatch(chooser, layout, style);
@@ -160,9 +172,12 @@ fn paint_gallery(surface: &mut Surface, chooser: &Chooser, layout: &Layout, styl
             tiles.width,
             tiles.height,
             |clipped| {
-                for index in grid.visible_range(offset) {
+                for position in grid.visible_range(offset) {
+                    let Some(index) = visible.get(position).copied() else {
+                        continue;
+                    };
                     let (Some(bounds), Some(candidate)) = (
-                        grid.cell_rect(offset, index),
+                        grid.cell_rect(offset, position),
                         chooser.candidates().get(index),
                     ) else {
                         continue;

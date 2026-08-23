@@ -290,7 +290,8 @@ pub fn build_system_partition(
     // (`tairix_syshelp::plant_system_payload`): each command app's
     // internationalised `Help/` tree and its `Resources/` files, discovered
     // from the bundle's own on-disk sources, plus the desktop's graphics
-    // assets (the raster icon masters) planted under `Graphics/`. Driving the
+    // assets (the icon masters, and the wallpaper masters under their own
+    // category directories) planted under `Graphics/`. Driving the
     // walk here — and, identically, in the QEMU image fixture — from one
     // definition means the two planters can never lay down a different set of
     // files, and a new help document, resource, or icon ships without editing

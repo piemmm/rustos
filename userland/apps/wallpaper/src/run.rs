@@ -66,8 +66,8 @@ mod program {
     use tairix_sandbox::{ParserSandbox, ServeEnd};
     use tairix_theme::{TextRole, Theme, ThemeRegistry};
     use tairix_wallpaper::{
-        catalog_entries, PinboardSettings, WallpaperFit, WallpaperPath, MAX_WALLPAPER_BYTES,
-        PINBOARD_PUBLISHER, WALLPAPER_STORE,
+        catalog_categories, catalog_entries, category_path, PinboardSettings, WallpaperFit,
+        WallpaperPath, MAX_WALLPAPER_BYTES, PINBOARD_PUBLISHER, WALLPAPER_STORE,
     };
     use tairix_wallpaper_chooser::{
         candidates_from_catalog, ApplyOutcome, Chooser, ChooserAction, Style, MIN_WIN_HEIGHT,
@@ -290,45 +290,74 @@ mod program {
         settings
     }
 
-    /// The wallpapers the shipped store offers, discovered by listing it
-    /// under the launching user's own identity.
+    /// The wallpapers the shipped store offers, discovered by listing each of
+    /// its category directories under the launching user's own identity.
     ///
     /// A store that cannot be listed is not fatal: the chooser still
     /// offers "no wallpaper" and every backdrop colour, so the refusal is
-    /// stated and an empty candidate list returned.
+    /// stated and an empty candidate list returned. One unreadable category
+    /// costs only its own wallpapers, so the rest of the store is still
+    /// offered.
     fn store_candidates() -> Vec<tairix_wallpaper_chooser::Candidate> {
-        let stream = match tairix_rt::read_dir_all(WALLPAPER_STORE.as_bytes()) {
+        let Some(entries) = list_directory(WALLPAPER_STORE) else {
+            return Vec::new();
+        };
+        // The store's own children are the categories; a stray file there is
+        // planted by nothing and offered by nothing.
+        let categories = catalog_categories(
+            entries
+                .iter()
+                .filter(|entry| entry.is_directory_backed())
+                .map(tairix_browse::Entry::name),
+        );
+        let mut candidates = Vec::new();
+        for category in &categories {
+            let path = category_path(category);
+            let Some(listing) = list_directory(&path) else {
+                continue;
+            };
+            // The shared catalog builder decides what counts as a wallpaper
+            // (name shape, extension, ordering, and the listing bound); this
+            // only drops the directories, which are never candidates.
+            let catalog = catalog_entries(
+                listing
+                    .iter()
+                    .filter(|entry| !entry.is_directory_backed())
+                    .map(|entry| {
+                        (
+                            entry.name(),
+                            usize::try_from(entry.size()).unwrap_or(usize::MAX),
+                        )
+                    }),
+            );
+            candidates.extend(candidates_from_catalog(category, &catalog));
+        }
+        candidates
+    }
+
+    /// One directory's entries, or `None` with the reason stated on `stderr`.
+    fn list_directory(path: &str) -> Option<Vec<tairix_browse::Entry>> {
+        let stream = match tairix_rt::read_dir_all(path.as_bytes()) {
             Ok(stream) => stream,
             Err(err) => {
                 report(&alloc::format!(
-                    "{WALLPAPER_STORE}: {:?}; no shipped wallpapers offered",
+                    "{path}: {:?}; its wallpapers are not offered",
                     errno_from(err)
                 ));
-                return Vec::new();
+                return None;
             }
         };
         let Ok(entries) = tairix_browse::vfs::entries_from_dir_stream(
-            WALLPAPER_STORE,
+            path,
             &stream,
             &mut tairix_browse::RtLinkReader,
         ) else {
             report(&alloc::format!(
-                "{WALLPAPER_STORE}: listing not readable; no shipped wallpapers offered"
+                "{path}: listing not readable; its wallpapers are not offered"
             ));
-            return Vec::new();
+            return None;
         };
-        // The shared catalog builder decides what counts as a wallpaper
-        // (name shape, extension, ordering, and the listing bound); this
-        // only drops the directories, which are never candidates.
-        let catalog = catalog_entries(entries.iter().filter(|e| !e.is_directory_backed()).map(
-            |entry| {
-                (
-                    entry.name(),
-                    usize::try_from(entry.size()).unwrap_or(usize::MAX),
-                )
-            },
-        ));
-        candidates_from_catalog(&catalog)
+        Some(entries)
     }
 
     /// Render one wallpaper through the sandboxed worker: read the file

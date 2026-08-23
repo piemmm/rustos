@@ -66,7 +66,7 @@ impl Lcg {
 const KEYS: &[&str] = &["wallpaper", "fit", "backdrop", "icons", "sort"];
 const WALLPAPER_VALUES: &[&str] = &[
     "none",
-    "/System/Graphics/Wallpapers/tairix-dark.jpg",
+    "/System/Graphics/Wallpapers/TAIRiX/tairix-dark.jpg",
     "/Users/ada/Documents/sunset.png",
     // A `#` no longer ends a value: the format engine quotes one, so a file
     // the user really named this way must survive the round trip.

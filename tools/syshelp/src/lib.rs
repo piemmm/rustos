@@ -138,8 +138,10 @@ pub enum GraphicsFamilyKind {
     /// and file manager by asset id.
     Icon,
     /// The shipped default wallpaper masters: one `.jpg`/`.jpeg`/`.png` per
-    /// shipped master, listed by name through
-    /// `tairix_wallpaper::catalog_entries`.
+    /// shipped master, filed one directory level deep in a category
+    /// (`Space`, `TAIRiX`, …) whose own name is the label a chooser draws.
+    /// A category is listed through `tairix_wallpaper::catalog_categories`
+    /// and its masters through `tairix_wallpaper::catalog_entries`.
     Wallpaper,
 }
 
@@ -157,8 +159,8 @@ impl GraphicsFamilyKind {
 }
 
 /// One shipped desktop graphics asset, ready to plant at
-/// `/System/Graphics/<family.target_dir()>/<file>` on the read-only
-/// `/System` volume.
+/// `/System/Graphics/<family.target_dir()>[/<category>]/<file>` on the
+/// read-only `/System` volume.
 ///
 /// Unlike a [`HelpFile`] or a [`ResourceFile`] a graphics asset is not
 /// per-bundle: it is desktop-wide artwork, tagged with the
@@ -168,9 +170,14 @@ impl GraphicsFamilyKind {
 pub struct GraphicsFile {
     /// Which family this asset belongs to.
     pub family: GraphicsFamilyKind,
+    /// The category directory this asset is filed under inside its family's
+    /// own directory, or `None` for a family whose assets sit directly in
+    /// it. Discovery decides this per family, so a flat family can never
+    /// gain a category nor a categorised one lose it.
+    pub category: Option<&'static str>,
     /// The asset's file name: for an icon, its stable asset id plus
     /// extension; for a wallpaper, the plain file name a consumer lists it
-    /// by.
+    /// by within its category.
     pub file: &'static str,
     /// The asset's bytes.
     pub bytes: &'static [u8],
@@ -182,9 +189,9 @@ pub struct GraphicsFile {
 /// family's own contract as it is discovered (a name its consumer could not
 /// resolve, an over-large file, or a duplicate identifier fails the build).
 ///
-/// Rows are ordered deterministically (by family, then file name), so the
-/// planted store and any reproducible image are stable across builds and
-/// hosts.
+/// Rows are ordered deterministically (by family, then category, then file
+/// name), so the planted store and any reproducible image are stable across
+/// builds and hosts.
 pub const GRAPHICS_FILES: &[GraphicsFile] =
     &include!(concat!(env!("OUT_DIR"), "/graphics_files.rs"));
 
@@ -234,14 +241,15 @@ pub fn plant_system_payload<E>(
         )?;
     }
     for asset in GRAPHICS_FILES {
-        plant(
-            &[
-                b"Graphics",
-                asset.family.target_dir().as_bytes(),
-                asset.file.as_bytes(),
-            ],
-            asset.bytes,
-        )?;
+        let family = asset.family.target_dir().as_bytes();
+        let file = asset.file.as_bytes();
+        match asset.category {
+            Some(category) => plant(
+                &[b"Graphics", family, category.as_bytes(), file],
+                asset.bytes,
+            ),
+            None => plant(&[b"Graphics", family, file], asset.bytes),
+        }?;
     }
     Ok(())
 }
@@ -385,7 +393,8 @@ mod tests {
     /// bound with a unique asset id — so one kind never ships a master in
     /// both formats, of which the resolution order could only ever select
     /// the raster one — and a wallpaper is a legal shipped file name within
-    /// the wallpaper byte bound with a unique name. Dispatching on
+    /// the wallpaper byte bound, filed under a legal category directory and
+    /// unique within it. Dispatching on
     /// [`super::GraphicsFamilyKind`] rather than a directory string means a
     /// third family added here without a matching arm fails to compile,
     /// never silently skips its own contract. This mirrors the fail-closed
@@ -400,10 +409,16 @@ mod tests {
             "at least one desktop graphics asset must be discovered"
         );
         let mut icon_ids: BTreeSet<&str> = BTreeSet::new();
-        let mut wallpaper_names: BTreeSet<&str> = BTreeSet::new();
+        let mut wallpapers: BTreeSet<(&str, &str)> = BTreeSet::new();
+        let mut categories: BTreeSet<&str> = BTreeSet::new();
         for asset in GRAPHICS_FILES {
             match asset.family {
                 GraphicsFamilyKind::Icon => {
+                    assert!(
+                        asset.category.is_none(),
+                        "the icon family is flat, so `{}` carries no category",
+                        asset.file
+                    );
                     let kind = tairix_icon::artwork_kind_for_file(asset.file)
                         .unwrap_or_else(|| panic!("`{}` is a legal icon artwork name", asset.file));
                     assert!(
@@ -418,6 +433,13 @@ mod tests {
                     );
                 }
                 GraphicsFamilyKind::Wallpaper => {
+                    let category = asset.category.unwrap_or_else(|| {
+                        panic!("wallpaper `{}` is filed under a category", asset.file)
+                    });
+                    assert!(
+                        tairix_wallpaper::is_wallpaper_category_name(category),
+                        "`{category}` is a legal wallpaper category name"
+                    );
                     assert!(
                         tairix_wallpaper::is_wallpaper_file_name(asset.file),
                         "`{}` is a legal wallpaper file name",
@@ -429,17 +451,23 @@ mod tests {
                         asset.file
                     );
                     assert!(
-                        wallpaper_names.insert(asset.file),
-                        "wallpaper name `{}` is claimed by more than one file",
+                        wallpapers.insert((category, asset.file)),
+                        "wallpaper `{category}/{}` is claimed by more than one file",
                         asset.file
                     );
+                    categories.insert(category);
                 }
             }
         }
         assert!(!icon_ids.is_empty(), "at least one icon must be discovered");
         assert!(
-            !wallpaper_names.is_empty(),
+            !wallpapers.is_empty(),
             "at least one wallpaper must be discovered"
+        );
+        assert!(
+            categories.contains(tairix_wallpaper::DEFAULT_WALLPAPER_CATEGORY),
+            "the default wallpaper's own category must be discovered, or the \
+             desktop's default choice ships nowhere"
         );
     }
 
@@ -447,11 +475,12 @@ mod tests {
     /// at its `/System`-volume-relative path: a help document under
     /// `Apps/<bundle>/Help/<locale>/`, a resource under
     /// `Apps/<bundle>/Resources/`, an icon under `Graphics/Icons/`, and a
-    /// wallpaper under `Graphics/Wallpapers/`. All planters drive their own
-    /// `plant_nested_file` from this one walk, so this pins the count and
-    /// the path spelling they share — for a vector class master and a raster
-    /// one alike, since the walk plants an icon by its discovered file name
-    /// and never by an assumed extension.
+    /// wallpaper under `Graphics/Wallpapers/<category>/`. All planters drive
+    /// their own `plant_nested_file` from this one walk, so this pins the
+    /// count and the path spelling they share — for a vector class master and
+    /// a raster one alike, since the walk plants an icon by its discovered
+    /// file name and never by an assumed extension, and for a categorised
+    /// family, whose extra path component the flat one must not gain.
     #[test]
     fn the_shared_walk_visits_every_payload_file_at_its_planted_path() {
         use super::{plant_system_payload, GRAPHICS_FILES, HELP_FILES, RESOURCE_FILES};
@@ -485,15 +514,20 @@ mod tests {
                 "the {icon} icon is planted at Graphics/Icons/{icon}"
             );
         }
-        // The shipped default wallpaper lands at Graphics/Wallpapers/tairix-dark.jpg.
+        // The shipped default wallpaper lands inside its own category, at
+        // Graphics/Wallpapers/TAIRiX/tairix-dark.jpg.
         assert!(
             visited.iter().any(|c| c
                 == &[
                     b"Graphics".to_vec(),
                     b"Wallpapers".to_vec(),
+                    tairix_wallpaper::DEFAULT_WALLPAPER_CATEGORY
+                        .as_bytes()
+                        .to_vec(),
                     tairix_wallpaper::DEFAULT_WALLPAPER.as_bytes().to_vec(),
                 ]),
-            "the default wallpaper is planted at Graphics/Wallpapers/{}",
+            "the default wallpaper is planted at Graphics/Wallpapers/{}/{}",
+            tairix_wallpaper::DEFAULT_WALLPAPER_CATEGORY,
             tairix_wallpaper::DEFAULT_WALLPAPER
         );
     }

@@ -63,7 +63,7 @@ that key's own closed vocabulary:
 
 | Key         | Value                                             | Default                                       |
 |-------------|---------------------------------------------------|-----------------------------------------------|
-| `wallpaper` | `none`, or an absolute path to an image           | `/System/Graphics/Wallpapers/tairix-dark.jpg` |
+| `wallpaper` | `none`, or an absolute path to an image           | `/System/Graphics/Wallpapers/TAIRiX/tairix-dark.jpg` |
 | `fit`       | `fill` \| `fit` \| `stretch` \| `centre` \| `tile`| `fill`                                        |
 | `backdrop`  | `theme`, or six bare hex digits `rrggbb`          | `theme`                                       |
 | `icons`     | `leading` \| `trailing`                           | `leading`                                     |
@@ -110,8 +110,9 @@ before a pixel is drawn. This crate decodes nothing.
 The bounds are fixed validation limits on untrusted input, not growable
 capacities: the format engine's `MAX_DOCUMENT_LEN` / `MAX_VALUE_LEN`,
 `MAX_WALLPAPER_PATH_LEN` (1 KiB path, held inside `MAX_VALUE_LEN` by a
-compile-time assertion), `MAX_WALLPAPER_BYTES` (8 MiB per wallpaper file), and
-`MAX_WALLPAPER_CATALOG_ENTRIES` (256 offered wallpapers).
+compile-time assertion), `MAX_WALLPAPER_BYTES` (8 MiB per wallpaper file),
+`MAX_WALLPAPER_CATALOG_ENTRIES` (256 offered wallpapers), and
+`MAX_WALLPAPER_CATEGORIES` (64 offered categories).
 
 The engine performs no I/O and holds no authority: the document is read and
 written through the app-data service under the caller's own kernel-attested
@@ -120,27 +121,39 @@ identity, and listing a wallpaper directory goes through the secured VFS.
 ## The shipped set and the catalog
 
 The OS ships its wallpaper masters read-only under `WALLPAPER_STORE`
-(`/System/Graphics/Wallpapers`), discovered at build time from
-`lib/wallpaper/assets/` by `tools/syshelp` and planted by the image builder —
-never a hand-maintained list. `DEFAULT_WALLPAPER` names the default master
-and `default_wallpaper_path()` spells its absolute path, which is also the
-default `wallpaper` setting.
+(`/System/Graphics/Wallpapers`), filed one directory level deep in
+**categories** — `Abstract`, `City`, `Nature`, `Space`, `TAIRiX` — and
+discovered at build time from `lib/wallpaper/assets/<Category>/` by
+`tools/syshelp`, planted by the image builder; never a hand-maintained list.
+A category's directory name *is* the label a chooser draws, so adding a
+category is authoring a directory and no name → label table can drift out of
+step. `DEFAULT_WALLPAPER_CATEGORY` and `DEFAULT_WALLPAPER` name the default
+master's category and file, `category_path(category)` and
+`wallpaper_path(category, file)` spell a category and a master, and
+`default_wallpaper_path()` spells the default's absolute path, which is also
+the default `wallpaper` setting.
 
-`catalog_entries` is the one definition of which files a chooser may offer.
-It performs **no** I/O — the caller lists the directory and passes
-`(name, byte length)` pairs — and admits an entry only when its name is a
-legal plain file name (no path separator, no control character, not `.`/`..`),
-its extension is one of `.jpg`, `.jpeg`, `.png` (case-insensitively), and its
-size is at most `MAX_WALLPAPER_BYTES`. Anything else is silently dropped, so a
-directory mixing wallpapers with unrelated files yields only the wallpapers
-rather than a refusal of the whole listing. The result is sorted by name and
-capped at `MAX_WALLPAPER_CATALOG_ENTRIES`.
+`catalog_categories` and `catalog_entries` are the one definition of which
+directories and which files a chooser may offer. Neither performs **any**
+I/O — the caller lists the store's subdirectories, or one category's files,
+and passes the names in. `catalog_entries` admits an entry only when its name
+is a legal plain file name (no path separator, no control character, not
+`.`/`..`), its extension is one of `.jpg`, `.jpeg`, `.png`
+(case-insensitively), and its size is at most `MAX_WALLPAPER_BYTES`;
+`catalog_categories` admits a name on the leaf-name rule alone, since a
+category carries no extension and no case convention. Anything else is
+silently dropped, so a store holding a stray file beside its categories, or a
+category mixing wallpapers with unrelated files, yields only what a chooser
+can offer rather than a refusal of the whole listing. Both results are sorted
+by name and capped — at `MAX_WALLPAPER_CATALOG_ENTRIES` and
+`MAX_WALLPAPER_CATEGORIES`.
 
-`is_wallpaper_file_name` is that name contract on its own, so
-`tools/syshelp`'s build-time discovery applies exactly the definition the
-runtime applies: a shipped master the desktop could never offer, or one over
-the byte bound, fails the **build** rather than quietly never appearing in the
-chooser.
+`is_wallpaper_file_name` and `is_wallpaper_category_name` are those name
+contracts on their own, so `tools/syshelp`'s build-time discovery applies
+exactly the definitions the runtime applies: it walks one category level, and
+a master the desktop could never offer, one over the byte bound, a stray file
+at the store root, or an illegal category name fails the **build** rather than
+quietly never appearing in the chooser.
 
 ## Placement geometry
 
@@ -196,9 +209,10 @@ every source pixel at 1:1 and so needs the native size.
 - `SettingsKey::{ALL, name, from_name, value_of}` — the closed key registry;
   `PinboardSettings::{load, document}` and `decode` — the two readings and
   the canonical render; `DocumentRefusal` — the strict reading's reasons.
-- `catalog::{WALLPAPER_STORE, DEFAULT_WALLPAPER, default_wallpaper_path,
-  is_wallpaper_file_name, catalog_entries, CatalogEntry}` — the shipped set
-  and the listing model.
+- `catalog::{WALLPAPER_STORE, DEFAULT_WALLPAPER_CATEGORY, DEFAULT_WALLPAPER,
+  category_path, wallpaper_path, default_wallpaper_path,
+  is_wallpaper_category_name, is_wallpaper_file_name, catalog_categories,
+  catalog_entries, CatalogEntry}` — the shipped set and the listing model.
 - `fit::{place, decode_request, nominal_source_size, Placement}` — the
   placement geometry.
 - `PINBOARD_PUBLISHER` — the desktop session's signed bundle identifier, the

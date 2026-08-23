@@ -12,9 +12,10 @@
 //!
 //! The host-testable chooser engine the `Run` binary composes:
 //!
-//! * [`Chooser`] — the model: the candidate gallery (built from a directory
-//!   listing through [`candidates_from_catalog`]), the current selection,
-//!   the four settings drop-downs, the live preview, and the pointer and
+//! * [`Chooser`] — the model: the candidate gallery (built per store
+//!   category through [`candidates_from_catalog`]), the category rail that
+//!   filters it, the current selection, the four settings drop-downs, the
+//!   live preview, and the pointer and
 //!   keyboard state that drives them. It performs no I/O and holds no
 //!   authority: every thumbnail and every preview arrives already rendered
 //!   ([`Chooser::set_thumbnail`], [`Chooser::set_preview`]) or refused, by
@@ -35,17 +36,27 @@
 //!
 //! # Pointer first
 //!
-//! The chooser is driven by the mouse: click a wallpaper in the gallery to
-//! select it and see it in the preview, click a drop-down to change how it
-//! is fitted or what the desktop icons do, drag or wheel the gallery's
-//! scrollbar, and click Apply. Every control shows the shared hover and
-//! pressed states, and a press released away from the control it started on
-//! does nothing.
+//! The chooser is driven by the mouse: click a category in the rail beside
+//! the gallery to narrow it, click a wallpaper to select it and see it in
+//! the preview, click a drop-down to change how it is fitted or what the
+//! desktop icons do, drag or wheel the gallery's scrollbar, and click Apply.
+//! Every control shows the shared hover and pressed states, and a press
+//! released away from the control it started on does nothing.
 //!
 //! The keyboard is the secondary path, not the primary one: Tab and
-//! Shift-Tab move focus, the arrows move within the gallery or open a
-//! drop-down, Enter applies, and Escape closes (or dismisses an open
+//! Shift-Tab move focus, the arrows move within the rail or the gallery or
+//! open a drop-down, Enter applies, and Escape closes (or dismisses an open
 //! drop-down first).
+//!
+//! # Categories
+//!
+//! The shipped store files its masters one directory level deep, and each
+//! category directory's own name is the label the rail draws — so the rail
+//! is discovered from the store, never a list this app carries. `All` is the
+//! rail's leading entry, and a candidate belonging to no category (the "no
+//! wallpaper" choice, or a wallpaper in effect from outside the store) shows
+//! under every entry, so narrowing the gallery can never hide the choice
+//! that is actually applied.
 //!
 //! # Layering & safety
 //!
@@ -68,8 +79,8 @@ use tairix_geometry::Scale;
 use tairix_raster::Surface;
 use tairix_theme::{TextRole, Theme};
 use tairix_wallpaper::{
-    Backdrop, CatalogEntry, IconFlow, IconSort, Rgb, WallpaperChoice, WallpaperFit, WallpaperPath,
-    WALLPAPER_STORE,
+    wallpaper_path, Backdrop, CatalogEntry, IconFlow, IconSort, Rgb, WallpaperChoice, WallpaperFit,
+    WallpaperPath,
 };
 
 mod chooser;
@@ -107,6 +118,14 @@ pub const NONE_LABEL: &str = "No wallpaper";
 
 /// The gallery's section heading.
 pub const GALLERY_HEADING: &str = "Wallpapers";
+
+/// The category rail's leading entry: every candidate, whatever category it
+/// is filed under.
+///
+/// A first-class entry rather than a mode: the rail is the one place the
+/// gallery's contents are chosen from, so "show me everything" is a rail
+/// entry like any other and needs no second control to reach.
+pub const ALL_CATEGORIES_LABEL: &str = "All";
 
 /// The Apply button's label.
 pub const APPLY_LABEL: &str = "Apply";
@@ -292,6 +311,14 @@ impl<'a> Style<'a> {
     pub fn caption_font(&self) -> BitmapFont {
         BitmapFont::for_role(self.theme.fonts(), TextRole::Caption, self.scale)
     }
+
+    /// The face a shared control sets its own body text in — what the
+    /// category rail draws its labels with, so its owner can measure the
+    /// width they need in the very face they will be drawn in.
+    #[must_use]
+    pub fn body_font(&self) -> BitmapFont {
+        BitmapFont::for_role(self.theme.fonts(), TextRole::Body, self.scale)
+    }
 }
 
 /// One candidate the gallery may offer: the shipped "no wallpaper" backdrop
@@ -302,6 +329,14 @@ pub struct Candidate {
     pub choice: WallpaperChoice,
     /// The display label (the catalog file name, or [`NONE_LABEL`]).
     pub label: String,
+    /// The store category this candidate is filed under, or `None` for one
+    /// that belongs to no category.
+    ///
+    /// A category-less candidate is shown under *every* rail entry: the
+    /// "no wallpaper" choice must stay reachable whichever category is being
+    /// browsed, and a wallpaper already in effect from outside the shipped
+    /// store must never be the one thing the chooser hides.
+    pub category: Option<String>,
     /// The candidate's current thumbnail lifecycle state.
     pub thumbnail: Thumbnail,
 }
@@ -328,46 +363,54 @@ pub enum Thumbnail {
 }
 
 impl Candidate {
-    /// The "no wallpaper" entry: always first, always present.
+    /// The "no wallpaper" entry: always first, always present, and in no
+    /// category, so browsing one never takes it away.
     #[must_use]
     fn none_entry() -> Self {
         Self {
             choice: WallpaperChoice::None,
             label: String::from(NONE_LABEL),
+            category: None,
             thumbnail: Thumbnail::Backdrop,
         }
     }
 
-    /// A pending image candidate at the shipped store's `path`.
+    /// A pending image candidate at `path`, filed under `category`.
     #[must_use]
-    fn image(path: WallpaperPath, label: String) -> Self {
+    fn image(path: WallpaperPath, label: String, category: Option<String>) -> Self {
         Self {
             choice: WallpaperChoice::Image(path),
             label,
+            category,
             thumbnail: Thumbnail::Pending,
         }
     }
 }
 
-/// Build the image candidates a chooser may offer from a wallpaper store
-/// listing, discovered by [`tairix_wallpaper::catalog::catalog_entries`].
+/// Build the image candidates a chooser may offer for one store category,
+/// from that category's listing as
+/// [`tairix_wallpaper::catalog::catalog_entries`] discovered it.
 ///
 /// Every entry becomes a [`Candidate`] naming the wallpaper at
-/// `<WALLPAPER_STORE>/<entry.name>`, with a [`Thumbnail::Pending`] state:
-/// the caller renders each one through the sandbox and reports the result
-/// with [`Chooser::set_thumbnail`] / [`Chooser::mark_thumbnail_refused`]. An
+/// `<WALLPAPER_STORE>/<category>/<entry.name>`, filed under `category` so
+/// the rail can offer it, with a [`Thumbnail::Pending`] state: the caller
+/// renders each one through the sandbox and reports the result with
+/// [`Chooser::set_thumbnail`] / [`Chooser::mark_thumbnail_refused`]. An
 /// entry whose name somehow fails to parse as a wallpaper path (impossible
 /// for anything [`tairix_wallpaper::catalog::catalog_entries`] itself
 /// already validated, but never assumed here) is silently dropped rather
 /// than fabricating a candidate that could not be applied.
 #[must_use]
-pub fn candidates_from_catalog(entries: &[CatalogEntry]) -> Vec<Candidate> {
+pub fn candidates_from_catalog(category: &str, entries: &[CatalogEntry]) -> Vec<Candidate> {
     entries
         .iter()
         .filter_map(|entry| {
-            let full_path = alloc::format!("{WALLPAPER_STORE}/{}", entry.name);
-            let path = WallpaperPath::new(&full_path).ok()?;
-            Some(Candidate::image(path, entry.name.clone()))
+            let path = WallpaperPath::new(&wallpaper_path(category, &entry.name)).ok()?;
+            Some(Candidate::image(
+                path,
+                entry.name.clone(),
+                Some(category.to_string()),
+            ))
         })
         .collect()
 }
@@ -434,6 +477,8 @@ fn leaf_name(path: &WallpaperPath) -> String {
 /// is.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum Focus {
+    /// The gallery's category rail.
+    Categories,
     /// The wallpaper gallery.
     Gallery,
     /// One of the four settings drop-downs.
@@ -446,7 +491,8 @@ pub enum Focus {
 
 impl Focus {
     /// The fixed tab order Tab and Shift-Tab move through.
-    const ORDER: [Self; OPTION_GROUP_COUNT + 3] = [
+    const ORDER: [Self; OPTION_GROUP_COUNT + 4] = [
+        Self::Categories,
         Self::Gallery,
         Self::Setting(OptionGroup::Fit),
         Self::Setting(OptionGroup::Backdrop),

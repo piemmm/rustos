@@ -285,7 +285,7 @@ mod tests {
     use crate::Errno;
 
     fn sample_document() -> &'static str {
-        "wallpaper /System/Graphics/Wallpapers/tairix-dark.jpg\n\
+        "wallpaper /System/Graphics/Wallpapers/TAIRiX/tairix-dark.jpg\n\
          fit fill\n\
          backdrop theme\n\
          icons leading\n\

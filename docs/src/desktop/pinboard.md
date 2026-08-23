@@ -199,8 +199,9 @@ the fit, backdrop, arrangement, and sort, and applies by sending the
 rendered document to the session. A refusal is reported in its own window;
 it never fabricates success and never exits over one.
 
-The window is a large preview beside the four settings, a scrolling gallery
-of the shipped wallpapers beneath them, and the two actions in the footer:
+The window is a large preview beside the four settings, then the category
+rail and a scrolling gallery of the shipped wallpapers, and the two actions
+in the footer:
 
 ```text
 +--------------------------------------------------------------+
@@ -209,21 +210,44 @@ of the shipped wallpapers beneath them, and the two actions in the footer:
 |  |                           |  Icons    [ Top left      v ] |
 |  +---------------------------+  Sort     [ Name          v ] |
 |  Wallpapers                     tairix-dark.jpg              |
-|  +---------------------------------------------------+ +--+  |
-|  |  [tile]  [tile]  [tile]  [tile]  [tile]           | |##|  |
-|  +---------------------------------------------------+ +--+  |
+|  +--------+ +--------------------------------------+ +--+    |
+|  | All    | |  [tile]  [tile]  [tile]  [tile]      | |##|    |
+|  |Abstract| |  [tile]  [tile]                      | |  |    |
+|  | Space  | |                                      | |  |    |
+|  | TAIRiX | |                                      | |  |    |
+|  +--------+ +--------------------------------------+ +--+    |
 |  Applied.                                  [Close] [Apply]   |
 +--------------------------------------------------------------+
 ```
 
 It is **driven by the pointer**, with the keyboard as a complete secondary
-path: click a tile to select it and the preview follows, click a setting to
+path: click a category to narrow the gallery, click a tile to select it and
+the preview follows, click a setting to
 open its list, wheel or drag the gallery, click Apply. Every interactive
 part is a shared control from [the control set](./widgets.md) — the
-drop-downs, the buttons, the scrollbar — held for the life of the window so
+drop-downs, the buttons, the scrollbar, the rail's own vertical tab strip —
+held for the life of the window so
 each owns its own hover, press and drag state, and the gallery is the
 shared icon-grid engine the file manager and the desktop's own icon field
 use. The chooser therefore defines no control and no grid of its own.
+
+### The categories
+
+The rail is **discovered, not written down**: its entries are the store's own
+category directories, each drawn under the directory's own name, so adding a
+category to the OS is authoring a directory and no list anywhere needs
+editing. `All` leads the rail; a rail with nothing to choose between is not
+drawn at all and the tiles take its width.
+
+Narrowing filters what the gallery *shows*; it never changes what is
+selected. The wallpaper in effect stays selected, stays in the preview and
+stays what Apply would send, even while a category that does not hold it is
+being browsed — and the chooser opens on the category that does hold it. Two
+candidates belong to *every* entry rather than to one: the "no wallpaper"
+choice, so a plain backdrop is always one click away, and a wallpaper already
+in effect from outside the shipped store, so narrowing can never hide the
+very thing that is applied. The gallery returns to its top on a change, since
+the rows it was scrolled to belong to the category being left.
 
 The preview and every tile are rendered through the same sandboxed path the
 desktop uses, so the chooser decodes nothing itself. A tile is the

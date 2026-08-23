@@ -1133,6 +1133,9 @@ mod tests {
     /// exactly what is expected rather than something the icon check would
     /// refuse for having no transparency. [`verify_wallpaper_master`] is its
     /// own named check for exactly that reason.
+    ///
+    /// A master is named by its planted `<category>/<file>` path, since a
+    /// file name is only unique within its own category directory.
     #[test]
     fn every_shipped_wallpaper_master_is_artwork_the_desktop_will_draw() {
         let wallpaper_masters: Vec<_> = tairix_syshelp::GRAPHICS_FILES
@@ -1144,8 +1147,15 @@ mod tests {
             "at least one wallpaper master ships"
         );
         for asset in wallpaper_masters {
+            let category = asset
+                .category
+                .expect("a discovered wallpaper master is filed under a category");
             verify_wallpaper_master(
-                &format!("Graphics/{}/{}", asset.family.target_dir(), asset.file),
+                &format!(
+                    "Graphics/{}/{category}/{}",
+                    asset.family.target_dir(),
+                    asset.file
+                ),
                 asset.bytes,
             )
             .expect("a shipped wallpaper master");

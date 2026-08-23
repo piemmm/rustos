@@ -64,7 +64,7 @@ lib/image      JPEG + PNG decode, reduced-scale decode          (P1)
 lib/raster     the one image resampler                          (P2)
 lib/wallpaper  settings document + catalog + fit geometry
                + the shipped default wallpaper masters          (P3)
-tools/syshelp  plants the masters at /System/Graphics/Wallpapers (P4)
+tools/syshelp  plants /System/Graphics/Wallpapers/<Category>/    (P4)
 lib/sandbox    wallpaper render ops in the desktop image service (P5)
 lib/abi        pinboard_ipc: the apply rendezvous                (P6)
 lib/browse     GridFlow::ColumnsFromLeading                      (P7)
@@ -125,11 +125,19 @@ One document, one engine, one writer.
 
 ## 3. The wallpaper
 
-- **Default set.** Five masters ship read-only at
-  `/System/Graphics/Wallpapers/`, discovered at build time from
-  `lib/wallpaper/assets/` by `tools/syshelp` — never a hand-maintained list.
-  The default is `tairix-dark.jpg`, named once by
-  `tairix_wallpaper::DEFAULT_WALLPAPER`.
+- **Default set.** The masters ship read-only under
+  `/System/Graphics/Wallpapers/`, filed one directory level deep in the
+  **categories** `Abstract`, `City`, `Nature`, `Space`, and `TAIRiX`, and
+  discovered at build time from `lib/wallpaper/assets/<Category>/` by
+  `tools/syshelp` — never a hand-maintained list. A category's directory
+  name *is* the label a chooser draws, so adding a category is authoring a
+  directory and there is no name → label table to drift out of step.
+  Discovery walks exactly one category level and fails the build closed on a
+  stray file at the store root or a category name no chooser could offer
+  (`tairix_wallpaper::is_wallpaper_category_name`). The default is
+  `TAIRiX/tairix-dark.jpg`, named once by
+  `tairix_wallpaper::{DEFAULT_WALLPAPER_CATEGORY, DEFAULT_WALLPAPER}` and
+  spelled by `default_wallpaper_path()`.
 - **A shipped master is authored no larger than the renderer's own maximum
   destination** (`lib/sandbox`'s `MAX_WALLPAPER_WIDTH`×`MAX_WALLPAPER_HEIGHT`,
   3840×2160). JPEG entropy decoding cannot skip blocks: every block of the
@@ -155,8 +163,8 @@ One document, one engine, one writer.
   - ARXFS fetches each contiguous run of such a request in **one** device
     request (`docs/src/filesystem/arxfs.md`). Both halves are needed:
     without the coalescing a 64 KiB syscall still cost ~35 device
-    round-trips, which is what made a five-master gallery take seconds
-    behind an SD card.
+    round-trips, which is what made the gallery take seconds behind an SD
+    card.
   - **A repeat is served from RAM, and the read size must never change
     that.** Both cache layers admit by memory budget, never by request
     length (`docs/src/architecture/memory.md` §7g/§7m): a size-based
@@ -322,8 +330,10 @@ unchanged — the menu never fails silently and never dies over a refusal.
 A graphical application bundle (`kind = application`, so it installs into
 the system application store and is typeable by name). It:
 
-- lists `/System/Graphics/Wallpapers` through the shared catalog builder,
-  and offers a "no wallpaper" candidate that shows the backdrop alone;
+- lists the shipped store through the shared catalog builders — its category
+  directories through `catalog_categories`, and one category's masters
+  through `catalog_entries` — and offers a "no wallpaper" candidate that
+  shows the backdrop alone;
 - draws a **live preview** of the selection at the top of the window, and
   every candidate as a tile in a scrolling gallery beneath it — all of them
   rendered through the same sandboxed wallpaper path, so the chooser decodes

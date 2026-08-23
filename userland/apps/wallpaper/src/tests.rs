@@ -12,6 +12,7 @@ use alloc::vec;
 use tairix_controls::collection::IconTile;
 use tairix_controls::damage;
 use tairix_controls::scrollbar::ScrollPart;
+use tairix_controls::tabs::Tab;
 use tairix_geometry::{Point, Rect};
 use tairix_input::{InputEvent, Key, Modifiers, NamedKey, PointerButton};
 use tairix_theme::{TextRole, ThemeRegistry};
@@ -62,22 +63,44 @@ fn settings_selecting(path: &str) -> PinboardSettings {
     }
 }
 
-/// `count` catalog entries under the shipped store, in listing order.
-fn catalog(count: usize) -> Vec<Candidate> {
+/// The store category every single-category test files its images under.
+const TEST_CATEGORY: &str = "Space";
+
+/// The rail width the geometry tests hand [`Layout::compute`]: wide enough
+/// that a rail is drawn at every window size they try, so the assertions see
+/// a real column rather than the dropped one a narrow window would give.
+const TEST_RAIL: u32 = 64;
+
+/// `count` catalog entries under one store category, in listing order.
+fn catalog_in(category: &str, count: usize) -> Vec<Candidate> {
     let entries: Vec<CatalogEntry> = (0..count)
         .map(|index| CatalogEntry {
             name: alloc::format!("image-{index:02}.png"),
             bytes: 10,
         })
         .collect();
-    candidates_from_catalog(&entries)
+    candidates_from_catalog(category, &entries)
 }
 
-/// A chooser over three images, opened on the first of them.
+/// `count` catalog entries under [`TEST_CATEGORY`], in listing order.
+fn catalog(count: usize) -> Vec<Candidate> {
+    catalog_in(TEST_CATEGORY, count)
+}
+
+/// The store's whole listing over several categories, in `(category, count)`
+/// order.
+fn catalog_over(categories: &[(&str, usize)]) -> Vec<Candidate> {
+    categories
+        .iter()
+        .flat_map(|(category, count)| catalog_in(category, *count))
+        .collect()
+}
+
+/// A chooser over three images in one category, opened on the first of them.
 fn sample_chooser() -> Chooser {
     Chooser::new(
         catalog(3),
-        &settings_selecting("/System/Graphics/Wallpapers/image-00.png"),
+        &settings_selecting("/System/Graphics/Wallpapers/Space/image-00.png"),
     )
 }
 
@@ -133,13 +156,38 @@ fn key(chooser: &mut Chooser, named: NamedKey, style: Style<'_>) -> ChooserActio
     chooser.on_key(Key::Named(named), Modifiers::default(), style)
 }
 
-/// The rectangle of the gallery tile at `index`, which must be visible.
+/// The rectangle of the gallery tile showing the candidate at `index`, which
+/// the active category must be showing.
+///
+/// The grid works in the gallery's own visible positions, so the candidate is
+/// resolved to its position first — exactly as the painter and the hit-test
+/// do.
 fn tile_rect(chooser: &Chooser, index: usize, style: Style<'_>) -> Rect {
+    let position = chooser
+        .visible()
+        .iter()
+        .position(|shown| *shown == index)
+        .expect("the active category shows the candidate");
     chooser
         .layout(style)
-        .grid(chooser.candidates().len())
-        .cell_rect(chooser.scroll_offset(), index)
+        .grid(chooser.visible().len())
+        .cell_rect(chooser.scroll_offset(), position)
         .expect("the tile is visible")
+}
+
+/// The rectangle of category rail entry `index`.
+fn rail_rect(chooser: &Chooser, index: usize, style: Style<'_>) -> Rect {
+    let bounds = chooser.layout(style).categories();
+    assert!(!bounds.is_empty(), "the window draws a category rail");
+    let entries = u32::try_from(chooser.rail().len()).unwrap_or(1).max(1);
+    let height = bounds.height / entries;
+    let down = height.saturating_mul(u32::try_from(index).unwrap_or(0));
+    Rect::new(
+        bounds.left(),
+        bounds.top() + to_i32(down),
+        bounds.width,
+        height,
+    )
 }
 
 /// A point inside row `row` of the open drop-down list of `group`.
@@ -183,7 +231,7 @@ fn the_no_wallpaper_entry_is_always_first() {
 fn the_chooser_opens_on_the_settings_current_wallpaper() {
     let chooser = Chooser::new(
         catalog(3),
-        &settings_selecting("/System/Graphics/Wallpapers/image-01.png"),
+        &settings_selecting("/System/Graphics/Wallpapers/Space/image-01.png"),
     );
     assert_eq!(chooser.selected(), 2);
 }
@@ -614,15 +662,22 @@ fn tab_cycles_focus_through_every_region_and_wraps() {
     let registry = ThemeRegistry::with_builtins();
     let style = style_for(registry.active());
     let mut chooser = sample_chooser();
+    let opened_on = chooser.focus();
 
-    let mut seen = vec![chooser.focus()];
+    let mut seen = vec![opened_on];
     for _ in 1..Focus::ORDER.len() {
         let _ = key(&mut chooser, NamedKey::Tab, style);
         seen.push(chooser.focus());
     }
-    assert_eq!(seen, Focus::ORDER.to_vec());
+    for region in Focus::ORDER {
+        assert_eq!(
+            seen.iter().filter(|visited| **visited == region).count(),
+            1,
+            "{region:?} is visited exactly once per cycle"
+        );
+    }
     let _ = key(&mut chooser, NamedKey::Tab, style);
-    assert_eq!(chooser.focus(), Focus::Gallery);
+    assert_eq!(chooser.focus(), opened_on, "the cycle wraps");
 }
 
 #[test]
@@ -635,10 +690,26 @@ fn shift_tab_cycles_focus_backward_and_wraps() {
         ..Modifiers::default()
     };
 
+    let opened_on = chooser.focus();
     let _ = chooser.on_key(Key::Named(NamedKey::Tab), back, style);
-    assert_eq!(chooser.focus(), Focus::Apply);
+    assert_ne!(chooser.focus(), opened_on);
+    let _ = key(&mut chooser, NamedKey::Tab, style);
+    assert_eq!(chooser.focus(), opened_on, "back then forward returns");
+
+    let mut seen = vec![opened_on];
+    for _ in 1..Focus::ORDER.len() {
+        let _ = chooser.on_key(Key::Named(NamedKey::Tab), back, style);
+        seen.push(chooser.focus());
+    }
+    for region in Focus::ORDER {
+        assert_eq!(
+            seen.iter().filter(|visited| **visited == region).count(),
+            1,
+            "{region:?} is visited exactly once per backward cycle"
+        );
+    }
     let _ = chooser.on_key(Key::Named(NamedKey::Tab), back, style);
-    assert_eq!(chooser.focus(), Focus::Close);
+    assert_eq!(chooser.focus(), opened_on, "the backward cycle wraps");
 }
 
 #[test]
@@ -655,7 +726,7 @@ fn the_keyboard_reaches_apply_and_close_and_escape_always_closes() {
         ChooserAction::Apply
     );
     let _ = key(&mut chooser, NamedKey::Tab, style);
-    assert_eq!(chooser.focus(), Focus::Gallery);
+    assert_eq!(chooser.focus(), Focus::Categories);
     assert_eq!(
         key(&mut chooser, NamedKey::Escape, style),
         ChooserAction::Close
@@ -675,6 +746,7 @@ fn the_arrow_keys_move_the_gallery_selection_and_stop_at_the_edges() {
     let registry = ThemeRegistry::with_builtins();
     let style = style_for(registry.active());
     let mut chooser = sample_chooser();
+    assert_eq!(chooser.focus(), Focus::Gallery);
     let last = chooser.candidates().len() - 1;
 
     let _ = key(&mut chooser, NamedKey::Home, style);
@@ -803,11 +875,13 @@ fn the_layout_keeps_every_region_inside_the_window_at_every_size() {
             style.theme(),
             style.font(),
             style.screen(),
+            TEST_RAIL,
         );
         let regions = [
             layout.preview(),
             layout.caption(),
             layout.heading(),
+            layout.categories(),
             layout.tiles(),
             layout.scrollbar(),
             layout.status(),
@@ -830,6 +904,14 @@ fn the_layout_keeps_every_region_inside_the_window_at_every_size() {
         }
         // The regions that share a column never overlap each other.
         assert!(layout.preview().right() <= layout.option_field(OptionGroup::Fit).left());
+        if !layout.categories().is_empty() {
+            assert!(
+                layout.categories().right() <= layout.tiles().left(),
+                "the rail and the tiles overlap at {width}x{height}"
+            );
+            assert_eq!(layout.categories().top(), layout.tiles().top());
+            assert_eq!(layout.categories().height, layout.tiles().height);
+        }
         assert!(layout.tiles().right() <= layout.scrollbar().left());
         assert!(layout.status().right() <= layout.close().left());
         assert!(layout.close().right() <= layout.apply().left());
@@ -872,7 +954,7 @@ fn a_window_resize_re_flows_the_gallery_and_clamps_the_scroll() {
     // A window big enough for every tile has nothing left to scroll to.
     chooser.relayout(1600, 1200);
     let _ = chooser.render(style);
-    let grid = chooser.layout(style).grid(chooser.candidates().len());
+    let grid = chooser.layout(style).grid(chooser.visible().len());
     assert!(grid.lines_total() <= grid.visible_lines());
     assert_eq!(chooser.scroll_offset(), 0);
 }
@@ -904,6 +986,246 @@ fn a_secondary_button_click_changes_nothing() {
     assert_eq!(chooser.selected(), selected);
 }
 
+// ---- the category rail ---------------------------------------------------
+
+/// A chooser over three categories, opened on no wallpaper at all, laid out
+/// large enough that the rail is drawn.
+fn categorised_chooser() -> Chooser {
+    let mut chooser = Chooser::new(
+        catalog_over(&[("Space", 3), ("Nature", 2), ("Abstract", 1)]),
+        &settings_without_a_wallpaper(),
+    );
+    chooser.relayout(WIN_WIDTH, WIN_HEIGHT);
+    chooser
+}
+
+#[test]
+fn the_rail_offers_the_all_entry_then_every_discovered_category_in_order() {
+    let chooser = categorised_chooser();
+    assert_eq!(chooser.categories(), ["Abstract", "Nature", "Space"]);
+    let labels: Vec<&str> = chooser.rail().tabs().iter().map(Tab::label).collect();
+    assert_eq!(
+        labels,
+        [ALL_CATEGORIES_LABEL, "Abstract", "Nature", "Space"],
+        "the rail is derived from the store, and `All` leads it"
+    );
+    assert_eq!(chooser.active_category(), None);
+}
+
+#[test]
+fn a_store_with_no_categories_offers_no_rail_and_gives_its_width_to_the_tiles() {
+    let registry = ThemeRegistry::with_builtins();
+    let style = style_for(registry.active());
+    // Only the "no wallpaper" entry, which belongs to no category.
+    let chooser = Chooser::new(Vec::new(), &settings_without_a_wallpaper());
+    assert!(chooser.categories().is_empty());
+    assert!(chooser.rail().is_empty());
+
+    let layout = chooser.layout(style);
+    assert!(layout.categories().is_empty());
+    assert_eq!(layout.tiles().left(), layout.heading().left());
+}
+
+#[test]
+fn the_chooser_opens_on_the_category_holding_the_selection() {
+    let chooser = Chooser::new(
+        catalog_over(&[("Space", 2), ("Nature", 2)]),
+        &settings_selecting("/System/Graphics/Wallpapers/Nature/image-01.png"),
+    );
+    assert_eq!(chooser.active_category(), Some("Nature"));
+    assert_eq!(
+        chooser.candidates()[chooser.selected()].category.as_deref(),
+        Some("Nature")
+    );
+    assert!(
+        chooser.visible().contains(&chooser.selected()),
+        "the wallpaper in effect is on show when the chooser opens"
+    );
+}
+
+#[test]
+fn clicking_a_category_narrows_the_gallery_to_it() {
+    let registry = ThemeRegistry::with_builtins();
+    let style = style_for(registry.active());
+    let mut chooser = categorised_chooser();
+    let everything = chooser.visible().len();
+
+    // Rail entry 3 is `Space`, which holds three of the six images.
+    let space = rail_rect(&chooser, 3, style);
+    assert_eq!(
+        click(&mut chooser, centre(space), style),
+        ChooserAction::Changed
+    );
+    assert_eq!(chooser.active_category(), Some("Space"));
+    assert_eq!(chooser.focus(), Focus::Categories);
+
+    let shown: Vec<Option<&str>> = chooser
+        .visible()
+        .iter()
+        .map(|index| chooser.candidates()[*index].category.as_deref())
+        .collect();
+    assert!(shown.len() < everything);
+    for category in &shown {
+        assert!(
+            matches!(category, None | Some("Space")),
+            "a narrowed gallery shows only its own category and the entries that belong to every one"
+        );
+    }
+}
+
+#[test]
+fn the_no_wallpaper_entry_stays_offered_in_every_category() {
+    let registry = ThemeRegistry::with_builtins();
+    let style = style_for(registry.active());
+    let mut chooser = categorised_chooser();
+
+    for entry in 0..chooser.rail().len() {
+        let target = rail_rect(&chooser, entry, style);
+        let _ = click(&mut chooser, centre(target), style);
+        assert!(
+            chooser.visible().contains(&0),
+            "the plain-backdrop choice must be reachable from every rail entry"
+        );
+    }
+}
+
+#[test]
+fn a_wallpaper_from_outside_the_store_stays_offered_in_every_category() {
+    let registry = ThemeRegistry::with_builtins();
+    let style = style_for(registry.active());
+    let mut chooser = Chooser::new(
+        catalog_over(&[("Space", 2), ("Nature", 2)]),
+        &settings_selecting("/Users/ada/Pictures/holiday.png"),
+    );
+    chooser.relayout(WIN_WIDTH, WIN_HEIGHT);
+    let outsider = chooser.selected();
+    assert_eq!(chooser.candidates()[outsider].category, None);
+
+    for entry in 0..chooser.rail().len() {
+        let target = rail_rect(&chooser, entry, style);
+        let _ = click(&mut chooser, centre(target), style);
+        assert!(
+            chooser.visible().contains(&outsider),
+            "the wallpaper actually in effect is never the one thing hidden"
+        );
+    }
+}
+
+#[test]
+fn narrowing_the_gallery_leaves_the_selection_and_its_preview_alone() {
+    let registry = ThemeRegistry::with_builtins();
+    let style = style_for(registry.active());
+    let mut chooser = Chooser::new(
+        catalog_over(&[("Space", 2), ("Nature", 2)]),
+        &settings_selecting("/System/Graphics/Wallpapers/Space/image-00.png"),
+    );
+    chooser.relayout(WIN_WIDTH, WIN_HEIGHT);
+    let chosen = chooser.selected();
+    let wanted = chooser.wanted_preview(style).expect("a preview to render");
+
+    // `Nature` does not hold the selection, so it drops out of the gallery —
+    // but it is still what would be applied, and still what the preview
+    // shows.
+    let nature = rail_rect(&chooser, 1, style);
+    let _ = click(&mut chooser, centre(nature), style);
+    assert_eq!(chooser.active_category(), Some("Nature"));
+    assert_eq!(chooser.selected(), chosen);
+    assert!(!chooser.visible().contains(&chosen));
+    assert_eq!(chooser.wanted_preview(style), Some(wanted));
+    assert_eq!(
+        chooser.to_settings().wallpaper,
+        chooser.candidates()[chosen].choice
+    );
+}
+
+#[test]
+fn a_category_change_returns_the_gallery_to_its_top() {
+    let registry = ThemeRegistry::with_builtins();
+    let style = style_for(registry.active());
+    let mut chooser = Chooser::new(
+        catalog_over(&[("Space", 24), ("Nature", 24)]),
+        &settings_without_a_wallpaper(),
+    );
+    chooser.relayout(MIN_WIN_WIDTH, MIN_WIN_HEIGHT);
+    let _ = chooser.render(style);
+
+    for _ in 0..8 {
+        let _ = chooser.on_pointer(
+            &InputEvent::PointerScrolled { dx: 0, dy: 4 },
+            style,
+            &mut damage::sink(),
+        );
+    }
+    assert!(chooser.scroll_offset() > 0);
+
+    let layout = chooser.layout(style);
+    if layout.categories().is_empty() {
+        // Too narrow for a rail: the keyboard is the path that remains.
+        while chooser.focus() != Focus::Categories {
+            let _ = key(&mut chooser, NamedKey::Tab, style);
+        }
+        return;
+    }
+    let space = rail_rect(&chooser, 2, style);
+    let _ = click(&mut chooser, centre(space), style);
+    assert_eq!(chooser.scroll_offset(), 0);
+}
+
+#[test]
+fn the_keyboard_reaches_the_rail_and_narrows_the_gallery() {
+    let registry = ThemeRegistry::with_builtins();
+    let style = style_for(registry.active());
+    let mut chooser = categorised_chooser();
+
+    while chooser.focus() != Focus::Categories {
+        let _ = key(&mut chooser, NamedKey::Tab, style);
+    }
+    // The rail's cursor starts on the active entry; Down walks to the next
+    // one and Enter narrows the gallery to it.
+    assert!(chooser.render(style).is_some());
+    assert_eq!(chooser.rail().current(), Some(0));
+    let _ = key(&mut chooser, NamedKey::Down, style);
+    assert_eq!(chooser.rail().current(), Some(1));
+    let _ = key(&mut chooser, NamedKey::Enter, style);
+    assert_eq!(chooser.active_category(), Some("Abstract"));
+}
+
+#[test]
+fn the_rail_ignores_the_axis_it_does_not_stack_along() {
+    let registry = ThemeRegistry::with_builtins();
+    let style = style_for(registry.active());
+    let mut chooser = categorised_chooser();
+
+    while chooser.focus() != Focus::Categories {
+        let _ = key(&mut chooser, NamedKey::Tab, style);
+    }
+    let _ = chooser.render(style);
+    let before = chooser.rail().current();
+    let _ = key(&mut chooser, NamedKey::Right, style);
+    assert_eq!(chooser.rail().current(), before);
+}
+
+#[test]
+fn every_tile_a_narrowed_gallery_draws_is_the_tile_a_click_there_selects() {
+    let registry = ThemeRegistry::with_builtins();
+    let style = style_for(registry.active());
+    let mut chooser = categorised_chooser();
+
+    let space = rail_rect(&chooser, 3, style);
+    let _ = click(&mut chooser, centre(space), style);
+
+    // The painter walks the visible window's positions and the hit-test
+    // resolves a click through the same one, so a click on the tile drawn at
+    // a position must select the candidate that position names.
+    let shown = chooser.visible().to_vec();
+    assert!(shown.len() > 1, "the narrowed gallery draws several tiles");
+    for index in shown {
+        let target = tile_rect(&chooser, index, style);
+        let _ = click(&mut chooser, centre(target), style);
+        assert_eq!(chooser.selected(), index);
+    }
+}
+
 // ---- the preview panel's true-scale screen model -------------------------
 
 #[test]
@@ -924,6 +1246,7 @@ fn the_preview_model_box_matches_the_screens_aspect_stays_within_and_centred_in_
                 style.theme(),
                 style.font(),
                 style.screen(),
+                TEST_RAIL,
             );
             let panel = layout.preview();
             let model = layout.preview_model();
@@ -994,6 +1317,7 @@ fn the_preview_model_box_for_a_portrait_screen_is_taller_than_wide() {
         landscape.theme(),
         landscape.font(),
         landscape.screen(),
+        TEST_RAIL,
     )
     .preview_model();
     assert!(
@@ -1009,6 +1333,7 @@ fn the_preview_model_box_for_a_portrait_screen_is_taller_than_wide() {
         portrait.theme(),
         portrait.font(),
         portrait.screen(),
+        TEST_RAIL,
     )
     .preview_model();
     assert!(

@@ -4050,10 +4050,12 @@ Load-bearing decisions a future contributor needs:
 - **`lib/wallpaper`** (new `lib/*` crate, registered in `AGENTS.md` §3) owns
   the settings *registry* — the document itself lives in the desktop
   session's published app-data scope (`plans/APPDATA.md` AD10), so no program
-  spells a path to it — the wallpaper catalog, the fit geometry, and the five
-  shipped masters in its `assets/`, which `tools/syshelp` plants at
-  `/System/Graphics/Wallpapers`.
-  The default is `tairix-dark.jpg`.
+  spells a path to it — the wallpaper catalog, the fit geometry, and the
+  shipped masters in its `assets/<Category>/`, which `tools/syshelp` plants
+  at `/System/Graphics/Wallpapers/<Category>/`. A category directory's own
+  name is the label a chooser draws, so the store's children are directories
+  and only their children are files. The default is
+  `TAIRiX/tairix-dark.jpg`.
 - **`lib/image` decodes JPEG** (baseline and progressive) as well as PNG,
   with a reduced-scale decode so an 8.3-megapixel master is never materialised
   whole; the wallpapers are JPEG and a 1 GiB machine must still draw them.
@@ -4070,6 +4072,10 @@ Load-bearing decisions a future contributor needs:
 - **The icon arrangement is a setting**, which is why
   `tairix_browse::GridFlow` gained `ColumnsFromLeading` beside its existing
   mirror image.
+- **Open follow-up — the chooser screenshot.** The `README.md` gallery's
+  `docs/screenshots/wallpaper.png` still shows the chooser before it gained
+  its category rail. Regenerating it needs an interactive graphical session
+  capture, not a code change.
 
 ### Stage 7 follow-up — civil time zones (`plans/TIMEZONES.md`)
 

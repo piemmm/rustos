@@ -15,14 +15,26 @@ its pinboard. Nothing changes on screen until the settings are applied.
 The window is driven by the mouse. A large preview at the top shows the
 selected wallpaper as the desktop will draw it, with the chosen backdrop
 colour wherever the image does not reach. Beneath it, the gallery lists
-every shipped wallpaper as a tile: click one to select it and the
+the shipped wallpapers as tiles: click one to select it and the
 preview follows immediately. The **No wallpaper** tile, always first,
 shows the chosen backdrop colour alone.
+
+The shipped wallpapers are filed in categories — `Space`, `Nature`,
+`City`, `Abstract`, `TAIRiX` — listed in the rail down the leading edge of
+the gallery. Click one to show only its wallpapers, or **All** to show
+every one. The window opens on the category holding the wallpaper
+currently in effect.
+
+Narrowing the gallery changes only what is listed, never what is
+selected: the wallpaper in effect stays in the preview and stays what
+Apply would send, even while you browse a category that does not hold it.
+The **No wallpaper** tile, and a wallpaper in effect from outside the
+shipped store, are listed under every category.
 
 The gallery scrolls when it holds more tiles than the window shows. Turn
 the wheel anywhere over the window, drag the scrollbar's thumb at the
 trailing edge, or click the track above or below the thumb to move a
-page at a time.
+page at a time. Choosing a category returns the gallery to its top.
 
 Beside the preview are four settings, each a drop-down list. Click one
 to open it and click a choice to take it:
@@ -50,9 +62,11 @@ the desktop. A file that cannot be decoded is marked `unreadable` in its
 tile and is not attempted again.
 
 The keyboard reaches everything the mouse does. `Tab` and `Shift-Tab`
-move focus forward and back through the gallery, the four settings, and
-the two buttons. The arrow keys move within the gallery, or open the
-focused setting's list and move within it. `Enter` applies, or activates
+move focus forward and back through the category rail, the gallery, the
+four settings, and the two buttons. The arrow keys move within the
+focused region — `Up` and `Down` walk the category rail, where `Enter`
+then shows the category the cursor is on — or open the focused setting's
+list and move within it. `Enter` applies from the gallery, or activates
 the focused button, and `Escape` closes the window without applying.
 
 Applying sends the chosen settings to the desktop session, which decides

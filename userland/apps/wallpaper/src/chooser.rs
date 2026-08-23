@@ -3,17 +3,25 @@
 //!
 //! Every interactive thing in the window is a shared `lib/controls` control
 //! held here for the life of the window — the four settings drop-downs, the
-//! Apply and Close buttons, and the gallery's scrollbar — so each one owns
+//! category rail, the Apply and Close buttons, and the gallery's scrollbar —
+//! so each one owns
 //! its own hover, press, drag and focus state exactly as it does everywhere
 //! else in the desktop. The gallery's tiles are the one exception the design
 //! language names: a tile renders state and never dispatches, so the gallery
 //! hit-tests the pointer against the very geometry it painted.
+//!
+//! The rail narrows the gallery rather than replacing its contents: the model
+//! holds every candidate once, and [`Chooser::visible`] is the window into it
+//! the active rail entry implies. The grid, the scroll range, the hit-test and
+//! the painter all work in that window's own positions, so a click can never
+//! land on a candidate the active category was not showing.
 //!
 //! The model performs no I/O. Pixels for the preview and for each gallery
 //! thumbnail are asked for ([`Chooser::next_preview`],
 //! [`Chooser::next_thumbnail`]) and handed back by the caller, which is the
 //! only part of the program that may speak to the parser sandbox.
 
+use alloc::collections::BTreeSet;
 use alloc::string::String;
 use alloc::vec::Vec;
 
@@ -24,18 +32,20 @@ use tairix_controls::damage;
 use tairix_controls::scroll::{ScrollModel, ScrollOrientation, ScrollRange};
 use tairix_controls::scrollbar::{ScrollAction, ScrollBar};
 use tairix_controls::state::ControlRole;
+use tairix_controls::tabs::{Tab, Tabs, TabsAction, TabsOrientation};
 use tairix_geometry::{Point, Rect, Region};
 use tairix_input::{InputEvent, Key, Modifiers, NamedKey, PointerButton};
 use tairix_raster::Surface;
 use tairix_wallpaper::{
-    Backdrop, IconFlow, IconSort, PinboardSettings, WallpaperChoice, WallpaperFit, WallpaperPath,
+    catalog_categories, Backdrop, IconFlow, IconSort, PinboardSettings, WallpaperChoice,
+    WallpaperFit, WallpaperPath,
 };
 
 use crate::{
     backdrop_options, leaf_name, to_i32, to_u32, ApplyOutcome, BackdropOption, Candidate,
-    ChooserAction, Focus, Layout, OptionGroup, Style, Thumbnail, APPLY_LABEL, CLOSE_LABEL, FIT_ALL,
-    FIT_LABELS, ICON_FLOW_ALL, ICON_FLOW_LABELS, MIN_WIN_HEIGHT, MIN_WIN_WIDTH, OPTION_GROUP_COUNT,
-    SORT_ALL, SORT_LABELS, WIN_HEIGHT, WIN_WIDTH,
+    ChooserAction, Focus, Layout, OptionGroup, Style, Thumbnail, ALL_CATEGORIES_LABEL, APPLY_LABEL,
+    CLOSE_LABEL, FIT_ALL, FIT_LABELS, ICON_FLOW_ALL, ICON_FLOW_LABELS, MIN_WIN_HEIGHT,
+    MIN_WIN_WIDTH, OPTION_GROUP_COUNT, SORT_ALL, SORT_LABELS, WIN_HEIGHT, WIN_WIDTH,
 };
 
 /// A wallpaper the caller must render for the preview panel.
@@ -101,6 +111,10 @@ struct PreviewSlot {
 pub struct Chooser {
     candidates: Vec<Candidate>,
     selected: usize,
+    categories: Vec<String>,
+    rail: Tabs,
+    active: usize,
+    visible: Vec<usize>,
     backdrops: Vec<BackdropOption>,
     fields: [ComboBox; OPTION_GROUP_COUNT],
     apply: Button,
@@ -124,8 +138,14 @@ impl Chooser {
     /// The "no wallpaper" entry is always the first candidate, so a user can
     /// always get back to a plain backdrop. A settings document naming a
     /// wallpaper the store does not list (a file removed since it was set)
-    /// still appears, appended under its own leaf name, so the chooser never
-    /// silently drops the choice that is actually in effect.
+    /// still appears, appended under its own leaf name and under no category,
+    /// so the chooser never silently drops the choice that is actually in
+    /// effect.
+    ///
+    /// The category rail is *derived* from the categories `images` are filed
+    /// under, so it offers exactly what the store holds and this app carries
+    /// no list of its own. It opens on the category holding the selection, so
+    /// the wallpaper in effect is shown in the company it was chosen from.
     #[must_use]
     pub fn new(images: Vec<Candidate>, settings: &PinboardSettings) -> Self {
         let mut candidates = Vec::with_capacity(images.len().saturating_add(1));
@@ -136,13 +156,23 @@ impl Chooser {
                 .iter()
                 .any(|candidate| candidate.choice == settings.wallpaper)
             {
-                candidates.push(Candidate::image(path.clone(), leaf_name(path)));
+                candidates.push(Candidate::image(path.clone(), leaf_name(path), None));
             }
         }
         let selected = candidates
             .iter()
             .position(|candidate| candidate.choice == settings.wallpaper)
             .unwrap_or(0);
+
+        let categories = discovered_categories(&candidates);
+        let active = candidates
+            .get(selected)
+            .and_then(|candidate| candidate.category.as_deref())
+            .and_then(|name| categories.iter().position(|owned| owned == name))
+            .map_or(0, |slot| slot.saturating_add(1));
+        let mut rail = category_rail(&categories);
+        rail.adopt_selected(active);
+        let visible = visible_indices(&candidates, category_at(&categories, active));
 
         let backdrops = backdrop_options(settings.backdrop);
         let backdrop_index = backdrops
@@ -165,6 +195,10 @@ impl Chooser {
         Self {
             candidates,
             selected,
+            categories,
+            rail,
+            active,
+            visible,
             fields: [
                 field(&FIT_LABELS, fit_index),
                 field_from(&backdrops, backdrop_index),
@@ -205,10 +239,32 @@ impl Chooser {
         self.height = height.max(MIN_WIN_HEIGHT);
     }
 
-    /// The candidates the gallery offers, in gallery order.
+    /// Every candidate the chooser holds, whichever category is being
+    /// browsed.
     #[must_use]
     pub fn candidates(&self) -> &[Candidate] {
         &self.candidates
+    }
+
+    /// The categories the rail offers beneath its leading "all" entry, in
+    /// rail order.
+    #[must_use]
+    pub fn categories(&self) -> &[String] {
+        &self.categories
+    }
+
+    /// The category currently narrowing the gallery, or `None` when the rail
+    /// is on its "all" entry.
+    #[must_use]
+    pub fn active_category(&self) -> Option<&str> {
+        category_at(&self.categories, self.active)
+    }
+
+    /// The candidates the gallery is showing, as indices into
+    /// [`Self::candidates`], in gallery order.
+    #[must_use]
+    pub fn visible(&self) -> &[usize] {
+        &self.visible
     }
 
     /// The selected candidate's index.
@@ -453,6 +509,7 @@ impl Chooser {
         }
         changed |= apply_changed | close_changed;
 
+        changed |= self.rail_pointer(event, &layout, damage);
         changed |= self.scroll_pointer(event, &layout, style, damage);
         changed |= self.gallery_pointer(event, &layout);
         ChooserAction::changed(changed)
@@ -483,6 +540,9 @@ impl Chooser {
             }
             Key::Named(NamedKey::Escape) => ChooserAction::Close,
             _ => match self.focus {
+                Focus::Categories => {
+                    ChooserAction::changed(self.rail_key(key, &layout, &mut damage))
+                }
                 Focus::Gallery => self.gallery_key(key, &layout),
                 Focus::Setting(group) => ChooserAction::changed(
                     self.field_key(group, key, &layout, style, &mut damage)
@@ -563,6 +623,12 @@ impl Chooser {
         &self.scroll
     }
 
+    /// The category rail.
+    #[must_use]
+    pub(crate) fn rail(&self) -> &Tabs {
+        &self.rail
+    }
+
     /// The pixels the preview panel should draw for `want`, or `None` when
     /// they have not been rendered yet.
     #[must_use]
@@ -610,7 +676,37 @@ impl Chooser {
             style.theme(),
             style.font(),
             style.screen(),
+            self.rail_width(style),
         )
+    }
+
+    /// The width the category rail asks for: the strip's own measurement,
+    /// widened to hold its longest label in the face the strip draws it in,
+    /// and zero when there are no categories to offer.
+    ///
+    /// The strip's own measurement is a fixed cross-axis extent that reserves
+    /// its bead but knows nothing of the labels stacked down it, so a rail of
+    /// names has to be measured here — by its owner, which is what holds
+    /// them.
+    fn rail_width(&self, style: Style<'_>) -> u32 {
+        if self.rail.is_empty() {
+            return 0;
+        }
+        let font = style.body_font();
+        let inset = style
+            .scale()
+            .scale_length(style.theme().metrics().control_inset)
+            .max(1);
+        let widest = self
+            .rail
+            .tabs()
+            .iter()
+            .map(|tab| font.text_width(tab.label()))
+            .max()
+            .unwrap_or(0);
+        self.rail
+            .measured_extent(style.scale(), style.theme())
+            .max(widest.saturating_add(inset.saturating_mul(2)))
     }
 
     /// Resolve the layout and bring every control's derived state in line
@@ -622,7 +718,7 @@ impl Chooser {
     /// never on a control that does not know it has it.
     fn sync(&mut self, style: Style<'_>) -> Layout {
         let layout = self.layout(style);
-        let grid = layout.grid(self.candidates.len());
+        let grid = layout.grid(self.visible.len());
         let range = grid.scroll_range(self.scroll.model().offset());
         let page = u64::try_from(grid.visible_lines()).unwrap_or(1).max(1);
         self.scroll.set_model(ScrollModel::new(range, 1, page));
@@ -632,7 +728,77 @@ impl Chooser {
         }
         self.apply.set_focused(self.focus == Focus::Apply);
         self.close.set_focused(self.focus == Focus::Close);
+        // The rail draws its focus ring around the keyboard cursor, so the
+        // cursor is put on the strip when the rail holds focus and taken off
+        // it when it does not — never moved, or the arrow keys would be
+        // undone on the next paint.
+        match (self.focus == Focus::Categories, self.rail.current()) {
+            (true, None) => self.rail.adopt_current(Some(self.active)),
+            (false, Some(_)) => self.rail.adopt_current(None),
+            _ => {}
+        }
         layout
+    }
+
+    /// Route a pointer event to the category rail, reporting whether anything
+    /// it draws changed.
+    ///
+    /// The strip reports its own repainted pixels rather than exposing its
+    /// hover, so its damage is collected here and forwarded: a hover that
+    /// moved between two entries is a change, an idle sample over the one it
+    /// is already on is not.
+    fn rail_pointer(&mut self, event: &InputEvent, layout: &Layout, damage: &mut Region) -> bool {
+        let bounds = layout.categories();
+        if bounds.is_empty() {
+            return false;
+        }
+        let mut reported = damage::sink();
+        let action = self.rail.on_pointer(event, bounds, &mut reported);
+        let mut changed = !reported.is_empty();
+        for rect in reported.rects() {
+            damage.add(*rect);
+        }
+        if let Some(TabsAction::Selected { index }) = action {
+            self.focus = Focus::Categories;
+            changed |= self.select_category(index, bounds, damage);
+        }
+        changed
+    }
+
+    /// Route a key press to the category rail: the arrows move its cursor,
+    /// Enter or Space narrows the gallery to the entry the cursor is on.
+    fn rail_key(&mut self, key: Key, layout: &Layout, damage: &mut Region) -> bool {
+        let bounds = layout.categories();
+        if bounds.is_empty() {
+            return false;
+        }
+        let before = damage.rects().len();
+        let action = self.rail.on_key(key, bounds, damage);
+        let mut changed = damage.rects().len() != before;
+        if let Some(TabsAction::Selected { index }) = action {
+            changed |= self.select_category(index, bounds, damage);
+        }
+        changed
+    }
+
+    /// Narrow the gallery to rail entry `index`, reporting whether it was on
+    /// a different one before.
+    ///
+    /// The selection is deliberately left where it is: it is the wallpaper
+    /// that will be applied, and the preview and caption go on showing it
+    /// even while a category that does not hold it is being browsed. The
+    /// gallery returns to its top, because the rows it was scrolled to belong
+    /// to the entry being left.
+    fn select_category(&mut self, index: usize, bounds: Rect, damage: &mut Region) -> bool {
+        if index >= self.rail.len() || index == self.active {
+            return false;
+        }
+        self.active = index;
+        self.rail.set_selected(index, bounds, damage);
+        let category = category_at(&self.categories, index);
+        self.visible = visible_indices(&self.candidates, category);
+        self.scroll_to(0);
+        true
     }
 
     /// The index the drop-down of `group` has selected.
@@ -753,12 +919,14 @@ impl Chooser {
     /// paints state and holds no pointer of its own, so the view resolves the
     /// pointer against the very grid it painted.
     fn gallery_pointer(&mut self, event: &InputEvent, layout: &Layout) -> bool {
-        let grid = layout.grid(self.candidates.len());
-        let at = grid.index_at(
-            self.scroll.model().offset(),
-            to_u32(self.pointer.x),
-            to_u32(self.pointer.y),
-        );
+        let grid = layout.grid(self.visible.len());
+        let at = grid
+            .index_at(
+                self.scroll.model().offset(),
+                to_u32(self.pointer.x),
+                to_u32(self.pointer.y),
+            )
+            .and_then(|position| self.visible.get(position).copied());
         match event {
             InputEvent::PointerMoved { .. } => {
                 let changed = self.hovered != at;
@@ -791,27 +959,47 @@ impl Chooser {
 
     /// Move the gallery's selection with the arrow keys, revealing the tile
     /// that gains it.
+    ///
+    /// The arrows walk the gallery's *visible* positions, so they move
+    /// through what the active category is showing rather than through
+    /// candidates it is not. A selection the active category does not hold
+    /// has no position to move from, so forward keys enter at its first tile
+    /// and backward keys have nowhere to go.
     fn gallery_key(&mut self, key: Key, layout: &Layout) -> ChooserAction {
-        let grid = layout.grid(self.candidates.len());
+        let grid = layout.grid(self.visible.len());
         let per_line = grid.cells_per_line().max(1);
-        let last = self.candidates.len().saturating_sub(1);
+        let last = self.visible.len().saturating_sub(1);
+        let here = self.position_of(self.selected);
         let target = match key {
-            Key::Named(NamedKey::Left) => self.selected.checked_sub(1),
-            Key::Named(NamedKey::Right) => Some(self.selected.saturating_add(1).min(last)),
-            Key::Named(NamedKey::Up) => self.selected.checked_sub(per_line),
-            Key::Named(NamedKey::Down) => Some(self.selected.saturating_add(per_line).min(last)),
+            Key::Named(NamedKey::Left) => here.and_then(|at| at.checked_sub(1)),
+            Key::Named(NamedKey::Right) => {
+                Some(here.map_or(0, |at| at.saturating_add(1).min(last)))
+            }
+            Key::Named(NamedKey::Up) => here.and_then(|at| at.checked_sub(per_line)),
+            Key::Named(NamedKey::Down) => {
+                Some(here.map_or(0, |at| at.saturating_add(per_line).min(last)))
+            }
             Key::Named(NamedKey::Home) => Some(0),
             Key::Named(NamedKey::End) => Some(last),
             Key::Named(NamedKey::Enter) => return ChooserAction::Apply,
             _ => return ChooserAction::None,
         };
-        let Some(target) = target else {
+        let Some(index) = target.and_then(|at| self.visible.get(at).copied()) else {
             return ChooserAction::None;
         };
-        let changed = self.select(target);
-        let revealed = grid.reveal(self.scroll.model().offset(), Some(self.selected));
+        let changed = self.select(index);
+        let revealed = grid.reveal(
+            self.scroll.model().offset(),
+            self.position_of(self.selected),
+        );
         let moved = self.scroll_to(revealed);
         ChooserAction::changed(changed || moved)
+    }
+
+    /// Where the candidate at `index` sits among the gallery's visible
+    /// positions, or `None` when the active category is not showing it.
+    fn position_of(&self, index: usize) -> Option<usize> {
+        self.visible.iter().position(|shown| *shown == index)
     }
 
     /// Select the candidate at `index`, reporting whether the selection
@@ -823,6 +1011,60 @@ impl Chooser {
         self.selected = index;
         true
     }
+}
+
+/// The categories a candidate list is filed under, in rail order.
+///
+/// Derived from the candidates themselves rather than taken as a second
+/// input, so the rail can only ever offer a category the gallery actually
+/// holds something for. The shared catalog decides which names may be
+/// offered and how many, exactly as it does for the store's own listing.
+fn discovered_categories(candidates: &[Candidate]) -> Vec<String> {
+    let names: BTreeSet<&str> = candidates
+        .iter()
+        .filter_map(|candidate| candidate.category.as_deref())
+        .collect();
+    catalog_categories(names)
+}
+
+/// The rail over `categories`, with the "all" entry leading it.
+///
+/// A store offering no categories has nothing to choose between, so the rail
+/// is empty and the layout gives its width to the tiles rather than drawing
+/// a column with one entry that does nothing.
+fn category_rail(categories: &[String]) -> Tabs {
+    let mut entries = Vec::new();
+    if !categories.is_empty() {
+        entries.push(Tab::new(ALL_CATEGORIES_LABEL));
+        entries.extend(categories.iter().map(|name| Tab::new(name.clone())));
+    }
+    Tabs::new(entries).with_orientation(TabsOrientation::Vertical)
+}
+
+/// The category rail entry `index` names, or `None` for the leading "all"
+/// entry and for an index the rail does not have.
+fn category_at(categories: &[String], index: usize) -> Option<&str> {
+    index
+        .checked_sub(1)
+        .and_then(|slot| categories.get(slot))
+        .map(String::as_str)
+}
+
+/// The candidates a rail entry shows, as indices into the whole list: those
+/// filed under `category`, plus every candidate filed under none, which
+/// belongs to every entry.
+fn visible_indices(candidates: &[Candidate], category: Option<&str>) -> Vec<usize> {
+    candidates
+        .iter()
+        .enumerate()
+        .filter(
+            |(_, candidate)| match (candidate.category.as_deref(), category) {
+                (None, _) | (Some(_), None) => true,
+                (Some(owner), Some(wanted)) => owner == wanted,
+            },
+        )
+        .map(|(index, _)| index)
+        .collect()
 }
 
 /// One settings drop-down over a fixed set of human choice names.

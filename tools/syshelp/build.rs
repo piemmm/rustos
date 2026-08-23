@@ -25,11 +25,14 @@
 //! `lib/wallpaper/assets/` — and emits one `[GraphicsFile]` table for the
 //! image builder to plant under `/System/Graphics`. Both are single,
 //! non-per-bundle trees walked by the same `GRAPHICS_FAMILIES` table and
-//! loop, each validated against its own family's contract
-//! (`tairix_icon`/`tairix_wallpaper`) as it is discovered: a name a consumer
-//! could never resolve, an over-large file, or (for icons) two files claiming
-//! one asset id fails the build closed rather than shipping artwork that
-//! would silently render as a fallback glyph or never be offered.
+//! loop; a family is either flat (icons) or files its assets one directory
+//! level deep in categories (wallpapers), which is one field on the family
+//! rather than a second walk. Each asset is validated against its own
+//! family's contract (`tairix_icon`/`tairix_wallpaper`) as it is discovered:
+//! a name a consumer could never resolve, an illegal category directory, an
+//! over-large file, or (for icons) two files claiming one asset id fails the
+//! build closed rather than shipping artwork that would silently render as a
+//! fallback glyph or never be offered.
 
 use std::fmt::Write as _;
 use std::fs;
@@ -62,6 +65,17 @@ const APP_ROOTS: &[&str] = &["userland/apps", "userland/gui", "userland/shell"];
 struct GraphicsFamily {
     /// Source directory, relative to the workspace root.
     source_root: &'static str,
+    /// Whether this family's assets sit directly in `source_root` or one
+    /// directory level deeper, and — when deeper — whether one such
+    /// directory name is legal for the family.
+    ///
+    /// `None` is a flat family (icons): the files are `source_root`'s own
+    /// children. `Some(is_legal)` is a categorised family (wallpapers): each
+    /// child of `source_root` is a category directory holding the files, and
+    /// `is_legal` is the family's own runtime definition of a category name a
+    /// consumer could resolve, so a directory no chooser could offer fails
+    /// the build rather than shipping unreachable artwork.
+    categorise: Option<fn(&str) -> bool>,
     /// The name of the `GraphicsFile::family` variant (`tairix_syshelp::
     /// GraphicsFamilyKind`) this family's rows are tagged with.
     ///
@@ -86,6 +100,7 @@ struct GraphicsFamily {
 const GRAPHICS_FAMILIES: &[GraphicsFamily] = &[
     GraphicsFamily {
         source_root: "lib/icon/assets",
+        categorise: None,
         family_variant: "Icon",
         max_bytes: tairix_icon::MAX_ARTWORK_BYTES,
         // A class master is either a `<asset-id>.png` raster or a
@@ -99,6 +114,7 @@ const GRAPHICS_FAMILIES: &[GraphicsFamily] = &[
     },
     GraphicsFamily {
         source_root: "lib/wallpaper/assets",
+        categorise: Some(tairix_wallpaper::is_wallpaper_category_name),
         family_variant: "Wallpaper",
         max_bytes: tairix_wallpaper::MAX_WALLPAPER_BYTES,
         identify: |name| tairix_wallpaper::is_wallpaper_file_name(name).then(|| name.to_string()),
@@ -204,8 +220,8 @@ fn main() {
 
 /// Discover every [`GraphicsFamily`]'s single-tree assets and write
 /// `graphics_files.rs` — one `GraphicsFile` row per asset, planted at
-/// `Graphics/<family's GraphicsFamilyKind::target_dir()>/<file>` on the
-/// image.
+/// `Graphics/<family's GraphicsFamilyKind::target_dir()>[/<category>]/<file>`
+/// on the image.
 ///
 /// Each discovered file is validated against its own family's `identify`
 /// contract before it is emitted, so the build fails closed on an asset a
@@ -216,11 +232,12 @@ fn main() {
 /// * the file must be at most `family.max_bytes` (the same untrusted-input
 ///   bound each family's own runtime consumer refuses over-long input
 ///   against), and
-/// * no two files in the same family may claim the same identifier.
+/// * no two files in the same directory may claim the same identifier.
 ///
-/// Families are walked in [`GRAPHICS_FAMILIES`] order and each family's
-/// files are sorted by name, exactly as the help and resource walks are, so
-/// the emitted table — and the planted image — is reproducible.
+/// Families are walked in [`GRAPHICS_FAMILIES`] order, each family's
+/// directories by [`family_directories`], and each directory's files sorted
+/// by name, exactly as the help and resource walks are, so the emitted table
+/// — and the planted image — is reproducible.
 fn emit_graphics_table(workspace: &Path) {
     let mut rows = String::from("[\n");
     for family in GRAPHICS_FAMILIES {
@@ -231,51 +248,60 @@ fn emit_graphics_table(workspace: &Path) {
         }
 
         let max_bytes = u64::try_from(family.max_bytes).expect("bound fits u64");
-        let mut seen_ids: Vec<String> = Vec::new();
-        for file in sorted_children(&assets) {
-            let path = assets.join(&file);
-            if !path.is_file() {
-                continue;
-            }
-            // A name the family's own runtime consumer would never resolve
-            // (an unknown id, a wrong extension, a path separator) can never
-            // be offered, so shipping it is a build error, not a silent
-            // fallback.
-            let id = (family.identify)(&file).unwrap_or_else(|| {
-                panic!(
-                    "{}: not a legal shipped name for the {} graphics family",
+        let mut seen_ids: Vec<(Option<String>, String)> = Vec::new();
+        for (category, dir) in family_directories(family, &assets) {
+            println!("cargo:rerun-if-changed={}", dir.display());
+            for file in sorted_children(&dir) {
+                let path = dir.join(&file);
+                if !path.is_file() {
+                    continue;
+                }
+                // A name the family's own runtime consumer would never
+                // resolve (an unknown id, a wrong extension, a path
+                // separator) can never be offered, so shipping it is a build
+                // error, not a silent fallback.
+                let id = (family.identify)(&file).unwrap_or_else(|| {
+                    panic!(
+                        "{}: not a legal shipped name for the {} graphics family",
+                        path.display(),
+                        family.family_variant
+                    )
+                });
+                // The byte bound is a fixed validation limit on untrusted
+                // input: an over-large asset is refused before it is decoded,
+                // so one that exceeds it must never reach the image.
+                let len = fs::metadata(&path)
+                    .unwrap_or_else(|e| panic!("stat {}: {e}", path.display()))
+                    .len();
+                assert!(
+                    len <= max_bytes,
+                    "{}: {len} bytes exceeds the {}-byte {} bound",
                     path.display(),
+                    family.max_bytes,
                     family.family_variant
-                )
-            });
-            // The byte bound is a fixed validation limit on untrusted input:
-            // an over-large asset is refused before it is decoded, so one
-            // that exceeds it must never reach the image.
-            let len = fs::metadata(&path)
-                .unwrap_or_else(|e| panic!("stat {}: {e}", path.display()))
-                .len();
-            assert!(
-                len <= max_bytes,
-                "{}: {len} bytes exceeds the {}-byte {} bound",
-                path.display(),
-                family.max_bytes,
-                family.family_variant
-            );
-            assert!(
-                !seen_ids.contains(&id),
-                "{}: two files claim the identifier `{id}`",
-                path.display()
-            );
-            seen_ids.push(id);
+                );
+                let claim = (category.clone(), id);
+                assert!(
+                    !seen_ids.contains(&claim),
+                    "{}: two files claim the identifier `{}`",
+                    path.display(),
+                    claim.1
+                );
+                seen_ids.push(claim);
 
-            println!("cargo:rerun-if-changed={}", path.display());
-            let abs = path.to_str().expect("graphics path is valid UTF-8");
-            let variant = family.family_variant;
-            writeln!(
-                rows,
-                "    GraphicsFile {{ family: GraphicsFamilyKind::{variant}, file: {file:?}, bytes: include_bytes!({abs:?}) }},"
-            )
-            .expect("write to String");
+                println!("cargo:rerun-if-changed={}", path.display());
+                let abs = path.to_str().expect("graphics path is valid UTF-8");
+                let variant = family.family_variant;
+                let category = match &category {
+                    Some(name) => format!("Some({name:?})"),
+                    None => String::from("None"),
+                };
+                writeln!(
+                    rows,
+                    "    GraphicsFile {{ family: GraphicsFamilyKind::{variant}, category: {category}, file: {file:?}, bytes: include_bytes!({abs:?}) }},"
+                )
+                .expect("write to String");
+            }
         }
     }
     rows.push(']');
@@ -284,6 +310,42 @@ fn emit_graphics_table(workspace: &Path) {
     fs::File::create(&dest)
         .and_then(|mut f| f.write_all(rows.as_bytes()))
         .expect("write generated graphics table");
+}
+
+/// The directories one graphics family's files are discovered in, each with
+/// the category it plants under: the family's own root and `None` for a flat
+/// family, or every category directory beneath it in name order for a
+/// categorised one.
+///
+/// A categorised family's root holds category directories and nothing else:
+/// a file sitting there would be planted nowhere and offered by nothing, and
+/// a directory whose name the family's own consumer could not resolve would
+/// ship artwork no chooser could reach — so either fails the build rather
+/// than passing silently.
+fn family_directories(family: &GraphicsFamily, assets: &Path) -> Vec<(Option<String>, PathBuf)> {
+    let Some(is_legal_category) = family.categorise else {
+        return vec![(None, assets.to_path_buf())];
+    };
+    sorted_children(assets)
+        .into_iter()
+        .map(|name| {
+            let path = assets.join(&name);
+            assert!(
+                path.is_dir(),
+                "{}: the {} graphics family files its assets in category \
+                 directories, so its root holds only directories",
+                path.display(),
+                family.family_variant
+            );
+            assert!(
+                is_legal_category(&name),
+                "{}: not a legal category directory for the {} graphics family",
+                path.display(),
+                family.family_variant
+            );
+            (Some(name), path)
+        })
+        .collect()
 }
 
 /// The planted bundle directory (`<name>.app`) of the app crate at

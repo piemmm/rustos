@@ -320,8 +320,9 @@ fn try_build_system_partition(
     // `tools/mkimage` drives (`tairix_syshelp::plant_system_payload`): each
     // command app's internationalised Help/ tree and its Resources/ files,
     // discovered from the bundle's own on-disk sources, plus the desktop's
-    // graphics assets (the raster icon masters) under Graphics/ — every
-    // intermediate directory (including Graphics/Icons) created on demand.
+    // graphics assets (the icon masters, and the wallpaper masters under
+    // their own category directories) under Graphics/ — every intermediate
+    // directory created on demand, however deep.
     // Sharing the walk with mkimage means the session vertical reads the same
     // bytes a real image ships and the two planters cannot list a different
     // payload set (there is no third, hand-mirrored copy of the loops here).
