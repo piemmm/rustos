@@ -41,6 +41,9 @@ the line under edit, and `Ctrl-D` on an empty line ends the session.
 Tab completes the word under the cursor: command names (builtins and
 installed command apps), file paths, and — for a redirection target or
 a reference-shaped word — resource references such as `sys:random`.
+A namespace completes its registered selectors a segment at a time
+(`state:` → `net/` → `wan/` → `link`); a segment shown as `<iface>` is a
+name only the running machine knows, so it is listed but never inserted.
 Piped or scripted input bypasses the editor and behaves identically
 with or without a terminal.
 

@@ -23,11 +23,31 @@
 //!   exactly the names the shell would resolve. A word spelling a path (it
 //!   contains `/`) completes as a path.
 //! * **Redirection target**: filesystem paths *and* resource references —
-//!   registered namespaces (`sys:` …) and their well-known selectors
+//!   registered namespaces (`sys:` …) and their catalogued selectors
 //!   ([`tairix_resref::KnownNamespace`]), the same registry the redirection
 //!   classifier applies.
 //! * **Any other argument**: filesystem paths, plus resource references once
 //!   the word could begin one (a registered-namespace prefix).
+//!
+//! # Resource references
+//!
+//! A word the shared resolution rule
+//! ([`tairix_resref::names_resource_reference`] — the same predicate
+//! [`tairix_resref::classify_target`] routes on) reads as a resource
+//! reference is completed *only* as one, in every role including command
+//! position: it can never denote a path, so offering path candidates for it
+//! would offer something the shell would not open.
+//!
+//! Within a namespace the selector completes one segment at a time, exactly
+//! as a path does, from the registry's selector catalogue
+//! ([`tairix_resref::KnownNamespace::selector_catalogue`]) — so
+//! `state:<Tab>` offers `irq/` and `net/`, and `state:net/wan/<Tab>` offers
+//! that interface's four state leaves. A catalogue segment spelled `<iface>`
+//! is a *placeholder*: a per-machine name the registry cannot enumerate. It
+//! becomes a display-only [`Completion::hints`] entry rather than a
+//! candidate — the user is shown what comes next without the shell inserting
+//! a name it does not know — and completion resumes past it once the name is
+//! typed.
 //!
 //! Degradation is deliberate and fail-closed: a line whose prefix does not
 //! lex (an open quote), or a word already carrying quoting or expansion
@@ -38,7 +58,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use tairix_cmdres::CommandEnv;
-use tairix_resref::KnownNamespace;
+use tairix_resref::{is_placeholder, KnownNamespace, SelectorEntry};
 
 pub use tairix_complete::{DirEntryInfo, DirLister};
 
@@ -70,6 +90,16 @@ pub struct Completion {
     pub end: usize,
     /// The candidates, sorted and deduplicated.
     pub candidates: Vec<Candidate>,
+    /// Display-only entries: what could come next where the shell cannot
+    /// supply the text itself — today a resource-selector placeholder
+    /// (`<iface>`), a per-machine name only the running system knows.
+    ///
+    /// A hint is listed beside the candidates and never inserted. Because a
+    /// lone real candidate would otherwise be inserted silently and hide the
+    /// alternative, a result carrying hints is always *listed* rather than
+    /// completed; hints are therefore raised only at a segment boundary (an
+    /// empty leaf), so completing a partly typed name is never held up.
+    pub hints: Vec<String>,
 }
 
 impl Completion {
@@ -79,6 +109,7 @@ impl Completion {
             start: cursor,
             end: cursor,
             candidates: Vec::new(),
+            hints: Vec::new(),
         }
     }
 }
@@ -138,31 +169,43 @@ pub fn complete(
 
     let role = word_role(before);
     let mut candidates = Vec::new();
+    let mut hints = Vec::new();
+    // A word the shared resolution rule reads as a resource reference is a
+    // reference in every role — it can never name a path — so it completes
+    // from the registry alone.
+    let reference = tairix_resref::names_resource_reference(&word);
     match role {
         Role::HereDocDelim => {}
         Role::Command => {
-            if word.contains('/') {
+            if reference {
+                selector_candidates(&word, &mut candidates, &mut hints);
+            } else if word.contains('/') {
                 path_candidates(&word, lister, &mut candidates);
             } else {
                 command_candidates(&word, env, lister, &mut candidates);
             }
         }
-        Role::Argument => {
-            resource_candidates(&word, false, &mut candidates);
-            path_candidates(&word, lister, &mut candidates);
-        }
-        Role::RedirTarget => {
-            resource_candidates(&word, true, &mut candidates);
-            path_candidates(&word, lister, &mut candidates);
+        Role::Argument | Role::RedirTarget => {
+            if reference {
+                selector_candidates(&word, &mut candidates, &mut hints);
+            } else {
+                // A redirection target's blank slate offers every namespace;
+                // an empty argument word does not (it would bury the paths).
+                namespace_candidates(&word, role == Role::RedirTarget, &mut candidates);
+                path_candidates(&word, lister, &mut candidates);
+            }
         }
     }
 
     candidates.sort_by(|a, b| a.display.cmp(&b.display));
     candidates.dedup_by(|a, b| a.insert == b.insert);
+    hints.sort();
+    hints.dedup();
     Completion {
         start,
         end: cursor,
         candidates,
+        hints,
     }
 }
 
@@ -289,31 +332,14 @@ fn command_candidates(
     }
 }
 
-/// Candidates from the resource-reference registry: registered namespaces
-/// for a plain prefix, and a namespace's well-known selectors once the `:`
-/// is typed. `offer_all` additionally offers every namespace for an empty
-/// word (a redirection target's blank slate).
-fn resource_candidates(word: &str, offer_all: bool, out: &mut Vec<Candidate>) {
-    if let Some(colon) = word.find(':') {
-        let (prefix, rest) = (&word[..colon], &word[colon + 1..]);
-        let Some(namespace) = KnownNamespace::from_name(prefix) else {
-            return;
-        };
-        // `sys:/…` is an alias-path spelling, not a reference.
-        if rest.starts_with('/') || rest.contains('/') {
-            return;
-        }
-        for &selector in namespace.well_known_selectors() {
-            if selector.starts_with(rest) {
-                out.push(Candidate {
-                    insert: format!("{prefix}:{selector}"),
-                    display: format!("{prefix}:{selector}"),
-                    closing: Some(' '),
-                });
-            }
-        }
-        return;
-    }
+/// The registered namespace prefixes a plain (not yet reference-shaped) word
+/// could begin: `st` offers `state:` and `stats:`. `offer_all` additionally
+/// offers every namespace for an empty word — a redirection target's blank
+/// slate, where a namespace is as likely as a filename.
+///
+/// The candidate stays open (no closing character): the user carries on into
+/// the selector.
+fn namespace_candidates(word: &str, offer_all: bool, out: &mut Vec<Candidate>) {
     if word.is_empty() && !offer_all {
         return;
     }
@@ -327,6 +353,134 @@ fn resource_candidates(word: &str, offer_all: bool, out: &mut Vec<Candidate>) {
             });
         }
     }
+}
+
+/// Candidates for a reference-shaped `word` (`state:net/wan/li`): the next
+/// selector segment, from the namespace's registry catalogue.
+///
+/// The walk mirrors path completion — the segments before the last `/` are
+/// fixed, the text after it is the prefix being completed — so a deep
+/// selector is reached one segment at a time. A catalogue placeholder at the
+/// completing position becomes a `hints` entry instead of a candidate; see
+/// [`Completion::hints`] for why that is display-only and why it is raised
+/// only at a segment boundary.
+///
+/// Inserts are built verbatim rather than through [`escape_word`]: every
+/// character of the reference grammar (`a-z0-9-_./:?=`) is an ordinary word
+/// character to the shell's lexer, so escaping would only inject backslashes
+/// into the reference.
+fn selector_candidates(word: &str, out: &mut Vec<Candidate>, hints: &mut Vec<String>) {
+    // The rule that classified `word` guarantees a `:` with a registered
+    // namespace before it, but this function must stand on its own.
+    let Some(colon) = word.find(':') else {
+        return;
+    };
+    let (prefix, rest) = (&word[..colon], &word[colon + 1..]);
+    let Some(namespace) = KnownNamespace::from_name(prefix) else {
+        return;
+    };
+    let (fixed, leaf) = tairix_complete::split_path_word(rest);
+    // `fixed` is empty or ends in `/`, so the split's last element is always
+    // the empty tail after that separator. Any *other* empty element is a
+    // malformed selector (`net//link`): complete it to nothing rather than to
+    // a spelling the reference parser would reject.
+    let mut typed: Vec<&str> = fixed.split('/').collect();
+    typed.pop();
+    if typed.iter().any(|segment| segment.is_empty()) {
+        return;
+    }
+    let catalogue = namespace.selector_catalogue();
+    for entry in catalogue {
+        let segments: Vec<&str> = entry.segments().collect();
+        // Nothing left to offer once the whole selector is typed.
+        if segments.len() <= typed.len() {
+            continue;
+        }
+        if !matches_typed(&segments, &typed, catalogue) {
+            continue;
+        }
+        let next = segments[typed.len()];
+        let last = segments.len() == typed.len() + 1;
+        if is_placeholder(next) {
+            // A name only the running machine knows. Shown at a segment
+            // boundary so the shape is discoverable, never inserted.
+            if leaf.is_empty() {
+                hints.push(String::from(next));
+            }
+            continue;
+        }
+        if !next.starts_with(leaf) {
+            continue;
+        }
+        let mut insert = format!("{prefix}:{fixed}{next}");
+        let mut display = String::from(next);
+        let closing = if last {
+            match entry.mandatory_param {
+                // A rate is undefined without its sampling window, so the
+                // completed reference carries the parameter the user must
+                // fill in rather than closing as a finished word.
+                Some(param) => {
+                    for text in [&mut insert, &mut display] {
+                        text.push('?');
+                        text.push_str(param);
+                        text.push('=');
+                    }
+                    None
+                }
+                None => Some(' '),
+            }
+        } else {
+            insert.push('/');
+            display.push('/');
+            None
+        };
+        out.push(Candidate {
+            insert,
+            display,
+            closing,
+        });
+    }
+}
+
+/// Whether `segments` (one catalogue entry) is still in play given the
+/// non-empty `typed` segments: each fixed position must match, literally for
+/// a literal segment and by any name for a placeholder.
+///
+/// A literal sibling wins its position: when some entry in `catalogue`
+/// spells `typed[i]` literally there, entries that would match it only
+/// through a placeholder are out. That mirrors the resolvers' own arm
+/// order — `state:net/resolver/…` and `stats:net/stack/…` are matched before
+/// `net/<iface>/…`, which makes `resolver` and `stack` reserved interface
+/// names — so completion offers exactly what would resolve.
+fn matches_typed(segments: &[&str], typed: &[&str], catalogue: &[SelectorEntry]) -> bool {
+    for (index, &fixed) in typed.iter().enumerate() {
+        let Some(&segment) = segments.get(index) else {
+            return false;
+        };
+        if is_placeholder(segment) {
+            if literal_claims(catalogue, typed, index, fixed) {
+                return false;
+            }
+        } else if segment != fixed {
+            return false;
+        }
+    }
+    true
+}
+
+/// Whether any catalogue entry spells `fixed` literally at `index`, having
+/// itself matched every earlier typed segment. Such an entry claims the
+/// position, so a placeholder cannot also match there.
+fn literal_claims(catalogue: &[SelectorEntry], typed: &[&str], index: usize, fixed: &str) -> bool {
+    catalogue.iter().any(|entry| {
+        let segments: Vec<&str> = entry.segments().collect();
+        segments.get(index) == Some(&fixed)
+            && segments
+                .iter()
+                .zip(typed)
+                .take(index)
+                .all(|(&segment, &earlier)| is_placeholder(segment) || segment == earlier)
+    })
 }
 
 /// Filesystem path candidates: the shared `lib/complete` policy (the
@@ -400,6 +554,10 @@ mod tests {
 
     fn inserts(candidates: &[Candidate]) -> Vec<&str> {
         candidates.iter().map(|c| c.insert.as_str()).collect()
+    }
+
+    fn displays(candidates: &[Candidate]) -> Vec<&str> {
+        candidates.iter().map(|c| c.display.as_str()).collect()
     }
 
     /// A command-position word completes from builtins and the `.app`
@@ -482,7 +640,7 @@ mod tests {
     }
 
     /// A redirection target offers resource namespaces alongside files, and
-    /// a typed namespace completes its well-known selectors.
+    /// a typed namespace completes its catalogued selectors.
     #[test]
     fn redirection_target_offers_resources() {
         let lister = MapLister::new(&[(".", &[("sysinfo.txt", false)])]);
@@ -491,6 +649,7 @@ mod tests {
 
         let selectors = complete("cat < sys:", 10, CommandEnv::default(), &lister);
         assert_eq!(inserts(&selectors.candidates), ["sys:null", "sys:random"]);
+        assert_eq!(displays(&selectors.candidates), ["null", "random"]);
 
         let narrowed = complete("cat < sys:r", 11, CommandEnv::default(), &lister);
         assert_eq!(inserts(&narrowed.candidates), ["sys:random"]);
@@ -506,6 +665,208 @@ mod tests {
         // But an empty argument word does not spam namespaces.
         let empty = complete("cat ", 4, CommandEnv::default(), &lister);
         assert!(empty.candidates.is_empty());
+    }
+
+    /// The registry's whole namespace set is offered from a shared prefix, so
+    /// `st` reaches `state:` and `stats:` as well as any file.
+    #[test]
+    fn namespace_prefixes_are_offered_from_a_partial_word() {
+        let lister = MapLister::new(&[(".", &[("stack.txt", false)])]);
+        let result = complete("cat st", 6, CommandEnv::default(), &lister);
+        assert_eq!(
+            inserts(&result.candidates),
+            ["stack.txt", "state:", "stats:"]
+        );
+        // A namespace prefix stays open: the user carries on into a selector.
+        for candidate in &result.candidates {
+            if candidate.insert.ends_with(':') {
+                assert_eq!(candidate.closing, None);
+            }
+        }
+    }
+
+    /// A namespace completes its selectors one segment at a time, exactly as
+    /// a path does: a non-final segment gains `/` and stays open, a leaf
+    /// closes the word.
+    #[test]
+    fn namespace_selectors_complete_one_segment_at_a_time() {
+        let lister = MapLister::new(&[(".", &[])]);
+
+        let top = complete("cat state:", 10, CommandEnv::default(), &lister);
+        assert_eq!(inserts(&top.candidates), ["state:irq/", "state:net/"]);
+        assert_eq!(displays(&top.candidates), ["irq/", "net/"]);
+        assert!(top.candidates.iter().all(|c| c.closing.is_none()));
+
+        let leaves = complete("cat state:net/wan/", 18, CommandEnv::default(), &lister);
+        assert_eq!(
+            displays(&leaves.candidates),
+            ["active-member", "address", "link", "member-health"]
+        );
+        assert_eq!(leaves.candidates[2].insert, "state:net/wan/link");
+        assert!(leaves.candidates.iter().all(|c| c.closing == Some(' ')));
+
+        // A partial leaf narrows, and the span covers the whole word so the
+        // insert replaces it entire.
+        let narrowed = complete("cat state:net/wan/li", 20, CommandEnv::default(), &lister);
+        assert_eq!(inserts(&narrowed.candidates), ["state:net/wan/link"]);
+        assert_eq!((narrowed.start, narrowed.end), (4, 20));
+    }
+
+    /// A `.`-separated leaf is one segment, so the counter family narrows on
+    /// its own prefix.
+    #[test]
+    fn dotted_leaves_narrow_within_one_segment() {
+        let lister = MapLister::new(&[(".", &[])]);
+        let result = complete("cat stats:net/wan/rx.", 21, CommandEnv::default(), &lister);
+        assert_eq!(
+            displays(&result.candidates),
+            [
+                "rx.bps?window=",
+                "rx.bytes",
+                "rx.dropped",
+                "rx.packets",
+                "rx.pps?window="
+            ]
+        );
+    }
+
+    /// A rate is undefined without a sampling window, so its completion
+    /// carries the mandatory parameter and stays open for the value rather
+    /// than closing as a finished word.
+    #[test]
+    fn a_windowed_rate_completes_with_its_mandatory_parameter() {
+        let lister = MapLister::new(&[(".", &[])]);
+        let result = complete(
+            "cat stats:net/wan/rx.pp",
+            23,
+            CommandEnv::default(),
+            &lister,
+        );
+        assert_eq!(
+            inserts(&result.candidates),
+            ["stats:net/wan/rx.pps?window="]
+        );
+        assert_eq!(result.candidates[0].closing, None);
+    }
+
+    /// A per-machine name the registry cannot enumerate is offered as a
+    /// display-only hint beside the real candidates, never as an insert — and
+    /// only at a segment boundary, so a partly typed name still completes.
+    #[test]
+    fn placeholder_segments_become_display_only_hints() {
+        let lister = MapLister::new(&[(".", &[])]);
+
+        // Both shapes the position accepts are shown: a plain interface, and
+        // a bond alias (whose aggregation leaves only a bond serves).
+        let boundary = complete("cat state:net/", 14, CommandEnv::default(), &lister);
+        assert_eq!(inserts(&boundary.candidates), ["state:net/resolver/"]);
+        assert_eq!(boundary.hints, ["<bond>", "<iface>"]);
+
+        // Typing into the segment is completion, not discovery: the hint
+        // steps aside so `resolver/` can be inserted.
+        let typing = complete("cat state:net/r", 15, CommandEnv::default(), &lister);
+        assert_eq!(inserts(&typing.candidates), ["state:net/resolver/"]);
+        assert!(typing.hints.is_empty());
+
+        // Two distinct placeholders at one position are both shown.
+        let irq = complete("cat info:", 9, CommandEnv::default(), &lister);
+        assert!(irq.hints.is_empty(), "the first segment is all literal");
+        let limits = complete("cat info:limits/", 16, CommandEnv::default(), &lister);
+        assert!(limits.candidates.is_empty());
+        assert_eq!(limits.hints, ["<kind>"]);
+    }
+
+    /// A literal sibling claims its position, mirroring the resolvers' own
+    /// arm order: `net/stack` and `net/resolver` are reserved names, so they
+    /// never also match as an interface, and their leaves are not offered
+    /// under an interface that happens to be typed there.
+    #[test]
+    fn a_literal_segment_claims_its_position_from_a_placeholder() {
+        let lister = MapLister::new(&[(".", &[])]);
+
+        // `stack` resolves only its own defence counters.
+        let stack = complete("cat stats:net/stack/", 20, CommandEnv::default(), &lister);
+        assert_eq!(stack.candidates.len(), 11, "the defence counters");
+        assert!(
+            stack
+                .candidates
+                .iter()
+                .all(|c| c.insert.starts_with("stats:net/stack/")),
+            "no interface counters leak in: {:?}",
+            displays(&stack.candidates)
+        );
+
+        // An interface's counters still complete under a real name.
+        let iface = complete("cat stats:net/wan/", 18, CommandEnv::default(), &lister);
+        assert_eq!(iface.candidates.len(), 10, "6 counters and 4 rates");
+
+        // A fully typed leaf is a dead end, not a placeholder match.
+        for line in ["cat stats:irq/count/", "cat stats:cpu/load/"] {
+            let cursor = line.chars().count();
+            let result = complete(line, cursor, CommandEnv::default(), &lister);
+            assert!(
+                result.candidates.is_empty() && result.hints.is_empty(),
+                "{line:?} should be a dead end, got {:?}",
+                displays(&result.candidates)
+            );
+        }
+    }
+
+    /// A reference-shaped word completes as a reference at command position
+    /// too — a bare `state:<Tab>` at the prompt lists the namespace — while a
+    /// word that is not reference-shaped still offers only runnable names.
+    #[test]
+    fn command_position_completes_a_reference_shaped_word() {
+        let lister = MapLister::new(&[("/System/Commands", &[("stat.app", true)]), (".", &[])]);
+
+        let reference = complete("state:", 6, CommandEnv::default(), &lister);
+        assert_eq!(inserts(&reference.candidates), ["state:irq/", "state:net/"]);
+
+        // Without the `:` the word is a command name: no namespace noise.
+        let command = complete("stat", 4, CommandEnv::default(), &lister);
+        assert_eq!(inserts(&command.candidates), ["stat"]);
+    }
+
+    /// The `Alias:/path` spelling is a path, not a reference, so it completes
+    /// through the filesystem — the shared classification rule, never a
+    /// second copy of it.
+    #[test]
+    fn an_alias_path_still_completes_as_a_path() {
+        let lister = MapLister::new(&[("sys:", &[("etc", true)])]);
+        let result = complete("cat sys:/e", 10, CommandEnv::default(), &lister);
+        assert_eq!(inserts(&result.candidates), ["sys:/etc/"]);
+    }
+
+    /// A selector with an empty segment is malformed — the reference parser
+    /// rejects it — so it completes to nothing rather than to a spelling that
+    /// could never resolve.
+    #[test]
+    fn a_malformed_selector_completes_to_nothing() {
+        let lister = MapLister::new(&[(".", &[])]);
+        for line in ["cat state:net//", "cat state:net//li", "cat stats://mem/"] {
+            let cursor = line.chars().count();
+            let result = complete(line, cursor, CommandEnv::default(), &lister);
+            assert!(
+                result.candidates.is_empty() && result.hints.is_empty(),
+                "{line:?} is malformed and must offer nothing, got {:?}",
+                displays(&result.candidates)
+            );
+        }
+    }
+
+    /// A namespace with no resolver wired advertises nothing, so completion
+    /// cannot offer a name that would resolve to nothing.
+    #[test]
+    fn an_unserved_namespace_completes_to_nothing() {
+        let lister = MapLister::new(&[(".", &[])]);
+        for line in ["cat disk:", "cat tty:", "cat proc:"] {
+            let cursor = line.chars().count();
+            let result = complete(line, cursor, CommandEnv::default(), &lister);
+            assert!(
+                result.candidates.is_empty() && result.hints.is_empty(),
+                "{line:?} has no wired resolver and must offer nothing"
+            );
+        }
     }
 
     /// The word before a pipe or `;` is a fresh command position.

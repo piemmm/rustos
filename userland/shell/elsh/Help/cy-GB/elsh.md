@@ -40,7 +40,11 @@ Ar derfynell mae'r gragen yn cynnig golygydd llinell rhyngweithiol: mae
 I fyny/I lawr yn pori hanes y gorchmynion, mae `Ctrl-R` yn ei chwilio,
 mae `Ctrl-C` yn gollwng y llinell gyfredol, mae `Ctrl-D` ar linell wag
 yn gorffen y sesiwn, ac mae Tab yn cwblhau enwau gorchmynion, llwybrau a
-chyfeiriadau adnoddau fel `sys:random`.
+chyfeiriadau adnoddau fel `sys:random`. Mae gofod enwau yn cwblhau ei
+ddetholyddion cofrestredig fesul segment
+(`state:` → `net/` → `wan/` → `link`); mae segment a ddangosir fel
+`<iface>` yn enw nad yw'n hysbys ond i'r peiriant sy'n rhedeg, felly caiff
+ei restru ond nid ei fewnosod.
 
 ## OPTIONS
 

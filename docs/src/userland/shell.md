@@ -244,14 +244,37 @@ command-position word completes from the builtin table and the `.app`
 bundles of the shared command-search directories
 (`tairix_cmdres::command_search_dirs` — so exactly the names the shell would
 resolve are offered); argument words complete as filesystem paths through
-the injected `DirLister` (the shared `lib/complete` seam, kernel-authorised `fs_readdir`); a redirection
-target additionally offers the registered resource namespaces (`sys:` …) and
-their well-known selectors (`tairix_resref::KnownNamespace`) — the same
-registry the redirection classifier applies, cross-checked against the
-kernel resolver. A unique candidate inserts (directories stay open with `/`,
-finished words close with a space), several extend to their longest common
-prefix, and an unextendable set is listed inline. Unlexable prefixes and
-quoted/expansion-bearing words degrade to no candidates, fail closed.
+the injected `DirLister` (the shared `lib/complete` seam, kernel-authorised `fs_readdir`); and an
+argument or redirection target additionally offers the registered resource
+namespaces (`sys:`, `info:`, `state:`, `stats:` …). A unique candidate inserts
+(directories stay open with `/`, finished words close with a space), several
+extend to their longest common prefix, and an unextendable set is listed
+inline. Unlexable prefixes and quoted/expansion-bearing words degrade to no
+candidates, fail closed.
+
+A word the shared resolution rule reads as a resource reference
+(`tairix_resref::names_resource_reference` — the predicate `classify_target`
+routes on) completes only as a reference, in every position including command
+position, since it can never name a path. Within a namespace the selector
+completes one `/`-separated segment at a time, exactly as a path does, from
+the registry's selector catalogue
+(`tairix_resref::KnownNamespace::selector_catalogue`) — so `state:<Tab>`
+offers `irq/` and `net/`, and `state:net/wan/<Tab>` offers that interface's
+four state leaves. The catalogue is cross-checked by each serving resolver's
+own tests (the kernel's for `sys:`, `lib/procinfo`'s for
+`info:`/`state:`/`stats:`), so completion cannot advertise a selector nothing
+serves, and a namespace with no resolver wired offers nothing.
+
+A catalogue segment spelled `<iface>` is a placeholder: a per-machine name the
+registry cannot enumerate. It becomes a display-only `Completion::hints` entry
+rather than a candidate — listed so the shape is discoverable, never inserted —
+and completion resumes past it once the name is typed. A result carrying hints
+is always listed rather than inserted, so a lone real candidate cannot silently
+hide the alternative; hints are raised only at a segment boundary, so
+completing a partly typed name is unaffected. A selector whose reference needs
+a query parameter to be valid (a windowed rate) completes with that parameter
+in place of the closing space: `stats:net/wan/rx.pp<Tab>` →
+`stats:net/wan/rx.pps?window=`.
 
 The `RtProcessHost` launches external commands through the `spawn` syscall
 and reaps them through `wait`. The command's words travel to the child as

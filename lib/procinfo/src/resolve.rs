@@ -32,6 +32,14 @@
 //! syn-backlog-started,syn-backlog-expired,accepts,accept-overflow,
 //! tcp-resets}` read from the stack's one socket table,
 //! `plans/NETWORK.md` §5).
+//!
+//! **A selector added here must be added to the registry too.** The served set
+//! is advertised for display and completion by
+//! [`KnownNamespace::selector_catalogue`](tairix_resref::KnownNamespace::selector_catalogue),
+//! and the `catalogued_selectors_are_recognised` test below proves every
+//! advertised selector is one this resolver answers. That check is
+//! one-directional — no test can enumerate match arms — so a new arm left out
+//! of the catalogue simply stays undiscoverable in the shell.
 
 use alloc::format;
 use alloc::string::{String, ToString};
@@ -2343,6 +2351,98 @@ mod tests {
     ) -> Result<super::ResourceResponse, ResolveInfoError> {
         let reference = parse(s).expect("parse");
         resolve(&reference, now(), fixture)
+    }
+
+    /// The registry cross-check: every selector `lib/resref` catalogues for
+    /// the three namespaces *this* resolver serves must be one it recognises,
+    /// so the shell's completion can never advertise a name that resolves to
+    /// nothing.
+    ///
+    /// The claim under test is recognition, not success: a catalogued
+    /// selector may still be refused for want of a capability, or need a
+    /// decoration this fixture does not supply, and both are orthogonal to
+    /// whether the registry spells a served resource. What must never happen
+    /// is [`ResolveInfoError::UnknownSelector`] or
+    /// [`ResolveInfoError::NamespaceNotServed`].
+    ///
+    /// A placeholder segment is filled with a name the fixture actually
+    /// serves, so the walk exercises the real match arms rather than their
+    /// fail-closed edges.
+    #[test]
+    fn catalogued_selectors_are_recognised() {
+        use alloc::format;
+        use alloc::string::ToString;
+        use tairix_resref::{is_placeholder, KnownNamespace};
+
+        /// The fixture-backed stand-in for each placeholder the catalogue
+        /// spells. An unmapped placeholder fails the test rather than
+        /// silently resolving something else.
+        fn sample(placeholder: &str) -> &'static str {
+            match placeholder {
+                // `fixture_net_facts`/`fixture_net_state`/`fixture_net_counters`.
+                "<iface>" => "wan",
+                // `fixture_bond_members`.
+                "<bond>" => "bond0",
+                // `fixture_irqs`' first line.
+                "<line>" => "27",
+                // `fixture_cpu_times` carries CPUs 0 and 1.
+                "<cpu>" => "0",
+                "<kind>" => "open-streams",
+                // `RECLAIM_CLASS_NAMES`, served by `fixture_reclaim`.
+                "<class>" => "clean-file-data",
+                other => panic!("no fixture sample for placeholder {other}"),
+            }
+        }
+
+        let fixture = Fixture::new();
+        let mut checked = 0usize;
+        for ns in [
+            KnownNamespace::Info,
+            KnownNamespace::State,
+            KnownNamespace::Stats,
+        ] {
+            let catalogue = ns.selector_catalogue();
+            assert!(
+                !catalogue.is_empty(),
+                "{} is served here but catalogues nothing",
+                ns.as_str()
+            );
+            for entry in catalogue {
+                let filled: Vec<String> = entry
+                    .segments()
+                    .map(|segment| {
+                        if is_placeholder(segment) {
+                            sample(segment).to_string()
+                        } else {
+                            segment.to_string()
+                        }
+                    })
+                    .collect();
+                let mut spelling = format!("{}:{}", ns.as_str(), filled.join("/"));
+                if let Some(param) = entry.mandatory_param {
+                    spelling.push('?');
+                    spelling.push_str(param);
+                    spelling.push_str("=1s");
+                }
+                // A capability denial or an unsupported decoration says
+                // nothing about whether the selector is spelled right; only
+                // an unrecognised one is a registry error.
+                if let Err(err) = resolve_str(&spelling, &fixture) {
+                    assert!(
+                        !matches!(
+                            err,
+                            ResolveInfoError::UnknownSelector
+                                | ResolveInfoError::NamespaceNotServed
+                        ),
+                        "{spelling} is catalogued as served but this resolver \
+                         does not recognise it: {err:?}"
+                    );
+                }
+                checked += 1;
+            }
+        }
+        // A registry that quietly emptied would otherwise pass vacuously.
+        assert!(checked >= 70, "only {checked} catalogued selectors checked");
     }
 
     #[test]

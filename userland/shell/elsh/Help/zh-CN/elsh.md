@@ -30,7 +30,8 @@ elsh — TAIRiX 的命令 shell
 shell 不接受操作数：脚本执行尚不在其语法之内。
 
 在终端上，shell 提供交互式行编辑器：上/下方向键浏览命令历史，`Ctrl-R` 搜索历史，`Ctrl-C` 放弃当前行，空行上的
-`Ctrl-D` 结束会话，Tab 补全命令名、路径以及 `sys:random` 这样的资源引用。
+`Ctrl-D` 结束会话，Tab 补全命令名、路径以及 `sys:random` 这样的资源引用。命名空间按段逐层补全其已注册的选择符（`state:`
+→ `net/` → `wan/` → `link`）；显示为 `<iface>` 的段是只有运行中的机器才知道的名称，因此只列出而不插入。
 
 ## OPTIONS
 

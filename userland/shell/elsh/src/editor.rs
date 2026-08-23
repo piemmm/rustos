@@ -558,9 +558,19 @@ impl<'a> Session<'a> {
     /// inserted (with its closing character); several candidates extend to
     /// their longest common prefix, or — when nothing extends — are listed
     /// inline, after which the caller's render repaints the prompt.
+    ///
+    /// A result carrying display-only hints
+    /// ([`crate::complete::Completion::hints`]) is always listed: inserting
+    /// or extending would settle on text the hint says is only one of the
+    /// possibilities, so the user sees the choice instead.
     fn complete(&mut self, console: &dyn Console, completer: &dyn Completer) {
         let line: String = self.line.iter().collect();
         let completion = completer.complete(&line, self.cursor);
+        let hints = completion.hints.as_slice();
+        if !hints.is_empty() {
+            self.list_candidates(console, &completion.candidates, hints);
+            return;
+        }
         match completion.candidates.as_slice() {
             [] => {}
             [only] => {
@@ -576,7 +586,7 @@ impl<'a> Session<'a> {
                 if common.len() > completion.end - completion.start {
                     self.replace_span(completion.start, completion.end, &common);
                 } else {
-                    self.list_candidates(console, many);
+                    self.list_candidates(console, many, hints);
                 }
             }
         }
@@ -598,18 +608,27 @@ impl<'a> Session<'a> {
         self.line.extend(tail);
     }
 
-    /// Write the candidate listing on its own lines; the caller's render
-    /// then repaints the prompt and line below it.
-    fn list_candidates(&self, console: &dyn Console, candidates: &[crate::complete::Candidate]) {
+    /// Write the candidate listing on its own lines, the display-only hints
+    /// last; the caller's render then repaints the prompt and line below it.
+    fn list_candidates(
+        &self,
+        console: &dyn Console,
+        candidates: &[crate::complete::Candidate],
+        hints: &[String],
+    ) {
+        let displays = candidates
+            .iter()
+            .map(|candidate| candidate.display.as_str())
+            .chain(hints.iter().map(String::as_str));
         let mut out = String::from("\r\n");
         let mut col = 0usize;
-        for candidate in candidates {
-            let cell = candidate.display.chars().count() + 2;
+        for display in displays {
+            let cell = display.chars().count() + 2;
             if col > 0 && col + cell > self.width {
                 out.push_str("\r\n");
                 col = 0;
             }
-            out.push_str(&candidate.display);
+            out.push_str(display);
             out.push_str("  ");
             col += cell;
         }
@@ -637,10 +656,12 @@ mod tests {
     use alloc::vec::Vec;
     use tairix_curses::{Event, Size};
 
-    /// A scripted completer: returns a fixed span and candidate list.
+    /// A scripted completer: returns a fixed span, candidate list, and
+    /// display-only hint list.
     struct FixedCompleter {
         start: usize,
         candidates: Vec<Candidate>,
+        hints: Vec<String>,
     }
 
     impl FixedCompleter {
@@ -648,6 +669,7 @@ mod tests {
             Self {
                 start: 0,
                 candidates: Vec::new(),
+                hints: Vec::new(),
             }
         }
 
@@ -662,6 +684,21 @@ mod tests {
                         closing,
                     })
                     .collect(),
+                hints: Vec::new(),
+            }
+        }
+
+        /// The same, plus the display-only hints a resource-selector
+        /// placeholder raises.
+        fn with_hints(
+            start: usize,
+            inserts: &[&str],
+            closing: Option<char>,
+            hints: &[&str],
+        ) -> Self {
+            Self {
+                hints: hints.iter().map(|hint| (*hint).to_string()).collect(),
+                ..Self::with(start, inserts, closing)
             }
         }
     }
@@ -672,6 +709,7 @@ mod tests {
                 start: self.start,
                 end: cursor,
                 candidates: self.candidates.clone(),
+                hints: self.hints.clone(),
             }
         }
     }
@@ -952,6 +990,26 @@ mod tests {
         assert_eq!(outcome, Some(ReadOutcome::Line("note".to_string())));
         assert!(out.contains("notebooks/"), "listing shown: {out:?}");
         assert!(out.contains("notes.txt"), "listing shown: {out:?}");
+    }
+
+    /// A completion carrying a display-only hint is listed, never inserted:
+    /// a lone real candidate must not silently settle the word when the hint
+    /// says a per-machine name is equally valid there.
+    #[test]
+    fn tab_lists_rather_than_inserting_when_a_hint_is_present() {
+        let mut editor = Editor::new();
+        let completer = FixedCompleter::with_hints(0, &["resolver/"], None, &["<iface>"]);
+        let mut events = chars("state:net/");
+        events.push(Event::Tab);
+        events.push(Event::Enter);
+        let (outcome, out) = drive(&mut editor, events, &completer);
+        assert_eq!(
+            outcome,
+            Some(ReadOutcome::Line("state:net/".to_string())),
+            "the line is untouched"
+        );
+        assert!(out.contains("resolver/"), "candidate listed: {out:?}");
+        assert!(out.contains("<iface>"), "hint listed: {out:?}");
     }
 
     #[test]

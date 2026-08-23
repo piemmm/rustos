@@ -200,21 +200,42 @@ impl KnownNamespace {
         KnownNamespace::Cap,
     ];
 
-    /// The namespace's *well-known selectors*: the closed, documented set of
-    /// selectors the platform serves for every installation (today the
-    /// kernel-resolved unprivileged `sys:` members). Registry data for
-    /// display and completion only — spelling grants nothing, and whether a
+    /// The namespace's *selector catalogue*: the selectors the platform
+    /// serves today, as [`SelectorEntry`] spellings. Registry data for
+    /// display and completion only — a spelling grants nothing, and whether a
     /// caller may *open* one is decided by the capability-checked resolver at
-    /// open time. A namespace whose members are discovered per machine
-    /// (`disk:`, `net:`, …) has no well-known set and returns an empty slice.
+    /// open time.
     ///
-    /// The kernel resolver's unit tests cross-check this table against what
-    /// it actually serves, so the registry cannot drift from reality.
+    /// A namespace with no resolver wired yet returns an empty slice rather
+    /// than a plausible-looking set: completion must never advertise a name
+    /// nothing can serve.
+    ///
+    /// Each serving resolver's unit tests cross-check this table against what
+    /// it actually answers — the kernel's `resource` resolver for `sys:`, and
+    /// `lib/procinfo`'s userspace resolver for `info:`, `state:`, and
+    /// `stats:` — so the registry cannot drift from reality.
     #[must_use]
-    pub fn well_known_selectors(self) -> &'static [&'static str] {
+    pub fn selector_catalogue(self) -> &'static [SelectorEntry] {
         match self {
-            KnownNamespace::Sys => &["null", "random"],
-            _ => &[],
+            KnownNamespace::Sys => SYS_SELECTORS,
+            KnownNamespace::Info => INFO_SELECTORS,
+            KnownNamespace::State => STATE_SELECTORS,
+            KnownNamespace::Stats => STATS_SELECTORS,
+            // No resolver is wired for these namespaces yet; their members
+            // are discovered per machine and gain a catalogue in place when
+            // a resolver lands.
+            KnownNamespace::Disk
+            | KnownNamespace::Part
+            | KnownNamespace::Vol
+            | KnownNamespace::Tty
+            | KnownNamespace::Net
+            | KnownNamespace::Input
+            | KnownNamespace::Audio
+            | KnownNamespace::Gpu
+            | KnownNamespace::Bus
+            | KnownNamespace::Svc
+            | KnownNamespace::Proc
+            | KnownNamespace::Cap => &[],
         }
     }
 
@@ -242,6 +263,170 @@ impl KnownNamespace {
         })
     }
 }
+
+/// One entry in a namespace's *selector catalogue*: a selector spelling the
+/// platform serves, without its `namespace:` prefix.
+///
+/// Registry data for display and completion only — a spelling here grants
+/// nothing, and whether a caller may actually read the resource is decided by
+/// the capability-checked resolver at open time.
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
+pub struct SelectorEntry {
+    /// The `/`-separated selector.
+    ///
+    /// A segment spelled `<name>` is a **placeholder**: a name discovered per
+    /// machine (an interface, an interrupt line), or one defined by another
+    /// crate's closed table (a resource-limit kind, a reclaim class), which
+    /// this dependency-free registry cannot enumerate without copying a
+    /// source of truth that already exists elsewhere. A consumer completes
+    /// the literal segments and leaves a placeholder to the user.
+    pub selector: &'static str,
+    /// The query parameter a complete reference must carry, or [`None`] when
+    /// the selector takes none.
+    ///
+    /// `Some("window")` for the windowed throughput rates, which are
+    /// undefined without a sampling window (`plans/ALIAS.md` §6.3).
+    pub mandatory_param: Option<&'static str>,
+}
+
+impl SelectorEntry {
+    /// A served selector that takes no mandatory query parameter.
+    const fn bare(selector: &'static str) -> Self {
+        Self {
+            selector,
+            mandatory_param: None,
+        }
+    }
+
+    /// A served selector whose reference must carry `?window=…`.
+    const fn windowed(selector: &'static str) -> Self {
+        Self {
+            selector,
+            mandatory_param: Some("window"),
+        }
+    }
+
+    /// The selector's `/`-separated segments, in order.
+    pub fn segments(&self) -> impl Iterator<Item = &'static str> {
+        self.selector.split('/')
+    }
+
+    /// `true` if any segment is a placeholder, so this entry names a *shape*
+    /// rather than one concrete resource.
+    #[must_use]
+    pub fn has_placeholder(&self) -> bool {
+        self.segments().any(is_placeholder)
+    }
+}
+
+/// `true` if `segment` is a [`SelectorEntry`] placeholder — the `<name>`
+/// spelling. Neither `<` nor `>` is a selector character, so a placeholder
+/// can never collide with a real segment.
+#[must_use]
+pub fn is_placeholder(segment: &str) -> bool {
+    segment.len() > 2 && segment.starts_with('<') && segment.ends_with('>')
+}
+
+/// The `sys:` catalogue: the kernel-resolved unprivileged members
+/// (`kernel/core`'s `resource` resolver).
+const SYS_SELECTORS: &[SelectorEntry] =
+    &[SelectorEntry::bare("null"), SelectorEntry::bare("random")];
+
+/// The `info:` catalogue: the stable facts `lib/procinfo`'s userspace
+/// resolver serves through the System Information API.
+///
+/// `<iface>` is a network interface name, `<bond>` a link-aggregation alias,
+/// `<line>` an interrupt line id, and `<kind>` a resource-limit kind
+/// (`tairix_abi::LimitKind`'s closed name table).
+const INFO_SELECTORS: &[SelectorEntry] = &[
+    SelectorEntry::bare("cpu/count"),
+    SelectorEntry::bare("cpu/features"),
+    SelectorEntry::bare("cpu/model"),
+    SelectorEntry::bare("cpu/topology"),
+    SelectorEntry::bare("cpu/vendor"),
+    SelectorEntry::bare("irq/<line>/owner"),
+    SelectorEntry::bare("limits/<kind>/hard"),
+    SelectorEntry::bare("limits/<kind>/soft"),
+    SelectorEntry::bare("mem/page-size"),
+    SelectorEntry::bare("mem/physical"),
+    SelectorEntry::bare("net/<bond>/members"),
+    SelectorEntry::bare("net/<iface>/kind"),
+    SelectorEntry::bare("net/<iface>/mac"),
+    SelectorEntry::bare("net/<iface>/mtu"),
+    SelectorEntry::bare("process/caps"),
+    SelectorEntry::bare("process/gid"),
+    SelectorEntry::bare("process/pid"),
+    SelectorEntry::bare("process/proc-id"),
+    SelectorEntry::bare("process/trust-domain"),
+    SelectorEntry::bare("process/uid"),
+    SelectorEntry::bare("system/boot-time"),
+    SelectorEntry::bare("system/hostname"),
+    SelectorEntry::bare("system/kernel"),
+    SelectorEntry::bare("system/machine-id"),
+];
+
+/// The `state:` catalogue: the mutable state `lib/procinfo`'s userspace
+/// resolver serves. `net/resolver` is a reserved first segment, so no
+/// interface may take that name here.
+const STATE_SELECTORS: &[SelectorEntry] = &[
+    SelectorEntry::bare("irq/<line>/quarantined"),
+    SelectorEntry::bare("net/<bond>/active-member"),
+    SelectorEntry::bare("net/<bond>/member-health"),
+    SelectorEntry::bare("net/<iface>/address"),
+    SelectorEntry::bare("net/<iface>/link"),
+    SelectorEntry::bare("net/resolver/servers"),
+];
+
+/// The `stats:` catalogue: the measurements `lib/procinfo`'s userspace
+/// resolver serves. `<class>` is a reclaim class
+/// (`tairix_abi::sysinfo::RECLAIM_CLASS_NAMES`), `<cpu>` a CPU index, and
+/// `net/stack` is a reserved first segment (the stack-wide defence
+/// aggregates), so no interface may take that name here.
+const STATS_SELECTORS: &[SelectorEntry] = &[
+    SelectorEntry::bare("cpu/<cpu>/load"),
+    SelectorEntry::bare("cpu/load"),
+    SelectorEntry::bare("cpu/switches"),
+    SelectorEntry::bare("irq/<line>/count"),
+    SelectorEntry::bare("irq/count"),
+    SelectorEntry::bare("limits/<kind>"),
+    SelectorEntry::bare("mem/available"),
+    SelectorEntry::bare("mem/kernel-heap"),
+    SelectorEntry::bare("mem/pinned"),
+    SelectorEntry::bare("mem/pressure"),
+    SelectorEntry::bare("mem/pressure/transitions"),
+    SelectorEntry::bare("mem/ramzip/logical"),
+    SelectorEntry::bare("mem/ramzip/saved"),
+    SelectorEntry::bare("mem/ramzip/stored"),
+    SelectorEntry::bare("mem/reclaim/<class>"),
+    SelectorEntry::bare("mem/reclaim/<class>/self"),
+    SelectorEntry::bare("mem/reclaim/total"),
+    SelectorEntry::bare("mem/reclaim/total/self"),
+    SelectorEntry::bare("mem/total"),
+    SelectorEntry::bare("mem/used"),
+    SelectorEntry::bare("mem/user-resident"),
+    SelectorEntry::bare("net/<iface>/rx.bytes"),
+    SelectorEntry::bare("net/<iface>/rx.dropped"),
+    SelectorEntry::bare("net/<iface>/rx.packets"),
+    SelectorEntry::bare("net/<iface>/tx.bytes"),
+    SelectorEntry::bare("net/<iface>/tx.dropped"),
+    SelectorEntry::bare("net/<iface>/tx.packets"),
+    SelectorEntry::windowed("net/<iface>/rx.bps"),
+    SelectorEntry::windowed("net/<iface>/rx.pps"),
+    SelectorEntry::windowed("net/<iface>/tx.bps"),
+    SelectorEntry::windowed("net/<iface>/tx.pps"),
+    SelectorEntry::bare("net/stack/accept-overflow"),
+    SelectorEntry::bare("net/stack/accepts"),
+    SelectorEntry::bare("net/stack/icmp-errors"),
+    SelectorEntry::bare("net/stack/icmp-suppressed"),
+    SelectorEntry::bare("net/stack/reassembly-evicted"),
+    SelectorEntry::bare("net/stack/syn-backlog-expired"),
+    SelectorEntry::bare("net/stack/syn-backlog-started"),
+    SelectorEntry::bare("net/stack/syn-cookies"),
+    SelectorEntry::bare("net/stack/syn-cookies-accepted"),
+    SelectorEntry::bare("net/stack/syn-cookies-rejected"),
+    SelectorEntry::bare("net/stack/tcp-resets"),
+    SelectorEntry::bare("uptime"),
+];
 
 /// A validated namespace name (the token before the first `:`). Its spelling is
 /// a lowercase ASCII ident starting with a letter; membership of the closed
@@ -1170,19 +1355,79 @@ mod tests {
         assert_eq!(KnownNamespace::ALL.len(), 16);
     }
 
-    /// Every well-known selector composes into a reference that parses back
-    /// to its own namespace and single-segment selector.
+    /// Every catalogued selector composes into a reference that parses back
+    /// to its own namespace and segment list. A placeholder segment stands in
+    /// for a name the registry cannot enumerate, so it is filled with a
+    /// sample before parsing — the point of the check is that the *literal*
+    /// spellings and the segment structure are well formed.
     #[test]
-    fn well_known_selectors_parse() {
+    fn catalogue_selectors_parse() {
         use alloc::format;
+        use alloc::string::ToString;
 
         for ns in KnownNamespace::ALL {
-            for selector in ns.well_known_selectors() {
-                let spelling = format!("{}:{selector}", ns.as_str());
-                let parsed = parse(&spelling).expect("well-known selector parses");
+            for entry in ns.selector_catalogue() {
+                let filled: Vec<String> = entry
+                    .segments()
+                    .map(|segment| {
+                        if is_placeholder(segment) {
+                            "sample".to_string()
+                        } else {
+                            segment.to_string()
+                        }
+                    })
+                    .collect();
+                let mut spelling = format!("{}:{}", ns.as_str(), filled.join("/"));
+                if let Some(param) = entry.mandatory_param {
+                    spelling.push('?');
+                    spelling.push_str(param);
+                    spelling.push_str("=1s");
+                }
+                let parsed = parse(&spelling).expect("catalogued selector parses");
                 assert_eq!(parsed.namespace().known(), Some(ns));
-                assert_eq!(parsed.selector(), [*selector]);
+                assert_eq!(parsed.selector(), filled.as_slice());
+                assert_eq!(
+                    parsed.params().len(),
+                    usize::from(entry.mandatory_param.is_some()),
+                    "{spelling} carries exactly its mandatory parameter"
+                );
             }
+        }
+    }
+
+    /// The placeholder spelling is the `<name>` form and nothing else: a bare
+    /// angle bracket, an empty pair, and an ordinary segment are all literal.
+    #[test]
+    fn placeholder_spelling_is_closed() {
+        for placeholder in ["<iface>", "<a>", "<reclaim-class>"] {
+            assert!(
+                is_placeholder(placeholder),
+                "{placeholder} is a placeholder"
+            );
+        }
+        for literal in ["", "<", ">", "<>", "iface", "<iface", "iface>", "a<b>c"] {
+            assert!(!is_placeholder(literal), "{literal:?} is literal");
+        }
+    }
+
+    /// No catalogue entry claims a namespace whose resolver is not wired: a
+    /// completion built on the registry can never offer a name nothing serves.
+    #[test]
+    fn unserved_namespaces_have_no_catalogue() {
+        for ns in KnownNamespace::ALL {
+            let served = matches!(
+                ns,
+                KnownNamespace::Sys
+                    | KnownNamespace::Info
+                    | KnownNamespace::State
+                    | KnownNamespace::Stats
+            );
+            assert_eq!(
+                !ns.selector_catalogue().is_empty(),
+                served,
+                "{} catalogue does not match its resolver",
+                ns.as_str()
+            );
         }
     }
 

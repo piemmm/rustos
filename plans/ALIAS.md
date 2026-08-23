@@ -1106,6 +1106,21 @@ reset_behavior
 
 Shell completion must be namespace-aware and command-intent-aware.
 
+The candidate source is the namespace registry's **selector catalogue**: the
+selectors the platform serves today, held once beside the namespace registry
+itself (`lib/resref`) and cross-checked by each serving resolver's own tests —
+the kernel's resource resolver for `sys:`, the userspace System Information
+resolver (`lib/procinfo`) for `info:`, `state:`, and `stats:`. Completion
+therefore cannot advertise a selector nothing serves, and a namespace with no
+resolver wired offers nothing rather than a plausible-looking set.
+
+A catalogue entry may spell a segment `<name>`: a placeholder for a name
+discovered per machine (an interface, an interrupt line) or defined by a closed
+table elsewhere (a resource-limit kind, a reclaim class). A placeholder is
+shown, never inserted — completion has no authority to invent a resource name —
+and resumes past it once the name is typed (`plans/SHELL.md`, "Tab expansion
+and completion").
+
 For safe commands, completion may insert short aliases:
 
 ```text

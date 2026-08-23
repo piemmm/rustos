@@ -39,7 +39,10 @@ Su un terminale la shell offre un editor di riga interattivo: Su/Giù
 scorrono la cronologia dei comandi, `Ctrl-R` la cerca, `Ctrl-C` scarta
 la riga in corso, `Ctrl-D` su una riga vuota termina la sessione e Tab
 completa nomi di comandi, percorsi e riferimenti a risorse come
-`sys:random`.
+`sys:random`. Uno spazio dei nomi completa i suoi selettori registrati un
+segmento alla volta (`state:` → `net/` → `wan/` → `link`); un segmento
+mostrato come `<iface>` è un nome che solo la macchina in esecuzione
+conosce, quindi viene elencato ma mai inserito.
 
 ## OPTIONS
 

@@ -40,7 +40,11 @@ En un terminal, el shell ofrece un editor de línea interactivo:
 Arriba/Abajo recorren el historial de órdenes, `Ctrl-R` lo busca,
 `Ctrl-C` descarta la línea en edición, `Ctrl-D` en una línea vacía
 termina la sesión, y Tab completa nombres de órdenes, rutas y
-referencias de recursos como `sys:random`.
+referencias de recursos como `sys:random`. Un espacio de nombres completa
+sus selectores registrados segmento a segmento
+(`state:` → `net/` → `wan/` → `link`); un segmento mostrado como `<iface>`
+es un nombre que solo conoce la máquina en ejecución, así que se lista pero
+nunca se inserta.
 
 ## OPTIONS
 

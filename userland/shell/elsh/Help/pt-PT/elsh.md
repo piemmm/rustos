@@ -39,7 +39,10 @@ Num terminal, a shell oferece um editor de linha interativo: Cima/Baixo
 percorrem o histórico de comandos, `Ctrl-R` pesquisa-o, `Ctrl-C`
 descarta a linha em edição, `Ctrl-D` numa linha vazia termina a sessão,
 e Tab completa nomes de comandos, caminhos e referências de recursos
-como `sys:random`.
+como `sys:random`. Um espaço de nomes completa os seus seletores
+registados segmento a segmento (`state:` → `net/` → `wan/` → `link`); um
+segmento mostrado como `<iface>` é um nome que só a máquina em execução
+conhece, pelo que é listado mas nunca inserido.
 
 ## OPTIONS
 

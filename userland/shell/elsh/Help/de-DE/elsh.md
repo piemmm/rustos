@@ -40,7 +40,11 @@ Auf einem Terminal bietet die Shell einen interaktiven Zeileneditor:
 Pfeil-hoch/-runter blättern durch den Befehlsverlauf, `Ctrl-R`
 durchsucht ihn, `Ctrl-C` verwirft die aktuelle Zeile, `Ctrl-D` auf
 leerer Zeile beendet die Sitzung, und Tab vervollständigt Befehlsnamen,
-Dateipfade und Ressourcenreferenzen wie `sys:random`.
+Dateipfade und Ressourcenreferenzen wie `sys:random`. Ein Namensraum
+vervollständigt seine registrierten Selektoren segmentweise
+(`state:` → `net/` → `wan/` → `link`); ein als `<iface>` angezeigtes
+Segment ist ein Name, den nur das laufende System kennt — er wird also
+aufgelistet, aber nie eingefügt.
 
 ## OPTIONS
 

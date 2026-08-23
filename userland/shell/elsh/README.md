@@ -18,7 +18,9 @@ On a terminal-backed session the REPL runs an interactive line editor
 incremental `Ctrl-R` reverse search, the readline movement/kill/yank
 chords, `Ctrl-C` line cancel, `Ctrl-D` end-of-input, and Tab completion
 (`src/complete.rs`) over command names, paths, and resource references —
-see `docs/src/userland/shell.md`. A terminal resize adopts the new width
+namespaces and their catalogued selectors, drilled down a segment at a
+time (`state:` → `net/` → `wan/` → `link`) — see
+`docs/src/userland/shell.md`. A terminal resize adopts the new width
 and repaints the line under edit — never losing, duplicating, or
 submitting it, and never cancelling a live reverse search. A backing that
 refuses raw mode (a pipe, a script) keeps the plain line reader,

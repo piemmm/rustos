@@ -1327,6 +1327,15 @@ confidence        exact, inferred, stale, unknown
 
 The display text may be rich; the inserted text MUST be minimal and valid.
 
+A result MAY additionally carry **display-only hints**: entries the menu lists
+but never inserts, for a position where the shell can name the *shape* of what
+comes next but not the text. The one hint today is a resource-selector
+placeholder (`<iface>`, `<line>`) — a per-machine name the registry cannot
+enumerate. Because inserting a lone real candidate would hide the alternative
+the hint names, a result carrying hints MUST be listed rather than inserted or
+extended, and hints MUST therefore be raised only at a word boundary so
+completing a partly typed name is never held up.
+
 ### Required completion contexts
 
 At command position:
@@ -1502,6 +1511,32 @@ bare names (`ALIAS.md` §15.1):
 ```text
 disk:backup@7K2M      Samsung SSD 870 EVO   4 TiB   pinned, non-removable
 disk:installer@P91Q   SanDisk Ultra USB     32 GiB  removable, empty
+```
+
+A selector completes **one `/`-separated segment at a time**, exactly as a
+path does, from the namespace registry's selector catalogue (`ALIAS.md` §15.1)
+— never a completion-only table:
+
+```text
+state:<TAB>            irq/  net/
+state:net/<TAB>        resolver/  <bond>  <iface>
+state:net/wan/<TAB>    active-member  address  link  member-health
+```
+
+A word the shared resolution rule reads as a resource reference MUST be
+completed only as one, in every position including command position: it can
+never denote a path, so path candidates for it would offer something the shell
+would not open. Conversely a word that is not yet reference-shaped is offered
+the registered namespace prefixes alongside its path candidates.
+
+A catalogued segment the registry cannot enumerate is a display-only hint (see
+"Completion result model"), and completion resumes past it once the name is
+typed. Where a selector's reference is invalid without a query parameter — a
+windowed rate — completion MUST insert that parameter rather than closing the
+word as finished:
+
+```text
+stats:net/wan/rx.pp<TAB>    stats:net/wan/rx.pps?window=
 ```
 
 For an alias path (`plans/DRIVES.md`):

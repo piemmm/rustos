@@ -292,21 +292,36 @@ mod tests {
         );
     }
 
-    /// The registry cross-check: every selector `lib/resref` advertises as
-    /// well-known for a namespace this resolver serves must actually resolve
-    /// for reading, so completion and documentation built on the registry can
-    /// never advertise a name the kernel refuses.
+    /// The registry cross-check: every concrete selector `lib/resref`
+    /// catalogues for a namespace *this* resolver serves must actually
+    /// resolve for reading, so completion and documentation built on the
+    /// registry can never advertise a name the kernel refuses.
+    ///
+    /// A catalogued namespace resolved in userspace instead (`info:`,
+    /// `state:`, `stats:` — served by `lib/procinfo` over the System
+    /// Information API) is expected to land on
+    /// [`ResolveError::UnsupportedResolver`] here; its own cross-check lives
+    /// with that resolver. Entries carrying a placeholder name a shape rather
+    /// than one resource, so there is nothing concrete to open.
     #[test]
-    fn advertised_well_known_selectors_resolve() {
+    fn catalogued_selectors_resolve() {
         use alloc::format;
 
         for ns in KnownNamespace::ALL {
-            for selector in ns.well_known_selectors() {
-                let reference = format!("{}:{selector}", ns.as_str());
-                assert!(
-                    resolve(&reference, OpenFlags::READ).is_ok(),
-                    "{reference} is advertised as well-known but does not resolve",
-                );
+            for entry in ns.selector_catalogue() {
+                if entry.has_placeholder() {
+                    continue;
+                }
+                let reference = format!("{}:{}", ns.as_str(), entry.selector);
+                // A catalogued reference this resolver does not own lands on
+                // `UnsupportedResolver`; anything else is a registry error.
+                if let Err(err) = resolve(&reference, OpenFlags::READ) {
+                    assert_eq!(
+                        err,
+                        ResolveError::UnsupportedResolver,
+                        "{reference} is catalogued but this resolver refuses it",
+                    );
+                }
             }
         }
     }
