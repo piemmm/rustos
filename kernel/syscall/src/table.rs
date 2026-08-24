@@ -3927,9 +3927,10 @@ mod tests {
     fn build_caps(items: &[CapabilityId], sink: &RecordingSink) -> TaskCapabilities {
         let set = caps_of(items);
         let t = TaskCapabilities::derive(ProcessId(0xA), UserId(1000), set, set, sink);
-        // Drop the derivation event so tests can assert against dispatcher
-        // events alone.
+        // Drop the derivation record whole — it carries a `task` field of its
+        // own — so a test asserts against dispatcher output alone.
         sink.events.borrow_mut().clear();
+        sink.fields.borrow_mut().clear();
         t
     }
 
@@ -5288,25 +5289,7 @@ mod tests {
     fn audit_records_carry_the_callers_attested_proc_id() {
         use tairix_abi::{ProcId, PROC_ID_HEX_LEN};
 
-        /// Sink that captures the value of the `proc` field of each event.
-        struct ProcFieldSink {
-            seen: RefCell<Vec<alloc::string::String>>,
-        }
-        impl Sink for ProcFieldSink {
-            fn write_event(&self, event: &Event<'_>) {
-                for f in event.fields {
-                    if f.key == "proc" {
-                        self.seen
-                            .borrow_mut()
-                            .push(alloc::string::ToString::to_string(&f.value));
-                    }
-                }
-            }
-        }
-        set_max_level(Level::Trace);
-        let sink = ProcFieldSink {
-            seen: RefCell::new(Vec::new()),
-        };
+        let sink = RecordingSink::new();
 
         // The attested identity lives on the capability record, minted
         // kernel-side; it is unrelated to the numeric task id.
@@ -5338,7 +5321,7 @@ mod tests {
 
         let mut expected = [0u8; PROC_ID_HEX_LEN];
         let expected = minted.write_hex(&mut expected);
-        let seen = sink.seen.borrow();
+        let seen = sink.field_values("proc");
         assert_eq!(seen.len(), 1, "exactly the one denied record");
         assert_eq!(seen[0], expected);
         // The attestation comes from the caps record, not the task id: a
@@ -5351,25 +5334,7 @@ mod tests {
     fn audit_records_carry_the_callers_attested_parent_proc_id() {
         use tairix_abi::{ProcId, PROC_ID_HEX_LEN};
 
-        /// Sink that captures the value of the `pproc` field of each event.
-        struct PparentFieldSink {
-            seen: RefCell<Vec<alloc::string::String>>,
-        }
-        impl Sink for PparentFieldSink {
-            fn write_event(&self, event: &Event<'_>) {
-                for f in event.fields {
-                    if f.key == "pproc" {
-                        self.seen
-                            .borrow_mut()
-                            .push(alloc::string::ToString::to_string(&f.value));
-                    }
-                }
-            }
-        }
-        set_max_level(Level::Trace);
-        let sink = PparentFieldSink {
-            seen: RefCell::new(Vec::new()),
-        };
+        let sink = RecordingSink::new();
 
         // The parentage lives on the capability record, attested kernel-side
         // from the parent's own record; it is unrelated to the numeric task
@@ -5404,7 +5369,7 @@ mod tests {
 
         let mut expected = [0u8; PROC_ID_HEX_LEN];
         let expected = parent.write_hex(&mut expected);
-        let seen = sink.seen.borrow();
+        let seen = sink.field_values("pproc");
         assert_eq!(seen.len(), 1, "exactly the one denied record");
         assert_eq!(seen[0], expected);
         // The parentage comes from the caps record, not the task id and not
@@ -5417,25 +5382,7 @@ mod tests {
 
     #[test]
     fn audit_records_carry_the_callers_attested_name() {
-        /// Sink that captures the value of the `comm` field of each event.
-        struct CommFieldSink {
-            seen: RefCell<Vec<alloc::string::String>>,
-        }
-        impl Sink for CommFieldSink {
-            fn write_event(&self, event: &Event<'_>) {
-                for f in event.fields {
-                    if f.key == "comm" {
-                        self.seen
-                            .borrow_mut()
-                            .push(alloc::string::ToString::to_string(&f.value));
-                    }
-                }
-            }
-        }
-        set_max_level(Level::Trace);
-        let sink = CommFieldSink {
-            seen: RefCell::new(Vec::new()),
-        };
+        let sink = RecordingSink::new();
 
         // The name lives on the capability record, attested kernel-side at
         // admission; it is not derived from the numeric task id and cannot be
@@ -5465,32 +5412,14 @@ mod tests {
             Err(Errno::PermissionDenied)
         );
 
-        let seen = sink.seen.borrow();
+        let seen = sink.field_values("comm");
         assert_eq!(seen.len(), 1, "exactly the one denied record");
         assert_eq!(seen[0], "sysinfod");
     }
 
     #[test]
     fn audit_records_carry_the_callers_attested_start_time() {
-        /// Sink that captures the value of the `start` field of each event.
-        struct StartFieldSink {
-            seen: RefCell<Vec<alloc::string::String>>,
-        }
-        impl Sink for StartFieldSink {
-            fn write_event(&self, event: &Event<'_>) {
-                for f in event.fields {
-                    if f.key == "start" {
-                        self.seen
-                            .borrow_mut()
-                            .push(alloc::string::ToString::to_string(&f.value));
-                    }
-                }
-            }
-        }
-        set_max_level(Level::Trace);
-        let sink = StartFieldSink {
-            seen: RefCell::new(Vec::new()),
-        };
+        let sink = RecordingSink::new();
 
         // The admission timestamp lives on the capability record, attested
         // kernel-side from the monotonic clock; it is not derived from the
@@ -5521,7 +5450,7 @@ mod tests {
             Err(Errno::PermissionDenied)
         );
 
-        let seen = sink.seen.borrow();
+        let seen = sink.field_values("start");
         assert_eq!(seen.len(), 1, "exactly the one denied record");
         // The typed unsigned value renders as its decimal, and it is the
         // attested record value, not the numeric task id (7).
@@ -5564,6 +5493,10 @@ mod tests {
     fn a_reserved_upper_bit_never_aliases_onto_a_real_syscall() {
         let sink = RecordingSink::new();
         let caps = build_caps(&[CapabilityId::USER_ADMIN], &sink);
+        assert!(
+            sink.ids().is_empty() && sink.field_values("task").is_empty(),
+            "the derivation record leaks into the dispatcher's own"
+        );
         let ctx = CallerContext {
             task_id: TaskId(7),
             caps: &caps,

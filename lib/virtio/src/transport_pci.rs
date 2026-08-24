@@ -31,6 +31,7 @@
 use alloc::vec;
 use alloc::vec::Vec;
 
+use crate::transport::{le_halves, u64_from_le_halves, write_u64_halves};
 use crate::{PciTransportWindows, Status, Transport, VirtioError};
 
 /// The virtio "no vector" sentinel (virtio 1.1 §4.1.4.3): writing it
@@ -174,24 +175,6 @@ impl PciTransport {
             .write_u32(common::DRIVER_FEATURE_SELECT, select);
         let _ = self.windows.common.write_u32(common::DRIVER_FEATURE, value);
     }
-
-    /// Write a little-endian `u64` to the common-cfg register at
-    /// `offset` as two `u32` halves (the window exposes no `u64`
-    /// accessor).
-    fn write_u64(&self, offset: usize, value: u64) -> Result<(), VirtioError> {
-        // The two halves reconstruct `value` exactly: the narrowing keeps its
-        // low 32 bits and the shift moves its high 32 into range first.
-        #[allow(clippy::cast_possible_truncation)]
-        let (lo, hi) = (value as u32, (value >> 32) as u32);
-        self.windows
-            .common
-            .write_u32(offset, lo)
-            .map_err(|_| VirtioError::DeviceFault)?;
-        self.windows
-            .common
-            .write_u32(offset + 4, hi)
-            .map_err(|_| VirtioError::DeviceFault)
-    }
 }
 
 impl Transport for PciTransport {
@@ -228,18 +211,13 @@ impl Transport for PciTransport {
     }
 
     fn device_features(&self) -> u64 {
-        let lo = u64::from(self.read_feature_half(0));
-        let hi = u64::from(self.read_feature_half(1));
-        (hi << 32) | lo
+        u64_from_le_halves(self.read_feature_half(0), self.read_feature_half(1))
     }
 
     fn set_driver_features(&mut self, features: u64) {
-        // The device takes the bitmap as two selected halves; together they
-        // reconstruct `features` exactly.
-        #[allow(clippy::cast_possible_truncation)]
-        let (lo, hi) = (features as u32, (features >> 32) as u32);
-        self.write_feature_half(0, lo);
-        self.write_feature_half(1, hi);
+        let (low, high) = le_halves(features);
+        self.write_feature_half(0, low);
+        self.write_feature_half(1, high);
     }
 
     fn num_queues(&self) -> u16 {
@@ -280,9 +258,9 @@ impl Transport for PciTransport {
             .common
             .write_u16(common::QUEUE_SIZE, size)
             .map_err(|_| VirtioError::DeviceFault)?;
-        self.write_u64(common::QUEUE_DESC, desc)?;
-        self.write_u64(common::QUEUE_DRIVER, avail)?;
-        self.write_u64(common::QUEUE_DEVICE, used)?;
+        write_u64_halves(&self.windows.common, common::QUEUE_DESC, desc)?;
+        write_u64_halves(&self.windows.common, common::QUEUE_DRIVER, avail)?;
+        write_u64_halves(&self.windows.common, common::QUEUE_DEVICE, used)?;
         // Program the queue's MSI-X vector before enabling it. A device
         // that cannot honour the request reflects `VIRTIO_MSI_NO_VECTOR`
         // back on read (virtio 1.1 §4.1.4.3); fail closed so the driver
@@ -495,14 +473,23 @@ mod tests {
         let mut t = dev.transport();
         t.queue_select(0).unwrap();
         assert_eq!(t.queue_max_size(), 8);
-        t.queue_set(8, 0x1234_5678_9ABC_DEF0, 0x0011_2233, 0x4455_6677)
-            .unwrap();
+        // Every ring address carries a distinct non-zero half, so a write
+        // that lost a high half or crossed two registers cannot pass.
+        t.queue_set(
+            8,
+            0x1234_5678_9ABC_DEF0,
+            0x0011_2233_4455_6677,
+            0x8899_AABB_CCDD_EEFF,
+        )
+        .unwrap();
         // Driver-programmed registers are visible to the device.
         assert_eq!(c.read_u16(common::QUEUE_SIZE).unwrap(), 8);
         assert_eq!(c.read_u32(common::QUEUE_DESC).unwrap(), 0x9ABC_DEF0);
         assert_eq!(c.read_u32(common::QUEUE_DESC + 4).unwrap(), 0x1234_5678);
-        assert_eq!(c.read_u32(common::QUEUE_DRIVER).unwrap(), 0x0011_2233);
-        assert_eq!(c.read_u32(common::QUEUE_DEVICE).unwrap(), 0x4455_6677);
+        assert_eq!(c.read_u32(common::QUEUE_DRIVER).unwrap(), 0x4455_6677);
+        assert_eq!(c.read_u32(common::QUEUE_DRIVER + 4).unwrap(), 0x0011_2233);
+        assert_eq!(c.read_u32(common::QUEUE_DEVICE).unwrap(), 0xCCDD_EEFF);
+        assert_eq!(c.read_u32(common::QUEUE_DEVICE + 4).unwrap(), 0x8899_AABB);
         assert_eq!(c.read_u16(common::QUEUE_ENABLE).unwrap(), 1);
         // notify(0) writes the queue index to off * multiplier = 8.
         t.notify(0);

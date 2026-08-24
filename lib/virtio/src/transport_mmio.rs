@@ -39,6 +39,7 @@
 
 use tairix_abi::RegisterWindow;
 
+use crate::transport::{le_halves, u64_from_le_halves, write_u64_halves};
 use crate::{Status, Transport, VirtioError};
 
 /// Byte offsets within the virtio-MMIO register block (virtio 1.1
@@ -177,22 +178,6 @@ impl MmioTransport {
         let _ = self.window.write_u32(regs::DRIVER_FEATURES_SEL, select);
         let _ = self.window.write_u32(regs::DRIVER_FEATURES, value);
     }
-
-    /// Write a little-endian `u64` to the `*Low`/`*High` register pair
-    /// beginning at `low_offset` (the window exposes no `u64`
-    /// accessor).
-    fn write_u64_pair(&self, low_offset: usize, value: u64) -> Result<(), VirtioError> {
-        // The two halves reconstruct `value` exactly: the narrowing keeps its
-        // low 32 bits and the shift moves its high 32 into range first.
-        #[allow(clippy::cast_possible_truncation)]
-        let (lo, hi) = (value as u32, (value >> 32) as u32);
-        self.window
-            .write_u32(low_offset, lo)
-            .map_err(|_| VirtioError::DeviceFault)?;
-        self.window
-            .write_u32(low_offset + 4, hi)
-            .map_err(|_| VirtioError::DeviceFault)
-    }
 }
 
 impl Transport for MmioTransport {
@@ -225,18 +210,13 @@ impl Transport for MmioTransport {
     }
 
     fn device_features(&self) -> u64 {
-        let lo = u64::from(self.read_feature_half(0));
-        let hi = u64::from(self.read_feature_half(1));
-        (hi << 32) | lo
+        u64_from_le_halves(self.read_feature_half(0), self.read_feature_half(1))
     }
 
     fn set_driver_features(&mut self, features: u64) {
-        // The device takes the bitmap as two selected halves; together they
-        // reconstruct `features` exactly.
-        #[allow(clippy::cast_possible_truncation)]
-        let (lo, hi) = (features as u32, (features >> 32) as u32);
-        self.write_feature_half(0, lo);
-        self.write_feature_half(1, hi);
+        let (low, high) = le_halves(features);
+        self.write_feature_half(0, low);
+        self.write_feature_half(1, high);
     }
 
     fn num_queues(&self) -> u16 {
@@ -276,9 +256,9 @@ impl Transport for MmioTransport {
         self.window
             .write_u32(regs::QUEUE_NUM, u32::from(size))
             .map_err(|_| VirtioError::DeviceFault)?;
-        self.write_u64_pair(regs::QUEUE_DESC_LOW, desc)?;
-        self.write_u64_pair(regs::QUEUE_DRIVER_LOW, avail)?;
-        self.write_u64_pair(regs::QUEUE_DEVICE_LOW, used)?;
+        write_u64_halves(&self.window, regs::QUEUE_DESC_LOW, desc)?;
+        write_u64_halves(&self.window, regs::QUEUE_DRIVER_LOW, avail)?;
+        write_u64_halves(&self.window, regs::QUEUE_DEVICE_LOW, used)?;
         self.window
             .write_u32(regs::QUEUE_READY, 1)
             .map_err(|_| VirtioError::DeviceFault)
@@ -462,13 +442,22 @@ mod tests {
         let mut t = dev.transport();
         t.queue_select(0).unwrap();
         assert_eq!(t.queue_max_size(), 8);
-        t.queue_set(8, 0x1234_5678_9ABC_DEF0, 0x0011_2233, 0x4455_6677)
-            .unwrap();
+        // Every ring address carries a distinct non-zero half, so a write
+        // that lost a high half or crossed two registers cannot pass.
+        t.queue_set(
+            8,
+            0x1234_5678_9ABC_DEF0,
+            0x0011_2233_4455_6677,
+            0x8899_AABB_CCDD_EEFF,
+        )
+        .unwrap();
         assert_eq!(c.read_u32(regs::QUEUE_NUM).unwrap(), 8);
         assert_eq!(c.read_u32(regs::QUEUE_DESC_LOW).unwrap(), 0x9ABC_DEF0);
         assert_eq!(c.read_u32(regs::QUEUE_DESC_HIGH).unwrap(), 0x1234_5678);
-        assert_eq!(c.read_u32(regs::QUEUE_DRIVER_LOW).unwrap(), 0x0011_2233);
-        assert_eq!(c.read_u32(regs::QUEUE_DEVICE_LOW).unwrap(), 0x4455_6677);
+        assert_eq!(c.read_u32(regs::QUEUE_DRIVER_LOW).unwrap(), 0x4455_6677);
+        assert_eq!(c.read_u32(regs::QUEUE_DRIVER_HIGH).unwrap(), 0x0011_2233);
+        assert_eq!(c.read_u32(regs::QUEUE_DEVICE_LOW).unwrap(), 0xCCDD_EEFF);
+        assert_eq!(c.read_u32(regs::QUEUE_DEVICE_HIGH).unwrap(), 0x8899_AABB);
         assert_eq!(c.read_u32(regs::QUEUE_READY).unwrap(), 1);
     }
 

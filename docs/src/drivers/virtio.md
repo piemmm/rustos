@@ -122,7 +122,11 @@ authority and performs **no** pointer arithmetic: every register
 access goes through the bounds-checked `RegisterWindow` accessors
 (`AGENTS.md` §4). The 64-bit queue-address registers (`queue_desc`,
 `queue_driver`, `queue_device`) are written as two little-endian
-`u32` halves because the window exposes no `u64` accessor.
+`u32` halves, low half first, because virtio defines its 64-bit
+registers as two 32-bit accesses (virtio 1.1 §4.1.3.1, §4.2.2) — which
+is why the window carries no `u64` accessor. Both transports share the
+one `write_u64_halves` in `lib/virtio`'s `transport` module rather than
+each carrying its own copy of the split.
 
 `PciTransport::new` validates that the common-configuration window
 is at least `virtio_pci_common_cfg` length (`0x38` bytes) and reads

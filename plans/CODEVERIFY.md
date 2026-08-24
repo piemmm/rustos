@@ -416,27 +416,89 @@ Two things a later reviewer should not re-litigate:
   dispatch tests gained `i32_argument_reaches_the_handler_verbatim`, which
   asserts the value the mock handler receives.
 
-### Open — three duplications noticed while sweeping the `#[allow]` sites
+### Done — the three duplications, and the shape a total narrowing takes
 
-Recorded rather than folded into that change (§2.18), each small enough for one
-context:
+**The four field sinks are one.** `ProcFieldSink`, `PparentFieldSink`,
+`CommFieldSink`, and `StartFieldSink` in `kernel/syscall/src/table.rs` differed
+only in the key they watched, and the module's own `RecordingSink` already
+captured every field; the four tests now read `field_values(key)`, which went
+from one caller to five.
 
-- **Four near-identical field-capturing sinks** in `kernel/syscall/src/table.rs`
-  tests (`ProcFieldSink`, `PparentFieldSink`, `CommFieldSink`,
-  `StartFieldSink`), each differing only in the key it watches. The shared
-  `RecordingSink` in the same module now captures every field and answers
-  `field_values(key)`, so all four collapse into it.
-- **`write_u64` / `write_u64_pair`** in `lib/virtio`'s PCI and MMIO transports
-  are the same algorithm over a different window type. They are sibling
-  `Transport` implementations, so the §2.2 carve-out arguably covers them —
-  but the *helper* is not the sibling behaviour, and deduplicating it needs a
-  shared "has a `write_u32`" seam. Decide deliberately; do not collapse the
-  transports themselves.
-- **A dead error path in `lib/abi/src/hwtree.rs`**:
-  `u32::try_from(self.xlate >> 32).map_err(|_| Errno::LengthOutOfRange)?`
-  cannot fail — shifting a `u64` right by 32 leaves at most 32 bits — so the
-  `LengthOutOfRange` arm is unreachable. The sibling width decode above it is a
-  stated-invariant cast. One of the two shapes is right for both; pick it.
+That promoted a latent trap in `build_caps`, which cleared the sink's recorded
+*events* after the derivation but not its recorded *fields* — and the
+derivation emits a `task` field of its own. With one field reader that was
+invisible; with five it is one test away from a count that reads as "the
+dispatcher emitted two records". `build_caps` now drops the record whole, and
+`a_reserved_upper_bit_never_aliases_onto_a_real_syscall` asserts the sink is
+empty before the first dispatch (it fails with either clear removed).
+
+**`lib/virtio`'s 64-bit registers have one split.** The §2.2 sibling carve-out
+does **not** cover this helper, and the premise recorded here before — that
+deduplicating it needs a shared "has a `write_u32`" seam — was wrong. Both
+transports write through the *same* type: `tairix_abi::RegisterWindow`
+(`MmioTransport::window`, `PciTransport::windows.common`), calling the same
+`write_u32`, mapping the same `WindowError` onto the same
+`VirtioError::DeviceFault`, splitting the value with the same two lines. The
+seam already existed as a concrete type, so no trait and no generic was needed.
+What *is* sibling — the register maps (`regs::QUEUE_DESC_LOW` against
+`common::QUEUE_DESC`), the reset handshakes, the notify schemes, MSI-X — is
+untouched; the transports were not collapsed.
+
+Three `pub(crate)` items in `transport.rs` hold it: `le_halves` (the split,
+three callers), `u64_from_le_halves` (its inverse, which `device_features`
+open-coded on both sides), and `write_u64_halves` over a `&RegisterWindow` (the
+low-then-high pair write, two callers). Six copies and four
+`#[allow(clippy::cast_possible_truncation)]` are gone.
+
+It stays in `lib/virtio`, not on `RegisterWindow` in `lib/abi`: the window has
+no `u64` accessor because virtio *defines* its 64-bit registers as two 32-bit
+accesses, and a `write_u64` on the generic window would advertise a single
+access it does not perform. It is not hoisted tree-wide either — the twelve
+other `>> 32) as u32` sites are unrelated operations (an MSI-X address half, a
+PRNG word, an x86 `wrmsr` `edx` operand, a FAT cursor), and a shared helper
+over those would be the one-liner-wrapping module §2.3 forbids.
+
+Both `queue_set` tests programmed `avail` and `used` with values under 2^32, so
+their high halves were zero *and never asserted*: a transport that wrote only
+the low half of those two ring addresses passed. Demonstrated, not assumed —
+that mutation passes the pre-change assertions and fails the widened ones. All
+six halves are now distinct and asserted.
+
+**A total narrowing is written so it is total.** Neither shape the entry
+recorded was right; the third one is. `(x & 0xFFFF_FFFF) as u32`,
+`(x >> 32) as u32`, and `((x & MASK) >> SHIFT) as u8` are all
+`cast_possible_truncation`-clean — clippy reduces a masked or shifted operand's
+width before comparing it to the target — so the narrowing needs neither a
+suppression to justify nor an error arm that cannot be taken. Five sites in
+`lib/abi/src/hwtree.rs`:
+
+- `framebuffer_mode`'s height decode dropped
+  `.map_err(|_| Errno::LengthOutOfRange)` (unreachable), and its width decode
+  dropped the suppression.
+- `framebuffer_mode`'s format decode dropped a suppression that was silencing
+  nothing — the mask is `0xFF`. Same false-justification class as the two this
+  sweep already found.
+- `framebuffer_memory` masks the field before shifting it down. **No test can
+  distinguish this**: the reserved-bit check six lines above already bounds
+  `flags` to sixteen bits, so both forms agree on every reachable input. It is
+  a suppression removal, not a behaviour fix — made because the suppression's
+  comment credited the shift for a bound the *guard* supplied.
+- `link_address_octets` dropped `u8::try_from(…).unwrap_or(0)` — unreachable,
+  and its recovery silently substitutes a zero octet. Both it and
+  `link_address` are now `to_le_bytes`/`from_le_bytes` over the low six bytes,
+  so the pair is visibly inverse rather than a hand-rolled shift loop against a
+  mask.
+
+Regression cover for the two decodes, since the removed arms were unreachable
+and no test could fail *before*:
+`framebuffer_mode_carries_both_geometry_halves_whole` drives the widest geometry
+the constructor admits (`0x3FFF_FFFF` × `0xFFFF_FFFF` — a `u32` stride caps the
+width at four bytes per pixel), and
+`link_address_octets_reads_only_the_six_it_packed` drives distinct octets plus a
+wire resource carrying junk in the two `base` bytes above the address. Every
+other fixture in that module stays inside sixteen bits, so a decode narrowed to
+those passed before and fails now. Probed by mutation: narrowing either half,
+reading one half for the other, and shifting the octet window each fail.
 
 ### Done — no `.rs` comment cites a charter section, and `cargo xtask charter-cite` keeps it that way
 

@@ -124,6 +124,38 @@ impl VirtioError {
     }
 }
 
+/// Split a 64-bit register value into the low and high `u32` halves the
+/// device takes it as.
+///
+/// virtio defines every 64-bit register as a pair of 32-bit accesses
+/// (virtio 1.1 §4.1.3.1, §4.2.2), so both transports address the halves
+/// rather than the whole.
+pub(crate) fn le_halves(value: u64) -> (u32, u32) {
+    ((value & 0xFFFF_FFFF) as u32, (value >> 32) as u32)
+}
+
+/// Reassemble a 64-bit register value from the halves the device
+/// reports, the inverse of [`le_halves`].
+pub(crate) fn u64_from_le_halves(low: u32, high: u32) -> u64 {
+    (u64::from(high) << 32) | u64::from(low)
+}
+
+/// Write `value` to the 64-bit register whose low half sits at
+/// `low_offset`, low half first as virtio requires.
+pub(crate) fn write_u64_halves(
+    window: &RegisterWindow,
+    low_offset: usize,
+    value: u64,
+) -> Result<(), VirtioError> {
+    let (low, high) = le_halves(value);
+    window
+        .write_u32(low_offset, low)
+        .map_err(|_| VirtioError::DeviceFault)?;
+    window
+        .write_u32(low_offset + 4, high)
+        .map_err(|_| VirtioError::DeviceFault)
+}
+
 /// Direction of a descriptor in a virtqueue chain.
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
 pub enum Direction {
@@ -640,6 +672,24 @@ mod tests {
         assert!(!s.contains(Status::DRIVER_OK));
         assert_eq!(s.bits(), 1 | 2 | 8);
         assert_eq!(Status::from_bits(0xFF).bits(), 0xFF);
+    }
+
+    #[test]
+    fn the_register_halves_are_exact_inverses() {
+        for value in [
+            0,
+            1,
+            0xFFFF_FFFF,
+            0x1_0000_0000,
+            0x1234_5678_9ABC_DEF0,
+            u64::MAX,
+        ] {
+            let (low, high) = le_halves(value);
+            assert_eq!(u64_from_le_halves(low, high), value, "{value:#x}");
+        }
+        // The split is by position, not by magnitude: neither half borrows a
+        // bit from the other.
+        assert_eq!(le_halves(0x1234_5678_9ABC_DEF0), (0x9ABC_DEF0, 0x1234_5678));
     }
 
     #[test]

@@ -729,13 +729,14 @@ impl HwResource {
     /// ([`HwResourceKind::LinkAddress`]).
     #[must_use]
     pub fn link_address(octets: [u8; MAC_ADDRESS_LEN]) -> Self {
-        let mut packed = 0u64;
-        let mut i = MAC_ADDRESS_LEN;
-        while i > 0 {
-            i -= 1;
-            packed = (packed << 8) | u64::from(octets[i]);
-        }
-        Self::new(HwResourceKind::LinkAddress, packed, 1, 0)
+        let mut packed = [0u8; 8];
+        packed[..MAC_ADDRESS_LEN].copy_from_slice(&octets);
+        Self::new(
+            HwResourceKind::LinkAddress,
+            u64::from_le_bytes(packed),
+            1,
+            0,
+        )
     }
 
     /// The link-layer address a [`HwResourceKind::LinkAddress`] resource
@@ -751,9 +752,7 @@ impl HwResource {
             return None;
         }
         let mut octets = [0u8; MAC_ADDRESS_LEN];
-        for (i, slot) in octets.iter_mut().enumerate() {
-            *slot = u8::try_from((self.base >> (8 * i)) & 0xFF).unwrap_or(0);
-        }
+        octets.copy_from_slice(&self.base.to_le_bytes()[..MAC_ADDRESS_LEN]);
         (octets != [0u8; MAC_ADDRESS_LEN]).then_some(octets)
     }
 
@@ -808,10 +807,8 @@ impl HwResource {
         if self.flags & !Self::FRAMEBUFFER_FLAGS_MASK != 0 {
             return Err(Errno::BadMagic);
         }
-        // The shift leaves only the bits the memory-kind field occupies;
-        // `from_u8` then rejects any value it does not name.
-        #[allow(clippy::cast_possible_truncation)]
-        let encoded = (self.flags >> Self::FRAMEBUFFER_MEMORY_SHIFT) as u8;
+        let encoded =
+            ((self.flags & Self::FRAMEBUFFER_MEMORY_MASK) >> Self::FRAMEBUFFER_MEMORY_SHIFT) as u8;
         FramebufferMemory::from_u8(encoded)
     }
 
@@ -837,16 +834,10 @@ impl HwResource {
             return Err(Errno::BadMagic);
         }
         self.framebuffer_memory()?;
-        // `FRAMEBUFFER_FORMAT_MASK` is a byte mask, so nothing outside it
-        // survives; `from_u8` then rejects any value it does not name.
-        #[allow(clippy::cast_possible_truncation)]
         let format = DisplayFormat::from_u8((self.flags & Self::FRAMEBUFFER_FORMAT_MASK) as u8)?;
-        // `xlate` packs the width into its low half and the height into its
-        // high, so keeping the low 32 bits is the exact inverse of the
-        // encoding.
-        #[allow(clippy::cast_possible_truncation)]
-        let width_px = self.xlate as u32;
-        let height_px = u32::try_from(self.xlate >> 32).map_err(|_| Errno::LengthOutOfRange)?;
+        // `xlate` packs the width into its low half and the height into its high.
+        let width_px = (self.xlate & 0xFFFF_FFFF) as u32;
+        let height_px = (self.xlate >> 32) as u32;
         if width_px == 0 || height_px == 0 {
             return Err(Errno::LengthOutOfRange);
         }
@@ -2252,6 +2243,41 @@ mod tests {
     }
 
     #[test]
+    fn framebuffer_mode_carries_both_geometry_halves_whole() {
+        // The widest geometry the constructor admits — a `u32` stride caps
+        // the width at four bytes per pixel, the height has its whole half.
+        // Every other fixture here stays inside sixteen bits, so a decode
+        // narrowed to those would pass them and fail this.
+        let mode = DisplayMode {
+            width_px: 0x3FFF_FFFF,
+            height_px: 0xFFFF_FFFF,
+            stride_bytes: 0xFFFF_FFFC,
+            format: DisplayFormat::Rgba8888,
+        };
+        let fb = HwResource::framebuffer(0x8000_0000, &mode, FramebufferMemory::WriteBack)
+            .expect("the widest legal geometry is admitted");
+        assert_eq!(fb.framebuffer_mode(), Ok(mode));
+        assert_eq!(
+            HwResource::from_bytes(&fb.to_le_bytes())
+                .expect("decodes")
+                .framebuffer_mode(),
+            Ok(mode)
+        );
+
+        // The halves are independent: swapping them is a different geometry,
+        // so a decode that read one half for the other cannot pass both.
+        let swapped = DisplayMode {
+            width_px: 3,
+            height_px: 5,
+            stride_bytes: 12,
+            format: DisplayFormat::Rgba8888,
+        };
+        let fb = HwResource::framebuffer(0x1000, &swapped, FramebufferMemory::WriteBack)
+            .expect("valid mode");
+        assert_eq!(fb.framebuffer_mode(), Ok(swapped));
+    }
+
+    #[test]
     fn framebuffer_resource_round_trips_its_memory_policy() {
         let mode = DisplayMode {
             width_px: 1280,
@@ -2744,6 +2770,37 @@ mod tests {
         );
         // Every other kind reports no address at all.
         assert_eq!(HwResource::irq(7, 1).link_address_octets(), None);
+    }
+
+    #[test]
+    fn link_address_octets_reads_only_the_six_it_packed() {
+        // Every octet is distinct, and the set spans the byte domain
+        // including an interior zero, so a decode that dropped, zeroed, or
+        // reordered one cannot pass.
+        let mac = [0xFF, 0x00, 0x80, 0x01, 0x7F, 0xFE];
+        let resource = HwResource::link_address(mac);
+        assert_eq!(resource.link_address_octets(), Some(mac));
+
+        // A wire resource is not built by the constructor, so `base` can
+        // carry anything above the six octets. The decode ignores it: a
+        // hostile emitter cannot lengthen or shift the address it reports.
+        let mut bytes = resource.to_le_bytes();
+        bytes[8 + MAC_ADDRESS_LEN] = 0xAD;
+        bytes[9 + MAC_ADDRESS_LEN] = 0xDE;
+        let hostile = HwResource::from_bytes(&bytes).expect("decodes");
+        assert_eq!(hostile.link_address_octets(), Some(mac));
+
+        // Junk above an all-zero address is still "the emitter reported
+        // none", so it fails closed rather than reporting a padded address.
+        let mut bytes = HwResource::link_address([0; MAC_ADDRESS_LEN]).to_le_bytes();
+        bytes[8 + MAC_ADDRESS_LEN] = 0xAD;
+        bytes[9 + MAC_ADDRESS_LEN] = 0xDE;
+        assert_eq!(
+            HwResource::from_bytes(&bytes)
+                .expect("decodes")
+                .link_address_octets(),
+            None
+        );
     }
 
     #[test]
