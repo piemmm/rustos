@@ -8,11 +8,6 @@
 //! carries neither inline assembly nor a target-conditional `cfg` gate:
 //! the unit tests drive the bridge through a recording mock and the
 //! ring-0 bring-up path hands it the x86_64 backend.
-//
-// Same `dead_code` rationale as `config.rs`: the production reach
-// path is through `dyn Bus` dispatch wired up by the driver host;
-// the in-crate test module covers every helper directly.
-#![allow(dead_code)]
 
 use tairix_abi::driver::port_io::PortIo;
 

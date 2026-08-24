@@ -32,7 +32,6 @@ pub(crate) struct TaskInner {
     /// Stable identity. Mirrored from the registry key so kernel-side
     /// logging / panic paths can stamp records without re-locking the
     /// registry (debugging must remain practical).
-    #[allow(dead_code)] // read by debug / tracing builds only.
     pub id: TaskId,
     /// Last CPU the task ran on. Stealers update this on success so future
     /// schedules favour cache locality.

@@ -7,11 +7,9 @@
 //! function, 48 capability entries — the legacy 256-byte
 //! configuration space cannot fit more) so it terminates without
 //! external timeouts.
-//
-// Same `dead_code` rationale as `config.rs` / `mech_one.rs`.
-#![allow(dead_code)]
 
 use tairix_abi::driver::bus::BusDevice;
+use tairix_abi::driver::virtio_pci::VIRTIO_PCI_CFG_NOTIFY;
 use tairix_abi::hwtree::HW_NODE_ROOT;
 use tairix_abi::{
     DriverError, HwDeviceClass, HwMatchKey, HwNode, MmioMapError, MmioMapper, MsiMessage,
@@ -20,7 +18,6 @@ use tairix_abi::{
 
 use crate::config::{
     BarDescriptor, BarKind, Capability, ConfigAddress, ConfigSpace, CAP_ID_VENDOR,
-    VIRTIO_CFG_NOTIFY,
 };
 
 /// Maximum number of BAR slots a type-0 PCI function exposes
@@ -67,22 +64,40 @@ const CMD_MEMORY_SPACE: u32 = 1 << 1;
 /// (an MSI-X interrupt is itself an upstream memory write).
 const CMD_BUS_MASTER: u32 = 1 << 2;
 
-/// MSI Message Control "MSI Enable" bit (PCI Local Bus 3.0 §6.8.1.3,
-/// MC bit 0). The Message Control register occupies the high 16 bits of
-/// the MSI capability header dword, so MC bit 0 lands at dword bit 16.
-const MSI_CTRL_ENABLE: u32 = 1 << 16;
+/// MSI Message Control "MSI Enable" bit (PCI Local Bus 3.0 §6.8.1.3, MC bit 0).
+const MSI_MC_ENABLE: u16 = 1 << 0;
 
-/// MSI Message Control "Multiple Message Enable" field (MC bits 6:4 →
-/// dword bits 22:20): the log2 of how many vectors the function may use.
-/// Cleared to request exactly one vector — TAIRiX routes a single MSI per
-/// function, so a device must not spread interrupts across vectors the
-/// kernel did not allocate.
-const MSI_CTRL_MME_MASK: u32 = 0x7 << 20;
+/// Bit offset of the Multiple Message Capable field within Message Control.
+const MSI_MC_MMC_SHIFT: u32 = 1;
 
-/// MSI Message Control "Per-vector Masking Capable" bit (MC bit 8 →
-/// dword bit 24). When set, the capability appends a 32-bit mask register;
-/// any bit left set suppresses that vector's MSI write at the device.
-const MSI_CTRL_PVM_CAPABLE: u32 = 1 << 24;
+/// MSI Message Control "Multiple Message Capable" field (MC bits 3:1): the
+/// log2 of how many vectors the function requests.
+const MSI_MC_MMC_MASK: u16 = 0x7 << MSI_MC_MMC_SHIFT;
+
+/// MSI Message Control "Multiple Message Enable" field (MC bits 6:4): the log2
+/// of how many vectors the function may use. Cleared to request exactly one
+/// vector — TAIRiX routes a single MSI per function, so a device must not
+/// spread interrupts across vectors the kernel did not allocate.
+const MSI_MC_MME_MASK: u16 = 0x7 << 4;
+
+/// MSI Message Control "64-bit Address Capable" bit (MC bit 7).
+const MSI_MC_ADDR64: u16 = 1 << 7;
+
+/// MSI Message Control "Per-vector Masking Capable" bit (MC bit 8). When set,
+/// the capability appends a 32-bit mask register; any bit left set suppresses
+/// that vector's MSI write at the device.
+const MSI_MC_PVM_CAPABLE: u16 = 1 << 8;
+
+/// Bit offset of the Message Control register within the MSI capability header
+/// dword: the low half holds the read-only capability id and next pointer, so
+/// enabling MSI is a shifted read-modify-write of the same dword.
+const MSI_CTRL_SHIFT: u32 = 16;
+
+/// [`MSI_MC_ENABLE`] in the capability header dword's coordinates.
+const MSI_CTRL_ENABLE: u32 = (MSI_MC_ENABLE as u32) << MSI_CTRL_SHIFT;
+
+/// [`MSI_MC_MME_MASK`] in the capability header dword's coordinates.
+const MSI_CTRL_MME_MASK: u32 = (MSI_MC_MME_MASK as u32) << MSI_CTRL_SHIFT;
 
 /// The PCI bus driver instance.
 ///
@@ -539,16 +554,14 @@ impl<C: ConfigSpace> Pci<C> {
     ///
     /// The bus driver walks the function's capability list, locates the
     /// vendor-specific virtio capability of the requested `cfg_type` (one
-    /// of [`VIRTIO_CFG_COMMON`](crate::config::VIRTIO_CFG_COMMON),
-    /// [`VIRTIO_CFG_NOTIFY`],
-    /// [`VIRTIO_CFG_ISR`](crate::config::VIRTIO_CFG_ISR), or
-    /// [`VIRTIO_CFG_DEVICE`](crate::config::VIRTIO_CFG_DEVICE)), and
-    /// resolves the `(bar, bar_offset, length)` triple to a CPU-physical
-    /// base. This is the resolve primitive the two-process driver contract
-    /// grants to a user-space driver, which maps the window in its own
-    /// address space through its capability-gated MMIO facility;
-    /// [`map_virtio_window`](Self::map_virtio_window) is the in-kernel
-    /// resolve-and-map sibling.
+    /// of the [`VIRTIO_PCI_CFG_*`](tairix_abi::driver::virtio_pci)
+    /// discriminants), and resolves the `(bar, bar_offset, length)` triple to
+    /// a CPU-physical base. This is the resolve primitive the two-process
+    /// driver contract grants to a user-space driver, which maps the window in
+    /// its own address space through its capability-gated MMIO facility;
+    /// [`map_virtio_window`] is the in-kernel resolve-and-map sibling.
+    ///
+    /// [`map_virtio_window`]: tairix_abi::driver::virtio_pci::VirtioPciBus::map_virtio_window
     ///
     /// # Errors
     ///
@@ -587,46 +600,13 @@ impl<C: ConfigSpace> Pci<C> {
         Ok((phys_base, len))
     }
 
-    /// Resolve the virtio-1.x configuration structure of kind `cfg_type`
-    /// on function `bdf` ([`virtio_window_region`](Self::virtio_window_region))
-    /// and ask the kernel `mapper` to map it, returning the resulting
-    /// [`RegisterWindow`] — the resolve-and-map hand-off the in-kernel,
-    /// single-process virtio PCI transport uses. The driver never
-    /// synthesises a pointer; the kernel allocates and validates the
-    /// mapping. The four windows so produced are what `PciTransport::new`
-    /// consumes.
-    ///
-    /// # Errors
-    ///
-    /// As [`virtio_window_region`](Self::virtio_window_region), plus
-    /// [`DriverError::PermissionDenied`] when the caller does not hold
-    /// [`CapabilityId::MMIO_MAP`](tairix_abi::CapabilityId::MMIO_MAP)
-    /// (propagated from the mapper).
-    ///
-    /// # Capabilities
-    ///
-    /// The `mapper` enforces
-    /// [`CapabilityId::MMIO_MAP`](tairix_abi::CapabilityId::MMIO_MAP).
-    pub fn map_virtio_window(
-        &self,
-        bdf: u64,
-        cfg_type: u8,
-        mapper: &dyn MmioMapper,
-    ) -> Result<RegisterWindow, DriverError> {
-        let (phys_base, len) = self.virtio_window_region(bdf, cfg_type)?;
-        mapper
-            .map_window(phys_base, len)
-            .map_err(MmioMapError::as_driver_error)
-    }
-
     /// Read the `notify_off_multiplier` from the function's virtio
     /// notification capability.
     ///
-    /// Returned alongside the four windows from [`map_virtio_window`]
-    /// to populate `PciTransport`'s notification scale (virtio 1.x
-    /// §4.1.4.4).
+    /// Returned alongside the four windows from [`map_virtio_window`] to
+    /// populate `PciTransport`'s notification scale (virtio 1.x §4.1.4.4).
     ///
-    /// [`map_virtio_window`]: Self::map_virtio_window
+    /// [`map_virtio_window`]: tairix_abi::driver::virtio_pci::VirtioPciBus::map_virtio_window
     ///
     /// # Errors
     ///
@@ -837,7 +817,7 @@ impl<C: ConfigSpace> Pci<C> {
     }
 
     /// Locate the function's MSI capability, returning its
-    /// `(cap_offset, addressing_64bit)`.
+    /// `(cap_offset, addressing_64bit, per_vector_masking)`.
     fn find_msi(&self, bdf: u64) -> Result<(u8, bool, bool), DriverError> {
         let mut caps = [Capability::Other { offset: 0, id: 0 }; CAP_LIST_HARD_LIMIT];
         let n = self.capabilities(bdf, &mut caps)?;
@@ -895,7 +875,7 @@ impl<C: ConfigSpace> Pci<C> {
                     bar_offset,
                     length,
                     ..
-                } if cfg_type == VIRTIO_CFG_NOTIFY => Some((bar, bar_offset, length)),
+                } if cfg_type == VIRTIO_PCI_CFG_NOTIFY => Some((bar, bar_offset, length)),
                 _ => None,
             })
             .ok_or(DriverError::NotFound)
@@ -1079,12 +1059,12 @@ fn decode_msi<C: ConfigSpace>(
     msg_ctrl: u16,
 ) -> Capability {
     // `mmc` is a 3-bit field; the mask + cast is lossless.
-    let mmc = ((msg_ctrl >> 1) & 0x7) as u8;
+    let mmc = ((msg_ctrl & MSI_MC_MMC_MASK) >> MSI_MC_MMC_SHIFT) as u8;
     Capability::Msi {
         offset,
         message_count: 1 << mmc,
-        addressing_64bit: msg_ctrl & 0x80 != 0,
-        per_vector_masking: msg_ctrl & 0x100 != 0,
+        addressing_64bit: msg_ctrl & MSI_MC_ADDR64 != 0,
+        per_vector_masking: msg_ctrl & MSI_MC_PVM_CAPABLE != 0,
     }
 }
 
@@ -1125,7 +1105,7 @@ fn decode_virtio<C: ConfigSpace>(
     // `offset`/`length` are dwords 2 and 3 of the capability.
     let bar_offset = this.config.read32(addr_with_byte_offset(base, offset + 8));
     let length = this.config.read32(addr_with_byte_offset(base, offset + 12));
-    if cfg_type == VIRTIO_CFG_NOTIFY {
+    if cfg_type == VIRTIO_PCI_CFG_NOTIFY {
         // The notification structure appends `notify_off_multiplier`
         // as dword 4 of the capability (virtio 1.x §4.1.4.4).
         let notify_off_multiplier = this.config.read32(addr_with_byte_offset(base, offset + 16));

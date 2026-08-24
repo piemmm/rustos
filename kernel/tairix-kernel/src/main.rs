@@ -259,12 +259,3 @@ mod kernel {
 // `cargo test` invocations the rest of the project does succeed.
 #[cfg(not(freestanding))]
 fn main() {}
-
-#[cfg(not(freestanding))]
-#[allow(dead_code)]
-fn _suppress_unused_lib() {
-    // Reference the library half from the host build so cargo's
-    // dead-code lint stays quiet without an `#[allow]` on the lib
-    // itself.
-    let _ = tairix_kernel::FreeListAllocator::used;
-}

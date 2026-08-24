@@ -219,6 +219,84 @@ records an empty backlog.
 
 ---
 
+## Open sweep: the charter-compliance audit of the recent commit range
+
+The twenty-five commits ending at `a66f6a27` landed roughly 60 000 lines across
+545 files without the charter applied throughout, so that surface and the code
+around it are being re-reviewed adversarially under §23. The scan matrix below
+is the audit's coverage record; the areas marked open are the remaining work.
+
+Clean on the commit-range surface, verified by scan and needing no further
+pass: production-path `panic!`/`unwrap`/`expect` (§2.9 — every hit is a test,
+host build script, or fixture), `TODO`/`FIXME`/`HACK`/"for now" markers (§2.1,
+§2.19), `cfg(target_arch …)`/`cfg(target_pointer_width …)` outside the §17.2
+allow-list, and 32-bit absolute time in an ABI or persisted format (§21).
+
+### Open — unjustified `#[allow(...)]`, 168 sites tree-wide (§15.10)
+
+An `#[allow]` with no comment tying it to a real invariant. Distribution:
+`tests/integration` 62, `kernel/arch` 16, `kernel/sched` 12, `userland/apps`
+11, `lib/virtio` 10, `userland/gui` 8, `lib/abi` 8, `kernel/tairix-kernel` 8,
+`kernel/syscall` 8, `kernel/core` 4, remainder in `lib/*`. Mostly
+`clippy::cast_*`. Each is either a lossless conversion whose invariant should
+be stated, or a cast that should be a checked conversion instead — decide per
+site; do not blanket-annotate. The `dead_code` allows are already resolved (see
+below) and are not part of this count.
+
+### Open — charter section numbers cited in comments, 278 lines in 98 files (§2.11)
+
+`AGENTS.md` §N in a comment restates *what* a rule is, never *why* the code
+does what it does, and §2.11/§15.17 forbid it outright — including a bare
+trailing `(§5.4)`. Rewrite each as the prose reason ("fail closed", "zeroed on
+drop") or delete it. References to *other* files — `plans/*.md`,
+`tests/SECURITY.md`, `docs/src/**`, an external spec, an RFC, a hardware
+manual — are legitimate and stay. The one sanctioned exception is a generator
+stamping provenance onto a generated artefact.
+
+### Open — §23.1 security review of the new app-data subsystem
+
+`lib/appdata`, `userland/system/confd` (`vault`, `store`, `bulk`, `owner`), and
+`lib/abi/src/appdata_ipc.rs` landed as ~9 000 lines of new, security-critical
+surface: the sealed scope holds per-application secrets under a key derived
+from a per-account master secret, and the store root is the gate that keeps one
+application out of another's data. Trace each entry point for
+capability-check-before-state, per-field input validation, fail-closed error
+paths, and secret zeroisation on every exit including the error ones — in
+particular whether the buffer a master-secret record is read into is wiped by
+its caller, since `MasterSecret::decode` deliberately leaves that to the reader.
+Read `plans/APPDATA.md` first.
+
+### Open — rustdoc waffle in the new surface (§2.11, `plans/WAFFLE.md`)
+
+Several new modules carry multi-section design essays as module rustdoc
+(`userland/system/confd/src/vault.rs` opens with ~52 lines under "# The
+hierarchy", "# What protects the master secret, stated plainly", "# What the
+sealing does buy"). Mandatory rustdoc is held to the same terseness as any
+comment. Coordinate with `plans/WAFFLE.md` rather than opening a second sweep.
+
+### Done — dead code and false-justification lint silencing (§2.14, §15.3, §15.10)
+
+Every `dead_code` allow in the tree was probed by removing it and rebuilding.
+Fourteen carried justifications that were simply false — the code they claimed
+to protect produced no warning at all — and are gone along with the code that
+was genuinely dead. What remains is `cfg_attr`-scoped to one target or to
+`loom`, a const-assert, or a shared test fixture compiled into several
+binaries, and each states the real reason.
+
+Structural findings worth keeping in mind while auditing the rest:
+
+- An inherent method that duplicates a trait default silently wins method
+  resolution, so tests calling it through the concrete type never reach the
+  trait default the production path uses. `lib/pci`'s `Pci::map_virtio_window`
+  duplicated `VirtioPciBus::map_virtio_window` exactly, and every test went to
+  the copy. Trait-forward seams are now covered through `&dyn` in that crate;
+  the same shape is worth checking wherever a crate forwards inherent methods
+  into a trait impl.
+- `fn _suppress_no_main() {}` — an empty function whose only purpose was to
+  silence a lint, itself silenced by `#[allow(dead_code)]` — had been
+  replicated into 68 integration-test programs and one kernel binary. None of
+  them suppressed anything.
+
 ## Open sweep: the raw-syscall-result → `Errno` conversion
 
 `lib/rt::errno_from_raw` is now the one public, tested conversion from a raw

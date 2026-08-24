@@ -788,13 +788,14 @@ vendor-specific capability (`cap_id = 0x09`) carrying a
 `(cfg_type, bar, offset, length)` tuple (virtio 1.x §4.1.4). The PCI
 capability walker decodes these into `Capability::Virtio` /
 `Capability::VirtioNotify` records, and
-`Pci::map_virtio_window(bdf, cfg_type, mapper)` resolves a requested
-`cfg_type` — common (`1`), notify (`2`), ISR (`3`), or device (`4`) —
-to its `bar.base + offset` physical address and maps exactly `length`
-bytes through the same `CAP_MMIO_MAP`-gated `MmioMapper`. The
-`bar_offset + length` span is bounds-checked against the resolved BAR
-size before the mapping request, so a malformed capability fails
-closed (`OutOfRange`) rather than mapping past the device's window.
+`Pci::virtio_window_region(bdf, cfg_type)` resolves a requested
+`cfg_type` — common (`1`), notify (`2`), ISR (`3`), or device (`4`) — to
+its `bar.base + offset` physical address and `length`, and
+`VirtioPciBus::map_virtio_window` maps exactly that span through the
+`CAP_MMIO_MAP`-gated `MmioMapper`. The `bar_offset + length` span is
+bounds-checked against the resolved BAR size before the mapping request,
+so a malformed capability fails closed (`OutOfRange`) rather than
+mapping past the device's window.
 `Pci::virtio_notify_off_multiplier(bdf)` returns the notification
 scale from the notify capability. The four windows plus the
 multiplier are exactly what `PciTransport::new` consumes, so a
@@ -808,9 +809,13 @@ driver crate's only public surface is `register` (`AGENTS.md` §8). Ring
 0 therefore reaches them through a frozen ABI seam rather than the
 concrete type: `Pci<C>` implements
 `tairix_abi::driver::virtio_pci::VirtioPciBus` (a supertrait of `Bus`),
-whose `map_virtio_window` / `notify_off_multiplier` methods forward to
-the inherent ones. The kernel's `provision_virtio_pci(bus, device_id,
-mapper, build)` (in `kernel/virtio/src/virtio_pci_walk.rs`) takes a
+whose `virtio_window_region` / `notify_off_multiplier` methods forward to
+the inherent ones and whose `map_virtio_window` default composes the
+resolve with the mapper. The default is inherited rather than
+re-implemented, so the seam ring 0 calls is the only such path.
+
+The kernel's `provision_virtio_pci(bus, device_id, mapper, build)` (in
+`kernel/virtio/src/virtio_pci_walk.rs`) takes a
 `&dyn VirtioPciBus`, enumerates the bus into a bounded table, picks the
 first function matching `VIRTIO_PCI_VENDOR_ID` and the requested device
 ID, maps the four windows through the `CAP_MMIO_MAP`-gated `MmioMapper`,
@@ -823,9 +828,8 @@ never on the `drivers/bus/virtio` crate (`AGENTS.md` §17.4:
 `drivers/bus/*` type and holds no ambient authority — the capability
 check lives in the mapper, and every failure is a typed
 `VirtioPciWalkError` rather than a panic (`AGENTS.md` §2.9).
-The constants live once in `tairix_abi`; the driver's `VIRTIO_CFG_*`
-names bind to them rather than re-stating the literals (`AGENTS.md`
-§2.2).
+The `cfg_type` discriminants live once, in `tairix_abi`, and the driver
+uses them directly rather than through an alias of its own.
 
 ### Ring-0 virtio-MMIO walk
 

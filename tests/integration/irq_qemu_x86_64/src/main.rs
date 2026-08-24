@@ -465,7 +465,3 @@ fn tairix_test_irq_qemu_x86_64_panic_stub(_info: &core::panic::PanicInfo<'_>) ->
 // --- Host stub -----------------------------------------------------
 #[cfg(not(itest_x86_64))]
 fn main() {}
-
-#[cfg(not(itest_x86_64))]
-#[allow(dead_code)]
-fn _suppress_no_main() {}

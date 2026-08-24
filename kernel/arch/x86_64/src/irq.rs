@@ -203,14 +203,6 @@ pub fn global_routing() -> &'static Routing {
     unsafe { &*core::ptr::addr_of!(GLOBAL_ROUTING).cast::<Routing>() }
 }
 
-#[cfg(test)]
-#[allow(dead_code)] // Reserved for future host tests that exercise GLOBAL_ROUTING.
-pub(crate) fn clear_routing_for_tests() {
-    for slot in &GLOBAL_ROUTING {
-        slot.store(GSI_UNMAPPED, Ordering::Release);
-    }
-}
-
 // --- MSI message construction -------------------------------------
 
 /// Build the x86 local-APIC MSI message that delivers `vector` to the

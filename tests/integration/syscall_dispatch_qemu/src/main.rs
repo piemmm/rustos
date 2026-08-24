@@ -485,13 +485,3 @@ fn tairix_test_syscall_dispatch_qemu_panic_stub(_info: &core::panic::PanicInfo<'
 // --- Host stub -----------------------------------------------------
 #[cfg(not(itest_x86_64))]
 fn main() {}
-
-#[cfg(not(itest_x86_64))]
-#[allow(dead_code)]
-// this `#[allow]` is justified — the freestanding
-// configuration declares `#![no_main]`, but the host configuration
-// needs an unused stub so `cargo build` for the host target does not
-// complain about the absent `fn main`. The host stub `fn main` above
-// already covers that; this helper exists only to keep the host
-// build's symbol table layout in line with `kernel_arch_boot`'s.
-fn _suppress_no_main() {}

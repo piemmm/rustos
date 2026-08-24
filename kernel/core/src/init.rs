@@ -2541,18 +2541,15 @@ fn build_shared_mem_facility<A: KernelArch>(
 /// never returns from `kernel_main`'s halt, so the leak is a
 /// one-shot publish, not a global mutable static.
 ///
-/// `kernel_main` keeps the `'static` reference around for the
-/// duration of the audit/halt sequence; future stages will hand it to
-/// the scheduler dispatch loop.
+/// The scheduler, IRQ dispatch, and syscall hook all read it for the rest of
+/// the boot, so `kernel_main` holds the `'static` reference until it halts.
 pub(crate) struct KernelState<A: KernelArch> {
-    #[allow(dead_code)] // Stage 4 will wire the allocator into the driver host.
     pub(crate) frame_allocator: &'static FrameAllocator,
     pub(crate) scheduler: Scheduler<A>,
-    /// Per-task capability registry. The `KernelDispatchHook` reads
-    /// this on every syscall; future `cap_delegate` / `cap_revoke`
-    /// handlers write to it. Wrapped in a reader-preferring
-    /// `RwLock` so the syscall hot path takes only a shared lock
-    /// (mirrors `Scheduler::tasks`'s composition strategy).
+    /// Per-task capability registry, read by the `KernelDispatchHook` on every
+    /// syscall and written by the `cap_delegate` / `cap_revoke` handlers.
+    /// Reader-preferring `RwLock` so the syscall hot path takes only a shared
+    /// lock (mirrors `Scheduler::tasks`'s composition strategy).
     pub(crate) caps: RwLock<CapTable>,
     /// Named-port registry. The `KernelDispatchHook` reads this on
     /// every `ipc_send` / `ipc_recv` to resolve the endpoint carried
@@ -2599,8 +2596,6 @@ pub(crate) struct KernelState<A: KernelArch> {
     /// Audit sink the dispatch hook emits security-relevant records
     /// through. Held here so the hook borrows it for the lifetime of
     /// `KernelState` rather than re-discovering it at syscall time.
-    #[allow(dead_code)]
-    // Borrowed by the leaked `KernelDispatchHook`; tests assert through observers.
     pub(crate) audit_sink: &'static (dyn Sink + Sync),
     /// Kernel IRQ table backing the `irq_bind` / `irq_wait`
     /// syscalls. The `irq_bind` handler binds against the calling

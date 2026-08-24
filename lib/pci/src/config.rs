@@ -5,15 +5,6 @@
 //! [`crate::mech_one`] both depend on a single source of truth for
 //! the on-wire layout. Nothing here is re-exported outside the
 //! crate; the test module exercises every type directly.
-//
-// `dead_code` is muted at the module level because the crate's public
-// surface is the `mechanism_*` constructors and the `dyn Bus` /
-// `dyn PciBus` / `dyn VirtioPciBus` / `dyn MsixBus` trait objects they
-// return — every config-space helper here is reached only through that
-// dispatch (a composing host wires it up) and through the in-crate
-// `#[cfg(test)]` module that exercises each item directly. Without this
-// annotation a non-test build warns about every helper.
-#![allow(dead_code)]
 
 /// A `(bus, device, function, register)` quadruple addressing one
 /// 32-bit dword of PCI configuration space.
@@ -219,9 +210,9 @@ pub enum Capability {
     Virtio {
         /// Byte offset of the capability header in configuration space.
         offset: u8,
-        /// Structure kind (`cfg_type`); one of [`VIRTIO_CFG_COMMON`],
-        /// [`VIRTIO_CFG_ISR`], [`VIRTIO_CFG_DEVICE`],
-        /// [`VIRTIO_CFG_PCI`], or a future value surfaced verbatim.
+        /// Structure kind (`cfg_type`); one of the
+        /// [`VIRTIO_PCI_CFG_*`](tairix_abi::driver::virtio_pci) discriminants,
+        /// or a future value surfaced verbatim.
         cfg_type: u8,
         /// Index of the BAR holding the structure.
         bar: u8,
@@ -231,12 +222,14 @@ pub enum Capability {
         length: u32,
     },
     /// The virtio-1.x notification capability
-    /// (`cap_id = 0x09`, `cfg_type = `[`VIRTIO_CFG_NOTIFY`]).
+    /// (`cap_id = 0x09`, `cfg_type = `[`VIRTIO_PCI_CFG_NOTIFY`]).
     ///
     /// Identical to [`Capability::Virtio`] but additionally carries
     /// `notify_off_multiplier`, the scale applied to a queue's
     /// `queue_notify_off` to derive its notification address
     /// (virtio 1.x §4.1.4.4).
+    ///
+    /// [`VIRTIO_PCI_CFG_NOTIFY`]: tairix_abi::driver::virtio_pci::VIRTIO_PCI_CFG_NOTIFY
     VirtioNotify {
         /// Byte offset of the capability header in configuration space.
         offset: u8,
@@ -261,26 +254,6 @@ pub enum Capability {
 /// PCI capability ID for a vendor-specific capability (PCI Local Bus
 /// 3.0 §H); virtio 1.x reuses it for its configuration structures.
 pub const CAP_ID_VENDOR: u8 = 0x09;
-
-// The virtio `cfg_type` discriminants are the frozen `abi-v1`
-// transport-provisioning seam: the kernel walk picks
-// a `cfg_type` from `tairix_abi` and this driver resolves it, so both
-// sides must agree on one definition. These aliases bind to the
-// `tairix_abi` source of truth rather than re-stating the literals,
-// keeping the driver free of a second copy.
-
-/// virtio `cfg_type` for the common configuration structure
-/// (virtio 1.x §4.1.4.3).
-pub const VIRTIO_CFG_COMMON: u8 = tairix_abi::driver::virtio_pci::VIRTIO_PCI_CFG_COMMON;
-/// virtio `cfg_type` for the notification structure (virtio 1.x §4.1.4.4).
-pub const VIRTIO_CFG_NOTIFY: u8 = tairix_abi::driver::virtio_pci::VIRTIO_PCI_CFG_NOTIFY;
-/// virtio `cfg_type` for the ISR-status structure (virtio 1.x §4.1.4.5).
-pub const VIRTIO_CFG_ISR: u8 = tairix_abi::driver::virtio_pci::VIRTIO_PCI_CFG_ISR;
-/// virtio `cfg_type` for the device-specific structure (virtio 1.x §4.1.4.6).
-pub const VIRTIO_CFG_DEVICE: u8 = tairix_abi::driver::virtio_pci::VIRTIO_PCI_CFG_DEVICE;
-/// virtio `cfg_type` for the PCI configuration-access window
-/// (virtio 1.x §4.1.4.7).
-pub const VIRTIO_CFG_PCI: u8 = tairix_abi::driver::virtio_pci::VIRTIO_PCI_CFG_PCI;
 
 #[cfg(test)]
 mod tests {

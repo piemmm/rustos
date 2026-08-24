@@ -17,6 +17,8 @@
 //! image is spawned into its own process and registered over IPC; that
 //! mechanism is the Stage 4.HW process-spawn increment (`PLAN.md`).
 
+// Compiled into each test binary in this directory, and each uses a subset, so
+// per-binary `dead_code` reports are false here.
 #![allow(dead_code)]
 
 use std::cell::{Cell, RefCell};
@@ -250,9 +252,6 @@ impl RecordingSink {
         Self {
             events: RefCell::new(Vec::new()),
         }
-    }
-    pub fn last_id(&self) -> Option<u32> {
-        self.events.borrow().last().map(|e| e.id)
     }
     pub fn ids(&self) -> Vec<u32> {
         self.events.borrow().iter().map(|e| e.id).collect()

@@ -57,6 +57,3 @@ mod kernel;
 // on the host triple it has nothing to run.
 #[cfg(not(itest_x86_64))]
 fn main() {}
-#[cfg(not(itest_x86_64))]
-#[allow(dead_code)]
-fn _suppress_no_main() {}

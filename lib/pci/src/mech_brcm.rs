@@ -31,12 +31,6 @@
 //! resolves to the PCI "no device" sentinel (all-ones), so a walk fails
 //! closed rather than reaching out of bounds.
 
-// Same `dead_code` rationale as `config.rs` / `mech_ecam.rs`: the
-// production reach path is through `dyn Bus` dispatch wired up by the
-// driver host (via `crate::mechanism_brcm`); the in-crate test module
-// covers every helper directly.
-#![allow(dead_code)]
-
 use tairix_abi::RegisterWindow;
 
 use crate::config::{ConfigAddress, ConfigSpace};

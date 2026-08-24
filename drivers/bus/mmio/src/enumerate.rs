@@ -16,9 +16,6 @@
 //! skipped silently — this is exactly how QEMU's `virt` machine
 //! presents unattached transports (`hw/virtio/virtio-mmio.c`).
 
-// Same `dead_code` rationale as the PCI driver crate.
-#![allow(dead_code)]
-
 use tairix_abi::driver::bus::BusDevice;
 use tairix_abi::{DriverError, MmioMapError, MmioMapper, RegisterWindow};
 use tairix_fdt::Fdt;

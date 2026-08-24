@@ -51,7 +51,6 @@ pub(crate) struct TaskInner {
     /// Stable identity. Mirrored from the registry key so kernel-side
     /// logging / panic paths can stamp records without re-locking the
     /// registry (debugging must remain practical).
-    #[allow(dead_code)] // read by debug / tracing builds only.
     pub id: TaskId,
     /// CPU whose virtual-time run queue currently owns this task.
     /// Stealers update this on success so future schedules and re-queues

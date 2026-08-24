@@ -241,6 +241,3 @@ fn panic(info: &core::panic::PanicInfo<'_>) -> ! {
 // `cargo xtask ci` doesn't have to special-case this crate.
 #[cfg(not(itest_x86_64))]
 fn main() {}
-#[cfg(not(itest_x86_64))]
-#[allow(dead_code)]
-fn _suppress_no_main() {}

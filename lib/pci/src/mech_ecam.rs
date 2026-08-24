@@ -20,12 +20,6 @@
 //! window's bounds checking turns any access beyond the mapped region
 //! into the PCI "no device" sentinel, so a walk past the mapped buses
 //! fails closed rather than reading out of bounds.
-//
-// Same `dead_code` rationale as `config.rs` / `mech_one.rs`: the
-// production reach path is through `dyn Bus` dispatch wired up by the
-// driver host (via `crate::mechanism_ecam`); the in-crate test module
-// covers every helper directly.
-#![allow(dead_code)]
 
 use tairix_abi::RegisterWindow;
 

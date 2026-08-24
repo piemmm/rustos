@@ -5,12 +5,6 @@
 //! wiring uses [`VolatileMmioRead`], which encapsulates the one
 //! `unsafe` block in the crate.
 
-// The production reach path goes through `dyn Bus` dispatch wired
-// up by the driver host at load time. Items below are exercised
-// directly by the in-crate test module; without this allow, the
-// non-test build of the lib half flags every helper as dead.
-#![allow(dead_code)]
-
 /// Volatile reader for a 32-bit MMIO register.
 ///
 /// Implementations promise that reads observe device-side updates
@@ -115,31 +109,10 @@ mod tests {
 
     extern crate alloc;
 
-    /// In-memory MMIO fake.
-    ///
-    /// Tracks `(physical_address, value)` pairs and returns `0` for
-    /// unknown addresses — matching the "slot empty" sentinel used
-    /// by the enumeration core when reading an unmapped virtio-MMIO
-    /// `MagicValue` register.
-    pub struct FakeMmio {
-        pub regs: alloc::vec::Vec<(u64, u32)>,
-    }
-
-    impl MmioRead for FakeMmio {
-        fn read32(&self, physical_address: u64) -> u32 {
-            self.regs
-                .iter()
-                .find(|(a, _)| *a == physical_address)
-                .map_or(0, |(_, v)| *v)
-        }
-    }
-
     #[test]
-    fn volatile_reader_round_trips_against_fake() {
-        // The fake-host case for the production reader: an aligned
-        // host-side buffer stands in for the MMIO window, so the
-        // `unsafe` pointer arithmetic is exercised without touching
-        // real hardware.
+    fn volatile_reader_round_trips_over_host_buffer() {
+        // An aligned host-side buffer stands in for the MMIO window, so the
+        // `unsafe` pointer arithmetic is exercised without real hardware.
         let backing: alloc::vec::Vec<u32> = alloc::vec![0x7472_6976, 2, 1, 0x554D_4551];
         let base_phys = 0x1000_u64;
         // SAFETY: `backing.as_ptr()` is non-null, 4-byte aligned

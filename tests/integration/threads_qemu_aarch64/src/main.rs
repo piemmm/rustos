@@ -61,7 +61,3 @@ pub extern "C" fn kernel_main(_dtb: u64) -> ! {
 // --- Host stub -----------------------------------------------------
 #[cfg(not(itest_aarch64))]
 fn main() {}
-
-#[cfg(not(itest_aarch64))]
-#[allow(dead_code)]
-fn _suppress_no_main() {}
